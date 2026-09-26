@@ -299,7 +299,7 @@ juce::Label* FlubLookAndFeel::createSliderTextBox (juce::Slider& slider)
 juce::Font FlubLookAndFeel::getTextButtonFont (juce::TextButton& b, int buttonHeight)
 {
     const auto style = styleOf (b);
-    const bool bold = style == "segment" || style == "accent" || style == "tab";
+    const bool bold = style == "tab";
     if (style == "chip")
         return Theme::font (juce::jmin (11.5f, static_cast<float> (buttonHeight) * 0.5f), true);
     return Theme::font (juce::jmin (13.0f, static_cast<float> (buttonHeight) * 0.5f), bold);
@@ -310,26 +310,9 @@ void FlubLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, 
     const auto bounds = b.getLocalBounds().toFloat().reduced (0.5f);
     const auto style = styleOf (b);
     const bool on = b.getToggleState();
-    const bool enabled = b.isEnabled();
     const auto shape = roundedShape (bounds, Theme::kControlRadius, b);
 
-    if (style == "segment")
-    {
-        if (on)
-        {
-            g.setGradientFill (juce::ColourGradient (accent.brighter (0.1f), 0.0f, bounds.getY(), accent.darker (0.25f), 0.0f,
-                                                     bounds.getBottom(), false));
-            g.fillPath (shape);
-            g.setColour (juce::Colours::white.withAlpha (0.18f));
-            g.drawHorizontalLine (juce::roundToInt (bounds.getY() + 1.0f), bounds.getX() + 4.0f, bounds.getRight() - 4.0f);
-        }
-        else if (isHighlighted || isDown)
-        {
-            g.setColour (isDown ? Palette::panelHover.darker (0.2f) : Palette::panelHover);
-            g.fillPath (shape);
-        }
-    }
-    else if (style == "tab")
+    if (style == "tab")
     {
         // Neutral selection (the accent is reserved for the mode switch): a
         // raised fill plus an accent underline.
@@ -360,24 +343,6 @@ void FlubLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, 
         }
         g.setColour (on ? accent.withAlpha (0.5f) : Palette::borderStrong);
         g.drawRoundedRectangle (bounds.reduced (0.5f), r, 1.0f);
-    }
-    else if (style == "ghost")
-    {
-        if (isHighlighted || isDown || on)
-        {
-            g.setColour (on ? accent.withAlpha (isDown ? 0.24f : 0.15f) : (isDown ? Palette::panelHover.darker (0.2f) : Palette::panelHover));
-            g.fillPath (shape);
-        }
-    }
-    else if (style == "accent")
-    {
-        auto base = enabled ? accent : Palette::faint;
-        if (isHighlighted)
-            base = base.brighter (0.12f);
-        if (isDown)
-            base = base.darker (0.15f);
-        g.setGradientFill (Theme::sheen (bounds, base, 0.12f));
-        g.fillPath (shape);
     }
     else if (style == "warning" && on)
     {
@@ -413,14 +378,10 @@ void FlubLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bo
     const bool on = b.getToggleState();
 
     juce::Colour colour = isHighlighted ? Palette::text : Palette::text.withAlpha (0.86f);
-    if (style == "segment")
-        colour = on ? Palette::background : (isHighlighted ? Palette::text : Palette::muted);
-    else if (style == "tab")
+    if (style == "tab")
         colour = on ? Palette::text : (isHighlighted ? Palette::text.withAlpha (0.9f) : Palette::muted);
     else if (style == "chip")
         colour = on ? accent.brighter (0.25f) : (isHighlighted ? Palette::text : Palette::muted);
-    else if (style == "accent")
-        colour = Palette::background;
     else if (style == "warning" && on)
         colour = Palette::amber;
     else if (on)
@@ -785,7 +746,7 @@ void FlubLookAndFeel::drawLevelMeter (juce::Graphics& g, int width, int height, 
     const float amount = juce::jlimit (0.0f, 1.0f, std::sqrt (juce::jmax (0.0f, level)) * 1.2f);
     if (amount > 0.0f)
     {
-        g.setColour (amount > 0.95f ? Palette::red : accent);
+        g.setColour (amount > 0.95f ? Theme::statusColours (meterPalette).hot : accent);
         g.fillRoundedRectangle (r.reduced (1.0f).withWidth ((r.getWidth() - 2.0f) * amount), 2.0f);
     }
 }

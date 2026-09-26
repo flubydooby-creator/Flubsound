@@ -1,8 +1,10 @@
 // Flubsound Pro - parameter layout + lock-free parameter store.
 //
-// * Every user-facing value is a float in a flat, fixed-size table. IDs are
-//   stable integers (append-only - never reorder); presets and IPC use the
-//   string keys, so IDs can still be remapped safely between versions.
+// * Every user-facing value is a float in a flat, fixed-size table indexed by
+//   Id. Ids are an in-memory index only: saved data (presets, plug-in state,
+//   host automation, IPC) uses the string keys, so Ids may shift between
+//   versions when parameters are inserted. The keys are the stable contract:
+//   never rename or reuse one.
 // * The store holds TWO banks (A and B) for A/B comparison. The GUI thread
 //   writes with relaxed atomic stores; the audio thread reads the active bank
 //   once per block. Continuous values glide inside the modules (smoothing),
@@ -47,12 +49,19 @@ struct Info
     std::vector<std::string> choices; // Unit::Choice labels
     bool structural = false;          // needs chain re-prepare (latency changes)
 
+    /** Plug-in parameter version hint (JUCE ParameterID version, which orders
+        AU parameters): the parameter-layout version that introduced this
+        parameter. Everything in the first release is 1. Rule: parameters
+        added later get the next version (highest in use + 1, shared by all
+        parameters added in the same release); a shipped value never changes. */
+    int sinceVersion = 1;
+
     /** Into [minValue, maxValue]; NaN (which no comparison catches) maps to the default. */
     float clamp (float v) const noexcept { return v != v ? defaultValue : (v < minValue ? minValue : (v > maxValue ? maxValue : v)); }
 };
 
 // -------------------------------------------------------------------------
-// Stable IDs
+// IDs (index into layout(); not persisted - saved data uses Info::key)
 // -------------------------------------------------------------------------
 enum Id : int
 {

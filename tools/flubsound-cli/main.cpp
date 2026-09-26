@@ -159,8 +159,8 @@ files), name, unit, range, default and choices. Percent values are stored as
 
 const char* const kPresetsHelp = R"(flubsound-cli presets [--dir <dir>] [--json]
 
-Lists the factory presets (presets/factory/**/*.json). The folder is searched
-in this order: --dir, $FLUBSOUND_PRESET_DIR, presets/factory next to the
+Lists the factory presets (presets/factory/*.json; sub-folders are ignored).
+The folder is searched in this order: --dir, $FLUBSOUND_PRESET_DIR, presets/factory next to the
 executable or up to four parent folders above it, ../share/flubsound/presets/
 factory, and the source tree the CLI was built from.
 `--preset <name>` in process / batch resolves names against the same folder

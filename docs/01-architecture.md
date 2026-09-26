@@ -50,9 +50,9 @@ How each platform realises the virtual endpoints:
 
 | Platform | Mechanism |
 |---|---|
-| Windows (primary) | WaveRT virtual audio driver, "Flubsound Virtual Audio" (design in `platform/windows/driver/`). Apps are assigned to endpoints by Windows' per-app output setting or by Flubsound's routing panel. Process-loopback capture is a no-driver fallback. |
-| macOS | Audio Server Plug-in virtual device (libASPL). Per-app capture on 14.2+ via Core Audio process taps with *mute-when-tapped*. |
-| Linux | PipeWire null sinks `Flubsound Game/Music/Chat/System` (`platform/linux/flubsound-pipewire-setup.sh`). Apps are moved per sink-input or with WirePlumber rules. |
+| Windows (primary) | WaveRT virtual audio driver, "Flubsound Virtual Audio" (**design only**, `platform/windows/driver/`; not built yet). Apps are assigned to endpoints by Windows' per-app output setting; the routing panel can do it itself only in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING`, otherwise it opens `ms-settings:apps-volume`. **Implemented today:** per-process loopback capture (`ProcessLoopbackCapture`, Windows 10 build 20348+ / Windows 11) as the no-driver path. |
+| macOS | Audio Server Plug-in virtual device (libASPL) and per-app capture on 14.2+ via Core Audio process taps with *mute-when-tapped* (**design only**, `platform/macos/README.md`; the app reports routing and capture as unsupported). |
+| Linux | PipeWire / PulseAudio null sinks `flubsound_game/music/chat/system` ("Flubsound Game" ...), created by `platform/linux/flubsound-pipewire-setup.sh` or a PipeWire config drop-in. Apps are moved per sink-input (`pactl move-sink-input`) or with `target.object` rules. **Implemented.** |
 | Any OS, zero install | Any third-party virtual cable (VB-Cable, BlackHole, a JACK port) feeding a strip through the device input. |
 
 ---
@@ -78,14 +78,14 @@ flowchart TB
         MB[MeterBus · AnalyzerTaps]
     end
     subgraph L1["L1 · DSP modules & analysis  core/dsp, core/analysis"]
-        MOD[Gate · EQ · DynEQ · Bass · Clarity · Saturation · Spatial · Virtualizer · Compressor · Limiter/Maximizer]
+        MOD[Gate · EQ · DynEQ · Bass · Clarity/TransientShaper · Saturation · Spatial · Virtualizer · Compressor · Limiter/Maximizer]
         AN[LoudnessMeter · TruePeakMeter · LevelMeter]
     end
     subgraph L0["L0 · Primitives  core/common, core/dsp"]
         PRIM[SVF · Biquad · LR4 · Oversampler · TruePeakDetector · FFT · SpscRing · DelayLine · Smoothers]
     end
     subgraph OSL["OS integration  app/Source/platform, platform/"]
-        PSV[GlobalHotkeys · AppAudioRouter · ProcessLoopbackCapture · SystemTuning · virtual drivers]
+        PSV[GlobalHotkeys · AppAudioRouter · ProcessLoopbackCapture · AudioEndpoints · SystemTuning · virtual drivers design]
     end
 
     L5 --> L4 --> L3 --> L2 --> L1 --> L0
@@ -104,7 +104,7 @@ flowchart TB
 | L1 modules | One audio effect each, implementing `flub::Processor` | `ParametricEq`, `DynamicEq`, `BassEngine`, `ClarityEnhancer`, `Saturator`, `StereoSpatializer`, `HeadphoneVirtualizer`, `Compressor`, `TruePeakLimiter`, `LoudnessMaximizer`, `SpectralNoiseGate`, meters |
 | L2 engine | Parameters, macros, protection loops, bypass, chain order, strips, telemetry | `ParameterStore`, `MacroMap`, `SafetyGovernor`, `AutoLevel`, `ModuleSlot`, `ProcessingChain`, `MixEngine`, `MeterBus` |
 | L3 host | Device I/O, clock-domain bridging, reconfiguration | `AudioEngineHost`, `DriftCompensatedFifo` |
-| L4 services | Presets, settings, routing model, tray, hotkeys | `EngineController`, `PresetManager`, `AppSettings` |
+| L4 services | Presets, settings, routing model, tray, hotkeys, device profiles | `EngineController`, `PresetManager`, `AppSettings`, `AppRouting`, `HotkeyManager`, `TrayIcon` |
 | L5 UI | Presentation and interaction only | JUCE components |
 
 ---
@@ -114,25 +114,29 @@ flowchart TB
 | Thread | Priority | Runs | Must not |
 |---|---|---|---|
 | **Audio callback** (device) | Real-time (MMCSS "Pro Audio" / time-constraint / SCHED_FIFO) | `MixEngine::process` → strips → master limiter; reads the parameter snapshot; writes meters | Allocate, lock, log, do I/O, or wait |
-| **Capture threads** (process loopback, one per captured app) | High (MMCSS "Audio") | Pull OS capture packets and push frames into a `DriftCompensatedFifo` | Allocate or lock (after start) |
-| **Message thread** (JUCE) | Normal | UI, timers (meters at 60 Hz, parameter refresh at 30 Hz, reconfiguration poll at 5 Hz), tray, hotkeys | Block for long |
-| **Worker threads** | Normal/low | Preset I/O, HRIR loading/resampling, batch rendering (one chain per job), future inference | Touch audio-thread objects directly |
+| **Capture threads** (Windows process loopback, one per captured app) | MMCSS "Pro Audio" (falls back to "Audio") | Pull OS capture packets and push frames into a `DriftCompensatedFifo` | Allocate or lock (after start) |
+| **Message thread** (JUCE) | Normal | UI (meters and analyser once per display frame via `VBlankAttachment`), parameter-control refresh at 30 Hz, reconfiguration poll at 5 Hz, controller housekeeping at 1 Hz (state autosave every 5 s, preferred-output rescan), preset I/O, tray, hotkeys | Block for long |
+| **Worker threads** | Low | App routing worker ("Flubsound routing": session enumeration and endpoint moves, every 2 s while routes exist); `flubsound-cli batch --jobs N` (one chain per job). Roadmap: HRIR loading/resampling, inference | Touch audio-thread objects directly |
 
-### Cross-thread communication (the only three channels)
+### Cross-thread communication (three main channels)
 
 | Channel | Direction | Mechanism | Guarantees |
 |---|---|---|---|
-| `param::ParameterStore` | GUI/hotkeys/plug-in host → audio | Two banks (A/B) of `std::atomic<float>`, relaxed stores; the audio thread takes one `snapshot()` per block; a version counter lets the GUI refresh | Wait-free; last-writer-wins per value; the A/B switch is a single atomic |
+| `param::ParameterStore` | GUI/hotkeys/plug-in host → audio | Two banks (A/B) of `std::atomic<float>`, relaxed stores (values clamped, NaN ignored); the audio thread takes one `snapshot()` per block; a version counter lets the GUI refresh | Wait-free; last-writer-wins per value; the A/B switch is a single atomic |
 | `MeterBus` | Audio → GUI | `std::atomic<float>` fields written once per block, polled at display rate | Wait-free; values are always individually consistent |
 | `AnalyzerTaps` (`SpscRing<float>` pre/post) | Audio → GUI | Single-producer/single-consumer ring, acquire/release indices | Wait-free; drops (never blocks) if the GUI is slow |
 
-Structural changes (latency profile, device format, strip layout) are never applied on the audio thread. The host notices `MixEngine::needsReprepare()` on the message thread, detaches the callback, re-prepares, and re-attaches. This is a deliberate, short, explicit dropout; a crossfaded double-buffered engine swap is on the roadmap.
+A few single `std::atomic` hand-offs complement them: the chain publishes every *effective* (post-macro) value once per block (`ProcessingChain::effectiveValue()`, for the GUI's "ghost" markers), the momentary per-module audition bypass (`ProcessingChain::setAuditionBypass`) is one atomic bit mask, and `AudioEngineHost` passes strip gain / mute, the device-input map and the master ceiling to the audio thread through atomics.
+
+Structural changes (latency profile, device format, strip layout) are never applied on the audio thread. The host polls `MixEngine::needsReprepare()` at 5 Hz on the message thread, detaches the callback, re-prepares, and re-attaches (the plug-in does the same with its own timer and reports the new latency to the host). This is a deliberate, short, explicit dropout; a crossfaded double-buffered engine swap is on the roadmap.
 
 ---
 
 ## 4. Data flow in detail
 
-### 4.1 End-to-end signal path (Windows, driver path)
+### 4.1 End-to-end signal path (Windows, driver path — design)
+
+The driver is not built yet (`platform/windows/driver/README.md`); today the Windows strips are fed by per-process loopback capture or a virtual cable on the device input. The engine side (from `AudioEngineHost` on) is the same either way.
 
 ```mermaid
 sequenceDiagram
@@ -160,8 +164,10 @@ sequenceDiagram
  in (2 / 6 / 8 ch)
   │
   ├─ Input gain (smoothed)                        ── all channels
-  ├─ AutoLevel (LUFS input levelling, ±12 dB, ≤ +1 dB/s)
-  ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix
+  ├─ AutoLevel (gated LUFS input levelling, ±12 dB, +1 dB/s up / −4 dB/s down;
+  │            BS.1770-4 channel weights: 5.1/7.1 sides 1.41, 7.1 back pair 1.0, LFE excluded)
+  ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix (LFE dropped, −3 dB);
+  │                                                   virt.on toggles crossfade the two folds over 20 ms
   │        ════════ from here on: STEREO ════════
   ├─ dry tap ──► (delayed by total latency) ──► global bypass / A-B reference
   ├─ [slot] SpectralNoiseGate      (Quality profile only; STFT 1024)
@@ -172,8 +178,9 @@ sequenceDiagram
   ├─ [slot] Saturator              tape / tube / digital, 2× oversampled
   ├─ [slot] StereoSpatializer      side-only width / focus / space / crossfeed (mono-exact)
   ├─ [slot] Compressor             look-ahead, linked, downward + upward
-  ├─ [slot] LoudnessMaximizer      drive → 3-band glue → 4× soft clipper → true-peak limiter
-  ├─ Output gain
+  ├─ [slot] LoudnessMaximizer      drive → 3-band glue (only while armed) → 4× soft clipper (2× in Low Latency)
+  │                                 → true-peak limiter (4× detector shared with the meters)
+  ├─ Output gain (trim, −24 … 0 dB)
   ├─ control loops: SafetyGovernor · AutoDrive · LoudnessMatch (feed the next block)
   ├─ global bypass crossfade (latency aligned, loudness matched, ceiling-capped)
   └─ meters (peak/RMS/TP/LUFS M·S·I·LRA/correlation) · analyser tap → out (2 ch)
@@ -183,7 +190,7 @@ sequenceDiagram
 1. **Gate first.** Enhancement stages must not amplify hiss or hum they were never meant to see.
 2. **Corrective before creative.** Static EQ fixes tonal balance. The dynamic EQ then reacts to that corrected balance and controls masking and resonances *before* the additive enhancers (bass, clarity, saturation) run, so they do not trigger extra dynamic cuts.
 3. **Harmonics before width.** Saturation glues the generated harmonics. The spatializer then shapes the final tonal image, and only its side-channel.
-4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it may add gain, except the output trim, which only attenuates in practice, and the ceiling-capped matched bypass.
+4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it adds gain: the output trim can only attenuate (its range ends at 0 dB), and the loudness-matched bypass is capped so the dry reference stays below the ceiling.
 
 ### 4.3 Control flow per audio block
 
@@ -200,24 +207,30 @@ flowchart LR
 
 - **Base vs effective values.** Presets and the GUI write *base* values. Each block the chain computes *effective* values:
 
-  `effective = clamp(base + Σ amount · smoothstep(start, end, macro)^exp · governorScale)`
+  ```
+  effective = clamp( base + Σ amount · smoothstep(start, end, source)^exponent · g )
+  g = governorScale for "governed" entries (they add loudness / drive), 1 otherwise
+  source = Boost Intensity or one of the five mode macros (0 … 1)
+  ```
 
-  Macros can also *engage* modules. For example, turning up *Warmth* switches Saturation on.
+  Macros can also *engage* modules. For example, turning up *Warmth* switches Saturation on (`core/src/engine/MacroMap.cpp`).
 - **Mode bands.** Dynamic-EQ bands 4–7 belong to the mode policy, not to the user:
   - Gaming: footstep lift (3.2 kHz and 260 Hz upward compression), explosion anti-masking (90 Hz low shelf, cut above) and voice/score presence (2 kHz).
-  - Music: dynamic de-harsh (3.5 kHz), air lift (12 kHz shelf) and de-boom (120 Hz).
+  - Music: dynamic de-harsh (3.5 kHz), air lift (12 kHz shelf) and de-boom (120 Hz); band 7 is unused in Music.
 
-  All of them scale with the relevant macro.
-- **Protection loops** close around the output:
-  - The governor keeps average limiter gain reduction above −6 dB and clip energy below −30 dB.
-  - AutoDrive can only *reduce* maximizer drive, towards a LUFS target.
-  - LoudnessMatch computes the fair-comparison gain for the bypass path.
+  Each band's range scales with its source: Footsteps (bands 4–6) and Voice & Score (band 7) in Gaming; Clarity (de-harsh, air) and Boost Intensity (de-boom) in Music (`configureModeBands()` in `ProcessingChain.cpp`).
+- **Glue arming.** The maximizer's 3-band glue splitter is only in the signal path while glue is *armed*: the preset sets `max.glue` > 0, or a macro that can raise it (Music: Boost Intensity, Loudness) is above zero. While armed, a 0.001 floor keeps the splitter engaged so Boost crossing the glue start point (40 %) never crossfades against the splitter's all-pass-shifted sum. Disarmed, the splitter is out of the path, because its all-pass rotation would raise the crest factor of flat-topped masters by 1–3 dB.
+- **Protection loops** close around the output (`core/src/engine/Protection.cpp`):
+  - The SafetyGovernor keeps the ~3 s average limiter gain reduction above −6 dB and the clip-energy ratio below −30 dB. Over budget, its scale falls at 15 %/s (minimum 0.3); comfortably under budget (1.5 dB hysteresis) it recovers at 3 %/s.
+  - AutoDrive can only *reduce* maximizer drive (0 … −24 dB, ≤ 2 dB/s, 0.5 LU dead band), towards a LUFS target.
+  - LoudnessMatch computes the fair-comparison gain for the bypass path (±12 dB, 3 dB/s).
+  - All three loudness loops use a gated 3 s measure that freezes in silence, pauses and fade-outs.
 
 ### 4.4 Parameter, preset & A/B flow
 
 ```
 GUI knob / hotkey / tray / plug-in host automation
-        │  store.set(id, v)   (clamped, relaxed atomic, version++)
+        │  store.set(id, v)   (clamped, NaN ignored, relaxed atomic, version++)
         ▼
 ParameterStore ── Bank A ──┐
                └─ Bank B ──┴─ activeBank (atomic) ──► audio thread snapshot()
@@ -225,13 +238,13 @@ ParameterStore ── Bank A ──┐
 PresetManager: JSON (string keys) ⇄ Preset(values) ⇄ applyToStore(bank) / captureFromStore(bank)
 ```
 
-- **A/B.** Two complete parameter banks. "Compare" flips the active bank atomically, and all continuous parameters glide, so the switch is click-free. "Copy A→B" duplicates a bank.
-- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, choices are stored as labels (`presets/factory/*.json`, `core/include/flub/io/PresetIO.h`).
+- **A/B.** Two complete parameter banks. The header's A / B buttons flip the active bank atomically, and all continuous parameters glide, so the switch is click-free. The copy button duplicates the active bank into the other one (A→B or B→A).
+- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, out-of-range numbers are clamped, choices are stored as labels, and "Bypass All" is never loaded from or saved to a preset (`presets/factory/*.json`, user presets as `*.flubpreset.json`, `core/include/flub/io/PresetIO.h`).
 
 ### 4.5 Metering & visualisation flow
 
 ```
-audio thread ─► LevelMeter / TruePeakMeter / LoudnessMeter ─► MeterBus atomics ─► GUI timers (60 Hz)
+audio thread ─► LevelMeter / TruePeakMeter / LoudnessMeter ─► MeterBus atomics ─► GUI, once per display frame
             └─► mid (L+R)/2 pre & post ─► AnalyzerTaps SPSC rings ─► GUI FFT (4096, Hann, 75 %)
                                                                     ├─► SpectrumAnalyzer + EQ curve
                                                                     └─► WaveformHistory (min/max decimation)
@@ -242,25 +255,26 @@ The GUI does all FFT and drawing work on the message thread. The audio thread's 
 ### 4.6 Per-application routing flow
 
 1. The user assigns an application to a strip (routing panel), or a rule matches its executable.
-2. `AppAudioRouter::setAppEndpoint(pid, "Flubsound Game")` points the app's default render endpoint at the virtual endpoint. If the OS offers no supported API, the UI opens the system per-app device settings instead.
+2. `AppRouting` applies the mapping with one of two methods (`app/Source/engine/AppRouting.h`):
+   - **Endpoint routing:** `AppAudioRouter::setAppEndpoint(pid, endpoint)` moves the app's output to the strip's virtual endpoint. Linux: `pactl move-sink-input` to `flubsound_game` etc. Windows: only in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (and useful once the driver's endpoints exist); otherwise the call fails with an explanation and the UI opens `ms-settings:apps-volume`. macOS: not supported yet (the UI opens the Sound settings).
+   - **Process capture** (Windows 10 build 20348+ / Windows 11): `ProcessLoopbackCapture` captures the process tree into the strip through a `DriftCompensatedFifo`. It cannot mute the app's original output, so it suits monitoring and "lite" setups.
 3. The app's audio now arrives on that strip and is processed with that strip's profile (`ParameterStore`).
-4. The mapping (executable → strip) persists in `AppSettings` and is re-applied when the app starts.
-
-Without the driver, `ProcessLoopbackCapture` can capture a specific process (tree) into a strip for monitoring and "lite" setups.
+4. The mapping (executable → strip) persists in `AppSettings`. A background worker re-applies it (every 2 s while routes exist) whenever the executable shows up, and endpoint moves are restored to the system default on shutdown.
 
 ### 4.7 Batch processing & export flow
 
 ```
-WAV/FLAC/MP3 in ─► decode ─► ProcessingChain (offline, same code as realtime)
-      │                          │ latency compensated: drop first L samples, flush L zeros
-      │                          ▼
-      │                LoudnessMeter (integrated LUFS)
-      │                          │ loudness target? adjust max.drive by the error, ≤ 4 iterations, stop within 0.3 LU
-      ▼                          ▼
- report (LUFS, LRA, TP, peak) ◄─ export WAV (float32 / PCM24 / PCM16 with TPDF dither)
+WAV in ─► decode ─► ProcessingChain (offline, same code as realtime; mono → stereo, 5.1/7.1 → binaural or downmix)
+   │  (PCM 16/24/32, float 32/64,  │ latency compensated: flush L zeros, drop the first L output samples
+   │   WAVE_FORMAT_EXTENSIBLE)     ▼
+   │                     LoudnessMeter (integrated LUFS)
+   │                               │ loudness target? move max.drive (then input.gain / output.gain) by the error,
+   │                               │ secant steps, ≤ 4 corrective passes, stop within 0.3 LU, keep the closest pass
+   ▼                               ▼
+ report (LUFS, LRA, TP, peak) ◄─ export WAV (float32, or PCM24 / PCM16 with TPDF dither)
 ```
 
-Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, `presets`). The app's batch UI (roadmap Phase 2) uses the same engine code.
+Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, `presets`). Other formats (FLAC, MP3, AIFF, Ogg) are planned for the app's batch UI through JUCE's `AudioFormatManager` (roadmap Phase 2, item 2.10), which will use the same engine code.
 
 ---
 
@@ -276,8 +290,10 @@ Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, 
 | Maximizer clipper oversampling | 4× HQ: 36 smp | 4× HQ: 36 smp | 2× short: 16 smp |
 | True-peak limiter look-ahead + detector | 2 ms + 20 = 116 smp | 1.5 ms + 20 = 92 smp | 0.5 ms + 20 = 44 smp |
 | **Total** | **1352 smp ≈ 28.2 ms** | **192 smp = 4.0 ms** | **100 smp ≈ 2.1 ms** |
+| *Desktop app only:* master true-peak limiter after the strip sum (`MixEngine`, 1 ms look-ahead + 20) | +68 smp | +68 smp | +68 smp |
+| **App engine total** (`MixEngine::getLatencySamples()`) | **1420 smp ≈ 29.6 ms** | **260 smp ≈ 5.4 ms** | **168 smp = 3.5 ms** |
 
-All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match.
+All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app's header shows device input + output latency + engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots.
 
 ### 5.2 Added end-to-end latency (what the user feels), Windows driver path
 
@@ -285,11 +301,12 @@ All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have
 |---|---|---|
 | Read safety margin on the virtual endpoint | ~1 ms | ~1 ms |
 | Engine block (128 frames) | 2.7 ms | 2.7 ms |
-| Algorithmic (§5.1) | 2.1 ms | 4.0 ms |
+| Algorithmic, strip chain (§5.1) | 2.1 ms | 4.0 ms |
+| Master limiter (§5.1) | 1.4 ms | 1.4 ms |
 | Output buffering (device period, double-buffered) | ~2.7 ms | ~3–4 ms |
-| **Added total** | **≈ 8.5 ms** | **≈ 10–11 ms** |
+| **Added total (estimate)** | **≈ 10 ms** | **≈ 12–13 ms** |
 
-Both meet the ≤ 10–12 ms target. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why the engine prefers `IAudioClient3` low-latency shared mode or exclusive mode. The app's latency readout shows the actual device buffer sizes plus the engine's reported latency.
+Low Latency + exclusive meets the ≤ 10–12 ms target; Balanced + shared low-latency sits at its upper edge. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why `IAudioClient3` low-latency shared mode or exclusive mode is recommended. The app does not pick it by itself yet: it opens JUCE's default device type (*Windows Audio*, shared) unless the user selects *Windows Audio (Low Latency Mode)* or *(Exclusive Mode)* in Settings > Audio (defaulting to low-latency mode is roadmap). The app's latency readout adds the device's reported input and output latencies to the engine latency (and the capture FIFO target, if any); a loopback measurement tool is roadmap (`07-roadmap.md` item 1.2). These figures are estimates for the driver path, which is not built yet.
 
 ---
 
@@ -297,7 +314,7 @@ Both meet the ≤ 10–12 ms target. Classic shared mode with a 10 ms default pe
 
 | Extension | How |
 |---|---|
-| New DSP module | Implement `flub::Processor`, add a `ModuleSlot` in `ProcessingChain`, add parameters to `Parameters.h/.cpp` (append-only IDs), and add a card in the UI (the generic editor comes free from `param::layout()` groups). |
+| New DSP module | Implement `flub::Processor`, add a `ModuleSlot` in `ProcessingChain`, add parameters to `Parameters.h/.cpp` (new string keys; `Id`s are only an in-memory index, the keys are the stable contract and are never renamed or reused; parameters added after the first release get the next `Info::sinceVersion` for the plug-in), and add a card in the UI (the generic `ParamGrid` editor comes free from `param::layout()`). |
 | New macro behaviour | Add rows to the `MacroMap` tables (source, parameter, amount, start/end, curve, governed). No code changes in modules. |
 | New mode policy | Extend `configureModeBands()` / the policy block in `ProcessingChain::applyParameters()`. |
 | New host | Any code that can call `ProcessingChain::process()` with float buffers: app, plug-in, CLI, tests, future APO or PipeWire node. |
@@ -311,17 +328,17 @@ Both meet the ≤ 10–12 ms target. Classic shared mode with a 10 ms default pe
 | Failure | Behaviour |
 |---|---|
 | NaN/Inf in the input (bad driver or plug-in) | The chain drops the block (outputs silence) and resets its state instead of latching garbage. |
-| Capture underrun / overrun | `DriftCompensatedFifo` outputs silence or drops the oldest frames and counts the event (shown in diagnostics). The PI loop re-centres the fill level. |
-| Device removed / sleep / default-device change | The host re-opens the configured device, or falls back to the system default, and re-prepares. The virtual endpoints stay default so apps are unaffected. |
+| Capture underrun / overrun | `DriftCompensatedFifo` fades to silence (then re-primes and fades back in over 5 ms) or drops the oldest frames, and counts the event in its `Stats` (available through `AudioEngineHost::getCaptures()`; not shown in the UI yet). The PI loop re-centres the fill level. |
+| Device removed / sleep / default-device change | JUCE reports the change and the host re-prepares for the new device format. When the preferred output (for example a USB headset) disappears, JUCE falls back to another device; `EngineController` switches back as soon as the preferred device is listed again (rescan every 5 s while it is missing). With the virtual driver (design), the virtual endpoints would stay the default so apps are unaffected. |
 | Over-driven settings | The SafetyGovernor withdraws governed macro gain, and the limiter + master limiter guarantee the ceiling. |
-| CPU overload | Meters show CPU. Recommended action: the Low Latency profile, which is also the cheapest. A watchdog that auto-degrades (e.g. drops HQ oversampling) is on the roadmap. |
-| GUI hang or crash | Audio keeps running; the GUI only reads atomics and rings. The service-process split (roadmap) makes this fully independent. |
+| CPU overload | The header shows the device callback's CPU load. Recommended action: the Low Latency profile, which is also the cheapest (2× instead of 4× clipper oversampling, no STFT gate). A watchdog that auto-degrades (e.g. drops HQ oversampling) is on the roadmap. |
+| GUI hang or crash | A hung GUI does not stop audio: the audio thread never waits for the GUI, which only reads atomics and rings. A crash still takes down the process (GUI and engine share it) until the service-process split (roadmap). |
 
 ---
 
 ## 8. Security & privacy
 
 - **No network access** is required. Audio never leaves the machine, and future neural features run on-device.
-- **Driver attack surface.** The virtual driver's private IOCTL validates caller, sizes and state. The shared buffer is mapped read/write only into the Flubsound engine process.
-- **Per-process capture** is user-initiated for a chosen application. The OS privacy permission (macOS audio capture) is requested with a clear purpose string.
+- **Driver attack surface (design).** The virtual driver's private IOCTL validates caller, sizes and state. The shared buffer is mapped read/write only into the Flubsound engine process.
+- **Per-process capture** is user-initiated for a chosen application. On macOS the app declares the microphone permission with a purpose string (capturing a virtual loopback device is an audio input); process-tap capture (design) will add `NSAudioCaptureUsageDescription`.
 - **No injection or hooks** into other processes, which also keeps the product anti-cheat safe (`08-pitfalls-and-solutions.md` C7).

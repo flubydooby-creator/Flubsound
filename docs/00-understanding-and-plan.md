@@ -14,11 +14,11 @@ Each requirement has an ID. The traceability matrix in §5 maps every ID to its 
 ### R1 Real-time audio engine
 | ID | Requirement | Interpretation used |
 |---|---|---|
-| R1.1 | Latency under 10–12 ms | This is the **added** latency Flubsound introduces on top of what the OS and application already have. We budget ≤ 2 ms algorithmic latency in *Low Latency*, ≤ 4 ms in *Balanced*, plus I/O buffering, for a total added ≤ 10 ms. The *Quality* profile, for music and batch, is allowed more. See `01-architecture.md` §5. |
-| R1.2 | WASAPI shared + exclusive, ASIO, Core Audio, ALSA / PulseAudio / PipeWire | JUCE 9 device layer (WASAPI shared, exclusive and low-latency; ASIO with the Steinberg SDK; CoreAudio; ALSA; JACK). PipeWire is reached via its ALSA/JACK/Pulse compatibility layers, and natively later (roadmap). |
+| R1.1 | Latency under 10–12 ms | This is the **added** latency Flubsound introduces on top of what the OS and application already have. The per-strip chain has ~2.1 ms algorithmic latency in *Low Latency* and 4.0 ms in *Balanced* (48 kHz); the desktop app's master limiter adds 1.4 ms; I/O buffering comes on top. The estimated added total is ~10 ms (Low Latency) to ~12–13 ms (Balanced) on the Windows driver path. The *Quality* profile (~28 ms), for music and batch, is allowed more. See `01-architecture.md` §5. |
+| R1.2 | WASAPI shared + exclusive, ASIO, Core Audio, ALSA / PulseAudio / PipeWire | JUCE 9 device layer (WASAPI shared, exclusive and low-latency; ASIO with the Steinberg SDK; CoreAudio; ALSA; JACK). PipeWire and PulseAudio are reached through PipeWire's ALSA / JACK compatibility layers for audio I/O and through `pactl` (PulseAudio protocol) for per-app routing; a native PipeWire node is roadmap. |
 | R1.3 | 32-bit float internal processing | All DSP is `float`. Metering integrators and long-running accumulators use `double` where precision matters. |
-| R1.4 | 44.1 / 48 / 96 / 192 kHz | Every coefficient is derived from the session rate. Tests cover all four rates. |
-| R1.5 | Robust buffer management, glitch-free | Lock-free SPSC FIFOs, no allocation or locks on the audio thread (enforced by tests), drift-compensated resampling between clock domains, and denormal protection. |
+| R1.4 | 44.1 / 48 / 96 / 192 kHz | Every coefficient is derived from the session rate. Tests cover all four rates; the chain test also runs 8 – 176.4 kHz for headsets. |
+| R1.5 | Robust buffer management, glitch-free | Lock-free SPSC FIFOs, no allocation or locks on the audio thread (enforced by tests), drift-compensated resampling between clock domains (`DriftCompensatedFifo` for per-app captures), and denormal protection. |
 
 ### R2 Core processing modules (all real-time, individually bypassable, with A/B)
 | ID | Module |
@@ -78,10 +78,11 @@ These were fixed up front because every later deliverable depends on them. `02-t
    - later, a Windows APO or a PipeWire filter node.
 
    JUCE is used where it excels: device I/O, GUI and plug-in wrappers.
-2. **System-wide + per-app = virtual endpoints + routing.** Flubsound installs a virtual audio driver exposing one endpoint per *strip*: Game (7.1), Music, Chat and System. Applications are routed to endpoints per app. The engine processes each strip with its own profile, sums them, protects the sum with a master true-peak limiter and plays the result on the real device. This is the model proven by SteelSeries Sonar and Voicemeeter.
-   - macOS 14.2+ uses Core Audio process taps instead.
-   - Linux uses PipeWire null sinks.
-   - Where no driver is installed, process-loopback capture or any third-party virtual cable feeds the strips.
+2. **System-wide + per-app = virtual endpoints + routing.** The target design installs a virtual audio driver exposing one endpoint per *strip*: Game (7.1), Music, Chat and System. Applications are routed to endpoints per app. The engine processes each strip with its own profile, sums them, protects the sum with a master true-peak limiter and plays the result on the real device. This is the model proven by SteelSeries Sonar and Voicemeeter. Status per platform:
+   - Windows: the WaveRT driver is designed (`platform/windows/driver/`), not yet built.
+   - macOS 14.2+: Core Audio process taps are designed (`platform/macos/`), not yet built.
+   - Linux: PipeWire / PulseAudio null sinks (`platform/linux/`) plus `pactl` routing work today.
+   - Without a driver, per-process loopback capture (Windows 10 build 20348+ / Windows 11) or any third-party virtual cable feeds the strips.
 3. **Latency is a first-class, constant quantity.** Each latency profile (Quality, Balanced, Low Latency) fixes every structural choice: look-ahead lengths, oversampling factors, and whether the STFT gate is in the chain. Within a profile the chain latency never changes, because bypass paths are latency-compensated. Toggling a module therefore never shifts audio in time or clicks.
 4. **Macros, not presets, drive "intelligence".** Presets store *base* values. Boost Intensity and the five mode macros add staged, curved contributions on top. A **Safety Governor** scales back every loudness-adding contribution when limiter gain reduction or clipper energy exceed their budgets, which is the THD protection loop.
 5. **Gaming correctness beats loudness.** Gaming mode enforces rules that protect positional cues:
@@ -90,7 +91,7 @@ These were fixed up front because every later deliverable depends on them. `02-t
    - no widening of binaural (virtualised) output,
    - fast recovery after loud events,
    - dedicated footstep and anti-masking dynamic-EQ bands,
-   - a sub-2 ms Low Latency profile.
+   - a Low Latency profile with ~2.1 ms chain latency at 48 kHz.
 
 ---
 
@@ -110,7 +111,7 @@ These were fixed up front because every later deliverable depends on them. `02-t
 The work was run as a sequence of review loops:
 
 1. **Contracts first.** The shared primitives were written and tested by hand: SVF, biquad, Linkwitz–Riley crossovers, half-band oversampler, true-peak interpolator, FFT, lock-free ring, delay line. Then every module's public header was written as a contract, with the algorithm specified in its comments.
-2. **Parallel implementation with adversarial verification.** Each module was implemented against its contract with thorough tests. An independent reviewer then tried to break it and fixed the real defects found. Covered in this way: EQ, dynamic EQ, bass, clarity, saturation, spatializer, virtualizer, compressor, limiter/maximizer, noise gate, loudness meter and WAV/JSON I/O.
+2. **Parallel implementation with adversarial verification.** Each module was implemented against its contract with thorough tests. An independent reviewer then tried to break it and fixed the real defects found. Covered in this way: EQ, dynamic EQ, bass, clarity and transient shaper, saturation, spatializer, virtualizer, compressor, limiter/maximizer, noise gate, loudness meter and WAV/JSON I/O.
 3. **Engine integration.** Parameter layout, macros, protection loops, module slots, processing chain and multi-strip mixer, verified by chain-level tests: latency constancy, bypass transparency, ceiling safety, zero allocations and 7.1 folding.
 4. **Application, platform, tools, presets.** The JUCE app, the Windows/macOS/Linux integration layer, the CLI batch processor, the plug-in and the factory presets, each with a review pass.
 5. **Documentation.** Written from the actual code and fact-checked against it.
@@ -118,7 +119,7 @@ The work was run as a sequence of review loops:
 
 ### Quality gates (applied to every change)
 
-- Zero-warning builds with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` on GCC and Clang, and `/W4` on MSVC.
+- Zero-warning builds with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (plus `-Wno-sign-conversion`) on GCC and Clang, and `/W4` on MSVC; CI turns warnings into errors for the Linux core builds.
 - The full unit-test suite passes under Address and Undefined Behavior sanitizers.
 - Allocation-counting tests prove `process()` paths never touch the heap.
 - CI on Windows, macOS and Linux (`.github/workflows/ci.yml`).

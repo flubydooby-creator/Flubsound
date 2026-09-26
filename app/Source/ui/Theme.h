@@ -63,8 +63,19 @@ juce::Colour accentForMode (flub::param::ModeValue mode);
     look-and-feel is not a FlubLookAndFeel). */
 juce::Colour accent (const juce::Component& c);
 
+/** Meter palette of the component's look-and-feel (Standard if it is not a
+    FlubLookAndFeel). */
+MeterPalette meterPalette (const juce::Component& c);
+
 /** Meter colours of the component's look-and-feel. */
 MeterColours meterColours (const juce::Component& c);
+
+/** Good / caution / alert colours for indicators that encode a state by
+    colour outside the level bars (correlation, gain reduction, clipper,
+    over-ceiling readouts, muted strips). Standard keeps the UI's green /
+    amber / red; the colour-blind safe palette uses its meter colours. */
+MeterColours statusColours (MeterPalette palette);
+inline MeterColours statusColours (const juce::Component& c) { return statusColours (meterPalette (c)); }
 
 /** Colour of a level in dBFS on a meter (safe / warn / hot zones). */
 juce::Colour meterColourForDb (const MeterColours& colours, float db);

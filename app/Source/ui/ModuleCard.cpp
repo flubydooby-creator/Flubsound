@@ -130,8 +130,7 @@ ModuleCard::ModuleCard (const ModuleDescriptor& d, ParameterBinder& b)
 
 ModuleCard::~ModuleCard()
 {
-    if (listening)
-        stopListening();
+    stopListening();
     gridView.reset();
     binder.unbind (power);
     for (auto& c : keyControls)
@@ -205,28 +204,47 @@ void ModuleCard::setState (const State& newState)
     hasState = true;
 
     keyHolder.setAlpha (state.effectiveOn ? 1.0f : 0.42f);
-    const bool macroOnly = state.effectiveOn && ! state.baseOn;
-    listenButton.setEnabled (state.effectiveOn && ! macroOnly);
-    listenButton.setTooltip (macroOnly ? descriptor.name + " is engaged by Boost Intensity / a macro, so it cannot be bypassed here"
-                                       : "A/B listen: hold to hear the strip without " + descriptor.name);
+    // The ear works whenever the module is heard, also when only a macro
+    // engages it (the engine's audition bypass overrides the macros).
+    listenButton.setEnabled (state.effectiveOn);
     repaint();
 }
 
+// =============================================================================
+// Ear (A/B listen)
+// =============================================================================
 void ModuleCard::startListening()
 {
-    if (auto* store = binder.getStore())
-    {
-        listenRestore = store->get (descriptor.enableId);
-        store->set (descriptor.enableId, 0.0f);
-        listening = true;
-    }
+    if (onListen == nullptr)
+        return;
+    listening = true;
+    listenedInForeground = juce::Process::isForegroundProcess();
+    onListen (true);
+    startTimerHz (10);
 }
 
 void ModuleCard::stopListening()
 {
+    stopTimer();
+    if (! listening)
+        return;
     listening = false;
-    if (auto* store = binder.getStore())
-        store->set (descriptor.enableId, listenRestore);
+    if (onListen != nullptr)
+        onListen (false);
+}
+
+void ModuleCard::releaseListening()
+{
+    stopListening();
+}
+
+void ModuleCard::timerCallback()
+{
+    // Safety net for releases the button may never see (the window lost focus
+    // mid-hold, the card was hidden): the audition must never stick.
+    const bool lostFocus = listenedInForeground && ! juce::Process::isForegroundProcess();
+    if (! listenButton.isDown() || ! isShowing() || lostFocus)
+        stopListening();
 }
 
 void ModuleCard::setExpanded (bool shouldExpand)

@@ -5,8 +5,9 @@
 //   Enabled | Mode: Music / Gaming | Boost +10 % / -10 % | Presets > ... |
 //   Open Flubsound Pro | Quit
 // Mode, boost and presets act on the selected strip. The icon is drawn in
-// code (accent colour while enabled, grey while bypassed) and doubles as a
-// macOS template image.
+// code: white equaliser bars on a fixed teal-to-blue gradient while enabled,
+// dimmed bars on grey while bypassed; the macOS template variant is the bars
+// alone.
 #pragma once
 
 #include "engine/EngineController.h"
@@ -17,8 +18,6 @@
 
 namespace flub::app
 {
-class HotkeyManager;
-
 class TrayIcon final : public juce::SystemTrayIconComponent, private EngineController::Listener
 {
 public:

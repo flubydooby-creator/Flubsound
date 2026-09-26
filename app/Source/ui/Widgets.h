@@ -78,9 +78,7 @@ private:
 
 namespace Style
 {
-/** Makes a TextButton one cell of a segmented control. */
-void segment (juce::TextButton& b, int radioGroupId, int connectedEdges);
-/** Named FlubLookAndFeel styles ("ghost", "accent", "warning", "power", "switch"). */
+/** Named FlubLookAndFeel styles ("tab", "chip", "warning", "power", "switch"). */
 void set (juce::Component& c, const juce::String& style);
 /** Gives a component an accessible title and a tooltip in one call. */
 void describe (juce::Component& c, const juce::String& title, const juce::String& tooltip = {});

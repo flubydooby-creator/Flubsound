@@ -11,16 +11,14 @@
 // plain juce::TextButton / juce::ToggleButton / juce::Slider objects can be
 // used everywhere:
 //
-//   button.getProperties().set (FlubLookAndFeel::styleProperty, "segment");
+//   button.getProperties().set (FlubLookAndFeel::styleProperty, "tab");
+//   (or Style::set (button, "tab") from Widgets.h)
 //
-//   TextButton   "segment"  segmented-control cell (radio group); the ON
-//                           cell is filled with the accent
-//                "tab"      neutral selection with an accent underline
+//   TextButton   "tab"      neutral selection with an accent underline
 //                           (strip selector, A/B, settings navigation)
 //                "chip"     small pill toggle (analyser display options)
-//                "ghost"    no chrome until hovered (toolbar actions)
-//                "accent"   filled with the accent (primary action)
 //                "warning"  amber when toggled on (bypass)
+//                (default)  raised button, accent tint when toggled on
 //   ToggleButton "power"    round power icon (module enable)
 //                "switch"   pill switch followed by the button text
 //                (default)  tick box followed by the button text

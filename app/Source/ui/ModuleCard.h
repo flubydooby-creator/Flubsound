@@ -8,7 +8,10 @@
 //              latency-compensated crossfade in the engine)
 // * AUTO chip  the module is off in the preset but engaged by Boost
 //              Intensity / a mode macro (post-macro effective value)
-// * ear        hold to hear the strip without this module ("A/B listen")
+// * ear        hold to hear the strip without this module ("A/B listen"):
+//              an audition bypass in the engine (onListen), not a parameter
+//              write, so it also works for macro-engaged modules and never
+//              marks the preset modified
 // * expand     shows ALL parameters of the module's layout group
 //              (auto-generated ParamGrid in a scrolling view)
 // The card dims while the module is effectively bypassed. Banded modules
@@ -50,11 +53,13 @@ struct ModuleDescriptor
     Banding banding = Banding::None;
     std::vector<Key> keys;
 
-    /** The ten modules in processing order. */
+    /** The ten modules in rack order: the chain's processing order, except
+        that the Headphone Virtualizer (which runs first, before the gate)
+        sits with the stereo modules. */
     static const std::vector<ModuleDescriptor>& all();
 };
 
-class ModuleCard : public juce::Component
+class ModuleCard : public juce::Component, private juce::Timer
 {
 public:
     ModuleCard (const ModuleDescriptor& descriptor, ParameterBinder& binder);
@@ -80,6 +85,13 @@ public:
     int getBand() const noexcept { return band; }
     std::function<void (int band)> onBandChanged;
 
+    /** Ear (A/B listen): called with true when a hold starts and with false
+        when it ends - on mouse-up, focus loss, when the card is hidden or
+        destroyed, or on releaseListening(). Every start gets exactly one end. */
+    std::function<void (bool listen)> onListen;
+    /** Ends a hold now (strip switch, engine reconfiguration). */
+    void releaseListening();
+
     /** Preferred width in the collapsed rack. */
     int getPreferredWidth() const;
 
@@ -92,6 +104,7 @@ private:
     void bindKeys();
     void startListening();
     void stopListening();
+    void timerCallback() override;
     juce::String noteText() const;
 
     ModuleDescriptor descriptor;
@@ -108,8 +121,7 @@ private:
     ParamGrid* grid = nullptr;
 
     State state;
-    bool expanded = false, listening = false, hasState = false;
-    float listenRestore = 1.0f;
+    bool expanded = false, listening = false, listenedInForeground = false, hasState = false;
     int band = 0;
     juce::Rectangle<int> headerArea, titleArea, bandArea, noteArea;
 };

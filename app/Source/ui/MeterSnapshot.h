@@ -2,8 +2,9 @@
 //
 // MainComponent reads the selected strip's flub::MeterBus atomics ONCE per
 // display frame into this plain struct and hands it to the meter / loudness /
-// boost / EQ views, so no view touches the atomics directly and every view
-// shows values from the same instant.
+// boost / EQ views, so these views never touch the atomics and all show
+// values from the same instant. (RoutingPanel's per-strip mini meters are
+// the exception: they read outPeakDb of every strip's MeterBus themselves.)
 #pragma once
 
 #include "flub/engine/MeterBus.h"

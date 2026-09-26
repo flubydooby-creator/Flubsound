@@ -216,6 +216,7 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             refreshDeviceBanner(); // the "Use <preset>" offer hides once it is loaded
             break;
         case Change::Engine:
+            rack.releaseListening(); // the re-created chains start without auditions
             // Device restarts re-create the chains but usually keep the strips.
             if (const auto signature = currentStripSignature(); signature != stripSignature)
             {
@@ -229,9 +230,11 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             refreshDeviceBanner();
             break;
         case Change::SelectedStrip:
+            rack.releaseListening();
             header.refresh();
             routing.setSelectedStrip (controller.getSelectedStrip());
             resetAnalysis();
+            refreshDeviceBanner(); // the advice follows the selected strip's mode
             break;
         case Change::MasterEnable:
         case Change::Parameters:
@@ -279,7 +282,7 @@ void MainComponent::openSettings()
                 return;
             safe->lookAndFeel().setMeterPalette (palette);
             safe->saveUiPreferences();
-            safe->repaint();
+            safe->sendLookAndFeelChange(); // repaints; views that cache palette colours refresh them
         },
         lookAndFeel().getMeterPalette());
 }

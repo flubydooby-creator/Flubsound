@@ -11,8 +11,9 @@
 // instead); "Quit" in the tray or a system quit request ends the app.
 //
 // Headless mode: --screenshot <out.png> [--mode music|gaming] [--size WxH]
-// [--seconds S] [--scale F] (see shell/ScreenshotDriver.h). No device, no tray, no
-// hotkeys, no settings are written.
+// [--seconds S] [--scale F] [--device "output device name"] (see
+// shell/ScreenshotDriver.h). No device, no tray, no hotkeys, no settings are
+// written.
 #pragma once
 
 #include <juce_gui_extra/juce_gui_extra.h>

@@ -1,8 +1,9 @@
 // Flubsound Pro CLI - locating, listing and resolving factory presets.
 //
-// Factory presets are the presets/factory/**/*.json files of the source tree
-// (the app embeds the same files as BinaryData). The CLI finds the folder at
-// run time, first match wins:
+// Factory presets are the presets/factory/*.json files of the source tree
+// (top level only - sub-folders are ignored everywhere, since the tests only
+// validate the top level; the app embeds the same files as BinaryData). The
+// CLI finds the folder at run time, first match wins:
 //   1. an explicit folder (--dir for `presets`, --preset-dir for process/batch)
 //   2. $FLUBSOUND_PRESET_DIR
 //   3. <exe dir>/presets/factory, then the same below the executable's parent
@@ -43,8 +44,8 @@ std::vector<std::filesystem::path> presetSearchPath (const std::string& explicit
     not exist is NOT skipped silently: it is returned as nullopt. */
 std::optional<std::filesystem::path> findFactoryPresetDir (const std::string& explicitDir);
 
-/** Parses every *.json below dir (recursively), sorted by category then
-    name. Files that fail to parse are reported in `problems`. */
+/** Parses every *.json directly in dir (not in sub-folders), sorted by
+    category then name. Files that fail to parse are reported in `problems`. */
 std::vector<FactoryPresetEntry> scanPresetDir (const std::filesystem::path& dir, std::vector<std::string>& problems);
 
 /** Loads `spec` (file path or factory preset name) into `out`.

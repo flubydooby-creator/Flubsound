@@ -290,14 +290,42 @@ void PresetManager::setCurrentPresetId (int strip, const juce::String& id, const
         return;
     currentIds[static_cast<size_t> (strip)] = id;
     if (store != nullptr)
-        versionAtLoad[static_cast<size_t> (strip)] = store->version();
+        takeSnapshot (strip, *store);
+}
+
+void PresetManager::takeSnapshot (int strip, const ParameterStore& store)
+{
+    auto& snap = snapshots[static_cast<size_t> (strip)];
+    snap.values.resize (static_cast<size_t> (kNumParams));
+    store.snapshot (snap.values.data());
+    snap.checkedStore = &store;
+    snap.checkedVersion = store.version();
+    snap.modified = false;
+}
+
+bool PresetManager::isPresetSound (int paramId) noexcept
+{
+    return paramId != BypassAll && paramId != LatencyProfile && paramId != LoudnessMatchBypass;
 }
 
 bool PresetManager::isModified (int strip, const ParameterStore& store) const
 {
     if (strip < 0 || strip >= kMaxStrips || currentIds[static_cast<size_t> (strip)].isEmpty())
         return false;
-    return store.version() != versionAtLoad[static_cast<size_t> (strip)];
+
+    // Polled by UI timers: compare only when the store changed since the last call.
+    const auto& snap = snapshots[static_cast<size_t> (strip)];
+    const auto version = store.version();
+    if (&store == snap.checkedStore && version == snap.checkedVersion)
+        return snap.modified;
+
+    bool modified = snap.values.empty();
+    for (int i = 0; i < kNumParams && ! modified; ++i)
+        modified = isPresetSound (i) && store.get (i) != snap.values[static_cast<size_t> (i)];
+    snap.checkedStore = &store;
+    snap.checkedVersion = version;
+    snap.modified = modified;
+    return modified;
 }
 
 // =============================================================================
@@ -366,7 +394,7 @@ bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::S
     if (saveUserPreset (copy.name, copy.category, copy.description, store, error, true).isEmpty())
         return false;
     if (strip >= 0 && strip < kMaxStrips)
-        versionAtLoad[static_cast<size_t> (strip)] = store.version();
+        takeSnapshot (strip, store);
     return true;
 }
 

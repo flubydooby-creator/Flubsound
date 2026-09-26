@@ -25,8 +25,12 @@ else()
         target_link_options(flub_compiler_settings INTERFACE -fsanitize=address,undefined)
     endif()
     if(FLUB_RTSAN)
-        # RealtimeSanitizer: functions marked [[clang::nonblocking]] abort on
-        # malloc/free, locks, syscalls. See docs/08-pitfalls-and-solutions.md.
+        # RealtimeSanitizer (optional local build, clang >= 20; no CI job):
+        # functions marked [[clang::nonblocking]] abort on malloc/free, locks,
+        # syscalls. No function carries the attribute yet, so this checks
+        # nothing until one does - the allocation-counting tests in tests/
+        # are what enforces "no allocation on the audio thread" today.
+        # See docs/08-pitfalls-and-solutions.md.
         target_compile_options(flub_compiler_settings INTERFACE -fsanitize=realtime)
         target_link_options(flub_compiler_settings INTERFACE -fsanitize=realtime)
     endif()

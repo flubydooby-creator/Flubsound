@@ -91,7 +91,7 @@ public:
         auto& ctrl = panel.controller;
         const bool muted = ctrl.isStripMuted (strip);
         mute.setIcon (muted ? Icons::speakerMuted() : Icons::speaker());
-        mute.setIconColour (muted ? std::optional<juce::Colour> (Palette::red) : std::nullopt);
+        mute.setIconColour (muted ? std::optional<juce::Colour> (Theme::statusColours (*this).hot) : std::nullopt);
         Style::describe (mute, muted ? "Unmute " + name : "Mute " + name, muted ? "Unmute this strip" : "Mute this strip");
         if (! gain.isMouseButtonDown())
             gain.setValue (ctrl.getStripGainDb (strip), juce::dontSendNotification);
@@ -155,7 +155,7 @@ public:
         g.setFont (Theme::numeric (11.5f, false));
         g.drawText (gain.getTextFromValue (gain.getValue()), gainTextArea, juce::Justification::centredRight, false);
 
-        // Mini meter (stereo, -60 .. 0 dB)
+        // Mini meter (stereo peak, IEC deflection -70 .. 0 dBFS)
         const auto colours = Theme::meterColours (*this);
         auto m = meterArea.toFloat();
         for (size_t c = 0; c < 2; ++c)
@@ -226,6 +226,7 @@ public:
 
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
     void mouseExit (const juce::MouseEvent&) override { repaint(); }
+    void lookAndFeelChanged() override { refreshState(); } // meter palette -> muted icon colour
 
     void mouseUp (const juce::MouseEvent& e) override
     {
@@ -370,7 +371,7 @@ juce::String RoutingPanel::unsupportedReason() const
         return "Per-app routing needs the Flubsound platform services, which are not part of this build. "
                "Send apps to a Flubsound output device in your system sound settings instead.";
     if (routing.getMethod() == AppRouting::Method::Disabled)
-        return "Per-app routing is switched off (Settings > Engine).";
+        return "Per-app routing is switched off (Settings > Processing).";
     return "This system supports neither per-app endpoint routing nor process capture. "
            "Choose a Flubsound output device per app in the system sound settings instead.";
 }

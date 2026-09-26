@@ -38,7 +38,8 @@ public:
     /** Human-readable list of chords that could not be registered. */
     const juce::StringArray& getFailures() const noexcept { return failures; }
 
-    /** Runs an action exactly as the hotkey would (also used by the tray). */
+    /** Runs an action exactly as the hotkey would (the registered chords call
+        it; the tray menu drives EngineController directly). */
     void perform (HotkeyAction action);
 
     /** Feedback after an action (e.g. for a tray bubble / on-screen display). */

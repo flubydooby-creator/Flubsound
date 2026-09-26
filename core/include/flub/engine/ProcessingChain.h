@@ -6,7 +6,7 @@
 //       (virtualiser off) - from here on the chain is STEREO
 //    -> [slot] SpectralNoiseGate      (Quality latency profile only)
 //    -> [slot] ParametricEq (10 bands)
-//    -> [slot] DynamicEq (4 bands)
+//    -> [slot] DynamicEq (4 user bands + 4 internal mode bands)
 //    -> [slot] BassEngine
 //    -> [slot] ClarityEnhancer
 //    -> [slot] Saturator (oversampled)

@@ -4,17 +4,18 @@
 //   desktop app and flubsound-cli run).
 // * Every flub::param::layout() entry is exposed as a host parameter through
 //   an AudioProcessorValueTreeState: parameter ID = Info::key (versioned
-//   ParameterID, version 1), floats with NormalisableRange + skew from
-//   Info::skewCentre, AudioParameterChoice for choices, AudioParameterBool
-//   for toggles. The "bypass" parameter is also the host bypass parameter, so
+//   ParameterID, version hint = Info::sinceVersion), floats with
+//   NormalisableRange + skew from Info::skewCentre, AudioParameterChoice for
+//   choices, AudioParameterBool for toggles. The "bypass" parameter is also the host bypass parameter, so
 //   host bypass is the chain's click-free, latency-compensated bypass.
 // * processBlock copies the APVTS raw values into the store (plain atomic
 //   loads/stores, only for values that changed - RT-safe), holds
 //   ScopedNoDenormals and runs the chain in chunks of at most the prepared
 //   block size (hosts may exceed the size announced in prepareToPlay).
-// * Latency: setLatencySamples (chain latency) in prepareToPlay. The latency
-//   profile is structural: a message-thread timer notices a change, suspends
-//   processing, re-prepares the chain and reports the new latency to the host.
+// * Latency: setLatencySamples (chain latency) in prepareToPlay. Structural
+//   parameters (every Info::structural entry; today the latency profile): a
+//   message-thread timer notices a change, suspends processing, re-prepares
+//   the chain and reports the new latency to the host.
 // * Buses: stereo -> stereo, mono -> stereo (duplicated), 5.1 / 7.1 -> stereo
 //   (binaural virtualiser or ITU downmix inside the chain). Surround channels
 //   are re-ordered from JUCE's channel order into the chain's
@@ -100,6 +101,9 @@ private:
     void pushParametersToStore() noexcept;
     /** (Re-)prepares the chain for the current layout / structural params. Non-RT. */
     void prepareChain (double sampleRate, int maxBlockSize);
+    /** Any Info::structural parameter differs from what the chain was prepared
+        with. Message thread, prepareMutex held. */
+    bool structuralParameterChanged() const noexcept;
     void processInternal (juce::AudioBuffer<float>& buffer, bool forceBypass) noexcept;
 
     flub::param::ParameterStore store;
@@ -120,7 +124,9 @@ private:
     bool duplicateMono = false;
     double preparedSampleRate = 48000.0;
     int preparedBlockSize = 0;
-    int preparedProfile = -1; // guarded by prepareMutex (prepareToPlay may run off the message thread)
+    // Store values the chain was last prepared with (only the structural ones
+    // are compared). Guarded by prepareMutex (prepareToPlay may run off the message thread).
+    std::array<float, flub::param::kNumParams> preparedValues {};
     std::atomic<bool> prepared { false };
     std::atomic<int> reportedLatency { 0 };
     std::mutex prepareMutex; // prepareToPlay / releaseResources vs. the re-prepare timer (never on the audio thread)

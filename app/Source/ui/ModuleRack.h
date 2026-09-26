@@ -1,5 +1,7 @@
 // Flubsound Pro - the module rack: one ModuleCard per processing module, in
-// signal-flow order, in a horizontally scrolling Viewport.
+// a horizontally scrolling Viewport. The cards follow the chain's processing
+// order, except that the Headphone Virtualizer (which the chain runs first,
+// before the gate) sits with the stereo modules.
 //
 // Expanding a card switches the rack into a focused view: only that card is
 // shown, at the full rack size, with every parameter of the module
@@ -7,7 +9,8 @@
 // button returns to the row of cards.
 //
 // All cards share one ParameterBinder bound to the selected strip's store;
-// updateFromEngine() feeds them the post-macro "effective" module states.
+// updateFromEngine() feeds them the post-macro "effective" module states. The
+// cards' ears (hold-to-bypass A/B) go to EngineController::setAuditionBypass.
 #pragma once
 
 #include "ModuleCard.h"
@@ -30,6 +33,10 @@ public:
 
     /** Card states from the selected strip's store / effective values (~15 Hz). */
     void updateFromEngine();
+
+    /** Ends any ear hold (A/B listen); call on strip switches and engine
+        reconfigurations. */
+    void releaseListening();
 
     bool hasExpandedCard() const noexcept { return expandedCard != nullptr; }
     void collapse();
@@ -54,5 +61,6 @@ private:
     juce::Viewport viewport;
     std::vector<std::unique_ptr<ModuleCard>> cards;
     ModuleCard* expandedCard = nullptr;
+    int listenStrip = 0; // strip of the current ear holds (a strip switch releases them)
 };
 } // namespace flub::app::ui

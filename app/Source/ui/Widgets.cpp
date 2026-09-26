@@ -370,15 +370,6 @@ void IconButton::paintButton (juce::Graphics& g, bool isHighlighted, bool isDown
 // =============================================================================
 namespace Style
 {
-void segment (juce::TextButton& b, int radioGroupId, int connectedEdges)
-{
-    b.getProperties().set (FlubLookAndFeel::styleProperty, "segment");
-    b.setRadioGroupId (radioGroupId, juce::dontSendNotification);
-    b.setClickingTogglesState (true);
-    b.setConnectedEdges (connectedEdges);
-    b.setMouseClickGrabsKeyboardFocus (false);
-}
-
 void set (juce::Component& c, const juce::String& style)
 {
     c.getProperties().set (FlubLookAndFeel::styleProperty, style);

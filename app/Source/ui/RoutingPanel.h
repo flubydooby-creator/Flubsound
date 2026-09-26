@@ -2,11 +2,13 @@
 //
 // One row per strip (Game 7.1 / Music / Chat / System by default):
 //   activity LED, name, channel badge, mute, gain (-60 .. +12 dB), a stereo
-//   mini meter of the strip output and the applications routed to it (chips:
-//   click for "move to strip" / "remove"). Clicking a row selects the strip
-//   for editing (same as the header's strip selector).
-// Footer: "Assign app..." (running audio sessions from AppRouting, or a typed
-// executable name) for the selected strip and "Open system routing settings".
+//   mini peak meter of the strip output (IEC 60268-18 deflection, -70 .. 0
+//   dBFS, like LevelMeters) and the applications routed to it (chips: click
+//   for "move to strip" / "remove"). Clicking a row selects the strip for
+//   editing (same as the header's strip selector).
+// Footer: "Assign app to strip..." (running audio sessions from AppRouting,
+// or a typed executable name) for the selected strip and "System sound
+// settings" (the OS's per-app audio device page).
 // When per-app routing is unavailable (no platform services, unsupported OS
 // version, or switched off) the assign button is greyed out and the panel
 // explains why and what to do instead (a one-line notice with the full text

@@ -9,9 +9,9 @@ This roadmap covers the path from this repository to a 1.0 release on Windows, m
 - Platform integration scaffolding, factory presets and CI.
 
 What remains is mainly **productisation**:
-- the signed virtual driver,
+- the signed Windows virtual driver (only its user/kernel header exists),
 - per-app routing hardening,
-- macOS/Linux integration,
+- macOS integration (HAL plug-in, process taps) and Linux global hotkeys,
 - UX polish and scale testing.
 
 ---
@@ -77,10 +77,10 @@ Beta                         [closed]      [public]      [1.0]
 | # | Work item | Estimate (person-weeks) | Notes |
 |---|---|---|---|
 | 1.1 | Engine host hardening: device selection, reconnect on hot-plug/sleep, drift-compensated input FIFO soak | 3 | `AudioEngineHost`, `DriftCompensatedFifo` |
-| 1.2 | Latency measurement tool (loopback impulse) + latency HUD | 1.5 | Validates the per-profile budgets on real devices |
+| 1.2 | Latency measurement tool (loopback impulse) + latency HUD | 1.5 | Validates the per-profile budgets on real devices. A *reported* latency readout (device + engine) already exists in the header and Settings > Processing |
 | 1.3 | Preset browser UX, user presets, A/B banks, loudness-matched bypass UX | 2 | |
 | 1.4 | DSP tuning pass with listening panel (8 listeners, 40 reference tracks, 6 games) | 3 | Macro curves, preset voicing |
-| 1.5 | Tray, hotkeys, start-with-Windows, close-to-tray | 1 | |
+| 1.5 | Tray, hotkeys, start-with-Windows, close-to-tray | 1 | Tray icon, close-to-tray and global hotkeys (Windows, macOS; defaults Ctrl+Alt+F / M / arrows) exist; start-with-Windows and hardening remain |
 | 1.6 | Onboarding: device check, "disable OEM enhancements" guide, headphones vs speakers | 1.5 | |
 | 1.7 | Installer (WiX MSI, no driver yet), code signing, auto-update check | 2 | |
 | 1.8 | Crash reporting (Crashpad, opt-in), logging (never on the audio thread) | 1 | |
@@ -105,12 +105,12 @@ Beta                         [closed]      [public]      [1.0]
 | 2.1 | **Flubsound Virtual Audio** WaveRT driver: 4 render endpoints (Game 7.1, Music, Chat, System) + Mic | 8 | Based on SYSVAD / SimpleAudioSample (MS-PL) |
 | 2.2 | Shared-memory zero-copy path (private IOCTL) + clock slaving | 4 | `platform/windows/driver/FlubVirtualAudioShared.h` |
 | 2.3 | Driver signing: EV certificate, attestation signing, HVCI validation, installer integration | 3 | Start the paperwork in week 10 |
-| 2.4 | Multi-strip engine UI: routing panel, per-strip profiles, per-app assignment (policy API adapter + fallback) | 4 | `MixEngine`, `AppAudioRouter` |
+| 2.4 | Multi-strip engine UI: routing panel, per-strip profiles, per-app assignment (policy API adapter + fallback) | 4 | `MixEngine`, `AppAudioRouter`. The engine, a first routing panel and the opt-in adapter (`FLUB_ENABLE_UNDOCUMENTED_ROUTING`) exist; validation per Windows build remains |
 | 2.5 | Auto-profile: foreground game detection → profile switch (allow-list of game executables) | 1.5 | |
-| 2.6 | Virtualiser HQ: SOFA loader, resampling of HRIRs, uniformly partitioned FFT convolution | 3 | Parametric model stays the default |
+| 2.6 | Virtualiser HQ: SOFA loader, resampling of HRIRs, uniformly partitioned FFT convolution | 3 | Parametric model stays the default. Core already has a direct-form HRIR renderer (`HeadphoneVirtualizer::setHrirSet`, capped at 1024 taps) that nothing loads yet |
 | 2.7 | Gaming tuning: footstep/anti-masking bands, per-genre presets, competitive latency validation | 3 | Playtests with 20 competitive players |
 | 2.8 | Spectral gate UX (learn/freeze noise profile), dynamic EQ editor with live gain display | 2 | |
-| 2.9 | Plug-in (VST3/AU) with the custom editor shared with the app, pluginval in CI | 2 | |
+| 2.9 | Plug-in (VST3/AU) with the custom editor shared with the app, pluginval in CI | 2 | The plug-in builds today with JUCE's generic editor plus a preset/telemetry toolbar |
 | 2.10 | Batch processing UI in the app (drag-and-drop folder, loudness target, export formats) | 2 | Uses the same engine as `flubsound-cli` |
 | 2.11 | Hearing guard, loudness history export | 1 | |
 | 2.12 | QA: driver stress (sleep/resume, device churn, 24 h soak), anti-cheat compatibility matrix (EAC, BattlEye, Vanguard, VAC) | 4 | |
@@ -154,9 +154,9 @@ Beta                         [closed]      [public]      [1.0]
 | Level | What | When |
 |---|---|---|
 | Unit (property-based) | Frequency responses vs analytic curves, latency exactness, mono-sum invariance, true-peak ceiling, zero allocations, block-size invariance, finite outputs | Every commit (CI) |
-| Sanitizers | ASan + UBSan full suite; RTSan on `[[clang::nonblocking]]` entry points | Every commit (CI) |
-| Integration | Chain/mixer tests, preset validation (each factory preset rendered and checked), CLI end-to-end | Every commit (CI) |
-| Golden renders | Reference programme through every preset; spectral/loudness diffs with tolerances | Nightly |
+| Sanitizers | ASan + UBSan full suite (every commit, CI); RTSan on `[[clang::nonblocking]]` entry points (planned: the `FLUB_RTSAN` option exists, no function is annotated yet) | Every commit (CI) |
+| Integration | Chain/mixer tests and preset validation (each factory preset rendered and checked) every commit; the CI also smoke-tests the CLI (`params`, `presets`); a CLI render end-to-end test is planned | Every commit (CI) |
+| Golden renders (planned) | Reference programme through every preset; spectral/loudness diffs with tolerances | Nightly |
 | Soak | 8–24 h device runs with a glitch detector (sine through a loopback cable, discontinuity detection) | Weekly + release candidates |
 | Listening tests | Loudness-matched blind A/B (MUSHRA-style for music; task-based localisation tests for gaming) | Each tuning milestone |
 | Compatibility | Device lab, Windows builds, anti-cheat matrix, macOS versions, distros | Each beta |

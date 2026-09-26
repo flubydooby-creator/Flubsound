@@ -11,6 +11,11 @@
 //   glides continuous values and crossfades discrete ones).
 // * "Bypass All" is application state (master enable), not preset state:
 //   loading keeps the bank's current bypass value and saving never writes it.
+// * "Modified" compares the active bank's sound values with a snapshot taken
+//   when the preset was loaded / saved, so reverting an edit clears it. App
+//   state that shares the store is ignored: Bypass All, the latency profile
+//   and loudness-matched bypass (application-wide settings) and which A/B
+//   bank is active (only the values heard count).
 //
 // Preset ids are stable strings: "factory:<resource name>" / "user:<file name>".
 // The list is ordered: factory presets (by category, then name), then user
@@ -84,8 +89,14 @@ public:
         a saved strip state was restored). With a store, the store's current
         state counts as unmodified. */
     void setCurrentPresetId (int strip, const juce::String& id, const flub::param::ParameterStore* store = nullptr);
-    /** True if the strip's store changed since its preset was loaded. */
+    /** True if the sound values of the strip's active bank differ from the
+        preset as loaded / saved. Cheap to poll: compares only after
+        store.version() changed. */
     bool isModified (int strip, const flub::param::ParameterStore& store) const;
+    /** False for parameters that live in the store but are application state,
+        not part of a preset's sound (Bypass All, latency profile,
+        loudness-matched bypass). */
+    static bool isPresetSound (int paramId) noexcept;
 
     // ---- Saving -------------------------------------------------------------------------
     /** Saves the store's active bank as a user preset. Returns the new preset's
@@ -120,9 +131,21 @@ private:
     static PresetInfo describe (const flub::preset::Preset& p);
     static juce::String sanitiseFileName (const juce::String& name);
 
+    void takeSnapshot (int strip, const flub::param::ParameterStore& store);
+
+    /** Active-bank values when the strip's preset was loaded / saved, plus the
+        cached result of the last isModified() comparison. */
+    struct Snapshot
+    {
+        std::vector<float> values; // kNumParams, empty until taken
+        mutable const flub::param::ParameterStore* checkedStore = nullptr;
+        mutable uint32_t checkedVersion = 0;
+        mutable bool modified = false;
+    };
+
     juce::File userFolder;
     std::vector<PresetInfo> presets;
     std::array<juce::String, kMaxStrips> currentIds;
-    std::array<uint32_t, kMaxStrips> versionAtLoad {};
+    std::array<Snapshot, kMaxStrips> snapshots;
 };
 } // namespace flub::app

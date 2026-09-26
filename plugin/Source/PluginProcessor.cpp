@@ -19,10 +19,6 @@ using flub::param::Unit;
 
 namespace
 {
-/** Version hint of every parameter introduced in plug-in version 1. New
-    parameters appended to the layout later get a higher hint (AU ordering). */
-constexpr int kParameterVersion = 1;
-
 /** Re-prepare poll rate for structural parameter changes. */
 constexpr int kStructuralPollHz = 5;
 
@@ -89,7 +85,12 @@ juce::String groupIdFor (const std::string& name)
 
 std::unique_ptr<juce::RangedAudioParameter> makeParameter (const Info& info)
 {
-    const juce::ParameterID pid { juce::String (info.key), kParameterVersion };
+    // ID = the preset key (never changes). Version hint = the layout version
+    // that introduced the parameter (Info::sinceVersion). AUv2 orders
+    // parameters by version hint, then by ID hash, so as long as a parameter
+    // added in a later release gets the next version, Logic / GarageBand
+    // automation of the existing parameters still recalls.
+    const juce::ParameterID pid { juce::String (info.key), info.sinceVersion };
     const juce::String name (info.name);
 
     if (info.unit == Unit::Toggle)
@@ -299,7 +300,8 @@ void FlubsoundProcessor::prepareChain (double sampleRate, int maxBlockSize)
     pushParametersToStore();
 
     chain.prepare ({ preparedSampleRate, preparedBlockSize, chainInputChannels });
-    preparedProfile = static_cast<int> (std::lround (store.get (flub::param::LatencyProfile)));
+    for (size_t id = 0; id < preparedValues.size(); ++id)
+        preparedValues[id] = store.get (static_cast<int> (id));
 
     const int latency = chain.getLatencySamples();
     reportedLatency.store (latency, std::memory_order_relaxed);
@@ -329,6 +331,30 @@ void FlubsoundProcessor::reset()
         chain.reset();
 }
 
+bool FlubsoundProcessor::structuralParameterChanged() const noexcept
+{
+    // Loops over every Info::structural parameter (no hard-coded list), so a
+    // future structural parameter needs no change here. Two views:
+    //  * the chain's own check sees the values the audio thread has pushed
+    //    into the store;
+    //  * the APVTS values also catch a change made while the host is not
+    //    processing, so the re-prepare (and the new latency) lands before
+    //    playback resumes.
+    if (chain.needsReprepare())
+        return true;
+
+    const auto& table = flub::param::layout();
+    for (size_t id = 0; id < rawValues.size(); ++id)
+    {
+        if (! table[id].structural)
+            continue;
+        const float v = rawValues[id]->load (std::memory_order_relaxed);
+        if (! std::isnan (v) && table[id].clamp (v) != preparedValues[id]) // the store ignores NaN too
+            return true;
+    }
+    return false;
+}
+
 void FlubsoundProcessor::timerCallback()
 {
     // Structural parameter changed (latency profile)? Re-prepare off the audio
@@ -338,12 +364,10 @@ void FlubsoundProcessor::timerCallback()
     if (! prepared.load (std::memory_order_acquire))
         return;
 
-    const auto* raw = rawValues[static_cast<size_t> (flub::param::LatencyProfile)];
-    const int wanted = static_cast<int> (std::lround (raw->load (std::memory_order_relaxed)));
     {
-        // preparedProfile is written by prepareToPlay (possibly on another thread).
+        // The prepared state is written by prepareToPlay (possibly on another thread).
         const std::lock_guard<std::mutex> lock (prepareMutex);
-        if (wanted == preparedProfile)
+        if (! structuralParameterChanged())
             return;
     }
 
@@ -353,7 +377,7 @@ void FlubsoundProcessor::timerCallback()
     suspendProcessing (true);
     {
         const std::lock_guard<std::mutex> lock (prepareMutex);
-        if (prepared.load (std::memory_order_acquire) && wanted != preparedProfile)
+        if (prepared.load (std::memory_order_acquire) && structuralParameterChanged())
             prepareChain (preparedSampleRate, preparedBlockSize);
     }
     suspendProcessing (false);

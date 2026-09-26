@@ -6,7 +6,7 @@
 > - the batch CLI (`tools/flubsound-cli/`),
 > - the zero-dependency unit tests (`tests/`).
 >
-> The hosts contain only I/O and glue. There are three exceptions in the app, and none of them alters the processed sound:
+> The hosts contain only I/O and glue. There are three exceptions in the app, and none of them is part of the enhancement chain:
 > - the clock-drift resampler for captured streams (`app/Source/engine/DriftCompensatedFifo`);
 > - the synthetic test-signal generator;
 > - the display-side analyser FFT.
@@ -157,7 +157,7 @@ Flubsound/
 │   ├── CMakeLists.txt                      globs tests/*.cpp; defines FLUB_PRESET_DIR and FLUB_DEVICE_PROFILES
 │   ├── TestFramework.h                     TEST_CASE / CHECK / REQUIRE / CHECK_NEAR / CHECK_LE / CHECK_GE, AllocationGuard
 │   ├── TestMain.cpp                        runner (substring filter, exit code = failed cases), counting global operator new
-│   ├── TestSignals.h                       sine / whiteNoise / rms / peak / toDb helpers, Planar buffer, processInBlocks
+│   ├── TestSignals.h                       sine / whiteNoise / rms / peakAbs / toDb / measureGainDb helpers, Planar buffer, processInBlocks
 │   ├── test_primitives.cpp                 Svf, Biquad, LR4, ThreeBandSplitter, Oversampler, TruePeakDetector, Fft, SpscRing, DelayLine, OnePoleSmoother
 │   ├── test_parametric_eq.cpp              ParametricEq
 │   ├── test_dynamic_eq.cpp                 DynamicEq
@@ -282,18 +282,19 @@ Flubsound/
     ├── 03-dsp-design.md                    DSP design, module by module: maths, parameters, latency, CPU, tests
     ├── 04-project-structure.md             this document
     ├── 05-code-skeletons.md                guided tour of the real core code
+    ├── 06-gui.md                           GUI structure and components, screenshots
     ├── 07-roadmap.md                       MVP → Advanced → Polish roadmap
     ├── 08-pitfalls-and-solutions.md        pitfalls and concrete solutions
     ├── 09-future-roadmap.md                post-1.0 expansion
     ├── 10-headset-compatibility.md         headset / Turtle Beach compatibility
-    └── images/                             screenshots rendered by the app's headless --screenshot mode
+    └── images/                             screenshots rendered by the app's headless --screenshot mode (used by docs/06)
         ├── app-music.png                   Music mode, 1440 × 900
         ├── app-gaming.png                  Gaming mode, 1440 × 900
-        ├── app-gaming-headset-advice.png   Gaming mode with a recognised headset (advice banner), 1440 × 900; used by docs/10
+        ├── app-gaming-headset-advice.png   Gaming mode with a recognised headset (advice banner), 1440 × 900; also used by docs/10
         └── app-bluetooth-handsfree-1100x700.png  Music mode, headset in Bluetooth hands-free (−3 dBTP ceiling advice), minimum window size 1100 × 700
 ```
 
-`README.md` also links `docs/06-gui.md` and `docs/TRACEABILITY.md`, which are not in the tree yet. The DSP design is [`docs/03-dsp-design.md`](03-dsp-design.md).
+`README.md` also links `docs/TRACEABILITY.md` (the requirement traceability matrix), which is not in the tree yet. The DSP design is [`docs/03-dsp-design.md`](03-dsp-design.md); the GUI is [`docs/06-gui.md`](06-gui.md).
 
 **Header-only core components.** These have no `.cpp`:
 - all of `common/`;
@@ -345,7 +346,7 @@ flowchart TB
 
 **How the boundary is enforced.**
 - **Link level.** `flub_core` links only `flub::compiler_settings` (PRIVATE) and `Threads::Threads` (PUBLIC; the core itself creates no threads, the CLI does). JUCE targets exist only after `cmake/FlubJuce.cmake` is included, which happens only with `FLUB_BUILD_APP` or `FLUB_BUILD_PLUGIN`, and after `core/` has been added.
-- **Include level.** The CI `core` job never fetches JUCE, so a JUCE include in `core/` fails all four core builds. An OS header in `core/` would compile on its own OS but fail on the other two CI platforms.
+- **Include level.** The CI `core` job never fetches JUCE, so a JUCE include in `core/` fails all four core builds. An OS-specific header in `core/` (for example `<windows.h>`) fails on at least one of the three CI platforms; a POSIX header shared by Linux and macOS would only fail on Windows. There is no automated include check beyond this, so review remains part of the enforcement.
 - **Review.** `CONTRIBUTING.md`, "The real-time contract".
 
 ### 3.2 Inside `flub_core`
@@ -366,7 +367,7 @@ The `include/flub/` sub-folders form a strict hierarchy. The `#include` graph wa
 
 Rules that follow from this:
 
-- **DSP modules (`dsp/`) know nothing about parameters, macros, meters or presets.** They expose a plain `<Name>Params` struct and `setParams()`. The only place where parameter IDs meet modules is `ProcessingChain::applyParameters()`.
+- **DSP modules (`dsp/`) know nothing about parameters, macros, meters or presets.** They expose a plain `<Name>Params` struct and `setParams()`; the two EQs take one struct per band instead (`ParametricEq::setBand (int, const EqBandParams&)`, `DynamicEq::setBand (int, const DynEqBandParams&)`). The only place where parameter IDs meet modules is `ProcessingChain::applyParameters()`.
 - **Analysis never modifies audio.** Meters take the block and only read it.
 - **`io/` is split by level.** `Json` and `WavFile` sit at the bottom. `PresetIO` sits above `engine/Parameters.h` because presets are keyed by `param::Info::key`.
 - **Real-time and non-real-time code share headers but not entry points.** `Processor::prepare()`, `ProcessingChain::prepare()`, `MixEngine::configure()`, everything in `io/` and `DeviceProfiles` may allocate. Everything reachable from `process()`, `reset()` or a setter may not (see `core/include/flub/dsp/Processor.h` and `CONTRIBUTING.md`).
@@ -389,7 +390,7 @@ Rules that follow from this:
 | `presets/` | `juce_core`, `<FlubsoundPresetData.h>` (generated), `flub/io/*`, `flub/engine/Parameters.h`, `flub/engine/MixEngine.h` | `ui/`, `shell/` |
 | `engine/` | `juce_audio_devices`, `juce_events`, core headers, `presets/`, `settings/`, `platform/` | `ui/`, `shell/` |
 | `ui/` | `juce_gui_basics` (and `juce_dsp`, `juce_audio_utils` where needed), `engine/EngineController.h`, read-only core headers (`Parameters.h`, `ProcessingChain.h`, `MeterBus.h`, `ParametricEq.h` for `responseDb`) | `shell/`, `AudioEngineHost` internals |
-| `shell/` | `ui/`, `engine/`, `platform/PlatformBridge.h` | — |
+| `shell/` | `ui/`, `engine/`, `platform/PlatformBridge.h`, `platform/PlatformServices.h` (types only, `HotkeyManager.h`) | — |
 
 - **`EngineController` is the façade.** It is the one object the UI talks to (`engine/EngineController.h`). There are two small exceptions:
   - `ui/RoutingPanel.cpp` calls `platform_bridge::servicesCompiledIn()` to explain why routing is unavailable;
@@ -431,12 +432,12 @@ Notes:
 | `FLUB_BUILD_PLUGIN` | `OFF` | root | — | includes `cmake/FlubJuce.cmake`, adds `plugin/` |
 | `FLUB_WARNINGS_AS_ERRORS` | `OFF` | root | targets linking `flub::compiler_settings` | `-Werror` / `/WX` |
 | `FLUB_SANITIZE` | `OFF` | root | same; GCC/Clang only (ignored on MSVC) | `-fsanitize=address,undefined -fno-omit-frame-pointer` (compile + link) |
-| `FLUB_RTSAN` | `OFF` | root | same; GCC/Clang only | `-fsanitize=realtime` (Clang ≥ 20). No function in the repository is annotated `[[clang::nonblocking]]` yet, and no CI job enables the option, so it currently checks nothing. |
+| `FLUB_RTSAN` | `OFF` | root | same; applied on every non-MSVC compiler, but only Clang ≥ 20 accepts the flag | `-fsanitize=realtime` (compile + link). No function in the repository is annotated `[[clang::nonblocking]]` yet, and no CI job enables the option, so it currently checks nothing. |
 | `FLUB_JUCE_VERSION` | `9.0.2` | `cmake/FlubJuce.cmake` | JUCE fetch | git tag passed to `FetchContent_Declare` |
 | `FETCHCONTENT_SOURCE_DIR_JUCE` | unset | CMake built-in | JUCE fetch | use a local JUCE checkout instead of cloning |
 | `FLUB_ASIO_SDK_DIR` | `""` | `app/CMakeLists.txt` | `FlubsoundPro` (Windows) | `JUCE_ASIO=1` and adds `<dir>/common` to the includes. Warns if `common/iasiodrv.h` is missing. |
 | `FLUB_FACTORY_PRESET_DIR` | `${PROJECT_SOURCE_DIR}/presets/factory` | `app/CMakeLists.txt` | `FlubsoundPresets` | folder whose top-level `*.json` files are embedded |
-| `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | `OFF` | `app/Source/platform/PlatformServices.cmake` | `PlatformServices_win.cpp` | compiles the undocumented `IAudioPolicyConfigFactory` per-app routing adapter |
+| `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | `OFF` | `app/Source/platform/PlatformServices.cmake` (declared only when `FlubsoundPro` exists and has platform services) | `PlatformServices_win.cpp` | sets `FLUB_ENABLE_UNDOCUMENTED_ROUTING=1` on that one source file, which compiles the undocumented `IAudioPolicyConfigFactory` per-app routing adapter |
 
 **Scope of `flub::compiler_settings`.** Only `flub_core`, `flub_tests` and `flubsound-cli` link it, so `FLUB_WARNINGS_AS_ERRORS`, `FLUB_SANITIZE` and `FLUB_RTSAN` apply to those three targets. The app and the plug-in compile JUCE module sources inside their own targets. They therefore set warnings per source file, on their own translation units only:
 - app and plug-in sources: `-Wall -Wextra -Wshadow -Wno-sign-conversion`, or `/W4 /permissive- /utf-8` on MSVC;
@@ -461,6 +462,8 @@ Notes:
 | `FLUB_SOURCE_PRESET_DIR` | `flubsound-cli` | last-resort preset folder: the source tree the binary was built from |
 | `FLUB_HAS_PLATFORM_SERVICES` | `FlubsoundPro` | `1` when `PlatformServices_<os>` exists for the build OS, else `0` |
 | `FLUB_HAS_FACTORY_PRESETS` | `FlubsoundPro` | `1` when `FlubsoundPresets` was created |
+| `JUCE_APPLICATION_NAME_STRING`, `JUCE_APPLICATION_VERSION_STRING` | `FlubsoundPro` | product name and version, from the target's JUCE properties |
+| `FLUB_ENABLE_UNDOCUMENTED_ROUTING=1` | `PlatformServices_win.cpp` only (source property) | set when the option of the same name is `ON` |
 | `JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STRICT_REFCOUNTEDPOINTER=1` | app and plug-in | no web view, no libcurl |
 | `JUCE_WASAPI=1 JUCE_DIRECTSOUND=0`, `JUCE_ASIO=0/1` | app, Windows | WASAPI only; ASIO with the SDK |
 | `JUCE_ALSA=1 JUCE_JACK=1` | app and plug-in, Linux | device types; `JUCE_USE_XINPUT=0` when `X11/extensions/XInput2.h` is missing |
@@ -518,9 +521,9 @@ Comments explain *why* (the DSP reasoning or the constraint), not what the next 
 | Tests | `tests/test_<subject>.cpp` (snake_case) | `test_dynamic_eq.cpp` |
 | Factory presets | `presets/factory/<category>-<slug>.json`, lower case, `<category>` ∈ `music`, `gaming`, `device` | `gaming-competitive-fps.json` |
 | User presets | `*.flubpreset.json` in `<userApplicationDataDirectory>/Flubsound/Presets` | — |
-| Design docs | `docs/NN-kebab-title.md`; a leading `_` marks a working fragment | `docs/03-dsp-design.md`, `docs/05-code-skeletons.md` |
+| Design docs | `docs/NN-kebab-title.md` | `docs/03-dsp-design.md`, `docs/05-code-skeletons.md` |
 
-Every header uses `#pragma once` and starts with a `// Flubsound Pro - <purpose>` block (`Flubsound FX` in the plug-in, `Flubsound Pro CLI` in the CLI; the driver header uses a C comment). For modules, that block is the **contract**: algorithm, maths, latency and threading.
+Every C++ header uses `#pragma once` and starts with a `// Flubsound Pro - <purpose>` block (`// Flubsound FX - ` in the plug-in, `// Flubsound Pro CLI - ` in the CLI headers). The one C header, `platform/windows/driver/FlubVirtualAudioShared.h`, uses a C block comment and a classic `#ifndef FLUB_VIRTUAL_AUDIO_SHARED_H` include guard so that it also builds as C in the driver. For modules, that block is the **contract**: algorithm, maths, latency and threading.
 
 ### 5.3 Includes
 
@@ -552,7 +555,7 @@ Every header uses `#pragma once` and starts with a `// Flubsound Pro - <purpose>
 | Constants | `k` + `PascalCase` | `kMaxBands`, `kControlInterval`, `kNumParams`, `kMaxStrips` |
 | Parameter IDs (`param::Id`, plain enum) | `PascalCase`, grouped by module prefix | `BassBoostDb`, `CompUpRatio`, `MaxCeilingDb` |
 | Parameter keys (persisted) | `<group>.<name>`, lower camel after the dot; banded keys are `eq.<n>.<field>` and `dyneq.<n>.<field>` with 0-based `n` | `bass.harmonicsCutoff`, `max.autoRelease`, `eq.3.freq` |
-| Module parameter structs | `<Module>Params` with in-class defaults and a defaulted `operator==` | `SaturatorParams`, `CompressorParams` |
+| Module parameter structs | `<Name>Params` (usually a short form of the module name) with in-class defaults and a defaulted `operator==`; per-band structs for the EQs | `SaturatorParams`, `ClarityParams`, `LimiterParams`, `EqBandParams` |
 | Preprocessor symbols, CMake options and variables | `FLUB_` prefix | `FLUB_HAS_SSE_CSR`, `FLUB_BUILD_APP` |
 | CMake library targets | `flub_<name>` with a `flub::<name>` alias; JUCE products `PascalCase` | `flub_core` / `flub::core`, `FlubsoundPro` |
 | Test cases | `"<Subject>: <behaviour>"`, so a substring filter selects a subject | `"Chain: latency per profile and constant under module bypass"` |
@@ -597,7 +600,7 @@ private:
 } // namespace flub
 ```
 
-The public section is the reviewed contract. Implementers extend only the part below the `implementation-defined` marker. Some headers add "(owned by the .cpp author)" to that marker.
+The public section is the reviewed contract. Implementers extend only the part below the `implementation-defined` marker. Some headers add "(owned by the .cpp author)" to that marker. The two EQs deviate in one point: they take `setBand (int index, const <Band>Params&)` instead of `setParams()` / `getParams()`.
 
 ---
 
@@ -697,11 +700,12 @@ TEST_CASE ("Foo: process() is allocation-free")
 
   Mode rules (Gaming) and binaural rules go in the same function.
 - `process()` needs no edit: the loop under `// ---- 4. Module slots ----` runs every slot.
+- The slots are all stereo (`ProcessSpec stereo { sr, maxB, 2 }`). A module that must see the multichannel input before the fold-down is not a slot: `HeadphoneVirtualizer` is prepared with `config.inputChannels`, run separately and crossfaded through its own `virtMix` smoother. Follow that pattern, not this one, for such a module.
 
 **7. Structural parameters (only if Foo has one).**
-- Set `Info::structural = true` in `Parameters.cpp`.
-- Extend `ProcessingChain::needsReprepare()`. It currently compares only `LatencyProfile` against the profile used at `prepare()`.
-- Extend the plug-in's `FlubsoundProcessor::timerCallback()` (`plugin/Source/PluginProcessor.cpp`), which also polls only `LatencyProfile` (at `kStructuralPollHz = 5`).
+- Set `Info::structural = true` in `Parameters.cpp` (as `buildLayout()` does for `LatencyProfile`).
+- `ProcessingChain::needsReprepare()` needs no edit: it loops over the whole layout and returns true when any parameter with `Info::structural` differs from its value at the last `prepare()` (`baseAtPrepare`).
+- Extend the plug-in's `FlubsoundProcessor::timerCallback()` (`plugin/Source/PluginProcessor.cpp`). Unlike the chain, it is hard-coded to poll only `LatencyProfile` (at `kStructuralPollHz = 5`).
 - The app host polls `MixEngine::needsReprepare()` (`AudioEngineHost.cpp`), so it follows automatically.
 
 **8. Telemetry (optional).** Add `std::atomic<float>` fields to `MeterBus` (`core/include/flub/engine/MeterBus.h`) and store them in `ProcessingChain::publishMeters()`. The GUI reads them once per frame through `app/Source/ui/MeterSnapshot.{h,cpp}`.
@@ -733,7 +737,7 @@ TEST_CASE ("Foo: process() is allocation-free")
 
 **12. Documentation.**
 - `docs/03-dsp-design.md`: algorithm, parameters, latency, CPU.
-- The requirement traceability matrix.
+- The requirement traceability matrix (`docs/TRACEABILITY.md`, linked from `README.md`, not yet in the tree; `CONTRIBUTING.md` checklist item 9).
 - `01-architecture.md` §4.2, and §5.1 if the module adds latency.
 - The tree in §2 of this document.
 
@@ -770,7 +774,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_factory_presets.cpp`: validation and render of every preset;
   - `test_device_profiles.cpp`: the profile database and the drift check of the embedded copy;
   - `test_platform_linux.cpp`: Linux platform services, headless, with no sound server or display needed; compiles to nothing on other OSes.
-- **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree. Without them the preset tests compile to nothing and the device-profile file test is skipped.
+- **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
 - **Current state.** 407 test cases in 21 `test_*.cpp` files at the time of writing. All passed in a Release GCC 13.3 build (about 28 s on the documentation machine).
 
 ---

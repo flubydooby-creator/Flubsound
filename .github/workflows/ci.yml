@@ -83,11 +83,22 @@ jobs:
           sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
             libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev \
             libgl1-mesa-dev ninja-build xvfb
+      # The cache key follows FLUB_JUCE_VERSION in cmake/FlubJuce.cmake, so a
+      # JUCE bump there invalidates the cached checkout / build.
+      - name: JUCE version
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*FLUB_JUCE_VERSION[[:space:]]+"([^"]+)".*/\1/p' cmake/FlubJuce.cmake | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error file=cmake/FlubJuce.cmake::FLUB_JUCE_VERSION not found"
+            exit 1
+          fi
+          echo "FLUB_JUCE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Cache JUCE
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: juce-9.0.2-${{ runner.os }}
+          key: juce-${{ env.FLUB_JUCE_VERSION }}-${{ runner.os }}
       - name: Configure
         shell: bash
         run: >

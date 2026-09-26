@@ -10,9 +10,9 @@ ctest --test-dir build --output-on-failure        # or ./build/tests/flub_tests 
 
 Optional targets:
 - `-DFLUB_BUILD_APP=ON` builds the desktop app, and `-DFLUB_BUILD_PLUGIN=ON` the VST3/AU plug-in. Both fetch JUCE 9.0.2; pass `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE` to build offline.
-- `-DFLUB_SANITIZE=ON` enables ASan + UBSan.
-- `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20).
-- `-DFLUB_WARNINGS_AS_ERRORS=ON` is what CI uses on Linux.
+- `-DFLUB_SANITIZE=ON` enables ASan + UBSan (GCC / Clang; CI runs the full suite this way with Clang).
+- `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20). It only checks functions marked `[[clang::nonblocking]]`; none are marked yet and CI does not run it, so treat it as groundwork.
+- `-DFLUB_WARNINGS_AS_ERRORS=ON` is what CI uses for the Linux core builds (GCC and Clang).
 
 ## The real-time contract (non-negotiable)
 
@@ -22,7 +22,7 @@ Code reachable from `Processor::process()`, `reset()`, parameter setters, the de
 - throw exceptions (everything on the audio path is `noexcept`),
 - run loops whose length depends on history or input content, beyond the block size and fixed design constants.
 
-Allocate in `prepare()`. Communicate with other threads only through `ParameterStore` atomics, `MeterBus` atomics and `SpscRing`s.
+Allocate in `prepare()`. Communicate with other threads only through `ParameterStore` atomics, `MeterBus` atomics, `SpscRing`s, or single `std::atomic` values handed over once per block (as `ProcessingChain::effectiveValue()` and `AudioEngineHost`'s strip gain / ceiling hand-off do).
 
 Every module test contains an `AllocationGuard` check. Please keep it that way.
 
@@ -30,7 +30,7 @@ Every module test contains an `AllocationGuard` check. Please keep it that way.
 
 - C++20. JUCE-like formatting: Allman braces, 4-space indent, a space before parentheses (`foo (x)`), `static_cast` for conversions. See `.clang-format`.
 - Comments explain **why** (the DSP reasoning, the constraint), not what the next line does.
-- Zero warnings with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (GCC and Clang) and `/W4` (MSVC).
+- Zero warnings with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion` (GCC and Clang) and `/W4` (MSVC) on `flub_core`, the tests and the CLI (`cmake/FlubCompilerSettings.cmake`). The app and plug-in sources use a slightly lighter set because JUCE module sources compile in the same targets.
 
 ## Adversarial review checklist (every DSP change)
 
@@ -46,7 +46,9 @@ Every module test contains an `AllocationGuard` check. Please keep it that way.
 
 ## Presets
 
-Factory presets live in `presets/factory/*.json` and are validated by `tests/test_factory_presets.cpp`. They must:
+Factory presets live in `presets/factory/<category>-<slug>.json` and are validated by `tests/test_factory_presets.cpp`. They must:
 - set only non-default parameters (string keys from `flub::param::layout()`),
-- keep the ceiling at ≤ −1 dBTP (≤ −2 dBTP for Bluetooth presets),
-- include a clear description.
+- keep the maximizer on, `max.drive` at 0 and the ceiling at ≤ −1 dBTP (≤ −2 dBTP for Bluetooth presets),
+- include a clear description and tags (author `Flubsound`).
+
+The full list of checks is in `presets/README.md`.

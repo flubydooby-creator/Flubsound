@@ -100,7 +100,7 @@ void LoudnessPanel::drawGainReductionRow (juce::Graphics& g, juce::Rectangle<flo
     const float amount = juce::jlimit (0.0f, 1.0f, -reductionDb / rangeDb);
     if (amount > 0.001f)
     {
-        g.setColour (Palette::amber);
+        g.setColour (Theme::statusColours (*this).warn);
         g.fillRoundedRectangle (bar.withWidth (juce::jmax (2.0f, bar.getWidth() * amount)), 2.0f);
     }
     if (upwardDb > 0.05f)
@@ -120,6 +120,7 @@ void LoudnessPanel::paint (juce::Graphics& g)
     painted = shown;
     Theme::drawPanel (g, getLocalBounds().toFloat());
     const auto accent = Theme::accent (*this);
+    const auto status = Theme::statusColours (*this); // follows the meter palette
 
     auto r = getLocalBounds().toFloat().reduced (14.0f, 12.0f);
     const float fixed = 18.0f + 60.0f + 20.0f + 10.0f + 18.0f + 10.0f + 18.0f; // captions / readouts / gaps
@@ -163,7 +164,7 @@ void LoudnessPanel::paint (juce::Graphics& g)
             g.drawText (value, c, juce::Justification::centredLeft, true);
         };
         item ("LRA", juce::String (shown.range, 1), Palette::text.withAlpha (0.9f));
-        item ("TP", Theme::formatDb (shown.truePeakMax, 1), shown.truePeakMax > -1.0f ? Palette::red : Palette::text.withAlpha (0.9f));
+        item ("TP", Theme::formatDb (shown.truePeakMax, 1), shown.truePeakMax > -1.0f ? status.hot : Palette::text.withAlpha (0.9f));
         item ("AUTO", Theme::formatSignedDb (shown.autoLevel, 1), Palette::text.withAlpha (0.9f));
     }
 
@@ -190,7 +191,7 @@ void LoudnessPanel::paint (juce::Graphics& g)
         const bool overBudget = shown.clip > -30.0f;
         if (amount > 0.001f)
         {
-            g.setColour (overBudget ? Palette::red : Palette::amber.withAlpha (0.8f));
+            g.setColour (overBudget ? status.hot : status.warn.withAlpha (0.8f));
             g.fillRoundedRectangle (bar.withWidth (juce::jmax (2.0f, bar.getWidth() * amount)), 2.0f);
         }
         const float budgetX = bar.getX() + bar.getWidth() * 0.6f; // -30 dB budget of the SafetyGovernor
@@ -217,7 +218,7 @@ void LoudnessPanel::paint (juce::Graphics& g)
         g.fillRoundedRectangle (bar, 2.0f);
         const float centreX = bar.getCentreX();
         const float x = centreX + shown.correlation * bar.getWidth() * 0.5f;
-        const auto colour = shown.correlation < 0.0f ? Palette::red : (shown.correlation < 0.3f ? Palette::amber : Palette::green);
+        const auto colour = shown.correlation < 0.0f ? status.hot : (shown.correlation < 0.3f ? status.warn : status.safe);
         g.setColour (colour.withAlpha (0.35f));
         g.fillRect (juce::Rectangle<float>::leftTopRightBottom (juce::jmin (centreX, x), bar.getY(), juce::jmax (centreX, x), bar.getBottom()));
         g.setColour (Palette::muted.withAlpha (0.6f));

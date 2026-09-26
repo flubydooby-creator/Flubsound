@@ -1,6 +1,10 @@
 // Flubsound Pro - the contract every DSP module implements.
 //
-// Threading contract (enforced by review, tests and RealtimeSanitizer in CI):
+// Threading contract. Enforced by review and, for "no allocation", by the
+// allocation-counting tests in tests/ (flubtest::AllocationGuard around
+// process() / reset() / setters). FLUB_RTSAN is an optional local build
+// (clang >= 20), not a CI job, and RealtimeSanitizer only checks functions
+// marked [[clang::nonblocking]] - none are yet.
 //   prepare()  : non-realtime thread only. May allocate, may be slow.
 //   reset()    : audio thread allowed. No allocation, no locks, no I/O.
 //   process()  : audio thread. No allocation, no locks, no I/O, no exceptions,

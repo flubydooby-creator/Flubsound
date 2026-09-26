@@ -62,6 +62,7 @@ TEST_CASE ("Parameters: layout is complete, keys unique, defaults in range")
     const auto& t = layout();
     REQUIRE (static_cast<int> (t.size()) == kNumParams);
     std::set<std::string> keys;
+    std::set<int> versions;
     for (const auto& i : t)
     {
         CHECK (! i.key.empty());
@@ -69,9 +70,13 @@ TEST_CASE ("Parameters: layout is complete, keys unique, defaults in range")
         CHECK (i.minValue <= i.defaultValue && i.defaultValue <= i.maxValue);
         if (i.unit == Unit::Choice)
             CHECK (static_cast<int> (i.choices.size()) == static_cast<int> (i.maxValue) + 1);
+        CHECK (i.sinceVersion >= 1); // plug-in version hint; 0 would mean "unversioned" to JUCE
         keys.insert (i.key);
+        versions.insert (i.sinceVersion);
     }
     CHECK (static_cast<int> (keys.size()) == kNumParams);
+    // Every release that adds parameters takes the next version: 1..N, no gaps.
+    CHECK (! versions.empty() && *versions.begin() == 1 && *versions.rbegin() == static_cast<int> (versions.size()));
     CHECK (findByKey ("eq.3.freq") == eq (3, EqFieldFreq));
     CHECK (findByKey ("dyneq.1.threshold") == dyn (1, DynFieldThreshold));
     CHECK (findByKey ("nope") == -1);

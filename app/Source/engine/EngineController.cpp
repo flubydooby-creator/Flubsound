@@ -190,6 +190,7 @@ void EngineController::setSelectedStrip (int strip)
         return;
     selectedStrip = s;
     settings->setSelectedStrip (s);
+    updateDeviceProfile(); // the advice (suggested preset) follows the selected strip's mode
     notify (Change::SelectedStrip);
 }
 
@@ -201,6 +202,11 @@ ParameterStore& EngineController::getParams (int strip)
 flub::ProcessingChain& EngineController::getChain (int strip)
 {
     return host->getMixEngine().chain (resolveStrip (strip));
+}
+
+void EngineController::setAuditionBypass (int strip, int enableParamId, bool bypassed)
+{
+    getChain (strip).setAuditionBypass (enableParamId, bypassed);
 }
 
 void EngineController::setStripGainDb (int strip, float gainDb)
@@ -256,8 +262,7 @@ ModeValue EngineController::getMode (int strip)
 void EngineController::setMode (ModeValue mode, int strip)
 {
     getParams (resolveStrip (strip)).set (Mode, static_cast<float> (static_cast<int> (mode)));
-    if (options.openAudioDevice)
-        updateDeviceProfile(); // the suggested preset depends on the mode
+    updateDeviceProfile(); // the suggested preset depends on the mode
     notify (Change::Parameters);
 }
 

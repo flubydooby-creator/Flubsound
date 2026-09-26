@@ -165,7 +165,10 @@ std::vector<FactoryPresetEntry> scanPresetDir (const fs::path& dir, std::vector<
     std::vector<FactoryPresetEntry> entries;
     std::error_code ec;
     const auto options = fs::directory_options::skip_permission_denied;
-    for (fs::recursive_directory_iterator it (dir, options, ec), end; ! ec && it != end; it.increment (ec))
+    // Top level only, like every other consumer (the app's BinaryData glob,
+    // the install rule, tests/test_factory_presets.cpp): a preset in a
+    // sub-folder would be listed here without ever having been validated.
+    for (fs::directory_iterator it (dir, options, ec), end; ! ec && it != end; it.increment (ec))
     {
         std::error_code fileEc;
         if (! it->is_regular_file (fileEc) || toLower (it->path().extension().string()) != ".json")

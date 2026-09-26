@@ -51,7 +51,7 @@ DeviceAdviceBanner::DeviceAdviceBanner (EngineController& c) : controller (c)
             onDetailsRequested();
     };
     dismissButton.setButtonText (juce::String (juce::CharPointer_UTF8 ("\xc3\x97"))); // multiplication sign
-    dismissButton.setTooltip ("Hide until the output device changes");
+    dismissButton.setTooltip ("Hide the advice for this output device for the rest of the session");
     dismissButton.setTitle ("Dismiss device advice");
     dismissButton.onClick = [this] {
         dismissedFor = deviceName;

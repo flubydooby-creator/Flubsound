@@ -26,6 +26,12 @@ ModuleRack::ModuleRack (EngineController& c)
     {
         auto card = std::make_unique<ModuleCard> (d, binder);
         card->onExpandRequested = [this] (ModuleCard& which, bool shouldExpand) { expand (which, shouldExpand); };
+        card->onListen = [this, enableId = d.enableId] (bool listen)
+        {
+            if (listen)
+                listenStrip = controller.getSelectedStrip();
+            controller.setAuditionBypass (listenStrip, enableId, listen);
+        };
         if (d.banding == ModuleDescriptor::Banding::Eq)
             card->onBandChanged = [this] (int band)
             {
@@ -61,6 +67,12 @@ void ModuleRack::updateFromEngine()
         s.virtualizerNeedsSurround = ! surround;
         card->setState (s);
     }
+}
+
+void ModuleRack::releaseListening()
+{
+    for (auto& card : cards)
+        card->releaseListening();
 }
 
 void ModuleRack::setSelectedEqBand (int band)

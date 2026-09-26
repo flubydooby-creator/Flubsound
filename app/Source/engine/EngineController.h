@@ -24,6 +24,8 @@
 //              (device rate change, latency profile, layout) re-creates the
 //              chains. Change::Engine is broadcast afterwards; reset any
 //              analyser state then.
+// A/B listen   setAuditionBypass(strip, enableId, true / false): momentary
+//              "hear the strip without this module" (not a parameter).
 // Master       isEnabled()/setEnabled() = BypassAll on every strip (both
 //              banks). getMasterGainReductionDb() = master safety limiter.
 // Mode/Boost   getMode/setMode/toggleMode, getBoost/setBoost/nudgeBoost
@@ -111,6 +113,14 @@ public:
     flub::param::ParameterStore& getSelectedParams() { return getParams (selectedStrip); }
     flub::ProcessingChain& getChain (int strip);
     uint32_t getEngineGeneration() const noexcept { return host->getStructureGeneration(); }
+
+    /** Hold-to-bypass A/B (a module card's "ear"): forces the module whose
+        enable parameter is `enableParamId` off on the strip's chain whatever
+        the preset or the macros say (ProcessingChain::setAuditionBypass,
+        click-free). Not a parameter: never stored, never marks the preset
+        modified. The caller must release it; a reconfiguration re-creates the
+        chains, which drops every audition. */
+    void setAuditionBypass (int strip, int enableParamId, bool bypassed);
 
     bool isStripActive (int strip) const noexcept { return host->isStripActive (strip); }
     void setStripGainDb (int strip, float gainDb);

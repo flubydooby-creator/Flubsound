@@ -18,15 +18,30 @@ juce::Colour accent (const juce::Component& c)
     return Palette::teal;
 }
 
+MeterPalette meterPalette (const juce::Component& c)
+{
+    if (auto* lnf = dynamic_cast<const FlubLookAndFeel*> (&c.getLookAndFeel()))
+        return lnf->getMeterPalette();
+    return MeterPalette::Standard;
+}
+
+namespace
+{
+const MeterColours colourBlindSafe { juce::Colour (0xff56b4e9), juce::Colour (0xfff0e442), juce::Colour (0xffd55e00) }; // Okabe-Ito
+} // namespace
+
 MeterColours meterColours (const juce::Component& c)
 {
-    auto palette = MeterPalette::Standard;
-    if (auto* lnf = dynamic_cast<const FlubLookAndFeel*> (&c.getLookAndFeel()))
-        palette = lnf->getMeterPalette();
-
-    if (palette == MeterPalette::ColourBlindSafe)
-        return { juce::Colour (0xff56b4e9), juce::Colour (0xfff0e442), juce::Colour (0xffd55e00) };
+    if (meterPalette (c) == MeterPalette::ColourBlindSafe)
+        return colourBlindSafe;
     return { juce::Colour (0xff34d399), Palette::amber, juce::Colour (0xffef4444) };
+}
+
+MeterColours statusColours (MeterPalette palette)
+{
+    if (palette == MeterPalette::ColourBlindSafe)
+        return colourBlindSafe;
+    return { Palette::green, Palette::amber, Palette::red };
 }
 
 juce::Colour meterColourForDb (const MeterColours& colours, float db)

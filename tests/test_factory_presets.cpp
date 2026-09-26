@@ -240,6 +240,15 @@ TEST_CASE ("Factory presets: library is complete, uniquely named and loadable")
     }
     CHECK (categories == (std::set<std::string> { "Device", "Gaming", "Music" }));
 
+    // Every consumer (the app's BinaryData glob, the CLI, the install rule and
+    // this file) reads the top level only, so a preset in a sub-folder would
+    // silently never ship: keep the folder flat.
+    std::error_code ec;
+    for (fs::directory_iterator it (FLUB_PRESET_DIR, ec), end; ! ec && it != end; it.increment (ec))
+        if (it->is_directory())
+            reportFailure (__FILE__, __LINE__, "presets/factory must not have sub-folders: " + it->path().filename().string());
+    CHECK (! ec);
+
     // Presets that code and docs refer to by name must exist.
     for (const char* required : { "Flubsound Signature", "Competitive FPS", "Bluetooth Headphones", "Tournament Clean",
                                   "7.1 Headphone Surround", "Cinematic Adventure", "Laptop Speakers" })

@@ -7,8 +7,10 @@
 //             -30 dB budget), bass protection, master safety limiter
 //   STEREO    correlation meter (-1 .. +1) and effective width
 // All values come from one MeterSnapshot per display frame; gain-reduction
-// bars get a short release so they stay readable. Clicking the integrated
-// readout resets it (onResetRequested -> MeterBus::resetLoudnessRequest).
+// bars get a short release so they stay readable. Their colours, the
+// correlation meter's and the true-peak warning follow the meter palette
+// (Theme::statusColours). Clicking the integrated readout resets it
+// (onResetRequested -> MeterBus::resetLoudnessRequest).
 #pragma once
 
 #include "MeterSnapshot.h"
