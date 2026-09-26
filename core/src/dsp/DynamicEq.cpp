@@ -436,7 +436,7 @@ void DynamicEq::controlTick (int index) noexcept
 }
 
 //==============================================================================
-void DynamicEq::process (const AudioBlock& block) noexcept
+void DynamicEq::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numSamples = block.numSamples;
     if (numSamples <= 0)

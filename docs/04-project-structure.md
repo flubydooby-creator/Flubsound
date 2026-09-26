@@ -45,7 +45,7 @@
 | `platform/` | Virtual-device designs, a shared driver header, PipeWire scripts and configs | — (not built) | — | — |
 | `presets/` | 24 factory presets and the device-profile database (JSON) | embedded by `FlubsoundPresets` / installed by `flubsound-cli` | — | — |
 | `docs/` | The design deliverables and screenshots | — | — | — |
-| `.github/workflows/ci.yml` | CI: core matrix, sanitizers, app + plug-in | — | — | — |
+| `.github/workflows/ci.yml` | CI: core matrix, sanitizers, RTSan, app + plug-in | — | — | — |
 | `.clang-format`, `.editorconfig`, `.gitignore` | Formatting and editor rules; ignores for build trees and renders | — | — | — |
 | `README.md`, `CONTRIBUTING.md` | Overview and build commands; real-time contract, style and review checklist | — | — | — |
 
@@ -65,7 +65,7 @@ Flubsound/
 ├── .gitignore                              build trees, IDE folders, *.wav (except presets/**/*.wav), /renders/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                          jobs: core (4 compilers), sanitizers (ASan+UBSan), app + plugin (3 OSes, headless screenshots)
+│       └── ci.yml                          jobs: core (4 compilers), sanitizers (ASan+UBSan), rtsan (Clang 20), app + plugin (3 OSes, headless screenshots)
 │
 ├── cmake/
 │   ├── FlubCompilerSettings.cmake          INTERFACE target flub_compiler_settings: warnings, -Werror, sanitizers, RTSan
@@ -79,6 +79,7 @@ Flubsound/
 │   │   │   ├── DelayLine.h                 fixed multichannel delay: look-ahead, dry-path latency compensation
 │   │   │   ├── Denormals.h                 ScopedNoDenormals: FTZ/DAZ via the SSE control register, FZ via FPCR on AArch64
 │   │   │   ├── Math.h                      dB ↔ gain, smoothstep, onePoleCoeff, msToSamples, nextPowerOfTwo, FastRandom
+│   │   │   ├── Realtime.h                  FLUB_NONBLOCKING: [[clang::nonblocking]] on the audio entry points in FLUB_RTSAN builds, else empty
 │   │   │   ├── SmoothedValue.h             LinearSmoothedValue and OnePoleSmoother (zipper-free parameter glides)
 │   │   │   └── SpscRing.h                  wait-free single-producer/single-consumer ring (analyser taps, capture streams)
 │   │   ├── dsp/                            L0 filter primitives and L1 modules
@@ -178,6 +179,8 @@ Flubsound/
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input
+│   ├── test_drift_fifo.cpp                 #includes app/Source/engine/DriftCompensatedFifo.cpp: clock drift, stalls, downmix, continuity
+│   ├── test_rtsan.cpp                      FLUB_RTSAN builds only: nonblocking annotations present, RTSan self-test
 │   └── test_platform_linux.cpp             Linux only: #includes app/Source/platform/PlatformServices_{common,linux}.cpp
 │
 ├── tools/
@@ -337,7 +340,7 @@ flowchart TB
 | Code in | May include / link | Must not include |
 |---|---|---|
 | `core/` | The C++ standard library. `<xmmintrin.h>` in `common/Denormals.h`, x86 only (a CPU intrinsic header, not an OS header). `<fstream>` / `<filesystem>` only in non-real-time code (`io/WavFile.cpp`, `io/PresetIO.cpp`, `engine/DeviceProfiles.cpp`). | JUCE, any OS header, any third-party library, anything from `app/`, `plugin/`, `tools/`, `tests/` |
-| `tests/` | `core/include/flub/**`, `TestFramework.h`, `TestSignals.h`. **One exception:** `test_platform_linux.cpp` `#include`s `app/Source/platform/PlatformServices_common.cpp` and `PlatformServices_linux.cpp`, guarded by `#if defined(__linux__)`, to test functions in an unnamed namespace. | JUCE |
+| `tests/` | `core/include/flub/**`, `TestFramework.h`, `TestSignals.h`. **Exceptions:** `test_platform_linux.cpp` `#include`s `app/Source/platform/PlatformServices_common.cpp` and `PlatformServices_linux.cpp`, guarded by `#if defined(__linux__)`, to test functions in an unnamed namespace; `test_drift_fifo.cpp` `#include`s `app/Source/engine/DriftCompensatedFifo.cpp` (JUCE-free, core headers only) on every OS; `test_rtsan.cpp` uses POSIX `fork()` / `waitpid()`, only in `FLUB_RTSAN` builds on Linux and macOS. | JUCE |
 | `tools/flubsound-cli/` | `flub::core`, its own files, `std::thread` (`batch --jobs N`). `<windows.h>` / `<mach-o/dyld.h>` in `FactoryPresets.cpp`, only to find the executable's own path. | JUCE, `app/`, `plugin/` |
 | `plugin/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_processors`, `juce_gui_basics` | `app/` (the shared custom editor is roadmap item 2.9) |
 | `app/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_devices`, `juce_dsp`, `juce_gui_extra`; OS SDKs in `platform/` only | `plugin/`, `tools/` |
@@ -432,7 +435,7 @@ Notes:
 | `FLUB_BUILD_PLUGIN` | `OFF` | root | — | includes `cmake/FlubJuce.cmake`, adds `plugin/` |
 | `FLUB_WARNINGS_AS_ERRORS` | `OFF` | root | targets linking `flub::compiler_settings` | `-Werror` / `/WX` |
 | `FLUB_SANITIZE` | `OFF` | root | same; GCC/Clang only (ignored on MSVC) | `-fsanitize=address,undefined -fno-omit-frame-pointer` (compile + link) |
-| `FLUB_RTSAN` | `OFF` | root | same; applied on every non-MSVC compiler, but only Clang ≥ 20 accepts the flag | `-fsanitize=realtime` (compile + link). No function in the repository is annotated `[[clang::nonblocking]]` yet, and no CI job enables the option, so it currently checks nothing. |
+| `FLUB_RTSAN` | `OFF` | root | same; configure fails unless the C++ compiler is Clang ≥ 20, and with `FLUB_SANITIZE` or `FLUB_BUILD_PLUGIN` | defines `FLUB_RTSAN=1`, so `FLUB_NONBLOCKING` (`common/Realtime.h`) marks `ProcessingChain::process`, `MixEngine::process` and every `Processor::process` override `[[clang::nonblocking]]`; `-fsanitize=realtime` (compile + link) and `-Wno-function-effects` (C++ only). CI job `rtsan`. |
 | `FLUB_JUCE_VERSION` | `9.0.2` | `cmake/FlubJuce.cmake` | JUCE fetch | git tag passed to `FetchContent_Declare` |
 | `FETCHCONTENT_SOURCE_DIR_JUCE` | unset | CMake built-in | JUCE fetch | use a local JUCE checkout instead of cloning |
 | `FLUB_ASIO_SDK_DIR` | `""` | `app/CMakeLists.txt` | `FlubsoundPro` (Windows) | `JUCE_ASIO=1` and adds `<dir>/common` to the includes. Warns if `common/iasiodrv.h` is missing. |
@@ -485,6 +488,11 @@ cmake --build build-app
 cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++ \
       -DFLUB_SANITIZE=ON -DFLUB_BUILD_TOOLS=OFF
 cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+
+# What CI's rtsan job runs (Ubuntu: apt-get install clang-20 libclang-rt-20-dev)
+CC=clang-20 CXX=clang++-20 cmake -S . -B build-rtsan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      -DFLUB_RTSAN=ON -DFLUB_WARNINGS_AS_ERRORS=ON -DFLUB_BUILD_TOOLS=OFF
+cmake --build build-rtsan && RTSAN_OPTIONS=halt_on_error=1 ctest --test-dir build-rtsan --output-on-failure
 
 # Windows with ASIO, and the opt-in undocumented per-app routing adapter
 cmake -S . -B build-win -G Ninja -DFLUB_BUILD_APP=ON -DFLUB_ASIO_SDK_DIR=C:/sdk/asiosdk \
@@ -586,7 +594,7 @@ public:
     void setSomethingStructural (int x) noexcept;   // "Structural: call before prepare()"
     void prepare (const ProcessSpec& spec) override; // may allocate
     void reset() noexcept override;
-    void process (const AudioBlock& block) noexcept override;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override; // RTSan-checked in FLUB_RTSAN builds
     int latencySamples() const noexcept override;   // constant between prepare() calls
     const char* name() const noexcept override { return "Foo"; }
 
@@ -641,6 +649,7 @@ The example module is called `Foo`, with parameter group `"Foo"`, key prefix `fo
 
 **3. Tests: `tests/test_foo.cpp`.** The glob picks the file up. At minimum, cover the `CONTRIBUTING.md` checklist:
 - an `AllocationGuard` check around `process()`;
+- `FLUB_NONBLOCKING` on `process()` (declaration and definition), so the `rtsan` CI job checks it under RealtimeSanitizer, and a `hasNonblockingProcess<Foo>` line in `tests/test_rtsan.cpp`, so the annotation cannot silently go missing;
 - block-size invariance for blocks of 1, 7, 64 and 512 samples;
 - `latencySamples()` equal to the measured impulse delay;
 - finite, bounded output for silence, DC, full-scale noise, impulses and extreme parameters, at 44.1–192 kHz and 1–8 channels;
@@ -773,9 +782,11 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_transparency.cpp`: top-octave droop of the oversampled stages;
   - `test_factory_presets.cpp`: validation and render of every preset;
   - `test_device_profiles.cpp`: the profile database and the drift check of the embedded copy;
-  - `test_platform_linux.cpp`: Linux platform services, headless, with no sound server or display needed; compiles to nothing on other OSes.
+  - `test_platform_linux.cpp`: Linux platform services, headless, with no sound server or display needed; compiles to nothing on other OSes;
+  - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
+  - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state.** 407 test cases in 21 `test_*.cpp` files at the time of writing. All passed in a Release GCC 13.3 build (about 28 s on the documentation machine).
+- **Current state.** 419 test cases in 24 `test_*.cpp` files at the time of writing (420 in an `FLUB_RTSAN` build). All passed in a Release GCC 13.3 build (about 32 s on the documentation machine) and in a Clang 20 RTSan build.
 
 ---
 
@@ -843,12 +854,13 @@ There are two platform locations with different roles:
 |---|---|---|---|
 | `core` | `ubuntu-24.04` × {gcc, clang}, `windows-2022` (MSVC via `ilammy/msvc-dev-cmd`), `macos-14` (Apple Clang); `fail-fast: false` | Ninja, Release, `FLUB_BUILD_TESTS=ON`, `FLUB_BUILD_TOOLS=ON`, `FLUB_WARNINGS_AS_ERRORS=ON` on Linux only | build → `ctest --output-on-failure` → CLI smoke test (`flubsound-cli params > /dev/null`, `flubsound-cli presets`) |
 | `sanitizers` | `ubuntu-24.04` | Ninja, RelWithDebInfo, `clang++`, `FLUB_SANITIZE=ON`, `FLUB_BUILD_TOOLS=OFF` | build → `ctest` with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`, `ASAN_OPTIONS=detect_leaks=1` |
+| `rtsan` | `ubuntu-24.04` | `apt-get install clang-20 libclang-rt-20-dev`; Ninja, RelWithDebInfo, `CC=clang-20 CXX=clang++-20`, `FLUB_RTSAN=ON`, `FLUB_WARNINGS_AS_ERRORS=ON`, `FLUB_BUILD_TOOLS=OFF` | build → the full `ctest` with `RTSAN_OPTIONS=halt_on_error=1`: every test that calls a `ProcessingChain`, `MixEngine` or module `process()` runs it under RealtimeSanitizer, and `test_rtsan.cpp` proves the annotations and the sanitizer are live |
 | `app` (`needs: core`) | `windows-2022`, `macos-14`, `ubuntu-24.04` | Ninja, Release, `FLUB_BUILD_APP=ON`, `FLUB_BUILD_PLUGIN=ON`, tests and tools OFF; `build/_deps` cached under key `juce-9.0.2-<os>` | build. On Linux: three headless screenshots at 1440×900 under `xvfb-run` (`--mode music`, `--mode gaming`, `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`), uploaded as artifact `screenshots` |
 
 What CI does **not** run today:
-- RealtimeSanitizer (`FLUB_RTSAN`);
+- RealtimeSanitizer on anything but the unit tests (the app and the plug-in are not built with it; `reset()`, setters and the app's own callback code are not annotated);
 - sanitizers on Windows or macOS;
-- tests against the app or plug-in (there are none);
+- tests against the built app or plug-in (there are none; `flub_tests` compiles two app sources, the Linux platform services and the drift FIFO);
 - pluginval (roadmap item 2.9);
 - installers or signing (roadmap 1.7, 2.3, 3.3).
 

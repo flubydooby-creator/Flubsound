@@ -4,7 +4,10 @@
 //   activity LED, name, channel badge, mute, gain (-60 .. +12 dB), a stereo
 //   mini peak meter of the strip output (IEC 60268-18 deflection, -70 .. 0
 //   dBFS, like LevelMeters) and the applications routed to it (chips: click
-//   for "move to strip" / "remove"). Clicking a row selects the strip for
+//   for "move to strip" / "remove"). A chip's state is drawn as a shape as
+//   well as a colour (playing / idle / not running / error) and named in its
+//   tooltip; a routing or capture error shows its text in the tooltip and as
+//   an entry of the chip's menu. Clicking a row selects the strip for
 //   editing (same as the header's strip selector).
 // Footer: "Assign app to strip..." (running audio sessions from AppRouting,
 // or a typed executable name) for the selected strip and "System sound
@@ -52,7 +55,7 @@ private:
 
     void showAssignMenu();
     void promptForExecutable (const juce::String& stripName);
-    void showChipMenu (const juce::String& executable);
+    void showChipMenu (const juce::String& executable, const juce::String& error);
     juce::String unsupportedReason() const;
     juce::TextLayout layoutReason (int width) const;
 

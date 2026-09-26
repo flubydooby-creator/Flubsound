@@ -58,7 +58,7 @@
 
 ## Building
 
-Requirements: CMake ≥ 3.22, Ninja (recommended), and a C++20 compiler. CI builds with MSVC 2022 (windows-2022), Apple Clang 15 (macos-14), GCC 13 and Clang 18 (ubuntu-24.04).
+Requirements: CMake ≥ 3.22, Ninja (recommended), and a C++20 compiler. CI builds with MSVC 2022 (windows-2022), Apple Clang 15 (macos-14), GCC 13 and Clang 18 (ubuntu-24.04), plus Clang 20 for the RealtimeSanitizer job.
 
 ```bash
 # DSP core + unit tests + batch CLI (no external dependencies)
@@ -81,7 +81,7 @@ Useful options:
 | `FLUB_BUILD_TESTS` / `FLUB_BUILD_TOOLS` | ON | Unit tests / `flubsound-cli` |
 | `FLUB_BUILD_APP` / `FLUB_BUILD_PLUGIN` | OFF | JUCE desktop app / VST3 + Standalone plug-in (+ AU on macOS) |
 | `FLUB_SANITIZE` | OFF | AddressSanitizer + UndefinedBehaviorSanitizer (GCC / Clang only) |
-| `FLUB_RTSAN` | OFF | Clang RealtimeSanitizer (Clang ≥ 20). No function is annotated `[[clang::nonblocking]]` yet, so it currently checks nothing, and CI does not run it |
+| `FLUB_RTSAN` | OFF | Clang RealtimeSanitizer (Clang ≥ 20 required, else configure fails): the audio entry points (`ProcessingChain::process`, `MixEngine::process`, every `Processor::process` override) become `[[clang::nonblocking]]` and abort on allocation, locks or blocking calls. CI job `rtsan` runs the full test suite this way |
 | `FLUB_WARNINGS_AS_ERRORS` | OFF | `-Werror` / `/WX` (CI uses it for the Linux core builds) |
 | `FLUB_JUCE_VERSION` | `9.0.2` | JUCE git tag fetched for the app / plug-in |
 | `FLUB_ASIO_SDK_DIR` | empty | Windows app: Steinberg ASIO SDK root; enables the ASIO device type |

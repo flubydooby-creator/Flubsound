@@ -38,7 +38,14 @@ void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, i
         s->pad.prepare (2, maxStripLatency - s->chain->getLatencySamples());
 
     // Master safety limiter: only engages when the summed strips overshoot.
-    master.setLookaheadMs (1.0f);
+    // Its look-ahead follows the strips so that Low Latency stays low end to
+    // end: 0.5 ms (as in the Low Latency maximizer) when every strip runs that
+    // profile - the app applies one profile to all strips - and 1 ms
+    // otherwise. A profile change makes the strip's chain report
+    // needsReprepare(), which brings the host back here.
+    const auto isLowLatency = [] (const auto& s) { return s->chain->getLatencyProfile() == param::LatencyProfileValue::LowLatency; };
+    const bool allLowLatency = ! strips.empty() && std::all_of (strips.begin(), strips.end(), isLowLatency);
+    master.setLookaheadMs (allLowLatency ? kMasterLookaheadLowLatencyMs : kMasterLookaheadMs);
     master.setTruePeakDetection (true);
     master.prepare ({ sr, maxBlockSize, 2 });
     LimiterParams lp;
@@ -71,7 +78,7 @@ void MixEngine::setMasterCeilingDb (float db) noexcept
     master.setParams (lp);
 }
 
-void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept
+void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept FLUB_NONBLOCKING
 {
     const int n = std::min (out.numSamples, maxBlock);
     const AudioBlock mix = mixBuffer.block (2, n);

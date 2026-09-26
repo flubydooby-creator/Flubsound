@@ -44,7 +44,7 @@ MainComponent::MainComponent (EngineController& c)
     // ---- Wiring ----
     header.onSettingsRequested = [this] { openSettings(); };
     addChildComponent (deviceBanner);
-    deviceBanner.onDetailsRequested = [this] { openSettings(); };
+    deviceBanner.onDetailsRequested = [this] { openSettings (true); }; // the full guidance is on the Audio page
     deviceBanner.refresh();
     levels.onResetRequested = [this] { requestLoudnessReset(); };
     loudness.onResetRequested = [this] { requestLoudnessReset(); };
@@ -267,10 +267,12 @@ juce::String MainComponent::currentStripSignature() const
     return s;
 }
 
-void MainComponent::openSettings()
+void MainComponent::openSettings (bool forceAudioPage)
 {
     if (settingsWindow != nullptr)
     {
+        if (auto* dialog = dynamic_cast<SettingsDialog*> (settingsWindow->getContentComponent()); dialog != nullptr && forceAudioPage)
+            dialog->showPage (SettingsDialog::Page::Audio);
         settingsWindow->toFront (true);
         return;
     }

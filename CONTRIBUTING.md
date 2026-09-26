@@ -11,7 +11,7 @@ ctest --test-dir build --output-on-failure        # or ./build/tests/flub_tests 
 Optional targets:
 - `-DFLUB_BUILD_APP=ON` builds the desktop app, and `-DFLUB_BUILD_PLUGIN=ON` the VST3 / Standalone (+ AU on macOS) plug-in. Both fetch JUCE 9.0.2; pass `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE` to build offline.
 - `-DFLUB_SANITIZE=ON` enables ASan + UBSan (GCC / Clang; CI runs the full suite this way with Clang).
-- `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20). It only checks functions marked `[[clang::nonblocking]]`; none are marked yet and CI does not run it, so treat it as groundwork.
+- `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20; configure with `CC=clang-20 CXX=clang++-20`, not together with `FLUB_SANITIZE` or `FLUB_BUILD_PLUGIN`). It checks everything reached from the functions marked `FLUB_NONBLOCKING` (`ProcessingChain::process`, `MixEngine::process`, every `Processor::process` override); CI's `rtsan` job runs the full suite this way with `RTSAN_OPTIONS=halt_on_error=1`. A new `Processor` override needs `FLUB_NONBLOCKING` on its `process()` (declaration and definition) and a line in `tests/test_rtsan.cpp`.
 - `-DFLUB_WARNINGS_AS_ERRORS=ON` is what CI uses for the Linux core builds (GCC and Clang).
 
 ## The real-time contract (non-negotiable)

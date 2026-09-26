@@ -2,8 +2,9 @@
 //
 // Reference implementation so the core has zero third-party dependencies.
 // Production builds should swap in PFFFT (BSD) or the platform FFT
-// (vDSP / IPP) behind this same interface; the STFT noise gate and the
-// partitioned HRIR convolver are the only realtime users.
+// (vDSP / IPP) behind this same interface. The STFT noise gate is the only
+// realtime user today; the HRIR convolver is direct-form, and a partitioned
+// FFT convolver for longer responses is roadmap.
 #pragma once
 
 #include <complex>

@@ -18,9 +18,11 @@
 //   to "largest recent producer burst + 1 device block" because capture APIs
 //   deliver in packets (e.g. 10 ms) that can be larger than a device block.
 // * The loop is critically damped with a natural frequency of 0.15 rad/s and
-//   the correction is clamped to +-0.5 %, so pitch deviations are inaudible
-//   (500 ppm = 0.9 cent); typical drifts (< 500 ppm) are absorbed without any
-//   dropout and the steady-state correction ripple stays in the tens of ppm.
+//   the correction is clamped to +-0.5 % (kMaxCorrection: +-5000 ppm, at most
+//   ~8.7 cents of pitch shift while a large fill error is pulled in). In
+//   steady state the correction equals the clock drift: typical drifts
+//   (< 500 ppm, i.e. < 0.9 cent, inaudible) are absorbed without any dropout
+//   and the correction ripple stays in the tens of ppm.
 // * Underrun (not enough data for a block): the block fades from the last
 //   output value to silence (no DC step), is counted, and the FIFO re-primes
 //   until the fill is back at target; playback then resumes with a 5 ms fade-in.

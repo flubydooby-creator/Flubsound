@@ -61,7 +61,7 @@ class BassEngine final : public Processor
 public:
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept override;
-    void process (const AudioBlock& block) noexcept override;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Bass Engine"; }
 
     void setParams (const BassEngineParams& p) noexcept;

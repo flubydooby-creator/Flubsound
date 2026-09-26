@@ -70,7 +70,7 @@ public:
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept override;
-    void process (const AudioBlock& block) noexcept override;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Dynamic EQ"; }
 
     void setBand (int index, const DynEqBandParams& params) noexcept;

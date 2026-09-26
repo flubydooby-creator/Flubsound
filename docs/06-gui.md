@@ -36,7 +36,7 @@
 |---|---|---|
 | Main window, layout and every panel in §6 | Implemented | `ui/*`, `shell/MainWindow.*` |
 | Design system: tokens, look-and-feel, vector icons | Implemented | `ui/Theme.*`, `ui/FlubLookAndFeel.*`, `ui/Widgets.*` |
-| Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation) and the muted-strip icon. A few amber/red indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
+| Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation), the muted-strip icon and the app-chip error badge. A few amber/green indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
 | Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
@@ -81,7 +81,7 @@ The visual language rests on five decisions:
 | `teal` | `#22D3EE` | **Music** accent |
 | `magenta` | `#E879F9` | **Gaming** accent; surround channel badges (always magenta) |
 | `amber` | `#FBBF24` | Warnings (card notes, hotkey errors, CPU > 70 %), Bypass when on, "preset modified" dot, advice banner, governor limiting. It is also the *warn* status colour of the standard palette (gain-reduction bars, clipper, correlation < 0.3) |
-| `red` | `#F87171` | App-chip routing errors. It is also the *hot* status colour of the standard palette (correlation < 0, loudness-panel TP over −1 dBTP, clipper over budget, muted-strip icon) |
+| `red` | `#F87171` | The *hot* status colour of the standard palette (app-chip routing errors, correlation < 0, loudness-panel TP over −1 dBTP, clipper over budget, muted-strip icon) |
 | `green` | `#34D399` | "Safety governor OK". It is also the *safe* status colour of the standard palette (correlation ≥ 0.3) |
 | `dynamicEq` | `#FBBF24` | Dynamic-EQ ghost markers and the Dyn band dot |
 
@@ -138,6 +138,7 @@ The `DocumentWindow` background is `#0F1115` (`shell/MainWindow.h`), but it is n
 - **Status colours** (`Theme::statusColours`). These are for indicators that encode a state by colour outside the level bars. The standard palette gives the UI's own `green` / `amber` / `red` (`#34D399` / `#FBBF24` / `#F87171`, note *hot* is `red`, not the meter's `#EF4444`). The colour-blind safe palette gives the same Okabe–Ito triple as above. Users:
   - the loudness panel's gain-reduction bars (*warn*), clipper bar (*warn*, *hot* over budget), TP readout (*hot*) and correlation meter (*hot* / *warn* / *safe*);
   - the muted-strip icon (*hot*);
+  - the app-chip error badge and outline in the routing panel (*hot*);
   - the input level bar of the Settings › Audio device selector (*hot* above 0.95).
 - **Switching** the palette in Settings calls `MainComponent::sendLookAndFeelChange()`, so views that cache palette colours (the routing rows' mute icons) refresh at once.
 
@@ -231,7 +232,7 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
   - The EQ curve is fully keyboard-editable (§6.5).
   - Esc collapses an expanded module card and closes the settings dialog.
   - Alert windows bind Return and Esc.
-- **Redundant coding.** EQ nodes are numbered. The mode switch shows a label and an icon. The governor chip states its status in words. Every bar has a numeric readout.
+- **Redundant coding.** EQ nodes are numbered. The mode switch shows a label and an icon. The governor chip states its status in words. Every bar has a numeric readout. App chips draw their state as a shape (§6.10) and name it in their tooltip and in the strip row's accessible description.
 - **Meters.** A colour-blind safe palette (§2.3) for the level meters and the status colours of the loudness panel and routing rows.
 - **Tooltips** appear after 650 ms. They are disabled in headless screenshot runs.
 - **HiDPI.** All drawing is vector. The cached analyser grid and EQ layer are rendered at the physical pixel scale and re-rendered when that scale changes.
@@ -242,8 +243,7 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
 - Some indicators keep fixed colours whatever the palette:
   - the governor chip and inner arc (green/amber; the chip also states its status in words);
   - the CPU readout (amber over 70 %);
-  - the preset-modified dot and the card warning notes (amber);
-  - the app-chip dots in the routing panel (accent / muted / faint / red), which encode *playing / idle / not running / error* by colour alone.
+  - the preset-modified dot and the card warning notes (amber).
 - There is no in-app UI scale setting and no high-contrast theme.
 
 ---
@@ -651,7 +651,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
   - **Tooltip and accessible description:** all messages.
 - **Actions.**
   - **Use \<preset\>** is shown only when the suggested preset exists and is not already the current preset of the selected strip. It loads that preset into the selected strip.
-  - **Details** opens Settings on the Audio page, which lists the profile, connection, ceiling, narrowband flag, suggested preset and guidance. If Settings is already open, it is only brought to the front, on whatever page it shows.
+  - **Details** opens Settings on the Audio page, which lists the profile, connection, ceiling, narrowband flag, suggested preset and guidance. If Settings is already open, it is brought to the front and switched to the Audio page.
   - **×** hides the banner for this output device name for the rest of the session; a different device shows it again. The dismissal is not persisted.
 - **Style.** `panelRaised` fill, amber 45 % outline, a 4 px amber stripe on the left and a headphone glyph drawn in code.
 - **Updates.** Event-driven: `refresh()` runs on `Preset`, `Engine`, `SelectedStrip`, `MasterEnable`, `Parameters`, `Device` and `Settings`. When visibility changes, `MainComponent` re-runs its layout.
@@ -708,15 +708,15 @@ display points: 420, log-spaced 20 Hz … 20 kHz
 band of point fc: [fc·2^(−1/12), fc·2^(+1/12)]             1/6 octave
   if the band spans < 2 bins:  P = (linear interpolation of X at fc/binHz)²
   else:                        P = mean(X[k]²) over the bins inside the band
-calibrationDb = 20·log10(4/N) + 10·log10(B1k / binHz)
+calibrationDb = 20·log10(4/N) − 10·log10(1.5) + 10·log10(B1k / binHz)
   B1k = 1000·(2^(1/12) − 2^(−1/12)) ≈ 115.6 Hz              1/6-octave bandwidth at 1 kHz; binHz = fs/N
 level(fc) = max(−140, 10·log10(P + 1e−24) + calibrationDb)  dB
 tilt(fc)  = 4.5 · log2(fc / 1000)                           dB, added at draw time when Tilt is on
 ```
 
-The Hann coherent gain of 0.5 is folded into the `4/N` term (sine amplitude = 4·|X|/N), and the bandwidth term turns the per-bin mean power into the power of a 1/6-octave band at the 1 kHz pivot. So a sine and pink noise read on the same scale there. Because the bands have constant relative width, pink noise reads flat with Tilt off. The +4.5 dB/octave tilt is there so that typical music reads roughly flat.
+The Hann coherent gain of 0.5 is folded into the `4/N` term (sine amplitude = 4·|X|/N), the `1.5` is the Hann window's equivalent noise bandwidth in bins (a tone's power is spread over the bins that are summed), and the bandwidth term turns the per-bin mean power into the power of a 1/6-octave band at the 1 kHz pivot. So a sine and pink noise read on the same scale there. Because the bands have constant relative width, pink noise reads flat with Tilt off. The +4.5 dB/octave tilt is there so that typical music reads roughly flat.
 
-The calibration does **not** compensate the Hann window's equivalent noise bandwidth (1.5 bins, +1.76 dB). Both a sine and noise therefore read about 1.7 dB high: a 0 dBFS, 1 kHz sine displays at ≈ +1.7 dB (checked numerically against the code's formulas at 48 kHz). The code's own comment says "close to its dBFS value". See §13.
+A 0 dBFS, 1 kHz sine therefore reads ≈ 0 dB: +0.3 dB at 44.1 kHz and +0.4 dB at 48 kHz (measured with the real `SpectrumAnalyzer`). The small excess comes from the bands holding whole bins: at 48 kHz the band of the display point nearest 1 kHz (995 Hz) spans 9 bins = 105 Hz instead of 115.6 Hz.
 
 **Ballistics** (`advance (dt)`, `dt` clamped to 0…0.25 s):
 
@@ -933,7 +933,7 @@ Row heights adapt between 14 and 22 px.
   | Mute | `isStripMuted()` | `setStripMuted()` | speaker / speaker-muted icon (the *hot* status colour: red, or vermillion with the colour-blind palette) |
   | Gain slider | `getStripGainDb()` | `setStripGainDb()` | −60…+12 dB, skew centre −12 dB, double-click → 0 dB. This is a mixer setting held in host atomics and persisted per strip name, **not** a `ParameterStore` parameter |
   | Mini meter | `MeterBus::outPeakDb[0/1]` of that strip | — | two 3 px bars, IEC deflection, meter-palette gradient, falls at 30 dB/s; every frame |
-  | App chips | `AppRouting::getRoutes()` + `getApps()` | via menus | dot colour: accent = playing, muted = running but idle, faint = not running, red = routing / capture error. "+N" marks overflow; *No apps assigned* when empty |
+  | App chips | `AppRouting::getRoutes()` + `getApps()` | via menus | state glyph, a shape as well as a colour: accent dot with a halo = playing, muted dot = running but idle, hollow ring (and a dimmed name) = not running, a *hot* `!` badge and outline = routing / capture error (red, or vermillion with the colour-blind palette). Every running instance counts: an error wins, then playing. The tooltip names the state and shows the full error text; the chip menu then starts with a *Routing error: …* entry that opens the whole message. "+N" marks overflow (its tooltip lists the hidden apps); *No apps assigned* when empty |
 
   Clicking a row selects that strip for editing, the same as the header's strip selector. Clicking a chip opens its menu instead.
 - **Footer:**
@@ -958,7 +958,7 @@ Row heights adapt between 14 and 22 px.
 
 | Page | Contents |
 |---|---|
-| **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · up to 2 guidance lines. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
+| **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · every guidance message, one bulleted paragraph each; the box grows with its text and the page scrolls when it is longer than the dialog. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
 | **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare. Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, and "device in + engine + device out (+ app capture) = total" |
 | **Hotkeys** | *Enable system-wide hotkeys* switch. One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. The status line reads one of: "All shortcuts are registered", "Shortcuts are switched off", the chords that failed ("probably used by another application"), an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
 | **General** | *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
@@ -1048,15 +1048,15 @@ flowchart TD
     L --> T
     T --> R
     R --> P["Persisted in AppSettings<br/>applied at once (refresh), re-checked every 2 s"]
-    P --> C["Chip on the strip row<br/>accent = playing · muted = idle · faint = not running · red = error"]
-    C --> X["Chip menu: Move to strip › · Remove from (strip name)"]
+    P --> C["Chip on the strip row<br/>halo = playing · dot = idle · ring = not running · ! = error"]
+    C --> X["Chip menu: (Routing error: …) · Move to strip › · Remove from (strip name)"]
 ```
 
 **Per-OS behaviour** of the current platform layer (`app/Source/platform/PlatformServices_*`):
 
 | OS | Session list | Endpoint routing | Process capture | "System sound settings" opens |
 |---|---|---|---|---|
-| Windows | Yes (WASAPI session enumeration on every render endpoint; Flubsound's own sessions and system sounds are skipped) | Reported as supported, so *Automatic* selects it. Moving an app only works in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (opt-in adapter for the undocumented per-app default-endpoint API). Otherwise each move fails. The platform layer returns an explanation that points to Windows' per-app sound settings, but the panel shows only a red chip dot, not the text (§13) | Windows build ≥ 20348 | `ms-settings:apps-volume` |
+| Windows | Yes (WASAPI session enumeration on every render endpoint; Flubsound's own sessions and system sounds are skipped) | Reported as supported, so *Automatic* selects it. Moving an app only works in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (opt-in adapter for the undocumented per-app default-endpoint API). Otherwise each move fails. The platform layer returns an explanation that points to Windows' per-app sound settings; the chip shows it in its tooltip and its menu (§6.10) | Windows build ≥ 20348 | `ms-settings:apps-volume` |
 | Linux | Yes, through `pactl` (PulseAudio / PipeWire-pulse) when `pactl` is on `PATH` | Yes: sink-inputs are moved to the `flubsound_<strip>` null sinks (created by `platform/linux/flubsound-pipewire-setup.sh`) | Not applicable: the design routes into null sinks and reads their monitors | `pavucontrol --tab=1`, else `pwvucontrol`, `gnome-control-center sound` or `systemsettings kcm_pulseaudio` |
 | macOS | Router object present, but `isSupported()` is false | Not yet (**Roadmap** 3.2: Core Audio process taps, macOS 14.2+) | Not yet (same) | System Settings › Sound |
 
@@ -1075,7 +1075,7 @@ There is no wizard yet. First-run behaviour is built from defaults and in-contex
   - fresh strips reset to parameter defaults: Boost 0 %, ceiling −1 dBTP;
   - the Game strip, and any strip with more than 2 channels, starts in Gaming mode;
   - master enabled;
-  - the saved (or default) audio device is opened;
+  - the saved (or default) audio device is opened; without a saved choice, Windows uses JUCE's *Windows Audio (Low Latency Mode)* type (`IAudioClient3`), falling back to *Windows Audio*;
   - device input in *Automatic*: an input is processed only when its name looks like a virtual cable or loopback device (`flubsound`, `cable output`, `vb-audio`, `voicemeeter`, `blackhole`, `soundflower`, `loopback`), so "Stereo Mix" and "Monitor of …" are deliberately excluded to avoid feedback;
   - routing method *Automatic*;
   - hotkeys on, close-to-tray on.
@@ -1185,8 +1185,6 @@ These describe the behaviour of the current code.
 
 - **Hotkeys on Linux** are not implemented (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
-- **Spectrum calibration** reads about 1.7 dB high for sines and noise alike, because the Hann window's 1.5-bin equivalent noise bandwidth is not compensated (§6.4).
-- **App-chip errors** are shown only as a red dot. The error text itself (`AppState::error`) is not shown in the routing panel.
 - **Accessibility gaps** are listed in §2.8.
 
 ---

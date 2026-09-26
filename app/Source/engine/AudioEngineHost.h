@@ -106,8 +106,9 @@ public:
     // =========================================================================
     juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
 
-    /** Opens the device (saved XML state or system default) and attaches the
-        engine. Returns an error message, empty on success. */
+    /** Opens the device (saved XML state or system default; without saved
+        state Windows prefers the "Windows Audio (Low Latency Mode)" type) and
+        attaches the engine. Returns an error message, empty on success. */
     juce::String openDevice (const juce::XmlElement* savedState, int maxInputChannels = 8, int maxOutputChannels = 2);
 
     /** Detaches the engine and closes the device. */

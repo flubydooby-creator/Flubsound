@@ -551,7 +551,7 @@ void ParametricEq::applyOutputGain (const AudioBlock& block, int numChannels) no
     }
 }
 
-void ParametricEq::process (const AudioBlock& block) noexcept
+void ParametricEq::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numSamples = block.numSamples;
     const int numChannels = std::clamp (block.numChannels, 0, spec.numChannels);

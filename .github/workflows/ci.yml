@@ -63,6 +63,35 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------
+  # Clang RealtimeSanitizer over the full test suite. In this build the audio
+  # entry points (ProcessingChain::process, MixEngine::process and every
+  # Processor::process override) are [[clang::nonblocking]], so anything they
+  # reach that allocates, frees, locks or blocks aborts the run.
+  # tests/test_rtsan.cpp checks that the annotations are in place and that
+  # the sanitizer really stops a violation.
+  rtsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang 20 + RTSan runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-20 libclang-rt-20-dev
+      - name: Configure
+        env:
+          CC: clang-20
+          CXX: clang++-20
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DFLUB_RTSAN=ON -DFLUB_WARNINGS_AS_ERRORS=ON -DFLUB_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests (RTSan)
+        env:
+          RTSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
   # Desktop app + plug-in (JUCE) on all three platforms.
   app:
     name: app + plugin (${{ matrix.os }})

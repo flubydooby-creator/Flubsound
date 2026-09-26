@@ -15,11 +15,13 @@
 //                            only strokes / fills ready-made paths over a
 //                            cached grid image.
 // Levels are 1/6-octave band levels referred to 1 kHz: the averaged power
-// density plus the bandwidth of a 1/6-octave band at 1 kHz, so pink noise
-// reads its band level at the tilt pivot and a sine reads close to its dBFS
-// value there. Display: log frequency axis, dB axis, optional
-// +4.5 dB/octave tilt around 1 kHz (music looks "flat"), pre = grey fill,
-// post = accent line with a soft glow, peak hold = thin accent line.
+// density (Hann coherent gain and 1.5-bin noise bandwidth removed) plus the
+// bandwidth of a 1/6-octave band at 1 kHz, so pink noise reads its band
+// level at the tilt pivot and a sine reads its dBFS value there (within
+// +0.4 dB at 48 kHz, bands being whole bins). Display: log frequency axis,
+// dB axis, optional +4.5 dB/octave tilt around 1 kHz (music looks "flat"),
+// pre = grey fill, post = accent line with a soft glow, peak hold = thin
+// accent line.
 //
 // The plot geometry is shared with EqCurveEditor, which is laid over this
 // component with identical bounds.
@@ -102,7 +104,7 @@ private:
     std::vector<Band> bands;
     std::vector<float> pointHz, pointX, tiltDb;
     double sampleRate = 48000.0;
-    float calibrationDb = 0.0f; // sine calibration + 1/6-octave bandwidth at 1 kHz
+    float calibrationDb = 0.0f; // sine calibration - Hann noise bandwidth + 1/6-octave bandwidth at 1 kHz
     bool showPre = true, showPost = true, tilt = true, peakHold = true;
 
     juce::Rectangle<float> plot;

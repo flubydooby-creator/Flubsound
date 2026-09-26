@@ -346,7 +346,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
     ─► [Maximizer]   drive 0..+24 dB → glue (only while armed) → soft clipper → TRUE-PEAK LIMITER @ ceiling
                      (−12..0 dBTP, default −1)
     ─► output gain −24..0 dB (trim, attenuation only)
-    ─► (desktop app only) Σ strips → master TP limiter −1 dBTP, 1 ms look-ahead
+    ─► (desktop app only) Σ strips → master TP limiter −1 dBTP, 1 ms look-ahead (0.5 ms when every strip is Low Latency)
 ```
 
 ### 1.3 Where gain is added and removed
@@ -380,7 +380,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 - **Factory presets hold it too.** *Factory presets: Boost Intensity and all macros at 100 % stay safe* (`tests/test_factory_presets.cpp`) renders every factory preset with every macro at 100 % and checks sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB and no safety clamp. Because the limiter shares the meters' interpolator and holds its gain under the interpolation kernel (section 10), the margin is not needed in practice: measured for this document on the test's own programme, the 24 presets at their own settings and at full macros (48 renders) read at most −1.048 dBTP on the 4× meter for a −1 dBTP ceiling (−2.05 dBTP for the −2 dBTP Bluetooth preset), with no safety clamp. `LoudnessMaximizer.h` records the same result: worst −1.04 dBTP at full macros.
 - **Output gain cannot break the guarantee.** `output.gain` is a trim of −24…0 dB applied after the limiter, so it can only lower the level below the ceiling.
   - Hosts that run a single `ProcessingChain` (plug-in, CLI) therefore need no extra safety net. With `--ceiling` or `--target-lufs` the CLI switches the maximizer on, or warns if `max.on=off` was requested explicitly (`tools/flubsound-cli/CliOptions.cpp`); it also warns if the measured true peak of a render exceeds the ceiling by more than 0.1 dB (`OfflineRenderer.cpp`).
-  - In the desktop app several strips, each at its own ceiling, can sum above it. The `MixEngine` master limiter (−1 dBTP, 1 ms look-ahead, 50 ms auto release, `MixEngine.cpp`) catches that; its safety-clamp count is exposed as `MixEngine::getMasterSafetyClipCount()`.
+  - In the desktop app several strips, each at its own ceiling, can sum above it. The `MixEngine` master limiter (−1 dBTP, 1 ms look-ahead or 0.5 ms when every strip runs Low Latency, 50 ms auto release, `MixEngine.cpp`) catches that; its safety-clamp count is exposed as `MixEngine::getMasterSafetyClipCount()`.
 - **Glue is out of the path unless armed.** The maximizer's 3-band glue splitter is an all-pass, and a phase rotator raises the crest factor of flat-topped (mastered) material, which the limiter would then have to take back. `applyParameters()` therefore keeps the 0.001 glue floor only while glue is *armed* (`base[max.glue] > 0`, or a macro that can raise glue is above zero); otherwise glue is 0 and the splitter is out of the path. §11.3.2 has the rule, the measurements and the test (*Chain: with glue disarmed the maximizer passes hot flat-topped material untouched*: a −5 dBFS 100 Hz square passes the default maximizer unchanged within 1e−6 of the delayed input, with no gain reduction).
 - **Known onset overshoots** are left for the limiter by design:
   - the bass protection's 10 ms detector attack lets a sudden loud bass note overshoot its cap by up to ≈ 3–4 dB, from roughly 12 ms to 40 ms after the onset (§4.3.3, §4.9);
@@ -2327,8 +2327,8 @@ Kh   = min(8, ⌊L / 3⌋) with true-peak detection, 0 in sample-peak mode
 
 | Look-ahead | L @ 48 kHz | Kh | attack ramp `L − Kh + 1` | min window `L + Kh + 2` |
 |---|---|---|---|---|
-| 0.5 ms (Low Latency) | 24 | 8 | 17 | 34 |
-| 1.0 ms (master limiter) | 48 | 8 | 41 | 58 |
+| 0.5 ms (Low Latency; master limiter when every strip is Low Latency) | 24 | 8 | 17 | 34 |
+| 1.0 ms (master limiter, other profiles) | 48 | 8 | 41 | 58 |
 | 1.5 ms (Balanced) | 72 | 8 | 65 | 82 |
 | 2.0 ms (Quality) | 96 | 8 | 89 | 106 |
 
@@ -2410,7 +2410,7 @@ The strip limiter has no keys of its own. `LoudnessMaximizer` passes its paramet
 | (true-peak detection) | — | on | on in every profile | — | structural; off gives a sample-peak limiter with D = 0 and Kh = 0 |
 | (gain hold Kh) | — | 0 … 8 | 8 (7 at 0.5 ms, 44.1 kHz) | samples | derived at `prepare()`: `min(kTruePeakHold = 8, ⌊L/3⌋)` with true-peak detection, else 0; no latency |
 
-Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the device profile (−2 dBTP Bluetooth A2DP, −3 dBTP hands-free, section 14), 1 ms look-ahead, 50 ms auto release, true peak on. Module sanitising: out-of-range values clamp; a non-finite value keeps the previous one.
+Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the device profile (−2 dBTP Bluetooth A2DP, −3 dBTP hands-free, section 14), 1 ms look-ahead (0.5 ms when every strip runs the Low Latency profile, chosen in `MixEngine::configure()`), 50 ms auto release, true peak on. Module sanitising: out-of-range values clamp; a non-finite value keeps the previous one.
 
 ### 10.5 Smoothing & click-freeness
 
@@ -2425,8 +2425,8 @@ Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the devi
 
 | Look-ahead | 44.1 kHz | 48 kHz | 96 kHz | 192 kHz | Used by |
 |---|---|---|---|---|---|
-| 0.5 ms | 22 + 20 = 42 | 24 + 20 = **44** | 48 + 20 = 68 | 96 + 20 = 116 | Low Latency profile |
-| 1.0 ms | 44 + 20 = 64 | 48 + 20 = 68 | 96 + 20 = 116 | 192 + 20 = 212 | master limiter (`MixEngine`) |
+| 0.5 ms | 22 + 20 = 42 | 24 + 20 = **44** | 48 + 20 = 68 | 96 + 20 = 116 | Low Latency profile; master limiter (`MixEngine`) when every strip is Low Latency |
+| 1.0 ms | 44 + 20 = 64 | 48 + 20 = 68 | 96 + 20 = 116 | 192 + 20 = 212 | master limiter (`MixEngine`), any other mix of profiles |
 | 1.5 ms | 66 + 20 = 86 | 72 + 20 = **92** | 144 + 20 = 164 | 288 + 20 = 308 | Balanced profile (header default) |
 | 2.0 ms | 88 + 20 = 108 | 96 + 20 = **116** | 192 + 20 = 212 | 384 + 20 = 404 | Quality profile |
 
@@ -3247,7 +3247,7 @@ Maximum effective values with Boost and all macros at 100 %:
 | **LoudnessMatch** (fair A/B) | Gated loudness of the dry reference (post-fold, pre-slots) vs the processed output | Gain on the dry path in global bypass | Gain = wet − dry, clamped ±12 dB, slew 3 dB/s, updated only while both followers are active. A positive match is additionally capped at `max(0, max.ceiling − dry peak)`, so the matched reference never exceeds the maximizer ceiling. The dry peak is held with an instant attack and a ~2 s one-pole release, applied per block. The gain itself ramps over 50 ms. |
 | **True-peak ceiling** (strip) | 4× interpolated peaks with parabolic refinement | Limiter gain | Look-ahead sliding-minimum + box-filter envelope reaches the required gain Kh samples before the peak arrives and holds it Kh samples after (Kh = 8 at the profile look-aheads); a final safety clamp counts any engagement, published per block as `MeterBus::safetyClipCount` (section 10). |
 | **Output trim** | — | Strip level after the maximizer | `output.gain` −24 … 0 dB (20 ms ramp). A trim cannot raise the level, so the strip ceiling also holds in the plug-in and the CLI, which have no master limiter. |
-| **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the largest strip latency | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector), 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
+| **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the largest strip latency | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector); 0.5 ms (44 samples) when every strip runs Low Latency. 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
 | **Device ceiling cap** (desktop app) | Output device transport and profile (`device::adviceFor()`) | Master limiter ceiling | Default −1 dBTP; **Bluetooth A2DP −2 dBTP** (lossy codecs overshoot); **Bluetooth hands-free −3 dBTP**. A profile's own `ceilingDbTp` can lower it further; no shipped profile sets one yet. Strip ceilings are untouched: the cap only ever lowers the output. |
 | **Input sanitation** | Non-finite samples in the input block (Σ x·0 is non-finite) | Whole chain | The block is output as silence and the chain state is reset. |
 | **Parameter sanitation** | Every `ParameterStore::set()` | Base values | NaN is ignored (the previous value stays), ±Inf and out-of-range values clamp to the parameter's range, so no automation, host or script value can put a NaN gain into the audio path. |
@@ -3366,7 +3366,7 @@ Why the totals behave as they do:
 
 **Desktop app.**
 - `MixEngine` pads every strip to the largest strip latency, so relative A/V sync between applications is preserved.
-- The master limiter then adds its own 1 ms look-ahead plus the 20-sample detector delay: 68 samples, 1.42 ms at 48 kHz.
+- The master limiter then adds its own look-ahead plus the 20-sample detector delay: 1 ms, i.e. 68 samples = 1.42 ms at 48 kHz, or 0.5 ms (44 samples = 0.92 ms) when every strip runs the Low Latency profile, as the app sets it. App engine totals at 48 kHz: 144 samples = 3.0 ms (Low Latency), 260 = 5.4 ms (Balanced), 1420 ≈ 29.6 ms (Quality).
 - Device buffering (WASAPI / CoreAudio / ALSA periods, and the drift-compensated FIFO of captured strips) comes on top. It is not algorithmic and is not included here.
 - The README's "~2.1 ms Low Latency profile" is the strip's algorithmic latency at 48 kHz.
 

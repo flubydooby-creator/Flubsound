@@ -35,6 +35,7 @@
 #include "Protection.h"
 #include "flub/analysis/LoudnessMeter.h"
 #include "flub/analysis/PeakMeters.h"
+#include "flub/common/Realtime.h"
 #include "flub/common/SmoothedValue.h"
 #include "flub/dsp/BassEngine.h"
 #include "flub/dsp/ClarityEnhancer.h"
@@ -72,9 +73,11 @@ public:
 
     /** RT. io.numChannels == config.inputChannels, numSamples <= maxBlockSize.
         Output is written to channels 0/1; channels >= 2 are cleared. */
-    void process (const AudioBlock& io) noexcept;
+    void process (const AudioBlock& io) noexcept FLUB_NONBLOCKING;
 
     int getLatencySamples() const noexcept { return totalLatency; }
+    /** The latency profile the chain was prepared with (constant until the next prepare()). */
+    param::LatencyProfileValue getLatencyProfile() const noexcept { return static_cast<param::LatencyProfileValue> (profileAtPrepare); }
     double getSampleRate() const noexcept { return config.sampleRate; }
     const ChainConfig& getConfig() const noexcept { return config; }
 

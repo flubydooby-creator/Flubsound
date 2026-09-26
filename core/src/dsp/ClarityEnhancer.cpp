@@ -406,7 +406,7 @@ void ClarityEnhancer::controlTick() noexcept
 }
 
 //==============================================================================
-void ClarityEnhancer::process (const AudioBlock& block) noexcept
+void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numSamples = block.numSamples;
     const int numCh = std::min ({ block.numChannels, spec.numChannels, kMaxChannels });

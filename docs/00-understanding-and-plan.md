@@ -14,7 +14,7 @@ Each requirement has an ID. The traceability matrix in §5 maps every ID to its 
 ### R1 Real-time audio engine
 | ID | Requirement | Interpretation used |
 |---|---|---|
-| R1.1 | Latency under 10–12 ms | This is the **added** latency Flubsound introduces on top of what the OS and application already have. The per-strip chain has ~2.1 ms algorithmic latency in *Low Latency* and 4.0 ms in *Balanced* (48 kHz); the desktop app's master limiter adds 1.4 ms; I/O buffering comes on top. The estimated added total is ~10 ms (Low Latency) to ~12–13 ms (Balanced) on the Windows driver path. The *Quality* profile (~28 ms), for music and batch, is allowed more. See `01-architecture.md` §5. |
+| R1.1 | Latency under 10–12 ms | This is the **added** latency Flubsound introduces on top of what the OS and application already have. The per-strip chain has ~2.1 ms algorithmic latency in *Low Latency* and 4.0 ms in *Balanced* (48 kHz); the desktop app's master limiter adds 0.9 ms in *Low Latency* and 1.4 ms otherwise; I/O buffering comes on top. The estimated added total is ~9.5 ms (Low Latency) to ~12–13 ms (Balanced) on the Windows driver path. The *Quality* profile (~28 ms), for music and batch, is allowed more. See `01-architecture.md` §5. |
 | R1.2 | WASAPI shared + exclusive, ASIO, Core Audio, ALSA / PulseAudio / PipeWire | JUCE 9 device layer (WASAPI shared, exclusive and low-latency; ASIO with the Steinberg SDK; CoreAudio; ALSA; JACK). PipeWire and PulseAudio are reached through PipeWire's ALSA / JACK compatibility layers for audio I/O and through `pactl` (PulseAudio protocol) for per-app routing; a native PipeWire node is roadmap. |
 | R1.3 | 32-bit float internal processing | All DSP is `float`. Metering integrators and long-running accumulators use `double` where precision matters. |
 | R1.4 | 44.1 / 48 / 96 / 192 kHz | Every coefficient is derived from the session rate. Tests cover all four rates; the chain test "runs at every sample rate a headset may use" covers 11 rates from 8 to 192 kHz. |
@@ -120,7 +120,7 @@ The work was run as a sequence of review loops:
 ### Quality gates (applied to every change)
 
 - Zero-warning builds with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (plus `-Wno-sign-conversion`) on GCC and Clang, and `/W4` on MSVC; CI turns warnings into errors for the Linux core builds.
-- The full unit-test suite passes under Address and Undefined Behavior sanitizers.
+- The full unit-test suite passes under Address and Undefined Behavior sanitizers, and under RealtimeSanitizer with the audio entry points marked `[[clang::nonblocking]]`.
 - Allocation-counting tests prove `process()` paths never touch the heap.
 - CI on Windows, macOS and Linux (`.github/workflows/ci.yml`).
 

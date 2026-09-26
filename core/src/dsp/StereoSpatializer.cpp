@@ -399,7 +399,7 @@ void StereoSpatializer::sanitiseState() noexcept
 }
 
 //==============================================================================
-void StereoSpatializer::process (const AudioBlock& block) noexcept
+void StereoSpatializer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     if (! prepared || block.numChannels != 2)
         return; // stereo only: any other channel count passes through untouched

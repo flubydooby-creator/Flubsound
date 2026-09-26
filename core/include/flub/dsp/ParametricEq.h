@@ -52,7 +52,7 @@ public:
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept override;
-    void process (const AudioBlock& block) noexcept override;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Parametric EQ"; }
 
     /** RT-safe. Values are clamped to the documented ranges. */

@@ -3,6 +3,9 @@
 #include "FlubLookAndFeel.h"
 #include "presets/PresetManager.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace flub::app::ui
 {
 using namespace flub::param;
@@ -91,6 +94,121 @@ struct FormLayout
     }
 };
 } // namespace
+
+// =============================================================================
+// Audio page
+// =============================================================================
+/** Intro, OUTPUT DEVICE PROFILE box and device selector, stacked. The box
+    grows with its wrapped text (every guidance message of the profile) and
+    the page sets its own height; the dialog shows it in a vertical viewport,
+    so long guidance scrolls instead of pushing the selector out of reach. */
+class SettingsDialog::AudioPage : public juce::Component
+{
+public:
+    explicit AudioPage (EngineController& c)
+        : controller (c)
+    {
+        // Up to 16 inputs: one 7.1 strip plus three stereo strips via JACK / PipeWire monitors.
+        selector = std::make_unique<juce::AudioDeviceSelectorComponent> (controller.getDeviceManager(), 0, 16, 1, 2, false, false, true, false);
+        selector->setItemHeight (26);
+        addAndMakeVisible (*selector);
+        deviceText = describeOutputDevice (controller);
+    }
+
+    void refresh()
+    {
+        const auto text = describeOutputDevice (controller);
+        if (text != deviceText)
+        {
+            deviceText = text;
+            resized();
+            repaint();
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawSectionTitle (g, titleArea, "Audio device");
+        introLayout.draw (g, introArea.toFloat());
+
+        // Output device profile (headset families, connection, safety ceiling, guidance).
+        auto box = deviceArea.toFloat();
+        g.setColour (Palette::well);
+        g.fillRoundedRectangle (box, 6.0f);
+        g.setColour (Palette::border);
+        g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
+        auto inner = deviceArea.reduced (kBoxPadX, kBoxPadY);
+        Theme::drawCaption (g, "OUTPUT DEVICE PROFILE", inner.removeFromTop (16).toFloat(), Palette::faint);
+        inner.removeFromTop (4);
+        deviceLayout.draw (g, inner.toFloat());
+    }
+
+    void resized() override
+    {
+        // The text column starts kInset px in, so the selector (x = 0) lines
+        // its labels up under it as before.
+        const int w = getWidth() - kInset;
+        titleArea = { kInset, 0, w, 22 };
+
+        juce::AttributedString intro;
+        intro.append ("Flubsound processes the input (a Flubsound / virtual cable device or loopback) and plays the result on the output "
+                      "device. Smaller buffers lower the latency; raise them if you hear dropouts.",
+                      Theme::font (11.5f), Palette::faint.brighter (0.2f));
+        introLayout.createLayout (intro, static_cast<float> (juce::jmax (80, w)));
+        introArea = { kInset, 28, w, static_cast<int> (std::ceil (introLayout.getHeight())) };
+
+        deviceLayout = layoutDeviceText (deviceText, w - 2 * kBoxPadX);
+        const int boxHeight = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (deviceLayout.getHeight())) + kBoxPadY + 2;
+        deviceArea = { kInset, introArea.getBottom() + 8, w, boxHeight };
+
+        selector->setBounds (0, deviceArea.getBottom() + 10, getWidth(), juce::jmax (1, selector->getHeight()));
+        fitHeight();
+    }
+
+    // The selector sizes its own height to its controls (device type, channel lists, ...).
+    void childBoundsChanged (juce::Component* child) override
+    {
+        if (child == selector.get())
+            fitHeight();
+    }
+
+private:
+    static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8;
+
+    void fitHeight()
+    {
+        const int h = selector->getBottom() + 12;
+        if (h != getHeight())
+            setSize (getWidth(), h);
+    }
+
+    /** First lines: device, profile, connection, ceiling. Every further line
+        is one guidance message, drawn as a bulleted paragraph. */
+    static juce::TextLayout layoutDeviceText (const juce::String& text, int width)
+    {
+        const auto font = Theme::font (12.0f);
+        const auto lines = juce::StringArray::fromLines (text);
+        juce::AttributedString s;
+        for (int i = 0; i < lines.size(); ++i)
+        {
+            const bool guidance = i >= 2;
+            if (i > 0)
+                s.append (guidance ? "\n\n" : "\n", guidance ? Theme::font (5.0f) : font, Palette::text);
+            if (guidance)
+                s.append (juce::String (juce::CharPointer_UTF8 ("\xe2\x80\xa2  ")), font, Palette::amber); // bullet
+            s.append (lines[i], font, Palette::text.withAlpha (guidance ? 0.78f : 0.88f));
+        }
+        juce::TextLayout layout;
+        layout.createLayout (s, static_cast<float> (juce::jmax (80, width)));
+        return layout;
+    }
+
+    EngineController& controller;
+    std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
+    juce::String deviceText;
+    juce::TextLayout introLayout, deviceLayout;
+    juce::Rectangle<int> titleArea, introArea, deviceArea;
+};
 
 // =============================================================================
 // Processing page
@@ -524,18 +642,18 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
         addAndMakeVisible (b);
     }
 
-    // Up to 16 inputs: one 7.1 strip plus three stereo strips via JACK / PipeWire monitors.
-    audioPage = std::make_unique<juce::AudioDeviceSelectorComponent> (controller.getDeviceManager(), 0, 16, 1, 2, false, false, true, false);
-    audioPage->setItemHeight (26);
+    audioPage = std::make_unique<AudioPage> (controller);
     processingPage = std::make_unique<ProcessingPage> (controller, std::move (onPalette), palette);
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
-    addChildComponent (*audioPage);
+    audioView.setViewedComponent (audioPage.get(), false);
+    audioView.setScrollBarsShown (true, false);
+    audioView.setScrollBarThickness (8);
+    addChildComponent (audioView);
     addChildComponent (*processingPage);
     addChildComponent (*hotkeysPage);
     addChildComponent (*generalPage);
 
-    deviceText = describeOutputDevice (controller);
     showPage (Page::Audio);
     setSize (780, 600);
     startTimerHz (2);
@@ -544,6 +662,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
 SettingsDialog::~SettingsDialog()
 {
     stopTimer();
+    audioView.setViewedComponent (nullptr, false);
 }
 
 juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
@@ -594,8 +713,9 @@ juce::String SettingsDialog::describeOutputDevice (EngineController& controller,
         s << "  -  narrowband (speech) format";
     if (! advice.suggestedPreset.empty())
         s << "  -  suggested preset: " << juce::String::fromUTF8 (advice.suggestedPreset.c_str());
-    for (int i = 0; i < maxMessages && i < static_cast<int> (advice.messages.size()); ++i)
-        s << "\n" << juce::String::fromUTF8 (advice.messages[static_cast<size_t> (i)].c_str());
+    const auto count = maxMessages < 0 ? advice.messages.size() : std::min (advice.messages.size(), static_cast<size_t> (maxMessages));
+    for (size_t i = 0; i < count; ++i)
+        s << "\n" << juce::String::fromUTF8 (advice.messages[i].c_str());
     return s;
 }
 
@@ -604,7 +724,7 @@ void SettingsDialog::showPage (Page page)
     current = page;
     for (size_t i = 0; i < navButtons.size(); ++i)
         navButtons[i].setToggleState (static_cast<int> (i) == static_cast<int> (page), juce::dontSendNotification);
-    audioPage->setVisible (page == Page::Audio);
+    audioView.setVisible (page == Page::Audio);
     processingPage->setVisible (page == Page::Processing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
@@ -620,40 +740,12 @@ void SettingsDialog::timerCallback()
     if (current == Page::Processing)
         processingPage->refresh();
     if (current == Page::Audio)
-    {
-        const auto text = describeOutputDevice (controller);
-        if (text != deviceText)
-        {
-            deviceText = text;
-            repaint (deviceArea);
-        }
-    }
+        audioPage->refresh();
 }
 
 void SettingsDialog::paint (juce::Graphics& g)
 {
     g.fillAll (Palette::background);
-    if (current == Page::Audio)
-    {
-        drawSectionTitle (g, pageArea.withHeight (22), "Audio device");
-        g.setColour (Palette::faint.brighter (0.2f));
-        g.setFont (Theme::font (11.5f));
-        g.drawFittedText ("Flubsound processes the input (a Flubsound / virtual cable device or loopback) and plays the result on the output "
-                          "device. Smaller buffers lower the latency; raise them if you hear dropouts.",
-                          pageArea.withTrimmedTop (28).withHeight (32), juce::Justification::topLeft, 2, 1.0f);
-
-        // Output device profile (headset families, connection, safety ceiling).
-        auto box = deviceArea.toFloat();
-        g.setColour (Palette::well);
-        g.fillRoundedRectangle (box, 6.0f);
-        g.setColour (Palette::border);
-        g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
-        auto inner = deviceArea.reduced (12, 8);
-        Theme::drawCaption (g, "OUTPUT DEVICE PROFILE", inner.removeFromTop (16).toFloat(), Palette::faint);
-        g.setColour (Palette::text.withAlpha (0.85f));
-        g.setFont (Theme::font (12.0f));
-        g.drawFittedText (deviceText, inner, juce::Justification::topLeft, 4, 1.0f);
-    }
     auto nav = navArea.toFloat();
     g.setColour (Palette::panel);
     g.fillRect (nav);
@@ -678,8 +770,12 @@ void SettingsDialog::resized()
         }
     }
     pageArea = r.reduced (26, 20);
-    deviceArea = pageArea.withTrimmedTop (66).withHeight (86);
-    audioPage->setBounds (pageArea.withTrimmedTop (66 + 86 + 10).withTrimmedLeft (-10));
+    // The Audio page extends 10 px to the left (the device selector's labels
+    // line up with the text) and its scrollbar sits in the right margin; the
+    // page sets its own height for the width it gets.
+    const int scrollbar = audioView.getScrollBarThickness() + 6;
+    audioView.setBounds (pageArea.withTrimmedLeft (-10).withTrimmedRight (-scrollbar));
+    audioPage->setSize (audioView.getWidth() - scrollbar, juce::jmax (1, audioPage->getHeight()));
     processingPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);

@@ -1,10 +1,15 @@
 // Flubsound Pro - the contract every DSP module implements.
 //
-// Threading contract. Enforced by review and, for "no allocation", by the
-// allocation-counting tests in tests/ (flubtest::AllocationGuard around
-// process() / reset() / setters). FLUB_RTSAN is an optional local build
-// (clang >= 20), not a CI job, and RealtimeSanitizer only checks functions
-// marked [[clang::nonblocking]] - none are yet.
+// Threading contract. Enforced by review, by the allocation-counting tests
+// in tests/ (flubtest::AllocationGuard around process() / reset() /
+// setters) and, for process(), by RealtimeSanitizer: the base and every
+// override are declared FLUB_NONBLOCKING (flub/common/Realtime.h), which the
+// FLUB_RTSAN build (Clang 20, CI job 'rtsan') turns into
+// [[clang::nonblocking]], so an allocation, free, lock or blocking system
+// call anywhere below process() aborts the test run. Declare new overrides
+// the same way (and list them in tests/test_rtsan.cpp):
+//   void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+//
 //   prepare()  : non-realtime thread only. May allocate, may be slow.
 //   reset()    : audio thread allowed. No allocation, no locks, no I/O.
 //   process()  : audio thread. No allocation, no locks, no I/O, no exceptions,
@@ -18,6 +23,7 @@
 #pragma once
 
 #include "flub/common/AudioBlock.h"
+#include "flub/common/Realtime.h"
 
 namespace flub
 {
@@ -38,7 +44,7 @@ public:
 
     /** In-place processing. block.numSamples <= spec.maxBlockSize and
         block.numChannels <= spec.numChannels are guaranteed by the caller. */
-    virtual void process (const AudioBlock& block) noexcept = 0;
+    virtual void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING = 0;
 
     virtual int latencySamples() const noexcept { return 0; }
     virtual const char* name() const noexcept = 0;

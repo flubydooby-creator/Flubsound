@@ -16,9 +16,10 @@
 // Profiles live in presets/devices/device-profiles.json (versioned, vendor
 // neutral format). Matching is by case-insensitive tokens in the endpoint
 // name; the connection type comes from the platform layer when it can tell
-// (Windows enumerator, macOS transport type, PipeWire device.bus) and falls
-// back to name/format heuristics. Pure C++, no allocation after load(); not
-// for the audio thread.
+// (Windows: the endpoint's device enumerator; macOS: the Core Audio transport
+// type; Linux reports Unknown - PipeWire's device.bus is not queried) and
+// otherwise from name/format heuristics (detectConnection()). Pure C++, no
+// allocation after load(); not for the audio thread.
 #pragma once
 
 #include "flub/io/Json.h"
@@ -82,8 +83,10 @@ std::string normalise (const std::string& s);
 /** Best-effort connection detection when the platform cannot tell. */
 Connection detectConnection (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint = Connection::Unknown);
 
-/** The shipped profile database (presets/devices/device-profiles.json embedded
-    at build time by tools/scripts/embed-device-profiles.py). */
+/** The shipped profile database: presets/devices/device-profiles.json as a
+    string literal in the committed, generated DeviceProfilesData.cpp. Edit
+    the JSON, then regenerate with tools/scripts/embed-device-profiles.py
+    (the build does not; test_device_profiles.cpp fails if the copy drifts). */
 const char* builtInProfilesJson() noexcept;
 
 class Database

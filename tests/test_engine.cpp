@@ -545,6 +545,110 @@ TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-lim
     CHECK (mix.getLatencySamples() > 0);
 }
 
+TEST_CASE ("MixEngine: master look-ahead follows the strips' latency profiles (0.5 ms only when all are Low Latency)")
+{
+    const std::vector<StripConfig> layout { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } };
+    const auto setAll = [] (MixEngine& m, LatencyProfileValue p) {
+        for (int s = 0; s < m.getNumStrips(); ++s)
+            m.params (s).set (LatencyProfile, static_cast<float> (p));
+    };
+
+    // Reported latency = where an impulse actually comes out (every module
+    // bypassed, so the strips and the master limiter are pure delays).
+    const auto impulsePosition = [] (MixEngine& m) {
+        const int n = 1024;
+        Planar game (8, n), music (2, n), chat (2, n), out (2, n);
+        game.ch[0][0] = game.ch[1][0] = 0.25f;
+        const AudioBlock gb = game.block(), mb = music.block(), cb = chat.block();
+        const AudioBlock* inputs[] = { &gb, &mb, &cb };
+        m.process (inputs, out.block());
+        const auto it = std::max_element (out.ch[0].begin(), out.ch[0].end(), [] (float a, float b) { return std::abs (a) < std::abs (b); });
+        return static_cast<int> (it - out.ch[0].begin());
+    };
+
+    MixEngine mix;
+    mix.configure (layout, kFs, 1024);
+    for (int s = 0; s < mix.getNumStrips(); ++s)
+        bypassAllModules (mix.params (s));
+
+    // Default (Balanced everywhere): 192 + master 1 ms (48) + detector 20.
+    setAll (mix, LatencyProfileValue::Balanced);
+    mix.configure (layout, kFs, 1024);
+    CHECK (mix.chain (0).getLatencySamples() == 192);
+    CHECK (mix.getLatencySamples() == 192 + 48 + 20);
+    CHECK (impulsePosition (mix) == mix.getLatencySamples());
+
+    // All strips on Low Latency (what the app does): 100 + 0.5 ms (24) + 20
+    // = 144 samples = 3.0 ms instead of 168.
+    setAll (mix, LatencyProfileValue::LowLatency);
+    CHECK (mix.needsReprepare());
+    mix.configure (layout, kFs, 1024);
+    CHECK (! mix.needsReprepare());
+    CHECK (mix.chain (0).getLatencySamples() == 100);
+    CHECK (mix.getLatencySamples() == 100 + 24 + 20);
+    CHECK (impulsePosition (mix) == mix.getLatencySamples());
+
+    // One strip back on Balanced: that is a structural change the host sees
+    // through needsReprepare(), and the re-configure pads every strip to 192
+    // and puts the master back on 1 ms.
+    mix.params (2).set (LatencyProfile, static_cast<float> (LatencyProfileValue::Balanced));
+    CHECK (mix.needsReprepare());
+    mix.configure (layout, kFs, 1024);
+    CHECK (mix.getLatencySamples() == 192 + 48 + 20);
+    CHECK (impulsePosition (mix) == mix.getLatencySamples());
+
+    // Quality anywhere: 1352 + 68.
+    mix.params (1).set (LatencyProfile, static_cast<float> (LatencyProfileValue::Quality));
+    CHECK (mix.needsReprepare());
+    mix.configure (layout, kFs, 1024);
+    CHECK (mix.getLatencySamples() == 1352 + 48 + 20);
+}
+
+TEST_CASE ("MixEngine: with all strips on Low Latency the 0.5 ms master still holds the ceiling")
+{
+    MixEngine mix;
+    const std::vector<StripConfig> layout { { "Game", 2, 0.0f, false }, { "Music", 2, 0.0f, false } };
+    mix.configure (layout, kFs, 256);
+    for (int s = 0; s < 2; ++s)
+    {
+        mix.params (s).set (LatencyProfile, static_cast<float> (LatencyProfileValue::LowLatency));
+        mix.params (s).set (BoostIntensity, 1.0f);
+    }
+    mix.configure (layout, kFs, 256);
+    REQUIRE (mix.getLatencySamples() == 100 + 24 + 20);
+
+    // Two hot, individually limited strips: their sum overshoots the -1 dBTP
+    // master ceiling by several dB, so the master works continuously.
+    const int total = 48000 * 3;
+    const auto a = makeProgramme (total, 0.9f, 7);
+    const auto b = makeProgramme (total, 0.9f, 99);
+    Planar game (2, 256), music (2, 256), out (2, total);
+    const AudioBlock gb = game.block(), mb = music.block();
+    const AudioBlock* inputs[] = { &gb, &mb };
+    float deepestGr = 0.0f;
+    AllocationGuard guard;
+    for (int pos = 0; pos + 256 <= total; pos += 256)
+    {
+        for (int c = 0; c < 2; ++c)
+        {
+            std::copy_n (a.ch[static_cast<size_t> (c)].begin() + pos, 256, game.ch[static_cast<size_t> (c)].begin());
+            std::copy_n (b.ch[static_cast<size_t> (c)].begin() + pos, 256, music.ch[static_cast<size_t> (c)].begin());
+        }
+        mix.process (inputs, out.block (pos, 256));
+        deepestGr = std::min (deepestGr, mix.getMasterGainReductionDb());
+    }
+    CHECK (guard.allocations() == 0);
+
+    CHECK_LE (deepestGr, -2.0); // the master really was limiting
+    TruePeakMeter tp;
+    tp.prepare (2);
+    tp.process (out.block());
+    CHECK_LE (tp.getMaxDbAllChannels(), -1.0 + 0.15);
+    for (int c = 0; c < 2; ++c)
+        CHECK_LE (peakAbs (out.ch[static_cast<size_t> (c)].data(), total), dbToGain (-1.0f) + 1e-6);
+    CHECK (mix.getMasterSafetyClipCount() == 0);
+}
+
 TEST_CASE ("Presets: JSON round trip, labels for choices, unknown keys ignored")
 {
     preset::Preset p = preset::makeDefault();

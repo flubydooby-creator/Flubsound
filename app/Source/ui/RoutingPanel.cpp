@@ -32,9 +32,26 @@ juce::String channelBadge (int channels)
 // =============================================================================
 // StripRow
 // =============================================================================
-class RoutingPanel::StripRow : public juce::Component
+class RoutingPanel::StripRow : public juce::Component, public juce::TooltipClient
 {
 public:
+    /** An application routed to this strip. Its state is drawn as a shape as
+        well as a colour, so it never relies on colour alone: accent dot with a
+        halo (playing), plain dot (running, idle), hollow ring (not running),
+        '!' badge in the palette's alert colour (routing / capture error). */
+    struct Chip
+    {
+        enum class State
+        {
+            Playing,
+            Idle,
+            NotRunning,
+            Error
+        };
+        juce::String name, executable, error;
+        State state = State::NotRunning;
+    };
+
     StripRow (RoutingPanel& p, int stripIndex)
         : panel (p), strip (stripIndex)
     {
@@ -79,11 +96,31 @@ public:
         }
     }
 
-    void setApps (std::vector<std::pair<juce::String, juce::Colour>> newChips)
+    void setApps (std::vector<Chip> newChips)
     {
         chips = std::move (newChips);
+        juce::StringArray states;
+        for (const auto& chip : chips)
+            states.add (describeChip (chip).replace ("\n", ": "));
+        setDescription ("Click to edit the " + name + " strip" + (states.isEmpty() ? juce::String() : ". Apps: " + states.joinIntoString ("; ")));
         layoutChips();
         repaint();
+    }
+
+    juce::String getTooltip() override
+    {
+        const auto pos = getMouseXYRelative();
+        for (size_t i = 0; i < chips.size() && i < chipBounds.size(); ++i)
+            if (chipBounds[i].contains (pos))
+                return describeChip (chips[i]);
+        if (hiddenChips > 0 && moreArea.contains (pos))
+        {
+            juce::StringArray hidden;
+            for (size_t i = chips.size() - static_cast<size_t> (hiddenChips); i < chips.size(); ++i)
+                hidden.add (describeChip (chips[i]));
+            return hidden.joinIntoString ("\n");
+        }
+        return {};
     }
 
     void refreshState()
@@ -179,22 +216,23 @@ public:
             g.setFont (Theme::font (11.0f));
             g.drawText ("No apps assigned", chipsArea.toFloat(), juce::Justification::centredLeft, false);
         }
+        const auto alert = Theme::statusColours (*this).hot; // red, or vermillion with the colour-blind palette
         for (size_t i = 0; i < chips.size() && i < chipBounds.size(); ++i)
         {
             const auto r = chipBounds[i].toFloat();
             if (r.isEmpty())
                 continue;
+            const auto state = chips[i].state;
             g.setColour (Palette::panelRaised);
             g.fillRoundedRectangle (r, r.getHeight() * 0.5f);
-            g.setColour (Palette::borderStrong);
+            g.setColour (state == Chip::State::Error ? alert.withAlpha (0.55f) : Palette::borderStrong);
             g.drawRoundedRectangle (r.reduced (0.5f), r.getHeight() * 0.5f, 1.0f);
-            auto content = r.reduced (8.0f, 0.0f);
-            g.setColour (chips[i].second);
-            g.fillEllipse (content.removeFromLeft (6.0f).withSizeKeepingCentre (6.0f, 6.0f));
+            auto content = r.reduced (6.0f, 0.0f);
+            drawChipState (g, content.removeFromLeft (11.0f), state, accent, alert);
             content.removeFromLeft (5.0f);
-            g.setColour (Palette::text.withAlpha (0.9f));
+            g.setColour (Palette::text.withAlpha (state == Chip::State::NotRunning ? 0.6f : 0.9f));
             g.setFont (Theme::font (11.5f));
-            g.drawText (chips[i].first, content, juce::Justification::centredLeft, true);
+            g.drawText (chips[i].name, content, juce::Justification::centredLeft, true);
         }
         if (hiddenChips > 0)
         {
@@ -234,16 +272,56 @@ public:
         {
             if (chipBounds[i].contains (e.getPosition()))
             {
-                panel.showChipMenu (chipExecutables[i]);
+                panel.showChipMenu (chips[i].executable, chips[i].error);
                 return;
             }
         }
         panel.controller.setSelectedStrip (strip);
     }
 
-    std::vector<juce::String> chipExecutables;
-
 private:
+    juce::String describeChip (const Chip& chip) const
+    {
+        switch (chip.state)
+        {
+            case Chip::State::Playing: return chip.name + ": playing (routed to " + name + ")";
+            case Chip::State::Idle: return chip.name + ": running, not playing";
+            case Chip::State::NotRunning: return chip.name + ": not running (routed to " + name + " when it starts)";
+            case Chip::State::Error: return chip.name + ": routing error\n" + chip.error;
+        }
+        return chip.name;
+    }
+
+    static void drawChipState (juce::Graphics& g, juce::Rectangle<float> area, Chip::State state, juce::Colour accent, juce::Colour alert)
+    {
+        const auto c = area.getCentre();
+        const auto circle = [c] (float diameter) { return juce::Rectangle<float> (diameter, diameter).withCentre (c); };
+        switch (state)
+        {
+            case Chip::State::Playing: // like the strip activity LED
+                g.setColour (accent.withAlpha (0.28f));
+                g.fillEllipse (circle (10.0f));
+                g.setColour (accent);
+                g.fillEllipse (circle (6.0f));
+                break;
+            case Chip::State::Idle:
+                g.setColour (Palette::muted);
+                g.fillEllipse (circle (6.0f));
+                break;
+            case Chip::State::NotRunning:
+                g.setColour (Palette::faint.brighter (0.35f));
+                g.drawEllipse (circle (6.5f), 1.3f);
+                break;
+            case Chip::State::Error:
+                g.setColour (alert);
+                g.fillEllipse (circle (11.0f));
+                g.setColour (Palette::well);
+                g.fillRoundedRectangle (juce::Rectangle<float> (1.7f, 4.3f).withCentre (c.translated (0.0f, -1.25f)), 0.85f);
+                g.fillEllipse (juce::Rectangle<float> (1.9f, 1.9f).withCentre (c.translated (0.0f, 2.75f)));
+                break;
+        }
+    }
+
     int chipLines (int width) const
     {
         if (chips.empty())
@@ -252,7 +330,7 @@ private:
         int lines = 1, x = 0;
         for (const auto& chip : chips)
         {
-            const int w = chipWidth (chip.first);
+            const int w = chipWidth (chip.name);
             if (x > 0 && x + w > available)
             {
                 ++lines;
@@ -265,7 +343,7 @@ private:
 
     static int chipWidth (const juce::String& text)
     {
-        return juce::jmin (150, static_cast<int> (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), text)) + 30);
+        return juce::jmin (150, static_cast<int> (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), text)) + 30); // 6 + 11 + 5 + text + 8
     }
 
     void layoutChips()
@@ -276,20 +354,28 @@ private:
         const int maxLines = juce::jmax (1, (chipsArea.getHeight() + 4) / 22);
         for (size_t i = 0; i < chips.size(); ++i)
         {
-            const int w = chipWidth (chips[i].first);
+            const int w = chipWidth (chips[i].name);
             if (x > chipsArea.getX() && x + w > chipsArea.getRight())
             {
+                if (line + 1 >= maxLines)
+                {
+                    hiddenChips = static_cast<int> (chips.size() - i);
+                    break;
+                }
                 ++line;
                 x = chipsArea.getX();
                 y += 22;
             }
-            if (line >= maxLines)
-            {
-                hiddenChips = static_cast<int> (chips.size() - i);
-                break;
-            }
             chipBounds[i] = { x, y, juce::jmin (w, chipsArea.getRight() - x), 18 };
             x += w + 6;
+        }
+        // "+N" goes after the last visible chip on the last line; a chip it
+        // would overlap is hidden as well.
+        for (auto i = chips.size() - static_cast<size_t> (hiddenChips); hiddenChips > 0 && i > 0 && x > chipsArea.getX() && x + 30 > chipsArea.getRight(); --i)
+        {
+            x = chipBounds[i - 1].getX();
+            chipBounds[i - 1] = {};
+            ++hiddenChips;
         }
         moreArea = { x, y, 30, 18 };
     }
@@ -302,7 +388,7 @@ private:
     IconButton mute { "Mute", Icons::speaker() };
     bool selected = false, active = false;
     std::array<float, 2> levels { -100.0f, -100.0f };
-    std::vector<std::pair<juce::String, juce::Colour>> chips;
+    std::vector<Chip> chips;
     std::vector<juce::Rectangle<int>> chipBounds;
     int hiddenChips = 0;
     juce::Rectangle<int> ledArea, titleArea, gainTextArea, meterArea, chipsArea, moreArea;
@@ -380,28 +466,33 @@ void RoutingPanel::refreshRouting()
 {
     auto& routing = controller.getRouting();
     const auto& apps = routing.getApps();
-    const auto accent = Theme::accent (*this);
 
     for (auto& row : rows)
     {
         const auto stripName = controller.getStripName (row->getStrip());
-        std::vector<std::pair<juce::String, juce::Colour>> chips;
-        row->chipExecutables.clear();
+        std::vector<StripRow::Chip> chips;
         for (const auto& route : routing.getRoutes())
         {
             if (! route.stripName.equalsIgnoreCase (stripName))
                 continue;
-            auto colour = Palette::faint; // not running
+            // Every running instance counts: an error wins, then playing, then idle.
+            using State = StripRow::Chip::State;
+            StripRow::Chip chip { displayNameOf (route.executable), route.executable, {}, State::NotRunning };
             for (const auto& app : apps)
             {
-                if (AppRouting::executablesMatch (app.executable, route.executable))
+                if (! AppRouting::executablesMatch (app.executable, route.executable) || chip.state == State::Error)
+                    continue;
+                if (app.error.isNotEmpty())
                 {
-                    colour = app.error.isNotEmpty() ? Palette::red : (app.isActive ? accent : Palette::muted);
-                    break;
+                    chip.state = State::Error;
+                    chip.error = app.error;
                 }
+                else if (app.isActive)
+                    chip.state = State::Playing;
+                else if (chip.state == State::NotRunning)
+                    chip.state = State::Idle;
             }
-            chips.emplace_back (displayNameOf (route.executable), colour);
-            row->chipExecutables.push_back (route.executable);
+            chips.push_back (std::move (chip));
         }
         row->setApps (std::move (chips));
     }
@@ -505,7 +596,7 @@ void RoutingPanel::promptForExecutable (const juce::String& stripName)
                              true);
 }
 
-void RoutingPanel::showChipMenu (const juce::String& executable)
+void RoutingPanel::showChipMenu (const juce::String& executable, const juce::String& error)
 {
     auto& routing = controller.getRouting();
     const auto current = routing.getStripNameForExecutable (executable);
@@ -518,15 +609,30 @@ void RoutingPanel::showChipMenu (const juce::String& executable)
     }
     juce::PopupMenu menu;
     menu.addSectionHeader (displayNameOf (executable));
+    if (error.isNotEmpty())
+    {
+        // Shortened here (menus do not wrap); the item opens the full text.
+        juce::PopupMenu::Item item ("Routing error: " + (error.length() > 60 ? error.substring (0, 57).trimEnd() + "..." : error));
+        item.itemID = 2;
+        item.colour = Theme::statusColours (*this).hot;
+        menu.addItem (item);
+        menu.addSeparator();
+    }
     menu.addSubMenu ("Move to strip", move);
     menu.addItem (1, "Remove from " + current);
 
     juce::Component::SafePointer<RoutingPanel> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withMousePosition(),
-                        [safe, executable] (int result)
+                        [safe, executable, error] (int result)
                         {
                             if (safe == nullptr || result == 0)
                                 return;
+                            if (result == 2)
+                            {
+                                juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
+                                                                        displayNameOf (executable) + " - routing error", error, "OK", safe);
+                                return;
+                            }
                             auto& r = safe->controller.getRouting();
                             if (result == 1)
                                 r.removeRoute (executable);

@@ -69,7 +69,9 @@ private:
     void applyMode (flub::param::ModeValue mode);
     void resetAnalysis();
     void requestLoudnessReset();
-    void openSettings();
+    /** Opens Settings (on the Audio page), or brings the open dialog to the
+        front; forceAudioPage also switches an open dialog to the Audio page. */
+    void openSettings (bool forceAudioPage = false);
     void refreshDeviceBanner();
     juce::String currentStripSignature() const;
     void loadUiPreferences();

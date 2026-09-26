@@ -290,10 +290,10 @@ Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, 
 | Maximizer clipper oversampling | 4× HQ: 36 smp | 4× HQ: 36 smp | 2× short: 16 smp |
 | True-peak limiter look-ahead + detector | 2 ms + 20 = 116 smp | 1.5 ms + 20 = 92 smp | 0.5 ms + 20 = 44 smp |
 | **Total** | **1352 smp ≈ 28.2 ms** | **192 smp = 4.0 ms** | **100 smp ≈ 2.1 ms** |
-| *Desktop app only:* master true-peak limiter after the strip sum (`MixEngine`, 1 ms look-ahead + 20) | +68 smp | +68 smp | +68 smp |
-| **App engine total** (`MixEngine::getLatencySamples()`) | **1420 smp ≈ 29.6 ms** | **260 smp ≈ 5.4 ms** | **168 smp = 3.5 ms** |
+| *Desktop app only:* master true-peak limiter after the strip sum (`MixEngine`; 1 ms look-ahead + 20, or 0.5 ms + 20 when every strip runs Low Latency) | +68 smp | +68 smp | +44 smp |
+| **App engine total** (`MixEngine::getLatencySamples()`) | **1420 smp ≈ 29.6 ms** | **260 smp ≈ 5.4 ms** | **144 smp = 3.0 ms** |
 
-All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app's header shows device input + output latency + engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots.
+All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app applies one latency profile to all strips; `MixEngine::configure()` gives the master limiter the Low Latency look-ahead (0.5 ms) only when every strip runs that profile, and 1 ms otherwise, so a mix of profiles (possible in the engine) pays the larger master latency on top of the largest strip. The app's header shows device input + output latency + engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots.
 
 ### 5.2 Added end-to-end latency (what the user feels), Windows driver path
 
@@ -302,11 +302,11 @@ All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have
 | Read safety margin on the virtual endpoint | ~1 ms | ~1 ms |
 | Engine block (128 frames) | 2.7 ms | 2.7 ms |
 | Algorithmic, strip chain (§5.1) | 2.1 ms | 4.0 ms |
-| Master limiter (§5.1) | 1.4 ms | 1.4 ms |
+| Master limiter (§5.1) | 0.9 ms | 1.4 ms |
 | Output buffering (device period, double-buffered) | ~2.7 ms | ~3–4 ms |
-| **Added total (estimate)** | **≈ 10 ms** | **≈ 12–13 ms** |
+| **Added total (estimate)** | **≈ 9.5 ms** | **≈ 12–13 ms** |
 
-Low Latency + exclusive meets the ≤ 10–12 ms target; Balanced + shared low-latency sits at its upper edge. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why `IAudioClient3` low-latency shared mode or exclusive mode is recommended. The app does not pick it by itself yet: it opens JUCE's default device type (*Windows Audio*, shared) unless the user selects *Windows Audio (Low Latency Mode)* or *(Exclusive Mode)* in Settings > Audio (defaulting to low-latency mode is roadmap). The app's latency readout adds the device's reported input and output latencies to the engine latency (and the capture FIFO target, if any); a loopback measurement tool is roadmap (`07-roadmap.md` item 1.2). These figures are estimates for the driver path, which is not built yet.
+Low Latency + exclusive meets the ≤ 10–12 ms target; Balanced + shared low-latency sits at its upper edge. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why `IAudioClient3` low-latency shared mode or exclusive mode is recommended. Without a saved device choice the app opens JUCE's *Windows Audio (Low Latency Mode)* type (`AudioEngineHost::openDevice`), falling back to plain *Windows Audio* if the device cannot be opened in that mode; a type chosen in Settings > Audio (e.g. *(Exclusive Mode)*) is saved and always wins. The app's latency readout adds the device's reported input and output latencies to the engine latency (and the capture FIFO target, if any); a loopback measurement tool is roadmap (`07-roadmap.md` item 1.2). These figures are estimates for the driver path, which is not built yet.
 
 ---
 

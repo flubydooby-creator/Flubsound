@@ -7,7 +7,7 @@
 // invariance.
 //
 // What the true-peak guarantee covers: the limiter's 4x detector
-// (TruePeakDetector) is flat to 0.39 fs and rolls off above it, so the
+// (TruePeakDetector) is flat to 0.4535 fs and rolls off above it, so the
 // "true peak <= ceiling + 0.1 dB" check is made on programme whose spectrum
 // is inside that band (band-limited noise and squares, sines, impulses) and
 // is judged by the ideal (full-band sinc) reconstruction. Raw full-band
@@ -478,8 +478,9 @@ TEST_CASE ("TruePeakLimiter: full-band synthetic signals hold the sample ceiling
 {
     // Raw white noise and aliased squares carry full-level content up to
     // fs/2. The sample-peak guarantee is exact; their ideal-reconstruction
-    // peak can exceed the ceiling because the 4x detector rolls off above
-    // 0.39 fs (-1.7 dB at 0.45 fs). This bounds that known limitation.
+    // peak can exceed the ceiling because the 4x detector is flat only to
+    // 0.4535 fs and, like every 4x interpolator, rolls off towards fs/2.
+    // This bounds that known limitation.
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
         const int n = static_cast<int> (fs * 0.15);

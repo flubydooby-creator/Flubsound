@@ -89,7 +89,7 @@ public:
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept override;
-    void process (const AudioBlock& block) noexcept override;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Headphone Virtualizer"; }
 
     /** RT-safe. Angle / head-radius changes glide (one-pole, 30 ms) and the

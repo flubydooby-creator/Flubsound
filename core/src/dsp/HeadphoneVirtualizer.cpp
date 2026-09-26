@@ -864,7 +864,7 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         std::fill_n (block.channel (c) + start, length, 0.0f);
 }
 
-void HeadphoneVirtualizer::process (const AudioBlock& block) noexcept
+void HeadphoneVirtualizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numSamples = block.numSamples;
     const int numInputs = std::min (block.numChannels, kMaxChannels);

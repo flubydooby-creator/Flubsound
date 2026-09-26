@@ -72,7 +72,36 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     JUCE_ASSERT_MESSAGE_THREAD
     closeDevice();
 
+   #if JUCE_WINDOWS
+    // Nothing saved (first run, or the user never changed the device): prefer
+    // JUCE's IAudioClient3 low-latency shared mode to the default "Windows
+    // Audio" type. A saved choice always wins; if the device cannot be opened
+    // in that mode the default type is used.
+    juce::String fallbackType;
+    if (savedState == nullptr)
+    {
+        const juce::String lowLatencyType ("Windows Audio (Low Latency Mode)");
+        for (auto* type : deviceManager.getAvailableDeviceTypes())
+        {
+            if (type->getTypeName() == lowLatencyType && deviceManager.getCurrentAudioDeviceType() != lowLatencyType)
+            {
+                fallbackType = deviceManager.getCurrentAudioDeviceType();
+                deviceManager.setCurrentAudioDeviceType (lowLatencyType, false); // not "chosen": nothing gets persisted
+                break;
+            }
+        }
+    }
+   #endif
+
     auto error = deviceManager.initialise (maxInputChannels, maxOutputChannels, savedState, true);
+
+   #if JUCE_WINDOWS
+    if (fallbackType.isNotEmpty() && (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr))
+    {
+        deviceManager.setCurrentAudioDeviceType (fallbackType, false);
+        error = deviceManager.initialise (maxInputChannels, maxOutputChannels, nullptr, true);
+    }
+   #endif
 
     // Attaching triggers audioDeviceAboutToStart -> configureEngine for the
     // device's real sample rate / block size.

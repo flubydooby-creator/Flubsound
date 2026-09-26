@@ -479,7 +479,7 @@ void ProcessingChain::downmixToStereo (const AudioBlock& io) noexcept
     }
 }
 
-void ProcessingChain::process (const AudioBlock& io) noexcept
+void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 {
     const int n = io.numSamples;
     if (n <= 0)

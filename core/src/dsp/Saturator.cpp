@@ -494,7 +494,7 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
     }
 }
 
-void Saturator::process (const AudioBlock& block) noexcept
+void Saturator::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numChannels = std::min (block.numChannels, spec.numChannels);
     const int numSamples = block.numSamples;

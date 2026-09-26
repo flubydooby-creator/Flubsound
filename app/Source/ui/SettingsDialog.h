@@ -5,7 +5,8 @@
 //               sample rate, buffer size, channels); the selection is
 //               persisted by the EngineController automatically. Above it:
 //               the matched headset / device profile, its connection, the
-//               safety ceiling applied to the master limiter and guidance.
+//               safety ceiling applied to the master limiter and all of its
+//               guidance (the page scrolls when that is long).
 //   Processing  latency profile (applied to every strip and both A/B banks;
 //               the engine re-prepares with a brief dropout), live latency
 //               breakdown, device-input routing, per-app routing method and
@@ -65,13 +66,15 @@ public:
     void showPage (Page page);
 
     /** Output device + matched headset profile, connection, safety ceiling and
-        the profile's guidance (EngineController::getDeviceAdvice). */
-    static juce::String describeOutputDevice (EngineController& controller, int maxMessages = 2);
+        the profile's guidance (EngineController::getDeviceAdvice), one line
+        each; maxMessages < 0 includes every guidance message. */
+    static juce::String describeOutputDevice (EngineController& controller, int maxMessages = -1);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
 
 private:
+    class AudioPage;
     class ProcessingPage;
     class HotkeysPage;
     class GeneralPage;
@@ -80,12 +83,12 @@ private:
 
     EngineController& controller;
     std::array<juce::TextButton, 4> navButtons;
-    std::unique_ptr<juce::AudioDeviceSelectorComponent> audioPage;
+    std::unique_ptr<AudioPage> audioPage;
+    juce::Viewport audioView; // the Audio page scrolls when the guidance is long
     std::unique_ptr<ProcessingPage> processingPage;
     std::unique_ptr<HotkeysPage> hotkeysPage;
     std::unique_ptr<GeneralPage> generalPage;
     Page current = Page::Audio;
-    juce::String deviceText;
-    juce::Rectangle<int> navArea, pageArea, deviceArea;
+    juce::Rectangle<int> navArea, pageArea;
 };
 } // namespace flub::app::ui

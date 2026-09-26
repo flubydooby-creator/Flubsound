@@ -428,7 +428,7 @@ TEST_CASE ("LoudnessMaximizer: with 18 dB drive the ceiling holds on noise and d
     // clipper's own THD telemetry stays below -12 dB (it removes < 6 % of the
     // energy - already 18 dB beyond the SafetyGovernor's -30 dB budget).
     // Harder clipping creates intermodulation right up to fs/2, above the
-    // limiter's 4x detector band (flat to 0.39 fs); there the ideal-
+    // limiter's 4x detector band (flat to 0.4535 fs); there the ideal-
     // reconstruction peak may exceed the ceiling slightly (measured
     // <= +0.3 dB), which is bounded here as a documented limitation.
     for (double fs : { 44100.0, 48000.0, 96000.0 })

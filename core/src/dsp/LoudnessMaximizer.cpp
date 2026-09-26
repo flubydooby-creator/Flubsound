@@ -509,7 +509,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
     limiter.process (seg);
 }
 
-void LoudnessMaximizer::process (const AudioBlock& block) noexcept
+void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numCh = std::min ({ block.numChannels, spec.numChannels, kMaxChannels });
     const int numSamples = block.numSamples;

@@ -79,7 +79,7 @@ public:
 
     /** In-place processing. block.numSamples <= spec.maxBlockSize and
         block.numChannels <= spec.numChannels are guaranteed by the caller. */
-    virtual void process (const AudioBlock& block) noexcept = 0;     // [3]
+    virtual void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING = 0; // [3]
 
     virtual int latencySamples() const noexcept { return 0; }        // [4]
     virtual const char* name() const noexcept = 0;
@@ -151,7 +151,7 @@ class ScopedNoDenormals              // RAII: FTZ | DAZ (SSE MXCSR 0x8040) or FZ
 
 1. `prepare()` is the only place a module may allocate or do slow work: filter design tables, delay lines, FIR taps.
 2. `reset()` runs on the audio thread. The chain calls it after dropping a NaN block, and `ModuleSlot` calls it when a module is re-activated. It must therefore be allocation-free.
-3. Processing is **in place** on a view. No module owns I/O buffers. Sub-blocks (`subBlock`, `firstChannels`) are free, which is why the maximizer can split a host block into `maxBlockSize` segments and the chain can take a stereo view of an 8-channel block.
+3. Processing is **in place** on a view. No module owns I/O buffers. Sub-blocks (`subBlock`, `firstChannels`) are free, which is why the maximizer can split a host block into `maxBlockSize` segments and the chain can take a stereo view of an 8-channel block. `process()` is declared `FLUB_NONBLOCKING` (`common/Realtime.h`) in the base and in every override: in the `FLUB_RTSAN` build that is `[[clang::nonblocking]]`, and RealtimeSanitizer aborts on anything below it that allocates, frees, locks or blocks (CI job `rtsan`); elsewhere it expands to nothing.
 4. Latency is a virtual *query*, not a setter. It must be constant between `prepare()` calls, because the chain sums slot latencies once, in `ProcessingChain::prepare()`, and sizes its global dry delay from the sum.
 5. `kMaxChannels = 8` bounds every per-channel `std::array` in the engine, so per-channel state needs no heap.
 6. `AudioBlock` is a small value type (8 pointers + 2 ints). Passing it by `const&` or copying it is cheap.
@@ -514,9 +514,10 @@ public:
 
     /** RT. io.numChannels == config.inputChannels, numSamples <= maxBlockSize.
         Output is written to channels 0/1; channels >= 2 are cleared. */
-    void process (const AudioBlock& io) noexcept;
+    void process (const AudioBlock& io) noexcept FLUB_NONBLOCKING;
 
     int getLatencySamples() const noexcept { return totalLatency; }
+    param::LatencyProfileValue getLatencyProfile() const noexcept; // as prepared (MixEngine's master look-ahead)
     bool needsReprepare() const noexcept;               // latency profile changed since prepare()
     /** Centre / corner frequency of dynamic-EQ mode band 4..7 in `mode` (GUI markers). */
     static float modeBandFrequency (param::ModeValue mode, int band) noexcept;
@@ -1180,7 +1181,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
 | `latencySamples()` | `oversampler.latencySamples() + limiter.latencySamples()`, the same with the clipper on or off |
 | Clip oversampler round trip | 4× High 36 · 4× Low 19 · 2× High 32 · 2× Low 16 · 1× 0 samples |
 | Limiter | `L + D`: `L = round(lookaheadMs · fs / 1000)` (look-ahead clamped to 0–10 ms; non-finite → 1.5 ms), `D = TruePeakDetector::kDelay = 20` with true-peak detection, else 0 |
-| Limiter attack / hold | true-peak mode: `Kh = min(8, L / 3)`. Attack = linear ramp of `L − Kh + 1` samples that reaches the required gain `Kh` samples before the peak and holds it until `Kh` samples after. At 48 kHz: `Kh = 8`, ramps of 17 / 65 / 89 samples for 0.5 / 1.5 / 2 ms (master limiter, 1 ms: 41). Sample-peak mode: `Kh = 0`, ramp `L + 1` |
+| Limiter attack / hold | true-peak mode: `Kh = min(8, L / 3)`. Attack = linear ramp of `L − Kh + 1` samples that reaches the required gain `Kh` samples before the peak and holds it until `Kh` samples after. At 48 kHz: `Kh = 8`, ramps of 17 / 65 / 89 samples for 0.5 / 1.5 / 2 ms (master limiter: 1 ms → 41, or 0.5 ms → 17 when every strip runs Low Latency). Sample-peak mode: `Kh = 0`, ramp `L + 1` |
 | Class defaults (4× High, 1.5 ms) | 36 + 72 + 20 = **128** samples at 48 kHz |
 | Chain profiles at 48 kHz | Quality 36 + 116 = 152 · Balanced 36 + 92 = 128 · Low Latency 16 + 44 = 60 |
 | Glue detector | peak-hold buckets of 800 / 400 / 12 samples at 48 kHz (`fs / (2 · 30, 60, 2000 Hz)`), follower 5 ms attack / 80 ms release |
@@ -1882,7 +1883,7 @@ void StereoSpatializer::controlTick() noexcept
 
 ```
 strip 0 (Game, 7.1) ─ chain ─ pad ─ ×gain ─┐
-strip 1 (Music, 2)  ─ chain ─ pad ─ ×gain ─┼─ Σ ─► master TruePeakLimiter (−1 dBTP, 1 ms LA, TP on) ─► out (2 ch)
+strip 1 (Music, 2)  ─ chain ─ pad ─ ×gain ─┼─ Σ ─► master TruePeakLimiter (−1 dBTP, 1 ms LA or 0.5 ms if all Low Latency, TP on) ─► out (2 ch)
 strip 2 (Chat, 2)   ─ chain ─ pad ─ ×gain ─┘      pad = max strip latency − own latency
 ```
 
@@ -1900,6 +1901,7 @@ class MixEngine
 {
 public:
     static constexpr int kMaxStrips = 4;
+    static constexpr float kMasterLookaheadLowLatencyMs = 0.5f, kMasterLookaheadMs = 1.0f; // [3]
 
     void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize); // non-RT
     param::ParameterStore& params (int strip) noexcept;          // one store (= profile) per strip
@@ -1909,7 +1911,7 @@ public:
     void setMasterCeilingDb (float db) noexcept;
 
     /** RT. inputs[i] feeds strip i; out is stereo. Strips with no input pass nullptr. */
-    void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept;
+    void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept FLUB_NONBLOCKING;
 
     int getLatencySamples() const noexcept;                      // max strip latency + master limiter
     float getMasterGainReductionDb() const noexcept;
@@ -1948,7 +1950,11 @@ void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, i
     for (auto& s : strips)
         s->pad.prepare (2, maxStripLatency - s->chain->getLatencySamples());
 
-    master.setLookaheadMs (1.0f);                                                        // [3]
+    // The master look-ahead follows the strips; a profile change re-configures
+    // through needsReprepare().
+    const auto isLowLatency = [] (const auto& s) { return s->chain->getLatencyProfile() == param::LatencyProfileValue::LowLatency; };
+    const bool allLowLatency = ! strips.empty() && std::all_of (strips.begin(), strips.end(), isLowLatency);
+    master.setLookaheadMs (allLowLatency ? kMasterLookaheadLowLatencyMs : kMasterLookaheadMs); // 0.5 / 1 ms [3]
     master.setTruePeakDetection (true);
     master.prepare ({ sr, maxBlockSize, 2 });
     LimiterParams lp;
@@ -1986,7 +1992,7 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
 
 1. One `ParameterStore` + `ProcessingChain` per strip = per-application profiles. Stores are moved into the new strips on re-configuration, so a sample-rate change or a structural re-prepare keeps every strip's settings (test *MixEngine: strips are summed, padded to equal latency and master-limited*).
 2. Strips may run **different latency profiles** (e.g. Game on Low Latency, Music on Balanced). Each is padded to the largest strip latency, so relative A/V sync between applications is preserved.
-3. The master `TruePeakLimiter` (1 ms look-ahead + 20-sample detector = 68 samples at 48 kHz, −1 dBTP, 50 ms auto release) only engages when the *sum* of individually limited strips overshoots. `getLatencySamples()` = max strip latency + 68 at 48 kHz.
+3. The master `TruePeakLimiter` (−1 dBTP, 50 ms auto release) only engages when the *sum* of individually limited strips overshoots. Its look-ahead follows the strips: 0.5 ms + 20-sample detector = 44 samples at 48 kHz when every strip runs Low Latency (the app applies one profile to all strips), otherwise 1 ms + 20 = 68. `getLatencySamples()` = max strip latency + that: 100 + 44 = 144 (Low Latency), 192 + 68 = 260 (Balanced) at 48 kHz (test *MixEngine: master look-ahead follows the strips' latency profiles*). A latency-profile change is structural, so `needsReprepare()` brings the host back to `configure()`, which re-decides.
 4. A strip with no input this block (nullptr, or too few channels) is skipped and contributes nothing.
 5. The strip gain, mute and master-ceiling setters are allocation-free, but they write plain (non-atomic) fields and smoothers, so they belong on the audio thread. The desktop host keeps the GUI's values in its own atomics and forwards changes at the start of each block on the audio thread (`AudioEngineHost::processBlock()` → `applyPendingMixSettings()` in `app/Source/engine/AudioEngineHost.cpp`). Per-strip *processing* parameters go through each strip's `ParameterStore` as usual.
 
@@ -2167,7 +2173,7 @@ mix: out peak -1.06 dBFS, deepest master limiter GR -1.57 dB
 | `effective 2.61 dB` | MacroMap staging of Boost Intensity 0.6 onto `max.drive` (worked example in §3). The base value stays 0. |
 | `B (bypass) … -6.4 LUFS` | The A/B switch to bank B (`bypass` on) plays the dry path at the **same loudness** as the processed signal: loudness-matched bypass. |
 | `after re-prepare: 100` | `needsReprepare()` flagged the structural change; after `prepare()` the Low Latency profile is 100 samples (2.08 ms). |
-| `mix latency: 260` | The Music strip (Balanced, 192) sets the pad; the Game strip (Low Latency, 100) is padded by 92. The master limiter adds 48 + 20 = 68. |
+| `mix latency: 260` | The Music strip (Balanced, 192) sets the pad; the Game strip (Low Latency, 100) is padded by 92. Not every strip is Low Latency, so the master limiter keeps its 1 ms look-ahead and adds 48 + 20 = 68. |
 | `deepest master limiter GR -1.57 dB` | The two individually limited strips overshoot when summed. The master limiter catches it, and the output peaks at −1.06 dBFS, under its −1 dBTP ceiling. |
 
 **What a real host does differently.** The app (`app/Source/engine`) and the plug-in do the same things in a device callback or `processBlock`. `prepare()` / `configure()` for a structural change happens on the message thread after detaching the callback; see [01 — Architecture §3](01-architecture.md#3-process--thread-model). The offline renderer (`tools/flubsound-cli/OfflineRenderer.cpp`) adds a "prime" step: one silent `process()` block delivers every parameter to the modules, then `reset()` snaps their smoothers onto those targets, so an offline render has no start-up glide. It then drops the first `getLatencySamples()` output samples and flushes the same number of zeros for sample alignment.

@@ -281,7 +281,7 @@ void SpectralNoiseGate::clearChannel (ChannelState& st) noexcept
 }
 
 //==============================================================================
-void SpectralNoiseGate::process (const AudioBlock& block) noexcept
+void SpectralNoiseGate::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int nch = std::min (block.numChannels, numChannels);
     if (! prepared || nch <= 0)

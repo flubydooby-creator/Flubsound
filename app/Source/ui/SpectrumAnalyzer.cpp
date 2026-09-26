@@ -73,10 +73,20 @@ void SpectrumAnalyzer::rebuildBands()
     const double edge = std::pow (2.0, 1.0 / 12.0);
     const int maxBin = kFftSize / 2 - 1;
 
-    // Sine-calibrated (Hann coherent gain 0.5: amplitude = 4 |X| / N) plus the
-    // bandwidth of a 1/6-octave band at 1 kHz relative to one bin.
+    // dBFS scale (a full-scale sine reads 0 dB, noise its band power on the
+    // same scale):
+    //   20 log10 (4 / N)          Hann coherent gain 0.5: amplitude = 4 |X| / N
+    //   - 10 log10 (1.5)          Hann equivalent noise bandwidth (bins): a tone's
+    //                             |X|^2 summed over the band is 1.5x its peak bin's
+    //   + 10 log10 (B1k / binHz)  mean bin power -> power of a 1/6-octave band
+    //                             at 1 kHz (bandwidth B1k)
+    // Bands hold whole bins, so a band's width only approximates its nominal
+    // width: a 0 dBFS 1 kHz sine reads +0.3 dB at 44.1 kHz and +0.4 dB at
+    // 48 kHz (its band spans 9 bins = 105 Hz instead of 115.6 Hz).
     const double bandwidthAt1k = 1000.0 * (edge - 1.0 / edge);
-    calibrationDb = static_cast<float> (20.0 * std::log10 (4.0 / kFftSize) + 10.0 * std::log10 (bandwidthAt1k / binHz));
+    const double hannEnbwBins = 1.5;
+    calibrationDb = static_cast<float> (20.0 * std::log10 (4.0 / kFftSize) - 10.0 * std::log10 (hannEnbwBins)
+                                        + 10.0 * std::log10 (bandwidthAt1k / binHz));
 
     bands.resize (static_cast<size_t> (kNumPoints));
     for (int i = 0; i < kNumPoints; ++i)

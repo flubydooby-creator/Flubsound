@@ -6,17 +6,22 @@
 //
 //   Windows : RegisterHotKey on a message-only window; per-app routing via
 //             the (undocumented, version-dependent) IAudioPolicyConfig
-//             "persisted default endpoint" API with a documented fallback
-//             (ms-settings:apps-volume); per-process capture via
+//             "persisted default endpoint" API, compiled in only with
+//             FLUB_ENABLE_UNDOCUMENTED_ROUTING (otherwise each move fails
+//             and points to the documented fallback, ms-settings:apps-volume);
+//             per-process capture via
 //             AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK (Win10 20348+);
 //             EcoQoS opt-out via SetProcessInformation(ProcessPowerThrottling);
 //             MMCSS "Pro Audio" for the audio thread.
-//   macOS   : Carbon RegisterEventHotKey; per-app capture via Core Audio
-//             process taps (CATapDescription, macOS 14.2+); routing = tap
-//             with mute-when-tapped.
-//   Linux   : xdg-desktop-portal GlobalShortcuts (Wayland) / XGrabKey (X11);
-//             per-app routing by moving PipeWire/Pulse sink-inputs to the
-//             "Flubsound <Strip>" null sinks.
+//   macOS   : Carbon RegisterEventHotKey. Per-app capture and routing are
+//             designed, not implemented (isSupported() == false; roadmap
+//             3.2): capture via Core Audio process taps (CATapDescription,
+//             macOS 14.2+), routing = tap with mute-when-tapped.
+//   Linux   : per-app routing by moving PipeWire/Pulse sink-inputs to the
+//             "flubsound_<strip>" null sinks (pactl). Global hotkeys are
+//             designed, not implemented (isSupported() == false; roadmap):
+//             xdg-desktop-portal GlobalShortcuts (Wayland) / XGrabKey (X11).
+//             No per-process capture: apps are routed into the null sinks.
 #pragma once
 
 #include <cstdint>
@@ -145,7 +150,8 @@ struct SystemTuning
     static bool disablePowerThrottling();
 
     /** Promote the calling thread for audio (MMCSS "Pro Audio" on Windows,
-        time-constraint policy on macOS, SCHED_FIFO / rtkit on Linux).
+        time-constraint policy on macOS, SCHED_FIFO on Linux where
+        RLIMIT_RTPRIO allows it; RealtimeKit is not used).
         Returns an opaque handle to pass to revertAudioThread (may be null). */
     static void* promoteAudioThread();
     static void revertAudioThread (void* handle);

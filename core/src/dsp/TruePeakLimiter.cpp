@@ -251,7 +251,7 @@ void TruePeakLimiter::setParams (const LimiterParams& newParams) noexcept
 }
 
 //==============================================================================
-void TruePeakLimiter::process (const AudioBlock& block) noexcept
+void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     const int numSamples = block.numSamples;
     const int numCh = std::min ({ block.numChannels, spec.numChannels, kMaxChannels });

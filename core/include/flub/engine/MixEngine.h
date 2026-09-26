@@ -6,7 +6,9 @@
 // and the sum passes a master safety true-peak limiter (-1 dBTP default)
 // before the physical output. Different strips may run different latency
 // profiles; each is padded to the largest strip latency so relative A/V sync
-// between applications is preserved.
+// between applications is preserved. The master look-ahead follows the
+// strips: 0.5 ms when every strip runs the Low Latency profile, 1 ms
+// otherwise (24 / 48 samples + the 20-sample detector at 48 kHz).
 //
 //   strip 0 (Game, 7.1) --chain--> pad --+
 //   strip 1 (Music, 2)  --chain--> pad --+--> sum -> master limiter -> out
@@ -17,6 +19,7 @@
 #pragma once
 
 #include "ProcessingChain.h"
+#include "flub/common/Realtime.h"
 #include "flub/dsp/TruePeakLimiter.h"
 
 #include <memory>
@@ -37,8 +40,11 @@ class MixEngine
 {
 public:
     static constexpr int kMaxStrips = 4;
+    /** Master limiter look-ahead: all strips on Low Latency / any other mix. */
+    static constexpr float kMasterLookaheadLowLatencyMs = 0.5f, kMasterLookaheadMs = 1.0f;
 
-    /** Non-RT. Creates (or re-creates) strips and prepares everything. */
+    /** Non-RT. Creates (or re-creates) strips and prepares everything; also
+        picks the master look-ahead from the strips' latency profiles. */
     void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
 
     int getNumStrips() const noexcept { return static_cast<int> (strips.size()); }
@@ -54,14 +60,16 @@ public:
 
     /** RT. inputs[i] feeds strip i (channel count per its config, may be
         modified in place); out is stereo. Strips with no input pass nullptr. */
-    void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept;
+    void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept FLUB_NONBLOCKING;
 
     /** Total output latency (max strip latency + master limiter). */
     int getLatencySamples() const noexcept;
     float getMasterGainReductionDb() const noexcept { return master.getGainReductionDb(); }
     uint64_t getMasterSafetyClipCount() const noexcept { return master.getSafetyClipCount(); }
 
-    /** Any chain that needs a structural re-prepare (host polls this). */
+    /** Any chain that needs a structural re-prepare (host polls this). A
+        latency-profile change is structural, so re-configuring also
+        re-decides the master look-ahead. */
     bool needsReprepare() const noexcept;
 
 private:
