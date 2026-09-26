@@ -23,8 +23,11 @@
 // air lift (BoostBelow high shelf 10 kHz).
 #pragma once
 
+#include "EnvelopeFollower.h"
 #include "ParametricEq.h"
 #include "Processor.h"
+#include "Svf.h"
+#include "flub/common/SmoothedValue.h"
 
 #include <array>
 #include <atomic>
@@ -78,8 +81,55 @@ public:
 
 private:
     // ---- implementation-defined below this line (owned by the .cpp author) ----
+    struct BandState
+    {
+        bool active = false;                  // being processed (enabled, or fading out / re-typing)
+        DynEqMode mode = DynEqMode::CutAbove; // mode / shape currently running (targets may differ
+        EqBandType shape = EqBandType::Bell;  // while a click-free swap is in progress)
+
+        // Control-rate smoothing (one tick = kControlInterval samples).
+        LinearSmoothedValue fade;             // 0..1, multiplies the total gain in dB
+        OnePoleSmoother logFreq, logQ, thresholdDb, ratio, rangeDb, staticGainDb, noiseFloorDb;
+        GainSmoother dynGain;                 // dynamic gain (dB), attack = detector level rising
+        float freq = 1000.0f, q = 1.0f;       // current (smoothed) geometry
+
+        // Sidechain detector (reads the module's dry input) and EQ section.
+        SvfCoeffs detCoeffs, eqCoeffs;
+        std::array<SvfState, kMaxChannels> detState {}, eqState {};
+
+        // After a coefficient update the EQ glides from the previous set to
+        // eqCoeffs across the next control interval: (g, k, m0, m1, m2) are
+        // interpolated per sample and a1..a3 re-derived, so every intermediate
+        // filter is a valid, stable SVF and there is no control-rate zipper.
+        struct EqRampPoint
+        {
+            float g = 0.0f, k = 0.0f, m0 = 0.0f, m1 = 0.0f, m2 = 0.0f;
+        };
+        EqRampPoint rampStart, rampDelta;
+        bool eqRamping = false;
+
+        // Linked peak envelope: max |detector| over channels, held over a sliding
+        // window (two alternating buckets) so a steady tone reads its true peak
+        // without ripple, then released exponentially.
+        float segmentPeak = 0.0f, windowPeak = 0.0f, prevWindowPeak = 0.0f, env = 0.0f;
+        float envRelease = 0.0f;
+        int windowTicks = 1, windowCountdown = 1;
+
+        float coeffGainDb = 0.0f;             // gain the EQ coefficients were built for
+    };
+
+    void activateBand (int index, bool fadeIn) noexcept;
+    void updateDetector (BandState& band) const noexcept;
+    void updateEq (BandState& band, float totalDb, bool glide) const noexcept;
+    static void clearBandState (BandState& band) noexcept;
+    void controlTick (int index) noexcept;
+
     ProcessSpec spec;
+    double controlRate = 48000.0 / kControlInterval;
+    int controlCountdown = kControlInterval;
     std::array<DynEqBandParams, kMaxBands> targets {};
+    std::array<BandState, kMaxBands> bands {};
+    std::array<SvfCoeffs, kControlInterval> rampScratch {}; // per-sample EQ coefficients while gliding
     std::array<std::atomic<float>, kMaxBands> appliedGainDb {};
 };
 } // namespace flub

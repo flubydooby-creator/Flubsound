@@ -455,7 +455,10 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     for (int c = 0; c < 2; ++c)
         for (int i = 0; i < n; ++i)
             dryPeak = std::max (dryPeak, std::abs (dry.channel (c)[i]));
-    dryPeakHold = dryPeak > dryPeakHold ? dryPeak : dryPeak + dryPeakRelease * (dryPeakHold - dryPeak);
+    // Instant attack, ~2 s release; the per-sample coefficient is raised to the
+    // block length because this runs once per block.
+    const float blockRelease = std::pow (dryPeakRelease, static_cast<float> (n));
+    dryPeakHold = dryPeak > dryPeakHold ? dryPeak : dryPeak + blockRelease * (dryPeakHold - dryPeak);
 
     float matchDb = on (e, LoudnessMatchBypass) ? loudnessMatch.getDryGainDb (n) : 0.0f;
     if (matchDb > 0.0f && dryPeakHold > 0.0f)

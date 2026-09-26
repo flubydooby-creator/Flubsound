@@ -66,8 +66,53 @@ public:
 
 private:
     // ---- implementation-defined below this line (owned by the .cpp author) ----
+    static constexpr int kMaxSections = 4; // 48 dB/oct = 4 x 12 dB/oct SVF sections
+
+    /** The discrete part of a band. Changing it cannot be smoothed, so it is
+        crossfaded: wet mix -> 0, swap + clear state, wet mix -> 1. */
+    struct Topology
+    {
+        bool enabled = false;
+        EqBandType type = EqBandType::Bell;
+        int numSections = 1; // 1 except for LowCut / HighCut
+
+        bool operator== (const Topology&) const = default;
+    };
+
+    struct Band
+    {
+        Topology running;                     // what the filter currently implements
+        OnePoleSmoother logFreq, gainDb, logQ; // control-rate smoothers: log2 Hz, dB, log2 Q
+        std::array<SvfCoeffs, kMaxSections> coeffs {};     // designed at the latest tick (steady-state set)
+        std::array<SvfCoeffs, kMaxSections> prevCoeffs {}; // designed at the tick before (ramp start)
+        std::array<std::array<SvfState, kMaxSections>, kMaxChannels> state {};
+        int fadePos = 0;            // wet mix = fadePos / fadeSamples (exact 0 and 1 at the ends)
+        int fadeDir = 0;            // +1 fading in, -1 fading out, 0 settled
+        int rampPos = 0;            // samples into the current coefficient ramp
+        bool ramping = false;       // interpolate prevCoeffs -> coeffs across this control period
+        bool audible = false;       // run the filter during this control period
+        bool stateValid = true;     // false: clear (or prime) the state before the next sample
+        bool primeOnStart = false;  // prime the LP integrator with the input when clearing
+        bool coeffsDirty = true;    // smoothed values moved since the last design
+        bool busy = false;          // needs control ticks (smoothing, ramping, fading or pending swap)
+    };
+
+    void controlTick() noexcept;
+    void updateBand (Band& band, const EqBandParams& target) noexcept;
+    void snapBand (Band& band, const EqBandParams& target) noexcept;
+    void swapTopology (Band& band, const Topology& wanted) noexcept;
+    void refreshCoefficients (Band& band, const EqBandParams& target, bool ramp) const noexcept;
+    void processBand (Band& band, const AudioBlock& block, int start, int length, int numChannels) noexcept;
+    void applyOutputGain (const AudioBlock& block, int numChannels) noexcept;
+
     ProcessSpec spec;
     std::array<EqBandParams, kMaxBands> targets {};
+    std::array<Band, kMaxBands> bandDsp {};
     LinearSmoothedValue outputGain;
+    float outputGainDb = 0.0f;
+    int fadeSamples = 240;           // ~5 ms, a whole number of control periods
+    float invFadeSamples = 1.0f / 240.0f;
+    int samplesToTick = 0;           // samples until the next control tick (0 = due now)
+    bool anyBusy = false;            // false: every control tick would be a no-op
 };
 } // namespace flub
