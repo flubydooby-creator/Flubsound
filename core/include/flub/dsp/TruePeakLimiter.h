@@ -3,7 +3,7 @@
 // Guarantee: the output never exceeds the ceiling in sample peak, and stays
 // within ~0.1 dB of it in true (inter-sample) peak, with no gain overshoot.
 // (True-peak scope: the detector is the meters' own 4x interpolator - 40
-// taps/phase, Kaiser beta 5 - flat within 0.02 dB to 0.4535 fs, i.e. 20 kHz
+// taps/phase, Kaiser beta 5 - within -0.02 / +0.04 dB to 0.4535 fs, i.e. 20 kHz
 // at 44.1 kHz. Measured: full-level noise band-limited to 0.45 fs (a CD-style
 // 20 kHz passband) peaks within +0.02 dB of the ceiling; raw digital white
 // noise, whose energy reaches fs/2 where every 4x interpolator rolls off, up

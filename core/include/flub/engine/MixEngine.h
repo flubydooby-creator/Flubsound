@@ -45,6 +45,9 @@ public:
     param::ParameterStore& params (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->store; }
     ProcessingChain& chain (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->chain; }
 
+    /** AUDIO THREAD ONLY (between process() calls): these write plain fields
+        and smoothers. Other threads hand values over through atomics, as
+        the app's AudioEngineHost does (applyPendingMixSettings). */
     void setStripGainDb (int strip, float db) noexcept;
     void setStripMuted (int strip, bool muted) noexcept;
     void setMasterCeilingDb (float db) noexcept;

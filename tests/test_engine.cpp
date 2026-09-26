@@ -99,6 +99,31 @@ TEST_CASE ("ParameterStore: clamping, banks, snapshot, version")
     CHECK (snap[static_cast<size_t> (MaxDriveDb)] == 24.0f);
 }
 
+TEST_CASE ("ParameterStore: NaN is ignored, infinities clamp, and the chain stays finite")
+{
+    ParameterStore store;
+    store.set (OutputGainDb, -3.0f);
+    store.set (OutputGainDb, std::numeric_limits<float>::quiet_NaN());
+    CHECK (store.get (OutputGainDb) == -3.0f);
+    store.set (InputGainDb, std::numeric_limits<float>::infinity());
+    CHECK (store.get (InputGainDb) == layout()[static_cast<size_t> (InputGainDb)].maxValue);
+    store.set (InputGainDb, -std::numeric_limits<float>::infinity());
+    CHECK (store.get (InputGainDb) == layout()[static_cast<size_t> (InputGainDb)].minValue);
+    CHECK (layout()[static_cast<size_t> (MaxDriveDb)].clamp (std::numeric_limits<float>::quiet_NaN()) == layout()[static_cast<size_t> (MaxDriveDb)].defaultValue);
+
+    // Every parameter hit with NaN: the chain output stays finite.
+    ParameterStore s2;
+    for (int i = 0; i < kNumParams; ++i)
+        s2.set (i, std::numeric_limits<float>::quiet_NaN());
+    ProcessingChain chain (s2);
+    chain.prepare ({ kFs, 512, 2 });
+    auto buf = makeProgramme (48000, 0.5f);
+    runChain (chain, buf, 512);
+    for (auto& c : buf.ch)
+        for (float v : c)
+            REQUIRE (std::isfinite (v));
+}
+
 TEST_CASE ("MacroMap: zero macros leave base values untouched")
 {
     std::vector<float> base (static_cast<size_t> (kNumParams)), eff (static_cast<size_t> (kNumParams));

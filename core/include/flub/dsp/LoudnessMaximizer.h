@@ -88,9 +88,11 @@ private:
     //    -> ratio-2 gain sqrt(T / env) above T.
     //  * The final limiter holds the sample ceiling exactly. Its true-peak
     //    accuracy (<= +0.1 dB) needs the signal inside the 4x detector band
-    //    (~0.4 fs); very hard clipping (clip energy above about -12 dB)
-    //    creates intermodulation up to fs/2 and can then read up to ~+0.3 dB
-    //    on an ideal reconstruction.
+    //    (flat to 0.4535 fs, see TruePeakDetector.h); very hard clipping
+    //    creates intermodulation up to fs/2, where every 4x interpolator
+    //    rolls off, so an ideal reconstruction can read slightly higher
+    //    (measured: every factory preset at full macros stays below the
+    //    ceiling on the 4x meter, worst -1.04 dBTP for a -1 dBTP ceiling).
 
     /** Linked level detector of one glue band. */
     struct BandDetector

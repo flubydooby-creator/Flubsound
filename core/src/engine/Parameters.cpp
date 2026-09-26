@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <unordered_map>
 
 namespace flub::param
@@ -247,6 +248,10 @@ float ParameterStore::get (Bank b, int id) const noexcept
 void ParameterStore::set (Bank b, int id, float value) noexcept
 {
     assert (id >= 0 && id < kNumParams);
+    // A NaN from automation / a host / a script would otherwise reach the audio
+    // path (e.g. a NaN output gain turns the whole output into NaN): ignore it.
+    if (std::isnan (value))
+        return;
     const float v = layout()[static_cast<size_t> (id)].clamp (value);
     values[static_cast<size_t> (static_cast<int> (b) * kNumParams + id)].store (v, std::memory_order_relaxed);
     changeCounter.fetch_add (1, std::memory_order_release);

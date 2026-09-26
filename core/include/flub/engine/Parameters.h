@@ -47,7 +47,8 @@ struct Info
     std::vector<std::string> choices; // Unit::Choice labels
     bool structural = false;          // needs chain re-prepare (latency changes)
 
-    float clamp (float v) const noexcept { return v < minValue ? minValue : (v > maxValue ? maxValue : v); }
+    /** Into [minValue, maxValue]; NaN (which no comparison catches) maps to the default. */
+    float clamp (float v) const noexcept { return v != v ? defaultValue : (v < minValue ? minValue : (v > maxValue ? maxValue : v)); }
 };
 
 // -------------------------------------------------------------------------
@@ -217,7 +218,7 @@ public:
 
     /** Active bank, relaxed atomics: RT-safe on any thread. */
     float get (int id) const noexcept;
-    void set (int id, float value) noexcept; // clamps, bumps version
+    void set (int id, float value) noexcept; // clamps, bumps version; NaN is ignored (keeps the value)
 
     float get (Bank b, int id) const noexcept;
     void set (Bank b, int id, float value) noexcept;
