@@ -89,6 +89,18 @@ void FlubsoundApplication::initialiseInteractive()
     for (const auto& failure : hotkeys->getFailures())
         printLine (true, "Flubsound: hotkey: " + failure);
 
+   #if ! JUCE_MAC
+    // An enabled start-up entry follows this executable if the app was moved,
+    // updated in a new folder or its AppImage renamed. (macOS registers the
+    // bundle itself, so there is nothing to refresh.)
+    if (auto autoStart = platform_bridge::createAutoStart(); autoStart != nullptr && autoStart->isSupported() && autoStart->isEnabled())
+    {
+        std::string error;
+        if (! autoStart->setEnabled (true, {}, error))
+            printLine (true, "Flubsound: start with the OS: " + juce::String::fromUTF8 (error.c_str()));
+    }
+   #endif
+
     // The settings dialog edits the hotkeys: give it access to the manager.
     if (auto* content = dynamic_cast<ui::MainComponent*> (mainWindow->getContentComponent()))
     {

@@ -1,4 +1,5 @@
 #include "EngineController.h"
+#include "settings/UserDataFolder.h"
 
 #include "flub/engine/MacroMap.h"
 #include "flub/io/Json.h"
@@ -576,9 +577,7 @@ void EngineController::changeListenerCallback (juce::ChangeBroadcaster*)
 void EngineController::loadDeviceProfiles()
 {
     std::string error;
-    const auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-                              .getChildFile ("Flubsound")
-                              .getChildFile ("device-profiles.json");
+    const auto userFile = userDataFolder().getChildFile ("device-profiles.json");
     if (userFile.existsAsFile() && deviceProfiles.loadFile (userFile.getFullPathName().toStdString(), error))
         return;
     if (! deviceProfiles.loadBuiltIn (error))

@@ -1,5 +1,7 @@
 #include "PresetManager.h"
 
+#include "settings/UserDataFolder.h"
+
 #include "flub/io/Json.h"
 
 #if FLUB_HAS_FACTORY_PRESETS
@@ -37,7 +39,7 @@ PresetManager::PresetManager()
 
 juce::File PresetManager::getDefaultUserPresetFolder()
 {
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Flubsound").getChildFile ("Presets");
+    return userDataFolder().getChildFile ("Presets");
 }
 
 void PresetManager::setUserPresetFolder (const juce::File& folder)

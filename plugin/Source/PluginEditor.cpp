@@ -2,6 +2,9 @@
 
 #include "flub/common/Math.h"
 
+// Header-only; shared with the desktop app so both use one preset folder.
+#include "../../app/Source/settings/UserDataFolder.h"
+
 #include <cmath>
 
 namespace flub::plugin
@@ -21,7 +24,7 @@ juce::String formatDb (float v, const char* unit)
 juce::File defaultPresetFolder()
 {
     // Same user folder as the desktop app's PresetManager.
-    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getChildFile ("Flubsound").getChildFile ("Presets");
+    return flub::app::userDataFolder().getChildFile ("Presets");
 }
 } // namespace
 
