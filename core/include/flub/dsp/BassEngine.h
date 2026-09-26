@@ -73,6 +73,24 @@ private:
     // ---- implementation-defined below this line ----
     static constexpr int kControlInterval = 16;
 
+    /** While a corner frequency glides, the SVF prewarped frequency g moves
+        linearly per sample from the previous control-rate design to the new
+        one (a1..a3 re-derived per sample), so a sweep has no 16-sample steps. */
+    struct GGlide
+    {
+        void start (double fromG, double toG) noexcept
+        {
+            from = static_cast<float> (fromG);
+            delta = static_cast<float> (toG - fromG);
+            active = delta != 0.0f;
+        }
+
+        float at (float t) const noexcept { return from + delta * t; }
+
+        float from = 0.0f, delta = 0.0f;
+        bool active = false;
+    };
+
     /** A filter stage that can be switched in and out without a click or a
         momentary notch. Crossfading dry against a filtered path directly would
         cancel around the corner (an LR4 sum is -180 degrees there), so a stage
@@ -86,6 +104,7 @@ private:
         float logTarget = 0.0f, logPark = 0.0f;
         OnePoleSmoother logHz;     // control rate, log-frequency glide
         LinearSmoothedValue blend; // per sample: 0 = dry .. 1 = processed
+        GGlide glide;              // per-sample g between two control-rate designs
     };
 
     using Lr4State = std::array<SvfState, 3>; // split section, low section, high section
@@ -136,9 +155,10 @@ private:
     OnePoleSmoother characterSmoothed, logCutoff;
     float cutoffHz = 120.0f;
     std::array<float, 4> weights {}; // w2 .. w5
-    SvfCoeffs harmPreHp, harmPostHp, harmPostLp;
-    std::array<SvfCoeffs, 2> harmPreLp {};
-    std::array<SvfState, 5> harmState {}; // preHp, preLp[0], preLp[1], postHp, postLp
+    SvfCoeffs harmPreHp, harmPostHp;
+    std::array<SvfCoeffs, 2> harmPreLp {}, harmPostLp {};
+    std::array<SvfState, 6> harmState {}; // preHp, preLp[0], preLp[1], postHp, postLp[0], postLp[1]
+    GGlide cutoffGlide, upperGlide;       // g of the cutoff and 6 * cutoff designs
     TransientShaper::PeakHold harmHold;
     EnvelopeFollower harmEnv;
 

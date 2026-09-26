@@ -115,7 +115,7 @@ struct SvfState
     void reset() noexcept { ic1 = ic2 = 0.0f; }
 };
 
-/** Raw tick. Returns the mixed output; lowOut/bandOut optionally receive v2/v1. */
+/** One sample through the SVF; returns the mixed output m0 v0 + m1 v1 + m2 v2. */
 inline float svfTick (const SvfCoeffs& c, SvfState& s, float v0) noexcept
 {
     const float v3 = v0 - s.ic2;

@@ -345,6 +345,12 @@ int AudioEngineHost::getDeviceInputStrip() const noexcept
     return -1;
 }
 
+void AudioEngineHost::setCaptureFactory (CaptureFactory factory)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    captureFactory = std::move (factory);
+}
+
 int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::String& error)
 {
     JUCE_ASSERT_MESSAGE_THREAD
@@ -370,7 +376,7 @@ int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::S
         return -1;
     }
 
-    auto capture = platform_bridge::createProcessLoopbackCapture();
+    auto capture = captureFactory != nullptr ? captureFactory() : platform_bridge::createProcessLoopbackCapture();
     if (capture == nullptr || ! capture->isSupported())
     {
         error = "Per-application capture is not supported on this system";
@@ -641,6 +647,9 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const double sampleRate = device->getCurrentSampleRate();
     const int blockSize = device->getCurrentBufferSizeSamples();
 
+    // Must be visible before any async configure request is handled.
+    callbackRunning.store (true, std::memory_order_release);
+
     if (juce::MessageManager::existsAndIsCurrentThread())
     {
         configurePending.store (false, std::memory_order_release);
@@ -652,7 +661,7 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
     else
     {
         // Never touch the engine structure off the message thread: run silent
-        // until the message thread has configured it.
+        // until the message thread has configured it (handleAsyncUpdate).
         engineReady.store (false, std::memory_order_release);
         pendingSampleRate = sampleRate;
         pendingBlockSize = blockSize;
@@ -661,8 +670,6 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
         configurePending.store (true, std::memory_order_release);
         triggerAsyncUpdate();
     }
-
-    callbackRunning.store (true, std::memory_order_release);
 }
 
 void AudioEngineHost::audioDeviceStopped()

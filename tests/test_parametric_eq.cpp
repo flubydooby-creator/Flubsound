@@ -1161,7 +1161,10 @@ TEST_CASE ("ParametricEq (review): glides converge to the exact target design at
                     v = svfTick (secs[static_cast<size_t> (s)], st[static_cast<size_t> (s)], v);
                 err = std::max (err, static_cast<double> (std::abs (v - buf.ch[0][static_cast<size_t> (glide + quiet + i)])));
             }
-            CHECK_LE (err, 0.0);
+            // Exact up to the EQ's -300 dBFS state flush in the decaying tail
+            // (the raw reference does not flush). A stalled smoother left
+            // errors of 1e-6 .. 1e-5 here.
+            CHECK_LE (err, 1.0e-12);
         }
 }
 
@@ -1195,5 +1198,37 @@ TEST_CASE ("ParametricEq (review): a type + gain change on a skipped 0 dB band n
         CHECK_LE (peakAbs (buf.ch[0].data() + change, n - change), static_cast<double> (amp) * 1.001);
         // ... and it really arrived (24 dB/oct, 2.3 octaves above fc: ~ -56 dB).
         CHECK_LE (peakAbs (buf.ch[0].data() + n - n / 8, n / 8), static_cast<double> (amp) * 0.01);
+    }
+}
+
+TEST_CASE ("ParametricEq (review): a fading-out band keeps its old values until the swap")
+{
+    // Bell 250 Hz +12 dB Q 4 -> HighCut 20 kHz (a preset change). A 500 Hz
+    // tone is +0.4 dB through the bell and ~0 dB through the cut. If the old
+    // bell glided towards the new frequency while fading out, it would sweep
+    // up through the tone and boost it by ~+1.2 dB above both steady states
+    // for ~5 ms (measured). The fade-out must only remove the old sound; the
+    // new values arrive with the new topology under mix 0.
+    for (double fs : { 44100.0, 192000.0 })
+    {
+        auto eq = makeEq (fs, 1);
+        const auto bell = makeBand (EqBandType::Bell, 250.0f, 12.0f, 4.0f);
+        eq->setBand (0, bell);
+        eq->reset();
+        const int block = 32;
+        const int change = static_cast<int> (fs * 0.1) / block * block;
+        const int n = change + static_cast<int> (fs * 0.1);
+        const float amp = 0.25f;
+        Planar buf (1, n);
+        load (buf, 0, sine (500.0, fs, n, amp));
+        for (int pos = 0; pos < n; pos += block)
+        {
+            if (pos == change)
+                eq->setBand (0, makeBand (EqBandType::HighCut, 20000.0f, 12.0f, 4.0f, 12));
+            eq->process (buf.block (pos, std::min (block, n - pos)));
+        }
+        const double gainBefore = std::pow (10.0, ParametricEq::responseDb (&bell, 1, 500.0, fs) / 20.0);
+        const double bound = static_cast<double> (amp) * std::max (1.0, gainBefore) * 1.01;
+        CHECK_LE (peakAbs (buf.ch[0].data() + change, n - change), bound);
     }
 }

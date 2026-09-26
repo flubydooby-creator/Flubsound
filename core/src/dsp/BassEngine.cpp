@@ -14,7 +14,7 @@
 //                      gain boostDb - protection.
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
-//                      -> HP2 cutoff -> LP2 6 * cutoff -> * 2 * amount,
+//                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
 //                      added to every channel after the optional
 //                      replace-fundamental HP4 at cutoff on the original.
 //   5. Tighten       : LR4 split at 150 Hz, TransientShaper (sustain =
@@ -24,9 +24,11 @@
 // Control rate: every kControlInterval samples of absolute stream time (the
 // counter survives across process() calls, so the output does not depend on
 // the host block size) the smoothers advance, the protection is computed and
-// filter designs are refreshed. The shelf's gain changes glide per sample
-// (TransientShaper::SvfGlide); frequency glides step per control tick, which
-// the SVF tolerates without artefacts at these rates of change.
+// filter designs are refreshed. Across the following interval the filters
+// glide per sample to the new designs: the shelf interpolates (g, k, m0..m2)
+// (TransientShaper::SvfGlide), the fixed-Q LP / HP / LR4 sections interpolate
+// their prewarped frequency g (GGlide); a1..a3 are re-derived per sample, so
+// neither gain changes nor corner sweeps produce 16-sample steps.
 //
 // Switching subsonic / mono / replace / tighten in or out uses ParkedStage
 // (see header): parked at 10 Hz (subsonic: 5 Hz) the processed path equals
@@ -162,6 +164,16 @@ inline void lr4Split (const SvfCoeffs& c, std::array<SvfState, 3>& s, float x, f
     high = hp1 - k * v1 - v2;
 }
 
+/** An LP / HP design with its prewarped frequency g replaced (k, m unchanged). */
+inline SvfCoeffs withG (SvfCoeffs c, float g) noexcept
+{
+    const float k = static_cast<float> (c.k);
+    c.a1 = 1.0f / (1.0f + g * (g + k));
+    c.a2 = g * c.a1;
+    c.a3 = g * c.a2;
+    return c;
+}
+
 inline float blendTo (float dry, float wet, float amount) noexcept
 {
     return amount == 1.0f ? wet : dry + amount * (wet - dry);
@@ -234,6 +246,7 @@ void BassEngine::reset() noexcept
     harmonicsActive = params.harmonicsAmount > 0.0f;
     updateHarmonicWeights();
     updateHarmonicFilters();
+    cutoffGlide.active = upperGlide.active = false;
 
     auto resetStage = [this] (ParkedStage& stage)
     {
@@ -241,6 +254,7 @@ void BassEngine::reset() noexcept
         stage.hz = stage.wanted ? stage.targetHz : stage.parkHz;
         stage.logHz.reset (controlRate, kFreqGlideMs, stage.wanted ? stage.logTarget : stage.logPark);
         stage.blend.setImmediate (stage.wanted ? 1.0f : 0.0f);
+        stage.glide.active = false;
     };
     resetStage (subsonic);
     resetStage (mono);
@@ -330,11 +344,13 @@ bool BassEngine::setStage (ParkedStage& stage, bool wanted, float hz) noexcept
     stage.logHz.setImmediate (stage.logPark);
     stage.blend.setImmediate (0.0f);
     stage.blend.setTarget (1.0f);
+    stage.glide.active = false;
     return true;
 }
 
 bool BassEngine::tickStage (ParkedStage& stage, bool effectSettled) noexcept
 {
+    stage.glide.active = false; // the caller starts a new glide if the corner moved
     if (! stage.active)
         return false;
 
@@ -367,10 +383,14 @@ void BassEngine::updateHarmonicFilters() noexcept
 {
     const double sr = spec.sampleRate;
     const double fc = cutoffHz;
+    const double oldCutG = harmPostHp.g, oldUpperG = harmPostLp[0].g;
     harmPreLp[0] = SvfCoeffs::make (FilterType::LowPass, fc, butterworthQ (2, 0), 0.0, sr);
     harmPreLp[1] = SvfCoeffs::make (FilterType::LowPass, fc, butterworthQ (2, 1), 0.0, sr);
     harmPostHp = SvfCoeffs::make (FilterType::HighPass, fc, kButterworthQ2, 0.0, sr);
-    harmPostLp = SvfCoeffs::make (FilterType::LowPass, fc * kHarmonicsUpperRatio, kButterworthQ2, 0.0, sr);
+    harmPostLp[0] = SvfCoeffs::make (FilterType::LowPass, fc * kHarmonicsUpperRatio, butterworthQ (2, 0), 0.0, sr);
+    harmPostLp[1] = SvfCoeffs::make (FilterType::LowPass, fc * kHarmonicsUpperRatio, butterworthQ (2, 1), 0.0, sr);
+    cutoffGlide.start (oldCutG, harmPostHp.g);
+    upperGlide.start (oldUpperG, harmPostLp[0].g);
 }
 
 void BassEngine::updateHarmonicWeights() noexcept
@@ -428,14 +448,32 @@ void BassEngine::controlTick() noexcept
     const double sr = spec.sampleRate;
 
     // ---- switchable filter stages -----------------------------------------
+    // A moved corner is redesigned here and reached by a per-sample g glide
+    // across the next control interval.
     if (tickStage (subsonic, true))
+    {
+        const double g0 = subsonicHp[0].g;
         designHighPass4 (subsonicHp, subsonic.hz, sr);
+        subsonic.glide.start (g0, subsonicHp[0].g);
+    }
     if (tickStage (mono, true))
+    {
+        const double g0 = monoXo.g;
         monoXo = designLr4 (mono.hz, sr);
+        mono.glide.start (g0, monoXo.g);
+    }
     if (tickStage (replace, true))
+    {
+        const double g0 = replaceHp[0].g;
         designHighPass4 (replaceHp, replace.hz, sr);
+        replace.glide.start (g0, replaceHp[0].g);
+    }
     if (tickStage (tight, tightShaper.isSettled()))
+    {
+        const double g0 = tightXo.g;
         tightXo = designLr4 (tight.hz, sr);
+        tight.glide.start (g0, tightXo.g);
+    }
 
     // ---- adaptive low shelf with headroom protection -----------------------
     const float boost = boostSmoothed.next();
@@ -481,6 +519,10 @@ void BassEngine::controlTick() noexcept
         cutoffHz = std::exp (logCutoff.next());
         updateHarmonicFilters();
     }
+    else
+    {
+        cutoffGlide.active = upperGlide.active = false;
+    }
     if (harmonicsActive && harmonicsMix.getTarget() == 0.0f && ! harmonicsMix.isSmoothing())
         harmonicsActive = false;
 
@@ -521,12 +563,14 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
     const int phase = kControlInterval - controlCountdown; // samples since the last tick
     const float invCh = 1.0f / static_cast<float> (numCh);
     const float w2 = weights[0], w3 = weights[1], w4 = weights[2], w5 = weights[3];
+    constexpr float invInterval = 1.0f / static_cast<float> (kControlInterval);
 
     std::array<float, kMaxChannels> x {}, low {}, high {};
 
     for (int i = 0; i < len; ++i)
     {
         const int n = pos + i;
+        const float t = static_cast<float> (phase + i + 1) * invInterval; // glide position
         for (int c = 0; c < numCh; ++c)
             x[static_cast<size_t> (c)] = block.channel (c)[n];
 
@@ -534,11 +578,18 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         if (subsonic.active)
         {
             const float b = subsonic.blend.next();
+            SvfCoeffs hp0 = subsonicHp[0], hp1 = subsonicHp[1];
+            if (subsonic.glide.active)
+            {
+                const float g = subsonic.glide.at (t);
+                hp0 = withG (hp0, g);
+                hp1 = withG (hp1, g);
+            }
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
                 auto& s = subsonicState[ch];
-                const float y = svfTick (subsonicHp[1], s[1], svfTick (subsonicHp[0], s[0], x[ch]));
+                const float y = svfTick (hp1, s[1], svfTick (hp0, s[0], x[ch]));
                 x[ch] = blendTo (x[ch], y, b);
             }
         }
@@ -547,8 +598,9 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         if (doMono)
         {
             const float b = mono.blend.next();
-            lr4Split (monoXo, monoState[0], x[0], low[0], high[0]);
-            lr4Split (monoXo, monoState[1], x[1], low[1], high[1]);
+            const SvfCoeffs xo = mono.glide.active ? withG (monoXo, mono.glide.at (t)) : monoXo;
+            lr4Split (xo, monoState[0], x[0], low[0], high[0]);
+            lr4Split (xo, monoState[1], x[1], low[1], high[1]);
             const float midLow = 0.5f * (low[0] + low[1]);
             x[0] = blendTo (x[0], midLow + high[0], b);
             x[1] = blendTo (x[1], midLow + high[1], b);
@@ -565,8 +617,7 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
 
         if (shelfActive)
         {
-            const SvfCoeffs sc = shelf.ramping ? shelf.at (static_cast<float> (phase + i + 1) * (1.0f / static_cast<float> (kControlInterval)))
-                                               : shelf.end;
+            const SvfCoeffs sc = shelf.ramping ? shelf.at (t) : shelf.end;
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
@@ -583,9 +634,25 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
                 mid += x[static_cast<size_t> (c)];
             mid *= invCh;
 
+            SvfCoeffs lp0 = harmPreLp[0], lp1 = harmPreLp[1], postHp = harmPostHp;
+            SvfCoeffs postLp0 = harmPostLp[0], postLp1 = harmPostLp[1];
+            if (cutoffGlide.active)
+            {
+                const float g = cutoffGlide.at (t);
+                lp0 = withG (lp0, g);
+                lp1 = withG (lp1, g);
+                postHp = withG (postHp, g);
+            }
+            if (upperGlide.active)
+            {
+                const float g = upperGlide.at (t);
+                postLp0 = withG (postLp0, g);
+                postLp1 = withG (postLp1, g);
+            }
+
             float b = svfTick (harmPreHp, harmState[0], mid);
-            b = svfTick (harmPreLp[0], harmState[1], b);
-            b = svfTick (harmPreLp[1], harmState[2], b);
+            b = svfTick (lp0, harmState[1], b);
+            b = svfTick (lp1, harmState[2], b);
 
             // Amplitude-normalised Chebyshev shaper: for a sinusoid the output
             // is exactly w2 cos 2t + w3 cos 3t + ... scaled by its amplitude.
@@ -598,19 +665,29 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             const float t5 = xn * (x2 * (16.0f * x2 - 20.0f) + 5.0f);
             float y = (w2 * t2 + w3 * t3 + w4 * t4 + w5 * t5) * env;
 
-            y = svfTick (harmPostHp, harmState[3], y);
-            y = svfTick (harmPostLp, harmState[4], y);
+            // Band-pass [cutoff (12 dB/oct), 6 cutoff (24 dB/oct)]: the steep
+            // upper slope also removes the splatter of the envelope's attacks.
+            y = svfTick (postHp, harmState[3], y);
+            y = svfTick (postLp0, harmState[4], y);
+            y = svfTick (postLp1, harmState[5], y);
             harmonics = y * harmonicsMix.next();
         }
 
         if (replace.active)
         {
             const float b = replace.blend.next();
+            SvfCoeffs hp0 = replaceHp[0], hp1 = replaceHp[1];
+            if (replace.glide.active)
+            {
+                const float g = replace.glide.at (t);
+                hp0 = withG (hp0, g);
+                hp1 = withG (hp1, g);
+            }
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
                 auto& s = replaceState[ch];
-                const float y = svfTick (replaceHp[1], s[1], svfTick (replaceHp[0], s[0], x[ch]));
+                const float y = svfTick (hp1, s[1], svfTick (hp0, s[0], x[ch]));
                 x[ch] = blendTo (x[ch], y, b);
             }
         }
@@ -623,11 +700,12 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         if (tight.active)
         {
             const float b = tight.blend.next();
+            const SvfCoeffs xo = tight.glide.active ? withG (tightXo, tight.glide.at (t)) : tightXo;
             float lowPeak = 0.0f;
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
-                lr4Split (tightXo, tightState[ch], x[ch], low[ch], high[ch]);
+                lr4Split (xo, tightState[ch], x[ch], low[ch], high[ch]);
                 lowPeak = std::max (lowPeak, std::abs (low[ch]));
             }
             const float g = tightShaper.computeGain (lowPeak);

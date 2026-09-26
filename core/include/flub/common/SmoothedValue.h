@@ -85,18 +85,18 @@ public:
 
     float next() noexcept
     {
+        const float previous = current;
         current = target + coeff * (current - target);
-        if (std::abs (current - target) < 1.0e-6f * (1.0f + std::abs (target)))
-            current = target;
+        snapIfSettled (previous);
         return current;
     }
 
     /** Advance n samples at once (exact for a one-pole). */
     float skip (int n) noexcept
     {
+        const float previous = current;
         current = target + std::pow (coeff, static_cast<float> (n)) * (current - target);
-        if (std::abs (current - target) < 1.0e-6f * (1.0f + std::abs (target)))
-            current = target;
+        snapIfSettled (previous);
         return current;
     }
 
@@ -105,6 +105,15 @@ public:
     float getTarget() const noexcept { return target; }
 
 private:
+    /** In float the recursion stalls ~0.5 ulp / (1 - coeff) short of a non-zero
+        target (it stops moving before any relative threshold is met), so a
+        step that no longer changes the value also counts as settled. */
+    void snapIfSettled (float previous) noexcept
+    {
+        if (current == previous || std::abs (current - target) < 1.0e-6f * (1.0f + std::abs (target)))
+            current = target;
+    }
+
     float coeff = 0.0f, current = 0.0f, target = 0.0f;
 };
 } // namespace flub

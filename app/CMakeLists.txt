@@ -91,12 +91,17 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FLUB_PLATFORM_
 # Optional hook for extra link dependencies of the platform implementation.
 include("${FLUB_PLATFORM_DIR}/PlatformServices.cmake" OPTIONAL)
 
-if(WIN32)
-    # MMCSS (avrt), COM (ole32), ActivateAudioInterfaceAsync (mmdevapi).
-    target_link_libraries(FlubsoundPro PRIVATE avrt ole32 mmdevapi)
-elseif(APPLE)
-    # Carbon RegisterEventHotKey for global hotkeys.
-    target_link_libraries(FlubsoundPro PRIVATE "-framework Carbon")
+if(FLUB_HAS_PLATFORM_SERVICES)
+    if(WIN32)
+        # COM (ole32), hotkey window (user32), ms-settings launch (shell32,
+        # shlwapi), OS build query (version), MMCSS (avrt),
+        # ActivateAudioInterfaceAsync (mmdevapi). MSVC also gets them from the
+        # #pragma comment(lib) lines; MinGW needs them here.
+        target_link_libraries(FlubsoundPro PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi)
+    elseif(APPLE)
+        # Carbon RegisterEventHotKey (global hotkeys), AppKit (settings links).
+        target_link_libraries(FlubsoundPro PRIVATE "-framework Carbon" "-framework AppKit")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

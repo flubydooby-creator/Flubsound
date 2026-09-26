@@ -117,6 +117,5 @@ private:
     int runAge = 0, runSpan = 0;            // age of the current limiting run / span to its last over
     int blendStart = 1, blendEnd = 2;       // runSpan range over which release goes fast -> slow
     float blendScale = 1.0f;                // 1 / (blendEnd - blendStart)
-    uint64_t pendingClips = 0;
 };
 } // namespace flub

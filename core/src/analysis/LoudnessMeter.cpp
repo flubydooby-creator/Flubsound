@@ -39,6 +39,7 @@ constexpr int kNumBins = 1000;
 // The K-weighting designs are valid for any fs > 2 * 1682 Hz; below a sane
 // minimum the prewarping tan() would fold over and give an unstable filter.
 constexpr double kMinDesignRate = 8000.0;
+constexpr double kMaxSampleRate = 1.0e7;
 
 // A constant -400 dBFS offset added at the filter input. The RLB high-pass has
 // a double zero at DC, so it never reaches the measured energy, but it keeps
@@ -62,7 +63,19 @@ float toReading (double energy) noexcept
 int binIndex (double lufs) noexcept
 {
     const double pos = std::floor ((lufs - kAbsoluteGateLufs) * kBinsPerLu);
-    return static_cast<int> (std::clamp (pos, 0.0, static_cast<double> (kNumBins - 1)));
+    if (! (pos >= 0.0))
+        return 0; // also catches NaN, whose float -> int conversion would be UB
+    return static_cast<int> (std::min (pos, static_cast<double> (kNumBins - 1)));
+}
+
+/** Rate used for the K-weighting designs: non-finite rates fall back to 48 kHz
+    (tan() of NaN, or of 0 for an infinite rate, would give NaN coefficients or
+    a double pole on the unit circle), tiny ones are raised to the design minimum. */
+double designRate (double fsHz) noexcept
+{
+    if (! std::isfinite (fsHz))
+        return 48000.0;
+    return std::max (fsHz, kMinDesignRate);
 }
 } // namespace
 
@@ -78,7 +91,7 @@ BiquadCoeffs LoudnessMeter::kWeightingStage1 (double fsHz) noexcept
     constexpr double gainDb = 3.999843853973347;
     constexpr double q = 0.7071752369554196;
 
-    const double k = std::tan (kPi * f0 / std::max (fsHz, kMinDesignRate));
+    const double k = std::tan (kPi * f0 / designRate (fsHz));
     const double vh = std::pow (10.0, gainDb / 20.0);
     const double vb = std::pow (vh, 0.4996667741545416);
     const double a0 = 1.0 + k / q + k * k;
@@ -101,7 +114,7 @@ BiquadCoeffs LoudnessMeter::kWeightingStage2 (double fsHz) noexcept
     constexpr double f0 = 38.13547087602444;
     constexpr double q = 0.5003270373238773;
 
-    const double k = std::tan (kPi * f0 / std::max (fsHz, kMinDesignRate));
+    const double k = std::tan (kPi * f0 / designRate (fsHz));
     const double d = 1.0 + k / q + k * k;
 
     BiquadCoeffs c;
@@ -116,7 +129,9 @@ BiquadCoeffs LoudnessMeter::kWeightingStage2 (double fsHz) noexcept
 //==============================================================================
 void LoudnessMeter::prepare (double newSampleRate, int numChannels)
 {
-    fs = newSampleRate > 0.0 ? newSampleRate : 48000.0;
+    // Nonsense rates (<= 0, NaN, Inf) fall back to 48 kHz; the upper clamp keeps
+    // the sub-block length (an int) meaningful for any finite input.
+    fs = std::isfinite (newSampleRate) && newSampleRate > 0.0 ? std::min (newSampleRate, kMaxSampleRate) : 48000.0;
     channels = std::clamp (numChannels, 1, kMaxChannels);
     stage1Coeffs = kWeightingStage1 (fs);
     stage2Coeffs = kWeightingStage2 (fs);
@@ -401,15 +416,16 @@ bool LoudnessMeter::GatingHistogram::gatedPercentiles (double relativeGateLu, do
         if (b.count == 0)
             continue;
         seen += b.count;
-        const double binLufs = energyToLufs (b.energy / static_cast<double> (b.count));
+        // log10 only for the (at most two) bins that resolve a rank, not for
+        // every occupied bin of the scan.
         if (! haveLow && lowRank < seen)
         {
-            lowLufs = binLufs;
+            lowLufs = energyToLufs (b.energy / static_cast<double> (b.count));
             haveLow = true;
         }
         if (highRank < seen)
         {
-            highLufs = binLufs;
+            highLufs = energyToLufs (b.energy / static_cast<double> (b.count));
             return haveLow;
         }
     }

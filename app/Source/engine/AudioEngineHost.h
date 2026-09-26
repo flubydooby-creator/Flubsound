@@ -176,6 +176,12 @@ public:
     /** First strip fed by the device inputs, -1 if none. */
     int getDeviceInputStrip() const noexcept;
 
+    /** Factory for per-process capture objects. Defaults to the platform
+        implementation (platform_bridge); tests / alternative capture sources
+        can inject their own. Message thread, before starting captures. */
+    using CaptureFactory = std::function<std::unique_ptr<flub::platform::ProcessLoopbackCapture>()>;
+    void setCaptureFactory (CaptureFactory factory);
+
     /** Starts capturing a process (tree) into a strip. Message thread. Returns
         a capture id >= 0, or -1 with `error` set. */
     int startProcessCapture (int strip, uint32_t processId, juce::String& error);
@@ -273,6 +279,7 @@ private:
     std::array<CaptureSlot, kMaxCaptures> captureSlots;
 
     // ---- Message-thread state ----------------------------------------------------------
+    CaptureFactory captureFactory;
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;
     int deviceInputLatency = 0, deviceOutputLatency = 0;

@@ -36,20 +36,36 @@ public:
 
     void process (const AudioBlock& block) noexcept
     {
+        // Two tiny offsets keep every recursive state normal during digital
+        // silence even without FTZ/DAZ: a -400 dBFS DC at the filter input (the
+        // RLB high-pass removes it, but the biquad states settle at ~1e-20
+        // instead of decaying into subnormals), and a -600 dB floor on the mean
+        // square (far below the 1e-20 reporting floor of getLufs()).
+        constexpr double antiDenormal = 1.0e-20;
+        constexpr double msFloor = 1.0e-60;
+
         const int nch = std::min (block.numChannels, channels);
         for (int i = 0; i < block.numSamples; ++i)
         {
-            double sum = 0.0;
+            double sum = msFloor;
             for (int c = 0; c < nch; ++c)
             {
                 if (nch >= 6 && c == 3)
                     continue; // LFE
                 const double w = (nch >= 6 && c >= 4) ? 1.41 : 1.0;
-                const double k = stage2.processSample (c, stage1.processSample (c, block.channel (c)[i]));
+                const double x = static_cast<double> (block.channel (c)[i]) + antiDenormal;
+                const double k = stage2.processSample (c, stage1.processSample (c, x));
                 sum += w * k * k;
             }
             ms.process (sum);
         }
+
+        // A NaN/Inf input sample would otherwise leave the filter states and
+        // the mean square NaN forever (getLufs() stuck at -inf, the control
+        // loops frozen). Any non-finite value reaches ms within the same
+        // sample, so one check per block is enough to restart cleanly.
+        if (! std::isfinite (ms.get()))
+            reset();
     }
 
     float getLufs() const noexcept

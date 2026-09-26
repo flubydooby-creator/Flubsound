@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace flub
 {
@@ -67,6 +68,23 @@ float sanitise (float v, float lo, float hi, float fallback) noexcept
 float slopeFromRatio (float ratio) noexcept
 {
     return 1.0f - 1.0f / ratio;
+}
+
+/** One per-sample step of a parameter smoother. OnePoleSmoother only snaps
+    within 1e-6 (1 + |target|), finer than float lets a slow one-pole get:
+    once coeff * (current - target) rounds back to (current - target) the
+    recursion stalls a few ulps short of any target with |target| >~ 1
+    (-60 dB stalls ~0.002 dB short at 48 kHz, ~0.007 dB at 192 kHz). The
+    curve would then sit just off its setting and the module would never go
+    idle again. So a step that no longer moves the value lands on the target;
+    that last step is below 0.01 dB (or 0.1 % of the sidechain corner). */
+void glide (OnePoleSmoother& s) noexcept
+{
+    if (! s.isSmoothing())
+        return;
+    const float before = s.getCurrent();
+    if (s.next() == before)
+        s.setImmediate (s.getTarget());
 }
 } // namespace
 
@@ -158,6 +176,22 @@ float Compressor::autoMakeupDb (const CompressorParams& p) noexcept
     return std::clamp (-0.5f * evaluateCurve (makeCurve (p), 0.0f).down, 0.0f, kMaxMakeupDb);
 }
 
+float Compressor::reductionOnsetGain (const Curve& c) noexcept
+{
+    // The detector peak (linear) at which gDown reaches -kActiveReductionDb,
+    // i.e. the inverse of the downward curve at that depth. Auto release
+    // measures how long the *instantaneous* peak stays above it, so the peak
+    // hold (which keeps the held level up for B .. 2B samples after the
+    // signal has gone) is not mistaken for persistence.
+    constexpr float d = kActiveReductionDb;
+    if (c.slope <= 0.0f)
+        return std::numeric_limits<float>::max(); // ratio 1: never reduces
+    float x = c.thresholdDb + d / c.slope;        // hard knee, or above a shallow knee
+    if (c.kneeDb > 0.0f && c.slope * c.kneeDb >= 2.0f * d)
+        x = c.thresholdDb - 0.5f * c.kneeDb + std::sqrt (2.0f * d * c.kneeDb / c.slope); // inside the knee
+    return std::exp (std::min (x, 2.0f * kMaxLevelDb) * kDbToLog);
+}
+
 //==============================================================================
 int Compressor::holdSamplesFor (float sidechainHpHz) const noexcept
 {
@@ -176,10 +210,17 @@ int Compressor::holdSamplesFor (float sidechainHpHz) const noexcept
     return std::max ({ 1, latency, halfPeriod });
 }
 
+double Compressor::timeCoeff (float ms) const noexcept
+{
+    // Double: in float, 1 - 1/(2000 ms * 192 kHz) = 1 - 2.6e-6 is only
+    // representable to ~1 %, and the time constant would drift with fs.
+    return std::exp (-1.0 / (static_cast<double> (ms) * 0.001 * spec.sampleRate));
+}
+
 void Compressor::updateTimeConstants() noexcept
 {
-    attackCoeff = onePoleCoeff (params.attackMs, spec.sampleRate);
-    releaseCoeff = onePoleCoeff (params.releaseMs, spec.sampleRate);
+    attackCoeff = timeCoeff (params.attackMs);
+    releaseCoeff = timeCoeff (params.releaseMs);
     autoCoeffSustain = -1.0f; // invalidate the auto-release cache
 }
 
@@ -231,6 +272,7 @@ void Compressor::reset() noexcept
     curve = makeCurve (params);
     smoothing = false;
     curveDirty = true;
+    onsetDirty = true;
 
     for (auto& s : hpState)
         s.reset();
@@ -246,10 +288,11 @@ void Compressor::reset() noexcept
     levelDb = kMinusInfDb;
     target = {};
 
-    gainDb = 0.0f; // the curve's value for silence
+    gainDb = 0.0; // the curve's value for silence
     updateTimeConstants();
     sustain = 0.0f;
     activeRun = 0;
+    loudRun = 0;
 
     lastWetDb = 0.0f;
     lastMix = -1.0f; // forces the first output-factor computation
@@ -324,22 +367,31 @@ void Compressor::setParams (const CompressorParams& newParams) noexcept
 
 void Compressor::advanceSmoothers() noexcept
 {
-    curve.thresholdDb = thresholdS.next();
-    curve.kneeDb = kneeS.next();
-    curve.slope = slopeS.next();
-    curve.upThresholdDb = upThresholdS.next();
-    curve.upSlope = upSlopeS.next();
-    curve.upMaxGainDb = upMaxS.next();
-    curve.upFloorDb = upFloorS.next();
+    const bool downMoving = thresholdS.isSmoothing() || kneeS.isSmoothing() || slopeS.isSmoothing();
+    glide (thresholdS);
+    glide (kneeS);
+    glide (slopeS);
+    glide (upThresholdS);
+    glide (upSlopeS);
+    glide (upMaxS);
+    glide (upFloorS);
+    curve.thresholdDb = thresholdS.getCurrent();
+    curve.kneeDb = kneeS.getCurrent();
+    curve.slope = slopeS.getCurrent();
+    curve.upThresholdDb = upThresholdS.getCurrent();
+    curve.upSlope = upSlopeS.getCurrent();
+    curve.upMaxGainDb = upMaxS.getCurrent();
+    curve.upFloorDb = upFloorS.getCurrent();
     curveDirty = true;
+    onsetDirty = onsetDirty || downMoving;
 
-    makeupS.next();
-    mixS.next();
+    glide (makeupS);
+    glide (mixS);
     hpMix.next();
 
     if (logHpFreq.isSmoothing())
     {
-        logHpFreq.next();
+        glide (logHpFreq);
         // The SVF is modulation-safe, so the corner can step at control rate;
         // the last step lands exactly on the target.
         if ((tick & (kHpCoeffInterval - 1u)) == 0u || ! logHpFreq.isSmoothing())
@@ -359,7 +411,8 @@ void Compressor::housekeeping() noexcept
     // Flush near-zero filter states so a decaying sidechain cannot leave
     // subnormals circulating, and recover from non-finite input: a NaN or Inf
     // stuck in the high-pass would otherwise blind the detector for good.
-    float sum = 0.0f;
+    // Per channel: restarting a healthy channel's filter mid-signal would pass
+    // its unfiltered level (e.g. a loud sub) to the detector for a few ms.
     for (int c = 0; c < spec.numChannels; ++c)
     {
         auto& s = hpState[static_cast<size_t> (c)];
@@ -367,14 +420,12 @@ void Compressor::housekeeping() noexcept
             s.ic1 = 0.0f;
         if (std::abs (s.ic2) < kStateFlush)
             s.ic2 = 0.0f;
-        sum += s.ic1 + s.ic2;
-    }
-    if (! std::isfinite (sum))
-        for (auto& s : hpState)
+        if (! std::isfinite (s.ic1 + s.ic2))
             s.reset();
+    }
 
     if (! std::isfinite (gainDb))
-        gainDb = 0.0f;
+        gainDb = 0.0;
 }
 
 //==============================================================================
@@ -388,6 +439,12 @@ void Compressor::process (const AudioBlock& block) noexcept
     std::array<float*, kMaxChannels> data {};
     for (int c = 0; c < numCh; ++c)
         data[static_cast<size_t> (c)] = block.channel (c);
+
+    // Channels this block leaves out (narrower than the prepared width) are
+    // fed silence: their delay lines share the write head, and a channel that
+    // rejoins later must not replay audio from before it was dropped.
+    for (int c = numCh; c < spec.numChannels; ++c)
+        hpState[static_cast<size_t> (c)].reset();
 
     float blockMinDb = 0.0f, blockMaxDb = 0.0f;
 
@@ -444,23 +501,32 @@ void Compressor::process (const AudioBlock& block) noexcept
             curveDirty = false;
             target = evaluateCurve (curve, levelDb);
         }
-        const float targetDb = target.down + target.up;
+        if (onsetDirty)
+        {
+            onsetDirty = false;
+            onsetGain = reductionOnsetGain (curve);
+        }
+        const double targetDb = static_cast<double> (target.down) + static_cast<double> (target.up);
 
         // ---- 4) how long has the reduction lasted? (auto release) ------------
-        // The held level stays up for at least bucketLength after the signal
-        // drops, so that much is not counted as persistence. While a release
-        // is still running the value is kept, so dense material that never
-        // fully recovers keeps the slow release (no pumping); it is forgotten
-        // over kSustainMs only once the gain is back near 0 dB.
+        // An episode runs while the held level asks for reduction; its
+        // persistence is the time from its start to the last sample whose
+        // instantaneous peak was loud enough to reduce. That excludes the
+        // B .. 2B samples the hold keeps the level up after the signal has
+        // gone, so a gunshot really releases at ~releaseMs / 4. While a
+        // release is still running the value is kept, so dense material that
+        // never fully recovers keeps the slow release (no pumping); it is
+        // forgotten over kSustainMs only once the gain is back near 0 dB.
         if (target.down < -kActiveReductionDb)
         {
-            activeRun = std::min (activeRun + 1, bucketLength + sustainSamples);
-            const float persisted = static_cast<float> (activeRun - bucketLength) * sustainStep;
-            sustain = std::max (sustain, std::min (1.0f, persisted));
+            activeRun = std::min (activeRun + 1, sustainSamples);
+            if (peak > onsetGain)
+                loudRun = activeRun;
+            sustain = std::max (sustain, static_cast<float> (loudRun) * sustainStep);
         }
         else
         {
-            activeRun = 0;
+            activeRun = loudRun = 0;
             if (gainDb >= -kActiveReductionDb)
                 sustain = std::max (0.0f, sustain - sustainStep);
         }
@@ -470,43 +536,45 @@ void Compressor::process (const AudioBlock& block) noexcept
         // for both the downward and the upward part), a rising gain the release.
         if (gainDb != targetDb)
         {
-            float coeff = attackCoeff;
+            double coeff = attackCoeff;
             if (targetDb > gainDb)
             {
                 coeff = releaseCoeff;
                 // Program-dependent release applies to recovery from reduction;
                 // the upward lift (gain above 0 dB) always rises at releaseMs so
                 // short gaps are not pumped up.
-                if (params.autoRelease && gainDb < 0.0f)
+                if (params.autoRelease && gainDb < 0.0)
                 {
                     if (sustain != autoCoeffSustain)
                     {
                         autoCoeffSustain = sustain;
                         const float scale = kFastReleaseFraction + (1.0f - kFastReleaseFraction) * sustain;
-                        autoCoeff = onePoleCoeff (params.releaseMs * scale, spec.sampleRate);
+                        autoCoeff = timeCoeff (params.releaseMs * scale);
                     }
                     coeff = autoCoeff;
                 }
             }
             gainDb = targetDb + coeff * (gainDb - targetDb);
-            if (std::abs (gainDb - targetDb) < kLandDb)
+            if (std::abs (gainDb - targetDb) < static_cast<double> (kLandDb))
                 gainDb = targetDb;
         }
-        blockMinDb = std::min (blockMinDb, gainDb);
-        blockMaxDb = std::max (blockMaxDb, gainDb);
+        const float gain = static_cast<float> (gainDb);
+        blockMinDb = std::min (blockMinDb, gain);
+        blockMaxDb = std::max (blockMaxDb, gain);
 
         // ---- 6) look-ahead delay, makeup and dry/wet --------------------------
         // The delayed signal is both the wet input and the dry path, so the
         // parallel mix is phase-aligned and collapses to one gain factor:
-        //   out = d (1 - mix) + d g mix = d (1 + mix (g - 1)),
-        // which is exactly 1 for mix = 0 or g = 1.
-        const float wetDb = gainDb + makeupS.getCurrent();
+        //   out = d (1 - mix) + d g mix,
+        // which is exactly 1 for mix = 0 (or g = 1) and exactly g for mix = 1
+        // (the form 1 + mix (g - 1) would lose g's precision below ~-60 dB).
+        const float wetDb = gain + makeupS.getCurrent();
         const float mix = mixS.getCurrent();
         if (wetDb != lastWetDb || mix != lastMix)
         {
             lastWetDb = wetDb;
             lastMix = mix;
-            outFactor = 1.0f + mix * (std::exp (wetDb * kDbToLog) - 1.0f);
+            outFactor = (1.0f - mix) + mix * std::exp (wetDb * kDbToLog);
         }
 
         for (int c = 0; c < numCh; ++c)
@@ -514,6 +582,8 @@ void Compressor::process (const AudioBlock& block) noexcept
             float* d = data[static_cast<size_t> (c)];
             d[i] = delay.processSample (c, d[i]) * outFactor;
         }
+        for (int c = numCh; c < spec.numChannels; ++c)
+            (void) delay.processSample (c, 0.0f);
         delay.advance();
 
         if ((++tick & (kHousekeepingInterval - 1u)) == 0u)

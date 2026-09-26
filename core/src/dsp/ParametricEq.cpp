@@ -16,7 +16,14 @@
 // a chain of short ramps instead of 16-sample steps (no zipper noise). When no
 // band is busy the ticks would be no-ops, so the whole remaining block is
 // processed as one segment; the output is sample-identical either way, which
-// makes the EQ independent of the host block size.
+// makes the EQ independent of the host block size. A smoother that stalls
+// at float resolution short of its target lands on it (stepSmoother()), so
+// every glide ends and the band returns to the exact static design.
+//
+// Discrete changes: while a swap is pending the fading-out band keeps its
+// current parameter values; the new ones arrive with the new topology under
+// mix 0. A band that is currently skipped (silent, or a 0 dB identity) swaps
+// at once and only fades in.
 //
 // CPU: a band costs nothing while it is disabled and faded out, or while it
 // is a bell / shelf at exactly 0 dB that is not gliding (an exact identity:
@@ -190,7 +197,7 @@ void ParametricEq::prepare (const ProcessSpec& newSpec)
 {
     spec = newSpec;
     spec.numChannels = std::clamp (spec.numChannels, 1, kMaxChannels);
-    if (! (spec.sampleRate > 0.0))
+    if (! (spec.sampleRate > 0.0) || ! std::isfinite (spec.sampleRate))
         spec.sampleRate = 48000.0;
 
     // Crossfade length is a whole number of control periods, so a fade that
@@ -258,7 +265,7 @@ void ParametricEq::setOutputGainDb (float db) noexcept
 //==============================================================================
 double ParametricEq::responseDb (const EqBandParams* bandList, int numBands, double freqHz, double sampleRate) noexcept
 {
-    if (bandList == nullptr || numBands <= 0 || ! (sampleRate > 0.0) || std::isnan (freqHz))
+    if (bandList == nullptr || numBands <= 0 || ! (sampleRate > 0.0) || ! std::isfinite (sampleRate) || std::isnan (freqHz))
         return 0.0;
 
     double db = 0.0;
@@ -372,10 +379,15 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
         band.fadeDir = band.fadePos < goal ? 1 : (band.fadePos > goal ? -1 : 0);
     }
 
-    // 2. Continuous parameters.
+    // 2. Continuous parameters. While a swap is pending the fading-out band
+    //    keeps its current values: the fade-out should only remove the old
+    //    sound, not morph the old type towards values meant for the new one
+    //    (the smoothers jump to their targets at the swap, under mix 0). If
+    //    the discrete change is reverted, the glide simply resumes.
+    const bool swapPending = ! (wanted == band.running);
     const bool smoothing = band.logFreq.isSmoothing() || band.gainDb.isSmoothing() || band.logQ.isSmoothing();
     const bool silent = band.fadePos == 0 && band.fadeDir <= 0;
-    if (smoothing)
+    if (smoothing && ! swapPending)
     {
         if (silent)
         {
@@ -431,7 +443,7 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
         band.rampPos = 0;
     }
 
-    band.busy = band.fadeDir != 0 || band.ramping || ! (wanted == band.running) || band.logFreq.isSmoothing()
+    band.busy = band.fadeDir != 0 || band.ramping || swapPending || band.logFreq.isSmoothing()
                 || band.gainDb.isSmoothing() || band.logQ.isSmoothing();
 }
 

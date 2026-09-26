@@ -752,3 +752,282 @@ TEST_CASE ("LoudnessFollower: converges to the programme loudness and gates sile
     CHECK_NEAR (l.getLufs(), -23.01, 0.1);
     CHECK_NEAR (s.getLufs() - l.getLufs(), 10.0 * std::log10 (1.41), 0.02);
 }
+
+//==============================================================================
+// ---- adversarial review tests ----
+namespace
+{
+/** Brute-force BS.1770-4 / EBU Tech 3342 reference: keeps every gating block
+    and every short-term value and gates / sorts them exactly (no histogram). */
+struct ReferenceResult
+{
+    double integrated, lra, maxM, maxS, m, s;
+};
+
+ReferenceResult referenceLoudness (const Planar& x, double fs)
+{
+    const auto c1 = LoudnessMeter::kWeightingStage1 (fs);
+    const auto c2 = LoudnessMeter::kWeightingStage2 (fs);
+    const int nch = x.numChannels();
+    const int n = x.numSamples();
+    const int len = static_cast<int> (std::lround (0.1 * fs));
+
+    std::vector<double> sub;
+    std::vector<BiquadState> s1 (static_cast<size_t> (nch)), s2 (static_cast<size_t> (nch));
+    std::vector<double> acc (static_cast<size_t> (nch), 0.0);
+    for (int i = 0; i < n; ++i)
+    {
+        for (size_t c = 0; c < static_cast<size_t> (nch); ++c)
+        {
+            const double y = biquadTick (c2, s2[c], biquadTick (c1, s1[c], static_cast<double> (x.ch[c][static_cast<size_t> (i)])));
+            acc[c] += y * y;
+        }
+        if ((i + 1) % len == 0)
+        {
+            sub.push_back (std::accumulate (acc.begin(), acc.end(), 0.0));
+            std::fill (acc.begin(), acc.end(), 0.0);
+        }
+    }
+
+    const auto lufs = [] (double e) { return -0.691 + 10.0 * std::log10 (e); };
+    const auto window = [&] (size_t end, int count)
+    {
+        double e = 0.0;
+        for (int k = 0; k < count; ++k)
+            e += sub[end - static_cast<size_t> (k)];
+        return e / (count * static_cast<double> (len));
+    };
+    std::vector<double> blocks, shortTerm;
+    for (size_t j = 3; j < sub.size(); ++j)
+        blocks.push_back (window (j, 4));
+    for (size_t j = 29; j < sub.size(); ++j)
+        shortTerm.push_back (window (j, 30));
+
+    // Absolute gate, then the relative gate `relLu` below the absolute-gated power mean.
+    const auto gated = [&] (const std::vector<double>& v, double relLu)
+    {
+        double sum = 0.0;
+        int count = 0;
+        for (double e : v)
+            if (e > 0.0 && lufs (e) > -70.0)
+            {
+                sum += e;
+                ++count;
+            }
+        std::vector<double> out;
+        if (count == 0)
+            return out;
+        const double thr = sum / count * std::pow (10.0, relLu / 10.0);
+        for (double e : v)
+            if (e > 0.0 && lufs (e) > -70.0 && e > thr)
+                out.push_back (e);
+        return out;
+    };
+
+    ReferenceResult r {};
+    const auto gi = gated (blocks, -10.0);
+    r.integrated = lufs (std::accumulate (gi.begin(), gi.end(), 0.0) / static_cast<double> (gi.size()));
+    auto gl = gated (shortTerm, -20.0);
+    std::sort (gl.begin(), gl.end());
+    const double last = static_cast<double> (gl.size() - 1);
+    r.lra = lufs (gl[static_cast<size_t> (std::llround (last * 0.95))]) - lufs (gl[static_cast<size_t> (std::llround (last * 0.10))]);
+    r.maxM = lufs (*std::max_element (blocks.begin(), blocks.end()));
+    r.maxS = lufs (*std::max_element (shortTerm.begin(), shortTerm.end()));
+    r.m = lufs (blocks.back());
+    r.s = lufs (shortTerm.back());
+    return r;
+}
+
+/** Noise with random piecewise-constant levels (-75..-5 dBFS, 50 ms..4 s segments). */
+Planar randomProgramme (double fs, int numChannels, double seconds, uint32_t seed)
+{
+    const int n = static_cast<int> (seconds * fs);
+    Planar buf (numChannels, n);
+    FastRandom rng (seed);
+    int i = 0;
+    while (i < n)
+    {
+        const float g = dbfs (-40.0 + 35.0 * rng.nextBipolar());
+        const int len = std::min (n - i, static_cast<int> ((2.025 + 1.975 * rng.nextBipolar()) * fs));
+        for (int c = 0; c < numChannels; ++c)
+            for (int k = 0; k < len; ++k)
+                buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i + k)] = g * rng.nextBipolar();
+        i += len;
+    }
+    return buf;
+}
+} // namespace
+
+TEST_CASE ("LoudnessMeter (adversarial): histogram gating matches a brute-force BS.1770 / Tech 3342 reference")
+{
+    // Random programmes with many level steps exercise both gates, the bin
+    // that straddles the relative gate and the percentile ranks. Integrated
+    // must be exact in practice; LRA may deviate by the documented 0.1 LU bin
+    // resolution; max / live readings are plain window sums and must agree.
+    const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
+    const int blockSizes[] = { 4096, 1, 333, 1024 };
+    for (int k = 0; k < 4; ++k)
+    {
+        const double fs = rates[k];
+        const int numChannels = 1 + k % 2;
+        const auto buf = randomProgramme (fs, numChannels, fs >= 96000.0 ? 20.0 : 40.0, static_cast<uint32_t> (77 + k));
+        auto& mutableBuf = const_cast<Planar&> (buf);
+        LoudnessMeter m;
+        m.prepare (fs, numChannels);
+        processRange (m, mutableBuf, 0, buf.numSamples(), blockSizes[k]);
+        const auto ref = referenceLoudness (buf, fs);
+        std::printf ("k=%d I %.5f ref %.5f LRA %.4f ref %.4f\n", k, m.getIntegratedLufs(), ref.integrated, m.getLoudnessRangeLu(), ref.lra);
+        CHECK_NEAR (m.getIntegratedLufs(), ref.integrated, 0.005);
+        CHECK_NEAR (m.getLoudnessRangeLu(), ref.lra, 0.1);
+        CHECK (ref.lra > 5.0); // the programme really has a range
+        CHECK_NEAR (m.getMaxMomentaryLufs(), ref.maxM, 1e-3);
+        CHECK_NEAR (m.getMaxShortTermLufs(), ref.maxS, 1e-3);
+        CHECK_NEAR (m.getMomentaryLufs(), ref.m, 1e-3);
+        CHECK_NEAR (m.getShortTermLufs(), ref.s, 1e-3);
+    }
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): EBU Tech 3342 LRA cases at 44.1 and 96 kHz")
+{
+    for (double fs : { 44100.0, 96000.0 })
+    {
+        LoudnessMeter m;
+        m.prepare (fs, 2);
+        ToneSource src (fs, 2, 4096);
+        src.feed (m, -40.0, 20.0);
+        src.feed (m, -20.0, 20.0);
+        CHECK_NEAR (m.getLoudnessRangeLu(), 20.0, 0.1);
+    }
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): reset() / resetIntegrated() exactly on and off the 100 ms grid")
+{
+    const std::array<float, kMaxChannels> g { dbfs (-23.0), dbfs (-23.0) };
+    const std::array<float, kMaxChannels> loud { dbfs (-10.0), dbfs (-10.0) };
+
+    // reset() mid sub-block restarts the grid at the reset: momentary appears
+    // exactly 400 ms after it, not at the old grid position.
+    {
+        LoudnessMeter m;
+        m.prepare (kFs, 2);
+        ToneSource src (kFs, 2, 97);
+        src.feedSamples (m, loud, 12345);
+        m.reset();
+        src.feedSamples (m, g, 19199);
+        CHECK (m.getMomentaryLufs() == kMinusInfDb);
+        src.feedSamples (m, g, 1);
+        CHECK_NEAR (m.getMomentaryLufs(), -23.0, 0.1);
+        CHECK_NEAR (m.getMaxMomentaryLufs(), -23.0, 0.1); // nothing of the loud pre-reset audio survives
+    }
+
+    // resetIntegrated() exactly on a sub-block boundary: no sub-block is skipped,
+    // the first fresh gating block is complete 400 ms later.
+    {
+        LoudnessMeter m;
+        m.prepare (kFs, 2);
+        ToneSource src (kFs, 2, 4800);
+        src.feedSamples (m, loud, 4800 * 20);
+        m.resetIntegrated();
+        src.feedSamples (m, g, 4800 * 4 - 1);
+        CHECK (m.getIntegratedLufs() == kMinusInfDb);
+        src.feedSamples (m, g, 1);
+        CHECK_NEAR (m.getIntegratedLufs(), -23.0, 0.05);
+        CHECK_NEAR (m.getMaxMomentaryLufs(), -23.0, 0.05);
+        // Short-term max / LRA only from windows entirely after the reset (3 s).
+        src.feedSamples (m, g, 4800 * 26 - 1);
+        CHECK (m.getMaxShortTermLufs() == kMinusInfDb);
+        src.feedSamples (m, g, 1);
+        CHECK_NEAR (m.getMaxShortTermLufs(), -23.0, 0.05);
+    }
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): blocks with fewer / more channels than prepared")
+{
+    // Prepared stereo, fed mono: the missing channel contributes nothing.
+    {
+        LoudnessMeter m;
+        m.prepare (kFs, 2);
+        ToneSource src (kFs, 1);
+        src.feed (m, -20.0, 4.0, 1u);
+        CHECK_NEAR (m.getIntegratedLufs(), -23.01, 0.05);
+    }
+    // Prepared stereo, fed 4 channels: the extra channels are ignored.
+    {
+        LoudnessMeter m;
+        m.prepare (kFs, 2);
+        ToneSource src (kFs, 4);
+        src.feed (m, -20.0, 4.0, 0xFu);
+        CHECK_NEAR (m.getIntegratedLufs(), -20.0, 0.05);
+    }
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): NaN in one channel only drops that channel's sub-block")
+{
+    LoudnessMeter m;
+    m.prepare (kFs, 2);
+    ToneSource src (kFs, 2, 4800);
+    src.feed (m, -23.0, 2.0);
+    // One sub-block where L carries a NaN: R still counts, so the newest
+    // momentary window loses at most a quarter of L's energy (never -inf).
+    Planar bad (2, 4800);
+    copyInto (bad.ch[0], sine (1000.0, kFs, 4800, dbfs (-23.0)));
+    copyInto (bad.ch[1], sine (1000.0, kFs, 4800, dbfs (-23.0)));
+    bad.ch[0][4000] = std::numeric_limits<float>::quiet_NaN();
+    m.process (bad.block());
+    const double expected = -23.0 + 10.0 * std::log10 (7.0 / 8.0);
+    CHECK_NEAR (m.getMomentaryLufs(), expected, 0.1);
+    CHECK (std::isfinite (m.getIntegratedLufs()));
+
+    // A NaN in the LFE of a 5.1 stream is never even filtered.
+    LoudnessMeter s;
+    s.prepare (kFs, 6);
+    Planar six (6, 4800);
+    std::fill (six.ch[3].begin(), six.ch[3].end(), std::numeric_limits<float>::quiet_NaN());
+    copyInto (six.ch[0], sine (1000.0, kFs, 4800, dbfs (-20.0)));
+    for (int i = 0; i < 10; ++i)
+        s.process (six.block());
+    CHECK (std::isfinite (s.getMomentaryLufs()));
+    CHECK_GE (s.getMomentaryLufs(), -24.0f);
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): K-weighting designs stay finite and stable for any rate")
+{
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    for (double fs : { nan, inf, -inf, 0.0, -48000.0, 1.0, 8000.0, 11025.0, 768000.0, 1.0e9 })
+    {
+        for (const auto& c : { LoudnessMeter::kWeightingStage1 (fs), LoudnessMeter::kWeightingStage2 (fs) })
+        {
+            CHECK (std::isfinite (c.b0) && std::isfinite (c.b1) && std::isfinite (c.b2));
+            CHECK (std::isfinite (c.a1) && std::isfinite (c.a2));
+            // Jury conditions for a stable second-order denominator.
+            CHECK (std::abs (c.a2) < 1.0);
+            CHECK (std::abs (c.a1) < 1.0 + c.a2);
+        }
+
+        LoudnessMeter m;
+        m.prepare (fs, 2);
+        Planar buf (2, 4096);
+        copyInto (buf.ch[0], whiteNoise (4096, 0.5f, 5));
+        copyInto (buf.ch[1], whiteNoise (4096, 0.5f, 6));
+        for (int b = 0; b < 60; ++b)
+            m.process (buf.block());
+        CHECK (allFinite (snapshot (m)));
+    }
+}
+
+TEST_CASE ("LoudnessFollower (adversarial): recovers from NaN / Inf input")
+{
+    LoudnessFollower f;
+    f.prepare (kFs, 2, 1000.0f);
+    ToneSource src (kFs, 2);
+    src.feed (f, -23.0, 3.0);
+    Planar bad (2, 64);
+    bad.ch[0][10] = std::numeric_limits<float>::quiet_NaN();
+    bad.ch[1][63] = std::numeric_limits<float>::infinity();
+    f.process (bad.block());
+    CHECK (std::isfinite (f.getLufs()));
+    src.feed (f, -23.0, 8.0);
+    CHECK_NEAR (f.getLufs(), -23.0, 0.2);
+    CHECK (f.isActive());
+}

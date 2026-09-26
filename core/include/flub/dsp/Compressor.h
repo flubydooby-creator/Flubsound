@@ -96,8 +96,10 @@ private:
     static Curve makeCurve (const CompressorParams& p) noexcept;
     static CurveGain evaluateCurve (const Curve& c, float levelDb) noexcept;
     static float autoMakeupDb (const CompressorParams& p) noexcept;
+    static float reductionOnsetGain (const Curve& c) noexcept;
 
     int holdSamplesFor (float sidechainHpHz) const noexcept;
+    double timeCoeff (float ms) const noexcept;
     void updateTimeConstants() noexcept;
     void updateHpCoeffs() noexcept;
     void advanceSmoothers() noexcept;
@@ -121,21 +123,25 @@ private:
     // Continuous parameters glide per sample (curve, makeup dB, mix).
     OnePoleSmoother thresholdS, kneeS, slopeS, upThresholdS, upSlopeS, upMaxS, upFloorS, makeupS, mixS;
     Curve curve;
-    bool smoothing = false, curveDirty = true;
+    bool smoothing = false, curveDirty = true, onsetDirty = true;
 
     // Linked peak detector with a two-bucket hold (see the .cpp).
     float bucketPeak = 0.0f, prevBucketPeak = 0.0f, heldPeak = -1.0f, levelDb = kMinusInfDb;
     int bucketLength = 1, bucketCountdown = 1;
     CurveGain target;
 
-    // Gain smoothing (dB) and program-dependent release.
-    float gainDb = 0.0f;
-    float attackCoeff = 0.0f, releaseCoeff = 0.0f;
+    // Gain smoothing (dB) and program-dependent release. The state and the
+    // coefficients are double: a float one-pole with c ~ 1 - 1e-5 stalls
+    // (c (y - t) rounds back to y - t) up to ~0.7 dB short of its target.
+    double gainDb = 0.0;
+    double attackCoeff = 0.0, releaseCoeff = 0.0;
     float sustain = 0.0f, sustainStep = 0.0f;         // 0..1: how long the current reduction has lasted
-    int activeRun = 0, sustainSamples = 4800;
-    float autoCoeffSustain = -1.0f, autoCoeff = 0.0f; // cache of the auto-release coefficient
+    int activeRun = 0, loudRun = 0, sustainSamples = 4800;
+    float onsetGain = 1.0f;                           // detector peak above which gDown < -0.5 dB
+    float autoCoeffSustain = -1.0f;                   // cache of the auto-release coefficient
+    double autoCoeff = 0.0;
 
-    // Output gain cache: 1 + mix * (10^((gain + makeup) / 20) - 1).
+    // Output gain cache: (1 - mix) + mix * 10^((gain + makeup) / 20).
     float lastWetDb = 0.0f, lastMix = -1.0f, outFactor = 1.0f;
 
     uint32_t tick = 0;                                // running sample counter (control-rate phase)

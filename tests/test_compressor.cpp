@@ -954,3 +954,363 @@ TEST_CASE ("Compressor: 1..8 channels, all linked, and blocks narrower than the 
     CHECK (buf.ch[1] == original);
     CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + n - 4800, 4800, 1000.0, kFs) / dbfs (-8.0)), -9.0, 0.3);
 }
+
+// ---- adversarial review tests ----
+namespace
+{
+/** A 1 kHz tone whose level steps through `segments` (seconds, dBFS). */
+std::vector<float> steppedTone (double fs, const std::vector<std::pair<double, double>>& segments)
+{
+    std::vector<float> out;
+    int start = 0;
+    for (const auto& [seconds, db] : segments)
+    {
+        const int len = static_cast<int> (std::lround (seconds * fs));
+        const float amp = db <= -200.0 ? 0.0f : dbfs (db);
+        for (int i = 0; i < len; ++i)
+            out.push_back (amp * static_cast<float> (std::sin (kTwoPi * 1000.0 * (start + i) / fs)));
+        start += len;
+    }
+    return out;
+}
+
+/** Runs `comp` over a mono signal in blocks of `blockSize`, returning the
+    smoothed gain the meter reports after every block (block size 1 gives the
+    gain of every sample). */
+std::vector<float> gainTrace (Compressor& comp, std::vector<float> signal, int blockSize)
+{
+    std::vector<float> trace;
+    float* ptr = signal.data();
+    const int n = static_cast<int> (signal.size());
+    for (int pos = 0; pos < n; pos += blockSize)
+    {
+        comp.process (AudioBlock (&ptr, 1, std::min (blockSize, n - pos), pos));
+        trace.push_back (std::min (comp.getGainReductionDb(), 0.0f) + comp.getUpwardGainDb());
+    }
+    return trace;
+}
+
+/** First index >= from where the trace crosses `level` in the given direction. */
+double crossingIndex (const std::vector<float>& trace, int from, float level, bool falling)
+{
+    for (int i = std::max (1, from); i < static_cast<int> (trace.size()); ++i)
+    {
+        const float a = trace[static_cast<size_t> (i - 1)], b = trace[static_cast<size_t> (i)];
+        if (falling ? (a > level && b <= level) : (a < level && b >= level))
+            return (i - 1) + static_cast<double> ((level - a) / (b - a)); // linear interpolation
+    }
+    return -1.0;
+}
+} // namespace
+
+TEST_CASE ("Compressor [adversarial]: the gain lands on the static curve even with the slowest times at 192 kHz")
+{
+    // A float one-pole y = t + c (y - t) stalls once c (y - t) rounds back to
+    // y - t: with c = 1 - 2.6e-6 (2000 ms at 192 kHz) and |t| ~ 40 dB that is
+    // up to ~0.7 dB short of the target, indefinitely.
+    const double fs = 192000.0;
+    CompressorParams p = downParams (-60.0f, 20.0f);
+    p.sidechainHpHz = 0.0f;
+    p.attackMs = 200.0f;
+    p.releaseMs = 2000.0f;
+    Compressor comp;
+    comp.setParams (p);
+    prepareComp (comp, fs, 1, 4096, 0.0f);
+
+    const double expected = Compressor::computeGainDb (p, -18.0f); // -39.9 dB
+
+    // Attack side: -30 dBFS (-28.5 dB), then -18 dBFS; 3 s = 15 attack time constants.
+    auto trace = gainTrace (comp, steppedTone (fs, { { 3.0, -30.0 }, { 3.0, -18.0 } }), 4096);
+    CHECK_NEAR (trace.back(), expected, 0.01);
+
+    // Release side: -6 dBFS (-51.3 dB), then back to -18 dBFS for 8 release time constants.
+    trace = gainTrace (comp, steppedTone (fs, { { 1.0, -6.0 }, { 16.0, -18.0 } }), 4096);
+    CHECK_NEAR (trace.back(), expected, 0.01);
+}
+
+TEST_CASE ("Compressor [adversarial]: after a parameter glide the output matches a compressor set up with the final values")
+{
+    // Parameter smoothers must actually land. A smoother that stalls a few
+    // ulps short keeps the curve (and the sidechain corner) off target forever
+    // and never lets the module go idle.
+    for (double fs : { 48000.0, 192000.0 })
+    {
+        CompressorParams a = downParams (-20.0f, 3.0f);
+        a.kneeDb = 4.0f;
+        a.makeupDb = 3.0f;
+        a.sidechainHpHz = 80.0f;
+        a.upThresholdDb = -50.0f;
+        a.upMaxGainDb = 6.0f;
+        CompressorParams b = a;
+        b.thresholdDb = -37.3f;
+        b.ratio = 6.0f;
+        b.kneeDb = 9.0f;
+        b.makeupDb = 7.3f;
+        b.mix = 0.7f;
+        b.sidechainHpHz = 300.0f;
+        b.upThresholdDb = -61.0f;
+        b.upMaxGainDb = 9.0f;
+        b.upFloorDb = -83.0f;
+
+        const auto signal = steppedTone (fs, { { 3.0, -12.0 } });
+        const int n = static_cast<int> (signal.size());
+
+        Compressor glide, fresh;
+        glide.setParams (a);
+        prepareComp (glide, fs, 1);
+        glide.setParams (b);
+        fresh.setParams (b);
+        prepareComp (fresh, fs, 1);
+
+        Planar x (1, n), y (1, n);
+        setChannel (x, 0, signal);
+        setChannel (y, 0, signal);
+        processInBlocks (glide, x, 512);
+        processInBlocks (fresh, y, 512);
+
+        double worst = 0.0, peak = 0.0;
+        for (int i = n - n / 10; i < n; ++i)
+        {
+            worst = std::max (worst, static_cast<double> (std::abs (x.ch[0][static_cast<size_t> (i)] - y.ch[0][static_cast<size_t> (i)])));
+            peak = std::max (peak, static_cast<double> (std::abs (y.ch[0][static_cast<size_t> (i)])));
+        }
+        CHECK (peak > 0.05);
+        CHECK_LE (worst / peak, 1e-6);
+    }
+}
+
+TEST_CASE ("Compressor [adversarial]: attack and release time constants are exact and sample-rate independent")
+{
+    for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        CompressorParams p = downParams (-40.0f, 20.0f);
+        p.sidechainHpHz = 0.0f;
+        p.attackMs = 5.0f;
+        p.releaseMs = 100.0f;
+        Compressor comp;
+        comp.setParams (p);
+        prepareComp (comp, fs, 1, 512, 0.0f);
+
+        const float target = Compressor::computeGainDb (p, -6.0f); // -32.3 dB
+        const auto trace = gainTrace (comp, steppedTone (fs, { { 0.5, -6.0 }, { 1.0, -300.0 } }), 1);
+
+        // Attack: from -10 dB, one time constant covers (1 - 1/e) of the rest.
+        const float a0 = -10.0f, a1 = target + (a0 - target) / static_cast<float> (std::exp (1.0));
+        const double attackMs = (crossingIndex (trace, 0, a1, true) - crossingIndex (trace, 0, a0, true)) * 1000.0 / fs;
+        CHECK_NEAR (attackMs, 5.0, 0.05);
+
+        // Release (after the hold): from -20 dB to -20 / e dB is one time constant.
+        const int end = static_cast<int> (0.5 * fs);
+        const float r0 = -20.0f, r1 = r0 / static_cast<float> (std::exp (1.0));
+        const double releaseMs = (crossingIndex (trace, end, r1, false) - crossingIndex (trace, end, r0, false)) * 1000.0 / fs;
+        CHECK_NEAR (releaseMs, 100.0, 1.0);
+
+        // The hold before the release starts is bounded: half a period of
+        // 20 Hz to a full one (HP off), never less than the look-ahead.
+        const double holdMs = (crossingIndex (trace, end, target + 0.5f, false) - end) * 1000.0 / fs;
+        CHECK_GE (holdMs, 24.0);
+        CHECK_LE (holdMs, 51.0);
+    }
+}
+
+TEST_CASE ("Compressor [adversarial]: auto release after a 5 ms transient runs at ~releaseMs/4, whatever the hold phase")
+{
+    // The peak hold keeps the detected level up for 25..50 ms (HP off) after
+    // the transient. That hold must not be counted as "persistence", or a
+    // gunshot would release at up to ~0.5 releaseMs instead of ~0.25.
+    auto recoverySamples = [] (bool autoRelease, float releaseMs, int offset)
+    {
+        CompressorParams p = downParams (-30.0f, 10.0f);
+        p.sidechainHpHz = 0.0f;
+        p.attackMs = 0.5f;
+        p.releaseMs = releaseMs;
+        p.autoRelease = autoRelease;
+        Compressor comp;
+        comp.setParams (p);
+        prepareComp (comp, kFs, 1, 512, 0.0f);
+        const auto trace = gainTrace (comp, steppedTone (kFs, { { offset / kFs, -300.0 }, { 0.005, -6.0 }, { 1.0, -300.0 } }), 1);
+        const int end = offset + 240;
+        CHECK_LE (*std::min_element (trace.begin(), trace.end()), -15.0f); // the transient was caught
+        return crossingIndex (trace, end, -3.0f, false) - end;
+    };
+
+    for (int offset : { 1, 311, 600, 911, 1199 })
+    {
+        const double autoTime = recoverySamples (true, 200.0f, offset);
+        const double quarterTime = recoverySamples (false, 50.0f, offset); // manual releaseMs / 4
+        CHECK_GE (autoTime, quarterTime - 1.0);
+        CHECK_LE (autoTime, 1.2 * quarterTime);
+    }
+}
+
+TEST_CASE ("Compressor [adversarial]: a channel that rejoins after narrower blocks does not replay stale audio")
+{
+    Compressor comp;
+    comp.setParams (downParams (-20.0f, 4.0f));
+    prepareComp (comp, kFs, 2, 512, 3.0f);
+    const int lat = comp.latencySamples();
+
+    Planar buf (2, 3 * 480);
+    setChannel (buf, 0, sine (1000.0, kFs, 3 * 480, 0.3f));
+    setChannel (buf, 1, whiteNoise (480, 0.9f, 17)); // loud noise on channel 1, then silence
+    comp.process (buf.block (0, 480));
+    comp.process (buf.block (480, 480).firstChannels (1)); // channel 1 dropped
+    comp.process (buf.block (960, 480));                   // ... and back, silent
+
+    double stale = 0.0;
+    for (int i = 960; i < 960 + lat; ++i)
+        stale = std::max (stale, static_cast<double> (std::abs (buf.ch[1][static_cast<size_t> (i)])));
+    CHECK_LE (stale, 0.0);
+}
+
+TEST_CASE ("Compressor [adversarial]: a NaN on one channel does not disturb the detector of the others")
+{
+    // Only the poisoned channel's sidechain filter is restarted: restarting a
+    // healthy one mid-signal passes its full (unfiltered) level for a few ms.
+    CompressorParams p = downParams (-20.0f, 4.0f);
+    p.sidechainHpHz = 80.0f;
+    Compressor comp;
+    comp.setParams (p);
+    prepareComp (comp, kFs, 2, 512, 2.0f);
+
+    const int n = 48000;
+    Planar buf (2, n);
+    setChannel (buf, 0, sine (30.0, kFs, n, dbfs (-6.0))); // reads ~ -23 dB through the HP: no reduction
+    setChannel (buf, 1, sine (1000.0, kFs, n, dbfs (-40.0)));
+    buf.ch[1][24000 + 7] = std::numeric_limits<float>::quiet_NaN();
+
+    std::vector<float> trace;
+    for (int pos = 0; pos < n; pos += 16)
+    {
+        comp.process (buf.block (pos, 16));
+        trace.push_back (comp.getGainReductionDb());
+    }
+    CHECK_GE (*std::min_element (trace.begin() + 1000, trace.end()), -0.5f);
+}
+
+TEST_CASE ("Compressor [adversarial]: the hold covers the full 10 ms look-ahead even with a 300 Hz sidechain corner")
+{
+    for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        CompressorParams p = downParams (-30.0f, 20.0f);
+        p.sidechainHpHz = 300.0f; // half-period hold only 3.3 ms < look-ahead
+        p.attackMs = 1.0f;
+        p.releaseMs = 10.0f;
+        Compressor comp;
+        comp.setParams (p);
+        prepareComp (comp, fs, 1, 512, 10.0f);
+        const int lat = comp.latencySamples();
+
+        const int n = lat + 2000;
+        Planar buf (1, n);
+        const int at = 700;
+        for (int i = at; i < at + 8; ++i)
+            buf.ch[0][static_cast<size_t> (i)] = (i % 2 == 0) ? 1.0f : -1.0f; // HF click, passes the HP
+        processInBlocks (comp, buf, 64);
+        // Every sample of the click is played with (almost) the full reduction.
+        for (int i = at; i < at + 8; ++i)
+            CHECK_LE (toDb (std::abs (buf.ch[0][static_cast<size_t> (i + lat)])), -24.0);
+    }
+}
+
+TEST_CASE ("Compressor [adversarial]: random automation, block sizes and signals never produce NaN/Inf or out-of-range meters")
+{
+    FastRandom rng (0xC0FFEEu);
+    auto uni = [&] (float lo, float hi) { return lo + (hi - lo) * 0.5f * (rng.nextBipolar() + 1.0f); };
+
+    for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        for (int channels : { 1, 2, 8 })
+        {
+            Compressor comp;
+            prepareComp (comp, fs, channels, 4096, uni (0.0f, 10.0f));
+            const int n = static_cast<int> (fs * 0.5);
+            Planar buf (channels, n);
+            for (int c = 0; c < channels; ++c)
+            {
+                auto noise = whiteNoise (n, 1.0f, static_cast<uint32_t> (11 + c));
+                for (int i = 0; i < n; ++i)
+                {
+                    // Bursts of full-scale noise, quiet passages and silence.
+                    const int section = (i / 5000 + c) % 4;
+                    const float g = section == 0 ? 1.0f : section == 1 ? 1.0e-3f : section == 2 ? 0.0f : 0.05f;
+                    buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = g * noise[static_cast<size_t> (i)];
+                }
+            }
+            int pos = 0;
+            while (pos < n)
+            {
+                CompressorParams p;
+                p.thresholdDb = uni (-70.0f, 5.0f);
+                p.ratio = uni (0.5f, 25.0f);
+                p.kneeDb = uni (-2.0f, 30.0f);
+                p.attackMs = uni (0.0f, 250.0f);
+                p.releaseMs = uni (0.0f, 2500.0f);
+                p.autoRelease = rng.nextBipolar() > 0.0f;
+                p.makeupDb = uni (-15.0f, 30.0f);
+                p.autoMakeup = rng.nextBipolar() > 0.3f;
+                p.sidechainHpHz = rng.nextBipolar() > 0.0f ? uni (-10.0f, 400.0f) : 0.0f;
+                p.mix = uni (-0.2f, 1.2f);
+                p.upThresholdDb = uni (-90.0f, 0.0f);
+                p.upRatio = uni (0.5f, 12.0f);
+                p.upMaxGainDb = uni (-2.0f, 20.0f);
+                p.upFloorDb = uni (-110.0f, -30.0f);
+                comp.setParams (p);
+
+                const int len = std::min (n - pos, 1 + static_cast<int> (rng.nextU32() % 700u));
+                const int nch = 1 + static_cast<int> (rng.nextU32() % static_cast<uint32_t> (channels));
+                comp.process (buf.block (pos, len).firstChannels (nch));
+                CHECK_LE (comp.getGainReductionDb(), 0.0f);
+                CHECK_GE (comp.getGainReductionDb(), -160.0f);
+                CHECK_GE (comp.getUpwardGainDb(), 0.0f);
+                CHECK_LE (comp.getUpwardGainDb(), 18.0f + 1.0e-3f);
+                pos += len;
+            }
+            CHECK (allFinite (buf));
+            CHECK_LE (peakOf (buf), 126.0); // +18 dB up + 24 dB makeup on a full-scale input
+        }
+    }
+}
+
+TEST_CASE ("Compressor [adversarial]: parameter changes at the same sample positions give identical output for any block split")
+{
+    const int n = 48000, seg = 480;
+    Planar src (2, n);
+    setChannel (src, 0, whiteNoise (n, 0.8f, 3));
+    setChannel (src, 1, sine (95.0, kFs, n, 0.7f));
+
+    auto run = [&] (uint32_t seed)
+    {
+        FastRandom rng (seed), prm (77); // prm: the same automation for every split
+        Compressor comp;
+        prepareComp (comp, kFs, 2, 512, 1.0f);
+        Planar buf (2, n);
+        for (int c = 0; c < 2; ++c)
+            setChannel (buf, c, src.ch[static_cast<size_t> (c)]);
+        for (int s = 0; s < n; s += seg)
+        {
+            CompressorParams p = downParams (-40.0f + 30.0f * std::abs (prm.nextBipolar()), 2.0f + 8.0f * std::abs (prm.nextBipolar()));
+            p.autoRelease = prm.nextBipolar() > 0.0f;
+            p.autoMakeup = prm.nextBipolar() > 0.0f;
+            p.sidechainHpHz = prm.nextBipolar() > 0.2f ? 0.0f : 150.0f;
+            p.mix = std::abs (prm.nextBipolar());
+            p.upMaxGainDb = 10.0f * std::abs (prm.nextBipolar());
+            comp.setParams (p);
+            int pos = s;
+            while (pos < s + seg)
+            {
+                const int len = seed == 0 ? seg : std::min (s + seg - pos, 1 + static_cast<int> (rng.nextU32() % 97u));
+                comp.process (buf.block (pos, len));
+                pos += len;
+            }
+        }
+        return buf.ch;
+    };
+
+    const auto ref = run (0);
+    for (uint32_t seed : { 1u, 2u, 3u })
+    {
+        const auto out = run (seed);
+        CHECK (out == ref);
+    }
+}

@@ -4,6 +4,7 @@
 #include "TestSignals.h"
 
 #include "flub/common/DelayLine.h"
+#include "flub/common/SmoothedValue.h"
 #include "flub/common/SpscRing.h"
 #include "flub/dsp/Biquad.h"
 #include "flub/dsp/Crossover.h"
@@ -261,4 +262,29 @@ TEST_CASE ("DelayLine: block delay equals per-sample delay")
         CHECK (buf.ch[0][static_cast<size_t> (i)] == expected);
         CHECK (buf.ch[1][static_cast<size_t> (i)] == expected);
     }
+}
+
+TEST_CASE ("OnePoleSmoother: glides converge exactly to non-zero targets (no float stall)")
+{
+    for (double controlRate : { 44100.0 / 16, 48000.0 / 16, 48000.0, 192000.0 })
+        for (float target : { 1.5f, 6.0f, 9.97f, 14.29f, 24.0f, -3.3f, 1000.0f })
+        {
+            OnePoleSmoother s;
+            s.reset (controlRate, 20.0f, 0.0f);
+            s.setTarget (target);
+            int steps = 0;
+            while (s.isSmoothing() && steps < 1000000)
+            {
+                s.next();
+                ++steps;
+            }
+            CHECK (s.getCurrent() == target);
+            CHECK (! s.isSmoothing());
+        }
+    OnePoleSmoother k;
+    k.reset (48000.0, 20.0f, 0.0f);
+    k.setTarget (12.0f);
+    for (int i = 0; i < 100000 && k.isSmoothing(); ++i)
+        k.skip (16);
+    CHECK (k.getCurrent() == 12.0f);
 }

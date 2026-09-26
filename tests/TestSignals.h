@@ -5,6 +5,7 @@
 #include "flub/common/Math.h"
 #include "flub/dsp/Processor.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <vector>
@@ -99,7 +100,7 @@ inline double measureGainDb (flub::Processor& p, double freq, double sampleRate,
     Planar buf (numChannels, total);
     auto s = sine (freq, sampleRate, total, amplitude);
     for (auto& c : buf.ch)
-        c = s;
+        std::copy (s.begin(), s.end(), c.begin()); // keep the storage Planar points at
     p.reset();
     processInBlocks (p, buf, 256);
     // Measure at the requested frequency over an integer number of periods where possible.
