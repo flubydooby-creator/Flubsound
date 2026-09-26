@@ -208,7 +208,7 @@ Formatting helpers:
 - The track is `clamp (0.075 · size, 2.5, 6)` px wide.
 - The value arc has a 16 %-alpha halo 4 px wider than the track.
 - The body is a gradient disc with a pointer; a keyboard-focus ring is drawn in the accent at 55 %.
-- **Effective-value ring.** The `flubEffective` property is set by `ParameterBinder` (§5.4). When the post-macro value differs from the knob position by more than 0.004 of the travel, a 1.5 px outer arc runs from the knob value to the effective value and ends in a 4 px dot. This is how Boost Intensity and the macros become visible on the module knobs they drive.
+- **Effective-value ring.** The `flubEffective` property is set by `ParameterBinder` (§5.4). When the effective value differs from the knob position by more than 0.004 of the travel, a 1.5 px outer arc runs from the knob value to the effective value and ends in a 4 px dot. This is how Boost Intensity and the macros become visible on the module knobs they drive. The effective value also carries the engine's mode and format overrides, so the ring shows what is applied: crossfeed 0 in Gaming, width 1 / space 0 / crossfeed 0 under the binaural lock, air 0 below 42 kHz, and ratio 1:1 for a Gaming compressor that only macros switched on ([03 §14.1](03-dsp-design.md#141-base-values-effective-values-and-the-macro-formula)).
 
 **`ParamKnob`** (`ui/ParamKnob.*`) is caption above, knob, value box below.
 
@@ -358,7 +358,7 @@ All four images are real renders of the app by the headless driver (§11). No au
 - The Game strip (7.1) is selected and the accent is magenta.
 - The driver plays a 7.1 game scene on Game and music at −12 dB on the Music strip, so both strips show activity dots.
 - The single amber diamond near 90 Hz is the live gain of the Gaming *anti-masking* mode band (dynamic-EQ band 6).
-- The compressor shows −2.2 dB of gain reduction.
+- The compressor shows −2.0 dB of gain reduction (*7.1 Headphone Surround* sets a 1.5:1 ratio, so its downward section stays in force).
 
 ![Headset advice banner for a Turtle Beach Stealth headset](images/app-gaming-headset-advice.png)
 
@@ -459,7 +459,7 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 | Channel | Direction | UI side | Mechanism |
 |---|---|---|---|
 | `param::ParameterStore` (per strip, banks A/B) | UI → audio | `ParameterBinder`, `EqCurveEditor`, `EngineController` (mode, boost, A/B, bypass, presets), `HeaderBar` (reset, loudness-matched bypass), Settings (latency profile) | `set (id, v)`: clamped relaxed atomic store (NaN is ignored), `version()` incremented. The audio thread takes one `snapshot()` per block |
-| `ProcessingChain::effectiveValue (id)` | audio → UI | `ParameterBinder` (knob rings), `ModuleRack` (AUTO / dimming) | post-macro values published as relaxed atomics |
+| `ProcessingChain::effectiveValue (id)` | audio → UI | `ParameterBinder` (knob rings), `ModuleRack` (AUTO / dimming) | post-macro values, including the chain's mode / format overrides, published as relaxed atomics at the end of each block's `applyParameters()` |
 | Audition mask (`ProcessingChain::setAuditionBypass`) | UI → audio | `ModuleCard` ear via `ModuleRack` → `EngineController::setAuditionBypass` | one atomic bit per module. It forces the module off whatever the preset or macros say, via the slot's click-free crossfade. It is not a parameter |
 | `MeterBus` | audio → UI | `MeterSnapshot::read()` once per frame for the selected strip. `RoutingPanel` reads `outPeakDb` of every strip directly | relaxed atomics written once per block |
 | `MeterBus::resetLoudnessRequest` | UI → audio | click on TRUE PEAK or INTEGR. | atomic flag; the chain `exchange`s it at the next block and resets integrated loudness and the TP hold |

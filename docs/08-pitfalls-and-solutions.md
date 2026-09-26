@@ -142,7 +142,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 - **Solution:**
   - Instead of global squashing, Gaming uses **targeted** processing: upward compression of *quiet high-frequency detail* only (footstep band 3.2 kHz, `BoostBelow`) and **anti-masking** of very loud lows (explosions).
   - The upward compressor has a noise-floor taper and a gentle ratio.
-  - The *Competitive FPS* preset keeps broadband *downward* compression off (ratio 1:1), so the compressor only lifts quiet sounds.
+  - When only Gaming macros (Boost Intensity, *Footsteps*, *Detail*) switch the compressor on and no ratio was chosen, the chain runs it at 1:1: it only lifts quiet sounds, and gunshots and explosions keep their dynamics (03 §9.7; test *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*). The *Competitive FPS* preset sets 1:1 explicitly; other Gaming presets choose a gentle downward ratio on purpose.
 
 ### C3. Wideners and crossfeed corrupt localisation
 - **Symptom:** blurry or phasey positions, and "inside-the-head" confusion.
@@ -150,6 +150,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
   - Width is applied to the side signal only, and only above `spatial.lowCut` (default 180 Hz; the mono sum is preserved exactly).
   - Gaming mode forces crossfeed to 0.
   - When the virtualiser produced binaural output, width, space and crossfeed are **locked off** (binaural lock). Only the ILD-emphasising *positional focus* remains.
+  - Known limitation: widening and focus act on the side signal, so on a source panned *hard* to one side they put an anti-phase copy in the far ear. The *Positional* macro at 100 % takes such a source from an infinite ILD to about 10 dB at 3 kHz; partially panned sources gain ILD, and the mono sum is unchanged ([03 §7.9](03-dsp-design.md#79-known-limitations)).
 
 ### C4. Double HRTF
 - **Symptom:** muffled, comb-filtered, "far away" audio.

@@ -714,9 +714,9 @@ TEST_CASE ("Chain: AutoDrive never raises the drive: below the target it is iner
     CHECK (maxDelayedError (out[1], out[0], 0, 0, out[0].numSamples()) == 0.0);
 
     // 2. A target the programme exceeds even undriven (-20 LUFS vs -24): the
-    //    reduction passes the requested 6 dB, the applied drive floors at 0 dB
-    //    and the output is the untouched (delayed) input - AutoDrive never
-    //    attenuates below the unprocessed level.
+    //    reduction reaches the requested 6 dB and stops there, so the applied
+    //    drive is 0 dB and the output is the untouched (delayed) input -
+    //    AutoDrive never attenuates below the unprocessed level.
     ParameterStore store;
     maximizerOnly (store, 6.0f, true, -24.0f);
     ProcessingChain chain (store);

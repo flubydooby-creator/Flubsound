@@ -197,7 +197,7 @@ Flubsound/
 │   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters
 │   │   └── Utf8Windows.h                   Windows: UTF-8 argv (CommandLineToArgvW), environment (GetEnvironmentVariableW) and console output; pass-through elsewhere
 │   └── scripts/
-│       └── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes)
+│       └── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
 │
 ├── app/                                    FlubsoundPro: the JUCE desktop application
 │   ├── CMakeLists.txt                      juce_add_gui_app, explicit FLUB_APP_SOURCES, platform detection, BinaryData presets, JUCE flags
@@ -636,7 +636,7 @@ The public section is the reviewed contract. Implementers extend only the part b
 | A CLI source file | `tools/flubsound-cli/` | **Yes:** `FLUB_CLI_SOURCES` |
 | Support for a new OS | `app/Source/platform/PlatformServices_<os>.*` | **Yes:** extend the `if(WIN32) / elseif(APPLE) / else()` selection in `app/CMakeLists.txt`; link flags go in `PlatformServices.cmake` |
 | A factory preset | `presets/factory/<category>-<slug>.json` (top level; see §9) | No (globbed with `CONFIGURE_DEPENDS`) |
-| A device profile | `presets/devices/device-profiles.json`, then `python3 tools/scripts/embed-device-profiles.py` | No |
+| A device profile | `presets/devices/device-profiles.json`, then `python3 tools/scripts/embed-device-profiles.py` (`--check` verifies the embedded copy without writing) | No |
 | A macro behaviour | rows in `kMusicTable` / `kGamingTable`, `core/src/engine/MacroMap.cpp` | No |
 | A mode policy | `configureModeBands()` or the policy block in `ProcessingChain::applyParameters()` | No |
 
@@ -797,7 +797,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state** (current tree). 433 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (434 in an `FLUB_RTSAN` build, which adds the RTSan self-test). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
+- **Current state** (current tree). 435 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (436 in an `FLUB_RTSAN` build, which adds the RTSan self-test). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
 
 ---
 
@@ -833,7 +833,7 @@ There are two platform locations with different roles:
 | | | `flub_tests` | `test_factory_presets.cpp` over `FLUB_PRESET_DIR` (top level) |
 | | | `install` | `share/flubsound/presets/factory/*.json` (CLI install rule) |
 | User presets | `<userApplicationDataDirectory>/Flubsound/Presets/*.flubpreset.json` | app | save / overwrite / delete / import in `PresetManager` |
-| Device profiles | `presets/devices/device-profiles.json` (8 profiles, 7132 bytes) | `flub_core` | embedded as `core/src/engine/DeviceProfilesData.cpp` by `tools/scripts/embed-device-profiles.py`. The script refuses input over 16000 bytes (one MSVC string literal). `test_device_profiles.cpp` fails if the embedded copy drifts from the JSON. |
+| Device profiles | `presets/devices/device-profiles.json` (8 profiles, 7132 bytes) | `flub_core` | embedded as `core/src/engine/DeviceProfilesData.cpp` by `tools/scripts/embed-device-profiles.py`. The script refuses input over 16000 bytes (one MSVC string literal) and leaves the file untouched when it is already up to date; `--check` writes nothing and exits 1 if the embedded copy is stale, and `--help` only prints usage. `test_device_profiles.cpp` fails if the embedded copy drifts from the JSON. |
 | | | app | `EngineController::loadDeviceProfiles()` prefers `<userApplicationDataDirectory>/Flubsound/device-profiles.json` and falls back to the embedded database |
 
 **Factory preset files.**

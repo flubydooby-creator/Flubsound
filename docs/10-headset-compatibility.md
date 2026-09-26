@@ -46,7 +46,7 @@ The test is "Chain: runs at every sample rate a headset may use" in `tests/test_
 | **Xbox Wireless** models on PC (`xbox-wireless-headset`) | — | ✓ (Xbox Wireless adapter) | — | Windows Sonic / Dolby Atmos for Headphones | Turn off OS spatial sound with Flubsound's virtualiser |
 | Legacy **Ear Force** and any other Turtle Beach device (`turtle-beach-generic`) | ✓ | ✓ | ✓ | Any on-board enhancement | Generic Turtle Beach advice |
 
-Families are matched on whole words in the endpoint name, such as "Headphones (Stealth 700 Gen 2 MAX)" or "ROCCAT Syn Pro Air". The more specific family always wins over the vendor-generic entry, and unrelated products are excluded ("Razer Blade Stealth", "Stealthy Mic", "Reconnect Audio" do not match). An unrecognised device simply gets the generic path, which behaves exactly like a recognised one minus the tailored messages.
+Families are matched on whole words in the endpoint name, such as "Headphones (Stealth 700 Gen 2 MAX)", "ROCCAT Syn Pro Air" or "Headphones (PDP Airlite Pro Wireless)". The more specific family always wins over the vendor-generic entry, and unrelated products are excluded ("Razer Blade Stealth", "Stealthy Mic", "Reconnect Audio", "Airliner Lounge Speakers", "Headphones (Victrixx)" do not match). An unrecognised device simply gets the generic path, which behaves exactly like a recognised one minus the tailored messages.
 
 ---
 

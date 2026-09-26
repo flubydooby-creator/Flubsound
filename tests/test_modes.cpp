@@ -422,8 +422,8 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever 
     // With the virtualiser on, the stereo after it is binaural: widening,
     // ambience and crossfeed would corrupt its interaural cues, so the chain
     // forces width 1 / space 0 / crossfeed 0 into the spatializer (focus is
-    // allowed). The effective values still show what the store and macros
-    // ask for; the spatializer's own width meter shows what it applies.
+    // allowed). The published effective values and the spatializer's own
+    // width meter both show what is applied.
     Planar in (8, kLen);
     const double freqs[8] = { 440.0, 550.0, 700.0, 0.0, 1300.0, 2300.0, 3100.0, 1700.0 }; // FL FR FC LFE BL BR SL SR
     const float levels[8] = { 0.10f, 0.08f, 0.10f, 0.0f, 0.05f, 0.05f, 0.10f, 0.07f };
@@ -492,9 +492,11 @@ TEST_CASE ("Gaming: a compressor switched on only by a macro is upward-only - lo
     CHECK (chosen.eff (CompRatio) == 1.5f);
     CHECK (chosen.toneDb (0, 1000.0) < off.toneDb (0, 1000.0) - 1.0); // downward 1.5:1 above -18 dB
 
-    const auto userOn = effectiveAfterPrepare ([] (ParameterStore& s) {
+    // Rendered (not just prepared), so the chain's per-block override has run.
+    const auto userOn = renderGaming ([] (ParameterStore& s) {
         s.set (CompressorOn, 1.0f);
         s.set (Macro1, 1.0f);
-    });
-    CHECK (userOn[static_cast<size_t> (CompRatio)] == layout()[static_cast<size_t> (CompRatio)].defaultValue);
+    }, loud, held);
+    CHECK (userOn.eff (CompRatio) == layout()[static_cast<size_t> (CompRatio)].defaultValue);
+    CHECK (userOn.toneDb (0, 1000.0) < off.toneDb (0, 1000.0) - 1.0); // the user's 2.5:1 compresses
 }

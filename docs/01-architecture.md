@@ -126,7 +126,7 @@ flowchart TB
 | `MeterBus` | Audio → GUI | `std::atomic<float>` fields written once per block, polled at display rate | Wait-free; values are always individually consistent |
 | `AnalyzerTaps` (`SpscRing<float>` pre/post) | Audio → GUI | Single-producer/single-consumer ring, acquire/release indices | Wait-free; drops (never blocks) if the GUI is slow |
 
-A few single `std::atomic` hand-offs complement them: the chain publishes every *effective* (post-macro) value once per block (`ProcessingChain::effectiveValue()`, for the GUI's "ghost" markers), the momentary per-module audition bypass (`ProcessingChain::setAuditionBypass`) is one atomic bit mask, and `AudioEngineHost` passes strip gain / mute, the device-input map and the master ceiling to the audio thread through atomics.
+A few single `std::atomic` hand-offs complement them: the chain publishes every *effective* value (post-macro, including its mode and format overrides) once per block (`ProcessingChain::effectiveValue()`, for the GUI's "ghost" markers), the momentary per-module audition bypass (`ProcessingChain::setAuditionBypass`) is one atomic bit mask, and `AudioEngineHost` passes strip gain / mute, the device-input map and the master ceiling to the audio thread through atomics.
 
 Structural changes (latency profile, device format, strip layout) are never applied on the audio thread. The host polls `MixEngine::needsReprepare()` at 5 Hz on the message thread, detaches the callback, re-prepares, and re-attaches (the plug-in does the same with its own timer and reports the new latency to the host). This is a deliberate, short, explicit dropout; a crossfaded double-buffered engine swap is on the roadmap.
 
@@ -199,8 +199,8 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A[store.snapshot → base] --> B[MacroMap.apply<br/>Boost Intensity + 5 mode macros<br/>× governor scale on 'governed' entries]
-    B --> C[Mode & binaural policy<br/>Gaming: crossfeed 0<br/>binaural: width 1, space 0, crossfeed 0]
-    C --> D[Module setters<br/>targets only — modules smooth]
+    B --> C[Mode & format policy, written into the effective values<br/>Gaming: crossfeed 0, macro-only compressor 1:1<br/>binaural: width 1, space 0, crossfeed 0<br/>below 42 kHz: air 0]
+    C --> D[Module setters<br/>targets only — modules smooth<br/>then publish effective values]
     D --> E[process slots]
     E --> F[Telemetry → MeterBus]
     F --> G[SafetyGovernor · AutoDrive · LoudnessMatch<br/>update for next block]
@@ -215,7 +215,7 @@ flowchart LR
   source = Boost Intensity or one of the five mode macros (0 … 1)
   ```
 
-  Macros can also *engage* modules. For example, turning up *Warmth* switches Saturation on (`core/src/engine/MacroMap.cpp`).
+  Macros can also *engage* modules. For example, turning up *Warmth* switches Saturation on (`core/src/engine/MacroMap.cpp`). In Gaming, a compressor that only macros switched on runs upward-only (ratio 1:1) unless a ratio was chosen, so loud events keep their dynamics.
 - **Mode bands.** Dynamic-EQ bands 4–7 belong to the mode policy, not to the user:
   - Gaming: footstep lift (3.2 kHz and 260 Hz upward compression), explosion anti-masking (90 Hz low shelf, cut above) and voice/score presence (2 kHz).
   - Music: dynamic de-harsh (3.5 kHz), air lift (12 kHz shelf) and de-boom (120 Hz); band 7 is unused in Music.
@@ -224,7 +224,7 @@ flowchart LR
 - **Glue arming.** The maximizer's 3-band glue splitter is only in the signal path while glue is *armed*: the preset sets `max.glue` > 0, or a macro that can raise it (Music: Boost Intensity, Loudness) is above zero. While armed, a 0.001 floor keeps the splitter engaged so Boost crossing the glue start point (40 %) never crossfades against the splitter's all-pass-shifted sum. Disarmed, the splitter is out of the path, because its all-pass rotation would raise the crest factor of flat-topped masters by 1–3 dB.
 - **Protection loops** close around the output (`core/src/engine/Protection.cpp`):
   - The SafetyGovernor keeps the ~3 s average limiter gain reduction above −6 dB and the clip-energy ratio below −30 dB. Over budget, its scale falls at 15 %/s (minimum 0.3); comfortably under budget (1.5 dB hysteresis) it recovers at 3 %/s.
-  - AutoDrive can only *reduce* maximizer drive (0 … −24 dB, ≤ 2 dB/s, 0.5 LU dead band), towards a LUFS target.
+  - AutoDrive can only *reduce* maximizer drive, towards a LUFS target (≤ 2 dB/s, 0.5 LU dead band). The reduction stops at the requested drive (the applied drive never goes below 0 dB), so there is no hidden reduction to wind back when the programme gets quieter.
   - LoudnessMatch computes the fair-comparison gain for the bypass path (±12 dB, 3 dB/s; a raise is capped at `max.ceiling` minus the held dry peak, and the dry-path limiter above catches what the per-block cap misses).
   - All three loudness loops use a gated 3 s measure that freezes in silence, pauses and fade-outs.
 

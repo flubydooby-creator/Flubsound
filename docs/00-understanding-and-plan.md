@@ -89,6 +89,7 @@ These were fixed up front because every later deliverable depends on them. `02-t
    - all dynamics are stereo-linked,
    - no crossfeed,
    - no widening of binaural (virtualised) output,
+   - a compressor switched on only by the macros lifts quiet cues without compressing loud events (unless a preset or the user chose a ratio),
    - fast recovery after loud events,
    - dedicated footstep and anti-masking dynamic-EQ bands,
    - a Low Latency profile with ~2.1 ms chain latency at 48 kHz.

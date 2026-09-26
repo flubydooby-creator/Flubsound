@@ -524,7 +524,8 @@ public:
 
     MeterBus& meters() noexcept { return meterBus; }    // audio -> GUI atomics
     AnalyzerTaps& taps() noexcept { return analyzerTaps; } // pre/post SPSC rings (mid signal)
-    /** Last effective (post-macro) value of a parameter. Published once per block
+    /** Last effective value of a parameter - after the macros and the chain's
+        mode / format overrides, i.e. what is applied. Published once per block
         (relaxed atomics), so any thread may call it. */
     float effectiveValue (int paramId) const noexcept;
 
@@ -554,7 +555,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     // ...
     store.snapshot (base.data());
     MacroMap::apply (base.data(), effective.data(), 1.0f);             // [1] effective values decide initial enables
-    publishEffective();
+    publishEffective();                                                // plain post-macro values until the first block
     const float* e = effective.data();
 
     profileAtPrepare = idx (e, LatencyProfile);                        // [2] latched until the next prepare()
@@ -712,7 +713,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     const bool maxActive = ! slots[SMax].isFullyBypassed();
     governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f,
                      maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, n);   // [9]
-    autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive));
+    autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]); // [14] floored at -requested drive
     loudnessMatch.measureWet (st);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
@@ -769,8 +770,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
 void ProcessingChain::applyParameters() noexcept
 {
     MacroMap::apply (base.data(), effective.data(), governor.getScale());       // [11]
-    publishEffective();                                                          // -> effectiveValue()
-    float* e = effective.data();
+    float* e = effective.data();   // the mode / format policies below write their overrides into e [18]
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
     const bool binaural = config.inputChannels > 2 && on (e, VirtualizerOn);
     // ... input/output gain targets, AutoLevel, bypassMix target,
@@ -792,22 +792,30 @@ void ProcessingChain::applyParameters() noexcept
     slots[SEq].setActive (on (e, EqOn));
 
     // ... Dynamic EQ user bands 0..3, then configureModeBands() writes mode bands 4..7   [12]
-    // ... Bass (BassEngineParams), Clarity (air forced to 0 below 42 kHz), Saturation
+    // ... Bass (BassEngineParams)
+    if (config.sampleRate < 42000.0)                                             // ---- Clarity ----
+        e[ClarityAir] = 0.0f;  // exciter products of <= 7 kHz content must stay below fs / 2
+    // ... ClarityParams (cp.air = e[ClarityAir]), Saturation
 
-    SpatializerParams wp;                                                        // ---- mode / binaural policy ----
-    // ... copy spatial.* values
-    if (mode == ModeValue::Gaming)
-        wp.crossfeed = 0.0f; // crossfeed blurs lateral cues: never in gaming   [13]
+    if (mode == ModeValue::Gaming)                                               // ---- mode / binaural policy ----
+        e[SpatialCrossfeed] = 0.0f; // crossfeed blurs lateral cues: never in gaming   [13]
     if (binaural)
     {
-        wp.width = 1.0f;     // binaural output already carries exact interaural cues
-        wp.space = 0.0f;
-        wp.crossfeed = 0.0f; // (positional focus is still allowed)
+        e[SpatialWidth] = 1.0f;     // binaural output already carries exact interaural cues
+        e[SpatialSpace] = 0.0f;
+        e[SpatialCrossfeed] = 0.0f; // (positional focus is still allowed)
     }
+    SpatializerParams wp;
+    // ... copy spatial.* values from e
     spatial.setParams (wp);
     slots[SSpatial].setActive (on (e, SpatialOn));
 
-    // ... Virtualiser, Compressor
+    // ... Virtualiser
+
+    if (mode == ModeValue::Gaming && ! (base[CompressorOn] >= 0.5f)             // ---- Compressor ----
+        && base[CompRatio] == layout()[static_cast<size_t> (CompRatio)].defaultValue)
+        e[CompRatio] = 1.0f;   // engaged only by a macro, no ratio chosen: upward only   [19]
+    // ... CompressorParams from e, compressor.setParams, slots[SComp].setActive
 
     MaximizerParams mp;                                                          // ---- Maximizer ----
     mp.driveDb = std::max (0.0f, e[MaxDriveDb] + autoDrive.getReductionDb());   // [14] AutoDrive only reduces
@@ -821,6 +829,8 @@ void ProcessingChain::applyParameters() noexcept
     mp.autoRelease = on (e, MaxAutoRelease);
     maximizer.setParams (mp);
     slots[SMax].setActive (on (e, MaximizerOn));
+
+    publishEffective();                                                          // [18] -> effectiveValue(), overrides included
 }
 ```
 
@@ -828,7 +838,7 @@ void ProcessingChain::applyParameters() noexcept
 flowchart LR
     A["NaN/Inf guard"] --> B["store.snapshot → base"]
     B --> C["MacroMap::apply<br/>× governor scale"]
-    C --> D["mode & binaural policy<br/>→ module setters, slot.setActive"]
+    C --> D["mode & binaural policy<br/>→ module setters, slot.setActive<br/>→ publishEffective"]
     D --> E["input gain · AutoLevel<br/>virtualiser / downmix"]
     E --> F["dry reference<br/>(delayed by totalLatency)"]
     F --> G["9 slots in order"]
@@ -858,7 +868,7 @@ flowchart LR
 | Protection loop (`Protection.h/.cpp`) | Constants in the code |
 |---|---|
 | `SafetyGovernor` | ~3 s averaging of limiter GR and clip-energy ratio (power domain). Over budget if avg GR < −6 dB or avg clip > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
-| `AutoDrive` | Gated loudness of the output. Reduction in [−24, 0] dB, rate `min(2, 0.5·\|error\|)` dB/s, 0.5 LU dead band. Relaxes to 0 at 4 dB/s when off. |
+| `AutoDrive` | Gated loudness of the output. `update()` also takes the requested (effective) drive: the reduction stays in [−requested drive, 0] dB (requested drive clamped to 0 … 24 dB), rate `min(2, 0.5·\|error\|)` dB/s, 0.5 LU dead band. Relaxes to 0 at 4 dB/s when off. |
 | `LoudnessMatch` | Gated dry and wet loudness. Dry gain = wet − dry, clamped ±12 dB, slewed 3 dB/s. |
 | `GatedLoudness` | 100 ms "momentary" + 3 s "slow" K-weighted followers. Gate closed below −70 dBFS RMS, below −50 LUFS, or more than 20 LU under the slow value. |
 
@@ -877,10 +887,12 @@ flowchart LR
 11. The governor scale is applied inside `MacroMap::apply`, on the governed entries only.
 12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands()`). In Gaming they are footstep, footstep-body, anti-masking and voice bands, scaled by *Footsteps* (M1) and *Voice & Score* (M5). In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
 13. Gaming correctness beats spaciousness: crossfeed is forced to 0 in Gaming mode. With binaural (virtualised) input, width, space and crossfeed are forced neutral.
-14. AutoDrive's value is ≤ 0, so it can only *reduce* the drive the user or macros asked for.
+14. AutoDrive's value is ≤ 0, so it can only *reduce* the drive the user or macros asked for. It is also ≥ −requested drive: past that the applied drive is already 0 dB, and further "reduction" would change nothing audible while delaying recovery. Test: *Chain: AutoDrive's reduction stops at the requested drive, so it recovers at once*.
 15. **Glue floor, only while glue is armed.** Glue is armed when its base value is above 0, or when a macro source that can raise it is above 0 in the current mode (`MacroMap::isArmed()`: Boost Intensity or *Loudness* in Music, even before the entry's start point). While armed, `kGlueFloor = 0.001` keeps the maximizer's 3-band splitter engaged. Switching glue fully off and on crossfades the input against its own all-pass-shifted band sum, which comb-nulls 120 Hz and 4 kHz for the fade. Without the floor that would happen every time Boost Intensity crosses its glue start point (40 %); 0.001 of 2:1 band compression is inaudible. When glue is disarmed the floor is not applied and the splitter is out of the path, because its all-pass rotation raises the crest factor of flat-topped (mastered) material by 1–3 dB (source comment), which the limiter would otherwise have to take back.
 16. Toggling `virt.on` on 6/8-channel input never clicks. For 20 ms both folds run and are crossfaded linearly (`virtMix`), since binaural render and downmix differ in level and timing (ITD, head shadow). Switching the virtualiser on from fully off first `reset()`s it, so it starts from silence rather than stale history.
 17. **The bypass reference has its own true-peak limiter.** `dryLimiter` (a `TruePeakLimiter` at `max.ceiling`, 80 ms auto release) limits the matched reference, so the ceiling holds in bypass in every host, including the plug-in and the CLI, which have no master limiter. It fits inside the latency the dry path needs anyway: 1 ms look-ahead + the 20-sample detector = 68 samples at 48 kHz, and `dryDelay` shrinks by the same amount, so no latency is added. It runs only while bypass is engaged (`bypassMix` above 0 or moving), which keeps its cost out of normal processing, and it is `reset()` every time it starts. Started cold, it outputs silence for its latency (1.42 ms at 48 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
+18. **Published effective values include the chain's overrides.** The mode and format policies write into the effective array itself (Gaming crossfeed 0; binaural width 1, space 0, crossfeed 0; air 0 below 42 kHz; the compressor rule of decision 19), and `publishEffective()` runs at the end of `applyParameters()`. `effectiveValue()` and the GUI's effective-value rings therefore show what the modules apply, not what the store and macros asked for. `prepare()` publishes the plain post-macro values; the first processed block replaces them. Test: *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies* reads the published width, space and crossfeed.
+19. **In Gaming, a macro-engaged compressor is upward-only.** Boost Intensity, *Footsteps* and *Detail* switch the compressor on for its upward section. When the base `comp.on` is off and `comp.ratio` is still at its default (2.5), the effective ratio is set to 1:1, so the downward section is off and gunshots and explosions keep their dynamics. A preset that sets a ratio, or a compressor the user switched on, keeps its ratio. Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*.
 
 ---
 
@@ -2034,13 +2046,13 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
 
 The program below is a complete host. It creates a `ParameterStore` and a `ProcessingChain`, prepares them, sets a few parameters, processes blocks, reads meters, does an A/B comparison against the loudness-matched bypass, and applies a structural latency-profile change. It then runs the `MixEngine` multi-strip variant: a 7.1 Game strip in Gaming mode on the Low Latency profile, plus a stereo Music strip at −3 dB.
 
-**Verification.** It was compiled and run in the scratch directory against the repository's `core/`, with exactly the command below; re-run against the current tree (with the bypass-reference limiter of §5.3), it prints the same output. The bank-B reference peaks at −1.99 dBFS, below the ceiling, so that limiter does not act here:
+**Verification.** It was compiled and run in the scratch directory against the repository's `core/`, with exactly the command below; re-run against the current tree (with the bypass-reference limiter of §5.3 and the Gaming upward-only compressor of decision 19), it prints the output below; only the last line changed with decision 19. The bank-B reference peaks at −1.99 dBFS, below the ceiling, so that limiter does not act here:
 
 ```bash
 g++ -std=c++20 -Icore/include example.cpp core/src/**/*.cpp -o example && ./example
 ```
 
-(g++ 13.3.0, x86-64.) It also compiles with zero warnings under `-O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion`, and the `-O2` build prints identical output. The program and its output below were re-verified against the current code, including the final `TruePeakLimiter` (shared detector taps and the `Kh` gain hold of §6), the conditional glue floor and the `effectiveValue()` accessor.
+(g++ 13.3.0, x86-64.) It also compiles with zero warnings under `-O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion`, and the `-O2` build prints identical output. The program and its output below were re-verified against the current code, including the final `TruePeakLimiter` (shared detector taps and the `Kh` gain hold of §6), the conditional glue floor, the `effectiveValue()` accessor and the AutoDrive and Gaming compressor changes of decisions 14 and 19.
 
 ```cpp
 // Flubsound Pro - minimal host for flub_core (docs/05-code-skeletons.md, section 11).
@@ -2193,7 +2205,7 @@ A: out peak -1.05 dBFS, TP max -1.05 dBTP, short-term -6.4 LUFS, limiter GR -1.9
 B (bypass): out peak -1.99 dBFS, short-term -6.4 LUFS
 after re-prepare (Low Latency): 100 samples
 mix latency: 260 samples (max strip + master limiter)
-mix: out peak -1.06 dBFS, deepest master limiter GR -1.57 dB
+mix: out peak -1.05 dBFS, deepest master limiter GR -3.38 dB
 ```
 
 **What the output demonstrates**
@@ -2206,7 +2218,7 @@ mix: out peak -1.06 dBFS, deepest master limiter GR -1.57 dB
 | `B (bypass) … -6.4 LUFS` | The A/B switch to bank B (`bypass` on) plays the dry path at the **same loudness** as the processed signal: loudness-matched bypass. |
 | `after re-prepare: 100` | `needsReprepare()` flagged the structural change; after `prepare()` the Low Latency profile is 100 samples (2.08 ms). |
 | `mix latency: 260` | The Music strip (Balanced, 192) sets the pad; the Game strip (Low Latency, 100) is padded by 92. Not every strip is Low Latency, so the master limiter keeps its 1 ms look-ahead and adds 48 + 20 = 68. |
-| `deepest master limiter GR -1.57 dB` | The two individually limited strips overshoot when summed. The master limiter catches it, and the output peaks at −1.06 dBFS, under its −1 dBTP ceiling. |
+| `deepest master limiter GR -3.38 dB` | The two individually limited strips overshoot when summed. The master limiter catches it, and the output peaks at −1.05 dBFS, under its −1 dBTP ceiling. (The Game strip's *Footsteps* compressor is upward-only since decision 19, so that strip is no longer compressed downward and the sum needs more master limiting; before that rule this line read −1.57 dB and −1.06 dBFS.) |
 
 **What a real host does differently.** The app (`app/Source/engine`) and the plug-in do the same things in a device callback or `processBlock`. `prepare()` / `configure()` for a structural change happens on the message thread after detaching the callback; see [01 — Architecture §3](01-architecture.md#3-process--thread-model). The offline renderer (`tools/flubsound-cli/OfflineRenderer.cpp`) adds a "prime" step: one silent `process()` block delivers every parameter to the modules, then `reset()` snaps their smoothers onto those targets, so an offline render has no start-up glide. It then drops the first `getLatencySamples()` output samples and flushes the same number of zeros for sample alignment.
 

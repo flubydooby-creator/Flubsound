@@ -1245,7 +1245,7 @@ Measured at air 1, levels re the input tone:
 | 9 kHz | 44.1 kHz | 18 kHz −30.0 dB | **alias at 17.1 kHz −44.3 dB** | |
 | 8.5 / 9 kHz | 48 kHz | — | alias at 22.5 / 21 kHz: −36.0 / −43.0 dB | |
 
-**Sample-rate guard.** `ProcessingChain` sets `air = 0` whenever **fs < 42 kHz**, for example USB 32 kHz modes and Bluetooth hands-free at 16 or 8 kHz, where the products would fold back. The guard is in `applyParameters()` (`cp.air = fs >= 42000 ? air : 0`) and matches the 21 kHz argument exactly: 3 × 7 kHz = 21 kHz < fs/2.
+**Sample-rate guard.** `ProcessingChain` sets `air = 0` whenever **fs < 42 kHz**, for example USB 32 kHz modes and Bluetooth hands-free at 16 or 8 kHz, where the products would fold back. The guard is in `applyParameters()` (`if (fs < 42000) e[ClarityAir] = 0`, then `cp.air = e[ClarityAir]`) and matches the 21 kHz argument exactly: 3 × 7 kHz = 21 kHz < fs/2. Because it writes the effective value, `effectiveValue(clarity.air)` and the GUI's effective-value ring show the 0 that is applied (§14.1).
 
 ### 5.4 Parameters
 
@@ -1614,7 +1614,7 @@ A Cytomic bell (as `SvfCoeffs::make(Bell)`) on S1 at a fixed 3 kHz, Q 0.5, gain 
 A = 10^(gainDb / 40),  k = 1 / (Q A),  m = (1, k (A² − 1), 0)       focus 0 → m1 = 0 exactly
 ```
 
-At focus 1 and 48 kHz (analytic): +0.25 dB at 300 Hz, +2.15 dB at 1 kHz, **+6.00 dB at 3 kHz**, +3.63 dB at 6 kHz, +1.46 dB at 10 kHz and +0.44 dB at 15 kHz. The gain is ≥ +3 dB from 1.26 kHz to 6.84 kHz. For broadband transients (footsteps, reloads), interaural level differences in this region are the main lateral localisation cue. Emphasising S there sharpens the perceived direction without touching the centre.
+At focus 1 and 48 kHz (analytic): +0.25 dB at 300 Hz, +2.15 dB at 1 kHz, **+6.00 dB at 3 kHz**, +3.63 dB at 6 kHz, +1.46 dB at 10 kHz and +0.44 dB at 15 kHz. The gain is ≥ +3 dB from 1.26 kHz to 6.84 kHz. For broadband transients (footsteps, reloads), interaural level differences in this region are the main lateral localisation cue. Emphasising S there sharpens the perceived direction without touching the centre. A source panned hard to one side is the exception: raising its S puts an anti-phase copy into the far ear, so its interaural level difference falls (§7.9).
 
 #### 7.3.3 Space
 
@@ -1744,11 +1744,11 @@ There are no control-rate coefficient steps. The output is bit-identical for blo
 
 | | Music | Gaming |
 |---|---|---|
-| Macros | **Width** macro: engages `spatial.on`, width +0.6 (0–100 %), space +0.35 (40–100 %). **Boost Intensity**: width +0.2 (0–50 %). | **Positional** macro: engages `spatial.on`, focus +0.9 (0–100 %), width +0.25 (30–100 %). **Boost Intensity**: focus +0.3 (0–60 %). |
+| Macros | **Width** macro: engages `spatial.on`, width +0.6 (0–100 %), space +0.35 (40–100 %). **Boost Intensity**: width +0.2 (0–50 %). | **Positional** macro: engages `spatial.on`, focus +0.9 (0–100 %), width +0.25 (30–100 %); it raises the ILD of partially panned sources but lowers that of hard-panned ones (§7.9). **Boost Intensity**: focus +0.3 (0–60 %). |
 | Crossfeed | as set by the user / preset | **forced to 0** by `ProcessingChain` (it blurs interaural differences, the main lateral cue) |
 | Binaural lock (both modes) | When a 5.1/7.1 strip was rendered by the virtualiser (`virt.on`), the chain forces width 1, space 0 and crossfeed 0: binaural output already carries exact interaural cues. Focus stays available. | same |
 
-All contributions are ungoverned (they add little loudness). Macro contributions are clamped to the parameter range: at 100 % Music Width plus Boost, width is `1 + 0.6 + 0.2 = 1.8`.
+The chain writes these overrides into the effective values, so `effectiveValue()` and the GUI's effective-value rings show what the spatializer applies (§14.1). All contributions are ungoverned (they add little loudness). Macro contributions are clamped to the parameter range: at 100 % Music Width plus Boost, width is `1 + 0.6 + 0.2 = 1.8`.
 
 ### 7.8 Tests that prove it (`tests/test_spatializer.cpp`)
 
@@ -1786,6 +1786,7 @@ All contributions are ungoverned (they add little loudness). Macro contributions
 - **Correlation reads 1 when one output channel is silent.** "Silent" here means `<L'²><R'²> ≤ 1e−20`, a geometric-mean level of about −100 dBFS; an example is a hard-panned source at width ≤ 1. This is the same convention as `LevelMeter`; many meters read 0 there. The safety holds its state while ρ is undefined.
 - **The safety scales only the width.** Space and focus are not pulled back, so a low `minCorrelation` target can be missed while space is on (the width then saturates at 1, which is harmless).
 - **Hard-panned sources widened above 1 always drive ρ towards −1**, so any `minCorrelation ≥ 0` pulls such material fully back to width 1. This follows from the contract.
+- **Raising S lowers the ILD of a hard-panned source.** Width and positional focus scale the side signal. For a source on one channel only (R = 0, so M = S), any side gain g > 1 gives `L' = (1 + g)·L/2` and `R' = (1 − g)·L/2`: an anti-phase copy in the far ear. The interaural level difference falls from infinite to `20 log10((1 + g)/(g − 1))`. With the Gaming *Positional* macro at 100 % (focus 0.9, S +5.4 dB at 3 kHz; the mono safety has pulled its +0.25 width back to 1 on such a source), that is about **10 dB at 3 kHz**, the worst case (10.4 dB measured at 48 kHz; 11–16 dB at 1, 2, 6 and 10 kHz; 9.6 dB with Boost Intensity also at 100 %, focus 1.0). Partially panned sources gain ILD instead: an R = L/2 source goes from 6 dB to about 18 dB at 3 kHz. The mono sum is unchanged in both cases (§7.3.6). *Gaming Positional (M2): …* in `tests/test_modes.cpp` asserts that a hard-left 3 kHz tone keeps at least 6 dB of ILD and its near-ear level. A widener that raised only the near ear would need to know where each source is panned, which an M/S processor does not.
 - **The space network is fixed:** no size, decay or modulation controls. Like any decorrelator, it gives frequency-dependent level differences between the ears on steady tones.
 - **The loop can overshoot once** on a sudden change, because of the 300 ms measurement lag. The implementer observed a dip to about 1.19 before settling at 1.33 on content with input correlation 0.3. It does not hunt.
 
@@ -2177,7 +2178,7 @@ Prepared channels missing from a narrower block are fed zeros through their dela
 
 | Name | Key | Range | Default | Unit | What it does |
 |---|---|---|---|---|---|
-| Compressor | `comp.on` | off/on | **off** | toggle | module bypass (Gaming macros engage it) |
+| Compressor | `comp.on` | off/on | **off** | toggle | module bypass (Gaming macros engage it, upward only unless a ratio is set: §9.7) |
 | Threshold | `comp.threshold` | −60 … 0 | −18 | dBFS | downward threshold T (detector peak) |
 | Ratio | `comp.ratio` | 1 … 20 | 2.5 | ratio | downward slope `1 − 1/R` |
 | Knee | `comp.knee` | 0 … 24 | 6 | dB | soft-knee width W (0 = hard) |
@@ -2219,8 +2220,8 @@ Module sanitising: out-of-range values clamp, and a non-finite field keeps its l
   - **Footsteps** engages it and adds upward max +3 dB (30–100 %).
   - **Detail** engages it and adds upward max +8 dB (0–100 %).
   - Together they reach +16 dB (store range 0 … 18). With the default upward curve the lift is capped by the curve itself at +9 dB (above).
-  - Engaging the module also activates the *default downward curve* (−18 dBFS, 2.5:1, 6 dB knee, 10/120 ms, sidechain HP 80 Hz), so loud events are compressed gently while quiet cues are lifted.
-  - The 80 Hz sidechain high-pass keeps explosions from ducking everything.
+  - **A macro-engaged compressor is upward-only.** When only these macros switched the module on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, `ProcessingChain::applyParameters()` sets the effective ratio to **1:1**. The downward slope `1 − 1/R` is then 0, so gunshots and explosions keep their dynamics while quiet cues are lifted. Before this rule the default downward curve (−18 dBFS, 2.5:1, 6 dB knee) took about 4.8 dB off a −10 dBFS tone at Footsteps 100 %. A preset that sets a ratio keeps it (the Gaming factory presets that engage the compressor choose 1:1 to 3:1), and so does a compressor the user switched on. The effective value shows the 1:1 (§14.1). Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen* (`tests/test_modes.cpp`: with only Footsteps engaging the compressor, the effective ratio reads 1:1 and a −10 dBFS 1 kHz tone stays within 0.2 dB of the macro-off level; with a stored 1.5:1 it comes out more than 1 dB lower). A compressor the user switched on is rendered too: its effective ratio stays at the default 2.5 and it takes more than 1 dB off the loud tone.
+  - Where a downward ratio is in force, the 80 Hz sidechain high-pass keeps explosions from ducking everything.
   - The Low Latency profile uses a 0.5 ms look-ahead.
 - **Music.** No Music macro touches the compressor, and `comp.on` defaults to off. It is a user/preset tool, for example dynamic genres or night listening via the upward curve.
 
@@ -3162,7 +3163,8 @@ effective[p] = clamp_p( base[p] + Σ_e  amount_e · c_e(v_e) · g_e )
 - **Governor timing.** The scale applied in a block is the one computed after the previous block.
 - **Staggered windows.** Staggered `start/end` windows make one slider behave "intelligently": different processes arrive in a musically sensible order. The first third mostly adds clarity, width and detail, the middle adds bass and harmonics, and loudness ramps in last.
 - **Arming.** `MacroMap::isArmed(base, paramId)` is true when a source that can raise the parameter in the current mode (an entry with a positive amount) is above zero, even before the entry's start point. The chain uses it for the glue floor (§11.3.2).
-- **GUI read-back.** `ProcessingChain::effectiveValue(paramId)` returns the last effective value to the GUI for "ghost" markers (0 for an invalid id). The audio thread publishes the whole array once per block into relaxed atomics, so the read is race-free from any thread. `ProcessingChain::modeBandFrequency(mode, band)` gives the GUI the centre or corner frequency of the dynamic-EQ mode bands (`kFirstModeBand = 4`, `kNumModeBands = 4`; 0 for any other band).
+- **Mode and format overrides.** After `MacroMap::apply`, `applyParameters()` writes the chain's policies into the same effective array: in Gaming, crossfeed 0 and, for a compressor only macros switched on with the ratio at its default, ratio 1:1 (§14.4); under the binaural lock, width 1, space 0 and crossfeed 0; below 42 kHz, air 0 (§5.3.4). The modules receive exactly these values.
+- **GUI read-back.** `ProcessingChain::effectiveValue(paramId)` returns the last effective value to the GUI for "ghost" markers (0 for an invalid id). It is published at the end of `applyParameters()`, after the overrides above, so the markers show what is applied rather than what the store and macros asked for (`prepare()` publishes the plain post-macro values, which the first processed block replaces). The audio thread publishes the whole array once per block into relaxed atomics, so the read is race-free from any thread. `ProcessingChain::modeBandFrequency(mode, band)` gives the GUI the centre or corner frequency of the dynamic-EQ mode bands (`kFirstModeBand = 4`, `kNumModeBands = 4`; 0 for any other band).
 
 ### 14.2 Boost Intensity staging
 
@@ -3181,7 +3183,7 @@ Every entry from `kMusicTable` / `kGamingTable` (amount at 100 %, active window,
 | Maximizer drive (`max.drive`) | +8 dB\* (30–100 %, curve^1.2) | +6 dB\* (30–100 %, curve^1.2) |
 | Glue (`max.glue`) | +0.30 (40–100 %) | — |
 | Saturation drive (`sat.drive`) | +4 dB\* (60–100 %) | — |
-| Engages | Dynamic EQ (from > 1 %, so the Music de-boom band can track Boost), Maximizer (≈ 26 %) | Compressor (≈ 6 %, for upward compression), Maximizer (≈ 26 %) |
+| Engages | Dynamic EQ (from > 1 %, so the Music de-boom band can track Boost), Maximizer (≈ 26 %) | Compressor (≈ 6 %, for upward compression; 1:1 downward unless a ratio is set, §14.4), Maximizer (≈ 26 %) |
 
 `dyneq.on`, `max.on`, `bass.on`, `clarity.on` and `spatial.on` default to on, so their engage entries matter only if a preset or the user switched the module off. `comp.on` and `sat.on` default to off.
 
@@ -3213,10 +3215,10 @@ Maximum effective values with Boost and all five macros at 100 % (governor scale
 
 | Macro | Targets (\* governed) | Internal dynamic-EQ companion |
 |---|---|---|
-| **Footsteps** | Dynamic EQ on; Compressor on; upward max gain +3 dB (30–100 %) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *boost below* −42 dBFS, 3:1, range 7 dB × Footsteps (3 / 120 ms), floor −75 dBFS. Band 5: **footstep body** bell 260 Hz, Q 1.2, *boost below* −45 dBFS, 2.5:1, range 3 dB × Footsteps (5 / 150 ms), floor −75 dBFS. Band 6: **explosion anti-masking** low shelf 90 Hz, Q 0.7, *cut above* −22 dBFS, 3:1, range 6 dB × Footsteps (10 / 250 ms), floor −80 dBFS |
-| **Positional** | Stereo on; positional focus +0.9 (0–100 %); width +0.25 (30–100 %, widens only above `spatial.lowCut`, default 180 Hz) | — |
+| **Footsteps** | Dynamic EQ on; Compressor on (upward only unless a ratio is set, see the policies below); upward max gain +3 dB (30–100 %) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *boost below* −42 dBFS, 3:1, range 7 dB × Footsteps (3 / 120 ms), floor −75 dBFS. Band 5: **footstep body** bell 260 Hz, Q 1.2, *boost below* −45 dBFS, 2.5:1, range 3 dB × Footsteps (5 / 150 ms), floor −75 dBFS. Band 6: **explosion anti-masking** low shelf 90 Hz, Q 0.7, *cut above* −22 dBFS, 3:1, range 6 dB × Footsteps (10 / 250 ms), floor −80 dBFS |
+| **Positional** | Stereo on; positional focus +0.9 (0–100 %); width +0.25 (30–100 %, widens only above `spatial.lowCut`, default 180 Hz). Raises the ILD of partially panned sources; a hard-panned source drops from an infinite ILD to about 10 dB at 100 % (§7.9) | — |
 | **Impact** (explosions, gunshots) | Bass on; bass boost +6 dB\* (0–100 %); harmonic bass +0.25\* (40–100 %); Clarity on; transient attack +4 dB (20–100 %) | — |
-| **Detail** (environment) | Compressor on; upward max gain +8 dB (0–100 %); Clarity on; air +0.4 (20–100 %) | — |
+| **Detail** (environment) | Compressor on (upward only unless a ratio is set); upward max gain +8 dB (0–100 %); Clarity on; air +0.4 (20–100 %) | — |
 | **Voice & Score** | Clarity on; presence +0.7 (0–100 %); de-mud +0.4 (20–100 %); Dynamic EQ on | Band 7: **voice / score** bell 2 kHz, Q 0.7, *boost below* −36 dBFS, 2:1, range 4 dB × Voice (5 / 150 ms), floor −70 dBFS |
 
 Maximum effective values with Boost and all macros at 100 %:
@@ -3232,8 +3234,9 @@ Maximum effective values with Boost and all macros at 100 %:
 - The anti-masking shelf only engages on *very* loud low-frequency events and recovers with a 250 ms release, so the steps after an explosion are not buried.
 - All detection is stereo-linked (dynamic EQ, compressor, limiter), so none of this moves a source's apparent direction.
 
-**Gaming policies enforced by the chain** (independent of preset values):
+**Gaming policies enforced by the chain** (independent of preset values; written into the effective values, so `effectiveValue()` reports them, §14.1):
 - **Crossfeed forced to 0.** It blurs interaural differences, the main lateral localisation cue.
+- **A macro-engaged compressor is upward-only.** When Boost Intensity, Footsteps or Detail switched the compressor on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, the effective ratio is 1:1: quiet cues are lifted, gunshots and explosions keep their dynamics. Presets that set a ratio (e.g. 1.5:1 glue) and a compressor the user switched on keep theirs (§9.7).
 - **Binaural lock** (both modes). When the virtualiser rendered 5.1/7.1 to binaural (`inputChannels > 2` and `virt.on`), the chain sets width 1, space 0 and crossfeed 0. Positional focus, a mild ILD emphasis around 1–6 kHz on the side channel, stays available.
 - **Low Latency presets.** Presets for competitive play (`gaming-competitive-fps`, `gaming-battle-royale`, `gaming-tournament-clean`) choose the *Low Latency* profile: 0.5 ms look-aheads and 2× short (Low-quality) oversampling. That is **100 samples = 2.08 ms** of algorithmic latency at 48 kHz, 96 samples = 2.18 ms at 44.1 kHz (section 15).
 
@@ -3254,7 +3257,7 @@ Maximum effective values with Boost and all macros at 100 %:
 |---|---|---|---|
 | **SafetyGovernor** (THD / over-processing) | Maximizer limiter gain reduction (block minimum) and clipper energy ratio, per block. Averaged with a one-pole `a = exp(−Δt / 3 s)`: GR in dB, clip energy in the power domain (so bursts are not under-weighted). A fully bypassed maximizer feeds 0 dB / −160 dB. | Scale on all *governed* macro amounts | **Over budget** (avg GR < −6 dB **or** avg clip energy > −30 dB): scale −0.15 per second (−15 %/s), floor 0.3; 1 → 0.3 takes 4.7 s. **Comfortably under** (avg GR > −4.5 dB **and** clip energy < −31.5 dB: 1.5 dB hysteresis on both): +0.03 per second (+3 %/s) up to 1; 0.3 → 1 takes 23 s. In between it holds. |
 | **AutoLevel** (LUFS input levelling) | *Gated* K-weighted loudness of the input (all input channels with the BS.1770-4 channel weights of §13.3, before its own gain, so open-loop and unconditionally stable). A 3 s one-pole advances only while programme is present: block RMS > −70 dBFS, 100 ms follower > −50 LUFS and within 20 LU of the slow value. It counts as active only while the slow value is > −60 LUFS. | Input gain before the fold and the slots | Gain = target − measured, clamped ±12 dB, slew +1 dB/s up and −4 dB/s down, adapted only while the gate is open. Pauses, track gaps and fade-outs never pump the gain up. Switched off, it returns to 0 dB at 4 dB/s. Applied as a per-block linear ramp. Target `autolevel.target` −30 … −10 LUFS (default −18). |
-| **AutoDrive** (maximizer loudness target) | Gated loudness (same gate) of the strip *output*, after the output trim | Maximizer drive | Closed loop with a 0.5 LU dead band. It integrates the error at min(2, 0.5 · \|error\|) dB/s. The reduction stays in [−24, 0] dB, and the chain applies `drive = max(0, max.drive(effective) + reduction)`. It can only **reduce** the requested drive, never below 0 dB, so it never makes anything louder than the user or macros asked for (and cannot make a programme that is already above target at 0 dB drive quieter). Switched off, the reduction returns to 0 at 4 dB/s. Target `max.target` −24 … −6 LUFS (default −14). |
+| **AutoDrive** (maximizer loudness target) | Gated loudness (same gate) of the strip *output*, after the output trim | Maximizer drive | Closed loop with a 0.5 LU dead band. It integrates the error at min(2, 0.5 · \|error\|) dB/s. The chain passes the requested drive (effective `max.drive`) to `AutoDrive::update()`, and the reduction stays in [−requested drive, 0] dB (the requested drive clamped to 0 … 24 dB); the chain applies `drive = max(0, max.drive(effective) + reduction)`. It can only **reduce** the requested drive, never below 0 dB, so it never makes anything louder than the user or macros asked for (and cannot make a programme that is already above target at 0 dB drive quieter). Because the reduction stops where the drive reaches 0 dB, it holds no reduction beyond that point: the drive starts coming back as soon as the output falls more than 0.5 LU below the target, and a lowered drive clamps the reduction at once. (It used to run on towards −24 dB with nothing audible changing, and had to climb back from there before any drive returned.) Switched off, the reduction returns to 0 at 4 dB/s. Target `max.target` −24 … −6 LUFS (default −14). |
 | **LoudnessMatch** (fair A/B) | Gated loudness of the dry reference (post-fold, pre-slots) vs the processed output | Gain on the dry path in global bypass | Gain = wet − dry, clamped ±12 dB, slew 3 dB/s, updated only while both followers are active. A positive match is additionally capped once per block at `max(0, max.ceiling − held dry peak)`; the dry sample peak is held with an instant attack and a ~2 s one-pole release, applied per block. The gain itself ramps over 50 ms, so a new, louder dry peak can still meet a gain chosen for the quieter past; the bypass-reference limiter (next row) catches that. |
 | **Bypass-reference limiter** (`dryLimiter`, every host) | The matched dry reference, 4× interpolated peaks | Reference gain in global bypass | A `TruePeakLimiter` at `max.ceiling`, 80 ms auto release, true-peak detection. Look-ahead 1 ms (48 samples at 48 kHz), capped at chain latency − 20; with the 20-sample detector that is 68 samples at 48 kHz, taken out of the dry-path delay (`dryDelay` = chain latency − limiter latency), so the reference stays aligned and no latency is added. If a chain's latency were too short for the detector plus 8 samples it would fall back to sample-peak detection with the whole chain latency as look-ahead; the shipped profiles never need that. It runs only while bypass is engaged (the crossfade is above 0 or moving) and is `reset()` whenever it starts, so it never resumes from stale history. Started cold, it outputs silence for its latency (1 ms + 20 samples: 68 samples = 1.42 ms at 48 kHz, 64 = 1.45 ms at 44.1 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above (at narrowband rates the 20 detector samples are a larger share: 28 samples = 3.5 ms at 8 kHz, about 12 % of the crossfade). |
 | **True-peak ceiling** (strip) | 4× interpolated peaks with parabolic refinement | Limiter gain | Look-ahead sliding-minimum + box-filter envelope reaches the required gain Kh samples before the peak arrives and holds it Kh samples after (Kh = 8 at the profile look-aheads); a final safety clamp counts any engagement, published per block as `MeterBus::safetyClipCount` (section 10). |
@@ -3316,6 +3319,7 @@ Maximum effective values with Boost and all macros at 100 %:
   - *AutoLevel: brings a quiet source towards the target, slew limited, frozen in silence*
   - *Chain: AutoDrive pulls a hot drive down to the loudness target at <= 2 dB/s and settles near, not above, it* (+16 dB drive, 7 LU over a −18 LUFS target: reduction in [−24, 0] dB, never faster than 2 dB/s, exactly 2 dB/s while far over, within 0.75 LU of the target by 10 s and never back above it, settles at −19 … −17.25 LUFS)
   - *Chain: AutoDrive never raises the drive: below the target it is inert, and it stops at 0 dB drive (the input itself)*
+  - *Chain: AutoDrive's reduction stops at the requested drive, so it recovers at once* (+6 dB drive and an unreachable −24 LUFS target: after 12 s the reduction is −6 dB within 1e−3, not lower; lowering `max.drive` to 2 dB lifts it to ≥ −2 dB at once)
   - *Chain: matched bypass reproduces the processed loudness within 0.5 LU; unmatched bypass is the input itself* (+10 dB drive on a programme peaking at −25 dBFS, so neither the cap nor the reference limiter acts: reference within 0.5 LU of the processed loudness and the input × 10 ± 0.5 dB; unmatched = delayed input within 1e−6)
 - **Bypass and latency:**
   - *ModuleSlot: bypassed slot is a pure latency-compensated delay and toggling is click-free*
@@ -3333,7 +3337,7 @@ Maximum effective values with Boost and all macros at 100 %:
   - *Chain: a NaN/Inf input block is dropped and the chain recovers*
   - *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)*
 
-`tests/test_modes.cpp`: the Gaming mode policy through the full chain, at least one case per Gaming macro (Footsteps: mode band 4 and band 5 lift laws and band 6 anti-masking; Positional: ILD up, mono sum unchanged; Impact; Detail; Voice & Score: band 7), plus *Gaming: crossfeed is forced off - a hard-left source never leaks into the right ear, whatever the store says* and *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies*.
+`tests/test_modes.cpp`: the Gaming mode policy through the full chain, at least one case per Gaming macro (Footsteps: mode band 4 and band 5 lift laws and band 6 anti-masking; Positional: ILD up, mono sum unchanged; Impact; Detail; Voice & Score: band 7), plus *Gaming: crossfeed is forced off - a hard-left source never leaks into the right ear, whatever the store says*, *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies* (the published effective values read width 1, space 0 and crossfeed 0) and *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*. The Positional case also checks that a hard-left 3 kHz source keeps at least 6 dB of ILD (§7.9).
 
 `tests/test_device_profiles.cpp`: *DeviceProfiles: advice caps the ceiling per connection and warns about stacked headset DSP*, and the matching and parsing tests.
 
@@ -3342,6 +3346,7 @@ Maximum effective values with Boost and all macros at 100 %:
 ### 14.9 Known limitations
 
 - **AutoDrive only reduces.** It cannot make a programme that is already louder than the target at 0 dB drive any quieter. Use `output.gain` or AutoLevel for that.
+- **"No ratio chosen" means the stored ratio equals the default.** The Gaming upward-only rule (§14.4) cannot tell a stored 2.5:1 from an untouched one, so a macro-engaged compressor runs at 1:1 in both cases. To keep the 2.5:1 downward curve, switch `comp.on` on in the preset or store any other ratio (the factory-preset lint already rejects stored defaults).
 - **The governor's GR input is a block minimum.** It is averaged over about 3 s, so its budget refers to the deepest limiting per block, not to the mean gain.
 - **Absolute gates assume the chain's nominal level.** The loudness gates are absolute (−70 dBFS RMS, −50 LUFS) plus relative (20 LU); very quiet sources below −50 LUFS never drive the loops.
 - **The matched bypass favours the ceiling over the match.** A raise is capped at `max.ceiling` − held dry peak, and the bypass-reference limiter then shaves what is still over, so on material with high peaks the reference can stay a little quieter than the processed output (1.2–1.5 LU in the re-measurement of §14.6). The tests assert match accuracy only where the cap is not involved (within 0.5 LU), and the ceiling where it is.

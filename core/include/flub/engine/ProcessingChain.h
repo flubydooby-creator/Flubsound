@@ -105,8 +105,10 @@ public:
     MeterBus& meters() noexcept { return meterBus; }
     AnalyzerTaps& taps() noexcept { return analyzerTaps; }
 
-    /** Last effective (post-macro) value of a parameter, for GUI "ghost"
-        markers. The audio thread publishes all of them once per block
+    /** Last effective value of a parameter - after the macros and the chain's
+        mode / format overrides (Gaming crossfeed, binaural lock, air below
+        42 kHz, the Gaming compressor ratio), i.e. what is applied - for GUI
+        "ghost" markers. The audio thread publishes all of them once per block
         (relaxed atomics), so this may be called from any thread. */
     float effectiveValue (int paramId) const noexcept
     {
