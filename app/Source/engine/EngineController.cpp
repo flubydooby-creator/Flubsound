@@ -13,7 +13,7 @@ using namespace flub::param;
 
 namespace
 {
-constexpr int kTimerHz = 5;
+constexpr int kTimerHz = 1;
 constexpr int kPersistEveryTicks = 5 * kTimerHz; // strip state autosave: every 5 s
 
 constexpr const char* kStateFormat = "flubsound-strip-state";

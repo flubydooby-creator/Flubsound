@@ -29,6 +29,16 @@ constexpr double kPowerTimeHops = 2.0;
 // adapts, so it never learns the half-settled power.
 constexpr double kWarmupTimeConstants = 3.0;
 
+// The first profile is a single snapshot of P_k: per bin it is off by several dB
+// (P_k of noise still fluctuates). The minimum tracker corrects a floor that is
+// too high at once, one that is too low only at floorRiseDbPerSec, so the
+// snapshot is bias-scaled like every later candidate and starts high. It then
+// needs a few hundred ms of material to settle onto the lower envelope; for
+// that long the floor keeps adapting even with freezeFloor on, otherwise a
+// gate that is frozen from the start would hold the raw snapshot for good
+// (permanently open "musical noise" bins, or a floor B dB too high).
+constexpr double kLearnSeconds = 1.0;
+
 // thresholdDb / reductionDb glide over 20 ms (hop-rate one-pole), so moving
 // either never steps every bin's gain at once.
 constexpr double kParamSmoothSeconds = 0.020;
@@ -192,6 +202,7 @@ void SpectralNoiseGate::prepare (const ProcessSpec& newSpec)
     powerCoeff = hopCoeff (hopSeconds, powerTime);
     paramCoeff = hopCoeff (hopSeconds, kParamSmoothSeconds);
     warmupFrames = std::max (1, static_cast<int> (std::ceil (kWarmupTimeConstants * powerTime / hopSeconds)));
+    learnPeriodFrames = std::max (1, static_cast<int> (std::ceil (kLearnSeconds / hopSeconds)));
 
     prepared = true;
     updateCoefficients();
@@ -258,12 +269,13 @@ void SpectralNoiseGate::clearChannel (ChannelState& st) noexcept
 {
     std::fill (st.input.begin(), st.input.end(), 0.0f);
     std::fill (st.output.begin(), st.output.end(), 0.0f);
-    std::fill (st.power.begin(), st.power.end(), 0.0f);
+    std::fill (st.power.begin(), st.power.end(), kPowerOffset);
     std::fill (st.noiseFloor.begin(), st.noiseFloor.end(), 1.0f);
     std::fill (st.gainDb.begin(), st.gainDb.end(), 0.0f); // start open: nothing learned yet
     st.hopPeak = 0.0f;
     st.silentHops = 0xFu; // the samples before the reset are unknown (zeros in the FIFO)
     st.holdFrames = warmupFrames;
+    st.learnFrames = learnPeriodFrames;
     st.floorValid = false;
 }
 
@@ -337,11 +349,15 @@ void SpectralNoiseGate::processFrame (ChannelState& st) noexcept
     else if (st.holdFrames > 0)
         --st.holdFrames;               // P_k still settling on the new material
     else
-        adaptFloor = ! params.freezeFloor || ! st.floorValid; // freeze holds a learned profile
+        adaptFloor = ! params.freezeFloor || st.learnFrames > 0; // freeze holds a learned profile
 
     const bool firstProfile = adaptFloor && ! st.floorValid;
     if (adaptFloor)
+    {
         st.floorValid = true;
+        if (st.learnFrames > 0)
+            --st.learnFrames;
+    }
     const bool gating = st.floorValid;
 
     // ---- analysis ----
@@ -361,26 +377,25 @@ void SpectralNoiseGate::processFrame (ChannelState& st) noexcept
 
     for (int k = 0; k < numBins; ++k)
     {
-        float p = std::norm (bins[static_cast<size_t> (k)]) * powerNorm + kPowerOffset;
-        if (! (p < kMaxPower))
-            p = kMaxPower;
-
+        // A frame poisoned by NaN / Inf (or absurdly large) input leaves the
+        // statistics as they were instead of pinning P_k at a huge value that
+        // would take ~1 s to decay (gate wide open) and drag the floor up.
         float& pk = pw[k];
-        pk = p + powerCoeff * (pk - p);
+        const float p = std::norm (bins[static_cast<size_t> (k)]) * powerNorm + kPowerOffset;
+        if (p < kMaxPower)
+            pk = p + powerCoeff * (pk - p);
 
         // Noise floor: minimum tracking of the (bias-scaled) power. It drops to
         // any lower value at once, but climbs at most riseFactor per hop, so a
         // note or a voice never "becomes" the floor while slow hum / hiss drift
-        // is followed. The first profile starts at P_k itself (unbiased).
+        // is followed. The first profile is the (bias-scaled) candidate itself:
+        // starting high, the instant downward path settles it within the
+        // learning period.
         float& nk = nf[k];
-        if (firstProfile)
-        {
-            nk = pk;
-        }
-        else if (adaptFloor)
+        if (adaptFloor)
         {
             const float candidate = pk * floorBias;
-            nk = candidate < nk ? candidate : std::min (candidate, nk * riseFactor);
+            nk = firstProfile || candidate < nk ? candidate : std::min (candidate, nk * riseFactor);
         }
 
         sn[k] = std::clamp (pk / nk, kMinRatio, kMaxRatio);

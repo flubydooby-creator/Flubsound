@@ -555,6 +555,23 @@ TEST_CASE ("WavFile: unknown chunks, pad bytes, missing pads and oversize data c
         CHECK (out.sampleRate == 22050.0);
     }
     {
+        // Many small unknown chunks before the audio are walked; an absurd number is refused.
+        Bytes many;
+        for (int i = 0; i < 1000; ++i)
+            many.chunk ("junk", Bytes {});
+        Bytes chunks = many;
+        chunks.chunk ("fmt ", fmtBody (1, 2, 48000, 16)).chunk ("data", stereo16);
+        REQUIRE (readBytesAsWav (riff (chunks), out, error));
+        checkFrames (3);
+
+        Bytes tooMany;
+        for (int i = 0; i < 70; ++i)
+            tooMany.append (many);
+        tooMany.chunk ("fmt ", fmtBody (1, 2, 48000, 16)).chunk ("data", stereo16);
+        CHECK (! readBytesAsWav (riff (tooMany), out, error));
+        CHECK (contains (error, "chunks before the audio data"));
+    }
+    {
         // A zero-length data chunk is a valid, empty file.
         Bytes chunks;
         chunks.chunk ("fmt ", fmtBody (1, 2, 48000, 16)).chunk ("data", Bytes {});

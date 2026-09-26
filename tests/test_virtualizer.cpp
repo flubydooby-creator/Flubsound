@@ -824,3 +824,417 @@ TEST_CASE ("HeadphoneVirtualizer: room amount adds reflections 4-19 ms after the
         CHECK_LE (late, 1e-3);
     }
 }
+
+//==============================================================================
+// ---- adversarial review tests ----
+namespace
+{
+/** Reference model of one parametric (speaker, ear) path at an exact integer
+    or fractional Woodworth delay, written from the header formulas: 4-tap
+    Lagrange fractional delay followed by the Brown-Duda head shadow. */
+std::vector<double> referenceEarImpulse (double delaySamples, double thetaDeg, double radiusM, double fs, int n)
+{
+    const int base = std::max (0, static_cast<int> (std::floor (delaySamples)) - 1);
+    const double d = delaySamples - base;
+    const double h[4] = { -(d - 1) * (d - 2) * (d - 3) / 6.0, d * (d - 2) * (d - 3) / 2.0,
+                          -d * (d - 1) * (d - 3) / 2.0, d * (d - 1) * (d - 2) / 6.0 };
+    std::vector<double> x (static_cast<size_t> (n), 0.0);
+    for (int k = 0; k < 4; ++k)
+        if (base + k < n)
+            x[static_cast<size_t> (base + k)] = h[k];
+
+    const double w0 = kC / radiusM;
+    const double alpha = 1.05 + 0.95 * std::cos (thetaDeg * 1.2 * kPi / 180.0);
+    const auto c = BiquadCoeffs::fromAnalogFirstOrder (1.0, alpha / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
+    BiquadState s;
+    for (auto& v : x)
+        v = biquadTick (c, s, v);
+    return x;
+}
+
+/** Brown-Duda head-shadow magnitude (dB) of the bilinear design at f. */
+double shadowDb (double thetaDeg, double radiusM, double f, double fs)
+{
+    const double w0 = kC / radiusM;
+    const double alpha = 1.05 + 0.95 * std::cos (thetaDeg * 1.2 * kPi / 180.0);
+    const auto c = BiquadCoeffs::fromAnalogFirstOrder (1.0, alpha / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
+    return 20.0 * std::log10 (std::abs (c.response (f, fs)));
+}
+
+/** Deterministic random partition of [0, n) into blocks of 1 .. maxBlock. */
+std::vector<int> randomPartition (int n, int maxBlock, uint32_t seed)
+{
+    FastRandom rng (seed);
+    std::vector<int> sizes;
+    for (int pos = 0; pos < n;)
+    {
+        const uint32_t r = rng.nextU32();
+        int len = r % 4 == 0 ? 1 : static_cast<int> (1 + (r >> 8) % static_cast<uint32_t> (maxBlock));
+        len = std::min (len, n - pos);
+        sizes.push_back (len);
+        pos += len;
+    }
+    return sizes;
+}
+} // namespace
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: centre and ear-axis paths match the header model sample by sample")
+{
+    // a/c = 12 samples exactly at 48 kHz: the centre speaker reaches both
+    // ears through an integer 12-sample delay and the theta = 90 deg shadow.
+    const double radiusM = 12.0 * kC / kFs; // 85.75 mm
+    auto p = paramsFor (ChannelLayout::Surround71, 0.0f);
+    p.headRadiusMm = static_cast<float> (radiusM * 1000.0);
+    p.sideAngleDeg = 90.0f;
+    const int n = 256;
+
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, p);
+        Planar buf (8, n);
+        buf.ch[FC][0] = 1.0f;
+        v.process (buf.block());
+        const auto ref = referenceEarImpulse (12.0, 90.0, radiusM, kFs, n);
+        double err = 0.0;
+        for (int e = 0; e < 2; ++e)
+            for (int i = 0; i < n; ++i)
+                err = std::max (err, std::abs (kTrim * ref[static_cast<size_t> (i)] - buf.ch[static_cast<size_t> (e)][static_cast<size_t> (i)]));
+        CHECK_LE (err, 1e-6);
+        for (int i = 0; i < 12; ++i)
+            CHECK (buf.ch[0][static_cast<size_t> (i)] == 0.0f);
+    }
+
+    // SL exactly on the left ear axis: delay 0 / theta 0 to the left ear,
+    // (a/c)(1 + pi/2) / theta 180 to the right ear (fractional delay). Both
+    // behind-the-ear-axis rules are off at exactly 90 deg (no rear shelf).
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, p);
+        Planar buf (8, n);
+        buf.ch[SL][0] = 1.0f;
+        v.process (buf.block());
+        const auto near = referenceEarImpulse (0.0, 0.0, radiusM, kFs, n);
+        const auto far = referenceEarImpulse (12.0 * (1.0 + kPi / 2.0), 180.0, radiusM, kFs, n);
+        double errL = 0.0, errR = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            errL = std::max (errL, std::abs (kTrim * near[static_cast<size_t> (i)] - buf.ch[0][static_cast<size_t> (i)]));
+            errR = std::max (errR, std::abs (kTrim * far[static_cast<size_t> (i)] - buf.ch[1][static_cast<size_t> (i)]));
+        }
+        CHECK_LE (errL, 1e-6);
+        CHECK_LE (errR, 1e-6);
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: ILD matches the Brown-Duda response at every rate")
+{
+    // Shelf and trim are common to both ears, so the ILD of a side source is
+    // the ratio of the two head-shadow responses (plus a small Lagrange
+    // ripple at 48 kHz for the far ear's fractional delay).
+    for (double fs : { 48000.0, 192000.0 })
+        for (double f : { 1000.0, 4000.0, 10000.0 })
+        {
+            const auto p = paramsFor (ChannelLayout::Surround71, 0.0f);
+            const double ild = earToneDb (p, SL, 0, f, fs) - earToneDb (p, SL, 1, f, fs);
+            const double expected = shadowDb (10.0, 0.0875, f, fs) - shadowDb (170.0, 0.0875, f, fs);
+            CHECK_NEAR (ild, expected, fs > 100000.0 ? 0.1 : 0.75);
+        }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: largest ITD at 192 kHz fits the delay line without wrapping")
+{
+    auto p = paramsFor (ChannelLayout::Surround71, 0.0f);
+    p.headRadiusMm = 105.0f;
+    p.sideAngleDeg = 90.0f;
+    const double fs = 192000.0;
+    HeadphoneVirtualizer v;
+    setUp (v, p, fs, 1024);
+    Planar buf (8, 1024);
+    buf.ch[SR][0] = 1.0f; // right ear axis: far (left) ear gets the maximum delay
+    v.process (buf.block());
+    const double expectedDelay = 0.105 / kC * (1.0 + kPi / 2.0) * fs; // ~151.1
+    const auto ref = referenceEarImpulse (expectedDelay, 180.0, 0.105, fs, 1024);
+    double err = 0.0;
+    for (int i = 0; i < 1024; ++i)
+        err = std::max (err, std::abs (kTrim * ref[static_cast<size_t> (i)] - buf.ch[0][static_cast<size_t> (i)]));
+    CHECK_LE (err, 1e-6);
+    CHECK (peakAbs (buf.ch[0].data(), 140) == 0.0); // nothing arrives before the path delay
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: bit-exact under random block partitions with continuous automation")
+{
+    // Parameters change at fixed stream positions (every 700 samples:
+    // angles, head, room, LFE and two layout swaps); each interval is cut
+    // into random blocks of 1 .. 4096 samples. The header promises output
+    // that is sample-identical for any host block size.
+    for (bool withHrir : { false, true })
+    {
+        const int interval = 700, numIntervals = 40, n = interval * numIntervals;
+        std::vector<std::vector<float>> ref;
+        for (uint32_t seed : { 0u, 1u, 2u, 3u })
+        {
+            HeadphoneVirtualizer v;
+            if (withHrir)
+                v.setHrirSet (makeImpulseSet (makeImpulseSpec(), kFs, false));
+            setUp (v, paramsFor (ChannelLayout::Surround71, 0.3f), kFs, 4096);
+            auto buf = noiseOnAll (8, n, 0.5f, false, 21);
+            for (int k = 0; k < numIntervals; ++k)
+            {
+                auto p = paramsFor (k >= 15 && k < 22 ? ChannelLayout::Surround51 : ChannelLayout::Surround71, 0.1f * static_cast<float> (k % 7));
+                const float ph = static_cast<float> (k) * 0.7f;
+                p.frontAngleDeg = 33.5f + 11.5f * std::sin (ph);
+                p.sideAngleDeg = 100.0f + 20.0f * std::sin (1.3f * ph);
+                p.rearAngleDeg = 142.5f + 22.5f * std::cos (ph);
+                p.headRadiusMm = 87.5f + 17.5f * std::sin (0.4f * ph);
+                p.lfeGainDb = -5.0f + 15.0f * std::sin (0.9f * ph);
+                v.setParams (p);
+                const int start = k * interval;
+                if (seed == 0)
+                {
+                    v.process (buf.block (start, interval));
+                    continue;
+                }
+                int pos = start;
+                for (int len : randomPartition (interval, 4096, seed * 977u + static_cast<uint32_t> (k)))
+                {
+                    v.process (buf.block (pos, len));
+                    pos += len;
+                }
+            }
+            CHECK (allFinite (buf));
+            if (ref.empty())
+            {
+                ref = { buf.ch[0], buf.ch[1] };
+                continue;
+            }
+            CHECK (maxAbsDiff (buf.ch[0], ref[0]) == 0.0);
+            CHECK (maxAbsDiff (buf.ch[1], ref[1]) == 0.0);
+        }
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: continuous angle automation on every block stays click-free")
+{
+    const int n = 48000;
+    const auto input = sine (150.0, kFs, n, 0.5f);
+    for (int channel : { FL, BL, SL })
+    {
+        HeadphoneVirtualizer v;
+        auto p = paramsFor (ChannelLayout::Surround71, 0.3f);
+        setUp (v, p);
+        auto buf = monoSource (8, n, channel, input);
+        const int start = 12000;
+        for (int pos = 0; pos < n; pos += 32)
+        {
+            if (pos >= start)
+            {
+                // Full-range triangle-ish sweeps, pushed every 32 samples.
+                const float ph = static_cast<float> (pos - start) / 6000.0f;
+                p.frontAngleDeg = 33.5f + 11.5f * std::sin (6.0f * ph);
+                p.sideAngleDeg = 100.0f + 20.0f * std::sin (5.0f * ph); // crosses 90 deg repeatedly
+                p.rearAngleDeg = 142.5f + 22.5f * std::sin (7.0f * ph);
+                p.headRadiusMm = 87.5f + 17.5f * std::sin (4.0f * ph);
+                v.setParams (p);
+            }
+            v.process (buf.block (pos, 32));
+        }
+        for (int e = 0; e < 2; ++e)
+        {
+            const auto& y = buf.ch[static_cast<size_t> (e)];
+            double steady = 0.0, moving = 0.0;
+            for (int i = 4002; i < n; ++i)
+            {
+                const double d2 = std::abs (y[static_cast<size_t> (i)] - 2.0f * y[static_cast<size_t> (i - 1)] + y[static_cast<size_t> (i - 2)]);
+                (i < start ? steady : moving) = std::max (i < start ? steady : moving, d2);
+            }
+            CHECK (steady > 0.0);
+            CHECK_LE (moving, 2.0 * steady);
+        }
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: layout toggled every block never clicks and settles on the final layout")
+{
+    const int n = 24000;
+    const auto input = sine (120.0, kFs, n, 0.5f);
+    HeadphoneVirtualizer v;
+    setUp (v, paramsFor (ChannelLayout::Surround71, 0.0f));
+    auto buf = monoSource (8, n, FL, input);
+    const int start = 6000, stop = 12000;
+    for (int pos = 0; pos < n; pos += 48)
+    {
+        if (pos >= start && pos < stop)
+            v.setParams (paramsFor ((pos / 48) % 3 == 0 ? ChannelLayout::Surround51 : ((pos / 48) % 3 == 1 ? ChannelLayout::Stereo : ChannelLayout::Surround71), 0.0f));
+        if (pos == stop)
+            v.setParams (paramsFor (ChannelLayout::Stereo, 0.0f));
+        v.process (buf.block (pos, 48));
+    }
+    CHECK (allFinite (buf));
+    double steady = 0.0, toggling = 0.0;
+    for (int e = 0; e < 2; ++e)
+        for (int i = 1; i < n; ++i)
+        {
+            const double d = std::abs (buf.ch[static_cast<size_t> (e)][static_cast<size_t> (i)] - buf.ch[static_cast<size_t> (e)][static_cast<size_t> (i - 1)]);
+            (i < start ? steady : toggling) = std::max (i < start ? steady : toggling, d);
+        }
+    CHECK_LE (toggling, 1.5 * steady);
+
+    // FL of 7.1 is ch 0 of stereo: after settling, identical to a stereo instance.
+    HeadphoneVirtualizer ref;
+    setUp (ref, paramsFor (ChannelLayout::Stereo, 0.0f));
+    auto r = monoSource (8, n, FL, input);
+    processInBlocks (ref, r, 48);
+    CHECK_LE (maxAbsDiff (buf.ch[0], r.ch[0], n - 4000), 1e-5);
+    CHECK_LE (maxAbsDiff (buf.ch[1], r.ch[1], n - 4000), 1e-5);
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: 7.1 fed only FL/FR equals the stereo layout exactly")
+{
+    const int n = 12000;
+    HeadphoneVirtualizer a, b;
+    setUp (a, paramsFor (ChannelLayout::Surround71, 0.4f), kFs, 512, 2);
+    setUp (b, paramsFor (ChannelLayout::Stereo, 0.4f), kFs, 512, 2);
+    auto x = noiseOnAll (2, n, 0.5f, false, 31);
+    auto y = noiseOnAll (2, n, 0.5f, false, 31);
+    processInBlocks (a, x, 256);
+    processInBlocks (b, y, 256);
+    CHECK (maxAbsDiff (x.ch[0], y.ch[0]) == 0.0);
+    CHECK (maxAbsDiff (x.ch[1], y.ch[1]) == 0.0);
+
+    // Mono host bus: (L + R) / 2 of the binaural pair.
+    HeadphoneVirtualizer m;
+    setUp (m, paramsFor (ChannelLayout::Stereo, 0.4f), kFs, 512, 1);
+    Planar mono (1, n);
+    mono.ch[0] = noiseOnAll (2, n, 0.5f, false, 31).ch[0];
+    mono.ptrs[0] = mono.ch[0].data();
+    HeadphoneVirtualizer s;
+    setUp (s, paramsFor (ChannelLayout::Stereo, 0.4f), kFs, 512, 2);
+    auto st = noiseOnAll (2, n, 0.5f, false, 31);
+    std::fill (st.ch[1].begin(), st.ch[1].end(), 0.0f);
+    processInBlocks (m, mono, 256);
+    processInBlocks (s, st, 256);
+    double err = 0.0;
+    for (int i = 0; i < n; ++i)
+        err = std::max (err, std::abs (0.5 * (st.ch[0][static_cast<size_t> (i)] + st.ch[1][static_cast<size_t> (i)]) - mono.ch[0][static_cast<size_t> (i)]));
+    CHECK_LE (err, 1e-6);
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: a NaN / Inf input sample does not latch the module")
+{
+    // The chain drops non-finite blocks, but a module on its own must still
+    // recover once finite input resumes (IIR state must not stay NaN).
+    for (bool withHrir : { false, true })
+        for (float bad : { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() })
+        {
+            HeadphoneVirtualizer v;
+            if (withHrir)
+                v.setHrirSet (makeImpulseSet (makeImpulseSpec(), kFs, false));
+            setUp (v, paramsFor (ChannelLayout::Surround71, 0.5f));
+            const int n = 48000;
+            auto buf = noiseOnAll (8, n, 0.3f, false, 41);
+            for (int c = 0; c < 8; ++c)
+                buf.ch[static_cast<size_t> (c)][1000] = bad;
+            processInBlocks (v, buf, 256);
+            // Everything after 0.25 s is finite and at a sane level.
+            bool finite = true;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 12000; i < n; ++i)
+                    finite = finite && std::isfinite (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)]);
+            CHECK (finite);
+            CHECK (rms (buf.ch[0].data() + 12000, n - 12000) > 0.01);
+        }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: re-prepare switches the renderer with the session rate")
+{
+    const ImpulseSpec spec = makeImpulseSpec();
+    auto set = makeImpulseSet (spec, kFs, true);
+    HeadphoneVirtualizer v;
+    v.setHrirSet (set);
+    const auto p = paramsFor (ChannelLayout::Surround71, 0.0f);
+    v.setParams (p);
+
+    const auto flImpulseAtZero = [&v]
+    {
+        Planar imp (8, 64);
+        imp.ch[FL][0] = 1.0f;
+        v.process (imp.block());
+        return std::abs (imp.ch[0][0] - 0.125f * kTrim) < 1e-7f && imp.ch[0][1] == 0.0f;
+    };
+
+    v.prepare ({ kFs, 512, 8 });
+    CHECK (flImpulseAtZero()); // HRIR at 48 kHz
+    v.prepare ({ 44100.0, 512, 8 });
+    CHECK (! flImpulseAtZero()); // mismatched rate: parametric
+    v.prepare ({ kFs, 512, 8 });
+    CHECK (flImpulseAtZero()); // HRIR again
+
+    // An HRIR set handed over after prepare() only applies at the next prepare().
+    HeadphoneVirtualizer w;
+    w.setParams (p);
+    w.prepare ({ kFs, 512, 8 });
+    w.setHrirSet (set);
+    Planar a (8, 64);
+    a.ch[FL][0] = 1.0f;
+    w.process (a.block());
+    CHECK (a.ch[0][0] != 0.125f * kTrim);
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: absurd sample rates in prepare() do not hang or produce NaN")
+{
+    for (double fs : { 0.0, -1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), 1.0e12 })
+    {
+        HeadphoneVirtualizer v;
+        v.setParams (paramsFor (ChannelLayout::Surround71, 0.5f));
+        v.prepare ({ fs, 256, 8 });
+        auto buf = noiseOnAll (8, 1024, 0.5f, false, 51);
+        processInBlocks (v, buf, 256);
+        CHECK (allFinite (buf));
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: tiny inputs decay to exact zero at every rate (no subnormal crawl)")
+{
+    for (double fs : { 44100.0, 192000.0 })
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, paramsFor (ChannelLayout::Surround71, 1.0f), fs, 4096);
+        const int n = static_cast<int> (fs);
+        auto buf = noiseOnAll (8, n, 1.0e-20f, false, 61);
+        for (auto& c : buf.ch)
+            std::fill (c.begin() + n / 4, c.end(), 0.0f);
+        processInBlocks (v, buf, 4096);
+        for (int e = 0; e < 2; ++e)
+            CHECK (peakAbs (buf.ch[static_cast<size_t> (e)].data() + n - 4096, 4096) == 0.0);
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer [adversarial]: switching renderer (HRIR 7.1 -> parametric stereo) is click-free")
+{
+    const int n = 24000, change = 9600;
+    const auto input = sine (200.0, kFs, n, 0.5f);
+    HeadphoneVirtualizer v;
+    v.setHrirSet (makeImpulseSet (makeImpulseSpec(), kFs, false));
+    setUp (v, paramsFor (ChannelLayout::Surround71, 0.5f));
+    auto buf = monoSource (8, n, FL, input);
+    for (int pos = 0; pos < n; pos += 64)
+    {
+        if (pos == change)
+            v.setParams (paramsFor (ChannelLayout::Stereo, 0.5f));
+        v.process (buf.block (pos, 64));
+    }
+    CHECK (allFinite (buf));
+    for (int e = 0; e < 2; ++e)
+    {
+        const auto& y = buf.ch[static_cast<size_t> (e)];
+        double before = 0.0, during = 0.0, after = 0.0;
+        for (int i = 4001; i < n; ++i)
+        {
+            const double d = std::abs (y[static_cast<size_t> (i)] - y[static_cast<size_t> (i - 1)]);
+            double& slot = i < change ? before : (i < change + 2400 ? during : after);
+            slot = std::max (slot, d);
+        }
+        CHECK (before > 0.0 && after > 0.0);
+        CHECK_LE (during, 1.5 * std::max (before, after));
+    }
+}

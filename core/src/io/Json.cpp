@@ -167,7 +167,7 @@ public:
     {
         // RFC 8259 s8.1 lets parsers ignore a UTF-8 byte order mark (Windows editors add one).
         if (text.size() >= 3 && text.compare (0, 3, "\xEF\xBB\xBF") == 0)
-            pos = 3;
+            pos = contentStart = 3;
 
         if (! parseValue (out, 0))
             return false;
@@ -182,13 +182,14 @@ public:
 private:
     const std::string& text;
     size_t pos = 0;
+    size_t contentStart = 0; // after the BOM, which editors do not show as a column
 
     bool fail (size_t offset, const std::string& message)
     {
         // Count lines and code points (not bytes) up to the error so the column
         // matches what a text editor shows for UTF-8 content.
         size_t line = 1, column = 1;
-        for (size_t i = 0; i < offset && i < text.size(); ++i)
+        for (size_t i = contentStart; i < offset && i < text.size(); ++i)
         {
             const auto c = static_cast<unsigned char> (text[i]);
             if (c == '\n')

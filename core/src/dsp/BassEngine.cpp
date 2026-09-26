@@ -8,10 +8,10 @@
 //   3. Adaptive shelf: detector = linked max_c |LP2_150Hz (x_c)| -> 25 ms peak
 //                      hold -> 10 / 150 ms peak follower -> level L (dBFS).
 //                      excess = L + boostDb - protectThresholdDb
-//                      protection = clamp (softKnee6dB (excess), 0, boostDb),
-//                      smoothed (5 ms) and published via getProtectionDb();
+//                      withdraw = clamp (softKnee6dB (excess), 0, boostDb);
 //                      low shelf (Q 0.7, half gain at boostFrequency) with
-//                      gain boostDb - protection.
+//                      gain smooth_5ms (boostDb - withdraw); getProtectionDb()
+//                      publishes boostDb - that gain.
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -236,7 +236,7 @@ void BassEngine::reset() noexcept
     boostSmoothed.reset (controlRate, kParamSmoothMs, params.boostDb);
     logBoostHz.reset (controlRate, kFreqGlideMs, std::log (params.boostFrequency));
     thresholdSmoothed.reset (controlRate, kParamSmoothMs, params.protectThresholdDb);
-    protectionSmoothed.reset (controlRate, kProtectionSmoothMs, 0.0f);
+    shelfGainSmoothed.reset (controlRate, kProtectionSmoothMs, params.boostDb);
     characterSmoothed.reset (controlRate, kParamSmoothMs, params.harmonicsCharacter);
     logCutoff.reset (controlRate, kFreqGlideMs, std::log (params.harmonicsCutoff));
     boostHz = params.boostFrequency;
@@ -356,8 +356,11 @@ bool BassEngine::tickStage (ParkedStage& stage, bool effectSettled) noexcept
 
     if (stage.wanted)
     {
-        stage.logHz.setTarget (stage.logTarget);
+        // Crossfade in completely at the park frequency before gliding up:
+        // the crossfade then only ever mixes dry with a practically identical
+        // processed signal.
         stage.blend.setTarget (1.0f);
+        stage.logHz.setTarget (stage.blend.getCurrent() == 1.0f ? stage.logTarget : stage.logPark);
     }
     else
     {
@@ -483,13 +486,18 @@ void BassEngine::controlTick() noexcept
         boostHz = std::exp (logBoostHz.next());
 
     // Predicted LF peak after the boost vs the cap; the boost is withdrawn by
-    // the excess (never beyond the whole boost: this stage never cuts).
+    // the excess (never beyond the whole boost: this stage never cuts). The
+    // net shelf gain is what gets smoothed (5 ms), so a boost change and the
+    // protection's reaction to it can never pull the gain in opposite
+    // directions for a moment.
     const float levelDb = gainToDb (detectorEnv.get());
-    protectionSmoothed.setTarget (std::clamp (softKnee (levelDb + boost - threshold), 0.0f, boost));
-    const float protect = std::clamp (protectionSmoothed.next(), 0.0f, boost);
-    protectionDb.store (protect, std::memory_order_relaxed);
+    const float withdraw = std::clamp (softKnee (levelDb + boost - threshold), 0.0f, boost);
+    // (While the boost itself falls, the smoothed gain may trail it by a
+    // fraction of a dB; clamping it to the boost would put a kink in it.)
+    shelfGainSmoothed.setTarget (boost - withdraw);
+    const float gainDb = std::max (0.0f, shelfGainSmoothed.next());
+    protectionDb.store (std::max (0.0f, boost - gainDb), std::memory_order_relaxed);
 
-    const float gainDb = boost - protect;
     if (gainDb != shelfGainDb || (shelfMoved && gainDb != 0.0f))
     {
         if (! shelfActive)

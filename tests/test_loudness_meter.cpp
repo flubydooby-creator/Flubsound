@@ -861,9 +861,10 @@ Planar randomProgramme (double fs, int numChannels, double seconds, uint32_t see
 TEST_CASE ("LoudnessMeter (adversarial): histogram gating matches a brute-force BS.1770 / Tech 3342 reference")
 {
     // Random programmes with many level steps exercise both gates, the bin
-    // that straddles the relative gate and the percentile ranks. Integrated
-    // must be exact in practice; LRA may deviate by the documented 0.1 LU bin
-    // resolution; max / live readings are plain window sums and must agree.
+    // that straddles the relative gate and the percentile ranks. Seed 79 at
+    // 96 kHz puts a whole steady noise segment right on the relative gate:
+    // with a single 0.1 LU straddle bin, I was off by 0.08 LU there. Max /
+    // live readings are plain window sums and must agree.
     const double rates[] = { 44100.0, 48000.0, 96000.0, 192000.0 };
     const int blockSizes[] = { 4096, 1, 333, 1024 };
     for (int k = 0; k < 4; ++k)
@@ -876,15 +877,37 @@ TEST_CASE ("LoudnessMeter (adversarial): histogram gating matches a brute-force 
         m.prepare (fs, numChannels);
         processRange (m, mutableBuf, 0, buf.numSamples(), blockSizes[k]);
         const auto ref = referenceLoudness (buf, fs);
-        std::printf ("k=%d I %.5f ref %.5f LRA %.4f ref %.4f\n", k, m.getIntegratedLufs(), ref.integrated, m.getLoudnessRangeLu(), ref.lra);
-        CHECK_NEAR (m.getIntegratedLufs(), ref.integrated, 0.005);
-        CHECK_NEAR (m.getLoudnessRangeLu(), ref.lra, 0.1);
+        CHECK_NEAR (m.getIntegratedLufs(), ref.integrated, 0.002);
+        CHECK_NEAR (m.getLoudnessRangeLu(), ref.lra, 0.02); // 0.01 LU fine bins
         CHECK (ref.lra > 5.0); // the programme really has a range
         CHECK_NEAR (m.getMaxMomentaryLufs(), ref.maxM, 1e-3);
         CHECK_NEAR (m.getMaxShortTermLufs(), ref.maxS, 1e-3);
         CHECK_NEAR (m.getMomentaryLufs(), ref.m, 1e-3);
         CHECK_NEAR (m.getShortTermLufs(), ref.s, 1e-3);
     }
+}
+
+TEST_CASE ("LoudnessMeter (adversarial): a noise passage sitting right on the relative gate")
+{
+    // Worst case for a gating histogram: half the programme is a steady tone,
+    // the other half noise whose 400 ms blocks cluster (+-0.1 LU) exactly on
+    // the -10 LU relative gate, so the true I jumps by ~2.7 LU across a 0.3 dB
+    // sweep of the noise level. Deciding one 0.1 LU straddle bin as a whole
+    // was off by 0.78 LU at -24.6 dBFS; the 0.01 LU fine bins keep it exact.
+    double worst = 0.0;
+    for (double noiseDb : { -24.8, -24.7, -24.6, -24.5, -24.4 })
+    {
+        const int n = static_cast<int> (kFs * 20.0);
+        Planar buf (1, n);
+        copyInto (buf.ch[0], sine (1000.0, kFs, n / 2, 0.3f));
+        const auto noise = whiteNoise (n / 2, dbfs (noiseDb), 4242);
+        std::copy (noise.begin(), noise.end(), buf.ch[0].begin() + n / 2);
+        LoudnessMeter m;
+        m.prepare (kFs, 1);
+        processRange (m, buf, 0, n, 4096);
+        worst = std::max (worst, std::abs (m.getIntegratedLufs() - referenceLoudness (buf, kFs).integrated));
+    }
+    CHECK_LE (worst, 0.02);
 }
 
 TEST_CASE ("LoudnessMeter (adversarial): EBU Tech 3342 LRA cases at 44.1 and 96 kHz")

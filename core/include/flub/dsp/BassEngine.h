@@ -139,7 +139,7 @@ private:
     std::array<Lr4State, kMaxChannels> monoState {};
 
     // 3. Adaptive low shelf + headroom protection.
-    OnePoleSmoother boostSmoothed, logBoostHz, thresholdSmoothed, protectionSmoothed;
+    OnePoleSmoother boostSmoothed, logBoostHz, thresholdSmoothed, shelfGainSmoothed;
     float boostHz = 70.0f, shelfGainDb = 0.0f;
     bool shelfActive = false;
     TransientShaper::SvfGlide shelf;

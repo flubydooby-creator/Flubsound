@@ -85,6 +85,7 @@ private:
     // Structural values latched by prepare() (the setters above only take
     // effect there, so the latency can never change behind the chain's back).
     bool prepared = false;
+    bool fresh = true;     // nothing processed since prepare()/reset(): setParams() applies instantly
     bool detectTruePeak = true;
     int lookahead = 0;     // L
     int detectorDelay = 0; // D (TruePeakDetector::kDelay, or 0 for sample peak)
@@ -104,18 +105,20 @@ private:
     // the per-sample ceiling history for the safety clamp; both rings share ringPos.
     std::vector<float> boxRing, ceilingRing;
     int ringSize = 1, ringPos = 0;
-    double boxSum = 1.0, invBoxLength = 1.0;
+    double boxSum = 1.0, boxLength = 1.0;
 
     // Ceiling: smoothed in dB; linear value and detector threshold derived from it.
     LinearSmoothedValue ceilingDbS;
     float ceilingLin = 1.0f, thresholdLin = 1.0f;
 
-    // Gain state and release.
-    float gain = 1.0f;
-    float fastCoeff = 0.0f, slowCoeff = 0.0f;
+    // Gain state and release. Double precision: a float one-pole with a long
+    // release stalls a few 1e-5 below its target (the per-sample step drops
+    // under half an ulp of 1.0), which would leave a permanent tiny reduction.
+    double gain = 1.0;
+    double fastCoeff = 0.0, slowCoeff = 0.0;
     int sinceOver = 0, gapSamples = 1;      // samples since r < 1; run continuity gap
     int runAge = 0, runSpan = 0;            // age of the current limiting run / span to its last over
     int blendStart = 1, blendEnd = 2;       // runSpan range over which release goes fast -> slow
-    float blendScale = 1.0f;                // 1 / (blendEnd - blendStart)
+    double blendScale = 1.0;                // 1 / (blendEnd - blendStart)
 };
 } // namespace flub

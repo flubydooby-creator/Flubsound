@@ -200,5 +200,8 @@ private:
     int fadeSamples = 240; // layout-swap dip, each direction (whole control periods)
     int fadePos = 240;
     int fadeDir = 0;
+    // Silent pre-roll after a swap so the new paths fill their (cleared) delay
+    // lines before the fade-in starts (whole control periods).
+    int holdParametric = 96, holdHrir = 96, holdRemaining = 0;
 };
 } // namespace flub

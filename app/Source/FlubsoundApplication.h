@@ -11,7 +11,7 @@
 // instead); "Quit" in the tray or a system quit request ends the app.
 //
 // Headless mode: --screenshot <out.png> [--mode music|gaming] [--size WxH]
-// [--seconds S] (see shell/ScreenshotDriver.h). No device, no tray, no
+// [--seconds S] [--scale F] (see shell/ScreenshotDriver.h). No device, no tray, no
 // hotkeys, no settings are written.
 #pragma once
 

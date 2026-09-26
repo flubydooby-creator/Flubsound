@@ -61,6 +61,7 @@ private:
         float hopPeak = 0.0f;          // max |x| of the hop being collected (digital-silence detection)
         unsigned silentHops = 0xFu;    // one bit per hop in the analysis window: 1 = silent / before reset
         int holdFrames = 0;            // valid frames left before the floor may adapt (P_k settling)
+        int learnFrames = 0;           // adapting frames left in the initial learning period (ignores freeze)
         bool floorValid = false;       // a noise profile has been learned since the last reset
     };
 
@@ -77,6 +78,7 @@ private:
     int numChannels = 0, activeChannels = 0;
     int hopPos = 0;                    // samples collected in the current hop (shared by all channels)
     int warmupFrames = 1;
+    int learnPeriodFrames = 1;         // length of the initial learning period (frames)
     double hopSeconds = 128.0 / 48000.0;
 
     // Per-hop coefficients (derived from params in updateCoefficients()).

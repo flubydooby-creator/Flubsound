@@ -439,6 +439,7 @@ TEST_CASE ("Json: BOM, whitespace and top-level scalars")
     CHECK (parseOrFail ("[ ]").asArray().empty());
     CHECK (parseOrFail ("{ \n }").asObject().empty());
     CHECK (fails ("\xEF\xBB\xBF"));
+    CHECK (failsAt ("\xEF\xBB\xBF[1,]", 1, 4, "trailing comma")); // the BOM is not a column
     CHECK (fails ("\f[1]")); // form feed is not JSON whitespace
 }
 

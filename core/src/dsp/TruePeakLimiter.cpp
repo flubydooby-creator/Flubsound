@@ -44,7 +44,7 @@ constexpr float kRecoveredGain = 0.98855309f; // 10^(-0.1 / 20)
 
 // The released gain lands exactly on the envelope once this close, so a
 // recovered limiter is bit-transparent (y = x delayed).
-constexpr float kLand = 1.0e-6f;
+constexpr double kLand = 1.0e-7;
 
 float sanitise (float v, float lo, float hi, float fallback) noexcept
 {
@@ -63,8 +63,9 @@ LimiterParams TruePeakLimiter::sanitised (const LimiterParams& in, const Limiter
 
 void TruePeakLimiter::updateReleaseCoeffs() noexcept
 {
-    slowCoeff = onePoleCoeff (params.releaseMs, spec.sampleRate);
-    fastCoeff = params.autoRelease ? onePoleCoeff (params.releaseMs * kFastFraction, spec.sampleRate) : slowCoeff;
+    auto coeff = [this] (double ms) { return std::exp (-1.0 / (ms * 0.001 * spec.sampleRate)); };
+    slowCoeff = coeff (static_cast<double> (params.releaseMs));
+    fastCoeff = params.autoRelease ? coeff (static_cast<double> (params.releaseMs * kFastFraction)) : slowCoeff;
 }
 
 void TruePeakLimiter::updateCeiling (float ceilingDb) noexcept
@@ -102,12 +103,12 @@ void TruePeakLimiter::prepare (const ProcessSpec& newSpec)
     ringSize = lookahead + 1;
     boxRing.assign (static_cast<size_t> (ringSize), 1.0f);
     ceilingRing.assign (static_cast<size_t> (ringSize), 1.0f);
-    invBoxLength = 1.0 / static_cast<double> (ringSize);
+    boxLength = static_cast<double> (ringSize);
 
     gapSamples = std::max (1, msToSamples (kRunGapMs, spec.sampleRate));
     blendStart = std::max (1, msToSamples (kBlendStartMs, spec.sampleRate));
     blendEnd = std::max (blendStart + 1, msToSamples (kBlendEndMs, spec.sampleRate));
-    blendScale = 1.0f / static_cast<float> (blendEnd - blendStart);
+    blendScale = 1.0 / static_cast<double> (blendEnd - blendStart);
 
     safetyClips.store (0, std::memory_order_relaxed);
     prepared = true;
@@ -131,12 +132,13 @@ void TruePeakLimiter::reset() noexcept
     updateCeiling (params.ceilingDb);
     std::fill (ceilingRing.begin(), ceilingRing.end(), ceilingLin);
 
-    gain = 1.0f;
+    gain = 1.0;
     sinceOver = gapSamples + 1;
     runAge = runSpan = 0;
     updateReleaseCoeffs();
 
     grDb.store (0.0f, std::memory_order_relaxed);
+    fresh = true;
 }
 
 int TruePeakLimiter::latencySamples() const noexcept
@@ -152,7 +154,19 @@ void TruePeakLimiter::setParams (const LimiterParams& newParams) noexcept
 
     const bool releaseChanged = p.releaseMs != params.releaseMs || p.autoRelease != params.autoRelease;
     params = p;
-    ceilingDbS.setTarget (p.ceilingDb);
+    if (fresh)
+    {
+        // Nothing has been output since prepare()/reset(), so there is no
+        // gain to click against: start directly at the requested ceiling
+        // (the chain pushes its parameters right after preparing).
+        ceilingDbS.setImmediate (p.ceilingDb);
+        updateCeiling (p.ceilingDb);
+        std::fill (ceilingRing.begin(), ceilingRing.end(), ceilingLin);
+    }
+    else
+    {
+        ceilingDbS.setTarget (p.ceilingDb);
+    }
     if (releaseChanged)
         updateReleaseCoeffs();
 }
@@ -164,7 +178,12 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
     const int numCh = std::min ({ block.numChannels, spec.numChannels, kMaxChannels });
     if (! prepared || numSamples <= 0 || numCh <= 0)
         return;
+    fresh = false;
 
+    // Prepared channels that are missing from this block are fed silence, so
+    // their detector history and look-ahead line never hold stale audio that
+    // could be released unlimited when a wider block comes back.
+    const int numPrepared = spec.numChannels;
     std::array<float*, kMaxChannels> data {};
     for (int c = 0; c < numCh; ++c)
         data[static_cast<size_t> (c)] = block.channel (c);
@@ -192,6 +211,8 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         {
             for (int c = 0; c < numCh; ++c)
                 peak = std::max (peak, detector.processSample (c, data[static_cast<size_t> (c)][i]));
+            for (int c = numCh; c < numPrepared; ++c)
+                peak = std::max (peak, detector.processSample (c, 0.0f));
         }
         else
         {
@@ -242,7 +263,8 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         // The oldest ceiling in the ring is the one r[n-L] was computed with:
         // the clamp level this output sample was limited to.
         const float clampLin = ceil[ringPos];
-        const float env = std::clamp (static_cast<float> (boxSum * invBoxLength), 0.0f, 1.0f);
+        // (A division, so that a window full of 1.0 gives exactly 1.0.)
+        const double env = std::clamp (boxSum / boxLength, 0.0, 1.0);
 
         // ---- 5) program-dependent release ----------------------------------------
         // runSpan = time from the first to the latest over of the current run
@@ -269,13 +291,14 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         }
         else
         {
-            const float blend = std::clamp (static_cast<float> (runSpan - blendStart) * blendScale, 0.0f, 1.0f);
-            const float coeff = fastCoeff + (slowCoeff - fastCoeff) * blend;
+            const double blend = std::clamp (static_cast<double> (runSpan - blendStart) * blendScale, 0.0, 1.0);
+            const double coeff = fastCoeff + (slowCoeff - fastCoeff) * blend;
             gain = env + coeff * (gain - env);
             if (env - gain < kLand)
                 gain = env;
         }
-        minGain = std::min (minGain, gain);
+        const float g = static_cast<float> (gain);
+        minGain = std::min (minGain, g);
 
         // ---- 6) delayed audio, gain, final safety clamp --------------------------
         // |x[n-L-D]| <= p[n-L], so |y| <= threshold < clampLin by construction;
@@ -283,7 +306,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         for (int c = 0; c < numCh; ++c)
         {
             float* d = data[static_cast<size_t> (c)];
-            float y = audioDelay.processSample (c, d[i]) * gain;
+            float y = audioDelay.processSample (c, d[i]) * g;
             if (! (std::abs (y) <= clampLin))
             {
                 y = std::isnan (y) ? 0.0f : std::copysign (clampLin, y);
@@ -291,6 +314,8 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
             }
             d[i] = y;
         }
+        for (int c = numCh; c < numPrepared; ++c)
+            audioDelay.processSample (c, 0.0f);
         audioDelay.advance();
     }
 

@@ -35,8 +35,13 @@
 //
 // Discrete changes: a layout change alters what each input channel means (and
 // may switch renderer), so it is not glided. The output fades to silence over
-// ~5 ms, roles / renderer / geometry are swapped and all state is cleared at
-// silence, then it fades back in over ~5 ms.
+// ~5 ms, roles / renderer / geometry are swapped and the per-channel state is
+// cleared at silence. The new configuration then runs silently for a short
+// pre-roll (2 ms; up to 10 ms for an HRIR) so its delay lines hold real input
+// before the ~5 ms fade-in: fading in while a path is still empty would make
+// the signal arrive as a step at a non-zero gain (a small click). The
+// reflection line is not cleared, so content common to both layouts keeps
+// its reflections continuous.
 //
 // Renderer selection: the HRIR renderer runs when a well-formed HrirSet was
 // set before prepare(), its sampleRate equals the session rate (within
@@ -94,6 +99,8 @@ constexpr float kGeometrySmoothingMs = 30.0f; // angles and head radius (one-pol
 constexpr float kShelfSmoothingMs = 10.0f;    // rear-cue shelf gain in dB (one-pole)
 constexpr float kGainRampMs = 20.0f;          // room and LFE levels (linear)
 constexpr float kFadeMs = 5.0f;               // layout swap: fade out, swap, fade in
+constexpr float kPrerollMs = 2.0f;            // silent pre-roll after a swap (parametric)
+constexpr float kMaxHrirPrerollMs = 10.0f;    // ... and the cap for an HRIR pre-roll
 
 // Longest HRIR accepted by the direct-form convolver; longer sets are truncated.
 constexpr int kMaxHrirTaps = 8192;
@@ -193,8 +200,11 @@ BiquadCoeffs mixFirstOrder (const BiquadCoeffs& a, const BiquadCoeffs& b, double
     return c;
 }
 
-float flushed (float v) noexcept { return std::abs (v) < kStateFloor ? 0.0f : v; }
-double flushed (double v) noexcept { return std::abs (v) < static_cast<double> (kStateFloor) ? 0.0 : v; }
+// Also resets non-finite state: one NaN / Inf input sample would otherwise
+// latch in the recursive filters forever. The delay lines are FIR and flush
+// themselves once overwritten, so the module recovers within one line length.
+float flushed (float v) noexcept { return std::abs (v) < kStateFloor || ! std::isfinite (v) ? 0.0f : v; }
+double flushed (double v) noexcept { return std::abs (v) < static_cast<double> (kStateFloor) || ! std::isfinite (v) ? 0.0 : v; }
 
 void storeState (SvfState& state, const SvfState& s) noexcept
 {
@@ -342,8 +352,11 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     spec = newSpec;
     spec.numChannels = std::clamp (spec.numChannels, 1, kMaxChannels);
     spec.maxBlockSize = std::max (1, spec.maxBlockSize);
-    if (! (spec.sampleRate > 0.0))
+    // Non-finite or absurd rates would overflow the delay-line sizes (and hang
+    // nextPowerOfTwo) or give an empty SVF frequency range.
+    if (! (spec.sampleRate > 0.0) || ! std::isfinite (spec.sampleRate))
         spec.sampleRate = 48000.0;
+    spec.sampleRate = std::clamp (spec.sampleRate, 8000.0, 768000.0);
     const double fs = spec.sampleRate;
 
     // ITD lines: the longest Woodworth delay (a = 105 mm, theta = 180 deg) is
@@ -396,14 +409,28 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     fadeSamples = std::max (1, static_cast<int> (periods)) * kControlInterval;
 
     hrirValid = loadHrir();
+
+    // Pre-roll after a swap, rounded up to whole control periods: at least the
+    // longest ITD path plus the Lagrange taps (151 + 3 samples at 192 kHz, far
+    // below 2 ms) and the shelf / shadow start-up. An HRIR needs its length
+    // (capped: late taps are small, and the fade-in covers them).
+    const auto periodsFor = [] (double samples)
+    { return std::max (1, static_cast<int> (std::ceil (samples / kControlInterval))) * kControlInterval; };
+    holdParametric = periodsFor (static_cast<double> (kPrerollMs) * 0.001 * fs);
+    holdHrir = std::max (holdParametric, periodsFor (std::min (static_cast<double> (hrirLength), static_cast<double> (kMaxHrirPrerollMs) * 0.001 * fs)));
+
     reset();
 }
 
 void HeadphoneVirtualizer::reset() noexcept
 {
     swapLayout();
+    reflHpState.reset();
+    reflLpState.reset();
+    std::fill (reflLine.begin(), reflLine.end(), 0.0f);
     fadePos = fadeSamples;
     fadeDir = 0;
+    holdRemaining = 0;
     lfeGain.setImmediate (lfeGain.getTarget());
     roomGain.setImmediate (roomGain.getTarget());
     samplesToTick = 0;
@@ -502,20 +529,20 @@ void HeadphoneVirtualizer::clearChannel (int channel) noexcept
 
 void HeadphoneVirtualizer::clearState() noexcept
 {
+    // Per-channel paths and the LFE only. The reflection line is fed by the
+    // mono speaker sum and stays continuous across a swap (reset() clears it).
     for (int c = 0; c < kMaxChannels; ++c)
         clearChannel (c);
     for (auto& s : lfeState)
         s.reset();
-    reflHpState.reset();
-    reflLpState.reset();
-    std::fill (reflLine.begin(), reflLine.end(), 0.0f);
 }
 
 void HeadphoneVirtualizer::swapLayout() noexcept
 {
     // Only called while the output is silent (swap fade at 0) or from reset(),
     // so everything may jump: new roles and renderer, geometry at its targets,
-    // clean state. The fade-in then hides the filters' start-up.
+    // clean per-channel state. A silent pre-roll then lets the new paths fill
+    // before the fade-in, which hides the rest of the filters' start-up.
     runningLayout = params.layout;
     const bool lfe = hasLfe (runningLayout);
     const int numLayoutChannels = channelCount (runningLayout);
@@ -532,7 +559,8 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     headRadius.setImmediate (headRadius.getTarget());
     updateGeometry (true);
     clearState();
-    fadeDir = 1;
+    fadeDir = 0;
+    holdRemaining = useHrir ? holdHrir : holdParametric;
 }
 
 void HeadphoneVirtualizer::tick() noexcept
@@ -552,14 +580,19 @@ void HeadphoneVirtualizer::tick() noexcept
     rampPos = 0;
 
     // 1. Layout: a discrete change (channel meaning, renderer). Fade out, swap
-    //    at silence, fade back in. Returning to the running layout while the
-    //    fade-out is still going simply fades back in.
+    //    at silence, pre-roll silently, fade back in. Returning to the running
+    //    layout while the fade-out is still going simply fades back in; a new
+    //    change during the pre-roll swaps again at once (still silent).
     if (params.layout != runningLayout)
     {
         if (fadePos == 0)
             swapLayout();
         else
             fadeDir = -1;
+    }
+    else if (holdRemaining > 0)
+    {
+        fadeDir = 0;
     }
     else
     {
@@ -590,7 +623,7 @@ void HeadphoneVirtualizer::tick() noexcept
         shelvesMoving = shelvesMoving || sp.shelfDb.isSmoothing();
     }
 
-    busy = ramping || shelvesMoving || fadeDir != 0 || params.layout != runningLayout || frontAngle.isSmoothing()
+    busy = ramping || shelvesMoving || fadeDir != 0 || holdRemaining > 0 || params.layout != runningLayout || frontAngle.isSmoothing()
            || sideAngle.isSmoothing() || rearAngle.isSmoothing() || headRadius.isSmoothing();
 }
 
@@ -843,6 +876,8 @@ void HeadphoneVirtualizer::process (const AudioBlock& block) noexcept
             rampPos = std::min (rampPos + len, kControlInterval);
         if (fadeDir != 0)
             fadePos = std::clamp (fadePos + fadeDir * len, 0, fadeSamples);
+        else if (holdRemaining > 0)
+            holdRemaining = std::max (0, holdRemaining - len);
 
         // Keep the tick grid aligned to absolute stream time.
         samplesToTick = ((samplesToTick - len) % kControlInterval + kControlInterval) % kControlInterval;

@@ -50,6 +50,10 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     if (secondsIndex >= 0)
         options.seconds = std::clamp (args[secondsIndex + 1].getDoubleValue(), 0.2, 60.0);
 
+    const int scaleIndex = args.indexOf ("--scale");
+    if (scaleIndex >= 0)
+        options.scale = std::clamp (args[scaleIndex + 1].getFloatValue(), 0.5f, 4.0f);
+
     return true;
 }
 
@@ -164,7 +168,7 @@ void ScreenshotDriver::finish()
     finished = true;
     stopTimer();
 
-    const auto image = target.createComponentSnapshot (target.getLocalBounds(), true, 1.0f);
+    const auto image = target.createComponentSnapshot (target.getLocalBounds(), true, options.scale);
     bool ok = false;
 
     if (image.isValid())

@@ -48,6 +48,10 @@ constexpr int64_t kBlockFrames = 8192;
 // Only the first 40 bytes of a fmt chunk carry information we use (EXTENSIBLE size).
 constexpr uint32_t kMaxFmtBytes = 40;
 
+// Real files have a handful of chunks; a file made of millions of empty chunks would
+// otherwise cost two seeks each, so the walk gives up after this many.
+constexpr int kMaxChunks = 65536;
+
 // Largest float below 1.0 (1 - 2^-24). PCM32 near full scale rounds to 1.0f when
 // converted to float, which would break the [-1, 1) output range of integer formats.
 constexpr float kBelowOne = 0.99999994f;
@@ -236,6 +240,7 @@ public:
         return readAt (offset, id, 4) && isPlausibleChunkId (id);
     }
 
+private:
     std::ifstream& stream;
     const int64_t fileSize;
 };
@@ -318,9 +323,13 @@ bool readWavImpl (const std::string& path, AudioFileData& out, std::string& erro
     bool haveFmt = false, haveData = false;
     int64_t dataOffset = 0, dataBytes = 0;
     int64_t pos = 12;
+    int chunksWalked = 0;
 
     while (pos <= fileSize - 8 && ! (haveFmt && haveData))
     {
+        if (++chunksWalked > kMaxChunks)
+            return fail ("more than " + std::to_string (kMaxChunks) + " chunks before the audio data (corrupt file?)");
+
         uint8_t header[8];
         if (! reader.readAt (pos, header, 8))
             break;

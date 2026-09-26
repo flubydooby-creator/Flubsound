@@ -480,52 +480,9 @@ TEST_CASE ("BassEngine: tighten shortens low-frequency decays and leaves highs a
 
 TEST_CASE ("BassEngine: switching features on and off is click-free")
 {
-    // Two low tones, different on L and R (so mono bass has work to do).
-    const int n = ms (4000);
-    auto l = sine (80.0, kFs, n, 0.15f);
-    auto r = sine (55.0, kFs, n, 0.15f, 1.0);
-    for (size_t i = 0; i < l.size(); ++i)
-    {
-        l[i] += 0.1f * r[i];
-        r[i] -= 0.1f * l[i];
-    }
-
-    auto run = [&] (bool toggle)
-    {
-        BassEngine be;
-        prepareBass (be);
-        auto p = allOn();
-        be.setParams (p);
-        be.reset();
-        Planar buf (2, n);
-        setChannel (buf, 0, l);
-        setChannel (buf, 1, r);
-        const int block = 240;
-        for (int pos = 0, k = 0; pos < n; pos += block, ++k)
-        {
-            if (toggle && k % 25 == 12) // every 125 ms, mid-note
-            {
-                const int step = k / 25;
-                switch (step % 7)
-                {
-                    case 0: p.monoBelowHz = p.monoBelowHz > 0.0f ? 0.0f : 150.0f; break;
-                    case 1: p.replaceFundamental = ! p.replaceFundamental; break;
-                    case 2: p.subsonicHz = p.subsonicHz > 0.0f ? 0.0f : 35.0f; break;
-                    case 3: p.tighten = p.tighten > 0.0f ? 0.0f : 1.0f; break;
-                    case 4: p.harmonicsAmount = p.harmonicsAmount > 0.0f ? 0.0f : 1.0f; break;
-                    case 5: p.boostDb = p.boostDb > 0.0f ? 0.0f : 15.0f; break;
-                    default: p.harmonicsCutoff = p.harmonicsCutoff > 100.0f ? 60.0f : 200.0f; break;
-                }
-                be.setParams (p);
-            }
-            be.process (buf.block (pos, std::min (block, n - pos)));
-        }
-        return buf;
-    };
-
     // A click is broadband: measure what lands above 3 kHz (all the program
-    // content, harmonics included, is below ~1.2 kHz).
-    auto hfPeak = [&] (const Planar& y)
+    // content, harmonics included, is below ~1.5 kHz).
+    auto hfPeak = [] (const Planar& y)
     {
         double peak = 0.0;
         const auto hp = SvfCoeffs::make (FilterType::HighPass, 3000.0, 0.7071, 0.0, kFs);
@@ -541,10 +498,84 @@ TEST_CASE ("BassEngine: switching features on and off is click-free")
         }
         return peak;
     };
-    const double steady = hfPeak (run (false));
-    const double toggled = hfPeak (run (true));
-    CHECK_LE (toggled, 1.0e-3); // -60 dBFS, program at about -14 dBFS
-    CHECK_LE (toggled, std::max (4.0 * steady, 2.0e-4));
+
+    const int n = ms (4000);
+    const int block = 240;
+
+    // 1. Linear features (subsonic, mono, shelf / protection, replace, tighten)
+    //    toggled every 125 ms, mid-note, on two different low tones on L / R.
+    {
+        auto l = sine (80.0, kFs, n, 0.15f);
+        auto r = sine (55.0, kFs, n, 0.15f, 1.0);
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            l[i] += 0.1f * r[i];
+            r[i] -= 0.1f * l[i];
+        }
+        BassEngine be;
+        prepareBass (be);
+        auto p = allOn();
+        p.harmonicsAmount = 0.0f;
+        be.setParams (p);
+        be.reset();
+        Planar buf (2, n);
+        setChannel (buf, 0, l);
+        setChannel (buf, 1, r);
+        for (int pos = 0, k = 0; pos < n; pos += block, ++k)
+        {
+            if (k % 25 == 12)
+            {
+                switch ((k / 25) % 6)
+                {
+                    case 0: p.monoBelowHz = p.monoBelowHz > 0.0f ? 0.0f : 150.0f; break;
+                    case 1: p.replaceFundamental = ! p.replaceFundamental; break;
+                    case 2: p.subsonicHz = p.subsonicHz > 0.0f ? 0.0f : 35.0f; break;
+                    case 3: p.tighten = p.tighten > 0.0f ? 0.0f : 1.0f; break;
+                    case 4: p.boostDb = p.boostDb > 0.0f ? 0.0f : 15.0f; break;
+                    default: p.harmonicsCutoff = p.harmonicsCutoff > 100.0f ? 60.0f : 200.0f; break;
+                }
+                be.setParams (p);
+            }
+            be.process (buf.block (pos, std::min (block, n - pos)));
+        }
+        CHECK_LE (hfPeak (buf), 1.0e-4); // -80 dBFS; program at about -12 dBFS
+    }
+
+    // 2. Harmonics amount / cutoff / character toggled on a steady tone with
+    //    every other feature on. What remains is the shaper's own brief
+    //    clamping while the band level rises (cutoff sweeping up), far below
+    //    anything a switching discontinuity would produce.
+    {
+        const auto x = sine (60.0, kFs, n, 0.25f);
+        auto run = [&] (bool toggle)
+        {
+            BassEngine be;
+            prepareBass (be);
+            auto p = allOn();
+            be.setParams (p);
+            be.reset();
+            Planar buf (2, n);
+            setChannel (buf, 0, x);
+            setChannel (buf, 1, x);
+            for (int pos = 0, k = 0; pos < n; pos += block, ++k)
+            {
+                if (toggle && k % 25 == 12)
+                {
+                    switch ((k / 25) % 3)
+                    {
+                        case 0: p.harmonicsAmount = p.harmonicsAmount > 0.0f ? 0.0f : 1.0f; break;
+                        case 1: p.harmonicsCutoff = p.harmonicsCutoff > 100.0f ? 60.0f : 200.0f; break;
+                        default: p.harmonicsCharacter = p.harmonicsCharacter > 0.5f ? 0.0f : 1.0f; break;
+                    }
+                    be.setParams (p);
+                }
+                be.process (buf.block (pos, std::min (block, n - pos)));
+            }
+            return buf;
+        };
+        CHECK_LE (hfPeak (run (false)), 1.0e-4);
+        CHECK_LE (hfPeak (run (true)), 1.0e-3); // -60 dBFS; program at about -6 dBFS
+    }
 }
 
 TEST_CASE ("BassEngine: zero latency - an impulse is not delayed")

@@ -11,8 +11,9 @@
 //
 // Gated measurements (integrated loudness, LRA) keep only histograms: the
 // bins hold exact energy sums and counts, which makes the absolute-gated mean
-// (and so the relative gate) exact, and quantises nothing but the single bin
-// that straddles the relative gate. Memory is O(1) for any programme length.
+// (and so the relative gate) exact, and quantises nothing but the single
+// 0.01 LU bin that straddles the relative gate. Memory is O(1) for any
+// programme length.
 #include "flub/analysis/LoudnessMeter.h"
 
 #include <algorithm>
@@ -29,12 +30,15 @@ constexpr double kRangeRelativeGateLu = -20.0;      // EBU Tech 3342
 constexpr double kRangeLowFraction = 0.10;          // P10
 constexpr double kRangeHighFraction = 0.95;         // P95
 
-// Histogram: 0.1 LU bins from the absolute gate (-70 LUFS) up to +30 LUFS.
-// Nothing real is louder than ~+13 LUFS (full-scale square waves in 7.1), but
-// float signals can exceed 0 dBFS; such blocks land in the top bin with their
-// true energy, so the gated mean stays exact and only LRA resolution saturates.
-constexpr double kBinsPerLu = 10.0;
-constexpr int kNumBins = 1000;
+// Histogram: from the absolute gate (-70 LUFS) up to +30 LUFS, in 0.1 LU
+// coarse bins that are each split into ten 0.01 LU fine bins. Nothing real is
+// louder than ~+13 LUFS (full-scale square waves in 7.1), but float signals
+// can exceed 0 dBFS; such blocks land in the top bin with their true energy,
+// so the gated mean stays exact and only LRA resolution saturates.
+constexpr int kFinePerCoarse = 10;
+constexpr int kNumCoarseBins = 1000;
+constexpr int kNumFineBins = kNumCoarseBins * kFinePerCoarse;
+constexpr double kFineBinsPerLu = 100.0;
 
 // The K-weighting designs are valid for any fs > 2 * 1682 Hz; below a sane
 // minimum the prewarping tan() would fold over and give an unstable filter.
@@ -60,12 +64,13 @@ float toReading (double energy) noexcept
     return static_cast<float> (std::max (static_cast<double> (kMinusInfDb), energyToLufs (energy)));
 }
 
-int binIndex (double lufs) noexcept
+/** Fine (0.01 LU) bin of a loudness; the coarse bin is index / kFinePerCoarse. */
+int fineBinIndex (double lufs) noexcept
 {
-    const double pos = std::floor ((lufs - kAbsoluteGateLufs) * kBinsPerLu);
+    const double pos = std::floor ((lufs - kAbsoluteGateLufs) * kFineBinsPerLu);
     if (! (pos >= 0.0))
         return 0; // also catches NaN, whose float -> int conversion would be UB
-    return static_cast<int> (std::min (pos, static_cast<double> (kNumBins - 1)));
+    return static_cast<int> (std::min (pos, static_cast<double> (kNumFineBins - 1)));
 }
 
 /** Rate used for the K-weighting designs: non-finite rates fall back to 48 kHz
@@ -318,7 +323,8 @@ float LoudnessMeter::getMaxShortTermLufs() const noexcept { return maxShortTermL
 //==============================================================================
 void LoudnessMeter::GatingHistogram::prepare()
 {
-    bins.assign (static_cast<size_t> (kNumBins), Bin {});
+    coarse.assign (static_cast<size_t> (kNumCoarseBins), Bin {});
+    fine.assign (static_cast<size_t> (kNumFineBins), Bin {});
     totalEnergy = 0.0;
     totalCount = 0;
     highestBin = -1;
@@ -328,8 +334,9 @@ void LoudnessMeter::GatingHistogram::reset() noexcept
 {
     // Only the occupied range can be non-zero, which keeps a reset from the
     // audio thread cheap.
-    const auto used = std::min (static_cast<size_t> (highestBin + 1), bins.size());
-    std::fill (bins.begin(), bins.begin() + static_cast<std::ptrdiff_t> (used), Bin {});
+    const auto used = std::min (static_cast<size_t> (highestBin + 1), coarse.size());
+    std::fill (coarse.begin(), coarse.begin() + static_cast<std::ptrdiff_t> (used), Bin {});
+    std::fill (fine.begin(), fine.begin() + static_cast<std::ptrdiff_t> (used * kFinePerCoarse), Bin {});
     totalEnergy = 0.0;
     totalCount = 0;
     highestBin = -1;
@@ -337,19 +344,23 @@ void LoudnessMeter::GatingHistogram::reset() noexcept
 
 void LoudnessMeter::GatingHistogram::add (double energy) noexcept
 {
-    if (bins.empty() || ! (energy > 0.0))
+    if (coarse.empty() || ! (energy > 0.0))
         return;
     const double lufs = energyToLufs (energy);
     if (! (lufs > kAbsoluteGateLufs))
         return; // absolute gate
 
-    const int idx = binIndex (lufs);
-    auto& b = bins[static_cast<size_t> (idx)];
-    b.energy += energy;
-    ++b.count;
+    const int f = fineBinIndex (lufs);
+    const int c = f / kFinePerCoarse;
+    auto& fb = fine[static_cast<size_t> (f)];
+    auto& cb = coarse[static_cast<size_t> (c)];
+    fb.energy += energy;
+    ++fb.count;
+    cb.energy += energy;
+    ++cb.count;
     totalEnergy += energy;
     ++totalCount;
-    highestBin = std::max (highestBin, idx);
+    highestBin = std::max (highestBin, c);
 }
 
 int LoudnessMeter::GatingHistogram::firstGatedBin (double relativeGateLu) const noexcept
@@ -359,17 +370,30 @@ int LoudnessMeter::GatingHistogram::firstGatedBin (double relativeGateLu) const 
 
     // Relative gate in the energy domain: L > mean_L + gate  <=>  E > mean_E * 10^(gate/10).
     const double threshold = totalEnergy / static_cast<double> (totalCount) * std::pow (10.0, relativeGateLu / 10.0);
-    const int t = binIndex (energyToLufs (threshold));
-    if (t > highestBin)
+    const int t = fineBinIndex (energyToLufs (threshold));
+    if (t / kFinePerCoarse > highestBin)
         return -1;
 
-    // Every bin above t lies wholly above the threshold. Bin t straddles it and
-    // is kept or dropped as a whole, decided by its exact mean energy (for
-    // steady material every block of the bin sits at that mean).
-    const auto& b = bins[static_cast<size_t> (t)];
+    // Every fine bin above t lies wholly above the threshold. Bin t straddles
+    // it and is kept or dropped as a whole, decided by its exact mean energy:
+    // only blocks within 0.01 LU of the gate can be misclassified (and for
+    // steady material, whose blocks all sit at that mean, none are).
+    const auto& b = fine[static_cast<size_t> (t)];
     if (b.count > 0 && b.energy / static_cast<double> (b.count) > threshold)
         return t;
-    return t + 1 <= highestBin ? t + 1 : -1;
+    return (t + 1) / kFinePerCoarse <= highestBin ? t + 1 : -1;
+}
+
+LoudnessMeter::GatingHistogram::Bin LoudnessMeter::GatingHistogram::partialCoarse (int first) const noexcept
+{
+    Bin sum;
+    const int end = (first / kFinePerCoarse + 1) * kFinePerCoarse;
+    for (int f = first; f < end; ++f)
+    {
+        sum.energy += fine[static_cast<size_t> (f)].energy;
+        sum.count += fine[static_cast<size_t> (f)].count;
+    }
+    return sum;
 }
 
 double LoudnessMeter::GatingHistogram::gatedMeanEnergy (double relativeGateLu) const noexcept
@@ -378,14 +402,15 @@ double LoudnessMeter::GatingHistogram::gatedMeanEnergy (double relativeGateLu) c
     if (first < 0)
         return 0.0;
 
-    double energy = 0.0;
-    std::int64_t count = 0;
-    for (int i = first; i <= highestBin; ++i)
+    // The gated part of the straddling coarse bin from its fine bins, then
+    // every coarse bin above it whole.
+    Bin sum = partialCoarse (first);
+    for (int c = first / kFinePerCoarse + 1; c <= highestBin; ++c)
     {
-        energy += bins[static_cast<size_t> (i)].energy;
-        count += bins[static_cast<size_t> (i)].count;
+        sum.energy += coarse[static_cast<size_t> (c)].energy;
+        sum.count += coarse[static_cast<size_t> (c)].count;
     }
-    return count > 0 ? energy / static_cast<double> (count) : 0.0;
+    return sum.count > 0 ? sum.energy / static_cast<double> (sum.count) : 0.0;
 }
 
 bool LoudnessMeter::GatingHistogram::gatedPercentiles (double relativeGateLu, double lowFraction, double highFraction,
@@ -395,40 +420,46 @@ bool LoudnessMeter::GatingHistogram::gatedPercentiles (double relativeGateLu, do
     if (first < 0)
         return false;
 
-    std::int64_t n = 0;
-    for (int i = first; i <= highestBin; ++i)
-        n += bins[static_cast<size_t> (i)].count;
+    const int firstCoarse = first / kFinePerCoarse;
+    const std::int64_t firstCount = partialCoarse (first).count;
+    std::int64_t n = firstCount;
+    for (int c = firstCoarse + 1; c <= highestBin; ++c)
+        n += coarse[static_cast<size_t> (c)].count;
     if (n <= 0)
         return false;
 
     // Tech 3342 reference: value = sorted[round ((n - 1) * p)] (0-based). The
-    // histogram is the sorted list in 0.1 LU steps; a rank is resolved to the
-    // bin it falls into, represented by that bin's exact mean loudness.
+    // histogram is the sorted list in 0.01 LU steps; a rank is resolved to the
+    // fine bin it falls into, represented by that bin's exact mean loudness.
+    // Coarse bins are skipped whole until one contains the next rank.
     const double last = static_cast<double> (n - 1);
-    const auto lowRank = static_cast<std::int64_t> (std::llround (last * lowFraction));
-    const auto highRank = static_cast<std::int64_t> (std::llround (last * highFraction));
-
+    const std::int64_t ranks[2] = { static_cast<std::int64_t> (std::llround (last * lowFraction)),
+                                    static_cast<std::int64_t> (std::llround (last * highFraction)) };
+    double* const outputs[2] = { &lowLufs, &highLufs };
+    int next = 0;
     std::int64_t seen = 0;
-    bool haveLow = false;
-    for (int i = first; i <= highestBin; ++i)
+
+    for (int c = firstCoarse; c <= highestBin && next < 2; ++c)
     {
-        const auto& b = bins[static_cast<size_t> (i)];
-        if (b.count == 0)
+        const std::int64_t count = c == firstCoarse ? firstCount : coarse[static_cast<size_t> (c)].count;
+        if (seen + count <= ranks[next])
+        {
+            seen += count;
             continue;
-        seen += b.count;
-        // log10 only for the (at most two) bins that resolve a rank, not for
-        // every occupied bin of the scan.
-        if (! haveLow && lowRank < seen)
-        {
-            lowLufs = energyToLufs (b.energy / static_cast<double> (b.count));
-            haveLow = true;
         }
-        if (highRank < seen)
+
+        const int end = (c + 1) * kFinePerCoarse;
+        for (int f = c == firstCoarse ? first : c * kFinePerCoarse; f < end && next < 2; ++f)
         {
-            highLufs = energyToLufs (b.energy / static_cast<double> (b.count));
-            return haveLow;
+            const auto& b = fine[static_cast<size_t> (f)];
+            if (b.count == 0)
+                continue;
+            seen += b.count;
+            // log10 only for the (at most two) bins that resolve a rank.
+            while (next < 2 && ranks[next] < seen)
+                *outputs[next++] = energyToLufs (b.energy / static_cast<double> (b.count));
         }
     }
-    return false; // unreachable: highRank < n
+    return next == 2;
 }
 } // namespace flub

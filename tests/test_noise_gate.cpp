@@ -781,3 +781,221 @@ TEST_CASE ("SpectralNoiseGate: output is identical for any host block size")
         for (int c = 0; c < 2; ++c)
             CHECK_NEAR (maxAbsDiff (outs[k].ch[static_cast<size_t> (c)].data(), outs[0].ch[static_cast<size_t> (c)].data(), n), 0.0, 0.0);
 }
+
+// ---- adversarial review tests ----
+//==============================================================================
+TEST_CASE ("SpectralNoiseGate: freezeFloor from the start freezes a settled profile, not a raw snapshot")
+{
+    // With freeze on from reset, the floor that ends up frozen must be a real
+    // estimate of the noise: not a single ~10 ms snapshot (whose low bins stay
+    // open for good: stuck at ~-15 dB with 24 dB reduction at 1024) and not a
+    // snapshot scaled up by the bias (which would gate material several dB
+    // above the noise).
+    for (int size : { 512, 1024, 4096 })
+    {
+        SpectralNoiseGate gate;
+        NoiseGateParams p;
+        p.reductionDb = 24.0f;
+        p.freezeFloor = true;
+        gate.setParams (p);
+        prepareGate (gate, kFs, 1, size);
+
+        const int learn = seconds (3.0);
+        const int total = learn + seconds (2.0);
+        auto x = noiseAt (total, -60.0, 61);
+        for (int i = learn; i < total; ++i)
+            x[static_cast<size_t> (i)] *= dbfs (12.0); // well above threshold + 3 dB
+        const auto y = runMono (gate, x);
+        const int latency = gate.latencySamples();
+
+        CHECK_LE (gainDb (x, y, latency, seconds (1.5), learn), -20.0);
+        CHECK_GE (gainDb (x, y, latency, learn + seconds (0.2), total - latency), -1.0);
+    }
+}
+
+TEST_CASE ("SpectralNoiseGate: the gate converges quickly after reset (the floor starts high, not low)")
+{
+    // The tracker corrects a floor that is too high at once but one that is
+    // too low only at floorRiseDbPerSec; a low first snapshot leaves bins open
+    // for seconds after every reset / re-activation.
+    for (int size : { 1024, 4096 })
+    {
+        SpectralNoiseGate gate;
+        NoiseGateParams p;
+        p.reductionDb = 24.0f;
+        gate.setParams (p);
+        prepareGate (gate, kFs, 1, size);
+        const int total = seconds (1.5);
+        const auto x = noiseAt (total, -60.0, 67);
+        const auto y = runMono (gate, x);
+        CHECK_LE (gainDb (x, y, gate.latencySamples(), seconds (0.5), seconds (1.2)), -20.0);
+    }
+}
+
+TEST_CASE ("SpectralNoiseGate: a NaN / Inf burst neither sticks in the output nor poisons the statistics")
+{
+    SpectralNoiseGate gate;
+    prepareGate (gate);
+    const int latency = gate.latencySamples();
+    const int burst = seconds (2.0);
+    const int total = burst + seconds (1.5);
+    auto x = noiseAt (total, -60.0, 71);
+    Planar buf (1, total);
+    setChannel (buf, 0, x);
+    buf.ch[0][static_cast<size_t> (burst)] = std::numeric_limits<float>::quiet_NaN();
+    buf.ch[0][static_cast<size_t> (burst + 50)] = std::numeric_limits<float>::infinity();
+    buf.ch[0][static_cast<size_t> (burst + 99)] = -std::numeric_limits<float>::infinity();
+    buf.ch[0][static_cast<size_t> (burst + 100)] = 1.0e25f; // finite, but absurd
+    processInBlocks (gate, buf, 256);
+    const auto& y = buf.ch[0];
+
+    // The poisoned samples leave the FIFO and the accumulator within 2 frames.
+    bool finite = true;
+    for (int i = burst + 100 + 2 * latency + 1; i < total; ++i)
+        finite = finite && std::isfinite (y[static_cast<size_t> (i)]);
+    CHECK (finite);
+    // ... and the gate keeps gating right after (P_k was not pinned at a huge
+    // value that takes ~1 s to decay, the floor was not dragged up).
+    CHECK_LE (gainDb (x, y, latency, burst + 100 + 2 * latency + seconds (0.05), burst + seconds (0.6)), -9.0);
+    CHECK_LE (gainDb (x, y, latency, burst + seconds (0.6), total - latency), -10.0);
+}
+
+TEST_CASE ("SpectralNoiseGate: reset() mid-stream is equivalent to a freshly prepared gate")
+{
+    const int n = seconds (1.5);
+    const auto a = noiseAt (n, -40.0, 73);
+    const auto b = noiseAt (n, -55.0, 79);
+    NoiseGateParams p;
+    p.thresholdDb = 3.0f;
+    p.reductionDb = 20.0f;
+
+    SpectralNoiseGate used;
+    used.setParams (p);
+    prepareGate (used);
+    Planar warm (1, 777); // leaves the hop clock mid-hop
+    setChannel (warm, 0, a);
+    processInBlocks (used, warm, 100);
+    NoiseGateParams q = p;
+    q.reductionDb = 40.0f; // also a pending parameter glide ...
+    used.setParams (q);
+    used.process (warm.block (0, 13));
+    used.setParams (p); // ... that reset() must snap
+    used.reset();
+
+    SpectralNoiseGate fresh;
+    fresh.setParams (p);
+    prepareGate (fresh);
+
+    const auto y1 = runMono (used, b, 97);
+    const auto y2 = runMono (fresh, b, 256);
+    CHECK_NEAR (maxAbsDiff (y1.data(), y2.data(), n), 0.0, 0.0);
+}
+
+TEST_CASE ("SpectralNoiseGate: 8 channels at 192 kHz, block size 1 vs 4096, each equal to a mono gate")
+{
+    const double fs = 192000.0;
+    const int n = seconds (0.6, fs);
+    const int channels = 8;
+    Planar ref (channels, n);
+    for (int c = 0; c < channels; ++c)
+    {
+        const auto noise = noiseAt (n, -70.0 + 4.0 * c, static_cast<uint32_t> (100 + c));
+        const auto tone = sine (200.0 * (c + 1), fs, n, 0.05f);
+        for (int i = 0; i < n; ++i)
+            ref.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = noise[static_cast<size_t> (i)] + (i > n / 2 ? tone[static_cast<size_t> (i)] : 0.0f);
+    }
+
+    for (int size : { 256, 2048 })
+    {
+        std::vector<Planar> outs;
+        for (int blockSize : { 1, 4096 })
+        {
+            SpectralNoiseGate gate;
+            prepareGate (gate, fs, channels, size, 4096);
+            Planar buf = ref;
+            buf.ptrs.clear();
+            for (auto& ch : buf.ch)
+                buf.ptrs.push_back (ch.data());
+            processInBlocks (gate, buf, blockSize);
+            CHECK (allFiniteAndBounded (buf, 1.0));
+            outs.push_back (std::move (buf));
+        }
+        for (int c = 0; c < channels; ++c)
+        {
+            CHECK_NEAR (maxAbsDiff (outs[0].ch[static_cast<size_t> (c)].data(), outs[1].ch[static_cast<size_t> (c)].data(), n), 0.0, 0.0);
+            SpectralNoiseGate mono;
+            prepareGate (mono, fs, 1, size, 4096);
+            const auto y = runMono (mono, ref.ch[static_cast<size_t> (c)], 333);
+            CHECK_NEAR (maxAbsDiff (outs[0].ch[static_cast<size_t> (c)].data(), y.data(), n), 0.0, 0.0);
+        }
+        // The gate did engage on the noise-only half at this rate / size.
+        CHECK_LE (gainDb (ref.ch[0], outs[0].ch[0], size, seconds (0.15, fs), n / 2 - size), -6.0);
+    }
+}
+
+TEST_CASE ("SpectralNoiseGate: a tone is preserved and noise reduced at the rate / size extremes")
+{
+    struct Config
+    {
+        double fs;
+        int size;
+    };
+    for (const auto& cfg : { Config { 192000.0, 256 }, Config { 44100.0, 4096 }, Config { 96000.0, 2048 } })
+    {
+        SpectralNoiseGate gate;
+        prepareGate (gate, cfg.fs, 1, cfg.size);
+        const int learn = seconds (1.5, cfg.fs);
+        const int total = learn + seconds (2.0, cfg.fs);
+        const auto noise = noiseAt (total, -60.0, 83);
+        const auto tone = sine (1000.0, cfg.fs, total, 0.1f);
+        std::vector<float> x (static_cast<size_t> (total));
+        for (int i = 0; i < total; ++i)
+            x[static_cast<size_t> (i)] = noise[static_cast<size_t> (i)] + (i >= learn ? tone[static_cast<size_t> (i)] : 0.0f);
+        const auto y = runMono (gate, x);
+        const int latency = gate.latencySamples();
+
+        const int from = learn + seconds (0.5, cfg.fs);
+        const int len = total - latency - from;
+        CHECK_NEAR (toDb (toneAmplitude (y.data() + from + latency, len, 1000.0, cfg.fs) / toneAmplitude (x.data() + from, len, 1000.0, cfg.fs)), 0.0, 0.5);
+        const double nIn = bandEnergy (x.data() + from, len, cfg.fs, 500.0, 2000.0, false, 8192);
+        const double nOut = bandEnergy (y.data() + from + latency, len, cfg.fs, 500.0, 2000.0, false, 8192);
+        CHECK_LE (10.0 * std::log10 (nOut / nIn), -8.0);
+    }
+}
+
+TEST_CASE ("SpectralNoiseGate: per-block parameter automation stays finite and click-free on noise")
+{
+    // Threshold / reduction swept every block, attack / release / rise jumping
+    // between their extremes, freeze toggling: bounded output, no steps larger
+    // than those of the (gated) input noise itself.
+    SpectralNoiseGate gate;
+    prepareGate (gate, kFs, 2, 512, 64);
+    const int n = seconds (3.0);
+    const auto x = noiseAt (n, -30.0, 89);
+    Planar buf (2, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    NoiseGateParams p;
+    int b = 0;
+    for (int pos = 0; pos < n; pos += 64, ++b)
+    {
+        const double ph = static_cast<double> (pos) / kFs;
+        p.thresholdDb = static_cast<float> (10.0 + 10.0 * std::sin (kTwoPi * 0.7 * ph));
+        p.reductionDb = static_cast<float> (20.0 + 20.0 * std::sin (kTwoPi * 1.3 * ph));
+        p.attackMs = (b / 50) % 2 == 0 ? 1.0f : 50.0f;
+        p.releaseMs = (b / 70) % 2 == 0 ? 10.0f : 500.0f;
+        p.floorRiseDbPerSec = (b / 90) % 2 == 0 ? 0.5f : 20.0f;
+        p.freezeFloor = (b / 110) % 2 == 1;
+        gate.setParams (p);
+        gate.process (buf.block (pos, std::min (64, n - pos)));
+    }
+    CHECK (allFiniteAndBounded (buf, 0.2));
+    double maxStepIn = 0.0, maxStepOut = 0.0;
+    for (size_t i = 1; i < x.size(); ++i)
+    {
+        maxStepIn = std::max (maxStepIn, static_cast<double> (std::abs (x[i] - x[i - 1])));
+        maxStepOut = std::max (maxStepOut, static_cast<double> (std::abs (buf.ch[0][i] - buf.ch[0][i - 1])));
+    }
+    CHECK_LE (maxStepOut, maxStepIn * 1.1);
+    CHECK_NEAR (maxAbsDiff (buf.ch[0].data(), buf.ch[1].data(), n), 0.0, 0.0);
+}

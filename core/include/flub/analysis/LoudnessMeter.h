@@ -53,11 +53,13 @@ private:
     static constexpr int kMomentarySubBlocks = 4;   // 400 ms
     static constexpr int kShortTermSubBlocks = 30;  // 3 s (also the ring length)
 
-    /** Gating histogram: 0.1 LU bins from -70 LUFS (the absolute gate) to
-        +30 LUFS; louder blocks are clamped into the top bin. Each bin keeps
-        the exact energy sum and count of its blocks, so the gated mean is
-        exact except for the single bin that straddles the relative gate, and
-        memory stays constant however long the programme runs. */
+    /** Gating histogram from -70 LUFS (the absolute gate) to +30 LUFS, louder
+        blocks clamped into the top bin. Two levels: 0.1 LU coarse bins keep
+        the scans short (<= 1000 bins), and 0.01 LU fine bins resolve the bin
+        that straddles the relative gate and the bins that hold the LRA
+        percentile ranks. Every bin keeps the exact energy sum and count of its
+        blocks, so the gated mean is exact except for blocks within 0.01 LU of
+        the relative gate, and memory stays constant for any programme length. */
     class GatingHistogram
     {
     public:
@@ -85,13 +87,17 @@ private:
             std::int64_t count = 0;
         };
 
-        /** First bin that passes the relative gate (-1 = nothing passes). */
+        /** First fine bin that passes the relative gate (-1 = nothing passes). */
         int firstGatedBin (double relativeGateLu) const noexcept;
 
-        std::vector<Bin> bins;
+        /** Energy / count of the gated part of the coarse bin that contains
+            fine bin `first` (fine bins from `first` to the coarse bin's end). */
+        Bin partialCoarse (int first) const noexcept;
+
+        std::vector<Bin> coarse, fine;
         double totalEnergy = 0.0; // absolute-gated sums (for the relative gate)
         std::int64_t totalCount = 0;
-        int highestBin = -1;      // bounds the scans to the occupied range
+        int highestBin = -1;      // highest occupied coarse bin: bounds the scans
     };
 
     void completeSubBlock() noexcept;

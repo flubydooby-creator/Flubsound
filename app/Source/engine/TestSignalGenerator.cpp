@@ -121,8 +121,8 @@ void panGains (double azimuthDeg, std::array<float, 8>& gains)
 class TestSignalGenerator::MusicSynth
 {
 public:
-    explicit MusicSynth (double sampleRate)
-        : fs (sampleRate), rng (0x5eed1234u)
+    explicit MusicSynth (double rate)
+        : fs (rate), rng (0x5eed1234u)
     {
         beatLength = static_cast<int64_t> (std::llround (fs * 0.5));
         eighthLength = beatLength / 2;
@@ -223,8 +223,8 @@ private:
 class TestSignalGenerator::GameSynth
 {
 public:
-    explicit GameSynth (double sampleRate)
-        : fs (sampleRate), rng (0x9a3e5eedu)
+    explicit GameSynth (double rate)
+        : fs (rate), rng (0x9a3e5eedu)
     {
         for (size_t c = 0; c < ambience.size(); ++c)
         {

@@ -26,8 +26,12 @@
 #pragma once
 
 #include "Processor.h"
+#include "Svf.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <algorithm>
 #include <atomic>
+#include <vector>
 
 namespace flub
 {
@@ -61,8 +65,79 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    //
+    // Width realisation note: S_low / S_high are a COMPLEMENTARY split
+    // (S_low + S_high = S exactly), so for w <= 1 the width is a plain gain
+    // w * S and for w > 1 it is S + (w - 1) * S_high, i.e. a 2nd-order
+    // minimum-phase high shelf on S (Q 1/sqrt 2, 0 dB below widthLowCutHz,
+    // 20 log10 w above, half of that at the cut - the same magnitude
+    // transition as an in-phase LR4 sum). A literal LR4 pair sums to an
+    // all-pass; applied to S alone (M must stay untouched for the mono
+    // guarantee) it would rotate S by -180 degrees against M at the low cut,
+    // mirroring the image there, and width 1 could never be transparent.
+    // See StereoSpatializer.cpp for the full signal flow.
+    static constexpr int kControlInterval = 32;
+
+    /** Power-of-two circular buffer; all lines share one write position. */
+    struct DelayBuffer
+    {
+        void allocate (int maxDelay);
+        void clear() noexcept { std::fill (data.begin(), data.end(), 0.0f); }
+        float read (int pos, int delay) const noexcept { return data[static_cast<size_t> ((pos - delay) & mask)]; }
+        void write (int pos, float x) noexcept { data[static_cast<size_t> (pos & mask)] = x; }
+
+        std::vector<float> data;
+        int mask = 0;
+    };
+
+    void clearState() noexcept;
+    void sanitiseState() noexcept;
+    void controlTick() noexcept;
+    void updateWidthTarget() noexcept;
+    void designShelf (float width, float g0) noexcept;
+    void designFocus (float gainDb) noexcept;
+    float prewarp (float hz) const noexcept;
+    float ambience (float mid) noexcept;
+    float correlationEstimate() const noexcept;
+
     ProcessSpec spec;
     SpatializerParams params;
     std::atomic<float> correlation { 1.0f }, effectiveWidth { 1.0f };
+    bool prepared = false;
+    double sr = 48000.0;
+
+    // Width: complementary high shelf on S, re-derived only while width or
+    // low cut glide (per sample, so there are no control-rate steps).
+    OnePoleSmoother widthSmoother;     // effective width (user width x mono safety)
+    OnePoleSmoother lowCutLogHz;       // ln (widthLowCutHz)
+    float lowCutG0 = 0.0f;             // tan (pi fc / fs) of the current low cut
+    float shelfWidth = 1.0f, shelfG0 = 0.0f; // design the shelf coefficients hold
+    SvfCoeffs shelfCoeffs;
+    SvfState shelfState;
+
+    // Positional focus: 3 kHz bell on S.
+    OnePoleSmoother focusDb;
+    float focusG = 0.0f;
+    SvfCoeffs focusCoeffs;
+    SvfState focusState;
+
+    // Space: HP 300 Hz (M) -> pre-delay -> nested all-pass network -> S.
+    SvfCoeffs spaceHpCoeffs;
+    SvfState spaceHpState;
+    DelayBuffer preDelayLine, outerLine, middleLine, innerLine;
+    int preDelaySamples = 1, outerDelay = 1, middleDelay = 1, innerDelay = 1;
+    int writePos = 0, writeMask = 0;
+    float lastAmbience = 0.0f;
+    OnePoleSmoother spaceGain;
+
+    // Crossfeed: first-order TPT low-pass on S.
+    float crossfeedG = 0.0f, crossfeedState = 0.0f;
+    OnePoleSmoother crossfeedGain;
+
+    // Output correlation (300 ms mean products) and the mono-safety pull.
+    double corrCoeff = 0.0, corrLR = 0.0, corrLL = 0.0, corrRR = 0.0;
+    float safety = 0.0f; // 0 = user width .. 1 = width pulled to 1
+    float safetyAttackStep = 0.0f, safetyReleaseStep = 0.0f, safetyOffStep = 0.0f;
+    int controlCountdown = kControlInterval;
 };
 } // namespace flub
