@@ -15,6 +15,8 @@
 //   dither from a per-file seeded generator, so renders are reproducible.
 #include "flub/io/WavFile.h"
 
+#include "flub/io/FilePath.h"
+
 #include "flub/common/AudioBlock.h"
 
 #include <algorithm>
@@ -315,24 +317,26 @@ float decodeSample (const uint8_t* p, SampleFormat format) noexcept
 
 bool readWavImpl (const std::string& path, AudioFileData& out, std::string& error)
 {
-    std::ifstream in (path, std::ios::binary);
-    if (! in)
-    {
-        error = "cannot open " + path;
-        return false;
-    }
-
     const auto fail = [&] (const std::string& message)
     {
         error = path + ": " + message;
         return false;
     };
 
-    // A directory opens fine on Linux and seeking to its end reports a bogus size
-    // (LLONG_MAX on ext4), which would give a baffling "too short" message.
+    // Checked before opening: a directory opens fine on Linux and seeking to
+    // its end reports a bogus size (LLONG_MAX on ext4), which would give a
+    // baffling "too short" message; on Windows the open itself fails.
+    const auto fsPath = pathFromUtf8 (path);
     std::error_code ec;
-    if (std::filesystem::is_directory (path, ec))
+    if (std::filesystem::is_directory (fsPath, ec))
         return fail ("is a directory");
+
+    std::ifstream in (fsPath, std::ios::binary);
+    if (! in)
+    {
+        error = "cannot open " + path;
+        return false;
+    }
 
     in.seekg (0, std::ios::end);
     const auto endPos = static_cast<int64_t> (in.tellg());
@@ -624,7 +628,7 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
     putId ("data");
     putU32 (static_cast<uint32_t> (dataSize));
 
-    std::ofstream f (path, std::ios::binary | std::ios::trunc);
+    std::ofstream f (pathFromUtf8 (path), std::ios::binary | std::ios::trunc);
     if (! f)
     {
         error = "cannot write " + path;
@@ -678,7 +682,7 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
         // path may be a device or FIFO (e.g. /dev/full), which must never be unlinked.
         std::error_code ec;
         if (std::filesystem::is_regular_file (path, ec))
-            std::filesystem::remove (path, ec);
+            std::filesystem::remove (pathFromUtf8 (path), ec);
         return fail ("write error (disk full?)");
     }
     return true;

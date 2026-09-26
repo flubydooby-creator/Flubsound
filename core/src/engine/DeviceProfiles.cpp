@@ -1,5 +1,7 @@
 #include "flub/engine/DeviceProfiles.h"
 
+#include "flub/io/FilePath.h"
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -140,7 +142,7 @@ bool Database::load (const json::Value& root, std::string& error)
 
 bool Database::loadFile (const std::string& path, std::string& error)
 {
-    std::ifstream f (path, std::ios::binary);
+    std::ifstream f (io::pathFromUtf8 (path), std::ios::binary);
     if (! f)
     {
         error = "cannot open " + path;

@@ -1,5 +1,7 @@
 #include "flub/io/PresetIO.h"
 
+#include "flub/io/FilePath.h"
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -125,7 +127,7 @@ json::Value toJson (const Preset& p, bool full)
 
 bool load (const std::string& path, Preset& out, std::string& error)
 {
-    std::ifstream f (path, std::ios::binary);
+    std::ifstream f (io::pathFromUtf8 (path), std::ios::binary);
     if (! f)
     {
         error = "cannot open " + path;
@@ -144,7 +146,7 @@ bool load (const std::string& path, Preset& out, std::string& error)
 
 bool save (const std::string& path, const Preset& p, std::string& error, bool full)
 {
-    std::ofstream f (path, std::ios::binary | std::ios::trunc);
+    std::ofstream f (io::pathFromUtf8 (path), std::ios::binary | std::ios::trunc);
     if (! f)
     {
         error = "cannot write " + path;

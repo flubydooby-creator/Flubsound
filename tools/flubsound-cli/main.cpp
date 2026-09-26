@@ -17,9 +17,11 @@
 #include "CliOptions.h"
 #include "FactoryPresets.h"
 #include "OfflineRenderer.h"
+#include "Utf8Windows.h"
 
 #include "flub/engine/MacroMap.h"
 #include "flub/engine/Parameters.h"
+#include "flub/io/FilePath.h"
 #include "flub/io/Json.h"
 #include "flub/io/WavFile.h"
 
@@ -263,7 +265,7 @@ void printJson (const json::Value& v)
 
 std::string lowerExtension (const fs::path& p)
 {
-    std::string e = p.extension().string();
+    std::string e = io::pathToUtf8 (p.extension());
     std::transform (e.begin(), e.end(), e.begin(), [] (unsigned char c) { return static_cast<char> (std::tolower (c)); });
     return e;
 }
@@ -381,7 +383,7 @@ int runProcess (const CliOptions& o)
         log.error (error);
         return kExitUsage;
     }
-    if (sameFile (o.input, o.output))
+    if (sameFile (io::pathFromUtf8 (o.input), io::pathFromUtf8 (o.output)))
     {
         log.error ("the output file would overwrite the input file (" + o.output + ")");
         return kExitUsage;
@@ -482,7 +484,7 @@ void runBatchJob (const BatchJob& job, const std::vector<float>& values, const R
     {
         io::AudioFileData input;
         std::string error;
-        if (! io::readWav (job.input.string(), input, error) || ! checkRenderable (input, error))
+        if (! io::readWav (io::pathToUtf8 (job.input), input, error) || ! checkRenderable (input, error))
         {
             result.error = error;
         }
@@ -498,7 +500,7 @@ void runBatchJob (const BatchJob& job, const std::vector<float>& values, const R
             {
                 std::error_code ec;
                 fs::create_directories (job.output.parent_path(), ec);
-                if (! io::writeWav (job.output.string(), result.render.output, format, error))
+                if (! io::writeWav (io::pathToUtf8 (job.output), result.render.output, format, error))
                     result.error = error;
                 else
                     result.ok = true;
@@ -524,7 +526,7 @@ int runBatch (const CliOptions& o)
     std::string error;
     std::error_code ec;
 
-    const fs::path inDir (o.input), outDir (o.output);
+    const fs::path inDir = io::pathFromUtf8 (o.input), outDir = io::pathFromUtf8 (o.output);
     if (! fs::is_directory (inDir, ec))
     {
         log.error ("input folder not found: " + o.input);
@@ -563,12 +565,12 @@ int runBatch (const CliOptions& o)
         const fs::path rel = entry.path().lexically_relative (inDir);
         if (! isWavFile (entry.path()))
         {
-            skipped.push_back (rel.generic_string());
+            skipped.push_back (io::pathToUtf8Generic (rel));
             return;
         }
         if (outputNestedInInput && isInside (fs::weakly_canonical (entry.path(), fileEc), outCanonical))
             return; // output folder nested in the input folder: never re-process our own results
-        jobs.push_back ({ entry.path(), outDir / rel, rel.generic_string() });
+        jobs.push_back ({ entry.path(), outDir / rel, io::pathToUtf8Generic (rel) });
     };
 
     const auto dirOptions = fs::directory_options::skip_permission_denied;
@@ -611,7 +613,7 @@ int runBatch (const CliOptions& o)
             std::error_code canonicalEc;
             if (inputs.count (fs::weakly_canonical (j.output, canonicalEc)) != 0)
             {
-                log.error ("the output file " + j.output.string() + " would overwrite an input file; choose an output folder "
+                log.error ("the output file " + io::pathToUtf8 (j.output) + " would overwrite an input file; choose an output folder "
                            "outside the input folder tree");
                 return kExitUsage;
             }
@@ -740,15 +742,15 @@ int runBatch (const CliOptions& o)
         {
             const auto& r = results[i];
             json::Value f;
-            f.set ("file", jobs[i].input.string());
-            f.set ("outputFile", jobs[i].output.string());
+            f.set ("file", io::pathToUtf8 (jobs[i].input));
+            f.set ("outputFile", io::pathToUtf8 (jobs[i].output));
             f.set ("status", r.ok ? "ok" : "failed");
             if (! r.ok)
                 f.set ("error", r.error);
             if (r.ok)
             {
-                f.set ("input", reportToJson (r.inReport, jobs[i].input.string(), r.inFormat));
-                f.set ("output", reportToJson (r.outReport, jobs[i].output.string(), sampleFormatName (o.render.format)));
+                f.set ("input", reportToJson (r.inReport, io::pathToUtf8 (jobs[i].input), r.inFormat));
+                f.set ("output", reportToJson (r.outReport, io::pathToUtf8 (jobs[i].output), sampleFormatName (o.render.format)));
                 f.set ("render", renderInfoJson (r.render, o.render, params, r.inReport.sampleRate, r.inReport.durationSeconds));
             }
             f.set ("seconds", std::round (r.seconds * 1000.0) / 1000.0);
@@ -932,7 +934,7 @@ int runPresets (const CliOptions& o)
         std::string msg = o.dir.empty() ? "no factory preset folder found. Searched:" : "preset folder not found: " + o.dir;
         if (o.dir.empty())
             for (const auto& d : presetSearchPath (o.dir))
-                msg += "\n    " + d.string();
+                msg += "\n    " + io::pathToUtf8 (d);
         log.error (msg);
         return kExitFailure;
     }
@@ -957,7 +959,7 @@ int runPresets (const CliOptions& o)
             for (const auto& t : e.tags)
                 tags.push (t);
             p.set ("tags", std::move (tags));
-            p.set ("file", e.file.string());
+            p.set ("file", io::pathToUtf8 (e.file));
             arr.push (std::move (p));
         }
         json::Value v;
@@ -986,7 +988,7 @@ int runPresets (const CliOptions& o)
         std::error_code ec;
         const auto rel = fs::relative (e.file, *dir, ec);
         out += "  " + padRight (e.name, nameW + 2) + padRight (e.category, catW + 2) + padRight (e.mode, 8)
-               + (ec ? e.file.string() : rel.generic_string()) + "\n";
+               + (ec ? io::pathToUtf8 (e.file) : io::pathToUtf8Generic (rel)) + "\n";
         if (! e.description.empty())
             out += "  " + std::string (nameW + 2, ' ') + ellipsize (e.description, 90) + "\n";
     }
@@ -999,9 +1001,8 @@ int runPresets (const CliOptions& o)
 // ===========================================================================
 int main (int argc, char** argv)
 {
-    std::vector<std::string> args;
-    for (int i = 1; i < argc; ++i)
-        args.emplace_back (argv[i]);
+    useUtf8Console();
+    const std::vector<std::string> args = utf8Arguments (argc, argv);
 
     CliOptions options;
     std::string error;

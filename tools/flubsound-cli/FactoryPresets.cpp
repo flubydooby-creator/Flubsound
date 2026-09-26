@@ -1,6 +1,8 @@
 #include "FactoryPresets.h"
+#include "Utf8Windows.h"
 
 #include "flub/engine/Parameters.h"
+#include "flub/io/FilePath.h"
 
 #include <algorithm>
 #include <cctype>
@@ -50,28 +52,17 @@ std::string looseKey (const std::string& s)
 /** "competitive-fps.flubpreset.json" -> "competitive-fps". */
 std::string presetStem (const fs::path& file)
 {
-    std::string stem = file.stem().string();
+    std::string stem = io::pathToUtf8 (file.stem());
     const std::string suffix = ".flubpreset";
     if (stem.size() > suffix.size() && toLower (stem.substr (stem.size() - suffix.size())) == suffix)
         stem.resize (stem.size() - suffix.size());
     return stem;
 }
 
-/** getenv without MSVC's C4996 deprecation warning. */
+/** Environment variable as UTF-8 (wide API on Windows, see Utf8Windows.h). */
 std::string environmentVariable (const char* name)
 {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    size_t length = 0;
-    if (_dupenv_s (&value, &length, name) != 0 || value == nullptr)
-        return {};
-    std::string result (value);
-    std::free (value);
-    return result;
-#else
-    const char* value = std::getenv (name);
-    return value != nullptr ? std::string (value) : std::string();
-#endif
+    return utf8Environment (name);
 }
 
 bool isDirectory (const fs::path& p)
@@ -84,7 +75,7 @@ std::string describeCandidates (const std::vector<const FactoryPresetEntry*>& li
 {
     std::string s;
     for (const auto* e : list)
-        s += "\n    " + e->name + "  [" + e->category + "]  (" + e->file.filename().string() + ")";
+        s += "\n    " + e->name + "  [" + e->category + "]  (" + io::pathToUtf8 (e->file.filename()) + ")";
     return s;
 }
 } // namespace
@@ -121,12 +112,12 @@ std::vector<fs::path> presetSearchPath (const std::string& explicitDir)
     std::vector<fs::path> dirs;
     if (! explicitDir.empty())
     {
-        dirs.emplace_back (explicitDir);
+        dirs.push_back (io::pathFromUtf8 (explicitDir));
         return dirs; // an explicit folder is the only candidate
     }
 
     if (const auto env = environmentVariable ("FLUBSOUND_PRESET_DIR"); ! env.empty())
-        dirs.emplace_back (env);
+        dirs.push_back (io::pathFromUtf8 (env));
 
     const fs::path exe = executablePath();
     if (! exe.empty())
@@ -148,7 +139,7 @@ std::vector<fs::path> presetSearchPath (const std::string& explicitDir)
 
     const std::string sourceDir = FLUB_SOURCE_PRESET_DIR;
     if (! sourceDir.empty())
-        dirs.emplace_back (sourceDir);
+        dirs.push_back (io::pathFromUtf8 (sourceDir));
     return dirs;
 }
 
@@ -171,15 +162,15 @@ std::vector<FactoryPresetEntry> scanPresetDir (const fs::path& dir, std::vector<
     for (fs::directory_iterator it (dir, options, ec), end; ! ec && it != end; it.increment (ec))
     {
         std::error_code fileEc;
-        if (! it->is_regular_file (fileEc) || toLower (it->path().extension().string()) != ".json")
+        if (! it->is_regular_file (fileEc) || toLower (io::pathToUtf8 (it->path().extension())) != ".json")
             continue;
 
         preset::Preset p;
         std::string error;
-        if (! preset::load (it->path().string(), p, error))
+        if (! preset::load (io::pathToUtf8 (it->path()), p, error))
         {
             // Parse errors already start with the path; semantic ones do not.
-            const std::string path = it->path().string();
+            const std::string path = io::pathToUtf8 (it->path());
             problems.push_back (error.rfind (path, 0) == 0 ? error : path + ": " + error);
             continue;
         }
@@ -197,7 +188,7 @@ std::vector<FactoryPresetEntry> scanPresetDir (const fs::path& dir, std::vector<
         entries.push_back (std::move (e));
     }
     if (ec)
-        problems.push_back (dir.string() + ": " + ec.message());
+        problems.push_back (io::pathToUtf8 (dir) + ": " + ec.message());
 
     std::sort (entries.begin(), entries.end(), [] (const FactoryPresetEntry& a, const FactoryPresetEntry& b) {
         const auto ca = toLower (a.category), cb = toLower (b.category);
@@ -217,16 +208,16 @@ bool resolvePreset (const std::string& spec, const std::string& explicitPresetDi
 
     // 1. A preset file on disk.
     std::error_code ec;
-    const fs::path asPath (spec);
+    const fs::path asPath = io::pathFromUtf8 (spec);
     if (fs::is_regular_file (asPath, ec))
     {
-        if (! preset::load (asPath.string(), out, error))
+        if (! preset::load (io::pathToUtf8 (asPath), out, error))
             return false;
-        resolvedFrom = "preset file " + asPath.string();
+        resolvedFrom = "preset file " + io::pathToUtf8 (asPath);
         return true;
     }
     const bool looksLikePath = spec.find ('/') != std::string::npos || spec.find ('\\') != std::string::npos
-                               || toLower (asPath.extension().string()) == ".json";
+                               || toLower (io::pathToUtf8 (asPath.extension())) == ".json";
     if (looksLikePath)
     {
         error = "preset file not found: " + spec;
@@ -239,7 +230,7 @@ bool resolvePreset (const std::string& spec, const std::string& explicitPresetDi
     {
         error = "'" + spec + "' is not a file and no factory preset folder was found. Searched:";
         for (const auto& d : presetSearchPath (explicitPresetDir))
-            error += "\n    " + d.string();
+            error += "\n    " + io::pathToUtf8 (d);
         error += "\nUse --preset-dir <dir>, set FLUBSOUND_PRESET_DIR, or pass a preset file path.";
         return false;
     }
@@ -285,9 +276,9 @@ bool resolvePreset (const std::string& spec, const std::string& explicitPresetDi
             error = "preset name '" + spec + "' is ambiguous; candidates:" + describeCandidates (hits);
             return false;
         }
-        if (! preset::load (hits.front()->file.string(), out, error))
+        if (! preset::load (io::pathToUtf8 (hits.front()->file), out, error))
             return false;
-        resolvedFrom = "factory preset '" + hits.front()->name + "' (" + hits.front()->file.string() + ")";
+        resolvedFrom = "factory preset '" + hits.front()->name + "' (" + io::pathToUtf8 (hits.front()->file) + ")";
         return true;
     }
 

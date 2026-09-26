@@ -17,7 +17,8 @@ set(FLUB_CLI_SOURCES
     FactoryPresets.cpp
     FactoryPresets.h
     OfflineRenderer.cpp
-    OfflineRenderer.h)
+    OfflineRenderer.h
+    Utf8Windows.h)
 
 add_executable(flubsound-cli ${FLUB_CLI_SOURCES})
 
@@ -31,6 +32,9 @@ target_compile_definitions(flubsound-cli PRIVATE
 # stated again because the CLI uses it directly).
 find_package(Threads REQUIRED)
 target_link_libraries(flubsound-cli PRIVATE Threads::Threads)
+if(WIN32)
+    target_link_libraries(flubsound-cli PRIVATE shell32) # CommandLineToArgvW
+endif()
 
 # Installed layout: bin/flubsound-cli + share/flubsound/presets/factory/*.json
 # Top-level *.json only - the same set the app embeds and

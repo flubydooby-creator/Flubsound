@@ -12,6 +12,7 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/io/FilePath.h"
 #include "flub/io/WavFile.h"
 
 #include <bit>
@@ -1067,6 +1068,25 @@ TEST_CASE ("WavFile review: directories and special files give clear errors; a f
         CHECK (std::filesystem::is_character_file (node.path));
     }
 #endif
+}
+
+TEST_CASE ("WavFile: UTF-8 paths with non-ASCII characters round trip on every platform")
+{
+    // Core file APIs take UTF-8 (flub/io/FilePath.h). On Windows a narrow
+    // path would be read in the ANSI code page and mangle these characters.
+    const std::string dir = io::pathToUtf8 (std::filesystem::temp_directory_path());
+    const std::string path = dir + "/flub_\xC3\xBC\xC3\xB1\xC3\xAF_\xE6\x97\xA5\xE6\x9C\xAC_\xF0\x9F\x8E\xA7.wav"; // "flub_üñï_日本_🎧.wav"
+    AudioFileData d = makeSignal (2, 4800, 48000.0);
+    std::string error;
+    REQUIRE (writeWav (path, d, SampleFormat::Float32, error));
+    CHECK (std::filesystem::exists (io::pathFromUtf8 (path)));
+    AudioFileData back;
+    REQUIRE (readWav (path, back, error));
+    CHECK (back.numFrames() == d.numFrames());
+    CHECK (back.channels[1][100] == d.channels[1][100]);
+    std::error_code ec;
+    std::filesystem::remove (io::pathFromUtf8 (path), ec);
+    CHECK (! std::filesystem::exists (io::pathFromUtf8 (path)));
 }
 
 TEST_CASE ("WavFile review: TPDF dither has the triangular shape and is independent across channels")
