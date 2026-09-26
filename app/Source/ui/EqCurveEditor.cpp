@@ -47,6 +47,7 @@ EqCurveEditor::EqCurveEditor (SpectrumAnalyzer& g, StoreProvider s)
                     "double-click to reset a band and right-click for type, slope and enable.");
     setHelpText (getDescription());
     dynFreqs.fill (1000.0f);
+    refresh (true); // real band values from the first paint on
 }
 
 juce::Colour EqCurveEditor::bandColour (int band)

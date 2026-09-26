@@ -120,7 +120,8 @@ float fromText (int paramId, const juce::String& text)
     if (i.unit == Unit::Ratio)
         numberText = t.upToFirstOccurrenceOf (":", false, false);
 
-    auto value = numberText.retainCharacters ("+-0123456789.").getDoubleValue();
+    // ("+3" is not parsed by getDoubleValue(): a leading plus sign is simply dropped.)
+    auto value = numberText.retainCharacters ("-0123456789.").getDoubleValue();
 
     if (i.unit == Unit::Hz && t.containsChar ('k'))
         value *= 1000.0;

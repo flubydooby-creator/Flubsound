@@ -95,7 +95,7 @@ ParamGrid::ParamGrid (ParameterBinder& b, const std::vector<int>& paramIds)
         {
             auto k = std::make_unique<ParamKnob> (label, ParamKnob::Size::Small);
             binder.bindSlider (k->slider, id);
-            cell.width = 66;
+            cell.width = 80;
             cell.control = std::move (k);
         }
         addAndMakeVisible (*cell.control);

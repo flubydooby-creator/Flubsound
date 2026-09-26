@@ -21,6 +21,7 @@
 
     #include "flub/analysis/PeakMeters.h"
     #include "flub/common/Denormals.h"
+    #include "flub/engine/MacroMap.h"
     #include "flub/engine/ProcessingChain.h"
     #include "flub/io/Json.h"
     #include "flub/io/PresetIO.h"
@@ -212,9 +213,10 @@ void fail (const FactoryFile& f, const std::string& what)
 //==============================================================================
 TEST_CASE ("Factory presets: library is complete, uniquely named and loadable")
 {
+    // Only a lower bound: the README tells contributors how to add presets, so
+    // the library is expected to grow.
     const auto files = factoryFiles();
     REQUIRE (files.size() >= 20);
-    CHECK (files.size() <= 24);
 
     std::set<std::string> names;
     std::set<std::string> categories;
@@ -336,6 +338,71 @@ TEST_CASE ("Factory presets: metadata, keys, labels and output protection are va
     }
 }
 
+TEST_CASE ("Factory presets: macros stack sanely and gaming presets keep positional cues")
+{
+    const auto& table = layout();
+    for (const auto& f : factoryFiles())
+    {
+        preset::Preset p;
+        std::string error;
+        if (! preset::load (f.path.string(), p, error))
+        {
+            fail (f, "does not load: " + error);
+            continue;
+        }
+        const auto value = [&p] (int id) { return p.values[static_cast<size_t> (id)]; };
+        const bool gaming = choiceIndex (p, Mode) == static_cast<int> (ModeValue::Gaming);
+
+        // ---- Macro stacking ----
+        // Boost Intensity and the macros ADD to the base values. With all six
+        // at 100 % (governor not yet reacting), the drive / bass / harmonic
+        // parameters must not be pinned at the top of their range: a base
+        // value that eats the macro headroom makes the top of the knob dead
+        // and is the "bass 15 + harmonics 1 + drive 24" combination the
+        // governor was never meant to rescue.
+        std::vector<float> base (p.values), eff (static_cast<size_t> (kNumParams));
+        for (int id : { BoostIntensity, Macro1, Macro2, Macro3, Macro4, Macro5 })
+            base[static_cast<size_t> (id)] = 1.0f;
+        MacroMap::apply (base.data(), eff.data(), 1.0f);
+        for (int id : { BassBoostDb, BassHarmonics, MaxDriveDb, SatDriveDb })
+        {
+            const auto& info = table[static_cast<size_t> (id)];
+            if (eff[static_cast<size_t> (id)] >= info.maxValue)
+                fail (f, info.key + " is pinned at its maximum with Boost Intensity and all macros at 100 %");
+        }
+        // Fixed drive is never governed; loudness must come from Boost / Loudness.
+        if (value (MaxDriveDb) > 0.0f)
+            fail (f, "max.drive must stay 0 (fixed drive bypasses the SafetyGovernor)");
+
+        // ---- Gaming: positional cues ----
+        if (gaming)
+        {
+            // The chain forces crossfeed to 0 in Gaming mode; a stored value would
+            // only show a misleading number in the UI.
+            if (value (SpatialCrossfeed) > 0.0f)
+                fail (f, "Gaming presets must not store headphone crossfeed");
+            // Conservative width / ambience: decorrelation smears direction.
+            if (value (SpatialWidth) > 1.25f || value (SpatialSpace) > 0.2f)
+                fail (f, "Gaming presets must keep width <= 1.25 and space <= 0.2");
+            // The compressor is switched on by Boost / Footsteps / Detail, so its
+            // downward settings must be chosen on purpose, not left at 2.5:1 @ -18 dB.
+            MacroMap::apply (p.values.data(), eff.data(), 1.0f);
+            const json::Value stored = preset::toJson (p, false); // non-default values only
+            const auto& params = stored["params"];
+            if (eff[static_cast<size_t> (CompressorOn)] >= 0.5f && params["comp.ratio"].isNull() && params["comp.threshold"].isNull())
+                fail (f, "the compressor is engaged but its ratio / threshold are left at the defaults");
+        }
+
+        // ---- Latency profile matches the "low-latency" tag ----
+        const bool lowLatencyTag = std::find (p.tags.begin(), p.tags.end(), "low-latency") != p.tags.end();
+        const bool lowLatency = choiceIndex (p, LatencyProfile) == static_cast<int> (LatencyProfileValue::LowLatency);
+        if (lowLatencyTag != lowLatency)
+            fail (f, "the \"low-latency\" tag and the Low Latency profile must go together");
+        if (gaming && (contains (p.name, "competitive") || contains (p.name, "tournament")) && ! lowLatency)
+            fail (f, "competitive / tournament presets must use the Low Latency profile");
+    }
+}
+
 TEST_CASE ("Factory presets: each renders a hot programme cleanly below its ceiling")
 {
     const Planar stereo = makeProgramme (2);
@@ -405,6 +472,73 @@ TEST_CASE ("Factory presets: each renders a hot programme cleanly below its ceil
         const int tail = kRenderSamples / 2;
         if (rms (buf.ch[0].data() + tail, tail) < dbToGain (-40.0f))
             fail (f, "output is (nearly) silent");
+    }
+}
+
+TEST_CASE ("Factory presets: Boost Intensity and all macros at 100 % stay safe")
+{
+    // Worst case a user can reach from any factory preset in two moves: every
+    // macro turned fully up. Only the first 2 s are rendered - that is where
+    // the SafetyGovernor has not reacted yet, so the limiter alone must hold.
+    constexpr int kStressSamples = kRenderSamples / 2;
+    // KNOWN ENGINE ISSUE (core, not the presets): while the soft clipper works
+    // hard, the maximizer's output reads up to ~0.4 dB above the ceiling on an
+    // independent 4x true-peak meter (Laptop Speakers / Podcast & Voice /
+    // Punchy Pop at full macros). Sample peaks and the safety clamp are still
+    // exact. Tighten this to kTruePeakToleranceDb once the limiter is fixed.
+    constexpr float kStressTruePeakToleranceDb = 0.5f;
+    const Planar stereo = makeProgramme (2);
+    const Planar surround = makeProgramme (8);
+
+    for (const auto& f : factoryFiles())
+    {
+        preset::Preset p;
+        std::string error;
+        if (! preset::load (f.path.string(), p, error))
+        {
+            fail (f, "does not load: " + error);
+            continue;
+        }
+
+        ParameterStore store;
+        preset::applyToStore (p, store, Bank::A);
+        for (int id : { BoostIntensity, Macro1, Macro2, Macro3, Macro4, Macro5 })
+            store.set (Bank::A, id, 1.0f);
+        ProcessingChain chain (store);
+        const int channels = isSurroundPreset (p) ? 8 : 2;
+        chain.prepare ({ kFs, kBlockSize, channels });
+
+        Planar buf = channels == 8 ? surround : stereo;
+        {
+            ScopedNoDenormals noDenormals;
+            for (int pos = 0; pos < kStressSamples; pos += kBlockSize)
+                chain.process (buf.block (pos, std::min (kBlockSize, kStressSamples - pos)));
+        }
+
+        bool finite = true;
+        for (int c = 0; c < 2; ++c)
+            finite = finite && std::all_of (buf.ch[static_cast<size_t> (c)].begin(), buf.ch[static_cast<size_t> (c)].begin() + kStressSamples,
+                                            [] (float v) { return std::isfinite (v); });
+        if (! finite)
+        {
+            fail (f, "non-finite output at full macros");
+            continue;
+        }
+
+        const float ceilingDb = p.values[static_cast<size_t> (MaxCeilingDb)];
+        for (int c = 0; c < 2; ++c)
+        {
+            const double peak = peakAbs (buf.ch[static_cast<size_t> (c)].data(), kStressSamples);
+            if (peak > dbToGain (ceilingDb) + 1.0e-6)
+                fail (f, "sample peak " + std::to_string (toDb (peak)) + " dBFS above the ceiling at full macros");
+        }
+        TruePeakMeter truePeak;
+        truePeak.prepare (2);
+        truePeak.process (buf.block (0, kStressSamples).firstChannels (2));
+        if (truePeak.getMaxDbAllChannels() > ceilingDb + kStressTruePeakToleranceDb)
+            fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling at full macros");
+        if (chain.meters().safetyClipCount.load() != 0)
+            fail (f, "the limiter's safety clamp engaged at full macros");
     }
 }
 

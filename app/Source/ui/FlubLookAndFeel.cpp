@@ -773,6 +773,23 @@ void FlubLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
     g.drawText (label.getText(), area, label.getJustificationType(), true);
 }
 
+void FlubLookAndFeel::drawLevelMeter (juce::Graphics& g, int width, int height, float level)
+{
+    const auto r = juce::Rectangle<float> (0.0f, 0.0f, static_cast<float> (width), static_cast<float> (height)).withSizeKeepingCentre (
+        static_cast<float> (width), juce::jmin (8.0f, static_cast<float> (height)));
+    g.setColour (Palette::well);
+    g.fillRoundedRectangle (r, 3.0f);
+    g.setColour (Palette::border);
+    g.drawRoundedRectangle (r.reduced (0.5f), 3.0f, 1.0f);
+    // `level` is a linear gain; show it on a dB-like curve.
+    const float amount = juce::jlimit (0.0f, 1.0f, std::sqrt (juce::jmax (0.0f, level)) * 1.2f);
+    if (amount > 0.0f)
+    {
+        g.setColour (amount > 0.95f ? Palette::red : accent);
+        g.fillRoundedRectangle (r.reduced (1.0f).withWidth ((r.getWidth() - 2.0f) * amount), 2.0f);
+    }
+}
+
 void FlubLookAndFeel::drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics& g, const juce::Path& path, juce::Image&)
 {
     g.setColour (juce::Colours::black.withAlpha (0.4f));

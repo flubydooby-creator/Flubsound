@@ -60,8 +60,8 @@ struct FormLayout
             {
                 const auto lines = juce::jmax (1, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), r.help)
                                                                                / juce::jmax (80.0f, static_cast<float> (area.getWidth() - kCaptionWidth)))));
-                r.helpArea = { area.getX() + kCaptionWidth, y - 2, area.getWidth() - kCaptionWidth, lines * 15 + 2 };
-                y += lines * 15 + 4;
+                r.helpArea = { area.getX() + kCaptionWidth, y + 1, area.getWidth() - kCaptionWidth, lines * 15 + 2 };
+                y += lines * 15 + 6;
             }
             y += 4;
         }
@@ -215,6 +215,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         form.paint (g);
+        drawSectionTitle (g, latencyTitle, "Current latency");
         auto r = latencyArea.toFloat();
         g.setColour (Palette::well);
         g.fillRoundedRectangle (r, 6.0f);
@@ -228,8 +229,10 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
-        latencyArea = r.removeFromBottom (74);
-        r.removeFromBottom (10);
+        latencyArea = r.removeFromBottom (70);
+        r.removeFromBottom (8);
+        latencyTitle = r.removeFromBottom (22);
+        r.removeFromBottom (6);
         form.layout (r);
     }
 
@@ -239,7 +242,7 @@ private:
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, paletteBox;
     FormLayout form;
     juce::String latencyText;
-    juce::Rectangle<int> latencyArea;
+    juce::Rectangle<int> latencyArea, latencyTitle;
 };
 
 // =============================================================================
@@ -270,7 +273,7 @@ public:
             row.editor->setTitle (row.name + " shortcut");
             row.editor->setFont (Theme::font (13.0f));
             row.editor->setJustification (juce::Justification::centredLeft);
-            row.editor->setIndents (8, 5);
+            row.editor->setIndents (8, 0);
             row.editor->setTooltip ("Type a chord such as Ctrl+Alt+F, Ctrl+Shift+F5 or None, then press Return");
             auto* editor = row.editor.get();
             row.editor->onReturnKey = [this, action, editor] { commit (action, *editor); };
@@ -463,7 +466,8 @@ public:
         line (settingsLine, "Settings file", controller.getSettings().getFile().getFullPathName());
         line (presetsLine, "User presets", controller.getPresetManager().getUserPresetFolder().getFullPathName());
         g.setColour (Palette::faint.brighter (0.2f));
-        g.drawText ("Flubsound Pro " + juce::JUCEApplicationBase::getInstance()->getApplicationVersion() + "  -  Music & Gaming Edition", versionLine,
+        const auto* app = juce::JUCEApplicationBase::getInstance();
+        g.drawText ("Flubsound Pro " + (app != nullptr ? app->getApplicationVersion() : juce::String()) + "  -  Music & Gaming Edition", versionLine,
                     juce::Justification::centredLeft, true);
     }
 
@@ -581,6 +585,15 @@ void SettingsDialog::timerCallback()
 void SettingsDialog::paint (juce::Graphics& g)
 {
     g.fillAll (Palette::background);
+    if (current == Page::Audio)
+    {
+        drawSectionTitle (g, pageArea.withHeight (22), "Audio device");
+        g.setColour (Palette::faint.brighter (0.2f));
+        g.setFont (Theme::font (11.5f));
+        g.drawFittedText ("Flubsound processes the input (a Flubsound / virtual cable device or loopback) and plays the result on the output "
+                          "device. Smaller buffers lower the latency; raise them if you hear dropouts.",
+                          pageArea.withTrimmedTop (28).withHeight (32), juce::Justification::topLeft, 2, 1.0f);
+    }
     auto nav = navArea.toFloat();
     g.setColour (Palette::panel);
     g.fillRect (nav);
@@ -605,7 +618,7 @@ void SettingsDialog::resized()
         }
     }
     pageArea = r.reduced (26, 20);
-    audioPage->setBounds (pageArea.withTrimmedLeft (-10));
+    audioPage->setBounds (pageArea.withTrimmedTop (66).withTrimmedLeft (-10));
     processingPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);

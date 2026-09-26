@@ -373,8 +373,10 @@ void SpectrumAnalyzer::renderGrid (float scale)
                                                 : (f == 20000.0 ? juce::Justification::centredRight : juce::Justification::centred));
     }
 
-    // Level grid (dBFS, left axis)
-    for (float db = kMaxDb; db >= kMinDb; db -= 12.0f)
+    // Level grid (left axis): 12 dB steps, coarser when the plot is short.
+    const float pixelsPer12Db = plot.getHeight() * 12.0f / (kMaxDb - kMinDb);
+    const float step = pixelsPer12Db >= 16.0f ? 12.0f : (pixelsPer12Db >= 8.0f ? 24.0f : 42.0f);
+    for (float db = kMaxDb; db >= kMinDb; db -= step)
     {
         const float y = std::round (yForDb (db)) + 0.5f;
         g.setColour (juce::Colour (0xff171c24));
@@ -397,7 +399,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
     {
         g.setColour (Palette::faint);
         g.setFont (Theme::font (12.0f));
-        g.drawText ("Waiting for audio on this strip", plot, juce::Justification::centred);
+        g.drawText ("Waiting for audio on this strip", plot.withHeight (juce::jmin (plot.getHeight() * 0.4f, 60.0f)), juce::Justification::centred);
         return;
     }
 

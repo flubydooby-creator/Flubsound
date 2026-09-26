@@ -109,6 +109,8 @@ public:
     void drawLabel (juce::Graphics&, juce::Label&) override;
 
     void drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics&, const juce::Path&, juce::Image&) override;
+    /** Input level bar of juce::AudioDeviceSelectorComponent. */
+    void drawLevelMeter (juce::Graphics&, int width, int height, float level) override;
 
 private:
     static juce::String styleOf (const juce::Component& c);
