@@ -10,7 +10,9 @@
 // out to `pactl` (pulseaudio-utils >= 16 or pipewire-pulse's pactl), which
 // works identically against PulseAudio and PipeWire's pulse server. Global
 // hotkeys use the X11 headers when present at build time and load libX11
-// with dlopen at run time (no link dependency).
+// with dlopen at run time (no link dependency); in Wayland sessions they go
+// through the xdg-desktop-portal GlobalShortcuts interface over D-Bus, with
+// libdbus-1 loaded the same way (no headers, no link dependency).
 //
 // Start with the OS: an XDG autostart entry (Desktop Application Autostart
 // Specification), honoured by GNOME, KDE Plasma, Xfce, Cinnamon, MATE and
@@ -19,7 +21,8 @@
 // Threading: AppAudioRouter calls block while pactl runs (typically 5-30 ms);
 // call them from a background thread if that matters. SystemTuning must be
 // called on the thread it tunes. GlobalHotkeys callbacks run on the
-// service's X event thread, not on the thread that created it. AutoStart does
+// service's own X event / D-Bus thread, not on the thread that created it.
+// AutoStart does
 // small blocking file IO: message thread, on user action.
 #if defined(__linux__)
 
@@ -28,7 +31,9 @@
 
 #include "flub/io/Json.h"
 
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
 #include <sched.h>
@@ -38,14 +43,20 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -59,12 +70,6 @@
     // X.h defines None as a macro, which would break KeyChord::None (used
     // below and by tests/test_platform_linux.cpp, which includes this file).
     #undef None
-    #include <dlfcn.h>
-    #include <fcntl.h>
-    #include <poll.h>
-    #include <atomic>
-    #include <mutex>
-    #include <thread>
 #else
     #define FLUB_HAVE_X11_HEADERS 0
 #endif
@@ -335,10 +340,22 @@ bool isExecutableInPath (const char* name)
       - Wayland: grabbing keys is forbidden by design (an X grab through
         XWayland only sees keys while an XWayland window has focus, so it is
         not global). The sanctioned route is the xdg-desktop-portal
-        GlobalShortcuts interface (CreateSession, BindShortcuts, "Activated"
-        signal; KDE Plasma 5.27+, GNOME 48+, Hyprland) - roadmap. In a Wayland
-        session isSupported() == false and the UI asks users to bind the
-        actions in their desktop's keyboard settings instead. */
+        GlobalShortcuts interface (KDE Plasma 5.27+, GNOME 48+, Hyprland),
+        implemented by PortalGlobalHotkeys below; GlobalHotkeys::create()
+        picks it in a Wayland session. Without the portal isSupported() ==
+        false and the UI asks users to bind the actions in their desktop's
+        keyboard settings instead. */
+
+/** True in a Wayland session, where X key grabs are not global. */
+bool isWaylandSession()
+{
+    const char* type = std::getenv ("XDG_SESSION_TYPE");
+    if (type != nullptr && std::string (type) == "wayland")
+        return true;
+    const char* wayland = std::getenv ("WAYLAND_DISPLAY");
+    return wayland != nullptr && *wayland != '\0';
+}
+
 #if FLUB_HAVE_X11_HEADERS
 /** The libX11 entry points the hotkey service needs, resolved with dlopen. */
 struct X11Api
@@ -385,16 +402,6 @@ struct X11Api
         return api.lib != nullptr ? &api : nullptr;
     }
 };
-
-/** True in a Wayland session, where X key grabs are not global. */
-bool isWaylandSession()
-{
-    const char* type = std::getenv ("XDG_SESSION_TYPE");
-    if (type != nullptr && std::string (type) == "wayland")
-        return true;
-    const char* wayland = std::getenv ("WAYLAND_DISPLAY");
-    return wayland != nullptr && *wayland != '\0';
-}
 
 /** KeyChord key code (ASCII upper-case letter / digit, F1..F24 as 0x70 + n,
     VK-style navigation keys) to an X keysym; 0 if unmappable. */
@@ -1259,7 +1266,15 @@ void SystemTuning::revertAudioThread (void* handle)
 }
 
 //==============================================================================
-std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<LinuxGlobalHotkeys>(); }
+std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create()
+{
+    // X key grabs are not global under Wayland (XWayland only sees keys while
+    // one of its windows has focus): there the portal is the only route, and
+    // without it the service is unsupported.
+    if (isWaylandSession())
+        return std::make_unique<PortalGlobalHotkeys>();
+    return std::make_unique<LinuxGlobalHotkeys>();
+}
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<LinuxAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<LinuxProcessLoopbackCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<LinuxAutoStart>(); }

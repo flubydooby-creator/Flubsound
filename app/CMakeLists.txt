@@ -20,6 +20,7 @@
 # Options:
 #   FLUB_ASIO_SDK_DIR        Steinberg ASIO SDK root (enables JUCE_ASIO on Windows)
 #   FLUB_FACTORY_PRESET_DIR  folder whose *.json files are embedded as factory presets
+#   FLUB_BUILD_APP_TESTS     also build flub_app_tests (tests/app, see the end of this file)
 
 set(FLUB_ASIO_SDK_DIR "" CACHE PATH "Steinberg ASIO SDK root folder (Windows, optional; enables the ASIO device type)")
 set(FLUB_FACTORY_PRESET_DIR "${PROJECT_SOURCE_DIR}/presets/factory" CACHE PATH "Folder with factory preset *.json files to embed")
@@ -206,3 +207,13 @@ else()
     set(FLUB_APP_WARNINGS -Wall -Wextra -Wshadow -Wno-sign-conversion)
 endif()
 set_source_files_properties(${FLUB_APP_SOURCES} PROPERTIES COMPILE_OPTIONS "${FLUB_APP_WARNINGS}")
+
+# ---------------------------------------------------------------------------
+# App-level tests: tests/app/CMakeLists.txt builds flub_app_tests from these
+# sources (all but Main.cpp) with this target's compile definitions, include
+# directories, link libraries and per-source warning flags, so the tests run
+# the code the app runs. The FlubsoundPro target itself is unchanged.
+# ---------------------------------------------------------------------------
+if(FLUB_BUILD_APP_TESTS)
+    add_subdirectory("${PROJECT_SOURCE_DIR}/tests/app" "${PROJECT_BINARY_DIR}/tests/app")
+endif()

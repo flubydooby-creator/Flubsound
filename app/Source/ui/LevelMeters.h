@@ -30,6 +30,10 @@ public:
     void update (const MeterSnapshot& snapshot, double dtSeconds);
     void reset();
 
+    /** Displayed bar values (dBFS, after ballistics) of the input or output pair. */
+    float getDisplayedPeakDb (bool output, int channel) const noexcept { return pair (output, channel).peak; }
+    float getDisplayedRmsDb (bool output, int channel) const noexcept { return pair (output, channel).rms; }
+
     std::function<void()> onResetRequested;
 
     /** IEC 60268-18 meter deflection, 0..1 for -70 .. 0 dBFS. */
@@ -49,6 +53,7 @@ private:
         float peak = -100.0f, rms = -100.0f, hold = -100.0f, holdAge = 0.0f;
     };
 
+    const Channel& pair (bool output, int channel) const noexcept { return (output ? out : in)[channel != 0 ? 1u : 0u]; }
     void updateChannel (Channel& c, float peakDb, float rmsDb, float dt) noexcept;
     void drawPair (juce::Graphics& g, juce::Rectangle<float> area, const Channel& l, const Channel& r, bool clipped, const juce::String& label);
 

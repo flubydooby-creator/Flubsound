@@ -29,6 +29,10 @@ public:
     void update (const MeterSnapshot& snapshot, double dtSeconds);
     void reset();
 
+    /** Displayed values (after smoothing). */
+    float getDisplayedCorrelation() const noexcept { return shown.correlation; }
+    float getDisplayedShortTermLufs() const noexcept { return shown.shortTerm; }
+
     std::function<void()> onResetRequested;
 
     void paint (juce::Graphics& g) override;

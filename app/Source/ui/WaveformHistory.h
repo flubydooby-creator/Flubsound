@@ -30,14 +30,22 @@ public:
     /** Rebuilds the paths if new columns arrived. */
     void advance();
 
-    void paint (juce::Graphics& g) override;
-    void resized() override;
-
-private:
     struct Column
     {
         float lo = 0.0f, hi = 0.0f, lufs = -160.0f;
     };
+
+    /** A completed column: age 0 = the newest, kColumns - 1 = the oldest. */
+    const Column& getColumn (int age) const noexcept
+    {
+        return columns[static_cast<size_t> (((writeIndex - 1 - age) % kColumns + kColumns) % kColumns)];
+    }
+    int getSamplesPerColumn() const noexcept { return samplesPerColumn; }
+
+    void paint (juce::Graphics& g) override;
+    void resized() override;
+
+private:
 
     void rebuildPaths();
 

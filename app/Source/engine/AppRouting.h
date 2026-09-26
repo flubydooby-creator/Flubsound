@@ -22,6 +22,7 @@
 // published app list. The public API is message-thread only.
 #pragma once
 
+#include "platform/PlatformServices.h"
 #include "settings/AppSettings.h"
 
 #include <juce_events/juce_events.h>
@@ -53,6 +54,13 @@ public:
 
     /** Reads the routes / method from settings; does nothing until start(). */
     AppRouting (AudioEngineHost& host, AppSettings& settings);
+
+    /** Same, with an injected router instead of the platform one (tests, or
+        an alternative session source). nullptr = no enumeration at all;
+        captureSupported replaces the platform probe (the captures themselves
+        come from AudioEngineHost's capture factory). */
+    AppRouting (AudioEngineHost& host, AppSettings& settings, std::unique_ptr<flub::platform::AppAudioRouter> router,
+                bool captureSupported);
     ~AppRouting() override;
 
     /** Begins applying routes (worker thread, captures, endpoints). */

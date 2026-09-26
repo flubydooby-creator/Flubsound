@@ -57,6 +57,9 @@ public:
     void reset();
     /** FFT hops, ballistics, path rebuild; repaints if anything moved. */
     void advance (double dtSeconds);
+    /** Latest analysed 1/6-octave band level (dB, before ballistics and
+        tilt) at the display point nearest `hz`; pre or post stream. */
+    float getBandLevelDb (bool post, double hz) const noexcept;
 
     // ---- Options -------------------------------------------------------------------------
     void setShowPre (bool shouldShow);

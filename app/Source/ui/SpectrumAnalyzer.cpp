@@ -168,6 +168,15 @@ void SpectrumAnalyzer::analyse (Stream& s)
     }
 }
 
+float SpectrumAnalyzer::getBandLevelDb (bool post, double hz) const noexcept
+{
+    // Display points are log-spaced: the nearest one in log frequency.
+    const double t = std::log (juce::jlimit (static_cast<double> (kMinHz), static_cast<double> (kMaxHz), hz) / kMinHz)
+                     / std::log (static_cast<double> (kMaxHz / kMinHz));
+    const auto i = static_cast<size_t> (juce::jlimit (0, kNumPoints - 1, juce::roundToInt (t * (kNumPoints - 1))));
+    return streams[post ? 1 : 0].analysisDb[i];
+}
+
 void SpectrumAnalyzer::advance (double dtSeconds)
 {
     const auto dt = static_cast<float> (juce::jlimit (0.0, 0.25, dtSeconds));

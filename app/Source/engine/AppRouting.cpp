@@ -30,10 +30,13 @@ bool sameState (const AppRouting::AppState& x, const AppRouting::AppState& y)
 } // namespace
 
 AppRouting::AppRouting (AudioEngineHost& h, AppSettings& s)
-    : juce::Thread ("Flubsound routing"), host (h), settings (s)
+    : AppRouting (h, s, platform_bridge::createAppAudioRouter(), platform_bridge::isProcessCaptureSupported())
 {
-    router = platform_bridge::createAppAudioRouter();
-    captureSupported = platform_bridge::isProcessCaptureSupported();
+}
+
+AppRouting::AppRouting (AudioEngineHost& h, AppSettings& s, std::unique_ptr<flub::platform::AppAudioRouter> r, bool canCapture)
+    : juce::Thread ("Flubsound routing"), host (h), settings (s), router (std::move (r)), captureSupported (canCapture)
+{
     method = settings.getRoutingMethod();
     routes = settings.getAppRoutes();
 }
