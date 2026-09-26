@@ -82,6 +82,16 @@ public:
         must call prepare() again from a non-RT thread (with a short fade). */
     bool needsReprepare() const noexcept;
 
+    /** Momentary "listen without this module" (the GUI's hold-to-bypass A/B):
+        forces the module whose enable parameter is `enableParamId` (GateOn,
+        EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn,
+        CompressorOn, MaximizerOn, VirtualizerOn) off whatever the store or
+        the macros say, through the module's normal click-free bypass fade.
+        Callable from any thread (one atomic); not stored, not in presets.
+        Other ids are ignored. */
+    void setAuditionBypass (int enableParamId, bool bypassed) noexcept;
+    bool isAuditionBypassed (int enableParamId) const noexcept;
+
     /** The dynamic EQ's internal mode bands (footsteps / anti-masking / voice
         in Gaming, de-harsh / air / de-boom in Music) occupy bands 4..7. */
     static constexpr int kFirstModeBand = 4, kNumModeBands = 4;
@@ -112,6 +122,8 @@ private:
     int totalLatency = 0;
 
     std::vector<float> base, effective; // kNumParams each (allocated in ctor); audio thread only
+    std::vector<float> baseAtPrepare;   // structural values the chain was prepared with
+    std::atomic<uint32_t> auditionMask { 0 }; // bit per module, see auditionBit()
     std::unique_ptr<std::atomic<float>[]> publishedEffective; // copy of effective for other threads
 
     // Modules (owned) and their bypass slots, in processing order.

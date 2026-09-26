@@ -340,6 +340,42 @@ TEST_CASE ("Chain: with glue disarmed the maximizer passes hot flat-topped mater
     CHECK (chain.meters().maxGainReductionDb.load() == 0.0f);
 }
 
+TEST_CASE ("Chain: audition bypass holds a macro-engaged module off (hold-to-bypass A/B)")
+{
+    // Punch (Music macro 1) switches Clarity on although its own enable
+    // parameter is off. The GUI's "listen without this module" must still
+    // take it out: the output becomes the input, delayed, after the fade.
+    auto render = [] (bool audition) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (Mode, static_cast<float> (ModeValue::Music));
+        store.set (Macro1, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 256, 2 });
+        CHECK (chain.effectiveValue (ClarityOn) >= 0.5f); // engaged by the macro
+        chain.setAuditionBypass (ClarityOn, audition);
+        CHECK (chain.isAuditionBypassed (ClarityOn) == audition);
+        auto prog = makeProgramme (48000, 0.3f);
+        Planar buf = prog;
+        buf.ptrs.clear();
+        for (auto& c : buf.ch)
+            buf.ptrs.push_back (c.data());
+        runChain (chain, buf, 256);
+        const int lat = chain.getLatencySamples();
+        double maxErr = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = 4800 + lat; i < 48000; ++i) // after the 20 ms bypass fade
+                maxErr = std::max (maxErr, static_cast<double> (std::abs (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] - prog.ch[static_cast<size_t> (c)][static_cast<size_t> (i - lat)])));
+        return maxErr;
+    };
+    CHECK (render (false) > 1e-3);  // Clarity audibly active
+    CHECK_LE (render (true), 1e-6); // held off despite the macro
+    ParameterStore store;
+    ProcessingChain chain (store);
+    chain.setAuditionBypass (InputGainDb, true); // not a module: ignored
+    CHECK (! chain.isAuditionBypassed (InputGainDb));
+}
+
 TEST_CASE ("Chain: full Music boost on a hot programme never exceeds the ceiling")
 {
     for (int mode : { 0, 1 })

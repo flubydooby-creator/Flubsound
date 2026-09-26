@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace flub
 {
@@ -77,6 +78,37 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e) noexcep
 }
 } // namespace
 
+namespace
+{
+/** Bit of a module's enable parameter in ProcessingChain::auditionMask, -1 if none. */
+int auditionBit (int enableParamId) noexcept
+{
+    static constexpr int ids[] = { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, CompressorOn, MaximizerOn, VirtualizerOn };
+    for (int b = 0; b < static_cast<int> (std::size (ids)); ++b)
+        if (ids[b] == enableParamId)
+            return b;
+    return -1;
+}
+} // namespace
+
+void ProcessingChain::setAuditionBypass (int enableParamId, bool bypassed) noexcept
+{
+    const int b = auditionBit (enableParamId);
+    if (b < 0)
+        return;
+    const uint32_t bit = 1u << static_cast<uint32_t> (b);
+    if (bypassed)
+        auditionMask.fetch_or (bit, std::memory_order_relaxed);
+    else
+        auditionMask.fetch_and (~bit, std::memory_order_relaxed);
+}
+
+bool ProcessingChain::isAuditionBypassed (int enableParamId) const noexcept
+{
+    const int b = auditionBit (enableParamId);
+    return b >= 0 && (auditionMask.load (std::memory_order_relaxed) & (1u << static_cast<uint32_t> (b))) != 0;
+}
+
 float ProcessingChain::modeBandFrequency (ModeValue mode, int band) noexcept
 {
     const int i = band - kFirstModeBand;
@@ -89,6 +121,7 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
 {
     base.assign (static_cast<size_t> (kNumParams), 0.0f);
     effective.assign (static_cast<size_t> (kNumParams), 0.0f);
+    baseAtPrepare.assign (static_cast<size_t> (kNumParams), 0.0f);
     publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
     store.snapshot (base.data());
     MacroMap::apply (base.data(), effective.data(), 1.0f);
@@ -109,6 +142,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     const int maxB = config.maxBlockSize;
 
     store.snapshot (base.data());
+    baseAtPrepare = base;
     MacroMap::apply (base.data(), effective.data(), 1.0f);
     publishEffective();
     const float* e = effective.data();
@@ -212,7 +246,13 @@ void ProcessingChain::reset() noexcept
 
 bool ProcessingChain::needsReprepare() const noexcept
 {
-    return static_cast<int> (std::lround (store.get (LatencyProfile))) != profileAtPrepare;
+    // Every structural parameter (today: the latency profile) changes the
+    // module configuration or latency, so any of them needs a re-prepare.
+    const auto& info = layout();
+    for (int i = 0; i < kNumParams; ++i)
+        if (info[static_cast<size_t> (i)].structural && store.get (i) != baseAtPrepare[static_cast<size_t> (i)])
+            return true;
+    return false;
 }
 
 void ProcessingChain::applyParameters() noexcept
@@ -220,15 +260,22 @@ void ProcessingChain::applyParameters() noexcept
     MacroMap::apply (base.data(), effective.data(), governor.getScale());
     publishEffective();
     float* e = effective.data();
+    // A module is active when it is (effectively) on and not held off by the
+    // GUI's audition bypass.
+    const uint32_t audition = auditionMask.load (std::memory_order_relaxed);
+    const auto active = [e, audition] (int enableId) {
+        const int b = auditionBit (enableId);
+        return on (e, enableId) && (b < 0 || (audition & (1u << static_cast<uint32_t> (b))) == 0);
+    };
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
-    const bool binaural = config.inputChannels > 2 && on (e, VirtualizerOn);
+    const bool binaural = config.inputChannels > 2 && active (VirtualizerOn);
 
     inputGain.setTarget (dbToGain (e[InputGainDb]));
     outputGain.setTarget (dbToGain (e[OutputGainDb]));
     autoLevel.setEnabled (on (e, AutoLevelOn));
     autoLevel.setTargetLufs (e[AutoLevelTargetLufs]);
     bypassMix.setTarget (on (e, BypassAll) ? 1.0f : 0.0f);
-    if (const float vt = on (e, VirtualizerOn) ? 1.0f : 0.0f; vt != virtMix.getTarget())
+    if (const float vt = active (VirtualizerOn) ? 1.0f : 0.0f; vt != virtMix.getTarget())
     {
         // Switching on from fully off: the renderer has not run, so start it
         // from silence rather than from stale history.
@@ -248,7 +295,7 @@ void ProcessingChain::applyParameters() noexcept
         gp.floorRiseDbPerSec = e[GateFloorRise];
         gp.freezeFloor = on (e, GateFreeze);
         gate.setParams (gp);
-        slots[SGate].setActive (on (e, GateOn));
+        slots[SGate].setActive (active (GateOn));
     }
 
     // ---- Parametric EQ ----
@@ -264,7 +311,7 @@ void ProcessingChain::applyParameters() noexcept
         paramEq.setBand (b, bp);
     }
     paramEq.setOutputGainDb (e[EqOutputGainDb]);
-    slots[SEq].setActive (on (e, EqOn));
+    slots[SEq].setActive (active (EqOn));
 
     // ---- Dynamic EQ: user bands 0..3, mode bands 4..7 ----
     static constexpr EqBandType shapes[] = { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf };
@@ -286,7 +333,7 @@ void ProcessingChain::applyParameters() noexcept
         dynEq.setBand (b, dp);
     }
     configureModeBands (dynEq, mode, e);
-    slots[SDynEq].setActive (on (e, DynEqOn));
+    slots[SDynEq].setActive (active (DynEqOn));
 
     // ---- Bass ----
     BassEngineParams bp;
@@ -301,7 +348,7 @@ void ProcessingChain::applyParameters() noexcept
     bp.monoBelowHz = e[BassMonoBelow];
     bp.subsonicHz = e[BassSubsonic];
     bass.setParams (bp);
-    slots[SBass].setActive (on (e, BassOn));
+    slots[SBass].setActive (active (BassOn));
 
     // ---- Clarity ----
     ClarityParams cp;
@@ -316,7 +363,7 @@ void ProcessingChain::applyParameters() noexcept
     cp.air = config.sampleRate >= 42000.0 ? e[ClarityAir] : 0.0f;
     cp.deMud = e[ClarityDeMud];
     clarity.setParams (cp);
-    slots[SClarity].setActive (on (e, ClarityOn));
+    slots[SClarity].setActive (active (ClarityOn));
 
     // ---- Saturation ----
     SaturatorParams sp;
@@ -325,7 +372,7 @@ void ProcessingChain::applyParameters() noexcept
     sp.mix = e[SatMix];
     sp.outputDb = e[SatOutputDb];
     saturator.setParams (sp);
-    slots[SSat].setActive (on (e, SaturationOn));
+    slots[SSat].setActive (active (SaturationOn));
 
     // ---- Stereo & space (mode / binaural policy) ----
     SpatializerParams wp;
@@ -348,7 +395,7 @@ void ProcessingChain::applyParameters() noexcept
         wp.crossfeed = 0.0f;
     }
     spatial.setParams (wp);
-    slots[SSpatial].setActive (on (e, SpatialOn));
+    slots[SSpatial].setActive (active (SpatialOn));
 
     // ---- Virtualiser ----
     VirtualizerParams vp;
@@ -378,7 +425,7 @@ void ProcessingChain::applyParameters() noexcept
     kp.upMaxGainDb = e[CompUpMaxGainDb];
     kp.upFloorDb = e[CompUpFloorDb];
     compressor.setParams (kp);
-    slots[SComp].setActive (on (e, CompressorOn));
+    slots[SComp].setActive (active (CompressorOn));
 
     // ---- Maximizer (AutoDrive may only reduce the requested drive) ----
     MaximizerParams mp;
@@ -402,7 +449,7 @@ void ProcessingChain::applyParameters() noexcept
     mp.releaseMs = e[MaxReleaseMs];
     mp.autoRelease = on (e, MaxAutoRelease);
     maximizer.setParams (mp);
-    slots[SMax].setActive (on (e, MaximizerOn));
+    slots[SMax].setActive (active (MaximizerOn));
 }
 
 void ProcessingChain::downmixToStereo (const AudioBlock& io) noexcept
