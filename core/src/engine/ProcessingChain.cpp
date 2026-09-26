@@ -40,41 +40,65 @@ DynEqBandParams modeBand (DynEqMode mode, EqBandType shape, float freq, float q,
 /** Dynamic-EQ bands 4..7 belong to the mode policy, not to the user: they are
     the fixed-function "footsteps / anti-masking / voice" (Gaming) and
     "de-harsh / air / de-boom" (Music) processors, scaled by the macros. */
+// Centre / corner frequencies of the internal dynamic-EQ mode bands 4..7
+// (also reported to the GUI through ProcessingChain::modeBandFrequency).
+constexpr std::array<float, ProcessingChain::kNumModeBands> kGamingModeBandHz { 3200.0f, 260.0f, 90.0f, 2000.0f };
+constexpr std::array<float, ProcessingChain::kNumModeBands> kMusicModeBandHz { 3500.0f, 12000.0f, 120.0f, 1000.0f };
+
 void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e) noexcept
 {
+    const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
     if (mode == ModeValue::Gaming)
     {
         const float footsteps = e[Macro1];
         const float voice = e[Macro5];
         // Quiet high-frequency detail (steps, reloads, cloth) is lifted by upward
         // compression; loud events above threshold are untouched.
-        dyn.setBand (4, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, 3200.0f, 0.9f, -42.0f, 3.0f, 7.0f * footsteps, 3.0f, 120.0f, -75.0f));
+        dyn.setBand (4, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[0], 0.9f, -42.0f, 3.0f, 7.0f * footsteps, 3.0f, 120.0f, -75.0f));
         // Footstep "body" (heel impact) for heavier footwear / surfaces.
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, 260.0f, 1.2f, -45.0f, 2.5f, 3.0f * footsteps, 5.0f, 150.0f, -75.0f));
+        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[1], 1.2f, -45.0f, 2.5f, 3.0f * footsteps, 5.0f, 150.0f, -75.0f));
         // Anti-masking: very loud low end (explosions, vehicles) is tamed so it
         // does not bury the steps that follow; normal bass is unaffected.
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, 90.0f, 0.7f, -22.0f, 3.0f, 6.0f * footsteps, 10.0f, 250.0f, -80.0f));
+        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, -22.0f, 3.0f, 6.0f * footsteps, 10.0f, 250.0f, -80.0f));
         // Voice comms / dialogue / score intelligibility.
-        dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, 2000.0f, 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
+        dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
     }
     else
     {
         const float clarity = e[Macro3];
         const float boost = e[BoostIntensity];
         // Presence/air boosts are paired with a dynamic de-harsh band.
-        dyn.setBand (4, modeBand (DynEqMode::CutAbove, EqBandType::Bell, 3500.0f, 1.2f, -22.0f, 3.0f, 3.0f * clarity, 2.0f, 80.0f, -80.0f));
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, 12000.0f, 0.7f, -45.0f, 2.0f, 3.0f * clarity, 10.0f, 200.0f, -80.0f));
+        dyn.setBand (4, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[0], 1.2f, -22.0f, 3.0f, 3.0f * clarity, 2.0f, 80.0f, -80.0f));
+        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, hz[1], 0.7f, -45.0f, 2.0f, 3.0f * clarity, 10.0f, 200.0f, -80.0f));
         // Bass boost is paired with a dynamic de-boom band.
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::Bell, 120.0f, 1.0f, -14.0f, 2.5f, 4.0f * boost, 10.0f, 150.0f, -80.0f));
-        dyn.setBand (7, modeBand (DynEqMode::CutAbove, EqBandType::Bell, 1000.0f, 1.0f, 0.0f, 1.0f, 0.0f, 5.0f, 80.0f, -80.0f));
+        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[2], 1.0f, -14.0f, 2.5f, 4.0f * boost, 10.0f, 150.0f, -80.0f));
+        dyn.setBand (7, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[3], 1.0f, 0.0f, 1.0f, 0.0f, 5.0f, 80.0f, -80.0f));
     }
 }
 } // namespace
+
+float ProcessingChain::modeBandFrequency (ModeValue mode, int band) noexcept
+{
+    const int i = band - kFirstModeBand;
+    if (i < 0 || i >= kNumModeBands)
+        return 0.0f;
+    return (mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz)[static_cast<size_t> (i)];
+}
 
 ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
 {
     base.assign (static_cast<size_t> (kNumParams), 0.0f);
     effective.assign (static_cast<size_t> (kNumParams), 0.0f);
+    publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
+    store.snapshot (base.data());
+    MacroMap::apply (base.data(), effective.data(), 1.0f);
+    publishEffective();
+}
+
+void ProcessingChain::publishEffective() noexcept
+{
+    for (int i = 0; i < kNumParams; ++i)
+        publishedEffective[static_cast<size_t> (i)].store (effective[static_cast<size_t> (i)], std::memory_order_relaxed);
 }
 
 void ProcessingChain::prepare (const ChainConfig& cfg)
@@ -86,6 +110,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
     store.snapshot (base.data());
     MacroMap::apply (base.data(), effective.data(), 1.0f);
+    publishEffective();
     const float* e = effective.data();
 
     profileAtPrepare = idx (e, LatencyProfile);
@@ -140,6 +165,8 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
     dryBuffer.setSize (2, maxB);
     dryDelay.prepare (2, totalLatency);
+    foldScratch.setSize (config.inputChannels, maxB);
+    virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) ? 1.0f : 0.0f);
 
     inputGain.reset (sr, 20.0f, dbToGain (e[InputGainDb]));
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
@@ -169,6 +196,7 @@ void ProcessingChain::reset() noexcept
         if (s != SGate || gateInChain)
             slots[static_cast<size_t> (s)].reset();
     virtualizer.reset();
+    virtMix.setImmediate (virtMix.getTarget());
     dryDelay.reset();
     autoLevel.reset();
     autoDrive.reset();
@@ -190,6 +218,7 @@ bool ProcessingChain::needsReprepare() const noexcept
 void ProcessingChain::applyParameters() noexcept
 {
     MacroMap::apply (base.data(), effective.data(), governor.getScale());
+    publishEffective();
     float* e = effective.data();
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
     const bool binaural = config.inputChannels > 2 && on (e, VirtualizerOn);
@@ -199,6 +228,14 @@ void ProcessingChain::applyParameters() noexcept
     autoLevel.setEnabled (on (e, AutoLevelOn));
     autoLevel.setTargetLufs (e[AutoLevelTargetLufs]);
     bypassMix.setTarget (on (e, BypassAll) ? 1.0f : 0.0f);
+    if (const float vt = on (e, VirtualizerOn) ? 1.0f : 0.0f; vt != virtMix.getTarget())
+    {
+        // Switching on from fully off: the renderer has not run, so start it
+        // from silence rather than from stale history.
+        if (vt > 0.0f && virtMix.getCurrent() == 0.0f)
+            virtualizer.reset();
+        virtMix.setTarget (vt);
+    }
 
     // ---- Spectral gate ----
     if (gateInChain)
@@ -349,13 +386,19 @@ void ProcessingChain::applyParameters() noexcept
     mp.ceilingDb = e[MaxCeilingDb];
     mp.clipAmount = e[MaxClipAmount];
     mp.clipKnee = e[MaxClipKnee];
-    // A tiny glue floor keeps the maximizer's 3-band splitter permanently
-    // engaged. Switching glue fully off/on crossfades the input against its
-    // own all-pass-shifted band sum, which comb-nulls the presence region for
-    // a few ms (e.g. whenever Boost Intensity crosses its glue threshold).
-    // 0.001 of 2:1 band compression is inaudible; the all-pass is constant.
+    // While glue is armed - set in the preset, or a macro that raises it
+    // (Boost Intensity, Loudness) is off zero - a tiny floor keeps the
+    // maximizer's 3-band splitter engaged. Switching glue fully off/on
+    // crossfades the input against its own all-pass-shifted band sum, which
+    // comb-nulls 120 Hz and 4 kHz for the fade; without the floor that would
+    // happen every time Boost crossed its glue start point (40 %). 0.001 of
+    // 2:1 band compression is inaudible. With glue disarmed the splitter is
+    // out of the path: its all-pass rotation raises the crest factor of
+    // flat-topped (mastered) material by 1-3 dB, which the limiter would
+    // otherwise have to take back.
     constexpr float kGlueFloor = 0.001f;
-    mp.glue = std::max (kGlueFloor, e[MaxGlue]);
+    const bool glueArmed = base[MaxGlue] > 0.0f || MacroMap::isArmed (base.data(), MaxGlue);
+    mp.glue = glueArmed ? std::max (kGlueFloor, e[MaxGlue]) : e[MaxGlue];
     mp.releaseMs = e[MaxReleaseMs];
     mp.autoRelease = on (e, MaxAutoRelease);
     maximizer.setParams (mp);
@@ -426,10 +469,32 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     // ---- 2. Fold to stereo ----
     if (config.inputChannels > 2)
     {
-        if (on (e, VirtualizerOn))
-            virtualizer.process (in);
+        if (! virtMix.isSmoothing())
+        {
+            if (virtMix.getCurrent() > 0.5f)
+                virtualizer.process (in);
+            else
+                downmixToStereo (in);
+        }
         else
-            downmixToStereo (in);
+        {
+            // Crossfade so that toggling the virtualiser never clicks: the two
+            // folds differ in level and timing (ITD, head shadow).
+            const AudioBlock alt = foldScratch.block (config.inputChannels, n);
+            alt.copyFrom (in);
+            virtualizer.process (in);
+            downmixToStereo (alt);
+            for (int i = 0; i < n; ++i)
+            {
+                const float w = virtMix.next();
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    float* y = in.channel (ch);
+                    const float d = alt.channel (ch)[i];
+                    y[i] = d + w * (y[i] - d);
+                }
+            }
+        }
     }
     const AudioBlock st = io.firstChannels (2);
 
@@ -538,5 +603,6 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.governorScale.store (governor.getScale(), rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);
+    m.safetyClipCount.store (maximizer.getSafetyClipCount(), rl);
 }
 } // namespace flub

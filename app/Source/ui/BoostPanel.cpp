@@ -146,7 +146,7 @@ void BoostDial::paint (juce::Graphics& g)
 BoostPanel::BoostPanel (EngineController& c)
     : controller (c),
       binder ([this] { return &controller.getSelectedParams(); },
-              [this] { return controller.getChain (controller.getSelectedStrip()).effectiveValues(); })
+              [this] { return &controller.getChain (controller.getSelectedStrip()); })
 {
     addAndMakeVisible (dial);
     binder.bindSlider (dial, BoostIntensity);

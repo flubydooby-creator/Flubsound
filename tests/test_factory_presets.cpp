@@ -481,12 +481,6 @@ TEST_CASE ("Factory presets: Boost Intensity and all macros at 100 % stay safe")
     // macro turned fully up. Only the first 2 s are rendered - that is where
     // the SafetyGovernor has not reacted yet, so the limiter alone must hold.
     constexpr int kStressSamples = kRenderSamples / 2;
-    // KNOWN ENGINE ISSUE (core, not the presets): while the soft clipper works
-    // hard, the maximizer's output reads up to ~0.4 dB above the ceiling on an
-    // independent 4x true-peak meter (Laptop Speakers / Podcast & Voice /
-    // Punchy Pop at full macros). Sample peaks and the safety clamp are still
-    // exact. Tighten this to kTruePeakToleranceDb once the limiter is fixed.
-    constexpr float kStressTruePeakToleranceDb = 0.5f;
     const Planar stereo = makeProgramme (2);
     const Planar surround = makeProgramme (8);
 
@@ -535,7 +529,7 @@ TEST_CASE ("Factory presets: Boost Intensity and all macros at 100 % stay safe")
         TruePeakMeter truePeak;
         truePeak.prepare (2);
         truePeak.process (buf.block (0, kStressSamples).firstChannels (2));
-        if (truePeak.getMaxDbAllChannels() > ceilingDb + kStressTruePeakToleranceDb)
+        if (truePeak.getMaxDbAllChannels() > ceilingDb + kTruePeakToleranceDb)
             fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling at full macros");
         if (chain.meters().safetyClipCount.load() != 0)
             fail (f, "the limiter's safety clamp engaged at full macros");

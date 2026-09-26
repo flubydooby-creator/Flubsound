@@ -137,6 +137,23 @@ TEST_CASE ("MacroMap: Boost Intensity is staged and governed")
     }
 }
 
+TEST_CASE ("MacroMap: glue is armed only while a source that can raise it is off zero")
+{
+    std::vector<float> base (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        base[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+    base[Mode] = static_cast<float> (ModeValue::Music);
+    CHECK (! MacroMap::isArmed (base.data(), MaxGlue));
+    base[BoostIntensity] = 0.2f; // below the glue start point (40 %), but armed
+    CHECK (MacroMap::isArmed (base.data(), MaxGlue));
+    base[BoostIntensity] = 0.0f;
+    base[Macro4] = 0.1f;         // Loudness
+    CHECK (MacroMap::isArmed (base.data(), MaxGlue));
+    base[Macro4] = 0.0f;
+    base[Macro1] = 1.0f;         // Punch never raises glue
+    CHECK (! MacroMap::isArmed (base.data(), MaxGlue));
+}
+
 TEST_CASE ("MacroMap: every mode has five named macros that engage modules")
 {
     for (auto mode : { ModeValue::Music, ModeValue::Gaming })
@@ -265,6 +282,39 @@ TEST_CASE ("Chain: everything bypassed = input delayed by the chain latency (bit
     CHECK_LE (maxErr, 1e-6);
 }
 
+TEST_CASE ("Chain: with glue disarmed the maximizer passes hot flat-topped material untouched")
+{
+    // The glue's 3-band splitter is an all-pass that raises the crest factor
+    // of flat-topped material (+3.4 dB on this square). With no glue in the
+    // preset and no macro that could raise it, the splitter must be out of the
+    // path: the default maximizer (drive 0, clipper not reached, ceiling
+    // -1 dBTP) must return the square exactly, delayed. At -5 dBFS its true
+    // peak (Gibbs ringing at the edges) is -2.9 dBTP; through the splitter it
+    // would read about +0.5 dBTP and be limited.
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (MaximizerOn, 1.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 512, 2 });
+    const int lat = chain.getLatencySamples();
+    const int n = 48000;
+    Planar in (2, n);
+    for (int i = 0; i < n; ++i)
+        for (auto& c : in.ch)
+            c[static_cast<size_t> (i)] = ((i / 240) % 2 == 0 ? 1.0f : -1.0f) * dbToGain (-5.0f); // 100 Hz
+    Planar buf = in;
+    buf.ptrs.clear();
+    for (auto& c : buf.ch)
+        buf.ptrs.push_back (c.data());
+    runChain (chain, buf, 512);
+    double maxErr = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int i = lat; i < n; ++i)
+            maxErr = std::max (maxErr, static_cast<double> (std::abs (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] - in.ch[static_cast<size_t> (c)][static_cast<size_t> (i - lat)])));
+    CHECK_LE (maxErr, 1e-6);
+    CHECK (chain.meters().maxGainReductionDb.load() == 0.0f);
+}
+
 TEST_CASE ("Chain: full Music boost on a hot programme never exceeds the ceiling")
 {
     for (int mode : { 0, 1 })
@@ -340,6 +390,49 @@ TEST_CASE ("Chain: 7.1 input is virtualised (or downmixed) to stereo; extra chan
         for (int c = 2; c < 8; ++c)
             CHECK (peakAbs (buf.ch[static_cast<size_t> (c)].data(), buf.numSamples()) == 0.0);
     }
+}
+
+TEST_CASE ("Chain: toggling the virtualiser on a 7.1 strip crossfades (no step in the output)")
+{
+    // The binaural render and the BS.775 downmix differ in level and timing,
+    // so a hard switch would step the waveform. Measure the largest
+    // sample-to-sample change around each switch against steady state.
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (VirtualizerOn, 1.0f);
+    ProcessingChain chain (store);
+    constexpr int kBlock = 256;
+    chain.prepare ({ kFs, kBlock, 8 });
+    const int n = kBlock * 600; // 3.2 s
+    Planar buf (8, n);
+    for (int c = 0; c < 8; ++c)
+        if (c != 3)
+        {
+            const auto s = sine (220.0 * (1.0 + 0.1 * c), kFs, n, 0.1f);
+            std::copy (s.begin(), s.end(), buf.ch[static_cast<size_t> (c)].begin()); // keep the block pointers valid
+        }
+    const int toggleOff = kBlock * 200, toggleOn = kBlock * 400;
+    for (int pos = 0; pos < n; pos += kBlock)
+    {
+        if (pos == toggleOff)
+            store.set (VirtualizerOn, 0.0f);
+        if (pos == toggleOn)
+            store.set (VirtualizerOn, 1.0f);
+        chain.process (buf.block (pos, kBlock));
+    }
+    auto maxStep = [&] (int from, int to) {
+        double m = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = from + 1; i < to; ++i)
+                m = std::max (m, static_cast<double> (std::abs (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] - buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i - 1)])));
+        return m;
+    };
+    const double steadyOn = maxStep (kBlock * 100, toggleOff);
+    const double steadyOff = maxStep (toggleOff + kBlock * 20, toggleOn);
+    const double steady = std::max (steadyOn, steadyOff);
+    CHECK (steady > 0.0);
+    CHECK_LE (maxStep (toggleOff - kBlock, toggleOff + kBlock * 8), 1.25 * steady);
+    CHECK_LE (maxStep (toggleOn - kBlock, toggleOn + kBlock * 8), 1.25 * steady);
 }
 
 TEST_CASE ("Chain: loudness-matched global bypass tracks the processed loudness without exceeding the ceiling")

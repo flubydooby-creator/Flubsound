@@ -3,7 +3,9 @@
 // Pages (left navigation):
 //   Audio       juce::AudioDeviceSelectorComponent (device type, device,
 //               sample rate, buffer size, channels); the selection is
-//               persisted by the EngineController automatically.
+//               persisted by the EngineController automatically. Above it:
+//               the matched headset / device profile, its connection, the
+//               safety ceiling applied to the master limiter and guidance.
 //   Processing  latency profile (applied to every strip and both A/B banks;
 //               the engine re-prepares with a brief dropout), live latency
 //               breakdown, device-input routing, per-app routing method and
@@ -46,6 +48,10 @@ public:
         General
     };
 
+    /** Smallest window size at which every page fits (the Processing page's
+        help text wraps more on narrow windows). */
+    static constexpr int kMinWidth = 720, kMinHeight = 580;
+
     SettingsDialog (EngineController& controller, HotkeyHooks hooks, std::function<void (MeterPalette)> onMeterPaletteChanged,
                     MeterPalette currentPalette);
     ~SettingsDialog() override;
@@ -57,6 +63,10 @@ public:
                                      Page page = Page::Audio);
 
     void showPage (Page page);
+
+    /** Output device + matched headset profile, connection, safety ceiling and
+        the profile's guidance (EngineController::getDeviceAdvice). */
+    static juce::String describeOutputDevice (EngineController& controller, int maxMessages = 2);
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -75,6 +85,7 @@ private:
     std::unique_ptr<HotkeysPage> hotkeysPage;
     std::unique_ptr<GeneralPage> generalPage;
     Page current = Page::Audio;
-    juce::Rectangle<int> navArea, pageArea;
+    juce::String deviceText;
+    juce::Rectangle<int> navArea, pageArea, deviceArea;
 };
 } // namespace flub::app::ui

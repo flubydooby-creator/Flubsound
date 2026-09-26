@@ -15,6 +15,7 @@ constexpr const char* kPrefAnalyzer = "ui.analyzer";
 MainComponent::MainComponent (EngineController& c)
     : controller (c),
       header (c),
+      deviceBanner (c),
       routing (c),
       boost (c),
       analyzer ([this] { return &controller.getSelectedParams(); }),
@@ -42,6 +43,9 @@ MainComponent::MainComponent (EngineController& c)
 
     // ---- Wiring ----
     header.onSettingsRequested = [this] { openSettings(); };
+    addChildComponent (deviceBanner);
+    deviceBanner.onDetailsRequested = [this] { openSettings(); };
+    deviceBanner.refresh();
     levels.onResetRequested = [this] { requestLoudnessReset(); };
     loudness.onResetRequested = [this] { requestLoudnessReset(); };
     loudness.setTooltip ("Click the integrated loudness to reset it (also resets the true-peak hold)");
@@ -79,9 +83,16 @@ MainComponent::~MainComponent()
 
 FlubLookAndFeel& MainComponent::lookAndFeel()
 {
-    if (ownLookAndFeel != nullptr)
-        return *ownLookAndFeel;
-    return *dynamic_cast<FlubLookAndFeel*> (&juce::LookAndFeel::getDefaultLookAndFeel());
+    if (ownLookAndFeel == nullptr)
+    {
+        if (auto* shared = dynamic_cast<FlubLookAndFeel*> (&juce::LookAndFeel::getDefaultLookAndFeel()))
+            return *shared;
+        // The application default changed to something else: use a private one.
+        ownLookAndFeel = std::make_unique<FlubLookAndFeel>();
+        ownLookAndFeel->setAccent (Theme::accentForMode (mode));
+        setLookAndFeel (ownLookAndFeel.get());
+    }
+    return *ownLookAndFeel;
 }
 
 // =============================================================================
@@ -202,6 +213,7 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
     {
         case Change::Preset:
             header.refreshPresets();
+            refreshDeviceBanner(); // the "Use <preset>" offer hides once it is loaded
             break;
         case Change::Engine:
             // Device restarts re-create the chains but usually keep the strips.
@@ -214,6 +226,7 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             resetAnalysis();
             header.refresh();
             header.updateStatus();
+            refreshDeviceBanner();
             break;
         case Change::SelectedStrip:
             header.refresh();
@@ -223,16 +236,24 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
         case Change::MasterEnable:
         case Change::Parameters:
             header.refresh();
+            refreshDeviceBanner(); // the suggested preset follows the mode
             break;
         case Change::Device:
         case Change::Settings:
             header.updateStatus();
             routing.refreshRouting();
+            refreshDeviceBanner();
             break;
         case Change::Routing:
             routing.refreshRouting();
             break;
     }
+}
+
+void MainComponent::refreshDeviceBanner()
+{
+    if (deviceBanner.refresh())
+        resized();
 }
 
 juce::String MainComponent::currentStripSignature() const
@@ -289,6 +310,12 @@ void MainComponent::resized()
     const int gap = 10;
     const int w = getWidth();
 
+    if (deviceBanner.shouldShow())
+    {
+        deviceBanner.setBounds (r.removeFromTop (DeviceAdviceBanner::kHeight));
+        r.removeFromTop (gap);
+    }
+
     history.setBounds (r.removeFromBottom (juce::jlimit (76, 128, r.getHeight() / 8)));
     r.removeFromBottom (gap);
 
@@ -297,7 +324,12 @@ void MainComponent::resized()
 
     auto right = r.removeFromRight (juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
     r.removeFromRight (gap);
-    levels.setBounds (right.removeFromTop (juce::jlimit (196, 290, juce::roundToInt (right.getHeight() * 0.40))));
+    // The loudness panel's content has a fixed height (~340 px): on tall
+    // windows the level meters take the spare height instead of leaving the
+    // loudness panel half empty.
+    constexpr int kLoudnessNeeds = 400;
+    const int levelsH = juce::jlimit (196, 560, juce::jmax (juce::roundToInt (right.getHeight() * 0.40), right.getHeight() - kLoudnessNeeds - gap));
+    levels.setBounds (right.removeFromTop (levelsH));
     right.removeFromTop (gap);
     loudness.setBounds (right);
 

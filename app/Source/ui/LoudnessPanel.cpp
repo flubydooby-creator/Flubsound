@@ -67,8 +67,13 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
                          || differs (shown.glue, painted.glue, 0.02f) || differs (shown.clip, painted.clip, 0.1f)
                          || differs (shown.bass, painted.bass, 0.02f) || differs (shown.master, painted.master, 0.02f)
                          || differs (shown.correlation, painted.correlation, 0.005f) || differs (shown.width, painted.width, 0.005f);
-    if (changed)
+    // Loudness readouts are read by eye: 20 Hz is plenty and halves the paint cost.
+    sinceRepaint += dt;
+    if (changed && sinceRepaint >= 0.05f)
+    {
+        sinceRepaint = 0.0f;
         repaint();
+    }
 }
 
 void LoudnessPanel::reset()

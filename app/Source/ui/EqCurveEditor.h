@@ -61,8 +61,9 @@ public:
     void mouseDoubleClick (const juce::MouseEvent& e) override;
     void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
     bool keyPressed (const juce::KeyPress& key) override;
-    void focusGained (FocusChangeType) override { repaint(); }
-    void focusLost (FocusChangeType) override { repaint(); }
+    void focusGained (FocusChangeType) override { invalidate(); }
+    void focusLost (FocusChangeType) override { invalidate(); }
+    void lookAndFeelChanged() override;
 
 private:
     static constexpr int kBands = flub::param::kEqBands;
@@ -78,6 +79,8 @@ private:
     void showBandMenu (int band);
     juce::String describeBand (int band) const;
     void drawBubble (juce::Graphics& g, int band) const;
+    void renderLayer (juce::Graphics& g);
+    void invalidate();
 
     SpectrumAnalyzer& geometry;
     StoreProvider storeProvider;
@@ -91,6 +94,9 @@ private:
     uint32_t lastVersion = 0;
 
     juce::Path curve, curveFill, selectedFill;
+    juce::Image layer;          // cached curve / nodes / labels
+    float layerScale = 1.0f;
+    bool layerDirty = true;
     std::array<float, kNumDynMarkers> dynGains {};
     std::array<float, kNumDynMarkers> dynFreqs {};
 

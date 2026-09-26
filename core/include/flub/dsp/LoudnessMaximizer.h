@@ -71,6 +71,8 @@ public:
     static float softClip (float x, float threshold, float knee) noexcept;
 
     float getGainReductionDb() const noexcept { return limiterGrDb.load (std::memory_order_relaxed); }
+    /** Engagements of the limiter's final safety clamp since prepare() (0 in normal operation). */
+    uint64_t getSafetyClipCount() const noexcept { return limiter.getSafetyClipCount(); }
     float getGlueReductionDb() const noexcept { return glueGrDb.load (std::memory_order_relaxed); }
     float getClipEnergyRatioDb() const noexcept { return clipRatioDb.load (std::memory_order_relaxed); }
 

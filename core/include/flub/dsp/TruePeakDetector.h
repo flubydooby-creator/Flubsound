@@ -29,12 +29,17 @@ public:
     static constexpr int kTapsPerPhase = 40;
     static constexpr int kDelay = kTapsPerPhase / 2; // = 20 base samples
 
-    /** Allocates. */
-    void prepare (int numChannels)
+    static constexpr double kKaiserBeta = 5.0; // see the passband analysis above
+
+    using PhaseTaps = std::array<std::array<float, kTapsPerPhase>, kPhases>;
+
+    /** The interpolator design, shared with TruePeakLimiter's detector so the
+        limiter and the meters can never read different peaks. Phase 0 is the
+        delayed input sample itself and is left untouched (all zero). */
+    static void designPhaseTaps (PhaseTaps& phaseTaps) noexcept
     {
         constexpr int length = kPhases * kTapsPerPhase + 1; // 161, centre = 80
         constexpr int centre = (length - 1) / 2;
-        constexpr double beta = 5.0; // see the passband analysis above
         for (int p = 1; p < kPhases; ++p)
         {
             double sum = 0.0;
@@ -42,13 +47,19 @@ public:
             for (int j = 0; j < kTapsPerPhase; ++j)
             {
                 const int k = kPhases * j + p;
-                const double v = fir::sinc (static_cast<double> (k - centre) / kPhases) * fir::kaiser (k, length, beta);
+                const double v = fir::sinc (static_cast<double> (k - centre) / kPhases) * fir::kaiser (k, length, kKaiserBeta);
                 taps[static_cast<size_t> (j)] = static_cast<float> (v);
                 sum += v;
             }
             for (auto& t : taps)
                 t = static_cast<float> (t / sum); // unity DC gain per phase
         }
+    }
+
+    /** Allocates. */
+    void prepare (int numChannels)
+    {
+        designPhaseTaps (phaseTaps);
         for (int c = 0; c < kMaxChannels; ++c)
             history[static_cast<size_t> (c)].assign (c < numChannels ? 2 * kTapsPerPhase : 0, 0.0f);
         pos.fill (0);
@@ -83,7 +94,7 @@ public:
     }
 
 private:
-    std::array<std::array<float, kTapsPerPhase>, kPhases> phaseTaps {};
+    PhaseTaps phaseTaps {};
     std::array<std::vector<float>, kMaxChannels> history;
     std::array<int, kMaxChannels> pos {};
 };

@@ -72,11 +72,16 @@ juce::Font numeric (float height, bool bold)
 }
 
 // =============================================================================
+juce::ColourGradient panelFill (juce::Rectangle<float> bounds)
+{
+    // Slightly lighter at the top so panels read as raised surfaces.
+    return juce::ColourGradient (Palette::panel.brighter (0.035f), 0.0f, bounds.getY(), Palette::panel, 0.0f,
+                                 bounds.getY() + juce::jmin (160.0f, bounds.getHeight()), false);
+}
+
 void drawPanel (juce::Graphics& g, juce::Rectangle<float> bounds, float radius)
 {
-    // Fill slightly lighter at the top so panels read as raised surfaces.
-    g.setGradientFill (juce::ColourGradient (Palette::panel.brighter (0.035f), 0.0f, bounds.getY(), Palette::panel, 0.0f,
-                                             bounds.getY() + juce::jmin (160.0f, bounds.getHeight()), false));
+    g.setGradientFill (panelFill (bounds));
     g.fillRoundedRectangle (bounds, radius);
     g.setColour (Palette::border);
     g.drawRoundedRectangle (bounds.reduced (0.5f), radius, 1.0f);

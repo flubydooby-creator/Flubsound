@@ -56,11 +56,15 @@ Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/
 1. **Identify** the output device by name and family, and the connection type from the platform layer (Windows device enumerator, macOS transport type, PipeWire `device.bus`), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or 16 kHz mono ⇒ Bluetooth hands-free.
 2. **Cap the true-peak ceiling:** −1 dBTP (wired, USB, 2.4 GHz), −2 dBTP (Bluetooth A2DP), −3 dBTP (Bluetooth hands-free). The cap is applied to the master limiter, so user presets are not modified.
 3. **Adapt to the sample rate:** every module derives its coefficients from the device rate, and alias-prone processing (the air exciter) is disabled below 42 kHz.
-4. **Advise:** show the profile's guidance in the app, most important first:
+4. **Advise:** show the profile's guidance in the app, most important first. A banner under the header names the recognised family, the connection and the ceiling in force, shows the top piece of advice, and offers the suggested preset with one click (*Use Competitive FPS*). *Details* opens Settings > Audio with the full list. The banner can be dismissed per output device for the session:
    - turn off Superhuman Hearing, EQ presets or virtual surround when they would stack with Flubsound,
    - keep voice chat on the headset's own Chat output when it has one,
    - Bluetooth latency and hands-free quality notes.
 5. **Suggest a preset** for the current mode: *Competitive FPS* / *Flubsound Signature*, or *Bluetooth Headphones* on Bluetooth.
+
+![Headset advice banner for a Turtle Beach Stealth headset in Gaming mode](images/app-gaming-headset-advice.png)
+
+*Rendered headlessly with `--screenshot out.png --mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`. The `--device` option simulates the output device, so profile matching can be checked without the hardware.*
 6. **Survive power cycles and replugging.** A 2.4 GHz transmitter keeps the device present when the headset sleeps. When a USB headset is unplugged and replugged, the engine re-opens the preferred output device as soon as it reappears.
 
 ---

@@ -512,9 +512,21 @@ void* SystemTuning::promoteAudioThread()
         inheriting real-time priority; rtkit requires it as well. */
     const pthread_t self = ::pthread_self();
 
-    auto saved = std::make_unique<SavedSchedulingPolicy>();
-    if (::pthread_getschedparam (self, &saved->policy, &saved->param) != 0)
+    int currentPolicy = SCHED_OTHER;
+    sched_param currentParam {};
+    if (::pthread_getschedparam (self, &currentPolicy, &currentParam) != 0)
         return nullptr;
+
+    // Already real-time (JACK / PipeWire-JACK call us on the server's client
+    // thread, typically SCHED_FIFO 70+): leave it alone. Setting our own
+    // priority here would DEMOTE the sound server's thread.
+    const int basePolicy = currentPolicy & ~SCHED_RESET_ON_FORK;
+    if (basePolicy == SCHED_FIFO || basePolicy == SCHED_RR)
+        return nullptr;
+
+    auto saved = std::make_unique<SavedSchedulingPolicy>();
+    saved->policy = currentPolicy;
+    saved->param = currentParam;
 
     const int minPriority = ::sched_get_priority_min (SCHED_FIFO);
     const int maxPriority = ::sched_get_priority_max (SCHED_FIFO);

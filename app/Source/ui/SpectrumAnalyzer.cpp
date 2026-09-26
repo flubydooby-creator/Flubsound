@@ -19,8 +19,12 @@ constexpr double kIdleSeconds = 0.35; // no samples for this long: let the trace
 
 SpectrumAnalyzer::SpectrumAnalyzer()
 {
-    setOpaque (false);
+    // Opaque (fills with the panel colour) so 60 Hz repaints never have to
+    // repaint the parent panel behind it.
+    setOpaque (true);
     setInterceptsMouseClicks (false, false);
+    setTitle ("Spectrum analyser");
+    setDescription ("Input and output spectrum of the selected strip, 20 Hz to 20 kHz");
 
     // Periodic Hann window (exact 75 % overlap-add).
     window.resize (static_cast<size_t> (kFftSize));
@@ -324,6 +328,11 @@ void SpectrumAnalyzer::resized()
     rebuildPaths();
 }
 
+void SpectrumAnalyzer::moved()
+{
+    gridImage = {}; // the panel gradient behind it depends on the position
+}
+
 void SpectrumAnalyzer::lookAndFeelChanged()
 {
     gridImage = {};
@@ -340,7 +349,12 @@ void SpectrumAnalyzer::renderGrid (float scale)
     juce::Graphics g (gridImage);
     g.addTransform (juce::AffineTransform::scale (scale));
 
-    // Plot well
+    // The parent panel's fill behind the axis labels (the component is opaque), then the plot well.
+    if (auto* parent = getParentComponent())
+        g.setGradientFill (Theme::panelFill (getLocalArea (parent, parent->getLocalBounds()).toFloat()));
+    else
+        g.setColour (Palette::panel);
+    g.fillAll();
     g.setColour (Palette::well);
     g.fillRoundedRectangle (plot.expanded (1.0f), 6.0f);
 
@@ -423,11 +437,9 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
                                                  false));
         g.fillPath (postFill);
 
-        // Glow: wide translucent strokes under the crisp line.
-        g.setColour (accent.withAlpha (0.07f));
-        g.strokePath (postLine, juce::PathStrokeType (7.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-        g.setColour (accent.withAlpha (0.16f));
-        g.strokePath (postLine, juce::PathStrokeType (3.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // Glow: a wide translucent stroke under the crisp line.
+        g.setColour (accent.withAlpha (0.15f));
+        g.strokePath (postLine, juce::PathStrokeType (4.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         g.setColour (accent);
         g.strokePath (postLine, juce::PathStrokeType (1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }

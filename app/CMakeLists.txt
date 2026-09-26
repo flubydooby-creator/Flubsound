@@ -57,6 +57,7 @@ set(FLUB_APP_SOURCES
     Source/ui/AnalyzerFeed.cpp
     Source/ui/AnalyzerPanel.cpp
     Source/ui/BoostPanel.cpp
+    Source/ui/DeviceAdviceBanner.cpp
     Source/ui/EqCurveEditor.cpp
     Source/ui/FlubLookAndFeel.cpp
     Source/ui/HeaderBar.cpp

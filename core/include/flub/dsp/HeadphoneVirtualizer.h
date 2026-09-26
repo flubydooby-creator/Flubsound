@@ -22,7 +22,8 @@
 //           bilinear-transformed (BiquadCoeffs::fromAnalogFirstOrder).
 //     Rear cue: -4 dB high shelf @ 4 kHz for |azimuth| > 90 deg (pinna
 //           shadow; resolves the front/back symmetry of a sphere).
-//     Early reflections: 6 taps 4-19 ms, low-passed, alternating ears,
+//     Early reflections: 6 taps 4-19 ms, band-passed (HP 200 Hz, LP 5 kHz),
+//           alternating ears,
 //           level = roomAmount -> externalisation ("out of head").
 // Renderer B - Measured HRIRs: per-speaker left/right impulse responses
 //   (e.g. from a SOFA file, resampled to the session rate on a background
@@ -91,8 +92,10 @@ public:
     void process (const AudioBlock& block) noexcept override;
     const char* name() const noexcept override { return "Headphone Virtualizer"; }
 
-    /** Angle/head changes recompute filters at the next block (RT-safe,
-        coefficient-only); layout changes take effect immediately. */
+    /** RT-safe. Angle / head-radius changes glide (one-pole, 30 ms) and the
+        filters are redesigned on 16-sample control ticks; a layout change
+        fades out (~5 ms), swaps at silence, pre-rolls (2 ms, up to 10 ms for
+        an HRIR) and fades back in (~5 ms). See HeadphoneVirtualizer.cpp. */
     void setParams (const VirtualizerParams& p) noexcept;
     const VirtualizerParams& getParams() const noexcept { return params; }
 

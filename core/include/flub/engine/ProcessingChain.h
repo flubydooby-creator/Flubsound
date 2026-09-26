@@ -48,6 +48,8 @@
 #include "flub/dsp/StereoSpatializer.h"
 
 #include <array>
+#include <atomic>
+#include <memory>
 #include <vector>
 
 namespace flub
@@ -80,15 +82,27 @@ public:
         must call prepare() again from a non-RT thread (with a short fade). */
     bool needsReprepare() const noexcept;
 
+    /** The dynamic EQ's internal mode bands (footsteps / anti-masking / voice
+        in Gaming, de-harsh / air / de-boom in Music) occupy bands 4..7. */
+    static constexpr int kFirstModeBand = 4, kNumModeBands = 4;
+    /** Centre / corner frequency of mode band `band` (4..7) in `mode`, for
+        GUI markers; 0 for any other band. */
+    static float modeBandFrequency (param::ModeValue mode, int band) noexcept;
+
     MeterBus& meters() noexcept { return meterBus; }
     AnalyzerTaps& taps() noexcept { return analyzerTaps; }
 
-    /** Last effective (post-macro) parameter values, for GUI "ghost" markers.
-        Written by the audio thread; benign races on individual floats. */
-    const float* effectiveValues() const noexcept { return effective.data(); }
+    /** Last effective (post-macro) value of a parameter, for GUI "ghost"
+        markers. The audio thread publishes all of them once per block
+        (relaxed atomics), so this may be called from any thread. */
+    float effectiveValue (int paramId) const noexcept
+    {
+        return paramId >= 0 && paramId < param::kNumParams ? publishedEffective[static_cast<size_t> (paramId)].load (std::memory_order_relaxed) : 0.0f;
+    }
 
 private:
     void applyParameters() noexcept;
+    void publishEffective() noexcept;
     void publishMeters (const AudioBlock& out, int numSamples) noexcept;
     void downmixToStereo (const AudioBlock& io) noexcept;
 
@@ -97,7 +111,8 @@ private:
     int profileAtPrepare = -1;
     int totalLatency = 0;
 
-    std::vector<float> base, effective; // kNumParams each (allocated in ctor)
+    std::vector<float> base, effective; // kNumParams each (allocated in ctor); audio thread only
+    std::unique_ptr<std::atomic<float>[]> publishedEffective; // copy of effective for other threads
 
     // Modules (owned) and their bypass slots, in processing order.
     SpectralNoiseGate gate;
@@ -121,6 +136,11 @@ private:
     AutoDrive autoDrive;
     SafetyGovernor governor;
     LoudnessMatch loudnessMatch;
+
+    // Surround fold: 20 ms crossfade between the binaural render and the
+    // BS.775 downmix whenever virt.on changes (both paths run during it).
+    LinearSmoothedValue virtMix;
+    AudioBuffer foldScratch;
 
     // Global bypass dry path (post input stage, stereo, delayed by totalLatency)
     AudioBuffer dryBuffer;

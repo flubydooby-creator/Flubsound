@@ -158,6 +158,13 @@ void AppRouting::setLiveUpdates (bool shouldUpdate)
 
 void AppRouting::stripLayoutChanged()
 {
+    // AudioEngineHost::setStripLayout() has already released the slots of
+    // captures whose strip disappeared, and surviving strips may have a new
+    // channel count: drop every capture so no stale id is ever stopped later
+    // (its slot may be reused by another capture) and let the next pass
+    // restart them with FIFOs sized for the new layout.
+    stopAllCaptures();
+    captureFailures.clear();
     publishConfig();
     refresh();
 }
@@ -326,20 +333,38 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
         if (! seen.insert (a.processId).second)
             continue;
 
-        const auto existing = captures.find (a.processId);
+        auto existing = captures.find (a.processId);
         if (captureMethod && a.strip >= 0)
         {
-            if (existing != captures.end())
+            if (existing != captures.end() && existing->second.strip != a.strip)
             {
-                host.setCaptureStrip (existing->second, a.strip);
+                const auto layout = host.getStripLayout();
+                const auto channelsOf = [&layout] (int strip)
+                { return strip >= 0 && strip < static_cast<int> (layout.size()) ? layout[static_cast<size_t> (strip)].inputChannels : 0; };
+
+                if (channelsOf (existing->second.strip) == channelsOf (a.strip))
+                {
+                    // Same width: just re-point the running capture.
+                    host.setCaptureStrip (existing->second.id, a.strip);
+                    existing->second.strip = a.strip;
+                }
+                else
+                {
+                    // The FIFO is sized (and down-mixed) for the old strip's
+                    // channel count: restart the capture for the new strip.
+                    host.stopProcessCapture (existing->second.id);
+                    captures.erase (existing);
+                    existing = captures.end();
+                }
             }
-            else if (captureFailures[a.processId] < kMaxCaptureAttempts)
+
+            if (existing == captures.end() && captureFailures[a.processId] < kMaxCaptureAttempts)
             {
                 juce::String error;
                 const int id = host.startProcessCapture (a.strip, a.processId, error);
                 if (id >= 0)
                 {
-                    captures[a.processId] = id;
+                    captures[a.processId] = { id, a.strip };
                 }
                 else
                 {
@@ -350,7 +375,7 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
         }
         else if (existing != captures.end())
         {
-            host.stopProcessCapture (existing->second);
+            host.stopProcessCapture (existing->second.id);
             captures.erase (existing);
         }
     }
@@ -360,7 +385,7 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
     {
         if (seen.count (it->first) == 0)
         {
-            host.stopProcessCapture (it->second);
+            host.stopProcessCapture (it->second.id);
             it = captures.erase (it);
         }
         else
@@ -374,14 +399,14 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
     for (auto& a : states)
     {
         const auto cap = captures.find (a.processId);
-        a.captureId = cap != captures.end() ? cap->second : -1;
+        a.captureId = cap != captures.end() ? cap->second.id : -1;
     }
 }
 
 void AppRouting::stopAllCaptures()
 {
-    for (const auto& [pid, id] : captures)
-        host.stopProcessCapture (id);
+    for (const auto& entry : captures)
+        host.stopProcessCapture (entry.second.id);
     captures.clear();
 }
 } // namespace flub::app

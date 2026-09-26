@@ -54,6 +54,17 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     if (scaleIndex >= 0)
         options.scale = std::clamp (args[scaleIndex + 1].getFloatValue(), 0.5f, 4.0f);
 
+    const int deviceIndex = args.indexOf ("--device");
+    if (deviceIndex >= 0)
+    {
+        if (deviceIndex + 1 >= args.size() || args[deviceIndex + 1].startsWith ("--"))
+        {
+            error = "--device needs an output device name, e.g. --device \"Headphones (Stealth 700 Gen 2 MAX)\"";
+            return false;
+        }
+        options.simulatedDevice = args[deviceIndex + 1].unquoted();
+    }
+
     return true;
 }
 
@@ -114,6 +125,8 @@ void ScreenshotDriver::setUpScene()
             store.set (macros[i], macroValues[i]);
 
     controller.setSelectedStrip (focus);
+    if (options.simulatedDevice.isNotEmpty())
+        controller.simulateOutputDevice (options.simulatedDevice, controller.getHost().getSampleRate(), 2);
 
     sampleRate = controller.getHost().getSampleRate();
     generator = std::make_unique<TestSignalGenerator> (sampleRate);

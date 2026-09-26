@@ -1,6 +1,7 @@
 // Flubsound Pro - headless visual verification.
 //
 //   FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds S] [--scale F]
+//                [--device "output device name"]
 //
 // No audio device is opened. The engine runs offline on synthetic programme
 // audio (TestSignalGenerator: drum/bass/pad music; in gaming mode a 7.1 game
@@ -10,7 +11,8 @@
 // with a real device. After `seconds` (default 3.5) the main component is
 // rendered with createComponentSnapshot() into a PNG (at --scale, default 1,
 // e.g. 2 for a HiDPI check) and the app quits (exit code 0 on success, 1 on
-// failure, 2 for bad arguments).
+// failure, 2 for bad arguments). --device pretends that output device is
+// open, so the headset profile, its advice banner and ceiling cap show up.
 //
 // Note for UI code: in this mode the component is on screen (under xvfb on CI),
 // isShowing() is true and every juce::Timer runs normally.
@@ -36,6 +38,7 @@ public:
         int width = 1280, height = 820;
         double seconds = 3.5; // > 3 s so the short-term (3 s) loudness window is full
         float scale = 1.0f;
+        juce::String simulatedDevice; // --device: headset profile / advice banner preview
     };
 
     /** Parses the screenshot arguments; returns false if --screenshot is absent

@@ -14,8 +14,9 @@
 //                 and refreshes the controls only when something changed.
 //                 Refreshes never write back, so there is no feedback loop,
 //                 and a control that is being dragged is not refreshed.
-//               * Optional EffectiveProvider (ProcessingChain::effectiveValues)
-//                 feeds the knob's post-macro "effective value" ring.
+//               * Optional EffectiveProvider (the strip's ProcessingChain,
+//                 read through effectiveValue(), which is thread-safe) feeds
+//                 the knob's post-macro "effective value" ring.
 //               No audio-thread callbacks are involved anywhere.
 //
 // Lifetime: the binder must be destroyed before the controls it is bound to
@@ -23,6 +24,11 @@
 #pragma once
 
 #include "flub/engine/Parameters.h"
+
+namespace flub
+{
+class ProcessingChain;
+}
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -57,7 +63,7 @@ class ParameterBinder final : private juce::Timer
 {
 public:
     using StoreProvider = std::function<flub::param::ParameterStore*()>;
-    using EffectiveProvider = std::function<const float*()>;
+    using EffectiveProvider = std::function<const flub::ProcessingChain*()>;
 
     explicit ParameterBinder (StoreProvider storeProvider, EffectiveProvider effectiveProvider = {});
     ~ParameterBinder() override;

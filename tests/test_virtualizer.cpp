@@ -399,6 +399,39 @@ TEST_CASE ("HeadphoneVirtualizer: HRIR renderer produces exactly the expected de
         }
 }
 
+TEST_CASE ("HeadphoneVirtualizer: HRIRs longer than 1024 taps are truncated with a half-cosine fade-out")
+{
+    // Direct form is O(taps): sets are capped at 1024 taps, the last 64 kept
+    // taps faded to zero (no abrupt truncation), everything later dropped.
+    constexpr int kLength = 2048;
+    auto set = std::make_shared<HrirSet>();
+    set->sampleRate = kFs;
+    set->layout = ChannelLayout::Surround71;
+    set->length = kLength;
+    for (int c = 0; c < 8; ++c)
+    {
+        std::vector<float> l (static_cast<size_t> (kLength), 0.0f), r (static_cast<size_t> (kLength), 0.0f);
+        if (c == 0)
+            l[10] = l[1000] = l[1500] = 0.5f;
+        set->left.push_back (std::move (l));
+        set->right.push_back (std::move (r));
+    }
+    HeadphoneVirtualizer v;
+    v.setHrirSet (set);
+    setUp (v, paramsFor (ChannelLayout::Surround71, 0.0f));
+    const int n = 4096;
+    Planar buf (8, n);
+    buf.ch[0][0] = 1.0f; // unit impulse on FL
+    processInBlocks (v, buf, 512);
+    const float* y = buf.ch[0].data();
+    CHECK_NEAR (y[10], 0.5 * kTrim, 1e-6);                                                     // before the fade: exact
+    CHECK_NEAR (y[1000], 0.5 * kTrim * (0.5 + 0.5 * std::cos (kPi * 41.0 / 64.0)), 1e-6);      // inside the fade
+    double tail = 0.0;
+    for (int i = 1024; i < n; ++i)
+        tail = std::max (tail, static_cast<double> (std::abs (y[i])));
+    CHECK (tail == 0.0); // the tap at 1500 is beyond the cap
+}
+
 TEST_CASE ("HeadphoneVirtualizer: HRIR renderer matches a reference convolution for dense responses")
 {
     const int length = 37; // not a multiple of the 4-way unrolled dot product

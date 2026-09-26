@@ -2,18 +2,20 @@
 //
 // K-weighting: two biquads (high-shelf "pre-filter" + RLB high-pass), with
 // coefficients derived from the analog prototype so any sample rate is
-// exact (matches the BS.1770 48 kHz table to ~1e-8):
+// exact (matches the BS.1770 48 kHz table to ~1e-14):
 //   stage 1: f0 = 1681.974450955533 Hz, G = 3.999843853973347 dB,
 //            Q = 0.7071752369554196
 //   stage 2: f0 = 38.13547087602444 Hz, Q = 0.5003270373238773
 // Loudness = -0.691 + 10 log10( sum_i G_i * meanSquare_i )
-//   G = 1.0 (L, R, C), 1.41 (surrounds), LFE excluded (index 3 for 5.1/7.1).
+//   G per ChannelWeights.h: 1.0 (L, R, C, 7.1 back pair), 1.41 (side
+//   surrounds), LFE excluded (index 3 for 5.1/7.1).
 // Windows are built from 100 ms sub-blocks of channel-weighted energy:
 //   momentary  = 400 ms (4 sub-blocks), short-term = 3 s (30 sub-blocks)
 //   integrated = gated (EBU R128): 400 ms blocks, 75 % overlap; absolute gate
 //                -70 LUFS; relative gate -10 LU below the absolute-gated
-//                mean. Implemented with a 0.1 LU histogram (bin energy sums +
-//                counts) -> O(1) memory for arbitrarily long programmes.
+//                mean. Implemented with a two-level histogram (0.1 LU coarse,
+//                0.01 LU fine bins, each with its energy sum + count) -> O(1)
+//                memory for arbitrarily long programmes.
 //   LRA (EBU Tech 3342): short-term values with absolute gate -70 and relative
 //                gate -20 LU; LRA = P95 - P10, same histogram technique.
 // process() only reads the block (const input), never modifies it.

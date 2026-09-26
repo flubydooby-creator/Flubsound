@@ -18,7 +18,7 @@
 //              The reference stays valid until the strip LAYOUT changes.
 // Metering     getChain(strip).meters() (flub::MeterBus atomics) and
 //              getChain(strip).taps() (AnalyzerTaps SPSC rings; the UI's
-//              analyser must be their ONLY consumer) plus effectiveValues()
+//              analyser must be their ONLY consumer) plus effectiveValue(id)
 //              for post-macro "ghost" markers. RE-FETCH getChain() on every
 //              timer tick - never cache the reference: a reconfiguration
 //              (device rate change, latency profile, layout) re-creates the
@@ -169,6 +169,10 @@ public:
     juce::String getDeviceProfileName() const;
     flub::device::Connection getDeviceConnection() const noexcept { return deviceMatch.connection; }
     juce::String getOutputDeviceName() const { return currentOutputName; }
+    /** Headless runs only (Options::openAudioDevice == false, e.g. --screenshot):
+        treats `name` as the open output device, so the device profile, advice
+        and ceiling cap can be shown and checked without hardware. */
+    void simulateOutputDevice (const juce::String& name, double sampleRate, int outputChannels);
     /** The profile database (shipped, or the user override file
         <app data>/Flubsound/device-profiles.json when present). */
     const flub::device::Database& getDeviceProfiles() const noexcept { return deviceProfiles; }
@@ -206,6 +210,7 @@ private:
     void persistDeviceState();
     void loadDeviceProfiles();
     void updateDeviceProfile();
+    void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
 
     Options options;
@@ -224,6 +229,9 @@ private:
     flub::device::Match deviceMatch;
     flub::device::Advice deviceAdvice;
     juce::String currentOutputName, preferredOutputName;
+    juce::String simulatedOutputName; // headless only, see simulateOutputDevice()
+    double simulatedSampleRate = 48000.0;
+    int simulatedOutputChannels = 2;
     bool preferredMissing = false, restoringPreferred = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)

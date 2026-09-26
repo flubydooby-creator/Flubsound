@@ -38,9 +38,9 @@ public:
     StripRow (RoutingPanel& p, int stripIndex)
         : panel (p), strip (stripIndex)
     {
-        auto& controller = panel.controller;
-        name = controller.getStripName (strip);
-        channels = controller.getStripChannels (strip);
+        auto& ctrl = panel.controller;
+        name = ctrl.getStripName (strip);
+        channels = ctrl.getStripChannels (strip);
         setTitle (name + " strip");
         setDescription ("Click to edit the " + name + " strip");
 
@@ -50,7 +50,7 @@ public:
         range.setSkewForCentre (-12.0);
         gain.setNormalisableRange (range);
         gain.setDoubleClickReturnValue (true, 0.0);
-        gain.setValue (controller.getStripGainDb (strip), juce::dontSendNotification);
+        gain.setValue (ctrl.getStripGainDb (strip), juce::dontSendNotification);
         gain.textFromValueFunction = [] (double v) { return Theme::formatSignedDb (static_cast<float> (v), 1) + " dB"; };
         Style::describe (gain, name + " level", name + " strip level (double-click: 0 dB)");
         gain.onValueChange = [this] { panel.controller.setStripGainDb (strip, static_cast<float> (gain.getValue())); repaint (gainTextArea); };
@@ -88,23 +88,25 @@ public:
 
     void refreshState()
     {
-        auto& controller = panel.controller;
-        const bool muted = controller.isStripMuted (strip);
+        auto& ctrl = panel.controller;
+        const bool muted = ctrl.isStripMuted (strip);
         mute.setIcon (muted ? Icons::speakerMuted() : Icons::speaker());
         mute.setIconColour (muted ? std::optional<juce::Colour> (Palette::red) : std::nullopt);
         Style::describe (mute, muted ? "Unmute " + name : "Mute " + name, muted ? "Unmute this strip" : "Mute this strip");
         if (! gain.isMouseButtonDown())
-            gain.setValue (controller.getStripGainDb (strip), juce::dontSendNotification);
+            gain.setValue (ctrl.getStripGainDb (strip), juce::dontSendNotification);
         gain.setAlpha (muted ? 0.5f : 1.0f);
     }
 
     void updateMeters (float dt)
     {
-        auto& controller = panel.controller;
-        const bool isActive = controller.isStripActive (strip);
-        const auto& bus = controller.getChain (strip).meters();
-        bool changed = isActive != active;
+        auto& ctrl = panel.controller;
+        const bool isActive = ctrl.isStripActive (strip);
+        const auto& bus = ctrl.getChain (strip).meters();
+        if (isActive != active)
+            repaint (ledArea.expanded (4));
         active = isActive;
+        bool changed = false;
         for (size_t c = 0; c < 2; ++c)
         {
             const float target = active ? bus.outPeakDb[c].load (std::memory_order_relaxed) : -100.0f;
@@ -113,7 +115,7 @@ public:
             levels[c] = next;
         }
         if (changed)
-            repaint (meterArea.expanded (2).getUnion (ledArea));
+            repaint (meterArea.expanded (2));
     }
 
     int getPreferredHeight (int width) const

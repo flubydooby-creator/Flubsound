@@ -7,6 +7,8 @@ namespace flub::app::ui
 AnalyzerPanel::AnalyzerPanel (EqCurveEditor::StoreProvider storeProvider)
     : eqEditor (analyzer, std::move (storeProvider))
 {
+    setTitle ("Spectrum and EQ");
+    setDescription ("Spectrum analyser with the editable parametric EQ curve of the selected strip");
     addAndMakeVisible (analyzer);
     addAndMakeVisible (eqEditor);
 

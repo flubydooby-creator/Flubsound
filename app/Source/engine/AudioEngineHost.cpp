@@ -460,9 +460,13 @@ void AudioEngineHost::waitForAudioThreadToPass()
 
     // callbackCounter increments at the END of every callback, so once it has
     // changed, any callback that could have seen the old state has returned.
-    const auto start = callbackCounter.load (std::memory_order_acquire);
+    // This is a store(live) -> load(counter) / load(live) -> rmw(counter)
+    // handshake (Dekker style): all four operations are seq_cst, otherwise the
+    // StoreLoad reordering allowed by acquire/release could let this thread
+    // read a counter value older than the callback that still sees live == true.
+    const auto start = callbackCounter.load (std::memory_order_seq_cst);
     const auto deadline = juce::Time::getMillisecondCounter() + 250;
-    while (callbackRunning.load (std::memory_order_acquire) && callbackCounter.load (std::memory_order_acquire) == start
+    while (callbackRunning.load (std::memory_order_acquire) && callbackCounter.load (std::memory_order_seq_cst) == start
            && juce::Time::getMillisecondCounter() < deadline)
         juce::Thread::sleep (1);
 }
@@ -552,7 +556,8 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
 
                 for (auto& slot : captureSlots)
                 {
-                    if (! slot.live.load (std::memory_order_acquire) || slot.strip.load (std::memory_order_relaxed) != s)
+                    // seq_cst: pairs with releaseSlot() / waitForAudioThreadToPass().
+                    if (! slot.live.load (std::memory_order_seq_cst) || slot.strip.load (std::memory_order_relaxed) != s)
                         continue;
                     slot.fifo.pull (block.ch.data(), channels, n, fed);
                     fed = true;
@@ -619,9 +624,11 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     flub::ScopedNoDenormals noDenormals;
 
     // Promote the device thread once (MMCSS "Pro Audio", time constraint,
-    // SCHED_FIFO). Backends may use a new thread after a restart, so this is
-    // tracked per thread. The handle is intentionally never reverted: revert
-    // must run on this thread, and the backend's thread dies with the device.
+    // SCHED_FIFO; threads that are already real-time are left alone). Backends
+    // may use a new thread after a restart, so this is tracked per thread. The
+    // handle is intentionally never reverted: revert must run on this thread,
+    // and the backend's thread dies with the device. (On Linux the handle is a
+    // few bytes of saved policy allocated once per new device thread.)
     if (const auto thisThread = juce::Thread::getCurrentThreadId(); thisThread != promotedThread)
     {
         promotionHandle = platform_bridge::promoteAudioThread();
@@ -639,7 +646,7 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
                 std::memset (outputChannelData[c], 0, sizeof (float) * static_cast<size_t> (numSamples));
     }
 
-    callbackCounter.fetch_add (1, std::memory_order_acq_rel);
+    callbackCounter.fetch_add (1, std::memory_order_seq_cst);
 }
 
 void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)

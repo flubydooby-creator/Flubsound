@@ -16,6 +16,8 @@
 // programme length.
 #include "flub/analysis/LoudnessMeter.h"
 
+#include "flub/analysis/ChannelWeights.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -146,19 +148,11 @@ void LoudnessMeter::prepare (double newSampleRate, int numChannels)
     // whole multiples of it.
     subBlockLength = std::max (1, static_cast<int> (std::lround (0.1 * fs)));
 
-    // BS.1770 channel weights. Only a >= 6 channel stream is read as 5.1/7.1
-    // (L R C LFE Ls Rs [Lb Rb]): the LFE is excluded and the surrounds get
-    // +1.5 dB (1.41) because sound from the side/rear is perceived louder.
-    const bool surroundLayout = channels >= 6;
+    // BS.1770-4 channel weights (see ChannelWeights.h): only a >= 6 channel
+    // stream is read as 5.1 / 7.1; the LFE is excluded and the side
+    // surrounds get +1.5 dB (1.41), the 7.1 back pair 1.0.
     for (int c = 0; c < kMaxChannels; ++c)
-    {
-        double w = c < channels ? 1.0 : 0.0;
-        if (surroundLayout && c == 3)
-            w = 0.0;
-        else if (surroundLayout && c >= 4 && c < channels)
-            w = 1.41;
-        channelWeight[static_cast<size_t> (c)] = w;
-    }
+        channelWeight[static_cast<size_t> (c)] = bs1770ChannelWeight (c, channels);
 
     integratedHistogram.prepare();
     rangeHistogram.prepare();

@@ -102,8 +102,13 @@ constexpr float kFadeMs = 5.0f;               // layout swap: fade out, swap, fa
 constexpr float kPrerollMs = 2.0f;            // silent pre-roll after a swap (parametric)
 constexpr float kMaxHrirPrerollMs = 10.0f;    // ... and the cap for an HRIR pre-roll
 
-// Longest HRIR accepted by the direct-form convolver; longer sets are truncated.
-constexpr int kMaxHrirTaps = 8192;
+// Longest HRIR kept by the direct-form convolver (21 ms at 48 kHz: every
+// anechoic HRIR set fits). Direct form costs O(taps) per sample and ear: 1024
+// taps for 7.1 at 48 kHz is already ~16 % of a core, so longer sets (BRIRs
+// with a room tail) are truncated with a short half-cosine fade-out rather
+// than risking dropouts. A partitioned FFT convolver is on the roadmap.
+constexpr int kMaxHrirTaps = 1024;
+constexpr int kHrirTruncationFade = 64;
 
 // Filter state below -300 dB re full scale is flushed to zero at the end of a
 // segment so decaying IIR tails never crawl through subnormals when the host
@@ -339,7 +344,12 @@ bool HeadphoneVirtualizer::loadHrir()
             // the (oldest-first) history window.
             path.reversed[ear].assign (static_cast<size_t> (length), 0.0f);
             for (int k = 0; k < length; ++k)
-                path.reversed[ear][static_cast<size_t> (length - 1 - k)] = (*irs[ear])[static_cast<size_t> (k)];
+            {
+                float w = 1.0f;
+                if (set.length > length && k >= length - kHrirTruncationFade)
+                    w = 0.5f + 0.5f * std::cos (static_cast<float> (kPi) * static_cast<float> (k - (length - kHrirTruncationFade) + 1) / static_cast<float> (kHrirTruncationFade));
+                path.reversed[ear][static_cast<size_t> (length - 1 - k)] = w * (*irs[ear])[static_cast<size_t> (k)];
+            }
         }
         path.history.assign (2 * static_cast<size_t> (length), 0.0f);
         path.present = true;

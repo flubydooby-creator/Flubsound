@@ -55,6 +55,7 @@ private:
     std::array<Channel, 2> in, out;
     bool inClip = false, outClip = false, active = false;
     float truePeakMax = -160.0f, truePeakNow = -160.0f;
+    float readoutAge = 0.0f; // numeric readouts refresh at ~12 Hz, bars at display rate
     juce::Rectangle<float> barsArea, inArea, outArea, truePeakArea, inClipArea, outClipArea;
     juce::String lastTip;
 };

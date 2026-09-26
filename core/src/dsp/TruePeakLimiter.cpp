@@ -15,6 +15,18 @@ namespace
 // programme material) and float rounding in the gain envelope.
 constexpr float kMarginLin = 0.99426007f; // 10^(-0.05 / 20)
 
+// True-peak mode holds the reduced gain for this many extra samples on each
+// side of a peak (Kh below), so the gain is flat under the central part of
+// the interpolator that reads the peak. Without it the attack ramp is still
+// falling across the kernel's +-20 taps when the peak arrives, and on dense
+// clipped programme the output's true peak (read by the same interpolator)
+// came out up to ~0.05 dB above the ceiling. 8 taps each side carry
+// practically all of the kernel's weight: with Kh = 8 the worst case measured
+// on hard-clipped noise + tones at 44.1 / 48 / 96 kHz and 0.5 .. 2 ms
+// look-ahead is 0.04 dB below the ceiling. Kh never exceeds L / 3, so the
+// attack ramp (L - Kh + 1 samples) keeps at least two thirds of the look-ahead.
+constexpr int kTruePeakHold = 8;
+
 // Look-ahead is structural; 10 ms is far beyond any profile (0.5 .. 2 ms) and
 // bounds the ring sizes (1921 samples at 192 kHz).
 constexpr float kMaxLookaheadMs = 10.0f;
@@ -55,26 +67,10 @@ float sanitise (float v, float lo, float hi, float fallback) noexcept
 //==============================================================================
 void TruePeakLimiter::RefinedPeakDetector::prepare (int numChannels)
 {
-    // Identical design to TruePeakDetector::prepare(): 97-tap Kaiser (beta 8)
-    // windowed-sinc prototype, 24 taps per phase, each phase normalised to
-    // unity DC gain. Phase 0 is the delayed input sample itself.
-    constexpr int length = kPhases * kTaps + 1;
-    constexpr int centre = (length - 1) / 2;
-    constexpr double beta = 8.0;
-    for (int p = 1; p < kPhases; ++p)
-    {
-        auto& taps = phaseTaps[static_cast<size_t> (p)];
-        double sum = 0.0;
-        std::array<double, kTaps> t {};
-        for (int j = 0; j < kTaps; ++j)
-        {
-            const int k = kPhases * j + p;
-            t[static_cast<size_t> (j)] = fir::sinc (static_cast<double> (k - centre) / kPhases) * fir::kaiser (k, length, beta);
-            sum += t[static_cast<size_t> (j)];
-        }
-        for (int j = 0; j < kTaps; ++j)
-            taps[static_cast<size_t> (j)] = static_cast<float> (t[static_cast<size_t> (j)] / sum);
-    }
+    // The very same interpolator as TruePeakDetector (and so as the meters):
+    // shared design function, same taps, same kDelay. Phase 0 is the delayed
+    // input sample itself.
+    TruePeakDetector::designPhaseTaps (phaseTaps);
     for (int c = 0; c < kMaxChannels; ++c)
         history[static_cast<size_t> (c)].assign (c < numChannels ? static_cast<size_t> (2 * kTaps) : 0u, 0.0f);
     reset();
@@ -169,21 +165,23 @@ void TruePeakLimiter::prepare (const ProcessSpec& newSpec)
     lookahead = msToSamples (la, spec.sampleRate);
     detectorDelay = detectTruePeak ? TruePeakDetector::kDelay : 0;
 
+    hold = detectTruePeak ? std::min (kTruePeakHold, lookahead / 3) : 0;
+
     detector.prepare (spec.numChannels);
     audioDelay.prepare (spec.numChannels, lookahead + detectorDelay);
 
-    // The deque holds at most L + 2 live entries plus the one that expires on
-    // the current sample.
-    window = static_cast<uint32_t> (lookahead + 2);
-    const int capacity = nextPowerOfTwo (lookahead + 3);
+    // The deque holds at most L + Kh + 2 live entries plus the one that
+    // expires on the current sample.
+    window = static_cast<uint32_t> (lookahead + hold + 2);
+    const int capacity = nextPowerOfTwo (lookahead + hold + 3);
     dequeValue.assign (static_cast<size_t> (capacity), 1.0f);
     dequeIndex.assign (static_cast<size_t> (capacity), 0u);
     dequeMask = static_cast<uint32_t> (capacity - 1);
 
-    ringSize = lookahead + 1;
+    ringSize = lookahead - hold + 1;
     boxRing.assign (static_cast<size_t> (ringSize), 1.0f);
-    ceilingRing.assign (static_cast<size_t> (ringSize), 1.0f);
     boxLength = static_cast<double> (ringSize);
+    ceilingRing.assign (static_cast<size_t> (lookahead + 1), 1.0f);
 
     gapSamples = std::max (1, msToSamples (kRunGapMs, spec.sampleRate));
     blendStart = std::max (1, msToSamples (kBlendStartMs, spec.sampleRate));
@@ -206,6 +204,7 @@ void TruePeakLimiter::reset() noexcept
     std::fill (boxRing.begin(), boxRing.end(), 1.0f);
     boxSum = static_cast<double> (ringSize);
     ringPos = 0;
+    ceilingPos = 0;
 
     // No previous output to click against: the ceiling starts at its target.
     ceilingDbS.reset (spec.sampleRate, kCeilingSmoothMs, params.ceilingDb);
@@ -304,7 +303,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         // Written as a comparison so +Inf gives 0 and NaN gives 1.
         const float r = peak > thresholdLin ? thresholdLin / peak : 1.0f;
 
-        // ---- 3) sliding minimum over r[n-L-1 .. n] (monotonic deque) --------------
+        // ---- 3) sliding minimum over r[n-L-Kh-1 .. n] (monotonic deque) -----------
         // Entries increase from front to back; anything at the back that is
         // not smaller than r can never be the minimum again. Each entry is
         // pushed and popped once, so this is O(1) amortised and at most
@@ -321,15 +320,19 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         const float m = dqValue[dequeFront & dequeMask];
         ++sampleIndex;
 
-        // ---- 4) box filter: mean of m over the last L + 1 samples -----------------
-        // Every m[k], k in [n-L, n], includes r[n-L] and r[n-L-1] in its window,
-        // so the mean is <= both: the gain is down to the required value by
-        // the time the peak (and the inter-sample interval before it) leaves
-        // the look-ahead delay, via a linear ramp of L + 1 samples.
+        // ---- 4) box filter: mean of m over the last L - Kh + 1 samples ------------
+        // Every m[k], k in [n-L+Kh, n], has r[j] in its window for every j in
+        // [n-L-1-Kh, n-L+Kh], so the mean is <= all of them: the gain is down
+        // to the required value Kh samples before the peak (and the
+        // inter-sample interval before it) leaves the look-ahead delay, via a
+        // linear ramp of L - Kh + 1 samples, and stays there until Kh samples
+        // after it.
         const float oldM = box[ringPos];
         box[ringPos] = m;
         boxSum += static_cast<double> (m) - static_cast<double> (oldM);
-        ceilHist[ringPos] = ceilingLin;
+        ceilHist[ceilingPos] = ceilingLin;
+        if (++ceilingPos > lookahead)
+            ceilingPos = 0;
         if (++ringPos == ringSize)
         {
             ringPos = 0;
@@ -340,9 +343,9 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
                 s += static_cast<double> (box[k]);
             boxSum = s;
         }
-        // The oldest ceiling in the ring is the one r[n-L] was computed with:
-        // the clamp level this output sample was limited to.
-        const float clampLin = ceilHist[ringPos];
+        // The oldest ceiling in its ring (L + 1 long) is the one r[n-L] was
+        // computed with: the clamp level this output sample was limited to.
+        const float clampLin = ceilHist[ceilingPos];
         // (A division, so that a window full of 1.0 gives exactly 1.0.)
         const double env = std::clamp (boxSum / boxLength, 0.0, 1.0);
 

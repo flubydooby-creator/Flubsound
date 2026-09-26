@@ -101,6 +101,7 @@ jobs:
           APP=$(find build -type f -name "Flubsound Pro" -perm -u+x | head -n 1)
           xvfb-run -a "$APP" --screenshot screenshot-music.png --mode music --size 1440x900
           xvfb-run -a "$APP" --screenshot screenshot-gaming.png --mode gaming --size 1440x900
+          xvfb-run -a "$APP" --screenshot screenshot-headset.png --mode gaming --size 1440x900 --device "Headphones (Stealth 700 Gen 2 MAX)"
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:

@@ -4,6 +4,8 @@
 //
 //   +--------------------------------------------------------------------+
 //   | HeaderBar: logo, mode, strip, presets, A/B, bypass, latency, gear  |
+//   +--------------------------------------------------------------------+
+//   | DeviceAdviceBanner (only for a recognised headset / Bluetooth)     |
 //   +-----------+----------------------------------------+---------------+
 //   | Routing   | BoostPanel (Boost Intensity + macros)  | LevelMeters   |
 //   | Panel     +----------------------------------------+               |
@@ -30,6 +32,7 @@
 #include "AnalyzerFeed.h"
 #include "AnalyzerPanel.h"
 #include "BoostPanel.h"
+#include "DeviceAdviceBanner.h"
 #include "FlubLookAndFeel.h"
 #include "HeaderBar.h"
 #include "LevelMeters.h"
@@ -67,6 +70,7 @@ private:
     void resetAnalysis();
     void requestLoudnessReset();
     void openSettings();
+    void refreshDeviceBanner();
     juce::String currentStripSignature() const;
     void loadUiPreferences();
     void saveUiPreferences();
@@ -76,6 +80,7 @@ private:
     std::unique_ptr<FlubLookAndFeel> ownLookAndFeel; // only when the app default is not a FlubLookAndFeel
 
     HeaderBar header;
+    DeviceAdviceBanner deviceBanner;
     RoutingPanel routing;
     BoostPanel boost;
     AnalyzerPanel analyzer;

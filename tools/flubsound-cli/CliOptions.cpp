@@ -801,9 +801,6 @@ bool buildParameters (const RenderOptions& o, ResolvedParameters& out, std::stri
         out.notes.push_back ("max.autoDrive disabled (--target-lufs sets the maximizer drive offline)");
     }
 
-    if ((o.ceilingDb || o.targetLufs) && v[static_cast<size_t> (OutputGainDb)] > 0.0f)
-        out.notes.push_back ("warning: output.gain > 0 dB is applied after the maximizer; the true-peak ceiling is not guaranteed");
-
     if (v[static_cast<size_t> (BypassAll)] >= 0.5f)
         out.notes.push_back ("bypass=on: the output is the latency-aligned dry signal (loudness-matched unless bypass.matched=off)");
     return true;

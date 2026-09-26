@@ -3,6 +3,8 @@
 #include "FlubLookAndFeel.h"
 #include "Theme.h"
 
+#include "flub/engine/ProcessingChain.h"
+
 #include <cmath>
 
 namespace flub::app::ui
@@ -369,9 +371,9 @@ void ParameterBinder::updateEffective()
 {
     if (effectiveProvider == nullptr)
         return;
-    const float* effective = effectiveProvider();
+    const auto* chain = effectiveProvider();
     auto* store = getStore();
-    if (effective == nullptr || store == nullptr)
+    if (chain == nullptr || store == nullptr)
         return;
 
     for (auto& b : bindings)
@@ -383,7 +385,7 @@ void ParameterBinder::updateEffective()
             continue;
 
         const auto& i = ParamFormat::info (b->paramId);
-        const float eff = i.clamp (effective[b->paramId]);
+        const float eff = i.clamp (chain->effectiveValue (b->paramId));
         const float base = store->get (b->paramId);
         const float tolerance = 1.0e-4f * (i.maxValue - i.minValue);
 

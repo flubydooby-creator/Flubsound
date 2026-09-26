@@ -56,6 +56,7 @@ public:
     /** Total output latency (max strip latency + master limiter). */
     int getLatencySamples() const noexcept;
     float getMasterGainReductionDb() const noexcept { return master.getGainReductionDb(); }
+    uint64_t getMasterSafetyClipCount() const noexcept { return master.getSafetyClipCount(); }
 
     /** Any chain that needs a structural re-prepare (host polls this). */
     bool needsReprepare() const noexcept;

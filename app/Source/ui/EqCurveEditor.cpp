@@ -3,6 +3,8 @@
 #include "ParameterBinding.h"
 #include "Theme.h"
 
+#include "flub/engine/ProcessingChain.h"
+
 #include <cmath>
 
 namespace flub::app::ui
@@ -13,12 +15,6 @@ namespace
 {
 constexpr float kNodeRadius = 7.5f;
 constexpr float kHitRadius = 12.0f;
-
-// Frequencies of the dynamic EQ's internal mode bands 4..7 (mirrors
-// configureModeBands() in core/src/engine/ProcessingChain.cpp, which the
-// core does not expose).
-constexpr std::array<float, 4> kGamingModeBandHz { 3200.0f, 260.0f, 90.0f, 2000.0f };
-constexpr std::array<float, 4> kMusicModeBandHz { 3500.0f, 12000.0f, 120.0f, 1000.0f };
 
 const char* typeName (EqBandType t)
 {
@@ -70,7 +66,7 @@ void EqCurveEditor::setSampleRate (double newSampleRate)
     {
         sampleRate = newSampleRate;
         rebuildCurve();
-        repaint();
+        invalidate();
     }
 }
 
@@ -78,7 +74,7 @@ void EqCurveEditor::setRangeDb (float newRange)
 {
     rangeDb = juce::jlimit (3.0f, 24.0f, newRange);
     rebuildCurve();
-    repaint();
+    invalidate();
 }
 
 void EqCurveEditor::selectBand (int band)
@@ -88,7 +84,7 @@ void EqCurveEditor::selectBand (int band)
         return;
     selected = band;
     rebuildCurve();
-    repaint();
+    invalidate();
     if (onBandSelected != nullptr)
         onBandSelected (selected);
 }
@@ -124,17 +120,18 @@ void EqCurveEditor::refresh (bool force)
         dynFreqs[static_cast<size_t> (b)] = store->get (dyn (b, DynFieldFreq));
 
     rebuildCurve();
-    repaint();
+    invalidate();
 }
 
 void EqCurveEditor::setDynamicEqState (const std::array<float, kNumDynMarkers>& gainsDb, ModeValue mode)
 {
-    const auto& modeHz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
+    // Frequencies of the dynamic EQ's internal mode bands, straight from core.
     bool changed = false;
-    for (size_t b = 0; b < 4; ++b)
+    for (int b = flub::ProcessingChain::kFirstModeBand; b < flub::ProcessingChain::kFirstModeBand + flub::ProcessingChain::kNumModeBands; ++b)
     {
-        changed = changed || dynFreqs[b + 4] != modeHz[b];
-        dynFreqs[b + 4] = modeHz[b];
+        const float hz = flub::ProcessingChain::modeBandFrequency (mode, b);
+        changed = changed || dynFreqs[static_cast<size_t> (b)] != hz;
+        dynFreqs[static_cast<size_t> (b)] = hz;
     }
     for (size_t b = 0; b < gainsDb.size(); ++b)
     {
@@ -210,6 +207,7 @@ int EqCurveEditor::nodeAt (juce::Point<float> pos) const
 void EqCurveEditor::resized()
 {
     rebuildCurve();
+    invalidate();
 }
 
 void EqCurveEditor::rebuildCurve()
@@ -307,6 +305,62 @@ void EqCurveEditor::paint (juce::Graphics& g)
     if (plot.isEmpty())
         return;
 
+    // Curve, nodes, labels and bubble only change on edits / hover: they are
+    // cached in an image at the physical pixel scale. The live dynamic-EQ
+    // markers are drawn on top every frame.
+    const float scale = g.getInternalContext().getPhysicalPixelScaleFactor();
+    if (layerDirty || layer.isNull() || std::abs (scale - layerScale) > 0.01f)
+    {
+        layer = juce::Image (juce::Image::ARGB, juce::jmax (1, juce::roundToInt (static_cast<float> (getWidth()) * scale)),
+                             juce::jmax (1, juce::roundToInt (static_cast<float> (getHeight()) * scale)), true);
+        juce::Graphics lg (layer);
+        lg.addTransform (juce::AffineTransform::scale (scale));
+        renderLayer (lg);
+        layerScale = scale;
+        layerDirty = false;
+    }
+    g.drawImageTransformed (layer, juce::AffineTransform::scale (1.0f / layerScale));
+
+    const float zeroY = yForGain (0.0f);
+    g.saveState();
+    g.reduceClipRegion (plot.getSmallestIntegerContainer());
+    // ---- Dynamic EQ ghost markers ----
+    for (size_t b = 0; b < dynGains.size(); ++b)
+    {
+        const float gain = dynGains[b];
+        if (std::abs (gain) < 0.1f)
+            continue;
+        const float x = geometry.xForFrequency (dynFreqs[b]);
+        const float y = yForGain (gain);
+        const float strength = juce::jlimit (0.35f, 1.0f, std::abs (gain) / 4.0f);
+        g.setColour (Palette::dynamicEq.withAlpha (0.55f * strength));
+        g.drawLine (x, zeroY, x, y, 2.0f);
+        juce::Path diamond;
+        diamond.addPolygon ({ x, y }, 4, 5.0f, juce::MathConstants<float>::pi * 0.25f);
+        g.setColour (Palette::dynamicEq.withAlpha (0.9f * strength));
+        g.fillPath (diamond);
+    }
+
+    g.restoreState();
+}
+
+void EqCurveEditor::invalidate()
+{
+    layerDirty = true;
+    repaint();
+}
+
+void EqCurveEditor::lookAndFeelChanged()
+{
+    invalidate();
+}
+
+void EqCurveEditor::renderLayer (juce::Graphics& g)
+{
+    const auto plot = geometry.getPlotArea();
+    if (plot.isEmpty())
+        return;
+
     const auto accent = Theme::accent (*this);
     const float zeroY = yForGain (0.0f);
     const float alpha = eqEnabled ? 1.0f : 0.4f;
@@ -342,23 +396,6 @@ void EqCurveEditor::paint (juce::Graphics& g)
     g.strokePath (curve, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour (Palette::text.withAlpha (0.88f * alpha));
     g.strokePath (curve, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-    // ---- Dynamic EQ ghost markers ----
-    for (size_t b = 0; b < dynGains.size(); ++b)
-    {
-        const float gain = dynGains[b];
-        if (std::abs (gain) < 0.1f)
-            continue;
-        const float x = geometry.xForFrequency (dynFreqs[b]);
-        const float y = yForGain (gain);
-        const float strength = juce::jlimit (0.35f, 1.0f, std::abs (gain) / 4.0f);
-        g.setColour (Palette::dynamicEq.withAlpha (0.55f * strength));
-        g.drawLine (x, zeroY, x, y, 2.0f);
-        juce::Path diamond;
-        diamond.addPolygon ({ x, y }, 4, 5.0f, juce::MathConstants<float>::pi * 0.25f);
-        g.setColour (Palette::dynamicEq.withAlpha (0.9f * strength));
-        g.fillPath (diamond);
-    }
 
     // ---- Nodes ----
     for (int b = 0; b < kBands; ++b)
@@ -417,7 +454,7 @@ void EqCurveEditor::mouseMove (const juce::MouseEvent& e)
     {
         hovered = b;
         setMouseCursor (b >= 0 ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
-        repaint();
+        invalidate();
     }
 }
 
@@ -426,7 +463,7 @@ void EqCurveEditor::mouseExit (const juce::MouseEvent&)
     if (hovered >= 0)
     {
         hovered = -1;
-        repaint();
+        invalidate();
     }
 }
 
@@ -477,7 +514,7 @@ void EqCurveEditor::mouseDrag (const juce::MouseEvent& e)
 void EqCurveEditor::mouseUp (const juce::MouseEvent&)
 {
     dragging = -1;
-    repaint();
+    invalidate();
 }
 
 void EqCurveEditor::mouseDoubleClick (const juce::MouseEvent& e)

@@ -2,30 +2,34 @@
 //
 // Guarantee: the output never exceeds the ceiling in sample peak, and stays
 // within ~0.1 dB of it in true (inter-sample) peak, with no gain overshoot.
-// (True-peak scope: content inside the 4x detector's band, flat to ~0.4 fs,
-// i.e. 17.6 kHz at 44.1 kHz. Above that the short 4x interpolator rolls off
-// (-0.9 dB at 0.44 fs, -1.7 dB at 0.45 fs), so strong content between 0.4 fs
-// and fs/2 is under-read: measured up to ~+0.25 dB for full-level noise
-// band-limited to 0.45 fs (a CD-style 20 kHz passband) and ~+1.7 dB for raw
-// digital white noise. Mastered programme carries far less energy up there.
-// The sample-peak guarantee holds exactly for any input.)
+// (True-peak scope: the detector is the meters' own 4x interpolator - 40
+// taps/phase, Kaiser beta 5 - flat within 0.02 dB to 0.4535 fs, i.e. 20 kHz
+// at 44.1 kHz. Measured: full-level noise band-limited to 0.45 fs (a CD-style
+// 20 kHz passband) peaks within +0.02 dB of the ceiling; raw digital white
+// noise, whose energy reaches fs/2 where every 4x interpolator rolls off, up
+// to ~+1.2 dB. Mastered programme carries far less energy up there. The
+// sample-peak guarantee holds exactly for any input.)
 //
 // Algorithm (per sample n, all channels linked):
 //   p[n]   = max over channels of the 4x TruePeakDetector interpolator (with
 //            parabolic refinement of each local maximum of the 4x sequence),
 //            or |x| when truePeak is off; the detector adds kDelay samples.
-//   r[n]   = min(1, ceilingLin / p[n])                  required gain
-//   m[n]   = min(r[n-L-1 .. n])        sliding minimum (monotonic deque, O(1))
-//   a[n]   = mean(m[n-L .. n])         box filter (running sum, double)
-//            -> linear attack ramp that reaches r exactly when the peak
-//               sample leaves the look-ahead delay; provably a[n] <= r[n-L].
+//   r[n]   = min(1, threshold / p[n])                   required gain
+//   m[n]   = min(r[n-L-Kh-1 .. n])     sliding minimum (monotonic deque, O(1))
+//   a[n]   = mean(m[n-L+Kh .. n])      box filter (running sum, double)
+//            -> linear attack ramp of L - Kh + 1 samples that reaches r Kh
+//               samples before the peak sample leaves the look-ahead delay
+//               and holds it until Kh samples after; provably a[n] <= r[j]
+//               for every j in [n-L-Kh-1, n-L+Kh]. Kh = min(8, L/3) in
+//               true-peak mode (the gain is flat under the central taps of
+//               the interpolator that reads the peak), 0 in sample-peak mode.
 //   g[n]   = min(a[n], release(g[n-1]))  one-pole release towards a[n]
 //            autoRelease: fast (releaseMs/5) for isolated peaks, slow
 //            (releaseMs) once limiting has been continuous for > 50 ms.
 //   y[n]   = x[n - L - D] * g[n]       L = lookahead, D = detector delay
 //   final safety: hard clamp to ceilingLin (counts engagements; must be 0
 //            in tests - it exists only to make overs impossible).
-// An internal margin of 0.05 dB below the ceiling absorbs interpolation error.
+// threshold = ceiling - 0.05 dB: the margin absorbs interpolation error.
 // latency = L + D (1.5 ms + 20 samples at 48 kHz = 92 samples by default).
 #pragma once
 
@@ -81,12 +85,13 @@ private:
     //    the span of the current limiting run grows from 25 to 50 ms.
 
     /** Linked-detection front end: exactly TruePeakDetector's 4x polyphase
-        interpolator (same taps, same kDelay), but instead of the plain maximum
-        of the four grid points it also refines every local maximum of the 4x
-        sequence with a parabola through its two neighbours. The plain grid
-        maximum under-reads a peak that falls between grid points by up to
-        0.12 dB for content at 0.3 fs and 0.25 dB at 0.4 fs - more than the
-        0.05 dB margin; refined, the residual is < 0.03 dB. */
+        interpolator (same taps via TruePeakDetector::designPhaseTaps, same
+        kDelay), but instead of the plain maximum of the four grid points it
+        also refines every local maximum of the 4x sequence with a parabola
+        through its two neighbours. The plain grid maximum under-reads a peak
+        that falls halfway between grid points by up to cos(pi f / 4 fs):
+        0.24 dB at 0.3 fs and 0.44 dB at 0.4 fs - more than the 0.05 dB
+        margin; refined, the residual is < 0.03 dB. */
     class RefinedPeakDetector
     {
     public:
@@ -100,7 +105,7 @@ private:
         static constexpr int kPhases = TruePeakDetector::kPhases;
         static constexpr int kTaps = TruePeakDetector::kTapsPerPhase;
         static constexpr int kDelay = TruePeakDetector::kDelay;
-        std::array<std::array<float, kTaps>, kPhases> phaseTaps {};
+        TruePeakDetector::PhaseTaps phaseTaps {};
         std::array<std::vector<float>, kMaxChannels> history; // mirrored, newest first
         std::array<int, kMaxChannels> pos {};
         std::array<float, kMaxChannels> lastPhase {};          // |z| at n - kDelay - 1/4
@@ -124,22 +129,23 @@ private:
     bool detectTruePeak = true;
     int lookahead = 0;     // L
     int detectorDelay = 0; // D (TruePeakDetector::kDelay, or 0 for sample peak)
+    int hold = 0;          // Kh: extra gain hold each side of a peak (true-peak mode)
 
     RefinedPeakDetector detector;
     DelayLine audioDelay;  // L + D
 
-    // Sliding minimum of r over the last L + 2 samples: a monotonic deque
+    // Sliding minimum of r over the last L + Kh + 2 samples: a monotonic deque
     // (values increase from front to back) kept in a fixed power-of-two ring.
     std::vector<float> dequeValue;
     std::vector<uint32_t> dequeIndex;
     uint32_t dequeMask = 0, dequeFront = 0, dequeBack = 0; // back = one past the newest
-    uint32_t window = 2;                                   // L + 2
+    uint32_t window = 2;                                   // L + Kh + 2
     uint32_t sampleIndex = 0;                              // wraps; only differences are used
 
-    // Box filter (running mean over L + 1 samples of the sliding minimum) and
-    // the per-sample ceiling history for the safety clamp; both rings share ringPos.
+    // Box filter (running mean over L - Kh + 1 samples of the sliding minimum)
+    // and the per-sample ceiling history for the safety clamp (L + 1 samples).
     std::vector<float> boxRing, ceilingRing;
-    int ringSize = 1, ringPos = 0;
+    int ringSize = 1, ringPos = 0, ceilingPos = 0;
     double boxSum = 1.0, boxLength = 1.0;
 
     // Ceiling: smoothed in dB; linear value and detector threshold derived from it.

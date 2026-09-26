@@ -29,7 +29,7 @@
 
 namespace flub::app::ui
 {
-class HeaderBar : public juce::Component
+class HeaderBar : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit HeaderBar (EngineController& controller);
@@ -51,6 +51,7 @@ public:
     void paint (juce::Graphics& g) override;
     void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
+    void mouseMove (const juce::MouseEvent& e) override;
 
 private:
     class ModeSegment;

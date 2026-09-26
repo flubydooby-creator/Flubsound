@@ -71,6 +71,7 @@ public:
 
     void paint (juce::Graphics& g) override;
     void resized() override;
+    void moved() override;
     void lookAndFeelChanged() override;
 
 private:

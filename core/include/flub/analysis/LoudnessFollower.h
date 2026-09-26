@@ -8,6 +8,7 @@
 // loops freeze instead of chasing silence.
 #pragma once
 
+#include "ChannelWeights.h"
 #include "LoudnessMeter.h"
 #include "flub/dsp/EnvelopeFollower.h"
 
@@ -50,9 +51,9 @@ public:
             double sum = msFloor;
             for (int c = 0; c < nch; ++c)
             {
-                if (nch >= 6 && c == 3)
+                const double w = bs1770ChannelWeight (c, nch);
+                if (w == 0.0)
                     continue; // LFE
-                const double w = (nch >= 6 && c >= 4) ? 1.41 : 1.0;
                 const double x = static_cast<double> (block.channel (c)[i]) + antiDenormal;
                 const double k = stage2.processSample (c, stage1.processSample (c, x));
                 sum += w * k * k;

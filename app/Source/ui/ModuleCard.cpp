@@ -15,17 +15,17 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
     using B = ModuleDescriptor::Banding;
     static const std::vector<ModuleDescriptor> modules = [] {
         std::vector<ModuleDescriptor> m;
-        auto add = [&m] (const char* id, const char* name, const char* group, const char* blurb, int enableId, B banding,
-                         std::vector<Key> keys)
+        auto add = [&m] (const char* moduleId, const char* moduleName, const char* layoutGroup, const char* description, int enableParam,
+                         B bandingKind, std::vector<Key> keyControls)
         {
             ModuleDescriptor d;
-            d.id = id;
-            d.name = name;
-            d.group = group;
-            d.blurb = blurb;
-            d.enableId = enableId;
-            d.banding = banding;
-            d.keys = std::move (keys);
+            d.id = moduleId;
+            d.name = moduleName;
+            d.group = layoutGroup;
+            d.blurb = description;
+            d.enableId = enableParam;
+            d.banding = bandingKind;
+            d.keys = std::move (keyControls);
             m.push_back (std::move (d));
         };
 

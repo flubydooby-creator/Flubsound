@@ -40,7 +40,8 @@ struct FormLayout
         rows.push_back ({ caption, &control, help, {}, width, {}, {}, {} });
     }
 
-    void layout (juce::Rectangle<int> area)
+    /** Lays the rows out from the top of `area`; returns the bottom edge used. */
+    int layout (juce::Rectangle<int> area)
     {
         int y = area.getY();
         for (auto& r : rows)
@@ -65,6 +66,7 @@ struct FormLayout
             }
             y += 4;
         }
+        return y;
     }
 
     void paint (juce::Graphics& g) const
@@ -228,12 +230,13 @@ public:
 
     void resized() override
     {
-        auto r = getLocalBounds();
-        latencyArea = r.removeFromBottom (70);
-        r.removeFromBottom (8);
-        latencyTitle = r.removeFromBottom (22);
-        r.removeFromBottom (6);
-        form.layout (r);
+        // Flow layout: the live latency block follows the form (anchoring it
+        // to the bottom made it collide with the Display rows on short
+        // dialogs). SettingsDialog's minimum size keeps all of it visible.
+        const auto r = getLocalBounds();
+        const int formBottom = form.layout (r);
+        latencyTitle = { r.getX(), formBottom + 14, r.getWidth(), 22 };
+        latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), 70 };
     }
 
 private:
@@ -532,8 +535,9 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     addChildComponent (*hotkeysPage);
     addChildComponent (*generalPage);
 
+    deviceText = describeOutputDevice (controller);
     showPage (Page::Audio);
-    setSize (780, 560);
+    setSize (780, 600);
     startTimerHz (2);
 }
 
@@ -558,8 +562,41 @@ juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Co
     options.resizable = true;
     auto* window = options.launchAsync();
     if (window != nullptr)
-        window->setResizeLimits (680, 480, 1600, 1200);
+        window->setResizeLimits (kMinWidth, kMinHeight, 1600, 1200);
     return window;
+}
+
+juce::String SettingsDialog::describeOutputDevice (EngineController& controller, int maxMessages)
+{
+    using flub::device::Connection;
+    const auto output = controller.getOutputDeviceName();
+    if (output.isEmpty())
+        return "No output device open.";
+
+    juce::String connection;
+    switch (controller.getDeviceConnection())
+    {
+        case Connection::Analog: connection = "wired"; break;
+        case Connection::Usb: connection = "USB / wireless dongle"; break;
+        case Connection::Bluetooth: connection = "Bluetooth"; break;
+        case Connection::BluetoothHandsFree: connection = "Bluetooth hands-free"; break;
+        case Connection::Unknown: break;
+    }
+
+    const auto& advice = controller.getDeviceAdvice();
+    const auto profile = controller.getDeviceProfileName();
+    juce::String s;
+    s << output << "  -  " << (profile.isNotEmpty() ? profile : juce::String ("generic device"));
+    if (connection.isNotEmpty())
+        s << " (" << connection << ")";
+    s << "\nSafety ceiling " << juce::String (advice.ceilingDbTp, 1) << " dBTP";
+    if (advice.narrowband)
+        s << "  -  narrowband (speech) format";
+    if (! advice.suggestedPreset.empty())
+        s << "  -  suggested preset: " << juce::String::fromUTF8 (advice.suggestedPreset.c_str());
+    for (int i = 0; i < maxMessages && i < static_cast<int> (advice.messages.size()); ++i)
+        s << "\n" << juce::String::fromUTF8 (advice.messages[static_cast<size_t> (i)].c_str());
+    return s;
 }
 
 void SettingsDialog::showPage (Page page)
@@ -582,6 +619,15 @@ void SettingsDialog::timerCallback()
 {
     if (current == Page::Processing)
         processingPage->refresh();
+    if (current == Page::Audio)
+    {
+        const auto text = describeOutputDevice (controller);
+        if (text != deviceText)
+        {
+            deviceText = text;
+            repaint (deviceArea);
+        }
+    }
 }
 
 void SettingsDialog::paint (juce::Graphics& g)
@@ -595,6 +641,18 @@ void SettingsDialog::paint (juce::Graphics& g)
         g.drawFittedText ("Flubsound processes the input (a Flubsound / virtual cable device or loopback) and plays the result on the output "
                           "device. Smaller buffers lower the latency; raise them if you hear dropouts.",
                           pageArea.withTrimmedTop (28).withHeight (32), juce::Justification::topLeft, 2, 1.0f);
+
+        // Output device profile (headset families, connection, safety ceiling).
+        auto box = deviceArea.toFloat();
+        g.setColour (Palette::well);
+        g.fillRoundedRectangle (box, 6.0f);
+        g.setColour (Palette::border);
+        g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
+        auto inner = deviceArea.reduced (12, 8);
+        Theme::drawCaption (g, "OUTPUT DEVICE PROFILE", inner.removeFromTop (16).toFloat(), Palette::faint);
+        g.setColour (Palette::text.withAlpha (0.85f));
+        g.setFont (Theme::font (12.0f));
+        g.drawFittedText (deviceText, inner, juce::Justification::topLeft, 4, 1.0f);
     }
     auto nav = navArea.toFloat();
     g.setColour (Palette::panel);
@@ -620,7 +678,8 @@ void SettingsDialog::resized()
         }
     }
     pageArea = r.reduced (26, 20);
-    audioPage->setBounds (pageArea.withTrimmedTop (66).withTrimmedLeft (-10));
+    deviceArea = pageArea.withTrimmedTop (66).withHeight (86);
+    audioPage->setBounds (pageArea.withTrimmedTop (66 + 86 + 10).withTrimmedLeft (-10));
     processingPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);

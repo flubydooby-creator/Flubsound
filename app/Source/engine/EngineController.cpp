@@ -16,6 +16,8 @@ namespace
 {
 constexpr int kTimerHz = 1;
 constexpr int kPersistEveryTicks = 5 * kTimerHz; // strip state autosave: every 5 s
+constexpr int kRescanEveryTicks = 5 * kTimerHz;  // missing preferred output: rescan every 5 s
+                                                 // (ALSA probes every PCM device; too slow for 1 Hz)
 
 constexpr const char* kStateFormat = "flubsound-strip-state";
 
@@ -585,20 +587,39 @@ juce::String EngineController::getDeviceProfileName() const
 
 void EngineController::updateDeviceProfile()
 {
-    using flub::device::Connection;
     auto* device = getDeviceManager().getCurrentAudioDevice();
     if (device == nullptr)
     {
+        if (simulatedOutputName.isNotEmpty())
+        {
+            applyDeviceProfile (simulatedOutputName, simulatedSampleRate, simulatedOutputChannels);
+            return;
+        }
         deviceMatch = {};
         deviceAdvice = {};
         currentOutputName = {};
         host->setMasterCeilingDb (-1.0f);
         return;
     }
+    applyDeviceProfile (getDeviceManager().getAudioDeviceSetup().outputDeviceName, device->getCurrentSampleRate(),
+                        device->getActiveOutputChannels().countNumberOfSetBits());
+}
 
-    currentOutputName = getDeviceManager().getAudioDeviceSetup().outputDeviceName;
-    const double sampleRate = device->getCurrentSampleRate();
-    const int outputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
+void EngineController::simulateOutputDevice (const juce::String& name, double sampleRate, int outputChannels)
+{
+    if (options.openAudioDevice)
+        return; // never overrides a real device
+    simulatedOutputName = name;
+    simulatedSampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    simulatedOutputChannels = juce::jmax (1, outputChannels);
+    updateDeviceProfile();
+    notify (Change::Device);
+}
+
+void EngineController::applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels)
+{
+    using flub::device::Connection;
+    currentOutputName = outputName;
 
     // The OS knows the real transport (USB vs Bluetooth vs hands-free) where
     // it can; name / format heuristics cover the rest.
@@ -687,7 +708,7 @@ void EngineController::timerCallback()
         persistStripStates (false);
 
     // While the preferred output (e.g. a headset) is missing, look for it.
-    if (preferredMissing && options.openAudioDevice)
+    if (preferredMissing && options.openAudioDevice && timerTicks % kRescanEveryTicks == 0)
     {
         const auto before = getDeviceManager().getAudioDeviceSetup().outputDeviceName;
         trackPreferredOutput (true);

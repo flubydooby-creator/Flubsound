@@ -56,5 +56,11 @@ public:
     /** effective[] <- base[] with all macro contributions applied and clamped.
         Both arrays have param::kNumParams entries. RT-safe. */
     static void apply (const float* base, float* effective, float governorScale) noexcept;
+
+    /** True when a macro source that can raise paramId in the current mode is
+        above zero, even if it has not reached its entry's start point yet
+        (e.g. Boost Intensity at 20 % "arms" the glue that begins at 40 %).
+        RT-safe. */
+    static bool isArmed (const float* base, int paramId) noexcept;
 };
 } // namespace flub

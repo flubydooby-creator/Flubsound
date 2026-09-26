@@ -11,7 +11,7 @@ using namespace flub::param;
 ModuleRack::ModuleRack (EngineController& c)
     : controller (c),
       binder ([this] { return &controller.getSelectedParams(); },
-              [this] { return controller.getChain (controller.getSelectedStrip()).effectiveValues(); })
+              [this] { return &controller.getChain (controller.getSelectedStrip()); })
 {
     setTitle ("Module rack");
     setWantsKeyboardFocus (false);
@@ -47,7 +47,7 @@ void ModuleRack::updateFromEngine()
 {
     auto& store = controller.getSelectedParams();
     const int strip = controller.getSelectedStrip();
-    const float* effective = controller.getChain (strip).effectiveValues();
+    const auto& chain = controller.getChain (strip);
     const bool quality = static_cast<int> (std::lround (store.get (LatencyProfile))) == static_cast<int> (LatencyProfileValue::Quality);
     const bool surround = controller.getStripChannels (strip) > 2;
 
@@ -56,7 +56,7 @@ void ModuleRack::updateFromEngine()
         const int enableId = card->getDescriptor().enableId;
         ModuleCard::State s;
         s.baseOn = store.get (enableId) >= 0.5f;
-        s.effectiveOn = effective != nullptr ? effective[enableId] >= 0.5f : s.baseOn;
+        s.effectiveOn = chain.effectiveValue (enableId) >= 0.5f;
         s.gateInactiveProfile = ! quality;
         s.virtualizerNeedsSurround = ! surround;
         card->setState (s);

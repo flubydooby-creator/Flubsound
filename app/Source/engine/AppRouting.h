@@ -123,7 +123,12 @@ private:
 
     // Message thread
     std::vector<AppState> apps;
-    std::map<uint32_t, int> captures;        // pid -> capture id
+    struct RunningCapture
+    {
+        int id = -1;    // AudioEngineHost capture id
+        int strip = -1; // strip it feeds (its FIFO is sized for that strip's channels)
+    };
+    std::map<uint32_t, RunningCapture> captures; // pid -> running capture
     std::map<uint32_t, int> captureFailures; // pid -> failed attempts
 
     // Shared with the worker

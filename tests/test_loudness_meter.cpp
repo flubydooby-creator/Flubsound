@@ -322,9 +322,12 @@ TEST_CASE ("LoudnessMeter: 5.1 / 7.1 channel weighting (LFE excluded, surrounds 
     CHECK_NEAR (toneLoudness (6, 1u << 5) - left, surroundDb, 0.01);
     CHECK_NEAR (toneLoudness (6, 1u << 4) - left, 1.5, 0.05);
 
-    // 7.1: channels 4..7 are all surrounds; LFE still excluded.
+    // 7.1 (FL FR FC LFE BL BR SL SR): the side pair SL/SR (~90-110 deg) gets
+    // 1.41, the back pair BL/BR (~135-150 deg) 1.0; LFE still excluded.
     CHECK_NEAR (toneLoudness (8, 1u << 6) - left, surroundDb, 0.01);
     CHECK_NEAR (toneLoudness (8, 1u << 7) - left, surroundDb, 0.01);
+    CHECK_NEAR (toneLoudness (8, 1u << 4) - left, 0.0, 0.001);
+    CHECK_NEAR (toneLoudness (8, 1u << 5) - left, 0.0, 0.001);
     CHECK (toneLoudness (8, 1u << 3) == kMinusInfDb);
 
     // Below 6 channels there is no LFE/surround interpretation.
@@ -751,6 +754,16 @@ TEST_CASE ("LoudnessFollower: converges to the programme loudness and gates sile
     b.feed (s, -20.0, 8.0, 1u << 4);
     CHECK_NEAR (l.getLufs(), -23.01, 0.1);
     CHECK_NEAR (s.getLufs() - l.getLufs(), 10.0 * std::log10 (1.41), 0.02);
+
+    // 7.1: the back pair is weighted 1.0 like the meter.
+    LoudnessFollower back, side;
+    back.prepare (kFs, 8, 1000.0f);
+    side.prepare (kFs, 8, 1000.0f);
+    ToneSource c8 (kFs, 8), d8 (kFs, 8);
+    c8.feed (back, -20.0, 8.0, 1u << 4);
+    d8.feed (side, -20.0, 8.0, 1u << 6);
+    CHECK_NEAR (back.getLufs(), l.getLufs(), 0.02);
+    CHECK_NEAR (side.getLufs() - back.getLufs(), 10.0 * std::log10 (1.41), 0.02);
 }
 
 //==============================================================================

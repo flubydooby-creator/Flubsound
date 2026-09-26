@@ -46,6 +46,7 @@ private:
                                float rangeDb, float upwardDb = 0.0f);
 
     Shown shown, painted;
+    float sinceRepaint = 0.0f; // readouts refresh at <= 20 Hz
     juce::Rectangle<float> integratedArea;
 };
 } // namespace flub::app::ui

@@ -299,6 +299,23 @@ void HeaderBar::updateStatus()
         repaint();
 }
 
+void HeaderBar::mouseMove (const juce::MouseEvent& e)
+{
+    if (! readoutArea.contains (e.getPosition()))
+    {
+        setTooltip ({});
+        return;
+    }
+    const auto li = controller.getLatencyInfo();
+    juce::String tip;
+    tip << "Latency: device in " << juce::String (li.deviceInputMs, 1) << " ms + engine " << juce::String (li.engineMs, 1) << " ms + device out "
+        << juce::String (li.deviceOutputMs, 1) << " ms";
+    if (li.captureBufferMs > 0.0)
+        tip << " + app capture " << juce::String (li.captureBufferMs, 1) << " ms";
+    tip << "\n" << SettingsDialog::describeOutputDevice (controller, 1);
+    setTooltip (tip);
+}
+
 void HeaderBar::animate (double dtSeconds)
 {
     if (std::abs (thumbPos - thumbTarget) < 0.001f)
@@ -669,7 +686,7 @@ void HeaderBar::resized()
     auto r = getLocalBounds().reduced (16, 0);
     const int controlH = 32;
     auto centred = [this] (juce::Rectangle<int> area, int h) { return area.withSizeKeepingCentre (area.getWidth(), h).withY ((getHeight() - h) / 2); };
-    auto centreY = [&centred, controlH] (juce::Rectangle<int> area) { return centred (area, controlH); };
+    auto centreY = [&centred] (juce::Rectangle<int> area) { return centred (area, controlH); };
 
     logoArea = r.removeFromLeft (compact ? 136 : 160);
     r.removeFromLeft (compact ? 10 : 14);

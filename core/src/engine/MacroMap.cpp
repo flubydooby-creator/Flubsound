@@ -125,6 +125,15 @@ const char* MacroMap::macroName (ModeValue mode, int macroIndex) noexcept
     return mode == ModeValue::Gaming ? gaming[macroIndex] : music[macroIndex];
 }
 
+bool MacroMap::isArmed (const float* base, int paramId) noexcept
+{
+    const auto mode = static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode])));
+    for (const auto& e : table (mode))
+        if (e.paramId == paramId && e.amount > 0.0f && sourceValue (base, e.source) > 0.0f)
+            return true;
+    return false;
+}
+
 void MacroMap::apply (const float* base, float* effective, float governorScale) noexcept
 {
     for (int i = 0; i < kNumParams; ++i)

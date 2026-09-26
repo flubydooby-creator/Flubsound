@@ -83,6 +83,8 @@ constexpr float kPanelRadius = 10.0f;
 constexpr float kControlRadius = 6.0f;
 
 void drawPanel (juce::Graphics& g, juce::Rectangle<float> bounds, float radius = kPanelRadius);
+/** The fill drawPanel uses for a panel with these bounds (lets opaque children match it). */
+juce::ColourGradient panelFill (juce::Rectangle<float> panelBounds);
 /** Caption in the panel header style, e.g. "LOUDNESS". Returns its width. */
 float drawCaption (juce::Graphics& g, const juce::String& text, juce::Rectangle<float> area,
                    juce::Colour colour = Palette::muted, juce::Justification just = juce::Justification::centredLeft);

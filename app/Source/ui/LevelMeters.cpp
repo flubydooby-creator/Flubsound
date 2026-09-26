@@ -98,12 +98,26 @@ void LevelMeters::update (const MeterSnapshot& s, double dtSeconds)
         outClip = true;
 
     const float newMax = s.outTruePeakMaxDb;
-    const bool changed = std::abs (newMax - truePeakMax) > 0.05f || active != s.active;
+    const bool activityChanged = active != s.active;
+    const bool maxChanged = std::abs (newMax - truePeakMax) > 0.05f;
     truePeakMax = newMax;
     active = s.active;
 
-    if (changed || s.active || in[0].hold > -99.0f || out[0].hold > -99.0f)
+    if (activityChanged)
+    {
         repaint();
+        return;
+    }
+    const bool moving = s.active || in[0].hold > -99.0f || out[0].hold > -99.0f || in[0].peak > -99.0f || out[0].peak > -99.0f;
+    if (moving)
+        repaint (barsArea.expanded (2.0f).getSmallestIntegerContainer());
+
+    readoutAge += dt;
+    if ((moving || maxChanged) && readoutAge >= 0.08f)
+    {
+        readoutAge = 0.0f;
+        repaint (truePeakArea.expanded (2.0f).getSmallestIntegerContainer());
+    }
 }
 
 void LevelMeters::reset()
@@ -205,12 +219,21 @@ void LevelMeters::paint (juce::Graphics& g)
     // ---- dB scale (aligned with the bar bodies) ----
     const auto body = inArea.withTrimmedTop (10.0f).withTrimmedBottom (18.0f);
     g.setFont (Theme::font (9.5f));
+    // The scale is non-linear (the top 6 dB take ~15 % of the height), so on
+    // short meters neighbouring labels would collide: a label is only drawn
+    // when it clears the previous one. Grid lines are always drawn.
+    constexpr float kMinLabelSpacing = 11.5f;
+    float lastLabelY = -1.0e6f;
     for (const float db : { 0.0f, -3.0f, -6.0f, -12.0f, -18.0f, -24.0f, -36.0f, -60.0f })
     {
         const float y = body.getBottom() - deflection (db) * body.getHeight();
-        g.setColour (Palette::faint);
-        g.drawText (juce::String (juce::roundToInt (db)), juce::Rectangle<float> (barsArea.getX(), y - 6.0f, 20.0f, 12.0f),
-                    juce::Justification::centredRight, false);
+        if (y - lastLabelY >= kMinLabelSpacing)
+        {
+            g.setColour (Palette::faint);
+            g.drawText (juce::String (juce::roundToInt (db)), juce::Rectangle<float> (barsArea.getX(), y - 6.0f, 20.0f, 12.0f),
+                        juce::Justification::centredRight, false);
+            lastLabelY = y;
+        }
         g.setColour (Palette::grid);
         g.drawHorizontalLine (juce::roundToInt (y), barsArea.getX() + 22.0f, outArea.getRight());
     }

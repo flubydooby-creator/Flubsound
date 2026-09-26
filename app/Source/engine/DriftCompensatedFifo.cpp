@@ -286,7 +286,26 @@ bool DriftCompensatedFifo::pull (float* const* dest, int numDestChannels, int nu
             fillMsStat.store (static_cast<float> (1000.0 * avail / producerRate), std::memory_order_relaxed);
             return false;
         }
-        startStreaming (avail);
+
+        // Packetised delivery: priming completes right after a producer packet
+        // arrived, i.e. at the PEAK of the fill sawtooth, overshooting the
+        // target by up to one packet. The loop regulates the AVERAGE fill
+        // (~ peak - burst / 2), so:
+        //  * drop the oldest frames above target + burst / 2 (the stream fades
+        //    in from silence here, so this is inaudible and trims latency);
+        //  * seed the fill smoother with the average, not the peak.
+        // Seeding with the peak made every (re)prime start with a positive
+        // error that the 1.5 s smoother never saw drain away, so a producer
+        // slower than the correction range wound the integrator up in the
+        // WRONG direction (consume faster) and underran ~4x more often.
+        const double halfBurst = 0.5 * static_cast<double> (burstEstimate.load (std::memory_order_relaxed));
+        if (const double excessFrames = avail - (target + halfBurst); excessFrames >= 1.0)
+        {
+            const auto excess = static_cast<size_t> (excessFrames);
+            ring.skip (excess * ch);
+            avail -= static_cast<double> (excess);
+        }
+        startStreaming (std::max (0.0, avail - halfBurst));
     }
 
     // ---- 3. PI controller on the smoothed fill level ------------------------

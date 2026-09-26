@@ -420,6 +420,23 @@ void* SystemTuning::promoteAudioThread()
         5.33 ms, up to half of it for computation, finished within the period.
         Values are converted from nanoseconds to Mach absolute time units
         (1 ns on Intel, 125/3 ns per tick on Apple Silicon). */
+    const thread_port_t thread = pthread_mach_thread_np (pthread_self());
+
+    // Core Audio's HAL I/O thread already runs with a time-constraint policy
+    // derived from the real buffer size. Overwriting it with the generic
+    // 256-frame description below would give large buffers a computation
+    // quantum far shorter than one block, and the kernel demotes threads that
+    // overrun it. Only promote threads that still have the default policy.
+    {
+        thread_time_constraint_policy_data_t current {};
+        mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+        boolean_t isDefault = FALSE;
+        if (thread_policy_get (thread, THREAD_TIME_CONSTRAINT_POLICY, reinterpret_cast<thread_policy_t> (&current), &count, &isDefault)
+                == KERN_SUCCESS
+            && ! isDefault)
+            return nullptr;
+    }
+
     mach_timebase_info_data_t timebase;
     if (mach_timebase_info (&timebase) != KERN_SUCCESS || timebase.numer == 0 || timebase.denom == 0)
         return nullptr;
@@ -435,7 +452,7 @@ void* SystemTuning::promoteAudioThread()
     policy.constraint = msToAbsolute (periodMs);
     policy.preemptible = 1;
 
-    const kern_return_t result = thread_policy_set (pthread_mach_thread_np (pthread_self()),
+    const kern_return_t result = thread_policy_set (thread,
                                                     THREAD_TIME_CONSTRAINT_POLICY,
                                                     reinterpret_cast<thread_policy_t> (&policy),
                                                     THREAD_TIME_CONSTRAINT_POLICY_COUNT);
