@@ -1,0 +1,442 @@
+// Engine-level tests: parameter layout/store, macros, protection loops,
+// module slot, full processing chain, mixer and presets.
+#include "TestFramework.h"
+#include "TestSignals.h"
+
+#include "flub/analysis/PeakMeters.h"
+#include "flub/common/Denormals.h"
+#include "flub/engine/MixEngine.h"
+#include "flub/engine/ProcessingChain.h"
+#include "flub/io/PresetIO.h"
+
+#include <limits>
+#include <set>
+
+using namespace flub;
+using namespace flub::param;
+using namespace flubtest;
+
+namespace
+{
+constexpr double kFs = 48000.0;
+
+/** Drum-like test programme: kick-ish low bursts + noise hats + a bass line. */
+Planar makeProgramme (int numSamples, float level = 0.5f, uint32_t seed = 7)
+{
+    Planar p (2, numSamples);
+    FastRandom rng (seed);
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const double t = i / kFs;
+        const double beat = std::fmod (t, 0.5);
+        const double kick = std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat);
+        const double hat = (std::fmod (t + 0.25, 0.5) < 0.03 ? 0.3 : 0.0) * rng.nextBipolar();
+        const double bassLine = 0.4 * std::sin (kTwoPi * 55.0 * t);
+        const double pad = 0.15 * std::sin (kTwoPi * 440.0 * t) + 0.1 * std::sin (kTwoPi * 660.0 * t + 0.3);
+        const float l = level * static_cast<float> (kick + hat + bassLine + pad);
+        const float r = level * static_cast<float> (kick + 0.8 * hat + bassLine + 0.7 * pad);
+        p.ch[0][static_cast<size_t> (i)] = l;
+        p.ch[1][static_cast<size_t> (i)] = r;
+    }
+    return p;
+}
+
+void runChain (ProcessingChain& chain, Planar& buf, int blockSize)
+{
+    ScopedNoDenormals noDenormals;
+    const int n = buf.numSamples();
+    for (int pos = 0; pos < n; pos += blockSize)
+        chain.process (buf.block (pos, std::min (blockSize, n - pos)));
+}
+
+void bypassAllModules (ParameterStore& s)
+{
+    for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+        s.set (id, 0.0f);
+}
+} // namespace
+
+// ---------------------------------------------------------------------------
+TEST_CASE ("Parameters: layout is complete, keys unique, defaults in range")
+{
+    const auto& t = layout();
+    REQUIRE (static_cast<int> (t.size()) == kNumParams);
+    std::set<std::string> keys;
+    for (const auto& i : t)
+    {
+        CHECK (! i.key.empty());
+        CHECK (! i.name.empty());
+        CHECK (i.minValue <= i.defaultValue && i.defaultValue <= i.maxValue);
+        if (i.unit == Unit::Choice)
+            CHECK (static_cast<int> (i.choices.size()) == static_cast<int> (i.maxValue) + 1);
+        keys.insert (i.key);
+    }
+    CHECK (static_cast<int> (keys.size()) == kNumParams);
+    CHECK (findByKey ("eq.3.freq") == eq (3, EqFieldFreq));
+    CHECK (findByKey ("dyneq.1.threshold") == dyn (1, DynFieldThreshold));
+    CHECK (findByKey ("nope") == -1);
+    CHECK (t[static_cast<size_t> (LatencyProfile)].structural);
+    CHECK (kEqBands >= 10); // requirement: fully parametric EQ with at least 10 bands
+}
+
+TEST_CASE ("ParameterStore: clamping, banks, snapshot, version")
+{
+    ParameterStore s;
+    const auto v0 = s.version();
+    s.set (MaxDriveDb, 99.0f);
+    CHECK (s.get (MaxDriveDb) == 24.0f);
+    CHECK (s.version() > v0);
+    s.set (Bank::B, MaxDriveDb, 3.0f);
+    CHECK (s.get (Bank::A, MaxDriveDb) == 24.0f);
+    s.setActiveBank (Bank::B);
+    CHECK (s.get (MaxDriveDb) == 3.0f);
+    s.copyBank (Bank::A, Bank::B);
+    CHECK (s.get (MaxDriveDb) == 24.0f);
+    std::vector<float> snap (static_cast<size_t> (kNumParams));
+    AllocationGuard guard;
+    s.snapshot (snap.data());
+    CHECK (guard.allocations() == 0);
+    CHECK (snap[static_cast<size_t> (MaxDriveDb)] == 24.0f);
+}
+
+TEST_CASE ("MacroMap: zero macros leave base values untouched")
+{
+    std::vector<float> base (static_cast<size_t> (kNumParams)), eff (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        base[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+    for (int mode : { 0, 1 })
+    {
+        base[Mode] = static_cast<float> (mode);
+        MacroMap::apply (base.data(), eff.data(), 1.0f);
+        for (int i = 0; i < kNumParams; ++i)
+            CHECK (eff[static_cast<size_t> (i)] == base[static_cast<size_t> (i)]);
+    }
+}
+
+TEST_CASE ("MacroMap: Boost Intensity is staged and governed")
+{
+    std::vector<float> base (static_cast<size_t> (kNumParams)), eff (static_cast<size_t> (kNumParams)), half (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        base[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+
+    base[BoostIntensity] = 0.2f;
+    MacroMap::apply (base.data(), eff.data(), 1.0f);
+    CHECK (eff[ClarityPresence] > 0.0f);  // clarity arrives early
+    CHECK (eff[MaxDriveDb] == 0.0f);      // loudness does not yet
+    base[BoostIntensity] = 1.0f;
+    MacroMap::apply (base.data(), eff.data(), 1.0f);
+    CHECK_NEAR (eff[MaxDriveDb], 8.0, 1e-4);
+    CHECK_NEAR (eff[BassBoostDb], 5.0, 1e-4);
+    MacroMap::apply (base.data(), half.data(), 0.5f);
+    CHECK_NEAR (half[MaxDriveDb], 4.0, 1e-4);           // governed
+    CHECK_NEAR (half[ClarityPresence], eff[ClarityPresence], 1e-6); // not governed
+    for (int i = 0; i < kNumParams; ++i)
+    {
+        const auto& info = layout()[static_cast<size_t> (i)];
+        CHECK (eff[static_cast<size_t> (i)] >= info.minValue && eff[static_cast<size_t> (i)] <= info.maxValue);
+    }
+}
+
+TEST_CASE ("MacroMap: every mode has five named macros that engage modules")
+{
+    for (auto mode : { ModeValue::Music, ModeValue::Gaming })
+    {
+        for (int m = 0; m < 5; ++m)
+            CHECK (std::string (MacroMap::macroName (mode, m)).size() > 0);
+        std::vector<float> base (static_cast<size_t> (kNumParams)), eff (static_cast<size_t> (kNumParams));
+        for (int i = 0; i < kNumParams; ++i)
+            base[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+        base[Mode] = static_cast<float> (mode);
+        base[SaturationOn] = 0.0f;
+        base[Macro5] = 0.5f;
+        MacroMap::apply (base.data(), eff.data(), 1.0f);
+        if (mode == ModeValue::Music)
+            CHECK (eff[SaturationOn] >= 0.5f); // Warmth engages saturation
+        else
+            CHECK (eff[ClarityPresence] > 0.0f); // Voice & Score raises presence
+    }
+}
+
+TEST_CASE ("SafetyGovernor: backs off under sustained over-limiting and recovers")
+{
+    SafetyGovernor g;
+    g.prepare (kFs);
+    for (int i = 0; i < 48000 * 6 / 480; ++i)
+        g.update (-12.0f, -40.0f, 480);
+    CHECK (g.getScale() < 0.6f);
+    CHECK (g.getScale() >= 0.3f);
+    const float low = g.getScale();
+    for (int i = 0; i < 48000 * 10 / 480; ++i)
+        g.update (-1.0f, -60.0f, 480);
+    CHECK (g.getScale() > low);
+}
+
+TEST_CASE ("AutoLevel: brings a quiet source towards the target, slew limited, frozen in silence")
+{
+    AutoLevel al;
+    al.prepare (kFs, 2);
+    al.setEnabled (true);
+    al.setTargetLufs (-18.0f);
+    // -30 dBFS stereo 1 kHz sine is ~ -30 LUFS: needs +12 dB.
+    const int block = 480;
+    for (int b = 0; b < 100; ++b) // 1 s: slew limit is +1 dB/s
+    {
+        Planar p (2, block);
+        auto s = sine (1000.0, kFs, block, dbToGain (-30.0f), b * block * kTwoPi * 1000.0 / kFs);
+        p.ch[0] = s;
+        p.ch[1] = s;
+        al.process (p.block());
+    }
+    CHECK (al.getGainDb() > 0.0f);
+    CHECK (al.getGainDb() <= 1.05f);
+    const float held = al.getGainDb();
+    for (int b = 0; b < 400; ++b) // 4 s of silence: frozen
+    {
+        Planar p (2, block);
+        al.process (p.block());
+    }
+    CHECK_NEAR (al.getGainDb(), held, 0.3);
+}
+
+TEST_CASE ("ModuleSlot: bypassed slot is a pure latency-compensated delay and toggling is click-free")
+{
+    TruePeakLimiter lim; // has latency
+    ModuleSlot slot;
+    slot.prepare (lim, { kFs, 256, 2 }, 20.0f, true);
+    const int lat = slot.latencySamples();
+    REQUIRE (lat > 0);
+
+    const int n = 48000;
+    Planar buf (2, n);
+    auto s = sine (440.0, kFs, n, 0.25f);
+    buf.ch[0] = s;
+    buf.ch[1] = s;
+    for (int pos = 0, b = 0; pos < n; pos += 256, ++b)
+    {
+        slot.setActive (b < 40 || b > 120); // off in the middle
+        slot.process (buf.block (pos, std::min (256, n - pos)));
+    }
+    // Low-level sine is untouched by the limiter, so wet == dry and the whole
+    // output (after the first `lat` samples) must be the delayed input.
+    double maxErr = 0.0;
+    for (int i = lat; i < n; ++i)
+        maxErr = std::max (maxErr, static_cast<double> (std::abs (buf.ch[0][static_cast<size_t> (i)] - s[static_cast<size_t> (i - lat)])));
+    CHECK_LE (maxErr, 1e-5);
+}
+
+// ---------------------------------------------------------------------------
+TEST_CASE ("Chain: latency per profile and constant under module bypass")
+{
+    ParameterStore store;
+    ProcessingChain chain (store);
+    int latencies[3] {};
+    for (int profile = 0; profile < 3; ++profile)
+    {
+        store.set (LatencyProfile, static_cast<float> (profile));
+        chain.prepare ({ kFs, 512, 2 });
+        latencies[profile] = chain.getLatencySamples();
+        CHECK (! chain.needsReprepare());
+    }
+    CHECK (latencies[0] > latencies[1]);
+    CHECK (latencies[1] > latencies[2]);
+    CHECK (latencies[1] * 1000.0 / kFs < 5.0);  // Balanced: < 5 ms algorithmic
+    CHECK (latencies[2] * 1000.0 / kFs < 2.5);  // Low Latency: < 2.5 ms
+    store.set (LatencyProfile, 0.0f);
+    CHECK (chain.needsReprepare());
+}
+
+TEST_CASE ("Chain: everything bypassed = input delayed by the chain latency (bit-transparent path)")
+{
+    ParameterStore store;
+    bypassAllModules (store);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 256, 2 });
+    const int lat = chain.getLatencySamples();
+    auto prog = makeProgramme (48000, 0.3f);
+    Planar buf = prog;
+    buf.ptrs.clear();
+    for (auto& c : buf.ch)
+        buf.ptrs.push_back (c.data());
+    runChain (chain, buf, 256);
+    double maxErr = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int i = lat; i < 48000; ++i)
+            maxErr = std::max (maxErr, static_cast<double> (std::abs (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] - prog.ch[static_cast<size_t> (c)][static_cast<size_t> (i - lat)])));
+    CHECK_LE (maxErr, 1e-6);
+}
+
+TEST_CASE ("Chain: full Music boost on a hot programme never exceeds the ceiling")
+{
+    for (int mode : { 0, 1 })
+    {
+        ParameterStore store;
+        store.set (Mode, static_cast<float> (mode));
+        store.set (BoostIntensity, 1.0f);
+        for (int m = Macro1; m <= Macro5; ++m)
+            store.set (m, 1.0f);
+        store.set (MaxCeilingDb, -1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        auto buf = makeProgramme (48000 * 4, 0.9f);
+        runChain (chain, buf, 512);
+
+        TruePeakMeter tp;
+        tp.prepare (2);
+        tp.process (buf.block());
+        CHECK_LE (tp.getMaxDbAllChannels(), -1.0 + 0.15);
+        CHECK_LE (peakAbs (buf.ch[0].data(), buf.numSamples()), dbToGain (-1.0f) + 1e-6);
+        CHECK (chain.meters().safetyClipCount.load() == 0);
+        for (auto& c : buf.ch)
+            for (float v : c)
+                REQUIRE (std::isfinite (v));
+    }
+}
+
+TEST_CASE ("Chain: process() is allocation-free in every mode and profile")
+{
+    for (int profile = 0; profile < 3; ++profile)
+    {
+        ParameterStore store;
+        store.set (LatencyProfile, static_cast<float> (profile));
+        store.set (GateOn, 1.0f);
+        store.set (CompressorOn, 1.0f);
+        store.set (SaturationOn, 1.0f);
+        store.set (BoostIntensity, 0.7f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        auto buf = makeProgramme (512 * 20, 0.5f);
+        AllocationGuard guard;
+        for (int b = 0; b < 20; ++b)
+        {
+            if (b == 10)
+            {
+                store.set (Mode, 1.0f);           // mode switch mid-stream
+                store.setActiveBank (Bank::B);    // A/B switch mid-stream
+                store.set (BypassAll, 1.0f);
+            }
+            chain.process (buf.block (b * 512, 512));
+        }
+        CHECK (guard.allocations() == 0);
+    }
+}
+
+TEST_CASE ("Chain: 7.1 input is virtualised (or downmixed) to stereo; extra channels cleared")
+{
+    for (bool virt : { true, false })
+    {
+        ParameterStore store;
+        store.set (VirtualizerOn, virt ? 1.0f : 0.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 256, 8 });
+        Planar buf (8, 256 * 40);
+        auto s = sine (1000.0, kFs, buf.numSamples(), 0.2f);
+        buf.ch[6] = s; // side-left only
+        runChain (chain, buf, 256);
+        const int tail = buf.numSamples() / 2;
+        const double left = rms (buf.ch[0].data() + tail, tail);
+        const double right = rms (buf.ch[1].data() + tail, tail);
+        CHECK (left > 0.01);
+        CHECK (left > right); // image stays on the left
+        for (int c = 2; c < 8; ++c)
+            CHECK (peakAbs (buf.ch[static_cast<size_t> (c)].data(), buf.numSamples()) == 0.0);
+    }
+}
+
+TEST_CASE ("Chain: loudness-matched global bypass tracks the processed loudness without exceeding the ceiling")
+{
+    ParameterStore store;
+    store.set (Macro4, 1.0f); // music loudness: output clearly louder than input
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 512, 2 });
+    auto warm = makeProgramme (48000 * 6, 0.2f);
+    runChain (chain, warm, 512); // let loudness followers settle
+    store.set (BypassAll, 1.0f);
+    auto buf = makeProgramme (48000 * 2, 0.2f, 99);
+    runChain (chain, buf, 512);
+    CHECK (chain.meters().shortTermLufs.load() > -60.0f);
+    CHECK_LE (peakAbs (buf.ch[0].data() + 48000, 48000), dbToGain (-1.0f) + 1e-3);
+}
+
+TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-limited")
+{
+    MixEngine mix;
+    mix.configure ({ { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false } }, kFs, 256);
+    mix.params (0).set (Mode, 1.0f);
+    mix.params (1).set (LatencyProfile, 0.0f); // Quality profile on music - needs reprepare
+    CHECK (mix.needsReprepare());
+    mix.configure ({ { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false } }, kFs, 256);
+    CHECK (! mix.needsReprepare());
+    CHECK (mix.params (1).get (LatencyProfile) == 0.0f); // store preserved across configure
+
+    Planar game (8, 256), music (2, 256), out (2, 256);
+    const AudioBlock gb = game.block(), mb = music.block();
+    const AudioBlock* inputs[] = { &gb, &mb };
+    AllocationGuard guard;
+    for (int b = 0; b < 50; ++b)
+    {
+        for (int i = 0; i < 256; ++i)
+        {
+            game.ch[0][static_cast<size_t> (i)] = 0.9f * static_cast<float> (std::sin (kTwoPi * 100.0 * (b * 256 + i) / kFs));
+            music.ch[0][static_cast<size_t> (i)] = music.ch[1][static_cast<size_t> (i)] = 0.9f * static_cast<float> (std::sin (kTwoPi * 60.0 * (b * 256 + i) / kFs));
+        }
+        mix.process (inputs, out.block());
+        CHECK_LE (peakAbs (out.ch[0].data(), 256), dbToGain (-1.0f) + 1e-6);
+    }
+    CHECK (guard.allocations() == 0);
+    CHECK (mix.getLatencySamples() > 0);
+}
+
+TEST_CASE ("Presets: JSON round trip, labels for choices, unknown keys ignored")
+{
+    preset::Preset p = preset::makeDefault();
+    p.name = "Round Trip";
+    p.category = "Gaming";
+    p.tags = { "fps", "test" };
+    p.values[static_cast<size_t> (Mode)] = 1.0f;
+    p.values[static_cast<size_t> (MaxDriveDb)] = 7.5f;
+    p.values[static_cast<size_t> (eq (2, EqFieldType))] = 3.0f;
+
+    const auto j = preset::toJson (p);
+    CHECK (j["params"]["mode"].asString() == "Gaming");
+    CHECK (j["params"]["eq.2.type"].asString() == "Low Cut");
+    const std::string text = json::write (j);
+
+    json::Value parsed;
+    std::string err;
+    REQUIRE (json::parse (text, parsed, err));
+    preset::Preset back;
+    REQUIRE (preset::fromJson (parsed, back, err));
+    CHECK (back.name == "Round Trip");
+    CHECK (back.tags.size() == 2);
+    for (int i = 0; i < kNumParams; ++i)
+        CHECK (back.values[static_cast<size_t> (i)] == p.values[static_cast<size_t> (i)]);
+
+    json::Value extra = parsed;
+    json::Value params = extra["params"];
+    params.set ("future.param", 1.0);
+    params.set ("max.drive", 1000.0); // clamped
+    extra.set ("params", params);
+    REQUIRE (preset::fromJson (extra, back, err));
+    CHECK (back.values[static_cast<size_t> (MaxDriveDb)] == 24.0f);
+
+    ParameterStore store;
+    preset::applyToStore (back, store, Bank::B);
+    CHECK (store.get (Bank::B, MaxDriveDb) == 24.0f);
+    CHECK (preset::captureFromStore (store, Bank::B).values[static_cast<size_t> (Mode)] == 1.0f);
+}
+
+TEST_CASE ("Chain: a NaN/Inf input block is dropped and the chain recovers")
+{
+    ParameterStore store;
+    store.set (BoostIntensity, 0.5f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 256, 2 });
+    auto buf = makeProgramme (256 * 20, 0.3f);
+    buf.ch[0][256 * 5 + 17] = std::numeric_limits<float>::quiet_NaN();
+    buf.ch[1][256 * 9 + 3] = std::numeric_limits<float>::infinity();
+    runChain (chain, buf, 256);
+    for (auto& c : buf.ch)
+        for (float v : c)
+            REQUIRE (std::isfinite (v));
+    CHECK (rms (buf.ch[0].data() + 256 * 15, 256 * 5) > 1e-3); // audio resumed
+}

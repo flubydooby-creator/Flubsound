@@ -4,8 +4,9 @@ add_library(flub_compiler_settings INTERFACE)
 add_library(flub::compiler_settings ALIAS flub_compiler_settings)
 
 if(MSVC)
-    target_compile_options(flub_compiler_settings INTERFACE /W4 /permissive- /Zc:__cplusplus /utf-8 /fp:fast
-        $<$<CONFIG:Release>:/O2 /Oi /GL>)
+    # /fp:precise (not /fp:fast): fast-math style folding would break the chain's
+    # NaN/Inf input guard and the metering maths.
+    target_compile_options(flub_compiler_settings INTERFACE /W4 /permissive- /Zc:__cplusplus /utf-8 /fp:precise)
     target_compile_definitions(flub_compiler_settings INTERFACE _USE_MATH_DEFINES NOMINMAX)
     if(FLUB_WARNINGS_AS_ERRORS)
         target_compile_options(flub_compiler_settings INTERFACE /WX)

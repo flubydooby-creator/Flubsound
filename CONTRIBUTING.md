@@ -1,0 +1,52 @@
+# Contributing to Flubsound Pro
+
+## Build & test
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure        # or ./build/tests/flub_tests [filter]
+```
+
+Optional targets:
+- `-DFLUB_BUILD_APP=ON` builds the desktop app, and `-DFLUB_BUILD_PLUGIN=ON` the VST3/AU plug-in. Both fetch JUCE 9.0.2; pass `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE` to build offline.
+- `-DFLUB_SANITIZE=ON` enables ASan + UBSan.
+- `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20).
+- `-DFLUB_WARNINGS_AS_ERRORS=ON` is what CI uses on Linux.
+
+## The real-time contract (non-negotiable)
+
+Code reachable from `Processor::process()`, `reset()`, parameter setters, the device callback or `processBlock` must **not**:
+- allocate or free memory (no `new`, no container growth, no `std::string`/`std::function` construction),
+- lock a mutex, wait on a condition variable, or call anything that may (logging, file or network I/O, `std::cout`, most OS calls),
+- throw exceptions (everything on the audio path is `noexcept`),
+- run loops whose length depends on history or input content, beyond the block size and fixed design constants.
+
+Allocate in `prepare()`. Communicate with other threads only through `ParameterStore` atomics, `MeterBus` atomics and `SpscRing`s.
+
+Every module test contains an `AllocationGuard` check. Please keep it that way.
+
+## Style
+
+- C++20. JUCE-like formatting: Allman braces, 4-space indent, a space before parentheses (`foo (x)`), `static_cast` for conversions. See `.clang-format`.
+- Comments explain **why** (the DSP reasoning, the constraint), not what the next line does.
+- Zero warnings with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (GCC and Clang) and `/W4` (MSVC).
+
+## Adversarial review checklist (every DSP change)
+
+1. **Maths:** coefficient formulas, dB ↔ linear, time constants derived from the *current* sample rate, signs, units.
+2. **Latency:** `latencySamples()` equals the measured impulse delay and never changes between `prepare()` calls.
+3. **Click-freeness:** continuous parameters are smoothed; discrete changes crossfade; bypass goes through `ModuleSlot`.
+4. **Block-size invariance:** identical output for blocks of 1, 7, 64 and 512 samples.
+5. **Robustness:** silence, DC, full-scale noise, impulses, extreme parameters, 44.1–192 kHz, 1–8 channels all give finite, bounded output.
+6. **Image safety:** dynamics are linked across channels; stereo effects preserve the mono sum where the design says so.
+7. **RT safety:** the allocation test passes, and the sanitizer run is clean.
+8. **Tests prove the claims:** every property stated in the header or the docs has a test with a meaningful tolerance.
+9. **Docs updated:** `docs/03-dsp-design.md` (algorithm, parameters, latency, CPU) and the traceability matrix.
+
+## Presets
+
+Factory presets live in `presets/factory/*.json` and are validated by `tests/test_factory_presets.cpp`. They must:
+- set only non-default parameters (string keys from `flub::param::layout()`),
+- keep the ceiling at ≤ −1 dBTP (≤ −2 dBTP for Bluetooth presets),
+- include a clear description.

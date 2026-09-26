@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # DSP core + unit tests + batch CLI (no JUCE) on all three platforms.
+  core:
+    name: core (${{ matrix.os }}, ${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, compiler: gcc,   cc: gcc,   cxx: g++ }
+          - { os: ubuntu-24.04, compiler: clang, cc: clang, cxx: clang++ }
+          - { os: windows-2022, compiler: msvc,  cc: cl,    cxx: cl }
+          - { os: macos-14,     compiler: apple-clang, cc: clang, cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DFLUB_BUILD_TESTS=ON -DFLUB_BUILD_TOOLS=ON
+          -DFLUB_WARNINGS_AS_ERRORS=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          ./build/tools/flubsound-cli/flubsound-cli params > /dev/null
+          ./build/tools/flubsound-cli/flubsound-cli presets
+
+  # ---------------------------------------------------------------------------
+  # Address + UndefinedBehavior sanitizers over the full test suite.
+  sanitizers:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=ON -DFLUB_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Unit tests (ASan + UBSan)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # Desktop app + plug-in (JUCE) on all three platforms.
+  app:
+    name: app + plugin (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: core
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev \
+            libgl1-mesa-dev ninja-build xvfb
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-9.0.2-${{ runner.os }}
+      - name: Configure
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Headless screenshot (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          APP=$(find build -type f -name "Flubsound Pro" -perm -u+x | head -n 1)
+          xvfb-run -a "$APP" --screenshot screenshot-music.png --mode music --size 1440x900
+          xvfb-run -a "$APP" --screenshot screenshot-gaming.png --mode gaming --size 1440x900
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: screenshots
+          path: screenshot-*.png

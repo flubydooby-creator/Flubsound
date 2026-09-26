@@ -101,7 +101,7 @@ private:
 
     // Modules (owned) and their bypass slots, in processing order.
     SpectralNoiseGate gate;
-    ParametricEq eq;
+    ParametricEq paramEq;
     DynamicEq dynEq;
     BassEngine bass;
     ClarityEnhancer clarity;
@@ -125,6 +125,7 @@ private:
     // Global bypass dry path (post input stage, stereo, delayed by totalLatency)
     AudioBuffer dryBuffer;
     DelayLine dryDelay;
+    float dryPeakHold = 0.0f, dryPeakRelease = 0.0f; // keeps the matched reference below the ceiling
 
     // Metering
     LevelMeter inLevel, outLevel;
