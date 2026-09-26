@@ -38,7 +38,8 @@
 // Type changes are crossfaded over 20 ms in the oversampled domain (both
 // curves run during the fade); the tube DC blocker and the tape head bump run
 // continuously and are faded with matching weights. Everything is per-sample
-// state, and blocks are split only where a type crossfade ends, so the output
+// state, and blocks are split only where a type crossfade ends (and into
+// spec.maxBlockSize chunks for the scratch buffers), so the output
 // is identical for any host block size (bit-exact apart from when a state
 // below 1e-15 gets flushed to zero, which is checked at segment ends and
 // every 64 oversampled samples for the tape emphasis).

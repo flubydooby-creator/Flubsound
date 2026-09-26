@@ -35,8 +35,8 @@ public:
     static BiquadCoeffs kWeightingStage1 (double sampleRate) noexcept;
     static BiquadCoeffs kWeightingStage2 (double sampleRate) noexcept;
 
-    /** Allocates. numChannels 1..8; channels 3 (LFE) and 4+ (surround weight
-        1.41) are interpreted as 5.1/7.1 only when numChannels >= 6. */
+    /** Allocates. numChannels 1..8; the stream is read as 5.1 / 7.1 only when
+        numChannels >= 6 (LFE excluded, weights per ChannelWeights.h). */
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;              // everything
     void resetIntegrated() noexcept;    // integrated + LRA + max values only
