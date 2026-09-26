@@ -31,9 +31,13 @@
 // neither gain changes nor corner sweeps produce 16-sample steps.
 //
 // Switching subsonic / mono / replace / tighten in or out uses ParkedStage
-// (see header): parked at 10 Hz (subsonic: 5 Hz) the processed path equals
-// the dry one above the subsonic range, so the 20 ms crossfade is inaudible,
-// and the corner then glides (25 ms one-pole in log frequency) to its target.
+// (see header). Engaging: the stage starts with its corner parked at 10 Hz
+// (subsonic: 5 Hz), where the processed path differs from the dry one
+// essentially only below the audible band, crossfades in over 20 ms, and
+// only then glides (25 ms one-pole in log frequency) to its target.
+// Disengaging runs the same sequence backwards (the tighten stage also waits
+// for its shaper gain to return to exactly 1). Corner changes of an engaged
+// stage are plain glides.
 //
 // Detector envelopes use a peak hold so that a steady bass note gives a
 // constant level: no ripple, hence no gain modulation distortion from the
@@ -66,7 +70,7 @@ constexpr double kShelfQ = 0.7;
 constexpr double kDetectorHz = 150.0;
 constexpr float kDetectorAttackMs = 10.0f;
 constexpr float kDetectorReleaseMs = 150.0f;
-constexpr float kProtectionSmoothMs = 5.0f;
+constexpr float kShelfGainSmoothMs = 5.0f;
 constexpr float kProtectionKneeDb = 6.0f;
 constexpr double kHoldMs = 25.0; // half a period of 20 Hz
 
@@ -236,7 +240,7 @@ void BassEngine::reset() noexcept
     boostSmoothed.reset (controlRate, kParamSmoothMs, params.boostDb);
     logBoostHz.reset (controlRate, kFreqGlideMs, std::log (params.boostFrequency));
     thresholdSmoothed.reset (controlRate, kParamSmoothMs, params.protectThresholdDb);
-    shelfGainSmoothed.reset (controlRate, kProtectionSmoothMs, params.boostDb);
+    shelfGainSmoothed.reset (controlRate, kShelfGainSmoothMs, params.boostDb);
     characterSmoothed.reset (controlRate, kParamSmoothMs, params.harmonicsCharacter);
     logCutoff.reset (controlRate, kFreqGlideMs, std::log (params.harmonicsCutoff));
     boostHz = params.boostFrequency;

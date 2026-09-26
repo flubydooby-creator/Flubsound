@@ -989,15 +989,19 @@ TEST_CASE ("HeadphoneVirtualizer [adversarial]: bit-exact under random block par
                 p.lfeGainDb = -5.0f + 15.0f * std::sin (0.9f * ph);
                 v.setParams (p);
                 const int start = k * interval;
+                // Interval 30: a 3-channel host bus (LFE and surrounds missing).
+                // The 20 ms LFE ramp started there is still running when the
+                // LFE comes back.
+                const int channels = k == 30 ? 3 : 8;
                 if (seed == 0)
                 {
-                    v.process (buf.block (start, interval));
+                    v.process (buf.block (start, interval).firstChannels (channels));
                     continue;
                 }
                 int pos = start;
                 for (int len : randomPartition (interval, 4096, seed * 977u + static_cast<uint32_t> (k)))
                 {
-                    v.process (buf.block (pos, len));
+                    v.process (buf.block (pos, len).firstChannels (channels));
                     pos += len;
                 }
             }

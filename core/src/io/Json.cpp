@@ -187,12 +187,14 @@ private:
     bool fail (size_t offset, const std::string& message)
     {
         // Count lines and code points (not bytes) up to the error so the column
-        // matches what a text editor shows for UTF-8 content.
+        // matches what a text editor shows for UTF-8 content. LF, CRLF and a lone
+        // CR (classic Mac line ending; CR is JSON whitespace) each end a line.
         size_t line = 1, column = 1;
         for (size_t i = contentStart; i < offset && i < text.size(); ++i)
         {
             const auto c = static_cast<unsigned char> (text[i]);
-            if (c == '\n')
+            const bool loneCr = c == '\r' && (i + 1 >= text.size() || text[i + 1] != '\n');
+            if (c == '\n' || loneCr)
             {
                 ++line;
                 column = 1;
@@ -689,8 +691,15 @@ const Value& Value::operator[] (const std::string& key) const
 void Value::set (const std::string& key, Value v)
 {
     // Any non-object (not only null) becomes an empty object so set() always takes effect.
+    // The new object is built before `data` is replaced: `key` may refer into this
+    // value (e.g. v.set (v.asString(), x)) and would dangle once the old string dies.
     if (! isObject())
-        data = Object {};
+    {
+        Object members;
+        members.emplace_back (key, std::move (v));
+        data = std::move (members);
+        return;
+    }
     auto& members = std::get<Object> (data);
     for (auto it = members.rbegin(); it != members.rend(); ++it)
     {

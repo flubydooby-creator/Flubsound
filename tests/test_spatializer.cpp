@@ -402,10 +402,21 @@ TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono s
     CHECK_NEAR (sp.getCorrelation(), 0.6, 0.1);
     CHECK_NEAR (sp.getEffectiveWidth(), 1.0, 0.0);
 
-    // The ambience is high-passed: little S below 300 Hz.
-    const double lowS = toneAmplitude (s.data(), len, 60.0, kFs);
-    const double highS = toneAmplitude (s.data(), len, 3000.0, kFs);
-    CHECK_LE (lowS, highS);
+    // Steady mono sines: the all-pass network is flat, so S / M is exactly
+    // 0.5 |HP_300 (f)| - -6.02 dB well above 300 Hz, < -25 dB at 80 Hz.
+    const auto monoSineSideDb = [&p] (double freq) {
+        StereoSpatializer sine1;
+        setUp (sine1, p);
+        const int total = 72000, from = 24000;
+        const auto y = sine (freq, kFs, total, 0.4f);
+        Planar o = stereo (y, y);
+        processInBlocks (sine1, o, 512);
+        const auto sOut = sideOf (o, from, total - from);
+        return toDb (toneAmplitude (sOut.data(), total - from, freq, kFs) / 0.4);
+    };
+    CHECK_NEAR (monoSineSideDb (3000.0), -6.02, 0.05);
+    CHECK_NEAR (monoSineSideDb (9000.0), -6.02, 0.05);
+    CHECK_LE (monoSineSideDb (80.0), -25.0);
 
     // Half the amount -> half the ambience amplitude.
     p.space = 0.5f;

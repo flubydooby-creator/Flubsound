@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <new>
@@ -107,6 +108,21 @@ bool isPlausibleChunkId (const uint8_t* p) noexcept
     return true;
 }
 
+/** Chunk IDs that appear in real WAV files. Used only to break the tie when an
+    odd-sized chunk may or may not be followed by its pad byte and both candidate
+    offsets hold printable IDs (e.g. a missing pad before "data" whose size has a
+    printable low byte would otherwise read as the plausible ID "ata?"). */
+bool isKnownChunkId (const uint8_t* p) noexcept
+{
+    static constexpr const char* known[] = { "data", "fmt ", "fact", "LIST", "bext", "JUNK", "junk", "PAD ", "FLLR",
+                                             "cue ", "smpl", "inst", "iXML", "id3 ", "ID3 ", "PEAK", "acid", "cart",
+                                             "_PMX", "axml", "levl", "umid", "chna", "DISP", "plst", "labl", "ltxt" };
+    for (const char* id : known)
+        if (std::memcmp (p, id, 4) == 0)
+            return true;
+    return false;
+}
+
 std::string describeId (const uint8_t* p)
 {
     std::string s = "'";
@@ -131,6 +147,25 @@ struct WavFormat
     SampleFormat format = SampleFormat::Float32;
 };
 
+/** Container bytes per sample for integer PCM. Normally ceil (bits / 8), but a
+    non-EXTENSIBLE file may declare e.g. 24 bits while nBlockAlign says each sample
+    sits in a 4-byte slot. Ignoring nBlockAlign then misframes every sample into
+    garbage, so a per-channel slot that is larger than needed (and at most 4 bytes)
+    wins; the valid bits are taken as left-justified, as in WAVE_FORMAT_EXTENSIBLE.
+    Nonsense block aligns (smaller than needed, not a multiple of the channel
+    count, a bit count written as bytes...) are ignored. */
+int pcmContainerBytes (uint32_t bits, uint32_t channels, uint32_t blockAlign) noexcept
+{
+    const auto needed = (bits + 7) / 8;
+    if (blockAlign != 0 && blockAlign % channels == 0)
+    {
+        const uint32_t slot = blockAlign / channels;
+        if (slot > needed && slot <= 4)
+            return static_cast<int> (slot);
+    }
+    return static_cast<int> (needed);
+}
+
 /** p holds min (chunkSize, kMaxFmtBytes) bytes of the fmt chunk body. */
 bool parseFmt (const uint8_t* p, uint32_t chunkSize, WavFormat& fmt, std::string& message)
 {
@@ -143,6 +178,7 @@ bool parseFmt (const uint8_t* p, uint32_t chunkSize, WavFormat& fmt, std::string
     uint32_t tag = loadU16 (p);
     const uint32_t channels = loadU16 (p + 2);
     const uint32_t rate = loadU32 (p + 4);
+    const uint32_t blockAlign = loadU16 (p + 12);
     const uint32_t bits = loadU16 (p + 14); // container size for EXTENSIBLE
 
     if (tag == kTagExtensible)
@@ -182,7 +218,8 @@ bool parseFmt (const uint8_t* p, uint32_t chunkSize, WavFormat& fmt, std::string
     if (tag == kTagPcm)
     {
         // Non-EXTENSIBLE PCM may declare e.g. 20 bits in a 3-byte container; the
-        // container is ceil (bits / 8) bytes and the samples are left-justified.
+        // container is ceil (bits / 8) bytes (or the nBlockAlign slot, see
+        // pcmContainerBytes) and the samples are left-justified.
         if (bits >= 1 && bits <= 8)
         {
             message = "8-bit PCM is not supported";
@@ -193,7 +230,7 @@ bool parseFmt (const uint8_t* p, uint32_t chunkSize, WavFormat& fmt, std::string
             message = "unsupported PCM bit depth (" + std::to_string (bits) + ")";
             return false;
         }
-        fmt.bytesPerSample = static_cast<int> ((bits + 7) / 8);
+        fmt.bytesPerSample = pcmContainerBytes (bits, channels, blockAlign);
         fmt.format = fmt.bytesPerSample == 2 ? SampleFormat::Pcm16 : (fmt.bytesPerSample == 3 ? SampleFormat::Pcm24 : SampleFormat::Pcm32);
     }
     else if (tag == kTagFloat)
@@ -232,12 +269,6 @@ public:
         stream.seekg (static_cast<std::streamoff> (offset), std::ios::beg);
         stream.read (reinterpret_cast<char*> (dst), static_cast<std::streamsize> (numBytes));
         return stream.gcount() == static_cast<std::streamsize> (numBytes);
-    }
-
-    bool plausibleIdAt (int64_t offset)
-    {
-        uint8_t id[4];
-        return readAt (offset, id, 4) && isPlausibleChunkId (id);
     }
 
 private:
@@ -296,6 +327,12 @@ bool readWavImpl (const std::string& path, AudioFileData& out, std::string& erro
         error = path + ": " + message;
         return false;
     };
+
+    // A directory opens fine on Linux and seeking to its end reports a bogus size
+    // (LLONG_MAX on ext4), which would give a baffling "too short" message.
+    std::error_code ec;
+    if (std::filesystem::is_directory (path, ec))
+        return fail ("is a directory");
 
     in.seekg (0, std::ios::end);
     const auto endPos = static_cast<int64_t> (in.tellg());
@@ -361,12 +398,15 @@ bool readWavImpl (const std::string& path, AudioFileData& out, std::string& erro
         }
 
         // Odd-sized chunks are followed by a pad byte. Some writers forget it, so the
-        // pad is skipped unless doing so lands on garbage while the unpadded offset
-        // holds a plausible chunk ID.
+        // pad is skipped unless doing so lands on garbage (or on an unknown ID) while
+        // the unpadded offset holds a plausible (or a known) chunk ID.
         int64_t next = body + static_cast<int64_t> (size);
         if ((size & 1u) != 0)
         {
-            const bool padMissing = ! reader.plausibleIdAt (next + 1) && reader.plausibleIdAt (next);
+            uint8_t padded[4] {}, unpadded[4] {};
+            const bool paddedOk = reader.readAt (next + 1, padded, 4) && isPlausibleChunkId (padded);
+            const bool unpaddedOk = reader.readAt (next, unpadded, 4) && isPlausibleChunkId (unpadded);
+            const bool padMissing = unpaddedOk && (! paddedOk || (isKnownChunkId (unpadded) && ! isKnownChunkId (padded)));
             if (! padMissing)
                 ++next;
         }
@@ -385,7 +425,11 @@ bool readWavImpl (const std::string& path, AudioFileData& out, std::string& erro
     result.sampleRate = static_cast<double> (fmt.sampleRate);
     result.numChannels = fmt.numChannels;
     result.sourceFormat = fmt.format;
-    result.channels.assign (static_cast<size_t> (fmt.numChannels), std::vector<float> (static_cast<size_t> (numFrames)));
+    // Sized per channel: assign (n, vector (frames)) would build an extra prototype
+    // buffer and raise the peak memory by one channel for long files.
+    result.channels.resize (static_cast<size_t> (fmt.numChannels));
+    for (auto& ch : result.channels)
+        ch.resize (static_cast<size_t> (numFrames));
 
     std::vector<uint8_t> buffer (static_cast<size_t> (std::min (numFrames, kBlockFrames) * frameBytes));
     for (int64_t frame = 0; frame < numFrames;)
@@ -502,6 +546,11 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
     if (! (data.sampleRate >= 1.0 && data.sampleRate <= 4294967295.0)) // also rejects NaN
         return fail ("invalid sample rate");
     const auto sampleRate = static_cast<uint32_t> (std::llround (data.sampleRate));
+
+    // Checked before any multiplication so a (theoretical) huge frame count cannot
+    // wrap the 64-bit size arithmetic below into a small, "valid" header.
+    if (numFrames > static_cast<size_t> (kMaxRiffSize))
+        return fail ("audio is too long for a RIFF/WAVE file (4 GiB limit; RF64 is not supported)");
 
     const bool isFloat = format == SampleFormat::Float32;
     const bool extensible = numChannels > 2;
@@ -624,7 +673,11 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
     if (! f)
     {
         f.close();
-        std::remove (path.c_str()); // do not leave a truncated file behind
+        // Do not leave a truncated file behind - but only delete regular files: the
+        // path may be a device or FIFO (e.g. /dev/full), which must never be unlinked.
+        std::error_code ec;
+        if (std::filesystem::is_regular_file (path, ec))
+            std::filesystem::remove (path, ec);
         return fail ("write error (disk full?)");
     }
     return true;

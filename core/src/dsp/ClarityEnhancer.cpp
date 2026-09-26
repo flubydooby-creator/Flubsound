@@ -439,9 +439,10 @@ void ClarityEnhancer::processBell (DynamicBell& bell, const AudioBlock& block, i
 {
     const size_t n = static_cast<size_t> (len);
 
-    // Linked detection on this stage's input: per sample, max over channels.
+    // Linked detection on this stage's input: per sample, max over channels
+    // of the squared band-pass output (and of the squared input for the
+    // broadband reference), then one mean-square follower each.
     std::fill_n (scratchA.begin(), n, 0.0f);
-    std::fill_n (scratchB.begin(), n, 0.0f);
     const SvfCoeffs det = bell.detector;
     for (int c = 0; c < numCh; ++c)
     {
@@ -451,15 +452,24 @@ void ClarityEnhancer::processBell (DynamicBell& bell, const AudioBlock& block, i
         {
             const float d = svfTick (det, s, x[i]);
             scratchA[i] = std::max (scratchA[i], d * d);
-            scratchB[i] = std::max (scratchB[i], x[i] * x[i]);
         }
         bell.detectorState[static_cast<size_t> (c)] = s;
     }
     for (size_t i = 0; i < n; ++i)
         bell.bandMs = scratchA[i] + msCoeff * (bell.bandMs - scratchA[i]);
+
     if (trackBroadband)
+    {
+        std::fill_n (scratchB.begin(), n, 0.0f);
+        for (int c = 0; c < numCh; ++c)
+        {
+            const float* x = block.channel (c) + pos;
+            for (size_t i = 0; i < n; ++i)
+                scratchB[i] = std::max (scratchB[i], x[i] * x[i]);
+        }
         for (size_t i = 0; i < n; ++i)
             bell.broadMs = scratchB[i] + msCoeff * (bell.broadMs - scratchB[i]);
+    }
 
     // The EQ runs whenever the stage is active (also at 0 dB, where it is an
     // exact identity) so its state is always current when the gain moves.

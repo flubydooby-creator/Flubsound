@@ -56,7 +56,8 @@ constexpr float kSilenceLevel = 1.0e-7f;
 // Keeps every power strictly positive (-200 dB, far below any real noise floor)
 // so ratios and logs stay finite and the smoothers never go subnormal.
 constexpr float kPowerOffset = 1.0e-20f;
-// Clamp (also catches NaN) so the per-bin state cannot overflow or be poisoned.
+// A frame whose power is not below this (NaN / Inf / absurd input) is skipped,
+// so the per-bin state can neither overflow nor be poisoned.
 constexpr float kMaxPower = 1.0e30f;
 // P_k / N_k is clamped to +-200 dB: far beyond both ends of the gate curve.
 constexpr float kMinRatio = 1.0e-20f;
@@ -349,7 +350,7 @@ void SpectralNoiseGate::processFrame (ChannelState& st) noexcept
     else if (st.holdFrames > 0)
         --st.holdFrames;               // P_k still settling on the new material
     else
-        adaptFloor = ! params.freezeFloor || st.learnFrames > 0; // freeze holds a learned profile
+        adaptFloor = ! params.freezeFloor || st.learnFrames > 0; // freeze holds the profile once learned
 
     const bool firstProfile = adaptFloor && ! st.floorValid;
     if (adaptFloor)

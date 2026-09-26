@@ -806,8 +806,13 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
             renderParametric<false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
         }
     }
-    if (! lfeRendered)
-        lfeGain.skip (length); // keep the ramp in stream time
+    if (! lfeRendered && lfeGain.isSmoothing())
+    {
+        // Keep the ramp in stream time. Stepped per sample (not skip()) so the
+        // float value is the same for any block partition.
+        for (int i = 0; i < length; ++i)
+            lfeGain.next();
+    }
 
     renderReflections (length);
 
