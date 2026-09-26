@@ -198,7 +198,19 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             totalLatency += slots[static_cast<size_t> (s)].latencySamples();
 
     dryBuffer.setSize (2, maxB);
-    dryDelay.prepare (2, totalLatency);
+    // The bypass reference's safety limiter lives inside the chain latency:
+    // up to 1 ms look-ahead plus the 4x detector delay when the latency
+    // allows (every profile at 22.05 kHz and above), sample-peak otherwise.
+    {
+        const int detector = TruePeakDetector::kDelay;
+        const bool truePeak = totalLatency >= detector + 8;
+        const int lookahead = truePeak ? std::min (totalLatency - detector, std::max (1, static_cast<int> (std::lround (0.001 * sr))))
+                                       : totalLatency;
+        dryLimiter.setTruePeakDetection (truePeak);
+        dryLimiter.setLookaheadMs (static_cast<float> (1000.0 * lookahead / sr));
+        dryLimiter.prepare ({ sr, maxB, 2 });
+    }
+    dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples()));
     foldScratch.setSize (config.inputChannels, maxB);
     virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) ? 1.0f : 0.0f);
 
@@ -232,6 +244,8 @@ void ProcessingChain::reset() noexcept
     virtualizer.reset();
     virtMix.setImmediate (virtMix.getTarget());
     dryDelay.reset();
+    dryLimiter.reset();
+    dryLimiterRunning = false;
     autoLevel.reset();
     autoDrive.reset();
     governor.reset();
@@ -275,6 +289,7 @@ void ProcessingChain::applyParameters() noexcept
     autoLevel.setEnabled (on (e, AutoLevelOn));
     autoLevel.setTargetLufs (e[AutoLevelTargetLufs]);
     bypassMix.setTarget (on (e, BypassAll) ? 1.0f : 0.0f);
+    dryLimiter.setParams ({ e[MaxCeilingDb], 80.0f, true });
     if (const float vt = active (VirtualizerOn) ? 1.0f : 0.0f; vt != virtMix.getTarget())
     {
         // Switching on from fully off: the renderer has not run, so start it
@@ -589,19 +604,37 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 
     if (bypassMix.getCurrent() > 0.0f || bypassMix.isSmoothing())
     {
+        // The per-block cap above keeps the match gain sensible, but a new,
+        // louder dry peak can arrive while the gain is still high: the
+        // reference therefore passes a true-peak limiter at the ceiling. It
+        // runs only while bypass is engaged; started cold, it outputs silence
+        // for its latency (<= ~1.4 ms) at the very start of the 30 ms
+        // crossfade, where the dry weight is still below 5 %.
+        if (! dryLimiterRunning)
+        {
+            dryLimiter.reset();
+            dryLimiterRunning = true;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            const float dg = dryMatchGain.next();
+            for (int c = 0; c < 2; ++c)
+                dry.channel (c)[i] *= dg;
+        }
+        dryLimiter.process (dry);
         for (int i = 0; i < n; ++i)
         {
             const float b = bypassMix.next();
-            const float dg = dryMatchGain.next();
             for (int c = 0; c < 2; ++c)
             {
                 float* w = st.channel (c);
-                w[i] += b * (dg * dry.channel (c)[i] - w[i]);
+                w[i] += b * (dry.channel (c)[i] - w[i]);
             }
         }
     }
     else
     {
+        dryLimiterRunning = false;
         dryMatchGain.skip (n);
     }
 

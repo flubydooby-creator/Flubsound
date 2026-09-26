@@ -157,9 +157,14 @@ private:
     LinearSmoothedValue virtMix;
     AudioBuffer foldScratch;
 
-    // Global bypass dry path (post input stage, stereo, delayed by totalLatency)
+    // Global bypass dry path (post input stage, stereo): delayed by
+    // totalLatency - dryLimiter latency, then (while bypass is engaged)
+    // loudness-matched and true-peak limited at the ceiling by dryLimiter, so
+    // it lines up with the processed path and never overshoots.
     AudioBuffer dryBuffer;
     DelayLine dryDelay;
+    TruePeakLimiter dryLimiter;
+    bool dryLimiterRunning = false;
     float dryPeakHold = 0.0f, dryPeakRelease = 0.0f; // keeps the matched reference below the ceiling
 
     // Metering

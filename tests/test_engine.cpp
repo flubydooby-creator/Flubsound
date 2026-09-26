@@ -516,6 +516,51 @@ TEST_CASE ("Chain: loudness-matched global bypass tracks the processed loudness 
     CHECK_LE (peakAbs (buf.ch[0].data() + 48000, 48000), dbToGain (-1.0f) + 1e-3);
 }
 
+TEST_CASE ("Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives")
+{
+    // The processed output (Loudness macro) is far louder than the input, so
+    // the matched bypass lifts the dry reference. Kicks that keep getting
+    // louder then meet a match gain chosen for the quieter past: the
+    // reference must still stay at the ceiling (sample and true peak).
+    for (int profile = 0; profile < 3; ++profile)
+    {
+        ParameterStore store;
+        store.set (LatencyProfile, static_cast<float> (profile));
+        store.set (Macro4, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        const int n = static_cast<int> (kFs * 10.0);
+        Planar buf (2, n);
+        FastRandom rng (5);
+        float lp = 0.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / kFs;
+            lp += 0.05f * (rng.nextBipolar() - lp);                        // dull noise bed
+            const double beat = std::fmod (t, 0.5);
+            const double kickLevel = std::pow (10.0, (-26.0 + 2.6 * t) / 20.0); // -26 dBFS rising to 0 dBFS
+            const double kick = kickLevel * std::exp (-beat * 12.0) * std::sin (kTwoPi * 55.0 * beat);
+            const double burst = std::fmod (t, 1.7) < 0.02 ? 0.5 * kickLevel * rng.nextBipolar() : 0.0;
+            for (auto& c : buf.ch)
+                c[static_cast<size_t> (i)] = static_cast<float> (0.08 * lp + kick + burst);
+        }
+        const int bypassFrom = static_cast<int> (kFs * 4.0);
+        for (int pos = 0; pos < n; pos += 512)
+        {
+            if (pos == bypassFrom)
+                store.set (BypassAll, 1.0f);
+            chain.process (buf.block (pos, std::min (512, n - pos)));
+        }
+        const int from = bypassFrom + static_cast<int> (kFs * 0.1);
+        TruePeakMeter tp;
+        tp.prepare (2);
+        tp.process (buf.block (from, n - from));
+        CHECK_LE (tp.getMaxDbAllChannels(), -1.0 + 0.15);
+        for (auto& c : buf.ch)
+            CHECK_LE (peakAbs (c.data() + from, n - from), dbToGain (-1.0f) + 1e-6);
+    }
+}
+
 TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-limited")
 {
     MixEngine mix;
