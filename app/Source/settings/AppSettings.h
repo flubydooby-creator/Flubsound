@@ -116,6 +116,11 @@ public:
     juce::String getWindowState() const;
     void setWindowState (const juce::String& state);
 
+    /** The output device the user chose (e.g. a USB headset); restored when it
+        reappears after being unplugged / powered off. */
+    juce::String getPreferredOutputDevice() const;
+    void setPreferredOutputDevice (const juce::String& name);
+
     // ---- App routing -------------------------------------------------------------------
     enum class RoutingMethod { Automatic, EndpointRouting, ProcessCapture, Disabled };
     RoutingMethod getRoutingMethod() const;

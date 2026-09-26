@@ -26,7 +26,7 @@
 // Stages, in order: louder = max.drive (0..24 dB), then input.gain (ahead of
 // the maximizer, so the ceiling still holds); quieter = max.drive down to
 // 0 dB, then output.gain (post-maximizer attenuation). With the maximizer off
-// only output.gain is used. The pass closest to the target is delivered.
+// output.gain is used (and input.gain when output.gain is at its maximum). The pass closest to the target is delivered.
 // Targeting is skipped (with a warning) for bypass=on and for programmes
 // without a measurable integrated loudness.
 //

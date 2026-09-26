@@ -20,6 +20,7 @@ constexpr const char* hotkeysEnabled = "hotkeys.enabled";
 constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
 constexpr const char* windowState = "ui.windowState";
+constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
 } // namespace Keys
@@ -379,6 +380,8 @@ bool AppSettings::getCloseToTray() const { return properties->getBoolValue (Keys
 void AppSettings::setCloseToTray (bool shouldCloseToTray) { properties->setValue (Keys::closeToTray, shouldCloseToTray); }
 juce::String AppSettings::getWindowState() const { return properties->getValue (Keys::windowState); }
 void AppSettings::setWindowState (const juce::String& state) { properties->setValue (Keys::windowState, state); }
+juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
+void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 
 // ---- App routing ----------------------------------------------------------------------------------------
 AppSettings::RoutingMethod AppSettings::getRoutingMethod() const

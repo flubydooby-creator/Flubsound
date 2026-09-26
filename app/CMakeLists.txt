@@ -11,7 +11,11 @@
 #   platform/    PlatformServices.h (fixed interface), PlatformBridge.* (guards
 #                the optional platform implementation), PlatformServices_<os>.*
 #                (owned by the platform engineer)
-#   ui/          MainComponent (placeholder; replaced by the full UI)
+#   ui/          the GUI: MainComponent (layout + frame loop), FlubLookAndFeel,
+#                ParameterBinding, HeaderBar, SettingsDialog, BoostPanel,
+#                AnalyzerPanel (SpectrumAnalyzer + EqCurveEditor), LevelMeters,
+#                LoudnessPanel, WaveformHistory, ModuleRack / ModuleCard /
+#                ParamGrid, RoutingPanel, shared Theme / Widgets / ParamKnob
 #
 # Options:
 #   FLUB_ASIO_SDK_DIR        Steinberg ASIO SDK root (enables JUCE_ASIO on Windows)
@@ -50,7 +54,27 @@ set(FLUB_APP_SOURCES
     Source/shell/TrayIcon.cpp
     Source/shell/HotkeyManager.cpp
     Source/shell/ScreenshotDriver.cpp
-    Source/ui/MainComponent.cpp)
+    Source/ui/AnalyzerFeed.cpp
+    Source/ui/AnalyzerPanel.cpp
+    Source/ui/BoostPanel.cpp
+    Source/ui/EqCurveEditor.cpp
+    Source/ui/FlubLookAndFeel.cpp
+    Source/ui/HeaderBar.cpp
+    Source/ui/LevelMeters.cpp
+    Source/ui/LoudnessPanel.cpp
+    Source/ui/MainComponent.cpp
+    Source/ui/MeterSnapshot.cpp
+    Source/ui/ModuleCard.cpp
+    Source/ui/ModuleRack.cpp
+    Source/ui/ParamGrid.cpp
+    Source/ui/ParamKnob.cpp
+    Source/ui/ParameterBinding.cpp
+    Source/ui/RoutingPanel.cpp
+    Source/ui/SettingsDialog.cpp
+    Source/ui/SpectrumAnalyzer.cpp
+    Source/ui/Theme.cpp
+    Source/ui/WaveformHistory.cpp
+    Source/ui/Widgets.cpp)
 
 target_sources(FlubsoundPro PRIVATE ${FLUB_APP_SOURCES})
 target_include_directories(FlubsoundPro PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Source")

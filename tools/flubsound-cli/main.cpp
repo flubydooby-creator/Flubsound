@@ -550,6 +550,10 @@ int runBatch (const CliOptions& o)
 
     // ---- Collect jobs --------------------------------------------------------
     const fs::path outCanonical = fs::weakly_canonical (outDir, ec);
+    // Only an output folder nested in the input folder holds files the
+    // recursive scan would pick up (an output folder above the input folder
+    // contains every input, so it must not be used as an exclusion).
+    const bool outputNestedInInput = o.recursive && isInside (outCanonical, fs::weakly_canonical (inDir, ec));
     std::vector<BatchJob> jobs;
     std::vector<std::string> skipped;
     auto consider = [&] (const fs::directory_entry& entry) {
@@ -562,7 +566,7 @@ int runBatch (const CliOptions& o)
             skipped.push_back (rel.generic_string());
             return;
         }
-        if (o.recursive && isInside (fs::weakly_canonical (entry.path(), fileEc), outCanonical))
+        if (outputNestedInInput && isInside (fs::weakly_canonical (entry.path(), fileEc), outCanonical))
             return; // output folder nested in the input folder: never re-process our own results
         jobs.push_back ({ entry.path(), outDir / rel, rel.generic_string() });
     };

@@ -6,6 +6,8 @@
 #include "shell/MainWindow.h"
 #include "shell/ScreenshotDriver.h"
 #include "shell/TrayIcon.h"
+#include "ui/FlubLookAndFeel.h"
+#include "ui/MainComponent.h"
 
 #include <cstdio>
 
@@ -20,18 +22,10 @@ bool commandLineRequestsScreenshot()
 
 std::unique_ptr<juce::LookAndFeel_V4> makeLookAndFeel()
 {
-    using Scheme = juce::LookAndFeel_V4::ColourScheme;
-    auto scheme = juce::LookAndFeel_V4::getDarkColourScheme();
-    scheme.setUIColour (Scheme::windowBackground, MainWindow::backgroundColour());
-    scheme.setUIColour (Scheme::widgetBackground, juce::Colour (0xff171a21));
-    scheme.setUIColour (Scheme::menuBackground, juce::Colour (0xff171a21));
-    scheme.setUIColour (Scheme::outline, juce::Colour (0xff262b36));
-    scheme.setUIColour (Scheme::defaultText, juce::Colour (0xffe5e7eb));
-    scheme.setUIColour (Scheme::defaultFill, juce::Colour (0xff22d3c5));
-    scheme.setUIColour (Scheme::highlightedText, juce::Colour (0xff0f1115));
-    scheme.setUIColour (Scheme::highlightedFill, juce::Colour (0xff22d3c5));
-    scheme.setUIColour (Scheme::menuText, juce::Colour (0xffe5e7eb));
-    return std::make_unique<juce::LookAndFeel_V4> (scheme);
+    // The application-wide look-and-feel is the UI's own: dialogs, alert
+    // windows, tooltips and the tray menu then match the main window, and
+    // the main component switches its accent colour with the mode.
+    return std::make_unique<ui::FlubLookAndFeel>();
 }
 
 void printLine (bool toStdErr, const juce::String& text)
@@ -94,6 +88,20 @@ void FlubsoundApplication::initialiseInteractive()
     hotkeys->registerAll();
     for (const auto& failure : hotkeys->getFailures())
         printLine (true, "Flubsound: hotkey: " + failure);
+
+    // The settings dialog edits the hotkeys: give it access to the manager.
+    if (auto* content = dynamic_cast<ui::MainComponent*> (mainWindow->getContentComponent()))
+    {
+        ui::HotkeyHooks hooks;
+        hooks.isSupported = [this] { return hotkeys != nullptr && hotkeys->isSupported(); };
+        hooks.getFailures = [this] { return hotkeys != nullptr ? hotkeys->getFailures() : juce::StringArray(); };
+        hooks.reRegister = [this]
+        {
+            if (hotkeys != nullptr)
+                hotkeys->registerAll(); // unregisters the previous chords first
+        };
+        content->setHotkeyHooks (std::move (hooks));
+    }
 
     if (controller->getSettings().getStartMinimised())
     {

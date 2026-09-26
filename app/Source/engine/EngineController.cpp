@@ -3,6 +3,7 @@
 #include "flub/engine/MacroMap.h"
 #include "flub/io/Json.h"
 #include "flub/io/PresetIO.h"
+#include "platform/PlatformServices.h"
 
 #include <algorithm>
 #include <cmath>
@@ -94,12 +95,17 @@ EngineController::EngineController (Options opts)
         persistedVersions[static_cast<size_t> (i)] = getParams (i).version();
     }
 
+    loadDeviceProfiles();
+    preferredOutputName = settings->getPreferredOutputDevice();
+
     if (options.openAudioDevice)
     {
         const auto savedState = settings->getDeviceState();
         lastDeviceError = host->openDevice (savedState.get());
         getDeviceManager().addChangeListener (this);
         applyDeviceInputPolicy();
+        trackPreferredOutput (false);
+        updateDeviceProfile();
     }
 
     if (options.enableAppRouting)
@@ -248,6 +254,8 @@ ModeValue EngineController::getMode (int strip)
 void EngineController::setMode (ModeValue mode, int strip)
 {
     getParams (resolveStrip (strip)).set (Mode, static_cast<float> (static_cast<int> (mode)));
+    if (options.openAudioDevice)
+        updateDeviceProfile(); // the suggested preset depends on the mode
     notify (Change::Parameters);
 }
 
@@ -543,10 +551,132 @@ void EngineController::setDeviceInputStrip (int strip)
 
 void EngineController::changeListenerCallback (juce::ChangeBroadcaster*)
 {
-    // The device manager changed (device / rate / block / channels).
+    // The device manager changed (device / rate / block / channels, or a device
+    // appeared / disappeared).
+    trackPreferredOutput (false);
     persistDeviceState();
     applyDeviceInputPolicy();
+    updateDeviceProfile();
     notify (Change::Device);
+}
+
+// =============================================================================
+// Output device profiles (headsets)
+// =============================================================================
+void EngineController::loadDeviceProfiles()
+{
+    std::string error;
+    const auto userFile = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                              .getChildFile ("Flubsound")
+                              .getChildFile ("device-profiles.json");
+    if (userFile.existsAsFile() && deviceProfiles.loadFile (userFile.getFullPathName().toStdString(), error))
+        return;
+    if (! deviceProfiles.loadBuiltIn (error))
+    {
+        DBG ("Flubsound: device profiles unavailable: " << error);
+        juce::ignoreUnused (error);
+    }
+}
+
+juce::String EngineController::getDeviceProfileName() const
+{
+    return deviceMatch.profile != nullptr ? juce::String::fromUTF8 (deviceMatch.profile->displayName.c_str()) : juce::String();
+}
+
+void EngineController::updateDeviceProfile()
+{
+    using flub::device::Connection;
+    auto* device = getDeviceManager().getCurrentAudioDevice();
+    if (device == nullptr)
+    {
+        deviceMatch = {};
+        deviceAdvice = {};
+        currentOutputName = {};
+        host->setMasterCeilingDb (-1.0f);
+        return;
+    }
+
+    currentOutputName = getDeviceManager().getAudioDeviceSetup().outputDeviceName;
+    const double sampleRate = device->getCurrentSampleRate();
+    const int outputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
+
+    // The OS knows the real transport (USB vs Bluetooth vs hands-free) where
+    // it can; name / format heuristics cover the rest.
+    Connection hint = Connection::Unknown;
+    switch (flub::platform::AudioEndpoints::queryOutputTransport (currentOutputName.toStdString()))
+    {
+        case flub::platform::EndpointTransport::Analog: hint = Connection::Analog; break;
+        case flub::platform::EndpointTransport::Usb: hint = Connection::Usb; break;
+        case flub::platform::EndpointTransport::Bluetooth: hint = Connection::Bluetooth; break;
+        case flub::platform::EndpointTransport::BluetoothHandsFree: hint = Connection::BluetoothHandsFree; break;
+        case flub::platform::EndpointTransport::Hdmi:
+        case flub::platform::EndpointTransport::Virtual:
+        case flub::platform::EndpointTransport::Unknown: break;
+    }
+
+    deviceMatch = deviceProfiles.match (currentOutputName.toStdString(), sampleRate, outputChannels, hint);
+    deviceAdvice = flub::device::adviceFor (deviceMatch, sampleRate, getMode (selectedStrip) == ModeValue::Gaming);
+
+    // Applied to the master limiter on the audio thread (atomic hand-off); user
+    // presets keep their own ceilings, the cap only ever lowers the output.
+    host->setMasterCeilingDb (deviceAdvice.ceilingDbTp);
+}
+
+void EngineController::trackPreferredOutput (bool rescan)
+{
+    if (restoringPreferred || ! options.openAudioDevice)
+        return;
+
+    auto& dm = getDeviceManager();
+    const auto current = dm.getAudioDeviceSetup().outputDeviceName;
+    if (preferredOutputName.isEmpty())
+    {
+        if (current.isNotEmpty())
+        {
+            preferredOutputName = current;
+            settings->setPreferredOutputDevice (current);
+        }
+        return;
+    }
+    if (current == preferredOutputName)
+    {
+        preferredMissing = false;
+        return;
+    }
+
+    auto* type = dm.getCurrentDeviceTypeObject();
+    if (type == nullptr)
+        return;
+    if (rescan)
+        type->scanForDevices(); // some backends (e.g. ALSA) do not report hot-plugs themselves
+
+    if (! type->getDeviceNames (false).contains (preferredOutputName))
+    {
+        // The preferred device (e.g. a USB / wireless headset) is gone and JUCE
+        // fell back to another output: keep waiting for it to return.
+        preferredMissing = true;
+        return;
+    }
+
+    if (preferredMissing)
+    {
+        // It is back: switch to it again.
+        auto setup = dm.getAudioDeviceSetup();
+        setup.outputDeviceName = preferredOutputName;
+        restoringPreferred = true;
+        const auto error = dm.setAudioDeviceSetup (setup, true);
+        restoringPreferred = false;
+        preferredMissing = ! error.isEmpty();
+        if (error.isNotEmpty())
+            lastDeviceError = error;
+    }
+    else
+    {
+        // Both devices exist and the user picked a different one: that is the
+        // new preference.
+        preferredOutputName = current;
+        settings->setPreferredOutputDevice (current);
+    }
 }
 
 // =============================================================================
@@ -555,6 +685,18 @@ void EngineController::timerCallback()
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     if (++timerTicks % kPersistEveryTicks == 0)
         persistStripStates (false);
+
+    // While the preferred output (e.g. a headset) is missing, look for it.
+    if (preferredMissing && options.openAudioDevice)
+    {
+        const auto before = getDeviceManager().getAudioDeviceSetup().outputDeviceName;
+        trackPreferredOutput (true);
+        if (getDeviceManager().getAudioDeviceSetup().outputDeviceName != before)
+        {
+            updateDeviceProfile();
+            notify (Change::Device);
+        }
+    }
 }
 
 void EngineController::renderOffline (StripSignalSource& source, int numSamples)

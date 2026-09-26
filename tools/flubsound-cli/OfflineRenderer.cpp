@@ -243,14 +243,19 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
             {
                 knob = OutputGainDb;
             }
+            else if (louder && canMove (InputGainDb, true))
+            {
+                knob = InputGainDb;
+            }
 
             if (knob < 0)
             {
                 std::string why;
-                if (! maximizerOn)
-                    why = louder ? "output.gain is at its maximum (the maximizer is off)" : "output.gain is at its minimum";
+                if (louder)
+                    why = maximizerOn ? "maximizer drive and input.gain are at their maximum"
+                                      : "output.gain and input.gain are at their maximum (the maximizer is off)";
                 else
-                    why = louder ? "maximizer drive and input gain are at their maximum" : "output.gain is at its minimum";
+                    why = "output.gain is at its minimum";
                 result.notes.push_back ("warning: loudness target not reachable: " + why);
                 break;
             }
@@ -280,8 +285,9 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
 
             if (knob == InputGainDb && ! inputNoteAdded)
             {
-                result.notes.push_back ("maximizer drive is at its " + formatFloat ("%.0f", rangeOf (MaxDriveDb).maxValue)
-                                        + " dB maximum: input.gain raised to reach the target");
+                result.notes.push_back (maximizerOn ? "maximizer drive is at its " + formatFloat ("%.0f", rangeOf (MaxDriveDb).maxValue)
+                                                          + " dB maximum: input.gain raised to reach the target"
+                                                    : std::string ("input.gain raised to reach the target (the maximizer is off)"));
                 inputNoteAdded = true;
             }
             if (knob == OutputGainDb && maximizerOn && ! outputNoteAdded)
@@ -333,7 +339,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     if (iterated && ! result.targetReached)
         result.notes.push_back ("warning: loudness target missed by "
                                 + formatFloat ("%.2f", std::abs (bestReport.integratedLufs - *settings.targetLufs)) + " LU after "
-                                + std::to_string (result.passes) + " passes");
+                                + std::to_string (result.passes) + (result.passes == 1 ? " pass" : " passes"));
 
     result.output.sampleRate = input.sampleRate;
     result.output.numChannels = 2;

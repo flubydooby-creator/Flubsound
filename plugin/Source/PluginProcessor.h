@@ -108,6 +108,10 @@ private:
 
     // Audio-thread view of the APVTS (pointers are stable for the lifetime of the APVTS).
     std::array<std::atomic<float>*, flub::param::kNumParams> rawValues {};
+    // Cached: wrappers (VST3, VST2, AAX, AudioProcessorGraph) call
+    // getBypassParameter() on the audio thread for every block, so it must
+    // not build a String and search the APVTS there.
+    juce::AudioProcessorParameter* bypassParameter = nullptr;
     std::array<float, flub::param::kNumParams> lastPushed {}; // audio thread (or while suspended)
 
     // Prepared configuration (written while processing is stopped / suspended).
@@ -116,7 +120,7 @@ private:
     bool duplicateMono = false;
     double preparedSampleRate = 48000.0;
     int preparedBlockSize = 0;
-    int preparedProfile = -1;
+    int preparedProfile = -1; // guarded by prepareMutex (prepareToPlay may run off the message thread)
     std::atomic<bool> prepared { false };
     std::atomic<int> reportedLatency { 0 };
     std::mutex prepareMutex; // prepareToPlay / releaseResources vs. the re-prepare timer (never on the audio thread)

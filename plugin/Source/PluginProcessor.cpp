@@ -212,6 +212,9 @@ FlubsoundProcessor::FlubsoundProcessor()
     for (int c = 0; c < flub::kMaxChannels; ++c)
         channelMap[static_cast<size_t> (c)] = c;
 
+    bypassParameter = apvts.getParameter (juce::String (table[static_cast<size_t> (flub::param::BypassAll)].key));
+    jassert (bypassParameter != nullptr);
+
     pushParametersToStore();
     startTimerHz (kStructuralPollHz);
 }
@@ -337,14 +340,22 @@ void FlubsoundProcessor::timerCallback()
 
     const auto* raw = rawValues[static_cast<size_t> (flub::param::LatencyProfile)];
     const int wanted = static_cast<int> (std::lround (raw->load (std::memory_order_relaxed)));
-    if (wanted == preparedProfile)
-        return;
+    {
+        // preparedProfile is written by prepareToPlay (possibly on another thread).
+        const std::lock_guard<std::mutex> lock (prepareMutex);
+        if (wanted == preparedProfile)
+            return;
+    }
 
-    const std::lock_guard<std::mutex> lock (prepareMutex);
-    if (! prepared.load (std::memory_order_acquire))
-        return;
+    // Lock order: the callback lock is never requested while prepareMutex is
+    // held. Some wrappers call prepareToPlay with the callback lock held (AU
+    // offline-render switch), so the opposite order could deadlock.
     suspendProcessing (true);
-    prepareChain (preparedSampleRate, preparedBlockSize);
+    {
+        const std::lock_guard<std::mutex> lock (prepareMutex);
+        if (prepared.load (std::memory_order_acquire) && wanted != preparedProfile)
+            prepareChain (preparedSampleRate, preparedBlockSize);
+    }
     suspendProcessing (false);
 }
 
@@ -410,7 +421,7 @@ void FlubsoundProcessor::processInternal (juce::AudioBuffer<float>& buffer, bool
 //==============================================================================
 juce::AudioProcessorParameter* FlubsoundProcessor::getBypassParameter() const
 {
-    return apvts.getParameter (juce::String (flub::param::layout()[static_cast<size_t> (flub::param::BypassAll)].key));
+    return bypassParameter; // RT-safe: called by the wrappers on the audio thread
 }
 
 double FlubsoundProcessor::getTailLengthSeconds() const

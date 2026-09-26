@@ -48,6 +48,8 @@
 #include "presets/PresetManager.h"
 #include "settings/AppSettings.h"
 
+#include "flub/engine/DeviceProfiles.h"
+
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_events/juce_events.h>
 
@@ -158,6 +160,19 @@ public:
     /** Re-opens the device from the saved state (e.g. after a failure). */
     juce::String reopenDevice();
 
+    // ---- Output device profile (headsets, e.g. Turtle Beach families) ------------------
+    /** Advice for the current output device: the ceiling cap already applied to
+        the master limiter (-1 / -2 Bluetooth / -3 dBTP hands-free), whether the
+        format is narrowband, a suggested preset and user-facing guidance. */
+    const flub::device::Advice& getDeviceAdvice() const noexcept { return deviceAdvice; }
+    /** Matched profile ("Turtle Beach Stealth series"); empty for generic devices. */
+    juce::String getDeviceProfileName() const;
+    flub::device::Connection getDeviceConnection() const noexcept { return deviceMatch.connection; }
+    juce::String getOutputDeviceName() const { return currentOutputName; }
+    /** The profile database (shipped, or the user override file
+        <app data>/Flubsound/device-profiles.json when present). */
+    const flub::device::Database& getDeviceProfiles() const noexcept { return deviceProfiles; }
+
     /** Device input -> strip policy (see AppSettings::DeviceInputMode). */
     void setDeviceInputMode (AppSettings::DeviceInputMode mode);
     void setDeviceInputStrip (int strip);
@@ -189,6 +204,9 @@ private:
     void persistStripStates (bool force);
     void applyDeviceInputPolicy();
     void persistDeviceState();
+    void loadDeviceProfiles();
+    void updateDeviceProfile();
+    void trackPreferredOutput (bool rescan);
 
     Options options;
     std::unique_ptr<AppSettings> settings;
@@ -201,6 +219,12 @@ private:
     int selectedStrip = 0, timerTicks = 0;
     std::array<uint32_t, AudioEngineHost::kMaxStrips> persistedVersions {};
     juce::String lastDeviceError;
+
+    flub::device::Database deviceProfiles;
+    flub::device::Match deviceMatch;
+    flub::device::Advice deviceAdvice;
+    juce::String currentOutputName, preferredOutputName;
+    bool preferredMissing = false, restoringPreferred = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };
