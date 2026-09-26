@@ -24,6 +24,11 @@
 //             isSupported() == false (xdg-desktop-portal GlobalShortcuts is
 //             roadmap). No per-process capture: apps are routed into the
 //             null sinks.
+//
+// Start with the OS (AutoStart): Windows HKCU\...\CurrentVersion\Run value;
+// macOS SMAppService.mainAppService (macOS 13+, unsupported on older
+// systems); Linux an XDG autostart entry
+// ($XDG_CONFIG_HOME/autostart/flubsound-pro.desktop).
 #pragma once
 
 #include <cstdint>
@@ -146,6 +151,41 @@ struct AudioEndpoints
           macOS   : kAudioDevicePropertyTransportType
           Linux   : Unknown (heuristics in flub::device::detectConnection) */
     static EndpointTransport queryOutputTransport (const std::string& deviceName);
+};
+
+// ---------------------------------------------------------------------------
+/** "Start Flubsound Pro when I sign in". The OS entry is the source of truth:
+    isEnabled() reads it every time (the user can also remove it in the OS's
+    own start-up settings), it is not a cached flag.
+      Windows : value "Flubsound Pro" = "<quoted exe path>" under
+                HKCU\Software\Microsoft\Windows\CurrentVersion\Run; an entry
+                the user switched off in Task Manager > Startup apps
+                (Explorer\StartupApproved\Run) reads as disabled, and enabling
+                clears that switch.
+      macOS   : SMAppService.mainAppService (Login Items, macOS 13+); the
+                running app bundle is registered, executablePath is ignored.
+                isSupported() == false on older systems.
+      Linux   : $XDG_CONFIG_HOME/autostart/flubsound-pro.desktop (default
+                ~/.config), written atomically. A file with Hidden=true or
+                X-GNOME-Autostart-enabled=false reads as disabled.
+    Blocking file / registry IO: call from the message thread on user action,
+    never from the audio thread. */
+class AutoStart
+{
+public:
+    virtual ~AutoStart() = default;
+    virtual bool isSupported() const = 0;
+
+    /** True when the OS will start the app at the next sign-in. */
+    virtual bool isEnabled() const = 0;
+
+    /** Adds (true) or removes (false) the start-up entry; idempotent.
+        executablePath: absolute UTF-8 path of the program to start; empty =
+        the running executable (Linux: $APPIMAGE when run from an AppImage).
+        Returns false and sets a user-presentable 'error' on failure. */
+    virtual bool setEnabled (bool shouldStart, const std::string& executablePath, std::string& error) = 0;
+
+    static std::unique_ptr<AutoStart> create();
 };
 
 // ---------------------------------------------------------------------------

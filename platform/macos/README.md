@@ -4,7 +4,12 @@ Status: **design.** `app/Source/platform/PlatformServices_mac.mm` implements
 global hotkeys (Carbon `RegisterEventHotKey`), thread tuning
 (`THREAD_TIME_CONSTRAINT_POLICY`) and the output transport query
 (`kAudioDevicePropertyTransportType`, which tells the headset profiles
-USB from Bluetooth). Since macOS 15 (Sequoia),
+USB from Bluetooth), and start at login: `SMAppService.mainAppService`
+(ServiceManagement, macOS 13+) registers the app bundle as a login item,
+the Settings switch reads `status == SMAppServiceStatusEnabled` back, and if
+macOS reports `RequiresApproval` the app opens System Settings › General ›
+Login Items. Older macOS reports it unsupported and the switch is hidden. Not
+yet verified on a Mac. Since macOS 15 (Sequoia),
 `RegisterEventHotKey` rejects shortcuts whose only modifiers are Option or
 Option+Shift, so the UI should suggest chords that include Cmd or Ctrl. Per-app routing and capture report
 `isSupported() == false` until the design below is implemented and tested on

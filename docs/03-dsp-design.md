@@ -1335,7 +1335,7 @@ Test *TransientShaper: parameter changes and onsets move the gain smoothly* boun
 - *Clarity (review): steady tones through shaper, de-mud and presence stay free of modulation products*
 - *Clarity (review): presence and de-mud behave the same at every sample rate*
 
-Chain level: *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)* runs all macros at 100 % at every rate, including the ones where air is forced off.
+Chain level: *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)* runs all macros at 100 % at every rate, including the ones where air is forced off. *Headset: below 42 kHz (hands-free 8 / 16 kHz, USB 32 kHz) the air exciter is cut off - nothing is added above the input band; at 44.1 / 48 kHz the same setting adds its harmonics and shelf* (`tests/test_protection_gaps.cpp`) asserts the guard itself: with only Clarity on and air 100 %, the effective air reads 0 (also when the Clarity macro raises it) and the output at 8, 16 and 32 kHz is the delayed input within 1e−6; at 44.1 and 48 kHz the 2nd harmonic (≥ −30 dB) and the 10 kHz shelf (≥ +1 dB at 12 kHz) are there.
 
 ### 5.9 Reviewed design decisions & known limitations
 
@@ -2768,6 +2768,7 @@ Elsewhere:
 - *Chain: with glue disarmed the maximizer passes hot flat-topped material untouched* (`tests/test_engine.cpp`; ≤ 1e−6 against the delayed input, no gain reduction)
 - *MacroMap: glue is armed only while a source that can raise it is off zero* (`tests/test_engine.cpp`)
 - *SafetyGovernor: backs off under sustained over-limiting and recovers* (`tests/test_engine.cpp`)
+- *Protection: the SafetyGovernor's clip-energy branch alone backs off at 15 %/s, holds inside its hysteresis and recovers at 3 %/s* and *Protection: governed Boost drive into heavy clipping trips the clip-energy budget; the governor scales only the governed contributions, never the base values, and releases when the signal calms* (`tests/test_protection_gaps.cpp`; details in §14.8)
 
 ### 11.9 Known limitations
 
@@ -3354,6 +3355,21 @@ Maximum effective values with Boost and all macros at 100 %:
   - *MixEngine: strips are summed, padded to equal latency and master-limited*
   - *Chain: a NaN/Inf input block is dropped and the chain recovers*
   - *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)*
+
+`tests/test_protection_gaps.cpp`:
+- **SafetyGovernor, clip-energy branch:**
+  - *Protection: the SafetyGovernor's clip-energy branch alone backs off at 15 %/s, holds inside its hysteresis and recovers at 3 %/s* (GR input 0 dB throughout: −20 dB clip energy lowers the scale by 0.15 ± 0.002 per second to exactly 0.3; clean input releases it at 0.06 ± 0.002 per 2 s once the average is under −31.5 dB; −31 dB holds it unchanged for 20 s; one 10 ms block at −3 dB trips it, one at −15 dB does not)
+  - *Protection: governed Boost drive into heavy clipping trips the clip-energy budget; the governor scales only the governed contributions, never the base values, and releases when the signal calms* (base drive 10 dB + Boost 100 %, clipper share 1, 8 s of hot programme: the mirrored 3 s GR average never goes below −4.5 dB while the clip-energy average peaks ≥ 6 dB over its budget (−11 dB measured), the scale reaches ≤ 0.35; every block's effective drive, bass boost, harmonics and saturation drive equal base + amount × the previous block's scale within 1e−4, presence, width and glue never move, and the store is unchanged; 20 s of quiet programme bring the scale back up by ≥ 0.1 (0.30 → 0.55 measured))
+- **LoudnessMatch as a unit:**
+  - *LoudnessMatch: the dry gain converges to the measured wet - dry loudness difference, slewed at exactly 3 dB/s without overshoot* (+6, −9, 0 and +11.5 dB: ≤ 0.03 dB per 10 ms block, 3 dB after 1 s, no reversal above 1e−4 dB, settled within 0.05 dB)
+  - *LoudnessMatch: the gain is bounded to +-12 dB, holds while either side is silent, and reset() returns it to 0 dB*
+- **A/B and bypass clicks:**
+  - *A/B: bank switches and global bypass toggles (matched and unmatched) are click-free on a sine* (1 kHz; bank B = +9 dB EQ at 1 kHz, presence, saturation on, width 1.5, +3 dB drive; around every switch and bypass toggle the largest sample-to-sample step stays within 1.1 × the steady signal's own, measured 1.000–1.002)
+- **Music Width and Clarity macros:**
+  - *Macros: Music Width engages Stereo and raises width 1 -> 1.6 and space 0 -> 0.35 (from 40 %) monotonically, ungoverned, clamped at 2*
+  - *Macros: Music Clarity engages Clarity and Dynamic EQ and raises presence (+0.8), air (+0.7 from 20 %) and de-mud (+0.5 by 70 %) monotonically, ungoverned*
+  - *Macros: through the chain, Width raises the side / mid ratio and Clarity lifts quiet presence-band content, both in proportion to the macro* (side / mid −12.0 / −9.8 / −7.2 dB at Width 0 / 50 / 100 %; a quiet 3.2 kHz tone +0 / +2.4 / +4.8 dB at Clarity 0 / 50 / 100 %, a loud one −2.9 dB at 100 %)
+- **Device ceiling caps:** *Headset: the master limiter at the Bluetooth -2 dBTP and hands-free -3 dBTP caps holds the 4x true peak of hot inter-sample-peak material* (cap from `adviceFor()`, 44.1 / 48 / 16 / 8 kHz, ≥ 6 dB of master gain reduction: true peak ≤ cap + 0.1 dB on the 4× meter and an independent 4× interpolator, sample peak ≤ cap, no safety clamp; measured cap − 0.045 to − 0.050 dB), and the air cut-off test of §5.8.
 
 `tests/test_modes.cpp`: the Gaming mode policy through the full chain, at least one case per Gaming macro (Footsteps: mode band 4 and band 5 lift laws and band 6 anti-masking; Positional: ILD up, mono sum unchanged, a hard-left source stays hard-left; Impact; Detail; Voice & Score: band 7), plus *Gaming: crossfeed is forced off - a hard-left source never leaks into the right ear, whatever the store says*, *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies* (the published effective values read width 1, space 0 and crossfeed 0) and *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*. The Positional case also checks that a hard-left 3 kHz source keeps at least 60 dB of ILD (§7.9).
 

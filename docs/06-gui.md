@@ -46,7 +46,7 @@
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
 | Custom plug-in editor sharing these components | **Roadmap** 2.9. Today the plug-in uses JUCE's generic editor plus a toolbar (§10) | `plugin/Source/PluginEditor.*` |
 | Batch processing UI | **Roadmap** 2.10. Today: `flubsound-cli` | `tools/flubsound-cli` |
-| Start with the OS | **Roadmap** 1.5. Tray, hotkeys and close-to-tray from that item exist | — |
+| Start with the OS | Implemented: Windows `HKCU\…\CurrentVersion\Run`, macOS 13+ `SMAppService` login item (older macOS: hidden), Linux XDG autostart entry. Only the Linux path has been run; the Windows path has been compiled (MinGW) but not run, and the macOS path not yet built or run on a Mac | `ui/SettingsDialog.*`, `app/Source/platform/PlatformServices_*` |
 | Hearing guard, localisation, accessibility audit, UI motion polish | **Roadmap** 2.11, 3.7, 3.6 | — |
 
 ---
@@ -961,7 +961,7 @@ Row heights adapt between 14 and 22 px.
 | **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · every guidance message, one bulleted paragraph each; the box grows with its text and the page scrolls when it is longer than the dialog. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
 | **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare. Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, and "device in + engine + device out (+ app capture) = total" |
 | **Hotkeys** | *Enable system-wide hotkeys* switch. One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. The status line reads one of: "All shortcuts are registered", "Shortcuts are switched off", the chords that failed ("probably used by another application"), an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
-| **General** | *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
+| **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
 
 ---
 
@@ -999,6 +999,7 @@ Row heights adapt between 14 and 22 px.
 - **Close and start-up behaviour** (`FlubsoundApplication`):
   - With *close to tray* on (default **on**) and a tray icon present, the close button hides the window. On Linux, where a tray host is not guaranteed, it minimises instead.
   - With *start minimised* (default off), Windows and macOS start tray-only; Linux starts iconified.
+  - *Start Flubsound Pro when I sign in* (default off) adds or removes the OS's own start-up entry through `platform::AutoStart`: the per-user `Run` registry value on Windows, `SMAppService.mainAppService` on macOS 13+, `$XDG_CONFIG_HOME/autostart/flubsound-pro.desktop` on Linux. The OS entry is the source of truth: each time the General page is shown the switch reads it back, so an entry removed or switched off in the OS's start-up settings shows as off. A failure appears in amber under the switch, which then shows the actual state. The entry starts the plain executable; *start minimised* decides how it opens.
   - A second launch focuses the running instance (`moreThanOneInstanceAllowed()` is false except for `--screenshot`).
   - *Quit* and system quit requests end the app.
 
@@ -1174,6 +1175,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Last preset per strip, strip gain and mute | `AppSettings` per strip name | —, 0 dB, unmuted |
 | Hotkeys, hotkeys enabled | `AppSettings` | §7.2 table, on |
 | Start minimised, close to tray | `AppSettings` | off, on |
+| Start with the OS | `ui.startWithOs`, a copy of the OS entry's state (§7.1) | off |
 | Routing method and routes; preferred output device | `AppSettings` | Automatic; none |
 
 **Not persisted:** banner dismissal (per session and device), the expanded card, the selected EQ band and the Settings page.

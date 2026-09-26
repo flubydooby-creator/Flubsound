@@ -7,8 +7,9 @@
 //
 // Contents: audio device state (AudioDeviceManager XML), per-strip last preset
 // and full parameter state (both A/B banks), master enable, selected strip,
-// device-input routing, hotkey chords, start minimised / close to tray, the
-// app routing map (executable -> strip) and the window position.
+// device-input routing, hotkey chords, start minimised / close to tray / start
+// with the OS, the app routing map (executable -> strip) and the window
+// position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -113,6 +114,13 @@ public:
     void setStartMinimised (bool shouldStartMinimised);
     bool getCloseToTray() const;
     void setCloseToTray (bool shouldCloseToTray);
+    /** Last known state of "Start Flubsound Pro when I sign in" (default off).
+        The OS entry (platform::AutoStart) is the source of truth: Settings >
+        General writes this after each change and re-syncs it from the OS
+        whenever the page is shown, since the user can also remove the entry
+        in the OS's own start-up settings. */
+    bool getStartWithOs() const;
+    void setStartWithOs (bool shouldStartWithOs);
     juce::String getWindowState() const;
     void setWindowState (const juce::String& state);
 

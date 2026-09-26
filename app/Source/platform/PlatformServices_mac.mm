@@ -1,8 +1,10 @@
 // Flubsound Pro - macOS implementation of PlatformServices.h (Objective-C++)
 //
 // Frameworks the app must link: Carbon (RegisterEventHotKey lives in
-// HIToolbox), AppKit (NSWorkspace) - JUCE already links AppKit/Foundation.
-//   CMake: target_link_libraries (<app> PRIVATE "-framework Carbon" "-framework AppKit")
+// HIToolbox), AppKit (NSWorkspace) - JUCE already links AppKit/Foundation -
+// and ServiceManagement (SMAppService, start at login).
+//   CMake: target_link_libraries (<app> PRIVATE "-framework Carbon" "-framework AppKit"
+//                                               "-framework ServiceManagement")
 //
 // Kept deliberately small and conservative: per-app routing and per-process
 // capture are documented designs (see below and platform/macos/README.md)
@@ -23,6 +25,15 @@
 
 #include <map>
 #include <vector>
+
+// SMAppService is declared by the macOS 13 SDK and later; older SDKs build
+// without start-at-login (AutoStart reports isSupported() == false).
+#if __has_include(<ServiceManagement/SMAppService.h>)
+    #import <ServiceManagement/ServiceManagement.h>
+    #define FLUB_HAVE_SMAPPSERVICE 1
+#else
+    #define FLUB_HAVE_SMAPPSERVICE 0
+#endif
 
 namespace flub::platform
 {
@@ -354,6 +365,73 @@ public:
     bool isRunning() const override { return false; }
 };
 
+//==============================================================================
+// AutoStart - SMAppService.mainAppService (Login Items, macOS 13+)
+//==============================================================================
+/*  Registers the running app bundle as a login item; it then shows up in
+    System Settings > General > Login Items, where the user can also remove
+    it (status reads back as not enabled then). Older systems report
+    unsupported: SMLoginItemSetEnabled needs a bundled helper app and
+    LSSharedFileList is deprecated. executablePath is not used. */
+class MacAutoStart final : public AutoStart
+{
+public:
+    bool isSupported() const override
+    {
+#if FLUB_HAVE_SMAPPSERVICE
+        if (@available (macOS 13.0, *))
+            return true;
+#endif
+        return false;
+    }
+
+    bool isEnabled() const override
+    {
+#if FLUB_HAVE_SMAPPSERVICE
+        if (@available (macOS 13.0, *))
+            return [SMAppService mainAppService].status == SMAppServiceStatusEnabled;
+#endif
+        return false;
+    }
+
+    bool setEnabled ([[maybe_unused]] bool shouldStart, const std::string&, std::string& error) override
+    {
+#if FLUB_HAVE_SMAPPSERVICE
+        if (@available (macOS 13.0, *))
+        {
+            @autoreleasepool
+            {
+                SMAppService* service = [SMAppService mainAppService];
+                const SMAppServiceStatus status = service.status;
+                const bool registered = status == SMAppServiceStatusEnabled || status == SMAppServiceStatusRequiresApproval;
+                if (shouldStart ? status == SMAppServiceStatusEnabled : ! registered)
+                    return true; // already in the requested state (unregistering twice is an error)
+
+                NSError* nsError = nil;
+                const BOOL ok = shouldStart ? [service registerAndReturnError:&nsError] : [service unregisterAndReturnError:&nsError];
+                if (! ok)
+                {
+                    const char* reason = nsError != nil ? nsError.localizedDescription.UTF8String : nullptr;
+                    error = std::string (shouldStart ? "Could not add Flubsound Pro to the login items: " : "Could not remove Flubsound Pro from the login items: ")
+                            + (reason != nullptr ? reason : "unknown error");
+                    return false;
+                }
+
+                if (shouldStart && service.status == SMAppServiceStatusRequiresApproval)
+                {
+                    [SMAppService openSystemSettingsLoginItems];
+                    error = "Allow Flubsound Pro in System Settings > General > Login Items to finish.";
+                    return false;
+                }
+                return true;
+            }
+        }
+#endif
+        error = "Starting at login needs macOS 13 or later. Add Flubsound Pro in System Settings > Users & Groups > Login Items instead.";
+        return false;
+    }
+};
+
 // Non-null token returned by promoteAudioThread on success.
 char timeConstraintToken = 0;
 } // namespace
@@ -492,6 +570,7 @@ void SystemTuning::revertAudioThread (void* handle)
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<MacGlobalHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<MacAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<MacProcessLoopbackCapture>(); }
+std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<MacAutoStart>(); }
 } // namespace flub::platform
 
 #endif // __APPLE__

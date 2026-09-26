@@ -12,7 +12,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <optional>
+#include <sstream>
 #include <thread>
 
 using namespace flub::platform;
@@ -364,5 +368,353 @@ TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord ano
     ::dlclose (xtst);
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Start with the OS: XDG autostart entry
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Sets (or, with nullptr, unsets) an environment variable for one scope and
+    restores the previous value afterwards, also when a REQUIRE throws. */
+class ScopedEnv
+{
+public:
+    ScopedEnv (const char* nameIn, const char* value)
+        : name (nameIn)
+    {
+        if (const char* old = std::getenv (name))
+            previous = std::string (old);
+        if (value != nullptr)
+            ::setenv (name, value, 1);
+        else
+            ::unsetenv (name);
+    }
+
+    ~ScopedEnv()
+    {
+        if (previous)
+            ::setenv (name, previous->c_str(), 1);
+        else
+            ::unsetenv (name);
+    }
+
+    ScopedEnv (const ScopedEnv&) = delete;
+    ScopedEnv& operator= (const ScopedEnv&) = delete;
+
+private:
+    const char* name;
+    std::optional<std::string> previous;
+};
+
+/** A fresh directory under $TMPDIR (or /tmp), removed with its contents. */
+struct TempDir
+{
+    TempDir()
+    {
+        const char* base = std::getenv ("TMPDIR");
+        std::string pattern = std::string (base != nullptr && base[0] == '/' ? base : "/tmp") + "/flub-autostart-XXXXXX";
+        if (::mkdtemp (pattern.data()) != nullptr)
+            path = pattern;
+    }
+    ~TempDir()
+    {
+        std::error_code ignored;
+        if (! path.empty())
+            std::filesystem::remove_all (path, ignored);
+    }
+    TempDir (const TempDir&) = delete;
+    TempDir& operator= (const TempDir&) = delete;
+
+    std::string path;
+};
+
+std::string readText (const std::string& path)
+{
+    std::ifstream in (path, std::ios::binary);
+    std::ostringstream text;
+    text << in.rdbuf();
+    return text.str();
+}
+
+void writeText (const std::string& path, const std::string& text)
+{
+    std::ofstream out (path, std::ios::binary | std::ios::trunc);
+    out << text;
+}
+
+/** Reference decoder for an Exec value, written from the Desktop Entry spec
+    independently of the implementation: string-value unescaping (\s \n \t
+    \r \; anything else is invalid), then field codes (only %% is expected
+    here), then the quoting rules (inside "...", a backslash may only precede
+    " ` $ or \). Returns the argument vector; ok = false on any violation. */
+std::vector<std::string> decodeExec (const std::string& value, bool& ok)
+{
+    ok = true;
+    const auto fail = [&ok]
+    {
+        ok = false;
+        return std::vector<std::string>();
+    };
+
+    std::string unescaped;
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        if (value[i] != '\\')
+        {
+            unescaped += value[i];
+            continue;
+        }
+        if (++i >= value.size())
+            return fail();
+        switch (value[i])
+        {
+            case 's': unescaped += ' '; break;
+            case 'n': unescaped += '\n'; break;
+            case 't': unescaped += '\t'; break;
+            case 'r': unescaped += '\r'; break;
+            case '\\': unescaped += '\\'; break;
+            default: return fail();
+        }
+    }
+
+    std::string expanded;
+    for (size_t i = 0; i < unescaped.size(); ++i)
+    {
+        if (unescaped[i] != '%')
+        {
+            expanded += unescaped[i];
+            continue;
+        }
+        if (i + 1 >= unescaped.size() || unescaped[i + 1] != '%')
+            return fail(); // a field code we never write
+        expanded += '%';
+        ++i;
+    }
+
+    const std::string reserved = " \t\n\"'\\><~|&;$*?#()`";
+    std::vector<std::string> args;
+    size_t i = 0;
+    while (i < expanded.size())
+    {
+        if (expanded[i] == ' ')
+        {
+            ++i;
+            continue;
+        }
+        std::string arg;
+        if (expanded[i] == '"')
+        {
+            ++i;
+            bool closed = false;
+            while (i < expanded.size())
+            {
+                const char c = expanded[i++];
+                if (c == '"')
+                {
+                    closed = true;
+                    break;
+                }
+                if (c == '\\')
+                {
+                    if (i >= expanded.size() || std::string ("\"`$\\").find (expanded[i]) == std::string::npos)
+                        return fail();
+                    arg += expanded[i++];
+                    continue;
+                }
+                if (c == '`' || c == '$')
+                    return fail(); // must have been escaped
+                arg += c;
+            }
+            if (! closed)
+                return fail();
+        }
+        else
+        {
+            while (i < expanded.size() && expanded[i] != ' ')
+            {
+                if (reserved.find (expanded[i]) != std::string::npos)
+                    return fail(); // needs quoting
+                arg += expanded[i++];
+            }
+        }
+        args.push_back (arg);
+    }
+    return args;
+}
+
+std::vector<std::string> decodeExecOf (const std::string& program)
+{
+    std::string exec, error;
+    if (! autostart::execValueFor (program, exec, error))
+        return {};
+    bool ok = false;
+    auto args = decodeExec (exec, ok);
+    return ok ? args : std::vector<std::string>();
+}
+} // namespace
+
+TEST_CASE ("Platform: XDG autostart Exec quoting follows the Desktop Entry spec for spaces, quotes and shell characters")
+{
+    std::string exec, error;
+
+    // The spec's own examples: a quote in a quoted argument is \\" in the
+    // file, a dollar \\$, a backslash \\\\.
+    REQUIRE (autostart::execValueFor ("/opt/My \"Apps\"/Flub$ound\\x", exec, error));
+    CHECK (exec == R"("/opt/My \\"Apps\\"/Flub\\$ound\\\\x")");
+    REQUIRE (autostart::execValueFor ("/usr/bin/flubsound-pro", exec, error));
+    CHECK (exec == "\"/usr/bin/flubsound-pro\"");
+    REQUIRE (autostart::execValueFor ("/opt/100%/run", exec, error));
+    CHECK (exec == "\"/opt/100%%/run\"");
+
+    // Every path round-trips through an independent decoder as ONE argument.
+    const std::string paths[] = {
+        "/usr/bin/flubsound-pro",
+        "/home/alex/Flubsound Pro/FlubsoundPro",
+        "/home/o'neil/\"quoted\" dir/`tick`/$HOME/back\\slash/50%/FlubsoundPro",
+        "/home/j\xC3\xBCrgen/Musik & Spiele/(x86)/a;b|c<d>e*f?g#h~i/Flubsound Pro",
+        "/tmp/ends with backslash\\",
+    };
+    for (const auto& path : paths)
+    {
+        const auto args = decodeExecOf (path);
+        REQUIRE (args.size() == 1);
+        CHECK (args[0] == path);
+    }
+
+    // What an Exec line cannot carry is refused with a message.
+    for (const auto& bad : { std::string(), std::string ("FlubsoundPro"), std::string ("relative/dir/FlubsoundPro"),
+                           std::string ("/opt/a\nb"), std::string ("/opt/a\tb"), std::string ("/opt/bad\xFF/utf8"),
+                           std::string ("/opt/overlong\xC0\xAF"), std::string ("/opt/surrogate\xED\xA0\x80"),
+                           std::string ("/opt/truncated\xE2\x82") })
+    {
+        error.clear();
+        CHECK (! autostart::execValueFor (bad, exec, error));
+        CHECK (! error.empty());
+    }
+
+    // The group reader ignores comments, other groups and CRLF line ends.
+    const auto keys = autostart::parseDesktopEntryGroup ("# c\r\n[Desktop Entry]\r\nName = Flubsound Pro\r\nHidden=false\r\n"
+                                                         "[Desktop Action x]\nHidden=true\n");
+    CHECK (keys.size() == 2);
+    CHECK (keys.count ("Name") == 1 && keys.at ("Name") == "Flubsound Pro");
+    CHECK (keys.count ("Hidden") == 1 && keys.at ("Hidden") == "false");
+}
+
+TEST_CASE ("Platform: XDG autostart entry is written atomically under $XDG_CONFIG_HOME, read back, switched off and removed")
+{
+    TempDir temp;
+    REQUIRE (! temp.path.empty());
+    const std::string config = temp.path + "/con fig"; // does not exist yet: created with the autostart folder
+    ScopedEnv xdg ("XDG_CONFIG_HOME", config.c_str());
+    ScopedEnv appImage ("APPIMAGE", nullptr);
+
+    const std::string file = config + "/autostart/flubsound-pro.desktop";
+    CHECK (autostart::entryPath() == file);
+
+    auto autoStart = AutoStart::create();
+    REQUIRE (autoStart != nullptr);
+    CHECK (autoStart->isSupported());
+    CHECK (! autoStart->isEnabled());
+
+    const std::string program = temp.path + "/Flubsound \"Pro\" $1/FlubsoundPro";
+    std::string error;
+    REQUIRE (autoStart->setEnabled (true, program, error));
+    CHECK (error.empty());
+    CHECK (autoStart->isEnabled());
+
+    // A parseable entry with the required keys; Exec decodes to the program.
+    const auto text = readText (file);
+    CHECK (text.rfind ("[Desktop Entry]\n", 0) == 0);
+    const auto keys = autostart::parseDesktopEntryGroup (text);
+    CHECK (keys.count ("Type") == 1 && keys.at ("Type") == "Application");
+    CHECK (keys.count ("Name") == 1 && keys.at ("Name") == "Flubsound Pro");
+    CHECK (keys.count ("X-GNOME-Autostart-enabled") == 1 && keys.at ("X-GNOME-Autostart-enabled") == "true");
+    REQUIRE (keys.count ("Exec") == 1);
+    bool ok = false;
+    const auto args = decodeExec (keys.at ("Exec"), ok);
+    CHECK (ok);
+    REQUIRE (args.size() == 1); // the app has no start-to-tray switch: no arguments
+    CHECK (args[0] == program);
+
+    // Nothing but the entry is left in the folder (the temp file was renamed).
+    size_t files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator (config + "/autostart"))
+    {
+        ++files;
+        CHECK (entry.path().filename() == "flubsound-pro.desktop");
+    }
+    CHECK (files == 1);
+
+    // Enabling again is harmless; an empty path means the running executable.
+    REQUIRE (autoStart->setEnabled (true, {}, error));
+    const auto selfArgs = decodeExec (autostart::parseDesktopEntryGroup (readText (file))["Exec"], ok);
+    CHECK (ok);
+    REQUIRE (selfArgs.size() == 1);
+    CHECK (std::filesystem::equivalent (selfArgs[0], "/proc/self/exe"));
+
+    // Switched off by the desktop's own start-up settings: reads as disabled,
+    // and enabling from Flubsound switches it back on.
+    writeText (file, "[Desktop Entry]\nType=Application\nName=Flubsound Pro\nExec=/x\nX-GNOME-Autostart-enabled=false\n");
+    CHECK (! autoStart->isEnabled());
+    writeText (file, "[Desktop Entry]\nType=Application\nName=Flubsound Pro\nExec=/x\nHidden=true\n");
+    CHECK (! autoStart->isEnabled());
+    writeText (file, "not a desktop entry\n");
+    CHECK (! autoStart->isEnabled());
+    REQUIRE (autoStart->setEnabled (true, program, error));
+    CHECK (autoStart->isEnabled());
+
+    // Disable removes the file; disabling twice is fine.
+    REQUIRE (autoStart->setEnabled (false, program, error));
+    CHECK (! std::filesystem::exists (file));
+    CHECK (! autoStart->isEnabled());
+    CHECK (autoStart->setEnabled (false, program, error));
+
+    // Failures are reported, not swallowed: the config "folder" is a file.
+    const std::string blocker = temp.path + "/blocker";
+    writeText (blocker, "x");
+    ScopedEnv blocked ("XDG_CONFIG_HOME", blocker.c_str());
+    error.clear();
+    CHECK (! autoStart->setEnabled (true, program, error));
+    CHECK (! error.empty());
+    CHECK (! autoStart->isEnabled());
+    error.clear();
+    CHECK (! autoStart->setEnabled (true, "relative/FlubsoundPro", error));
+    CHECK (! error.empty());
+}
+
+TEST_CASE ("Platform: XDG autostart falls back to ~/.config when $XDG_CONFIG_HOME is unset, empty or relative")
+{
+    TempDir temp;
+    REQUIRE (! temp.path.empty());
+    ScopedEnv home ("HOME", (temp.path + "/").c_str());
+    const std::string expected = temp.path + "/.config/autostart/flubsound-pro.desktop";
+
+    {
+        ScopedEnv xdg ("XDG_CONFIG_HOME", nullptr);
+        CHECK (autostart::entryPath() == expected);
+    }
+    {
+        ScopedEnv xdg ("XDG_CONFIG_HOME", "");
+        CHECK (autostart::entryPath() == expected);
+    }
+    {
+        ScopedEnv xdg ("XDG_CONFIG_HOME", "relative/config");
+        CHECK (autostart::entryPath() == expected);
+
+        auto autoStart = AutoStart::create();
+        REQUIRE (autoStart != nullptr);
+        std::string error;
+        REQUIRE (autoStart->setEnabled (true, "/usr/bin/flubsound-pro", error));
+        CHECK (std::filesystem::exists (expected));
+        CHECK (! std::filesystem::exists ("relative/config"));
+        CHECK (autoStart->isEnabled());
+        REQUIRE (autoStart->setEnabled (false, {}, error));
+        CHECK (! std::filesystem::exists (expected));
+    }
+    {
+        ScopedEnv xdg ("XDG_CONFIG_HOME", (temp.path + "/xdg//").c_str());
+        CHECK (autostart::entryPath() == temp.path + "/xdg/autostart/flubsound-pro.desktop");
+    }
+}
 
 #endif // __linux__

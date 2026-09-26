@@ -162,11 +162,25 @@ public:
     void stop() override {}
     bool isRunning() const override { return false; }
 };
+
+class UnsupportedAutoStart final : public AutoStart
+{
+public:
+    bool isSupported() const override { return false; }
+    bool isEnabled() const override { return false; }
+
+    bool setEnabled (bool, const std::string&, std::string& error) override
+    {
+        error = "Starting with the operating system is not supported here.";
+        return false;
+    }
+};
 } // namespace
 
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<UnsupportedHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<UnsupportedRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<UnsupportedCapture>(); }
+std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<UnsupportedAutoStart>(); }
 
 bool SystemTuning::disablePowerThrottling() { return true; }
 void* SystemTuning::promoteAudioThread() { return nullptr; }

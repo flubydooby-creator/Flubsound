@@ -12,10 +12,15 @@
 // hotkeys use the X11 headers when present at build time and load libX11
 // with dlopen at run time (no link dependency).
 //
+// Start with the OS: an XDG autostart entry (Desktop Application Autostart
+// Specification), honoured by GNOME, KDE Plasma, Xfce, Cinnamon, MATE and
+// LXQt; bare window managers need a helper such as dex.
+//
 // Threading: AppAudioRouter calls block while pactl runs (typically 5-30 ms);
 // call them from a background thread if that matters. SystemTuning must be
 // called on the thread it tunes. GlobalHotkeys callbacks run on the
-// service's X event thread, not on the thread that created it.
+// service's X event thread, not on the thread that created it. AutoStart does
+// small blocking file IO: message thread, on user action.
 #if defined(__linux__)
 
 #include "PlatformServices.h"
@@ -23,17 +28,22 @@
 
 #include "flub/io/Json.h"
 
+#include <fcntl.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <sched.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <type_traits>
@@ -778,6 +788,368 @@ public:
 };
 
 //==============================================================================
+// AutoStart - XDG autostart entry (unnamed namespace; tests reach the helpers)
+//==============================================================================
+namespace autostart
+{
+constexpr const char* kFileName = "flubsound-pro.desktop";
+constexpr size_t kMaxEntryBytes = 64u * 1024u; // a sane .desktop file is < 1 KB
+
+std::string withoutTrailingSlashes (std::string path)
+{
+    while (path.size() > 1 && path.back() == '/')
+        path.pop_back();
+    return path;
+}
+
+/** $XDG_CONFIG_HOME when set to an absolute path (the XDG Base Directory spec
+    says relative values are invalid and must be ignored), else $HOME/.config,
+    else the passwd entry's home + "/.config". Empty when no home is known. */
+std::string configHome()
+{
+    if (const char* xdg = std::getenv ("XDG_CONFIG_HOME"); xdg != nullptr && xdg[0] == '/')
+        return withoutTrailingSlashes (xdg);
+
+    std::string home;
+    if (const char* h = std::getenv ("HOME"); h != nullptr && h[0] == '/')
+        home = h;
+    else if (const passwd* pw = ::getpwuid (::getuid()); pw != nullptr && pw->pw_dir != nullptr && pw->pw_dir[0] == '/')
+        home = pw->pw_dir; // message thread only: getpwuid is not reentrant
+
+    return home.empty() ? std::string() : withoutTrailingSlashes (home) + "/.config";
+}
+
+std::string directory()
+{
+    const auto base = configHome();
+    return base.empty() ? base : base + "/autostart";
+}
+
+std::string entryPath()
+{
+    const auto dir = directory();
+    return dir.empty() ? dir : dir + "/" + kFileName;
+}
+
+/** Strict UTF-8 check (no overlong forms, surrogates or code points above
+    U+10FFFF): Desktop Entry values must be UTF-8. */
+bool isValidUtf8 (const std::string& text)
+{
+    size_t i = 0;
+    while (i < text.size())
+    {
+        const auto lead = static_cast<unsigned char> (text[i]);
+        size_t length = 0;
+        uint32_t cp = 0;
+        if (lead < 0x80)
+        {
+            ++i;
+            continue;
+        }
+        if (lead >= 0xC2 && lead <= 0xDF)
+        {
+            length = 2;
+            cp = lead & 0x1Fu;
+        }
+        else if (lead >= 0xE0 && lead <= 0xEF)
+        {
+            length = 3;
+            cp = lead & 0x0Fu;
+        }
+        else if (lead >= 0xF0 && lead <= 0xF4)
+        {
+            length = 4;
+            cp = lead & 0x07u;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (i + length > text.size())
+            return false;
+        for (size_t k = 1; k < length; ++k)
+        {
+            const auto c = static_cast<unsigned char> (text[i + k]);
+            if ((c & 0xC0u) != 0x80u)
+                return false;
+            cp = (cp << 6) | (c & 0x3Fu);
+        }
+
+        if ((length == 3 && cp < 0x800) || (length == 4 && cp < 0x10000) || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+            return false;
+        i += length;
+    }
+    return true;
+}
+
+/** The Exec value that starts `program` with no arguments, following the
+    Desktop Entry spec ("The Exec key"):
+      1. the path is always double-quoted, and inside the quotes the four
+         characters " ` $ \ get a backslash;
+      2. the value is then a string value, whose escape rule doubles every
+         backslash - so a quote is written \\" and a backslash \\\;
+      3. '%' starts a field code and is written %%.
+    Verified against GLib 2.80 (GKeyFile + g_shell_parse_argv). One GLib
+    quirk remains: it checks that the program exists BEFORE expanding %%, so
+    GNOME skips an entry whose path contains '%' (KDE starts it).
+    Fails (with a user-presentable error) for what an Exec line cannot carry:
+    an empty or relative path, invalid UTF-8, control characters. */
+bool execValueFor (const std::string& program, std::string& exec, std::string& error)
+{
+    if (program.empty() || program.front() != '/')
+    {
+        error = "The program path for the start-up entry must be absolute: \"" + program + "\".";
+        return false;
+    }
+    if (! isValidUtf8 (program))
+    {
+        error = "The program path is not valid UTF-8, which a start-up (.desktop) entry cannot store.";
+        return false;
+    }
+
+    exec = "\"";
+    for (const char c : program)
+    {
+        const auto u = static_cast<unsigned char> (c);
+        if (u < 0x20 || u == 0x7F)
+        {
+            error = "The program path contains a control character, which a start-up (.desktop) entry cannot store.";
+            return false;
+        }
+
+        switch (c)
+        {
+            case '"':
+            case '`':
+            case '$': exec += "\\\\"; exec += c; break; // quoting \x, then string-escaped backslash
+            case '\\': exec += "\\\\\\\\"; break;       // quoting \\, each string-escaped
+            case '%': exec += "%%"; break;
+            default: exec += c; break;
+        }
+    }
+    exec += '"';
+    return true;
+}
+
+std::string desktopEntry (const std::string& execValue)
+{
+    return "[Desktop Entry]\n"
+           "Type=Application\n"
+           "Version=1.5\n"
+           "Name=Flubsound Pro\n"
+           "Comment=Music and gaming audio enhancer, started at sign-in\n"
+           "Exec=" + execValue + "\n"
+           "Terminal=false\n"
+           "X-GNOME-Autostart-enabled=true\n";
+}
+
+/** Keys of the [Desktop Entry] group, values as written (not unescaped).
+    Comments, blank lines and other groups are skipped. */
+std::map<std::string, std::string> parseDesktopEntryGroup (const std::string& text)
+{
+    std::map<std::string, std::string> keys;
+    bool inGroup = false;
+    size_t pos = 0;
+    while (pos < text.size())
+    {
+        auto end = text.find ('\n', pos);
+        if (end == std::string::npos)
+            end = text.size();
+        std::string line = text.substr (pos, end - pos);
+        pos = end + 1;
+
+        if (! line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (line.empty() || line.front() == '#')
+            continue;
+        if (line.front() == '[')
+        {
+            inGroup = line == "[Desktop Entry]";
+            continue;
+        }
+        if (! inGroup)
+            continue;
+
+        const auto eq = line.find ('=');
+        if (eq == std::string::npos)
+            continue;
+        auto key = line.substr (0, eq);
+        auto value = line.substr (eq + 1);
+        // The spec allows spaces around '='.
+        while (! key.empty() && key.back() == ' ')
+            key.pop_back();
+        const auto first = value.find_first_not_of (' ');
+        value.erase (0, first == std::string::npos ? value.size() : first);
+        keys.emplace (std::move (key), std::move (value)); // first occurrence wins
+    }
+    return keys;
+}
+
+bool readFile (const std::string& path, std::string& contents)
+{
+    FILE* file = std::fopen (path.c_str(), "re");
+    if (file == nullptr)
+        return false;
+
+    contents.clear();
+    char buffer[4096];
+    size_t bytes = 0;
+    while ((bytes = std::fread (buffer, 1, sizeof (buffer), file)) > 0 && contents.size() <= kMaxEntryBytes)
+        contents.append (buffer, bytes);
+    const bool ok = std::ferror (file) == 0 && contents.size() <= kMaxEntryBytes;
+    std::fclose (file);
+    return ok;
+}
+
+/** An entry starts the app unless it is missing, has no [Desktop Entry]
+    group, or is switched off with Hidden=true (KDE, the spec's way to
+    delete) or X-GNOME-Autostart-enabled=false (GNOME Tweaks). */
+bool isEntryEnabled (const std::string& path)
+{
+    std::string text;
+    if (path.empty() || ! readFile (path, text))
+        return false;
+
+    const auto keys = parseDesktopEntryGroup (text);
+    if (keys.empty())
+        return false;
+    const auto hidden = keys.find ("Hidden");
+    const auto gnome = keys.find ("X-GNOME-Autostart-enabled");
+    return ! (hidden != keys.end() && hidden->second == "true") && ! (gnome != keys.end() && gnome->second == "false");
+}
+
+std::string errnoText (int error) { return std::strerror (error); } // message thread only
+
+/** mkdir -p; new directories get 0700 as the XDG Base Directory spec asks. */
+bool makeDirectories (const std::string& path, std::string& error)
+{
+    for (size_t slash = path.find ('/', 1);; slash = path.find ('/', slash + 1))
+    {
+        const std::string partial = slash == std::string::npos ? path : path.substr (0, slash);
+        if (! partial.empty() && ::mkdir (partial.c_str(), 0700) != 0 && errno != EEXIST)
+        {
+            error = "Could not create " + partial + ": " + errnoText (errno);
+            return false;
+        }
+        if (slash == std::string::npos)
+            break;
+    }
+
+    struct stat info {};
+    if (::stat (path.c_str(), &info) != 0 || ! S_ISDIR (info.st_mode))
+    {
+        error = "Could not create the folder " + path + ".";
+        return false;
+    }
+    return true;
+}
+
+/** Writes a sibling temp file, fsyncs it and renames it over `path`, so a
+    crash or full disk never leaves a truncated entry behind. */
+bool writeFileAtomically (const std::string& path, const std::string& contents, std::string& error)
+{
+    const std::string temp = path + ".tmp-" + std::to_string (static_cast<long> (::getpid()));
+    const int fd = ::open (temp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
+    if (fd < 0)
+    {
+        error = "Could not write " + temp + ": " + errnoText (errno);
+        return false;
+    }
+
+    const auto fail = [&] (const std::string& what, int code)
+    {
+        ::close (fd);
+        ::unlink (temp.c_str());
+        error = what + ": " + errnoText (code);
+        return false;
+    };
+
+    size_t written = 0;
+    while (written < contents.size())
+    {
+        const ssize_t n = ::write (fd, contents.data() + written, contents.size() - written);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return fail ("Could not write " + temp, errno);
+        }
+        written += static_cast<size_t> (n);
+    }
+
+    if (::fsync (fd) != 0)
+        return fail ("Could not write " + temp, errno);
+    if (::close (fd) != 0)
+    {
+        const int code = errno;
+        ::unlink (temp.c_str());
+        error = "Could not write " + temp + ": " + errnoText (code);
+        return false;
+    }
+    if (::rename (temp.c_str(), path.c_str()) != 0)
+    {
+        const int code = errno;
+        ::unlink (temp.c_str());
+        error = "Could not create " + path + ": " + errnoText (code);
+        return false;
+    }
+    return true;
+}
+
+/** The program to start: $APPIMAGE when running from an AppImage (the
+    executable itself lives in a temporary mount), else /proc/self/exe
+    without the " (deleted)" suffix it gets after an in-place upgrade. */
+std::string runningExecutable()
+{
+    if (const char* appImage = std::getenv ("APPIMAGE"); appImage != nullptr && appImage[0] == '/')
+        return appImage;
+
+    char buffer[PATH_MAX];
+    const ssize_t n = ::readlink ("/proc/self/exe", buffer, sizeof (buffer) - 1);
+    if (n <= 0)
+        return {};
+    std::string path (buffer, static_cast<size_t> (n));
+    const std::string deleted = " (deleted)";
+    if (path.size() > deleted.size() && path.compare (path.size() - deleted.size(), deleted.size(), deleted) == 0)
+        path.resize (path.size() - deleted.size());
+    return path;
+}
+} // namespace autostart
+
+class LinuxAutoStart final : public AutoStart
+{
+public:
+    bool isSupported() const override { return ! autostart::entryPath().empty(); }
+    bool isEnabled() const override { return autostart::isEntryEnabled (autostart::entryPath()); }
+
+    bool setEnabled (bool shouldStart, const std::string& executablePath, std::string& error) override
+    {
+        const auto path = autostart::entryPath();
+        if (path.empty())
+        {
+            error = "No home folder is known, so no start-up entry can be written.";
+            return false;
+        }
+
+        if (! shouldStart)
+        {
+            if (::unlink (path.c_str()) != 0 && errno != ENOENT)
+            {
+                error = "Could not remove " + path + ": " + autostart::errnoText (errno);
+                return false;
+            }
+            return true;
+        }
+
+        std::string exec;
+        const auto program = executablePath.empty() ? autostart::runningExecutable() : executablePath;
+        return autostart::execValueFor (program, exec, error) && autostart::makeDirectories (autostart::directory(), error)
+               && autostart::writeFileAtomically (path, autostart::desktopEntry (exec), error);
+    }
+};
+
+//==============================================================================
 /** Saved scheduling state, owned by the handle promoteAudioThread returns. */
 struct SavedSchedulingPolicy
 {
@@ -890,6 +1262,7 @@ void SystemTuning::revertAudioThread (void* handle)
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<LinuxGlobalHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<LinuxAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<LinuxProcessLoopbackCapture>(); }
+std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<LinuxAutoStart>(); }
 } // namespace flub::platform
 
 #endif // __linux__

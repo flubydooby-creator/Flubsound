@@ -14,7 +14,7 @@ option(FLUB_ENABLE_UNDOCUMENTED_ROUTING
 
 if(WIN32)
     # See the header comment of PlatformServices_win.cpp for what each is used for.
-    target_link_libraries(FlubsoundPro PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi)
+    target_link_libraries(FlubsoundPro PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi advapi32)
 
     if(FLUB_ENABLE_UNDOCUMENTED_ROUTING)
         set_property(SOURCE "${FLUB_PLATFORM_DIR}/PlatformServices_win.cpp"
@@ -23,7 +23,9 @@ if(WIN32)
     endif()
 elseif(APPLE)
     # Carbon: RegisterEventHotKey. AppKit: NSWorkspace (already linked by JUCE).
-    target_link_libraries(FlubsoundPro PRIVATE "-framework Carbon" "-framework AppKit")
+    # ServiceManagement: SMAppService (start at login, macOS 13+; weak-referenced
+    # through @available, the framework itself exists on every supported macOS).
+    target_link_libraries(FlubsoundPro PRIVATE "-framework Carbon" "-framework AppKit" "-framework ServiceManagement")
 endif()
 
 # Our platform sources compile warning-free with the core's strict set.

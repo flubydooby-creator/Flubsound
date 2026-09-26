@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 
 #include "FlubLookAndFeel.h"
+#include "platform/PlatformBridge.h"
 #include "presets/PresetManager.h"
 
 #include <algorithm>
@@ -546,10 +547,10 @@ class SettingsDialog::GeneralPage : public juce::Component
 {
 public:
     explicit GeneralPage (EngineController& c)
-        : controller (c)
+        : controller (c), autoStart (platform_bridge::createAutoStart())
     {
         auto& settings = controller.getSettings();
-        for (auto* t : { &startMinimised, &closeToTray })
+        for (auto* t : { &startWithOs, &startMinimised, &closeToTray })
         {
             Style::set (*t, "switch");
             addAndMakeVisible (*t);
@@ -558,6 +559,12 @@ public:
         closeToTray.setToggleState (settings.getCloseToTray(), juce::dontSendNotification);
         startMinimised.onClick = [this] { controller.getSettings().setStartMinimised (startMinimised.getToggleState()); };
         closeToTray.onClick = [this] { controller.getSettings().setCloseToTray (closeToTray.getToggleState()); };
+
+        // Start with the OS: hidden when this OS / build has no support.
+        autoStartSupported = autoStart != nullptr && autoStart->isSupported();
+        startWithOs.setVisible (autoStartSupported);
+        startWithOs.onClick = [this] { applyStartWithOs (startWithOs.getToggleState()); };
+        refresh();
 
         revealSettings.setText ("Show");
         revealPresets.setText ("Show");
@@ -572,10 +579,27 @@ public:
         addAndMakeVisible (revealPresets);
     }
 
+    /** Shows the OS's ACTUAL start-up entry (the user may have removed it in
+        the OS's own settings) and brings the stored setting in line. */
+    void refresh()
+    {
+        if (! autoStartSupported)
+            return;
+        const bool enabled = autoStart->isEnabled();
+        startWithOs.setToggleState (enabled, juce::dontSendNotification);
+        controller.getSettings().setStartWithOs (enabled);
+    }
+
     void paint (juce::Graphics& g) override
     {
         drawSectionTitle (g, startupTitle, "Start-up");
         drawSectionTitle (g, filesTitle, "Files");
+        if (autoStartError.isNotEmpty())
+        {
+            g.setColour (Palette::amber);
+            g.setFont (Theme::font (11.5f));
+            g.drawFittedText (autoStartError, autoStartErrorArea, juce::Justification::topLeft, 3, 1.0f);
+        }
         g.setFont (Theme::font (12.5f));
         auto line = [&] (juce::Rectangle<int> area, const juce::String& caption, const juce::String& value)
         {
@@ -597,6 +621,17 @@ public:
         auto r = getLocalBounds();
         startupTitle = r.removeFromTop (22);
         r.removeFromTop (10);
+        if (autoStartSupported)
+        {
+            startWithOs.setBounds (r.removeFromTop (26).withWidth (360));
+            if (autoStartError.isNotEmpty())
+            {
+                const auto width = static_cast<float> (juce::jmax (80, r.getWidth() - 4));
+                const auto lines = juce::jlimit (1, 3, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), autoStartError) / width)));
+                autoStartErrorArea = r.removeFromTop (lines * 15 + 4).withTrimmedLeft (4).withTrimmedTop (2);
+            }
+            r.removeFromTop (6);
+        }
         startMinimised.setBounds (r.removeFromTop (26).withWidth (360));
         r.removeFromTop (6);
         closeToTray.setBounds (r.removeFromTop (26).withWidth (360));
@@ -615,8 +650,31 @@ public:
     }
 
 private:
+    void applyStartWithOs (bool shouldStart)
+    {
+        // Empty path: the platform layer picks the running executable (on
+        // Linux the AppImage itself rather than its temporary mount).
+        std::string error;
+        const bool ok = autoStart->setEnabled (shouldStart, {}, error);
+        const bool enabled = autoStart->isEnabled();
+        if (ok && enabled != shouldStart)
+            error = shouldStart ? "The start-up entry was written, but the system does not report it as active."
+                                : "The start-up entry could not be removed.";
+
+        autoStartError = error.empty() ? juce::String() : juce::String::fromUTF8 (error.c_str());
+        startWithOs.setToggleState (enabled, juce::dontSendNotification);
+        controller.getSettings().setStartWithOs (enabled);
+        resized();
+        repaint();
+    }
+
     EngineController& controller;
+    std::unique_ptr<flub::platform::AutoStart> autoStart;
+    bool autoStartSupported = false;
+    juce::ToggleButton startWithOs { "Start Flubsound Pro when I sign in" };
     juce::ToggleButton startMinimised { "Start minimised" }, closeToTray { "Close button keeps Flubsound running in the tray" };
+    juce::String autoStartError;
+    juce::Rectangle<int> autoStartErrorArea;
     IconButton revealSettings { "Show the settings file", Icons::external(), IconButton::Style::Framed };
     IconButton revealPresets { "Show the user preset folder", Icons::external(), IconButton::Style::Framed };
     juce::Rectangle<int> startupTitle, filesTitle, settingsLine, presetsLine, versionLine;
@@ -732,6 +790,8 @@ void SettingsDialog::showPage (Page page)
         processingPage->refresh();
     if (page == Page::Hotkeys)
         hotkeysPage->refresh();
+    if (page == Page::General)
+        generalPage->refresh();
     repaint();
 }
 

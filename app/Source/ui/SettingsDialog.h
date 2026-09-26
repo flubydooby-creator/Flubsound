@@ -14,7 +14,9 @@
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; chords
 //               that could not be registered are listed.
-//   General     start minimised, close to tray, file locations, version.
+//   General     start with the OS (reflects the OS's actual entry; hidden
+//               where unsupported), start minimised, close to tray, file
+//               locations, version.
 #pragma once
 
 #include "Theme.h"

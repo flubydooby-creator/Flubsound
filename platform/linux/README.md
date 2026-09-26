@@ -125,6 +125,36 @@ another client holds, and release on unregister` in
 skipped without an X display or `libXtst`; CI runs it under `xvfb-run` in the
 `sanitizers` job.
 
+## Start at sign-in
+
+*Settings › General › Start Flubsound Pro when I sign in* writes an XDG
+autostart entry (`LinuxAutoStart` in
+`app/Source/platform/PlatformServices_linux.cpp`):
+`$XDG_CONFIG_HOME/autostart/flubsound-pro.desktop`, or
+`~/.config/autostart/` when the variable is unset, empty or relative. GNOME,
+KDE Plasma, Xfce, Cinnamon, MATE and LXQt honour it; bare window managers
+need a helper such as `dex`.
+
+- The entry has `Type=Application`, `Name`, `Exec`, `Terminal=false` and
+  `X-GNOME-Autostart-enabled=true`. `Exec` is the double-quoted absolute path
+  of the executable (`$APPIMAGE` when run from an AppImage), escaped as the
+  Desktop Entry spec requires: `"`, `` ` ``, `$` and `\` get a backslash
+  inside the quotes, every backslash is then doubled by the string-value
+  rule, and `%` becomes `%%`. Paths that are not valid UTF-8 or contain
+  control characters are refused with an error. No argument is added: the app
+  has no command-line switch for starting minimised; the *Start minimised*
+  setting applies instead. GLib checks that the program exists before
+  expanding `%%`, so GNOME skips an entry whose path contains `%`.
+- The file is written to a temporary sibling, `fsync`ed and renamed over the
+  entry; new folders get mode 0700. Switching the option off deletes the file.
+- The switch shows the file's real state each time the page opens: a missing
+  file, `Hidden=true` or `X-GNOME-Autostart-enabled=false` (how desktop
+  start-up settings switch an entry off) all read as off.
+
+Tests: the `Platform: XDG autostart ...` cases in
+`tests/test_platform_linux.cpp` point `XDG_CONFIG_HOME` / `HOME` at a
+temporary folder.
+
 ## Real-time scheduling
 
 `SystemTuning::promoteAudioThread()` tries `SCHED_FIFO` with priority 20,

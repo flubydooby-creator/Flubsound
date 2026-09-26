@@ -19,6 +19,7 @@ constexpr const char* selectedStrip = "engine.selectedStrip";
 constexpr const char* hotkeysEnabled = "hotkeys.enabled";
 constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
+constexpr const char* startWithOs = "ui.startWithOs";
 constexpr const char* windowState = "ui.windowState";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
@@ -378,6 +379,8 @@ bool AppSettings::getStartMinimised() const { return properties->getBoolValue (K
 void AppSettings::setStartMinimised (bool shouldStartMinimised) { properties->setValue (Keys::startMinimised, shouldStartMinimised); }
 bool AppSettings::getCloseToTray() const { return properties->getBoolValue (Keys::closeToTray, true); }
 void AppSettings::setCloseToTray (bool shouldCloseToTray) { properties->setValue (Keys::closeToTray, shouldCloseToTray); }
+bool AppSettings::getStartWithOs() const { return properties->getBoolValue (Keys::startWithOs, false); }
+void AppSettings::setStartWithOs (bool shouldStartWithOs) { properties->setValue (Keys::startWithOs, shouldStartWithOs); }
 juce::String AppSettings::getWindowState() const { return properties->getValue (Keys::windowState); }
 void AppSettings::setWindowState (const juce::String& state) { properties->setValue (Keys::windowState, state); }
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }

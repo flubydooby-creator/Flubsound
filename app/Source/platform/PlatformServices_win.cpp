@@ -13,11 +13,12 @@
 //   version   GetFileVersionInfoW / VerQueryValueW (app "FileDescription")
 //   avrt      AvSetMmThreadCharacteristicsW / AvSetMmThreadPriority (MMCSS)
 //   mmdevapi  ActivateAudioInterfaceAsync (MSVC: Mmdevapi.lib, MinGW: -lmmdevapi)
+//   advapi32  RegCreateKeyExW / RegSetValueExW / RegDeleteValueW (start with Windows)
 // NOT needed: uuid (every IID comes from __uuidof or a local GUID constant) and
 // runtimeobject/combase (the optional WinRT entry points of the undocumented
 // routing adapter are resolved at run time from combase.dll).
 //
-//   CMake:  target_link_libraries (<app> PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi)
+//   CMake:  target_link_libraries (<app> PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi advapi32)
 //   MSVC additionally picks them up from the #pragma comment(lib) lines below.
 //
 // Threading
@@ -28,6 +29,7 @@
 //   ProcessLoopbackCapture : start/stop from any non-RT thread; frames arrive
 //                     on an internal MMCSS "Pro Audio" thread.
 //   SystemTuning    : promote/revert must be called on the thread concerned.
+//   AutoStart       : any thread (registry calls only; message thread in the app).
 #if defined(_WIN32)
 
 #include "PlatformServices.h"
@@ -82,6 +84,7 @@
     #pragma comment(lib, "version.lib")
     #pragma comment(lib, "avrt.lib")
     #pragma comment(lib, "mmdevapi.lib")
+    #pragma comment(lib, "advapi32.lib")
 #endif
 
 //==============================================================================
@@ -1715,6 +1718,167 @@ private:
     DWORD threadId = 0;
 };
 
+//==============================================================================
+// AutoStart - HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//==============================================================================
+/*  The per-user Run key is what Settings > Apps > Startup and Task Manager's
+    "Startup apps" list. Their on/off switch does not touch the Run value: it
+    writes a REG_BINARY of the same name under Explorer\StartupApproved\Run
+    whose first byte is even (02) for enabled and odd (03) for disabled. That
+    value is undocumented but unchanged since Windows 8; it is only read (so
+    isEnabled() tells the truth) and deleted (so turning the feature on in
+    Flubsound also undoes a "disabled" switch - a missing value means
+    enabled). No elevation needed: everything is under HKEY_CURRENT_USER. */
+namespace autostart
+{
+constexpr const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr const wchar_t* kApprovedKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+constexpr const wchar_t* kValueName = L"Flubsound Pro";
+
+struct ScopedKey
+{
+    ScopedKey() = default;
+    ~ScopedKey()
+    {
+        if (key != nullptr)
+            RegCloseKey (key);
+    }
+    ScopedKey (const ScopedKey&) = delete;
+    ScopedKey& operator= (const ScopedKey&) = delete;
+
+    HKEY key = nullptr;
+};
+
+std::string errorText (LONG code) { return hresultToString (HRESULT_FROM_WIN32 (static_cast<unsigned long> (code))); }
+
+/** The Run value's command line, or empty when there is none. */
+std::wstring readRunCommand()
+{
+    ScopedKey run;
+    if (RegOpenKeyExW (HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, &run.key) != ERROR_SUCCESS)
+        return {};
+
+    DWORD type = 0, bytes = 0;
+    if (RegQueryValueExW (run.key, kValueName, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)
+        || bytes == 0 || bytes > 65536)
+        return {};
+
+    // REG_SZ data is not guaranteed to be terminated: leave room for one.
+    std::wstring command (bytes / sizeof (wchar_t) + 1, L'\0');
+    DWORD size = bytes;
+    if (RegQueryValueExW (run.key, kValueName, nullptr, &type, reinterpret_cast<BYTE*> (command.data()), &size) != ERROR_SUCCESS)
+        return {};
+    command.resize (size / sizeof (wchar_t));
+    while (! command.empty() && command.back() == L'\0')
+        command.pop_back();
+    return command;
+}
+
+/** True when Task Manager / Settings switched the entry off. */
+bool isSwitchedOffByUser()
+{
+    ScopedKey approved;
+    if (RegOpenKeyExW (HKEY_CURRENT_USER, kApprovedKey, 0, KEY_QUERY_VALUE, &approved.key) != ERROR_SUCCESS)
+        return false;
+
+    BYTE data[64] = {};
+    DWORD type = 0, size = sizeof (data);
+    if (RegQueryValueExW (approved.key, kValueName, nullptr, &type, data, &size) != ERROR_SUCCESS || type != REG_BINARY || size == 0)
+        return false;
+    return (data[0] & 1u) != 0;
+}
+
+/** Deletes a value; a missing key or value counts as success. */
+LONG deleteValue (const wchar_t* subKey)
+{
+    ScopedKey key;
+    LONG result = RegOpenKeyExW (HKEY_CURRENT_USER, subKey, 0, KEY_SET_VALUE, &key.key);
+    if (result == ERROR_SUCCESS)
+        result = RegDeleteValueW (key.key, kValueName);
+    return result == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : result;
+}
+
+std::wstring runningExecutable()
+{
+    std::wstring path (MAX_PATH, L'\0');
+    for (;;)
+    {
+        const DWORD length = GetModuleFileNameW (nullptr, path.data(), static_cast<DWORD> (path.size()));
+        if (length == 0)
+            return {};
+        if (length < path.size())
+        {
+            path.resize (length);
+            return path;
+        }
+        if (path.size() >= 32768)
+            return {};
+        path.resize (path.size() * 2); // truncated: retry with a larger buffer
+    }
+}
+} // namespace autostart
+
+class WinAutoStart final : public AutoStart
+{
+public:
+    bool isSupported() const override { return true; }
+    bool isEnabled() const override { return ! autostart::readRunCommand().empty() && ! autostart::isSwitchedOffByUser(); }
+
+    bool setEnabled (bool shouldStart, const std::string& executablePath, std::string& error) override
+    {
+        using namespace autostart;
+
+        if (! shouldStart)
+        {
+            const LONG result = deleteValue (kRunKey);
+            deleteValue (kApprovedKey); // tidy up; a leftover switch is harmless
+            if (result != ERROR_SUCCESS)
+            {
+                error = "Could not remove the start-up entry: " + errorText (result);
+                return false;
+            }
+            return true;
+        }
+
+        const std::wstring path = executablePath.empty() ? runningExecutable() : toWide (executablePath);
+        if (path.empty() || (! executablePath.empty() && toUtf8 (path) != executablePath))
+        {
+            error = "The program path is empty or not valid UTF-8.";
+            return false;
+        }
+        if (path.find (L'"') != std::wstring::npos || PathIsRelativeW (path.c_str()))
+        {
+            error = "The program path for the start-up entry must be an absolute path: \"" + toUtf8 (path) + "\".";
+            return false;
+        }
+
+        // Quoted, so a path with spaces ("C:\Program Files\...") is one argument.
+        const std::wstring command = L"\"" + path + L"\"";
+        ScopedKey run;
+        LONG result = RegCreateKeyExW (HKEY_CURRENT_USER, kRunKey, 0, nullptr, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &run.key, nullptr);
+        if (result == ERROR_SUCCESS)
+            result = RegSetValueExW (run.key,
+                                     kValueName,
+                                     0,
+                                     REG_SZ,
+                                     reinterpret_cast<const BYTE*> (command.c_str()),
+                                     static_cast<DWORD> ((command.size() + 1) * sizeof (wchar_t)));
+        if (result != ERROR_SUCCESS)
+        {
+            error = "Could not write the start-up entry: " + errorText (result);
+            return false;
+        }
+
+        result = deleteValue (kApprovedKey);
+        if (result != ERROR_SUCCESS)
+        {
+            error = "The start-up entry was written, but it is switched off in Task Manager > Startup apps: " + errorText (result);
+            return false;
+        }
+        return true;
+    }
+};
+
 // Token returned by promoteAudioThread when MMCSS was unavailable and we fell
 // back to a plain thread-priority boost.
 char threadPriorityFallbackToken = 0;
@@ -1880,6 +2044,7 @@ void SystemTuning::revertAudioThread (void* handle)
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<WinGlobalHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<WinAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<WinProcessLoopbackCapture>(); }
+std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<WinAutoStart>(); }
 } // namespace flub::platform
 
 #endif // _WIN32
