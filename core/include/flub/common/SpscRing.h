@@ -16,6 +16,11 @@
 
 namespace flub
 {
+#if defined(_MSC_VER)
+    #pragma warning(push)
+    #pragma warning(disable : 4324) // padding from alignas(64) is the point: head/tail on separate cache lines
+#endif
+
 template <typename T>
 class SpscRing
 {
@@ -91,4 +96,8 @@ private:
     alignas (64) std::atomic<size_t> head { 0 };
     alignas (64) std::atomic<size_t> tail { 0 };
 };
+
+#if defined(_MSC_VER)
+    #pragma warning(pop)
+#endif
 } // namespace flub

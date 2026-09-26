@@ -8,6 +8,12 @@
 // process() paths are allocation-free.
 #pragma once
 
+#if defined(_MSC_VER)
+    // CHECK / REQUIRE on compile-time constants (layout pins, table sizes) are
+    // intentional; MSVC's "conditional expression is constant" is noise here.
+    #pragma warning(disable : 4127)
+#endif
+
 #include <cmath>
 #include <cstdint>
 #include <functional>

@@ -18,6 +18,16 @@ using namespace flubtest;
 
 namespace
 {
+/** JSON text with "~u" standing for the \\u escape. MSVC rejects surrogate
+    universal-character-names (\\uD800..\\uDFFF) even inside raw string
+    literals, so the tests spell them this way and expand them at run time. */
+std::string unicodeEscapes (std::string s)
+{
+    for (size_t i = 0; (i = s.find ("~u", i)) != std::string::npos; i += 2)
+        s[i] = '\\';
+    return s;
+}
+
 bool sameNumber (double a, double b) { return std::bit_cast<uint64_t> (a) == std::bit_cast<uint64_t> (b); }
 
 /** Structural equality; numbers compared bit for bit (so -0 != 0). */
@@ -173,7 +183,7 @@ TEST_CASE ("Json: objects preserve insertion order; duplicate keys resolve to th
 
 TEST_CASE ("Json: escapes, unicode and surrogate pairs round trip")
 {
-    const std::string text = R"("q\" b\\ s\/ \b\f\n\r\t A=\u0041 e=\u00e9 E=\u20AC note=\ud83c\udfb5 nul=\u0000 end")";
+    const std::string text = unicodeEscapes (R"("q\" b\\ s\/ \b\f\n\r\t A=~u0041 e=~u00e9 E=~u20AC note=~ud83c~udfb5 nul=~u0000 end")");
     const Value v = parseOrFail (text);
     REQUIRE (v.isString());
     const std::string expected = std::string ("q\" b\\ s/ \b\f\n\r\t A=A e=\xC3\xA9 E=\xE2\x82\xAC note=\xF0\x9F\x8E\xB5 nul=") + '\0' + " end";
@@ -187,7 +197,7 @@ TEST_CASE ("Json: escapes, unicode and surrogate pairs round trip")
     // Raw (unescaped) multi-byte UTF-8 is accepted as-is.
     CHECK (parseOrFail ("\"\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\xA7\"").asString() == "\xE6\x97\xA5\xE6\x9C\xAC \xF0\x9F\x8E\xA7");
     // Highest code point via a surrogate pair.
-    CHECK (parseOrFail (R"("\uDBFF\uDFFF")").asString() == "\xF4\x8F\xBF\xBF");
+    CHECK (parseOrFail (unicodeEscapes (R"("~uDBFF~uDFFF")")).asString() == "\xF4\x8F\xBF\xBF");
 
     // Every control character is escaped and survives.
     std::string controls;

@@ -565,7 +565,8 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
     const bool writeFact = isFloat;
     const uint64_t dataSize = static_cast<uint64_t> (numFrames) * blockAlign;
     const uint64_t padSize = dataSize & 1u;
-    const uint64_t riffSize = 4 + (8 + fmtSize) + (writeFact ? 12 : 0) + 8 + dataSize + padSize;
+    const uint64_t headerBytes = 4u + (8u + static_cast<uint64_t> (fmtSize)) + (writeFact ? 12u : 0u) + 8u;
+    const uint64_t riffSize = headerBytes + dataSize + padSize;
     if (riffSize > kMaxRiffSize)
         return fail ("audio is too long for a RIFF/WAVE file (4 GiB limit; RF64 is not supported)");
 

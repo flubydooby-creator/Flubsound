@@ -5,6 +5,8 @@
 // validated as UTF-8 and \uXXXX escapes (incl. surrogate pairs) are decoded
 // to UTF-8; numbers are checked against the JSON grammar first and then
 // converted with std::from_chars (locale independent, correctly rounded).
+// Standard libraries without floating-point from_chars (libc++ before LLVM
+// 20, e.g. Apple's) use strtod under a thread-local "C" locale instead.
 // Errors carry the 1-based "line:col" of the offending character, with the
 // column counted in code points so it matches what an editor shows.
 //
@@ -16,6 +18,19 @@
 
 #include <algorithm>
 #include <charconv>
+#include <version>
+
+#if defined(FLUB_JSON_FORCE_STRTOD) || (defined(_LIBCPP_VERSION) && _LIBCPP_VERSION < 200000)
+    #define FLUB_JSON_FLOAT_FROM_CHARS 0
+    #include <cerrno>
+    #include <cstdlib>
+    #include <locale.h>
+    #if defined(__APPLE__)
+        #include <xlocale.h>
+    #endif
+#else
+    #define FLUB_JSON_FLOAT_FROM_CHARS 1
+#endif
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -119,6 +134,34 @@ std::string describeChar (char c)
     std::snprintf (buf, sizeof (buf), "byte 0x%02X", static_cast<unsigned> (u));
     return buf;
 }
+
+#if ! FLUB_JSON_FLOAT_FROM_CHARS
+/** strtod in the "C" numeric locale whatever the process locale is (the
+    thread's locale is switched for the call only). Returns std::from_chars'
+    error codes: result_out_of_range on overflow and on underflow to zero (a
+    subnormal result is kept, as from_chars does). */
+std::from_chars_result parseDouble (const char* first, const char* last, double& value)
+{
+    static const locale_t cLocale = newlocale (LC_ALL_MASK, "C", static_cast<locale_t> (0));
+    const std::string text (first, last); // NUL-terminated copy for strtod
+    const locale_t previous = cLocale != static_cast<locale_t> (0) ? uselocale (cLocale) : static_cast<locale_t> (0);
+    errno = 0;
+    char* end = nullptr;
+    const double v = std::strtod (text.c_str(), &end);
+    const bool range = errno == ERANGE;
+    if (previous != static_cast<locale_t> (0))
+        uselocale (previous);
+
+    std::from_chars_result result { first + (end - text.c_str()), std::errc() };
+    if (end == text.c_str())
+        result.ec = std::errc::invalid_argument;
+    else if (range && (std::isinf (v) || v == 0.0))
+        result.ec = std::errc::result_out_of_range;
+    else
+        value = v;
+    return result;
+}
+#endif
 
 /** from_chars reports result_out_of_range for both overflow and underflow. A
     grammar-valid number whose decimal magnitude is below 1 can only have
@@ -499,7 +542,11 @@ private:
         const char* first = text.data() + start;
         const char* last = text.data() + pos;
         double value = 0.0;
+#if FLUB_JSON_FLOAT_FROM_CHARS
         const auto result = std::from_chars (first, last, value, std::chars_format::general);
+#else
+        const auto result = parseDouble (first, last, value);
+#endif
         if (result.ec == std::errc::result_out_of_range)
         {
             if (! magnitudeBelowOne (first, last))
