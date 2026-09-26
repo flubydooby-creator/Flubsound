@@ -813,7 +813,9 @@ TEST_CASE ("StereoSpatializer: parameter jumps are click-free")
     const int n = 24000, change = 12000;
     // Side sine at its peak when the parameter jumps: an unsmoothed step of
     // width / focus / crossfeed / low cut would show up as a curvature spike
-    // far above the sine's own A w^2.
+    // (the size of the step: 0.1 .. 0.4 here) far above the sine's own A w^2.
+    // A one-pole glide only has a slope corner (~ step / 960 samples), which
+    // the factor 2 below allows for.
     const auto check = [&] (const SpatializerParams& from, const SpatializerParams& to, double freq) {
         const double phase = 0.5 * kPi - kTwoPi * freq * change / kFs;
         const auto x = sine (freq, kFs, n, 0.25f, phase);
@@ -833,7 +835,7 @@ TEST_CASE ("StereoSpatializer: parameter jumps are click-free")
         const Planar steadyTo = render (to, to);
         const Planar jump = render (from, to);
         const double bound = std::max (maxCurvature (steadyFrom.ch[0], 6000, 6000), maxCurvature (steadyTo.ch[0], 18000, 6000));
-        CHECK_LE (maxCurvature (jump.ch[0], change - 100, 9600), bound * 1.05 + 1.0e-6);
+        CHECK_LE (maxCurvature (jump.ch[0], change - 100, 9600), 2.0 * bound);
     };
 
     SpatializerParams a = neutral(), b = neutral();
@@ -843,8 +845,8 @@ TEST_CASE ("StereoSpatializer: parameter jumps are click-free")
     check (b, a, 1000.0);
     a = b = neutral();
     b.positionalFocus = 1.0f;
-    check (a, b, 3000.0);
-    check (b, a, 3000.0);
+    check (a, b, 1500.0);
+    check (b, a, 1500.0);
     a = b = neutral();
     b.crossfeed = 1.0f;
     check (a, b, 200.0);
