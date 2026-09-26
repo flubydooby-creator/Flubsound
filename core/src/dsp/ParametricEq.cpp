@@ -235,20 +235,21 @@ double ParametricEq::responseDb (const EqBandParams* bandList, int numBands, dou
 }
 
 //==============================================================================
-namespace
+ParametricEq::Topology ParametricEq::topologyOf (const EqBandParams& params) noexcept
 {
+    return { params.enabled, params.type, isCut (params.type) ? sectionsForSlope (params.slopeDbPerOct) : 1 };
+}
+
 /** Bell / shelves at exactly 0 dB (and not moving) are an exact identity:
     m1 = m2 = 0 and m0 = 1, so they are skipped entirely. */
-template <typename BandT>
-bool isTransparent (const BandT& band) noexcept
+bool ParametricEq::isTransparent (const Band& band) noexcept
 {
     return isGainType (band.running.type) && band.gainDb.getCurrent() == 0.0f && ! band.gainDb.isSmoothing();
 }
-} // namespace
 
 void ParametricEq::snapBand (Band& band, const EqBandParams& target) noexcept
 {
-    band.running = { target.enabled, target.type, isCut (target.type) ? sectionsForSlope (target.slopeDbPerOct) : 1 };
+    band.running = topologyOf (target);
     band.logFreq.setImmediate (std::log2 (target.frequency));
     band.gainDb.setImmediate (target.gainDb);
     band.logQ.setImmediate (std::log2 (target.q));
@@ -307,7 +308,7 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
 
     band.ramping = false; // a coefficient ramp spans exactly one control period, which ends here
 
-    const Topology wanted { target.enabled, target.type, isCut (target.type) ? sectionsForSlope (target.slopeDbPerOct) : 1 };
+    const Topology wanted = topologyOf (target);
 
     // 1. Discrete changes: fade out, swap at mix 0, fade back in. A band that
     //    is already silent or transparent swaps immediately (nothing to hear).
@@ -351,20 +352,28 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
     // 3. Decide whether the filter runs during the coming control period.
     //    Coefficients ramp only when the same filter keeps running; after a
     //    swap, a resume or a (re)start the state is cleared and they jump.
+    //    A filter that starts while the wet mix is 0 (just swapped / enabled)
+    //    is hidden by the fade-in. One that starts while the mix is above 0
+    //    can only be a 0 dB bell / shelf leaving 0 dB: it was skipped as an
+    //    exact identity, so it must resume from that identity (below). This
+    //    holds whether its old state is stale or was already invalidated by
+    //    an earlier swap (e.g. disabled, re-enabled at 0 dB, then boosted).
     const bool audibleNow = ! silent && ! isTransparent (band);
     const bool continuous = band.audible && audibleNow && band.stateValid;
-    const bool resuming = audibleNow && ! band.audible && band.stateValid;
+    const bool resuming = audibleNow && ! band.audible && band.fadePos > 0;
     band.audible = audibleNow;
     if (band.audible && band.coeffsDirty)
         refreshCoefficients (band, target, continuous);
 
     if (resuming)
     {
-        // A 0 dB bell / shelf was skipped and now leaves 0 dB: its state is
-        // stale. Prime the low-pass integrator with the input (DC equilibrium,
-        // band-pass = 0) and ramp the output mix from identity (m0 = 1,
-        // m1 = m2 = 0) to the new design across this control period, so the
-        // output leaves the skipped identity path without a step.
+        // Neither a stale nor a zero state matches the signal (a zero-state
+        // high shelf, for instance, starts at m0 = A^2 instead of unity at
+        // low frequencies: a step). Prime the low-pass integrator with the
+        // input (DC equilibrium, band-pass = 0) and ramp the output mix from
+        // identity (m0 = 1, m1 = m2 = 0) to the new design across this
+        // control period, so the output leaves the identity path without a
+        // step while the remaining state error is weighted by a tiny m1 / m2.
         band.stateValid = false;
         band.primeOnStart = true;
         band.prevCoeffs = band.coeffs;

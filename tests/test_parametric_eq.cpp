@@ -65,6 +65,48 @@ double maxStep (const std::vector<float>& y, int from, int to)
     return m;
 }
 
+/** max |y[n] - 2 y[n-1] + y[n-2]| for n in [from, to): the discrete curvature.
+    Far more sensitive to zipper steps and state discontinuities than the first
+    difference, because a slow tone has a tiny steady-state curvature. */
+double maxCurvature (const std::vector<float>& y, int from, int to)
+{
+    double m = 0.0;
+    for (int n = std::max (2, from); n < to; ++n)
+    {
+        const auto i = static_cast<size_t> (n);
+        m = std::max (m, static_cast<double> (std::abs (y[i] - 2.0f * y[i - 1] + y[i - 2])));
+    }
+    return m;
+}
+
+/** Reference for a gain glide, the smoothest realisation of the specified
+    behaviour: from sample `change` on, the band gain (dB) follows a per-sample
+    one-pole with the EQ's 20 ms time constant from 0 dB towards gainDb, the
+    SVF coefficients are redesigned every `hold` samples (1 = every sample)
+    and the filter state is always valid (the filter also runs, as an exact
+    identity, before the change). hold = kControlInterval models a naive
+    control-rate implementation without coefficient interpolation (zipper). */
+std::vector<float> referenceGainGlide (FilterType type, double freq, double q, double gainDb, double fs,
+                                       const std::vector<float>& x, int change, int hold)
+{
+    const double pole = std::exp (-1.0 / (0.020 * fs));
+    double db = 0.0;
+    SvfState state;
+    auto coeffs = SvfCoeffs::make (type, freq, q, 0.0, fs);
+    std::vector<float> y (x.size());
+    for (int i = 0; i < static_cast<int> (x.size()); ++i)
+    {
+        if (i >= change)
+        {
+            db = gainDb + pole * (db - gainDb);
+            if ((i - change) % hold == 0)
+                coeffs = SvfCoeffs::make (type, freq, q, db, fs);
+        }
+        y[static_cast<size_t> (i)] = svfTick (coeffs, state, x[static_cast<size_t> (i)]);
+    }
+    return y;
+}
+
 /** Copies into the existing channel storage. (Assigning a temporary vector to
     a Planar channel would move a new buffer in and leave its pointers stale.) */
 void load (Planar& buf, int channel, const std::vector<float>& s)
@@ -113,7 +155,7 @@ TEST_CASE ("ParametricEq: all bands disabled is an exact null")
     }
 }
 
-TEST_CASE ("ParametricEq: bells and shelves at 0 dB are an exact null (also after toggling)")
+TEST_CASE ("ParametricEq: bells and shelves at 0 dB are an exact null, also after toggles and glides")
 {
     auto eq = makeEq (kFs);
     const EqBandType gainTypes[] = { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf };
@@ -121,33 +163,38 @@ TEST_CASE ("ParametricEq: bells and shelves at 0 dB are an exact null (also afte
         eq->setBand (b, makeBand (gainTypes[b % 3], 25.0f * std::pow (2.0f, 0.6f * static_cast<float> (b)), 0.0f, 0.1f + 1.1f * static_cast<float> (b), 12, true));
 
     const int n = 16384;
-    auto in = whiteNoise (n, 1.0f, 5);
+    const auto in = whiteNoise (n, 1.0f, 5);
     Planar buf (2, n);
-    fillAll (buf, in);
+    // Runs one pass of the test signal and returns max |out - in| over both channels.
+    const auto nullError = [&]
+    {
+        fillAll (buf, in);
+        processInBlocks (*eq, buf, 128);
+        double err = 0.0;
+        for (const auto& c : buf.ch)
+            for (int i = 0; i < n; ++i)
+                err = std::max (err, static_cast<double> (std::abs (c[static_cast<size_t> (i)] - in[static_cast<size_t> (i)])));
+        return err;
+    };
 
-    // Half way through, boost band 3 and immediately return it to 0 dB. After
-    // the glide it must be exactly transparent again.
-    processInBlocks (*eq, buf, 128); // warm-up pass
-    fillAll (buf, in);
-    for (int pos = 0; pos < n; pos += 128)
-        eq->process (buf.block (pos, std::min (128, n - pos)));
-    double err = 0.0;
-    for (int i = 0; i < n; ++i)
-        err = std::max (err, static_cast<double> (std::abs (buf.ch[0][static_cast<size_t> (i)] - in[static_cast<size_t> (i)])));
-    CHECK_LE (err, 1.0e-6);
+    CHECK_LE (nullError(), 1.0e-6);
 
+    // Enable toggles, type changes between 0 dB gain types and frequency / Q
+    // glides of a 0 dB band change nothing audible, so they stay exact.
+    eq->setBand (3, makeBand (EqBandType::Bell, 1000.0f, 0.0f, 1.0f, 12, false));
+    CHECK_LE (nullError(), 1.0e-6);
+    eq->setBand (3, makeBand (EqBandType::LowShelf, 3000.0f, 0.0f, 4.0f, 12, true));
+    CHECK_LE (nullError(), 1.0e-6);
+    eq->setBand (3, makeBand (EqBandType::HighShelf, 300.0f, 0.0f, 0.2f, 12, true));
+    CHECK_LE (nullError(), 1.0e-6);
+
+    // Boost band 3, then return it to 0 dB: once the ~20 ms glide back has
+    // settled (16384 samples > 16 time constants) it must be skipped again.
     eq->setBand (3, makeBand (EqBandType::Bell, 1000.0f, 9.0f, 1.0f));
-    fillAll (buf, in);
-    processInBlocks (*eq, buf, 128);
+    CHECK_GE (nullError(), 0.1); // really boosted
     eq->setBand (3, makeBand (EqBandType::Bell, 1000.0f, 0.0f, 1.0f));
-    fillAll (buf, in);
-    processInBlocks (*eq, buf, 128); // glide back to 0 dB (~20 ms time constant)
-    fillAll (buf, in);
-    processInBlocks (*eq, buf, 128);
-    err = 0.0;
-    for (int i = 0; i < n; ++i)
-        err = std::max (err, static_cast<double> (std::abs (buf.ch[0][static_cast<size_t> (i)] - in[static_cast<size_t> (i)])));
-    CHECK_LE (err, 1.0e-6);
+    (void) nullError(); // the glide back
+    CHECK_LE (nullError(), 1.0e-6);
 }
 
 //==============================================================================
@@ -289,71 +336,144 @@ TEST_CASE ("ParametricEq: responseDb() sums enabled bands, ignores disabled ones
 }
 
 //==============================================================================
-TEST_CASE ("ParametricEq: abrupt gain jump 0 -> +12 dB is click-free")
+TEST_CASE ("ParametricEq: abrupt gain / Q jumps are click-free (first-difference criterion)")
 {
-    // (1) The spec'd first-difference criterion, tone at the bell centre.
-    for (float q : { 1.0f, 8.0f })
+    // A smooth glide between two steady states cannot move the output faster
+    // than the faster of the two steady states does, so the largest
+    // |y[n] - y[n-1]| during the transition must stay within a small factor
+    // (1.1) of the steady-state maximum before / after. A click (step) adds
+    // its full height on top. Each case is run in three band histories:
+    //   0: set at 0 dB and reset (skipped as an identity until the jump),
+    //   1: +6 dB, disabled, re-enabled at 0 dB (state invalidated by the
+    //      swaps) and only then boosted,
+    //   2: enabled at 0 dB 2 ms before the boost (inside the 5 ms fade-in).
+    // A tone at the band frequency sees the largest gain change.
+    struct Case
     {
-        auto eq = makeEq (kFs);
-        eq->setBand (0, makeBand (EqBandType::Bell, 200.0f, 0.0f, q));
-        eq->reset();
+        EqBandParams from, to;
+        double toneHz;
+    };
+    const Case cases[] = {
+        { makeBand (EqBandType::Bell, 200.0f, 0.0f, 1.0f), makeBand (EqBandType::Bell, 200.0f, 12.0f, 1.0f), 200.0 },
+        { makeBand (EqBandType::Bell, 200.0f, 0.0f, 8.0f), makeBand (EqBandType::Bell, 200.0f, 12.0f, 8.0f), 200.0 },
+        { makeBand (EqBandType::LowShelf, 200.0f, 0.0f), makeBand (EqBandType::LowShelf, 200.0f, 12.0f), 200.0 },
+        { makeBand (EqBandType::HighShelf, 200.0f, 0.0f), makeBand (EqBandType::HighShelf, 200.0f, 12.0f), 200.0 },
+        // Q jump 0.3 -> 10 on a +12 dB bell, heard off-centre (~+11 dB -> ~+0.3 dB).
+        { makeBand (EqBandType::Bell, 200.0f, 12.0f, 0.3f), makeBand (EqBandType::Bell, 200.0f, 12.0f, 10.0f), 300.0 },
+    };
 
-        const int n = static_cast<int> (kFs * 0.6);
-        const int change = 9600; // 0.2 s
-        Planar buf (2, n);
-        fillAll (buf, sine (200.0, kFs, n, 0.2f));
-        for (int pos = 0; pos < n; pos += 64)
-        {
-            if (pos == change)
-                eq->setBand (0, makeBand (EqBandType::Bell, 200.0f, 12.0f, q));
-            eq->process (buf.block (pos, std::min (64, n - pos)));
-        }
-
-        const auto& y = buf.ch[0];
-        const double before = maxStep (y, 4800, change);
-        const double after = maxStep (y, n - 4800, n);
-        const double transition = maxStep (y, change, n);
-        CHECK_NEAR (after / before, std::pow (10.0, 12.0 / 20.0), 0.05); // really reached +12 dB
-        CHECK_LE (transition, 1.1 * std::max (before, after));
-        CHECK (allFinite (buf));
-    }
-
-    // (2) Zipper / resume check with the far more sensitive second difference
-    //     |y[n] - 2y[n-1] + y[n-2]|: a slow tone has a tiny steady-state value,
-    //     so a coefficient step every control period, or a stale state when a
-    //     skipped 0 dB band resumes, sticks out by 30x (48k) .. 130x (192k).
-    //     What legitimately remains is the single-sample slope kink at the
-    //     onset of any exponential glide; relative to a sine's second
-    //     difference (~1/fs^2) it grows with the rate (~1/fs), hence the bound.
     for (double fs : { 48000.0, 192000.0 })
-        for (auto type : { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf })
+        for (const auto& c : cases)
+            for (int history = 0; history < 3; ++history)
+            {
+                if (history > 0 && c.from.gainDb != 0.0f)
+                    continue; // the histories are about bands that start at 0 dB
+
+                auto eq = makeEq (fs);
+                const int block = 64;
+                const int change = static_cast<int> (fs * 0.2) / block * block; // on the control grid
+                const int n = change + static_cast<int> (fs * 0.4);
+                auto boosted = c.from;
+                boosted.gainDb = 6.0f;
+                auto disabled = c.from;
+                disabled.enabled = false;
+                eq->setBand (0, history == 0 ? c.from : (history == 1 ? boosted : disabled));
+                eq->reset();
+
+                Planar buf (2, n);
+                fillAll (buf, sine (c.toneHz, fs, n, 0.2f));
+                for (int pos = 0; pos < n; pos += block)
+                {
+                    if (history == 1 && pos == block * 20)
+                        eq->setBand (0, disabled);
+                    if (history == 1 && pos == block * 60)
+                        eq->setBand (0, c.from);
+                    if (history == 2 && pos == change - static_cast<int> (fs * 0.002) / block * block)
+                        eq->setBand (0, c.from);
+                    if (pos == change)
+                        eq->setBand (0, c.to);
+                    eq->process (buf.block (pos, std::min (block, n - pos)));
+                }
+                CHECK (allFinite (buf));
+
+                const auto& y = buf.ch[0];
+                const int tail = static_cast<int> (fs * 0.1);
+                const double before = maxStep (y, change - tail, change);
+                const double after = maxStep (y, n - tail, n);
+                const double transition = maxStep (y, change, n);
+                // The glide really arrived: steady-state slope ratio == |H(tone)| ratio.
+                const double gainRatio = std::pow (10.0, (ParametricEq::responseDb (&c.to, 1, c.toneHz, fs)
+                                                          - ParametricEq::responseDb (&c.from, 1, c.toneHz, fs)) / 20.0);
+                CHECK_NEAR (after / before, gainRatio, 0.02 * gainRatio);
+                CHECK_LE (transition, 1.1 * std::max (before, after));
+            }
+}
+
+TEST_CASE ("ParametricEq: gain glides are as smooth as an ideal per-sample glide (no zipper, no stale state)")
+{
+    // The curvature |y[n] - 2y[n-1] + y[n-2]| of a slow tone is tiny in the
+    // steady state (~ A (2 pi f / fs)^2), so it exposes coefficient steps at
+    // the 16-sample control rate and state discontinuities when a skipped
+    // 0 dB band resumes. It cannot be bounded by the steady-state curvature,
+    // though: any exponential glide has a slope kink at its onset of about
+    // (ln 10 / 20) (12 dB / 20 ms) A / fs, which relative to the steady state
+    // grows with the sample rate. The physically meaningful bound is the
+    // curvature of the smoothest possible realisation of the specified
+    // smoothing: a per-sample one-pole glide in dB, coefficients redesigned
+    // every sample, on a filter whose state was always valid. The EQ may
+    // deviate from it only by its linear coefficient interpolation between
+    // control ticks (~1 % onset slope difference) and by the approximate
+    // (primed) state of a resumed band; 25 % covers both, while a 16-sample
+    // zipper exceeds it several-fold (checked below as a negative control)
+    // and a zero / stale state on resume by 4x .. 400x.
+    const FilterType svfTypes[] = { FilterType::Bell, FilterType::LowShelf, FilterType::HighShelf };
+    const EqBandType eqTypes[] = { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf };
+    constexpr double toneHz = 101.25, bandHz = 1000.0, gainDb = 12.0;
+
+    for (double fs : kRates)
+    {
+        const int block = 64;
+        const int change = static_cast<int> (fs * 0.1) / block * block; // on the control grid
+        const int n = change + static_cast<int> (fs * 0.3);
+        const auto x = sine (toneHz, fs, n, 0.2f);
+
+        for (int t = 0; t < 3; ++t)
             for (float q : { 0.3f, 0.7071f, 2.0f })
             {
-                auto eq = makeEq (fs, 1);
-                eq->setBand (0, makeBand (type, 1000.0f, 0.0f, q));
-                eq->reset();
-                const int change = static_cast<int> (fs * 0.1) / 64 * 64 + 17 * 64; // on the 16-sample grid
-                const int n = change + static_cast<int> (fs * 0.3);
-                Planar buf (1, n);
-                load (buf, 0, sine (101.25, fs, n, 0.2f));
-                for (int pos = 0; pos < n; pos += 64)
+                const auto ideal = referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, 1);
+                const auto zipper = referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, ParametricEq::kControlInterval);
+                const double bound = 1.25 * maxCurvature (ideal, change, n);
+                CHECK_GE (maxCurvature (zipper, change, n), 2.0 * bound); // the metric can see zipper noise
+
+                // History 0: skipped at 0 dB since reset (stale state on resume).
+                // History 1: +6 dB -> disabled -> re-enabled at 0 dB (state invalidated by the swaps).
+                for (int history = 0; history < 2; ++history)
                 {
-                    if (pos == change)
-                        eq->setBand (0, makeBand (type, 1000.0f, 12.0f, q));
-                    eq->process (buf.block (pos, std::min (64, n - pos)));
+                    auto eq = makeEq (fs, 1);
+                    eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), history == 0 ? 0.0f : 6.0f, q));
+                    eq->reset();
+                    Planar buf (1, n);
+                    load (buf, 0, x);
+                    for (int pos = 0; pos < n; pos += block)
+                    {
+                        if (history == 1 && pos == block * 10)
+                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), 6.0f, q, 12, false));
+                        if (history == 1 && pos == block * 40)
+                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), 0.0f, q));
+                        if (pos == change)
+                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), static_cast<float> (gainDb), q));
+                        eq->process (buf.block (pos, std::min (block, n - pos)));
+                    }
+                    const auto& y = buf.ch[0];
+                    CHECK_LE (maxCurvature (y, change, n), bound);
+                    // ... and it ends where the ideal glide ends.
+                    double endErr = 0.0;
+                    for (int i = n - 1000; i < n; ++i)
+                        endErr = std::max (endErr, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - ideal[static_cast<size_t> (i)])));
+                    CHECK_LE (endErr, 1.0e-4);
                 }
-                const auto& y = buf.ch[0];
-                const auto maxD2 = [&y] (int from, int to)
-                {
-                    double m = 0.0;
-                    for (int i = std::max (2, from); i < to; ++i)
-                        m = std::max (m, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - 2.0f * y[static_cast<size_t> (i - 1)] + y[static_cast<size_t> (i - 2)])));
-                    return m;
-                };
-                const int tail = static_cast<int> (fs * 0.05);
-                const double steady = std::max (maxD2 (change - tail, change), maxD2 (n - tail, n));
-                CHECK_LE (maxD2 (change, n), (fs > 96000.0 ? 10.0 : 2.5) * steady);
             }
+    }
 }
 
 TEST_CASE ("ParametricEq: abrupt type / slope / enable changes are crossfaded without clicks")

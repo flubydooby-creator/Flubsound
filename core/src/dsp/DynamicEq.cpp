@@ -23,8 +23,9 @@ constexpr float kFadeMs = 20.0f;
 // Peak-hold window limits. The window must span at least half a period of the
 // lowest frequency the detector passes, otherwise the envelope ripples at twice
 // the signal frequency and modulates the EQ gain (intermodulation). 25 ms
-// covers 20 Hz; 1 ms keeps treble bands snappy while still spanning several
-// cycles, which also averages out sample-peak vs true-peak jitter.
+// covers 20 Hz (the low-shelf detector always uses it, see updateDetector());
+// 1 ms keeps treble bands snappy while still spanning several cycles, which
+// also averages out sample-peak vs true-peak jitter.
 constexpr double kMinHoldSeconds = 0.001;
 constexpr double kMaxHoldSeconds = 0.025;
 
@@ -243,37 +244,48 @@ void DynamicEq::activateBand (int index, bool fadeIn) noexcept
 void DynamicEq::updateDetector (BandState& band) const noexcept
 {
     // Unity-gain sidechain filter matching the region the EQ shape acts on.
-    // holdPeriods = how many periods of the band frequency the peak-hold
-    // window spans, i.e. 1 / (lowest significant detector frequency / f).
+    // The peak-hold window must cover half a period of the lowest frequency
+    // that still reaches the detector at a significant level.
+    const double freq = SvfCoeffs::clampFrequency (band.freq, spec.sampleRate);
     FilterType type = FilterType::BandPass;
     double detQ = band.q;
-    double holdPeriods = 1.0;
+    double holdSeconds = kMaxHoldSeconds;
     switch (band.shape)
     {
         case EqBandType::LowShelf:
+            // The low-pass passes everything below f at unity, all the way
+            // down to the deepest bass, whatever f is: a window tied to f
+            // would let a 30 Hz note ripple the level of a 500 Hz shelf and
+            // distort the very bass it is shaping. Always hold for 20 Hz.
             type = FilterType::LowPass;
             detQ = std::min (detQ, kMaxShelfDetectorQ);
-            holdPeriods = 2.0; // everything below f passes: cover down to f/4
+            holdSeconds = kMaxHoldSeconds;
             break;
         case EqBandType::HighShelf:
+            // Four periods of f = half a period of f/8, where the 12 dB/oct
+            // skirt is 36 dB down: loud bass under a treble shelf cannot
+            // ripple its level.
             type = FilterType::HighPass;
             detQ = std::min (detQ, kMaxShelfDetectorQ);
-            holdPeriods = 1.0; // covers the 12 dB/oct skirt down to f/2
+            holdSeconds = 4.0 / freq;
             break;
         default:
         {
-            // One full period at the band-pass's lower -3 dB edge
-            // fl = f (sqrt(1 + 1/(4Q^2)) - 1/(2Q)).
+            // Two periods of the band-pass's lower -3 dB edge
+            // fl = f (sqrt(1 + 1/(4Q^2)) - 1/(2Q)), i.e. half a period of
+            // fl/4, where the skirt is 16 dB down at Q = 1 (12 dB at Q = 0.1,
+            // 32 dB at Q = 10). Loud bass leaking through the skirt then
+            // barely ripples the level of a mid band: a -6 dBFS 100 Hz note
+            // under an acting 1 kHz band leaves intermod sidebands near
+            // -90 dBc at an 80 ms release (half this window: -62 dBc).
             const double halfBw = 0.5 / detQ;
-            holdPeriods = 1.0 / (std::sqrt (1.0 + halfBw * halfBw) - halfBw);
+            holdSeconds = 2.0 / (freq * (std::sqrt (1.0 + halfBw * halfBw) - halfBw));
             break;
         }
     }
+    holdSeconds = std::clamp (holdSeconds, kMinHoldSeconds, kMaxHoldSeconds);
 
     band.detCoeffs = SvfCoeffs::make (type, band.freq, detQ, 0.0, spec.sampleRate);
-
-    const double freq = SvfCoeffs::clampFrequency (band.freq, spec.sampleRate);
-    const double holdSeconds = std::clamp (holdPeriods / freq, kMinHoldSeconds, kMaxHoldSeconds);
     band.windowTicks = std::max (1, static_cast<int> (std::lround (holdSeconds * controlRate)));
     band.windowCountdown = std::min (band.windowCountdown, band.windowTicks);
     // After the hold, the envelope decays with a time constant of one window,

@@ -35,8 +35,12 @@
 // Zero latency (ITD delays are part of the binaural cue, not added latency).
 #pragma once
 
+#include "Biquad.h"
 #include "Processor.h"
+#include "Svf.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -97,8 +101,104 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    static constexpr int kControlInterval = 16; // samples between geometry updates
+    static constexpr int kNumReflections = 6;
+
+    enum class Role : uint8_t
+    {
+        None = 0, // not part of the layout: ignored and cleared
+        Speaker,  // virtual loudspeaker at speakerAzimuthDeg()
+        Lfe       // low-passed to both ears
+    };
+
+    /** One ear of one virtual speaker (parametric renderer). "prev" values are
+        the design at the previous control tick; while `ramping` the running
+        values are interpolated per sample from prev to current. */
+    struct EarPath
+    {
+        float delay = 0.0f, prevDelay = 0.0f; // Woodworth delay (samples)
+        std::array<float, 4> taps {};         // Lagrange taps for `delay`
+        int base = 0;                         // integer read offset of taps[0]
+        BiquadCoeffs shadow, prevShadow;      // Brown-Duda head shadow
+        BiquadState state;
+    };
+
+    struct Speaker
+    {
+        Role role = Role::None;
+        float azimuth = 0.0f;
+        OnePoleSmoother shelfDb; // rear-cue shelf gain, control rate
+        SvfCoeffs shelf, prevShelf;
+        SvfState shelfState;
+        std::array<EarPath, 2> ears {}; // 0 = left, 1 = right
+        bool clean = true;              // every state of this channel is zero
+    };
+
+    /** Renderer B data for one speaker: mirrored input history (2 x length,
+        so the newest `length` samples are always contiguous) and the
+        time-reversed HRIR of each ear. */
+    struct HrirPath
+    {
+        std::vector<float> history;
+        std::array<std::vector<float>, 2> reversed;
+        bool present = false;
+    };
+
+    bool loadHrir();
+    void tick() noexcept;
+    void swapLayout() noexcept;
+    void updateGeometry (bool snap) noexcept;
+    void clearState() noexcept;
+    void clearChannel (int channel) noexcept;
+    void renderSegment (const AudioBlock& block, int start, int length, int numInputs) noexcept;
+    template <bool Ramp>
+    void renderParametric (Speaker& sp, float* line, const float* x, int length) noexcept;
+    void renderHrir (HrirPath& path, const float* x, int length) noexcept;
+    void renderLfe (const float* x, int length) noexcept;
+    void renderReflections (int length) noexcept;
+
     std::shared_ptr<const HrirSet> hrir;
     ProcessSpec spec;
     VirtualizerParams params;
+
+    ChannelLayout runningLayout = ChannelLayout::Surround71;
+    std::array<Speaker, kMaxChannels> speakers {};
+    OnePoleSmoother frontAngle, sideAngle, rearAngle, headRadius; // control rate
+
+    // Parametric ITD delay lines (one per channel, shared write position).
+    std::array<std::vector<float>, kMaxChannels> itdLines;
+    int itdMask = 0, itdWrite = 0;
+    float maxDelaySamples = 0.0f;
+
+    // Renderer B.
+    std::array<HrirPath, kMaxChannels> hrirPaths;
+    int hrirLength = 0, hrirWrite = 0;
+    ChannelLayout hrirLayout = ChannelLayout::Surround71;
+    bool hrirValid = false, useHrir = false;
+
+    // LFE: 4th-order Butterworth low-pass.
+    std::array<SvfCoeffs, 2> lfeCoeffs {};
+    std::array<SvfState, 2> lfeState {};
+    LinearSmoothedValue lfeGain;
+
+    // Early reflections from the band-limited mono speaker sum.
+    SvfCoeffs reflHpCoeffs, reflLpCoeffs;
+    SvfState reflHpState, reflLpState;
+    std::vector<float> reflLine;
+    std::array<int, kNumReflections> reflDelay {};
+    int reflMask = 0, reflWrite = 0;
+    LinearSmoothedValue roomGain;
+
+    // Scratch (maxBlockSize): ear accumulators and the reflection bus.
+    std::vector<float> accL, accR, bus;
+
+    // Control-rate state, aligned to absolute stream time.
+    int samplesToTick = 0;
+    int rampPos = 0;
+    bool ramping = false;
+    bool busy = false;
+    int fadeSamples = 240; // layout-swap dip, each direction (whole control periods)
+    int fadePos = 240;
+    int fadeDir = 0;
 };
 } // namespace flub

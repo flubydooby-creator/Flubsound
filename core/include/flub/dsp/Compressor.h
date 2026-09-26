@@ -23,8 +23,13 @@
 #pragma once
 
 #include "Processor.h"
+#include "Svf.h"
+#include "flub/common/DelayLine.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 
 namespace flub
 {
@@ -73,9 +78,66 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    /** Static-curve parameters in the form the per-sample gain computer uses.
+        Ratios are carried as slopes (1 - 1/R), which is what the curve needs
+        and what glides most evenly when a ratio is smoothed. */
+    struct Curve
+    {
+        float thresholdDb = -18.0f, kneeDb = 6.0f, slope = 0.6f;
+        float upThresholdDb = -45.0f, upSlope = 0.5f, upMaxGainDb = 0.0f, upFloorDb = -75.0f;
+    };
+
+    struct CurveGain
+    {
+        float down = 0.0f, up = 0.0f;
+    };
+
+    static CompressorParams sanitised (const CompressorParams& p, const CompressorParams& fallback) noexcept;
+    static Curve makeCurve (const CompressorParams& p) noexcept;
+    static CurveGain evaluateCurve (const Curve& c, float levelDb) noexcept;
+    static float autoMakeupDb (const CompressorParams& p) noexcept;
+
+    int holdSamplesFor (float sidechainHpHz) const noexcept;
+    void updateTimeConstants() noexcept;
+    void updateHpCoeffs() noexcept;
+    void advanceSmoothers() noexcept;
+    void housekeeping() noexcept;
+
     float lookaheadMs = 2.0f;
     ProcessSpec spec;
     CompressorParams params;
     std::atomic<float> grDb { 0.0f }, upDb { 0.0f };
+
+    int latency = 0;
+    DelayLine delay;                                  // look-ahead: the dry and the wet path
+
+    // Sidechain high-pass (12 dB/oct Butterworth SVF), crossfaded in / out.
+    SvfCoeffs hpCoeffs;
+    std::array<SvfState, kMaxChannels> hpState {};
+    OnePoleSmoother logHpFreq;                        // ln(Hz)
+    LinearSmoothedValue hpMix;                        // 0 = raw input, 1 = high-passed
+    bool hpRunning = false;
+
+    // Continuous parameters glide per sample (curve, makeup dB, mix).
+    OnePoleSmoother thresholdS, kneeS, slopeS, upThresholdS, upSlopeS, upMaxS, upFloorS, makeupS, mixS;
+    Curve curve;
+    bool smoothing = false, curveDirty = true;
+
+    // Linked peak detector with a two-bucket hold (see the .cpp).
+    float bucketPeak = 0.0f, prevBucketPeak = 0.0f, heldPeak = -1.0f;
+    int bucketLength = 1, bucketCountdown = 1;
+    CurveGain target;
+
+    // Gain smoothing (dB) and program-dependent release.
+    float gainDb = 0.0f;
+    float attackCoeff = 0.0f, releaseCoeff = 0.0f;
+    float sustain = 0.0f, sustainStep = 0.0f;         // 0..1: how long the current reduction has lasted
+    int activeRun = 0;
+    float autoCoeffSustain = -1.0f, autoCoeff = 0.0f; // cache of the auto-release coefficient
+
+    // Output gain cache: 1 + mix * (10^((gain + makeup) / 20) - 1).
+    float lastWetDb = 0.0f, lastMix = -1.0f, outFactor = 1.0f;
+
+    uint32_t tick = 0;                                // running sample counter (control-rate phase)
 };
 } // namespace flub

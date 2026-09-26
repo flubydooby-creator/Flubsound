@@ -290,7 +290,10 @@ TEST_CASE ("DynamicEq: a steady tone is not modulated by detector ripple (fast r
 {
     // A naive peak follower with a 5 ms release ripples at twice the signal
     // frequency and turns the EQ into a distortion generator on bass. The
-    // windowed peak hold must keep the gain constant on a steady tone.
+    // windowed peak hold must keep the gain constant on a steady tone. The
+    // low-shelf cases matter most: its low-pass detector passes the deepest
+    // bass at full level, far below the shelf corner (30 Hz under a 500 Hz
+    // shelf), and the shelf applies its gain right there.
     struct Case
     {
         EqBandType shape;
@@ -298,7 +301,8 @@ TEST_CASE ("DynamicEq: a steady tone is not modulated by detector ripple (fast r
         double toneHz;
     };
     for (const Case c : { Case { EqBandType::Bell, 100.0f, 1.0f, 100.0 }, Case { EqBandType::Bell, 1000.0f, 1.0f, 620.0 },
-                          Case { EqBandType::LowShelf, 120.0f, 0.7071f, 40.0 }, Case { EqBandType::HighShelf, 3000.0f, 0.7071f, 2000.0 } })
+                          Case { EqBandType::LowShelf, 120.0f, 0.7071f, 40.0 }, Case { EqBandType::LowShelf, 500.0f, 0.7071f, 30.0 },
+                          Case { EqBandType::HighShelf, 3000.0f, 0.7071f, 2000.0 } })
     {
         DynamicEq eq;
         prepareEq (eq, kFs, 1);
@@ -328,6 +332,55 @@ TEST_CASE ("DynamicEq: a steady tone is not modulated by detector ripple (fast r
         const double fund = toneAmplitude (y, n / 2, c.toneHz, kFs);
         CHECK_LE (toDb (toneAmplitude (y, n / 2, 2.0 * c.toneHz, kFs) / fund), -70.0);
         CHECK_LE (toDb (toneAmplitude (y, n / 2, 3.0 * c.toneHz, kFs) / fund), -70.0);
+    }
+}
+
+TEST_CASE ("DynamicEq: loud bass leaking through a detector skirt does not intermodulate")
+{
+    // A -3/-6 dBFS bass note reaches the band-pass (Bell) and high-pass
+    // (HighShelf) detectors through their skirts, far below the band. If the
+    // peak hold spanned only the band's own period, the level would ripple at
+    // twice the bass frequency and amplitude-modulate the in-band content,
+    // i.e. sidebands at fHi +- 2 fBass. Default attack / release (5 / 80 ms).
+    struct Case
+    {
+        EqBandType shape;
+        float bandHz, thresholdDb;
+        double bassHz, bassDb, hiHz, hiDb;
+    };
+    for (const Case c : { Case { EqBandType::Bell, 1000.0f, -40.0f, 100.0, -6.0, 1000.0, -30.0 },
+                          Case { EqBandType::HighShelf, 1000.0f, -45.0f, 100.0, -3.0, 4000.0, -30.0 } })
+    {
+        DynamicEq eq;
+        prepareEq (eq, kFs, 1);
+        eq.setBand (0, makeBand (DynEqMode::CutAbove, c.shape, c.bandHz, c.shape == EqBandType::Bell ? 1.0f : 0.7071f,
+                                 c.thresholdDb, 3.0f, 12.0f));
+        eq.reset();
+
+        const int n = 96000, m = 48000; // measure the second second: integer cycles for every tone
+        const auto bass = sine (c.bassHz, kFs, n, dbfs (c.bassDb));
+        const auto hi = sine (c.hiHz, kFs, n, dbfs (c.hiDb));
+        Planar buf (1, n);
+        for (int i = 0; i < n; ++i)
+            buf.ch[0][static_cast<size_t> (i)] = bass[static_cast<size_t> (i)] + hi[static_cast<size_t> (i)];
+        double gMin = 100.0, gMax = -100.0;
+        for (int pos = 0; pos < n; pos += 32)
+        {
+            eq.process (buf.block (pos, 32));
+            if (pos >= m)
+            {
+                gMin = std::min (gMin, static_cast<double> (eq.getBandGainDb (0)));
+                gMax = std::max (gMax, static_cast<double> (eq.getBandGainDb (0)));
+            }
+        }
+        CHECK_LE (gMax, -9.0); // the band is really acting
+        CHECK_LE (gMax - gMin, 0.02);
+
+        const float* y = buf.ch[0].data() + m;
+        const double carrier = toneAmplitude (y, m, c.hiHz, kFs);
+        const double lower = toneAmplitude (y, m, c.hiHz - 2.0 * c.bassHz, kFs);
+        const double upper = toneAmplitude (y, m, c.hiHz + 2.0 * c.bassHz, kFs);
+        CHECK_LE (toDb (std::max (lower, upper) / carrier), -80.0);
     }
 }
 
@@ -373,7 +426,7 @@ TEST_CASE ("DynamicEq: attack and release timing")
         if (i < onAt || i >= offAt)
             x[static_cast<size_t> (i)] = 0.0f;
     Planar buf (1, n);
-    buf.ch[0] = x;
+    setChannel (buf, 0, x);
 
     double attack90 = -1.0, release90 = -1.0;
     for (int pos = 0; pos < n; pos += block)
@@ -397,6 +450,49 @@ TEST_CASE ("DynamicEq: attack and release timing")
     CHECK_LE (release90, 265.0);
 }
 
+TEST_CASE ("DynamicEq: level accuracy and timing do not depend on the sample rate")
+{
+    // The control rate is fs / kControlInterval; every smoother, the hold
+    // window and the gain smoother are derived from it, so the static curve
+    // and the attack / release times must come out the same at every rate.
+    for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        DynamicEq eq;
+        prepareEq (eq, fs, 1, 64);
+        auto p = cutAbove1k (12.0f);
+        p.attackMs = 10.0f;
+        p.releaseMs = 100.0f;
+        eq.setBand (0, p);
+        eq.reset();
+
+        const int offAt = static_cast<int> (fs * 0.6), n = static_cast<int> (fs * 1.0), measure = static_cast<int> (fs * 0.2);
+        auto x = sine (1000.0, fs, n, dbfs (-10.0));
+        std::fill (x.begin() + offAt, x.end(), 0.0f);
+        Planar buf (1, n);
+        setChannel (buf, 0, x);
+
+        double attack90 = -1.0, release90 = -1.0, gainAtOff = 0.0;
+        for (int pos = 0; pos < n; pos += 64)
+        {
+            eq.process (buf.block (pos, std::min (64, n - pos)));
+            const double g = eq.getBandGainDb (0);
+            const double t = (pos + 64) / fs * 1000.0;
+            if (attack90 < 0.0 && g <= -10.8)
+                attack90 = t;
+            if (pos + 64 <= offAt)
+                gainAtOff = g; // last block that ends before the tone stops
+            if (pos >= offAt && release90 < 0.0 && g >= -1.2)
+                release90 = t - offAt / fs * 1000.0;
+        }
+        CHECK_NEAR (gainAtOff, -12.0, 0.05);
+        CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + offAt - measure, measure, 1000.0, fs) / dbfs (-10.0)), -12.0, 0.25);
+        CHECK_GE (attack90, 18.0);
+        CHECK_LE (attack90, 30.0);
+        CHECK_GE (release90, 200.0);
+        CHECK_LE (release90, 265.0);
+    }
+}
+
 TEST_CASE ("DynamicEq: expansion modes use attack for a RISING gain")
 {
     // BoostAbove with a fast attack and a slow release: the boost must arrive
@@ -415,7 +511,7 @@ TEST_CASE ("DynamicEq: expansion modes use attack for a RISING gain")
         if (i < onAt || i >= offAt)
             x[static_cast<size_t> (i)] = 0.0f;
     Planar buf (1, n);
-    buf.ch[0] = x;
+    setChannel (buf, 0, x);
     double up90 = -1.0, down90 = -1.0;
     for (int pos = 0; pos < n; pos += 16)
     {
@@ -443,8 +539,8 @@ TEST_CASE ("DynamicEq: disabled bands are bit-transparent; enable / disable glid
     // Nothing enabled: exact pass-through.
     {
         Planar buf (2, n);
-        buf.ch[0] = tone;
-        buf.ch[1] = tone;
+        setChannel (buf, 0, tone);
+        setChannel (buf, 1, tone);
         processInBlocks (eq, buf, 333);
         CHECK (buf.ch[0] == tone);
         CHECK (buf.ch[1] == tone);
@@ -459,8 +555,8 @@ TEST_CASE ("DynamicEq: disabled bands are bit-transparent; enable / disable glid
     eq.reset();
 
     Planar buf (2, n);
-    buf.ch[0] = tone;
-    buf.ch[1] = tone;
+    setChannel (buf, 0, tone);
+    setChannel (buf, 1, tone);
     const int block = 64;
     const int enableAt = 9600, disableAt = 28800;
     std::vector<float> gains;
@@ -512,8 +608,8 @@ TEST_CASE ("DynamicEq: mode and shape switches are click-free crossfades")
     eq.reset();
 
     Planar buf (2, n);
-    buf.ch[0] = tone;
-    buf.ch[1] = tone;
+    setChannel (buf, 0, tone);
+    setChannel (buf, 1, tone);
     const int block = 100;
     std::vector<float> gains;
     for (int pos = 0; pos < n; pos += block)
@@ -590,7 +686,7 @@ TEST_CASE ("DynamicEq: continuous parameter changes glide")
     const int n = 48000;
     auto x = sine (2000.0, kFs, n, 0.5f);
     Planar sweep (1, n);
-    sweep.ch[0] = x;
+    setChannel (sweep, 0, x);
     for (int pos = 0; pos < n; pos += 64)
     {
         p.frequency = 200.0f * std::pow (50.0f, static_cast<float> (pos) / static_cast<float> (n));
@@ -689,12 +785,14 @@ TEST_CASE ("DynamicEq: robustness - silence, DC, full-scale noise, impulses, ext
     for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
     {
         const int n = static_cast<int> (fs * 0.25);
-        const int bs = 480;
 
         for (int setting = 0; setting < 4; ++setting)
         {
+            // Block sizes 480 / 4096 (the maximum) / 1 / 333, and one 8-channel run.
+            const int bs = setting == 1 ? 4096 : setting == 2 ? 1 : setting == 3 ? 333 : 480;
+            const int channels = setting == 3 ? 8 : 2;
             DynamicEq eq;
-            prepareEq (eq, fs, 2, bs);
+            prepareEq (eq, fs, channels, bs);
             for (int b = 0; b < DynamicEq::kMaxBands; ++b)
             {
                 DynEqBandParams p;
@@ -743,14 +841,14 @@ TEST_CASE ("DynamicEq: robustness - silence, DC, full-scale noise, impulses, ext
 
             for (int sig = 0; sig < 5; ++sig)
             {
-                Planar buf (2, n);
-                for (int c = 0; c < 2; ++c)
+                Planar buf (channels, n);
+                for (int c = 0; c < channels; ++c)
                 {
                     auto& x = buf.ch[static_cast<size_t> (c)];
                     switch (sig)
                     {
                         case 0: break; // silence
-                        case 1: std::fill (x.begin(), x.end(), c == 0 ? 1.0f : -1.0f); break;
+                        case 1: std::fill (x.begin(), x.end(), c % 2 == 0 ? 1.0f : -1.0f); break;
                         case 2: setChannel (buf, c, whiteNoise (n, 1.0f, static_cast<uint32_t> (11 + c))); break;
                         case 3:
                             for (int i = 0; i < n; i += 997)
@@ -768,7 +866,8 @@ TEST_CASE ("DynamicEq: robustness - silence, DC, full-scale noise, impulses, ext
                 const bool stackedShelves = setting == 1 || setting == 3;
                 CHECK (allFinite (buf, stackedShelves ? 1.0e6 : 1.0e3));
                 if (sig == 0)
-                    CHECK (peakAbs (buf.ch[0].data(), n) == 0.0);
+                    for (int c = 0; c < channels; ++c)
+                        CHECK (peakAbs (buf.ch[static_cast<size_t> (c)].data(), n) == 0.0);
                 for (int b = 0; b < DynamicEq::kMaxBands; ++b)
                     CHECK (std::isfinite (eq.getBandGainDb (b)) && std::abs (eq.getBandGainDb (b)) <= 36.001f);
             }

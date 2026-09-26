@@ -97,6 +97,8 @@ private:
         bool busy = false;          // needs control ticks (smoothing, ramping, fading or pending swap)
     };
 
+    static Topology topologyOf (const EqBandParams& params) noexcept;
+    static bool isTransparent (const Band& band) noexcept;
     void controlTick() noexcept;
     void updateBand (Band& band, const EqBandParams& target) noexcept;
     void snapBand (Band& band, const EqBandParams& target) noexcept;

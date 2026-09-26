@@ -50,7 +50,73 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
-    double sampleRate = 48000.0;
+    static constexpr int kMomentarySubBlocks = 4;   // 400 ms
+    static constexpr int kShortTermSubBlocks = 30;  // 3 s (also the ring length)
+
+    /** Gating histogram: 0.1 LU bins from -70 LUFS (the absolute gate) to
+        +30 LUFS; louder blocks are clamped into the top bin. Each bin keeps
+        the exact energy sum and count of its blocks, so the gated mean is
+        exact except for the single bin that straddles the relative gate, and
+        memory stays constant however long the programme runs. */
+    class GatingHistogram
+    {
+    public:
+        void prepare();
+        void reset() noexcept;
+
+        /** Adds one block (mean-square energy already channel-weighted);
+            blocks at or below the -70 LUFS absolute gate are discarded. */
+        void add (double energy) noexcept;
+
+        /** Mean energy of the blocks that pass the absolute gate and the
+            relative gate (relativeGateLu below the absolute-gated mean);
+            0 when nothing passes. */
+        double gatedMeanEnergy (double relativeGateLu) const noexcept;
+
+        /** EBU Tech 3342 percentiles (in LUFS) of the gated distribution.
+            Returns false when no block passes the gates. */
+        bool gatedPercentiles (double relativeGateLu, double lowFraction, double highFraction,
+                               double& lowLufs, double& highLufs) const noexcept;
+
+    private:
+        struct Bin
+        {
+            double energy = 0.0;
+            std::int64_t count = 0;
+        };
+
+        /** First bin that passes the relative gate (-1 = nothing passes). */
+        int firstGatedBin (double relativeGateLu) const noexcept;
+
+        std::vector<Bin> bins;
+        double totalEnergy = 0.0; // absolute-gated sums (for the relative gate)
+        std::int64_t totalCount = 0;
+        int highestBin = -1;      // bounds the scans to the occupied range
+    };
+
+    void completeSubBlock() noexcept;
+    void resetMeasurement() noexcept;
+
+    double fs = 48000.0;
     int channels = 2;
+    int subBlockLength = 0;       // samples per 100 ms sub-block (0 = not prepared)
+    int subBlockPos = 0;          // samples accumulated in the current sub-block
+
+    BiquadCoeffs stage1Coeffs, stage2Coeffs;
+    std::array<BiquadState, kMaxChannels> stage1State {}, stage2State {};
+    std::array<double, kMaxChannels> channelWeight {};
+    std::array<double, kMaxChannels> channelEnergy {}; // running sum of squares, current sub-block
+
+    std::array<double, kShortTermSubBlocks> subBlockEnergy {}; // ring of weighted sub-block energies
+    int ringPos = 0;
+    int validSubBlocks = 0;       // complete sub-blocks since reset(), capped at the ring length
+    int measuredSubBlocks = 0;    // ... since the measurement (re)started, capped likewise
+
+    GatingHistogram integratedHistogram; // 400 ms blocks, 75 % overlap
+    GatingHistogram rangeHistogram;      // 3 s short-term values every 100 ms
+
+    float momentaryLufs = kMinusInfDb, shortTermLufs = kMinusInfDb, integratedLufs = kMinusInfDb;
+    float maxMomentaryLufs = kMinusInfDb, maxShortTermLufs = kMinusInfDb;
+    float loudnessRangeLu = 0.0f;
 };
 } // namespace flub
