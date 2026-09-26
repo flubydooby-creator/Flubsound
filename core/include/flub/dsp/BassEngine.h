@@ -28,9 +28,13 @@
 //      sustain = shorter, drier bass decay ("punchy" rather than "boomy").
 #pragma once
 
+#include "EnvelopeFollower.h"
 #include "Processor.h"
+#include "Svf.h"
 #include "TransientShaper.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <atomic>
 
 namespace flub
@@ -67,8 +71,85 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    static constexpr int kControlInterval = 16;
+
+    /** A filter stage that can be switched in and out without a click or a
+        momentary notch. Crossfading dry against a filtered path directly would
+        cancel around the corner (an LR4 sum is -180 degrees there), so a stage
+        is engaged by a short crossfade while its corner is parked at a
+        subsonic frequency, and only then glides to its target; disengaging
+        glides back to the park frequency first and crossfades out there. */
+    struct ParkedStage
+    {
+        bool wanted = false, active = false;
+        float targetHz = 100.0f, parkHz = 10.0f, hz = 10.0f;
+        float logTarget = 0.0f, logPark = 0.0f;
+        OnePoleSmoother logHz;     // control rate, log-frequency glide
+        LinearSmoothedValue blend; // per sample: 0 = dry .. 1 = processed
+    };
+
+    using Lr4State = std::array<SvfState, 3>; // split section, low section, high section
+    using Hp4State = std::array<SvfState, 2>;
+
+    void updateTargets() noexcept;
+    bool setStage (ParkedStage& stage, bool wanted, float hz) noexcept;
+    bool tickStage (ParkedStage& stage, bool effectSettled) noexcept;
+    void updateHarmonicFilters() noexcept;
+    void updateHarmonicWeights() noexcept;
+    void clearHarmonics() noexcept;
+    void clearAllStates() noexcept;
+    float flushStates() noexcept;
+    void controlTick() noexcept;
+    void processSegment (const AudioBlock& block, int numCh, int pos, int len) noexcept;
+
     ProcessSpec spec;
     BassEngineParams params;
     std::atomic<float> protectionDb { 0.0f };
+
+    double controlRate = 48000.0 / kControlInterval;
+    int controlCountdown = kControlInterval;
+
+    // 1. Subsonic high-pass (Butterworth, 2 sections).
+    ParkedStage subsonic;
+    std::array<SvfCoeffs, 2> subsonicHp {};
+    std::array<Hp4State, kMaxChannels> subsonicState {};
+
+    // 2. Mono bass: LR4 built from one Butterworth LP design (raw SVF outputs).
+    ParkedStage mono;
+    SvfCoeffs monoXo;
+    std::array<Lr4State, kMaxChannels> monoState {};
+
+    // 3. Adaptive low shelf + headroom protection.
+    OnePoleSmoother boostSmoothed, logBoostHz, thresholdSmoothed, protectionSmoothed;
+    float boostHz = 70.0f, shelfGainDb = 0.0f;
+    bool shelfActive = false;
+    TransientShaper::SvfGlide shelf;
+    std::array<SvfState, kMaxChannels> shelfState {};
+    SvfCoeffs detectorLp;
+    std::array<SvfState, kMaxChannels> detectorState {};
+    TransientShaper::PeakHold detectorHold;
+    EnvelopeFollower detectorEnv;
+
+    // 4. Psychoacoustic harmonics (mid signal) + replace-fundamental high-pass.
+    bool harmonicsActive = false;
+    LinearSmoothedValue harmonicsMix; // linear gain: amount * 2 (+6 dB)
+    OnePoleSmoother characterSmoothed, logCutoff;
+    float cutoffHz = 120.0f;
+    std::array<float, 4> weights {}; // w2 .. w5
+    SvfCoeffs harmPreHp, harmPostHp, harmPostLp;
+    std::array<SvfCoeffs, 2> harmPreLp {};
+    std::array<SvfState, 5> harmState {}; // preHp, preLp[0], preLp[1], postHp, postLp
+    TransientShaper::PeakHold harmHold;
+    EnvelopeFollower harmEnv;
+
+    ParkedStage replace;
+    std::array<SvfCoeffs, 2> replaceHp {};
+    std::array<Hp4State, kMaxChannels> replaceState {};
+
+    // 5. Tighten: transient shaper (negative sustain) on the LR4 low band.
+    ParkedStage tight;
+    SvfCoeffs tightXo;
+    std::array<Lr4State, kMaxChannels> tightState {};
+    TransientShaper tightShaper;
 };
 } // namespace flub

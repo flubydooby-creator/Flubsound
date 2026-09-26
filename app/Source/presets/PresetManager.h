@@ -80,7 +80,10 @@ public:
     bool stepPreset (int strip, int direction, flub::param::ParameterStore& store, juce::String& error);
 
     juce::String getCurrentPresetId (int strip) const;
-    void setCurrentPresetId (int strip, const juce::String& id);
+    /** Marks `id` as the strip's current preset without loading it (e.g. when
+        a saved strip state was restored). With a store, the store's current
+        state counts as unmodified. */
+    void setCurrentPresetId (int strip, const juce::String& id, const flub::param::ParameterStore* store = nullptr);
     /** True if the strip's store changed since its preset was loaded. */
     bool isModified (int strip, const flub::param::ParameterStore& store) const;
 

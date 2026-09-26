@@ -17,6 +17,17 @@
 // band is busy the ticks would be no-ops, so the whole remaining block is
 // processed as one segment; the output is sample-identical either way, which
 // makes the EQ independent of the host block size.
+//
+// CPU: a band costs nothing while it is disabled and faded out, or while it
+// is a bell / shelf at exactly 0 dB that is not gliding (an exact identity:
+// m0 = 1, m1 = m2 = 0). When such a skipped 0 dB band starts to glide it
+// resumes from that identity: its low-pass integrator is primed with the
+// input (DC equilibrium) and its output mix is ramped from identity to the
+// new design across one control period.
+//
+// State hygiene: at the end of every segment integrator values below
+// -300 dBFS are flushed to zero (no subnormal crawl without FTZ) and a
+// non-finite state is reset, so a NaN / Inf input cannot latch.
 #include "flub/dsp/ParametricEq.h"
 
 #include <algorithm>
@@ -98,10 +109,41 @@ int designBand (EqBandType type, int numSections, double freq, double q, double 
     return numSections;
 }
 
+/** Integrator value to keep after a segment: tiny values are flushed (see
+    kStateFloor), and a non-finite one (a NaN / Inf that reached the input)
+    restarts the section from rest. Without that, one bad input sample would
+    latch in the recursive state and silence the band until the next reset();
+    with it the damage ends with the segment. Costs one test per state per
+    segment, not per sample. */
+float cleanState (float v) noexcept
+{
+    return (std::abs (v) < kStateFloor || ! std::isfinite (v)) ? 0.0f : v;
+}
+
 void storeState (SvfState& state, const SvfState& s) noexcept
 {
-    state.ic1 = std::abs (s.ic1) < kStateFloor ? 0.0f : s.ic1;
-    state.ic2 = std::abs (s.ic2) < kStateFloor ? 0.0f : s.ic2;
+    state.ic1 = cleanState (s.ic1);
+    state.ic2 = cleanState (s.ic2);
+}
+
+/** One control-rate step of a parameter smoother. OnePoleSmoother snaps to
+    its target only within 1e-6 (1 + |target|), which is finer than float lets
+    a slow one-pole get: once coeff * (cur - target) rounds back to cur the
+    recursion stalls, tens of ulps short of any target with |target| >~ 1
+    (log2 Hz is 4.3 .. 14.3; most gains are several dB). The band would stay
+    "busy" forever: coefficients redesigned every control period, the ramped
+    path always in use and the running filter never equal to the design
+    responseDb() shows. So a step that no longer moves the value lands on
+    the target. The remaining distance is at most ~0.5 ulp / (1 - coeff),
+    i.e. < 3e-4 dB or octaves even at 192 kHz, and the coefficient ramp
+    spreads that final step over one control period. */
+void stepSmoother (OnePoleSmoother& s) noexcept
+{
+    if (! s.isSmoothing())
+        return;
+    const float before = s.getCurrent();
+    if (s.next() == before)
+        s.setImmediate (s.getTarget());
 }
 
 /** One SVF section in place. Local copies keep coefficients and state in
@@ -311,10 +353,15 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
     const Topology wanted = topologyOf (target);
 
     // 1. Discrete changes: fade out, swap at mix 0, fade back in. A band that
-    //    is already silent or transparent swaps immediately (nothing to hear).
+    //    is already silent, or was skipped during the last control period as
+    //    an exact 0 dB identity, swaps immediately (nothing to hear). The
+    //    test is "not audible", not isTransparent(): a pending gain change
+    //    (a preset load: new type AND new gain) makes the gain smoother busy,
+    //    and fading out would first glide the OLD type towards the new gain
+    //    and play it for ~5 ms.
     if (! (wanted == band.running))
     {
-        if (band.fadePos == 0 || isTransparent (band))
+        if (band.fadePos == 0 || ! band.audible)
             swapTopology (band, wanted);
         else
             band.fadeDir = -1;
@@ -339,12 +386,9 @@ void ParametricEq::updateBand (Band& band, const EqBandParams& target) noexcept
         }
         else
         {
-            if (band.logFreq.isSmoothing())
-                band.logFreq.next();
-            if (band.gainDb.isSmoothing())
-                band.gainDb.next();
-            if (band.logQ.isSmoothing())
-                band.logQ.next();
+            stepSmoother (band.logFreq);
+            stepSmoother (band.gainDb);
+            stepSmoother (band.logQ);
         }
         band.coeffsDirty = true;
     }

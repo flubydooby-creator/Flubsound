@@ -16,8 +16,13 @@
 
 #include "Oversampler.h"
 #include "Processor.h"
+#include "Svf.h"
+#include "flub/common/DelayLine.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <cstdint>
+#include <vector>
 
 namespace flub
 {
@@ -62,9 +67,70 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    // Notes (details in Saturator.cpp):
+    //  * The curve is blended in with depth = smoothstep(0, 6 dB, drive), so
+    //    0 dB drive is exactly transparent and drive >= 6 dB is exactly
+    //    f(g x)/g. Both terms have unity small-signal gain.
+    //  * outputDb is the wet-path (make-up) gain; mix = 0 always yields the
+    //    latency-aligned dry signal.
+    //  * Type changes crossfade the two curves over 20 ms (oversampled domain).
+
+    /** Everything derived from the (smoothed) drive in dB. */
+    struct DriveGains
+    {
+        float g = 1.0f;        // curve input gain 10^(drive/20)
+        float invG = 1.0f;     // 1 / g (unity small-signal gain)
+        float depth = 0.0f;    // wet depth of the curve: 0 at 0 dB drive, 1 from 6 dB up
+        float bumpBeta = 0.0f; // tape head bump: 10^(bumpDb/20) - 1, bumpDb = 1 dB * drive / 24
+    };
+
+    struct ChannelState
+    {
+        SvfState pre, de;  // tape pre-/de-emphasis (oversampled rate)
+        SvfState bump;     // tape head-bump band-pass (base rate)
+        float dcLp = 0.0f; // tube DC blocker integrator (base rate)
+    };
+
+    static DriveGains driveGains (float driveDb) noexcept;
+
+    void updateTypeFade() noexcept;
+    void computeControls (int length) noexcept;
+    void runCurve (SaturationType type, ChannelState& st, float* d, int n) noexcept;
+    void processSegment (const AudioBlock& io, int start, int length) noexcept;
+
     int osFactor = 2;
     Oversampler::Quality osQuality = Oversampler::Quality::High;
     ProcessSpec spec;
     SaturatorParams params;
+
+    Oversampler oversampler;
+    DelayLine dryDelay;    // latency-aligns the dry path with the oversampled wet path
+    AudioBuffer dryBuffer; // [channel][maxBlockSize]
+
+    // Per-segment control arrays (allocated in prepare(), never resized).
+    std::vector<float> osGain, osInvGain, osScratch;                 // factor * maxBlockSize
+    std::vector<float> depthBuf, tubeBuf, bumpBuf, gainBuf, mixBuf; // maxBlockSize
+
+    std::array<ChannelState, kMaxChannels> channelState {};
+    SvfCoeffs preEmphasis, deEmphasis, headBump;
+    float dcBlockG = 0.0f; // TPT one-pole coefficient g / (1 + g) of the 10 Hz DC blocker
+
+    LinearSmoothedValue driveSmoother, mixSmoother, outputSmoother;
+    DriveGains steady;     // drive-derived values while the drive is not ramping
+    float lastGain = 1.0f; // g at the last processed base-rate sample (ramp interpolation start)
+    bool driveRamping = false;
+
+    // Type changes are crossfaded (fromType -> toType) in the oversampled domain.
+    SaturationType activeType = SaturationType::Tape;
+    SaturationType fromType = SaturationType::Tape;
+    SaturationType toType = SaturationType::Tape;
+    bool fading = false;
+    int fadePos = 0;      // base-rate samples of the crossfade already done
+    int fadeLength = 960; // base-rate samples
+    float invFadeLength = 1.0f / 960.0f;
+    float invFadeLengthOs = 1.0f / 1920.0f;
+
+    int preparedFactor = 1; // oversampling factor actually prepared
+    bool prepared = false;
 };
 } // namespace flub

@@ -84,7 +84,7 @@ private:
         Topology running;                     // what the filter currently implements
         OnePoleSmoother logFreq, gainDb, logQ; // control-rate smoothers: log2 Hz, dB, log2 Q
         std::array<SvfCoeffs, kMaxSections> coeffs {};     // designed at the latest tick (steady-state set)
-        std::array<SvfCoeffs, kMaxSections> prevCoeffs {}; // designed at the tick before (ramp start)
+        std::array<SvfCoeffs, kMaxSections> prevCoeffs {}; // ramp start: the previous design (identity mixes on a resume)
         std::array<std::array<SvfState, kMaxSections>, kMaxChannels> state {};
         int fadePos = 0;            // wet mix = fadePos / fadeSamples (exact 0 and 1 at the ends)
         int fadeDir = 0;            // +1 fading in, -1 fading out, 0 settled

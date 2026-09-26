@@ -1021,3 +1021,285 @@ TEST_CASE ("DynamicEq: zero latency - an impulse is not delayed")
         mismatches += imp.ch[0][static_cast<size_t> (i)] != (i == 100 ? 1.0e-3f : 0.0f) ? 1 : 0;
     CHECK (mismatches == 0);
 }
+
+//==============================================================================
+// ---- adversarial review tests ----
+
+namespace
+{
+/** Single CutAbove Bell (Q 2, thr -40, ratio 4, range 24) at `bandHz`, fed a
+    -10 dBFS sine: the ideal static gain is -(30 * 0.75) = -22.5 dB. Returns the
+    min / max of getBandGainDb() over the second half of 2 s. */
+std::pair<double, double> reviewSampledGain (double fs, double bandHz, double toneHz, double phase)
+{
+    DynamicEq eq;
+    prepareEq (eq, fs, 1);
+    eq.setBand (0, makeBand (DynEqMode::CutAbove, EqBandType::Bell, static_cast<float> (bandHz), 2.0f, -40.0f, 4.0f, 24.0f));
+    eq.reset();
+    const int n = static_cast<int> (fs * 2.0) / 16 * 16;
+    Planar buf (1, n);
+    setChannel (buf, 0, sine (toneHz, fs, n, dbfs (-10.0), phase));
+    double gMin = 100.0, gMax = -100.0;
+    for (int pos = 0; pos < n; pos += 16)
+    {
+        eq.process (buf.block (pos, 16));
+        if (pos >= n / 2)
+        {
+            gMin = std::min (gMin, static_cast<double> (eq.getBandGainDb (0)));
+            gMax = std::max (gMax, static_cast<double> (eq.getBandGainDb (0)));
+        }
+    }
+    return { gMin, gMax };
+}
+} // namespace
+
+TEST_CASE ("DynamicEq review: the level is not read low for treble near fs/4 (inter-sample peaks)")
+{
+    // A tone at exactly fs/4 whose crest falls between two samples (+-45 deg)
+    // has a SAMPLE peak 3 dB under its true peak: a pure sample-peak detector
+    // then applies 2.25 dB less cut than the static curve asks for, right in
+    // the de-harsh / air region (11-12 kHz). Detuned by a few Hz, that error
+    // beats slowly and the band tremolos a steady tone. Both were measured on
+    // the original implementation (-20.24 dB instead of -22.5; 0.32 dB ripple).
+    for (double fs : { 44100.0, 48000.0 })
+    {
+        const auto exact = reviewSampledGain (fs, fs / 4.0, fs / 4.0, kPi / 4.0);
+        CHECK_GE (exact.first, -22.5 - 0.03); // never more cut than the ideal
+        CHECK_LE (exact.second, -22.5 + 0.45); // at most ~0.45 dB under-read
+        const auto detuned = reviewSampledGain (fs, fs / 4.0, fs / 4.0 + 5.0, 0.0);
+        CHECK_LE (detuned.second - detuned.first, 0.2);
+    }
+
+    // The interpolated midpoints must never over-read: across the band the
+    // applied cut stays within [ideal - 0.03, ideal + 0.45] dB.
+    for (double fs : { 44100.0, 48000.0, 96000.0 })
+        for (double f : { 100.0, 1000.0, 5000.0, 9000.0, 13000.0, 15000.0, 19000.0 })
+        {
+            const auto g = reviewSampledGain (fs, f, f, 1.0);
+            CHECK_GE (g.first, -22.5 - 0.03);
+            CHECK_LE (g.second, -22.5 + 0.45);
+        }
+}
+
+TEST_CASE ("DynamicEq review: a channel that re-appears does not ring out stale filter state")
+{
+    // Blocks may carry fewer channels than prepared. A channel that drops out
+    // mid-note and comes back later must not resume from its old SVF states
+    // (measured: a -26 dBFS tail on silent input with the original code).
+    DynamicEq eq;
+    prepareEq (eq, kFs, 2);
+    auto p = makeBand (DynEqMode::CutAbove, EqBandType::LowShelf, 200.0f, 0.7f, -20.0f, 4.0f, 12.0f);
+    p.staticGainDb = 12.0f;
+    eq.setBand (0, p);
+    eq.reset();
+
+    Planar loud (2, 1000);
+    setChannel (loud, 0, sine (50.0, kFs, 1000, 0.9f));
+    setChannel (loud, 1, loud.ch[0]);
+    eq.process (loud.block());                              // stops mid-cycle in both channels
+    Planar mono (2, 4800);
+    setChannel (mono, 0, sine (50.0, kFs, 4800, 0.01f));
+    eq.process (mono.block().firstChannels (1));            // channel 1 absent
+    Planar back (2, 480);
+    eq.process (back.block());                              // channel 1 returns, silent
+    CHECK (peakAbs (back.ch[1].data(), 480) == 0.0);
+}
+
+TEST_CASE ("DynamicEq review: bit-exact for any block split, with events at arbitrary samples")
+{
+    // Stronger than the 1e-5 check above: random block sizes 1..4096 and 60
+    // random setBand() events (enable, mode, shape, geometry) at arbitrary,
+    // non tick-aligned sample positions must give identical output.
+    const double fs = 44100.0;
+    const int n = 44100 * 2;
+    Planar input (2, n);
+    {
+        const auto a = whiteNoise (n, 0.3f, 5), b = sine (60.0, fs, n, 0.8f), c = sine (3000.0, fs, n, 0.5f);
+        for (int i = 0; i < n; ++i)
+        {
+            const size_t k = static_cast<size_t> (i);
+            const float e = (i / 3000) % 3 == 0 ? 1.0f : 0.05f;
+            input.ch[0][k] = e * (a[k] + b[k]);
+            input.ch[1][k] = e * c[k] + 0.1f * a[k];
+        }
+    }
+    struct Event
+    {
+        int pos, band;
+        DynEqBandParams p;
+    };
+    std::vector<Event> events;
+    FastRandom rng (7);
+    for (int e = 0; e < 60; ++e)
+    {
+        DynEqBandParams p;
+        p.enabled = rng.nextU32() % 4u != 0u;
+        p.mode = static_cast<DynEqMode> (rng.nextU32() % 4u);
+        p.shape = static_cast<EqBandType> (rng.nextU32() % 3u);
+        p.frequency = 50.0f + static_cast<float> (rng.nextU32() % 10000u);
+        p.q = 0.3f + 0.1f * static_cast<float> (rng.nextU32() % 50u);
+        p.thresholdDb = -static_cast<float> (rng.nextU32() % 60u);
+        p.ratio = 1.0f + static_cast<float> (rng.nextU32() % 8u);
+        p.rangeDb = static_cast<float> (rng.nextU32() % 24u);
+        p.staticGainDb = static_cast<float> (static_cast<int> (rng.nextU32() % 25u) - 12);
+        p.attackMs = 0.1f + static_cast<float> (rng.nextU32() % 50u);
+        events.push_back ({ static_cast<int> (rng.nextU32() % static_cast<uint32_t> (n)), static_cast<int> (rng.nextU32() % 8u), p });
+    }
+    std::sort (events.begin(), events.end(), [] (const Event& x, const Event& y) { return x.pos < y.pos; });
+
+    auto run = [&] (uint32_t seed)
+    {
+        DynamicEq eq;
+        prepareEq (eq, fs, 2, 4096);
+        Planar buf = input;
+        buf.ptrs.clear();
+        for (auto& c : buf.ch)
+            buf.ptrs.push_back (c.data());
+        FastRandom blocks (seed);
+        size_t next = 0;
+        for (int pos = 0; pos < n;)
+        {
+            while (next < events.size() && events[next].pos <= pos)
+            {
+                eq.setBand (events[next].band, events[next].p);
+                ++next;
+            }
+            const int limit = next < events.size() ? events[next].pos : n;
+            const int len = seed == 0 ? 1 : std::min (limit - pos, 1 + static_cast<int> (blocks.nextU32() % 4096u));
+            eq.process (buf.block (pos, len));
+            pos += len;
+        }
+        return buf;
+    };
+
+    const auto ref = run (0);
+    for (uint32_t seed : { 1u, 2u, 3u })
+    {
+        const auto out = run (seed);
+        int diffs = 0;
+        for (size_t c = 0; c < 2; ++c)
+            for (int i = 0; i < n; ++i)
+                diffs += out.ch[c][static_cast<size_t> (i)] != ref.ch[c][static_cast<size_t> (i)] ? 1 : 0;
+        CHECK (diffs == 0);
+    }
+}
+
+TEST_CASE ("DynamicEq review: an active band that is not acting is an exact identity")
+{
+    // After a loud burst has released, a CutAbove band (no static gain) on a
+    // signal under threshold must return EXACTLY to 0 dB, i.e. the output is
+    // bit-identical to the input: no residual colouration, no endless tail.
+    DynamicEq eq;
+    prepareEq (eq, kFs, 2);
+    auto p = cutAbove1k (12.0f);
+    p.releaseMs = 20.0f;
+    eq.setBand (0, p);
+    eq.reset();
+
+    const int n = 48000;
+    auto x = sine (1000.0, kFs, n, dbfs (-45.0));
+    for (int i = 0; i < 4800; ++i)
+        x[static_cast<size_t> (i)] = std::sin (static_cast<float> (i) * 0.13f) * dbfs (-6.0);
+    Planar buf (2, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    processInBlocks (eq, buf, 256);
+    CHECK (eq.getBandGainDb (0) == 0.0f);
+    int mismatches = 0;
+    for (int i = n / 2; i < n; ++i)
+        mismatches += buf.ch[0][static_cast<size_t> (i)] != x[static_cast<size_t> (i)] ? 1 : 0;
+    CHECK (mismatches == 0);
+}
+
+TEST_CASE ("DynamicEq review: hammering discrete changes stays click-free and settles on the last request")
+{
+    // Toggle enable, mode and shape every 2..7 ms (faster than the 20 ms fade)
+    // on a +12 dB band sitting on a 300 Hz tone. The output may never step
+    // faster than a +12 dB (x4) version of the tone could, stays finite, and
+    // once the requests stop the band ends up in the last requested state.
+    DynamicEq eq;
+    prepareEq (eq, kFs, 2);
+    auto p = makeBand (DynEqMode::CutAbove, EqBandType::Bell, 300.0f, 1.0f, -80.0f, 1.0f, 0.0f);
+    p.staticGainDb = 12.0f;
+    eq.setBand (0, p);
+    eq.reset();
+
+    const int n = 48000;
+    const auto tone = sine (300.0, kFs, n, 0.2f);
+    Planar buf (2, n);
+    setChannel (buf, 0, tone);
+    setChannel (buf, 1, tone);
+    FastRandom rng (3);
+    int pos = 0;
+    while (pos < n)
+    {
+        const int len = std::min (n - pos, 96 + static_cast<int> (rng.nextU32() % 240u));
+        if (pos < n / 2)
+        {
+            switch (rng.nextU32() % 3u)
+            {
+                case 0: p.enabled = ! p.enabled; break;
+                case 1: p.mode = static_cast<DynEqMode> (rng.nextU32() % 4u); break;
+                default: p.shape = static_cast<EqBandType> (rng.nextU32() % 3u); break;
+            }
+            eq.setBand (0, p);
+        }
+        eq.process (buf.block (pos, len));
+        pos += len;
+    }
+    CHECK (allFinite (buf, 1.0));
+    CHECK_LE (maxStep (buf.ch[0]), maxStep (tone) * 4.0);
+
+    // Settled: whatever was requested last is what runs now.
+    const DynEqBandParams& last = eq.getBand (0);
+    const double expected = last.enabled
+        ? SvfCoeffs::make (last.shape == EqBandType::LowShelf ? FilterType::LowShelf : last.shape == EqBandType::HighShelf ? FilterType::HighShelf : FilterType::Bell,
+                           300.0, 1.0, 12.0, kFs).magnitudeDb (300.0, kFs)
+        : 0.0;
+    CHECK_NEAR (eq.getBandGainDb (0), last.enabled ? 12.0 : 0.0, 0.01);
+    CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + n - 9600, 9600, 300.0, kFs) / 0.2), expected, 0.05);
+}
+
+TEST_CASE ("DynamicEq review: NaN / Inf input is flushed within two control intervals")
+{
+    DynamicEq eq;
+    prepareEq (eq, kFs, 2);
+    auto p = makeBand (DynEqMode::BoostAbove, EqBandType::HighShelf, 2000.0f, 0.7f, -40.0f, 2.0f, 6.0f);
+    p.staticGainDb = 3.0f;
+    eq.setBand (0, p);
+    eq.setBand (1, cutAbove1k (12.0f));
+    eq.reset();
+
+    Planar buf (2, 4800);
+    setChannel (buf, 0, sine (1000.0, kFs, 4800, 0.5f));
+    setChannel (buf, 1, sine (3000.0, kFs, 4800, 0.5f));
+    buf.ch[0][1000] = std::numeric_limits<float>::quiet_NaN();
+    buf.ch[1][1003] = std::numeric_limits<float>::infinity();
+    processInBlocks (eq, buf, 7);
+    // The poisoned samples may spread until the next control tick flushes the
+    // band states (ticks every 16 samples); after that everything is finite.
+    for (size_t c = 0; c < 2; ++c)
+        for (int i = 1003 + 2 * DynamicEq::kControlInterval; i < 4800; ++i)
+            CHECK (std::isfinite (buf.ch[c][static_cast<size_t> (i)]));
+    for (int b = 0; b < 2; ++b)
+        CHECK (std::isfinite (eq.getBandGainDb (b)));
+    // ... and the band still works: the 1 kHz cut is back to its steady value.
+    Planar more (2, 24000);
+    setChannel (more, 0, sine (1000.0, kFs, 24000, dbfs (-10.0)));
+    processInBlocks (eq, more, 64);
+    CHECK_NEAR (eq.getBandGainDb (1), -12.0, 0.1);
+}
+
+TEST_CASE ("DynamicEq review: re-preparing at another sample rate keeps levels and timing right")
+{
+    DynamicEq eq;
+    auto p = cutAbove1k (24.0f);
+    eq.setBand (0, p);
+    for (double fs : { 48000.0, 192000.0, 44100.0, 96000.0 })
+    {
+        prepareEq (eq, fs, 2, 1024);
+        const auto r = runTone (eq, 0, 1000.0, dbfs (-10.0), 2, fs);
+        CHECK_NEAR (r.appliedDb, -15.0, 0.1);
+        CHECK_NEAR (r.outputGainDb, -15.0, 0.25);
+    }
+}

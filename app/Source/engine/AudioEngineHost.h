@@ -89,7 +89,7 @@ public:
     virtual bool renderStrip (int strip, const flub::AudioBlock& block) = 0;
 };
 
-class AudioEngineHost final : public juce::AudioIODeviceCallback, private juce::AsyncUpdater
+class AudioEngineHost final : public juce::AudioIODeviceCallback, private juce::AsyncUpdater, private juce::Timer
 {
 public:
     static constexpr int kMaxCaptures = 16;
@@ -125,7 +125,9 @@ public:
     /** Re-creates the engine for the current device format. Brief dropout. */
     void reconfigure();
 
-    /** A structural parameter changed (latency profile): reconfigure() needed. */
+    /** A structural parameter changed (latency profile): reconfigure() needed.
+        Polled by this class at 5 Hz on the message thread, which then calls
+        reconfigure() by itself. */
     bool needsReprepare() const noexcept { return mixEngine.needsReprepare(); }
 
     /** Increments after every MixEngine::configure (chains were re-created). */
@@ -160,11 +162,19 @@ public:
     // =========================================================================
     // Sources
     // =========================================================================
-    /** Device input channels [firstChannel, firstChannel + stripChannels) feed
-        `strip`; -1 disables the device input path. Any thread. */
+    /** Device input -> strip mapping. firstChannels[strip] >= 0 feeds the strip
+        from device inputs [first, first + stripChannels) (missing channels are
+        silent); -1 = the strip is not fed by the device. Typical setups:
+          Windows / macOS MVP : one virtual cable -> {0, -1, -1, -1}
+          Linux (JACK / PipeWire monitors): {0, 8, 10, 12}
+        Any thread (atomics, applied at the next block). */
+    void setDeviceInputMap (const std::array<int, kMaxStrips>& firstChannels) noexcept;
+    std::array<int, kMaxStrips> getDeviceInputMap() const noexcept;
+
+    /** Convenience: only `strip` is fed, from `firstDeviceChannel`; -1 = none. */
     void setDeviceInputRouting (int strip, int firstDeviceChannel = 0) noexcept;
-    int getDeviceInputStrip() const noexcept { return deviceInputStrip.load (std::memory_order_relaxed); }
-    int getDeviceInputFirstChannel() const noexcept { return deviceInputFirstChannel.load (std::memory_order_relaxed); }
+    /** First strip fed by the device inputs, -1 if none. */
+    int getDeviceInputStrip() const noexcept;
 
     /** Starts capturing a process (tree) into a strip. Message thread. Returns
         a capture id >= 0, or -1 with `error` set. */
@@ -225,6 +235,7 @@ private:
     };
 
     void handleAsyncUpdate() override;
+    void timerCallback() override;
     void configureEngine (double sampleRate, int blockSize);
     void processBlock (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples,
                        StripSignalSource* offlineSource) noexcept;
@@ -246,7 +257,7 @@ private:
     float appliedCeilingDb = -1.0f;
     flub::AudioBuffer mixOutput;
     int maxBlock = 512, numStripsConfigured = 0, hangoverSamples = 24000;
-    bool threadPromoted = false;
+    juce::Thread::ThreadID promotedThread = nullptr;
     void* promotionHandle = nullptr;
 
     // ---- Cross-thread state ---------------------------------------------------------
@@ -254,7 +265,7 @@ private:
     std::array<std::atomic<bool>, kMaxStrips> stripMuted {};
     std::array<std::atomic<bool>, kMaxStrips> stripActive {};
     std::atomic<float> masterCeilingDb { -1.0f };
-    std::atomic<int> deviceInputStrip { -1 }, deviceInputFirstChannel { 0 };
+    std::array<std::atomic<int>, kMaxStrips> deviceInputFirst {};
     std::atomic<bool> engineReady { false }, callbackRunning { false };
     std::atomic<bool> configurePending { false }, notifyPending { false }, errorPending { false };
     std::atomic<uint64_t> callbackCounter { 0 };

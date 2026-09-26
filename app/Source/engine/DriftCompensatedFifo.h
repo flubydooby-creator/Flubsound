@@ -17,9 +17,10 @@
 // * Target fill = 2 device blocks (in producer frames), raised automatically
 //   to "largest recent producer burst + 1 device block" because capture APIs
 //   deliver in packets (e.g. 10 ms) that can be larger than a device block.
-// * The loop is critically damped with a natural frequency of ~0.3 rad/s and
-//   the correction is clamped to +-0.5 %, so pitch deviations are inaudible;
-//   typical drifts (< 500 ppm) are absorbed without any dropout.
+// * The loop is critically damped with a natural frequency of 0.15 rad/s and
+//   the correction is clamped to +-0.5 %, so pitch deviations are inaudible
+//   (500 ppm = 0.9 cent); typical drifts (< 500 ppm) are absorbed without any
+//   dropout and the steady-state correction ripple stays in the tens of ppm.
 // * Underrun (not enough data for a block): the block fades from the last
 //   output value to silence (no DC step), is counted, and the FIFO re-primes
 //   until the fill is back at target; playback then resumes with a 5 ms fade-in.
@@ -103,9 +104,13 @@ public:
 private:
     static constexpr int kChunkFrames = 1024; // producer conversion chunk
     static constexpr double kMaxCorrection = 0.005;
-    static constexpr double kKp = 0.54;       // 1/s   (zeta ~ 0.9)
-    static constexpr double kKi = 0.09;       // 1/s^2 (omega_n ~ 0.3 rad/s)
-    static constexpr double kFillSmoothingSeconds = 0.5;
+    // Loop: de/dt = drift - c, c = Kp e + Ki int(e)  ->  omega_n = sqrt(Ki),
+    // zeta = Kp / (2 sqrt(Ki)). Critically damped at 0.15 rad/s; the 1.5 s
+    // fill smoothing (pole at 0.67 rad/s) suppresses the packet/block beat
+    // pattern in the fill measurement.
+    static constexpr double kKp = 0.3;        // 1/s
+    static constexpr double kKi = 0.0225;     // 1/s^2
+    static constexpr double kFillSmoothingSeconds = 1.5;
 
     int convertChunk (const float* src, int numFrames, int srcChannels) noexcept;
     double computeTargetFrames() const noexcept;

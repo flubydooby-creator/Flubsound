@@ -96,6 +96,9 @@ private:
         // Sidechain detector (reads the module's dry input) and EQ section.
         SvfCoeffs detCoeffs, eqCoeffs;
         std::array<SvfState, kMaxChannels> detState {}, eqState {};
+        // Last 5 detector outputs per channel (newest first), for the
+        // inter-sample (midpoint) peak estimate.
+        std::array<std::array<float, 5>, kMaxChannels> detHistory {};
 
         // After a coefficient update the EQ glides from the previous set to
         // eqCoeffs across the next control interval: (g, k, m0, m1, m2) are
@@ -108,7 +111,8 @@ private:
         EqRampPoint rampStart, rampDelta;
         bool eqRamping = false;
 
-        // Linked peak envelope: max |detector| over channels, held over a sliding
+        // Linked peak envelope: max |detector| over channels (samples and
+        // interpolated inter-sample midpoints), held over a sliding
         // window (two alternating buckets) so a steady tone reads its true peak
         // without ripple, then released exponentially.
         float segmentPeak = 0.0f, windowPeak = 0.0f, prevWindowPeak = 0.0f, env = 0.0f;
@@ -127,6 +131,7 @@ private:
     ProcessSpec spec;
     double controlRate = 48000.0 / kControlInterval;
     int controlCountdown = kControlInterval;
+    int lastNumChannels = 0; // channels in the previous block (states of absent channels go stale)
     std::array<DynEqBandParams, kMaxBands> targets {};
     std::array<BandState, kMaxBands> bands {};
     std::array<SvfCoeffs, kControlInterval> rampScratch {}; // per-sample EQ coefficients while gliding

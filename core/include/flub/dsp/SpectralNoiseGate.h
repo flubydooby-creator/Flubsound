@@ -86,7 +86,8 @@ private:
     float thresholdCur = 6.0f, reductionCur = 12.0f; // hop-rate smoothed thresholdDb / reductionDb
 
     Fft fft;
-    std::vector<float> analysisWindow, synthesisWindow, frame, gains;
+    std::vector<float> analysisWindow, synthesisWindow, frame;
+    std::vector<float> snr, gains;     // per-bin scratch: P_k / N_k, linear gate gain
     std::vector<Fft::Complex> bins;
     std::array<ChannelState, kMaxChannels> channels {};
 };

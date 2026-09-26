@@ -13,6 +13,7 @@ namespace Keys
 constexpr const char* deviceState = "device.state";
 constexpr const char* deviceInputMode = "deviceInput.mode";
 constexpr const char* deviceInputStrip = "deviceInput.strip";
+constexpr const char* deviceInputMap = "deviceInput.map";
 constexpr const char* masterEnabled = "engine.enabled";
 constexpr const char* selectedStrip = "engine.selectedStrip";
 constexpr const char* hotkeysEnabled = "hotkeys.enabled";
@@ -189,6 +190,16 @@ juce::String AppSettings::getDeviceInputStripName() const
 void AppSettings::setDeviceInputStripName (const juce::String& stripName)
 {
     properties->setValue (Keys::deviceInputStrip, stripName);
+}
+
+juce::String AppSettings::getDeviceInputMap() const
+{
+    return properties->getValue (Keys::deviceInputMap);
+}
+
+void AppSettings::setDeviceInputMap (const juce::String& map)
+{
+    properties->setValue (Keys::deviceInputMap, map);
 }
 
 // ---- Engine ------------------------------------------------------------------------------
@@ -417,7 +428,12 @@ void AppSettings::setAppRoutes (const std::vector<AppRoute>& routes)
 
 juce::String AppSettings::getStripEndpointId (const juce::String& stripName) const
 {
-    return properties->getValue (stripKey (stripName, "endpoint"), "Flubsound " + stripName);
+   #if JUCE_LINUX || JUCE_BSD
+    const auto fallback = "flubsound_" + stripName.toLowerCase().replaceCharacter (' ', '_');
+   #else
+    const auto fallback = "Flubsound " + stripName;
+   #endif
+    return properties->getValue (stripKey (stripName, "endpoint"), fallback);
 }
 
 void AppSettings::setStripEndpointId (const juce::String& stripName, const juce::String& endpointId)

@@ -1,7 +1,9 @@
 // Tests for the fully parametric EQ: exact nulls, analytic-vs-measured
 // response for every band type, Butterworth cut slopes, click-free parameter
-// and topology changes, clamping, stability at 20 kHz / 192 kHz, allocation
-// freedom, robustness, block-size invariance and zero latency.
+// and topology changes (first-difference criterion, and curvature against an
+// ideal per-sample glide), log-domain frequency glide, clamping, stability and
+// accuracy from 20 Hz to 20 kHz at 44.1 .. 192 kHz, NaN / Inf recovery,
+// allocation freedom, robustness, block-size invariance and zero latency.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -416,62 +418,74 @@ TEST_CASE ("ParametricEq: gain glides are as smooth as an ideal per-sample glide
     // the 16-sample control rate and state discontinuities when a skipped
     // 0 dB band resumes. It cannot be bounded by the steady-state curvature,
     // though: any exponential glide has a slope kink at its onset of about
-    // (ln 10 / 20) (12 dB / 20 ms) A / fs, which relative to the steady state
-    // grows with the sample rate. The physically meaningful bound is the
-    // curvature of the smoothest possible realisation of the specified
-    // smoothing: a per-sample one-pole glide in dB, coefficients redesigned
-    // every sample, on a filter whose state was always valid. The EQ may
-    // deviate from it only by its linear coefficient interpolation between
-    // control ticks (~1 % onset slope difference) and by the approximate
-    // (primed) state of a resumed band; 25 % covers both, while a 16-sample
-    // zipper exceeds it several-fold (checked below as a negative control)
-    // and a zero / stale state on resume by 4x .. 400x.
+    // |dH / d dB| (12 dB / 20 ms) A / fs, which relative to the steady state
+    // grows with the sample rate. The physically meaningful reference is the
+    // smoothest realisation of the specified smoothing: a per-sample one-pole
+    // glide in dB, coefficients redesigned every sample, on a filter whose
+    // state was always valid.
+    //
+    // The size of an onset kink depends on the tone's phase at the instant of
+    // the change, and the EQ's resume kink (its skipped band restarts from a
+    // DC-primed state) peaks at a different phase than the ideal glide's. A
+    // user's knob move has a random phase, so the comparison is worst case
+    // against worst case over 8 phases (22.5 deg apart: each worst case is
+    // sampled to within 2 %). The EQ may exceed the ideal only by its linear
+    // coefficient interpolation between control ticks (~1 % onset slope) and
+    // its primed resume state (<= 6 % over tones below / at / above the band
+    // and Q 0.3 .. 2), so the bound is 1.15x. A 16-sample zipper exceeds it
+    // several-fold (checked below as a negative control); a stale or zero
+    // state on resume did so by 4x .. 400x.
     const FilterType svfTypes[] = { FilterType::Bell, FilterType::LowShelf, FilterType::HighShelf };
     const EqBandType eqTypes[] = { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf };
     constexpr double toneHz = 101.25, bandHz = 1000.0, gainDb = 12.0;
+    constexpr int numPhases = 8;
 
     for (double fs : kRates)
     {
         const int block = 64;
-        const int change = static_cast<int> (fs * 0.1) / block * block; // on the control grid
-        const int n = change + static_cast<int> (fs * 0.3);
-        const auto x = sine (toneHz, fs, n, 0.2f);
+        const int change = static_cast<int> (fs * 0.08) / block * block; // on the control grid
+        const int n = change + static_cast<int> (fs * 0.12);             // 6 time constants of glide
+        const auto band = [] (EqBandType type, double db, float q, bool enabled = true)
+        { return makeBand (type, static_cast<float> (bandHz), static_cast<float> (db), q, 12, enabled); };
 
         for (int t = 0; t < 3; ++t)
             for (float q : { 0.3f, 0.7071f, 2.0f })
             {
-                const auto ideal = referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, 1);
-                const auto zipper = referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, ParametricEq::kControlInterval);
-                const double bound = 1.25 * maxCurvature (ideal, change, n);
-                CHECK_GE (maxCurvature (zipper, change, n), 2.0 * bound); // the metric can see zipper noise
-
-                // History 0: skipped at 0 dB since reset (stale state on resume).
-                // History 1: +6 dB -> disabled -> re-enabled at 0 dB (state invalidated by the swaps).
-                for (int history = 0; history < 2; ++history)
+                double ideal = 0.0, zipper = 0.0;
+                std::array<double, 2> eq {}; // per history
+                for (int ph = 0; ph < numPhases; ++ph)
                 {
-                    auto eq = makeEq (fs, 1);
-                    eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), history == 0 ? 0.0f : 6.0f, q));
-                    eq->reset();
-                    Planar buf (1, n);
-                    load (buf, 0, x);
-                    for (int pos = 0; pos < n; pos += block)
+                    const auto x = sine (toneHz, fs, n, 0.2f, kPi * ph / numPhases);
+                    ideal = std::max (ideal, maxCurvature (referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, 1), change, n));
+                    zipper = std::max (zipper, maxCurvature (referenceGainGlide (svfTypes[t], bandHz, q, gainDb, fs, x, change, ParametricEq::kControlInterval), change, n));
+
+                    // History 0: skipped at 0 dB since reset (stale state on resume).
+                    // History 1: +6 dB -> disabled -> re-enabled at 0 dB (state
+                    //            invalidated by the swaps) -> boosted.
+                    for (int history = 0; history < 2; ++history)
                     {
-                        if (history == 1 && pos == block * 10)
-                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), 6.0f, q, 12, false));
-                        if (history == 1 && pos == block * 40)
-                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), 0.0f, q));
-                        if (pos == change)
-                            eq->setBand (0, makeBand (eqTypes[t], static_cast<float> (bandHz), static_cast<float> (gainDb), q));
-                        eq->process (buf.block (pos, std::min (block, n - pos)));
+                        auto proc = makeEq (fs, 1);
+                        proc->setBand (0, band (eqTypes[t], history == 0 ? 0.0 : 6.0, q));
+                        proc->reset();
+                        Planar buf (1, n);
+                        load (buf, 0, x);
+                        for (int pos = 0; pos < n; pos += block)
+                        {
+                            if (history == 1 && pos == change / 4 / block * block)
+                                proc->setBand (0, band (eqTypes[t], 6.0, q, false));
+                            if (history == 1 && pos == change / 2 / block * block)
+                                proc->setBand (0, band (eqTypes[t], 0.0, q));
+                            if (pos == change)
+                                proc->setBand (0, band (eqTypes[t], gainDb, q));
+                            proc->process (buf.block (pos, std::min (block, n - pos)));
+                        }
+                        eq[static_cast<size_t> (history)] = std::max (eq[static_cast<size_t> (history)], maxCurvature (buf.ch[0], change, n));
                     }
-                    const auto& y = buf.ch[0];
-                    CHECK_LE (maxCurvature (y, change, n), bound);
-                    // ... and it ends where the ideal glide ends.
-                    double endErr = 0.0;
-                    for (int i = n - 1000; i < n; ++i)
-                        endErr = std::max (endErr, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - ideal[static_cast<size_t> (i)])));
-                    CHECK_LE (endErr, 1.0e-4);
                 }
+                const double bound = 1.15 * ideal;
+                CHECK_LE (eq[0], bound);
+                CHECK_LE (eq[1], bound);
+                CHECK_GE (zipper, 2.0 * bound); // the metric does see zipper noise
             }
     }
 }
@@ -956,6 +970,40 @@ TEST_CASE ("ParametricEq: robustness - silence, DC, full-scale noise, impulses, 
     }
 }
 
+TEST_CASE ("ParametricEq: a NaN / Inf input sample does not latch in the filter state")
+{
+    // Upstream protection should never let one through, but if it does the
+    // damage must end with the current block instead of silencing the EQ
+    // until the next reset().
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    auto eq = makeEq (kFs);
+    eq->setBand (0, makeBand (EqBandType::LowCut, 40.0f, 0.0f, 0.7071f, 48));
+    eq->setBand (1, makeBand (EqBandType::Bell, 900.0f, 6.0f, 2.0f));
+    eq->setBand (2, makeBand (EqBandType::HighShelf, 8000.0f, -3.0f));
+    eq->reset();
+
+    const int n = 8192, block = 256;
+    auto x = whiteNoise (n, 0.5f, 31);
+    x[1000] = nan;
+    x[3000] = inf;
+    x[5000] = -inf;
+    Planar buf (2, n);
+    fillAll (buf, x);
+    processInBlocks (*eq, buf, block);
+
+    for (int bad : { 1000, 3000, 5000 })
+    {
+        const int from = (bad / block + 1) * block; // the next block
+        bool finite = true;
+        for (int i = from; i < from + 1500; ++i)
+            finite = finite && std::isfinite (buf.ch[0][static_cast<size_t> (i)]) && std::isfinite (buf.ch[1][static_cast<size_t> (i)]);
+        CHECK (finite);
+    }
+    // ... and before the first bad sample the output is untouched by it.
+    CHECK (std::isfinite (buf.ch[0][999]));
+}
+
 TEST_CASE ("ParametricEq: output is independent of the host block size (1, 7, 64, 512)")
 {
     const int event = 3584; // = lcm (7, 512): a block boundary for every size
@@ -1051,4 +1099,101 @@ TEST_CASE ("ParametricEq: zero latency - the impulse response starts at sample 0
     }
     CHECK (std::abs (buf.ch[0][0]) > 1.0e-4f); // energy at n = 0: no delay
     CHECK_LE (err, 1.0e-9);
+}
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("ParametricEq (review): glides converge to the exact target design at every sample rate")
+{
+    // OnePoleSmoother snaps only within 1e-6 (1 + |target|), finer than float
+    // resolution lets a slow one-pole get: once coeff * (cur - target) rounds
+    // back to cur the recursion stalls tens of ulps short of any target with
+    // |target| >~ 1 (log2 Hz is 4.3 .. 14.3, gains are several dB). Without a
+    // local guard the band then stays "busy" forever: coefficients redesigned
+    // every 16 samples, the ramped path in use and the running filter never
+    // equal to what responseDb() describes. After a glide has had ample time
+    // to settle, the band must be bit-identical to the raw target cascade.
+    for (double fs : kRates)
+        for (int kind = 0; kind < 3; ++kind)
+        {
+            const auto from = kind == 0 ? makeBand (EqBandType::Bell, 250.0f, 3.0f, 1.0f)
+                                        : (kind == 1 ? makeBand (EqBandType::HighShelf, 900.0f, -4.0f, 0.5f)
+                                                     : makeBand (EqBandType::LowCut, 50.0f, 0.0f, 0.7071f, 24));
+            const auto to = kind == 0 ? makeBand (EqBandType::Bell, 3000.0f, 9.0f, 2.0f)
+                                      : (kind == 1 ? makeBand (EqBandType::HighShelf, 5000.0f, 7.5f, 1.3f)
+                                                   : makeBand (EqBandType::LowCut, 440.0f, 0.0f, 0.7071f, 24));
+            auto eq = makeEq (fs, 1);
+            eq->setBand (0, from);
+            eq->reset();
+
+            // 0.5 s of noise while gliding (25 time constants), then 1 s of
+            // silence so the state flushes to exactly zero, then an impulse.
+            const int glide = static_cast<int> (fs * 0.5), quiet = static_cast<int> (fs * 1.0), tail = 512;
+            const int n = glide + quiet + tail;
+            Planar buf (1, n);
+            load (buf, 0, whiteNoise (glide, 0.5f, 17));
+            buf.ch[0][static_cast<size_t> (glide + quiet)] = 0.5f;
+            for (int pos = 0; pos < n; pos += 100)
+            {
+                if (pos == 0)
+                    eq->setBand (0, to);
+                eq->process (buf.block (pos, std::min (100, n - pos)));
+            }
+
+            std::array<SvfCoeffs, 2> secs;
+            std::array<SvfState, 2> st {};
+            int numSecs = 1;
+            if (kind == 0)
+                secs[0] = SvfCoeffs::make (FilterType::Bell, 3000.0, static_cast<double> (2.0f), 9.0, fs);
+            else if (kind == 1)
+                secs[0] = SvfCoeffs::make (FilterType::HighShelf, 5000.0, static_cast<double> (1.3f), 7.5, fs);
+            else
+            {
+                numSecs = 2;
+                for (int s = 0; s < 2; ++s)
+                    secs[static_cast<size_t> (s)] = SvfCoeffs::make (FilterType::HighPass, 440.0, butterworthQ (2, s), 0.0, fs);
+            }
+            double err = 0.0;
+            for (int i = 0; i < tail; ++i)
+            {
+                float v = i == 0 ? 0.5f : 0.0f;
+                for (int s = 0; s < numSecs; ++s)
+                    v = svfTick (secs[static_cast<size_t> (s)], st[static_cast<size_t> (s)], v);
+                err = std::max (err, static_cast<double> (std::abs (v - buf.ch[0][static_cast<size_t> (glide + quiet + i)])));
+            }
+            CHECK_LE (err, 0.0);
+        }
+}
+
+TEST_CASE ("ParametricEq (review): a type + gain change on a skipped 0 dB band never plays the old type")
+{
+    // Preset load / type-and-gain edit on a band that is currently a skipped
+    // 0 dB bell. The band contributes an exact identity, so the new topology
+    // can be swapped in at once and faded in. It must not first glide the
+    // OLD type towards the new gain while fading it out (that plays a
+    // 5 ms burst of a response nobody asked for: here a +12 dB narrow bell
+    // at the tone frequency, where the requested high-cut only attenuates).
+    for (double fs : { 48000.0, 192000.0 })
+    {
+        auto eq = makeEq (fs, 1);
+        eq->setBand (0, makeBand (EqBandType::Bell, 1000.0f, 0.0f, 8.0f));
+        eq->reset();
+        const int block = 64;
+        const int change = static_cast<int> (fs * 0.05) / block * block;
+        const int n = change + static_cast<int> (fs * 0.1);
+        const float amp = 0.25f;
+        Planar buf (1, n);
+        load (buf, 0, sine (1000.0, fs, n, amp));
+        for (int pos = 0; pos < n; pos += block)
+        {
+            if (pos == change) // the gain field is ignored by cuts, but it is in the preset
+                eq->setBand (0, makeBand (EqBandType::HighCut, 200.0f, 12.0f, 8.0f, 24));
+            eq->process (buf.block (pos, std::min (block, n - pos)));
+        }
+        CHECK (allFinite (buf));
+        // A high-cut (at any wet mix) can only attenuate the 1 kHz tone.
+        CHECK_LE (peakAbs (buf.ch[0].data() + change, n - change), static_cast<double> (amp) * 1.001);
+        // ... and it really arrived (24 dB/oct, 2.3 octaves above fc: ~ -56 dB).
+        CHECK_LE (peakAbs (buf.ch[0].data() + n - n / 8, n / 8), static_cast<double> (amp) * 0.01);
+    }
 }

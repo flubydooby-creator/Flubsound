@@ -149,9 +149,9 @@ TEST_CASE ("Platform: malformed pactl output is reported, not crashed on")
 
     // Entries with junk ids are skipped, valid ones kept.
     inputs.clear();
-    CHECK (pactl::parseSinkInputs (R"([{"index":-1},{"index":"x"},{"index":1.5},{"index":7,"properties":{"application.process.id":"12abc"}}])",
-                                   inputs,
-                                   error));
+    const char* const junk =
+        R"([{"index":-1},{"index":"x"},{"index":1.5},{"index":7,"properties":{"application.process.id":"12abc"}}])";
+    CHECK (pactl::parseSinkInputs (junk, inputs, error));
     REQUIRE (inputs.size() == 1);
     CHECK (inputs[0].index == 7);
     CHECK (inputs[0].processId == 0);

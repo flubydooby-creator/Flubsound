@@ -30,7 +30,23 @@
 // sample from the previous design to the new one, so a parameter sweep is a
 // chain of short linear ramps (no zipper noise, no clicks). When nothing is
 // busy the block is one segment; the output is sample-identical either way,
-// so the result does not depend on the host block size.
+// so the result does not depend on the host block size. Room and LFE levels
+// ramp linearly per sample (20 ms).
+//
+// Discrete changes: a layout change alters what each input channel means (and
+// may switch renderer), so it is not glided. The output fades to silence over
+// ~5 ms, roles / renderer / geometry are swapped and all state is cleared at
+// silence, then it fades back in over ~5 ms.
+//
+// Renderer selection: the HRIR renderer runs when a well-formed HrirSet was
+// set before prepare(), its sampleRate equals the session rate (within
+// 0.5 Hz) and its layout equals the running layout. Otherwise the parametric
+// renderer runs (a mismatched set is ignored, never resampled here). The LFE
+// path, the reflections and the trim are shared by both renderers.
+//
+// Channel handling: inputs beyond the layout are ignored; layout channels
+// missing from a block are silent; a 1-channel block receives the mono
+// fold-down (L + R) / 2 of the binaural pair.
 #include "flub/dsp/HeadphoneVirtualizer.h"
 
 #include "flub/common/Math.h"
@@ -281,7 +297,7 @@ bool HeadphoneVirtualizer::loadHrir()
         return false;
 
     const int length = std::min (set.length, kMaxHrirTaps);
-    const auto entryFor = [&set, lfeOmitted] (int channel) { return lfeOmitted && channel > 3 ? channel - 1 : channel; };
+    const auto entryFor = [lfeOmitted] (int channel) { return lfeOmitted && channel > 3 ? channel - 1 : channel; };
 
     for (int c = 0; c < numLayoutChannels; ++c)
     {

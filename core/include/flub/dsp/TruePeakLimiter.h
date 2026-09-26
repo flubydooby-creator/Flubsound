@@ -23,9 +23,12 @@
 
 #include "Processor.h"
 #include "TruePeakDetector.h"
+#include "flub/common/DelayLine.h"
+#include "flub/common/SmoothedValue.h"
 
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 namespace flub
 {
@@ -61,11 +64,59 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    // Notes (details in TruePeakLimiter.cpp):
+    //  * The ceiling glides over 50 ms (linear in dB). The safety clamp uses
+    //    the ceiling that was in force when each output sample's gain was
+    //    computed (ceilingRing), so a falling ceiling never trips it.
+    //  * Auto release blends the release coefficient from fast to slow while
+    //    the span of the current limiting run grows from 25 to 50 ms.
+
+    static LimiterParams sanitised (const LimiterParams& p, const LimiterParams& fallback) noexcept;
+    void updateReleaseCoeffs() noexcept;
+    void updateCeiling (float ceilingDb) noexcept;
+
     float lookaheadMs = 1.5f;
     bool truePeak = true;
     ProcessSpec spec;
     LimiterParams params;
     std::atomic<float> grDb { 0.0f };
     std::atomic<uint64_t> safetyClips { 0 };
+
+    // Structural values latched by prepare() (the setters above only take
+    // effect there, so the latency can never change behind the chain's back).
+    bool prepared = false;
+    bool detectTruePeak = true;
+    int lookahead = 0;     // L
+    int detectorDelay = 0; // D (TruePeakDetector::kDelay, or 0 for sample peak)
+
+    TruePeakDetector detector;
+    DelayLine audioDelay;  // L + D
+
+    // Sliding minimum of r over the last L + 2 samples: a monotonic deque
+    // (values increase from front to back) kept in a fixed power-of-two ring.
+    std::vector<float> dequeValue;
+    std::vector<uint32_t> dequeIndex;
+    uint32_t dequeMask = 0, dequeFront = 0, dequeBack = 0; // back = one past the newest
+    uint32_t window = 2;                                   // L + 2
+    uint32_t sampleIndex = 0;                              // wraps; only differences are used
+
+    // Box filter (running mean over L + 1 samples of the sliding minimum) and
+    // the per-sample ceiling history for the safety clamp; both rings share ringPos.
+    std::vector<float> boxRing, ceilingRing;
+    int ringSize = 1, ringPos = 0;
+    double boxSum = 1.0, invBoxLength = 1.0;
+
+    // Ceiling: smoothed in dB; linear value and detector threshold derived from it.
+    LinearSmoothedValue ceilingDbS;
+    float ceilingLin = 1.0f, thresholdLin = 1.0f;
+
+    // Gain state and release.
+    float gain = 1.0f;
+    float fastCoeff = 0.0f, slowCoeff = 0.0f;
+    int sinceOver = 0, gapSamples = 1;      // samples since r < 1; run continuity gap
+    int runAge = 0, runSpan = 0;            // age of the current limiting run / span to its last over
+    int blendStart = 1, blendEnd = 2;       // runSpan range over which release goes fast -> slow
+    float blendScale = 1.0f;                // 1 / (blendEnd - blendStart)
+    uint64_t pendingClips = 0;
 };
 } // namespace flub

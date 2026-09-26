@@ -69,6 +69,11 @@ public:
     void setDeviceInputMode (DeviceInputMode mode);
     juce::String getDeviceInputStripName() const; // default "Game"
     void setDeviceInputStripName (const juce::String& stripName);
+    /** Optional multi-strip map "Game=0;Music=8;Chat=10;System=12" (strip name =
+        first device input channel). When set it replaces the single-strip
+        routing above (e.g. Linux: one JACK / PipeWire monitor per strip). */
+    juce::String getDeviceInputMap() const;
+    void setDeviceInputMap (const juce::String& map);
 
     // ---- Engine ----------------------------------------------------------------
     bool getMasterEnabled() const;
@@ -118,7 +123,9 @@ public:
     std::vector<AppRoute> getAppRoutes() const;
     void setAppRoutes (const std::vector<AppRoute>& routes);
     /** Output endpoint an app mapped to a strip is routed to (endpoint routing).
-        Default: the strip's virtual endpoint name, "Flubsound <Strip>". */
+        Default: the strip's virtual endpoint - "Flubsound <Strip>" (Windows
+        endpoint friendly name / macOS device name) or "flubsound_<strip>"
+        (Linux PipeWire / PulseAudio null-sink name). */
     juce::String getStripEndpointId (const juce::String& stripName) const;
     void setStripEndpointId (const juce::String& stripName, const juce::String& endpointId);
 

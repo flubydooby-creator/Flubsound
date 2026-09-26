@@ -105,7 +105,7 @@ struct Readings
     float m, s, i, lra, maxM, maxS;
 };
 
-Readings read (const LoudnessMeter& m)
+Readings snapshot (const LoudnessMeter& m)
 {
     return { m.getMomentaryLufs(), m.getShortTermLufs(), m.getIntegratedLufs(),
              m.getLoudnessRangeLu(), m.getMaxMomentaryLufs(), m.getMaxShortTermLufs() };
@@ -391,6 +391,21 @@ TEST_CASE ("LoudnessMeter: absolute gate - silence does not pull integrated loud
     CHECK (m.getShortTermLufs() == kMinusInfDb);
     CHECK_NEAR (m.getIntegratedLufs(), -23.0, 0.1);
     CHECK_NEAR (m.getMaxMomentaryLufs(), -23.0, 0.1);
+
+    // Without the -70 LUFS gate, a long near-silent tail would drag the
+    // relative threshold down (-34 LUFS mean -> -44 gate) until the -37 LUFS
+    // passage counted and I fell to ~-25.8. With it, -37 stays relative-gated
+    // and I is the mean of the 47 full -23 blocks plus the 3 gating blocks
+    // that straddle the step (3/4, 2/4, 1/4 of -23, rest -37): -23.13.
+    LoudnessMeter g;
+    g.prepare (kFs, 2);
+    ToneSource s2 (kFs, 2);
+    s2.feed (g, -23.0, 5.0);
+    s2.feed (g, -37.0, 5.0);
+    s2.feed (g, -80.0, 60.0);
+    const double loud = std::pow (10.0, -2.3), quiet = std::pow (10.0, -3.7);
+    const double expected = 10.0 * std::log10 ((48.5 * loud + 1.5 * quiet) / 50.0);
+    CHECK_NEAR (g.getIntegratedLufs(), expected, 0.02);
 }
 
 TEST_CASE ("LoudnessMeter: max momentary / short-term hold the loudest window")
@@ -451,7 +466,7 @@ TEST_CASE ("LoudnessMeter: reset clears everything")
     ToneSource src (kFs, 2);
     src.feed (m, -20.0, 4.0);
     m.reset();
-    const auto r = read (m);
+    const auto r = snapshot (m);
     CHECK (r.m == kMinusInfDb);
     CHECK (r.s == kMinusInfDb);
     CHECK (r.i == kMinusInfDb);
@@ -533,7 +548,7 @@ TEST_CASE ("LoudnessMeter: robustness - silence, DC, full-scale noise, impulses 
             LoudnessMeter m;
             m.prepare (fs, 2);
             processRange (m, buf, 0, n, 1024);
-            const auto r = read (m);
+            const auto r = snapshot (m);
             CHECK (allFinite (r));
             for (float v : { r.m, r.s, r.i, r.maxM, r.maxS })
             {
@@ -579,8 +594,15 @@ TEST_CASE ("LoudnessMeter: NaN / Inf input cannot poison the meter")
     bad.ch[0][10] = std::numeric_limits<float>::quiet_NaN();
     bad.ch[1][20] = std::numeric_limits<float>::infinity();
     m.process (bad.block());
-    src.feed (m, -23.0, 4.0);
-    const auto r = read (m);
+    // Every reading stays finite at every 100 ms update through the recovery.
+    bool finite = true;
+    for (int i = 0; i < 40; ++i)
+    {
+        src.feed (m, -23.0, 0.1);
+        finite = finite && allFinite (snapshot (m));
+    }
+    CHECK (finite);
+    const auto r = snapshot (m);
     CHECK (allFinite (r));
     CHECK_NEAR (r.m, -23.0, 0.1);
     CHECK_NEAR (r.s, -23.0, 0.2);
@@ -600,7 +622,7 @@ TEST_CASE ("LoudnessMeter: extreme configuration values are clamped safely")
             copyInto (buf.ch[static_cast<size_t> (c)], whiteNoise (997, 0.5f, static_cast<uint32_t> (3 + c)));
         for (int b = 0; b < 400; ++b)
             m.process (buf.block());
-        const auto r = read (m);
+        const auto r = snapshot (m);
         CHECK (allFinite (r));
         CHECK_GE (r.m, -40.0f);
         CHECK_LE (r.m, 20.0f);
@@ -668,7 +690,7 @@ TEST_CASE ("LoudnessMeter: readings are independent of the host block size")
         {
             processRange (m, buf, pos, cp, blockSize);
             pos = cp;
-            snaps.push_back (read (m));
+            snaps.push_back (snapshot (m));
             if (cp == resetAt)
                 m.resetIntegrated();
         }

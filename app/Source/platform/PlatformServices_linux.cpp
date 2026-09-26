@@ -62,8 +62,8 @@ bool isSafeToken (const std::string& token)
                         token.end(),
                         [] (char c)
                         {
-                            return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == ':'
-                                || c == '@' || c == '+' || c == '-';
+                            const bool alphanumeric = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+                            return alphanumeric || c == '_' || c == '.' || c == ':' || c == '@' || c == '+' || c == '-';
                         });
 }
 
@@ -204,7 +204,9 @@ bool parseSinkInputs (const std::string& text, std::vector<SinkInput>& inputs, s
 /** One AudioSessionInfo per process (a process may own several streams; a
     playing one wins). Streams without a pid cannot be addressed through the
     pid-based interface and are skipped, as are our own streams. */
-std::vector<AudioSessionInfo> toSessions (const std::vector<SinkInput>& inputs, const std::map<uint32_t, std::string>& sinkNames, uint32_t ownPid)
+std::vector<AudioSessionInfo> toSessions (const std::vector<SinkInput>& inputs,
+                                          const std::map<uint32_t, std::string>& sinkNames,
+                                          uint32_t ownPid)
 {
     std::vector<AudioSessionInfo> sessions;
     std::map<uint32_t, size_t> indexByPid;
@@ -369,7 +371,10 @@ public:
             if (input.processId != processId)
                 continue;
 
-            const auto result = pactl::run ("LC_ALL=C pactl move-sink-input " + std::to_string (input.index) + " " + pactl::shellQuote (target) + " 2>&1");
+            // Every variable part is an integer or a whitelisted, quoted token.
+            const auto command =
+                "LC_ALL=C pactl move-sink-input " + std::to_string (input.index) + " " + pactl::shellQuote (target) + " 2>&1";
+            const auto result = pactl::run (command);
             if (result.exitCode != 0)
             {
                 error = "pactl could not move the stream to '" + target + "': " + pactl::firstLine (result.output);
@@ -380,7 +385,8 @@ public:
 
         if (moved == 0)
         {
-            error = "Process " + std::to_string (processId) + " is not playing audio right now. Start playback in the application and try again.";
+            error = "Process " + std::to_string (processId)
+                  + " is not playing audio right now. Start playback in the application and try again.";
             return false;
         }
 
@@ -406,13 +412,18 @@ public:
 private:
     static bool listSinkInputs (std::vector<pactl::SinkInput>& inputs, std::string& error)
     {
-        const auto result = pactl::run ("LC_ALL=C pactl --format=json list sink-inputs 2>&1");
-        if (result.exitCode != 0)
-        {
-            error = "pactl failed (is PipeWire/PulseAudio running? pactl >= 16 is needed for JSON output): " + pactl::firstLine (result.output);
-            return false;
-        }
-        return pactl::parseSinkInputs (result.output, inputs, error);
+        // stderr is discarded so warnings can never corrupt the JSON on stdout.
+        const auto result = pactl::run ("LC_ALL=C pactl --format=json list sink-inputs 2>/dev/null");
+        if (result.exitCode == 0)
+            return pactl::parseSinkInputs (result.output, inputs, error);
+
+        // Tell "no server" apart from "pactl too old for --format=json".
+        const auto info = pactl::run ("LC_ALL=C pactl info 2>&1");
+        if (info.exitCode != 0)
+            error = "Cannot reach the sound server (is PipeWire/pipewire-pulse or PulseAudio running?): " + pactl::firstLine (info.output);
+        else
+            error = "This pactl cannot print JSON; pactl 16 or newer (pulseaudio-utils 16+) is required.";
+        return false;
     }
 
     const bool havePactl;

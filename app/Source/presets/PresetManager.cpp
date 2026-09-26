@@ -250,9 +250,7 @@ bool PresetManager::loadIntoStrip (int strip, const PresetInfo& info, ParameterS
 {
     if (! loadIntoBank (info, store, store.getActiveBank(), error))
         return false;
-    setCurrentPresetId (strip, info.id);
-    if (strip >= 0 && strip < kMaxStrips)
-        versionAtLoad[static_cast<size_t> (strip)] = store.version();
+    setCurrentPresetId (strip, info.id, &store);
     return true;
 }
 
@@ -286,10 +284,13 @@ juce::String PresetManager::getCurrentPresetId (int strip) const
     return strip >= 0 && strip < kMaxStrips ? currentIds[static_cast<size_t> (strip)] : juce::String();
 }
 
-void PresetManager::setCurrentPresetId (int strip, const juce::String& id)
+void PresetManager::setCurrentPresetId (int strip, const juce::String& id, const ParameterStore* store)
 {
-    if (strip >= 0 && strip < kMaxStrips)
-        currentIds[static_cast<size_t> (strip)] = id;
+    if (strip < 0 || strip >= kMaxStrips)
+        return;
+    currentIds[static_cast<size_t> (strip)] = id;
+    if (store != nullptr)
+        versionAtLoad[static_cast<size_t> (strip)] = store->version();
 }
 
 bool PresetManager::isModified (int strip, const ParameterStore& store) const

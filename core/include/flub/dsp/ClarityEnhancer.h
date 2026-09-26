@@ -16,7 +16,13 @@
 // Zero latency.
 #pragma once
 
+#include "EnvelopeFollower.h"
 #include "Processor.h"
+#include "Svf.h"
+#include "TransientShaper.h"
+#include "flub/common/SmoothedValue.h"
+
+#include <array>
 
 namespace flub
 {
@@ -45,7 +51,70 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    static constexpr int kControlInterval = 16;
+
+    /** Level-dependent bell (de-mud cut / presence boost): linked mean-square
+        detector on a unity-gain band-pass, gain computer at control rate,
+        EQ gain = amount * smoothed dynamic gain, gliding per sample. */
+    struct DynamicBell
+    {
+        bool active = false;
+        OnePoleSmoother amount;              // 0..1, control rate
+        GainSmoother gain;                   // dynamic gain before the amount scaling (dB)
+        float appliedDb = 0.0f;              // what the EQ is designed for
+        float bandMs = 0.0f, broadMs = 0.0f; // linked mean squares (band / broadband)
+        SvfCoeffs detector;
+        std::array<SvfState, kMaxChannels> detectorState {}, eqState {};
+        TransientShaper::SvfGlide eq;
+    };
+
+    /** Per-channel exciter state: HP4 3.5 kHz, LP4 7 kHz, HP4 7 kHz + envelope. */
+    struct AirChannel
+    {
+        std::array<SvfState, 6> filters {};
+        TransientShaper::PeakHold hold;
+        float release = 0.0f, env = 0.0f;
+    };
+
+    void activateBell (DynamicBell& bell, double hz, double q) noexcept;
+    void updateBell (DynamicBell& bell, float gainDb, double hz, double q, bool moved) noexcept;
+    void activateAir() noexcept;
+    void processBell (DynamicBell& bell, const AudioBlock& block, int numCh, int pos, int len, int phase, bool trackBroadband) noexcept;
+    void processAir (const AudioBlock& block, int numCh, int pos, int len, int phase) noexcept;
+    void applyGlide (TransientShaper::SvfGlide& glide, std::array<SvfState, kMaxChannels>& state,
+                     const AudioBlock& block, int numCh, int pos, int len, int phase) noexcept;
+    void controlTick() noexcept;
+    void clearAllStates() noexcept;
+    float flushStates() noexcept;
+
     ProcessSpec spec;
     ClarityParams params;
+
+    double controlRate = 48000.0 / kControlInterval;
+    int controlCountdown = kControlInterval;
+    float msCoeff = 0.0f; // mean-square detector one-pole
+
+    // 1. Transient shaper (full band, linked).
+    TransientShaper shaper;
+
+    // 2. De-mud, 3. dynamic presence.
+    DynamicBell deMud, presence;
+    OnePoleSmoother logPresenceHz;
+    float presenceHz = 3200.0f;
+
+    // 4. Air exciter + high shelf.
+    bool airActive = false;
+    OnePoleSmoother airAmount;  // control rate: shelf gain = 2 dB * air
+    LinearSmoothedValue airMix; // per sample: exciter mix = air * -12 dB
+    std::array<SvfCoeffs, 6> airFilters {};
+    std::array<AirChannel, kMaxChannels> airChannels {};
+    float airReleaseCoeff = 0.0f, airSmoothCoeff = 0.0f;
+    TransientShaper::SvfGlide airShelf;
+    float airShelfDb = 0.0f;
+    std::array<SvfState, kMaxChannels> airShelfState {};
+
+    // Per-segment scratch (a segment never exceeds one control interval).
+    std::array<SvfCoeffs, kControlInterval> rampScratch {};
+    std::array<float, kControlInterval> scratchA {}, scratchB {};
 };
 } // namespace flub

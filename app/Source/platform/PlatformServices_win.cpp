@@ -67,6 +67,8 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
+#include <iterator>
 #include <map>
 #include <utility>
 #include <vector>
@@ -531,7 +533,8 @@ std::wstring endpointFriendlyName (IMMDevice* device)
 ComPtr<IMMDeviceEnumerator> createDeviceEnumerator (std::string& error)
 {
     ComPtr<IMMDeviceEnumerator> enumerator;
-    const HRESULT hr = CoCreateInstance (__uuidof (MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof (IMMDeviceEnumerator), enumerator.putVoid());
+    const HRESULT hr =
+        CoCreateInstance (__uuidof (MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof (IMMDeviceEnumerator), enumerator.putVoid());
     if (FAILED (hr))
         error = "Cannot create the Windows audio device enumerator: " + hresultToString (hr);
     return enumerator;
@@ -540,7 +543,10 @@ ComPtr<IMMDeviceEnumerator> createDeviceEnumerator (std::string& error)
 /** Accepts an MMDevice endpoint id ("{0.0.0.00000000}.{guid}") or the exact
     friendly name of an active render endpoint (e.g. "Flubsound Game (Flubsound
     Virtual Audio)") and returns the verified endpoint id. */
-[[maybe_unused]] bool resolveRenderEndpoint (IMMDeviceEnumerator* enumerator, const std::string& idOrName, std::wstring& resolvedId, std::string& error)
+[[maybe_unused]] bool resolveRenderEndpoint (IMMDeviceEnumerator* enumerator,
+                                             const std::string& idOrName,
+                                             std::wstring& resolvedId,
+                                             std::string& error)
 {
     const auto wanted = toWide (idOrName);
     if (wanted.empty())
@@ -587,9 +593,9 @@ ComPtr<IMMDeviceEnumerator> createDeviceEnumerator (std::string& error)
                 continue;
 
             const auto name = endpointFriendlyName (device.get());
-            if (! name.empty()
-                && CompareStringOrdinal (name.c_str(), static_cast<int> (name.size()), wanted.c_str(), static_cast<int> (wanted.size()), TRUE)
-                       == CSTR_EQUAL)
+            const int nameLength = static_cast<int> (name.size());
+            const int wantedLength = static_cast<int> (wanted.size());
+            if (! name.empty() && CompareStringOrdinal (name.c_str(), nameLength, wanted.c_str(), wantedLength, TRUE) == CSTR_EQUAL)
             {
                 resolvedId = endpointId (device.get());
                 return ! resolvedId.empty();
@@ -741,7 +747,8 @@ private:
         for (int attempt = 0; attempt < kMaxNativeId; ++attempt)
         {
             nextNativeId = nextNativeId >= kMaxNativeId ? 1 : nextNativeId + 1;
-            const bool inUse = std::any_of (entries.begin(), entries.end(), [this] (const auto& e) { return e.second.nativeId == nextNativeId; });
+            const bool inUse =
+                std::any_of (entries.begin(), entries.end(), [this] (const auto& e) { return e.second.nativeId == nextNativeId; });
             if (! inUse)
                 return nextNativeId;
         }
@@ -863,8 +870,8 @@ struct AudioPolicyConfigFactoryVtbl
     void* GetTrustLevel;
     // add_CtxVolumeChange ... remove_ChatContextChanged (never called)
     void* notUsed[19];
-    HRESULT (STDMETHODCALLTYPE* SetPersistedDefaultAudioEndpoint) (void* self, UINT processId, EDataFlow flow, ERole role, HStringHandle deviceId);
-    HRESULT (STDMETHODCALLTYPE* GetPersistedDefaultAudioEndpoint) (void* self, UINT processId, EDataFlow flow, ERole role, HStringHandle* deviceId);
+    HRESULT (STDMETHODCALLTYPE* SetPersistedDefaultAudioEndpoint) (void* self, UINT pid, EDataFlow, ERole, HStringHandle deviceId);
+    HRESULT (STDMETHODCALLTYPE* GetPersistedDefaultAudioEndpoint) (void* self, UINT pid, EDataFlow, ERole, HStringHandle* deviceId);
     HRESULT (STDMETHODCALLTYPE* ClearAllPersistedApplicationDefaultEndpoints) (void* self);
 };
 
@@ -963,7 +970,9 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
     // Prefer the IID that matches this build, but accept the other one: the
     // successful IID match is what guarantees the layout, not the build number.
     const bool newer = windowsBuildNumber() >= kAudioPolicyConfigIidChangeBuild;
-    const GUID* const candidates[] = { newer ? &kIidFactory21390 : &kIidFactoryDownlevel, newer ? &kIidFactoryDownlevel : &kIidFactory21390 };
+    const GUID* const preferred = newer ? &kIidFactory21390 : &kIidFactoryDownlevel;
+    const GUID* const alternative = newer ? &kIidFactoryDownlevel : &kIidFactory21390;
+    const GUID* const candidates[] = { preferred, alternative };
 
     AudioPolicyConfigFactory* factory = nullptr;
     HRESULT hr = E_NOINTERFACE;
@@ -1049,7 +1058,8 @@ public:
 
         ComPtr<IMMDeviceCollection> devices;
         UINT deviceCount = 0;
-        if (FAILED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put())) || FAILED (devices->GetCount (&deviceCount)))
+        if (FAILED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put()))
+            || FAILED (devices->GetCount (&deviceCount)))
             return sessions;
 
         const DWORD ownProcessId = GetCurrentProcessId();
@@ -1311,7 +1321,13 @@ private:
 
     GetMixFormat() is not implemented by the process-loopback device, so we
     ask for float32 at the caller's rate/channel count and let the audio
-    engine convert (AUTOCONVERTPCM + SRC_DEFAULT_QUALITY). */
+    engine convert (AUTOCONVERTPCM + SRC_DEFAULT_QUALITY).
+
+    Lifetime: start()/stop()/destruction from any non-real-time thread, but
+    never destroy or restart the object from inside the FrameCallback (stop()
+    from the callback only requests the stop; it cannot join its own thread).
+    If the stream dies (e.g. the audio service restarts), the thread exits and
+    isRunning() turns false; start() may then simply be called again. */
 class WinProcessLoopbackCapture final : public ProcessLoopbackCapture
 {
 public:
@@ -1336,8 +1352,8 @@ public:
 
         if (! isSupported())
         {
-            error = "Per-application capture needs Windows 11 or Windows 10 build 20348+ (this is build " + std::to_string (windowsBuildNumber())
-                  + ").";
+            error = "Per-application capture needs Windows 11 or Windows 10 build 20348+ (this is build "
+                  + std::to_string (windowsBuildNumber()) + ").";
             return false;
         }
 
@@ -1493,7 +1509,8 @@ private:
         }
 
         IActivateAudioInterfaceAsyncOperation* operation = nullptr;
-        HRESULT hr = ActivateAudioInterfaceAsync (VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof (IAudioClient), &params, handler, &operation);
+        HRESULT hr =
+            ActivateAudioInterfaceAsync (VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, __uuidof (IAudioClient), &params, handler, &operation);
 
         if (SUCCEEDED (hr))
             hr = handler->waitForClient (kActivationTimeoutMs, stream.client.put());
@@ -1524,8 +1541,8 @@ private:
         // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {00000003-0000-0010-8000-00aa00389b71}, local to avoid ksuser/uuid.
         format.SubFormat = GUID { 0x00000003, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 
-        const DWORD streamFlags =
-            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        const DWORD streamFlags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                                | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
         hr = stream.client->Initialize (AUDCLNT_SHAREMODE_SHARED, streamFlags, kBufferDuration, 0, &format.Format, nullptr);
         if (FAILED (hr))

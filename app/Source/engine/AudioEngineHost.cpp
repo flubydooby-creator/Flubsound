@@ -45,15 +45,20 @@ AudioEngineHost::AudioEngineHost()
         stripGainDb[i].store (i < layout.size() ? layout[i].gainDb : 0.0f, std::memory_order_relaxed);
         stripMuted[i].store (i < layout.size() && layout[i].muted, std::memory_order_relaxed);
         stripActive[i].store (false, std::memory_order_relaxed);
+        deviceInputFirst[i].store (-1, std::memory_order_relaxed);
     }
 
     // Strips and parameter stores must exist before anything else (UI, preset
     // restore) touches the engine, so configure once for a nominal format.
     configureEngine (currentSampleRate, currentBlockSize);
+
+    // Structural parameter changes (latency profile) are picked up here.
+    startTimerHz (5);
 }
 
 AudioEngineHost::~AudioEngineHost()
 {
+    stopTimer();
     cancelPendingUpdate();
     closeDevice();
     stopAllCaptures();
@@ -113,8 +118,8 @@ void AudioEngineHost::setStripLayout (std::vector<flub::StripConfig> newLayout)
         if (slot.capture != nullptr && slot.strip.load (std::memory_order_relaxed) >= static_cast<int> (newLayout.size()))
             releaseSlot (slot);
 
-    if (deviceInputStrip.load() >= static_cast<int> (newLayout.size()))
-        deviceInputStrip.store (-1);
+    for (size_t i = newLayout.size(); i < static_cast<size_t> (kMaxStrips); ++i)
+        deviceInputFirst[i].store (-1);
 
     layout = std::move (newLayout);
     for (size_t i = 0; i < layout.size(); ++i)
@@ -195,6 +200,12 @@ void AudioEngineHost::configureEngine (double sampleRate, int blockSize)
     // audioDeviceAboutToStart (under the device manager's callback lock).
     notifyPending.store (true, std::memory_order_release);
     triggerAsyncUpdate();
+}
+
+void AudioEngineHost::timerCallback()
+{
+    if (mixEngine.needsReprepare())
+        reconfigure();
 }
 
 void AudioEngineHost::handleAsyncUpdate()
@@ -303,10 +314,35 @@ void AudioEngineHost::applyPendingMixSettings() noexcept
 // =============================================================================
 // Sources
 // =============================================================================
+void AudioEngineHost::setDeviceInputMap (const std::array<int, kMaxStrips>& firstChannels) noexcept
+{
+    for (size_t i = 0; i < static_cast<size_t> (kMaxStrips); ++i)
+        deviceInputFirst[i].store (firstChannels[i] >= 0 ? firstChannels[i] : -1, std::memory_order_relaxed);
+}
+
+std::array<int, AudioEngineHost::kMaxStrips> AudioEngineHost::getDeviceInputMap() const noexcept
+{
+    std::array<int, kMaxStrips> map {};
+    for (size_t i = 0; i < static_cast<size_t> (kMaxStrips); ++i)
+        map[i] = deviceInputFirst[i].load (std::memory_order_relaxed);
+    return map;
+}
+
 void AudioEngineHost::setDeviceInputRouting (int strip, int firstDeviceChannel) noexcept
 {
-    deviceInputFirstChannel.store (std::max (0, firstDeviceChannel), std::memory_order_relaxed);
-    deviceInputStrip.store (strip >= 0 && strip < kMaxStrips ? strip : -1, std::memory_order_relaxed);
+    std::array<int, kMaxStrips> map;
+    map.fill (-1);
+    if (strip >= 0 && strip < kMaxStrips)
+        map[static_cast<size_t> (strip)] = std::max (0, firstDeviceChannel);
+    setDeviceInputMap (map);
+}
+
+int AudioEngineHost::getDeviceInputStrip() const noexcept
+{
+    for (int i = 0; i < kMaxStrips; ++i)
+        if (deviceInputFirst[static_cast<size_t> (i)].load (std::memory_order_relaxed) >= 0)
+            return i;
+    return -1;
 }
 
 int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::String& error)
@@ -475,10 +511,6 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
 {
     applyPendingMixSettings();
 
-    const int inputStrip = deviceInputStrip.load (std::memory_order_relaxed);
-    const int firstInput = deviceInputFirstChannel.load (std::memory_order_relaxed);
-    const bool deviceInputUsable = inputs != nullptr && firstInput < numInputs;
-
     for (int pos = 0; pos < numSamples;)
     {
         const int n = std::min (numSamples - pos, maxBlock);
@@ -498,7 +530,8 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
             }
             else
             {
-                if (s == inputStrip && deviceInputUsable)
+                const int firstInput = deviceInputFirst[si].load (std::memory_order_relaxed);
+                if (inputs != nullptr && firstInput >= 0 && firstInput < numInputs)
                 {
                     for (int c = 0; c < channels; ++c)
                     {
@@ -579,14 +612,14 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
 {
     flub::ScopedNoDenormals noDenormals;
 
-    // One-time promotion of the device thread (MMCSS "Pro Audio", time
-    // constraint, SCHED_FIFO/rtkit). The handle is intentionally never
-    // reverted: revert must run on this thread, and the backend's thread dies
-    // with the device.
-    if (! threadPromoted)
+    // Promote the device thread once (MMCSS "Pro Audio", time constraint,
+    // SCHED_FIFO). Backends may use a new thread after a restart, so this is
+    // tracked per thread. The handle is intentionally never reverted: revert
+    // must run on this thread, and the backend's thread dies with the device.
+    if (const auto thisThread = juce::Thread::getCurrentThreadId(); thisThread != promotedThread)
     {
         promotionHandle = platform_bridge::promoteAudioThread();
-        threadPromoted = true;
+        promotedThread = thisThread;
     }
 
     if (engineReady.load (std::memory_order_acquire))
@@ -605,9 +638,6 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
 
 void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
-    threadPromoted = false; // the backend may use a new thread
-    promotionHandle = nullptr;
-
     const double sampleRate = device->getCurrentSampleRate();
     const int blockSize = device->getCurrentBufferSizeSamples();
 

@@ -5,19 +5,21 @@
 // two methods (resolved per OS by getEffectiveMethod()):
 //
 //   EndpointRouting  flub::platform::AppAudioRouter::setAppEndpoint moves the
-//                    app's audio session to the strip's virtual endpoint
-//                    ("Flubsound Game" ...), whose capture side feeds the
-//                    engine (device input path or a capture). Windows:
-//                    persisted-default-endpoint API; Linux: move sink-inputs.
-//                    Endpoints are restored to the system default on shutdown.
+//                    app's audio to the strip's virtual endpoint (Windows:
+//                    "Flubsound Game" endpoint; Linux: "flubsound_game" null
+//                    sink), whose capture side / monitor feeds the engine
+//                    through the device inputs. Endpoints are restored to the
+//                    system default on shutdown.
 //   ProcessCapture   flub::platform::ProcessLoopbackCapture captures the app's
 //                    process tree directly into the strip through a
 //                    DriftCompensatedFifo (AudioEngineHost::startProcessCapture).
-//                    macOS (process taps) and Windows 10 20348+.
 //
-// Running sessions are enumerated every 2 s while routes exist (or while the
-// UI asked for live updates), so apps that start later are picked up.
-// Message thread only.
+// Threading: AppAudioRouter calls block for 5-30 ms (COM / pactl), so session
+// enumeration and endpoint moves run on a background worker ("Flubsound
+// routing", every 2 s while routes exist or live updates are on, or on
+// refresh()). Results are handed to the message thread, which owns the
+// capture decisions (AudioEngineHost is message-thread only) and the
+// published app list. The public API is message-thread only.
 #pragma once
 
 #include "settings/AppSettings.h"
@@ -33,7 +35,7 @@ namespace flub::app
 {
 class AudioEngineHost;
 
-class AppRouting final : private juce::Timer
+class AppRouting final : private juce::Thread, private juce::AsyncUpdater
 {
 public:
     using Method = AppSettings::RoutingMethod;
@@ -49,10 +51,14 @@ public:
         juce::String error;        // last routing / capture error
     };
 
+    /** Reads the routes / method from settings; does nothing until start(). */
     AppRouting (AudioEngineHost& host, AppSettings& settings);
     ~AppRouting() override;
 
-    /** Restores endpoints, stops captures and timers. Idempotent. */
+    /** Begins applying routes (worker thread, captures, endpoints). */
+    void start();
+
+    /** Stops the worker, restores endpoints and stops captures. Idempotent. */
     void shutdown();
 
     // ---- Capabilities ------------------------------------------------------------
@@ -78,36 +84,56 @@ public:
     static bool executablesMatch (const juce::String& a, const juce::String& b);
 
     // ---- Live state ------------------------------------------------------------------
+    /** Last enumeration result (message thread copy). */
     const std::vector<AppState>& getApps() const noexcept { return apps; }
-    /** Enumerates sessions now and applies the routes. */
+    /** Requests an enumeration + apply pass now (asynchronous). */
     void refresh();
     /** Keep enumerating every 2 s even without routes (e.g. while a routing
         page is visible). */
     void setLiveUpdates (bool shouldUpdate);
+    /** Re-reads strip names / endpoints after the strip layout changed. */
+    void stripLayoutChanged();
     void openSystemRoutingSettings();
 
-    /** Called after refresh() when the app list or routing state changed. */
+    /** Called on the message thread when the app list or routing state changed. */
     std::function<void()> onChanged;
 
 private:
-    void timerCallback() override;
-    void updateTimer();
-    void persistRoutes();
-    int stripIndexForName (const juce::String& stripName) const;
-    void restoreAllEndpoints();
+    /** Snapshot of everything the worker needs (copied under `lock`). */
+    struct WorkerConfig
+    {
+        bool active = false;
+        Method method = Method::Disabled;
+        std::vector<AppRoute> routes;
+        std::vector<juce::String> stripNames, stripEndpoints;
+    };
+
+    void run() override;
+    void handleAsyncUpdate() override;
+    void publishConfig();
+    void applyCaptures (std::vector<AppState>& states);
     void stopAllCaptures();
 
     AudioEngineHost& host;
     AppSettings& settings;
     std::unique_ptr<flub::platform::AppAudioRouter> router;
-    bool captureSupported = false, liveUpdates = false, isShutDown = false;
+    bool captureSupported = false, liveUpdates = false, isStarted = false, isShutDown = false;
     Method method = Method::Automatic;
-
     std::vector<AppRoute> routes;
+
+    // Message thread
     std::vector<AppState> apps;
+    std::map<uint32_t, int> captures;        // pid -> capture id
+    std::map<uint32_t, int> captureFailures; // pid -> failed attempts
+
+    // Shared with the worker
+    juce::CriticalSection lock;
+    WorkerConfig config;
+    std::vector<AppState> workerResult;
+    bool resultPending = false;
+
+    // Worker thread only (and the message thread after the worker stopped)
     std::map<uint32_t, juce::String> routedEndpoints; // pid -> endpoint we assigned
-    std::map<uint32_t, int> captures;                 // pid -> capture id
-    std::map<uint32_t, int> captureFailures;          // pid -> failed attempts
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppRouting)
 };

@@ -43,6 +43,19 @@ constexpr float kEnvFloor = 1.0e-9f; // -180 dB, below kMinusInfDb
 
 constexpr DynEqBandParams kDefaultBandParams {};
 
+// Inter-sample peak estimate: a sample-peak detector reads a tone near fs/4
+// up to 3 dB low (two samples straddling the crest at +-45 degrees), and a
+// tone slightly off fs/4 (or fs/3, fs/6 ...) makes that error beat slowly,
+// i.e. the level ripples and the band tremolos a steady 11-12 kHz tone. The
+// midpoint between two detector samples is estimated with the maximally flat
+// 6-point (Lagrange) half-sample interpolator (3/256, -25/256, 150/256, 150/256,
+// -25/256, 3/256); max(|samples|, |midpoints|) keeps the worst-case under-read
+// of a sine below 0.7 dB up to fs/4 and never over-reads (|H(w)| <= 1). The
+// midpoint lags by 2.5 samples; the sample peak itself is still instant.
+constexpr float kMid1 = 150.0f / 256.0f;
+constexpr float kMid3 = -25.0f / 256.0f;
+constexpr float kMid5 = 3.0f / 256.0f;
+
 /** Flushes near-zero SVF states; returns their sum for a cheap finiteness check. */
 float flushTiny (SvfState& s) noexcept
 {
@@ -116,6 +129,7 @@ void DynamicEq::prepare (const ProcessSpec& newSpec)
 void DynamicEq::reset() noexcept
 {
     controlCountdown = kControlInterval;
+    lastNumChannels = spec.numChannels;
     for (int b = 0; b < kMaxBands; ++b)
     {
         if (targets[static_cast<size_t> (b)].enabled)
@@ -208,6 +222,8 @@ void DynamicEq::clearBandState (BandState& band) noexcept
         s.reset();
     for (auto& s : band.eqState)
         s.reset();
+    for (auto& h : band.detHistory)
+        h.fill (0.0f);
     band.segmentPeak = band.windowPeak = band.prevWindowPeak = band.env = 0.0f;
     band.windowCountdown = band.windowTicks;
 }
@@ -412,6 +428,8 @@ void DynamicEq::controlTick (int index) noexcept
             band.dynGain.setExpanderMode (isExpander (t.mode));
             band.dynGain.reset (0.0f);
             band.segmentPeak = band.windowPeak = band.prevWindowPeak = band.env = 0.0f;
+            for (auto& h : band.detHistory) // old-topology outputs must not feed the interpolator
+                h.fill (0.0f);
             updateDetector (band);
         }
     }
@@ -425,6 +443,24 @@ void DynamicEq::process (const AudioBlock& block) noexcept
         return;
 
     const int numCh = std::min ({ block.numChannels, spec.numChannels, kMaxChannels });
+
+    // A channel that was absent from the previous block(s) kept the filter
+    // states of whatever it last carried; resuming from them would ring out a
+    // stale tail (a click). Channels that come back start from rest instead.
+    if (numCh > lastNumChannels)
+    {
+        for (auto& band : bands)
+        {
+            for (int ch = std::max (0, lastNumChannels); ch < numCh; ++ch)
+            {
+                const size_t c = static_cast<size_t> (ch);
+                band.detState[c].reset();
+                band.eqState[c].reset();
+                band.detHistory[c].fill (0.0f);
+            }
+        }
+    }
+    lastNumChannels = numCh;
 
     bool anyActive = false;
     for (const auto& band : bands)
@@ -447,6 +483,8 @@ void DynamicEq::process (const AudioBlock& block) noexcept
         //    section has touched it, so every band's threshold refers to the
         //    input level and bands do not chase each other. The level is
         //    linked: one peak over all channels, so the image never shifts.
+        //    Peak = max of |samples| and |interpolated midpoints| (see kMid1).
+        //    NaN never enters: std::max keeps its first argument if either is NaN.
         for (auto& band : bands)
         {
             if (! band.active)
@@ -455,11 +493,24 @@ void DynamicEq::process (const AudioBlock& block) noexcept
             float peak = band.segmentPeak;
             for (int ch = 0; ch < numCh; ++ch)
             {
-                SvfState s = band.detState[static_cast<size_t> (ch)];
+                const size_t cs = static_cast<size_t> (ch);
+                SvfState s = band.detState[cs];
+                auto& h = band.detHistory[cs];
+                float y1 = h[0], y2 = h[1], y3 = h[2], y4 = h[3], y5 = h[4];
                 const float* x = block.channel (ch) + pos;
                 for (int i = 0; i < len; ++i)
-                    peak = std::max (peak, std::abs (svfTick (c, s, x[i])));
-                band.detState[static_cast<size_t> (ch)] = s;
+                {
+                    const float y0 = svfTick (c, s, x[i]);
+                    const float mid = kMid1 * (y3 + y2) + kMid3 * (y4 + y1) + kMid5 * (y5 + y0); // between y3 and y2
+                    peak = std::max (peak, std::max (std::abs (y0), std::abs (mid)));
+                    y5 = y4;
+                    y4 = y3;
+                    y3 = y2;
+                    y2 = y1;
+                    y1 = y0;
+                }
+                h = { y1, y2, y3, y4, y5 };
+                band.detState[cs] = s;
             }
             band.segmentPeak = peak;
         }
