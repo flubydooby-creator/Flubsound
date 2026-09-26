@@ -9,11 +9,13 @@
 #include "flub/analysis/LoudnessFollower.h"
 #include "flub/analysis/LoudnessMeter.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <utility>
 #include <vector>
 
 using namespace flub;
@@ -25,6 +27,13 @@ constexpr double kFs = 48000.0;
 constexpr unsigned kStereo = 0x3u;
 
 float dbfs (double db) { return static_cast<float> (std::pow (10.0, db / 20.0)); }
+
+/** Copies into a Planar channel in place (move-assigning a new vector would
+    leave the Planar's channel pointers dangling). */
+void copyInto (std::vector<float>& dst, const std::vector<float>& src)
+{
+    std::copy (src.begin(), src.begin() + static_cast<std::ptrdiff_t> (std::min (src.size(), dst.size())), dst.begin());
+}
 
 /** Phase-continuous 1 kHz sine with piecewise-constant per-channel levels, fed
     to a meter in fixed blocks. EBU Tech 3341/3342 test signals are 1 kHz tones
@@ -178,7 +187,7 @@ TEST_CASE ("LoudnessMeter: 0 dBFS 997 Hz sine in one channel reads -3.01 LUFS")
     m.prepare (kFs, 1);
     const int n = static_cast<int> (kFs * 2.0);
     Planar buf (1, n);
-    buf.ch[0] = sine (997.0, kFs, n, 1.0f);
+    copyInto (buf.ch[0], sine (997.0, kFs, n, 1.0f));
     processRange (m, buf, 0, n, 480);
     CHECK_NEAR (m.getMomentaryLufs(), -3.01, 0.01);
     CHECK_NEAR (m.getIntegratedLufs(), -3.01, 0.01);
@@ -354,12 +363,12 @@ TEST_CASE ("LoudnessMeter: window timing - readings appear exactly when their wi
 
 TEST_CASE ("LoudnessMeter: momentary window is a rectangular 400 ms window on a 100 ms grid")
 {
-    // Silence for 1 s, then a -23 dBFS tone: at +100/+200/+400 ms the window
+    // Silence for 3 s, then a -23 dBFS tone: at +100/+200/+400 ms the window
     // holds 1/4, 2/4 and 4/4 of tone -> -23 + 10 log10 (fraction).
     LoudnessMeter m;
     m.prepare (kFs, 2);
     ToneSource src (kFs, 2);
-    src.feed (m, -200.0, 1.0);
+    src.feed (m, -200.0, 3.0);
     CHECK (m.getMomentaryLufs() == kMinusInfDb);
     src.feed (m, -23.0, 0.1);
     CHECK_NEAR (m.getMomentaryLufs(), -23.0 + 10.0 * std::log10 (0.25), 0.1);
@@ -459,8 +468,8 @@ TEST_CASE ("LoudnessMeter: process() only reads the block")
     LoudnessMeter m;
     m.prepare (kFs, 2);
     Planar buf (2, 1000);
-    buf.ch[0] = whiteNoise (1000, 0.7f, 11);
-    buf.ch[1] = whiteNoise (1000, 0.7f, 12);
+    copyInto (buf.ch[0], whiteNoise (1000, 0.7f, 11));
+    copyInto (buf.ch[1], whiteNoise (1000, 0.7f, 12));
     const auto copy = buf.ch;
     for (int i = 0; i < 10; ++i)
         m.process (buf.block());
@@ -479,7 +488,7 @@ TEST_CASE ("LoudnessMeter: process, reset and getters do not allocate")
         f.prepare (kFs, channels);
         Planar buf (channels, 512);
         for (int c = 0; c < channels; ++c)
-            buf.ch[static_cast<size_t> (c)] = whiteNoise (512, 0.3f, static_cast<uint32_t> (100 + c));
+            copyInto (buf.ch[static_cast<size_t> (c)], whiteNoise (512, 0.3f, static_cast<uint32_t> (100 + c)));
         float sink = 0.0f;
 
         AllocationGuard guard;
@@ -514,12 +523,12 @@ TEST_CASE ("LoudnessMeter: robustness - silence, DC, full-scale noise, impulses 
                 if (kind == 1)
                     std::fill (d.begin(), d.end(), c == 0 ? 1.0f : -1.0f); // full-scale DC
                 else if (kind == 2)
-                    d = whiteNoise (n, 1.0f, static_cast<uint32_t> (7 + c)); // full-scale noise
+                    copyInto (d, whiteNoise (n, 1.0f, static_cast<uint32_t> (7 + c))); // full-scale noise
                 else if (kind == 3)
                     for (int i = 0; i < n; i += 4800)
                         d[static_cast<size_t> (i)] = 1.0f; // isolated single-sample impulses
                 else if (kind == 4)
-                    d = whiteNoise (n, 1.0e30f, static_cast<uint32_t> (9 + c)); // absurd float overs
+                    copyInto (d, whiteNoise (n, 1.0e30f, static_cast<uint32_t> (9 + c))); // absurd float overs
             }
             LoudnessMeter m;
             m.prepare (fs, 2);
@@ -588,7 +597,7 @@ TEST_CASE ("LoudnessMeter: extreme configuration values are clamped safely")
         m.prepare (fs, ch);
         Planar buf (kMaxChannels, 997);
         for (int c = 0; c < kMaxChannels; ++c)
-            buf.ch[static_cast<size_t> (c)] = whiteNoise (997, 0.5f, static_cast<uint32_t> (3 + c));
+            copyInto (buf.ch[static_cast<size_t> (c)], whiteNoise (997, 0.5f, static_cast<uint32_t> (3 + c)));
         for (int b = 0; b < 400; ++b)
             m.process (buf.block());
         const auto r = read (m);
@@ -707,7 +716,7 @@ TEST_CASE ("LoudnessFollower: converges to the programme loudness and gates sile
     src.feed (f, -23.0, 20.0);
     CHECK_NEAR (f.getLufs(), -23.0, 0.2);
     CHECK (f.isActive());
-    src.feed (f, -300.0, 60.0);
+    src.feed (f, -300.0, 30.0);
     CHECK (! f.isActive());
     CHECK (std::isfinite (f.getLufs()));
 

@@ -106,6 +106,13 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 - **Root cause:** a single NaN latches forever in IIR state.
 - **Solution:** every module is tested with silence, DC, full-scale noise, impulses and extreme parameters for finite output. The chain input is also guarded: a non-finite block is zeroed and the chain reset, instead of propagating.
 
+### B6b. Real-time levelling during pauses and fade-outs
+- **Symptom:** the level jumps up after a pause, or a fade-out gets "pulled back up".
+- **Root cause:** a naive running loudness estimate keeps decaying through silence, and the levelling loop chases it.
+- **Solution:** all loudness control loops (AutoLevel, AutoDrive, LoudnessMatch) use `GatedLoudness`. The slow 3 s measure only advances while programme is present: block RMS above −70 dBFS, a fast 100 ms follower above −50 LUFS, and within 20 LU of the slow value. Adaptation is additionally slew-limited to +1 dB/s up and −4 dB/s down.
+- **Known limit:** a slow musical fade can still lift the gain by a dB or two before the relative gate closes. This is inherent to any look-ahead-free leveller. Players that support per-track loudness normalisation (ReplayGain / LUFS) should use it, and AutoLevel stays off in the gaming presets.
+- **Verification:** "AutoLevel: brings a quiet source towards the target, slew limited, frozen in silence" (`tests/test_engine.cpp`).
+
 ### B7. Denormals
 - **Symptom:** CPU spikes during fade-outs and silence, 10–100× slower on x86.
 - **Solution:** `ScopedNoDenormals` (FTZ + DAZ on SSE, FZ on AArch64) in every realtime entry point: device callback, plug-in `processBlock` and batch render.

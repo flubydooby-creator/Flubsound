@@ -124,7 +124,7 @@ private:
     bool smoothing = false, curveDirty = true;
 
     // Linked peak detector with a two-bucket hold (see the .cpp).
-    float bucketPeak = 0.0f, prevBucketPeak = 0.0f, heldPeak = -1.0f;
+    float bucketPeak = 0.0f, prevBucketPeak = 0.0f, heldPeak = -1.0f, levelDb = kMinusInfDb;
     int bucketLength = 1, bucketCountdown = 1;
     CurveGain target;
 
@@ -132,7 +132,7 @@ private:
     float gainDb = 0.0f;
     float attackCoeff = 0.0f, releaseCoeff = 0.0f;
     float sustain = 0.0f, sustainStep = 0.0f;         // 0..1: how long the current reduction has lasted
-    int activeRun = 0;
+    int activeRun = 0, sustainSamples = 4800;
     float autoCoeffSustain = -1.0f, autoCoeff = 0.0f; // cache of the auto-release coefficient
 
     // Output gain cache: 1 + mix * (10^((gain + makeup) / 20) - 1).

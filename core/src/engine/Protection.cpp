@@ -65,7 +65,7 @@ void SafetyGovernor::update (float limiterGrDb, float clipEnergyRatioDb, int num
 void AutoLevel::prepare (double sampleRate, int numChannels)
 {
     sr = sampleRate;
-    follower.prepare (sampleRate, numChannels, 3000.0f);
+    follower.prepare (sampleRate, numChannels);
     reset();
 }
 
@@ -83,7 +83,7 @@ void AutoLevel::process (const AudioBlock& block) noexcept
 
     if (enabled)
     {
-        if (follower.isActive()) // freeze during silence / track gaps
+        if (follower.isActive()) // gated: frozen during silence, pauses and fade-outs
         {
             const float desired = std::clamp (target - follower.getLufs(), -12.0f, 12.0f);
             gainDb = slew (gainDb, desired, 1.0f, 4.0f, dt);
@@ -103,7 +103,7 @@ void AutoLevel::process (const AudioBlock& block) noexcept
 void AutoDrive::prepare (double sampleRate, int numChannels)
 {
     sr = sampleRate;
-    follower.prepare (sampleRate, numChannels, 3000.0f);
+    follower.prepare (sampleRate, numChannels);
     reset();
 }
 
@@ -140,8 +140,8 @@ float AutoDrive::update (const AudioBlock& output, float targetLufs, bool enable
 void LoudnessMatch::prepare (double sampleRate, int numChannels)
 {
     sr = sampleRate;
-    dryF.prepare (sampleRate, numChannels, 3000.0f);
-    wetF.prepare (sampleRate, numChannels, 3000.0f);
+    dryF.prepare (sampleRate, numChannels);
+    wetF.prepare (sampleRate, numChannels);
     reset();
 }
 

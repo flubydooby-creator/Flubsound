@@ -273,8 +273,9 @@ void LoudnessMeter::completeSubBlock() noexcept
         }
     }
 
-    // Short-term (3 s). LRA uses every short-term value (10 Hz, i.e. 2.9 s
-    // overlap - Tech 3342 asks for at least 10 values per second).
+    // Short-term (3 s). LRA takes every short-term value, i.e. 3 s windows
+    // with a 100 ms hop (Tech 3342 needs overlapping windows; libebur128 hops
+    // 1 s - the finer hop only gives the statistics more samples).
     if (validSubBlocks >= kShortTermSubBlocks)
     {
         const double e = windowEnergy (kShortTermSubBlocks);

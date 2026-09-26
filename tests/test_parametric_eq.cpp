@@ -934,12 +934,14 @@ TEST_CASE ("ParametricEq: robustness - silence, DC, full-scale noise, impulses, 
             }
         }
 
-        // Automation storm: every band re-randomised every 64-sample block.
+        // Automation storm: four bands re-randomised before every block, with
+        // host block sizes anywhere in 1 .. 4096.
         auto eq = makeEq (fs);
         FastRandom rng (static_cast<uint32_t> (fs));
         Planar buf (2, n);
         fillAll (buf, whiteNoise (n, 1.0f, 8));
-        for (int pos = 0; pos < n; pos += 64)
+        const int blockSizes[] = { 1, 64, 4096, 7, 333, 16, 2, 1024 };
+        for (int pos = 0, k = 0; pos < n; pos += blockSizes[k++ % 8])
         {
             for (int b = 0; b < 4; ++b)
             {
@@ -947,7 +949,7 @@ TEST_CASE ("ParametricEq: robustness - silence, DC, full-scale noise, impulses, 
                 eq->setBand (b, makeBand (static_cast<EqBandType> (rng.nextU32() % 7), 20.0f * std::pow (1000.0f, r()), 24.0f * rng.nextBipolar(),
                                           0.1f + 17.9f * r() * r(), 12 * static_cast<int> (1 + rng.nextU32() % 4), (rng.nextU32() % 8) != 0));
             }
-            eq->process (buf.block (pos, std::min (64, n - pos)));
+            eq->process (buf.block (pos, std::min (blockSizes[k % 8], n - pos)));
         }
         CHECK (allFinite (buf));
         CHECK_LE (peakOf (buf), 1.0e5);
@@ -956,8 +958,8 @@ TEST_CASE ("ParametricEq: robustness - silence, DC, full-scale noise, impulses, 
 
 TEST_CASE ("ParametricEq: output is independent of the host block size (1, 7, 64, 512)")
 {
-    const int n = 14336;             // 4 x 3584
-    const int event = 3584;          // = lcm (7, 512): a block boundary for every size
+    const int event = 3584; // = lcm (7, 512): a block boundary for every size
+    const int n = 5 * event;
     const auto noise = whiteNoise (n, 0.3f, 2024);
     const auto tone = sine (440.0, kFs, n, 0.3f);
 
@@ -990,8 +992,16 @@ TEST_CASE ("ParametricEq: output is independent of the host block size (1, 7, 64
                 eq->setBand (7, makeBand (EqBandType::BandPass, 2000.0f, 0.0f, 0.5f, 12, false));
                 eq->setOutputGainDb (-3.0f);
             }
-            if (pos == 3 * event) // back to 0 dB -> band goes transparent (skipped)
+            if (pos == 3 * event) // back to 0 dB -> skipped; swap to a 0 dB bell -> skipped
+            {
                 eq->setBand (0, makeBand (EqBandType::Bell, 2500.0f, 0.0f, 0.7f));
+                eq->setBand (7, makeBand (EqBandType::Bell, 800.0f, 0.0f, 1.5f));
+            }
+            if (pos == 4 * event) // both resume from identity: stale state / swapped state
+            {
+                eq->setBand (0, makeBand (EqBandType::Bell, 2500.0f, 5.0f, 0.7f));
+                eq->setBand (7, makeBand (EqBandType::Bell, 800.0f, -6.0f, 1.5f));
+            }
             eq->process (buf.block (pos, std::min (blockSize, n - pos)));
         }
         return buf.ch;

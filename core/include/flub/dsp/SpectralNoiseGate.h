@@ -51,8 +51,43 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
-    int fftSize = 512;
+    struct ChannelState
+    {
+        std::vector<float> input;      // analysis FIFO: the last frameSize input samples, oldest first
+        std::vector<float> output;     // overlap-add accumulator; [0, hop) is the next hop's output
+        std::vector<float> power;      // P_k : bin power smoothed over ~10 ms
+        std::vector<float> noiseFloor; // N_k : bias-compensated minimum-tracked floor (~ mean noise power)
+        std::vector<float> gainDb;     // per-bin gate gain after attack / release (dB)
+        float hopPeak = 0.0f;          // max |x| of the hop being collected (digital-silence detection)
+        unsigned silentHops = 0xFu;    // one bit per hop in the analysis window: 1 = silent / before reset
+        int holdFrames = 0;            // valid frames left before the floor may adapt (P_k settling)
+        bool floorValid = false;       // a noise profile has been learned since the last reset
+    };
+
+    void updateCoefficients() noexcept;
+    void clearChannel (ChannelState& state) noexcept;
+    void processFrame (ChannelState& state) noexcept;
+
+    int fftSize = 512;                 // requested by setFftSize(), validated in prepare()
     ProcessSpec spec;
     NoiseGateParams params;
+
+    bool prepared = false;
+    int frameSize = 512, hopSize = 128, numBins = 257;
+    int numChannels = 0, activeChannels = 0;
+    int hopPos = 0;                    // samples collected in the current hop (shared by all channels)
+    int warmupFrames = 1;
+    double hopSeconds = 128.0 / 48000.0;
+
+    // Per-hop coefficients (derived from params in updateCoefficients()).
+    float powerNorm = 2.0f / 512.0f;   // 1 / sum(w^2): white noise of variance s^2 reads P_k = s^2
+    float powerCoeff = 0.0f, paramCoeff = 0.0f, attackCoeff = 0.0f, releaseCoeff = 0.0f;
+    float riseFactor = 1.0f, floorBias = 1.0f;
+    float thresholdCur = 6.0f, reductionCur = 12.0f; // hop-rate smoothed thresholdDb / reductionDb
+
+    Fft fft;
+    std::vector<float> analysisWindow, synthesisWindow, frame, gains;
+    std::vector<Fft::Complex> bins;
+    std::array<ChannelState, kMaxChannels> channels {};
 };
 } // namespace flub

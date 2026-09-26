@@ -1,0 +1,375 @@
+// Flubsound Pro - macOS implementation of PlatformServices.h (Objective-C++)
+//
+// Frameworks the app must link: Carbon (RegisterEventHotKey lives in
+// HIToolbox), AppKit (NSWorkspace) - JUCE already links AppKit/Foundation.
+//   CMake: target_link_libraries (<app> PRIVATE "-framework Carbon" "-framework AppKit")
+//
+// Kept deliberately small and conservative: per-app routing and per-process
+// capture are documented designs (see below and platform/macos/README.md)
+// that report isSupported() == false until they are implemented and tested
+// on real hardware.
+#if defined(__APPLE__)
+
+#include "PlatformServices.h"
+#include "PlatformServicesInternal.h"
+
+#import <AppKit/AppKit.h>
+#include <Carbon/Carbon.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+#include <mach/thread_policy.h>
+#include <pthread.h>
+
+#include <map>
+
+namespace flub::platform
+{
+namespace
+{
+//==============================================================================
+// GlobalHotkeys - Carbon RegisterEventHotKey
+//==============================================================================
+/*  Carbon hot keys are still the standard way to get system-wide shortcuts on
+    macOS: they need no Accessibility / Input Monitoring permission (unlike
+    CGEventTap or NSEvent global monitors) and work in sandboxed apps.
+    The handler is installed on the application event target, so
+    kEventHotKeyPressed is delivered on the main thread by the normal
+    NSApplication run loop that JUCE runs - no extra thread or loop.
+
+    Create, use and destroy this object on the main (message) thread. */
+class MacGlobalHotkeys final : public GlobalHotkeys
+{
+public:
+    MacGlobalHotkeys()
+    {
+        EventTypeSpec eventType;
+        eventType.eventClass = kEventClassKeyboard;
+        eventType.eventKind = kEventHotKeyPressed;
+
+        handlerUpp = NewEventHandlerUPP (&MacGlobalHotkeys::handleHotKeyEvent);
+        if (InstallApplicationEventHandler (handlerUpp, 1, &eventType, this, &handlerRef) != noErr)
+            handlerRef = nullptr;
+    }
+
+    ~MacGlobalHotkeys() override
+    {
+        unregisterAll();
+
+        if (handlerRef != nullptr)
+            RemoveEventHandler (handlerRef);
+        if (handlerUpp != nullptr)
+            DisposeEventHandlerUPP (handlerUpp);
+    }
+
+    bool isSupported() const override { return handlerRef != nullptr; }
+
+    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    {
+        if (handlerRef == nullptr || ! callback || ! detail::isValidChord (chord))
+            return false;
+
+        const int virtualKey = toMacVirtualKey (chord.keyCode);
+        if (virtualKey < 0)
+            return false; // e.g. F21-F24 do not exist on Mac keyboards
+
+        unregisterHotkey (id);
+
+        EventHotKeyID hotKeyId;
+        hotKeyId.signature = kSignature;
+        hotKeyId.id = nextNativeId++;
+
+        EventHotKeyRef hotKeyRef = nullptr;
+        const OSStatus status = RegisterEventHotKey (static_cast<UInt32> (virtualKey),
+                                                     toCarbonModifiers (chord.modifiers),
+                                                     hotKeyId,
+                                                     GetApplicationEventTarget(),
+                                                     0,
+                                                     &hotKeyRef);
+        if (status != noErr || hotKeyRef == nullptr)
+            return false; // eventHotKeyExistsErr: taken by another app / the system
+
+        Entry entry;
+        entry.ref = hotKeyRef;
+        entry.nativeId = hotKeyId.id;
+        entry.callback = std::move (callback);
+        entries[id] = std::move (entry);
+        return true;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        const auto it = entries.find (id);
+        if (it == entries.end())
+            return;
+
+        UnregisterEventHotKey (it->second.ref);
+        entries.erase (it);
+    }
+
+    void unregisterAll() override
+    {
+        for (auto& item : entries)
+            UnregisterEventHotKey (item.second.ref);
+        entries.clear();
+    }
+
+private:
+    struct Entry
+    {
+        EventHotKeyRef ref = nullptr;
+        UInt32 nativeId = 0;
+        std::function<void()> callback;
+    };
+
+    // 'FlbS' built arithmetically to avoid multi-character literal warnings.
+    static constexpr OSType kSignature = (OSType ('F') << 24) | (OSType ('l') << 16) | (OSType ('b') << 8) | OSType ('S');
+
+    static UInt32 toCarbonModifiers (uint32_t modifiers)
+    {
+        UInt32 flags = 0;
+        if ((modifiers & KeyChord::Ctrl) != 0)
+            flags |= controlKey;
+        if ((modifiers & KeyChord::Alt) != 0)
+            flags |= optionKey;
+        if ((modifiers & KeyChord::Shift) != 0)
+            flags |= shiftKey;
+        if ((modifiers & KeyChord::Super) != 0)
+            flags |= cmdKey;
+        return flags;
+    }
+
+    /** KeyChord codes (ASCII A-Z / 0-9, F1..F24 = 0x70..) -> kVK_* virtual key
+        codes (US ANSI positions; Carbon hot keys match physical keys). */
+    static int toMacVirtualKey (uint32_t keyCode)
+    {
+        static const int letters[26] = { kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F, kVK_ANSI_G,
+                                         kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J, kVK_ANSI_K, kVK_ANSI_L, kVK_ANSI_M, kVK_ANSI_N,
+                                         kVK_ANSI_O, kVK_ANSI_P, kVK_ANSI_Q, kVK_ANSI_R, kVK_ANSI_S, kVK_ANSI_T, kVK_ANSI_U,
+                                         kVK_ANSI_V, kVK_ANSI_W, kVK_ANSI_X, kVK_ANSI_Y, kVK_ANSI_Z };
+        static const int digits[10] = { kVK_ANSI_0, kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
+                                        kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9 };
+        static const int functionKeys[20] = { kVK_F1,  kVK_F2,  kVK_F3,  kVK_F4,  kVK_F5,  kVK_F6,  kVK_F7,
+                                              kVK_F8,  kVK_F9,  kVK_F10, kVK_F11, kVK_F12, kVK_F13, kVK_F14,
+                                              kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20 };
+
+        if (detail::isLetterKey (keyCode))
+            return letters[keyCode - 'A'];
+        if (detail::isDigitKey (keyCode))
+            return digits[keyCode - '0'];
+
+        const int fn = detail::functionKeyNumber (keyCode);
+        if (fn >= 1 && fn <= 20)
+            return functionKeys[fn - 1];
+
+        return -1;
+    }
+
+    void dispatch (UInt32 nativeId)
+    {
+        for (const auto& item : entries)
+        {
+            if (item.second.nativeId == nativeId)
+            {
+                // Copy first: the callback may unregister (and destroy) itself.
+                const auto callback = item.second.callback;
+                try
+                {
+                    callback();
+                }
+                catch (...)
+                {
+                    // Never let an exception unwind through the Carbon event dispatcher.
+                }
+                return;
+            }
+        }
+    }
+
+    static OSStatus handleHotKeyEvent (EventHandlerCallRef, EventRef event, void* userData)
+    {
+        EventHotKeyID hotKeyId;
+        hotKeyId.signature = 0;
+        hotKeyId.id = 0;
+
+        const OSStatus status = GetEventParameter (event,
+                                                   kEventParamDirectObject,
+                                                   typeEventHotKeyID,
+                                                   nullptr,
+                                                   sizeof (hotKeyId),
+                                                   nullptr,
+                                                   &hotKeyId);
+
+        if (status != noErr || hotKeyId.signature != kSignature || userData == nullptr)
+            return eventNotHandledErr;
+
+        static_cast<MacGlobalHotkeys*> (userData)->dispatch (hotKeyId.id);
+        return noErr;
+    }
+
+    EventHandlerUPP handlerUpp = nullptr;
+    EventHandlerRef handlerRef = nullptr;
+    UInt32 nextNativeId = 1;
+    std::map<int, Entry> entries;
+};
+
+//==============================================================================
+// AppAudioRouter - not available yet on macOS
+//==============================================================================
+/*  macOS has no per-application output device setting at all, so "routing" an
+    app means capturing it with a Core Audio process tap that mutes it on its
+    normal output while tapped (see ProcessLoopbackCapture below):
+
+      1. List audio clients: kAudioHardwarePropertyProcessObjectList (macOS 14+)
+         -> per AudioObjectID: kAudioProcessPropertyPID, ...BundleID,
+         ...IsRunningOutput (-> AudioSessionInfo.isActive).
+      2. "Route to strip X" = start a tap with muteBehavior =
+         CATapMutedWhenTapped and feed its frames into strip X of the MixEngine.
+         The app keeps playing to the system default device as far as it
+         knows, but only Flubsound's processed copy is audible.
+      3. "Restore" = destroy the tap (the process is unmuted automatically).
+
+    Alternatively users can pick "Flubsound Game" (Audio Server Plug-in,
+    platform/macos) as the output inside apps that have their own device menu.
+    Until the tap path is implemented and validated this reports
+    isSupported() == false and opens the Sound settings. */
+class MacAppAudioRouter final : public AppAudioRouter
+{
+public:
+    bool isSupported() const override { return false; }
+    std::vector<AudioSessionInfo> enumerateSessions() override { return {}; }
+
+    bool setAppEndpoint (uint32_t, const std::string&, std::string& error) override
+    {
+        error = "macOS has no per-application output setting. Choose \"Flubsound\" as the output device inside the "
+                "application, or use a Flubsound device as the system output.";
+        return false;
+    }
+
+    void openSystemRoutingSettings() override
+    {
+        @autoreleasepool
+        {
+            // Opens System Settings > Sound (System Preferences before macOS 13).
+            NSURL* url = [NSURL URLWithString: @"x-apple.systempreferences:com.apple.preference.sound"];
+            if (url != nil)
+                [[NSWorkspace sharedWorkspace] openURL: url];
+        }
+    }
+};
+
+//==============================================================================
+// ProcessLoopbackCapture - design only (Core Audio process taps, macOS 14.2+)
+//==============================================================================
+/*  Planned implementation (not written yet because it cannot be tested
+    without macOS 14.2+ hardware and a TCC grant):
+
+      1. pid -> process object: AudioObjectGetPropertyData on
+         kAudioObjectSystemObject with kAudioHardwarePropertyTranslatePIDToProcessObject.
+      2. CATapDescription* tap = [[CATapDescription alloc]
+             initStereoMixdownOfProcesses: @[ @(processObject) ]]
+         (or initWithProcesses:andDeviceUID:withStream: for multichannel;
+          exclusive = YES with an empty list + our own pid gives "everything but
+          Flubsound", the equivalent of Windows' EXCLUDE mode);
+         tap.privateTap = YES; tap.muteBehavior = CATapMutedWhenTapped;
+         includeProcessTree: add the child processes' objects as well
+         (Core Audio has no process-tree flag).
+      3. AudioHardwareCreateProcessTap (tap, &tapObjectID).
+      4. Private aggregate device containing only the tap:
+         AudioHardwareCreateAggregateDevice with
+           kAudioAggregateDeviceIsPrivateKey = 1,
+           kAudioAggregateDeviceTapListKey = @[ @{ kAudioSubTapUIDKey: tap.UUID.UUIDString,
+                                                   kAudioSubTapDriftCompensationKey: @YES } ],
+           kAudioAggregateDeviceTapAutoStartKey = 1,
+           main sub-device = the current output device (clock source).
+      5. Read the format from kAudioTapPropertyFormat, then
+         AudioDeviceCreateIOProcIDWithBlock + AudioDeviceStart on the aggregate;
+         the IO block converts to interleaved float if needed and calls the
+         FrameCallback (RT-safe, same contract as on Windows).
+      6. stop(): AudioDeviceStop, AudioDeviceDestroyIOProcID,
+         AudioHardwareDestroyAggregateDevice, AudioHardwareDestroyProcessTap.
+
+    Requirements: NSAudioCaptureUsageDescription in Info.plist (the user is
+    asked for "System Audio Recording" permission on first use), hardened
+    runtime, macOS 14.2+ (check with @available). */
+class MacProcessLoopbackCapture final : public ProcessLoopbackCapture
+{
+public:
+    bool isSupported() const override { return false; }
+
+    bool start (uint32_t, bool, double, int, FrameCallback, std::string& error) override
+    {
+        error = "Per-application capture on macOS (Core Audio process taps) is not available in this version.";
+        return false;
+    }
+
+    void stop() override {}
+    bool isRunning() const override { return false; }
+};
+
+// Non-null token returned by promoteAudioThread on success.
+char timeConstraintToken = 0;
+} // namespace
+
+//==============================================================================
+// SystemTuning
+//==============================================================================
+bool SystemTuning::disablePowerThrottling()
+{
+    // No-op: macOS has no EcoQoS-style switch for a process. App Nap does not
+    // throttle a process while Core Audio IO is running, and real-time audio
+    // threads use the time-constraint policy below (or, better, join the
+    // device's os_workgroup - kAudioDevicePropertyIOThreadOSWorkgroup - which
+    // JUCE exposes via AudioWorkgroup, so Apple Silicon keeps them on P-cores).
+    return true;
+}
+
+void* SystemTuning::promoteAudioThread()
+{
+    /*  Mach time-constraint ("real-time") policy. Without knowing the caller's
+        buffer size we describe a typical 256-frame / 48 kHz cycle: period
+        5.33 ms, up to half of it for computation, finished within the period.
+        Values are converted from nanoseconds to Mach absolute time units
+        (1 ns on Intel, 125/3 ns per tick on Apple Silicon). */
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info (&timebase) != KERN_SUCCESS || timebase.numer == 0 || timebase.denom == 0)
+        return nullptr;
+
+    const auto msToAbsolute = [&timebase] (double ms)
+    { return static_cast<uint32_t> (ms * 1.0e6 * static_cast<double> (timebase.denom) / static_cast<double> (timebase.numer)); };
+
+    constexpr double periodMs = 256.0 * 1000.0 / 48000.0;
+
+    thread_time_constraint_policy_data_t policy;
+    policy.period = msToAbsolute (periodMs);
+    policy.computation = msToAbsolute (periodMs * 0.5);
+    policy.constraint = msToAbsolute (periodMs);
+    policy.preemptible = 1;
+
+    const kern_return_t result = thread_policy_set (pthread_mach_thread_np (pthread_self()),
+                                                    THREAD_TIME_CONSTRAINT_POLICY,
+                                                    reinterpret_cast<thread_policy_t> (&policy),
+                                                    THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+
+    return result == KERN_SUCCESS ? &timeConstraintToken : nullptr;
+}
+
+void SystemTuning::revertAudioThread (void* handle)
+{
+    if (handle == nullptr)
+        return;
+
+    thread_standard_policy_data_t standard;
+    standard.no_data = 0;
+    thread_policy_set (pthread_mach_thread_np (pthread_self()),
+                       THREAD_STANDARD_POLICY,
+                       reinterpret_cast<thread_policy_t> (&standard),
+                       THREAD_STANDARD_POLICY_COUNT);
+}
+
+//==============================================================================
+std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<MacGlobalHotkeys>(); }
+std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<MacAppAudioRouter>(); }
+std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<MacProcessLoopbackCapture>(); }
+} // namespace flub::platform
+
+#endif // __APPLE__
