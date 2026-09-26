@@ -4,7 +4,7 @@
 # ON. The desktop app's own sources (everything but Main.cpp, plus the
 # platform services when present) are compiled into this console executable
 # with the FlubsoundPro target's compile definitions, include directories,
-# link libraries and per-source warning flags, so the tests exercise the code
+# link libraries and per-source flags, so the tests exercise the code
 # the app runs. No audio device, window or display is needed: the device
 # callback is driven with a fake juce::AudioIODevice, per-app routing with a
 # fake platform::AppAudioRouter, and the views are used without a peer.
@@ -33,14 +33,18 @@ target_include_directories(flub_app_tests PRIVATE ${FLUB_APP_TEST_INCLUDES} "${P
 # CMAKE_DL_LIBS: dlsym for the lock counter in AppTestMain.cpp (Linux).
 target_link_libraries(flub_app_tests PRIVATE ${FLUB_APP_TEST_LIBRARIES} ${CMAKE_DL_LIBS})
 
-# The app's and the platform's sources keep the warning flags their owners
-# set in app/ (source properties are per directory); JUCE's module sources,
-# also compiled into this target, get none.
+# The app's and the platform's sources keep the warning flags and the
+# per-source definitions (e.g. FLUB_ENABLE_UNDOCUMENTED_ROUTING on
+# PlatformServices_win.cpp) their owners set in app/ (source properties are
+# per directory); JUCE's module sources, also compiled into this target, get
+# none.
 foreach(source IN LISTS FLUB_APP_TEST_APP_SOURCES FLUB_PLATFORM_SOURCES)
-    get_source_file_property(options "${source}" DIRECTORY "${FLUB_APP_DIR}" COMPILE_OPTIONS)
-    if(options)
-        set_source_files_properties("${source}" PROPERTIES COMPILE_OPTIONS "${options}")
-    endif()
+    foreach(property IN ITEMS COMPILE_OPTIONS COMPILE_DEFINITIONS)
+        get_source_file_property(value "${source}" DIRECTORY "${FLUB_APP_DIR}" ${property})
+        if(value)
+            set_source_files_properties("${source}" PROPERTIES ${property} "${value}")
+        endif()
+    endforeach()
 endforeach()
 
 # The tests themselves: the app's warning set (JUCE's headers are not clean

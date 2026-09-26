@@ -4,6 +4,7 @@
 //   Windows : %APPDATA%\Flubsound
 //   macOS   : ~/Library/Application Support/Flubsound (via JUCE's app data dir)
 //   Linux   : $XDG_CONFIG_HOME/Flubsound, else ~/.config/Flubsound
+//   any OS  : $FLUB_USER_DATA_DIR when set to an absolute path
 // Header-only so the plug-in can use it without linking the app sources.
 #pragma once
 
@@ -15,6 +16,11 @@ namespace flub::app
 {
 inline juce::File userDataFolder()
 {
+    // Explicit override on every OS (tests, portable installs): an absolute
+    // path used as-is instead of <OS default>/Flubsound.
+    if (const char* dir = std::getenv ("FLUB_USER_DATA_DIR"); dir != nullptr && juce::File::isAbsolutePath (juce::String::fromUTF8 (dir)))
+        return juce::File (juce::String::fromUTF8 (dir));
+
    #if JUCE_LINUX || JUCE_BSD
     // JUCE 9 resolves userApplicationDataDirectory from ~/.config/user-dirs.dirs
     // and never reads the XDG_CONFIG_HOME environment variable. The XDG Base

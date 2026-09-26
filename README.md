@@ -11,7 +11,7 @@
 - 🎧 **Works with any headset or speakers** the OS can play to: 3.5 mm, USB, 2.4 GHz dongles, Xbox Wireless and Bluetooth, including **every Turtle Beach headset** on a Windows, macOS or Linux computer. Device profiles recognise Turtle Beach families and apply connection-specific safety (a −2 dBTP ceiling on Bluetooth A2DP, −3 dBTP in hands-free mode) and setup advice ([docs/10](docs/10-headset-compatibility.md)).
 - 🧩 **Per-app profiles and routing:** four strips (Game 7.1, Music, Chat, System), each with its own profile. They are fed by PipeWire null sinks on Linux, by per-process loopback capture on Windows 10 build 20348+ / Windows 11, or by any virtual cable. Plus a system tray, global hotkeys (Windows, macOS, Linux under X11), factory presets, a batch CLI and a VST3/AU/Standalone plug-in.
 
-> Status: the complete engine, DSP and application foundation is implemented and tested (see `docs/07-roadmap.md`). The remaining productisation steps are the signed Windows virtual driver and the macOS HAL plug-in with process-tap capture (both designed in `platform/`, not yet built), global hotkeys in Wayland sessions (X11 works), and scale QA.
+> Status: the complete engine, DSP and application foundation is implemented and tested (see `docs/07-roadmap.md`). The remaining productisation steps are the signed Windows virtual driver and the macOS HAL plug-in with process-tap capture (both designed in `platform/`, not yet built), and scale QA.
 
 ![Flubsound Pro in Gaming mode with the headset advice banner](docs/images/app-gaming-headset-advice.png)
 
@@ -69,6 +69,7 @@ ctest --test-dir build --output-on-failure
 # Desktop app and plug-in (fetches JUCE 9.0.2; use -DFETCHCONTENT_SOURCE_DIR_JUCE=... for a local copy)
 cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON
 cmake --build build-app
+ctest --test-dir build-app --output-on-failure   # flub_tests + the app-level flub_app_tests: no audio device or display needed
 ```
 
 Linux packages for the app build: `libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev` (CI also installs `libgl1-mesa-dev`, and `xvfb` for the headless screenshots; `libxi-dev` is optional and enables JUCE's XInput2 support).
@@ -80,6 +81,7 @@ Useful options:
 |---|---|---|
 | `FLUB_BUILD_TESTS` / `FLUB_BUILD_TOOLS` | ON | Unit tests / `flubsound-cli` |
 | `FLUB_BUILD_APP` / `FLUB_BUILD_PLUGIN` | OFF | JUCE desktop app / VST3 + Standalone plug-in (+ AU on macOS) |
+| `FLUB_BUILD_APP_TESTS` | ON | With `FLUB_BUILD_APP`: also build `flub_app_tests` (`tests/app/`), the app-level tests of the device callback, headset ceiling cap, meters and per-app routing |
 | `FLUB_SANITIZE` | OFF | AddressSanitizer + UndefinedBehaviorSanitizer (GCC / Clang only) |
 | `FLUB_RTSAN` | OFF | Clang RealtimeSanitizer (Clang ≥ 20 required, else configure fails): the audio entry points (`ProcessingChain::process`, `MixEngine::process`, every `Processor::process` override) become `[[clang::nonblocking]]` and abort on allocation, locks or blocking calls. CI job `rtsan` runs the full test suite this way |
 | `FLUB_WARNINGS_AS_ERRORS` | OFF | `-Werror` / `/WX` (CI uses it for the Linux core builds) |

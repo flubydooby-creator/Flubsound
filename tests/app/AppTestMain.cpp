@@ -9,9 +9,9 @@
 //   * Linux / glibc: pthread_mutex_lock / _trylock are interposed and counted
 //     per thread, so a probe also sees juce::CriticalSection, std::mutex and
 //     any other pthread mutex taken on the probed thread;
-//   * Linux: XDG_CONFIG_HOME points at a temporary folder, so the app's user
-//     data folder (user presets, device-profile override) is empty and the
-//     real user's files are never read or written.
+//   * FLUB_USER_DATA_DIR (and XDG_CONFIG_HOME on Linux) point at a temporary
+//     folder, so the app's user data folder (user presets, device-profile
+//     override) is empty and the real user's files are never read or written.
 #include "AppTestSupport.h"
 
 #include <juce_events/juce_events.h>
@@ -148,8 +148,14 @@ int main (int argc, char** argv)
 
     juce::ScopedJuceInitialiser_GUI juceInitialiser; // this thread becomes the message thread
 
-   #if JUCE_LINUX || JUCE_BSD
+    // The app's user data folder (settings, user presets, device-profile
+    // override) points at a temporary folder on every OS.
     const flubapptest::TempFolder configHome;
+    const auto dataDir = configHome.file ("Flubsound").getFullPathName();
+   #if JUCE_WINDOWS
+    _wputenv_s (L"FLUB_USER_DATA_DIR", dataDir.toWideCharPointer());
+   #else
+    setenv ("FLUB_USER_DATA_DIR", dataDir.toRawUTF8(), 1);
     setenv ("XDG_CONFIG_HOME", configHome.file ("config").getFullPathName().toRawUTF8(), 1);
    #endif
 

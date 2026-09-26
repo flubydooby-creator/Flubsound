@@ -38,6 +38,7 @@
 | `cmake/` | Shared compiler settings (INTERFACE target) and the JUCE `FetchContent` declaration | `flub_compiler_settings` (`flub::compiler_settings`) | yes | — |
 | `core/` | DSP primitives, DSP modules, analysis, engine, presets and file I/O | `flub_core` (`flub::core`), STATIC | yes | C++ standard library, `Threads::Threads` |
 | `tests/` | Self-registering unit tests plus an allocation-counting `operator new` | `flub_tests` (one CTest test, `flub_tests`) | yes (`FLUB_BUILD_TESTS=ON`) | `flub_core` |
+| `tests/app/` | App-level tests: the app's own sources with a fake audio device, a fake per-app router and headless views | `flub_app_tests` (one CTest test, `flub_app_tests`) | with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`) | `flub_core`, JUCE 9.0.2, the app's sources |
 | `tools/flubsound-cli/` | Batch processor, loudness analyser, parameter and preset browser | `flubsound-cli` | yes (`FLUB_BUILD_TOOLS=ON`) | `flub_core` |
 | `tools/scripts/` | Generator for the embedded device-profile database | — (run by hand) | — | Python 3 |
 | `app/` | JUCE desktop app: engine host, GUI, tray, hotkeys, presets, settings, platform services | `FlubsoundPro`, `FlubsoundPresets` (BinaryData) | no (`FLUB_BUILD_APP=OFF`) | `flub_core`, JUCE 9.0.2, OS SDKs |
@@ -65,7 +66,7 @@ Flubsound/
 ├── .gitignore                              build trees, IDE folders, *.wav (except presets/**/*.wav), /renders/
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                          jobs: core (4 compilers), sanitizers (ASan+UBSan), rtsan (Clang 20), app + plugin (3 OSes, headless screenshots)
+│       └── ci.yml                          jobs: core (4 compilers), sanitizers (ASan+UBSan), rtsan (Clang 20), app + plugin (3 OSes, flub_app_tests, headless screenshots)
 │
 ├── cmake/
 │   ├── FlubCompilerSettings.cmake          INTERFACE target flub_compiler_settings: warnings, -Werror, sanitizers, RTSan
@@ -160,6 +161,14 @@ Flubsound/
 │   ├── TestFramework.h                     TEST_CASE / CHECK / REQUIRE / CHECK_NEAR / CHECK_LE / CHECK_GE, AllocationGuard
 │   ├── TestMain.cpp                        runner (substring filter, exit code = failed cases), counting global operator new
 │   ├── TestSignals.h                       sine / whiteNoise / rms / peakAbs / toDb / measureGainDb helpers, Planar buffer, processInBlocks
+│   ├── app/                                flub_app_tests (added by app/CMakeLists.txt): the app's sources except Main.cpp, JUCE, no device or display
+│   │   ├── CMakeLists.txt                  juce_add_console_app; copies FlubsoundPro's definitions, includes, link libraries and per-source warning flags / definitions
+│   │   ├── AppTestMain.cpp                 runner under juce::ScopedJuceInitialiser_GUI; per-thread counting operator new / delete; Linux: counting pthread_mutex_lock / _trylock
+│   │   ├── AppTestSupport.h                RealtimeProbe (allocations, frees, locks on the calling thread), pumpMessagesUntil, TempFolder
+│   │   ├── test_app_realtime.cpp           AudioEngineHost's device callback with a fake AudioIODevice (48 kHz / 256): no allocation, free or lock per block
+│   │   ├── test_app_headset_cap.cpp        EngineController::simulateOutputDevice -> master ceiling -2 (Bluetooth) / -3 (hands-free) / -1 dBTP, measured on the output
+│   │   ├── test_app_meters.cpp             SpectrumAnalyzer calibration, AnalyzerFeed, LevelMeters RMS / peak, correlation, WaveformHistory, LoudnessPanel
+│   │   └── test_app_routing.cpp            AppRouting with a fake AppAudioRouter: session -> strip mapping, endpoint moves, captures, errors, persistence
 │   ├── test_primitives.cpp                 Svf, Biquad, LR4, ThreeBandSplitter, Oversampler, TruePeakDetector, Fft, SpscRing, DelayLine, OnePoleSmoother
 │   ├── test_parametric_eq.cpp              ParametricEq
 │   ├── test_dynamic_eq.cpp                 DynamicEq
@@ -187,7 +196,7 @@ Flubsound/
 │   ├── test_driver_shared.cpp              platform/windows/driver/FlubVirtualAudioShared.h: constants, IOCTL codes, ring index maths, Generation lock, C vs C++ layout
 │   ├── test_driver_shared_c.c              the same header compiled as strict C89 (GCC / Clang only); layout table for test_driver_shared.cpp
 │   ├── test_rtsan.cpp                      FLUB_RTSAN builds only: nonblocking annotations present, RTSan self-test
-│   └── test_platform_linux.cpp             Linux only: #includes app/Source/platform/PlatformServices_{common,linux}.cpp (incl. the XDG autostart entry)
+│   └── test_platform_linux.cpp             Linux only: #includes app/Source/platform/PlatformServices_{common,linux}.cpp (incl. the XDG autostart entry and Wayland hotkeys against a mock GlobalShortcuts portal on a private dbus-daemon)
 │
 ├── tools/
 │   ├── flubsound-cli/                      flubsound-cli: JUCE-free, links flub::core only
@@ -203,7 +212,7 @@ Flubsound/
 │       └── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
 │
 ├── app/                                    FlubsoundPro: the JUCE desktop application
-│   ├── CMakeLists.txt                      juce_add_gui_app, explicit FLUB_APP_SOURCES, platform detection, BinaryData presets, JUCE flags
+│   ├── CMakeLists.txt                      juce_add_gui_app, explicit FLUB_APP_SOURCES, platform detection, BinaryData presets, JUCE flags; adds tests/app (FLUB_BUILD_APP_TESTS)
 │   └── Source/                             include root of the app ("engine/EngineController.h", ...)
 │       ├── Main.cpp                        START_JUCE_APPLICATION (flub::app::FlubsoundApplication)
 │       ├── FlubsoundApplication.{h,cpp}    JUCEApplication: start-up order, command line, headless --screenshot mode, lifetime
@@ -211,7 +220,7 @@ Flubsound/
 │       │   ├── AudioEngineHost.{h,cpp}     juce::AudioDeviceManager, device callback, MixEngine owner, capture FIFO slots
 │       │   ├── DriftCompensatedFifo.{h,cpp} capture-clock → device-clock bridge: SPSC ring, cubic Hermite resampler, PI loop
 │       │   ├── EngineController.{h,cpp}    the façade the UI talks to: strips, parameters, presets, device, routing, advice
-│       │   ├── AppRouting.{h,cpp}          executable → strip map; endpoint routing or per-process capture
+│       │   ├── AppRouting.{h,cpp}          executable → strip map; endpoint routing or per-process capture (a second constructor injects the router)
 │       │   └── TestSignalGenerator.{h,cpp} deterministic synthetic music / 7.1 game scene (screenshots, demos)
 │       ├── presets/
 │       │   └── PresetManager.{h,cpp}       factory presets from BinaryData, user presets (*.flubpreset.json), strip glue
@@ -223,7 +232,7 @@ Flubsound/
 │       │   ├── PlatformServices_common.cpp KeyChord formatting / validation, "unsupported" fallbacks for other OSes
 │       │   ├── PlatformServices_win.cpp    Windows: Win32/COM only (hotkeys, sessions, process loopback, MMCSS, EcoQoS)
 │       │   ├── PlatformServices_mac.mm     macOS: Carbon hotkeys, transport type, time-constraint thread policy
-│       │   ├── PlatformServices_linux.cpp  Linux: X11 hotkeys (XGrabKey, libX11 via dlopen), pactl-based routing to the null sinks, SCHED_FIFO tuning
+│       │   ├── PlatformServices_linux.cpp  Linux: X11 hotkeys (XGrabKey, libX11 via dlopen), Wayland hotkeys (GlobalShortcuts portal, libdbus-1 via dlopen), pactl-based routing to the null sinks, SCHED_FIFO tuning
 │       │   ├── PlatformServices.cmake      link libraries, FLUB_ENABLE_UNDOCUMENTED_ROUTING, warning flags for the files above
 │       │   └── PlatformBridge.{h,cpp}      the only access point for the rest of the app; nullptr / no-op without services
 │       ├── shell/                          top-level windows and OS-facing shell
@@ -328,6 +337,7 @@ flowchart TB
         PLG["plugin/ → FlubsoundFX"]
         CLI["tools/flubsound-cli → flubsound-cli"]
         TST["tests/ → flub_tests"]
+        TAPP["tests/app → flub_app_tests"]
     end
     CORE["core/ → flub_core<br/>C++20 + standard library only"]
     JUCE[("JUCE 9.0.2<br/>(FetchContent)")]
@@ -343,6 +353,7 @@ flowchart TB
     APP -->|"app/Source/platform only"| OSSDK
     TST -.->|"test_platform_linux.cpp compiles the Linux platform sources"| OSSDK
     TST -.->|"test_offline_render.cpp compiles the CLI sources"| CLI
+    TAPP -.->|"compiles the app's sources (not Main.cpp)"| APP
     APP -.->|"BinaryData at build time"| DATA
     CLI -.->|"looked up at run time"| DATA
     TST -.->|"FLUB_PRESET_DIR / FLUB_DEVICE_PROFILES"| DATA
@@ -352,6 +363,7 @@ flowchart TB
 |---|---|---|
 | `core/` | The C++ standard library. `<xmmintrin.h>` in `common/Denormals.h`, x86 only (a CPU intrinsic header, not an OS header). `<fstream>` / `<filesystem>` only in non-real-time code (`io/FilePath.h`, `io/WavFile.cpp`, `io/PresetIO.cpp`, `engine/DeviceProfiles.cpp`); every path those files open is a UTF-8 `std::string` converted by `io/FilePath.h`, so non-ASCII paths work with MSVC too (test *WavFile: UTF-8 paths with non-ASCII characters round trip on every platform*). | JUCE, any OS header, any third-party library, anything from `app/`, `plugin/`, `tools/`, `tests/` |
 | `tests/` | `core/include/flub/**`, `TestFramework.h`, `TestSignals.h`. **Exceptions:** `test_platform_linux.cpp` `#include`s `app/Source/platform/PlatformServices_common.cpp` and `PlatformServices_linux.cpp`, guarded by `#if defined(__linux__)`, to test functions in an unnamed namespace; `test_drift_fifo.cpp` `#include`s `app/Source/engine/DriftCompensatedFifo.cpp` (JUCE-free, core headers only) on every OS; `test_rtsan.cpp` uses POSIX `fork()` / `waitpid()`, only in `FLUB_RTSAN` builds on Linux and macOS; `test_driver_shared.cpp` and `test_driver_shared_c.c` include `platform/windows/driver/FlubVirtualAudioShared.h` (plain C, no Windows headers outside kernel mode) on every OS; `test_offline_render.cpp` includes the `tools/flubsound-cli` headers, and `tests/CMakeLists.txt` compiles that folder's sources except `main.cpp` into `flub_tests` on every OS (independent of `FLUB_BUILD_TOOLS`). | JUCE |
+| `tests/app/` | Everything `app/Source/` may use, the app's own headers, `TestFramework.h`. Fakes stand in for the audio device (`juce::AudioIODevice`), the per-app router (`platform::AppAudioRouter`, through `AppRouting`'s injecting constructor) and captures (`AudioEngineHost::setCaptureFactory`). `AppTestMain.cpp` interposes `pthread_mutex_lock` / `_trylock` on Linux / glibc only (`dlsym (RTLD_NEXT)`). | `plugin/`, `tools/`; opening a real audio device or a window |
 | `tools/flubsound-cli/` | `flub::core`, its own files, `std::thread` (`batch --jobs N`). `<windows.h>` / `<mach-o/dyld.h>` in `FactoryPresets.cpp`, only to find the executable's own path; `<windows.h>` / `<shellapi.h>` in `Utf8Windows.h`, only for UTF-8 argv, environment and console on Windows. | JUCE, `app/`, `plugin/` |
 | `plugin/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_processors`, `juce_gui_basics` | `app/` (the shared custom editor is roadmap item 2.9) |
 | `app/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_devices`, `juce_dsp`, `juce_gui_extra`; OS SDKs in `platform/` only | `plugin/`, `tools/` |
@@ -426,6 +438,7 @@ Rules that follow from this:
 | `flub_tests` | executable + CTest test `flub_tests` | `tests/CMakeLists.txt` | `file(GLOB … CONFIGURE_DEPENDS "*.cpp")`, plus `test_driver_shared_c.c` compiled with `-std=c89` except on MSVC, and the `tools/flubsound-cli` sources except `main.cpp` | `flub::core`, `flub::compiler_settings`; `shell32` on Windows | `build/tests/flub_tests` | `FLUB_BUILD_TESTS=ON` |
 | `flubsound-cli` | executable (+ `install`) | `tools/flubsound-cli/CMakeLists.txt` | explicit `FLUB_CLI_SOURCES` | `flub::core`, `flub::compiler_settings`, `Threads::Threads`; `shell32` on Windows (`CommandLineToArgvW`) | `build/tools/flubsound-cli/flubsound-cli` | `FLUB_BUILD_TOOLS=ON` |
 | `FlubsoundPro` | `juce_add_gui_app` (product "Flubsound Pro", bundle id `com.flubsound.pro`) | `app/CMakeLists.txt` | explicit `FLUB_APP_SOURCES` + the detected platform sources | `flub::core`, `FlubsoundPresets`, `juce_audio_utils`, `juce_audio_devices`, `juce_dsp`, `juce_gui_extra`, `juce_recommended_config_flags`; OS libraries (§8) | `build/app/FlubsoundPro_artefacts/<config>/Flubsound Pro` | `FLUB_BUILD_APP=ON` |
+| `flub_app_tests` | `juce_add_console_app` + CTest test `flub_app_tests` | `tests/app/CMakeLists.txt`, added at the end of `app/CMakeLists.txt` | `file(GLOB … CONFIGURE_DEPENDS "*.cpp")` in `tests/app/`, plus `FLUB_APP_SOURCES` except `Main.cpp` and the detected platform sources | whatever `FlubsoundPro` links (copied from its `LINK_LIBRARIES`, so the platform libraries of `PlatformServices.cmake` too), `${CMAKE_DL_LIBS}`; `FlubsoundPro`'s compile definitions and include directories plus `JUCE_MODAL_LOOPS_PERMITTED=1` | `build/tests/app/flub_app_tests_artefacts/<config>/flub_app_tests` | `FLUB_BUILD_APP=ON` **and** `FLUB_BUILD_APP_TESTS=ON` |
 | `FlubsoundPresets` | `juce_add_binary_data` (namespace `FlubsoundPresetData`, header `FlubsoundPresetData.h`) | `app/CMakeLists.txt` | sorted `${FLUB_FACTORY_PRESET_DIR}/*.json` | — | `build/app/libFlubsoundPresets.a` | `FLUB_BUILD_APP=ON` **and** at least one preset found |
 | `FlubsoundFX` (shared code) + `FlubsoundFX_VST3`, `FlubsoundFX_Standalone`, `FlubsoundFX_AU` (macOS), `FlubsoundFX_All` | `juce_add_plugin` (manufacturer `Flub`, code `FlFx`, bundle id `com.flubsound.fx`) | `plugin/CMakeLists.txt` | explicit `FLUB_PLUGIN_SOURCES` + headers | `flub::core`, `juce_audio_utils`, `juce_audio_processors`, `juce_gui_basics`, `juce_recommended_config_flags` | `build/plugin/FlubsoundFX_artefacts/<config>/{VST3,Standalone,AU}` | `FLUB_BUILD_PLUGIN=ON` |
 
@@ -445,6 +458,7 @@ Notes:
 | `FLUB_BUILD_TOOLS` | `ON` | root | — | `tools/flubsound-cli/` |
 | `FLUB_BUILD_APP` | `OFF` | root | — | includes `cmake/FlubJuce.cmake` (fetches JUCE), adds `app/` |
 | `FLUB_BUILD_PLUGIN` | `OFF` | root | — | includes `cmake/FlubJuce.cmake`, adds `plugin/` |
+| `FLUB_BUILD_APP_TESTS` | `ON` | root | only with `FLUB_BUILD_APP=ON` | `enable_testing()` + `tests/app/` (`flub_app_tests`). It compiles the app's sources and JUCE a second time, so turn it off for a faster app-only build. |
 | `FLUB_WARNINGS_AS_ERRORS` | `OFF` | root | targets linking `flub::compiler_settings` | `-Werror` / `/WX` |
 | `FLUB_SANITIZE` | `OFF` | root | same; GCC/Clang only (ignored on MSVC) | `-fsanitize=address,undefined -fno-omit-frame-pointer` (compile + link) |
 | `FLUB_RTSAN` | `OFF` | root | same; configure fails unless the C++ compiler is Clang ≥ 20, and with `FLUB_SANITIZE` or `FLUB_BUILD_PLUGIN` | defines `FLUB_RTSAN=1`, so `FLUB_NONBLOCKING` (`common/Realtime.h`) marks `ProcessingChain::process`, `MixEngine::process` and every `Processor::process` override `[[clang::nonblocking]]`; `-fsanitize=realtime` (compile + link) and `-Wno-function-effects` (C++ only). CI job `rtsan`. |
@@ -457,6 +471,8 @@ Notes:
 **Scope of `flub::compiler_settings`.** Only `flub_core`, `flub_tests` and `flubsound-cli` link it, so `FLUB_WARNINGS_AS_ERRORS`, `FLUB_SANITIZE` and `FLUB_RTSAN` apply to those three targets. The app and the plug-in compile JUCE module sources inside their own targets. They therefore set warnings per source file, on their own translation units only:
 - app and plug-in sources: `-Wall -Wextra -Wshadow -Wno-sign-conversion`, or `/W4 /permissive- /utf-8` on MSVC;
 - platform sources (`PlatformServices.cmake`): the same plus `-Wconversion`.
+
+`flub_app_tests` compiles the app's and the platform's sources with the flags above (copied from the `app/` directory's source properties), and its own `tests/app/*.cpp` with the app set, plus `-Werror` / `/WX` when `FLUB_WARNINGS_AS_ERRORS` is on. JUCE's headers are not clean under `-Wconversion` / `-Wpedantic`, so the core's strict set is not used there.
 
 **Compiler settings (`cmake/FlubCompilerSettings.cmake`).**
 
@@ -496,6 +512,7 @@ ctest --test-dir build --output-on-failure          # or: ./build/tests/flub_tes
 # Desktop app + plug-in (fetches JUCE 9.0.2 unless FETCHCONTENT_SOURCE_DIR_JUCE is given)
 cmake -S . -B build-app -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON
 cmake --build build-app
+ctest --test-dir build-app -R flub_app_tests --output-on-failure   # or: build-app/tests/app/flub_app_tests_artefacts/Release/flub_app_tests "App: AppRouting"
 
 # What CI's sanitizer job runs
 cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++ \
@@ -774,7 +791,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
 
 ## 7. Test layout
 
-- **One executable, one CTest entry.** `tests/CMakeLists.txt` globs every `tests/*.cpp` into `flub_tests` and registers it as the single CTest test `flub_tests`. `ctest` therefore reports one test. For per-case output run the binary directly:
+- **One executable, one CTest entry.** `tests/CMakeLists.txt` globs every `tests/*.cpp` into `flub_tests` and registers it as the single CTest test `flub_tests`. `ctest` therefore reports one test (two in an app build, which adds `flub_app_tests`, below). For per-case output run the binary directly:
 
   ```
   ./build/tests/flub_tests                     # all cases
@@ -795,15 +812,20 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_transparency.cpp`: top-octave droop of the oversampled stages;
   - `test_factory_presets.cpp`: validation and render of every preset;
   - `test_device_profiles.cpp`: the profile database and the drift check of the embedded copy;
-  - `test_platform_linux.cpp`: Linux platform services, with no sound server needed (the XDG autostart cases point `XDG_CONFIG_HOME` / `HOME` at a temporary folder and restore them); the X11 global-hotkey case needs an X display and `libXtst` (CI: `xvfb-run` in the `sanitizers` job) and is skipped without them, the rest run headless; compiles to nothing on other OSes;
+  - `test_platform_linux.cpp`: Linux platform services, with no sound server needed (the XDG autostart cases point `XDG_CONFIG_HOME` / `HOME` at a temporary folder and restore them); the X11 global-hotkey case needs an X display and `libXtst` (CI: `xvfb-run` in the `sanitizers` job) and is skipped without them; the Wayland global-hotkey cases start their own `dbus-daemon` with a mock GlobalShortcuts portal (never the machine's session bus) and are skipped without `dbus-daemon` or libdbus-1; the rest run headless; compiles to nothing on other OSes;
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
   - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), LoudnessMatch as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
+- **App-level tests (`tests/app/`, `flub_app_tests`).** A second executable, built only with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`), that compiles the app's own sources except `Main.cpp` and uses the same `TestFramework.h` registry, runner output and substring filter; every case name starts with `App:`. It needs no audio device and no display (it also runs under `xvfb-run -a`) and takes about a second. Its runner initialises JUCE once (`juce::ScopedJuceInitialiser_GUI`, no window), so the test thread is the message thread, and points `FLUB_USER_DATA_DIR` (plus `XDG_CONFIG_HOME` on Linux) at a temporary folder on every OS, so the user's settings, presets and device-profile override are never read or written. `flubapptest::RealtimeProbe` counts allocations, frees and (Linux / glibc) `pthread_mutex_lock` / `_trylock` calls on the calling thread only.
+  - `test_app_realtime.cpp`: the host is started with a fake `juce::AudioIODevice` (48 kHz / 256) as JUCE starts it, then 600 probed callbacks run on a separate "device" thread with 8 device inputs on the 7.1 strip, a fake per-app capture through the `DriftCompensatedFifo` (including an underrun and re-prime), gain / mute / ceiling / parameter changes, and the UI draining the analyser taps between blocks; a self-check proves the probe counts;
+  - `test_app_headset_cap.cpp`: headless `EngineController::simulateOutputDevice` for a Bluetooth, a hands-free and a wired device name: the master ceiling applied is −2 / −3 / −1 dBTP, and a mix pushed about 11 dB over full scale leaves the engine at that ceiling;
+  - `test_app_meters.cpp`: `SpectrumAnalyzer` band levels (a 1 kHz sine at 0 and −20 dBFS reads its level ±0.5 dB at 44.1 and 48 kHz, directly and through the chain's taps and `AnalyzerFeed`), `AnalyzerFeed` fan-out and backlog trimming, `LevelMeters` (sine RMS = peak − 3.01 dB), correlation (+1 / −1 / ≈0), `WaveformHistory` columns and the `LoudnessPanel` short-term readout;
+  - `test_app_routing.cpp`: `AppRouting` with a fake `platform::AppAudioRouter` (endpoint moves, one per process, errors shown per app, un-mapping and shutdown restoring endpoints), the process-capture fallback with fake captures, and routes / method persisted through `AppSettings`.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state** (current tree). 460 test cases in 27 `test_*.cpp` files plus `test_driver_shared_c.c` (461 in an `FLUB_RTSAN` build, which adds the RTSan self-test; 459 on Linux without the X11 headers, where the X11 hotkey case is compiled out, as on the `core` CI jobs). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON`, a Clang Release build, a Clang 20 `FLUB_RTSAN=ON` build and an ASan + UBSan build; the cases added with `test_offline_render.cpp`, `test_protection_gaps.cpp` and the XDG autostart cases first ran on CI in run [36273859875](https://github.com/flubydooby-creator/Flubsound/actions/runs/36273859875) (commit `f4d30bf`), green on all nine jobs.
+- **Current state** (current tree). 463 test cases in 27 `test_*.cpp` files plus `test_driver_shared_c.c` (464 in an `FLUB_RTSAN` build, which adds the RTSan self-test; 462 on Linux without the X11 headers, where the X11 hotkey case is compiled out, as on the `core` CI jobs), and 13 `App:` cases in the 4 `tests/app/test_app_*.cpp` files of `flub_app_tests`. All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and a Clang Release build (both with `flub_app_tests`), a Clang 20 `FLUB_RTSAN=ON` build and an ASan + UBSan build; the cases added with `test_offline_render.cpp`, `test_protection_gaps.cpp` and the XDG autostart cases first ran on CI in run [36273859875](https://github.com/flubydooby-creator/Flubsound/actions/runs/36273859875) (commit `f4d30bf`), green on all nine jobs. `flub_app_tests` and the three Wayland global-hotkey cases in `test_platform_linux.cpp` have not run on CI yet.
 
 ---
 
@@ -824,7 +846,7 @@ There are two platform locations with different roles:
 |---|---|---|---|---|
 | Windows | `PlatformServices_win.cpp`: plain Win32 / COM (no JUCE, WRL or ATL; builds with MSVC, clang-cl and MinGW-w64) | global hotkeys (`RegisterHotKey`, message-only window); session enumeration and the `ms-settings:apps-volume` fallback; per-process loopback capture on build ≥ 20348; output transport query; EcoQoS opt-out; MMCSS "Pro Audio" | moving an app to another endpoint (`setAppEndpoint`) unless built with `FLUB_ENABLE_UNDOCUMENTED_ROUTING=ON` | `windows/driver/README.md`: the WaveRT "Flubsound Virtual Audio" driver (status: design, roadmap 2.1–2.3). `windows/driver/FlubVirtualAudioShared.h`: the C user/kernel contract. No product target includes it yet; `flub_tests` does (`tests/test_driver_shared.cpp` on every OS, `tests/test_driver_shared_c.c` as strict C89 on GCC / Clang). |
 | macOS | `PlatformServices_mac.mm` (Objective-C++) | Carbon global hotkeys; output transport (`kAudioDevicePropertyTransportType`); time-constraint thread policy | per-app routing, per-process capture | `macos/README.md`: Core Audio process taps (14.2+) and the Audio Server Plug-in virtual device (design, roadmap 3.1–3.2) |
-| Linux | `PlatformServices_linux.cpp` (`flub::json` + C library; shells out to `pactl`; X11 headers at build time only, libX11 loaded with `dlopen` at run time) | global hotkeys under X11 (`XGrabKey` on the root window, own event thread); per-app routing by moving sink-inputs to the `flubsound_*` null sinks (when `pactl` is present); best-effort `SCHED_FIFO` | global hotkeys in a Wayland session, without a `DISPLAY`, or without the X11 headers / libX11 (the xdg-desktop-portal GlobalShortcuts path is documented, not implemented); per-process capture (not needed on Linux); output transport (`Unknown`, name heuristics are used instead) | `linux/flubsound-pipewire-setup.sh` (`install`, `remove`, `status`, `print-pa-config`); `linux/pipewire/pipewire.conf.d/90-flubsound-sinks.conf` (persistent sinks); `linux/pipewire/pipewire-pulse.conf.d/90-flubsound-app-routing.conf` (example routing rules); `linux/README.md` |
+| Linux | `PlatformServices_linux.cpp` (`flub::json` + C library; shells out to `pactl`; X11 headers at build time only, libX11 loaded with `dlopen` at run time) | global hotkeys under X11 (`XGrabKey` on the root window, own event thread) and in Wayland sessions (xdg-desktop-portal GlobalShortcuts over D-Bus, libdbus-1 loaded with `dlopen`, own thread); per-app routing by moving sink-inputs to the `flubsound_*` null sinks (when `pactl` is present); best-effort `SCHED_FIFO` | global hotkeys in a Wayland session without the GlobalShortcuts portal (or libdbus-1), and under X11 without a `DISPLAY` or without the X11 headers / libX11; per-process capture (not needed on Linux); output transport (`Unknown`, name heuristics are used instead) | `linux/flubsound-pipewire-setup.sh` (`install`, `remove`, `status`, `print-pa-config`); `linux/pipewire/pipewire.conf.d/90-flubsound-sinks.conf` (persistent sinks); `linux/pipewire/pipewire-pulse.conf.d/90-flubsound-app-routing.conf` (example routing rules); `linux/README.md` |
 
 **The four strips.** The default strip layout lives in `AudioEngineHost` (`app/Source/engine/AudioEngineHost.h`): Game (8 channels, 7.1), Music, Chat and System (2 channels each). `MixEngine::kMaxStrips = 4` caps the layout. The virtual endpoints in every design use the same four names: "Flubsound Game / Music / Chat / System". The Windows and macOS designs also add a "Flubsound Mic" capture endpoint.
 
@@ -872,12 +894,12 @@ There are two platform locations with different roles:
 | `core` | `ubuntu-24.04` × {gcc, clang}, `windows-2022` (MSVC via `ilammy/msvc-dev-cmd`), `macos-14` (Apple Clang); `fail-fast: false` | Ninja, Release, `FLUB_BUILD_TESTS=ON`, `FLUB_BUILD_TOOLS=ON`, `FLUB_WARNINGS_AS_ERRORS=ON` on Linux only | build → `ctest --output-on-failure` → CLI smoke test (`flubsound-cli params > /dev/null`, `flubsound-cli presets`) |
 | `sanitizers` | `ubuntu-24.04` | Ninja, RelWithDebInfo, `clang++`, `FLUB_SANITIZE=ON`, `FLUB_BUILD_TOOLS=OFF` | `apt-get install libx11-dev libxtst6 xvfb` → build → `ctest` with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`, `ASAN_OPTIONS=detect_leaks=1` → the platform tests again under `xvfb-run -a ./build/tests/flub_tests "Platform:"` with the same options, so the X11 global-hotkey test runs against a real X server |
 | `rtsan` | `ubuntu-24.04` | `apt-get install clang-20 libclang-rt-20-dev`; Ninja, RelWithDebInfo, `CC=clang-20 CXX=clang++-20`, `FLUB_RTSAN=ON`, `FLUB_WARNINGS_AS_ERRORS=ON`, `FLUB_BUILD_TOOLS=OFF` | build → the full `ctest` with `RTSAN_OPTIONS=halt_on_error=1`: every test that calls a `ProcessingChain`, `MixEngine` or module `process()` runs it under RealtimeSanitizer, and `test_rtsan.cpp` proves the annotations and the sanitizer are live |
-| `app` (`needs: core`) | `windows-2022`, `macos-14`, `ubuntu-24.04` | Ninja, Release, `FLUB_BUILD_APP=ON`, `FLUB_BUILD_PLUGIN=ON`, tests and tools OFF; `build/_deps` cached under key `juce-<FLUB_JUCE_VERSION>-<runner.os>`, the version read from `cmake/FlubJuce.cmake` | build. On Linux: three headless screenshots at 1440×900 under `xvfb-run` (`--mode music`, `--mode gaming`, `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`), uploaded as artifact `screenshots` |
+| `app` (`needs: core`) | `windows-2022`, `macos-14`, `ubuntu-24.04` | Ninja, Release, `FLUB_BUILD_APP=ON`, `FLUB_BUILD_PLUGIN=ON`, `FLUB_BUILD_APP_TESTS=ON`, unit tests and tools OFF; `build/_deps` cached under key `juce-<FLUB_JUCE_VERSION>-<runner.os>`, the version read from `cmake/FlubJuce.cmake` | build → `ctest --test-dir build --output-on-failure --timeout 300`, which runs `flub_app_tests` (the only registered test there) with no audio device or display. On Linux: three headless screenshots at 1440×900 under `xvfb-run` (`--mode music`, `--mode gaming`, `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`), uploaded as artifact `screenshots` |
 
 What CI does **not** run today:
-- RealtimeSanitizer on anything but the unit tests (the app and the plug-in are not built with it; `reset()`, setters and the app's own callback code are not annotated);
+- RealtimeSanitizer on anything but the unit tests (the app and the plug-in are not built with it; `reset()`, setters and the app's own callback code are not annotated; the app's callback is instead checked for allocations, frees and, on Linux, mutex locks by `flub_app_tests`);
 - sanitizers on Windows or macOS;
-- tests against the built app or plug-in (there are none; `flub_tests` compiles a few app sources directly: the Linux platform services, on Linux only, and the drift FIFO);
+- tests against the built app or plug-in binaries: `flub_app_tests` compiles the app's sources into its own executable (and `flub_tests` compiles the Linux platform services and the drift FIFO), but nothing opens a real audio device, drives the GUI or loads the plug-in;
 - pluginval (roadmap item 2.9);
 - installers or signing (roadmap 1.7, 2.3, 3.3).
 

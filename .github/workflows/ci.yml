@@ -55,7 +55,7 @@ jobs:
       - name: X11 test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxtst6 xvfb
+          sudo apt-get install -y libx11-dev libxtst6 xvfb dbus libdbus-1-3
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -143,9 +143,16 @@ jobs:
         shell: bash
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
+          -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_APP_TESTS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
       - name: Build
         run: cmake --build build --parallel
+      # tests/app (flub_app_tests): device callback real-time safety, headset
+      # ceiling cap, analyser / meter data paths, per-app routing model. No
+      # audio device and no display needed (the Ninja build is single-config,
+      # so ctest finds the binary on every OS; it is the only registered test
+      # here because FLUB_BUILD_TESTS is OFF).
+      - name: App tests
+        run: ctest --test-dir build --output-on-failure --timeout 300
       - name: Headless screenshot (Linux)
         if: runner.os == 'Linux'
         run: |

@@ -211,7 +211,7 @@ set_source_files_properties(${FLUB_APP_SOURCES} PROPERTIES COMPILE_OPTIONS "${FL
 # ---------------------------------------------------------------------------
 # App-level tests: tests/app/CMakeLists.txt builds flub_app_tests from these
 # sources (all but Main.cpp) with this target's compile definitions, include
-# directories, link libraries and per-source warning flags, so the tests run
+# directories, link libraries and per-source flags, so the tests run
 # the code the app runs. The FlubsoundPro target itself is unchanged.
 # ---------------------------------------------------------------------------
 if(FLUB_BUILD_APP_TESTS)

@@ -35,7 +35,6 @@ struct RouterScript
     int enumerations = 0;
     uint32_t flickeringPid = 0; // this session's isActive flips on every enumeration
 
-
     void setSessions (std::vector<AudioSessionInfo> s)
     {
         const std::lock_guard<std::mutex> g (lock);

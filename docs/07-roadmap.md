@@ -11,7 +11,7 @@ This roadmap covers the path from this repository to a 1.0 release on Windows, m
 What remains is mainly **productisation**:
 - the signed Windows virtual driver (only its user/kernel header exists),
 - per-app routing hardening,
-- macOS integration (HAL plug-in, process taps) and Wayland global hotkeys (xdg-desktop-portal GlobalShortcuts; X11 hotkeys exist),
+- macOS integration (HAL plug-in, process taps),
 - UX polish and scale testing.
 
 ---
@@ -80,7 +80,7 @@ Beta                         [closed]      [public]      [1.0]
 | 1.2 | Latency measurement tool (loopback impulse) + latency HUD | 1.5 | Turns the estimated budget of `01-architecture.md` §5 into measurements on real devices. A *reported* latency readout (device in + app engine + device out + capture FIFO target) already exists in the header and Settings > Processing |
 | 1.3 | Preset browser UX, user presets, A/B banks, loudness-matched bypass UX | 2 | |
 | 1.4 | DSP tuning pass with listening panel (8 listeners, 40 reference tracks, 6 games) | 3 | Macro curves, preset voicing |
-| 1.5 | Tray, hotkeys, start-with-Windows, close-to-tray | 1 | Tray icon, close-to-tray, global hotkeys (Windows, macOS, Linux under X11; defaults Ctrl+Alt+F / M / arrows) and start with the OS (Windows `Run` key, macOS 13+ `SMAppService`, Linux XDG autostart) exist; Wayland hotkeys (GlobalShortcuts portal), running start-with-the-OS on Windows and a Mac (so far only run on Linux) and hardening remain |
+| 1.5 | Tray, hotkeys, start-with-Windows, close-to-tray | 1 | Tray icon, close-to-tray, global hotkeys (Windows, macOS, Linux under X11 and, through the xdg-desktop-portal GlobalShortcuts interface, in Wayland sessions; defaults Ctrl+Alt+F / M / arrows) and start with the OS (Windows `Run` key, macOS 13+ `SMAppService`, Linux XDG autostart) exist; running the Wayland hotkeys on real desktops (KDE Plasma, GNOME, Hyprland; so far only tested against a mock portal), running start-with-the-OS on Windows and a Mac (so far only run on Linux) and hardening remain |
 | 1.6 | Onboarding: device check, "disable OEM enhancements" guide, headphones vs speakers | 1.5 | |
 | 1.7 | Installer (WiX MSI, no driver yet), code signing, auto-update check | 2 | |
 | 1.8 | Crash reporting (Crashpad, opt-in), logging (never on the audio thread) | 1 | |

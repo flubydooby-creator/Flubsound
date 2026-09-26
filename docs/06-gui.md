@@ -2,7 +2,7 @@
 
 > The desktop GUI is a native JUCE 9 application: `app/Source/ui` holds the components and `app/Source/shell` holds the window, tray, hotkeys and headless screenshot driver. It is a presentation layer only. It writes parameters and reads telemetry through the three lock-free channels of [`01-architecture.md`](01-architecture.md) §3, and nothing it does can block the audio thread.
 >
-> This document describes the GUI **as implemented**: design language, layout, component hierarchy, update model, every key component, tray and hotkeys, the per-app routing UX, the device advice banner and the headless screenshot driver. Anything planned rather than built is labelled **Roadmap** with its item number in [`07-roadmap.md`](07-roadmap.md). Examples: the onboarding wizard, the custom plug-in editor, Wayland hotkeys and macOS per-app routing.
+> This document describes the GUI **as implemented**: design language, layout, component hierarchy, update model, every key component, tray and hotkeys, the per-app routing UX, the device advice banner and the headless screenshot driver. Anything planned rather than built is labelled **Roadmap** with its item number in [`07-roadmap.md`](07-roadmap.md). Examples: the onboarding wizard, the custom plug-in editor and macOS per-app routing.
 
 **Reading conventions**
 
@@ -34,14 +34,14 @@
 
 | Area | Status | Code |
 |---|---|---|
-| Main window, layout and every panel in §6 | Implemented | `ui/*`, `shell/MainWindow.*` |
+| Main window, layout and every panel in §6 | Implemented. The data side of the analyser, level meters, loudness panel and waveform history is tested by `flub_app_tests` (`tests/app/test_app_meters.cpp`, §6.4–§6.8); painting and layout are checked by the CI screenshots only | `ui/*`, `shell/MainWindow.*` |
 | Design system: tokens, look-and-feel, vector icons | Implemented | `ui/Theme.*`, `ui/FlubLookAndFeel.*`, `ui/Widgets.*` |
 | Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation), the muted-strip icon and the app-chip error badge. A few amber/green indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
 | Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
-| Global hotkeys | Implemented on Windows (`RegisterHotKey`), macOS (Carbon `RegisterEventHotKey`) and Linux under X11 (`XGrabKey`). Wayland sessions: not yet (the xdg-desktop-portal GlobalShortcuts path is roadmap); the service reports "unsupported" | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
-| Per-app routing UI | Implemented. Backend support differs per OS (§8) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
+| Global hotkeys | Implemented on Windows (`RegisterHotKey`), macOS (Carbon `RegisterEventHotKey`) and Linux: `XGrabKey` under X11, the xdg-desktop-portal GlobalShortcuts interface in Wayland sessions ("unsupported" when the desktop has no such portal) | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
+| Per-app routing UI | Implemented. Backend support differs per OS (§8). The routing model (`AppRouting`) is tested with a fake router and fake captures (`tests/app/test_app_routing.cpp`); `RoutingPanel` itself is not | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
 | Headless screenshot driver (incl. `--device`) | Implemented; used by CI: the `app` job's Linux step renders three screenshots under `xvfb-run` and uploads them as the `screenshots` artifact (green in CI run 36247109446; nothing is compared against a reference image) | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
 | Custom plug-in editor sharing these components | **Roadmap** 2.9. Today the plug-in uses JUCE's generic editor plus a toolbar (§10) | `plugin/Source/PluginEditor.*` |
@@ -646,7 +646,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
   - the advice has at least one message;
   - the user has not dismissed it for this device name.
 - **Content.**
-  - **Headline:** `<profile name or device name> · <connection> · ceiling <x.x> dBTP`. The connection text is one of *wired*, *USB / wireless dongle*, *Bluetooth* or *Bluetooth hands-free*. The ceiling is the cap already applied to the master limiter: −1 dBTP by default, −2 on Bluetooth, −3 on hands-free.
+  - **Headline:** `<profile name or device name> · <connection> · ceiling <x.x> dBTP`. The connection text is one of *wired*, *USB / wireless dongle*, *Bluetooth* or *Bluetooth hands-free*. The ceiling is the cap already applied to the master limiter: −1 dBTP by default, −2 on Bluetooth, −3 on hands-free. `tests/app/test_app_headset_cap.cpp` checks that wiring headlessly (`EngineController::simulateOutputDevice`), including the limited output level; the banner itself is not tested.
   - **Body:** the first advice message.
   - **Tooltip and accessible description:** all messages.
 - **Actions.**
@@ -716,7 +716,7 @@ tilt(fc)  = 4.5 · log2(fc / 1000)                           dB, added at draw t
 
 The Hann coherent gain of 0.5 is folded into the `4/N` term (sine amplitude = 4·|X|/N), the `1.5` is the Hann window's equivalent noise bandwidth in bins (a tone's power is spread over the bins that are summed), and the bandwidth term turns the per-bin mean power into the power of a 1/6-octave band at the 1 kHz pivot. So a sine and pink noise read on the same scale there. Because the bands have constant relative width, pink noise reads flat with Tilt off. The +4.5 dB/octave tilt is there so that typical music reads roughly flat.
 
-A 0 dBFS, 1 kHz sine therefore reads ≈ 0 dB: +0.3 dB at 44.1 kHz and +0.4 dB at 48 kHz (measured with the real `SpectrumAnalyzer`). The small excess comes from the bands holding whole bins: at 48 kHz the band of the display point nearest 1 kHz (995 Hz) spans 9 bins = 105 Hz instead of 115.6 Hz.
+A 0 dBFS, 1 kHz sine therefore reads ≈ 0 dB: +0.3 dB at 44.1 kHz and +0.4 dB at 48 kHz (measured with the real `SpectrumAnalyzer`). `flub_app_tests` checks that a 1 kHz sine at 0 and −20 dBFS reads its level within ±0.5 dB at both rates, fed directly and through a chain's analyser tap and `AnalyzerFeed`. The small excess comes from the bands holding whole bins: at 48 kHz the band of the display point nearest 1 kHz (995 Hz) spans 9 bins = 105 Hz instead of 115.6 Hz.
 
 **Ballistics** (`advance (dt)`, `dt` clamped to 0…0.25 s):
 
@@ -836,6 +836,7 @@ Selecting a band also selects it on the EQ module card, and vice versa. Every ed
   With no signal on the strip, the caption row reads *no signal* and the bars fall.
 - **Interaction.** Clicking the bars clears the clip LEDs. Clicking TRUE PEAK resets the true-peak hold *and* the integrated loudness via `MeterBus::resetLoudnessRequest`, and also resets the local holds and clip LEDs.
 - **Rate.** Bars repaint every frame while anything moves; the readouts at most every 0.08 s.
+- **Tested** (`tests/app/test_app_meters.cpp`): a −6 dBFS sine through the engine shows its peak and an RMS 3.01 dB lower on both the input and output bars, and the bars fall after the signal stops.
 
 ### 6.7 `LoudnessPanel` — loudness, dynamics and stereo
 
@@ -849,6 +850,8 @@ Selecting a band also selects it on the EQ module card, and vice versa. Every ed
 
 Row heights adapt between 14 and 22 px.
 
+**Tested** (`tests/app/test_app_meters.cpp`): through the engine, the correlation meter reads +1 for a mono sine, −1 for an anti-phase one and ≈ 0 for independent noise, and SHORT reads −20.0 LUFS for a −20 dBFS 1 kHz sine on both channels.
+
 ### 6.8 `WaveformHistory` — output history
 
 `ui/WaveformHistory.*`, full width at the bottom.
@@ -860,6 +863,7 @@ Row heights adapt between 14 and 22 px.
 - **Loudness trace.** The short-term LUFS of each column is drawn as a 1.5 px trace (every second column, over a dark 3.5 px underlay) on a −40…0 LUFS axis. Grid lines are at −10, −20 and −30; the trace breaks where loudness is ≤ −60 LUFS.
 - **Header:** `OUTPUT HISTORY`, `12 s`, a legend and the current short-term value.
 - **Rate.** Paths are rebuilt in the frame loop only when a column completed (100 per second). With no audio yet, the plot reads *"No output yet"*.
+- **Tested** (`tests/app/test_app_meters.cpp`): column min / max of a sine and of silence, the loudness recorded per column, partial columns and `reset()`.
 
 ### 6.9 `ModuleRack` and `ModuleCard` — the processing modules
 
@@ -999,7 +1003,7 @@ Row heights adapt between 14 and 22 px.
 - **Close and start-up behaviour** (`FlubsoundApplication`):
   - With *close to tray* on (default **on**) and a tray icon present, the close button hides the window. On Linux, where a tray host is not guaranteed, it minimises instead.
   - With *start minimised* (default off), Windows and macOS start tray-only; Linux starts iconified.
-  - *Start Flubsound Pro when I sign in* (default off) adds or removes the OS's own start-up entry through `platform::AutoStart`: the per-user `Run` registry value on Windows, `SMAppService.mainAppService` on macOS 13+, `$XDG_CONFIG_HOME/autostart/flubsound-pro.desktop` on Linux. On Windows and Linux an enabled entry is rewritten at every interactive start, so it follows the executable when the app is moved, updated into a new folder or its AppImage renamed (macOS registers the bundle itself). The settings file, user presets and the device-profile override share one per-user folder (`settings/UserDataFolder.h`): on Linux `$XDG_CONFIG_HOME/Flubsound` when the variable is an absolute path, else `~/.config/Flubsound` (JUCE's own lookup ignores the variable); the plug-in uses the same preset folder. The OS entry is the source of truth: each time the General page is shown the switch reads it back, so an entry removed or switched off in the OS's start-up settings shows as off. A failure appears in amber under the switch, which then shows the actual state. The entry starts the plain executable; *start minimised* decides how it opens.
+  - *Start Flubsound Pro when I sign in* (default off) adds or removes the OS's own start-up entry through `platform::AutoStart`: the per-user `Run` registry value on Windows, `SMAppService.mainAppService` on macOS 13+, `$XDG_CONFIG_HOME/autostart/flubsound-pro.desktop` on Linux. On Windows and Linux an enabled entry is rewritten at every interactive start, so it follows the executable when the app is moved, updated into a new folder or its AppImage renamed (macOS registers the bundle itself). The settings file, user presets and the device-profile override share one per-user folder (`settings/UserDataFolder.h`): on Linux `$XDG_CONFIG_HOME/Flubsound` when the variable is an absolute path, else `~/.config/Flubsound` (JUCE's own lookup ignores the variable). On every OS an absolute `FLUB_USER_DATA_DIR` replaces the folder (tests, portable installs). The plug-in uses the same preset folder. The OS entry is the source of truth: each time the General page is shown the switch reads it back, so an entry removed or switched off in the OS's start-up settings shows as off. A failure appears in amber under the switch, which then shows the actual state. The entry starts the plain executable; *start minimised* decides how it opens.
   - A second launch focuses the running instance (`moreThanOneInstanceAllowed()` is false except for `--screenshot`).
   - *Quit* and system quit requests end the app.
 
@@ -1025,7 +1029,7 @@ Row heights adapt between 14 and 22 px.
 | Windows | `RegisterHotKey` on a message-only window, `MOD_NOREPEAT` | Full support |
 | macOS | Carbon `RegisterEventHotKey` | Ctrl maps to ⌃ Control and Alt to ⌥ Option, so the defaults are ⌃⌥F etc.; Super maps to ⌘ |
 | Linux (X11) | `XGrabKey` on the root window for each chord × {none, CapsLock, NumLock, both}, so lock keys do not defeat it. libX11 is loaded at run time with `dlopen` (no link dependency; without the library or the build-time headers the service reports "unsupported"). A private `Display` is served by its own event thread (`poll` + wake pipe), which calls the callbacks; `HotkeyManager` moves them to the message thread | A chord another X client holds is refused (`BadAccess`, caught by a temporary `XSetErrorHandler`). `XkbSetDetectableAutoRepeat` plus a per-chord down flag make a held key fire once. Bare keys are refused, F-keys included. Tested under Xvfb (`tests/test_platform_linux.cpp`; the CI `sanitizers` job runs it with `xvfb-run`) |
-| Linux (Wayland) | None: `isSupported()` returns false in a Wayland session (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` set) and without a `DISPLAY`; the Hotkeys page explains it | **Roadmap**: xdg-desktop-portal GlobalShortcuts (design notes in `PlatformServices_linux.cpp`) |
+| Linux (Wayland) | In a Wayland session (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` set, also with an XWayland `DISPLAY`): xdg-desktop-portal **GlobalShortcuts** (`PortalGlobalHotkeys`). libdbus-1 is loaded at run time with `dlopen` (no headers or link dependency); a private session-bus connection is served by the service's own thread (`poll` + wake pipe), which calls the callbacks once per `Activated` signal. `CreateSession`, then `BindShortcuts` with id `flubsound-<action>`, description `Flubsound Pro: <chord>` and `preferred_trigger` in the XDG shortcuts format (`CTRL+ALT+Up`, `CTRL+SHIFT+m`). A changed set is bound in a new session (the old one is closed); changes within 50 ms are coalesced, and a `registerAll()` that ends with the set already bound sends nothing | Available where the desktop's portal has GlobalShortcuts (KDE Plasma 5.27+, GNOME 48+, Hyprland); otherwise `isSupported()` is false and the Hotkeys page explains it. The desktop may show a dialog in which the user can choose another key or decline. Binding is asynchronous, so `registerHotkey` returns true when the chord could be requested; declined or unbound shortcuts and portal errors are logged to stderr and do not appear on the Hotkeys page. Tested against a mock portal on a private `dbus-daemon` (`tests/test_platform_linux.cpp`) |
 
 ---
 
@@ -1038,6 +1042,8 @@ Row heights adapt between 14 and 22 px.
 | **Endpoint routing** | `AppAudioRouter::setAppEndpoint` points the app at the strip's virtual endpoint. The default endpoint names are `Flubsound <Strip>` (Windows / macOS) and `flubsound_<strip>` (Linux null sink); both can be overridden per strip in `AppSettings`. The strip is fed from that endpoint's capture / monitor side through the device inputs. Endpoints are restored to the system default on shutdown |
 | **Process capture** | `ProcessLoopbackCapture` captures the app's process tree straight into the strip through a `DriftCompensatedFifo`. Its extra FIFO latency appears as "app capture" in the latency readouts |
 | **Automatic** (default) | Endpoint routing if supported, else process capture if supported, else disabled |
+
+A capture that fails to start is retried on the next two passes, then given up until the process goes away; its last error stays on the app's chip. The model (mapping, endpoint moves once per process, restoring endpoints on un-mapping and shutdown, captures, errors, persistence) is tested with a fake router in `tests/app/test_app_routing.cpp`.
 
 ```mermaid
 flowchart TD
@@ -1186,7 +1192,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 
 These describe the behaviour of the current code.
 
-- **Hotkeys on Linux** work under X11 only; Wayland sessions report them unsupported until the GlobalShortcuts portal is implemented (§7.2).
+- **Hotkeys on Wayland** need the desktop's GlobalShortcuts portal; without it they are reported unsupported. Shortcuts the user declines in the portal dialog are only logged to stderr, not shown on the Hotkeys page (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
 - **Accessibility gaps** are listed in §2.8.
 

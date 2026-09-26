@@ -92,8 +92,12 @@ libpipewire.
 
 ## Global hotkeys
 
-Implemented for X11 sessions (`LinuxGlobalHotkeys` in
-`app/Source/platform/PlatformServices_linux.cpp`); not yet for Wayland.
+Implemented for X11 sessions (`LinuxGlobalHotkeys`) and for Wayland
+sessions through the xdg-desktop-portal (`PortalGlobalHotkeys`), both in
+`app/Source/platform/PlatformServices_linux.cpp`. `GlobalHotkeys::create()`
+picks the portal in a Wayland session (`XDG_SESSION_TYPE=wayland` or
+`WAYLAND_DISPLAY` set, even when XWayland also provides a `DISPLAY`) and
+X11 otherwise.
 
 - **X11.** `XGrabKey` on the root window, once per chord combined with each
   of {none, CapsLock, NumLock, both}, so the lock keys do not defeat the
@@ -109,21 +113,71 @@ Implemented for X11 sessions (`LinuxGlobalHotkeys` in
   per-chord "down" flag make a held key fire once. Bare keys, F-keys
   included, are refused because they would steal normal typing.
 - **Wayland.** Grabbing keys is forbidden by design (an X grab through
-  XWayland only sees keys while an XWayland window has focus). In a Wayland
-  session (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` set), and with no
-  `DISPLAY`, `GlobalHotkeys::isSupported() == false` and the UI suggests
-  binding Flubsound's actions in the desktop's keyboard settings. The proper
-  API is the **xdg-desktop-portal GlobalShortcuts** interface
-  (`org.freedesktop.portal.GlobalShortcuts`: `CreateSession`,
-  `BindShortcuts`, `Activated` signal); it is roadmap. The compositor shows
-  a confirmation dialog and the user may rebind keys. It is available in KDE
-  Plasma 5.27+, GNOME 48+ and Hyprland.
+  XWayland only sees keys while an XWayland window has focus). The
+  sanctioned API is the **xdg-desktop-portal GlobalShortcuts** interface
+  (`org.freedesktop.portal.GlobalShortcuts` version 1 on
+  `org.freedesktop.portal.Desktop`), available in KDE Plasma 5.27+, GNOME
+  48+ and Hyprland:
+  - libdbus-1 is loaded at run time with `dlopen("libdbus-1.so.3")`. The
+    few functions and the two caller-allocated structs are declared in the
+    source from libdbus's stable ABI, so neither the headers
+    (`libdbus-1-dev`) nor a link dependency is needed, and one declaration
+    path is compiled and tested everywhere.
+  - The service opens a private connection to the session bus
+    (`$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`; never X11
+    autolaunch) and reads the interface's `version` property. When the
+    portal or the interface is missing, `isSupported() == false` and the UI
+    suggests binding Flubsound's actions in the desktop's keyboard settings.
+    Otherwise its own thread serves the connection (`poll` on the bus fd
+    plus a wake pipe) and calls the callbacks, once per `Activated` signal.
+    `Deactivated` (key release) is ignored. Signals count only when they come
+    from the portal's unique bus name and name the current session.
+  - `CreateSession`, then, once its `Response` signal carries the
+    `session_handle`, `BindShortcuts` with one entry per chord: id
+    `flubsound-<action>`, description `Flubsound Pro: <chord>` and a
+    `preferred_trigger` in the XDG shortcuts format: modifiers `CTRL`,
+    `ALT`, `SHIFT`, `LOGO`, then the xkb keysym name of the unshifted key,
+    for example `CTRL+ALT+Up`, `CTRL+SHIFT+m`, `CTRL+Page_Up` or `F13`.
+    The desktop may show a dialog; the user can pick another key or
+    decline.
+  - Binding is asynchronous, so `registerHotkey()` returns true when the
+    chord could be requested (valid chord, portal present). A declined
+    dialog, shortcuts missing from the `BindShortcuts` response and portal
+    errors are logged to stderr; the `GlobalHotkeys` interface has no way to
+    report them to `HotkeyManager` later, so the Hotkeys page does not show
+    them.
+  - Rebinding: the interface has no "unbind", and a session's shortcuts are
+    bound once. A changed set is therefore bound in a new session and the
+    old one is closed (`Session.Close`). Desktops remember the user's choice
+    per application and shortcut id, so known ids are not asked about again.
+    Changes within 50 ms are coalesced, because `HotkeyManager::registerAll()`
+    unregisters everything and re-registers each action; when the result is
+    the set already bound, nothing is sent at all. If the portal restarts,
+    the set is bound again with the new instance.
+  - `parent_window` is empty (the interface gives the service no window
+    handle), and the app has no installed `.desktop` file yet, so desktops
+    identify it by its process (for example its systemd scope) rather than
+    by an application id. How each desktop treats such an unregistered
+    application is untested.
 
-Test: `Platform: X11 global hotkeys fire once per press, refuse a chord
-another client holds, and release on unregister` in
-`tests/test_platform_linux.cpp` synthesises key events with XTest. It is
-skipped without an X display or `libXtst`; CI runs it under `xvfb-run` in the
-`sanitizers` job.
+Tests in `tests/test_platform_linux.cpp`:
+
+- `Platform: X11 global hotkeys fire once per press, refuse a chord another
+  client holds, and release on unregister` synthesises key events with
+  XTest. It is skipped without an X display or `libXtst`; CI runs it under
+  `xvfb-run` in the `sanitizers` job.
+- `Platform: Wayland global hotkeys bind through the GlobalShortcuts portal,
+  fire once per activation and rebind in a new session` starts a private
+  `dbus-daemon` and a mock portal implemented in the test with libdbus. It
+  checks the ids, descriptions and triggers `BindShortcuts` receives, that
+  one `Activated` fires the right callback exactly once and that signals from
+  another client or a closed session are ignored. It also checks that
+  unregistering or changing a chord re-creates the session and that
+  re-registering the same set does not. `Platform: Wayland global hotkeys
+  are unsupported without a GlobalShortcuts portal` covers a bus without a
+  portal, a portal without the interface and no bus at all. Both are
+  skipped without `dbus-daemon` or libdbus-1; the CI `sanitizers` job
+  installs `dbus`.
 
 ## Start at sign-in
 
@@ -168,7 +222,8 @@ policy with the flag kept set, which is harmless for `SCHED_OTHER`. Ways to gran
 - the distribution's `audio` or `realtime` group with `rtprio` limits
   (`/etc/security/limits.d/`), or
 - RealtimeKit over D-Bus (`org.freedesktop.RealtimeKit1.MakeThreadRealtime`).
-  This is not wired up yet, to avoid a D-Bus dependency.
+  This is not wired up yet; the run-time libdbus-1 loading used for Wayland
+  hotkeys could carry it without a link dependency.
 
 When the engine runs as a JACK or PipeWire client (JUCE's JACK backend on
 `pipewire-jack`), the server calls the process callback on its own RT thread,
@@ -207,6 +262,8 @@ detect Bluetooth and hands-free outputs from the device name and format
   monitor hop, and lets WirePlumber manage the links.
 - libpulse or libpipewire routing instead of shelling out to `pactl`, for
   Flatpak and to receive change events instead of polling.
-- xdg-desktop-portal GlobalShortcuts (global hotkeys in Wayland sessions).
+- Wayland hotkeys: run on real desktops (so far tested only against a mock
+  portal), pass a `parent_window` and ship a `.desktop` file so the portal
+  knows the application id.
 - RealtimeKit for the audio thread, `node.latency` for Flubsound's streams,
   and the output's `device.bus` for headset connection detection.

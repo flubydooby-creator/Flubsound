@@ -46,7 +46,6 @@ public:
     void resized() override;
 
 private:
-
     void rebuildPaths();
 
     std::vector<Column> columns; // ring, newest at writeIndex - 1

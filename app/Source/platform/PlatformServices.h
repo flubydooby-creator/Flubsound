@@ -19,11 +19,12 @@
 //             macOS 14.2+), routing = tap with mute-when-tapped.
 //   Linux   : per-app routing by moving PipeWire/Pulse sink-inputs to the
 //             "flubsound_<strip>" null sinks (pactl). Global hotkeys via
-//             XGrabKey under X11 (libX11 loaded at run time; callbacks come
-//             from the service's own event thread). Wayland sessions report
-//             isSupported() == false (xdg-desktop-portal GlobalShortcuts is
-//             roadmap). No per-process capture: apps are routed into the
-//             null sinks.
+//             XGrabKey under X11 (libX11 loaded at run time) and, in Wayland
+//             sessions, via the xdg-desktop-portal GlobalShortcuts interface
+//             over D-Bus (libdbus-1 loaded at run time; isSupported() ==
+//             false without the portal). Callbacks come from the service's
+//             own event thread. No per-process capture: apps are routed into
+//             the null sinks.
 //
 // Start with the OS (AutoStart): Windows HKCU\...\CurrentVersion\Run value;
 // macOS SMAppService.mainAppService (macOS 13+, unsupported on older
@@ -66,10 +67,15 @@ public:
 
     /** Registers a system-wide shortcut. On Windows and macOS the callback is
         invoked on the thread that created the service (the app's message
-        thread); on Linux (X11) it runs on the service's own X event thread,
-        so callers must hop to their own thread (HotkeyManager does). Returns
-        false if the chord is invalid (see KeyChord), cannot be mapped on this
-        system, or is taken by another application. */
+        thread); on Linux it runs on the service's own X event / D-Bus
+        thread, so callers must hop to their own thread (HotkeyManager does).
+        Returns false if the chord is invalid (see KeyChord), cannot be
+        mapped on this system, or is taken by another application.
+        Linux, Wayland (GlobalShortcuts portal): binding is asynchronous and
+        the desktop may ask the user, who can choose another key or decline.
+        true means the chord was requested; a refusal found later is logged
+        to stderr, not reported here. Changes made within 50 ms are bound
+        together as one portal session. */
     virtual bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) = 0;
     virtual void unregisterHotkey (int id) = 0;
     virtual void unregisterAll() = 0;
