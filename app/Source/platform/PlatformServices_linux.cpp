@@ -190,9 +190,18 @@ bool parseSinkInputs (const std::string& text, std::vector<SinkInput>& inputs, s
         toUInt32 (item["sink"], input.sinkIndex);
         input.corked = item["corked"].asBool (false);
 
+        // Prefer PipeWire's socket-credential pid: the kernel reports it in
+        // the sound server's (= our) pid namespace. application.process.id is
+        // the client's own getpid(), which for Flatpak/Snap/container apps is
+        // a sandbox-local pid (often 2 or 3) - it would collide between
+        // sandboxes and name an unrelated host process. Classic PulseAudio
+        // only has application.process.id.
         const auto& props = item["properties"];
-        if (! toUInt32 (props["application.process.id"], input.processId))
-            toUInt32 (props["pipewire.sec.pid"], input.processId); // PipeWire's socket-credential pid
+        if (! toUInt32 (props["pipewire.sec.pid"], input.processId) || input.processId == 0)
+        {
+            input.processId = 0;
+            toUInt32 (props["application.process.id"], input.processId);
+        }
 
         input.binary = props["application.process.binary"].asString();
         input.applicationName = props["application.name"].asString();
@@ -528,7 +537,14 @@ void SystemTuning::revertAudioThread (void* handle)
         return;
 
     const std::unique_ptr<SavedSchedulingPolicy> saved (static_cast<SavedSchedulingPolicy*> (handle));
-    ::pthread_setschedparam (::pthread_self(), saved->policy, &saved->param);
+    const pthread_t self = ::pthread_self();
+
+    // Exact restore first. Without CAP_SYS_NICE the kernel refuses to CLEAR
+    // SCHED_RESET_ON_FORK once set (sched(7)), i.e. a desktop user promoted via
+    // RLIMIT_RTPRIO gets EPERM here and would stay SCHED_FIFO forever. Keeping
+    // the flag is harmless for a normal-policy thread, so retry with it.
+    if (::pthread_setschedparam (self, saved->policy, &saved->param) != 0)
+        ::pthread_setschedparam (self, saved->policy | SCHED_RESET_ON_FORK, &saved->param);
 }
 
 //==============================================================================

@@ -136,6 +136,27 @@ TEST_CASE ("Platform: pactl JSON is turned into one session per process")
     CHECK (withoutNames[2].displayName == "spotify"); // no application.name -> binary
 }
 
+TEST_CASE ("Platform: PipeWire's host pid wins over a sandbox-local application.process.id")
+{
+    // A Flatpak app reports its pid inside the sandbox's pid namespace (here 2);
+    // pipewire.sec.pid is the host pid from the socket credentials.
+    const char* const json =
+        R"([{"index":201,"sink":48,"corked":false,"properties":{"application.process.id":"2","pipewire.sec.pid":"31337"}},
+            {"index":202,"sink":48,"corked":false,"properties":{"application.process.id":"2","pipewire.sec.pid":"31338"}},
+            {"index":203,"sink":48,"corked":false,"properties":{"application.process.id":"555","pipewire.sec.pid":"0"}}])";
+
+    std::string error;
+    std::vector<pactl::SinkInput> inputs;
+    REQUIRE (pactl::parseSinkInputs (json, inputs, error));
+    REQUIRE (inputs.size() == 3);
+    CHECK (inputs[0].processId == 31337);
+    CHECK (inputs[1].processId == 31338);
+    CHECK (inputs[2].processId == 555); // a zero credential pid falls back
+
+    // Two sandboxed apps must not be merged into one "pid 2" session.
+    CHECK (pactl::toSessions (inputs, {}, 1).size() == 3);
+}
+
 TEST_CASE ("Platform: malformed pactl output is reported, not crashed on")
 {
     std::string error;
