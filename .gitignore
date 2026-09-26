@@ -1,0 +1,19 @@
+# Build trees
+/build*/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+
+# IDEs
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+
+# Test / render artefacts
+*.wav
+!presets/**/*.wav
+/renders/

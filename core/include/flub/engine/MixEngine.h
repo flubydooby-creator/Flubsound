@@ -1,0 +1,79 @@
+// Flubsound Pro - multi-strip mixer (per-application profiles and routing).
+//
+// Each strip = one source stream (a virtual endpoint such as "Flubsound Game",
+// "Flubsound Music", "Flubsound Chat", or a per-process loopback capture) with
+// its own ParameterStore (= profile) and ProcessingChain. Strips are summed
+// and the sum passes a master safety true-peak limiter (-1 dBTP default)
+// before the physical output. Different strips may run different latency
+// profiles; each is padded to the largest strip latency so relative A/V sync
+// between applications is preserved.
+//
+//   strip 0 (Game, 7.1) --chain--> pad --+
+//   strip 1 (Music, 2)  --chain--> pad --+--> sum -> master limiter -> out
+//   strip 2 (Chat, 2)   --chain--> pad --+
+//
+// Threading: configure() is non-RT (allocates, prepares chains). process() is
+// the device callback. Profile/preset changes only touch ParameterStores.
+#pragma once
+
+#include "ProcessingChain.h"
+#include "flub/dsp/TruePeakLimiter.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace flub
+{
+struct StripConfig
+{
+    std::string name = "Main";
+    int inputChannels = 2;
+    float gainDb = 0.0f;
+    bool muted = false;
+};
+
+class MixEngine
+{
+public:
+    static constexpr int kMaxStrips = 4;
+
+    /** Non-RT. Creates (or re-creates) strips and prepares everything. */
+    void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
+
+    int getNumStrips() const noexcept { return static_cast<int> (strips.size()); }
+    param::ParameterStore& params (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->store; }
+    ProcessingChain& chain (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->chain; }
+
+    void setStripGainDb (int strip, float db) noexcept;
+    void setStripMuted (int strip, bool muted) noexcept;
+    void setMasterCeilingDb (float db) noexcept;
+
+    /** RT. inputs[i] feeds strip i (channel count per its config, may be
+        modified in place); out is stereo. Strips with no input pass nullptr. */
+    void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept;
+
+    /** Total output latency (max strip latency + master limiter). */
+    int getLatencySamples() const noexcept;
+    float getMasterGainReductionDb() const noexcept { return master.getGainReductionDb(); }
+
+    /** Any chain that needs a structural re-prepare (host polls this). */
+    bool needsReprepare() const noexcept;
+
+private:
+    struct Strip
+    {
+        StripConfig config;
+        std::unique_ptr<param::ParameterStore> store;
+        std::unique_ptr<ProcessingChain> chain;
+        DelayLine pad;
+        LinearSmoothedValue gain;
+    };
+
+    std::vector<std::unique_ptr<Strip>> strips;
+    TruePeakLimiter master;
+    AudioBuffer mixBuffer;
+    double sampleRate = 48000.0;
+    int maxBlock = 512, maxStripLatency = 0;
+};
+} // namespace flub

@@ -1,0 +1,19 @@
+# Flubsound Pro house style (JUCE-like): Allman braces, 4-space indent,
+# space before call/definition parentheses.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 140
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+SpaceBeforeParens: Always
+SpaceAfterLogicalNot: true
+PointerAlignment: Left
+NamespaceIndentation: None
+AccessModifierOffset: -4
+IndentCaseLabels: true
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+Standard: c++20
