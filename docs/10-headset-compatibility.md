@@ -22,10 +22,10 @@
 
 ### Sample rates and formats
 
-The engine follows whatever rate the device's audio format uses. The chain is tested at **8, 16, 22.05, 24, 32, 44.1, 48, 88.2, 96, 176.4 and 192 kHz**, in Music and Gaming mode, with Boost Intensity and every macro at 100 % and the compressor and saturator on:
-- output is finite and not silent,
-- the sample peak stays at or below the −1 dBTP ceiling,
-- the chain's algorithmic latency stays below 6 ms at ≥ 22.05 kHz and below 12 ms at the Bluetooth hands-free rates (the FIR oversampling delays are fixed in samples).
+The engine follows whatever rate the device's audio format uses. The chain is tested at **8, 16, 22.05, 24, 32, 44.1, 48, 88.2, 96, 176.4 and 192 kHz**, in Music and Gaming mode, in the default Balanced latency profile, with Boost Intensity and every macro at 100 % and the compressor and saturator on, on a hot stereo programme (a 110 Hz burst plus noise, the right channel at 0.9 × the left):
+- output is finite on both channels and not silent,
+- the sample peak of **both** output channels stays at or below −1 dBFS, the default −1 dBTP ceiling (the test checks sample peak; the true-peak bound is covered by the limiter and chain tests at 44.1–192 kHz),
+- the chain's algorithmic latency (Balanced) stays below 6 ms at ≥ 22.05 kHz and below 12 ms at the Bluetooth hands-free rates (the FIR oversampling delays are fixed in samples: 92 samples = 11.5 ms at 8 kHz).
 
 The test is "Chain: runs at every sample rate a headset may use" in `tests/test_engine.cpp`. Bit depth is handled by the OS or the device layer; internal processing is always 32-bit float.
 
@@ -42,6 +42,7 @@ The test is "Chain: runs at every sample rate a headset may use" in `tests/test_
 | **Atlas / Elite Atlas** (`turtle-beach-atlas`) | ✓ | ✓ (wireless models) | — | PC companion software: 3D / virtual surround, EQ | Turn off the software's virtual surround when using Flubsound's virtualiser |
 | **Elite Pro** (`turtle-beach-elite-pro`) | ✓ | ✓ via external USB amplifier / DAC | — | Amplifier / controller sound modes | The amplifier is the output device; keep its modes neutral |
 | **ROCCAT** headsets (Turtle Beach brand) (`turtle-beach-roccat`), e.g. Syn, Elo | ✓ | ✓ | where available | 7.1 / 3D audio and EQ in software | Keep them neutral |
+| **PDP** headsets (Turtle Beach brand) (`turtle-beach-pdp`), e.g. Airlite, LVL50 / LVL40 / LVL30, Victrix | ✓ (mostly wired console headsets: jack or controller output) | ✓ (wireless Airlite for Xbox: via the Xbox Wireless adapter) | — | Usually none | The jack or controller output is the output device; wireless Xbox models connect like other Xbox Wireless headsets |
 | **Xbox Wireless** models on PC (`xbox-wireless-headset`) | — | ✓ (Xbox Wireless adapter) | — | Windows Sonic / Dolby Atmos for Headphones | Turn off OS spatial sound with Flubsound's virtualiser |
 | Legacy **Ear Force** and any other Turtle Beach device (`turtle-beach-generic`) | ✓ | ✓ | ✓ | Any on-board enhancement | Generic Turtle Beach advice |
 
@@ -51,9 +52,9 @@ Families are matched on whole words in the endpoint name, such as "Headphones (S
 
 ## 3. What Flubsound does automatically
 
-Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/device-profiles.json`, and applied by the app's `EngineController` whenever the output device starts or changes. The JSON is compiled in as `core/src/engine/DeviceProfilesData.cpp` (regenerate with `python3 tools/scripts/embed-device-profiles.py`; `tests/test_device_profiles.cpp` fails if the two drift apart). A file at `<user application data>/Flubsound/device-profiles.json` replaces the built-in database, which lets the lab test new entries without a rebuild.
+Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/device-profiles.json`, and applied by the app's `EngineController` whenever the output device starts or changes. The JSON is compiled in as `core/src/engine/DeviceProfilesData.cpp` (regenerate with `python3 tools/scripts/embed-device-profiles.py`, check with its `--check` option; `tests/test_device_profiles.cpp` fails if the two drift apart). A file at `<user application data>/Flubsound/device-profiles.json` replaces the built-in database, which lets the lab test new entries without a rebuild.
 
-1. **Identify** the output device by name and family, and the connection type from the platform layer where it can tell (`AudioEndpoints::queryOutputTransport`: Windows endpoint enumerator name and form factor, macOS `kAudioDevicePropertyTransportType`; on Linux it returns *unknown*), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or ≤ 16 kHz mono ⇒ Bluetooth hands-free; a Bluetooth endpoint at ≤ 16 kHz is treated as hands-free too. When neither tells, the matched family's typical connection is assumed (Stealth, Atlas, ROCCAT, Xbox: USB; Recon, Elite Pro: analog), which is why the screenshot below reads "USB / wireless dongle".
+1. **Identify** the output device by name and family, and the connection type from the platform layer where it can tell (`AudioEndpoints::queryOutputTransport`: Windows endpoint enumerator name and form factor, macOS `kAudioDevicePropertyTransportType`; on Linux it returns *unknown*), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or ≤ 16 kHz mono ⇒ Bluetooth hands-free; a Bluetooth endpoint at ≤ 16 kHz is treated as hands-free too. When neither tells, the matched family's typical connection is assumed (Stealth, Atlas, ROCCAT, Xbox: USB; Recon, Elite Pro, PDP: analog), which is why the screenshot below reads "USB / wireless dongle".
 2. **Cap the true-peak ceiling:** −1 dBTP (wired, USB, 2.4 GHz), −2 dBTP (Bluetooth A2DP), −3 dBTP (Bluetooth hands-free). The cap is applied to the app's master limiter, so user presets are not modified.
 3. **Adapt to the sample rate:** every module derives its coefficients from the device rate, and alias-prone processing (the air exciter) is disabled below 42 kHz.
 4. **Advise:** show the profile's guidance in the app, most important first. A banner under the header (`app/Source/ui/DeviceAdviceBanner.*`) appears when there is something device-specific to say (a recognised profile, or a Bluetooth / hands-free connection). It names the recognised family, the connection and the ceiling in force, shows the top piece of advice (the tooltip lists all of it), and offers the suggested preset with one click (*Use Competitive FPS*) when that preset is not already loaded. *Details* opens Settings, whose Audio page summarises the device, ceiling and suggested preset with the first two messages. The banner can be dismissed per output device for the session. The messages cover:
@@ -96,7 +97,7 @@ For each family, and for each connection type the family supports, a lab entry b
 | 5 | Headset power off/on, transmitter unplug/replug, PC sleep/resume | Audio resumes on the headset within 2 s where the OS reports the device change (within the 5 s rescan period otherwise), no crash, no stuck silence |
 | 6 | Bluetooth A2DP ↔ hands-free switch (open the mic in a call app) | Engine re-prepares at 16/8 kHz and back without artefacts; the advice banner updates |
 | 7 | Game/Chat dual endpoints (where present) | Game via Flubsound, Chat direct, and the balance control works |
-| 8 | Latency measurement (loopback impulse) | Added latency ≤ 12 ms (Balanced) / ≤ 10 ms (Low Latency) on USB / 2.4 GHz (the R1.1 target; estimates in `01-architecture.md` §5.2) |
+| 8 | Latency measurement (loopback impulse) | Added end-to-end latency on USB / 2.4 GHz, over the output path Flubsound uses (virtual driver once built; state the capture path otherwise): **≤ 10 ms in Low Latency** (the R1.1 target); Balanced recorded against its ≈ 12–13 ms estimate, the upper edge of R1.1. Budget and scopes: `01-architecture.md` §5 (process-loopback and PipeWire capture add their own buffering, §5.3). Bluetooth links are measured but excluded, since their codec adds 100–300 ms |
 | 9 | Listening check with on-board DSP neutral vs on | Advice text matches the observed stacking behaviour |
 
 The lab list and results live alongside the QA matrix described in `docs/07-roadmap.md`: work item 1.10 (device matrix, including every Turtle Beach family on each of its connection types) and the "Compatibility" row of §7.

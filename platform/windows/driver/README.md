@@ -4,8 +4,13 @@ Status: **design, not implemented.** The C header
 [`FlubVirtualAudioShared.h`](FlubVirtualAudioShared.h) is the only code here.
 It fixes the user/kernel contract (control block layout, IOCTL codes, endpoint
 ids) so the engine side can be written and unit-tested before the driver
-exists. No engine code includes it yet; today the Windows app feeds its strips
-from per-process loopback capture or from a virtual cable on the device input.
+exists. No engine code includes it yet. The unit tests do:
+`tests/test_driver_shared.cpp` checks its constants, IOCTL codes, ring index
+maths and the `Generation` sequence lock on every platform, and
+`tests/test_driver_shared_c.c` compiles it as strict C89 (GCC / Clang builds)
+and compares the C struct layout with C++. Today the Windows app feeds its
+strips from per-process loopback capture or from a virtual cable on the device
+input.
 
 ---
 
@@ -226,22 +231,56 @@ the engine.
 
 ## 6. Latency budget (48 kHz)
 
-| Stage | Default (10 ms shared periods, Balanced profile) | Low latency (128-frame packets, `IAudioClient3`, Low Latency profile) |
-|---|---|---|
-| audiodg renders ahead into the virtual buffer | 10.0 ms | 2.67 ms |
-| Engine pickup alignment (avg ½ output period) | 5.0 ms | 1.33 ms |
-| Engine DSP: strip chain + master limiter (`MixEngine::getLatencySamples()`; 192 + 68 / 100 + 68 samples) | 5.4 ms | 3.5 ms |
-| Output WASAPI period on the real device | 10.0 ms | 2.67 ms |
-| Device FIFO / codec (typical USB or HDA) | ~2 ms | ~2 ms |
-| **Total, application to ear** | **≈ 32 ms** | **≈ 12 ms** |
+The project keeps one latency budget, in
+[`docs/01-architecture.md` §5](../../../docs/01-architecture.md#5-latency-budget).
+The driver path is the one it estimates; the figures below are the same, with
+the driver-specific meaning of each row. Scope labels: **chain** =
+`ProcessingChain::getLatencySamples()`, **app engine** =
+`MixEngine::getLatencySamples()` (largest strip + master limiter), **added
+end-to-end** = what Flubsound adds between the application and the ear on top
+of the application's normal output path.
 
-Without the zero-copy path, the engine would record each virtual endpoint
-through WASAPI (loopback or a capture pin). That adds one more audiodg pass
-and one capture period plus alignment: **+10–15 ms** at the default and
-+3–4 ms in low-latency mode. It also costs extra CPU for the additional
-mix/SRC pass. The goal for the Game path is **≤ 15 ms** in low-latency mode;
-audio lagging the picture becomes noticeable in fast games above about
-20 ms.
+| Component | Scope | Low Latency profile, exclusive (or 128-frame) output | Balanced profile, `IAudioClient3` shared output |
+|---|---|---|---|
+| Read safety margin behind `WritePosition` (audiodg renders into the virtual buffer one packet ahead) | I/O | ~1 ms | ~1 ms |
+| Engine block (128 frames), pulled from the output device callback (§4.3) | I/O | 2.7 ms | 2.7 ms |
+| Strip chain | chain | 100 smp = 2.1 ms | 192 smp = 4.0 ms |
+| Master true-peak limiter (0.5 ms + 20 when every strip is Low Latency, else 1 ms + 20) | app engine − chain | 24 + 20 = 44 smp = 0.9 ms | 48 + 20 = 68 smp = 1.4 ms |
+| Output WASAPI period on the real device (double-buffered) | I/O | ~2.7 ms | ~3–4 ms |
+| **Added end-to-end (estimate)** | added | **≈ 9.5 ms** | **≈ 12–13 ms** |
+
+The app engine total is 100 + 24 + 20 = **144 samples = 3.0 ms** in Low
+Latency and 192 + 48 + 20 = **260 samples ≈ 5.4 ms** in Balanced
+(`MixEngine::getLatencySamples()`, asserted by the test *MixEngine: master
+look-ahead follows the strips' latency profiles (0.5 ms only when all are
+Low Latency)*).
+
+**Goal (R1.1): added end-to-end latency under 10–12 ms.** The Low Latency
+profile is the one that meets it (≈ 9.5 ms, under 10 ms); Balanced sits at
+the upper edge (≈ 12–13 ms). Every end-to-end figure here is an estimate until
+the driver exists and the loopback measurement (roadmap item 1.2, device-lab
+test 8 in `docs/10-headset-compatibility.md` §5) has run.
+
+What sits outside the budget:
+
+- **Stages that exist without Flubsound.** The application's own buffer into
+  audiodg, the audiodg mix, and the device's FIFO / codec (~2 ms on typical
+  USB or HDA hardware) are part of the application's normal path, so they are
+  not *added* latency. Measured application to ear, they come on top of the
+  table.
+- **Classic 10 ms shared periods.** With 10 ms periods on the virtual endpoint
+  and the output device, the engine block and the output buffering each grow
+  to about 10 ms and the added total roughly doubles (≈ 25 ms, estimate),
+  well outside the target. The installer should therefore leave the default
+  device type (`IAudioClient3` low-latency shared mode) in place.
+- **Without the zero-copy path.** Recording each virtual endpoint through
+  WASAPI (loopback or a capture pin) instead of the shared buffer adds one
+  more audiodg pass and one capture period plus alignment: **+10–15 ms** with
+  10 ms periods and +3–4 ms in low-latency mode, and extra CPU for the
+  additional mix / SRC pass. Today's no-driver path, per-process loopback
+  capture, is of this kind: its drift FIFO alone holds 612 frames = 12.75 ms
+  with 10 ms capture packets and 128-frame blocks (`docs/01-architecture.md`
+  §5.3). That is the main reason the driver exists (§1).
 
 ## 7. INF and installation
 

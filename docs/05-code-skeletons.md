@@ -538,7 +538,8 @@ private:
     std::array<ModuleSlot, kNumSlots> slots;
     // ... gain smoothers, AutoLevel, AutoDrive, SafetyGovernor, LoudnessMatch,
     //     virtMix + foldScratch (20 ms virtualiser <-> downmix crossfade),
-    //     global-bypass dry buffer + DelayLine, meters, MeterBus, AnalyzerTaps,
+    //     global-bypass dry buffer + DelayLine + dryLimiter (TruePeakLimiter on the reference),
+    //     meters, MeterBus, AnalyzerTaps,
     //     publishedEffective (std::atomic<float>[kNumParams], read by effectiveValue())
 };
 ```
@@ -596,7 +597,19 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             totalLatency += slots[static_cast<size_t> (s)].latencySamples();   // [3]
 
     dryBuffer.setSize (2, maxB);
-    dryDelay.prepare (2, totalLatency);                                // global-bypass reference
+    // The bypass reference's safety limiter lives inside the chain latency:     [17]
+    // up to 1 ms look-ahead plus the 4x detector delay when the latency allows
+    // (every profile at 22.05 kHz and above), sample-peak otherwise.
+    {
+        const int detector = TruePeakDetector::kDelay;                          // 20
+        const bool truePeak = totalLatency >= detector + 8;
+        const int lookahead = truePeak ? std::min (totalLatency - detector, std::max (1, static_cast<int> (std::lround (0.001 * sr))))
+                                       : totalLatency;
+        dryLimiter.setTruePeakDetection (truePeak);
+        dryLimiter.setLookaheadMs (static_cast<float> (1000.0 * lookahead / sr));
+        dryLimiter.prepare ({ sr, maxB, 2 });
+    }
+    dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples())); // global-bypass reference
     foldScratch.setSize (config.inputChannels, maxB);
     virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) ? 1.0f : 0.0f);
     inputGain.reset (sr, 20.0f, dbToGain (e[InputGainDb]));
@@ -711,19 +724,36 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
 
     if (bypassMix.getCurrent() > 0.0f || bypassMix.isSmoothing())
     {
+        // The per-block cap above keeps the match gain sensible, but a new,
+        // louder dry peak can arrive while the gain is still high: the
+        // reference therefore passes a true-peak limiter at the ceiling.   [17]
+        if (! dryLimiterRunning)
+        {
+            dryLimiter.reset();                                                  // cold start: silent for its latency
+            dryLimiterRunning = true;
+        }
+        for (int i = 0; i < n; ++i)
+        {
+            const float dg = dryMatchGain.next();                                // 50 ms linear
+            for (int c = 0; c < 2; ++c)
+                dry.channel (c)[i] *= dg;
+        }
+        dryLimiter.process (dry);                                                // @ max.ceiling, its latency is part of totalLatency
         for (int i = 0; i < n; ++i)
         {
             const float b = bypassMix.next();                                    // 30 ms linear
-            const float dg = dryMatchGain.next();                                // 50 ms linear
             for (int c = 0; c < 2; ++c)
             {
                 float* w = st.channel (c);
-                w[i] += b * (dg * dry.channel (c)[i] - w[i]);
+                w[i] += b * (dry.channel (c)[i] - w[i]);
             }
         }
     }
     else
+    {
+        dryLimiterRunning = false;                                               // only runs while bypass is engaged
         dryMatchGain.skip (n);
+    }
 
     // ---- 8. Output meters / analyser ----
     publishMeters (st, n);                                                       // relaxed atomic stores
@@ -744,6 +774,7 @@ void ProcessingChain::applyParameters() noexcept
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
     const bool binaural = config.inputChannels > 2 && on (e, VirtualizerOn);
     // ... input/output gain targets, AutoLevel, bypassMix target,
+    //     dryLimiter.setParams ({ e[MaxCeilingDb], 80.0f, true }) (ceiling, release ms, auto release),
     //     virtMix target (virtualizer reset() when switched on from fully off), gate
 
     for (int b = 0; b < kEqBands; ++b)                                          // ---- Parametric EQ ----
@@ -803,7 +834,7 @@ flowchart LR
     F --> G["9 slots in order"]
     G --> H["output gain"]
     H --> I["SafetyGovernor · AutoDrive ·<br/>LoudnessMatch (next block)"]
-    I --> J["global bypass crossfade"]
+    I --> J["global bypass crossfade<br/>(match gain → dryLimiter)"]
     J --> K["MeterBus · analyser taps"]
     I -.-> C
 ```
@@ -819,7 +850,7 @@ flowchart LR
 | Macro 1–5 | `macro.1` … `macro.5` | 0 … 1 | 0 | % | Music: Punch, Width, Clarity, Loudness, Warmth. Gaming: Footsteps, Positional, Impact, Detail, Voice & Score. |
 | Auto Level | `autolevel.on` | off / on | off | toggle | Gated-LUFS input levelling: ±12 dB, slewed +1 dB/s up and −4 dB/s down. |
 | Auto Level Target | `autolevel.target` | −30 … −10 | −18 | LUFS | AutoLevel target. |
-| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | Global bypass plays the dry path at the wet loudness (±12 dB, 3 dB/s). A raise is capped so the held dry peak stays under `max.ceiling`. |
+| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | Global bypass plays the dry path at the wet loudness (±12 dB, 3 dB/s). A raise is capped so the held dry peak stays under `max.ceiling`, and the reference is then true-peak limited at `max.ceiling` (decision 17). |
 | Bypass All | `bypass` | off / on | off | toggle | 30 ms crossfade to the latency-aligned dry reference. |
 | Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice (**structural**) | Sets the structural settings of §5.2. Takes effect only through `prepare()`. |
 | Module enables | `gate.on`, `eq.on`, `dyneq.on`, `bass.on`, `clarity.on`, `sat.on`, `spatial.on`, `virt.on`, `comp.on`, `max.on` | off / on | gate off, eq on, dyneq on, bass on, clarity on, sat off, spatial on, virt on, comp off, max on | toggle | `ModuleSlot::setActive()`: 20 ms latency-compensated crossfade. `gate.on` has an effect only in the Quality profile (the only one with the gate in the chain). `virt.on` has no slot: it chooses virtualiser vs downmix for 6/8-channel input, with a 20 ms crossfade between the two folds (decision 16). |
@@ -839,16 +870,17 @@ flowchart LR
 4. The NaN/Inf guard costs one multiply-add per sample: `x * 0` is 0 for any finite `x` and NaN for Inf/NaN, so the sum is non-finite iff any sample is. The whole chain is `reset()` rather than trying to repair individual modules.
 5. **One snapshot per block.** All modules in a block see one coherent parameter set.
 6. `applyParameters()` pushes every value into every module every block. The modules' early-return on unchanged values makes that cheap, and the chain has no change-tracking state that could get out of sync.
-7. The global-bypass reference is taken **after** input gain, AutoLevel and the virtualiser/downmix. "Bypass" therefore compares the enhancement, not the level-matching or the 7.1 fold. It is delayed by `totalLatency`, so toggling bypass never shifts audio in time.
+7. The global-bypass reference is taken **after** input gain, AutoLevel and the virtualiser/downmix. "Bypass" therefore compares the enhancement, not the level-matching or the 7.1 fold. It is delayed by `totalLatency` in total (the `dryDelay` line plus the `dryLimiter` latency, decision 17), so toggling bypass never shifts audio in time.
 8. The output gain range tops out at 0 dB: nothing after the maximizer can push the output over the ceiling.
 9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipping".
-10. Loudness matching may *raise* the dry path. The raise is capped so that the held dry peak (instant attack, ~2 s release) stays below `max.ceiling`, which keeps the reference out of clipping.
+10. Loudness matching may *raise* the dry path. The raise is capped so that the held dry peak (instant attack, ~2 s release) stays below `max.ceiling`. The cap is evaluated once per block and the gain ramps over 50 ms, so on its own it cannot stop a new, louder dry peak that arrives while the gain is still high; decision 17 does.
 11. The governor scale is applied inside `MacroMap::apply`, on the governed entries only.
 12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands()`). In Gaming they are footstep, footstep-body, anti-masking and voice bands, scaled by *Footsteps* (M1) and *Voice & Score* (M5). In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
 13. Gaming correctness beats spaciousness: crossfeed is forced to 0 in Gaming mode. With binaural (virtualised) input, width, space and crossfeed are forced neutral.
 14. AutoDrive's value is ≤ 0, so it can only *reduce* the drive the user or macros asked for.
 15. **Glue floor, only while glue is armed.** Glue is armed when its base value is above 0, or when a macro source that can raise it is above 0 in the current mode (`MacroMap::isArmed()`: Boost Intensity or *Loudness* in Music, even before the entry's start point). While armed, `kGlueFloor = 0.001` keeps the maximizer's 3-band splitter engaged. Switching glue fully off and on crossfades the input against its own all-pass-shifted band sum, which comb-nulls 120 Hz and 4 kHz for the fade. Without the floor that would happen every time Boost Intensity crosses its glue start point (40 %); 0.001 of 2:1 band compression is inaudible. When glue is disarmed the floor is not applied and the splitter is out of the path, because its all-pass rotation raises the crest factor of flat-topped (mastered) material by 1–3 dB (source comment), which the limiter would otherwise have to take back.
 16. Toggling `virt.on` on 6/8-channel input never clicks. For 20 ms both folds run and are crossfaded linearly (`virtMix`), since binaural render and downmix differ in level and timing (ITD, head shadow). Switching the virtualiser on from fully off first `reset()`s it, so it starts from silence rather than stale history.
+17. **The bypass reference has its own true-peak limiter.** `dryLimiter` (a `TruePeakLimiter` at `max.ceiling`, 80 ms auto release) limits the matched reference, so the ceiling holds in bypass in every host, including the plug-in and the CLI, which have no master limiter. It fits inside the latency the dry path needs anyway: 1 ms look-ahead + the 20-sample detector = 68 samples at 48 kHz, and `dryDelay` shrinks by the same amount, so no latency is added. It runs only while bypass is engaged (`bypassMix` above 0 or moving), which keeps its cost out of normal processing, and it is `reset()` every time it starts. Started cold, it outputs silence for its latency (≤ ~1.4 ms) at the very start of the 30 ms crossfade, where the dry weight is still below 5 %. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
 
 ---
 
@@ -2002,7 +2034,7 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
 
 The program below is a complete host. It creates a `ParameterStore` and a `ProcessingChain`, prepares them, sets a few parameters, processes blocks, reads meters, does an A/B comparison against the loudness-matched bypass, and applies a structural latency-profile change. It then runs the `MixEngine` multi-strip variant: a 7.1 Game strip in Gaming mode on the Low Latency profile, plus a stereo Music strip at −3 dB.
 
-**Verification.** It was compiled and run in the scratch directory against the repository's `core/`, with exactly:
+**Verification.** It was compiled and run in the scratch directory against the repository's `core/`, with exactly the command below; re-run against the current tree (with the bypass-reference limiter of §5.3), it prints the same output. The bank-B reference peaks at −1.99 dBFS, below the ceiling, so that limiter does not act here:
 
 ```bash
 g++ -std=c++20 -Icore/include example.cpp core/src/**/*.cpp -o example && ./example
@@ -2184,7 +2216,7 @@ mix: out peak -1.06 dBFS, deepest master limiter GR -1.57 dB
 
 | Piece | Test file | Representative tests |
 |---|---|---|
-| `ParameterStore`, `MacroMap`, `ModuleSlot`, `ProcessingChain`, `MixEngine`, protection loops | [`tests/test_engine.cpp`](../tests/test_engine.cpp) | *ParameterStore: clamping, banks, snapshot, version* · *MacroMap: Boost Intensity is staged and governed* · *ModuleSlot: bypassed slot is a pure latency-compensated delay and toggling is click-free* · *Chain: latency per profile and constant under module bypass* · *Chain: everything bypassed = input delayed by the chain latency (bit-transparent path)* · *Chain: full Music boost on a hot programme never exceeds the ceiling* · *Chain: process() is allocation-free in every mode and profile* · *MixEngine: strips are summed, padded to equal latency and master-limited* |
+| `ParameterStore`, `MacroMap`, `ModuleSlot`, `ProcessingChain`, `MixEngine`, protection loops | [`tests/test_engine.cpp`](../tests/test_engine.cpp) | *ParameterStore: clamping, banks, snapshot, version* · *MacroMap: Boost Intensity is staged and governed* · *ModuleSlot: bypassed slot is a pure latency-compensated delay and toggling is click-free* · *Chain: latency per profile and constant under module bypass* · *Chain: everything bypassed = input delayed by the chain latency (bit-transparent path)* · *Chain: full Music boost on a hot programme never exceeds the ceiling* · *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* · *Chain: process() is allocation-free in every mode and profile* · *MixEngine: strips are summed, padded to equal latency and master-limited* |
 | `LoudnessMaximizer` | [`tests/test_maximizer.cpp`](../tests/test_maximizer.cpp), [`tests/test_transparency.cpp`](../tests/test_transparency.cpp) | *softClip is odd, continuous, monotonic, identity below the knee and never exceeds t* · *latencySamples() = clip oversampler + limiter latency, constant with the clipper off* · *with 18 dB drive the ceiling holds on noise and drum-like programme (sample and true peak)* · *clip-energy telemetry equals the header formula* · *the maximizer's oversampled clipper does not droop the top octave* |
 | `TruePeakLimiter` | [`tests/test_limiter.cpp`](../tests/test_limiter.cpp) | *latencySamples() = lookahead + detector delay, and a quiet impulse arrives exactly that late* · *gain matches a brute-force model of the header (deque, box filter, attack bound)* · *after 20 s of dense limiting with a 1 s release the gain lands exactly on 0 dB* |
 | `ParametricEq` | [`tests/test_parametric_eq.cpp`](../tests/test_parametric_eq.cpp) | *measured sine gain matches responseDb() for every band type* · *gain glides are as smooth as an ideal per-sample glide (no zipper, no stale state)* · *abrupt type / slope / enable changes are crossfaded without clicks* · *glides converge to the exact target design at every sample rate* |

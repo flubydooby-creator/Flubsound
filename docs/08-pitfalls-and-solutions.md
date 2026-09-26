@@ -6,7 +6,16 @@ Each pitfall below lists:
 - **Solution**: what Flubsound does, pointing at the code or design that implements it.
 - **Verification**: how we prove it stays fixed.
 
-Pitfalls are grouped by the four areas the brief singles out: latency, clipping/distortion, gaming sensitivity and platform issues. Engineering-process, product and safety pitfalls follow.
+The sections below are grouped by engineering area (A–F). The brief asks for pitfalls in four areas: **latency, stability, anti-cheat and audio quality**. This table maps each of them to the sections that cover it:
+
+| Brief area | Sections | What they cover |
+|---|---|---|
+| **Latency** | [A1](#a1-buffers-stack-up-silently)–[A6](#a6-hidden-resampling), [D2](#d2-exclusive-mode-locks-everyone-else-out-windows), [D9](#d9-linux-diversity) | The latency budget and its scopes, look-ahead creep, constant latency under bypass, lip-sync, Bluetooth, hidden resampling, WASAPI modes, the PipeWire quantum |
+| **Stability** (no dropouts, crashes or runaway state) | [B6](#b6-naninf-poisoning), [B7](#b7-denormals), [D1](#d1-clock-drift-between-clock-domains-windows--macos--linux), [D3](#d3-device-changes-hot-plug-sleepresume), [D5](#d5-power-management-windows-11-ecoqos-hybrid-cpus), [D7](#d7-undocumented-per-app-routing-api), [D10](#d10-asio-specifics), [E](#e-engineering--real-time-software) | NaN/Inf and denormals, clock drift and xruns, device changes, power management, fragile OS APIs, real-time contract, data races, object lifetime |
+| **Anti-cheat** | [C7](#c7-anti-cheat-and-tournament-rules), [D6](#d6-driver-signing--security-features), [D7](#d7-undocumented-per-app-routing-api) | What Flubsound touches (and never touches) in a game process, capture and routing APIs, hotkeys, driver signing |
+| **Audio quality** | [B1](#b1-inter-sample-peaks)–[B6b](#b6b-real-time-levelling-during-pauses-and-fade-outs), [C1](#c1-unlinked-dynamics-move-sounds)–[C6](#c6-frontback-confusion-in-virtual-surround), [C9](#c9-headset-on-board-dsp-stacking-with-flubsound-eg-turtle-beach-superhuman-hearing), [A6](#a6-hidden-resampling), [D4](#d4-double-processing-by-oem-enhancements), [F](#f-product--safety) | Inter-sample peaks, boost stacking, aliasing, pumping, DC, levelling, positional cues in games, double HRTF, stacked headset or OEM processing, fair (loudness-matched) comparison |
+
+Engineering-process, product and safety pitfalls (E, F) follow the platform section.
 
 ---
 
@@ -16,12 +25,12 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 - **Symptom:** "It adds 40 ms and ruins my aim." Each layer looks small, but together they are not.
 - **Root cause:** added latency is the sum of the virtual endpoint period, capture safety margin, processing block, algorithmic look-ahead, output device buffer and any sample-rate converters.
 - **Solution:**
-  1. An explicit **latency budget per profile** (documented in `01-architecture.md` §5): *Low Latency* ≈ 2.1 ms algorithmic, *Balanced* 4.0 ms, *Quality* (≈ 28 ms) for music/batch only; the desktop app's master limiter adds 0.9 ms in *Low Latency* (0.5 ms look-ahead when every strip runs that profile) and 1.4 ms otherwise.
+  1. One explicit **latency budget** with labelled scopes (`01-architecture.md` §5). **Chain** (per strip, algorithmic): *Low Latency* 100 samples ≈ 2.1 ms, *Balanced* 192 samples = 4.0 ms, *Quality* ≈ 28 ms for music/batch only. **App engine**: the desktop app's master limiter adds 44 samples (0.9 ms; 0.5 ms look-ahead when every strip runs Low Latency) or 68 samples (1.4 ms) otherwise. **Added end-to-end** (estimate, Windows driver path): ≈ 9.5 ms in *Low Latency*, the profile that meets the ≤ 10 ms target, and ≈ 12–13 ms in *Balanced*, the upper edge of R1.1. Today's capture paths add their own buffering on top (`01-architecture.md` §5.3): the Windows process-loopback FIFO targets 612 frames (12.75 ms) with 10 ms capture packets and 128-frame blocks, and a PipeWire null sink adds up to one quantum (≈ 21 ms at the common default of 1024).
   2. **Event-driven** WASAPI with small periods: `IAudioClient3` low-latency shared mode, or exclusive mode. Low-latency shared mode is the default when no device choice is saved: the app opens JUCE's *Windows Audio (Low Latency Mode)* type, falling back to *Windows Audio* if the device cannot be opened in that mode. A type picked in Settings > Audio is saved and wins.
   3. The **driver shared-memory path** (design), which reads the virtual endpoint's cyclic buffer directly instead of paying for a second WASAPI capture hop (`platform/windows/driver/`).
   4. A 128-frame block at 48 kHz.
   5. The latency shown in the UI is the *reported* total: device input + device output latency (as the driver reports them) + engine latency + the capture FIFO target. It is not measured.
-- **Verification:** `tests/test_engine.cpp` "Chain: latency per profile and constant under module bypass" asserts Balanced < 5 ms and Low Latency < 2.5 ms algorithmic latency. A loopback-impulse measurement tool (roadmap Phase 1, item 1.2) will measure real end-to-end latency per device.
+- **Verification:** `tests/test_engine.cpp` "Chain: latency per profile and constant under module bypass" asserts Balanced < 5 ms and Low Latency < 2.5 ms chain latency, and "MixEngine: master look-ahead follows the strips' latency profiles (0.5 ms only when all are Low Latency)" asserts the exact app engine totals (144 and 260 samples at 48 kHz). The end-to-end figures are estimates: a loopback-impulse measurement tool (roadmap Phase 1, item 1.2) and device-lab test 8 (`10-headset-compatibility.md` §5) will measure real added latency per device.
 
 ### A2. Look-ahead and linear-phase creep
 - **Symptom:** latency grows release after release.
@@ -157,11 +166,18 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 - **Solution:** a rear pinna-shadow high shelf (−4 dB at 4 kHz for |azimuth| > 90°), head-radius personalisation (`virt.headRadius`, 70–105 mm), early reflections for externalisation (`virt.room`), and measured HRIRs as the HQ renderer. The core already has a direct-form HRIR renderer (`HeadphoneVirtualizer::setHrirSet`, capped at 1024 taps); a SOFA loader, HRIR resampling and partitioned FFT convolution are on the roadmap.
 
 ### C7. Anti-cheat and tournament rules
-- **Symptom:** the game refuses to start, or the player is flagged.
-- **Solution:**
-  - Flubsound **never injects into or hooks game processes**. It only receives audio the OS delivers to its virtual endpoints.
-  - The planned driver is to be properly signed (attestation → WHQL) and HVCI-compatible (`platform/windows/driver/README.md` §8).
-  - Some tournaments restrict third-party audio processing, so the *Tournament Clean* preset limits processing to ceiling protection, and a single hotkey (default Ctrl+Alt+F, Windows and macOS) toggles full bypass on every strip.
+- **Symptom:** the game refuses to start, the player is kicked, or the account is flagged.
+- **Root cause:** kernel-level anti-cheats (for example Easy Anti-Cheat, BattlEye, Riot Vanguard, FACEIT) look for code injected into the game, hooks on its APIs, memory reads of its process, input hooks and overlays, and vulnerable or test-signed kernel drivers. Audio tools that work by injecting a DLL into the game or hooking its audio API look exactly like that.
+- **Solution: Flubsound stays outside the game process.** Everything below describes the code as it is, except where it says *design*.
+  - **No injection, no hooks, no overlay.** Flubsound loads no DLL into another process, installs no API or window hooks and draws no in-game overlay; its only windows are its own main window and tray icon. It never reads or writes another process's memory. It processes only audio the OS audio engine delivers to it.
+  - **Per-process loopback capture** (Windows 10 build 20348+ / Windows 11, `ProcessLoopbackCapture` in `app/Source/platform/PlatformServices_win.cpp`) is a documented audio-engine feature: `ActivateAudioInterfaceAsync` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` names the target by **process id**, and the Windows audio service hands Flubsound a copy of that process's (by default its whole process tree's) render audio. The capture needs no handle to the game and nothing is read from its memory. Separately, Flubsound opens a `PROCESS_QUERY_LIMITED_INFORMATION` handle, the lowest access right Windows offers, to read an executable's path for the session list and to check that a capture target exists. Some anti-cheats filter or log handle access to the protected game process; whether any of them objects to a limited-query handle has not been verified yet (QA matrix, roadmap item 2.12).
+  - **Per-app endpoint routing** through the undocumented `IAudioPolicyConfigFactory` (the interface behind Windows' own per-app output setting) is compiled in only with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (off by default) and runs only on explicit user action (D7). It is a user-mode call into the audio service's endpoint policy, the same setting the user can change in Settings; it does not touch the game process. Default builds open `ms-settings:apps-volume` instead.
+  - **Global hotkeys** use `RegisterHotKey` on Windows (a message-only window receives `WM_HOTKEY`) and Carbon `RegisterEventHotKey` on macOS. There is no low-level keyboard hook (`WH_KEYBOARD_LL`), no event tap and no raw-input monitoring, so Flubsound never sees keystrokes other than its own chords.
+  - **Driver path (design).** The planned "Flubsound Virtual Audio" driver is a WaveRT virtual audio device: to Windows and to games it is an ordinary audio endpoint, like a USB headset. It has to be signed properly: Microsoft attestation signing via Partner Center, WHQL / HLK later, and HVCI-compatible (`platform/windows/driver/README.md` §8). Two rules matter for anti-cheat:
+    - Test-signing mode (`bcdedit /set testsigning on`), used for driver development, is refused by the major kernel anti-cheats, so test-signed builds stay on dedicated development VMs and gaming QA only ever uses properly signed builds.
+    - The driver must never qualify for the Microsoft vulnerable driver blocklist (enforced by Windows with memory integrity / HVCI and Smart App Control; anti-cheats are known to keep similar lists of their own). Its control IOCTL maps only the driver's own dedicated pages, validates every length and index, and never returns a kernel pointer or exposes arbitrary memory (driver README §8, "Never become a BYOVD primitive").
+  - **Tournament rules.** Some tournaments restrict third-party audio processing, so the *Tournament Clean* preset limits processing to ceiling protection, and a single hotkey (default Ctrl+Alt+F, Windows and macOS) toggles full bypass on every strip.
+- **Verification:** nothing here is proven by a test yet. The anti-cheat compatibility matrix (EAC, BattlEye, Vanguard, VAC across the top competitive titles) is roadmap item 2.12 with the Phase 2 exit criterion "no anti-cheat conflicts across the top 20 competitive titles". Anti-cheat vendors do not publish their rules, so the points above lower the risk; they do not guarantee compatibility.
 
 ### C8. Voice chat problems
 - **Symptom:** your team hears echo, or your voice pumps.
@@ -181,7 +197,13 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 - **Symptom:** a click every few minutes, or slowly growing latency.
 - **Root cause:** the virtual endpoint (system timer) and the DAC crystal run at slightly different rates (±100 ppm is common).
 - **Solution:** `DriftCompensatedFifo` (`app/Source/engine/`), an SPSC FIFO feeding an adaptive cubic Hermite resampler whose ratio is steered by a PI controller on the FIFO fill level (target: 2 device blocks, raised to the largest recent capture burst + 1 block; critically damped at 0.15 rad/s; correction clamped to ±0.5 %). It serves the per-app capture streams. The driver design also allows *clock slaving*, where engine pulls advance the virtual endpoint position, removing drift at the source.
-- **Verification:** not automated yet. Planned: a unit test with simulated ±200 ppm drift over long runs (no underruns or overruns, bounded fill level) and the Phase 1 soak test.
+- **Verification:** automated in simulation, `tests/test_drift_fifo.cpp` (it compiles `DriftCompensatedFifo.cpp` into `flub_tests`, so it runs on every OS). An event-driven model pairs a capture clock at 48 kHz × (1 + drift) with a device clock at exactly 48 kHz:
+  - "DriftFifo: +-200 and +-2000 ppm drift, 10 ms and 441-frame packets, 128 and 512 blocks: settles clean": for every combination, after the loop settles, no underruns, overflows or dropped frames, the fill stays within ±1 ms of the target, the learned correction equals the true drift within 5 ppm, the output never steps more than a clean sine (no skipped or repeated frames), and `push()` / `pull()` never allocate;
+  - "DriftFifo: a capture stall is one counted underrun, then the stream recovers" (200 ms stall: exactly one underrun, click-free fade-out and fade-in, the learned drift survives the re-prime);
+  - "DriftFifo: a device stall drops the oldest audio (counted overflow), then the stream recovers" (300 ms and 1.5 s stalls: one counted overflow, the stalled audio dropped, back at the target fill);
+  - "DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (LFE dropped, -3 dB)" and "DriftFifo: a mono capture is duplicated to both channels of a stereo FIFO".
+
+  Not covered: real devices and long runs. The soak test (Phase 1, items 1.1 and 1.10) and driver clock slaving (design) remain.
 
 ### D2. Exclusive mode locks everyone else out (Windows)
 - **Solution (partly roadmap):** default to shared low-latency mode (`IAudioClient3`, JUCE's *Windows Audio (Low Latency Mode)*). Without a saved device choice the app opens that type, falling back to *Windows Audio* if the device cannot be opened in it; a mode chosen in Settings > Audio is saved and kept. Offering exclusive mode only when the virtual endpoints are the system default (so all apps flow through Flubsound) is roadmap.
@@ -242,7 +264,7 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 
 | Pitfall | Solution |
 |---|---|
-| "Louder = better" bias hides bad processing | Loudness-matched global bypass (the dry path is matched to the processed loudness and never pushed above the ceiling), plus A/B banks. |
+| "Louder = better" bias hides bad processing | Loudness-matched global bypass, plus A/B banks. The dry path is matched to the processed loudness; a raise is capped per block at the ceiling minus the held dry peak, and the reference then passes its own true-peak limiter at the ceiling, so it cannot overshoot even when a louder dry peak arrives while the match gain is high (test "Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives"). On programmes with high peaks the cap can leave the reference a little quieter than the processed signal. |
 | Hearing damage from boosted loudness | Output loudness readouts (momentary / short-term / integrated LUFS, true peak) exist, and defaults are conservative (Boost 0 %, ceiling −1 dBTP). Roadmap (`07-roadmap.md` items 2.11 and 1.6): a hearing-guard notice when sustained high short-term loudness is detected, and WHO safe-listening guidance (≈ 80 dB(A) for 40 h/week) cited in onboarding. |
 | Users stack Flubsound with other enhancers | Today: device-profile advice for headsets with their own DSP (C9). Roadmap: onboarding checks for other enhancement software, OEM APOs and spatial sound, with guidance to disable them. |
 | Too many knobs | A three-level UI: Boost Intensity + 5 mode macros → module cards with key controls → full parameter lists. Presets set base values and macros add staged contributions on top. |

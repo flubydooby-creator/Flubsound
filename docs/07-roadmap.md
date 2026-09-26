@@ -77,7 +77,7 @@ Beta                         [closed]      [public]      [1.0]
 | # | Work item | Estimate (person-weeks) | Notes |
 |---|---|---|---|
 | 1.1 | Engine host hardening: device selection, reconnect on hot-plug/sleep, drift-compensated input FIFO soak | 3 | `AudioEngineHost`, `DriftCompensatedFifo` |
-| 1.2 | Latency measurement tool (loopback impulse) + latency HUD | 1.5 | Validates the per-profile budgets on real devices. A *reported* latency readout (device + engine) already exists in the header and Settings > Processing |
+| 1.2 | Latency measurement tool (loopback impulse) + latency HUD | 1.5 | Turns the estimated budget of `01-architecture.md` §5 into measurements on real devices. A *reported* latency readout (device in + app engine + device out + capture FIFO target) already exists in the header and Settings > Processing |
 | 1.3 | Preset browser UX, user presets, A/B banks, loudness-matched bypass UX | 2 | |
 | 1.4 | DSP tuning pass with listening panel (8 listeners, 40 reference tracks, 6 games) | 3 | Macro curves, preset voicing |
 | 1.5 | Tray, hotkeys, start-with-Windows, close-to-tray | 1 | Tray icon, close-to-tray and global hotkeys (Windows, macOS; defaults Ctrl+Alt+F / M / arrows) exist; start-with-Windows and hardening remain |
@@ -89,8 +89,8 @@ Beta                         [closed]      [public]      [1.0]
 
 **Exit criteria**
 - 8-hour soak at 48 kHz / 128 frames with **zero** dropouts on three reference machines (desktop, gaming laptop, low-end laptop).
-- CPU under 3 % of one core on a mid-range laptop in the Balanced profile with all modules on.
-- Measured added latency under 10 ms (Balanced, shared low-latency WASAPI).
+- CPU for one strip in the Balanced profile at 48 kHz, on a mid-range laptop: under 3 % of one core at default settings, and under 7 % with Boost Intensity and all five Music macros at 100 % (glue armed). `03-dsp-design.md` §15.3 measures 2.7–2.8 % and 5.8–6.0 % for these two cases on a 2.1 GHz Xeon. The full-boost gate tightens to under 3 % once the SIMD work of item 1.9 lands; that figure is a goal, not yet a measurement.
+- Measured added end-to-end latency (loopback tool, item 1.2; 48 kHz, 128-frame blocks, shared low-latency or exclusive WASAPI): **≤ 10 ms in the Low Latency profile**, the R1.1 target. Balanced is measured and recorded against its ≈ 12–13 ms estimate, the upper edge of R1.1 (`01-architecture.md` §5.2). The third-party cable's own buffering is measured and reported separately, because Flubsound does not control it (`01-architecture.md` §5.3).
 - No true-peak overs across the full test corpus (automated).
 - Closed beta: ≥ 70 % of 200 users rate the sound "better than off" in loudness-matched blind A/B.
 

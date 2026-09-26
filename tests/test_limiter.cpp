@@ -1162,10 +1162,14 @@ TEST_CASE ("TruePeakLimiter [adversarial]: getGainReductionDb() reports the deep
 
 TEST_CASE ("TruePeakLimiter [adversarial]: CD-band programme (flat to 0.45 fs) stays within the documented true-peak bound")
 {
-    // Documents (and pins, against regressions) the detector-band limitation
-    // from the header: full-level noise that fills a CD-style passband up to
+    // Documents (and pins, against regressions) the detector-band scope from
+    // the header: full-level noise that fills a CD-style passband up to
     // 0.45 fs (19.8 kHz at 44.1 kHz), driven +12 dB. The sample peak is
-    // exact; the ideal-reconstruction peak is measured at up to ~+0.25 dB.
+    // exact; the ideal-reconstruction peak of these six cases measures
+    // -0.05 .. -0.03 dB re the ceiling (worst about -0.03 dB), so the bound
+    // below is the limiter's usual +0.15 dB true-peak tolerance with margin,
+    // and the programme must still land near the ceiling (a limiter, not a
+    // mute).
     auto lowPass045 = [] (const std::vector<float>& x) {
         constexpr int taps = 401, centre = taps / 2;
         constexpr double fc = 0.45;
@@ -1208,5 +1212,6 @@ TEST_CASE ("TruePeakLimiter [adversarial]: CD-band programme (flat to 0.45 fs) s
             CHECK (res.safetyClips == 0u);
             worst = std::max (worst, toDb (res.truePeak) + 1.0);
         }
-    CHECK_LE (worst, 0.35);
+    CHECK_LE (worst, 0.15);
+    CHECK_GE (worst, -0.5);
 }

@@ -42,7 +42,7 @@
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
 | Global hotkeys | Implemented on Windows (`RegisterHotKey`) and macOS (Carbon `RegisterEventHotKey`). Linux: not yet; the service reports "unsupported" | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
 | Per-app routing UI | Implemented. Backend support differs per OS (§8) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
-| Headless screenshot driver (incl. `--device`) | Implemented; used by CI | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
+| Headless screenshot driver (incl. `--device`) | Implemented; used by CI: the `app` job's Linux step renders three screenshots under `xvfb-run` and uploads them as the `screenshots` artifact (green in CI run 36247109446; nothing is compared against a reference image) | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
 | Custom plug-in editor sharing these components | **Roadmap** 2.9. Today the plug-in uses JUCE's generic editor plus a toolbar (§10) | `plugin/Source/PluginEditor.*` |
 | Batch processing UI | **Roadmap** 2.10. Today: `flubsound-cli` | `tools/flubsound-cli` |
@@ -633,7 +633,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 |---|---|---|---|---|---|
 | Mode | `mode` | Music, Gaming | Music | choice | Selects the macro set, the dynamic-EQ mode bands and the accent. Fresh strips named "Game" or with more than 2 channels start in Gaming |
 | Bypass All | `bypass` | off / on | off | toggle | Latency-aligned, click-free global bypass of a strip. Driven by the master Bypass for all strips |
-| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | The bypass path gets the loudness-match gain, capped so the dry signal never exceeds the ceiling |
+| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | The bypass path gets the loudness-match gain (a raise capped per block at the ceiling minus the held dry peak); the reference then passes the chain's bypass-reference true-peak limiter at `max.ceiling`, so it never exceeds the ceiling (`03-dsp-design.md` §14.5) |
 | Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice, structural | Set in Settings › Processing on every strip and both banks. The engine re-prepares with a brief dropout |
 
 ### 6.2 `DeviceAdviceBanner` — headset and output-device advice
@@ -1198,6 +1198,7 @@ These describe the behaviour of the current code.
 | R4.3 | Music and Gaming preset system (UI side) | §6.1, §7.1 | `ui/HeaderBar.*`, `shell/TrayIcon.*` |
 | R4.4 | System tray + global hotkeys | §7 | `shell/TrayIcon.*`, `shell/HotkeyManager.*` |
 | R4.5 | Per-application profiles and routing | §6.10, §8 | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
+| R4.6 | Virtual audio device / cable support | §6.11 (Settings › Processing: **Device input**, with *Automatic (virtual cables / loopback only)* / *Always process the device input* / *Off*, and **Input feeds strip**), §8 (endpoint routing to the `Flubsound <Strip>` / `flubsound_<strip>` endpoints). The virtual devices themselves are designs (`platform/windows/driver/README.md`, `platform/macos/README.md`); the Linux null sinks exist (`platform/linux/`) | `ui/SettingsDialog.*` (`ProcessingPage`), `engine/EngineController.*` (`setDeviceInputMode`, `setDeviceInputStrip`, `looksLikeLoopbackDevice`: Flubsound, VB-Audio / "CABLE Output", VoiceMeeter, BlackHole, Soundflower, "loopback"), `engine/AudioEngineHost.*` (`setDeviceInputMap`) |
 | R2.10 | Per-module bypass + A/B | §6.1, §6.9 | `ui/HeaderBar.*`, `ui/ModuleCard.*` |
 | R3.4 | Boost Intensity 0–100 % | §6.3 | `ui/BoostPanel.*` |
 | R6.1 | Headset-aware safety and setup advice | §6.2, §11 (`--device`) | `ui/DeviceAdviceBanner.*`, `shell/ScreenshotDriver.*` |

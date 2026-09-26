@@ -169,7 +169,8 @@ sequenceDiagram
   ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix (LFE dropped, −3 dB);
   │                                                   virt.on toggles crossfade the two folds over 20 ms
   │        ════════ from here on: STEREO ════════
-  ├─ dry tap ──► (delayed by total latency) ──► global bypass (loudness-matched reference)
+  ├─ dry tap ──► (delayed by total latency) ──► global bypass (loudness-matched reference;
+  │                                               its own true-peak limiter fits inside that delay)
   ├─ [slot] SpectralNoiseGate      (Quality profile only; STFT 1024)
   ├─ [slot] ParametricEq           10 bands, SVF, zero latency
   ├─ [slot] DynamicEq              4 user bands + 4 mode bands (footsteps / de-harsh …)
@@ -182,7 +183,8 @@ sequenceDiagram
   │                                 → true-peak limiter (4× detector shared with the meters)
   ├─ Output gain (trim, −24 … 0 dB)
   ├─ control loops: SafetyGovernor · AutoDrive · LoudnessMatch (feed the next block)
-  ├─ global bypass crossfade (latency aligned, loudness matched, ceiling-capped)
+  ├─ global bypass crossfade (latency aligned, loudness matched: match gain capped per block, then a
+  │                           dry-path true-peak limiter at max.ceiling, running only while bypass is engaged)
   └─ meters (peak/RMS/TP/LUFS M·S·I·LRA/correlation) · analyser tap → out (2 ch)
 ```
 
@@ -190,7 +192,7 @@ sequenceDiagram
 1. **Gate first.** Enhancement stages must not amplify hiss or hum they were never meant to see.
 2. **Corrective before creative.** Static EQ fixes tonal balance. The dynamic EQ then reacts to that corrected balance and controls masking and resonances *before* the additive enhancers (bass, clarity, saturation) run, so they do not trigger extra dynamic cuts.
 3. **Harmonics before width.** Saturation glues the generated harmonics. The spatializer then shapes the final tonal image, and only its side-channel.
-4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it adds gain: the output trim can only attenuate (its range ends at 0 dB), and the loudness-matched bypass is capped so the dry reference stays below the ceiling.
+4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it adds gain: the output trim can only attenuate (its range ends at 0 dB). The loudness-matched bypass reference is protected separately: its match gain is capped once per block at `max.ceiling` minus the held dry peak, and because a new, louder dry peak can still arrive while that gain is high, the reference then passes its own `TruePeakLimiter` at `max.ceiling` (`dryLimiter` in `ProcessingChain`). That limiter fits inside the chain latency the dry path is delayed by anyway (up to 1 ms look-ahead + the 20-sample detector, so no latency is added), runs only while bypass is engaged, and starts cold on engagement: it outputs silence for its own latency (≤ ~1.4 ms) at the start of the 30 ms crossfade, where the dry weight is still below 5 %. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three latency profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
 
 ### 4.3 Control flow per audio block
 
@@ -223,7 +225,7 @@ flowchart LR
 - **Protection loops** close around the output (`core/src/engine/Protection.cpp`):
   - The SafetyGovernor keeps the ~3 s average limiter gain reduction above −6 dB and the clip-energy ratio below −30 dB. Over budget, its scale falls at 15 %/s (minimum 0.3); comfortably under budget (1.5 dB hysteresis) it recovers at 3 %/s.
   - AutoDrive can only *reduce* maximizer drive (0 … −24 dB, ≤ 2 dB/s, 0.5 LU dead band), towards a LUFS target.
-  - LoudnessMatch computes the fair-comparison gain for the bypass path (±12 dB, 3 dB/s).
+  - LoudnessMatch computes the fair-comparison gain for the bypass path (±12 dB, 3 dB/s; a raise is capped at `max.ceiling` minus the held dry peak, and the dry-path limiter above catches what the per-block cap misses).
   - All three loudness loops use a gated 3 s measure that freezes in silence, pauses and fade-outs.
 
 ### 4.4 Parameter, preset & A/B flow
@@ -280,6 +282,21 @@ Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, 
 
 ## 5. Latency budget
 
+This section is the project's single latency model. The R1.1 row in `00-understanding-and-plan.md`, the exit criteria in `07-roadmap.md`, device-lab test 8 in `10-headset-compatibility.md` §5, the Windows driver design (`platform/windows/driver/README.md` §6) and the README all refer to it. Every figure carries one of three scope labels:
+
+| Scope | What it covers | Source | Status |
+|---|---|---|---|
+| **Chain** | One strip's algorithmic latency: look-aheads, oversampler FIRs, the STFT frame | `ProcessingChain::getLatencySamples()`; what the plug-in reports to its host and the CLI compensates | Exact, asserted by tests |
+| **App engine** | The largest strip's chain + the desktop app's master limiter | `MixEngine::getLatencySamples()` | Exact, asserted by tests |
+| **Added end-to-end** | Everything Flubsound puts between the application and the ear on top of the application's normal output path: engine + I/O buffering (+ capture buffering on a capture path) | §5.2 and §5.3 | **Estimate** until the loopback measurement (roadmap `07-roadmap.md` item 1.2; device-lab test 8 in `10-headset-compatibility.md` §5) |
+
+**Target (R1.1): added end-to-end latency under 10–12 ms.**
+- **Low Latency** is the profile that meets it: ≈ 9.5 ms estimated, under 10 ms.
+- **Balanced** (the default) sits at the upper edge: ≈ 12–13 ms estimated.
+- **Quality** (≈ 28 ms for the chain alone) is for music and batch use and is outside the target by design.
+
+These estimates are for the Windows virtual-driver path, which is designed but not built. The capture paths that feed the strips today add buffering of their own (§5.3).
+
 ### 5.1 Algorithmic latency per profile (48 kHz; the only latency sources in the chain)
 
 | Stage | Quality | Balanced (default) | Low Latency (competitive) |
@@ -289,24 +306,40 @@ Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, 
 | Compressor look-ahead | 3 ms = 144 smp | 1 ms = 48 smp | 0.5 ms = 24 smp |
 | Maximizer clipper oversampling | 4× HQ: 36 smp | 4× HQ: 36 smp | 2× short: 16 smp |
 | True-peak limiter look-ahead + detector | 2 ms + 20 = 116 smp | 1.5 ms + 20 = 92 smp | 0.5 ms + 20 = 44 smp |
-| **Total** | **1352 smp ≈ 28.2 ms** | **192 smp = 4.0 ms** | **100 smp ≈ 2.1 ms** |
+| **Chain total** | **1352 smp ≈ 28.2 ms** | **192 smp = 4.0 ms** | **100 smp ≈ 2.1 ms** |
 | *Desktop app only:* master true-peak limiter after the strip sum (`MixEngine`; 1 ms look-ahead + 20, or 0.5 ms + 20 when every strip runs Low Latency) | +68 smp | +68 smp | +44 smp |
 | **App engine total** (`MixEngine::getLatencySamples()`) | **1420 smp ≈ 29.6 ms** | **260 smp ≈ 5.4 ms** | **144 smp = 3.0 ms** |
 
-All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app applies one latency profile to all strips; `MixEngine::configure()` gives the master limiter the Low Latency look-ahead (0.5 ms) only when every strip runs that profile, and 1 ms otherwise, so a mix of profiles (possible in the engine) pays the larger master latency on top of the largest strip. The app's header shows device input + output latency + engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots.
+All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. The global-bypass reference's own true-peak limiter (§4.2) sits inside that dry-path delay, so it adds nothing either. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app applies one latency profile to all strips; `MixEngine::configure()` gives the master limiter the Low Latency look-ahead (0.5 ms) only when every strip runs that profile, and 1 ms otherwise, so a mix of profiles (possible in the engine) pays the larger master latency on top of the largest strip. The app's header shows device input + output latency + app engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots.
 
 ### 5.2 Added end-to-end latency (what the user feels), Windows driver path
 
-| Component | Low Latency + exclusive | Balanced + shared low-latency (`IAudioClient3`) |
-|---|---|---|
-| Read safety margin on the virtual endpoint | ~1 ms | ~1 ms |
-| Engine block (128 frames) | 2.7 ms | 2.7 ms |
-| Algorithmic, strip chain (§5.1) | 2.1 ms | 4.0 ms |
-| Master limiter (§5.1) | 0.9 ms | 1.4 ms |
-| Output buffering (device period, double-buffered) | ~2.7 ms | ~3–4 ms |
-| **Added total (estimate)** | **≈ 9.5 ms** | **≈ 12–13 ms** |
+This is the budget table. It is an estimate for the virtual-driver path (`platform/windows/driver/README.md` §6 uses the same figures).
 
-Low Latency + exclusive meets the ≤ 10–12 ms target; Balanced + shared low-latency sits at its upper edge. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why `IAudioClient3` low-latency shared mode or exclusive mode is recommended. Without a saved device choice the app opens JUCE's *Windows Audio (Low Latency Mode)* type (`AudioEngineHost::openDevice`), falling back to plain *Windows Audio* if the device cannot be opened in that mode; a type chosen in Settings > Audio (e.g. *(Exclusive Mode)*) is saved and always wins. The app's latency readout adds the device's reported input and output latencies to the engine latency (and the capture FIFO target, if any); a loopback measurement tool is roadmap (`07-roadmap.md` item 1.2). These figures are estimates for the driver path, which is not built yet.
+| Component | Scope | Low Latency + exclusive | Balanced + shared low-latency (`IAudioClient3`) |
+|---|---|---|---|
+| Read safety margin on the virtual endpoint | I/O | ~1 ms | ~1 ms |
+| Engine block (128 frames) | I/O | 2.7 ms | 2.7 ms |
+| Strip chain (§5.1) | chain | 2.1 ms (100 smp) | 4.0 ms (192 smp) |
+| Master limiter (§5.1) | app engine − chain | 0.9 ms (44 smp) | 1.4 ms (68 smp) |
+| Output buffering (device period, double-buffered) | I/O | ~2.7 ms | ~3–4 ms |
+| **Added total (estimate)** | added end-to-end | **≈ 9.5 ms: meets ≤ 10 ms** | **≈ 12–13 ms: upper edge of 10–12 ms** |
+
+- **Device mode.** Without a saved device choice the app opens JUCE's *Windows Audio (Low Latency Mode)* type (`IAudioClient3`, `AudioEngineHost::openDevice`), falling back to plain *Windows Audio* if the device cannot be opened in that mode; a type chosen in Settings > Audio (e.g. *(Exclusive Mode)*) is saved and always wins. Classic shared mode uses 10 ms periods, so the engine block and the output buffering each grow to about 10 ms and the added total roughly doubles (≈ 25 ms, estimate), well outside the target.
+- **Reported, not measured.** The app's latency readout adds the device's reported input and output latencies to the app engine latency (and the capture FIFO target, if any). A loopback measurement tool is roadmap (`07-roadmap.md` item 1.2), and the device-lab plan checks the budget per headset (`10-headset-compatibility.md` §5, test 8). Until then every end-to-end figure in the docs is an estimate.
+- **Other platforms.** The structure is the same on macOS (CoreAudio) and Linux (JACK / ALSA), with that backend's period in place of the WASAPI rows; they have not been estimated separately.
+
+### 5.3 Capture paths that exist today add their own buffering
+
+Until the virtual drivers exist, the strips are fed by a capture path. Each one adds buffering that the §5.2 budget does not contain, and on its own can use up the whole target:
+
+| Path | Extra buffering | Figure at 48 kHz | Consequence |
+|---|---|---|---|
+| Windows per-process loopback capture (`ProcessLoopbackCapture` → `DriftCompensatedFifo`) | The FIFO target is max(2 device blocks, capture packet + 1 block) + 4 frames, so the drift loop never runs dry (asserted in the `DriftFifo:` tests) | **612 frames = 12.75 ms** with typical 10 ms (480-frame) capture packets and 128-frame blocks | Exceeds the 10–12 ms target before any device buffering. Suits monitoring and "lite" setups, not competitive play |
+| Linux PipeWire null sinks (`flubsound_*`, §1) | The sink and its monitor add up to one graph quantum (`platform/linux/README.md`) | 1024 / 48000 = **21.3 ms** at the default quantum on many distributions; 256 / 48000 = 5.3 ms when forced (`pw-metadata -n settings 0 clock.force-quantum 256`) | Over the target at the default quantum. Setting `node.latency` for Flubsound's own nodes is roadmap |
+| A third-party virtual cable on the device input (VB-Cable, BlackHole, a JACK port) | The cable's own buffer plus the input device's period | Set by the cable and its driver, not by Flubsound | Has to be measured per setup |
+
+The app's latency readout includes the capture FIFO target of a running process-loopback capture, but not a PipeWire quantum or a cable's buffer.
 
 ---
 

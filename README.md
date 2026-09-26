@@ -3,7 +3,7 @@
 **Real-time, system-wide, per-application audio enhancement for music and video games.** Louder, punchier, clearer, wider and more immersive, with distortion, clipping and latency kept under strict control.
 
 - 🎚️ **Full processing chain:** true-peak loudness maximizer with soft clipper, 10-band parametric EQ, 4 + 4-band dynamic EQ, psychoacoustic bass engine, clarity/transient enhancer, tape/tube/digital saturation, mono-safe stereo widener/spatializer, 5.1/7.1 → binaural headphone virtualizer, look-ahead compressor (downward + upward), spectral noise gate.
-- 🎮 **Gaming Mode.** Macros for footsteps, positional focus, impact, detail and voice & score. Stereo-linked dynamics protect positional cues, anti-masking keeps footsteps audible after explosions, and a Low Latency profile (**~2.1 ms** chain latency at 48 kHz) serves competitive play.
+- 🎮 **Gaming Mode.** Macros for footsteps, positional focus, impact, detail and voice & score. Stereo-linked dynamics protect positional cues, anti-masking keeps footsteps audible after explosions, and a Low Latency profile serves competitive play: **~2.1 ms** chain latency at 48 kHz, 3.0 ms for the desktop app's engine including its master limiter, and an estimated ≈ 9.5 ms added end to end, inside the 10 ms target (Balanced, the default, is ≈ 12–13 ms). End-to-end figures are estimates until the loopback measurement on the roadmap; per-app capture paths add their own buffering ([latency budget](docs/01-architecture.md#5-latency-budget)).
 - 🎵 **Music Mode.** Macros for punch, width, clarity, loudness and warmth, with dynamic de-harsh, air and de-boom companions.
 - 🚀 **Boost Intensity (0–100 %).** One slider scales many modules in stages (clarity → bass → loudness). A **Safety Governor** backs it off before the limiter or clipper start to distort.
 - 🛡️ **Protection:** true-peak limiting on a 4× interpolated detector (−1 dBTP default), LUFS auto-level, loudness-matched bypass plus A/B parameter banks, NaN/denormal guards, and a master limiter after the strip sum in the desktop app.
@@ -91,6 +91,8 @@ Useful options:
 ---
 
 ## Batch processing & export (CLI)
+
+The build above puts the CLI at `build/tools/flubsound-cli/flubsound-cli` (`flubsound-cli.exe` on Windows; with a multi-config generator such as Visual Studio, under a `Release/` or `Debug/` sub-folder). The examples assume it is on your `PATH`: either call it by that path, or install it with `cmake --install build --prefix <dir>`, which puts it in `<dir>/bin` and the factory presets in `<dir>/share/flubsound/presets/factory`.
 
 ```bash
 flubsound-cli process -i song.wav -o song-enhanced.wav --preset "Punchy Pop" --boost 60 --target-lufs -12

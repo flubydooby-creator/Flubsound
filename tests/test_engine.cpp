@@ -9,6 +9,7 @@
 #include "flub/engine/ProcessingChain.h"
 #include "flub/io/PresetIO.h"
 
+#include <functional>
 #include <limits>
 #include <set>
 
@@ -561,6 +562,230 @@ TEST_CASE ("Chain: matched bypass never overshoots the ceiling when a louder dry
     }
 }
 
+namespace
+{
+/** Runs `buf` through `chain` in blocks; `afterBlock (endSample)` is called
+    after every block (to sample meters or change parameters). */
+void runChainWatching (ProcessingChain& chain, Planar& buf, int blockSize, const std::function<void (int)>& afterBlock)
+{
+    ScopedNoDenormals noDenormals;
+    const int n = buf.numSamples();
+    for (int pos = 0; pos < n; pos += blockSize)
+    {
+        const int len = std::min (blockSize, n - pos);
+        chain.process (buf.block (pos, len));
+        afterBlock (pos + len);
+    }
+}
+
+/** Largest |a[i] - b[i - delay]| over both channels for i in [from, to). */
+double maxDelayedError (const Planar& a, const Planar& b, int delay, int from, int to)
+{
+    double m = 0.0;
+    for (size_t c = 0; c < 2; ++c)
+        for (int i = std::max (from, delay); i < to; ++i)
+            m = std::max (m, static_cast<double> (std::abs (a.ch[c][static_cast<size_t> (i)] - b.ch[c][static_cast<size_t> (i - delay)])));
+    return m;
+}
+
+/** Maximizer-only strip (LowLatency profile keeps the long AutoDrive runs cheap). */
+void maximizerOnly (ParameterStore& s, float driveDb, bool autoDrive, float targetLufs)
+{
+    bypassAllModules (s);
+    s.set (LatencyProfile, static_cast<float> (LatencyProfileValue::LowLatency));
+    s.set (MaximizerOn, 1.0f);
+    s.set (MaxDriveDb, driveDb);
+    s.set (MaxAutoDrive, autoDrive ? 1.0f : 0.0f);
+    s.set (MaxTargetLufs, targetLufs);
+}
+} // namespace
+
+TEST_CASE ("Chain: AutoDrive pulls a hot drive down to the loudness target at <= 2 dB/s and settles near, not above, it")
+{
+    // +16 dB of maximizer drive on a programme at about -26 LUFS puts the
+    // output near -11 LUFS, 7 LU over a -18 LUFS target. AutoDrive
+    // (Protection.h) integrates the error of a gated 3 s loudness of the
+    // output at min(2, 0.5 |error|) dB/s with a 0.5 LU dead band, as a drive
+    // REDUCTION in [-24, 0] dB (drive = max(0, requested + reduction)).
+    constexpr float kDrive = 16.0f, kTarget = -18.0f;
+    constexpr int kBlockSize = 512;
+    const double blockSec = kBlockSize / kFs;
+    {
+        ParameterStore store; // reference: AutoDrive off stays far over the target
+        maximizerOnly (store, kDrive, false, kTarget);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlockSize, 2 });
+        auto buf = makeProgramme (48000 * 4, 0.15f);
+        runChain (chain, buf, kBlockSize);
+        CHECK_GE (chain.meters().shortTermLufs.load(), kTarget + 5.0f);
+        CHECK (chain.meters().autoDriveDb.load() == 0.0f);
+    }
+
+    ParameterStore store;
+    maximizerOnly (store, kDrive, true, kTarget);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlockSize, 2 });
+    // 30 s: behind the 3 s follower the loop is underdamped - it first
+    // undershoots the target by about 3 LU (around 10 s), then settles
+    // inside its dead band by about 20 s.
+    auto buf = makeProgramme (48000 * 30, 0.15f);
+    std::vector<float> reduction, shortTerm; // per block
+    runChainWatching (chain, buf, kBlockSize, [&] (int) {
+        reduction.push_back (chain.meters().autoDriveDb.load());
+        shortTerm.push_back (chain.meters().shortTermLufs.load());
+    });
+
+    // Never raises the drive, never beyond its range, never faster than 2 dB/s.
+    float prev = 0.0f;
+    double fastest = 0.0;
+    for (float r : reduction)
+    {
+        CHECK (r <= 0.0f);
+        CHECK (r >= -24.0f);
+        fastest = std::max (fastest, std::abs (r - prev) / blockSec);
+        prev = r;
+    }
+    CHECK_LE (fastest, 2.0 + 1e-3);
+    // Far over the target (error > 4 LU) the loop runs at exactly that limit...
+    const auto reductionAt = [&] (double seconds) { return reduction[static_cast<size_t> (seconds / blockSec)]; };
+    CHECK_NEAR (reductionAt (5.0) - reductionAt (2.0), -6.0, 0.3);
+    // ...and it settles inside its dead band, with drive to spare (the target
+    // is reached by the loop, not by the 0 dB drive floor).
+    CHECK_GE (shortTerm.back(), kTarget - 1.0f);
+    CHECK_LE (shortTerm.back(), kTarget + 0.75f);
+    CHECK_GE (kDrive + reduction.back(), 3.0f);
+    // Once the output has come down to the target it never climbs back over it
+    // (beyond the dead band and the meter's 3 s window).
+    size_t reached = 0;
+    while (reached < shortTerm.size() && ! (shortTerm[reached] > -100.0f && shortTerm[reached] <= kTarget + 0.75f))
+        ++reached;
+    REQUIRE (reached < shortTerm.size());
+    CHECK_LE (static_cast<double> (reached) * blockSec, 10.0);
+    for (size_t i = reached; i < shortTerm.size(); ++i)
+        CHECK_LE (shortTerm[i], kTarget + 0.75f);
+}
+
+TEST_CASE ("Chain: AutoDrive never raises the drive: below the target it is inert, and it stops at 0 dB drive (the input itself)")
+{
+    constexpr int kBlockSize = 512;
+    // 1. A quiet programme far below the target: the reduction stays exactly
+    //    0 and the output is bit-identical to AutoDrive off (it can only take
+    //    drive away, never add any).
+    Planar out[2] = { makeProgramme (48000 * 4, 0.05f), makeProgramme (48000 * 4, 0.05f) };
+    for (int autoDrive = 0; autoDrive < 2; ++autoDrive)
+    {
+        ParameterStore store;
+        maximizerOnly (store, 6.0f, autoDrive == 1, -14.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlockSize, 2 });
+        float deepest = 0.0f, highest = -100.0f;
+        runChainWatching (chain, out[autoDrive], kBlockSize, [&] (int) {
+            deepest = std::min (deepest, chain.meters().autoDriveDb.load());
+            highest = std::max (highest, chain.meters().autoDriveDb.load());
+        });
+        CHECK (deepest == 0.0f);
+        CHECK (highest == 0.0f);
+        CHECK (chain.meters().shortTermLufs.load() < -24.0f); // far below the -14 LUFS target
+    }
+    CHECK (maxDelayedError (out[1], out[0], 0, 0, out[0].numSamples()) == 0.0);
+
+    // 2. A target the programme exceeds even undriven (-20 LUFS vs -24): the
+    //    reduction passes the requested 6 dB, the applied drive floors at 0 dB
+    //    and the output is the untouched (delayed) input - AutoDrive never
+    //    attenuates below the unprocessed level.
+    ParameterStore store;
+    maximizerOnly (store, 6.0f, true, -24.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlockSize, 2 });
+    const auto in = makeProgramme (48000 * 8, 0.3f);
+    Planar buf = in;
+    float deepest = 0.0f;
+    runChainWatching (chain, buf, kBlockSize, [&] (int) { deepest = std::min (deepest, chain.meters().autoDriveDb.load()); });
+    CHECK_LE (chain.meters().autoDriveDb.load(), -6.0f);
+    CHECK_GE (deepest, -24.0f);
+    CHECK_LE (maxDelayedError (buf, in, chain.getLatencySamples(), 48000 * 6, buf.numSamples()), 1e-6);
+}
+
+TEST_CASE ("Chain: matched bypass reproduces the processed loudness within 0.5 LU; unmatched bypass is the input itself")
+{
+    // +10 dB maximizer drive on a steady, low-crest programme (peaks -25 dBFS):
+    // the processed output is 10 LU louder than the input and is never
+    // limited, and the matched reference (the input + 10 dB, peaks -15 dBFS)
+    // stays far below the ceiling, so neither the per-block ceiling cap nor
+    // the reference's own limiter is involved: this measures LoudnessMatch.
+    constexpr int kBlockSize = 512;
+    constexpr int kBypassAt = kBlockSize * 470; // ~4.9 s: followers settled, match gain slewed (3 dB/s)
+    constexpr int kTotal = kBlockSize * 800;    // ~3.4 s of bypass (> the 3 s short-term window)
+    Planar in (2, kTotal);
+    for (int i = 0; i < kTotal; ++i)
+    {
+        const double t = i / kFs;
+        const double env = 0.8 + 0.2 * std::sin (kTwoPi * 0.7 * t);
+        const double v = env * (0.5 * std::sin (kTwoPi * 110.0 * t) + 0.3 * std::sin (kTwoPi * 440.0 * t + 1.0) + 0.2 * std::sin (kTwoPi * 1760.0 * t + 2.0));
+        in.ch[0][static_cast<size_t> (i)] = static_cast<float> (0.06 * v);
+        in.ch[1][static_cast<size_t> (i)] = static_cast<float> (0.05 * v);
+    }
+
+    for (bool matched : { true, false })
+    {
+        ParameterStore store;
+        store.set (MaxDriveDb, 10.0f);
+        store.set (LoudnessMatchBypass, matched ? 1.0f : 0.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlockSize, 2 });
+        Planar buf = in;
+        float wetLufs = 0.0f, inLufs = 0.0f;
+        runChainWatching (chain, buf, kBlockSize, [&] (int end) {
+            if (end == kBypassAt)
+            {
+                wetLufs = chain.meters().shortTermLufs.load();
+                inLufs = chain.meters().inShortTermLufs.load();
+                store.set (BypassAll, 1.0f);
+            }
+        });
+        const float refLufs = chain.meters().shortTermLufs.load();
+        CHECK_GE (wetLufs - inLufs, 8.0f); // processing is clearly louder than the input
+
+        const int lat = chain.getLatencySamples();
+        const int from = kTotal - 48000 * 2; // the last 2 s, well after the 30 ms crossfade
+        if (matched)
+        {
+            CHECK_NEAR (refLufs, wetLufs, 0.5);
+            // The reference is the input times one gain: no processing, no limiting.
+            double xy = 0.0, xx = 0.0;
+            for (size_t c = 0; c < 2; ++c)
+                for (int i = from; i < kTotal; ++i)
+                {
+                    const double x = in.ch[c][static_cast<size_t> (i - lat)], y = buf.ch[c][static_cast<size_t> (i)];
+                    xy += x * y;
+                    xx += x * x;
+                }
+            // Here the processing is a pure +10 dB drive, so the loudness gap
+            // the reference has to close is exactly 10 LU.
+            const double g = xy / xx;
+            CHECK_NEAR (toDb (g), 10.0, 0.5);
+            double residual = 0.0, peak = 0.0;
+            for (size_t c = 0; c < 2; ++c)
+                for (int i = from; i < kTotal; ++i)
+                {
+                    const double y = buf.ch[c][static_cast<size_t> (i)];
+                    residual = std::max (residual, std::abs (y - g * in.ch[c][static_cast<size_t> (i - lat)]));
+                    peak = std::max (peak, std::abs (y));
+                }
+            CHECK_LE (residual, 0.01 * peak);
+            CHECK_LE (peak, dbToGain (-1.0f - 6.0f)); // far below the ceiling: no cap involved
+        }
+        else
+        {
+            // Unmatched: the reference is the input, sample for sample (delayed
+            // by the chain latency), at the input's loudness.
+            CHECK_LE (maxDelayedError (buf, in, lat, from, kTotal), 1e-6);
+            CHECK_NEAR (refLufs, chain.meters().inShortTermLufs.load(), 0.5);
+            CHECK_GE (wetLufs - refLufs, 8.0f);
+        }
+    }
+}
+
 TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-limited")
 {
     MixEngine mix;
@@ -785,7 +1010,10 @@ TEST_CASE ("Chain: runs at every sample rate a headset may use (8 kHz hands-free
             for (auto& c : buf.ch)
                 for (float v : c)
                     REQUIRE (std::isfinite (v));
-            CHECK_LE (peakAbs (buf.ch[0].data(), n), dbToGain (-1.0f) + 1e-6);
-            CHECK (rms (buf.ch[0].data() + n / 2, n / 2) > 1e-3);
+            for (const auto& c : buf.ch) // both output channels: ceiling held, audio present
+            {
+                CHECK_LE (peakAbs (c.data(), n), dbToGain (-1.0f) + 1e-6);
+                CHECK (rms (c.data() + n / 2, n / 2) > 1e-3);
+            }
         }
 }

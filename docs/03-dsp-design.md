@@ -48,7 +48,7 @@
 | Aspect | Rule (as implemented) | Source |
 |---|---|---|
 | Sample format | 32-bit `float`, planar, processed **in place** on an `AudioBlock`: an array of up to `kMaxChannels = 8` channel pointers plus the sample count. Sub-blocks are views, so they cost no allocation. | `common/AudioBlock.h` |
-| Double precision | Used where precision matters more than speed: <br>• filter *design* (`SvfCoeffs::make` computes in `double` and keeps `g`, `k` as `double` for exact response evaluation); <br>• FIR tap design (`FirDesign.h`, taps are then stored as `float`); <br>• `Biquad` coefficients and state (TDF-II); <br>• `MeanSquareFollower` state; <br>• the loudness gates' sums of squares. | `dsp/Svf.h`, `dsp/FirDesign.h`, `dsp/Biquad.h`, `dsp/EnvelopeFollower.h`, `engine/Protection.h` |
+| Double precision | Used where precision matters more than speed: <br>• filter *design* (`SvfCoeffs::make` computes in `double` and keeps `g`, `k` as `double` for exact response evaluation); <br>• FIR tap design (`FirDesign.h`, taps are then stored as `float`); <br>• `Biquad` coefficients and state (TDF-II); <br>• `MeanSquareFollower` state (so also the `LevelMeter` RMS and correlation and the `LoudnessFollower`s of the control loops); <br>• the loudness gates' sums of squares; <br>• `LoudnessMeter` energies (per-channel sums, the sub-block ring, the gating histogram); <br>• the `TruePeakLimiter` gain envelope (the release one-pole `gain` and its fast / slow / blend coefficients) and the box filter's running sum (`boxSum`, `boxLength`): a float one-pole with a long release stalls a few 1e−5 below its target; <br>• the `Compressor` gain computer's smoothing state (`gainDb`) and its attack, release and auto-release coefficients (the peak detector itself is float): a float one-pole with a coefficient near 1 − 1e−5 stalls up to ~0.7 dB short of its target; <br>• the `StereoSpatializer`'s output-correlation mean products. | `dsp/Svf.h`, `dsp/FirDesign.h`, `dsp/Biquad.h`, `dsp/EnvelopeFollower.h`, `analysis/LoudnessMeter.h`, `dsp/TruePeakLimiter.h`, `dsp/Compressor.h`, `dsp/StereoSpatializer.h`, `engine/Protection.h` |
 | Threading | `prepare()` runs off the audio thread and may allocate. `reset()`, `process()` and all setters run on the audio thread: `noexcept`, no allocation, no locks, no I/O, bounded time. | `dsp/Processor.h` |
 | Parameter push | `ProcessingChain::applyParameters()` calls every module setter **every block**. Each module sanitises the new values, compares them with the current set and returns early when nothing changed, so an unchanged parameter costs one comparison. | `engine/ProcessingChain.cpp` |
 | Sanitising | **First line, the `ParameterStore`:** `ParameterStore::set()` ignores NaN and keeps the current value; `Info::clamp()` maps NaN to the parameter's default; ±inf clamps to the range edge. A NaN from automation, a host or a script therefore never reaches a module through the store (test *ParameterStore: NaN is ignored, infinities clamp, and the chain stays finite*). <br>**Second line, each module** (for direct API use): values are clamped to the module's documented range, and ±inf clamps to the range edge. NaN handling differs by module: <br>• the previous value is kept by `BassEngine`, `ClarityEnhancer` and `TransientShaper`; <br>• the default is used by `ParametricEq` and `Saturator`; <br>• `DynamicEq` keeps the previous setting for **any** non-finite value, including ±inf. | `engine/Parameters.h`, `src/engine/Parameters.cpp`, per-module `sanitise()` |
@@ -326,7 +326,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
    - Quiet material therefore passes at unity gain.
 3. **Every boost is explicit and bounded.** Level-dependent boosts are *protected* (bass shelf), *tapered* at the noise floor (dynamic-EQ `BoostBelow`, presence) or *gated* (de-mud).
 4. **Loudness-adding macro contributions are governed.** The SafetyGovernor scales them back when the limiter or clipper work too hard (section 14).
-5. **Exactly one stage guarantees the ceiling:** the maximizer's true-peak limiter. Between stages the signal is float, may exceed 0 dBFS, and is never clipped. The only stage after the limiter, `output.gain`, can only attenuate (−24…0 dB).
+5. **Exactly one stage guarantees the ceiling on the processed path:** the maximizer's true-peak limiter. Between stages the signal is float, may exceed 0 dBFS, and is never clipped. The only stage after the limiter, `output.gain`, can only attenuate (−24…0 dB). The global-bypass reference, which skips the maximizer, has its own true-peak limiter at the same ceiling while bypass is engaged (§14.5, §14.6), and the desktop app adds a master limiter after the strip sum.
 
 ### 1.2 Signal flow (where gain can be added or removed)
 
@@ -346,6 +346,9 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
     ─► [Maximizer]   drive 0..+24 dB → glue (only while armed) → soft clipper → TRUE-PEAK LIMITER @ ceiling
                      (−12..0 dBTP, default −1)
     ─► output gain −24..0 dB (trim, attenuation only)
+    ─► global bypass crossfade (30 ms) with the dry reference (tapped after the fold, delayed by the chain latency):
+                     × match gain (±12 dB, a raise capped at max.ceiling − held dry peak) → TRUE-PEAK LIMITER @ max.ceiling
+                     (only while bypass is engaged; its latency is taken out of the dry delay, so none is added)
     ─► (desktop app only) Σ strips → master TP limiter −1 dBTP, 1 ms look-ahead (0.5 ms when every strip is Low Latency)
 ```
 
@@ -366,6 +369,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 | Saturation | wet make-up up to +12 dB (`sat.output`) | loud peaks (curve), −12 dB make-up | unity small-signal; see §6.3 for level behaviour | §6 |
 | Maximizer | drive up to +24 dB (+ governed macros) | limiter / clipper / glue reduction | **true-peak ceiling**, SafetyGovernor, AutoDrive (reduce only); the glue splitter is only in the path while glue is armed (§1.4) | section 11 |
 | Output gain (`output.gain`) | — (0 dB maximum) | −24 dB | trim applied **after** the maximizer, 20 ms ramp (see §1.4) | `ProcessingChain.cpp`, `Parameters.cpp` |
+| Matched-bypass reference (`bypass.matched`, only while `bypass` is engaged) | up to +12 dB (LoudnessMatch) | −12 dB | a raise is capped once per block at `max.ceiling` − held dry peak and ramped over 50 ms; the reference then passes its own `TruePeakLimiter` at `max.ceiling` (`dryLimiter`), which catches a louder dry peak that arrives while the gain is still high (§14.5) | `ProcessingChain.cpp`, `Protection.h` |
 
 ### 1.4 Headroom policy
 
@@ -379,6 +383,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
   - zero safety-clamp engagements. This check is meaningful at chain level: the maximizer's limiter count (`LoudnessMaximizer::getSafetyClipCount()`) is published every block as `MeterBus::safetyClipCount`.
 - **Factory presets hold it too.** *Factory presets: Boost Intensity and all macros at 100 % stay safe* (`tests/test_factory_presets.cpp`) renders every factory preset with every macro at 100 % and checks sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB and no safety clamp. Because the limiter shares the meters' interpolator and holds its gain under the interpolation kernel (section 10), the margin is not needed in practice: measured for this document on the test's own programme, the 24 presets at their own settings and at full macros (48 renders) read at most −1.048 dBTP on the 4× meter for a −1 dBTP ceiling (−2.05 dBTP for the −2 dBTP Bluetooth preset), with no safety clamp. `LoudnessMaximizer.h` records the same result: worst −1.04 dBTP at full macros.
 - **Output gain cannot break the guarantee.** `output.gain` is a trim of −24…0 dB applied after the limiter, so it can only lower the level below the ceiling.
+- **Neither can the matched bypass.** The loudness-matched bypass raises the dry reference, which never passes the maximizer. Its per-block cap (`max.ceiling` − held dry peak) is not enough on its own: the gain ramps over 50 ms, so a new, louder dry peak can arrive while it is still high. Before the fix below, CLI renders of pink noise with 55 Hz kicks under the Loudness macro peaked at −0.13 to +0.28 dBFS against a −1 dBTP ceiling. The reference therefore passes a dedicated `TruePeakLimiter` at `max.ceiling` (true-peak detection, 80 ms auto release) that fits inside the chain latency the dry path is delayed by anyway (§14.6), so every host (app, plug-in, CLI) now gets the ceiling in bypass too. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives*.
   - Hosts that run a single `ProcessingChain` (plug-in, CLI) therefore need no extra safety net. With `--ceiling` or `--target-lufs` the CLI switches the maximizer on, or warns if `max.on=off` was requested explicitly (`tools/flubsound-cli/CliOptions.cpp`); it also warns if the measured true peak of a render exceeds the ceiling by more than 0.1 dB (`OfflineRenderer.cpp`).
   - In the desktop app several strips, each at its own ceiling, can sum above it. The `MixEngine` master limiter (−1 dBTP, 1 ms look-ahead or 0.5 ms when every strip runs Low Latency, 50 ms auto release, `MixEngine.cpp`) catches that; its safety-clamp count is exposed as `MixEngine::getMasterSafetyClipCount()`.
 - **Glue is out of the path unless armed.** The maximizer's 3-band glue splitter is an all-pass, and a phase rotator raises the crest factor of flat-topped (mastered) material, which the limiter would then have to take back. `applyParameters()` therefore keeps the 0.001 glue floor only while glue is *armed* (`base[max.glue] > 0`, or a macro that can raise glue is above zero); otherwise glue is 0 and the splitter is out of the path. §11.3.2 has the rule, the measurements and the test (*Chain: with glue disarmed the maximizer passes hot flat-topped material untouched*: a −5 dBFS 100 Hz square passes the default maximizer unchanged within 1e−6 of the delayed input, with no gain reduction).
@@ -398,6 +403,7 @@ In both modes the tonal, spatial and detail contributions are ungoverned, becaus
 ### 1.6 Tests that prove it
 
 - *Chain: full Music boost on a hot programme never exceeds the ceiling*
+- *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives*
 - *Factory presets: Boost Intensity and all macros at 100 % stay safe*
 - *Chain: with glue disarmed the maximizer passes hot flat-topped material untouched*
 - *MacroMap: glue is armed only while a source that can raise it is off zero*
@@ -2270,8 +2276,9 @@ Sources: [`core/include/flub/dsp/TruePeakLimiter.h`](../core/include/flub/dsp/Tr
 
 ### 10.1 Purpose
 
-The limiter is the **only** stage that guarantees the ceiling (rule 5 of §1.1). It is used twice:
+The limiter is the **only** stage that guarantees the ceiling (rule 5 of §1.1). It is used three times:
 - inside every strip's `LoudnessMaximizer` (section 11), at `max.ceiling`;
+- on every strip's global-bypass reference while bypass is engaged (`dryLimiter` in `ProcessingChain`, at `max.ceiling`, 1 ms look-ahead, 80 ms auto release; §14.5);
 - as the desktop app's master limiter in `MixEngine` across all strips (section 14).
 
 Its guarantee:
@@ -2410,6 +2417,8 @@ The strip limiter has no keys of its own. `LoudnessMaximizer` passes its paramet
 | (true-peak detection) | — | on | on in every profile | — | structural; off gives a sample-peak limiter with D = 0 and Kh = 0 |
 | (gain hold Kh) | — | 0 … 8 | 8 (7 at 0.5 ms, 44.1 kHz) | samples | derived at `prepare()`: `min(kTruePeakHold = 8, ⌊L/3⌋)` with true-peak detection, else 0; no latency |
 
+Bypass-reference limiter (`ProcessingChain::dryLimiter`, every host, only while global bypass is engaged): ceiling `max.ceiling`, 1 ms look-ahead (capped at chain latency − 20), 80 ms auto release, true peak on; its latency is taken out of the dry-path delay (§14.5).
+
 Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the device profile (−2 dBTP Bluetooth A2DP, −3 dBTP hands-free, section 14), 1 ms look-ahead (0.5 ms when every strip runs the Low Latency profile, chosen in `MixEngine::configure()`), 50 ms auto release, true peak on. Module sanitising: out-of-range values clamp; a non-finite value keeps the previous one.
 
 ### 10.5 Smoothing & click-freeness
@@ -2426,7 +2435,7 @@ Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the devi
 | Look-ahead | 44.1 kHz | 48 kHz | 96 kHz | 192 kHz | Used by |
 |---|---|---|---|---|---|
 | 0.5 ms | 22 + 20 = 42 | 24 + 20 = **44** | 48 + 20 = 68 | 96 + 20 = 116 | Low Latency profile; master limiter (`MixEngine`) when every strip is Low Latency |
-| 1.0 ms | 44 + 20 = 64 | 48 + 20 = 68 | 96 + 20 = 116 | 192 + 20 = 212 | master limiter (`MixEngine`), any other mix of profiles |
+| 1.0 ms | 44 + 20 = 64 | 48 + 20 = 68 | 96 + 20 = 116 | 192 + 20 = 212 | master limiter (`MixEngine`), any other mix of profiles; the bypass-reference limiter (`dryLimiter`), inside the chain latency |
 | 1.5 ms | 66 + 20 = 86 | 72 + 20 = **92** | 144 + 20 = 164 | 288 + 20 = 308 | Balanced profile (header default) |
 | 2.0 ms | 88 + 20 = 108 | 96 + 20 = **116** | 192 + 20 = 212 | 384 + 20 = 404 | Quality profile |
 
@@ -3236,6 +3245,8 @@ Maximum effective values with Boost and all macros at 100 %:
         │                                                  ▼                                        ├─► AutoDrive ──► max.drive reduction (next block)
         └── measured on the input (open loop)       SafetyGovernor ──► scale on governed macro     └─► LoudnessMatch wet ─► dry-path gain in bypass
                                                     amounts (next block)
+ global bypass reference: fold ─► dry delay (chain latency − limiter latency) ─► × match gain ─► TruePeakLimiter @ max.ceiling ─► crossfade
+                          (the limiter runs only while bypass is engaged)
  desktop app: Σ strips (padded to equal latency) ─► master TruePeakLimiter (−1 dBTP, or the device cap) ─► device
 ```
 
@@ -3244,7 +3255,8 @@ Maximum effective values with Boost and all macros at 100 %:
 | **SafetyGovernor** (THD / over-processing) | Maximizer limiter gain reduction (block minimum) and clipper energy ratio, per block. Averaged with a one-pole `a = exp(−Δt / 3 s)`: GR in dB, clip energy in the power domain (so bursts are not under-weighted). A fully bypassed maximizer feeds 0 dB / −160 dB. | Scale on all *governed* macro amounts | **Over budget** (avg GR < −6 dB **or** avg clip energy > −30 dB): scale −0.15 per second (−15 %/s), floor 0.3; 1 → 0.3 takes 4.7 s. **Comfortably under** (avg GR > −4.5 dB **and** clip energy < −31.5 dB: 1.5 dB hysteresis on both): +0.03 per second (+3 %/s) up to 1; 0.3 → 1 takes 23 s. In between it holds. |
 | **AutoLevel** (LUFS input levelling) | *Gated* K-weighted loudness of the input (all input channels with the BS.1770-4 channel weights of §13.3, before its own gain, so open-loop and unconditionally stable). A 3 s one-pole advances only while programme is present: block RMS > −70 dBFS, 100 ms follower > −50 LUFS and within 20 LU of the slow value. It counts as active only while the slow value is > −60 LUFS. | Input gain before the fold and the slots | Gain = target − measured, clamped ±12 dB, slew +1 dB/s up and −4 dB/s down, adapted only while the gate is open. Pauses, track gaps and fade-outs never pump the gain up. Switched off, it returns to 0 dB at 4 dB/s. Applied as a per-block linear ramp. Target `autolevel.target` −30 … −10 LUFS (default −18). |
 | **AutoDrive** (maximizer loudness target) | Gated loudness (same gate) of the strip *output*, after the output trim | Maximizer drive | Closed loop with a 0.5 LU dead band. It integrates the error at min(2, 0.5 · \|error\|) dB/s. The reduction stays in [−24, 0] dB, and the chain applies `drive = max(0, max.drive(effective) + reduction)`. It can only **reduce** the requested drive, never below 0 dB, so it never makes anything louder than the user or macros asked for (and cannot make a programme that is already above target at 0 dB drive quieter). Switched off, the reduction returns to 0 at 4 dB/s. Target `max.target` −24 … −6 LUFS (default −14). |
-| **LoudnessMatch** (fair A/B) | Gated loudness of the dry reference (post-fold, pre-slots) vs the processed output | Gain on the dry path in global bypass | Gain = wet − dry, clamped ±12 dB, slew 3 dB/s, updated only while both followers are active. A positive match is additionally capped at `max(0, max.ceiling − dry peak)`, so the matched reference never exceeds the maximizer ceiling. The dry peak is held with an instant attack and a ~2 s one-pole release, applied per block. The gain itself ramps over 50 ms. |
+| **LoudnessMatch** (fair A/B) | Gated loudness of the dry reference (post-fold, pre-slots) vs the processed output | Gain on the dry path in global bypass | Gain = wet − dry, clamped ±12 dB, slew 3 dB/s, updated only while both followers are active. A positive match is additionally capped once per block at `max(0, max.ceiling − held dry peak)`; the dry sample peak is held with an instant attack and a ~2 s one-pole release, applied per block. The gain itself ramps over 50 ms, so a new, louder dry peak can still meet a gain chosen for the quieter past; the bypass-reference limiter (next row) catches that. |
+| **Bypass-reference limiter** (`dryLimiter`, every host) | The matched dry reference, 4× interpolated peaks | Reference gain in global bypass | A `TruePeakLimiter` at `max.ceiling`, 80 ms auto release, true-peak detection. Look-ahead 1 ms (48 samples at 48 kHz), capped at chain latency − 20; with the 20-sample detector that is 68 samples at 48 kHz, taken out of the dry-path delay (`dryDelay` = chain latency − limiter latency), so the reference stays aligned and no latency is added. If a chain's latency were too short for the detector plus 8 samples it would fall back to sample-peak detection with the whole chain latency as look-ahead; the shipped profiles never need that. It runs only while bypass is engaged (the crossfade is above 0 or moving) and is `reset()` whenever it starts, so it never resumes from stale history. Started cold, it outputs silence for its latency (≤ ~1.4 ms: 68 samples at 48 kHz, 64 at 44.1 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 %. |
 | **True-peak ceiling** (strip) | 4× interpolated peaks with parabolic refinement | Limiter gain | Look-ahead sliding-minimum + box-filter envelope reaches the required gain Kh samples before the peak arrives and holds it Kh samples after (Kh = 8 at the profile look-aheads); a final safety clamp counts any engagement, published per block as `MeterBus::safetyClipCount` (section 10). |
 | **Output trim** | — | Strip level after the maximizer | `output.gain` −24 … 0 dB (20 ms ramp). A trim cannot raise the level, so the strip ceiling also holds in the plug-in and the CLI, which have no master limiter. |
 | **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the largest strip latency | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector); 0.5 ms (44 samples) when every strip runs Low Latency. 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
@@ -3259,7 +3271,7 @@ Maximum effective values with Boost and all macros at 100 %:
   - A bypassed module is not processed at all.
   - A re-enabled module is reset and pre-rolled for latency + 64 samples while still fully dry, so look-ahead lines and filters are primed before anything is heard.
   - The chain latency is identical whether a module is on or off.
-- **Global bypass** (`bypass`): a 30 ms crossfade to a dry reference taken after the input stage and fold, delayed by the full chain latency. With *loudness-matched bypass* (`bypass.matched`, default on), the reference is level-matched (§14.5), so comparisons are about tone and dynamics, not loudness.
+- **Global bypass** (`bypass`): a 30 ms crossfade to a dry reference taken after the input stage and fold and delayed to the full chain latency. The delay is split: a plain `DelayLine` of chain latency − 68 samples (at 48 kHz) and, while bypass is engaged, the bypass-reference `TruePeakLimiter` (68 samples), so the reference is true-peak limited at `max.ceiling` without adding latency (§14.5). With *loudness-matched bypass* (`bypass.matched`, default on), the reference is also level-matched (§14.5), so comparisons are about tone and dynamics, not loudness. On programmes with high peaks the ceiling cap can leave the matched reference below the processed loudness: in a re-measurement on synthetic pink noise with 55 Hz kicks (about −22.8 LUFS, peaks −5.2 to −6.3 dBFS, Loudness macro 100 %, 48 kHz), the settled reference read 1.2–1.5 LU below the processed output, and every render in all three profiles peaked at −1.05 dBTP / −1.05 dBFS.
 - **A/B:** two complete parameter banks in the `ParameterStore`. The switch is one atomic, and all continuous parameters glide inside the modules.
 - **Latency profiles** (`latency.profile`, structural):
   - Changing the profile sets `needsReprepare()`. The host re-prepares the chain off the audio thread, which is a deliberate, short dropout.
@@ -3313,6 +3325,7 @@ Maximum effective values with Boost and all macros at 100 %:
   - *Chain: 7.1 input is virtualised (or downmixed) to stereo; extra channels cleared*
   - *Chain: toggling the virtualiser on a 7.1 strip crossfades (no step in the output)*
   - *Chain: loudness-matched global bypass tracks the processed loudness without exceeding the ceiling*
+  - *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (Loudness macro 100 %, kicks rising from −26 to 0 dBFS over 10 s, bypass engaged at 4 s, all three latency profiles: from 100 ms after engaging, true peak ≤ −1 dBTP + 0.15 dB and sample peak ≤ −1 dBFS + 1e−6 on both channels)
   - *MixEngine: strips are summed, padded to equal latency and master-limited*
   - *Chain: a NaN/Inf input block is dropped and the chain recovers*
   - *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)*
@@ -3326,6 +3339,7 @@ Maximum effective values with Boost and all macros at 100 %:
 - **AutoDrive only reduces.** It cannot make a programme that is already louder than the target at 0 dB drive any quieter. Use `output.gain` or AutoLevel for that.
 - **The governor's GR input is a block minimum.** It is averaged over about 3 s, so its budget refers to the deepest limiting per block, not to the mean gain.
 - **Absolute gates assume the chain's nominal level.** The loudness gates are absolute (−70 dBFS RMS, −50 LUFS) plus relative (20 LU); very quiet sources below −50 LUFS never drive the loops.
+- **The matched bypass favours the ceiling over the match.** A raise is capped at `max.ceiling` − held dry peak, and the bypass-reference limiter then shaves what is still over, so on material with high peaks the reference can stay a little quieter than the processed output (1.2–1.5 LU in the re-measurement of §14.6). Match accuracy is not asserted by a test; the tests assert the ceiling.
 
 ---
 
@@ -3367,8 +3381,9 @@ Why the totals behave as they do:
 **Desktop app.**
 - `MixEngine` pads every strip to the largest strip latency, so relative A/V sync between applications is preserved.
 - The master limiter then adds its own look-ahead plus the 20-sample detector delay: 1 ms, i.e. 68 samples = 1.42 ms at 48 kHz, or 0.5 ms (44 samples = 0.92 ms) when every strip runs the Low Latency profile, as the app sets it. App engine totals at 48 kHz: 144 samples = 3.0 ms (Low Latency), 260 = 5.4 ms (Balanced), 1420 ≈ 29.6 ms (Quality).
-- Device buffering (WASAPI / CoreAudio / ALSA periods, and the drift-compensated FIFO of captured strips) comes on top. It is not algorithmic and is not included here.
-- The README's "~2.1 ms Low Latency profile" is the strip's algorithmic latency at 48 kHz.
+- The bypass-reference limiter of the global bypass (§14.5) sits inside the strip's dry-path delay and adds nothing.
+- Device buffering (WASAPI / CoreAudio / ALSA periods, and the drift-compensated FIFO of captured strips) comes on top. It is not algorithmic and is not included here; the added end-to-end budget, with its scope labels (chain / app engine / added end-to-end), is `01-architecture.md` §5.
+- The README's "~2.1 ms Low Latency profile" is the strip's algorithmic (chain) latency at 48 kHz.
 
 ### 15.2 CPU per module (indicative)
 
@@ -3408,7 +3423,7 @@ This is the full `ProcessingChain::process()`:
 - output trim and the global-bypass path;
 - all meters, AutoLevel / AutoDrive / LoudnessMatch followers and analyser taps.
 
-Stereo in and out unless noted; same conditions as §15.2.
+Stereo in and out unless noted; same conditions as §15.2. Global bypass is off in every row, so none of them includes the bypass-reference limiter (§14.5): it runs only while bypass is engaged and then costs about one true-peak limiter (150–168 ns per stereo sample, §10.6). These rows were measured before that limiter was added; with bypass off the chain skips it.
 
 | Scenario | Quality | Balanced | Low Latency |
 |---|---|---|---|
