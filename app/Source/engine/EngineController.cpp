@@ -148,6 +148,11 @@ void EngineController::shutdown()
 
 void EngineController::notify (Change change)
 {
+    // The advice (suggested preset) follows the selected strip's mode, which
+    // setMode, preset loads, A/B switches and strip switches can all change.
+    if ((change == Change::SelectedStrip || change == Change::Parameters || change == Change::Preset) && host != nullptr
+        && (getMode (selectedStrip) == ModeValue::Gaming) != adviceForGaming)
+        updateDeviceProfile();
     listeners.call ([change] (Listener& l) { l.engineControllerChanged (change); });
 }
 
@@ -190,8 +195,7 @@ void EngineController::setSelectedStrip (int strip)
         return;
     selectedStrip = s;
     settings->setSelectedStrip (s);
-    updateDeviceProfile(); // the advice (suggested preset) follows the selected strip's mode
-    notify (Change::SelectedStrip);
+    notify (Change::SelectedStrip); // also refreshes the advice for the strip's mode
 }
 
 ParameterStore& EngineController::getParams (int strip)
@@ -262,8 +266,7 @@ ModeValue EngineController::getMode (int strip)
 void EngineController::setMode (ModeValue mode, int strip)
 {
     getParams (resolveStrip (strip)).set (Mode, static_cast<float> (static_cast<int> (mode)));
-    updateDeviceProfile(); // the suggested preset depends on the mode
-    notify (Change::Parameters);
+    notify (Change::Parameters); // also refreshes the advice (the suggested preset depends on the mode)
 }
 
 void EngineController::toggleMode (int strip)
@@ -592,6 +595,7 @@ juce::String EngineController::getDeviceProfileName() const
 
 void EngineController::updateDeviceProfile()
 {
+    adviceForGaming = getMode (selectedStrip) == ModeValue::Gaming;
     auto* device = getDeviceManager().getCurrentAudioDevice();
     if (device == nullptr)
     {

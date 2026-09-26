@@ -1,8 +1,8 @@
 // Flubsound Pro - parameter layout + lock-free parameter store.
 //
 // * Every user-facing value is a float in a flat, fixed-size table indexed by
-//   Id. Ids are an in-memory index only: saved data (presets, plug-in state,
-//   host automation, IPC) uses the string keys, so Ids may shift between
+//   Id. IDs are an in-memory index only: saved data (presets, plug-in state,
+//   host automation, IPC) uses the string keys, so IDs may shift between
 //   versions when parameters are inserted. The keys are the stable contract:
 //   never rename or reuse one.
 // * The store holds TWO banks (A and B) for A/B comparison. The GUI thread

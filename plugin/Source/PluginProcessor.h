@@ -6,8 +6,9 @@
 //   an AudioProcessorValueTreeState: parameter ID = Info::key (versioned
 //   ParameterID, version hint = Info::sinceVersion), floats with
 //   NormalisableRange + skew from Info::skewCentre, AudioParameterChoice for
-//   choices, AudioParameterBool for toggles. The "bypass" parameter is also the host bypass parameter, so
-//   host bypass is the chain's click-free, latency-compensated bypass.
+//   choices, AudioParameterBool for toggles. The "bypass" parameter is also
+//   the host bypass parameter, so host bypass is the chain's click-free,
+//   latency-compensated bypass.
 // * processBlock copies the APVTS raw values into the store (plain atomic
 //   loads/stores, only for values that changed - RT-safe), holds
 //   ScopedNoDenormals and runs the chain in chunks of at most the prepared

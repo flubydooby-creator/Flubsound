@@ -243,6 +243,7 @@ private:
     double simulatedSampleRate = 48000.0;
     int simulatedOutputChannels = 2;
     bool preferredMissing = false, restoringPreferred = false;
+    bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };
