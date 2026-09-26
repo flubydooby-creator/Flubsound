@@ -1,0 +1,21 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Wide Stage",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "A bigger, more open stereo image for live recordings, ambient, orchestral pop and film scores. The sides are widened above 220 Hz, a little decorrelated ambience is added, and the low end stays centred and mono-safe. Mono Safety watches the correlation and pulls the width back if the image would collapse.",
+  "tags": ["wide", "stereo", "space", "live", "ambient"],
+  "params": {
+    "boost": 0.3,
+    "macro.1": 0.1,
+    "macro.2": 0.4,
+    "macro.3": 0.15,
+    "bass.monoBelow": 120,
+    "clarity.air": 0.1,
+    "spatial.width": 1.15,
+    "spatial.lowCut": 220,
+    "spatial.space": 0.2,
+    "spatial.minCorrelation": 0.15
+  }
+}

@@ -3,7 +3,7 @@
 **Real-time, system-wide, per-application audio enhancement for music and video games.** Louder, punchier, clearer, wider and more immersive, with distortion, clipping and latency kept under strict control.
 
 - 🎚️ **Full processing chain:** true-peak loudness maximizer with soft clipper, 10-band parametric EQ, 4 + 4-band dynamic EQ, psychoacoustic bass engine, clarity/transient enhancer, tape/tube/digital saturation, mono-safe stereo widener/spatializer, 5.1/7.1 → binaural headphone virtualizer, look-ahead compressor (downward + upward), spectral noise gate.
-- 🎮 **Gaming Mode.** Macros for footsteps, positional focus, impact, detail and voice & score. Stereo-linked dynamics protect positional cues, anti-masking keeps footsteps audible after explosions, and a **~1.9 ms** Low Latency profile serves competitive play.
+- 🎮 **Gaming Mode.** Macros for footsteps, positional focus, impact, detail and voice & score. Stereo-linked dynamics protect positional cues, anti-masking keeps footsteps audible after explosions, and a **~2.1 ms** Low Latency profile serves competitive play.
 - 🎵 **Music Mode.** Macros for punch, width, clarity, loudness and warmth, with dynamic de-harsh, air and de-boom companions.
 - 🚀 **Boost Intensity (0–100 %).** One slider scales many modules in stages (clarity → bass → loudness). A **Safety Governor** backs it off before the limiter or clipper start to distort.
 - 🛡️ **Protection:** 4× oversampled true-peak limiting (−1 dBTP), LUFS auto-level, loudness-matched A/B bypass, NaN/denormal guards, and a master limiter across all apps.

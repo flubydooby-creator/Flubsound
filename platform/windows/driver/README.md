@@ -99,9 +99,11 @@ users who only want Music + Chat are not left with five devices.
 For every endpoint the driver owns two regions and maps them into the engine
 process on request. The layout is fixed in `FlubVirtualAudioShared.h`.
 
-1. **Control page** (4 KiB, `MmAllocatePagesForMdlEx`, zeroed, only ever
-   mapped to the engine). It starts with `FLUB_VA_STREAM_CONTROL`: the
-   format description plus `Generation`, then 64-bit monotonic frame
+1. **Control page** (4 KiB, `MmAllocatePagesForMdlEx`, zeroed). Only the
+   engine gets a writable mapping; audiodg sees the page read-only, and only
+   if `ReadOffsetBytes` is exposed as the WaveRT position register. It starts
+   with `FLUB_VA_STREAM_CONTROL`: the format description plus the
+   `Generation` sequence lock, then 64-bit monotonic frame
    counters `WritePosition` and `ReadPosition`, each on its own 64-byte cache
    line with its QPC timestamp, and finally the state/heartbeat line.
 2. **Data region.** This is the WaveRT cyclic buffer itself.
@@ -127,11 +129,16 @@ stay alive until the engine unmaps them, and the engine remaps when
   `IRP_MJ_CREATE/CLOSE/CLEANUP/DEVICE_CONTROL`. SYSVAD already hooks
   `IRP_MJ_PNP` this way. IRPs for our **control device object** are handled
   by the driver. Everything else is forwarded to `PcDispatchIrp`.
-- The control device is created with `IoCreateDeviceSecure`,
-  `FILE_DEVICE_SECURE_OPEN` and the SDDL
+- The control device is a non-PnP control device object created with
+  `IoCreateDeviceSecure`, `FILE_DEVICE_SECURE_OPEN`, the class GUID
+  `GUID_DEVCLASS_FLUB_VIRTUAL_AUDIO_CONTROL` and the SDDL
   `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)` (SYSTEM, administrators,
-  interactive users). It is published via
-  `GUID_DEVINTERFACE_FLUB_VIRTUAL_AUDIO`.
+  interactive users). It is published with `IoCreateSymbolicLink` as
+  `\DosDevices\Global\FlubsoundVirtualAudio` (user mode:
+  `\\.\FlubsoundVirtualAudio`). It cannot be a device interface:
+  `IoRegisterDeviceInterface` needs a PDO, and putting our SDDL on the
+  adapter's devnode would also restrict the KS interfaces audiodg opens. The
+  driver deletes the link and the object when the last adapter is removed.
 - IOCTLs are defined with `CTL_CODE` (`METHOD_BUFFERED`, vendor device type
   `0x8F1B`):
   - `IOCTL_FLUB_VA_GET_INFO`: magic, ABI version and per-endpoint info. The
@@ -142,22 +149,28 @@ stay alive until the engine unmaps them, and the engine remaps when
     inside `__try/__except`. It references the engine-created, **unnamed**
     `DataEvent` and `StateEvent` handles (`ObReferenceObjectByHandle`,
     `UserMode`, `EVENT_MODIFY_STATE`). Only one mapping per endpoint is
-    allowed; a second caller gets `STATUS_SHARING_VIOLATION`.
+    allowed; a second caller gets `STATUS_SHARING_VIOLATION`. 32-bit (WoW64)
+    callers are rejected (`IoIs32bitProcess`): the 64-bit position counters
+    are not single-copy atomic in 32-bit code.
   - `IOCTL_FLUB_VA_UNMAP_ENDPOINT`: explicit unmap.
   - `IOCTL_FLUB_VA_SET_CLOCK_MODE`: free-running or engine-slaved (§5).
-- Mappings belong to the file object. They are torn down in
-  `IRP_MJ_CLEANUP`, which runs in the owning process's context, as
-  `MmUnmapLockedPages` requires. Killing the engine therefore never leaks
-  mappings.
+- Mappings belong to the file object and record the mapping process. A user
+  mapping must be removed with `MmUnmapLockedPages` in the mapping process
+  and must never outlive it. Normally that happens in `IRP_MJ_CLEANUP`,
+  which runs in the context of the process that closes the last handle: the
+  engine, including when it is killed (handle rundown). A handle duplicated
+  into another process would move the cleanup elsewhere, so the driver also
+  registers `PsSetCreateProcessNotifyRoutineEx` and unmaps when the mapping
+  process exits. `IRP_MJ_CLEANUP` in a different process only marks the
+  endpoint free. Killing the engine therefore never leaks mappings.
 - Named events (`Global\Flubsound.VirtualAudio.<n>.State`) exist only for
   diagnostic tools. The driver creates them at load time, before any user
   process can claim the names.
 
 ### 4.3 Engine side
 
-1. `CM_Get_Device_Interface_List (GUID_DEVINTERFACE_FLUB_VIRTUAL_AUDIO)`, then
-   `CreateFileW`, then `GET_INFO`, then `MAP_ENDPOINT` for each enabled
-   endpoint.
+1. `CreateFileW (FLUB_VA_CONTROL_PATH_USER)` (`\\.\FlubsoundVirtualAudio`),
+   then `GET_INFO`, then `MAP_ENDPOINT` for each enabled endpoint.
 2. **Render.** The strip's input is pulled from the output device callback
    (MMCSS "Pro Audio"):
    - `avail = ReadAcquire64 (&WritePosition) - ReadPosition`,
@@ -165,9 +178,10 @@ stay alive until the engine unmaps them, and the engine remaps when
    - `WriteRelease64 (&ReadPosition, …)`,
    - update `ReadQpc` and `EngineHeartbeat`.
 3. **Mic.** Mirror image: the engine is the producer of `WritePosition`.
-4. Before copying, the engine reads `Generation`, copies the description,
-   then re-reads `Generation` (seqlock), so a format change is never half
-   seen.
+4. `Generation` is a sequence lock: the driver makes it odd before it
+   rewrites the description and even again afterwards. The engine reads it
+   (acquire), retries while it is odd, copies the description, then re-reads
+   it and retries on a change, so a format change is never half seen.
 
 ## 5. Clocks: slaving versus ASRC
 
@@ -297,7 +311,8 @@ Uninstall: `pnputil /remove-device` on the devnode, then
 - **Development.** Test-signed builds, only on dedicated VMs
   (`bcdedit /set testsigning on`, Secure Boot off). Anti-cheat software
   refuses to run games in test mode, so gaming QA always uses signed builds.
-- **Release (Windows 10 1607+ requires Microsoft-signed kernel drivers).**
+- **Release.** Windows 10 1607+ with Secure Boot loads only
+  Microsoft-signed new kernel drivers; cross-signing is no longer possible.
   1. Buy an **EV code-signing certificate** (HSM or token). Partner Center
      requires it both to register the company and to sign submissions.
   2. Register in **Partner Center**, hardware program.
@@ -306,10 +321,12 @@ Uninstall: `pnputil /remove-device` on the devnode, then
   4. Submit for **attestation signing** (Windows 10/11 client). Microsoft
      returns the package with its signature, usually within hours.
   5. Sign the MSI with the same certificate and an RFC 3161 timestamp.
-  - Attestation limits: not valid on Windows Server, and not distributed
-    through Windows Update. WU distribution or enterprise trust needs full
-    **HLK** certification (plan it for v2; the HLK audio tests need a
-    dedicated lab).
+  - Attestation limits: the signature is not accepted on Windows Server,
+    and Windows Update distribution comes with extra Partner Center
+    restrictions (check the current shipping-label rules before relying on
+    it). Server support, broad WU distribution and the "Windows compatible"
+    listing need full **HLK** certification (plan it for v2; the HLK audio
+    tests need a dedicated lab).
 - **HVCI / Memory integrity** (on by default on new Windows 11 installs):
   - allocate only NX memory (`ExAllocatePool2 (POOL_FLAG_NON_PAGED)`, MDL
     pages mapped with `MdlMappingNoExecute`);

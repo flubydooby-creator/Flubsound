@@ -1,0 +1,27 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Competitive FPS",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "For tactical and competitive shooters (Counter-Strike, Valorant, Rainbow Six). Footsteps and quiet cues are lifted by upward dynamics while gunfire stays untouched, explosion rumble is tamed so it cannot mask the steps that follow, and lateral cues are sharpened. Low Latency profile, no broadband downward compression and no crossfeed.",
+  "tags": ["fps", "competitive", "footsteps", "positional", "low-latency", "esports"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.35,
+    "macro.1": 0.8,
+    "macro.2": 0.55,
+    "macro.3": 0.1,
+    "macro.4": 0.3,
+    "macro.5": 0.35,
+    "latency.profile": "Low Latency",
+    "bass.subsonic": 30,
+    "comp.ratio": 1,
+    "comp.attack": 2,
+    "comp.upThreshold": -36,
+    "eq.1.type": "Low Shelf",
+    "eq.1.freq": 100,
+    "eq.1.gain": -2,
+    "eq.1.q": 0.7
+  }
+}

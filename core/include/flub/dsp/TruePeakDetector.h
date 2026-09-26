@@ -1,9 +1,12 @@
 // Flubsound Pro - 4x polyphase inter-sample (true) peak detector.
 //
 // ITU-R BS.1770-4 Annex 2 estimates true peak by 4x oversampling. We use our
-// own Kaiser-windowed sinc interpolator (97-tap prototype, 24 taps per phase)
-// whose passband is flat to ~19 kHz at 48 kHz, which meets the Annex 2
-// accuracy intent; its constant delay is exactly kDelay base samples.
+// own Kaiser-windowed sinc interpolator: a 161-tap prototype (40 taps per
+// phase, Kaiser beta 5). Every fractional-delay phase is flat within 0.02 dB
+// up to 0.4535 fs (20 kHz at 44.1 kHz, 21.8 kHz at 48 kHz) and over-reads by
+// at most +0.04 dB, so the detector never materially under-reads full-band
+// programme. The earlier 24-tap design dipped by up to 2 dB near 20 kHz.
+// Its constant delay is exactly kDelay base samples.
 //
 // Each call consumes x[n] and returns max |.| over the four positions
 // { n-kDelay, n-kDelay+1/4, n-kDelay+1/2, n-kDelay+3/4 }.  Phase 0 of a
@@ -23,15 +26,15 @@ class TruePeakDetector
 {
 public:
     static constexpr int kPhases = 4;
-    static constexpr int kTapsPerPhase = 24;
-    static constexpr int kDelay = kTapsPerPhase / 2; // = 12 base samples
+    static constexpr int kTapsPerPhase = 40;
+    static constexpr int kDelay = kTapsPerPhase / 2; // = 20 base samples
 
     /** Allocates. */
     void prepare (int numChannels)
     {
-        constexpr int length = kPhases * kTapsPerPhase + 1; // 97, centre = 48
+        constexpr int length = kPhases * kTapsPerPhase + 1; // 161, centre = 80
         constexpr int centre = (length - 1) / 2;
-        constexpr double beta = 8.0;
+        constexpr double beta = 5.0; // see the passband analysis above
         for (int p = 1; p < kPhases; ++p)
         {
             double sum = 0.0;

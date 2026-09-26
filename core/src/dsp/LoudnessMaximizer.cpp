@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace flub
 {
@@ -54,6 +55,15 @@ constexpr float kAntiDenormal = 1.0e-20f;
 float sanitise (float v, float lo, float hi, float fallback) noexcept
 {
     return std::isfinite (v) ? std::clamp (v, lo, hi) : fallback;
+}
+
+/** A NaN / Inf input sample (or one that the drive pushes past the float
+    range) becomes silence at the door, so it can neither poison the glue
+    splitter's recursive states (whose reset would glitch every channel) nor
+    smear through the oversampler's FIRs into its neighbours. */
+float finiteOrZero (float x) noexcept
+{
+    return std::abs (x) <= std::numeric_limits<float>::max() ? x : 0.0f;
 }
 } // namespace
 
@@ -198,6 +208,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     oversampler.prepare (spec.numChannels, spec.maxBlockSize, osFactor, clipOsQuality);
     dryDelay.prepare (spec.numChannels, oversampler.latencySamples());
     dryBuffer.setSize (spec.numChannels, spec.maxBlockSize);
+    padBuffer.setSize (spec.numChannels, spec.maxBlockSize);
     thresholdBuf.assign (static_cast<size_t> (spec.maxBlockSize), 1.0f);
     kneeBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipMixBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
@@ -352,9 +363,11 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
 
         if (! glueRunning)
         {
-            if (driveGain != 1.0f)
-                for (int c = 0; c < numCh; ++c)
-                    data[static_cast<size_t> (c)][i] *= driveGain;
+            for (int c = 0; c < numCh; ++c)
+            {
+                float& x = data[static_cast<size_t> (c)][i];
+                x = finiteOrZero (x * driveGain);
+            }
             continue;
         }
 
@@ -371,7 +384,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         for (int c = 0; c < numCh; ++c)
         {
             const auto ci = static_cast<size_t> (c);
-            const float x = data[ci][i] * driveGain;
+            const float x = finiteOrZero (data[ci][i] * driveGain);
             data[ci][i] = x;
             auto& s = split[ci];
             splitter.processSample (c, x + antiDenormal, s[0], s[1], s[2]);
@@ -379,9 +392,9 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         }
         if (! std::isfinite (bandSum))
         {
-            // Non-finite input poisoned the IIR states: restart from rest
-            // rather than staying NaN forever (the limiter's output guard
-            // silences the non-finite sample itself).
+            // Last resort (the input is already finite): absurd but finite
+            // levels overflowed the IIR states. Restart from rest rather than
+            // staying non-finite forever.
             splitter.reset();
             for (int c = 0; c < numCh; ++c)
                 split[static_cast<size_t> (c)] = {};
@@ -506,7 +519,19 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept
     for (int pos = 0; pos < numSamples; pos += spec.maxBlockSize)
     {
         const int len = std::min (spec.maxBlockSize, numSamples - pos);
-        processSegment (io.subBlock (pos, len), clipDiff, clipIn, glueMin);
+        AudioBlock seg = io.subBlock (pos, len);
+        // Prepared channels missing from this block are run on silence (the
+        // output of those lanes is discarded). Otherwise their dry-delay line
+        // and oversampler history would stand still and release audio from
+        // before the gap when a full-width block comes back.
+        for (int c = numCh; c < spec.numChannels; ++c)
+        {
+            float* pad = padBuffer.channel (c);
+            std::fill (pad, pad + len, 0.0f);
+            seg.ch[static_cast<size_t> (c)] = pad;
+        }
+        seg.numChannels = spec.numChannels;
+        processSegment (seg, clipDiff, clipIn, glueMin);
         grMin = std::min (grMin, limiter.getGainReductionDb());
     }
 

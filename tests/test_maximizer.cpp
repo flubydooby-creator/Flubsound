@@ -339,10 +339,10 @@ TEST_CASE ("LoudnessMaximizer: latencySamples() = clip oversampler + limiter lat
         int expected;
     };
     const Case cases[] = {
-        { 4, Oversampler::Quality::High, 1.5f, true, 36 + 72 + 12 },
-        { 4, Oversampler::Quality::High, 2.0f, true, 36 + 96 + 12 },
-        { 2, Oversampler::Quality::Low, 0.5f, true, 16 + 24 + 12 },
-        { 1, Oversampler::Quality::High, 1.5f, true, 0 + 72 + 12 },
+        { 4, Oversampler::Quality::High, 1.5f, true, 36 + 72 + TruePeakDetector::kDelay },
+        { 4, Oversampler::Quality::High, 2.0f, true, 36 + 96 + TruePeakDetector::kDelay },
+        { 2, Oversampler::Quality::Low, 0.5f, true, 16 + 24 + TruePeakDetector::kDelay },
+        { 1, Oversampler::Quality::High, 1.5f, true, 0 + 72 + TruePeakDetector::kDelay },
         { 2, Oversampler::Quality::High, 1.0f, false, 32 + 48 },
     };
     for (const auto& tc : cases)
@@ -493,7 +493,7 @@ TEST_CASE ("LoudnessMaximizer: extreme and full-band input still holds the sampl
     // content between 0.41 fs and fs/2, where the limiter's 4x detector
     // under-reads. The sample-peak ceiling is still exact; the ideal-
     // reconstruction peak is only bounded loosely (documented limitation:
-    // measured <= +0.3 dB for band-limited input, up to ~+1.5 dB for raw
+    // measured <= +0.3 dB for band-limited input, up to ~+1.7 dB for raw
     // white noise).
     for (double fs : { 44100.0, 48000.0 })
     {
@@ -528,7 +528,8 @@ TEST_CASE ("LoudnessMaximizer: clipAmount 0 disables the clipper (telemetry -160
     const int n = 24000;
     const auto x = sine (220.0, kFs, n, 0.5f);
 
-    // Off: -160 dB even when driven hard, and at low level the path is a pure delay.
+    // Off: -160 dB even when driven hard (that the path is then a bit-exact
+    // delay is checked by the transparency test above).
     {
         LoudnessMaximizer m;
         prepareMax (m);
@@ -672,7 +673,9 @@ TEST_CASE ("LoudnessMaximizer: release and ceiling are passed to the limiter")
         Planar buf (2, n);
         for (int i = 1000; i < 3000; ++i)
             buf.ch[0][static_cast<size_t> (i)] = 3.0f * static_cast<float> (std::sin (kTwoPi * 440.0 * i / kFs));
-        processInBlocks (m, buf, 4800); // ends 21 ms ... last block reports its minimum
+        // The last block (0.34 .. 0.44 s after the burst) reports the gain
+        // that has recovered least in it.
+        processInBlocks (m, buf, 4800);
         return m.getGainReductionDb();
     };
     CHECK (grAfterBurst (500.0f) < grAfterBurst (20.0f) - 1.0f);
@@ -803,5 +806,233 @@ TEST_CASE ("LoudnessMaximizer: output is independent of the host block size (1, 
         for (size_t i = 0; i < outputs[0].size(); ++i)
             maxDiff = std::max (maxDiff, static_cast<double> (std::abs (outputs[k][i] - outputs[0][i])));
         CHECK_LE (maxDiff, 1e-5);
+    }
+}
+
+// ---- adversarial review tests ----
+TEST_CASE ("LoudnessMaximizer [adversarial]: a channel that leaves and rejoins never replays stale audio")
+{
+    // Stereo DC on the right, then 100 ms of mono blocks, then stereo
+    // silence: the right channel must come back silent (it used to release
+    // 0.5 of stale DC from the dry delay / oversampler lanes that stood still
+    // meanwhile). The gap is long enough for the glue splitter's own IIR
+    // ringing to have decayed below the tolerance.
+    for (float clipAmount : { 0.0f, 0.5f })
+        for (float glue : { 0.0f, 0.6f })
+        {
+            LoudnessMaximizer m;
+            prepareMax (m, kFs, 2, 256);
+            m.setParams (maxParams (0.0f, -1.0f, clipAmount, glue));
+            Planar st (2, 256);
+            std::fill (st.ch[1].begin(), st.ch[1].end(), 0.5f);
+            m.process (st.block());
+            Planar mono (1, 256);
+            for (int b = 0; b < 20; ++b)
+            {
+                std::fill (mono.ch[0].begin(), mono.ch[0].end(), 0.0f);
+                m.process (mono.block());
+            }
+            Planar back (2, 256);
+            m.process (back.block());
+            CHECK_LE (peakAbs (back.ch[1].data(), 256), 1e-6);
+            CHECK_LE (peakAbs (back.ch[0].data(), 256), 1e-6);
+        }
+}
+
+TEST_CASE ("LoudnessMaximizer [adversarial]: a NaN in one channel does not glitch the other channel")
+{
+    // Glue on (shared splitter), clipper on: a corrupt sample in the left
+    // channel used to reset the splitter of every channel, dropping one
+    // sample of the healthy right channel and restarting its filters.
+    auto run = [] (bool inject) {
+        LoudnessMaximizer m;
+        prepareMax (m);
+        m.setParams (maxParams (0.0f, -1.0f, 0.5f, 0.8f));
+        const int n = 9600;
+        Planar buf (2, n);
+        setChannel (buf, 0, sine (300.0, kFs, n, 0.05f));
+        setChannel (buf, 1, sine (300.0, kFs, n, 0.2f));
+        if (inject)
+        {
+            buf.ch[0][4000] = std::numeric_limits<float>::quiet_NaN();
+            buf.ch[0][6000] = std::numeric_limits<float>::infinity();
+        }
+        processInBlocks (m, buf, 256);
+        return buf;
+    };
+    const auto ref = run (false);
+    const auto hit = run (true);
+    CHECK (allFinite (hit));
+    double errRight = 0.0;
+    for (int i = 0; i < hit.numSamples(); ++i)
+        errRight = std::max (errRight, static_cast<double> (std::abs (hit.ch[1][static_cast<size_t> (i)] - ref.ch[1][static_cast<size_t> (i)])));
+    CHECK_LE (errRight, 1e-3); // (linked glue level: the left lane is 12 dB quieter)
+}
+
+TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the header formula")
+{
+    // 1x oversampling, glue off, parameters applied instantly: the clipper
+    // input is exactly x * drive, so the telemetry can be recomputed.
+    const float driveDb = 12.0f, ceilingDb = -2.0f, clipAmount = 0.7f, knee = 0.4f;
+    LoudnessMaximizer m;
+    prepareMax (m, kFs, 2, 512, 1);
+    m.setParams (maxParams (driveDb, ceilingDb, clipAmount, 0.0f, knee));
+    const int n = 4096;
+    const auto l = sine (220.0, kFs, n, 0.3f);
+    const auto r = whiteNoise (n, 0.2f, 91);
+    Planar buf (2, n);
+    setChannel (buf, 0, l);
+    setChannel (buf, 1, r);
+    const float drive = dbToGain (driveDb);
+    const float t = dbToGain (ceilingDb + lerp (6.0f, 0.3f, clipAmount));
+    for (int pos = 0; pos < n; pos += 512)
+    {
+        m.process (buf.block (pos, 512));
+        double diff = 0.0, in = 0.0;
+        for (const auto* src : { &l, &r })
+            for (int i = pos; i < pos + 512; ++i)
+            {
+                const float x = (*src)[static_cast<size_t> (i)] * drive;
+                const double d = static_cast<double> (x - LoudnessMaximizer::softClip (x, t, knee));
+                diff += d * d;
+                in += static_cast<double> (x) * static_cast<double> (x);
+            }
+        CHECK_NEAR (m.getClipEnergyRatioDb(), 10.0 * std::log10 (diff / in), 0.01);
+    }
+}
+
+TEST_CASE ("LoudnessMaximizer [adversarial]: glue is 2:1 above ceiling - 6 dB and an all-pass (no gain) below it")
+{
+    // Below threshold: every band gain is 1, so the output is the splitter's
+    // all-pass sum: flat magnitude at any frequency, zero glue reduction.
+    for (double f : { 50.0, 120.0, 1000.0, 4000.0, 12000.0 })
+    {
+        LoudnessMaximizer m;
+        prepareMax (m);
+        m.setParams (maxParams (0.0f, -1.0f, 0.0f, 1.0f));
+        const int n = 24000;
+        Planar buf (2, n);
+        setChannel (buf, 0, sine (f, kFs, n, dbfs (-20.0)));
+        setChannel (buf, 1, sine (f, kFs, n, dbfs (-20.0)));
+        processInBlocks (m, buf, 256);
+        CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + 12000, 12000, f, kFs)), -20.0, 0.05);
+        CHECK (m.getGlueReductionDb() == 0.0f);
+    }
+
+    // Above threshold, a 1 kHz tone sits in the mid band: out = sqrt (T * A).
+    // Ceiling 0 dB -> T = -6.02 dBFS; A = 0.8 -> out -3.98 dBFS, gain -2.04 dB.
+    LoudnessMaximizer m;
+    prepareMax (m);
+    m.setParams (maxParams (0.0f, 0.0f, 0.0f, 1.0f));
+    const int n = 48000;
+    Planar buf (2, n);
+    setChannel (buf, 0, sine (1000.0, kFs, n, 0.8f));
+    setChannel (buf, 1, sine (1000.0, kFs, n, 0.8f));
+    processInBlocks (m, buf, 480);
+    const double expected = 0.5 * (toDb (0.8) + (-6.0206));
+    CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + 24000, 24000, 1000.0, kFs)), expected, 0.15);
+    CHECK_NEAR (m.getGlueReductionDb(), expected - toDb (0.8), 0.15);
+    CHECK (m.getGainReductionDb() == 0.0f); // -3.98 dBFS: the limiter has nothing to do
+}
+
+TEST_CASE ("LoudnessMaximizer [adversarial]: automation of every parameter and stage switch is block-size independent")
+{
+    // Parameter changes at multiples of 512 samples (so every host block
+    // size sees them at the same sample): drive, ceiling, clip on/off, glue
+    // on/off, knee, release. Everything runs per sample, so the outputs must
+    // agree to float rounding for block sizes 1, 64 and 512.
+    const int n = 48000;
+    const auto l = drumPattern (kFs, n, 81);
+    const auto r = bandLimit (whiteNoise (n, 0.3f, 82));
+    std::vector<MaximizerParams> sched;
+    FastRandom rng (83);
+    for (int k = 0; k * 512 < n; ++k)
+    {
+        MaximizerParams p = maxParams (12.0f, -1.0f, 0.5f, 0.3f);
+        if ((k / 6) % 2 == 1)
+            p.glue = 0.0f;
+        if ((k / 5) % 3 == 1)
+            p.clipAmount = 0.0f;
+        if ((k / 7) % 2 == 1)
+        {
+            p.driveDb = 20.0f * (0.5f + 0.5f * rng.nextBipolar());
+            p.ceilingDb = -6.0f * (0.5f + 0.5f * rng.nextBipolar());
+            p.clipKnee = 0.5f + 0.5f * rng.nextBipolar();
+            p.releaseMs = 200.0f;
+            p.autoRelease = false;
+        }
+        sched.push_back (p);
+    }
+    std::vector<std::vector<float>> outs;
+    for (int bs : { 1, 64, 512 })
+    {
+        LoudnessMaximizer m;
+        prepareMax (m, kFs, 2, 512);
+        Planar buf (2, n);
+        setChannel (buf, 0, l);
+        setChannel (buf, 1, r);
+        for (int pos = 0; pos < n; pos += bs)
+        {
+            if (pos % 512 == 0)
+                m.setParams (sched[static_cast<size_t> (pos / 512)]);
+            m.process (buf.block (pos, std::min (bs, n - pos)));
+        }
+        CHECK (allFinite (buf));
+        CHECK_LE (planarPeak (buf), 1.0);
+        std::vector<float> both (buf.ch[0]);
+        both.insert (both.end(), buf.ch[1].begin(), buf.ch[1].end());
+        outs.push_back (both);
+    }
+    for (size_t k = 1; k < outs.size(); ++k)
+    {
+        double maxDiff = 0.0;
+        for (size_t i = 0; i < outs[0].size(); ++i)
+            maxDiff = std::max (maxDiff, static_cast<double> (std::abs (outs[k][i] - outs[0][i])));
+        CHECK_LE (maxDiff, 1e-6);
+    }
+}
+
+TEST_CASE ("LoudnessMaximizer [adversarial]: 192 kHz and the latency profiles hold the ceiling with 18 dB drive")
+{
+    struct Case
+    {
+        double fs;
+        int factor;
+        Oversampler::Quality q;
+        float lookaheadMs;
+    };
+    // Quality (4x HQ, 2 ms), LowLatency (2x Low, 0.5 ms), Balanced (4x HQ, 1.5 ms).
+    const Case cases[] = { { 192000.0, 4, Oversampler::Quality::High, 1.5f }, { 44100.0, 2, Oversampler::Quality::Low, 0.5f },
+                           { 48000.0, 4, Oversampler::Quality::High, 2.0f }, { 96000.0, 2, Oversampler::Quality::Low, 0.5f } };
+    for (const auto& tc : cases)
+    {
+        const int n = static_cast<int> (tc.fs * 0.25);
+        const int tail = static_cast<int> (tc.fs * 0.02);
+        const auto dl = bandLimit (drumPattern (tc.fs, n - tail - 200, 85));
+        const auto dr = bandLimit (drumPattern (tc.fs, n - tail - 200, 86));
+        for (float clipAmount : { 0.0f, 0.4f })
+        {
+            LoudnessMaximizer m;
+            prepareMax (m, tc.fs, 2, 512, tc.factor, tc.q, tc.lookaheadMs);
+            m.setParams (maxParams (18.0f, -1.0f, clipAmount, 0.5f));
+            Planar buf (2, n);
+            setChannel (buf, 0, dl);
+            setChannel (buf, 1, dr);
+            double clipEnergy = 0.0;
+            int blocks = 0;
+            for (int pos = 0; pos < n; pos += 512, ++blocks)
+            {
+                m.process (buf.block (pos, std::min (512, n - pos)));
+                clipEnergy += std::pow (10.0, m.getClipEnergyRatioDb() / 10.0);
+            }
+            const double clipDb = 10.0 * std::log10 (clipEnergy / blocks + 1e-30);
+            const double sp = planarPeak (buf), tp = planarTruePeak (buf), ceil = dbfs (-1.0);
+            if (! (sp <= ceil && tp <= ceil * kTpTolerance))
+                std::cerr << "    fs " << tc.fs << " x" << tc.factor << " clip " << clipAmount << ": sp " << toDb (sp) << " tp " << toDb (tp)
+                          << " clip energy " << clipDb << "\n";
+            CHECK_LE (sp, ceil);
+            CHECK_LE (tp, ceil * (clipDb <= -12.0 ? kTpTolerance : dbfs (0.5)));
+            CHECK_GE (tp, ceil * dbfs (-0.5));
+        }
     }
 }

@@ -1,0 +1,28 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Club Loud",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "Big, dense and loud for parties, EDM and workouts. The Loudness macro drives the maximizer towards a -9 LUFS target (the loop only ever reduces drive), multiband glue and the soft clipper share the work so the limiter does not pump, and the bass is tightened and centred. On masters that are already loud, the safety governor backs the drive off instead of distorting.",
+  "tags": ["loud", "club", "edm", "party", "maximizer", "loudness-target"],
+  "params": {
+    "boost": 0.45,
+    "macro.1": 0.15,
+    "macro.2": 0.1,
+    "macro.4": 0.6,
+    "bass.boost": 3,
+    "bass.freq": 55,
+    "bass.protect": -8,
+    "bass.harmonics": 0.1,
+    "bass.tighten": 0.2,
+    "bass.monoBelow": 100,
+    "bass.subsonic": 28,
+    "clarity.presence": 0.1,
+    "clarity.demud": 0.2,
+    "max.glue": 0.4,
+    "max.autoDrive": true,
+    "max.target": -9,
+    "eq.3.gain": -1
+  }
+}

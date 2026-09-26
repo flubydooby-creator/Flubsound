@@ -1,0 +1,28 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Bass Head",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "Deep, heavy but controlled low end for hip-hop, trap, EDM and dub. A 6 dB adaptive sub shelf with headroom protection, harmonic bass so small drivers still convey the notes, and light tightening plus a low-mid cut so it reads as deep rather than muddy. Mono bass below 110 Hz and multiband glue keep the limiter from pumping.",
+  "tags": ["bass", "hip-hop", "edm", "sub", "harmonics"],
+  "params": {
+    "boost": 0.45,
+    "macro.1": 0.25,
+    "macro.4": 0.15,
+    "eq.output": -1.5,
+    "bass.boost": 6,
+    "bass.freq": 55,
+    "bass.protect": -4,
+    "bass.harmonics": 0.2,
+    "bass.harmonicsCutoff": 90,
+    "bass.character": 0.35,
+    "bass.tighten": 0.1,
+    "bass.monoBelow": 110,
+    "bass.subsonic": 25,
+    "clarity.demud": 0.2,
+    "max.glue": 0.3,
+    "eq.3.gain": -1.5,
+    "eq.3.q": 0.9
+  }
+}

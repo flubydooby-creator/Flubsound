@@ -1,0 +1,21 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Flubsound Signature",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "The balanced everyday sound for any genre, on headphones or speakers. A touch of sub-bass weight, tighter low end, clearer mids and a little more air and width, with a gentle glue before the -1 dBTP limiter. Turn Boost Intensity up for more excitement; it stays controlled by the safety governor.",
+  "tags": ["balanced", "default", "all-round", "headphones", "speakers"],
+  "params": {
+    "boost": 0.35,
+    "macro.1": 0.2,
+    "macro.2": 0.15,
+    "macro.3": 0.2,
+    "bass.boost": 1.5,
+    "bass.freq": 60,
+    "bass.tighten": 0.1,
+    "clarity.air": 0.05,
+    "clarity.demud": 0.1,
+    "max.glue": 0.15
+  }
+}

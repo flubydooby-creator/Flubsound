@@ -2,7 +2,9 @@
 
 Status: **design.** `app/Source/platform/PlatformServices_mac.mm` implements
 global hotkeys (Carbon `RegisterEventHotKey`) and thread tuning
-(`THREAD_TIME_CONSTRAINT_POLICY`). Per-app routing and capture report
+(`THREAD_TIME_CONSTRAINT_POLICY`). Since macOS 15 (Sequoia),
+`RegisterEventHotKey` rejects shortcuts whose only modifiers are Option or
+Option+Shift, so the UI should suggest chords that include Cmd or Ctrl. Per-app routing and capture report
 `isSupported() == false` until the design below is implemented and tested on
 real hardware.
 
@@ -82,8 +84,9 @@ Requirements and caveats:
 | Flubsound System | output | 2 | suggested system output |
 | Flubsound Mic | input | 2 | processed microphone for chat apps |
 
-Formats: float32 at 44.1, 48 and 96 kHz. Nominal rate changes are applied
-through libASPL's control requests (`RequestConfigurationChange`).
+Formats: float32 at 44.1, 48 and 96 kHz. Nominal rate changes must go
+through the HAL's `RequestDeviceConfigurationChange` host call (libASPL's
+`Device` wraps it), never directly from a property setter.
 
 ### 2.3 Data path
 
@@ -153,9 +156,12 @@ process while Core Audio IO is running.
 4. Build the installer with `pkgbuild` / `productbuild`. The plug-in installs
    to `/Library/Audio/Plug-Ins/HAL/`, which needs admin rights; the App Store
    is therefore not an option for the plug-in. Sign the package with a
-   **Developer ID Installer** certificate. The postinstall script runs
-   `launchctl kickstart -k system/com.apple.audio.coreaudiod` to reload
-   coreaudiod.
+   **Developer ID Installer** certificate. The postinstall script reloads
+   coreaudiod with
+   `launchctl kickstart -k system/com.apple.audio.coreaudiod || killall coreaudiod`.
+   On recent macOS releases SIP refuses the `kickstart` ("Operation not
+   permitted while System Integrity Protection is engaged"); launchd then
+   restarts the killed daemon by itself.
 5. **Notarise:**
    `xcrun notarytool submit Flubsound.pkg --keychain-profile flub --wait`,
    then `xcrun stapler staple Flubsound.pkg` (and the `.dmg` / `.app`).

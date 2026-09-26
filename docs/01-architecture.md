@@ -274,8 +274,8 @@ Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, 
 | Saturator oversampling (2×) | 32 smp (high-quality FIR) | 16 smp (short FIR) | 16 smp |
 | Compressor look-ahead | 3 ms = 144 smp | 1 ms = 48 smp | 0.5 ms = 24 smp |
 | Maximizer clipper oversampling | 4× HQ: 36 smp | 4× HQ: 36 smp | 2× short: 16 smp |
-| True-peak limiter look-ahead + detector | 2 ms + 12 = 108 smp | 1.5 ms + 12 = 84 smp | 0.5 ms + 12 = 36 smp |
-| **Total** | **1344 smp ≈ 28 ms** | **184 smp ≈ 3.8 ms** | **92 smp ≈ 1.9 ms** |
+| True-peak limiter look-ahead + detector | 2 ms + 20 = 116 smp | 1.5 ms + 20 = 92 smp | 0.5 ms + 20 = 44 smp |
+| **Total** | **1352 smp ≈ 28.2 ms** | **192 smp = 4.0 ms** | **100 smp ≈ 2.1 ms** |
 
 All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match.
 
@@ -285,9 +285,9 @@ All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have
 |---|---|---|
 | Read safety margin on the virtual endpoint | ~1 ms | ~1 ms |
 | Engine block (128 frames) | 2.7 ms | 2.7 ms |
-| Algorithmic (§5.1) | 1.9 ms | 3.8 ms |
+| Algorithmic (§5.1) | 2.1 ms | 4.0 ms |
 | Output buffering (device period, double-buffered) | ~2.7 ms | ~3–4 ms |
-| **Added total** | **≈ 8 ms** | **≈ 10–11 ms** |
+| **Added total** | **≈ 8.5 ms** | **≈ 10–11 ms** |
 
 Both meet the ≤ 10–12 ms target. Classic shared mode with a 10 ms default period would add about 7 ms more, which is why the engine prefers `IAudioClient3` low-latency shared mode or exclusive mode. The app's latency readout shows the actual device buffer sizes plus the engine's reported latency.
 

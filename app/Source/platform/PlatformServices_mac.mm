@@ -72,25 +72,37 @@ public:
         if (virtualKey < 0)
             return false; // e.g. F21-F24 do not exist on Mac keyboards
 
-        unregisterHotkey (id);
-
-        EventHotKeyID hotKeyId;
-        hotKeyId.signature = kSignature;
-        hotKeyId.id = nextNativeId++;
+        // Rebinding: release the old chord first (it may be the same chord),
+        // but put it back if the new one cannot be registered, so a failed
+        // rebind never silently loses a working shortcut.
+        const auto previous = entries.find (id);
+        if (previous != entries.end())
+        {
+            UnregisterEventHotKey (previous->second.ref);
+            previous->second.ref = nullptr;
+        }
 
         EventHotKeyRef hotKeyRef = nullptr;
-        const OSStatus status = RegisterEventHotKey (static_cast<UInt32> (virtualKey),
-                                                     toCarbonModifiers (chord.modifiers),
-                                                     hotKeyId,
-                                                     GetApplicationEventTarget(),
-                                                     0,
-                                                     &hotKeyRef);
-        if (status != noErr || hotKeyRef == nullptr)
-            return false; // eventHotKeyExistsErr: taken by another app / the system
+        const UInt32 nativeId = nextNativeId++;
+
+        // Fails with eventHotKeyExistsErr when another app / the system owns
+        // the chord. macOS 15+ also rejects chords whose only modifiers are
+        // Option or Option+Shift (anti key-logging change in Sequoia).
+        if (! registerNative (static_cast<UInt32> (virtualKey), toCarbonModifiers (chord.modifiers), nativeId, hotKeyRef))
+        {
+            if (previous != entries.end())
+            {
+                if (! registerNative (previous->second.virtualKey, previous->second.carbonModifiers, previous->second.nativeId, previous->second.ref))
+                    entries.erase (previous); // lost in the meantime: do not keep a dead entry
+            }
+            return false;
+        }
 
         Entry entry;
         entry.ref = hotKeyRef;
-        entry.nativeId = hotKeyId.id;
+        entry.nativeId = nativeId;
+        entry.virtualKey = static_cast<UInt32> (virtualKey);
+        entry.carbonModifiers = toCarbonModifiers (chord.modifiers);
         entry.callback = std::move (callback);
         entries[id] = std::move (entry);
         return true;
@@ -102,14 +114,18 @@ public:
         if (it == entries.end())
             return;
 
-        UnregisterEventHotKey (it->second.ref);
+        if (it->second.ref != nullptr)
+            UnregisterEventHotKey (it->second.ref);
         entries.erase (it);
     }
 
     void unregisterAll() override
     {
         for (auto& item : entries)
-            UnregisterEventHotKey (item.second.ref);
+        {
+            if (item.second.ref != nullptr)
+                UnregisterEventHotKey (item.second.ref);
+        }
         entries.clear();
     }
 
@@ -118,8 +134,23 @@ private:
     {
         EventHotKeyRef ref = nullptr;
         UInt32 nativeId = 0;
+        UInt32 virtualKey = 0;      // kept so a failed rebind can restore this chord
+        UInt32 carbonModifiers = 0;
         std::function<void()> callback;
     };
+
+    static bool registerNative (UInt32 virtualKey, UInt32 carbonModifiers, UInt32 nativeId, EventHotKeyRef& ref)
+    {
+        EventHotKeyID hotKeyId;
+        hotKeyId.signature = kSignature;
+        hotKeyId.id = nativeId;
+
+        ref = nullptr;
+        const OSStatus status = RegisterEventHotKey (virtualKey, carbonModifiers, hotKeyId, GetApplicationEventTarget(), 0, &ref);
+        if (status != noErr)
+            ref = nullptr;
+        return ref != nullptr;
+    }
 
     // 'FlbS' built arithmetically to avoid multi-character literal warnings.
     static constexpr OSType kSignature = (OSType ('F') << 24) | (OSType ('l') << 16) | (OSType ('b') << 8) | OSType ('S');

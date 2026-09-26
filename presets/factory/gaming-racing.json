@@ -1,0 +1,31 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Racing",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "For racing games and sims. Engine note and gear changes gain body without drone, tyre scrub and squeal (the grip cues) and surrounding cars are easier to place, and the spotter or co-driver cuts through. Moderate compression keeps the constant engine sound comfortable over long stints.",
+  "tags": ["racing", "sim-racing", "engine", "tyres", "spotter"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.4,
+    "macro.2": 0.4,
+    "macro.3": 0.35,
+    "macro.4": 0.3,
+    "macro.5": 0.35,
+    "bass.boost": 2,
+    "bass.freq": 60,
+    "bass.harmonics": 0.15,
+    "bass.harmonicsCutoff": 100,
+    "bass.tighten": 0.2,
+    "clarity.presenceFreq": 2500,
+    "clarity.demud": 0.2,
+    "spatial.width": 1.1,
+    "comp.threshold": -16,
+    "comp.ratio": 1.8,
+    "comp.knee": 8,
+    "comp.release": 150,
+    "comp.autoRelease": true,
+    "comp.makeup": 2.5
+  }
+}

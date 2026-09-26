@@ -62,7 +62,7 @@ Always-on Music companion: band 6 is a de-boom bell at 120 Hz, *cut above* −14
 **Gaming policies enforced by the chain** (independent of preset values):
 - Crossfeed is forced to 0: it blurs interaural differences, the main lateral localisation cue.
 - **Binaural lock:** when the virtualiser rendered 5.1/7.1 to binaural, width = 1, space = 0 and crossfeed = 0. Positional focus (a mild ILD emphasis in 1–6 kHz on the side channel) stays available.
-- Presets for competitive play choose the *Low Latency* profile: 0.5 ms look-aheads and 2× short oversampling, about 1.9 ms algorithmic in total.
+- Presets for competitive play choose the *Low Latency* profile: 0.5 ms look-aheads and 2× short oversampling, about 2.1 ms algorithmic in total.
 
 ### M.5 Protection loops
 
@@ -85,6 +85,6 @@ Always-on Music companion: band 6 is a de-boom bell at 120 Hz, *cut above* −14
 
 | Profile | Gate (STFT) | Saturator OS | Compressor LA | Clipper OS | Limiter LA | Total @ 48 kHz |
 |---|---|---|---|---|---|---|
-| Quality | in chain (1024) | 2× HQ (32) | 3 ms (144) | 4× HQ (36) | 2 ms + 12 (108) | 1344 smp ≈ 28 ms |
-| Balanced | — | 2× short (16) | 1 ms (48) | 4× HQ (36) | 1.5 ms + 12 (84) | 184 smp ≈ 3.8 ms |
-| Low Latency | — | 2× short (16) | 0.5 ms (24) | 2× short (16) | 0.5 ms + 12 (36) | 92 smp ≈ 1.9 ms |
+| Quality | in chain (1024) | 2× HQ (32) | 3 ms (144) | 4× HQ (36) | 2 ms + 20 (116) | 1352 smp ≈ 28.2 ms |
+| Balanced | — | 2× short (16) | 1 ms (48) | 4× HQ (36) | 1.5 ms + 20 (92) | 192 smp = 4.0 ms |
+| Low Latency | — | 2× short (16) | 0.5 ms (24) | 2× short (16) | 0.5 ms + 20 (44) | 100 smp ≈ 2.1 ms |

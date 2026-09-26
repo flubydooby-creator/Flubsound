@@ -349,7 +349,13 @@ void ProcessingChain::applyParameters() noexcept
     mp.ceilingDb = e[MaxCeilingDb];
     mp.clipAmount = e[MaxClipAmount];
     mp.clipKnee = e[MaxClipKnee];
-    mp.glue = e[MaxGlue];
+    // A tiny glue floor keeps the maximizer's 3-band splitter permanently
+    // engaged. Switching glue fully off/on crossfades the input against its
+    // own all-pass-shifted band sum, which comb-nulls the presence region for
+    // a few ms (e.g. whenever Boost Intensity crosses its glue threshold).
+    // 0.001 of 2:1 band compression is inaudible; the all-pass is constant.
+    constexpr float kGlueFloor = 0.001f;
+    mp.glue = std::max (kGlueFloor, e[MaxGlue]);
     mp.releaseMs = e[MaxReleaseMs];
     mp.autoRelease = on (e, MaxAutoRelease);
     maximizer.setParams (mp);

@@ -15,7 +15,8 @@
 # ".monitor" source and plays the result on the real device.
 #
 # The sinks live until the sound server restarts. For persistent sinks use
-# platform/linux/pipewire/90-flubsound-sinks.conf instead (see README.md).
+# platform/linux/pipewire/pipewire.conf.d/90-flubsound-sinks.conf instead
+# (see README.md).
 #
 # Usage: flubsound-pipewire-setup.sh [install|remove|status|print-pa-config]   (default: install)
 # The script is idempotent: install skips existing sinks, remove only unloads

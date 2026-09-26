@@ -2,10 +2,13 @@
 //
 // Guarantee: the output never exceeds the ceiling in sample peak, and stays
 // within ~0.1 dB of it in true (inter-sample) peak, with no gain overshoot.
-// (True-peak scope: content inside the 4x detector's band, flat to ~0.4 fs -
-// i.e. any ADC-recorded programme. Strong synthetic content between 0.4 fs
-// and fs/2, e.g. raw digital white noise, is under-read by any short 4x
-// interpolator; the sample-peak guarantee still holds exactly.)
+// (True-peak scope: content inside the 4x detector's band, flat to ~0.4 fs,
+// i.e. 17.6 kHz at 44.1 kHz. Above that the short 4x interpolator rolls off
+// (-0.9 dB at 0.44 fs, -1.7 dB at 0.45 fs), so strong content between 0.4 fs
+// and fs/2 is under-read: measured up to ~+0.25 dB for full-level noise
+// band-limited to 0.45 fs (a CD-style 20 kHz passband) and ~+1.7 dB for raw
+// digital white noise. Mastered programme carries far less energy up there.
+// The sample-peak guarantee holds exactly for any input.)
 //
 // Algorithm (per sample n, all channels linked):
 //   p[n]   = max over channels of the 4x TruePeakDetector interpolator (with
@@ -23,7 +26,7 @@
 //   final safety: hard clamp to ceilingLin (counts engagements; must be 0
 //            in tests - it exists only to make overs impossible).
 // An internal margin of 0.05 dB below the ceiling absorbs interpolation error.
-// latency = L + D (1.5 ms + 12 samples at 48 kHz = 84 samples by default).
+// latency = L + D (1.5 ms + 20 samples at 48 kHz = 92 samples by default).
 #pragma once
 
 #include "Processor.h"

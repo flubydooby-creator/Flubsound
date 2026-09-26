@@ -66,8 +66,10 @@ Sink names and properties:
 
 - **`enumerateSessions()`** runs `pactl --format=json list sink-inputs` and
   `… list sinks` and parses the output with `flub::json`. It returns one
-  entry per process: pid from `application.process.id` (or
-  `pipewire.sec.pid`), binary, application name, the current sink name, and
+  entry per process: pid from `pipewire.sec.pid` (the host pid from the
+  socket credentials) or else `application.process.id` (the client's own
+  `getpid()`, which is sandbox-local for Flatpak/Snap apps), binary,
+  application name, the current sink name, and
   whether the stream is playing (`corked == false`). Flubsound's own streams
   and streams without a pid are skipped.
 - **`setAppEndpoint(pid, sink)`** runs `pactl move-sink-input <id> '<sink>'`
@@ -109,7 +111,9 @@ keyboard settings.
 the same ceiling rtkit grants. It adds `SCHED_RESET_ON_FORK` so that
 children such as `pactl` never inherit real-time priority. If that fails, it
 retries at the user's `RLIMIT_RTPRIO`, then silently stays at
-`SCHED_OTHER`. Ways to grant RT rights:
+`SCHED_OTHER`. Without `CAP_SYS_NICE` the kernel does not let a thread clear
+`SCHED_RESET_ON_FORK` again, so `revertAudioThread()` restores the old
+policy with the flag kept set, which is harmless for `SCHED_OTHER`. Ways to grant RT rights:
 
 - the distribution's `audio` or `realtime` group with `rtprio` limits
   (`/etc/security/limits.d/`), or

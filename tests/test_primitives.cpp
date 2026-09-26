@@ -288,3 +288,27 @@ TEST_CASE ("OnePoleSmoother: glides converge exactly to non-zero targets (no flo
         k.skip (16);
     CHECK (k.getCurrent() == 12.0f);
 }
+
+TEST_CASE ("TruePeakDetector: full-band accuracy - a 20 kHz sine at 44.1 kHz reads its true amplitude")
+{
+    // The true peak of a pure sine is its amplitude, whatever the sampling
+    // phase. Near Nyquist the samples can sit far below it; the 40-tap-per-phase
+    // interpolator must still read within 0.05 dB (and never materially over).
+    for (double fs : { 44100.0, 48000.0 })
+        for (double f : { 15000.0, 18000.0, 19500.0, 20000.0 })
+            for (double phase : { 0.0, 0.37, 1.1, 2.9 })
+            {
+                TruePeakDetector tp;
+                tp.prepare (1);
+                const int n = 8192;
+                auto s = sine (f, fs, n, 0.5f, phase);
+                float truePeak = 0.0f;
+                for (int i = 0; i < n; ++i)
+                {
+                    const float p = tp.processSample (0, s[static_cast<size_t> (i)]);
+                    if (i > 200)
+                        truePeak = std::max (truePeak, p);
+                }
+                CHECK_NEAR (toDb (truePeak / 0.5), 0.0, 0.05);
+            }
+}

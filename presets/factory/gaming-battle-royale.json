@@ -1,0 +1,31 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Battle Royale",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "For large-map shooters (Apex Legends, Warzone, Fortnite, PUBG). Footsteps and distant gunfire direction come forward, close explosions and vehicles are gently held back so distant cues stay audible, and squad callouts stay clear. Low Latency profile for fast reactions.",
+  "tags": ["battle-royale", "footsteps", "positional", "long-range", "low-latency"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.4,
+    "macro.1": 0.6,
+    "macro.2": 0.55,
+    "macro.3": 0.25,
+    "macro.4": 0.45,
+    "macro.5": 0.4,
+    "latency.profile": "Low Latency",
+    "bass.subsonic": 28,
+    "comp.threshold": -14,
+    "comp.ratio": 1.5,
+    "comp.knee": 8,
+    "comp.attack": 3,
+    "comp.release": 180,
+    "comp.makeup": 2,
+    "comp.upThreshold": -42,
+    "eq.1.type": "Low Shelf",
+    "eq.1.freq": 100,
+    "eq.1.gain": -1,
+    "eq.1.q": 0.7
+  }
+}

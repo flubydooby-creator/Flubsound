@@ -1,0 +1,27 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "7.1 Headphone Surround",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "Set the game (and the Flubsound Game device) to 7.1: the Headphone Virtualizer renders all eight channels binaurally, with side and rear speakers spread for clear front, side and back separation, a little room for out-of-head sound and a tamed LFE. Use either the game's own HRTF with a stereo output or this preset, never both.",
+  "tags": ["7.1", "surround", "virtualizer", "binaural", "headphones", "positional"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.3,
+    "macro.1": 0.45,
+    "macro.2": 0.4,
+    "macro.3": 0.3,
+    "macro.4": 0.3,
+    "macro.5": 0.35,
+    "virt.side": 90,
+    "virt.rear": 150,
+    "virt.room": 0.22,
+    "virt.lfe": -4,
+    "comp.threshold": -16,
+    "comp.ratio": 1.5,
+    "comp.attack": 5,
+    "comp.release": 150,
+    "comp.makeup": 2
+  }
+}

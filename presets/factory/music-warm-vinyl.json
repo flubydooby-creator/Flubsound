@@ -1,0 +1,31 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Warm Vinyl",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "An analogue record-player colour for soul, classic rock, jazz-funk and singer-songwriter music. Oversampled tape saturation, a soft top end, a little low-mid body and bass summed to mono below 150 Hz as on a vinyl cut. Transients are slightly rounded; raise Warmth for more tape drive.",
+  "tags": ["warm", "vinyl", "analog", "tape", "soul", "rock"],
+  "params": {
+    "boost": 0.25,
+    "macro.5": 0.35,
+    "latency.profile": "Quality",
+    "sat.on": true,
+    "bass.boost": 1.5,
+    "bass.freq": 90,
+    "bass.monoBelow": 150,
+    "bass.subsonic": 25,
+    "clarity.attack": -1,
+    "sat.drive": 2,
+    "sat.mix": 0.7,
+    "spatial.width": 0.9,
+    "max.clip": 0.35,
+    "eq.3.freq": 220,
+    "eq.3.gain": 1,
+    "eq.3.q": 0.8,
+    "eq.8.type": "High Shelf",
+    "eq.8.freq": 9000,
+    "eq.8.gain": -1.5,
+    "eq.8.q": 0.7
+  }
+}

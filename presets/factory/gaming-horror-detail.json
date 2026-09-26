@@ -1,0 +1,28 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Horror Detail",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "For horror and stealth games, where the quietest sound matters most. Upward compression and the Detail and Footsteps macros lift creaks, breathing and distant steps out of the silence (the noise floor is left alone), a low drone lift adds dread, and jump scares are only lightly held back.",
+  "tags": ["horror", "detail", "ambience", "footsteps", "immersive"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.35,
+    "macro.1": 0.5,
+    "macro.2": 0.4,
+    "macro.3": 0.15,
+    "macro.4": 0.6,
+    "macro.5": 0.3,
+    "bass.boost": 1.5,
+    "bass.freq": 45,
+    "comp.threshold": -12,
+    "comp.ratio": 1.3,
+    "comp.attack": 5,
+    "comp.release": 200,
+    "comp.makeup": 1.5,
+    "comp.upThreshold": -38,
+    "comp.upRatio": 2.5,
+    "comp.upFloor": -70
+  }
+}

@@ -672,16 +672,28 @@ public:
         if (chord.keyCode == detail::kFunctionKeyBase + 11 && chord.modifiers == KeyChord::None)
             return false;
 
-        unregisterHotkey (id);
+        // Rebinding: release the old chord first (it may be the same chord),
+        // but put it back if the new one cannot be registered, so a failed
+        // rebind never silently loses a working shortcut.
+        const auto previous = entries.find (id);
+        if (previous != entries.end())
+            UnregisterHotKey (window, previous->second.nativeId);
 
         const int nativeId = allocateNativeId();
-        if (nativeId == 0)
+        if (nativeId == 0
+            || ! RegisterHotKey (window, nativeId, toWin32Modifiers (chord.modifiers) | MOD_NOREPEAT, chord.keyCode))
+        {
+            // Typically ERROR_HOTKEY_ALREADY_REGISTERED: another app owns this chord.
+            if (previous != entries.end()
+                && ! RegisterHotKey (window,
+                                     previous->second.nativeId,
+                                     toWin32Modifiers (previous->second.chord.modifiers) | MOD_NOREPEAT,
+                                     previous->second.chord.keyCode))
+                entries.erase (previous); // lost in the meantime: do not keep a dead entry
             return false;
+        }
 
-        if (! RegisterHotKey (window, nativeId, toWin32Modifiers (chord.modifiers) | MOD_NOREPEAT, chord.keyCode))
-            return false; // typically ERROR_HOTKEY_ALREADY_REGISTERED: another app owns this chord
-
-        entries[id] = Entry { nativeId, std::move (callback) };
+        entries[id] = Entry { nativeId, chord, std::move (callback) };
         return true;
     }
 
@@ -710,6 +722,7 @@ private:
     struct Entry
     {
         int nativeId = 0;
+        KeyChord chord;
         std::function<void()> callback;
     };
 
@@ -1209,16 +1222,25 @@ private:
 //==============================================================================
 
 /** Completion handler for ActivateAudioInterfaceAsync. Hand-written COM object
-    with manual reference counting. It also implements IAgileObject (a marker
-    interface without methods) so the audio stack may call ActivateCompleted
-    directly on its worker thread without marshalling it back to our apartment -
-    ActivateAudioInterfaceAsync requires an agile handler. */
+    with manual reference counting. The API requires an agile handler ("the
+    implementation must be agile (aggregating a free-threaded marshaler)"), so
+    the audio stack may call ActivateCompleted directly on its worker thread
+    without marshalling it back to our apartment. We do both things WRL's
+    FtmBase does: answer IAgileObject (a marker interface without methods) and
+    aggregate the free-threaded marshaler for IMarshal.
+    Must be created on a thread that has initialised COM. */
 class ActivationCompletionHandler final : public IActivateAudioInterfaceCompletionHandler, public IAgileObject
 {
 public:
-    ActivationCompletionHandler() : completed (CreateEventW (nullptr, TRUE, FALSE, nullptr)) {}
+    ActivationCompletionHandler() : completed (CreateEventW (nullptr, TRUE, FALSE, nullptr))
+    {
+        // Aggregation: the FTM's IUnknown is our private inner object; it does
+        // not AddRef us (the controlling unknown), so no reference cycle.
+        if (FAILED (CoCreateFreeThreadedMarshaler (static_cast<IActivateAudioInterfaceCompletionHandler*> (this), &freeThreadedMarshaler)))
+            freeThreadedMarshaler = nullptr;
+    }
 
-    bool isValid() const noexcept { return completed.handle != nullptr; }
+    bool isValid() const noexcept { return completed.handle != nullptr && freeThreadedMarshaler != nullptr; }
 
     /** Waits for completion; on success returns the IAudioClient (caller owns a ref). */
     HRESULT waitForClient (DWORD timeoutMs, IAudioClient** client)
@@ -1246,6 +1268,8 @@ public:
             *object = static_cast<IActivateAudioInterfaceCompletionHandler*> (this);
         else if (riid == __uuidof (IAgileObject))
             *object = static_cast<IAgileObject*> (this);
+        else if (riid == __uuidof (IMarshal) && freeThreadedMarshaler != nullptr)
+            return freeThreadedMarshaler->QueryInterface (riid, object); // AddRefs us through aggregation
         else
         {
             *object = nullptr;
@@ -1293,9 +1317,12 @@ private:
     {
         if (audioClient != nullptr)
             audioClient->Release();
+        if (freeThreadedMarshaler != nullptr)
+            freeThreadedMarshaler->Release();
     }
 
     LONG refCount = 1;
+    IUnknown* freeThreadedMarshaler = nullptr; // inner (non-delegating) unknown of the aggregated FTM
     ScopedHandle completed;
     HRESULT result = E_PENDING;
     IAudioClient* audioClient = nullptr;
@@ -1504,7 +1531,7 @@ private:
         if (! handler->isValid())
         {
             handler->Release();
-            error = "CreateEvent failed.";
+            error = "Cannot create the activation completion handler (CreateEvent / CoCreateFreeThreadedMarshaler failed).";
             return false;
         }
 
@@ -1613,7 +1640,20 @@ private:
                 hr = stream.capture->GetBuffer (&data, &frames, &flags, nullptr, nullptr);
                 if (FAILED (hr))
                     break;
+                if (hr == AUDCLNT_S_BUFFER_EMPTY || frames == 0)
+                {
+                    // Success code without a packet. AUDCLNT_S_BUFFER_EMPTY
+                    // acquires nothing; a (theoretical) S_OK with 0 frames is
+                    // closed with ReleaseBuffer (0) so the next GetBuffer is
+                    // never out of order. Then wait for the next event.
+                    hr = (hr == AUDCLNT_S_BUFFER_EMPTY) ? S_OK : stream.capture->ReleaseBuffer (0);
+                    break;
+                }
 
+                // AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY only reports a glitch
+                // *before* this packet (e.g. we were late); the packet itself
+                // is valid and is delivered normally; the consumer side
+                // (DriftCompensatedFifo) absorbs the timing jump.
                 if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0 || data == nullptr)
                 {
                     // Deliver silence explicitly so downstream timing stays continuous.

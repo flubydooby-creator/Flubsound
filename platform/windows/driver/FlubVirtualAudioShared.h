@@ -11,7 +11,8 @@
  *   For every endpoint the driver owns two page-aligned regions that it maps
  *   into the engine process on IOCTL_FLUB_VA_MAP_ENDPOINT:
  *     1. a control page starting with FLUB_VA_STREAM_CONTROL (positions,
- *        format, state), never visible to audiodg;
+ *        format, state), never writable by audiodg (see ReadOffsetBytes for
+ *        the one optional read-only exposure);
  *     2. the data region: the WaveRT cyclic buffer that audiodg reads (Mic)
  *        or writes (Game/Music/Chat/System), up to DataCapacityBytes.
  *
@@ -19,7 +20,9 @@
  *   - Positions are 64-bit monotonically increasing FRAME counters; the byte
  *     offset of a frame is (position % BufferFrames) * BytesPerFrame. They are
  *     8-byte aligned, so plain 64-bit loads/stores are single-copy atomic on
- *     x64 and ARM64.
+ *     x64 and ARM64. They are NOT on 32-bit x86/ARM, so only 64-bit engines
+ *     may map endpoints (the driver rejects MAP from WoW64 callers with
+ *     IoIs32bitProcess). The IOCTL structs below are 32/64-bit neutral.
  *   - The producer writes samples first, then publishes WritePosition with
  *     RELEASE semantics (WriteRelease64 / InterlockedExchange64).
  *   - The consumer reads WritePosition with ACQUIRE semantics (ReadAcquire64),
@@ -28,9 +31,13 @@
  *   - Producer and consumer fields sit on separate 64-byte cache lines to
  *     avoid false sharing between the audiodg / driver thread and the
  *     engine thread.
- *   - Fields in cache line 0 change only while StreamState != RUNNING; every
- *     change increments Generation (read it before and after copying the
- *     description - seqlock style - and retry on mismatch).
+ *   - Fields in cache line 0 change only while StreamState != FLUB_VA_STATE_RUN
+ *     and are protected by a sequence lock on Generation: the driver
+ *     increments it to an ODD value before changing any of them and to the
+ *     next EVEN value afterwards (release ordering for both). A reader loads
+ *     Generation (acquire), retries while it is odd, copies the description,
+ *     loads Generation again and retries if it changed. A single increment
+ *     after the change would not detect a copy torn by a write in progress.
  *
  * Who produces what:
  *   render endpoints  (Game, Music, Chat, System): audiodg writes the buffer,
@@ -88,12 +95,21 @@ typedef int64_t FLUB_VA_I64;
 #define FLUB_VA_PAGE_BYTES 4096u
 #define FLUB_VA_MAX_CHANNELS 8u
 
-/* Device interface the driver registers (IoRegisterDeviceInterface) for its
-   control device; the engine finds it with CM_Get_Device_Interface_List and
-   opens it with CreateFileW. Generated for Flubsound - never reuse. */
-#define FLUB_VA_INTERFACE_GUID_STRING "{e968b28c-aea9-4e2c-a2af-5212a5a2c759}"
+/* Control channel. The driver creates a non-PnP control device object with
+   IoCreateDeviceSecure (its own SDDL, FILE_DEVICE_SECURE_OPEN) and publishes it
+   with IoCreateSymbolicLink; the engine opens FLUB_VA_CONTROL_PATH_USER with
+   CreateFileW. (A device interface is not an option for a control device:
+   IoRegisterDeviceInterface needs a PDO, and re-using the adapter PDO would
+   put our SDDL on the KS audio interfaces that audiodg opens too.)
+   The GUID is the DeviceClassGuid passed to IoCreateDeviceSecure, so
+   administrators can override the device's security through the registry.
+   Generated for Flubsound - never reuse. */
+#define FLUB_VA_CONTROL_DEVICE_NAME_KERNEL L"\\Device\\FlubsoundVirtualAudio"
+#define FLUB_VA_CONTROL_SYMLINK_KERNEL L"\\DosDevices\\Global\\FlubsoundVirtualAudio"
+#define FLUB_VA_CONTROL_PATH_USER L"\\\\.\\FlubsoundVirtualAudio"
+#define FLUB_VA_CONTROL_CLASS_GUID_STRING "{e968b28c-aea9-4e2c-a2af-5212a5a2c759}"
 #if defined(DEFINE_GUID)
-DEFINE_GUID (GUID_DEVINTERFACE_FLUB_VIRTUAL_AUDIO, 0xe968b28c, 0xaea9, 0x4e2c, 0xa2, 0xaf, 0x52, 0x12, 0xa5, 0xa2, 0xc7, 0x59);
+DEFINE_GUID (GUID_DEVCLASS_FLUB_VIRTUAL_AUDIO_CONTROL, 0xe968b28c, 0xaea9, 0x4e2c, 0xa2, 0xaf, 0x52, 0x12, 0xa5, 0xa2, 0xc7, 0x59);
 #endif
 
 /* ------------------------------------------------------------------------- */
@@ -156,7 +172,7 @@ typedef struct FLUB_VA_STREAM_CONTROL
     FLUB_VA_U32 BufferFrames;  /* current cyclic buffer size in frames (not necessarily 2^n) */
     FLUB_VA_U32 PeriodFrames;  /* audiodg period = notification interval */
     FLUB_VA_U32 ClockMode;     /* FLUB_VA_CLOCK_* currently in effect */
-    volatile FLUB_VA_U32 Generation; /* incremented on every description / buffer change */
+    volatile FLUB_VA_U32 Generation; /* sequence lock: odd while the driver rewrites this line */
     FLUB_VA_U64 DataCapacityBytes;   /* size of the mapped data region (>= BufferFrames * BytesPerFrame) */
 
     /* --- cache line 1 (offset 64): producer-owned ------------------------- */
@@ -173,7 +189,9 @@ typedef struct FLUB_VA_STREAM_CONTROL
     volatile FLUB_VA_U32 ConsumerFlags;
     /* ReadPosition as a byte offset inside the buffer, for audiodg: can be
        exposed as the WaveRT position register (KSRTAUDIO_HWREGISTER) so
-       audiodg reads the play position without a kernel transition. */
+       audiodg reads the play position without a kernel transition. Doing so
+       maps this whole page READ-ONLY into audiodg (page granularity); it
+       holds no secrets, but audiodg must never get a writable mapping. */
     volatile FLUB_VA_U32 ReadOffsetBytes;
     FLUB_VA_U8 Reserved2[FLUB_VA_CACHE_LINE_BYTES - 32];
 
@@ -250,7 +268,7 @@ typedef struct FLUB_VA_MAP_RESULT
     FLUB_VA_U64 DataAddress;       /* user VA of the data region */
     FLUB_VA_U64 DataCapacityBytes;
     FLUB_VA_U32 ControlBytes;      /* size of the control mapping (FLUB_VA_PAGE_BYTES) */
-    FLUB_VA_U32 Generation;        /* Generation at mapping time */
+    FLUB_VA_U32 Generation;        /* Generation at mapping time (always even) */
 } FLUB_VA_MAP_RESULT;
 
 typedef struct FLUB_VA_UNMAP_REQUEST

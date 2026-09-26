@@ -1,0 +1,33 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Crystal Clarity",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "Maximum detail without harshness for acoustic, vocal and well-recorded music. Low-mid mud is trimmed, presence rises only when the 3 kHz region is quiet, and air is added by a harmonic exciter plus a 12 kHz shelf. A dynamic de-harsh band and a 7 kHz de-esser keep sibilance and cymbals smooth.",
+  "tags": ["clarity", "detail", "vocals", "acoustic", "air"],
+  "params": {
+    "boost": 0.3,
+    "macro.1": 0.1,
+    "macro.2": 0.1,
+    "macro.3": 0.4,
+    "clarity.presenceFreq": 3000,
+    "clarity.air": 0.15,
+    "clarity.demud": 0.15,
+    "eq.3.freq": 280,
+    "eq.3.gain": -1,
+    "eq.3.q": 1.2,
+    "eq.9.type": "High Shelf",
+    "eq.9.freq": 12000,
+    "eq.9.gain": 1,
+    "eq.9.q": 0.7,
+    "dyneq.2.on": true,
+    "dyneq.2.freq": 7000,
+    "dyneq.2.q": 2,
+    "dyneq.2.threshold": -30,
+    "dyneq.2.ratio": 3,
+    "dyneq.2.range": 4,
+    "dyneq.2.attack": 1,
+    "dyneq.2.release": 60
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Punchy Pop",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "Radio-ready energy for pop, dance-pop and K-pop. Kick and snare transients are emphasised, the bass is tightened and centred below 90 Hz, low-mid boxiness is trimmed and vocals get presence and sheen. Loudness is raised moderately through multiband glue rather than hard limiting.",
+  "tags": ["pop", "punch", "vocals", "transients", "radio"],
+  "params": {
+    "boost": 0.4,
+    "macro.1": 0.35,
+    "macro.2": 0.15,
+    "macro.3": 0.2,
+    "macro.4": 0.25,
+    "bass.boost": 2,
+    "bass.tighten": 0.2,
+    "bass.monoBelow": 90,
+    "max.glue": 0.25,
+    "eq.3.gain": -1
+  }
+}

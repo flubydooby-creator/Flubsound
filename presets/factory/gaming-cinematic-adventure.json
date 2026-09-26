@@ -1,0 +1,32 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Cinematic Adventure",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "For story-driven, open-world and RPG games. Explosions and hits gain weight and impact, the score and dialogue open up, and a wider soundstage with a little ambience makes the world feel bigger. Gentle glue keeps the big moments big without fatigue, in the Balanced profile.",
+  "tags": ["cinematic", "story", "rpg", "adventure", "impact", "score"],
+  "params": {
+    "mode": "Gaming",
+    "boost": 0.45,
+    "macro.2": 0.3,
+    "macro.3": 0.5,
+    "macro.4": 0.25,
+    "macro.5": 0.45,
+    "bass.boost": 2,
+    "bass.freq": 50,
+    "bass.harmonics": 0.1,
+    "spatial.width": 1.2,
+    "spatial.lowCut": 200,
+    "spatial.space": 0.15,
+    "virt.room": 0.2,
+    "comp.threshold": -12,
+    "comp.ratio": 1.5,
+    "comp.knee": 10,
+    "comp.attack": 20,
+    "comp.release": 250,
+    "comp.autoRelease": true,
+    "comp.makeup": 1.5,
+    "max.glue": 0.25
+  }
+}

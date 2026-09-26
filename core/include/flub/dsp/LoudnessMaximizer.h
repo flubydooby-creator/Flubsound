@@ -119,6 +119,11 @@ private:
     bool prepared = false;
     bool fresh = true;           // nothing processed since prepare()/reset(): setParams() applies instantly
 
+    // Silence for prepared channels that a block leaves out: every stage (dry
+    // delay, oversampler, splitter, limiter) keeps running on all prepared
+    // channels, so no stale audio is released when a wider block returns.
+    AudioBuffer padBuffer;
+
     // Clipper: oversampled soft clip, crossfaded against a dry path delayed by
     // exactly the oversampler round trip.
     int osFactor = 1;

@@ -1,0 +1,33 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Lo-Fi Chill",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "A relaxed, dusty tape character for lo-fi hip-hop, chillhop and study playlists. Tape saturation, a rolled-off top above 10 kHz, softened transients and a slightly narrower, roomier image make any track sit back and stay easy on the ears for hours.",
+  "tags": ["lo-fi", "chill", "study", "tape", "warm", "relaxed"],
+  "params": {
+    "boost": 0.25,
+    "macro.5": 0.4,
+    "latency.profile": "Quality",
+    "sat.on": true,
+    "bass.boost": 2,
+    "bass.freq": 80,
+    "clarity.attack": -2,
+    "clarity.sustain": 1,
+    "sat.drive": 6,
+    "sat.mix": 0.6,
+    "spatial.width": 0.85,
+    "spatial.space": 0.2,
+    "max.clip": 0.3,
+    "max.glue": 0.2,
+    "eq.0.type": "Low Cut",
+    "eq.0.freq": 35,
+    "eq.0.slope": "12 dB/oct",
+    "eq.4.gain": 1,
+    "eq.4.q": 0.7,
+    "eq.8.type": "High Cut",
+    "eq.8.freq": 10000,
+    "eq.8.slope": "12 dB/oct"
+  }
+}

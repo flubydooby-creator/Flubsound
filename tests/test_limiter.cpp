@@ -372,8 +372,8 @@ TEST_CASE ("TruePeakLimiter: latencySamples() = lookahead + detector delay, and 
         bool truePeak;
         int expected;
     };
-    const Case cases[] = { { 48000.0, 1.5f, true, 72 + 12 }, { 48000.0, 1.5f, false, 72 },  { 44100.0, 2.0f, true, 88 + 12 },
-                           { 96000.0, 0.5f, true, 48 + 12 }, { 192000.0, 1.0f, true, 192 + 12 }, { 48000.0, 0.0f, true, 12 } };
+    const Case cases[] = { { 48000.0, 1.5f, true, 72 + TruePeakDetector::kDelay }, { 48000.0, 1.5f, false, 72 },  { 44100.0, 2.0f, true, 88 + TruePeakDetector::kDelay },
+                           { 96000.0, 0.5f, true, 48 + TruePeakDetector::kDelay }, { 192000.0, 1.0f, true, 192 + TruePeakDetector::kDelay }, { 48000.0, 0.0f, true, TruePeakDetector::kDelay } };
     for (const auto& tc : cases)
     {
         TruePeakLimiter lim;
@@ -403,7 +403,7 @@ TEST_CASE ("TruePeakLimiter: latencySamples() = lookahead + detector delay, and 
     prepareLimiter (lim, kFs, 2, 256, 1.5f, true);
     lim.setLookaheadMs (5.0f);
     lim.setTruePeakDetection (false);
-    CHECK (lim.latencySamples() == 84);
+    CHECK (lim.latencySamples() == 72 + TruePeakDetector::kDelay);
 }
 
 TEST_CASE ("TruePeakLimiter: a -30 dBFS signal passes bit-exactly, only delayed by latencySamples()")
@@ -624,7 +624,7 @@ TEST_CASE ("TruePeakLimiter: detection is linked - a quiet channel gets the loud
     const double gQuiet = toneAmplitude (buf.ch[1].data() + 12000, 9600, 300.0, kFs) / 0.01;
     CHECK_NEAR (toDb (gLoud), toDb (gQuiet), 0.02);
     CHECK_NEAR (toDb (gQuiet), -7.07, 0.1);
-    CHECK (lat == 84);
+    CHECK (lat == 72 + TruePeakDetector::kDelay);
 }
 
 TEST_CASE ("TruePeakLimiter: ceiling and release changes while limiting are click-free and never trip the safety clamp")
@@ -746,8 +746,8 @@ TEST_CASE ("TruePeakLimiter: silence, DC, full-scale noise, impulses and extreme
     {
         TruePeakLimiter lim;
         prepareLimiter (lim, kFs, 2, 256, la);
-        CHECK (lim.latencySamples() >= 12);
-        CHECK (lim.latencySamples() <= 12 + 480);
+        CHECK (lim.latencySamples() >= TruePeakDetector::kDelay);
+        CHECK (lim.latencySamples() <= TruePeakDetector::kDelay + 480);
         Planar buf (2, 4096);
         setChannel (buf, 0, whiteNoise (4096, 4.0f, 3));
         processInBlocks (lim, buf, 256);
@@ -835,4 +835,377 @@ TEST_CASE ("TruePeakLimiter: blocks narrower than the prepared channel count and
     }
     CHECK (allFinite (wide));
     CHECK (lim.getSafetyClipCount() == 0u);
+}
+
+// ---- adversarial review tests ----
+namespace
+{
+/** Brute-force reference of the header's gain computer in sample-peak mode
+    (p = max |x|, D = 0), in double: r, the sliding minimum over L + 2 and the
+    mean over L + 1, straight from the definitions (no deque, no running sum). */
+std::vector<double> referenceEnvelope (const std::vector<float>& x, int L, double thr)
+{
+    const int n = static_cast<int> (x.size());
+    auto r = [&] (int k) {
+        if (k < 0)
+            return 1.0;
+        const double p = std::abs (static_cast<double> (x[static_cast<size_t> (k)]));
+        return p > thr ? thr / p : 1.0;
+    };
+    std::vector<double> m (static_cast<size_t> (n)), a (static_cast<size_t> (n));
+    for (int k = 0; k < n; ++k)
+    {
+        double mn = 1.0;
+        for (int j = k - L - 1; j <= k; ++j)
+            mn = std::min (mn, r (j));
+        m[static_cast<size_t> (k)] = mn;
+    }
+    for (int k = 0; k < n; ++k)
+    {
+        double s = 0.0;
+        for (int j = k - L; j <= k; ++j)
+            s += j < 0 ? 1.0 : m[static_cast<size_t> (j)];
+        a[static_cast<size_t> (k)] = s / (L + 1);
+    }
+    return a;
+}
+} // namespace
+
+TEST_CASE ("TruePeakLimiter [adversarial]: gain matches a brute-force model of the header (deque, box filter, attack bound)")
+{
+    // Sample-peak mode makes p[n] exactly max |x|, so the whole gain computer
+    // can be checked sample by sample against the definitions. Look-aheads
+    // include L + 3 = 32 and 64 (deque ring exactly full) and L = 0.
+    // Programme: never-zero random-sign samples under an envelope with
+    // isolated spikes, dense bursts, and long monotonic ramps up and down
+    // (a slowly falling peak level fills the deque to L + 2 entries).
+    const int n = 12000;
+    std::vector<float> x (static_cast<size_t> (n));
+    FastRandom rng (77);
+    for (int i = 0; i < n; ++i)
+    {
+        double env = 0.3;
+        if (i >= 2000 && i < 2400)
+            env = 4.0 - 3.5 * (i - 2000) / 400.0; // falling peaks: r rises every sample
+        else if (i >= 3000 && i < 3400)
+            env = 0.5 + 3.5 * (i - 3000) / 400.0; // rising peaks
+        else if (i >= 5000 && i < 7000)
+            env = 1.0 + 3.0 * (0.5 + 0.5 * rng.nextBipolar()); // dense random overs
+        else if ((rng.nextU32() & 127u) == 0u)
+            env = 1.0 + 7.0 * (0.5 + 0.5 * rng.nextBipolar()); // isolated spikes
+        const float sign = (rng.nextU32() & 1u) != 0u ? 1.0f : -1.0f;
+        x[static_cast<size_t> (i)] = sign * static_cast<float> (env * (0.6 + 0.4 * (0.5 + 0.5 * rng.nextBipolar())));
+    }
+
+    for (int L : { 0, 1, 29, 61, 72 })
+    {
+        TruePeakLimiter lim;
+        prepareLimiter (lim, kFs, 1, 300, static_cast<float> (L * 1000.0 / kFs), false);
+        REQUIRE (lim.latencySamples() == L);
+        lim.setParams (limiterParams (-1.0f, 50.0f, true));
+        Planar buf (1, n);
+        setChannel (buf, 0, x);
+        // Irregular host blocks (1 .. 300 samples).
+        for (int pos = 0; pos < n;)
+        {
+            const int len = std::min (n - pos, 1 + static_cast<int> (rng.nextU32() % 300u));
+            lim.process (buf.block (pos, len));
+            pos += len;
+        }
+        const double thr = std::pow (10.0, (-1.0 - 0.05) / 20.0);
+        const auto a = referenceEnvelope (x, L, thr);
+        int boundFails = 0, attackFails = 0, releaseFails = 0;
+        double prevG = 1.0;
+        for (int i = L; i < n; ++i)
+        {
+            const double xin = x[static_cast<size_t> (i - L)];
+            const double y = buf.ch[0][static_cast<size_t> (i)];
+            const double g = y / xin; // x never 0
+            const double ai = a[static_cast<size_t> (i)];
+            const double r0 = i - L - 1 >= 0 ? std::min (1.0, thr / std::abs (static_cast<double> (x[static_cast<size_t> (i - L - 1)]))) : 1.0;
+            const double r1 = std::min (1.0, thr / std::abs (xin));
+            // g <= a[n] <= min (r[n-L-1], r[n-L]); |y| <= threshold.
+            if (g > ai * (1.0 + 1e-6) || g > std::min (r0, r1) * (1.0 + 1e-6) || std::abs (y) > thr * (1.0 + 1e-6))
+                ++boundFails;
+            // Attack: the gain follows the box-filtered envelope exactly.
+            if (ai < prevG * (1.0 - 1e-5) && std::abs (g - ai) > 1e-6 * ai)
+                ++attackFails;
+            // Release: monotonic recovery, never above the envelope.
+            if (ai > prevG * (1.0 + 1e-5) && g < prevG * (1.0 - 1e-6))
+                ++releaseFails;
+            prevG = g;
+        }
+        if (boundFails + attackFails + releaseFails > 0)
+            std::cerr << "    L = " << L << ": bound " << boundFails << ", attack " << attackFails << ", release " << releaseFails << "\n";
+        CHECK (boundFails == 0);
+        CHECK (attackFails == 0);
+        CHECK (releaseFails == 0);
+        CHECK (lim.getSafetyClipCount() == 0u);
+    }
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: 192 kHz and the latency-profile look-aheads hold the ceiling (sample + true peak)")
+{
+    struct Case
+    {
+        double fs;
+        float lookaheadMs;
+    };
+    // 0.5 ms = LowLatency profile, 2 ms = Quality profile, 1 ms = MixEngine master.
+    const Case cases[] = { { 192000.0, 1.5f }, { 192000.0, 0.5f }, { 44100.0, 0.5f }, { 48000.0, 0.5f }, { 96000.0, 2.0f }, { 44100.0, 1.0f } };
+    for (const auto& tc : cases)
+    {
+        const double fs = tc.fs;
+        const int n = static_cast<int> (fs * 0.12);
+        const int tail = static_cast<int> (fs * 0.02);
+        Program hardOnset { "hard-onset 11 kHz +6 dB", sine (11000.0, fs, n, 2.0f, 0.1), sine (7000.0, fs, n, 2.0f, 2.1) };
+        std::fill (hardOnset.l.end() - tail, hardOnset.l.end(), 0.0f);
+        std::fill (hardOnset.r.end() - tail, hardOnset.r.end(), 0.0f);
+        const Program programs[] = {
+            hardOnset,
+            { "band-limited noise +20 dB", bandLimitedNoise (n, tail, 10.0f, 51), bandLimitedNoise (n, tail, 10.0f, 52) },
+            { "sparse impulses + doublets", sparseImpulses (n, tail, 2.0f, 53), sparseImpulses (n, tail, 1.0f, 54) },
+            { "band-limited square +12 dB", bandLimit (naiveSquare (2500.0, fs, n - 200, tail, 4.0f)),
+              bandLimit (naiveSquare (60.0, fs, n - 200, tail, 4.0f)) },
+        };
+        for (const auto& prog : programs)
+        {
+            const float ceilingDb = -1.0f;
+            const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb, tc.lookaheadMs, 97);
+            const double ceil = dbfs (ceilingDb);
+            reportIfFailed (res.samplePeak <= ceil && res.truePeak <= ceil * kTpTolerance && res.safetyClips == 0u, prog, fs, ceilingDb, res);
+            CHECK_LE (res.samplePeak, ceil);
+            CHECK_LE (res.truePeak, ceil * kTpTolerance);
+            CHECK (res.safetyClips == 0u);
+        }
+    }
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: ceiling automation while limiting never trips the safety clamp")
+{
+    // The ceiling is moved at random (-12 .. 0 dB) every 10 .. 40 ms under
+    // dense +12 dB programme. The gain path alone must hold every ceiling in
+    // force (the clamp compares against the ceiling each output sample was
+    // limited with), and the result is identical for any block size.
+    const int n = 48000;
+    const auto l = bandLimitedNoise (n, 1000, 4.0f, 61);
+    const auto r = bandLimit (naiveSquare (330.0, kFs, n - 200, 1000, 4.0f));
+    std::vector<std::pair<int, float>> automation;
+    FastRandom rng (62);
+    for (int pos = 0; pos < n;)
+    {
+        automation.push_back ({ pos, -12.0f * (0.5f + 0.5f * rng.nextBipolar()) });
+        pos += 480 * (1 + static_cast<int> (rng.nextU32() % 4u));
+    }
+    std::vector<float> first;
+    for (int bs : { 1, 48, 480 })
+    {
+        TruePeakLimiter lim;
+        prepareLimiter (lim, kFs, 2, 512);
+        lim.setParams (limiterParams (-1.0f, 40.0f, true));
+        Planar buf (2, n);
+        setChannel (buf, 0, l);
+        setChannel (buf, 1, r);
+        size_t next = 0;
+        for (int pos = 0; pos < n; pos += bs)
+        {
+            while (next < automation.size() && automation[next].first <= pos)
+                lim.setParams (limiterParams (automation[next++].second, 40.0f, true));
+            lim.process (buf.block (pos, std::min (bs, n - pos)));
+        }
+        CHECK (lim.getSafetyClipCount() == 0u);
+        CHECK_LE (planarPeak (buf), 1.0);
+        CHECK (allFinite (buf));
+        if (first.empty())
+            first = buf.ch[0];
+        else
+            CHECK (buf.ch[0] == first); // automation points are multiples of every block size
+    }
+
+    // Harsher: a new random ceiling every millisecond (the glide never
+    // finishes, and reverses direction while the gain is still ramping).
+    TruePeakLimiter lim;
+    prepareLimiter (lim, kFs, 2, 64);
+    Planar buf (2, n);
+    setChannel (buf, 0, l);
+    setChannel (buf, 1, r);
+    for (int pos = 0; pos < n; pos += 48)
+    {
+        lim.setParams (limiterParams (-12.0f * (0.5f + 0.5f * rng.nextBipolar()), 5.0f, (pos / 48) % 2 == 0));
+        lim.process (buf.block (pos, std::min (48, n - pos)));
+    }
+    CHECK (lim.getSafetyClipCount() == 0u);
+    CHECK_LE (planarPeak (buf), 1.0);
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: after 20 s of dense limiting with a 1 s release the gain lands exactly on 0 dB")
+{
+    // Guards the running sum (re-summed per ring cycle), the double gain
+    // state and the landing rule: once recovered, the limiter is again a
+    // bit-exact delay.
+    TruePeakLimiter lim;
+    prepareLimiter (lim, kFs, 2, 1024, 10.0f); // largest look-ahead: largest ring
+    lim.setParams (limiterParams (-3.0f, 1000.0f, false));
+    Planar buf (2, 1024);
+    FastRandom rng (71);
+    const int loudBlocks = static_cast<int> (20.0 * kFs / 1024);
+    for (int b = 0; b < loudBlocks; ++b)
+    {
+        for (auto& c : buf.ch)
+            for (auto& v : c)
+                v = 6.0f * rng.nextBipolar();
+        lim.process (buf.block());
+        if (b == loudBlocks - 1)
+            CHECK_LE (lim.getGainReductionDb(), -10.0f);
+    }
+    CHECK (lim.getSafetyClipCount() == 0u);
+
+    // 25 s of quiet noise (a 1 s release needs ~17 s from -18 dB to 1e-7).
+    const int lat = lim.latencySamples();
+    std::vector<float> history;
+    bool exact = true;
+    for (int b = 0; b < static_cast<int> (25.0 * kFs / 1024); ++b)
+    {
+        std::vector<float> in (1024);
+        for (auto& v : in)
+            v = 0.1f * rng.nextBipolar();
+        std::copy (in.begin(), in.end(), buf.ch[0].begin());
+        std::copy (in.begin(), in.end(), buf.ch[1].begin());
+        history.insert (history.end(), in.begin(), in.end());
+        lim.process (buf.block());
+        if (b >= static_cast<int> (24.0 * kFs / 1024))
+            for (int i = 0; i < 1024; ++i)
+            {
+                const size_t k = history.size() - 1024 + static_cast<size_t> (i) - static_cast<size_t> (lat);
+                exact = exact && buf.ch[0][static_cast<size_t> (i)] == history[k];
+            }
+    }
+    CHECK (exact);
+    CHECK (lim.getGainReductionDb() == 0.0f);
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: a channel that leaves and rejoins never replays stale audio")
+{
+    for (bool truePeak : { true, false })
+    {
+        TruePeakLimiter lim;
+        prepareLimiter (lim, kFs, 2, 256, 1.5f, truePeak);
+        lim.setParams (limiterParams (-1.0f));
+        Planar st (2, 256);
+        std::fill (st.ch[1].begin(), st.ch[1].end(), 0.5f); // right channel: DC, then the channel goes away
+        lim.process (st.block());
+        Planar mono (1, 256);
+        for (int b = 0; b < 4; ++b)
+            lim.process (mono.block());
+        Planar back (2, 256); // silence on both channels
+        lim.process (back.block());
+        CHECK (peakAbs (back.ch[1].data(), 256) == 0.0);
+        CHECK (peakAbs (back.ch[0].data(), 256) == 0.0);
+    }
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: reset() mid-limit forgets the gain; setParams() right after applies instantly")
+{
+    TruePeakLimiter lim;
+    prepareLimiter (lim, kFs, 1, 512);
+    lim.setParams (limiterParams (-1.0f, 1000.0f, false));
+    Planar loud (1, 4096);
+    setChannel (loud, 0, sine (440.0, kFs, 4096, 8.0f));
+    processInBlocks (lim, loud, 512);
+    CHECK_LE (lim.getGainReductionDb(), -15.0f);
+
+    lim.reset();
+    lim.setParams (limiterParams (-6.0f, 1000.0f, false)); // fresh: no 50 ms glide
+    const int n = 4096;
+    const auto quiet = sine (440.0, kFs, n, dbfs (-7.0)); // below -6 dB: must pass untouched
+    Planar buf (1, n);
+    setChannel (buf, 0, quiet);
+    processInBlocks (lim, buf, 512);
+    const int lat = lim.latencySamples();
+    bool exact = true;
+    for (int i = 0; i < n; ++i)
+        exact = exact && buf.ch[0][static_cast<size_t> (i)] == (i >= lat ? quiet[static_cast<size_t> (i - lat)] : 0.0f);
+    CHECK (exact);
+    CHECK (lim.getGainReductionDb() == 0.0f);
+
+    // ...and the new ceiling is in force from the first sample: a -3 dBFS
+    // burst straight after another reset is held at -6 dB.
+    lim.reset();
+    lim.setParams (limiterParams (-2.0f));
+    lim.setParams (limiterParams (-6.0f));
+    Planar burst (1, 2048);
+    setChannel (burst, 0, sine (440.0, kFs, 2048, dbfs (-3.0)));
+    processInBlocks (lim, burst, 64);
+    CHECK_LE (peakAbs (burst.ch[0].data(), 2048), dbfs (-6.0));
+    CHECK (lim.getSafetyClipCount() == 0u);
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: getGainReductionDb() reports the deepest gain of the block")
+{
+    // One spike of +12 dB (over a -1 dB ceiling) in an otherwise quiet
+    // stream, sample-peak mode: the deepest gain is threshold / 4 exactly.
+    TruePeakLimiter lim;
+    prepareLimiter (lim, kFs, 2, 4096, 1.5f, false);
+    lim.setParams (limiterParams (-1.0f, 80.0f, true));
+    Planar buf (2, 4096);
+    buf.ch[1][1000] = -4.0f;
+    lim.process (buf.block());
+    CHECK_NEAR (lim.getGainReductionDb(), -1.05 - toDb (4.0), 0.001);
+    CHECK_NEAR (std::abs (buf.ch[1][static_cast<size_t> (1000 + lim.latencySamples())]), dbfs (-1.05), 1e-5);
+    // A later quiet block (after recovery) reports 0 dB again.
+    Planar quiet (2, 4096);
+    for (int b = 0; b < 12; ++b)
+        lim.process (quiet.block());
+    CHECK (lim.getGainReductionDb() == 0.0f);
+}
+
+TEST_CASE ("TruePeakLimiter [adversarial]: CD-band programme (flat to 0.45 fs) stays within the documented true-peak bound")
+{
+    // Documents (and pins, against regressions) the detector-band limitation
+    // from the header: full-level noise that fills a CD-style passband up to
+    // 0.45 fs (19.8 kHz at 44.1 kHz), driven +12 dB. The sample peak is
+    // exact; the ideal-reconstruction peak is measured at up to ~+0.25 dB.
+    auto lowPass045 = [] (const std::vector<float>& x) {
+        constexpr int taps = 401, centre = taps / 2;
+        constexpr double fc = 0.45;
+        std::vector<double> h (taps);
+        double sum = 0.0;
+        for (int k = 0; k < taps; ++k)
+        {
+            const double t = k - centre;
+            const double s = t == 0.0 ? 1.0 : std::sin (kTwoPi * fc * t) / (kTwoPi * fc * t);
+            h[static_cast<size_t> (k)] = s * (0.42 - 0.5 * std::cos (kTwoPi * k / (taps - 1)) + 0.08 * std::cos (2.0 * kTwoPi * k / (taps - 1)));
+            sum += h[static_cast<size_t> (k)];
+        }
+        std::vector<float> y (x.size() + taps - 1, 0.0f);
+        for (size_t i = 0; i < y.size(); ++i)
+        {
+            double acc = 0.0;
+            for (int k = 0; k < taps; ++k)
+                if (i >= static_cast<size_t> (k) && i - static_cast<size_t> (k) < x.size())
+                    acc += h[static_cast<size_t> (k)] / sum * x[i - static_cast<size_t> (k)];
+            y[i] = static_cast<float> (acc);
+        }
+        return y;
+    };
+    double worst = -100.0;
+    for (double fs : { 44100.0, 48000.0 })
+        for (uint32_t seed : { 1u, 2u, 3u })
+        {
+            const int n = static_cast<int> (fs * 0.12), tail = static_cast<int> (fs * 0.02);
+            std::vector<float> ch[2];
+            for (int c = 0; c < 2; ++c)
+            {
+                ch[c] = lowPass045 (whiteNoise (n - tail - 400, 1.0f, seed + 10u * static_cast<uint32_t> (c)));
+                ch[c].resize (static_cast<size_t> (n), 0.0f);
+                const float s = 4.0f / static_cast<float> (peakAbs (ch[c].data(), n));
+                for (auto& v : ch[c])
+                    v *= s;
+            }
+            const auto res = runCeilingCase (ch[0], ch[1], fs, -1.0f);
+            CHECK_LE (res.samplePeak, dbfs (-1.0));
+            CHECK (res.safetyClips == 0u);
+            worst = std::max (worst, toDb (res.truePeak) + 1.0);
+        }
+    CHECK_LE (worst, 0.35);
 }

@@ -1,0 +1,20 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Tournament Clean",
+  "category": "Gaming",
+  "author": "Flubsound",
+  "description": "Minimal processing for events and leagues that restrict audio enhancement. Every module is off except the true-peak limiter at -1 dBTP (limiter only, no clipper, no drive), so the only change to the game's sound is hearing protection against sudden overs. Low Latency profile.",
+  "tags": ["tournament", "clean", "minimal", "esports", "low-latency", "protection"],
+  "params": {
+    "mode": "Gaming",
+    "latency.profile": "Low Latency",
+    "eq.on": false,
+    "dyneq.on": false,
+    "bass.on": false,
+    "clarity.on": false,
+    "spatial.on": false,
+    "virt.on": false,
+    "max.clip": 0
+  }
+}

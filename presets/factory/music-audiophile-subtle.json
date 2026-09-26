@@ -1,0 +1,19 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "name": "Audiophile Subtle",
+  "category": "Music",
+  "author": "Flubsound",
+  "description": "Almost transparent: for high-quality recordings and hi-fi headphones where you want the original, just a little more comfortable. A trace of sub-bass and air, light headphone crossfeed and a limiter-only safety ceiling (no clipper, no drive), all in the Quality latency profile.",
+  "tags": ["audiophile", "transparent", "hi-fi", "crossfeed", "subtle"],
+  "params": {
+    "latency.profile": "Quality",
+    "dyneq.on": false,
+    "bass.boost": 0.8,
+    "bass.freq": 40,
+    "bass.subsonic": 10,
+    "clarity.air": 0.06,
+    "spatial.crossfeed": 0.15,
+    "max.clip": 0
+  }
+}
