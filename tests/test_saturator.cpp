@@ -6,9 +6,11 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/common/Denormals.h"
 #include "flub/dsp/Saturator.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -837,4 +839,167 @@ TEST_CASE ("Saturator: output is independent of the host block size")
                 CHECK_LE (err, 1.0e-5);
             }
         }
+}
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("Saturator (review): no subnormal crawl in the tape emphasis after the input stops (FTZ off)")
+{
+    // Without FTZ the 3 kHz emphasis shelves decayed into subnormals within
+    // ~150 samples of silence and stayed there until the end of the segment.
+    // At 2x/4x a 4096-sample silent block after loud Tape material cost 30x
+    // a loud block. A silent block must not cost more than a loud one (the
+    // curve work is identical); 3x leaves room for timer noise. The minimum
+    // over several runs rejects scheduler hiccups.
+#if defined(FLUB_HAS_SSE_CSR)
+    const unsigned int savedCsr = _mm_getcsr();
+    _mm_setcsr (savedCsr & ~0x8040u); // FTZ and DAZ off, as on a host that forgot ScopedNoDenormals
+    for (int factor : { 1, 2, 4 })
+    {
+        auto sat = makeSat (44100.0, makeParams (SaturationType::Tape, 12.0f), 2, 4096, factor);
+        Planar loud (2, 4096), quiet (2, 4096);
+        double loudUs = 1.0e30, quietUs = 1.0e30;
+        for (int rep = 0; rep < 7; ++rep)
+        {
+            fillAll (loud, sine (100.0, 44100.0, 4096, 0.5f));
+            fillAll (quiet, std::vector<float> (4096, 0.0f));
+            sat->reset();
+            const auto t0 = std::chrono::steady_clock::now();
+            sat->process (loud.block());
+            const auto t1 = std::chrono::steady_clock::now();
+            sat->process (quiet.block());
+            const auto t2 = std::chrono::steady_clock::now();
+            loudUs = std::min (loudUs, std::chrono::duration<double, std::micro> (t1 - t0).count());
+            quietUs = std::min (quietUs, std::chrono::duration<double, std::micro> (t2 - t1).count());
+        }
+        CHECK_LE (quietUs, 3.0 * loudUs + 20.0);
+    }
+    _mm_setcsr (savedCsr);
+#endif
+
+    // Deterministic part: a silent tail really does reach exact zero (every
+    // IIR state gets flushed), and no output sample is ever subnormal.
+    for (auto type : kTypes)
+    {
+        auto sat = makeSat (44100.0, makeParams (type, 18.0f), 1, 4096, 4);
+        const int n = 44100 * 3;
+        std::vector<float> x (static_cast<size_t> (n), 0.0f);
+        const auto tone = sine (60.0, 44100.0, 44100, 0.8f);
+        std::copy (tone.begin(), tone.end(), x.begin());
+        const auto y = runMono (*sat, x, 4096);
+        int subnormals = 0;
+        for (float v : y)
+            subnormals += (v != 0.0f && std::abs (v) < std::numeric_limits<float>::min()) ? 1 : 0;
+        CHECK (subnormals == 0);
+        CHECK (peakAbs (y.data() + (n - 4096), 4096) == 0.0);
+    }
+}
+
+TEST_CASE ("Saturator (review): recovers from a NaN / Inf input burst")
+{
+    // Garbage in must not leave garbage forever: the FIR / delay memories
+    // flush themselves and non-finite IIR states are cleared.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (const auto& os : kOsConfigs)
+        for (auto type : kTypes)
+        {
+            auto sat = makeSat (kFs, makeParams (type, 12.0f), 2, 256, os.factor, os.quality);
+            const int n = 9600, n0 = 1000, block = 256;
+            Planar buf (2, n);
+            fillAll (buf, sine (440.0, kFs, n, 0.5f));
+            buf.ch[0][n0] = nan;
+            buf.ch[1][n0 + 3] = inf;
+            buf.ch[1][n0 + 4] = -inf;
+            processInBlocks (*sat, buf, block);
+            const int recovered = n0 + os.expectedLatency + 2 * block + 64;
+            bool finite = true;
+            for (const auto& c : buf.ch)
+                for (int i = recovered; i < n; ++i)
+                    finite = finite && std::isfinite (c[static_cast<size_t> (i)]);
+            CHECK (finite);
+            CHECK_GE (peakOf (buf, n - 960, n), 0.1); // still producing signal
+
+            // ... and switching to Tape afterwards (whose idle emphasis states
+            // may have seen the burst) is clean too.
+            sat->setParams (makeParams (SaturationType::Tape, 12.0f));
+            Planar more (2, 4800);
+            fillAll (more, sine (440.0, kFs, 4800, 0.5f));
+            processInBlocks (*sat, more, block);
+            CHECK (allFinite (more));
+        }
+}
+
+TEST_CASE ("Saturator (review): mix 0 stays the exact delayed dry signal during fades and ramps")
+{
+    // Type, drive and output change every 37-sample block (reversals, queued
+    // fades, overlapping ramps): the wet path is busy, but at mix 0 it must be
+    // multiplied out exactly.
+    for (const auto& os : kOsConfigs)
+    {
+        auto sat = makeSat (kFs, makeParams (SaturationType::Tape, 0.0f, 0.0f), 2, 512, os.factor, os.quality);
+        const int n = 24000;
+        const auto x = whiteNoise (n, 1.0f, 3);
+        Planar buf (2, n);
+        fillAll (buf, x);
+        for (int pos = 0, b = 0; pos < n; pos += 37, ++b)
+        {
+            sat->setParams (makeParams (kTypes[static_cast<size_t> ((b / 5) % 3)], static_cast<float> ((b * 7) % 25), 0.0f,
+                                        static_cast<float> (b % 25) - 12.0f));
+            sat->process (buf.block (pos, std::min (37, n - pos)));
+        }
+        CHECK_LE (maxDelayedError (buf.ch[0], x, os.expectedLatency, 0, n), 0.0);
+        CHECK_LE (maxDelayedError (buf.ch[1], x, os.expectedLatency, 0, n), 0.0);
+    }
+}
+
+TEST_CASE ("Saturator (review): maxBlockSize 1 gives the same output as maxBlockSize 4096")
+{
+    // Internal segmenting at maxBlockSize must not change the result either
+    // (drive ramps, type fades and 4x oversampling with 1-sample segments).
+    for (const auto& os : kOsConfigs)
+    {
+        const int n = 12000;
+        const auto x = whiteNoise (n, 0.9f, 77);
+        std::vector<std::vector<float>> outs;
+        for (int maxBlock : { 4096, 1 })
+        {
+            auto sat = makeSat (96000.0, makeParams (SaturationType::Tube, 3.0f), 1, maxBlock, os.factor, os.quality);
+            Planar buf (1, n);
+            load (buf, 0, x);
+            const int block = maxBlock == 1 ? 1 : 500; // every change lands on a block start
+            for (int pos = 0; pos < n; pos += block)
+            {
+                if (pos == 1000)
+                    sat->setParams (makeParams (SaturationType::Tape, 20.0f, 0.8f, -3.0f));
+                if (pos == 3000)
+                    sat->setParams (makeParams (SaturationType::Digital, 9.0f, 0.8f, 4.0f));
+                if (pos == 3500)
+                    sat->setParams (makeParams (SaturationType::Tape, 24.0f, 1.0f, 4.0f)); // reversal
+                sat->process (buf.block (pos, std::min (block, n - pos)));
+            }
+            CHECK (allFinite (buf));
+            outs.push_back (buf.ch[0]);
+        }
+        CHECK_LE (maxDelayedError (outs[1], outs[0], 0, 0, n), 1.0e-5);
+    }
+}
+
+TEST_CASE ("Saturator (review): toggling the type every sample stays click-free")
+{
+    // Worst case for the fade logic: a reversal at every sample.
+    const int n = 48000;
+    auto sat = makeSat (kFs, makeParams (SaturationType::Tape, 18.0f), 1, 512);
+    const auto x = sine (100.0, kFs, n, 0.3f);
+    Planar buf (1, n);
+    load (buf, 0, x);
+    for (int i = 0; i < n; ++i)
+    {
+        sat->setParams (makeParams (i % 2 != 0 ? SaturationType::Tube : SaturationType::Digital, 18.0f));
+        sat->process (buf.block (i, 1));
+    }
+    CHECK (allFinite (buf));
+    // The steepest step of the input sine; every curve has slope <= 1.
+    const double sineStep = 0.3 * kTwoPi * 100.0 / kFs;
+    CHECK_LE (maxStep (buf.ch[0], 0, n), 1.1 * sineStep);
 }

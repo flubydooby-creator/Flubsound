@@ -11,7 +11,8 @@
 //                      withdraw = clamp (softKnee6dB (excess), 0, boostDb);
 //                      low shelf (Q 0.7, half gain at boostFrequency) with
 //                      gain smooth_5ms (boostDb - withdraw); getProtectionDb()
-//                      publishes boostDb - that gain.
+//                      publishes smooth_5ms (withdraw). The detector LP sits
+//                      at max (150 Hz, 1.5 boostFrequency).
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -68,6 +69,7 @@ constexpr double kButterworthQ2 = 0.70710678118654752;
 // 3. Adaptive boost.
 constexpr double kShelfQ = 0.7;
 constexpr double kDetectorHz = 150.0;
+constexpr double kDetectorTrackRatio = 1.5; // detector LP >= 1.5 x boostFrequency (see designDetector)
 constexpr float kDetectorAttackMs = 10.0f;
 constexpr float kDetectorReleaseMs = 150.0f;
 constexpr float kShelfGainSmoothMs = 5.0f;
@@ -141,6 +143,18 @@ float softKnee (float excessDb) noexcept
     return t * t / (2.0f * kProtectionKneeDb);
 }
 
+/** Protection detector LP: ~150 Hz as specified, but never below 1.5 x the
+    shelf frequency. The prediction assumes the full boost on what the
+    detector sees; with a shelf at 150 - 200 Hz a fixed 150 Hz LP reads
+    content around the shelf corner (which still gets about half the boost)
+    several dB low, and the output overshot the cap by up to 2.6 dB. At
+    1.5 x the corner the prediction stays conservative (<= 0.2 dB over the cap
+    for any tone, any setting). For shelves at or below 100 Hz nothing changes. */
+SvfCoeffs designDetector (double boostHz, double sampleRate) noexcept
+{
+    return SvfCoeffs::make (FilterType::LowPass, std::max (kDetectorHz, kDetectorTrackRatio * boostHz), kButterworthQ2, 0.0, sampleRate);
+}
+
 void designHighPass4 (std::array<SvfCoeffs, 2>& c, double hz, double sampleRate) noexcept
 {
     c[0] = SvfCoeffs::make (FilterType::HighPass, hz, butterworthQ (2, 0), 0.0, sampleRate);
@@ -204,7 +218,6 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     controlRate = spec.sampleRate / static_cast<double> (kControlInterval);
     const double sr = spec.sampleRate;
 
-    detectorLp = SvfCoeffs::make (FilterType::LowPass, kDetectorHz, kButterworthQ2, 0.0, sr);
     detectorHold.prepare (sr, kHoldMs);
     detectorEnv.prepare (sr, kDetectorAttackMs, kDetectorReleaseMs);
 
@@ -241,6 +254,7 @@ void BassEngine::reset() noexcept
     logBoostHz.reset (controlRate, kFreqGlideMs, std::log (params.boostFrequency));
     thresholdSmoothed.reset (controlRate, kParamSmoothMs, params.protectThresholdDb);
     shelfGainSmoothed.reset (controlRate, kShelfGainSmoothMs, params.boostDb);
+    withdrawSmoothed.reset (controlRate, kShelfGainSmoothMs, 0.0f);
     characterSmoothed.reset (controlRate, kParamSmoothMs, params.harmonicsCharacter);
     logCutoff.reset (controlRate, kFreqGlideMs, std::log (params.harmonicsCutoff));
     boostHz = params.boostFrequency;
@@ -269,6 +283,7 @@ void BassEngine::reset() noexcept
     designHighPass4 (replaceHp, replace.hz, sr);
     tightXo = designLr4 (tight.hz, sr);
 
+    detectorLp = designDetector (boostHz, sr);
     shelfGainDb = params.boostDb;
     shelf.setImmediate (SvfCoeffs::make (FilterType::LowShelf, boostHz, kShelfQ, shelfGainDb, sr));
     shelfActive = ! shelf.isIdentity();
@@ -487,7 +502,10 @@ void BassEngine::controlTick() noexcept
     const float threshold = thresholdSmoothed.next();
     const bool shelfMoved = logBoostHz.isSmoothing();
     if (shelfMoved)
+    {
         boostHz = std::exp (logBoostHz.next());
+        detectorLp = designDetector (boostHz, sr);
+    }
 
     // Predicted LF peak after the boost vs the cap; the boost is withdrawn by
     // the excess (never beyond the whole boost: this stage never cuts). The
@@ -500,7 +518,12 @@ void BassEngine::controlTick() noexcept
     // fraction of a dB; clamping it to the boost would put a kink in it.)
     shelfGainSmoothed.setTarget (boost - withdraw);
     const float gainDb = std::max (0.0f, shelfGainSmoothed.next());
-    protectionDb.store (std::max (0.0f, boost - gainDb), std::memory_order_relaxed);
+
+    // Telemetry: the withdrawal itself, smoothed like the gain. (boost - gainDb
+    // would also report the 5 ms lag of the gain behind a boost change as
+    // "protection": a 2+ dB flash on quiet material whenever boostDb moves.)
+    withdrawSmoothed.setTarget (withdraw);
+    protectionDb.store (std::clamp (withdrawSmoothed.next(), 0.0f, boost), std::memory_order_relaxed);
 
     if (gainDb != shelfGainDb || (shelfMoved && gainDb != 0.0f))
     {

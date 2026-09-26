@@ -88,10 +88,13 @@ target_sources(FlubsoundPro PRIVATE ${FLUB_PLATFORM_SOURCES})
 # Re-run the configure step when a platform source appears or disappears.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FLUB_PLATFORM_DIR}")
 
-# Optional hook for extra link dependencies of the platform implementation.
-include("${FLUB_PLATFORM_DIR}/PlatformServices.cmake" OPTIONAL)
+# Build settings owned by the platform engineer (link libraries, options such
+# as FLUB_ENABLE_UNDOCUMENTED_ROUTING, warning flags for their sources).
+set(FLUB_PLATFORM_CMAKE "${FLUB_PLATFORM_DIR}/PlatformServices.cmake")
+include("${FLUB_PLATFORM_CMAKE}" OPTIONAL)
 
-if(FLUB_HAS_PLATFORM_SERVICES)
+# Fallback link dependencies when that file is absent.
+if(FLUB_HAS_PLATFORM_SERVICES AND NOT EXISTS "${FLUB_PLATFORM_CMAKE}")
     if(WIN32)
         # COM (ole32), hotkey window (user32), ms-settings launch (shell32,
         # shlwapi), OS build query (version), MMCSS (avrt),

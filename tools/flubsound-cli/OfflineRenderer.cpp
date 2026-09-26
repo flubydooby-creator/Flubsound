@@ -180,7 +180,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
         if (! isMeasured (currentReport.integratedLufs))
         {
             result.targetReached = false;
-            result.notes.push_back ("loudness target skipped: the output has no measurable integrated loudness "
+            result.notes.push_back ("warning: loudness target skipped: the output has no measurable integrated loudness "
                                     "(silence, or shorter than one 400 ms gating block)");
             keepAsBest();
         }
@@ -229,7 +229,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
                         const float newGain = std::clamp (gain + err, gainInfo.minValue, gain);
                         if (std::abs (newGain - gain) < 0.005f)
                         {
-                            result.notes.push_back ("loudness target not reachable: output gain is already at its minimum");
+                            result.notes.push_back ("warning: loudness target not reachable: output gain is already at its minimum");
                             break;
                         }
                         value (OutputGainDb) = newGain;
@@ -239,7 +239,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
                     }
                     else
                     {
-                        result.notes.push_back ("loudness target not reachable: maximizer drive is at its "
+                        result.notes.push_back ("warning: loudness target not reachable: maximizer drive is at its "
                                                 + formatFloat ("%.0f", kMaxDriveDb) + " dB maximum");
                         break;
                     }
@@ -261,7 +261,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
             }
             result.targetReached = bestError <= tolerance;
             if (! result.targetReached)
-                result.notes.push_back ("loudness target missed by " + formatFloat ("%.2f", bestError) + " LU after "
+                result.notes.push_back ("warning: loudness target missed by " + formatFloat ("%.2f", bestError) + " LU after "
                                         + std::to_string (result.passes) + " passes");
         }
     }

@@ -44,6 +44,11 @@ constexpr float kClipHeadroomMinDb = 0.3f;
 // Envelope values below this are flushed (the host also sets FTZ/DAZ).
 constexpr float kEnvFlush = 1.0e-15f;
 
+// A -400 dB DC offset on the splitter input keeps its recursive (SVF) states
+// in the normal float range when the input falls silent, so they cannot
+// decay into subnormals even without FTZ (the states are not ours to flush).
+constexpr float kAntiDenormal = 1.0e-20f;
+
 float sanitise (float v, float lo, float hi, float fallback) noexcept
 {
     return std::isfinite (v) ? std::clamp (v, lo, hi) : fallback;
@@ -355,7 +360,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         const float mix = glueMixS.next();
         const float amount = glueS.next();
 
-        std::array<std::array<float, kNumBands>, kMaxChannels> split;
+        std::array<std::array<float, kNumBands>, kMaxChannels> split {};
         std::array<float, kNumBands> level {};
         float bandSum = 0.0f;
         for (int c = 0; c < numCh; ++c)
@@ -364,7 +369,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
             const float x = data[ci][i] * driveGain;
             data[ci][i] = x;
             auto& s = split[ci];
-            splitter.processSample (c, x, s[0], s[1], s[2]);
+            splitter.processSample (c, x + kAntiDenormal, s[0], s[1], s[2]);
             bandSum += s[0] + s[1] + s[2];
         }
         if (! std::isfinite (bandSum))

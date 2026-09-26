@@ -372,7 +372,7 @@ void Saturator::runCurve (SaturationType type, ChannelState& st, float* d, int n
             // The 3 kHz emphasis shelves decay fast (down to ~3 samples per
             // e-fold at 44.1 kHz, 1x), so after the input stops a state can
             // drop from the 1e-15 flush floor into subnormals within ~150
-            // samples and then crawl or limit-cycle there. That costs 10-25x
+            // samples and then crawl or limit-cycle there. That costs up to 30x
             // without FTZ, and a segment can hold 4 * 4096 oversampled
             // samples. Flushing every kTapeFlushInterval samples keeps the
             // states out of the subnormal range. The check is a few

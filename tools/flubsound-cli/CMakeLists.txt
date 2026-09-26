@@ -35,6 +35,8 @@ target_link_libraries(flubsound-cli PRIVATE Threads::Threads)
 # Installed layout: bin/flubsound-cli + share/flubsound/presets/factory/*.json
 include(GNUInstallDirs)
 install(TARGETS flubsound-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY "${PROJECT_SOURCE_DIR}/presets/factory/"
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/flubsound/presets/factory"
-        FILES_MATCHING PATTERN "*.json")
+if(EXISTS "${PROJECT_SOURCE_DIR}/presets/factory")
+    install(DIRECTORY "${PROJECT_SOURCE_DIR}/presets/factory/"
+            DESTINATION "${CMAKE_INSTALL_DATADIR}/flubsound/presets/factory"
+            FILES_MATCHING PATTERN "*.json")
+endif()

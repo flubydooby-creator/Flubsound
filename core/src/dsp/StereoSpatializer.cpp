@@ -54,8 +54,10 @@
 // -100 dBFS). Every 32 samples of stream time a safety amount s (0 .. 1)
 // integrates the error e = minCorrelation - rho:
 //   e > 0      : s += (32 / 300 ms) * min (1, e / 0.1)   full pull in 300 ms
-//   e < -0.05  : s -= 32 / 3 s                            slow release
+//   e < -h     : s -= 32 / 3 s                            slow release
 //   otherwise  : hold (hysteresis band, so the loop parks instead of hunting)
+//   h = min (0.05, (1 - minCorrelation) / 2), so release stays reachable
+//   when minCorrelation is close to 1
 //   output below -100 dBFS (rho undefined) : hold
 //   safety off or width <= 1 : s -= 32 / 300 ms
 //   w_eff = w > 1 ? 1 + (w - 1)(1 - s) : w
@@ -65,8 +67,9 @@
 //
 // Smoothing: width / focus dB / space gain / crossfeed gain one-pole 20 ms,
 // ln (low cut) one-pole 50 ms, all per sample. The control countdown runs in
-// stream time and every smoother is per sample, so the output is identical
-// for any host block size.
+// stream time, every smoother is per sample and the state hygiene (denormal
+// flush, non-finite recovery) runs on the control tick, so the output is
+// bit-identical for any host block size.
 //
 // CPU per stereo sample: 3 SVF ticks (shelf, bell, HP), one one-pole,
 // 4 delay-line reads / writes and 3 double-precision MACs; coefficient math
@@ -312,6 +315,12 @@ float StereoSpatializer::correlationEstimate() const noexcept
 
 void StereoSpatializer::controlTick() noexcept
 {
+    // State hygiene runs here, in stream time, rather than once per host
+    // block: the flush points (and so every output bit) are then the same for
+    // any block size, a subnormal tail can crawl for at most 32 samples even
+    // with 4096-sample blocks, and a NaN is contained within 32 samples.
+    sanitiseState();
+
     if (corrLL + corrRR < 1.0e-30)
         corrLR = corrLL = corrRR = 0.0; // long silence: no subnormal doubles
 
@@ -321,10 +330,15 @@ void StereoSpatializer::controlTick() noexcept
     }
     else if (corrLL * corrRR > kCorrelationFloor)
     {
+        // The release threshold may not exceed a correlation of 1: with
+        // minCorrelation near 1 a fixed 0.05 band would make release
+        // unreachable, and the width could never recover even on content
+        // that is back above the target.
+        const float hysteresis = std::min (kSafetyHysteresis, 0.5f * (1.0f - params.minCorrelation));
         const float err = params.minCorrelation - correlationEstimate();
         if (err > 0.0f)
             safety += safetyAttackStep * std::min (1.0f, err / kSafetyErrorRange);
-        else if (err < -kSafetyHysteresis)
+        else if (err < -hysteresis)
             safety -= safetyReleaseStep;
     }
     // else: (near) silence says nothing about the material - hold the pull,
@@ -367,6 +381,9 @@ void StereoSpatializer::sanitiseState() noexcept
 {
     // A non-finite input sample (normally caught by the chain's protection)
     // must not poison the recursive states for good: start clean instead.
+    // Any non-finite output also latches into the correlation accumulators,
+    // so a NaN / inf that only lives in a delay line is caught once it
+    // reaches the output.
     const float sum = shelfState.ic1 + shelfState.ic2 + focusState.ic1 + focusState.ic2 + spaceHpState.ic1
                       + spaceHpState.ic2 + crossfeedState + lastAmbience;
     if (! std::isfinite (sum) || ! std::isfinite (corrLR + corrLL + corrRR))
@@ -442,7 +459,6 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept
         corrRR = dr * dr + corrCoeff * (corrRR - dr * dr);
     }
 
-    sanitiseState();
     correlation.store (correlationEstimate(), std::memory_order_relaxed);
     effectiveWidth.store (widthSmoother.getCurrent(), std::memory_order_relaxed);
 }

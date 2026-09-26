@@ -822,3 +822,200 @@ TEST_CASE ("BassEngine: output is independent of the host block size")
     for (int bs : { 1, 7, 64 })
         CHECK_LE (maxAbsDiff (run (bs), ref), 1.0e-6);
 }
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("BassEngine (review): protection telemetry does not flash while the boost is automated")
+{
+    // Quiet material never needs protection, so the GUI readout must stay at
+    // exactly 0 while boostDb moves (the shelf gain lags the boost by its 5 ms
+    // smoothing; that lag is not "withdrawn by the protection").
+    BassEngine be;
+    prepareBass (be);
+    auto p = allOff();
+    p.boostFrequency = 60.0f;
+    be.setParams (p);
+    be.reset();
+    const int n = ms (1500);
+    Planar buf (2, n);
+    setChannel (buf, 0, sine (40.0, kFs, n, dbfs (-60.0)));
+    setChannel (buf, 1, sine (40.0, kFs, n, dbfs (-60.0)));
+    float maxReading = 0.0f;
+    for (int pos = 0, k = 0; pos < n; pos += 64, ++k)
+    {
+        if (k % 150 == 20)
+        {
+            p.boostDb = p.boostDb > 0.0f ? 0.0f : 15.0f;
+            be.setParams (p);
+        }
+        be.process (buf.block (pos, std::min (64, n - pos)));
+        maxReading = std::max (maxReading, be.getProtectionDb());
+    }
+    CHECK (maxReading == 0.0f);
+}
+
+TEST_CASE ("BassEngine (review): the protection cap holds for every shelf frequency and tone")
+{
+    // Tones just under / over the cap, shelf anywhere in 30..200 Hz: the
+    // steady output never exceeds max (cap, input) by more than 0.5 dB.
+    const int settle = ms (500), measure = ms (500);
+    for (float boostHz : { 30.0f, 80.0f, 150.0f, 200.0f })
+    {
+        for (double f : { 30.0, 60.0, 120.0, 180.0, 250.0 })
+        {
+            for (float thr : { 0.0f, -12.0f })
+            {
+                for (float rel : { -2.0f, 3.0f })
+                {
+                    auto p = allOff();
+                    p.boostDb = 15.0f;
+                    p.boostFrequency = boostHz;
+                    p.protectThresholdDb = thr;
+                    BassEngine be;
+                    prepareBass (be);
+                    be.setParams (p);
+                    const double inDb = thr + rel;
+                    const auto out = runStereo (be, sine (f, kFs, settle + measure, dbfs (inDb)));
+                    const double outDb = toDb (peakAbs (out.ch[0].data() + settle, measure));
+                    CHECK_LE (outDb, std::max (static_cast<double> (thr), inDb) + 0.5);
+                    CHECK (be.getProtectionDb() > 0.0f);
+                }
+            }
+        }
+    }
+
+    // The spec's case literally: a tone near 0 dBFS, cap 0 dBFS.
+    for (double f : { 40.0, 60.0, 100.0 })
+    {
+        auto p = allOff();
+        p.boostDb = 12.0f;
+        p.boostFrequency = 60.0f;
+        p.protectThresholdDb = 0.0f;
+        BassEngine be;
+        prepareBass (be);
+        be.setParams (p);
+        const auto out = runStereo (be, sine (f, kFs, settle + measure, dbfs (-1.0)));
+        CHECK_LE (toDb (peakAbs (out.ch[0].data() + settle, measure)), 0.0 + 1.0);
+        CHECK_GE (be.getProtectionDb(), 6.0f);
+    }
+}
+
+TEST_CASE ("BassEngine (review): after loud material the output decays to exact silence without a reset")
+{
+    for (int channels : { 1, 2, 6 })
+    {
+        BassEngine be;
+        prepareBass (be, kFs, channels);
+        be.setParams (allOn());
+        be.reset();
+        const int loud = ms (500), n = loud + ms (2500);
+        Planar buf (channels, n);
+        for (int c = 0; c < channels; ++c)
+        {
+            auto x = sine (40.0 + 13.0 * c, kFs, loud, 0.9f);
+            const auto noise = whiteNoise (loud, 0.3f, static_cast<uint32_t> (c + 1));
+            for (int i = 0; i < loud; ++i)
+                buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = x[static_cast<size_t> (i)] + noise[static_cast<size_t> (i)];
+        }
+        processInBlocks (be, buf, 256);
+        // State hygiene flushes every recursive state: the last 500 ms are exactly 0.
+        for (const auto& c : buf.ch)
+            CHECK (peakAbs (c.data() + n - ms (500), ms (500)) == 0.0);
+    }
+}
+
+TEST_CASE ("BassEngine (review): switching everything off lands on a bit-exact pass-through")
+{
+    BassEngine be;
+    prepareBass (be);
+    be.setParams (allOn());
+    be.reset();
+    const int n = ms (700);
+    Planar in (2, n);
+    setChannel (in, 0, whiteNoise (n, 0.4f, 8));
+    setChannel (in, 1, sine (70.0, kFs, n, 0.6f));
+    Planar warm = clone (in);
+    processInBlocks (be, warm, 128);
+    be.setParams (allOff()); // no reset: every stage has to glide / fade out and stop
+    for (int round = 0; round < 3; ++round)
+    {
+        Planar buf = clone (in);
+        processInBlocks (be, buf, 128);
+        if (round == 2)
+            CHECK (buf.ch == in.ch);
+    }
+    CHECK (be.getProtectionDb() == 0.0f);
+}
+
+TEST_CASE ("BassEngine (review): every block size gives bit-identical output")
+{
+    const int n = 4096 * 5;
+    Planar input (2, n);
+    {
+        const auto noise = whiteNoise (n, 0.3f, 17);
+        const auto kick = decayingTone (9000, 50.0, 0.9f, 90.0);
+        for (int i = 0; i < n; ++i)
+        {
+            const size_t k = static_cast<size_t> (i);
+            const float hit = kick[static_cast<size_t> (i % 9000)];
+            input.ch[0][k] = noise[k] + hit;
+            input.ch[1][k] = 0.3f * noise[k] - hit;
+        }
+    }
+    auto run = [&] (int blockSize)
+    {
+        BassEngine be;
+        prepareBass (be, kFs, 2, 4096);
+        auto p = allOn();
+        p.protectThresholdDb = -20.0f;
+        be.setParams (p);
+        be.reset();
+        Planar buf = clone (input);
+        for (int pos = 0; pos < n; pos += blockSize)
+        {
+            if (pos == 12288) // common boundary of every size below
+            {
+                p.tighten = 0.0f;
+                p.monoBelowHz = 60.0f;
+                p.boostFrequency = 190.0f;
+                p.harmonicsAmount = 0.0f;
+                be.setParams (p);
+            }
+            be.process (buf.block (pos, std::min (blockSize, n - pos)));
+        }
+        return buf;
+    };
+    const auto ref = run (4096);
+    for (int bs : { 1, 3, 12, 16, 48, 256, 1024 }) // all divide 12288
+        CHECK (maxAbsDiff (run (bs), ref) == 0.0);
+}
+
+TEST_CASE ("BassEngine (review): steady bass through protection, tighten, mono and subsonic stays clean")
+{
+    // Protection in its knee (gain depends on level), tighten on, mono on:
+    // every dynamic stage sees a constant level, so no harmonics appear.
+    for (double fs : { 44100.0, 48000.0, 192000.0 })
+    {
+        for (double f : { 30.0, 55.0, 90.0 })
+        {
+            BassEngine be;
+            prepareBass (be, fs);
+            auto p = allOff();
+            p.subsonicHz = 20.0f;
+            p.boostDb = 12.0f;
+            p.boostFrequency = 80.0f;
+            p.protectThresholdDb = -6.0f;
+            p.tighten = 1.0f;
+            p.monoBelowHz = 120.0f;
+            be.setParams (p);
+            const int n = static_cast<int> (fs * 2.0);
+            const auto out = runStereo (be, sine (f, fs, n, dbfs (-14.0)));
+            const int from = static_cast<int> (fs), len = static_cast<int> (fs);
+            const double a1 = toneAmplitude (out.ch[0].data() + from, len, f, fs);
+            CHECK (be.getProtectionDb() > 0.5f);
+            CHECK (be.getProtectionDb() < 11.5f);
+            for (int k = 2; k <= 5; ++k)
+                CHECK_LE (toDb (toneAmplitude (out.ch[0].data() + from, len, k * f, fs) / a1), -70.0);
+        }
+    }
+}

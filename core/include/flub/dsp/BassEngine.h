@@ -140,6 +140,7 @@ private:
 
     // 3. Adaptive low shelf + headroom protection.
     OnePoleSmoother boostSmoothed, logBoostHz, thresholdSmoothed, shelfGainSmoothed;
+    OnePoleSmoother withdrawSmoothed; // telemetry only (getProtectionDb)
     float boostHz = 70.0f, shelfGainDb = 0.0f;
     bool shelfActive = false;
     TransientShaper::SvfGlide shelf;

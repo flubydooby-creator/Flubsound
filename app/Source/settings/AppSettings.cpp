@@ -127,8 +127,17 @@ juce::PropertiesFile::Options AppSettings::defaultOptions()
 }
 
 AppSettings::AppSettings()
-    : properties (std::make_unique<juce::PropertiesFile> (defaultOptions()))
 {
+   #if JUCE_LINUX || JUCE_BSD
+    // JUCE's default on Linux is ~/<folderName>; follow XDG instead
+    // ($XDG_CONFIG_HOME or ~/.config), next to the user presets.
+    const auto file = juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+                          .getChildFile ("Flubsound")
+                          .getChildFile ("Flubsound Pro.settings");
+    properties = std::make_unique<juce::PropertiesFile> (file, defaultOptions());
+   #else
+    properties = std::make_unique<juce::PropertiesFile> (defaultOptions());
+   #endif
 }
 
 AppSettings::AppSettings (const juce::File& file, bool persist)

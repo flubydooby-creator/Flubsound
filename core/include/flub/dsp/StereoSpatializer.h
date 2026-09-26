@@ -6,21 +6,27 @@
 // That is the core mono-compatibility guarantee (tested), and it also means
 // no comb filtering on mono playback, laptop speakers, or phone Bluetooth.
 //
-//   width     : S' = S_low * min(width, 1) + S_high * width, split with an
-//               LR4 at widthLowCutHz so the low end never gets wider.
+//   width     : S' = S_low * min(width, 1) + S_high * width, split at
+//               widthLowCutHz so the low end never gets wider. The split is
+//               complementary (S_low + S_high = S, a 2nd-order Q 0.707 shelf
+//               transition with LR4-like magnitude): an LR4 pair would sum to
+//               an all-pass that turns S by 180 degrees against M at the cut.
 //   positionalFocus (gaming): +0..6 dB bell on S at 3 kHz (Q 0.5, ~1-6 kHz).
 //               Interaural level differences in this region are the main
 //               lateral localisation cue for broadband transients
 //               (footsteps, reloads); emphasising S there sharpens the
 //               perceived direction without touching the centre (M).
-//   space     : S += space * 0.5 * D(HP_300Hz(M)), D = 3 nested Schroeder
-//               all-passes (3.1/4.7/7.3 ms, g = 0.5): decorrelated ambience
-//               derived from the centre. In mono it cancels (lives in S).
-//   crossfeed : S' -= crossfeed * 0.6 * LP_700Hz(S): reduces low-frequency
-//               separation on headphones (bs2b-like comfort) without
-//               colouring M - also mono-exact.
+//   space     : S += space * 0.5 * D(z^-5ms HP_300Hz(M)), D = 3 nested
+//               Schroeder all-passes (3.1/4.7/7.3 ms, g = 0.5): decorrelated
+//               ambience derived from the centre. The 5 ms pre-delay keeps
+//               the all-pass direct tap (-g x) from panning the centre. In
+//               mono it cancels (lives in S).
+//   crossfeed : S' -= crossfeed * 0.6 * LP1_700Hz(S) (first order):
+//               reduces low-frequency separation on headphones (bs2b-like
+//               comfort) without colouring M - also mono-exact.
 //   autoMonoSafety: running L/R correlation (300 ms); if it drops below
-//               minCorrelation the effective width is pulled back towards 1.
+//               minCorrelation the effective width is pulled back towards 1
+//               (widths above 1 only: a narrowed image is never widened).
 // Stereo only: blocks with numChannels != 2 pass through untouched.
 // Zero latency.
 #pragma once

@@ -7,6 +7,8 @@
 #include "flub/io/PresetIO.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -74,10 +76,15 @@ int decimalsFor (Unit u, float value)
 juce::String groupIdFor (const std::string& name)
 {
     // Group IDs: basic characters only (JUCE: no '.', not a pure integer).
-    juce::String id;
+    juce::String id ("grp_");
     for (auto c : juce::String (name))
-        id << (juce::CharacterFunctions::isLetterOrDigit (c) ? juce::String::charToString (juce::CharacterFunctions::toLowerCase (c)) : juce::String ("_"));
-    return "grp_" + id;
+    {
+        if (juce::CharacterFunctions::isLetterOrDigit (c))
+            id << juce::String::charToString (juce::CharacterFunctions::toLowerCase (c));
+        else
+            id << "_";
+    }
+    return id; // "Noise Gate" -> "grp_noise_gate"
 }
 
 std::unique_ptr<juce::RangedAudioParameter> makeParameter (const Info& info)
@@ -114,12 +121,9 @@ std::unique_ptr<juce::RangedAudioParameter> makeParameter (const Info& info)
                           })
                           .withValueFromStringFunction ([unit, percent] (const juce::String& text) {
                               auto t = text.trim();
-                              float scale = 1.0f;
-                              if (unit == Unit::Hz && t.endsWithIgnoreCase ("k"))
-                                  scale = 1000.0f; // "1.5k"
-                              if (unit == Unit::Hz && t.endsWithIgnoreCase ("khz"))
-                                  scale = 1000.0f;
-                              const float v = t.getFloatValue() * scale; // ignores a trailing unit
+                              // "1.5k" / "1.5 kHz" for frequencies; getFloatValue() ignores a trailing unit.
+                              const bool kilo = unit == Unit::Hz && (t.endsWithIgnoreCase ("k") || t.endsWithIgnoreCase ("khz"));
+                              const float v = t.getFloatValue() * (kilo ? 1000.0f : 1.0f);
                               return percent ? v / 100.0f : v;
                           });
     return std::make_unique<juce::AudioParameterFloat> (pid, name, range, info.defaultValue, attributes);
@@ -483,12 +487,39 @@ bool FlubsoundProcessor::exportPreset (const juce::File& file, juce::String& err
     preset.category = "User";
     preset.author = "User";
 
+    // Host normalisation (skewed ranges) leaves float dust such as
+    // 5.0000005 for a default of 5: snap such values back onto the default so
+    // the preset only lists what the user really changed.
+    const auto& table = flub::param::layout();
     for (int id = 0; id < flub::param::kNumParams; ++id)
-        preset.values[static_cast<size_t> (id)] = rawValues[static_cast<size_t> (id)]->load (std::memory_order_relaxed);
+    {
+        const auto& info = table[static_cast<size_t> (id)];
+        float v = rawValues[static_cast<size_t> (id)]->load (std::memory_order_relaxed);
+        if (std::abs (v - info.defaultValue) <= 1.0e-5f * (info.maxValue - info.minValue))
+            v = info.defaultValue;
+        preset.values[static_cast<size_t> (id)] = v;
+    }
     const auto bypass = static_cast<size_t> (flub::param::BypassAll);
-    preset.values[bypass] = flub::param::layout()[bypass].defaultValue;
+    preset.values[bypass] = table[bypass].defaultValue;
 
-    const auto text = flub::json::write (flub::preset::toJson (preset), 2) + "\n";
+    // Numbers are floats: write them with float precision ("0.6", not
+    // "0.6000000238418579") so presets stay readable and diff cleanly.
+    auto root = flub::preset::toJson (preset);
+    flub::json::Value params { flub::json::Value::Object {} };
+    for (const auto& [key, value] : root["params"].asObject())
+    {
+        if (! value.isNumber())
+        {
+            params.set (key, value);
+            continue;
+        }
+        char buf[32];
+        std::snprintf (buf, sizeof (buf), "%.6g", value.asNumber());
+        params.set (key, flub::json::Value (std::strtod (buf, nullptr)));
+    }
+    root.set ("params", std::move (params));
+
+    const auto text = flub::json::write (root, 2) + "\n";
     if (! file.replaceWithText (juce::String::fromUTF8 (text.c_str()), false, false, "\n"))
     {
         error = "Cannot write " + file.getFullPathName();

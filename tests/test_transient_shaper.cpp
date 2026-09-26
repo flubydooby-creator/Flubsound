@@ -462,3 +462,86 @@ TEST_CASE ("TransientShaper: output is independent of the host block size")
         CHECK (maxDiff == 0.0); // per-sample algorithm: exactly identical
     }
 }
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("TransientShaper (review): steady low notes are not gain-modulated at any rate")
+{
+    // The peak hold must make a sustained bass note read as a constant level:
+    // any residual ripple in the gain would put harmonics / sidebands on it.
+    for (double fs : { 44100.0, 48000.0, 192000.0 })
+    {
+        for (double f : { 25.0, 40.0, 70.0 })
+        {
+            TransientShaper ts;
+            ts.prepare (fs);
+            ts.setAttackDb (12.0f);
+            ts.setSustainDb (-12.0f);
+            ts.reset();
+            const int n = static_cast<int> (fs * 1.5);
+            Planar buf = monoBuffer (sine (f, fs, n, 0.5f));
+            runShaper (ts, buf, 256);
+            const int from = static_cast<int> (fs * 0.5), len = static_cast<int> (fs);
+            const double a1 = toneAmplitude (buf.ch[0].data() + from, len, f, fs);
+            CHECK_NEAR (toDb (a1 / 0.5), 0.0, 0.01);
+            for (int k = 2; k <= 4; ++k)
+                CHECK_LE (toDb (toneAmplitude (buf.ch[0].data() + from, len, k * f, fs) / a1), -80.0);
+        }
+    }
+}
+
+TEST_CASE ("TransientShaper (review): gain is bounded and slews smoothly at every sample rate")
+{
+    const float inf = std::numeric_limits<float>::infinity();
+    for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        TransientShaper ts;
+        ts.prepare (fs);
+        ts.reset();
+        FastRandom rng (7);
+        const int n = static_cast<int> (fs * 2.0);
+        double prev = 0.0, maxStep = 0.0, maxAbs = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            if (i % 997 == 0)
+            {
+                ts.setAttackDb (rng.nextBipolar() > 0.0f ? 1.0e9f : -inf);
+                ts.setSustainDb (12.0f * rng.nextBipolar());
+            }
+            // Clicks, bursts, silence and garbage on the detector input.
+            const float x = (i % 4000 < 30) ? 1.0f : ((i / 3000) % 2 == 0 ? 0.3f * rng.nextBipolar() : 0.0f);
+            const float g = ts.computeGain (i % 5003 == 0 ? inf : x);
+            REQUIRE (std::isfinite (g) && g > 0.0f);
+            const double db = gainToDb (g);
+            maxAbs = std::max (maxAbs, std::abs (db));
+            maxStep = std::max (maxStep, std::abs (db - prev));
+            prev = db;
+        }
+        CHECK_LE (maxAbs, 24.0 + 1.0e-3);
+        // 1 ms one-pole on a target inside +-24 dB: at most 48 dB * (1 - e^(-1 / (fs * 1 ms))) per sample.
+        CHECK_LE (maxStep, 48.0 * (1.0 - std::exp (-1000.0 / fs)) + 1.0e-3);
+    }
+}
+
+TEST_CASE ("TransientShaper (review): neutral is bit-exact again after garbage input at every rate")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (double fs : { 44100.0, 96000.0, 192000.0 })
+    {
+        TransientShaper ts;
+        ts.prepare (fs);
+        ts.setAttackDb (12.0f);
+        ts.setSustainDb (-12.0f);
+        for (float bad : { nan, std::numeric_limits<float>::infinity(), 1.0e30f, -5.0f })
+            (void) ts.computeGain (bad);
+        ts.setAttackDb (0.0f);
+        ts.setSustainDb (0.0f);
+        const int n = static_cast<int> (fs * 0.3);
+        const auto x = gatedNoise (n, 0.9f, 20.0, 60.0, 3, fs);
+        Planar settle = monoBuffer (x);
+        runShaper (ts, settle, 64);
+        Planar again = monoBuffer (x);
+        runShaper (ts, again, 64);
+        CHECK (again.ch[0] == x);
+    }
+}

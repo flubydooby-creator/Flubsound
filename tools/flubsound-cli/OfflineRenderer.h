@@ -59,7 +59,7 @@ struct RenderResult
     float outputGainDb = 0.0f;    // base output.gain of the delivered pass
     bool targetReached = true;
     double renderSeconds = 0.0;   // wall time of all passes (excluding analysis)
-    std::vector<std::string> notes;
+    std::vector<std::string> notes; // problems start with "warning: "
 };
 
 /** Checks sample rate / channel count / length before any work starts. */

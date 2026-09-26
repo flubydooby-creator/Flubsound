@@ -3,7 +3,7 @@
 // Stored as XML in the OS's per-user application-data folder:
 //   Windows : %APPDATA%\Flubsound\Flubsound Pro.settings
 //   macOS   : ~/Library/Application Support/Flubsound/Flubsound Pro.settings
-//   Linux   : ~/.config/Flubsound/Flubsound Pro.settings
+//   Linux   : $XDG_CONFIG_HOME (~/.config)/Flubsound/Flubsound Pro.settings
 //
 // Contents: audio device state (AudioDeviceManager XML), per-strip last preset
 // and full parameter state (both A/B banks), master enable, selected strip,

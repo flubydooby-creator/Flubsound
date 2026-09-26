@@ -271,7 +271,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
     float* const dqValue = dequeValue.data();
     uint32_t* const dqIndex = dequeIndex.data();
     float* const box = boxRing.data();
-    float* const ceil = ceilingRing.data();
+    float* const ceilHist = ceilingRing.data();
 
     float minGain = 1.0f;
     uint64_t clips = 0;
@@ -329,7 +329,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         const float oldM = box[ringPos];
         box[ringPos] = m;
         boxSum += static_cast<double> (m) - static_cast<double> (oldM);
-        ceil[ringPos] = ceilingLin;
+        ceilHist[ringPos] = ceilingLin;
         if (++ringPos == ringSize)
         {
             ringPos = 0;
@@ -342,7 +342,7 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept
         }
         // The oldest ceiling in the ring is the one r[n-L] was computed with:
         // the clamp level this output sample was limited to.
-        const float clampLin = ceil[ringPos];
+        const float clampLin = ceilHist[ringPos];
         // (A division, so that a window full of 1.0 gives exactly 1.0.)
         const double env = std::clamp (boxSum / boxLength, 0.0, 1.0);
 

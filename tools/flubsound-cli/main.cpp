@@ -200,6 +200,18 @@ public:
         std::fflush (json ? stderr : stdout);
     }
 
+    /** Problems worth seeing even with --quiet (e.g. a missed loudness target). */
+    void warning (const std::string& text) const
+    {
+        if (! quiet)
+        {
+            info ("Warning : " + text + "\n");
+            return;
+        }
+        const std::lock_guard<std::mutex> lock (mutex);
+        std::fputs (("warning: " + text + "\n").c_str(), stderr);
+    }
+
     void error (const std::string& text) const
     {
         const std::lock_guard<std::mutex> lock (mutex);
@@ -278,9 +290,27 @@ std::string describeSettings (const ResolvedParameters& p, const RenderOptions& 
     if (o.targetLufs)
         s += ", target " + fmt ("%.1f LUFS", *o.targetLufs);
     s += ", output " + std::string (sampleFormatName (o.format)) + "\n";
-    for (const auto& n : p.notes)
-        s += "Note    : " + n + "\n";
     return s;
+}
+
+/** Notes starting with "warning: " are problems and survive --quiet. */
+void logNotes (const Log& log, const std::vector<std::string>& notes)
+{
+    const std::string prefix = "warning: ";
+    for (const auto& n : notes)
+    {
+        if (n.rfind (prefix, 0) == 0)
+            log.warning (n.substr (prefix.size()));
+        else
+            log.info ("Note    : " + n + "\n");
+    }
+}
+
+/** Settings summary plus the parameter notes. */
+void logSettings (const Log& log, const ResolvedParameters& p, const RenderOptions& o)
+{
+    log.info (describeSettings (p, o));
+    logNotes (log, p.notes);
 }
 
 RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParameters& p)
@@ -365,7 +395,7 @@ int runProcess (const CliOptions& o)
     }
 
     const std::string inFormat = sampleFormatName (input.sourceFormat);
-    log.info (describeSettings (params, o.render));
+    logSettings (log, params, o.render);
     log.info ("Input   : " + o.input + fmt ("  (%.0f ch, ", input.numChannels) + fmt ("%.0f Hz, ", input.sampleRate) + inFormat
               + fmt (", %.2f s)\n", static_cast<double> (input.numFrames()) / input.sampleRate));
 
@@ -392,8 +422,7 @@ int runProcess (const CliOptions& o)
               + ") compensated, max.drive " + fmt ("%.2f dB", rr.driveDb)
               + (rr.outputGainDb != params.values[static_cast<size_t> (param::OutputGainDb)] ? ", output.gain " + fmt ("%.2f dB", rr.outputGainDb) : std::string())
               + (rr.renderSeconds > 0.0 ? fmt (", %.1fx realtime", audioSeconds * rr.passes / rr.renderSeconds) : std::string()) + "\n");
-    for (const auto& n : rr.notes)
-        log.info ("Note    : " + n + "\n");
+    logNotes (log, rr.notes);
 
     if (o.json)
     {
@@ -566,7 +595,7 @@ int runBatch (const CliOptions& o)
     const unsigned hw = std::max (1u, std::thread::hardware_concurrency());
     const size_t numWorkers = std::min (jobs.size(), static_cast<size_t> (o.jobs > 0 ? static_cast<unsigned> (o.jobs) : hw));
 
-    log.info (describeSettings (params, o.render));
+    logSettings (log, params, o.render);
     log.info ("Batch   : " + std::to_string (jobs.size()) + " WAV file(s), " + std::to_string (numWorkers) + " job(s)"
               + (skipped.empty() ? std::string() : ", skipping " + std::to_string (skipped.size()) + " non-WAV file(s)") + "\n");
 

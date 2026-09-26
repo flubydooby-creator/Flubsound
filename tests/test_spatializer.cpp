@@ -905,3 +905,257 @@ TEST_CASE ("StereoSpatializer: parameter jumps are click-free")
     CHECK_LE (early, 0.1 * settled);
     CHECK_GE (settled, 0.05);
 }
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("StereoSpatializer (review): bit-identical for any block size, including tails and max-size blocks")
+{
+    // Noise with the safety moving, a parameter change, then a long silent
+    // tail (where the denormal flush acts). Every host block size - including
+    // the 4096 maximum - must give the same bits, and the same telemetry.
+    for (double fs : { 44100.0, 192000.0 })
+    {
+        const int n = static_cast<int> (fs * 3.0);
+        const int loud = n / 6; // then 2.5 s of silence (the ambience decays ~135 dB/s)
+        const auto a = whiteNoise (loud, 0.7f, 101u);
+        const auto b = whiteNoise (loud, 0.7f, 102u);
+        std::vector<float> l (static_cast<size_t> (n), 0.0f), r (static_cast<size_t> (n), 0.0f);
+        for (size_t i = 0; i < static_cast<size_t> (loud); ++i)
+        {
+            l[i] = a[i] + 0.1f * b[i];
+            r[i] = -a[i] + 0.1f * b[(i * 5) % b.size()];
+        }
+        SpatializerParams p;
+        p.width = 2.0f;
+        p.widthLowCutHz = 60.0f;
+        p.positionalFocus = 1.0f;
+        p.space = 1.0f;
+        p.crossfeed = 1.0f;
+        p.minCorrelation = 0.3f;
+        SpatializerParams q = p;
+        q.widthLowCutHz = 500.0f;
+        q.space = 0.4f;
+        const int changeAt = 8192; // blocks are cut there, as a host would
+
+        const auto run = [&] (int blockSize, float& corr, float& width) {
+            StereoSpatializer sp;
+            setUp (sp, p, fs, 4096);
+            Planar buf = stereo (l, r);
+            for (int pos = 0; pos < n;)
+            {
+                if (pos == changeAt)
+                    sp.setParams (q);
+                const int len = std::min ({ blockSize, n - pos, pos < changeAt ? changeAt - pos : n });
+                sp.process (buf.block (pos, len));
+                pos += len;
+            }
+            corr = sp.getCorrelation();
+            width = sp.getEffectiveWidth();
+            return buf;
+        };
+        float c1 = 0.0f, w1 = 0.0f;
+        const Planar ref = run (1, c1, w1);
+        for (int bs : { 13, 1024, 4096 })
+        {
+            float c = 0.0f, w = 0.0f;
+            const Planar out = run (bs, c, w);
+            CHECK (identical (ref, out));
+            CHECK (c == c1);
+            CHECK (w == w1);
+        }
+        // The tail ends in exact zeros (no subnormal crawl) even with 4096 blocks.
+        CHECK_NEAR (std::max (peakAbs (ref.ch[0].data() + n - 4096, 4096), peakAbs (ref.ch[1].data() + n - 4096, 4096)), 0.0, 0.0);
+    }
+}
+
+TEST_CASE ("StereoSpatializer (review): mono safety releases with minCorrelation close to 1")
+{
+    // minCorrelation 0.97: a fixed 0.05 release band would demand a
+    // correlation above 1.02, so a pulled width could never come back.
+    const int n = static_cast<int> (kFs * 2.0);
+    const auto a = whiteNoise (n, 0.5f, 111u);
+    const auto b = whiteNoise (n, 0.5f, 112u);
+    const auto c = whiteNoise (n, 0.5f, 113u);
+    SpatializerParams p;
+    p.width = 2.0f;
+    p.minCorrelation = 0.97f;
+    StereoSpatializer sp;
+    setUp (sp, p);
+
+    Planar pull = stereo (mix (a, 1.0f, b, 0.3f), mix (a, 1.0f, c, 0.3f)); // output rho ~0.7 at width 2
+    processInBlocks (sp, pull, 256);
+    CHECK_LE (sp.getEffectiveWidth(), 1.01f);
+
+    // Nearly mono material: at width 2 the output correlation is ~0.996,
+    // comfortably above the target, so the width must be restored.
+    for (int k = 0; k < 4; ++k)
+    {
+        Planar near = stereo (mix (a, 1.0f, b, 0.03f), mix (a, 1.0f, c, 0.03f));
+        processInBlocks (sp, near, 256);
+    }
+    CHECK_GE (sp.getCorrelation(), 0.985f);
+    CHECK_NEAR (sp.getEffectiveWidth(), 2.0, 1.0e-3);
+}
+
+TEST_CASE ("StereoSpatializer (review): mono safety timing does not depend on the sample rate")
+{
+    // Seconds until the effective width first drops below 1.1 on antiphase
+    // content, and back above 1.9 after it turns well correlated.
+    const auto times = [] (double fs, double& pullS, double& recoverS) {
+        const int n = static_cast<int> (fs * 6.0);
+        const auto a = whiteNoise (n, 0.5f, 121u);
+        const auto b = whiteNoise (n, 0.1f, 122u);
+        SpatializerParams p;
+        p.width = 2.0f;
+        StereoSpatializer sp;
+        setUp (sp, p, fs);
+        pullS = recoverS = -1.0;
+        const int half = n / 3;
+        std::vector<float> l (static_cast<size_t> (n)), r (static_cast<size_t> (n));
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            l[i] = a[i] + b[i];
+            r[i] = (static_cast<int> (i) < half ? -a[i] : a[i]) + b[(i * 7) % b.size()];
+        }
+        Planar buf = stereo (l, r);
+        for (int pos = 0; pos < n; pos += 64)
+        {
+            sp.process (buf.block (pos, std::min (64, n - pos)));
+            const double t = (pos + 64) / fs;
+            if (pullS < 0.0 && sp.getEffectiveWidth() < 1.1f)
+                pullS = t;
+            if (pos >= half && recoverS < 0.0 && sp.getEffectiveWidth() > 1.9f)
+                recoverS = t - half / fs;
+        }
+    };
+    double p44 = 0.0, r44 = 0.0, p192 = 0.0, r192 = 0.0;
+    times (44100.0, p44, r44);
+    times (192000.0, p192, r192);
+    CHECK (p44 > 0.0 && p192 > 0.0 && r44 > 0.0 && r192 > 0.0);
+    CHECK_NEAR (p192, p44, 0.05);
+    CHECK_NEAR (r192, r44, 0.1);
+    CHECK_LE (p44, 0.8);
+    CHECK_LE (r44, 4.5);
+}
+
+TEST_CASE ("StereoSpatializer (review): widening never mirrors a panned source around the low cut")
+{
+    // A hard-left tone at and around the low cut must stay on the left at
+    // width 2 (an LR4 band sum on S would rotate S by -180 degrees against M
+    // at the cut and move it to the right). L' / R' = |1 + H| / |1 - H|.
+    for (double f : { 60.0, 90.0, 180.0, 360.0, 1000.0 })
+    {
+        SpatializerParams p = neutral();
+        p.width = 2.0f;
+        p.widthLowCutHz = 180.0f;
+        StereoSpatializer sp;
+        setUp (sp, p);
+        const int total = 96000, from = 48000;
+        const auto x = sine (f, kFs, total, 0.5f);
+        Planar buf = stereo (x, std::vector<float> (x.size(), 0.0f));
+        processInBlocks (sp, buf, 512);
+        const double lAmp = toneAmplitude (buf.ch[0].data() + from, total - from, f, kFs);
+        const double rAmp = toneAmplitude (buf.ch[1].data() + from, total - from, f, kFs);
+        CHECK_GE (lAmp, 2.5 * rAmp);
+        // Mono sum is still exactly the input.
+        CHECK_NEAR (toneAmplitude (midOf (buf, from, total - from).data(), total - from, f, kFs), 0.25, 1.0e-4);
+    }
+}
+
+TEST_CASE ("StereoSpatializer (review): NaN / inf inputs are contained within one control interval")
+{
+    const float nanV = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (float bad : { nanV, inf, -inf })
+    {
+        SpatializerParams p;
+        p.width = 1.8f;
+        p.positionalFocus = 1.0f;
+        p.space = 1.0f;
+        p.crossfeed = 1.0f;
+        StereoSpatializer sp;
+        setUp (sp, p, kFs, 4096);
+        Planar buf = stereo (whiteNoise (4096, 0.5f, 131u), whiteNoise (4096, 0.5f, 132u));
+        buf.ch[1][10] = bad; // right channel only
+        sp.process (buf.block (0, 4096));
+        // The state is cleared at the next 32-sample control tick, not at the
+        // end of a 4096-sample block.
+        bool finiteAfter = true;
+        for (int c = 0; c < 2; ++c)
+            for (size_t i = 10 + 2 * 32; i < 4096; ++i)
+                finiteAfter = finiteAfter && std::isfinite (buf.ch[static_cast<size_t> (c)][i]);
+        CHECK (finiteAfter);
+        CHECK (std::isfinite (sp.getCorrelation()) && std::isfinite (sp.getEffectiveWidth()));
+        Planar next = stereo (whiteNoise (4096, 0.5f, 133u), whiteNoise (4096, 0.5f, 134u));
+        processInBlocks (sp, next, 512);
+        CHECK (allFinite (next));
+    }
+}
+
+TEST_CASE ("StereoSpatializer (review): per-sample parameter thrash stays finite, bounded and mono-exact")
+{
+    FastRandom rng (0xBADF00Du);
+    for (double fs : kRates)
+    {
+        const int n = static_cast<int> (fs * 0.3);
+        const Planar in = stereo (whiteNoise (n, 1.0f, 141u), whiteNoise (n, 1.0f, 142u));
+        Planar out = stereo (in.ch[0], in.ch[1]);
+        StereoSpatializer sp;
+        setUp (sp, SpatializerParams {}, fs, 1);
+        float minW = 10.0f, maxW = -10.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            // Hammer every parameter between its extremes, one-sample blocks.
+            SpatializerParams p;
+            p.width = rng.nextBipolar() > 0.0f ? 2.0f : 0.0f;
+            p.widthLowCutHz = rng.nextBipolar() > 0.0f ? 500.0f : 60.0f;
+            p.positionalFocus = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
+            p.space = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
+            p.crossfeed = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
+            p.autoMonoSafety = rng.nextBipolar() > 0.0f;
+            p.minCorrelation = rng.nextBipolar();
+            sp.setParams (p);
+            sp.process (out.block (i, 1));
+            minW = std::min (minW, sp.getEffectiveWidth());
+            maxW = std::max (maxW, sp.getEffectiveWidth());
+        }
+        CHECK (allFinite (out));
+        CHECK_LE (maxMonoSumError (in, out), 1.0e-5);
+        CHECK_GE (minW, 0.0f);
+        CHECK_LE (maxW, 2.0f);
+        CHECK_LE (std::max (peakAbs (out.ch[0].data(), n), peakAbs (out.ch[1].data(), n)), 16.0);
+    }
+}
+
+TEST_CASE ("StereoSpatializer (review): re-prepare at another rate, empty blocks, silence start")
+{
+    SpatializerParams p;
+    p.width = 2.0f;
+    p.space = 1.0f;
+    StereoSpatializer sp;
+    setUp (sp, p, 44100.0, 256);
+
+    // Long digital silence first: the safety must not drift (correlation is
+    // undefined, so it holds at "no pull").
+    Planar silence (2, 44100 * 2);
+    processInBlocks (sp, silence, 256);
+    CHECK_NEAR (sp.getEffectiveWidth(), 2.0, 0.0);
+    CHECK_NEAR (sp.getCorrelation(), 1.0, 0.0);
+
+    // Zero-length blocks are harmless.
+    Planar tiny (2, 4);
+    sp.process (tiny.block (0, 0));
+    CHECK (allFinite (tiny));
+
+    // Re-prepare at 192 kHz with larger blocks: the ambience keeps its level
+    // (delay lines re-sized, S / M of a mono noise input still ~ -6 dB).
+    sp.prepare ({ 192000.0, 4096, 2 });
+    const int n = 192000;
+    const auto x = whiteNoise (n, 0.5f, 151u);
+    Planar buf = stereo (x, x);
+    processInBlocks (sp, buf, 4096);
+    CHECK (allFinite (buf));
+    const double ratioDb = rmsDb (sideOf (buf, n / 2, n / 2)) - rmsDb (midOf (buf, n / 2, n / 2));
+    CHECK_NEAR (ratioDb, -6.0, 0.6);
+    CHECK_LE (maxMonoSumError (stereo (x, x), buf), 1.0e-5);
+}
