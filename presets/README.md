@@ -1,6 +1,6 @@
 # Flubsound factory presets
 
-This folder holds the factory preset library. There are 24 presets in three categories:
+This folder holds the factory preset library: 24 presets in three categories (12 Music, 9 Gaming, 3 Device). It has two parts:
 
 | Folder | Contents |
 |---|---|
@@ -30,7 +30,7 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
 
 | Profile | Latency | What it enables |
 |---|---|---|
-| **Quality** | ~28 ms | Spectral noise gate in the chain, HQ oversampling, longest look-ahead |
+| **Quality** | ~28 ms | Spectral noise gate in the chain, HQ oversampling, longest look-ahead. Still well inside lip-sync tolerance for video, but not for competitive play |
 | **Balanced** | ~4 ms | Default. Safe for video lip-sync |
 | **Low Latency** | ~2 ms | Short look-ahead and oversampling, for competitive play |
 
@@ -48,7 +48,7 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
 | **Wide Stage** | Bigger, open stereo image | Width 1.15 above 220 Hz, space 0.2, mono bass < 120 Hz, stricter mono safety (min. correlation 0.15), air 0.1 | Boost 30 %, Width 40, Clarity 15, Punch 10 | Balanced | −1 dBTP |
 | **Late Night Low Volume** | Quiet listening without losing detail | **Auto Level → −20 LUFS**; compressor 2:1 @ −26 dB (20 ms / 250 ms auto) + **upward 6 dB below −40 dB**; loudness contour: adaptive bass +3 dB @ 80 Hz, +1.5 dB shelf @ 10 kHz; presence 0.2 @ 2.5 kHz | Boost 20 % | Balanced | −1 dBTP |
 | **Audiophile Subtle** | Almost transparent | Bass +0.8 dB @ 40 Hz, subsonic 10 Hz, air 0.06, crossfeed 0.15, dynamic EQ off, **limiter only** (no clipper, no drive) | none | Quality | −1 dBTP |
-| **Club Loud** | Loud and dense for parties / EDM | **Loudness target −9 LUFS** (AutoDrive), glue 0.4, bass +3 dB (protection −8 dBFS), tighten 0.2, mono < 100 Hz, subsonic 28 Hz | Boost 45 %, **Loudness 60** (≈ +6 dB governed drive), Punch 15, Width 10 | Balanced | −1 dBTP |
+| **Club Loud** | Loud and dense for parties / EDM | **−9 LUFS loudness cap** (AutoDrive only ever *reduces* drive), glue 0.4, bass +3 dB (protection −8 dBFS), tighten 0.2, mono < 100 Hz, subsonic 28 Hz | Boost 45 %, **Loudness 60** (≈ +6 dB governed drive), Punch 15, Width 10 | Balanced | −1 dBTP |
 | **Podcast & Voice** | Clear, even speech | **Spectral gate** (−9 dB); low cut 80 Hz; −2 dB @ 250 Hz; compressor 2.5:1 @ −14 dB, +4 dB makeup; **Auto Level → −16 LUFS**; de-esser 6.5 kHz; presence 0.3 @ 2.8 kHz; de-mud 0.35; width 0.8; bass engine off | Boost 20 %, Clarity 20 | Quality | −1 dBTP |
 | **Lo-Fi Chill** | Relaxed, dusty tape character | Tape saturation (drive 6 dB, mix 0.6), high cut 10 kHz (12 dB/oct), low cut 35 Hz, +1 dB @ 500 Hz, attack −2 / sustain +1 dB, width 0.85, space 0.2, clipper 0.3 | Boost 25 %, Warmth 40 | Quality | −1 dBTP |
 | **Classical & Jazz Dynamic** | Full dynamic range for acoustic recordings | **No drive, no clipper, no compression**; slow limiter (250 ms); bass +1.2 dB @ 80 Hz; air 0.12; crossfeed 0.3 for hard-panned vintage jazz | none | Quality | −1 dBTP |
@@ -83,7 +83,7 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
   * The ceiling is −1 dBTP, or −2 dBTP for Bluetooth. Device profiles may lower it further (−3 dBTP for hands-free).
 * **Gaming compressor settings are always explicit.** In Gaming mode, Boost ≥ 7 %, *Footsteps* and *Detail* all switch the compressor on. Every Gaming preset therefore sets the downward threshold, ratio and makeup on purpose. *Competitive FPS* uses ratio 1:1, so the compressor only lifts quiet sounds and gunfire is never compressed.
 * **Bass protection is adaptive.** `bass.protect` caps the *predicted* low-frequency level, so the adaptive shelf gives way on bass-heavy masters instead of making the limiter pump. The default (−12 dBFS) is kept wherever the boost is a matter of taste. It is raised only where the boost is the point of the preset or compensates for the device: Bass Head −4, Earbuds −6, Club Loud / Bluetooth / Late Night −8.
-* **Laptop Speakers subsonic is 40 Hz, not 60 Hz.** The brief asked for 60 Hz, but the `bass.subsonic` range is 0–40 Hz, so 60 would be clamped to 40. With small-speaker mode on, everything below the 150 Hz speaker limit is high-passed away *after* the harmonics are generated. The drivers therefore never receive sub-150 Hz energy, and the 40 Hz subsonic only keeps rumble out of the harmonic generator.
+* **Laptop Speakers subsonic is 40 Hz, not 60 Hz.** 60 Hz would suit the drivers, but the `bass.subsonic` range is 0–40 Hz, so 60 would be clamped to 40. With small-speaker mode on, everything below the 150 Hz speaker limit is high-passed away *after* the harmonics are generated. The drivers therefore never receive sub-150 Hz energy, and the 40 Hz subsonic only keeps rumble out of the harmonic generator.
 * **Crossfeed 0 in Competitive FPS is not written in the file**, because it is the default. The chain also forces it to 0 in Gaming mode.
 * **Auto Level** is used only where levelling is the point of the preset: *Late Night Low Volume*, *Podcast & Voice* and *Night Mode Gaming*. Elsewhere it would flatten the intended dynamics of music and games.
 
@@ -157,10 +157,17 @@ The test enforces all of the following:
 * **Output protection:**
   * the ceiling is ≤ −1 dBTP (≤ −2 dBTP for Bluetooth);
   * the maximizer is on;
-  * the output gain is ≤ 0 dB.
+  * the output gain is ≤ 0 dB;
+  * `max.drive` stays 0 (fixed drive is not governed).
+* **Macro stacking:** with Boost Intensity and all five macros at 100 %, `bass.boost`, `bass.harmonics`, `max.drive` and `sat.drive` must not be pinned at the top of their range (the base value must leave the macros headroom).
+* **Gaming policy:**
+  * no stored crossfeed, width ≤ 1.25, space ≤ 0.2;
+  * if the compressor is engaged, its ratio or threshold is set explicitly;
+  * *Competitive* and *Tournament* presets use Low Latency, and the `low-latency` tag goes with the Low Latency profile in every category.
 * **Render:** a hot 4 s drum, bass and pad programme is rendered through the chain. The chain uses 8 channels for the 7.1 preset and is prepared after loading, so the latency profile is honoured. The test checks that:
   * the output is finite;
   * the sample peak stays at or below the ceiling;
   * the true peak is within 0.15 dB of the ceiling;
   * no safety clips occur and the output is not silent.
+* **Stress render:** the same programme, with Boost Intensity and all macros at 100 %, for the first 2 s (before the SafetyGovernor reacts). The output must be finite, sample peaks must stay at or below the ceiling and the safety clamp must not engage. The true-peak tolerance here is 0.5 dB, because of a known limiter issue in the core that is tracked separately. It will be tightened to 0.15 dB once that is fixed.
 * **Cross-references:** every preset that a device profile suggests exists.

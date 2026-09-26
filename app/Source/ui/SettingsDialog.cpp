@@ -542,8 +542,8 @@ SettingsDialog::~SettingsDialog()
     stopTimer();
 }
 
-void SettingsDialog::show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
-                           std::function<void (MeterPalette)> onPalette, MeterPalette palette, Page page)
+juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
+                                          std::function<void (MeterPalette)> onPalette, MeterPalette palette, Page page)
 {
     auto dialog = std::make_unique<SettingsDialog> (controller, std::move (hooks), std::move (onPalette), palette);
     dialog->showPage (page);
@@ -556,8 +556,10 @@ void SettingsDialog::show (EngineController& controller, juce::Component* parent
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
     options.resizable = true;
-    if (auto* window = options.launchAsync())
+    auto* window = options.launchAsync();
+    if (window != nullptr)
         window->setResizeLimits (680, 480, 1600, 1200);
+    return window;
 }
 
 void SettingsDialog::showPage (Page page)

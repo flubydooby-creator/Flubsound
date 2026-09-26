@@ -50,9 +50,11 @@ public:
                     MeterPalette currentPalette);
     ~SettingsDialog() override;
 
-    /** Opens the dialog (non-modal, owns its content). */
-    static void show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
-                      std::function<void (MeterPalette)> onMeterPaletteChanged, MeterPalette currentPalette, Page page = Page::Audio);
+    /** Opens the dialog (non-modal, owns its content). The caller should keep
+        the returned window (SafePointer) and delete it before the controller. */
+    static juce::DialogWindow* show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
+                                     std::function<void (MeterPalette)> onMeterPaletteChanged, MeterPalette currentPalette,
+                                     Page page = Page::Audio);
 
     void showPage (Page page);
 

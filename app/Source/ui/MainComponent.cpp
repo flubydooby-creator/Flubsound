@@ -58,6 +58,7 @@ MainComponent::MainComponent (EngineController& c)
                           history.push (samples, n);
                   });
 
+    stripSignature = currentStripSignature();
     loadUiPreferences();
     applyMode (controller.getMode());
     controller.addListener (this);
@@ -68,6 +69,9 @@ MainComponent::MainComponent (EngineController& c)
 
 MainComponent::~MainComponent()
 {
+    // The settings window talks to the controller: close it while that exists.
+    if (settingsWindow != nullptr)
+        delete settingsWindow.getComponent();
     vblank.reset();
     controller.removeListener (this);
     setLookAndFeel (nullptr);
@@ -200,10 +204,16 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             header.refreshPresets();
             break;
         case Change::Engine:
-            header.rebuildStrips();
-            routing.rebuildStrips();
+            // Device restarts re-create the chains but usually keep the strips.
+            if (const auto signature = currentStripSignature(); signature != stripSignature)
+            {
+                stripSignature = signature;
+                header.rebuildStrips();
+                routing.rebuildStrips();
+            }
             resetAnalysis();
             header.refresh();
+            header.updateStatus();
             break;
         case Change::SelectedStrip:
             header.refresh();
@@ -225,9 +235,22 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
     }
 }
 
+juce::String MainComponent::currentStripSignature() const
+{
+    juce::String s;
+    for (int i = 0; i < controller.getNumStrips(); ++i)
+        s << controller.getStripName (i) << ':' << controller.getStripChannels (i) << ';';
+    return s;
+}
+
 void MainComponent::openSettings()
 {
-    SettingsDialog::show (
+    if (settingsWindow != nullptr)
+    {
+        settingsWindow->toFront (true);
+        return;
+    }
+    settingsWindow = SettingsDialog::show (
         controller, this, hotkeyHooks,
         [safe = juce::Component::SafePointer<MainComponent> (this)] (MeterPalette palette)
         {

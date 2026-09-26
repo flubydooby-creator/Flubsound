@@ -67,6 +67,7 @@ private:
     void resetAnalysis();
     void requestLoudnessReset();
     void openSettings();
+    juce::String currentStripSignature() const;
     void loadUiPreferences();
     void saveUiPreferences();
     FlubLookAndFeel& lookAndFeel();
@@ -88,6 +89,8 @@ private:
     MeterSnapshot snapshot;
     HotkeyHooks hotkeyHooks;
     std::unique_ptr<juce::VBlankAttachment> vblank;
+    juce::Component::SafePointer<juce::DialogWindow> settingsWindow;
+    juce::String stripSignature; // names + channel counts: rebuild strip views only when it changes
 
     double lastFrameTime = -1.0;
     int frameCounter = 0, lastStrip = -1;
