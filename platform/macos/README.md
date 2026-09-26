@@ -1,8 +1,10 @@
 # Flubsound on macOS: virtual device, per-app capture, distribution
 
 Status: **design.** `app/Source/platform/PlatformServices_mac.mm` implements
-global hotkeys (Carbon `RegisterEventHotKey`) and thread tuning
-(`THREAD_TIME_CONSTRAINT_POLICY`). Since macOS 15 (Sequoia),
+global hotkeys (Carbon `RegisterEventHotKey`), thread tuning
+(`THREAD_TIME_CONSTRAINT_POLICY`) and the output transport query
+(`kAudioDevicePropertyTransportType`, which tells the headset profiles
+USB from Bluetooth). Since macOS 15 (Sequoia),
 `RegisterEventHotKey` rejects shortcuts whose only modifiers are Option or
 Option+Shift, so the UI should suggest chords that include Cmd or Ctrl. Per-app routing and capture report
 `isSupported() == false` until the design below is implemented and tested on
@@ -137,7 +139,9 @@ tiny: no DSP.
 Threads that work in lock-step with a device should also **join the
 device's audio workgroup** (`kAudioDevicePropertyIOThreadOSWorkgroup`, exposed
 by JUCE as `AudioWorkgroup`). This keeps them on performance cores next to
-the IO thread.
+the IO thread. Not implemented yet: today the only such thread is the device
+callback itself, which already runs in the workgroup; capture threads (process
+taps, v1 loopback) will need it.
 
 `disablePowerThrottling` is a no-op on macOS. App Nap does not throttle a
 process while Core Audio IO is running.

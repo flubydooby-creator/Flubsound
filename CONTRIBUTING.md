@@ -9,7 +9,7 @@ ctest --test-dir build --output-on-failure        # or ./build/tests/flub_tests 
 ```
 
 Optional targets:
-- `-DFLUB_BUILD_APP=ON` builds the desktop app, and `-DFLUB_BUILD_PLUGIN=ON` the VST3/AU plug-in. Both fetch JUCE 9.0.2; pass `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE` to build offline.
+- `-DFLUB_BUILD_APP=ON` builds the desktop app, and `-DFLUB_BUILD_PLUGIN=ON` the VST3 / Standalone (+ AU on macOS) plug-in. Both fetch JUCE 9.0.2; pass `-DFETCHCONTENT_SOURCE_DIR_JUCE=/path/to/JUCE` to build offline.
 - `-DFLUB_SANITIZE=ON` enables ASan + UBSan (GCC / Clang; CI runs the full suite this way with Clang).
 - `-DFLUB_RTSAN=ON` enables Clang RealtimeSanitizer (Clang ≥ 20). It only checks functions marked `[[clang::nonblocking]]`; none are marked yet and CI does not run it, so treat it as groundwork.
 - `-DFLUB_WARNINGS_AS_ERRORS=ON` is what CI uses for the Linux core builds (GCC and Clang).

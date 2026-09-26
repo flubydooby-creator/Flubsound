@@ -233,11 +233,6 @@ void ModuleCard::stopListening()
         onListen (false);
 }
 
-void ModuleCard::releaseListening()
-{
-    stopListening();
-}
-
 void ModuleCard::timerCallback()
 {
     // Safety net for releases the button may never see (the window lost focus

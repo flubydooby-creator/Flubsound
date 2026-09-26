@@ -82,8 +82,9 @@ Sink names and properties:
 
 `pactl --format=json` needs `pactl` 16 or newer. That covers
 pulseaudio-utils 16+ and every current distribution; pipewire-pulse only
-provides the server side. The calls block for a few milliseconds, so the UI
-calls them off the message thread.
+provides the server side. The calls block for roughly 5–30 ms, so the app
+runs them on its routing worker thread (`AppRouting`, every 2 s while routes
+exist), never on the message or audio thread.
 
 **Flatpak.** The sandbox has no `pactl`. The Flatpak build has to bundle
 `pactl` (with `--socket=pulseaudio`) or replace these calls with libpulse or
@@ -138,7 +139,17 @@ quantum. Force a smaller quantum for gaming with
 pw-metadata -n settings 0 clock.force-quantum 256
 ```
 
-or have the engine request `node.latency = 256/48000` for its streams.
+A per-stream `node.latency = 256/48000` request for Flubsound's own streams
+would be the targeted alternative; the engine does not set it yet (it uses
+JUCE's ALSA / JACK backends), so this is roadmap.
+
+## Headset profiles on Linux
+
+`AudioEndpoints::queryOutputTransport()` returns *unknown* on Linux: JUCE's
+ALSA / JACK device names do not map one-to-one to PipeWire / Pulse sinks, so
+the PipeWire `device.bus` property is not queried. Headset profiles therefore
+detect Bluetooth and hands-free outputs from the device name and format
+(`flub::device::detectConnection`, see `docs/10-headset-compatibility.md`).
 
 ## Roadmap
 
@@ -148,3 +159,5 @@ or have the engine request `node.latency = 256/48000` for its streams.
 - libpulse or libpipewire routing instead of shelling out to `pactl`, for
   Flatpak and to receive change events instead of polling.
 - xdg-desktop-portal GlobalShortcuts.
+- RealtimeKit for the audio thread, `node.latency` for Flubsound's streams,
+  and the output's `device.bus` for headset connection detection.

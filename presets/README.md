@@ -4,7 +4,7 @@ This folder holds the factory preset library: 24 presets in three categories (12
 
 | Folder | Contents |
 |---|---|
-| `factory/` | `<category>-<slug>.json` preset files. The desktop app embeds them as BinaryData, `flubsound-cli` finds them at run time, and the installer copies them to `share/flubsound/presets/factory`. |
+| `factory/` | `<category>-<slug>.json` preset files, top level only (no sub-folders). The desktop app embeds them as BinaryData, `flubsound-cli` finds them at run time, and `cmake --install` copies them to `share/flubsound/presets/factory`. |
 | `devices/device-profiles.json` | Headset and output-device profiles. They add device-aware advice and ceiling caps, and suggest presets by name (for example *Competitive FPS*, *Flubsound Signature* or *Bluetooth Headphones*). |
 
 `tests/test_factory_presets.cpp` checks every file on every build. It confirms the metadata, that every key and choice label is known, that only non-default values are stored and that the ceilings are right. It also renders each preset through the full `ProcessingChain` and checks the output against its ceiling. Details are in the last section.
@@ -18,13 +18,15 @@ A preset stores **base values** only. Two further layers are added on top of the
 * **Boost Intensity** is staged, so each part arrives at a different point:
   * clarity, width and detail come in first;
   * bass and impact come next;
-  * maximizer drive and saturation come in last (drive starts at 30 %).
+  * maximizer drive and saturation come in last (drive starts at 30 %, saturation drive at 60 %; in Music mode the multiband glue joins from 40 %).
 * **The five mode macros:**
   * Music mode: *Punch, Width, Clarity, Loudness, Warmth*.
   * Gaming mode: *Footsteps, Positional, Impact, Detail, Voice & Score*.
   * Several macros also drive internal dynamic-EQ bands, such as the footstep lift, explosion anti-masking, the voice band, de-harsh and de-boom.
 
-Every factory preset sets Boost and the macros to a sensible *starting point*, so the user can go further from there. Anything that adds loudness or drive through Boost or a macro is **governed**: the SafetyGovernor scales it back when the limiter or clipper is working too hard. For this reason the factory presets get their loudness from the governed controls (Boost, Loudness), not from a fixed `max.drive`.
+Every factory preset sets Boost and the macros to a sensible *starting point*, so the user can go further from there. Anything that adds loudness or drive through Boost or a macro (maximizer drive, saturation drive, bass boost, harmonic bass) is **governed**: the SafetyGovernor scales it back when the limiter or clipper is working too hard. For this reason the factory presets get their loudness from the governed controls (Boost, Loudness), not from a fixed `max.drive`.
+
+The maximizer's 3-band **glue** only runs while it is *armed*: the preset sets `max.glue` above 0, or a macro that can raise it (Boost Intensity or Loudness, Music mode only) is above zero. A preset without glue and with those controls at zero keeps the splitter out of the signal path entirely.
 
 **Latency profiles** (48 kHz, algorithmic, with the current modules):
 
@@ -32,7 +34,9 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
 |---|---|---|
 | **Quality** | ~28 ms | Spectral noise gate in the chain, HQ oversampling, longest look-ahead. Still well inside lip-sync tolerance for video, but not for competitive play |
 | **Balanced** | ~4 ms | Default. Safe for video lip-sync |
-| **Low Latency** | ~2 ms | Short look-ahead and oversampling, for competitive play |
+| **Low Latency** | ~2.1 ms | Short look-ahead and oversampling, for competitive play |
+
+These are per-strip chain figures. The desktop app adds 1.4 ms for its master limiter after the strip sum (see `docs/01-architecture.md` §5).
 
 ---
 
@@ -79,7 +83,7 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
 
 * **Output protection, in every preset:**
   * The maximizer (true-peak limiter) stays on.
-  * `output.gain` is never positive, because it is applied *after* the limiter.
+  * `output.gain` is never positive: it is applied *after* the limiter, and its range ends at 0 dB.
   * The ceiling is −1 dBTP, or −2 dBTP for Bluetooth. Device profiles may lower it further (−3 dBTP for hands-free).
 * **Gaming compressor settings are always explicit.** In Gaming mode, Boost ≥ 7 %, *Footsteps* and *Detail* all switch the compressor on. Every Gaming preset therefore sets the downward threshold, ratio and makeup on purpose. *Competitive FPS* uses ratio 1:1, so the compressor only lifts quiet sounds and gunfire is never compressed.
 * **Bass protection is adaptive.** `bass.protect` caps the *predicted* low-frequency level, so the adaptive shelf gives way on bass-heavy masters instead of making the limiter pump. The default (−12 dBFS) is kept wherever the boost is a matter of taste. It is raised only where the boost is the point of the preset or compensates for the device: Bass Head −4, Earbuds −6, Club Loud / Bluetooth / Late Night −8.
@@ -93,8 +97,8 @@ Every factory preset sets Boost and the macros to a sensible *starting point*, s
 
 1. **Start from the closest factory preset.** Load it, adjust it, and use *Save As*. Factory presets are read-only; user presets go to the user preset folder.
 2. **Adjust from the top down.** Change Boost Intensity and the five macros first, then the module cards, and only then individual parameters. The macros are staged and governed, so they are the safest way to get more.
-3. **Cut before you boost.** Keep headroom with `eq.output` or `input.gain` when you add large EQ or bass boosts. Never raise `output.gain` above 0 dB: it is applied after the limiter and would push peaks past the ceiling.
-4. **Get loudness from the Loudness macro, or from a `max.target` with `max.autoDrive`.** A fixed `max.drive` bypasses the SafetyGovernor. If the governor meter drops below 100 %, or the limiter shows more than about 6 dB of sustained gain reduction, back off.
+3. **Cut before you boost.** Keep headroom with `eq.output` or `input.gain` when you add large EQ or bass boosts. `output.gain` sits after the limiter and can only attenuate (−24 … 0 dB).
+4. **Get loudness from Boost Intensity and the Loudness macro** (both governed). `max.autoDrive` with `max.target` only *caps* loudness: AutoDrive can reduce the requested drive, never add to it. A fixed `max.drive` bypasses the SafetyGovernor. If the Boost panel's badge changes from "Safety governor OK" to "Safety governor: N% applied", or the limiter shows more than about 6 dB of sustained gain reduction, back off.
 5. **Keep the ceiling at −1 dBTP or lower** (−2 dBTP on Bluetooth). Leave the maximizer on.
 6. **Gaming:**
    * Keep footstep and positional enhancement in one place only. Turn off the headset's own "superhuman hearing", bass boost and virtual surround.
@@ -145,11 +149,15 @@ cmake --build build --target flub_tests && ./build/tests/flub_tests "Factory pre
 
 The test enforces all of the following:
 
+* **Library:**
+  * the file name is `<category>-<slug>.json` in lower case, and `presets/factory` has no sub-folders;
+  * preset names are unique, all three categories exist, and the presets that code and docs refer to by name exist.
 * **Metadata:**
+  * `"format": "flubsound-preset"`, `"version": 1`;
   * name, category, description and tags are present;
   * the author is `Flubsound`;
   * the category is Music, Gaming or Device;
-  * Gaming presets are in Gaming mode.
+  * Gaming presets are in Gaming mode and Music presets in Music mode (the Device presets use Music mode too).
 * **Parameters:**
   * every key is known and appears only once;
   * choice labels are valid, toggles are booleans and numbers are in range;
@@ -158,16 +166,18 @@ The test enforces all of the following:
   * the ceiling is ≤ −1 dBTP (≤ −2 dBTP for Bluetooth);
   * the maximizer is on;
   * the output gain is ≤ 0 dB;
+  * the preset does not load in global bypass;
   * `max.drive` stays 0 (fixed drive is not governed).
 * **Macro stacking:** with Boost Intensity and all five macros at 100 %, `bass.boost`, `bass.harmonics`, `max.drive` and `sat.drive` must not be pinned at the top of their range (the base value must leave the macros headroom).
 * **Gaming policy:**
   * no stored crossfeed, width ≤ 1.25, space ≤ 0.2;
   * if the compressor is engaged, its ratio or threshold is set explicitly;
   * *Competitive* and *Tournament* presets use Low Latency, and the `low-latency` tag goes with the Low Latency profile in every category.
-* **Render:** a hot 4 s drum, bass and pad programme is rendered through the chain. The chain uses 8 channels for the 7.1 preset and is prepared after loading, so the latency profile is honoured. The test checks that:
-  * the output is finite;
+* **Render:** a hot 4 s drum, bass and pad programme (48 kHz, 512-sample blocks) is rendered through the chain. The chain uses 8 channels for the 7.1 preset and is prepared after loading, so the latency profile is honoured. The test checks that:
+  * the chain latency is within its profile's bound (40 / 5 / 2.5 ms for Quality / Balanced / Low Latency);
+  * the output is finite, and channels above the stereo pair are cleared;
   * the sample peak stays at or below the ceiling;
-  * the true peak is within 0.15 dB of the ceiling;
+  * the true peak (4× meter) is at most 0.15 dB above the ceiling;
   * no safety clips occur and the output is not silent.
-* **Stress render:** the same programme, with Boost Intensity and all macros at 100 %, for the first 2 s (before the SafetyGovernor reacts). The output must be finite, sample peaks must stay at or below the ceiling and the safety clamp must not engage. The true-peak tolerance here is 0.5 dB, because of a known limiter issue in the core that is tracked separately. It will be tightened to 0.15 dB once that is fixed.
+* **Stress render:** the same programme, with Boost Intensity and all macros at 100 %, for the first 2 s (before the SafetyGovernor reacts). The output must be finite, sample peaks must stay at or below the ceiling, the true peak within the same 0.15 dB, and the safety clamp must not engage.
 * **Cross-references:** every preset that a device profile suggests exists.

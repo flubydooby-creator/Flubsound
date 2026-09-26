@@ -87,10 +87,10 @@ public:
 
     /** Ear (A/B listen): called with true when a hold starts and with false
         when it ends - on mouse-up, focus loss, when the card is hidden or
-        destroyed, or on releaseListening(). Every start gets exactly one end. */
+        destroyed, or on stopListening(). Every start gets exactly one end. */
     std::function<void (bool listen)> onListen;
     /** Ends a hold now (strip switch, engine reconfiguration). */
-    void releaseListening();
+    void stopListening();
 
     /** Preferred width in the collapsed rack. */
     int getPreferredWidth() const;
@@ -103,7 +103,6 @@ private:
     int resolve (const ModuleDescriptor::Key& key) const noexcept;
     void bindKeys();
     void startListening();
-    void stopListening();
     void timerCallback() override;
     juce::String noteText() const;
 

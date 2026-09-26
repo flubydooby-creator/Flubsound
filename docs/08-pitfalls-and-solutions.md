@@ -72,7 +72,7 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 ### B2. Boost stacking
 - **Symptom:** EQ + bass + exciter + saturation + macros add up to 20 dB and everything slams the limiter.
 - **Solution (gain staging by construction):**
-  1. Saturation, harmonics and exciters have **unity small-signal gain** (`f(gx)/g`), so they change timbre, not level. (The saturator has no automatic make-up, so loud material comes out somewhat *quieter* at high drive, never louder.)
+  1. Saturation, harmonics and exciters have **unity small-signal gain** (`f(gx)/g`), so they change timbre, not level. (The saturator has no automatic make-up, so loud material comes out *quieter* at high drive: pink noise at −12 dBFS RMS through Tape at 9 dB drive loses about 3.6 dB RMS.)
   2. Bass boost is **headroom-protected**: it is withdrawn when the predicted low-frequency level would exceed `bass.protect`.
   3. **AutoLevel** normalises the input loudness.
   4. The **SafetyGovernor** scales every loudness-adding macro contribution back when average limiter gain reduction is below −6 dB or clipper energy is above −30 dB. It recovers slowly, with hysteresis.
@@ -228,13 +228,13 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 
 | Pitfall | Solution in Flubsound |
 |---|---|
-| Allocation / locks / logging on the audio thread (priority inversion, page faults) | A written RT contract in `Processor.h`. `AllocationGuard` tests over every module and the whole chain (0 allocations, including mode and A/B switches). Clang RealtimeSanitizer option (`FLUB_RTSAN`) in CI. |
-| GUI ↔ audio data races | Only three channels: `ParameterStore` (relaxed atomics, two banks), `MeterBus` (atomics) and `AnalyzerTaps` (SPSC rings). No shared mutable objects and no audio-thread callbacks into the GUI. |
+| Allocation / locks / logging on the audio thread (priority inversion, page faults) | A written RT contract in `Processor.h`. `AllocationGuard` tests over every module, the whole chain and the mixer (0 allocations, including mode and A/B switches). A Clang RealtimeSanitizer build option (`FLUB_RTSAN`) exists; annotating entry points and running it in CI are still to do. |
+| GUI ↔ audio data races | Three main channels: `ParameterStore` (relaxed atomics, two banks), `MeterBus` (atomics) and `AnalyzerTaps` (SPSC rings), plus single atomic hand-offs (effective values, audition mask, strip gain / ceiling). No shared mutable objects and no audio-thread callbacks into the GUI. |
 | Object lifetime when swapping engines/HRIR sets | Structural changes happen in `prepare()` off the audio thread. The documented roadmap design is a double-buffered engine swap with deferred (RCU-style) reclamation on the message thread. |
 | Zipper noise | All continuous parameters are smoothed. Discrete changes (filter type, bypass) crossfade. Coefficients are updated at a 16-sample control rate using modulation-safe SVFs. |
 | Block-size dependence | Every module is tested for identical output with 1, 7, 64 and 512-sample blocks (control counters carry across blocks). |
 | Preset breakage between versions | String keys, versioned files, unknown keys ignored, missing keys defaulted, choices stored as labels. |
-| Flaky "golden file" audio tests | Property-based assertions instead: response matches the analytic curve, mono sum is preserved, ceiling holds, latency is exact, output is finite. Golden renders are used only for regression diffs with tolerances. |
+| Flaky "golden file" audio tests | Property-based assertions instead: response matches the analytic curve, mono sum is preserved, ceiling holds, latency is exact, output is finite. Golden renders are planned only for regression diffs with tolerances (`07-roadmap.md` §7). |
 
 ---
 
@@ -243,6 +243,6 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 | Pitfall | Solution |
 |---|---|
 | "Louder = better" bias hides bad processing | Loudness-matched global bypass (the dry path is matched to the processed loudness and never pushed above the ceiling), plus A/B banks. |
-| Hearing damage from boosted loudness | Output loudness readouts and a hearing-guard notice when sustained high short-term loudness is detected. Defaults are conservative (Boost 0 %, ceiling −1 dBTP). WHO safe-listening guidance (≈ 80 dB(A) for 40 h/week) is cited in onboarding. |
-| Users stack Flubsound with other enhancers | Onboarding checks for other enhancement software, OEM APOs and spatial sound, with guidance to disable them. |
+| Hearing damage from boosted loudness | Output loudness readouts (momentary / short-term / integrated LUFS, true peak) exist, and defaults are conservative (Boost 0 %, ceiling −1 dBTP). Roadmap (`07-roadmap.md` items 2.11 and 1.6): a hearing-guard notice when sustained high short-term loudness is detected, and WHO safe-listening guidance (≈ 80 dB(A) for 40 h/week) cited in onboarding. |
+| Users stack Flubsound with other enhancers | Today: device-profile advice for headsets with their own DSP (C9). Roadmap: onboarding checks for other enhancement software, OEM APOs and spatial sound, with guidance to disable them. |
 | Too many knobs | A three-level UI: Boost Intensity + 5 mode macros → module cards with key controls → full parameter lists. Presets set base values and macros add staged contributions on top. |

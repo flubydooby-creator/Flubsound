@@ -52,7 +52,7 @@
                         Σ → master true-peak limiter → WASAPI / ASIO / CoreAudio / ALSA / JACK → 🎧
 ```
 
-`core/` (the `flub_core` library) contains every DSP module, the meters and the engine, and has **zero** third-party dependencies. The JUCE app (`app/`), the plug-in (`plugin/`), the batch CLI (`tools/`) and the tests (`tests/`) are thin hosts around it; the only host-side signal code is I/O glue (the app's drift-compensating capture FIFO and the GUI's analyser FFT).
+`core/` (the `flub_core` library) contains every DSP module, the meters and the engine, and has **zero** third-party dependencies. The JUCE app (`app/`), the plug-in (`plugin/`), the batch CLI (`tools/`) and the tests (`tests/`) are thin hosts around it; host-side signal code is limited to I/O glue and visualisation (the app's drift-compensating capture FIFO, the GUI's analyser FFT, and a test-signal generator for headless screenshots).
 
 ---
 

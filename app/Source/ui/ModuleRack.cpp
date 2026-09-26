@@ -72,7 +72,7 @@ void ModuleRack::updateFromEngine()
 void ModuleRack::releaseListening()
 {
     for (auto& card : cards)
-        card->releaseListening();
+        card->stopListening();
 }
 
 void ModuleRack::setSelectedEqBand (int band)

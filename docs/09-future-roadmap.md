@@ -44,8 +44,10 @@ class AsyncModelProcessor : public Processor
 public:
     explicit AsyncModelProcessor (std::unique_ptr<ModelRunner> runner, int frameSize, int safetyFrames);
     void prepare (const ProcessSpec&) override;   // starts worker, allocates rings
+    void reset() noexcept override;               // clears rings and the fallback state
     void process (const AudioBlock&) noexcept override; // push/pop rings only
     int latencySamples() const noexcept override { return frameSize * (1 + safetyFrames); }
+    const char* name() const noexcept override { return "Neural"; }
     uint64_t getDeadlineMisses() const noexcept;
 };
 ```
@@ -68,7 +70,7 @@ public:
 
 | Feature | Description |
 |---|---|
-| Measured-HRIR renderer (HQ) | SOFA loading, resampling, partitioned FFT convolution, head-size personalisation; the parametric model remains the fallback. |
+| Measured-HRIR renderer (HQ) | SOFA loading, resampling, partitioned FFT convolution, head-size personalisation; the parametric model remains the fallback. The core already renders a supplied HRIR set by direct-form convolution (`HeadphoneVirtualizer::setHrirSet`, capped at 1024 taps, ≈ 21 ms at 48 kHz); nothing loads one yet. |
 | Head tracking | Webcam, AirPods/Bluetooth IMU or IMU dongle → rotate the virtual speaker field (virtualiser angles become dynamic). |
 | Speaker crosstalk cancellation | 3D gaming on laptop and desktop speakers (XTC with regularisation). |
 | Headphone correction database | Target-curve EQ presets per headphone model (licence-checked datasets). |

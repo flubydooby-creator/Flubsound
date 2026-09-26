@@ -36,7 +36,7 @@
 |---|---|---|
 | Main window, layout and every panel in §6 | Implemented | `ui/*`, `shell/MainWindow.*` |
 | Design system: tokens, look-and-feel, vector icons | Implemented | `ui/Theme.*`, `ui/FlubLookAndFeel.*`, `ui/Widgets.*` |
-| Colour-blind safe meter palette | Implemented; covers level meters, clip LEDs and strip mini meters, not the other status colours (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
+| Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation) and the muted-strip icon. A few amber/red indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
 | Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
@@ -69,7 +69,7 @@ The visual language rests on five decisions:
 |---|---|---|
 | `background` | `#0E1014` | Content background; edge fades of the module rack |
 | `well` | `#0A0C10` | Meter wells, plot backgrounds, text-editor fill |
-| `panel` | `#161A21` | Panel base. `drawPanel()` fills a vertical gradient, 3.5 % brighter at the top over the first 160 px, then draws a 1 px `border` |
+| `panel` | `#161A21` | Panel base. `drawPanel()` fills a vertical gradient from `panel.brighter (0.035)` at the top to `panel` 160 px down, then draws a 1 px `border` |
 | `panelRaised` | `#1C212A` | Buttons, combo boxes, the advice banner |
 | `panelHover` | `#222834` | Hover states |
 | `border` | `#232A35` | 1 px panel borders and dividers |
@@ -80,9 +80,9 @@ The visual language rests on five decisions:
 | `faint` | `#5A6373` | Axis labels, empty states, disabled controls |
 | `teal` | `#22D3EE` | **Music** accent |
 | `magenta` | `#E879F9` | **Gaming** accent; surround channel badges (always magenta) |
-| `amber` | `#FBBF24` | Warnings, gain-reduction bars, Bypass when on, "preset modified" dot, advice banner, governor limiting |
-| `red` | `#F87171` | Errors, correlation < 0, TP readout over −1 dBTP (loudness panel), muted-strip icon, clipper over budget |
-| `green` | `#34D399` | "Safety governor OK", correlation ≥ 0.3 |
+| `amber` | `#FBBF24` | Warnings (card notes, hotkey errors, CPU > 70 %), Bypass when on, "preset modified" dot, advice banner, governor limiting. It is also the *warn* status colour of the standard palette (gain-reduction bars, clipper, correlation < 0.3) |
+| `red` | `#F87171` | App-chip routing errors. It is also the *hot* status colour of the standard palette (correlation < 0, loudness-panel TP over −1 dBTP, clipper over budget, muted-strip icon) |
+| `green` | `#34D399` | "Safety governor OK". It is also the *safe* status colour of the standard palette (correlation ≥ 0.3) |
 | `dynamicEq` | `#FBBF24` | Dynamic-EQ ghost markers and the Dyn band dot |
 
 A few fixed colours live in `ui/FlubLookAndFeel.cpp`:
@@ -134,7 +134,12 @@ The `DocumentWindow` background is `#0F1115` (`shell/MainWindow.h`), but it is n
   - *safe* up to −14 dBFS;
   - blend to *warn* at −10 dBFS and hold it to −4 dBFS;
   - *hot* from −2 dBFS to 0 dBFS.
-- **Users of the palette:** the level-meter bars, the peak-hold lines, the clip LEDs, the strip mini meters in the routing panel and the TRUE PEAK readout when it is above −1 dBTP.
+- **Users of the meter colours** (`Theme::meterColours`): the level-meter bars, the peak-hold lines, the clip LEDs, the strip mini meters in the routing panel and the TRUE PEAK readout when it is above −1 dBTP.
+- **Status colours** (`Theme::statusColours`). These are for indicators that encode a state by colour outside the level bars. The standard palette gives the UI's own `green` / `amber` / `red` (`#34D399` / `#FBBF24` / `#F87171`, note *hot* is `red`, not the meter's `#EF4444`). The colour-blind safe palette gives the same Okabe–Ito triple as above. Users:
+  - the loudness panel's gain-reduction bars (*warn*), clipper bar (*warn*, *hot* over budget), TP readout (*hot*) and correlation meter (*hot* / *warn* / *safe*);
+  - the muted-strip icon (*hot*);
+  - the input level bar of the Settings › Audio device selector (*hot* above 0.95).
+- **Switching** the palette in Settings calls `MainComponent::sendLookAndFeelChange()`, so views that cache palette colours (the routing rows' mute icons) refresh at once.
 
 ### 2.4 Categorical colours: EQ bands
 
@@ -189,7 +194,7 @@ Formatting helpers:
 | `TextButton` | `tab` | neutral; ON = raised fill + 2 px accent underline | strip selector, A/B, settings navigation |
 | | `chip` | pill; ON = accent tint + accent text | analyser In / Out / Tilt / Hold |
 | | `warning` | amber tint and outline while toggled on | Bypass |
-| | `segment`, `ghost`, `accent` | segmented cell / chrome only on hover / filled accent | defined, not used by any current component |
+| | *(none)* | raised `panelRaised` sheen + `borderStrong` outline; ON = accent tint and outline | banner buttons, dialog buttons |
 | `ToggleButton` | `power` | round power icon; accent while on | module enable |
 | | `switch` | pill switch + label | Dyn EQ band On, settings toggles, `ParamGrid` toggles |
 | | *(none)* | tick box + label | — |
@@ -227,14 +232,18 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
   - Esc collapses an expanded module card and closes the settings dialog.
   - Alert windows bind Return and Esc.
 - **Redundant coding.** EQ nodes are numbered. The mode switch shows a label and an icon. The governor chip states its status in words. Every bar has a numeric readout.
-- **Meters.** A colour-blind safe meter palette (§2.3).
+- **Meters.** A colour-blind safe palette (§2.3) for the level meters and the status colours of the loudness panel and routing rows.
 - **Tooltips** appear after 650 ms. They are disabled in headless screenshot runs.
 - **HiDPI.** All drawing is vector. The cached analyser grid and EQ layer are rendered at the physical pixel scale and re-rendered when that scale changes.
 
 **Gaps** (**Roadmap** 3.6, accessibility audit)
 
 - The custom-drawn views (spectrum, meters, loudness, history) expose a title and description but not their live values. No custom `AccessibilityHandler` exists.
-- The meter palette does not cover the correlation meter (red/amber/green), the gain-reduction bars (amber), the clipper bar (amber/red), the TP readout in the loudness panel (red) or the muted-strip icon (red).
+- Some indicators keep fixed colours whatever the palette:
+  - the governor chip and inner arc (green/amber; the chip also states its status in words);
+  - the CPU readout (amber over 70 %);
+  - the preset-modified dot and the card warning notes (amber);
+  - the app-chip dots in the routing panel (accent / muted / faint / red), which encode *playing / idle / not running / error* by colour alone.
 - There is no in-app UI scale setting and no high-contrast theme.
 
 ---
@@ -422,7 +431,7 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 **Shared building blocks.**
 
 - [`ui/Theme.*`](../app/Source/ui/Theme.h): tokens, fonts, panel / caption / pill drawing, number formatting.
-- [`ui/Widgets.*`](../app/Source/ui/Widgets.h): icons, `IconButton`, `Style::set / describe / segment`.
+- [`ui/Widgets.*`](../app/Source/ui/Widgets.h): icons, `IconButton`, `Style::set` / `Style::describe`.
 - [`ui/ParameterBinding.*`](../app/Source/ui/ParameterBinding.h): `ParamFormat` and `ParameterBinder`.
 
 **Coupling.** Only seven UI files take an `EngineController&`: `MainComponent`, `HeaderBar`, `DeviceAdviceBanner`, `RoutingPanel`, `BoostPanel`, `ModuleRack` and `SettingsDialog`. All other components work from a `ParameterStore*` provider, a `ProcessingChain*` provider, a `MeterSnapshot`, or raw sample blocks. This split is the basis of the plug-in editor plan (§10).
@@ -449,8 +458,9 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 
 | Channel | Direction | UI side | Mechanism |
 |---|---|---|---|
-| `param::ParameterStore` (per strip, banks A/B) | UI → audio | `ParameterBinder`, `EqCurveEditor`, `EngineController` (mode, boost, A/B, bypass, presets), `ModuleCard` ear, `HeaderBar` reset | `set (id, v)`: clamped relaxed atomic store, `version()` incremented. The audio thread takes one `snapshot()` per block |
+| `param::ParameterStore` (per strip, banks A/B) | UI → audio | `ParameterBinder`, `EqCurveEditor`, `EngineController` (mode, boost, A/B, bypass, presets), `HeaderBar` (reset, loudness-matched bypass), Settings (latency profile) | `set (id, v)`: clamped relaxed atomic store (NaN is ignored), `version()` incremented. The audio thread takes one `snapshot()` per block |
 | `ProcessingChain::effectiveValue (id)` | audio → UI | `ParameterBinder` (knob rings), `ModuleRack` (AUTO / dimming) | post-macro values published as relaxed atomics |
+| Audition mask (`ProcessingChain::setAuditionBypass`) | UI → audio | `ModuleCard` ear via `ModuleRack` → `EngineController::setAuditionBypass` | one atomic bit per module. It forces the module off whatever the preset or macros say, via the slot's click-free crossfade. It is not a parameter |
 | `MeterBus` | audio → UI | `MeterSnapshot::read()` once per frame for the selected strip. `RoutingPanel` reads `outPeakDb` of every strip directly | relaxed atomics written once per block |
 | `MeterBus::resetLoudnessRequest` | UI → audio | click on TRUE PEAK or INTEGR. | atomic flag; the chain `exchange`s it at the next block and resets integrated loudness and the TP hold |
 | `AnalyzerTaps` pre / post | audio → UI | `AnalyzerFeed`, the **only** consumer | SPSC rings of mid `(L+R)/2` samples, 32768 floats each (≈ 0.68 s at 48 kHz); the producer drops samples when a ring is full |
@@ -525,6 +535,7 @@ flowchart LR
 | `LoudnessPanel` | repaint ≥ 0.05 s apart (≤ 20 Hz), and only when a value changed | readouts and bars |
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
 | `ParameterBinder` × 2 (Boost panel, module rack) | 30 Hz `juce::Timer` | `store.version()` poll → control refresh; effective-value rings |
+| `ModuleCard` ear | 10 Hz, only while held | safety net: ends the audition if the button is no longer down, the card is hidden or the app lost the foreground |
 | `SettingsDialog` | 2 Hz | live latency text (Processing); device-profile text (Audio) |
 | `AudioEngineHost` | 5 Hz | structural re-prepare poll (latency profile, layout) → `Change::Engine` |
 | `EngineController` | 1 Hz | strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
@@ -545,7 +556,9 @@ flowchart LR
 
 **Effective rings.** The same tick reads `chain->effectiveValue (id)` for every bound slider. If `|effective − base|` exceeds `1e−4 × range`, the slider's `flubEffective` property is set to the effective position. The slider repaints only when that position moved by more than 0.002.
 
-**Lifetime.** A binder must outlive its controls' callbacks. The owners declare it before the controls and unbind in their destructors.
+**Lifetime.** No control may keep a callback into a dead binder. Two patterns are used:
+- The binder dies first. Its destructor detaches every callback. `BoostPanel` declares it after its dial and knobs.
+- The controls unbind while the binder is still alive. `ModuleRack` declares the binder before its cards and clears the cards in its destructor. `ModuleCard` and `ParamGrid` call `unbind` in their destructors.
 
 `ParamFormat` turns `flub::param::layout()` metadata into text and ranges:
 
@@ -571,8 +584,8 @@ flowchart LR
 | `Change` | Emitted by | UI reaction |
 |---|---|---|
 | `Preset` | preset loaded, saved or list changed | rebuild the preset list; refresh the banner (its *Use …* offer hides once that preset is loaded) |
-| `Engine` | engine re-configured (rate, latency profile, layout, device restart) | rebuild header strip buttons and routing rows only if the strip names or channel counts changed; reset analysis; refresh header, status and banner |
-| `SelectedStrip` | `setSelectedStrip()` | refresh the header; select the routing row; reset analysis |
+| `Engine` | engine re-configured (rate, latency profile, layout, device restart) | release any ear hold (the new chains start without auditions); rebuild header strip buttons and routing rows only if the strip names or channel counts changed; reset analysis; refresh header, status and banner |
+| `SelectedStrip` | `setSelectedStrip()` (which also recomputes the device advice for the new strip's mode) | release any ear hold; refresh the header; select the routing row; reset analysis; refresh the banner |
 | `MasterEnable`, `Parameters` | bypass, mode, boost, A/B through the controller | refresh the header and the banner |
 | `Device`, `Settings` | device opened, changed or failed; device-input or routing settings | header status, routing refresh, banner refresh |
 | `Routing` | routing worker results, route edits | `RoutingPanel::refreshRouting()` |
@@ -608,7 +621,10 @@ Each component below lists its purpose, what it reads and writes, its update rat
 | **Latency / CPU** | `getLatencyInfo()`, `getStatus()` | — | Top line `totalMs + captureBufferMs` with one decimal. Bottom line: CPU %, amber above 70 %, or `offline` (the caption then reads DEVICE). Hover shows the breakdown "device in + engine + device out (+ app capture)" plus the output-device profile |
 | **Settings** | — | opens `SettingsDialog` | gear button |
 
-- **"Modified" semantics.** `PresetManager::isModified()` compares the strip store's `version()` with its value at load. Any write to that store counts, including A/B switches, master Bypass and holding a module's ear button.
+- **"Modified" semantics.** `PresetManager::isModified()` compares the active bank's values with a snapshot taken when the preset was loaded or saved, so reverting an edit clears the dot. The comparison runs only after `store.version()` changed.
+  - Application state that shares the store is ignored: `bypass`, `latency.profile` and `bypass.matched` (`PresetManager::isPresetSound`).
+  - Which bank is active does not count, only the values heard. Switching to a B bank whose values differ therefore shows the dot.
+  - The ear button never marks the preset as modified: it is an engine audition, not a store write (§6.9).
 - **Rates.** `refresh()` is event-driven (§5.5). `updateStatus()` runs every 15 frames. `animate()` runs every frame, but only while the thumb is moving.
 
 **Global parameters driven from the header**
@@ -635,11 +651,11 @@ Each component below lists its purpose, what it reads and writes, its update rat
   - **Tooltip and accessible description:** all messages.
 - **Actions.**
   - **Use \<preset\>** is shown only when the suggested preset exists and is not already the current preset of the selected strip. It loads that preset into the selected strip.
-  - **Details** opens Settings on the Audio page, which lists the profile, connection, ceiling, narrowband flag, suggested preset and guidance.
+  - **Details** opens Settings on the Audio page, which lists the profile, connection, ceiling, narrowband flag, suggested preset and guidance. If Settings is already open, it is only brought to the front, on whatever page it shows.
   - **×** hides the banner for this output device name for the rest of the session; a different device shows it again. The dismissal is not persisted.
 - **Style.** `panelRaised` fill, amber 45 % outline, a 4 px amber stripe on the left and a headphone glyph drawn in code.
-- **Updates.** Event-driven: `refresh()` runs on `Preset`, `Engine`, `MasterEnable`, `Parameters`, `Device` and `Settings`. When visibility changes, `MainComponent` re-runs its layout.
-- **Mode dependence.** The controller computes the advice (and its suggested preset) from the mode of the selected strip at the time of a device change or `setMode()`.
+- **Updates.** Event-driven: `refresh()` runs on `Preset`, `Engine`, `SelectedStrip`, `MasterEnable`, `Parameters`, `Device` and `Settings`. When visibility changes, `MainComponent` re-runs its layout.
+- **Mode dependence.** The controller computes the advice (and its suggested preset) from the mode of the selected strip. It recomputes it on every device change, `setMode()` and `setSelectedStrip()`, so the offer always follows the strip being edited.
 
 ### 6.3 `BoostPanel` — Boost Intensity and the mode macros
 
@@ -651,7 +667,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
   - a thumb dot in the text colour;
   - the centre readout (integer %, 22–46 px) captioned `BOOST %`.
 
-  A thin **inner arc** shows the share actually applied: `value × governorScale`. It is amber while `governorScale < 0.985`, and 55 % text colour otherwise. `governorScale` comes from `MeterBus::governorScale` every frame. The Safety Governor floor is 0.3 (`core/include/flub/engine/Protection.h`).
+  A thin **inner arc** shows the share actually applied: `value × governorScale`. It is amber while `governorScale < 0.985`, and 55 % text colour otherwise. `governorScale` comes from `MeterBus::governorScale` every frame. The Safety Governor floor is 0.3 (`kMinScale` in `core/src/engine/Protection.cpp`; documented in `core/include/flub/engine/Protection.h`).
 - **Governor chip** (right end of the panel's caption row): green *Safety governor OK*, or amber *Safety governor: NN% applied*.
 - **Five macro knobs** (`ParamKnob`, Large; cells at most 170 px apart; knob at most 96 × 124 px). Captions come from `flub::MacroMap::macroName()` and change with the mode, together with titles and tooltips.
 - **Rates.** Dial and macros refresh through the binder at 30 Hz. The governor updates every frame; the header strip repaints only when the limiting state or the rounded percentage changes.
@@ -698,7 +714,9 @@ level(fc) = max(−140, 10·log10(P + 1e−24) + calibrationDb)  dB
 tilt(fc)  = 4.5 · log2(fc / 1000)                           dB, added at draw time when Tilt is on
 ```
 
-The Hann coherent gain of 0.5 is folded into the `4/N` term, so a sine reads its dBFS level at the 1 kHz pivot. The 1/6-octave bandwidth term makes pink noise read its band level there.
+The Hann coherent gain of 0.5 is folded into the `4/N` term (sine amplitude = 4·|X|/N), and the bandwidth term turns the per-bin mean power into the power of a 1/6-octave band at the 1 kHz pivot. So a sine and pink noise read on the same scale there. Because the bands have constant relative width, pink noise reads flat with Tilt off. The +4.5 dB/octave tilt is there so that typical music reads roughly flat.
+
+The calibration does **not** compensate the Hann window's equivalent noise bandwidth (1.5 bins, +1.76 dB). Both a sine and noise therefore read about 1.7 dB high: a 0 dBFS, 1 kHz sine displays at ≈ +1.7 dB (checked numerically against the code's formulas at 48 kHz). The code's own comment says "close to its dBFS value". See §13.
 
 **Ballistics** (`advance (dt)`, `dt` clamped to 0…0.25 s):
 
@@ -708,7 +726,7 @@ peak hold: 1.2 s, then falls at 14 dB/s
 no samples for 0.35 s → the target drops to the −140 dB floor (the trace falls away)
 ```
 
-At 96 kHz and above, more than one hop can arrive per 60 Hz frame. Only one analysis runs per stream per frame and the surplus hop count is discarded. The analysis always uses the newest 4096 samples.
+Above 61.44 kHz (1024 samples × 60 frames/s), for example at 88.2 or 96 kHz, more than one hop arrives per 60 Hz frame. Only one analysis runs per stream per frame and the surplus hop count is discarded (`sinceHop = min (sinceHop − 1024, 1023)`). The analysis always uses the newest 4096 samples.
 
 **Display**
 
@@ -746,11 +764,11 @@ y(g) = centreY − clamp(g/range, −1.08, 1.08) · (plotHeight/2) · 0.92
 - A bubble describes the dragged or hovered band, e.g. `4  Bell   250 Hz   +3.0 dB   Q 1.00`. Cut types show `dB/oct` instead of Q; a disabled band adds `(off)`.
 - Curve, nodes and bubble are cached in an image and rebuilt only after edits or hover changes.
 
-**Dynamic-EQ ghost markers** are drawn every frame from `MeterBus::dynEqGainDb[0…7]`:
+**Dynamic-EQ ghost markers** come from `MeterBus::dynEqGainDb[0…7]`, which `setDynamicEqState` checks every frame. They are painted over the cached layer:
 
-- a 2 px amber stem from 0 dB to the live gain, with a 5 px diamond;
+- a 2 px amber stem from 0 dB to the live gain, with a diamond of 5 px radius;
 - strength `clamp (|g| / 4, 0.35, 1)`; markers are skipped below 0.1 dB;
-- repaint when any gain moved by more than 0.05 dB.
+- the editor repaints only when any gain moved by more than 0.05 dB or the mode-band frequencies changed.
 
 Bands 0–3 are the user dynamic bands at `dyneq.<b>.freq`. Bands 4–7 are the internal mode bands at `ProcessingChain::modeBandFrequency()`:
 
@@ -821,7 +839,7 @@ Selecting a band also selects it on the EQ module card, and vice versa. Every ed
 
 ### 6.7 `LoudnessPanel` — loudness, dynamics and stereo
 
-`ui/LoudnessPanel.*`, below the level meters. All values come from the frame's `MeterSnapshot`. The panel repaints at most every 0.05 s, and only when a value moved by more than its tolerance (0.05 LU / dB for loudness, 0.02 dB for gain reduction).
+`ui/LoudnessPanel.*`, below the level meters. All values come from the frame's `MeterSnapshot`. The panel repaints at most every 0.05 s, and only when a value moved by more than its tolerance: 0.05 LU / dB for the loudness readouts, 0.02 dB for gain reduction, 0.1 dB for the clipper and 0.005 for correlation and width. The bar and readout colours named below are the *standard* status colours. With the colour-blind safe palette they become sky blue / yellow / vermillion (§2.3).
 
 | Section | Contents |
 |---|---|
@@ -883,7 +901,11 @@ Row heights adapt between 14 and 22 px.
   4. *Drag the nodes in the analyser, wheel = Q* (EQ);
   5. *Live gain: amber markers in the analyser* (Dynamic EQ);
   6. *Hold the ear to A/B this module*.
-- **Ear (A/B listen).** While held, the card stores the module's base enable and writes 0; on release it restores the stored value. The ear is disabled when the module is effectively off, and when it is engaged only by a macro (tooltip: "engaged by Boost Intensity / a macro, so it cannot be bypassed here").
+- **Ear (A/B listen).** Hold it to hear the strip without this module.
+  - The card calls `onListen (true)` on press. `ModuleRack` remembers the strip and calls `EngineController::setAuditionBypass (strip, enableId, true)`, which sets the module's bit in `ProcessingChain`'s audition mask. The chain treats the module as off whatever the base value or the macros say, through the slot's click-free crossfade.
+  - It is not a parameter write. The store is untouched, the preset is never marked modified, and it works just as well for a module that only Boost Intensity or a macro engages.
+  - The ear is enabled whenever the module is effectively on.
+  - Every hold gets exactly one release: on mouse-up, or when a 10 Hz safety timer sees the button up, the card hidden or the app no longer in the foreground. The card's destructor also releases it, and so does `ModuleRack::releaseListening()` on a strip switch or engine reconfiguration (the re-created chains start without auditions anyway).
 - **Band selector** (EQ and Dynamic EQ only).
   - The EQ card cycles bands 1–10 with a band-colour dot and follows the curve editor's selection.
   - The Dynamic EQ card cycles the 4 user bands ("Dyn N", amber dot).
@@ -908,7 +930,7 @@ Row heights adapt between 14 and 22 px.
   |---|---|---|---|
   | Activity LED | `isStripActive()` | — | accent + halo when receiving audio |
   | Name + channel badge | layout | — | `7.1` (≥ 8 ch), `5.1` (≥ 6), `MONO`, `STEREO`; surround badges magenta |
-  | Mute | `isStripMuted()` | `setStripMuted()` | speaker / speaker-muted icon (red) |
+  | Mute | `isStripMuted()` | `setStripMuted()` | speaker / speaker-muted icon (the *hot* status colour: red, or vermillion with the colour-blind palette) |
   | Gain slider | `getStripGainDb()` | `setStripGainDb()` | −60…+12 dB, skew centre −12 dB, double-click → 0 dB. This is a mixer setting held in host atomics and persisted per strip name, **not** a `ParameterStore` parameter |
   | Mini meter | `MeterBus::outPeakDb[0/1]` of that strip | — | two 3 px bars, IEC deflection, meter-palette gradient, falls at 30 dB/s; every frame |
   | App chips | `AppRouting::getRoutes()` + `getApps()` | via menus | dot colour: accent = playing, muted = running but idle, faint = not running, red = routing / capture error. "+N" marks overflow; *No apps assigned* when empty |
@@ -1027,14 +1049,14 @@ flowchart TD
     T --> R
     R --> P["Persisted in AppSettings<br/>applied at once (refresh), re-checked every 2 s"]
     P --> C["Chip on the strip row<br/>accent = playing · muted = idle · faint = not running · red = error"]
-    C --> X["Chip menu: Move to strip › · Remove from this strip"]
+    C --> X["Chip menu: Move to strip › · Remove from (strip name)"]
 ```
 
 **Per-OS behaviour** of the current platform layer (`app/Source/platform/PlatformServices_*`):
 
 | OS | Session list | Endpoint routing | Process capture | "System sound settings" opens |
 |---|---|---|---|---|
-| Windows | Yes (WASAPI session enumeration on every render endpoint; Flubsound's own sessions and system sounds are skipped) | Reported as supported, so *Automatic* selects it. Moving an app only works in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (opt-in adapter for the undocumented per-app default-endpoint API). Otherwise each move fails with an explanation (red chip) that points to Windows' per-app sound settings | Windows build ≥ 20348 | `ms-settings:apps-volume` |
+| Windows | Yes (WASAPI session enumeration on every render endpoint; Flubsound's own sessions and system sounds are skipped) | Reported as supported, so *Automatic* selects it. Moving an app only works in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (opt-in adapter for the undocumented per-app default-endpoint API). Otherwise each move fails. The platform layer returns an explanation that points to Windows' per-app sound settings, but the panel shows only a red chip dot, not the text (§13) | Windows build ≥ 20348 | `ms-settings:apps-volume` |
 | Linux | Yes, through `pactl` (PulseAudio / PipeWire-pulse) when `pactl` is on `PATH` | Yes: sink-inputs are moved to the `flubsound_<strip>` null sinks (created by `platform/linux/flubsound-pipewire-setup.sh`) | Not applicable: the design routes into null sinks and reads their monitors | `pavucontrol --tab=1`, else `pwvucontrol`, `gnome-control-center sound` or `systemsettings kcm_pulseaudio` |
 | macOS | Router object present, but `isSupported()` is false | Not yet (**Roadmap** 3.2: Core Audio process taps, macOS 14.2+) | Not yet (same) | System Settings › Sound |
 
@@ -1096,7 +1118,7 @@ The editor is resizable from 520 × 260 to 2400 × 1800 (default 720 × 560, or 
 | `Theme`, `FlubLookAndFeel`, `Widgets`, `ParamKnob`, `ParamGrid`, `ModuleCard` | As is | — |
 | `SpectrumAnalyzer`, `EqCurveEditor`, `AnalyzerPanel`, `AnalyzerFeed`, `LevelMeters`, `LoudnessPanel`, `WaveformHistory`, `MeterSnapshot` | As is. The plug-in's `ProcessingChain` has the same `MeterBus` and `AnalyzerTaps`; nothing consumes the taps today, so the rings just fill and drop | A frame loop like `MainComponent::frame()` (VBlank) in the editor. `masterGainReductionDb` stays 0 because the plug-in has no `MixEngine` |
 | `ParameterBinder`, `EqCurveEditor` writes | Not as is | In the plug-in the **APVTS is the source of truth**: `processBlock` copies changed APVTS values into the store. Writing the store directly would bypass host automation, undo and saved state. The shared editor needs a binder back-end that writes through the APVTS parameters (gesture begin / set / end) while keeping the same `version()`-style refresh |
-| `BoostPanel`, `ModuleRack` | With an adapter | They only need "selected store", "chain" and the static `getMacroName()`; replace the `EngineController&` with provider functions |
+| `BoostPanel`, `ModuleRack` | With an adapter | They only need the selected store, the chain (effective values, audition bypass), the strip's channel count and the static `getMacroName()`. Replace the `EngineController&` with provider functions |
 | `HeaderBar` | Partly | Mode, presets (file based) and A/B are meaningful. Strip selector, master bypass, device latency and CPU are not: the host owns I/O and bypass |
 | `RoutingPanel`, `DeviceAdviceBanner`, `SettingsDialog`, tray, hotkeys | Not applicable | Single chain, host-owned devices |
 
@@ -1163,10 +1185,8 @@ These describe the behaviour of the current code.
 
 - **Hotkeys on Linux** are not implemented (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
-- **The *modified* dot** tracks store writes, not value differences (§6.1). A/B switches, master Bypass, the latency profile and holding a card's ear all mark the preset as modified. Reverting an edit does not clear it.
-- **The ear button** only clears the module's *base* enable. If Boost Intensity or a macro also engages that module, it stays effectively on while the ear is held. The button is enabled in that case, because the base is on.
-- **The device advice's suggested preset** is recomputed on device changes and `setMode()`, not on a strip switch. After selecting a strip in the other mode, the banner can offer the preset for the previously selected strip's mode.
-- **The routing panel's "switched off" notice** points to "Settings > Engine". The routing method actually lives on the *Processing* page.
+- **Spectrum calibration** reads about 1.7 dB high for sines and noise alike, because the Hann window's 1.5-bin equivalent noise bandwidth is not compensated (§6.4).
+- **App-chip errors** are shown only as a red dot. The error text itself (`AppState::error`) is not shown in the routing panel.
 - **Accessibility gaps** are listed in §2.8.
 
 ---

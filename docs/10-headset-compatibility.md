@@ -22,10 +22,10 @@
 
 ### Sample rates and formats
 
-The engine follows whatever rate the device's audio format uses. The chain is tested at **8, 16, 22.05, 24, 32, 44.1, 48, 88.2, 96, 176.4 and 192 kHz**, in Music and Gaming mode, with every macro at 100 %:
-- output is finite,
-- the ceiling is respected,
-- latency stays below 6 ms algorithmic at ≥ 22.05 kHz and below 12 ms at the Bluetooth hands-free rates.
+The engine follows whatever rate the device's audio format uses. The chain is tested at **8, 16, 22.05, 24, 32, 44.1, 48, 88.2, 96, 176.4 and 192 kHz**, in Music and Gaming mode, with Boost Intensity and every macro at 100 % and the compressor and saturator on:
+- output is finite and not silent,
+- the sample peak stays at or below the −1 dBTP ceiling,
+- the chain's algorithmic latency stays below 6 ms at ≥ 22.05 kHz and below 12 ms at the Bluetooth hands-free rates (the FIR oversampling delays are fixed in samples).
 
 The test is "Chain: runs at every sample rate a headset may use" in `tests/test_engine.cpp`. Bit depth is handled by the OS or the device layer; internal processing is always 32-bit float.
 
@@ -51,21 +51,21 @@ Families are matched on whole words in the endpoint name, such as "Headphones (S
 
 ## 3. What Flubsound does automatically
 
-Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/device-profiles.json`, and applied by the app when the output device starts.
+Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/device-profiles.json`, and applied by the app's `EngineController` whenever the output device starts or changes. The JSON is compiled in as `core/src/engine/DeviceProfilesData.cpp` (regenerate with `python3 tools/scripts/embed-device-profiles.py`; `tests/test_device_profiles.cpp` fails if the two drift apart). A file at `<user application data>/Flubsound/device-profiles.json` replaces the built-in database, which lets the lab test new entries without a rebuild.
 
-1. **Identify** the output device by name and family, and the connection type from the platform layer (Windows device enumerator, macOS transport type, PipeWire `device.bus`), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or 16 kHz mono ⇒ Bluetooth hands-free.
-2. **Cap the true-peak ceiling:** −1 dBTP (wired, USB, 2.4 GHz), −2 dBTP (Bluetooth A2DP), −3 dBTP (Bluetooth hands-free). The cap is applied to the master limiter, so user presets are not modified.
+1. **Identify** the output device by name and family, and the connection type from the platform layer where it can tell (`AudioEndpoints::queryOutputTransport`: Windows endpoint enumerator name and form factor, macOS `kAudioDevicePropertyTransportType`; on Linux it returns *unknown*), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or ≤ 16 kHz mono ⇒ Bluetooth hands-free; a Bluetooth endpoint at ≤ 16 kHz is treated as hands-free too. When neither tells, the matched family's typical connection is assumed (Stealth, Atlas, ROCCAT, Xbox: USB; Recon, Elite Pro: analog), which is why the screenshot below reads "USB / wireless dongle".
+2. **Cap the true-peak ceiling:** −1 dBTP (wired, USB, 2.4 GHz), −2 dBTP (Bluetooth A2DP), −3 dBTP (Bluetooth hands-free). The cap is applied to the app's master limiter, so user presets are not modified.
 3. **Adapt to the sample rate:** every module derives its coefficients from the device rate, and alias-prone processing (the air exciter) is disabled below 42 kHz.
-4. **Advise:** show the profile's guidance in the app, most important first. A banner under the header names the recognised family, the connection and the ceiling in force, shows the top piece of advice, and offers the suggested preset with one click (*Use Competitive FPS*). *Details* opens Settings > Audio with the full list. The banner can be dismissed per output device for the session:
+4. **Advise:** show the profile's guidance in the app, most important first. A banner under the header (`app/Source/ui/DeviceAdviceBanner.*`) appears when there is something device-specific to say (a recognised profile, or a Bluetooth / hands-free connection). It names the recognised family, the connection and the ceiling in force, shows the top piece of advice (the tooltip lists all of it), and offers the suggested preset with one click (*Use Competitive FPS*) when that preset is not already loaded. *Details* opens Settings, whose Audio page summarises the device, ceiling and suggested preset with the first two messages. The banner can be dismissed per output device for the session. The messages cover:
    - turn off Superhuman Hearing, EQ presets or virtual surround when they would stack with Flubsound,
    - keep voice chat on the headset's own Chat output when it has one,
-   - Bluetooth latency and hands-free quality notes.
-5. **Suggest a preset** for the current mode: *Competitive FPS* / *Flubsound Signature*, or *Bluetooth Headphones* on Bluetooth.
+   - Bluetooth latency and hands-free quality notes, and a low-sample-rate note.
+5. **Suggest a preset** for the current mode: *Competitive FPS* (Gaming) / *Flubsound Signature* (Music) for the Turtle Beach and Xbox profiles, or *Bluetooth Headphones* on any Bluetooth connection.
+6. **Survive power cycles and replugging.** A 2.4 GHz transmitter keeps the device present when the headset sleeps. When a USB headset is unplugged, JUCE falls back to another output; the app remembers the *preferred* output and switches back as soon as it is listed again (immediately when the OS reports the change, otherwise at the next 5 s rescan).
 
 ![Headset advice banner for a Turtle Beach Stealth headset in Gaming mode](images/app-gaming-headset-advice.png)
 
-*Rendered headlessly with `--screenshot out.png --mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`. The `--device` option simulates the output device, so profile matching can be checked without the hardware.*
-6. **Survive power cycles and replugging.** A 2.4 GHz transmitter keeps the device present when the headset sleeps. When a USB headset is unplugged and replugged, the engine re-opens the preferred output device as soon as it reappears.
+*Rendered headlessly with `--screenshot out.png --mode gaming --size 1440x900 --device "Headphones (Stealth 700 Gen 2 MAX)"` (as in CI). The `--device` option simulates the output device (only when no real device is open), so profile matching can be checked without the hardware.*
 
 ---
 
@@ -73,7 +73,7 @@ Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/
 
 1. **Connect for quality and latency:** 2.4 GHz USB transmitter or cable first, Bluetooth only for casual listening.
 2. **Neutral headset sound:** set the headset or its companion app to its flat / default preset. Turn off **Superhuman Hearing** if you use Flubsound's *Footsteps* macro, and turn off the headset's (or Windows') **virtual surround** if you use Flubsound's *Headphone Virtualizer*. Never run two footstep enhancers or two HRTF stages in series.
-3. **Routing:**
+3. **Routing** (with the Flubsound virtual endpoints; on Windows and macOS these need the virtual driver / HAL plug-in, which are designed but not built yet, so today a virtual cable or per-app capture feeds the strips instead):
    - Set Windows' default output to *Flubsound System*.
    - Assign the game to *Flubsound Game* (the game can then output 7.1 for the virtualiser).
    - Set Flubsound's physical output to the headset's **Game** endpoint.
@@ -93,10 +93,10 @@ For each family, and for each connection type the family supports, a lab entry b
 | 2 | Endpoint name matching | Correct profile id; no false match on other lab devices |
 | 3 | Connection detection | Correct `Connection` (USB vs Bluetooth vs hands-free) from the platform layer |
 | 4 | Ceiling cap applied to the master limiter | Measured output true peak ≤ cap on a loopback recording |
-| 5 | Headset power off/on, transmitter unplug/replug, PC sleep/resume | Audio resumes on the headset within 2 s, no crash, no stuck silence |
+| 5 | Headset power off/on, transmitter unplug/replug, PC sleep/resume | Audio resumes on the headset within 2 s where the OS reports the device change (within the 5 s rescan period otherwise), no crash, no stuck silence |
 | 6 | Bluetooth A2DP ↔ hands-free switch (open the mic in a call app) | Engine re-prepares at 16/8 kHz and back without artefacts; the advice banner updates |
 | 7 | Game/Chat dual endpoints (where present) | Game via Flubsound, Chat direct, and the balance control works |
-| 8 | Latency measurement (loopback impulse) | Added latency ≤ 10 ms (Balanced) / ≤ 8 ms (Low Latency) on USB / 2.4 GHz |
+| 8 | Latency measurement (loopback impulse) | Added latency ≤ 12 ms (Balanced) / ≤ 10 ms (Low Latency) on USB / 2.4 GHz (the R1.1 target; estimates in `01-architecture.md` §5.2) |
 | 9 | Listening check with on-board DSP neutral vs on | Advice text matches the observed stacking behaviour |
 
-The lab list and results live alongside the QA matrix described in `docs/07-roadmap.md` §7. The "Compatibility" work item there includes the Turtle Beach families above.
+The lab list and results live alongside the QA matrix described in `docs/07-roadmap.md`: work item 1.10 (device matrix, including every Turtle Beach family on each of its connection types) and the "Compatibility" row of §7.

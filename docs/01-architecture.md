@@ -1,12 +1,12 @@
 # 01 — High-Level System Architecture & Detailed Data Flow (Workflow 2)
 
-> Flubsound Pro is a layered system with one sharp boundary: everything that touches audio samples lives in **`flub_core`**. That library is framework-free C++20 with no allocation or locks on the audio path. It is hosted by:
+> Flubsound Pro is a layered system with one sharp boundary: all DSP (every module, the meters and the engine) lives in **`flub_core`**; the hosts add only I/O glue and visualisation. That library is framework-free C++20 with no allocation or locks on the audio path. It is hosted by:
 > - the desktop app (JUCE device I/O + GUI),
 > - the plug-in,
 > - the batch CLI,
 > - the unit tests.
 >
-> System-wide and per-application processing comes from **virtual endpoints** (one per *strip*: Game, Music, Chat, System). Each strip has its own processing chain and profile. The strips are summed and protected by a master true-peak limiter before the physical output.
+> System-wide and per-application processing comes from **virtual endpoints** (one per *strip*: Game, Music, Chat, System; per-platform status in §1). Each strip has its own processing chain and profile. The strips are summed and protected by a master true-peak limiter before the physical output.
 
 ---
 
@@ -154,7 +154,7 @@ sequenceDiagram
     Host->>Strip: 7.1 block (e.g. 128 frames)
     Strip->>Strip: input gain · AutoLevel · virtualiser (7.1→binaural) · modules
     Strip->>Mix: stereo, padded to max strip latency
-    Mix->>Mix: Σ strips · master true-peak limiter (−1 dBTP)
+    Mix->>Mix: Σ strips · master true-peak limiter (−1 dBTP, lower on Bluetooth)
     Mix->>Out: stereo block
 ```
 
@@ -169,7 +169,7 @@ sequenceDiagram
   ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix (LFE dropped, −3 dB);
   │                                                   virt.on toggles crossfade the two folds over 20 ms
   │        ════════ from here on: STEREO ════════
-  ├─ dry tap ──► (delayed by total latency) ──► global bypass / A-B reference
+  ├─ dry tap ──► (delayed by total latency) ──► global bypass (loudness-matched reference)
   ├─ [slot] SpectralNoiseGate      (Quality profile only; STFT 1024)
   ├─ [slot] ParametricEq           10 bands, SVF, zero latency
   ├─ [slot] DynamicEq              4 user bands + 4 mode bands (footsteps / de-harsh …)
@@ -197,7 +197,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     A[store.snapshot → base] --> B[MacroMap.apply<br/>Boost Intensity + 5 mode macros<br/>× governor scale on 'governed' entries]
-    B --> C[Mode & binaural policy<br/>Gaming: crossfeed 0<br/>binaural: width 1, space 0]
+    B --> C[Mode & binaural policy<br/>Gaming: crossfeed 0<br/>binaural: width 1, space 0, crossfeed 0]
     C --> D[Module setters<br/>targets only — modules smooth]
     D --> E[process slots]
     E --> F[Telemetry → MeterBus]
@@ -239,7 +239,7 @@ PresetManager: JSON (string keys) ⇄ Preset(values) ⇄ applyToStore(bank) / ca
 ```
 
 - **A/B.** Two complete parameter banks. The header's A / B buttons flip the active bank atomically, and all continuous parameters glide, so the switch is click-free. The copy button duplicates the active bank into the other one (A→B or B→A).
-- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, out-of-range numbers are clamped, choices are stored as labels, and "Bypass All" is never loaded from or saved to a preset (`presets/factory/*.json`, user presets as `*.flubpreset.json`, `core/include/flub/io/PresetIO.h`).
+- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, out-of-range numbers are clamped, choices are stored as labels (`presets/factory/*.json`, user presets as `*.flubpreset.json`, `core/include/flub/io/PresetIO.h`). The hosts (app, plug-in, CLI) never take "Bypass All" from a preset or write it into one: it is application state, not sound.
 
 ### 4.5 Metering & visualisation flow
 

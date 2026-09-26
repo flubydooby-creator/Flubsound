@@ -3,7 +3,9 @@
 Status: **design, not implemented.** The C header
 [`FlubVirtualAudioShared.h`](FlubVirtualAudioShared.h) is the only code here.
 It fixes the user/kernel contract (control block layout, IOCTL codes, endpoint
-ids) so the engine side can be built and unit-tested before the driver exists.
+ids) so the engine side can be written and unit-tested before the driver
+exists. No engine code includes it yet; today the Windows app feeds its strips
+from per-process loopback capture or from a virtual cable on the device input.
 
 ---
 
@@ -21,7 +23,9 @@ has no built-in virtual devices, and each alternative falls short:
 
 So Flubsound installs a PortCls **WaveRT** driver, "Flubsound Virtual Audio".
 It exposes five endpoints. Applications are routed to them in Windows'
-per-app settings or through `AppAudioRouter::setAppEndpoint`. The engine
+per-app settings or through `AppAudioRouter::setAppEndpoint` (only in builds
+with `FLUB_ENABLE_UNDOCUMENTED_ROUTING`; otherwise the app opens
+`ms-settings:apps-volume`). The engine
 reads their audio **directly from the drivers' cyclic buffers**, processes
 each strip and plays the mix on the real device.
 
@@ -222,14 +226,14 @@ the engine.
 
 ## 6. Latency budget (48 kHz)
 
-| Stage | Default (10 ms shared periods) | Low latency (128-frame packets, `IAudioClient3`) |
+| Stage | Default (10 ms shared periods, Balanced profile) | Low latency (128-frame packets, `IAudioClient3`, Low Latency profile) |
 |---|---|---|
 | audiodg renders ahead into the virtual buffer | 10.0 ms | 2.67 ms |
 | Engine pickup alignment (avg ½ output period) | 5.0 ms | 1.33 ms |
-| Engine DSP (limiter look-ahead 1.5 ms + oversampling FIRs ~0.3 ms) | 1.8 ms | 1.8 ms |
+| Engine DSP: strip chain + master limiter (`MixEngine::getLatencySamples()`; 192 + 68 / 100 + 68 samples) | 5.4 ms | 3.5 ms |
 | Output WASAPI period on the real device | 10.0 ms | 2.67 ms |
 | Device FIFO / codec (typical USB or HDA) | ~2 ms | ~2 ms |
-| **Total, application to ear** | **≈ 29 ms** | **≈ 10.5 ms** |
+| **Total, application to ear** | **≈ 32 ms** | **≈ 12 ms** |
 
 Without the zero-copy path, the engine would record each virtual endpoint
 through WASAPI (loopback or a capture pin). That adds one more audiodg pass

@@ -93,10 +93,6 @@ public:
         preset as loaded / saved. Cheap to poll: compares only after
         store.version() changed. */
     bool isModified (int strip, const flub::param::ParameterStore& store) const;
-    /** False for parameters that live in the store but are application state,
-        not part of a preset's sound (Bypass All, latency profile,
-        loudness-matched bypass). */
-    static bool isPresetSound (int paramId) noexcept;
 
     // ---- Saving -------------------------------------------------------------------------
     /** Saves the store's active bank as a user preset. Returns the new preset's
@@ -132,6 +128,10 @@ private:
     static juce::String sanitiseFileName (const juce::String& name);
 
     void takeSnapshot (int strip, const flub::param::ParameterStore& store);
+    /** False for parameters that live in the store but are application state,
+        not part of a preset's sound (Bypass All, latency profile,
+        loudness-matched bypass). */
+    static bool isPresetSound (int paramId) noexcept;
 
     /** Active-bank values when the strip's preset was loaded / saved, plus the
         cached result of the last isModified() comparison. */
