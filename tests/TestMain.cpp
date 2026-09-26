@@ -4,7 +4,7 @@
 #include <cstdlib>
 #include <new>
 
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     #include <malloc.h>
 #endif
 
@@ -34,10 +34,11 @@ void* operator new[] (std::size_t size)
 
 namespace
 {
-// MSVC has no std::aligned_alloc; its aligned blocks must be freed with _aligned_free.
+// The Windows C runtimes (MSVC, MinGW) have no std::aligned_alloc; aligned
+// blocks come from _aligned_malloc and must be freed with _aligned_free.
 void* alignedAllocate (std::size_t size, std::size_t alignment) noexcept
 {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     return _aligned_malloc (size == 0 ? 1 : size, alignment);
 #else
     return std::aligned_alloc (alignment, (std::max<std::size_t> (size, 1) + alignment - 1) / alignment * alignment);
@@ -46,7 +47,7 @@ void* alignedAllocate (std::size_t size, std::size_t alignment) noexcept
 
 void alignedFree (void* p) noexcept
 {
-#if defined(_MSC_VER)
+#if defined(_WIN32)
     _aligned_free (p);
 #else
     std::free (p);
