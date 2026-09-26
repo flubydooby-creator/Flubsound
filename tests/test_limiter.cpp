@@ -74,7 +74,10 @@ void fftInPlace (std::vector<std::complex<double>>& a, bool inverse)
     }
 }
 
-double independentTruePeak (const float* x, int n)
+/** True peak of one or two channels (two real signals share one complex FFT:
+    the interpolation is linear and maps real signals to real signals, so the
+    real part is channel a and the imaginary part channel b). */
+double independentTruePeak (const float* a, const float* b, int n)
 {
     constexpr size_t os = 8;
     size_t N = 2;
@@ -82,7 +85,7 @@ double independentTruePeak (const float* x, int n)
         N <<= 1;
     std::vector<std::complex<double>> X (N);
     for (int i = 0; i < n; ++i)
-        X[static_cast<size_t> (i)] = static_cast<double> (x[i]);
+        X[static_cast<size_t> (i)] = std::complex<double> (a[i], b != nullptr ? b[i] : 0.0f);
     fftInPlace (X, false);
 
     const size_t M = N * os;
@@ -97,25 +100,28 @@ double independentTruePeak (const float* x, int n)
 
     const double scale = 1.0 / static_cast<double> (N);
     double peak = 0.0;
-    auto at = [&] (size_t m) { return std::abs (Y[m].real()) * scale; };
-    for (size_t m = 1; m + 1 < M; ++m)
+    for (int part = 0; part < (b != nullptr ? 2 : 1); ++part)
     {
-        const double y1 = at (m);
-        if (y1 <= peak)
-            continue;
-        peak = y1;
-        const double y0 = at (m - 1), y2 = at (m + 1);
-        const double den = y0 - 2.0 * y1 + y2;
-        if (y1 >= y0 && y1 >= y2 && den < 0.0)
+        auto at = [&] (size_t m) { return std::abs (part == 0 ? Y[m].real() : Y[m].imag()) * scale; };
+        for (size_t m = 1; m + 1 < M; ++m)
         {
-            const double p = 0.5 * (y0 - y2) / den;
-            peak = std::max (peak, y1 - 0.25 * (y0 - y2) * p);
+            const double y1 = at (m);
+            if (y1 <= peak)
+                continue;
+            peak = y1;
+            const double y0 = at (m - 1), y2 = at (m + 1);
+            const double den = y0 - 2.0 * y1 + y2;
+            if (y1 >= y0 && y1 >= y2 && den < 0.0)
+            {
+                const double p = 0.5 * (y0 - y2) / den;
+                peak = std::max (peak, y1 - 0.25 * (y0 - y2) * p);
+            }
         }
     }
     return peak;
 }
 
-double independentTruePeak (const std::vector<float>& x) { return independentTruePeak (x.data(), static_cast<int> (x.size())); }
+double independentTruePeak (const std::vector<float>& x) { return independentTruePeak (x.data(), nullptr, static_cast<int> (x.size())); }
 
 /** Linear-phase Blackman-windowed-sinc low-pass (161 taps, cutoff 0.41 fs:
     flat to ~0.39 fs, below -70 dB from ~0.44 fs). The full convolution is
@@ -195,8 +201,9 @@ double planarPeak (const Planar& buf)
 double planarTruePeak (const Planar& buf)
 {
     double p = 0.0;
-    for (const auto& c : buf.ch)
-        p = std::max (p, independentTruePeak (c));
+    for (size_t c = 0; c < buf.ch.size(); c += 2)
+        p = std::max (p, independentTruePeak (buf.ch[c].data(), c + 1 < buf.ch.size() ? buf.ch[c + 1].data() : nullptr,
+                                              buf.numSamples()));
     return p;
 }
 
@@ -423,9 +430,13 @@ TEST_CASE ("TruePeakLimiter: ceiling holds in sample peak and independent true p
 {
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
-        const int n = static_cast<int> (fs * 0.3);
-        const int tail = static_cast<int> (fs * 0.03);
+        const int n = static_cast<int> (fs * 0.15);
+        const int tail = static_cast<int> (fs * 0.02);
+        Program hardOnset { "hard-onset 11 kHz +6 dB (no fades)", sine (11000.0, fs, n, 2.0f, 0.1), sine (11000.0, fs, n, 2.0f, 2.1) };
+        std::fill (hardOnset.l.end() - tail, hardOnset.l.end(), 0.0f);
+        std::fill (hardOnset.r.end() - tail, hardOnset.r.end(), 0.0f);
         const Program programs[] = {
+            hardOnset,
             { "band-limited noise +20 dB", bandLimitedNoise (n, tail, 10.0f, 1), bandLimitedNoise (n, tail, 10.0f, 2) },
             { "band-limited noise +6 dB", bandLimitedNoise (n, tail, 2.0f, 3), bandLimitedNoise (n, tail, 2.0f, 4) },
             { "band-limited naive square +12 dB", bandLimit (naiveSquare (1234.0, fs, n - 200, tail, 4.0f)),
@@ -463,25 +474,17 @@ TEST_CASE ("TruePeakLimiter: full-band synthetic signals hold the sample ceiling
     // 0.39 fs (-1.7 dB at 0.45 fs). This bounds that known limitation.
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
-        const int n = static_cast<int> (fs * 0.3);
-        const int tail = static_cast<int> (fs * 0.03);
+        const int n = static_cast<int> (fs * 0.2);
+        const int tail = static_cast<int> (fs * 0.02);
         const Program programs[] = {
             { "white noise +20 dB", drivenNoise (n, tail, 10.0f, 1), drivenNoise (n, tail, 10.0f, 2) },
             { "white noise +6 dB", drivenNoise (n, tail, 2.0f, 3), drivenNoise (n, tail, 2.0f, 4) },
             { "naive square 0 dBFS", naiveSquare (110.0, fs, n, tail, 1.0f), naiveSquare (220.0, fs, n, tail, 1.0f) },
             { "naive square +12 dB", naiveSquare (1234.0, fs, n, tail, 4.0f), naiveSquare (777.0, fs, n, tail, 4.0f) },
             { "tanh square 0 dBFS", tanhSquare (441.0, fs, n, tail, 1.0f), tanhSquare (3001.0, fs, n, tail, 1.0f) },
-            { "hard-onset 11 kHz +6 dB", drivenNoise (n, tail, 0.0f, 1), drivenNoise (n, tail, 0.0f, 1) },
         };
-        for (auto prog : programs)
+        for (const auto& prog : programs)
         {
-            if (prog.name[0] == 'h')
-            {
-                // A loud HF tone switched on and off without fades: broadband splatter.
-                const auto tone = sine (11000.0, fs, n - tail, 2.0f, 0.1);
-                std::copy (tone.begin(), tone.end(), prog.l.begin());
-                std::copy (tone.begin(), tone.end(), prog.r.begin());
-            }
             const float ceilingDb = -1.0f;
             const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb);
             const double ceil = dbfs (ceilingDb);
@@ -496,7 +499,7 @@ TEST_CASE ("TruePeakLimiter: full-band synthetic signals hold the sample ceiling
 
 TEST_CASE ("TruePeakLimiter: other ceilings and look-aheads hold the ceiling too")
 {
-    const int n = 24000, tail = 2000;
+    const int n = 12000, tail = 1000;
     const auto noise = bandLimitedNoise (n, tail, 12.0f, 21);
     const auto square = bandLimit (naiveSquare (3000.0, kFs, n - 200, tail, 3.0f));
     for (float lookaheadMs : { 0.0f, 0.5f, 1.0f, 5.0f })

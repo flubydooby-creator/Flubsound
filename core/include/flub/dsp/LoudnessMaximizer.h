@@ -20,10 +20,16 @@
 // latency = clipper oversampler latency + limiter latency.
 #pragma once
 
+#include "Crossover.h"
 #include "Oversampler.h"
 #include "Processor.h"
+#include "TruePeakLimiter.h"
+#include "flub/common/DelayLine.h"
+#include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <atomic>
+#include <vector>
 
 namespace flub
 {
@@ -70,6 +76,33 @@ public:
 
 private:
     // ---- implementation-defined below this line ----
+    // Notes (details in LoudnessMaximizer.cpp):
+    //  * Continuous parameters glide over 50 ms; the glue and clipper stages
+    //    are switched on/off by crossfading against a latency-aligned dry path
+    //    (after a short warm-up of the stage), so on/off is click-free and the
+    //    latency never changes.
+    //  * Glue detector per band: linked |x| -> two-bucket peak hold (half a
+    //    period of the band's lowest frequency) -> 5/80 ms branching follower
+    //    -> ratio-2 gain sqrt(T / env) above T.
+
+    /** Linked level detector of one glue band. */
+    struct BandDetector
+    {
+        float bucket = 0.0f, prevBucket = 0.0f, env = 0.0f;
+        int countdown = 1, holdLength = 1;
+        float attack = 0.0f, release = 0.0f;
+    };
+
+    static constexpr int kNumBands = 3;
+
+    static MaximizerParams sanitised (const MaximizerParams& p, const MaximizerParams& fallback) noexcept;
+    void applyParamsImmediately() noexcept;
+    void startGlue (bool immediate) noexcept;
+    void startClipper (bool immediate) noexcept;
+    void updateCeiling (float ceilingDb) noexcept;
+    void updateClipThreshold() noexcept;
+    void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain) noexcept;
+
     int clipOsFactor = 4;
     Oversampler::Quality clipOsQuality = Oversampler::Quality::High;
     float lookaheadMs = 1.5f;
@@ -77,5 +110,30 @@ private:
     ProcessSpec spec;
     MaximizerParams params;
     std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f };
+
+    bool prepared = false;
+    bool fresh = true;           // nothing processed since prepare()/reset(): setParams() applies instantly
+
+    // Clipper: oversampled soft clip, crossfaded against a dry path delayed by
+    // exactly the oversampler round trip.
+    int osFactor = 1;
+    Oversampler oversampler;
+    DelayLine dryDelay;
+    AudioBuffer dryBuffer;
+    std::vector<float> thresholdBuf, kneeBuf, clipMixBuf; // per-sample clip controls (maxBlockSize)
+    bool clipRunning = false;
+    int clipWarmup = 0, clipWarmupLength = 1;
+
+    // Glue: 3-band split, per-band linked compressor, crossfaded against the input.
+    ThreeBandSplitter splitter;
+    std::array<BandDetector, kNumBands> bands {};
+    bool glueRunning = false;
+    int glueWarmup = 0, glueWarmupLength = 1;
+
+    TruePeakLimiter limiter;
+
+    // Smoothed controls.
+    LinearSmoothedValue driveDbS, ceilingDbS, clipAmountS, clipKneeS, glueS, glueMixS, clipMixS;
+    float driveGain = 1.0f, ceilingDb = -1.0f, ceilingLin = 1.0f, glueThreshold = 0.5f, clipThreshold = 1.0f;
 };
 } // namespace flub

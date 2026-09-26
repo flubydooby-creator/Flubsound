@@ -59,6 +59,7 @@ Each requirement has an ID. The traceability matrix in §5 maps every ID to its 
 | R5.1 | Batch processing of music files |
 | R5.2 | Export of enhanced audio |
 | R5.3 | Architecture ready for neural enhancement |
+| R6.1 | *(added on request)* Compatible with all Turtle Beach headsets (every connection type on a computer), with device-aware safety and setup advice |
 
 ### Technical preferences
 C++ with JUCE. The GUI is JUCE, with Electron/React evaluated and rejected, reasons in `02-tech-stack.md`. Platform order is Windows → macOS → Linux. The design must be modular, thread-safe and high-performance.
@@ -135,6 +136,7 @@ The work was run as a sequence of review loops:
 7. [Implementation roadmap: MVP → Advanced → Polish](07-roadmap.md)
 8. [Major pitfalls & concrete solutions](08-pitfalls-and-solutions.md)
 9. [Future expansion roadmap](09-future-roadmap.md)
+10. [Headset compatibility, including all Turtle Beach headsets](10-headset-compatibility.md) (added on request)
 
 ---
 

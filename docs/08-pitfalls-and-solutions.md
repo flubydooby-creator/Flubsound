@@ -166,6 +166,12 @@ Pitfalls are grouped by the four areas the brief singles out: latency, clipping/
 - **Symptom:** your team hears echo, or your voice pumps.
 - **Solution:** chat is a separate strip with its own profile, and the mic is not routed through music/game processing. The Windows communications default device is set to the Chat endpoint so OS ducking applies only there.
 
+### C9. Headset on-board DSP stacking with Flubsound (e.g. Turtle Beach Superhuman Hearing)
+- **Symptom:** harsh, hissy footsteps; boomy bass; a muffled "far away" surround image.
+- **Root cause:** many gaming headsets and their companion apps apply their own footstep enhancement, bass boost, EQ or virtual surround. Stacked with Flubsound's Footsteps / Impact macros or virtualiser, the same processing runs twice.
+- **Solution:** device profiles (`presets/devices/device-profiles.json`, `core/include/flub/engine/DeviceProfiles.h`) recognise the headset family and show targeted advice: neutral headset mode, one footstep enhancer, one HRTF stage. They also cap the ceiling per connection (Bluetooth −2 dBTP, hands-free −3 dBTP). The full Turtle Beach matrix is in `docs/10-headset-compatibility.md`.
+- **Verification:** `tests/test_device_profiles.cpp` (family matching, no false positives, advice and ceiling caps) and "Chain: runs at every sample rate a headset may use".
+
 ---
 
 ## D. Platform issues

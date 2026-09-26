@@ -22,6 +22,11 @@
 #include <limits>
 #include <random>
 
+#if defined(__linux__)
+    #include <sys/stat.h>
+    #include <sys/sysmacros.h>
+#endif
+
 using namespace flub;
 using namespace flub::io;
 using namespace flubtest;
@@ -969,4 +974,181 @@ TEST_CASE ("WavFile: writer rejects invalid requests without creating a file")
     AudioFileData out;
     REQUIRE (readWav (f.path, out, error));
     CHECK (out.numChannels == 2 && out.numFrames() == 0);
+}
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("WavFile review: a missing pad byte before 'data' is detected even when the data size looks like text")
+{
+    // An odd-sized chunk written without its pad, followed by a data chunk whose size
+    // has a printable low byte (100 = 'd'): both the padded offset ("ata" + 'd') and the
+    // unpadded one ("data") look like chunk IDs, so only knowing real IDs resolves it.
+    Bytes odd;
+    odd.u8 (1).u8 (2).u8 (3);
+    Bytes data;
+    for (int i = 0; i < 50; ++i)
+        data.u16 (static_cast<uint32_t> (i * 256));
+    REQUIRE (data.v.size() == 100);
+    Bytes chunks;
+    chunks.chunk ("fmt ", fmtBody (1, 1, 48000, 16)).chunk ("bext", odd, false).chunk ("data", data);
+
+    AudioFileData out;
+    std::string error;
+    REQUIRE (readBytesAsWav (riff (chunks), out, error));
+    REQUIRE (out.numFrames() == 50);
+    CHECK (out.channels[0][1] == 256.0f / 32768.0f);
+    CHECK (out.channels[0][49] == 49.0f * 256.0f / 32768.0f);
+
+    // The same file written correctly (with the pad) still reads identically, even
+    // with a printable, non-zero pad byte.
+    Bytes padded;
+    padded.chunk ("fmt ", fmtBody (1, 1, 48000, 16)).chunk ("bext", odd, false).u8 ('z').chunk ("data", data);
+    AudioFileData out2;
+    REQUIRE (readBytesAsWav (riff (padded), out2, error));
+    REQUIRE (out2.numFrames() == 50);
+    CHECK (out2.channels[0][49] == out.channels[0][49]);
+}
+
+TEST_CASE ("WavFile review: nBlockAlign frames 24-bit samples stored in 4-byte slots")
+{
+    // Plain PCM, wBitsPerSample = 24 but nBlockAlign = 8 for stereo: each sample sits
+    // left-justified in 4 bytes. Before the fix this was decoded with 3-byte framing,
+    // turning the whole file into garbage.
+    Bytes fmt;
+    fmt.u16 (1).u16 (2).u32 (48000).u32 (48000 * 8).u16 (8).u16 (24);
+    Bytes data;
+    data.u32 (0x40000000u).u32 (0xC0000000u).u32 (0x20000000u).u32 (0xE0000000u);
+    Bytes chunks;
+    chunks.chunk ("fmt ", fmt).chunk ("data", data);
+    AudioFileData out;
+    std::string error;
+    REQUIRE (readBytesAsWav (riff (chunks), out, error));
+    REQUIRE (out.numFrames() == 2);
+    CHECK (out.channels[0][0] == 0.5f && out.channels[1][0] == -0.5f);
+    CHECK (out.channels[0][1] == 0.25f && out.channels[1][1] == -0.25f);
+
+    // Nonsense block aligns (bits instead of bytes, channel count forgotten, 0) are ignored.
+    for (uint32_t badAlign : { 32u, 2u, 0u, 3u })
+    {
+        Bytes f16;
+        f16.u16 (1).u16 (2).u32 (48000).u32 (48000 * 4).u16 (badAlign).u16 (16);
+        Bytes d16;
+        d16.u16 (0x4000).u16 (0xC000);
+        Bytes c16;
+        c16.chunk ("fmt ", f16).chunk ("data", d16);
+        REQUIRE (readBytesAsWav (riff (c16), out, error));
+        REQUIRE (out.numFrames() == 1);
+        CHECK (out.channels[0][0] == 0.5f && out.channels[1][0] == -0.5f);
+    }
+}
+
+TEST_CASE ("WavFile review: directories and special files give clear errors; a failing device is never unlinked")
+{
+    AudioFileData out;
+    std::string error;
+    const auto dir = std::filesystem::temp_directory_path().string();
+    CHECK (! readWav (dir, out, error));
+    CHECK (contains (error, "is a directory"));
+
+    AudioFileData d = makeSignal (2, 20000, 48000.0);
+    CHECK (! writeWav (dir, d, SampleFormat::Pcm16, error));
+    CHECK (contains (error, "cannot write"));
+
+#if defined(__linux__)
+    // A private copy of /dev/full (writes fail with ENOSPC). The writer used to
+    // std::remove() the path after a failed write, which deletes the device node
+    // itself (as root, writeWav ("/dev/full", ...) removed /dev/full).
+    TempFile node;
+    if (::mknod (node.path.c_str(), S_IFCHR | 0600, makedev (1, 7)) == 0)
+    {
+        CHECK (! writeWav (node.path, d, SampleFormat::Pcm16, error));
+        CHECK (contains (error, "write error"));
+        CHECK (std::filesystem::exists (node.path));
+        CHECK (std::filesystem::is_character_file (node.path));
+    }
+#endif
+}
+
+TEST_CASE ("WavFile review: TPDF dither has the triangular shape and is independent across channels")
+{
+    // For an input exactly on an integer level the error is round (d) with d triangular
+    // on (-1, 1): P(e = +1) = P(e = -1) = P(d > 0.5) = 1/8 and P(e = 0) = 3/4.
+    // Rectangular +-0.5 LSB dither would give e = 0 always; +-1 LSB rectangular 1/4 each.
+    const int n = 80000;
+    AudioFileData in;
+    in.sampleRate = 44100.0;
+    in.channels = { std::vector<float> (static_cast<size_t> (n), 0.0f), std::vector<float> (static_cast<size_t> (n), 100.0f / 32768.0f) };
+    AudioFileData out;
+    REQUIRE (roundTrip (in, SampleFormat::Pcm16, out));
+
+    int counts[2][3] = {};
+    double sum0 = 0.0, sum1 = 0.0, sum01 = 0.0, sq0 = 0.0, sq1 = 0.0;
+    for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+    {
+        const double e0 = std::round (static_cast<double> (out.channels[0][i]) * 32768.0);
+        const double e1 = std::round (static_cast<double> (out.channels[1][i]) * 32768.0) - 100.0;
+        REQUIRE (std::abs (e0) <= 1.0 && std::abs (e1) <= 1.0);
+        ++counts[0][static_cast<int> (e0) + 1];
+        ++counts[1][static_cast<int> (e1) + 1];
+        sum0 += e0;
+        sum1 += e1;
+        sum01 += e0 * e1;
+        sq0 += e0 * e0;
+        sq1 += e1 * e1;
+    }
+    for (auto& c : counts)
+    {
+        CHECK_NEAR (c[0] / static_cast<double> (n), 0.125, 0.006);
+        CHECK_NEAR (c[1] / static_cast<double> (n), 0.75, 0.008);
+        CHECK_NEAR (c[2] / static_cast<double> (n), 0.125, 0.006);
+    }
+    const double cov = sum01 / n - (sum0 / n) * (sum1 / n);
+    const double corr = cov / std::sqrt ((sq0 / n - (sum0 / n) * (sum0 / n)) * (sq1 / n - (sum1 / n) * (sum1 / n)));
+    CHECK_LE (std::abs (corr), 0.02); // interleaved sequential draws: no inter-channel correlation
+}
+
+TEST_CASE ("WavFile review: odd-sized EXTENSIBLE PCM24 data gets a counted pad byte and reads back")
+{
+    TempFile f;
+    std::string error;
+    const auto in = makeSignal (3, 7, 48000.0); // 3 ch x 3 bytes x 7 frames = 63 bytes
+    REQUIRE (writeWav (f.path, in, SampleFormat::Pcm24, error));
+    const auto b = readBytes (f.path);
+    REQUIRE (b.size() == 12 + 48 + 8 + 63 + 1);
+    CHECK (le32 (b, 4) == b.size() - 8);
+    CHECK (le16 (b, 20) == 0xFFFE);
+    CHECK (le32 (b, 40) == 0x007);
+    CHECK (le32 (b, 64) == 63);
+    CHECK (b.back() == 0);
+
+    // A chunk appended after the padded data is still found by a strict reader walk.
+    auto withTail = b;
+    Bytes tail;
+    tail.chunk ("LIST", Bytes {}.id ("INFO"));
+    withTail.insert (withTail.end(), tail.v.begin(), tail.v.end());
+    AudioFileData out;
+    REQUIRE (readBytesAsWav (withTail, out, error));
+    CHECK (out.numFrames() == 7);
+    CHECK_LE (maxAbsError (in, out), std::ldexp (1.0, -22));
+}
+
+TEST_CASE ("WavFile review: PCM round trips stay within spec at full scale and at every sample rate")
+{
+    for (double rate : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        AudioFileData in;
+        in.sampleRate = rate;
+        in.channels.assign (2, {});
+        for (float x : { -1.0f, -0.99999f, 0.99995f, 32767.0f / 32768.0f, 1.0e-9f, -1.0e-9f, 0.5f })
+            for (auto& ch : in.channels)
+                ch.insert (ch.end(), 50, x);
+        for (auto format : { SampleFormat::Pcm16, SampleFormat::Pcm24 })
+        {
+            AudioFileData out;
+            REQUIRE (roundTrip (in, format, out));
+            CHECK (out.sampleRate == rate);
+            const double limit = format == SampleFormat::Pcm16 ? std::ldexp (1.0, -14) : std::ldexp (1.0, -22);
+            CHECK_LE (maxAbsError (in, out), limit * 0.999);
+        }
+    }
 }

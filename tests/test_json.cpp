@@ -546,3 +546,91 @@ TEST_CASE ("Json: const accessors and lookups do not allocate")
     CHECK (sink > 0.0);
     CHECK (sizes > 0);
 }
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("Json review: set() with a key that aliases the value being replaced")
+{
+    // v is a string and the key is that very string: converting v to an object used to
+    // destroy the key before it was copied into the new member (use after free).
+    Value v (std::string ("a key long enough to live on the heap, not in SSO"));
+    v.set (v.asString(), 1);
+    REQUIRE (v.isObject());
+    REQUIRE (v.asObject().size() == 1);
+    CHECK (v.asObject()[0].first == "a key long enough to live on the heap, not in SSO");
+    CHECK (v["a key long enough to live on the heap, not in SSO"].asNumber() == 1.0);
+
+    // Key taken from a member's own value; appending may reallocate the member vector.
+    Value o;
+    o.set ("k", "another key long enough to avoid small string optimisation");
+    for (int i = 0; i < 20; ++i)
+        o.set ("pad" + std::to_string (i), i);
+    o.set (o["k"].asString(), true);
+    CHECK (o["another key long enough to avoid small string optimisation"].asBool());
+    // Key aliasing the value it replaces.
+    o.set ("self", "self");
+    o.set (o["self"].asString(), 2);
+    CHECK (o["self"].asNumber() == 2.0);
+}
+
+TEST_CASE ("Json review: lone CR line endings count as new lines in error positions")
+{
+    CHECK (failsAt ("[1,\r2,\r]", 3, 1, "trailing comma"));
+    CHECK (failsAt ("[1,\r\n2,\r\n]", 3, 1, "trailing comma")); // CRLF is still one line
+    CHECK (failsAt ("\r\r\n\n x", 4, 2, "expected a value"));
+}
+
+TEST_CASE ("Json review: numbers at the edges of double precision")
+{
+    CHECK (sameNumber (parseOrFail ("1e-310").asNumber(), 1e-310)); // subnormal, not flushed to 0
+    CHECK (sameNumber (parseOrFail ("2.2250738585072011e-308").asNumber(), 2.2250738585072011e-308));
+    CHECK (sameNumber (parseOrFail ("9007199254740993").asNumber(), 9007199254740992.0)); // round-half-even
+    CHECK (sameNumber (parseOrFail ("1.7976931348623158e308").asNumber(), DBL_MAX)); // rounds down to max
+    CHECK (failsAt ("1.7976931348623159e308", 1, 1, "out of range"));
+    // Very long mantissas: correct rounding, and underflow / overflow classification by magnitude.
+    CHECK (parseOrFail ("0." + std::string (1000, '0') + "1").asNumber() == 0.0);
+    CHECK (parseOrFail ("0." + std::string (300, '0') + "1e300").asNumber() == 1e-1);
+    CHECK (failsAt ("1" + std::string (400, '0'), 1, 1, "out of range"));
+    CHECK (sameNumber (parseOrFail ("1" + std::string (300, '0') + "e-300").asNumber(), 1.0));
+    CHECK (sameNumber (parseOrFail ("-" + std::string ("0.") + std::string (400, '0') + "1").asNumber(), -0.0));
+}
+
+TEST_CASE ("Json review: string edge cases")
+{
+    // Raw NUL / DEL inside strings: NUL is a control character, DEL is allowed.
+    CHECK (failsAt (std::string ("\"a\0b\"", 5), 1, 3, "U+0000"));
+    CHECK (parseOrFail ("\"a\x7F\"").asString() == "a\x7F");
+    // High surrogate followed by a broken \u escape, or by a second high surrogate.
+    CHECK (failsAt ("\"\\ud83c\\u12\"", 1, 2, "high surrogate"));
+    CHECK (failsAt ("\"\\ud83c\\ud83c\"", 1, 2, "high surrogate"));
+    CHECK (failsAt ("\"\\ud83c", 1, 2, "high surrogate"));
+    // Escaped keys round trip and are found by operator[].
+    const Value v = parseOrFail ("{\"a\\nb\\u00e9\": 1, \"\": 2}");
+    CHECK (v["a\nb\xC3\xA9"].asNumber() == 1.0);
+    CHECK (v[""].asNumber() == 2.0);
+    CHECK (deepEqual (parseOrFail (write (v, 3)), v));
+    // Invalid UTF-8 in keys built in code is repaired too.
+    Value k;
+    k.set ("\xFF", 1);
+    CHECK (parseOrFail (write (k))["\xEF\xBF\xBD"].asNumber() == 1.0);
+}
+
+TEST_CASE ("Json review: writer indentation is clamped and output is always re-parseable")
+{
+    Value v;
+    v.set ("a", Value::Array { Value (1), Value::Array {}, Value::Object {} });
+    const std::string big = write (v, 1000);
+    CHECK (big == write (v, 32));
+    CHECK (big.find ("\n" + std::string (64, ' ') + "1") != std::string::npos); // level 2 x 32 spaces
+    CHECK (big.find (std::string (65, ' ')) == std::string::npos);
+    CHECK (deepEqual (parseOrFail (big), v));
+    CHECK (write (v, std::numeric_limits<int>::min()) == write (v, 0));
+
+    // A 256-deep document (the parse limit) pretty-prints and parses back.
+    Value deep = Value (1);
+    for (int i = 0; i < 256; ++i)
+        deep = Value (Value::Array { deep });
+    CHECK (deepEqual (parseOrFail (write (deep, 2)), deep));
+    Value tooDeep = Value (Value::Array { deep });
+    CHECK (fails (write (tooDeep, 0))); // 257 levels: the writer can emit it, the parser refuses it cleanly
+}

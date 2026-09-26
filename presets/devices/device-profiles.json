@@ -1,0 +1,135 @@
+{
+  "format": "flubsound-device-profiles",
+  "version": 1,
+  "about": "Output-device profiles. Matching only adds device-aware advice and safety caps; every standard output device works without a profile. Tokens match whole words in the endpoint name, case-insensitively. labVerified=false means the entry is based on the product family's documented connection types and features and still has to be confirmed in the device lab. Flubsound is not affiliated with or endorsed by the vendors named here.",
+  "profiles": [
+    {
+      "id": "turtle-beach-generic",
+      "vendor": "Turtle Beach",
+      "family": "Turtle Beach (any)",
+      "displayName": "Turtle Beach headset",
+      "matchAny": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
+      "specificity": 1,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Turtle Beach headsets can apply their own sound modes (for example Superhuman Hearing, bass boost or EQ presets) on the headset or in the companion software. Set them to the flat / default mode, or turn off Flubsound's Footsteps and Impact macros, so footstep and bass enhancement are not applied twice."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-stealth",
+      "vendor": "Turtle Beach",
+      "family": "Stealth",
+      "displayName": "Turtle Beach Stealth series",
+      "matchAny": ["stealth pro", "stealth 700", "stealth 600", "stealth 500", "stealth 400", "stealth 350", "stealth 300", "stealth"],
+      "exclude": ["razer", "blade stealth"],
+      "specificity": 2,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": true,
+      "mayExposeGameChat": true,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Wireless Stealth models connect through a 2.4 GHz USB transmitter that the computer sees as a standard USB audio device - use that connection for games. Their Bluetooth link (where available) adds latency and switches to narrowband audio when the microphone is used.",
+        "Turn off Superhuman Hearing and any on-headset EQ preset while Flubsound's Gaming mode is active (or disable Flubsound's Footsteps macro instead)."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-recon",
+      "vendor": "Turtle Beach",
+      "family": "Recon",
+      "displayName": "Turtle Beach Recon series",
+      "matchAny": ["recon spark", "recon 500", "recon 200", "recon 70", "recon 50", "recon"],
+      "specificity": 2,
+      "typicalConnection": "analog",
+      "onboardDsp": false,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Wired Recon models on a 3.5 mm jack play through the computer's (or controller's) own audio output, so select that output in Flubsound. Amplified or USB variants appear as their own USB audio device. Both work with Flubsound unchanged."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-atlas",
+      "vendor": "Turtle Beach",
+      "family": "Atlas",
+      "displayName": "Turtle Beach Atlas / Elite Atlas series",
+      "matchAny": ["elite atlas aero", "elite atlas", "atlas three", "atlas one", "atlas air", "atlas"],
+      "specificity": 2,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": true,
+      "mayExposeGameChat": true,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Wireless Atlas models are managed by Turtle Beach's PC companion software, which can enable 3D / virtual surround and EQ. Keep those off when Flubsound's Headphone Virtualizer or Gaming mode is used."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-elite-pro",
+      "vendor": "Turtle Beach",
+      "family": "Elite Pro",
+      "displayName": "Turtle Beach Elite Pro series",
+      "matchAny": ["elite pro 2", "elite pro"],
+      "specificity": 2,
+      "typicalConnection": "analog",
+      "onboardDsp": true,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": true,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "When an external amplifier / DAC (for example a USB tactical audio controller) is used, that amplifier is the output device - select it in Flubsound and keep its own enhancement modes neutral."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-roccat",
+      "vendor": "Turtle Beach (ROCCAT)",
+      "family": "ROCCAT headsets",
+      "displayName": "ROCCAT headset",
+      "matchAny": ["roccat", "syn pro air", "syn max air", "syn buds", "elo 7 1", "elo x"],
+      "specificity": 2,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": true,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "ROCCAT headsets (a Turtle Beach brand) can enable 7.1 / 3D audio and EQ in their software; keep those neutral while Flubsound processes the audio."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "xbox-wireless-headset",
+      "vendor": "Various (Xbox Wireless)",
+      "family": "Xbox Wireless",
+      "displayName": "Headset on the Xbox Wireless adapter",
+      "matchAny": ["xbox wireless", "xbox wireless headset"],
+      "specificity": 1,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Xbox-licensed headsets (including Turtle Beach Xbox models) connected to a PC through the Xbox Wireless adapter appear as a normal output device. If Windows Sonic or Dolby Atmos for Headphones is enabled on that output, turn it off while Flubsound's virtualizer is used."
+      ],
+      "labVerified": false
+    }
+  ]
+}

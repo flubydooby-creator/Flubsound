@@ -15,15 +15,22 @@
 //      faded out towards the -80 dB RMS noise floor so hiss is never lifted.
 //      GainSmoother 5 ms (boost withdrawing) / 100 ms. EQ: bell Q 0.8 at
 //      presence * boost.
-//   4. Air exciter, per channel: HP4 3.5 kHz -> LP4 7 kHz (Butterworth) ->
-//      b; envelope env = 7.5 ms peak hold -> 40 ms release -> 0.5 ms
-//      smoothing; xn = clamp (b / env, -1, 1);
-//      y = env (T2(xn) + 0.5 T3(xn))  (2nd + 3rd harmonic of a sinusoid,
-//      level tracking the band linearly) -> HP4 7 kHz -> + air * -12 dB.
-//      Then a high shelf 10 kHz Q 0.707 at 2 dB * air.
+//   4. Air exciter, per channel: h = HP4 3.5 kHz (x), b = LP4 7 kHz (h)
+//      (Butterworth). Envelopes E(.) = 7.5 ms peak hold -> 40 ms release;
+//      env = smooth_0.5ms (max (E(|b|), -3 dB * E(|h|))); xn = clamp (b / env,
+//      -1, 1); y = env (T2(xn) + 0.5 T3(xn)) (2nd + 3rd harmonic of a
+//      sinusoid, level tracking the band linearly) -> HP4 7 kHz -> + air *
+//      -12 dB. Then a high shelf 10 kHz Q 0.707 at 2 dB * air.
 //      The polynomial is of order 3 and its input is band limited to 7 kHz,
 //      so products stay below 21 kHz: no oversampling at 44.1 kHz. The peak
 //      hold makes env constant on steady tones, so no modulation products.
+//      The -3 dB * E(|h|) floor matters for content in the band's upper skirt
+//      (> 7 kHz, where the LP4 is below -3 dB): normalised against its own
+//      small band level it would be shaped at full depth, and its 3rd (above
+//      fs / 6) or 2nd (above fs / 4) harmonic would alias. Against the floor
+//      it is shaped only gently (a 9 kHz tone's alias drops by ~13 dB), while
+//      everything below 7 kHz is normalised by the band envelope unchanged.
+//      It also backs the exciter off when the top octave is already bright.
 //
 // Control rate: every kControlInterval samples of absolute stream time the
 // gain computers run, the smoothers advance and EQ designs are refreshed;
@@ -80,6 +87,7 @@ constexpr float kAirShelfMaxDb = 2.0f;
 constexpr float kAirMixMax = 0.251188643f;     // -12 dB
 constexpr float kAirW2 = 1.0f, kAirW3 = 0.5f;  // 2nd / 3rd harmonic weights
 constexpr double kAirHoldMs = 7.5;             // >= 26 periods of the band's lowest frequency
+constexpr float kAirSkirtFloor = 0.70710678f;  // -3 dB: the LP4 7 kHz level at its corner
 constexpr float kAirReleaseMs = 40.0f;
 constexpr float kAirSmoothMs = 0.5f;
 
@@ -184,7 +192,10 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
     airFilters[4] = SvfCoeffs::make (FilterType::HighPass, kAirHighHz, butterworthQ (2, 0), 0.0, sr);
     airFilters[5] = SvfCoeffs::make (FilterType::HighPass, kAirHighHz, butterworthQ (2, 1), 0.0, sr);
     for (auto& ch : airChannels)
-        ch.hold.prepare (sr, kAirHoldMs);
+    {
+        ch.bandHold.prepare (sr, kAirHoldMs);
+        ch.highHold.prepare (sr, kAirHoldMs);
+    }
     airReleaseCoeff = onePoleCoeff (kAirReleaseMs, sr);
     airSmoothCoeff = onePoleCoeff (kAirSmoothMs, sr);
     airMix.reset (sr, kParamSmoothMs, 0.0f);
@@ -274,8 +285,9 @@ void ClarityEnhancer::activateAir() noexcept
     for (auto& ch : airChannels)
     {
         ch.filters.fill ({});
-        ch.hold.reset();
-        ch.release = ch.env = 0.0f;
+        ch.bandHold.reset();
+        ch.highHold.reset();
+        ch.bandRelease = ch.highRelease = ch.env = 0.0f;
     }
     airShelfState.fill ({});
 }
@@ -291,8 +303,9 @@ void ClarityEnhancer::clearAllStates() noexcept
     for (auto& ch : airChannels)
     {
         ch.filters.fill ({});
-        ch.hold.reset();
-        ch.release = ch.env = 0.0f;
+        ch.bandHold.reset();
+        ch.highHold.reset();
+        ch.bandRelease = ch.highRelease = ch.env = 0.0f;
     }
     airShelfState.fill ({});
 }
@@ -318,7 +331,8 @@ float ClarityEnhancer::flushStates() noexcept
             auto& ch = airChannels[static_cast<size_t> (c)];
             for (auto& s : ch.filters)
                 sum += flushTiny (s);
-            sum += flushTiny (ch.release) + flushTiny (ch.env) + flushTiny (airShelfState[static_cast<size_t> (c)]);
+            sum += flushTiny (ch.bandRelease) + flushTiny (ch.highRelease) + flushTiny (ch.env)
+                 + flushTiny (airShelfState[static_cast<size_t> (c)]);
         }
     }
     return sum;
@@ -488,17 +502,18 @@ void ClarityEnhancer::processAir (const AudioBlock& block, int numCh, int pos, i
         float* d = block.channel (c) + pos;
         for (size_t i = 0; i < n; ++i)
         {
-            float b = svfTick (airFilters[0], st.filters[0], d[i]);
-            b = svfTick (airFilters[1], st.filters[1], b);
-            b = svfTick (airFilters[2], st.filters[2], b);
-            b = svfTick (airFilters[3], st.filters[3], b);
+            float high = svfTick (airFilters[0], st.filters[0], d[i]);
+            high = svfTick (airFilters[1], st.filters[1], high); // everything above 3.5 kHz
+            float b = svfTick (airFilters[2], st.filters[2], high);
+            b = svfTick (airFilters[3], st.filters[3], b);       // the 3.5 - 7 kHz band
 
-            // Envelope: instant rise through the hold, 40 ms fall, then a
+            // Envelopes: instant rise through the hold, 40 ms fall; then a
             // 0.5 ms smoother so level changes never step (a stepping env
             // would splatter through the -env term of T2).
-            const float held = st.hold.process (std::abs (b));
-            st.release = std::max (held, st.release * airReleaseCoeff);
-            st.env = st.release + airSmoothCoeff * (st.env - st.release);
+            st.bandRelease = std::max (st.bandHold.process (std::abs (b)), st.bandRelease * airReleaseCoeff);
+            st.highRelease = std::max (st.highHold.process (std::abs (high)), st.highRelease * airReleaseCoeff);
+            const float target = std::max (st.bandRelease, kAirSkirtFloor * st.highRelease);
+            st.env = target + airSmoothCoeff * (st.env - target);
 
             const float xn = st.env > 0.0f ? std::clamp (b / st.env, -1.0f, 1.0f) : 0.0f;
             const float x2 = xn * xn;

@@ -811,8 +811,7 @@ TEST_CASE ("HeadphoneVirtualizer: room amount adds reflections 4-19 ms after the
         const int n = 2048;
         Planar buf (8, n);
         buf.ch[FC][0] = 1.0f;
-        v.process (buf.block (0, 512));
-        v.process (buf.block (512, 1536));
+        processInBlocks (v, buf, 512); // blocks <= spec.maxBlockSize (Processor contract)
         const double early = peakAbs (buf.ch[0].data(), 150);            // direct (< 3 ms)
         const double reflections = peakAbs (buf.ch[0].data() + 180, 800); // 3.75 .. 20.4 ms
         const double late = peakAbs (buf.ch[0].data() + 1300, n - 1300);  // > 27 ms

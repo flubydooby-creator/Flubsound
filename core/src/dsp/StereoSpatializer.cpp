@@ -56,6 +56,7 @@
 //   e > 0      : s += (32 / 300 ms) * min (1, e / 0.1)   full pull in 300 ms
 //   e < -0.05  : s -= 32 / 3 s                            slow release
 //   otherwise  : hold (hysteresis band, so the loop parks instead of hunting)
+//   output below -100 dBFS (rho undefined) : hold
 //   safety off or width <= 1 : s -= 32 / 300 ms
 //   w_eff = w > 1 ? 1 + (w - 1)(1 - s) : w
 // Only widening is pulled back: a narrowed image (w < 1) is never widened by
@@ -103,7 +104,8 @@ constexpr float kCrossfeedScale = 0.6f;
 
 constexpr double kCorrelationMs = 300.0;
 // Product of the two mean squares below which the correlation is undefined
-// (geometric-mean level -100 dBFS): silence and fade tails read as 1 (safe).
+// (geometric-mean level -100 dBFS): the meter then reads 1 and the mono
+// safety holds its current pull.
 constexpr double kCorrelationFloor = 1.0e-20;
 
 constexpr float kParamSmoothMs = 20.0f;
@@ -313,7 +315,11 @@ void StereoSpatializer::controlTick() noexcept
     if (corrLL + corrRR < 1.0e-30)
         corrLR = corrLL = corrRR = 0.0; // long silence: no subnormal doubles
 
-    if (params.autoMonoSafety && params.width > 1.0f)
+    if (! params.autoMonoSafety || params.width <= 1.0f)
+    {
+        safety -= safetyOffStep;
+    }
+    else if (corrLL * corrRR > kCorrelationFloor)
     {
         const float err = params.minCorrelation - correlationEstimate();
         if (err > 0.0f)
@@ -321,10 +327,8 @@ void StereoSpatializer::controlTick() noexcept
         else if (err < -kSafetyHysteresis)
             safety -= safetyReleaseStep;
     }
-    else
-    {
-        safety -= safetyOffStep;
-    }
+    // else: (near) silence says nothing about the material - hold the pull,
+    // so a game's pauses do not pump the width back up between events.
     safety = std::clamp (safety, 0.0f, 1.0f);
     updateWidthTarget();
 }

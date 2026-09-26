@@ -85,7 +85,7 @@ Beta                         [closed]      [public]      [1.0]
 | 1.7 | Installer (WiX MSI, no driver yet), code signing, auto-update check | 2 | |
 | 1.8 | Crash reporting (Crashpad, opt-in), logging (never on the audio thread) | 1 | |
 | 1.9 | Performance: profiling, SIMD for hot loops (EQ bands, TP detector), PFFFT in the analyser | 2 | |
-| 1.10 | QA: device matrix (20 devices: USB DACs, onboard Realtek, BT, HDMI), 8 h soak, glitch detector | 4 | |
+| 1.10 | QA: device matrix (20 devices: USB DACs, onboard Realtek, BT, HDMI, plus every Turtle Beach family on each of its connection types; see `docs/10-headset-compatibility.md` §5), 8 h soak, glitch detector | 4 | Flip `labVerified` per device profile as models pass |
 
 **Exit criteria**
 - 8-hour soak at 48 kHz / 128 frames with **zero** dropouts on three reference machines (desktop, gaming laptop, low-end laptop).

@@ -68,12 +68,13 @@ private:
         TransientShaper::SvfGlide eq;
     };
 
-    /** Per-channel exciter state: HP4 3.5 kHz, LP4 7 kHz, HP4 7 kHz + envelope. */
+    /** Per-channel exciter state: HP4 3.5 kHz, LP4 7 kHz, HP4 7 kHz, and the
+        envelopes of the band and of everything above 3.5 kHz. */
     struct AirChannel
     {
         std::array<SvfState, 6> filters {};
-        TransientShaper::PeakHold hold;
-        float release = 0.0f, env = 0.0f;
+        TransientShaper::PeakHold bandHold, highHold;
+        float bandRelease = 0.0f, highRelease = 0.0f, env = 0.0f;
     };
 
     void activateBell (DynamicBell& bell, double hz, double q) noexcept;

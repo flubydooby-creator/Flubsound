@@ -440,3 +440,44 @@ TEST_CASE ("Chain: a NaN/Inf input block is dropped and the chain recovers")
             REQUIRE (std::isfinite (v));
     CHECK (rms (buf.ch[0].data() + 256 * 15, 256 * 5) > 1e-3); // audio resumed
 }
+
+TEST_CASE ("Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)")
+{
+    // Bluetooth hands-free (HFP) endpoints run at 8 / 16 kHz, some USB headsets
+    // at 22.05 / 24 / 32 kHz; wired and USB audio classes at 44.1 .. 192 kHz.
+    for (double sr : { 8000.0, 16000.0, 22050.0, 24000.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+        for (int mode : { 0, 1 })
+        {
+            ParameterStore store;
+            store.set (Mode, static_cast<float> (mode));
+            store.set (BoostIntensity, 1.0f);
+            for (int m = Macro1; m <= Macro5; ++m)
+                store.set (m, 1.0f);
+            store.set (CompressorOn, 1.0f);
+            store.set (SaturationOn, 1.0f);
+            ProcessingChain chain (store);
+            chain.prepare ({ sr, 256, 2 });
+            // FIR oversampling latency is fixed in samples, so it grows in ms at
+            // narrowband rates; those are Bluetooth hands-free links that add
+            // 100+ ms themselves. Everything >= 22.05 kHz stays under 6 ms.
+            CHECK (chain.getLatencySamples() * 1000.0 / sr < (sr >= 22050.0 ? 6.0 : 12.0));
+
+            const int n = static_cast<int> (sr * 1.5);
+            Planar buf (2, n);
+            FastRandom rng (11);
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = i / sr;
+                const float v = 0.8f * static_cast<float> (std::sin (kTwoPi * 110.0 * t) * (std::fmod (t, 0.25) < 0.05 ? 1.0 : 0.3))
+                                + 0.2f * rng.nextBipolar();
+                buf.ch[0][static_cast<size_t> (i)] = v;
+                buf.ch[1][static_cast<size_t> (i)] = 0.9f * v;
+            }
+            runChain (chain, buf, 256);
+            for (auto& c : buf.ch)
+                for (float v : c)
+                    REQUIRE (std::isfinite (v));
+            CHECK_LE (peakAbs (buf.ch[0].data(), n), dbToGain (-1.0f) + 1e-6);
+            CHECK (rms (buf.ch[0].data() + n / 2, n / 2) > 1e-3);
+        }
+}

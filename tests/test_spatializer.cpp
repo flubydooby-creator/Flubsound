@@ -484,6 +484,23 @@ TEST_CASE ("StereoSpatializer: auto mono safety pulls the width back for antipha
     // Pulled within ~0.6 s (300 ms detector + 300 ms pull).
     CHECK_LE (trace[static_cast<size_t> (kFs * 0.8 / 256)], 1.1f);
 
+    // Silence says nothing about the material: the pull is held (a game's
+    // pauses must not pump the width back up). For the first seconds the
+    // 300 ms memory still holds the old correlation; once the output is
+    // below -100 dBFS the correlation is undefined (meter reads 1) and the
+    // pull is still held.
+    Planar pause (2, n);
+    processInBlocks (sp, pause, 256);
+    CHECK_NEAR (sp.getEffectiveWidth(), 1.0, 1.0e-3);
+    CHECK_LE (sp.getCorrelation(), -0.5);
+    for (int k = 0; k < 3; ++k)
+    {
+        Planar silence (2, n);
+        processInBlocks (sp, silence, 256);
+    }
+    CHECK_NEAR (sp.getCorrelation(), 1.0, 0.0);
+    CHECK_NEAR (sp.getEffectiveWidth(), 1.0, 1.0e-3);
+
     // Recovery once the content is well correlated again (width 2 keeps the
     // output correlation at ~0.7 for this material).
     const auto corrL = mix (a, 1.0f, b, 3.0f);

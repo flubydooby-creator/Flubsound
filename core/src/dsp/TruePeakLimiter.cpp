@@ -53,6 +53,86 @@ float sanitise (float v, float lo, float hi, float fallback) noexcept
 } // namespace
 
 //==============================================================================
+void TruePeakLimiter::RefinedPeakDetector::prepare (int numChannels)
+{
+    // Identical design to TruePeakDetector::prepare(): 97-tap Kaiser (beta 8)
+    // windowed-sinc prototype, 24 taps per phase, each phase normalised to
+    // unity DC gain. Phase 0 is the delayed input sample itself.
+    constexpr int length = kPhases * kTaps + 1;
+    constexpr int centre = (length - 1) / 2;
+    constexpr double beta = 8.0;
+    for (int p = 1; p < kPhases; ++p)
+    {
+        auto& taps = phaseTaps[static_cast<size_t> (p)];
+        double sum = 0.0;
+        std::array<double, kTaps> t {};
+        for (int j = 0; j < kTaps; ++j)
+        {
+            const int k = kPhases * j + p;
+            t[static_cast<size_t> (j)] = fir::sinc (static_cast<double> (k - centre) / kPhases) * fir::kaiser (k, length, beta);
+            sum += t[static_cast<size_t> (j)];
+        }
+        for (int j = 0; j < kTaps; ++j)
+            taps[static_cast<size_t> (j)] = static_cast<float> (t[static_cast<size_t> (j)] / sum);
+    }
+    for (int c = 0; c < kMaxChannels; ++c)
+        history[static_cast<size_t> (c)].assign (c < numChannels ? static_cast<size_t> (2 * kTaps) : 0u, 0.0f);
+    reset();
+}
+
+void TruePeakLimiter::RefinedPeakDetector::reset() noexcept
+{
+    for (auto& h : history)
+        std::fill (h.begin(), h.end(), 0.0f);
+    pos.fill (0);
+    lastPhase.fill (0.0f);
+}
+
+float TruePeakLimiter::RefinedPeakDetector::processSample (int ch, float x) noexcept
+{
+    const auto c = static_cast<size_t> (ch);
+    auto& h = history[c];
+    int& p = pos[c];
+    p = (p == 0 ? kTaps - 1 : p - 1);
+    h[static_cast<size_t> (p)] = x;
+    h[static_cast<size_t> (p + kTaps)] = x;
+    const float* w = h.data() + p; // w[j] = x[n - j]
+
+    // |z| on the 4x grid around the interval: a[0] = n-D-1/4 (last call's
+    // phase 3), a[1..4] = n-D + {0, 1/4, 1/2, 3/4}, a[5] = n-D+1 (= x[n-D+1],
+    // already in the history, so refining costs no extra delay).
+    std::array<float, 6> a {};
+    a[0] = lastPhase[c];
+    a[1] = std::abs (w[kDelay]);
+    for (int ph = 1; ph < kPhases; ++ph)
+    {
+        const float* t = phaseTaps[static_cast<size_t> (ph)].data();
+        float acc = 0.0f;
+        for (int j = 0; j < kTaps; ++j)
+            acc += t[j] * w[j];
+        a[static_cast<size_t> (ph + 1)] = std::abs (acc);
+    }
+    a[5] = std::abs (w[kDelay - 1]);
+    lastPhase[c] = a[4];
+
+    // Plain grid maximum, then the parabolic vertex of every local maximum.
+    // For a local maximum |a0 - a2| <= -den, so the correction is bounded
+    // (<= a1 / 4) and can only raise the estimate (conservative).
+    float peak = std::max ({ a[1], a[2], a[3], a[4] });
+    for (size_t i = 1; i <= 4; ++i)
+    {
+        const float a0 = a[i - 1], a1 = a[i], a2 = a[i + 1];
+        const float den = a0 - 2.0f * a1 + a2;
+        if (a1 >= a0 && a1 >= a2 && den < 0.0f)
+        {
+            const float d = a0 - a2;
+            peak = std::max (peak, a1 - 0.125f * d * d / den);
+        }
+    }
+    return peak;
+}
+
+//==============================================================================
 LimiterParams TruePeakLimiter::sanitised (const LimiterParams& in, const LimiterParams& fallback) noexcept
 {
     LimiterParams p = in;

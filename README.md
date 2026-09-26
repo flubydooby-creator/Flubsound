@@ -8,6 +8,7 @@
 - 🚀 **Boost Intensity (0–100 %).** One slider scales many modules in stages (clarity → bass → loudness). A **Safety Governor** backs it off before the limiter or clipper start to distort.
 - 🛡️ **Protection:** 4× oversampled true-peak limiting (−1 dBTP), LUFS auto-level, loudness-matched A/B bypass, NaN/denormal guards, and a master limiter across all apps.
 - 📊 **Pro metering:** spectrum analyzer with an interactive EQ curve, waveform/loudness history, LUFS momentary/short-term/integrated + LRA, true peak, RMS, gain reduction and correlation.
+- 🎧 **Works with any headset or speakers** the OS can play to: 3.5 mm, USB, 2.4 GHz dongles, Xbox Wireless and Bluetooth, including **every Turtle Beach headset** on a PC or Mac. Device profiles recognise Turtle Beach families and apply connection-specific safety (e.g. a −2/−3 dBTP ceiling on Bluetooth) and setup advice ([docs/10](docs/10-headset-compatibility.md)).
 - 🧩 **Per-app profiles and routing** via virtual endpoints: Game (7.1), Music, Chat, System. Plus a system tray, global hotkeys, factory presets, a batch CLI and a VST3/AU plug-in.
 
 > Status: the complete engine, DSP and application foundation is implemented and tested (see `docs/07-roadmap.md`). The signed Windows virtual driver, the macOS HAL plug-in and scale QA are the remaining productisation steps.
@@ -28,6 +29,7 @@
 | 7 | [Implementation roadmap](docs/07-roadmap.md) |
 | 8 | [Pitfalls & concrete solutions](docs/08-pitfalls-and-solutions.md) |
 | 9 | [Future expansion roadmap](docs/09-future-roadmap.md) |
+| + | [Headset compatibility (incl. all Turtle Beach headsets)](docs/10-headset-compatibility.md) |
 
 ---
 

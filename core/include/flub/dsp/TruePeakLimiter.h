@@ -4,8 +4,9 @@
 // within ~0.1 dB of it in true (inter-sample) peak, with no gain overshoot.
 //
 // Algorithm (per sample n, all channels linked):
-//   p[n]   = max over channels of TruePeakDetector (4x) output, or |x| when
-//            truePeak is off; the detector adds kDelay samples of delay.
+//   p[n]   = max over channels of the 4x TruePeakDetector interpolator (with
+//            parabolic refinement of each local maximum of the 4x sequence),
+//            or |x| when truePeak is off; the detector adds kDelay samples.
 //   r[n]   = min(1, ceilingLin / p[n])                  required gain
 //   m[n]   = min(r[n-L-1 .. n])        sliding minimum (monotonic deque, O(1))
 //   a[n]   = mean(m[n-L .. n])         box filter (running sum, double)
@@ -26,6 +27,7 @@
 #include "flub/common/DelayLine.h"
 #include "flub/common/SmoothedValue.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -71,6 +73,32 @@ private:
     //  * Auto release blends the release coefficient from fast to slow while
     //    the span of the current limiting run grows from 25 to 50 ms.
 
+    /** Linked-detection front end: exactly TruePeakDetector's 4x polyphase
+        interpolator (same taps, same kDelay), but instead of the plain maximum
+        of the four grid points it also refines every local maximum of the 4x
+        sequence with a parabola through its two neighbours. The plain grid
+        maximum under-reads a peak that falls between grid points by up to
+        0.12 dB for content at 0.3 fs and 0.25 dB at 0.4 fs - more than the
+        0.05 dB margin; refined, the residual is < 0.03 dB. */
+    class RefinedPeakDetector
+    {
+    public:
+        void prepare (int numChannels);
+        void reset() noexcept;
+        /** Consumes x[n]; returns the peak magnitude over positions
+            [n - kDelay - 1/8, n - kDelay + 7/8). */
+        float processSample (int ch, float x) noexcept;
+
+    private:
+        static constexpr int kPhases = TruePeakDetector::kPhases;
+        static constexpr int kTaps = TruePeakDetector::kTapsPerPhase;
+        static constexpr int kDelay = TruePeakDetector::kDelay;
+        std::array<std::array<float, kTaps>, kPhases> phaseTaps {};
+        std::array<std::vector<float>, kMaxChannels> history; // mirrored, newest first
+        std::array<int, kMaxChannels> pos {};
+        std::array<float, kMaxChannels> lastPhase {};          // |z| at n - kDelay - 1/4
+    };
+
     static LimiterParams sanitised (const LimiterParams& p, const LimiterParams& fallback) noexcept;
     void updateReleaseCoeffs() noexcept;
     void updateCeiling (float ceilingDb) noexcept;
@@ -90,7 +118,7 @@ private:
     int lookahead = 0;     // L
     int detectorDelay = 0; // D (TruePeakDetector::kDelay, or 0 for sample peak)
 
-    TruePeakDetector detector;
+    RefinedPeakDetector detector;
     DelayLine audioDelay;  // L + D
 
     // Sliding minimum of r over the last L + 2 samples: a monotonic deque

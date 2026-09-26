@@ -69,6 +69,28 @@ struct Planar
     Planar (int numChannels, int numSamples)
         : ch (static_cast<size_t> (numChannels), std::vector<float> (static_cast<size_t> (numSamples), 0.0f))
     {
+        rebind();
+    }
+
+    // Copies must point at their OWN storage (a defaulted copy would keep the
+    // source's channel pointers). Moves keep the vectors' buffers, so the
+    // pointers stay valid.
+    Planar (const Planar& other) : ch (other.ch) { rebind(); }
+    Planar& operator= (const Planar& other)
+    {
+        if (this != &other)
+        {
+            ch = other.ch;
+            rebind();
+        }
+        return *this;
+    }
+    Planar (Planar&&) noexcept = default;
+    Planar& operator= (Planar&&) noexcept = default;
+
+    void rebind()
+    {
+        ptrs.clear();
         for (auto& c : ch)
             ptrs.push_back (c.data());
     }

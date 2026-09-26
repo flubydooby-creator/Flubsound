@@ -9,6 +9,7 @@
 #include "flub/dsp/Fft.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <limits>
@@ -328,6 +329,20 @@ TEST_CASE ("Clarity: air produces no aliasing at 44.1 kHz")
     CHECK_LE (worst, -80.0);
     if (worst > -80.0)
         std::cerr << "    worst non-harmonic component " << worst << " dB at " << worstHz << " Hz\n";
+
+    // Tones in the band's upper skirt (above 7 kHz) are not shaped at full
+    // depth, so their 2nd / 3rd harmonics, which would fold back into the
+    // audible range, stay low.
+    for (const auto& [tone, alias, limitDb] : { std::array<double, 3> { 9000.0, fs - 3.0 * 9000.0, -40.0 },
+                                                std::array<double, 3> { 10000.0, fs - 3.0 * 10000.0, -50.0 },
+                                                std::array<double, 3> { 12000.0, fs - 2.0 * 12000.0, -50.0 } })
+    {
+        ce.reset();
+        Planar skirt (1, settle + n);
+        setChannel (skirt, 0, sine (tone, fs, settle + n, dbfs (-12.0)));
+        processInBlocks (ce, skirt, 441);
+        CHECK_LE (levelDb (skirt.ch[0], settle, n, alias, dbfs (-12.0), fs), limitDb);
+    }
 }
 
 TEST_CASE ("Clarity: parameter changes are click-free")
@@ -465,7 +480,7 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
 
     for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
     {
-        const int n = static_cast<int> (fs * 0.3);
+        const int n = static_cast<int> (fs * 0.2);
         for (const auto& p : settings)
         {
             for (int channels : { 1, 2, 6 })

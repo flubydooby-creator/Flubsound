@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -847,8 +848,10 @@ int runParams (const CliOptions& o)
 
             const char* unit = info.unit == Unit::Choice || info.unit == Unit::Toggle ? "" : unitLabel (info.unit);
             std::string def = formatParameterValue (id, info.defaultValue);
-            out += padRight (info.key, kKey - 1) + " " + padRight (ellipsize (info.name, kName - 1), kName - 1) + " "
-                   + padRight (unit, kUnit) + padRight (range, kRange) + padRight (def, kDefault) + notes + "\n";
+            std::string line = padRight (info.key, kKey - 1) + " " + padRight (ellipsize (info.name, kName - 1), kName - 1) + " "
+                               + padRight (unit, kUnit) + padRight (range, kRange) + padRight (def, kDefault) + notes;
+            line.erase (line.find_last_not_of (' ') + 1); // no trailing blanks
+            out += line + "\n";
         }
     }
     std::fputs (out.c_str(), stdout);

@@ -57,6 +57,23 @@ std::string presetStem (const fs::path& file)
     return stem;
 }
 
+/** getenv without MSVC's C4996 deprecation warning. */
+std::string environmentVariable (const char* name)
+{
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    size_t length = 0;
+    if (_dupenv_s (&value, &length, name) != 0 || value == nullptr)
+        return {};
+    std::string result (value);
+    std::free (value);
+    return result;
+#else
+    const char* value = std::getenv (name);
+    return value != nullptr ? std::string (value) : std::string();
+#endif
+}
+
 bool isDirectory (const fs::path& p)
 {
     std::error_code ec;
@@ -108,7 +125,7 @@ std::vector<fs::path> presetSearchPath (const std::string& explicitDir)
         return dirs; // an explicit folder is the only candidate
     }
 
-    if (const char* env = std::getenv ("FLUBSOUND_PRESET_DIR"); env != nullptr && *env != '\0')
+    if (const auto env = environmentVariable ("FLUBSOUND_PRESET_DIR"); ! env.empty())
         dirs.emplace_back (env);
 
     const fs::path exe = executablePath();
@@ -158,7 +175,9 @@ std::vector<FactoryPresetEntry> scanPresetDir (const fs::path& dir, std::vector<
         std::string error;
         if (! preset::load (it->path().string(), p, error))
         {
-            problems.push_back (it->path().string() + ": " + error);
+            // Parse errors already start with the path; semantic ones do not.
+            const std::string path = it->path().string();
+            problems.push_back (error.rfind (path, 0) == 0 ? error : path + ": " + error);
             continue;
         }
 

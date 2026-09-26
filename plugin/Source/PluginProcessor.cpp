@@ -1,0 +1,512 @@
+#include "PluginProcessor.h"
+
+#include "PluginEditor.h"
+
+#include "flub/common/Denormals.h"
+#include "flub/io/Json.h"
+#include "flub/io/PresetIO.h"
+
+#include <cmath>
+#include <limits>
+#include <vector>
+
+namespace flub::plugin
+{
+using flub::param::Info;
+using flub::param::Unit;
+
+namespace
+{
+/** Version hint of every parameter introduced in plug-in version 1. New
+    parameters appended to the layout later get a higher hint (AU ordering). */
+constexpr int kParameterVersion = 1;
+
+/** Re-prepare poll rate for structural parameter changes. */
+constexpr int kStructuralPollHz = 5;
+
+const juce::Identifier kStateType { "FlubsoundFX" };
+const juce::Identifier kStateVersionProperty { "flubStateVersion" };
+constexpr int kStateVersion = 1;
+
+//==============================================================================
+// Display helpers for float parameters
+juce::String unitLabel (Unit u)
+{
+    switch (u)
+    {
+        case Unit::Db: return "dB";
+        case Unit::Hz: return "Hz";
+        case Unit::Ms: return "ms";
+        case Unit::Percent: return "%";
+        case Unit::Ratio: return ":1";
+        case Unit::Lufs: return "LUFS";
+        case Unit::Degrees: return "deg";
+        case Unit::Millimetres: return "mm";
+        case Unit::DbPerSec: return "dB/s";
+        case Unit::None:
+        case Unit::Choice:
+        case Unit::Toggle: break;
+    }
+    return {};
+}
+
+int decimalsFor (Unit u, float value)
+{
+    const float a = std::abs (value);
+    switch (u)
+    {
+        case Unit::Hz: return a < 100.0f ? 1 : 0;
+        case Unit::Ms: return a < 10.0f ? 2 : 1;
+        case Unit::Percent: return 0;
+        case Unit::Degrees: return 0;
+        case Unit::None: return 2;
+        case Unit::Db:
+        case Unit::Ratio:
+        case Unit::Lufs:
+        case Unit::Millimetres:
+        case Unit::DbPerSec:
+        case Unit::Choice:
+        case Unit::Toggle: break;
+    }
+    return 1;
+}
+
+juce::String groupIdFor (const std::string& name)
+{
+    // Group IDs: basic characters only (JUCE: no '.', not a pure integer).
+    juce::String id;
+    for (auto c : juce::String (name))
+        id << (juce::CharacterFunctions::isLetterOrDigit (c) ? juce::String::charToString (juce::CharacterFunctions::toLowerCase (c)) : juce::String ("_"));
+    return "grp_" + id;
+}
+
+std::unique_ptr<juce::RangedAudioParameter> makeParameter (const Info& info)
+{
+    const juce::ParameterID pid { juce::String (info.key), kParameterVersion };
+    const juce::String name (info.name);
+
+    if (info.unit == Unit::Toggle)
+        return std::make_unique<juce::AudioParameterBool> (pid, name, info.defaultValue >= 0.5f,
+                                                           juce::AudioParameterBoolAttributes().withAutomatable (! info.structural));
+
+    if (info.unit == Unit::Choice)
+    {
+        juce::StringArray choices;
+        for (const auto& c : info.choices)
+            choices.add (juce::String (c));
+        return std::make_unique<juce::AudioParameterChoice> (pid, name, choices, static_cast<int> (std::lround (info.defaultValue)),
+                                                             juce::AudioParameterChoiceAttributes().withAutomatable (! info.structural));
+    }
+
+    juce::NormalisableRange<float> range (info.minValue, info.maxValue);
+    if (info.skewCentre > info.minValue && info.skewCentre < info.maxValue)
+        range.setSkewForCentre (info.skewCentre);
+
+    const Unit unit = info.unit;
+    const bool percent = unit == Unit::Percent;
+    auto attributes = juce::AudioParameterFloatAttributes()
+                          .withLabel (unitLabel (unit))
+                          .withAutomatable (! info.structural)
+                          .withStringFromValueFunction ([unit, percent] (float v, int maxLength) {
+                              const float shown = percent ? v * 100.0f : v;
+                              auto text = juce::String (shown, decimalsFor (unit, shown));
+                              return maxLength > 0 ? text.substring (0, maxLength) : text;
+                          })
+                          .withValueFromStringFunction ([unit, percent] (const juce::String& text) {
+                              auto t = text.trim();
+                              float scale = 1.0f;
+                              if (unit == Unit::Hz && t.endsWithIgnoreCase ("k"))
+                                  scale = 1000.0f; // "1.5k"
+                              if (unit == Unit::Hz && t.endsWithIgnoreCase ("khz"))
+                                  scale = 1000.0f;
+                              const float v = t.getFloatValue() * scale; // ignores a trailing unit
+                              return percent ? v / 100.0f : v;
+                          });
+    return std::make_unique<juce::AudioParameterFloat> (pid, name, range, info.defaultValue, attributes);
+}
+} // namespace
+
+//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout FlubsoundProcessor::createParameterLayout()
+{
+    using namespace flub::param;
+    const auto& table = layout();
+
+    // Groups in order of first appearance; the EQ and dynamic-EQ bands get one
+    // sub-group per band so generic editors / host menus stay navigable.
+    struct GroupEntry
+    {
+        std::string name;
+        std::unique_ptr<juce::AudioProcessorParameterGroup> group;
+        std::vector<std::unique_ptr<juce::AudioProcessorParameterGroup>> bands;
+    };
+    std::vector<GroupEntry> groups;
+
+    auto groupFor = [&groups] (const std::string& name) -> GroupEntry& {
+        for (auto& g : groups)
+            if (g.name == name)
+                return g;
+        GroupEntry e;
+        e.name = name;
+        e.group = std::make_unique<juce::AudioProcessorParameterGroup> (groupIdFor (name), juce::String (name), "|");
+        groups.push_back (std::move (e));
+        return groups.back();
+    };
+
+    for (int id = 0; id < kNumParams; ++id)
+    {
+        const auto& info = table[static_cast<size_t> (id)];
+        auto& g = groupFor (info.group);
+        auto parameter = makeParameter (info);
+
+        int band = -1;
+        if (id >= kEqBase && id < kDynBase)
+            band = (id - kEqBase) / kEqFields;
+        else if (id >= kDynBase)
+            band = (id - kDynBase) / kDynFields;
+
+        if (band < 0)
+        {
+            g.group->addChild (std::move (parameter));
+            continue;
+        }
+        while (static_cast<int> (g.bands.size()) <= band)
+        {
+            const auto n = static_cast<int> (g.bands.size());
+            const juce::String sub = (id >= kDynBase ? "Dyn " : "Band ") + juce::String (n + 1);
+            g.bands.push_back (std::make_unique<juce::AudioProcessorParameterGroup> (groupIdFor (info.group) + "_" + juce::String (n + 1),
+                                                                                    sub, "|"));
+        }
+        g.bands[static_cast<size_t> (band)]->addChild (std::move (parameter));
+    }
+
+    juce::AudioProcessorValueTreeState::ParameterLayout result;
+    for (auto& g : groups)
+    {
+        for (auto& b : g.bands)
+            g.group->addChild (std::move (b));
+        result.add (std::move (g.group));
+    }
+    return result;
+}
+
+//==============================================================================
+FlubsoundProcessor::FlubsoundProcessor()
+    : juce::AudioProcessor (BusesProperties()
+                                .withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts (*this, nullptr, kStateType, createParameterLayout())
+{
+    const auto& table = flub::param::layout();
+    for (int id = 0; id < flub::param::kNumParams; ++id)
+    {
+        const auto& info = table[static_cast<size_t> (id)];
+        rawValues[static_cast<size_t> (id)] = apvts.getRawParameterValue (juce::String (info.key));
+        jassert (rawValues[static_cast<size_t> (id)] != nullptr);
+        lastPushed[static_cast<size_t> (id)] = std::numeric_limits<float>::quiet_NaN(); // forces the first push
+    }
+    for (int c = 0; c < flub::kMaxChannels; ++c)
+        channelMap[static_cast<size_t> (c)] = c;
+
+    pushParametersToStore();
+    startTimerHz (kStructuralPollHz);
+}
+
+FlubsoundProcessor::~FlubsoundProcessor()
+{
+    stopTimer();
+}
+
+const juce::String FlubsoundProcessor::getName() const
+{
+    return JucePlugin_Name;
+}
+
+//==============================================================================
+bool FlubsoundProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    if (layouts.getMainOutputChannelSet() != juce::AudioChannelSet::stereo())
+        return false;
+
+    const auto in = layouts.getMainInputChannelSet();
+    return in == juce::AudioChannelSet::mono() || in == juce::AudioChannelSet::stereo()
+           || in == juce::AudioChannelSet::create5point1() || in == juce::AudioChannelSet::create7point1();
+}
+
+void FlubsoundProcessor::pushParametersToStore() noexcept
+{
+    for (size_t id = 0; id < rawValues.size(); ++id)
+    {
+        const float v = rawValues[id]->load (std::memory_order_relaxed);
+        if (v != lastPushed[id]) // NaN sentinel never compares equal
+        {
+            store.set (static_cast<int> (id), v); // clamps; relaxed atomic store
+            lastPushed[id] = v;
+        }
+    }
+}
+
+void FlubsoundProcessor::prepareChain (double sampleRate, int maxBlockSize)
+{
+    using juce::AudioChannelSet;
+
+    // Map chain channels (WAVE_FORMAT_EXTENSIBLE order) onto JUCE buffer channels.
+    const auto inSet = getChannelLayoutOfBus (true, 0);
+    const int numIn = inSet.size();
+    duplicateMono = numIn == 1;
+    chainInputChannels = (numIn == 6 || numIn == 8) ? numIn : 2;
+    for (int c = 0; c < flub::kMaxChannels; ++c)
+        channelMap[static_cast<size_t> (c)] = c;
+
+    if (chainInputChannels > 2)
+    {
+        // 5.1 : FL FR FC LFE SL SR          7.1 : FL FR FC LFE BL BR SL SR
+        const AudioChannelSet::ChannelType order51[] = { AudioChannelSet::left, AudioChannelSet::right, AudioChannelSet::centre,
+                                                         AudioChannelSet::LFE, AudioChannelSet::leftSurround, AudioChannelSet::rightSurround };
+        const AudioChannelSet::ChannelType order71[] = { AudioChannelSet::left,
+                                                         AudioChannelSet::right,
+                                                         AudioChannelSet::centre,
+                                                         AudioChannelSet::LFE,
+                                                         AudioChannelSet::leftSurroundRear,
+                                                         AudioChannelSet::rightSurroundRear,
+                                                         AudioChannelSet::leftSurroundSide,
+                                                         AudioChannelSet::rightSurroundSide };
+        const auto* order = chainInputChannels == 8 ? order71 : order51;
+        bool complete = true;
+        std::array<int, flub::kMaxChannels> map {};
+        for (int c = 0; c < chainInputChannels; ++c)
+        {
+            map[static_cast<size_t> (c)] = inSet.getChannelIndexForType (order[c]);
+            complete = complete && map[static_cast<size_t> (c)] >= 0;
+        }
+        if (complete)
+            channelMap = map;
+        // else: unknown variant - keep the host order (identity), still stereo out.
+    }
+
+    preparedSampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    preparedBlockSize = juce::jmax (32, maxBlockSize);
+
+    // Structural parameters (latency profile) are read by prepare().
+    std::fill (lastPushed.begin(), lastPushed.end(), std::numeric_limits<float>::quiet_NaN());
+    pushParametersToStore();
+
+    chain.prepare ({ preparedSampleRate, preparedBlockSize, chainInputChannels });
+    preparedProfile = static_cast<int> (std::lround (store.get (flub::param::LatencyProfile)));
+
+    const int latency = chain.getLatencySamples();
+    reportedLatency.store (latency, std::memory_order_relaxed);
+    setLatencySamples (latency);
+}
+
+void FlubsoundProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+{
+    const std::lock_guard<std::mutex> lock (prepareMutex);
+    prepared.store (false, std::memory_order_release);
+    prepareChain (sampleRate, samplesPerBlock);
+    prepared.store (true, std::memory_order_release);
+}
+
+void FlubsoundProcessor::releaseResources()
+{
+    const std::lock_guard<std::mutex> lock (prepareMutex);
+    prepared.store (false, std::memory_order_release);
+}
+
+void FlubsoundProcessor::reset()
+{
+    // Hosts call this to flush tails (e.g. on transport jumps); never
+    // concurrently with a block we are processing.
+    const juce::ScopedLock sl (getCallbackLock());
+    if (prepared.load (std::memory_order_acquire))
+        chain.reset();
+}
+
+void FlubsoundProcessor::timerCallback()
+{
+    // Structural parameter changed (latency profile)? Re-prepare off the audio
+    // thread: suspendProcessing() waits for the current block (callback lock),
+    // the host receives silence for the few ms the prepare takes, then the new
+    // latency is reported. Profiles are a deliberate, rare user action.
+    if (! prepared.load (std::memory_order_acquire))
+        return;
+
+    const auto* raw = rawValues[static_cast<size_t> (flub::param::LatencyProfile)];
+    const int wanted = static_cast<int> (std::lround (raw->load (std::memory_order_relaxed)));
+    if (wanted == preparedProfile)
+        return;
+
+    const std::lock_guard<std::mutex> lock (prepareMutex);
+    if (! prepared.load (std::memory_order_acquire))
+        return;
+    suspendProcessing (true);
+    prepareChain (preparedSampleRate, preparedBlockSize);
+    suspendProcessing (false);
+}
+
+//==============================================================================
+void FlubsoundProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    processInternal (buffer, false);
+}
+
+void FlubsoundProcessor::processBlockBypassed (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    // Only reached with hosts that bypass without our bypass parameter: use
+    // the chain's own bypass so latency and the crossfade stay consistent.
+    processInternal (buffer, true);
+}
+
+void FlubsoundProcessor::processInternal (juce::AudioBuffer<float>& buffer, bool forceBypass) noexcept
+{
+    const flub::ScopedNoDenormals noDenormals;
+
+    const int numSamples = buffer.getNumSamples();
+    if (! prepared.load (std::memory_order_acquire) || numSamples <= 0)
+    {
+        buffer.clear();
+        return;
+    }
+
+    const int needed = juce::jmax (2, chainInputChannels);
+    if (buffer.getNumChannels() < needed)
+    {
+        buffer.clear(); // host violated the negotiated layout
+        return;
+    }
+
+    pushParametersToStore();
+    if (forceBypass)
+    {
+        store.set (flub::param::BypassAll, 1.0f);
+        lastPushed[static_cast<size_t> (flub::param::BypassAll)] = std::numeric_limits<float>::quiet_NaN(); // restore next block
+    }
+
+    // Mono in -> stereo: the second buffer channel is an output-only channel
+    // (undefined content), so it receives a copy of the input.
+    if (duplicateMono)
+        buffer.copyFrom (1, 0, buffer, 0, 0, numSamples);
+
+    std::array<float*, flub::kMaxChannels> pointers {};
+    for (int c = 0; c < chainInputChannels; ++c)
+        pointers[static_cast<size_t> (c)] = buffer.getWritePointer (channelMap[static_cast<size_t> (c)]);
+
+    for (int pos = 0; pos < numSamples; pos += preparedBlockSize)
+    {
+        const int n = juce::jmin (preparedBlockSize, numSamples - pos);
+        chain.process (flub::AudioBlock (pointers.data(), chainInputChannels, n, pos));
+    }
+
+    // Anything beyond the stereo output (surround inputs) is cleared by the
+    // chain; clear extra buffer channels the chain does not know about.
+    for (int c = chainInputChannels; c < buffer.getNumChannels(); ++c)
+        buffer.clear (c, 0, numSamples);
+}
+
+//==============================================================================
+juce::AudioProcessorParameter* FlubsoundProcessor::getBypassParameter() const
+{
+    return apvts.getParameter (juce::String (flub::param::layout()[static_cast<size_t> (flub::param::BypassAll)].key));
+}
+
+double FlubsoundProcessor::getTailLengthSeconds() const
+{
+    // Release stages (compressor up to 2 s, maximizer up to 1 s) and the
+    // virtualiser room decay; 0.5 s covers the audible tail at defaults.
+    return 0.5;
+}
+
+//==============================================================================
+void FlubsoundProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    state.setProperty (kStateVersionProperty, kStateVersion, nullptr);
+    if (auto xml = state.createXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+        if (xml->hasTagName (apvts.state.getType()))
+            apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    // Parameters missing from an older state keep their current values; the
+    // audio thread picks everything up through the raw values.
+}
+
+//==============================================================================
+bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& error)
+{
+    // Read through juce::File (Unicode paths on every platform), parse with
+    // the core so the app, the CLI and the plug-in agree on the format.
+    if (! file.existsAsFile())
+    {
+        error = "File not found: " + file.getFullPathName();
+        return false;
+    }
+    flub::json::Value root;
+    std::string parseError;
+    if (! flub::json::parse (file.loadFileAsString().toStdString(), root, parseError))
+    {
+        error = file.getFileName() + ": " + juce::String (parseError);
+        return false;
+    }
+    flub::preset::Preset preset;
+    if (! flub::preset::fromJson (root, preset, parseError))
+    {
+        error = file.getFileName() + ": " + juce::String (parseError);
+        return false;
+    }
+
+    const auto& table = flub::param::layout();
+    for (int id = 0; id < flub::param::kNumParams; ++id)
+    {
+        if (id == flub::param::BypassAll)
+            continue; // application state, not preset state
+        if (auto* p = apvts.getParameter (juce::String (table[static_cast<size_t> (id)].key)))
+        {
+            p->beginChangeGesture();
+            p->setValueNotifyingHost (p->convertTo0to1 (preset.values[static_cast<size_t> (id)]));
+            p->endChangeGesture();
+        }
+    }
+    return true;
+}
+
+bool FlubsoundProcessor::exportPreset (const juce::File& file, juce::String& error) const
+{
+    auto preset = flub::preset::makeDefault();
+    auto name = file.getFileNameWithoutExtension();
+    if (name.endsWithIgnoreCase (".flubpreset"))
+        name = name.dropLastCharacters (11);
+    preset.name = name.toStdString();
+    preset.category = "User";
+    preset.author = "User";
+
+    for (int id = 0; id < flub::param::kNumParams; ++id)
+        preset.values[static_cast<size_t> (id)] = rawValues[static_cast<size_t> (id)]->load (std::memory_order_relaxed);
+    const auto bypass = static_cast<size_t> (flub::param::BypassAll);
+    preset.values[bypass] = flub::param::layout()[bypass].defaultValue;
+
+    const auto text = flub::json::write (flub::preset::toJson (preset), 2) + "\n";
+    if (! file.replaceWithText (juce::String::fromUTF8 (text.c_str()), false, false, "\n"))
+    {
+        error = "Cannot write " + file.getFullPathName();
+        return false;
+    }
+    return true;
+}
+
+//==============================================================================
+juce::AudioProcessorEditor* FlubsoundProcessor::createEditor()
+{
+    return new FlubsoundEditor (*this);
+}
+} // namespace flub::plugin
+
+//==============================================================================
+// The plug-in client wrappers create the processor through this factory.
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new flub::plugin::FlubsoundProcessor();
+}

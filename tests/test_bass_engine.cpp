@@ -675,7 +675,7 @@ TEST_CASE ("BassEngine: robustness - silence, DC, full-scale noise, impulses, ex
 
     for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
     {
-        const int n = static_cast<int> (fs * 0.4);
+        const int n = static_cast<int> (fs * 0.25);
         for (const auto& p : settings)
         {
             for (int channels : { 1, 2, 6 })

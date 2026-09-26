@@ -37,7 +37,8 @@
 // continuously and are faded with matching weights. Everything is per-sample
 // state, and blocks are split only where a type crossfade ends, so the output
 // is identical for any host block size (bit-exact apart from when a state
-// below 1e-15 gets flushed to zero, which is checked at segment ends).
+// below 1e-15 gets flushed to zero, which is checked at segment ends and
+// every 64 oversampled samples for the tape emphasis).
 //
 // outputDb is a wet-path (make-up) gain: mix = 0 is always the exact,
 // latency-aligned dry signal.
@@ -85,6 +86,12 @@ constexpr float kDbToLog = 0.11512925464970229f;
 // (or limit-cycling in) subnormals when the host did not enable FTZ. A
 // non-finite state (only possible after non-finite input) is cleared too.
 constexpr float kStateFloor = 1.0e-15f;
+
+// Oversampled samples between flushes of the tape emphasis states. From the
+// 1e-15 floor, subnormal range (1.2e-38) is 53 e-folds away, which takes at
+// least ~150 samples at the fastest emphasis decay (44.1 kHz, 1x). 64 samples
+// leaves a wide margin, so the flush always catches the state first.
+constexpr int kTapeFlushInterval = 64;
 
 float flushState (float v) noexcept
 {
@@ -362,12 +369,24 @@ void Saturator::runCurve (SaturationType type, ChannelState& st, float* d, int n
     switch (type)
     {
         case SaturationType::Tape:
-            if (driveRamping)
-                curveLoop<SaturationType::Tape, true> (preEmphasis, deEmphasis, st.pre, st.de, d, n, g, ig, g0, ig0);
-            else
-                curveLoop<SaturationType::Tape, false> (preEmphasis, deEmphasis, st.pre, st.de, d, n, g, ig, g0, ig0);
-            flushState (st.pre);
-            flushState (st.de);
+            // The 3 kHz emphasis shelves decay fast (down to ~3 samples per
+            // e-fold at 44.1 kHz, 1x), so after the input stops a state can
+            // drop from the 1e-15 flush floor into subnormals within ~150
+            // samples and then crawl or limit-cycle there. That costs 10-25x
+            // without FTZ, and a segment can hold 4 * 4096 oversampled
+            // samples. Flushing every kTapeFlushInterval samples keeps the
+            // states out of the subnormal range. The check is a few
+            // compares per 64 samples.
+            for (int pos = 0; pos < n; pos += kTapeFlushInterval)
+            {
+                const int len = std::min (kTapeFlushInterval, n - pos);
+                if (driveRamping)
+                    curveLoop<SaturationType::Tape, true> (preEmphasis, deEmphasis, st.pre, st.de, d + pos, len, g + pos, ig + pos, g0, ig0);
+                else
+                    curveLoop<SaturationType::Tape, false> (preEmphasis, deEmphasis, st.pre, st.de, d + pos, len, g, ig, g0, ig0);
+                flushState (st.pre);
+                flushState (st.de);
+            }
             break;
         case SaturationType::Tube:
             if (driveRamping)
