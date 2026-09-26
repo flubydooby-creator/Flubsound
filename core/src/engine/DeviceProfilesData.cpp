@@ -122,6 +122,24 @@ const char* builtInProfilesJson() noexcept
       "labVerified": false
     },
     {
+      "id": "turtle-beach-pdp",
+      "vendor": "Turtle Beach (PDP)",
+      "family": "PDP",
+      "displayName": "PDP headset (Turtle Beach)",
+      "matchAny": ["pdp", "airlite", "victrix", "lvl50", "lvl40", "lvl30"],
+      "specificity": 2,
+      "typicalConnection": "analog",
+      "onboardDsp": false,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "PDP headsets (Airlite, LVL and Victrix lines; PDP is part of Turtle Beach) are mostly wired 3.5 mm console headsets. On a computer they play through the jack or the controller's audio output, which Flubsound uses unchanged. Wireless Airlite models for Xbox connect like other Xbox Wireless headsets, through the Xbox Wireless adapter."
+      ],
+      "labVerified": false
+    },
+    {
       "id": "xbox-wireless-headset",
       "vendor": "Various (Xbox Wireless)",
       "family": "Xbox Wireless",

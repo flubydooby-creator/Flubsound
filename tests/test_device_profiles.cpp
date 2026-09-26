@@ -68,6 +68,9 @@ TEST_CASE ("DeviceProfiles: Turtle Beach families are recognised from typical en
         { "ROCCAT Syn Pro Air", "turtle-beach-roccat" },
         { "Speakers (Turtle Beach Ear Force Z60)", "turtle-beach-generic" },
         { "Headset Earphone (Xbox Wireless Headset)", "xbox-wireless-headset" },
+        { "Headphones (PDP Airlite Pro Wireless)", "turtle-beach-pdp" }, // PDP is a Turtle Beach brand
+        { "Speakers (Victrix Gambit Headset)", "turtle-beach-pdp" },
+        { "Headset (LVL50 Wireless)", "turtle-beach-pdp" },
     };
     for (const auto& c : cases)
     {
@@ -82,7 +85,8 @@ TEST_CASE ("DeviceProfiles: unrelated devices do not match (no false positives)"
 {
     const auto& db = shippedDatabase();
     for (const char* name : { "Speakers (Realtek(R) Audio)", "Razer Blade Stealth Speakers", "Headphones (WH-1000XM5)",
-                              "MacBook Pro Speakers", "Built-in Audio Analog Stereo", "Stealthy Mic", "Reconnect Audio" })
+                              "MacBook Pro Speakers", "Built-in Audio Analog Stereo", "Stealthy Mic", "Reconnect Audio",
+                              "Airliner Lounge Speakers", "Headphones (Victrixx)" })
         CHECK (idOf (db.match (name, 48000.0, 2)) == "(generic)");
 }
 
