@@ -15,12 +15,14 @@
 
 #import <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
+#include <CoreAudio/CoreAudio.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
 #include <pthread.h>
 
 #include <map>
+#include <vector>
 
 namespace flub::platform
 {
@@ -340,6 +342,63 @@ public:
 // Non-null token returned by promoteAudioThread on success.
 char timeConstraintToken = 0;
 } // namespace
+
+//==============================================================================
+// AudioEndpoints - Core Audio transport type of the named output device
+//==============================================================================
+EndpointTransport AudioEndpoints::queryOutputTransport (const std::string& deviceName)
+{
+    if (deviceName.empty())
+        return EndpointTransport::Unknown;
+
+    AudioObjectPropertyAddress devicesAddress { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                                kAudioObjectPropertyElementMain };
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize (kAudioObjectSystemObject, &devicesAddress, 0, nullptr, &size) != noErr || size == 0)
+        return EndpointTransport::Unknown;
+
+    std::vector<AudioObjectID> ids (size / sizeof (AudioObjectID));
+    if (AudioObjectGetPropertyData (kAudioObjectSystemObject, &devicesAddress, 0, nullptr, &size, ids.data()) != noErr)
+        return EndpointTransport::Unknown;
+
+    for (const AudioObjectID id : ids)
+    {
+        // JUCE names CoreAudio devices by kAudioObjectPropertyName.
+        AudioObjectPropertyAddress nameAddress { kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+                                                 kAudioObjectPropertyElementMain };
+        CFStringRef cfName = nullptr;
+        UInt32 nameSize = sizeof (cfName);
+        if (AudioObjectGetPropertyData (id, &nameAddress, 0, nullptr, &nameSize, &cfName) != noErr || cfName == nullptr)
+            continue;
+
+        char buffer[512] = {};
+        const bool converted = CFStringGetCString (cfName, buffer, sizeof (buffer), kCFStringEncodingUTF8);
+        CFRelease (cfName); // the property returns a +1 reference
+        if (! converted || deviceName != buffer)
+            continue;
+
+        AudioObjectPropertyAddress transportAddress { kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal,
+                                                      kAudioObjectPropertyElementMain };
+        UInt32 transport = 0;
+        UInt32 transportSize = sizeof (transport);
+        if (AudioObjectGetPropertyData (id, &transportAddress, 0, nullptr, &transportSize, &transport) != noErr)
+            return EndpointTransport::Unknown;
+
+        switch (transport)
+        {
+            case kAudioDeviceTransportTypeBluetooth:
+            case kAudioDeviceTransportTypeBluetoothLE: return EndpointTransport::Bluetooth; // HFP is detected by format (8/16 kHz)
+            case kAudioDeviceTransportTypeUSB: return EndpointTransport::Usb;
+            case kAudioDeviceTransportTypeBuiltIn: return EndpointTransport::Analog;
+            case kAudioDeviceTransportTypeHDMI:
+            case kAudioDeviceTransportTypeDisplayPort: return EndpointTransport::Hdmi;
+            case kAudioDeviceTransportTypeVirtual:
+            case kAudioDeviceTransportTypeAggregate: return EndpointTransport::Virtual;
+            default: return EndpointTransport::Unknown;
+        }
+    }
+    return EndpointTransport::Unknown;
+}
 
 //==============================================================================
 // SystemTuning

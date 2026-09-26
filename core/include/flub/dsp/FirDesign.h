@@ -35,21 +35,4 @@ inline double sinc (double x) noexcept
 {
     return std::abs (x) < 1.0e-12 ? 1.0 : std::sin (kPi * x) / (kPi * x);
 }
-
-/** Linear-phase low-pass, odd length, cutoff in cycles/sample (0..0.5),
-    unity DC gain. Allocates: prepare-time only. */
-inline std::vector<double> lowpass (int length, double cutoff, double kaiserBeta)
-{
-    std::vector<double> h (static_cast<size_t> (length));
-    const int centre = (length - 1) / 2;
-    double sum = 0.0;
-    for (int n = 0; n < length; ++n)
-    {
-        h[static_cast<size_t> (n)] = 2.0 * cutoff * sinc (2.0 * cutoff * (n - centre)) * kaiser (n, length, kaiserBeta);
-        sum += h[static_cast<size_t> (n)];
-    }
-    for (auto& v : h)
-        v /= sum;
-    return h;
-}
 } // namespace flub::fir

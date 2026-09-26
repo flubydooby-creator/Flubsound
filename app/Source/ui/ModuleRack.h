@@ -48,8 +48,8 @@ private:
 
     EngineController& controller;
     ParameterBinder binder;
+    juce::Component content; // declared before the viewport that shows it
     juce::Viewport viewport;
-    juce::Component content;
     std::vector<std::unique_ptr<ModuleCard>> cards;
     ModuleCard* expandedCard = nullptr;
 };

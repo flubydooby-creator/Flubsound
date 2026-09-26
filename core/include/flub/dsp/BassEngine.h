@@ -5,8 +5,9 @@
 //      removes DC and inaudible rumble that would waste limiter headroom.
 //   2. Mono-bass (stereo only): LR4 split at monoBelowHz; the low band is
 //      replaced by its mid (L+R)/2 -> tight, centred low end, no phasey sub.
-//   3. Adaptive low boost: low-shelf (Q 0.7) at boostFrequency whose gain is
-//      boostDb minus a protection term. A detector (LP at ~150 Hz, linked,
+//   3. Adaptive low boost: low-shelf (Q 0.7) at boostFrequency (the shelf
+//      corner = half-gain point) whose gain is boostDb minus a protection
+//      term. A detector (LP at max(150 Hz, 1.5 x boostFrequency), linked,
 //      10 ms / 150 ms envelope) predicts the boosted LF level; if
 //      level + boost exceeds protectThresholdDb the boost is withdrawn by the
 //      excess (soft knee 6 dB). This is what keeps "+12 dB bass" from turning

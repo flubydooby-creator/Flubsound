@@ -17,10 +17,11 @@
 //   smoothing: GainSmoother (attack = level rising), control-rate coefficient
 //              update every kControlInterval samples (the SVF is modulation-safe).
 //
-// Gaming uses: footstep lift (BoostBelow ~3 kHz), explosion-masking control
-// (CutAbove ~80 Hz), voice/score presence (BoostBelow ~1.8 kHz).
-// Music uses: de-harsh (CutAbove ~3.5 kHz), de-boom (CutAbove ~120 Hz),
-// air lift (BoostBelow high shelf 10 kHz).
+// The chain's mode policy drives bands 4-7 (ProcessingChain::configureModeBands):
+// Gaming: footstep detail (BoostBelow bell 3.2 kHz), footstep body (BoostBelow
+// bell 260 Hz), explosion anti-masking (CutAbove low shelf 90 Hz), voice /
+// score (BoostBelow bell 2 kHz). Music: de-harsh (CutAbove bell 3.5 kHz), air
+// lift (BoostBelow high shelf 12 kHz), de-boom (CutAbove bell 120 Hz).
 #pragma once
 
 #include "EnvelopeFollower.h"

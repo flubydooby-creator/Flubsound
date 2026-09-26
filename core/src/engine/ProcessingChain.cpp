@@ -275,8 +275,8 @@ void ProcessingChain::applyParameters() noexcept
     // The air exciter is alias-free only because its <= 3rd-order products of
     // <= 7 kHz content stay below 21 kHz. Headsets running at low rates (USB
     // 32 kHz modes, Bluetooth hands-free at 16 / 8 kHz) would fold them back,
-    // so it is disabled below 40 kHz.
-    cp.air = config.sampleRate >= 40000.0 ? e[ClarityAir] : 0.0f;
+    // so it is disabled below 42 kHz (3 x 7 kHz = 21 kHz < fs / 2).
+    cp.air = config.sampleRate >= 42000.0 ? e[ClarityAir] : 0.0f;
     cp.deMud = e[ClarityDeMud];
     clarity.setParams (cp);
     slots[SClarity].setActive (on (e, ClarityOn));

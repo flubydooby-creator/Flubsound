@@ -475,6 +475,17 @@ struct SavedSchedulingPolicy
 constexpr int kPreferredFifoPriority = 20;
 } // namespace
 
+// ============================================================================
+// AudioEndpoints
+// ============================================================================
+EndpointTransport AudioEndpoints::queryOutputTransport (const std::string&)
+{
+    // JUCE's ALSA/JACK device names do not map 1:1 to PipeWire/Pulse sinks, so
+    // the transport (PipeWire "device.bus") is not queried here; headset
+    // profiles fall back to flub::device::detectConnection() heuristics.
+    return EndpointTransport::Unknown;
+}
+
 //==============================================================================
 // SystemTuning
 //==============================================================================

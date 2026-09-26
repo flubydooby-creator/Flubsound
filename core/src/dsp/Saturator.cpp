@@ -2,10 +2,13 @@
 //
 // Signal flow per channel (x = input, L = oversampler round-trip latency):
 //
-//   x --+--> upsample --> curve (per type, oversampled) --> downsample --> s
-//       |                                                                 |
-//       +--> dry delay (L samples) -----------------------------> x_d     |
-//                                                                         v
+//   x --+--> upsample x^ --> curve f (per type) --> f(x^) - x^ --> downsample --> d
+//       |                                                                        |
+//       +--> dry delay (L samples) ---------------------------------> x_d ---(+)--> s
+//   (delta oversampling: only the curve's deviation is band-limited, so the
+//    programme never passes the half-band filters and the top octave does
+//    not droop; the round-trip latency L is unchanged)
+//
 //   s'   = s - tubeW * LP10(s)                  tube DC blocker (10 Hz HP)
 //   s''  = s' + bumpBeta * tapeW * BP80(s')     tape head bump (+1 dB * drive/24 @ 80 Hz)
 //   core = x_d + depth * (s'' - x_d)            drive depth (0 at 0 dB drive)
@@ -211,6 +214,7 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     osGain.assign (osSize, 1.0f);
     osInvGain.assign (osSize, 1.0f);
     osScratch.assign (osSize, 0.0f);
+    osInput.assign (osSize, 0.0f);
     for (auto* v : { &depthBuf, &tubeBuf, &bumpBuf, &gainBuf, &mixBuf })
         v->assign (baseSize, 0.0f);
 
@@ -424,9 +428,18 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
     {
         auto& st = channelState[static_cast<size_t> (c)];
         float* d = up.channel (c);
+        // Delta oversampling: keep the upsampled input so that only the
+        // curve's deviation f(x^) - x^ passes the band-limiting downsampler;
+        // the programme itself is taken from the exact dry delay (no top-octave
+        // droop from the half-band filters, e.g. -2.3 dB at 20 kHz / 44.1 kHz
+        // with the short 2x design).
+        float* in = osInput.data();
+        std::copy (d, d + nOs, in);
         if (! fading)
         {
             runCurve (activeType, st, d, nOs);
+            for (int k = 0; k < nOs; ++k)
+                d[k] -= in[k];
             continue;
         }
 
@@ -440,10 +453,10 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
         for (int k = 0; k < nOs; ++k)
         {
             const float w = static_cast<float> (base + k + 1) * invFadeLengthOs;
-            d[k] += w * (alt[k] - d[k]);
+            d[k] += w * (alt[k] - d[k]) - in[k];
         }
     }
-    oversampler.downsample (seg);
+    oversampler.downsample (seg); // seg now holds the band-limited deviation
 
     // 4. Base-rate post-processing and latency-aligned dry/wet.
     const SvfCoeffs bumpC = headBump;
@@ -458,7 +471,7 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
         for (int i = 0; i < length; ++i)
         {
             const auto si = static_cast<size_t> (i);
-            float s = y[i];
+            float s = x[i] + y[i]; // exact dry + band-limited curve deviation
 
             // Tube DC blocker: 1st-order TPT high-pass at 10 Hz, HP(s) = s - LP(s).
             // Always running so it is settled when a crossfade brings Tube in.

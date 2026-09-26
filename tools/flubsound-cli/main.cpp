@@ -32,6 +32,7 @@
 #include <exception>
 #include <filesystem>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -107,8 +108,10 @@ and sample rate.
     to stereo.
   * --target-lufs L: render, measure the integrated loudness (EBU R128),
     move max.drive (0..24 dB) by the error and render again - up to 4 more
-    passes, stopping within 0.3 LU. The maximizer's true-peak limiter holds
-    the ceiling (--ceiling, default from the preset / -1 dBTP).
+    passes, stopping within 0.3 LU. Beyond 24 dB of drive input.gain is
+    raised; below 0 dB of drive output.gain is lowered. The maximizer's
+    true-peak limiter holds the ceiling (--ceiling, default from the preset /
+    -1 dBTP); a measured overshoot is trimmed off the delivered file.
   * Percent parameters are stored as 0..1: --set clarity.air=0.4 or =40%.
 
 Examples:
@@ -339,11 +342,13 @@ json::Value renderInfoJson (const RenderResult& rr, const RenderOptions& o, cons
     r.set ("latencyMs", std::round (1.0e5 * rr.latencySamples / sampleRate) / 100.0);
     r.set ("chainInputChannels", rr.chainInputChannels);
     r.set ("maxDriveDb", std::round (rr.driveDb * 100.0) / 100.0);
+    r.set ("inputGainDb", std::round (rr.inputGainDb * 100.0) / 100.0);
     r.set ("outputGainDb", std::round (rr.outputGainDb * 100.0) / 100.0);
+    r.set ("ceilingTrimDb", std::round (rr.ceilingTrimDb * 100.0) / 100.0);
     r.set ("targetLufs", o.targetLufs ? json::Value (static_cast<double> (*o.targetLufs)) : json::Value());
     r.set ("targetReached", rr.targetReached);
     r.set ("renderSeconds", std::round (rr.renderSeconds * 1000.0) / 1000.0);
-    r.set ("realtimeFactor", rr.renderSeconds > 0.0 ? std::round (10.0 * audioSeconds * rr.passes / rr.renderSeconds) / 10.0 : 0.0);
+    r.set ("realtimeFactor", rr.renderSeconds > 0.0 && audioSeconds > 0.0 ? std::round (10.0 * audioSeconds * rr.passes / rr.renderSeconds) / 10.0 : 0.0);
     r.set ("format", sampleFormatName (o.format));
     json::Value notes { json::Value::Array {} };
     for (const auto& n : p.notes)
@@ -420,8 +425,9 @@ int runProcess (const CliOptions& o)
     log.info ("Render  : " + std::to_string (rr.passes) + (rr.passes == 1 ? " pass" : " passes") + ", latency "
               + std::to_string (rr.latencySamples) + " samples (" + fmt ("%.2f ms", 1000.0 * rr.latencySamples / input.sampleRate)
               + ") compensated, max.drive " + fmt ("%.2f dB", rr.driveDb)
+              + (rr.inputGainDb != params.values[static_cast<size_t> (param::InputGainDb)] ? ", input.gain " + fmt ("%.2f dB", rr.inputGainDb) : std::string())
               + (rr.outputGainDb != params.values[static_cast<size_t> (param::OutputGainDb)] ? ", output.gain " + fmt ("%.2f dB", rr.outputGainDb) : std::string())
-              + (rr.renderSeconds > 0.0 ? fmt (", %.1fx realtime", audioSeconds * rr.passes / rr.renderSeconds) : std::string()) + "\n");
+              + (rr.renderSeconds > 0.0 && audioSeconds > 0.0 ? fmt (", %.1fx realtime", audioSeconds * rr.passes / rr.renderSeconds) : std::string()) + "\n");
     logNotes (log, rr.notes);
 
     if (o.json)
@@ -583,6 +589,29 @@ int runBatch (const CliOptions& o)
     {
         log.error ("no .wav files found in " + o.input + (o.recursive ? "" : " (use --recursive for sub-folders)"));
         return kExitFailure;
+    }
+
+    // An output path must never be one of the inputs. With --recursive and an
+    // output folder above the input folder this can happen (in = A/B, out = A:
+    // A/B/B/x.wav would be written to A/B/x.wav, itself an input), and a
+    // worker could then read a file another worker is overwriting.
+    {
+        std::set<fs::path> inputs;
+        for (const auto& j : jobs)
+        {
+            std::error_code canonicalEc;
+            inputs.insert (fs::weakly_canonical (j.input, canonicalEc));
+        }
+        for (const auto& j : jobs)
+        {
+            std::error_code canonicalEc;
+            if (inputs.count (fs::weakly_canonical (j.output, canonicalEc)) != 0)
+            {
+                log.error ("the output file " + j.output.string() + " would overwrite an input file; choose an output folder "
+                           "outside the input folder tree");
+                return kExitUsage;
+            }
+        }
     }
 
     fs::create_directories (outDir, ec);

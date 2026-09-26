@@ -299,7 +299,7 @@ juce::Label* FlubLookAndFeel::createSliderTextBox (juce::Slider& slider)
 juce::Font FlubLookAndFeel::getTextButtonFont (juce::TextButton& b, int buttonHeight)
 {
     const auto style = styleOf (b);
-    const bool bold = style == "segment" || style == "accent";
+    const bool bold = style == "segment" || style == "accent" || style == "tab";
     return Theme::font (juce::jmin (13.0f, static_cast<float> (buttonHeight) * 0.5f), bold);
 }
 
@@ -325,6 +325,21 @@ void FlubLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, 
         {
             g.setColour (isDown ? Palette::panelHover.darker (0.2f) : Palette::panelHover);
             g.fillPath (shape);
+        }
+    }
+    else if (style == "tab")
+    {
+        // Neutral selection (the accent is reserved for the mode switch): a
+        // raised fill plus an accent underline.
+        if (on || isHighlighted || isDown)
+        {
+            g.setColour (on ? juce::Colour (0xff262d3a) : Palette::panelHover.withAlpha (isDown ? 0.9f : 0.6f));
+            g.fillPath (shape);
+        }
+        if (on)
+        {
+            g.setColour (accent);
+            g.fillRoundedRectangle (bounds.getX() + bounds.getWidth() * 0.3f, bounds.getBottom() - 3.0f, bounds.getWidth() * 0.4f, 2.0f, 1.0f);
         }
     }
     else if (style == "ghost")
@@ -381,6 +396,8 @@ void FlubLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bo
     juce::Colour colour = isHighlighted ? Palette::text : Palette::text.withAlpha (0.86f);
     if (style == "segment")
         colour = on ? Palette::background : (isHighlighted ? Palette::text : Palette::muted);
+    else if (style == "tab")
+        colour = on ? Palette::text : (isHighlighted ? Palette::text.withAlpha (0.9f) : Palette::muted);
     else if (style == "accent")
         colour = Palette::background;
     else if (style == "warning" && on)

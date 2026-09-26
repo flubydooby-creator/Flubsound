@@ -5,16 +5,21 @@
 // aliasing back into the audible band.
 //
 // Design: cascaded half-band FIR stages (Kaiser-windowed sinc). A half-band
-// filter has every other tap equal to zero, so each 2x stage costs ~N/4
-// multiplies per input sample per direction, and phase 0 of the interpolator
-// is a pure delay. Stage lengths are chosen so the round-trip latency is a
+// filter has every other tap equal to zero, so each 2x stage costs 2d (~N/2)
+// multiply-adds per lower-rate sample per direction (tap symmetry is not
+// exploited), and phase 0 of the interpolator is a pure delay. Stage lengths are chosen so the round-trip latency is a
 // whole number of base-rate samples (required for latency compensation):
 //
 //   stage 1 (base <-> 2x): 4*d1+1 taps, round trip = 2*d1 base samples
 //   stage 2 (2x <-> 4x)  : 4*d2+1 taps, round trip = d2 base samples
 //
-//   Quality::High : d1 = 16 (~90 dB image rejection), d2 = 4  -> 4x latency 36 smp
-//   Quality::Low  : d1 = 8  (~50 dB, gaming ultra-low-latency),  d2 = 3 -> 4x latency 19 smp
+//   Quality::High : d1 = 16, d2 = 4 -> 4x latency 36 smp
+//   Quality::Low  : d1 = 8,  d2 = 3 -> 4x latency 19 smp (gaming low latency)
+// Image rejection is ~90 dB (High) / ~50 dB (Low) up to ~0.375 fs, falling to
+// 67 / 40 dB at 20 kHz / 48 kHz and 25 / 18 dB at 20 kHz / 44.1 kHz. The
+// passband droops near fs/2 (20 kHz / 44.1 kHz: -1.0 dB High, -2.3 dB Low), so
+// the nonlinear stages use DELTA oversampling: only the deviation f(x^) - x^
+// is band-limited and added to the exactly delayed input.
 //
 // A minimum-phase / polyphase-IIR variant (lower latency, non-linear phase)
 // is the planned alternative for the "Competitive" latency profile.

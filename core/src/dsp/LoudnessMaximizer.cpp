@@ -469,7 +469,9 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                     const double removed = static_cast<double> (w) * static_cast<double> (x - y);
                     diffEnergy += removed * removed;
                     inEnergy += static_cast<double> (x) * static_cast<double> (x);
-                    u[k] = y;
+                    // Delta oversampling: only the clipping correction goes
+                    // through the band-limiting downsampler.
+                    u[k] = y - x;
                 }
             }
         }
@@ -478,19 +480,21 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
             clipDiffEnergy += diffEnergy;
             clipInEnergy += inEnergy;
         }
-        oversampler.downsample (seg);
+        oversampler.downsample (seg); // seg now holds the band-limited correction
 
-        for (int i = 0; i < n; ++i)
+        // out = x (delayed exactly by the round trip) + LP(clip(x^) - x^). The
+        // programme itself never passes the half-band filters, so unclipped
+        // audio is bit-transparent and the top octave does not droop (the 2x/4x
+        // stage-1 filters would otherwise cut 20 kHz by 1-2.3 dB at 44.1 kHz).
+        // The clip mix is applied after the downsampler (as a base-rate
+        // crossfade weight), so with the mix at 0 the output is exactly the
+        // dry path whatever the filter tail holds - block-size independent.
+        for (int c = 0; c < numCh; ++c)
         {
-            const float w = clipMixBuf[static_cast<size_t> (i)];
-            if (w == 1.0f)
-                continue;
-            for (int c = 0; c < numCh; ++c)
-            {
-                float* y = data[static_cast<size_t> (c)];
-                const float d = dry.channel (c)[i];
-                y[i] = d + w * (y[i] - d);
-            }
+            float* y = data[static_cast<size_t> (c)];
+            const float* d = dry.channel (c);
+            for (int i = 0; i < n; ++i)
+                y[i] = d[i] + clipMixBuf[static_cast<size_t> (i)] * y[i];
         }
 
         if (clipMixS.getCurrent() == 0.0f && ! clipMixS.isSmoothing() && clipWarmup == 0 && ! (params.clipAmount > 0.0f))

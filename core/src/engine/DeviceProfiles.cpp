@@ -154,6 +154,14 @@ bool Database::loadFile (const std::string& path, std::string& error)
     return load (v, error);
 }
 
+bool Database::loadBuiltIn (std::string& error)
+{
+    json::Value v;
+    if (! json::parse (builtInProfilesJson(), v, error))
+        return false;
+    return load (v, error);
+}
+
 Match Database::match (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint) const
 {
     Match best;
@@ -208,7 +216,7 @@ Advice adviceFor (const Match& m, double sampleRate, bool gamingMode)
     }
 
     if (a.narrowband && m.connection != Connection::BluetoothHandsFree)
-        a.messages.push_back ("The output runs at a low sample rate; Flubsound adapts automatically (the air exciter is disabled below 40 kHz), "
+        a.messages.push_back ("The output runs at a low sample rate; Flubsound adapts automatically (the air exciter is disabled below 42 kHz), "
                               "but 48 kHz gives the best quality if the device supports it.");
 
     if (const Profile* p = m.profile)

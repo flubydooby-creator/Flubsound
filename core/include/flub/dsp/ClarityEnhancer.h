@@ -12,7 +12,10 @@
 //      normalised polynomial of order <= 3 (2nd + 3rd harmonics) -> high-
 //      pass 7 kHz -> mixed in at up to -12 dB * air, plus a +2 dB * air high
 //      shelf at 10 kHz. Order <= 3 on content <= 7 kHz keeps every product
-//      below 21 kHz, so no oversampling is needed even at 44.1 kHz.
+//      below 21 kHz, so no oversampling is needed at >= 44.1 kHz for content
+//      inside the band; strong tones on the 24 dB/oct skirt (7.6-9 kHz) leave
+//      small aliases (-25..-44 dB) folding to 17-21 kHz. The chain disables
+//      air below 42 kHz sample rate.
 // Zero latency.
 #pragma once
 

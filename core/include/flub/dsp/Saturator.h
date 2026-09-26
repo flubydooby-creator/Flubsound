@@ -2,7 +2,12 @@
 //
 // Unity small-signal gain by construction: y = f(g x) / g, where g is the
 // drive gain and f has f'(0) = 1, so drive changes the *character* and peak
-// behaviour rather than the loudness of quiet material.
+// behaviour rather than the loudness of quiet material. The curve is blended
+// in with depth = smoothstep(0, 6 dB, drive), so 0 dB drive is exactly
+// transparent. Loud material is compressed (lower RMS): there is no automatic
+// wet make-up; outputDb is a wet-path gain.
+// Delta oversampling: only f(x^) - x^ passes the half-band downsampler and is
+// added to the exactly delayed input, so the top octave does not droop.
 //   Tape    : pre-emphasis (+6 dB high shelf @ 3 kHz) -> f = tanh ->
 //             de-emphasis (-6 dB) : HF saturates earlier, like tape; plus a
 //             gentle +1 dB "head bump" bell at 80 Hz scaled by drive.
@@ -108,7 +113,7 @@ private:
     AudioBuffer dryBuffer; // [channel][maxBlockSize]
 
     // Per-segment control arrays (allocated in prepare(), never resized).
-    std::vector<float> osGain, osInvGain, osScratch;                 // factor * maxBlockSize
+    std::vector<float> osGain, osInvGain, osScratch, osInput;        // factor * maxBlockSize (osInput: delta oversampling)
     std::vector<float> depthBuf, tubeBuf, bumpBuf, gainBuf, mixBuf; // maxBlockSize
 
     std::array<ChannelState, kMaxChannels> channelState {};

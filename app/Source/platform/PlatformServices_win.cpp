@@ -68,6 +68,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <cwctype>
 #include <iterator>
 #include <map>
 #include <utility>
@@ -1722,6 +1723,95 @@ char threadPriorityFallbackToken = 0;
 //==============================================================================
 // SystemTuning
 //==============================================================================
+// =============================================================================
+// AudioEndpoints: output transport (for headset device profiles)
+// =============================================================================
+namespace
+{
+// PKEY_Device_EnumeratorName (same fmtid as FriendlyName, pid 24) and
+// PKEY_AudioEndpoint_FormFactor, defined locally (no INITGUID / uuid.lib).
+const PROPERTYKEY kDeviceEnumeratorNameKey = { { 0xa45c254e, 0xdf1c, 0x4efd, { 0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0 } }, 24 };
+const PROPERTYKEY kEndpointFormFactorKey = { { 0x1da5d803, 0xd492, 0x4edd, { 0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e } }, 0 };
+constexpr UINT kFormFactorDigitalAudioDisplayDevice = 9; // EndpointFormFactor::DigitalAudioDisplayDevice (HDMI / DP)
+
+std::wstring readStringProperty (IPropertyStore* store, const PROPERTYKEY& key)
+{
+    PROPVARIANT value;
+    PropVariantInit (&value);
+    std::wstring text;
+    if (SUCCEEDED (store->GetValue (key, &value)) && value.vt == VT_LPWSTR && value.pwszVal != nullptr)
+        text = value.pwszVal;
+    PropVariantClear (&value);
+    return text;
+}
+
+UINT readUIntProperty (IPropertyStore* store, const PROPERTYKEY& key, UINT fallback)
+{
+    PROPVARIANT value;
+    PropVariantInit (&value);
+    UINT result = fallback;
+    if (SUCCEEDED (store->GetValue (key, &value)) && value.vt == VT_UI4)
+        result = value.ulVal;
+    PropVariantClear (&value);
+    return result;
+}
+
+EndpointTransport transportFromEnumerator (const std::wstring& enumerator, UINT formFactor)
+{
+    std::wstring e = enumerator;
+    for (auto& ch : e)
+        ch = static_cast<wchar_t> (towupper (ch));
+
+    if (e.find (L"BTHHFENUM") != std::wstring::npos)
+        return EndpointTransport::BluetoothHandsFree; // Bluetooth hands-free profile
+    if (e.rfind (L"BTH", 0) == 0)
+        return EndpointTransport::Bluetooth;          // BTHENUM (A2DP), BTHLEDEVICE (LE Audio)
+    if (e == L"USB")
+        return EndpointTransport::Usb;
+    if (formFactor == kFormFactorDigitalAudioDisplayDevice)
+        return EndpointTransport::Hdmi;
+    if (e == L"HDAUDIO" || e == L"INTELAUDIO" || e == L"ACPI" || e == L"PCI")
+        return EndpointTransport::Analog;
+    if (e == L"SWD" || e == L"ROOT")
+        return EndpointTransport::Virtual;            // software / root-enumerated (virtual cables, our driver)
+    return EndpointTransport::Unknown;
+}
+} // namespace
+
+EndpointTransport AudioEndpoints::queryOutputTransport (const std::string& deviceName)
+{
+    const ScopedComInit com;
+    if (! com.isUsable() || deviceName.empty())
+        return EndpointTransport::Unknown;
+
+    std::string error;
+    auto enumerator = createDeviceEnumerator (error);
+    if (! enumerator)
+        return EndpointTransport::Unknown;
+
+    ComPtr<IMMDeviceCollection> devices;
+    UINT count = 0;
+    if (FAILED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put())) || FAILED (devices->GetCount (&count)))
+        return EndpointTransport::Unknown;
+
+    const std::wstring wanted = toWide (deviceName);
+    for (UINT i = 0; i < count; ++i)
+    {
+        ComPtr<IMMDevice> device;
+        if (FAILED (devices->Item (i, device.put())))
+            continue;
+        if (endpointFriendlyName (device.get()) != wanted)
+            continue;
+
+        ComPtr<IPropertyStore> store;
+        if (FAILED (device->OpenPropertyStore (STGM_READ, store.put())))
+            return EndpointTransport::Unknown;
+        return transportFromEnumerator (readStringProperty (store.get(), kDeviceEnumeratorNameKey),
+                                        readUIntProperty (store.get(), kEndpointFormFactorKey, 10));
+    }
+    return EndpointTransport::Unknown;
+}
+
 bool SystemTuning::disablePowerThrottling()
 {
     /*  EcoQoS: Windows 11 (and 10 on hybrid CPUs) may run processes it thinks are

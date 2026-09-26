@@ -17,7 +17,7 @@
 | **2.4 GHz wireless via USB transmitter** (e.g. wireless Stealth and Atlas models) | Also a USB Audio Class device (the transmitter is the audio device) | Same as wired USB. The engine keeps running when the headset itself powers off, because the transmitter stays connected. | Wireless adds its own small, fixed latency that Flubsound cannot change. This is the recommended connection for games. |
 | **Xbox Wireless adapter on PC** (Xbox models, including Turtle Beach) | A normal output endpoint | Works unchanged | Turn off Windows Sonic / Dolby Atmos for Headphones on that endpoint if you use Flubsound's virtualiser. |
 | **Bluetooth, stereo (A2DP)** | Bluetooth output (lossy codec: SBC/AAC/…) | Output ceiling is capped at **−2 dBTP**, because lossy codecs overshoot peaks; the *Bluetooth Headphones* preset is suggested | Bluetooth adds roughly 100–300 ms of codec latency, independent of Flubsound. Prefer the USB transmitter or a cable for competitive play. |
-| **Bluetooth hands-free (HFP/HSP)**, active while the headset microphone is open | Mono, narrowband output (8 or 16 kHz) | Detected from the endpoint name or format. Ceiling capped at **−3 dBTP**, the air exciter is disabled below 40 kHz to prevent aliasing, and the whole chain runs correctly at 8–16 kHz (tested) | Audio quality is limited by the Bluetooth profile itself. Use the stereo endpoint for game/music audio and a separate mic path if possible. |
+| **Bluetooth hands-free (HFP/HSP)**, active while the headset microphone is open | Mono, narrowband output (8 or 16 kHz) | Detected from the endpoint name or format. Ceiling capped at **−3 dBTP**, the air exciter is disabled below 42 kHz to prevent aliasing, and the whole chain runs correctly at 8–16 kHz (tested) | Audio quality is limited by the Bluetooth profile itself. Use the stereo endpoint for game/music audio and a separate mic path if possible. |
 | **Console only** (headset plugged into an Xbox / PlayStation / Switch with no PC in the path) | — | **Not applicable.** Flubsound runs on computers and cannot process audio that never passes through one. | Routing console audio through a PC (e.g. a capture card with monitoring) makes it processable. |
 
 ### Sample rates and formats
@@ -55,7 +55,7 @@ Implemented in `core/include/flub/engine/DeviceProfiles.h` and `presets/devices/
 
 1. **Identify** the output device by name and family, and the connection type from the platform layer (Windows device enumerator, macOS transport type, PipeWire `device.bus`), falling back to name and format heuristics. Examples: "Hands-Free AG Audio", or 16 kHz mono ⇒ Bluetooth hands-free.
 2. **Cap the true-peak ceiling:** −1 dBTP (wired, USB, 2.4 GHz), −2 dBTP (Bluetooth A2DP), −3 dBTP (Bluetooth hands-free). The cap is applied to the master limiter, so user presets are not modified.
-3. **Adapt to the sample rate:** every module derives its coefficients from the device rate, and alias-prone processing (the air exciter) is disabled below 40 kHz.
+3. **Adapt to the sample rate:** every module derives its coefficients from the device rate, and alias-prone processing (the air exciter) is disabled below 42 kHz.
 4. **Advise:** show the profile's guidance in the app, most important first:
    - turn off Superhuman Hearing, EQ presets or virtual surround when they would stack with Flubsound,
    - keep voice chat on the headset's own Chat output when it has one,

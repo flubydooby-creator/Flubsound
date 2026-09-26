@@ -82,11 +82,17 @@ std::string normalise (const std::string& s);
 /** Best-effort connection detection when the platform cannot tell. */
 Connection detectConnection (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint = Connection::Unknown);
 
+/** The shipped profile database (presets/devices/device-profiles.json embedded
+    at build time by tools/scripts/embed-device-profiles.py). */
+const char* builtInProfilesJson() noexcept;
+
 class Database
 {
 public:
     bool load (const json::Value& root, std::string& error);
     bool loadFile (const std::string& path, std::string& error);
+    /** Loads the embedded, shipped database. */
+    bool loadBuiltIn (std::string& error);
 
     const std::vector<Profile>& profiles() const noexcept { return entries; }
 

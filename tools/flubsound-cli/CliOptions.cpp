@@ -55,7 +55,8 @@ bool endsWith (const std::string& s, const std::string& suffix)
 bool parseNumber (const std::string& text, double& value)
 {
     const std::string t = trim (text);
-    if (t.empty())
+    // Decimal only: strtod would also take hex ("0x100") and "inf" / "nan".
+    if (t.empty() || t.find_first_not_of ("0123456789+-.eE") != std::string::npos)
         return false;
     errno = 0;
     char* end = nullptr;

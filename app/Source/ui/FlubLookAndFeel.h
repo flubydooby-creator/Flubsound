@@ -15,6 +15,8 @@
 //
 //   TextButton   "segment"  segmented-control cell (radio group); the ON
 //                           cell is filled with the accent
+//                "tab"      neutral selection with an accent underline
+//                           (strip selector, A/B, settings navigation)
 //                "ghost"    no chrome until hovered (toolbar actions)
 //                "accent"   filled with the accent (primary action)
 //                "warning"  amber when toggled on (bypass)

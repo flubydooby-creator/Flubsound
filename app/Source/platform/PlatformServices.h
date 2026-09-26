@@ -109,6 +109,34 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+/** How an output endpoint is physically attached. Feeds the headset device
+    profiles (flub::device::Connection), e.g. to cap the ceiling on Bluetooth.
+    Unknown when the OS cannot tell; callers then fall back to name/format
+    heuristics. */
+enum class EndpointTransport : uint8_t
+{
+    Unknown = 0,
+    Analog,             // onboard codec / line out / 3.5 mm
+    Usb,                // USB Audio Class (incl. 2.4 GHz USB transmitters)
+    Bluetooth,          // Bluetooth stereo (A2DP)
+    BluetoothHandsFree, // Bluetooth hands-free (HFP/HSP) endpoint
+    Hdmi,               // display audio
+    Virtual             // virtual / aggregate devices (incl. Flubsound's own)
+};
+
+struct AudioEndpoints
+{
+    /** Transport of the active OUTPUT endpoint whose name matches the device
+        name the audio layer reports (JUCE device name / friendly name).
+        Best effort; never throws, returns Unknown when not determinable.
+          Windows : PKEY_Device_EnumeratorName (USB / BTHENUM / BTHHFENUM /
+                    HDAUDIO ...) + PKEY_AudioEndpoint_FormFactor (HDMI)
+          macOS   : kAudioDevicePropertyTransportType
+          Linux   : Unknown (heuristics in flub::device::detectConnection) */
+    static EndpointTransport queryOutputTransport (const std::string& deviceName);
+};
+
+// ---------------------------------------------------------------------------
 /** Process / thread tuning for glitch-free audio. */
 struct SystemTuning
 {

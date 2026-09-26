@@ -1,68 +1,99 @@
 // Flubsound Pro - main window content.
 //
-// PLACEHOLDER UI: a compact, functional panel that exercises the whole
-// EngineController surface (strip selection, master enable, mode, boost,
-// macros, presets, A/B, meters, analyser taps, latency, device settings). It
-// exists so the shell / engine host can be verified end to end and will be
-// replaced by the full UI. The only contract the replacement must keep:
+// Layout (scales from 1100 x 700 to 2560 x 1440, proportional with limits):
 //
-//     namespace flub::app::ui { class MainComponent : public juce::Component
-//     { public: explicit MainComponent (EngineController&); ... }; }
+//   +--------------------------------------------------------------------+
+//   | HeaderBar: logo, mode, strip, presets, A/B, bypass, latency, gear  |
+//   +-----------+----------------------------------------+---------------+
+//   | Routing   | BoostPanel (Boost Intensity + macros)  | LevelMeters   |
+//   | Panel     +----------------------------------------+               |
+//   | (strips,  | AnalyzerPanel: SpectrumAnalyzer +      +---------------+
+//   |  gain,    |   EqCurveEditor (largest area)         | LoudnessPanel |
+//   |  apps)    +----------------------------------------+               |
+//   |           | ModuleRack (scrolling cards)           |               |
+//   +-----------+----------------------------------------+---------------+
+//   | WaveformHistory (output envelope + short-term LUFS)                |
+//   +--------------------------------------------------------------------+
 //
-// See EngineController.h for the threading / lifetime rules (re-fetch
-// getChain() every tick, single consumer of the analyser taps, ...).
+// Refresh model: one VBlankAttachment callback per display frame reads the
+// selected strip's MeterBus into a MeterSnapshot, drains the analyser taps
+// (AnalyzerFeed is their single consumer) and advances every view; views
+// repaint only what changed and paint() never does analysis work. Controls
+// are bound to the ParameterStore through ParameterBinders (30 Hz version
+// polling); structural events arrive through EngineController::Listener. The
+// accent colour follows the selected strip's mode.
+//
+// Contract with the shell: namespace flub::app::ui, constructible from an
+// EngineController&, owned by MainWindow.
 #pragma once
 
+#include "AnalyzerFeed.h"
+#include "AnalyzerPanel.h"
+#include "BoostPanel.h"
+#include "FlubLookAndFeel.h"
+#include "HeaderBar.h"
+#include "LevelMeters.h"
+#include "LoudnessPanel.h"
+#include "MeterSnapshot.h"
+#include "ModuleRack.h"
+#include "RoutingPanel.h"
+#include "SettingsDialog.h"
+#include "WaveformHistory.h"
 #include "engine/EngineController.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
-#include <array>
 #include <memory>
 
 namespace flub::app::ui
 {
-class MainComponent final : public juce::Component, private juce::Timer, private EngineController::Listener
+class MainComponent final : public juce::Component, private EngineController::Listener
 {
 public:
     explicit MainComponent (EngineController& controller);
     ~MainComponent() override;
 
+    /** Gives the settings dialog access to the application's hotkey manager. */
+    void setHotkeyHooks (HotkeyHooks hooks) { hotkeyHooks = std::move (hooks); }
+
     void paint (juce::Graphics& g) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress& key) override;
 
 private:
-    class MeterPanel;
-    class SpectrumView;
-
-    void timerCallback() override;
+    void frame (double timestampSeconds);
     void engineControllerChanged (EngineController::Change change) override;
-
-    void rebuildStripButtons();
-    void refreshControls();
-    void refreshPresetList();
-    void updateStatusText();
-    void openAudioSettings();
+    void applyMode (flub::param::ModeValue mode);
+    void resetAnalysis();
+    void requestLoudnessReset();
+    void openSettings();
+    void loadUiPreferences();
+    void saveUiPreferences();
+    FlubLookAndFeel& lookAndFeel();
 
     EngineController& controller;
+    std::unique_ptr<FlubLookAndFeel> ownLookAndFeel; // only when the app default is not a FlubLookAndFeel
 
-    juce::TextButton enableButton, audioSettingsButton;
-    juce::OwnedArray<juce::TextButton> stripButtons;
-    juce::TextButton musicButton { "MUSIC" }, gamingButton { "GAMING" };
-    juce::Slider boostSlider;
-    juce::Label boostLabel;
-    std::array<juce::Slider, 5> macroSliders;
-    std::array<juce::Label, 5> macroLabels;
-    juce::ComboBox presetBox;
-    juce::TextButton previousPresetButton { "<" }, nextPresetButton { ">" }, abButton, copyAbButton { "Copy to other" };
-    std::unique_ptr<MeterPanel> meters;
-    std::unique_ptr<SpectrumView> spectrum;
+    HeaderBar header;
+    RoutingPanel routing;
+    BoostPanel boost;
+    AnalyzerPanel analyzer;
+    ModuleRack rack;
+    LevelMeters levels;
+    LoudnessPanel loudness;
+    WaveformHistory history;
+    juce::TooltipWindow tooltips { this, 650 };
 
-    juce::String statusText;
-    juce::Rectangle<int> headerArea, stripArea, leftArea, footerArea;
-    uint32_t lastStoreVersion = 0, lastGeneration = 0;
-    int lastSelectedStrip = -1, tick = 0;
-    std::vector<juce::String> presetIdsByItem;
+    AnalyzerFeed feed;
+    MeterSnapshot snapshot;
+    HotkeyHooks hotkeyHooks;
+    std::unique_ptr<juce::VBlankAttachment> vblank;
+
+    double lastFrameTime = -1.0;
+    int frameCounter = 0, lastStrip = -1;
+    uint32_t lastGeneration = 0;
+    flub::param::ModeValue mode = flub::param::ModeValue::Music;
+    bool modeKnown = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

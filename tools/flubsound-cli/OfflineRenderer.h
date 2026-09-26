@@ -19,14 +19,21 @@
 //     alignment (a bypassed render is the input, sample for sample).
 //
 // Loudness targeting (targetLufs): render, measure integrated loudness with
-// flub::LoudnessMeter, move the maximizer drive (max.drive, 0..24 dB) by the
-// error - from the second correction on, divided by the measured
-// loudness-per-dB slope (secant step), because a limiter's response flattens
-// as it works harder - and re-render, up to maxIterations times, stopping
-// within toleranceLu. When even 0 dB drive is too loud, the remaining excess
-// is removed with output.gain (post-maximizer attenuation, so the ceiling
-// still holds). The pass closest to the target is delivered. The true-peak
-// ceiling itself is enforced by the maximizer's true-peak limiter.
+// flub::LoudnessMeter, move one gain stage by the error and re-render, up to
+// maxIterations times, stopping within toleranceLu. From the second move of
+// the same stage on the step is divided by the measured loudness-per-dB slope
+// (secant step), because a limiter's response flattens as it works harder.
+// Stages, in order: louder = max.drive (0..24 dB), then input.gain (ahead of
+// the maximizer, so the ceiling still holds); quieter = max.drive down to
+// 0 dB, then output.gain (post-maximizer attenuation). With the maximizer off
+// only output.gain is used. The pass closest to the target is delivered.
+// Targeting is skipped (with a warning) for bypass=on and for programmes
+// without a measurable integrated loudness.
+//
+// Ceiling: the maximizer's true-peak limiter enforces it. If the delivered
+// pass still measures above verifyCeilingDb (limiter overshoot at extreme
+// drive) and the maximizer is on, a static trim brings the file back under
+// the ceiling (ceilingTrimDb, reported as a note).
 #pragma once
 
 #include "Analysis.h"
@@ -45,7 +52,7 @@ struct RenderSettings
     std::optional<float> targetLufs;
     float toleranceLu = 0.3f;
     int maxIterations = 4;                 // corrective re-renders after the first pass
-    std::optional<float> verifyCeilingDb;  // report a true peak above this (+0.1 dB)
+    std::optional<float> verifyCeilingDb;  // hold (maximizer on) / report a true peak above this
 };
 
 struct RenderResult
@@ -56,7 +63,9 @@ struct RenderResult
     int chainInputChannels = 2;
     int passes = 0;
     float driveDb = 0.0f;         // base max.drive of the delivered pass
+    float inputGainDb = 0.0f;     // base input.gain of the delivered pass
     float outputGainDb = 0.0f;    // base output.gain of the delivered pass
+    float ceilingTrimDb = 0.0f;   // static trim applied to hold the ceiling (<= 0)
     bool targetReached = true;
     double renderSeconds = 0.0;   // wall time of all passes (excluding analysis)
     std::vector<std::string> notes; // problems start with "warning: "

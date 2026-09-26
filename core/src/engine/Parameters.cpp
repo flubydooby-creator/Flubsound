@@ -42,7 +42,9 @@ std::vector<Info> buildLayout()
 
     // ---- Global ----------------------------------------------------------
     set (InputGainDb, make ("input.gain", "Input Gain", "Global", Unit::Db, -24.0f, 24.0f, 0.0f));
-    set (OutputGainDb, make ("output.gain", "Output Gain", "Global", Unit::Db, -24.0f, 12.0f, 0.0f));
+    // Output gain is a trim AFTER the maximizer, so it never boosts: the true-peak
+    // ceiling then holds in every host (plug-in and CLI have no master limiter).
+    set (OutputGainDb, make ("output.gain", "Output Gain", "Global", Unit::Db, -24.0f, 0.0f, 0.0f));
     set (Mode, choice ("mode", "Mode", "Global", { "Music", "Gaming" }, 0));
     set (BoostIntensity, make ("boost", "Boost Intensity", "Global", Unit::Percent, 0.0f, 1.0f, 0.0f));
     set (Macro1, make ("macro.1", "Macro 1", "Macros", Unit::Percent, 0.0f, 1.0f, 0.0f));

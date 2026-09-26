@@ -138,3 +138,24 @@ TEST_CASE ("DeviceProfiles: malformed files are rejected with an error")
     CHECK (! db.load (v, err));
     CHECK (! db.loadFile ("/nonexistent/profiles.json", err));
 }
+
+TEST_CASE ("DeviceProfiles: the embedded database is identical to presets/devices/device-profiles.json")
+{
+    // Regenerate with: python3 tools/scripts/embed-device-profiles.py
+    Database builtIn;
+    std::string err;
+    REQUIRE (builtIn.loadBuiltIn (err));
+    const auto& shipped = shippedDatabase();
+    REQUIRE (builtIn.profiles().size() == shipped.profiles().size());
+    for (size_t i = 0; i < builtIn.profiles().size(); ++i)
+    {
+        const auto& a = builtIn.profiles()[i];
+        const auto& b = shipped.profiles()[i];
+        CHECK (a.id == b.id);
+        CHECK (a.matchAny == b.matchAny);
+        CHECK (a.exclude == b.exclude);
+        CHECK (a.notes == b.notes);
+        CHECK (a.specificity == b.specificity);
+        CHECK (a.gamingPreset == b.gamingPreset);
+    }
+}
