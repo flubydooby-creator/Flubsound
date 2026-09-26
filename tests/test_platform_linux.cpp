@@ -203,7 +203,12 @@ TEST_CASE ("Platform: unsupported Linux services report themselves as such")
     // runs must report them unsupported instead of failing.
     auto hotkeys = GlobalHotkeys::create();
     REQUIRE (hotkeys != nullptr);
-    if (std::getenv ("DISPLAY") == nullptr || isWaylandSession())
+#if FLUB_HAVE_X11_HEADERS
+    const bool expectUnsupported = std::getenv ("DISPLAY") == nullptr || isWaylandSession();
+#else
+    const bool expectUnsupported = true; // built without the X11 headers
+#endif
+    if (expectUnsupported)
     {
         CHECK (! hotkeys->isSupported());
         CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl, 'G'), [] {}));

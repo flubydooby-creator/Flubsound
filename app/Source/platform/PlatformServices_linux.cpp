@@ -41,7 +41,8 @@
 
 // X11 global hotkeys (see LinuxGlobalHotkeys): headers only, libX11 itself is
 // loaded at run time.
-#if __has_include(<X11/Xlib.h>) && __has_include(<X11/keysym.h>)
+// FLUB_NO_X11 forces the header-less build (no global hotkeys) for testing.
+#if ! defined(FLUB_NO_X11) && __has_include(<X11/Xlib.h>) && __has_include(<X11/keysym.h>)
     #define FLUB_HAVE_X11_HEADERS 1
     #include <X11/Xlib.h>
     #include <X11/keysym.h>

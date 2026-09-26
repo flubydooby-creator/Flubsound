@@ -797,7 +797,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state** (current tree). 437 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (438 in an `FLUB_RTSAN` build, which adds the RTSan self-test). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
+- **Current state** (current tree). 437 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (438 in an `FLUB_RTSAN` build, which adds the RTSan self-test; 436 on Linux without the X11 headers, where the X11 hotkey case is compiled out, as on the `core` CI jobs). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
 
 ---
 
