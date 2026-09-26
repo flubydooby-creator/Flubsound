@@ -39,8 +39,8 @@ public:
         const float h = r.getHeight();
 
         g.setFont (Theme::font (juce::jmin (13.0f, h * 0.44f), true));
-        const auto text = getButtonText();
-        const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text);
+        const auto label = getButtonText();
+        const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), label);
         const float iconSize = h * 0.5f;
         const float total = iconSize + 7.0f + tw;
         auto content = r.withSizeKeepingCentre (juce::jmin (total, r.getWidth() - 8.0f), h);
@@ -48,7 +48,7 @@ public:
         drawIcon (g, icon, content.removeFromLeft (iconSize).withSizeKeepingCentre (iconSize, iconSize), colour, 1.6f);
         content.removeFromLeft (7.0f);
         g.setColour (colour);
-        g.drawText (text, content, juce::Justification::centredLeft, false);
+        g.drawText (label, content, juce::Justification::centredLeft, false);
 
         if (hasKeyboardFocus (false))
         {
@@ -250,6 +250,8 @@ void HeaderBar::refresh()
         if (presetIds[i] == currentId)
             item = static_cast<int> (i) + 1;
     presetBox.setSelectedId (item, juce::dontSendNotification);
+    if (const auto* preset = currentPreset())
+        presetBox.setTooltip (preset->name + "  (" + (preset->isFactory ? "factory" : "user") + " - " + preset->category + ")");
     const bool hasPresets = ! presetIds.empty();
     prevPreset.setEnabled (hasPresets);
     nextPreset.setEnabled (hasPresets);
@@ -275,9 +277,10 @@ void HeaderBar::updateStatus()
     const auto status = controller.getStatus();
 
     const auto newLatency = juce::String (li.totalMs + li.captureBufferMs, 1) + " ms";
-    const auto newCpu = status.deviceOpen ? "CPU " + juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%" : juce::String ("OFFLINE");
+    const auto newCpu = status.deviceOpen ? juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%" : juce::String ("offline");
     const bool hot = status.cpuLoad > 0.7;
-    bool changed = newLatency != latencyText || newCpu != cpuText || hot != cpuHot;
+    bool changed = newLatency != latencyText || newCpu != cpuText || hot != cpuHot || deviceOpen != status.deviceOpen;
+    deviceOpen = status.deviceOpen;
     latencyText = newLatency;
     cpuText = newCpu;
     cpuHot = hot;
@@ -418,8 +421,8 @@ void HeaderBar::renamePreset (const PresetInfo& preset)
 
         // PresetManager has no rename: write the preset under the new name,
         // then delete the old file and move the strips that used it.
-        auto& controller = safe->controller;
-        auto& presets = controller.getPresetManager();
+        auto& ctrl = safe->controller;
+        auto& presets = ctrl.getPresetManager();
         juce::String error;
         flub::param::ParameterStore temp;
         if (! presets.loadIntoBank (preset, temp, Bank::A, error))
@@ -430,7 +433,7 @@ void HeaderBar::renamePreset (const PresetInfo& preset)
         temp.setActiveBank (Bank::A);
 
         std::vector<int> users;
-        for (int s = 0; s < controller.getNumStrips(); ++s)
+        for (int s = 0; s < ctrl.getNumStrips(); ++s)
             if (presets.getCurrentPresetId (s) == preset.id)
                 users.push_back (s);
 
@@ -448,7 +451,7 @@ void HeaderBar::renamePreset (const PresetInfo& preset)
         for (const int s : users)
         {
             presets.setCurrentPresetId (s, newId, nullptr); // keeps the strip's "modified" state
-            controller.getSettings().setLastPreset (controller.getStripName (s), newId);
+            ctrl.getSettings().setLastPreset (ctrl.getStripName (s), newId);
         }
         safe->refreshPresets();
     }),
@@ -572,7 +575,7 @@ void HeaderBar::paint (juce::Graphics& g)
         drawIcon (g, Icons::logo(), markArea.reduced (mark * 0.16f), Palette::background, 2.4f);
         r.removeFromLeft (10.0f);
 
-        const float size = compact ? 16.0f : 17.5f;
+        const float size = compact ? 15.0f : 17.0f;
         g.setFont (Theme::font (size, true));
         const float w1 = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), "Flubsound");
         g.setColour (Palette::text);
@@ -614,19 +617,22 @@ void HeaderBar::paint (juce::Graphics& g)
     container (stripArea);
     container (abArea);
 
-    // ---- Latency / CPU readout ----
+    // ---- Latency / CPU readout: caption left (hidden when compact), value right ----
     {
         auto r = readoutArea.toFloat();
-        auto top = r.removeFromTop (r.getHeight() * 0.5f);
-        g.setFont (Theme::numeric (13.0f));
+        auto row1 = r.removeFromTop (r.getHeight() * 0.5f).withTrimmedTop (2.0f);
+        auto row2 = r.withTrimmedBottom (2.0f);
+        if (! compact)
+        {
+            Theme::drawCaption (g, "LATENCY", row1, Palette::faint);
+            Theme::drawCaption (g, deviceOpen ? "CPU" : "DEVICE", row2, Palette::faint);
+        }
+        g.setFont (Theme::numeric (12.5f));
         g.setColour (Palette::text);
-        const float vw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), latencyText);
-        g.drawText (latencyText, top.removeFromRight (vw + 1.0f), juce::Justification::bottomRight, false);
-        top.removeFromRight (5.0f);
-        Theme::drawCaption (g, "LATENCY", top.withTrimmedBottom (1.0f), Palette::faint, juce::Justification::bottomRight);
-        g.setFont (Theme::caption (10.0f));
+        g.drawText (latencyText, row1, juce::Justification::centredRight, false);
+        g.setFont (Theme::numeric (12.5f, false));
         g.setColour (cpuHot ? Palette::amber : Palette::muted);
-        g.drawText (cpuText, r.withTrimmedTop (2.0f), juce::Justification::topRight, false);
+        g.drawText (compact && deviceOpen ? "CPU " + cpuText : cpuText, row2, juce::Justification::centredRight, false);
     }
 }
 
@@ -644,12 +650,15 @@ void HeaderBar::paintOverChildren (juce::Graphics& g)
         g.fillEllipse (b.getRight() - 9.0f, b.getY() + 5.0f, 5.0f, 5.0f);
     }
 
-    // "Modified" dot inside the preset box.
+    // "Modified" badge on the preset box's top-right corner (never over the text).
     if (presetModified && presetBox.getSelectedId() > 0)
     {
         const auto b = presetBox.getBounds().toFloat();
+        const auto dot = juce::Rectangle<float> (9.0f, 9.0f).withCentre ({ b.getRight() - 3.0f, b.getY() + 3.0f });
+        g.setColour (Palette::panel);
+        g.fillEllipse (dot.expanded (2.0f));
         g.setColour (Palette::amber);
-        g.fillEllipse (b.getRight() - 32.0f, b.getCentreY() - 3.0f, 6.0f, 6.0f);
+        g.fillEllipse (dot);
     }
 }
 
@@ -659,20 +668,21 @@ void HeaderBar::resized()
     compact = w < 1280;
     auto r = getLocalBounds().reduced (16, 0);
     const int controlH = 32;
-    auto centreY = [controlH, this] (juce::Rectangle<int> area, int h = controlH) { return area.withSizeKeepingCentre (area.getWidth(), h).withY ((getHeight() - h) / 2); };
+    auto centred = [this] (juce::Rectangle<int> area, int h) { return area.withSizeKeepingCentre (area.getWidth(), h).withY ((getHeight() - h) / 2); };
+    auto centreY = [&centred, controlH] (juce::Rectangle<int> area) { return centred (area, controlH); };
 
-    logoArea = r.removeFromLeft (compact ? 150 : 172);
-    r.removeFromLeft (compact ? 10 : 16);
+    logoArea = r.removeFromLeft (compact ? 136 : 160);
+    r.removeFromLeft (compact ? 10 : 14);
 
-    modeArea = centreY (r.removeFromLeft (compact ? 164 : 190), 34);
+    modeArea = centred (r.removeFromLeft (compact ? 152 : 176), 34);
     {
         auto m = modeArea.reduced (2, 2);
         musicSegment->setBounds (m.removeFromLeft (m.getWidth() / 2));
         gamingSegment->setBounds (m);
     }
-    r.removeFromLeft (compact ? 12 : 16);
+    r.removeFromLeft (compact ? 10 : 14);
 
-    const int stripW = compact ? 56 : 64;
+    const int stripW = compact ? 54 : 60;
     stripArea = centreY (r.removeFromLeft (stripW * static_cast<int> (stripButtons.size()) + 4));
     {
         auto s = stripArea.reduced (2, 2);
@@ -681,25 +691,25 @@ void HeaderBar::resized()
     }
 
     // Right side, from the right edge.
-    settingsButton.setBounds (centreY (r.removeFromRight (34), 34));
-    r.removeFromRight (compact ? 8 : 12);
-    readoutArea = centreY (r.removeFromRight (compact ? 70 : 88), 34);
-    r.removeFromRight (compact ? 10 : 14);
-    bypassButton->setBounds (centreY (r.removeFromRight (compact ? 80 : 90)));
-    r.removeFromRight (compact ? 8 : 12);
+    settingsButton.setBounds (centred (r.removeFromRight (34), 34));
+    r.removeFromRight (compact ? 8 : 10);
+    readoutArea = centred (r.removeFromRight (compact ? 74 : 104), 34);
+    r.removeFromRight (compact ? 10 : 12);
+    bypassButton->setBounds (centreY (r.removeFromRight (compact ? 76 : 84)));
+    r.removeFromRight (compact ? 8 : 10);
     copyAB.setBounds (centreY (r.removeFromRight (32)));
     r.removeFromRight (4);
-    abArea = centreY (r.removeFromRight (compact ? 64 : 72));
+    abArea = centreY (r.removeFromRight (compact ? 60 : 68));
     {
         auto a = abArea.reduced (2, 2);
         abA.setBounds (a.removeFromLeft (a.getWidth() / 2));
         abB.setBounds (a);
     }
-    r.removeFromRight (compact ? 10 : 14);
+    r.removeFromRight (compact ? 10 : 12);
 
     // Preset browser: right-aligned next to A/B, as wide as fits (prev / next
     // are hidden when narrow). The free space stays between the two clusters.
-    r.removeFromLeft (compact ? 12 : 16);
+    r.removeFromLeft (compact ? 10 : 12);
     presetArea = centreY (r);
     const int menuW = 32 + 4, arrowsW = 28 + 4 + 28 + 4;
     const bool showArrows = presetArea.getWidth() - menuW - arrowsW >= 180;

@@ -32,6 +32,11 @@ MainComponent::MainComponent (EngineController& c)
         setLookAndFeel (ownLookAndFeel.get());
     }
 
+    // Headless screenshots must not capture a tooltip for wherever the
+    // virtual display happens to park the mouse pointer.
+    if (! juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--screenshot"))
+        tooltips = std::make_unique<juce::TooltipWindow> (this, 650);
+
     for (auto* child : std::initializer_list<juce::Component*> { &header, &routing, &boost, &analyzer, &rack, &levels, &loudness, &history })
         addAndMakeVisible (child);
 

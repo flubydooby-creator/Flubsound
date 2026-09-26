@@ -8,7 +8,7 @@ namespace flub::app::ui
 {
 namespace
 {
-constexpr float kPeakFallDbPerSecond = 24.0f;
+constexpr float kPeakFallDbPerSecond = 12.0f; // IEC type I PPM: 20 dB in 1.7 s
 constexpr float kHoldSeconds = 1.5f;
 constexpr float kHoldFallDbPerSecond = 20.0f;
 constexpr float kRmsSeconds = 0.06f;
@@ -41,6 +41,19 @@ float LevelMeters::deflection (float db) noexcept
     else
         d = 100.0f;
     return d * 0.01f;
+}
+
+juce::ColourGradient LevelMeters::gradient (const MeterColours& colours, juce::Point<float> bottom, juce::Point<float> top)
+{
+    juce::ColourGradient g (colours.safe, bottom, colours.hot, top, false);
+    g.clearColours();
+    g.addColour (0.0, colours.safe);
+    g.addColour (deflection (-14.0f), colours.safe);
+    g.addColour (deflection (-10.0f), colours.warn);
+    g.addColour (deflection (-4.0f), colours.warn);
+    g.addColour (deflection (-2.0f), colours.hot);
+    g.addColour (1.0, colours.hot);
+    return g;
 }
 
 void LevelMeters::updateChannel (Channel& c, float peakDb, float rmsDb, float dt) noexcept
@@ -143,14 +156,7 @@ void LevelMeters::drawPair (juce::Graphics& g, juce::Rectangle<float> area, cons
 
     const float barWidth = (area.getWidth() - 3.0f) * 0.5f;
     const float bottom = area.getBottom(), height = area.getHeight();
-    auto gradient = juce::ColourGradient (colours.safe, 0.0f, bottom, colours.hot, 0.0f, area.getY(), false);
-    gradient.clearColours();
-    gradient.addColour (0.0, colours.safe);
-    gradient.addColour (deflection (-14.0f), colours.safe);
-    gradient.addColour (deflection (-11.0f), colours.warn);
-    gradient.addColour (deflection (-4.0f), colours.warn);
-    gradient.addColour (deflection (-2.5f), colours.hot);
-    gradient.addColour (1.0, colours.hot);
+    const auto fill = gradient (colours, { 0.0f, bottom }, { 0.0f, area.getY() });
 
     float x = area.getX();
     for (const auto* c : { &l, &r })
@@ -161,9 +167,12 @@ void LevelMeters::drawPair (juce::Graphics& g, juce::Rectangle<float> area, cons
 
         const float peakTop = bottom - deflection (c->peak) * height;
         const float rmsTop = bottom - deflection (c->rms) * height;
-        g.setGradientFill (gradient);
-        g.setOpacity (0.35f);
+        // Peak: translucent body with a crisp top edge; RMS: solid.
+        g.setGradientFill (fill);
+        g.setOpacity (0.42f);
         g.fillRect (bar.withTop (peakTop));
+        g.setOpacity (0.9f);
+        g.fillRect (bar.withTop (peakTop).withHeight (1.0f));
         g.setOpacity (1.0f);
         g.fillRect (bar.withTop (rmsTop));
 
@@ -196,7 +205,7 @@ void LevelMeters::paint (juce::Graphics& g)
     // ---- dB scale (aligned with the bar bodies) ----
     const auto body = inArea.withTrimmedTop (10.0f).withTrimmedBottom (18.0f);
     g.setFont (Theme::font (9.5f));
-    for (const float db : { 0.0f, -3.0f, -6.0f, -12.0f, -18.0f, -24.0f, -36.0f, -48.0f, -60.0f })
+    for (const float db : { 0.0f, -3.0f, -6.0f, -12.0f, -18.0f, -24.0f, -36.0f, -60.0f })
     {
         const float y = body.getBottom() - deflection (db) * body.getHeight();
         g.setColour (Palette::faint);
@@ -228,7 +237,7 @@ void LevelMeters::paint (juce::Graphics& g)
     }
     g.setColour (Palette::faint);
     g.setFont (Theme::font (10.5f));
-    g.drawText ("max hold - click to reset", r.removeFromTop (14.0f), juce::Justification::centredLeft, true);
+    g.drawText ("max - click to reset", r.removeFromTop (14.0f), juce::Justification::centredLeft, true);
     r.removeFromTop (10.0f);
 
     auto readout = [&] (const juce::String& name, float left, float right)

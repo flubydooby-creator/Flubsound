@@ -5,7 +5,7 @@
 //            come for free). An inner arc shows how much of it is actually
 //            applied: MeterBus::governorScale scales every "governed" macro
 //            contribution (bass, drive, saturation) when the SafetyGovernor
-//            detects over-processing; the pill below the dial names it.
+//            detects over-processing; a status chip in the header names it.
 // Macros     five knobs whose captions come from flub::MacroMap::macroName
 //            (Music: Punch / Width / Clarity / Loudness / Warmth, Gaming:
 //            Footsteps / Positional / Impact / Detail / Voice & Score) and
@@ -56,6 +56,6 @@ private:
     std::array<ParamKnob, 5> macros;
     ParameterBinder binder;
     flub::param::ModeValue mode = flub::param::ModeValue::Music;
-    juce::Rectangle<int> dialArea, pillArea, macroArea, headerArea;
+    juce::Rectangle<int> dialArea, macroArea, headerArea;
 };
 } // namespace flub::app::ui

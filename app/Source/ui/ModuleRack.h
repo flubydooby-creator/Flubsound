@@ -22,7 +22,7 @@
 
 namespace flub::app::ui
 {
-class ModuleRack : public juce::Component
+class ModuleRack : public juce::Component, private juce::ScrollBar::Listener
 {
 public:
     explicit ModuleRack (EngineController& controller);
@@ -40,11 +40,13 @@ public:
     std::function<void (int band)> onEqBandSelected;
 
     void paint (juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
 
 private:
     void expand (ModuleCard& card, bool shouldExpand);
+    void scrollBarMoved (juce::ScrollBar*, double) override { repaint(); }
 
     EngineController& controller;
     ParameterBinder binder;

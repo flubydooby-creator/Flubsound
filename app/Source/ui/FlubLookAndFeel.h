@@ -17,6 +17,7 @@
 //                           cell is filled with the accent
 //                "tab"      neutral selection with an accent underline
 //                           (strip selector, A/B, settings navigation)
+//                "chip"     small pill toggle (analyser display options)
 //                "ghost"    no chrome until hovered (toolbar actions)
 //                "accent"   filled with the accent (primary action)
 //                "warning"  amber when toggled on (bypass)
@@ -104,6 +105,8 @@ public:
     juce::Font getAlertWindowMessageFont() override;
     juce::Font getAlertWindowFont() override;
     juce::Font getLabelFont (juce::Label&) override;
+    /** Combo box labels: one line with an ellipsis instead of wrapping. */
+    void drawLabel (juce::Graphics&, juce::Label&) override;
 
     void drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics&, const juce::Path&, juce::Image&) override;
 

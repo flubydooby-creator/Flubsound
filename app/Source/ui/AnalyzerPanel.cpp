@@ -12,7 +12,7 @@ AnalyzerPanel::AnalyzerPanel (EqCurveEditor::StoreProvider storeProvider)
 
     auto setUpToggle = [this] (juce::TextButton& b, const juce::String& title, const juce::String& tip, bool Options::*field)
     {
-        Style::set (b, "ghost");
+        Style::set (b, "chip");
         b.setClickingTogglesState (true);
         Style::describe (b, title, tip);
         b.onClick = [this, &b, field]
@@ -75,15 +75,30 @@ void AnalyzerPanel::paint (juce::Graphics& g)
     const float w = Theme::drawCaption (g, "SPECTRUM  +  EQ", h, Palette::muted);
     h.removeFromLeft (w + 18.0f);
 
-    // Legend
+    // Legend (only when all of it fits).
     const auto accent = Theme::accent (*this);
-    auto legend = [&] (juce::Colour colour, const juce::String& text, bool diamond)
+    struct Entry
     {
-        if (h.getWidth() < 90.0f)
-            return;
+        juce::Colour colour;
+        const char* text;
+        bool diamond;
+    };
+    const Entry entries[] = { { Palette::muted, "Input", false }, { accent, "Output", false }, { Palette::text, "EQ", false },
+                              { Palette::dynamicEq, "Dynamic EQ", true } };
+    const auto font = Theme::font (11.5f);
+    float needed = 0.0f;
+    for (const auto& e : entries)
+        needed += 15.0f + juce::GlyphArrangement::getStringWidth (font, e.text) + 14.0f;
+    h.setRight (static_cast<float> (preButton.getX()) - 10.0f);
+    if (needed > h.getWidth())
+        return;
+
+    g.setFont (font);
+    for (const auto& e : entries)
+    {
         auto dot = h.removeFromLeft (10.0f).withSizeKeepingCentre (8.0f, 8.0f);
-        g.setColour (colour);
-        if (diamond)
+        g.setColour (e.colour);
+        if (e.diamond)
         {
             juce::Path p;
             p.addPolygon (dot.getCentre(), 4, 4.5f, juce::MathConstants<float>::pi * 0.25f);
@@ -95,17 +110,10 @@ void AnalyzerPanel::paint (juce::Graphics& g)
         }
         h.removeFromLeft (5.0f);
         g.setColour (Palette::muted);
-        g.setFont (Theme::font (11.5f));
-        const float tw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text);
-        g.drawText (text, h.removeFromLeft (tw + 2.0f), juce::Justification::centredLeft, false);
-        h.removeFromLeft (14.0f);
-    };
-    const float legendRight = static_cast<float> (preButton.getX()) - 10.0f;
-    h.setRight (legendRight);
-    legend (Palette::muted, "Input", false);
-    legend (accent, "Output", false);
-    legend (Palette::text, "EQ", false);
-    legend (Palette::dynamicEq, "Dynamic EQ", true);
+        const float tw = juce::GlyphArrangement::getStringWidth (font, e.text);
+        g.drawText (e.text, h.removeFromLeft (tw + 2.0f), juce::Justification::centredLeft, false);
+        h.removeFromLeft (12.0f);
+    }
 }
 
 void AnalyzerPanel::resized()
@@ -118,8 +126,8 @@ void AnalyzerPanel::resized()
         h.removeFromRight (8);
         for (auto* b : { &holdButton, &tiltButton, &postButton, &preButton })
         {
-            b->setBounds (h.removeFromRight (44).reduced (0, 1));
-            h.removeFromRight (2);
+            b->setBounds (h.removeFromRight (46).reduced (0, 2));
+            h.removeFromRight (5);
         }
     }
     r.removeFromTop (4);

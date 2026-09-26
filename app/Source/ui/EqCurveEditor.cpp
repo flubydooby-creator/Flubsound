@@ -337,10 +337,10 @@ void EqCurveEditor::paint (juce::Graphics& g)
     // ---- Combined curve ----
     g.setColour (accent.withAlpha (0.10f * alpha));
     g.fillPath (curveFill);
-    g.setColour (Palette::text.withAlpha (0.10f * alpha));
-    g.strokePath (curve, juce::PathStrokeType (5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour (Palette::text.withAlpha (0.92f * alpha));
-    g.strokePath (curve, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour (Palette::text.withAlpha (0.07f * alpha));
+    g.strokePath (curve, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    g.setColour (Palette::text.withAlpha (0.88f * alpha));
+    g.strokePath (curve, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
     // ---- Dynamic EQ ghost markers ----
     for (size_t b = 0; b < dynGains.size(); ++b)

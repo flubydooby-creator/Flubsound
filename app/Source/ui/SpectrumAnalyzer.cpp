@@ -69,6 +69,11 @@ void SpectrumAnalyzer::rebuildBands()
     const double edge = std::pow (2.0, 1.0 / 12.0);
     const int maxBin = kFftSize / 2 - 1;
 
+    // Sine-calibrated (Hann coherent gain 0.5: amplitude = 4 |X| / N) plus the
+    // bandwidth of a 1/6-octave band at 1 kHz relative to one bin.
+    const double bandwidthAt1k = 1000.0 * (edge - 1.0 / edge);
+    calibrationDb = static_cast<float> (20.0 * std::log10 (4.0 / kFftSize) + 10.0 * std::log10 (bandwidthAt1k / binHz));
+
     bands.resize (static_cast<size_t> (kNumPoints));
     for (int i = 0; i < kNumPoints; ++i)
     {
@@ -130,8 +135,6 @@ void SpectrumAnalyzer::analyse (Stream& s)
     std::fill (fftData.begin() + kFftSize, fftData.end(), 0.0f);
     fft.performFrequencyOnlyForwardTransform (fftData.data(), true);
 
-    // Sine-calibrated: a full-scale sine reads 0 dBFS (Hann coherent gain 0.5).
-    const float normDb = 20.0f * std::log10 (4.0f / static_cast<float> (kFftSize));
     for (int i = 0; i < kNumPoints; ++i)
     {
         const auto& b = bands[static_cast<size_t> (i)];
@@ -147,7 +150,7 @@ void SpectrumAnalyzer::analyse (Stream& s)
                 power += static_cast<double> (fftData[static_cast<size_t> (k)]) * fftData[static_cast<size_t> (k)];
             power /= (b.hi - b.lo + 1);
         }
-        s.analysisDb[static_cast<size_t> (i)] = juce::jmax (kFloorDb, static_cast<float> (10.0 * std::log10 (power + 1.0e-24)) + normDb);
+        s.analysisDb[static_cast<size_t> (i)] = juce::jmax (kFloorDb, static_cast<float> (10.0 * std::log10 (power + 1.0e-24)) + calibrationDb);
     }
 }
 
@@ -350,7 +353,7 @@ void SpectrumAnalyzer::renderGrid (float scale)
             if (f < kMinHz || f > kMaxHz)
                 continue;
             const float x = std::round (xForFrequency (f)) + 0.5f;
-            g.setColour (m == 1 ? Palette::borderStrong.withAlpha (0.8f) : Palette::grid);
+            g.setColour (m == 1 ? juce::Colour (0xff232b37) : juce::Colour (0xff141920));
             g.drawVerticalLine (static_cast<int> (x), plot.getY(), plot.getBottom());
         }
     }
@@ -374,7 +377,7 @@ void SpectrumAnalyzer::renderGrid (float scale)
     for (float db = kMaxDb; db >= kMinDb; db -= 12.0f)
     {
         const float y = std::round (yForDb (db)) + 0.5f;
-        g.setColour (Palette::grid);
+        g.setColour (juce::Colour (0xff171c24));
         g.drawHorizontalLine (static_cast<int> (y), plot.getX(), plot.getRight());
         g.setColour (Palette::faint);
         g.drawText (juce::String (juce::roundToInt (db)), juce::Rectangle<float> (plot.getX() - kLeftInset, y - 7.0f, kLeftInset - 6.0f, 14.0f),
@@ -405,7 +408,7 @@ void SpectrumAnalyzer::paint (juce::Graphics& g)
 
     if (! preFill.isEmpty())
     {
-        g.setGradientFill (juce::ColourGradient (Palette::muted.withAlpha (0.28f), 0.0f, plot.getY(), Palette::muted.withAlpha (0.06f), 0.0f,
+        g.setGradientFill (juce::ColourGradient (Palette::muted.withAlpha (0.22f), 0.0f, plot.getY(), Palette::muted.withAlpha (0.03f), 0.0f,
                                                  plot.getBottom(), false));
         g.fillPath (preFill);
         g.setColour (Palette::muted.withAlpha (0.45f));

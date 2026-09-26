@@ -82,7 +82,7 @@ private:
     LevelMeters levels;
     LoudnessPanel loudness;
     WaveformHistory history;
-    juce::TooltipWindow tooltips { this, 650 };
+    std::unique_ptr<juce::TooltipWindow> tooltips; // none in headless screenshot runs
 
     AnalyzerFeed feed;
     MeterSnapshot snapshot;

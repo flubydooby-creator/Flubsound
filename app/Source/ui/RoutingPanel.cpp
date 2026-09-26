@@ -165,7 +165,7 @@ public:
             const float level = LevelMeters::deflection (levels[c]);
             if (level > 0.0f)
             {
-                g.setColour (Theme::meterColourForDb (colours, levels[c]));
+                g.setGradientFill (LevelMeters::gradient (colours, bar.getTopLeft(), bar.getTopRight()));
                 g.fillRoundedRectangle (bar.withWidth (bar.getWidth() * level), 1.5f);
             }
         }
@@ -318,11 +318,11 @@ RoutingPanel::RoutingPanel (EngineController& c)
     rowView.setScrollBarThickness (8);
     addAndMakeVisible (rowView);
 
-    assignButton.setText ("Assign app...");
+    assignButton.setText ("Assign app to strip...");
     assignButton.onClick = [this] { showAssignMenu(); };
     addAndMakeVisible (assignButton);
 
-    systemButton.setText ("System routing");
+    systemButton.setText ("System sound settings");
     systemButton.onClick = [this] { controller.getRouting().openSystemRoutingSettings(); };
     addAndMakeVisible (systemButton);
 
@@ -555,10 +555,45 @@ void RoutingPanel::paint (juce::Graphics& g)
         g.fillRoundedRectangle (r, 6.0f);
         g.setColour (Palette::border);
         g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
-        g.setColour (Palette::muted);
-        g.setFont (Theme::font (11.0f));
-        g.drawFittedText (reason, r.reduced (8.0f, 5.0f).toNearestInt(), juce::Justification::topLeft, 6, 0.9f);
+        if (reasonCompact)
+        {
+            auto line = r.reduced (9.0f, 0.0f);
+            auto icon = line.removeFromLeft (14.0f).withSizeKeepingCentre (14.0f, 14.0f);
+            g.setColour (Palette::amber.withAlpha (0.9f));
+            g.drawEllipse (icon.reduced (1.0f), 1.3f);
+            g.setFont (Theme::font (10.0f, true));
+            g.drawText ("i", icon, juce::Justification::centred, false);
+            line.removeFromLeft (7.0f);
+            g.setColour (Palette::muted);
+            g.setFont (Theme::font (11.5f));
+            g.drawText ("Per-app routing unavailable - why?", line, juce::Justification::centredLeft, true);
+        }
+        else
+        {
+            layoutReason (reasonArea.getWidth()).draw (g, r.reduced (9.0f, 6.0f));
+        }
     }
+}
+
+void RoutingPanel::mouseMove (const juce::MouseEvent& e)
+{
+    setTooltip (reasonCompact && reasonArea.contains (e.getPosition()) ? reason : juce::String());
+}
+
+void RoutingPanel::mouseUp (const juce::MouseEvent& e)
+{
+    if (reasonCompact && reasonArea.contains (e.getPosition()))
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Per-app routing", reason, "OK", this);
+}
+
+juce::TextLayout RoutingPanel::layoutReason (int width) const
+{
+    juce::AttributedString text;
+    text.append (reason, Theme::font (11.0f), Palette::muted);
+    text.setLineSpacing (1.5f);
+    juce::TextLayout layout;
+    layout.createLayout (text, static_cast<float> (juce::jmax (40, width - 18)));
+    return layout;
 }
 
 void RoutingPanel::resized()
@@ -567,23 +602,24 @@ void RoutingPanel::resized()
     headerArea = r.removeFromTop (20);
     r.removeFromTop (8);
 
-    // Footer: buttons, then the explanation (if any) above them.
-    auto footer = r.removeFromBottom (30);
-    systemButton.setBounds (footer.removeFromRight (footer.getWidth() / 2 - 3));
-    footer.removeFromRight (6);
-    assignButton.setBounds (footer);
+    // Footer: the two actions stacked, the explanation (if any) above them.
+    systemButton.setBounds (r.removeFromBottom (30));
+    r.removeFromBottom (6);
+    assignButton.setBounds (r.removeFromBottom (30));
     r.removeFromBottom (8);
 
+    int rowsHeight = 0;
+    for (auto& row : rows)
+        rowsHeight += row->getPreferredHeight (r.getWidth()) + 8;
+
+    reasonArea = {};
+    reasonCompact = false;
     if (reason.isNotEmpty())
     {
-        const int lines = juce::jlimit (2, 6, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.0f), reason)
-                                                                           / juce::jmax (40.0f, static_cast<float> (r.getWidth() - 20)))) + 1);
-        reasonArea = r.removeFromBottom (lines * 14 + 10);
+        const int fullHeight = juce::roundToInt (layoutReason (r.getWidth()).getHeight()) + 13;
+        reasonCompact = rowsHeight + fullHeight + 8 > r.getHeight();
+        reasonArea = r.removeFromBottom (reasonCompact ? 26 : fullHeight);
         r.removeFromBottom (8);
-    }
-    else
-    {
-        reasonArea = {};
     }
 
     rowView.setBounds (r);

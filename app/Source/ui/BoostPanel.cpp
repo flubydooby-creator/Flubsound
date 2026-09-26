@@ -120,15 +120,18 @@ void BoostDial::paint (juce::Graphics& g)
         g.drawEllipse (juce::Rectangle<float> (track * 0.9f, track * 0.9f).withCentre (p), 1.0f);
     }
 
-    // Centre readout.
-    const float textSize = juce::jlimit (22.0f, 44.0f, size * 0.24f);
-    auto textArea = juce::Rectangle<float> (size * 0.7f, textSize * 1.1f).withCentre ({ centre.x, centre.y - textSize * 0.12f });
+    // Centre readout: value and caption.
+    const float textSize = juce::jlimit (22.0f, 46.0f, size * 0.27f);
+    auto textArea = juce::Rectangle<float> (size * 0.7f, textSize * 1.1f).withCentre ({ centre.x, centre.y - textSize * 0.15f });
     g.setColour (Palette::text);
     g.setFont (Theme::numeric (textSize));
     g.drawText (juce::String (juce::roundToInt (value * 100.0f)), textArea, juce::Justification::centred, false);
+    const float captionSize = juce::jlimit (8.5f, 10.5f, size * 0.065f);
+    auto captionArea = textArea.translated (0.0f, textSize * 0.86f).withHeight (captionSize + 3.0f);
     g.setColour (Palette::muted);
-    g.setFont (Theme::caption (juce::jlimit (9.0f, 11.0f, size * 0.06f)));
-    g.drawText ("BOOST %", textArea.translated (0.0f, textSize * 0.82f).withHeight (14.0f), juce::Justification::centred, false);
+    g.setFont (Theme::caption (captionSize));
+    g.drawText ("BOOST %", captionArea, juce::Justification::centred, false);
+
 
     if (hasKeyboardFocus (false))
     {
@@ -175,67 +178,67 @@ void BoostPanel::setMode (ModeValue newMode)
 
 void BoostPanel::setGovernorScale (float scale)
 {
-    const float before = dial.getGovernorScale();
+    const bool wasLimiting = dial.getGovernorScale() < 0.985f;
+    const int before = juce::roundToInt (dial.getGovernorScale() * 100.0f);
     dial.setGovernorScale (scale);
-    if (std::abs (before - dial.getGovernorScale()) > 0.002f)
-        repaint (pillArea);
+    if (wasLimiting != (dial.getGovernorScale() < 0.985f) || before != juce::roundToInt (dial.getGovernorScale() * 100.0f))
+        repaint (headerArea);
 }
 
 void BoostPanel::paint (juce::Graphics& g)
 {
     Theme::drawPanel (g, getLocalBounds().toFloat());
-    const auto accent = Theme::accent (*this);
 
     auto header = headerArea.toFloat();
     Theme::drawCaption (g, "BOOST INTENSITY", header.removeFromLeft (static_cast<float> (dialArea.getWidth()) + 20.0f));
     Theme::drawCaption (g, mode == ModeValue::Gaming ? "GAMING MACROS" : "MUSIC MACROS", header, Palette::muted);
 
+    // Safety governor status (right end of the header): how much of the
+    // governed Boost / macro amounts is applied right now.
+    const float gov = dial.getGovernorScale();
+    const bool limiting = gov < 0.985f;
+    const auto status = limiting ? "Safety governor: " + juce::String (juce::roundToInt (gov * 100.0f)) + "% applied"
+                                 : juce::String ("Safety governor OK");
+    g.setFont (Theme::font (11.5f));
+    const float sw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), status);
+    auto chip = header.removeFromRight (sw + 26.0f).withSizeKeepingCentre (sw + 26.0f, 18.0f);
+    const auto colour = limiting ? Palette::amber : Palette::green;
+    g.setColour (colour.withAlpha (0.1f));
+    g.fillRoundedRectangle (chip, 9.0f);
+    g.setColour (colour.withAlpha (0.35f));
+    g.drawRoundedRectangle (chip.reduced (0.5f), 9.0f, 1.0f);
+    g.setColour (colour);
+    g.fillEllipse (chip.withWidth (18.0f).withSizeKeepingCentre (6.0f, 6.0f).translated (4.0f, 0.0f));
+    g.setColour (limiting ? Palette::amber : Palette::text.withAlpha (0.85f));
+    g.drawText (status, chip.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, false);
+
     // Divider between the dial and the macros.
     g.setColour (Palette::border);
     g.fillRect (static_cast<float> (macroArea.getX()) - 12.0f, static_cast<float> (macroArea.getY()) + 8.0f, 1.0f,
                 static_cast<float> (macroArea.getHeight()) - 16.0f);
-
-    // Governor pill
-    const float gov = dial.getGovernorScale();
-    const bool limiting = gov < 0.985f;
-    const auto pill = pillArea.toFloat();
-    const auto colour = limiting ? Palette::amber : accent;
-    g.setColour (colour.withAlpha (0.12f));
-    g.fillRoundedRectangle (pill, pill.getHeight() * 0.5f);
-    g.setColour (colour.withAlpha (0.45f));
-    g.drawRoundedRectangle (pill.reduced (0.5f), pill.getHeight() * 0.5f, 1.0f);
-    auto content = pill.reduced (9.0f, 0.0f);
-    g.setColour (colour);
-    g.fillEllipse (content.removeFromLeft (6.0f).withSizeKeepingCentre (6.0f, 6.0f));
-    content.removeFromLeft (6.0f);
-    g.setColour (Palette::text.withAlpha (0.9f));
-    g.setFont (Theme::font (11.0f));
-    g.drawFittedText (limiting ? "Governor " + juce::String (juce::roundToInt (gov * 100.0f)) + "% applied" : juce::String ("Safety governor OK"),
-                      content.toNearestInt(), juce::Justification::centredLeft, 1, 0.85f);
 }
 
 void BoostPanel::resized()
 {
     auto r = getLocalBounds().reduced (14, 10);
     headerArea = r.removeFromTop (18);
-    r.removeFromTop (4);
+    r.removeFromTop (2);
 
-    // Dial: square on the left, sized by the available height.
-    const int dialSize = juce::jlimit (96, 190, r.getHeight() - 26);
+    // The dial is the hero: as tall as the panel allows.
+    const int dialSize = juce::jlimit (104, 196, r.getHeight());
     auto left = r.removeFromLeft (juce::jmax (dialSize, 150));
     dialArea = left;
-    pillArea = left.removeFromBottom (22).withSizeKeepingCentre (juce::jmin (left.getWidth(), 164), 22);
-    left.removeFromBottom (2);
-    dial.setBounds (left.withSizeKeepingCentre (dialSize, juce::jmin (dialSize, left.getHeight())));
+    dial.setBounds (left.withSizeKeepingCentre (dialSize, dialSize));
 
     r.removeFromLeft (26);
     macroArea = r;
 
-    // Macros: evenly spaced, knob size from the available height.
+    // Macros: evenly spaced (at most 170 px apart, centred), smaller than the dial.
     const int n = static_cast<int> (macros.size());
-    const int cellW = r.getWidth() / n;
-    const int knobH = juce::jmin (r.getHeight(), 132);
-    const int knobW = juce::jmin (cellW - 6, juce::jmax (78, knobH - 20));
+    const int cellW = juce::jmin (170, r.getWidth() / n);
+    r = r.withSizeKeepingCentre (cellW * n, r.getHeight());
+    const int knobH = juce::jmin (r.getHeight(), 124);
+    const int knobW = juce::jmin (cellW - 6, 96);
     for (int i = 0; i < n; ++i)
     {
         auto cell = r.removeFromLeft (cellW);

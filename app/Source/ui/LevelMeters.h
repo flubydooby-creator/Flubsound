@@ -13,6 +13,7 @@
 #pragma once
 
 #include "MeterSnapshot.h"
+#include "Theme.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -33,6 +34,9 @@ public:
 
     /** IEC 60268-18 meter deflection, 0..1 for -70 .. 0 dBFS. */
     static float deflection (float db) noexcept;
+
+    /** Meter fill from `bottom` (-70 dBFS) to `top` (0 dBFS): safe / warn / hot zones. */
+    static juce::ColourGradient gradient (const MeterColours& colours, juce::Point<float> bottom, juce::Point<float> top);
 
     void paint (juce::Graphics& g) override;
     void resized() override;

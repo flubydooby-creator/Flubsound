@@ -84,7 +84,7 @@ private:
     std::vector<juce::String> presetIds; // combo item id - 1 -> preset id
     juce::Rectangle<int> logoArea, modeArea, stripArea, presetArea, abArea, readoutArea;
     juce::String latencyText, cpuText;
-    bool cpuHot = false, compact = false, presetModified = false;
+    bool cpuHot = false, compact = false, presetModified = false, deviceOpen = false;
     std::vector<bool> stripActive;
     float thumbPos = 0.0f, thumbTarget = 0.0f; // 0 = Music, 1 = Gaming
 };

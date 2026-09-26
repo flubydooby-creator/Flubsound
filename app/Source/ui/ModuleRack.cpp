@@ -18,7 +18,8 @@ ModuleRack::ModuleRack (EngineController& c)
 
     viewport.setViewedComponent (&content, false);
     viewport.setScrollBarsShown (false, true);
-    viewport.setScrollBarThickness (8);
+    viewport.setScrollBarThickness (10);
+    viewport.getHorizontalScrollBar().addListener (this);
     addAndMakeVisible (viewport);
 
     for (const auto& d : ModuleDescriptor::all())
@@ -38,6 +39,7 @@ ModuleRack::ModuleRack (EngineController& c)
 
 ModuleRack::~ModuleRack()
 {
+    viewport.getHorizontalScrollBar().removeListener (this);
     cards.clear(); // unbinds from the binder while it is still alive
 }
 
@@ -112,6 +114,27 @@ bool ModuleRack::keyPressed (const juce::KeyPress& key)
 
 void ModuleRack::paint (juce::Graphics&)
 {
+}
+
+void ModuleRack::paintOverChildren (juce::Graphics& g)
+{
+    // Edge fades hint at cards scrolled out of view.
+    if (expandedCard != nullptr || content.getWidth() <= viewport.getWidth())
+        return;
+    const float fade = 36.0f;
+    const auto area = viewport.getBounds().toFloat().withTrimmedBottom (static_cast<float> (viewport.getScrollBarThickness()) + 2.0f);
+    const int x = viewport.getViewPositionX();
+    if (x > 0)
+    {
+        g.setGradientFill (juce::ColourGradient (Palette::background, area.getX(), 0.0f, Palette::background.withAlpha (0.0f), area.getX() + fade, 0.0f, false));
+        g.fillRect (area.withWidth (fade));
+    }
+    if (x + viewport.getWidth() < content.getWidth())
+    {
+        g.setGradientFill (juce::ColourGradient (Palette::background.withAlpha (0.0f), area.getRight() - fade, 0.0f, Palette::background, area.getRight(), 0.0f,
+                                                 false));
+        g.fillRect (area.withLeft (area.getRight() - fade));
+    }
 }
 
 void ModuleRack::resized()

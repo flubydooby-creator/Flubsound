@@ -300,6 +300,8 @@ juce::Font FlubLookAndFeel::getTextButtonFont (juce::TextButton& b, int buttonHe
 {
     const auto style = styleOf (b);
     const bool bold = style == "segment" || style == "accent" || style == "tab";
+    if (style == "chip")
+        return Theme::font (juce::jmin (11.5f, static_cast<float> (buttonHeight) * 0.5f), true);
     return Theme::font (juce::jmin (13.0f, static_cast<float> (buttonHeight) * 0.5f), bold);
 }
 
@@ -341,6 +343,23 @@ void FlubLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, 
             g.setColour (accent);
             g.fillRoundedRectangle (bounds.getX() + bounds.getWidth() * 0.3f, bounds.getBottom() - 3.0f, bounds.getWidth() * 0.4f, 2.0f, 1.0f);
         }
+    }
+    else if (style == "chip")
+    {
+        // Small pill toggles (analyser options): outline when off, tinted when on.
+        const float r = bounds.getHeight() * 0.5f;
+        if (on)
+        {
+            g.setColour (accent.withAlpha (isDown ? 0.22f : 0.13f));
+            g.fillRoundedRectangle (bounds, r);
+        }
+        else if (isHighlighted || isDown)
+        {
+            g.setColour (Palette::panelHover);
+            g.fillRoundedRectangle (bounds, r);
+        }
+        g.setColour (on ? accent.withAlpha (0.5f) : Palette::borderStrong);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), r, 1.0f);
     }
     else if (style == "ghost")
     {
@@ -398,6 +417,8 @@ void FlubLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& b, bo
         colour = on ? Palette::background : (isHighlighted ? Palette::text : Palette::muted);
     else if (style == "tab")
         colour = on ? Palette::text : (isHighlighted ? Palette::text.withAlpha (0.9f) : Palette::muted);
+    else if (style == "chip")
+        colour = on ? accent.brighter (0.25f) : (isHighlighted ? Palette::text : Palette::muted);
     else if (style == "accent")
         colour = Palette::background;
     else if (style == "warning" && on)
@@ -653,6 +674,13 @@ void FlubLookAndFeel::drawScrollbar (juce::Graphics& g, juce::ScrollBar&, int x,
     else
         thumb = juce::Rectangle<float> (static_cast<float> (thumbStartPosition), static_cast<float> (y), static_cast<float> (thumbSize),
                                         static_cast<float> (height));
+    // Faint track so a scrollable area reads as such, then the thumb.
+    const auto track = juce::Rectangle<float> (static_cast<float> (x), static_cast<float> (y), static_cast<float> (width),
+                                               static_cast<float> (height))
+                           .reduced (3.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.035f));
+    g.fillRoundedRectangle (track, juce::jmin (track.getWidth(), track.getHeight()) * 0.5f);
+
     thumb = thumb.reduced (isMouseOver || isMouseDown ? 2.0f : 3.0f);
     g.setColour (isMouseDown ? accent.withAlpha (0.7f) : (isMouseOver ? juce::Colour (0xff4a5466) : juce::Colour (0xff343c4a)));
     g.fillRoundedRectangle (thumb, juce::jmin (thumb.getWidth(), thumb.getHeight()) * 0.5f);
@@ -728,6 +756,21 @@ juce::Font FlubLookAndFeel::getAlertWindowFont()
 juce::Font FlubLookAndFeel::getLabelFont (juce::Label& label)
 {
     return label.getFont();
+}
+
+void FlubLookAndFeel::drawLabel (juce::Graphics& g, juce::Label& label)
+{
+    if (dynamic_cast<juce::ComboBox*> (label.getParentComponent()) == nullptr || label.isBeingEdited())
+    {
+        LookAndFeel_V4::drawLabel (g, label);
+        return;
+    }
+    const float alpha = label.isEnabled() ? 1.0f : 0.5f;
+    g.fillAll (label.findColour (juce::Label::backgroundColourId).withMultipliedAlpha (alpha));
+    g.setColour (label.findColour (juce::Label::textColourId).withMultipliedAlpha (alpha));
+    g.setFont (getLabelFont (label));
+    const auto area = getLabelBorderSize (label).subtractedFrom (label.getLocalBounds());
+    g.drawText (label.getText(), area, label.getJustificationType(), true);
 }
 
 void FlubLookAndFeel::drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics& g, const juce::Path& path, juce::Image&)

@@ -14,7 +14,10 @@
 //                            updated and the paths are rebuilt, so paint()
 //                            only strokes / fills ready-made paths over a
 //                            cached grid image.
-// Display: log frequency axis, dBFS axis (sine-calibrated), optional
+// Levels are 1/6-octave band levels referred to 1 kHz: the averaged power
+// density plus the bandwidth of a 1/6-octave band at 1 kHz, so pink noise
+// reads its band level at the tilt pivot and a sine reads close to its dBFS
+// value there. Display: log frequency axis, dB axis, optional
 // +4.5 dB/octave tilt around 1 kHz (music looks "flat"), pre = grey fill,
 // post = accent line with a soft glow, peak hold = thin accent line.
 //
@@ -37,7 +40,7 @@ public:
     static constexpr int kFftSize = 1 << kFftOrder; // 4096
     static constexpr int kHop = kFftSize / 4;       // 75 % overlap
     static constexpr int kNumPoints = 420;          // log-spaced display points
-    static constexpr float kMinDb = -96.0f, kMaxDb = 0.0f;
+    static constexpr float kMinDb = -84.0f, kMaxDb = 0.0f;
     static constexpr float kMinHz = 20.0f, kMaxHz = 20000.0f;
 
     // Plot insets inside the component (left: dB labels, right: EQ gain labels).
@@ -98,6 +101,7 @@ private:
     std::vector<Band> bands;
     std::vector<float> pointHz, pointX, tiltDb;
     double sampleRate = 48000.0;
+    float calibrationDb = 0.0f; // sine calibration + 1/6-octave bandwidth at 1 kHz
     bool showPre = true, showPost = true, tilt = true, peakHold = true;
 
     juce::Rectangle<float> plot;

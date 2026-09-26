@@ -9,7 +9,8 @@
 // executable name) for the selected strip and "Open system routing settings".
 // When per-app routing is unavailable (no platform services, unsupported OS
 // version, or switched off) the assign button is greyed out and the panel
-// explains why and what to do instead.
+// explains why and what to do instead (a one-line notice with the full text
+// on hover / click when the panel is short).
 //
 // While visible the panel asks AppRouting for live session updates.
 #pragma once
@@ -24,7 +25,7 @@
 
 namespace flub::app::ui
 {
-class RoutingPanel : public juce::Component
+class RoutingPanel : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     explicit RoutingPanel (EngineController& controller);
@@ -41,6 +42,8 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
     void visibilityChanged() override;
+    void mouseMove (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
 
 private:
     class StripRow;
@@ -49,6 +52,7 @@ private:
     void promptForExecutable (const juce::String& stripName);
     void showChipMenu (const juce::String& executable);
     juce::String unsupportedReason() const;
+    juce::TextLayout layoutReason (int width) const;
 
     EngineController& controller;
     juce::Component rowHolder;
@@ -58,6 +62,7 @@ private:
     IconButton systemButton { "Open system routing settings", Icons::external(), IconButton::Style::Framed };
     juce::String reason;
     juce::Rectangle<int> headerArea, reasonArea;
+    bool reasonCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;
 };
 } // namespace flub::app::ui
