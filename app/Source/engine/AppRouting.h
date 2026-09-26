@@ -137,7 +137,12 @@ private:
         int strip = -1; // strip it feeds (its FIFO is sized for that strip's channels)
     };
     std::map<uint32_t, RunningCapture> captures; // pid -> running capture
-    std::map<uint32_t, int> captureFailures; // pid -> failed attempts
+    struct CaptureFailure
+    {
+        int attempts = 0;
+        juce::String error; // last start error, still reported once attempts run out
+    };
+    std::map<uint32_t, CaptureFailure> captureFailures; // pid -> failed starts
 
     // Shared with the worker
     juce::CriticalSection lock;

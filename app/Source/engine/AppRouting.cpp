@@ -361,18 +361,29 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
                 }
             }
 
-            if (existing == captures.end() && captureFailures[a.processId] < kMaxCaptureAttempts)
+            if (existing == captures.end())
             {
-                juce::String error;
-                const int id = host.startProcessCapture (a.strip, a.processId, error);
-                if (id >= 0)
+                auto& failure = captureFailures[a.processId];
+                if (failure.attempts < kMaxCaptureAttempts)
                 {
-                    captures[a.processId] = { id, a.strip };
+                    juce::String error;
+                    const int id = host.startProcessCapture (a.strip, a.processId, error);
+                    if (id >= 0)
+                    {
+                        captures[a.processId] = { id, a.strip };
+                        captureFailures.erase (a.processId);
+                    }
+                    else
+                    {
+                        ++failure.attempts;
+                        failure.error = error;
+                        a.error = error;
+                    }
                 }
                 else
                 {
-                    ++captureFailures[a.processId];
-                    a.error = error;
+                    // Gave up: keep showing why the app is mapped but silent.
+                    a.error = failure.error;
                 }
             }
         }

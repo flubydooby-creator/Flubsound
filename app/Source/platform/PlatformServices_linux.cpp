@@ -642,6 +642,923 @@ public:
 #endif
 
 //==============================================================================
+// GlobalHotkeys - xdg-desktop-portal GlobalShortcuts (Wayland sessions)
+//==============================================================================
+/*  Protocol (org.freedesktop.portal.GlobalShortcuts, version 1, served by
+    org.freedesktop.portal.Desktop at /org/freedesktop/portal/desktop):
+      1. CreateSession ({handle_token, session_handle_token}) returns a
+         Request object path; the result arrives later as that Request's
+         Response signal (u response, a{sv} results) with
+         results["session_handle"].
+      2. BindShortcuts (session, [(id, {description, preferred_trigger})],
+         parent_window, {handle_token}) answers the same way with
+         results["shortcuts"]: the shortcuts actually bound, each as
+         (id, {description, trigger_description}). The compositor may show a
+         dialog; the user may pick another key or decline, so
+         preferred_trigger is only a hint.
+      3. Activated / Deactivated (session, shortcut_id, timestamp, options)
+         signals while the session lives.
+    Response codes: 0 success, 1 cancelled by the user, 2 other failure.
+    Request paths are predictable (.../request/<sender>/<handle_token>), so
+    the Response is matched even when it overtakes the method reply.
+
+    Rebinding: the interface has no "unbind", and binding a session's
+    shortcuts is a one-time step (a second BindShortcuts on the same session
+    is not portable across portal back-ends). A changed set is therefore
+    applied by closing the session (Session.Close) and binding the whole new
+    set in a fresh one. Desktops remember the user's choice per application
+    and shortcut id, so re-binding known ids does not ask again. Changes are
+    coalesced: HotkeyManager::registerAll() unregisters everything and then
+    registers each action in a burst; that becomes one new session
+    (settleTime after the last change), and a burst that ends with the set
+    already bound is not sent at all. ListShortcuts is not used: the
+    BindShortcuts response already lists what was bound.
+
+    Results are asynchronous, so registerHotkey() returns true when the chord
+    can be requested (valid chord with a trigger name, portal present). A
+    denied dialog, shortcuts the desktop did not bind and portal errors are
+    logged to stderr: the GlobalHotkeys interface has no channel back to
+    HotkeyManager for failures found after registerHotkey() returned.
+
+    Threading: one private connection to the session bus, serviced by the
+    service's own thread (poll on the bus fd + a wake pipe, like the X11
+    class). After the constructor all D-Bus traffic happens on that thread;
+    registerHotkey / unregister* only edit the wanted set under a mutex and
+    wake it. Callbacks run on that thread, once per Activated signal (the
+    Deactivated signal, key release, is ignored). Signals count only when
+    they come from the portal's unique bus name and name the current
+    session. */
+namespace dbus
+{
+/*  libdbus-1 is declared here from its stable C ABI instead of including
+    <dbus/dbus.h>. The headers ship in libdbus-1-dev, which most build
+    machines (CI, this project's build hosts) do not have; a
+    __has_include(<dbus/dbus.h>) switch with a fallback would give two
+    declaration paths, one of them never compiled or tested. libdbus-1.so.3
+    has kept its ABI since 1.0 (2006) and the D-Bus project guarantees it, so
+    these prototypes, the type codes and the two structs the caller
+    allocates are fixed:
+      - DBusError { const char* name; const char* message; unsigned dummy
+        bit-fields; void* padding1; }: declared field for field, plus spare
+        room;
+      - DBusMessageIter: opaque, 72 bytes on LP64, only ever passed by
+        pointer: over-allocated here (libdbus writes at most its real size). */
+struct Connection;
+struct Message;
+using Boolean = uint32_t; // dbus_bool_t ("Bool" is an X11 macro)
+
+struct Error
+{
+    const char* name = nullptr;
+    const char* message = nullptr;
+    unsigned int dummyBits = 0;
+    void* padding1 = nullptr;
+    void* spare[4] {};
+};
+
+struct Iter
+{
+    void* opaque[16] {};
+};
+
+constexpr int kTypeUInt32 = 'u';
+constexpr int kTypeString = 's';
+constexpr int kTypeObjectPath = 'o';
+constexpr int kTypeVariant = 'v';
+constexpr int kTypeArray = 'a';
+constexpr int kTypeStruct = 'r';
+constexpr int kTypeDictEntry = 'e';
+
+constexpr int kMessageMethodReturn = 2;
+constexpr int kMessageError = 3;
+constexpr int kMessageSignal = 4;
+
+constexpr int kDispatchDataRemains = 0;
+
+/** The libdbus-1 entry points the portal client needs, resolved with dlopen. */
+struct Api
+{
+    void* lib = nullptr;
+    void (*errorInit) (Error*) = nullptr;
+    void (*errorFree) (Error*) = nullptr;
+    Connection* (*connectionOpenPrivate) (const char*, Error*) = nullptr;
+    Boolean (*busRegister) (Connection*, Error*) = nullptr;
+    const char* (*busGetUniqueName) (Connection*) = nullptr;
+    void (*busAddMatch) (Connection*, const char*, Error*) = nullptr;
+    void (*connectionSetExitOnDisconnect) (Connection*, Boolean) = nullptr;
+    void (*connectionClose) (Connection*) = nullptr;
+    void (*connectionUnref) (Connection*) = nullptr;
+    Boolean (*connectionGetUnixFd) (Connection*, int*) = nullptr;
+    Boolean (*connectionReadWrite) (Connection*, int) = nullptr;
+    int (*connectionGetDispatchStatus) (Connection*) = nullptr;
+    Message* (*connectionPopMessage) (Connection*) = nullptr;
+    Boolean (*connectionSend) (Connection*, Message*, uint32_t*) = nullptr;
+    void (*connectionFlush) (Connection*) = nullptr;
+    Boolean (*connectionHasMessagesToSend) (Connection*) = nullptr;
+    Message* (*sendWithReplyAndBlock) (Connection*, Message*, int, Error*) = nullptr;
+    Message* (*messageNewMethodCall) (const char*, const char*, const char*, const char*) = nullptr;
+    void (*messageUnref) (Message*) = nullptr;
+    int (*messageGetType) (Message*) = nullptr;
+    const char* (*messageGetPath) (Message*) = nullptr;
+    const char* (*messageGetInterface) (Message*) = nullptr;
+    const char* (*messageGetMember) (Message*) = nullptr;
+    const char* (*messageGetSender) (Message*) = nullptr;
+    const char* (*messageGetErrorName) (Message*) = nullptr;
+    uint32_t (*messageGetReplySerial) (Message*) = nullptr;
+    void (*messageSetNoReply) (Message*, Boolean) = nullptr;
+    Boolean (*iterInit) (Message*, Iter*) = nullptr;
+    void (*iterInitAppend) (Message*, Iter*) = nullptr;
+    int (*iterGetArgType) (Iter*) = nullptr;
+    Boolean (*iterNext) (Iter*) = nullptr;
+    void (*iterRecurse) (Iter*, Iter*) = nullptr;
+    void (*iterGetBasic) (Iter*, void*) = nullptr;
+    Boolean (*iterAppendBasic) (Iter*, int, const void*) = nullptr;
+    Boolean (*iterOpenContainer) (Iter*, int, const char*, Iter*) = nullptr;
+    Boolean (*iterCloseContainer) (Iter*, Iter*) = nullptr;
+
+    static const Api* get()
+    {
+        static const Api api = []
+        {
+            Api a;
+            a.lib = ::dlopen ("libdbus-1.so.3", RTLD_NOW | RTLD_LOCAL);
+            if (a.lib == nullptr)
+                return a;
+            const auto sym = [&a] (auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype (fn)>> (::dlsym (a.lib, name)); return fn != nullptr; };
+            Boolean (*threadsInitDefault)() = nullptr;
+            const bool ok = sym (threadsInitDefault, "dbus_threads_init_default") && sym (a.errorInit, "dbus_error_init")
+                            && sym (a.errorFree, "dbus_error_free") && sym (a.connectionOpenPrivate, "dbus_connection_open_private")
+                            && sym (a.busRegister, "dbus_bus_register") && sym (a.busGetUniqueName, "dbus_bus_get_unique_name")
+                            && sym (a.busAddMatch, "dbus_bus_add_match")
+                            && sym (a.connectionSetExitOnDisconnect, "dbus_connection_set_exit_on_disconnect")
+                            && sym (a.connectionClose, "dbus_connection_close") && sym (a.connectionUnref, "dbus_connection_unref")
+                            && sym (a.connectionGetUnixFd, "dbus_connection_get_unix_fd")
+                            && sym (a.connectionReadWrite, "dbus_connection_read_write")
+                            && sym (a.connectionGetDispatchStatus, "dbus_connection_get_dispatch_status")
+                            && sym (a.connectionPopMessage, "dbus_connection_pop_message")
+                            && sym (a.connectionSend, "dbus_connection_send") && sym (a.connectionFlush, "dbus_connection_flush")
+                            && sym (a.connectionHasMessagesToSend, "dbus_connection_has_messages_to_send")
+                            && sym (a.sendWithReplyAndBlock, "dbus_connection_send_with_reply_and_block")
+                            && sym (a.messageNewMethodCall, "dbus_message_new_method_call") && sym (a.messageUnref, "dbus_message_unref")
+                            && sym (a.messageGetType, "dbus_message_get_type") && sym (a.messageGetPath, "dbus_message_get_path")
+                            && sym (a.messageGetInterface, "dbus_message_get_interface")
+                            && sym (a.messageGetMember, "dbus_message_get_member") && sym (a.messageGetSender, "dbus_message_get_sender")
+                            && sym (a.messageGetErrorName, "dbus_message_get_error_name")
+                            && sym (a.messageGetReplySerial, "dbus_message_get_reply_serial")
+                            && sym (a.messageSetNoReply, "dbus_message_set_no_reply") && sym (a.iterInit, "dbus_message_iter_init")
+                            && sym (a.iterInitAppend, "dbus_message_iter_init_append")
+                            && sym (a.iterGetArgType, "dbus_message_iter_get_arg_type") && sym (a.iterNext, "dbus_message_iter_next")
+                            && sym (a.iterRecurse, "dbus_message_iter_recurse") && sym (a.iterGetBasic, "dbus_message_iter_get_basic")
+                            && sym (a.iterAppendBasic, "dbus_message_iter_append_basic")
+                            && sym (a.iterOpenContainer, "dbus_message_iter_open_container")
+                            && sym (a.iterCloseContainer, "dbus_message_iter_close_container");
+            // Several threads use libdbus (this service, and any other
+            // libdbus user in the process); must precede every other call.
+            if (! ok || threadsInitDefault() == 0)
+            {
+                ::dlclose (a.lib);
+                a = Api();
+            }
+            return a;
+        }();
+        return api.lib != nullptr ? &api : nullptr;
+    }
+};
+
+struct MessageUnref
+{
+    void operator() (Message* message) const { Api::get()->messageUnref (message); }
+};
+using MessageRef = std::unique_ptr<Message, MessageUnref>;
+
+inline std::string str (const char* text) { return text != nullptr ? std::string (text) : std::string(); }
+
+/** Appends a string-like basic value ('s' or 'o'). libdbus aborts the
+    process on an invalid UTF-8 string or object path, so callers only pass
+    ASCII built here or paths checked with portal::isValidObjectPath. */
+inline bool appendBasic (const Api& api, Iter* iter, int type, const std::string& value)
+{
+    const char* text = value.c_str();
+    return api.iterAppendBasic (iter, type, &text) != 0;
+}
+
+/** Appends {key: variant<type>(value)} to an a{sv} under construction. */
+inline bool appendDictEntry (const Api& api, Iter* dict, const char* key, int type, const std::string& value)
+{
+    Iter entry, variant;
+    const char signature[2] = { static_cast<char> (type), '\0' };
+    return api.iterOpenContainer (dict, kTypeDictEntry, nullptr, &entry) != 0 && appendBasic (api, &entry, kTypeString, key)
+           && api.iterOpenContainer (&entry, kTypeVariant, signature, &variant) != 0 && appendBasic (api, &variant, type, value)
+           && api.iterCloseContainer (&entry, &variant) != 0 && api.iterCloseContainer (dict, &entry) != 0;
+}
+
+/** Reads an 's' or 'o' argument; false for any other type. */
+inline bool readString (const Api& api, Iter* iter, std::string& out)
+{
+    const int type = api.iterGetArgType (iter);
+    if (type != kTypeString && type != kTypeObjectPath)
+        return false;
+    const char* text = nullptr;
+    api.iterGetBasic (iter, &text);
+    out = str (text);
+    return true;
+}
+
+/** Finds 'key' in the a{sv} at 'dict' and points 'value' into its variant. */
+inline bool findInVardict (const Api& api, Iter* dict, const char* key, Iter& value)
+{
+    if (api.iterGetArgType (dict) != kTypeArray)
+        return false;
+    Iter entries;
+    api.iterRecurse (dict, &entries);
+    for (; api.iterGetArgType (&entries) == kTypeDictEntry; api.iterNext (&entries))
+    {
+        Iter entry;
+        api.iterRecurse (&entries, &entry);
+        std::string name;
+        if (readString (api, &entry, name) && name == key && api.iterNext (&entry) != 0 && api.iterGetArgType (&entry) == kTypeVariant)
+        {
+            api.iterRecurse (&entry, &value);
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool readVardictString (const Api& api, Iter* dict, const char* key, std::string& out)
+{
+    Iter value;
+    return findInVardict (api, dict, key, value) && readString (api, &value, out);
+}
+} // namespace dbus
+
+namespace portal
+{
+constexpr const char* kService = "org.freedesktop.portal.Desktop";
+constexpr const char* kObjectPath = "/org/freedesktop/portal/desktop";
+constexpr const char* kShortcutsInterface = "org.freedesktop.portal.GlobalShortcuts";
+constexpr const char* kRequestInterface = "org.freedesktop.portal.Request";
+constexpr const char* kSessionInterface = "org.freedesktop.portal.Session";
+
+// Broadcast signals only reach a connection with a matching rule. The portal
+// sends Response / Activated to its client directly, but the rules keep
+// portal back-ends that broadcast working too.
+constexpr const char* kMatchRules[] = {
+    "type='signal',interface='org.freedesktop.portal.Request',member='Response'",
+    "type='signal',interface='org.freedesktop.portal.GlobalShortcuts'",
+    "type='signal',interface='org.freedesktop.portal.Session',member='Closed'",
+    "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.freedesktop.portal.Desktop'",
+};
+
+/** A KeyChord as a trigger in the XDG shortcuts spec format: the modifiers
+    CTRL, ALT, SHIFT and LOGO, then the xkb keysym name of the unshifted key,
+    joined with '+' ("CTRL+ALT+Up", "CTRL+SHIFT+m", "LOGO+F13"). "" when the
+    key has no name. */
+std::string triggerFor (const KeyChord& chord)
+{
+    std::string key;
+    if (detail::isLetterKey (chord.keyCode))
+        key = std::string (1, static_cast<char> ('a' + (chord.keyCode - 'A')));
+    else if (detail::isDigitKey (chord.keyCode))
+        key = std::string (1, static_cast<char> (chord.keyCode));
+    else if (const int f = detail::functionKeyNumber (chord.keyCode); f > 0)
+        key = "F" + std::to_string (f);
+    else
+    {
+        switch (chord.keyCode)
+        {
+            case 0x20: key = "space"; break;
+            case 0x21: key = "Page_Up"; break;
+            case 0x22: key = "Page_Down"; break;
+            case 0x23: key = "End"; break;
+            case 0x24: key = "Home"; break;
+            case 0x25: key = "Left"; break;
+            case 0x26: key = "Up"; break;
+            case 0x27: key = "Right"; break;
+            case 0x28: key = "Down"; break;
+            case 0x2D: key = "Insert"; break;
+            case 0x2E: key = "Delete"; break;
+            default: return {};
+        }
+    }
+
+    std::string trigger;
+    if ((chord.modifiers & KeyChord::Ctrl) != 0) trigger += "CTRL+";
+    if ((chord.modifiers & KeyChord::Alt) != 0) trigger += "ALT+";
+    if ((chord.modifiers & KeyChord::Shift) != 0) trigger += "SHIFT+";
+    if ((chord.modifiers & KeyChord::Super) != 0) trigger += "LOGO+";
+    return trigger + key;
+}
+
+/** Shortcut ids are what desktops store the user's choice under. */
+std::string shortcutId (int id) { return "flubsound-" + std::to_string (id); }
+
+/** D-Bus object path syntax: "/" or "/a/b_1" (elements of [A-Za-z0-9_]). */
+bool isValidObjectPath (const std::string& path)
+{
+    if (path.empty() || path.front() != '/')
+        return false;
+    if (path.size() == 1)
+        return true;
+    if (path.back() == '/')
+        return false;
+    for (size_t i = 1; i < path.size(); ++i)
+    {
+        const char c = path[i];
+        const bool element = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        if (! element && ! (c == '/' && path[i - 1] != '/'))
+            return false;
+    }
+    return true;
+}
+
+/** Request / session object path element for a unique bus name: ":1.42"
+    becomes "1_42". */
+std::string busPathElement (const std::string& uniqueName)
+{
+    std::string element = uniqueName.substr (uniqueName.empty() || uniqueName.front() != ':' ? 0 : 1);
+    std::replace (element.begin(), element.end(), '.', '_');
+    return element;
+}
+
+/** The session bus address: $DBUS_SESSION_BUS_ADDRESS, else the systemd
+    user bus socket $XDG_RUNTIME_DIR/bus. libdbus's own fallback would also
+    try X11 autolaunch, which can start a stray bus daemon; that is avoided. */
+std::string sessionBusAddress()
+{
+    if (const char* address = std::getenv ("DBUS_SESSION_BUS_ADDRESS"); address != nullptr && *address != '\0')
+        return address;
+
+    const char* runtimeDir = std::getenv ("XDG_RUNTIME_DIR");
+    if (runtimeDir == nullptr || runtimeDir[0] != '/')
+        return {};
+    const std::string socketPath = std::string (runtimeDir) + "/bus";
+    struct stat info {};
+    if (::stat (socketPath.c_str(), &info) != 0 || ! S_ISSOCK (info.st_mode))
+        return {};
+
+    // D-Bus address values escape every byte outside [-0-9A-Za-z_/.\*] as %XX.
+    std::string address = "unix:path=";
+    for (const char c : socketPath)
+    {
+        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+                           || c == '/' || c == '.' || c == '\\' || c == '*';
+        if (plain)
+            address += c;
+        else
+        {
+            char escaped[4];
+            std::snprintf (escaped, sizeof (escaped), "%%%02X", static_cast<unsigned int> (static_cast<unsigned char> (c)));
+            address += escaped;
+        }
+    }
+    return address;
+}
+
+void log (const std::string& text) { std::fprintf (stderr, "Flubsound: global shortcuts: %s\n", text.c_str()); }
+} // namespace portal
+
+class PortalGlobalHotkeys final : public GlobalHotkeys
+{
+public:
+    /** Changes closer together than this are bound as one set. */
+    static constexpr std::chrono::milliseconds kSettleTime { 50 };
+    /** Bound for the start-up probe (D-Bus may have to start the portal). */
+    static constexpr int kProbeTimeoutMs = 3000;
+
+    explicit PortalGlobalHotkeys (std::chrono::milliseconds settleTimeIn = kSettleTime)
+        : settleTime (settleTimeIn)
+    {
+        api = dbus::Api::get();
+        if (api == nullptr || ! start())
+            closeConnection();
+    }
+
+    ~PortalGlobalHotkeys() override
+    {
+        if (thread.joinable())
+        {
+            running = false;
+            wake();
+            thread.join();
+        }
+        if (connection != nullptr)
+        {
+            closeSession();
+            api->connectionFlush (connection);
+        }
+        closeConnection();
+        for (int& fd : wakePipe)
+            if (fd >= 0)
+                ::close (fd);
+    }
+
+    bool isSupported() const override { return supported; }
+
+    /** GlobalShortcuts interface version the portal reported (0 = none). */
+    uint32_t getPortalVersion() const noexcept { return portalVersion; }
+
+    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    {
+        if (! supported || ! callback || ! detail::isValidChord (chord))
+            return false;
+        Shortcut shortcut { portal::triggerFor (chord), "Flubsound Pro: " + chord.toString() };
+        if (shortcut.trigger.empty())
+            return false;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            wanted[id] = Wanted { std::move (shortcut), std::move (callback) };
+            noteChange();
+        }
+        wake();
+        return true;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            if (wanted.erase (id) == 0)
+                return;
+            noteChange();
+        }
+        wake();
+    }
+
+    void unregisterAll() override
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            if (wanted.empty())
+                return;
+            wanted.clear();
+            noteChange();
+        }
+        wake();
+    }
+
+    /** Sends pending changes now instead of after the settle time (tests). */
+    void applyNow()
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            applyImmediately = true;
+        }
+        wake();
+    }
+
+    /** Waits, at most 'timeout', until every change so far has been sent and
+        the portal has answered (tests). */
+    bool waitUntilSettled (std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock (mutex);
+        return settledCondition.wait_for (lock, timeout, [this] { return settledRevision == revision; });
+    }
+
+private:
+    struct Shortcut
+    {
+        std::string trigger;     // preferred_trigger, XDG shortcuts format
+        std::string description; // shown in the desktop's dialog / settings
+        bool operator== (const Shortcut&) const = default;
+    };
+
+    struct Wanted
+    {
+        Shortcut shortcut;
+        std::function<void()> callback;
+    };
+
+    enum class Stage
+    {
+        Idle,
+        CreatingSession,
+        Binding
+    };
+
+    /** The one portal request in flight (service thread only). */
+    struct Pending
+    {
+        Stage stage = Stage::Idle;
+        uint32_t serial = 0;
+        std::string requestPath, returnedPath;
+        std::map<int, Shortcut> shortcuts;
+        uint64_t revision = 0;
+    };
+
+    static constexpr uint64_t kReapply = ~uint64_t (0);
+
+    bool start()
+    {
+        const std::string address = portal::sessionBusAddress();
+        if (address.empty())
+            return false;
+        dbus::Error error;
+        api->errorInit (&error);
+        connection = api->connectionOpenPrivate (address.c_str(), &error);
+        if (connection != nullptr)
+        {
+            api->connectionSetExitOnDisconnect (connection, 0);
+            if (api->busRegister (connection, &error) == 0)
+                closeConnection();
+        }
+        api->errorFree (&error);
+        if (connection == nullptr)
+            return false;
+
+        uniqueName = dbus::str (api->busGetUniqueName (connection));
+        portalVersion = probeVersion();
+        int fd = -1;
+        if (portalVersion == 0 || api->connectionGetUnixFd (connection, &fd) == 0 || ::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
+            return false;
+
+        for (const char* rule : portal::kMatchRules)
+            api->busAddMatch (connection, rule, nullptr); // asynchronous; ordered before any portal call
+        api->connectionFlush (connection);
+
+        busFd = fd;
+        supported = true;
+        running = true;
+        thread = std::thread ([this] { run(); });
+        return true;
+    }
+
+    /** Properties.Get (GlobalShortcuts, "version"): 0 when the portal is
+        missing or has no GlobalShortcuts interface. Also learns the portal's
+        unique bus name, the only sender whose signals are accepted. */
+    uint32_t probeVersion()
+    {
+        dbus::MessageRef call (api->messageNewMethodCall (portal::kService, portal::kObjectPath, "org.freedesktop.DBus.Properties", "Get"));
+        if (call == nullptr)
+            return 0;
+        dbus::Iter args;
+        api->iterInitAppend (call.get(), &args);
+        if (! dbus::appendBasic (*api, &args, dbus::kTypeString, portal::kShortcutsInterface)
+            || ! dbus::appendBasic (*api, &args, dbus::kTypeString, "version"))
+            return 0;
+
+        dbus::Error error;
+        api->errorInit (&error);
+        dbus::MessageRef reply (api->sendWithReplyAndBlock (connection, call.get(), kProbeTimeoutMs, &error));
+        api->errorFree (&error); // ServiceUnknown (no portal), InvalidArgs (no GlobalShortcuts), timeout
+        if (reply == nullptr)
+            return 0;
+
+        uint32_t version = 0;
+        dbus::Iter it, value;
+        if (api->iterInit (reply.get(), &it) != 0 && api->iterGetArgType (&it) == dbus::kTypeVariant)
+        {
+            api->iterRecurse (&it, &value);
+            if (api->iterGetArgType (&value) == dbus::kTypeUInt32)
+                api->iterGetBasic (&value, &version);
+        }
+        portalOwner = dbus::str (api->messageGetSender (reply.get()));
+        return portalOwner.empty() ? 0 : version;
+    }
+
+    void closeConnection()
+    {
+        if (connection == nullptr)
+            return;
+        api->connectionClose (connection); // private connections must be closed before the last unref
+        api->connectionUnref (connection);
+        connection = nullptr;
+    }
+
+    void wake()
+    {
+        if (wakePipe[1] < 0)
+            return;
+        const char byte = 0;
+        [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
+    }
+
+    void noteChange() // mutex held
+    {
+        ++revision;
+        lastChange = std::chrono::steady_clock::now();
+    }
+
+    void markSettled (uint64_t rev)
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            settledRevision = rev;
+        }
+        settledCondition.notify_all();
+    }
+
+    //--------------------------------------------------------------------------
+    // Service thread
+    void run()
+    {
+        pollfd fds[2] = { { busFd, POLLIN, 0 }, { wakePipe[0], POLLIN, 0 } };
+        while (running)
+        {
+            if (api->connectionReadWrite (connection, 0) == 0) // reads and writes what it can, never blocks
+            {
+                portal::log ("lost the connection to the session bus; shortcuts stop working");
+                break;
+            }
+            while (dbus::Message* message = api->connectionPopMessage (connection))
+            {
+                const dbus::MessageRef owner (message);
+                handleMessage (message);
+            }
+
+            int timeoutMs = applyWantedSet();
+            if (api->connectionGetDispatchStatus (connection) == dbus::kDispatchDataRemains)
+                timeoutMs = 0; // already read into libdbus's queue: poll would not see it
+            fds[0].events = static_cast<short> (POLLIN | (api->connectionHasMessagesToSend (connection) != 0 ? POLLOUT : 0));
+            ::poll (fds, 2, timeoutMs);
+            if ((fds[1].revents & POLLIN) != 0)
+            {
+                char buffer[16];
+                while (::read (wakePipe[0], buffer, sizeof (buffer)) > 0) {}
+            }
+        }
+    }
+
+    /** Starts binding the wanted set once it has settled; returns the poll
+        timeout in ms (-1 = until woken). */
+    int applyWantedSet()
+    {
+        if (pending.stage != Stage::Idle)
+            return -1;
+
+        std::map<int, Shortcut> want;
+        uint64_t rev = 0;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            if (revision == handledRevision)
+                return -1;
+            const auto sinceChange = std::chrono::steady_clock::now() - lastChange;
+            if (! applyImmediately && sinceChange < settleTime)
+                return static_cast<int> (std::chrono::ceil<std::chrono::milliseconds> (settleTime - sinceChange).count());
+            applyImmediately = false;
+            rev = revision;
+            for (const auto& [id, w] : wanted)
+                want.emplace (id, w.shortcut);
+        }
+        handledRevision = rev;
+
+        if (want == bound && (want.empty() || ! session.empty()))
+        {
+            markSettled (rev); // e.g. unregisterAll() + the same registrations again
+            return -1;
+        }
+        closeSession();
+        bound.clear();
+        if (want.empty() || ! createSession (std::move (want), rev))
+            markSettled (rev);
+        return -1;
+    }
+
+    std::string nextToken() { return "flubsound" + std::to_string (++tokenCounter); }
+
+    bool send (dbus::MessageRef call, Stage stage, const std::string& requestToken, std::map<int, Shortcut> shortcuts, uint64_t rev)
+    {
+        uint32_t serial = 0;
+        if (api->connectionSend (connection, call.get(), &serial) == 0)
+        {
+            portal::log ("could not send a request to the portal");
+            return false;
+        }
+        pending = Pending { stage, serial, std::string (portal::kObjectPath) + "/request/" + portal::busPathElement (uniqueName) + "/" + requestToken,
+                            {}, std::move (shortcuts), rev };
+        return true;
+    }
+
+    bool createSession (std::map<int, Shortcut> want, uint64_t rev)
+    {
+        dbus::MessageRef call (api->messageNewMethodCall (portal::kService, portal::kObjectPath, portal::kShortcutsInterface, "CreateSession"));
+        if (call == nullptr)
+            return false;
+        const std::string requestToken = nextToken();
+        dbus::Iter args, options;
+        api->iterInitAppend (call.get(), &args);
+        const bool built = api->iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &options) != 0
+                           && dbus::appendDictEntry (*api, &options, "handle_token", dbus::kTypeString, requestToken)
+                           && dbus::appendDictEntry (*api, &options, "session_handle_token", dbus::kTypeString, nextToken())
+                           && api->iterCloseContainer (&args, &options) != 0;
+        return built && send (std::move (call), Stage::CreatingSession, requestToken, std::move (want), rev);
+    }
+
+    bool bindShortcuts()
+    {
+        dbus::MessageRef call (api->messageNewMethodCall (portal::kService, portal::kObjectPath, portal::kShortcutsInterface, "BindShortcuts"));
+        if (call == nullptr)
+            return false;
+        const std::string requestToken = nextToken();
+        dbus::Iter args, list, options;
+        api->iterInitAppend (call.get(), &args);
+        bool built = dbus::appendBasic (*api, &args, dbus::kTypeObjectPath, session)
+                     && api->iterOpenContainer (&args, dbus::kTypeArray, "(sa{sv})", &list) != 0;
+        for (const auto& [id, shortcut] : pending.shortcuts)
+        {
+            dbus::Iter entry, properties;
+            built = built && api->iterOpenContainer (&list, dbus::kTypeStruct, nullptr, &entry) != 0
+                    && dbus::appendBasic (*api, &entry, dbus::kTypeString, portal::shortcutId (id))
+                    && api->iterOpenContainer (&entry, dbus::kTypeArray, "{sv}", &properties) != 0
+                    && dbus::appendDictEntry (*api, &properties, "description", dbus::kTypeString, shortcut.description)
+                    && dbus::appendDictEntry (*api, &properties, "preferred_trigger", dbus::kTypeString, shortcut.trigger)
+                    && api->iterCloseContainer (&entry, &properties) != 0 && api->iterCloseContainer (&list, &entry) != 0;
+        }
+        // parent_window "": the interface gives no window handle to pass.
+        built = built && api->iterCloseContainer (&args, &list) != 0 && dbus::appendBasic (*api, &args, dbus::kTypeString, "")
+                && api->iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &options) != 0
+                && dbus::appendDictEntry (*api, &options, "handle_token", dbus::kTypeString, requestToken)
+                && api->iterCloseContainer (&args, &options) != 0;
+        return built && send (std::move (call), Stage::Binding, requestToken, std::move (pending.shortcuts), pending.revision);
+    }
+
+    void closeSession()
+    {
+        if (session.empty())
+            return;
+        if (dbus::MessageRef call { api->messageNewMethodCall (portal::kService, session.c_str(), portal::kSessionInterface, "Close") })
+        {
+            api->messageSetNoReply (call.get(), 1);
+            api->connectionSend (connection, call.get(), nullptr);
+        }
+        session.clear();
+    }
+
+    void finishPending()
+    {
+        const uint64_t rev = pending.revision;
+        pending = Pending();
+        markSettled (rev);
+    }
+
+    void handleMessage (dbus::Message* message)
+    {
+        const int type = api->messageGetType (message);
+        if ((type == dbus::kMessageMethodReturn || type == dbus::kMessageError) && pending.stage != Stage::Idle
+            && api->messageGetReplySerial (message) == pending.serial)
+        {
+            dbus::Iter it;
+            std::string text;
+            if (type == dbus::kMessageMethodReturn)
+            {
+                if (api->iterInit (message, &it) != 0 && dbus::readString (*api, &it, text))
+                    pending.returnedPath = text; // normally == requestPath (portals older than 0.9 differ)
+                return;
+            }
+            if (api->iterInit (message, &it) != 0)
+                dbus::readString (*api, &it, text);
+            portal::log (std::string (pending.stage == Stage::Binding ? "BindShortcuts" : "CreateSession") + " failed: "
+                         + dbus::str (api->messageGetErrorName (message)) + " " + text);
+            finishPending();
+            return;
+        }
+        if (type != dbus::kMessageSignal)
+            return;
+
+        const std::string interfaceName = dbus::str (api->messageGetInterface (message));
+        const std::string member = dbus::str (api->messageGetMember (message));
+        const std::string path = dbus::str (api->messageGetPath (message));
+        const std::string sender = dbus::str (api->messageGetSender (message));
+
+        if (interfaceName == "org.freedesktop.DBus" && member == "NameOwnerChanged" && sender == "org.freedesktop.DBus")
+            onPortalOwnerChanged (message);
+        else if (sender != portalOwner)
+            return; // nobody but the portal may press our shortcuts
+        else if (interfaceName == portal::kRequestInterface && member == "Response" && pending.stage != Stage::Idle
+                 && (path == pending.requestPath || (! pending.returnedPath.empty() && path == pending.returnedPath)))
+            onResponse (message);
+        else if (interfaceName == portal::kShortcutsInterface && member == "Activated")
+            onActivated (message);
+        else if (interfaceName == portal::kSessionInterface && member == "Closed" && ! session.empty() && path == session)
+        {
+            portal::log ("the desktop closed the session; shortcuts are requested again when the hotkey settings change");
+            session.clear();
+            bound.clear();
+        }
+    }
+
+    void onResponse (dbus::Message* message)
+    {
+        dbus::Iter results;
+        uint32_t code = 2;
+        if (api->iterInit (message, &results) != 0 && api->iterGetArgType (&results) == dbus::kTypeUInt32)
+        {
+            api->iterGetBasic (&results, &code);
+            api->iterNext (&results);
+        }
+
+        if (pending.stage == Stage::CreatingSession)
+        {
+            std::string handle; // 's' in the spec, 'o' in some back-ends
+            if (code == 0 && dbus::readVardictString (*api, &results, "session_handle", handle) && portal::isValidObjectPath (handle))
+            {
+                session = handle;
+                if (bindShortcuts())
+                    return;
+            }
+            else
+                portal::log ("the desktop did not open a session (response " + std::to_string (code) + ")");
+            finishPending();
+            return;
+        }
+
+        std::set<std::string> boundIds;
+        dbus::Iter list;
+        if (code == 0 && dbus::findInVardict (*api, &results, "shortcuts", list) && api->iterGetArgType (&list) == dbus::kTypeArray)
+        {
+            dbus::Iter items;
+            api->iterRecurse (&list, &items);
+            for (; api->iterGetArgType (&items) == dbus::kTypeStruct; api->iterNext (&items))
+            {
+                dbus::Iter item;
+                std::string shortcut;
+                api->iterRecurse (&items, &item);
+                if (dbus::readString (*api, &item, shortcut))
+                    boundIds.insert (shortcut);
+            }
+        }
+        if (code != 0)
+            portal::log (code == 1 ? "the user declined the shortcuts" : "the desktop refused the shortcuts (response " + std::to_string (code) + ")");
+        else
+            for (const auto& [id, shortcut] : pending.shortcuts)
+                if (boundIds.count (portal::shortcutId (id)) == 0)
+                    portal::log ("\"" + shortcut.description + "\" (" + shortcut.trigger + ") was not bound by the desktop");
+
+        // Remembered even when refused, so re-registering the same set does
+        // not ask the user again; a changed set starts a new session.
+        bound = std::move (pending.shortcuts);
+        finishPending();
+    }
+
+    void onActivated (dbus::Message* message)
+    {
+        dbus::Iter it;
+        std::string sessionHandle, shortcut;
+        if (api->iterInit (message, &it) == 0 || ! dbus::readString (*api, &it, sessionHandle) || api->iterNext (&it) == 0
+            || ! dbus::readString (*api, &it, shortcut))
+            return;
+        if (session.empty() || sessionHandle != session)
+            return; // a closed session's late signal
+
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            for (const auto& [id, w] : wanted)
+                if (portal::shortcutId (id) == shortcut)
+                    callback = w.callback;
+        }
+        if (callback) // outside the lock: a callback may (un)register
+            callback();
+    }
+
+    /** The portal restarted (or went away): its sessions are gone. Rebind the
+        wanted set with the new instance. */
+    void onPortalOwnerChanged (dbus::Message* message)
+    {
+        dbus::Iter it;
+        std::string name, oldOwner, newOwner;
+        if (api->iterInit (message, &it) == 0 || ! dbus::readString (*api, &it, name) || name != portal::kService
+            || api->iterNext (&it) == 0 || ! dbus::readString (*api, &it, oldOwner) || api->iterNext (&it) == 0
+            || ! dbus::readString (*api, &it, newOwner))
+            return;
+        portalOwner = newOwner;
+        session.clear();
+        bound.clear();
+        if (pending.stage != Stage::Idle)
+            finishPending();
+        if (! newOwner.empty())
+            handledRevision = kReapply;
+    }
+
+    const dbus::Api* api = nullptr;
+    const std::chrono::milliseconds settleTime;
+    dbus::Connection* connection = nullptr;
+    std::string uniqueName;
+    uint32_t portalVersion = 0;
+    bool supported = false;
+    int busFd = -1;
+    int wakePipe[2] = { -1, -1 };
+    std::atomic<bool> running { false };
+    std::thread thread;
+
+    // Shared with the callers of registerHotkey / unregister* (mutex).
+    std::mutex mutex;
+    std::condition_variable settledCondition;
+    std::map<int, Wanted> wanted;
+    uint64_t revision = 0, settledRevision = 0;
+    std::chrono::steady_clock::time_point lastChange;
+    bool applyImmediately = false;
+
+    // Service thread only (the constructor sets portalOwner before it starts).
+    std::string portalOwner;
+    std::string session;
+    std::map<int, Shortcut> bound;
+    Pending pending;
+    uint64_t handledRevision = 0;
+    unsigned int tokenCounter = 0;
+};
+
+//==============================================================================
 // AppAudioRouter - pactl (PulseAudio / PipeWire-pulse)
 //==============================================================================
 class LinuxAppAudioRouter final : public AppAudioRouter

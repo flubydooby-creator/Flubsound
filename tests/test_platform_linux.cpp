@@ -10,8 +10,13 @@
 #include "../app/Source/platform/PlatformServices_common.cpp"
 #include "../app/Source/platform/PlatformServices_linux.cpp"
 
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -203,14 +208,15 @@ TEST_CASE ("Platform: malformed pactl output is reported, not crashed on")
 
 TEST_CASE ("Platform: unsupported Linux services report themselves as such")
 {
-    // Global hotkeys need an X11 display (and no Wayland session); headless
-    // runs must report them unsupported instead of failing.
+    // Global hotkeys need an X11 display, or in a Wayland session the
+    // GlobalShortcuts portal (tested against a mock portal below); headless
+    // X11-less runs must report them unsupported instead of failing.
     auto hotkeys = GlobalHotkeys::create();
     REQUIRE (hotkeys != nullptr);
 #if FLUB_HAVE_X11_HEADERS
-    const bool expectUnsupported = std::getenv ("DISPLAY") == nullptr || isWaylandSession();
+    const bool expectUnsupported = ! isWaylandSession() && std::getenv ("DISPLAY") == nullptr;
 #else
-    const bool expectUnsupported = true; // built without the X11 headers
+    const bool expectUnsupported = ! isWaylandSession(); // built without the X11 headers
 #endif
     if (expectUnsupported)
     {
@@ -714,6 +720,730 @@ TEST_CASE ("Platform: XDG autostart falls back to ~/.config when $XDG_CONFIG_HOM
     {
         ScopedEnv xdg ("XDG_CONFIG_HOME", (temp.path + "/xdg//").c_str());
         CHECK (autostart::entryPath() == temp.path + "/xdg/autostart/flubsound-pro.desktop");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wayland: xdg-desktop-portal GlobalShortcuts (against a mock portal on a
+// private session bus)
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Bound for every wait on the bus, the daemon or the service thread: a hang
+    guard only, never a timing assertion. */
+constexpr auto kHangGuard = std::chrono::seconds (10);
+
+template <typename Predicate>
+bool waitUntil (Predicate predicate)
+{
+    const auto deadline = std::chrono::steady_clock::now() + kHangGuard;
+    while (! predicate())
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+            return false;
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    }
+    return true;
+}
+
+std::string findInPath (const char* name)
+{
+    const char* path = std::getenv ("PATH");
+    std::istringstream dirs (path != nullptr ? path : "/usr/local/bin:/usr/bin:/bin");
+    for (std::string dir; std::getline (dirs, dir, ':');)
+        if (! dir.empty() && ::access ((dir + "/" + name).c_str(), X_OK) == 0)
+            return dir + "/" + name;
+    return {};
+}
+
+/** A private dbus-daemon (session bus configuration) for one test: started
+    with --nofork, its address read from a pipe, SIGTERMed and reaped on
+    destruction. address stays empty when dbus-daemon is missing or fails. */
+class PrivateSessionBus
+{
+public:
+    PrivateSessionBus()
+    {
+        const std::string daemon = findInPath ("dbus-daemon");
+        if (daemon.empty() || dir.path.empty())
+            return;
+        const std::string config = dir.path + "/session.conf";
+        writeText (config, "<busconfig>\n  <type>session</type>\n  <listen>unix:dir=" + dir.path + "</listen>\n"
+                           "  <auth>EXTERNAL</auth>\n  <policy context=\"default\">\n    <allow send_destination=\"*\" eavesdrop=\"true\"/>\n"
+                           "    <allow eavesdrop=\"true\"/>\n    <allow own=\"*\"/>\n  </policy>\n</busconfig>\n");
+
+        int fds[2] = { -1, -1 };
+        if (::pipe2 (fds, O_CLOEXEC) != 0)
+            return;
+        // Everything the child needs is prepared before fork (async-signal-safe child).
+        const std::string configArg = "--config-file=" + config;
+        const std::string printArg = "--print-address=" + std::to_string (fds[1]);
+        const char* argv[] = { daemon.c_str(), configArg.c_str(), "--nofork", printArg.c_str(), nullptr };
+        const pid_t parent = ::getpid();
+        pid = ::fork();
+        if (pid == 0)
+        {
+            // The daemon must not outlive a test binary that crashes or is killed.
+            ::prctl (PR_SET_PDEATHSIG, SIGTERM);
+            if (::getppid() != parent)
+                ::_exit (127);
+            ::fcntl (fds[1], F_SETFD, 0); // the address pipe survives exec
+            ::execv (argv[0], const_cast<char* const*> (argv));
+            ::_exit (127);
+        }
+        ::close (fds[1]);
+
+        std::string line;
+        pollfd readable { fds[0], POLLIN, 0 };
+        const auto deadline = std::chrono::steady_clock::now() + kHangGuard;
+        while (pid > 0 && line.find ('\n') == std::string::npos && std::chrono::steady_clock::now() < deadline)
+        {
+            if (::poll (&readable, 1, 100) <= 0)
+                continue;
+            char buffer[256];
+            const ssize_t n = ::read (fds[0], buffer, sizeof (buffer));
+            if (n <= 0)
+                break; // daemon exited
+            line.append (buffer, static_cast<size_t> (n));
+        }
+        ::close (fds[0]);
+        if (const size_t end = line.find ('\n'); end != std::string::npos)
+            address = line.substr (0, end);
+    }
+
+    ~PrivateSessionBus()
+    {
+        if (pid > 0)
+        {
+            ::kill (pid, SIGTERM);
+            int status = 0;
+            ::waitpid (pid, &status, 0);
+        }
+    }
+
+    PrivateSessionBus (const PrivateSessionBus&) = delete;
+    PrivateSessionBus& operator= (const PrivateSessionBus&) = delete;
+
+    TempDir dir;
+    pid_t pid = -1;
+    std::string address;
+};
+
+/** A private connection to $DBUS_SESSION_BUS_ADDRESS (nullptr on failure). */
+dbus::Connection* connectToSessionBus (const dbus::Api& api)
+{
+    dbus::Error error;
+    api.errorInit (&error);
+    dbus::Connection* connection = api.connectionOpenPrivate (portal::sessionBusAddress().c_str(), &error);
+    if (connection != nullptr && api.busRegister (connection, &error) == 0)
+    {
+        api.connectionClose (connection);
+        api.connectionUnref (connection);
+        connection = nullptr;
+    }
+    api.errorFree (&error);
+    return connection;
+}
+
+void disconnect (const dbus::Api& api, dbus::Connection* connection)
+{
+    if (connection == nullptr)
+        return;
+    api.connectionClose (connection);
+    api.connectionUnref (connection);
+}
+
+/** libdbus calls only the mock portal needs (the service never sends
+    replies or signals). */
+struct MockDBusApi
+{
+    int (*requestName) (dbus::Connection*, const char*, unsigned int, dbus::Error*) = nullptr;
+    dbus::Message* (*newMethodReturn) (dbus::Message*) = nullptr;
+    dbus::Message* (*newSignal) (const char*, const char*, const char*) = nullptr;
+    dbus::Message* (*newError) (dbus::Message*, const char*, const char*) = nullptr;
+    dbus::Boolean (*setDestination) (dbus::Message*, const char*) = nullptr;
+
+    explicit MockDBusApi (const dbus::Api& api)
+    {
+        const auto sym = [&api] (auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype (fn)>> (::dlsym (api.lib, name)); return fn != nullptr; };
+        ok = sym (requestName, "dbus_bus_request_name") && sym (newMethodReturn, "dbus_message_new_method_return")
+             && sym (newSignal, "dbus_message_new_signal") && sym (newError, "dbus_message_new_error")
+             && sym (setDestination, "dbus_message_set_destination");
+    }
+    bool ok = false;
+};
+
+/** In-process stand-in for xdg-desktop-portal: owns
+    org.freedesktop.portal.Desktop on the private bus and implements
+    GlobalShortcuts (CreateSession, BindShortcuts, the version property),
+    Session.Close and the Request::Response signals like the real portal
+    (unicast to the caller, predictable request paths). Served by its own
+    thread, which is the only one that touches its connection: libdbus lets
+    a thread blocked in dbus_connection_flush starve while another thread
+    keeps taking the connection's I/O path, so emit() queues the signal for
+    the mock's thread instead of sending it itself. The test reads what the
+    mock recorded under its mutex. */
+class MockPortal
+{
+public:
+    struct Shortcut
+    {
+        std::string id, description, preferredTrigger;
+        bool operator== (const Shortcut&) const = default;
+    };
+    struct Bind
+    {
+        std::string session;
+        std::vector<Shortcut> shortcuts;
+    };
+
+    explicit MockPortal (bool withGlobalShortcuts) : globalShortcuts (withGlobalShortcuts)
+    {
+        if (api == nullptr || ! extra.ok || (connection = connectToSessionBus (*api)) == nullptr)
+            return;
+        dbus::Error error;
+        api->errorInit (&error);
+        const int reply = extra.requestName (connection, portal::kService, 4 /* DO_NOT_QUEUE */, &error);
+        api->errorFree (&error);
+        if (reply != 1 /* PRIMARY_OWNER */)
+            return;
+        uniqueName = dbus::str (api->busGetUniqueName (connection));
+        if (api->connectionGetUnixFd (connection, &busFd) == 0 || ::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
+            return;
+        running = true;
+        thread = std::thread ([this] { serve(); });
+    }
+
+    ~MockPortal()
+    {
+        running = false;
+        if (thread.joinable())
+        {
+            wake();
+            thread.join();
+        }
+        disconnect (*api, connection);
+        for (const int fd : wakePipe)
+            if (fd >= 0)
+                ::close (fd);
+    }
+
+    bool ok() const { return thread.joinable(); }
+
+    /** Sends GlobalShortcuts.Activated / Deactivated to the client, as the
+        portal does when the user presses / releases a bound shortcut. */
+    void emit (const std::string& member, const std::string& session, const std::string& shortcutId)
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            jobs.push_back ([this, member, session, shortcutId, client = clientName]
+                            { sendShortcutSignal (*api, extra, connection, client, member.c_str(), session, shortcutId); });
+        }
+        wake();
+    }
+
+    static void sendShortcutSignal (const dbus::Api& dbusApi, const MockDBusApi& mockApi, dbus::Connection* from, const std::string& to,
+                                    const char* member, const std::string& session, const std::string& shortcutId)
+    {
+        dbus::MessageRef signal (mockApi.newSignal (portal::kObjectPath, portal::kShortcutsInterface, member));
+        dbus::Iter args, options;
+        const uint64_t timestamp = 0;
+        mockApi.setDestination (signal.get(), to.c_str());
+        dbusApi.iterInitAppend (signal.get(), &args);
+        dbus::appendBasic (dbusApi, &args, dbus::kTypeObjectPath, session);
+        dbus::appendBasic (dbusApi, &args, dbus::kTypeString, shortcutId);
+        dbusApi.iterAppendBasic (&args, 't', &timestamp);
+        dbusApi.iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &options);
+        dbusApi.iterCloseContainer (&args, &options);
+        dbusApi.connectionSend (from, signal.get(), nullptr);
+        dbusApi.connectionFlush (from);
+    }
+
+    /** Shortcut ids BindShortcuts leaves out of its result (not bound). */
+    void refuse (const std::string& shortcutId)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        refused.insert (shortcutId);
+    }
+
+    std::vector<std::string> createdSessions()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return created;
+    }
+    std::vector<std::string> closedSessions()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return closed;
+    }
+    std::vector<Bind> bindCalls()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return binds;
+    }
+    std::string client()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return clientName;
+    }
+
+    const dbus::Api* api = dbus::Api::get();
+    MockDBusApi extra { *dbus::Api::get() };
+    dbus::Connection* connection = nullptr;
+    std::string uniqueName;
+
+private:
+    void wake()
+    {
+        const char byte = 0;
+        [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
+    }
+
+    /** Same loop shape as the service: poll the bus fd and the wake pipe,
+        never block inside libdbus. */
+    void serve()
+    {
+        pollfd fds[2] = { { busFd, POLLIN, 0 }, { wakePipe[0], POLLIN, 0 } };
+        while (running && api->connectionReadWrite (connection, 0) != 0)
+        {
+            while (dbus::Message* message = api->connectionPopMessage (connection))
+            {
+                const dbus::MessageRef owner (message);
+                if (api->messageGetType (message) == 1 /* method call */)
+                    handleCall (message);
+            }
+            std::vector<std::function<void()>> queued;
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                queued.swap (jobs);
+            }
+            for (auto& job : queued)
+                job();
+            if (api->connectionGetDispatchStatus (connection) == dbus::kDispatchDataRemains)
+                continue;
+            fds[0].events = static_cast<short> (POLLIN | (api->connectionHasMessagesToSend (connection) != 0 ? POLLOUT : 0));
+            ::poll (fds, 2, -1);
+            char buffer[16];
+            while (::read (wakePipe[0], buffer, sizeof (buffer)) > 0) {}
+        }
+    }
+
+    void handleCall (dbus::Message* call)
+    {
+        const std::string interfaceName = dbus::str (api->messageGetInterface (call));
+        const std::string member = dbus::str (api->messageGetMember (call));
+        const std::string sender = dbus::str (api->messageGetSender (call));
+        dbus::Iter args;
+        api->iterInit (call, &args);
+
+        if (interfaceName == "org.freedesktop.DBus.Properties" && member == "Get")
+        {
+            std::string iface, property;
+            dbus::readString (*api, &args, iface);
+            api->iterNext (&args);
+            dbus::readString (*api, &args, property);
+            if (! globalShortcuts || iface != portal::kShortcutsInterface || property != "version")
+                return replyError (call, "org.freedesktop.DBus.Error.InvalidArgs", "No such interface or property");
+            dbus::MessageRef reply (extra.newMethodReturn (call));
+            dbus::Iter out, variant;
+            const uint32_t version = 1;
+            api->iterInitAppend (reply.get(), &out);
+            api->iterOpenContainer (&out, dbus::kTypeVariant, "u", &variant);
+            api->iterAppendBasic (&variant, dbus::kTypeUInt32, &version);
+            api->iterCloseContainer (&out, &variant);
+            return send (reply.get());
+        }
+
+        const std::string requestBase = std::string (portal::kObjectPath) + "/request/" + portal::busPathElement (sender) + "/";
+        if (interfaceName == portal::kShortcutsInterface && member == "CreateSession" && globalShortcuts)
+        {
+            std::string token, sessionToken;
+            dbus::readVardictString (*api, &args, "handle_token", token);
+            dbus::readVardictString (*api, &args, "session_handle_token", sessionToken);
+            const std::string session = std::string (portal::kObjectPath) + "/session/" + portal::busPathElement (sender) + "/" + sessionToken;
+            if (token.empty() || ! portal::isValidObjectPath (session))
+                return replyError (call, "org.freedesktop.DBus.Error.InvalidArgs", "tokens missing");
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                clientName = sender;
+                created.push_back (session);
+            }
+            replyPath (call, requestBase + token);
+            // The spec types session_handle as 's'.
+            return respond (sender, requestBase + token,
+                            [&] (dbus::Iter* results) { dbus::appendDictEntry (*api, results, "session_handle", dbus::kTypeString, session); });
+        }
+
+        if (interfaceName == portal::kShortcutsInterface && member == "BindShortcuts" && globalShortcuts)
+        {
+            Bind bind;
+            dbus::readString (*api, &args, bind.session);
+            api->iterNext (&args);
+            dbus::Iter items;
+            api->iterRecurse (&args, &items);
+            for (; api->iterGetArgType (&items) == dbus::kTypeStruct; api->iterNext (&items))
+            {
+                dbus::Iter item;
+                api->iterRecurse (&items, &item);
+                Shortcut shortcut;
+                dbus::readString (*api, &item, shortcut.id);
+                api->iterNext (&item);
+                dbus::readVardictString (*api, &item, "description", shortcut.description);
+                dbus::readVardictString (*api, &item, "preferred_trigger", shortcut.preferredTrigger);
+                bind.shortcuts.push_back (shortcut);
+            }
+            std::string parentWindow = "unset", token;
+            api->iterNext (&args);
+            dbus::readString (*api, &args, parentWindow);
+            api->iterNext (&args);
+            dbus::readVardictString (*api, &args, "handle_token", token);
+            std::set<std::string> refusedNow;
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                binds.push_back (bind);
+                refusedNow = refused;
+            }
+            replyPath (call, requestBase + token);
+            return respond (sender, requestBase + token,
+                            [&] (dbus::Iter* results)
+                            {
+                                dbus::Iter entry, variant, list;
+                                api->iterOpenContainer (results, dbus::kTypeDictEntry, nullptr, &entry);
+                                dbus::appendBasic (*api, &entry, dbus::kTypeString, "shortcuts");
+                                api->iterOpenContainer (&entry, dbus::kTypeVariant, "a(sa{sv})", &variant);
+                                api->iterOpenContainer (&variant, dbus::kTypeArray, "(sa{sv})", &list);
+                                for (const auto& shortcut : bind.shortcuts)
+                                {
+                                    if (refusedNow.count (shortcut.id) != 0)
+                                        continue;
+                                    dbus::Iter item, properties;
+                                    api->iterOpenContainer (&list, dbus::kTypeStruct, nullptr, &item);
+                                    dbus::appendBasic (*api, &item, dbus::kTypeString, shortcut.id);
+                                    api->iterOpenContainer (&item, dbus::kTypeArray, "{sv}", &properties);
+                                    dbus::appendDictEntry (*api, &properties, "description", dbus::kTypeString, shortcut.description);
+                                    dbus::appendDictEntry (*api, &properties, "trigger_description", dbus::kTypeString, shortcut.preferredTrigger);
+                                    api->iterCloseContainer (&item, &properties);
+                                    api->iterCloseContainer (&list, &item);
+                                }
+                                api->iterCloseContainer (&variant, &list);
+                                api->iterCloseContainer (&entry, &variant);
+                                api->iterCloseContainer (results, &entry);
+                            });
+        }
+
+        if (interfaceName == portal::kSessionInterface && member == "Close")
+        {
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                closed.push_back (dbus::str (api->messageGetPath (call)));
+            }
+            dbus::MessageRef reply (extra.newMethodReturn (call));
+            return send (reply.get());
+        }
+
+        replyError (call, "org.freedesktop.DBus.Error.UnknownMethod", "not implemented by the mock portal");
+    }
+
+    void send (dbus::Message* message)
+    {
+        api->connectionSend (connection, message, nullptr);
+        api->connectionFlush (connection);
+    }
+
+    void replyError (dbus::Message* call, const char* name, const char* text)
+    {
+        dbus::MessageRef reply (extra.newError (call, name, text));
+        send (reply.get());
+    }
+
+    void replyPath (dbus::Message* call, const std::string& requestPath)
+    {
+        dbus::MessageRef reply (extra.newMethodReturn (call));
+        dbus::Iter out;
+        api->iterInitAppend (reply.get(), &out);
+        dbus::appendBasic (*api, &out, dbus::kTypeObjectPath, requestPath);
+        send (reply.get());
+    }
+
+    /** Request::Response (0 = success, results) to the caller only. */
+    template <typename AddResults>
+    void respond (const std::string& to, const std::string& requestPath, AddResults addResults)
+    {
+        dbus::MessageRef signal (extra.newSignal (requestPath.c_str(), portal::kRequestInterface, "Response"));
+        dbus::Iter args, results;
+        const uint32_t code = 0;
+        extra.setDestination (signal.get(), to.c_str());
+        api->iterInitAppend (signal.get(), &args);
+        api->iterAppendBasic (&args, dbus::kTypeUInt32, &code);
+        api->iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &results);
+        addResults (&results);
+        api->iterCloseContainer (&args, &results);
+        send (signal.get());
+    }
+
+    const bool globalShortcuts;
+    int busFd = -1;
+    int wakePipe[2] = { -1, -1 };
+    std::vector<std::function<void()>> jobs;
+    std::atomic<bool> running { false };
+    std::thread thread;
+    std::mutex mutex;
+    std::string clientName;
+    std::vector<std::string> created, closed;
+    std::vector<Bind> binds;
+    std::set<std::string> refused;
+};
+
+std::vector<std::string> ids (const MockPortal::Bind& bind)
+{
+    std::vector<std::string> result;
+    for (const auto& shortcut : bind.shortcuts)
+        result.push_back (shortcut.id);
+    return result;
+}
+
+/** Skips (true) when libdbus-1 or dbus-daemon is missing. */
+bool skipWithoutDBus (const PrivateSessionBus& bus)
+{
+    if (dbus::Api::get() == nullptr)
+    {
+        std::cerr << "    (libdbus-1.so.3 not available: skipped)\n";
+        return true;
+    }
+    if (bus.address.empty())
+    {
+        std::cerr << "    (dbus-daemon not available: skipped)\n";
+        return true;
+    }
+    return false;
+}
+} // namespace
+
+TEST_CASE ("Platform: portal shortcut triggers use the XDG shortcuts format and object paths are validated")
+{
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl | KeyChord::Alt, 0x26)) == "CTRL+ALT+Up");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl | KeyChord::Alt, 0x28)) == "CTRL+ALT+Down");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl | KeyChord::Shift, 'M')) == "CTRL+SHIFT+m");
+    CHECK (portal::triggerFor (chord (KeyChord::Super | KeyChord::Alt, kF1 + 12)) == "ALT+LOGO+F13");
+    CHECK (portal::triggerFor (chord (KeyChord::None, kF1)) == "F1");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, '7')) == "CTRL+7");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, 0x20)) == "CTRL+space");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, 0x21)) == "CTRL+Page_Up");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, 0x22)) == "CTRL+Page_Down");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, 0x2E)) == "CTRL+Delete");
+    CHECK (portal::triggerFor (chord (KeyChord::Ctrl, 0x2A)).empty());
+    // Every chord the settings accept has a trigger.
+    for (const uint32_t nav : { 0x20u, 0x21u, 0x22u, 0x23u, 0x24u, 0x25u, 0x26u, 0x27u, 0x28u, 0x2Du, 0x2Eu })
+        CHECK (! portal::triggerFor (chord (KeyChord::Ctrl, nav)).empty());
+
+    CHECK (portal::shortcutId (3) == "flubsound-3");
+    CHECK (portal::busPathElement (":1.42") == "1_42");
+    CHECK (portal::isValidObjectPath ("/org/freedesktop/portal/desktop/session/1_42/flubsound2"));
+    CHECK (portal::isValidObjectPath ("/"));
+    CHECK (! portal::isValidObjectPath (""));
+    CHECK (! portal::isValidObjectPath ("relative/path"));
+    CHECK (! portal::isValidObjectPath ("/double//slash"));
+    CHECK (! portal::isValidObjectPath ("/trailing/"));
+    CHECK (! portal::isValidObjectPath ("/with-dash"));
+
+    // Without DBUS_SESSION_BUS_ADDRESS the systemd user bus socket is used
+    // (escaped as a D-Bus address), never X11 autolaunch.
+    TempDir temp;
+    REQUIRE (! temp.path.empty());
+    const std::string runtime = temp.path + "/run dir";
+    REQUIRE (::mkdir (runtime.c_str(), 0700) == 0);
+    ScopedEnv noAddress ("DBUS_SESSION_BUS_ADDRESS", nullptr);
+    ScopedEnv runtimeDir ("XDG_RUNTIME_DIR", runtime.c_str());
+    CHECK (portal::sessionBusAddress().empty()); // no socket yet
+    const int listener = ::socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    REQUIRE (listener >= 0);
+    sockaddr_un socketAddress {};
+    socketAddress.sun_family = AF_UNIX;
+    const std::string socketPath = runtime + "/bus";
+    REQUIRE (socketPath.size() < sizeof (socketAddress.sun_path));
+    std::memcpy (socketAddress.sun_path, socketPath.c_str(), socketPath.size() + 1);
+    REQUIRE (::bind (listener, reinterpret_cast<const sockaddr*> (&socketAddress), sizeof (socketAddress)) == 0);
+    CHECK (portal::sessionBusAddress() == "unix:path=" + temp.path + "/run%20dir/bus");
+    ::close (listener);
+    ScopedEnv relative ("XDG_RUNTIME_DIR", "relative");
+    CHECK (portal::sessionBusAddress().empty());
+}
+
+TEST_CASE ("Platform: Wayland global hotkeys bind through the GlobalShortcuts portal, fire once per activation and rebind in a new session")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+
+    // The factory picks the portal in a Wayland session (also when XWayland
+    // provides a DISPLAY, e.g. under xvfb-run).
+    {
+        auto viaFactory = GlobalHotkeys::create();
+        REQUIRE (dynamic_cast<PortalGlobalHotkeys*> (viaFactory.get()) != nullptr);
+        CHECK (viaFactory->isSupported());
+    }
+    CHECK (mock.createdSessions().empty()); // nothing registered, no session
+
+    // A long settle time: only applyNow() sends, so every step is one
+    // deterministic batch (production coalesces bursts for 50 ms).
+    PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+    REQUIRE (hotkeys.isSupported());
+    CHECK (hotkeys.getPortalVersion() == 1);
+
+    std::atomic<int> boost { 0 }, mode { 0 }, f13 { 0 }, down { 0 };
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [&boost] { ++boost; }));
+    CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Shift, 'M'), [&mode] { ++mode; }));
+    CHECK (hotkeys.registerHotkey (9, chord (KeyChord::None, kF1 + 12), [&f13] { ++f13; })); // bare F13: allowed
+    CHECK (! hotkeys.registerHotkey (4, chord (KeyChord::None, 'G'), [] {}));                // would swallow typing
+    CHECK (! hotkeys.registerHotkey (4, chord (KeyChord::Ctrl, 0x2A), [] {}));               // no key name
+    CHECK (! hotkeys.registerHotkey (4, chord (KeyChord::Ctrl, 'G'), nullptr));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+
+    auto binds = mock.bindCalls();
+    REQUIRE (binds.size() == 1);
+    REQUIRE (mock.createdSessions().size() == 1);
+    const std::string session1 = mock.createdSessions()[0];
+    CHECK (binds[0].session == session1);
+    CHECK (mock.closedSessions().empty());
+    const std::vector<MockPortal::Shortcut> expected {
+        { "flubsound-3", "Flubsound Pro: Ctrl+Alt+Up", "CTRL+ALT+Up" },
+        { "flubsound-5", "Flubsound Pro: Ctrl+Shift+M", "CTRL+SHIFT+m" },
+        { "flubsound-9", "Flubsound Pro: F13", "F13" },
+    };
+    CHECK (binds[0].shortcuts == expected);
+
+    // One callback per Activated; Deactivated (release) does nothing. Signals
+    // arrive in order, so once the later "mode" activation has fired, any
+    // duplicate "boost" call would have happened already.
+    mock.emit ("Activated", session1, "flubsound-3");
+    mock.emit ("Deactivated", session1, "flubsound-3");
+    mock.emit ("Activated", session1, "flubsound-5");
+    REQUIRE (waitUntil ([&mode] { return mode.load() == 1; }));
+    CHECK (boost.load() == 1);
+    CHECK (f13.load() == 0);
+
+    // Another bus client cannot press our shortcuts. Its GetId round trip
+    // makes the daemon route the forged signal before the portal's next one.
+    {
+        dbus::Connection* intruder = connectToSessionBus (*mock.api);
+        REQUIRE (intruder != nullptr);
+        MockPortal::sendShortcutSignal (*mock.api, mock.extra, intruder, mock.client(), "Activated", session1, "flubsound-3");
+        dbus::MessageRef ping (mock.api->messageNewMethodCall ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetId"));
+        dbus::Error error;
+        mock.api->errorInit (&error);
+        dbus::MessageRef pong (mock.api->sendWithReplyAndBlock (intruder, ping.get(), 10000, &error));
+        mock.api->errorFree (&error);
+        CHECK (pong != nullptr);
+        disconnect (*mock.api, intruder);
+    }
+    mock.emit ("Activated", session1, "flubsound-9");
+    REQUIRE (waitUntil ([&f13] { return f13.load() == 1; }));
+    CHECK (boost.load() == 1);
+
+    // Unregistering re-creates the session with the remaining set; the old
+    // session is closed and its late signals are ignored.
+    hotkeys.unregisterHotkey (9);
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    binds = mock.bindCalls();
+    REQUIRE (binds.size() == 2);
+    REQUIRE (mock.createdSessions().size() == 2);
+    const std::string session2 = mock.createdSessions()[1];
+    CHECK (session2 != session1);
+    CHECK (binds[1].session == session2);
+    CHECK (ids (binds[1]) == (std::vector<std::string> { "flubsound-3", "flubsound-5" }));
+    CHECK (mock.closedSessions() == std::vector<std::string> { session1 });
+    mock.emit ("Activated", session1, "flubsound-3");
+    mock.emit ("Activated", session2, "flubsound-9"); // no longer registered
+    mock.emit ("Activated", session2, "flubsound-5");
+    REQUIRE (waitUntil ([&mode] { return mode.load() == 2; }));
+    CHECK (boost.load() == 1);
+    CHECK (f13.load() == 1);
+
+    // HotkeyManager::registerAll() = unregisterAll() + the same chords again:
+    // nothing is re-bound (no new session, no new dialog); the new callbacks
+    // take over.
+    hotkeys.unregisterAll();
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [&down] { ++down; }));
+    CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Shift, 'M'), [&mode] { ++mode; }));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (mock.createdSessions().size() == 2);
+    CHECK (mock.bindCalls().size() == 2);
+    mock.emit ("Activated", session2, "flubsound-3");
+    mock.emit ("Activated", session2, "flubsound-5");
+    REQUIRE (waitUntil ([&mode] { return mode.load() == 3; }));
+    CHECK (down.load() == 1);
+    CHECK (boost.load() == 1);
+
+    // A changed chord is a rebind with the new preferred trigger. The mock
+    // leaves one shortcut unbound (logged to stderr; registerHotkey already
+    // returned true), which does not affect the others.
+    mock.refuse ("flubsound-7");
+    CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), [&mode] { ++mode; }));
+    CHECK (hotkeys.registerHotkey (7, chord (KeyChord::Ctrl | KeyChord::Alt, 'P'), [] {}));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    binds = mock.bindCalls();
+    REQUIRE (binds.size() == 3);
+    REQUIRE (mock.createdSessions().size() == 3);
+    const std::string session3 = mock.createdSessions()[2];
+    CHECK (binds[2].session == session3);
+    REQUIRE (binds[2].shortcuts.size() == 3);
+    CHECK (binds[2].shortcuts[1] == (MockPortal::Shortcut { "flubsound-5", "Flubsound Pro: Ctrl+Alt+Down", "CTRL+ALT+Down" }));
+    CHECK (mock.closedSessions() == (std::vector<std::string> { session1, session2 }));
+    mock.emit ("Activated", session3, "flubsound-5");
+    REQUIRE (waitUntil ([&mode] { return mode.load() == 4; }));
+
+    // Unregistering everything closes the session without opening a new one.
+    hotkeys.unregisterAll();
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (waitUntil ([&mock] { return mock.closedSessions().size() == 3; }));
+    const auto closedAtEnd = mock.closedSessions();
+    CHECK (! closedAtEnd.empty() && closedAtEnd.back() == session3);
+    CHECK (mock.createdSessions().size() == 3);
+}
+
+TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalShortcuts portal")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+
+    // No portal on the bus at all.
+    {
+        auto hotkeys = GlobalHotkeys::create();
+        REQUIRE (hotkeys != nullptr);
+        CHECK (! hotkeys->isSupported());
+        CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl | KeyChord::Alt, 'G'), [] {}));
+        hotkeys->unregisterAll();
+    }
+
+    // A portal without the GlobalShortcuts interface (no "version" property).
+    {
+        MockPortal mock (false);
+        REQUIRE (mock.ok());
+        auto hotkeys = GlobalHotkeys::create();
+        REQUIRE (dynamic_cast<PortalGlobalHotkeys*> (hotkeys.get()) != nullptr);
+        CHECK (! hotkeys->isSupported());
+        CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl | KeyChord::Alt, 'G'), [] {}));
+        CHECK (mock.createdSessions().empty());
+    }
+
+    // No session bus.
+    {
+        ScopedEnv noAddress ("DBUS_SESSION_BUS_ADDRESS", nullptr);
+        ScopedEnv noRuntimeDir ("XDG_RUNTIME_DIR", nullptr);
+        auto hotkeys = GlobalHotkeys::create();
+        CHECK (! hotkeys->isSupported());
     }
 }
 

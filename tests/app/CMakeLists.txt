@@ -43,14 +43,15 @@ foreach(source IN LISTS FLUB_APP_TEST_APP_SOURCES FLUB_PLATFORM_SOURCES)
     endif()
 endforeach()
 
-# The tests themselves: the core's strict set.
+# The tests themselves: the app's warning set (JUCE's headers are not clean
+# under -Wconversion / -Wpedantic), as errors with FLUB_WARNINGS_AS_ERRORS.
 if(MSVC)
     set(FLUB_APP_TEST_WARNINGS /W4 /permissive- /utf-8)
     if(FLUB_WARNINGS_AS_ERRORS)
         list(APPEND FLUB_APP_TEST_WARNINGS /WX)
     endif()
 else()
-    set(FLUB_APP_TEST_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion)
+    set(FLUB_APP_TEST_WARNINGS -Wall -Wextra -Wshadow -Wno-sign-conversion)
     if(FLUB_WARNINGS_AS_ERRORS)
         list(APPEND FLUB_APP_TEST_WARNINGS -Werror)
     endif()
