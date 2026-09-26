@@ -242,7 +242,7 @@ of the application's normal output path.
 
 | Component | Scope | Low Latency profile, exclusive (or 128-frame) output | Balanced profile, `IAudioClient3` shared output |
 |---|---|---|---|
-| Read safety margin behind `WritePosition` (audiodg renders into the virtual buffer one packet ahead) | I/O | ~1 ms | ~1 ms |
+| Read safety margin: how far behind audiodg's `WritePosition` the engine reads the virtual buffer (§4.3) | I/O | ~1 ms | ~1 ms |
 | Engine block (128 frames), pulled from the output device callback (§4.3) | I/O | 2.7 ms | 2.7 ms |
 | Strip chain | chain | 100 smp = 2.1 ms | 192 smp = 4.0 ms |
 | Master true-peak limiter (0.5 ms + 20 when every strip is Low Latency, else 1 ms + 20) | app engine − chain | 24 + 20 = 44 smp = 0.9 ms | 48 + 20 = 68 smp = 1.4 ms |
@@ -271,8 +271,9 @@ What sits outside the budget:
 - **Classic 10 ms shared periods.** With 10 ms periods on the virtual endpoint
   and the output device, the engine block and the output buffering each grow
   to about 10 ms and the added total roughly doubles (≈ 25 ms, estimate),
-  well outside the target. The installer should therefore leave the default
-  device type (`IAudioClient3` low-latency shared mode) in place.
+  well outside the target. That is why the app opens the output in
+  `IAudioClient3` low-latency shared mode by default (exclusive mode when
+  the user picks it in Settings).
 - **Without the zero-copy path.** Recording each virtual endpoint through
   WASAPI (loopback or a capture pin) instead of the shared buffer adds one
   more audiodg pass and one capture period plus alignment: **+10–15 ms** with
@@ -280,7 +281,7 @@ What sits outside the budget:
   additional mix / SRC pass. Today's no-driver path, per-process loopback
   capture, is of this kind: its drift FIFO alone holds 612 frames = 12.75 ms
   with 10 ms capture packets and 128-frame blocks (`docs/01-architecture.md`
-  §5.3). That is the main reason the driver exists (§1).
+  §5.3). Latency is one more reason for the driver, next to those in §1.
 
 ## 7. INF and installation
 

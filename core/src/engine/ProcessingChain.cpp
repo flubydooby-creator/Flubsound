@@ -272,8 +272,10 @@ bool ProcessingChain::needsReprepare() const noexcept
 void ProcessingChain::applyParameters() noexcept
 {
     MacroMap::apply (base.data(), effective.data(), governor.getScale());
-    publishEffective();
     float* e = effective.data();
+    // Mode / format policies below write their overrides into e, so the
+    // values published at the end (effectiveValue(), GUI ghost markers) are
+    // the ones actually applied.
     // A module is active when it is (effectively) on and not held off by the
     // GUI's audition bypass.
     const uint32_t audition = auditionMask.load (std::memory_order_relaxed);
@@ -375,7 +377,9 @@ void ProcessingChain::applyParameters() noexcept
     // <= 7 kHz content stay below 21 kHz. Headsets running at low rates (USB
     // 32 kHz modes, Bluetooth hands-free at 16 / 8 kHz) would fold them back,
     // so it is disabled below 42 kHz (3 x 7 kHz = 21 kHz < fs / 2).
-    cp.air = config.sampleRate >= 42000.0 ? e[ClarityAir] : 0.0f;
+    if (config.sampleRate < 42000.0)
+        e[ClarityAir] = 0.0f;
+    cp.air = e[ClarityAir];
     cp.deMud = e[ClarityDeMud];
     clarity.setParams (cp);
     slots[SClarity].setActive (active (ClarityOn));
@@ -390,6 +394,17 @@ void ProcessingChain::applyParameters() noexcept
     slots[SSat].setActive (active (SaturationOn));
 
     // ---- Stereo & space (mode / binaural policy) ----
+    if (mode == ModeValue::Gaming)
+        e[SpatialCrossfeed] = 0.0f; // crossfeed blurs lateral cues: never in gaming
+    if (binaural)
+    {
+        // Binaural output already carries exact interaural cues; widening,
+        // decorrelation or crossfeed would corrupt them. Focus (an ILD
+        // emphasis) is still allowed.
+        e[SpatialWidth] = 1.0f;
+        e[SpatialSpace] = 0.0f;
+        e[SpatialCrossfeed] = 0.0f;
+    }
     SpatializerParams wp;
     wp.width = e[SpatialWidth];
     wp.widthLowCutHz = e[SpatialWidthLowCut];
@@ -398,17 +413,6 @@ void ProcessingChain::applyParameters() noexcept
     wp.crossfeed = e[SpatialCrossfeed];
     wp.autoMonoSafety = on (e, SpatialMonoSafety);
     wp.minCorrelation = e[SpatialMinCorrelation];
-    if (mode == ModeValue::Gaming)
-        wp.crossfeed = 0.0f; // crossfeed blurs lateral cues: never in gaming
-    if (binaural)
-    {
-        // Binaural output already carries exact interaural cues; widening,
-        // decorrelation or crossfeed would corrupt them. Focus (an ILD
-        // emphasis) is still allowed.
-        wp.width = 1.0f;
-        wp.space = 0.0f;
-        wp.crossfeed = 0.0f;
-    }
     spatial.setParams (wp);
     slots[SSpatial].setActive (active (SpatialOn));
 
@@ -424,6 +428,14 @@ void ProcessingChain::applyParameters() noexcept
     virtualizer.setParams (vp);
 
     // ---- Compressor ----
+    // Gaming macros (Boost, Footsteps, Detail) switch the compressor on for
+    // its UPWARD section: quiet detail comes up. When only a macro engaged it
+    // and nobody chose a downward ratio (comp.ratio still at its default), the
+    // downward section stays off, so gunshots and explosions keep their
+    // dynamics. Presets that set a ratio (e.g. 1.5:1 glue) keep it.
+    if (mode == ModeValue::Gaming && ! (base[CompressorOn] >= 0.5f)
+        && base[CompRatio] == layout()[static_cast<size_t> (CompRatio)].defaultValue)
+        e[CompRatio] = 1.0f;
     CompressorParams kp;
     kp.thresholdDb = e[CompThresholdDb];
     kp.ratio = e[CompRatio];
@@ -465,6 +477,8 @@ void ProcessingChain::applyParameters() noexcept
     mp.autoRelease = on (e, MaxAutoRelease);
     maximizer.setParams (mp);
     slots[SMax].setActive (active (MaximizerOn));
+
+    publishEffective();
 }
 
 void ProcessingChain::downmixToStereo (const AudioBlock& io) noexcept
@@ -584,7 +598,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     // ---- 6. Control loops for the next block ----
     const bool maxActive = ! slots[SMax].isFullyBypassed();
     governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, n);
-    autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive));
+    autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
     loudnessMatch.measureWet (st);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----

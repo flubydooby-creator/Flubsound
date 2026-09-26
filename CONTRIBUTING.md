@@ -30,6 +30,7 @@ Every module test contains an `AllocationGuard` check. Please keep it that way.
 
 - C++20. JUCE-like formatting: Allman braces, 4-space indent, a space before parentheses (`foo (x)`), `static_cast` for conversions. See `.clang-format`.
 - Comments explain **why** (the DSP reasoning, the constraint), not what the next line does.
+- File paths in core APIs are UTF-8 `std::string`s. Open files through `flub::io::pathFromUtf8()` (`core/include/flub/io/FilePath.h`), never by passing a narrow string to `std::fstream` / `std::filesystem` (on Windows that means the ANSI code page, which mangles non-ASCII names). The CLI reads its arguments and environment as UTF-8 on Windows (`tools/flubsound-cli/Utf8Windows.h`).
 - Zero warnings with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wno-sign-conversion` (GCC and Clang) and `/W4` (MSVC) on `flub_core`, the tests and the CLI (`cmake/FlubCompilerSettings.cmake`). The app and plug-in sources use a slightly lighter set because JUCE module sources compile in the same targets.
 
 ## Adversarial review checklist (every DSP change)
@@ -42,7 +43,7 @@ Every module test contains an `AllocationGuard` check. Please keep it that way.
 6. **Image safety:** dynamics are linked across channels; stereo effects preserve the mono sum where the design says so.
 7. **RT safety:** the allocation test passes, and the sanitizer run is clean.
 8. **Tests prove the claims:** every property stated in the header or the docs has a test with a meaningful tolerance.
-9. **Docs updated:** `docs/03-dsp-design.md` (algorithm, parameters, latency, CPU) and the traceability matrix.
+9. **Docs updated:** `docs/03-dsp-design.md` (algorithm, parameters, latency, CPU) and the traceability matrix ([`docs/TRACEABILITY.md`](docs/TRACEABILITY.md)); a change to latency updates the single budget in [`docs/01-architecture.md` §5](docs/01-architecture.md#5-latency-budget).
 
 ## Presets
 

@@ -113,10 +113,13 @@ void AutoDrive::reset() noexcept
     reductionDb = 0.0f;
 }
 
-float AutoDrive::update (const AudioBlock& output, float targetLufs, bool enabled) noexcept
+float AutoDrive::update (const AudioBlock& output, float targetLufs, bool enabled, float requestedDriveDb) noexcept
 {
     follower.process (output);
     const double dt = output.numSamples / sr;
+    // Only the requested drive can be taken away (drive is floored at 0 dB).
+    const float floorDb = -std::clamp (std::isfinite (requestedDriveDb) ? requestedDriveDb : 0.0f, 0.0f, 24.0f);
+    reductionDb = std::max (reductionDb, floorDb);
 
     if (! enabled)
     {
@@ -130,7 +133,7 @@ float AutoDrive::update (const AudioBlock& output, float targetLufs, bool enable
     // 0.5 LU dead band; the result is only ever a reduction (<= 0 dB).
     const float error = follower.getLufs() - targetLufs;
     if (error > 0.5f)
-        reductionDb = std::max (-24.0f, reductionDb - static_cast<float> (std::min (2.0, 0.5 * error) * dt));
+        reductionDb = std::max (floorDb, reductionDb - static_cast<float> (std::min (2.0, 0.5 * error) * dt));
     else if (error < -0.5f)
         reductionDb = std::min (0.0f, reductionDb + static_cast<float> (std::min (2.0, -0.5 * error) * dt));
     return reductionDb;

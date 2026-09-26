@@ -665,6 +665,30 @@ TEST_CASE ("Chain: AutoDrive pulls a hot drive down to the loudness target at <=
         CHECK_LE (shortTerm[i], kTarget + 0.75f);
 }
 
+TEST_CASE ("Chain: AutoDrive's reduction stops at the requested drive, so it recovers at once")
+{
+    // An unreachable target (far below the undriven loudness): once the drive
+    // is back at 0 dB further "reduction" changes nothing, so it must stop at
+    // -requested drive instead of running on to -24 dB and delaying recovery.
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (MaximizerOn, 1.0f);
+    store.set (MaxDriveDb, 6.0f);
+    store.set (MaxAutoDrive, 1.0f);
+    store.set (MaxTargetLufs, -24.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 512, 2 });
+    auto buf = makeProgramme (static_cast<int> (kFs * 12.0), 0.6f);
+    runChain (chain, buf, 512);
+    const float reduction = chain.meters().autoDriveDb.load();
+    CHECK_NEAR (reduction, -6.0, 1e-3);
+    // Lowering the requested drive clamps the reduction immediately.
+    store.set (MaxDriveDb, 2.0f);
+    auto more = makeProgramme (512 * 4, 0.6f);
+    runChain (chain, more, 512);
+    CHECK_GE (chain.meters().autoDriveDb.load(), -2.0f - 1e-3f);
+}
+
 TEST_CASE ("Chain: AutoDrive never raises the drive: below the target it is inert, and it stops at 0 dB drive (the input itself)")
 {
     constexpr int kBlockSize = 512;
@@ -714,8 +738,8 @@ TEST_CASE ("Chain: matched bypass reproduces the processed loudness within 0.5 L
     // stays far below the ceiling, so neither the per-block ceiling cap nor
     // the reference's own limiter is involved: this measures LoudnessMatch.
     constexpr int kBlockSize = 512;
-    constexpr int kBypassAt = kBlockSize * 470; // ~4.9 s: followers settled, match gain slewed (3 dB/s)
-    constexpr int kTotal = kBlockSize * 800;    // ~3.4 s of bypass (> the 3 s short-term window)
+    constexpr int kBypassAt = kBlockSize * 470; // ~5.0 s: followers settled, match gain slewed (3 dB/s)
+    constexpr int kTotal = kBlockSize * 800;    // ~3.5 s of bypass (> the 3 s short-term window)
     Planar in (2, kTotal);
     for (int i = 0; i < kTotal; ++i)
     {

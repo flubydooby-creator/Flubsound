@@ -22,7 +22,8 @@
 //
 // AutoDrive (maximizer loudness target):
 //   GatedLoudness on the post-chain output; a slow integrating loop (0.5 LU
-//   dead band, <= 2 dB/s) produces a drive REDUCTION in [-24, 0] dB. It can
+//   dead band, <= 2 dB/s) produces a drive REDUCTION in [-requested drive, 0]
+//   dB (never past 0 dB of drive, so recovery is immediate). It can
 //   stop over-limiting but can never make things louder than the user/macros
 //   asked for.
 //
@@ -120,8 +121,10 @@ public:
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;
     /** Feed the post-chain output; returns the drive reduction (dB <= 0) to
-        apply at the next block. */
-    float update (const AudioBlock& output, float targetLufs, bool enabled) noexcept;
+        apply at the next block. The reduction never goes below
+        -requestedDriveDb: past that the drive is already 0 dB and further
+        "reduction" would change nothing audible while delaying recovery. */
+    float update (const AudioBlock& output, float targetLufs, bool enabled, float requestedDriveDb) noexcept;
     float getReductionDb() const noexcept { return reductionDb; }
 
 private:

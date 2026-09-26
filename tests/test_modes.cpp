@@ -194,6 +194,34 @@ TEST_CASE ("Gaming Footsteps (M1): mode band 4 lifts quiet 3.2 kHz detail by its
     CHECK_NEAR (r.compUpwardDb, 3.0, 0.2);
 }
 
+TEST_CASE ("Gaming Footsteps (M1): mode band 5 lifts quiet 260 Hz footstep body by its gain law (up to 3 dB); loud low-mids are not boosted")
+{
+    // Mode band 5: BoostBelow bell at 260 Hz, threshold -45 dB, ratio 2.5,
+    // range 3 dB x Footsteps (heel impact). The compressor Footsteps also
+    // engages is held off so only the dynamic EQ is measured.
+    const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 5);
+    const auto lift = [f] (float amount, float levelDb, float* bandDb = nullptr) {
+        const auto ref = renderGaming (macroOnly (Macro1, 0.0f, { DynEqOn, CompressorOn }), tone (f, levelDb), { CompressorOn });
+        const auto r = renderGaming (macroOnly (Macro1, amount, { DynEqOn, CompressorOn }), tone (f, levelDb), { CompressorOn });
+        const double l = r.toneDb (0, f) - ref.toneDb (0, f);
+        CHECK_NEAR (r.toneDb (1, f) - ref.toneDb (1, f), l, 0.01); // stereo-linked
+        if (bandDb != nullptr)
+            *bandDb = r.dynEqDb[5];
+        return l;
+    };
+    float band = 0.0f;
+    // -48 dBFS: 3 dB under the threshold -> (1 - 1/2.5) x 3 = +1.8 dB.
+    CHECK_NEAR (lift (1.0f, -48.0f, &band), 3.0 * (1.0 - 1.0 / 2.5), 0.15);
+    CHECK_NEAR (band, 3.0 * (1.0 - 1.0 / 2.5), 0.15);
+    // -60 dBFS: the law asks for +9 dB, the range (3 dB x Footsteps) caps it.
+    CHECK_NEAR (lift (1.0f, -60.0f, &band), 3.0, 0.15);
+    CHECK_NEAR (band, 3.0, 0.1);
+    CHECK_NEAR (lift (0.5f, -60.0f), 1.5, 0.1);
+    // -20 dBFS (far above the threshold): no boost.
+    CHECK_LE (std::abs (lift (1.0f, -20.0f, &band)), 0.05);
+    CHECK_LE (band, 0.01f);
+}
+
 TEST_CASE ("Gaming Footsteps (M1): anti-masking band 6 tames a very loud 90 Hz rumble; normal bass is untouched")
 {
     // Mode band 6: CutAbove low shelf at 90 Hz, threshold -22 dB, ratio 3,
@@ -420,8 +448,11 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever 
 
     const auto wide = render (true, 2.0f, 1.0f, 1.0f, 1.0f);
     const auto plain = render (true, 1.0f, 0.0f, 0.0f, 1.0f);
-    CHECK (wide.eff (SpatialWidth) == 2.0f); // asked for (clamped to the range)
-    CHECK (wide.eff (SpatialSpace) == 1.0f);
+    // The published effective values show what is applied, not what the store
+    // asked for (the GUI's post-macro markers must not show a locked width).
+    CHECK (wide.eff (SpatialWidth) == 1.0f);
+    CHECK (wide.eff (SpatialSpace) == 0.0f);
+    CHECK (wide.eff (SpatialCrossfeed) == 0.0f);
     CHECK_NEAR (wide.effectiveWidth, 1.0, 1e-4); // applied
     CHECK (maxAbsDiff (wide.out, plain.out) == 0.0);
     CHECK (rms (plain.out.ch[0].data(), kLen) > 0.01);
@@ -437,4 +468,33 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever 
     const auto plainDownmix = render (false, 1.0f, 0.0f, 0.0f, 1.0f);
     CHECK_NEAR (wideDownmix.effectiveWidth, 2.0, 1e-3);
     CHECK_GE (rmsDiff (wideDownmix.out, plainDownmix.out), 0.1 * rms (plainDownmix.out.ch[0].data(), kLen));
+}
+
+TEST_CASE ("Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen")
+{
+    // Footsteps switches the compressor on for its upward section. With
+    // comp.ratio left at its default the downward section stays off, so a
+    // loud -10 dBFS "gunshot" tone passes at its own level; a preset that
+    // chose a ratio (1.5:1 here) keeps it, and so does a compressor the user
+    // switched on.
+    const std::initializer_list<int> held { DynEqOn, ClarityOn, BassOn, SpatialOn, SaturationOn, MaximizerOn };
+    const auto loud = tone (1000.0, -10.0f);
+    const auto off = renderGaming (macroOnly (Macro1, 0.0f, { CompressorOn }), loud, held);
+    const auto macro = renderGaming (macroOnly (Macro1, 1.0f, { CompressorOn }), loud, held);
+    CHECK (macro.eff (CompressorOn) >= 0.5f);
+    CHECK (macro.eff (CompRatio) == 1.0f);
+    CHECK_NEAR (macro.toneDb (0, 1000.0), off.toneDb (0, 1000.0), 0.2);
+
+    const auto chosen = renderGaming ([] (ParameterStore& s) {
+        macroOnly (Macro1, 1.0f, { CompressorOn }) (s);
+        s.set (CompRatio, 1.5f);
+    }, loud, held);
+    CHECK (chosen.eff (CompRatio) == 1.5f);
+    CHECK (chosen.toneDb (0, 1000.0) < off.toneDb (0, 1000.0) - 1.0); // downward 1.5:1 above -18 dB
+
+    const auto userOn = effectiveAfterPrepare ([] (ParameterStore& s) {
+        s.set (CompressorOn, 1.0f);
+        s.set (Macro1, 1.0f);
+    });
+    CHECK (userOn[static_cast<size_t> (CompRatio)] == layout()[static_cast<size_t> (CompRatio)].defaultValue);
 }
