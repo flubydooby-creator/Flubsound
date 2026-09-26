@@ -156,7 +156,7 @@ Flubsound/
 │           └── WavFile.cpp
 │
 ├── tests/                                  flub_tests: one executable, zero dependencies
-│   ├── CMakeLists.txt                      globs tests/*.cpp; defines FLUB_PRESET_DIR and FLUB_DEVICE_PROFILES; adds platform/windows/driver to the include path and, except on MSVC, test_driver_shared_c.c as C89
+│   ├── CMakeLists.txt                      globs tests/*.cpp; defines FLUB_PRESET_DIR and FLUB_DEVICE_PROFILES; adds platform/windows/driver to the include path and, except on MSVC, test_driver_shared_c.c as C89; compiles the tools/flubsound-cli sources except main.cpp
 │   ├── TestFramework.h                     TEST_CASE / CHECK / REQUIRE / CHECK_NEAR / CHECK_LE / CHECK_GE, AllocationGuard
 │   ├── TestMain.cpp                        runner (substring filter, exit code = failed cases), counting global operator new
 │   ├── TestSignals.h                       sine / whiteNoise / rms / peakAbs / toDb / measureGainDb helpers, Planar buffer, processInBlocks
@@ -181,6 +181,7 @@ Flubsound/
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input and UTF-8 (non-ASCII) paths
+│   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
 │   ├── test_drift_fifo.cpp                 #includes app/Source/engine/DriftCompensatedFifo.cpp: clock drift, stalls, downmix, continuity
 │   ├── test_driver_shared.cpp              platform/windows/driver/FlubVirtualAudioShared.h: constants, IOCTL codes, ring index maths, Generation lock, C vs C++ layout
 │   ├── test_driver_shared_c.c              the same header compiled as strict C89 (GCC / Clang only); layout table for test_driver_shared.cpp
@@ -190,7 +191,8 @@ Flubsound/
 ├── tools/
 │   ├── flubsound-cli/                      flubsound-cli: JUCE-free, links flub::core only
 │   │   ├── CMakeLists.txt                  explicit source list, FLUB_CLI_VERSION, FLUB_SOURCE_PRESET_DIR, install rules
-│   │   ├── main.cpp                        commands process / batch / analyze / params / presets; exit codes 0 / 1 / 2
+│   │   ├── main.cpp                        command-line parsing, help text and dispatch; exit codes 0 / 1 / 2
+│   │   ├── Commands.{h,cpp}                process / batch / analyze / params / presets: render-and-write glue, batch folder walk, worker pool, per-file reports
 │   │   ├── CliOptions.{h,cpp}              strict option parsing; precedence defaults → --preset → --mode → --boost/... → --set
 │   │   ├── FactoryPresets.{h,cpp}          run-time preset folder lookup (--dir, $FLUBSOUND_PRESET_DIR, exe-relative, source tree)
 │   │   ├── OfflineRenderer.{h,cpp}         sample-aligned offline render through ProcessingChain, loudness-target iterations
@@ -339,6 +341,7 @@ flowchart TB
     PLG --> JUCE
     APP -->|"app/Source/platform only"| OSSDK
     TST -.->|"test_platform_linux.cpp compiles the Linux platform sources"| OSSDK
+    TST -.->|"test_offline_render.cpp compiles the CLI sources"| CLI
     APP -.->|"BinaryData at build time"| DATA
     CLI -.->|"looked up at run time"| DATA
     TST -.->|"FLUB_PRESET_DIR / FLUB_DEVICE_PROFILES"| DATA
@@ -347,7 +350,7 @@ flowchart TB
 | Code in | May include / link | Must not include |
 |---|---|---|
 | `core/` | The C++ standard library. `<xmmintrin.h>` in `common/Denormals.h`, x86 only (a CPU intrinsic header, not an OS header). `<fstream>` / `<filesystem>` only in non-real-time code (`io/FilePath.h`, `io/WavFile.cpp`, `io/PresetIO.cpp`, `engine/DeviceProfiles.cpp`); every path those files open is a UTF-8 `std::string` converted by `io/FilePath.h`, so non-ASCII paths work with MSVC too (test *WavFile: UTF-8 paths with non-ASCII characters round trip on every platform*). | JUCE, any OS header, any third-party library, anything from `app/`, `plugin/`, `tools/`, `tests/` |
-| `tests/` | `core/include/flub/**`, `TestFramework.h`, `TestSignals.h`. **Exceptions:** `test_platform_linux.cpp` `#include`s `app/Source/platform/PlatformServices_common.cpp` and `PlatformServices_linux.cpp`, guarded by `#if defined(__linux__)`, to test functions in an unnamed namespace; `test_drift_fifo.cpp` `#include`s `app/Source/engine/DriftCompensatedFifo.cpp` (JUCE-free, core headers only) on every OS; `test_rtsan.cpp` uses POSIX `fork()` / `waitpid()`, only in `FLUB_RTSAN` builds on Linux and macOS; `test_driver_shared.cpp` and `test_driver_shared_c.c` include `platform/windows/driver/FlubVirtualAudioShared.h` (plain C, no Windows headers outside kernel mode) on every OS. | JUCE |
+| `tests/` | `core/include/flub/**`, `TestFramework.h`, `TestSignals.h`. **Exceptions:** `test_platform_linux.cpp` `#include`s `app/Source/platform/PlatformServices_common.cpp` and `PlatformServices_linux.cpp`, guarded by `#if defined(__linux__)`, to test functions in an unnamed namespace; `test_drift_fifo.cpp` `#include`s `app/Source/engine/DriftCompensatedFifo.cpp` (JUCE-free, core headers only) on every OS; `test_rtsan.cpp` uses POSIX `fork()` / `waitpid()`, only in `FLUB_RTSAN` builds on Linux and macOS; `test_driver_shared.cpp` and `test_driver_shared_c.c` include `platform/windows/driver/FlubVirtualAudioShared.h` (plain C, no Windows headers outside kernel mode) on every OS; `test_offline_render.cpp` includes the `tools/flubsound-cli` headers, and `tests/CMakeLists.txt` compiles that folder's sources except `main.cpp` into `flub_tests` on every OS (independent of `FLUB_BUILD_TOOLS`). | JUCE |
 | `tools/flubsound-cli/` | `flub::core`, its own files, `std::thread` (`batch --jobs N`). `<windows.h>` / `<mach-o/dyld.h>` in `FactoryPresets.cpp`, only to find the executable's own path; `<windows.h>` / `<shellapi.h>` in `Utf8Windows.h`, only for UTF-8 argv, environment and console on Windows. | JUCE, `app/`, `plugin/` |
 | `plugin/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_processors`, `juce_gui_basics` | `app/` (the shared custom editor is roadmap item 2.9) |
 | `app/Source/` | `flub::core`; `juce_audio_utils`, `juce_audio_devices`, `juce_dsp`, `juce_gui_extra`; OS SDKs in `platform/` only | `plugin/`, `tools/` |
@@ -419,7 +422,7 @@ Rules that follow from this:
 |---|---|---|---|---|---|---|
 | `flub_compiler_settings` (alias `flub::compiler_settings`) | INTERFACE library | `cmake/FlubCompilerSettings.cmake` | — | — | — | always |
 | `flub_core` (alias `flub::core`) | STATIC library, PIC | `core/CMakeLists.txt` | `file(GLOB_RECURSE … CONFIGURE_DEPENDS)` over `src/*.cpp` and `include/flub/*.h` | PRIVATE `flub::compiler_settings`; PUBLIC `Threads::Threads`; PUBLIC include dir `core/include`; `cxx_std_20` | `build/core/libflub_core.a` (`flub_core.lib` on MSVC) | always |
-| `flub_tests` | executable + CTest test `flub_tests` | `tests/CMakeLists.txt` | `file(GLOB … CONFIGURE_DEPENDS "*.cpp")`, plus `test_driver_shared_c.c` compiled with `-std=c89` except on MSVC | `flub::core`, `flub::compiler_settings` | `build/tests/flub_tests` | `FLUB_BUILD_TESTS=ON` |
+| `flub_tests` | executable + CTest test `flub_tests` | `tests/CMakeLists.txt` | `file(GLOB … CONFIGURE_DEPENDS "*.cpp")`, plus `test_driver_shared_c.c` compiled with `-std=c89` except on MSVC, and the `tools/flubsound-cli` sources except `main.cpp` | `flub::core`, `flub::compiler_settings`; `shell32` on Windows | `build/tests/flub_tests` | `FLUB_BUILD_TESTS=ON` |
 | `flubsound-cli` | executable (+ `install`) | `tools/flubsound-cli/CMakeLists.txt` | explicit `FLUB_CLI_SOURCES` | `flub::core`, `flub::compiler_settings`, `Threads::Threads`; `shell32` on Windows (`CommandLineToArgvW`) | `build/tools/flubsound-cli/flubsound-cli` | `FLUB_BUILD_TOOLS=ON` |
 | `FlubsoundPro` | `juce_add_gui_app` (product "Flubsound Pro", bundle id `com.flubsound.pro`) | `app/CMakeLists.txt` | explicit `FLUB_APP_SOURCES` + the detected platform sources | `flub::core`, `FlubsoundPresets`, `juce_audio_utils`, `juce_audio_devices`, `juce_dsp`, `juce_gui_extra`, `juce_recommended_config_flags`; OS libraries (§8) | `build/app/FlubsoundPro_artefacts/<config>/Flubsound Pro` | `FLUB_BUILD_APP=ON` |
 | `FlubsoundPresets` | `juce_add_binary_data` (namespace `FlubsoundPresetData`, header `FlubsoundPresetData.h`) | `app/CMakeLists.txt` | sorted `${FLUB_FACTORY_PRESET_DIR}/*.json` | — | `build/app/libFlubsoundPresets.a` | `FLUB_BUILD_APP=ON` **and** at least one preset found |
@@ -471,7 +474,7 @@ Notes:
 | `FLUB_DEVICE_PROFILES` | `flub_tests` | `"<source>/presets/devices/device-profiles.json"` |
 | `FLUB_TEST_DRIVER_SHARED_C=1` | `flub_tests`, except on MSVC | `test_driver_shared.cpp` also compares the C89 layout from `test_driver_shared_c.c` |
 | `FLUB_CLI_VERSION` | `flubsound-cli` | `"${PROJECT_VERSION}"` (0.1.0) |
-| `FLUB_SOURCE_PRESET_DIR` | `flubsound-cli` | last-resort preset folder: the source tree the binary was built from |
+| `FLUB_SOURCE_PRESET_DIR` | `flubsound-cli`, `flub_tests` | last-resort preset folder: the source tree the binary was built from |
 | `FLUB_HAS_PLATFORM_SERVICES` | `FlubsoundPro` | `1` when `PlatformServices_<os>` exists for the build OS, else `0` |
 | `FLUB_HAS_FACTORY_PRESETS` | `FlubsoundPro` | `1` when `FlubsoundPresets` was created |
 | `JUCE_APPLICATION_NAME_STRING`, `JUCE_APPLICATION_VERSION_STRING` | `FlubsoundPro` | product name and version, from the target's JUCE properties |
@@ -633,7 +636,7 @@ The public section is the reviewed contract. Implementers extend only the part b
 | A unit-test file | `tests/test_<subject>.cpp` | No (glob `tests/*.cpp`) |
 | An app source file | `app/Source/<layer>/<Type>.{h,cpp}` | **Yes:** add the `.cpp` to `FLUB_APP_SOURCES` in `app/CMakeLists.txt` |
 | A plug-in source file | `plugin/Source/` | **Yes:** `FLUB_PLUGIN_SOURCES` (and the header to `target_sources`) |
-| A CLI source file | `tools/flubsound-cli/` | **Yes:** `FLUB_CLI_SOURCES` |
+| A CLI source file | `tools/flubsound-cli/` | **Yes:** `FLUB_CLI_SOURCES`, and the CLI source list in `tests/CMakeLists.txt` if it is not `main.cpp` |
 | Support for a new OS | `app/Source/platform/PlatformServices_<os>.*` | **Yes:** extend the `if(WIN32) / elseif(APPLE) / else()` selection in `app/CMakeLists.txt`; link flags go in `PlatformServices.cmake` |
 | A factory preset | `presets/factory/<category>-<slug>.json` (top level; see §9) | No (globbed with `CONFIGURE_DEPENDS`) |
 | A device profile | `presets/devices/device-profiles.json`, then `python3 tools/scripts/embed-device-profiles.py` (`--check` verifies the embedded copy without writing) | No |
@@ -794,6 +797,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_platform_linux.cpp`: Linux platform services, with no sound server needed; the X11 global-hotkey case needs an X display and `libXtst` (CI: `xvfb-run` in the `sanitizers` job) and is skipped without them, the rest run headless; compiles to nothing on other OSes;
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
+  - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.

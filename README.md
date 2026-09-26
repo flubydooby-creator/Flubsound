@@ -102,7 +102,7 @@ flubsound-cli params                                   # every parameter key, ra
 flubsound-cli presets                                  # factory preset list
 ```
 
-Offline rendering uses exactly the same `ProcessingChain` as real-time processing. It is sample-aligned (latency compensated). Loudness targeting re-renders up to 4 more times, moving `max.drive` (then `input.gain` or `output.gain`) until the integrated loudness is within 0.3 LU of the target, and delivers the closest pass; the true-peak limiter holds the ceiling, with a static trim as a last resort. The CLI reads WAV only (PCM 16/24/32-bit, float 32/64, `WAVE_FORMAT_EXTENSIBLE`, up to 8 channels) and writes float32, or PCM24 / PCM16 with TPDF dither.
+Offline rendering uses exactly the same `ProcessingChain` as real-time processing. It is sample-aligned (latency compensated). Loudness targeting re-renders up to 4 more times, moving `max.drive` (then `input.gain` or `output.gain`) until the integrated loudness is within 0.3 LU of the target, and delivers the closest pass; the true-peak limiter holds the ceiling, with a static trim as a last resort. The CLI reads WAV only (PCM 16/24/32-bit, float 32/64, `WAVE_FORMAT_EXTENSIBLE`, up to 8 channels) and writes float32, or PCM24 / PCM16 with TPDF dither. The printed and `--json` output report measures the file as written: a PCM export is read back, so quantisation and dither are included. `tests/test_offline_render.cpp` runs the render, export and batch code (including parallel jobs and a corrupt input file).
 
 ---
 
