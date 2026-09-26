@@ -2,7 +2,7 @@
 
 > The desktop GUI is a native JUCE 9 application: `app/Source/ui` holds the components and `app/Source/shell` holds the window, tray, hotkeys and headless screenshot driver. It is a presentation layer only. It writes parameters and reads telemetry through the three lock-free channels of [`01-architecture.md`](01-architecture.md) §3, and nothing it does can block the audio thread.
 >
-> This document describes the GUI **as implemented**: design language, layout, component hierarchy, update model, every key component, tray and hotkeys, the per-app routing UX, the device advice banner and the headless screenshot driver. Anything planned rather than built is labelled **Roadmap** with its item number in [`07-roadmap.md`](07-roadmap.md). Examples: the onboarding wizard, the custom plug-in editor, Linux hotkeys and macOS per-app routing.
+> This document describes the GUI **as implemented**: design language, layout, component hierarchy, update model, every key component, tray and hotkeys, the per-app routing UX, the device advice banner and the headless screenshot driver. Anything planned rather than built is labelled **Roadmap** with its item number in [`07-roadmap.md`](07-roadmap.md). Examples: the onboarding wizard, the custom plug-in editor, Wayland hotkeys and macOS per-app routing.
 
 **Reading conventions**
 
@@ -40,7 +40,7 @@
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
 | Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
-| Global hotkeys | Implemented on Windows (`RegisterHotKey`) and macOS (Carbon `RegisterEventHotKey`). Linux: not yet; the service reports "unsupported" | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
+| Global hotkeys | Implemented on Windows (`RegisterHotKey`), macOS (Carbon `RegisterEventHotKey`) and Linux under X11 (`XGrabKey`). Wayland sessions: not yet (the xdg-desktop-portal GlobalShortcuts path is roadmap); the service reports "unsupported" | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
 | Per-app routing UI | Implemented. Backend support differs per OS (§8) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
 | Headless screenshot driver (incl. `--device`) | Implemented; used by CI: the `app` job's Linux step renders three screenshots under `xvfb-run` and uploads them as the `screenshots` artifact (green in CI run 36247109446; nothing is compared against a reference image) | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
@@ -470,7 +470,7 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 Two other threads feed the UI, always via the message thread:
 
 - the per-app routing worker ("Flubsound routing"), through a `juce::AsyncUpdater` → `onChanged` → `Change::Routing`;
-- global-hotkey callbacks, which `HotkeyManager` moves onto the message thread with `MessageManager::callAsync` if an implementation ever calls from another thread.
+- global-hotkey callbacks, which `HotkeyManager` moves onto the message thread with `MessageManager::callAsync` when they arrive on another thread (the Linux X11 service calls them from its own event thread).
 
 ```mermaid
 flowchart LR
@@ -1016,14 +1016,15 @@ Row heights adapt between 14 and 22 px.
 | Previous Preset | **Ctrl+Alt+Left** | `previousPreset()` | same |
 
 - **Feedback.** After each action, `onActionPerformed` shows the feedback text as a tray info bubble, where the OS supports one.
-- **Registration.** `registerAll()` first unregisters everything. It skips unassigned chords (`keyCode == 0`) and collects failures such as "Next Preset (Ctrl+Alt+Right) is in use by another application". These are printed to stderr at start-up and shown on the Hotkeys page. Disabling hotkeys in settings registers nothing.
-- **Chord format.** `KeyChord` uses VK-style codes: `'A'…'Z'`, `'0'…'9'`, F1 = `0x70`, arrows `0x25…0x28`, Space `0x20`. The modifiers are Ctrl, Alt, Shift and Super (Win / Cmd).
+- **Registration.** `registerAll()` first unregisters everything. It skips unassigned chords (`keyCode == 0`) and collects failures such as "Next Preset (Ctrl+Alt+Right) could not be registered: another application may already use it, or the system does not allow that key". These are printed to stderr at start-up and shown on the Hotkeys page. Disabling hotkeys in settings registers nothing.
+- **Chord format.** `KeyChord` uses VK-style codes, the same on every OS: `'A'…'Z'`, `'0'…'9'`, F1…F24 = `0x70…0x87`, Space `0x20`, PageUp / PageDown / End / Home `0x21…0x24`, arrows Left / Up / Right / Down `0x25…0x28`, Insert `0x2D`, Delete `0x2E`. The modifiers are Ctrl, Alt, Shift and Super (Win / Cmd). Letters, digits and navigation keys need a modifier other than Shift (`detail::isValidChord`); F-keys may be bare on Windows (not F12, which Windows reserves) and macOS (which maps F1–F20 only). Before this validator accepted navigation keys, the default Boost and preset chords (Ctrl+Alt+arrows) failed to register on every OS.
 
 | OS | Implementation | Notes |
 |---|---|---|
 | Windows | `RegisterHotKey` on a message-only window, `MOD_NOREPEAT` | Full support |
 | macOS | Carbon `RegisterEventHotKey` | Ctrl maps to ⌃ Control and Alt to ⌥ Option, so the defaults are ⌃⌥F etc.; Super maps to ⌘ |
-| Linux | Not implemented. `isSupported()` returns false and the Hotkeys page explains it | **Roadmap**: xdg-desktop-portal GlobalShortcuts on Wayland, `XGrabKey` on X11 (design notes in `PlatformServices_linux.cpp`) |
+| Linux (X11) | `XGrabKey` on the root window for each chord × {none, CapsLock, NumLock, both}, so lock keys do not defeat it. libX11 is loaded at run time with `dlopen` (no link dependency; without the library or the build-time headers the service reports "unsupported"). A private `Display` is served by its own event thread (`poll` + wake pipe), which calls the callbacks; `HotkeyManager` moves them to the message thread | A chord another X client holds is refused (`BadAccess`, caught by a temporary `XSetErrorHandler`). `XkbSetDetectableAutoRepeat` plus a per-chord down flag make a held key fire once. Bare keys are refused, F-keys included. Tested under Xvfb (`tests/test_platform_linux.cpp`; the CI `sanitizers` job runs it with `xvfb-run`) |
+| Linux (Wayland) | None: `isSupported()` returns false in a Wayland session (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` set) and without a `DISPLAY`; the Hotkeys page explains it | **Roadmap**: xdg-desktop-portal GlobalShortcuts (design notes in `PlatformServices_linux.cpp`) |
 
 ---
 
@@ -1183,7 +1184,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 
 These describe the behaviour of the current code.
 
-- **Hotkeys on Linux** are not implemented (§7.2).
+- **Hotkeys on Linux** work under X11 only; Wayland sessions report them unsupported until the GlobalShortcuts portal is implemented (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
 - **Accessibility gaps** are listed in §2.8.
 

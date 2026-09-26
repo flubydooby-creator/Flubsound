@@ -8,11 +8,14 @@
 //
 // Dependencies: flub_core (flub::json) and the C library only. Routing shells
 // out to `pactl` (pulseaudio-utils >= 16 or pipewire-pulse's pactl), which
-// works identically against PulseAudio and PipeWire's pulse server.
+// works identically against PulseAudio and PipeWire's pulse server. Global
+// hotkeys use the X11 headers when present at build time and load libX11
+// with dlopen at run time (no link dependency).
 //
 // Threading: AppAudioRouter calls block while pactl runs (typically 5-30 ms);
 // call them from a background thread if that matters. SystemTuning must be
-// called on the thread it tunes.
+// called on the thread it tunes. GlobalHotkeys callbacks run on the
+// service's X event thread, not on the thread that created it.
 #if defined(__linux__)
 
 #include "PlatformServices.h"
@@ -33,7 +36,27 @@
 #include <cstdlib>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
+
+// X11 global hotkeys (see LinuxGlobalHotkeys): headers only, libX11 itself is
+// loaded at run time.
+#if __has_include(<X11/Xlib.h>) && __has_include(<X11/keysym.h>)
+    #define FLUB_HAVE_X11_HEADERS 1
+    #include <X11/Xlib.h>
+    #include <X11/keysym.h>
+    // X.h defines None as a macro, which would break KeyChord::None (used
+    // below and by tests/test_platform_linux.cpp, which includes this file).
+    #undef None
+    #include <dlfcn.h>
+    #include <fcntl.h>
+    #include <poll.h>
+    #include <atomic>
+    #include <mutex>
+    #include <thread>
+#else
+    #define FLUB_HAVE_X11_HEADERS 0
+#endif
 
 namespace flub::platform
 {
@@ -286,27 +309,319 @@ bool isExecutableInPath (const char* name)
 } // namespace pactl
 
 //==============================================================================
-// GlobalHotkeys - not implemented on Linux yet
+// GlobalHotkeys - X11 key grabs (XGrabKey on the root window)
 //==============================================================================
 /*  There is no single global-shortcut API on Linux:
-      - Wayland: grabbing keys is forbidden by design; the sanctioned route is
-        the xdg-desktop-portal GlobalShortcuts interface
-        (org.freedesktop.portal.GlobalShortcuts: CreateSession, BindShortcuts,
-        "Activated" signal) - the compositor asks the user to confirm and
-        may let them rebind. Implemented by KDE Plasma 5.27+, GNOME 48+,
-        Hyprland; needs a D-Bus client (sd-bus/GDBus) and an app id.
-      - X11: XGrabKey on the root window for every chord x {NumLock,
-        CapsLock} mask combination, fed from JUCE's X11 event loop.
-    Until one of these ships, isSupported() == false and the UI tells users
-    to bind the actions in their desktop's keyboard settings instead. */
+      - X11 (implemented here): XGrabKey on the root window for every chord x
+        {none, CapsLock, NumLock, both} so the lock keys do not defeat the
+        shortcut. libX11 is loaded at run time (as JUCE itself does), so the
+        app and the unit tests build and run without it; the grabs use a
+        private Display connection served by one event thread, which calls
+        the callbacks (HotkeyManager hops them to the message thread).
+        A chord another client already grabbed fails with BadAccess, which is
+        caught with a temporary error handler around an XSync and reported
+        as "in use" (registerHotkey returns false).
+      - Wayland: grabbing keys is forbidden by design (an X grab through
+        XWayland only sees keys while an XWayland window has focus, so it is
+        not global). The sanctioned route is the xdg-desktop-portal
+        GlobalShortcuts interface (CreateSession, BindShortcuts, "Activated"
+        signal; KDE Plasma 5.27+, GNOME 48+, Hyprland) - roadmap. In a Wayland
+        session isSupported() == false and the UI asks users to bind the
+        actions in their desktop's keyboard settings instead. */
+#if FLUB_HAVE_X11_HEADERS
+/** The libX11 entry points the hotkey service needs, resolved with dlopen. */
+struct X11Api
+{
+    void* lib = nullptr;
+    Display* (*openDisplay) (const char*) = nullptr;
+    int (*closeDisplay) (Display*) = nullptr;
+    Window (*defaultRootWindow) (Display*) = nullptr;
+    KeyCode (*keysymToKeycode) (Display*, KeySym) = nullptr;
+    int (*grabKey) (Display*, int, unsigned int, Window, Bool, int, int) = nullptr;
+    int (*ungrabKey) (Display*, int, unsigned int, Window) = nullptr;
+    int (*selectInput) (Display*, Window, long) = nullptr;
+    int (*pending) (Display*) = nullptr;
+    int (*nextEvent) (Display*, XEvent*) = nullptr;
+    int (*sync) (Display*, Bool) = nullptr;
+    int (*flush) (Display*) = nullptr;
+    int (*connectionNumber) (Display*) = nullptr;
+    XErrorHandler (*setErrorHandler) (XErrorHandler) = nullptr;
+    Bool (*setDetectableAutoRepeat) (Display*, Bool, Bool*) = nullptr; // Xkb, optional
+
+    static const X11Api* get()
+    {
+        static const X11Api api = []
+        {
+            X11Api a;
+            a.lib = ::dlopen ("libX11.so.6", RTLD_NOW | RTLD_LOCAL);
+            if (a.lib == nullptr)
+                return a;
+            const auto sym = [&a] (auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype (fn)>> (::dlsym (a.lib, name)); return fn != nullptr; };
+            const bool ok = sym (a.openDisplay, "XOpenDisplay") && sym (a.closeDisplay, "XCloseDisplay")
+                            && sym (a.defaultRootWindow, "XDefaultRootWindow") && sym (a.keysymToKeycode, "XKeysymToKeycode")
+                            && sym (a.grabKey, "XGrabKey") && sym (a.ungrabKey, "XUngrabKey") && sym (a.selectInput, "XSelectInput")
+                            && sym (a.pending, "XPending") && sym (a.nextEvent, "XNextEvent") && sym (a.sync, "XSync")
+                            && sym (a.flush, "XFlush") && sym (a.connectionNumber, "XConnectionNumber")
+                            && sym (a.setErrorHandler, "XSetErrorHandler");
+            sym (a.setDetectableAutoRepeat, "XkbSetDetectableAutoRepeat");
+            if (! ok)
+            {
+                ::dlclose (a.lib);
+                a = X11Api();
+            }
+            return a;
+        }();
+        return api.lib != nullptr ? &api : nullptr;
+    }
+};
+
+/** True in a Wayland session, where X key grabs are not global. */
+bool isWaylandSession()
+{
+    const char* type = std::getenv ("XDG_SESSION_TYPE");
+    if (type != nullptr && std::string (type) == "wayland")
+        return true;
+    const char* wayland = std::getenv ("WAYLAND_DISPLAY");
+    return wayland != nullptr && *wayland != '\0';
+}
+
+/** KeyChord key code (ASCII upper-case letter / digit, F1..F24 as 0x70 + n,
+    VK-style navigation keys) to an X keysym; 0 if unmappable. */
+KeySym keysymForChord (uint32_t keyCode)
+{
+    if (keyCode >= 'A' && keyCode <= 'Z')
+        return static_cast<KeySym> (XK_a + (keyCode - 'A'));
+    if (keyCode >= '0' && keyCode <= '9')
+        return static_cast<KeySym> (XK_0 + (keyCode - '0'));
+    if (keyCode >= 0x70 && keyCode < 0x70 + 24)
+        return static_cast<KeySym> (XK_F1 + (keyCode - 0x70));
+    switch (keyCode)
+    {
+        case 0x20: return XK_space;
+        case 0x21: return XK_Prior;
+        case 0x22: return XK_Next;
+        case 0x23: return XK_End;
+        case 0x24: return XK_Home;
+        case 0x25: return XK_Left;
+        case 0x26: return XK_Up;
+        case 0x27: return XK_Right;
+        case 0x28: return XK_Down;
+        case 0x2D: return XK_Insert;
+        case 0x2E: return XK_Delete;
+        default: break;
+    }
+    return 0;
+}
+
+unsigned int x11Modifiers (uint32_t modifiers)
+{
+    unsigned int m = 0;
+    if ((modifiers & KeyChord::Ctrl) != 0) m |= ControlMask;
+    if ((modifiers & KeyChord::Alt) != 0) m |= Mod1Mask;
+    if ((modifiers & KeyChord::Shift) != 0) m |= ShiftMask;
+    if ((modifiers & KeyChord::Super) != 0) m |= Mod4Mask;
+    return m;
+}
+
+// Lock-key variants grabbed for every chord (CapsLock = LockMask, NumLock =
+// Mod2Mask on practically every keymap).
+constexpr unsigned int kLockVariants[] = { 0u, LockMask, Mod2Mask, LockMask | Mod2Mask };
+constexpr unsigned int kChordModifierMask = ControlMask | Mod1Mask | ShiftMask | Mod4Mask;
+
+std::atomic<Display*> grabErrorDisplay { nullptr };
+std::atomic<bool> grabFailed { false };
+XErrorHandler previousErrorHandler = nullptr;
+
+int onGrabError (Display* display, XErrorEvent* event)
+{
+    if (display == grabErrorDisplay.load())
+    {
+        if (event->error_code == BadAccess)
+            grabFailed = true;
+        return 0;
+    }
+    return previousErrorHandler != nullptr ? previousErrorHandler (display, event) : 0;
+}
+
 class LinuxGlobalHotkeys final : public GlobalHotkeys
 {
 public:
-    bool isSupported() const override { return false; }
+    LinuxGlobalHotkeys()
+    {
+        api = X11Api::get();
+        const char* displayName = std::getenv ("DISPLAY");
+        if (api == nullptr || isWaylandSession() || displayName == nullptr || *displayName == '\0')
+            return;
+        display = api->openDisplay (nullptr);
+        if (display == nullptr)
+            return;
+        root = api->defaultRootWindow (display);
+        api->selectInput (display, root, KeyPressMask | KeyReleaseMask);
+        if (api->setDetectableAutoRepeat != nullptr)
+        {
+            Bool supported = False;
+            api->setDetectableAutoRepeat (display, True, &supported); // held keys: one press, not a stream
+        }
+        if (::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
+        {
+            api->closeDisplay (display);
+            display = nullptr;
+            return;
+        }
+        running = true;
+        thread = std::thread ([this] { eventLoop(); });
+    }
+
+    ~LinuxGlobalHotkeys() override
+    {
+        unregisterAll();
+        if (thread.joinable())
+        {
+            running = false;
+            const char byte = 0;
+            [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
+            thread.join();
+        }
+        if (display != nullptr)
+        {
+            api->closeDisplay (display);
+            ::close (wakePipe[0]);
+            ::close (wakePipe[1]);
+        }
+    }
+
+    bool isSupported() const override { return display != nullptr; }
+
+    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    {
+        if (display == nullptr || ! callback)
+            return false;
+        const KeySym keysym = keysymForChord (chord.keyCode);
+        const unsigned int mods = x11Modifiers (chord.modifiers);
+        if (! callback || ! detail::isValidChord (chord) || keysym == 0
+            || mods == 0) // bare keys (even F-keys) would steal normal typing under X
+            return false;
+        unregisterHotkey (id);
+
+        std::lock_guard<std::mutex> guard (mutex);
+        const KeyCode keycode = api->keysymToKeycode (display, keysym);
+        if (keycode == 0)
+            return false;
+
+        // Grab synchronously so a BadAccess (someone else owns the chord) is
+        // seen here. The error handler is process-wide, so it is only swapped
+        // in for this call (on the message thread, like JUCE's own X calls).
+        grabErrorDisplay = display;
+        grabFailed = false;
+        previousErrorHandler = api->setErrorHandler (&onGrabError);
+        for (const unsigned int lock : kLockVariants)
+            api->grabKey (display, keycode, mods | lock, root, False, GrabModeAsync, GrabModeAsync);
+        api->sync (display, False);
+        const bool failed = grabFailed;
+        if (failed)
+        {
+            for (const unsigned int lock : kLockVariants)
+                api->ungrabKey (display, keycode, mods | lock, root);
+            api->sync (display, False);
+        }
+        api->setErrorHandler (previousErrorHandler);
+        grabErrorDisplay = nullptr;
+        if (failed)
+            return false;
+
+        bindings[id] = Binding { keycode, mods, std::move (callback), false };
+        return true;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        const auto it = bindings.find (id);
+        if (it == bindings.end())
+            return;
+        for (const unsigned int lockMask : kLockVariants)
+            api->ungrabKey (display, it->second.keycode, it->second.modifiers | lockMask, root);
+        api->flush (display);
+        bindings.erase (it);
+    }
+
+    void unregisterAll() override
+    {
+        std::vector<int> ids;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            for (const auto& b : bindings)
+                ids.push_back (b.first);
+        }
+        for (const int id : ids)
+            unregisterHotkey (id);
+    }
+
+private:
+    struct Binding
+    {
+        KeyCode keycode = 0;
+        unsigned int modifiers = 0;
+        std::function<void()> callback;
+        bool down = false; // suppresses key repeat until the release
+    };
+
+    void eventLoop()
+    {
+        pollfd fds[2] = { { api->connectionNumber (display), POLLIN, 0 }, { wakePipe[0], POLLIN, 0 } };
+        while (running)
+        {
+            std::vector<std::function<void()>> fire;
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                while (api->pending (display) > 0)
+                {
+                    XEvent event;
+                    api->nextEvent (display, &event);
+                    if (event.type != KeyPress && event.type != KeyRelease)
+                        continue;
+                    const auto& key = event.xkey;
+                    const unsigned int mods = key.state & kChordModifierMask;
+                    for (auto& [id, b] : bindings)
+                    {
+                        if (b.keycode != key.keycode || b.modifiers != mods)
+                            continue;
+                        if (event.type == KeyPress && ! b.down)
+                            fire.push_back (b.callback);
+                        b.down = event.type == KeyPress;
+                    }
+                }
+            }
+            for (auto& f : fire) // outside the lock: a callback may (un)register
+                f();
+            ::poll (fds, 2, -1);
+            if ((fds[1].revents & POLLIN) != 0)
+            {
+                char buffer[16];
+                while (::read (wakePipe[0], buffer, sizeof (buffer)) > 0) {}
+            }
+        }
+    }
+
+    const X11Api* api = nullptr;
+    Display* display = nullptr;
+    Window root = 0;
+    int wakePipe[2] = { -1, -1 };
+    std::atomic<bool> running { false };
+    std::thread thread;
+    std::mutex mutex;
+    std::map<int, Binding> bindings;
+};
+#else
+class LinuxGlobalHotkeys final : public GlobalHotkeys
+{
+public:
+    bool isSupported() const override { return false; } // built without X11 headers
     bool registerHotkey (int, const KeyChord&, std::function<void()>) override { return false; }
     void unregisterHotkey (int) override {}
     void unregisterAll() override {}
 };
+#endif
 
 //==============================================================================
 // AppAudioRouter - pactl (PulseAudio / PipeWire-pulse)

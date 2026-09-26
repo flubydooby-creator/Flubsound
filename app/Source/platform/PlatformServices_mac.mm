@@ -171,7 +171,7 @@ private:
         return flags;
     }
 
-    /** KeyChord codes (ASCII A-Z / 0-9, F1..F24 = 0x70..) -> kVK_* virtual key
+    /** KeyChord codes (ASCII A-Z / 0-9, F1..F24 = 0x70.., navigation keys) -> kVK_* virtual key
         codes (US ANSI positions; Carbon hot keys match physical keys). */
     static int toMacVirtualKey (uint32_t keyCode)
     {
@@ -194,6 +194,21 @@ private:
         if (fn >= 1 && fn <= 20)
             return functionKeys[fn - 1];
 
+        switch (keyCode)
+        {
+            case 0x20: return kVK_Space;
+            case 0x21: return kVK_PageUp;
+            case 0x22: return kVK_PageDown;
+            case 0x23: return kVK_End;
+            case 0x24: return kVK_Home;
+            case 0x25: return kVK_LeftArrow;
+            case 0x26: return kVK_UpArrow;
+            case 0x27: return kVK_RightArrow;
+            case 0x28: return kVK_DownArrow;
+            case 0x2D: return kVK_Help; // the Insert position on Apple extended keyboards
+            case 0x2E: return kVK_ForwardDelete;
+            default: break;
+        }
         return -1;
     }
 

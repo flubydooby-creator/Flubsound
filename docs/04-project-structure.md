@@ -216,11 +216,11 @@ Flubsound/
 │       │   └── AppSettings.{h,cpp}         juce::PropertiesFile: device state, per-strip A/B state, hotkeys, routing map, window
 │       ├── platform/                       OS integration. Plain C++ interfaces, no JUCE types.
 │       │   ├── PlatformServices.h          the fixed interface: GlobalHotkeys, AppAudioRouter, ProcessLoopbackCapture, AudioEndpoints, SystemTuning
-│       │   ├── PlatformServicesInternal.h  shared private helpers (chord validation, F-key encoding)
+│       │   ├── PlatformServicesInternal.h  shared private helpers (chord validation, F-key and navigation-key encoding)
 │       │   ├── PlatformServices_common.cpp KeyChord formatting / validation, "unsupported" fallbacks for other OSes
 │       │   ├── PlatformServices_win.cpp    Windows: Win32/COM only (hotkeys, sessions, process loopback, MMCSS, EcoQoS)
 │       │   ├── PlatformServices_mac.mm     macOS: Carbon hotkeys, transport type, time-constraint thread policy
-│       │   ├── PlatformServices_linux.cpp  Linux: pactl-based routing to the null sinks, SCHED_FIFO tuning
+│       │   ├── PlatformServices_linux.cpp  Linux: X11 hotkeys (XGrabKey, libX11 via dlopen), pactl-based routing to the null sinks, SCHED_FIFO tuning
 │       │   ├── PlatformServices.cmake      link libraries, FLUB_ENABLE_UNDOCUMENTED_ROUTING, warning flags for the files above
 │       │   └── PlatformBridge.{h,cpp}      the only access point for the rest of the app; nullptr / no-op without services
 │       ├── shell/                          top-level windows and OS-facing shell
@@ -791,13 +791,13 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_transparency.cpp`: top-octave droop of the oversampled stages;
   - `test_factory_presets.cpp`: validation and render of every preset;
   - `test_device_profiles.cpp`: the profile database and the drift check of the embedded copy;
-  - `test_platform_linux.cpp`: Linux platform services, headless, with no sound server or display needed; compiles to nothing on other OSes;
+  - `test_platform_linux.cpp`: Linux platform services, with no sound server needed; the X11 global-hotkey case needs an X display and `libXtst` (CI: `xvfb-run` in the `sanitizers` job) and is skipped without them, the rest run headless; compiles to nothing on other OSes;
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state** (current tree). 435 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (436 in an `FLUB_RTSAN` build, which adds the RTSan self-test). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
+- **Current state** (current tree). 437 test cases in 25 `test_*.cpp` files plus `test_driver_shared_c.c` (438 in an `FLUB_RTSAN` build, which adds the RTSan self-test). All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and in a Clang 20 `FLUB_RTSAN=ON` build.
 
 ---
 
@@ -818,7 +818,7 @@ There are two platform locations with different roles:
 |---|---|---|---|---|
 | Windows | `PlatformServices_win.cpp`: plain Win32 / COM (no JUCE, WRL or ATL; builds with MSVC, clang-cl and MinGW-w64) | global hotkeys (`RegisterHotKey`, message-only window); session enumeration and the `ms-settings:apps-volume` fallback; per-process loopback capture on build ≥ 20348; output transport query; EcoQoS opt-out; MMCSS "Pro Audio" | moving an app to another endpoint (`setAppEndpoint`) unless built with `FLUB_ENABLE_UNDOCUMENTED_ROUTING=ON` | `windows/driver/README.md`: the WaveRT "Flubsound Virtual Audio" driver (status: design, roadmap 2.1–2.3). `windows/driver/FlubVirtualAudioShared.h`: the C user/kernel contract. No product target includes it yet; `flub_tests` does (`tests/test_driver_shared.cpp` on every OS, `tests/test_driver_shared_c.c` as strict C89 on GCC / Clang). |
 | macOS | `PlatformServices_mac.mm` (Objective-C++) | Carbon global hotkeys; output transport (`kAudioDevicePropertyTransportType`); time-constraint thread policy | per-app routing, per-process capture | `macos/README.md`: Core Audio process taps (14.2+) and the Audio Server Plug-in virtual device (design, roadmap 3.1–3.2) |
-| Linux | `PlatformServices_linux.cpp` (`flub::json` + C library; shells out to `pactl`) | per-app routing by moving sink-inputs to the `flubsound_*` null sinks (when `pactl` is present); best-effort `SCHED_FIFO` | global hotkeys (the portal / XGrabKey paths are documented, not implemented); per-process capture (not needed on Linux); output transport (`Unknown`, name heuristics are used instead) | `linux/flubsound-pipewire-setup.sh` (`install`, `remove`, `status`, `print-pa-config`); `linux/pipewire/pipewire.conf.d/90-flubsound-sinks.conf` (persistent sinks); `linux/pipewire/pipewire-pulse.conf.d/90-flubsound-app-routing.conf` (example routing rules); `linux/README.md` |
+| Linux | `PlatformServices_linux.cpp` (`flub::json` + C library; shells out to `pactl`; X11 headers at build time only, libX11 loaded with `dlopen` at run time) | global hotkeys under X11 (`XGrabKey` on the root window, own event thread); per-app routing by moving sink-inputs to the `flubsound_*` null sinks (when `pactl` is present); best-effort `SCHED_FIFO` | global hotkeys in a Wayland session, without a `DISPLAY`, or without the X11 headers / libX11 (the xdg-desktop-portal GlobalShortcuts path is documented, not implemented); per-process capture (not needed on Linux); output transport (`Unknown`, name heuristics are used instead) | `linux/flubsound-pipewire-setup.sh` (`install`, `remove`, `status`, `print-pa-config`); `linux/pipewire/pipewire.conf.d/90-flubsound-sinks.conf` (persistent sinks); `linux/pipewire/pipewire-pulse.conf.d/90-flubsound-app-routing.conf` (example routing rules); `linux/README.md` |
 
 **The four strips.** The default strip layout lives in `AudioEngineHost` (`app/Source/engine/AudioEngineHost.h`): Game (8 channels, 7.1), Music, Chat and System (2 channels each). `MixEngine::kMaxStrips = 4` caps the layout. The virtual endpoints in every design use the same four names: "Flubsound Game / Music / Chat / System". The Windows and macOS designs also add a "Flubsound Mic" capture endpoint.
 
@@ -864,7 +864,7 @@ There are two platform locations with different roles:
 | Job | Runners | Configure | Steps |
 |---|---|---|---|
 | `core` | `ubuntu-24.04` × {gcc, clang}, `windows-2022` (MSVC via `ilammy/msvc-dev-cmd`), `macos-14` (Apple Clang); `fail-fast: false` | Ninja, Release, `FLUB_BUILD_TESTS=ON`, `FLUB_BUILD_TOOLS=ON`, `FLUB_WARNINGS_AS_ERRORS=ON` on Linux only | build → `ctest --output-on-failure` → CLI smoke test (`flubsound-cli params > /dev/null`, `flubsound-cli presets`) |
-| `sanitizers` | `ubuntu-24.04` | Ninja, RelWithDebInfo, `clang++`, `FLUB_SANITIZE=ON`, `FLUB_BUILD_TOOLS=OFF` | build → `ctest` with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`, `ASAN_OPTIONS=detect_leaks=1` |
+| `sanitizers` | `ubuntu-24.04` | Ninja, RelWithDebInfo, `clang++`, `FLUB_SANITIZE=ON`, `FLUB_BUILD_TOOLS=OFF` | `apt-get install libx11-dev libxtst6 xvfb` → build → `ctest` with `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`, `ASAN_OPTIONS=detect_leaks=1` → the platform tests again under `xvfb-run -a ./build/tests/flub_tests "Platform:"` with the same options, so the X11 global-hotkey test runs against a real X server |
 | `rtsan` | `ubuntu-24.04` | `apt-get install clang-20 libclang-rt-20-dev`; Ninja, RelWithDebInfo, `CC=clang-20 CXX=clang++-20`, `FLUB_RTSAN=ON`, `FLUB_WARNINGS_AS_ERRORS=ON`, `FLUB_BUILD_TOOLS=OFF` | build → the full `ctest` with `RTSAN_OPTIONS=halt_on_error=1`: every test that calls a `ProcessingChain`, `MixEngine` or module `process()` runs it under RealtimeSanitizer, and `test_rtsan.cpp` proves the annotations and the sanitizer are live |
 | `app` (`needs: core`) | `windows-2022`, `macos-14`, `ubuntu-24.04` | Ninja, Release, `FLUB_BUILD_APP=ON`, `FLUB_BUILD_PLUGIN=ON`, tests and tools OFF; `build/_deps` cached under key `juce-<FLUB_JUCE_VERSION>-<runner.os>`, the version read from `cmake/FlubJuce.cmake` | build. On Linux: three headless screenshots at 1440×900 under `xvfb-run` (`--mode music`, `--mode gaming`, `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`), uploaded as artifact `screenshots` |
 

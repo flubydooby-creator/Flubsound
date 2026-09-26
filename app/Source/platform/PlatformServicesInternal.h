@@ -27,17 +27,28 @@ constexpr int functionKeyNumber (uint32_t keyCode) noexcept
     return isFunctionKey (keyCode) ? static_cast<int> (keyCode - kFunctionKeyBase) + 1 : 0;
 }
 
+/** Navigation keys use their VK codes too: Space 0x20, PageUp 0x21, PageDown
+    0x22, End 0x23, Home 0x24, Left/Up/Right/Down 0x25..0x28, Insert 0x2D,
+    Delete 0x2E. */
+constexpr bool isNavigationKey (uint32_t keyCode) noexcept
+{
+    return (keyCode >= 0x20 && keyCode <= 0x28) || keyCode == 0x2D || keyCode == 0x2E;
+}
+
 constexpr uint32_t kAllModifiers = KeyChord::Ctrl | KeyChord::Alt | KeyChord::Shift | KeyChord::Super;
 
 /** Platform-independent sanity rules for a global shortcut:
-      - the key must be A-Z, 0-9 or F1-F24 (the only codes KeyChord defines),
+      - the key must be A-Z, 0-9, F1-F24 or a navigation key (the only codes
+        KeyChord defines),
       - no unknown modifier bits,
-      - letters and digits need at least one modifier other than Shift, otherwise
+      - letters, digits and navigation keys need at least one modifier other
+        than Shift, otherwise
         the shortcut would swallow ordinary typing in every other application.
     F-keys may be used bare (e.g. F13-F24 on gaming keyboards / macro pads).
     On failure, 'reason' (if given) receives a user-presentable explanation. */
 bool isValidChord (const KeyChord& chord, std::string* reason = nullptr);
 
-/** Human-readable name of the key alone ("K", "7", "F13"); "" if invalid. */
+/** Human-readable name of the key alone ("K", "7", "F13", "Up"); "" if
+    invalid. The names match the settings file's chord syntax. */
 std::string keyName (uint32_t keyCode);
 } // namespace flub::platform::detail

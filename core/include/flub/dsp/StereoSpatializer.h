@@ -126,6 +126,13 @@ private:
     float focusG = 0.0f;
     SvfCoeffs focusCoeffs;
     SvfState focusState;
+    float focusCentreGain = 1.0f; // A^2 of the current bell (linear gain at 3 kHz)
+    // Polarity guard: band envelopes of M and S around the bell, and the share
+    // of the bell's lift that may be applied (see StereoSpatializer.cpp).
+    SvfCoeffs focusDetectCoeffs;
+    SvfState detectMidState, detectSideState;
+    float envMid = 0.0f, envSide = 0.0f, focusGuard = 1.0f;
+    float envRelease = 0.0f, guardRelease = 0.0f;
 
     // Space: HP 300 Hz (M) -> pre-delay -> nested all-pass network -> S.
     SvfCoeffs spaceHpCoeffs;

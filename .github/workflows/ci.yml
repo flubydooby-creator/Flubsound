@@ -50,6 +50,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      # X11 headers (compile-time only; libX11 is loaded at run time) and an
+      # X server + XTest for the Linux global-hotkey test.
+      - name: X11 test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxtst6 xvfb
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -61,6 +67,11 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           ASAN_OPTIONS: detect_leaks=1
         run: ctest --test-dir build --output-on-failure
+      - name: Platform tests under Xvfb (X11 global hotkeys, ASan + UBSan)
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: xvfb-run -a ./build/tests/flub_tests "Platform:"
 
   # ---------------------------------------------------------------------------
   # Clang RealtimeSanitizer over the full test suite. In this build the audio

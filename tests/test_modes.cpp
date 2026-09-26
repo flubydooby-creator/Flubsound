@@ -287,12 +287,12 @@ TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre
     CHECK_NEAR (monoSumDb[1], monoSumDb[0], 0.01);
     CHECK_NEAR (monoSumDb[2], monoSumDb[0], 0.01);
 
-    // A hard-left source stays clearly on its side. (Raising S necessarily
-    // puts an anti-phase copy in the far ear, so its ILD drops from infinite
-    // to about 10 dB at 100 %; it must not collapse towards the centre.)
+    // A hard-left source stays hard-left: the focus's polarity guard never
+    // lifts S beyond M, so no anti-phase copy reaches the far ear (without it
+    // the ILD fell from infinite to about 10 dB at 100 %).
     const auto hard = renderGaming (positional (1.0f), tone (3000.0, -20.0f, 0.0f));
-    CHECK_GE (hard.toneDb (0, 3000.0) - hard.toneDb (1, 3000.0), 6.0);
-    CHECK_GE (hard.toneDb (0, 3000.0), -20.0);
+    CHECK_GE (hard.toneDb (0, 3000.0) - hard.toneDb (1, 3000.0), 60.0);
+    CHECK_GE (hard.toneDb (0, 3000.0), -20.5);
 }
 
 TEST_CASE ("Gaming Impact (M3): governed bass boost + harmonics and transient attack; a sub-bass hit gains level and harmonics")

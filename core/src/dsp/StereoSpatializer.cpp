@@ -31,6 +31,16 @@
 // Positional focus: the Cytomic bell of Svf.h (k = 1 / (Q A), m1 = k (A^2 - 1))
 // with fixed g; the gain glides in dB and the three a-coefficients are
 // re-derived per sample only while it moves. Focus 0 gives m1 = 0 exactly.
+// Polarity guard: raising S by G against an untouched M flips the far ear
+// (M - G S) once G S > M. For a hard-panned source (S = M) any lift does,
+// which would put an anti-phase copy in the silent ear (the ILD would fall
+// from infinite to ~10 dB). Band-pass envelopes of M and S at the bell's own
+// centre and Q (peak hold, 30 ms release) bound the lift to what keeps the
+// quieter ear's polarity: the applied share of the bell's added signal is
+//   guard = clamp ((e_M - e_S) / (e_S (G - 1)), 0, 1),  G = A^2 (3 kHz gain)
+// (instant attack, 50 ms release). Partially panned sources (e_M > e_S) still
+// gain ILD, a hard-panned one keeps it infinite, a pure side signal (no M)
+// is not lifted, and M is still never touched (mono sum exact).
 //
 // Space: HP_300 (2nd-order Butterworth) of M, delayed by P = 5 ms, then three
 // nested Schroeder all-passes (g = 0.5): the 7.3 ms outer section carries the
@@ -94,6 +104,8 @@ constexpr double kFocusHz = 3000.0;
 constexpr float kFocusQ = 0.5f;
 constexpr float kFocusMaxDb = 6.0f;
 constexpr float kDbToLnA = 0.0575646273f; // ln (10) / 40: dB -> ln A of the bell
+constexpr float kFocusEnvReleaseMs = 30.0f;   // polarity guard: band envelope release
+constexpr float kFocusGuardReleaseMs = 50.0f; // polarity guard: recovery of the lift
 
 constexpr double kSpaceHpHz = 300.0;
 constexpr double kSpaceHpQ = 0.70710678;
@@ -182,6 +194,9 @@ void StereoSpatializer::prepare (const ProcessSpec& newSpec)
 
     // Fixed designs.
     focusG = static_cast<float> (std::tan (kPi * SvfCoeffs::clampFrequency (kFocusHz, sr) / sr));
+    focusDetectCoeffs = SvfCoeffs::make (FilterType::BandPass, kFocusHz, kFocusQ, 0.0, sr);
+    envRelease = static_cast<float> (std::exp (-1.0 / (kFocusEnvReleaseMs * 0.001 * sr)));
+    guardRelease = static_cast<float> (std::exp (-1.0 / (kFocusGuardReleaseMs * 0.001 * sr)));
     spaceHpCoeffs = SvfCoeffs::make (FilterType::HighPass, kSpaceHpHz, kSpaceHpQ, 0.0, sr);
     const double cfG = std::tan (kPi * SvfCoeffs::clampFrequency (kCrossfeedHz, sr) / sr);
     crossfeedG = static_cast<float> (cfG / (1.0 + cfG));
@@ -239,6 +254,10 @@ void StereoSpatializer::clearState() noexcept
 {
     shelfState.reset();
     focusState.reset();
+    detectMidState.reset();
+    detectSideState.reset();
+    envMid = envSide = 0.0f;
+    focusGuard = 1.0f;
     spaceHpState.reset();
     preDelayLine.clear();
     outerLine.clear();
@@ -295,6 +314,7 @@ void StereoSpatializer::designFocus (float gainDb) noexcept
     focusCoeffs.m0 = 1.0f;
     focusCoeffs.m1 = k * (a * a - 1.0f);
     focusCoeffs.m2 = 0.0f;
+    focusCentreGain = a * a;
 }
 
 void StereoSpatializer::updateWidthTarget() noexcept
@@ -384,7 +404,8 @@ void StereoSpatializer::sanitiseState() noexcept
     // Any non-finite output also latches into the correlation accumulators,
     // so a NaN / inf that only lives in a delay line is caught once it
     // reaches the output.
-    const float sum = shelfState.ic1 + shelfState.ic2 + focusState.ic1 + focusState.ic2 + spaceHpState.ic1
+    const float sum = shelfState.ic1 + shelfState.ic2 + focusState.ic1 + focusState.ic2 + detectMidState.ic1
+                      + detectMidState.ic2 + detectSideState.ic1 + detectSideState.ic2 + envMid + envSide + spaceHpState.ic1
                       + spaceHpState.ic2 + crossfeedState + lastAmbience;
     if (! std::isfinite (sum) || ! std::isfinite (corrLR + corrLL + corrRR))
     {
@@ -394,6 +415,10 @@ void StereoSpatializer::sanitiseState() noexcept
 
     flush (shelfState);
     flush (focusState);
+    flush (detectMidState);
+    flush (detectSideState);
+    envMid = flushed (envMid);
+    envSide = flushed (envSide);
     flush (spaceHpState);
     crossfeedState = flushed (crossfeedState);
 }
@@ -430,7 +455,15 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
         // ---- positional focus ----
         if (focusDb.isSmoothing())
             designFocus (focusDb.next());
-        s = svfTick (focusCoeffs, focusState, s);
+        {
+            const float focused = svfTick (focusCoeffs, focusState, s);
+            envMid = std::max (std::abs (svfTick (focusDetectCoeffs, detectMidState, mid)), envRelease * envMid);
+            envSide = std::max (std::abs (svfTick (focusDetectCoeffs, detectSideState, s)), envRelease * envSide);
+            const float lift = envSide * (focusCentreGain - 1.0f);
+            const float target = lift <= envMid - envSide ? 1.0f : std::max (0.0f, (envMid - envSide) / lift);
+            focusGuard = target < focusGuard ? target : target + guardRelease * (focusGuard - target);
+            s += focusGuard * (focused - s); // focus 0: focused == s, exact
+        }
 
         // ---- space ---- (the network always runs, so raising space never
         // starts from an empty reverb)

@@ -81,7 +81,10 @@ std::vector<float> midOf (const Planar& buf, int start, int length)
 
 /** Steady-state gain (dB) of the side path for a pure side sine (L = x, R = -x),
     measured over a whole number of periods. */
-double sideGainDb (const SpatializerParams& p, double freq, double fs = kFs)
+/** Gain (dB) the spatializer applies to S at `freq`. midRatio > 0 adds an
+    in-phase M of that many times S (a panned rather than a pure-side
+    source), which the positional focus's polarity guard needs to lift S. */
+double sideGainDb (const SpatializerParams& p, double freq, double fs = kFs, float midRatio = 0.0f)
 {
     StereoSpatializer sp;
     setUp (sp, p, fs);
@@ -91,7 +94,7 @@ double sideGainDb (const SpatializerParams& p, double freq, double fs = kFs)
     const int total = settle + measure;
     const float amp = 0.25f;
     const auto x = sine (freq, fs, total, amp);
-    Planar buf = stereo (x, scaled (x, -1.0f));
+    Planar buf = stereo (scaled (x, midRatio + 1.0f), scaled (x, midRatio - 1.0f));
     processInBlocks (sp, buf, 256);
     const auto s = sideOf (buf, settle, measure);
     return toDb (toneAmplitude (s.data(), measure, freq, fs) / amp);
@@ -330,17 +333,20 @@ TEST_CASE ("StereoSpatializer: positional focus lifts S around 3 kHz only; M unt
 {
     SpatializerParams p = neutral();
     p.positionalFocus = 1.0f;
-    CHECK_NEAR (sideGainDb (p, 3000.0), 6.0, 0.05);
-    CHECK_LE (std::abs (sideGainDb (p, 100.0)), 0.1);
-    CHECK_LE (sideGainDb (p, 1000.0), 4.0);
-    CHECK_LE (sideGainDb (p, 15000.0), 1.5);
+    // Measured on a panned source (M = 4 S): the polarity guard then allows
+    // the full bell (it would need M > 2 S at +6 dB).
+    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 6.0, 0.05);
+    CHECK_LE (std::abs (sideGainDb (p, 100.0, kFs, 4.0f)), 0.1);
+    CHECK_LE (sideGainDb (p, 1000.0, kFs, 4.0f), 4.0);
+    CHECK_LE (sideGainDb (p, 15000.0, kFs, 4.0f), 1.5);
     const auto bell = SvfCoeffs::make (FilterType::Bell, 3000.0, 0.5, 6.0, kFs);
     for (double f : { 300.0, 1000.0, 2000.0, 6000.0, 12000.0 })
-        CHECK_NEAR (sideGainDb (p, f), bell.magnitudeDb (f, kFs), 0.05);
+        CHECK_NEAR (sideGainDb (p, f, kFs, 4.0f), bell.magnitudeDb (f, kFs), 0.05);
 
     p.positionalFocus = 0.5f;
-    CHECK_NEAR (sideGainDb (p, 3000.0), 3.0, 0.05);
-    CHECK_NEAR (sideGainDb (p, 3000.0, 44100.0), 3.0, 0.05);
+    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 3.0, 0.05);
+    CHECK_NEAR (sideGainDb (p, 3000.0, 44100.0, 4.0f), 3.0, 0.05);
+    CHECK_LE (std::abs (sideGainDb (p, 3000.0)), 0.01); // pure side (no M): nothing to keep in phase, no lift
 
     p.positionalFocus = 1.0f;
     StereoSpatializer sp;
@@ -349,6 +355,39 @@ TEST_CASE ("StereoSpatializer: positional focus lifts S around 3 kHz only; M unt
     Planar out = stereo (x, x);
     processInBlocks (sp, out, 128);
     CHECK (identical (out, stereo (x, x)));
+}
+
+TEST_CASE ("StereoSpatializer: positional focus never flips the far ear - hard-panned sources stay hard-panned")
+{
+    // Lifting S against an untouched M puts an anti-phase copy in the silent
+    // ear of a hard-panned source (ILD from infinite to ~10 dB). The polarity
+    // guard bounds the lift to M / S, so that ear stays exactly silent, while a
+    // partially panned source still gains ILD and the mono sum stays exact.
+    SpatializerParams p = neutral();
+    p.positionalFocus = 1.0f;
+    const int n = 48000;
+    for (const auto& x : { sine (3000.0, kFs, n, 0.5f), whiteNoise (n, 0.5f, 9u) })
+    {
+        StereoSpatializer sp;
+        setUp (sp, p);
+        Planar buf = stereo (x, std::vector<float> (static_cast<size_t> (n), 0.0f)); // hard left
+        const Planar in = buf;
+        processInBlocks (sp, buf, 256);
+        CHECK (peakAbs (buf.ch[1].data(), n) == 0.0);  // the right ear stays silent
+        CHECK (identical (buf, in));                   // and the left ear untouched
+    }
+
+    // Partially panned (R = L / 2) at 3 kHz: the ILD grows from 6 dB.
+    StereoSpatializer sp;
+    setUp (sp, p);
+    const auto x = sine (3000.0, kFs, n, 0.5f);
+    Planar buf = stereo (x, scaled (x, 0.5f));
+    const Planar in = buf;
+    processInBlocks (sp, buf, 256);
+    const int tail = n / 2;
+    const double ild = toDb (toneAmplitude (buf.ch[0].data() + tail, tail, 3000.0, kFs) / toneAmplitude (buf.ch[1].data() + tail, tail, 3000.0, kFs));
+    CHECK_GE (ild, 12.0); // bell +6 dB on S: L = 0.75 + 0.5, R = 0.75 - 0.5 -> 14 dB
+    CHECK_LE (maxMonoSumError (in, buf), 1e-6);
 }
 
 TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono sum stays exact")

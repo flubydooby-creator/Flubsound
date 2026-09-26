@@ -60,7 +60,7 @@ void HotkeyManager::registerAll()
                                                          });
                                                  });
         if (! ok)
-            failures.add (AppSettings::getHotkeyActionName (action) + " (" + AppSettings::chordToString (chord) + ") is in use by another application");
+            failures.add (AppSettings::getHotkeyActionName (action) + " (" + AppSettings::chordToString (chord) + ") could not be registered: another application may already use it, or the system does not allow that key");
     }
 }
 

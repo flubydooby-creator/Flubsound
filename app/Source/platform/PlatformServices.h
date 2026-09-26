@@ -18,10 +18,12 @@
 //             3.2): capture via Core Audio process taps (CATapDescription,
 //             macOS 14.2+), routing = tap with mute-when-tapped.
 //   Linux   : per-app routing by moving PipeWire/Pulse sink-inputs to the
-//             "flubsound_<strip>" null sinks (pactl). Global hotkeys are
-//             designed, not implemented (isSupported() == false; roadmap):
-//             xdg-desktop-portal GlobalShortcuts (Wayland) / XGrabKey (X11).
-//             No per-process capture: apps are routed into the null sinks.
+//             "flubsound_<strip>" null sinks (pactl). Global hotkeys via
+//             XGrabKey under X11 (libX11 loaded at run time; callbacks come
+//             from the service's own event thread). Wayland sessions report
+//             isSupported() == false (xdg-desktop-portal GlobalShortcuts is
+//             roadmap). No per-process capture: apps are routed into the
+//             null sinks.
 #pragma once
 
 #include <cstdint>
@@ -44,7 +46,9 @@ struct KeyChord
         Super = 1u << 3 // Win / Cmd
     };
     uint32_t modifiers = None;
-    uint32_t keyCode = 0; // ASCII upper-case letter/digit, or F1..F24 as 0x70 + n (VK-style)
+    uint32_t keyCode = 0; // VK-style: ASCII upper-case letter/digit, F1..F24 = 0x70 + n,
+                          // Space 0x20, PageUp/PageDown/End/Home 0x21..0x24,
+                          // Left/Up/Right/Down 0x25..0x28, Insert 0x2D, Delete 0x2E
 
     std::string toString() const;
 };
@@ -55,9 +59,12 @@ public:
     virtual ~GlobalHotkeys() = default;
     virtual bool isSupported() const = 0;
 
-    /** Registers a system-wide shortcut. The callback is invoked on the
-        thread that created the service (the app's message thread). Returns
-        false if the chord is taken by another application. */
+    /** Registers a system-wide shortcut. On Windows and macOS the callback is
+        invoked on the thread that created the service (the app's message
+        thread); on Linux (X11) it runs on the service's own X event thread,
+        so callers must hop to their own thread (HotkeyManager does). Returns
+        false if the chord is invalid (see KeyChord), cannot be mapped on this
+        system, or is taken by another application. */
     virtual bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) = 0;
     virtual void unregisterHotkey (int id) = 0;
     virtual void unregisterAll() = 0;

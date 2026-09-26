@@ -92,19 +92,38 @@ libpipewire.
 
 ## Global hotkeys
 
-Not implemented on Linux yet (`GlobalHotkeys::isSupported() == false`).
+Implemented for X11 sessions (`LinuxGlobalHotkeys` in
+`app/Source/platform/PlatformServices_linux.cpp`); not yet for Wayland.
 
-- Under Wayland, grabbing keys is forbidden by design. The proper API is the
-  **xdg-desktop-portal GlobalShortcuts** interface
+- **X11.** `XGrabKey` on the root window, once per chord combined with each
+  of {none, CapsLock, NumLock, both}, so the lock keys do not defeat the
+  shortcut. libX11 is loaded at run time with `dlopen("libX11.so.6")`, so
+  the app has no link dependency on it; the X11 headers are needed at build
+  time only, and without the headers or the library the service reports
+  itself unsupported. The grabs live on a private `Display` connection
+  served by the service's own event thread (`poll` on the X connection plus
+  a wake pipe); callbacks run on that thread and `HotkeyManager` moves them
+  to the message thread. A chord another X client already grabbed fails with
+  `BadAccess`, caught by a temporary `XSetErrorHandler`, and
+  `registerHotkey` returns false. `XkbSetDetectableAutoRepeat` and a
+  per-chord "down" flag make a held key fire once. Bare keys, F-keys
+  included, are refused because they would steal normal typing.
+- **Wayland.** Grabbing keys is forbidden by design (an X grab through
+  XWayland only sees keys while an XWayland window has focus). In a Wayland
+  session (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY` set), and with no
+  `DISPLAY`, `GlobalHotkeys::isSupported() == false` and the UI suggests
+  binding Flubsound's actions in the desktop's keyboard settings. The proper
+  API is the **xdg-desktop-portal GlobalShortcuts** interface
   (`org.freedesktop.portal.GlobalShortcuts`: `CreateSession`,
-  `BindShortcuts`, `Activated` signal). The compositor shows a confirmation
-  dialog and the user may rebind keys. It is available in KDE Plasma 5.27+,
-  GNOME 48+ and Hyprland.
-- Under X11 the implementation would be `XGrabKey` on the root window, once
-  per chord combined with the NumLock and CapsLock masks.
+  `BindShortcuts`, `Activated` signal); it is roadmap. The compositor shows
+  a confirmation dialog and the user may rebind keys. It is available in KDE
+  Plasma 5.27+, GNOME 48+ and Hyprland.
 
-Until then the UI suggests binding Flubsound's actions in the desktop's
-keyboard settings.
+Test: `Platform: X11 global hotkeys fire once per press, refuse a chord
+another client holds, and release on unregister` in
+`tests/test_platform_linux.cpp` synthesises key events with XTest. It is
+skipped without an X display or `libXtst`; CI runs it under `xvfb-run` in the
+`sanitizers` job.
 
 ## Real-time scheduling
 
@@ -158,6 +177,6 @@ detect Bluetooth and hands-free outputs from the device name and format
   monitor hop, and lets WirePlumber manage the links.
 - libpulse or libpipewire routing instead of shelling out to `pactl`, for
   Flatpak and to receive change events instead of polling.
-- xdg-desktop-portal GlobalShortcuts.
+- xdg-desktop-portal GlobalShortcuts (global hotkeys in Wayland sessions).
 - RealtimeKit for the audio thread, `node.latency` for Flubsound's streams,
   and the output's `device.bus` for headset connection detection.

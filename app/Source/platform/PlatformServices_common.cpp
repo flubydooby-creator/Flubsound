@@ -21,6 +21,21 @@ std::string keyName (uint32_t keyCode)
     if (const int n = functionKeyNumber (keyCode); n > 0)
         return "F" + std::to_string (n);
 
+    switch (keyCode)
+    {
+        case 0x20: return "Space";
+        case 0x21: return "PageUp";
+        case 0x22: return "PageDown";
+        case 0x23: return "End";
+        case 0x24: return "Home";
+        case 0x25: return "Left";
+        case 0x26: return "Up";
+        case 0x27: return "Right";
+        case 0x28: return "Down";
+        case 0x2D: return "Insert";
+        case 0x2E: return "Delete";
+        default: break;
+    }
     return {};
 }
 
@@ -37,13 +52,13 @@ bool isValidChord (const KeyChord& chord, std::string* reason)
         return fail ("Unknown modifier flags in shortcut.");
 
     if (keyName (chord.keyCode).empty())
-        return fail ("Shortcuts must use a letter, a digit or F1-F24.");
+        return fail ("Shortcuts must use a letter, a digit, F1-F24, an arrow key, Space, Home, End, PageUp, PageDown, Insert or Delete.");
 
     const bool isFKey = isFunctionKey (chord.keyCode);
     const uint32_t nonShiftModifiers = chord.modifiers & (KeyChord::Ctrl | KeyChord::Alt | KeyChord::Super);
 
     if (! isFKey && nonShiftModifiers == 0)
-        return fail ("Letter and digit shortcuts need Ctrl, Alt or the Win/Cmd key.");
+        return fail ("Letter, digit and navigation-key shortcuts need Ctrl, Alt or the Win/Cmd key.");
 
     return true;
 }

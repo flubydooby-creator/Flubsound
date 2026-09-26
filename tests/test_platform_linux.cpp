@@ -10,6 +10,9 @@
 #include "../app/Source/platform/PlatformServices_common.cpp"
 #include "../app/Source/platform/PlatformServices_linux.cpp"
 
+#include <atomic>
+#include <chrono>
+#include <iostream>
 #include <thread>
 
 using namespace flub::platform;
@@ -58,7 +61,11 @@ TEST_CASE ("Platform: KeyChord::toString uses Linux modifier names and F-key num
     CHECK (chord (KeyChord::None, kF1 + 23).toString() == "F24");
     CHECK (chord (KeyChord::Ctrl, '7').toString() == "Ctrl+7");
     CHECK (chord (KeyChord::None, 0).toString().empty());
-    CHECK (chord (KeyChord::Ctrl, 0x20).toString() == "Ctrl+Key 0x20");
+    CHECK (chord (KeyChord::Ctrl | KeyChord::Alt, 0x26).toString() == "Ctrl+Alt+Up");
+    CHECK (chord (KeyChord::Ctrl, 0x20).toString() == "Ctrl+Space");
+    CHECK (chord (KeyChord::Ctrl, 0x21).toString() == "Ctrl+PageUp");
+    CHECK (chord (KeyChord::Ctrl, 0x2E).toString() == "Ctrl+Delete");
+    CHECK (chord (KeyChord::Ctrl, 0x2A).toString() == "Ctrl+Key 0x2A");
 }
 
 TEST_CASE ("Platform: chord validation rejects shortcuts that would swallow typing")
@@ -68,7 +75,19 @@ TEST_CASE ("Platform: chord validation rejects shortcuts that would swallow typi
     CHECK (detail::isValidChord (chord (KeyChord::Ctrl, 'A')));
     CHECK (detail::isValidChord (chord (KeyChord::Alt | KeyChord::Shift, '9')));
     CHECK (detail::isValidChord (chord (KeyChord::None, kF1 + 12)));
-    CHECK (! detail::isValidChord (chord (KeyChord::Ctrl, 0x20)));
+    CHECK (! detail::isValidChord (chord (KeyChord::Ctrl, 0x2A)));
+    CHECK (! detail::isValidChord (chord (KeyChord::Ctrl, 0x29)));
+    // The app's default Boost / preset chords (Ctrl+Alt+arrows) and the other
+    // navigation keys are valid with a modifier, never bare or Shift-only.
+    for (const uint32_t nav : { 0x20u, 0x21u, 0x22u, 0x23u, 0x24u, 0x25u, 0x26u, 0x27u, 0x28u, 0x2Du, 0x2Eu })
+    {
+        CHECK (detail::isValidChord (chord (KeyChord::Ctrl | KeyChord::Alt, nav)));
+        CHECK (! detail::isValidChord (chord (KeyChord::None, nav)));
+        CHECK (! detail::isValidChord (chord (KeyChord::Shift, nav)));
+#if FLUB_HAVE_X11_HEADERS
+        CHECK (keysymForChord (nav) != 0);
+#endif
+    }
     CHECK (! detail::isValidChord (chord (KeyChord::Ctrl, kF1 + 24)));
     CHECK (! detail::isValidChord (chord (1u << 7, 'A')));
 
@@ -180,10 +199,15 @@ TEST_CASE ("Platform: malformed pactl output is reported, not crashed on")
 
 TEST_CASE ("Platform: unsupported Linux services report themselves as such")
 {
+    // Global hotkeys need an X11 display (and no Wayland session); headless
+    // runs must report them unsupported instead of failing.
     auto hotkeys = GlobalHotkeys::create();
     REQUIRE (hotkeys != nullptr);
-    CHECK (! hotkeys->isSupported());
-    CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl, 'G'), [] {}));
+    if (std::getenv ("DISPLAY") == nullptr || isWaylandSession())
+    {
+        CHECK (! hotkeys->isSupported());
+        CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl, 'G'), [] {}));
+    }
     hotkeys->unregisterAll();
 
     auto capture = ProcessLoopbackCapture::create();
@@ -239,5 +263,101 @@ TEST_CASE ("Platform: SystemTuning promote/revert restores the thread's policy")
     worker.join();
     CHECK (restored);
 }
+
+#if FLUB_HAVE_X11_HEADERS
+TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord another client holds, and release on unregister")
+{
+    // Needs an X server (CI runs the platform tests under Xvfb too) and
+    // libXtst to synthesise key events; skipped otherwise.
+    auto hotkeys = GlobalHotkeys::create();
+    if (! hotkeys->isSupported())
+    {
+        std::cerr << "    (no X11 display: skipped)\n";
+        return;
+    }
+    void* xtst = ::dlopen ("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (xtst == nullptr)
+    {
+        std::cerr << "    (libXtst not available: skipped)\n";
+        return;
+    }
+    using FakeKey = int (*) (Display*, unsigned int, Bool, unsigned long);
+    const auto fakeKey = reinterpret_cast<FakeKey> (::dlsym (xtst, "XTestFakeKeyEvent"));
+    REQUIRE (fakeKey != nullptr);
+    const X11Api* x = X11Api::get();
+    REQUIRE (x != nullptr);
+    Display* d = x->openDisplay (nullptr);
+    REQUIRE (d != nullptr);
+
+    std::atomic<int> fired { 0 };
+    const auto chordG = chord (KeyChord::Ctrl | KeyChord::Alt, 'G');
+    REQUIRE (hotkeys->registerHotkey (7, chordG, [&fired] { ++fired; }));
+
+    const auto key = [&] (KeySym sym, bool down) {
+        fakeKey (d, x->keysymToKeycode (d, sym), down ? True : False, 0);
+        x->flush (d);
+    };
+    const auto waitFor = [&fired] (int count) {
+        for (int i = 0; i < 200 && fired.load() < count; ++i)
+            std::this_thread::sleep_for (std::chrono::milliseconds (5));
+        return fired.load();
+    };
+    const auto press = [&] (int repeats) {
+        key (XK_Control_L, true);
+        key (XK_Alt_L, true);
+        for (int i = 0; i < repeats; ++i)
+            key (XK_g, true); // key repeat: presses without a release
+        key (XK_g, false);
+        key (XK_Alt_L, false);
+        key (XK_Control_L, false);
+    };
+
+    press (1);
+    CHECK (waitFor (1) == 1);
+    press (5); // held key: one action, not five
+    CHECK (waitFor (2) == 2);
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    CHECK (fired.load() == 2);
+
+    // Other modifiers do not fire.
+    key (XK_Control_L, true);
+    key (XK_g, true);
+    key (XK_g, false);
+    key (XK_Control_L, false);
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    CHECK (fired.load() == 2);
+
+    // Another client (a second service) cannot take the same chord ...
+    auto other = GlobalHotkeys::create();
+    REQUIRE (other->isSupported());
+    CHECK (! other->registerHotkey (1, chordG, [] {}));
+    // ... until it is released here.
+    hotkeys->unregisterHotkey (7);
+    CHECK (other->registerHotkey (1, chordG, [] {}));
+    other->unregisterAll();
+
+    // Navigation keys work too (the app's defaults are Ctrl+Alt+arrows).
+    std::atomic<int> arrow { 0 };
+    REQUIRE (hotkeys->registerHotkey (10, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [&arrow] { ++arrow; }));
+    key (XK_Control_L, true);
+    key (XK_Alt_L, true);
+    key (XK_Up, true);
+    key (XK_Up, false);
+    key (XK_Alt_L, false);
+    key (XK_Control_L, false);
+    for (int i = 0; i < 200 && arrow.load() < 1; ++i)
+        std::this_thread::sleep_for (std::chrono::milliseconds (5));
+    CHECK (arrow.load() == 1);
+    hotkeys->unregisterHotkey (10);
+
+    // Bare keys and unmappable key codes are refused.
+    CHECK (! hotkeys->registerHotkey (8, chord (KeyChord::None, 'G'), [] {}));
+    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Ctrl, 0x13), [] {}));
+    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Shift, 'G'), [] {}));
+
+    x->closeDisplay (d);
+    ::dlclose (xtst);
+}
+#endif
 
 #endif // __linux__

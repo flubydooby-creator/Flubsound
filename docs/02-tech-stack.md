@@ -105,7 +105,8 @@ Because `flub_core` is framework-free and allocation-free, an **"APO Lite" mode*
 - **Device I/O:** ALSA and JACK via JUCE. PipeWire serves both through its compatibility layers.
 - **Virtual endpoints:** PipeWire null sinks, "Flubsound Game/Music/Chat/System" (`platform/linux/flubsound-pipewire-setup.sh`).
 - **Per-app routing:** moving sink-inputs (`pactl move-sink-input`), or WirePlumber rules with `target.object`.
-- **Not yet:** global hotkeys (xdg-desktop-portal GlobalShortcuts / X11 `XGrabKey`) and RealtimeKit; the audio thread gets best-effort `SCHED_FIFO`.
+- **Global hotkeys:** X11 `XGrabKey` on the root window, with libX11 loaded at run time (`dlopen`, no link dependency). Wayland sessions report hotkeys unsupported.
+- **Not yet:** Wayland global hotkeys (xdg-desktop-portal GlobalShortcuts) and RealtimeKit; the audio thread gets best-effort `SCHED_FIFO`.
 - **Roadmap:** a native `pw_filter` node hosting `flub_core` directly inside the PipeWire graph for the lowest latency.
 
 ---

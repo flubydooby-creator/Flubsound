@@ -1743,7 +1743,7 @@ Everything acts on the **side** signal only, which is the mono-compatibility gua
 ```
 M  = (L + R) / 2,   S = (L − R) / 2
 S1 = min(w, 1) · HS_w(S)                              width: complementary 2nd-order high shelf at the low cut
-S2 = Bell(S1), 3 kHz, Q 0.5, +6 dB · focus             positional focus
+S2 = S1 + guard · (Bell(S1) − S1)                      positional focus: bell 3 kHz, Q 0.5, +6 dB · focus; guard ∈ [0, 1] keeps the far ear's polarity
 S3 = S2 + 0.5 · space · AP(z^−5ms · HP_300(M))         space: nested Schroeder all-passes 7.3 / 4.7 / 3.1 ms, g = 0.5
 S4 = S3 − 0.6 · crossfeed · LP1_700(S3)                crossfeed (first-order low-pass)
 L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting (to float rounding)
@@ -1756,7 +1756,7 @@ L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting
 | Stereo & Space | `spatial.on` | off / on | on | toggle | Slot enable (20 ms crossfade). |
 | Width | `spatial.width` | 0 … 2 | 1 | % (0–200 %) | ≤ 1: plain gain on S (0 = mono). > 1: S gains up to `20·log10(w)` dB above the low cut, 0 dB below it. 20 ms one-pole. |
 | Width Low Cut | `spatial.lowCut` | 60 … 500 | 180 | Hz | Shelf turnover: the low end never gets wider. 50 ms one-pole on ln(Hz). |
-| Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 6 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis). M is untouched. |
+| Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 6 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis). A polarity guard bounds the lift, so a hard-panned source stays hard-panned. M is untouched. |
 | Space | `spatial.space` | 0 … 1 | 0 | % | Adds decorrelated ambience from HP(M) into S (gain 0.5 · space). Cancels in mono. |
 | Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Low-shelf reduction of S (bs2b-like). **Forced to 0 in Gaming mode** and with binaural input. |
 | Mono Safety | `spatial.monoSafety` | off / on | on | toggle | Pulls widths > 1 back towards 1 while the output correlation is below the minimum. |
@@ -1792,8 +1792,9 @@ public:
     float getEffectiveWidth() const noexcept;
 private:
     static constexpr int kControlInterval = 32;
-    // ... shelf / focus / space-HP SVFs, 4 power-of-two delay lines (one shared write index),
-    //     OnePoleSmoothers, double-precision correlation accumulators, safety amount
+    // ... shelf / focus / space-HP SVFs, the focus guard's two band-pass SVFs and envelopes,
+    //     4 power-of-two delay lines (one shared write index), OnePoleSmoothers,
+    //     double-precision correlation accumulators, safety amount
 };
 ```
 
@@ -1832,7 +1833,15 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept
         // ---- positional focus ----
         if (focusDb.isSmoothing())
             designFocus (focusDb.next());
-        s = svfTick (focusCoeffs, focusState, s);
+        {
+            const float focused = svfTick (focusCoeffs, focusState, s);                              // [8]
+            envMid = std::max (std::abs (svfTick (focusDetectCoeffs, detectMidState, mid)), envRelease * envMid);
+            envSide = std::max (std::abs (svfTick (focusDetectCoeffs, detectSideState, s)), envRelease * envSide);
+            const float lift = envSide * (focusCentreGain - 1.0f);   // focusCentreGain = A^2 (3 kHz gain)
+            const float target = lift <= envMid - envSide ? 1.0f : std::max (0.0f, (envMid - envSide) / lift);
+            focusGuard = target < focusGuard ? target : target + guardRelease * (focusGuard - target);
+            s += focusGuard * (focused - s); // focus 0: focused == s, exact
+        }
 
         // ---- space ---- (the network always runs, so raising space never starts from an empty reverb)
         s += spaceGain.next() * ambience (mid);                                                     // [3]
@@ -1905,6 +1914,7 @@ void StereoSpatializer::controlTick() noexcept
 | Smoothers (per sample) | width, focus dB, space gain, crossfeed gain: 20 ms one-pole · ln(low cut): 50 ms one-pole |
 | Width shelf | Q = 1/√2 (k = √2), gain `max(w, 1)` above the cut |
 | Focus bell | 3 kHz, Q 0.5, max +6 dB |
+| Focus polarity guard | band-pass 3 kHz, Q 0.5 on M and S1; envelopes peak hold, 30 ms release; guard instant attack, 50 ms release |
 | Space | HP 300 Hz (Q 0.707), pre-delay 5 ms (240 samples at 48 kHz), nested all-passes 7.3 / 4.7 / 3.1 ms (350 / 226 / 149 samples at 48 kHz, g = 0.5), scale 0.5 |
 | Crossfeed | first-order LP at 700 Hz, scale 0.6 |
 | Mono safety | correlation one-pole 300 ms (double), attack 300 ms (saturating at an error of 0.1), release 3 s, off-release 300 ms, hysteresis `min(0.05, (1 − minCorrelation)/2)` |
@@ -1918,6 +1928,7 @@ void StereoSpatializer::controlTick() noexcept
 5. Correlation is measured on the **output**, in double precision, so the safety reacts to what the listener actually gets.
 6. State hygiene runs on the 32-sample tick in stream time, not once per block. A NaN is contained within one control interval, and the output is bit-identical for any block size, tails included.
 7. The mono safety pulls **only widening** back towards 1; a narrowed image is never widened. The width smoother also removes the 32-sample steps of the safety amount. During near-silence the pull is held, so a game's pauses do not pump the width between events.
+8. **The focus never flips the far ear.** Raising S by G against an untouched M turns `M − G·S` negative once `G·S > M`; for a hard-panned source (M = S) any lift would put an anti-phase copy in the silent ear. Band envelopes of M and S1 at the bell's own centre and Q bound the applied share of the bell's added signal to `clamp((e_M − e_S) / (e_S (G − 1)), 0, 1)`. A hard-panned source gets no lift (its far ear stays exactly silent), a partially panned one still gains ILD, a pure side signal is not lifted, and M is still never written (test *positional focus never flips the far ear - hard-panned sources stay hard-panned*; 03 §7.3.2).
 
 ---
 
@@ -2233,7 +2244,7 @@ mix: out peak -1.05 dBFS, deepest master limiter GR -3.38 dB
 | `TruePeakLimiter` | [`tests/test_limiter.cpp`](../tests/test_limiter.cpp) | *latencySamples() = lookahead + detector delay, and a quiet impulse arrives exactly that late* · *gain matches a brute-force model of the header (deque, box filter, attack bound)* · *after 20 s of dense limiting with a 1 s release the gain lands exactly on 0 dB* |
 | `ParametricEq` | [`tests/test_parametric_eq.cpp`](../tests/test_parametric_eq.cpp) | *measured sine gain matches responseDb() for every band type* · *gain glides are as smooth as an ideal per-sample glide (no zipper, no stale state)* · *abrupt type / slope / enable changes are crossfaded without clicks* · *glides converge to the exact target design at every sample rate* |
 | `BassEngine` | [`tests/test_bass_engine.cpp`](../tests/test_bass_engine.cpp) | *headroom protection withdraws the boost on loud low frequencies* · *harmonics character flips the 2nd / 3rd harmonic balance* · *the protection cap holds for every shelf frequency and tone* · *switching everything off lands on a bit-exact pass-through* |
-| `StereoSpatializer` | [`tests/test_spatializer.cpp`](../tests/test_spatializer.cpp) | *L'+R' == L+R for random stereo noise under random settings* · *width 1 with everything else neutral is a bit-exact pass-through* · *widening never mirrors a panned source around the low cut* · *NaN / inf inputs are contained within one control interval* |
+| `StereoSpatializer` | [`tests/test_spatializer.cpp`](../tests/test_spatializer.cpp) | *L'+R' == L+R for random stereo noise under random settings* · *width 1 with everything else neutral is a bit-exact pass-through* · *widening never mirrors a panned source around the low cut* · *positional focus never flips the far ear - hard-panned sources stay hard-panned* · *NaN / inf inputs are contained within one control interval* |
 
 **Roadmap items visible in these files** (not implemented today):
 - a linear-phase EQ mode for offline/batch mastering (`ParametricEq.h`);
