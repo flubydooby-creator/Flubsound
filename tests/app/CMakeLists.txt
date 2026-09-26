@@ -25,6 +25,10 @@ target_sources(flub_app_tests PRIVATE ${FLUB_APP_TEST_SOURCES} ${FLUB_APP_TEST_A
 get_target_property(FLUB_APP_TEST_DEFINITIONS FlubsoundPro COMPILE_DEFINITIONS)
 get_target_property(FLUB_APP_TEST_INCLUDES FlubsoundPro INCLUDE_DIRECTORIES)
 get_target_property(FLUB_APP_TEST_LIBRARIES FlubsoundPro LINK_LIBRARIES)
+# Not the app's Windows resource object library (FlubsoundPro_rc_lib): this
+# target gets its own from juce_add_console_app, and two VERSION resources
+# fail the link (CVT1100 duplicate resource).
+list(FILTER FLUB_APP_TEST_LIBRARIES EXCLUDE REGEX "_rc_lib$")
 
 # JUCE_MODAL_LOOPS_PERMITTED: the tests pump the message loop
 # (MessageManager::runDispatchLoopUntil) to receive AsyncUpdater callbacks.
