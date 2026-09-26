@@ -603,6 +603,54 @@ TEST_CASE ("ParametricEq: frequency glides in the log domain (~20 ms) without cl
     CHECK_LE (maxStep (y, t0, n), 1.1 * maxStep (y, n - 2400, n));
 }
 
+TEST_CASE ("ParametricEq: the frequency glide is exponential in log2 (Hz), not in Hz")
+{
+    // A narrow +12 dB bell glides 250 Hz -> 4 kHz. A probe tone at f is
+    // boosted most when the centre passes f. For a one-pole in log2 (Hz)
+    // with tau = 20 ms that is at t = -tau ln (1 - log2 (f / 250) / 4); a
+    // one-pole in Hz would pass it at t = -tau ln (1 - (f - 250) / 3750),
+    // 9 .. 15 ms earlier for these probes. The measured envelope peak lags
+    // the log-domain time by one control period plus the build-up of the
+    // Q = 4 resonance (~ Q / (pi f), 0.6 .. 1.3 ms), hence the window.
+    for (double fs : { 44100.0, 48000.0, 192000.0 })
+        for (double probe : { 1000.0, 2000.0 })
+        {
+            auto eq = makeEq (fs, 1);
+            eq->setBand (0, makeBand (EqBandType::Bell, 250.0f, 12.0f, 4.0f));
+            eq->reset();
+            const int block = 128;
+            const int t0 = static_cast<int> (fs * 0.2) / block * block;
+            const int n = t0 + static_cast<int> (fs * 0.15);
+            Planar buf (1, n);
+            load (buf, 0, sine (probe, fs, n, 0.1f));
+            for (int pos = 0; pos < n; pos += block)
+            {
+                if (pos == t0)
+                    eq->setBand (0, makeBand (EqBandType::Bell, 4000.0f, 12.0f, 4.0f));
+                eq->process (buf.block (pos, std::min (block, n - pos)));
+            }
+
+            // Envelope: peak |y| over one probe period, hopped by a quarter period.
+            const int win = static_cast<int> (std::lround (fs / probe));
+            double best = 0.0;
+            int bestAt = 0;
+            for (int s = t0; s + win < n; s += win / 4)
+            {
+                const double p = peakAbs (buf.ch[0].data() + s, win);
+                if (p > best)
+                {
+                    best = p;
+                    bestAt = s + win / 2;
+                }
+            }
+            const double tPeakMs = 1000.0 * (bestAt - t0) / fs;
+            const double tLogMs = -20.0 * std::log (1.0 - std::log2 (probe / 250.0) / 4.0);
+            CHECK_GE (tPeakMs, tLogMs - 0.5);
+            CHECK_LE (tPeakMs, tLogMs + 3.0);
+            CHECK_GE (toDb (best / 0.1), 9.0); // the resonance really swept through the probe
+        }
+}
+
 //==============================================================================
 TEST_CASE ("ParametricEq: getBand() round-trips clamped values; bad indices are safe")
 {
@@ -706,6 +754,32 @@ TEST_CASE ("ParametricEq: 20 kHz bands are stable and accurate at 44.1 kHz and 1
         CHECK (allFinite (buf));
         CHECK_LE (peakOf (buf), 1.0e3);
     }
+}
+
+TEST_CASE ("ParametricEq: low-frequency bands stay accurate at 96 kHz and 192 kHz")
+{
+    // A 20 Hz section at 192 kHz has g = tan (pi fc / fs) ~ 3e-4: the regime
+    // where direct-form biquads lose precision in float. The TPT SVF must
+    // still match the analytic response.
+    const EqBandParams bands[] = {
+        makeBand (EqBandType::Bell, 30.0f, 9.0f, 1.0f),
+        makeBand (EqBandType::Bell, 60.0f, -12.0f, 3.0f),
+        makeBand (EqBandType::LowShelf, 40.0f, 6.0f, 0.7071f),
+        makeBand (EqBandType::LowCut, 20.0f, 0.0f, 0.7071f, 48),
+        makeBand (EqBandType::HighCut, 25.0f, 0.0f, 0.7071f, 12),
+    };
+    for (double fs : { 96000.0, 192000.0 })
+        for (const auto& p : bands)
+        {
+            auto eq = makeEq (fs, 1);
+            eq->setBand (0, p);
+            for (double f : { 20.0, 30.0, 40.0, 60.0, 100.0, 400.0 }) // whole periods in the 0.5 s window
+            {
+                const double predicted = ParametricEq::responseDb (&p, 1, f, fs);
+                if (predicted > -60.0)
+                    CHECK_NEAR (measureGainDb (*eq, f, fs, 1), predicted, 0.1);
+            }
+        }
 }
 
 TEST_CASE ("ParametricEq: output gain is smoothed, clamped and NaN-safe")
