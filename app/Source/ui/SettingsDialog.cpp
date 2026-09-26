@@ -466,7 +466,7 @@ public:
         line (settingsLine, "Settings file", controller.getSettings().getFile().getFullPathName());
         line (presetsLine, "User presets", controller.getPresetManager().getUserPresetFolder().getFullPathName());
         g.setColour (Palette::faint.brighter (0.2f));
-        const auto* app = juce::JUCEApplicationBase::getInstance();
+        auto* app = juce::JUCEApplicationBase::getInstance();
         g.drawText ("Flubsound Pro " + (app != nullptr ? app->getApplicationVersion() : juce::String()) + "  -  Music & Gaming Edition", versionLine,
                     juce::Justification::centredLeft, true);
     }
