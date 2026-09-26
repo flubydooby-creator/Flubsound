@@ -14,6 +14,8 @@ set(FLUB_CLI_SOURCES
     Analysis.h
     CliOptions.cpp
     CliOptions.h
+    Commands.cpp
+    Commands.h
     FactoryPresets.cpp
     FactoryPresets.h
     OfflineRenderer.cpp

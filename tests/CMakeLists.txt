@@ -21,3 +21,20 @@ if(NOT MSVC)
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/test_driver_shared_c.c" PROPERTIES COMPILE_OPTIONS "-std=c89")
     target_compile_definitions(flub_tests PRIVATE FLUB_TEST_DRIVER_SHARED_C=1)
 endif()
+
+# tools/flubsound-cli is plain C++ on flub::core: test_offline_render.cpp runs
+# its offline renderer, `process` / `batch` glue and reports directly, so its
+# sources (all but main.cpp) are compiled into the tests. This does not depend
+# on FLUB_BUILD_TOOLS, so the sanitizer jobs cover it too.
+set(FLUB_CLI_DIR "${PROJECT_SOURCE_DIR}/tools/flubsound-cli")
+target_sources(flub_tests PRIVATE
+    "${FLUB_CLI_DIR}/Analysis.cpp"
+    "${FLUB_CLI_DIR}/CliOptions.cpp"
+    "${FLUB_CLI_DIR}/Commands.cpp"
+    "${FLUB_CLI_DIR}/FactoryPresets.cpp"
+    "${FLUB_CLI_DIR}/OfflineRenderer.cpp")
+target_include_directories(flub_tests PRIVATE "${FLUB_CLI_DIR}")
+target_compile_definitions(flub_tests PRIVATE FLUB_SOURCE_PRESET_DIR="${PROJECT_SOURCE_DIR}/presets/factory")
+if(WIN32)
+    target_link_libraries(flub_tests PRIVATE shell32) # Utf8Windows.h: CommandLineToArgvW
+endif()
