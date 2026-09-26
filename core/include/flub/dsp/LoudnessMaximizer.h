@@ -129,6 +129,7 @@ private:
     std::array<BandDetector, kNumBands> bands {};
     bool glueRunning = false;
     int glueWarmup = 0, glueWarmupLength = 1;
+    float antiDenormal = 0.0f;   // alternates 1e-20 / 0 on the splitter input
 
     TruePeakLimiter limiter;
 
