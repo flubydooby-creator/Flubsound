@@ -84,6 +84,11 @@ private:
     //  * Glue detector per band: linked |x| -> two-bucket peak hold (half a
     //    period of the band's lowest frequency) -> 5/80 ms branching follower
     //    -> ratio-2 gain sqrt(T / env) above T.
+    //  * The final limiter holds the sample ceiling exactly. Its true-peak
+    //    accuracy (<= +0.1 dB) needs the signal inside the 4x detector band
+    //    (~0.4 fs); very hard clipping (clip energy above about -12 dB)
+    //    creates intermodulation up to fs/2 and can then read up to ~+0.3 dB
+    //    on an ideal reconstruction.
 
     /** Linked level detector of one glue band. */
     struct BandDetector
@@ -99,7 +104,7 @@ private:
     void applyParamsImmediately() noexcept;
     void startGlue (bool immediate) noexcept;
     void startClipper (bool immediate) noexcept;
-    void updateCeiling (float ceilingDb) noexcept;
+    void updateCeiling (float newCeilingDb) noexcept;
     void updateClipThreshold() noexcept;
     void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain) noexcept;
 

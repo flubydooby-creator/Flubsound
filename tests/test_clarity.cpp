@@ -613,3 +613,129 @@ TEST_CASE ("Clarity: output is independent of the host block size")
     for (int bs : { 1, 7, 64 })
         CHECK_LE (maxAbsDiff (run (bs), ref), 1.0e-6);
 }
+
+// ---- adversarial review tests ----
+
+TEST_CASE ("Clarity (review): after loud material the output decays to exact silence without a reset")
+{
+    for (int channels : { 1, 2, 6 })
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce, kFs, channels);
+        ClarityParams p = allOn();
+        p.attackDb = 12.0f;
+        p.sustainDb = 12.0f;
+        p.air = 1.0f;
+        ce.setParams (p);
+        ce.reset();
+        const int loud = ms (500), n = loud + ms (3000);
+        Planar buf (channels, n);
+        for (int c = 0; c < channels; ++c)
+            setChannel (buf, c, whiteNoise (loud, 0.8f, static_cast<uint32_t> (c + 9)));
+        processInBlocks (ce, buf, 256);
+        for (const auto& c : buf.ch)
+            CHECK (peakAbs (c.data() + n - ms (500), ms (500)) == 0.0);
+    }
+}
+
+TEST_CASE ("Clarity (review): every block size gives bit-identical output")
+{
+    const int n = 4096 * 5;
+    Planar input (2, n);
+    {
+        const auto noise = gatedNoise (n, 0.4f, 25.0, 90.0, 4);
+        const auto mud = sine (240.0, kFs, n, 0.5f);
+        const auto hiss = whiteNoise (n, 0.01f, 5);
+        for (int i = 0; i < n; ++i)
+        {
+            const size_t k = static_cast<size_t> (i);
+            input.ch[0][k] = noise[k] + mud[k] + hiss[k];
+            input.ch[1][k] = 0.2f * noise[k] - mud[k];
+        }
+    }
+    auto run = [&] (int blockSize)
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce, kFs, 2, 4096);
+        auto p = allOn();
+        ce.setParams (p);
+        ce.reset();
+        Planar buf = clone (input);
+        for (int pos = 0; pos < n; pos += blockSize)
+        {
+            if (pos == 12288) // common boundary of every size below
+            {
+                p.presence = 0.0f;
+                p.air = 1.0f;
+                p.sustainDb = 12.0f;
+                p.presenceFrequency = 1200.0f;
+                ce.setParams (p);
+            }
+            ce.process (buf.block (pos, std::min (blockSize, n - pos)));
+        }
+        return buf;
+    };
+    const auto ref = run (4096);
+    for (int bs : { 1, 3, 12, 16, 48, 256, 1024 }) // all divide 12288
+        CHECK (maxAbsDiff (run (bs), ref) == 0.0);
+}
+
+TEST_CASE ("Clarity (review): steady tones through shaper, de-mud and presence stay free of modulation products")
+{
+    for (double fs : { 44100.0, 192000.0 })
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce, fs);
+        ClarityParams p;
+        p.attackDb = 12.0f;
+        p.sustainDb = -12.0f;
+        p.presence = 1.0f;
+        p.deMud = 1.0f;
+        ce.setParams (p);
+        ce.reset();
+        const int n = static_cast<int> (fs * 2.0);
+        auto x = sine (250.0, fs, n, 0.3f);
+        const auto y = sine (1000.0, fs, n, 0.05f);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] += y[i];
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        processInBlocks (ce, buf, 256);
+        const int from = static_cast<int> (fs), len = static_cast<int> (fs);
+        const double a = toneAmplitude (buf.ch[0].data() + from, len, 250.0, fs);
+        CHECK_NEAR (toDb (a / 0.3), -4.0, 0.3); // the de-mud cut is there
+        for (double f : { 500.0, 750.0, 1250.0, 1500.0, 2000.0 })
+            CHECK_LE (toDb (toneAmplitude (buf.ch[0].data() + from, len, f, fs) / a), -90.0);
+    }
+}
+
+TEST_CASE ("Clarity (review): presence and de-mud behave the same at every sample rate")
+{
+    const float quiet = dbfs (-50.0), loud = dbfs (-12.0);
+    for (double fs : { 44100.0, 96000.0, 192000.0 })
+    {
+        const int settle = static_cast<int> (fs * 0.8), measure = static_cast<int> (fs * 0.4);
+        ClarityEnhancer ce;
+        prepareClarity (ce, fs);
+        ClarityParams p;
+        p.presence = 1.0f;
+        ce.setParams (p);
+        Planar buf (2, settle + measure);
+        setChannel (buf, 0, sine (3200.0, fs, settle + measure, quiet));
+        setChannel (buf, 1, sine (3200.0, fs, settle + measure, quiet));
+        ce.reset();
+        processInBlocks (ce, buf, 256);
+        CHECK_NEAR (toDb (toneAmplitude (buf.ch[0].data() + settle, measure, 3200.0, fs) / quiet), 6.0, 0.5);
+
+        p = ClarityParams {};
+        p.deMud = 1.0f;
+        ce.setParams (p);
+        Planar mud (2, settle + measure);
+        setChannel (mud, 0, sine (250.0, fs, settle + measure, loud));
+        setChannel (mud, 1, sine (250.0, fs, settle + measure, loud));
+        ce.reset();
+        processInBlocks (ce, mud, 256);
+        CHECK_NEAR (toDb (toneAmplitude (mud.ch[0].data() + settle, measure, 250.0, fs) / loud), -4.0, 0.5);
+    }
+}

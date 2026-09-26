@@ -2,6 +2,10 @@
 //
 // Guarantee: the output never exceeds the ceiling in sample peak, and stays
 // within ~0.1 dB of it in true (inter-sample) peak, with no gain overshoot.
+// (True-peak scope: content inside the 4x detector's band, flat to ~0.4 fs -
+// i.e. any ADC-recorded programme. Strong synthetic content between 0.4 fs
+// and fs/2, e.g. raw digital white noise, is under-read by any short 4x
+// interpolator; the sample-peak guarantee still holds exactly.)
 //
 // Algorithm (per sample n, all channels linked):
 //   p[n]   = max over channels of the 4x TruePeakDetector interpolator (with

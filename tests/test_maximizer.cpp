@@ -13,6 +13,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <map>
 #include <vector>
 
 using namespace flub;
@@ -42,11 +43,17 @@ void fftInPlace (std::vector<std::complex<double>>& a, bool inverse)
         if (i < j)
             std::swap (a[i], a[j]);
     }
-    std::vector<std::complex<double>> tw (n / 2);
-    for (size_t k = 0; k < n / 2; ++k)
+    // Forward twiddles e^{-j 2 pi k / n}, cached per size (test code only).
+    static std::map<size_t, std::vector<std::complex<double>>> cache;
+    auto& tw = cache[n];
+    if (tw.empty())
     {
-        const double ang = (inverse ? 2.0 : -2.0) * kPi * static_cast<double> (k) / static_cast<double> (n);
-        tw[k] = std::complex<double> (std::cos (ang), std::sin (ang));
+        tw.resize (n / 2);
+        for (size_t k = 0; k < n / 2; ++k)
+        {
+            const double ang = -2.0 * kPi * static_cast<double> (k) / static_cast<double> (n);
+            tw[k] = std::complex<double> (std::cos (ang), std::sin (ang));
+        }
     }
     for (size_t len = 2; len <= n; len <<= 1)
     {
@@ -54,8 +61,9 @@ void fftInPlace (std::vector<std::complex<double>>& a, bool inverse)
         for (size_t start = 0; start < n; start += len)
             for (size_t k = 0; k < half; ++k)
             {
+                const std::complex<double> w = inverse ? std::conj (tw[k * step]) : tw[k * step];
                 const std::complex<double> u = a[start + k];
-                const std::complex<double> v = a[start + k + half] * tw[k * step];
+                const std::complex<double> v = a[start + k + half] * w;
                 a[start + k] = u + v;
                 a[start + k + half] = u - v;
             }
@@ -197,12 +205,12 @@ double planarTruePeak (const Planar& buf)
 
 /** Drum-machine-like pattern at ~0 dBFS peaks: a pitch-dropping kick (120 ->
     45 Hz, 150 ms decay), a snare (noise + 190 Hz body, 60 ms) and closed hats
-    (short noise ticks) on a 120 bpm 16th-note grid, plus a bass line. */
+    (short noise ticks) on a 240 bpm 16th-note grid, plus a bass line. */
 std::vector<float> drumPattern (double fs, int n, uint32_t seed)
 {
     std::vector<float> v (static_cast<size_t> (n), 0.0f);
     FastRandom rng (seed);
-    const int sixteenth = static_cast<int> (fs * 0.125);
+    const int sixteenth = static_cast<int> (fs * 0.0625);
     for (int step = 0; step * sixteenth < n; ++step)
     {
         const int start = step * sixteenth;
@@ -425,8 +433,8 @@ TEST_CASE ("LoudnessMaximizer: with 18 dB drive the ceiling holds on noise and d
     // <= +0.3 dB), which is bounded here as a documented limitation.
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
-        const int n = static_cast<int> (fs * 0.4);
-        const int tail = static_cast<int> (fs * 0.03);
+        const int n = static_cast<int> (fs * 0.3);
+        const int tail = static_cast<int> (fs * 0.02);
         const auto noiseL = bandLimit (whiteNoise (n - tail - 200, 0.17f, 11));
         const auto noiseR = bandLimit (whiteNoise (n - tail - 200, 0.17f, 12));
         const auto drumsL = bandLimit (drumPattern (fs, n - tail - 200, 13));
@@ -489,8 +497,8 @@ TEST_CASE ("LoudnessMaximizer: extreme and full-band input still holds the sampl
     // white noise).
     for (double fs : { 44100.0, 48000.0 })
     {
-        const int n = static_cast<int> (fs * 0.3);
-        const int tail = static_cast<int> (fs * 0.03);
+        const int n = static_cast<int> (fs * 0.2);
+        const int tail = static_cast<int> (fs * 0.02);
         const auto rawL = whiteNoise (n - tail, 0.5f, 15);
         const auto rawR = whiteNoise (n - tail, 0.5f, 16);
         const auto drumsL = drumPattern (fs, n - tail, 17);

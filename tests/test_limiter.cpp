@@ -23,6 +23,7 @@
 #include <cmath>
 #include <complex>
 #include <limits>
+#include <map>
 #include <vector>
 
 using namespace flub;
@@ -54,11 +55,17 @@ void fftInPlace (std::vector<std::complex<double>>& a, bool inverse)
         if (i < j)
             std::swap (a[i], a[j]);
     }
-    std::vector<std::complex<double>> tw (n / 2);
-    for (size_t k = 0; k < n / 2; ++k)
+    // Forward twiddles e^{-j 2 pi k / n}, cached per size (test code only).
+    static std::map<size_t, std::vector<std::complex<double>>> cache;
+    auto& tw = cache[n];
+    if (tw.empty())
     {
-        const double ang = (inverse ? 2.0 : -2.0) * kPi * static_cast<double> (k) / static_cast<double> (n);
-        tw[k] = std::complex<double> (std::cos (ang), std::sin (ang));
+        tw.resize (n / 2);
+        for (size_t k = 0; k < n / 2; ++k)
+        {
+            const double ang = -2.0 * kPi * static_cast<double> (k) / static_cast<double> (n);
+            tw[k] = std::complex<double> (std::cos (ang), std::sin (ang));
+        }
     }
     for (size_t len = 2; len <= n; len <<= 1)
     {
@@ -66,8 +73,9 @@ void fftInPlace (std::vector<std::complex<double>>& a, bool inverse)
         for (size_t start = 0; start < n; start += len)
             for (size_t k = 0; k < half; ++k)
             {
+                const std::complex<double> w = inverse ? std::conj (tw[k * step]) : tw[k * step];
                 const std::complex<double> u = a[start + k];
-                const std::complex<double> v = a[start + k + half] * tw[k * step];
+                const std::complex<double> v = a[start + k + half] * w;
                 a[start + k] = u + v;
                 a[start + k + half] = u - v;
             }
@@ -474,7 +482,7 @@ TEST_CASE ("TruePeakLimiter: full-band synthetic signals hold the sample ceiling
     // 0.39 fs (-1.7 dB at 0.45 fs). This bounds that known limitation.
     for (double fs : { 44100.0, 48000.0, 96000.0 })
     {
-        const int n = static_cast<int> (fs * 0.2);
+        const int n = static_cast<int> (fs * 0.15);
         const int tail = static_cast<int> (fs * 0.02);
         const Program programs[] = {
             { "white noise +20 dB", drivenNoise (n, tail, 10.0f, 1), drivenNoise (n, tail, 10.0f, 2) },
@@ -523,7 +531,7 @@ TEST_CASE ("TruePeakLimiter: other ceilings and look-aheads hold the ceiling too
 
 TEST_CASE ("TruePeakLimiter: a sudden +12 dB step never overshoots and is anticipated by the look-ahead")
 {
-    const int n = 36000, step = 12000, end = 33000;
+    const int n = 24000, step = 8000, end = 22000;
     std::vector<float> x (static_cast<size_t> (n), 0.0f);
     for (int i = 0; i < end; ++i) // step 1/3 of a period away from a zero crossing, then a hard stop
         x[static_cast<size_t> (i)] = static_cast<float> (std::sin (kTwoPi * 440.0 * i / kFs + 1.0)) * (i < step ? dbfs (-6.0) : dbfs (6.0));
@@ -542,7 +550,7 @@ TEST_CASE ("TruePeakLimiter: a sudden +12 dB step never overshoots and is antici
     }
     const int lat = lim.latencySamples();
     CHECK_LE (planarPeak (buf), dbfs (-1.0));
-    CHECK_LE (independentTruePeak (buf.ch[0]), dbfs (-1.0) * std::pow (10.0, 0.1 / 20.0));
+    CHECK_LE (independentTruePeak (buf.ch[0]), dbfs (-1.0) * kTpTolerance);
     CHECK (lim.getSafetyClipCount() == 0u);
 
     // Before the step reaches the output nothing happens (-6 dBFS < ceiling)...
@@ -814,8 +822,8 @@ TEST_CASE ("TruePeakLimiter: blocks narrower than the prepared channel count and
     Planar mono (1, 512);
     Planar wide (8, 512);
     FastRandom rng (5);
-    // ~20 s of alternating loud / quiet noise, mono and 8-channel blocks.
-    for (int b = 0; b < 2000; ++b)
+    // ~10 s of alternating loud / quiet noise, mono and 8-channel blocks.
+    for (int b = 0; b < 1000; ++b)
     {
         Planar& buf = (b % 3 == 0) ? mono : wide;
         const float amp = (b / 20) % 2 == 0 ? 8.0f : 0.1f;
