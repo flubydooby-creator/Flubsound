@@ -1161,12 +1161,12 @@ TEST_CASE ("KnownGap closed: governed macros at 64..4096-sample blocks - Boost 1
     // tick with dt = block length and a new scale only at the next host
     // block) this stimulus spread 0.29 LU on the CLI (-10.86 at 128 to
     // -11.15 LUFS at 4096 samples).
-    const auto input = kickProgramme (12.0);
+    const auto input = kickProgramme (20.0);
     RenderOptions o = boosted (ModeValue::Music, 100.0f);
     o.macros.push_back ({ "loudness", 100.0f });
     const auto values = resolve (o);
     double lo = 1.0e9, hi = -1.0e9;
-    for (const int block : { 64, 256, 512, 1024, 4096 })
+    for (const int block : { 64, 256, 512, 1024, 2048, 4096 })
     {
         Channels out;
         int latency = 0;
