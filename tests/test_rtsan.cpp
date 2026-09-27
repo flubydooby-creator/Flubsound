@@ -93,6 +93,7 @@ static_assert (hasNonblockingReset<SpectralNoiseGate>);
 static_assert (hasNonblockingReset<StereoSpatializer>);
 static_assert (hasNonblockingReset<TruePeakLimiter>);
 static_assert (hasNonblockingReset<TransientShaper>);
+static_assert (hasNonblockingReset<AsyncModelProcessor>);
 
 // Parameter setters called once per block by ProcessingChain::applyParameters
 // (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the

@@ -111,7 +111,7 @@ Offline rendering uses exactly the same `ProcessingChain` as real-time processin
 ## Repository layout
 
 ```
-core/        flub_core — primitives, DSP modules, analysis, engine, presets & file I/O (no JUCE)
+core/        flub_core — primitives, DSP modules, analysis, engine, neural-model framework, presets & file I/O (no JUCE)
 tests/       zero-dependency unit tests (allocation-free proofs, response/latency/ceiling properties)
 app/         JUCE desktop app — engine host, GUI, tray, hotkeys, platform services
 plugin/      VST3 / AU / Standalone wrapper around the same ProcessingChain

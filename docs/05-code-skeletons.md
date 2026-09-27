@@ -157,6 +157,7 @@ class ScopedNoDenormals              // RAII: FTZ | DAZ (SSE MXCSR 0x8040) or FZ
 6. `AudioBlock` is a small value type (8 pointers + 2 ints). Passing it by `const&` or copying it is cheap.
 7. `applyGainRamp()` is how every block-rate gain (input/output gain, AutoLevel, strip gain) becomes a per-sample ramp: no steps at block boundaries.
 8. `snapIfSettled()` fixes a real float trap found in review: a one-pole with a slow coefficient stops moving tens of ulps short of a non-zero target, so a band would stay "busy" forever. `ParametricEq` adds its own `stepSmoother()` guard for the same reason (§7).
+9. Work that cannot be bounded, such as neural inference, keeps the contract by leaving the audio thread: `flub::AsyncModelProcessor` (`core/include/flub/neural/`) is an ordinary `Processor` whose `process()` only moves fixed-size frames through two wait-free queues to one worker thread that runs a `ModelRunner`, and applies the returned control frame to the input delayed by a constant `frameSize × (1 + safetyFrames)` (a late or failed frame keeps the last good controls, then ramps to neutral). It is not in `ProcessingChain` yet (`09-future-roadmap.md` §1.1).
 
 ---
 

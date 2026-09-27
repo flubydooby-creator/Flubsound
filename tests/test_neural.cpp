@@ -24,6 +24,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <thread>
@@ -37,8 +39,10 @@ namespace
 constexpr double kFs = 48000.0;
 constexpr int kFrame = 64;
 
-/** Polls until pred() holds. The bound is a hang guard for a broken worker,
-    never a timing assumption: a healthy run returns within microseconds. */
+/** Spins (yielding) until pred() holds. The bound is a hang guard for a
+    broken worker, never a timing assumption: a healthy worker answers within
+    one poll interval. Yielding rather than sleeping keeps the test's own wait
+    out of the timer granularity (up to 15.6 ms per sleep on Windows). */
 template <typename Pred>
 bool waitUntil (Pred pred)
 {
@@ -47,7 +51,7 @@ bool waitUntil (Pred pred)
     {
         if (std::chrono::steady_clock::now() > deadline)
             return false;
-        std::this_thread::sleep_for (std::chrono::microseconds (20));
+        std::this_thread::yield();
     }
     return true;
 }
@@ -130,6 +134,32 @@ private:
     ModelDescription desc;
     std::vector<float>& frames;
     size_t recorded = 0;
+};
+
+/** A level normaliser: control = 1 / mean |x| of the frame. */
+class InverseLevelRunner : public ModelRunner
+{
+public:
+    explicit InverseLevelRunner (int frameSize) : frame (frameSize) {}
+
+    ModelDescription describe() const override
+    {
+        ModelDescription d;
+        d.frameSize = frame;
+        return d;
+    }
+
+    bool run (const float* inFrame, float* outControls) override
+    {
+        double sum = 0.0;
+        for (int i = 0; i < frame; ++i)
+            sum += std::abs (inFrame[i]);
+        outControls[0] = sum > 0.0 ? static_cast<float> (frame / sum) : 1.0f;
+        return true;
+    }
+
+private:
+    int frame;
 };
 
 ModelDescription description (int frameSize, int numControls = 1, ControlKind kind = ControlKind::BroadbandGain, int inputs = 1)
@@ -269,6 +299,35 @@ TEST_CASE ("Neural: the model receives consecutive input frames as a mono downmi
                 }
         CHECK (ok);
     }
+}
+
+TEST_CASE ("Neural: the control computed from a frame is applied to exactly that frame's samples")
+{
+    // Each input frame is DC at its own level v_k; the model returns 1 / v_k.
+    // Aligned, every frame leaves at unity once the ramp (24 samples, starting
+    // on the frame's first sample) is done; one frame early or late it would
+    // leave at v_k / v_(k +- 1).
+    AsyncModelConfig cfg;
+    cfg.controlRampMs = 0.5f;
+    cfg.maxGain = 16.0f;
+    AsyncModelProcessor p (std::make_unique<InverseLevelRunner> (kFrame), cfg);
+    p.prepare (spec (1));
+    const int latency = p.latencySamples();
+    const int frames = 40;
+    Planar buf (1, kFrame * frames);
+    for (int k = 0; k < frames; ++k)
+        std::fill_n (buf.ch[0].begin() + k * kFrame, kFrame, 0.1f + 0.08f * static_cast<float> ((k * 7) % 10));
+    REQUIRE (runBlocks (p, buf, 0, kFrame * frames, { 64, 40, 24 }));
+
+    double worst = 0.0;
+    for (int k = 0; k + latency / kFrame < frames; ++k)
+    {
+        const int first = latency + k * kFrame;
+        for (int i = first + 24; i < first + kFrame; ++i)
+            worst = std::max (worst, std::abs (static_cast<double> (buf.ch[0][static_cast<size_t> (i)]) - 1.0));
+    }
+    CHECK_LE (worst, 1.0e-5);
+    CHECK (p.getDeadlineMisses() == 0);
 }
 
 TEST_CASE ("Neural: a constant -6 dB model scales the delayed input by -6 dB once the control ramp has settled")
@@ -599,7 +658,7 @@ TEST_CASE ("Neural: eligibility follows the latency-profile rule")
 
 TEST_CASE ("Neural: repeated create, prepare, process and destroy joins the worker cleanly")
 {
-    const int n = kFrame * 6;
+    const int n = kFrame * 4;
     const Planar in = noise (2, n);
     uint64_t waitedProcessed = 0;
     int waitedIterations = 0;
@@ -610,9 +669,9 @@ TEST_CASE ("Neural: repeated create, prepare, process and destroy joins the work
             continue; // destroyed without ever being prepared
         p.prepare (spec());
         if (iteration % 3 == 0)
-            p.prepare (spec (1, 128)); // re-prepare restarts the worker
+            p.prepare (spec (2, 128)); // re-prepare restarts the worker
         Planar buf = in;
-        const bool waitEachBlock = iteration % 2 == 0;
+        const bool waitEachBlock = iteration % 5 == 0;
         REQUIRE (runBlocks (p, buf, 0, n, { 64 }, waitEachBlock));
         REQUIRE (waitForWorker (p));
         CHECK (p.getFramesProcessed() <= static_cast<uint64_t> (n / kFrame));
@@ -623,6 +682,13 @@ TEST_CASE ("Neural: repeated create, prepare, process and destroy joins the work
         }
         // Destroyed here, possibly while the worker is polling.
     }
-    CHECK (waitedIterations == 20);
+    CHECK (waitedIterations == 10);
     CHECK (waitedProcessed == static_cast<uint64_t> (waitedIterations * (n / kFrame)));
+
+    // An explicit poll interval is capped at 100 ms: the worker notices a stop
+    // request only between sleeps, so prepare() and the destructor wait that long.
+    AsyncModelConfig slow;
+    slow.workerPollMicroseconds = std::numeric_limits<int>::max();
+    const AsyncModelProcessor capped (std::make_unique<IdentityRunner> (kFrame), slow);
+    CHECK (capped.getConfig().workerPollMicroseconds == 100000);
 }

@@ -352,7 +352,7 @@ The app's latency readout includes the capture FIFO target of a running process-
 | New mode policy | Extend `configureModeBands()` / the policy block in `ProcessingChain::applyParameters()`. |
 | New host | Any code that can call `ProcessingChain::process()` with float buffers: app, plug-in, CLI, tests, future APO or PipeWire node. |
 | New OS | Implement `app/Source/platform/PlatformServices.h` for that OS. |
-| Neural module | An asynchronous processor with a fixed-latency contract (see `09-future-roadmap.md` §1.1). |
+| Neural module | Implement `flub::ModelRunner` (`core/include/flub/neural/ModelRunner.h`: frame size, input channels, a control frame of gains) and wrap it in `flub::AsyncModelProcessor`, which runs it on a worker thread behind a fixed latency of `frameSize × (1 + safetyFrames)` and falls back to the last good control, then to neutral, on a deadline miss or model failure; `isEligible()` (`neural/Eligibility.h`) says which latency profiles may run it. Putting it into `ProcessingChain` is still a code change (a new slot, as for any module), and there is no inference runtime or model yet (see `09-future-roadmap.md` §1.1). |
 
 ---
 

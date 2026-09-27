@@ -18,6 +18,10 @@ constexpr double kAutoPollFraction = 0.125;
 constexpr int kMinAutoPollMicroseconds = 100;
 constexpr int kMaxAutoPollMicroseconds = 1000;
 
+// Explicit poll intervals are capped: the worker only notices a stop request
+// between sleeps, so prepare() and the destructor wait up to one interval.
+constexpr int kMaxPollMicroseconds = 100000;
+
 // Frames that can be in flight between the audio thread and the worker: the
 // safety frames, the frames one host block can complete, and a little slack
 // so a worker that is merely late never finds the result queue full.
@@ -40,7 +44,7 @@ AsyncModelProcessor::AsyncModelProcessor (std::unique_ptr<ModelRunner> r, const 
     config.fallbackAfterFrames = std::max (1, config.fallbackAfterFrames);
     config.controlRampMs = std::isfinite (config.controlRampMs) ? std::max (0.0f, config.controlRampMs) : 0.0f;
     config.maxGain = std::isfinite (config.maxGain) ? std::max (0.0f, config.maxGain) : 1.0f;
-    config.workerPollMicroseconds = std::max (0, config.workerPollMicroseconds);
+    config.workerPollMicroseconds = std::clamp (config.workerPollMicroseconds, 0, kMaxPollMicroseconds);
 
     if (runner != nullptr)
     {
@@ -100,13 +104,14 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
     firstUsefulSeq.store (0, std::memory_order_relaxed);
     resetAudioState();
 
-    modelActive = desc.sampleRate == 0.0 || desc.sampleRate == s.sampleRate;
-    prepared = true;
-    if (modelActive)
+    const bool rateMatches = desc.sampleRate == 0.0 || desc.sampleRate == s.sampleRate;
+    if (rateMatches)
     {
-        runner->prepare (s.sampleRate);
-        startWorker();
+        runner->prepare (s.sampleRate); // may throw: the processor then stays unprepared
+        startWorker();                  // so may std::thread (std::system_error), with the same result
     }
+    modelActive = rateMatches;
+    prepared = true;
 }
 
 void AsyncModelProcessor::resetAudioState() noexcept
@@ -122,7 +127,7 @@ void AsyncModelProcessor::resetAudioState() noexcept
         sm.setImmediate (1.0f);
 }
 
-void AsyncModelProcessor::reset() noexcept
+void AsyncModelProcessor::reset() noexcept FLUB_NONBLOCKING
 {
     if (! prepared)
         return;

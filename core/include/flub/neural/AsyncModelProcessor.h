@@ -79,7 +79,7 @@ struct AsyncModelConfig
     int fallbackAfterFrames = 4;      // K >= 1: consecutive missed / failed frames before the ramp to neutral
     float controlRampMs = 5.0f;       // every control change is a linear ramp this long (>= 1 sample)
     float maxGain = 4.0f;             // controls are clamped to [0, maxGain] (+12 dB by default)
-    int workerPollMicroseconds = 0;   // 0 = auto (frame period / 8, 100 .. 1000 us)
+    int workerPollMicroseconds = 0;   // 0 = auto (frame period / 8, 100 .. 1000 us); at most 100 000 us
 };
 
 class AsyncModelProcessor final : public Processor
@@ -94,7 +94,7 @@ public:
     AsyncModelProcessor& operator= (const AsyncModelProcessor&) = delete;
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override { return latency; }
     const char* name() const noexcept override { return "Neural"; }

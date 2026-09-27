@@ -45,6 +45,7 @@ private:
     EngineController& controller;
     Callbacks callbacks;
     bool iconShowsEnabled = false, iconValid = false;
+    bool overloadNotified = false; // bubble shown for the current overload
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrayIcon)
 };

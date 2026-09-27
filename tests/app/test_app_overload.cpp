@@ -29,7 +29,6 @@
 #include <array>
 #include <atomic>
 #include <cmath>
-#include <cstdlib>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -225,13 +224,18 @@ EngineStatus runningStatus (double load, int xruns, int glitches)
     return st;
 }
 
+juce::String snapshotDir()
+{
+    return juce::SystemStats::getEnvironmentVariable ("FLUB_APP_TEST_SNAPSHOT_DIR", {});
+}
+
 /** Writes `component` to $FLUB_APP_TEST_SNAPSHOT_DIR/<name>.png if that is set. */
 void snapshotIfRequested (juce::Component& component, const char* name)
 {
-    const auto* dir = std::getenv ("FLUB_APP_TEST_SNAPSHOT_DIR");
-    if (dir == nullptr || *dir == 0)
+    const auto dir = snapshotDir();
+    if (dir.isEmpty())
         return;
-    const auto file = juce::File (juce::String::fromUTF8 (dir)).getChildFile (juce::String (name) + ".png");
+    const auto file = juce::File::getCurrentWorkingDirectory().getChildFile (dir).getChildFile (juce::String (name) + ".png");
     file.getParentDirectory().createDirectory();
     file.deleteFile();
     const auto image = component.createComponentSnapshot (component.getLocalBounds(), true, 1.0f);
@@ -244,7 +248,7 @@ void snapshotIfRequested (juce::Component& component, const char* name)
 /** Renders the header and Settings > Processing (only with FLUB_APP_TEST_SNAPSHOT_DIR). */
 void snapshotUi (EngineController& controller, const char* prefix)
 {
-    if (std::getenv ("FLUB_APP_TEST_SNAPSHOT_DIR") == nullptr)
+    if (snapshotDir().isEmpty())
         return;
     ui::FlubLookAndFeel lnf;
     juce::LookAndFeel::setDefaultLookAndFeel (&lnf);

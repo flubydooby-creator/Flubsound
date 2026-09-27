@@ -62,6 +62,19 @@ void TrayIcon::engineControllerChanged (EngineController::Change change)
 {
     if (change == EngineController::Change::MasterEnable)
         updateIcon();
+
+    // One bubble when a CPU overload starts (the watchdog broadcasts
+    // Change::Device on both edges); the header readout shows it until it ends.
+    if (change == EngineController::Change::Device)
+    {
+        const auto& overload = controller.getOverloadState();
+        if (overload.overloaded && ! overloadNotified)
+            notify ("Flubsound Pro - audio overload",
+                    "The audio engine is running out of time (peak " + juce::String (juce::roundToInt (overload.peakLoad * 100.0)) + " % CPU"
+                        + (overload.episodeGlitches > 0 ? ", " + juce::String (static_cast<juce::int64> (overload.episodeGlitches)) + " dropouts" : juce::String())
+                        + "). Try the Low Latency profile or a larger buffer.");
+        overloadNotified = overload.overloaded;
+    }
 }
 
 void TrayIcon::notify (const juce::String& title, const juce::String& message)
