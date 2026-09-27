@@ -116,6 +116,8 @@ These are per-strip chain figures. The desktop app adds 1.4 ms for its master li
 {
   "format": "flubsound-preset",
   "version": 2,
+  "uuid": "0b7a4c1e-9d52-4f0e-8a31-5c2d7e6f9a10",
+  "contentHash": "3f1d0c9e7a52b684",
   "name": "My FPS Tweak",
   "category": "Gaming",
   "author": "Me",
@@ -139,9 +141,12 @@ These are per-strip chain figures. The desktop app adds 1.4 ms for its master li
   * Choices are written as their **label**, for example `"Gaming"`, `"Low Shelf"` or `"12 dB/oct"`.
   * Toggles are `true` / `false`.
   * Percentages are stored as 0–1.
-  * Out-of-range numbers are clamped when loaded.
+  * Out-of-range numbers are clamped when loaded, with a warning.
 * **Keep files minimal:** store only values that differ from the defaults. Missing keys load as defaults, and unknown keys are ignored, so presets stay compatible in both directions between versions.
-* **Schema version:** Flubsound writes `"version": 2` and loads versions 1 and 2. A missing key means the default *of the file's version*: version 1 (and a file without `"version"`) was written sparse against the version-1 defaults, so its missing keys load those, and a default changed later never re-voices it. The only difference so far is `virt.lfe`: 0 dB in version 1, +6 dB in version 2. The factory presets are still version 1 (see the checks below), so they keep 0 dB unless they set `virt.lfe`.
+* **Warnings:** everything the reader ignores or changes is reported, one sentence each: unknown keys with the closest known key (`unknown parameter "bost" ignored (did you mean "boost"?)`), clamped values, unknown choice labels, values of the wrong type, an invalid `uuid` and a newer schema minor. `flubsound-cli` prints them as `warning: preset: ...` on stderr (also with `--quiet`) and lists them in `--json` `render.notes`; the plug-in's *Import* shows them.
+* **Schema version** (`major.minor`, written as a number such as `2` or `2.1`, also read from a string): Flubsound writes `"version": 2` and reads every major up to 2. A newer *minor* of a known major loads, with a warning (a minor only adds optional fields and keys). A newer *major* is refused with a message ("saved by a newer Flubsound version"); the file is never changed. An older major is migrated in memory, one registry step per major (`preset::migrations()` in `core/src/io/PresetIO.cpp`); only an explicit save writes the current version. A missing key means the default *of the file's version*: version 1 (and a file without `"version"`) was written sparse against the version-1 defaults, so the 1 → 2 step fills its missing keys from the frozen version-1 table, and a default changed later never re-voices it. The only difference so far is `virt.lfe`: 0 dB in version 1, +6 dB in version 2. The factory presets are still version 1 (see the checks below), so they keep 0 dB unless they set `virt.lfe`. Changing any parameter default fails `tests/test_presets_golden.cpp` until the major is bumped with a migration that fills the old value.
+* **`uuid`** (optional, RFC 4122, stored lower case) identifies a preset across renames: auto-profile rules, hotkeys and content packs should refer to presets by it (`preset::findByUuid`). Give every new preset its own (`python3 -c 'import uuid; print(uuid.uuid4())'`) and never change it; the plug-in's *Export* writes a new one.
+* **`contentHash`** is written on save: 16 hex digits of a hash of every sound parameter's value (app state excluded). It identifies the sound, not the file, and is not a checksum; a mismatch on load only means the file was edited or the parameter table grew since.
 * **Mode:** Music presets leave `mode` out (Music is the default), and Gaming presets set `"mode": "Gaming"`.
 * **App state is not part of a preset:** `bypass`, `bypass.matched` and `latency.profile` belong to the application. Loading a preset never changes them. Name the profile a preset is made for with the optional top-level `"suggestedLatencyProfile"` label (`"Quality"`, `"Balanced"` or `"Low Latency"`); it is metadata, never applied on load. A `latency.profile` in `params` (older files) is read as that suggestion.
 
@@ -160,6 +165,7 @@ The test enforces all of the following:
   * preset names are unique, all three categories exist, and the presets that code and docs refer to by name exist.
 * **Metadata:**
   * `"format": "flubsound-preset"`, `"version": 1`;
+  * a lower-case `uuid`, unique among the factory presets, and no `fromJson` warning;
   * name, category, description and tags are present;
   * the author is `Flubsound`;
   * the category is Music, Gaming or Device;
@@ -189,6 +195,7 @@ The test enforces all of the following:
   * no safety clips occur and the output is not silent.
 * **Stress render:** the same programme in the same profiles, with Boost Intensity and all macros at 100 %, for the first 2 s (before the SafetyGovernor reacts). The output must be finite, sample peaks must stay at or below the ceiling, the true peak within the same 0.15 dB, and the safety clamp must not engage.
 * **Cross-references:** every preset that a device profile suggests exists.
+* **Golden** (`./build/tests/flub_tests Golden`, `tests/golden/`): every parameter default matches `parameter-defaults.json`, and every factory preset keeps its uuid and `contentHash` (`factory-presets.json`). With `FLUB_GOLDEN_REFERENCE=1` on the reference platform (Linux x86-64, gcc Release; CI's core job, gcc leg) every factory preset is also rendered (3 s of pink noise and 55 Hz kicks, Balanced) and its integrated LUFS and 1/3-octave band levels must stay within 0.05 dB of the recorded golden render. For an intended change, re-record with `FLUB_GOLDEN_UPDATE=1 ./build/tests/flub_tests Golden` on the reference platform and name the change.
 
 ### Changing how a preset sounds (contributors)
 

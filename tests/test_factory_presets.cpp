@@ -300,6 +300,7 @@ TEST_CASE ("Factory presets: library is complete, uniquely named and loadable")
 TEST_CASE ("Factory presets: metadata, keys, labels and output protection are valid")
 {
     const auto& table = layout();
+    std::set<std::string> uuids;
     for (const auto& f : factoryFiles())
     {
         json::Value root;
@@ -328,6 +329,13 @@ TEST_CASE ("Factory presets: metadata, keys, labels and output protection are va
             fail (f, "author must be \"Flubsound\"");
         if (p.tags.empty() || root["tags"].asArray().size() != p.tags.size())
             fail (f, "tags must be a non-empty array of strings");
+        // Stable identity (docs/11 E52): rules, hotkeys and packs refer to it.
+        if (! preset::isValidUuid (p.uuid) || root["uuid"].asString() != p.uuid)
+            fail (f, "needs a lower-case RFC 4122 \"uuid\" (python3 -c 'import uuid; print(uuid.uuid4())')");
+        else if (! uuids.insert (p.uuid).second)
+            fail (f, "uuid " + p.uuid + " is used by another factory preset");
+        if (! p.warnings.empty())
+            fail (f, "fromJson warning: " + p.warnings.front());
 
         // ---- Parameters: known keys, valid values, no duplicates or defaults ----
         const auto& params = root["params"];

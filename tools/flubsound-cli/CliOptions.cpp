@@ -731,7 +731,7 @@ bool buildParameters (const RenderOptions& o, ResolvedParameters& out, std::stri
             return false;
         }
         // Keys and values the preset reader ignored or changed (docs/11 E52):
-        // stderr (survives --quiet) and --json "notes".
+        // stderr (survives --quiet) and --json render.notes.
         for (const auto& w : p.warnings)
             out.notes.push_back ("warning: preset: " + w);
     }

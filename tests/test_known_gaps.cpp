@@ -39,8 +39,10 @@
 #include "Commands.h"
 #include "OfflineRenderer.h"
 
+#include "flub/common/Denormals.h"
 #include "flub/common/Math.h"
 #include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
 #include "flub/engine/Protection.h"
 #include "flub/io/PresetIO.h"
 #include "flub/io/WavFile.h"
@@ -50,6 +52,7 @@
 #include <cstdio>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1088,4 +1091,261 @@ TEST_CASE ("CLI: render.stats reads the limiter GR of a steady sine as the hand-
     CHECK_NEAR (rr.stats.limiterOver1DbPercent, 0.0, 1.0e-6);
     for (size_t b = 0; b < 4; ++b)
         CHECK_NEAR (rr.stats.modeBandMaxDb[b], 0.0, 1.0e-6);
+}
+
+// =============================================================================
+// Protection metrics (docs/11 E06 slice, E10 Phase 1)
+// =============================================================================
+namespace
+{
+/** As render(), straight through a ProcessingChain at 512-sample blocks with
+    the host's protection strength set (the CLI has no switch for it): primed
+    the same way, latency compensated. */
+struct GovernorReading
+{
+    double scale = 1.0, distortionDb = -160.0; // at the end of the render
+};
+
+Channels renderAtStrength (const io::AudioFileData& input, const std::vector<float>& values, ProtectionStrength strength,
+                           GovernorReading* reading = nullptr)
+{
+    ParameterStore store;
+    for (int id = 0; id < kNumParams; ++id)
+        store.set (id, values[static_cast<size_t> (id)]);
+    constexpr int kBlock = 512;
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    chain.setProtectionStrength (strength);
+    const int latency = chain.getLatencySamples();
+    const int n = static_cast<int> (input.channels[0].size());
+    Planar buf (2, n + latency);
+    for (int c = 0; c < 2; ++c)
+        std::copy (input.channels[static_cast<size_t> (c)].begin(), input.channels[static_cast<size_t> (c)].end(), buf.ch[static_cast<size_t> (c)].begin());
+    ScopedNoDenormals noDenormals;
+    Planar prime (2, kBlock);
+    chain.process (prime.block (0, kBlock));
+    chain.reset();
+    for (int pos = 0; pos < n + latency; pos += kBlock)
+        chain.process (buf.block (pos, std::min (kBlock, n + latency - pos)));
+    if (reading != nullptr)
+        *reading = { chain.meters().governorScale.load(), chain.meters().governorDistortionDb.load() };
+    Channels out (2);
+    for (int c = 0; c < 2; ++c)
+        out[static_cast<size_t> (c)].assign (buf.ch[static_cast<size_t> (c)].begin() + latency, buf.ch[static_cast<size_t> (c)].end());
+    return out;
+}
+
+/** Pink bed at -24 dBFS RMS plus 55 Hz kicks (peak 0.7, tau 100 ms) every 500 ms. */
+io::AudioFileData kickProgramme (double seconds)
+{
+    const int n = samplesOf (seconds);
+    auto l = pinkNoise (n, std::pow (10.0f, -24.0f / 20.0f), 707);
+    auto r = pinkNoise (n, std::pow (10.0f, -24.0f / 20.0f), 808);
+    for (int i = 0; i < n; ++i)
+    {
+        const double beat = std::fmod (i / kFs, 0.5);
+        const auto kick = static_cast<float> (0.7 * std::exp (-beat / 0.1) * std::sin (kTwoPi * 55.0 * beat));
+        l[static_cast<size_t> (i)] += kick;
+        r[static_cast<size_t> (i)] += kick;
+    }
+    return fileOf ({ l, r });
+}
+} // namespace
+
+TEST_CASE ("KnownGap closed: governed macros at 64..4096-sample blocks - Boost 100 + Loudness 100 on kick-heavy programme lands within 0.05 LU integrated (E06)")
+{
+    // The governor ticks on the maximizer's 10 ms GR-window grid and the chain
+    // ends its processing segments on that grid, so the scale's trajectory -
+    // the only block-size dependent part of the chain on this programme -
+    // is the same at every host block size. Before the E06 slice (a per-block
+    // tick with dt = block length and a new scale only at the next host
+    // block) this stimulus spread 0.29 LU on the CLI (-10.86 at 128 to
+    // -11.15 LUFS at 4096 samples).
+    const auto input = kickProgramme (12.0);
+    RenderOptions o = boosted (ModeValue::Music, 100.0f);
+    o.macros.push_back ({ "loudness", 100.0f });
+    const auto values = resolve (o);
+    double lo = 1.0e9, hi = -1.0e9;
+    for (const int block : { 64, 256, 512, 1024, 4096 })
+    {
+        Channels out;
+        int latency = 0;
+        std::string error;
+        REQUIRE (renderPass (input, values, block, out, latency, error));
+        const double lufs = analyse (out, kFs).integratedLufs;
+        measured ("Boost 100 + Loudness 100 integrated at " + std::to_string (block) + "-sample blocks", lufs, "LUFS");
+        lo = std::min (lo, lufs);
+        hi = std::max (hi, lufs);
+    }
+    measured ("Boost 100 + Loudness 100 block-size spread", hi - lo, "LU");
+    CHECK_LE (hi - lo, 0.05); // docs/11 E06 Done-when
+}
+
+TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 50 ms and leaves the level alone; a NaN burst does not regress (E10)")
+{
+    // -20 dBFS pink through the Signature preset, one corrupt sample at 2 s.
+    // Before the sanitiser a finite 1e30 passed the non-finite guard: about
+    // 100 ms of silence, then +13.7 dB at 2.1-2.5 s and -2.1 dB at 4-5 s, a
+    // disturbance above -60 dBFS for 6 s (CLI, same scene). It is now muted
+    // and its block is hidden from the control loops.
+    const int n = samplesOf (6.0);
+    const auto input = fileOf ({ pinkNoise (n, 0.1f, 31), pinkNoise (n, 0.1f, 32) });
+    const auto values = resolve (factoryPreset ("music-flubsound-signature.json"));
+    const auto clean = render (input, values);
+    const int at = samplesOf (2.0);
+
+    struct Disturbance
+    {
+        double spanMs, worstChangeDb;
+    };
+    const auto disturbance = [&] (const io::AudioFileData& spiked) {
+        const auto out = render (spiked, values);
+        int first = -1, last = -1;
+        for (int i = 0; i < n; ++i)
+        {
+            const float d = std::max (std::abs (out[0][static_cast<size_t> (i)] - clean[0][static_cast<size_t> (i)]),
+                                      std::abs (out[1][static_cast<size_t> (i)] - clean[1][static_cast<size_t> (i)]));
+            if (d > 1.0e-3f) // -60 dBFS
+            {
+                first = first < 0 ? i : first;
+                last = i;
+            }
+        }
+        Disturbance r { first < 0 ? 0.0 : 1000.0 * (last - first + 1) / kFs, 0.0 };
+        // Level change from 100 ms after the spike on (docs/11 E10 Done-when).
+        for (const auto& w : { Window { at + samplesOf (0.1), at + samplesOf (0.5) }, Window { at + samplesOf (0.5), at + samplesOf (1.0) },
+                               Window { at + samplesOf (1.0), at + samplesOf (2.0) }, Window { at + samplesOf (2.0), n } })
+            r.worstChangeDb = std::max (r.worstChangeDb, std::abs (powerDb (meanPower (out, { w })) - powerDb (meanPower (clean, { w }))));
+        return r;
+    };
+
+    auto spiked = input;
+    spiked.channels[0][static_cast<size_t> (at)] = 1.0e30f;
+    const auto spike = disturbance (spiked);
+    auto both = input;
+    both.channels[0][static_cast<size_t> (at)] = both.channels[1][static_cast<size_t> (at)] = -1.0e30f;
+    const auto spikeBoth = disturbance (both);
+    auto nan = input;
+    for (int i = at; i < at + 480; ++i)
+        nan.channels[0][static_cast<size_t> (i)] = std::numeric_limits<float>::quiet_NaN();
+    const auto burst = disturbance (nan);
+    measured ("1e30 spike disturbance above -60 dBFS", spike.spanMs, "ms");
+    measured ("1e30 spike level change after 100 ms", spike.worstChangeDb, "dB");
+    measured ("-1e30 on both channels disturbance above -60 dBFS", spikeBoth.spanMs, "ms");
+    measured ("NaN burst (10 ms) disturbance above -60 dBFS", burst.spanMs, "ms");
+    measured ("NaN burst level change after 100 ms", burst.worstChangeDb, "dB");
+
+    // docs/11 E10 Done-when: <= 50 ms above -60 dBFS, <= 0.3 dB after 100 ms.
+    CHECK_LE (spike.spanMs, 50.0);
+    CHECK_LE (spike.worstChangeDb, 0.3);
+    CHECK_LE (spikeBoth.spanMs, 50.0);
+    CHECK_LE (spikeBoth.worstChangeDb, 0.3);
+    // The NaN burst drops its blocks (silence) and restarts the signal path;
+    // the control loops keep their state. Unchanged by E10 Phase 1.
+    CHECK_NEAR (burst.spanMs, 799.8, 20.0);
+    CHECK_LE (burst.worstChangeDb, 0.3);
+}
+
+TEST_CASE ("KnownGap: DC after the maximizer - an asymmetric 100 + 200 Hz signal at 24 dB drive leaves <= -60 dBFS DC in Quality and Balanced; Low Latency and the limiter alone still leave some (E10)")
+{
+    // 100 Hz + 200 Hz (+90 degrees), 0.35 each: no DC in, a strongly
+    // asymmetric waveform. Default chain with max.drive 24, 2..4 s. Before
+    // the residual-path DC blocker on the clipper's correction the output
+    // held -15.8 dBFS DC in Balanced (-22.0 dBFS at drive 12; CLI).
+    const int n = samplesOf (4.0);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+        x[static_cast<size_t> (i)] = static_cast<float> (0.35 * std::sin (kTwoPi * 100.0 * i / kFs) + 0.35 * std::cos (kTwoPi * 200.0 * i / kFs));
+    const auto input = stereoOf (x);
+    const auto dcDb = [&] (const Channels& out) {
+        double sum = 0.0;
+        for (const auto& c : out)
+            for (int i = samplesOf (2.0); i < n; ++i)
+                sum += c[static_cast<size_t> (i)];
+        return toDb (std::abs (sum) / (2.0 * (n - samplesOf (2.0))));
+    };
+    struct Row
+    {
+        LatencyProfileValue profile;
+        const char* name;
+        double chainDb, limiterOnlyDb; // measured after E10 Phase 1
+    };
+    for (const auto& r : { Row { LatencyProfileValue::Quality, "Quality", -73.55, -51.42 }, Row { LatencyProfileValue::Balanced, "Balanced", -68.81, -49.02 },
+                           Row { LatencyProfileValue::LowLatency, "Low Latency", -58.70, -42.22 } })
+    {
+        RenderOptions o;
+        o.profile = r.profile;
+        auto values = resolve (o);
+        setValue (values, MaxDriveDb, 24.0f);
+        const double dc = dcDb (render (input, values));
+        setValue (values, MaxClipAmount, 0.0f);
+        const double limiterOnly = dcDb (render (input, values));
+        measured (std::string ("DC at max.drive 24, ") + r.name, dc, "dBFS");
+        measured (std::string ("DC at max.drive 24 with the clipper off, ") + r.name, limiterOnly, "dBFS");
+        // docs/11 E10 Done-when: <= -60 dBFS in every profile. What is left
+        // comes from the true-peak limiter's gain modulation of the
+        // asymmetric waveform (the clipper-off rows; faster in Low Latency's
+        // 0.5 ms look-ahead). A residual high-pass there would move peaks
+        // past the ceiling (KNOWN_GAP for Low Latency and the limiter alone).
+        if (r.profile != LatencyProfileValue::LowLatency)
+            CHECK_LE (dc, -60.0);
+        CHECK_NEAR (dc, r.chainDb, 1.0);
+        CHECK_NEAR (limiterOnly, r.limiterOnlyDb, 1.0);
+    }
+}
+
+TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protection strength Off, Normal and Strict, with and without driven base settings (E06)")
+{
+    // -12 dBFS 50 Hz, Music, Boost 100 and macros 1-5 at 100 %, THD+N over
+    // 6..10 s. Off governs the macro amounts only (as before E06); Normal
+    // also scales the base max.drive, sat.drive and bass.harmonics; Strict
+    // does that and lets the scale fall to 0 instead of 0.3. Scene b adds
+    // driven base settings (max.drive 12, Tape saturation at 12 dB).
+    const auto input = stereoOf (sine (50.0, kFs, samplesOf (10.0), std::pow (10.0f, -12.0f / 20.0f)));
+    RenderOptions o = boosted (ModeValue::Music, 100.0f);
+    for (const char* m : { "1", "2", "3", "4", "5" })
+        o.macros.push_back ({ m, 100.0f });
+    const auto macros = resolve (o);
+    auto driven = macros;
+    setValue (driven, MaxDriveDb, 12.0f);
+    setValue (driven, SaturationOn, 1.0f);
+    setValue (driven, SatDriveDb, 12.0f);
+    double thd[2][3] = {}, governed[2][3] = {};
+    for (int scene = 0; scene < 2; ++scene)
+        for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal, ProtectionStrength::Strict })
+        {
+            GovernorReading gr;
+            const auto out = renderAtStrength (input, scene == 0 ? macros : driven, s, &gr);
+            const auto k = static_cast<size_t> (s);
+            thd[scene][k] = thdPlusNoiseDb (out[0], samplesOf (6.0), samplesOf (4.0), 50.0);
+            governed[scene][k] = gr.distortionDb;
+            const std::string tag = std::string (scene == 0 ? "all Music macros 100" : "... with max.drive 12 + sat.drive 12")
+                                    + ", strength " + std::to_string (static_cast<int> (s));
+            measured (tag + ": 50 Hz THD+N", thd[scene][k], "dB");
+            measured (tag + ": 50 Hz THD+N (percent)", 100.0 * std::pow (10.0, thd[scene][k] / 20.0), "%");
+            measured (tag + ": governor scale at 10 s", gr.scale, "");
+            measured (tag + ": governor THD+N input (3 s average)", gr.distortionDb, "dB");
+        }
+    // Off is the behaviour before E06 (the CLI measures 20.3 % on scene a).
+    CHECK_NEAR (thd[0][0], -13.85, 0.3);
+    // KNOWN_GAP: target <= 3 % (-30.5 dB) at Normal per docs/11 E06 Done-when.
+    // Music's base drives are 0 dB: every drive on scene a is a governed
+    // macro amount, already scaled at Off, and the scale sits at its 0.3
+    // floor, so Normal changes nothing here. Strict (floor 0) removes every
+    // governed amount and still measures 5.3 %: the rest is ungoverned (the
+    // governor's own input stays over its -30 dB budget at scale 0, and the
+    // limiter's LF distortion is not measured at all - docs/11 E06 step 1,
+    // E05's LF envelope).
+    CHECK_NEAR (thd[0][1], thd[0][0], 0.05);
+    CHECK_NEAR (thd[0][2], -25.51, 0.3);
+    CHECK_GE (governed[0][2], SafetyGovernor::kDistortionBudgetDb);
+    // Driven base settings: Normal governs them too, and the governor's
+    // measured input (saturator + clipper) falls 6 dB; the output's THD+N
+    // does not, because less clipper drive hands the 50 Hz peaks to the
+    // limiter, whose distortion the governor does not see (KNOWN_GAP, E06
+    // step 1).
+    CHECK_NEAR (thd[1][0], -15.27, 0.3);
+    CHECK_NEAR (thd[1][1], -14.11, 0.3);
+    CHECK_NEAR (thd[1][2], -20.83, 0.3);
+    CHECK_LE (governed[1][1], governed[1][0] - 3.0);
 }

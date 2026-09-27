@@ -473,7 +473,10 @@ TEST_CASE ("Distortion: through the chain, base saturation alone trips the gover
         std::vector<float> baseBefore (static_cast<size_t> (kNumParams)), baseAfter (static_cast<size_t> (kNumParams));
         store.snapshot (baseBefore.data());
 
-        constexpr int kBlock = 512;
+        // 10 ms blocks: each is one processing segment that ends on a governor
+        // tick (docs/11 E06), so the effective values published for a block
+        // were computed with the scale published after the previous one.
+        constexpr int kBlock = 480;
         ProcessingChain chain (store);
         chain.prepare ({ kFs, kBlock, 2 });
 

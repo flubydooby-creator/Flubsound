@@ -38,6 +38,16 @@ jobs:
         run: cmake --build build --parallel
       - name: Unit tests
         run: ctest --test-dir build --output-on-failure
+      # docs/11 E52: golden renders of every factory preset (1/3-octave bands
+      # and integrated LUFS within 0.05 dB of tests/golden/factory-presets.json).
+      # Float results differ slightly between compilers, so they are compared
+      # on this one reference leg only (about 3 s); uuid, contentHash and the
+      # parameter defaults are checked by the unit tests on every leg.
+      - name: Golden preset renders (reference platform)
+        if: matrix.compiler == 'gcc'
+        env:
+          FLUB_GOLDEN_REFERENCE: "1"
+        run: ./build/tests/flub_tests "Golden renders"
       - name: CLI smoke test
         shell: bash
         run: |

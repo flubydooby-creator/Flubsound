@@ -24,6 +24,9 @@
 //   mapping - no copies.
 // * State: APVTS XML (getStateInformation / setStateInformation) plus import
 //   and export of Flubsound preset JSON (the app / CLI preset format).
+//   setStateInformation gives every parameter the saved state does not carry
+//   its DEFAULT (flub::preset::resolveSavedState), so a project saved before a
+//   parameter existed recalls the same way every time (docs/11 E52 Phase A).
 //   As in the app, "Bypass All" is never taken from or written to a preset.
 #pragma once
 
@@ -82,8 +85,10 @@ public:
     /** Telemetry published by the audio thread (atomics; poll from a timer). */
     const flub::MeterBus& getMeters() noexcept { return chain.meters(); }
 
-    /** Loads a Flubsound preset JSON (*.flubpreset.json) into the parameters. */
-    bool importPreset (const juce::File& file, juce::String& error);
+    /** Loads a Flubsound preset JSON (*.flubpreset.json) into the parameters.
+        `warnings` (optional) receives what the reader ignored or changed:
+        unknown keys, clamped values, a newer schema minor. */
+    bool importPreset (const juce::File& file, juce::String& error, juce::StringArray* warnings = nullptr);
 
     /** Writes the current parameters as a Flubsound preset JSON. */
     bool exportPreset (const juce::File& file, juce::String& error) const;

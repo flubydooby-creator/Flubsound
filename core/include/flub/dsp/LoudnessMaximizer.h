@@ -13,6 +13,10 @@
 //        Shaves sub-millisecond transients (snare/gunshot crack) cheaply, so
 //        the limiter only handles the longer peaks -> less audible pumping.
 //        clipAmount = 0 disables the clipper entirely (limiter-only).
+//        Delta design: out = x + HP5(clip(x^) - x^), the correction band-
+//        limited by the downsampler and passed through a 5 Hz 1st-order
+//        high-pass (docs/11 E10), so clipping an asymmetric waveform leaves
+//        no DC on the driver.
 //     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak).
 // Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
 //   the last block (how hard the clipper works), the limiter's gain
@@ -161,6 +165,10 @@ private:
     std::vector<float> thresholdBuf, kneeBuf, clipMixBuf; // per-sample clip controls (maxBlockSize)
     bool clipRunning = false;
     int clipWarmup = 0, clipWarmupLength = 1;
+    // Residual-path DC blocker on the clipper's correction (docs/11 E10):
+    // TPT one-pole low-pass state per channel (double) and its coefficient.
+    std::array<double, kMaxChannels> clipDcLp {};
+    double clipDcG = 0.0;
 
     // Glue: 3-band split, per-band linked compressor, crossfaded against the input.
     ThreeBandSplitter splitter;

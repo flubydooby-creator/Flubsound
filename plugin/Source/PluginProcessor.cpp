@@ -25,6 +25,11 @@ constexpr int kStructuralPollHz = 5;
 const juce::Identifier kStateType { "FlubsoundFX" };
 const juce::Identifier kStateVersionProperty { "flubStateVersion" };
 constexpr int kStateVersion = 1;
+// AudioProcessorValueTreeState's tree layout: <PARAM id="key" value="..."/>
+// per parameter (the denormalised value).
+const juce::Identifier kParamType { "PARAM" };
+const juce::Identifier kParamIdProperty { "id" };
+const juce::Identifier kParamValueProperty { "value" };
 
 //==============================================================================
 // Display helpers for float parameters
@@ -466,15 +471,65 @@ void FlubsoundProcessor::getStateInformation (juce::MemoryBlock& destData)
 
 void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    if (auto xml = getXmlFromBinary (data, sizeInBytes))
-        if (xml->hasTagName (apvts.state.getType()))
-            apvts.replaceState (juce::ValueTree::fromXml (*xml));
-    // Parameters missing from an older state keep their current values; the
-    // audio thread picks everything up through the raw values.
+    auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return;
+    const auto saved = juce::ValueTree::fromXml (*xml);
+
+    // Deterministic recall (docs/11 E52 Phase A): every parameter the saved
+    // state does not carry (an older state, written before the parameter
+    // existed) takes its DEFAULT, never the value it had before the load.
+    // What APVTS::replaceState does with a missing PARAM depends on JUCE
+    // internals (the child-added notification of the tree it appends), so the
+    // loaded tree is rebuilt with one PARAM per parameter, its value resolved
+    // (and clamped) by the core, the same rule the tests check.
+    // A state from a newer build (flubStateVersion > kStateVersion) loads the
+    // same way: unknown parameters are ignored, values are clamped.
+    std::vector<std::pair<std::string, float>> carried;
+    std::vector<std::string> warnings;
+    for (auto child : saved)
+    {
+        if (! child.hasType (kParamType) || ! child.hasProperty (kParamIdProperty))
+            continue;
+        // Attributes read back from XML are text: accept a whole number only
+        // (a missing or malformed value leaves the parameter at its default).
+        const auto key = child[kParamIdProperty].toString().toStdString();
+        const auto text = child[kParamValueProperty].toString().trim().toStdString();
+        char* end = nullptr;
+        const double value = std::strtod (text.c_str(), &end);
+        if (text.empty() || end != text.c_str() + text.size())
+            warnings.push_back ("\"" + key + "\": no numeric value, default used");
+        else
+            carried.emplace_back (key, static_cast<float> (value));
+    }
+    std::vector<std::string> resolveWarnings; // unknown parameters, clamped values
+    const auto values = flub::preset::resolveSavedState (carried, &resolveWarnings);
+    warnings.insert (warnings.end(), resolveWarnings.begin(), resolveWarnings.end());
+    if (static_cast<int> (saved.getProperty (kStateVersionProperty, 0)) > kStateVersion)
+        warnings.insert (warnings.begin(), "state written by a newer Flubsound FX (flubStateVersion "
+                                               + saved.getProperty (kStateVersionProperty).toString().toStdString() + ")");
+
+    juce::ValueTree state (apvts.state.getType());
+    state.copyPropertiesFrom (saved, nullptr);
+    for (auto child : saved)
+        if (! child.hasType (kParamType))
+            state.appendChild (child.createCopy(), nullptr);
+    const auto& table = flub::param::layout();
+    for (size_t id = 0; id < table.size(); ++id)
+    {
+        juce::ValueTree param (kParamType);
+        param.setProperty (kParamIdProperty, juce::String (table[id].key), nullptr);
+        param.setProperty (kParamValueProperty, static_cast<double> (values[id]), nullptr);
+        state.appendChild (param, nullptr);
+    }
+    apvts.replaceState (state); // the audio thread picks the values up through the raw values
+
+    for ([[maybe_unused]] const auto& w : warnings)
+        DBG ("Flubsound FX state: " << juce::String (w));
 }
 
 //==============================================================================
-bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& error)
+bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& error, juce::StringArray* warnings)
 {
     // Read through juce::File (Unicode paths on every platform), parse with
     // the core so the app, the CLI and the plug-in agree on the format.
@@ -509,6 +564,12 @@ bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& err
             p->endChangeGesture();
         }
     }
+    if (warnings != nullptr)
+    {
+        warnings->clear();
+        for (const auto& w : preset.warnings) // unknown keys, clamped values, a newer minor (docs/11 E52)
+            warnings->add (juce::String::fromUTF8 (w.c_str()));
+    }
     return true;
 }
 
@@ -521,6 +582,7 @@ bool FlubsoundProcessor::exportPreset (const juce::File& file, juce::String& err
     preset.name = name.toStdString();
     preset.category = "User";
     preset.author = "User";
+    preset.uuid = flub::preset::makeUuid(); // a new preset: its own stable identity (docs/11 E52)
 
     // Host normalisation (skewed ranges) leaves float dust such as
     // 5.0000005 for a default of 5: snap such values back onto the default so

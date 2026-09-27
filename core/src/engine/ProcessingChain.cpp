@@ -863,6 +863,21 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
         meterBus.corruptSampleCount.store (corruptSamples, std::memory_order_relaxed);
     }
 
+    // The block runs in segments that end where the governor ticks (its 10 ms
+    // grid, docs/11 E06), so a new scale takes effect at the same sample
+    // whatever the host block size: a 4096-sample block no longer holds a
+    // scale for 85 ms that a 64-sample host would have updated at the tick.
+    for (int start = 0; start < n;)
+    {
+        const int length = std::min (n - start, governor.samplesToNextTick());
+        processSegment (io.subBlock (start, length), contaminated);
+        start += length;
+    }
+}
+
+void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING
+{
+    const int n = io.numSamples;
     store.snapshot (base.data());
     if (redetectRequest.exchange (false, std::memory_order_relaxed))
         inputDetector.reset();

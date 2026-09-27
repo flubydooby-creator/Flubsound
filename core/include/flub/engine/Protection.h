@@ -319,6 +319,9 @@ public:
     /** Restarts the tick grid (not the loop state), for when the maximizer's
         window grid restarts without a full reset (a dropped block). */
     void restartTickGrid() noexcept FLUB_NONBLOCKING { pendingSamples = 0; }
+    /** Samples until the next tick (1 .. one window): the chain ends its
+        processing segments there, so a new scale takes effect on the grid. */
+    int samplesToNextTick() const noexcept { return tickSamples - pendingSamples; }
     /** Sets the scale's floor (Strict: 0, else kMinScale); any time on the
         audio thread. A scale below a raised floor is lifted to it. */
     void setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING;

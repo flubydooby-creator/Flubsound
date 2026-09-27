@@ -289,7 +289,7 @@ TEST_CASE ("Golden: every parameter default matches tests/golden/parameter-defau
         }
         // The major was bumped: the migration from the recorded major must fill the old value.
         const auto frozen = preset::frozenDefaults (recordedMajor);
-        const auto it = std::find_if (frozen.begin(), frozen.end(), [&key = key] (const auto& d) { return d.first == key; });
+        const auto it = std::find_if (frozen.begin(), frozen.end(), [&wanted = key] (const auto& d) { return d.first == wanted; });
         if (it == frozen.end() || it->second != recorded)
             fail ("default of \"" + key + "\" changed but frozenDefaults(" + std::to_string (recordedMajor)
                   + ") does not restore " + std::to_string (recorded) + " for older files");

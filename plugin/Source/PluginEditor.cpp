@@ -112,8 +112,11 @@ void FlubsoundEditor::importPreset()
         if (file == juce::File())
             return; // cancelled
         juce::String error;
-        if (! safeThis->flubProcessor.importPreset (file, error))
+        juce::StringArray warnings;
+        if (! safeThis->flubProcessor.importPreset (file, error, &warnings))
             safeThis->showMessage ("Import failed", error);
+        else if (! warnings.isEmpty())
+            safeThis->showMessage ("Imported with warnings", file.getFileName() + ":\n" + warnings.joinIntoString ("\n"));
     });
 }
 

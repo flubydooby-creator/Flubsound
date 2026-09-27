@@ -261,6 +261,9 @@ private:
     void applyParameters() noexcept;
     void publishEffective() noexcept;
     void publishMeters (const AudioBlock& out, int numSamples) noexcept;
+    /** process() after the input sanitiser, for one segment of the block
+        that ends at or before the governor's next tick. */
+    void processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING;
     /** reset() without the control loops (governor, AutoLevel, AutoDrive,
         ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;

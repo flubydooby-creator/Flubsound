@@ -41,6 +41,11 @@ constexpr std::array<double, 3> kBandLowestHz { 30.0, 60.0, 2000.0 };
 // Clipper threshold headroom above the ceiling: lerp (+6 dB, +0.3 dB, amount).
 constexpr float kClipHeadroomMaxDb = 6.0f;
 constexpr float kClipHeadroomMinDb = 0.3f;
+// Residual-path DC blocker (docs/11 E10): the clipper's band-limited
+// correction clip(x) - x passes a 1st-order high-pass at this frequency
+// before it is added to the dry path, so a clipped asymmetric waveform
+// leaves no DC (the programme itself never passes the filter).
+constexpr double kClipDcBlockHz = 5.0;
 
 // Envelope values below this are flushed (the host also sets FTZ/DAZ).
 constexpr float kEnvFlush = 1.0e-15f;
@@ -144,6 +149,7 @@ void LoudnessMaximizer::startGlue (bool immediate) noexcept
 void LoudnessMaximizer::startClipper (bool immediate) noexcept
 {
     oversampler.reset();
+    clipDcLp.fill (0.0);
     clipRunning = true;
     if (immediate)
     {
@@ -213,6 +219,8 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     kneeBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipMixBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipWarmupLength = 2 * oversampler.latencySamples() + kClipWarmupExtra;
+    const double gDc = std::tan (kPi * kClipDcBlockHz / fs);
+    clipDcG = gDc / (1.0 + gDc);
 
     splitter.prepare (fs, kGlueLowMidHz, kGlueMidHighHz);
     for (size_t b = 0; b < bands.size(); ++b)
@@ -240,6 +248,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     const double fs = spec.sampleRate;
     oversampler.reset();
     dryDelay.reset();
+    clipDcLp.fill (0.0);
     splitter.reset();
     antiDenormal = 0.0f;
     limiter.reset();
@@ -508,12 +517,25 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         // The clip mix is applied after the downsampler (as a base-rate
         // crossfade weight), so with the mix at 0 the output is exactly the
         // dry path whatever the filter tail holds - block-size independent.
+        // The correction first passes the residual-path DC blocker, a 1st-
+        // order TPT high-pass HP(r) = r - LP(r) with double state (docs/11
+        // E10): only what the clipper adds is filtered, never the programme.
+        const double dcG = clipDcG;
         for (int c = 0; c < numCh; ++c)
         {
             float* y = data[static_cast<size_t> (c)];
             const float* d = dry.channel (c);
+            double lpState = clipDcLp[static_cast<size_t> (c)];
             for (int i = 0; i < n; ++i)
-                y[i] = d[i] + clipMixBuf[static_cast<size_t> (i)] * y[i];
+            {
+                const double r = static_cast<double> (y[i]);
+                const double v = (r - lpState) * dcG;
+                const double lp = v + lpState;
+                lpState = lp + v;
+                y[i] = d[i] + clipMixBuf[static_cast<size_t> (i)] * static_cast<float> (r - lp);
+            }
+            // No denormals while the correction is silent (below every threshold).
+            clipDcLp[static_cast<size_t> (c)] = std::abs (lpState) < 1.0e-30 ? 0.0 : lpState;
         }
 
         if (clipMixS.getCurrent() == 0.0f && ! clipMixS.isSmoothing() && clipWarmup == 0 && ! (params.clipAmount > 0.0f))

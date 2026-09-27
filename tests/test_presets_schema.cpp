@@ -71,7 +71,7 @@ TEST_CASE ("Preset schema: the typo key \"bost\" is reported with an exact warni
     CHECK (loadOk (R"({ "format": "flubsound-preset", "version": 2, "params": { "boost": 0.4, "mode": "Gaming" } })").warnings.empty());
 }
 
-TEST_CASE ("Preset schema: the CLI reports preset warnings as \"warning: \" notes (stderr, survives --quiet, --json \"notes\")")
+TEST_CASE ("Preset schema: the CLI reports preset warnings as \"warning: \" notes (stderr, survives --quiet, --json render.notes)")
 {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("flub-preset-warnings-" + preset::makeUuid());
