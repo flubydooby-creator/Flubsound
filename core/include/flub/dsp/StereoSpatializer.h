@@ -11,11 +11,14 @@
 //               complementary (S_low + S_high = S, a 2nd-order Q 0.707 shelf
 //               transition with LR4-like magnitude): an LR4 pair would sum to
 //               an all-pass that turns S by 180 degrees against M at the cut.
-//   positionalFocus (gaming): +0..6 dB bell on S at 3 kHz (Q 0.5, ~1-6 kHz).
+//   positionalFocus (gaming): +0..3 dB bell on S at 3 kHz (Q 0.5, ~1-6 kHz).
 //               Interaural level differences in this region are the main
 //               lateral localisation cue for broadband transients
 //               (footsteps, reloads); emphasising S there sharpens the
-//               perceived direction without touching the centre (M).
+//               perceived direction without touching the centre (M). At
+//               100 % a source 6 dB to one side gains about 2.9 dB of ILD
+//               at 3 kHz. Off at sample rates <= 32 kHz (Bluetooth
+//               hands-free / speech links, mono and narrowband).
 //   space     : S += space * 0.5 * D(z^-5ms HP_300Hz(M)), D = 3 nested
 //               Schroeder all-passes (3.1/4.7/7.3 ms, g = 0.5): decorrelated
 //               ambience derived from the centre. The 5 ms pre-delay keeps
@@ -123,6 +126,7 @@ private:
 
     // Positional focus: 3 kHz bell on S.
     OnePoleSmoother focusDb;
+    float focusMaxDb = 0.0f; // bell gain at focus 1 (0 at speech-link rates)
     float focusG = 0.0f;
     SvfCoeffs focusCoeffs;
     SvfState focusState;

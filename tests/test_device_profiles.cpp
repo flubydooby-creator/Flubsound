@@ -104,6 +104,41 @@ TEST_CASE ("DeviceProfiles: connection detection (platform hint, hands-free name
     CHECK (shippedDatabase().match ("Headphones (Recon 50)", 48000.0, 2).connection == Connection::Analog);
 }
 
+TEST_CASE ("DeviceProfiles: hands-free up to 32 kHz, 'wireless' is not USB, and Bluetooth evidence beats a profile's typical connection (docs/11 E17)")
+{
+    const auto& db = shippedDatabase();
+    // Bluetooth voice links run at 8 / 16 / 32 kHz (CVSD, mSBC / LC3-WB,
+    // LC3-SWB): a Bluetooth endpoint there is hands-free, A2DP rates are not.
+    for (const double fs : { 8000.0, 16000.0, 32000.0 })
+        CHECK (detectConnection ("Whatever", fs, 1, Connection::Bluetooth) == Connection::BluetoothHandsFree);
+    CHECK (detectConnection ("Whatever", 44100.0, 2, Connection::Bluetooth) == Connection::Bluetooth);
+    // No platform hint: a mono endpoint at a voice-link rate is hands-free,
+    // whatever family the name matches (its typical connection is USB).
+    CHECK (detectConnection ("Headset (Stealth 600 Gen 3)", 32000.0, 1) == Connection::BluetoothHandsFree);
+    CHECK (db.match ("Headset (Stealth 600 Gen 3)", 32000.0, 1).connection == Connection::BluetoothHandsFree);
+    CHECK (adviceFor (db.match ("Headset (Stealth 600 Gen 3)", 32000.0, 1), 32000.0, true).ceilingDbTp == -3.0f);
+    CHECK (detectConnection ("Headset (Stealth 600 Gen 3)", 32000.0, 2) == Connection::Unknown); // stereo 32 kHz: no evidence
+    CHECK (detectConnection ("Speakers", 48000.0, 1) == Connection::Unknown);                   // mono, but a full rate
+    // "Wireless" alone is no evidence (a 2.4 GHz dongle and Bluetooth are both wireless).
+    CHECK (detectConnection ("Wireless Headset", 48000.0, 2) == Connection::Unknown);
+    CHECK (db.match ("Wireless Headset", 48000.0, 2).connection == Connection::Unknown);
+    CHECK (detectConnection ("Wireless Headset (USB Audio)", 48000.0, 2) == Connection::Usb);
+    // A Bluetooth Stealth Pro: the platform hint, or a BlueZ / PipeWire node
+    // name on Linux, beats the family's typical USB connection (cap -2 dBTP).
+    const auto hinted = db.match ("Stealth Pro", 48000.0, 2, Connection::Bluetooth);
+    CHECK (idOf (hinted) == "turtle-beach-stealth");
+    CHECK (hinted.connection == Connection::Bluetooth);
+    CHECK (adviceFor (hinted, 48000.0, true).ceilingDbTp == -2.0f);
+    CHECK (db.match ("Stealth Pro", 48000.0, 2).connection == Connection::Usb); // no evidence: the family's typical link
+    for (const char* node : { "bluez_output.AA_BB_CC_DD_EE_FF.1", "Stealth Pro (bluez_output.AA_BB_CC_DD_EE_FF.a2dp-sink)", "Stealth Pro A2DP" })
+    {
+        const auto m = db.match (node, 48000.0, 2);
+        CHECK (m.connection == Connection::Bluetooth);
+        CHECK (adviceFor (m, 48000.0, true).ceilingDbTp == -2.0f);
+    }
+    CHECK (detectConnection ("bluez_output.AA_BB_CC_DD_EE_FF.headset-head-unit", 16000.0, 1) == Connection::BluetoothHandsFree);
+}
+
 TEST_CASE ("DeviceProfiles: advice caps the ceiling per connection and warns about stacked headset DSP")
 {
     const auto& db = shippedDatabase();

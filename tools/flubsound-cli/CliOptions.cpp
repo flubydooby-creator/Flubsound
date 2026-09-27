@@ -124,6 +124,7 @@ enum class Opt
     Block,
     Jobs,
     Recursive,
+    Bands,
     Json,
     Dir,
     Quiet,
@@ -156,6 +157,7 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Block, "--block", nullptr, true, false, kRender },
     { Opt::Jobs, "--jobs", "-j", true, false, kBatch },
     { Opt::Recursive, "--recursive", "-r", false, false, kBatch },
+    { Opt::Bands, "--bands", nullptr, false, false, kProcess | kAnalyze },
     { Opt::Json, "--json", nullptr, false, false, kAll },
     { Opt::Dir, "--dir", "-d", true, false, kPresets },
     { Opt::Quiet, "--quiet", "-q", false, false, kRender },
@@ -362,6 +364,7 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
         }
 
         case Opt::Recursive: o.recursive = true; return true;
+        case Opt::Bands: o.bands = true; return true;
         case Opt::Json: o.json = true; return true;
         case Opt::Quiet: o.quiet = true; return true;
         case Opt::Help: return true; // handled by the caller
@@ -802,7 +805,7 @@ bool buildParameters (const RenderOptions& o, ResolvedParameters& out, std::stri
     }
 
     if (v[static_cast<size_t> (BypassAll)] >= 0.5f)
-        out.notes.push_back ("bypass=on: the output is the latency-aligned dry signal (loudness-matched unless bypass.matched=off)");
+        out.notes.push_back ("bypass=on: the output is the latency-aligned dry signal (turned down to the processed loudness where it is louder, unless bypass.matched=off; never raised)");
     return true;
 }
 } // namespace flub::cli

@@ -42,6 +42,13 @@ struct MeterBus
     std::atomic<float> autoLevelGainDb { 0.0f };
     std::atomic<float> autoDriveDb { 0.0f };
 
+    // Input channels (5.1 / 7.1 strips, docs/11 E27): bit c = channel c
+    // carries content (ActiveChannelDetector); the fold in use (0 surround,
+    // 1 stereo passthrough) and whether surround content was confirmed.
+    std::atomic<uint32_t> activeChannelMask { 0 };
+    std::atomic<int> inputFold { 0 };
+    std::atomic<bool> surroundConfirmed { false };
+
     // Engine
     std::atomic<float> latencyMs { 0.0f };
     std::atomic<uint64_t> safetyClipCount { 0 };

@@ -6,7 +6,8 @@
 //   S1 = min (w, 1) * HS_w (S)                                   width
 //        HS_w: 2nd-order high shelf (Cytomic SVF, Q 1/sqrt 2) at the low cut,
 //        0 dB below it, 20 log10 (max (w, 1)) dB above, half of that at the cut
-//   S2 = Bell (S1), 3 kHz, Q 0.5, +6 dB * focus                  positional focus
+//   S2 = Bell (S1), 3 kHz, Q 0.5, +3 dB * focus                  positional focus
+//        (0 dB at output rates <= 32 kHz: Bluetooth hands-free / speech links)
 //   S3 = S2 + 0.5 * space * AP (z^-P HP_300 (M))                 space
 //   S4 = S3 - 0.6 * crossfeed * LP1_700 (S3)                     crossfeed
 //   L' = M + S4,  R' = M - S4        (L and R are left untouched when S4 == S)
@@ -102,7 +103,14 @@ constexpr float kShelfK = 1.41421356f; // 1 / Q, Q = 1 / sqrt 2 (no overshoot)
 
 constexpr double kFocusHz = 3000.0;
 constexpr float kFocusQ = 0.5f;
-constexpr float kFocusMaxDb = 6.0f;
+// +3 dB on S at 3 kHz: about +2.9 dB of added ILD on a source 6 dB to one
+// side (docs/11 E24 caps the added ILD at 3 dB; 6 dB added 7.9 dB).
+constexpr float kFocusMaxDb = 3.0f;
+// At and below this rate the output is a Bluetooth hands-free / speech link
+// (8 / 16 / 32 kHz, mono and narrowband), where an ILD emphasis near 3 kHz
+// has nothing to sharpen: focus is off (docs/11 E24, E17; the chain turns the
+// gaming footsteps band off at the same rates).
+constexpr double kSpeechLinkMaxRate = 32000.0;
 constexpr float kDbToLnA = 0.0575646273f; // ln (10) / 40: dB -> ln A of the bell
 constexpr float kFocusEnvReleaseMs = 30.0f;   // polarity guard: band envelope release
 constexpr float kFocusGuardReleaseMs = 50.0f; // polarity guard: recovery of the lift
@@ -191,6 +199,7 @@ void StereoSpatializer::prepare (const ProcessSpec& newSpec)
     if (! (spec.sampleRate > 0.0))
         spec.sampleRate = 48000.0;
     sr = spec.sampleRate;
+    focusMaxDb = sr > kSpeechLinkMaxRate ? kFocusMaxDb : 0.0f;
 
     // Fixed designs.
     focusG = static_cast<float> (std::tan (kPi * SvfCoeffs::clampFrequency (kFocusHz, sr) / sr));
@@ -221,7 +230,7 @@ void StereoSpatializer::prepare (const ProcessSpec& newSpec)
 
     widthSmoother.reset (sr, kParamSmoothMs, params.width);
     lowCutLogHz.reset (sr, kLowCutSmoothMs, std::log (params.widthLowCutHz));
-    focusDb.reset (sr, kParamSmoothMs, kFocusMaxDb * params.positionalFocus);
+    focusDb.reset (sr, kParamSmoothMs, focusMaxDb * params.positionalFocus);
     spaceGain.reset (sr, kParamSmoothMs, kSpaceScale * params.space);
     crossfeedGain.reset (sr, kParamSmoothMs, kCrossfeedScale * params.crossfeed);
 
@@ -237,7 +246,7 @@ void StereoSpatializer::reset() noexcept FLUB_NONBLOCKING
     safety = 0.0f;
     widthSmoother.setImmediate (params.width);
     lowCutLogHz.setImmediate (std::log (params.widthLowCutHz));
-    focusDb.setImmediate (kFocusMaxDb * params.positionalFocus);
+    focusDb.setImmediate (focusMaxDb * params.positionalFocus);
     spaceGain.setImmediate (kSpaceScale * params.space);
     crossfeedGain.setImmediate (kCrossfeedScale * params.crossfeed);
 
@@ -278,7 +287,7 @@ void StereoSpatializer::setParams (const SpatializerParams& p) noexcept FLUB_NON
     params = s;
     updateWidthTarget();
     lowCutLogHz.setTarget (std::log (s.widthLowCutHz));
-    focusDb.setTarget (kFocusMaxDb * s.positionalFocus);
+    focusDb.setTarget (focusMaxDb * s.positionalFocus);
     spaceGain.setTarget (kSpaceScale * s.space);
     crossfeedGain.setTarget (kCrossfeedScale * s.crossfeed);
 }

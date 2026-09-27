@@ -2,8 +2,14 @@
 //
 //   in (2 / 6 / 8 ch)
 //    -> input gain -> AutoLevel (LUFS)                 [all input channels]
-//    -> HeadphoneVirtualizer (5.1/7.1 -> binaural) or ITU-R BS.775 downmix
-//       (virtualiser off) - from here on the chain is STEREO
+//    -> ActiveChannelDetector (5.1/7.1: surround or stereo-only content?)
+//    -> fold to stereo, one of (crossfaded, docs/11 E01 / E27):
+//         HeadphoneVirtualizer (5.1/7.1 -> binaural, virt.on),
+//         ITU-R BS.775 downmix at -3 dB (virt.on off), or
+//         stereo passthrough (unity BS.775: FL/FR-only content, a forced
+//         stereo fold or a game that renders its own HRTF);
+//       the LFE is folded by the same LfeFold in all three
+//       - from here on the chain is STEREO
 //    -> [slot] SpectralNoiseGate      (Quality latency profile only)
 //    -> [slot] Neural (AsyncModelProcessor; only while a model is installed
 //              and eligible for the latency profile, see setNeuralModel)
@@ -12,8 +18,10 @@
 //    -> [slot] BassEngine
 //    -> [slot] ClarityEnhancer
 //    -> [slot] Saturator (oversampled)
-//    -> [slot] StereoSpatializer      (forced width 1 / crossfeed 0 when the
-//                                      virtualiser produced binaural output)
+//    -> [slot] StereoSpatializer      (forced width 1 / space 0 / crossfeed 0 /
+//                                      focus 0 when the virtualiser produced
+//                                      binaural output or the game renders
+//                                      its own HRTF, virt.ownHrtf)
 //    -> [slot] Compressor (look-ahead, up/down)
 //    -> [slot] LoudnessMaximizer (glue + clipper + true-peak limiter)
 //    -> output gain -> global bypass crossfade (dry delayed by total latency,
@@ -56,7 +64,9 @@
 #include "flub/analysis/PeakMeters.h"
 #include "flub/common/Realtime.h"
 #include "flub/common/SmoothedValue.h"
+#include "flub/dsp/ActiveChannelDetector.h"
 #include "flub/dsp/BassEngine.h"
+#include "flub/dsp/Bs775Fold.h"
 #include "flub/dsp/ClarityEnhancer.h"
 #include "flub/dsp/Compressor.h"
 #include "flub/dsp/DynamicEq.h"
@@ -159,6 +169,13 @@ public:
     void setAuditionBypass (int enableParamId, bool bypassed) noexcept;
     bool isAuditionBypassed (int enableParamId) const noexcept;
 
+    /** 5.1 / 7.1 strips (docs/11 E27): forget the input-channel detection,
+        including a confirmed-surround latch, and start over ("Surround,
+        unconfirmed"), as prepare() does. For the host when the routed
+        process or the source changes on the same device. Any thread (one
+        atomic, taken by the next process()). */
+    void redetectInputChannels() noexcept FLUB_NONBLOCKING { redetectRequest.store (true, std::memory_order_relaxed); }
+
     /** The dynamic EQ's internal mode bands (footsteps / anti-masking / voice
         in Gaming, de-harsh / air / de-boom in Music) occupy bands 4..7. */
     static constexpr int kFirstModeBand = 4, kNumModeBands = 4;
@@ -210,9 +227,9 @@ private:
     void publishEffective() noexcept;
     void publishMeters (const AudioBlock& out, int numSamples) noexcept;
     /** reset() without the control loops (governor, AutoLevel, AutoDrive,
-        LoudnessMatch): the signal path, its meters and the distortion monitor. */
+        ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;
-    void downmixToStereo (const AudioBlock& io) noexcept;
+    void foldToStereo (const AudioBlock& in) noexcept;
     void prepareNeuralSlot (const ProcessSpec& stereo);
     bool inChain (int slot) const noexcept { return (slot != SGate || gateInChain) && (slot != SNeural || neuralInChain); }
 
@@ -258,12 +275,23 @@ private:
     AutoDrive autoDrive;
     SafetyGovernor governor;
     DistortionMonitor distortion;
-    LoudnessMatch loudnessMatch;
+    ComparisonMatcher loudnessMatch;
 
-    // Surround fold: 20 ms crossfade between the binaural render and the
-    // BS.775 downmix whenever virt.on changes (both paths run during it).
-    LinearSmoothedValue virtMix;
+    // Surround fold (5.1 / 7.1 input): the virtualiser's binaural render B,
+    // the unity BS.775 matrix D (Bs775Fold, LFE included) and the detector.
+    //   surround S = k D + virtMix (B - k D)   (virtMix: 20 ms, virt.on)
+    //   output     = g (S + passMix (D - S))    (passMix: 400 ms, stereo fold)
+    // g = 1 except during the passMix ramp p, where it holds the mix's RMS
+    // on (1 - p) RMS_S + p RMS_D (block statistics pass*, see foldToStereo).
+    // Paths whose weight is zero for a whole block are not run; one that
+    // starts again is reset first (virtRan / foldRan).
+    Bs775Fold fold;
+    ActiveChannelDetector inputDetector;
+    LinearSmoothedValue virtMix, passMix;
     AudioBuffer foldScratch;
+    double passSs = 0.0, passDd = 0.0, passSd = 0.0; // mean S^2, D^2, S D (both channels)
+    bool virtRan = false, foldRan = false, passStatsValid = false;
+    std::atomic<bool> redetectRequest { false };
 
     // Global bypass dry path (post input stage, stereo): delayed by
     // totalLatency - dryLimiter latency, then (while bypass is engaged)
@@ -273,7 +301,6 @@ private:
     DelayLine dryDelay;
     TruePeakLimiter dryLimiter;
     bool dryLimiterRunning = false;
-    float dryPeakHold = 0.0f, dryPeakRelease = 0.0f; // keeps the matched reference below the ceiling
 
     // Metering
     LevelMeter inLevel, outLevel;

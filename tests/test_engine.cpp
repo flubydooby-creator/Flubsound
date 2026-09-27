@@ -732,16 +732,19 @@ TEST_CASE ("Chain: AutoDrive never raises the drive: below the target it is iner
     CHECK_LE (maxDelayedError (buf, in, chain.getLatencySamples(), 48000 * 6, buf.numSamples()), 1e-6);
 }
 
-TEST_CASE ("Chain: matched bypass reproduces the processed loudness within 0.5 LU; unmatched bypass is the input itself")
+TEST_CASE ("Chain: matched bypass plays the input as it is and turns the processed side down to it within 0.5 LU; unmatched bypass is the input itself")
 {
     // +10 dB maximizer drive on a steady, low-crest programme (peaks -25 dBFS):
     // the processed output is 10 LU louder than the input and is never
-    // limited, and the matched reference (the input + 10 dB, peaks -15 dBFS)
-    // stays far below the ceiling, so neither the per-block ceiling cap nor
-    // the reference's own limiter is involved: this measures LoudnessMatch.
+    // limited. docs/11 E37: the match only ever turns the louder side down,
+    // so in a comparison the reference is the input itself and the processed
+    // side, once the bypass is off again, plays 10 dB down (it used to raise
+    // the reference by 10 dB instead, and fell short where that needed
+    // headroom; see test_protection_gaps.cpp for hot programme).
     constexpr int kBlockSize = 512;
-    constexpr int kBypassAt = kBlockSize * 470; // ~5.0 s: followers settled, match gain slewed (3 dB/s)
-    constexpr int kTotal = kBlockSize * 800;    // ~3.5 s of bypass (> the 3 s short-term window)
+    constexpr int kBypassAt = kBlockSize * 470;   // ~5.0 s: measures settled
+    constexpr int kBypassOffAt = kBlockSize * 800; // ~8.5 s: 3.5 s of bypass (> the 3 s short-term window)
+    constexpr int kTotal = kBlockSize * 1130;      // ~3.5 s of the processed side again, still in the comparison
     Planar in (2, kTotal);
     for (int i = 0; i < kTotal; ++i)
     {
@@ -760,7 +763,7 @@ TEST_CASE ("Chain: matched bypass reproduces the processed loudness within 0.5 L
         ProcessingChain chain (store);
         chain.prepare ({ kFs, kBlockSize, 2 });
         Planar buf = in;
-        float wetLufs = 0.0f, inLufs = 0.0f;
+        float wetLufs = 0.0f, inLufs = 0.0f, refLufs = 0.0f, inAtOff = 0.0f;
         runChainWatching (chain, buf, kBlockSize, [&] (int end) {
             if (end == kBypassAt)
             {
@@ -768,47 +771,25 @@ TEST_CASE ("Chain: matched bypass reproduces the processed loudness within 0.5 L
                 inLufs = chain.meters().inShortTermLufs.load();
                 store.set (BypassAll, 1.0f);
             }
+            if (end == kBypassOffAt)
+            {
+                refLufs = chain.meters().shortTermLufs.load();
+                inAtOff = chain.meters().inShortTermLufs.load();
+                store.set (BypassAll, 0.0f);
+            }
         });
-        const float refLufs = chain.meters().shortTermLufs.load();
+        const float backLufs = chain.meters().shortTermLufs.load(), inAtEnd = chain.meters().inShortTermLufs.load();
         CHECK_GE (wetLufs - inLufs, 8.0f); // processing is clearly louder than the input
 
+        // The reference is the input, sample for sample (delayed by the
+        // chain latency), matched or not: the input is the quieter side.
         const int lat = chain.getLatencySamples();
-        const int from = kTotal - 48000 * 2; // the last 2 s, well after the 30 ms crossfade
-        if (matched)
-        {
-            CHECK_NEAR (refLufs, wetLufs, 0.5);
-            // The reference is the input times one gain: no processing, no limiting.
-            double xy = 0.0, xx = 0.0;
-            for (size_t c = 0; c < 2; ++c)
-                for (int i = from; i < kTotal; ++i)
-                {
-                    const double x = in.ch[c][static_cast<size_t> (i - lat)], y = buf.ch[c][static_cast<size_t> (i)];
-                    xy += x * y;
-                    xx += x * x;
-                }
-            // Here the processing is a pure +10 dB drive, so the loudness gap
-            // the reference has to close is exactly 10 LU.
-            const double g = xy / xx;
-            CHECK_NEAR (toDb (g), 10.0, 0.5);
-            double residual = 0.0, peak = 0.0;
-            for (size_t c = 0; c < 2; ++c)
-                for (int i = from; i < kTotal; ++i)
-                {
-                    const double y = buf.ch[c][static_cast<size_t> (i)];
-                    residual = std::max (residual, std::abs (y - g * in.ch[c][static_cast<size_t> (i - lat)]));
-                    peak = std::max (peak, std::abs (y));
-                }
-            CHECK_LE (residual, 0.01 * peak);
-            CHECK_LE (peak, dbToGain (-1.0f - 6.0f)); // far below the ceiling: no cap involved
-        }
-        else
-        {
-            // Unmatched: the reference is the input, sample for sample (delayed
-            // by the chain latency), at the input's loudness.
-            CHECK_LE (maxDelayedError (buf, in, lat, from, kTotal), 1e-6);
-            CHECK_NEAR (refLufs, chain.meters().inShortTermLufs.load(), 0.5);
-            CHECK_GE (wetLufs - refLufs, 8.0f);
-        }
+        const int from = kBypassOffAt - 48000 * 2; // the last 2 s of bypass, well after the 30 ms crossfade
+        CHECK_LE (maxDelayedError (buf, in, lat, from, kBypassOffAt), 1e-6);
+        CHECK_NEAR (refLufs, inAtOff, 0.5);
+        // Back on the processed side within the comparison: matched, it is
+        // 10 LU down, at the input's loudness; unmatched, 10 LU over it.
+        CHECK_NEAR (backLufs - inAtEnd, matched ? 0.0 : 10.0, 0.5);
     }
 }
 
@@ -1113,4 +1094,418 @@ TEST_CASE ("MixEngine: configureFrom builds a second engine that shares the runn
     CHECK (third.params (0).get (Mode) == running.params (0).get (Mode));
     third.params (0).set (Mode, 1.0f);
     CHECK (running.params (0).get (Mode) == 1.0f);
+}
+
+// ---------------------------------------------------------------------------
+// 5.1 / 7.1 input folds (docs/11 E01 LFE, E27 active channels, E24 (i)).
+namespace
+{
+/** An 8-channel stream fed block by block through a chain; channel levels
+    can change between calls. The chain's fold state is sampled per block. */
+struct SurroundFeed
+{
+    explicit SurroundFeed (ProcessingChain& c, int block = 512) : chain (c), blockSize (block) {}
+
+    ProcessingChain& chain;
+    int blockSize;
+    int64_t t = 0;
+    std::vector<int> foldPerBlock; // MeterBus::inputFold after each block
+
+    /** `seconds` of sines (a different frequency per channel) at the given
+        peak amplitudes, FL/FR as noise when `noiseFronts`. Returns the output. */
+    Planar run (const std::array<float, 8>& amps, double seconds, bool noiseFronts = true)
+    {
+        const int n = static_cast<int> (std::lround (seconds * kFs / blockSize)) * blockSize;
+        Planar buf (8, n);
+        for (int c = 0; c < 8; ++c)
+        {
+            const auto amp = amps[static_cast<size_t> (c)];
+            if (amp == 0.0f)
+                continue;
+            auto& ch = buf.ch[static_cast<size_t> (c)];
+            if (c < 2 && noiseFronts)
+            {
+                const auto x = whiteNoise (n, amp, static_cast<uint32_t> (77 + c + t));
+                std::copy (x.begin(), x.end(), ch.begin());
+            }
+            else
+            {
+                for (int i = 0; i < n; ++i)
+                    ch[static_cast<size_t> (i)] = amp * static_cast<float> (std::sin (kTwoPi * (310.0 + 90.0 * c) * static_cast<double> (t + i) / kFs));
+            }
+        }
+        const Planar in = buf;
+        std::vector<int> folds (static_cast<size_t> (n / blockSize));
+        {
+            AllocationGuard guard;
+            for (int pos = 0, b = 0; pos < n; pos += blockSize, ++b)
+            {
+                chain.process (buf.block (pos, blockSize));
+                folds[static_cast<size_t> (b)] = chain.meters().inputFold.load();
+            }
+            allocations += guard.allocations();
+        }
+        foldPerBlock.insert (foldPerBlock.end(), folds.begin(), folds.end());
+        t += n;
+        inputs.push_back (in);
+        return buf;
+    }
+
+    /** Seconds from `fromBlock` until the fold first read `fold`; -1 if never. */
+    double timeTo (int fold, size_t fromBlock) const
+    {
+        for (size_t b = fromBlock; b < foldPerBlock.size(); ++b)
+            if (foldPerBlock[b] == fold)
+                return static_cast<double> (b + 1 - fromBlock) * blockSize / kFs;
+        return -1.0;
+    }
+
+    std::vector<Planar> inputs;
+    int64_t allocations = 0; // inside chain.process()
+};
+
+std::array<float, 8> frontsOnly (float amp) { return { amp, amp, 0, 0, 0, 0, 0, 0 }; }
+} // namespace
+
+TEST_CASE ("Chain: a stereo game in an 8-channel container switches to the passthrough fold within 2.5 s without a level step, then equals the 2-channel render (E27)")
+{
+    for (bool virt : { false, true })
+    {
+        ParameterStore s8, s2;
+        for (auto* s : { &s8, &s2 })
+        {
+            bypassAllModules (*s);
+            s->set (VirtualizerOn, virt ? 1.0f : 0.0f);
+        }
+        ProcessingChain c8 (s8), c2 (s2);
+        c8.prepare ({ kFs, 512, 8 });
+        c2.prepare ({ kFs, 512, 2 });
+        SurroundFeed feed (c8);
+        const Planar out8 = feed.run (frontsOnly (0.1f), 4.0);
+        CHECK (feed.allocations == 0);
+        const Planar& in8 = feed.inputs.front();
+        Planar ref (2, in8.numSamples());
+        std::copy (in8.ch[0].begin(), in8.ch[0].end(), ref.ch[0].begin());
+        std::copy (in8.ch[1].begin(), in8.ch[1].end(), ref.ch[1].begin());
+        runChain (c2, ref, 512);
+
+        // Decision after 2 s of FL/FR-only content, then a 400 ms ramp.
+        const double decided = feed.timeTo (1, 0);
+        CHECK_GE (decided, 2.0);
+        CHECK_LE (decided + 0.4, 2.5);
+        CHECK (c8.meters().activeChannelMask.load() == 0x3u);
+        CHECK (! c8.meters().surroundConfirmed.load());
+
+        // Then exactly the 2-channel render (all modules bypassed: both are
+        // the input delayed by the same latency).
+        const int settled = static_cast<int> (2.5 * kFs);
+        double err = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = settled; i < out8.numSamples(); ++i)
+                err = std::max (err, static_cast<double> (std::abs (out8.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] - ref.ch[static_cast<size_t> (c)][static_cast<size_t> (i)])));
+        CHECK_LE (err, 1e-6);
+
+        // The ramp: output / 2-channel reference level in 20 ms windows moves
+        // by well under 1 dB between neighbours across the switch (1.9..3 s)
+        // and never dips below where it started (no hole mid-fade: the
+        // linear fade is RMS-compensated, next test). The BS.775 fold starts
+        // 3.01 dB below, the virtualiser about 0.8 dB, whose short-term level
+        // also wanders with the noise's spectrum in the steady fold (0.5..1.9 s).
+        const int w = static_cast<int> (0.02 * kFs);
+        double lowest = 0.0;
+        auto track = [&] (double from, double to, double& first, double& last) {
+            double prev = 0.0, maxStep = 0.0;
+            lowest = 0.0;
+            for (int i = static_cast<int> (from * kFs), k = 0; i + w <= static_cast<int> (to * kFs); i += w, ++k)
+            {
+                const double num = rms (out8.ch[0].data() + i, w) + rms (out8.ch[1].data() + i, w);
+                const double den = rms (ref.ch[0].data() + i, w) + rms (ref.ch[1].data() + i, w);
+                const double g = toDb (num / den);
+                lowest = std::min (lowest, g);
+                if (k == 0)
+                    first = g;
+                else
+                    maxStep = std::max (maxStep, std::abs (g - prev));
+                prev = g;
+            }
+            last = prev;
+            return maxStep;
+        };
+        double first = 0.0, last = 0.0, unused = 0.0;
+        const double steadyStep = track (0.5, 1.9, unused, unused);
+        const double switchStep = track (1.9, 3.0, first, last);
+        std::cout << "    measured " << (virt ? "virtualiser" : "BS.775") << " -> passthrough: start " << first << " dB, largest 20 ms step "
+                  << switchStep << " dB (steady fold: " << steadyStep << " dB)\n";
+        CHECK_NEAR (first, virt ? -0.8 : -3.01, virt ? 0.5 : 0.01);
+        CHECK_NEAR (last, 0.0, 0.01);
+        CHECK_LE (switchStep, virt ? 0.5 : 0.2);
+        CHECK_GE (lowest, first - (virt ? 0.3 : 0.01));
+    }
+}
+
+TEST_CASE ("Chain: the passthrough ramp is power-compensated - centred pink noise glides from the virtualiser to passthrough without a swell (E27)")
+{
+    // FL = FR pink noise (a centred, low-heavy source) in an 8-channel
+    // container, virtualiser on, every module off. The binaural render and
+    // the passthrough are strongly correlated in the lows, so an equal-power
+    // ramp between them swelled 1.2-1.5 dB above both folds mid-fade; the
+    // compensated linear ramp stays between the two folds' levels. Level:
+    // output / input power (both channels) in 50 ms windows, latency aligned.
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (VirtualizerOn, 1.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 512, 8 });
+    const int n = static_cast<int> (4.0 * kFs / 512) * 512;
+    Planar buf (8, n);
+    const auto pink = pinkNoise (n, 0.05f, 5);
+    buf.ch[0] = pink;
+    buf.ch[1] = pink;
+    runChain (chain, buf, 512);
+    const int latency = chain.getLatencySamples(), w = static_cast<int> (0.05 * kFs);
+    auto level = [&] (int from) {
+        double out = 0.0, in = 0.0;
+        for (int i = from; i < from + w; ++i)
+        {
+            const auto x = static_cast<double> (pink[static_cast<size_t> (i)]);
+            in += 2.0 * x * x;
+            for (int c = 0; c < 2; ++c)
+            {
+                const auto y = static_cast<double> (buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i + latency)]);
+                out += y * y;
+            }
+        }
+        return 10.0 * std::log10 (out / in);
+    };
+    double virtMax = -100.0, passMin = 100.0, fadeMax = -100.0, fadeMin = 100.0;
+    for (int i = static_cast<int> (1.0 * kFs); i + w <= static_cast<int> (1.9 * kFs); i += w / 4)
+        virtMax = std::max (virtMax, level (i)); // the virtualiser fold, before the decision
+    for (int i = static_cast<int> (1.9 * kFs); i + w <= static_cast<int> (2.6 * kFs); i += w / 4)
+    {
+        fadeMax = std::max (fadeMax, level (i));
+        fadeMin = std::min (fadeMin, level (i));
+    }
+    for (int i = static_cast<int> (2.6 * kFs); i + w + latency <= n; i += w / 4)
+        passMin = std::min (passMin, level (i)); // passthrough: 0 dB
+    std::cout << "    measured centred pink: virtualiser fold up to " << virtMax << " dB, during the ramp " << fadeMin << " .. " << fadeMax
+              << " dB, passthrough from " << passMin << " dB\n";
+    CHECK_NEAR (passMin, 0.0, 0.01);
+    CHECK_LE (fadeMax, virtMax + 0.3);
+    CHECK_GE (fadeMin, passMin - 0.3);
+}
+
+TEST_CASE ("Chain: rear content switches back to surround within 300 ms and latches through 30 s of rear silence; -45 dB ambience never leaves surround; redetect starts over (E27)")
+{
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (VirtualizerOn, 1.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 1024, 8 });
+    SurroundFeed feed (chain, 1024);
+    feed.run (frontsOnly (0.1f), 2.5);
+    CHECK (feed.foldPerBlock.back() == 1);
+
+    // A side-left sound 30 dB under the fronts.
+    auto rear = frontsOnly (0.1f);
+    rear[6] = 0.1f * dbToGain (-30.0f);
+    const size_t mark = feed.foldPerBlock.size();
+    feed.run (rear, 0.5);
+    const double back = feed.timeTo (0, mark);
+    CHECK (back > 0.0);
+    CHECK_LE (back, 0.30);
+    CHECK (chain.meters().surroundConfirmed.load());
+    CHECK (chain.meters().activeChannelMask.load() == ((1u << 6) | 0x3u));
+
+    // 30 s with silent rears: stays surround (the latch).
+    const size_t quiet = feed.foldPerBlock.size();
+    feed.run (frontsOnly (0.1f), 30.0);
+    CHECK (feed.timeTo (1, quiet) < 0.0);
+
+    // A new routed process: detection starts over.
+    chain.redetectInputChannels();
+    const size_t again = feed.foldPerBlock.size();
+    feed.run (frontsOnly (0.1f), 2.5);
+    CHECK (feed.timeTo (1, again) > 0.0);
+    CHECK (feed.allocations == 0);
+
+    // -45 dB rear ambience under the fronts is surround content.
+    chain.prepare ({ kFs, 1024, 8 });
+    SurroundFeed amb (chain, 1024);
+    auto ambience = frontsOnly (0.1f);
+    ambience[4] = ambience[5] = 0.1f * dbToGain (-45.0f);
+    amb.run (ambience, 5.0);
+    CHECK (amb.timeTo (1, 0) < 0.0);
+    CHECK (chain.meters().surroundConfirmed.load());
+}
+
+TEST_CASE ("Chain: Force Stereo / Force Surround and the own-HRTF switch (E27); focus 0 under the binaural lock (E24 (i))")
+{
+    auto full = frontsOnly (0.1f);
+    full[2] = full[4] = full[5] = full[6] = full[7] = 0.05f;
+    // Force Stereo: the passthrough fold from the first block, whatever the
+    // content, and no binaural lock on the (virtualiser-on) store's width.
+    {
+        ParameterStore store;
+        store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceStereo));
+        store.set (SpatialWidth, 1.5f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 8 });
+        SurroundFeed feed (chain);
+        feed.run (full, 0.5);
+        CHECK (feed.timeTo (0, 0) < 0.0);
+        CHECK (chain.effectiveValue (SpatialWidth) == 1.5f);
+    }
+    // Force Surround: FL/FR-only content never leaves the surround fold, and
+    // the binaural lock holds width 1 and focus 0 (Positional 100 %).
+    {
+        ParameterStore store;
+        store.set (Mode, 1.0f);
+        store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        store.set (SpatialWidth, 1.5f);
+        store.set (Macro2, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 8 });
+        SurroundFeed feed (chain);
+        feed.run (frontsOnly (0.1f), 3.0);
+        CHECK (feed.timeTo (1, 0) < 0.0);
+        CHECK (chain.effectiveValue (SpatialWidth) == 1.0f);
+        CHECK (chain.effectiveValue (SpatialFocus) == 0.0f);
+        // Auto on the same content: after the switch there is no binaural
+        // render, so no lock: width and focus apply again.
+        store.set (VirtInputMode, static_cast<float> (InputModeValue::Auto));
+        feed.run (frontsOnly (0.1f), 2.5);
+        CHECK (feed.foldPerBlock.back() == 1);
+        CHECK (chain.effectiveValue (SpatialWidth) > 1.0f);
+        CHECK (chain.effectiveValue (SpatialFocus) > 0.8f);
+    }
+    // The game renders its own HRTF: virtualiser off, width 1, focus 0,
+    // crossfeed 0, space 0 on any strip; a 7.1 strip folds as stereo at once
+    // unless surround is forced.
+    for (int channels : { 2, 8 })
+        for (bool forceSurround : { false, true })
+        {
+            ParameterStore store;
+            store.set (VirtOwnHrtf, 1.0f);
+            store.set (SpatialWidth, 1.8f);
+            store.set (SpatialFocus, 0.7f);
+            store.set (SpatialSpace, 0.5f);
+            store.set (SpatialCrossfeed, 0.5f); // Music mode: crossfeed is otherwise allowed
+            if (forceSurround)
+                store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+            ProcessingChain chain (store);
+            chain.prepare ({ kFs, 512, channels });
+            Planar buf (channels, 512 * 20);
+            runChain (chain, buf, 512);
+            CHECK (chain.effectiveValue (VirtualizerOn) == 0.0f);
+            CHECK (chain.effectiveValue (SpatialWidth) == 1.0f);
+            CHECK (chain.effectiveValue (SpatialFocus) == 0.0f);
+            CHECK (chain.effectiveValue (SpatialSpace) == 0.0f);
+            CHECK (chain.effectiveValue (SpatialCrossfeed) == 0.0f);
+            CHECK (chain.meters().inputFold.load() == (channels > 2 && ! forceSurround ? 1 : 0));
+        }
+}
+
+TEST_CASE ("Chain: the LFE folds at virt.lfe re one main in both folds; virt.lfeFold off is the v1 downmix bit for bit (E01)")
+{
+    // LFE-only vs FL-only 50 Hz, all modules bypassed, surround fold forced.
+    auto level = [] (int channel, bool virt, float lfeDb) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (VirtualizerOn, virt ? 1.0f : 0.0f);
+        store.set (VirtRoom, 0.0f);
+        store.set (VirtLfeGainDb, lfeDb);
+        store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 8 });
+        const int n = 48000;
+        Planar buf (8, n);
+        const auto s = sine (50.0, kFs, n, 0.25f);
+        std::copy (s.begin(), s.end(), buf.ch[static_cast<size_t> (channel)].begin());
+        runChain (chain, buf, 512);
+        return toDb (toneAmplitude (buf.ch[0].data() + n / 2, n / 2, 50.0, kFs));
+    };
+    CHECK (layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue == 6.0f);
+    for (float lfeDb : { 0.0f, 6.0f, 10.0f })
+    {
+        const double off = level (3, false, lfeDb) - level (0, false, lfeDb);
+        const double on = level (3, true, lfeDb) - level (0, true, lfeDb);
+        CHECK_NEAR (off, lfeDb, 0.05);
+        CHECK_NEAR (on, lfeDb, 0.1);
+    }
+
+    // LFE fold off: the v1 BS.775 downmix (LFE dropped, -3 dB), delayed by the
+    // chain latency, bit for bit.
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (VirtLfeFold, 0.0f);
+    store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 256, 8 });
+    const int lat = chain.getLatencySamples();
+    const int n = 24000;
+    Planar buf (8, n);
+    for (int c = 0; c < 8; ++c)
+    {
+        const auto x = whiteNoise (n, 0.1f, static_cast<uint32_t> (500 + c));
+        std::copy (x.begin(), x.end(), buf.ch[static_cast<size_t> (c)].begin());
+    }
+    std::vector<float> refL (static_cast<size_t> (n)), refR (static_cast<size_t> (n));
+    constexpr float k = 0.70710678f;
+    for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+    {
+        float lo = buf.ch[0][i], ro = buf.ch[1][i];
+        lo += k * buf.ch[2][i];
+        ro += k * buf.ch[2][i];
+        for (size_t c = 4; c + 1 < 8; c += 2)
+        {
+            lo += k * buf.ch[c][i];
+            ro += k * buf.ch[c + 1][i];
+        }
+        refL[i] = k * lo;
+        refR[i] = k * ro;
+    }
+    runChain (chain, buf, 256);
+    double err = 0.0;
+    for (int i = lat; i < n; ++i)
+    {
+        err = std::max (err, static_cast<double> (std::abs (buf.ch[0][static_cast<size_t> (i)] - refL[static_cast<size_t> (i - lat)])));
+        err = std::max (err, static_cast<double> (std::abs (buf.ch[1][static_cast<size_t> (i)] - refR[static_cast<size_t> (i - lat)])));
+    }
+    CHECK (err == 0.0);
+}
+
+TEST_CASE ("Presets: schema version 2 - a version-1 preset without virt.lfe keeps the version-1 default (0 dB), a version-2 one gets today's (+6 dB)")
+{
+    auto parse = [] (const char* text, preset::Preset& p, std::string& err) {
+        json::Value v;
+        REQUIRE (json::parse (text, v, err));
+        return preset::fromJson (v, p, err);
+    };
+    preset::Preset p;
+    std::string err;
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 1, "name": "Old", "params": { "boost": 0.5 } })", p, err));
+    CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == 0.0f);
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "name": "No version", "params": {} })", p, err));
+    CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == 0.0f);
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 1, "name": "Set", "params": { "virt.lfe": -4 } })", p, err));
+    CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == -4.0f);
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 2, "name": "New", "params": {} })", p, err));
+    CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == 6.0f);
+    CHECK (p.values[static_cast<size_t> (VirtLfeFold)] == 1.0f);
+    CHECK (! parse (R"({ "format": "flubsound-preset", "version": 3, "name": "Future", "params": {} })", p, err));
+
+    // Saving writes version 2, so a value equal to today's default may be
+    // omitted and still round-trips; a version-1 value of 0 dB is written.
+    preset::Preset old;
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 1, "name": "Old", "params": {} })", old, err));
+    const auto j = preset::toJson (old);
+    CHECK (j["version"].asNumber() == 2.0);
+    CHECK (j["params"]["virt.lfe"].asNumber (99.0) == 0.0);
+    preset::Preset back;
+    REQUIRE (preset::fromJson (j, back, err));
+    CHECK (back.values[static_cast<size_t> (VirtLfeGainDb)] == 0.0f);
+    const auto fresh = preset::toJson (preset::makeDefault());
+    CHECK (fresh["params"]["virt.lfe"].isNull());
+    REQUIRE (preset::fromJson (fresh, back, err));
+    CHECK (back.values[static_cast<size_t> (VirtLfeGainDb)] == 6.0f);
 }

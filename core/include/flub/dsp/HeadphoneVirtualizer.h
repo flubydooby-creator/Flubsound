@@ -9,7 +9,8 @@
 //   7.1 : FL FR FC LFE BL BR SL SR
 // Virtual speaker azimuths (deg, + = right): FL/FR -/+frontAngle (30),
 //   FC 0, SL/SR -/+sideAngle (100), BL/BR -/+rearAngle (145). LFE -> both
-//   ears, low-passed 120 Hz, at lfeGainDb.
+//   ears, low-passed 120 Hz, at lfeGainDb re one main channel, through the
+//   LfeFold that the chain's BS.775 fold shares (Bs775Fold.h, docs/11 E01).
 //
 // Renderer A - Parametric (built in, no data licence needed):
 //   Brown & Duda (1998) spherical-head model per source/ear:
@@ -37,6 +38,7 @@
 #pragma once
 
 #include "Biquad.h"
+#include "Bs775Fold.h"
 #include "Processor.h"
 #include "Svf.h"
 #include "flub/common/SmoothedValue.h"
@@ -76,7 +78,8 @@ struct VirtualizerParams
     float rearAngleDeg = 145.0f; // 120 .. 165
     float headRadiusMm = 87.5f;  // 70 .. 105 (personalisation)
     float roomAmount = 0.15f;    // 0 .. 1
-    float lfeGainDb = 0.0f;      // -20 .. +10
+    float lfeGainDb = 0.0f;      // -20 .. +16, re one main channel
+    bool lfeOn = true;           // false: the LFE is not rendered (fades out over 20 ms)
 
     bool operator== (const VirtualizerParams&) const = default;
 };
@@ -179,10 +182,8 @@ private:
     ChannelLayout hrirLayout = ChannelLayout::Surround71;
     bool hrirValid = false, useHrir = false;
 
-    // LFE: 4th-order Butterworth low-pass.
-    std::array<SvfCoeffs, 2> lfeCoeffs {};
-    std::array<SvfState, 2> lfeState {};
-    LinearSmoothedValue lfeGain;
+    // LFE: 4th-order Butterworth low-pass and level (shared with Bs775Fold).
+    LfeFold lfe;
 
     // Early reflections from the band-limited mono speaker sum.
     SvfCoeffs reflHpCoeffs, reflLpCoeffs;

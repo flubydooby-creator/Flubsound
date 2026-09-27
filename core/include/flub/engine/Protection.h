@@ -26,7 +26,7 @@
 //   under budget minus 1.5 dB hysteresis it recovers at 3 %/s. The scale
 //   multiplies every "governed" macro amount; base values are never touched.
 //
-// GatedLoudness (shared by the three loops below):
+// GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
 //   present. The gate is open when the block is not (near) digital silence
 //   (RMS above -70 dBFS), a fast 100 ms follower reads above -50 LUFS, and it
@@ -46,9 +46,22 @@
 //   unbiased from the first block on.
 //
 // AutoLevel (LUFS input levelling / loudness normalisation):
-//   GatedLoudness on the input; gain = target - measured, limited to +-12 dB,
-//   slew-limited to +1 dB/s (up) and -4 dB/s (down), adapted only while the
-//   gate is open. Applied as a per-block linear ramp (click-free).
+//   GatedLoudness on the input with its upper gate on (below); gain =
+//   target - measured, limited to -12..+6 dB (a quiet bed is lifted at most
+//   6 dB), slew-limited to +1 dB/s (up) and -4 dB/s (down), adapted only
+//   while the measure is advanced: frozen in silence, pauses and fade-outs,
+//   while programme is kept out by the relative gate, and during loud events
+//   the upper gate holds. For 2 s after such a freeze of programme the
+//   upward slew is 3 dB/s, so what a long event took away comes back fast.
+//   Applied as a per-block linear ramp (click-free).
+//   Upper gate (docs/11 E21): a 400 ms K-weighted momentary loudness runs
+//   beside the slow measure; while it reads more than 8 LU above the slow
+//   measure, the block is left out of the slow measure and the gain holds, so
+//   an explosion or a burst of gunfire neither pulls the gain down nor leaves
+//   a hole in the ambience after it. Programme that stays that loud is a new
+//   level, not an event: after 5 s of it (counted while the 100 ms follower
+//   also reads above the gate, so the 400 ms measure's decay after an event
+//   does not count) the slow measure restarts on it.
 //
 // AutoDrive (maximizer loudness target):
 //   GatedLoudness on the post-chain output; a slow integrating loop (0.5 LU
@@ -57,14 +70,34 @@
 //   stop over-limiting but can never make things louder than the user/macros
 //   asked for.
 //
-// LoudnessMatch (fair A/B): two GatedLoudness measures (dry, wet); gainDb for
-//   the dry path = wet - dry, clamped +-12 dB, slewed 3 dB/s.
+// ComparisonMatcher (fair A/B through the loudness-matched bypass, docs/11
+//   E37 Phase 1): the dry reference and the processed output are K-weighted
+//   all the time, in 100 ms sub-blocks. A sub-block is admitted when either
+//   side reads above -60 LUFS; the difference is the energy ratio over the
+//   last 30 admitted sub-blocks (3 s of programme, pauses left out), valid
+//   from 4 on while both sides read above -70 LUFS over them. A sliding
+//   window forgets a change completely after 3 s (a one-pole average took
+//   16 s to settle within 0.1 dB after a 7 dB drop). It only ever
+//   attenuates the louder side: dry trim = min (0, wet - dry), wet trim =
+//   min (0, dry - wet), limited to -20 dB. A raise would need headroom the
+//   dry reference does not have (the processed side got its loudness from
+//   limiting), so the former capped, raise-only match read 2-3 LU short on
+//   hot programme. A comparison starts when the global bypass is engaged
+//   with matching on and lasts until the bypass has been off for 10 s;
+//   during it the processed side keeps its trim, so every flip back and
+//   forth is matched (the first flip still hears the processed side at its
+//   own level). The trims follow the live difference for the first 1 s of
+//   measured programme of a comparison (acquire) and are then frozen until
+//   it ends, so the reference does not ride the programme. When it ends,
+//   the wet trim returns to 0 dB at 2 dB/s. Matching off: the dry trim is
+//   0 dB at once and the wet trim returns at the same rate.
 #pragma once
 
 #include "flub/analysis/LoudnessFollower.h"
 #include "flub/common/Realtime.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 
@@ -77,25 +110,35 @@ public:
     /** Programme kept out by the relative gate alone for this long restarts
         the slow measure (see the header comment). */
     static constexpr double kRelativeReleaseSeconds = 3.0;
+    /** Upper gate (AutoLevel only, see the AutoLevel header comment). */
+    static constexpr float kUpperMomentaryMs = 400.0f;
+    static constexpr float kUpperGateLu = 8.0f;
+    static constexpr double kUpperReleaseSeconds = 5.0;
+
+    /** Turns the upper gate on or off; call before prepare(). */
+    void setUpperGate (bool on) noexcept { upperGate = on; }
 
     void prepare (double sampleRate, int numChannels)
     {
         channels = numChannels;
         momentary.prepare (sampleRate, numChannels, 100.0f);
         slow.prepare (sampleRate, numChannels, kSlowTimeMs);
+        upper.prepare (sampleRate, numChannels, kUpperMomentaryMs);
         slowPole = static_cast<double> (onePoleCoeff (kSlowTimeMs, sampleRate));
         releaseSamples = static_cast<std::int64_t> (kRelativeReleaseSeconds * sampleRate);
+        upperReleaseSamples = static_cast<std::int64_t> (kUpperReleaseSeconds * sampleRate);
         reset();
     }
 
     void reset() noexcept
     {
         momentary.reset();
+        upper.reset();
         restartSlow();
-        gateOpen = false;
+        gateOpen = held = programme = false;
     }
 
-    void process (const AudioBlock& block) noexcept
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
     {
         // Instant close on (near) digital silence: track gaps, paused players.
         double sumSquares = 0.0;
@@ -106,11 +149,32 @@ public:
         const bool silent = sumSquares <= 1.0e-7 * std::max (1, nch * block.numSamples); // < -70 dBFS RMS
 
         momentary.process (block);
+        if (upperGate)
+            upper.process (block);
         const float m = momentary.getLufs();
-        const bool absoluteOpen = ! silent && m > -50.0f;
+        programme = ! silent && m > -50.0f;
         const float s = getLufs();
-        gateOpen = absoluteOpen && (! (s > -60.0f) || m > s - 20.0f);
-        if (gateOpen)
+        gateOpen = programme && (! (s > -60.0f) || m > s - 20.0f);
+
+        // Upper gate: a loud event is held out of the slow measure; one that
+        // lasts kUpperReleaseSeconds is a new level and restarts it.
+        held = upperGate && gateOpen && s > -60.0f && upper.getLufs() > s + kUpperGateLu;
+        if (held)
+        {
+            if (m > s + kUpperGateLu)
+                upperHeldSamples += block.numSamples;
+            if (upperHeldSamples >= upperReleaseSamples)
+            {
+                restartSlow();
+                held = false;
+            }
+        }
+        else
+        {
+            upperHeldSamples = 0;
+        }
+
+        if (gateOpen && ! held)
         {
             relativeGatedSamples = 0;
             slow.process (block);
@@ -123,7 +187,7 @@ public:
                 biasDb = residual > 1.0e-7 ? static_cast<float> (-10.0 * std::log10 (1.0 - residual)) : 0.0f;
             }
         }
-        else if (absoluteOpen)
+        else if (programme && ! gateOpen)
         {
             // Programme is present but more than 20 LU below the slow
             // measure, which cannot move while it is kept out: after
@@ -140,8 +204,14 @@ public:
         const float raw = slow.getLufs();
         return raw > kMinusInfDb ? raw + biasDb : raw;
     }
-    /** True while programme is present and the slow measure is valid. */
-    bool isActive() const noexcept { return gateOpen && getLufs() > -60.0f; }
+    /** True while the slow measure is valid and was advanced by the last
+        block: programme present, inside the gates, not held by the upper gate. */
+    bool isActive() const noexcept { return gateOpen && ! held && getLufs() > -60.0f; }
+    /** True while the upper gate holds the last block out (a loud event). */
+    bool isHeld() const noexcept { return held; }
+    /** True when the last block was programme (not silence, above the
+        absolute gate), whether or not it was admitted. */
+    bool hasProgramme() const noexcept { return programme; }
 
 private:
     void restartSlow() noexcept
@@ -149,15 +219,17 @@ private:
         slow.reset();
         openSamples = 0;
         relativeGatedSamples = 0;
+        upperHeldSamples = 0;
         biasDb = 1.0f; // any value > 0: recomputed on the next open block
     }
 
-    LoudnessFollower momentary, slow;
+    LoudnessFollower momentary, slow, upper;
     int channels = 2;
     double slowPole = 0.0;
-    std::int64_t releaseSamples = 144000, openSamples = 0, relativeGatedSamples = 0;
+    std::int64_t releaseSamples = 144000, upperReleaseSamples = 240000;
+    std::int64_t openSamples = 0, relativeGatedSamples = 0, upperHeldSamples = 0;
     float biasDb = 0.0f;
-    bool gateOpen = false;
+    bool upperGate = false, gateOpen = false, held = false, programme = false;
 };
 
 class DistortionMonitor
@@ -217,20 +289,29 @@ private:
 class AutoLevel
 {
 public:
+    static constexpr float kMaxGainDb = 6.0f;   // upward cap (docs/11 E21; was +12)
+    static constexpr float kMinGainDb = -12.0f;
+    static constexpr float kUpDbPerSec = 1.0f;
+    static constexpr float kDownDbPerSec = 4.0f;
+    static constexpr float kRecoveryUpDbPerSec = 3.0f; // for kRecoverySeconds after a freeze
+    static constexpr double kRecoverySeconds = 2.0;
+
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;
     void setTargetLufs (float lufs) noexcept { target = lufs; }
     void setEnabled (bool on) noexcept { enabled = on; }
 
     /** Measures and applies the levelling gain in place. */
-    void process (const AudioBlock& block) noexcept;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING;
     float getGainDb() const noexcept { return gainDb; }
+    /** True while the upper gate holds the gain through a loud event. */
+    bool isHeld() const noexcept { return follower.isHeld(); }
 
 private:
     GatedLoudness follower;
-    double sr = 48000.0;
+    double sr = 48000.0, recoveryLeft = 0.0;
     float target = -18.0f, gainDb = 0.0f, lastLinear = 1.0f;
-    bool enabled = false;
+    bool enabled = false, frozen = false;
 };
 
 class AutoDrive
@@ -251,19 +332,62 @@ private:
     float reductionDb = 0.0f;
 };
 
-class LoudnessMatch
+class ComparisonMatcher
 {
 public:
+    static constexpr double kAcquireSeconds = 1.0;
+    static constexpr double kSessionEndSeconds = 10.0; // bypass off this long ends a comparison
+    static constexpr float kReleaseDbPerSec = 2.0f;
+    static constexpr float kMaxTrimDb = 20.0f;
+    static constexpr double kSubBlockSeconds = 0.1;
+    static constexpr int kWindowSubBlocks = 30; // 3 s of programme
+    static constexpr int kMinSubBlocks = 4;     // measure valid after 0.4 s of programme
+
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;
-    void measureDry (const AudioBlock& dry) noexcept;
-    void measureWet (const AudioBlock& wet) noexcept;
-    /** Gain (dB) to apply to the dry path so it matches the wet loudness. */
-    float getDryGainDb (int numSamples) noexcept;
+    void measureDry (const AudioBlock& dry) noexcept FLUB_NONBLOCKING;
+    void measureWet (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;
+    /** Closes the block both sides were measured on and advances the
+        comparison by its numSamples: bypassEngaged = the global bypass is on,
+        matching = loudness matching is on. */
+    void update (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** Applies the wet trim to the processed block in place, as a linear
+        ramp from the last block's value (click-free). */
+    void applyWetTrim (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;
+
+    /** Trim (dB, <= 0) for the dry reference. */
+    float getDryTrimDb() const noexcept { return dryTrimDb; }
+    /** Trim (dB, <= 0) for the processed output. */
+    float getWetTrimDb() const noexcept { return wetTrimDb; }
+    /** Processed minus dry loudness over the window (LU); valid only while
+        hasMeasurement(). */
+    float getDifferenceLu() const noexcept { return differenceLu; }
+    bool hasMeasurement() const noexcept { return measured; }
+    bool isComparing() const noexcept { return comparing; }
+    /** True once the trims of the current comparison are frozen. */
+    bool isFrozen() const noexcept { return comparing && acquiredSamples >= acquireSamples; }
 
 private:
-    GatedLoudness dryF, wetF;
+    /** K-weighted, channel-weighted sum of squares of one side (BS.1770). */
+    struct Side
+    {
+        Biquad stage1, stage2;
+        double subBlock = 0.0;
+        std::array<double, kWindowSubBlocks> ring {};
+        void prepare (double sampleRate) noexcept;
+        void reset() noexcept;
+        void process (const AudioBlock& block, int channels) noexcept FLUB_NONBLOCKING;
+        double windowSum() const noexcept;
+    };
+    void closeSubBlock() noexcept FLUB_NONBLOCKING;
+
+    Side dry, wet;
     double sr = 48000.0;
-    float gainDb = 0.0f;
+    int channels = 2, ringPos = 0, ringCount = 0;
+    std::int64_t subBlockSamples = 4800, pendingSamples = 0;
+    std::int64_t acquireSamples = 48000, sessionEndSamples = 480000;
+    std::int64_t acquiredSamples = 0, offSamples = 0;
+    float dryTrimDb = 0.0f, wetTrimDb = 0.0f, lastWetGain = 1.0f, differenceLu = 0.0f;
+    bool comparing = false, measured = false;
 };
 } // namespace flub

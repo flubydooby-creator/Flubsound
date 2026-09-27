@@ -7,6 +7,7 @@
 //                                                           +-> Lagrange(D_R) -> shadow_R -> ear R
 //   speaker (HRIR):        x -> history -> dot(h_L) -> ear L,  dot(h_R) -> ear R
 //   LFE:                   x -> 4th-order Butterworth LP 120 Hz -> lfeGain -> both ears
+//                          (LfeFold, shared with the chain's BS.775 fold)
 //   room:                  sum of speaker inputs -> HP 200 Hz -> LP 5 kHz -> 6 taps
 //                          (4 .. 19 ms, alternating ears) * roomAmount
 //
@@ -70,7 +71,7 @@ constexpr float kMinFrontDeg = 22.0f, kMaxFrontDeg = 45.0f;
 constexpr float kMinSideDeg = 80.0f, kMaxSideDeg = 120.0f;
 constexpr float kMinRearDeg = 120.0f, kMaxRearDeg = 165.0f;
 constexpr float kMinHeadMm = 70.0f, kMaxHeadMm = 105.0f;
-constexpr float kMinLfeDb = -20.0f, kMaxLfeDb = 10.0f;
+constexpr float kMinLfeDb = LfeFold::kMinDb, kMaxLfeDb = LfeFold::kMaxDb;
 
 // -3 dB headroom trim: a phantom source that hits both ears in phase (centre
 // speaker plus reflections plus LFE) must not overload the rest of the chain.
@@ -81,8 +82,6 @@ constexpr float kTrim = 0.70794578f; // 10^(-3/20)
 constexpr double kRearShelfHz = 4000.0;
 constexpr double kRearShelfQ = 0.70710678;
 constexpr float kRearShelfDb = -4.0f;
-
-constexpr double kLfeCutoffHz = 120.0;
 
 // Early reflections: 6 taps, alternating ears (even -> left, odd -> right),
 // weights paired so both ears receive the same reflected energy
@@ -137,6 +136,7 @@ VirtualizerParams sanitise (const VirtualizerParams& p) noexcept
     s.headRadiusMm = clampOr (p.headRadiusMm, kMinHeadMm, kMaxHeadMm, d.headRadiusMm);
     s.roomAmount = clampOr (p.roomAmount, 0.0f, 1.0f, d.roomAmount);
     s.lfeGainDb = clampOr (p.lfeGainDb, kMinLfeDb, kMaxLfeDb, d.lfeGainDb);
+    s.lfeOn = p.lfeOn;
     return s;
 }
 
@@ -392,9 +392,8 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     reflHpCoeffs = SvfCoeffs::make (FilterType::HighPass, kReflectionHpHz, butterworthQ (1, 0), 0.0, fs);
     reflLpCoeffs = SvfCoeffs::make (FilterType::LowPass, kReflectionLpHz, butterworthQ (1, 0), 0.0, fs);
 
-    // LFE: 4th-order Butterworth = two SVF low-pass sections.
-    for (int s = 0; s < 2; ++s)
-        lfeCoeffs[static_cast<size_t> (s)] = SvfCoeffs::make (FilterType::LowPass, kLfeCutoffHz, butterworthQ (2, s), 0.0, fs);
+    // LFE: 4th-order Butterworth = two SVF low-pass sections (LfeFold).
+    lfe.prepare (fs, LfeFold::gainFor (params.lfeOn, params.lfeGainDb));
 
     const auto scratch = static_cast<size_t> (spec.maxBlockSize);
     accL.assign (scratch, 0.0f);
@@ -410,7 +409,6 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     headRadius.reset (controlRate, kGeometrySmoothingMs, params.headRadiusMm);
     for (auto& sp : speakers)
         sp.shelfDb.reset (controlRate, kShelfSmoothingMs, 0.0f);
-    lfeGain.reset (fs, kGainRampMs, dbToGain (params.lfeGainDb));
     roomGain.reset (fs, kGainRampMs, params.roomAmount);
 
     // The swap fade is a whole number of control periods, so a fade that
@@ -441,7 +439,7 @@ void HeadphoneVirtualizer::reset() noexcept FLUB_NONBLOCKING
     fadePos = fadeSamples;
     fadeDir = 0;
     holdRemaining = 0;
-    lfeGain.setImmediate (lfeGain.getTarget());
+    lfe.reset();
     roomGain.setImmediate (roomGain.getTarget());
     samplesToTick = 0;
     rampPos = 0;
@@ -461,7 +459,7 @@ void HeadphoneVirtualizer::setParams (const VirtualizerParams& p) noexcept FLUB_
     sideAngle.setTarget (s.sideAngleDeg);
     rearAngle.setTarget (s.rearAngleDeg);
     headRadius.setTarget (s.headRadiusMm);
-    lfeGain.setTarget (dbToGain (s.lfeGainDb));
+    lfe.setGain (LfeFold::gainFor (s.lfeOn, s.lfeGainDb));
     roomGain.setTarget (s.roomAmount);
     // Geometry glides and layout swaps run on the control ticks, which sit at
     // fixed positions in the stream.
@@ -532,8 +530,7 @@ void HeadphoneVirtualizer::clearChannel (int channel) noexcept
     auto& path = hrirPaths[static_cast<size_t> (channel)];
     std::fill (path.history.begin(), path.history.end(), 0.0f);
     if (sp.role == Role::Lfe)
-        for (auto& s : lfeState)
-            s.reset();
+        lfe.clearState();
     sp.clean = true;
 }
 
@@ -543,8 +540,7 @@ void HeadphoneVirtualizer::clearState() noexcept
     // mono speaker sum and stays continuous across a swap (reset() clears it).
     for (int c = 0; c < kMaxChannels; ++c)
         clearChannel (c);
-    for (auto& s : lfeState)
-        s.reset();
+    lfe.clearState();
 }
 
 void HeadphoneVirtualizer::swapLayout() noexcept
@@ -554,12 +550,12 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     // clean per-channel state. A silent pre-roll then lets the new paths fill
     // before the fade-in, which hides the rest of the filters' start-up.
     runningLayout = params.layout;
-    const bool lfe = hasLfe (runningLayout);
+    const bool withLfe = hasLfe (runningLayout);
     const int numLayoutChannels = channelCount (runningLayout);
     for (int c = 0; c < kMaxChannels; ++c)
     {
         auto& sp = speakers[static_cast<size_t> (c)];
-        sp.role = c >= numLayoutChannels ? Role::None : (lfe && c == 3 ? Role::Lfe : Role::Speaker);
+        sp.role = c >= numLayoutChannels ? Role::None : (withLfe && c == 3 ? Role::Lfe : Role::Speaker);
     }
     useHrir = hrirValid && hrirLayout == runningLayout;
 
@@ -711,18 +707,7 @@ void HeadphoneVirtualizer::renderHrir (HrirPath& path, const float* x, int lengt
 
 void HeadphoneVirtualizer::renderLfe (const float* x, int length) noexcept
 {
-    const SvfCoeffs c0 = lfeCoeffs[0], c1 = lfeCoeffs[1];
-    SvfState s0 = lfeState[0], s1 = lfeState[1];
-    float* const outL = accL.data();
-    float* const outR = accR.data();
-    for (int i = 0; i < length; ++i)
-    {
-        const float y = svfTick (c1, s1, svfTick (c0, s0, x[i])) * lfeGain.next();
-        outL[i] += y;
-        outR[i] += y;
-    }
-    storeState (lfeState[0], s0);
-    storeState (lfeState[1], s1);
+    lfe.addTo (x, accL.data(), accR.data(), length);
 }
 
 void HeadphoneVirtualizer::renderReflections (int length) noexcept
@@ -816,13 +801,8 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
             renderParametric<false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
         }
     }
-    if (! lfeRendered && lfeGain.isSmoothing())
-    {
-        // Keep the ramp in stream time. Stepped per sample (not skip()) so the
-        // float value is the same for any block partition.
-        for (int i = 0; i < length; ++i)
-            lfeGain.next();
-    }
+    if (! lfeRendered)
+        lfe.skip (length); // keep the ramp in stream time
 
     renderReflections (length);
 

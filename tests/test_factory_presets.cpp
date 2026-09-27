@@ -5,12 +5,16 @@
 //     tags) and live in a file named "<category>-<slug>.json",
 //   * use only known parameter keys, valid choice labels, true/false toggles
 //     and in-range numbers, and store ONLY non-default values,
+//   * store no app state (`bypass`, `bypass.matched`, `latency.profile`):
+//     loading a preset never changes the latency profile (docs/11 E40); the
+//     profile a preset is made for is the "suggestedLatencyProfile" label,
 //   * keep the product's output protection: maximizer engaged, output gain
 //     <= 0 dB (it is applied after the limiter), ceiling <= -1 dBTP
 //     (<= -2 dBTP for the Bluetooth device preset),
 //   * render a hot drum/bass/pad programme through the full ProcessingChain
-//     (prepared AFTER loading, so the latency profile is honoured) with
-//     finite output, sample peaks below the ceiling and no safety clips.
+//     in Balanced, Low Latency and the suggested profile (the user, not the
+//     preset, chooses it) with finite output, sample peaks below the ceiling
+//     and no safety clips.
 //
 // FLUB_PRESET_DIR (and FLUB_DEVICE_PROFILES) are compile definitions from
 // tests/CMakeLists.txt; builds without them compile this file to nothing.
@@ -109,6 +113,25 @@ bool isSurroundPreset (const preset::Preset& p)
 int choiceIndex (const preset::Preset& p, int id)
 {
     return static_cast<int> (std::lround (p.values[static_cast<size_t> (id)]));
+}
+
+constexpr LatencyProfileValue kProfiles[] = { LatencyProfileValue::Quality, LatencyProfileValue::Balanced, LatencyProfileValue::LowLatency };
+
+const std::string& profileName (LatencyProfileValue profile)
+{
+    return layout()[static_cast<size_t> (LatencyProfile)].choices[static_cast<size_t> (profile)];
+}
+
+/** The profiles a preset is rendered in: the user, not the preset, picks the
+    profile, so Balanced (the default) and Low Latency (the shortest limiter
+    look-ahead) always, and Quality (the longest look-aheads, the gate and HQ
+    oversampling; by far the slowest to render) when the preset suggests it. */
+std::vector<LatencyProfileValue> renderProfiles (const preset::Preset& p)
+{
+    std::vector<LatencyProfileValue> profiles { LatencyProfileValue::Balanced, LatencyProfileValue::LowLatency };
+    if (p.suggestedLatencyProfile == LatencyProfileValue::Quality)
+        profiles.push_back (LatencyProfileValue::Quality);
+    return profiles;
 }
 
 /** Hot drum / bass / pad programme (peaks ~ -0.3 dBFS, i.e. a loud master):
@@ -321,6 +344,8 @@ TEST_CASE ("Factory presets: metadata, keys, labels and output protection are va
             }
             if (! seen.insert (key).second)
                 fail (f, "duplicate parameter key '" + key + "'");
+            if (preset::isAppState (id))
+                fail (f, key + " is app state and never part of a preset (use \"suggestedLatencyProfile\" for the profile)");
             const std::string problem = checkParamValue (table[static_cast<size_t> (id)], value);
             if (! problem.empty())
                 fail (f, key + ": " + problem);
@@ -342,8 +367,12 @@ TEST_CASE ("Factory presets: metadata, keys, labels and output protection are va
             fail (f, "the maximizer (true-peak limiter) must stay enabled");
         if (p.values[static_cast<size_t> (OutputGainDb)] > 0.0f)
             fail (f, "output gain is applied after the limiter and must be <= 0 dB");
-        if (p.values[static_cast<size_t> (BypassAll)] >= 0.5f)
-            fail (f, "a factory preset must not load in global bypass");
+
+        // ---- Suggested latency profile: metadata only, a valid label ----
+        const auto& suggestion = root["suggestedLatencyProfile"];
+        if (! suggestion.isNull()
+            && (! suggestion.isString() || ! p.suggestedLatencyProfile || profileName (*p.suggestedLatencyProfile) != suggestion.asString()))
+            fail (f, "suggestedLatencyProfile must be one of the latency.profile labels");
     }
 }
 
@@ -402,17 +431,68 @@ TEST_CASE ("Factory presets: macros stack sanely and gaming presets keep positio
                 fail (f, "the compressor is engaged but its ratio / threshold are left at the defaults");
         }
 
-        // ---- Latency profile matches the "low-latency" tag ----
+        // ---- Suggested latency profile matches the "low-latency" tag ----
         const bool lowLatencyTag = std::find (p.tags.begin(), p.tags.end(), "low-latency") != p.tags.end();
-        const bool lowLatency = choiceIndex (p, LatencyProfile) == static_cast<int> (LatencyProfileValue::LowLatency);
+        const bool lowLatency = p.suggestedLatencyProfile == LatencyProfileValue::LowLatency;
         if (lowLatencyTag != lowLatency)
-            fail (f, "the \"low-latency\" tag and the Low Latency profile must go together");
+            fail (f, "the \"low-latency\" tag and a suggested Low Latency profile must go together");
         if (gaming && (contains (p.name, "competitive") || contains (p.name, "tournament")) && ! lowLatency)
-            fail (f, "competitive / tournament presets must use the Low Latency profile");
+            fail (f, "competitive / tournament presets must suggest the Low Latency profile");
+
+        // ---- Small-speaker mode keeps the fundamentals its harmonics come from ----
+        // The subsonic high-pass (bass engine stage 1) runs before the harmonic
+        // generator (stage 4), and replaceFundamental removes everything below
+        // the cutoff afterwards, so the harmonics are all that is left of the
+        // lowest octave. A subsonic above the 20 Hz default removed it: for a
+        // 30 Hz tone, Laptop Speakers at 40 Hz gave 9.2 dB less audible-band
+        // (>= 120 Hz) energy than at 0 (docs/11 E03; KnownGap test in
+        // test_known_gaps.cpp).
+        if (value (BassReplaceFundamental) >= 0.5f && value (BassSubsonic) > 20.0f)
+            fail (f, "with bass.replaceFundamental the subsonic filter must stay <= 20 Hz (it runs before the harmonics)");
     }
 }
 
-TEST_CASE ("Factory presets: each renders a hot programme cleanly below its ceiling")
+TEST_CASE ("Factory presets: loading one leaves the latency profile and bypass state alone and needs no re-prepare (E40)")
+{
+    // A strip on any profile, bypass engaged and matched bypass off (all
+    // non-default), loads each preset through both store paths: the preset
+    // path, and applyToStore, which the app's PresetManager still used when
+    // the factory presets stopped carrying latency.profile.
+    for (const auto& f : factoryFiles())
+    {
+        preset::Preset p;
+        std::string error;
+        if (! preset::load (f.path.string(), p, error))
+        {
+            fail (f, "does not load: " + error);
+            continue;
+        }
+        for (const auto profile : kProfiles)
+            for (const bool presetPath : { true, false })
+            {
+                ParameterStore store;
+                store.set (Bank::A, LatencyProfile, static_cast<float> (static_cast<int> (profile)));
+                store.set (Bank::A, BypassAll, 1.0f);
+                store.set (Bank::A, LoudnessMatchBypass, 0.0f);
+                ProcessingChain chain (store);
+                chain.prepare ({ kFs, kBlockSize, 2 });
+
+                if (presetPath)
+                    preset::applyPresetToStore (p, store, Bank::A);
+                else
+                    preset::applyToStore (p, store, Bank::A);
+                const std::string in = std::string (presetPath ? " (applyPresetToStore, " : " (applyToStore, ") + profileName (profile) + ")";
+                if (store.get (Bank::A, LatencyProfile) != static_cast<float> (static_cast<int> (profile)))
+                    fail (f, "loading changed latency.profile" + in);
+                if (store.get (Bank::A, BypassAll) != 1.0f || store.get (Bank::A, LoudnessMatchBypass) != 0.0f)
+                    fail (f, "loading changed bypass / bypass.matched" + in);
+                if (chain.needsReprepare())
+                    fail (f, "loading requires a re-prepare" + in);
+            }
+    }
+}
+
+TEST_CASE ("Factory presets: each renders a hot programme cleanly below its ceiling in Balanced, Low Latency and its suggested profile")
 {
     const Planar stereo = makeProgramme (2);
     const Planar surround = makeProgramme (8);
@@ -427,60 +507,65 @@ TEST_CASE ("Factory presets: each renders a hot programme cleanly below its ceil
             continue;
         }
 
-        ParameterStore store;
-        preset::applyToStore (p, store, Bank::A);
-        ProcessingChain chain (store);
-        const int channels = isSurroundPreset (p) ? 8 : 2;
-        chain.prepare ({ kFs, kBlockSize, channels }); // after loading: the latency profile is structural
-        CHECK (! chain.needsReprepare());
-
-        const int profile = std::clamp (choiceIndex (p, LatencyProfile), 0, 2);
-        const double latencyMs = 1000.0 * chain.getLatencySamples() / kFs;
-        if (latencyMs > kMaxLatencyMs[profile])
-            fail (f, "latency " + std::to_string (latencyMs) + " ms exceeds its profile's bound");
-
-        Planar buf = channels == 8 ? surround : stereo;
+        // The profile is the user's choice (app state), not the preset's.
+        for (const auto profile : renderProfiles (p))
         {
-            ScopedNoDenormals noDenormals;
-            for (int pos = 0; pos < kRenderSamples; pos += kBlockSize)
-                chain.process (buf.block (pos, std::min (kBlockSize, kRenderSamples - pos)));
+            const std::string in = " (" + profileName (profile) + ")";
+            ParameterStore store;
+            store.set (Bank::A, LatencyProfile, static_cast<float> (static_cast<int> (profile)));
+            preset::applyPresetToStore (p, store, Bank::A);
+            ProcessingChain chain (store);
+            const int channels = isSurroundPreset (p) ? 8 : 2;
+            chain.prepare ({ kFs, kBlockSize, channels });
+            CHECK (! chain.needsReprepare());
+
+            const double latencyMs = 1000.0 * chain.getLatencySamples() / kFs;
+            if (latencyMs > kMaxLatencyMs[static_cast<int> (profile)])
+                fail (f, "latency " + std::to_string (latencyMs) + " ms exceeds its profile's bound" + in);
+
+            Planar buf = channels == 8 ? surround : stereo;
+            {
+                ScopedNoDenormals noDenormals;
+                for (int pos = 0; pos < kRenderSamples; pos += kBlockSize)
+                    chain.process (buf.block (pos, std::min (kBlockSize, kRenderSamples - pos)));
+            }
+
+            bool finite = true;
+            for (const auto& c : buf.ch)
+                finite = finite && std::all_of (c.begin(), c.end(), [] (float v) { return std::isfinite (v); });
+            if (! finite)
+            {
+                fail (f, "non-finite output" + in);
+                continue;
+            }
+
+            const float ceilingDb = p.values[static_cast<size_t> (MaxCeilingDb)];
+            const double ceiling = dbToGain (ceilingDb);
+            for (int c = 0; c < 2; ++c)
+            {
+                const double peak = peakAbs (buf.ch[static_cast<size_t> (c)].data(), kRenderSamples);
+                if (peak > ceiling + 1.0e-6)
+                    fail (f, "sample peak " + std::to_string (toDb (peak)) + " dBFS above the " + std::to_string (ceilingDb) + " dBTP ceiling" + in);
+            }
+            for (int c = 2; c < channels; ++c)
+                if (peakAbs (buf.ch[static_cast<size_t> (c)].data(), kRenderSamples) != 0.0)
+                    fail (f, "channels above the stereo pair must be cleared" + in);
+
+            // True peak (4x interpolated) within the inter-sample tolerance.
+            TruePeakMeter truePeak;
+            truePeak.prepare (2);
+            truePeak.process (buf.block().firstChannels (2));
+            if (truePeak.getMaxDbAllChannels() > ceilingDb + kTruePeakToleranceDb)
+                fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling" + in);
+
+            if (chain.meters().safetyClipCount.load() != 0)
+                fail (f, "the limiter's safety clamp engaged" + in);
+
+            // The preset must not mute or gut the programme (last 2 s, after settling).
+            const int tail = kRenderSamples / 2;
+            if (rms (buf.ch[0].data() + tail, tail) < dbToGain (-40.0f))
+                fail (f, "output is (nearly) silent" + in);
         }
-
-        bool finite = true;
-        for (const auto& c : buf.ch)
-            finite = finite && std::all_of (c.begin(), c.end(), [] (float v) { return std::isfinite (v); });
-        if (! finite)
-        {
-            fail (f, "non-finite output");
-            continue;
-        }
-
-        const float ceilingDb = p.values[static_cast<size_t> (MaxCeilingDb)];
-        const double ceiling = dbToGain (ceilingDb);
-        for (int c = 0; c < 2; ++c)
-        {
-            const double peak = peakAbs (buf.ch[static_cast<size_t> (c)].data(), kRenderSamples);
-            if (peak > ceiling + 1.0e-6)
-                fail (f, "sample peak " + std::to_string (toDb (peak)) + " dBFS above the " + std::to_string (ceilingDb) + " dBTP ceiling");
-        }
-        for (int c = 2; c < channels; ++c)
-            if (peakAbs (buf.ch[static_cast<size_t> (c)].data(), kRenderSamples) != 0.0)
-                fail (f, "channels above the stereo pair must be cleared");
-
-        // True peak (4x interpolated) within the inter-sample tolerance.
-        TruePeakMeter truePeak;
-        truePeak.prepare (2);
-        truePeak.process (buf.block().firstChannels (2));
-        if (truePeak.getMaxDbAllChannels() > ceilingDb + kTruePeakToleranceDb)
-            fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling");
-
-        if (chain.meters().safetyClipCount.load() != 0)
-            fail (f, "the limiter's safety clamp engaged");
-
-        // The preset must not mute or gut the programme (last 2 s, after settling).
-        const int tail = kRenderSamples / 2;
-        if (rms (buf.ch[0].data() + tail, tail) < dbToGain (-40.0f))
-            fail (f, "output is (nearly) silent");
     }
 }
 
@@ -503,45 +588,50 @@ TEST_CASE ("Factory presets: Boost Intensity and all macros at 100 % stay safe")
             continue;
         }
 
-        ParameterStore store;
-        preset::applyToStore (p, store, Bank::A);
-        for (int id : { BoostIntensity, Macro1, Macro2, Macro3, Macro4, Macro5 })
-            store.set (Bank::A, id, 1.0f);
-        ProcessingChain chain (store);
-        const int channels = isSurroundPreset (p) ? 8 : 2;
-        chain.prepare ({ kFs, kBlockSize, channels });
-
-        Planar buf = channels == 8 ? surround : stereo;
+        for (const auto profile : renderProfiles (p))
         {
-            ScopedNoDenormals noDenormals;
-            for (int pos = 0; pos < kStressSamples; pos += kBlockSize)
-                chain.process (buf.block (pos, std::min (kBlockSize, kStressSamples - pos)));
-        }
+            const std::string in = " (" + profileName (profile) + ")";
+            ParameterStore store;
+            store.set (Bank::A, LatencyProfile, static_cast<float> (static_cast<int> (profile)));
+            preset::applyPresetToStore (p, store, Bank::A);
+            for (int id : { BoostIntensity, Macro1, Macro2, Macro3, Macro4, Macro5 })
+                store.set (Bank::A, id, 1.0f);
+            ProcessingChain chain (store);
+            const int channels = isSurroundPreset (p) ? 8 : 2;
+            chain.prepare ({ kFs, kBlockSize, channels });
 
-        bool finite = true;
-        for (int c = 0; c < 2; ++c)
-            finite = finite && std::all_of (buf.ch[static_cast<size_t> (c)].begin(), buf.ch[static_cast<size_t> (c)].begin() + kStressSamples,
-                                            [] (float v) { return std::isfinite (v); });
-        if (! finite)
-        {
-            fail (f, "non-finite output at full macros");
-            continue;
-        }
+            Planar buf = channels == 8 ? surround : stereo;
+            {
+                ScopedNoDenormals noDenormals;
+                for (int pos = 0; pos < kStressSamples; pos += kBlockSize)
+                    chain.process (buf.block (pos, std::min (kBlockSize, kStressSamples - pos)));
+            }
 
-        const float ceilingDb = p.values[static_cast<size_t> (MaxCeilingDb)];
-        for (int c = 0; c < 2; ++c)
-        {
-            const double peak = peakAbs (buf.ch[static_cast<size_t> (c)].data(), kStressSamples);
-            if (peak > dbToGain (ceilingDb) + 1.0e-6)
-                fail (f, "sample peak " + std::to_string (toDb (peak)) + " dBFS above the ceiling at full macros");
+            bool finite = true;
+            for (int c = 0; c < 2; ++c)
+                finite = finite && std::all_of (buf.ch[static_cast<size_t> (c)].begin(), buf.ch[static_cast<size_t> (c)].begin() + kStressSamples,
+                                                [] (float v) { return std::isfinite (v); });
+            if (! finite)
+            {
+                fail (f, "non-finite output at full macros" + in);
+                continue;
+            }
+
+            const float ceilingDb = p.values[static_cast<size_t> (MaxCeilingDb)];
+            for (int c = 0; c < 2; ++c)
+            {
+                const double peak = peakAbs (buf.ch[static_cast<size_t> (c)].data(), kStressSamples);
+                if (peak > dbToGain (ceilingDb) + 1.0e-6)
+                    fail (f, "sample peak " + std::to_string (toDb (peak)) + " dBFS above the ceiling at full macros" + in);
+            }
+            TruePeakMeter truePeak;
+            truePeak.prepare (2);
+            truePeak.process (buf.block (0, kStressSamples).firstChannels (2));
+            if (truePeak.getMaxDbAllChannels() > ceilingDb + kTruePeakToleranceDb)
+                fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling at full macros" + in);
+            if (chain.meters().safetyClipCount.load() != 0)
+                fail (f, "the limiter's safety clamp engaged at full macros" + in);
         }
-        TruePeakMeter truePeak;
-        truePeak.prepare (2);
-        truePeak.process (buf.block (0, kStressSamples).firstChannels (2));
-        if (truePeak.getMaxDbAllChannels() > ceilingDb + kTruePeakToleranceDb)
-            fail (f, "true peak " + std::to_string (truePeak.getMaxDbAllChannels()) + " dBTP above the ceiling at full macros");
-        if (chain.meters().safetyClipCount.load() != 0)
-            fail (f, "the limiter's safety clamp engaged at full macros");
     }
 }
 

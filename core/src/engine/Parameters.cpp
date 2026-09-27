@@ -127,7 +127,19 @@ std::vector<Info> buildLayout()
     set (VirtRearAngle, make ("virt.rear", "Rear Speaker Angle", "Virtualizer", Unit::Degrees, 120.0f, 165.0f, 145.0f));
     set (VirtHeadRadius, make ("virt.headRadius", "Head Radius", "Virtualizer", Unit::Millimetres, 70.0f, 105.0f, 87.5f));
     set (VirtRoom, make ("virt.room", "Room", "Virtualizer", Unit::Percent, 0.0f, 1.0f, 0.15f));
-    set (VirtLfeGainDb, make ("virt.lfe", "LFE Level", "Virtualizer", Unit::Db, -20.0f, 10.0f, 0.0f));
+    // LFE level re one main channel, in the BS.775 fold and the virtualiser
+    // alike (docs/11 E01). The in-band convention is +10 dB; the default is
+    // +6 dB until the maximizer's LF-safe envelope (E05) lands. Presets saved
+    // before this default changed load 0 dB (PresetIO's v1 defaults).
+    set (VirtLfeGainDb, make ("virt.lfe", "LFE Level", "Virtualizer", Unit::Db, -20.0f, 16.0f, 6.0f));
+    // Added in layout version 2 (docs/11 E01 / E27).
+    auto v2 = [] (Info i) {
+        i.sinceVersion = 2;
+        return i;
+    };
+    set (VirtLfeFold, v2 (toggle ("virt.lfeFold", "LFE Fold", "Virtualizer", true)));
+    set (VirtInputMode, v2 (choice ("virt.input", "Input Channels", "Virtualizer", { "Auto", "Force Surround", "Force Stereo" }, 0)));
+    set (VirtOwnHrtf, v2 (toggle ("virt.ownHrtf", "Game Renders Own HRTF", "Virtualizer", false)));
 
     // ---- Compressor --------------------------------------------------------------------
     set (CompThresholdDb, make ("comp.threshold", "Threshold", "Compressor", Unit::Db, -60.0f, 0.0f, -18.0f));

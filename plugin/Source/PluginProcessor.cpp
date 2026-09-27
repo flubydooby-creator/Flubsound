@@ -500,8 +500,8 @@ bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& err
     const auto& table = flub::param::layout();
     for (int id = 0; id < flub::param::kNumParams; ++id)
     {
-        if (id == flub::param::BypassAll)
-            continue; // application state, not preset state
+        if (flub::preset::isAppState (id))
+            continue; // bypass, bypass.matched, latency.profile: application state, not preset state (docs/11 E40)
         if (auto* p = apvts.getParameter (juce::String (table[static_cast<size_t> (id)].key)))
         {
             p->beginChangeGesture();

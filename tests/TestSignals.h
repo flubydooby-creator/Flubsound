@@ -29,6 +29,33 @@ inline std::vector<float> whiteNoise (int numSamples, float amplitude = 1.0f, ui
     return v;
 }
 
+/** Pink (-3 dB/octave) noise, Paul Kellet's refined filter on seeded white
+    noise, scaled to the given RMS over the whole buffer. Deterministic. */
+inline std::vector<float> pinkNoise (int numSamples, float rmsLevel, uint32_t seed = 4321)
+{
+    flub::FastRandom rng (seed);
+    std::vector<float> v (static_cast<size_t> (numSamples));
+    double b0 = 0.0, b1 = 0.0, b2 = 0.0, b3 = 0.0, b4 = 0.0, b5 = 0.0, b6 = 0.0, acc = 0.0;
+    for (auto& s : v)
+    {
+        const double w = rng.nextBipolar();
+        b0 = 0.99886 * b0 + w * 0.0555179;
+        b1 = 0.99332 * b1 + w * 0.0750759;
+        b2 = 0.96900 * b2 + w * 0.1538520;
+        b3 = 0.86650 * b3 + w * 0.3104856;
+        b4 = 0.55000 * b4 + w * 0.5329522;
+        b5 = -0.7616 * b5 - w * 0.0168980;
+        const double p = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
+        b6 = w * 0.115926;
+        s = static_cast<float> (p);
+        acc += p * p;
+    }
+    const double g = numSamples > 0 && acc > 0.0 ? rmsLevel / std::sqrt (acc / numSamples) : 0.0;
+    for (auto& s : v)
+        s = static_cast<float> (s * g);
+    return v;
+}
+
 inline double rms (const float* x, int n)
 {
     double acc = 0.0;

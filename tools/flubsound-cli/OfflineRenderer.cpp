@@ -29,6 +29,98 @@ std::string formatFloat (const char* format, double v)
     std::snprintf (buf, sizeof (buf), format, v);
     return buf;
 }
+
+/** Builds RenderStats from one MeterBus reading per block (weighted by the
+    block's programme frames). */
+class StatsAccumulator
+{
+public:
+    explicit StatsAccumulator (const MeterBus& bus) noexcept
+        : m (bus), safetyClipsAtStart (bus.safetyClipCount.load (std::memory_order_relaxed))
+    {
+    }
+
+    void add (int numFrames) noexcept
+    {
+        constexpr auto rl = std::memory_order_relaxed;
+        const double w = numFrames;
+        const bool first = total <= 0.0;
+        total += w;
+
+        const float gr = m.maxGainReductionDb.load (rl);
+        s.limiterGrMaxDb = std::min (s.limiterGrMaxDb, gr);
+        grSum += w * gr;
+        over1 += gr < -1.0f ? w : 0.0;
+        over3 += gr < -3.0f ? w : 0.0;
+
+        const float glue = m.glueGainReductionDb.load (rl);
+        s.glueGrMaxDb = std::min (s.glueGrMaxDb, glue);
+        glueSum += w * glue;
+
+        const float clip = m.clipEnergyRatioDb.load (rl);
+        s.clipEnergyMaxDb = std::max (s.clipEnergyMaxDb, clip);
+        clipActive += clip > -60.0f ? w : 0.0;
+
+        const float thd = m.distortionDb.load (rl);
+        s.distortionMaxDb = std::max (s.distortionMaxDb, thd);
+        thdPower += w * (thd > kMinusInfDb ? std::pow (10.0, 0.1 * thd) : 0.0);
+
+        const float comp = m.compGainReductionDb.load (rl);
+        s.compGrMaxDb = std::min (s.compGrMaxDb, comp);
+        compSum += w * comp;
+        s.compUpwardMaxDb = std::max (s.compUpwardMaxDb, m.compUpwardGainDb.load (rl));
+        s.bassProtectionMaxDb = std::max (s.bassProtectionMaxDb, m.bassProtectionDb.load (rl));
+
+        for (size_t b = 0; b < s.modeBandMinDb.size(); ++b)
+        {
+            const float g = m.dynEqGainDb[static_cast<size_t> (ProcessingChain::kFirstModeBand) + b].load (rl);
+            s.modeBandMinDb[b] = first ? g : std::min (s.modeBandMinDb[b], g);
+            s.modeBandMaxDb[b] = first ? g : std::max (s.modeBandMaxDb[b], g);
+            bandSum[b] += w * g;
+        }
+
+        const float scale = m.governorScale.load (rl);
+        s.governorScaleMin = std::min (s.governorScaleMin, scale);
+        scaleSum += w * scale;
+        backoff += scale < 0.99f ? w : 0.0;
+
+        const float level = m.autoLevelGainDb.load (rl);
+        s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
+        s.autoLevelMaxDb = first ? level : std::max (s.autoLevelMaxDb, level);
+        s.autoDriveMaxDb = std::min (s.autoDriveMaxDb, m.autoDriveDb.load (rl));
+    }
+
+    RenderStats finish() const noexcept
+    {
+        RenderStats r = s;
+        r.frames = static_cast<int64_t> (total);
+        r.safetyClips = m.safetyClipCount.load (std::memory_order_relaxed) - safetyClipsAtStart;
+        if (total <= 0.0)
+            return r;
+        const auto mean = [this] (double sum) { return static_cast<float> (sum / total); };
+        const auto percent = [this] (double frames) { return static_cast<float> (100.0 * frames / total); };
+        r.limiterGrMeanDb = mean (grSum);
+        r.limiterOver1DbPercent = percent (over1);
+        r.limiterOver3DbPercent = percent (over3);
+        r.glueGrMeanDb = mean (glueSum);
+        r.clipActivePercent = percent (clipActive);
+        r.distortionMeanDb = thdPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (thdPower / total))) : kMinusInfDb;
+        r.compGrMeanDb = mean (compSum);
+        for (size_t b = 0; b < r.modeBandMeanDb.size(); ++b)
+            r.modeBandMeanDb[b] = mean (bandSum[b]);
+        r.governorScaleMean = mean (scaleSum);
+        r.governorBackoffPercent = percent (backoff);
+        return r;
+    }
+
+private:
+    const MeterBus& m;
+    const uint64_t safetyClipsAtStart;
+    RenderStats s;
+    double total = 0.0, grSum = 0.0, over1 = 0.0, over3 = 0.0, glueSum = 0.0, clipActive = 0.0, thdPower = 0.0, compSum = 0.0;
+    double scaleSum = 0.0, backoff = 0.0;
+    std::array<double, 4> bandSum {};
+};
 } // namespace
 
 bool checkRenderable (const io::AudioFileData& input, std::string& error)
@@ -60,7 +152,7 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error)
 
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort)
+                 const std::atomic<bool>* abort, RenderStats* stats)
 {
     if (! checkRenderable (input, error))
         return false;
@@ -96,6 +188,7 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
     io.clear();
     chain->process (io.block (chainChannels, blockSize));
     chain->reset();
+    StatsAccumulator accumulator (chain->meters());
 
     // Input followed by `latency` samples of silence; output sample k of the
     // chain belongs to input frame k - latency.
@@ -122,6 +215,8 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
         }
 
         chain->process (io.block (chainChannels, n));
+        if (stats != nullptr && available > 0)
+            accumulator.add (available);
 
         // Keep chain output frames [latency, latency + numFrames).
         const int64_t firstOut = pos - latency; // input frame of io[0]
@@ -133,6 +228,8 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
                 std::memcpy (outStereo[static_cast<size_t> (c)].data() + dstStart, io.channel (c) + skip,
                              sizeof (float) * static_cast<size_t> (count));
     }
+    if (stats != nullptr)
+        *stats = accumulator.finish();
     return true;
 }
 
@@ -155,10 +252,11 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     using Clock = std::chrono::steady_clock;
     double renderSeconds = 0.0;
 
+    RenderStats currentStats, bestStats;
     auto runPass = [&] (std::vector<std::vector<float>>& out, LoudnessReport& report) {
         const auto t0 = Clock::now();
         int latency = 0;
-        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort);
+        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats);
         renderSeconds += std::chrono::duration<double> (Clock::now() - t0).count();
         if (! ok)
             return false;
@@ -177,6 +275,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     auto keepAsBest = [&] {
         best.swap (current);
         bestReport = currentReport;
+        bestStats = currentStats;
         bestDrive = value (MaxDriveDb);
         bestInGain = value (InputGainDb);
         bestOutGain = value (OutputGainDb);
@@ -366,6 +465,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     result.driveDb = bestDrive;
     result.inputGainDb = bestInGain;
     result.outputGainDb = bestOutGain;
+    result.stats = bestStats;
     result.renderSeconds = renderSeconds;
     return true;
 }

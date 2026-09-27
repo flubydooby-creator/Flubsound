@@ -2,8 +2,10 @@
 
 #include "FactoryPresets.h"
 
+#include "flub/common/Math.h"
 #include "flub/engine/MacroMap.h"
 #include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
 #include "flub/io/FilePath.h"
 #include "flub/io/Json.h"
 #include "flub/io/WavFile.h"
@@ -173,6 +175,14 @@ std::string reportLine (const LoudnessReport& r)
            + formatDb (r.truePeakDbtp, 2) + " dBTP, sample peak " + formatDb (r.samplePeakDbfs, 2) + " dBFS";
 }
 
+/** A stat rounded to 0.01 for JSON; null at the -160 dB floor ("no measurement"). */
+json::Value statValue (float v)
+{
+    if (! std::isfinite (v) || v <= kMinusInfDb + 0.5f)
+        return json::Value();
+    return json::Value (std::round (static_cast<double> (v) * 100.0) / 100.0);
+}
+
 json::Value renderInfoJson (const RenderResult& rr, const RenderOptions& o, const ResolvedParameters& p, double sampleRate,
                             double audioSeconds)
 {
@@ -191,6 +201,7 @@ json::Value renderInfoJson (const RenderResult& rr, const RenderOptions& o, cons
     r.set ("renderSeconds", std::round (rr.renderSeconds * 1000.0) / 1000.0);
     r.set ("realtimeFactor", rr.renderSeconds > 0.0 && audioSeconds > 0.0 ? std::round (10.0 * audioSeconds * rr.passes / rr.renderSeconds) / 10.0 : 0.0);
     r.set ("format", sampleFormatName (o.format));
+    r.set ("stats", renderStatsToJson (rr.stats));
     json::Value notes { json::Value::Array {} };
     for (const auto& n : p.notes)
         notes.push (n);
@@ -263,6 +274,80 @@ RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParamet
     return rs;
 }
 
+json::Value renderStatsToJson (const RenderStats& st)
+{
+    json::Value limiter;
+    limiter.set ("grMaxDb", statValue (st.limiterGrMaxDb));
+    limiter.set ("grMeanDb", statValue (st.limiterGrMeanDb));
+    limiter.set ("over1DbPercent", statValue (st.limiterOver1DbPercent));
+    limiter.set ("over3DbPercent", statValue (st.limiterOver3DbPercent));
+    limiter.set ("safetyClips", static_cast<double> (st.safetyClips));
+
+    json::Value glue;
+    glue.set ("grMaxDb", statValue (st.glueGrMaxDb));
+    glue.set ("grMeanDb", statValue (st.glueGrMeanDb));
+
+    json::Value clipper;
+    clipper.set ("energyMaxDb", statValue (st.clipEnergyMaxDb));
+    clipper.set ("activePercent", statValue (st.clipActivePercent));
+
+    json::Value distortion;
+    distortion.set ("thdnMaxDb", statValue (st.distortionMaxDb));
+    distortion.set ("thdnMeanDb", statValue (st.distortionMeanDb));
+
+    json::Value compressor;
+    compressor.set ("grMaxDb", statValue (st.compGrMaxDb));
+    compressor.set ("grMeanDb", statValue (st.compGrMeanDb));
+    compressor.set ("upwardMaxDb", statValue (st.compUpwardMaxDb));
+
+    json::Value bands { json::Value::Array {} };
+    for (size_t b = 0; b < st.modeBandMinDb.size(); ++b)
+    {
+        json::Value band;
+        band.set ("band", static_cast<int> (b) + ProcessingChain::kFirstModeBand);
+        band.set ("minDb", statValue (st.modeBandMinDb[b]));
+        band.set ("maxDb", statValue (st.modeBandMaxDb[b]));
+        band.set ("meanDb", statValue (st.modeBandMeanDb[b]));
+        bands.push (std::move (band));
+    }
+
+    json::Value governor;
+    governor.set ("scaleMin", std::round (st.governorScaleMin * 1000.0) / 1000.0);
+    governor.set ("scaleMean", std::round (st.governorScaleMean * 1000.0) / 1000.0);
+    governor.set ("backoffPercent", statValue (st.governorBackoffPercent));
+
+    json::Value leveller;
+    leveller.set ("autoLevelMinDb", statValue (st.autoLevelMinDb));
+    leveller.set ("autoLevelMaxDb", statValue (st.autoLevelMaxDb));
+    leveller.set ("autoDriveMaxDb", statValue (st.autoDriveMaxDb));
+
+    json::Value v;
+    v.set ("frames", static_cast<double> (st.frames));
+    v.set ("limiter", std::move (limiter));
+    v.set ("glue", std::move (glue));
+    v.set ("clipper", std::move (clipper));
+    v.set ("distortion", std::move (distortion));
+    v.set ("compressor", std::move (compressor));
+    v.set ("bassProtectionMaxDb", statValue (st.bassProtectionMaxDb));
+    v.set ("modeBands", std::move (bands));
+    v.set ("governor", std::move (governor));
+    v.set ("leveller", std::move (leveller));
+    return v;
+}
+
+std::string formatStats (const RenderStats& st)
+{
+    std::string s = "limiter GR max " + fmt ("%.1f dB", st.limiterGrMaxDb) + " (mean " + fmt ("%.1f dB", st.limiterGrMeanDb)
+                    + fmt (", %.0f %% of the time deeper than 1 dB)", st.limiterOver1DbPercent);
+    s += ", THD+N max " + formatDb (st.distortionMaxDb, 1) + " dB";
+    s += ", governor min " + fmt ("%.0f %%", 100.0 * st.governorScaleMin);
+    if (st.compGrMaxDb < 0.0f || st.compUpwardMaxDb > 0.0f)
+        s += ", compressor GR max " + fmt ("%.1f dB", st.compGrMaxDb) + " / upward " + fmt ("+%.1f dB", st.compUpwardMaxDb);
+    if (st.autoLevelMinDb != 0.0f || st.autoLevelMaxDb != 0.0f)
+        s += ", auto level " + fmt ("%+.1f", st.autoLevelMinDb) + ".." + fmt ("%+.1f dB", st.autoLevelMaxDb);
+    return s;
+}
+
 // ===========================================================================
 // process
 // ===========================================================================
@@ -324,13 +409,28 @@ int runProcess (const CliOptions& o)
               + (rr.inputGainDb != params.values[static_cast<size_t> (param::InputGainDb)] ? ", input.gain " + fmt ("%.2f dB", rr.inputGainDb) : std::string())
               + (rr.outputGainDb != params.values[static_cast<size_t> (param::OutputGainDb)] ? ", output.gain " + fmt ("%.2f dB", rr.outputGainDb) : std::string())
               + (rr.renderSeconds > 0.0 && audioSeconds > 0.0 ? fmt (", %.1fx realtime", audioSeconds * rr.passes / rr.renderSeconds) : std::string()) + "\n");
+    log.info ("Stats   : " + formatStats (rr.stats) + "\n");
     logNotes (log, rr.notes);
+
+    std::vector<BandLevel> inBands, outBands;
+    if (o.bands)
+    {
+        inBands = octaveBands (input.channels, input.sampleRate);
+        outBands = octaveBands (rr.output.channels, rr.output.sampleRate); // the render (before PCM quantisation)
+        log.info ("Bands   : in  " + formatBands (inBands) + "\n");
+        log.info ("          out " + formatBands (outBands) + "\n");
+    }
 
     if (o.json)
     {
         json::Value v;
         v.set ("input", reportToJson (inReport, o.input, inFormat));
         v.set ("output", reportToJson (rr.outputReport, o.output, sampleFormatName (o.render.format)));
+        if (o.bands)
+        {
+            v.set ("inputBands", bandsToJson (inBands));
+            v.set ("outputBands", bandsToJson (outBands));
+        }
         v.set ("render", renderInfoJson (rr, o.render, params, input.sampleRate, audioSeconds));
         printJson (v);
     }
@@ -698,10 +798,20 @@ int runAnalyze (const CliOptions& o)
     }
     const LoudnessReport r = analyse (input.channels, input.sampleRate);
     const std::string format = sampleFormatName (input.sourceFormat);
+    const auto bands = o.bands ? octaveBands (input.channels, input.sampleRate) : std::vector<BandLevel> {};
     if (o.json)
-        printJson (reportToJson (r, o.input, format));
+    {
+        auto v = reportToJson (r, o.input, format);
+        if (o.bands)
+            v.set ("bands", bandsToJson (bands));
+        printJson (v);
+    }
     else
+    {
         std::fputs (formatReport (r, o.input, format).c_str(), stdout);
+        if (o.bands)
+            std::fputs (("Bands   : " + formatBands (bands) + "\n").c_str(), stdout);
+    }
     return kExitOk;
 }
 

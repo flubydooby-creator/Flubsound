@@ -16,7 +16,6 @@
     "bass.harmonicsCutoff": 150,
     "bass.character": 0.6,
     "bass.replaceFundamental": true,
-    "bass.subsonic": 40,
     "spatial.width": 1.25,
     "spatial.lowCut": 300,
     "comp.threshold": -20,

@@ -68,6 +68,7 @@ struct CliOptions
     bool json = false;
     bool quiet = false;
     bool recursive = false;   // `batch --recursive`
+    bool bands = false;       // `process` / `analyze --bands`: octave-band levels
     int jobs = 0;             // `batch --jobs` (0 = hardware concurrency)
     RenderOptions render;
 };

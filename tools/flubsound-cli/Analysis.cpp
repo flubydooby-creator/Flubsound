@@ -216,4 +216,71 @@ json::Value reportToJson (const LoudnessReport& r, const std::string& file, cons
     v.set ("perChannel", std::move (perChannel));
     return v;
 }
+std::vector<BandLevel> octaveBands (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    std::vector<BandLevel> bands;
+    if (channels.empty() || channels[0].empty() || ! (sampleRate > 0.0))
+        return bands;
+    const size_t n = channels[0].size();
+    std::vector<double> mid (n, 0.0);
+    for (const auto& c : channels)
+        for (size_t i = 0; i < n && i < c.size(); ++i)
+            mid[i] += c[i];
+    for (auto& v : mid)
+        v /= static_cast<double> (channels.size());
+
+    // Exact octave centres 1 kHz x 2^k, labelled with their nominal values.
+    constexpr double kQ = 1.41421356237309505; // ~1 octave between the -3 dB points
+    constexpr std::array<float, 10> kNominalHz { 31.5f, 63.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
+    for (size_t k = 0; k < kNominalHz.size(); ++k)
+    {
+        const double centre = 1000.0 * std::pow (2.0, static_cast<double> (k) - 5.0);
+        if (centre >= 0.4 * sampleRate)
+            break;
+        const double w0 = kTwoPi * centre / sampleRate, alpha = std::sin (w0) / (2.0 * kQ), a0 = 1.0 + alpha;
+        const double b0 = alpha / a0, a1 = -2.0 * std::cos (w0) / a0, a2 = (1.0 - alpha) / a0;
+        double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0, acc = 0.0;
+        for (double x : mid)
+        {
+            const double y = b0 * (x - x2) - a1 * y1 - a2 * y2;
+            x2 = x1;
+            x1 = x;
+            y2 = y1;
+            y1 = y;
+            acc += y * y;
+        }
+        const double ms = acc / static_cast<double> (n);
+        bands.push_back ({ kNominalHz[k], ms > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (ms))) : kMinusInfDb });
+    }
+    return bands;
+}
+
+json::Value bandsToJson (const std::vector<BandLevel>& bands)
+{
+    json::Value a { json::Value::Array {} };
+    for (const auto& b : bands)
+    {
+        json::Value v;
+        v.set ("hz", static_cast<double> (b.centreHz));
+        v.set ("db", jsonNumber (b.levelDb, 2));
+        a.push (std::move (v));
+    }
+    return a;
+}
+
+std::string formatBands (const std::vector<BandLevel>& bands)
+{
+    std::string s;
+    for (const auto& b : bands)
+    {
+        char buf[48];
+        if (b.centreHz >= 1000.0f)
+            std::snprintf (buf, sizeof (buf), "%gk %s", static_cast<double> (b.centreHz) / 1000.0, formatDb (b.levelDb, 1).c_str());
+        else
+            std::snprintf (buf, sizeof (buf), "%g %s", static_cast<double> (b.centreHz), formatDb (b.levelDb, 1).c_str());
+        s += (s.empty() ? "" : "  ") + std::string (buf);
+    }
+    return s + " (octave band Hz: dBFS)";
+}
+
 } // namespace flub::cli

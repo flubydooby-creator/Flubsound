@@ -74,7 +74,7 @@ flowchart TB
     end
     subgraph L2["L2 · Engine  core/engine"]
         MXE[MixEngine] --> PC[ProcessingChain ×N] --> SL[ModuleSlot bypass/latency]
-        PS[ParameterStore A/B] --- MM[MacroMap] --- PR[SafetyGovernor · AutoLevel · AutoDrive · LoudnessMatch]
+        PS[ParameterStore A/B] --- MM[MacroMap] --- PR[SafetyGovernor · AutoLevel · AutoDrive · ComparisonMatcher]
         MB[MeterBus · AnalyzerTaps]
     end
     subgraph L1["L1 · DSP modules & analysis  core/dsp, core/analysis"]
@@ -179,10 +179,12 @@ sequenceDiagram
  in (2 / 6 / 8 ch)
   │
   ├─ Input gain (smoothed)                        ── all channels
-  ├─ AutoLevel (gated LUFS input levelling, ±12 dB, +1 dB/s up / −4 dB/s down;
+  ├─ AutoLevel (gated LUFS input levelling, −12 … +6 dB, +1 dB/s up / −4 dB/s down, held through loud events;
   │            BS.1770-4 channel weights: 5.1/7.1 sides 1.41, 7.1 back pair 1.0, LFE excluded)
-  ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix (LFE dropped, −3 dB);
-  │                                                   virt.on toggles crossfade the two folds over 20 ms
+  ├─ ActiveChannelDetector (5.1/7.1)               ── FL/FR-only content → stereo passthrough fold
+  ├─ HeadphoneVirtualizer 5.1/7.1 → binaural       ── or ITU-R BS.775 downmix (−3 dB), or the unity
+  │                                                   passthrough; the LFE at virt.lfe in all three;
+  │                                                   virt.on toggles crossfade over 20 ms, fold switches over 400 ms
   │        ════════ from here on: STEREO ════════
   ├─ dry tap ──► (delayed by total latency) ──► global bypass (loudness-matched reference;
   │                                               its own true-peak limiter fits inside that delay)
@@ -197,7 +199,7 @@ sequenceDiagram
   ├─ [slot] LoudnessMaximizer      drive → 3-band glue (only while armed) → 4× soft clipper (2× in Low Latency)
   │                                 → true-peak limiter (4× detector shared with the meters)
   ├─ Output gain (trim, −24 … 0 dB)
-  ├─ control loops: SafetyGovernor · AutoDrive · LoudnessMatch (feed the next block)
+  ├─ control loops: SafetyGovernor · AutoDrive · ComparisonMatcher (feed the next block)
   ├─ global bypass crossfade (latency aligned, loudness matched: match gain capped per block, then a
   │                           dry-path true-peak limiter at max.ceiling, running only while bypass is engaged)
   └─ meters (peak/RMS/TP/LUFS M·S·I·LRA/correlation) · analyser tap → out (2 ch)
@@ -207,7 +209,7 @@ sequenceDiagram
 1. **Gate first.** Enhancement stages must not amplify hiss or hum they were never meant to see.
 2. **Corrective before creative.** Static EQ fixes tonal balance. The dynamic EQ then reacts to that corrected balance and controls masking and resonances *before* the additive enhancers (bass, clarity, saturation) run, so they do not trigger extra dynamic cuts.
 3. **Harmonics before width.** Saturation glues the generated harmonics. The spatializer then shapes the final tonal image, and only its side-channel.
-4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it adds gain: the output trim can only attenuate (its range ends at 0 dB). The loudness-matched bypass reference is protected separately: its match gain is capped once per block at `max.ceiling` minus the held dry peak, and because a new, louder dry peak can still arrive while that gain is high, the reference then passes its own `TruePeakLimiter` at `max.ceiling` (`dryLimiter` in `ProcessingChain`). That limiter fits inside the chain latency the dry path is delayed by anyway (up to 1 ms look-ahead + the 20-sample detector, so no latency is added), runs only while bypass is engaged, and starts cold on engagement: it outputs silence for its own latency (1 ms + 20 samples: 1.42 ms at 48 kHz) at the start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above (a little more at narrowband rates, where the 20 detector samples weigh more). Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three latency profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
+4. **Dynamics late, limiter last.** The compressor sees the final spectrum and stereo image (linked detection). The maximizer is last because it is the only stage that *guarantees* the true-peak ceiling. Nothing after it adds gain: the output trim and the comparison trim can only attenuate. The loudness-matched bypass reference is protected separately: the match never raises it, but the input itself can peak above the ceiling, so the reference passes its own `TruePeakLimiter` at `max.ceiling` (`dryLimiter` in `ProcessingChain`). That limiter fits inside the chain latency the dry path is delayed by anyway (up to 1 ms look-ahead + the 20-sample detector, so no latency is added), runs only while bypass is engaged, and starts cold on engagement: it outputs silence for its own latency (1 ms + 20 samples: 1.42 ms at 48 kHz) at the start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above (a little more at narrowband rates, where the 20 detector samples weigh more). Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three latency profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
 
 ### 4.3 Control flow per audio block
 
@@ -218,7 +220,7 @@ flowchart LR
     C --> D[Module setters<br/>targets only — modules smooth<br/>then publish effective values]
     D --> E[process slots]
     E --> F[Telemetry → MeterBus]
-    F --> G[SafetyGovernor · AutoDrive · LoudnessMatch<br/>update for next block]
+    F --> G[SafetyGovernor · AutoDrive · ComparisonMatcher<br/>update for next block]
     G -.-> B
 ```
 
@@ -240,7 +242,7 @@ flowchart LR
 - **Protection loops** close around the output (`core/src/engine/Protection.cpp`):
   - The SafetyGovernor keeps the ~3 s average limiter gain reduction above −6 dB and the measured THD+N of the saturator and the soft clipper below −30 dB (each measured over 25 ms windows; the clipper's share floored at its clip energy ratio over the same window, the former proxy, so it does not act later on clipping than before). Over budget, its scale falls at 15 %/s (minimum 0.3); comfortably under budget (1.5 dB hysteresis) it recovers at 3 %/s.
   - AutoDrive can only *reduce* maximizer drive, towards a LUFS target (≤ 2 dB/s, 0.5 LU dead band). The reduction stops at the requested drive (the applied drive never goes below 0 dB), so there is no hidden reduction to wind back when the programme gets quieter.
-  - LoudnessMatch computes the fair-comparison gain for the bypass path (±12 dB, 3 dB/s; a raise is capped at `max.ceiling` minus the held dry peak, and the dry-path limiter above catches what the per-block cap misses).
+  - ComparisonMatcher computes the fair-comparison trims: in a bypass comparison the louder side (the bypass path or the processed output) is turned down to the other, never raised (down to −20 dB, acquired in 1 s, then frozen until the bypass has been off for 10 s); the dry-path limiter above keeps the reference under the ceiling.
   - All three loudness loops use a gated 3 s measure that freezes in silence, pauses and fade-outs.
 
 ### 4.4 Parameter, preset & A/B flow
@@ -256,7 +258,7 @@ PresetManager: JSON (string keys) ⇄ Preset(values) ⇄ applyToStore(bank) / ca
 ```
 
 - **A/B.** Two complete parameter banks. The header's A / B buttons flip the active bank atomically, and all continuous parameters glide, so the switch is click-free. The copy button duplicates the active bank into the other one (A→B or B→A).
-- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, out-of-range numbers are clamped, choices are stored as labels (`presets/factory/*.json`, user presets as `*.flubpreset.json`, `core/include/flub/io/PresetIO.h`). The hosts (app, plug-in, CLI) never take "Bypass All" from a preset or write it into one: it is application state, not sound.
+- **Presets.** Versioned JSON with stable string keys: unknown keys are ignored, missing keys keep defaults, out-of-range numbers are clamped, choices are stored as labels (`presets/factory/*.json`, user presets as `*.flubpreset.json`, `core/include/flub/io/PresetIO.h`). The hosts (app, plug-in, CLI) never take "Bypass All" from a preset or write it into one: it is application state, not sound. `latency.profile` and `bypass.matched` are application state too: factory presets carry none of them, and `preset::applyPresetToStore` never writes them (a preset only suggests a profile, [11 E40](11-enhancement-report.md#e40)).
 
 ### 4.5 Metering & visualisation flow
 

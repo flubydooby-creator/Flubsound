@@ -45,6 +45,27 @@ struct LoudnessReport
     Non-RT, allocates. */
 LoudnessReport analyse (const std::vector<std::vector<float>>& channels, double sampleRate);
 
+/** One octave band of octaveBands(). */
+struct BandLevel
+{
+    float centreHz = 0.0f;
+    float levelDb = -160.0f; // dBFS RMS (plain mean square) of the band
+};
+
+/** Octave-band levels (`--bands`) of the mean of all channels ((L + R) / 2
+    for stereo), whole file: RBJ band-passes (constant 0 dB peak, Q sqrt 2,
+    about one octave wide) at 31.5 Hz .. 16 kHz, each band only while its
+    centre is below 0.4 x the sample rate. For comparing renders with each
+    other (tonal balance, tools/scripts/preset-render-diff.py), not a
+    class-1 IEC 61260 filter bank. Non-RT, allocates. */
+std::vector<BandLevel> octaveBands (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** [{ "hz": 31.5, "db": -40.12 }, ...] (null for silence). */
+json::Value bandsToJson (const std::vector<BandLevel>& bands);
+
+/** "31.5 -40.1  63 -38.0 ... 16k -71.2 (octave band Hz: dBFS)" (one line, no newline). */
+std::string formatBands (const std::vector<BandLevel>& bands);
+
 /** Human-readable multi-line report. */
 std::string formatReport (const LoudnessReport& report, const std::string& title, const std::string& sourceFormat);
 

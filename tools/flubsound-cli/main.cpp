@@ -5,7 +5,7 @@
 //
 //   flubsound-cli process -i in.wav -o out.wav [render options]
 //   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N]
-//   flubsound-cli analyze -i file.wav [--json]
+//   flubsound-cli analyze -i file.wav [--bands] [--json]
 //   flubsound-cli params  [--json]
 //   flubsound-cli presets [--dir <dir>] [--json]
 //
@@ -43,7 +43,7 @@ const char* const kGeneralHelp = R"(flubsound-cli - Flubsound Pro batch processo
 Usage:
   flubsound-cli process -i in.wav -o out.wav [render options]
   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N] [--recursive]
-  flubsound-cli analyze -i file.wav [--json]
+  flubsound-cli analyze -i file.wav [--bands] [--json]
   flubsound-cli params  [--json]
   flubsound-cli presets [--dir <dir>] [--json]
   flubsound-cli help <command>        detailed help for one command
@@ -67,7 +67,9 @@ Render options (process / batch):
                                  TPDF dithered)
       --block N                  processing block size (default 512)
   -q, --quiet                    only print errors (and --json output)
-      --json                     machine-readable result on stdout
+      --json                     machine-readable result on stdout (process /
+                                 batch: render.stats, see `help process`)
+      --bands                    process / analyze: octave-band levels
 
 Precedence: defaults < --preset < --mode < --boost/--macro/--profile/--ceiling
 < --set. Bypass is never taken from a preset (use --set bypass=on).
@@ -86,7 +88,8 @@ and sample rate.
     output lines up with the input sample for sample.
   * Channels: mono is duplicated to stereo; 5.1 (6 ch) and 7.1 (8 ch) files
     are virtualised binaurally (virt.on, default) or downmixed (ITU-R BS.775)
-    to stereo.
+    to stereo, the LFE folded at virt.lfe re one main channel. Content only
+    on FL/FR switches to a stereo passthrough after 2 s (virt.input Auto).
   * --target-lufs L: render, measure the integrated loudness (EBU R128),
     move max.drive (0..24 dB) by the error and render again - up to 4 more
     passes, stopping within 0.3 LU. Beyond 24 dB of drive input.gain is
@@ -95,6 +98,14 @@ and sample rate.
     ceiling (--ceiling, default from the preset / -1 dBTP); a measured
     overshoot is trimmed off the delivered file.
   * Percent parameters are stored as 0..1: --set clarity.air=0.4 or =40%.
+  * Render statistics of the delivered pass are printed ("Stats") and, with
+    --json, written to render.stats: limiter / glue / compressor gain
+    reduction (deepest, mean, time deeper than 1 / 3 dB), clip energy,
+    measured THD+N, bass protection, the dynamic EQ mode bands, the
+    SafetyGovernor's Boost scale and AutoLevel / AutoDrive, read from the
+    chain's meters once per block.
+  * --bands: octave-band levels (31.5 Hz .. 16 kHz, dBFS) of the input and
+    the rendered output (inputBands / outputBands with --json).
 
 Examples:
   flubsound-cli process -i song.wav -o song-fx.wav --preset "Punchy Pop" --boost 60
@@ -121,7 +132,7 @@ Example:
   flubsound-cli batch -i ./album -o ./album-fx --mode music --boost 40 --target-lufs -14 --jobs 4 --format pcm24
 )";
 
-const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--json]
+const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--bands] [--json]
 
 Measures a WAV file with the engine's meters:
   integrated loudness (LUFS, EBU R128 gating), loudness range (LU, EBU Tech
@@ -130,6 +141,9 @@ Measures a WAV file with the engine's meters:
   -3.01 dBFS RMS), per channel as well, plus duration, rate and channels.
 5.1 / 7.1 files use the BS.1770 channel weights (LFE excluded).
 Values that cannot be measured (silence, < 400 ms) print as -inf / null.
+--bands adds octave-band levels of the mean of all channels (31.5 Hz ..
+16 kHz, dBFS RMS; RBJ band-passes about one octave wide, for comparing
+renders rather than class-1 IEC 61260 filtering).
 )";
 
 const char* const kParamsHelp = R"(flubsound-cli params [--json]

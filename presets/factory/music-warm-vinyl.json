@@ -6,10 +6,10 @@
   "author": "Flubsound",
   "description": "An analogue record-player colour for soul, classic rock, jazz-funk and singer-songwriter music. Oversampled tape saturation, a soft top end, a little low-mid body and bass summed to mono below 150 Hz as on a vinyl cut. Transients are slightly rounded; raise Warmth for more tape drive.",
   "tags": ["warm", "vinyl", "analog", "tape", "soul", "rock"],
+  "suggestedLatencyProfile": "Quality",
   "params": {
     "boost": 0.25,
     "macro.5": 0.35,
-    "latency.profile": "Quality",
     "sat.on": true,
     "bass.boost": 1.5,
     "bass.freq": 90,

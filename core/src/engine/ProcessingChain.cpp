@@ -20,6 +20,26 @@ ChannelLayout layoutFor (int channels) noexcept
     return channels >= 8 ? ChannelLayout::Surround71 : (channels >= 6 ? ChannelLayout::Surround51 : ChannelLayout::Stereo);
 }
 
+// Stereo passthrough fold <-> surround fold (docs/11 E27): a 300-500 ms
+// ramp, so the level change between the folds (BS.775 -3.01 dB, virtualiser
+// about -0.8 dB on FL/FR-only content) is a glide, not a step.
+constexpr float kPassFadeMs = 400.0f;
+// Smoothing of the block statistics that power-compensate that ramp.
+constexpr double kPassStatsMs = 50.0;
+
+/** Whether a 5.1 / 7.1 strip folds as stereo: the manual override, else a
+    game that renders its own HRTF, else the detector. */
+bool stereoFoldFor (const float* e, ActiveChannelDetector::Fold detected) noexcept
+{
+    switch (static_cast<InputModeValue> (idx (e, VirtInputMode)))
+    {
+        case InputModeValue::ForceSurround: return false;
+        case InputModeValue::ForceStereo: return true;
+        case InputModeValue::Auto:
+        default: return on (e, VirtOwnHrtf) || detected == ActiveChannelDetector::Fold::Stereo;
+    }
+}
+
 DynEqBandParams modeBand (DynEqMode mode, EqBandType shape, float freq, float q, float thr, float ratio, float range,
                           float attack, float release, float floor) noexcept
 {
@@ -46,20 +66,36 @@ DynEqBandParams modeBand (DynEqMode mode, EqBandType shape, float freq, float q,
 constexpr std::array<float, ProcessingChain::kNumModeBands> kGamingModeBandHz { 3200.0f, 260.0f, 90.0f, 2000.0f };
 constexpr std::array<float, ProcessingChain::kNumModeBands> kMusicModeBandHz { 3500.0f, 12000.0f, 120.0f, 1000.0f };
 
-void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e) noexcept
+// Footsteps bands 4 / 5 (docs/11 E19 interim): the threshold sits near full
+// scale, so BoostBelow acts as a static bell - every cue under about -16 dBFS
+// (band 4) / -11 dBFS (band 5) in the band gets the full lift, with no
+// level-dependent ramp, so a short step under a bed is lifted like a steady
+// one and the step / bed contrast moves only as a static EQ moves it - that
+// rolls off over the loudest ~10 dB (gunfire and close explosions get little
+// or none) and over the hiss floor.
+constexpr float kFootstepsThresholdDb = -6.0f;
+// At and below this rate the output is a Bluetooth hands-free / speech link
+// (8 / 16 / 32 kHz): the 3.2 kHz footsteps bell would sit at 0.2..0.8 x
+// Nyquist of an already harsh narrowband channel, so it is off (docs/11 E17).
+constexpr double kSpeechLinkMaxRate = 32000.0;
+
+void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate) noexcept
 {
     const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
     if (mode == ModeValue::Gaming)
     {
         const float footsteps = e[Macro1];
         const float voice = e[Macro5];
-        // Quiet high-frequency detail (steps, reloads, cloth) is lifted by upward
-        // compression; loud events above threshold are untouched.
-        dyn.setBand (4, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[0], 0.9f, -42.0f, 3.0f, 7.0f * footsteps, 3.0f, 120.0f, -75.0f));
+        const float detailRange = sampleRate > kSpeechLinkMaxRate ? 7.0f * footsteps : 0.0f;
+        // Quiet high-frequency detail (steps, reloads, cloth): a static lift
+        // with a loud roll-off (see kFootstepsThresholdDb).
+        dyn.setBand (4, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[0], 0.9f, kFootstepsThresholdDb, 3.0f, detailRange, 3.0f, 120.0f, -75.0f));
         // Footstep "body" (heel impact) for heavier footwear / surfaces.
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[1], 1.2f, -45.0f, 2.5f, 3.0f * footsteps, 5.0f, 150.0f, -75.0f));
+        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[1], 1.2f, kFootstepsThresholdDb, 2.5f, 3.0f * footsteps, 5.0f, 150.0f, -75.0f));
         // Anti-masking: very loud low end (explosions, vehicles) is tamed so it
-        // does not bury the steps that follow; normal bass is unaffected.
+        // does not bury the steps that follow; normal bass is unaffected. It
+        // still follows Footsteps: docs/11 E20 decouples it inside E19's
+        // redesign and keys it to E21's "Tame" amount, not before (§5.1).
         dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, -22.0f, 3.0f, 6.0f * footsteps, 10.0f, 250.0f, -80.0f));
         // Voice comms / dialogue / score intelligibility.
         dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
@@ -276,6 +312,8 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     }
 
     virtualizer.prepare ({ sr, maxB, config.inputChannels });
+    fold.prepare (sr, LfeFold::gainFor (on (e, VirtLfeFold), e[VirtLfeGainDb]));
+    inputDetector.prepare (sr, config.inputChannels);
 
     const ProcessSpec stereo { sr, maxB, 2 };
     if (gateInChain)
@@ -310,7 +348,8 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     }
     dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples()));
     foldScratch.setSize (config.inputChannels, maxB);
-    virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) ? 1.0f : 0.0f);
+    virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) && ! on (e, VirtOwnHrtf) ? 1.0f : 0.0f);
+    passMix.reset (sr, kPassFadeMs, config.inputChannels > 2 && stereoFoldFor (e, ActiveChannelDetector::Fold::Surround) ? 1.0f : 0.0f);
 
     inputGain.reset (sr, 20.0f, dbToGain (e[InputGainDb]));
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
@@ -329,7 +368,6 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     outLoudness.prepare (sr, 2);
     inLoudness.prepare (sr, 2, 3000.0f);
     tapScratch.assign (static_cast<size_t> (maxB), 0.0f);
-    dryPeakRelease = onePoleCoeff (2000.0f, sr);
 
     meterBus.latencyMs.store (static_cast<float> (1000.0 * totalLatency / sr), std::memory_order_relaxed);
     reset();
@@ -338,6 +376,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 void ProcessingChain::reset() noexcept
 {
     resetSignalState();
+    inputDetector.reset();
     autoLevel.reset();
     autoDrive.reset();
     governor.reset();
@@ -350,7 +389,10 @@ void ProcessingChain::resetSignalState() noexcept
         if (inChain (s))
             slots[static_cast<size_t> (s)].reset();
     virtualizer.reset();
+    fold.reset();
     virtMix.setImmediate (virtMix.getTarget());
+    passMix.setImmediate (passMix.getTarget());
+    virtRan = foldRan = passStatsValid = false;
     dryDelay.reset();
     dryLimiter.reset();
     dryLimiterRunning = false;
@@ -360,7 +402,6 @@ void ProcessingChain::resetSignalState() noexcept
     outTruePeak.reset();
     outLoudness.reset();
     inLoudness.reset();
-    dryPeakHold = 0.0f;
 }
 
 bool ProcessingChain::needsReprepare() const noexcept
@@ -392,7 +433,15 @@ void ProcessingChain::applyParameters() noexcept
         return on (e, enableId) && (b < 0 || (audition & (1u << static_cast<uint32_t> (b))) == 0);
     };
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
-    const bool binaural = config.inputChannels > 2 && active (VirtualizerOn);
+    // A game that renders its own HRTF (docs/11 E27): no second head model on
+    // top of it (and the stereo fold below, unless surround is forced).
+    const bool ownHrtf = on (e, VirtOwnHrtf);
+    if (ownHrtf)
+        e[VirtualizerOn] = 0.0f;
+    // 5.1 / 7.1 input: stereo passthrough or surround fold, and the binaural
+    // lock only while the virtualiser actually renders the surround fold.
+    const bool stereoFold = config.inputChannels > 2 && stereoFoldFor (e, inputDetector.getFold());
+    const bool binaural = config.inputChannels > 2 && ! stereoFold && active (VirtualizerOn);
 
     inputGain.setTarget (dbToGain (e[InputGainDb]));
     outputGain.setTarget (dbToGain (e[OutputGainDb]));
@@ -400,14 +449,9 @@ void ProcessingChain::applyParameters() noexcept
     autoLevel.setTargetLufs (e[AutoLevelTargetLufs]);
     bypassMix.setTarget (on (e, BypassAll) ? 1.0f : 0.0f);
     dryLimiter.setParams ({ e[MaxCeilingDb], 80.0f, true });
-    if (const float vt = active (VirtualizerOn) ? 1.0f : 0.0f; vt != virtMix.getTarget())
-    {
-        // Switching on from fully off: the renderer has not run, so start it
-        // from silence rather than from stale history.
-        if (vt > 0.0f && virtMix.getCurrent() == 0.0f)
-            virtualizer.reset();
-        virtMix.setTarget (vt);
-    }
+    virtMix.setTarget (active (VirtualizerOn) ? 1.0f : 0.0f);
+    passMix.setTarget (stereoFold ? 1.0f : 0.0f);
+    fold.setLfeGain (LfeFold::gainFor (on (e, VirtLfeFold), e[VirtLfeGainDb]));
 
     // ---- Spectral gate ----
     if (gateInChain)
@@ -461,7 +505,7 @@ void ProcessingChain::applyParameters() noexcept
         dp.noiseFloorDb = e[dyn (b, DynFieldNoiseFloor)];
         dynEq.setBand (b, dp);
     }
-    configureModeBands (dynEq, mode, e);
+    configureModeBands (dynEq, mode, e, config.sampleRate);
     slots[SDynEq].setActive (active (DynEqOn));
 
     // ---- Bass ----
@@ -508,14 +552,16 @@ void ProcessingChain::applyParameters() noexcept
     // ---- Stereo & space (mode / binaural policy) ----
     if (mode == ModeValue::Gaming)
         e[SpatialCrossfeed] = 0.0f; // crossfeed blurs lateral cues: never in gaming
-    if (binaural)
+    if (binaural || ownHrtf)
     {
-        // Binaural output already carries exact interaural cues; widening,
-        // decorrelation or crossfeed would corrupt them. Focus (an ILD
-        // emphasis) is still allowed.
+        // Binaural output - the virtualiser's, or a game's own HRTF render -
+        // already carries exact interaural cues; widening, decorrelation,
+        // crossfeed or the focus ILD bell on top of them would corrupt them
+        // (docs/11 E24 (i), E27).
         e[SpatialWidth] = 1.0f;
         e[SpatialSpace] = 0.0f;
         e[SpatialCrossfeed] = 0.0f;
+        e[SpatialFocus] = 0.0f;
     }
     SpatializerParams wp;
     wp.width = e[SpatialWidth];
@@ -537,6 +583,7 @@ void ProcessingChain::applyParameters() noexcept
     vp.headRadiusMm = e[VirtHeadRadius];
     vp.roomAmount = e[VirtRoom];
     vp.lfeGainDb = e[VirtLfeGainDb];
+    vp.lfeOn = on (e, VirtLfeFold);
     virtualizer.setParams (vp);
 
     // ---- Compressor ----
@@ -593,30 +640,133 @@ void ProcessingChain::applyParameters() noexcept
     publishEffective();
 }
 
-void ProcessingChain::downmixToStereo (const AudioBlock& io) noexcept
+void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
 {
-    // ITU-R BS.775 downmix (LFE dropped) with -3 dB overall to limit overload.
-    // 5.1: FL FR FC LFE SL SR | 7.1: FL FR FC LFE BL BR SL SR
-    constexpr float k = 0.70710678f;
-    const int nch = io.numChannels;
-    float* l = io.channel (0);
-    float* r = io.channel (1);
-    const float* c = nch > 2 ? io.channel (2) : nullptr;
-    for (int i = 0; i < io.numSamples; ++i)
+    constexpr float k = Bs775Fold::kMatrixGain;
+    const bool virtSmoothing = virtMix.isSmoothing(), passSmoothing = passMix.isSmoothing();
+    const float v0 = virtMix.getCurrent(), p0 = passMix.getCurrent();
+    // A path that did not run in the previous block starts from silence
+    // rather than from stale history.
+    const auto runVirtualizer = [this] (const AudioBlock& b) {
+        if (! virtRan)
+            virtualizer.reset();
+        virtualizer.process (b);
+        virtRan = true;
+    };
+    const auto runFold = [this] (const AudioBlock& b, float overall) {
+        if (! foldRan)
+            fold.reset();
+        fold.process (b, overall);
+        foldRan = true;
+    };
+
+    if (! virtSmoothing && ! passSmoothing)
     {
-        float lo = l[i], ro = r[i];
-        if (c != nullptr)
+        if (p0 > 0.5f)
         {
-            lo += k * c[i];
-            ro += k * c[i];
+            runFold (in, 1.0f); // stereo passthrough
+            virtRan = false;
         }
-        for (int s = 4; s + 1 < nch; s += 2)
+        else if (v0 > 0.5f)
         {
-            lo += k * io.channel (s)[i];
-            ro += k * io.channel (s + 1)[i];
+            runVirtualizer (in);
+            foldRan = false;
         }
-        l[i] = k * lo;
-        r[i] = k * ro;
+        else
+        {
+            runFold (in, k); // BS.775 downmix
+            virtRan = false;
+        }
+        passStatsValid = false;
+        return;
+    }
+
+    // Crossfade, so that no fold change ever clicks: the folds differ in
+    // level and timing (ITD, head shadow). D (unity matrix) goes to the
+    // scratch copy, B (binaural) is rendered in place when it has weight.
+    const bool virtWeight = (virtSmoothing || v0 > 0.0f) && (passSmoothing || p0 < 1.0f);
+    const int n = in.numSamples;
+    const AudioBlock d = foldScratch.block (config.inputChannels, n);
+    d.copyFrom (in);
+    runFold (d, 1.0f);
+    if (virtWeight)
+        runVirtualizer (in);
+    else
+        virtRan = false;
+
+    // The surround fold S = (1 - w) k D + w B ramps linearly with virt.on (w,
+    // 20 ms). The stereo fold ramps linearly from S to D (p, 400 ms) and is
+    // power-compensated: g scales the mix so that its RMS follows
+    // (1 - p) RMS_S + p RMS_D whatever the correlation of S and D (for
+    // fully correlated folds g is 1: the plain linear ramp). A plain linear
+    // ramp dips by up to 3 dB mid-fade where they are uncorrelated (the
+    // binaural render's highs), an equal-power one swells by up to 3 dB where
+    // they are correlated (its lows: +3.4 dB on centred pink noise). The
+    // statistics are this block's (both paths are rendered before the mix),
+    // smoothed over 50 ms; g is exactly 1 at either end of the ramp.
+    if (passSmoothing)
+    {
+        auto ramp = virtMix; // a copy: the mix below replays the same ramp
+        double ss = 0.0, dd = 0.0, sd = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            const float w = ramp.next();
+            const float a = (1.0f - w) * k, b = virtWeight ? w : 0.0f;
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const double dv = d.channel (ch)[i];
+                const double sv = a * d.channel (ch)[i] + b * in.channel (ch)[i];
+                ss += sv * sv;
+                dd += dv * dv;
+                sd += sv * dv;
+            }
+        }
+        const double norm = 1.0 / (2.0 * n);
+        ss *= norm;
+        dd *= norm;
+        sd *= norm;
+        if (! passStatsValid)
+        {
+            passSs = ss;
+            passDd = dd;
+            passSd = sd;
+            passStatsValid = true;
+        }
+        else
+        {
+            const double a = 1.0 - std::exp (-n / (kPassStatsMs * 0.001 * config.sampleRate));
+            passSs += a * (ss - passSs);
+            passDd += a * (dd - passDd);
+            passSd += a * (sd - passSd);
+        }
+    }
+    else
+    {
+        passStatsValid = false;
+    }
+
+    for (int i = 0; i < n; ++i)
+    {
+        const float w = virtMix.next();
+        const float p = std::clamp (passMix.next(), 0.0f, 1.0f);
+        const float a = (1.0f - w) * k, b = virtWeight ? w : 0.0f;
+        float g = 1.0f;
+        if (passSmoothing)
+        {
+            const double q = 1.0 - p;
+            const double mix = q * q * passSs + static_cast<double> (p) * p * passDd + 2.0 * p * q * passSd;
+            const double rms = q * std::sqrt (passSs) + p * std::sqrt (passDd);
+            const double target = rms * rms;
+            if (mix > 1.0e-30)
+                g = static_cast<float> (std::clamp (std::sqrt (target / mix), 0.5, 2.0));
+        }
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* y = in.channel (ch);
+            const float dv = d.channel (ch)[i];
+            const float sv = a * dv + b * y[i];
+            y[i] = g * (sv + p * (dv - sv));
+        }
     }
 }
 
@@ -628,7 +778,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 
     // A single NaN/Inf from a misbehaving driver or upstream plug-in would latch
     // forever in IIR state: drop the block and restart the signal path cleanly.
-    // The control loops (governor, AutoLevel, AutoDrive, LoudnessMatch) have
+    // The control loops (governor, AutoLevel, AutoDrive, ComparisonMatcher) have
     // not seen this block, so their converged state is kept.
     float checksum = 0.0f;
     for (int c = 0; c < io.numChannels; ++c)
@@ -642,6 +792,8 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     }
 
     store.snapshot (base.data());
+    if (redetectRequest.exchange (false, std::memory_order_relaxed))
+        inputDetector.reset();
     if (meterBus.resetLoudnessRequest.exchange (false, std::memory_order_acq_rel))
     {
         outLoudness.resetIntegrated();
@@ -657,35 +809,9 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     autoLevel.process (in);
 
     // ---- 2. Fold to stereo ----
+    inputDetector.process (in);
     if (config.inputChannels > 2)
-    {
-        if (! virtMix.isSmoothing())
-        {
-            if (virtMix.getCurrent() > 0.5f)
-                virtualizer.process (in);
-            else
-                downmixToStereo (in);
-        }
-        else
-        {
-            // Crossfade so that toggling the virtualiser never clicks: the two
-            // folds differ in level and timing (ITD, head shadow).
-            const AudioBlock alt = foldScratch.block (config.inputChannels, n);
-            alt.copyFrom (in);
-            virtualizer.process (in);
-            downmixToStereo (alt);
-            for (int i = 0; i < n; ++i)
-            {
-                const float w = virtMix.next();
-                for (int ch = 0; ch < 2; ++ch)
-                {
-                    float* y = in.channel (ch);
-                    const float d = alt.channel (ch)[i];
-                    y[i] = d + w * (y[i] - d);
-                }
-            }
-        }
-    }
+        foldToStereo (in);
     const AudioBlock st = io.firstChannels (2);
 
     // ---- 3. Dry reference for global bypass / A-B ----
@@ -739,25 +865,16 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     loudnessMatch.measureWet (st);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
-    float dryPeak = 0.0f;
-    for (int c = 0; c < 2; ++c)
-        for (int i = 0; i < n; ++i)
-            dryPeak = std::max (dryPeak, std::abs (dry.channel (c)[i]));
-    // Instant attack, ~2 s release; the per-sample coefficient is raised to the
-    // block length because this runs once per block.
-    const float blockRelease = std::pow (dryPeakRelease, static_cast<float> (n));
-    dryPeakHold = dryPeak > dryPeakHold ? dryPeak : dryPeak + blockRelease * (dryPeakHold - dryPeak);
-
-    float matchDb = on (e, LoudnessMatchBypass) ? loudnessMatch.getDryGainDb (n) : 0.0f;
-    if (matchDb > 0.0f && dryPeakHold > 0.0f)
-        matchDb = std::min (matchDb, std::max (0.0f, e[MaxCeilingDb] - gainToDb (dryPeakHold))); // never push the reference into clipping
-    dryMatchGain.setTarget (dbToGain (matchDb));
+    // The louder side is turned down, never the quieter one up (docs/11 E37).
+    loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n);
+    loudnessMatch.applyWetTrim (st);
+    dryMatchGain.setTarget (dbToGain (loudnessMatch.getDryTrimDb()));
 
     if (bypassMix.getCurrent() > 0.0f || bypassMix.isSmoothing())
     {
-        // The per-block cap above keeps the match gain sensible, but a new,
-        // louder dry peak can arrive while the gain is still high: the
-        // reference therefore passes a true-peak limiter at the ceiling. It
+        // The match only ever turns the reference down, but the input itself
+        // can peak above the ceiling: the reference therefore passes a
+        // true-peak limiter at the ceiling. It
         // runs only while bypass is engaged; started cold, it outputs silence
         // for its latency (<= ~1.4 ms) at the very start of the 30 ms
         // crossfade, where the dry weight is still below 5 %.
@@ -840,6 +957,9 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.governorScale.store (governor.getScale(), rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);
+    m.activeChannelMask.store (inputDetector.getActiveMask(), rl);
+    m.inputFold.store (config.inputChannels > 2 && passMix.getTarget() > 0.5f ? 1 : 0, rl);
+    m.surroundConfirmed.store (inputDetector.isSurroundConfirmed(), rl);
     m.safetyClipCount.store (maximizer.getSafetyClipCount(), rl);
 }
 } // namespace flub

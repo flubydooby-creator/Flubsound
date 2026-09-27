@@ -40,7 +40,7 @@
 | `tests/` | Self-registering unit tests plus an allocation-counting `operator new` | `flub_tests` (one CTest test, `flub_tests`) | yes (`FLUB_BUILD_TESTS=ON`) | `flub_core` |
 | `tests/app/` | App-level tests: the app's own sources with a fake audio device, a fake per-app router and headless views | `flub_app_tests` (one CTest test, `flub_app_tests`) | with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`) | `flub_core`, JUCE 9.0.2, the app's sources |
 | `tools/flubsound-cli/` | Batch processor, loudness analyser, parameter and preset browser | `flubsound-cli` | yes (`FLUB_BUILD_TOOLS=ON`) | `flub_core` |
-| `tools/scripts/` | Generator for the embedded device-profile database | — (run by hand) | — | Python 3 |
+| `tools/scripts/` | Generator for the embedded device-profile database; all-preset render diff | — (run by hand) | — | Python 3 (standard library) |
 | `app/` | JUCE desktop app: engine host, GUI, tray, hotkeys, presets, settings, platform services | `FlubsoundPro`, `FlubsoundPresets` (BinaryData) | no (`FLUB_BUILD_APP=OFF`) | `flub_core`, JUCE 9.0.2, OS SDKs |
 | `plugin/` | VST3 / AU / Standalone wrapper around one `ProcessingChain` | `FlubsoundFX` + per-format wrappers | no (`FLUB_BUILD_PLUGIN=OFF`) | `flub_core`, JUCE 9.0.2 |
 | `platform/` | Virtual-device designs, a shared driver header, PipeWire scripts and configs | — (not built) | — | — |
@@ -115,7 +115,7 @@ Flubsound/
 │   │   ├── engine/                         L2 engine: parameters, macros, protection, bypass, chain, mixer, telemetry
 │   │   │   ├── Parameters.h                stable parameter IDs, Info table, two-bank lock-free ParameterStore (A/B)
 │   │   │   ├── MacroMap.h                  Boost Intensity + 5 mode macros → effective values; "governed" entries
-│   │   │   ├── Protection.h                GatedLoudness, DistortionMonitor, SafetyGovernor, AutoLevel, AutoDrive, LoudnessMatch
+│   │   │   ├── Protection.h                GatedLoudness, DistortionMonitor, SafetyGovernor, AutoLevel, AutoDrive, ComparisonMatcher
 │   │   │   ├── ModuleSlot.h                click-free, latency-compensated bypass wrapper (20 ms default crossfade)
 │   │   │   ├── ProcessingChain.h           the per-strip chain: module order, latency profiles, mode and binaural policy, optional neural slot
 │   │   │   ├── MixEngine.h                 up to kMaxStrips = 4 strips, latency padding, master true-peak limiter
@@ -204,13 +204,15 @@ Flubsound/
 │   ├── test_loudness_meter.cpp             LoudnessMeter and LoudnessFollower (EBU Tech 3341 / 3342 cases)
 │   ├── test_engine.cpp                     Parameters, ParameterStore, MacroMap, protection loops, ModuleSlot, ProcessingChain, MixEngine, preset round trip
 │   ├── test_modes.cpp                      Gaming mode policy through the full chain: what each Gaming macro does to effective values and sound
-│   ├── test_protection_gaps.cpp            SafetyGovernor clip-energy branch, LoudnessMatch, A/B click-freedom, Music Width / Clarity macros, headset ceiling caps and air cut-off
+│   ├── test_protection_gaps.cpp            SafetyGovernor clip-energy branch, ComparisonMatcher, A/B click-freedom, Music Width / Clarity macros, headset ceiling caps and air cut-off
 │   ├── test_distortion.cpp                 measured THD+N: estimator vs harmonic analysis, in-stage readings, block-size independence, DistortionMonitor, SafetyGovernor on measured distortion; the bass harmonics / air exciter readings, kept out of the governor
 │   ├── test_factory_presets.cpp            every presets/factory/*.json: metadata, keys, protection rules, render below the ceiling
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input and UTF-8 (non-ASCII) paths
 │   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
+│   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 interim's gunfire check; metric meta-validation; render.stats vs a hand computation
+│   ├── golden/preset-render-baseline.json  baseline of tools/scripts/preset-render-diff.py (24 presets x 5 programmes, not read by flub_tests)
 │   ├── test_drift_fifo.cpp                 #includes app/Source/engine/DriftCompensatedFifo.cpp: clock drift, stalls, downmix, continuity
 │   ├── test_driver_shared.cpp              platform/windows/driver/FlubVirtualAudioShared.h: constants, IOCTL codes, ring index maths, Generation lock, C vs C++ layout
 │   ├── test_driver_shared_c.c              the same header compiled as strict C89 (GCC / Clang only); layout table for test_driver_shared.cpp
@@ -225,10 +227,11 @@ Flubsound/
 │   │   ├── CliOptions.{h,cpp}              strict option parsing; precedence defaults → --preset → --mode → --boost/... → --set
 │   │   ├── FactoryPresets.{h,cpp}          run-time preset folder lookup (--dir, $FLUBSOUND_PRESET_DIR, exe-relative, source tree)
 │   │   ├── OfflineRenderer.{h,cpp}         sample-aligned offline render through ProcessingChain, loudness-target iterations, writeRender; also compiled into the app (export/)
-│   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters
+│   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters; octave bands (--bands)
 │   │   └── Utf8Windows.h                   Windows: UTF-8 argv (CommandLineToArgvW), environment (GetEnvironmentVariableW) and console output; pass-through elsewhere
 │   └── scripts/
-│       └── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
+│       ├── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
+│       └── preset-render-diff.py           renders every factory preset on pinned programmes with flubsound-cli and diffs the results against tests/golden (docs/11 E59)
 │
 ├── app/                                    FlubsoundPro: the JUCE desktop application
 │   ├── CMakeLists.txt                      juce_add_gui_app, explicit FLUB_APP_SOURCES, platform detection, BinaryData presets, JUCE flags; adds tests/app (FLUB_BUILD_APP_TESTS)
@@ -842,7 +845,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_platform_linux.cpp`: Linux platform services, with no sound server needed (the XDG autostart cases point `XDG_CONFIG_HOME` / `HOME` at a temporary folder and restore them); the X11 global-hotkey case needs an X display and `libXtst` (CI: `xvfb-run` in the `sanitizers` job) and is skipped without them; the Wayland global-hotkey cases start their own `dbus-daemon` with a mock GlobalShortcuts portal (never the machine's session bus) and are skipped without `dbus-daemon` or libdbus-1; the rest run headless; compiles to nothing on other OSes;
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
-  - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), LoudnessMatch as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
+  - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), ComparisonMatcher as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
   - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings and their independence of the host block size, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share), and the readings of the bass harmonics generator and the air exciter (a two-reference estimator against a harmonic analysis, -160 dB on linear settings, block-size independence, kept apart in the DistortionMonitor and out of the governor input);
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;

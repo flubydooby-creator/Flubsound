@@ -6,7 +6,8 @@
 //   * the desktop master limiter at the device-profile ceiling caps
 //     (Bluetooth A2DP -2 dBTP, hands-free -3 dBTP) on hot inter-sample-peak
 //     material, and the air exciter's sample-rate cut-off (< 42 kHz);
-//   * the LoudnessMatch class as a unit;
+//   * the ComparisonMatcher (loudness-matched bypass) as a unit, and its
+//     accuracy through the chain on hot programme (docs/11 E37);
 //   * click-free A/B bank switches and global bypass toggles;
 //   * the Music Width and Clarity macros (MacroMap values and their audible
 //     direction through the chain);
@@ -17,6 +18,7 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/analysis/LoudnessMeter.h"
 #include "flub/analysis/PeakMeters.h"
 #include "flub/common/Denormals.h"
 #include "flub/engine/DeviceProfiles.h"
@@ -485,22 +487,29 @@ TEST_CASE ("Headset: below 42 kHz (hands-free 8 / 16 kHz, USB 32 kHz) the air ex
 }
 
 //==============================================================================
-// R2.1 / R2.10 - LoudnessMatch as a unit
+// R2.1 / R2.10 - ComparisonMatcher (loudness-matched bypass) as a unit
 //==============================================================================
 namespace
 {
+struct Trims
+{
+    float dry = 0.0f, wet = 0.0f;
+};
+
 /** Feeds `seconds` of a noisy 1 kHz programme at `dryLevel` to the dry side
     and the same programme `wetDb` louder (or silence, with wetSilent) to the
-    wet side, in 10 ms blocks; returns the dry gain after every block. */
-std::vector<float> runMatch (LoudnessMatch& lm, double seconds, float dryLevel, float wetDb, uint32_t seed, bool wetSilent = false)
+    wet side, in 10 ms blocks, with the bypass and matching flags given;
+    returns the trims after every block. */
+std::vector<Trims> runMatch (ComparisonMatcher& cm, double seconds, float dryLevel, float wetDb, bool bypass, uint32_t seed,
+                             bool wetSilent = false, bool matching = true)
 {
     constexpr int kBlock = 480;
-    std::vector<float> gains;
+    std::vector<Trims> trims;
     FastRandom rng (seed);
     Planar dry (2, kBlock), wet (2, kBlock);
     int64_t clock = 0;
     const float wetGain = wetSilent ? 0.0f : dbToGain (wetDb);
-    const int blocks = static_cast<int> (seconds * kFs / kBlock);
+    const int blocks = static_cast<int> (std::lround (seconds * kFs / kBlock));
     for (int b = 0; b < blocks; ++b)
     {
         for (int i = 0; i < kBlock; ++i, ++clock)
@@ -512,78 +521,216 @@ std::vector<float> runMatch (LoudnessMatch& lm, double seconds, float dryLevel, 
                 wet.ch[c][static_cast<size_t> (i)] = wetGain * x;
             }
         }
-        lm.measureDry (dry.block());
-        lm.measureWet (wet.block());
-        gains.push_back (lm.getDryGainDb (kBlock));
+        cm.measureDry (dry.block());
+        cm.measureWet (wet.block());
+        cm.update (bypass, matching, kBlock);
+        trims.push_back ({ cm.getDryTrimDb(), cm.getWetTrimDb() });
     }
-    return gains;
+    return trims;
 }
 } // namespace
 
-TEST_CASE ("LoudnessMatch: the dry gain converges to the measured wet - dry loudness difference, slewed at exactly 3 dB/s without overshoot")
+TEST_CASE ("ComparisonMatcher: only the louder side is turned down, by the measured difference, and only in a comparison")
 {
-    for (float diffDb : { 6.0f, -9.0f, 0.0f, 11.5f })
+    // docs/11 E37: the matched bypass used to raise the dry reference (+-12 dB,
+    // 3 dB/s), capped at the ceiling, which left it up to 3 LU short on hot
+    // programme. Now the louder side is attenuated and nothing is raised.
+    for (float diffDb : { 6.0f, -9.0f, 0.0f, 11.5f, 25.0f, -25.0f })
     {
-        LoudnessMatch lm;
-        lm.prepare (kFs, 2);
-        CHECK (lm.getDryGainDb (480) == 0.0f); // nothing measured yet
-        const auto gains = runMatch (lm, 6.0, 0.1f, diffDb, 21);
+        ComparisonMatcher cm;
+        cm.prepare (kFs, 2);
+        // 4 s of programme with the bypass off: no comparison, no trim.
+        for (const auto& t : runMatch (cm, 4.0, 0.1f, diffDb, false, 21))
+            CHECK (t.dry == 0.0f && t.wet == 0.0f);
+        CHECK (! cm.isComparing());
 
-        // Smooth: never more than 3 dB/s (0.03 dB per 10 ms block), monotonic
-        // towards the target (once settled, float rounding of the two
-        // loudness readings moves it back by a few 1e-6 dB at most), never
-        // past it.
-        float prev = 0.0f, largestStep = 0.0f, largestReversal = 0.0f;
-        bool noOvershoot = true;
-        for (float gdb : gains)
+        // Bypass engaged: the trims are there from the first block (the
+        // measures have been running) and never positive.
+        const auto trims = runMatch (cm, 3.0, 0.1f, diffDb, true, 22);
+        const float expected = std::clamp (diffDb, -ComparisonMatcher::kMaxTrimDb, ComparisonMatcher::kMaxTrimDb);
+        for (const auto& t : trims)
         {
-            largestStep = std::max (largestStep, std::abs (gdb - prev));
-            largestReversal = std::max (largestReversal, diffDb >= 0.0f ? prev - gdb : gdb - prev);
-            noOvershoot = noOvershoot && std::abs (gdb) <= std::abs (diffDb) + 0.05f;
-            prev = gdb;
+            CHECK (t.dry <= 0.0f);
+            CHECK (t.wet <= 0.0f);
         }
-        CHECK_LE (largestStep, 0.03 + 1e-5);
-        CHECK_LE (largestReversal, 1e-4);
-        CHECK (noOvershoot);
-        // Full slew while far away: after 1 s the gain has moved 3 dB.
-        if (std::abs (diffDb) >= 4.0f)
-            CHECK_NEAR (std::abs (gains[99]), 3.0, 0.05);
-        // Settled on the difference (identical spectra: K-weighting cancels).
-        CHECK_NEAR (gains.back(), diffDb, 0.05);
+        CHECK (cm.isComparing());
+        CHECK (cm.isFrozen());
+        // Identical spectra: K-weighting cancels, the trim is the difference.
+        CHECK_NEAR (trims.front().wet, -std::max (0.0f, expected), 0.05);
+        CHECK_NEAR (trims.front().dry, std::min (0.0f, expected), 0.05);
+        CHECK_NEAR (trims.back().wet, -std::max (0.0f, expected), 0.05);
+        CHECK_NEAR (trims.back().dry, std::min (0.0f, expected), 0.05);
     }
 }
 
-TEST_CASE ("LoudnessMatch: the gain is bounded to +-12 dB, holds while either side is silent, and reset() returns it to 0 dB")
+TEST_CASE ("ComparisonMatcher: acquires in 1 s of programme, holds still for a whole comparison, ends 10 s after the last bypass-off and releases at 2 dB/s")
 {
-    for (float diffDb : { 20.0f, -20.0f })
     {
-        LoudnessMatch lm;
-        lm.prepare (kFs, 2);
-        const auto gains = runMatch (lm, 6.0, 0.05f, diffDb, 5);
-        CHECK (gains.back() == (diffDb > 0.0f ? 12.0f : -12.0f));
-        for (float gdb : gains)
-            CHECK (std::abs (gdb) <= 12.0f);
+        // A processed side that is silent while the reference plays is not
+        // matched down to (it is not programme).
+        ComparisonMatcher silentWet;
+        silentWet.prepare (kFs, 2);
+        for (const auto& t : runMatch (silentWet, 3.0, 0.1f, 0.0f, true, 8, true))
+            CHECK (t.dry == 0.0f && t.wet == 0.0f);
+        CHECK (! silentWet.hasMeasurement());
     }
 
-    LoudnessMatch lm;
-    lm.prepare (kFs, 2);
-    // Wet side silent from the start: no measurement, no gain.
-    auto gains = runMatch (lm, 1.0, 0.1f, 0.0f, 9, true);
-    CHECK (gains.back() == 0.0f);
-    // Settle on +4 dB (the dry follower has a 1 s head start, which its 3 s
-    // average forgets), then silence on both sides: the gain is frozen.
-    gains = runMatch (lm, 12.0, 0.1f, 4.0f, 9);
-    CHECK_NEAR (gains.back(), 4.0, 0.05);
-    const float settled = gains.back();
-    gains = runMatch (lm, 3.0, 0.0f, 0.0f, 9);
-    for (float gdb : gains)
-        CHECK (gdb == settled);
-    // Wet side goes silent while the dry side keeps playing: frozen as well.
-    gains = runMatch (lm, 3.0, 0.1f, 0.0f, 9, true);
-    for (float gdb : gains)
-        CHECK (gdb == settled);
-    lm.reset();
-    CHECK (lm.getDryGainDb (480) == 0.0f);
+    ComparisonMatcher cm;
+    cm.prepare (kFs, 2);
+    // A comparison that starts in silence waits for programme.
+    for (const auto& t : runMatch (cm, 2.0, 0.0f, 0.0f, true, 9))
+        CHECK (t.dry == 0.0f && t.wet == 0.0f);
+    CHECK (! cm.isFrozen());
+
+    // Processed +6 dB: the window is valid after 0.4 s of programme, the
+    // trim follows it for 1 s, then it is frozen.
+    auto trims = runMatch (cm, 1.3, 0.1f, 6.0f, true, 9);
+    CHECK (! cm.isFrozen());
+    trims = runMatch (cm, 0.2, 0.1f, 6.0f, true, 10);
+    CHECK (cm.isFrozen());
+    const float frozen = cm.getWetTrimDb();
+    CHECK_NEAR (frozen, -6.0, 0.1);
+    CHECK (cm.getDryTrimDb() == 0.0f);
+
+    // A 10 s comparison: flips every 2 s while the processed side changes
+    // (+6 -> +10 -> +2 dB) - the trims do not move at all (a tracking match
+    // audibly rode the reference level).
+    float lowest = frozen, highest = frozen;
+    for (int flip = 0; flip < 5; ++flip)
+    {
+        const float wetDb = flip < 2 ? 10.0f : 2.0f;
+        for (const auto& t : runMatch (cm, 2.0, 0.1f, wetDb, flip % 2 == 1, static_cast<uint32_t> (30 + flip)))
+        {
+            lowest = std::min (lowest, t.wet);
+            highest = std::max (highest, t.wet);
+            CHECK (t.dry == 0.0f);
+        }
+    }
+    CHECK_LE (highest - lowest, 0.2); // docs/11 E37 Done-when: trim variance <= 0.2 dB
+    CHECK (highest == frozen && lowest == frozen);
+
+    // The last flip left the bypass off at 10 s; the comparison ends after
+    // 10 s of bypass off in all (8 s more here), and the processed side
+    // then returns to its own level at 2 dB/s (0.02 dB per 10 ms block).
+    trims = runMatch (cm, 7.9, 0.1f, 2.0f, false, 40);
+    CHECK (cm.isComparing());
+    CHECK (trims.back().wet == frozen);
+    trims = runMatch (cm, 4.0, 0.1f, 2.0f, false, 41);
+    CHECK (! cm.isComparing());
+    float prev = frozen, largestStep = 0.0f;
+    for (const auto& t : trims)
+    {
+        CHECK (t.wet >= prev);
+        largestStep = std::max (largestStep, t.wet - prev);
+        prev = t.wet;
+    }
+    CHECK_LE (largestStep, 0.02 + 1e-5);
+    CHECK (trims.back().wet == 0.0f);
+
+    // A new comparison acquires the difference as it is now (+2 dB).
+    runMatch (cm, 1.5, 0.1f, 2.0f, true, 42);
+    CHECK_NEAR (cm.getWetTrimDb(), -2.0, 0.1);
+
+    // Matching switched off: the dry trim goes at once, the wet trim returns
+    // at 2 dB/s; reset() clears everything.
+    runMatch (cm, 1.5, 0.1f, -5.0f, false, 43, false, false);
+    CHECK (cm.getDryTrimDb() == 0.0f);
+    CHECK (! cm.isComparing());
+    CHECK (cm.getWetTrimDb() == 0.0f);
+    // The measures keep running outside a comparison, so one that starts
+    // after the programme settled (processed now 5 dB quieter) is right at once.
+    runMatch (cm, 8.0, 0.1f, -5.0f, false, 44);
+    trims = runMatch (cm, 1.5, 0.1f, -5.0f, true, 45);
+    CHECK_NEAR (trims.front().dry, -5.0, 0.1);
+    CHECK_NEAR (trims.back().dry, -5.0, 0.1);
+    CHECK (trims.back().wet == 0.0f);
+    cm.reset();
+    CHECK (cm.getDryTrimDb() == 0.0f);
+    CHECK (cm.getWetTrimDb() == 0.0f);
+    CHECK (! cm.isComparing());
+}
+
+TEST_CASE ("Chain: on hot programme the loudness-matched bypass and the processed side match within 0.5 LU through a 10 s comparison, the reference below the ceiling")
+{
+    // docs/11 E37 Done-when. Music mode, Loudness macro 100 % (the processed
+    // side is limited at the -1 dBTP ceiling), two programmes: dense pink
+    // noise (-15.8 LUFS, peaks -5.3 dBFS) and 55 Hz kicks over a dull bed
+    // (-18.2 LUFS, peaks -3.4 dBFS). 6 s processed, then bypass on / off /
+    // on / off / on in 2 s steps, then off. Loudness is the gated integrated
+    // loudness of each step (from 0.2 s after the flip).
+    // Before E37 (the dry reference raised, capped at ceiling - held dry
+    // peak, then limited): bypass read 1.96 to 2.31 LU (dense) and 3.04 to
+    // 3.07 LU (kicks) under the processed side, which played at its own
+    // level. Now the processed side is turned down to the reference for the
+    // comparison: every step reads within 0.1 LU of every other.
+    constexpr int kBlock = 512;
+    const int n = static_cast<int> (kFs * 18.0);
+    const auto at = [] (double seconds) { return static_cast<int> (seconds * kFs); };
+    const auto loudness = [&] (const Planar& p, double from, double to) {
+        LoudnessMeter meter;
+        meter.prepare (kFs, 2);
+        const int a = at (from), len = at (to) - a;
+        Planar seg (2, len);
+        for (size_t c = 0; c < 2; ++c)
+            std::copy (p.ch[c].begin() + a, p.ch[c].begin() + a + len, seg.ch[c].begin());
+        meter.process (seg.block());
+        return static_cast<double> (meter.getIntegratedLufs());
+    };
+
+    for (int programme = 0; programme < 2; ++programme)
+    {
+        Planar in (2, n);
+        if (programme == 0)
+        {
+            in.ch[0] = pinkNoise (n, 0.12f, 11);
+            in.ch[1] = pinkNoise (n, 0.12f, 12);
+        }
+        else
+        {
+            FastRandom rng (5);
+            float bed = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                const double beat = std::fmod (i / kFs, 0.5);
+                bed += 0.05f * (rng.nextBipolar() - bed);
+                const double kick = 0.7 * std::exp (-beat * 12.0) * std::sin (kTwoPi * 55.0 * beat);
+                for (auto& c : in.ch)
+                    c[static_cast<size_t> (i)] = static_cast<float> (0.05 * bed + kick);
+            }
+        }
+        ParameterStore store;
+        store.set (Mode, static_cast<float> (ModeValue::Music));
+        store.set (Macro4, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlock, 2 });
+        Planar buf = in;
+        {
+            ScopedNoDenormals noDenormals;
+            for (int pos = 0; pos < n; pos += kBlock)
+            {
+                const double t = pos / kFs;
+                const bool bypass = (t >= 6.0 && t < 8.0) || (t >= 10.0 && t < 12.0) || (t >= 14.0 && t < 16.0);
+                store.set (BypassAll, bypass ? 1.0f : 0.0f);
+                chain.process (buf.block (pos, std::min (kBlock, n - pos)));
+            }
+        }
+
+        const double processed = loudness (buf, 3.0, 6.0), input = loudness (in, 3.0, 6.0);
+        CHECK_GE (processed - input, 5.0); // processing is clearly louder
+        std::vector<double> steps;
+        for (double from = 6.0; from < 17.0; from += 2.0)
+            steps.push_back (loudness (buf, from + 0.2, from + 2.0));
+        const auto [lo, hi] = std::minmax_element (steps.begin(), steps.end());
+        CHECK_LE (*hi - *lo, 0.5);
+        CHECK_NEAR (*lo, input, 0.5); // matched at the reference (the input), not raised
+
+        // The reference stays below the ceiling (sample and true peak).
+        TruePeakMeter tp;
+        tp.prepare (2);
+        for (double from : { 6.1, 10.1, 14.1 })
+            tp.process (buf.block (at (from), at (1.9)));
+        CHECK_LE (tp.getMaxDbAllChannels(), -1.0 + 0.15);
+    }
 }
 
 //==============================================================================
@@ -877,23 +1024,34 @@ TEST_CASE ("GatedLoudness: programme more than 20 LU below the last one is held 
     CHECK (ad.getReductionDb() == heldReduction);
 
     // After 3 s of quiet programme the slow measure restarts on it: AutoLevel
-    // climbs at 1 dB/s to +12 dB (-18 - (-30)), AutoDrive (16 LU under its
-    // target) gives the drive back at 2 dB/s.
+    // climbs to +6 dB (-18 - (-30) = +12, capped at +6 since docs/11 E21),
+    // at 3 dB/s for the first 2 s after the freeze and 1 dB/s after that
+    // (it climbed at 1 dB/s to +12 dB before E21), and AutoDrive (16 LU
+    // under its target) gives the drive back at 2 dB/s.
     std::vector<float> gains;
     feedTone (30.0, dbToGain (-30.0f), phase, [&] (const AudioBlock& b) {
         both (b);
         gains.push_back (al.getGainDb());
     });
-    CHECK_NEAR (al.getGainDb(), 12.0, 0.2);
+    CHECK_NEAR (al.getGainDb(), AutoLevel::kMaxGainDb, 0.01);
     CHECK (ad.getReductionDb() == 0.0f);
-    float prev = heldGain, largestStep = 0.0f;
-    for (float g : gains)
+    float prev = heldGain, largestStep = 0.0f, largestLateStep = 0.0f;
+    size_t firstMove = gains.size();
+    for (size_t i = 0; i < gains.size(); ++i)
     {
+        const float g = gains[i];
         CHECK (g >= prev - 1e-4f); // only ever up (float noise of the reading once settled)
+        if (g > prev + 1e-4f && firstMove == gains.size())
+            firstMove = i;
         largestStep = std::max (largestStep, g - prev);
+        if (firstMove < gains.size() && i >= firstMove + 200)
+            largestLateStep = std::max (largestLateStep, g - prev);
         prev = g;
     }
-    CHECK_LE (largestStep, 0.01f + 1e-5f); // slewed at 1 dB/s (0.01 dB per 10 ms block)
+    REQUIRE (firstMove + 300 < gains.size());
+    CHECK_LE (largestStep, 0.03f + 1e-5f);     // 3 dB/s (0.03 dB per 10 ms block) for 2 s
+    CHECK_LE (largestLateStep, 0.01f + 1e-5f); // then 1 dB/s
+    CHECK_NEAR (gains[firstMove + 199] - heldGain, 6.0, 0.05);
 }
 
 TEST_CASE ("GatedLoudness: the slow measure is corrected for its cold start, so AutoLevel leaves a source at its target alone and never moves the wrong way")

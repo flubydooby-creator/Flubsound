@@ -4,7 +4,7 @@
   "name": "Late Night Low Volume",
   "category": "Music",
   "author": "Flubsound",
-  "description": "For listening quietly without losing the music. Auto Level evens out tracks and sources towards -20 LUFS, gentle downward plus upward compression brings quiet details up and loud peaks down, and a loudness contour (adaptive bass lift, soft treble shelf) compensates for the ear's reduced sensitivity at low volume.",
+  "description": "For listening quietly without losing the music. Auto Level evens out tracks and sources towards -20 LUFS, gentle downward plus upward compression brings quiet details up and loud peaks down, and a fixed low-volume contour (+3 dB bass shelf with headroom protection, +1.5 dB treble shelf) offsets part of the ear's reduced sensitivity at low volume. The contour does not follow your volume setting.",
   "tags": ["night", "low-volume", "auto-level", "compression", "loudness-contour"],
   "params": {
     "boost": 0.2,

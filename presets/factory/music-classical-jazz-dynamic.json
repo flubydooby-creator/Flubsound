@@ -6,8 +6,8 @@
   "author": "Flubsound",
   "description": "Keeps the full dynamic range of orchestral, chamber and jazz recordings. There is no maximizer drive, no clipper and no compression: only a slow, transparent limiter at -1 dBTP, a little warmth for cello and double bass, a touch of air, and crossfeed that makes hard-panned vintage jazz stereo comfortable on headphones.",
   "tags": ["classical", "jazz", "dynamic", "acoustic", "crossfeed", "no-compression"],
+  "suggestedLatencyProfile": "Quality",
   "params": {
-    "latency.profile": "Quality",
     "dyneq.on": false,
     "bass.boost": 1.2,
     "bass.freq": 80,

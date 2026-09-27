@@ -357,7 +357,7 @@ All four images are real renders of the app by the headless driver (§11). No au
 
 - The Game strip (7.1) is selected and the accent is magenta.
 - The driver plays a 7.1 game scene on Game and music at −12 dB on the Music strip, so both strips show activity dots.
-- The single amber diamond near 90 Hz is the live gain of the Gaming *anti-masking* mode band (dynamic-EQ band 6).
+- The single amber diamond near 90 Hz is the live gain of the Gaming *anti-masking* mode band (dynamic-EQ band 6). The screenshot predates docs/11 E19's interim: the footstep bands became static bells, so a current build also shows diamonds at 3.2 kHz and 260 Hz (up to +3.2 / +1.4 dB at this preset's Footsteps 45 %, less on loud passages; a marker is drawn from 0.1 dB).
 - The compressor shows −2.0 dB of gain reduction (*7.1 Headphone Surround* sets a 1.5:1 ratio, so its downward section stays in force).
 
 ![Headset advice banner for a Turtle Beach Stealth headset](images/app-gaming-headset-advice.png)
@@ -627,6 +627,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 
 - **"Modified" semantics.** `PresetManager::isModified()` compares the active bank's values with a snapshot taken when the preset was loaded or saved, so reverting an edit clears the dot. The comparison runs only after `store.version()` changed.
   - Application state that shares the store is ignored: `bypass`, `latency.profile` and `bypass.matched` (`PresetManager::isPresetSound`).
+- **Latency profile on load.** Factory presets carry no `latency.profile` (the profile they are made for is the `"suggestedLatencyProfile"` label, metadata only), and `preset::applyToStore` leaves app state the file does not name as it is, so loading or stepping a factory preset never changes the strip's profile or re-prepares the engine ([11 E40](11-enhancement-report.md#e40)). `PresetManager::loadIntoBank` still loads through `applyToStore`, so a user preset that was saved with a non-Balanced profile still applies it; switching it to `preset::applyPresetToStore`, which never writes app state, completes E40 part (1) in the app.
   - Which bank is active does not count, only the values heard. Switching to a B bank whose values differ therefore shows the dot.
   - The ear button never marks the preset as modified: it is an engine audition, not a store write (§6.9).
 - **Rates.** `refresh()` is event-driven (§5.5). `updateStatus()` runs every 15 frames. `animate()` runs every frame, but only while the thumb is moving.
@@ -639,7 +640,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 |---|---|---|---|---|---|
 | Mode | `mode` | Music, Gaming | Music | choice | Selects the macro set, the dynamic-EQ mode bands and the accent. Fresh strips named "Game" or with more than 2 channels start in Gaming |
 | Bypass All | `bypass` | off / on | off | toggle | Latency-aligned, click-free global bypass of a strip. Driven by the master Bypass for all strips |
-| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | The bypass path gets the loudness-match gain (a raise capped per block at the ceiling minus the held dry peak); the reference then passes the chain's bypass-reference true-peak limiter at `max.ceiling`, so it never exceeds the ceiling (`03-dsp-design.md` §14.5) |
+| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | In a bypass comparison the louder side is turned down to the other, never the quieter one raised: usually the processed side, which keeps that trim until Bypass has been off for 10 s and then returns at 2 dB/s. The first press of Bypass therefore still hears the processed sound at its own level; every flip after it is matched. The reference passes the chain's bypass-reference true-peak limiter at `max.ceiling`, so it never exceeds the ceiling (`03-dsp-design.md` §14.5) |
 | Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice, structural | Set in Settings › Processing on every strip and both banks. The engine re-prepares with a brief dropout |
 
 ### 6.2 `DeviceAdviceBanner` — headset and output-device advice
@@ -701,7 +702,7 @@ The macros add staged contributions on top of the preset's base values (`MacroMa
 
   The options persist as `ui.analyzer` (§12).
 - **Data.** `SpectrumAnalyzer::push()` writes the mono mid samples of the pre and post taps into two 4096-sample history rings.
-  - The **pre** tap is taken after input gain, AutoLevel and the stereo fold (virtualiser or downmix), before the module slots.
+  - The **pre** tap is taken after input gain, AutoLevel and the stereo fold (virtualiser, downmix or stereo passthrough), before the module slots.
   - The **post** tap is the strip's output after the global-bypass crossfade, before the strip gain and the master limiter.
 
 The analysis maths, from `ui/SpectrumAnalyzer.*`:
@@ -1145,7 +1146,7 @@ The following flow is the design intent recorded in [`07-roadmap.md`](07-roadmap
 
 1. **Device check.** Choose the output and confirm the format matches the device's mix rate (usually 48 kHz). Classify it as headphones or speakers.
 2. **Stacked processing check.** Detect OEM APOs / "enhancements", spatial sound and other enhancer software, and link to where each can be disabled.
-3. **Surround rule.** Use *either* the game's HRTF with a stereo endpoint, *or* 7.1 into Flubsound's virtualiser, never both.
+3. **Surround rule.** Use *either* the game's HRTF with a stereo endpoint, *or* 7.1 into Flubsound's virtualiser, never both. The engine already covers part of this: a game that fills only FL/FR of the Game strip's 8 channels is switched to the stereo passthrough fold after 2 s, and `virt.ownHrtf` ("Game Renders Own HRTF") takes the virtualiser, width, focus, crossfeed and space out for an in-game HRTF ([03 §8.2](03-dsp-design.md#82-signal-flow)). No GUI control or "receiving 2 / 6 / 8 channels" readout (`MeterBus::activeChannelMask`) exists for them yet.
 4. **Routing.** Set the system default to *Flubsound System* and assign the game, music and chat apps (the §8 flow).
 5. **Safe listening.** WHO guidance (≈ 80 dB(A) for 40 h/week) and the conservative defaults; the hearing-guard notice is roadmap item 2.11.
 6. **Preset pick** by mode and device, reusing the device-advice suggestion.

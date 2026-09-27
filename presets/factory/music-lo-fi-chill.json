@@ -6,10 +6,10 @@
   "author": "Flubsound",
   "description": "A relaxed, dusty tape character for lo-fi hip-hop, chillhop and study playlists. Tape saturation, a rolled-off top above 10 kHz, softened transients and a slightly narrower, roomier image make any track sit back and stay easy on the ears for hours.",
   "tags": ["lo-fi", "chill", "study", "tape", "warm", "relaxed"],
+  "suggestedLatencyProfile": "Quality",
   "params": {
     "boost": 0.25,
     "macro.5": 0.4,
-    "latency.profile": "Quality",
     "sat.on": true,
     "bass.boost": 2,
     "bass.freq": 80,

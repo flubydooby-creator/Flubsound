@@ -36,8 +36,13 @@ enum class Connection : uint8_t
     Analog,             // 3.5 mm / onboard codec
     Usb,                // USB Audio Class (wired USB, or a 2.4 GHz wireless dongle)
     Bluetooth,          // A2DP (stereo, lossy codec)
-    BluetoothHandsFree  // HFP/HSP (mono, narrowband 8/16 kHz while the mic is open)
+    BluetoothHandsFree  // HFP/HSP (mono, 8 / 16 / 32 kHz while the mic is open)
 };
+
+/** Highest sample rate of a Bluetooth voice (hands-free) link: 8 kHz CVSD,
+    16 kHz mSBC / LC3-WB, 32 kHz LC3-SWB. A Bluetooth endpoint at or below it
+    is hands-free, and so is any mono endpoint at or below it. */
+constexpr double kHandsFreeMaxRate = 32000.0;
 
 const char* toString (Connection c) noexcept;
 Connection connectionFromString (const std::string& s) noexcept;
@@ -80,7 +85,13 @@ struct Advice
 /** Lower-case, non-alphanumerics collapsed to single spaces, trimmed. */
 std::string normalise (const std::string& s);
 
-/** Best-effort connection detection when the platform cannot tell. */
+/** Best-effort connection detection when the platform cannot tell (or to
+    refine a Bluetooth hint into hands-free by the format). Evidence, in
+    order: the platform hint; hands-free names ("Hands-Free", BlueZ "head
+    unit", HFP / HSP); a mono format at a voice-link rate; Bluetooth names
+    ("Bluetooth", "BT", BlueZ, A2DP); USB names ("USB", "dongle",
+    "transmitter" - not "wireless"); onboard analog names. Any of these beats
+    a matched profile's typicalConnection (Database::match). */
 Connection detectConnection (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint = Connection::Unknown);
 
 /** The shipped profile database: presets/devices/device-profiles.json as a

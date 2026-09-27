@@ -39,13 +39,25 @@
 // pass still measures above verifyCeilingDb (limiter overshoot at extreme
 // drive) and the maximizer is on, a static trim brings the file back under
 // the ceiling (ceilingTrimDb, reported as a note).
+//
+// Render statistics (RenderResult::stats, `render.stats` in --json): after
+// every block that carries programme the pass reads the chain's MeterBus -
+// the same per-block readings the app's meters show - and accumulates the
+// deepest, mean and time-above values of limiter / glue / compressor gain
+// reduction, clip energy, measured THD+N, bass protection, the dynamic EQ's
+// mode bands, the SafetyGovernor scale and AutoLevel / AutoDrive. Means are
+// weighted by block length; "percent" values are shares of the programme's
+// frames. The chain's bass-harmonics and air-exciter readings are not
+// published on the MeterBus, so they are not part of it yet.
 #pragma once
 
 #include "Analysis.h"
 
 #include "flub/io/WavFile.h"
 
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -68,6 +80,37 @@ struct RenderSettings
 /** The error of a render stopped through RenderSettings::abort. */
 inline constexpr const char* kAbortedError = "render aborted";
 
+/** Statistics of one pass, polled from the chain's MeterBus once per block
+    (see the header comment). Gain reductions are dB <= 0; "max" is the
+    deepest reading. A module that is off reads as "no action". */
+struct RenderStats
+{
+    int64_t frames = 0; // programme frames covered (the latency tail is not counted)
+
+    // Maximizer: true-peak limiter, multiband glue, soft clipper.
+    float limiterGrMaxDb = 0.0f, limiterGrMeanDb = 0.0f;
+    float limiterOver1DbPercent = 0.0f, limiterOver3DbPercent = 0.0f; // frames limited deeper than 1 / 3 dB
+    float glueGrMaxDb = 0.0f, glueGrMeanDb = 0.0f;
+    float clipEnergyMaxDb = -160.0f;  // clipped-off energy re the output, loudest block
+    float clipActivePercent = 0.0f;   // frames whose clip energy is above -60 dB
+    uint64_t safetyClips = 0;         // engagements of the limiter's final safety clamp
+
+    // Measured THD+N of saturator + clipper (the 300 ms smoothed meter, dB).
+    float distortionMaxDb = -160.0f, distortionMeanDb = -160.0f; // mean = power mean
+
+    // Compressor, bass protection, dynamic EQ mode bands 4..7 (Gaming:
+    // footsteps / body / anti-masking / voice; Music: de-harsh / air / de-boom / 1 kHz).
+    float compGrMaxDb = 0.0f, compGrMeanDb = 0.0f, compUpwardMaxDb = 0.0f;
+    float bassProtectionMaxDb = 0.0f; // boost withdrawn (dB >= 0)
+    std::array<float, 4> modeBandMinDb {}, modeBandMaxDb {}, modeBandMeanDb {};
+
+    // Control loops.
+    float governorScaleMin = 1.0f, governorScaleMean = 1.0f;
+    float governorBackoffPercent = 0.0f; // frames with the Boost scale below 0.99
+    float autoLevelMinDb = 0.0f, autoLevelMaxDb = 0.0f;
+    float autoDriveMaxDb = 0.0f;         // deepest drive reduction
+};
+
 struct RenderResult
 {
     io::AudioFileData output;     // 2 channels, same rate and length as the input
@@ -81,6 +124,7 @@ struct RenderResult
     float ceilingTrimDb = 0.0f;   // static trim applied to hold the ceiling (<= 0)
     bool targetReached = true;
     double renderSeconds = 0.0;   // wall time of all passes (excluding analysis)
+    RenderStats stats;            // of the delivered pass
     std::vector<std::string> notes; // problems start with "warning: "
 };
 
@@ -101,8 +145,9 @@ bool writeRender (const std::string& path, io::SampleFormat format, RenderResult
 
 /** A single latency-compensated pass (no targeting). `outStereo` receives
     2 planar channels of input length. A non-null `abort` is polled once per
-    block (see RenderSettings::abort). */
+    block (see RenderSettings::abort); a non-null `stats` receives the pass's
+    statistics. */
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort = nullptr);
+                 const std::atomic<bool>* abort = nullptr, RenderStats* stats = nullptr);
 } // namespace flub::cli

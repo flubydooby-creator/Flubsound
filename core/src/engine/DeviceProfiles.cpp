@@ -67,22 +67,30 @@ bool containsToken (const std::string& haystack, const std::string& token)
 
 Connection detectConnection (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint)
 {
+    // Bluetooth voice links run at 8 kHz (CVSD), 16 kHz (mSBC, LC3-WB) or
+    // 32 kHz (LC3-SWB); A2DP runs at 44.1 / 48 kHz.
+    const bool speechRate = sampleRate > 0.0 && sampleRate <= kHandsFreeMaxRate;
     if (platformHint != Connection::Unknown)
     {
-        // A Bluetooth endpoint in a narrowband mono format is the hands-free profile.
-        if (platformHint == Connection::Bluetooth && sampleRate > 0.0 && sampleRate <= 16000.0)
+        // A Bluetooth endpoint at a voice-link rate is the hands-free profile.
+        if (platformHint == Connection::Bluetooth && speechRate)
             return Connection::BluetoothHandsFree;
         return platformHint;
     }
 
+    // Name evidence: Windows ("... Hands-Free AG Audio"), PipeWire / BlueZ
+    // node names ("bluez_output.<address>.a2dp-sink", "... headset-head-unit").
     const std::string n = normalise (endpointName);
-    if (containsToken (n, "hands free") || containsToken (n, "handsfree") || containsToken (n, "hands free ag audio"))
+    if (containsToken (n, "hands free") || containsToken (n, "handsfree") || containsToken (n, "head unit")
+        || containsToken (n, "hfp") || containsToken (n, "hsp"))
         return Connection::BluetoothHandsFree;
-    if (sampleRate > 0.0 && sampleRate <= 16000.0 && outputChannels <= 1)
-        return Connection::BluetoothHandsFree; // narrowband mono: speech profile
-    if (containsToken (n, "bluetooth") || containsToken (n, "bt"))
+    if (speechRate && outputChannels <= 1)
+        return Connection::BluetoothHandsFree; // speech-rate mono: voice profile
+    if (containsToken (n, "bluetooth") || containsToken (n, "bt") || containsToken (n, "bluez") || containsToken (n, "a2dp"))
         return Connection::Bluetooth;
-    if (containsToken (n, "usb") || containsToken (n, "dongle") || containsToken (n, "transmitter") || containsToken (n, "wireless"))
+    // "wireless" is not evidence: a 2.4 GHz dongle and a Bluetooth link are
+    // both wireless (the matched profile's typical connection decides).
+    if (containsToken (n, "usb") || containsToken (n, "dongle") || containsToken (n, "transmitter"))
         return Connection::Usb;
     if (containsToken (n, "realtek") || containsToken (n, "high definition audio") || containsToken (n, "line out"))
         return Connection::Analog;
@@ -207,7 +215,7 @@ Advice adviceFor (const Match& m, double sampleRate, bool gamingMode)
             break;
         case Connection::BluetoothHandsFree:
             a.ceilingDbTp = -3.0f;
-            a.messages.push_back ("The headset is in Bluetooth hands-free mode (microphone open): audio is mono and narrowband. "
+            a.messages.push_back ("The headset is in Bluetooth hands-free mode (microphone open): audio is mono and limited to speech bandwidth. "
                                   "For full-quality game and music audio, use the stereo (A2DP) endpoint or the headset's USB / 2.4 GHz connection, "
                                   "and a separate microphone path if possible.");
             break;

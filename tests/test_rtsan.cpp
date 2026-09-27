@@ -195,4 +195,34 @@ static_assert (std::is_same_v<decltype (&BassEngine::getDistortionDb), float (Ba
 static_assert (std::is_same_v<decltype (&ClarityEnhancer::getDistortionDb), float (ClarityEnhancer::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DistortionMonitor::updateHarmonics), float (DistortionMonitor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);
 
+// The levelling and comparison loops ProcessingChain::process runs every
+// block (tests/test_protection_gaps.cpp, docs/11 E21 / E37): AutoLevel and
+// its gated measure with the upper gate, and the loudness-matched bypass.
+static_assert (hasNonblockingProcess<GatedLoudness>);
+static_assert (hasNonblockingProcess<AutoLevel>);
+static_assert (std::is_same_v<decltype (&ComparisonMatcher::measureDry), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ComparisonMatcher::measureWet), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ComparisonMatcher::update), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ComparisonMatcher::applyWetTrim), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+
+// The surround fold and input-channel detection (tests/test_virtualizer_fold.cpp,
+// docs/11 E01 / E27): ProcessingChain::process runs the detector and the
+// BS.775 fold every block of a 5.1 / 7.1 strip, applyParameters sets the
+// fold's LFE level, HeadphoneVirtualizer renders its LFE through the same
+// LfeFold, and a host may ask for re-detection from any thread.
+#include "flub/dsp/ActiveChannelDetector.h"
+#include "flub/dsp/Bs775Fold.h"
+
+static_assert (hasNonblockingProcess<ActiveChannelDetector>);
+static_assert (hasNonblockingReset<ActiveChannelDetector>);
+static_assert (std::is_same_v<decltype (&Bs775Fold::process), void (Bs775Fold::*) (const AudioBlock&, float) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<Bs775Fold>);
+static_assert (std::is_same_v<decltype (&Bs775Fold::setLfeGain), void (Bs775Fold::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::addTo), void (LfeFold::*) (const float*, float*, float*, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::skip), void (LfeFold::*) (int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::setGain), void (LfeFold::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::clearState), void (LfeFold::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<LfeFold>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::redetectInputChannels), void (ProcessingChain::*)() noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

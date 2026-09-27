@@ -145,7 +145,10 @@ enum Id : int
     VirtRearAngle,
     VirtHeadRadius,
     VirtRoom,
-    VirtLfeGainDb,
+    VirtLfeGainDb,     // LFE level re one main channel, in every fold (docs/11 E01)
+    VirtLfeFold,       // Toggle: fold the LFE into the stereo output at all (off = v1 BS.775 downmix)
+    VirtInputMode,     // Choice: Auto, Force Surround, Force Stereo (5.1 / 7.1 input fold, docs/11 E27)
+    VirtOwnHrtf,       // Toggle: the game renders its own HRTF (stereo fold, no virtualiser / width / focus / crossfeed / space)
 
     // Compressor
     CompThresholdDb,
@@ -208,6 +211,7 @@ constexpr int dyn (int band, DynField f) noexcept { return kDynBase + band * kDy
 
 enum class ModeValue : int { Music = 0, Gaming = 1 };
 enum class LatencyProfileValue : int { Quality = 0, Balanced = 1, LowLatency = 2 };
+enum class InputModeValue : int { Auto = 0, ForceSurround = 1, ForceStereo = 2 }; // VirtInputMode
 
 /** The full, ordered table (index == Id). Built once, immutable afterwards. */
 const std::vector<Info>& layout();

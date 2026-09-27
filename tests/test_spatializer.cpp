@@ -334,18 +334,19 @@ TEST_CASE ("StereoSpatializer: positional focus lifts S around 3 kHz only; M unt
     SpatializerParams p = neutral();
     p.positionalFocus = 1.0f;
     // Measured on a panned source (M = 4 S): the polarity guard then allows
-    // the full bell (it would need M > 2 S at +6 dB).
-    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 6.0, 0.05);
+    // the full bell (it would need M > 1.4 S at +3 dB). The bell is capped at
+    // +3 dB (docs/11 E24; it was +6 dB).
+    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 3.0, 0.05);
     CHECK_LE (std::abs (sideGainDb (p, 100.0, kFs, 4.0f)), 0.1);
-    CHECK_LE (sideGainDb (p, 1000.0, kFs, 4.0f), 4.0);
-    CHECK_LE (sideGainDb (p, 15000.0, kFs, 4.0f), 1.5);
-    const auto bell = SvfCoeffs::make (FilterType::Bell, 3000.0, 0.5, 6.0, kFs);
+    CHECK_LE (sideGainDb (p, 1000.0, kFs, 4.0f), 2.0);
+    CHECK_LE (sideGainDb (p, 15000.0, kFs, 4.0f), 0.75);
+    const auto bell = SvfCoeffs::make (FilterType::Bell, 3000.0, 0.5, 3.0, kFs);
     for (double f : { 300.0, 1000.0, 2000.0, 6000.0, 12000.0 })
         CHECK_NEAR (sideGainDb (p, f, kFs, 4.0f), bell.magnitudeDb (f, kFs), 0.05);
 
     p.positionalFocus = 0.5f;
-    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 3.0, 0.05);
-    CHECK_NEAR (sideGainDb (p, 3000.0, 44100.0, 4.0f), 3.0, 0.05);
+    CHECK_NEAR (sideGainDb (p, 3000.0, kFs, 4.0f), 1.5, 0.05);
+    CHECK_NEAR (sideGainDb (p, 3000.0, 44100.0, 4.0f), 1.5, 0.05);
     CHECK_LE (std::abs (sideGainDb (p, 3000.0)), 0.01); // pure side (no M): nothing to keep in phase, no lift
 
     p.positionalFocus = 1.0f;
@@ -386,8 +387,41 @@ TEST_CASE ("StereoSpatializer: positional focus never flips the far ear - hard-p
     processInBlocks (sp, buf, 256);
     const int tail = n / 2;
     const double ild = toDb (toneAmplitude (buf.ch[0].data() + tail, tail, 3000.0, kFs) / toneAmplitude (buf.ch[1].data() + tail, tail, 3000.0, kFs));
-    CHECK_GE (ild, 12.0); // bell +6 dB on S: L = 0.75 + 0.5, R = 0.75 - 0.5 -> 14 dB
+    // Bell +3 dB on S: M = 0.375, S = 0.125 x 1.41 -> L 0.552, R 0.198: 8.9 dB.
+    CHECK_NEAR (ild, 8.88, 0.1);
     CHECK_LE (maxMonoSumError (in, buf), 1e-6);
+}
+
+TEST_CASE ("StereoSpatializer: positional focus adds at most 3 dB of ILD at 3 kHz, and none at speech-link rates (<= 32 kHz)")
+{
+    // docs/11 E24 slice: the focus bell is capped at +3 dB (a source 6 dB to
+    // one side gains 2.9 dB of ILD at 3 kHz; the old +6 dB bell added 7.9 dB),
+    // and focus is off when the output runs at a Bluetooth hands-free / speech
+    // rate (8 / 16 / 32 kHz; docs/11 E17), where there is no stereo image to
+    // sharpen. 44.1 kHz and up keep it.
+    SpatializerParams p = neutral();
+    p.positionalFocus = 1.0f;
+    const auto addedIld = [&p] (double fs) {
+        StereoSpatializer sp;
+        setUp (sp, p, fs);
+        const int n = static_cast<int> (fs);
+        const auto x = sine (3000.0, fs, n, 0.1f);
+        Planar buf = stereo (x, scaled (x, 0.5f)); // 6.02 dB ILD
+        processInBlocks (sp, buf, 256);
+        const int tail = n / 2;
+        return toDb (toneAmplitude (buf.ch[0].data() + tail, tail, 3000.0, fs) / toneAmplitude (buf.ch[1].data() + tail, tail, 3000.0, fs)) - toDb (2.0);
+    };
+    for (const double fs : { 44100.0, 48000.0, 96000.0 })
+    {
+        const double added = addedIld (fs);
+        CHECK_NEAR (added, 2.86, 0.05);
+        CHECK_LE (added, 3.0);
+    }
+    for (const double fs : { 8000.0, 16000.0, 32000.0 })
+    {
+        CHECK_LE (std::abs (addedIld (fs)), 1e-4);
+        CHECK_LE (std::abs (sideGainDb (p, 3000.0, fs, 4.0f)), 1e-4);
+    }
 }
 
 TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono sum stays exact")

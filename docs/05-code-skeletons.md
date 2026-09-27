@@ -548,7 +548,7 @@ private:
     enum SlotIndex { SGate, SNeural, SEq, SDynEq, SBass, SClarity, SSat, SSpatial, SComp, SMax, kNumSlots };
     std::array<ModuleSlot, kNumSlots> slots;
     bool gateInChain = false, neuralInChain = false;   // inChain (s): the gate / neural slot only when set
-    // ... gain smoothers, AutoLevel, AutoDrive, SafetyGovernor, LoudnessMatch,
+    // ... gain smoothers, AutoLevel, AutoDrive, SafetyGovernor, ComparisonMatcher,
     //     virtMix + foldScratch (20 ms virtualiser <-> downmix crossfade),
     //     global-bypass dry buffer + DelayLine + dryLimiter (TruePeakLimiter on the reference),
     //     meters, MeterBus, AnalyzerTaps,
@@ -625,7 +625,8 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     }
     dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples())); // global-bypass reference
     foldScratch.setSize (config.inputChannels, maxB);
-    virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) ? 1.0f : 0.0f);
+    virtMix.reset (sr, 20.0f, on (e, VirtualizerOn) && ! on (e, VirtOwnHrtf) ? 1.0f : 0.0f);
+    passMix.reset (sr, 400.0f, /* stereo fold forced by virt.input / virt.ownHrtf */ ...);  // detector starts "surround"
     inputGain.reset (sr, 20.0f, dbToGain (e[InputGainDb]));
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
     bypassMix.reset (sr, 30.0f, on (e, BypassAll) ? 1.0f : 0.0f);
@@ -689,21 +690,20 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     autoLevel.process (in);
 
     // ---- 2. Fold to stereo ----
+    inputDetector.process (in);                          // surround or FL/FR-only content? (docs/11 E27)
     if (config.inputChannels > 2)
-    {
-        if (! virtMix.isSmoothing())
-        {
-            if (virtMix.getCurrent() > 0.5f)
-                virtualizer.process (in);                                        // 5.1/7.1 -> binaural
-            else
-                downmixToStereo (in);                                            // ITU-R BS.775, -3 dB, LFE dropped
-        }
-        else                                                                     // [16] virt.on just changed
-        {
-            // ... alt = foldScratch copy of in; virtualizer.process (in); downmixToStereo (alt);
-            //     per sample: w = virtMix.next(); y = alt + w * (y - alt)       (channels 0/1)
-        }
-    }
+        foldToStereo (in);                                                       // [16]
+    // foldToStereo, outside a fade: one of
+    //     fold.process (in, 1.0f);                      // stereo passthrough (unity BS.775)
+    //     virtualizer.process (in);                     // 5.1/7.1 -> binaural
+    //     fold.process (in, k);                         // ITU-R BS.775, -3 dB
+    // (Bs775Fold: the LFE at virt.lfe re one main through the LfeFold the
+    // virtualiser shares, docs/11 E01). During a fade: D = fold of a
+    // foldScratch copy, B = virtualizer in place, per sample
+    //     S = (1 - w) k D + w B,   y = g (S + p (D - S))
+    // with w = virtMix.next() (20 ms, virt.on), p = passMix.next() (400 ms);
+    // g = 1 outside the p ramp, and during it holds the mix's RMS on
+    // (1 - p) RMS(S) + p RMS(D) from the block's S^2, D^2, S D (50 ms smoothed).
     const AudioBlock st = io.firstChannels (2);
 
     // ---- 3. Dry reference for global bypass / A-B ----
@@ -733,17 +733,16 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     loudnessMatch.measureWet (st);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
-    // ... dryPeakHold: instant attack, ~2 s release (per-sample coeff raised to the block length)
-    float matchDb = on (e, LoudnessMatchBypass) ? loudnessMatch.getDryGainDb (n) : 0.0f;
-    if (matchDb > 0.0f && dryPeakHold > 0.0f)
-        matchDb = std::min (matchDb, std::max (0.0f, e[MaxCeilingDb] - gainToDb (dryPeakHold))); // [10]
-    dryMatchGain.setTarget (dbToGain (matchDb));
+    // The louder side is turned down, never the quieter one up.            [10]
+    loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n);
+    loudnessMatch.applyWetTrim (st);
+    dryMatchGain.setTarget (dbToGain (loudnessMatch.getDryTrimDb()));
 
     if (bypassMix.getCurrent() > 0.0f || bypassMix.isSmoothing())
     {
-        // The per-block cap above keeps the match gain sensible, but a new,
-        // louder dry peak can arrive while the gain is still high: the
-        // reference therefore passes a true-peak limiter at the ceiling.   [17]
+        // The match only ever turns the reference down, but the input itself
+        // can peak above the ceiling: the reference therefore passes a
+        // true-peak limiter at the ceiling.                                [17]
         if (! dryLimiterRunning)
         {
             dryLimiter.reset();                                                  // cold start: silent for its latency
@@ -788,10 +787,14 @@ void ProcessingChain::applyParameters() noexcept
     MacroMap::apply (base.data(), effective.data(), governor.getScale());       // [11]
     float* e = effective.data();   // the mode / format policies below write their overrides into e [18]
     const auto mode = static_cast<ModeValue> (idx (e, Mode));
-    const bool binaural = config.inputChannels > 2 && on (e, VirtualizerOn);
+    const bool ownHrtf = on (e, VirtOwnHrtf);                                    // the game renders its own HRTF
+    if (ownHrtf)
+        e[VirtualizerOn] = 0.0f;
+    const bool stereoFold = config.inputChannels > 2 && stereoFoldFor (e, inputDetector.getFold()); // virt.input override
+    const bool binaural = config.inputChannels > 2 && ! stereoFold && on (e, VirtualizerOn);
     // ... input/output gain targets, AutoLevel, bypassMix target,
     //     dryLimiter.setParams ({ e[MaxCeilingDb], 80.0f, true }) (ceiling, release ms, auto release),
-    //     virtMix target (virtualizer reset() when switched on from fully off), gate
+    //     virtMix / passMix targets, fold.setLfeGain (LfeFold::gainFor (virt.lfeFold, virt.lfe)), gate
 
     for (int b = 0; b < kEqBands; ++b)                                          // ---- Parametric EQ ----
     {
@@ -815,11 +818,12 @@ void ProcessingChain::applyParameters() noexcept
 
     if (mode == ModeValue::Gaming)                                               // ---- mode / binaural policy ----
         e[SpatialCrossfeed] = 0.0f; // crossfeed blurs lateral cues: never in gaming   [13]
-    if (binaural)
+    if (binaural || ownHrtf)
     {
         e[SpatialWidth] = 1.0f;     // binaural output already carries exact interaural cues
         e[SpatialSpace] = 0.0f;
-        e[SpatialCrossfeed] = 0.0f; // (positional focus is still allowed)
+        e[SpatialCrossfeed] = 0.0f;
+        e[SpatialFocus] = 0.0f;     // no second ILD on top of an HRTF render (docs/11 E24 (i))
     }
     SpatializerParams wp;
     // ... copy spatial.* values from e
@@ -859,7 +863,7 @@ flowchart LR
     E --> F["dry reference<br/>(delayed by totalLatency)"]
     F --> G["9 slots in order"]
     G --> H["output gain"]
-    H --> I["SafetyGovernor · AutoDrive ·<br/>LoudnessMatch (next block)"]
+    H --> I["SafetyGovernor · AutoDrive ·<br/>ComparisonMatcher (next block)"]
     I --> J["global bypass crossfade<br/>(match gain → dryLimiter)"]
     J --> K["MeterBus · analyser taps"]
     I -.-> C
@@ -874,11 +878,11 @@ flowchart LR
 | Mode | `mode` | Music, Gaming | Music | choice | Selects the macro table, the mode dynamic-EQ bands 4–7 and the spatial policy. |
 | Boost Intensity | `boost` | 0 … 1 | 0 | % | Staged macro source (§3). |
 | Macro 1–5 | `macro.1` … `macro.5` | 0 … 1 | 0 | % | Music: Punch, Width, Clarity, Loudness, Warmth. Gaming: Footsteps, Positional, Impact, Detail, Voice & Score. |
-| Auto Level | `autolevel.on` | off / on | off | toggle | Gated-LUFS input levelling: ±12 dB, slewed +1 dB/s up and −4 dB/s down. |
+| Auto Level | `autolevel.on` | off / on | off | toggle | Gated-LUFS input levelling: −12 … +6 dB, slewed +1 dB/s up (3 dB/s for 2 s after a freeze) and −4 dB/s down; held through loud events by its upper gate. |
 | Auto Level Target | `autolevel.target` | −30 … −10 | −18 | LUFS | AutoLevel target. |
-| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | Global bypass plays the dry path at the wet loudness (±12 dB, 3 dB/s). A raise is capped so the held dry peak stays under `max.ceiling`, and the reference is then true-peak limited at `max.ceiling` (decision 17). |
+| Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | In a bypass comparison the louder side is turned down to the other (never a raise, down to −20 dB): usually the processed side, from the first bypass until the bypass has been off for 10 s. The reference is true-peak limited at `max.ceiling` (decision 17). |
 | Bypass All | `bypass` | off / on | off | toggle | 30 ms crossfade to the latency-aligned dry reference. |
-| Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice (**structural**) | Sets the structural settings of §5.2. Takes effect only through `prepare()`. |
+| Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice (**structural**) | Sets the structural settings of §5.2. Takes effect only through `prepare()`. App state, like `bypass` and `bypass.matched`: `preset::applyPresetToStore` never writes it, and presets name a profile only as the `"suggestedLatencyProfile"` label (`PresetIO.h`). |
 | Module enables | `gate.on`, `eq.on`, `dyneq.on`, `bass.on`, `clarity.on`, `sat.on`, `spatial.on`, `virt.on`, `comp.on`, `max.on` | off / on | gate off, eq on, dyneq on, bass on, clarity on, sat off, spatial on, virt on, comp off, max on | toggle | `ModuleSlot::setActive()`: 20 ms latency-compensated crossfade. `gate.on` has an effect only in the Quality profile (the only one with the gate in the chain). `virt.on` has no slot: it chooses virtualiser vs downmix for 6/8-channel input, with a 20 ms crossfade between the two folds (decision 16). |
 
 | Protection loop (`Protection.h/.cpp`) | Constants in the code |
@@ -886,7 +890,7 @@ flowchart LR
 | `SafetyGovernor` | ~3 s averaging of limiter GR and measured distortion (power domain; the clipper's THD+N floored at its clip energy ratio over the same 25 ms window). Over budget if avg GR < −6 dB or avg distortion > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
 | `DistortionMonitor` | Power sum of the latest THD+N readings of the saturator and the soft clipper (each measured inside the stage over 25 ms windows, `DistortionEstimator.h`); a 300 ms power-domain one-pole feeds `MeterBus::distortionDb`. The governor gets `combineDb (saturator, max (clipper THD+N, clip energy ratio over the same window))`. |
 | `AutoDrive` | Gated loudness of the output. `update()` also takes the requested (effective) drive: the reduction stays in [−requested drive, 0] dB (requested drive clamped to 0 … 24 dB), rate `min(2, 0.5·\|error\|)` dB/s, 0.5 LU dead band. Relaxes to 0 at 4 dB/s when off. |
-| `LoudnessMatch` | Gated dry and wet loudness. Dry gain = wet − dry, clamped ±12 dB, slewed 3 dB/s. |
+| `ComparisonMatcher` | K-weighted dry and wet energy over the last 3 s of programme. Dry trim = min(0, wet − dry), wet trim = min(0, dry − wet), ≥ −20 dB; acquired in the first 1 s of a comparison, then frozen until the bypass has been off for 10 s; the wet trim then returns at 2 dB/s. |
 | `GatedLoudness` | 100 ms "momentary" + 3 s "slow" K-weighted followers. Gate closed below −70 dBFS RMS, below −50 LUFS, or more than 20 LU under the slow value; after 3 s held out by that relative criterion alone the slow value restarts on the new level. The slow reading is corrected for its cold start (`−10 log10(1 − pole^n)` after n open-gate samples). |
 
 **Design decisions**
@@ -900,15 +904,15 @@ flowchart LR
 7. The global-bypass reference is taken **after** input gain, AutoLevel and the virtualiser/downmix. "Bypass" therefore compares the enhancement, not the level-matching or the 7.1 fold. It is delayed by `totalLatency` in total (the `dryDelay` line plus the `dryLimiter` latency, decision 17), so toggling bypass never shifts audio in time.
 8. The output gain range tops out at 0 dB: nothing after the maximizer can push the output over the ceiling.
 9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipper distortion", a fully bypassed saturator "no saturator distortion"; `DistortionMonitor` power-sums the two stages' measured THD+N for the meters; the governor's input floors the clipper's share at its clip energy ratio over the same 25 ms window.
-10. Loudness matching may *raise* the dry path. The raise is capped so that the held dry peak (instant attack, ~2 s release) stays below `max.ceiling`. The cap is evaluated once per block and the gain ramps over 50 ms, so on its own it cannot stop a new, louder dry peak that arrives while the gain is still high; decision 17 does.
+10. Loudness matching never *raises* either path ([11 E37](11-enhancement-report.md#e37)): the louder side is turned down. A raise needs headroom the dry reference does not have, since the processed side got its loudness from limiting; the former raise, capped at `max.ceiling` − held dry peak, fell 2–3 LU short on hot programme. The processed side keeps its trim for the whole comparison (until the bypass has been off for 10 s), so flips back to it are matched too.
 11. The governor scale is applied inside `MacroMap::apply`, on the governed entries only.
-12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands()`). In Gaming they are footstep, footstep-body, anti-masking and voice bands, scaled by *Footsteps* (M1) and *Voice & Score* (M5). In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
-13. Gaming correctness beats spaciousness: crossfeed is forced to 0 in Gaming mode. With binaural (virtualised) input, width, space and crossfeed are forced neutral.
+12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands (dyn, mode, e, sampleRate)`). In Gaming they are footstep, footstep-body, anti-masking and voice bands. *Footsteps* (M1) scales bands 4 and 5, whose threshold sits at −6 dBFS (`kFootstepsThresholdDb`), so they are static bells for every cue quieter than about −16 / −11 dBFS and roll off on the loudest events (docs/11 E19 interim). Band 4 (3.2 kHz) is off when the chain runs at 32 kHz or less (`kSpeechLinkMaxRate`, Bluetooth hands-free rates; docs/11 E17). *Footsteps* also scales the anti-masking band 6 (6 dB × Footsteps) until docs/11 E20 re-keys it to a loud-event "Tame" amount (E19 redesign, E21). *Voice & Score* (M5) scales band 7. In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
+13. Gaming correctness beats spaciousness: crossfeed is forced to 0 in Gaming mode. With binaural (virtualised) input, or a game that renders its own HRTF (`virt.ownHrtf`), width, space, crossfeed and focus are forced neutral.
 14. AutoDrive's value is ≤ 0, so it can only *reduce* the drive the user or macros asked for. It is also ≥ −requested drive: past that the applied drive is already 0 dB, and further "reduction" would change nothing audible while delaying recovery. Test: *Chain: AutoDrive's reduction stops at the requested drive, so it recovers at once*.
 15. **Glue floor, only while glue is armed.** Glue is armed when its base value is above 0, or when a macro source that can raise it is above 0 in the current mode (`MacroMap::isArmed()`: Boost Intensity or *Loudness* in Music, even before the entry's start point). While armed, `kGlueFloor = 0.001` keeps the maximizer's 3-band splitter engaged. Switching glue fully off and on crossfades the input against its own all-pass-shifted band sum, which comb-nulls 120 Hz and 4 kHz for the fade. Without the floor that would happen every time Boost Intensity crosses its glue start point (40 %); 0.001 of 2:1 band compression is inaudible. When glue is disarmed the floor is not applied and the splitter is out of the path, because its all-pass rotation raises the crest factor of flat-topped (mastered) material by 1–3 dB (source comment), which the limiter would otherwise have to take back.
-16. Toggling `virt.on` on 6/8-channel input never clicks. For 20 ms both folds run and are crossfaded linearly (`virtMix`), since binaural render and downmix differ in level and timing (ITD, head shadow). Switching the virtualiser on from fully off first `reset()`s it, so it starts from silence rather than stale history.
+16. Fold changes on 6/8-channel input never click. Toggling `virt.on` crossfades the binaural render and the downmix for 20 ms (`virtMix`), since they differ in level and timing (ITD, head shadow); the input-channel detector's (or `virt.input`'s) switch between the surround and the stereo passthrough fold takes 400 ms (`passMix`), a linear fade whose level is corrected from the two folds' correlation, so the level glides between them with neither a mid-fade hole nor a swell. A fold that did not run in the previous block is `reset()` before it runs again, so it starts from silence rather than stale history.
 17. **The bypass reference has its own true-peak limiter.** `dryLimiter` (a `TruePeakLimiter` at `max.ceiling`, 80 ms auto release) limits the matched reference, so the ceiling holds in bypass in every host, including the plug-in and the CLI, which have no master limiter. It fits inside the latency the dry path needs anyway: 1 ms look-ahead + the 20-sample detector = 68 samples at 48 kHz, and `dryDelay` shrinks by the same amount, so no latency is added. It runs only while bypass is engaged (`bypassMix` above 0 or moving), which keeps its cost out of normal processing, and it is `reset()` every time it starts. Started cold, it outputs silence for its latency (1.42 ms at 48 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
-18. **Published effective values include the chain's overrides.** The mode and format policies write into the effective array itself (Gaming crossfeed 0; binaural width 1, space 0, crossfeed 0; air 0 below 42 kHz; the compressor rule of decision 19), and `publishEffective()` runs at the end of `applyParameters()`. `effectiveValue()` and the GUI's effective-value rings therefore show what the modules apply, not what the store and macros asked for. `prepare()` publishes the plain post-macro values; the first processed block replaces them. Test: *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies* reads the published width, space and crossfeed.
+18. **Published effective values include the chain's overrides.** The mode and format policies write into the effective array itself (Gaming crossfeed 0; binaural lock or `virt.ownHrtf`: width 1, space 0, crossfeed 0, focus 0, and with `virt.ownHrtf` also `virt.on` 0; air 0 below 42 kHz; the compressor rule of decision 19), and `publishEffective()` runs at the end of `applyParameters()`. `effectiveValue()` and the GUI's effective-value rings therefore show what the modules apply, not what the store and macros asked for. `prepare()` publishes the plain post-macro values; the first processed block replaces them. Test: *Gaming: binaural lock on a 7.1 strip - width 1, space 0 and focus 0 whatever the store asks* reads the published width, space, crossfeed and focus.
 19. **In Gaming, a macro-engaged compressor is upward-only.** Boost Intensity, *Footsteps* and *Detail* switch the compressor on for its upward section. When the base `comp.on` is off and `comp.ratio` is still at its default (2.5), the effective ratio is set to 1:1, so the downward section is off and gunshots and explosions keep their dynamics. A preset that sets a ratio, or a compressor the user switched on, keeps its ratio. Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*.
 20. **The neural slot is optional, eligibility-checked and ahead of the dynamics.** `setNeuralModel()` wraps the runner in an `AsyncModelProcessor` at once (no thread yet) and parks it; `prepare()` swaps it in, so the audio thread never sees the model change, and `needsReprepare()` reports the pending change so the host re-prepares as for a profile change. `prepare()` then puts it in the chain only if `isEligible (profile, L, fs, context)` holds, the model's sample rate matches and, in real time, `maxBlockSize` is at most `safetyFrames × frameSize` (a result is only picked up in a later block than its frame's, so a longer buffer makes a fixed share of frames miss whatever the model's speed: `BlockTooLarge`). An ineligible, mismatched, invalid or failing model, or one whose safety frames do not cover the buffer, stays installed but out of the chain, with no worker thread and no latency, and `getNeuralStatus()` says why. The `Offline` context (batch rendering) accepts any model and any block length and runs the processor in offline mode, with the model inside `process()`, so a render faster than real time still gets every frame's result. The slot is part of the fixed slot array (the processor is owned through a pointer), so it shares `ModuleSlot`'s latency-compensated bypass fade (`setNeuralBypass()`) and the NaN reset. It sits after the gate and before the EQ: upstream of the compressor and the maximizer, so the true-peak limiter still guarantees the ceiling whatever gain the model applies (up to `maxGain`, +12 dB); downstream of the gate, whose noise-floor tracking would otherwise follow the model's frame-rate gain; and ahead of the tonal, saturation and width stages, so the model sees the source it was trained on. Tests: the `NeuralSlot:` cases in `tests/test_neural_slot.cpp` (no model: reference latencies and bit-identical output; an identity model adds exactly `L`; ineligible in Low Latency; `BlockTooLarge`; an Offline render with no waiting gets every frame's gain, reproducibly; the ceiling with −6 / +12 dB models; latency-constant bypass; allocation-free `process()`; `clearNeuralModel()`).
 
@@ -1763,7 +1767,7 @@ Everything acts on the **side** signal only, which is the mono-compatibility gua
 ```
 M  = (L + R) / 2,   S = (L − R) / 2
 S1 = min(w, 1) · HS_w(S)                              width: complementary 2nd-order high shelf at the low cut
-S2 = S1 + guard · (Bell(S1) − S1)                      positional focus: bell 3 kHz, Q 0.5, +6 dB · focus; guard ∈ [0, 1] keeps the far ear's polarity
+S2 = S1 + guard · (Bell(S1) − S1)                      positional focus: bell 3 kHz, Q 0.5, +3 dB · focus (0 dB at fs ≤ 32 kHz); guard ∈ [0, 1] keeps the far ear's polarity
 S3 = S2 + 0.5 · space · AP(z^−5ms · HP_300(M))         space: nested Schroeder all-passes 7.3 / 4.7 / 3.1 ms, g = 0.5
 S4 = S3 − 0.6 · crossfeed · LP1_700(S3)                crossfeed (first-order low-pass)
 L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting (to float rounding)
@@ -1776,7 +1780,7 @@ L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting
 | Stereo & Space | `spatial.on` | off / on | on | toggle | Slot enable (20 ms crossfade). |
 | Width | `spatial.width` | 0 … 2 | 1 | % (0–200 %) | ≤ 1: plain gain on S (0 = mono). > 1: S gains up to `20·log10(w)` dB above the low cut, 0 dB below it. 20 ms one-pole. |
 | Width Low Cut | `spatial.lowCut` | 60 … 500 | 180 | Hz | Shelf turnover: the low end never gets wider. 50 ms one-pole on ln(Hz). |
-| Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 6 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis). A polarity guard bounds the lift, so a hard-panned source stays hard-panned. M is untouched. |
+| Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 3 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis; at 100 % a source 6 dB to one side gains 2.9 dB of ILD, docs/11 E24). Off at sample rates ≤ 32 kHz (Bluetooth hands-free links). A polarity guard bounds the lift, so a hard-panned source stays hard-panned. M is untouched. |
 | Space | `spatial.space` | 0 … 1 | 0 | % | Adds decorrelated ambience from HP(M) into S (gain 0.5 · space). Cancels in mono. |
 | Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Low-shelf reduction of S (bs2b-like). **Forced to 0 in Gaming mode** and with binaural input. |
 | Mono Safety | `spatial.monoSafety` | off / on | on | toggle | Pulls widths > 1 back towards 1 while the output correlation is below the minimum. |
@@ -1933,7 +1937,7 @@ void StereoSpatializer::controlTick() noexcept
 | Control interval | 32 samples (stream time) |
 | Smoothers (per sample) | width, focus dB, space gain, crossfeed gain: 20 ms one-pole · ln(low cut): 50 ms one-pole |
 | Width shelf | Q = 1/√2 (k = √2), gain `max(w, 1)` above the cut |
-| Focus bell | 3 kHz, Q 0.5, max +6 dB |
+| Focus bell | 3 kHz, Q 0.5, max +3 dB (`kFocusMaxDb`); 0 dB at fs ≤ 32 kHz (`focusMaxDb`, set in `prepare()`) |
 | Focus polarity guard | band-pass 3 kHz, Q 0.5 on M and S1; envelopes peak hold, 30 ms release; guard instant attack, 50 ms release |
 | Space | HP 300 Hz (Q 0.707), pre-delay 5 ms (240 samples at 48 kHz), nested all-passes 7.3 / 4.7 / 3.1 ms (350 / 226 / 149 samples at 48 kHz, g = 0.5), scale 0.5 |
 | Crossfeed | first-order LP at 700 Hz, scale 0.6 |
@@ -2171,7 +2175,7 @@ int main()
                  store.get (MaxDriveDb), chain.effectiveValue (MaxDriveDb), m.governorScale.load());
 
     // A/B: bank B = bank A + global bypass. Switching banks is one atomic;
-    // the chain crossfades (30 ms) to the latency-aligned, loudness-matched dry path.
+    // the chain crossfades (30 ms) to the latency-aligned dry path.
     store.copyBank (Bank::A, Bank::B);
     store.set (Bank::B, BypassAll, 1.0f);
     store.setActiveBank (Bank::B);
@@ -2187,7 +2191,19 @@ int main()
         }
     }
     std::printf ("B (bypass): out peak %.2f dBFS, short-term %.1f LUFS\n", gainToDb (peakB), m.shortTermLufs.load());
+    // Back to A within the comparison: the louder, processed side is now
+    // turned down to the bypass loudness (never the bypass raised).
     store.setActiveBank (Bank::A);
+    {
+        ScopedNoDenormals noDenormals;
+        for (int block = 0; block < 750; ++block)
+        {
+            const AudioBlock b = io.block();
+            render (b, t, 0.5f);
+            chain.process (b);
+        }
+    }
+    std::printf ("A (in the comparison): short-term %.1f LUFS\n", m.shortTermLufs.load());
 
     // Structural change: flagged by the chain, applied off the audio thread.
     store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::LowLatency));
@@ -2233,10 +2249,11 @@ int main()
 chain latency: 192 samples (4.00 ms)
 A: out peak -1.05 dBFS, TP max -1.05 dBTP, short-term -6.4 LUFS, limiter GR -1.91 dB
    base drive 0.0 dB -> effective 2.61 dB (Boost Intensity), governor scale 1.00
-B (bypass): out peak -1.99 dBFS, short-term -6.4 LUFS
+B (bypass): out peak -5.97 dBFS, short-term -10.5 LUFS
+A (in the comparison): short-term -10.5 LUFS
 after re-prepare (Low Latency): 100 samples
 mix latency: 260 samples (max strip + master limiter)
-mix: out peak -1.05 dBFS, deepest master limiter GR -3.38 dB
+mix: out peak -1.05 dBFS, deepest master limiter GR -3.86 dB
 ```
 
 **What the output demonstrates**
@@ -2246,12 +2263,13 @@ mix: out peak -1.05 dBFS, deepest master limiter GR -3.38 dB
 | `chain latency: 192` | The Balanced profile at 48 kHz: 16 (saturator) + 48 (compressor) + 36 + 92 (maximizer) samples, whether or not those modules are enabled (§5.2). |
 | `A: out peak -1.05 dBFS, TP max -1.05 dBTP` | The −1 dBTP ceiling holds, in sample and true peak. The 0.05 dB below the ceiling is the limiter's internal margin. |
 | `effective 2.61 dB` | MacroMap staging of Boost Intensity 0.6 onto `max.drive` (worked example in §3). The base value stays 0. |
-| `B (bypass) … -6.4 LUFS` | The A/B switch to bank B (`bypass` on) plays the dry path at the **same loudness** as the processed signal: loudness-matched bypass. |
+| `B (bypass) … -10.5 LUFS` | The A/B switch to bank B (`bypass` on) plays the dry path at its own loudness, 4.1 LU under the processed signal: the loudness match never raises the reference (decision 10). This first flip starts a comparison. |
+| `A (in the comparison) … -10.5 LUFS` | Back on bank A within the comparison, the louder, processed side is turned down to the bypass loudness: the loudness-matched bypass. It keeps that trim until the bypass has been off for 10 s. (Before [11 E37](11-enhancement-report.md#e37) the bypass line read −1.99 dBFS / −6.4 LUFS: the reference was raised instead.) |
 | `after re-prepare: 100` | `needsReprepare()` flagged the structural change; after `prepare()` the Low Latency profile is 100 samples (2.08 ms). |
 | `mix latency: 260` | The Music strip (Balanced, 192) sets the pad; the Game strip (Low Latency, 100) is padded by 92. Not every strip is Low Latency, so the master limiter keeps its 1 ms look-ahead and adds 48 + 20 = 68. |
-| `deepest master limiter GR -3.38 dB` | The two individually limited strips overshoot when summed. The master limiter catches it, and the output peaks at −1.05 dBFS, under its −1 dBTP ceiling. (The Game strip's *Footsteps* compressor is upward-only since decision 19, so that strip is no longer compressed downward and the sum needs more master limiting; before that rule this line read −1.57 dB and −1.06 dBFS.) |
+| `deepest master limiter GR -3.86 dB` | The two individually limited strips overshoot when summed. The master limiter catches it, and the output peaks at −1.05 dBFS, under its −1 dBTP ceiling. (The Game strip's *Footsteps* compressor is upward-only since decision 19, so that strip is no longer compressed downward and the sum needs more master limiting; before that rule this line read −1.57 dB and −1.06 dBFS. Since the footsteps bands became static bells, docs/11 E19 interim, Footsteps 70 % lifts the Game strip's 3.2 kHz and 260 Hz content by up to 4.9 and 2.1 dB, which took this line from −3.38 to −3.86 dB.) |
 
-**What a real host does differently.** The app (`app/Source/engine`) and the plug-in do the same things in a device callback or `processBlock`. `prepare()` / `configure()` for a structural change happens on the message thread after detaching the callback; see [01 — Architecture §3](01-architecture.md#3-process--thread-model). The offline renderer (`tools/flubsound-cli/OfflineRenderer.cpp`) adds a "prime" step: one silent `process()` block delivers every parameter to the modules, then `reset()` snaps their smoothers onto those targets, so an offline render has no start-up glide. It then drops the first `getLatencySamples()` output samples and flushes the same number of zeros for sample alignment. `tests/test_offline_render.cpp` checks that a render equals the chain run this way by hand, bit for bit, and is bit-identical at any block size while no control loop moves (AutoLevel and AutoDrive off, and the SafetyGovernor at scale 1: its scale is updated once per block and applied from the next, so once it moves the block size changes the samples slightly), and that with the modules bypassed the first and last input samples come out unchanged.
+**What a real host does differently.** The app (`app/Source/engine`) and the plug-in do the same things in a device callback or `processBlock`. `prepare()` / `configure()` for a structural change happens on the message thread after detaching the callback; see [01 — Architecture §3](01-architecture.md#3-process--thread-model). The offline renderer (`tools/flubsound-cli/OfflineRenderer.cpp`) adds a "prime" step: one silent `process()` block delivers every parameter to the modules, then `reset()` snaps their smoothers onto those targets, so an offline render has no start-up glide. It then drops the first `getLatencySamples()` output samples and flushes the same number of zeros for sample alignment. After every block that carries programme it also reads the chain's `MeterBus` (from the rendering thread, which is also the thread that calls `process()`, so the readings are exactly that block's) and accumulates the render statistics that `flubsound-cli process --json` reports as `render.stats`; nothing is added to the audio path. `tests/test_offline_render.cpp` checks that a render equals the chain run this way by hand, bit for bit, and is bit-identical at any block size while no control loop moves (AutoLevel and AutoDrive off, and the SafetyGovernor at scale 1: its scale is updated once per block and applied from the next, so once it moves the block size changes the samples slightly), and that with the modules bypassed the first and last input samples come out unchanged.
 
 ---
 
@@ -2264,7 +2282,7 @@ mix: out peak -1.05 dBFS, deepest master limiter GR -3.38 dB
 | `TruePeakLimiter` | [`tests/test_limiter.cpp`](../tests/test_limiter.cpp) | *latencySamples() = lookahead + detector delay, and a quiet impulse arrives exactly that late* · *gain matches a brute-force model of the header (deque, box filter, attack bound)* · *after 20 s of dense limiting with a 1 s release the gain lands exactly on 0 dB* |
 | `ParametricEq` | [`tests/test_parametric_eq.cpp`](../tests/test_parametric_eq.cpp) | *measured sine gain matches responseDb() for every band type* · *gain glides are as smooth as an ideal per-sample glide (no zipper, no stale state)* · *abrupt type / slope / enable changes are crossfaded without clicks* · *glides converge to the exact target design at every sample rate* |
 | `BassEngine` | [`tests/test_bass_engine.cpp`](../tests/test_bass_engine.cpp) | *headroom protection withdraws the boost on loud low frequencies* · *harmonics character flips the 2nd / 3rd harmonic balance* · *the protection cap holds for every shelf frequency and tone* · *switching everything off lands on a bit-exact pass-through* |
-| `StereoSpatializer` | [`tests/test_spatializer.cpp`](../tests/test_spatializer.cpp) | *L'+R' == L+R for random stereo noise under random settings* · *width 1 with everything else neutral is a bit-exact pass-through* · *widening never mirrors a panned source around the low cut* · *positional focus never flips the far ear - hard-panned sources stay hard-panned* · *NaN / inf inputs are contained within one control interval* |
+| `StereoSpatializer` | [`tests/test_spatializer.cpp`](../tests/test_spatializer.cpp) | *L'+R' == L+R for random stereo noise under random settings* · *width 1 with everything else neutral is a bit-exact pass-through* · *widening never mirrors a panned source around the low cut* · *positional focus never flips the far ear - hard-panned sources stay hard-panned* · *positional focus adds at most 3 dB of ILD at 3 kHz, and none at speech-link rates (<= 32 kHz)* · *NaN / inf inputs are contained within one control interval* |
 
 **Roadmap items visible in these files** (not implemented today):
 - a linear-phase EQ mode for offline/batch mastering (`ParametricEq.h`);

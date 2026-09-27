@@ -39,25 +39,28 @@ struct Render
     std::array<float, MeterBus::kMaxDynBands> dynEqDb {};
     float effectiveWidth = 0.0f, compUpwardDb = 0.0f;
     std::vector<float> effective;
+    double fs = kFs;
 
-    /** Level (dBFS) of the component at `freq` in output channel `ch`. */
+    /** Level (dBFS) of the component at `freq` in output channel `ch`, over
+        the last 0.5 s. */
     double toneDb (int ch, double freq) const
     {
-        return toDb (toneAmplitude (out.ch[static_cast<size_t> (ch)].data() + out.numSamples() - kMeasure, kMeasure, freq, kFs));
+        const int n = static_cast<int> (fs / 2.0);
+        return toDb (toneAmplitude (out.ch[static_cast<size_t> (ch)].data() + out.numSamples() - n, n, freq, fs));
     }
     float eff (int id) const { return effective[static_cast<size_t> (id)]; }
 };
 
-/** Renders `in` through a fresh chain in Gaming mode. `setup` adjusts the
-    store before prepare(); `held` modules are held off with the audition
-    bypass. */
-Render renderGaming (const Setup& setup, Planar in, std::initializer_list<int> held = {})
+/** Renders `in` through a fresh chain in Gaming mode at `fs`. `setup`
+    adjusts the store before prepare(); `held` modules are held off with the
+    audition bypass. */
+Render renderGaming (const Setup& setup, Planar in, std::initializer_list<int> held = {}, double fs = kFs)
 {
     ParameterStore store;
     store.set (Mode, static_cast<float> (ModeValue::Gaming));
     setup (store);
     ProcessingChain chain (store);
-    chain.prepare ({ kFs, kBlock, in.numChannels() });
+    chain.prepare ({ fs, kBlock, in.numChannels() });
     for (int id : held)
         chain.setAuditionBypass (id, true);
     {
@@ -66,7 +69,7 @@ Render renderGaming (const Setup& setup, Planar in, std::initializer_list<int> h
         for (int pos = 0; pos < n; pos += kBlock)
             chain.process (in.block (pos, std::min (kBlock, n - pos)));
     }
-    Render r { std::move (in), {}, 0.0f, 0.0f, {} };
+    Render r { std::move (in), {}, 0.0f, 0.0f, {}, fs };
     for (size_t b = 0; b < r.dynEqDb.size(); ++b)
         r.dynEqDb[b] = chain.meters().dynEqGainDb[b].load();
     r.effectiveWidth = chain.meters().effectiveWidth.load();
@@ -91,12 +94,13 @@ std::vector<float> effectiveAfterPrepare (const Setup& setup)
     return e;
 }
 
-/** Stereo sine at `dbfs` on the left; the right channel is `right` x left. */
-Planar tone (double freq, float dbfs, float right = 1.0f)
+/** 1 s stereo sine at `dbfs` on the left; the right channel is `right` x left. */
+Planar tone (double freq, float dbfs, float right = 1.0f, double fs = kFs)
 {
-    Planar p (2, kLen);
-    const auto s = sine (freq, kFs, kLen, dbToGain (dbfs));
-    for (int i = 0; i < kLen; ++i)
+    const int len = static_cast<int> (fs);
+    Planar p (2, len);
+    const auto s = sine (freq, fs, len, dbToGain (dbfs));
+    for (int i = 0; i < len; ++i)
     {
         p.ch[0][static_cast<size_t> (i)] = s[static_cast<size_t> (i)];
         p.ch[1][static_cast<size_t> (i)] = right * s[static_cast<size_t> (i)];
@@ -139,10 +143,15 @@ double rmsDiff (const Planar& a, const Planar& b)
 } // namespace
 
 // ---------------------------------------------------------------------------
-TEST_CASE ("Gaming Footsteps (M1): mode band 4 lifts quiet 3.2 kHz detail by its gain law; loud steps are not boosted")
+TEST_CASE ("Gaming Footsteps (M1): mode band 4 is a static 3.2 kHz lift (7 dB x Footsteps) for everything but the loudest cues and hiss")
 {
-    // Mode band 4: BoostBelow bell at 3.2 kHz, threshold -42 dB, ratio 3,
-    // range 7 dB x Footsteps (upward compression of quiet high detail).
+    // Mode band 4: BoostBelow bell at 3.2 kHz, threshold -6 dB, ratio 3,
+    // range 7 dB x Footsteps, hiss floor -75 dB (docs/11 E19 interim). With the
+    // threshold near full scale the law (1 - 1/3) x (-6 - level) reaches the
+    // range at -16.5 dBFS, so the band is a static bell for every quieter cue
+    // (the same lift at -20 and at -60 dBFS: no level-dependent ramp, so a
+    // step / bed contrast moves only as a static EQ moves it) that rolls off
+    // over the loudest 10 dB.
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 4) == 3200.0f);
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 5) == 260.0f);
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 6) == 90.0f);
@@ -168,37 +177,55 @@ TEST_CASE ("Gaming Footsteps (M1): mode band 4 lifts quiet 3.2 kHz detail by its
 
     // The band on its own (compressor held off): lift of the 3.2 kHz tone
     // against Footsteps at 0.
-    const auto lift = [&] (float amount, float levelDb, std::initializer_list<int> held, Render* keep = nullptr) {
-        const auto ref = renderGaming (footsteps (0.0f), tone (f, levelDb), held);
-        auto r = renderGaming (footsteps (amount), tone (f, levelDb), held);
+    const auto lift = [&] (float amount, float levelDb, std::initializer_list<int> held, Render* keep = nullptr, double fs = kFs) {
+        const auto ref = renderGaming (footsteps (0.0f), tone (f, levelDb, 1.0f, fs), held, fs);
+        auto r = renderGaming (footsteps (amount), tone (f, levelDb, 1.0f, fs), held, fs);
         const double l = r.toneDb (0, f) - ref.toneDb (0, f);
         CHECK_NEAR (r.toneDb (1, f) - ref.toneDb (1, f), l, 0.01); // stereo-linked: both ears alike
         if (keep != nullptr)
             *keep = std::move (r);
         return l;
     };
-    Render r { Planar (2, 1), {}, 0.0f, 0.0f, {} };
-    // -50 dBFS: 8 dB under the threshold -> (1 - 1/3) x 8 = +5.3 dB.
-    CHECK_NEAR (lift (1.0f, -50.0f, { CompressorOn }, &r), 8.0 * (1.0 - 1.0 / 3.0), 0.3);
-    CHECK_NEAR (r.dynEqDb[4], 8.0 * (1.0 - 1.0 / 3.0), 0.3);
-    // -60 dBFS: the law asks for +12 dB, the range (7 dB x Footsteps) caps it.
-    CHECK_NEAR (lift (1.0f, -60.0f, { CompressorOn }), 7.0, 0.2);
+    Render r { Planar (2, 1), {}, 0.0f, 0.0f, {}, kFs };
+    // Quiet and moderate cues alike: the full range (7 dB x Footsteps).
+    for (const float level : { -60.0f, -40.0f, -20.0f })
+    {
+        CHECK_NEAR (lift (1.0f, level, { CompressorOn }, &r), 7.0, 0.2);
+        CHECK_NEAR (r.dynEqDb[4], 7.0, 0.05);
+    }
     CHECK_NEAR (lift (0.5f, -60.0f, { CompressorOn }), 3.5, 0.2);
-    // A loud step (-10 dBFS, far above the threshold) is not boosted.
-    CHECK_LE (std::abs (lift (1.0f, -10.0f, { CompressorOn }, &r)), 0.05);
+    // Loud roll-off: -10 dBFS is 4 dB under the threshold -> (1 - 1/3) x 4 =
+    // +2.7 dB; a -3 dBFS (gunfire-level) cue is above it and not lifted.
+    CHECK_NEAR (lift (1.0f, -10.0f, { CompressorOn }, &r), 4.0 * (1.0 - 1.0 / 3.0), 0.3);
+    CHECK_NEAR (r.dynEqDb[4], 4.0 * (1.0 - 1.0 / 3.0), 0.3);
+    CHECK_LE (std::abs (lift (1.0f, -3.0f, { CompressorOn }, &r)), 0.05);
+    CHECK_LE (r.dynEqDb[4], 0.01f);
+    // Hiss taper: at -80 dBFS (under the -75 dB floor) nothing is lifted.
+    CHECK_LE (std::abs (lift (1.0f, -80.0f, { CompressorOn }, &r)), 0.05);
     CHECK_LE (r.dynEqDb[4], 0.01f);
 
     // The whole macro: the compressor's upward gain (3 dB at 100 %) adds to
     // the band's 7 dB on a -60 dBFS cue.
     CHECK_NEAR (lift (1.0f, -60.0f, {}, &r), 10.0, 0.3);
     CHECK_NEAR (r.compUpwardDb, 3.0, 0.2);
+
+    // Speech-link rates (docs/11 E17): at 32 kHz and below the output is a
+    // Bluetooth hands-free link, where 3.2 kHz is 0.2..0.8 x Nyquist of a
+    // narrowband channel; the band is off there and on again at 44.1 kHz.
+    for (const double fs : { 8000.0, 16000.0, 32000.0 })
+    {
+        CHECK_LE (std::abs (lift (1.0f, -60.0f, { CompressorOn }, &r, fs)), 0.05);
+        CHECK_LE (std::abs (r.dynEqDb[4]), 0.01f);
+    }
+    CHECK_NEAR (lift (1.0f, -60.0f, { CompressorOn }, &r, 44100.0), 7.0, 0.2);
 }
 
-TEST_CASE ("Gaming Footsteps (M1): mode band 5 lifts quiet 260 Hz footstep body by its gain law (up to 3 dB); loud low-mids are not boosted")
+TEST_CASE ("Gaming Footsteps (M1): mode band 5 is a static 260 Hz footstep-body lift (3 dB x Footsteps) that rolls off on loud low-mids")
 {
-    // Mode band 5: BoostBelow bell at 260 Hz, threshold -45 dB, ratio 2.5,
-    // range 3 dB x Footsteps (heel impact). The compressor Footsteps also
-    // engages is held off so only the dynamic EQ is measured.
+    // Mode band 5: BoostBelow bell at 260 Hz, threshold -6 dB, ratio 2.5,
+    // range 3 dB x Footsteps (heel impact; docs/11 E19 interim). The law
+    // (1 - 1/2.5) x (-6 - level) reaches the range at -11 dBFS. The compressor
+    // Footsteps also engages is held off so only the dynamic EQ is measured.
     const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 5);
     const auto lift = [f] (float amount, float levelDb, float* bandDb = nullptr) {
         const auto ref = renderGaming (macroOnly (Macro1, 0.0f, { DynEqOn, CompressorOn }), tone (f, levelDb), { CompressorOn });
@@ -210,37 +237,44 @@ TEST_CASE ("Gaming Footsteps (M1): mode band 5 lifts quiet 260 Hz footstep body 
         return l;
     };
     float band = 0.0f;
-    // -48 dBFS: 3 dB under the threshold -> (1 - 1/2.5) x 3 = +1.8 dB.
-    CHECK_NEAR (lift (1.0f, -48.0f, &band), 3.0 * (1.0 - 1.0 / 2.5), 0.15);
-    CHECK_NEAR (band, 3.0 * (1.0 - 1.0 / 2.5), 0.15);
-    // -60 dBFS: the law asks for +9 dB, the range (3 dB x Footsteps) caps it.
+    // -60 and -20 dBFS: the full range.
     CHECK_NEAR (lift (1.0f, -60.0f, &band), 3.0, 0.15);
-    CHECK_NEAR (band, 3.0, 0.1);
+    CHECK_NEAR (band, 3.0, 0.05);
+    CHECK_NEAR (lift (1.0f, -20.0f, &band), 3.0, 0.15);
+    CHECK_NEAR (band, 3.0, 0.05);
     CHECK_NEAR (lift (0.5f, -60.0f), 1.5, 0.1);
-    // -20 dBFS (far above the threshold): no boost.
-    CHECK_LE (std::abs (lift (1.0f, -20.0f, &band)), 0.05);
+    // -8 dBFS: 2 dB under the threshold -> (1 - 1/2.5) x 2 = +1.2 dB.
+    CHECK_NEAR (lift (1.0f, -8.0f, &band), 2.0 * (1.0 - 1.0 / 2.5), 0.15);
+    CHECK_NEAR (band, 2.0 * (1.0 - 1.0 / 2.5), 0.15);
+    // -3 dBFS (above the threshold): no boost from band 5; the 0.06 dB left
+    // is the skirt of the 3.2 kHz band 4 bell.
+    CHECK_LE (std::abs (lift (1.0f, -3.0f, &band)), 0.1);
     CHECK_LE (band, 0.01f);
 }
 
 TEST_CASE ("Gaming Footsteps (M1): anti-masking band 6 tames a very loud 90 Hz rumble; normal bass is untouched")
 {
     // Mode band 6: CutAbove low shelf at 90 Hz, threshold -22 dB, ratio 3,
-    // range 6 dB x Footsteps. The compressor Footsteps also engages is held
-    // off so only the band is measured.
+    // range 6 dB x Footsteps (docs/11 E20 decouples it from Footsteps inside
+    // E19's redesign, not before). The compressor Footsteps also engages is
+    // held off so only the dynamic EQ is measured. At 90 Hz the static 260 Hz
+    // footstep-body bell (band 5, +3 dB since the E19 interim) adds its skirt,
+    // +0.3 dB, to both cases.
     const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 6);
     const auto render = [f] (float amount, float levelDb) {
         return renderGaming (macroOnly (Macro1, amount, { CompressorOn }), tone (f, levelDb), { CompressorOn });
     };
+    constexpr double kBodySkirtDb = 0.3;
     // -6 dBFS explosion rumble: the full 6 dB cut, which a shelf applies half
     // of at its corner frequency.
     const auto loudRef = render (0.0f, -6.0f), loud = render (1.0f, -6.0f);
     CHECK_NEAR (loud.dynEqDb[6], -6.0, 0.1);
-    CHECK_NEAR (loud.toneDb (0, f) - loudRef.toneDb (0, f), -3.0, 0.3);
-    CHECK_NEAR (loud.toneDb (1, f) - loudRef.toneDb (1, f), -3.0, 0.3);
+    CHECK_NEAR (loud.toneDb (0, f) - loudRef.toneDb (0, f), -3.0 + kBodySkirtDb, 0.3);
+    CHECK_NEAR (loud.toneDb (1, f) - loudRef.toneDb (1, f), -3.0 + kBodySkirtDb, 0.3);
     // -30 dBFS bass line: below the threshold, so no cut at all.
     const auto normalRef = render (0.0f, -30.0f), normal = render (1.0f, -30.0f);
     CHECK_GE (normal.dynEqDb[6], -0.01f);
-    CHECK_LE (std::abs (normal.toneDb (0, f) - normalRef.toneDb (0, f)), 0.05);
+    CHECK_NEAR (normal.toneDb (0, f) - normalRef.toneDb (0, f), kBodySkirtDb, 0.1);
 }
 
 TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre 3 kHz source; the mono sum is untouched")
@@ -263,8 +297,8 @@ TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre
     }
 
     // A 3 kHz source panned left (R = L / 2: ILD 6.0 dB). M = 0.75, S = 0.25;
-    // the spatializer scales S by width and by its focus bell (+6 dB x focus
-    // at 3 kHz) and leaves M alone.
+    // the spatializer scales S by width and by its focus bell (+3 dB x focus
+    // at 3 kHz, docs/11 E24's cap) and leaves M alone.
     double ild[3] {}, monoSumDb[3] {};
     const float amounts[3] = { 0.0f, 0.5f, 1.0f };
     for (int k = 0; k < 3; ++k)
@@ -279,9 +313,9 @@ TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre
             CHECK_NEAR (r.effectiveWidth, 1.25, 1e-3); // no mono-safety pull on a correlated source
     }
     CHECK_NEAR (ild[0], toDb (2.0), 0.02); // macro at 0: transparent
-    CHECK_GE (ild[1], ild[0] + 2.0);
-    CHECK_GE (ild[2], ild[1] + 5.0);
-    const double sGain = 1.25 * dbToGain (6.0f * 0.9f);
+    CHECK_GE (ild[1], ild[0] + 1.0);
+    CHECK_GE (ild[2], ild[1] + 3.0);
+    const double sGain = 1.25 * dbToGain (3.0f * 0.9f);
     CHECK_NEAR (ild[2], toDb ((0.75 + 0.25 * sGain) / (0.75 - 0.25 * sGain)), 0.5);
     // Mid/side only: the mono fold-down is exactly what it was.
     CHECK_NEAR (monoSumDb[1], monoSumDb[0], 0.01);
@@ -417,13 +451,14 @@ TEST_CASE ("Gaming: crossfeed is forced off - a hard-left source never leaks int
     CHECK (maxAbsDiff (withCrossfeed.out, withoutCrossfeed.out) == 0.0);
 }
 
-TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies")
+TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1, space 0 and focus 0 whatever the store asks")
 {
     // With the virtualiser on, the stereo after it is binaural: widening,
-    // ambience and crossfeed would corrupt its interaural cues, so the chain
-    // forces width 1 / space 0 / crossfeed 0 into the spatializer (focus is
-    // allowed). The published effective values and the spatializer's own
-    // width meter both show what is applied.
+    // ambience, crossfeed and the focus ILD bell would corrupt its interaural
+    // cues, so the chain forces width 1 / space 0 / crossfeed 0 / focus 0
+    // into the spatializer (docs/11 E24 (i); focus was allowed before). The
+    // published effective values and the spatializer's own width meter both
+    // show what is applied.
     Planar in (8, kLen);
     const double freqs[8] = { 440.0, 550.0, 700.0, 0.0, 1300.0, 2300.0, 3100.0, 1700.0 }; // FL FR FC LFE BL BR SL SR
     const float levels[8] = { 0.10f, 0.08f, 0.10f, 0.0f, 0.05f, 0.05f, 0.10f, 0.07f };
@@ -457,10 +492,11 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever 
     CHECK (maxAbsDiff (wide.out, plain.out) == 0.0);
     CHECK (rms (plain.out.ch[0].data(), kLen) > 0.01);
 
-    // Focus is not locked: Positional still changes the binaural output.
+    // Focus is locked too: Positional 100 % (focus 0.9 from the macro) no
+    // longer changes the binaural output at all.
     const auto noFocus = render (true, 1.0f, 0.0f, 0.0f, 0.0f);
-    CHECK (plain.eff (SpatialFocus) > 0.8f);
-    CHECK_GE (rmsDiff (plain.out, noFocus.out), 0.01 * rms (plain.out.ch[0].data(), kLen));
+    CHECK (plain.eff (SpatialFocus) == 0.0f);
+    CHECK (maxAbsDiff (plain.out, noFocus.out) == 0.0);
 
     // Contrast: the BS.775 downmix (virtualiser off) is plain stereo, and the
     // same store widens it and adds space.
@@ -468,6 +504,7 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever 
     const auto plainDownmix = render (false, 1.0f, 0.0f, 0.0f, 1.0f);
     CHECK_NEAR (wideDownmix.effectiveWidth, 2.0, 1e-3);
     CHECK_GE (rmsDiff (wideDownmix.out, plainDownmix.out), 0.1 * rms (plainDownmix.out.ch[0].data(), kLen));
+    CHECK (plainDownmix.eff (SpatialFocus) > 0.8f); // no lock: focus applies
 }
 
 TEST_CASE ("Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen")

@@ -50,6 +50,13 @@ bool isWavFile (const std::filesystem::path& path);
     ceiling check when --ceiling or --target-lufs was given. */
 RenderSettings makeRenderSettings (const RenderOptions& options, const ResolvedParameters& params);
 
+/** The `render.stats` object of `process` / `batch --json` (RenderStats,
+    dB rounded to 0.01, null at the -160 dB floor). */
+json::Value renderStatsToJson (const RenderStats& stats);
+
+/** One-line human-readable summary of the stats ("Stats   : ..." in `process`). */
+std::string formatStats (const RenderStats& stats);
+
 // ---- batch ----------------------------------------------------------------
 struct BatchJob
 {
