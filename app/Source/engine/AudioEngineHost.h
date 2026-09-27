@@ -114,11 +114,12 @@ namespace flub::app
 {
 struct LatencyInfo
 {
-    /** One strip's share of the engine latency (docs/11 E42a). The MixEngine
-        pads every strip to the slowest one so strips stay in sync:
+    /** One strip's output latency in the engine (docs/11 E42a; the
+        MixEngine's getStripLatencySamples / getStripPaddingSamples):
         ownSamples is what the strip's own chain plus the master limiter
-        needs, outputSamples what it really gets (= engineSamples), and
-        paddingSamples the difference another strip's profile adds. */
+        needs, paddingSamples what aligning it with the slowest strip of its
+        sync group adds (0 for a strip in no group, the default), and
+        outputSamples the sum. engineSamples is the largest outputSamples. */
     struct Strip
     {
         int ownSamples = 0, paddingSamples = 0, outputSamples = 0;

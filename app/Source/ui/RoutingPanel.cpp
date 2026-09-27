@@ -781,9 +781,13 @@ void RoutingPanel::refreshRouting()
     autoProfiles->refresh();
 
     // The red state: no application reaches a strip through us, whatever the
-    // reason (an unavailable method gives its own).
+    // reason (an unavailable method gives its own). Not while nothing is
+    // assigned and the device input feeds a strip (a virtual cable set as the
+    // system output): the audio is processed then, just not per app, and the
+    // notice stays the neutral explanation.
     reason = routing.getUnavailableReason();
-    noAppsProcessed = routing.getProcessedAppCount() == 0;
+    const bool fedByDeviceInput = routing.getRoutes().empty() && controller.getDeviceInputStrip() >= 0;
+    noAppsProcessed = routing.getProcessedAppCount() == 0 && ! fedByDeviceInput;
     if (! noAppsProcessed)
         noticeDetail = {};
     else if (reason.isNotEmpty())

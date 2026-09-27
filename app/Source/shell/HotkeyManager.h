@@ -94,7 +94,7 @@ public:
         it; the tray menu drives EngineController directly). */
     void perform (HotkeyAction action);
 
-    /** ChatMix balance change per press (10 presses from centre to one end). */
+    /** ChatMix balance change per press (5 presses from centre to one end, 1.2 dB each). */
     static constexpr float kChatMixStep = 0.2f;
 
     /** Feedback after an action (e.g. for a tray bubble / on-screen display). */

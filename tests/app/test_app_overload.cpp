@@ -695,13 +695,13 @@ TEST_CASE ("App: header latency readout marks an estimate, shows -- without an a
     info.totalMs = 38.8;
     info.captureBufferMs = 1.2;
     info.numStrips = 2;
-    info.strips[0] = { 148, 1204, 1352, 3.1, 25.1, 28.2 }; // Game in Low Latency, padded to Music in Quality
+    info.strips[0] = { 148, 1204, 1352, 3.1, 25.1, 28.2 }; // Game in Low Latency, padded to Music in Quality (one sync group)
     info.strips[1] = { 1352, 0, 1352, 28.2, 0.0, 28.2 };
     CHECK (ui::HeaderBar::formatLatencyReadout (info) == "~40.0 ms");
     const auto tip = ui::HeaderBar::describeLatency (info, { "Game", "Music" });
     CHECK (tip.startsWith ("Latency (estimated): device in 5.3 ms + engine 28.2 ms + device out 5.3 ms + app capture 1.2 ms = 40.0 ms"));
     CHECK (tip.contains ("\nEstimated: the device figures are what the driver reports"));
-    CHECK (tip.contains ("\nGame: 28.2 ms in the engine (its own 3.1 ms + 25.1 ms to stay in sync with the slowest strip)"));
+    CHECK (tip.contains ("\nGame: 28.2 ms in the engine (its own 3.1 ms + 25.1 ms to stay in sync with its sync group)"));
     CHECK (tip.contains ("\nMusic: 28.2 ms in the engine"));
     CHECK (! tip.contains ("Music: 28.2 ms in the engine (")); // no padding, no breakdown
 

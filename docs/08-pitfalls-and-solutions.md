@@ -55,7 +55,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 
 ### A4. Lip-sync for video
 - **Symptom:** dialogue feels late in films and cut-scenes.
-- **Solution:** keep added latency far below perceptual thresholds. ITU-R BT.1359 puts detectability at roughly 45 ms audio-early and 125 ms audio-late. *Balanced* (~4 ms algorithmic + I/O) is well inside that, and even *Quality* (~28 ms algorithmic) is acceptable for video.
+- **Solution:** keep added latency far below perceptual thresholds. ITU-R BT.1359 puts detectability at roughly 45 ms audio-early and 125 ms audio-late. *Balanced* (~4 ms algorithmic + I/O) is well inside that, and even *Quality* (~28 ms algorithmic) is acceptable for video. The Quality figure holds at every rate: its look-aheads and gate frame are defined in ms, and below 32 kHz (Bluetooth hands-free) Quality runs as Balanced, where it used to reach 144 ms at 8 kHz ([11 E42](11-enhancement-report.md#e42) E42a; tests *Chain: Quality runs as Balanced below 32 kHz, without a re-prepare* and *Chain: each profile's latency in ms is about the same from 44.1 to 192 kHz*). Strips that carry one A/V programme share a sync group (`StripConfig::syncGroup`) and are padded to its slowest strip; other strips are not padded, so a Quality Music strip never delays the Game strip (test *MixEngine: padding only within sync groups, per-strip latency reported*).
 
 ### A5. Bluetooth headphones
 - **Symptom:** "Flubsound adds 200 ms." In fact, the Bluetooth codec does.

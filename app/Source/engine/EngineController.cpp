@@ -508,10 +508,10 @@ void EngineController::restoreStripStates()
             }
         }
 
-        // A strip with nothing saved (a first run, or a strip new to the
-        // layout) starts from a safe, audible default preset (docs/11 E36);
-        // without state restore (headless runs, tests), or when that preset is
-        // missing, from the parameter defaults as before.
+        // A strip with nothing saved (a first run) starts from a safe,
+        // audible default preset (docs/11 E36); without state restore
+        // (headless runs, tests), or when that preset is missing, from the
+        // parameter defaults as before.
         if (! restored && ! (options.restoreState && loadFirstRunDefault (i)))
         {
             // Fresh strip: surround strips default to Gaming mode.
@@ -871,8 +871,8 @@ LatencyProfileValue EngineController::getLatencyProfile()
 
 void EngineController::applyLatencyProfile (LatencyProfileValue profile)
 {
-    // Every strip, both banks: strips are padded to the largest latency
-    // anyway, and A/B switching must not trigger re-prepares.
+    // Every strip, both banks: the Settings profile is one choice for the
+    // whole engine, and A/B switching must not trigger re-prepares.
     const float v = static_cast<float> (static_cast<int> (profile));
     for (int s = 0; s < getNumStrips(); ++s)
     {

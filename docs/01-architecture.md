@@ -170,7 +170,7 @@ sequenceDiagram
     Drv-->>Host: cyclic buffer + position via shared memory (no 2nd WASAPI hop)
     Host->>Strip: 7.1 block (e.g. 128 frames)
     Strip->>Strip: input gain · AutoLevel · virtualiser (7.1→binaural) · modules
-    Strip->>Mix: stereo, padded to max strip latency
+    Strip->>Mix: stereo, padded to the slowest strip of its sync group (none by default)
     Mix->>Mix: Σ strips · master true-peak limiter (−1 dBTP, lower on Bluetooth)
     Mix->>Out: stereo block
 ```
@@ -190,7 +190,7 @@ sequenceDiagram
   │        ════════ from here on: STEREO ════════
   ├─ dry tap ──► (delayed by total latency) ──► global bypass (loudness-matched reference;
   │                                               its own true-peak limiter fits inside that delay)
-  ├─ [slot] SpectralNoiseGate      (Quality profile only; STFT 1024)
+  ├─ [slot] SpectralNoiseGate      (Quality profile only; STFT 21.3 ms: 1024 at 48 kHz)
   ├─ [slot] ParametricEq           10 bands, SVF, zero latency
   ├─ [slot] DynamicEq              4 user bands + 4 mode bands (footsteps / de-harsh …)
   ├─ [slot] BassEngine             subsonic · mono-bass · protected shelf · harmonics · tighten
@@ -306,7 +306,7 @@ This section is the project's single latency model. The R1.1 row in `00-understa
 | Scope | What it covers | Source | Status |
 |---|---|---|---|
 | **Chain** | One strip's algorithmic latency: look-aheads, oversampler FIRs, the STFT frame | `ProcessingChain::getLatencySamples()`; what the plug-in reports to its host and the CLI compensates | Exact, asserted by tests |
-| **App engine** | The largest strip's chain + the desktop app's master limiter | `MixEngine::getLatencySamples()` | Exact, asserted by tests |
+| **App engine** | Per strip: its chain + its sync-group padding + the desktop app's master limiter (`MixEngine::getStripLatencySamples()`); the largest of these is the engine total | `MixEngine::getLatencySamples()` | Exact, asserted by tests |
 | **Added end-to-end** | Everything Flubsound puts between the application and the ear on top of the application's normal output path: engine + I/O buffering (+ capture buffering on a capture path) | §5.2 and §5.3 | **Estimate** until the loopback measurement (roadmap `07-roadmap.md` item 1.2; device-lab test 8 in `10-headset-compatibility.md` §5) |
 
 **Target (R1.1): added end-to-end latency under 10–12 ms.**
@@ -329,7 +329,7 @@ These estimates are for the Windows virtual-driver path, which is designed but n
 | *Desktop app only:* master true-peak limiter after the strip sum (`MixEngine`; 1 ms look-ahead + 20, or 0.5 ms + 20 when every strip runs Low Latency) | +68 smp | +68 smp | +44 smp |
 | **App engine total** (`MixEngine::getLatencySamples()`) | **1420 smp ≈ 29.6 ms** | **260 smp ≈ 5.4 ms** | **144 smp = 3.0 ms** |
 
-All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. The global-bypass reference's own true-peak limiter (§4.2) sits inside that dry-path delay, so it adds nothing either. Look-aheads are defined in ms and FIR delays in samples, so the chain total varies with the rate: 1332 / 182 / 96 samples at 44.1 kHz, 1592 / 312 / 148 samples at 96 kHz. The plug-in and the CLI run a single chain with no master limiter. The app applies one latency profile to all strips; `MixEngine::configure()` gives the master limiter the Low Latency look-ahead (0.5 ms) only when every strip runs that profile, and 1 ms otherwise, so a mix of profiles (possible in the engine) pays the larger master latency on top of the largest strip. The app's header shows device input + output latency + app engine total (+ the capture FIFO target when per-app capture runs); with no device open that is the engine alone, 5.4 ms for Balanced at 48 kHz as in the screenshots. A profile change while audio plays reaches the ear through the engine swap (§3): the old engine fades out and the new one fades in, a 20 ms dip in which the programme moves by the latency difference, e.g. 1160 samples (24 ms) later for Balanced → Quality.
+All other modules (EQ, dynamic EQ, bass, clarity, spatializer, virtualiser) have zero latency. Bypassing a module never changes the total: the dry path is delayed to match. The global-bypass reference's own true-peak limiter (§4.2) sits inside that dry-path delay, so it adds nothing either. Look-aheads and the noise gate's STFT frame are defined in ms (the frame is 21.3 ms, rounded to a power of two: 1024 samples at 44.1 / 48 kHz, 2048 at 88.2 / 96 kHz, 4096 at 176.4 / 192 kHz), and the oversampler FIRs and the true-peak detector in samples, so a profile costs about the same time at every rate and the FIR part shrinks as the rate rises: 1332 / 182 / 96 samples (30.2 / 4.1 / 2.2 ms) at 44.1 kHz, 2616 / 312 / 148 samples (27.3 / 3.3 / 1.5 ms) at 96 kHz, 5144 / 552 / 244 samples (26.8 / 2.9 / 1.3 ms) at 192 kHz (test *Chain: each profile's latency in ms is about the same from 44.1 to 192 kHz*; before [11 E42](11-enhancement-report.md#e42) the frame was 1024 samples at every rate, so Quality fell to 16.6 ms at 96 kHz and rose to 144 ms at 8 kHz). Below 32 kHz (Bluetooth hands-free and other speech links) a requested Quality runs as Balanced: 92 samples (11.5 ms) at 8 kHz instead of 1152 (144 ms); `ProcessingChain::getLatencyProfile()` reports the profile in effect and `getRequestedLatencyProfile()` the stored one, and the clamp is not a pending re-prepare. The plug-in and the CLI run a single chain with no master limiter. A strip is padded only to the slowest strip of its sync group (`StripConfig::syncGroup`, [11 E40](11-enhancement-report.md#e40) part 3); by default every strip is in a group of its own, so a Quality Music strip leaves a Low Latency Game strip at 100 + 68 samples instead of padding it to 1352 + 68, and `MixEngine::getStripLatencySamples()` / `getStripPaddingSamples()` report each strip's output latency and padding. `MixEngine::configure()` gives the master limiter the Low Latency look-ahead (0.5 ms) only when every strip runs that profile, and 1 ms otherwise, so a mix of profiles (possible in the engine; the app's Settings profile applies to every strip) pays the larger master latency on every strip. The app's header shows device input + output latency + app engine total (+ the capture FIFO target when per-app capture runs), marked `~` as an estimate; with no device running it reads `--` ([11 E42](11-enhancement-report.md#e42) / [E51](11-enhancement-report.md#e51); older screenshots show the engine alone, 5.4 ms for Balanced at 48 kHz). Its tooltip lists each strip's own latency and sync padding. A profile change while audio plays reaches the ear through the engine swap (§3): the old engine fades out and the new one fades in, a 20 ms dip in which the programme moves by the latency difference, e.g. 1160 samples (24 ms) later for Balanced → Quality.
 
 ### 5.2 Added end-to-end latency (what the user feels), Windows driver path
 

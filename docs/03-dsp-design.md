@@ -2870,7 +2870,7 @@ The gate is light, adaptive noise reduction for hiss and hum on noisy captures, 
 ### 12.3 Algorithm & maths as implemented
 
 **Framing.**
-- `N = fftSize` is structural (`setFftSize()` before `prepare()`): a power of two from 256 to 4096, otherwise 512. The chain uses **1024** in the Quality profile.
+- `N = fftSize` is structural (`setFftSize()` before `prepare()`): a power of two from 256 to 4096, otherwise 512. The chain uses the power of two nearest to 21.3 ms in the Quality profile: **1024** at 44.1 / 48 kHz, 2048 at 88.2 / 96 kHz, 4096 at 176.4 / 192 kHz, 512 at 32 kHz (below 32 kHz Quality runs as Balanced, without the gate).
 - Hop `H = N/4` (75 % overlap), `N/2 + 1` bins, hop duration `h = H / fs`.
 - At 48 kHz: N 512 → H 128 (2.67 ms), 257 bins; N 1024 → H 256 (5.33 ms), 513 bins.
 
@@ -2958,7 +2958,7 @@ The implementer measured that a −20 dBFS tone passes with less than 0.001 dB c
 | Gate Release | `gate.release` | 10 … 500 | 80 | ms | per-bin closing time constant (hop rate) |
 | Floor Adapt Rate | `gate.floorRise` | 0.5 … 20 | 3 | dB/s | maximum upward rate of the floor |
 | Freeze Noise Profile | `gate.freeze` | off/on | off | toggle | hold the learned floor (after the 1 s learning period) |
-| (FFT size) | `latency.profile` | 1024 in Quality | — | samples | structural; module accepts 256 … 4096 (default 512) |
+| (FFT size) | `latency.profile` | 1024 in Quality at 44.1 / 48 kHz (21.3 ms, a power of two per rate) | — | samples | structural; module accepts 256 … 4096 (default 512) |
 
 Module sanitising: NaN/Inf keeps the previous value; values are clamped; an unchanged set returns early.
 
@@ -2972,7 +2972,7 @@ Module sanitising: NaN/Inf keeps the previous value; values are clamped; an unch
 
 ### 12.6 Latency & CPU
 
-- **Latency = N**: 1024 samples in the chain (21.3 ms at 48 kHz, 23.2 ms at 44.1 kHz); 512 → 10.7 ms; 4096 → 85.3 ms at 48 kHz.
+- **Latency = N**: 1024 samples in the chain at 48 kHz (21.3 ms; 23.2 ms at 44.1 kHz, and 2048 / 4096 samples, 21.3 ms, at 96 / 192 kHz); 512 → 10.7 ms; 4096 → 85.3 ms at 48 kHz.
 - CPU (indicative, stereo, 48 kHz): N 512 **245–259 ns** per stereo sample (1.2 %), N 1024 **262–279 ns** (1.3 %), N 4096 **282–316 ns** (1.4–1.5 %).
   - Per hop and channel it costs one forward and one inverse N-point transform, plus `N/2 + 1` each of `log10`, `exp` and division.
   - The reference FFT runs real transforms as full complex ones (§0.8), about 2× the cost of a real FFT. PFFFT/vDSP/IPP is roadmap.
@@ -3334,7 +3334,7 @@ Maximum effective values with Boost and all macros at 100 %:
                                                     amounts (next block)
  global bypass reference: fold ─► dry delay (chain latency − limiter latency) ─► × dry trim ─► TruePeakLimiter @ max.ceiling ─► crossfade
                           (the limiter runs only while bypass is engaged)
- desktop app: Σ strips (padded to equal latency) ─► master TruePeakLimiter (−1 dBTP, or the device cap) ─► device
+ desktop app: Σ strips (padded within sync groups) ─► master TruePeakLimiter (−1 dBTP, or the device cap) ─► device
 ```
 
 | Loop | Measures | Acts on | Law (as implemented) |
@@ -3346,7 +3346,7 @@ Maximum effective values with Boost and all macros at 100 %:
 | **Bypass-reference limiter** (`dryLimiter`, every host) | The matched dry reference, 4× interpolated peaks | Reference gain in global bypass | A `TruePeakLimiter` at `max.ceiling`, 80 ms auto release, true-peak detection. Look-ahead 1 ms (48 samples at 48 kHz), capped at chain latency − 20; with the 20-sample detector that is 68 samples at 48 kHz, taken out of the dry-path delay (`dryDelay` = chain latency − limiter latency), so the reference stays aligned and no latency is added. If a chain's latency were too short for the detector plus 8 samples it would fall back to sample-peak detection with the whole chain latency as look-ahead; the shipped profiles never need that. It runs only while bypass is engaged (the crossfade is above 0 or moving) and is `reset()` whenever it starts, so it never resumes from stale history. Started cold, it outputs silence for its latency (1 ms + 20 samples: 68 samples = 1.42 ms at 48 kHz, 64 = 1.45 ms at 44.1 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above (at narrowband rates the 20 detector samples are a larger share: 28 samples = 3.5 ms at 8 kHz, about 12 % of the crossfade). |
 | **True-peak ceiling** (strip) | 4× interpolated peaks with parabolic refinement | Limiter gain | Look-ahead sliding-minimum + box-filter envelope reaches the required gain Kh samples before the peak arrives and holds it Kh samples after (Kh = 8 at the profile look-aheads); a final safety clamp counts any engagement, published per block as `MeterBus::safetyClipCount` (section 10). |
 | **Output trim** | — | Strip level after the maximizer | `output.gain` −24 … 0 dB (20 ms ramp). A trim cannot raise the level, so the strip ceiling also holds in the plug-in and the CLI, which have no master limiter. |
-| **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the largest strip latency | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector); 0.5 ms (44 samples) when every strip runs Low Latency. 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
+| **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the slowest strip of its sync group (none by default) | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector); 0.5 ms (44 samples) when every strip runs Low Latency. 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
 | **Device ceiling cap** (desktop app) | Output device transport and profile (`device::adviceFor()`) | Master limiter ceiling | Default −1 dBTP; **Bluetooth A2DP −2 dBTP** (lossy codecs overshoot); **Bluetooth hands-free −3 dBTP**. A profile's own `ceilingDbTp` can lower it further; no shipped profile sets one yet. Strip ceilings are untouched: the cap only ever lowers the output. |
 | **Input sanitation** | Non-finite samples in the input block (Σ x·0 is non-finite) | Signal path | The block is output as silence and the signal-path state (modules, delays, meters) is reset; the control loops above keep theirs (§0.11). |
 | **Parameter sanitation** | Every `ParameterStore::set()` | Base values | NaN is ignored (the previous value stays), ±Inf and out-of-range values clamp to the parameter's range, so no automation, host or script value can put a NaN gain into the audio path. |
@@ -3380,7 +3380,7 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
   | + harmonics at −6 dB | 6 (6) | 6 (6) | 15 (7) | 16 (16) |
   | + harmonics at −10 dB | 6 (6) | 6 (6) | 7 (6) | 16 (16) |
 
-  (24 factory presets. The six pinned at their own settings are Earbuds, Laptop Speakers, Cinematic Adventure, Racing, Bass Head and Club Loud.) No weight helps: keeping Laptop Speakers at its own settings off the budget needs a weight below −26.5 dB, at which every other preset stays under the budget even at Boost 100 % (Bass Head: −5.1 − 26.5 = −31.6 dB), so the weight would only ever act on Small Speaker Mode, the most deliberate use of the harmonics; and the governor could not take back air at all (`clarity.air` has no governed macro contribution), only Boost's other governed amounts. So both readings are **excluded from the governor input and from the THD+N meter** (`MeterBus::distortionDb` would otherwise show −2 to −25 dB whenever harmonic bass is on). `DistortionMonitor::updateHarmonics()` power-sums and smooths them (τ = 300 ms) separately, so they can be shown as what they are; `MeterBus` does not carry them yet. Test *Distortion: through the chain, the bass harmonics and the air exciter are not a governor input: harmonics far over the -30 dB budget leave the scale at exactly 1 and the THD+N meter at -160 dB, where a governor fed them would back off to its floor* asserts the policy end to end (the laptop setting on programme reads −2.1 dB). Cost: the chain with harmonic bass 0.6 (+6 dB boost) and air 0.6 went from 639–656 to 664–682 ns per stereo sample (+4 %, Balanced, 48 kHz, 512-sample blocks, same session); the second reference costs the bass engine three and the exciter two SVF sections per sample (and channel), and six double multiply-adds per sample and channel.
+  (Measured over the 24 factory presets that existed before Voice Chat. The six pinned at their own settings are Earbuds, Laptop Speakers, Cinematic Adventure, Racing, Bass Head and Club Loud.) No weight helps: keeping Laptop Speakers at its own settings off the budget needs a weight below −26.5 dB, at which every other preset stays under the budget even at Boost 100 % (Bass Head: −5.1 − 26.5 = −31.6 dB), so the weight would only ever act on Small Speaker Mode, the most deliberate use of the harmonics; and the governor could not take back air at all (`clarity.air` has no governed macro contribution), only Boost's other governed amounts. So both readings are **excluded from the governor input and from the THD+N meter** (`MeterBus::distortionDb` would otherwise show −2 to −25 dB whenever harmonic bass is on). `DistortionMonitor::updateHarmonics()` power-sums and smooths them (τ = 300 ms) separately, so they can be shown as what they are; `MeterBus` does not carry them yet. Test *Distortion: through the chain, the bass harmonics and the air exciter are not a governor input: harmonics far over the -30 dB budget leave the scale at exactly 1 and the THD+N meter at -160 dB, where a governor fed them would back off to its floor* asserts the policy end to end (the laptop setting on programme reads −2.1 dB). Cost: the chain with harmonic bass 0.6 (+6 dB boost) and air 0.6 went from 639–656 to 664–682 ns per stereo sample (+4 %, Balanced, 48 kHz, 512-sample blocks, same session); the second reference costs the bass engine three and the exciter two SVF sections per sample (and channel), and six double multiply-adds per sample and channel.
 
 ### 14.6 Bypass, A/B and latency profiles
 
@@ -3530,16 +3530,18 @@ Strip totals at other rates, measured with `ProcessingChain::getLatencySamples()
 |---|---|---|---|
 | 44.1 kHz | 1332 = 30.20 ms | 182 = 4.13 ms | 96 = 2.18 ms |
 | 48 kHz | 1352 = 28.17 ms | 192 = 4.00 ms | 100 = 2.08 ms |
-| 96 kHz | 1592 = 16.58 ms | 312 = 3.25 ms | 148 = 1.54 ms |
-| 192 kHz | 2072 = 10.79 ms | 552 = 2.88 ms | 244 = 1.27 ms |
+| 96 kHz | 2616 = 27.25 ms | 312 = 3.25 ms | 148 = 1.54 ms |
+| 192 kHz | 5144 = 26.79 ms | 552 = 2.88 ms | 244 = 1.27 ms |
+| 8 kHz | 92 = 11.50 ms (runs as Balanced) | 92 = 11.50 ms | 60 = 7.50 ms |
 
 Why the totals behave as they do:
 - The oversampler round trips are fixed in samples: 16/32/36, in base-rate samples at any rate.
 - The look-aheads are fixed in milliseconds.
-- The gate's 1024-sample frame is fixed in samples.
+- The gate's STFT frame is fixed in milliseconds too ([11 E42](11-enhancement-report.md#e42) E42a): 21.3 ms rounded to a power of two, 1024 samples at 44.1 / 48 kHz, 2048 at 88.2 / 96 kHz, 4096 at 176.4 / 192 kHz, so its bin spacing in Hz and the Quality total in ms stay about the same from 44.1 to 192 kHz (before, the frame was 1024 samples at every rate: Quality 16.58 ms at 96 kHz, 10.79 ms at 192 kHz).
+- Below 32 kHz (Bluetooth hands-free and other speech links) a requested Quality runs as Balanced: at 8 kHz the old 1024-sample frame alone was 128 ms and the Quality total 1152 samples = 144 ms. `ProcessingChain::getLatencyProfile()` is the profile in effect, `getRequestedLatencyProfile()` the stored one.
 
 **Desktop app.**
-- `MixEngine` pads every strip to the largest strip latency, so relative A/V sync between applications is preserved.
+- `MixEngine` pads a strip only to the slowest strip of its sync group (`StripConfig::syncGroup`, [11 E40](11-enhancement-report.md#e40) part 3), so strips that carry one A/V programme stay in sync. By default every strip is in a group of its own and is not padded: a Quality Music strip no longer delays a Low Latency Game strip. `getStripLatencySamples()` / `getStripPaddingSamples()` report each strip's output latency and padding.
 - The master limiter then adds its own look-ahead plus the 20-sample detector delay: 1 ms, i.e. 68 samples = 1.42 ms at 48 kHz, or 0.5 ms (44 samples = 0.92 ms) when every strip runs the Low Latency profile, as the app sets it. App engine totals at 48 kHz: 144 samples = 3.0 ms (Low Latency), 260 = 5.4 ms (Balanced), 1420 ≈ 29.6 ms (Quality).
 - The bypass-reference limiter of the global bypass (§14.5) sits inside the strip's dry-path delay and adds nothing.
 - Device buffering (WASAPI / CoreAudio / ALSA periods, and the drift-compensated FIFO of captured strips) comes on top. It is not algorithmic and is not included here; the added end-to-end budget, with its scope labels (chain / app engine / added end-to-end), is `01-architecture.md` §5.

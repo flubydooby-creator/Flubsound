@@ -937,5 +937,21 @@ TEST_CASE ("App: the routing panel shows the red \"No apps are being processed\"
     CHECK (panel.isShowingNoAppsProcessed());
     CHECK (panel.getNotice() == "No apps are being processed. Per-app routing is switched off (Settings > Processing).");
 
+    // Nothing assigned, but the device input (a virtual cable set as the
+    // system output) feeds a strip: audio is processed, just not per app, so
+    // no red state; the reason stays as the neutral notice.
+    routing.removeRoute ("cs2.exe");
+    REQUIRE (routing.getRoutes().empty());
+    controller.setDeviceInputMode (AppSettings::DeviceInputMode::On);
+    REQUIRE (controller.getDeviceInputStrip() >= 0);
+    panel.refreshRouting();
+    CHECK (! panel.isShowingNoAppsProcessed());
+    CHECK (panel.getNotice() == "Per-app routing is switched off (Settings > Processing).");
+
+    // An assigned app that is not processed is red again, device input or not.
+    routing.setRoute ("cs2.exe", "Game");
+    panel.refreshRouting();
+    CHECK (panel.isShowingNoAppsProcessed());
+
     controller.shutdown();
 }

@@ -1379,20 +1379,16 @@ LatencyInfo AudioEngineHost::getLatencyInfo() const
     info.engineMs = samplesToMs (info.engineSamples, currentSampleRate);
     info.graphQuantumMs = graphQuantumMs;
 
-    // Per strip (E42a): the strip's own chain + the master limiter, and the
-    // padding that aligns it with the slowest strip (MixEngine pads every
-    // strip to the largest chain latency).
-    info.numStrips = engine.getNumStrips();
-    int slowestChain = 0;
-    for (int s = 0; s < info.numStrips; ++s)
-        slowestChain = std::max (slowestChain, engine.chain (s).getLatencySamples());
-    const int masterSamples = std::max (0, info.engineSamples - slowestChain);
+    // Per strip (E42a), as the MixEngine runs it: the strip's own chain + the
+    // master limiter, and the padding that aligns it with the slowest strip
+    // of its sync group (none for a strip in no group).
+    info.numStrips = std::min (engine.getNumStrips(), static_cast<int> (info.strips.size()));
     for (int s = 0; s < info.numStrips; ++s)
     {
         auto& strip = info.strips[static_cast<size_t> (s)];
-        strip.ownSamples = engine.chain (s).getLatencySamples() + masterSamples;
-        strip.outputSamples = info.engineSamples;
-        strip.paddingSamples = std::max (0, strip.outputSamples - strip.ownSamples);
+        strip.outputSamples = engine.getStripLatencySamples (s);
+        strip.paddingSamples = engine.getStripPaddingSamples (s);
+        strip.ownSamples = strip.outputSamples - strip.paddingSamples;
         strip.ownMs = samplesToMs (strip.ownSamples, currentSampleRate);
         strip.outputMs = samplesToMs (strip.outputSamples, currentSampleRate);
         strip.paddingMs = samplesToMs (strip.paddingSamples, currentSampleRate);

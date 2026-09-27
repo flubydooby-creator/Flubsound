@@ -8,6 +8,8 @@
 //   them alone, so a preset never re-prepares the engine or pads the other
 //   strips (MixEngine). A saved user preset names its profile as
 //   "suggestedLatencyProfile" instead of writing it.
+// * The user's device-profiles.json override is read at start-up from the
+//   user data folder, whose name the test runner makes non-ASCII.
 // * docs/11 E36 / E23: a strip with no saved state starts from a default
 //   preset - Signature (Music, System), Voice Chat (Chat), "First Run - Game"
 //   (Competitive FPS capped) - and saved state is never overwritten. The
@@ -25,12 +27,16 @@
 
 #include "engine/EngineController.h"
 #include "presets/PresetManager.h"
+#include "settings/UserDataFolder.h"
 
 #include "flub/analysis/LoudnessMeter.h"
 #include "flub/io/Json.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -426,4 +432,40 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
     const double shipped = lift (-60.0);
     std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
     CHECK_GE (shipped, 6.0);
+}
+
+// =============================================================================
+// Start-up: the device-profile override
+// =============================================================================
+TEST_CASE ("App: a device-profiles.json override in the (non-ASCII) user data folder replaces the shipped profiles at start-up")
+{
+    // AppTestMain points the user data folder at a temporary folder with a
+    // non-ASCII name (like a Windows profile "C:\Users\José"): the override is
+    // read through juce::File, not a narrow std path.
+    const auto folder = userDataFolder();
+    REQUIRE (folder.createDirectory().wasOk());
+    const auto file = folder.getChildFile ("device-profiles.json");
+    REQUIRE (! file.exists());
+    struct Remove
+    {
+        juce::File f;
+        ~Remove() { f.deleteFile(); }
+    } remove { file };
+
+    REQUIRE (writeText (file, juce::String::fromUTF8 (R"({ "format": "flubsound-device-profiles", "version": 1, "profiles": [
+        { "id": "test-héadset", "vendor": "Tëst", "family": "Probe", "displayName": "Tëst Probe headset", "matchAny": ["probe headset"],
+          "specificity": 2, "typicalConnection": "usb" } ] })")));
+
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp, false));
+    const auto& profiles = controller.getDeviceProfiles().profiles();
+    REQUIRE (profiles.size() == 1);
+    CHECK (profiles[0].displayName == "T\xc3\xabst Probe headset");
+    controller.simulateOutputDevice ("Probe Headset (USB)", 48000.0, 2);
+    CHECK (controller.getDeviceProfileName() == juce::String::fromUTF8 ("T\xc3\xabst Probe headset"));
+
+    // A damaged override falls back to the shipped database.
+    REQUIRE (writeText (file, "{ not json"));
+    EngineController fallback (headlessOptions (temp, false));
+    CHECK (fallback.getDeviceProfiles().profiles().size() > 1);
 }

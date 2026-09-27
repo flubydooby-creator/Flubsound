@@ -348,13 +348,14 @@ juce::String HeaderBar::describeLatency (const LatencyInfo& info, const juce::St
     if (info.estimated)
         t << "\nEstimated: the device figures are what the driver reports; Bluetooth codec delay and the OS mixer are not included.";
 
-    // Strips are padded to the slowest one so they stay in sync.
+    // A strip in a sync group is padded to the group's slowest strip (none
+    // by default: MixEngine StripConfig::syncGroup).
     for (int i = 0; i < info.numStrips && i < static_cast<int> (info.strips.size()); ++i)
     {
         const auto& strip = info.strips[static_cast<size_t> (i)];
         t << "\n" << (i < stripNames.size() ? stripNames[i] : "Strip " + juce::String (i + 1)) << ": " << ms (strip.outputMs) << " in the engine";
         if (strip.paddingSamples > 0)
-            t << " (its own " << ms (strip.ownMs) << " + " << ms (strip.paddingMs) << " to stay in sync with the slowest strip)";
+            t << " (its own " << ms (strip.ownMs) << " + " << ms (strip.paddingMs) << " to stay in sync with its sync group)";
     }
     return t;
 }

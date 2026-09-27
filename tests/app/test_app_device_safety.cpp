@@ -595,7 +595,7 @@ TEST_CASE ("App: wireless headset drops, JUCE falls back to CABLE Input with CAB
     host.closeDevice();
 }
 
-TEST_CASE ("App: per-strip latency readout shows each strip's own latency and the padding another strip's profile adds (E42a)")
+TEST_CASE ("App: per-strip latency readout shows each strip's own latency and the padding its sync group adds (E42a)")
 {
     using Profile = flub::param::LatencyProfileValue;
     AudioEngineHost host;
@@ -608,24 +608,54 @@ TEST_CASE ("App: per-strip latency readout shows each strip's own latency and th
     REQUIRE (info.numStrips == 4);
 
     // Game on Low Latency, Music on Quality (like a Quality preset on Music).
-    host.getMixEngine().params (0).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
-    host.getMixEngine().params (1).set (flub::param::LatencyProfile, static_cast<float> (Profile::Quality));
-    host.getMixEngine().params (2).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
-    host.getMixEngine().params (3).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
-    host.reconfigure();
+    const auto setProfiles = [&host]
+    {
+        host.getMixEngine().params (0).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
+        host.getMixEngine().params (1).set (flub::param::LatencyProfile, static_cast<float> (Profile::Quality));
+        host.getMixEngine().params (2).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
+        host.getMixEngine().params (3).set (flub::param::LatencyProfile, static_cast<float> (Profile::LowLatency));
+        host.reconfigure();
+    };
+    setProfiles();
     info = host.getLatencyInfo();
 
+    // Every strip in a group of its own (the default layout): nobody is
+    // padded, and the readout is what the MixEngine runs, strip by strip.
+    auto& engine = host.getMixEngine();
+    for (int s = 0; s < info.numStrips; ++s)
+    {
+        const auto& strip = info.strips[static_cast<size_t> (s)];
+        CHECK (strip.paddingSamples == 0);
+        CHECK (strip.outputSamples == engine.getStripLatencySamples (s));
+        CHECK (strip.ownSamples == strip.outputSamples);
+    }
+    std::cerr << "    per-strip latency, no sync group: Game " << info.strips[0].outputSamples << ", Music " << info.strips[1].outputSamples
+              << " (engine " << info.engineSamples << ")\n";
+    CHECK (info.strips[1].ownSamples > info.strips[0].ownSamples); // Quality needs more than Low Latency
+    CHECK (info.strips[1].outputSamples == info.engineSamples);     // the slowest strip sets the engine figure
+    CHECK (info.strips[0].outputSamples < info.engineSamples);      // ... and no longer delays Game
+    CHECK (std::abs (info.strips[0].ownMs - 1000.0 * info.strips[0].ownSamples / 48000.0) < 1.0e-9);
+
+    // Game and Music in one sync group: Game is padded to Music, and the
+    // readout says by how much.
+    auto layout = host.getStripLayout();
+    REQUIRE (layout.size() >= 2);
+    layout[0].syncGroup = 1;
+    layout[1].syncGroup = 1;
+    host.setStripLayout (layout);
+    setProfiles();
+    info = host.getLatencyInfo();
     const auto& game = info.strips[0];
     const auto& music = info.strips[1];
-    std::cerr << "    per-strip latency: Game own " << game.ownSamples << " + padding " << game.paddingSamples << " = " << game.outputSamples
-              << "; Music own " << music.ownSamples << " (engine " << info.engineSamples << ")\n";
-    CHECK (music.ownSamples > game.ownSamples);            // Quality needs more than Low Latency
-    CHECK (music.paddingSamples == 0);                     // the slowest strip is not padded
+    std::cerr << "    per-strip latency, one sync group: Game own " << game.ownSamples << " + padding " << game.paddingSamples << " = "
+              << game.outputSamples << "; Music own " << music.ownSamples << " (engine " << info.engineSamples << ")\n";
+    CHECK (music.paddingSamples == 0); // the slowest strip of the group is not padded
     CHECK (music.ownSamples == info.engineSamples);
-    CHECK (game.outputSamples == info.engineSamples);      // every strip is padded to the slowest ...
-    CHECK (game.paddingSamples == info.engineSamples - game.ownSamples); // ... and the readout says by how much
+    CHECK (game.outputSamples == music.outputSamples);
+    CHECK (game.paddingSamples == music.ownSamples - game.ownSamples);
     CHECK (game.paddingSamples > 0);
-    CHECK (std::abs (game.ownMs - 1000.0 * game.ownSamples / 48000.0) < 1.0e-9);
+    CHECK (game.paddingSamples == host.getMixEngine().getStripPaddingSamples (0));
+    CHECK (info.strips[2].paddingSamples == 0); // Chat is in no group
 
     // A known graph quantum is part of the (estimated) total.
     const double withoutQuantum = info.totalMs;
