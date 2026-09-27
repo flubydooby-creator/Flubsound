@@ -276,7 +276,7 @@ WAV in ─► decode ─► ProcessingChain (offline, same code as realtime; mon
  report (LUFS, LRA, TP, peak) ◄─ export WAV (float32, or PCM24 / PCM16 with TPDF dither)
 ```
 
-Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, `presets`). Other formats (FLAC, MP3, AIFF, Ogg) are planned for the app's batch UI through JUCE's `AudioFormatManager` (roadmap Phase 2, item 2.10), which will use the same engine code.
+Tools: `tools/flubsound-cli` (`process`, `batch --jobs N`, `analyze`, `params`, `presets`). The desktop app's Export / batch process dialog (roadmap 2.10, `06-gui.md` §6.12) runs the same `OfflineRenderer` code on a worker thread; it decodes WAV, AIFF, FLAC, Ogg and MP3 through JUCE's `AudioFormatManager` and writes WAV (the core writer) or FLAC (JUCE's `FlacAudioFormat`).
 
 ---
 

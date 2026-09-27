@@ -37,6 +37,8 @@ void DistortionMonitor::reset() noexcept FLUB_NONBLOCKING
 {
     blockDb = smoothedDb = kMinusInfDb;
     smoothedPow = 0.0f;
+    harmonicsBlockDb = harmonicsSmoothedDb = kMinusInfDb;
+    harmonicsSmoothedPow = 0.0f;
 }
 
 float DistortionMonitor::combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING
@@ -56,10 +58,25 @@ float DistortionMonitor::update (float saturatorDb, float clipperDb, int numSamp
     // are treated as uncorrelated, so their ratios add in power.
     const float blockPow = dbToPower (saturatorDb) + dbToPower (clipperDb);
     blockDb = combineDb (saturatorDb, clipperDb);
-    const float a = static_cast<float> (std::exp (-(numSamples / sr) / kMeterTauSeconds));
-    smoothedPow = a * smoothedPow + (1.0f - a) * blockPow;
-    smoothedDb = powerToDb (smoothedPow);
+    smoothedDb = smooth (smoothedPow, blockPow, numSamples);
     return blockDb;
+}
+
+float DistortionMonitor::updateHarmonics (float bassDb, float airDb, int numSamples) noexcept FLUB_NONBLOCKING
+{
+    // Same combination as the THD+N (the air exciter follows the bass engine
+    // in the chain), kept in its own sums: these stages add harmonics on
+    // purpose, so their share is reported, never budgeted.
+    harmonicsBlockDb = combineDb (bassDb, airDb);
+    harmonicsSmoothedDb = smooth (harmonicsSmoothedPow, dbToPower (bassDb) + dbToPower (airDb), numSamples);
+    return harmonicsBlockDb;
+}
+
+float DistortionMonitor::smooth (float& statePow, float blockPow, int numSamples) const noexcept FLUB_NONBLOCKING
+{
+    const float a = static_cast<float> (std::exp (-(numSamples / sr) / kMeterTauSeconds));
+    statePow = a * statePow + (1.0f - a) * blockPow;
+    return powerToDb (statePow);
 }
 
 // ---------------------------------------------------------------------------

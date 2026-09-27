@@ -111,7 +111,7 @@ Beta                         [closed]      [public]      [1.0]
 | 2.7 | Gaming tuning: footstep/anti-masking bands, per-genre presets, competitive latency validation | 3 | Playtests with 20 competitive players |
 | 2.8 | Spectral gate UX (learn/freeze noise profile), dynamic EQ editor with live gain display | 2 | |
 | 2.9 | Plug-in (VST3/AU) with the custom editor shared with the app, pluginval in CI | 2 | The plug-in builds today with JUCE's generic editor plus a preset/telemetry toolbar |
-| 2.10 | Batch processing UI in the app (drag-and-drop folder, loudness target, export formats) | 2 | Uses the same engine as `flubsound-cli` |
+| 2.10 | Batch processing UI in the app (drag-and-drop folder, loudness target, export formats) | 2 | Implemented: preset menu › *Export / batch process audio files…* (`app/Source/export`, `docs/06-gui.md` §6.12). Renders through the CLI's `OfflineRenderer` (same code as `flubsound-cli`); reads WAV / AIFF / FLAC / Ogg / MP3 through JUCE, writes WAV float32 / PCM24 / PCM16 and FLAC 24 / 16; tested in `tests/app/test_app_export.cpp`. Open: parallel jobs, resampling |
 | 2.11 | Hearing guard, loudness history export | 1 | |
 | 2.12 | QA: driver stress (sleep/resume, device churn, 24 h soak), anti-cheat compatibility matrix (EAC, BattlEye, Vanguard, VAC) | 4 | |
 

@@ -627,9 +627,9 @@ private:
         int pending = 0, reassigned = 0, inactive = 0;
         for (auto& row : rows)
         {
-            const auto current = readState (row.action);
-            row.state = current.state;
-            row.stateText = current.text;
+            const auto latest = readState (row.action);
+            row.state = latest.state;
+            row.stateText = latest.text;
             pending += row.state.status == S::Pending ? 1 : 0;
             reassigned += row.state.status == S::Reassigned ? 1 : 0;
             inactive += row.state.status == S::Unavailable || row.state.status == S::Declined ? 1 : 0;

@@ -10,7 +10,12 @@
 //     unit and through the chain, where base saturation alone - invisible to
 //     the old clip-energy proxy - now trips it;
 //   * allocation-free measurement (the RTSan annotations are checked in
-//     tests/test_rtsan.cpp).
+//     tests/test_rtsan.cpp);
+//   * the intentional harmonic generators (bass harmonics, air exciter):
+//     the two-reference estimator (flub/dsp/ParallelDistortion.h), their
+//     readings against a harmonic analysis, -160 dB when linear, block-size
+//     independence, and the policy that they are tracked apart and are not
+//     a governor input.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -591,4 +596,564 @@ TEST_CASE ("Distortion: measuring in the saturator and the clipper, the monitor 
     CHECK (std::isfinite (sink));
     CHECK (sat.getDistortionDb() > kMinusInfDb);
     CHECK (maxi.getDistortionDb() > kMinusInfDb);
+}
+
+//==============================================================================
+// The intentional harmonic generators (docs/03-dsp-design.md §4.3.4, §5.3.4
+// and §14.5): the bass engine's harmonics and the clarity air exciter measure
+// the share of what they add in their output, where it is added (the linear
+// path against the added harmonics, so their band-split filters are not
+// counted). The chain tracks the readings apart from the THD+N: they are not
+// a governor input and not in the THD+N meter.
+#include "flub/dsp/BassEngine.h"
+#include "flub/dsp/ClarityEnhancer.h"
+#include "flub/dsp/ParallelDistortion.h"
+#include "flub/dsp/Svf.h"
+
+#include <complex>
+
+namespace
+{
+/** Energies of y (n = a whole number of periods of `period` samples) at the
+    fundamental and at DC + every other harmonic up to Nyquist, each bin
+    divided by gain (k) (the power gain of a linear stage after the point of
+    measurement at harmonic k, taken out again). */
+struct HarmonicSplit
+{
+    double fundamental = 0.0, others = 0.0;
+
+    double ratioDb() const { return 10.0 * std::log10 (others / (fundamental + others)); }
+};
+
+void addHarmonicSplit (HarmonicSplit& split, const float* y, int n, int period, const std::function<double (int)>& gain)
+{
+    for (int k = 0; 2 * k <= period; ++k)
+    {
+        double re = 0.0, im = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            const double phase = kTwoPi * static_cast<double> ((static_cast<long long> (k) * (i % period)) % period) / period;
+            re += y[i] * std::cos (phase);
+            im -= y[i] * std::sin (phase);
+        }
+        const double weight = (k == 0 || 2 * k == period) ? 1.0 : 2.0;
+        const double e = weight * (re * re + im * im) / n / gain (k);
+        (k == 1 ? split.fundamental : split.others) += e;
+    }
+}
+
+const std::function<double (int)> kUnity = [] (int) { return 1.0; };
+
+/** L = a sin, R = 0.6 a sin (different levels: every channel has its own
+    least-squares gain), exactly periodic. */
+Planar stereoTone (int period, int numSamples, double amplitude)
+{
+    Planar buf (2, numSamples);
+    buf.ch[0] = periodicSine (period, numSamples, amplitude);
+    buf.ch[1] = periodicSine (period, numSamples, 0.6 * amplitude);
+    buf.rebind();
+    return buf;
+}
+
+/** Power average of a stage's reading over every block after the first
+    0.5 s of a 1.5 s signal, processed in blocks of `block` samples. */
+double averageReading (Processor& stage, const std::function<float()>& reading, const Planar& signal, int block)
+{
+    Planar buf = signal;
+    const int len = buf.numSamples();
+    double power = 0.0;
+    int count = 0;
+    for (int pos = 0; pos < len; pos += block)
+    {
+        stage.process (buf.block (pos, std::min (block, len - pos)));
+        if (pos >= static_cast<int> (kFs * 0.5))
+        {
+            power += std::pow (10.0, reading() / 10.0);
+            ++count;
+        }
+    }
+    return 10.0 * std::log10 (power / count);
+}
+} // namespace
+
+TEST_CASE ("Distortion: the parallel-generator estimator counts only what neither the dry path nor the generator's linear branch explains: it matches a harmonic analysis where the dry-path fit alone reads high, and falls back to it when the branch adds no direction")
+{
+    // y = x + a, a = c p + h: the generated signal has a linear branch
+    // (c p, phase-shifted against x, as band filters leave it) and
+    // harmonics h. The harmonic analysis of y counts x + c p as fundamental
+    // and h as the rest; so must the estimate.
+    constexpr int kN = kPeriod * 16;
+    std::vector<float> x (kN), p (kN), h (kN);
+    for (int i = 0; i < kN; ++i)
+    {
+        const double t = kTwoPi * (i % kPeriod) / kPeriod;
+        const auto k = static_cast<size_t> (i);
+        x[k] = static_cast<float> (0.5 * std::sin (t));
+        p[k] = static_cast<float> (0.3 * std::sin (t + 1.1));
+        h[k] = static_cast<float> (0.05 * std::sin (2.0 * t + 0.3) + 0.02 * std::sin (3.0 * t));
+    }
+    const auto reading = [] (const std::vector<float>& xs, const std::vector<float>& ps, const std::vector<float>& as)
+    {
+        ParallelDistortionSums sums;
+        for (size_t i = 0; i < xs.size(); ++i)
+            sums.add (xs[i], ps[i], as[i]);
+        return 10.0 * std::log10 (sums.residualEnergy() / sums.outputEnergy());
+    };
+
+    for (const float c : { -0.4f, 0.0f, 0.8f })
+    {
+        std::vector<float> a (kN), y (kN);
+        for (size_t k = 0; k < a.size(); ++k)
+        {
+            a[k] = c * p[k] + h[k];
+            y[k] = x[k] + a[k];
+        }
+        const double analysed = harmonicThdNDb (y.data(), kN, kPeriod);
+        CHECK_NEAR (reading (x, p, a), analysed, 0.001);
+        if (c != 0.0f) // the dry-path fit alone counts the quadrature part of c p
+            CHECK_GE (DistortionEnergy::measureDb (x.data(), y.data(), kN), analysed + 3.0);
+        // Without a dry path (the replace-fundamental case taken to the limit).
+        const std::vector<float> none (kN, 0.0f);
+        CHECK_NEAR (reading (none, p, a), harmonicThdNDb (a.data(), kN, kPeriod), 0.001);
+    }
+
+    // A linear branch only: the rounding floor. Nothing added: -160 dB.
+    std::vector<float> lin (kN), y (kN);
+    for (size_t k = 0; k < lin.size(); ++k)
+        lin[k] = 0.7f * p[k];
+    CHECK_LE (reading (x, p, lin), -100.0);
+    {
+        ParallelDistortionWindow window;
+        window.prepare (kFs);
+        for (int i = 0; i < window.getLength(); ++i)
+            window.channel (0).add (x[static_cast<size_t> (i % kN)], p[static_cast<size_t> (i % kN)], 0.0f);
+        float db = 0.0f;
+        CHECK (window.advance (window.getLength(), db));
+        CHECK (db == kMinusInfDb);
+    }
+
+    // No second direction - p silent, or p collinear with x: exactly the
+    // dry-path estimator (DistortionEstimator.h).
+    std::vector<float> a (kN), p2 (kN);
+    const std::vector<float> silentP (kN, 0.0f);
+    for (size_t k = 0; k < a.size(); ++k)
+    {
+        a[k] = h[k] - 0.2f * x[k];
+        y[k] = x[k] + a[k];
+        p2[k] = -2.0f * x[k];
+    }
+    const double dryOnly = DistortionEnergy::measureDb (x.data(), y.data(), kN);
+    CHECK_NEAR (reading (x, silentP, a), dryOnly, 1e-6);
+    CHECK_NEAR (reading (x, p2, a), dryOnly, 1e-6);
+}
+
+TEST_CASE ("Distortion: the bass harmonics generator's reading matches a harmonic analysis of the stage output within 0.05 dB (40 / 80 Hz, every character, with and without replacing the fundamental)")
+{
+    // A steady tone below the 120 Hz cutoff: the stage adds exact harmonics
+    // 2 .. 5 (band-passed) to the linear path, so the harmonic share of the
+    // output is what the reading should be. Blocks of 600 samples make every
+    // 25 ms window exactly 1200 samples: one period of 40 Hz, two of 80 Hz.
+    ScopedNoDenormals noDenormals;
+    constexpr int kBlock = 600;
+    const int len = kBlock * 80; // 1 s
+    int cases = 0;
+    double lowest = 0.0, highest = -200.0;
+    for (const int period : { 1200, 600 })
+        for (const float character : { 0.0f, 0.5f, 1.0f })
+            for (const float amount : { 0.25f, 1.0f })
+                for (const bool replace : { false, true })
+                {
+                    BassEngine bass;
+                    bass.prepare ({ kFs, kBlock, 2 });
+                    BassEngineParams p;
+                    p.harmonicsAmount = amount;
+                    p.harmonicsCharacter = character;
+                    p.replaceFundamental = replace;
+                    bass.setParams (p);
+                    bass.reset(); // at the targets, no ramps
+                    Planar buf = stereoTone (period, len, 0.3);
+                    processInBlocks (bass, buf, kBlock);
+
+                    HarmonicSplit split;
+                    const int window = 2400; // the last two windows, long after the filters settled
+                    for (const auto& c : buf.ch)
+                        addHarmonicSplit (split, c.data() + len - window, window, period, kUnity);
+                    const double analysed = split.ratioDb();
+                    CHECK_NEAR (bass.getDistortionDb(), analysed, 0.05); // measured: < 0.001 dB
+                    lowest = std::min (lowest, analysed);
+                    highest = std::max (highest, analysed);
+                    ++cases;
+                }
+    CHECK (cases == 24);
+    CHECK_LE (lowest, -12.0); // the cases span a wide range of harmonic shares (measured: -12.3 dB) ...
+    CHECK_GE (highest, -0.1); // ... up to nearly all of the output with the fundamental replaced
+}
+
+TEST_CASE ("Distortion: the air exciter's reading matches a harmonic analysis of the stage output (the linear air shelf taken out) within 0.05 dB, also on the band's skirt")
+{
+    // Tones in the 3.5 - 7 kHz band get their 2nd and 3rd harmonics added;
+    // the 9.6 kHz tone on the skirt is shaped against the -3 dB floor, below
+    // full scale, so the 3rd-order term also adds a fundamental: a linear
+    // branch, phase-shifted by the band filters (the fit against the linear
+    // branch takes it out - against the dry path alone this tone read 12 dB
+    // high - and the analysis counts it as fundamental), plus aliases (which
+    // both count). The reading is taken before the linear 10 kHz air shelf,
+    // so the analysis divides every bin by the shelf's power gain. Blocks of
+    // 480 samples: every window is 1440 samples, whole periods of each tone.
+    ScopedNoDenormals noDenormals;
+    constexpr int kBlock = 480;
+    const int len = kBlock * 100; // 1 s
+    int cases = 0;
+    double lowest = 0.0, highest = -200.0;
+    for (const int period : { 12, 10, 8, 5 }) // 4, 4.8, 6, 9.6 kHz
+        for (const float air : { 0.25f, 0.5f, 1.0f })
+        {
+            ClarityEnhancer clarity;
+            clarity.prepare ({ kFs, kBlock, 2 });
+            ClarityParams p;
+            p.air = air;
+            clarity.setParams (p);
+            clarity.reset();
+            Planar buf = stereoTone (period, len, 0.3);
+            processInBlocks (clarity, buf, kBlock);
+
+            const auto shelf = SvfCoeffs::make (FilterType::HighShelf, 10000.0, 0.70710678118654752, 2.0 * air, kFs);
+            const auto shelfPower = [&shelf, period] (int k) { return std::norm (shelf.response (kFs * k / period, kFs)); };
+            HarmonicSplit split;
+            const int window = 1440;
+            for (const auto& c : buf.ch)
+                addHarmonicSplit (split, c.data() + len - window, window, period, shelfPower);
+            const double analysed = split.ratioDb();
+            CHECK_NEAR (clarity.getDistortionDb(), analysed, 0.05); // measured: < 0.001 dB
+            lowest = std::min (lowest, analysed);
+            highest = std::max (highest, analysed);
+            ++cases;
+        }
+    CHECK (cases == 12);
+    CHECK_LE (lowest, -30.0);
+    CHECK_GE (highest, -15.0);
+}
+
+TEST_CASE ("Distortion: linear settings of the bass engine and the clarity enhancer read -160 dB: harmonics / air off with every other stage engaged, after switching them off, and on silence")
+{
+    ScopedNoDenormals noDenormals;
+    constexpr int kBlock = 256;
+    Planar prog (2, kBlock * 200); // ~1.07 s
+    {
+        const auto noise = whiteNoise (prog.numSamples(), 0.2f, 31);
+        for (int i = 0; i < prog.numSamples(); ++i)
+        {
+            const auto s = static_cast<size_t> (i);
+            const auto tone = static_cast<float> (0.3 * std::sin (kTwoPi * 55.0 * i / kFs) + 0.1 * std::sin (kTwoPi * 5000.0 * i / kFs));
+            prog.ch[0][s] = tone + noise[s];
+            prog.ch[1][s] = tone - 0.5f * noise[s];
+        }
+    }
+    const Planar silence (2, kBlock * 20);
+
+    // Runs the stage over `signal` block by block; returns whether every
+    // reading after the first `skip` blocks was exactly -160 dB.
+    const auto allSilent = [] (Processor& stage, const std::function<float()>& reading, Planar signal, int skip)
+    {
+        bool ok = true;
+        for (int b = 0; b * kBlock < signal.numSamples(); ++b)
+        {
+            stage.process (signal.block (b * kBlock, kBlock));
+            ok = ok && (b < skip || reading() == kMinusInfDb);
+        }
+        return ok;
+    };
+
+    // Bass: boost with protection, subsonic, mono bass, replace-fundamental
+    // high-pass and tighten, but no harmonics.
+    BassEngineParams bp;
+    bp.boostDb = 12.0f;
+    bp.subsonicHz = 30.0f;
+    bp.monoBelowHz = 100.0f;
+    bp.replaceFundamental = true;
+    bp.tighten = 0.8f;
+    {
+        BassEngine bass;
+        bass.prepare ({ kFs, kBlock, 2 });
+        bass.setParams (bp);
+        const auto reading = [&bass] { return bass.getDistortionDb(); };
+        CHECK (allSilent (bass, reading, prog, 0));
+        // Harmonics on: measurable. Switched off, the mix ramps out over
+        // 20 ms, then the path stops: from the second window after that on
+        // (20 blocks = 107 ms) every reading is -160 dB again.
+        bp.harmonicsAmount = 0.5f;
+        bass.setParams (bp);
+        Planar work = prog;
+        processInBlocks (bass, work, kBlock);
+        CHECK_GE (bass.getDistortionDb(), -30.0);
+        bp.harmonicsAmount = 0.0f;
+        bass.setParams (bp);
+        CHECK (allSilent (bass, reading, prog, 20));
+    }
+    {
+        // Harmonics on, digital silence in: nothing is generated.
+        BassEngine bass;
+        bass.prepare ({ kFs, kBlock, 2 });
+        bp.harmonicsAmount = 1.0f;
+        bass.setParams (bp);
+        CHECK (allSilent (bass, [&bass] { return bass.getDistortionDb(); }, silence, 0));
+    }
+
+    // Clarity: transient shaper, de-mud and presence engaged, no air.
+    ClarityParams cp;
+    cp.attackDb = 6.0f;
+    cp.sustainDb = -6.0f;
+    cp.presence = 1.0f;
+    cp.deMud = 1.0f;
+    {
+        ClarityEnhancer clarity;
+        clarity.prepare ({ kFs, kBlock, 2 });
+        clarity.setParams (cp);
+        const auto reading = [&clarity] { return clarity.getDistortionDb(); };
+        CHECK (allSilent (clarity, reading, prog, 0));
+        cp.air = 1.0f;
+        clarity.setParams (cp);
+        Planar work = prog;
+        processInBlocks (clarity, work, kBlock);
+        CHECK_GE (clarity.getDistortionDb(), -60.0);
+        cp.air = 0.0f;
+        clarity.setParams (cp);
+        CHECK (allSilent (clarity, reading, prog, 20));
+    }
+    {
+        ClarityEnhancer clarity;
+        clarity.prepare ({ kFs, kBlock, 2 });
+        cp.air = 1.0f;
+        clarity.setParams (cp);
+        CHECK (allSilent (clarity, [&clarity] { return clarity.getDistortionDb(); }, silence, 0));
+    }
+}
+
+TEST_CASE ("Distortion: the bass harmonics and air exciter readings do not depend on the host block size: a 55 Hz tone and a 4.4 kHz tone read the same in 32- and 4096-sample blocks")
+{
+    ScopedNoDenormals noDenormals;
+    const int len = static_cast<int> (kFs * 1.5);
+    Planar low (2, len), high (2, len);
+    for (int i = 0; i < len; ++i)
+    {
+        const auto s = static_cast<size_t> (i);
+        low.ch[0][s] = low.ch[1][s] = static_cast<float> (0.3 * std::sin (kTwoPi * 55.0 * i / kFs));
+        high.ch[0][s] = high.ch[1][s] = static_cast<float> (0.2 * std::sin (kTwoPi * 4400.0 * i / kFs) + 0.2 * std::sin (kTwoPi * 300.0 * i / kFs));
+    }
+
+    double bassRef = 0.0, airRef = 0.0;
+    for (const int block : { 4096, 1024, 128, 64, 32 })
+    {
+        BassEngine bass;
+        bass.prepare ({ kFs, block, 2 });
+        BassEngineParams bp;
+        bp.harmonicsAmount = 0.6f;
+        bass.setParams (bp);
+        bass.reset();
+        const double bassDb = averageReading (bass, [&bass] { return bass.getDistortionDb(); }, low, block);
+
+        ClarityEnhancer clarity;
+        clarity.prepare ({ kFs, block, 2 });
+        ClarityParams cp;
+        cp.air = 1.0f;
+        clarity.setParams (cp);
+        clarity.reset();
+        const double airDb = averageReading (clarity, [&clarity] { return clarity.getDistortionDb(); }, high, block);
+
+        if (block == 4096)
+        {
+            bassRef = bassDb;
+            airRef = airDb;
+            CHECK_GE (bassRef, -30.0); // both measurably add harmonics
+            CHECK_GE (airRef, -45.0);
+            continue;
+        }
+        CHECK_NEAR (bassDb, bassRef, 0.2); // measured: < 0.13 dB (1.4 periods of 55 Hz per window at 32 samples)
+        CHECK_NEAR (airDb, airRef, 0.2);   // measured: < 0.002 dB
+    }
+}
+
+TEST_CASE ("Distortion: the monitor keeps the harmonic generators apart: power-summed and smoothed with tau = 300 ms, never in the THD+N block value or meter")
+{
+    DistortionMonitor mon;
+    mon.prepare (kFs);
+    CHECK_NEAR (mon.updateHarmonics (-20.0f, kMinusInfDb, 480), -20.0, 1e-4);
+    CHECK_NEAR (mon.updateHarmonics (kMinusInfDb, -25.0f, 480), -25.0, 1e-4);
+    CHECK_NEAR (mon.updateHarmonics (-20.0f, -20.0f, 480), -20.0 + 10.0 * std::log10 (2.0), 1e-4);
+    CHECK (mon.updateHarmonics (kMinusInfDb, kMinusInfDb, 480) == kMinusInfDb);
+    CHECK_NEAR (mon.getHarmonicsBlockDb(), -160.0, 1e-6);
+
+    // Harmonics alone: the THD+N side stays at -160 dB; and the other way round.
+    mon.reset();
+    for (int b = 0; b < 30; ++b) // 30 x 10 ms
+    {
+        mon.update (kMinusInfDb, kMinusInfDb, 480);
+        mon.updateHarmonics (-6.0f, -40.0f, 480);
+    }
+    CHECK (mon.getBlockDb() == kMinusInfDb);
+    CHECK (mon.getSmoothedDb() == kMinusInfDb);
+    const double step = 10.0 * std::log10 (std::pow (10.0, -0.6) + std::pow (10.0, -4.0));
+    CHECK_NEAR (mon.getHarmonicsBlockDb(), step, 1e-4);
+    CHECK_NEAR (mon.getSmoothedHarmonicsDb(), step + 10.0 * std::log10 (1.0 - std::exp (-1.0)), 0.02);
+    for (int b = 0; b < 30; ++b)
+    {
+        mon.update (-35.0f, kMinusInfDb, 480);
+        mon.updateHarmonics (kMinusInfDb, kMinusInfDb, 480);
+    }
+    CHECK_NEAR (mon.getBlockDb(), -35.0, 1e-4);
+    CHECK_NEAR (mon.getSmoothedHarmonicsDb(), step + 10.0 * std::log10 ((1.0 - std::exp (-1.0)) * std::exp (-1.0)), 0.02);
+    mon.reset();
+    CHECK (mon.getHarmonicsBlockDb() == kMinusInfDb);
+    CHECK (mon.getSmoothedHarmonicsDb() == kMinusInfDb);
+}
+
+TEST_CASE ("Distortion: through the chain, the bass harmonics and the air exciter are not a governor input: harmonics far over the -30 dB budget leave the scale at exactly 1 and the THD+N meter at -160 dB, where a governor fed them would back off to its floor")
+{
+    // Only the bass engine (harmonics at full amount, fundamental replaced
+    // above a 150 Hz speaker limit: the laptop setting, which reads about
+    // -2 dB on programme) and the clarity enhancer (air at full) run, so the
+    // chain's input reaches both unchanged. A mirror of the two stages on the
+    // same programme shows what their readings are; a SafetyGovernor fed
+    // them backs off, while the chain's governor - which does not take them
+    // (docs/03 §14.5: at full or any useful weight, the governor would pin
+    // at 0.3 on every harmonic-bass factory preset) - holds exactly 1.
+    ParameterStore store;
+    store.set (Mode, static_cast<float> (ModeValue::Music));
+    for (int id : { GateOn, EqOn, DynEqOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+        store.set (id, 0.0f);
+    store.set (BassOn, 1.0f);
+    store.set (BassHarmonics, 1.0f);
+    store.set (BassHarmonicsCutoff, 150.0f);
+    store.set (BassReplaceFundamental, 1.0f);
+    store.set (ClarityOn, 1.0f);
+    store.set (ClarityAir, 1.0f);
+
+    constexpr int kBlock = 512;
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    BassEngine bass;
+    bass.prepare ({ kFs, kBlock, 2 });
+    BassEngineParams bp;
+    bp.harmonicsAmount = 1.0f;
+    bp.harmonicsCutoff = 150.0f;
+    bp.replaceFundamental = true;
+    bass.setParams (bp);
+    ClarityEnhancer clarity;
+    clarity.prepare ({ kFs, kBlock, 2 });
+    ClarityParams cp;
+    cp.air = 1.0f;
+    clarity.setParams (cp);
+    SafetyGovernor fedHarmonics;
+    fedHarmonics.prepare (kFs);
+
+    const int len = static_cast<int> (kFs * 8.0);
+    Planar prog (2, len);
+    FastRandom rng (21);
+    for (int i = 0; i < len; ++i)
+    {
+        const double t = i / kFs;
+        const double beat = std::fmod (t, 0.5);
+        const double kick = std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat);
+        const double hat = (std::fmod (t + 0.25, 0.5) < 0.03 ? 0.3 : 0.0) * rng.nextBipolar();
+        const double bassLine = 0.4 * std::sin (kTwoPi * 55.0 * t);
+        const double pad = 0.15 * std::sin (kTwoPi * 440.0 * t) + 0.1 * std::sin (kTwoPi * 660.0 * t + 0.3);
+        prog.ch[0][static_cast<size_t> (i)] = 0.35f * static_cast<float> (kick + hat + bassLine + pad);
+        prog.ch[1][static_cast<size_t> (i)] = 0.35f * static_cast<float> (kick + 0.8 * hat + bassLine + 0.7 * pad);
+    }
+    Planar mirror = prog;
+
+    ScopedNoDenormals noDenormals;
+    bool scaleAtOne = true, meterSilent = true;
+    double bassPow = 0.0, airPow = 0.0;
+    int measured = 0;
+    for (int pos = 0; pos < len; pos += kBlock)
+    {
+        const int n = std::min (kBlock, len - pos);
+        chain.process (prog.block (pos, n));
+        bass.process (mirror.block (pos, n));
+        clarity.process (mirror.block (pos, n));
+        const float bassDb = bass.getDistortionDb(), airDb = clarity.getDistortionDb();
+        fedHarmonics.update (0.0f, DistortionMonitor::combineDb (bassDb, airDb), n);
+        const auto& m = chain.meters();
+        scaleAtOne = scaleAtOne && m.governorScale.load() == 1.0f;
+        meterSilent = meterSilent && m.distortionDb.load() == kMinusInfDb && m.clipEnergyRatioDb.load() == kMinusInfDb;
+        if (pos > kFs)
+        {
+            bassPow += std::pow (10.0, bassDb / 10.0);
+            airPow += std::pow (10.0, airDb / 10.0);
+            ++measured;
+        }
+    }
+    REQUIRE (measured > 0);
+    CHECK_GE (10.0 * std::log10 (bassPow / measured), SafetyGovernor::kDistortionBudgetDb + 20.0); // measured: -2.1 dB
+    CHECK_GE (10.0 * std::log10 (airPow / measured), -70.0);                                      // measured: -44.9 dB
+    CHECK (fedHarmonics.getScale() == 0.3f);
+    CHECK (scaleAtOne);
+    CHECK (meterSilent);
+    // The chain's stages see what the mirror sees: the outputs agree (the
+    // chain's output is delayed by its constant latency).
+    const int latency = chain.getLatencySamples();
+    double maxDiff = 0.0;
+    for (int c = 0; c < 2; ++c)
+        for (int i = 0; i + latency < len; ++i)
+            maxDiff = std::max (maxDiff, static_cast<double> (std::abs (prog.ch[static_cast<size_t> (c)][static_cast<size_t> (i + latency)]
+                                                                       - mirror.ch[static_cast<size_t> (c)][static_cast<size_t> (i)])));
+    CHECK_LE (maxDiff, 1e-5);
+}
+
+TEST_CASE ("Distortion: measuring in the bass harmonics generator and the air exciter, and the monitor's harmonics update, are allocation-free")
+{
+    ScopedNoDenormals noDenormals;
+    BassEngine bass;
+    bass.prepare ({ kFs, 512, 2 });
+    BassEngineParams bp;
+    bp.harmonicsAmount = 0.8f;
+    bp.boostDb = 6.0f;
+    bass.setParams (bp);
+    ClarityEnhancer clarity;
+    clarity.prepare ({ kFs, 512, 2 });
+    ClarityParams cp;
+    cp.air = 1.0f;
+    cp.presence = 0.5f;
+    clarity.setParams (cp);
+    DistortionMonitor mon;
+    mon.prepare (kFs);
+    Planar buf (2, 512);
+    buf.ch[0] = whiteNoise (512, 0.5f, 3);
+    buf.ch[1] = whiteNoise (512, 0.5f, 4);
+    buf.rebind();
+
+    AllocationGuard guard;
+    float sink = 0.0f;
+    float bassSeen = kMinusInfDb, airSeen = kMinusInfDb;
+    for (int b = 0; b < 60; ++b)
+    {
+        if (b == 30)
+        {
+            // Switching off and on again (window reset / ramp paths).
+            bp.harmonicsAmount = 0.0f;
+            cp.air = 0.0f;
+            bass.setParams (bp);
+            clarity.setParams (cp);
+        }
+        if (b == 45)
+        {
+            bp.harmonicsAmount = 0.5f;
+            cp.air = 0.5f;
+            bass.setParams (bp);
+            clarity.setParams (cp);
+        }
+        bass.process (buf.block());
+        clarity.process (buf.block());
+        bassSeen = std::max (bassSeen, bass.getDistortionDb());
+        airSeen = std::max (airSeen, clarity.getDistortionDb());
+        sink += mon.updateHarmonics (bass.getDistortionDb(), clarity.getDistortionDb(), 512) + mon.getSmoothedHarmonicsDb();
+    }
+    bass.reset();
+    clarity.reset();
+    mon.reset();
+    CHECK (guard.allocations() == 0);
+    CHECK (std::isfinite (sink));
+    CHECK (bassSeen > kMinusInfDb);
+    CHECK (airSeen > kMinusInfDb);
 }

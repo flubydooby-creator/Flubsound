@@ -4,10 +4,10 @@
 // IEEE float 32/64, WAVE_FORMAT_EXTENSIBLE with PCM/float sub-formats, any
 // channel count up to kMaxChannels, skipping unknown chunks (LIST, bext...).
 // Writes float32 or PCM16/24 with TPDF dither (+-1 LSB triangular) for
-// integer formats. WAV is the only file format today (CLI, tests); FLAC /
-// MP3 / AIFF / Ogg through JUCE's AudioFormatManager in the app's batch UI
-// are roadmap (docs/07-roadmap.md 2.10). This class keeps the CLI and tests
-// free of JUCE.
+// integer formats. It is the CLI's and the tests' only file format, and the
+// app's Export / batch process dialog writes its WAV files with it (other
+// formats go through JUCE's AudioFormatManager there, app/Source/export).
+// This class keeps the CLI and tests free of JUCE.
 #pragma once
 
 #include <cstdint>

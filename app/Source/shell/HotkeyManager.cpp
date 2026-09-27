@@ -53,6 +53,7 @@ void HotkeyManager::registerAll()
 {
     unregisterAll();
     statuses.clear();
+    refusedAtOnce.clear();
 
     auto& settings = controller.getSettings();
     const bool enabled = settings.getHotkeysEnabled();
@@ -93,9 +94,14 @@ void HotkeyManager::registerAll()
                                                  });
 
         // A refusal is reported through the listener as well; this covers a
-        // service that does not report.
-        if (! ok && statuses[action].status == Status::Pending)
+        // service that does not report. It is final for this registerAll():
+        // a result of an earlier one still queued for the message thread
+        // must not overwrite it.
+        if (! ok)
+        {
             statuses[action].status = Status::Unavailable;
+            refusedAtOnce.insert (action);
+        }
     }
 
     if (onStatusChanged != nullptr)
@@ -118,7 +124,8 @@ void HotkeyManager::applyBindingResult (const BindingResult& result)
 {
     const auto action = static_cast<HotkeyAction> (result.id);
     const auto it = statuses.find (action);
-    if (it == statuses.end() || it->second.status == Status::SwitchedOff || it->second.status == Status::NotSupported)
+    if (it == statuses.end() || it->second.status == Status::SwitchedOff || it->second.status == Status::NotSupported
+        || refusedAtOnce.count (action) != 0)
         return; // not requested by the last registerAll() (a late result of an earlier one)
 
     auto updated = it->second;

@@ -27,9 +27,19 @@
 //      headroom the transducer cannot use anyway.
 //   5. Tighten: TransientShaper on the LR4 low band (< 150 Hz) with negative
 //      sustain = shorter, drier bass decay ("punchy" rather than "boomy").
+//
+// Telemetry: getDistortionDb() = the share of the generated harmonics in the
+// stage output over the last completed 25 ms analysis window
+// (ParallelDistortion.h), taken where the harmonics are added: per channel,
+// the dry path at that point (after the shelf and the optional
+// replace-fundamental high-pass), the shaper's input through the same band
+// pass and mix (its linear branch) and the added harmonics. What the two
+// linear references explain is not counted, so neither path's filters are,
+// only what the waveshaper generates. -160 dB while the harmonics are off.
 #pragma once
 
 #include "EnvelopeFollower.h"
+#include "ParallelDistortion.h"
 #include "Processor.h"
 #include "Svf.h"
 #include "TransientShaper.h"
@@ -69,6 +79,11 @@ public:
 
     /** Boost currently withdrawn by the protection stage (dB >= 0), for the GUI. */
     float getProtectionDb() const noexcept { return protectionDb.load (std::memory_order_relaxed); }
+
+    /** Harmonics generator: energy of the added harmonics relative to the
+        output over the last 25 ms analysis window (dB; -160 = harmonics off
+        or silent). See the header comment. */
+    float getDistortionDb() const noexcept FLUB_NONBLOCKING { return distortionDb.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -125,6 +140,8 @@ private:
     ProcessSpec spec;
     BassEngineParams params;
     std::atomic<float> protectionDb { 0.0f };
+    ParallelDistortionWindow distortionWindow; // harmonics telemetry: sums over a 25 ms window
+    std::atomic<float> distortionDb { -160.0f };
 
     double controlRate = 48000.0 / kControlInterval;
     int controlCountdown = kControlInterval;
@@ -159,7 +176,9 @@ private:
     std::array<float, 4> weights {}; // w2 .. w5
     SvfCoeffs harmPreHp, harmPostHp;
     std::array<SvfCoeffs, 2> harmPreLp {}, harmPostLp {};
-    std::array<SvfState, 6> harmState {}; // preHp, preLp[0], preLp[1], postHp, postLp[0], postLp[1]
+    // preHp, preLp[0], preLp[1], postHp, postLp[0], postLp[1], then postHp,
+    // postLp[0], postLp[1] once more on the shaper's input (telemetry: its linear branch)
+    std::array<SvfState, 9> harmState {};
     GGlide cutoffGlide, upperGlide;       // g of the cutoff and 6 * cutoff designs
     TransientShaper::PeakHold harmHold;
     EnvelopeFollower harmEnv;

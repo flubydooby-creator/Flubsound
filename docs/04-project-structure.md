@@ -177,6 +177,7 @@ Flubsound/
 │   │   ├── AppTestMain.cpp                 runner under juce::ScopedJuceInitialiser_GUI; per-thread counting operator new / delete; Linux: counting pthread_mutex_lock / _trylock
 │   │   ├── AppTestSupport.h                RealtimeProbe (allocations, frees, locks on the calling thread), pumpMessagesUntil, TempFolder
 │   │   ├── test_app_realtime.cpp           AudioEngineHost's device callback with a fake AudioIODevice (48 kHz / 256): no allocation, free or lock per block
+│   │   ├── test_app_export.cpp             ExportJob on real WAV / AIFF / FLAC / corrupt / .txt files: formats, loudness target, CLI parity, cancel, refusals; ExportDialog
 │   │   ├── test_app_headset_cap.cpp        EngineController::simulateOutputDevice -> master ceiling -2 (Bluetooth) / -3 (hands-free) / -1 dBTP, measured on the output
 │   │   ├── test_app_meters.cpp             SpectrumAnalyzer calibration, AnalyzerFeed, LevelMeters RMS / peak, correlation, WaveformHistory, LoudnessPanel
 │   │   ├── test_app_routing.cpp            AppRouting with a fake AppAudioRouter: session -> strip mapping, endpoint moves, captures, errors, persistence
@@ -221,7 +222,7 @@ Flubsound/
 │   │   ├── Commands.{h,cpp}                process / batch / analyze / params / presets: render-and-write glue, batch folder walk, worker pool, per-file reports
 │   │   ├── CliOptions.{h,cpp}              strict option parsing; precedence defaults → --preset → --mode → --boost/... → --set
 │   │   ├── FactoryPresets.{h,cpp}          run-time preset folder lookup (--dir, $FLUBSOUND_PRESET_DIR, exe-relative, source tree)
-│   │   ├── OfflineRenderer.{h,cpp}         sample-aligned offline render through ProcessingChain, loudness-target iterations
+│   │   ├── OfflineRenderer.{h,cpp}         sample-aligned offline render through ProcessingChain, loudness-target iterations, writeRender; also compiled into the app (export/)
 │   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters
 │   │   └── Utf8Windows.h                   Windows: UTF-8 argv (CommandLineToArgvW), environment (GetEnvironmentVariableW) and console output; pass-through elsewhere
 │   └── scripts/
@@ -240,6 +241,9 @@ Flubsound/
 │       │   ├── OverloadWatchdog.h          CPU-overload decision logic (load + glitch counter per 2 Hz poll, hysteresis)
 │       │   ├── AutoLoadReducer.h           opt-in overload response: latency-profile step-down ladder (rate limited, never back up)
 │       │   └── TestSignalGenerator.{h,cpp} deterministic synthetic music / 7.1 game scene (screenshots, demos)
+│       ├── export/                         Export / batch process (docs/06-gui.md §6.12)
+│       │   ├── ExportJob.{h,cpp}           worker-thread job: JUCE decoding, the CLI's OfflineRenderer, WAV (core writer) / FLAC (JUCE) output, per-file results
+│       │   └── ExportDialog.{h,cpp}        the dialog: inputs (drop, files, folder), output folder / format, strip snapshot or preset, loudness target / ceiling, results table
 │       ├── presets/
 │       │   └── PresetManager.{h,cpp}       factory presets from BinaryData, user presets (*.flubpreset.json), strip glue
 │       ├── settings/
@@ -436,8 +440,9 @@ Rules that follow from this:
 | `settings/` | `juce_data_structures`, `platform/PlatformServices.h` (for `KeyChord`) | `engine/`, `ui/`, `shell/` |
 | `presets/` | `juce_core`, `<FlubsoundPresetData.h>` (generated), `flub/io/*`, `flub/engine/Parameters.h`, `flub/engine/MixEngine.h` | `ui/`, `shell/` |
 | `engine/` | `juce_audio_devices`, `juce_events`, core headers, `presets/`, `settings/`, `platform/` | `ui/`, `shell/` |
-| `ui/` | `juce_gui_basics` (and `juce_dsp`, `juce_audio_utils` where needed), `engine/EngineController.h`, read-only core headers (`Parameters.h`, `ProcessingChain.h`, `MeterBus.h`, `ParametricEq.h` for `responseDb`) | `shell/`, `AudioEngineHost` internals |
+| `ui/` | `juce_gui_basics` (and `juce_dsp`, `juce_audio_utils` where needed), `engine/EngineController.h`, `export/ExportDialog.h` (`MainComponent` opens it), read-only core headers (`Parameters.h`, `ProcessingChain.h`, `MeterBus.h`, `ParametricEq.h` for `responseDb`) | `shell/`, `AudioEngineHost` internals |
 | `shell/` | `ui/`, `engine/`, `platform/PlatformBridge.h`, `platform/PlatformServices.h` (types only, `HotkeyManager.h`) | — |
+| `export/` | `juce_audio_formats`, `juce_gui_basics`, `engine/EngineController.h`, `presets/PresetManager.h`, `ui/` theme and widgets, `tools/flubsound-cli/OfflineRenderer.h` and `Analysis.h`, core headers | `shell/`, `AudioEngineHost` internals |
 
 - **`EngineController` is the façade.** It is the one object the UI talks to (`engine/EngineController.h`). There are two small exceptions:
   - `ui/RoutingPanel.cpp` calls `platform_bridge::servicesCompiledIn()` to explain why routing is unavailable;
@@ -842,6 +847,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **App-level tests (`tests/app/`, `flub_app_tests`).** A second executable, built only with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`), that compiles the app's own sources except `Main.cpp` and uses the same `TestFramework.h` registry, runner output and substring filter; every case name starts with `App:`. It needs no audio device and no display (it also runs under `xvfb-run -a`) and takes about 1.5 seconds. Its runner initialises JUCE once (`juce::ScopedJuceInitialiser_GUI`, no window), so the test thread is the message thread, and points `FLUB_USER_DATA_DIR` (plus `XDG_CONFIG_HOME` on Linux) at a temporary folder on every OS, so the user's settings, presets and device-profile override are never read or written. `flubapptest::RealtimeProbe` counts allocations, frees and (Linux / glibc) `pthread_mutex_lock` / `_trylock` calls on the calling thread only.
   - `test_app_realtime.cpp`: the host is started with a fake `juce::AudioIODevice` (48 kHz / 256) as JUCE starts it, then 600 probed callbacks run on a separate "device" thread with 8 device inputs on the 7.1 strip, a fake per-app capture through the `DriftCompensatedFifo` (including an underrun and re-prime), gain / mute / ceiling / parameter changes, and the UI draining the analyser taps between blocks; a self-check proves the probe counts;
+  - `test_app_export.cpp`: the Export / batch process job on files it writes with JUCE's writers into a temporary folder (a WAV, an AIFF, a FLAC, a corrupt WAV and a `.txt`): output format, rate, length and channel count, per-file results, FLAC 24 / 16 at a loudness target (±0.3 LU) under the ceiling, WAV output byte-identical to the CLI renderer's, cancel and abort during a file, the refusals (output = input folder, an output that would overwrite an input) and output naming, and the dialog built headless (strip snapshot, preset source, dropped folders, layout at 720 × 560, a Start). The worker is waited on through `ExportJob::waitForCompletion`, with the timeout only as a hang guard;
   - `test_app_headset_cap.cpp`: headless `EngineController::simulateOutputDevice` for a Bluetooth, a hands-free and a wired device name: the master ceiling applied is −2 / −3 / −1 dBTP, and a mix pushed about 11 dB over full scale leaves the engine at that ceiling;
   - `test_app_meters.cpp`: `SpectrumAnalyzer` band levels (a 1 kHz sine at 0 and −20 dBFS reads its level ±0.5 dB at 44.1 and 48 kHz, directly and through the chain's taps and `AnalyzerFeed`), `AnalyzerFeed` fan-out and backlog trimming, `LevelMeters` (sine RMS = peak − 3.01 dB), correlation (+1 / −1 / ≈0), `WaveformHistory` columns and the `LoudnessPanel` short-term readout;
   - `test_app_routing.cpp`: `AppRouting` with a fake `platform::AppAudioRouter` (endpoint moves, one per process, errors shown per app, un-mapping and shutdown restoring endpoints), the process-capture fallback with fake captures, and routes / method persisted through `AppSettings`.

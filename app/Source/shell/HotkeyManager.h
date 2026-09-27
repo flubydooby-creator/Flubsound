@@ -25,6 +25,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 
 namespace flub::app
 {
@@ -95,6 +96,7 @@ private:
     EngineController& controller;
     std::unique_ptr<flub::platform::GlobalHotkeys> hotkeys;
     std::map<HotkeyAction, ActionStatus> statuses; // assigned actions only
+    std::set<HotkeyAction> refusedAtOnce;          // registerHotkey() returned false in the last registerAll()
     bool unsupported = false; // hotkeys enabled, but no service
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (HotkeyManager)

@@ -106,6 +106,10 @@ flubsound-cli presets                                  # factory preset list
 
 Offline rendering uses exactly the same `ProcessingChain` as real-time processing. It is sample-aligned (latency compensated). Loudness targeting re-renders up to 4 more times, moving `max.drive` (then `input.gain` or `output.gain`) until the integrated loudness is within 0.3 LU of the target, and delivers the closest pass; the true-peak limiter holds the ceiling, with a static trim as a last resort. The CLI reads WAV only (PCM 16/24/32-bit, float 32/64, `WAVE_FORMAT_EXTENSIBLE`, up to 8 channels) and writes float32, or PCM24 / PCM16 with TPDF dither. The printed and `--json` output report measures the file as written: a PCM export is read back, so quantisation and dither are included. `tests/test_offline_render.cpp` runs the render, export and batch code (including parallel jobs and a corrupt input file).
 
+### In the desktop app
+
+Preset menu (the `…` next to the preset box) › **Export / batch process audio files…** does the same without a terminal: add files or a folder (with or without sub-folders, or drop them on the dialog), choose an output folder, a format (WAV float32 / PCM24 / PCM16, FLAC 24 / 16-bit), the settings (the selected strip's current settings, or any preset) and optionally a loudness target and a true-peak ceiling, then **Start**. It reads WAV, AIFF, FLAC, Ogg Vorbis and MP3 (through JUCE), renders on a background thread with the CLI's own offline renderer (a WAV export is byte-identical to `flubsound-cli process` with the same settings), and lists each file's loudness in and out, true peak and status; **Cancel** stops after the current file and **Reveal in folder** shows the result. It never writes next to its inputs: an output folder that is an input folder is refused. Details: [`docs/06-gui.md` §6.12](docs/06-gui.md#612-exportdialog--export--batch-process); tests: `tests/app/test_app_export.cpp`.
+
 ---
 
 ## Repository layout

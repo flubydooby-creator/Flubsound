@@ -18,6 +18,10 @@
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
 //                      added to every channel after the optional
 //                      replace-fundamental HP4 at cutoff on the original.
+//                      Telemetry at that sum, per channel: the dry path,
+//                      the shaper input through the same HP2 / LP4 and mix
+//                      (the linear branch) and the harmonics
+//                      (ParallelDistortion.h).
 //   5. Tighten       : LR4 split at 150 Hz, TransientShaper (sustain =
 //                      -12 dB * tighten) detecting max_c |low_c|; its gain is
 //                      applied to the low band only: out_c = g low_c + high_c.
@@ -227,6 +231,7 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     harmonicsMix.reset (sr, kParamSmoothMs, 0.0f);
 
     tightShaper.prepare (sr);
+    distortionWindow.prepare (sr);
 
     auto initStage = [sr] (ParkedStage& stage, float parkHz)
     {
@@ -290,6 +295,8 @@ void BassEngine::reset() noexcept FLUB_NONBLOCKING
 
     clearAllStates();
     protectionDb.store (0.0f, std::memory_order_relaxed);
+    distortionWindow.reset();
+    distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -590,6 +597,10 @@ void BassEngine::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
             controlTick();
         }
     }
+
+    // Harmonics telemetry: a window without harmonics (all sums 0) reads -160 dB.
+    if (float db = kMinusInfDb; distortionWindow.advance (numSamples, db))
+        distortionDb.store (db, std::memory_order_relaxed);
 }
 
 void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, int len) noexcept
@@ -601,6 +612,7 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
     constexpr float invInterval = 1.0f / static_cast<float> (kControlInterval);
 
     std::array<float, kMaxChannels> x {}, low {}, high {};
+    std::array<ParallelDistortionSums, kMaxChannels> sums {}; // harmonics telemetry of this segment
 
     for (int i = 0; i < len; ++i)
     {
@@ -661,7 +673,7 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         }
 
         // 4. Psychoacoustic harmonics from the mid signal ------------------------
-        float harmonics = 0.0f;
+        float harmonics = 0.0f, linearBranch = 0.0f;
         if (harmonicsActive)
         {
             float mid = 0.0f;
@@ -705,7 +717,16 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             y = svfTick (postHp, harmState[3], y);
             y = svfTick (postLp0, harmState[4], y);
             y = svfTick (postLp1, harmState[5], y);
-            harmonics = y * harmonicsMix.next();
+
+            // Telemetry reference: the shaper's input through the same band
+            // pass. Whatever part of the harmonics is proportional to b (odd
+            // terms below full scale) is linear filtering, not generated.
+            float lin = svfTick (postHp, harmState[6], b);
+            lin = svfTick (postLp0, harmState[7], lin);
+            lin = svfTick (postLp1, harmState[8], lin);
+            const float mix = harmonicsMix.next();
+            harmonics = y * mix;
+            linearBranch = lin * mix;
         }
 
         if (replace.active)
@@ -729,7 +750,12 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
 
         if (harmonicsActive)
             for (int c = 0; c < numCh; ++c)
-                x[static_cast<size_t> (c)] += harmonics;
+            {
+                // Telemetry: the linear references here against what the shaper adds.
+                const size_t ch = static_cast<size_t> (c);
+                sums[ch].add (x[ch], linearBranch, harmonics);
+                x[ch] += harmonics;
+            }
 
         // 5. Tighten: shorter low-band decay --------------------------------
         if (tight.active)
@@ -754,5 +780,10 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         for (int c = 0; c < numCh; ++c)
             block.channel (c)[n] = x[static_cast<size_t> (c)];
     }
+
+    if (harmonicsActive)
+        for (int c = 0; c < numCh; ++c)
+            if (const auto& s = sums[static_cast<size_t> (c)]; s.isFinite())
+                distortionWindow.channel (c).merge (s);
 }
 } // namespace flub

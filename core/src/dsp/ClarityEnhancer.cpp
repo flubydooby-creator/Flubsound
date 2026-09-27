@@ -31,6 +31,10 @@
 //      it is shaped only gently (a 9 kHz tone's alias drops by ~13 dB), while
 //      everything below 7 kHz is normalised by the band envelope unchanged.
 //      It also backs the exciter off when the top octave is already bright.
+//      Telemetry where the harmonics are added, per channel: the exciter's
+//      input, air * -12 dB * HP4 7 kHz (b) (the linear branch: T3 below full
+//      scale has a term proportional to b) and air * -12 dB * y
+//      (ParallelDistortion.h).
 //
 // Control rate: every kControlInterval samples of absolute stream time the
 // gain computers run, the smoothers advance and EQ designs are refreshed;
@@ -199,6 +203,7 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
     airReleaseCoeff = onePoleCoeff (kAirReleaseMs, sr);
     airSmoothCoeff = onePoleCoeff (kAirSmoothMs, sr);
     airMix.reset (sr, kParamSmoothMs, 0.0f);
+    distortionWindow.prepare (sr);
 
     reset();
 }
@@ -234,6 +239,8 @@ void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
     airShelf.setImmediate (SvfCoeffs::make (FilterType::HighShelf, kAirShelfHz, kAirShelfQ, airShelfDb, sr));
 
     clearAllStates();
+    distortionWindow.reset();
+    distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
 }
 
 //==============================================================================
@@ -446,6 +453,10 @@ void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
             controlTick();
         }
     }
+
+    // Exciter telemetry: a window without air (all sums 0) reads -160 dB.
+    if (float db = kMinusInfDb; distortionWindow.advance (numSamples, db))
+        distortionDb.store (db, std::memory_order_relaxed);
 }
 
 void ClarityEnhancer::processBell (DynamicBell& bell, const AudioBlock& block, int numCh, int pos, int len, int phase,
@@ -500,6 +511,7 @@ void ClarityEnhancer::processAir (const AudioBlock& block, int numCh, int pos, i
     {
         AirChannel& st = airChannels[static_cast<size_t> (c)];
         float* d = block.channel (c) + pos;
+        ParallelDistortionSums sums;
         for (size_t i = 0; i < n; ++i)
         {
             float high = svfTick (airFilters[0], st.filters[0], d[i]);
@@ -521,8 +533,16 @@ void ClarityEnhancer::processAir (const AudioBlock& block, int numCh, int pos, i
             float y = h * st.env;
             y = svfTick (airFilters[4], st.filters[4], y);
             y = svfTick (airFilters[5], st.filters[5], y);
-            d[i] += scratchA[i] * y;
+            // Telemetry: the exciter's input and its linear branch (the band
+            // through the same high-pass) against what it adds.
+            float lin = svfTick (airFilters[4], st.filters[6], b);
+            lin = svfTick (airFilters[5], st.filters[7], lin);
+            const float added = scratchA[i] * y;
+            sums.add (d[i], scratchA[i] * lin, added);
+            d[i] += added;
         }
+        if (sums.isFinite())
+            distortionWindow.channel (c).merge (sums);
     }
 
     applyGlide (airShelf, airShelfState, block, numCh, pos, len, phase);

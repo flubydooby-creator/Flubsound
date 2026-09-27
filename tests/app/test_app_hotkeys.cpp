@@ -227,6 +227,16 @@ TEST_CASE ("App: HotkeyManager shows the desktop's later answers per action (wai
     drainMessages();
     CHECK (changes == 3);
 
+    // A refusal is final for its registerAll(): an answer to an earlier one,
+    // still queued for the message thread, does not overwrite it.
+    fake.reportFromAnotherThread ({ { idOf (HotkeyAction::BoostDown), Result::Status::Registered, {} } }); // posted, not yet run
+    fake.taken = { idOf (HotkeyAction::BoostDown) };
+    manager.registerAll();
+    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "In use / could not register");
+    drainMessages();
+    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "In use / could not register");
+    fake.taken.clear();
+
     // Answers for actions no longer requested (hotkeys switched off since) are dropped.
     settings.setHotkeysEnabled (false);
     manager.registerAll();

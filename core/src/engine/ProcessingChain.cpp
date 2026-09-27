@@ -708,6 +708,11 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     const float satDistortionDb = satActive ? saturator.getDistortionDb() : kMinusInfDb;
     const float clipDistortionDb = maxActive ? maximizer.getDistortionDb() : kMinusInfDb;
     distortion.update (satDistortionDb, clipDistortionDb, n); // measured THD+N (meters)
+    // The bass harmonics and the air exciter are measured the same way, but
+    // add their harmonics on purpose: tracked apart, neither in the THD+N
+    // meter nor in the governor input (docs/03 §14.5).
+    distortion.updateHarmonics (! slots[SBass].isFullyBypassed() ? bass.getDistortionDb() : kMinusInfDb,
+                                ! slots[SClarity].isFullyBypassed() ? clarity.getDistortionDb() : kMinusInfDb, n);
     // The governor sees the clipper's share floored at its clip energy ratio
     // over the same 25 ms window, the former proxy: on a steady tone that
     // reads above the THD+N (it also counts the in-phase part of the removed

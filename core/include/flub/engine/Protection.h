@@ -6,6 +6,11 @@
 //   measured around its own curve, see flub/dsp/DistortionEstimator.h); a
 //   stage that is fully bypassed feeds -160 dB. A power-domain one-pole with tau = 300 ms
 //   smooths the block value for the meters (MeterBus::distortionDb).
+//   The intentional harmonic generators (the bass engine's harmonics and the
+//   clarity air exciter) are measured the same way, but their readings are
+//   the share of the harmonics they add on purpose: updateHarmonics() sums
+//   and smooths them separately, and they are neither in the THD+N above nor
+//   a SafetyGovernor input (docs/03-dsp-design.md §14.5 has the numbers).
 //
 // SafetyGovernor (THD / over-processing protection):
 //   Inputs per block: maximizer limiter GR (dB) and distortion (dB): the
@@ -112,9 +117,22 @@ public:
     /** Block THD+N smoothed in the power domain (tau = kMeterTauSeconds). */
     float getSmoothedDb() const noexcept { return smoothedDb; }
 
+    /** The harmonic generators' readings this block (bass harmonics, air
+        exciter; dB re their output, -160 = none): power-summed and smoothed
+        like the THD+N, but kept apart from it (see the header comment).
+        Returns the block's power sum. */
+    float updateHarmonics (float bassDb, float airDb, int numSamples) noexcept FLUB_NONBLOCKING;
+    float getHarmonicsBlockDb() const noexcept { return harmonicsBlockDb; }
+    /** Block harmonics reading smoothed in the power domain (tau = kMeterTauSeconds). */
+    float getSmoothedHarmonicsDb() const noexcept { return harmonicsSmoothedDb; }
+
 private:
+    /** Advances a power-domain one-pole (tau = kMeterTauSeconds) by numSamples. */
+    float smooth (float& statePow, float blockPow, int numSamples) const noexcept FLUB_NONBLOCKING;
+
     double sr = 48000.0;
     float blockDb = -160.0f, smoothedDb = -160.0f, smoothedPow = 0.0f;
+    float harmonicsBlockDb = -160.0f, harmonicsSmoothedDb = -160.0f, harmonicsSmoothedPow = 0.0f;
 };
 
 class SafetyGovernor

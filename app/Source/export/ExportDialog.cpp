@@ -111,6 +111,10 @@ ExportDialog::ExportDialog (EngineController& c)
     table.setColour (juce::ListBox::outlineColourId, Palette::border);
     table.setOutlineThickness (1);
     auto& header = table.getHeader();
+    header.setColour (juce::TableHeaderComponent::backgroundColourId, Palette::panelRaised);
+    header.setColour (juce::TableHeaderComponent::textColourId, Palette::muted);
+    header.setColour (juce::TableHeaderComponent::outlineColourId, Palette::border);
+    header.setColour (juce::TableHeaderComponent::highlightColourId, Palette::panelHover);
     const int columnFlags = juce::TableHeaderComponent::visible | juce::TableHeaderComponent::resizable;
     header.addColumn ("File", FileColumn, 190, 80, -1, columnFlags);
     header.addColumn ("Status", StatusColumn, 74, 60, -1, columnFlags);
@@ -123,13 +127,16 @@ ExportDialog::ExportDialog (EngineController& c)
 
     // ---- Actions ----
     progressBar.setPercentageDisplay (false);
+    progressBar.setColour (juce::ProgressBar::backgroundColourId, Palette::well);
+    progressBar.setColour (juce::ProgressBar::foregroundColourId, Palette::teal.withAlpha (0.8f));
+    progressBar.setTextToDisplay ({}); // the status line above says which file and how many
     revealButton.onClick = [this] { revealSelected(); };
     revealButton.setTooltip ("Show the selected file (or the output folder) in the file manager");
     cancelButton.onClick = [this]
     {
         job.cancel();
         statusText = "Stopping after the current file...";
-        statusIsError = false;
+        statusIsError = statusIsWarning = false;
         repaint();
     };
     startButton.onClick = [this] { startExport(); };
@@ -258,6 +265,7 @@ bool ExportDialog::startExport()
     const bool ok = buildSettings (s, error) && job.start (std::move (s), error);
     statusText = ok ? juce::String ("Scanning...") : error;
     statusIsError = ! ok;
+    statusIsWarning = false;
     if (ok)
         rows.clear();
     table.updateContent();
@@ -346,7 +354,7 @@ void ExportDialog::updateInputSummary()
         (f.isDirectory() ? folders : files)++;
     if (inputs.isEmpty())
     {
-        inputSummary = "No input yet: add audio files (WAV, AIFF, FLAC, Ogg"
+        inputSummary = "No input yet: add or drop audio files (WAV, AIFF, FLAC, Ogg"
                        + juce::String (job.getFormatManager().findFormatForFileExtension (".mp3") != nullptr ? ", MP3" : "")
                        + ") or a folder.";
     }
@@ -398,14 +406,16 @@ void ExportDialog::changeListenerCallback (juce::ChangeBroadcaster*)
     rows = job.getItems();
     const auto p = job.getProgress();
     progressValue = p.total > 0 ? static_cast<double> (p.finished) / static_cast<double> (p.total) : (p.completed ? 1.0 : 0.0);
-    progressBar.setTextToDisplay (juce::String (p.finished) + " / " + juce::String (p.total) + (p.total == 1 ? " file" : " files"));
+    const auto count = " (" + juce::String (p.finished) + " of " + juce::String (p.total) + ")";
 
-    statusIsError = p.error.isNotEmpty() || p.failed > 0;
+    statusIsError = p.error.isNotEmpty();
+    statusIsWarning = p.failed > 0;
     if (p.error.isNotEmpty())
         statusText = p.error;
     else if (p.running)
-        statusText = p.current >= 0 && p.current < static_cast<int> (rows.size()) ? "Rendering " + rows[static_cast<size_t> (p.current)].displayName
-                                                                                 : juce::String ("Scanning...");
+        statusText = p.current >= 0 && p.current < static_cast<int> (rows.size())
+                         ? "Rendering " + rows[static_cast<size_t> (p.current)].displayName + count
+                         : juce::String ("Scanning...");
     else if (p.completed)
         statusText = juce::String (p.finished - p.failed) + " done" + (p.failed > 0 ? ", " + juce::String (p.failed) + " failed" : juce::String())
                      + (p.skipped > 0 ? ", " + juce::String (p.skipped) + " skipped" : juce::String())
@@ -494,6 +504,44 @@ juce::String ExportDialog::getCellTooltip (int row, int column)
 // =============================================================================
 // Layout
 // =============================================================================
+bool ExportDialog::isInterestedInFileDrag (const juce::StringArray&)
+{
+    return ! job.isRunning();
+}
+
+void ExportDialog::fileDragEnter (const juce::StringArray&, int, int)
+{
+    dragOver = true;
+    repaint();
+}
+
+void ExportDialog::fileDragExit (const juce::StringArray&)
+{
+    dragOver = false;
+    repaint();
+}
+
+void ExportDialog::filesDropped (const juce::StringArray& files, int, int)
+{
+    dragOver = false;
+    auto list = inputs;
+    for (const auto& path : files)
+        if (juce::File::isAbsolutePath (path))
+            list.addIfNotAlreadyThere (juce::File (path));
+    setInputs (list);
+    repaint();
+}
+
+void ExportDialog::paintOverChildren (juce::Graphics& g)
+{
+    if (! dragOver)
+        return;
+    g.setColour (Palette::teal.withAlpha (0.08f));
+    g.fillRect (getLocalBounds());
+    g.setColour (Palette::teal.withAlpha (0.7f));
+    g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (3.0f), Theme::kControlRadius, 2.0f);
+}
+
 void ExportDialog::paint (juce::Graphics& g)
 {
     g.fillAll (Palette::background);
@@ -512,7 +560,7 @@ void ExportDialog::paint (juce::Graphics& g)
     g.drawText ("Settings", sourceCaption, juce::Justification::centredLeft, true);
 
     g.setFont (Theme::font (12.0f));
-    g.setColour (statusIsError ? Palette::red : Palette::muted);
+    g.setColour (statusIsError ? Palette::red : (statusIsWarning ? Palette::amber : Palette::muted));
     g.drawFittedText (statusText, statusArea, juce::Justification::centredLeft, 1, 0.8f);
 }
 

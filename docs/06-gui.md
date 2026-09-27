@@ -45,7 +45,7 @@
 | Headless screenshot driver (incl. `--device`) | Implemented; used by CI: the `app` job's Linux step renders three screenshots under `xvfb-run` and uploads them as the `screenshots` artifact (green in CI run 36247109446; nothing is compared against a reference image) | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
 | Custom plug-in editor sharing these components | **Roadmap** 2.9. Today the plug-in uses JUCE's generic editor plus a toolbar (§10) | `plugin/Source/PluginEditor.*` |
-| Batch processing UI | **Roadmap** 2.10. Today: `flubsound-cli` | `tools/flubsound-cli` |
+| Export / batch process dialog | Implemented (roadmap 2.10, §6.12): preset menu › *Export / batch process audio files…*. The job (decode, render, write, cancel, refusals, parity with `flubsound-cli`) and the dialog's settings and layout are tested by `flub_app_tests` (`tests/app/test_app_export.cpp`); its painting is not checked by CI | `app/Source/export/*`, `tools/flubsound-cli/OfflineRenderer.*` |
 | Start with the OS | Implemented: Windows `HKCU\…\CurrentVersion\Run`, macOS 13+ `SMAppService` login item (older macOS: hidden), Linux XDG autostart entry. Only the Linux path has been run; the Windows path has been compiled (MinGW) but not run, and the macOS path not yet built or run on a Mac | `ui/SettingsDialog.*`, `app/Source/platform/PlatformServices_*` |
 | Hearing guard, localisation, accessibility audit, UI motion polish | **Roadmap** 2.11, 3.7, 3.6 | — |
 
@@ -423,6 +423,8 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 │     └─ MeterSnapshot  (non-visual)        ui/MeterSnapshot.*
 │  on demand: DialogWindow → SettingsDialog ui/SettingsDialog.*
 │     └─ AudioDeviceSelectorComponent | ProcessingPage | HotkeysPage | GeneralPage
+│  on demand: DialogWindow → ExportDialog   app/Source/export/ExportDialog.*
+│     └─ ExportJob (non-visual; one worker juce::Thread)   app/Source/export/ExportJob.*
 ├─ TrayIcon (SystemTrayIconComponent)       shell/TrayIcon.*
 ├─ HotkeyManager                            shell/HotkeyManager.*
 └─ ScreenshotDriver (headless runs only)    shell/ScreenshotDriver.*
@@ -434,13 +436,14 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 - [`ui/Widgets.*`](../app/Source/ui/Widgets.h): icons, `IconButton`, `Style::set` / `Style::describe`.
 - [`ui/ParameterBinding.*`](../app/Source/ui/ParameterBinding.h): `ParamFormat` and `ParameterBinder`.
 
-**Coupling.** Only seven UI files take an `EngineController&`: `MainComponent`, `HeaderBar`, `DeviceAdviceBanner`, `RoutingPanel`, `BoostPanel`, `ModuleRack` and `SettingsDialog`. All other components work from a `ParameterStore*` provider, a `ProcessingChain*` provider, a `MeterSnapshot`, or raw sample blocks. This split is the basis of the plug-in editor plan (§10).
+**Coupling.** Only eight UI files take an `EngineController&`: `MainComponent`, `HeaderBar`, `DeviceAdviceBanner`, `RoutingPanel`, `BoostPanel`, `ModuleRack`, `SettingsDialog` and `ExportDialog`. All other components work from a `ParameterStore*` provider, a `ProcessingChain*` provider, a `MeterSnapshot`, or raw sample blocks. This split is the basis of the plug-in editor plan (§10).
 
 **Wiring in `MainComponent`**
 
 | Source | Target |
 |---|---|
 | `header.onSettingsRequested`, `deviceBanner.onDetailsRequested` | `openSettings()`: a single, non-modal settings window; brought to front if already open |
+| `header.onExportRequested` | `openExport()`: a single, non-modal Export / batch process window (§6.12); brought to front if already open, deleted with the main component |
 | `levels.onResetRequested`, `loudness.onResetRequested` | `MeterBus::resetLoudnessRequest = true` for the selected strip |
 | `rack.onLayoutModeChanged` | `resized()`: a card was expanded or collapsed |
 | `analyzer.getEqEditor().onBandSelected` ↔ `rack.onEqBandSelected` | curve node selection and the EQ card's band selector stay in sync |
@@ -467,9 +470,10 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 | Host atomics | UI → audio | strip gain / mute (routing panel), master ceiling (device advice) | `AudioEngineHost` atomics, applied at the start of each audio block |
 | `EngineController::Listener` | controller → UI | `MainComponent`, `TrayIcon` | callbacks on the message thread for state that cannot be polled cheaply |
 
-Two other threads feed the UI, always via the message thread:
+Other threads feed the UI, always via the message thread:
 
 - the per-app routing worker ("Flubsound routing"), through a `juce::AsyncUpdater` → `onChanged` → `Change::Routing`;
+- the Export / batch process worker ("Flubsound export", §6.12), whose progress reaches the `ExportDialog` through a `juce::ChangeBroadcaster`; it renders on its own chains and never touches the live engine;
 - global-hotkey callbacks and registration results, which `HotkeyManager` moves onto the message thread with `MessageManager::callAsync` when they arrive on another thread (the Linux services call them from their own X event / D-Bus thread).
 
 ```mermaid
@@ -615,7 +619,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 | **Mode switch** | `controller.getMode()` (selected strip, active bank) | `controller.setMode()` → `Mode` of the selected strip's active bank | Two segments: music-note icon + *Music*, gamepad icon + *Gaming*. A thumb slides (τ = 55 ms) and cross-fades teal ↔ magenta. Mode is stored per strip and per bank, so A and B can differ |
 | **Strip selector** | strip names and channel counts; `isStripActive()` | `setSelectedStrip()` | "tab" buttons; an accent dot marks strips currently receiving audio. The tooltip names the format (7.1 / 5.1 / stereo) |
 | **Preset browser** | `PresetManager::getPresets()`, current preset ID, `isPresetModified()` | `loadPreset (id, selected strip)`, `nextPreset()` / `previousPreset()` | Combo grouped under section headings `Factory - <category>` / `User - <category>`. It reads "Default settings" when no preset is set and "No presets installed" when the list is empty. An amber dot at the top-right corner marks a modified preset |
-| **Preset menu (…)** | current preset | preset files | **Save** (user preset *and* modified) · **Save as…** (name, category, description) · **Rename…** (user only) · **Delete** (user only; confirmation, moved to the trash) · **Import…** (`*.json`, loaded straight into the strip) · **Export…** (defaults to `<Documents>/<name>.flubpreset.json`) · **Show preset folder** · **Reset strip to defaults** (active bank only; keeps `mode`, `latency.profile` and `bypass`) |
+| **Preset menu (…)** | current preset | preset files | **Save** (user preset *and* modified) · **Save as…** (name, category, description) · **Rename…** (user only) · **Delete** (user only; confirmation, moved to the trash) · **Import…** (`*.json`, loaded straight into the strip) · **Export…** (defaults to `<Documents>/<name>.flubpreset.json`) · **Show preset folder** · **Reset strip to defaults** (active bank only; keeps `mode`, `latency.profile` and `bypass`) · **Export / batch process audio files…** (opens the `ExportDialog`, §6.12) |
 | **A / B + copy** | `getActiveBank()` | `setActiveBank()`, `copyActiveToOtherBank()` | Switching is one atomic bank flip; continuous parameters glide, so it is click-free. The copy tooltip reads "Copy A to B" or "Copy B to A" |
 | **Bypass** | `isEnabled()`, `bypass.matched` of the selected strip | `toggleEnabled()` → `bypass` on **every strip, both banks** | "warning" style, label *Bypass* / *Bypassed*. **Right-click** shows a menu with **Loudness-matched bypass**, an application-wide setting written to `bypass.matched` on every strip and both banks |
 | **Latency / CPU** | `getLatencyInfo()`, `getStatus()`, `getOverloadState()`, `getCaptureStreams()` | — | Top line `totalMs + captureBufferMs` with one decimal. Bottom line: CPU %, amber above 70 %, or `offline` (the caption then reads DEVICE). When the device reports xruns (`juce::AudioIODevice::getXRunCount() >= 0`) the count follows the CPU %, `42% · 3 xr`, and the readout widens by 34 px. A sustained overload (below) turns the line bold in the *hot* status colour with the caption OVERLOAD (compact: a `!` prefix). Hover shows the breakdown "device in + engine + device out (+ app capture)", the CPU load and xruns, the overload warning with the recommended action or the session's overload count, what the automatic overload response changed (if it did; `EngineController::describeLoadReduction()`), one line per per-app capture stream (§6.11) and the output-device profile |
@@ -969,6 +973,42 @@ Row heights adapt between 14 and 22 px.
 | **Hotkeys** | *Enable system-wide hotkeys* switch. One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. Next to each row, its registration status (`HotkeyManager::getStatus`, §7.2): "Registered" (green), "In use / could not register" or "Declined by the desktop" (amber), "Bound by the desktop as <key>", "Waiting for the desktop", "Not assigned", "Off" or "Not supported here". The page polls it at 4 Hz while visible, so answers the desktop gives later appear by themselves. The status line below reads one of: "All shortcuts are registered", "Shortcuts are switched off", "Some shortcuts are not active (see each row) …", "Waiting for the desktop to confirm the shortcuts …", "The desktop bound some shortcuts to other keys …", an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
 | **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
 
+### 6.12 `ExportDialog` — Export / batch process
+
+`app/Source/export/ExportDialog.*` is the UI; `app/Source/export/ExportJob.*` does the work and has no UI dependency. Preset menu › **Export / batch process audio files…** opens a non-modal, resizable `DialogWindow` titled "Flubsound Pro - Export / batch process": 720 × 560 by default and at minimum (the results table shrinks first), at most 1600 × 1200, native title bar, Esc closes, one instance at a time (`MainComponent::openExport()`).
+
+```
+ INPUT      [Add files...] [Add folder...] [Clear]   (o) Include sub-folders
+            1 folder:  My Album                      (files / folders can also be dropped on the dialog)
+ OUTPUT     Folder [/path/to/Exports ...............................] [Choose...]
+            Format [WAV 32-bit float v]        Settings [Current strip settings (Game) v]
+ LOUDNESS   (o) Loudness target  ----o---  -14.0 LUFS     (o) Ceiling  -------o-  -1.0 dBTP
+ +---------------------------------------------------------------------------------------+
+ | File            | Status | In LUFS | Out LUFS | Out dBTP | Details                     |
+ | Track 1.wav     | Done   |   -20.6 |    -14.0 |   -12.63 | WAV 24-bit, 48000 Hz, 2 ch  |
+ | broken.wav      | Failed |         |          |          | Cannot decode: ...          |
+ | cover.jpg       | Skipped|         |          |          | Not an audio file ...       |
+ +---------------------------------------------------------------------------------------+
+ 5 done, 1 failed, 1 skipped
+ [==================== progress ====================]  [Reveal in folder] [Cancel] [Start]
+```
+
+| Part | Controls | Behaviour |
+|---|---|---|
+| **Input** | **Add files…** (multi-select, filtered to every registered format), **Add folder…**, **Clear**, *Include sub-folders*; files and folders dropped anywhere on the dialog are added too | Every file whose extension a registered format claims becomes a row; other files are listed as *Skipped*. Rows are sorted by their path relative to the added folder |
+| **Output** | **Folder** + **Choose…**; **Format**: WAV 32-bit float, WAV 24-bit PCM, WAV 16-bit PCM, FLAC 24-bit, FLAC 16-bit; **Settings**: *Current strip settings (<strip>)* or any factory / user preset (grouped like the header's preset box) | The output folder is created when missing. Each input keeps its relative path below it, with the output extension. On a name clash (`a.wav` + `a.flac` → WAV) the file that already has the output extension keeps the name and the other gets its source extension appended (`a_flac.wav`) |
+| **Loudness** | *Loudness target* switch + slider, −60 … −1 LUFS (default −14); *Ceiling* switch + slider, the `max.ceiling` range −12 … 0 dBTP (default −1) | The rules of `flubsound-cli --target-lufs` / `--ceiling`: the ceiling is written to `max.ceiling`, the maximizer is switched on when a target or ceiling needs it, `max.autoDrive` is switched off under a target; each change is noted in the status line |
+| **Results** | table: File, Status (Queued / Rendering / Done / Failed / Skipped / Cancelled), In LUFS, Out LUFS, Out dBTP, Details (input format, the renderer's notes, or the error); tooltips give the full paths and texts | Double-click a finished row (or select it and press **Reveal in folder**) to show the file; with no row selected, Reveal shows the output folder |
+| **Actions** | progress bar (files finished / files to render), status line ("Rendering x (2 of 6)", "5 done, 1 failed, 1 skipped", or why Start was refused), **Reveal in folder**, **Cancel**, **Start** | Controls are disabled while a job runs; Start needs inputs and an output folder |
+
+- **Parameters.** *Current strip settings* is a snapshot of the selected strip's active A/B bank taken when **Start** is pressed (`ExportJob::snapshotStrip`); later edits do not affect a running export. *Bypass All* is application state, not the strip's sound: it is set off, so a bypassed app still exports the processed sound (the CLI's rule for presets). A preset goes through `PresetManager::loadIntoBank` into a fresh store (`ExportJob::presetValues`).
+- **Decoding.** `juce::AudioFormatManager::registerBasicFormats()`: WAV, AIFF, FLAC, Ogg Vorbis and MP3 (`JUCE_USE_MP3AUDIOFORMAT` defaults to 1 in JUCE 9.0.2 and the app does not change it), plus Core Audio's formats on macOS. Files are rendered at their own sample rate (no resampling, as in the CLI), with 1, 2, 6 or 8 channels; the output is always stereo. A file that no reader accepts fails with "Cannot decode: not a supported audio file, or the file is damaged".
+- **Rendering** is `flub::cli::renderFile`, the CLI's offline renderer: `tools/flubsound-cli/OfflineRenderer.cpp` and `Analysis.cpp` are compiled into the app (not the CLI's `main.cpp`, the same way `flub_tests` compiles them). Each file gets its own `ParameterStore` and `ProcessingChain`: priming, latency compensation (the output has the input's length), the loudness-target loop (≤ 4 corrective passes, within 0.3 LU) and the ceiling hold behave exactly as in `flubsound-cli process`, and the live engine is never touched.
+- **Writing.** WAV goes through `flub::cli::writeRender` (the core WAV writer with its seeded TPDF dither), so a WAV export is byte-identical to `flubsound-cli process` for the same decoded samples and parameters. FLAC goes through `juce::FlacAudioFormat` (compression level 5) with the same TPDF dither. A file is written under a temporary name next to its target and moved into place when complete. Out LUFS / Out dBTP measure the file as written (PCM and FLAC are read back, so quantisation and dither are included).
+- **Never overwrites an input.** Start is refused when the output folder is an input folder or the folder of an input file (also through `..` or a symlink), and the whole job is refused when an output path would be an input (an output folder above a recursive input folder). Files inside an output folder nested in an input folder are never picked up as inputs.
+- **Threading.** `ExportJob` renders the files one after another on its own `juce::Thread` ("Flubsound export"), never on the message or the audio thread. Results and progress are copied under a lock and announced through a `juce::ChangeBroadcaster`, which the dialog listens to on the message thread. **Cancel** stops after the file being rendered (that file is completed and written, the rest become *Cancelled*). Closing the dialog, or quitting, aborts the file in progress between two render blocks (`RenderSettings::abort`); its partial file is discarded.
+- **Tests** (`tests/app/test_app_export.cpp`, headless): a folder with a WAV, an AIFF and a FLAC written by JUCE's writers, a corrupt WAV and a `.txt` (outputs in the right format, rate, length and channel count; per-file results; inputs byte-identical afterwards); FLAC 24 / 16 at a −16 LUFS target within 0.3 LU and under a −1 dBTP ceiling, with the table's values equal to a measurement of the file; WAV float32 and PCM16 byte-identical to the CLI renderer's output for the same WAV and parameters; cancel and abort during the first file; the refusals and output naming; the dialog's parameter snapshot (Bypass All ignored), preset source, dropped folders and layout at 720 × 560, and a Start through the dialog.
+
 ---
 
 ## 7. System tray and global hotkeys
@@ -1024,7 +1064,7 @@ Row heights adapt between 14 and 22 px.
 
 - **Feedback.** After each action, `onActionPerformed` shows the feedback text as a tray info bubble, where the OS supports one.
 - **Registration.** `registerAll()` first unregisters everything. It skips unassigned chords (`keyCode == 0`) and registers each action under its name (`AppSettings::getHotkeyActionName`, e.g. "Boost +10%"), which the Wayland portal shows in the desktop's dialog and shortcut settings; Windows, macOS and X11 have no such list and ignore it. Disabling hotkeys in settings registers nothing.
-- **Status per action.** `GlobalHotkeys::setBindingListener` receives the outcome of every registration as a `BindingResult` (`Registered`, `Reassigned` with the desktop's name for the key it bound, `Unavailable`, `Declined`). Windows, macOS and X11 report synchronously, from inside `registerHotkey`; the Wayland portal reports from its D-Bus thread once the desktop has answered. `HotkeyManager` moves results onto the message thread, keeps one `ActionStatus` per action (`Pending` until the answer arrives; results for actions the last `registerAll()` did not request are dropped) and calls `onStatusChanged`. `getStatusText` gives the Hotkeys page's row text ("Registered", "In use / could not register", "Declined by the desktop", "Bound by the desktop as Ctrl+Alt+PgUp", "Waiting for the desktop", "Not assigned", "Off", "Not supported here"). `getFailures()` lists the inactive ones, such as "Next Preset (Ctrl+Alt+Right) could not be registered: another application may already use it, or the system does not allow that key" or "… was declined by the desktop: bind it in the desktop's keyboard settings, or choose another chord"; at start-up those known by then are printed to stderr. A second constructor takes the `GlobalHotkeys` service, so `tests/app/test_app_hotkeys.cpp` drives it with a fake.
+- **Status per action.** `GlobalHotkeys::setBindingListener` receives the outcome of every registration as a `BindingResult` (`Registered`, `Reassigned` with the desktop's name for the key it bound, `Unavailable`, `Declined`). Windows, macOS and X11 report synchronously, from inside `registerHotkey`; the Wayland portal reports from its D-Bus thread once the desktop has answered. `HotkeyManager` moves results onto the message thread, keeps one `ActionStatus` per action (`Pending` until the answer arrives; results for actions the last `registerAll()` did not request are dropped, and so are late results for an action whose `registerHotkey()` returned false in it) and calls `onStatusChanged`. `getStatusText` gives the Hotkeys page's row text ("Registered", "In use / could not register", "Declined by the desktop", "Bound by the desktop as Ctrl+Alt+PgUp", "Waiting for the desktop", "Not assigned", "Off", "Not supported here"). `getFailures()` lists the inactive ones, such as "Next Preset (Ctrl+Alt+Right) could not be registered: another application may already use it, or the system does not allow that key" or "… was declined by the desktop: bind it in the desktop's keyboard settings, or choose another chord"; at start-up those known by then are printed to stderr. A second constructor takes the `GlobalHotkeys` service, so `tests/app/test_app_hotkeys.cpp` drives it with a fake.
 - **Chord format.** `KeyChord` uses VK-style codes, the same on every OS: `'A'…'Z'`, `'0'…'9'`, F1…F24 = `0x70…0x87`, Space `0x20`, PageUp / PageDown / End / Home `0x21…0x24`, arrows Left / Up / Right / Down `0x25…0x28`, Insert `0x2D`, Delete `0x2E`. The modifiers are Ctrl, Alt, Shift and Super (Win / Cmd). Letters, digits and navigation keys need a modifier other than Shift (`detail::isValidChord`); F-keys may be bare on Windows (not F12, which Windows reserves) and macOS (which maps F1–F20 only). Before this validator accepted navigation keys, the default Boost and preset chords (Ctrl+Alt+arrows) failed to register on every OS.
 
 | OS | Implementation | Notes |
@@ -1188,7 +1228,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Reduce processing load automatically when the CPU overloads | `engine.reduceLoadOnOverload` (§6.1); a profile it stepped to is saved like a manual one, the Restore offer is per session | off |
 | Routing method and routes; preferred output device | `AppSettings` | Automatic; none |
 
-**Not persisted:** banner dismissal (per session and device), the expanded card, the selected EQ band and the Settings page.
+**Not persisted:** banner dismissal (per session and device), the expanded card, the selected EQ band, the Settings page and the Export / batch process dialog's inputs, output folder and options.
 
 ---
 
@@ -1199,6 +1239,7 @@ These describe the behaviour of the current code.
 - **Hotkeys on Wayland** need the desktop's GlobalShortcuts portal; without it they are reported unsupported. Triggers are compared by English key names, so a desktop that describes the requested key in another language shows as "Bound by the desktop as Strg+Alt+Hoch" (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
 - **Accessibility gaps** are listed in §2.8.
+- **Export / batch process** (§6.12) renders one file at a time (the CLI's `batch --jobs N` runs several in parallel), has no progress within a file, and does not resample (outputs keep the input's rate). Outputs are always stereo WAV (float32 / PCM24 / PCM16) or FLAC (24 / 16-bit); there is no MP3 / Ogg / AAC output. Cancel waits for the file being rendered to finish.
 
 ---
 
@@ -1215,3 +1256,4 @@ These describe the behaviour of the current code.
 | R2.10 | Per-module bypass + A/B | §6.1, §6.9 | `ui/HeaderBar.*`, `ui/ModuleCard.*` |
 | R3.4 | Boost Intensity 0–100 % | §6.3 | `ui/BoostPanel.*` |
 | R6.1 | Headset-aware safety and setup advice | §6.2, §11 (`--device`) | `ui/DeviceAdviceBanner.*`, `shell/ScreenshotDriver.*` |
+| R5.1, R5.2 | Batch processing and export of enhanced audio (in the app) | §6.12 | `export/ExportDialog.*`, `export/ExportJob.*`, `tools/flubsound-cli/OfflineRenderer.*` |

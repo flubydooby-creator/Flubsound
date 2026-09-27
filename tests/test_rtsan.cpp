@@ -178,4 +178,21 @@ static_assert (std::is_same_v<decltype (&ProcessingChain::setNeuralBypass), void
 static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralStatus), NeuralSlotStatus (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralCounters), NeuralSlotCounters (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
 
+// The intentional harmonic generators (tests/test_distortion.cpp): the
+// two-reference estimator the bass engine's harmonics and the air exciter
+// run inside process(), their readings, and the monitor's harmonics update
+// ProcessingChain::process calls every block.
+#include "flub/dsp/ParallelDistortion.h"
+
+static_assert (std::is_same_v<decltype (&ParallelDistortionSums::add), void (ParallelDistortionSums::*) (float, float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParallelDistortionSums::residualEnergy), double (ParallelDistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParallelDistortionSums::outputEnergy), double (ParallelDistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParallelDistortionSums::merge), void (ParallelDistortionSums::*) (const ParallelDistortionSums&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParallelDistortionSums::isFinite), bool (ParallelDistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParallelDistortionWindow::advance), bool (ParallelDistortionWindow::*) (int, float&) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<ParallelDistortionWindow>);
+static_assert (std::is_same_v<decltype (&BassEngine::getDistortionDb), float (BassEngine::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ClarityEnhancer::getDistortionDb), float (ClarityEnhancer::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionMonitor::updateHarmonics), float (DistortionMonitor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

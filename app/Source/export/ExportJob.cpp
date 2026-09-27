@@ -23,13 +23,16 @@ constexpr int kFlacQuality = 5;     // FlacAudioFormat's "5 (Default)" compressi
 float& valueOf (std::vector<float>& values, int id) { return values[static_cast<size_t> (id)]; }
 
 /** Symlink- and ".."-resolved path for "is this output one of the inputs?"
-    (the CLI's collectBatchJobs uses the same comparison). */
-std::filesystem::path canonical (const juce::File& f)
+    (the CLI's collectBatchJobs uses the same comparison), case-folded where
+    file names are not case-sensitive (Windows; macOS by default), so
+    "Song.WAV" and "song.wav" name the same file there. */
+juce::String canonical (const juce::File& f)
 {
     std::error_code ec;
     const auto p = flub::io::pathFromUtf8 (f.getFullPathName().toStdString());
-    auto c = std::filesystem::weakly_canonical (p, ec);
-    return ec ? p.lexically_normal() : c;
+    const auto c = std::filesystem::weakly_canonical (p, ec);
+    const auto key = juce::String::fromUTF8 (flub::io::pathToUtf8 (ec ? p.lexically_normal() : c).c_str());
+    return juce::File::areFileNamesCaseSensitive() ? key : key.toLowerCase();
 }
 
 bool sameFolder (const juce::File& a, const juce::File& b)
@@ -271,7 +274,7 @@ bool ExportJob::plan (const ExportSettings& s, const juce::AudioFormatManager& m
 
     const auto ext = extensionFor (s.format);
     std::set<juce::String> taken; // output paths (lower case: case-insensitive file systems)
-    std::set<std::filesystem::path> inputs;
+    std::set<juce::String> inputs; // canonical()
     for (const auto& c : candidates)
         inputs.insert (canonical (c.file));
 

@@ -2,6 +2,7 @@
 // "Export / batch process audio files...").
 //
 //   INPUT       [Add files...] [Add folder...] [Clear]   (o) Include sub-folders
+//               (or drop files / folders anywhere on the dialog)
 //               what was added (files / folders)
 //   OUTPUT      Folder [path ...........................] [Choose...]
 //               Format [WAV 32-bit float v]   Settings [Current strip (Game) v]
@@ -34,6 +35,7 @@
 namespace flub::app::ui
 {
 class ExportDialog final : public juce::Component,
+                           public juce::FileDragAndDropTarget,
                            private juce::ChangeListener,
                            private juce::TableListBoxModel,
                            private EngineController::Listener
@@ -66,7 +68,14 @@ public:
     ExportJob& getJob() noexcept { return job; }
     juce::String getStatusText() const { return statusText; }
 
+    // Files and folders dropped anywhere on the dialog are added to the inputs.
+    bool isInterestedInFileDrag (const juce::StringArray& files) override;
+    void filesDropped (const juce::StringArray& files, int x, int y) override;
+    void fileDragEnter (const juce::StringArray& files, int x, int y) override;
+    void fileDragExit (const juce::StringArray& files) override;
+
     void paint (juce::Graphics& g) override;
+    void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
 
 private:
@@ -95,7 +104,8 @@ private:
     std::vector<ExportItem> rows;
     std::vector<juce::String> presetIds; // source combo item id - kFirstPresetItem -> preset id
     juce::String inputSummary, statusText;
-    bool statusIsError = false;
+    bool statusIsError = false, statusIsWarning = false; // red: refused / job error; amber: some files failed
+    bool dragOver = false;
     double progressValue = 0.0;
 
     juce::TextButton addFiles { "Add files..." }, addFolder { "Add folder..." }, clearInputs { "Clear" };

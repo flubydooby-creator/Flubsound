@@ -17,15 +17,25 @@
 //      small aliases (-25..-44 dB) folding to 17-21 kHz. The chain disables
 //      air below 42 kHz sample rate.
 // Zero latency.
+//
+// Telemetry: getDistortionDb() = the share of the exciter's generated
+// harmonics in its output over the last completed 25 ms analysis window
+// (ParallelDistortion.h), taken where they are added (before the linear air
+// shelf): per channel, the signal entering the exciter, the band signal
+// through the same 7 kHz high-pass and mix (the shaper's linear branch) and
+// the added harmonics; what the two linear references explain is not
+// counted. -160 dB while air is off.
 #pragma once
 
 #include "EnvelopeFollower.h"
+#include "ParallelDistortion.h"
 #include "Processor.h"
 #include "Svf.h"
 #include "TransientShaper.h"
 #include "flub/common/SmoothedValue.h"
 
 #include <array>
+#include <atomic>
 
 namespace flub
 {
@@ -52,6 +62,11 @@ public:
     void setParams (const ClarityParams& p) noexcept FLUB_NONBLOCKING;
     const ClarityParams& getParams() const noexcept { return params; }
 
+    /** Air exciter: energy of the added harmonics relative to the exciter's
+        output over the last 25 ms analysis window (dB; -160 = air off or
+        silent). See the header comment. */
+    float getDistortionDb() const noexcept FLUB_NONBLOCKING { return distortionDb.load (std::memory_order_relaxed); }
+
 private:
     // ---- implementation-defined below this line ----
     static constexpr int kControlInterval = 16;
@@ -71,11 +86,12 @@ private:
         TransientShaper::SvfGlide eq;
     };
 
-    /** Per-channel exciter state: HP4 3.5 kHz, LP4 7 kHz, HP4 7 kHz, and the
+    /** Per-channel exciter state: HP4 3.5 kHz, LP4 7 kHz, HP4 7 kHz, HP4 7 kHz
+        on the band (telemetry: the shaper's linear branch), and the
         envelopes of the band and of everything above 3.5 kHz. */
     struct AirChannel
     {
-        std::array<SvfState, 6> filters {};
+        std::array<SvfState, 8> filters {};
         TransientShaper::PeakHold bandHold, highHold;
         float bandRelease = 0.0f, highRelease = 0.0f, env = 0.0f;
     };
@@ -116,6 +132,8 @@ private:
     TransientShaper::SvfGlide airShelf;
     float airShelfDb = 0.0f;
     std::array<SvfState, kMaxChannels> airShelfState {};
+    ParallelDistortionWindow distortionWindow; // exciter telemetry: sums over a 25 ms window
+    std::atomic<float> distortionDb { -160.0f };
 
     // Per-segment scratch (a segment never exceeds one control interval).
     std::array<SvfCoeffs, kControlInterval> rampScratch {};

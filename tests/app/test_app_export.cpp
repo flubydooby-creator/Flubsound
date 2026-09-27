@@ -513,7 +513,7 @@ TEST_CASE ("App export: an output folder that is an input folder, or would overw
     CHECK (outputs.joinIntoString ("|") == "B/x.wav|x.wav|y_flac.wav|y.wav");
 }
 
-TEST_CASE ("App export: the dialog renders the selected strip's settings (Bypass All ignored) or a preset, and fits 720 x 560")
+TEST_CASE ("App export: the dialog takes dropped folders and renders the selected strip's settings (Bypass All ignored) or a preset; fits 720 x 560")
 {
     flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
@@ -530,7 +530,10 @@ TEST_CASE ("App export: the dialog renders the selected strip's settings (Bypass
     REQUIRE (writeWithJuce (wav, in.getChildFile ("clip.wav"), makeProgramme (2, 48000.0, 0.5, 0.2f, 121), 48000.0, 24));
 
     ui::ExportDialog dialog (controller);
-    dialog.setInputs ({ in });
+    // A folder dropped on the dialog becomes an input (once, however often it is dropped).
+    CHECK (dialog.isInterestedInFileDrag ({ in.getFullPathName() }));
+    dialog.filesDropped ({ in.getFullPathName() }, 10, 10);
+    dialog.filesDropped ({ in.getFullPathName() }, 10, 10);
     dialog.setOutputFolder (out);
     dialog.setFormat (ExportFormat::Flac16);
 
@@ -542,6 +545,7 @@ TEST_CASE ("App export: the dialog renders the selected strip's settings (Bypass
     CHECK (s.values[static_cast<size_t> (EqOn)] == 0.0f);
     CHECK (s.values[static_cast<size_t> (BypassAll)] == 0.0f); // the export renders the strip's sound, not the master bypass
     CHECK (s.format == ExportFormat::Flac16);
+    CHECK (s.inputs.size() == 1 && s.inputs[0] == in);
     CHECK (! s.targetLufs && ! s.ceilingDb);
 
     dialog.setLoudnessTarget (-20.0f);
