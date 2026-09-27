@@ -184,7 +184,10 @@ Flubsound/
 │   │   ├── test_app_meters.cpp             SpectrumAnalyzer calibration, AnalyzerFeed, LevelMeters RMS / peak, correlation, WaveformHistory, LoudnessPanel
 │   │   ├── test_app_routing.cpp            AppRouting with a fake AppAudioRouter: session -> strip mapping, endpoint moves, captures, errors, persistence
 │   │   ├── test_app_overload.cpp           OverloadWatchdog hysteresis, device xruns and capture FIFO stats through EngineController to the header / Settings text
-│   │   └── test_app_overload_response.cpp  AutoLoadReducer ladder / rate limit / switch / manual reset; the opt-in profile step through EngineController to the header / Settings
+│   │   ├── test_app_overload_response.cpp  AutoLoadReducer ladder / rate limit / switch / manual reset; the opt-in profile step through EngineController to the header / Settings
+│   │   ├── test_app_engine_swap.cpp        the crossfaded engine swap: profile / layout / neural-model swaps mid-stream, x100 with the realtime probe, device restarts, a removed strip's tail
+│   │   ├── test_app_auto_profile.cpp       AutoProfileSwitcher; automatic profiles through EngineController with a scripted ForegroundApp; the routing panel list and add form
+│   │   └── test_app_accessibility.cpp      WCAG contrast of both palettes, the live theme switch, the UI scale setting and minimum window sizes, Settings > General
 │   ├── test_primitives.cpp                 Svf, Biquad, LR4, ThreeBandSplitter, Oversampler, TruePeakDetector, Fft, SpscRing, DelayLine, OnePoleSmoother
 │   ├── test_parametric_eq.cpp              ParametricEq
 │   ├── test_dynamic_eq.cpp                 DynamicEq
@@ -194,6 +197,7 @@ Flubsound/
 │   ├── test_saturator.cpp                  Saturator
 │   ├── test_spatializer.cpp                StereoSpatializer
 │   ├── test_virtualizer.cpp                HeadphoneVirtualizer
+│   ├── test_virtualizer_fold.cpp           Bs775Fold (LFE fold, passthrough) and ActiveChannelDetector: the 7.1 fold of docs/11 E01 / E27
 │   ├── test_compressor.cpp                 Compressor
 │   ├── test_limiter.cpp                    TruePeakLimiter
 │   ├── test_maximizer.cpp                  LoudnessMaximizer
@@ -209,6 +213,7 @@ Flubsound/
 │   ├── test_factory_presets.cpp            every presets/factory/*.json: metadata, keys, protection rules, render below the ceiling
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
+│   ├── test_presets.cpp                    PresetIO: application state (bypass, latency profile) kept out of presets, suggestedLatencyProfile (docs/11 E40)
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input and UTF-8 (non-ASCII) paths
 │   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
 │   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 interim's gunfire check; metric meta-validation; render.stats vs a hand computation
@@ -848,6 +853,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), ComparisonMatcher as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
   - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings and their independence of the host block size, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share), and the readings of the bass harmonics generator and the air exciter (a two-reference estimator against a harmonic analysis, -160 dB on linear settings, block-size independence, kept apart in the DistortionMonitor and out of the governor input);
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
+  - `test_known_gaps.cpp`: the docs/11 E59 sound-quality metrics (`KnownGap:` cases pinned at today's values, `KnownGap closed:` cases for fixed defects), a meta-validation of every metric against injected artefacts, and the CLI's `render.stats` against a hand computation;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
 - **App-level tests (`tests/app/`, `flub_app_tests`).** A second executable, built only with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`), that compiles the app's own sources except `Main.cpp` and uses the same `TestFramework.h` registry, runner output and substring filter; every case name starts with `App:`. It needs no audio device and no display (it also runs under `xvfb-run -a`) and takes about 3 seconds. Its runner initialises JUCE once (`juce::ScopedJuceInitialiser_GUI`, no window), so the test thread is the message thread, and points `FLUB_USER_DATA_DIR` (plus `XDG_CONFIG_HOME` on Linux) at a temporary folder on every OS, so the user's settings, presets and device-profile override are never read or written. `flubapptest::RealtimeProbe` counts allocations, frees and (Linux / glibc) `pthread_mutex_lock` / `_trylock` calls on the calling thread only.

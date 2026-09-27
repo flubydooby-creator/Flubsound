@@ -409,9 +409,9 @@ public:
     {
         setTitle ("Automatic profiles");
 
-        enable.setButtonText ("Follow the app in front");
+        enable.setButtonText ({}); // the caption labels it; the title names it for screen readers
         Style::set (enable, "switch");
-        Style::describe (enable, "Switch presets automatically", "Load each rule's preset while its application is in the foreground");
+        Style::describe (enable, "Follow the app in front", "Automatic profiles on / off: load each rule's preset while its application is in the foreground");
         enable.onClick = [this] { panel.controller.setAutoProfilesEnabled (enable.getToggleState()); };
         addAndMakeVisible (enable);
 
@@ -516,8 +516,10 @@ public:
     void resized() override
     {
         auto r = getLocalBounds();
+        // The switch alone (no text) at the caption's right end: with its
+        // text it would cover the caption in the narrow panel.
         auto caption = r.removeFromTop (kCaptionHeight);
-        enable.setBounds (caption.removeFromRight (juce::jmin (180, caption.getWidth() / 2 + 40)));
+        enable.setBounds (caption.removeFromRight (kSwitchWidth));
         r.removeFromTop (6);
         for (auto& row : rows)
         {
@@ -538,7 +540,7 @@ public:
     }
 
 private:
-    static constexpr int kCaptionHeight = 20, kRowHeight = 24, kButtonHeight = 30;
+    static constexpr int kCaptionHeight = 20, kSwitchWidth = 36, kRowHeight = 24, kButtonHeight = 30;
 
     struct RuleRow
     {

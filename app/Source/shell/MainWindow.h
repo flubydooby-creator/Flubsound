@@ -7,6 +7,7 @@
 #pragma once
 
 #include "engine/EngineController.h"
+#include "ui/Theme.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -20,7 +21,8 @@ public:
     static constexpr int kMinWidth = 1100, kMinHeight = 700;
     static constexpr int kDefaultWidth = 1280, kDefaultHeight = 820;
 
-    static juce::Colour backgroundColour() { return juce::Colour (0xff0f1115); }
+    /** The theme's background (Theme::setTheme re-maps it on a switch). */
+    static juce::Colour backgroundColour() { return ui::Palette::background; }
 
     MainWindow (EngineController& controller, std::function<void()> onCloseButton);
     ~MainWindow() override;

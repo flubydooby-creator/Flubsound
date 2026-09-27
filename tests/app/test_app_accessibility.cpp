@@ -165,6 +165,11 @@ TEST_CASE ("App: switching the theme re-colours Palette, every FlubLookAndFeel (
     juce::Label label;
     label.setColour (juce::Label::textColourId, ui::Palette::muted.withAlpha (0.5f));
     label.setColour (juce::Label::backgroundColourId, juce::Colour (0xff123456)); // not a token: left alone
+    // The high-contrast palette has several tokens of the same RGB (background,
+    // well and shadow are all black): the role is remembered, not guessed back.
+    REQUIRE (contrast.well == contrast.background);
+    label.setColour (juce::Label::outlineColourId, standard.well);
+    label.setColour (juce::Label::outlineWhenEditingColourId, standard.background);
 
     {
         ScopedTheme scoped (UiTheme::HighContrast);
@@ -190,6 +195,8 @@ TEST_CASE ("App: switching the theme re-colours Palette, every FlubLookAndFeel (
         Theme::remapComponentColours (label, standard, contrast);
         CHECK (label.findColour (juce::Label::textColourId) == contrast.muted.withAlpha (0.5f));
         CHECK (label.findColour (juce::Label::backgroundColourId) == juce::Colour (0xff123456));
+        CHECK (label.findColour (juce::Label::outlineColourId) == contrast.well);
+        CHECK (label.findColour (juce::Label::outlineWhenEditingColourId) == contrast.background);
         Theme::remapComponentColours (label, contrast, standard);
     }
 
@@ -199,6 +206,8 @@ TEST_CASE ("App: switching the theme re-colours Palette, every FlubLookAndFeel (
     CHECK (lnf.findColour (juce::Label::textColourId) == standard.text);
     CHECK (lnf.getAccent() == standard.magenta);
     CHECK (label.findColour (juce::Label::textColourId) == standard.muted.withAlpha (0.5f));
+    CHECK (label.findColour (juce::Label::outlineColourId) == standard.well);
+    CHECK (label.findColour (juce::Label::outlineWhenEditingColourId) == standard.background);
 
     // Every token of the two palettes maps onto the other and back.
     CHECK (Theme::remapColour (standard.faint, standard, contrast) == contrast.faint);

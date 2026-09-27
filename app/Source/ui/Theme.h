@@ -121,12 +121,16 @@ UiTheme currentTheme();
     look-and-feel change so cached layers are redrawn. Message thread only. */
 void setTheme (UiTheme theme);
 
-/** The token of `to` in the role that `c` has in `from` (same RGB), keeping
-    c's alpha; c itself if it is not a token of `from`. */
+/** The token of `to` in the role that `c` has in `from` (same RGB; the first
+    such role where several tokens share it), keeping c's alpha; c itself if
+    it is not a token of `from`. */
 juce::Colour remapColour (juce::Colour c, const PaletteTokens& from, const PaletteTokens& to);
 
 /** remapColour for every colour set on `root` and its children with
-    Component::setColour (what setTheme does for each window on the desktop). */
+    Component::setColour (what setTheme does for each window on the desktop).
+    The role each colour was mapped from is remembered on the component, so
+    switching back restores it even where the other palette gives several
+    roles one RGB value (high contrast: background, well and shadow). */
 void remapComponentColours (juce::Component& root, const PaletteTokens& from, const PaletteTokens& to);
 
 /** WCAG 2.x relative luminance (0 black .. 1 white) and contrast ratio

@@ -908,7 +908,7 @@ void EngineController::setAutoProfileRules (std::vector<AutoProfileRule> rules)
 
 bool EngineController::addAutoProfileRule (const AutoProfileRule& rule)
 {
-    if (rule.executable.trim().isEmpty() || rule.stripName.isEmpty() || rule.presetId.isEmpty())
+    if (rule.executable.trim().isEmpty() || rule.stripName.trim().isEmpty() || rule.presetId.trim().isEmpty())
         return false;
     auto rules = autoProfiles.getRules();
     const auto wanted = rule.executable.trim();

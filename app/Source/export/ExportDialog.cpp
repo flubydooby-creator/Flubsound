@@ -167,7 +167,10 @@ juce::DialogWindow* ExportDialog::show (EngineController& controller, juce::Comp
     options.resizable = true;
     auto* window = options.launchAsync();
     if (window != nullptr)
+    {
         window->setResizeLimits (kMinWidth, kMinHeight, 1600, 1200);
+        Theme::setMinimumWindowSize (*window, { kMinWidth, kMinHeight }); // never larger than the screen at a large UI scale
+    }
     return window;
 }
 

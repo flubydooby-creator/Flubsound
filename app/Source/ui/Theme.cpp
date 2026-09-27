@@ -124,34 +124,63 @@ std::vector<juce::Colour> allTokens (const PaletteTokens& t)
     v.insert (v.end(), t.eqBands.begin(), t.eqBands.end());
     return v;
 }
+
+bool sameRgb (juce::Colour a, juce::Colour b) { return (a.getARGB() & 0x00ffffffu) == (b.getARGB() & 0x00ffffffu); }
+
+/** Index of the first token of `tokens` with c's RGB; -1 if none. */
+int roleOf (juce::Colour c, const std::vector<juce::Colour>& tokens)
+{
+    for (size_t i = 0; i < tokens.size(); ++i)
+        if (sameRgb (tokens[i], c))
+            return static_cast<int> (i);
+    return -1;
+}
+
+void remapTree (juce::Component& c, const std::vector<juce::Colour>& from, const std::vector<juce::Colour>& to)
+{
+    // Component::setColour stores each override as a "jcclr_<id>" property.
+    // Some tokens share an RGB value in one palette but not in the other
+    // (high contrast: background / well / shadow are all black), so the role
+    // a colour was mapped from is remembered beside it ("flubRole_<id>") and
+    // preferred while it still matches: switching back restores each colour.
+    juce::StringArray ids;
+    const auto& props = c.getProperties();
+    for (int i = 0; i < props.size(); ++i)
+        if (const auto name = props.getName (i).toString(); name.startsWith ("jcclr_"))
+            ids.add (name.substring (6));
+
+    for (const auto& hex : ids)
+    {
+        const auto id = hex.getHexValue32();
+        const auto old = c.findColour (id);
+        const juce::Identifier roleKey ("flubRole_" + hex);
+        int role = -1;
+        if (const auto* stored = c.getProperties().getVarPointer (roleKey))
+            if (const int r = static_cast<int> (*stored); r >= 0 && r < static_cast<int> (from.size()) && sameRgb (from[static_cast<size_t> (r)], old))
+                role = r;
+        if (role < 0)
+            role = roleOf (old, from);
+        if (role < 0)
+            continue;
+        c.getProperties().set (roleKey, role);
+        if (const auto mapped = to[static_cast<size_t> (role)].withAlpha (old.getAlpha()); mapped != old)
+            c.setColour (id, mapped);
+    }
+    for (auto* child : c.getChildren())
+        remapTree (*child, from, to);
+}
 } // namespace
 
 juce::Colour remapColour (juce::Colour c, const PaletteTokens& from, const PaletteTokens& to)
 {
-    const auto a = allTokens (from), b = allTokens (to);
-    const auto rgb = c.getARGB() & 0x00ffffffu;
-    for (size_t i = 0; i < a.size(); ++i)
-        if ((a[i].getARGB() & 0x00ffffffu) == rgb)
-            return b[i].withAlpha (c.getAlpha());
-    return c;
+    const auto a = allTokens (from);
+    const int role = roleOf (c, a);
+    return role >= 0 ? allTokens (to)[static_cast<size_t> (role)].withAlpha (c.getAlpha()) : c;
 }
 
 void remapComponentColours (juce::Component& c, const PaletteTokens& from, const PaletteTokens& to)
 {
-    // Component::setColour stores each override as a "jcclr_<id>" property.
-    const auto& props = c.getProperties();
-    for (int i = 0; i < props.size(); ++i)
-    {
-        const auto name = props.getName (i).toString();
-        if (! name.startsWith ("jcclr_"))
-            continue;
-        const auto id = name.substring (6).getHexValue32();
-        const auto old = c.findColour (id);
-        if (const auto mapped = remapColour (old, from, to); mapped != old)
-            c.setColour (id, mapped);
-    }
-    for (auto* child : c.getChildren())
-        remapComponentColours (*child, from, to);
+    remapTree (c, allTokens (from), allTokens (to));
 }
 
 void setTheme (UiTheme theme)

@@ -294,6 +294,14 @@ TEST_CASE ("App: AutoProfileSwitcher: a manual preset change cancels the rule un
     // The game stays in front: not applied again.
     for (int i = 0; i < 10; ++i)
         CHECK (s.update (app ("cs2.exe")).empty());
+    // Nor after another rule is added or removed (the cancelled one is still listed).
+    CHECK (s.setRules ({ rule ("spotify", "Music", "factory:bass"), rule ("cs2.exe", "Game", "factory:fps", true),
+                         rule ("doom", "Game", "factory:horror") })
+               .empty());
+    CHECK (s.setRules ({ rule ("cs2.exe", "Game", "factory:fps", true), rule ("spotify", "Music", "factory:bass") }).empty());
+    for (int i = 0; i < 5; ++i)
+        CHECK (s.update (app ("cs2.exe")).empty());
+    CHECK (s.getActiveRule() == nullptr);
     // Another app (even one without a rule) stable in front, then the game again: applied again.
     s.update (app ("firefox"));
     CHECK (s.update (app ("firefox")).empty()); // nothing active: nothing to end

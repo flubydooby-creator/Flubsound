@@ -33,6 +33,7 @@
 //   * Rules edited while one is active: the active rule stays if an identical
 //     rule is still in the list, otherwise it ends WITHOUT restoring (the
 //     strip keeps what it plays). Switching the feature off does the same.
+//     A rule cancelled by hand stays cancelled if it is still in the list.
 #pragma once
 
 #include "AppRouting.h"
@@ -109,18 +110,22 @@ public:
     std::vector<Action> setRules (std::vector<AutoProfileRule> newRules)
     {
         std::vector<Action> actions;
-        int newActive = -1;
-        if (const auto* current = getActiveRule())
+        const auto indexIn = [&newRules] (int index, const std::vector<AutoProfileRule>& from)
         {
-            const auto same = std::find (newRules.begin(), newRules.end(), *current);
-            if (same != newRules.end())
-                newActive = static_cast<int> (same - newRules.begin());
-            else
-                actions.push_back ({ Action::Kind::End, *current, false });
-        }
+            if (index < 0 || index >= static_cast<int> (from.size()))
+                return -1;
+            const auto same = std::find (newRules.begin(), newRules.end(), from[static_cast<size_t> (index)]);
+            return same != newRules.end() ? static_cast<int> (same - newRules.begin()) : -1;
+        };
+        const int newActive = indexIn (active, rules);
+        if (const auto* current = getActiveRule(); current != nullptr && newActive < 0)
+            actions.push_back ({ Action::Kind::End, *current, false });
+        // A rule cancelled by hand stays cancelled through edits of other
+        // rules (adding or removing one must not re-apply it).
+        const int newSuppressed = indexIn (suppressed, rules);
         rules = std::move (newRules);
         active = newActive;
-        suppressed = -1;
+        suppressed = newSuppressed;
         candidate = kUnknown;
         candidatePolls = 0;
         return actions;
