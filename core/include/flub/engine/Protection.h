@@ -1,11 +1,22 @@
 // Flubsound Pro - protection & loudness control loops (all RT-safe).
 //
+// DistortionMonitor (measured THD+N of the chain's nonlinear stages):
+//   Per block it power-sums the THD+N readings of the stages in series (the
+//   saturator and the maximizer's soft clipper, each measured around its own
+//   curve, see flub/dsp/DistortionEstimator.h); a stage that is fully
+//   bypassed feeds -160 dB. A power-domain one-pole with tau = 300 ms
+//   smooths the block value for the meters (MeterBus::distortionDb).
+//
 // SafetyGovernor (THD / over-processing protection):
-//   Inputs per block: maximizer limiter GR (dB), clipper energy ratio (dB).
-//   Budget: limiter GR averaged over ~3 s must stay above -6 dB, clip energy
-//   ratio above -30 dB (~3 % "THD" contribution). When over budget, scale
-//   falls at 15 %/s (min 0.3); when under budget minus 1.5 dB hysteresis it
-//   recovers at 3 %/s. The scale multiplies every "governed" macro amount.
+//   Inputs per block: maximizer limiter GR (dB) and distortion (dB): the
+//   measured THD+N of the saturator power-summed with the clipper's share,
+//   which is its measured THD+N floored at its clip energy ratio (the former
+//   proxy, never lower on a clipper), so the governor never acts later than
+//   it did on the proxy alone. Budget: limiter GR averaged over ~3 s must
+//   stay above -6 dB, distortion (power average over ~3 s) below -30 dB
+//   (~3.2 % RMS of the output). When over budget, scale falls at 15 %/s (min 0.3); when
+//   under budget minus 1.5 dB hysteresis it recovers at 3 %/s. The scale
+//   multiplies every "governed" macro amount; base values are never touched.
 //
 // GatedLoudness (shared by the three loops below):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -32,6 +43,7 @@
 #pragma once
 
 #include "flub/analysis/LoudnessFollower.h"
+#include "flub/common/Realtime.h"
 
 #include <algorithm>
 
@@ -83,17 +95,45 @@ private:
     bool gateOpen = false;
 };
 
-class SafetyGovernor
+class DistortionMonitor
 {
 public:
+    static constexpr float kMeterTauSeconds = 0.3f;
+
     void prepare (double sampleRate) noexcept;
-    void reset() noexcept;
-    void update (float limiterGrDb, float clipEnergyRatioDb, int numSamples) noexcept;
-    float getScale() const noexcept { return scale; }
+    void reset() noexcept FLUB_NONBLOCKING;
+    /** Combines this block's stage readings (dB; -160 = none) and returns the
+        block's THD+N (power sum). Advances the meter smoothing by numSamples. */
+    float update (float saturatorDb, float clipperDb, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** Power sum of two ratios in dB (-160 = none): stages in series. */
+    static float combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING;
+    float getBlockDb() const noexcept { return blockDb; }
+    /** Block THD+N smoothed in the power domain (tau = kMeterTauSeconds). */
+    float getSmoothedDb() const noexcept { return smoothedDb; }
 
 private:
     double sr = 48000.0;
-    float avgGrDb = 0.0f, avgClipDb = -160.0f, scale = 1.0f;
+    float blockDb = -160.0f, smoothedDb = -160.0f, smoothedPow = 0.0f;
+};
+
+class SafetyGovernor
+{
+public:
+    static constexpr float kGrBudgetDb = -6.0f;          // sustained limiting deeper than this = over-driven
+    static constexpr float kDistortionBudgetDb = -30.0f; // THD+N above ~3.2 % RMS = audible distortion
+
+    void prepare (double sampleRate) noexcept;
+    void reset() noexcept FLUB_NONBLOCKING;
+    /** distortionDb: the distortion of the nonlinear stages this block (see
+        the header comment; ProcessingChain::process). */
+    void update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING;
+    float getScale() const noexcept { return scale; }
+    /** The ~3 s power average of the distortion input (what the budget is compared with). */
+    float getAverageDistortionDb() const noexcept { return avgDistortionDb; }
+
+private:
+    double sr = 48000.0;
+    float avgGrDb = 0.0f, avgDistortionDb = -160.0f, scale = 1.0f;
 };
 
 class AutoLevel

@@ -23,7 +23,8 @@ void drawSectionTitle (juce::Graphics& g, juce::Rectangle<int> area, const juce:
     g.fillRect (area.getX(), area.getBottom() - 1, area.getWidth(), 1);
 }
 
-/** Caption + control (+ optional help line) rows, laid out top to bottom. */
+/** Caption + control (+ optional help line) rows, laid out top to bottom. A
+    row without a caption uses the full width (e.g. a long switch label). */
 struct FormLayout
 {
     struct Row
@@ -57,15 +58,16 @@ struct FormLayout
                 y += 30;
                 continue;
             }
-            r.captionArea = { area.getX(), y, kCaptionWidth, kRowHeight };
+            const int indent = r.caption.isEmpty() ? 0 : kCaptionWidth;
+            r.captionArea = { area.getX(), y, indent, kRowHeight };
             if (r.control != nullptr)
-                r.control->setBounds (area.getX() + kCaptionWidth, y + 2, juce::jmin (r.controlWidth, area.getWidth() - kCaptionWidth), kRowHeight - 4);
+                r.control->setBounds (area.getX() + indent, y + 2, juce::jmin (r.controlWidth, area.getWidth() - indent), kRowHeight - 4);
             y += kRowHeight;
             if (r.help.isNotEmpty())
             {
                 const auto lines = juce::jmax (1, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), r.help)
-                                                                               / juce::jmax (80.0f, static_cast<float> (area.getWidth() - kCaptionWidth)))));
-                r.helpArea = { area.getX() + kCaptionWidth, y + 1, area.getWidth() - kCaptionWidth, lines * 15 + 2 };
+                                                                               / juce::jmax (80.0f, static_cast<float> (area.getWidth() - indent)))));
+                r.helpArea = { area.getX() + indent, y + 1, area.getWidth() - indent, lines * 15 + 2 };
                 y += lines * 15 + 6;
             }
             y += 4;
@@ -226,15 +228,18 @@ public:
         latencyBox.setTitle ("Latency profile");
         latencyBox.onChange = [this]
         {
-            const float v = static_cast<float> (latencyBox.getSelectedId() - 1);
-            // Every strip, both banks: strips are padded to the largest
-            // latency anyway, and A/B switching must not trigger re-prepares.
-            for (int s = 0; s < controller.getNumStrips(); ++s)
-            {
-                auto& store = controller.getParams (s);
-                store.set (Bank::A, LatencyProfile, v);
-                store.set (Bank::B, LatencyProfile, v);
-            }
+            // Every strip, both banks (EngineController::setLatencyProfile);
+            // a choice by hand also resets the automatic overload response.
+            controller.setLatencyProfile (static_cast<LatencyProfileValue> (juce::jlimit (0, 2, latencyBox.getSelectedId() - 1)));
+        };
+
+        Style::set (autoReduceToggle, "switch");
+        autoReduceToggle.onClick = [this] { controller.setReduceLoadOnOverload (autoReduceToggle.getToggleState()); };
+        restoreButton.setTooltip ("Return to the latency profile you chose before the automatic change");
+        restoreButton.onClick = [this]
+        {
+            controller.restoreLatencyProfile();
+            refresh();
         };
 
         inputModeBox.addItem ("Automatic (virtual cables / loopback only)", 1);
@@ -281,12 +286,20 @@ public:
 
         for (auto* box : { &latencyBox, &inputModeBox, &inputStripBox, &routingBox, &paletteBox })
             addAndMakeVisible (*box);
+        addAndMakeVisible (autoReduceToggle);
+        addAndMakeVisible (restoreButton);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,
                   "Quality adds the spectral noise gate and the highest oversampling. Balanced (~4 ms) is the default; "
                   "Low Latency (~2 ms) suits competitive gaming. Changing it restarts the engine briefly.",
                   220);
+        form.row ({}, autoReduceToggle,
+                  "Off (default): a CPU overload is only reported. On: a lasting overload steps the profile down one level "
+                  "(Quality, then Balanced, then Low Latency), at most once every 30 s; it never steps back up by itself.",
+                  520);
+        form.row ("Automatic change", restoreButton, describeReduction(), 100);
+        reductionRow = form.rows.size() - 1;
         form.section ("Sources");
         form.row ("Device input", inputModeBox, "Automatic only processes inputs that look like a virtual cable or loopback device, never a microphone.",
                   330);
@@ -302,8 +315,15 @@ public:
 
     void refresh()
     {
-        const int profile = static_cast<int> (std::lround (controller.getSelectedParams().get (LatencyProfile)));
-        latencyBox.setSelectedId (profile + 1, juce::dontSendNotification);
+        latencyBox.setSelectedId (static_cast<int> (controller.getLatencyProfile()) + 1, juce::dontSendNotification);
+        autoReduceToggle.setToggleState (controller.getReduceLoadOnOverload(), juce::dontSendNotification);
+        restoreButton.setEnabled (controller.hasReducedLoad());
+        if (const auto text = describeReduction(); text != form.rows[reductionRow].help)
+        {
+            form.rows[reductionRow].help = text;
+            resized();
+            repaint();
+        }
 
         using Mode = AppSettings::DeviceInputMode;
         const auto mode = controller.getSettings().getDeviceInputMode();
@@ -388,10 +408,19 @@ public:
     }
 
 private:
+    juce::String describeReduction() const
+    {
+        const auto text = controller.describeLoadReduction();
+        return text.isNotEmpty() ? text : juce::String ("None: the latency profile is the one you chose.");
+    }
+
     EngineController& controller;
     std::function<void (MeterPalette)> onPaletteChanged;
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, paletteBox;
+    juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
+    juce::TextButton restoreButton { "Restore" };
     FormLayout form;
+    size_t reductionRow = 0; // the "Automatic change" row: its help is the live description
     static constexpr int kTextLine = 15; // line pitch of the 12 px text blocks
 
     juce::String latencyText, captureText;

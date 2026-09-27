@@ -74,6 +74,12 @@ void TrayIcon::engineControllerChanged (EngineController::Change change)
                         + (overload.episodeGlitches > 0 ? ", " + juce::String (static_cast<juce::int64> (overload.episodeGlitches)) + " dropouts" : juce::String())
                         + "). Try the Low Latency profile or a larger buffer.");
         overloadNotified = overload.overloaded;
+
+        // One bubble per automatic latency-profile step (opt-in overload response).
+        const auto steps = controller.getLoadReductionState().sessionSteps;
+        if (steps > reductionsNotified && controller.hasReducedLoad())
+            notify ("Flubsound Pro - processing load reduced", controller.describeLoadReduction());
+        reductionsNotified = steps;
     }
 }
 

@@ -114,6 +114,13 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
     prepared = true;
 }
 
+void AsyncModelProcessor::releaseResources() noexcept
+{
+    stopWorker();
+    prepared = false;
+    modelActive = false;
+}
+
 void AsyncModelProcessor::resetAudioState() noexcept
 {
     std::fill (delayBuffer.begin(), delayBuffer.end(), 0.0f);

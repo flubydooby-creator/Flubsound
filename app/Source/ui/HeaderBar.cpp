@@ -291,10 +291,11 @@ HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, c
     return r;
 }
 
-juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload)
+juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload, const juce::String& loadReduction)
 {
+    const auto reduction = loadReduction.isNotEmpty() ? "\n" + loadReduction : juce::String();
     if (! status.deviceOpen)
-        return "CPU: no audio device open";
+        return "CPU: no audio device open" + reduction;
 
     juce::String t;
     t << "CPU: " << juce::roundToInt (status.cpuLoad * 100.0) << " % of the audio callback's time budget";
@@ -312,7 +313,7 @@ juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadW
         t << "\n" << static_cast<juce::int64> (overload.episodes) << (overload.episodes == 1 ? " overload" : " overloads")
           << " this session (the last peaked at " << juce::roundToInt (overload.peakLoad * 100.0) << " %)";
     }
-    return t;
+    return t + reduction;
 }
 
 void HeaderBar::updateStatus()
@@ -361,7 +362,7 @@ void HeaderBar::mouseMove (const juce::MouseEvent& e)
         << juce::String (li.deviceOutputMs, 1) << " ms";
     if (li.captureBufferMs > 0.0)
         tip << " + app capture " << juce::String (li.captureBufferMs, 1) << " ms";
-    tip << "\n" << describeCpu (controller.getStatus(), controller.getOverloadState());
+    tip << "\n" << describeCpu (controller.getStatus(), controller.getOverloadState(), controller.describeLoadReduction());
     const auto streams = controller.getCaptureStreams();
     if (! streams.empty())
         tip << "\nApp capture: " << SettingsDialog::describeCaptureStreams (streams).replace ("\n", "\nApp capture: ");

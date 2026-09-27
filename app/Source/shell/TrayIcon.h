@@ -45,7 +45,8 @@ private:
     EngineController& controller;
     Callbacks callbacks;
     bool iconShowsEnabled = false, iconValid = false;
-    bool overloadNotified = false; // bubble shown for the current overload
+    bool overloadNotified = false;   // bubble shown for the current overload
+    uint64_t reductionsNotified = 0; // automatic profile steps already shown in a bubble
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrayIcon)
 };

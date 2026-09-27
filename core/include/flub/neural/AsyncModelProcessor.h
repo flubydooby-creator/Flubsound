@@ -54,10 +54,10 @@
 // The counters are relaxed atomics, readable from any thread; they restart
 // at prepare() but not at reset() (they are telemetry).
 //
-// Not in ProcessingChain yet: the chain has a fixed array of module slots, so
-// putting a neural module into it is still a code change (a new slot, its
-// parameters and the latency-profile eligibility check in
-// flub/neural/Eligibility.h).
+// In the chain: ProcessingChain::setNeuralModel() wraps a runner in one of
+// these and runs it in the chain's neural slot (after the gate, before the
+// EQ and every dynamics stage) when isEligible() allows it for the prepared
+// latency profile (flub/neural/Eligibility.h).
 #pragma once
 
 #include "flub/common/SmoothedValue.h"
@@ -94,6 +94,10 @@ public:
     AsyncModelProcessor& operator= (const AsyncModelProcessor&) = delete;
 
     void prepare (const ProcessSpec& spec) override;
+    /** Non-RT. Stops the worker and returns to the unprepared state (process()
+        does nothing) until the next prepare(). ProcessingChain calls it for a
+        model that is installed but not in the chain. */
+    void releaseResources() noexcept;
     void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override { return latency; }

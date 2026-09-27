@@ -7,9 +7,9 @@
 //
 // Contents: audio device state (AudioDeviceManager XML), per-strip last preset
 // and full parameter state (both A/B banks), master enable, selected strip,
-// device-input routing, hotkey chords, start minimised / close to tray / start
-// with the OS, the app routing map (executable -> strip) and the window
-// position.
+// the automatic overload response, device-input routing, hotkey chords, start
+// minimised / close to tray / start with the OS, the app routing map
+// (executable -> strip) and the window position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -81,6 +81,11 @@ public:
     void setMasterEnabled (bool enabled);
     int getSelectedStrip() const;
     void setSelectedStrip (int strip);
+    /** "Reduce processing load automatically when the CPU overloads" (default
+        off): step the latency profile down on a sustained overload
+        (AutoLoadReducer, EngineController::updateOverloadWatchdog). */
+    bool getReduceLoadOnOverload() const;
+    void setReduceLoadOnOverload (bool shouldReduce);
 
     // ---- Per-strip state -----------------------------------------------------------
     juce::String getLastPreset (const juce::String& stripName) const;

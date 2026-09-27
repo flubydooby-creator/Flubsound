@@ -17,8 +17,13 @@
 //             (f'(0) = 1, f(1.5) = 1, f'(1.5) = 0: odd harmonics, hard-ish).
 // Runs at 2x (default) or 4x via Oversampler; latency = oversampler latency.
 // Dry/wet mix is latency-aligned internally (the dry path is delayed).
+// Telemetry: getDistortionDb() = THD+N of the stage over the last completed
+// 25 ms analysis window (DistortionEstimator.h), measured at the oversampled rate around the curve,
+// where input and shaped output are aligned; depth, mix and output gain are
+// folded in, the linear post filters (tube DC blocker, tape head bump) are not.
 #pragma once
 
+#include "DistortionEstimator.h"
 #include "Oversampler.h"
 #include "Processor.h"
 #include "Svf.h"
@@ -26,6 +31,7 @@
 #include "flub/common/SmoothedValue.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -69,6 +75,9 @@ public:
 
     /** The static curve, exposed for tests and the GUI transfer plot. */
     static float shape (SaturationType type, float x) noexcept;
+
+    /** THD+N of the stage over the last 25 ms analysis window (dB re its output; -160 = clean, drive 0 or mix 0). */
+    float getDistortionDb() const noexcept { return distortionDb.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -115,6 +124,10 @@ private:
     // Per-segment control arrays (allocated in prepare(), never resized).
     std::vector<float> osGain, osInvGain, osScratch, osInput;        // factor * maxBlockSize (osInput: delta oversampling)
     std::vector<float> depthBuf, tubeBuf, bumpBuf, gainBuf, mixBuf; // maxBlockSize
+    std::vector<float> distWeightBuf; // maxBlockSize: curve deviation weight re the linear path (THD+N telemetry)
+
+    DistortionWindow distortionWindow; // sums over a 25 ms window, whatever the host block size
+    std::atomic<float> distortionDb { -160.0f };
 
     std::array<ChannelState, kMaxChannels> channelState {};
     SvfCoeffs preEmphasis, deEmphasis, headBump;

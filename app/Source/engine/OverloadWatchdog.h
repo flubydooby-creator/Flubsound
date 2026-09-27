@@ -17,12 +17,13 @@
 // the glitch counter, as does a counter that went backwards: JUCE restarts it
 // with the device).
 //
-// Policy (docs/01-architecture.md §7): NOTIFY ONLY. An overload is shown in
-// the header's CPU readout (and its tooltip, with the recommended action) and
-// counted per session; the engine is not changed. Automatic degradation
-// (e.g. stepping to the Low Latency profile, dropping HQ oversampling) is a
-// roadmap item because every such step is a structural re-prepare with an
-// audible dropout of its own.
+// Policy (docs/01-architecture.md §7): NOTIFY by default. An overload is
+// shown in the header's CPU readout (and its tooltip, with the recommended
+// action) and counted per session; the engine is not changed. Automatic
+// degradation is OPT-IN (Settings > Processing, default off) because every
+// step is a structural re-prepare with an audible dropout of its own: then
+// AutoLoadReducer steps the latency profile down one level on a lasting
+// overload (rate limited, never back up by itself; see AutoLoadReducer.h).
 #pragma once
 
 #include <algorithm>

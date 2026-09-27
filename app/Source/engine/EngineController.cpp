@@ -716,10 +716,89 @@ void EngineController::updateOverloadWatchdog (const EngineStatus& status)
     sample.load = status.cpuLoad;
     sample.glitchCount = status.deviceOpen ? static_cast<int64_t> (status.glitches) : -1;
 
-    // Notify only (docs/01 §7): the header's CPU readout turns into an
-    // overload warning; the engine itself is left alone.
-    if (overloadWatchdog.update (sample) != OverloadWatchdog::Event::None)
+    // The header's CPU readout turns into an overload warning (docs/01 §7).
+    bool changed = overloadWatchdog.update (sample) != OverloadWatchdog::Event::None;
+
+    // Opt-in (default off): on a lasting overload, one latency-profile step
+    // down (AutoLoadReducer: rate limited, never back up). Applied exactly
+    // like a user change - parameter writes on this (message) thread, the
+    // re-prepare follows in AudioEngineHost's poll - and reported through the
+    // same Change::Device (header tooltip, one tray bubble, Settings text).
+    if (const auto next = loadReducer.update (settings->getReduceLoadOnOverload(), overloadWatchdog.isOverloaded(), getLatencyProfile()))
+    {
+        applyLatencyProfile (*next);
+        changed = true;
+    }
+
+    if (changed)
         notify (Change::Device);
+}
+
+LatencyProfileValue EngineController::getLatencyProfile()
+{
+    constexpr int lowest = static_cast<int> (LatencyProfileValue::Quality), highest = static_cast<int> (LatencyProfileValue::LowLatency);
+    const int v = static_cast<int> (std::lround (getParams (selectedStrip).get (LatencyProfile)));
+    return static_cast<LatencyProfileValue> (std::clamp (v, lowest, highest));
+}
+
+void EngineController::applyLatencyProfile (LatencyProfileValue profile)
+{
+    // Every strip, both banks: strips are padded to the largest latency
+    // anyway, and A/B switching must not trigger re-prepares.
+    const float v = static_cast<float> (static_cast<int> (profile));
+    for (int s = 0; s < getNumStrips(); ++s)
+    {
+        auto& store = getParams (s);
+        store.set (Bank::A, LatencyProfile, v);
+        store.set (Bank::B, LatencyProfile, v);
+    }
+}
+
+void EngineController::setLatencyProfile (LatencyProfileValue profile)
+{
+    applyLatencyProfile (profile);
+    loadReducer.profileChangedByUser();
+    notify (Change::Settings);
+}
+
+void EngineController::setReduceLoadOnOverload (bool shouldReduce)
+{
+    settings->setReduceLoadOnOverload (shouldReduce);
+    notify (Change::Settings);
+}
+
+juce::String EngineController::describeLoadReduction() const
+{
+    if (! loadReducer.hasReduced())
+        return {};
+    const auto& choices = layout()[static_cast<size_t> (LatencyProfile)].choices;
+    const auto name = [&choices] (LatencyProfileValue p)
+    {
+        const auto i = static_cast<size_t> (p);
+        return i < choices.size() ? juce::String (choices[i]) : juce::String (static_cast<int> (p));
+    };
+
+    // The whole ladder walked since the user's choice: "Quality -> Balanced -> Low Latency".
+    const auto& st = loadReducer.getState();
+    juce::String path = name (st.restoreProfile);
+    auto p = st.restoreProfile;
+    for (int i = 0; i < st.steps; ++i)
+    {
+        if (const auto next = AutoLoadReducer::nextLower (p))
+        {
+            p = *next;
+            path << " -> " << name (p);
+        }
+    }
+
+    return "Processing load reduced automatically after a sustained CPU overload: latency profile " + path
+           + ". Restore " + name (st.restoreProfile) + " in Settings > Processing.";
+}
+
+void EngineController::restoreLatencyProfile()
+{
+    if (loadReducer.hasReduced())
+        setLatencyProfile (loadReducer.getState().restoreProfile);
 }
 
 std::vector<EngineController::CaptureStream> EngineController::getCaptureStreams() const

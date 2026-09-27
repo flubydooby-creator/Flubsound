@@ -11,8 +11,8 @@
 //                            (one 10 ms frame plus one frame of safety).
 //   Low Latency            : latency <= 1 reference frame.
 // Negative latencies and non-positive / non-finite sample rates are never
-// eligible. The rule only answers the question; nothing enforces it yet,
-// since no neural module is in ProcessingChain.
+// eligible. ProcessingChain enforces it at prepare(): an ineligible model
+// stays out of the chain (no latency added) and getNeuralStatus() says so.
 #pragma once
 
 #include "flub/engine/Parameters.h"

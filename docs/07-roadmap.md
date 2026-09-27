@@ -172,7 +172,7 @@ Beta                         [closed]      [public]      [1.0]
 | Anti-cheat false positives | Low | High | No injection or hooks; signed driver; early outreach to vendors; compatibility matrix in QA. |
 | Tuning "too loud / fatiguing" backlash | Medium | Medium | Conservative defaults, governor, loudness-matched A/B, hearing guard, listening panel. |
 | macOS process-tap API gaps or regressions | Medium | Medium | Virtual device fallback with manual routing; target 14.2+ only for per-app. |
-| CPU on low-end laptops | Medium | Medium | Low Latency profile is also the cheapest; per-module CPU budget; idle bypass on digital silence. |
+| CPU on low-end laptops | Medium | Medium | Low Latency profile is also the cheapest (opt-in: stepped down to automatically on a sustained overload); per-module CPU budget; idle bypass on digital silence. |
 | JUCE licensing cost / terms | Low | Medium | Core is JUCE-free; commercial JUCE licence budgeted. |
 | Team availability (kernel expertise is scarce) | Medium | High | Contract a Windows audio-driver specialist for Phase 2 driver work and reviews. |
 

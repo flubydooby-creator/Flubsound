@@ -40,6 +40,10 @@
 //              getStatus() (CPU, xruns), getDeviceInputStrip(),
 //              getOverloadState() (CPU-overload watchdog), getCaptureStreams()
 //              (per-app capture FIFO statistics).
+// Profile      getLatencyProfile() / setLatencyProfile() (every strip, both
+//              banks); the opt-in automatic overload response:
+//              setReduceLoadOnOverload(), hasReducedLoad(),
+//              describeLoadReduction(), restoreLatencyProfile().
 // Routing      getRouting() (per-app routing, executable -> strip).
 // Settings     getSettings() (tray / start-up / hotkeys ...).
 // Listening    addListener(); Listener::engineControllerChanged(Change) is
@@ -49,6 +53,7 @@
 
 #include "AppRouting.h"
 #include "AudioEngineHost.h"
+#include "AutoLoadReducer.h"
 #include "OverloadWatchdog.h"
 #include "presets/PresetManager.h"
 #include "settings/AppSettings.h"
@@ -175,14 +180,39 @@ public:
     juce::String reopenDevice();
 
     /** CPU-overload watchdog (OverloadWatchdog): sustained load >= 90 % or a
-        burst of xruns / overrunning callbacks. Notify only: the header shows
-        it and the episodes are counted for the session; nothing in the
-        engine is changed (docs/01-architecture.md §7). */
+        burst of xruns / overrunning callbacks. The header shows it and the
+        episodes are counted for the session. By default that is all; with
+        the opt-in setting (AppSettings::getReduceLoadOnOverload) a lasting
+        overload also steps the latency profile down (AutoLoadReducer,
+        docs/01-architecture.md §7). */
     const OverloadWatchdog::State& getOverloadState() const noexcept { return overloadWatchdog.getState(); }
     /** One watchdog poll. The controller's timer calls it at 2 Hz with
         getStatus(); tests feed statuses directly. Broadcasts Change::Device
-        when an overload starts or ends. */
+        when an overload starts or ends and when it stepped the profile down. */
     void updateOverloadWatchdog (const EngineStatus& status);
+
+    // ---- Latency profile / automatic overload response ---------------------------------
+    /** The selected strip's latency profile (every strip carries the same one). */
+    flub::param::LatencyProfileValue getLatencyProfile();
+    /** A user choice (Settings > Processing): every strip, both banks; the
+        engine re-prepares on the message thread (AudioEngineHost's poll, a
+        brief dropout). Resets the automatic ladder. Broadcasts Change::Settings. */
+    void setLatencyProfile (flub::param::LatencyProfileValue profile);
+    /** Turns the automatic overload response on / off (persisted; default off).
+        Broadcasts Change::Settings. */
+    void setReduceLoadOnOverload (bool shouldReduce);
+    bool getReduceLoadOnOverload() const { return settings->getReduceLoadOnOverload(); }
+    const AutoLoadReducer::State& getLoadReductionState() const noexcept { return loadReducer.getState(); }
+    /** True after an automatic step, until the profile is chosen by hand or restored. */
+    bool hasReducedLoad() const noexcept { return loadReducer.hasReduced(); }
+    /** What the automatic response changed ("latency profile Quality ->
+        Balanced ..."), for the header tooltip, the tray bubble and Settings;
+        empty while hasReducedLoad() is false. */
+    juce::String describeLoadReduction() const;
+    /** Manual "Restore": back to the profile the user had before the first
+        automatic step (a user change: the ladder resets; it never steps back
+        up by itself). Does nothing while hasReducedLoad() is false. */
+    void restoreLatencyProfile();
 
     /** A running per-app capture with its FIFO statistics
         (DriftCompensatedFifo::Stats), the application's display name (from
@@ -246,6 +276,7 @@ private:
     void updateDeviceProfile();
     void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
+    void applyLatencyProfile (flub::param::LatencyProfileValue profile);
 
     Options options;
     std::unique_ptr<AppSettings> settings;
@@ -270,6 +301,7 @@ private:
     bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
 
     OverloadWatchdog overloadWatchdog;
+    AutoLoadReducer loadReducer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };

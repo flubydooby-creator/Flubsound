@@ -61,8 +61,11 @@ public:
     static CpuReadout formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload);
 
     /** The CPU part of the readout's tooltip: load, device xruns, and the
-        overload warning with the recommended action or the session count. */
-    static juce::String describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload);
+        overload warning with the recommended action or the session count;
+        then what the automatic overload response changed, if anything
+        (EngineController::describeLoadReduction). */
+    static juce::String describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload,
+                                     const juce::String& loadReduction = {});
 
     void paint (juce::Graphics& g) override;
     void paintOverChildren (juce::Graphics& g) override;

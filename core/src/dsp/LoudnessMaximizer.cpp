@@ -222,6 +222,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
         bands[b].release = onePoleCoeff (kGlueReleaseMs, fs);
     }
     glueWarmupLength = std::max (1, msToSamples (kGlueWarmupMs, fs));
+    distortionWindow.prepare (fs);
 
     // Structural limiter settings are passed through here.
     limiter.setLookaheadMs (lookaheadMs);
@@ -259,6 +260,8 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     limiterGrDb.store (0.0f, std::memory_order_relaxed);
     glueGrDb.store (0.0f, std::memory_order_relaxed);
     clipRatioDb.store (kMinusInfDb, std::memory_order_relaxed);
+    distortionWindow.reset();
+    distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
     fresh = true;
 }
 
@@ -455,6 +458,11 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         for (int c = 0; c < up.numChannels; ++c)
         {
             float* u = up.channel (c);
+            // THD+N around the curve, at the oversampled rate where x^ and
+            // the clipped x^ are aligned: the effective output is
+            // x^ - removed (the clip weight included), i.e. d = -removed.
+            // xx and dd are the clip-energy sums; only <x, removed> is new.
+            double xx = 0.0, xr = 0.0, rr = 0.0;
             int k = 0;
             for (int i = 0; i < n; ++i)
             {
@@ -466,14 +474,20 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                 {
                     const float x = u[k];
                     const float y = softClip (x, t, knee);
+                    const double xd = static_cast<double> (x);
                     const double removed = static_cast<double> (w) * static_cast<double> (x - y);
-                    diffEnergy += removed * removed;
-                    inEnergy += static_cast<double> (x) * static_cast<double> (x);
+                    rr += removed * removed;
+                    xx += xd * xd;
+                    xr += xd * removed;
                     // Delta oversampling: only the clipping correction goes
                     // through the band-limiting downsampler.
                     u[k] = y - x;
                 }
             }
+            diffEnergy += rr;
+            inEnergy += xx;
+            if (const DistortionSums sums { xx, -xr, rr }; sums.isFinite())
+                distortionWindow.channel (c).merge (sums);
         }
         if (std::isfinite (diffEnergy) && std::isfinite (inEnergy))
         {
@@ -537,6 +551,8 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
         seg.numChannels = spec.numChannels;
         processSegment (seg, clipDiff, clipIn, glueMin);
         grMin = std::min (grMin, limiter.getGainReductionDb());
+        if (float db = kMinusInfDb; distortionWindow.advance (len, db))
+            distortionDb.store (db, std::memory_order_relaxed);
     }
 
     limiterGrDb.store (grMin, std::memory_order_relaxed);

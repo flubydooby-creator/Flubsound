@@ -128,6 +128,97 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
     publishEffective();
 }
 
+const char* neuralSlotReason (NeuralSlotState state) noexcept
+{
+    switch (state)
+    {
+        case NeuralSlotState::Empty: return "No neural model installed.";
+        case NeuralSlotState::Active: return "Neural model active.";
+        case NeuralSlotState::Ineligible: return "Bypassed: the model's latency exceeds the latency profile's budget.";
+        case NeuralSlotState::SampleRateMismatch: return "Bypassed: the model was trained for a different sample rate.";
+        case NeuralSlotState::InvalidModel: return "Bypassed: the model's description is invalid.";
+        case NeuralSlotState::PrepareFailed: return "Bypassed: the model failed to start.";
+    }
+    return "";
+}
+
+void ProcessingChain::setNeuralModel (std::unique_ptr<ModelRunner> runner, const NeuralSlotConfig& neuralConfig)
+{
+    // Built now (describe() only: no allocation of queues, no thread), swapped
+    // in by the next prepare(), so the audio thread never sees it change.
+    pendingNeural = runner != nullptr ? std::make_unique<AsyncModelProcessor> (std::move (runner), neuralConfig.processor) : nullptr;
+    pendingContext = neuralConfig.context;
+    neuralChangePending.store (true, std::memory_order_release);
+}
+
+void ProcessingChain::clearNeuralModel()
+{
+    setNeuralModel (nullptr);
+}
+
+NeuralSlotStatus ProcessingChain::getNeuralStatus() const noexcept FLUB_NONBLOCKING
+{
+    NeuralSlotStatus st;
+    st.state = static_cast<NeuralSlotState> (neuralState.load (std::memory_order_acquire));
+    st.modelLatencySamples = neuralModelLatency.load (std::memory_order_relaxed);
+    st.changePending = neuralChangePending.load (std::memory_order_acquire);
+    return st;
+}
+
+NeuralSlotCounters ProcessingChain::getNeuralCounters() const noexcept FLUB_NONBLOCKING
+{
+    NeuralSlotCounters c;
+    c.deadlineMisses = neuralMisses.load (std::memory_order_relaxed);
+    c.modelFailures = neuralFailures.load (std::memory_order_relaxed);
+    c.framesProcessed = neuralFrames.load (std::memory_order_relaxed);
+    return c;
+}
+
+void ProcessingChain::prepareNeuralSlot (const ProcessSpec& stereo)
+{
+    if (neuralChangePending.exchange (false, std::memory_order_acq_rel))
+    {
+        neural = std::move (pendingNeural); // the old processor (if any) joins its worker here
+        neuralContext = pendingContext;
+    }
+
+    neuralInChain = false;
+    neuralMisses.store (0, std::memory_order_relaxed);
+    neuralFailures.store (0, std::memory_order_relaxed);
+    neuralFrames.store (0, std::memory_order_relaxed);
+
+    auto state = NeuralSlotState::Empty;
+    int modelLatency = 0;
+    if (neural != nullptr)
+    {
+        const ModelDescription& d = neural->getDescription();
+        modelLatency = neural->latencySamples();
+        if (modelLatency <= 0)
+            state = NeuralSlotState::InvalidModel; // AsyncModelProcessor is inert (0 latency) exactly then
+        else if (d.sampleRate != 0.0 && d.sampleRate != stereo.sampleRate)
+            state = NeuralSlotState::SampleRateMismatch; // it would only delay: keep it out
+        else if (! isEligible (static_cast<LatencyProfileValue> (profileAtPrepare), modelLatency, stereo.sampleRate, neuralContext))
+            state = NeuralSlotState::Ineligible;
+        else
+        {
+            try
+            {
+                slots[SNeural].prepare (*neural, stereo, 20.0f, ! neuralBypass.load (std::memory_order_relaxed));
+                neuralInChain = true;
+                state = NeuralSlotState::Active;
+            }
+            catch (...) // the runner's prepare() or std::thread: run without the model
+            {
+                state = NeuralSlotState::PrepareFailed;
+            }
+        }
+        if (! neuralInChain)
+            neural->releaseResources(); // an out-of-chain model keeps no worker running
+    }
+    neuralModelLatency.store (modelLatency, std::memory_order_relaxed);
+    neuralState.store (static_cast<int> (state), std::memory_order_release);
+}
+
 void ProcessingChain::publishEffective() noexcept
 {
     for (int i = 0; i < kNumParams; ++i)
@@ -183,6 +274,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     const ProcessSpec stereo { sr, maxB, 2 };
     if (gateInChain)
         slots[SGate].prepare (gate, stereo, 20.0f, on (e, GateOn));
+    prepareNeuralSlot (stereo);
     slots[SEq].prepare (paramEq, stereo, 20.0f, on (e, EqOn));
     slots[SDynEq].prepare (dynEq, stereo, 20.0f, on (e, DynEqOn));
     slots[SBass].prepare (bass, stereo, 20.0f, on (e, BassOn));
@@ -194,7 +286,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
     totalLatency = 0;
     for (int s = 0; s < kNumSlots; ++s)
-        if (s != SGate || gateInChain)
+        if (inChain (s))
             totalLatency += slots[static_cast<size_t> (s)].latencySamples();
 
     dryBuffer.setSize (2, maxB);
@@ -222,6 +314,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     autoLevel.prepare (sr, config.inputChannels);
     autoDrive.prepare (sr, 2);
     governor.prepare (sr);
+    distortion.prepare (sr);
     loudnessMatch.prepare (sr, 2);
 
     inLevel.prepare (sr, 2);
@@ -239,7 +332,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 void ProcessingChain::reset() noexcept
 {
     for (int s = 0; s < kNumSlots; ++s)
-        if (s != SGate || gateInChain)
+        if (inChain (s))
             slots[static_cast<size_t> (s)].reset();
     virtualizer.reset();
     virtMix.setImmediate (virtMix.getTarget());
@@ -249,6 +342,7 @@ void ProcessingChain::reset() noexcept
     autoLevel.reset();
     autoDrive.reset();
     governor.reset();
+    distortion.reset();
     loudnessMatch.reset();
     inLevel.reset();
     outLevel.reset();
@@ -261,7 +355,10 @@ void ProcessingChain::reset() noexcept
 bool ProcessingChain::needsReprepare() const noexcept
 {
     // Every structural parameter (today: the latency profile) changes the
-    // module configuration or latency, so any of them needs a re-prepare.
+    // module configuration or latency, so any of them needs a re-prepare; so
+    // does installing or removing a neural model.
+    if (neuralChangePending.load (std::memory_order_acquire))
+        return true;
     const auto& info = layout();
     for (int i = 0; i < kNumParams; ++i)
         if (info[static_cast<size_t> (i)].structural && store.get (i) != baseAtPrepare[static_cast<size_t> (i)])
@@ -314,6 +411,10 @@ void ProcessingChain::applyParameters() noexcept
         gate.setParams (gp);
         slots[SGate].setActive (active (GateOn));
     }
+
+    // ---- Neural slot ----
+    if (neuralInChain)
+        slots[SNeural].setActive (! neuralBypass.load (std::memory_order_relaxed));
 
     // ---- Parametric EQ ----
     for (int b = 0; b < kEqBands; ++b)
@@ -588,8 +689,14 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 
     // ---- 4. Module slots ----
     for (int s = 0; s < kNumSlots; ++s)
-        if (s != SGate || gateInChain)
+        if (inChain (s))
             slots[static_cast<size_t> (s)].process (st);
+    if (neuralInChain)
+    {
+        neuralMisses.store (neural->getDeadlineMisses(), std::memory_order_relaxed);
+        neuralFailures.store (neural->getModelFailures(), std::memory_order_relaxed);
+        neuralFrames.store (neural->getFramesProcessed(), std::memory_order_relaxed);
+    }
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();
@@ -597,7 +704,16 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 
     // ---- 6. Control loops for the next block ----
     const bool maxActive = ! slots[SMax].isFullyBypassed();
-    governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, n);
+    const bool satActive = ! slots[SSat].isFullyBypassed();
+    const float satDistortionDb = satActive ? saturator.getDistortionDb() : kMinusInfDb;
+    const float clipDistortionDb = maxActive ? maximizer.getDistortionDb() : kMinusInfDb;
+    distortion.update (satDistortionDb, clipDistortionDb, n); // measured THD+N (meters)
+    // The governor sees the clipper's share floored at its clip energy ratio,
+    // the former proxy: that reads above the clipper's THD+N (it also counts
+    // the in-phase part, a gain change), so the governor never backs off
+    // later on clipping than before, and the saturator's THD+N is added.
+    const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getClipEnergyRatioDb()) : kMinusInfDb;
+    governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
     autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
     loudnessMatch.measureWet (st);
 
@@ -691,6 +807,7 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.maxGainReductionDb.store (maximizer.getGainReductionDb(), rl);
     m.glueGainReductionDb.store (maximizer.getGlueReductionDb(), rl);
     m.clipEnergyRatioDb.store (maximizer.getClipEnergyRatioDb(), rl);
+    m.distortionDb.store (distortion.getSmoothedDb(), rl);
     m.bassProtectionDb.store (bass.getProtectionDb(), rl);
     for (int b = 0; b < DynamicEq::kMaxBands && b < MeterBus::kMaxDynBands; ++b)
         m.dynEqGainDb[static_cast<size_t> (b)].store (dynEq.getBandGainDb (b), rl);

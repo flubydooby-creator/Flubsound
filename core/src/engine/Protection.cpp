@@ -18,7 +18,44 @@ float slew (float current, float target, float upDbPerSec, float downDbPerSec, d
         return std::min (target, current + maxUp);
     return std::max (target, current - maxDown);
 }
+
+/** dB (power ratio) -> power; kMinusInfDb and below (and NaN) -> 0. */
+float dbToPower (float db) noexcept
+{
+    return db > kMinusInfDb ? std::pow (10.0f, db * 0.1f) : 0.0f;
+}
 } // namespace
+
+// ---------------------------------------------------------------------------
+void DistortionMonitor::prepare (double sampleRate) noexcept
+{
+    sr = sampleRate;
+    reset();
+}
+
+void DistortionMonitor::reset() noexcept FLUB_NONBLOCKING
+{
+    blockDb = smoothedDb = kMinusInfDb;
+    smoothedPow = 0.0f;
+}
+
+float DistortionMonitor::combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING
+{
+    return powerToDb (dbToPower (aDb) + dbToPower (bDb));
+}
+
+float DistortionMonitor::update (float saturatorDb, float clipperDb, int numSamples) noexcept FLUB_NONBLOCKING
+{
+    // Stages in series: the saturator's residual passes the (linear part of
+    // the) clipper at the same ratio to the signal, and the two residuals
+    // are treated as uncorrelated, so their ratios add in power.
+    const float blockPow = dbToPower (saturatorDb) + dbToPower (clipperDb);
+    blockDb = powerToDb (blockPow);
+    const float a = static_cast<float> (std::exp (-(numSamples / sr) / kMeterTauSeconds));
+    smoothedPow = a * smoothedPow + (1.0f - a) * blockPow;
+    smoothedDb = powerToDb (smoothedPow);
+    return blockDb;
+}
 
 // ---------------------------------------------------------------------------
 void SafetyGovernor::prepare (double sampleRate) noexcept
@@ -27,17 +64,15 @@ void SafetyGovernor::prepare (double sampleRate) noexcept
     reset();
 }
 
-void SafetyGovernor::reset() noexcept
+void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
 {
     avgGrDb = 0.0f;
-    avgClipDb = kMinusInfDb;
+    avgDistortionDb = kMinusInfDb;
     scale = 1.0f;
 }
 
-void SafetyGovernor::update (float limiterGrDb, float clipEnergyRatioDb, int numSamples) noexcept
+void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING
 {
-    constexpr float kGrBudgetDb = -6.0f;     // sustained limiting deeper than this = over-driven
-    constexpr float kClipBudgetDb = -30.0f;  // clipped energy above ~3 % = audible distortion
     constexpr float kHysteresisDb = 1.5f;
     constexpr float kFallPerSec = 0.15f;
     constexpr float kRisePerSec = 0.03f;
@@ -47,13 +82,11 @@ void SafetyGovernor::update (float limiterGrDb, float clipEnergyRatioDb, int num
     const float a = static_cast<float> (std::exp (-dt / 3.0)); // ~3 s averaging
 
     avgGrDb = a * avgGrDb + (1.0f - a) * limiterGrDb;
-    // Average clip energy in the power domain (dB averages would under-weight bursts).
-    const float prevPow = avgClipDb <= kMinusInfDb ? 0.0f : std::pow (10.0f, avgClipDb * 0.1f);
-    const float curPow = clipEnergyRatioDb <= kMinusInfDb ? 0.0f : std::pow (10.0f, clipEnergyRatioDb * 0.1f);
-    avgClipDb = powerToDb (a * prevPow + (1.0f - a) * curPow);
+    // Average the THD+N in the power domain (dB averages would under-weight bursts).
+    avgDistortionDb = powerToDb (a * dbToPower (avgDistortionDb) + (1.0f - a) * dbToPower (distortionDb));
 
-    const bool over = avgGrDb < kGrBudgetDb || avgClipDb > kClipBudgetDb;
-    const bool comfortablyUnder = avgGrDb > kGrBudgetDb + kHysteresisDb && avgClipDb < kClipBudgetDb - kHysteresisDb;
+    const bool over = avgGrDb < kGrBudgetDb || avgDistortionDb > kDistortionBudgetDb;
+    const bool comfortablyUnder = avgGrDb > kGrBudgetDb + kHysteresisDb && avgDistortionDb < kDistortionBudgetDb - kHysteresisDb;
 
     if (over)
         scale = std::max (kMinScale, scale - static_cast<float> (kFallPerSec * dt));

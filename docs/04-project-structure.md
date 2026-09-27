@@ -88,6 +88,7 @@ Flubsound/
 │   │   │   ├── Svf.h                       Cytomic TPT state-variable filter (SvfCoeffs, SvfState, SvfFilter), Butterworth Q table
 │   │   │   ├── Biquad.h                    double-precision transposed DF-II biquad (K-weighting, head shadow)
 │   │   │   ├── Crossover.h                 LinkwitzRiley4, LinkwitzRileyAllPass, ThreeBandSplitter
+│   │   │   ├── DistortionEstimator.h       per-block least-squares THD+N of a nonlinear stage (DistortionSums, DistortionEnergy)
 │   │   │   ├── EnvelopeFollower.h          EnvelopeFollower, GainSmoother, MeanSquareFollower
 │   │   │   ├── FirDesign.h                 flub::fir: Bessel I0, Kaiser window, sinc (prepare-time design only)
 │   │   │   ├── Oversampler.h               1× / 2× / 4× cascaded half-band polyphase oversampler (HalfbandStage, Oversampler)
@@ -113,13 +114,13 @@ Flubsound/
 │   │   ├── engine/                         L2 engine: parameters, macros, protection, bypass, chain, mixer, telemetry
 │   │   │   ├── Parameters.h                stable parameter IDs, Info table, two-bank lock-free ParameterStore (A/B)
 │   │   │   ├── MacroMap.h                  Boost Intensity + 5 mode macros → effective values; "governed" entries
-│   │   │   ├── Protection.h                GatedLoudness, SafetyGovernor, AutoLevel, AutoDrive, LoudnessMatch
+│   │   │   ├── Protection.h                GatedLoudness, DistortionMonitor, SafetyGovernor, AutoLevel, AutoDrive, LoudnessMatch
 │   │   │   ├── ModuleSlot.h                click-free, latency-compensated bypass wrapper (20 ms default crossfade)
-│   │   │   ├── ProcessingChain.h           the per-strip chain: module order, latency profiles, mode and binaural policy
+│   │   │   ├── ProcessingChain.h           the per-strip chain: module order, latency profiles, mode and binaural policy, optional neural slot
 │   │   │   ├── MixEngine.h                 up to kMaxStrips = 4 strips, latency padding, master true-peak limiter
 │   │   │   ├── MeterBus.h                  audio → GUI telemetry atomics; AnalyzerTaps (pre/post SPSC rings, 1 << 15 samples)
 │   │   │   └── DeviceProfiles.h            flub::device: headset profile database, connection detection, ceiling caps, advice
-│   │   ├── neural/                         neural extension point (docs/09 §1.1); no inference runtime, no model
+│   │   ├── neural/                         neural extension point (docs/09 §1.1), run by ProcessingChain's neural slot; no inference runtime, no model
 │   │   │   ├── ModelRunner.h               model interface: describe() (frame size, channels, control frame), prepare / reset / run on the worker
 │   │   │   ├── FrameQueue.h                wait-free SPSC queue of fixed-size float frames with a sequence header
 │   │   │   ├── AsyncModelProcessor.h       Processor: runs a ModelRunner on one worker thread behind latency frameSize × (1 + safetyFrames); miss / failure fallback
@@ -179,7 +180,8 @@ Flubsound/
 │   │   ├── test_app_headset_cap.cpp        EngineController::simulateOutputDevice -> master ceiling -2 (Bluetooth) / -3 (hands-free) / -1 dBTP, measured on the output
 │   │   ├── test_app_meters.cpp             SpectrumAnalyzer calibration, AnalyzerFeed, LevelMeters RMS / peak, correlation, WaveformHistory, LoudnessPanel
 │   │   ├── test_app_routing.cpp            AppRouting with a fake AppAudioRouter: session -> strip mapping, endpoint moves, captures, errors, persistence
-│   │   └── test_app_overload.cpp           OverloadWatchdog hysteresis, device xruns and capture FIFO stats through EngineController to the header / Settings text
+│   │   ├── test_app_overload.cpp           OverloadWatchdog hysteresis, device xruns and capture FIFO stats through EngineController to the header / Settings text
+│   │   └── test_app_overload_response.cpp  AutoLoadReducer ladder / rate limit / switch / manual reset; the opt-in profile step through EngineController to the header / Settings
 │   ├── test_primitives.cpp                 Svf, Biquad, LR4, ThreeBandSplitter, Oversampler, TruePeakDetector, Fft, SpscRing, DelayLine, OnePoleSmoother
 │   ├── test_parametric_eq.cpp              ParametricEq
 │   ├── test_dynamic_eq.cpp                 DynamicEq
@@ -195,10 +197,12 @@ Flubsound/
 │   ├── test_transparency.cpp               top-octave transparency of the oversampled clipper and saturator
 │   ├── test_noise_gate.cpp                 SpectralNoiseGate
 │   ├── test_neural.cpp                     AsyncModelProcessor on its real worker thread with scripted stand-in models; eligibility rule
+│   ├── test_neural_slot.cpp                ProcessingChain's neural slot: empty = unchanged, latency + L when eligible, ineligible / failing models kept out, ceiling, bypass
 │   ├── test_loudness_meter.cpp             LoudnessMeter and LoudnessFollower (EBU Tech 3341 / 3342 cases)
 │   ├── test_engine.cpp                     Parameters, ParameterStore, MacroMap, protection loops, ModuleSlot, ProcessingChain, MixEngine, preset round trip
 │   ├── test_modes.cpp                      Gaming mode policy through the full chain: what each Gaming macro does to effective values and sound
 │   ├── test_protection_gaps.cpp            SafetyGovernor clip-energy branch, LoudnessMatch, A/B click-freedom, Music Width / Clarity macros, headset ceiling caps and air cut-off
+│   ├── test_distortion.cpp                 measured THD+N: estimator vs harmonic analysis, in-stage readings, DistortionMonitor, SafetyGovernor on measured distortion
 │   ├── test_factory_presets.cpp            every presets/factory/*.json: metadata, keys, protection rules, render below the ceiling
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
@@ -233,7 +237,8 @@ Flubsound/
 │       │   ├── DriftCompensatedFifo.{h,cpp} capture-clock → device-clock bridge: SPSC ring, cubic Hermite resampler, PI loop
 │       │   ├── EngineController.{h,cpp}    the façade the UI talks to: strips, parameters, presets, device, routing, advice
 │       │   ├── AppRouting.{h,cpp}          executable → strip map; endpoint routing or per-process capture (a second constructor injects the router)
-│       │   ├── OverloadWatchdog.h          CPU-overload decision logic (load + glitch counter per 2 Hz poll, hysteresis); notify only
+│       │   ├── OverloadWatchdog.h          CPU-overload decision logic (load + glitch counter per 2 Hz poll, hysteresis)
+│       │   ├── AutoLoadReducer.h           opt-in overload response: latency-profile step-down ladder (rate limited, never back up)
 │       │   └── TestSignalGenerator.{h,cpp} deterministic synthetic music / 7.1 game scene (screenshots, demos)
 │       ├── presets/
 │       │   └── PresetManager.{h,cpp}       factory presets from BinaryData, user presets (*.flubpreset.json), strip glue
@@ -401,9 +406,10 @@ The `include/flub/` sub-folders form a strict hierarchy. The `#include` graph wa
    1    dsp/*                             common/*, dsp/*
    2    analysis/*                        common/*, dsp/Biquad.h, dsp/EnvelopeFollower.h, dsp/TruePeakDetector.h, analysis/*
    3    engine/*                          common/*, dsp/*, analysis/*, engine/*,
-                                          io/Json.h (engine/DeviceProfiles.h only; DeviceProfiles.cpp also io/FilePath.h)
+                                          io/Json.h (engine/DeviceProfiles.h only; DeviceProfiles.cpp also io/FilePath.h),
+                                          neural/* (engine/ProcessingChain.h only: the neural slot)
+   3    neural/*                          common/*, dsp/Processor.h, neural/*, engine/Parameters.h (neural/Eligibility.h only)
    4    io/PresetIO.h                     engine/Parameters.h, io/Json.h (PresetIO.cpp also io/FilePath.h)
-   4    neural/*                          common/*, dsp/Processor.h, neural/*, engine/Parameters.h (neural/Eligibility.h only)
 ```
 
 Rules that follow from this:
@@ -830,6 +836,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
   - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), LoudnessMatch as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
+  - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share);
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.
@@ -839,8 +846,9 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_app_meters.cpp`: `SpectrumAnalyzer` band levels (a 1 kHz sine at 0 and −20 dBFS reads its level ±0.5 dB at 44.1 and 48 kHz, directly and through the chain's taps and `AnalyzerFeed`), `AnalyzerFeed` fan-out and backlog trimming, `LevelMeters` (sine RMS = peak − 3.01 dB), correlation (+1 / −1 / ≈0), `WaveformHistory` columns and the `LoudnessPanel` short-term readout;
   - `test_app_routing.cpp`: `AppRouting` with a fake `platform::AppAudioRouter` (endpoint moves, one per process, errors shown per app, un-mapping and shutdown restoring endpoints), the process-capture fallback with fake captures, and routes / method persisted through `AppSettings`.
   - `test_app_overload.cpp`: `OverloadWatchdog` fed load / glitch-counter samples directly (entry after 4 hot polls, recovery after 10 calm ones, no flapping around either threshold, xrun bursts, a restarted counter, a stopped device), `EngineController::updateOverloadWatchdog` broadcasting `Change::Device` and the header / Settings CPU text, device xruns from a fake `juce::AudioIODeviceType` through `AudioEngineHost::getStatus()`, and per-app capture FIFO statistics (an underrun and an overflow driven through the device callback) through `EngineController::getCaptureStreams()` to `SettingsDialog::describeCaptureStreams()`.
+  - `test_app_overload_response.cpp`: `AutoLoadReducer` fed polls directly (one step after 6 overloaded polls along Quality → Balanced → Low Latency, the bottom, at most one step per 60 polls, never back up, nothing while switched off, a manual change resetting the ladder), and `EngineController` with chosen statuses: the switch and the latency box of Settings › Processing, the step written to every strip and bank and re-prepared into the chains, `Change::Device`, the header tooltip / tray text, the Restore button; with the switch off nothing changes.
 - **Data-dependent tests.** The definitions `FLUB_PRESET_DIR` and `FLUB_DEVICE_PROFILES` point at the source tree, and `tests/CMakeLists.txt` always sets both. Without `FLUB_PRESET_DIR`, `test_factory_presets.cpp` compiles to nothing. Without `FLUB_DEVICE_PROFILES`, the preset → profile cross-check in `test_factory_presets.cpp` is skipped, but the `DeviceProfiles:` cases in `test_device_profiles.cpp` that use the shipped file load an empty database and **fail**, so a custom test build must keep that definition.
-- **Current state** (current tree). 476 test cases in 28 `test_*.cpp` files plus `test_driver_shared_c.c` (477 in an `FLUB_RTSAN` build, which adds the RTSan self-test; 475 on Linux without the X11 headers, where the X11 hotkey case is compiled out, as on the `core` CI jobs), and 20 `App:` cases in the 5 `tests/app/test_app_*.cpp` files of `flub_app_tests`. All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and a Clang Release build (both with `flub_app_tests`), a Clang 20 `FLUB_RTSAN=ON` build and an ASan + UBSan build; the cases added with `test_offline_render.cpp`, `test_protection_gaps.cpp` and the XDG autostart cases first ran on CI in run [36273859875](https://github.com/flubydooby-creator/Flubsound/actions/runs/36273859875) (commit `f4d30bf`), green on all nine jobs. `flub_app_tests` (on windows-2022, macos-14 and ubuntu-24.04) and the three Wayland global-hotkey cases in `test_platform_linux.cpp` (in the `sanitizers` job, ASan + UBSan) first ran on CI in run [36280955812](https://github.com/flubydooby-creator/Flubsound/actions/runs/36280955812) (commit `3d71cb0`), green on all nine jobs. The 13 `Neural:` cases in `test_neural.cpp` and the 7 cases in `test_app_overload.cpp` first ran on CI in run [36286593482](https://github.com/flubydooby-creator/Flubsound/actions/runs/36286593482) (commit `4c0d35a`), green on all nine jobs.
+- **Current state** (current tree). 492 test cases in 30 `test_*.cpp` files plus `test_driver_shared_c.c` (493 in an `FLUB_RTSAN` build, which adds the RTSan self-test; 491 on Linux without the X11 headers, where the X11 hotkey case is compiled out, as on the `core` CI jobs), and 26 `App:` cases in the 6 `tests/app/test_app_*.cpp` files of `flub_app_tests`. All passed in a Release GCC 13.3 build with `FLUB_WARNINGS_AS_ERRORS=ON` and a Clang Release build (both with `flub_app_tests`), a Clang 20 `FLUB_RTSAN=ON` build and an ASan + UBSan build; the cases added with `test_offline_render.cpp`, `test_protection_gaps.cpp` and the XDG autostart cases first ran on CI in run [36273859875](https://github.com/flubydooby-creator/Flubsound/actions/runs/36273859875) (commit `f4d30bf`), green on all nine jobs. `flub_app_tests` (on windows-2022, macos-14 and ubuntu-24.04) and the three Wayland global-hotkey cases in `test_platform_linux.cpp` (in the `sanitizers` job, ASan + UBSan) first ran on CI in run [36280955812](https://github.com/flubydooby-creator/Flubsound/actions/runs/36280955812) (commit `3d71cb0`), green on all nine jobs. The 13 `Neural:` cases in `test_neural.cpp` and the 7 cases in `test_app_overload.cpp` first ran on CI in run [36286593482](https://github.com/flubydooby-creator/Flubsound/actions/runs/36286593482) (commit `4c0d35a`), green on all nine jobs. The 8 `Distortion:` cases in `test_distortion.cpp`, the 8 `NeuralSlot:` cases in `test_neural_slot.cpp` and the 6 cases in `test_app_overload_response.cpp` have not run on CI yet.
 
 ---
 

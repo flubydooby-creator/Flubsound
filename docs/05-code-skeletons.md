@@ -157,7 +157,7 @@ class ScopedNoDenormals              // RAII: FTZ | DAZ (SSE MXCSR 0x8040) or FZ
 6. `AudioBlock` is a small value type (8 pointers + 2 ints). Passing it by `const&` or copying it is cheap.
 7. `applyGainRamp()` is how every block-rate gain (input/output gain, AutoLevel, strip gain) becomes a per-sample ramp: no steps at block boundaries.
 8. `snapIfSettled()` fixes a real float trap found in review: a one-pole with a slow coefficient stops moving tens of ulps short of a non-zero target, so a band would stay "busy" forever. `ParametricEq` adds its own `stepSmoother()` guard for the same reason (§7).
-9. Work that cannot be bounded, such as neural inference, keeps the contract by leaving the audio thread: `flub::AsyncModelProcessor` (`core/include/flub/neural/`) is an ordinary `Processor` whose `process()` only moves fixed-size frames through two wait-free queues to one worker thread that runs a `ModelRunner`, and applies the returned control frame to the input delayed by a constant `frameSize × (1 + safetyFrames)` (a late or failed frame keeps the last good controls, then ramps to neutral). It is not in `ProcessingChain` yet (`09-future-roadmap.md` §1.1).
+9. Work that cannot be bounded, such as neural inference, keeps the contract by leaving the audio thread: `flub::AsyncModelProcessor` (`core/include/flub/neural/`) is an ordinary `Processor` whose `process()` only moves fixed-size frames through two wait-free queues to one worker thread that runs a `ModelRunner`, and applies the returned control frame to the input delayed by a constant `frameSize × (1 + safetyFrames)` (a late or failed frame keeps the last good controls, then ramps to neutral). `ProcessingChain` runs one in its optional neural slot (§5, decision 20; `09-future-roadmap.md` §1.1).
 
 ---
 
@@ -530,14 +530,24 @@ public:
         (relaxed atomics), so any thread may call it. */
     float effectiveValue (int paramId) const noexcept;
 
+    // Neural slot (docs/09 §1.1): empty by default; a model takes effect at the next prepare().
+    void setNeuralModel (std::unique_ptr<ModelRunner> runner, const NeuralSlotConfig& config = {}); // non-RT
+    void clearNeuralModel();                                                                       // non-RT
+    NeuralSlotStatus getNeuralStatus() const noexcept FLUB_NONBLOCKING;     // state (Active / Ineligible / ...) + L
+    NeuralSlotCounters getNeuralCounters() const noexcept FLUB_NONBLOCKING; // misses, failures, frames (any thread)
+    void setNeuralBypass (bool bypassed) noexcept FLUB_NONBLOCKING;         // latency-constant fade, any thread
+
 private:
     // Modules (owned) and their bypass slots, in processing order.
     SpectralNoiseGate gate;   ParametricEq paramEq;   DynamicEq dynEq;      BassEngine bass;
     ClarityEnhancer clarity;  Saturator saturator;    StereoSpatializer spatial;
     Compressor compressor;    LoudnessMaximizer maximizer;                  HeadphoneVirtualizer virtualizer;
 
-    enum SlotIndex { SGate, SEq, SDynEq, SBass, SClarity, SSat, SSpatial, SComp, SMax, kNumSlots };
+    std::unique_ptr<AsyncModelProcessor> neural, pendingNeural; // installed / waiting for prepare()
+
+    enum SlotIndex { SGate, SNeural, SEq, SDynEq, SBass, SClarity, SSat, SSpatial, SComp, SMax, kNumSlots };
     std::array<ModuleSlot, kNumSlots> slots;
+    bool gateInChain = false, neuralInChain = false;   // inChain (s): the gate / neural slot only when set
     // ... gain smoothers, AutoLevel, AutoDrive, SafetyGovernor, LoudnessMatch,
     //     virtMix + foldScratch (20 ms virtualiser <-> downmix crossfade),
     //     global-bypass dry buffer + DelayLine + dryLimiter (TruePeakLimiter on the reference),
@@ -589,13 +599,15 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     const ProcessSpec stereo { sr, maxB, 2 };                          // everything after the fold is stereo
     if (gateInChain)
         slots[SGate].prepare (gate, stereo, 20.0f, on (e, GateOn));
+    prepareNeuralSlot (stereo);                                        // [20] swap in a pending model; in chain
+                                                                       //      only if eligible for the profile
     slots[SEq].prepare (paramEq, stereo, 20.0f, on (e, EqOn));
     // ... DynEq, Bass, Clarity, Sat, Spatial, Comp
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
 
     totalLatency = 0;
     for (int s = 0; s < kNumSlots; ++s)
-        if (s != SGate || gateInChain)
+        if (inChain (s))
             totalLatency += slots[static_cast<size_t> (s)].latencySamples();   // [3]
 
     dryBuffer.setSize (2, maxB);
@@ -641,7 +653,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 | 96 kHz | 1592 (16.58 ms) | 312 (3.25 ms) | 148 (1.54 ms) |
 | 192 kHz | 2072 (10.79 ms) | 552 (2.88 ms) | 244 (1.27 ms) |
 
-The oversampler and detector latencies (and the 1024-sample STFT) are fixed sample counts; look-ahead scales with `fs`. EQ, dynamic EQ, bass, clarity, spatializer and virtualiser have zero latency.
+The oversampler and detector latencies (and the 1024-sample STFT) are fixed sample counts; look-ahead scales with `fs`. EQ, dynamic EQ, bass, clarity, spatializer and virtualiser have zero latency. An active neural model adds its fixed `L = frameSize × (1 + safetyFrames)` to every column (decision 20); with no model the slot adds nothing.
 
 ### 5.3 `process()` — one block
 
@@ -703,8 +715,9 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
 
     // ---- 4. Module slots ----
     for (int s = 0; s < kNumSlots; ++s)
-        if (s != SGate || gateInChain)
+        if (inChain (s))
             slots[static_cast<size_t> (s)].process (st);
+    // ... neural counters published for getNeuralCounters() (relaxed atomics)
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();
@@ -712,8 +725,10 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
 
     // ---- 6. Control loops for the next block ----
     const bool maxActive = ! slots[SMax].isFullyBypassed();
-    governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f,
-                     maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, n);   // [9]
+    const bool satActive = ! slots[SSat].isFullyBypassed();
+    const float distortionDb = distortion.update (satActive ? saturator.getDistortionDb() : kMinusInfDb,
+                                                  maxActive ? maximizer.getDistortionDb() : kMinusInfDb, n);
+    governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, distortionDb, n); // [9]
     autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]); // [14] floored at -requested drive
     loudnessMatch.measureWet (st);
 
@@ -868,7 +883,8 @@ flowchart LR
 
 | Protection loop (`Protection.h/.cpp`) | Constants in the code |
 |---|---|
-| `SafetyGovernor` | ~3 s averaging of limiter GR and clip-energy ratio (power domain). Over budget if avg GR < −6 dB or avg clip > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
+| `SafetyGovernor` | ~3 s averaging of limiter GR and measured distortion (power domain; the clipper's THD+N floored at its clip energy ratio). Over budget if avg GR < −6 dB or avg distortion > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
+| `DistortionMonitor` | Power sum of the per-block THD+N of the saturator and the soft clipper (each measured inside the stage, `DistortionEstimator.h`); a 300 ms power-domain one-pole feeds `MeterBus::distortionDb`. The governor gets `combineDb (saturator, max (clipper THD+N, clip energy ratio))`. |
 | `AutoDrive` | Gated loudness of the output. `update()` also takes the requested (effective) drive: the reduction stays in [−requested drive, 0] dB (requested drive clamped to 0 … 24 dB), rate `min(2, 0.5·\|error\|)` dB/s, 0.5 LU dead band. Relaxes to 0 at 4 dB/s when off. |
 | `LoudnessMatch` | Gated dry and wet loudness. Dry gain = wet − dry, clamped ±12 dB, slewed 3 dB/s. |
 | `GatedLoudness` | 100 ms "momentary" + 3 s "slow" K-weighted followers. Gate closed below −70 dBFS RMS, below −50 LUFS, or more than 20 LU under the slow value. |
@@ -877,13 +893,13 @@ flowchart LR
 
 1. Initial module enables come from the **effective** values, so a macro that engages a module (e.g. *Warmth* → Saturation) is already on after `prepare()`.
 2. The profile is latched in `profileAtPrepare`. `needsReprepare()` compares it with the store's current value. The host applies it off the audio thread (§11); applying it in `process()` would change the latency mid-stream.
-3. `totalLatency` is computed once from the slot latencies. The gate's slot counts only in Quality, where it is in the chain.
+3. `totalLatency` is computed once from the slot latencies. The gate's slot counts only in Quality, where it is in the chain; the neural slot only while a model is active (decision 20).
 4. The NaN/Inf guard costs one multiply-add per sample: `x * 0` is 0 for any finite `x` and NaN for Inf/NaN, so the sum is non-finite iff any sample is. The whole chain is `reset()` rather than trying to repair individual modules.
 5. **One snapshot per block.** All modules in a block see one coherent parameter set.
 6. `applyParameters()` pushes every value into every module every block. The modules' early-return on unchanged values makes that cheap, and the chain has no change-tracking state that could get out of sync.
 7. The global-bypass reference is taken **after** input gain, AutoLevel and the virtualiser/downmix. "Bypass" therefore compares the enhancement, not the level-matching or the 7.1 fold. It is delayed by `totalLatency` in total (the `dryDelay` line plus the `dryLimiter` latency, decision 17), so toggling bypass never shifts audio in time.
 8. The output gain range tops out at 0 dB: nothing after the maximizer can push the output over the ceiling.
-9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipping".
+9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipper distortion", a fully bypassed saturator "no saturator distortion"; `DistortionMonitor` power-sums the two stages' measured THD+N for the meters; the governor's input floors the clipper's share at its clip energy ratio.
 10. Loudness matching may *raise* the dry path. The raise is capped so that the held dry peak (instant attack, ~2 s release) stays below `max.ceiling`. The cap is evaluated once per block and the gain ramps over 50 ms, so on its own it cannot stop a new, louder dry peak that arrives while the gain is still high; decision 17 does.
 11. The governor scale is applied inside `MacroMap::apply`, on the governed entries only.
 12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands()`). In Gaming they are footstep, footstep-body, anti-masking and voice bands, scaled by *Footsteps* (M1) and *Voice & Score* (M5). In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
@@ -894,6 +910,7 @@ flowchart LR
 17. **The bypass reference has its own true-peak limiter.** `dryLimiter` (a `TruePeakLimiter` at `max.ceiling`, 80 ms auto release) limits the matched reference, so the ceiling holds in bypass in every host, including the plug-in and the CLI, which have no master limiter. It fits inside the latency the dry path needs anyway: 1 ms look-ahead + the 20-sample detector = 68 samples at 48 kHz, and `dryDelay` shrinks by the same amount, so no latency is added. It runs only while bypass is engaged (`bypassMix` above 0 or moving), which keeps its cost out of normal processing, and it is `reset()` every time it starts. Started cold, it outputs silence for its latency (1.42 ms at 48 kHz) at the very start of the 30 ms crossfade, where the dry weight is still below 5 % at 44.1 kHz and above. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives* (all three profiles; sample peak ≤ ceiling, true peak ≤ ceiling + 0.15 dB).
 18. **Published effective values include the chain's overrides.** The mode and format policies write into the effective array itself (Gaming crossfeed 0; binaural width 1, space 0, crossfeed 0; air 0 below 42 kHz; the compressor rule of decision 19), and `publishEffective()` runs at the end of `applyParameters()`. `effectiveValue()` and the GUI's effective-value rings therefore show what the modules apply, not what the store and macros asked for. `prepare()` publishes the plain post-macro values; the first processed block replaces them. Test: *Gaming: binaural lock on a 7.1 strip - width 1 and space 0 whatever the store asks, positional focus still applies* reads the published width, space and crossfeed.
 19. **In Gaming, a macro-engaged compressor is upward-only.** Boost Intensity, *Footsteps* and *Detail* switch the compressor on for its upward section. When the base `comp.on` is off and `comp.ratio` is still at its default (2.5), the effective ratio is set to 1:1, so the downward section is off and gunshots and explosions keep their dynamics. A preset that sets a ratio, or a compressor the user switched on, keeps its ratio. Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*.
+20. **The neural slot is optional, eligibility-checked and ahead of the dynamics.** `setNeuralModel()` wraps the runner in an `AsyncModelProcessor` at once (no thread yet) and parks it; `prepare()` swaps it in, so the audio thread never sees the model change, and `needsReprepare()` reports the pending change so the host re-prepares as for a profile change. `prepare()` then puts it in the chain only if `isEligible (profile, L, fs, context)` holds (offline batch rendering accepts any model) and the model's sample rate matches; an ineligible, mismatched, invalid or failing model stays installed but out of the chain, with no worker thread and no latency, and `getNeuralStatus()` says why. The slot is part of the fixed slot array (the processor is owned through a pointer), so it shares `ModuleSlot`'s latency-compensated bypass fade (`setNeuralBypass()`) and the NaN reset. It sits after the gate and before the EQ: upstream of the compressor and the maximizer, so the true-peak limiter still guarantees the ceiling whatever gain the model applies (up to `maxGain`, +12 dB); downstream of the gate, whose noise-floor tracking would otherwise follow the model's frame-rate gain; and ahead of the tonal, saturation and width stages, so the model sees the source it was trained on. Tests: the `NeuralSlot:` cases in `tests/test_neural_slot.cpp` (no model: reference latencies and bit-identical output; an identity model adds exactly `L`; ineligible in Low Latency; the ceiling with −6 / +12 dB models; latency-constant bypass; allocation-free `process()`; `clearNeuralModel()`).
 
 ---
 
@@ -962,7 +979,8 @@ public:
     float getGainReductionDb() const noexcept;     // limiter, deepest in the block (relaxed atomic)
     uint64_t getSafetyClipCount() const noexcept;  // limiter's final-clamp engagements since prepare()
     float getGlueReductionDb() const noexcept;
-    float getClipEnergyRatioDb() const noexcept;   // THD telemetry for the SafetyGovernor
+    float getClipEnergyRatioDb() const noexcept;   // how hard the clipper works (meters; floor of the governor's clipper input)
+    float getDistortionDb() const noexcept;        // clipper THD+N (meters; with the clip energy as a floor, the SafetyGovernor's input)
     // ...
 };
 ```

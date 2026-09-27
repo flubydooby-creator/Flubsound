@@ -8,11 +8,12 @@
 //               safety ceiling applied to the master limiter and all of its
 //               guidance (the page scrolls when that is long).
 //   Processing  latency profile (applied to every strip and both A/B banks;
-//               the engine re-prepares with a brief dropout), live latency
-//               breakdown with CPU / xruns / overloads, the per-app capture
-//               streams' FIFO statistics, device-input routing, per-app
-//               routing method and the meter palette (standard / colour-blind
-//               safe).
+//               the engine re-prepares with a brief dropout), the opt-in
+//               automatic overload response (switch, what it changed and a
+//               Restore button), live latency breakdown with CPU / xruns /
+//               overloads, the per-app capture streams' FIFO statistics,
+//               device-input routing, per-app routing method and the meter
+//               palette (standard / colour-blind safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; chords
 //               that could not be registered are listed.

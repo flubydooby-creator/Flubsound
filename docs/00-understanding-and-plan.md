@@ -84,7 +84,7 @@ These were fixed up front because every later deliverable depends on them. `02-t
    - Linux: PipeWire / PulseAudio null sinks (`platform/linux/`) plus `pactl` routing work today.
    - Without a driver, per-process loopback capture (Windows 10 build 20348+ / Windows 11) or any third-party virtual cable feeds the strips.
 3. **Latency is a first-class, constant quantity.** Each latency profile (Quality, Balanced, Low Latency) fixes every structural choice: look-ahead lengths, oversampling factors, and whether the STFT gate is in the chain. Within a profile the chain latency never changes, because bypass paths are latency-compensated. Toggling a module therefore never shifts audio in time or clicks.
-4. **Macros, not presets, drive "intelligence".** Presets store *base* values. Boost Intensity and the five mode macros add staged, curved contributions on top. A **Safety Governor** scales back every loudness-adding contribution when limiter gain reduction or clipper energy exceed their budgets, which is the THD protection loop.
+4. **Macros, not presets, drive "intelligence".** Presets store *base* values. Boost Intensity and the five mode macros add staged, curved contributions on top. A **Safety Governor** scales back every loudness-adding contribution when limiter gain reduction or the measured distortion (THD+N of the saturator and the soft clipper) exceed their budgets, which is the THD protection loop.
 5. **Gaming correctness beats loudness.** Gaming mode enforces rules that protect positional cues:
    - all dynamics are stereo-linked,
    - no crossfeed,

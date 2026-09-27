@@ -14,13 +14,21 @@
 //        the limiter only handles the longer peaks -> less audible pumping.
 //        clipAmount = 0 disables the clipper entirely (limiter-only).
 //     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak).
-// THD protection telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2
-//   / sum x^2) over the last block, and the limiter's gain reduction; the
-//   SafetyGovernor backs Boost Intensity off when either exceeds its budget.
+// Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
+//   the last block (how hard the clipper works), the limiter's gain
+//   reduction, and distortionDb: the clipper's THD+N over the last 25 ms
+//   analysis window (independent of the host block size),
+//   measured at the oversampled rate around the curve itself, where input
+//   and clipped output are aligned (DistortionEstimator.h: residual after the
+//   least-squares gain, relative to the output energy). The chain feeds the
+//   limiter GR and the combined THD+N of the nonlinear stages (this one
+//   floored at clipEnergyRatioDb) to the SafetyGovernor, which backs the
+//   governed macro contributions off when either exceeds its budget.
 // latency = clipper oversampler latency + limiter latency.
 #pragma once
 
 #include "Crossover.h"
+#include "DistortionEstimator.h"
 #include "Oversampler.h"
 #include "Processor.h"
 #include "TruePeakLimiter.h"
@@ -75,6 +83,8 @@ public:
     uint64_t getSafetyClipCount() const noexcept { return limiter.getSafetyClipCount(); }
     float getGlueReductionDb() const noexcept { return glueGrDb.load (std::memory_order_relaxed); }
     float getClipEnergyRatioDb() const noexcept { return clipRatioDb.load (std::memory_order_relaxed); }
+    /** THD+N of the soft clipper over the last 25 ms analysis window (dB re its output; -160 = clean or off). */
+    float getDistortionDb() const noexcept { return distortionDb.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -118,7 +128,8 @@ private:
     bool truePeak = true;
     ProcessSpec spec;
     MaximizerParams params;
-    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f };
+    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f };
+    DistortionWindow distortionWindow; // clipper THD+N sums over a 25 ms window
 
     bool prepared = false;
     bool fresh = true;           // nothing processed since prepare()/reset(): setParams() applies instantly

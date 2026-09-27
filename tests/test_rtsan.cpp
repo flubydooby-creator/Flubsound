@@ -148,4 +148,29 @@ TEST_CASE ("RTSan: an allocation inside a nonblocking function stops the process
 }
 #endif
 
+// Measured THD+N (tests/test_distortion.cpp): the per-block estimator the
+// Saturator and the maximizer's clipper run inside process(), and the
+// monitor / governor updates ProcessingChain::process calls every block.
+#include "flub/dsp/DistortionEstimator.h"
+#include "flub/engine/Protection.h"
+
+static_assert (std::is_same_v<decltype (&DistortionSums::add), void (DistortionSums::*) (float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionSums::residualEnergy), double (DistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionSums::outputEnergy), double (DistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionEnergy::add), void (DistortionEnergy::*) (const DistortionSums&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionEnergy::ratioDb), float (DistortionEnergy::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionMonitor::update), float (DistortionMonitor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionMonitor::combineDb), float (*) (float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<DistortionMonitor>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::update), void (SafetyGovernor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<SafetyGovernor>);
+
+// Neural slot (tests/test_neural_slot.cpp): ProcessingChain::process runs the
+// slot's AsyncModelProcessor (process / reset asserted above) and publishes
+// its counters; the bypass switch and the status / counter reads are atomics
+// that any thread, the audio thread included, may call.
+static_assert (std::is_same_v<decltype (&ProcessingChain::setNeuralBypass), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralStatus), NeuralSlotStatus (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralCounters), NeuralSlotCounters (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

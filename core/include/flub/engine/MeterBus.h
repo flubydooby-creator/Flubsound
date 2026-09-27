@@ -35,6 +35,7 @@ struct MeterBus
     // Dynamics / protection (dB; reductions <= 0)
     std::atomic<float> compGainReductionDb { 0.0f }, compUpwardGainDb { 0.0f };
     std::atomic<float> maxGainReductionDb { 0.0f }, glueGainReductionDb { 0.0f }, clipEnergyRatioDb { -160.0f };
+    std::atomic<float> distortionDb { -160.0f }; // measured THD+N of saturator + clipper (dB re output, 300 ms smoothing)
     std::atomic<float> bassProtectionDb { 0.0f };
     std::array<std::atomic<float>, kMaxDynBands> dynEqGainDb {};
     std::atomic<float> governorScale { 1.0f };  // 1 = Boost Intensity fully applied

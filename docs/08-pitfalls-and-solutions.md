@@ -84,7 +84,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
   1. Saturation, harmonics and exciters have **unity small-signal gain** (`f(gx)/g`), so they change timbre, not level. (The saturator has no automatic make-up, so loud material comes out *quieter* at high drive: pink noise at −12 dBFS RMS through Tape at 9 dB drive loses about 3.6 dB RMS.)
   2. Bass boost is **headroom-protected**: it is withdrawn when the predicted low-frequency level would exceed `bass.protect`.
   3. **AutoLevel** normalises the input loudness.
-  4. The **SafetyGovernor** scales every loudness-adding macro contribution back when average limiter gain reduction is below −6 dB or clipper energy is above −30 dB. It recovers slowly, with hysteresis.
+  4. The **SafetyGovernor** scales every loudness-adding macro contribution back when average limiter gain reduction is below −6 dB or the measured THD+N of the saturator and the soft clipper is above −30 dB. It recovers slowly, with hysteresis.
   5. The limiter is always last, and the mixer has a master true-peak limiter after strip summing.
 - **Verification:** "Chain: full Music boost on a hot programme never exceeds the ceiling" (every macro at 100 %, hot input, both modes) and the governor unit test.
 

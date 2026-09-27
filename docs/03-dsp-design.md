@@ -375,7 +375,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 
 - **Headroom is float.** Nothing between the input stage and the maximizer clips; peaks above 0 dBFS inside the chain are legal. Protection acts on *predicted* or *measured* levels instead:
   - the bass protection predicts the boosted LF peak;
-  - the governor measures the limiter's gain reduction (≤ 6 dB average) and the clipper energy (≤ −30 dB);
+  - the governor measures the limiter's gain reduction (≤ 6 dB average) and the THD+N of the saturator and the soft clipper (≤ −30 dB, §14.5);
   - the limiter guarantees the ceiling.
 - **The ceiling is a strip property.** The chain test *Chain: full Music boost on a hot programme never exceeds the ceiling* sets Boost Intensity and all five macros to 100 %, in both modes, on a hot programme. It asserts:
   - true peak ≤ −1 dBTP + 0.15 dB;
@@ -1437,6 +1437,8 @@ Tape and Digital show no even harmonics: H2 is below −170 dBc.
 - **Make-up is manual.** `sat.output` (±12 dB) is a wet-path make-up gain. In the macro-driven workflow, loudness is restored downstream by the maximizer (Loudness macro, Boost Intensity) and bounded by AutoDrive. The loudness-matched global bypass (section 14) keeps A/B comparisons fair.
 - An automatic wet make-up based on measured loudness is **not implemented**.
 
+**Distortion telemetry.** `getDistortionDb()` is the stage's THD+N over the last block, measured with the per-block least-squares estimator of `DistortionEstimator.h` (§14.5) *around the curve*, at the oversampled rate, where the upsampled input `x̂` and the curve's deviation `f(x̂) − x̂` are aligned (the round-trip latency never enters). Depth, mix and output gain are folded in: the output is `a·x + b·(f − x)` with `a = 1 − mix + mix·outGain` and `b = mix·outGain·depth`, so the deviation is weighted by `b/a` (held per base-rate sample). The linear post filters (Tube DC blocker, Tape head bump) are not part of it; the DC the Tube bias creates is counted, although the 10 Hz blocker removes it afterwards. The reading includes harmonics above the base-rate Nyquist that the downsampler removes. At 0 dB drive or mix 0 it is −160 dB. Test *Distortion: the saturator's and the soft clipper's in-stage readings match a harmonic analysis of what the stages do within 0.1 dB* compares it with a Goertzel analysis of the saturator's actual output (Digital and Tape, 6–15 dB drive; measured difference < 0.01 dB).
+
 ### 6.4 Oversampling and aliasing
 
 | Profile (`latency.profile`) | Saturator oversampling | Latency |
@@ -1504,7 +1506,7 @@ At module level NaN falls back to the default, values are clamped, and an unchan
 - **Music.**
   - **Warmth** engages Saturation (`sat.on`) once the macro exceeds about 1 %: the toggle contribution is `smoothstep(0, 0.02, v)` and a toggle reads as on at ≥ 0.5. It also adds drive +9 dB (governed).
   - **Boost Intensity** adds drive +4 dB over 60–100 % (governed).
-  - The SafetyGovernor can take this drive back when the maximizer works too hard.
+  - The SafetyGovernor can take this drive back when the maximizer limits too hard or the measured THD+N of the saturator and the clipper together exceeds −30 dB (§14.5).
 - **Gaming.**
   - Nothing in the gaming macro table engages or drives saturation, and `sat.on` defaults to off. Saturation therefore stays off in Gaming mode unless a preset or the user turns it on.
   - This is deliberate: added harmonics and peak rounding bring no benefit to positional cues.
@@ -2534,7 +2536,7 @@ The maximizer is the last slot of every strip. It makes programme louder under a
 2. **Soft clipper**: oversampled. It shaves sub-millisecond transients (snare or gunshot crack) cheaply, so the limiter only handles the longer peaks, with less audible pumping.
 3. **True-peak limiter** at the ceiling (section 10).
 
-It also publishes the telemetry the SafetyGovernor needs: limiter gain reduction and clip energy ratio.
+It also publishes the telemetry the SafetyGovernor needs: limiter gain reduction, the clipper's measured THD+N (`getDistortionDb()`, §11.3.5) and the clip energy ratio, which floors the clipper's share of the governor input.
 
 ### 11.2 Signal flow
 
@@ -2643,7 +2645,15 @@ clipEnergyRatioDb = 10 log10( Σ (w · (x̂ − clip(x̂)))² / Σ x̂² )     o
                   = −160 dB when nothing was clipped or the clipper is off
 ```
 
-This is the energy the clipper removed (before band-limiting) relative to the energy that entered it: a THD-like measure of how hard the clipper works. The SafetyGovernor's budget is **−30 dB** (≈ 3.2 % RMS). Measured on noise band-limited to 0.4 fs, peak −6 dBFS (true peak −5.88 dBFS) before drive, 48 kHz, 4× High, 1.5 ms, defaults otherwise. "Disarmed" is `glue = 0`, the chain's default; "armed" is the 0.001 floor:
+This is the energy the clipper removed (before band-limiting) relative to the energy that entered it: a measure of how hard the clipper works. It is published (`MeterBus::clipEnergyRatioDb`) and overstates distortion: part of the removed signal is in phase with the input, i.e. a gain change rather than distortion. The governor keeps it only as a floor under the clipper's measured THD+N (§14.5).
+
+The clipper's share of the governor input is its **measured THD+N**, `getDistortionDb()`, floored at the clip energy ratio above (§14.5). The THD+N is taken in the same oversampled loop where `x̂` and the clipped `x̂` are aligned (`DistortionEstimator.h`, §14.5). With `r = w·(x̂ − clip(x̂))` the effective output is `x̂ − r`, and per channel and block
+
+```
+distortionDb = 10 log10( Σ_ch (Σr² − (Σx̂r)² / Σx̂²) / Σ_ch Σ(x̂ − r)² )       = −160 dB when nothing was clipped or the clipper is off
+```
+
+i.e. the energy left after the least-squares gain, relative to the output energy. Only `Σx̂r` is new; the other two sums are the clip-energy sums. The reading covers harmonics up to `osFactor · fs/2`, before the downsampler removes those above the base-rate Nyquist. On white noise through four one-pole low-passes (−3 dB near 6 kHz), peak −6 dBFS before drive, 48 kHz, 4× High, defaults otherwise, 64-sample blocks, it read 0.4–2.7 dB below the clip energy ratio on the same blocks (block maximum THD+N / clip energy: −62.3 / −61.9 dB at 6 dB drive, −28.7 / −28.0 dB at 9 dB, −17.8 / −15.8 dB at 12 dB, −9.2 / −6.5 dB at 18 dB). The SafetyGovernor's budget is **−30 dB** (≈ 3.2 % RMS) of THD+N, measured in the chain over the saturator and the clipper together (§14.5). The table below is the clip energy ratio, measured on noise band-limited to 0.4 fs, peak −6 dBFS (true peak −5.88 dBFS) before drive, 48 kHz, 4× High, 1.5 ms, defaults otherwise. "Disarmed" is `glue = 0`, the chain's default; "armed" is the 0.001 floor:
 
 | Drive | Limiter GR (block min), disarmed / armed | Clip energy ratio (block max), disarmed / armed | Glue GR, armed | True peak re ceiling, disarmed / armed |
 |---|---|---|---|---|
@@ -2654,7 +2664,7 @@ This is the energy the clipper removed (before band-limiting) relative to the en
 
 - At 0 dB drive the disarmed path returns the input's own true peak (−4.88 dB re ceiling); the armed splitter's all-pass raises it by 2.4 dB (§11.3.2).
 - The same all-pass makes the armed stage clip and limit more at moderate drive: at 6 dB, 2.05 dB more limiting and clip energy 57 dB higher.
-- At 12 and 18 dB drive this signal runs over the governor's clip budget either way. In the chain the governor would scale the governed drive contributions back (section 14).
+- At 12 and 18 dB drive this signal runs over the governor's −30 dB budget either way, in clip energy and in measured THD+N. In the chain the governor would scale the governed drive contributions back (section 14).
 - The safety clamp never engaged.
 
 #### 11.3.6 Limit and output trim
@@ -2732,7 +2742,7 @@ The 4× clipper costs about 205–225 ns, the glue splitter 35–80 ns while it 
 | Max. effective drive at 100 % (governor scale 1) | 18 dB (+ base `max.drive`, clamped to 24) | 6 dB (+ base) |
 | Latency profile | Balanced (4× High, 1.5 ms) or Quality | competitive presets: Low Latency (2× Low, 0.5 ms) |
 
-The governed drive contributions are what the SafetyGovernor takes back when the average limiter GR goes below −6 dB or the clip energy above −30 dB. AutoDrive can additionally *reduce* the effective drive towards a loudness target, but never below 0 dB (section 14).
+The governed drive contributions are what the SafetyGovernor takes back when the average limiter GR goes below −6 dB or the measured THD+N of the saturator and the clipper above −30 dB. AutoDrive can additionally *reduce* the effective drive towards a loudness target, but never below 0 dB (section 14).
 
 ### 11.8 Tests that prove it
 
@@ -2750,6 +2760,7 @@ The governed drive contributions are what the SafetyGovernor takes back when the
   - *LoudnessMaximizer: the clipper shaves transients so the limiter reduces less*
   - *LoudnessMaximizer: glue > 0 reduces limiter gain reduction on a bass-heavy signal*
   - *LoudnessMaximizer [adversarial]: clip-energy telemetry equals the header formula*
+  - *Distortion: the saturator's and the soft clipper's in-stage readings match a harmonic analysis of what the stages do within 0.1 dB* (`tests/test_distortion.cpp`: a 750 Hz sine at 0.6 peak; at 6, 9 and 12 dB drive the clipper's THD+N reading equals a Goertzel analysis of `softClip` on the same sine at 192 kHz; measured difference < 0.001 dB)
   - *LoudnessMaximizer [adversarial]: glue is 2:1 above ceiling - 6 dB and an all-pass (no gain) below it*
   - *LoudnessMaximizer: release and ceiling are passed to the limiter*
 - **Click-freeness, RT safety, robustness:**
@@ -3263,7 +3274,7 @@ Maximum effective values with Boost and all macros at 100 %:
 
 ```
  in ─► input gain ─► AutoLevel ─► fold ─► [slots … maximizer (limiter @ max.ceiling)] ─► output trim ─┬─► global bypass ─► meters ─► strip out
-        ▲ (+1/−4 dB/s)                                     │ GR, clip energy                        │
+        ▲ (+1/−4 dB/s)                                     │ GR, THD+N (sat + clipper)              │
         │                                                  ▼                                        ├─► AutoDrive ──► max.drive reduction (next block)
         └── measured on the input (open loop)       SafetyGovernor ──► scale on governed macro     └─► LoudnessMatch wet ─► dry-path gain in bypass
                                                     amounts (next block)
@@ -3274,7 +3285,7 @@ Maximum effective values with Boost and all macros at 100 %:
 
 | Loop | Measures | Acts on | Law (as implemented) |
 |---|---|---|---|
-| **SafetyGovernor** (THD / over-processing) | Maximizer limiter gain reduction (block minimum) and clipper energy ratio, per block. Averaged with a one-pole `a = exp(−Δt / 3 s)`: GR in dB, clip energy in the power domain (so bursts are not under-weighted). A fully bypassed maximizer feeds 0 dB / −160 dB. | Scale on all *governed* macro amounts | **Over budget** (avg GR < −6 dB **or** avg clip energy > −30 dB): scale −0.15 per second (−15 %/s), floor 0.3; 1 → 0.3 takes 4.7 s. **Comfortably under** (avg GR > −4.5 dB **and** clip energy < −31.5 dB: 1.5 dB hysteresis on both): +0.03 per second (+3 %/s) up to 1; 0.3 → 1 takes 23 s. In between it holds. |
+| **SafetyGovernor** (THD / over-processing) | Maximizer limiter gain reduction (block minimum) and the distortion of the saturator and the maximizer's soft clipper, per block: the **measured THD+N** of each (below), the clipper's floored at its clip energy ratio, power-summed. Averaged with a one-pole `a = exp(−Δt / 3 s)`: GR in dB, distortion in the power domain (so bursts are not under-weighted). A fully bypassed maximizer feeds 0 dB GR and no clipper distortion; a fully bypassed saturator feeds no THD+N. | Scale on all *governed* macro amounts (never the base values) | **Over budget** (avg GR < −6 dB **or** avg distortion > −30 dB): scale −0.15 per second (−15 %/s), floor 0.3; 1 → 0.3 takes 4.7 s. **Comfortably under** (avg GR > −4.5 dB **and** distortion < −31.5 dB: 1.5 dB hysteresis on both): +0.03 per second (+3 %/s) up to 1; 0.3 → 1 takes 23 s. In between it holds. |
 | **AutoLevel** (LUFS input levelling) | *Gated* K-weighted loudness of the input (all input channels with the BS.1770-4 channel weights of §13.3, before its own gain, so open-loop and unconditionally stable). A 3 s one-pole advances only while programme is present: block RMS > −70 dBFS, 100 ms follower > −50 LUFS and within 20 LU of the slow value. It counts as active only while the slow value is > −60 LUFS. | Input gain before the fold and the slots | Gain = target − measured, clamped ±12 dB, slew +1 dB/s up and −4 dB/s down, adapted only while the gate is open. Pauses, track gaps and fade-outs never pump the gain up. Switched off, it returns to 0 dB at 4 dB/s. Applied as a per-block linear ramp. Target `autolevel.target` −30 … −10 LUFS (default −18). |
 | **AutoDrive** (maximizer loudness target) | Gated loudness (same gate) of the strip *output*, after the output trim | Maximizer drive | Closed loop with a 0.5 LU dead band. It integrates the error at min(2, 0.5 · \|error\|) dB/s. The chain passes the requested drive (effective `max.drive`) to `AutoDrive::update()`, and the reduction stays in [−requested drive, 0] dB (the requested drive clamped to 0 … 24 dB); the chain applies `drive = max(0, max.drive(effective) + reduction)`. It can only **reduce** the requested drive, never below 0 dB, so it never makes anything louder than the user or macros asked for (and cannot make a programme that is already above target at 0 dB drive quieter). Because the reduction stops where the drive reaches 0 dB, it holds no reduction beyond that point: the drive starts coming back as soon as the output falls more than 0.5 LU below the target, and a lowered drive clamps the reduction at once. (It used to run on towards −24 dB with nothing audible changing, and had to climb back from there before any drive returned.) Switched off, the reduction returns to 0 at 4 dB/s. Target `max.target` −24 … −6 LUFS (default −14). |
 | **LoudnessMatch** (fair A/B) | Gated loudness of the dry reference (post-fold, pre-slots) vs the processed output | Gain on the dry path in global bypass | Gain = wet − dry, clamped ±12 dB, slew 3 dB/s, updated only while both followers are active. A positive match is additionally capped once per block at `max(0, max.ceiling − held dry peak)`; the dry sample peak is held with an instant attack and a ~2 s one-pole release, applied per block. The gain itself ramps over 50 ms, so a new, louder dry peak can still meet a gain chosen for the quieter past; the bypass-reference limiter (next row) catches that. |
@@ -3285,6 +3296,20 @@ Maximum effective values with Boost and all macros at 100 %:
 | **Device ceiling cap** (desktop app) | Output device transport and profile (`device::adviceFor()`) | Master limiter ceiling | Default −1 dBTP; **Bluetooth A2DP −2 dBTP** (lossy codecs overshoot); **Bluetooth hands-free −3 dBTP**. A profile's own `ceilingDbTp` can lower it further; no shipped profile sets one yet. Strip ceilings are untouched: the cap only ever lowers the output. |
 | **Input sanitation** | Non-finite samples in the input block (Σ x·0 is non-finite) | Whole chain | The block is output as silence and the chain state is reset. |
 | **Parameter sanitation** | Every `ParameterStore::set()` | Base values | NaN is ignored (the previous value stays), ±Inf and out-of-range values clamp to the parameter's range, so no automation, host or script value can put a NaN gain into the audio path. |
+
+**Measured distortion (THD+N).** Every nonlinear stage the governor watches measures its own distortion per block with `flub/dsp/DistortionEstimator.h`, *inside the stage*, around its curve, where the curve's input and output are time-aligned and at the same (oversampled) rate, so no latency or oversampler delay has to be compensated:
+
+```
+g        = <x, y> / <x, x>                         least-squares linear gain of the block (per channel)
+residual = Σ_ch <y − g x, y − g x> = Σ_ch ( <d, d> − <x, d>² / <x, x> ),   d = y − x (the curve's deviation)
+THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; −160 dB = none
+```
+
+- **Stages.** The maximizer's soft clipper (at 2× / 4×, the clip weight included; §11.3.5) and the Saturator (at its oversampling factor, with depth, mix and output gain folded in; §6.3). Accumulating `x` and `d` instead of `x` and `y` avoids the cancellation of `<y, y> − <x, y>²/<x, x>`: a linear stage reads the rounding floor (tested below −90 dB; exactly −160 dB when `d = 0`). The cost is three double multiply-adds per oversampled sample and channel; the chain CPU change is within run-to-run noise with the saturator off (575–597 against 586–605 ns per stereo sample, Balanced, defaults, 48 kHz, 512-sample blocks, measured under load) and about +2 % with it on (1044–1070 against 982–1037 ns, Boost 60 % + Warmth 50 %).
+- **Accuracy.** On a sine through tanh and through the Tube curve, the estimate equals a Goertzel harmonic analysis (DC + harmonics 2 … N/2 over the total) to < 0.001 dB from −60 to −10 dB; in the stages it matches a harmonic analysis of what the stage does to < 0.01 dB (`tests/test_distortion.cpp`). For a static curve on a sine, `g x` is exactly the fundamental, so the residual is exactly DC + harmonics; on programme it also contains intermodulation. The estimate includes harmonics above the base-rate Nyquist that the downsampler removes (they would otherwise alias).
+- **Combination and smoothing** (`DistortionMonitor`, `Protection.h`). The block readings of the stages in series are power-summed (the saturator's residual passes the clipper at the same ratio to the signal; the two residuals are taken as uncorrelated; `DistortionMonitor::combineDb`). The governor gets the same power sum with the clipper's reading floored at its clip energy ratio (next point) and averages it over ~3 s in the power domain as above. For display, a power-domain one-pole with **τ = 300 ms** smooths it into `MeterBus::distortionDb` (the clip energy ratio stays in `MeterBus::clipEnergyRatioDb`).
+- **Budget: −30 dB (≈ 3.2 % RMS of the output), with the clip energy as a floor.** This keeps the number of the former clip-energy budget. The clip-energy proxy counted the part of the removed signal that is in phase with the input, which is a gain change, not distortion; on the clipper the measured THD+N reads 0.4–2.7 dB below it on the band-limited noise of §11.3.5, and 3–4 dB below it on a sine near the budget (soft clipper at its default knee). On its own, the clipper's THD+N would therefore let the governor back off later and less than before on clipping, which is why the clipper's share of the governor input is `max(THD+N, clip energy ratio)`: the input is never below the former proxy, so on clipping the governor acts at least as early and as far as before, and saturation is added on top. Measured on the drum-like programme of the protection tests (kick, noise hats, 55 Hz bass line, pad; peaks −6.7 dBFS, 12 s, 48 kHz, 512-sample blocks; each preset's own Boost Intensity): Club Loud's scale bottoms out at 0.92 with the floor and with the proxy alone, but would have stayed at 1.00 on its THD+N alone (−31.9 dB power average), and every other factory preset stays at 1.00. At Boost Intensity 100 % the minimum scale with the floor equals the proxy's on every factory preset but three: Lo-Fi Chill and Warm Vinyl go to 0.30 (1.00 with the proxy, which could not see their saturation; −26.9 and −23.6 dB THD+N), and Punchy Pop 0.42 against 0.41. Without the floor it would have been higher on six presets (for example Earbuds 0.64 instead of 0.51, Horror Detail 0.59 instead of 0.44, Punchy Pop 0.60 instead of 0.42). Saturation is now counted too: the saturator's THD at 6 dB drive on a −6 dBFS tone is already about −26 dB (§6.3), so saturation that uses up the budget by itself leaves Boost and Warmth no room to add more.
+- **Governed contributions only.** Decision 4 of `00-understanding-and-plan.md` and §14.1 define the governor as scaling the governed macro *contributions*; the base values (`max.drive`, `sat.drive` from a preset or the user) are the user's explicit choice and are never touched. The governor therefore reacts to all measured distortion, including what base values cause, but only takes back what the macros add. The measurement itself is published (`MeterBus::distortionDb`), so the distortion that base settings cause can be shown; the app does not display it yet.
 
 ### 14.6 Bypass, A/B and latency profiles
 
@@ -3357,9 +3382,18 @@ Maximum effective values with Boost and all macros at 100 %:
   - *Chain: runs at every sample rate a headset may use (8 kHz hands-free .. 192 kHz)*
 
 `tests/test_protection_gaps.cpp`:
-- **SafetyGovernor, clip-energy branch:**
+- **SafetyGovernor, distortion branch** (these two tests predate the measured THD+N; the unit test's "clip energy" values now enter the governor's distortion input, and in the chain test the budget is tripped by the heavily clipping maximizer, whose share of that input is its clip energy ratio or its measured THD+N, whichever is higher, while the test mirrors the published clip energy ratio):
   - *Protection: the SafetyGovernor's clip-energy branch alone backs off at 15 %/s, holds inside its hysteresis and recovers at 3 %/s* (GR input 0 dB throughout: −20 dB clip energy lowers the scale by 0.15 ± 0.002 per second to exactly 0.3; clean input releases it at 0.06 ± 0.002 per 2 s once the average is under −31.5 dB; −31 dB holds it unchanged for 20 s; one 10 ms block at −3 dB trips it, one at −15 dB does not)
   - *Protection: governed Boost drive into heavy clipping trips the clip-energy budget; the governor scales only the governed contributions, never the base values, and releases when the signal calms* (base drive 10 dB + Boost 100 %, clipper share 1, 8 s of hot programme: the mirrored 3 s GR average never goes below −4.5 dB while the clip-energy average peaks ≥ 6 dB over its budget (−11 dB measured), the scale reaches ≤ 0.35; every block's effective drive, bass boost, harmonics and saturation drive equal base + amount × the previous block's scale within 1e−4, presence, width and glue never move, and the store is unchanged; 20 s of quiet programme bring the scale back up by ≥ 0.1 (0.30 → 0.55 measured))
+- **Measured THD+N** (`tests/test_distortion.cpp`):
+  - *Distortion: on a sine through tanh (and the asymmetric tube curve) the estimator matches a Goertzel harmonic analysis within 0.02 dB from -60 to -10 dB*
+  - *Distortion: a linear gain stage reads below -90 dB; the identity, silence and linear stage settings read -160 dB* (gains 0.25 … 3.98 and −1 on noise; the saturator at 0 dB drive with +6 dB make-up and the maximizer below its knee read exactly −160 dB; 12 dB of tape drive on a −80 dBFS sine reads below −90 dB)
+  - *Distortion: the saturator's and the soft clipper's in-stage readings match a harmonic analysis of what the stages do within 0.1 dB*
+  - *Distortion: the monitor power-sums the stages and smooths the meter in the power domain with tau = 300 ms* (a step reaches 1 − 1/e of its power after 0.3 s, ±0.02 dB, for 480- and 64-sample blocks)
+  - *Distortion: the SafetyGovernor backs off when the measured THD+N of a real stage exceeds the -30 dB budget, and not when it stays under* (the saturator's own reading on a sine, 3–6 dB over the budget: scale at the 0.3 floor after 10 s; 3–6 dB under it: scale 1 throughout)
+  - *Distortion: through the chain, base saturation alone trips the governor on measured THD+N (the clip-energy proxy stays silent) and only the governed Warmth contributions are scaled* (maximizer off, so GR 0 dB and clip energy −160 dB every block; base tape drive 12 dB + Warmth 100 % on hot programme: `MeterBus::distortionDb` peaks ≥ 6 dB over the budget, the scale ends ≤ 0.35, every block's effective `sat.drive` = base + 9 dB × the previous block's scale within 1e−4, the store is unchanged; Warmth 30 % on quiet programme: measurable THD+N ≥ 3 dB under the budget, scale exactly 1)
+  - *Distortion: through the chain, the clipper's share of the governor input is floored at its clip energy ratio, so clipping backs the scale off at least as far as the proxy alone did* (Music, Boost 100 %, `max.drive` 6 dB, saturation off, 10 s of a hot tonal programme: in every block the chain's scale is at most that of a SafetyGovernor fed the published limiter GR and clip energy ratio, the proxy trips (minimum ≤ 0.9) and the power-averaged measured THD+N is ≥ 1 dB below the clip energy ratio, so the floor is what decides; with the floor removed the scale runs up to 0.08 above the proxy's)
+  - *Distortion: measuring in the saturator and the clipper, the monitor and the governor update are allocation-free* (`tests/test_rtsan.cpp` checks the `FLUB_NONBLOCKING` annotations of the estimator, `DistortionMonitor::update` / `reset` and `SafetyGovernor::update` / `reset`)
 - **LoudnessMatch as a unit:**
   - *LoudnessMatch: the dry gain converges to the measured wet - dry loudness difference, slewed at exactly 3 dB/s without overshoot* (+6, −9, 0 and +11.5 dB: ≤ 0.03 dB per 10 ms block, 3 dB after 1 s, no reversal above 1e−4 dB, settled within 0.05 dB)
   - *LoudnessMatch: the gain is bounded to +-12 dB, holds while either side is silent, and reset() returns it to 0 dB*
@@ -3381,6 +3415,8 @@ Maximum effective values with Boost and all macros at 100 %:
 
 - **AutoDrive only reduces.** It cannot make a programme that is already louder than the target at 0 dB drive any quieter. Use `output.gain` or AutoLevel for that.
 - **"No ratio chosen" means the stored ratio equals the default.** The Gaming upward-only rule (§14.4) cannot tell a stored 2.5:1 from an untouched one, so a macro-engaged compressor runs at 1:1 in both cases. To keep the 2.5:1 downward curve, switch `comp.on` on in the preset or store any other ratio (the factory-preset lint already rejects stored defaults).
+- **Base distortion can hold the governor down.** The governor reacts to all measured THD+N but can only take back the governed macro contributions (§14.5). Saturation set above the budget by a preset or the user (roughly 6 dB of `sat.drive` on hot material) therefore holds the scale at its 0.3 floor, and Boost Intensity and Warmth then add only 30 % of their governed amounts. The measured distortion is published in `MeterBus::distortionDb`, which the app's UI does not show yet.
+- **Only the saturator and the soft clipper are measured.** The other nonlinear stages (the bass harmonics generator, the clarity air exciter, compressor and limiter gain modulation) are not part of the THD+N input; the harmonic stages add harmonics on purpose, and gain modulation is covered by the limiter GR budget. The measured THD+N includes the DC that the Tube bias creates, which the 10 Hz blocker removes downstream (slightly conservative).
 - **The governor's GR input is a block minimum.** It is averaged over about 3 s, so its budget refers to the deepest limiting per block, not to the mean gain.
 - **Absolute gates assume the chain's nominal level.** The loudness gates are absolute (−70 dBFS RMS, −50 LUFS) plus relative (20 LU); very quiet sources below −50 LUFS never drive the loops.
 - **The matched bypass favours the ceiling over the match.** A raise is capped at `max.ceiling` − held dry peak, and the bypass-reference limiter then shaves what is still over, so on material with high peaks the reference can stay a little quieter than the processed output (1.2–1.5 LU in the re-measurement of §14.6). The tests assert match accuracy only where the cap is not involved (within 0.5 LU), and the ceiling where it is.

@@ -17,6 +17,7 @@ constexpr const char* deviceInputStrip = "deviceInput.strip";
 constexpr const char* deviceInputMap = "deviceInput.map";
 constexpr const char* masterEnabled = "engine.enabled";
 constexpr const char* selectedStrip = "engine.selectedStrip";
+constexpr const char* reduceLoadOnOverload = "engine.reduceLoadOnOverload";
 constexpr const char* hotkeysEnabled = "hotkeys.enabled";
 constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
@@ -217,6 +218,8 @@ bool AppSettings::getMasterEnabled() const { return properties->getBoolValue (Ke
 void AppSettings::setMasterEnabled (bool enabled) { properties->setValue (Keys::masterEnabled, enabled); }
 int AppSettings::getSelectedStrip() const { return properties->getIntValue (Keys::selectedStrip, 0); }
 void AppSettings::setSelectedStrip (int strip) { properties->setValue (Keys::selectedStrip, strip); }
+bool AppSettings::getReduceLoadOnOverload() const { return properties->getBoolValue (Keys::reduceLoadOnOverload, false); }
+void AppSettings::setReduceLoadOnOverload (bool shouldReduce) { properties->setValue (Keys::reduceLoadOnOverload, shouldReduce); }
 
 // ---- Per strip --------------------------------------------------------------------------------
 juce::String AppSettings::getLastPreset (const juce::String& stripName) const

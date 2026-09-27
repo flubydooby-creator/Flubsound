@@ -216,7 +216,7 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     osInvGain.assign (osSize, 1.0f);
     osScratch.assign (osSize, 0.0f);
     osInput.assign (osSize, 0.0f);
-    for (auto* v : { &depthBuf, &tubeBuf, &bumpBuf, &gainBuf, &mixBuf })
+    for (auto* v : { &depthBuf, &tubeBuf, &bumpBuf, &gainBuf, &mixBuf, &distWeightBuf })
         v->assign (baseSize, 0.0f);
 
     // Emphasis runs at the oversampled rate, where the curve is. The two
@@ -237,6 +237,8 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     fadeLength = std::max (1, msToSamples (kTypeFadeMs, spec.sampleRate));
     invFadeLength = 1.0f / static_cast<float> (fadeLength);
     invFadeLengthOs = 1.0f / static_cast<float> (fadeLength * preparedFactor);
+
+    distortionWindow.prepare (spec.sampleRate);
 
     prepared = true;
     reset();
@@ -259,6 +261,8 @@ void Saturator::reset() noexcept FLUB_NONBLOCKING
     activeType = fromType = toType = params.type;
     fading = false;
     fadePos = 0;
+    distortionWindow.reset();
+    distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
 }
 
 int Saturator::latencySamples() const noexcept
@@ -352,6 +356,12 @@ void Saturator::computeControls (int length) noexcept
         bumpBuf[si] = dg.bumpBeta * tapeW;
         gainBuf[si] = outputSmoother.next();
         mixBuf[si] = mixSmoother.next();
+
+        // THD+N telemetry: y = a x + b (f - x) with a = 1 - mix + mix * gain
+        // (> 0: gain >= -12 dB) and b = mix * gain * depth, so relative to the
+        // linear path the curve's deviation is weighted by b / a.
+        const float wetGain = mixBuf[si] * gainBuf[si];
+        distWeightBuf[si] = wetGain * dg.depth / (1.0f - mixBuf[si] + wetGain);
     }
 
     if (driveRamping)
@@ -441,23 +451,39 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
             runCurve (activeType, st, d, nOs);
             for (int k = 0; k < nOs; ++k)
                 d[k] -= in[k];
-            continue;
+        }
+        else
+        {
+            // Crossfade: both curves on the same oversampled input, linear
+            // equal-gain weights (the two outputs are highly correlated).
+            float* alt = osScratch.data();
+            std::copy (d, d + nOs, alt);
+            runCurve (fromType, st, d, nOs);
+            runCurve (toType, st, alt, nOs);
+            const int base = fadePos * preparedFactor;
+            for (int k = 0; k < nOs; ++k)
+            {
+                const float w = static_cast<float> (base + k + 1) * invFadeLengthOs;
+                d[k] += w * (alt[k] - d[k]) - in[k];
+            }
         }
 
-        // Crossfade: both curves on the same oversampled input, linear
-        // equal-gain weights (the two outputs are highly correlated).
-        float* alt = osScratch.data();
-        std::copy (d, d + nOs, alt);
-        runCurve (fromType, st, d, nOs);
-        runCurve (toType, st, alt, nOs);
-        const int base = fadePos * preparedFactor;
-        for (int k = 0; k < nOs; ++k)
+        // THD+N telemetry around the curve, where the oversampled input and
+        // the curve's deviation are aligned (the weight is held across the
+        // sub-samples of each base-rate sample, like the other controls).
+        DistortionSums sums;
+        for (int i = 0, k = 0; i < length; ++i)
         {
-            const float w = static_cast<float> (base + k + 1) * invFadeLengthOs;
-            d[k] += w * (alt[k] - d[k]) - in[k];
+            const float w = distWeightBuf[static_cast<size_t> (i)];
+            for (int j = 0; j < preparedFactor; ++j, ++k)
+                sums.add (in[k], w * d[k]);
         }
+        if (sums.isFinite())
+            distortionWindow.channel (c).merge (sums);
     }
     oversampler.downsample (seg); // seg now holds the band-limited deviation
+    if (float db = kMinusInfDb; distortionWindow.advance (length, db))
+        distortionDb.store (db, std::memory_order_relaxed);
 
     // 4. Base-rate post-processing and latency-aligned dry/wet.
     const SvfCoeffs bumpC = headBump;
