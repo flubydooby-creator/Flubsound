@@ -72,8 +72,10 @@ void HotkeyManager::registerAll()
         if (status.status != Status::Pending)
             continue;
 
-        // The service promises message-thread callbacks; hop over defensively
-        // if an implementation ever calls from its own thread.
+        // Windows and macOS call back on the message thread; the Linux X11 and
+        // Wayland-portal services call from their own X event / D-Bus thread,
+        // so hop to the message thread then (see PlatformServices.h,
+        // registerHotkey).
         juce::WeakReference<HotkeyManager> weakThis (this);
         const bool ok = hotkeys->registerHotkey (static_cast<int> (action), chord,
                                                  AppSettings::getHotkeyActionName (action).toStdString(),

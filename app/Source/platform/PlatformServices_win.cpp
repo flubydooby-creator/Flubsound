@@ -1898,8 +1898,9 @@ public:
     the secure desktop (UAC prompt, lock screen: no foreground window) are
     not, and query() returns false for them. UWP / packaged apps draw inside
     an ApplicationFrameHost.exe frame; the process of the hosted child
-    window is reported instead. The image path is cached while the same
-    window and process stay in front. Message thread (any one thread). */
+    window is reported instead (the frame itself while the app is still
+    starting, looked up again on the next poll). The image path is cached
+    while the same window and process stay in front. Message thread (any one thread). */
 class WinForegroundApp final : public ForegroundApp
 {
 public:

@@ -20,7 +20,9 @@
 //               declined by the desktop, bound by the desktop as another
 //               key, waiting for the desktop), updated as results arrive.
 //   General     start with the OS (reflects the OS's actual entry; hidden
-//               where unsupported), start minimised, close to tray, file
+//               where unsupported), start minimised, close to tray, UI scale
+//               (Follow system or 75 - 200 %) and theme (standard / high
+//               contrast), both applied app-wide at once and persisted, file
 //               locations, version.
 #pragma once
 

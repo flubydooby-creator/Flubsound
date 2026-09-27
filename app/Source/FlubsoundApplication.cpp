@@ -8,6 +8,7 @@
 #include "shell/TrayIcon.h"
 #include "ui/FlubLookAndFeel.h"
 #include "ui/MainComponent.h"
+#include "ui/Theme.h"
 
 #include <cstdio>
 
@@ -26,6 +27,24 @@ std::unique_ptr<juce::LookAndFeel_V4> makeLookAndFeel()
     // windows, tooltips and the tray menu then match the main window, and
     // the main component switches its accent colour with the mode.
     return std::make_unique<ui::FlubLookAndFeel>();
+}
+
+/** Screenshot option `--theme standard|high-contrast` (default standard). */
+bool parseScreenshotTheme (const juce::StringArray& args, ui::UiTheme& theme, juce::String& error)
+{
+    theme = ui::UiTheme::Standard;
+    const int index = args.indexOf ("--theme");
+    if (index < 0)
+        return true;
+    const auto value = index + 1 < args.size() ? args[index + 1].toLowerCase() : juce::String();
+    if (value == "high-contrast" || value == "highcontrast")
+        theme = ui::UiTheme::HighContrast;
+    else if (value != "standard")
+    {
+        error = "--theme must be 'standard' or 'high-contrast'";
+        return false;
+    }
+    return true;
 }
 
 void printLine (bool toStdErr, const juce::String& text)
@@ -71,6 +90,11 @@ void FlubsoundApplication::initialiseInteractive()
     controller = std::make_unique<EngineController>();
     if (controller->getLastDeviceError().isNotEmpty())
         printLine (true, "Flubsound: audio device: " + controller->getLastDeviceError());
+
+    // Settings > General > UI scale and theme, before any window exists (the
+    // saved window position is in the scaled coordinates).
+    ui::Theme::applyUiScale (controller->getSettings().getUiScalePercent());
+    ui::Theme::setTheme (controller->getSettings().getHighContrast() ? ui::UiTheme::HighContrast : ui::UiTheme::Standard);
 
     mainWindow = std::make_unique<MainWindow> (*controller, [this] { closeButtonPressed(); });
 
@@ -134,11 +158,19 @@ bool FlubsoundApplication::initialiseScreenshot()
 {
     ScreenshotDriver::Options options;
     juce::String error;
-    if (! ScreenshotDriver::parseCommandLine (getCommandLineParameterArray(), options, error))
+    ui::UiTheme theme {};
+    if (! ScreenshotDriver::parseCommandLine (getCommandLineParameterArray(), options, error)
+        || ! parseScreenshotTheme (getCommandLineParameterArray(), theme, error))
     {
         printLine (true, "Flubsound: " + (error.isNotEmpty() ? error : juce::String ("invalid --screenshot arguments")));
         return false;
     }
+
+    // --theme picks the palette; --scale is also the UI scale (the snapshot
+    // is rendered at that scale, which is exactly what the UI looks like at
+    // it; the window keeps its --size in logical pixels).
+    ui::Theme::setTheme (theme);
+    ui::Theme::applyUiScale (juce::roundToInt (options.scale * 100.0f));
 
     EngineController::Options engineOptions;
     engineOptions.openAudioDevice = false;

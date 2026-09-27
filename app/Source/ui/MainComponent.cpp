@@ -1,6 +1,7 @@
 #include "MainComponent.h"
 
 #include "Theme.h"
+#include "shell/MainWindow.h"
 
 namespace flub::app::ui
 {
@@ -35,7 +36,8 @@ MainComponent::MainComponent (EngineController& c)
 
     // Headless screenshots must not capture a tooltip for wherever the
     // virtual display happens to park the mouse pointer.
-    if (! juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--screenshot"))
+    screenshotRun = juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--screenshot");
+    if (! screenshotRun)
         tooltips = std::make_unique<juce::TooltipWindow> (this, 650);
 
     for (auto* child : std::initializer_list<juce::Component*> { &header, &routing, &boost, &analyzer, &rack, &levels, &loudness, &history })
@@ -301,6 +303,21 @@ void MainComponent::openExport()
         return;
     }
     exportWindow = ExportDialog::show (controller, this);
+}
+
+void MainComponent::parentHierarchyChanged()
+{
+    // The window sets its own limits after adding this content: register the
+    // design minimum once that has happened, so the UI scale can re-fit it.
+    if (screenshotRun || findParentComponentOfClass<juce::ResizableWindow>() == nullptr)
+        return;
+    juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+                                     {
+                                         if (safe == nullptr)
+                                             return;
+                                         if (auto* window = safe->findParentComponentOfClass<juce::ResizableWindow>())
+                                             Theme::setMinimumWindowSize (*window, { MainWindow::kMinWidth, MainWindow::kMinHeight });
+                                     });
 }
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)

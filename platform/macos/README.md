@@ -8,8 +8,15 @@ USB from Bluetooth), and start at login: `SMAppService.mainAppService`
 (ServiceManagement, macOS 13+) registers the app bundle as a login item,
 the Settings switch reads `status == SMAppServiceStatusEnabled` back, and if
 macOS reports `RequiresApproval` the app opens System Settings › General ›
-Login Items. Older macOS reports it unsupported and the switch is hidden. Not
-yet verified on a Mac. Since macOS 15 (Sequoia),
+Login Items. Older macOS reports it unsupported and the switch is hidden.
+
+The foreground application for automatic profiles (`docs/06-gui.md` §8.1)
+comes from `NSWorkspace.frontmostApplication` (`MacForegroundApp`), queried
+on the main thread. It reports the executable path, the name and the bundle
+id; a rule may name either the executable or the bundle id. It needs no
+Accessibility or Screen Recording permission.
+
+None of this is verified on a Mac yet. Since macOS 15 (Sequoia),
 `RegisterEventHotKey` rejects shortcuts whose only modifiers are Option or
 Option+Shift, so the UI should suggest chords that include Cmd or Ctrl. Per-app routing and capture report
 `isSupported() == false` until the design below is implemented and tested on

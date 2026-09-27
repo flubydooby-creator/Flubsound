@@ -6,6 +6,8 @@
 #include "platform/PlatformBridge.h"
 
 #include <cmath>
+#include <iterator>
+#include <utility>
 
 namespace flub::app::ui
 {
@@ -18,6 +20,8 @@ juce::String displayNameOf (const juce::String& executable)
         n = n.dropLastCharacters (4);
     return n;
 }
+
+constexpr int kFormRowHeight = 30, kFormLabelWidth = 90; // AutoProfileForm
 
 juce::String channelBadge (int channels)
 {
@@ -559,6 +563,125 @@ private:
 };
 
 // =============================================================================
+// AutoProfileForm - the fields of "Add automatic profile..."
+// =============================================================================
+AutoProfileForm::AutoProfileForm (EngineController& c)
+    : controller (c)
+{
+    setTitle ("New automatic profile");
+
+    // Applications seen in the foreground (newest first), then the ones
+    // playing audio; one entry per executable.
+    const auto offer = [this] (const juce::String& exe)
+    {
+        if (exe.trim().isEmpty())
+            return;
+        for (const auto& known : suggestions)
+            if (AppRouting::executablesMatch (known, exe))
+                return;
+        suggestions.add (exe.trim());
+    };
+    for (const auto& exe : controller.getRecentForegroundApps())
+        offer (exe);
+    for (const auto& app : controller.getRouting().getApps())
+        offer (app.executable);
+
+    application.setText (suggestions.isEmpty() ? juce::String() : suggestions[0], false);
+    application.setTextToShowWhenEmpty ("e.g. cs2.exe, Spotify or com.spotify.client", Palette::muted);
+    Style::describe (application, "Application", "Executable name (with or without .exe), full path, or macOS bundle id");
+    addAndMakeVisible (application);
+
+    for (int i = 0; i < suggestions.size(); ++i)
+        recent.addItem (displayNameOf (suggestions[i]), i + 1);
+    recent.setTextWhenNothingSelected (suggestions.isEmpty() ? "No applications seen yet" : "Pick a recent application...");
+    recent.setTextWhenNoChoicesAvailable ("No applications seen yet");
+    recent.setEnabled (! suggestions.isEmpty());
+    recent.onChange = [this]
+    {
+        const int index = recent.getSelectedId() - 1;
+        if (index >= 0 && index < suggestions.size())
+            application.setText (suggestions[index], false);
+    };
+    Style::describe (recent, "Recent applications", "Applications recently in the foreground or playing audio");
+    addAndMakeVisible (recent);
+
+    const int selected = juce::jlimit (0, juce::jmax (0, controller.getNumStrips() - 1), controller.getSelectedStrip());
+    for (int i = 0; i < controller.getNumStrips(); ++i)
+        strip.addItem (controller.getStripName (i), i + 1);
+    strip.setSelectedId (selected + 1, juce::dontSendNotification);
+    Style::describe (strip, "Strip", "The strip whose preset changes");
+    addAndMakeVisible (strip);
+
+    // Presets grouped like the preset menu (factory by category, then user).
+    const auto current = controller.getCurrentPresetId (selected);
+    juce::String heading;
+    for (const auto& p : controller.getPresetManager().getPresets())
+    {
+        const auto group = (p.isFactory ? juce::String() : juce::String ("User: ")) + p.category;
+        if (group != heading)
+        {
+            heading = group;
+            preset.addSectionHeading (group.isNotEmpty() ? group : juce::String ("User"));
+        }
+        presetIds.push_back (p.id);
+        preset.addItem (p.name, static_cast<int> (presetIds.size()));
+        if (p.id == current)
+            preset.setSelectedId (static_cast<int> (presetIds.size()), juce::dontSendNotification);
+    }
+    if (preset.getSelectedId() == 0 && ! presetIds.empty())
+        preset.setSelectedId (1, juce::dontSendNotification);
+    Style::describe (preset, "Preset", "The preset the strip plays while the application is in the foreground");
+    addAndMakeVisible (preset);
+
+    mode.addItem ("The preset's own mode", 1);
+    mode.addItem ("Music", 2);
+    mode.addItem ("Gaming", 3);
+    mode.setSelectedId (1, juce::dontSendNotification);
+    Style::describe (mode, "Mode", "Play the preset in its own mode, or force Music or Gaming mode");
+    addAndMakeVisible (mode);
+
+    Style::describe (restore, "Restore on exit",
+                     "On: the strip's previous preset (and unsaved edits) return when the application leaves the foreground. "
+                     "Off: the preset stays.");
+    addAndMakeVisible (restore);
+
+    const std::pair<juce::Label*, juce::Component*> labels[] = { { &applicationLabel, &application }, { &recentLabel, &recent },
+                                                                 { &stripLabel, &strip }, { &presetLabel, &preset }, { &modeLabel, &mode } };
+    const char* texts[] = { "Application", "Recent", "Strip", "Preset", "Mode" };
+    for (size_t i = 0; i < std::size (labels); ++i)
+    {
+        labels[i].first->setText (texts[i], juce::dontSendNotification);
+        labels[i].first->setFont (Theme::font (12.0f));
+        labels[i].first->setColour (juce::Label::textColourId, Palette::muted);
+        labels[i].first->attachToComponent (labels[i].second, true);
+    }
+    setSize (400, 6 * kFormRowHeight);
+}
+
+AutoProfileRule AutoProfileForm::getRule() const
+{
+    AutoProfileRule rule;
+    rule.executable = application.getText().trim();
+    rule.stripName = strip.getText();
+    const int index = preset.getSelectedId() - 1;
+    if (index >= 0 && index < static_cast<int> (presetIds.size()))
+        rule.presetId = presetIds[static_cast<size_t> (index)];
+    rule.mode = mode.getSelectedId() == 2 ? AutoProfileRule::Mode::Music
+                                          : (mode.getSelectedId() == 3 ? AutoProfileRule::Mode::Gaming : AutoProfileRule::Mode::Preset);
+    rule.restoreOnExit = restore.getToggleState();
+    return rule;
+}
+
+void AutoProfileForm::resized()
+{
+    auto r = getLocalBounds();
+    r.removeFromLeft (kFormLabelWidth); // the attached labels sit here
+    for (auto* field : std::initializer_list<juce::Component*> { &application, &recent, &strip, &preset, &mode })
+        field->setBounds (r.removeFromTop (kFormRowHeight).reduced (0, 3));
+    restore.setBounds (r.removeFromTop (kFormRowHeight));
+}
+
+// =============================================================================
 // RoutingPanel
 // =============================================================================
 RoutingPanel::RoutingPanel (EngineController& c)
@@ -762,6 +885,42 @@ void RoutingPanel::promptForExecutable (const juce::String& stripName)
                                                                                 safe->controller.getRouting().setRoute (exe, stripName);
                                                                                 safe->refreshRouting();
                                                                             }
+                                                                        }),
+                             true);
+}
+
+void RoutingPanel::showAddAutoProfileDialog()
+{
+    if (! controller.isAutoProfileSupported())
+        return;
+
+    // The form outlives the window: the modal callback owns it, and the
+    // window (deleted right after the callback) only detaches it.
+    auto form = std::make_shared<AutoProfileForm> (controller);
+    auto* window = new juce::AlertWindow ("Add automatic profile",
+                                          "While the application is in the foreground, the strip plays the preset.",
+                                          juce::MessageBoxIconType::NoIcon, this);
+    window->addCustomComponent (form.get());
+    window->addButton ("Add", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    // Return in the application field adds too (the editor consumes the key).
+    form->application.onReturnKey = [w = juce::Component::SafePointer<juce::AlertWindow> (window)]
+    {
+        if (w != nullptr)
+            w->exitModalState (1);
+    };
+
+    juce::Component::SafePointer<RoutingPanel> safe (this);
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safe, form] (int result)
+                                                                        {
+                                                                            if (safe == nullptr || result != 1)
+                                                                                return;
+                                                                            if (! safe->controller.addAutoProfileRule (form->getRule()))
+                                                                                juce::AlertWindow::showMessageBoxAsync (
+                                                                                    juce::MessageBoxIconType::WarningIcon, "Add automatic profile",
+                                                                                    "Enter the application's executable name and choose a preset.", "OK",
+                                                                                    safe.getComponent());
+                                                                            safe->refreshRouting();
                                                                         }),
                              true);
 }

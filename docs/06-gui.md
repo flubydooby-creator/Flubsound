@@ -41,7 +41,8 @@
 | Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
 | Global hotkeys | Implemented on Windows (`RegisterHotKey`), macOS (Carbon `RegisterEventHotKey`) and Linux: `XGrabKey` under X11, the xdg-desktop-portal GlobalShortcuts interface in Wayland sessions ("unsupported" when the desktop has no such portal) | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
-| Per-app routing UI | Implemented. Backend support differs per OS (§8). The routing model (`AppRouting`) is tested with a fake router and fake captures (`tests/app/test_app_routing.cpp`); `RoutingPanel` itself is not | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
+| Per-app routing UI | Implemented. Backend support differs per OS (§8). The routing model (`AppRouting`) is tested with a fake router and fake captures (`tests/app/test_app_routing.cpp`); `RoutingPanel`'s strip rows are not (its *Auto profiles* list is, below) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
+| Automatic profiles (foreground app → preset) | Implemented (roadmap 2.5, §8.1): rules in the routing panel's *Auto profiles* list. Foreground detection on Windows (`GetForegroundWindow`), macOS (`NSWorkspace.frontmostApplication`) and Linux X11 (`_NET_ACTIVE_WINDOW` + `_NET_WM_PID`); unsupported under Wayland, which the panel says. The decision logic, the controller (with a fake foreground app), persistence and the list / add form are tested by `flub_app_tests` (`tests/app/test_app_auto_profile.cpp`), the X11 query under Xvfb by `flub_tests` (`tests/test_platform_linux.cpp`). The Windows path has been compiled (MinGW) but not run, the macOS path not yet built or run on a Mac | `app/Source/engine/AutoProfile.h`, `EngineController.*`, `ui/RoutingPanel.*`, `app/Source/platform/PlatformServices_*` |
 | Headless screenshot driver (incl. `--device`) | Implemented; used by CI: the `app` job's Linux step renders three screenshots under `xvfb-run` and uploads them as the `screenshots` artifact (green in CI run 36247109446; nothing is compared against a reference image) | `shell/ScreenshotDriver.*`, `.github/workflows/ci.yml` |
 | Onboarding wizard | **Roadmap** 1.6 (device check, OEM enhancements, headphones vs speakers) and 3.6 (wizard) | — |
 | Custom plug-in editor sharing these components | **Roadmap** 2.9. Today the plug-in uses JUCE's generic editor plus a toolbar (§10) | `plugin/Source/PluginEditor.*` |
@@ -63,34 +64,42 @@ The visual language rests on five decisions:
 
 ### 2.1 Palette tokens
 
-`ui/Theme.h`, namespace `Palette`:
+`ui/Theme.h`, namespace `Palette`. Every colour the UI draws with is one of these tokens; nothing else is hard-coded. The names refer to the active theme's `PaletteTokens`: *Settings › General › Theme* switches between the standard dark theme and a high-contrast one (`Theme::setTheme`, §2.8).
 
-| Token | Colour | Used for |
-|---|---|---|
-| `background` | `#0E1014` | Content background; edge fades of the module rack |
-| `well` | `#0A0C10` | Meter wells, plot backgrounds, text-editor fill |
-| `panel` | `#161A21` | Panel base. `drawPanel()` fills a vertical gradient from `panel.brighter (0.035)` at the top to `panel` 160 px down, then draws a 1 px `border` |
-| `panelRaised` | `#1C212A` | Buttons, combo boxes, the advice banner |
-| `panelHover` | `#222834` | Hover states |
-| `border` | `#232A35` | 1 px panel borders and dividers |
-| `borderStrong` | `#2F3847` | Control outlines, knob and slider tracks |
-| `grid` | `#1D232D` | Grid lines of the meters and the history |
-| `text` | `#E6E9EF` | Primary text, knob pointers, the EQ curve |
-| `muted` | `#8A93A3` | Captions, secondary text, the input (pre) spectrum |
-| `faint` | `#5A6373` | Axis labels, empty states, disabled controls |
-| `teal` | `#22D3EE` | **Music** accent |
-| `magenta` | `#E879F9` | **Gaming** accent; surround channel badges (always magenta) |
-| `amber` | `#FBBF24` | Warnings (card notes, hotkey errors, CPU > 70 %), Bypass when on, "preset modified" dot, advice banner, governor limiting. It is also the *warn* status colour of the standard palette (gain-reduction bars, clipper, correlation < 0.3) |
-| `red` | `#F87171` | The *hot* status colour of the standard palette (app-chip routing errors, correlation < 0, loudness-panel TP over −1 dBTP, clipper over budget, muted-strip icon) |
-| `green` | `#34D399` | "Safety governor OK". It is also the *safe* status colour of the standard palette (correlation ≥ 0.3) |
-| `dynamicEq` | `#FBBF24` | Dynamic-EQ ghost markers and the Dyn band dot |
+| Token | Standard | High contrast | Used for |
+|---|---|---|---|
+| `background` | `#0E1014` | `#000000` | Content background; edge fades of the module rack |
+| `well` | `#0A0C10` | `#000000` | Meter wells, plot backgrounds, text-editor fill |
+| `panel` | `#161A21` | `#0C0D10` | Panel base. `drawPanel()` fills a vertical gradient from `panel.brighter (0.035)` at the top to `panel` 160 px down, then draws a 1 px `border` |
+| `panelRaised` | `#1C212A` | `#16181C` | Buttons, combo boxes, the advice banner |
+| `panelHover` | `#222834` | `#262A31` | Hover states |
+| `menu` | `#171B22` | `#0C0D10` | Popup menus |
+| `tooltip` | `#1F2530` | `#16181C` | Tooltips, EQ node readouts |
+| `tabOn` | `#262D3A` | `#2A2F38` | Selected "tab" button |
+| `border` | `#232A35` | `#9AA3B2` | 1 px panel borders and dividers |
+| `borderStrong` | `#2F3847` | `#C8CED8` | Control outlines |
+| `track` | `#2F3847` | `#606878` | Knob and slider tracks (in high contrast ≥ 3:1 both against the panel and against the accent value arc) |
+| `grid` | `#1D232D` | `#3A404A` | Grid lines of the meters and the history |
+| `gridMinor`, `gridMajor` | `#141920`, `#232B37` | `#262B33`, `#4A5260` | Analyser frequency lines (minor, decades) |
+| `scrollThumb`, `scrollThumbHover` | `#343C4A`, `#4A5466` | `#9AA3B2`, `#D0D6E0` | Scrollbar thumb |
+| `text` | `#E6E9EF` | `#FFFFFF` | Primary text, knob pointers, the EQ curve |
+| `muted` | `#8A93A3` | `#E2E6EE` | Captions, secondary text, the input (pre) spectrum |
+| `faint` | `#7F899B` | `#C3C9D4` | Axis labels, empty states, disabled controls. Was `#5A6373` (2.9:1 on a panel); raised to meet WCAG AA |
+| `teal` | `#22D3EE` | `#3DE8FF` | **Music** accent |
+| `magenta` | `#E879F9` | `#FFA0FF` | **Gaming** accent; surround channel badges (always magenta) |
+| `amber` | `#FBBF24` | `#FFD23F` | Warnings (card notes, hotkey errors, CPU > 70 %), Bypass when on, "preset modified" dot, advice banner, governor limiting. It is also the *warn* status colour of the standard palette (gain-reduction bars, clipper, correlation < 0.3) |
+| `red` | `#F87171` | `#FF8080` | The *hot* status colour of the standard palette (app-chip routing errors, correlation < 0, loudness-panel TP over −1 dBTP, clipper over budget, muted-strip icon) |
+| `green` | `#34D399` | `#4CF5A8` | "Safety governor OK". It is also the *safe* status colour of the standard palette (correlation ≥ 0.3) |
+| `dynamicEq` | `#FBBF24` | `#FFD23F` | Dynamic-EQ ghost markers and the Dyn band dot |
+| `meterSafe`, `meterHot` | `#34D399`, `#EF4444` | `#4CF5A8`, `#FF5A5A` | Ends of the standard meter gradient (§2.3) |
+| `knobTop`, `knobBottom`, `knobRim` | `#2A313D`, `#171B22`, `#343D4C` | `#2A2F38`, `#16181C`, `#C8CED8` | Knob body gradient and outline |
+| `highlight`, `shadow` | white, black | white, black | Translucent sheens and drop shadows |
+| `eqBands` | 10 colours | same | EQ band nodes (`EqCurveEditor::bandColour`) |
 
-A few fixed colours live in `ui/FlubLookAndFeel.cpp`:
+**Contrast** (WCAG 2.x, `Theme::contrastRatio`; checked for every pair by `tests/app/test_app_accessibility.cpp`):
 
-- popup menus `#171B22`;
-- tooltips `#1F2530`;
-- scrollbar thumb `#343C4A`;
-- knob body gradient `#2A313D` → `#171B22`, outline `#343D4C`.
+- *Standard:* every text token (`text`, `muted`, `faint`, the accents and status colours) ≥ 4.5:1 on `background`, `well`, `panel` and the top of the panel gradient; `text` and `muted` ≥ 4.5:1 on `panelRaised`, `panelHover`, `menu` and `tooltip`. Disabled controls (drawn in `faint` on raised surfaces) are exempt in WCAG.
+- *High contrast:* every text token ≥ 4.5:1 on every surface (`text` and `muted` ≥ 7:1); borders, tracks, the scrollbar thumb, knob rims, both meter palettes and the EQ band colours ≥ 3:1 on the surfaces they are drawn on.
 
 The `DocumentWindow` background is `#0F1115` (`shell/MainWindow.h`), but it is never visible behind the opaque `MainComponent`.
 
@@ -126,7 +135,7 @@ The `DocumentWindow` background is `#0F1115` (`shell/MainWindow.h`), but it is n
 
 | Palette | safe | warn | hot | Selection |
 |---|---|---|---|---|
-| Standard | `#34D399` | `#FBBF24` | `#EF4444` | Settings › Processing › Meter colours |
+| Standard | `meterSafe` `#34D399` | `amber` `#FBBF24` | `meterHot` `#EF4444` (high-contrast theme: `#4CF5A8` / `#FFD23F` / `#FF5A5A`) | Settings › Processing › Meter colours |
 | Colour-blind safe (Okabe–Ito) | `#56B4E9` sky blue | `#F0E442` yellow | `#D55E00` vermillion | same; persisted as `ui.meterPalette = 1` |
 
 - **Zones** (`Theme::meterColourForDb`, used for peak-hold lines): ≥ −3 dBFS is *hot*, ≥ −12 dBFS is *warn*, anything lower is *safe*.
@@ -144,7 +153,7 @@ The `DocumentWindow` background is `#0F1115` (`shell/MainWindow.h`), but it is n
 
 ### 2.4 Categorical colours: EQ bands
 
-`EqCurveEditor::bandColour()`:
+`EqCurveEditor::bandColour()` (the `Palette::eqBands` token; both themes use the same colours, each ≥ 3:1 on the high-contrast black):
 
 | Band | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -236,6 +245,8 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
 - **Meters.** A colour-blind safe palette (§2.3) for the level meters and the status colours of the loudness panel and routing rows.
 - **Tooltips** appear after 650 ms. They are disabled in headless screenshot runs.
 - **HiDPI.** All drawing is vector. The cached analyser grid and EQ layer are rendered at the physical pixel scale and re-rendered when that scale changes.
+- **UI scale.** *Settings › General › UI scale*: *Follow system* (default: only the OS's display scaling) or 75, 90, 100, 110, 125, 150, 175 or 200 % (`AppSettings::getUiScalePercent`, key `ui.scalePercent`; other values are clamped to 75–200 %). `Theme::applyUiScale` sets `juce::Desktop::setGlobalScaleFactor`, so every window, dialog, menu and tooltip scales, text is laid out at the physical resolution (crisp) and mouse hit-testing uses the scaled coordinates. It applies at once and at start-up (before the main window restores its position). Windows keep their size in logical pixels, so they grow on screen: the main window (design minimum 1100 × 700) and the settings dialog (720 × 580) register their minimum with `Theme::setMinimumWindowSize`, which caps it at the display's user area and shrinks a window that no longer fits (`Theme::minimumWindowSize`).
+- **High contrast.** *Settings › General › Theme › High contrast* (key `ui.theme`): black surfaces, white text, bright borders and a mid-grey knob track (§2.1), meeting WCAG AA. `Theme::setTheme` re-points `Palette::`, re-applies the colours of every `FlubLookAndFeel` (the mode accent follows), re-maps colours that components set explicitly from the old palette (`Theme::remapComponentColours`) and sends every window a look-and-feel change, so cached layers are redrawn; nothing needs a restart. The colour-blind meter palette (§2.3) combines with either theme.
 
 **Gaps** (**Roadmap** 3.6, accessibility audit)
 
@@ -244,7 +255,7 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
   - the governor chip and inner arc (green/amber; the chip also states its status in words);
   - the CPU readout (amber over 70 %);
   - the preset-modified dot and the card warning notes (amber).
-- There is no in-app UI scale setting and no high-contrast theme.
+- The high-contrast theme is chosen in the app only; it does not follow the OS's high-contrast / increased-contrast setting.
 
 ---
 
@@ -542,7 +553,7 @@ flowchart LR
 | `ModuleCard` ear | 10 Hz, only while held | safety net: ends the audition if the button is no longer down, the card is hidden or the app lost the foreground |
 | `SettingsDialog` | 2 Hz | live latency, CPU and capture-stream text (Processing); device-profile text (Audio) |
 | `AudioEngineHost` | 5 Hz | structural re-prepare poll (latency profile, layout) → `Change::Engine` |
-| `EngineController` | 2 Hz | CPU-overload watchdog poll (`OverloadWatchdog`, §6.1) → `Change::Device` when an overload starts or ends, and when the opt-in `AutoLoadReducer` stepped the latency profile down; strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
+| `EngineController` | 2 Hz | CPU-overload watchdog poll (`OverloadWatchdog`, §6.1) → `Change::Device` when an overload starts or ends, and when the opt-in `AutoLoadReducer` stepped the latency profile down; foreground-application poll for automatic profiles (§8.1; skipped when unsupported or switched off) → `Change::Preset` / `Change::Routing` when a rule applies or ends; strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
 | `AppRouting` worker | every 2 s while routes exist, captures run or live updates are on; immediately on `refresh()` | session enumeration, endpoint moves |
 | `AppSettings` | writes debounced 2 s after a change | settings file |
 | `ScreenshotDriver` | 60 Hz | offline rendering paced in real time (§11) |
@@ -957,6 +968,16 @@ Row heights adapt between 14 and 22 px.
 
   If it does not fit, it collapses to the one-line *"Per-app routing unavailable - why?"* (§3.3).
 - **Live updates.** While the panel is visible it asks `AppRouting` for live session updates, so the worker enumerates every 2 s even without routes.
+- **Auto profiles** (below the strip rows, §8.1). Caption `AUTO PROFILES` with the switch *Follow the app in front* (all rules on / off, persisted). One line per rule, e.g. *cs2 -> Game: Competitive FPS (Gaming), restores on exit* (or *kept on exit*; *missing preset …* when the preset was deleted). The active rule is drawn bold in the accent. Each line has a remove button (*Remove the automatic profile for cs2*). *No automatic profiles…* when the list is empty. Under the list: what is active (*cs2 in front: Game plays Competitive FPS (restored when it leaves)*) or the last error. Where the foreground app cannot be detected (Wayland, no X display, no platform services) that reason is shown in amber instead, and the switch and **Add automatic profile…** are disabled.
+- **Add automatic profile…** opens a dialog (`AutoProfileForm` in an `AlertWindow`) with these fields:
+  - *Application*: an executable name, a path or a macOS bundle id. It is pre-filled with the application most recently in front.
+  - *Recent*: the applications recently in front (newest first, never Flubsound), then the ones playing audio. Picking one fills *Application*.
+  - *Strip*: defaults to the selected strip.
+  - *Preset*: grouped like the preset menu; defaults to the strip's current preset.
+  - *Mode*: the preset's own, Music or Gaming.
+  - *Restore the previous preset when it leaves* (default off).
+
+  A new rule replaces an existing rule for the same application, because only the first match could ever apply.
 
 ### 6.11 `SettingsDialog`
 
@@ -972,7 +993,7 @@ Row heights adapt between 14 and 22 px.
 | **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · every guidance message, one bulleted paragraph each; the box grows with its text and the page scrolls when it is longer than the dialog. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
 | **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare (`EngineController::setLatencyProfile()`). Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Reduce processing load automatically when the CPU overloads** (switch, default off; §6.1), and **Automatic change**: what it changed (or "None") with a **Restore** button, enabled only after an automatic step. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, "device in + engine + device out (+ app capture) = total", and a CPU line: load, device xruns when reported, and "OVERLOAD now (peak x %)" or "n overloads this session". **Per-app capture streams** block: one wrapped line per running capture, from its `DriftCompensatedFifo::Stats` (`EngineController::getCaptureStreams()`), e.g. `Discord (Chat): fill 21.3 / 20.0 ms, drift +42 ppm  -  1 underrun, 0 overflows` (application name from `AppRouting`, else `Process <pid>`; `priming` or `stopped` when not streaming; dropped frames when any), or a note that there are none |
 | **Hotkeys** | *Enable system-wide hotkeys* switch. One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. Next to each row, its registration status (`HotkeyManager::getStatus`, §7.2): "Registered" (green), "In use / could not register" or "Declined by the desktop" (amber), "Bound by the desktop as <key>", "Waiting for the desktop", "Not assigned", "Off" or "Not supported here". The page polls it at 4 Hz while visible, so answers the desktop gives later appear by themselves. The status line below reads one of: "All shortcuts are registered", "Shortcuts are switched off", "Some shortcuts are not active (see each row) …", "Waiting for the desktop to confirm the shortcuts …", "The desktop bound some shortcuts to other keys …", an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
-| **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
+| **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; **Appearance**: *UI scale* (Follow system, 75–200 %) and *Theme* (Standard (dark) / High contrast), both applied app-wide at once and persisted (§2.8); paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
 
 ### 6.12 `ExportDialog` — Export / batch process
 
@@ -1083,11 +1104,11 @@ Row heights adapt between 14 and 22 px.
 
 | Method | What happens |
 |---|---|
-| **Endpoint routing** | `AppAudioRouter::setAppEndpoint` points the app at the strip's virtual endpoint. The default endpoint names are `Flubsound <Strip>` (Windows / macOS) and `flubsound_<strip>` (Linux null sink); both can be overridden per strip in `AppSettings`. The strip is fed from that endpoint's capture / monitor side through the device inputs. Endpoints are restored to the system default on shutdown |
+| **Endpoint routing** | `AppAudioRouter::setAppEndpoint` points the app at the strip's virtual endpoint. The default endpoint names are `Flubsound <Strip>` (Windows / macOS) and `flubsound_<strip>` (Linux null sink); both can be overridden per strip in `AppSettings`. The strip is fed from that endpoint's capture / monitor side through the device inputs. The OS remembers the move per application, so Flubsound undoes every move it made: when the app is un-mapped or the method changes, and for apps still running at shutdown. The executables it moved are kept in the settings until then, so an app that exited while routed is moved back to the system default the next time it appears un-mapped, in the same run or a later one |
 | **Process capture** | `ProcessLoopbackCapture` captures the app's process tree straight into the strip through a `DriftCompensatedFifo`. Its extra FIFO latency appears as "app capture" in the latency readouts |
 | **Automatic** (default) | Endpoint routing if supported, else process capture if supported, else disabled |
 
-A capture that fails to start is retried on the next two passes, then given up until the process goes away; its last error stays on the app's chip. The model (mapping, endpoint moves once per process, restoring endpoints on un-mapping and shutdown, captures, errors, persistence) is tested with a fake router in `tests/app/test_app_routing.cpp`.
+A capture that fails to start is retried on the next two passes, then given up until the app is re-mapped, the method changes, another capture stops (freeing a slot) or the process goes away; its last error stays on the app's chip. A worker pass that was computed before the routes, method or strip layout changed is discarded, and a fresh pass follows at once, so no capture starts from an outdated mapping. The model (mapping, endpoint moves once per process, restoring endpoints on un-mapping and shutdown and for apps that exited while routed, captures, retries, discarded outdated passes, errors, persistence) is tested with a fake router in `tests/app/test_app_routing.cpp`.
 
 ```mermaid
 flowchart TD
@@ -1113,6 +1134,31 @@ flowchart TD
 | macOS | Router object present, but `isSupported()` is false | Not yet (**Roadmap** 3.2: Core Audio process taps, macOS 14.2+) | Not yet (same) | System Settings › Sound |
 
 **When nothing works.** The panel explains why (§6.10). The user can still pick a Flubsound output device per application in the OS settings, or use any virtual cable that feeds a strip through the device input (Settings › Processing › Device input).
+
+### 8.1 Automatic profiles (foreground application → preset)
+
+**Model.** A rule reads *"while `<application>` is in the foreground, the `<strip>` strip plays `<preset>`"*. It can optionally force Music or Gaming mode, and it chooses whether the strip's previous state returns when the application leaves (*restore on exit*, default off). Rules are an ordered list persisted in `AppSettings` (`autoProfile.rules`, plus the switch `autoProfile.enabled`, default on). The executable matches like a route (`AppRouting::executablesMatch`) or equals the macOS bundle id, and the first matching rule wins.
+
+**Polling and decisions.** `EngineController` polls `platform::ForegroundApp` from its 2 Hz message-thread timer (`pollForegroundApp`). The pure `AutoProfileSwitcher` (`app/Source/engine/AutoProfile.h`, no platform calls, time counted in polls) decides:
+
+- **Hysteresis.** A new foreground application, or none, must stay in front for 2 consecutive polls (1 s) before anything changes, so alt-tabbing or a notification does not flap presets.
+- **One rule at a time.** A newly stable rule first ends the active one (restoring if that rule asks), then applies.
+- **Holding.** Flubsound's own window in front (the user is tweaking the auto-loaded preset) and polls without an answer (no focused window, a process that cannot be inspected) keep the current state and do not reset a count in progress.
+- **Apply.** The rule's preset loads like a preset from the menu, into the bank that is heard. The mode override follows. The strip keeps both banks, the active bank, the preset id and its *modified* state for a later restore.
+- **Restore.** Both banks come back, and so do the active bank and the preset with its *modified* state. Application state that shares the store (Bypass All, latency profile, loudness-matched bypass) stays as it is now. Quitting while a restoring rule is active restores first, so the saved state is the user's own.
+- **Manual change cancels.** A preset chosen by hand on the rule's strip cancels the rule, and nothing is restored later. This covers the preset menu, next / previous (hotkeys too), saving a preset, and a change made outside the controller such as *Reset strip*, which is noticed on the next poll. The rule is not applied again until another application, or none, has been stable in front.
+- **Edits.** An edited or removed active rule ends without restoring, and so does switching the feature off. A rule whose preset no longer exists shows the error under the list instead of loading.
+
+Everything runs on the message thread as parameter writes, like a preset load. Nothing new happens on the audio thread.
+
+**Per-OS foreground detection** (`ForegroundApp`, `app/Source/platform/PlatformServices_*`):
+
+| OS | How | Notes |
+|---|---|---|
+| Windows | `GetForegroundWindow` → `GetWindowThreadProcessId` → `OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION)` + `QueryFullProcessImageNameW` (handle closed at once) | Games run as administrator are still recognised; protected processes and the secure desktop are not (no answer). A UWP app in front is an `ApplicationFrameHost.exe` frame: the process of its hosted child window is reported instead (retried each poll while the app is still starting). The path is cached while the same window and process stay in front |
+| macOS | `NSWorkspace.frontmostApplication` | Executable path and bundle id; needs no Accessibility or Screen Recording permission |
+| Linux (X11) | `_NET_ACTIVE_WINDOW` on the root window → `_NET_WM_PID` → `/proc/<pid>/exe` (libX11 loaded with `dlopen`, a private display connection) | Wine / Proton programs are reported by their Windows executable (argv[0] of the loader), so a rule for `cs2.exe` matches on Linux too. Another user's process falls back to `comm`. A window destroyed mid-query is ignored |
+| Linux (Wayland) | Unsupported: Wayland does not let applications see which window is in the foreground | The panel shows the reason and disables adding rules |
 
 ---
 
@@ -1184,7 +1230,7 @@ pluginval in CI is part of the same roadmap item.
 
 ```
 FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds S] [--scale F]
-             [--device "output device name"]
+             [--theme standard|high-contrast] [--device "output device name"]
 ```
 
 | Option | Default | Validation | Effect |
@@ -1193,7 +1239,8 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
 | `--mode music\|gaming` | `music` | anything else is an error | Scene set-up (below) |
 | `--size WxH` | `1280x820` | 64–8192 per side | Exact content size; bypasses the 1100 × 700 minimum |
 | `--seconds S` | `3.5` | clamped 0.2–60 | Run time before the capture. The default is > 3 s so the 3 s short-term loudness window is full |
-| `--scale F` | `1` | clamped 0.5–4 | Snapshot scale, e.g. 2 for a HiDPI check |
+| `--scale F` | `1` | clamped 0.5–4 | Snapshot scale, e.g. 2 for a HiDPI check or 1.5 for the 150 % UI scale. It is also applied as the UI scale (`Theme::applyUiScale`, clamped to 75–200 %); `--size` stays in logical pixels, so the image is `--size` × F, exactly what the window shows at that UI scale |
+| `--theme standard\|high-contrast` | `standard` | anything else is an error | Palette (§2.1), applied before the window is created (parsed in `FlubsoundApplication.cpp`) |
 | `--device "name"` | none | must be followed by a name | `EngineController::simulateOutputDevice (name, engine rate, 2 channels)`. The device-profile match, advice banner and master-ceiling cap then behave as if that output were open. It never overrides a real device |
 
 - **Exit codes:** 0 success, 1 the PNG could not be written, 2 bad arguments.
@@ -1218,6 +1265,8 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | What | Key / mechanism | Default |
 |---|---|---|
 | Meter palette | `ui.meterPalette` (0 standard, 1 colour-blind) | 0 |
+| UI scale | `ui.scalePercent` (0 follow the system, else 75–200) | 0 |
+| Theme | `ui.theme` (`standard` / `high-contrast`) | standard |
 | Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range"`; range clamped 6–24 | `"1,1,1,1,12"` |
 | Window position and size | `DocumentWindow::getWindowStateAsString()` | centred 1280 × 820 |
 | Selected strip, master enable | `AppSettings` | 0 (Game), enabled |
@@ -1228,6 +1277,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Start with the OS | `ui.startWithOs`, a copy of the OS entry's state (§7.1) | off |
 | Reduce processing load automatically when the CPU overloads | `engine.reduceLoadOnOverload` (§6.1); a profile it stepped to is saved like a manual one, the Restore offer is per session | off |
 | Routing method and routes; preferred output device | `AppSettings` | Automatic; none |
+| Automatic profiles: switch and rules (application, strip, preset id, mode, restore on exit; in order) | `autoProfile.enabled`, `autoProfile.rules` (§8.1) | on; none |
 
 **Not persisted:** banner dismissal (per session and device), the expanded card, the selected EQ band, the Settings page and the Export / batch process dialog's inputs, output folder and options.
 
@@ -1239,6 +1289,7 @@ These describe the behaviour of the current code.
 
 - **Hotkeys on Wayland** need the desktop's GlobalShortcuts portal; without it they are reported unsupported. Triggers are compared by English key names, so a desktop that describes the requested key in another language shows as "Bound by the desktop as Strg+Alt+Hoch" (§7.2).
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
+- **Automatic profiles on Wayland** are unsupported: Wayland does not let applications see which window is in the foreground (§8.1). X11 needs an EWMH window manager that publishes `_NET_ACTIVE_WINDOW` and clients that set `_NET_WM_PID`. On Windows and macOS the foreground detection has not been run yet (compiled with MinGW only / not yet built on a Mac).
 - **Accessibility gaps** are listed in §2.8.
 - **Export / batch process** (§6.12) renders one file at a time (the CLI's `batch --jobs N` runs several in parallel), has no progress within a file, and does not resample (outputs keep the input's rate). Outputs are always stereo WAV (float32 / PCM24 / PCM16) or FLAC (24 / 16-bit); there is no MP3 / Ogg / AAC output. Cancel waits for the file being rendered to finish.
 
@@ -1252,7 +1303,7 @@ These describe the behaviour of the current code.
 | R4.2 | Spectrum, waveform, LUFS / true-peak / RMS meters | §6.4–§6.8 | `ui/SpectrumAnalyzer.*`, `ui/WaveformHistory.*`, `ui/LevelMeters.*`, `ui/LoudnessPanel.*` |
 | R4.3 | Music and Gaming preset system (UI side) | §6.1, §7.1 | `ui/HeaderBar.*`, `shell/TrayIcon.*` |
 | R4.4 | System tray + global hotkeys | §7 | `shell/TrayIcon.*`, `shell/HotkeyManager.*` |
-| R4.5 | Per-application profiles and routing | §6.10, §8 | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
+| R4.5 | Per-application profiles and routing | §6.10, §8, §8.1 (automatic profiles) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*`, `app/Source/engine/AutoProfile.h` |
 | R4.6 | Virtual audio device / cable support | §6.11 (Settings › Processing: **Device input**, with *Automatic (virtual cables / loopback only)* / *Always process the device input* / *Off*, and **Input feeds strip**), §8 (endpoint routing to the `Flubsound <Strip>` / `flubsound_<strip>` endpoints). The virtual devices themselves are designs (`platform/windows/driver/README.md`, `platform/macos/README.md`); the Linux null sinks exist (`platform/linux/`) | `ui/SettingsDialog.*` (`ProcessingPage`), `engine/EngineController.*` (`setDeviceInputMode`, `setDeviceInputStrip`, `looksLikeLoopbackDevice`: Flubsound, VB-Audio / "CABLE Output", VoiceMeeter, BlackHole, Soundflower, "loopback"), `engine/AudioEngineHost.*` (`setDeviceInputMap`) |
 | R2.10 | Per-module bypass + A/B | §6.1, §6.9 | `ui/HeaderBar.*`, `ui/ModuleCard.*` |
 | R3.4 | Boost Intensity 0–100 % | §6.3 | `ui/BoostPanel.*` |

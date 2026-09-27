@@ -713,6 +713,38 @@ public:
         };
         addAndMakeVisible (revealSettings);
         addAndMakeVisible (revealPresets);
+
+        // Appearance: both apply at once, app-wide, and are remembered.
+        scaleBox.addItem ("Follow system", kFollowSystemId);
+        for (const int percent : { 75, 90, 100, 110, 125, 150, 175, 200 })
+            scaleBox.addItem (juce::String (percent) + " %", percent);
+        const int scale = settings.getUiScalePercent();
+        if (scale != AppSettings::kUiScaleFollowSystem && scaleBox.indexOfItemId (scale) < 0)
+            scaleBox.addItem (juce::String (scale) + " %", scale); // a value typed into the settings file
+        scaleBox.setSelectedId (scale == AppSettings::kUiScaleFollowSystem ? kFollowSystemId : scale, juce::dontSendNotification);
+        scaleBox.setTitle ("UI scale");
+        scaleBox.setTooltip ("Size of the whole interface. Follow system uses only the operating system's display scaling.");
+        scaleBox.onChange = [this]
+        {
+            const int id = scaleBox.getSelectedId();
+            const int percent = id == kFollowSystemId ? AppSettings::kUiScaleFollowSystem : id;
+            controller.getSettings().setUiScalePercent (percent);
+            Theme::applyUiScale (percent);
+        };
+
+        themeBox.addItem ("Standard (dark)", 1);
+        themeBox.addItem ("High contrast", 2);
+        themeBox.setSelectedId (settings.getHighContrast() ? 2 : 1, juce::dontSendNotification);
+        themeBox.setTitle ("Theme");
+        themeBox.setTooltip ("High contrast: black surfaces, white text and bright borders (WCAG AA contrast)");
+        themeBox.onChange = [this]
+        {
+            const bool highContrast = themeBox.getSelectedId() == 2;
+            controller.getSettings().setHighContrast (highContrast);
+            Theme::setTheme (highContrast ? UiTheme::HighContrast : UiTheme::Standard);
+        };
+        addAndMakeVisible (scaleBox);
+        addAndMakeVisible (themeBox);
     }
 
     /** Shows the OS's ACTUAL start-up entry (the user may have removed it in
@@ -729,6 +761,7 @@ public:
     void paint (juce::Graphics& g) override
     {
         drawSectionTitle (g, startupTitle, "Start-up");
+        drawSectionTitle (g, appearanceTitle, "Appearance");
         drawSectionTitle (g, filesTitle, "Files");
         if (autoStartError.isNotEmpty())
         {
@@ -744,6 +777,9 @@ public:
             g.setColour (Palette::muted);
             g.drawFittedText (value, area, juce::Justification::centredLeft, 1, 0.7f);
         };
+        g.setColour (Palette::text.withAlpha (0.88f));
+        g.drawText ("UI scale", scaleLine, juce::Justification::centredLeft, true);
+        g.drawText ("Theme", themeLine, juce::Justification::centredLeft, true);
         line (settingsLine, "Settings file", controller.getSettings().getFile().getFullPathName());
         line (presetsLine, "User presets", controller.getPresetManager().getUserPresetFolder().getFullPathName());
         g.setColour (Palette::faint.brighter (0.2f));
@@ -771,6 +807,14 @@ public:
         startMinimised.setBounds (r.removeFromTop (26).withWidth (360));
         r.removeFromTop (6);
         closeToTray.setBounds (r.removeFromTop (26).withWidth (360));
+        r.removeFromTop (22);
+        appearanceTitle = r.removeFromTop (22);
+        r.removeFromTop (10);
+        scaleLine = r.removeFromTop (kRowHeight);
+        scaleBox.setBounds (scaleLine.withTrimmedLeft (kCaptionWidth).withWidth (200).reduced (0, 2));
+        r.removeFromTop (4);
+        themeLine = r.removeFromTop (kRowHeight);
+        themeBox.setBounds (themeLine.withTrimmedLeft (kCaptionWidth).withWidth (200).reduced (0, 2));
         r.removeFromTop (22);
         filesTitle = r.removeFromTop (22);
         r.removeFromTop (10);
@@ -813,7 +857,9 @@ private:
     juce::Rectangle<int> autoStartErrorArea;
     IconButton revealSettings { "Show the settings file", Icons::external(), IconButton::Style::Framed };
     IconButton revealPresets { "Show the user preset folder", Icons::external(), IconButton::Style::Framed };
-    juce::Rectangle<int> startupTitle, filesTitle, settingsLine, presetsLine, versionLine;
+    static constexpr int kFollowSystemId = 1; // other UI scale items use their percentage as id
+    juce::ComboBox scaleBox, themeBox;
+    juce::Rectangle<int> startupTitle, appearanceTitle, filesTitle, settingsLine, presetsLine, versionLine, scaleLine, themeLine;
 };
 
 // =============================================================================
@@ -879,7 +925,10 @@ juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Co
     options.resizable = true;
     auto* window = options.launchAsync();
     if (window != nullptr)
+    {
         window->setResizeLimits (kMinWidth, kMinHeight, 1600, 1200);
+        Theme::setMinimumWindowSize (*window, { kMinWidth, kMinHeight }); // never larger than the screen at a large UI scale
+    }
     return window;
 }
 

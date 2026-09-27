@@ -71,6 +71,7 @@ public:
     ~TempFolder() { folder.deleteRecursively(); }
 
     juce::File file (const char* name) const { return folder.getChildFile (name); }
+    juce::File file (const juce::String& name) const { return folder.getChildFile (name); }
 
 private:
     juce::File folder;

@@ -184,7 +184,7 @@ public:
         // (another application, or none) was stable in front.
         if (suppressed >= 0 && target != suppressed)
             suppressed = -1;
-        if (target == active || target == suppressed)
+        if (target == active || (suppressed >= 0 && target == suppressed)) // (-1 is "no rule", not "suppressed")
             return actions;
 
         if (const auto* current = getActiveRule())

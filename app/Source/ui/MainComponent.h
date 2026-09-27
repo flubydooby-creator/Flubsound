@@ -25,6 +25,11 @@
 // polling); structural events arrive through EngineController::Listener. The
 // accent colour follows the selected strip's mode.
 //
+// UI scale and theme (Settings > General) are app-wide (Theme::applyUiScale,
+// Theme::setTheme); the main component registers its window's design minimum
+// (1100 x 700) so the window's minimum size never exceeds its screen at a
+// large UI scale.
+//
 // Contract with the shell: namespace flub::app::ui, constructible from an
 // EngineController&, owned by MainWindow.
 #pragma once
@@ -63,6 +68,7 @@ public:
     void paint (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
+    void parentHierarchyChanged() override;
 
 private:
     void frame (double timestampSeconds);
@@ -94,6 +100,7 @@ private:
     LoudnessPanel loudness;
     WaveformHistory history;
     std::unique_ptr<juce::TooltipWindow> tooltips; // none in headless screenshot runs
+    bool screenshotRun = false;                    // headless --screenshot: exact size, no window limits
 
     AnalyzerFeed feed;
     MeterSnapshot snapshot;

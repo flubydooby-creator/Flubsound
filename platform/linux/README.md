@@ -232,6 +232,50 @@ Tests: the `Platform: XDG autostart ...` cases in
 `tests/test_platform_linux.cpp` point `XDG_CONFIG_HOME` / `HOME` at a
 temporary folder.
 
+## Foreground application (automatic profiles)
+
+Automatic profiles (`docs/06-gui.md` §8.1) need to know which application is
+in front. `LinuxForegroundApp` in `app/Source/platform/PlatformServices_linux.cpp`
+works as follows:
+
+- **X11 sessions.** It reads the root window's `_NET_ACTIVE_WINDOW`, then that
+  window's `_NET_WM_PID`, then `/proc/<pid>/exe`.
+  - libX11 is loaded with `dlopen`: the same table as the hotkeys, on a
+    private display connection.
+  - Every EWMH window manager publishes `_NET_ACTIVE_WINDOW` (GNOME/Xorg,
+    KDE/X11, Xfce, Cinnamon, MATE, i3, ...). GTK, Qt, SDL, Wine and JUCE
+    clients set `_NET_WM_PID`. A window without it gives no answer, and the
+    current profile is held.
+  - The kernel resolves symlinks in `/proc/<pid>/exe`. A program started
+    through `/bin/foo` therefore reports its real path (for example
+    `/usr/bin/foo`), and a multi-call binary reports that binary.
+  - Wine / Proton programs run inside a `wine[64][-preloader]` loader. They
+    are reported by their Windows executable (argv[0], e.g.
+    `C:\Games\CS2\cs2.exe`), so a rule written for `cs2.exe` matches on
+    Linux too.
+  - Another user's process (unreadable `exe`) falls back to `comm`.
+  - A window destroyed between the two property reads raises `BadWindow`.
+    A temporary error handler, for this connection only, swallows it.
+  - The description is cached while the same window and process stay in
+    front, so a 2 Hz poll is two property round trips.
+- **Wayland sessions** (`XDG_SESSION_TYPE=wayland` or `WAYLAND_DISPLAY`
+  set). Unsupported: Wayland does not let applications see which window is in
+  the foreground, and XWayland only knows X clients. The routing panel shows
+  the reason and disables adding rules. Without libX11 or an X display, the
+  reason given says so.
+
+Tests in `tests/test_platform_linux.cpp`:
+
+- `Platform: foreground process names ...` covers the Wine / `/proc`
+  naming.
+- `Platform: foreground application detection is unsupported under Wayland
+  ...` covers the unsupported cases.
+- `Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_PID
+  ...` needs a bare X server (CI: `xvfb-run -a`). The test creates windows,
+  sets their `_NET_WM_PID` and the root's `_NET_ACTIVE_WINDOW` itself. It
+  compares the reported path with the canonical path of the spawned binary.
+  It is skipped without a display, or when a window manager is running.
+
 ## Real-time scheduling
 
 `SystemTuning::promoteAudioThread()` tries `SCHED_FIFO` with priority 20,

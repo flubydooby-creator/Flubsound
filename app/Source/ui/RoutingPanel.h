@@ -38,6 +38,34 @@
 
 namespace flub::app::ui
 {
+/** The fields of "Add automatic profile...": the application (typed, or
+    picked from the recently focused / audio-playing ones), the strip, the
+    preset, the mode and whether the previous preset returns when the
+    application leaves. Hosted by the panel's dialog; usable on its own
+    (tests fill it without a window). */
+class AutoProfileForm : public juce::Component
+{
+public:
+    explicit AutoProfileForm (EngineController& controller);
+
+    /** The rule as filled in; an empty executable or preset when incomplete. */
+    AutoProfileRule getRule() const;
+    /** Applications offered in the "Recent" list (newest first). */
+    const juce::StringArray& getSuggestions() const noexcept { return suggestions; }
+
+    void resized() override;
+
+    juce::TextEditor application;
+    juce::ComboBox recent, strip, preset, mode;
+    juce::ToggleButton restore { "Restore the previous preset when it leaves" };
+
+private:
+    EngineController& controller;
+    juce::StringArray suggestions;
+    std::vector<juce::String> presetIds; // item id - 1
+    juce::Label applicationLabel, recentLabel, stripLabel, presetLabel, modeLabel;
+};
+
 class RoutingPanel : public juce::Component, public juce::SettableTooltipClient
 {
 public:

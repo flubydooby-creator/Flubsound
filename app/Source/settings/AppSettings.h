@@ -10,7 +10,7 @@
 // the automatic overload response, device-input routing, hotkey chords, start
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
-// preset on a strip) and the window position.
+// preset on a strip), the UI scale and theme, and the window position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -150,6 +150,17 @@ public:
     void setStartWithOs (bool shouldStartWithOs);
     juce::String getWindowState() const;
     void setWindowState (const juce::String& state);
+
+    /** Settings > General > UI scale, in percent: kUiScaleFollowSystem (0,
+        the default: only the OS's display scaling applies) or 75 .. 200. */
+    static constexpr int kUiScaleFollowSystem = 0, kUiScaleMinPercent = 75, kUiScaleMaxPercent = 200;
+    /** <= 0 -> kUiScaleFollowSystem; anything else is clamped to 75 .. 200. */
+    static int clampUiScalePercent (int percent);
+    int getUiScalePercent() const;
+    void setUiScalePercent (int percent);
+    /** Settings > General > Theme: the high-contrast theme (default off). */
+    bool getHighContrast() const;
+    void setHighContrast (bool highContrast);
 
     /** The output device the user chose (e.g. a USB headset); restored when it
         reappears after being unplugged / powered off. */

@@ -48,11 +48,7 @@ EqCurveEditor::EqCurveEditor (SpectrumAnalyzer& g, StoreProvider s)
 
 juce::Colour EqCurveEditor::bandColour (int band)
 {
-    static const juce::Colour colours[] = { juce::Colour (0xfff87171), juce::Colour (0xfffb923c), juce::Colour (0xfffbbf24),
-                                            juce::Colour (0xffa3e635), juce::Colour (0xff34d399), juce::Colour (0xff22d3ee),
-                                            juce::Colour (0xff60a5fa), juce::Colour (0xff818cf8), juce::Colour (0xffc084fc),
-                                            juce::Colour (0xfff472b6) };
-    return colours[juce::jlimit (0, 9, band)];
+    return Palette::eqBands[static_cast<size_t> (juce::jlimit (0, 9, band))];
 }
 
 bool EqCurveEditor::typeHasGain (EqBandType type) noexcept
@@ -290,7 +286,7 @@ void EqCurveEditor::drawBubble (juce::Graphics& g, int band) const
         r.setY (node.y + 16.0f);
     r = r.constrainedWithin (plot.reduced (2.0f));
 
-    g.setColour (juce::Colour (0xf01f2530));
+    g.setColour (Palette::tooltip.withAlpha (0.94f));
     g.fillRoundedRectangle (r, 6.0f);
     g.setColour (bandColour (band).withAlpha (0.7f));
     g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);

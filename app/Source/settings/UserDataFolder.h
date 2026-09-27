@@ -17,9 +17,12 @@ namespace flub::app
 inline juce::File userDataFolder()
 {
     // Explicit override on every OS (tests, portable installs): an absolute
-    // path used as-is instead of <OS default>/Flubsound.
-    if (const char* dir = std::getenv ("FLUB_USER_DATA_DIR"); dir != nullptr && juce::File::isAbsolutePath (juce::String::fromUTF8 (dir)))
-        return juce::File (juce::String::fromUTF8 (dir));
+    // path used as-is instead of <OS default>/Flubsound. Read through JUCE,
+    // which uses GetEnvironmentVariableW on Windows: the narrow CRT copy of
+    // the environment is in the ANSI code page, not UTF-8, so std::getenv +
+    // fromUTF8 would garble (or miss) a non-ASCII path there.
+    if (const auto dir = juce::SystemStats::getEnvironmentVariable ("FLUB_USER_DATA_DIR", {}); juce::File::isAbsolutePath (dir))
+        return juce::File (dir);
 
    #if JUCE_LINUX || JUCE_BSD
     // JUCE 9 resolves userApplicationDataDirectory from ~/.config/user-dirs.dirs

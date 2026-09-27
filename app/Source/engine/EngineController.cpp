@@ -890,6 +890,12 @@ void EngineController::setAutoProfilesEnabled (bool shouldBeEnabled)
 
 void EngineController::setAutoProfileRules (std::vector<AutoProfileRule> rules)
 {
+    for (auto& r : rules) // as AppSettings reads them back
+    {
+        r.executable = r.executable.trim();
+        r.stripName = r.stripName.trim();
+        r.presetId = r.presetId.trim();
+    }
     rules.erase (std::remove_if (rules.begin(), rules.end(),
                                  [] (const AutoProfileRule& r)
                                  { return r.executable.trim().isEmpty() || r.stripName.isEmpty() || r.presetId.isEmpty(); }),
@@ -898,6 +904,20 @@ void EngineController::setAutoProfileRules (std::vector<AutoProfileRule> rules)
     applyAutoProfileActions (autoProfiles.setRules (std::move (rules)));
     autoProfileError = {};
     notify (Change::Settings);
+}
+
+bool EngineController::addAutoProfileRule (const AutoProfileRule& rule)
+{
+    if (rule.executable.trim().isEmpty() || rule.stripName.isEmpty() || rule.presetId.isEmpty())
+        return false;
+    auto rules = autoProfiles.getRules();
+    const auto wanted = rule.executable.trim();
+    rules.erase (std::remove_if (rules.begin(), rules.end(),
+                                 [&wanted] (const AutoProfileRule& r) { return AppRouting::executablesMatch (r.executable.trim(), wanted); }),
+                 rules.end());
+    rules.push_back (rule);
+    setAutoProfileRules (std::move (rules));
+    return true;
 }
 
 juce::String EngineController::describeAutoProfile() const

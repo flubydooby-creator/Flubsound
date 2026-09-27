@@ -12,7 +12,12 @@
 //   * FLUB_USER_DATA_DIR (and XDG_CONFIG_HOME on Linux) point at a temporary
 //     folder, so the app's user data folder (user presets, device-profile
 //     override) is empty and the real user's files are never read or written.
+//     Its name is not ASCII (like a temp folder under a non-ASCII Windows user
+//     name), and the run stops unless userDataFolder() resolves to exactly
+//     that folder.
 #include "AppTestSupport.h"
+
+#include "settings/UserDataFolder.h"
 
 #include <juce_events/juce_events.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -26,6 +31,13 @@
 
 #if defined(_WIN32)
     #include <malloc.h>
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
 #endif
 
 #if defined(__linux__) && defined(__GLIBC__)
@@ -149,15 +161,28 @@ int main (int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI juceInitialiser; // this thread becomes the message thread
 
     // The app's user data folder (settings, user presets, device-profile
-    // override) points at a temporary folder on every OS.
+    // override) points at a temporary folder on every OS. The name has
+    // characters outside ASCII and outside most ANSI code pages ("Flubsound
+    // e-acute + Japanese 'data'"), so a narrow / code-page read of the
+    // variable cannot pass the check below.
     const flubapptest::TempFolder configHome;
-    const auto dataDir = configHome.file ("Flubsound").getFullPathName();
+    const auto dataFolder = configHome.file (juce::String (juce::CharPointer_UTF8 ("Flubsound \xc3\xa9\xe3\x83\x87\xe3\x83\xbc\xe3\x82\xbf")));
+    const auto dataDir = dataFolder.getFullPathName();
    #if JUCE_WINDOWS
+    // The CRT copy (_wgetenv) and the OS environment block, which
+    // userDataFolder() reads through GetEnvironmentVariableW.
     _wputenv_s (L"FLUB_USER_DATA_DIR", dataDir.toWideCharPointer());
+    SetEnvironmentVariableW (L"FLUB_USER_DATA_DIR", dataDir.toWideCharPointer());
    #else
     setenv ("FLUB_USER_DATA_DIR", dataDir.toRawUTF8(), 1);
     setenv ("XDG_CONFIG_HOME", configHome.file ("config").getFullPathName().toRawUTF8(), 1);
    #endif
+    if (flub::app::userDataFolder() != dataFolder)
+    {
+        std::cout << "FLUB_USER_DATA_DIR is not read back as set: userDataFolder() = "
+                  << flub::app::userDataFolder().getFullPathName().toStdString() << ", expected " << dataDir.toStdString() << std::endl;
+        return 1;
+    }
 
     const auto started = std::chrono::steady_clock::now();
     for (const auto& tc : flubtest::registry())

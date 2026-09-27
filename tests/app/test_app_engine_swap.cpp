@@ -449,9 +449,9 @@ TEST_CASE ("App: neural model install and removal mid-stream go through the swap
     // not its worker keeps up with this faster-than-real-time device: a
     // missed frame falls back to the same unity gain. Every engine built
     // gets its own runner from the factory.
-    constexpr int kFrame = 480;
+    static constexpr int kFrame = 480;
     int runnersMade = 0;
-    const auto factory = [&runnersMade]
+    const auto factory = [&runnersMade]() -> std::unique_ptr<flub::ModelRunner>
     {
         ++runnersMade;
         return std::make_unique<flub::IdentityRunner> (kFrame);

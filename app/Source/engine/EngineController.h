@@ -284,6 +284,10 @@ public:
     /** Replaces the rules (first match wins; persisted). An active rule that is
         no longer in the list ends without restoring. Broadcasts Change::Settings. */
     void setAutoProfileRules (std::vector<AutoProfileRule> rules);
+    /** Appends a rule, replacing any rule for the same application (only the
+        first match could ever apply). Returns false (nothing changed) for a
+        rule without an executable, strip or preset. */
+    bool addAutoProfileRule (const AutoProfileRule& rule);
     /** The rule currently applied, nullptr if none. */
     const AutoProfileRule* getActiveAutoProfile() const noexcept { return autoProfiles.getActiveRule(); }
     /** One line for the UI: what is active, the last error, or "". */

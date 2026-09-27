@@ -26,12 +26,16 @@
 //                the post-macro value as a thin outer ring on rotary knobs.
 //
 // The accent colour follows the processing mode (setAccent) and the meter
-// palette can be switched to a colour-blind safe variant.
+// palette can be switched to a colour-blind safe variant. Every colour comes
+// from the active theme's Palette:: tokens; Theme::setTheme re-applies them
+// to every instance (applyPalette).
 #pragma once
 
 #include "Theme.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
+
+#include <functional>
 
 namespace flub::app::ui
 {
@@ -42,13 +46,21 @@ public:
     static inline const juce::Identifier effectiveProperty { "flubEffective" };
 
     FlubLookAndFeel();
-    ~FlubLookAndFeel() override = default;
+    ~FlubLookAndFeel() override;
 
     void setAccent (juce::Colour newAccent);
     juce::Colour getAccent() const noexcept { return accent; }
 
     void setMeterPalette (MeterPalette palette) noexcept { meterPalette = palette; }
     MeterPalette getMeterPalette() const noexcept { return meterPalette; }
+
+    /** Re-applies every colour from the active Palette:: tokens after a theme
+        switch; an accent that was a token of `previous` (the mode accent)
+        becomes the same token of the active palette. */
+    void applyPalette (const PaletteTokens& previous);
+
+    /** Calls fn for every live instance (message thread only). */
+    static void forEachInstance (const std::function<void (FlubLookAndFeel&)>& fn);
 
     /** Rotary angles used by every knob (and the Boost dial): -135 .. +135 deg. */
     static constexpr float kRotaryStart = juce::MathConstants<float>::pi * 1.25f;
@@ -113,6 +125,7 @@ public:
 private:
     static juce::String styleOf (const juce::Component& c);
     static juce::TextLayout layoutTooltip (const juce::String& text, juce::Colour colour);
+    void applyColours();
     void applyAccentColours();
 
     juce::Colour accent = Palette::teal;

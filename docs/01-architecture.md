@@ -85,7 +85,7 @@ flowchart TB
         PRIM[SVF · Biquad · LR4 · Oversampler · TruePeakDetector · FFT · SpscRing · DelayLine · Smoothers]
     end
     subgraph OSL["OS integration  app/Source/platform, platform/"]
-        PSV[GlobalHotkeys · AppAudioRouter · ProcessLoopbackCapture · AudioEndpoints · SystemTuning · virtual drivers design]
+        PSV[GlobalHotkeys · AppAudioRouter · ProcessLoopbackCapture · AudioEndpoints · SystemTuning · ForegroundApp · virtual drivers design]
     end
 
     L5 --> L4 --> L3 --> L2 --> L1 --> L0
@@ -115,7 +115,7 @@ flowchart TB
 |---|---|---|---|
 | **Audio callback** (device) | Real-time (MMCSS "Pro Audio" / time-constraint / SCHED_FIFO) | `MixEngine::process` → strips → master limiter (two engines, crossfaded, during an engine swap); reads the parameter snapshot; writes meters | Allocate, lock, log, do I/O, or wait |
 | **Capture threads** (Windows process loopback, one per captured app) | MMCSS "Pro Audio" (falls back to "Audio") | Pull OS capture packets and push frames into a `DriftCompensatedFifo` | Allocate or lock (after start) |
-| **Message thread** (JUCE) | Normal | UI (meters and analyser once per display frame via `VBlankAttachment`), parameter-control refresh at 30 Hz, reconfiguration poll at 5 Hz, controller housekeeping at 2 Hz (CPU-overload watchdog poll, state autosave every 5 s, preferred-output rescan), preset I/O, tray, hotkeys | Block for long |
+| **Message thread** (JUCE) | Normal | UI (meters and analyser once per display frame via `VBlankAttachment`), parameter-control refresh at 30 Hz, reconfiguration poll at 5 Hz, controller housekeeping at 2 Hz (CPU-overload watchdog poll, foreground-application poll for automatic profiles, state autosave every 5 s, preferred-output rescan), preset I/O, tray, hotkeys | Block for long |
 | **Worker threads** | Low | App routing worker ("Flubsound routing": session enumeration and endpoint moves, every 2 s while routes exist); `flubsound-cli batch --jobs N` (one chain per job). Roadmap: HRIR loading/resampling, inference | Touch audio-thread objects directly |
 
 ### Cross-thread communication (three main channels)
@@ -143,7 +143,7 @@ Both engines run for the new latency + 10 ms, or + 20 ms at equal latency: about
 - For Balanced → Quality the output stays below −26 dB of the tone for 4.4 ms (210 samples) inside the 20 ms dip.
 - The new chain's fresh detectors settle within ~0.2 dB over ~100 ms.
 - Installing and removing a 20 ms neural model (an identity model, eligible for Balanced) passes the same step and gap checks.
-- 100 swaps in a row (profiles, layouts, a request replaced before the audio thread took it) allocate, free and lock nothing on the audio thread, and every engine is freed (the ASan build reports no leak).
+- 100 swaps in a row (profiles, layouts, a request replaced before the audio thread took it) allocate, free and lock nothing on the audio thread, and every engine is freed: under ASan the only leak reported is the few bytes of saved scheduling policy that promoting each new device thread keeps (never reverted, see `AudioEngineHost::audioDeviceIOCallbackWithContext`).
 
 Sample-rate, buffer-size and device changes restart the device instead (JUCE stops the callback). The engine is rebuilt synchronously in `audioDeviceAboutToStart()`, and the first 10 ms after the engine latency fade in from silence. A swap pending or in flight when the device stops is dropped in favour of the newest engine. Message-thread code re-fetches chains when `AudioEngineHost::getStructureGeneration()` changes. A neural model goes through `AudioEngineHost::setNeuralModel (strip, factory)`: the factory makes a fresh runner for every engine the host builds (swaps, device restarts), because the old engine keeps running its own model until it has faded out; the new chain decides at its prepare whether the model is eligible (`getNeuralStatus()`). The app installs no model today. As with any re-prepare, other state set directly on a `ProcessingChain` does not carry over to the new engine's chains: the audition bypass, and a model installed with `ProcessingChain::setNeuralModel()` instead of through the host.
 

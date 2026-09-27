@@ -582,9 +582,8 @@ TEST_CASE ("App: automatic profiles: the routing panel lists the rules and expla
     CHECK (add->isEnabled());
     auto* remove = buttonNamed ("Remove the automatic profile for cs2");
     REQUIRE (remove != nullptr);
-    remove->triggerClick();
-    CHECK (controller.getAutoProfileRules().empty());
-    panel.refreshRouting();
+    remove->triggerClick(); // posted; the removal itself is deferred once more (it rebuilds the list)
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return controller.getAutoProfileRules().empty(); }));
     CHECK (buttonNamed ("Remove the automatic profile for cs2") == nullptr);
     CHECK (labels().joinIntoString ("\n").contains ("No automatic profiles"));
 
@@ -612,3 +611,77 @@ TEST_CASE ("App: automatic profiles: the routing panel lists the rules and expla
         if (b->getTitle() == "Add automatic profile..." || b->getButtonText() == "Add automatic profile...")
             CHECK (! b->isEnabled());
 }
+
+TEST_CASE ("App: automatic profiles: the add form offers recently focused apps, builds the rule, and adding replaces a rule for the same app")
+{
+    const flubapptest::TempFolder temp;
+    ForegroundScript script;
+    EngineController controller (headlessOptions (temp, script));
+    const auto musicPreset = factoryPreset (controller, "Music");
+    const auto gamingPreset = factoryPreset (controller, "Gaming");
+    REQUIRE (musicPreset.isValid());
+    REQUIRE (gamingPreset.isValid());
+    const int game = controller.findStrip ("Game");
+    REQUIRE (game >= 0);
+    juce::String error;
+    REQUIRE (controller.loadPreset (musicPreset.id, game, error));
+    controller.setSelectedStrip (game);
+
+    // Nothing seen yet: an empty application field, no suggestions.
+    {
+        ui::AutoProfileForm empty (controller);
+        CHECK (empty.getSuggestions().isEmpty());
+        CHECK (empty.application.getText().isEmpty());
+        CHECK (! empty.recent.isEnabled());
+        CHECK (empty.getRule().executable.isEmpty());
+        CHECK (! controller.addAutoProfileRule (empty.getRule()));
+        CHECK (controller.getAutoProfileRules().empty());
+    }
+
+    // The foreground polls remember applications (never Flubsound itself).
+    script.show ("C:\\Games\\CS2\\cs2.exe", 4242);
+    controller.pollForegroundApp();
+    script.show ("/opt/Flubsound Pro", 1, true);
+    controller.pollForegroundApp();
+    script.show ("/usr/lib/firefox/firefox", 777);
+    controller.pollForegroundApp();
+
+    ui::AutoProfileForm form (controller);
+    CHECK (form.getSuggestions() == juce::StringArray ("firefox", "cs2.exe"));
+    CHECK (form.application.getText() == "firefox"); // the newest is proposed
+    CHECK (form.recent.isEnabled());
+    CHECK (form.strip.getText() == "Game");         // the selected strip
+    auto built = form.getRule();
+    CHECK (built.executable == "firefox");
+    CHECK (built.stripName == "Game");
+    CHECK (built.presetId == musicPreset.id);        // the strip's current preset
+    CHECK (built.mode == AutoProfileRule::Mode::Preset);
+    CHECK (! built.restoreOnExit);                   // default: the preset stays
+
+    // Picking a recent application fills the field; the rest as chosen.
+    form.recent.setSelectedId (2, juce::sendNotificationSync);
+    CHECK (form.application.getText() == "cs2.exe");
+    for (int id = 1; id <= form.preset.getNumItems() && form.getRule().presetId != gamingPreset.id; ++id) // ids 1..N (headings have none)
+        form.preset.setSelectedId (id, juce::dontSendNotification);
+    form.mode.setSelectedId (3, juce::dontSendNotification);
+    form.restore.setToggleState (true, juce::dontSendNotification);
+    built = form.getRule();
+    CHECK (built.executable == "cs2.exe");
+    CHECK (built.presetId == gamingPreset.id);
+    CHECK (built.mode == AutoProfileRule::Mode::Gaming);
+    CHECK (built.restoreOnExit);
+    REQUIRE (controller.addAutoProfileRule (built));
+    REQUIRE (controller.getAutoProfileRules().size() == 1);
+    CHECK (controller.getAutoProfileRules()[0] == built);
+
+    // A second rule for the same application (other spelling) replaces the
+    // first; one for another application is appended after it.
+    REQUIRE (controller.addAutoProfileRule (rule ("firefox", "Music", musicPreset.id.toRawUTF8())));
+    REQUIRE (controller.addAutoProfileRule (rule ("D:\\Steam\\CS2.EXE", "Music", musicPreset.id.toRawUTF8(), false)));
+    const auto& rules = controller.getAutoProfileRules();
+    REQUIRE (rules.size() == 2);
+    CHECK (rules[0].executable == "firefox");
+    CHECK (rules[1].executable == "D:\\Steam\\CS2.EXE");
+    CHECK (controller.getSettings().getAutoProfileRules() == rules);
+}
+

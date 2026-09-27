@@ -2,14 +2,20 @@
 
 #include "Widgets.h"
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace flub::app::ui
 {
 namespace
 {
-const juce::Colour menuBackground { 0xff171b22 };
-const juce::Colour tooltipBackground { 0xff1f2530 };
+/** Live instances, for Theme::setTheme (message thread only). */
+std::vector<FlubLookAndFeel*>& instances()
+{
+    static std::vector<FlubLookAndFeel*> list;
+    return list;
+}
 
 Icon tickIcon()
 {
@@ -33,11 +39,40 @@ juce::Path roundedShape (juce::Rectangle<float> r, float radius, const juce::But
 
 FlubLookAndFeel::FlubLookAndFeel()
 {
+    instances().push_back (this);
+
+    // The whole app uses the same UI family, including JUCE's own dialogs.
+    if (Theme::fontFamily() != juce::Font::getDefaultSansSerifFontName())
+        setDefaultSansSerifTypefaceName (Theme::fontFamily());
+
+    applyColours();
+}
+
+FlubLookAndFeel::~FlubLookAndFeel()
+{
+    auto& list = instances();
+    list.erase (std::remove (list.begin(), list.end(), this), list.end());
+}
+
+void FlubLookAndFeel::forEachInstance (const std::function<void (FlubLookAndFeel&)>& fn)
+{
+    for (auto* lnf : instances())
+        fn (*lnf);
+}
+
+void FlubLookAndFeel::applyPalette (const PaletteTokens& previous)
+{
+    accent = Theme::remapColour (accent, previous, Palette::detail::active);
+    applyColours();
+}
+
+void FlubLookAndFeel::applyColours()
+{
     using Scheme = juce::LookAndFeel_V4::ColourScheme;
     auto scheme = getDarkColourScheme();
     scheme.setUIColour (Scheme::windowBackground, Palette::background);
     scheme.setUIColour (Scheme::widgetBackground, Palette::panelRaised);
-    scheme.setUIColour (Scheme::menuBackground, menuBackground);
+    scheme.setUIColour (Scheme::menuBackground, Palette::menu);
     scheme.setUIColour (Scheme::outline, Palette::borderStrong);
     scheme.setUIColour (Scheme::defaultText, Palette::text);
     scheme.setUIColour (Scheme::defaultFill, accent);
@@ -68,25 +103,25 @@ FlubLookAndFeel::FlubLookAndFeel()
     setColour (juce::ComboBox::buttonColourId, Palette::panelRaised);
     setColour (juce::ComboBox::arrowColourId, Palette::muted);
 
-    setColour (juce::PopupMenu::backgroundColourId, menuBackground);
+    setColour (juce::PopupMenu::backgroundColourId, Palette::menu);
     setColour (juce::PopupMenu::textColourId, Palette::text);
     setColour (juce::PopupMenu::headerTextColourId, Palette::muted);
     setColour (juce::PopupMenu::highlightedTextColourId, Palette::text);
 
-    setColour (juce::Slider::backgroundColourId, Palette::borderStrong);
-    setColour (juce::Slider::rotarySliderOutlineColourId, Palette::borderStrong);
+    setColour (juce::Slider::backgroundColourId, Palette::track);
+    setColour (juce::Slider::rotarySliderOutlineColourId, Palette::track);
     setColour (juce::Slider::thumbColourId, Palette::text);
     setColour (juce::Slider::textBoxTextColourId, Palette::text.withAlpha (0.9f));
     setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
     setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
 
-    setColour (juce::TooltipWindow::backgroundColourId, tooltipBackground);
+    setColour (juce::TooltipWindow::backgroundColourId, Palette::tooltip);
     setColour (juce::TooltipWindow::textColourId, Palette::text);
     setColour (juce::TooltipWindow::outlineColourId, Palette::borderStrong);
 
     setColour (juce::ScrollBar::backgroundColourId, juce::Colours::transparentBlack);
     setColour (juce::ScrollBar::trackColourId, juce::Colours::transparentBlack);
-    setColour (juce::ScrollBar::thumbColourId, juce::Colour (0xff343c4a));
+    setColour (juce::ScrollBar::thumbColourId, Palette::scrollThumb);
 
     setColour (juce::TextEditor::backgroundColourId, Palette::well);
     setColour (juce::TextEditor::textColourId, Palette::text);
@@ -104,10 +139,6 @@ FlubLookAndFeel::FlubLookAndFeel()
     setColour (juce::GroupComponent::outlineColourId, Palette::border);
     setColour (juce::GroupComponent::textColourId, Palette::muted);
     setColour (juce::HyperlinkButton::textColourId, Palette::teal);
-
-    // The whole app uses the same UI family, including JUCE's own dialogs.
-    if (Theme::fontFamily() != juce::Font::getDefaultSansSerifFontName())
-        setDefaultSansSerifTypefaceName (Theme::fontFamily());
 
     applyAccentColours();
 }
@@ -167,7 +198,7 @@ void FlubLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int wid
     const auto rounded = [] (float w) { return juce::PathStrokeType (w, juce::PathStrokeType::curved, juce::PathStrokeType::rounded); };
 
     // ---- Track + value arc (bipolar parameters grow from their zero point) ----
-    g.setColour (Palette::borderStrong);
+    g.setColour (Palette::track);
     g.strokePath (arc (startAngle, endAngle, radius), rounded (track));
 
     float zeroPos = 0.0f;
@@ -206,14 +237,14 @@ void FlubLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int wid
     // ---- Knob body ----
     const float bodyR = radius - track * 0.5f - juce::jmax (2.0f, size * 0.07f);
     const auto body = juce::Rectangle<float> (bodyR * 2.0f, bodyR * 2.0f).withCentre (centre);
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff2a313d), body.getX(), body.getY(), juce::Colour (0xff171b22), body.getX(),
+    g.setGradientFill (juce::ColourGradient (Palette::knobTop, body.getX(), body.getY(), Palette::knobBottom, body.getX(),
                                              body.getBottom(), false));
     g.fillEllipse (body);
-    g.setColour (juce::Colour (0xff343d4c));
+    g.setColour (Palette::knobRim);
     g.drawEllipse (body.reduced (0.5f), 1.0f);
     if (size > 36.0f)
     {
-        g.setColour (juce::Colours::white.withAlpha (0.05f));
+        g.setColour (Palette::highlight.withAlpha (0.05f));
         g.strokePath (arc (-1.1f, 1.1f, bodyR - 1.5f), rounded (1.0f));
     }
 
@@ -246,7 +277,7 @@ void FlubLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int wid
 
     const auto trackRect = horizontal ? juce::Rectangle<float> (bounds.getX(), bounds.getCentreY() - thickness * 0.5f, bounds.getWidth(), thickness)
                                       : juce::Rectangle<float> (bounds.getCentreX() - thickness * 0.5f, bounds.getY(), thickness, bounds.getHeight());
-    g.setColour (Palette::borderStrong);
+    g.setColour (Palette::track);
     g.fillRoundedRectangle (trackRect, thickness * 0.5f);
 
     float zeroCoord = horizontal ? bounds.getX() : bounds.getBottom();
@@ -318,7 +349,7 @@ void FlubLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b, 
         // raised fill plus an accent underline.
         if (on || isHighlighted || isDown)
         {
-            g.setColour (on ? juce::Colour (0xff262d3a) : Palette::panelHover.withAlpha (isDown ? 0.9f : 0.6f));
+            g.setColour (on ? Palette::tabOn : Palette::panelHover.withAlpha (isDown ? 0.9f : 0.6f));
             g.fillPath (shape);
         }
         if (on)
@@ -533,7 +564,7 @@ void FlubLookAndFeel::drawComboBoxTextWhenNothingSelected (juce::Graphics& g, ju
 
 void FlubLookAndFeel::drawPopupMenuBackground (juce::Graphics& g, int width, int height)
 {
-    g.fillAll (menuBackground);
+    g.fillAll (Palette::menu);
     g.setColour (Palette::borderStrong);
     g.drawRect (0, 0, width, height, 1);
 }
@@ -639,11 +670,11 @@ void FlubLookAndFeel::drawScrollbar (juce::Graphics& g, juce::ScrollBar&, int x,
     const auto track = juce::Rectangle<float> (static_cast<float> (x), static_cast<float> (y), static_cast<float> (width),
                                                static_cast<float> (height))
                            .reduced (3.0f);
-    g.setColour (juce::Colours::white.withAlpha (0.035f));
+    g.setColour (Palette::highlight.withAlpha (0.035f));
     g.fillRoundedRectangle (track, juce::jmin (track.getWidth(), track.getHeight()) * 0.5f);
 
     thumb = thumb.reduced (isMouseOver || isMouseDown ? 2.0f : 3.0f);
-    g.setColour (isMouseDown ? accent.withAlpha (0.7f) : (isMouseOver ? juce::Colour (0xff4a5466) : juce::Colour (0xff343c4a)));
+    g.setColour (isMouseDown ? accent.withAlpha (0.7f) : (isMouseOver ? Palette::scrollThumbHover : Palette::scrollThumb));
     g.fillRoundedRectangle (thumb, juce::jmin (thumb.getWidth(), thumb.getHeight()) * 0.5f);
 }
 
@@ -670,7 +701,7 @@ juce::Rectangle<int> FlubLookAndFeel::getTooltipBounds (const juce::String& tipT
 void FlubLookAndFeel::drawTooltip (juce::Graphics& g, const juce::String& text, int width, int height)
 {
     const auto bounds = juce::Rectangle<float> (0.0f, 0.0f, static_cast<float> (width), static_cast<float> (height));
-    g.setColour (tooltipBackground);
+    g.setColour (Palette::tooltip);
     g.fillRoundedRectangle (bounds, 6.0f);
     g.setColour (Palette::borderStrong);
     g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 1.0f);
@@ -753,7 +784,7 @@ void FlubLookAndFeel::drawLevelMeter (juce::Graphics& g, int width, int height, 
 
 void FlubLookAndFeel::drawCallOutBoxBackground (juce::CallOutBox&, juce::Graphics& g, const juce::Path& path, juce::Image&)
 {
-    g.setColour (juce::Colours::black.withAlpha (0.4f));
+    g.setColour (Palette::shadow.withAlpha (0.4f));
     g.fillPath (path, juce::AffineTransform::translation (0.0f, 3.0f));
     g.setColour (Palette::panelRaised);
     g.fillPath (path);

@@ -23,6 +23,8 @@ constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
 constexpr const char* startWithOs = "ui.startWithOs";
 constexpr const char* windowState = "ui.windowState";
+constexpr const char* uiScale = "ui.scalePercent";
+constexpr const char* uiTheme = "ui.theme";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
@@ -387,6 +389,17 @@ bool AppSettings::getStartWithOs() const { return properties->getBoolValue (Keys
 void AppSettings::setStartWithOs (bool shouldStartWithOs) { properties->setValue (Keys::startWithOs, shouldStartWithOs); }
 juce::String AppSettings::getWindowState() const { return properties->getValue (Keys::windowState); }
 void AppSettings::setWindowState (const juce::String& state) { properties->setValue (Keys::windowState, state); }
+
+int AppSettings::clampUiScalePercent (int percent)
+{
+    return percent <= kUiScaleFollowSystem ? kUiScaleFollowSystem : std::clamp (percent, kUiScaleMinPercent, kUiScaleMaxPercent);
+}
+
+int AppSettings::getUiScalePercent() const { return clampUiScalePercent (properties->getIntValue (Keys::uiScale, kUiScaleFollowSystem)); }
+void AppSettings::setUiScalePercent (int percent) { properties->setValue (Keys::uiScale, clampUiScalePercent (percent)); }
+// Stored as a name so a later theme can be added without renumbering.
+bool AppSettings::getHighContrast() const { return properties->getValue (Keys::uiTheme) == "high-contrast"; }
+void AppSettings::setHighContrast (bool highContrast) { properties->setValue (Keys::uiTheme, highContrast ? "high-contrast" : "standard"); }
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
 void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 

@@ -386,7 +386,7 @@ void SpectrumAnalyzer::renderGrid (float scale)
             if (f < kMinHz || f > kMaxHz)
                 continue;
             const float x = std::round (xForFrequency (f)) + 0.5f;
-            g.setColour (m == 1 ? juce::Colour (0xff232b37) : juce::Colour (0xff141920));
+            g.setColour (m == 1 ? Palette::gridMajor : Palette::gridMinor);
             g.drawVerticalLine (static_cast<int> (x), plot.getY(), plot.getBottom());
         }
     }
@@ -412,7 +412,7 @@ void SpectrumAnalyzer::renderGrid (float scale)
     for (float db = kMaxDb; db >= kMinDb; db -= step)
     {
         const float y = std::round (yForDb (db)) + 0.5f;
-        g.setColour (juce::Colour (0xff171c24));
+        g.setColour (Palette::grid.interpolatedWith (Palette::gridMinor, 0.5f));
         g.drawHorizontalLine (static_cast<int> (y), plot.getX(), plot.getRight());
         g.setColour (Palette::faint);
         g.drawText (juce::String (juce::roundToInt (db)), juce::Rectangle<float> (plot.getX() - kLeftInset, y - 7.0f, kLeftInset - 6.0f, 14.0f),

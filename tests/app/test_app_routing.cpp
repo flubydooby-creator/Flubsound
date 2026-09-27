@@ -10,6 +10,7 @@
 #include "engine/AudioEngineHost.h"
 #include "settings/AppSettings.h"
 
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -35,10 +36,40 @@ struct RouterScript
     int enumerations = 0;
     uint32_t flickeringPid = 0; // this session's isActive flips on every enumeration
 
+    // A held enumeration blocks the worker (a pass "in flight") until release().
+    std::condition_variable holdChanged;
+    bool holdNext = false, holding = false;
+    int holds = 0;
+
     void setSessions (std::vector<AudioSessionInfo> s)
     {
         const std::lock_guard<std::mutex> g (lock);
         sessions = std::move (s);
+    }
+
+    /** The next enumeration blocks until release(). */
+    void holdNextEnumeration()
+    {
+        const std::lock_guard<std::mutex> g (lock);
+        holdNext = true;
+    }
+
+    /** Lets a held enumeration return; holdAgain also blocks the one after. */
+    void release (bool holdAgain = false)
+    {
+        {
+            const std::lock_guard<std::mutex> g (lock);
+            holding = false;
+            holdNext = holdAgain;
+        }
+        holdChanged.notify_all();
+    }
+
+    /** Number of enumerations that have blocked so far (the last may still be). */
+    int getHolds()
+    {
+        const std::lock_guard<std::mutex> g (lock);
+        return holds;
     }
 
     std::vector<std::pair<uint32_t, std::string>> getMoves()
@@ -67,8 +98,15 @@ public:
 
     std::vector<AudioSessionInfo> enumerateSessions() override
     {
-        const std::lock_guard<std::mutex> g (script.lock);
+        std::unique_lock<std::mutex> g (script.lock);
         ++script.enumerations;
+        if (script.holdNext)
+        {
+            script.holdNext = false;
+            script.holding = true;
+            ++script.holds;
+            script.holdChanged.wait (g, [this] { return ! script.holding; });
+        }
         for (auto& s : script.sessions)
             if (s.processId == script.flickeringPid)
                 s.isActive = ! s.isActive;
@@ -110,25 +148,39 @@ const AppRouting::AppState* findApp (const AppRouting& routing, uint32_t pid)
     return nullptr;
 }
 
-bool wasMoved (RouterScript& script, uint32_t pid, const std::string& endpoint)
+int countMoves (RouterScript& script, uint32_t pid, const std::string& endpoint)
 {
+    int n = 0;
     for (const auto& m : script.getMoves())
-        if (m.first == pid && m.second == endpoint)
-            return true;
-    return false;
+        n += m.first == pid && m.second == endpoint ? 1 : 0;
+    return n;
 }
 
-/** Fake capture: start() fails for the pids in `refused`. */
+bool wasMoved (RouterScript& script, uint32_t pid, const std::string& endpoint)
+{
+    return countMoves (script, pid, endpoint) > 0;
+}
+
+/** Shared state of the fake captures (created and started on the message
+    thread, like the test body). */
+struct CaptureScript
+{
+    std::set<uint32_t> refused;       // start() fails for these pids
+    std::map<uint32_t, int> starts;   // pid -> start() calls
+};
+
+/** Fake capture: start() fails for the pids in the script's `refused`. */
 class FakeCapture final : public flub::platform::ProcessLoopbackCapture
 {
 public:
-    explicit FakeCapture (const std::set<uint32_t>& refusedPids) : refused (refusedPids) {}
+    explicit FakeCapture (std::shared_ptr<CaptureScript> s) : script (std::move (s)) {}
 
     bool isSupported() const override { return true; }
 
     bool start (uint32_t processId, bool, double, int, FrameCallback, std::string& error) override
     {
-        if (refused.count (processId) != 0)
+        ++script->starts[processId];
+        if (script->refused.count (processId) != 0)
         {
             error = "The process has no audio session (test)";
             return false;
@@ -141,9 +193,29 @@ public:
     bool isRunning() const override { return running; }
 
 private:
-    std::set<uint32_t> refused;
+    std::shared_ptr<CaptureScript> script;
     bool running = false;
 };
+
+std::shared_ptr<CaptureScript> useFakeCaptures (AudioEngineHost& host, std::set<uint32_t> refused = {})
+{
+    auto script = std::make_shared<CaptureScript>();
+    script->refused = std::move (refused);
+    host.setCaptureFactory ([script] { return std::make_unique<FakeCapture> (script); });
+    return script;
+}
+
+/** Waits for `count` more worker passes (a flickering session makes every
+    pass publish a change, counted by `passes`). */
+void runPasses (AppRouting& routing, const int& passes, int count)
+{
+    for (int i = 0; i < count; ++i)
+    {
+        const int before = passes;
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return passes > before; }));
+    }
+}
 } // namespace
 
 // =============================================================================
@@ -305,7 +377,7 @@ TEST_CASE ("App: AppRouting method resolution, process-capture fallback and capt
     script.flickeringPid = 900; // every pass publishes a change, so passes can be counted
     script.setSessions ({ session (500, "game.exe"), session (600, "exited.exe"), session (700, "music.exe"), session (900, "idle.exe") });
 
-    host.setCaptureFactory ([] { return std::make_unique<FakeCapture> (std::set<uint32_t> { 600 }); });
+    useFakeCaptures (host, { 600 });
 
     AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
     int passes = 0;
@@ -379,4 +451,306 @@ TEST_CASE ("App: AppRouting method resolution, process-capture fallback and capt
     REQUIRE (flubapptest::pumpMessagesUntil ([&] { return host.getCaptures().empty(); }));
     routing.shutdown();
     CHECK (host.getCaptures().empty());
+}
+
+TEST_CASE ("App: AppRouting undoes the endpoint routes of apps that exited while routed, in the same run and the next")
+{
+    const flubapptest::TempFolder temp;
+    const auto file = temp.file ("settings.xml");
+    AudioEngineHost host;
+    RouterScript script;
+    const auto gameEndpoint = AppSettings (temp.file ("defaults.xml"), false).getStripEndpointId ("Game").toStdString();
+
+    {
+        AppSettings settings (file, true);
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), false);
+        routing.setRoute ("cs2.exe", "Game");
+        routing.setLiveUpdates (true); // keep enumerating once no route is left
+        script.setSessions ({ session (100, "cs2.exe"), session (300, "Discord.exe") });
+        routing.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* cs2 = findApp (routing, 100);
+            return cs2 != nullptr && cs2->routed;
+        }));
+        CHECK (countMoves (script, 100, gameEndpoint) == 1);
+
+        // An empty list is taken as a failed enumeration, not as every app
+        // gone: the route of pid 100 is kept (no second move when it is back).
+        script.setSessions ({});
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return routing.getApps().empty(); }));
+        script.setSessions ({ session (100, "cs2.exe"), session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return findApp (routing, 100) != nullptr; }));
+        CHECK (findApp (routing, 100)->routed);
+        CHECK (countMoves (script, 100, gameEndpoint) == 1);
+
+        // cs2 exits while routed (its route stays with the OS), and the user
+        // un-maps it while it is closed.
+        script.setSessions ({ session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return routing.getApps().size() == 1; }));
+        routing.removeRoute ("cs2");
+        CHECK (! wasMoved (script, 100, "")); // the process is gone: nothing to move back yet
+
+        // Its next process is moved back to the system default, once.
+        script.setSessions ({ session (101, "cs2.exe"), session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return wasMoved (script, 101, "") && findApp (routing, 101) != nullptr; }));
+        CHECK (! findApp (routing, 101)->routed);
+        CHECK (findApp (routing, 101)->strip == -1);
+        CHECK (! wasMoved (script, 300, ""));
+
+        // Done for that executable: a later process is left alone.
+        script.setSessions ({ session (102, "cs2.exe"), session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return findApp (routing, 102) != nullptr; }));
+        CHECK (countMoves (script, 101, "") == 1);
+        CHECK (! wasMoved (script, 102, ""));
+
+        // Routed again, and it exits before Flubsound quits: shutdown cannot
+        // move a process that is gone, so the executable stays remembered.
+        routing.setRoute ("cs2", "Game");
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* cs2 = findApp (routing, 102);
+            return cs2 != nullptr && cs2->routed;
+        }));
+        script.setSessions ({ session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return routing.getApps().size() == 1; }));
+        routing.shutdown();
+        CHECK (! wasMoved (script, 102, ""));
+        settings.save();
+    }
+
+    // Next run (settings reloaded from disk): the route was removed, and the
+    // app's next process is moved back although no route is left at all.
+    {
+        AppSettings settings (file, true);
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), false);
+        routing.removeRoute ("cs2");
+        CHECK (routing.getRoutes().empty());
+        script.setSessions ({ session (200, "C:\\Games\\CS2.EXE"), session (300, "Discord.exe") });
+        routing.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return wasMoved (script, 200, ""); }));
+        routing.shutdown();
+        settings.save();
+    }
+
+    // And the run after that has nothing left to undo.
+    {
+        AppSettings settings (file, false);
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), false);
+        script.setSessions ({ session (201, "cs2.exe"), session (300, "Discord.exe") });
+        routing.setLiveUpdates (true);
+        routing.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return findApp (routing, 201) != nullptr; }));
+        routing.shutdown();
+        CHECK (! wasMoved (script, 201, ""));
+    }
+}
+
+TEST_CASE ("App: AppRouting retries a given-up capture after a re-mapping, a method change or a stopped capture")
+{
+    const flubapptest::TempFolder temp;
+    AppSettings settings (temp.file ("settings.xml"), false);
+    AudioEngineHost host;
+    auto captures = useFakeCaptures (host, { 600 });
+
+    RouterScript script;
+    script.supported = false;   // Automatic -> process capture
+    script.flickeringPid = 900; // every pass publishes a change, so passes can be counted
+    script.setSessions ({ session (500, "game.exe"), session (600, "voice.exe"), session (900, "idle.exe") });
+
+    AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
+    int passes = 0;
+    routing.onChanged = [&passes] { ++passes; };
+    routing.setRoute ("game", "Game");
+    routing.setRoute ("voice", "Chat");
+    routing.start();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        const auto* game = findApp (routing, 500);
+        return game != nullptr && game->captureId >= 0 && captures->starts[600] >= 1;
+    }));
+
+    // Three failed starts, then given up: fixing the cause alone changes nothing.
+    const auto giveUp = [&]
+    {
+        runPasses (routing, passes, 4);
+        CHECK (captures->starts[600] == 3);
+        captures->refused.clear();
+        runPasses (routing, passes, 2);
+        CHECK (captures->starts[600] == 3);
+        REQUIRE (findApp (routing, 600) != nullptr);
+        CHECK (findApp (routing, 600)->captureId == -1);
+        CHECK (findApp (routing, 600)->error == "The process has no audio session (test)");
+    };
+    const auto capturedAfter = [&] (int startsBefore)
+    {
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* voice = findApp (routing, 600);
+            return voice != nullptr && voice->captureId >= 0;
+        }));
+        CHECK (captures->starts[600] == startsBefore + 1);
+        CHECK (findApp (routing, 600)->error.isEmpty());
+    };
+    const auto refuseAgain = [&]
+    {
+        captures->refused = { 600 };
+        captures->starts[600] = 0;
+        routing.setRoute ("voice", {}); // stops the capture...
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* voice = findApp (routing, 600);
+            return voice != nullptr && voice->captureId == -1 && voice->strip == -1;
+        }));
+        routing.setRoute ("voice", "Chat"); // ...and maps it again: failing starts
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return captures->starts[600] >= 1; }));
+    };
+
+    // 1. Re-mapping (here: to another strip) retries it.
+    giveUp();
+    routing.setRoute ("voice", "Music");
+    capturedAfter (3);
+
+    // 2. A method change retries it.
+    refuseAgain();
+    giveUp();
+    routing.setMethod (AppRouting::Method::ProcessCapture); // was Automatic (-> process capture)
+    capturedAfter (3);
+
+    // 3. Another capture stopping (a slot is free now) retries it.
+    refuseAgain();
+    giveUp();
+    script.setSessions ({ session (600, "voice.exe"), session (900, "idle.exe") }); // the game exits
+    runPasses (routing, passes, 2); // its capture stops, then voice.exe is started again
+    capturedAfter (3);
+    CHECK (findApp (routing, 500) == nullptr);
+
+    routing.shutdown();
+    CHECK (host.getCaptures().empty());
+}
+
+TEST_CASE ("App: AppRouting discards a worker pass computed from an outdated configuration")
+{
+    const flubapptest::TempFolder temp;
+    AppSettings settings (temp.file ("settings.xml"), false);
+    AudioEngineHost host;
+    auto captures = useFakeCaptures (host);
+
+    RouterScript script;
+    script.supported = false; // Automatic -> process capture
+    script.flickeringPid = 900;
+    script.setSessions ({ session (500, "game.exe"), session (700, "music.exe"), session (900, "idle.exe") });
+
+    AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
+    struct Unhold // never leave the worker blocked in the fake router
+    {
+        RouterScript& s;
+        ~Unhold() { s.release(); }
+    } unhold { script };
+
+    int passes = 0;
+    routing.onChanged = [&passes] { ++passes; };
+    routing.setRoute ("game", "Game");
+    routing.start();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        const auto* game = findApp (routing, 500);
+        return game != nullptr && game->captureId >= 0 && findApp (routing, 700) != nullptr;
+    }));
+
+    // A pass starts with music.exe mapped to Music and is held in the router...
+    script.holdNextEnumeration();
+    routing.setRoute ("music", "Music");
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return script.getHolds() == 1; }));
+
+    // ...while the user removes that route again. The held pass then finishes
+    // (its result is posted) and the next one is held, so the message thread
+    // sees the outdated result on its own.
+    routing.removeRoute ("music");
+    script.release (true);
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return script.getHolds() == 2; }));
+    bool drained = false;
+    juce::MessageManager::callAsync ([&drained] { drained = true; }); // queued after that result
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return drained; }));
+
+    CHECK (captures->starts[700] == 0); // no capture into Music from the outdated mapping
+    CHECK (findApp (routing, 700)->strip == -1);
+
+    // The fresh pass publishes the current state.
+    const int before = passes;
+    script.release();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return passes > before; }));
+    CHECK (findApp (routing, 700)->strip == -1);
+    CHECK (captures->starts[700] == 0);
+    CHECK (host.getCaptures().size() == 1);
+
+    routing.shutdown();
+}
+
+TEST_CASE ("App: AppRouting does not take a reused process id for the routed process it replaced")
+{
+    const flubapptest::TempFolder temp;
+    AppSettings settings (temp.file ("settings.xml"), false);
+    AudioEngineHost host;
+    RouterScript script;
+    const auto gameEndpoint = settings.getStripEndpointId ("Game").toStdString();
+
+    AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), false);
+    routing.setRoute ("cs2", "Game");
+    routing.setRoute ("spotify", "Game");
+    routing.setLiveUpdates (true);
+    script.setSessions ({ session (100, "cs2.exe"), session (300, "Discord.exe") });
+    routing.start();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        const auto* cs2 = findApp (routing, 100);
+        return cs2 != nullptr && cs2->routed;
+    }));
+    CHECK (countMoves (script, 100, gameEndpoint) == 1);
+
+    const auto emptyEnumeration = [&]
+    {
+        script.setSessions ({}); // kept as a failed enumeration: pid 100 stays "routed"
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return routing.getApps().empty(); }));
+    };
+    const auto appearsAs = [&] (uint32_t pid, const char* exe)
+    {
+        script.setSessions ({ session (pid, exe), session (300, "Discord.exe") });
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* app = findApp (routing, pid);
+            return app != nullptr && app->executable == exe;
+        }));
+    };
+
+    // cs2 exited unseen and its pid now belongs to Spotify, mapped to the same
+    // strip: Spotify was never moved, so it is moved now.
+    emptyEnumeration();
+    appearsAs (100, "spotify.exe");
+    CHECK (countMoves (script, 100, gameEndpoint) == 2);
+    CHECK (findApp (routing, 100)->routed);
+
+    // Spotify exited unseen too and the pid is reused by an un-mapped program:
+    // that program is not "moved back", and Spotify's move stays remembered.
+    emptyEnumeration();
+    appearsAs (100, "notepad.exe");
+    CHECK (! wasMoved (script, 100, ""));
+    CHECK (! findApp (routing, 100)->routed);
+
+    // Un-mapped while closed, both apps are moved back on their next launch.
+    routing.removeRoute ("cs2");
+    routing.removeRoute ("spotify");
+    script.setSessions ({ session (101, "cs2.exe"), session (102, "spotify.exe"), session (300, "Discord.exe") });
+    routing.refresh();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return wasMoved (script, 101, "") && wasMoved (script, 102, ""); }));
+
+    routing.shutdown();
 }
