@@ -542,7 +542,9 @@ public:
             return;
         for (const unsigned int lockMask : kLockVariants)
             api->ungrabKey (display, it->second.keycode, it->second.modifiers | lockMask, root);
-        api->flush (display);
+        // Sync, not flush: when this returns the server has released the
+        // chord, so another client (or an immediate re-bind) can grab it.
+        api->sync (display, False);
         bindings.erase (it);
     }
 
