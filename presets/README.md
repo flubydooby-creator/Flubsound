@@ -1,6 +1,6 @@
 # Flubsound factory presets
 
-This folder holds the factory preset library: 24 presets in three categories (12 Music, 9 Gaming, 3 Device). It has two parts:
+This folder holds the factory preset library: 25 presets in three categories (13 Music, 9 Gaming, 3 Device). It has two parts:
 
 | Folder | Contents |
 |---|---|
@@ -38,6 +38,8 @@ The maximizer's 3-band **glue** only runs while it is *armed*: the preset sets `
 
 These are per-strip chain figures. The desktop app adds 1.4 ms for its master limiter after the strip sum (see `docs/01-architecture.md` §5). The spectral noise gate (used by *Podcast & Voice*) runs only in Quality; in the other profiles the rest of such a preset still applies.
 
+**Fresh strips** (the desktop app, a strip with no saved state: [docs/11 E36](../docs/11-enhancement-report.md#e36)) start from a factory preset instead of the parameter defaults at Boost 0: *Flubsound Signature* on Music and System, *Voice Chat* on Chat, and on Game *First Run – Game*, which is *Competitive FPS* with Boost 20 %, Footsteps 30 % and Detail 15 % (shown as a modified *Competitive FPS*). As shipped, *Competitive FPS* lifts −50 / −60 dBFS pink beds by +4.9 / +9.7 LU; the capped version by +2.7 / +2.6 LU, with step/bed contrast changes of +0.06 to +0.49 dB on the E59 burst scenes. None of them sets a latency profile, and saved strip state is never overwritten.
+
 ---
 
 ## Music (Music mode)
@@ -55,6 +57,7 @@ These are per-strip chain figures. The desktop app adds 1.4 ms for its master li
 | **Club Loud** | Loud and dense for parties / EDM | **−9 LUFS loudness cap** (AutoDrive only ever *reduces* drive), glue 0.4, bass +3 dB (protection −8 dBFS), tighten 0.2, mono < 100 Hz, subsonic 28 Hz | Boost 45 %, **Loudness 60** (≈ +6 dB governed drive), Punch 15, Width 10 | Balanced | −1 dBTP |
 | **Podcast & Voice** | Clear, even speech | **Spectral gate** (−9 dB); low cut 80 Hz; −2 dB @ 250 Hz; compressor 2.5:1 @ −14 dB, +4 dB makeup; **Auto Level → −16 LUFS**; de-esser 6.5 kHz; presence 0.3 @ 2.8 kHz; de-mud 0.35; width 0.8; bass engine off | Boost 20 %, Clarity 20 | Quality | −1 dBTP |
 | **Lo-Fi Chill** | Relaxed, dusty tape character | Tape saturation (drive 6 dB, mix 0.6), high cut 10 kHz (12 dB/oct), low cut 35 Hz, +1 dB @ 500 Hz, attack −2 / sustain +1 dB, width 0.85, space 0.2, clipper 0.3 | Boost 25 %, Warmth 40 | Quality | −1 dBTP |
+| **Voice Chat** | The Chat strip's default: even, intelligible voice chat (Discord, Teams, in-game voice) | Low cut 110 Hz; de-mud 0.3; presence 0.3 @ 2.8 kHz; de-esser 6.5 kHz; speech leveller: **Auto Level → −19 LUFS**, compressor 3:1 @ −30 dB (5 ms / 150 ms, +16 dB makeup) and upward 3:1 below −42 dB (up to +12 dB); bass engine off; **no loudness maximizing**: the maximizer is only its true-peak limiter (no drive, clipper share 0, no glue) | Boost 15 % (below the 25 % where Boost starts driving the maximizer) | Balanced | −1 dBTP |
 | **Classical & Jazz Dynamic** | Full dynamic range for acoustic recordings | **No drive, no clipper, no compression**; slow limiter (250 ms); bass +1.2 dB @ 80 Hz; air 0.12; crossfeed 0.3 for hard-panned vintage jazz | none | Quality | −1 dBTP |
 
 ## Gaming (Gaming mode)
@@ -195,6 +198,6 @@ The checks above prove that a preset is safe, not how it sounds. Any change that
 python3 tools/scripts/preset-render-diff.py --cli build/tools/flubsound-cli/flubsound-cli
 ```
 
-It renders all 24 presets, each in the latency profile it suggests, on five pinned programmes (a drum programme, a quiet game bed with footsteps, a 2 kHz tone under kicks, an ambush scene, a 7.1 bed with an LFE tone) and compares the output loudness, octave bands, 1 s level profile, pumping index and the CLI's render statistics with `tests/golden/preset-render-baseline.json`, listing every value that moved by more than 0.1 dB. The committed baseline comes from a gcc Release build on Linux x86-64; on another compiler, record your own on the base commit first (`--baseline /tmp/before.json --update`). Re-record the committed baseline with `--update` in the change that moves the sound on purpose.
+It renders all 25 presets, each in the latency profile it suggests, on five pinned programmes (a drum programme, a quiet game bed with footsteps, a 2 kHz tone under kicks, an ambush scene, a 7.1 bed with an LFE tone) and compares the output loudness, octave bands, 1 s level profile, pumping index and the CLI's render statistics with `tests/golden/preset-render-baseline.json`, listing every value that moved by more than 0.1 dB. The committed baseline comes from a gcc Release build on Linux x86-64; on another compiler, record your own on the base commit first (`--baseline /tmp/before.json --update`). Re-record the committed baseline with `--update` in the change that moves the sound on purpose.
 
 The known sound-quality gaps that the planned retunes address (footstep lift on short bursts out of silence, step/bed contrast, the Night Mode post-event hole, the Punch kick onset, pumping, 60 Hz THD+N, the 7.1 LFE, the 3.2 kHz lift at Bluetooth hands-free rates) are pinned by the `KnownGap:` tests in `tests/test_known_gaps.cpp` at today's values: `./build/tests/flub_tests KnownGap` prints every metric. A change that closes a gap updates its expectation to the target named there, as the Laptop Speakers subsonic fix did for the 30 Hz audible band (`KnownGap closed:`, now checked against its ≥ −15.8 dB target) and the 3 dB positional-focus cap did for the focus ILD (≤ 3 dB added at 3 kHz).
