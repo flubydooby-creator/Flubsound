@@ -74,9 +74,40 @@ public:
             DisposeEventHandlerUPP (handlerUpp);
     }
 
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return handlerRef != nullptr; }
 
-    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    /** Carbon hot keys have no user-visible list: 'description' is unused. */
+    bool registerHotkey (int id, const KeyChord& chord, const std::string&, std::function<void()> callback) override
+    {
+        const bool ok = registerChord (id, chord, std::move (callback));
+        reportBinding (id, ok ? BindingResult::Status::Registered : BindingResult::Status::Unavailable);
+        return ok;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        const auto it = entries.find (id);
+        if (it == entries.end())
+            return;
+
+        if (it->second.ref != nullptr)
+            UnregisterEventHotKey (it->second.ref);
+        entries.erase (it);
+    }
+
+    void unregisterAll() override
+    {
+        for (auto& item : entries)
+        {
+            if (item.second.ref != nullptr)
+                UnregisterEventHotKey (item.second.ref);
+        }
+        entries.clear();
+    }
+
+private:
+    bool registerChord (int id, const KeyChord& chord, std::function<void()> callback)
     {
         if (handlerRef == nullptr || ! callback || ! detail::isValidChord (chord))
             return false;
@@ -121,28 +152,6 @@ public:
         return true;
     }
 
-    void unregisterHotkey (int id) override
-    {
-        const auto it = entries.find (id);
-        if (it == entries.end())
-            return;
-
-        if (it->second.ref != nullptr)
-            UnregisterEventHotKey (it->second.ref);
-        entries.erase (it);
-    }
-
-    void unregisterAll() override
-    {
-        for (auto& item : entries)
-        {
-            if (item.second.ref != nullptr)
-                UnregisterEventHotKey (item.second.ref);
-        }
-        entries.clear();
-    }
-
-private:
     struct Entry
     {
         EventHotKeyRef ref = nullptr;

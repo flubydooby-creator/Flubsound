@@ -663,9 +663,40 @@ public:
         }
     }
 
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return window != nullptr; }
 
-    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    /** Windows keeps no list of global shortcuts: 'description' is unused. */
+    bool registerHotkey (int id, const KeyChord& chord, const std::string&, std::function<void()> callback) override
+    {
+        const bool ok = registerChord (id, chord, std::move (callback));
+        reportBinding (id, ok ? BindingResult::Status::Registered : BindingResult::Status::Unavailable);
+        return ok;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        const auto it = entries.find (id);
+        if (it == entries.end())
+            return;
+
+        if (window != nullptr)
+            UnregisterHotKey (window, it->second.nativeId);
+        entries.erase (it);
+    }
+
+    void unregisterAll() override
+    {
+        for (const auto& [id, entry] : entries)
+        {
+            if (window != nullptr)
+                UnregisterHotKey (window, entry.nativeId);
+        }
+        entries.clear();
+    }
+
+private:
+    bool registerChord (int id, const KeyChord& chord, std::function<void()> callback)
     {
         // Win32 hotkeys and the window are thread-affine.
         if (window == nullptr || GetCurrentThreadId() != ownerThread || ! callback || ! detail::isValidChord (chord))
@@ -701,28 +732,6 @@ public:
         return true;
     }
 
-    void unregisterHotkey (int id) override
-    {
-        const auto it = entries.find (id);
-        if (it == entries.end())
-            return;
-
-        if (window != nullptr)
-            UnregisterHotKey (window, it->second.nativeId);
-        entries.erase (it);
-    }
-
-    void unregisterAll() override
-    {
-        for (const auto& [id, entry] : entries)
-        {
-            if (window != nullptr)
-                UnregisterHotKey (window, entry.nativeId);
-        }
-        entries.clear();
-    }
-
-private:
     struct Entry
     {
         int nativeId = 0;

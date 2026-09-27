@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,29 @@ struct KeyChord
 class GlobalHotkeys
 {
 public:
+    /** What became of one registration, as the system finally reports it. */
+    struct BindingResult
+    {
+        enum class Status : uint8_t
+        {
+            Registered,  // active with the requested chord
+            Reassigned,  // active, but the desktop bound another key: see 'trigger'
+            Unavailable, // not active: invalid or unmappable chord, taken by
+                         // another application, or no working service
+            Declined     // the desktop, or the user in its dialog, declined it
+                         // (Wayland GlobalShortcuts portal)
+        };
+
+        int id = 0;
+        Status status = Status::Unavailable;
+        std::string trigger; // Reassigned: the desktop's own description of the
+                             // key it bound (its trigger_description), as sent
+
+        bool operator== (const BindingResult&) const = default;
+    };
+
+    using BindingListener = std::function<void (const BindingResult&)>;
+
     virtual ~GlobalHotkeys() = default;
     virtual bool isSupported() const = 0;
 
@@ -71,16 +95,61 @@ public:
         thread, so callers must hop to their own thread (HotkeyManager does).
         Returns false if the chord is invalid (see KeyChord), cannot be
         mapped on this system, or is taken by another application.
+        'description' names the action ("Boost +10%") where the desktop lists
+        the shortcut (Wayland portal dialog and settings, as "Flubsound Pro:
+        <description>"); empty = the chord's name. Windows and macOS have no
+        such list and ignore it.
         Linux, Wayland (GlobalShortcuts portal): binding is asynchronous and
         the desktop may ask the user, who can choose another key or decline.
-        true means the chord was requested; a refusal found later is logged
-        to stderr, not reported here. Changes made within 50 ms are bound
-        together as one portal session. */
-    virtual bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) = 0;
+        true means the chord was requested; the outcome arrives later through
+        the binding listener. Changes made within 50 ms are bound together as
+        one portal session. */
+    virtual bool registerHotkey (int id, const KeyChord& chord, const std::string& description, std::function<void()> callback) = 0;
+
+    /** The same without a description (the chord's name is shown). */
+    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback)
+    {
+        return registerHotkey (id, chord, std::string(), std::move (callback));
+    }
+
     virtual void unregisterHotkey (int id) = 0;
     virtual void unregisterAll() = 0;
 
+    /** Receives the outcome of every registration (nullptr = none). Every
+        registerHotkey() that returns false is reported as Unavailable on the
+        calling thread before it returns; so are the synchronous results of
+        Windows, macOS and X11 (Registered / Unavailable). The Wayland portal
+        reports each registered id from its D-Bus thread once the desktop has
+        answered the batch it belongs to (Registered, Reassigned or Declined;
+        Unavailable after portal errors), also when a batch needed no new
+        binding (the previous outcome again), and again if the desktop later
+        closes the session (Declined) or the portal goes away (Unavailable).
+        Called without the service's locks held; the listener must not
+        destroy the service. Set it before registering. */
+    void setBindingListener (BindingListener listener)
+    {
+        const std::lock_guard<std::mutex> guard (listenerMutex);
+        bindingListener = std::move (listener);
+    }
+
     static std::unique_ptr<GlobalHotkeys> create();
+
+protected:
+    /** For implementations: passes one result to the listener, if any. */
+    void reportBinding (int id, BindingResult::Status status, const std::string& trigger = {}) const
+    {
+        BindingListener listener;
+        {
+            const std::lock_guard<std::mutex> guard (listenerMutex);
+            listener = bindingListener;
+        }
+        if (listener)
+            listener (BindingResult { id, status, trigger });
+    }
+
+private:
+    mutable std::mutex listenerMutex;
+    BindingListener bindingListener;
 };
 
 // ---------------------------------------------------------------------------

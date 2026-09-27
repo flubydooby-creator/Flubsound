@@ -107,6 +107,7 @@ void FlubsoundApplication::initialiseInteractive()
         ui::HotkeyHooks hooks;
         hooks.isSupported = [this] { return hotkeys != nullptr && hotkeys->isSupported(); };
         hooks.getFailures = [this] { return hotkeys != nullptr ? hotkeys->getFailures() : juce::StringArray(); };
+        hooks.getStatus = [this] (HotkeyAction action) { return hotkeys != nullptr ? hotkeys->getStatus (action) : HotkeyManager::ActionStatus(); };
         hooks.reRegister = [this]
         {
             if (hotkeys != nullptr)

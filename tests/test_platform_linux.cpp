@@ -23,6 +23,7 @@
 #include <optional>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 using namespace flub::platform;
 using namespace flubtest;
@@ -306,7 +307,10 @@ TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord ano
 
     std::atomic<int> fired { 0 };
     const auto chordG = chord (KeyChord::Ctrl | KeyChord::Alt, 'G');
-    REQUIRE (hotkeys->registerHotkey (7, chordG, [&fired] { ++fired; }));
+    std::vector<GlobalHotkeys::BindingResult> results; // reported synchronously, on this thread
+    hotkeys->setBindingListener ([&results] (const GlobalHotkeys::BindingResult& r) { results.push_back (r); });
+    REQUIRE (hotkeys->registerHotkey (7, chordG, "Boost +10%", [&fired] { ++fired; }));
+    CHECK (results == (std::vector<GlobalHotkeys::BindingResult> { { 7, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
 
     const auto key = [&] (KeySym sym, bool down) {
         fakeKey (d, x->keysymToKeycode (d, sym), down ? True : False, 0);
@@ -345,11 +349,15 @@ TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord ano
     // Another client (a second service) cannot take the same chord ...
     auto other = GlobalHotkeys::create();
     REQUIRE (other->isSupported());
+    std::vector<GlobalHotkeys::BindingResult> otherResults;
+    other->setBindingListener ([&otherResults] (const GlobalHotkeys::BindingResult& r) { otherResults.push_back (r); });
     CHECK (! other->registerHotkey (1, chordG, [] {}));
     // ... until it is released here.
     hotkeys->unregisterHotkey (7);
     CHECK (other->registerHotkey (1, chordG, [] {}));
     other->unregisterAll();
+    CHECK (otherResults == (std::vector<GlobalHotkeys::BindingResult> { { 1, GlobalHotkeys::BindingResult::Status::Unavailable, {} },
+                                                                        { 1, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
 
     // Navigation keys work too (the app's defaults are Ctrl+Alt+arrows).
     std::atomic<int> arrow { 0 };
@@ -366,9 +374,13 @@ TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord ano
     hotkeys->unregisterHotkey (10);
 
     // Bare keys and unmappable key codes are refused.
+    results.clear();
     CHECK (! hotkeys->registerHotkey (8, chord (KeyChord::None, 'G'), [] {}));
     CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Ctrl, 0x13), [] {}));
     CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Shift, 'G'), [] {}));
+    CHECK (results.size() == 3);
+    for (const auto& r : results)
+        CHECK (r.status == GlobalHotkeys::BindingResult::Status::Unavailable);
 
     x->closeDisplay (d);
     ::dlclose (xtst);
@@ -966,6 +978,42 @@ public:
         refused.insert (shortcutId);
     }
 
+    /** The trigger_description BindShortcuts returns for a shortcut (by
+        default its preferred_trigger), as when the user picks another key or
+        the desktop words the same key its own way. */
+    void describeTrigger (const std::string& shortcutId, const std::string& triggerDescription)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        triggerDescriptions[shortcutId] = triggerDescription;
+    }
+
+    /** Response code of the next BindShortcuts (1 = the user cancelled the
+        dialog, 2 = other failure; no results then). */
+    void setBindResponse (uint32_t code)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        bindResponse = code;
+    }
+
+    /** Sends Session.Closed for 'session', as a desktop ending it does. */
+    void closeSession (const std::string& session)
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            jobs.push_back ([this, session, client = clientName]
+                            {
+                                dbus::MessageRef signal (extra.newSignal (session.c_str(), portal::kSessionInterface, "Closed"));
+                                dbus::Iter args, details;
+                                extra.setDestination (signal.get(), client.c_str());
+                                api->iterInitAppend (signal.get(), &args);
+                                api->iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &details);
+                                api->iterCloseContainer (&args, &details);
+                                send (signal.get());
+                            });
+        }
+        wake();
+    }
+
     std::vector<std::string> createdSessions()
     {
         std::lock_guard<std::mutex> guard (mutex);
@@ -1070,7 +1118,7 @@ private:
             }
             replyPath (call, requestBase + token);
             // The spec types session_handle as 's'.
-            return respond (sender, requestBase + token,
+            return respond (sender, requestBase + token, 0,
                             [&] (dbus::Iter* results) { dbus::appendDictEntry (*api, results, "session_handle", dbus::kTypeString, session); });
         }
 
@@ -1098,15 +1146,21 @@ private:
             api->iterNext (&args);
             dbus::readVardictString (*api, &args, "handle_token", token);
             std::set<std::string> refusedNow;
+            std::map<std::string, std::string> triggersNow;
+            uint32_t code = 0;
             {
                 std::lock_guard<std::mutex> guard (mutex);
                 binds.push_back (bind);
                 refusedNow = refused;
+                triggersNow = triggerDescriptions;
+                code = bindResponse;
             }
             replyPath (call, requestBase + token);
-            return respond (sender, requestBase + token,
+            return respond (sender, requestBase + token, code,
                             [&] (dbus::Iter* results)
                             {
+                                if (code != 0)
+                                    return;
                                 dbus::Iter entry, variant, list;
                                 api->iterOpenContainer (results, dbus::kTypeDictEntry, nullptr, &entry);
                                 dbus::appendBasic (*api, &entry, dbus::kTypeString, "shortcuts");
@@ -1121,7 +1175,9 @@ private:
                                     dbus::appendBasic (*api, &item, dbus::kTypeString, shortcut.id);
                                     api->iterOpenContainer (&item, dbus::kTypeArray, "{sv}", &properties);
                                     dbus::appendDictEntry (*api, &properties, "description", dbus::kTypeString, shortcut.description);
-                                    dbus::appendDictEntry (*api, &properties, "trigger_description", dbus::kTypeString, shortcut.preferredTrigger);
+                                    const auto described = triggersNow.find (shortcut.id);
+                                    dbus::appendDictEntry (*api, &properties, "trigger_description", dbus::kTypeString,
+                                                           described != triggersNow.end() ? described->second : shortcut.preferredTrigger);
                                     api->iterCloseContainer (&item, &properties);
                                     api->iterCloseContainer (&list, &item);
                                 }
@@ -1165,13 +1221,12 @@ private:
         send (reply.get());
     }
 
-    /** Request::Response (0 = success, results) to the caller only. */
+    /** Request::Response (code, results) to the caller only. */
     template <typename AddResults>
-    void respond (const std::string& to, const std::string& requestPath, AddResults addResults)
+    void respond (const std::string& to, const std::string& requestPath, uint32_t code, AddResults addResults)
     {
         dbus::MessageRef signal (extra.newSignal (requestPath.c_str(), portal::kRequestInterface, "Response"));
         dbus::Iter args, results;
-        const uint32_t code = 0;
         extra.setDestination (signal.get(), to.c_str());
         api->iterInitAppend (signal.get(), &args);
         api->iterAppendBasic (&args, dbus::kTypeUInt32, &code);
@@ -1192,7 +1247,48 @@ private:
     std::vector<std::string> created, closed;
     std::vector<Bind> binds;
     std::set<std::string> refused;
+    std::map<std::string, std::string> triggerDescriptions;
+    uint32_t bindResponse = 0;
 };
+
+/** Records what a service reports to its binding listener, and on which
+    thread. */
+struct BindingLog
+{
+    using Result = GlobalHotkeys::BindingResult;
+
+    void attach (GlobalHotkeys& hotkeys)
+    {
+        hotkeys.setBindingListener ([this] (const Result& result)
+                                    {
+                                        std::lock_guard<std::mutex> guard (mutex);
+                                        results.push_back (result);
+                                        threads.push_back (std::this_thread::get_id());
+                                    });
+    }
+
+    /** Everything reported since the last take(). */
+    std::vector<Result> take (std::vector<std::thread::id>* reportedOn = nullptr)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        if (reportedOn != nullptr)
+            *reportedOn = std::exchange (threads, {});
+        threads.clear();
+        return std::exchange (results, {});
+    }
+
+    size_t size()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return results.size();
+    }
+
+    std::mutex mutex;
+    std::vector<Result> results;
+    std::vector<std::thread::id> threads;
+};
+
+using Status = GlobalHotkeys::BindingResult::Status;
 
 std::vector<std::string> ids (const MockPortal::Bind& bind)
 {
@@ -1382,8 +1478,9 @@ TEST_CASE ("Platform: Wayland global hotkeys bind through the GlobalShortcuts po
     CHECK (boost.load() == 1);
 
     // A changed chord is a rebind with the new preferred trigger. The mock
-    // leaves one shortcut unbound (logged to stderr; registerHotkey already
-    // returned true), which does not affect the others.
+    // leaves one shortcut unbound (reported to the binding listener, see the
+    // next test; registerHotkey already returned true), which does not
+    // affect the others.
     mock.refuse ("flubsound-7");
     CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), [&mode] { ++mode; }));
     CHECK (hotkeys.registerHotkey (7, chord (KeyChord::Ctrl | KeyChord::Alt, 'P'), [] {}));
@@ -1408,6 +1505,136 @@ TEST_CASE ("Platform: Wayland global hotkeys bind through the GlobalShortcuts po
     const auto closedAtEnd = mock.closedSessions();
     CHECK (! closedAtEnd.empty() && closedAtEnd.back() == session3);
     CHECK (mock.createdSessions().size() == 3);
+}
+
+TEST_CASE ("Platform: portal trigger descriptions compare by modifiers and key, and shortcut descriptions are made valid UTF-8")
+{
+    // What desktops answer in trigger_description for the trigger we asked for.
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "CTRL+ALT+Up"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Up"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "<Control><Alt>Up"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Alt + Ctrl + Up"));
+    CHECK (portal::sameTrigger ("CTRL+SHIFT+m", "Shift+Ctrl+M"));
+    CHECK (portal::sameTrigger ("CTRL+Page_Up", "Ctrl+PgUp"));
+    CHECK (portal::sameTrigger ("CTRL+Page_Down", "Ctrl+Page Down"));
+    CHECK (portal::sameTrigger ("ALT+LOGO+F13", "Meta+Alt+F13"));
+    CHECK (portal::sameTrigger ("LOGO+F13", "Super+F13"));
+    CHECK (portal::sameTrigger ("CTRL+Delete", "Ctrl+Del"));
+    CHECK (portal::sameTrigger ("CTRL+space", "Ctrl+Space"));
+
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Down"));      // another key
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Up"));            // other modifiers
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Shift+Up"));
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt"));           // no key
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Up, Ctrl+U")); // two keys
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Strg+Alt+Hoch"));      // localised: shown as reassigned
+
+    // libdbus aborts on invalid UTF-8, so a caller's description is repaired.
+    CHECK (portal::validUtf8 ("Boost +10%") == "Boost +10%");
+    CHECK (portal::validUtf8 ("Caf\xC3\xA9 \xE2\x86\x91 \xF0\x9F\x8E\xA7") == "Caf\xC3\xA9 \xE2\x86\x91 \xF0\x9F\x8E\xA7");
+    CHECK (portal::validUtf8 ("a\xFF" "b") == "a?b");                   // not a lead byte
+    CHECK (portal::validUtf8 ("\xC0\xAF") == "??");                    // overlong '/'
+    CHECK (portal::validUtf8 ("\xED\xA0\x80") == "???");               // surrogate U+D800
+    CHECK (portal::validUtf8 ("\xF4\x90\x80\x80") == "????");          // above U+10FFFF
+    CHECK (portal::validUtf8 ("\xEF\xBF\xBF") == "???");               // noncharacter U+FFFF
+    CHECK (portal::validUtf8 ("\xE2\x86") == "??");                    // truncated
+    CHECK (portal::validUtf8 (std::string ("a\0b", 3)) == "a?b");
+    CHECK (portal::shortcutDescription ("Boost +10%", chord (KeyChord::Ctrl | KeyChord::Alt, 0x26)) == "Flubsound Pro: Boost +10%");
+    CHECK (portal::shortcutDescription ({}, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26)) == "Flubsound Pro: Ctrl+Alt+Up");
+}
+
+TEST_CASE ("Platform: Wayland portal shortcuts carry the action's description and report registered, reassigned and declined bindings")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+
+    PortalGlobalHotkeys hotkeys (std::chrono::hours (1)); // only applyNow() sends
+    REQUIRE (hotkeys.isSupported());
+    BindingLog log;
+    log.attach (hotkeys);
+    const auto testThread = std::this_thread::get_id();
+    std::vector<std::thread::id> threads;
+
+    // A refusal is reported at once, on the calling thread.
+    CHECK (! hotkeys.registerHotkey (4, chord (KeyChord::None, 'G'), "Bare G", [] {}));
+    CHECK (log.take (&threads) == (std::vector<BindingLog::Result> { { 4, Status::Unavailable, {} } }));
+    CHECK (threads == std::vector<std::thread::id> { testThread });
+
+    // The desktop words one trigger its own way (still the requested key),
+    // lets the user pick another key for a second and leaves a third unbound.
+    mock.describeTrigger ("flubsound-3", "Ctrl+Alt+Up");
+    mock.describeTrigger ("flubsound-5", "Ctrl+Alt+PgUp");
+    mock.refuse ("flubsound-7");
+    const auto registerSet = [&hotkeys]
+    {
+        CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+        CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), "Boost -10%", [] {}));
+        CHECK (hotkeys.registerHotkey (7, chord (KeyChord::Ctrl | KeyChord::Alt, 'P'), "Next Preset", [] {}));
+        CHECK (hotkeys.registerHotkey (9, chord (KeyChord::None, kF1 + 12), [] {})); // no description: the chord
+    };
+    registerSet();
+    CHECK (log.size() == 0); // asynchronous: nothing is known before the portal answers
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+
+    auto binds = mock.bindCalls();
+    REQUIRE (binds.size() == 1);
+    CHECK (binds[0].shortcuts == (std::vector<MockPortal::Shortcut> {
+                                     { "flubsound-3", "Flubsound Pro: Boost +10%", "CTRL+ALT+Up" },
+                                     { "flubsound-5", "Flubsound Pro: Boost -10%", "CTRL+ALT+Down" },
+                                     { "flubsound-7", "Flubsound Pro: Next Preset", "CTRL+ALT+p" },
+                                     { "flubsound-9", "Flubsound Pro: F13", "F13" },
+                                 }));
+    const std::vector<BindingLog::Result> firstOutcome {
+        { 3, Status::Registered, {} },
+        { 5, Status::Reassigned, "Ctrl+Alt+PgUp" },
+        { 7, Status::Declined, {} },
+        { 9, Status::Registered, {} },
+    };
+    CHECK (log.take (&threads) == firstOutcome); // reported before the batch settles
+    REQUIRE (threads.size() == 4);
+    CHECK (threads[0] != testThread); // the service's D-Bus thread
+
+    // Nothing to rebind (HotkeyManager::registerAll() with the same set): no
+    // new BindShortcuts, and the previous outcome is reported again.
+    hotkeys.unregisterAll();
+    registerSet();
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (mock.bindCalls().size() == 1);
+    CHECK (log.take() == firstOutcome);
+
+    // The user cancels the dialog (response 1): the whole batch is declined.
+    mock.setBindResponse (1);
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x24), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    REQUIRE (mock.bindCalls().size() == 2);
+    CHECK (log.take() == (std::vector<BindingLog::Result> {
+                             { 3, Status::Declined, {} }, { 5, Status::Declined, {} }, { 7, Status::Declined, {} }, { 9, Status::Declined, {} } }));
+
+    // A caller's description that is not valid UTF-8 is repaired before it
+    // reaches libdbus (which would abort the process).
+    mock.setBindResponse (0);
+    hotkeys.unregisterAll();
+    CHECK (hotkeys.registerHotkey (11, chord (KeyChord::Ctrl | KeyChord::Alt, 'K'), "Caf\xC3\xA9 \xFF mix", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    binds = mock.bindCalls();
+    REQUIRE (binds.size() == 3);
+    CHECK (binds[2].shortcuts == (std::vector<MockPortal::Shortcut> { { "flubsound-11", "Flubsound Pro: Caf\xC3\xA9 ? mix", "CTRL+ALT+k" } }));
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 11, Status::Registered, {} } }));
+
+    // The desktop ends the session: its shortcuts no longer work.
+    REQUIRE (mock.createdSessions().size() == 3);
+    mock.closeSession (mock.createdSessions()[2]);
+    REQUIRE (waitUntil ([&log] { return log.size() == 1; }));
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 11, Status::Declined, {} } }));
 }
 
 TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalShortcuts portal")

@@ -43,6 +43,7 @@ MainComponent::MainComponent (EngineController& c)
 
     // ---- Wiring ----
     header.onSettingsRequested = [this] { openSettings(); };
+    header.onExportRequested = [this] { openExport(); };
     addChildComponent (deviceBanner);
     deviceBanner.onDetailsRequested = [this] { openSettings (true); }; // the full guidance is on the Audio page
     deviceBanner.refresh();
@@ -73,9 +74,12 @@ MainComponent::MainComponent (EngineController& c)
 
 MainComponent::~MainComponent()
 {
-    // The settings window talks to the controller: close it while that exists.
+    // The settings and export windows talk to the controller: close them
+    // while that exists (closing the export window aborts a running export).
     if (settingsWindow != nullptr)
         delete settingsWindow.getComponent();
+    if (exportWindow != nullptr)
+        delete exportWindow.getComponent();
     vblank.reset();
     controller.removeListener (this);
     setLookAndFeel (nullptr);
@@ -287,6 +291,16 @@ void MainComponent::openSettings (bool forceAudioPage)
             safe->sendLookAndFeelChange(); // repaints; views that cache palette colours refresh them
         },
         lookAndFeel().getMeterPalette());
+}
+
+void MainComponent::openExport()
+{
+    if (exportWindow != nullptr)
+    {
+        exportWindow->toFront (true);
+        return;
+    }
+    exportWindow = ExportDialog::show (controller, this);
 }
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)

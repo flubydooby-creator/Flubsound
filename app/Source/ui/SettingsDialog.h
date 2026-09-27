@@ -15,8 +15,10 @@
 //               device-input routing, per-app routing method and the meter
 //               palette (standard / colour-blind safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
-//               ("Ctrl+Alt+F"), reset to default, enable / disable; chords
-//               that could not be registered are listed.
+//               ("Ctrl+Alt+F"), reset to default, enable / disable; each
+//               row shows its registration status (registered, in use,
+//               declined by the desktop, bound by the desktop as another
+//               key, waiting for the desktop), updated as results arrive.
 //   General     start with the OS (reflects the OS's actual entry; hidden
 //               where unsupported), start minimised, close to tray, file
 //               locations, version.
@@ -25,6 +27,7 @@
 #include "Theme.h"
 #include "Widgets.h"
 #include "engine/EngineController.h"
+#include "shell/HotkeyManager.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -42,6 +45,8 @@ struct HotkeyHooks
     std::function<bool()> isSupported;
     std::function<juce::StringArray()> getFailures;
     std::function<void()> reRegister;
+    /** Per-action status (HotkeyManager::getStatus); optional. */
+    std::function<HotkeyManager::ActionStatus (HotkeyAction)> getStatus;
 };
 
 class SettingsDialog : public juce::Component, private juce::Timer

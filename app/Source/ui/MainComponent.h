@@ -33,6 +33,7 @@
 #include "AnalyzerPanel.h"
 #include "BoostPanel.h"
 #include "DeviceAdviceBanner.h"
+#include "export/ExportDialog.h"
 #include "FlubLookAndFeel.h"
 #include "HeaderBar.h"
 #include "LevelMeters.h"
@@ -72,6 +73,8 @@ private:
     /** Opens Settings (on the Audio page), or brings the open dialog to the
         front; forceAudioPage also switches an open dialog to the Audio page. */
     void openSettings (bool forceAudioPage = false);
+    /** Opens the Export / batch process dialog, or brings it to the front. */
+    void openExport();
     void refreshDeviceBanner();
     juce::String currentStripSignature() const;
     void loadUiPreferences();
@@ -96,7 +99,7 @@ private:
     MeterSnapshot snapshot;
     HotkeyHooks hotkeyHooks;
     std::unique_ptr<juce::VBlankAttachment> vblank;
-    juce::Component::SafePointer<juce::DialogWindow> settingsWindow;
+    juce::Component::SafePointer<juce::DialogWindow> settingsWindow, exportWindow;
     juce::String stripSignature; // names + channel counts: rebuild strip views only when it changes
 
     double lastFrameTime = -1.0;

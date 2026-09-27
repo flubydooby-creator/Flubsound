@@ -247,26 +247,6 @@ RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParamet
     return rs;
 }
 
-bool writeRender (const std::string& path, io::SampleFormat format, RenderResult& result, std::string& error)
-{
-    if (! io::writeWav (path, result.output, format, error))
-        return false;
-    if (format == io::SampleFormat::Float32)
-        return true; // float32 round trips bit-exactly: outputReport already describes the file
-
-    // PCM: report what was delivered - the quantised, dithered samples - not
-    // the float render (the dither is seeded per file, so this is repeatable).
-    io::AudioFileData written;
-    std::string readError;
-    if (! io::readWav (path, written, readError))
-    {
-        error = "cannot read back " + path + ": " + readError;
-        return false;
-    }
-    result.outputReport = analyse (written.channels, written.sampleRate);
-    return true;
-}
-
 // ===========================================================================
 // process
 // ===========================================================================

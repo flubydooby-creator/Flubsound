@@ -44,6 +44,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -67,9 +68,11 @@
     #define FLUB_HAVE_X11_HEADERS 1
     #include <X11/Xlib.h>
     #include <X11/keysym.h>
-    // X.h defines None as a macro, which would break KeyChord::None (used
-    // below and by tests/test_platform_linux.cpp, which includes this file).
+    // X.h defines None and Xlib.h Status as macros, which would break
+    // KeyChord::None and GlobalHotkeys::BindingResult::Status (used below
+    // and by tests/test_platform_linux.cpp, which includes this file).
     #undef None
+    #undef Status
 #else
     #define FLUB_HAVE_X11_HEADERS 0
 #endif
@@ -508,9 +511,45 @@ public:
         }
     }
 
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return display != nullptr; }
 
-    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    /** X11 has no list of shortcuts to show 'description' in. */
+    bool registerHotkey (int id, const KeyChord& chord, const std::string&, std::function<void()> callback) override
+    {
+        const bool ok = grab (id, chord, std::move (callback));
+        reportBinding (id, ok ? BindingResult::Status::Registered : BindingResult::Status::Unavailable);
+        return ok;
+    }
+
+    void unregisterHotkey (int id) override
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        const auto it = bindings.find (id);
+        if (it == bindings.end())
+            return;
+        for (const unsigned int lockMask : kLockVariants)
+            api->ungrabKey (display, it->second.keycode, it->second.modifiers | lockMask, root);
+        api->flush (display);
+        bindings.erase (it);
+    }
+
+    void unregisterAll() override
+    {
+        std::vector<int> ids;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            for (const auto& b : bindings)
+                ids.push_back (b.first);
+        }
+        for (const int id : ids)
+            unregisterHotkey (id);
+    }
+
+private:
+    /** XGrabKey for every lock-key variant; false if the chord is invalid,
+        unmappable or grabbed by another client. */
+    bool grab (int id, const KeyChord& chord, std::function<void()> callback)
     {
         if (display == nullptr || ! callback)
             return false;
@@ -551,31 +590,6 @@ public:
         return true;
     }
 
-    void unregisterHotkey (int id) override
-    {
-        std::lock_guard<std::mutex> guard (mutex);
-        const auto it = bindings.find (id);
-        if (it == bindings.end())
-            return;
-        for (const unsigned int lockMask : kLockVariants)
-            api->ungrabKey (display, it->second.keycode, it->second.modifiers | lockMask, root);
-        api->flush (display);
-        bindings.erase (it);
-    }
-
-    void unregisterAll() override
-    {
-        std::vector<int> ids;
-        {
-            std::lock_guard<std::mutex> guard (mutex);
-            for (const auto& b : bindings)
-                ids.push_back (b.first);
-        }
-        for (const int id : ids)
-            unregisterHotkey (id);
-    }
-
-private:
     struct Binding
     {
         KeyCode keycode = 0;
@@ -634,8 +648,15 @@ private:
 class LinuxGlobalHotkeys final : public GlobalHotkeys
 {
 public:
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return false; } // built without X11 headers
-    bool registerHotkey (int, const KeyChord&, std::function<void()>) override { return false; }
+
+    bool registerHotkey (int id, const KeyChord&, const std::string&, std::function<void()>) override
+    {
+        reportBinding (id, BindingResult::Status::Unavailable);
+        return false;
+    }
+
     void unregisterHotkey (int) override {}
     void unregisterAll() override {}
 };
@@ -675,10 +696,14 @@ public:
     BindShortcuts response already lists what was bound.
 
     Results are asynchronous, so registerHotkey() returns true when the chord
-    can be requested (valid chord with a trigger name, portal present). A
-    denied dialog, shortcuts the desktop did not bind and portal errors are
-    logged to stderr: the GlobalHotkeys interface has no channel back to
-    HotkeyManager for failures found after registerHotkey() returned.
+    can be requested (valid chord with a trigger name, portal present). The
+    outcome goes to the binding listener from the service thread once the
+    batch is answered: Registered, Reassigned (the response's
+    trigger_description names another key than preferred_trigger; compared
+    by portal::sameTrigger), Declined (response code 1 or 2, or the id is
+    missing from the bound list) or Unavailable (a D-Bus error). A batch
+    that needs no new binding repeats the previous outcome. Refusals and
+    errors are also logged to stderr.
 
     Threading: one private connection to the session bus, serviced by the
     service's own thread (poll on the bus fd + a wake pipe, like the X11
@@ -950,6 +975,123 @@ std::string triggerFor (const KeyChord& chord)
     return trigger + key;
 }
 
+/** A trigger reduced to its modifiers and a canonical key name, so the
+    preferred_trigger sent ("CTRL+ALT+Page_Up") can be compared with the
+    trigger_description a desktop answers with ("Ctrl+Alt+PgUp",
+    "<Control><Alt>Page_Up", "Alt+Ctrl+Page Up"). Knows the English names
+    only: a localised description ("Strg+Alt+Bild auf") compares as a
+    different key and is reported as reassigned, showing the desktop's text. */
+struct CanonicalTrigger
+{
+    uint32_t modifiers = 0;
+    std::string key;
+    bool operator== (const CanonicalTrigger&) const = default;
+};
+
+/** false when 'text' names no key, or more than one. */
+bool canonicalTrigger (const std::string& text, CanonicalTrigger& out)
+{
+    static const std::map<std::string, uint32_t> modifierNames {
+        { "ctrl", KeyChord::Ctrl },  { "control", KeyChord::Ctrl }, { "primary", KeyChord::Ctrl }, { "strg", KeyChord::Ctrl },
+        { "alt", KeyChord::Alt },    { "mod1", KeyChord::Alt },     { "shift", KeyChord::Shift },  { "logo", KeyChord::Super },
+        { "super", KeyChord::Super }, { "meta", KeyChord::Super },  { "win", KeyChord::Super },    { "windows", KeyChord::Super },
+        { "mod4", KeyChord::Super }, { "cmd", KeyChord::Super },    { "command", KeyChord::Super },
+    };
+    static const std::map<std::string, std::string> keyAliases {
+        { "pgup", "pageup" },     { "prior", "pageup" },   { "pgdown", "pagedown" }, { "pgdn", "pagedown" },
+        { "next", "pagedown" },   { "del", "delete" },     { "ins", "insert" },      { "spacebar", "space" },
+        { "uparrow", "up" },      { "downarrow", "down" }, { "leftarrow", "left" },  { "rightarrow", "right" },
+    };
+
+    out = {};
+    std::vector<std::string> tokens;
+    std::string token;
+    for (const char c : text + "+")
+    {
+        if (c == '+' || c == '<' || c == '>')
+        {
+            if (! token.empty())
+                tokens.push_back (token);
+            token.clear();
+        }
+        else if (c != ' ' && c != '_' && c != '-')
+            token += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+    }
+    for (const auto& t : tokens)
+    {
+        if (const auto modifier = modifierNames.find (t); modifier != modifierNames.end())
+            out.modifiers |= modifier->second;
+        else if (! out.key.empty())
+            return false;
+        else if (const auto alias = keyAliases.find (t); alias != keyAliases.end())
+            out.key = alias->second;
+        else
+            out.key = t;
+    }
+    return ! out.key.empty();
+}
+
+/** True when the desktop's trigger_description names the trigger requested. */
+bool sameTrigger (const std::string& preferredTrigger, const std::string& triggerDescription)
+{
+    CanonicalTrigger preferred, actual;
+    return canonicalTrigger (preferredTrigger, preferred) && canonicalTrigger (triggerDescription, actual) && preferred == actual;
+}
+
+/** 'text' with NUL bytes and every byte that does not start a valid UTF-8
+    sequence (overlong forms, surrogates, code points above U+10FFFF, the
+    noncharacters U+FFFE / U+FFFF) replaced by '?': libdbus aborts the
+    process on an invalid string, and descriptions come from the caller. */
+std::string validUtf8 (const std::string& text)
+{
+    static constexpr uint32_t kMinimum[] = { 0, 0, 0x80, 0x800, 0x10000 }; // shortest form per length
+    std::string out;
+    out.reserve (text.size());
+    size_t i = 0;
+    while (i < text.size())
+    {
+        const auto lead = static_cast<unsigned char> (text[i]);
+        size_t length = 0; // 0: not a lead byte (or NUL)
+        if (lead >= 0x01 && lead < 0x80)
+            length = 1;
+        else if ((lead & 0xE0) == 0xC0)
+            length = 2;
+        else if ((lead & 0xF0) == 0xE0)
+            length = 3;
+        else if ((lead & 0xF8) == 0xF0)
+            length = 4;
+        uint32_t codePoint = length == 1 ? lead : lead & (0x7Fu >> length);
+
+        bool valid = length != 0 && i + length <= text.size();
+        for (size_t k = 1; valid && k < length; ++k)
+        {
+            const auto next = static_cast<unsigned char> (text[i + k]);
+            valid = (next & 0xC0) == 0x80;
+            codePoint = (codePoint << 6) | (next & 0x3Fu);
+        }
+        valid = valid && (length == 1 || codePoint >= kMinimum[length]) && codePoint <= 0x10FFFF
+                && (codePoint < 0xD800 || codePoint > 0xDFFF) && codePoint != 0xFFFE && codePoint != 0xFFFF;
+        if (valid)
+        {
+            out.append (text, i, length);
+            i += length;
+        }
+        else
+        {
+            out += '?';
+            ++i;
+        }
+    }
+    return out;
+}
+
+/** The BindShortcuts description: the application's name and the action
+    ("Flubsound Pro: Boost +10%"), or the chord when no description is given. */
+std::string shortcutDescription (const std::string& description, const KeyChord& chord)
+{
+    return "Flubsound Pro: " + (description.empty() ? chord.toString() : validUtf8 (description));
+}
+
 /** Shortcut ids are what desktops store the user's choice under. */
 std::string shortcutId (int id) { return "flubsound-" + std::to_string (id); }
 
@@ -1053,18 +1195,20 @@ public:
                 ::close (fd);
     }
 
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return supported; }
 
     /** GlobalShortcuts interface version the portal reported (0 = none). */
     uint32_t getPortalVersion() const noexcept { return portalVersion; }
 
-    bool registerHotkey (int id, const KeyChord& chord, std::function<void()> callback) override
+    bool registerHotkey (int id, const KeyChord& chord, const std::string& description, std::function<void()> callback) override
     {
-        if (! supported || ! callback || ! detail::isValidChord (chord))
+        Shortcut shortcut { portal::triggerFor (chord), portal::shortcutDescription (description, chord) };
+        if (! supported || ! callback || ! detail::isValidChord (chord) || shortcut.trigger.empty())
+        {
+            reportBinding (id, BindingResult::Status::Unavailable);
             return false;
-        Shortcut shortcut { portal::triggerFor (chord), "Flubsound Pro: " + chord.toString() };
-        if (shortcut.trigger.empty())
-            return false;
+        }
         {
             std::lock_guard<std::mutex> guard (mutex);
             wanted[id] = Wanted { std::move (shortcut), std::move (callback) };
@@ -1258,6 +1402,7 @@ private:
             if (api->connectionReadWrite (connection, 0) == 0) // reads and writes what it can, never blocks
             {
                 portal::log ("lost the connection to the session bus; shortcuts stop working");
+                report (wantedShortcuts(), BindingResult::Status::Unavailable);
                 break;
             }
             while (dbus::Message* message = api->connectionPopMessage (connection))
@@ -1304,14 +1449,28 @@ private:
 
         if (want == bound && (want.empty() || ! session.empty()))
         {
-            markSettled (rev); // e.g. unregisterAll() + the same registrations again
+            // e.g. unregisterAll() + the same registrations again: nothing to
+            // bind, the outcome is the previous one.
+            for (const auto& [id, result] : results)
+                reportBinding (id, result.status, result.trigger);
+            markSettled (rev);
             return -1;
         }
         closeSession();
         bound.clear();
-        if (want.empty() || ! createSession (std::move (want), rev))
+        results.clear();
+        if (! want.empty() && ! createSession (want, rev))
+            report (want, BindingResult::Status::Unavailable);
+        if (want.empty() || pending.stage == Stage::Idle)
             markSettled (rev);
         return -1;
+    }
+
+    /** Reports every id of 'shortcuts' with one status (service thread). */
+    void report (const std::map<int, Shortcut>& shortcuts, BindingResult::Status status)
+    {
+        for (const auto& entry : shortcuts)
+            reportBinding (entry.first, status);
     }
 
     std::string nextToken() { return "flubsound" + std::to_string (++tokenCounter); }
@@ -1409,6 +1568,7 @@ private:
                 dbus::readString (*api, &it, text);
             portal::log (std::string (pending.stage == Stage::Binding ? "BindShortcuts" : "CreateSession") + " failed: "
                          + dbus::str (api->messageGetErrorName (message)) + " " + text);
+            report (pending.shortcuts, BindingResult::Status::Unavailable);
             finishPending();
             return;
         }
@@ -1432,57 +1592,84 @@ private:
         else if (interfaceName == portal::kSessionInterface && member == "Closed" && ! session.empty() && path == session)
         {
             portal::log ("the desktop closed the session; shortcuts are requested again when the hotkey settings change");
+            report (bound, BindingResult::Status::Declined);
             session.clear();
             bound.clear();
+            results.clear();
         }
     }
 
     void onResponse (dbus::Message* message)
     {
-        dbus::Iter results;
+        dbus::Iter response;
         uint32_t code = 2;
-        if (api->iterInit (message, &results) != 0 && api->iterGetArgType (&results) == dbus::kTypeUInt32)
+        if (api->iterInit (message, &response) != 0 && api->iterGetArgType (&response) == dbus::kTypeUInt32)
         {
-            api->iterGetBasic (&results, &code);
-            api->iterNext (&results);
+            api->iterGetBasic (&response, &code);
+            api->iterNext (&response);
         }
 
         if (pending.stage == Stage::CreatingSession)
         {
             std::string handle; // 's' in the spec, 'o' in some back-ends
-            if (code == 0 && dbus::readVardictString (*api, &results, "session_handle", handle) && portal::isValidObjectPath (handle))
+            if (code == 0 && dbus::readVardictString (*api, &response, "session_handle", handle) && portal::isValidObjectPath (handle))
             {
                 session = handle;
                 if (bindShortcuts())
                     return;
+                report (pending.shortcuts, BindingResult::Status::Unavailable);
             }
             else
+            {
                 portal::log ("the desktop did not open a session (response " + std::to_string (code) + ")");
+                report (pending.shortcuts, code != 0 ? BindingResult::Status::Declined : BindingResult::Status::Unavailable);
+            }
             finishPending();
             return;
         }
 
-        std::set<std::string> boundIds;
+        // Each bound shortcut comes back as (id, {description, trigger_description});
+        // the trigger is the desktop's own text for the key it bound.
+        std::map<std::string, std::string> boundTriggers;
         dbus::Iter list;
-        if (code == 0 && dbus::findInVardict (*api, &results, "shortcuts", list) && api->iterGetArgType (&list) == dbus::kTypeArray)
+        if (code == 0 && dbus::findInVardict (*api, &response, "shortcuts", list) && api->iterGetArgType (&list) == dbus::kTypeArray)
         {
             dbus::Iter items;
             api->iterRecurse (&list, &items);
             for (; api->iterGetArgType (&items) == dbus::kTypeStruct; api->iterNext (&items))
             {
                 dbus::Iter item;
-                std::string shortcut;
+                std::string shortcut, trigger;
                 api->iterRecurse (&items, &item);
-                if (dbus::readString (*api, &item, shortcut))
-                    boundIds.insert (shortcut);
+                if (! dbus::readString (*api, &item, shortcut))
+                    continue;
+                if (api->iterNext (&item) != 0)
+                    dbus::readVardictString (*api, &item, "trigger_description", trigger);
+                boundTriggers[shortcut] = trigger;
             }
         }
         if (code != 0)
             portal::log (code == 1 ? "the user declined the shortcuts" : "the desktop refused the shortcuts (response " + std::to_string (code) + ")");
-        else
-            for (const auto& [id, shortcut] : pending.shortcuts)
-                if (boundIds.count (portal::shortcutId (id)) == 0)
+
+        // An empty trigger_description (some back-ends send none) counts as
+        // the requested trigger.
+        results.clear();
+        for (const auto& [id, shortcut] : pending.shortcuts)
+        {
+            BindingResult result { id, BindingResult::Status::Declined, {} };
+            const auto found = boundTriggers.find (portal::shortcutId (id));
+            if (found == boundTriggers.end())
+            {
+                if (code == 0)
                     portal::log ("\"" + shortcut.description + "\" (" + shortcut.trigger + ") was not bound by the desktop");
+            }
+            else if (found->second.empty() || portal::sameTrigger (shortcut.trigger, found->second))
+                result.status = BindingResult::Status::Registered;
+            else
+                result = BindingResult { id, BindingResult::Status::Reassigned, found->second };
+            results[id] = result;
+            reportBinding (id, result.status, result.trigger);
+        }
 
         // Remembered even when refused, so re-registering the same set does
         // not ask the user again; a changed set starts a new session.
@@ -1524,10 +1711,22 @@ private:
         portalOwner = newOwner;
         session.clear();
         bound.clear();
+        results.clear();
+        if (newOwner.empty())
+            report (wantedShortcuts(), BindingResult::Status::Unavailable);
         if (pending.stage != Stage::Idle)
             finishPending();
         if (! newOwner.empty())
-            handledRevision = kReapply;
+            handledRevision = kReapply; // rebinds, and reports the new outcome
+    }
+
+    std::map<int, Shortcut> wantedShortcuts()
+    {
+        std::map<int, Shortcut> want;
+        std::lock_guard<std::mutex> guard (mutex);
+        for (const auto& [id, w] : wanted)
+            want.emplace (id, w.shortcut);
+        return want;
     }
 
     const dbus::Api* api = nullptr;
@@ -1553,6 +1752,7 @@ private:
     std::string portalOwner;
     std::string session;
     std::map<int, Shortcut> bound;
+    std::map<int, BindingResult> results; // the outcome for each id of 'bound'
     Pending pending;
     uint64_t handledRevision = 0;
     unsigned int tokenCounter = 0;

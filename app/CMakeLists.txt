@@ -11,6 +11,8 @@
 #   platform/    PlatformServices.h (fixed interface), PlatformBridge.* (guards
 #                the optional platform implementation), PlatformServices_<os>.*
 #                (owned by the platform engineer)
+#   export/      ExportJob (background batch render of audio files through
+#                the CLI's offline renderer) and ExportDialog (its UI)
 #   ui/          the GUI: MainComponent (layout + frame loop), FlubLookAndFeel,
 #                ParameterBinding, HeaderBar, SettingsDialog, BoostPanel,
 #                AnalyzerPanel (SpectrumAnalyzer + EqCurveEditor), LevelMeters,
@@ -48,6 +50,8 @@ set(FLUB_APP_SOURCES
     Source/engine/EngineController.cpp
     Source/engine/AppRouting.cpp
     Source/engine/TestSignalGenerator.cpp
+    Source/export/ExportDialog.cpp
+    Source/export/ExportJob.cpp
     Source/presets/PresetManager.cpp
     Source/settings/AppSettings.cpp
     Source/platform/PlatformBridge.cpp
@@ -76,10 +80,16 @@ set(FLUB_APP_SOURCES
     Source/ui/SpectrumAnalyzer.cpp
     Source/ui/Theme.cpp
     Source/ui/WaveformHistory.cpp
-    Source/ui/Widgets.cpp)
+    Source/ui/Widgets.cpp
+    # The CLI's offline renderer (plain C++ on flub::core, no main.cpp): the
+    # Export / batch dialog renders files exactly like `flubsound-cli process`.
+    ../tools/flubsound-cli/Analysis.cpp
+    ../tools/flubsound-cli/OfflineRenderer.cpp)
 
 target_sources(FlubsoundPro PRIVATE ${FLUB_APP_SOURCES})
-target_include_directories(FlubsoundPro PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Source")
+target_include_directories(FlubsoundPro PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/Source"
+    "${PROJECT_SOURCE_DIR}/tools/flubsound-cli")
 
 # ---------------------------------------------------------------------------
 # Platform services (implemented by the platform engineer). The app builds
@@ -192,6 +202,7 @@ endif()
 target_link_libraries(FlubsoundPro
     PRIVATE
         flub::core
+        juce::juce_audio_formats # Export / batch: WAV, AIFF, FLAC, Ogg Vorbis, MP3 readers; FLAC writer
         juce::juce_audio_utils
         juce::juce_audio_devices
         juce::juce_dsp

@@ -406,6 +406,8 @@ void HeaderBar::showPresetMenu()
     menu.addItem (7, "Show preset folder");
     menu.addSeparator();
     menu.addItem (8, "Reset strip to defaults");
+    menu.addSeparator();
+    menu.addItem (9, "Export / batch process audio files...", onExportRequested != nullptr);
 
     juce::Component::SafePointer<HeaderBar> safe (this);
     const auto currentCopy = current != nullptr ? *current : PresetInfo();
@@ -439,6 +441,10 @@ void HeaderBar::showPresetMenu()
                                     break;
                                 }
                                 case 8: self.resetStrip(); break;
+                                case 9:
+                                    if (self.onExportRequested)
+                                        self.onExportRequested();
+                                    break;
                                 default: break;
                             }
                         });

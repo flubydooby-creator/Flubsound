@@ -4,14 +4,44 @@
 
 namespace flub::app
 {
+using BindingResult = flub::platform::GlobalHotkeys::BindingResult;
+
 HotkeyManager::HotkeyManager (EngineController& c)
-    : controller (c), hotkeys (platform_bridge::createGlobalHotkeys())
+    : HotkeyManager (c, platform_bridge::createGlobalHotkeys())
 {
+}
+
+HotkeyManager::HotkeyManager (EngineController& c, std::unique_ptr<flub::platform::GlobalHotkeys> service)
+    : controller (c), hotkeys (std::move (service))
+{
+    if (hotkeys == nullptr)
+        return;
+
+    // Results come synchronously from registerHotkey() on this thread, or
+    // later from the service's own thread (Wayland portal): hop over then.
+    juce::WeakReference<HotkeyManager> weakThis (this);
+    hotkeys->setBindingListener ([weakThis] (const BindingResult& result)
+                                 {
+                                     if (juce::MessageManager::existsAndIsCurrentThread())
+                                     {
+                                         if (auto* self = weakThis.get())
+                                             self->applyBindingResult (result);
+                                         return;
+                                     }
+                                     juce::MessageManager::callAsync (
+                                         [weakThis, result]
+                                         {
+                                             if (auto* self = weakThis.get())
+                                                 self->applyBindingResult (result);
+                                         });
+                                 });
 }
 
 HotkeyManager::~HotkeyManager()
 {
     unregisterAll();
+    if (hotkeys != nullptr)
+        hotkeys->setBindingListener (nullptr);
 }
 
 bool HotkeyManager::isSupported() const noexcept
@@ -22,17 +52,11 @@ bool HotkeyManager::isSupported() const noexcept
 void HotkeyManager::registerAll()
 {
     unregisterAll();
-    failures.clear();
+    statuses.clear();
 
     auto& settings = controller.getSettings();
-    if (! settings.getHotkeysEnabled())
-        return;
-
-    if (! isSupported())
-    {
-        failures.add ("Global hotkeys are not supported on this system");
-        return;
-    }
+    const bool enabled = settings.getHotkeysEnabled();
+    unsupported = enabled && ! isSupported();
 
     for (const auto action : AppSettings::getAllHotkeyActions())
     {
@@ -40,10 +64,18 @@ void HotkeyManager::registerAll()
         if (chord.keyCode == 0)
             continue; // unassigned
 
+        ActionStatus status;
+        status.chord = AppSettings::chordToString (chord);
+        status.status = ! enabled ? Status::SwitchedOff : (unsupported ? Status::NotSupported : Status::Pending);
+        statuses[action] = status;
+        if (status.status != Status::Pending)
+            continue;
+
         // The service promises message-thread callbacks; hop over defensively
         // if an implementation ever calls from its own thread.
         juce::WeakReference<HotkeyManager> weakThis (this);
         const bool ok = hotkeys->registerHotkey (static_cast<int> (action), chord,
+                                                 AppSettings::getHotkeyActionName (action).toStdString(),
                                                  [weakThis, action]
                                                  {
                                                      if (juce::MessageManager::existsAndIsCurrentThread())
@@ -59,15 +91,92 @@ void HotkeyManager::registerAll()
                                                                  self->perform (action);
                                                          });
                                                  });
-        if (! ok)
-            failures.add (AppSettings::getHotkeyActionName (action) + " (" + AppSettings::chordToString (chord) + ") could not be registered: another application may already use it, or the system does not allow that key");
+
+        // A refusal is reported through the listener as well; this covers a
+        // service that does not report.
+        if (! ok && statuses[action].status == Status::Pending)
+            statuses[action].status = Status::Unavailable;
     }
+
+    if (onStatusChanged != nullptr)
+        onStatusChanged();
 }
 
 void HotkeyManager::unregisterAll()
 {
     if (hotkeys != nullptr)
         hotkeys->unregisterAll();
+}
+
+HotkeyManager::ActionStatus HotkeyManager::getStatus (HotkeyAction action) const
+{
+    const auto it = statuses.find (action);
+    return it != statuses.end() ? it->second : ActionStatus {};
+}
+
+void HotkeyManager::applyBindingResult (const BindingResult& result)
+{
+    const auto action = static_cast<HotkeyAction> (result.id);
+    const auto it = statuses.find (action);
+    if (it == statuses.end() || it->second.status == Status::SwitchedOff || it->second.status == Status::NotSupported)
+        return; // not requested by the last registerAll() (a late result of an earlier one)
+
+    auto updated = it->second;
+    updated.trigger.clear();
+    switch (result.status)
+    {
+        case BindingResult::Status::Registered: updated.status = Status::Registered; break;
+        case BindingResult::Status::Reassigned:
+            updated.status = Status::Reassigned;
+            updated.trigger = juce::String::fromUTF8 (result.trigger.c_str());
+            break;
+        case BindingResult::Status::Unavailable: updated.status = Status::Unavailable; break;
+        case BindingResult::Status::Declined: updated.status = Status::Declined; break;
+    }
+    setStatus (action, updated);
+}
+
+void HotkeyManager::setStatus (HotkeyAction action, ActionStatus status)
+{
+    auto& current = statuses[action];
+    if (current.status == status.status && current.chord == status.chord && current.trigger == status.trigger)
+        return;
+    current = std::move (status);
+    if (onStatusChanged != nullptr)
+        onStatusChanged();
+}
+
+juce::String HotkeyManager::describe (const ActionStatus& status)
+{
+    switch (status.status)
+    {
+        case Status::NotAssigned: return "Not assigned";
+        case Status::SwitchedOff: return "Off";
+        case Status::NotSupported: return "Not supported here";
+        case Status::Pending: return "Waiting for the desktop";
+        case Status::Registered: return "Registered";
+        case Status::Reassigned: return "Bound by the desktop as " + status.trigger;
+        case Status::Unavailable: return "In use / could not register";
+        case Status::Declined: return "Declined by the desktop";
+    }
+    return {};
+}
+
+juce::StringArray HotkeyManager::getFailures() const
+{
+    juce::StringArray failures;
+    if (unsupported)
+        failures.add ("Global hotkeys are not supported on this system");
+
+    for (const auto& [action, status] : statuses)
+    {
+        const auto name = AppSettings::getHotkeyActionName (action) + " (" + status.chord + ")";
+        if (status.status == Status::Unavailable)
+            failures.add (name + " could not be registered: another application may already use it, or the system does not allow that key");
+        else if (status.status == Status::Declined)
+            failures.add (name + " was declined by the desktop: bind it in the desktop's keyboard settings, or choose another chord");
+    }
+    return failures;
 }
 
 void HotkeyManager::perform (HotkeyAction action)

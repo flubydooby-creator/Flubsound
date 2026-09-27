@@ -431,7 +431,11 @@ private:
 // =============================================================================
 // Hotkeys page
 // =============================================================================
-class SettingsDialog::HotkeysPage : public juce::Component
+/** One row per action: name, chord editor, reset button and the action's
+    registration status. Results that arrive later (the Wayland portal asks
+    the desktop, which may ask the user) are picked up by a 4 Hz poll while
+    the page is visible. */
+class SettingsDialog::HotkeysPage : public juce::Component, private juce::Timer
 {
 public:
     HotkeysPage (EngineController& c, HotkeyHooks h)
@@ -490,20 +494,36 @@ public:
         updateStatus();
     }
 
+    void visibilityChanged() override
+    {
+        if (isVisible())
+            startTimerHz (4);
+        else
+            stopTimer();
+    }
+
     void paint (juce::Graphics& g) override
     {
         drawSectionTitle (g, titleArea, "System-wide shortcuts");
-        g.setFont (Theme::font (13.0f));
         for (const auto& row : rows)
         {
             g.setColour (Palette::text.withAlpha (0.88f));
+            g.setFont (Theme::font (13.0f));
             g.drawText (row.name, row.captionArea, juce::Justification::centredLeft, true);
+
+            using S = HotkeyManager::Status;
+            const auto state = row.state.status;
+            g.setColour (state == S::Unavailable || state == S::Declined ? Palette::amber
+                         : state == S::Registered                         ? Palette::green
+                                                                          : Palette::muted);
+            g.setFont (Theme::font (11.5f));
+            g.drawFittedText (row.stateText, row.stateArea, juce::Justification::centredLeft, 2, 1.0f);
         }
         if (status.isNotEmpty())
         {
             g.setColour (statusIsError ? Palette::amber : Palette::faint.brighter (0.2f));
             g.setFont (Theme::font (12.0f));
-            g.drawFittedText (status, statusArea, juce::Justification::topLeft, 5, 1.0f);
+            g.drawFittedText (status, statusArea, juce::Justification::topLeft, 8, 1.0f);
         }
     }
 
@@ -517,14 +537,16 @@ public:
         for (auto& row : rows)
         {
             auto line = r.removeFromTop (kRowHeight);
-            row.captionArea = line.removeFromLeft (kCaptionWidth);
-            row.editor->setBounds (line.removeFromLeft (200).reduced (0, 2));
+            row.captionArea = line.removeFromLeft (160);
+            row.editor->setBounds (line.removeFromLeft (150).reduced (0, 2));
             line.removeFromLeft (6);
             row.reset->setBounds (line.removeFromLeft (26).reduced (0, 2));
+            line.removeFromLeft (12);
+            row.stateArea = line;
             r.removeFromTop (4);
         }
         r.removeFromTop (10);
-        statusArea = r.removeFromTop (80);
+        statusArea = r;
     }
 
 private:
@@ -534,8 +556,38 @@ private:
         juce::String name;
         std::unique_ptr<juce::TextEditor> editor;
         std::unique_ptr<IconButton> reset;
-        juce::Rectangle<int> captionArea;
+        juce::Rectangle<int> captionArea, stateArea;
+        HotkeyManager::ActionStatus state;
+        juce::String stateText; // HotkeyManager::describe, "" without the hook
     };
+
+    void timerCallback() override
+    {
+        // Only a change rewrites the summary, so an invalid-chord message
+        // stays until the next change.
+        for (const auto& row : rows)
+        {
+            if (readState (row.action).text != row.stateText)
+            {
+                updateStatus();
+                return;
+            }
+        }
+    }
+
+    struct RowState
+    {
+        HotkeyManager::ActionStatus state;
+        juce::String text;
+    };
+
+    RowState readState (HotkeyAction action) const
+    {
+        if (hooks.getStatus == nullptr)
+            return {};
+        const auto state = hooks.getStatus (action);
+        return { state, HotkeyManager::describe (state) };
+    }
 
     void commit (HotkeyAction action, juce::TextEditor& editor)
     {
@@ -571,6 +623,18 @@ private:
 
     void updateStatus()
     {
+        using S = HotkeyManager::Status;
+        int pending = 0, reassigned = 0, inactive = 0;
+        for (auto& row : rows)
+        {
+            const auto current = readState (row.action);
+            row.state = current.state;
+            row.stateText = current.text;
+            pending += row.state.status == S::Pending ? 1 : 0;
+            reassigned += row.state.status == S::Reassigned ? 1 : 0;
+            inactive += row.state.status == S::Unavailable || row.state.status == S::Declined ? 1 : 0;
+        }
+
         const bool supported = hooks.isSupported != nullptr && hooks.isSupported();
         statusIsError = false;
         if (! supported)
@@ -578,17 +642,28 @@ private:
             status = "System-wide hotkeys are not available here (no platform support, or a Wayland session without the "
                      "GlobalShortcuts portal). The shortcuts are saved and apply where supported.";
         }
-        else
+        else if (! controller.getSettings().getHotkeysEnabled())
         {
-            const auto failures = hooks.getFailures != nullptr ? hooks.getFailures() : juce::StringArray();
-            if (failures.isEmpty())
-                status = controller.getSettings().getHotkeysEnabled() ? "All shortcuts are registered." : "Shortcuts are switched off.";
-            else
-            {
-                status = "Could not register: " + failures.joinIntoString (", ") + " (probably used by another application).";
-                statusIsError = true;
-            }
+            status = "Shortcuts are switched off.";
         }
+        else if (inactive > 0)
+        {
+            status = "Some shortcuts are not active (see each row): another application may already use the chord, or the desktop "
+                     "declined it. Choose another chord, or bind the action in the desktop's keyboard settings.";
+            statusIsError = true;
+        }
+        else if (const auto failures = hooks.getStatus == nullptr && hooks.getFailures != nullptr ? hooks.getFailures() : juce::StringArray();
+                 ! failures.isEmpty())
+        {
+            status = "Could not register: " + failures.joinIntoString ("; ") + ".";
+            statusIsError = true;
+        }
+        else if (pending > 0)
+            status = "Waiting for the desktop to confirm the shortcuts; it may ask you in a dialog.";
+        else if (reassigned > 0)
+            status = "The desktop bound some shortcuts to other keys (shown next to each); change them in its keyboard settings.";
+        else
+            status = "All shortcuts are registered.";
         repaint();
     }
 

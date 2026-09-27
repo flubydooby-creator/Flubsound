@@ -2,10 +2,12 @@
 // `params` and `presets` (main.cpp only parses the command line, prints help
 // and dispatches here).
 //
-// The render-and-write glue and the batch building blocks are declared here
-// so tests/test_offline_render.cpp can run them directly: the folder walk
-// (collectBatchJobs), one file (runBatchJob), the worker pool (runBatchJobs)
-// and the per-file reports (formatBatchSummary, batchResultsToJson).
+// The batch building blocks are declared here so tests/test_offline_render.cpp
+// can run them directly: the folder walk (collectBatchJobs), one file
+// (runBatchJob), the worker pool (runBatchJobs) and the per-file reports
+// (formatBatchSummary, batchResultsToJson). The render-and-write glue
+// (renderFile, writeRender) is in OfflineRenderer.h, which the desktop app's
+// Export / batch dialog compiles too.
 //
 // The output report of `process` / `batch` describes the file as written:
 // for PCM16 / PCM24 the written file is read back and measured, so the
@@ -47,11 +49,6 @@ bool isWavFile (const std::filesystem::path& path);
 /** Render settings for these options: block size, loudness target, and the
     ceiling check when --ceiling or --target-lufs was given. */
 RenderSettings makeRenderSettings (const RenderOptions& options, const ResolvedParameters& params);
-
-/** Writes result.output to `path` in `format` (Float32, Pcm24 or Pcm16) and
-    sets result.outputReport to the analysis of the samples actually written
-    (PCM files are read back). Returns false with a message on failure. */
-bool writeRender (const std::string& path, io::SampleFormat format, RenderResult& result, std::string& error);
 
 // ---- batch ----------------------------------------------------------------
 struct BatchJob

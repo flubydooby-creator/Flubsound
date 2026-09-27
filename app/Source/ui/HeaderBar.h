@@ -9,7 +9,8 @@
 //   strips that currently receive audio.
 // * Preset browser: combo box grouped by factory / user category, previous
 //   / next, and a menu with save, save as, rename, delete, import, export,
-//   reveal folder and reset.
+//   reveal folder, reset and "Export / batch process audio files..." (the
+//   ExportDialog: render audio files with these settings).
 // * A/B: active bank of the selected strip + copy to the other bank.
 // * Bypass: master enable (every strip); it is loudness matched while the
 //   "Loudness-matched bypass" parameter is on (right-click to change).
@@ -49,6 +50,8 @@ public:
     void animate (double dtSeconds);
 
     std::function<void()> onSettingsRequested;
+    /** Preset menu > "Export / batch process audio files..." (ExportDialog). */
+    std::function<void()> onExportRequested;
 
     /** The bottom line of the latency / CPU readout. */
     struct CpuReadout

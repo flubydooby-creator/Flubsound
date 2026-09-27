@@ -127,8 +127,15 @@ namespace
 class UnsupportedHotkeys final : public GlobalHotkeys
 {
 public:
+    using GlobalHotkeys::registerHotkey;
     bool isSupported() const override { return false; }
-    bool registerHotkey (int, const KeyChord&, std::function<void()>) override { return false; }
+
+    bool registerHotkey (int id, const KeyChord&, const std::string&, std::function<void()>) override
+    {
+        reportBinding (id, BindingResult::Status::Unavailable);
+        return false;
+    }
+
     void unregisterHotkey (int) override {}
     void unregisterAll() override {}
 };

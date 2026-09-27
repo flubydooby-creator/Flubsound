@@ -1,5 +1,9 @@
 // Flubsound Pro CLI - sample-aligned offline rendering through ProcessingChain.
 //
+// Plain C++ on flub::core (with Analysis.cpp): the CLI, the core tests and
+// the desktop app's Export / batch dialog (app/Source/export) compile it, so
+// all three render a file identically.
+//
 // Every pass builds its own ParameterStore + ProcessingChain (so batch jobs
 // on worker threads share nothing) and runs exactly the real-time code path:
 //
@@ -40,6 +44,7 @@
 
 #include "flub/io/WavFile.h"
 
+#include <atomic>
 #include <optional>
 #include <string>
 #include <vector>
@@ -53,7 +58,14 @@ struct RenderSettings
     float toleranceLu = 0.3f;
     int maxIterations = 4;                 // corrective re-renders after the first pass
     std::optional<float> verifyCeilingDb;  // hold (maximizer on) / report a true peak above this
+    // Optional: another thread sets it to stop the render between blocks
+    // (renderFile / renderPass then fail with kAbortedError). The CLI leaves
+    // it null; the app's Export / batch job uses it to quit without waiting.
+    const std::atomic<bool>* abort = nullptr;
 };
+
+/** The error of a render stopped through RenderSettings::abort. */
+inline constexpr const char* kAbortedError = "render aborted";
 
 struct RenderResult
 {
@@ -79,8 +91,17 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error);
 bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseValues, const RenderSettings& settings,
                  RenderResult& result, std::string& error);
 
+/** Writes result.output to `path` in `format` (Float32, Pcm24 or Pcm16) and
+    sets result.outputReport to the analysis of the samples actually written
+    (PCM files are read back: the report includes quantisation and TPDF
+    dither; float32 round-trips bit-exactly, so the render's own analysis is
+    the file's). Returns false with a message on failure. */
+bool writeRender (const std::string& path, io::SampleFormat format, RenderResult& result, std::string& error);
+
 /** A single latency-compensated pass (no targeting). `outStereo` receives
-    2 planar channels of input length. */
+    2 planar channels of input length. A non-null `abort` is polled once per
+    block (see RenderSettings::abort). */
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
-                 std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error);
+                 std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
+                 const std::atomic<bool>* abort = nullptr);
 } // namespace flub::cli

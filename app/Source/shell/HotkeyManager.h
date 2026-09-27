@@ -8,8 +8,13 @@
 //   Ctrl+Alt+Right  next preset
 //   Ctrl+Alt+Left   previous preset
 //
-// Registration failures (chord owned by another application, or no platform
-// support) are collected in getFailures() so the UI can show them.
+// Each action is registered under its name (AppSettings::getHotkeyActionName),
+// which desktops that list shortcuts show (the Wayland portal dialog). The
+// outcome of every registration is kept per action (getStatus): the
+// service's binding listener reports it synchronously (Windows, macOS, X11)
+// or later from its own thread (Wayland portal: the desktop may decline a
+// shortcut or bind another key); results are moved onto the message thread.
+// Actions that are not active are also listed by getFailures() for the UI.
 #pragma once
 
 #include "engine/EngineController.h"
@@ -18,6 +23,7 @@
 #include <juce_events/juce_events.h>
 
 #include <functional>
+#include <map>
 #include <memory>
 
 namespace flub::app
@@ -26,6 +32,9 @@ class HotkeyManager final
 {
 public:
     explicit HotkeyManager (EngineController& controller);
+
+    /** Uses 'service' instead of the OS's (tests); nullptr = unsupported. */
+    HotkeyManager (EngineController& controller, std::unique_ptr<flub::platform::GlobalHotkeys> service);
     ~HotkeyManager();
 
     /** True when global hotkeys can be registered on this system. */
@@ -35,8 +44,39 @@ public:
     void registerAll();
     void unregisterAll();
 
-    /** Human-readable list of chords that could not be registered. */
-    const juce::StringArray& getFailures() const noexcept { return failures; }
+    /** Where an action's shortcut stands after the last registerAll(). */
+    enum class Status
+    {
+        NotAssigned,  // no chord (or registerAll() not called yet)
+        SwitchedOff,  // hotkeys disabled in the settings
+        NotSupported, // no global-hotkey service on this system
+        Pending,      // requested; the desktop has not answered yet (Wayland)
+        Registered,   // active with the chord from the settings
+        Reassigned,   // active, but the desktop bound another key: 'trigger'
+        Unavailable,  // taken by another application, or not allowed here
+        Declined      // the desktop (or the user in its dialog) declined it
+    };
+
+    struct ActionStatus
+    {
+        Status status = Status::NotAssigned;
+        juce::String chord;   // as registered (AppSettings::chordToString)
+        juce::String trigger; // Reassigned: the desktop's name for the key bound
+    };
+
+    ActionStatus getStatus (HotkeyAction action) const;
+
+    /** Short text for the Hotkeys page's row: "Registered", "In use / could
+        not register", "Declined by the desktop", "Bound by the desktop as
+        <trigger>", "Waiting for the desktop", "Not assigned", "Off",
+        "Not supported here". */
+    static juce::String describe (const ActionStatus& status);
+    juce::String getStatusText (HotkeyAction action) const { return describe (getStatus (action)); }
+
+    /** Human-readable list of shortcuts that are not active (could not be
+        registered, or declined by the desktop), or why hotkeys are
+        unavailable altogether. */
+    juce::StringArray getFailures() const;
 
     /** Runs an action exactly as the hotkey would (the registered chords call
         it; the tray menu drives EngineController directly). */
@@ -45,10 +85,17 @@ public:
     /** Feedback after an action (e.g. for a tray bubble / on-screen display). */
     std::function<void (HotkeyAction action, const juce::String& feedback)> onActionPerformed;
 
+    /** Called on the message thread whenever an action's status changes. */
+    std::function<void()> onStatusChanged;
+
 private:
+    void applyBindingResult (const flub::platform::GlobalHotkeys::BindingResult& result);
+    void setStatus (HotkeyAction action, ActionStatus status);
+
     EngineController& controller;
     std::unique_ptr<flub::platform::GlobalHotkeys> hotkeys;
-    juce::StringArray failures;
+    std::map<HotkeyAction, ActionStatus> statuses; // assigned actions only
+    bool unsupported = false; // hotkeys enabled, but no service
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (HotkeyManager)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HotkeyManager)

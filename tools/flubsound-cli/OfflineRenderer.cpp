@@ -59,7 +59,8 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error)
 }
 
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
-                 std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error)
+                 std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
+                 const std::atomic<bool>* abort)
 {
     if (! checkRenderable (input, error))
         return false;
@@ -101,6 +102,12 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
     const int64_t totalFrames = numFrames + latency;
     for (int64_t pos = 0; pos < totalFrames; pos += blockSize)
     {
+        if (abort != nullptr && abort->load (std::memory_order_relaxed))
+        {
+            error = kAbortedError;
+            return false;
+        }
+
         const int n = static_cast<int> (std::min<int64_t> (blockSize, totalFrames - pos));
         const int available = static_cast<int> (std::clamp<int64_t> (numFrames - pos, 0, n)); // real input frames in this block
 
@@ -151,7 +158,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     auto runPass = [&] (std::vector<std::vector<float>>& out, LoudnessReport& report) {
         const auto t0 = Clock::now();
         int latency = 0;
-        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error);
+        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort);
         renderSeconds += std::chrono::duration<double> (Clock::now() - t0).count();
         if (! ok)
             return false;
@@ -350,6 +357,26 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     result.inputGainDb = bestInGain;
     result.outputGainDb = bestOutGain;
     result.renderSeconds = renderSeconds;
+    return true;
+}
+
+bool writeRender (const std::string& path, io::SampleFormat format, RenderResult& result, std::string& error)
+{
+    if (! io::writeWav (path, result.output, format, error))
+        return false;
+    if (format == io::SampleFormat::Float32)
+        return true; // float32 round trips bit-exactly: outputReport already describes the file
+
+    // PCM: report what was delivered - the quantised, dithered samples - not
+    // the float render (the dither is seeded per file, so this is repeatable).
+    io::AudioFileData written;
+    std::string readError;
+    if (! io::readWav (path, written, readError))
+    {
+        error = "cannot read back " + path + ": " + readError;
+        return false;
+    }
+    result.outputReport = analyse (written.channels, written.sampleRate);
     return true;
 }
 } // namespace flub::cli

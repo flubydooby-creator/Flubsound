@@ -109,7 +109,10 @@ X11 otherwise.
   a wake pipe); callbacks run on that thread and `HotkeyManager` moves them
   to the message thread. A chord another X client already grabbed fails with
   `BadAccess`, caught by a temporary `XSetErrorHandler`, and
-  `registerHotkey` returns false. `XkbSetDetectableAutoRepeat` and a
+  `registerHotkey` returns false. Every registration is also reported to
+  the binding listener (`Registered` / `Unavailable`) before it returns.
+  X11 has no list of shortcuts, so the action's description is not used.
+  `XkbSetDetectableAutoRepeat` and a
   per-chord "down" flag make a held key fire once. Bare keys, F-keys
   included, are refused because they would steal normal typing.
 - **Wayland.** Grabbing keys is forbidden by design (an X grab through
@@ -134,18 +137,29 @@ X11 otherwise.
     from the portal's unique bus name and name the current session.
   - `CreateSession`, then, once its `Response` signal carries the
     `session_handle`, `BindShortcuts` with one entry per chord: id
-    `flubsound-<action>`, description `Flubsound Pro: <chord>` and a
+    `flubsound-<action>`, description `Flubsound Pro: <action name>`
+    (the description `HotkeyManager` passes, e.g. "Boost +10%", with
+    invalid UTF-8 replaced by `?` because libdbus aborts on it;
+    `Flubsound Pro: <chord>` when there is none) and a
     `preferred_trigger` in the XDG shortcuts format: modifiers `CTRL`,
     `ALT`, `SHIFT`, `LOGO`, then the xkb keysym name of the unshifted key,
     for example `CTRL+ALT+Up`, `CTRL+SHIFT+m`, `CTRL+Page_Up` or `F13`.
     The desktop may show a dialog; the user can pick another key or
     decline.
   - Binding is asynchronous, so `registerHotkey()` returns true when the
-    chord could be requested (valid chord, portal present). A declined
-    dialog, shortcuts missing from the `BindShortcuts` response and portal
-    errors are logged to stderr; the `GlobalHotkeys` interface has no way to
-    report them to `HotkeyManager` later, so the Hotkeys page does not show
-    them.
+    chord could be requested (valid chord, portal present). The outcome goes
+    to the binding listener (`GlobalHotkeys::setBindingListener`) from the
+    service's thread once the portal answers, and `HotkeyManager` shows it
+    per action on the Hotkeys page: an id in the `BindShortcuts` response is
+    `Registered`, or `Reassigned` when its `trigger_description` names
+    another key (compared by modifiers and key with common aliases such as
+    `PgUp` / `Page_Up` and `Meta` / `LOGO`; English names only, so a
+    localised description counts as another key and is shown verbatim). An
+    id missing from the response, or a response code 1 (the user cancelled)
+    or 2, is `Declined`; a D-Bus error is `Unavailable`. A batch that needs
+    no new binding repeats the previous outcome, a session the desktop
+    closes later turns its shortcuts `Declined`, and a portal that goes away
+    turns them `Unavailable`. Refusals and errors are also logged to stderr.
   - Rebinding: the interface has no "unbind", and a session's shortcuts are
     bound once. A changed set is therefore bound in a new session and the
     old one is closed (`Session.Close`). Desktops remember the user's choice
@@ -173,11 +187,20 @@ Tests in `tests/test_platform_linux.cpp`:
   one `Activated` fires the right callback exactly once and that signals from
   another client or a closed session are ignored. It also checks that
   unregistering or changing a chord re-creates the session and that
-  re-registering the same set does not. `Platform: Wayland global hotkeys
-  are unsupported without a GlobalShortcuts portal` covers a bus without a
-  portal, a portal without the interface and no bus at all. Both are
-  skipped without `dbus-daemon` or libdbus-1; the CI `sanitizers` job
-  installs `dbus`.
+  re-registering the same set does not. `Platform: Wayland portal shortcuts
+  carry the action's description and report registered, reassigned and
+  declined bindings` checks the descriptions `BindShortcuts` receives and
+  the binding listener's results: synchronous refusals on the calling
+  thread, then from the service thread a shortcut bound as requested (also
+  when the desktop words the trigger its own way), one bound to another key,
+  one left out, the same outcome again for an unchanged set, a cancelled
+  dialog, a repaired non-UTF-8 description and a session the desktop
+  closes. `Platform: Wayland global hotkeys are unsupported without a
+  GlobalShortcuts portal` covers a bus without a portal, a portal without
+  the interface and no bus at all. These are skipped without `dbus-daemon`
+  or libdbus-1; the CI `sanitizers` job installs `dbus`. `Platform: portal
+  trigger descriptions compare by modifiers and key, and shortcut
+  descriptions are made valid UTF-8` needs neither.
 
 ## Start at sign-in
 
