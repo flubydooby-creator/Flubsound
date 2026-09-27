@@ -343,7 +343,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
     ─► [Clarity]     transient gain ±12 (attack) ±12 (sustain) dB; presence ≤ +6 dB; de-mud ≤ −4 dB;
                      air: harmonics at ≤ −12 dB re band + ≤ +2 dB shelf
     ─► [Saturation]  unity small-signal; loud peaks reduced (≈ 1/g); wet output ±12 dB
-    ─► [Spatial]     L+R invariant (section 7)
+    ─► [Spatial]     L+R invariant, except with the Bs2b / Meier crossfeed (section 7)
     ─► [Compressor]  make-up −12..+24 dB, upward ≤ +18 dB (section 9)
     ─► [Maximizer]   drive 0..+24 dB → glue (only while armed) → soft clipper → TRUE-PEAK LIMITER @ ceiling
                      (−12..0 dBTP, default −1)
@@ -1586,7 +1586,7 @@ Sources: [`core/include/flub/dsp/StereoSpatializer.h`](../core/include/flub/dsp/
 
 ### 7.1 Purpose
 
-"Stereo & Space" widens, focuses and decorrelates the stereo image. It also offers bs2b-style headphone crossfeed. Every stage acts on the **side** signal only, so the mono fold-down is invariant for every setting (§7.3.6). That guarantee protects mono playback, laptop speakers and Bluetooth hands-free links from comb filtering.
+"Stereo & Space" widens, focuses and decorrelates the stereo image. It also offers headphone crossfeed. Width, focus, space and the Mono-safe crossfeed act on the **side** signal only, so the mono fold-down is invariant for them at every setting (§7.3.6). That guarantee protects mono playback, laptop speakers and Bluetooth hands-free links from comb filtering. The exception is the default Bs2b / Meier crossfeed ([11 E12](11-enhancement-report.md#e12) Phase A): a real L/R crossfeed with an interaural delay, which no side-only processor can produce (§7.3.4).
 
 - Zero latency, all IIR.
 - Stereo only: a block with `numChannels != 2` passes through untouched, and no state advances.
@@ -1598,11 +1598,15 @@ Sources: [`core/include/flub/dsp/StereoSpatializer.h`](../core/include/flub/dsp/
  L ─┐   M = (L + R) / 2 ─────────────────────────────────────────────────────┬─► L' = M + S4
  R ─┘   S = (L − R) / 2                                                       └─► R' = M − S4
         │
-        S  ─► HS_w: 2nd-order high shelf (Q 1/√2) at spatial.lowCut ─► × min(w, 1) ─► S1   width
+        S  ─► d = HS_w(S) − S: 2nd-order high shelf (Q 1/√2) at spatial.lowCut
+           ─► (S + guard_w · d) × min(w, 1) ─────────────────────────────────────► S1   width
+        M, S ─► HP at spatial.lowCut ─► envelopes e_M, e_S; |d| ─► e_d ─► guard_w   (width polarity guard, §7.3.1; w > 1 only)
         S1 ─► S1 + guard · (bell 3 kHz, Q 0.5, +3 dB · focus (S1) − S1) ────────► S2   positional focus
         M, S1 ─► band-pass 3 kHz, Q 0.5 ─► envelopes e_M, e_S ─► guard ∈ [0, 1]   (polarity guard, §7.3.2)
-        M  ─► HP 300 Hz (Butterworth, 12 dB/oct) ─► z^−5 ms ─► D (nested all-pass) ─► × 0.5·space ─(+)─► S3
-        S3 ─► S3 − 0.6 · crossfeed · LP1_700 Hz(S3) ───────────────────────────────► S4   crossfeed
+        M  ─► HP 300 Hz ─► dip −7 dB @ 2 kHz, Q 0.4 ─► z^−10 ms ─► D (nested all-pass) ─► × 0.5·space ─(+)─► S3
+        S3 ─► S3 − 0.6 · crossfeed · LP1_700 Hz(S3)  (Mono-safe type only) ───────► S4
+ L3 = M + S4, R3 = M − S4
+        ─► Bs2b / Meier crossfeed (§7.3.4):  L' = L3 − (1 − n0)·LP_fc(L3) + g·z^−D·LP_fc(R3),  R' likewise
 
  L', R' ─► <L'R'>, <L'²>, <R'²> (one-pole 300 ms, double) ─► ρ
         ─► every 32 samples: safety s ∈ [0, 1] ─► w_eff = w > 1 ? 1 + (w − 1)(1 − s) : w ─► 20 ms smoother ─► w
@@ -1637,6 +1641,21 @@ The phase of S never strays more than 27.7° from M (16.3° at `w = 1.5`). A lit
 
 The shelf is re-derived per sample only while `w` or the low cut glide: two square roots and one division, plus an `exp` and a `tan` while the low cut moves.
 
+**Width polarity guard** ([11 E12](11-enhancement-report.md#e12) Phase A). Raising S against an untouched M writes `M − S' < 0` into the quieter ear once `S' > M`. For a source on one channel only (R = 0, so M = S) any widening does: at `w = 2` the far ear carried an anti-phase copy at −6.0 dB re the source (ILD 9.5 dB instead of infinite; −15.3 dB at 100 Hz, below the 180 Hz cut, from the shelf transition). The side signal the shelf adds, `d = HS_w(S) − S`, is therefore applied only in the share that keeps S below M in the widened band:
+
+```
+e_M, e_S = peak-hold envelopes of HP(M), HP(S)     HP: 2nd-order, Q 1/√2, at spatial.lowCut; release 30 ms
+e_d      = peak-hold envelope of |d|                release 30 ms
+guard_w  = e_d ≤ e_M − e_S ? 1 : max(0, (e_M − e_S) / e_d)    instant attack, 50 ms release
+S1       = S + guard_w · d                          (w > 1; for w ≤ 1, d = 0 and S1 = w · S exactly)
+```
+
+- A hard-panned source (`e_M = e_S` exactly) is not widened: its far ear stays exactly silent at every frequency and its near ear bit-identical (measured with white noise and 100 Hz, 1 kHz and 5 kHz tones).
+- A partially panned source is widened until its far ear reaches silence, never past it: R = L/2 still goes from 6 dB to 13.7 dB (1 kHz) / 14.0 dB (5 kHz) of ILD at `w = 2`; R = L/4 at 2 kHz ends with its far ear 33 dB down, in phase.
+- A pure side signal (no M) and uncorrelated L/R of equal level (`e_M ≈ e_S`) are not widened.
+- The detectors run only while the effective width is above 1 and start from clear state when it leaves 1 (the shelf adds nothing at 1, and the envelopes attack instantly).
+- M is still never written: the mono sum stays exact. Like the focus guard it reads the band mix, not each source (§7.9).
+
 #### 7.3.2 Positional focus
 
 A Cytomic bell (as `SvfCoeffs::make(Bell)`) on S1 at a fixed 3 kHz, Q 0.5, gain `3 dB · positionalFocus` (`kFocusMaxDb`; 0 dB when the spatializer runs at 32 kHz or less):
@@ -1664,7 +1683,8 @@ S2       = S1 + guard · (Bell(S1) − S1)                focus 0: Bell(S1) == S
 #### 7.3.3 Space
 
 ```
-x  = z^−P · HP300(M)               HP300: 2nd-order Butterworth SVF high-pass, P = 5 ms pre-delay
+x  = z^−P · Dip(HP300(M))          HP300: 2nd-order Butterworth SVF high-pass; Dip: bell −7 dB at 2 kHz, Q 0.4
+                                   (−5 dB at 1 and 4 kHz); P = 10 ms pre-delay (5 ms before 11 E12)
 D  : three nested Schroeder all-passes, g = 0.5; the outer (7.3 ms) section carries the
      4.7 ms section in its delay path, which carries the 3.1 ms one. Per section:
          v = in + g · w,   y = w − g · v,   w = inner(v delayed)
@@ -1675,19 +1695,40 @@ S3 = S2 + 0.5 · space · D(x)
 
   | fs | pre-delay | outer | middle | inner |
   |---|---|---|---|---|
-  | 44.1 kHz | 221 | 322 | 207 | 137 |
-  | 48 kHz | 240 | 350 | 226 | 149 |
-  | 96 kHz | 480 | 701 | 451 | 298 |
-  | 192 kHz | 960 | 1402 | 902 | 595 |
+  | 44.1 kHz | 441 | 322 | 207 | 137 |
+  | 48 kHz | 480 | 350 | 226 | 149 |
+  | 96 kHz | 960 | 701 | 451 | 298 |
+  | 192 kHz | 1920 | 1402 | 902 | 595 |
 
-- D is a true lossless all-pass, so the ambience has exactly the spectrum of HP300(M). On mono sines at space 1, S/M (analytic) is −29.0 dB at 80 Hz, −9.0 dB at 300 Hz, −6.06 dB at 1 kHz and −6.02 dB from 3 kHz. On white noise the test measures −6.1 dB.
-- **Why the pre-delay.** A Schroeder section passes `−g` of its input with no delay. Without P that instantaneous tap would put `−0.25 · space · HP(M)` straight into S and pan the centre sideways (4.4 dB interaural level difference at space 1). Delayed by 5 ms it becomes a lateral early reflection (a Lauridsen-type complementary comb) that reads as space, not as an image shift, and the ambience is uncorrelated with M at lag 0.
-- **Decay** (measured, impulse on M, space 1, 48 kHz, 10 ms windows): −20 dB after 80 ms, −40 dB after 190 ms, −60 dB after 330 ms; the tail falls about 125–130 dB/s. The flush in §7.3.7 makes it exactly zero after about 2.1 s.
+- D is a true lossless all-pass, so the ambience has exactly the spectrum of Dip(HP300(M)). On mono sines at space 1, S/M (analytic) is −29.1 dB at 80 Hz, −10.0 dB at 300 Hz, −8.7 dB at 500 Hz, −11.1 dB at 1 kHz, −13.0 dB at 2 kHz, −12.2 dB at 3 kHz, −11.0 dB at 4 kHz and −7.6 dB at 9 kHz (−6.02 dB far above the dip). On white noise the test measures −7.4 dB (−6.1 dB before the dip).
+- **Interaural level difference of a centred source.** For a centred source L'/R' = (1 + A)/(1 − A), with A the ambience response re M, so the ears differ wherever A is in phase with M. Averaged over a 1/3 octave the ripple of the delayed ambience cancels once the band is wider than about 3.5/P. Measured on a centred impulse at space 1 (1 s response, 1/3-octave bands 100 Hz–16 kHz): at most **0.70 dB** (315 Hz) with P = 10 ms, 1.91 dB (500 Hz) with the former 5 ms ([11 E12](11-enhancement-report.md#e12) asks ≤ 2 dB). On a steady tone the ripple does not average out and the ILD is up to 20·log10((1 + |A|)/(1 − |A|)): 9.5 dB at the flat |A| = 0.5 of space 1. The presence dip bounds it over 1–4 kHz, where a voice carries its presence: measured on 1/24-octave steady tones, **4.88 dB** at most there (9.27 dB before, the docs/11 audit's 9.3 dB). Elsewhere (300–700 Hz, above 5 kHz) steady tones keep up to 9.2 dB (§7.9).
+- **Why the pre-delay.** A Schroeder section passes `−g` of its input with no delay. Without P that instantaneous tap would put `−0.25 · space · HP(M)` straight into S and pan the centre sideways (4.4 dB interaural level difference at space 1). Delayed, it becomes a lateral early reflection (a Lauridsen-type complementary comb) that reads as space, not as an image shift, and the ambience is uncorrelated with M at lag 0. 10 ms, rather than 5 ms, also averages its comb out within every 1/3 octave from 100 Hz (above).
+- **Decay** (measured, impulse on M, space 1, 48 kHz, 10 ms windows): −20 dB after 90 ms, −40 dB after 200 ms, −60 dB after 340 ms (10 ms later than with the 5 ms pre-delay); the tail falls about 125–130 dB/s. The flush in §7.3.7 makes it exactly zero after about 2.1 s.
 - The network always runs, even at space 0, so raising space starts from a live tail.
 
 #### 7.3.4 Crossfeed
 
-A first-order TPT low-pass at 700 Hz, subtracted from S:
+`SpatializerParams::crossfeedType` selects one of three models ([11 E12](11-enhancement-report.md#e12) Phase A). The default is **Bs2b**. There is no parameter key for the type yet, so the chain always runs Bs2b (§7.4).
+
+**Bs2b and Meier: an energy-preserving L/R crossfeed.** Each ear receives the other channel through a first-order head-shadow low-pass, delayed by an interaural time difference, and its own channel through a complementary near-ear shelf:
+
+```
+fc, feed = 700 Hz, 4.5 dB (Bs2b)  |  650 Hz, 9.5 dB (Meier)
+r  = crossfeed · 10^(−feed/20)       far/near feed ratio at DC (the knob scales it linearly)
+n0 = 1 / sqrt(1 + r²),  g = r · n0   so n0² + g² = 1
+LP : first-order TPT low-pass at fc (as the Mono-safe one below), one per output channel
+L' = L3 − (1 − n0) · LP(L3) + g · z^−D · LP(R3)     near ear N = 1 − (1 − n0)·LP = (n0 + jW)/(1 + jW)
+R' = R3 − (1 − n0) · LP(R3) + g · z^−D · LP(L3)     far ear  X = g·z^−D·LP = g·z^−D/(1 + jW)
+D  = 0.235 ms, read with a 4-tap (3rd-order) Lagrange interpolator, as the virtualiser's (§8)
+```
+
+- **Flat power.** `|N|² + |X|² = (n0² + g² + W²)/(1 + W²) = 1` at every frequency W. The bilinear transform keeps this exact in the digital domain, and the Lagrange read droops only where LP has already removed the signal. A hard-panned source, and uncorrelated L/R, keep their power at every frequency. Measured (hard-left sines 20 Hz–20 kHz, 1/6 octave): within ±0.07 dB for Bs2b and Meier at crossfeed 1 and for Bs2b at 0.3. The M/S shelf varied by 2.43 dB (−2.4 dB at low frequencies). The far ear sits 4.52 dB (Bs2b) / 9.52 dB (Meier) below the near ear at 50 Hz (14.97 dB for Bs2b at crossfeed 0.3).
+- **Interaural delay.** The far ear lags the near ear by **0.27 ms** by cross-correlation of a hard-left white noise at 44.1 and 48 kHz, and 0.25 ms at 96 and 192 kHz: D plus the head-shadow low-pass's own delay, about the Woodworth ITD of a speaker at ±30° (0.26 ms). The Mono-safe shelf measures 0.03 ms (1.4 samples) on the same test; the docs/11 audit gave 0.24 samples.
+- **Centred sources sum coherently.** `|N + X| = (1 + r)/sqrt(1 + r²)` at DC: a centred source gains **+2.7 dB** (Bs2b) / +2.0 dB (Meier) at low frequencies at crossfeed 1 (+1.3 dB for Bs2b at 0.3), falling to 0 dB above a few kHz (measured −0.13 dB at 12 kHz). This is the low-frequency build-up a stereo speaker pair gives its phantom centre. The ratio between centred and hard-panned sources, 20·log10((1 + r)/sqrt(1 + r²)), is the same for any normalisation. bs2b splits it (about +1.8 dB centred, −0.9 dB panned at DC); this design keeps panned and uncorrelated content flat, as [11 E12](11-enhancement-report.md#e12) specifies.
+- **Not mono-exact.** `L' + R' = (N + X)(L3 + R3)`: the mono fold-down of centred content gets the same coherent low-frequency lift and a gentle comb above the head-shadow corner. Use the Mono-safe type where the mono sum must not change.
+- **Smooth.** r glides (20 ms one-pole) and n0, g follow it (a square root and a division per sample while it moves). A type change cross-fades: the old type's gain glides to 0 while the new one's glides up, and fc glides (20 ms, on ln Hz). The low-passes and ITD lines run only while the crossfeed is on or fading. They start from clear state; the 20 ms fade-in is far slower than the 0.23 ms low-pass fills.
+
+**Mono-safe: the former M/S shelf.** A first-order TPT low-pass at 700 Hz, subtracted from S:
 
 ```
 G  = tan(π·700/fs) / (1 + tan(π·700/fs))
@@ -1695,19 +1736,19 @@ v  = (S3 − z) · G,   lp = v + z,   z ← lp + v
 S4 = S3 − 0.6 · crossfeed · lp
 ```
 
-This is a monotonic low shelf on S only, with no resonance. At crossfeed 1 (analytic, 48 kHz): −7.96 dB at DC, −7.53 dB at 100 Hz, −5.37 dB at 300 Hz, −2.37 dB at 700 Hz, −1.40 dB at 1 kHz, −0.19 dB at 3 kHz and −0.02 dB at 8 kHz. It reduces low-frequency separation on headphones (bs2b-like comfort) without colouring M.
+This is a monotonic low shelf on S only, with no resonance and no delay. At crossfeed 1 (analytic, 48 kHz): −7.96 dB at DC, −7.53 dB at 100 Hz, −5.37 dB at 300 Hz, −2.37 dB at 700 Hz, −1.40 dB at 1 kHz, −0.19 dB at 3 kHz and −0.02 dB at 8 kHz. It narrows the low end on headphones without colouring M, and the mono sum stays exact. It was the only crossfeed before [11 E12](11-enhancement-report.md#e12). It narrows the image but gives it no interaural delay, which is why E12 replaced it as the default.
 
 #### 7.3.5 Output
 
-`L' = M + S4`, `R' = M − S4`. When every stage is neutral, S4 equals S bit-exactly and the code leaves L and R untouched, because `M + S` does not round back to L in general. The neutral path is therefore bit-exact (test *width 1 with everything else neutral is a bit-exact pass-through*).
+`L3 = M + S4`, `R3 = M − S4`, followed by the Bs2b / Meier crossfeed when it is on (§7.3.4). When every stage is neutral, S4 equals S bit-exactly, the crossfeed ratio is exactly 0, and the code leaves L and R untouched, because `M + S` does not round back to L in general. The neutral path is therefore bit-exact (test *width 1 with everything else neutral is a bit-exact pass-through*).
 
 #### 7.3.6 Mono-sum invariance: proof
 
-Claim: for every parameter setting, every automation trajectory and every safety state, `L' + R' = L + R`, up to float rounding.
+Claim: for every parameter setting, every automation trajectory and every safety state, `L' + R' = L + R`, up to float rounding. This holds whenever the Bs2b / Meier crossfeed is off (crossfeed 0, or the Mono-safe type). That crossfeed is a real L/R crossfeed with an interaural delay, and `L' + R' = (N + X)(L3 + R3)` (§7.3.4).
 
 1. In exact arithmetic, `L' + R' = (M + S4) + (M − S4) = 2M = L + R`. This holds whatever S4 is, because S4 cancels.
 2. Nothing in the module writes to M:
-   - width, focus, crossfeed and the safety only scale or filter S (the focus's polarity guard reads M but writes only S);
+   - width, focus, the Mono-safe crossfeed and the safety only scale or filter S (the width and focus polarity guards read M but write only S);
    - the ambience is *derived* from M but *added* to S.
 
    So the identity holds sample by sample for any time-varying, recursive or nonlinear processing of S, including parameter glides and the safety loop.
@@ -1744,8 +1785,8 @@ w_eff = w > 1 ? 1 + (w − 1)(1 − s) : w            only widening is pulled ba
 - `getCorrelation()` and `getEffectiveWidth()` are published once per stereo block (relaxed atomics). The chain forwards the effective width to `MeterBus::effectiveWidth`. The chain's correlation meter is the separate `LevelMeter` (section 13).
 
 **State hygiene** also runs on the 32-sample tick, in stream time:
-- SVF states (including the polarity guard's two band-passes), the guard envelopes and the crossfeed state below 1e−15 are flushed;
-- all-pass line writes are flushed per write;
+- SVF states (including the width guard's two high-passes, the focus guard's two band-passes and the presence dip), the guard envelopes and the crossfeed states (Mono-safe and both head-shadow low-passes) below 1e−15 are flushed;
+- all-pass and ITD line writes are flushed per write;
 - the correlation accumulators are zeroed when `<L'²> + <R'²> < 1e−30`;
 - any non-finite filter state, ambience output or correlation sum clears all state.
 
@@ -1760,7 +1801,7 @@ A NaN or ±inf input is therefore contained within 32–64 samples, and flushing
 | Width Low Cut | `spatial.lowCut` | 60 … 500 | 180 | Hz | shelf corner (half-gain point) |
 | Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | 3 kHz bell on S, 0 … +3 dB (0 at ≤ 32 kHz), lift bounded by the polarity guard (§7.3.2) |
 | Space | `spatial.space` | 0 … 1 | 0 | % | ambience level, `0.5 · space · D(…)` into S |
-| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | `0.6 · crossfeed` of LP1_700(S) subtracted |
+| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Bs2b crossfeed: far/near feed ratio `crossfeed · 10^(−4.5/20)` at DC, 0.27 ms ITD, flat L+R power (§7.3.4). The Meier and Mono-safe types exist in `SpatializerParams::crossfeedType` but have no parameter key yet |
 | Mono Safety | `spatial.monoSafety` | off/on | on | toggle | enables the correlation loop (§7.3.7) |
 | Min Correlation | `spatial.minCorrelation` | −1 … 1 | 0 | — | target output correlation for the safety |
 
@@ -1772,7 +1813,9 @@ Module-level sanitising: NaN keeps the previous value; everything else, ±inf in
 |---|---|---|
 | width (user × safety) | per-sample one-pole on `w_eff`; shelf re-derived per sample while it moves | 20 ms (also removes the 32-sample steps of s) |
 | low cut | per-sample one-pole on ln(Hz) | 50 ms |
-| focus (dB), space gain, crossfeed gain | per-sample one-poles; bell a-coefficients re-derived while focus moves | 20 ms |
+| focus (dB), space gain, crossfeed gain / feed ratio | per-sample one-poles; bell a-coefficients and the crossfeed's n0, g re-derived while they move | 20 ms |
+| crossfeed type | cross-fade: the old type's gain glides to 0, the new one's up; head-shadow corner glides on ln Hz | 20 ms |
+| width polarity guard | as the focus guard: envelopes peak hold, one-pole release; guard instant attack, one-pole release (signal-driven) | 30 ms / 50 ms |
 | focus polarity guard | band envelopes: peak hold, one-pole release; guard: instant attack, one-pole release (a signal-driven gain, not a parameter) | 30 ms / 50 ms |
 | module on/off | `ModuleSlot` crossfade against the (zero-latency) dry path | 20 ms |
 | `reset()` | every smoother jumps to its target (nothing to click against) | — |
@@ -1782,16 +1825,16 @@ There are no control-rate coefficient steps. The output is bit-identical for blo
 ### 7.6 Latency & CPU
 
 - **Latency: 0** (test *zero latency - an impulse comes out at its own sample*).
-- Per stereo sample: five SVF ticks (shelf, bell, the polarity guard's two band-passes, HP), one first-order low-pass, at most one division (the guard), four delay-line reads and writes, three double multiply-adds. Coefficient maths run only while a parameter glides.
-- CPU (indicative, conditions under *Reading conventions*): **26–27 ns** per stereo sample neutral (0.12–0.13 % of a core; the ambience network, the guard's detectors and the correlation run even at neutral settings), **31–32 ns** with width 1.6 and focus/space/crossfeed 0.5 (0.15 %). The polarity guard added about 7–8 ns (19–20 / 23–24 ns before it).
-- Memory: four delay lines, the largest 2048 floats at 192 kHz, allocated in `prepare()`.
+- Per stereo sample: six SVF ticks at neutral settings (shelf, bell, the focus guard's two band-passes, HP, presence dip), two more while the width is above 1 (the width guard's high-passes), one first-order low-pass (Mono-safe crossfeed), at most two divisions (the guards), four delay-line reads and writes, three double multiply-adds. While the Bs2b / Meier crossfeed is on: two more first-order low-passes, two line writes and eight Lagrange reads. Coefficient maths run only while a parameter glides.
+- CPU (indicative, conditions under *Reading conventions*): **26 ns** per stereo sample neutral (0.12 % of a core; the ambience network, the focus guard's detectors and the correlation run even at neutral settings), **41 ns** with width 1.6, focus/space 0.5 and the Bs2b crossfeed at 0.5 (0.20 %). [11 E12](11-enhancement-report.md#e12) Phase A added about 3 ns neutral and 14 ns in that busy setting (the same benchmark before it: 23 / 28 ns; the earlier 26–27 / 31–32 ns figures were another run).
+- Memory: six delay lines (the four ambience lines, the largest 2048 floats at 192 kHz, and two ITD lines of 16–64 floats), allocated in `prepare()`.
 
 ### 7.7 Gaming vs Music usage
 
 | | Music | Gaming |
 |---|---|---|
-| Macros | **Width** macro: engages `spatial.on`, width +0.6 (0–100 %), space +0.35 (40–100 %). **Boost Intensity**: width +0.2 (0–50 %). | **Positional** macro: engages `spatial.on`, focus +0.9 (0–100 %), width +0.25 (30–100 %); it raises the ILD of partially panned sources and leaves hard-panned ones hard-panned (the focus's polarity guard, §7.3.2; the mono safety pulls the width back, §7.9). **Boost Intensity**: focus +0.3 (0–60 %). |
-| Crossfeed | as set by the user / preset | **forced to 0** by `ProcessingChain` (it blurs interaural differences, the main lateral cue) |
+| Macros | **Width** macro: engages `spatial.on`, width +0.6 (0–100 %), space +0.35 (40–100 %). **Boost Intensity**: width +0.2 (0–50 %). | **Positional** macro: engages `spatial.on`, focus +0.9 (0–100 %), width +0.25 (30–100 %); it raises the ILD of partially panned sources and leaves hard-panned ones hard-panned (the width and focus polarity guards, §7.3.1 and §7.3.2). **Boost Intensity**: focus +0.3 (0–60 %). |
+| Crossfeed | as set by the user / preset (Bs2b, §7.3.4) | **forced to 0** by `ProcessingChain` (it blurs interaural differences, the main lateral cue) |
 | Binaural lock (both modes) | When a 5.1/7.1 strip was rendered by the virtualiser (`virt.on`, surround fold), the chain forces width 1, space 0, crossfeed 0 and focus 0: binaural output already carries exact interaural cues ([11 E24](11-enhancement-report.md#e24) (i); focus stayed available before). `virt.ownHrtf` (a game that renders its own HRTF) forces the same four on any strip ([11 E27](11-enhancement-report.md#e27)). | same |
 
 The chain writes these overrides into the effective values, so `effectiveValue()` and the GUI's effective-value rings show what the spatializer applies (§14.1). All contributions are ungoverned (they add little loudness). Macro contributions are clamped to the parameter range: at 100 % Music Width plus Boost, width is `1 + 0.6 + 0.2 = 1.8`.
@@ -1803,12 +1846,12 @@ The chain writes these overrides into the effective values, so `effectiveValue()
   - *StereoSpatializer: width 1 with everything else neutral is a bit-exact pass-through*
   - *StereoSpatializer: width 0 folds to mono, L' == R' == (L + R) / 2*
 - **Responses:**
-  - *StereoSpatializer: width 2 lifts S by 6 dB above the low cut and not below; M untouched* (+6.02 ± 0.1 dB at 2/10 kHz, ≤ 0.1 dB at 40 Hz, ≤ 0.6 dB at half the cut; matches the analytic shelf within 0.05 dB)
+  - *StereoSpatializer: width 2 lifts S by 6 dB above the low cut and not below; M untouched* (measured on a panned source, M = 4 S, so the width guard allows the full shelf: +6.02 ± 0.1 dB at 2/10 kHz, ≤ 0.1 dB at 40 Hz, ≤ 0.6 dB at half the cut; matches the analytic shelf within 0.05 dB; a pure side signal gets ≤ 0.01 dB)
   - *StereoSpatializer: positional focus lifts S around 3 kHz only; M untouched* (measured on a panned source, M = 4 S, so the guard allows the full bell: +3.0 ± 0.05 dB at 3 kHz, the analytic bell within 0.05 dB; a pure side signal gets ≤ 0.01 dB)
   - *StereoSpatializer: positional focus never flips the far ear - hard-panned sources stay hard-panned* (focus 1, hard-left 3 kHz sine and white noise: right ear exactly 0, left ear bit-identical; R = L/2 at 3 kHz: ILD 8.88 ± 0.1 dB, mono-sum error ≤ 1e−6)
   - *StereoSpatializer: positional focus adds at most 3 dB of ILD at 3 kHz, and none at speech-link rates (<= 32 kHz)* (a 3 kHz source with 6.02 dB ILD gains 2.86 ± 0.05 dB at 44.1, 48 and 96 kHz and 0 at 8, 16 and 32 kHz)
-  - *StereoSpatializer: space adds decorrelated S to a mono input; mono sum stays exact* (S/M −6.1 ± 0.5 dB on noise; −6.02 ± 0.05 dB at 3 and 9 kHz; ≤ −25 dB at 80 Hz)
-  - *StereoSpatializer: crossfeed reduces low-frequency S only; M untouched*
+  - *StereoSpatializer: space adds decorrelated S to a mono input; mono sum stays exact* (S/M −7.4 ± 0.5 dB on noise; the analytic −6.02 dB + HP + presence dip within 0.05 dB at 1, 2, 3 and 9 kHz, −13.0 dB at 2 kHz; ≤ −25 dB at 80 Hz)
+  - *StereoSpatializer: crossfeed reduces low-frequency S only; M untouched* (the Mono-safe type)
 - **Safety and metering:**
   - *StereoSpatializer: auto mono safety pulls the width back for antiphase-heavy content*
   - *StereoSpatializer: published correlation tracks the output*
@@ -1827,16 +1870,25 @@ The chain writes these overrides into the effective values, so `effectiveValue()
   - *StereoSpatializer (review): NaN / inf inputs are contained within one control interval*
   - *StereoSpatializer (review): per-sample parameter thrash stays finite, bounded and mono-exact*
   - *StereoSpatializer (review): re-prepare at another rate, empty blocks, silence start*
+- **[11 E12](11-enhancement-report.md#e12) Phase A (stereo headphone imaging), each printing its measured values:**
+  - *StereoSpatializer (E12): Bs2b / Meier crossfeed ITD is 0.22-0.30 ms by cross-correlation at every rate* (0.27 ms at 44.1/48 kHz, 0.25 ms at 96/192 kHz; the Mono-safe type ≤ 0.05 ms, measured 0.03 ms)
+  - *StereoSpatializer (E12): Bs2b / Meier crossfeed keeps a hard-panned source's L+R power flat within 0.5 dB* (±0.07 dB measured; feed level at 50 Hz 4.5 / 9.5 / 15.0 ± 0.2 dB; centred source +2.74 / +2.05 / +1.29 ± 0.15 dB at 40 Hz, within 0.25 dB at 12 kHz)
+  - *StereoSpatializer (E12): Space keeps a centred impulse within 2 dB ILD per 1/3 octave, steady tones within 5 dB over 1-4 kHz* (asserts ≤ 1 dB per 1/3 octave, measured 0.70 dB; 1–4 kHz steady tones 4.88 dB; the 9.19 dB per-frequency maximum over 250 Hz–16 kHz is pinned as a KNOWN_GAP)
+  - *StereoSpatializer (E12): width 2 writes no anti-phase into the far ear of a hard-panned source; partially panned sources still widen* (far ear exactly 0 and near ear bit-identical for white noise and 100 Hz / 1 kHz / 5 kHz tones; R = L/2 ≥ 13 dB ILD; R = L/4 far ear ≤ −20 dB and in phase; mono-sum error ≤ 1e−6)
+  - *StereoSpatializer (E12): crossfeed type changes, crossfeed toggles and widening with the guard are click-free* (each type on/off, every type pair, width 1 ↔ 2 on a panned sine)
+- The mono-sum tests (*L'+R' == L+R …*, *per-sample parameter thrash …*, *zero latency …*) use the Mono-safe crossfeed; the thrash test also switches all three types every sample (finite, bounded) and *zero latency* checks that the Bs2b / Meier far ear starts only after the interaural delay.
 
 ### 7.9 Known limitations
 
 - **Shelf, not brick-wall.** Below the cut the width transition falls at about 12 dB/oct, similar in practice to an in-phase LR4 sum but not a 24 dB/oct split.
-- **Correlation reads 1 when one output channel is silent.** "Silent" here means `<L'²><R'²> ≤ 1e−20`, a geometric-mean level of about −100 dBFS; an example is a hard-panned source at width ≤ 1, at any focus. This is the same convention as `LevelMeter`; many meters read 0 there. The safety holds its state while ρ is undefined.
+- **Correlation reads 1 when one output channel is silent.** "Silent" here means `<L'²><R'²> ≤ 1e−20`, a geometric-mean level of about −100 dBFS; an example is a hard-panned source at any width and focus (without the Bs2b / Meier crossfeed). This is the same convention as `LevelMeter`; many meters read 0 there. The safety holds its state while ρ is undefined.
 - **The safety scales only the width.** Space and focus are not pulled back, so a low `minCorrelation` target can be missed while space is on (the width then saturates at 1, which is harmless).
-- **Hard-panned sources widened above 1 always drive ρ towards −1**, so any `minCorrelation ≥ 0` pulls such material fully back to width 1. This follows from the contract.
-- **Width above 1 lowers the ILD of a hard-panned source; positional focus does not.** Width scales the side signal above the low cut. For a source on one channel only (R = 0, so M = S), a side gain g > 1 gives `L' = (1 + g)·L/2` and `R' = (1 − g)·L/2`: an anti-phase copy in the far ear, and the interaural level difference falls from infinite to `20 log10((1 + g)/(g − 1))` (19.1 dB at the *Positional* macro's width 1.25). The mono safety pulls such width back to 1 (previous point). Focus no longer lowers it: its polarity guard (§7.3.2) gives a hard-panned source no lift. Through the chain, the Gaming *Positional* macro at 100 % (with or without Boost Intensity at 100 %) leaves the far ear of a hard-left tone at 1, 2, 3, 6 or 10 kHz, or of hard-left white noise, at numerical silence; before the guard the ILD fell to 10.4 dB at 3 kHz (9.6 dB with Boost). Partially panned sources still gain ILD: an R = L/2 source goes from 6 dB to 11.2 dB at 3 kHz (11.7 dB with Boost Intensity also at 100 %; 18.0 / 20.7 dB before the 3 dB focus cap). The mono sum is unchanged in every case (§7.3.6). *Gaming Positional (M2): …* in `tests/test_modes.cpp` asserts that a hard-left 3 kHz tone keeps at least 60 dB of ILD and its near-ear level within 0.5 dB.
-- **The polarity guard works on the band mix, not per source.** It compares band envelopes of M and S around 3 kHz, so a hard-panned sound under a louder centred one (`e_M > e_S`) is still lifted, and its anti-phase copy lands in the far ear under the centred sound. Measured through the chain at *Positional* 100 %: a hard-left 3.5 kHz tone 12 dB below a centred 2.5 kHz tone reaches the right ear 11.8 dB below its left-ear level (8.1 dB before the 3 dB focus cap). Conversely, material whose band S is at least as strong as its M (very wide or anti-phase content, a pure side signal) gets no focus lift at all. Raising only the near ear of every source would need to know where each one is panned, which an M/S processor does not.
-- **The space network is fixed:** no size, decay or modulation controls. Like any decorrelator, it gives frequency-dependent level differences between the ears on steady tones.
+- **Widening is bounded by M.** The width polarity guard (§7.3.1) lets S rise only up to M in the widened band. Material whose S is already as strong as its M there (uncorrelated L/R of equal level, very wide or anti-phase mixes, a pure side signal) is therefore not widened at all, and a width above 1 widens a typical mix, whose M leads S by several dB, only until S reaches M. Before [11 E12](11-enhancement-report.md#e12), hard-panned sources widened above 1 drove ρ towards −1 and any `minCorrelation ≥ 0` pulled such material back to width 1. The guard now keeps them out of anti-phase, so the mono safety sees them only in mixes (next point).
+- **Neither width nor positional focus lowers the ILD of an isolated hard-panned source.** For a source on one channel only (R = 0, so M = S), a side gain g > 1 would give `L' = (1 + g)·L/2` and `R' = (1 − g)·L/2`: an anti-phase copy in the far ear, and the interaural level difference would fall from infinite to `20 log10((1 + g)/(g − 1))` (9.5 dB at width 2, 19.1 dB at the *Positional* macro's width 1.25). Both polarity guards (§7.3.1, §7.3.2) give such a source no lift, so its far ear stays silent. Through the chain, the Gaming *Positional* macro at 100 % (with or without Boost Intensity at 100 %) leaves the far ear of a hard-left tone at 1, 2, 3, 6 or 10 kHz, or of hard-left white noise, at numerical silence; before the guard the ILD fell to 10.4 dB at 3 kHz (9.6 dB with Boost). Partially panned sources still gain ILD: an R = L/2 source goes from 6 dB to 11.2 dB at 3 kHz (11.7 dB with Boost Intensity also at 100 %; 18.0 / 20.7 dB before the 3 dB focus cap). The mono sum is unchanged in every case (§7.3.6). *Gaming Positional (M2): …* in `tests/test_modes.cpp` asserts that a hard-left 3 kHz tone keeps at least 60 dB of ILD and its near-ear level within 0.5 dB.
+- **The width guard works on the band mix, not per source, as the focus guard does.** It compares envelopes of M and S above the low cut, so a hard-panned source under a louder centred one (`e_M > e_S`) is still widened, and its anti-phase copy lands in the far ear under the centred sound. Measured at width 2 with a hard-left pink noise 6 dB below a centred one: its far-ear copy is −8.3 dB re the source, anti-phase, the same as before the guard (−11.7 dB instead of −10.0 dB at equal levels). A band-split guard would separate sources that occupy different bands, and a per-bin one (the STFT path of the Quality profile) would separate them per partial; neither exists yet ([11 E12](11-enhancement-report.md#e12) Status).
+- **The focus polarity guard works on the band mix, not per source.** It compares band envelopes of M and S around 3 kHz, so a hard-panned sound under a louder centred one (`e_M > e_S`) is still lifted, and its anti-phase copy lands in the far ear under the centred sound. Measured through the chain at *Positional* 100 %: a hard-left 3.5 kHz tone 12 dB below a centred 2.5 kHz tone reaches the right ear 11.8 dB below its left-ear level (8.1 dB before the 3 dB focus cap). Conversely, material whose band S is at least as strong as its M (very wide or anti-phase content, a pure side signal) gets no focus lift at all. Raising only the near ear of every source would need to know where each one is panned, which an M/S processor does not.
+- **The space network is fixed:** no size, decay or modulation controls. Like any additive decorrelator, it gives frequency-dependent level differences between the ears on steady tones, up to 20·log10((1 + |A|)/(1 − |A|)) for an ambience level |A| re M: at space 1, 4.9 dB over 1–4 kHz (the presence dip) but up to 9.2 dB at 300–700 Hz and above 5 kHz. A zero-latency limiter on the ambience's in-phase ("correlated") part was prototyped and not shipped. Broadband, it removed the ILD of a pure 1.5 kHz tone (4.1 → 1.6 dB) but none of a 220 Hz harmonic tone's (5.7 dB per partial before and after), because each partial sees a different phase of the ambience. Bounding it per partial needs a resolution finer than the harmonic spacing (an STFT, so latency) or a lower |A|.
+- **The Bs2b / Meier crossfeed changes the mono sum and lifts centred bass.** See §7.3.4: +2.7 dB (Bs2b) / +2.0 dB (Meier) at low frequencies on centred content at crossfeed 1, +1.3 dB at 0.3, and a gentle comb in the fold-down above the head-shadow corner. The factory presets that store crossfeed (Classical & Jazz 0.3, Earbuds 0.25, Audiophile Subtle and Bluetooth Headphones 0.15) became up to 1.3 dB fuller below 250 Hz on centred programme, and up to +1.06 LU louder integrated. The Mono-safe type is the former behaviour; there is no parameter key to select it yet.
 - **The loop can overshoot once** on a sudden change, because of the 300 ms measurement lag. The implementer observed a dip to about 1.19 before settling at 1.33 on content with input correlation 0.3. It does not hunt.
 
 ---
@@ -3578,7 +3630,7 @@ These are single-machine numbers for relative comparison, not a performance spec
 | Bass engine, defaults (20 Hz subsonic) / all stages | 23–24 / 160–165 | 0.1 / 0.8 % | §4 |
 | Clarity, neutral / all stages | 9–10 / 144–151 | 0.05 / 0.7 % | §5 |
 | Saturator Tape, 2× Low / 2× High, drive 12 dB (delta oversampling) | 143–144 / 150–170 | 0.7 / 0.7–0.8 % | §6.7 |
-| Stereo & Space, neutral / widened + focus + space + crossfeed | 26–27 / 31–32 | 0.12–0.13 / 0.15 % | §7.6 |
+| Stereo & Space, neutral / widened + focus + space + crossfeed | 26 / 41 | 0.12 / 0.20 % | §7.6 |
 | Virtualiser, parametric, 7.1 → binaural | 78–80 | 0.38 % | §8.6 |
 | Virtualiser, HRIR direct form, 7.1, 512 / 1024 taps | ≈ 1 700 / 3 340–3 450 | 8.2 / 16.5 % | §8.6 |
 | Compressor, down + upward, any look-ahead | 22–23 | 0.11 % | §9.6 |

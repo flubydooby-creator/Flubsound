@@ -102,7 +102,7 @@ Flubsound/
 │   │   │   ├── TransientShaper.h           building block: level-independent transient shaper (used by ClarityEnhancer)
 │   │   │   ├── ClarityEnhancer.h           module: transients, de-mud, dynamic presence, air exciter
 │   │   │   ├── Saturator.h                 module: oversampled tape / tube / digital saturation, unity small-signal gain
-│   │   │   ├── StereoSpatializer.h         module: side-only width / focus / space / crossfeed, mono sum preserved exactly
+│   │   │   ├── StereoSpatializer.h         module: side-only width / focus / space (mono sum preserved exactly), L/R headphone crossfeed
 │   │   │   ├── HeadphoneVirtualizer.h      module: 5.1 / 7.1 → binaural (parametric renderer or HRIR convolution)
 │   │   │   ├── Compressor.h                module: look-ahead, channel-linked, downward + upward compressor
 │   │   │   ├── TruePeakLimiter.h           module: look-ahead true-peak brickwall limiter (also the MixEngine master)

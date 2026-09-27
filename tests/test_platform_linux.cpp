@@ -2253,4 +2253,326 @@ TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// PipeWire quantum request and monitor links (docs/11 E48a). No PipeWire is
+// needed: the helpers are pure, and the router runs against fake pw-dump /
+// pw-link scripts on PATH.
+// ---------------------------------------------------------------------------
+TEST_CASE ("Platform: PipeWire quantum request: 256/48000 on Balanced, 128/48000 locked on Low Latency, a user's value kept")
+{
+    using pipewire::QuantumRequest;
+
+    auto plan = pipewire::planLatencyEnvironment (QuantumRequest::Balanced, nullptr, nullptr);
+    CHECK (plan.latency == "256/48000");
+    CHECK (plan.props.empty()); // Balanced never locks the quantum
+
+    plan = pipewire::planLatencyEnvironment (QuantumRequest::LowLatency, nullptr, nullptr);
+    CHECK (plan.latency == "128/48000");
+    CHECK (plan.props == "{ node.lock-quantum = true }");
+
+    // An empty variable counts as unset; the user's own props are kept.
+    plan = pipewire::planLatencyEnvironment (QuantumRequest::LowLatency, "", "{ node.name = x }");
+    CHECK (plan.latency == "128/48000");
+    CHECK (plan.props.empty());
+
+    // A value the user exported wins, whatever the request.
+    plan = pipewire::planLatencyEnvironment (QuantumRequest::LowLatency, "1024/48000", nullptr);
+    CHECK (plan.latency.empty());
+    CHECK (plan.props.empty());
+
+    CHECK (pipewire::isValidLatency (pipewire::kBalancedLatency));
+    CHECK (pipewire::isValidLatency (pipewire::kLowLatency));
+    CHECK (pipewire::isValidLatency ("1/8000"));
+    CHECK (pipewire::isValidLatency ("8192/768000"));
+    for (const char* bad : { "", "256", "/48000", "256/", "0/48000", "-1/48000", "256/48000x", "25 6/48000", "9000/48000", "256/100", "256/48000/1",
+                             "00000256/48000" })
+        CHECK (! pipewire::isValidLatency (bad));
+
+    {
+        ScopedEnv latency ("PIPEWIRE_LATENCY", nullptr);
+        ScopedEnv props ("PIPEWIRE_PROPS", nullptr);
+        pipewire::applyLatencyEnvironment (QuantumRequest::LowLatency);
+        REQUIRE (std::getenv ("PIPEWIRE_LATENCY") != nullptr && std::getenv ("PIPEWIRE_PROPS") != nullptr);
+        CHECK (std::string (std::getenv ("PIPEWIRE_LATENCY")) == "128/48000");
+        CHECK (std::string (std::getenv ("PIPEWIRE_PROPS")) == "{ node.lock-quantum = true }");
+    }
+    {
+        // The app's router asks for Balanced when it is created, before the
+        // audio device opens, and leaves a user's value alone.
+        ScopedEnv latency ("PIPEWIRE_LATENCY", nullptr);
+        ScopedEnv props ("PIPEWIRE_PROPS", nullptr);
+        auto router = AppAudioRouter::create();
+        REQUIRE (std::getenv ("PIPEWIRE_LATENCY") != nullptr);
+        CHECK (std::string (std::getenv ("PIPEWIRE_LATENCY")) == "256/48000");
+        CHECK (std::getenv ("PIPEWIRE_PROPS") == nullptr);
+    }
+    {
+        ScopedEnv latency ("PIPEWIRE_LATENCY", "2048/48000");
+        auto router = AppAudioRouter::create();
+        CHECK (std::string (std::getenv ("PIPEWIRE_LATENCY")) == "2048/48000");
+    }
+}
+
+namespace
+{
+/** A trimmed `pw-dump` (PipeWire 1.0) with "@PID@" for this process: the
+    Game sink (8 monitor ports and a playback port), the Music sink (its
+    ports listed out of order), a Chat sink without port.monitor flags,
+    Flubsound's JACK client (pid only on its client object; 10 audio inputs,
+    an output and a MIDI input), another process's JACK client, a microphone,
+    and two links: Game FL -> in_1 (made by JUCE) and the microphone -> in_2
+    (someone else's). */
+std::string pwDumpFixture (uint32_t pid, const std::string& extraLinks = {})
+{
+    std::string json = R"([
+  {"id":0,"type":"PipeWire:Interface:Core","info":{"name":"pipewire-0"}},
+  {"id":"junk","type":"PipeWire:Interface:Node"},
+  {"id":30,"type":"PipeWire:Interface:Client","info":{"props":{"pipewire.sec.pid":@PID@,"application.process.id":"2"}}},
+  {"id":40,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"flubsound_game","media.class":"Audio/Sink","object.id":40}}},
+)";
+    const char* const channels[] = { "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" };
+    for (int k = 0; k < 8; ++k)
+        json += R"(  {"id":)" + std::to_string (41 + k) + R"(,"type":"PipeWire:Interface:Port","info":{"direction":"output","props":{"port.name":"monitor_)"
+                + channels[k] + R"(","port.id":)" + std::to_string (k)
+                + R"(,"node.id":40,"port.monitor":true,"format.dsp":"32 bit float mono audio"}}},
+)";
+    json += R"(  {"id":49,"type":"PipeWire:Interface:Port","info":{"direction":"input","props":{"port.name":"playback_FL","port.id":0,"node.id":40}}},
+  {"id":60,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"flubsound_music","media.class":"Audio/Sink"}}},
+  {"id":61,"type":"PipeWire:Interface:Port","info":{"direction":"output","props":{"port.name":"monitor_FR","port.id":"1","node.id":"60","port.monitor":true}}},
+  {"id":62,"type":"PipeWire:Interface:Port","info":{"direction":"output","props":{"port.name":"monitor_FL","port.id":"0","node.id":"60","port.monitor":true}}},
+  {"id":70,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"flubsound_chat","media.class":"Audio/Sink"}}},
+  {"id":71,"type":"PipeWire:Interface:Port","info":{"props":{"port.direction":"out","port.name":"monitor_FL","port.id":0,"node.id":70}}},
+  {"id":72,"type":"PipeWire:Interface:Port","info":{"props":{"port.direction":"out","port.name":"monitor_FR","port.id":1,"node.id":70}}},
+  {"id":80,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"JUCEJack","media.class":"Stream/Duplex/Audio","client.id":30}}},
+)";
+    for (int k = 0; k < 10; ++k)
+        json += R"(  {"id":)" + std::to_string (81 + k) + R"(,"type":"PipeWire:Interface:Port","info":{"direction":"input","props":{"port.name":"in_)"
+                + std::to_string (k + 1) + R"(","port.id":)" + std::to_string (k) + R"(,"node.id":80,"format.dsp":"32 bit float mono audio"}}},
+)";
+    json += R"(  {"id":91,"type":"PipeWire:Interface:Port","info":{"direction":"output","props":{"port.name":"out_1","port.id":0,"node.id":80}}},
+  {"id":92,"type":"PipeWire:Interface:Port","info":{"direction":"input","props":{"port.name":"midi_in","port.id":10,"node.id":80,"format.dsp":"8 bit raw midi"}}},
+  {"id":100,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"JUCEJack","media.class":"Stream/Duplex/Audio","application.process.id":"1"}}},
+  {"id":101,"type":"PipeWire:Interface:Port","info":{"direction":"input","props":{"port.name":"in_1","port.id":0,"node.id":100}}},
+  {"id":110,"type":"PipeWire:Interface:Node","info":{"props":{"node.name":"alsa_input.usb-mic","media.class":"Audio/Source"}}},
+  {"id":111,"type":"PipeWire:Interface:Port","info":{"direction":"output","props":{"port.name":"capture_FL","port.id":0,"node.id":110}}},
+  {"id":120,"type":"PipeWire:Interface:Link","info":{"output-node-id":40,"output-port-id":41,"input-node-id":80,"input-port-id":81,"state":"active"}},
+  {"id":121,"type":"PipeWire:Interface:Link","info":{"output-node-id":110,"output-port-id":111,"input-node-id":80,"input-port-id":82}})"
+            + extraLinks + R"(
+])";
+    const std::string marker = "@PID@";
+    json.replace (json.find (marker), marker.size(), std::to_string (pid));
+    return json;
+}
+
+constexpr uint32_t kFixturePid = 4321;
+
+std::vector<AppAudioRouter::EndpointInput> stripInputs (int game, int music, int chat, int system)
+{
+    return { { "flubsound_game", game }, { "flubsound_music", music }, { "flubsound_chat", chat }, { "flubsound_system", system } };
+}
+
+bool hasLink (const std::vector<pipewire::PortLink>& links, uint32_t out, uint32_t in)
+{
+    return std::find (links.begin(), links.end(), pipewire::PortLink { out, in }) != links.end();
+}
+} // namespace
+
+TEST_CASE ("Platform: pw-dump JSON is read into nodes, ports and links; malformed output is reported")
+{
+    pipewire::Graph graph;
+    std::string error;
+    REQUIRE (pipewire::parseDump (pwDumpFixture (kFixturePid), graph, error));
+    CHECK (graph.nodes.size() == 6);
+    CHECK (graph.nodes[40].name == "flubsound_game");
+    CHECK (graph.nodes[40].mediaClass == "Audio/Sink");
+    CHECK (graph.nodes[80].processId == kFixturePid); // from its client's pipewire.sec.pid, not the sandbox-local "2"
+    CHECK (graph.nodes[100].processId == 1);
+    CHECK (graph.links.size() == 2);
+    CHECK (graph.links[0].outputPort == 41 && graph.links[0].inputPort == 81);
+
+    const auto monitors = pipewire::audioPorts (graph, 60, false, true);
+    REQUIRE (monitors.size() == 2);
+    CHECK (monitors[0]->id == 62); // port.id 0 first, although listed second
+    CHECK (pipewire::audioPorts (graph, 70, false, true).size() == 2); // "monitor_" names without port.monitor
+    CHECK (pipewire::audioPorts (graph, 40, false, true).size() == 8);
+    CHECK (pipewire::audioPorts (graph, 80, true, false).size() == 10); // the MIDI input is not audio
+
+    graph = {};
+    CHECK (! pipewire::parseDump ("pw-dump: unknown option", graph, error));
+    CHECK (! error.empty());
+    error.clear();
+    CHECK (! pipewire::parseDump (R"({"id":1})", graph, error));
+    CHECK (! error.empty());
+    CHECK (pipewire::parseDump ("[]", graph, error));
+    CHECK (graph.nodes.empty());
+}
+
+TEST_CASE ("Platform: PipeWire monitor links follow the device input map, up to the next strip and the engine's last input")
+{
+    pipewire::Graph graph;
+    std::string error;
+    REQUIRE (pipewire::parseDump (pwDumpFixture (kFixturePid), graph, error));
+
+    // Game=0;Music=8: 8 + 2 links into Flubsound's own node, not the other JACK client's.
+    auto plan = pipewire::planMonitorLinks (graph, kFixturePid, stripInputs (0, 8, -1, -1));
+    CHECK (plan.engineNode == 80);
+    CHECK (plan.engineInputs == 10);
+    CHECK (plan.problems.empty());
+    REQUIRE (plan.wanted.size() == 10);
+    for (uint32_t k = 0; k < 8; ++k)
+        CHECK (hasLink (plan.wanted, 41 + k, 81 + k));
+    CHECK (hasLink (plan.wanted, 62, 89)); // FL -> input channel 9
+    CHECK (hasLink (plan.wanted, 61, 90));
+    REQUIRE (plan.sinks.size() == 2);
+    CHECK (plan.sinks[1].sinkName == "flubsound_music" && plan.sinks[1].firstChannel == 8 && plan.sinks[1].channels == 2);
+
+    // Music at channel 4 cuts the Game sink to four links, and says so.
+    plan = pipewire::planMonitorLinks (graph, kFixturePid, stripInputs (0, 4, -1, -1));
+    CHECK (plan.wanted.size() == 6);
+    CHECK (! hasLink (plan.wanted, 45, 85));
+    CHECK (hasLink (plan.wanted, 62, 85));
+    REQUIRE (plan.problems.size() == 1);
+    CHECK (plan.problems[0].find ("Only 4 of the 8 channels of 'flubsound_game'") != std::string::npos);
+
+    // Past the engine's inputs, a missing sink, and the last inputs.
+    plan = pipewire::planMonitorLinks (graph, kFixturePid, stripInputs (-1, 9, 10, 2));
+    CHECK (plan.wanted.size() == 1); // Music at 9: only its FL fits
+    CHECK (hasLink (plan.wanted, 62, 90));
+    REQUIRE (plan.problems.size() == 3);
+    CHECK (plan.problems[0].find ("Only 1 of the 2 channels of 'flubsound_music'") != std::string::npos);
+    CHECK (plan.problems[1].find ("feeds input channel 11, but Flubsound's input has only 10 channels") != std::string::npos);
+    CHECK (plan.problems[2].find ("no sink 'flubsound_system'") != std::string::npos);
+
+    // Nothing mapped: nothing to do, not even a problem.
+    plan = pipewire::planMonitorLinks (graph, kFixturePid, stripInputs (-1, -1, -1, -1));
+    CHECK (plan.wanted.empty() && plan.problems.empty());
+
+    // Another process: Flubsound has no PipeWire input node (e.g. an ALSA hw: device).
+    plan = pipewire::planMonitorLinks (graph, 999, stripInputs (0, -1, -1, -1));
+    CHECK (plan.engineNode == 0);
+    CHECK (plan.wanted.empty());
+    REQUIRE (plan.problems.size() == 1);
+    CHECK (plan.problems[0].find ("JACK device type") != std::string::npos);
+
+    // The command lines carry port ids only.
+    CHECK (pipewire::linkCommand ({ 41, 81 }, false) == "LC_ALL=C pw-link 41 81 2>&1");
+    CHECK (pipewire::linkCommand ({ 62, 89 }, true) == "LC_ALL=C pw-link -d 62 89 2>&1");
+    CHECK (pipewire::alreadyLinked ("failed to link ports: File exists"));
+    CHECK (! pipewire::alreadyLinked ("failed to link ports: No such file or directory"));
+}
+
+TEST_CASE ("Platform: the Linux router links the sink monitors with pw-link, re-checks, unlinks on a map change and explains missing tools")
+{
+    TempDir temp;
+    REQUIRE (! temp.path.empty());
+    const auto write = [] (const std::string& path, const std::string& text)
+    {
+        std::ofstream out (path, std::ios::trunc);
+        out << text;
+    };
+    const auto read = [] (const std::string& path)
+    {
+        std::ifstream in (path);
+        std::stringstream text;
+        text << in.rdbuf();
+        return text.str();
+    };
+    const auto lines = [&read] (const std::string& path)
+    {
+        std::vector<std::string> result;
+        std::istringstream in (read (path));
+        for (std::string line; std::getline (in, line);)
+            result.push_back (line);
+        return result;
+    };
+
+    // Fake tools: pw-dump prints the fixture and counts its runs, pw-link logs its arguments.
+    const std::string bin = temp.path + "/bin", dumpFile = temp.path + "/dump.json", linkLog = temp.path + "/pw-link.log",
+                      dumpCount = temp.path + "/pw-dump.count";
+    std::filesystem::create_directory (bin);
+    write (bin + "/pw-dump", "#!/bin/sh\necho run >> '" + dumpCount + "'\ncat '" + dumpFile + "'\n");
+    write (bin + "/pw-link", "#!/bin/sh\necho \"$*\" >> '" + linkLog + "'\n");
+    std::filesystem::permissions (bin + "/pw-dump", std::filesystem::perms::owner_all);
+    std::filesystem::permissions (bin + "/pw-link", std::filesystem::perms::owner_all);
+
+    const auto ownPid = static_cast<uint32_t> (::getpid());
+    write (dumpFile, pwDumpFixture (ownPid));
+
+    const std::string path = bin + ":/usr/bin:/bin";
+    ScopedEnv pathEnv ("PATH", path.c_str());
+    auto router = AppAudioRouter::create();
+    REQUIRE (router != nullptr);
+
+    // Game=0;Music=8: nine new links (Game FL -> in_1 exists already).
+    std::string status;
+    CHECK (router->connectEndpointInputs (stripInputs (0, 8, -1, -1), status));
+    CHECK (status.empty());
+    auto linked = lines (linkLog);
+    REQUIRE (linked.size() == 9);
+    CHECK (linked[0] == "42 82"); // the microphone's link into in_2 stays; ours is added
+    CHECK (linked[7] == "62 89");
+    CHECK (linked[8] == "61 90");
+    CHECK (lines (dumpCount).size() == 1);
+
+    // The next pass confirms them (they exist now) and changes nothing ...
+    std::string extra;
+    for (uint32_t k = 1; k < 8; ++k)
+        extra += ",\n  {\"id\":" + std::to_string (200 + k) + ",\"type\":\"PipeWire:Interface:Link\",\"info\":{\"output-port-id\":" + std::to_string (41 + k)
+                 + ",\"input-port-id\":" + std::to_string (81 + k) + "}}";
+    extra += R"(,
+  {"id":210,"type":"PipeWire:Interface:Link","info":{"output-port-id":62,"input-port-id":89}},
+  {"id":211,"type":"PipeWire:Interface:Link","info":{"output-port-id":61,"input-port-id":90}})";
+    write (dumpFile, pwDumpFixture (ownPid, extra));
+    CHECK (router->connectEndpointInputs (stripInputs (0, 8, -1, -1), status));
+    CHECK (lines (linkLog).size() == 9);
+    CHECK (lines (dumpCount).size() == 2);
+
+    // ... and an unchanged map is not re-read before the re-check interval.
+    CHECK (router->connectEndpointInputs (stripInputs (0, 8, -1, -1), status));
+    CHECK (lines (dumpCount).size() == 2);
+
+    // Music moves to channel 6 (Game shrinks to 6): the links the router made
+    // and no longer wants are removed, the new ones made; JUCE's Game FL link
+    // and the microphone's are not touched.
+    CHECK (! router->connectEndpointInputs (stripInputs (0, 6, -1, -1), status));
+    CHECK (status.find ("Only 6 of the 8 channels of 'flubsound_game'") != std::string::npos);
+    CHECK (lines (dumpCount).size() == 3);
+    linked = lines (linkLog);
+    const std::vector<std::string> changes (linked.begin() + 9, linked.end());
+    const auto made = [&changes] (const std::string& line) { return std::find (changes.begin(), changes.end(), line) != changes.end(); };
+    CHECK (made ("-d 47 87"));
+    CHECK (made ("-d 48 88"));
+    CHECK (made ("-d 62 89"));
+    CHECK (made ("-d 61 90"));
+    CHECK (made ("62 87"));
+    CHECK (made ("61 88"));
+    CHECK (! made ("-d 41 81"));
+    CHECK (! made ("-d 111 82"));
+    CHECK (changes.size() == 6);
+
+    // Device input switched off: the router's own links go, nothing else.
+    write (dumpFile, pwDumpFixture (ownPid, extra + R"(,
+  {"id":212,"type":"PipeWire:Interface:Link","info":{"output-port-id":62,"input-port-id":87}},
+  {"id":213,"type":"PipeWire:Interface:Link","info":{"output-port-id":61,"input-port-id":88}})"));
+    CHECK (router->connectEndpointInputs (stripInputs (-1, -1, -1, -1), status));
+    linked = lines (linkLog);
+    const std::vector<std::string> removals (linked.begin() + 15, linked.end());
+    CHECK (removals.size() == 7); // 42..46 -> 82..86 and Music's two
+    CHECK (std::all_of (removals.begin(), removals.end(), [] (const std::string& l) { return l.rfind ("-d ", 0) == 0; }));
+    const auto countBefore = lines (dumpCount).size();
+    CHECK (router->connectEndpointInputs (stripInputs (-1, -1, -1, -1), status));
+    CHECK (lines (dumpCount).size() == countBefore); // nothing mapped, nothing ours: no pw-dump
+
+    // Without the PipeWire tools the router says what to do instead.
+    const std::string emptyBin = temp.path + "/empty";
+    std::filesystem::create_directory (emptyBin);
+    ScopedEnv noTools ("PATH", emptyBin.c_str());
+    auto bare = AppAudioRouter::create();
+    CHECK (! bare->connectEndpointInputs (stripInputs (0, -1, -1, -1), status));
+    CHECK (status.find ("pw-dump and pw-link were not found") != std::string::npos);
+    CHECK (status.find ("qpwgraph") != std::string::npos);
+    CHECK (bare->connectEndpointInputs (stripInputs (-1, -1, -1, -1), status)); // nothing to link: fine without them
+    CHECK (status.empty());
+}
+
 #endif // __linux__

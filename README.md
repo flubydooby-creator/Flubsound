@@ -74,6 +74,7 @@ ctest --test-dir build-app --output-on-failure   # flub_tests + the app-level fl
 ```
 
 Linux packages for the app build: `libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev` (CI also installs `libgl1-mesa-dev`, and `xvfb` for the headless screenshots; `libxi-dev` is optional and enables JUCE's XInput2 support).
+Linux at run time: create the `flubsound_*` sinks with `platform/linux/flubsound-pipewire-setup.sh install`. Per-app routing needs `pactl` (pulseaudio-utils 16+). On PipeWire, the app links each strip sink's monitor to its input by itself, which needs `pw-dump` / `pw-link` (`pipewire-bin` / `pipewire-utils`); without them it says so on stderr, and qpwgraph does the same by hand. It also asks for a 256/48000 quantum (`PIPEWIRE_LATENCY`, 5.3 ms instead of pipewire-jack's 21.3 ms default) unless you set the variable yourself. Details: [platform/linux/README.md](platform/linux/README.md).
 ASIO on Windows: `-DFLUB_ASIO_SDK_DIR=<path to Steinberg ASIO SDK>`.
 
 Useful options:

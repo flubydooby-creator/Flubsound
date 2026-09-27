@@ -1264,8 +1264,12 @@ TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 
     CHECK_LE (spikeBoth.spanMs, 50.0);
     CHECK_LE (spikeBoth.worstChangeDb, 0.3);
     // The NaN burst drops its blocks (silence) and restarts the signal path;
-    // the control loops keep their state. Unchanged by E10 Phase 1.
-    CHECK_NEAR (burst.spanMs, 799.8, 20.0);
+    // the control loops keep their state. Unchanged by E10 Phase 1. Re-based
+    // by docs/11 E12 Phase A, 799.8 -> 441.0 ms: Signature's width 1.23 no
+    // longer widens this uncorrelated pink noise (the width polarity guard
+    // caps S at M), so the mono safety's pull, which the restart clears,
+    // no longer shapes the output (799.8 ms with the guard disabled).
+    CHECK_NEAR (burst.spanMs, 441.0, 20.0);
     CHECK_LE (burst.worstChangeDb, 0.3);
 }
 

@@ -434,6 +434,19 @@ void AppRouting::run()
             triggerAsyncUpdate();
         }
 
+        // Connect each strip endpoint's capture side to the device input at
+        // the strip's channel where the OS does not (Linux: the sinks'
+        // monitors, docs/11 E48a); a no-op elsewhere. The router throttles
+        // itself and logs what it cannot link.
+        {
+            const auto firstChannels = host.getDeviceInputMap(); // atomics: safe off the message thread
+            std::vector<flub::platform::AppAudioRouter::EndpointInput> inputs;
+            for (size_t i = 0; i < c.stripEndpoints.size() && i < firstChannels.size(); ++i)
+                inputs.push_back ({ c.stripEndpoints[i].toStdString(), firstChannels[i] });
+            std::string status;
+            router->connectEndpointInputs (inputs, status);
+        }
+
         wait (kRefreshIntervalMs); // refresh() / config changes wake it early
     }
 }

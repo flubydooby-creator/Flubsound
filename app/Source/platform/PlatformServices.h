@@ -19,7 +19,9 @@
 //             3.2): capture via Core Audio process taps (CATapDescription,
 //             macOS 14.2+), routing = tap with mute-when-tapped.
 //   Linux   : per-app routing by moving PipeWire/Pulse sink-inputs to the
-//             "flubsound_<strip>" null sinks (pactl). Global hotkeys via
+//             "flubsound_<strip>" null sinks (pactl); the sinks' monitors
+//             are linked to the engine's input (pw-dump / pw-link), and
+//             PIPEWIRE_LATENCY asks for a 256/48000 quantum. Global hotkeys via
 //             XGrabKey under X11 (libX11 loaded at run time) and, in Wayland
 //             sessions, via the xdg-desktop-portal GlobalShortcuts interface
 //             over D-Bus (libdbus-1 loaded at run time; isSupported() ==
@@ -202,6 +204,29 @@ public:
 
     /** Opens the OS's own per-app device UI (fallback when unsupported). */
     virtual void openSystemRoutingSettings() = 0;
+
+    /** One strip's endpoint and the first device-input channel that feeds
+        the strip (-1: the strip does not read the device input). */
+    struct EndpointInput
+    {
+        std::string endpointId;
+        int firstInputChannel = -1;
+
+        bool operator== (const EndpointInput&) const = default;
+    };
+
+    /** Connects each endpoint's capture side to the engine's device input at
+        the strip's channel, where the OS does not do that by itself (Linux:
+        the flubsound_<strip> null sink's monitor ports to Flubsound's own
+        PipeWire input ports, through pw-dump / pw-link). Idempotent and cheap
+        to call every pass; blocks like the other calls (background thread).
+        false = a connection is missing; 'status' then says why and what to do
+        instead (user-presentable). The default has nothing to connect. */
+    virtual bool connectEndpointInputs (const std::vector<EndpointInput>& /*inputs*/, std::string& status)
+    {
+        status.clear();
+        return true;
+    }
 
     static std::unique_ptr<AppAudioRouter> create();
 };

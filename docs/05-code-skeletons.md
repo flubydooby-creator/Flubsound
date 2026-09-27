@@ -1762,15 +1762,16 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
 
 **Full files:** [`core/include/flub/dsp/StereoSpatializer.h`](../core/include/flub/dsp/StereoSpatializer.h) · [`core/src/dsp/StereoSpatializer.cpp`](../core/src/dsp/StereoSpatializer.cpp)
 
-Everything acts on the **side** signal only, which is the mono-compatibility guarantee:
+Width, focus, space and the Mono-safe crossfeed act on the **side** signal only, which is the mono-compatibility guarantee. The default Bs2b / Meier crossfeed is a real L/R crossfeed after it (docs/11 E12 Phase A; [03 §7.3.4](03-dsp-design.md#734-crossfeed)):
 
 ```
 M  = (L + R) / 2,   S = (L − R) / 2
-S1 = min(w, 1) · HS_w(S)                              width: complementary 2nd-order high shelf at the low cut
+S1 = min(w, 1) · (S + guard_w · (HS_w(S) − S))         width: complementary 2nd-order high shelf at the low cut; guard_w ∈ [0, 1] keeps S below M (no far-ear anti-phase)
 S2 = S1 + guard · (Bell(S1) − S1)                      positional focus: bell 3 kHz, Q 0.5, +3 dB · focus (0 dB at fs ≤ 32 kHz); guard ∈ [0, 1] keeps the far ear's polarity
-S3 = S2 + 0.5 · space · AP(z^−5ms · HP_300(M))         space: nested Schroeder all-passes 7.3 / 4.7 / 3.1 ms, g = 0.5
-S4 = S3 − 0.6 · crossfeed · LP1_700(S3)                crossfeed (first-order low-pass)
-L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting (to float rounding)
+S3 = S2 + 0.5 · space · AP(z^−10ms · Dip(HP_300(M)))   space: presence dip −7 dB @ 2 kHz, nested Schroeder all-passes 7.3 / 4.7 / 3.1 ms, g = 0.5
+S4 = S3 − 0.6 · crossfeed · LP1_700(S3)                Mono-safe crossfeed only (first-order low-pass)
+L3 = M + S4,  R3 = M − S4          ⇒  L3 + R3 = 2M = L + R for every setting (to float rounding)
+L' = L3 − (1 − n0)·LP(L3) + g·z^−D·LP(R3), R' likewise   Bs2b / Meier crossfeed: head shadow 700 / 650 Hz, D = 0.235 ms, n0² + g² = 1
 ```
 
 ### 9.1 Parameters
@@ -1782,7 +1783,7 @@ L' = M + S4,  R' = M − S4          ⇒  L' + R' = 2M = L + R for every setting
 | Width Low Cut | `spatial.lowCut` | 60 … 500 | 180 | Hz | Shelf turnover: the low end never gets wider. 50 ms one-pole on ln(Hz). |
 | Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 3 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis; at 100 % a source 6 dB to one side gains 2.9 dB of ILD, docs/11 E24). Off at sample rates ≤ 32 kHz (Bluetooth hands-free links). A polarity guard bounds the lift, so a hard-panned source stays hard-panned. M is untouched. |
 | Space | `spatial.space` | 0 … 1 | 0 | % | Adds decorrelated ambience from HP(M) into S (gain 0.5 · space). Cancels in mono. |
-| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Low-shelf reduction of S (bs2b-like). **Forced to 0 in Gaming mode** and with binaural input. |
+| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Bs2b L/R crossfeed with a 0.27 ms interaural delay and flat L+R power (`SpatializerParams::crossfeedType`: Bs2b, Meier or the Mono-safe side shelf; no parameter key selects the type yet). **Forced to 0 in Gaming mode** and with binaural input. |
 | Mono Safety | `spatial.monoSafety` | off / on | on | toggle | Pulls widths > 1 back towards 1 while the output correlation is below the minimum. |
 | Min Correlation | `spatial.minCorrelation` | −1 … 1 | 0 | – | Target for the mono safety. |
 
@@ -1939,15 +1940,16 @@ void StereoSpatializer::controlTick() noexcept
 | Width shelf | Q = 1/√2 (k = √2), gain `max(w, 1)` above the cut |
 | Focus bell | 3 kHz, Q 0.5, max +3 dB (`kFocusMaxDb`); 0 dB at fs ≤ 32 kHz (`focusMaxDb`, set in `prepare()`) |
 | Focus polarity guard | band-pass 3 kHz, Q 0.5 on M and S1; envelopes peak hold, 30 ms release; guard instant attack, 50 ms release |
-| Space | HP 300 Hz (Q 0.707), pre-delay 5 ms (240 samples at 48 kHz), nested all-passes 7.3 / 4.7 / 3.1 ms (350 / 226 / 149 samples at 48 kHz, g = 0.5), scale 0.5 |
-| Crossfeed | first-order LP at 700 Hz, scale 0.6 |
+| Space | HP 300 Hz (Q 0.707), presence dip −7 dB at 2 kHz (Q 0.4), pre-delay 10 ms (480 samples at 48 kHz), nested all-passes 7.3 / 4.7 / 3.1 ms (350 / 226 / 149 samples at 48 kHz, g = 0.5), scale 0.5 |
+| Crossfeed | Bs2b 700 Hz / 4.5 dB, Meier 650 Hz / 9.5 dB: first-order head-shadow LP per channel, far-ear delay 0.235 ms (4-tap Lagrange), near-ear shelf n0 = 1/√(1 + r²); Mono-safe: first-order LP at 700 Hz on S, scale 0.6 |
+| Width polarity guard | HP at the low cut (Q 1/√2) on M and S; envelopes peak hold, 30 ms release; guard instant attack, 50 ms release; runs only while w > 1 |
 | Mono safety | correlation one-pole 300 ms (double), attack 300 ms (saturating at an error of 0.1), release 3 s, off-release 300 ms, hysteresis `min(0.05, (1 − minCorrelation)/2)` |
 
 **Design decisions**
 
 1. Stereo only. Blocks with any other channel count pass through untouched and no state advances. The chain places the spatializer after the 7.1 fold, so it always sees stereo.
 2. **Width = complementary shelf, not a literal LR4.** An LR4 pair sums to an all-pass that reaches −180° at the crossover. Applied to S alone (M must stay untouched for the mono guarantee), it would invert the side signal against M around the low cut: a left-panned 180 Hz source would image right, and width 1 could not be transparent. The complementary split `S_low + S_high = S` gives the same magnitude transition as an in-phase LR4 sum (at w = 2: +0.38 / +3.0 / +5.6 dB at 0.5× / 1× / 2× the cut), and its phase never strays more than 28° from M. Coefficients are recomputed per sample, but only while width or low cut glide.
-3. The ambience network **always runs**, so raising *space* starts from a live tail, not an empty reverb. The 5 ms pre-delay turns the Schroeder direct tap (−g·x) into a lateral early reflection. Without it, 0.25 · space · HP(M) would go straight into S and pull the centre sideways (4.4 dB level difference between the ears at space 1).
+3. The ambience network **always runs**, so raising *space* starts from a live tail, not an empty reverb. The 10 ms pre-delay turns the Schroeder direct tap (−g·x) into a lateral early reflection whose comb averages out within every 1/3 octave from 100 Hz. Without it, 0.25 · space · HP(M) would go straight into S and pull the centre sideways (4.4 dB level difference between the ears at space 1).
 4. When every stage is neutral, S is unchanged bit-exactly, and L/R are left untouched instead of being rebuilt as M ± S (which would not round back to L and R): a bit-exact pass-through (test *width 1 with everything else neutral is a bit-exact pass-through*).
 5. Correlation is measured on the **output**, in double precision, so the safety reacts to what the listener actually gets.
 6. State hygiene runs on the 32-sample tick in stream time, not once per block. A NaN is contained within one control interval, and the output is bit-identical for any block size, tails included.

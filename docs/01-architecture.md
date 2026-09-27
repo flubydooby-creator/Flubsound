@@ -196,7 +196,7 @@ sequenceDiagram
   ├─ [slot] BassEngine             subsonic · mono-bass · protected shelf · harmonics · tighten
   ├─ [slot] ClarityEnhancer        transients · de-mud · dynamic presence · air exciter
   ├─ [slot] Saturator              tape / tube / digital, 2× oversampled
-  ├─ [slot] StereoSpatializer      side-only width / focus / space / crossfeed (mono-exact)
+  ├─ [slot] StereoSpatializer      side-only width / focus / space (mono-exact) · L/R crossfeed with ITD
   ├─ [slot] Compressor             look-ahead, linked, downward + upward
   ├─ [slot] LoudnessMaximizer      drive → 3-band glue (only while armed) → 4× soft clipper (2× in Low Latency)
   │                                 → true-peak limiter (4× detector shared with the meters)
@@ -355,7 +355,7 @@ Until the virtual drivers exist, the strips are fed by a capture path. Each one 
 | Path | Extra buffering | Figure at 48 kHz | Consequence |
 |---|---|---|---|
 | Windows per-process loopback capture (`ProcessLoopbackCapture` → `DriftCompensatedFifo`) | The FIFO target is max(2 device blocks, capture packet + 1 block) + 4 frames, so the drift loop never runs dry (asserted in the `DriftFifo:` tests) | **612 frames = 12.75 ms** with typical 10 ms (480-frame) capture packets and 128-frame blocks | Exceeds the 10–12 ms target before any device buffering. Suits monitoring and "lite" setups, not competitive play |
-| Linux PipeWire null sinks (`flubsound_*`, §1) | The sink and its monitor add up to one graph quantum (`platform/linux/README.md`) | 1024 / 48000 = **21.3 ms** at the default quantum on many distributions; 256 / 48000 = 5.3 ms when forced (`pw-metadata -n settings 0 clock.force-quantum 256`) | Over the target at the default quantum. Setting `node.latency` for Flubsound's own nodes is roadmap |
+| Linux PipeWire null sinks (`flubsound_*`, §1) | The sink and its monitor add up to one graph quantum (`platform/linux/README.md`) | 1024 / 48000 = **21.3 ms** at pipewire-jack's default request; **256 / 48000 = 5.3 ms** requested by the app (`PIPEWIRE_LATENCY`, exported before the device opens; a request, not a lock, docs/11 E48a), or forced with `pw-metadata -n settings 0 clock.force-quantum 256` | Within the target when the request is honoured (PipeWire clients through pipewire-jack or PipeWire's ALSA plug-in; not yet measured on a PipeWire system). The Low Latency request (128 / 48000, locked) is not used yet |
 | A third-party virtual cable on the device input (VB-Cable, BlackHole, a JACK port) | The cable's own buffer plus the input device's period | Set by the cable and its driver, not by Flubsound | Has to be measured per setup |
 
 The app's latency readout includes the capture FIFO target of a running process-loopback capture, but not a PipeWire quantum or a cable's buffer.

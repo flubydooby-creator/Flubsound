@@ -165,6 +165,7 @@ private:
     SvfCoeffs widthDetectCoeffs;
     SvfState widthMidState, widthSideState;
     float envWidthMid = 0.0f, envWidthSide = 0.0f, envWidthAdd = 0.0f, widthGuard = 1.0f;
+    bool widthGuardLive = false; // detectors run only while the width is above 1
 
     // Positional focus: 3 kHz bell on S.
     OnePoleSmoother focusDb;
@@ -203,6 +204,7 @@ private:
     float xfeedFar = 0.0f;             // g: far-ear gain at DC
     float xfeedStateL = 0.0f, xfeedStateR = 0.0f;
     DelayBuffer xfeedLineL, xfeedLineR;
+    bool xfeedLive = false;            // filters / lines run only while on or fading
     int xfeedBase = 0;                 // integer part of the Lagrange read
     std::array<float, 4> xfeedTaps {};
 

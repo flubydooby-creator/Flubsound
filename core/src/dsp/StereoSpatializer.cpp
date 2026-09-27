@@ -138,11 +138,12 @@
 // flush, non-finite recovery) runs on the control tick, so the output is
 // bit-identical for any host block size.
 //
-// CPU per stereo sample: 8 SVF ticks (shelf, the width guard's two
-// high-passes, bell, the focus guard's two band-passes, HP, dip), three
-// one-poles, 6 delay-line writes and 12 reads (8 of them the crossfeed's
-// Lagrange reads, only while it is on) and 3 double-precision MACs;
-// coefficient math only while a parameter glides.
+// CPU per stereo sample: 6 SVF ticks (shelf, bell, the focus guard's two
+// band-passes, HP, dip) plus the width guard's two high-passes while w > 1,
+// one one-pole (Mono-safe crossfeed) plus two, 2 line writes and 8 Lagrange
+// reads while the Bs2b / Meier crossfeed runs, 4 ambience line reads /
+// writes and 3 double-precision MACs; coefficient math only while a
+// parameter glides.
 #include "flub/dsp/StereoSpatializer.h"
 
 #include "flub/common/Math.h"
@@ -392,6 +393,7 @@ void StereoSpatializer::clearState() noexcept
     widthSideState.reset();
     envWidthMid = envWidthSide = envWidthAdd = 0.0f;
     widthGuard = 1.0f;
+    widthGuardLive = false;
     focusState.reset();
     detectMidState.reset();
     detectSideState.reset();
@@ -409,6 +411,7 @@ void StereoSpatializer::clearState() noexcept
     lastAmbience = 0.0f;
     crossfeedState = 0.0f;
     xfeedStateL = xfeedStateR = 0.0f;
+    xfeedLive = false;
     corrLR = corrLL = corrRR = 0.0;
 }
 
@@ -636,18 +639,34 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
         const float w = widthSmoother.next();
         if (w != shelfWidth || lowCutG0 != shelfG0)
             designShelf (w, lowCutG0);
-        float s = side;
+        float s = svfTick (shelfCoeffs, shelfState, side) * std::min (w, 1.0f); // w <= 1: exactly w * side
+        if (w > 1.0f)
         {
             // Polarity guard: the added side signal may raise S up to M in the
-            // band above the low cut, never past it (w <= 1: added == 0).
-            const float added = svfTick (shelfCoeffs, shelfState, side) - side;
+            // band above the low cut, never past it. Its detectors run only
+            // while the width is above 1 and start from clear state (the
+            // shelf only starts to add once w leaves 1, and the envelopes
+            // attack instantly).
+            if (! widthGuardLive)
+            {
+                widthMidState.reset();
+                widthSideState.reset();
+                envWidthMid = envWidthSide = envWidthAdd = 0.0f;
+                widthGuard = 1.0f;
+                widthGuardLive = true;
+            }
+            const float added = s - side;
             envWidthMid = std::max (std::abs (svfTick (widthDetectCoeffs, widthMidState, mid)), envRelease * envWidthMid);
             envWidthSide = std::max (std::abs (svfTick (widthDetectCoeffs, widthSideState, side)), envRelease * envWidthSide);
             envWidthAdd = std::max (std::abs (added), envRelease * envWidthAdd);
             const float room = envWidthMid - envWidthSide;
             const float target = envWidthAdd <= room ? 1.0f : (room > 0.0f ? room / envWidthAdd : 0.0f);
             widthGuard = target < widthGuard ? target : target + guardRelease * (widthGuard - target);
-            s = (side + widthGuard * added) * std::min (w, 1.0f); // w = 1: exactly side
+            s = side + widthGuard * added;
+        }
+        else
+        {
+            widthGuardLive = false;
         }
 
         // ---- positional focus ----
@@ -686,12 +705,21 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
             changed = true;
         }
 
-        // ---- Bs2b / Meier crossfeed ---- (the head-shadow filters and ITD
-        // lines always run, so the crossfeed fades in from live state)
+        // ---- Bs2b / Meier crossfeed ---- (runs only while on or fading;
+        // it starts from clear filters and lines, and the 20 ms fade-in is
+        // far slower than the 0.23 ms head-shadow low-pass fills)
+        if (xfeedLogHz.isSmoothing())
+            xfeedG = onePoleG (std::exp (xfeedLogHz.next()));
+        const float ratio = xfeedRatio.next();
+        if (ratio != 0.0f || xfeedRatio.getTarget() != 0.0f)
         {
-            if (xfeedLogHz.isSmoothing())
-                xfeedG = onePoleG (std::exp (xfeedLogHz.next()));
-            const float ratio = xfeedRatio.next();
+            if (! xfeedLive)
+            {
+                xfeedStateL = xfeedStateR = 0.0f;
+                xfeedLineL.clear();
+                xfeedLineR.clear();
+                xfeedLive = true;
+            }
             if (ratio != xfeedDesigned)
                 designCrossfeed (ratio);
 
@@ -717,6 +745,10 @@ void StereoSpatializer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
                 ro = ro - xfeedNearCut * shadowR + xfeedFar * farR;
                 changed = true;
             }
+        }
+        else
+        {
+            xfeedLive = false;
         }
 
         if (changed)

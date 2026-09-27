@@ -77,6 +77,9 @@ Sink names and properties:
   sink argument passes a strict whitelist (`[A-Za-z0-9_.:@+-]`, no leading
   `-`, max 255 characters) and is single-quoted as well. Nothing unsanitised
   ever reaches `popen`.
+- **`connectEndpointInputs()`** links each strip sink's monitor to the
+  engine's input with `pw-dump` / `pw-link` (see *Linking the sinks to the
+  engine* below).
 - **`openSystemRoutingSettings()`** starts `pavucontrol --tab=1` (Playback),
   or failing that `pwvucontrol`, GNOME Settings › Sound, or KDE's audio KCM.
 
@@ -86,9 +89,9 @@ provides the server side. The calls block for roughly 5–30 ms, so the app
 runs them on its routing worker thread (`AppRouting`, every 2 s while routes
 exist), never on the message or audio thread.
 
-**Flatpak.** The sandbox has no `pactl`. The Flatpak build has to bundle
-`pactl` (with `--socket=pulseaudio`) or replace these calls with libpulse or
-libpipewire.
+**Flatpak.** The sandbox has no `pactl`, `pw-dump` or `pw-link`. The Flatpak
+build has to bundle them (with `--socket=pulseaudio` and access to the
+PipeWire socket) or replace these calls with libpulse or libpipewire.
 
 ## Global hotkeys
 
@@ -349,18 +352,95 @@ policy is system-wide (cpufreq governor, power-profiles-daemon).
 
 ## Latency
 
-PipeWire processes the whole graph in cycles of one *quantum* (default
-1024/48000 = 21 ms on many distributions; games and pro-audio setups use
-256/48000 = 5.3 ms or less). The null sink and its monitor add at most one
-quantum. Force a smaller quantum for gaming with
+PipeWire processes the whole graph in cycles of one *quantum*: the smallest
+`node.latency` any running node asks for, within the server's
+`clock.min-quantum` / `clock.max-quantum`. The null sink and its monitor add
+up to one quantum. A client that asks for nothing gets its library's
+default, which is 1024/48000 = 21.3 ms for pipewire-jack.
+
+The app therefore asks for less (docs/11 E48a). When it creates its
+router, on the message thread before the audio device opens, it exports
+`PIPEWIRE_LATENCY=256/48000` (5.3 ms, the Balanced request). pipewire-jack
+and PipeWire's ALSA plug-in read the variable when Flubsound opens its
+streams. This is a request, not a lock: the quantum is not locked, and
+other clients can still ask for less (the graph follows the smallest
+request). While Flubsound runs, the graph quantum drops to 256 unless
+another client asks for less or the server's `clock.min-quantum` is higher.
+A `PIPEWIRE_LATENCY` you exported yourself is kept (a value that is not
+`<frames>/<rate>` gets a note on stderr). Pure JACK2 servers, ALSA `hw:`
+devices and PulseAudio ignore the variable.
+
+The Low Latency request (`128/48000`, with `node.lock-quantum = true`
+through `PIPEWIRE_PROPS`) is implemented and tested in
+`pipewire::planLatencyEnvironment`. It is not used yet: PipeWire reads the
+variables only when a stream opens, so a profile change would have to
+export them and re-open the device, and the latency profile is not known
+when the router is created. To force a smaller quantum for everything, run
 
 ```sh
-pw-metadata -n settings 0 clock.force-quantum 256
+pw-metadata -n settings 0 clock.force-quantum 128
 ```
 
-A per-stream `node.latency = 256/48000` request for Flubsound's own streams
-would be the targeted alternative; the engine does not set it yet (it uses
-JUCE's ALSA / JACK backends), so this is roadmap.
+## Linking the sinks to the engine
+
+The engine reads each strip from its device input, starting at the strip's
+channel (*Settings › Processing › Input feeds strip*, or several strips
+through the `deviceInputMap` setting, for example `Game=0;Music=8`).
+PipeWire does not connect a sink's monitor to that input by itself. The app
+does it, so no qpwgraph or Helvum step is needed.
+`LinuxAppAudioRouter::connectEndpointInputs`, called on every pass of the
+routing worker (`AppRouting`, every 2 s), works as follows:
+
+- It runs `pw-dump` and reads its JSON with `flub::json`
+  (`pipewire::parseDump`).
+- Flubsound's own input node is the one belonging to this process with the
+  most audio input ports: its `application.process.id`, or its client's
+  `pipewire.sec.pid`, is this process. Under pipewire-jack that is the
+  JACK client with ports `in_1` … `in_N`.
+- Monitor port *k* of each mapped `flubsound_<strip>` sink (the strip's
+  endpoint id) is linked to input port *first + k*
+  (`pipewire::planMonitorLinks`). A sink gets as many links as it has
+  monitor ports (8 for Game, 2 for the others), but never reaches the next
+  mapped strip's first channel or runs past the last input.
+- Missing links are made with `pw-link <out> <in>`. The command line
+  carries port ids (integers) only, so no sink or port name ever reaches
+  the shell. "File exists" (another linker was faster) counts as done.
+- Links made by others (JUCE's own JACK connections, a microphone) are left
+  alone. Links the router made and no longer wants, because the map changed
+  or device input was switched off, are removed with `pw-link -d`.
+- `pw-dump` costs a few milliseconds of CPU on a busy graph. An unchanged map
+  is therefore checked again only every 10 s (links vanish when the device
+  re-opens). A pass that changed something is confirmed on the next one.
+- What cannot be linked goes to stderr (`Flubsound: PipeWire links: …`),
+  once each time the message changes. Examples: a missing sink ("create
+  the Flubsound sinks with … install"), a strip mapped past the input's
+  channel count, a sink cut short by the next strip, or an input that is
+  not a PipeWire node (an ALSA `hw:` device: choose the JACK device type).
+  The same text is returned as the call's status for a later UI.
+- Without `pw-dump` / `pw-link` (package `pipewire-bin` on Debian / Ubuntu,
+  `pipewire-utils` on Fedora, `pipewire` on Arch; Flatpak) the router says
+  so and names qpwgraph or Helvum as the manual route. When `pw-dump` fails
+  (no PipeWire, for example classic PulseAudio), it suggests choosing a
+  sink's monitor as the input device.
+
+JUCE's JACK device gives the engine as many inputs as the chosen *input
+device* (a JACK client) has output ports. Choosing "Flubsound Game" gives 8,
+enough for the Game strip only. Feeding four strips from one device needs an
+input client with 14 ports, which is what the native filter node below
+removes.
+
+Tests in `tests/test_platform_linux.cpp` need no PipeWire. `Platform:
+PipeWire quantum request …` covers the environment plan (Balanced,
+Low Latency, a user's value kept) and the router's request at creation.
+`Platform: pw-dump JSON is read …` and `Platform: PipeWire monitor links
+follow the device input map …` cover parsing and planning against a
+trimmed `pw-dump` fixture: port order, a pid only on the client object,
+MIDI ports, another process's JACK client, limits and the problem texts.
+`Platform: the Linux router links the sink monitors with pw-link …` runs the
+router against fake `pw-dump` / `pw-link` scripts on `PATH`: nine links
+made, a confirming pass with no changes, no `pw-dump` before the re-check
+interval, the unlinking on a map change and on device input off, and the
+message when the tools are missing.
 
 ## Headset profiles on Linux
 
@@ -380,5 +460,8 @@ detect Bluetooth and hands-free outputs from the device name and format
 - Wayland hotkeys: run on real desktops (so far tested only against a mock
   portal), pass a `parent_window` and ship a `.desktop` file so the portal
   knows the application id.
-- RealtimeKit for the audio thread, `node.latency` for Flubsound's streams,
-  and the output's `device.bus` for headset connection detection.
+- The Low Latency quantum request (`128/48000`, locked) on a profile change,
+  which needs the device to re-open after the variables change. Links through
+  libpipewire registry events instead of polling `pw-dump`.
+- RealtimeKit for the audio thread, and the output's `device.bus` for
+  headset connection detection.
