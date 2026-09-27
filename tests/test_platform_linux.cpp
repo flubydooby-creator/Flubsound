@@ -10,6 +10,7 @@
 #include "../app/Source/platform/PlatformServices_common.cpp"
 #include "../app/Source/platform/PlatformServices_linux.cpp"
 
+#include <spawn.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -1673,5 +1674,202 @@ TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalSho
         CHECK (! hotkeys->isSupported());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Foreground application (automatic profiles)
+// ---------------------------------------------------------------------------
+TEST_CASE ("Platform: foreground process names: Wine / Proton programs by their Windows executable, others by /proc exe, comm or argv[0]")
+{
+    using namespace std::string_literals;
+    ForegroundAppInfo info;
+
+    // Wine and Proton loaders run the program named by argv[0].
+    foreground::describeExecutable ("/usr/bin/wine64-preloader", "C:\\Games\\CS2\\cs2.exe\0-steam\0"s, "cs2.exe", info);
+    CHECK (info.executablePath == "C:\\Games\\CS2\\cs2.exe");
+    CHECK (info.executableName == "cs2.exe");
+    foreground::describeExecutable ("/home/u/.steam/steam/steamapps/common/Proton 9.0/files/bin/wine-preloader",
+                                    "Z:\\home\\u\\Games\\Game.EXE\0"s, "Game.EXE", info);
+    CHECK (info.executableName == "Game.EXE");
+
+    // A wine loader that is not running a Windows program is itself.
+    foreground::describeExecutable ("/usr/bin/wine64", "/usr/bin/wine64\0--version\0"s, "wine64", info);
+    CHECK (info.executablePath == "/usr/bin/wine64");
+    CHECK (info.executableName == "wine64");
+
+    // Native programs: the resolved /proc/<pid>/exe link, whatever argv[0] says.
+    foreground::describeExecutable ("/usr/lib/firefox/firefox", "firefox.exe\0-new-tab\0"s, "firefox", info);
+    CHECK (info.executablePath == "/usr/lib/firefox/firefox");
+    CHECK (info.executableName == "firefox");
+
+    // Another user's process (exe unreadable): comm, then argv[0]'s file name.
+    foreground::describeExecutable ("", "/usr/sbin/sshd\0-D\0"s, "sshd", info);
+    CHECK (info.executablePath.empty());
+    CHECK (info.executableName == "sshd");
+    foreground::describeExecutable ("", "/opt/tool/bin/tool\0"s, "", info);
+    CHECK (info.executableName == "tool");
+
+    // This process, and one that does not exist.
+    REQUIRE (foreground::describeProcess (static_cast<uint32_t> (::getpid()), info));
+    CHECK (info.isThisProcess);
+    CHECK (info.processId == static_cast<uint32_t> (::getpid()));
+    CHECK (info.executablePath == std::filesystem::read_symlink ("/proc/self/exe").string());
+    CHECK (info.executableName == std::filesystem::read_symlink ("/proc/self/exe").filename().string());
+    CHECK (info.bundleId.empty());
+    CHECK (! foreground::describeProcess (4294967290u, info));
+}
+
+TEST_CASE ("Platform: foreground application detection is unsupported under Wayland and without an X display, and says why")
+{
+    {
+        ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+        auto foregroundApp = ForegroundApp::create();
+        REQUIRE (foregroundApp != nullptr);
+        CHECK (! foregroundApp->isSupported());
+        ForegroundAppInfo info;
+        CHECK (! foregroundApp->query (info));
+        CHECK (foregroundApp->unsupportedReason().find ("Wayland") != std::string::npos);
+    }
+    {
+        ScopedEnv noWayland ("WAYLAND_DISPLAY", nullptr);
+        ScopedEnv session ("XDG_SESSION_TYPE", "x11");
+        ScopedEnv noDisplay ("DISPLAY", nullptr);
+        auto foregroundApp = ForegroundApp::create();
+        REQUIRE (foregroundApp != nullptr);
+        CHECK (! foregroundApp->isSupported());
+        ForegroundAppInfo info;
+        CHECK (! foregroundApp->query (info));
+        CHECK (! foregroundApp->unsupportedReason().empty());
+        CHECK (foregroundApp->unsupportedReason().find ("Wayland") == std::string::npos);
+    }
+}
+
+#if FLUB_HAVE_X11_HEADERS
+TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_PID, and reports none for a missing or destroyed window")
+{
+    // Needs a bare X server (CI: Xvfb). Xvfb has no window manager, so the
+    // test publishes _NET_ACTIVE_WINDOW itself; with a window manager
+    // running (_NET_SUPPORTING_WM_CHECK set) it would fight over the
+    // property, so the test is skipped then.
+    ScopedEnv noWayland ("WAYLAND_DISPLAY", nullptr);
+    ScopedEnv session ("XDG_SESSION_TYPE", nullptr);
+    auto foregroundApp = ForegroundApp::create();
+    if (! foregroundApp->isSupported())
+    {
+        std::cerr << "    (no X11 display: skipped)\n";
+        return;
+    }
+    CHECK (foregroundApp->unsupportedReason().empty());
+
+    const X11Api* x = X11Api::get();
+    REQUIRE (x != nullptr);
+    using CreateWindowFn = Window (*) (Display*, Window, int, int, unsigned int, unsigned int, unsigned int, unsigned long, unsigned long);
+    using ChangePropertyFn = int (*) (Display*, Window, Atom, Atom, int, int, const unsigned char*, int);
+    using DeletePropertyFn = int (*) (Display*, Window, Atom);
+    using DestroyWindowFn = int (*) (Display*, Window);
+    const auto createWindow = reinterpret_cast<CreateWindowFn> (::dlsym (x->lib, "XCreateSimpleWindow"));
+    const auto changeProperty = reinterpret_cast<ChangePropertyFn> (::dlsym (x->lib, "XChangeProperty"));
+    const auto deleteProperty = reinterpret_cast<DeletePropertyFn> (::dlsym (x->lib, "XDeleteProperty"));
+    const auto destroyWindow = reinterpret_cast<DestroyWindowFn> (::dlsym (x->lib, "XDestroyWindow"));
+    REQUIRE (createWindow != nullptr);
+    REQUIRE (changeProperty != nullptr);
+    REQUIRE (deleteProperty != nullptr);
+    REQUIRE (destroyWindow != nullptr);
+
+    Display* d = x->openDisplay (nullptr);
+    REQUIRE (d != nullptr);
+    const Window root = x->defaultRootWindow (d);
+    const Atom activeAtom = x->internAtom (d, "_NET_ACTIVE_WINDOW", False);
+    const Atom pidAtom = x->internAtom (d, "_NET_WM_PID", False);
+    {
+        Atom type = 0;
+        int format = 0;
+        unsigned long count = 0, remaining = 0;
+        unsigned char* data = nullptr;
+        x->getWindowProperty (d, root, x->internAtom (d, "_NET_SUPPORTING_WM_CHECK", False), 0, 1, False, XA_WINDOW, &type, &format, &count,
+                              &remaining, &data);
+        if (data != nullptr)
+            x->free (data);
+        if (count > 0)
+        {
+            std::cerr << "    (a window manager is running: skipped)\n";
+            x->closeDisplay (d);
+            return;
+        }
+    }
+
+    const auto setProperty = [&] (Window w, Atom property, Atom type, unsigned long value)
+    {
+        const long item = static_cast<long> (value); // format 32 items are longs in Xlib
+        changeProperty (d, w, property, type, 32, PropModeReplace, reinterpret_cast<const unsigned char*> (&item), 1);
+        x->sync (d, False);
+    };
+    const auto makeWindow = [&] (uint32_t pid)
+    {
+        const Window w = createWindow (d, root, 0, 0, 16, 16, 0, 0, 0);
+        if (pid != 0)
+            setProperty (w, pidAtom, XA_CARDINAL, pid);
+        x->sync (d, False);
+        return w;
+    };
+    const auto activate = [&] (Window w) { setProperty (root, activeAtom, XA_WINDOW, w); };
+
+    ForegroundAppInfo info;
+
+    // No _NET_ACTIVE_WINDOW at all (no window manager): no answer.
+    deleteProperty (d, root, activeAtom);
+    x->sync (d, False);
+    CHECK (! foregroundApp->query (info));
+
+    // A window of this process.
+    const auto self = static_cast<uint32_t> (::getpid());
+    const Window own = makeWindow (self);
+    activate (own);
+    REQUIRE (foregroundApp->query (info));
+    CHECK (info.processId == self);
+    CHECK (info.isThisProcess);
+    CHECK (info.executablePath == std::filesystem::read_symlink ("/proc/self/exe").string());
+    CHECK (info.executableName == std::filesystem::read_symlink ("/proc/self/exe").filename().string());
+
+    // A window of another process (posix_spawn returns after the exec).
+    pid_t child = 0;
+    char arg0[] = "sleep", arg1[] = "30";
+    char* childArgs[] = { arg0, arg1, nullptr };
+    REQUIRE (::posix_spawn (&child, "/bin/sleep", nullptr, nullptr, childArgs, environ) == 0);
+    const Window other = makeWindow (static_cast<uint32_t> (child));
+    activate (other);
+    REQUIRE (foregroundApp->query (info));
+    CHECK (info.processId == static_cast<uint32_t> (child));
+    CHECK (! info.isThisProcess);
+    CHECK (info.executableName == "sleep");
+
+    // Back to our own window: the cached description is not reused for it.
+    activate (own);
+    REQUIRE (foregroundApp->query (info));
+    CHECK (info.processId == self);
+    CHECK (info.isThisProcess);
+
+    // A window without _NET_WM_PID, a destroyed window (BadWindow must be
+    // swallowed, not abort the process) and "no active window" (0).
+    const Window anonymous = makeWindow (0);
+    activate (anonymous);
+    CHECK (! foregroundApp->query (info));
+    activate (other);
+    REQUIRE (foregroundApp->query (info));
+    destroyWindow (d, other);
+    x->sync (d, False);
+    CHECK (! foregroundApp->query (info));
+    activate (0);
+    CHECK (! foregroundApp->query (info));
+
+    ::kill (child, SIGKILL);
+    int status = 0;
+    ::waitpid (child, &status, 0);
+    destroyWindow (d, own);
+    destroyWindow (d, anonymous);
+    deleteProperty (d, root, activeAtom);
+    x->sync (d, False);
+    x->closeDisplay (d);
+}
+#endif
 
 #endif // __linux__
