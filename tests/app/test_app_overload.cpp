@@ -677,3 +677,80 @@ TEST_CASE ("App: per-app capture FIFO stats reach EngineController::getCaptureSt
     host.stopAllCaptures();
     CHECK (controller.getCaptureStreams().empty());
 }
+
+// =============================================================================
+// Header: latency estimate per strip, device safety warning (docs/11 E42a, E51)
+// =============================================================================
+TEST_CASE ("App: header latency readout marks an estimate, shows -- without an audible path, and breaks the total down per strip")
+{
+    LatencyInfo info;
+    CHECK (ui::HeaderBar::formatLatencyReadout (info) == "--"); // not valid: no device
+    CHECK (ui::HeaderBar::describeLatency (info, {}).startsWith ("Latency: no audible path"));
+
+    info.valid = true;
+    info.estimated = true;
+    info.deviceInputMs = 5.3;
+    info.deviceOutputMs = 5.3;
+    info.engineMs = 28.2;
+    info.totalMs = 38.8;
+    info.captureBufferMs = 1.2;
+    info.numStrips = 2;
+    info.strips[0] = { 148, 1204, 1352, 3.1, 25.1, 28.2 }; // Game in Low Latency, padded to Music in Quality
+    info.strips[1] = { 1352, 0, 1352, 28.2, 0.0, 28.2 };
+    CHECK (ui::HeaderBar::formatLatencyReadout (info) == "~40.0 ms");
+    const auto tip = ui::HeaderBar::describeLatency (info, { "Game", "Music" });
+    CHECK (tip.startsWith ("Latency (estimated): device in 5.3 ms + engine 28.2 ms + device out 5.3 ms + app capture 1.2 ms = 40.0 ms"));
+    CHECK (tip.contains ("\nEstimated: the device figures are what the driver reports"));
+    CHECK (tip.contains ("\nGame: 28.2 ms in the engine (its own 3.1 ms + 25.1 ms to stay in sync with the slowest strip)"));
+    CHECK (tip.contains ("\nMusic: 28.2 ms in the engine"));
+    CHECK (! tip.contains ("Music: 28.2 ms in the engine (")); // no padding, no breakdown
+
+    info.estimated = false; // a measured path (docs/11 E42d) drops the marks
+    CHECK (ui::HeaderBar::formatLatencyReadout (info) == "40.0 ms");
+    CHECK (ui::HeaderBar::describeLatency (info, { "Game", "Music" }).startsWith ("Latency: device in"));
+}
+
+TEST_CASE ("App: a loopback pair or device error turns the header's bottom line into a DEVICE warning, broadcast as Change::Device")
+{
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    ChangeCounter changes;
+    controller.addListener (&changes);
+    auto& host = controller.getHost();
+    const auto status = runningStatus (0.30, -1, 0);
+
+    CHECK (controller.getDeviceSafetyState().kind == DeviceSafetyState::Kind::None);
+    CHECK (ui::HeaderBar::describeDeviceSafety (controller.getDeviceSafetyState()).isEmpty());
+    CHECK (ui::HeaderBar::formatCpuReadout (status, controller.getOverloadState(), controller.getDeviceSafetyState()).caption == "CPU");
+
+    // The output is the loopback partner of an input that feeds a strip.
+    host.setDeviceInputRouting (1, 0);
+    host.checkLoopbackPair ("BlackHole 2ch", "BlackHole 2ch");
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return changes.device >= 1; }, 5000)); // hang guard; the host notifies asynchronously
+    const auto state = controller.getDeviceSafetyState();
+    REQUIRE (state.kind == DeviceSafetyState::Kind::LoopbackPair);
+    auto readout = ui::HeaderBar::formatCpuReadout (status, controller.getOverloadState(), state);
+    CHECK (readout.caption == "DEVICE");
+    CHECK (readout.value == "muted");
+    CHECK (readout.overload); // the hot colour
+    const auto tip = ui::HeaderBar::describeDeviceSafety (state);
+    CHECK (tip.startsWith (state.message));
+    CHECK (tip.endsWith ("Click to open Settings."));
+
+    // A device error without a message still says what happened.
+    DeviceSafetyState error;
+    error.kind = DeviceSafetyState::Kind::DeviceError;
+    CHECK (ui::HeaderBar::formatCpuReadout (status, controller.getOverloadState(), error).value == "error");
+    CHECK (ui::HeaderBar::describeDeviceSafety (error) == "The audio device reported an error. Click to open Settings.");
+
+    // Allowed on purpose: the warning goes, the readout is the CPU again.
+    const int before = changes.device;
+    host.allowLoopbackPair ("BlackHole 2ch", "BlackHole 2ch");
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return changes.device > before; }, 5000));
+    CHECK (controller.getDeviceSafetyState().kind == DeviceSafetyState::Kind::None);
+    readout = ui::HeaderBar::formatCpuReadout (status, controller.getOverloadState(), controller.getDeviceSafetyState());
+    CHECK (readout.caption == "CPU");
+    CHECK (! readout.overload);
+
+    controller.removeListener (&changes);
+}

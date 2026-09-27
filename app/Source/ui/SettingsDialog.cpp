@@ -451,6 +451,18 @@ public:
         };
         addAndMakeVisible (enabledToggle);
 
+        // The strip the strip-level hotkeys act on (docs/11 E56), never the
+        // strip selected in the window.
+        stripBox.setTitle ("Hotkey strip");
+        stripBox.setTooltip ("Mode, Boost, preset, Focus, Night and Bypass hotkeys act on this strip, whichever strip is selected "
+                             "in the window. While an automatic profile is active, they act on its strip.");
+        stripBox.onChange = [this]
+        {
+            if (const auto name = stripBox.getText(); name.isNotEmpty())
+                controller.setHotkeyStripName (name);
+        };
+        addAndMakeVisible (stripBox);
+
         for (const auto action : AppSettings::getAllHotkeyActions())
         {
             Row row;
@@ -491,6 +503,17 @@ public:
         for (auto& row : rows)
             if (! row.editor->hasKeyboardFocus (true))
                 row.editor->setText (AppSettings::chordToString (controller.getSettings().getHotkey (row.action)), false);
+
+        stripBox.clear (juce::dontSendNotification);
+        const auto chosen = controller.getSettings().getHotkeyStripName();
+        for (int i = 0; i < controller.getNumStrips(); ++i)
+        {
+            stripBox.addItem (controller.getStripName (i), i + 1);
+            if (controller.getStripName (i).equalsIgnoreCase (chosen))
+                stripBox.setSelectedId (i + 1, juce::dontSendNotification);
+        }
+        if (stripBox.getSelectedId() == 0) // a strip the layout no longer has: the hotkeys use the first one
+            stripBox.setSelectedId (controller.getHotkeyStrip() + 1, juce::dontSendNotification);
         updateStatus();
     }
 
@@ -505,6 +528,9 @@ public:
     void paint (juce::Graphics& g) override
     {
         drawSectionTitle (g, titleArea, "System-wide shortcuts");
+        g.setColour (Palette::text.withAlpha (0.88f));
+        g.setFont (Theme::font (13.0f));
+        g.drawText ("Hotkeys act on", stripCaptionArea, juce::Justification::centredLeft, true);
         for (const auto& row : rows)
         {
             g.setColour (Palette::text.withAlpha (0.88f));
@@ -533,7 +559,13 @@ public:
         titleArea = r.removeFromTop (22);
         r.removeFromTop (10);
         enabledToggle.setBounds (r.removeFromTop (26).withWidth (300));
-        r.removeFromTop (10);
+        r.removeFromTop (6);
+        {
+            auto line = r.removeFromTop (kRowHeight);
+            stripCaptionArea = line.removeFromLeft (160);
+            stripBox.setBounds (line.removeFromLeft (150).reduced (0, 2));
+        }
+        r.removeFromTop (6);
         for (auto& row : rows)
         {
             auto line = r.removeFromTop (kRowHeight);
@@ -543,7 +575,7 @@ public:
             row.reset->setBounds (line.removeFromLeft (26).reduced (0, 2));
             line.removeFromLeft (12);
             row.stateArea = line;
-            r.removeFromTop (4);
+            r.removeFromTop (2);
         }
         r.removeFromTop (10);
         statusArea = r;
@@ -670,6 +702,8 @@ private:
     EngineController& controller;
     HotkeyHooks hooks;
     juce::ToggleButton enabledToggle { "Enable system-wide hotkeys" };
+    juce::ComboBox stripBox;
+    juce::Rectangle<int> stripCaptionArea;
     std::vector<Row> rows;
     juce::String status;
     bool statusIsError = false;

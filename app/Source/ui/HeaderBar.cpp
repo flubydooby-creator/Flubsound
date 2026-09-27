@@ -273,9 +273,17 @@ void HeaderBar::refresh()
     repaint();
 }
 
-HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload)
+HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload,
+                                                   const DeviceSafetyState& safety)
 {
     CpuReadout r;
+    if (safety.kind != DeviceSafetyState::Kind::None)
+    {
+        r.caption = "DEVICE";
+        r.value = safety.kind == DeviceSafetyState::Kind::LoopbackPair || safety.outputMuted ? "muted" : "error";
+        r.overload = true; // the hot status colour
+        return r;
+    }
     if (! status.deviceOpen)
     {
         r.caption = "DEVICE";
@@ -316,13 +324,61 @@ juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadW
     return t + reduction;
 }
 
+juce::String HeaderBar::formatLatencyReadout (const LatencyInfo& info)
+{
+    if (! info.valid)
+        return "--";
+    return (info.estimated ? "~" : "") + juce::String (info.totalMs + info.captureBufferMs, 1) + " ms";
+}
+
+juce::String HeaderBar::describeLatency (const LatencyInfo& info, const juce::StringArray& stripNames)
+{
+    const auto ms = [] (double v) { return juce::String (v, 1) + " ms"; };
+    if (! info.valid)
+        return "Latency: no audible path (no device running, or its output is held at silence)";
+
+    juce::String t;
+    t << "Latency" << (info.estimated ? " (estimated)" : "") << ": device in " << ms (info.deviceInputMs) << " + engine " << ms (info.engineMs)
+      << " + device out " << ms (info.deviceOutputMs);
+    if (info.graphQuantumMs > 0.0)
+        t << " + audio graph " << ms (info.graphQuantumMs);
+    if (info.captureBufferMs > 0.0)
+        t << " + app capture " << ms (info.captureBufferMs);
+    t << " = " << ms (info.totalMs + info.captureBufferMs);
+    if (info.estimated)
+        t << "\nEstimated: the device figures are what the driver reports; Bluetooth codec delay and the OS mixer are not included.";
+
+    // Strips are padded to the slowest one so they stay in sync.
+    for (int i = 0; i < info.numStrips && i < static_cast<int> (info.strips.size()); ++i)
+    {
+        const auto& strip = info.strips[static_cast<size_t> (i)];
+        t << "\n" << (i < stripNames.size() ? stripNames[i] : "Strip " + juce::String (i + 1)) << ": " << ms (strip.outputMs) << " in the engine";
+        if (strip.paddingSamples > 0)
+            t << " (its own " << ms (strip.ownMs) << " + " << ms (strip.paddingMs) << " to stay in sync with the slowest strip)";
+    }
+    return t;
+}
+
+juce::String HeaderBar::describeDeviceSafety (const DeviceSafetyState& safety)
+{
+    if (safety.kind == DeviceSafetyState::Kind::None)
+        return {};
+    juce::String t = safety.message.isNotEmpty() ? safety.message
+                     : safety.kind == DeviceSafetyState::Kind::LoopbackPair
+                         ? "The output device is the loopback partner of the input device: the output is held at silence."
+                         : "The audio device reported an error.";
+    if (safety.outputMuted && safety.kind != DeviceSafetyState::Kind::LoopbackPair)
+        t << " The output is held at silence.";
+    return t + " Click to open Settings.";
+}
+
 void HeaderBar::updateStatus()
 {
     const auto li = controller.getLatencyInfo();
     const auto status = controller.getStatus();
 
-    const auto newLatency = juce::String (li.totalMs + li.captureBufferMs, 1) + " ms";
-    const auto newCpu = formatCpuReadout (status, controller.getOverloadState());
+    const auto newLatency = formatLatencyReadout (li);
+    const auto newCpu = formatCpuReadout (status, controller.getOverloadState(), controller.getDeviceSafetyState());
     bool changed = newLatency != latencyText || newCpu.caption != cpu.caption || newCpu.value != cpu.value || newCpu.warn != cpu.warn
                    || newCpu.overload != cpu.overload;
     latencyText = newLatency;
@@ -356,18 +412,27 @@ void HeaderBar::mouseMove (const juce::MouseEvent& e)
         setTooltip ({});
         return;
     }
-    const auto li = controller.getLatencyInfo();
+    juce::StringArray stripNames;
+    for (int i = 0; i < controller.getNumStrips(); ++i)
+        stripNames.add (controller.getStripName (i));
     juce::String tip;
-    tip << "Latency: device in " << juce::String (li.deviceInputMs, 1) << " ms + engine " << juce::String (li.engineMs, 1) << " ms + device out "
-        << juce::String (li.deviceOutputMs, 1) << " ms";
-    if (li.captureBufferMs > 0.0)
-        tip << " + app capture " << juce::String (li.captureBufferMs, 1) << " ms";
+    if (const auto device = describeDeviceSafety (controller.getDeviceSafetyState()); device.isNotEmpty())
+        tip << device << "\n";
+    tip << describeLatency (controller.getLatencyInfo(), stripNames);
     tip << "\n" << describeCpu (controller.getStatus(), controller.getOverloadState(), controller.describeLoadReduction());
     const auto streams = controller.getCaptureStreams();
     if (! streams.empty())
         tip << "\nApp capture: " << SettingsDialog::describeCaptureStreams (streams).replace ("\n", "\nApp capture: ");
     tip << "\n" << SettingsDialog::describeOutputDevice (controller, 1);
     setTooltip (tip);
+}
+
+void HeaderBar::mouseUp (const juce::MouseEvent& e)
+{
+    // The readout leads to Settings, where the device, the buffer and the
+    // latency profile are chosen (and a device problem is explained).
+    if (readoutArea.contains (e.getPosition()) && e.mouseWasClicked() && onSettingsRequested != nullptr)
+        onSettingsRequested();
 }
 
 void HeaderBar::animate (double dtSeconds)

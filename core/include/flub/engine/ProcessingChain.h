@@ -34,10 +34,16 @@
 //
 // Latency is the sum of the slot latencies for the current latency profile
 // and is constant until the next prepare(). Latency profiles (48 kHz):
-//   Quality    : gate 1024, sat 2x HQ, comp LA 3 ms, max 4x HQ + 2 ms TP limiter
+//   Quality    : gate 1024, sat 2x HQ, comp LA 3 ms, max 4x HQ + 2 ms TP limiter (1352 smp ~ 28.2 ms)
 //   Balanced   : no gate,   sat 2x LQ, comp LA 1 ms, max 4x HQ + 1.5 ms  (192 smp = 4.0 ms)
 //   LowLatency : no gate,   sat 2x LQ, comp LA 0.5 ms, max 2x LQ + 0.5 ms (100 smp ~ 2.1 ms)
 // plus, while a neural model is active, its fixed latency L (docs/09 §1.1).
+// Look-aheads and the gate frame are defined in ms (the frame is 21.3 ms,
+// rounded to a power of two: 1024 at 44.1 / 48 kHz, 2048 at 96, 4096 at
+// 192 kHz); the oversampler FIRs and the true-peak detector are in samples.
+// Below 32 kHz (hands-free links) a requested Quality runs as Balanced
+// (docs/11 E42a): getLatencyProfile() is the profile in effect,
+// getRequestedLatencyProfile() the stored one.
 //
 // Neural slot (docs/09-future-roadmap.md §1.1). Empty by default: the slot is
 // then skipped like the gate outside Quality, so latency and output are
@@ -149,8 +155,13 @@ public:
     void process (const AudioBlock& io) noexcept FLUB_NONBLOCKING;
 
     int getLatencySamples() const noexcept { return totalLatency; }
-    /** The latency profile the chain was prepared with (constant until the next prepare()). */
+    /** The latency profile in effect since the last prepare() (constant until
+        the next one): the stored latency.profile, except that Quality runs as
+        Balanced below 32 kHz (docs/11 E42a). */
     param::LatencyProfileValue getLatencyProfile() const noexcept { return static_cast<param::LatencyProfileValue> (profileAtPrepare); }
+    /** The latency.profile the store held at the last prepare(); differs from
+        getLatencyProfile() only while Quality is clamped (for a UI note). */
+    param::LatencyProfileValue getRequestedLatencyProfile() const noexcept { return static_cast<param::LatencyProfileValue> (requestedProfileAtPrepare); }
     double getSampleRate() const noexcept { return config.sampleRate; }
     const ChainConfig& getConfig() const noexcept { return config; }
 
@@ -235,7 +246,7 @@ private:
 
     param::ParameterStore& store;
     ChainConfig config;
-    int profileAtPrepare = -1;
+    int profileAtPrepare = -1, requestedProfileAtPrepare = -1;
     int totalLatency = 0;
 
     std::vector<float> base, effective; // kNumParams each (allocated in ctor); audio thread only

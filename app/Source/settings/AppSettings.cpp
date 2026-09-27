@@ -19,6 +19,7 @@ constexpr const char* masterEnabled = "engine.enabled";
 constexpr const char* selectedStrip = "engine.selectedStrip";
 constexpr const char* reduceLoadOnOverload = "engine.reduceLoadOnOverload";
 constexpr const char* hotkeysEnabled = "hotkeys.enabled";
+constexpr const char* hotkeyStrip = "hotkeys.strip";
 constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
 constexpr const char* startWithOs = "ui.startWithOs";
@@ -114,6 +115,11 @@ const char* hotkeySettingKey (HotkeyAction action)
         case HotkeyAction::BoostDown: return "hotkey.boostDown";
         case HotkeyAction::NextPreset: return "hotkey.nextPreset";
         case HotkeyAction::PreviousPreset: return "hotkey.previousPreset";
+        case HotkeyAction::ToggleFocus: return "hotkey.toggleFocus";
+        case HotkeyAction::ChatMixToChat: return "hotkey.chatMixToChat";
+        case HotkeyAction::ChatMixToGame: return "hotkey.chatMixToGame";
+        case HotkeyAction::ToggleNight: return "hotkey.toggleNight";
+        case HotkeyAction::ToggleBypass: return "hotkey.toggleBypass";
     }
     return "hotkey.unknown";
 }
@@ -279,6 +285,11 @@ KeyChord AppSettings::getDefaultHotkey (HotkeyAction action)
         case HotkeyAction::BoostDown: chord.keyCode = 0x28; break;      // Down
         case HotkeyAction::NextPreset: chord.keyCode = 0x27; break;     // Right
         case HotkeyAction::PreviousPreset: chord.keyCode = 0x25; break; // Left
+        case HotkeyAction::ToggleFocus: chord.keyCode = 'S'; break;
+        case HotkeyAction::ChatMixToChat: chord.keyCode = 0x21; break;  // PageUp
+        case HotkeyAction::ChatMixToGame: chord.keyCode = 0x22; break;  // PageDown
+        case HotkeyAction::ToggleNight: chord.keyCode = 'N'; break;
+        case HotkeyAction::ToggleBypass: chord.keyCode = 'B'; break;
     }
     return chord;
 }
@@ -293,14 +304,20 @@ juce::String AppSettings::getHotkeyActionName (HotkeyAction action)
         case HotkeyAction::BoostDown: return "Boost -10%";
         case HotkeyAction::NextPreset: return "Next Preset";
         case HotkeyAction::PreviousPreset: return "Previous Preset";
+        case HotkeyAction::ToggleFocus: return "Focus (footsteps)";
+        case HotkeyAction::ChatMixToChat: return "ChatMix: more chat";
+        case HotkeyAction::ChatMixToGame: return "ChatMix: more game";
+        case HotkeyAction::ToggleNight: return "Night listening";
+        case HotkeyAction::ToggleBypass: return "Bypass hotkey strip";
     }
     return {};
 }
 
 std::vector<HotkeyAction> AppSettings::getAllHotkeyActions()
 {
-    return { HotkeyAction::ToggleEnable, HotkeyAction::ToggleMode, HotkeyAction::BoostUp,
-             HotkeyAction::BoostDown,    HotkeyAction::NextPreset, HotkeyAction::PreviousPreset };
+    return { HotkeyAction::ToggleEnable,  HotkeyAction::ToggleMode,    HotkeyAction::BoostUp,     HotkeyAction::BoostDown,
+             HotkeyAction::NextPreset,    HotkeyAction::PreviousPreset, HotkeyAction::ToggleFocus, HotkeyAction::ChatMixToChat,
+             HotkeyAction::ChatMixToGame, HotkeyAction::ToggleNight,   HotkeyAction::ToggleBypass };
 }
 
 KeyChord AppSettings::getHotkey (HotkeyAction action) const
@@ -322,6 +339,14 @@ void AppSettings::setHotkey (HotkeyAction action, const KeyChord& chord)
 
 bool AppSettings::getHotkeysEnabled() const { return properties->getBoolValue (Keys::hotkeysEnabled, true); }
 void AppSettings::setHotkeysEnabled (bool enabled) { properties->setValue (Keys::hotkeysEnabled, enabled); }
+
+juce::String AppSettings::getHotkeyStripName() const
+{
+    const auto name = properties->getValue (Keys::hotkeyStrip, "Game").trim();
+    return name.isNotEmpty() ? name : juce::String ("Game");
+}
+
+void AppSettings::setHotkeyStripName (const juce::String& stripName) { properties->setValue (Keys::hotkeyStrip, stripName.trim()); }
 
 juce::String AppSettings::chordToString (const KeyChord& chord)
 {

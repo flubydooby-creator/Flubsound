@@ -9,8 +9,13 @@
 // * Presets are applied to a strip's ParameterStore bank with
 //   flub::preset::applyToStore (lock-free atomic writes; the audio thread
 //   glides continuous values and crossfades discrete ones).
-// * "Bypass All" is application state (master enable), not preset state:
-//   loading keeps the bank's current bypass value and saving never writes it.
+// * App state that shares the parameter table - "Bypass All" (master
+//   enable), loudness-matched bypass and the latency profile - is not preset
+//   state (flub::preset::isAppState, docs/11 E40): loading keeps the bank's
+//   current values (flub::preset::applyPresetToStore), so a preset never
+//   re-prepares the engine or pads the other strips, and saving never writes
+//   them; a saved user preset names the profile it was made in as its
+//   "suggestedLatencyProfile" (PresetInfo::suggestedLatencyProfile).
 // * "Modified" compares the active bank's sound values with a snapshot taken
 //   when the preset was loaded / saved, so reverting an edit clears it. App
 //   state that shares the store is ignored: Bypass All, the latency profile
@@ -30,6 +35,7 @@
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace flub::app
@@ -40,6 +46,10 @@ struct PresetInfo
     juce::String name, category, author, description;
     juce::StringArray tags;
     juce::String mode;        // "Music" / "Gaming" (the preset's mode parameter)
+    /** The latency profile the preset was made for ("suggestedLatencyProfile",
+        or a profile an older file carried in "params"): metadata for a
+        suggestion, never applied on load (docs/11 E40 / E42a). */
+    std::optional<flub::param::LatencyProfileValue> suggestedLatencyProfile;
     bool isFactory = false;
     juce::String resourceName; // factory: BinaryData resource
     juce::File file;           // user: preset file
@@ -78,7 +88,9 @@ public:
         current preset. */
     bool loadIntoStrip (int strip, const PresetInfo& info, flub::param::ParameterStore& store, juce::String& error);
 
-    /** Loads into an explicit bank (does not change the strip's current preset). */
+    /** Loads into an explicit bank (does not change the strip's current preset).
+        Writes the preset's sound only: Bypass All, loudness-matched bypass and
+        the latency profile keep the bank's values (see the file comment). */
     bool loadIntoBank (const PresetInfo& info, flub::param::ParameterStore& store, flub::param::Bank bank, juce::String& error) const;
 
     /** next / previous preset relative to the strip's current one (wraps). */

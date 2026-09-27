@@ -9,7 +9,8 @@
 // (latency profile Balanced -> Quality, reconfigured by the message thread
 // between two probed blocks; the whole swap runs inside the probed blocks).
 // Every processed block is wrapped in a RealtimeProbe: no allocation, no free
-// and (Linux) no mutex.
+// and (Linux) no mutex. A second case runs the loopback guard (docs/11 E51:
+// ramp to silence, frozen engine, ramp back) under the same probe.
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
@@ -328,4 +329,67 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
     music.read (engine.load()->chain (1).meters());
     CHECK (game.inPeakDb[0] > -20.0f);
     CHECK (music.inPeakDb[0] > -20.0f);
+}
+
+TEST_CASE ("App: loopback guard trip, frozen blocks and release allocate, free and lock nothing on the audio thread (E51)")
+{
+    AudioEngineHost host;
+    host.setDeviceInputRouting (0, 0);
+    FakeAudioDevice device;
+    host.audioDeviceAboutToStart (&device);
+
+    std::array<std::vector<float>, kInputs> inputData;
+    std::array<const float*, kInputs> inputs {};
+    for (size_t c = 0; c < inputData.size(); ++c)
+    {
+        inputData[c].assign (kBlock, 0.0f);
+        for (int i = 0; i < kBlock; ++i)
+            inputData[c][static_cast<size_t> (i)] = 0.25f * static_cast<float> (std::sin (0.05 * static_cast<double> (i)));
+        inputs[c] = inputData[c].data();
+    }
+    std::array<std::vector<float>, 2> outputData { std::vector<float> (kBlock), std::vector<float> (kBlock) };
+    std::array<float*, 2> outputs { outputData[0].data(), outputData[1].data() };
+
+    BlockTotals totals;
+    bool warm = false;
+    // Each batch runs on a fresh "device" thread; the guard is tripped and
+    // released by this (the message) thread between batches.
+    const auto runBlocks = [&] (int numBlocks)
+    {
+        std::thread t ([&]
+        {
+            const juce::AudioIODeviceCallbackContext context {};
+            // The first block on a new thread promotes it (may allocate once).
+            host.audioDeviceIOCallbackWithContext (inputs.data(), kInputs, outputs.data(), 2, kBlock, context);
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                flubapptest::RealtimeProbe probe;
+                host.audioDeviceIOCallbackWithContext (inputs.data(), kInputs, outputs.data(), 2, kBlock, context);
+                if (warm)
+                {
+                    totals.allocations += probe.allocations();
+                    totals.deallocations += probe.deallocations();
+                    totals.locks += probe.locks();
+                    ++totals.blocks;
+                }
+            }
+        });
+        t.join();
+    };
+
+    runBlocks (20);
+    warm = true;
+    host.checkLoopbackPair ("CABLE Output (VB-Audio Virtual Cable)", "CABLE Input (VB-Audio Virtual Cable)");
+    REQUIRE (host.isOutputMutedByGuard());
+    runBlocks (10); // ramp down, then frozen
+    CHECK (outputData[0][static_cast<size_t> (kBlock - 1)] == 0.0f);
+    host.checkLoopbackPair ("CABLE Output (VB-Audio Virtual Cable)", "Headphones (USB Audio)");
+    REQUIRE (! host.isOutputMutedByGuard());
+    runBlocks (10); // ramp up
+    host.audioDeviceStopped();
+
+    CHECK (totals.blocks == 20);
+    CHECK (totals.allocations == 0);
+    CHECK (totals.deallocations == 0);
+    CHECK (totals.locks == 0);
 }

@@ -24,6 +24,24 @@ constexpr int kRescanEveryTicks = 5 * kTimerHz;  // missing preferred output: re
 constexpr const char* kStateFormat = "flubsound-strip-state";
 constexpr int kMaxRecentForegroundApps = 8;
 
+// First-run defaults (docs/11 E36): what a strip without saved state loads.
+constexpr const char* kFirstRunMusicPreset = "factory:music-flubsound-signature"; // Music, System, other stereo strips
+constexpr const char* kFirstRunChatPreset = "factory:music-voice-chat";           // Chat (docs/11 E23)
+constexpr const char* kFirstRunGamePreset = "factory:gaming-competitive-fps";     // Game / surround strips, capped:
+// "First Run - Game" = Competitive FPS with these caps. Measured with the
+// docs/11 E59 slice's definitions (tests/test_known_gaps.cpp): -50 / -60
+// dBFS pink beds +2.70 / +2.62 LU (Competitive FPS +4.92 / +9.69), step/bed
+// contrast change +0.06 .. +0.49 dB on the 20 / 40 / 80 ms burst scenes at
+// -14 / -24 / -40 / -50 LUFS (Competitive FPS -1.67 .. +0.83). Detail at the
+// E36 cap of 30 % leaves the beds at +3.55 / +3.87 LU, so it is 15 %.
+constexpr float kFirstRunGameBoost = 0.20f;     // below 0.25: Boost adds no maximizer drive
+constexpr float kFirstRunGameFootsteps = 0.30f; // Macro 1 (the E16 on-board-processing cap)
+constexpr float kFirstRunGameDetail = 0.15f;    // Macro 4
+
+// ChatMix (docs/11 E56): the strips it balances.
+constexpr const char* kChatMixGameStrip = "Game";
+constexpr const char* kChatMixChatStrip = "Chat";
+
 juce::String stripStateToJson (const ParameterStore& store)
 {
     flub::json::Value root;
@@ -80,13 +98,15 @@ EngineController::EngineController (Options opts)
         lastDeviceError = message;
         notify (Change::Device);
     };
+    host->onDeviceSafetyChanged = [this] { notify (Change::Device); }; // the header's device warning
     presets->onPresetListChanged = [this] { notify (Change::Preset); };
     routing->onChanged = [this] { notify (Change::Routing); };
 
     for (int i = 0; i < getNumStrips(); ++i)
     {
         const auto name = getStripName (i);
-        host->setStripGainDb (i, settings->getStripGainDb (name));
+        userGainDb[static_cast<size_t> (i)] = settings->getStripGainDb (name);
+        applyStripGain (i);
         host->setStripMuted (i, settings->getStripMuted (name));
     }
 
@@ -138,6 +158,9 @@ void EngineController::shutdown()
     stopTimer();
     routing->shutdown();
 
+    // Latched hotkey overrides are per session: the saved state is the user's own.
+    releaseAllLatches (true);
+
     // An auto profile that restores on exit gives its strip back, so the
     // saved state is the user's own and not the game's.
     if (const auto* rule = autoProfiles.getActiveRule(); rule != nullptr && rule->restoreOnExit)
@@ -156,6 +179,7 @@ void EngineController::shutdown()
 
     host->onEngineConfigured = nullptr;
     host->onDeviceError = nullptr;
+    host->onDeviceSafetyChanged = nullptr;
     host->closeDevice();
     host->stopAllCaptures();
 }
@@ -230,8 +254,20 @@ void EngineController::setAuditionBypass (int strip, int enableParamId, bool byp
 void EngineController::setStripGainDb (int strip, float gainDb)
 {
     const int s = resolveStrip (strip);
-    host->setStripGainDb (s, gainDb);
-    settings->setStripGainDb (getStripName (s), host->getStripGainDb (s));
+    auto& gain = userGainDb[static_cast<size_t> (s)];
+    gain = std::clamp (gainDb, -60.0f, 12.0f); // AudioEngineHost's range
+    applyStripGain (s);
+    settings->setStripGainDb (getStripName (s), gain);
+}
+
+float EngineController::getStripGainDb (int strip) const noexcept
+{
+    return strip >= 0 && strip < AudioEngineHost::kMaxStrips ? userGainDb[static_cast<size_t> (strip)] : 0.0f;
+}
+
+void EngineController::applyStripGain (int strip)
+{
+    host->setStripGainDb (strip, userGainDb[static_cast<size_t> (strip)] + chatMixOffsetDb (strip));
 }
 
 void EngineController::setStripMuted (int strip, bool muted)
@@ -243,7 +279,14 @@ void EngineController::setStripMuted (int strip, bool muted)
 
 void EngineController::setStripLayout (const std::vector<flub::StripConfig>& newLayout)
 {
+    // Hotkey state is per strip index: give every strip its own state back first.
+    releaseAllLatches (true);
+    setChatMix (0.0f);
+    stripBypassed.fill (false);
+
     host->setStripLayout (newLayout);
+    for (int i = 0; i < getNumStrips(); ++i)
+        userGainDb[static_cast<size_t> (i)] = host->getStripGainDb (i);
     selectedStrip = resolveStrip (selectedStrip);
     for (int i = 0; i < getNumStrips(); ++i)
         applyMasterEnableToStrip (i);
@@ -258,7 +301,8 @@ void EngineController::setStripLayout (const std::vector<flub::StripConfig>& new
 void EngineController::applyMasterEnableToStrip (int strip)
 {
     auto& store = getParams (strip);
-    const float bypass = enabled ? 0.0f : 1.0f;
+    const bool stripOff = strip >= 0 && strip < AudioEngineHost::kMaxStrips && stripBypassed[static_cast<size_t> (strip)];
+    const float bypass = enabled && ! stripOff ? 0.0f : 1.0f;
     store.set (Bank::A, BypassAll, bypass);
     store.set (Bank::B, BypassAll, bypass);
 }
@@ -270,6 +314,19 @@ void EngineController::setEnabled (bool shouldBeEnabled)
         applyMasterEnableToStrip (i);
     settings->setMasterEnabled (enabled);
     notify (Change::MasterEnable);
+}
+
+void EngineController::setStripBypassed (int strip, bool bypassed)
+{
+    const int s = resolveStrip (strip);
+    stripBypassed[static_cast<size_t> (s)] = bypassed;
+    applyMasterEnableToStrip (s);
+    notify (Change::MasterEnable);
+}
+
+bool EngineController::isStripBypassed (int strip) const noexcept
+{
+    return strip >= 0 && strip < AudioEngineHost::kMaxStrips && stripBypassed[static_cast<size_t> (strip)];
 }
 
 ModeValue EngineController::getMode (int strip)
@@ -451,7 +508,11 @@ void EngineController::restoreStripStates()
             }
         }
 
-        if (! restored)
+        // A strip with nothing saved (a first run, or a strip new to the
+        // layout) starts from a safe, audible default preset (docs/11 E36);
+        // without state restore (headless runs, tests), or when that preset is
+        // missing, from the parameter defaults as before.
+        if (! restored && ! (options.restoreState && loadFirstRunDefault (i)))
         {
             // Fresh strip: surround strips default to Gaming mode.
             store.resetToDefaults (Bank::A);
@@ -463,6 +524,44 @@ void EngineController::restoreStripStates()
             }
         }
     }
+}
+
+bool EngineController::loadFirstRunDefault (int strip)
+{
+    // Music and System (and any other stereo strip): Flubsound Signature.
+    // Chat: Voice Chat, not Signature, whose Boost 0.35 would switch the
+    // maximizer on for voice (docs/11 E23). Game (and any surround strip):
+    // "First Run - Game", Competitive FPS capped (see kFirstRunGame*), since
+    // Competitive FPS as shipped lifts quiet beds by +5 / +10 LU and cuts
+    // step/bed contrast. None of them sets a latency profile: the strips keep
+    // the default (Balanced), and a preset never changes it anyway (E40).
+    const auto name = getStripName (strip);
+    const bool game = getStripChannels (strip) > 2 || name.equalsIgnoreCase ("Game");
+    const char* presetId = game ? kFirstRunGamePreset : name.equalsIgnoreCase ("Chat") ? kFirstRunChatPreset : kFirstRunMusicPreset;
+    const auto* info = presets->findById (presetId);
+    if (info == nullptr)
+        return false;
+
+    auto& store = getParams (strip);
+    store.resetToDefaults (Bank::A);
+    store.resetToDefaults (Bank::B);
+    store.setActiveBank (Bank::A);
+    const auto preset = *info;
+    juce::String error;
+    if (! presets->loadIntoStrip (strip, preset, store, error))
+        return false;
+
+    if (game)
+    {
+        // After the preset's snapshot: the strip shows Competitive FPS as modified.
+        const auto cap = [&store] (int id, float maxValue) { store.set (Bank::A, id, std::min (store.get (Bank::A, id), maxValue)); };
+        cap (BoostIntensity, kFirstRunGameBoost);
+        cap (Macro1, kFirstRunGameFootsteps);
+        cap (Macro4, kFirstRunGameDetail);
+    }
+    PresetManager::copyAToB (store); // A/B start equal
+    settings->setLastPreset (name, preset.id);
+    return true;
 }
 
 void EngineController::persistStripStates (bool force)
@@ -595,8 +694,17 @@ void EngineController::loadDeviceProfiles()
 {
     std::string error;
     const auto userFile = userDataFolder().getChildFile ("device-profiles.json");
-    if (userFile.existsAsFile() && deviceProfiles.loadFile (userFile.getFullPathName().toStdString(), error))
-        return;
+    if (userFile.existsAsFile())
+    {
+        // Read through juce::File (the OS's wide-character API on Windows), so
+        // a user-data folder with a non-ASCII name works whatever the ANSI
+        // code page; the JSON text itself is UTF-8.
+        flub::json::Value root;
+        if (flub::json::parse (userFile.loadFileAsString().toStdString(), root, error) && deviceProfiles.load (root, error))
+            return;
+        DBG ("Flubsound: " << userFile.getFullPathName() << " ignored: " << error);
+        error.clear();
+    }
     if (! deviceProfiles.loadBuiltIn (error))
     {
         DBG ("Flubsound: device profiles unavailable: " << error);
@@ -1024,6 +1132,7 @@ void EngineController::applyAutoProfile (const AutoProfileRule& rule)
     }
 
     // Like loadPreset(), but not a manual change (that would cancel the rule).
+    forgetLatches (s);
     const auto preset = *info;
     juce::String error;
     if (! presets->loadIntoStrip (s, preset, store, error))
@@ -1054,6 +1163,7 @@ void EngineController::endAutoProfile (const AutoProfileSwitcher::Action& action
     // the store (Bypass All, latency profile, loudness-matched bypass) stays
     // as it is now. A preset that was modified before is loaded first so the
     // restored values still show as "modified" against it.
+    forgetLatches (s);
     auto& store = getParams (s);
     store.setActiveBank (point->activeBank);
     const auto* info = presets->findById (point->presetId);
@@ -1073,8 +1183,177 @@ void EngineController::endAutoProfile (const AutoProfileSwitcher::Action& action
     notify (Change::Preset);
 }
 
+// =============================================================================
+// Hotkey target and latched overrides (docs/11 E56)
+// =============================================================================
+int EngineController::getHotkeyStrip() const
+{
+    // An automatic profile says which strip the game in front plays on.
+    if (const auto* rule = autoProfiles.getActiveRule())
+        if (const int s = findStrip (rule->stripName); s >= 0)
+            return s;
+    if (const int s = findStrip (settings->getHotkeyStripName()); s >= 0)
+        return s;
+    return 0;
+}
+
+void EngineController::setHotkeyStripName (const juce::String& stripName)
+{
+    settings->setHotkeyStripName (stripName);
+    notify (Change::Settings);
+}
+
+void EngineController::engageLatch (int strip, Latch& latch, std::vector<Override> overrides)
+{
+    auto& store = getParams (strip);
+    latch.on = true;
+    latch.applied = std::move (overrides);
+    latch.savedA.clear();
+    latch.savedB.clear();
+    for (const auto& o : latch.applied)
+    {
+        latch.savedA.push_back (store.get (Bank::A, o.id));
+        latch.savedB.push_back (store.get (Bank::B, o.id));
+        store.set (Bank::A, o.id, o.value);
+        store.set (Bank::B, o.id, o.value);
+    }
+}
+
+void EngineController::releaseLatch (int strip, Latch& latch, bool restore)
+{
+    if (! latch.on)
+        return;
+    if (restore && strip >= 0 && strip < getNumStrips())
+    {
+        // A value changed since the override (by hand, a macro edit) is the
+        // user's now and stays; the stored value reads back clamped, so
+        // compare with what the store made of the override.
+        auto& store = getParams (strip);
+        for (size_t i = 0; i < latch.applied.size(); ++i)
+        {
+            const auto& o = latch.applied[i];
+            const float overridden = layout()[static_cast<size_t> (o.id)].clamp (o.value);
+            if (store.get (Bank::A, o.id) == overridden)
+                store.set (Bank::A, o.id, latch.savedA[i]);
+            if (store.get (Bank::B, o.id) == overridden)
+                store.set (Bank::B, o.id, latch.savedB[i]);
+        }
+    }
+    latch = {};
+}
+
+void EngineController::releaseAllLatches (bool restore)
+{
+    for (int s = 0; s < AudioEngineHost::kMaxStrips; ++s)
+    {
+        releaseLatch (s, focusLatches[static_cast<size_t> (s)], restore);
+        releaseLatch (s, nightLatches[static_cast<size_t> (s)], restore);
+    }
+}
+
+void EngineController::forgetLatches (int strip)
+{
+    if (strip < 0 || strip >= AudioEngineHost::kMaxStrips)
+        return;
+    releaseLatch (strip, focusLatches[static_cast<size_t> (strip)], false);
+    releaseLatch (strip, nightLatches[static_cast<size_t> (strip)], false);
+}
+
+bool EngineController::setFocus (int strip, bool on)
+{
+    const int s = resolveStrip (strip);
+    auto& latch = focusLatches[static_cast<size_t> (s)];
+    if (on == latch.on)
+        return true;
+    if (on)
+    {
+        if (getMode (s) != ModeValue::Gaming)
+            return false; // Macro 1 is Footsteps in Gaming mode only (Punch in Music)
+        engageLatch (s, latch, { { Macro1, 1.0f } });
+    }
+    else
+    {
+        releaseLatch (s, latch, true);
+    }
+    notify (Change::Parameters);
+    return true;
+}
+
+bool EngineController::isFocused (int strip) const noexcept
+{
+    return strip >= 0 && strip < AudioEngineHost::kMaxStrips && focusLatches[static_cast<size_t> (strip)].on;
+}
+
+void EngineController::setNight (int strip, bool on)
+{
+    const int s = resolveStrip (strip);
+    auto& latch = nightLatches[static_cast<size_t> (s)];
+    if (on == latch.on)
+        return;
+    if (on)
+    {
+        // The dynamics of the Night Mode Gaming factory preset.
+        engageLatch (s, latch,
+                     { { AutoLevelOn, 1.0f },
+                       { AutoLevelTargetLufs, -20.0f },
+                       { CompressorOn, 1.0f },
+                       { CompThresholdDb, -24.0f },
+                       { CompRatio, 3.0f },
+                       { CompMakeupDb, 6.0f },
+                       { CompUpThresholdDb, -38.0f },
+                       { CompUpRatio, 2.5f },
+                       { CompUpMaxGainDb, 6.0f } });
+    }
+    else
+    {
+        releaseLatch (s, latch, true);
+    }
+    notify (Change::Parameters);
+}
+
+bool EngineController::isNight (int strip) const noexcept
+{
+    return strip >= 0 && strip < AudioEngineHost::kMaxStrips && nightLatches[static_cast<size_t> (strip)].on;
+}
+
+float EngineController::chatMixOffsetDb (int strip) const
+{
+    const auto name = getStripName (strip);
+    if (name.equalsIgnoreCase (kChatMixGameStrip))
+        return -chatMix * kChatMixRangeDb;
+    if (name.equalsIgnoreCase (kChatMixChatStrip))
+        return chatMix * kChatMixRangeDb;
+    return 0.0f;
+}
+
+bool EngineController::setChatMix (float balance)
+{
+    const int game = findStrip (kChatMixGameStrip), chat = findStrip (kChatMixChatStrip);
+    if (game < 0 || chat < 0)
+        return false;
+    // Whole 10 % steps, so repeated nudges land on round values and 0 exactly.
+    const float next = std::round (std::clamp (balance, -1.0f, 1.0f) * 10.0f) / 10.0f;
+    if (next == chatMix)
+        return true;
+    chatMix = next;
+    applyStripGain (game);
+    applyStripGain (chat);
+    notify (Change::Parameters);
+    return true;
+}
+
+juce::String EngineController::describeChatMix() const
+{
+    if (chatMix == 0.0f)
+        return "centred";
+    const auto db = [] (float v) { return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB"; };
+    return juce::String (kChatMixGameStrip) + " " + db (-chatMix * kChatMixRangeDb) + ", " + kChatMixChatStrip + " "
+           + db (chatMix * kChatMixRangeDb);
+}
+
 void EngineController::presetChangedByUser (int strip)
 {
+    forgetLatches (strip);
     cancelAutoProfile (getStripName (strip));
 }
 

@@ -1,12 +1,23 @@
 // Flubsound Pro - system-wide hotkeys (flub::platform::GlobalHotkeys).
 //
 // Defaults (AppSettings::getDefaultHotkey, user-configurable):
-//   Ctrl+Alt+F      enable / disable processing
-//   Ctrl+Alt+M      toggle Music / Gaming mode (selected strip)
-//   Ctrl+Alt+Up     Boost Intensity +10 %
-//   Ctrl+Alt+Down   Boost Intensity -10 %
-//   Ctrl+Alt+Right  next preset
-//   Ctrl+Alt+Left   previous preset
+//   Ctrl+Alt+F         enable / disable processing (every strip)
+//   Ctrl+Alt+M         toggle Music / Gaming mode           (hotkey strip)
+//   Ctrl+Alt+Up        Boost Intensity +10 %                (hotkey strip)
+//   Ctrl+Alt+Down      Boost Intensity -10 %                (hotkey strip)
+//   Ctrl+Alt+Right     next preset                          (hotkey strip)
+//   Ctrl+Alt+Left      previous preset                      (hotkey strip)
+//   Ctrl+Alt+S         Focus: latched Footsteps 100 %       (hotkey strip)
+//   Ctrl+Alt+N         Night listening, latched dynamics    (hotkey strip)
+//   Ctrl+Alt+B         bypass that strip only               (hotkey strip)
+//   Ctrl+Alt+PageUp    ChatMix one step towards Chat (Game down, Chat up)
+//   Ctrl+Alt+PageDown  ChatMix one step towards Game
+//
+// The hotkey strip (docs/11 E56) is EngineController::getHotkeyStrip(): the
+// active automatic profile's strip, else the one chosen in Settings >
+// Hotkeys (default Game) - never the strip selected in the window, so a
+// mid-match Boost+ cannot land on Music because Music was clicked last. The
+// feedback text names it ("Game: Boost 60%").
 //
 // Each action is registered under its name (AppSettings::getHotkeyActionName),
 // which desktops that list shortcuts show (the Wayland portal dialog). The
@@ -82,6 +93,9 @@ public:
     /** Runs an action exactly as the hotkey would (the registered chords call
         it; the tray menu drives EngineController directly). */
     void perform (HotkeyAction action);
+
+    /** ChatMix balance change per press (10 presses from centre to one end). */
+    static constexpr float kChatMixStep = 0.2f;
 
     /** Feedback after an action (e.g. for a tray bubble / on-screen display). */
     std::function<void (HotkeyAction action, const juce::String& feedback)> onActionPerformed;

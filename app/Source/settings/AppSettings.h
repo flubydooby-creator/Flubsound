@@ -7,7 +7,8 @@
 //
 // Contents: audio device state (AudioDeviceManager XML), per-strip last preset
 // and full parameter state (both A/B banks), master enable, selected strip,
-// the automatic overload response, device-input routing, hotkey chords, start
+// the automatic overload response, device-input routing, hotkey chords and
+// the hotkey strip, start
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
 // preset on a strip), the UI scale and theme, and the window position.
@@ -35,7 +36,14 @@ enum class HotkeyAction : int
     BoostUp,
     BoostDown,
     NextPreset,
-    PreviousPreset
+    PreviousPreset,
+    // docs/11 E56 Phase A (the values are the ids registered with the OS and
+    // persisted per key name, so new actions only ever append):
+    ToggleFocus,   // latched Footsteps override (Macro 1 at 100 %)
+    ChatMixToChat, // ChatMix balance one step towards Chat
+    ChatMixToGame, // ... and towards Game
+    ToggleNight,   // latched night-listening override (Auto Level + dynamics)
+    ToggleBypass   // bypass of the hotkey strip only (loudness matched when set)
 };
 
 struct AppRoute
@@ -128,6 +136,12 @@ public:
     void setHotkey (HotkeyAction action, const flub::platform::KeyChord& chord);
     bool getHotkeysEnabled() const;
     void setHotkeysEnabled (bool enabled);
+    /** The strip the strip-level hotkeys act on (docs/11 E56): never the GUI
+        selection, so a mid-match Boost+ cannot land on the Music strip because
+        it was the last one clicked. Default "Game". An active automatic
+        profile's strip takes precedence (EngineController::getHotkeyStrip). */
+    juce::String getHotkeyStripName() const;
+    void setHotkeyStripName (const juce::String& stripName);
 
     /** "Ctrl+Alt+F", "Ctrl+Alt+Up", "Shift+Super+F5" <-> KeyChord (VK-style key
         codes: 'A'..'Z', '0'..'9', F1 = 0x70, arrows 0x25..0x28, Space 0x20).

@@ -88,6 +88,7 @@ PresetInfo PresetManager::describe (const flub::preset::Preset& p)
 
     if (info.category.isEmpty())
         info.category = "General";
+    info.suggestedLatencyProfile = p.suggestedLatencyProfile;
 
     const auto& modeInfo = layout()[static_cast<size_t> (Mode)];
     if (static_cast<size_t> (Mode) < p.values.size())
@@ -241,10 +242,11 @@ bool PresetManager::loadIntoBank (const PresetInfo& info, ParameterStore& store,
     if (! readPreset (info, p, error))
         return false;
 
-    // Bypass is master-enable state owned by the app, never by a preset.
-    const float bypass = store.get (bank, BypassAll);
-    flub::preset::applyToStore (p, store, bank);
-    store.set (bank, BypassAll, bypass);
+    // App state (Bypass All = master enable, loudness-matched bypass, the
+    // latency profile) keeps the bank's value: a preset never re-prepares the
+    // engine or, through the MixEngine padding, delays the other strips
+    // (docs/11 E40). A profile the file carries is info.suggestedLatencyProfile.
+    flub::preset::applyPresetToStore (p, store, bank);
     return true;
 }
 
@@ -363,7 +365,16 @@ juce::String PresetManager::saveUserPreset (const juce::String& name, const juce
     p.category = (category.trim().isNotEmpty() ? category.trim() : juce::String ("User")).toStdString();
     p.author = "User";
     p.description = description.toStdString();
-    p.values[static_cast<size_t> (BypassAll)] = layout()[static_cast<size_t> (BypassAll)].defaultValue;
+
+    // App state is not written into "params" (it would never be applied: see
+    // loadIntoBank); the profile the preset was made in becomes its
+    // "suggestedLatencyProfile" label (docs/11 E40, E42a).
+    const auto profile = static_cast<int> (std::lround (store.get (store.getActiveBank(), LatencyProfile)));
+    p.suggestedLatencyProfile = static_cast<LatencyProfileValue> (
+        std::clamp (profile, static_cast<int> (LatencyProfileValue::Quality), static_cast<int> (LatencyProfileValue::LowLatency)));
+    for (int id = 0; id < kNumParams; ++id)
+        if (flub::preset::isAppState (id))
+            p.unsetAppState.push_back (id);
 
     const auto file = userFolder.getChildFile (sanitiseFileName (name) + kUserExtension);
     if (file.existsAsFile() && ! overwriteExisting)

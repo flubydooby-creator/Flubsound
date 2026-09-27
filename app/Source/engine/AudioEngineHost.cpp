@@ -20,6 +20,44 @@ double samplesToMs (int samples, double sampleRate) noexcept
 {
     return sampleRate > 0.0 ? 1000.0 * static_cast<double> (samples) / sampleRate : 0.0;
 }
+
+// ---- Loopback-pair table (docs/11 E51) ------------------------------------------
+// Device names as the OS reports them, e.g. WASAPI friendly names
+// "CABLE Output (VB-Audio Virtual Cable)". Matching is on exact partner
+// pairs, never on a vendor token alone: a VB-Cable or Voicemeeter chain whose
+// output and input are different buses is legitimate (docs/11 §6 T7).
+bool hasVirtualDeviceToken (const juce::String& lower)
+{
+    static const char* const tokens[] = { "cable", "vb-audio", "voicemeeter", "blackhole", "soundflower", "loopback", "flubsound", "virtual" };
+    for (const auto* t : tokens)
+        if (lower.contains (t))
+            return true;
+    return false;
+}
+
+/** "(driver)" at the end of a friendly name, lower case; empty if none. */
+juce::String driverSuffix (const juce::String& lower)
+{
+    if (! lower.endsWithChar (')') || ! lower.containsChar ('('))
+        return {};
+    return lower.fromLastOccurrenceOf ("(", false, false).dropLastCharacters (1).trim();
+}
+
+/** The name with the whole word `word` replaced by a marker; empty if the word is absent. */
+juce::String withWordReplaced (const juce::String& lower, const char* word)
+{
+    auto tokens = juce::StringArray::fromTokens (lower, " ", {});
+    bool found = false;
+    for (auto& t : tokens)
+    {
+        if (t == word)
+        {
+            t = "\x01";
+            found = true;
+        }
+    }
+    return found ? tokens.joinIntoString (" ") : juce::String();
+}
 } // namespace
 
 // =============================================================================
@@ -111,6 +149,16 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
 
     if (error.isEmpty() && deviceManager.getCurrentAudioDevice() == nullptr)
         error = "No audio output device could be opened";
+
+    // A failed open is shown like a device error (a successful start cleared
+    // any earlier one in audioDeviceAboutToStart).
+    if (error.isNotEmpty() && safety.kind != DeviceSafetyState::Kind::LoopbackPair)
+    {
+        DeviceSafetyState next;
+        next.kind = DeviceSafetyState::Kind::DeviceError;
+        next.message = error;
+        setSafetyState (next);
+    }
 
     return error;
 }
@@ -291,13 +339,32 @@ void AudioEngineHost::configureEngine (double sampleRate, int blockSize, bool fa
     }
     hangoverSamples = static_cast<int> (std::lround (0.5 * currentSampleRate));
 
-    // Captures keep their own clock/rate; only the consumer side follows the
-    // device (the audio thread is not reading the FIFOs here).
+    // Captures keep their own clock, and run at the device rate so the
+    // FIFO's nominal ratio is 1 (its Hermite interpolator does not
+    // band-limit: 48 kHz -> 16 kHz hands-free at a ratio of 3 would alias
+    // 8-24 kHz into the band). The audio thread is not reading the FIFOs
+    // here. Same rate: only the consumer side follows the device. New rate:
+    // the capture is parked (not read) and restarted at the device rate on
+    // the message thread outside the device start (a capture start can block
+    // for a while; this may run under JUCE's device callback lock).
     for (auto& slot : captureSlots)
-        if (slot.capture != nullptr)
+    {
+        if (slot.capture == nullptr)
+            continue;
+        if (slot.restartPending || std::abs (slot.fifo.getProducerSampleRate() - currentSampleRate) > 0.5)
+        {
+            slot.live.store (false, std::memory_order_seq_cst);
+            slot.restartPending = true;
+            slot.restartAttempts = 0;
+            captureRestartNeeded = true;
+        }
+        else
+        {
             slot.fifo.setConsumerFormat (currentSampleRate, currentBlockSize);
+        }
+    }
 
-    afterStructureChange();
+    afterStructureChange(); // triggers handleAsyncUpdate, which restarts parked captures
 }
 
 void AudioEngineHost::replaceEngineNow (std::unique_ptr<EngineInstance> next, bool fadeIn)
@@ -375,6 +442,15 @@ void AudioEngineHost::timerCallback()
     collectRetired();
     if (latest->engine.needsReprepare())
         reconfigure();
+
+    // The guard's banner state follows device input map changes (the audio
+    // thread applies them at once).
+    if (loopbackPair.load (std::memory_order_relaxed) || safety.kind == DeviceSafetyState::Kind::LoopbackPair)
+        checkLoopbackPair (guardInputName, guardOutputName);
+
+    // A capture restart at a new device rate that failed is retried at 1 Hz.
+    if (captureRestartNeeded && juce::Time::getMillisecondCounter() - lastCaptureRestartMs >= 1000)
+        restartCapturesAtDeviceRate();
 }
 
 void AudioEngineHost::handleAsyncUpdate()
@@ -388,9 +464,15 @@ void AudioEngineHost::handleAsyncUpdate()
             deviceInputLatency = pendingInputLatency;
             deviceOutputLatency = pendingOutputLatency;
             configureEngine (pendingSampleRate, pendingBlockSize, true);
+            // The callback runs silent until engineReady (release) publishes
+            // the guard's gain set here.
+            applyDeviceStartSafety (deviceManager.getCurrentAudioDevice());
             engineReady.store (true, std::memory_order_release);
         }
     }
+
+    if (captureRestartNeeded)
+        restartCapturesAtDeviceRate();
 
     if (errorPending.exchange (false, std::memory_order_acq_rel))
     {
@@ -399,12 +481,24 @@ void AudioEngineHost::handleAsyncUpdate()
             const juce::ScopedLock sl (errorLock);
             message = lastDeviceError;
         }
+        if (safety.kind != DeviceSafetyState::Kind::LoopbackPair) // the muted output is the more urgent banner
+        {
+            DeviceSafetyState next;
+            next.kind = DeviceSafetyState::Kind::DeviceError;
+            next.message = message;
+            if (auto* device = deviceManager.getCurrentAudioDevice())
+                next.outputDeviceName = device->getName();
+            setSafetyState (next);
+        }
         if (onDeviceError != nullptr)
             onDeviceError (message);
     }
 
     if (notifyPending.exchange (false, std::memory_order_acq_rel) && onEngineConfigured != nullptr)
         onEngineConfigured();
+
+    if (safetyNotifyPending.exchange (false, std::memory_order_acq_rel) && onDeviceSafetyChanged != nullptr)
+        onDeviceSafetyChanged();
 }
 
 // =============================================================================
@@ -533,8 +627,8 @@ int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::S
     int slotIndex = -1;
     for (int i = 0; i < kMaxCaptures; ++i)
     {
-        const auto& s = captureSlots[static_cast<size_t> (i)];
-        if (s.capture == nullptr && ! s.live.load (std::memory_order_acquire))
+        auto& s = captureSlots[static_cast<size_t> (i)];
+        if (s.capture == nullptr && ! s.live.load (std::memory_order_acquire) && ! isSlotQuarantined (s))
         {
             slotIndex = i;
             break;
@@ -554,30 +648,74 @@ int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::S
     }
 
     auto& slot = captureSlots[static_cast<size_t> (slotIndex)];
-    const int channels = sanitiseChannels (layout[static_cast<size_t> (strip)].inputChannels);
+    slot.channels = sanitiseChannels (layout[static_cast<size_t> (strip)].inputChannels);
 
-    // Request the device rate so the FIFO's nominal ratio is 1 and the
-    // resampler only has to absorb clock drift.
-    const double captureRate = currentSampleRate;
-    slot.fifo.prepare (channels, captureRate, currentSampleRate, currentBlockSize);
-
-    DriftCompensatedFifo* fifo = &slot.fifo;
     std::string startError;
-    const bool ok = capture->start (processId, true, captureRate, channels,
-                                    [fifo] (const float* interleaved, int numFrames, int numChannels)
-                                    { fifo->push (interleaved, numFrames, numChannels); },
-                                    startError);
-    if (! ok)
+    if (! startCaptureInSlot (slot, *capture, processId, startError))
     {
-        error = startError.empty() ? juce::String ("Could not start the capture") : juce::String (startError);
+        error = juce::String (startError);
         return -1;
     }
 
     slot.capture = std::move (capture);
     slot.processId = processId;
+    slot.restartPending = false;
+    slot.restartAttempts = 0;
+    slot.restartError = {};
     slot.strip.store (strip, std::memory_order_relaxed);
     slot.live.store (true, std::memory_order_release);
     return slotIndex;
+}
+
+bool AudioEngineHost::startCaptureInSlot (CaptureSlot& slot, flub::platform::ProcessLoopbackCapture& capture, uint32_t processId,
+                                          std::string& error)
+{
+    // Request the device rate so the FIFO's nominal ratio is 1 and the
+    // resampler only has to absorb clock drift. The slot is not live and its
+    // producer is stopped: the FIFO can be (re)allocated.
+    slot.fifo.prepare (slot.channels, currentSampleRate, currentSampleRate, currentBlockSize);
+
+    DriftCompensatedFifo* fifo = &slot.fifo;
+    const bool ok = capture.start (processId, true, currentSampleRate, slot.channels,
+                                   [fifo] (const float* interleaved, int numFrames, int numChannels)
+                                   { fifo->push (interleaved, numFrames, numChannels); },
+                                   error);
+    if (! ok && error.empty())
+        error = "Could not start the capture";
+    return ok;
+}
+
+void AudioEngineHost::restartCapturesAtDeviceRate()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    captureRestartNeeded = false;
+    lastCaptureRestartMs = juce::Time::getMillisecondCounter();
+
+    for (auto& slot : captureSlots)
+    {
+        if (slot.capture == nullptr || ! slot.restartPending || slot.restartAttempts >= kMaxCaptureRestartAttempts)
+            continue;
+
+        // Parked by configureEngine while no callback could read it (live ==
+        // false since), so the FIFO is free once the producer has stopped.
+        slot.capture->stop();
+        std::string error;
+        if (startCaptureInSlot (slot, *slot.capture, slot.processId, error))
+        {
+            slot.restartPending = false;
+            slot.restartAttempts = 0;
+            slot.restartError = {};
+            slot.live.store (true, std::memory_order_release);
+        }
+        else
+        {
+            // The capture stays stopped (getCaptures() reports running ==
+            // false and the reason); retried by the timer.
+            slot.restartError = juce::String (error);
+            if (++slot.restartAttempts < kMaxCaptureRestartAttempts)
+                captureRestartNeeded = true;
+        }
+    }
 }
 
 void AudioEngineHost::stopProcessCapture (int captureId)
@@ -614,19 +752,45 @@ void AudioEngineHost::releaseSlot (CaptureSlot& slot)
         slot.capture->stop();
         slot.capture.reset();
     }
+    slot.restartPending = false;
+    slot.restartAttempts = 0;
+    slot.restartError = {};
 
     // 3. Make sure a block that was already reading the FIFO has finished
     //    before the slot can be re-prepared (re-allocated) by a new capture.
-    waitForAudioThreadToPass();
+    //    If the callback is stalled (driver hang, debugger, suspend), the
+    //    slot is quarantined instead: startProcessCapture skips it until a
+    //    callback has completed, so a stalled pull() never reads a FIFO that
+    //    was re-allocated under it.
+    uint64_t start = 0;
+    if (! waitForAudioThreadToPass (start))
+    {
+        slot.quarantined = true;
+        slot.quarantineCounter = start;
+    }
 
     slot.strip.store (-1, std::memory_order_relaxed);
     slot.processId = 0;
 }
 
-void AudioEngineHost::waitForAudioThreadToPass()
+bool AudioEngineHost::isSlotQuarantined (CaptureSlot& slot) noexcept
 {
+    if (! slot.quarantined)
+        return false;
+    // Still the stalled callback (or no callback since): not reusable. Once
+    // the counter moved, or the device stopped (the backend joined its
+    // thread), the reader that might have seen live == true has returned.
+    if (callbackRunning.load (std::memory_order_acquire) && callbackCounter.load (std::memory_order_seq_cst) == slot.quarantineCounter)
+        return true;
+    slot.quarantined = false;
+    return false;
+}
+
+bool AudioEngineHost::waitForAudioThreadToPass (uint64_t& startCounter)
+{
+    startCounter = callbackCounter.load (std::memory_order_seq_cst);
     if (! callbackRunning.load (std::memory_order_acquire))
-        return;
+        return true;
 
     // callbackCounter increments at the END of every callback, so once it has
     // changed, any callback that could have seen the old state has returned.
@@ -634,11 +798,26 @@ void AudioEngineHost::waitForAudioThreadToPass()
     // handshake (Dekker style): all four operations are seq_cst, otherwise the
     // StoreLoad reordering allowed by acquire/release could let this thread
     // read a counter value older than the callback that still sees live == true.
-    const auto start = callbackCounter.load (std::memory_order_seq_cst);
-    const auto deadline = juce::Time::getMillisecondCounter() + 250;
-    while (callbackRunning.load (std::memory_order_acquire) && callbackCounter.load (std::memory_order_seq_cst) == start
-           && juce::Time::getMillisecondCounter() < deadline)
+    //
+    // The wait is bounded so a wedged device never hangs the message thread;
+    // the caller quarantines what it could not hand off. A second release
+    // while the same callback is still stalled does not wait again.
+    if (lastWaitTimedOut && startCounter == lastTimedOutCounter)
+        return false;
+
+    const auto begin = juce::Time::getMillisecondCounter();
+    while (callbackRunning.load (std::memory_order_acquire) && callbackCounter.load (std::memory_order_seq_cst) == startCounter)
+    {
+        if (juce::Time::getMillisecondCounter() - begin >= kAudioThreadPassTimeoutMs)
+        {
+            lastWaitTimedOut = true;
+            lastTimedOutCounter = startCounter;
+            return false;
+        }
         juce::Thread::sleep (1);
+    }
+    lastWaitTimedOut = false;
+    return true;
 }
 
 std::vector<AudioEngineHost::CaptureInfo> AudioEngineHost::getCaptures() const
@@ -653,7 +832,9 @@ std::vector<AudioEngineHost::CaptureInfo> AudioEngineHost::getCaptures() const
         info.id = i;
         info.strip = slot.strip.load (std::memory_order_relaxed);
         info.processId = slot.processId;
-        info.running = slot.capture->isRunning();
+        info.running = slot.capture->isRunning() && ! slot.restartPending;
+        info.sampleRate = slot.fifo.getProducerSampleRate();
+        info.restartError = slot.restartError;
         info.stats = slot.fifo.getStats();
         result.push_back (info);
     }
@@ -931,18 +1112,55 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
         promotedThread = thisThread;
     }
 
-    if (engineReady.load (std::memory_order_acquire))
+    const bool ready = engineReady.load (std::memory_order_acquire);
+    // The guard reads the device input map here too, so a map that starts
+    // feeding a strip while the pair loops is muted from that block on.
+    const bool guarded = loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
+    if (ready && ! (guarded && guardGain <= 0.0f))
     {
         processBlock (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, nullptr);
+        if (guarded || guardGain < 1.0f)
+            applyGuardToOutput (outputChannelData, numOutputChannels, numSamples, guarded);
     }
     else
     {
+        // Not configured yet, or the loopback guard holds the output at
+        // silence. The engine is frozen then: its protection loops see
+        // nothing of the loop and keep their state.
         for (int c = 0; c < numOutputChannels; ++c)
             if (outputChannelData[c] != nullptr)
                 std::memset (outputChannelData[c], 0, sizeof (float) * static_cast<size_t> (numSamples));
+        if (ready)
+            for (auto& a : stripActive)
+                a.store (false, std::memory_order_relaxed);
     }
 
     callbackCounter.fetch_add (1, std::memory_order_seq_cst);
+}
+
+bool AudioEngineHost::deviceInputFeedsStrip() const noexcept
+{
+    for (const auto& first : deviceInputFirst)
+        if (first.load (std::memory_order_relaxed) >= 0)
+            return true;
+    return false;
+}
+
+void AudioEngineHost::applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples, bool muted) noexcept
+{
+    // Linear ramp over kSwapFadeMs towards the guard's target (0 while the
+    // output is the input's loopback partner, 1 otherwise).
+    const float target = muted ? 0.0f : 1.0f;
+    const float step = 1.0f / static_cast<float> (std::max<size_t> (1, active->fadeIn.size()));
+    float g = guardGain;
+    for (int k = 0; k < numSamples; ++k)
+    {
+        g = target > g ? std::min (target, g + step) : std::max (target, g - step);
+        for (int c = 0; c < numOutputs; ++c)
+            if (outputs[c] != nullptr)
+                outputs[c][k] *= g;
+    }
+    guardGain = g;
 }
 
 void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -959,6 +1177,7 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
         deviceInputLatency = device->getInputLatencyInSamples();
         deviceOutputLatency = device->getOutputLatencyInSamples();
         configureEngine (sampleRate, blockSize, true);
+        applyDeviceStartSafety (device);
         engineReady.store (true, std::memory_order_release);
     }
     else
@@ -1000,27 +1219,198 @@ juce::String AudioEngineHost::getLastDeviceError() const
 }
 
 // =============================================================================
+// Device safety
+// =============================================================================
+bool AudioEngineHost::isLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName)
+{
+    const auto in = inputDeviceName.trim().toLowerCase();
+    const auto out = outputDeviceName.trim().toLowerCase();
+    if (in.isEmpty() || out.isEmpty())
+        return false;
+
+    // A sink and its monitor source (PulseAudio / PipeWire): the monitor
+    // carries exactly what is played to the sink, whatever the sink is.
+    if (in == out + ".monitor" || in == "monitor of " + out)
+        return true;
+
+    // "Stereo Mix" / "What U Hear" / "Wave Out Mix" record the output of the
+    // same codec: "Stereo Mix (Realtek(R) Audio)" <-> "Speakers (Realtek(R) Audio)".
+    const auto inDriver = driverSuffix (in);
+    if ((in.startsWith ("stereo mix") || in.startsWith ("what u hear") || in.startsWith ("wave out mix"))
+        && inDriver.isNotEmpty() && inDriver == driverSuffix (out))
+        return true;
+
+    // Everything below is a virtual device; physical devices whose input and
+    // output share a name (USB headsets: microphone + earcups) are not loops.
+    if (! hasVirtualDeviceToken (in) && ! hasVirtualDeviceToken (out))
+        return false;
+
+    // One virtual device as both ends: BlackHole 2ch, Soundflower (2ch),
+    // Loopback Audio, VB-Cable on macOS, a Flubsound endpoint.
+    if (in == out)
+        return true;
+
+    // VB-Audio cables: "<X> Output (<driver>)" records what is played to
+    // "<X> Input (<driver>)" (CABLE, CABLE-A..D, Hi-Fi Cable, and the old
+    // "VoiceMeeter Output" / "VoiceMeeter Input" names).
+    if (const auto inKey = withWordReplaced (in, "output"); inKey.isNotEmpty() && inKey == withWordReplaced (out, "input"))
+        return true;
+
+    // Voicemeeter: each VAIO driver's recording endpoint is its bus (Out B1
+    // on "VB-Audio Voicemeeter VAIO", Out B2 on "... AUX VAIO", Out B3 on
+    // "... VAIO3"), which carries that driver's virtual input by default.
+    // Different drivers are different buses and are left alone.
+    if (in.contains ("voicemeeter") && out.contains ("voicemeeter") && inDriver.isNotEmpty() && inDriver == driverSuffix (out))
+        return true;
+
+    return false;
+}
+
+void AudioEngineHost::checkLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    guardInputName = inputDeviceName;
+    guardOutputName = outputDeviceName;
+
+    const bool allowed = std::any_of (allowedLoopbackPairs.begin(), allowedLoopbackPairs.end(),
+                                      [&] (const auto& p)
+                                      { return p.first.equalsIgnoreCase (inputDeviceName) && p.second.equalsIgnoreCase (outputDeviceName); });
+    loopbackPair.store (! allowed && isLoopbackPair (inputDeviceName, outputDeviceName), std::memory_order_release);
+
+    // Only a pair whose input feeds a strip is a loop (the timer re-checks
+    // when the device input map changes; the audio thread reads it itself).
+    if (isOutputMutedByGuard())
+    {
+        DeviceSafetyState next;
+        next.kind = DeviceSafetyState::Kind::LoopbackPair;
+        next.inputDeviceName = inputDeviceName;
+        next.outputDeviceName = outputDeviceName;
+        next.outputMuted = true;
+        next.message = "Output muted: \"" + outputDeviceName + "\" feeds the input \"" + inputDeviceName
+                     + "\" back into Flubsound (a feedback loop). This happens when the output falls back to the virtual cable, e.g. "
+                       "after a wireless headset disconnects. Choose another output device.";
+        setSafetyState (next);
+    }
+    else if (safety.kind == DeviceSafetyState::Kind::LoopbackPair)
+    {
+        setSafetyState ({});
+    }
+}
+
+void AudioEngineHost::allowLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    allowedLoopbackPairs.emplace_back (inputDeviceName, outputDeviceName);
+    checkLoopbackPair (guardInputName, guardOutputName);
+}
+
+void AudioEngineHost::clearAllowedLoopbackPairs()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    allowedLoopbackPairs.clear();
+    checkLoopbackPair (guardInputName, guardOutputName);
+}
+
+void AudioEngineHost::clearDeviceError()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (safety.kind == DeviceSafetyState::Kind::DeviceError)
+        setSafetyState ({});
+}
+
+void AudioEngineHost::applyDeviceStartSafety (juce::AudioIODevice* device)
+{
+    // Message thread, before the engine is marked ready: the callback is not
+    // running (or runs silent), so the guard gain can be set directly and
+    // the guard applies from the first sample.
+
+    // A device started: an earlier error or failed open no longer applies.
+    if (safety.kind == DeviceSafetyState::Kind::DeviceError)
+        setSafetyState ({});
+
+    // The device manager's names (updated before the callbacks are told);
+    // a device driven without it (tests, a duplex device) names both ends.
+    const auto setup = deviceManager.getAudioDeviceSetup();
+    auto output = setup.outputDeviceName, input = setup.inputDeviceName;
+    if (device != nullptr)
+    {
+        if (output.isEmpty())
+            output = device->getName();
+        if (input.isEmpty() && ! device->getActiveInputChannels().isZero())
+            input = device->getName();
+    }
+    checkLoopbackPair (input, output);
+    guardGain = isOutputMutedByGuard() ? 0.0f : 1.0f;
+}
+
+void AudioEngineHost::setSafetyState (DeviceSafetyState next)
+{
+    if (next.kind == safety.kind && next.message == safety.message && next.inputDeviceName == safety.inputDeviceName
+        && next.outputDeviceName == safety.outputDeviceName && next.outputMuted == safety.outputMuted)
+        return;
+    next.generation = safety.generation + 1;
+    safety = std::move (next);
+    // Listeners are told asynchronously: this may run inside
+    // audioDeviceAboutToStart (under the device manager's callback lock).
+    safetyNotifyPending.store (true, std::memory_order_release);
+    triggerAsyncUpdate();
+}
+
+// =============================================================================
 // Telemetry
 // =============================================================================
 LatencyInfo AudioEngineHost::getLatencyInfo() const
 {
     LatencyInfo info;
+    // Only a running device (with the guard not holding it silent) has a
+    // latency; anything else would be a stale or made-up number (docs/11 E51).
+    info.valid = callbackRunning.load (std::memory_order_acquire) && engineReady.load (std::memory_order_acquire)
+              && ! isOutputMutedByGuard();
+    info.estimated = true; // driver-reported device latencies; nothing is measured end to end (E42d)
     info.sampleRate = currentSampleRate;
     info.blockSize = currentBlockSize;
     const bool deviceOpen = deviceManager.getCurrentAudioDevice() != nullptr;
     info.deviceInputSamples = deviceOpen ? deviceInputLatency : 0;
     info.deviceOutputSamples = deviceOpen ? deviceOutputLatency : 0;
-    info.engineSamples = latest->engine.getLatencySamples();
+    auto& engine = latest->engine;
+    info.engineSamples = engine.getLatencySamples();
     info.deviceInputMs = samplesToMs (info.deviceInputSamples, currentSampleRate);
     info.deviceOutputMs = samplesToMs (info.deviceOutputSamples, currentSampleRate);
     info.engineMs = samplesToMs (info.engineSamples, currentSampleRate);
+    info.graphQuantumMs = graphQuantumMs;
+
+    // Per strip (E42a): the strip's own chain + the master limiter, and the
+    // padding that aligns it with the slowest strip (MixEngine pads every
+    // strip to the largest chain latency).
+    info.numStrips = engine.getNumStrips();
+    int slowestChain = 0;
+    for (int s = 0; s < info.numStrips; ++s)
+        slowestChain = std::max (slowestChain, engine.chain (s).getLatencySamples());
+    const int masterSamples = std::max (0, info.engineSamples - slowestChain);
+    for (int s = 0; s < info.numStrips; ++s)
+    {
+        auto& strip = info.strips[static_cast<size_t> (s)];
+        strip.ownSamples = engine.chain (s).getLatencySamples() + masterSamples;
+        strip.outputSamples = info.engineSamples;
+        strip.paddingSamples = std::max (0, strip.outputSamples - strip.ownSamples);
+        strip.ownMs = samplesToMs (strip.ownSamples, currentSampleRate);
+        strip.outputMs = samplesToMs (strip.outputSamples, currentSampleRate);
+        strip.paddingMs = samplesToMs (strip.paddingSamples, currentSampleRate);
+    }
 
     for (const auto& slot : captureSlots)
         if (slot.capture != nullptr)
             info.captureBufferMs = std::max (info.captureBufferMs, static_cast<double> (slot.fifo.getStats().targetMs));
 
-    info.totalMs = info.deviceInputMs + info.deviceOutputMs + info.engineMs;
+    info.totalMs = info.deviceInputMs + info.deviceOutputMs + info.engineMs + info.graphQuantumMs;
     return info;
+}
+
+juce::String AudioEngineHost::formatTotalLatency (const LatencyInfo& info)
+{
+    if (! info.valid)
+        return "--";
+    return juce::String (info.totalMs + info.captureBufferMs, 1) + (info.estimated ? " ms (est.)" : " ms");
 }
 
 EngineStatus AudioEngineHost::getStatus() const

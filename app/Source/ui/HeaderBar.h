@@ -16,7 +16,12 @@
 //   "Loudness-matched bypass" parameter is on (right-click to change).
 // * Latency (device + engine) and CPU readout (with the device's xrun count
 //   when it reports one, and the CPU-overload watchdog's warning), settings
-//   dialog.
+//   dialog. The latency total is marked "~" while it is an estimate (driver
+//   figures, LatencyInfo::estimated) and reads "--" when no audible path
+//   runs; its tooltip breaks it down per strip (own chain vs sync padding).
+//   A device problem (docs/11 E51: a loopback pair holding the output at
+//   silence, or a device error) turns the bottom line into a DEVICE warning
+//   with the message in the tooltip; a click opens Settings.
 // Message thread only; refresh() pulls everything from the controller.
 #pragma once
 
@@ -61,7 +66,19 @@ public:
         bool warn = false;     // amber: load above 70 %
         bool overload = false; // hot: sustained overload (OverloadWatchdog)
     };
-    static CpuReadout formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload);
+    /** A device safety state other than None (DeviceSafetyState) takes the
+        line over: "DEVICE" + "muted" (loopback guard) or "error", hot. */
+    static CpuReadout formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload,
+                                        const DeviceSafetyState& safety = {});
+
+    /** The top line: "--" (!valid), "~12.3 ms" (estimated) or "12.3 ms". */
+    static juce::String formatLatencyReadout (const LatencyInfo& info);
+    /** The latency part of the tooltip: the total's parts, whether it is an
+        estimate, and one line per strip with its own latency and the padding
+        another strip's profile adds (stripNames[i] names strip i). */
+    static juce::String describeLatency (const LatencyInfo& info, const juce::StringArray& stripNames);
+    /** The device warning's tooltip line; empty for Kind::None. */
+    static juce::String describeDeviceSafety (const DeviceSafetyState& safety);
 
     /** The CPU part of the readout's tooltip: load, device xruns, and the
         overload warning with the recommended action or the session count;
@@ -74,6 +91,7 @@ public:
     void paintOverChildren (juce::Graphics& g) override;
     void resized() override;
     void mouseMove (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
 
 private:
     class ModeSegment;

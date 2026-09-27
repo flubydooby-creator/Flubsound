@@ -48,11 +48,20 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     }
     strips = std::move (next);
 
+    // Padding within sync groups only (docs/11 E40 part 3 / E42a): a strip
+    // is delayed to the slowest chain of its group; one in no group is not.
     maxStripLatency = 0;
-    for (const auto& s : strips)
-        maxStripLatency = std::max (maxStripLatency, s->chain->getLatencySamples());
     for (auto& s : strips)
-        s->pad.prepare (2, maxStripLatency - s->chain->getLatencySamples());
+    {
+        int groupLatency = s->chain->getLatencySamples();
+        if (s->config.syncGroup != StripConfig::kNoSyncGroup)
+            for (const auto& other : strips)
+                if (other->config.syncGroup == s->config.syncGroup)
+                    groupLatency = std::max (groupLatency, other->chain->getLatencySamples());
+        s->padSamples = groupLatency - s->chain->getLatencySamples();
+        s->pad.prepare (2, s->padSamples);
+        maxStripLatency = std::max (maxStripLatency, groupLatency);
+    }
 
     // Master safety limiter: only engages when the summed strips overshoot.
     // Its look-ahead follows the strips so that Low Latency stays low end to
@@ -135,6 +144,19 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
 int MixEngine::getLatencySamples() const noexcept
 {
     return maxStripLatency + master.latencySamples();
+}
+
+int MixEngine::getStripLatencySamples (int strip) const noexcept
+{
+    if (strip < 0 || strip >= getNumStrips())
+        return 0;
+    const auto& s = *strips[static_cast<size_t> (strip)];
+    return s.chain->getLatencySamples() + s.padSamples + master.latencySamples();
+}
+
+int MixEngine::getStripPaddingSamples (int strip) const noexcept
+{
+    return strip >= 0 && strip < getNumStrips() ? strips[static_cast<size_t> (strip)]->padSamples : 0;
 }
 
 bool MixEngine::needsReprepare() const noexcept

@@ -293,6 +293,70 @@ TEST_CASE ("Chain: latency per profile and constant under module bypass")
     CHECK (chain.needsReprepare());
 }
 
+TEST_CASE ("Chain: Quality runs as Balanced below 32 kHz, without a re-prepare (docs/11 E42a)")
+{
+    // Before: Quality at 8 kHz was 1152 samples (144 ms; the 1024-sample gate
+    // frame alone was 128 ms), 1192 (74.5 ms) at 16 kHz.
+    for (const double sr : { 8000.0, 16000.0, 22050.0 })
+    {
+        ParameterStore store;
+        ProcessingChain chain (store);
+        store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::Balanced));
+        chain.prepare ({ sr, 512, 2 });
+        const int balanced = chain.getLatencySamples();
+        store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::Quality));
+        CHECK (chain.needsReprepare());
+        chain.prepare ({ sr, 512, 2 });
+        CHECK (chain.getLatencySamples() == balanced);
+        CHECK (chain.getLatencyProfile() == LatencyProfileValue::Balanced);
+        CHECK (chain.getRequestedLatencyProfile() == LatencyProfileValue::Quality);
+        CHECK (! chain.needsReprepare()); // the clamp is not a pending change
+    }
+    // From 32 kHz up Quality is Quality.
+    ParameterStore store;
+    ProcessingChain chain (store);
+    store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::Balanced));
+    chain.prepare ({ 32000.0, 512, 2 });
+    const int balanced = chain.getLatencySamples();
+    store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::Quality));
+    chain.prepare ({ 32000.0, 512, 2 });
+    CHECK (chain.getLatencyProfile() == LatencyProfileValue::Quality);
+    CHECK (chain.getRequestedLatencyProfile() == LatencyProfileValue::Quality);
+    CHECK (chain.getLatencySamples() > balanced);
+}
+
+TEST_CASE ("Chain: each profile's latency in ms is about the same from 44.1 to 192 kHz (docs/11 E42a)")
+{
+    // Look-aheads and the gate's STFT frame are defined in ms; only the
+    // oversampler FIRs and the 20-sample true-peak detector are in samples,
+    // and those get shorter in ms as the rate rises. Before, the gate frame
+    // was 1024 samples at every rate: Quality was 30.2 ms at 44.1 kHz but
+    // 16.6 ms at 96 kHz and 10.8 ms at 192 kHz.
+    const auto latencyMs = [] (LatencyProfileValue p, double sr) {
+        ParameterStore store;
+        store.set (LatencyProfile, static_cast<float> (p));
+        ProcessingChain chain (store);
+        chain.prepare ({ sr, 512, 2 });
+        return 1000.0 * chain.getLatencySamples() / sr;
+    };
+    CHECK (latencyMs (LatencyProfileValue::Quality, 48000.0) == 1000.0 * 1352 / 48000.0); // 48 kHz is unchanged
+    for (const double sr : { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+    {
+        const double q = latencyMs (LatencyProfileValue::Quality, sr);
+        const double b = latencyMs (LatencyProfileValue::Balanced, sr);
+        const double l = latencyMs (LatencyProfileValue::LowLatency, sr);
+        std::cerr << "    " << sr << " Hz: Quality " << q << " ms, Balanced " << b << " ms, Low Latency " << l << " ms\n";
+        CHECK (q >= 26.0);
+        CHECK (q <= 30.5);
+        // Look-aheads: Balanced 2.5 ms, Low Latency 1 ms, plus FIRs that are at
+        // most their 48 kHz length in ms.
+        CHECK (b >= 2.5);
+        CHECK (b <= 4.2);
+        CHECK (l >= 1.0);
+        CHECK (l <= 2.2);
+    }
+}
+
 TEST_CASE ("Chain: everything bypassed = input delayed by the chain latency (bit-transparent path)")
 {
     ParameterStore store;
@@ -795,14 +859,20 @@ TEST_CASE ("Chain: matched bypass plays the input as it is and turns the process
 
 TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-limited")
 {
+    // One sync group: the two strips are padded to the slower one.
+    const std::vector<StripConfig> layout { { "Game", 8, 0.0f, false, 0 }, { "Music", 2, 0.0f, false, 0 } };
     MixEngine mix;
-    mix.configure ({ { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false } }, kFs, 256);
+    mix.configure (layout, kFs, 256);
     mix.params (0).set (Mode, 1.0f);
     mix.params (1).set (LatencyProfile, 0.0f); // Quality profile on music - needs reprepare
     CHECK (mix.needsReprepare());
-    mix.configure ({ { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false } }, kFs, 256);
+    mix.configure (layout, kFs, 256);
     CHECK (! mix.needsReprepare());
     CHECK (mix.params (1).get (LatencyProfile) == 0.0f); // store preserved across configure
+    CHECK (mix.getStripPaddingSamples (1) == 0);
+    CHECK (mix.getStripPaddingSamples (0) == mix.chain (1).getLatencySamples() - mix.chain (0).getLatencySamples());
+    CHECK (mix.getStripLatencySamples (0) == mix.getLatencySamples());
+    CHECK (mix.getStripLatencySamples (1) == mix.getLatencySamples());
 
     Planar game (8, 256), music (2, 256), out (2, 256);
     const AudioBlock gb = game.block(), mb = music.block();
@@ -824,7 +894,8 @@ TEST_CASE ("MixEngine: strips are summed, padded to equal latency and master-lim
 
 TEST_CASE ("MixEngine: master look-ahead follows the strips' latency profiles (0.5 ms only when all are Low Latency)")
 {
-    const std::vector<StripConfig> layout { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } };
+    // One sync group, so every strip is padded to the slowest one.
+    const std::vector<StripConfig> layout { { "Game", 8, 0.0f, false, 0 }, { "Music", 2, 0.0f, false, 0 }, { "Chat", 2, 0.0f, false, 0 } };
     const auto setAll = [] (MixEngine& m, LatencyProfileValue p) {
         for (int s = 0; s < m.getNumStrips(); ++s)
             m.params (s).set (LatencyProfile, static_cast<float> (p));
@@ -1023,6 +1094,68 @@ TEST_CASE ("Chain: runs at every sample rate a headset may use (8 kHz hands-free
                 CHECK (rms (c.data() + n / 2, n / 2) > 1e-3);
             }
         }
+}
+
+TEST_CASE ("MixEngine: padding only within sync groups, per-strip latency reported (docs/11 E40 part 3 / E42a)")
+{
+    // Reported per-strip latency = where an impulse on that strip comes out
+    // (every module bypassed: chains, pads and the master are pure delays).
+    const auto impulsePosition = [] (MixEngine& m, int strip) {
+        const int n = 2048;
+        Planar a (8, n), b (2, n), c (2, n), out (2, n);
+        Planar* ins[] = { &a, &b, &c };
+        ins[strip]->ch[0][0] = ins[strip]->ch[1][0] = 0.25f;
+        const AudioBlock ab = a.block(), bb = b.block(), cb = c.block();
+        const AudioBlock* inputs[] = { &ab, &bb, &cb };
+        m.process (inputs, out.block());
+        const auto it = std::max_element (out.ch[0].begin(), out.ch[0].end(), [] (float x, float y) { return std::abs (x) < std::abs (y); });
+        return static_cast<int> (it - out.ch[0].begin());
+    };
+    const auto build = [] (MixEngine& m, const std::vector<StripConfig>& layout) {
+        m.configure (layout, kFs, 2048);
+        for (int s = 0; s < m.getNumStrips(); ++s)
+            bypassAllModules (m.params (s));
+        m.params (0).set (LatencyProfile, static_cast<float> (LatencyProfileValue::LowLatency)); // Game
+        m.params (1).set (LatencyProfile, static_cast<float> (LatencyProfileValue::Quality));    // Music
+        m.params (2).set (LatencyProfile, static_cast<float> (LatencyProfileValue::Balanced));   // Chat
+        m.configure (layout, kFs, 2048);
+    };
+
+    // Default: every strip in a group of its own. A Quality preset on Music
+    // no longer delays the Low Latency Game strip: 100 + master 1 ms (48 + 20)
+    // instead of 1352 + 68 (before this change every strip was padded).
+    {
+        MixEngine mix;
+        build (mix, { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } });
+        CHECK (mix.getMasterLatencySamples() == 48 + 20);
+        CHECK (mix.getStripPaddingSamples (0) == 0);
+        CHECK (mix.getStripPaddingSamples (1) == 0);
+        CHECK (mix.getStripPaddingSamples (2) == 0);
+        CHECK (mix.getStripLatencySamples (0) == 100 + 68);
+        CHECK (mix.getStripLatencySamples (1) == 1352 + 68);
+        CHECK (mix.getStripLatencySamples (2) == 192 + 68);
+        CHECK (mix.getLatencySamples() == 1352 + 68); // the slowest strip
+        for (int s = 0; s < 3; ++s)
+            CHECK (impulsePosition (mix, s) == mix.getStripLatencySamples (s));
+    }
+    // Game and Chat share a group (e.g. a game and its voice channel): Game is
+    // padded to Chat's 192, Music stays alone.
+    {
+        MixEngine mix;
+        build (mix, { { "Game", 8, 0.0f, false, 1 }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false, 1 } });
+        CHECK (mix.getStripPaddingSamples (0) == 92);
+        CHECK (mix.getStripPaddingSamples (1) == 0);
+        CHECK (mix.getStripPaddingSamples (2) == 0);
+        CHECK (mix.getStripLatencySamples (0) == 192 + 68);
+        CHECK (mix.getStripLatencySamples (2) == 192 + 68);
+        CHECK (mix.getStripLatencySamples (1) == 1352 + 68);
+        for (int s = 0; s < 3; ++s)
+            CHECK (impulsePosition (mix, s) == mix.getStripLatencySamples (s));
+    }
+    // Out-of-range strips report nothing.
+    MixEngine empty;
+    CHECK (empty.getStripLatencySamples (0) == 0);
+    CHECK (empty.getStripPaddingSamples (-1) == 0);
 }
 
 TEST_CASE ("MixEngine: configureFrom builds a second engine that shares the running engine's parameter stores")

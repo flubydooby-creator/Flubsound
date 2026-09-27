@@ -28,19 +28,27 @@
 // A/B listen   setAuditionBypass(strip, enableId, true / false): momentary
 //              "hear the strip without this module" (not a parameter).
 // Master       isEnabled()/setEnabled() = BypassAll on every strip (both
-//              banks). getMasterGainReductionDb() = master safety limiter.
+//              banks); setStripBypassed() bypasses one strip on top of it.
+//              getMasterGainReductionDb() = master safety limiter.
+// Hotkeys      getHotkeyStrip() (the strip hotkeys act on, never the GUI
+//              selection), setFocus() / setNight() latched overrides,
+//              setChatMix() Game <-> Chat balance (docs/11 E56).
 // Mode/Boost   getMode/setMode/toggleMode, getBoost/setBoost/nudgeBoost
 //              (strip = -1 means the selected strip). Macro labels:
 //              getMacroName(mode, 0..4).
 // Presets      getPresetManager() for the list; loadPreset(id, strip) /
 //              nextPreset() / previousPreset() / saveUserPreset() here so
 //              settings and listeners are updated. A/B: getActiveBank,
-//              setActiveBank, toggleAB, copyActiveToOtherBank.
+//              setActiveBank, toggleAB, copyActiveToOtherBank. A strip with
+//              no saved state starts from a default preset (docs/11 E36):
+//              Signature (Music, System), Voice Chat (Chat), a capped
+//              Competitive FPS (Game).
 // Device       getDeviceManager() (e.g. for juce::AudioDeviceSelectorComponent;
 //              the selection is persisted automatically), getLatencyInfo(),
 //              getStatus() (CPU, xruns), getDeviceInputStrip(),
 //              getOverloadState() (CPU-overload watchdog), getCaptureStreams()
-//              (per-app capture FIFO statistics).
+//              (per-app capture FIFO statistics), getDeviceSafetyState()
+//              (loopback pair / device error warning).
 // Profile      getLatencyProfile() / setLatencyProfile() (every strip, both
 //              banks); the opt-in automatic overload response:
 //              setReduceLoadOnOverload(), hasReducedLoad(),
@@ -145,8 +153,10 @@ public:
     void setAuditionBypass (int strip, int enableParamId, bool bypassed);
 
     bool isStripActive (int strip) const noexcept { return host->isStripActive (strip); }
+    /** The user's strip gain (persisted). The engine plays it plus the ChatMix
+        offset of Game and Chat (see setChatMix). */
     void setStripGainDb (int strip, float gainDb);
-    float getStripGainDb (int strip) const noexcept { return host->getStripGainDb (strip); }
+    float getStripGainDb (int strip) const noexcept;
     void setStripMuted (int strip, bool muted);
     bool isStripMuted (int strip) const noexcept { return host->isStripMuted (strip); }
     float getMasterGainReductionDb() noexcept { return host->getMixEngine().getMasterGainReductionDb(); }
@@ -155,6 +165,12 @@ public:
     bool isEnabled() const noexcept { return enabled; }
     void setEnabled (bool shouldBeEnabled);
     void toggleEnabled() { setEnabled (! enabled); }
+    /** Bypass of one strip on top of the master enable (the "Bypass hotkey
+        strip" hotkey, docs/11 E56): the strip plays its input, loudness
+        matched while its "Loudness-matched bypass" is on. Per session (not
+        persisted); a layout change clears it. Broadcasts Change::MasterEnable. */
+    void setStripBypassed (int strip, bool bypassed);
+    bool isStripBypassed (int strip) const noexcept;
 
     flub::param::ModeValue getMode (int strip = -1);
     void setMode (flub::param::ModeValue mode, int strip = -1);
@@ -191,6 +207,10 @@ public:
 
     /** Re-opens the device from the saved state (e.g. after a failure). */
     juce::String reopenDevice();
+    /** What the header shows as a device warning (docs/11 E51): a loopback
+        pair holding the output at silence, or a device error.
+        Change::Device is broadcast whenever it changes. */
+    DeviceSafetyState getDeviceSafetyState() const { return host->getDeviceSafetyState(); }
 
     /** CPU-overload watchdog (OverloadWatchdog): sustained load >= 90 % or a
         burst of xruns / overrunning callbacks. The header shows it and the
@@ -265,6 +285,42 @@ public:
         are kept; UI must re-fetch everything (Change::Engine). */
     void setStripLayout (const std::vector<flub::StripConfig>& newLayout);
 
+    // ---- Hotkey target and latched overrides (docs/11 E56) ----------------------------------
+    /** The strip the strip-level hotkeys act on: the active automatic
+        profile's strip, else the Settings > Hotkeys strip
+        (AppSettings::getHotkeyStripName, default Game), else strip 0. Never
+        the GUI selection. */
+    int getHotkeyStrip() const;
+    /** Persists the Settings > Hotkeys strip. Broadcasts Change::Settings. */
+    void setHotkeyStripName (const juce::String& stripName);
+
+    /** Focus: a latched Footsteps override - Macro 1 at 100 % on both banks
+        of a Gaming-mode strip, through the smoothed parameter path - until it
+        is switched off, which puts back the value it replaced (a parameter
+        changed since keeps its new value). Returns false and changes nothing
+        when switching on a strip that is not in Gaming mode. Loading a preset
+        on the strip ends it without restoring. */
+    bool setFocus (int strip, bool on);
+    bool isFocused (int strip) const noexcept;
+    /** Night listening: a latched override of the strip's dynamics, the Night
+        Mode Gaming preset's: Auto Level on at -20 LUFS, compressor 3:1 at
+        -24 dB (+6 dB makeup) with 6 dB of upward compression below -38 dB.
+        Switched off, released like Focus. */
+    void setNight (int strip, bool on);
+    bool isNight (int strip) const noexcept;
+
+    /** ChatMix: one balance between the Game and the Chat strip, -1 (towards
+        Game) .. +1 (towards Chat). It moves the two strips' gains in opposite
+        directions, up to +-kChatMixRangeDb at the ends, on top of the user's
+        strip gains; no other strip changes. Per session. Returns false (and
+        changes nothing) when there is no Game or no Chat strip. */
+    static constexpr float kChatMixRangeDb = 6.0f;
+    bool setChatMix (float balance);
+    bool nudgeChatMix (float delta) { return setChatMix (chatMix + delta); }
+    float getChatMix() const noexcept { return chatMix; }
+    /** "Game -2.4 dB, Chat +2.4 dB", or "centred". */
+    juce::String describeChatMix() const;
+
     // ---- Settings / routing ------------------------------------------------------------------
     AppSettings& getSettings() noexcept { return *settings; }
     AppRouting& getRouting() noexcept { return *routing; }
@@ -326,6 +382,27 @@ private:
     void endAutoProfile (const AutoProfileSwitcher::Action& action);
     void presetChangedByUser (int strip);
     void cancelAutoProfile (const juce::String& stripName);
+    bool loadFirstRunDefault (int strip);
+
+    /** A latched parameter override (Focus, Night): the values it replaced,
+        both banks, put back on release where the override still stands. */
+    struct Override
+    {
+        int id = 0;
+        float value = 0.0f;
+    };
+    struct Latch
+    {
+        bool on = false;
+        std::vector<Override> applied;
+        std::vector<float> savedA, savedB;
+    };
+    void engageLatch (int strip, Latch& latch, std::vector<Override> overrides);
+    void releaseLatch (int strip, Latch& latch, bool restore);
+    void releaseAllLatches (bool restore);
+    void forgetLatches (int strip);
+    void applyStripGain (int strip);
+    float chatMixOffsetDb (int strip) const;
 
     Options options;
     std::unique_ptr<AppSettings> settings;
@@ -351,6 +428,12 @@ private:
 
     OverloadWatchdog overloadWatchdog;
     AutoLoadReducer loadReducer;
+
+    // Hotkey-driven state (docs/11 E56), per session.
+    std::array<Latch, AudioEngineHost::kMaxStrips> focusLatches, nightLatches;
+    std::array<bool, AudioEngineHost::kMaxStrips> stripBypassed {};
+    std::array<float, AudioEngineHost::kMaxStrips> userGainDb {};
+    float chatMix = 0.0f;
 
     // Automatic profiles (message thread)
     /** A strip's state before an auto profile with "restore on exit" replaced it. */

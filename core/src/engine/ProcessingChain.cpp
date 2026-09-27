@@ -79,6 +79,28 @@ constexpr float kFootstepsThresholdDb = -6.0f;
 // Nyquist of an already harsh narrowband channel, so it is off (docs/11 E17).
 constexpr double kSpeechLinkMaxRate = 32000.0;
 
+// Latency profiles are defined in time, not samples (docs/11 E42a), so a
+// profile costs about the same milliseconds at every rate:
+//  * The compressor / maximizer look-aheads are set in ms (setLookaheadMs).
+//  * The noise gate's STFT frame is kGateFrameMs (1024 samples at 48 kHz),
+//    rounded to the nearest power of two in log terms: 1024 at 44.1 / 48 kHz,
+//    2048 at 88.2 / 96 kHz, 4096 at 176.4 / 192 kHz (21.3 - 23.2 ms). Its
+//    bin spacing in Hz, and so the gate's behaviour, stays the same too.
+//  * The oversampler FIRs and the true-peak detector stay in samples: they
+//    are filters defined relative to Nyquist and shrink at higher rates.
+// Below kQualityMinRate (Bluetooth hands-free / speech links, 8 / 16 / 22.05
+// kHz) Quality runs as Balanced: a 1024-sample frame alone was 128 ms at
+// 8 kHz, and the chain 1152 samples (144 ms), which breaks lip sync.
+constexpr double kGateFrameMs = 1024.0 * 1000.0 / 48000.0;
+constexpr double kQualityMinRate = 32000.0;
+
+int gateFftSizeFor (double sampleRate) noexcept
+{
+    const double frame = kGateFrameMs * 0.001 * sampleRate;
+    const int log2Size = static_cast<int> (std::lround (std::log2 (std::max (frame, 1.0))));
+    return 1 << std::clamp (log2Size, 8, 12); // SpectralNoiseGate: 256 .. 4096
+}
+
 void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate) noexcept
 {
     const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
@@ -280,12 +302,15 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     publishEffective();
     const float* e = effective.data();
 
-    profileAtPrepare = idx (e, LatencyProfile);
+    requestedProfileAtPrepare = idx (e, LatencyProfile);
+    profileAtPrepare = requestedProfileAtPrepare;
+    if (static_cast<LatencyProfileValue> (profileAtPrepare) == LatencyProfileValue::Quality && sr < kQualityMinRate)
+        profileAtPrepare = static_cast<int> (LatencyProfileValue::Balanced);
     switch (static_cast<LatencyProfileValue> (profileAtPrepare))
     {
         case LatencyProfileValue::Quality:
             gateInChain = true;
-            gate.setFftSize (1024);
+            gate.setFftSize (gateFftSizeFor (sr));
             saturator.setOversampling (2, Oversampler::Quality::High);
             compressor.setLookaheadMs (3.0f);
             maximizer.setClipOversampling (4, Oversampler::Quality::High);

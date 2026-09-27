@@ -190,6 +190,11 @@ juce::StringArray HotkeyManager::getFailures() const
 
 void HotkeyManager::perform (HotkeyAction action)
 {
+    // Strip actions go to the hotkey strip (an active automatic profile's,
+    // else Settings > Hotkeys', default Game), never to the strip selected in
+    // the window, and the feedback names it (docs/11 E56).
+    const int strip = controller.getHotkeyStrip();
+    const auto stripName = controller.getStripName (strip) + ": ";
     juce::String feedback;
     switch (action)
     {
@@ -198,22 +203,45 @@ void HotkeyManager::perform (HotkeyAction action)
             feedback = controller.isEnabled() ? "Flubsound enabled" : "Flubsound disabled";
             break;
         case HotkeyAction::ToggleMode:
-            controller.toggleMode();
-            feedback = controller.getStripName (controller.getSelectedStrip()) + ": "
-                       + (controller.getMode() == flub::param::ModeValue::Gaming ? "Gaming" : "Music") + " mode";
+            controller.toggleMode (strip);
+            feedback = stripName + (controller.getMode (strip) == flub::param::ModeValue::Gaming ? "Gaming" : "Music") + " mode";
             break;
         case HotkeyAction::BoostUp:
         case HotkeyAction::BoostDown:
-            controller.nudgeBoost (action == HotkeyAction::BoostUp ? 0.1f : -0.1f);
-            feedback = "Boost " + juce::String (juce::roundToInt (controller.getBoost() * 100.0f)) + "%";
+            controller.nudgeBoost (action == HotkeyAction::BoostUp ? 0.1f : -0.1f, strip);
+            feedback = stripName + "Boost " + juce::String (juce::roundToInt (controller.getBoost (strip) * 100.0f)) + "%";
             break;
         case HotkeyAction::NextPreset:
         case HotkeyAction::PreviousPreset:
-            if (action == HotkeyAction::NextPreset ? controller.nextPreset() : controller.previousPreset())
-                feedback = "Preset: " + controller.getCurrentPresetName();
+            if (action == HotkeyAction::NextPreset ? controller.nextPreset (strip) : controller.previousPreset (strip))
+                feedback = stripName + "preset " + controller.getCurrentPresetName (strip);
             else
                 feedback = "No presets available";
             break;
+        case HotkeyAction::ToggleFocus:
+            if (controller.setFocus (strip, ! controller.isFocused (strip)))
+                feedback = stripName + (controller.isFocused (strip) ? "Focus on (Footsteps 100%)" : "Focus off");
+            else
+                feedback = stripName + "Focus needs Gaming mode";
+            break;
+        case HotkeyAction::ChatMixToChat:
+        case HotkeyAction::ChatMixToGame:
+            if (controller.nudgeChatMix (action == HotkeyAction::ChatMixToChat ? kChatMixStep : -kChatMixStep))
+                feedback = "ChatMix " + controller.describeChatMix();
+            else
+                feedback = "ChatMix needs a Game and a Chat strip";
+            break;
+        case HotkeyAction::ToggleNight:
+            controller.setNight (strip, ! controller.isNight (strip));
+            feedback = stripName + (controller.isNight (strip) ? "Night listening on" : "Night listening off");
+            break;
+        case HotkeyAction::ToggleBypass:
+        {
+            controller.setStripBypassed (strip, ! controller.isStripBypassed (strip));
+            const bool matched = controller.getParams (strip).get (flub::param::LoudnessMatchBypass) >= 0.5f;
+            feedback = stripName + (controller.isStripBypassed (strip) ? (matched ? "bypassed (loudness matched)" : "bypassed") : "processing");
+            break;
+        }
     }
 
     if (onActionPerformed != nullptr)

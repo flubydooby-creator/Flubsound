@@ -80,8 +80,8 @@
 //   * Loopback-pair guard: at every device start the output and input device
 //     names are checked (isLoopbackPair: CABLE Input <-> CABLE Output, the
 //     same Voicemeeter bus, BlackHole / Soundflower / Loopback as both ends,
-//     a sink and its ".monitor"). A pair would close a feedback loop through
-//     the engine (typical: a wireless headset drops, JUCE falls back to the
+//     a sink and its ".monitor"). A pair whose input feeds a strip closes a
+//     feedback loop through the engine (typical: a wireless headset drops, JUCE falls back to the
 //     system default output, which in the cable setup IS CABLE Input). The
 //     output is then held at silence from the first sample (or ramped down
 //     over kSwapFadeMs if the guard trips while running) and the engine is
@@ -299,8 +299,13 @@ public:
         device reopened, or chose to ignore it). A tripped loopback guard
         stays until the pair changes or is allowed. */
     void clearDeviceError();
-    /** True while the loopback guard holds the output at silence. */
-    bool isOutputMutedByGuard() const noexcept { return guardMuted.load (std::memory_order_acquire); }
+    /** True while the loopback guard holds the output at silence: the pair
+        is a loopback pair (not allowed) AND the device input feeds a strip
+        (a pair whose input nothing uses is not a loop). */
+    bool isOutputMutedByGuard() const noexcept
+    {
+        return loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
+    }
 
     // =========================================================================
     // Strip mix controls (any thread; applied click-free on the audio thread)
@@ -459,10 +464,11 @@ private:
     static constexpr juce::uint32 kAudioThreadPassTimeoutMs = 250;
     void releaseSlot (CaptureSlot& slot);
     bool isSlotQuarantined (CaptureSlot& slot) noexcept;
-    void startCaptureInSlot (CaptureSlot& slot, std::string& error);
+    bool startCaptureInSlot (CaptureSlot& slot, flub::platform::ProcessLoopbackCapture& capture, uint32_t processId, std::string& error);
     void applyDeviceStartSafety (juce::AudioIODevice* device);
     void setSafetyState (DeviceSafetyState next);
-    void applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples) noexcept;
+    void applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples, bool muted) noexcept;
+    bool deviceInputFeedsStrip() const noexcept;
 
     juce::AudioDeviceManager deviceManager;
     std::vector<flub::StripConfig> layout;
@@ -500,7 +506,8 @@ private:
     std::array<std::atomic<int>, kMaxStrips> deviceInputFirst {};
     std::atomic<bool> engineReady { false }, callbackRunning { false };
     std::atomic<bool> configurePending { false }, notifyPending { false }, errorPending { false };
-    std::atomic<bool> guardMuted { false };    // loopback guard: output held at silence (message -> audio thread)
+    std::atomic<bool> loopbackPair { false };  // loopback guard: the current pair loops (message -> audio thread)
+    std::atomic<bool> safetyNotifyPending { false };
     float guardGain = 1.0f;                    // audio thread (or message thread before the callback starts)
     std::atomic<uint64_t> callbackCounter { 0 };
     std::atomic<uint32_t> structureGeneration { 0 };
@@ -527,6 +534,8 @@ private:
     std::vector<std::pair<juce::String, juce::String>> allowedLoopbackPairs; // (input, output)
     juce::String guardInputName, guardOutputName; // the pair last checked
     bool captureRestartNeeded = false;
+    bool lastWaitTimedOut = false;      // waitForAudioThreadToPass gave up ...
+    uint64_t lastTimedOutCounter = 0;   // ... while the counter stood here
     juce::uint32 lastCaptureRestartMs = 0;
     double graphQuantumMs = 0.0;
 

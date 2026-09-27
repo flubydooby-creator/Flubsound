@@ -41,7 +41,10 @@
 //
 // Large nominal ratios (e.g. 96 kHz capture into a 48 kHz device) work but
 // the Hermite interpolator does not band-limit; the host therefore requests
-// captures at the device rate so the nominal ratio is 1.
+// captures at the device rate so the nominal ratio is 1, and when the device
+// rate changes it restarts every running capture at the new rate (with a
+// fresh prepare()) instead of calling setConsumerFormat() with a new rate
+// (AudioEngineHost::restartCapturesAtDeviceRate).
 #pragma once
 
 #include "flub/common/AudioBlock.h"
