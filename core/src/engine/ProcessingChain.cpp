@@ -878,7 +878,10 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     const AudioBlock in = io.firstChannels (config.inputChannels);
     const float g0 = inputGain.getCurrent();
     in.applyGainRamp (g0, inputGain.skip (n));
-    autoLevel.process (in, ! contaminated);
+    if (contaminated)
+        autoLevel.processUnmeasured (in);
+    else
+        autoLevel.process (in);
 
     // ---- 2. Fold to stereo ----
     inputDetector.process (in);
@@ -948,7 +951,10 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
     // The louder side is turned down, never the quieter one up (docs/11 E37).
-    loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n, ! contaminated);
+    if (contaminated)
+        loudnessMatch.updateUnmeasured (on (e, BypassAll), on (e, LoudnessMatchBypass), n);
+    else
+        loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n);
     loudnessMatch.applyWetTrim (st);
     dryMatchGain.setTarget (dbToGain (loudnessMatch.getDryTrimDb()));
 

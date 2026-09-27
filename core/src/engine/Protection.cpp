@@ -173,7 +173,17 @@ void AutoLevel::reset() noexcept
     frozen = false;
 }
 
-void AutoLevel::process (const AudioBlock& block, bool measure) noexcept FLUB_NONBLOCKING
+void AutoLevel::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
+{
+    run (block, true);
+}
+
+void AutoLevel::processUnmeasured (const AudioBlock& block) noexcept FLUB_NONBLOCKING
+{
+    run (block, false);
+}
+
+void AutoLevel::run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLOCKING
 {
     if (measure)
         follower.process (block); // measured BEFORE our gain: open-loop, unconditionally stable
@@ -364,7 +374,17 @@ void ComparisonMatcher::closeSubBlock() noexcept FLUB_NONBLOCKING
     pendingSamples = 0;
 }
 
-void ComparisonMatcher::update (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock) noexcept FLUB_NONBLOCKING
+void ComparisonMatcher::update (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING
+{
+    advance (bypassEngaged, matching, numSamples, true);
+}
+
+void ComparisonMatcher::updateUnmeasured (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING
+{
+    advance (bypassEngaged, matching, numSamples, false);
+}
+
+void ComparisonMatcher::advance (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock) noexcept FLUB_NONBLOCKING
 {
     if (measuredBlock)
     {

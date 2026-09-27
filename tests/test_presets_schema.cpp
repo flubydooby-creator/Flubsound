@@ -8,11 +8,15 @@
 //     default on load (resolveSavedState).
 #include "TestFramework.h"
 
+#include "CliOptions.h"
+
+#include "flub/io/FilePath.h"
 #include "flub/io/Json.h"
 #include "flub/io/PresetIO.h"
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -30,13 +34,13 @@ json::Value parseJson (const std::string& text)
     return v;
 }
 
-bool load (const std::string& text, preset::Preset& p, std::string& error) { return preset::fromJson (parseJson (text), p, error); }
+bool loadText (const std::string& text, preset::Preset& p, std::string& error) { return preset::fromJson (parseJson (text), p, error); }
 
 preset::Preset loadOk (const std::string& text)
 {
     preset::Preset p;
     std::string error;
-    REQUIRE (load (text, p, error));
+    REQUIRE (loadText (text, p, error));
     return p;
 }
 
@@ -67,6 +71,38 @@ TEST_CASE ("Preset schema: the typo key \"bost\" is reported with an exact warni
     CHECK (loadOk (R"({ "format": "flubsound-preset", "version": 2, "params": { "boost": 0.4, "mode": "Gaming" } })").warnings.empty());
 }
 
+TEST_CASE ("Preset schema: the CLI reports preset warnings as \"warning: \" notes (stderr, survives --quiet, --json \"notes\")")
+{
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("flub-preset-warnings-" + preset::makeUuid());
+    fs::create_directories (dir);
+    const fs::path file = dir / "typo.flubpreset.json";
+    {
+        std::ofstream f (file, std::ios::binary);
+        f << R"({ "format": "flubsound-preset", "version": 2, "params": { "bost": 0.1 } })";
+    }
+    cli::RenderOptions options;
+    options.presetSpec = io::pathToUtf8 (file);
+    cli::ResolvedParameters resolved;
+    std::string error;
+    REQUIRE (cli::buildParameters (options, resolved, error));
+    CHECK (std::find (resolved.notes.begin(), resolved.notes.end(),
+                      R"(warning: preset: unknown parameter "bost" ignored (did you mean "boost"?))")
+           != resolved.notes.end());
+    CHECK (resolved.values[static_cast<size_t> (BoostIntensity)] == layout()[static_cast<size_t> (BoostIntensity)].defaultValue);
+    std::error_code ec;
+    fs::remove_all (dir, ec);
+
+#ifdef FLUB_PRESET_DIR
+    // A factory preset (migrated from version 1) has none.
+    options.presetSpec = "Racing";
+    options.presetDir = FLUB_PRESET_DIR;
+    REQUIRE (cli::buildParameters (options, resolved, error));
+    for (const auto& n : resolved.notes)
+        CHECK (n.rfind ("warning: preset:", 0) != 0);
+#endif
+}
+
 TEST_CASE ("Preset schema: 2.1 loads with a warning, 3.0 is refused, 1.1 migrates with a warning, bad versions are refused")
 {
     for (const char* v : { "2.1", "\"2.1\"" })
@@ -83,7 +119,7 @@ TEST_CASE ("Preset schema: 2.1 loads with a warning, 3.0 is refused, 1.1 migrate
     for (const char* v : { "3", "3.0", "\"3.2\"" })
     {
         error.clear();
-        CHECK (! load (std::string (R"({ "format": "flubsound-preset", "version": )") + v + " }", p, error));
+        CHECK (! loadText (std::string (R"({ "format": "flubsound-preset", "version": )") + v + " }", p, error));
         CHECK (error.find ("newer Flubsound version") != std::string::npos);
     }
     for (const char* v : { "-1", "0", "true", "\"two\"", "\"2.x\"", "[2]", "2.5e3x" })

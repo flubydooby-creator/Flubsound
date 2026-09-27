@@ -730,6 +730,10 @@ bool buildParameters (const RenderOptions& o, ResolvedParameters& out, std::stri
             error = "internal error: preset table has the wrong size";
             return false;
         }
+        // Keys and values the preset reader ignored or changed (docs/11 E52):
+        // stderr (survives --quiet) and --json "notes".
+        for (const auto& w : p.warnings)
+            out.notes.push_back ("warning: preset: " + w);
     }
     auto& v = out.values;
     v = p.values;

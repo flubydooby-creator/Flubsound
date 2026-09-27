@@ -368,15 +368,18 @@ public:
     void setTargetLufs (float lufs) noexcept { target = lufs; }
     void setEnabled (bool on) noexcept { enabled = on; }
 
-    /** Measures and applies the levelling gain in place. measure = false
-        (a block hidden from the control loops, docs/11 E10): the block is
-        not measured and the gain holds; it is still applied. */
-    void process (const AudioBlock& block, bool measure = true) noexcept FLUB_NONBLOCKING;
+    /** Measures and applies the levelling gain in place. */
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING;
+    /** For a block hidden from the control loops (docs/11 E10): not
+        measured, the gain holds (as in a pause) and is applied in place. */
+    void processUnmeasured (const AudioBlock& block) noexcept FLUB_NONBLOCKING;
     float getGainDb() const noexcept { return gainDb; }
     /** True while the upper gate holds the gain through a loud event. */
     bool isHeld() const noexcept { return follower.isHeld(); }
 
 private:
+    void run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLOCKING;
+
     GatedLoudness follower;
     double sr = 48000.0, recoveryLeft = 0.0;
     float target = -18.0f, gainDb = 0.0f, lastLinear = 1.0f;
@@ -418,10 +421,12 @@ public:
     void measureWet (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;
     /** Closes the block both sides were measured on and advances the
         comparison by its numSamples: bypassEngaged = the global bypass is on,
-        matching = loudness matching is on. measuredBlock = false: neither side
-        was measured on this block (hidden from the control loops, docs/11
-        E10), so it does not count towards the current 100 ms sub-block. */
-    void update (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock = true) noexcept FLUB_NONBLOCKING;
+        matching = loudness matching is on. */
+    void update (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** As update(), for a block neither side was measured on (hidden from
+        the control loops, docs/11 E10): it does not count towards the
+        current 100 ms sub-block. */
+    void updateUnmeasured (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING;
     /** Applies the wet trim to the processed block in place, as a linear
         ramp from the last block's value (click-free). */
     void applyWetTrim (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;
@@ -451,6 +456,7 @@ private:
         double windowSum() const noexcept;
     };
     void closeSubBlock() noexcept FLUB_NONBLOCKING;
+    void advance (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock) noexcept FLUB_NONBLOCKING;
 
     Side dry, wet;
     double sr = 48000.0;
