@@ -41,6 +41,11 @@ void DistortionMonitor::reset() noexcept FLUB_NONBLOCKING
 
 float DistortionMonitor::combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING
 {
+    // A missing term passes the other through exactly (no dB round trip).
+    if (! (aDb > kMinusInfDb))
+        return bDb > kMinusInfDb ? bDb : kMinusInfDb;
+    if (! (bDb > kMinusInfDb))
+        return aDb;
     return powerToDb (dbToPower (aDb) + dbToPower (bDb));
 }
 
@@ -50,7 +55,7 @@ float DistortionMonitor::update (float saturatorDb, float clipperDb, int numSamp
     // the) clipper at the same ratio to the signal, and the two residuals
     // are treated as uncorrelated, so their ratios add in power.
     const float blockPow = dbToPower (saturatorDb) + dbToPower (clipperDb);
-    blockDb = powerToDb (blockPow);
+    blockDb = combineDb (saturatorDb, clipperDb);
     const float a = static_cast<float> (std::exp (-(numSamples / sr) / kMeterTauSeconds));
     smoothedPow = a * smoothedPow + (1.0f - a) * blockPow;
     smoothedDb = powerToDb (smoothedPow);

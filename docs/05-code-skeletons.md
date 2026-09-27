@@ -883,8 +883,8 @@ flowchart LR
 
 | Protection loop (`Protection.h/.cpp`) | Constants in the code |
 |---|---|
-| `SafetyGovernor` | ~3 s averaging of limiter GR and measured distortion (power domain; the clipper's THD+N floored at its clip energy ratio). Over budget if avg GR < −6 dB or avg distortion > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
-| `DistortionMonitor` | Power sum of the per-block THD+N of the saturator and the soft clipper (each measured inside the stage, `DistortionEstimator.h`); a 300 ms power-domain one-pole feeds `MeterBus::distortionDb`. The governor gets `combineDb (saturator, max (clipper THD+N, clip energy ratio))`. |
+| `SafetyGovernor` | ~3 s averaging of limiter GR and measured distortion (power domain; the clipper's THD+N floored at its clip energy ratio over the same 25 ms window). Over budget if avg GR < −6 dB or avg distortion > −30 dB: scale −0.15/s, floor 0.3. Recovers at +0.03/s once 1.5 dB inside both budgets. |
+| `DistortionMonitor` | Power sum of the latest THD+N readings of the saturator and the soft clipper (each measured inside the stage over 25 ms windows, `DistortionEstimator.h`); a 300 ms power-domain one-pole feeds `MeterBus::distortionDb`. The governor gets `combineDb (saturator, max (clipper THD+N, clip energy ratio over the same window))`. |
 | `AutoDrive` | Gated loudness of the output. `update()` also takes the requested (effective) drive: the reduction stays in [−requested drive, 0] dB (requested drive clamped to 0 … 24 dB), rate `min(2, 0.5·\|error\|)` dB/s, 0.5 LU dead band. Relaxes to 0 at 4 dB/s when off. |
 | `LoudnessMatch` | Gated dry and wet loudness. Dry gain = wet − dry, clamped ±12 dB, slewed 3 dB/s. |
 | `GatedLoudness` | 100 ms "momentary" + 3 s "slow" K-weighted followers. Gate closed below −70 dBFS RMS, below −50 LUFS, or more than 20 LU under the slow value. |
@@ -899,7 +899,7 @@ flowchart LR
 6. `applyParameters()` pushes every value into every module every block. The modules' early-return on unchanged values makes that cheap, and the chain has no change-tracking state that could get out of sync.
 7. The global-bypass reference is taken **after** input gain, AutoLevel and the virtualiser/downmix. "Bypass" therefore compares the enhancement, not the level-matching or the 7.1 fold. It is delayed by `totalLatency` in total (the `dryDelay` line plus the `dryLimiter` latency, decision 17), so toggling bypass never shifts audio in time.
 8. The output gain range tops out at 0 dB: nothing after the maximizer can push the output over the ceiling.
-9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipper distortion", a fully bypassed saturator "no saturator distortion"; `DistortionMonitor` power-sums the two stages' measured THD+N for the meters; the governor's input floors the clipper's share at its clip energy ratio.
+9. The protection loops read this block's telemetry and act on the **next** block. Their time constants are seconds, so the one-block delay is irrelevant. A fully bypassed maximizer feeds the governor "no reduction, no clipper distortion", a fully bypassed saturator "no saturator distortion"; `DistortionMonitor` power-sums the two stages' measured THD+N for the meters; the governor's input floors the clipper's share at its clip energy ratio over the same 25 ms window.
 10. Loudness matching may *raise* the dry path. The raise is capped so that the held dry peak (instant attack, ~2 s release) stays below `max.ceiling`. The cap is evaluated once per block and the gain ramps over 50 ms, so on its own it cannot stop a new, louder dry peak that arrives while the gain is still high; decision 17 does.
 11. The governor scale is applied inside `MacroMap::apply`, on the governed entries only.
 12. Dynamic-EQ bands 4–7 belong to the mode policy (`configureModeBands()`). In Gaming they are footstep, footstep-body, anti-masking and voice bands, scaled by *Footsteps* (M1) and *Voice & Score* (M5). In Music they are de-harsh and air bands, scaled by *Clarity* (M3), and a de-boom band scaled by Boost Intensity; band 7 is unused (range 0).
@@ -979,8 +979,9 @@ public:
     float getGainReductionDb() const noexcept;     // limiter, deepest in the block (relaxed atomic)
     uint64_t getSafetyClipCount() const noexcept;  // limiter's final-clamp engagements since prepare()
     float getGlueReductionDb() const noexcept;
-    float getClipEnergyRatioDb() const noexcept;   // how hard the clipper works (meters; floor of the governor's clipper input)
-    float getDistortionDb() const noexcept;        // clipper THD+N (meters; with the clip energy as a floor, the SafetyGovernor's input)
+    float getClipEnergyRatioDb() const noexcept;   // how hard the clipper works, per block (meters)
+    float getDistortionDb() const noexcept;        // clipper THD+N over the last 25 ms window (meters; the SafetyGovernor's input ...)
+    float getWindowClipEnergyDb() const noexcept;  // ... floored at the clip energy ratio over that window
     // ...
 };
 ```

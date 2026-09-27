@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 using namespace flub;
@@ -259,6 +260,62 @@ TEST_CASE ("Distortion: the saturator's and the soft clipper's in-stage readings
     CHECK_GE (clipperCases, 3);
 }
 
+TEST_CASE ("Distortion: the readings do not depend on the host block size: a 55 Hz tone through the saturator and the clipper reads the same in 32- and 4096-sample blocks")
+{
+    // Over a block much shorter than a bass period, the fundamental and its
+    // harmonics are nearly collinear and a per-block least-squares gain
+    // would absorb most of the harmonics (per-block, this tone read 14 dB
+    // low in 32-sample blocks). The stages accumulate a 25 ms window instead.
+    ScopedNoDenormals noDenormals;
+    const auto steadyReading = [] (Processor& stage, const std::function<float()>& reading, int block)
+    {
+        const int len = static_cast<int> (kFs * 1.5);
+        Planar buf (2, len);
+        for (int i = 0; i < len; ++i)
+            buf.ch[0][static_cast<size_t> (i)] = buf.ch[1][static_cast<size_t> (i)] = static_cast<float> (0.3 * std::sin (kTwoPi * 55.0 * i / kFs));
+        double power = 0.0;
+        int count = 0;
+        for (int pos = 0; pos < len; pos += block)
+        {
+            stage.process (buf.block (pos, std::min (block, len - pos)));
+            if (pos >= static_cast<int> (kFs * 0.5))
+            {
+                power += std::pow (10.0, reading() / 10.0);
+                ++count;
+            }
+        }
+        return 10.0 * std::log10 (power / count);
+    };
+
+    double satRef = 0.0, clipRef = 0.0;
+    for (const int block : { 4096, 1024, 128, 64, 32 })
+    {
+        Saturator sat;
+        sat.prepare ({ kFs, block, 2 });
+        sat.setParams ({ SaturationType::Tape, 12.0f, 1.0f, 0.0f });
+        sat.reset();
+        const double satDb = steadyReading (sat, [&sat] { return sat.getDistortionDb(); }, block);
+
+        LoudnessMaximizer m;
+        m.prepare ({ kFs, block, 2 });
+        MaximizerParams p;
+        p.driveDb = 12.0f;
+        m.setParams (p);
+        const double clipDb = steadyReading (m, [&m] { return m.getDistortionDb(); }, block);
+
+        if (block == 4096)
+        {
+            satRef = satDb;
+            clipRef = clipDb;
+            CHECK_GE (satRef, -30.0); // both measurably distort (measured: -21.1 / -39.1 dB)
+            CHECK_GE (clipRef, -45.0);
+            continue;
+        }
+        CHECK_NEAR (satDb, satRef, 0.2); // measured: < 0.05 dB
+        CHECK_NEAR (clipDb, clipRef, 0.2);
+    }
+}
+
 TEST_CASE ("Distortion: the monitor power-sums the stages and smooths the meter in the power domain with tau = 300 ms")
 {
     DistortionMonitor mon;
@@ -436,17 +493,21 @@ TEST_CASE ("Distortion: through the chain, base saturation alone trips the gover
 
 TEST_CASE ("Distortion: through the chain, the clipper's share of the governor input is floored at its clip energy ratio, so clipping backs the scale off at least as far as the proxy alone did")
 {
-    // The clip-energy proxy reads above the clipper's THD+N (it also counts
-    // the in-phase part of the removed signal, a gain change). The chain
-    // floors the clipper's share at it, so a SafetyGovernor mirrored from the
-    // published limiter GR and clip energy ratio - the old governor inputs -
-    // never holds a lower scale than the chain's own. Saturation off: the
-    // clipper is the only nonlinear stage.
+    // The clip-energy proxy reads above the clipper's THD+N on a steady tone
+    // (it also counts the in-phase part of the removed signal, a gain
+    // change): about 3 dB here. The chain floors the clipper's share at it,
+    // so the governor never holds a higher scale than a SafetyGovernor fed
+    // the published limiter GR and per-block clip energy ratio (the old
+    // inputs), except for the one-window delay of the floor. The
+    // maximizer is alone, with the clipper at its maximum share, on a 750 Hz
+    // sine whose clip energy is over the -30 dB budget and whose THD+N is
+    // under it: the floor alone makes the chain back off. Boost is 0, so the
+    // scale changes no audio and the mirror sees exactly the chain's inputs.
     ParameterStore store;
-    store.set (Mode, static_cast<float> (ModeValue::Music));
-    store.set (BoostIntensity, 1.0f);
-    store.set (MaxDriveDb, 6.0f);
-    store.set (SaturationOn, 0.0f);
+    for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn })
+        store.set (id, 0.0f);
+    store.set (MaximizerOn, 1.0f);
+    store.set (MaxClipAmount, 1.0f);
 
     constexpr int kBlock = 512;
     ProcessingChain chain (store);
@@ -454,19 +515,11 @@ TEST_CASE ("Distortion: through the chain, the clipper's share of the governor i
     SafetyGovernor proxyOnly;
     proxyOnly.prepare (kFs);
 
-    const int len = static_cast<int> (kFs * 10.0);
+    const int len = static_cast<int> (kFs * 8.0);
     Planar prog (2, len);
-    FastRandom rng (21);
-    for (int i = 0; i < len; ++i)
-    {
-        const double t = i / kFs;
-        const double beat = std::fmod (t, 0.5);
-        const double kick = std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat);
-        const double hat = (std::fmod (t + 0.25, 0.5) < 0.03 ? 0.3 : 0.0) * rng.nextBipolar();
-        const double tone = 0.4 * std::sin (kTwoPi * 110.0 * t) + 0.15 * std::sin (kTwoPi * 440.0 * t);
-        prog.ch[0][static_cast<size_t> (i)] = 0.35f * static_cast<float> (kick + hat + tone);
-        prog.ch[1][static_cast<size_t> (i)] = 0.35f * static_cast<float> (kick + 0.8 * hat + tone);
-    }
+    prog.ch[0] = periodicSine (kPeriod, len, 0.94);
+    prog.ch[1] = prog.ch[0];
+    prog.rebind();
 
     ScopedNoDenormals noDenormals;
     double worstExcess = -1.0, clipPow = 0.0, thdPow = 0.0;
@@ -489,11 +542,15 @@ TEST_CASE ("Distortion: through the chain, the clipper's share of the governor i
         }
     }
     REQUIRE (measured > 0);
-    CHECK_LE (worstExcess, 1e-6);  // every block: chain scale <= the proxy-only scale
-    CHECK_LE (proxyMin, 0.9f);     // the proxy trips on this programme ...
-    CHECK_LE (chainMin, proxyMin); // ... and the chain backs off at least as far
-    // The floor matters here: the measured THD+N alone reads well below the proxy.
-    CHECK_GE (10.0 * std::log10 (clipPow / measured), 10.0 * std::log10 (thdPow / measured) + 1.0);
+    const double clipDb = 10.0 * std::log10 (clipPow / measured), thdDb = 10.0 * std::log10 (thdPow / measured);
+    CHECK_GE (clipDb, SafetyGovernor::kDistortionBudgetDb + 1.0); // measured: -27.8 dB
+    CHECK_LE (thdDb, SafetyGovernor::kDistortionBudgetDb - 0.5);  // measured: -31.1 dB
+    // Every block, the chain's scale is at most the proxy-only scale, up to
+    // the 25 ms window the floor is taken over (the chain learns of the
+    // clipping one window later): 0.15 /s * 25 ms = 0.00375.
+    CHECK_LE (worstExcess, 0.004);
+    CHECK_LE (proxyMin, 0.6f);                                    // the proxy trips ...
+    CHECK_LE (chainMin, proxyMin);                                // ... and the chain backs off as far
 }
 
 TEST_CASE ("Distortion: measuring in the saturator and the clipper, the monitor and the governor update are allocation-free")

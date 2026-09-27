@@ -129,16 +129,30 @@ public:
     DistortionSums& channel (int c) noexcept { return sums[static_cast<size_t> (c)]; }
 
     /** Counts n more base-rate samples. When the window is full, sets ratioDb
-        to its THD+N over every channel, starts the next window and returns true. */
-    bool advance (int n, float& ratioDb) noexcept FLUB_NONBLOCKING
+        to its THD+N over every channel (and deviationDb, if given, to
+        10 log10(sum <d, d> / sum <x, x>), the deviation energy relative to the
+        input: for the clipper, its clip energy ratio over the same window),
+        starts the next window and returns true. */
+    bool advance (int n, float& ratioDb, float* deviationDb = nullptr) noexcept FLUB_NONBLOCKING
     {
         count += n;
         if (count < length)
             return false;
         DistortionEnergy e;
+        double dd = 0.0, xx = 0.0;
         for (const auto& s : sums)
+        {
             e.add (s);
+            if (s.isFinite())
+            {
+                dd += s.dd;
+                xx += s.xx;
+            }
+        }
         ratioDb = e.ratioDb();
+        if (deviationDb != nullptr)
+            *deviationDb = dd > 0.0 && xx > 0.0 ? static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (dd / xx)))
+                                                : kMinusInfDb;
         reset();
         return true;
     }

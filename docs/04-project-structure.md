@@ -88,7 +88,7 @@ Flubsound/
 │   │   │   ├── Svf.h                       Cytomic TPT state-variable filter (SvfCoeffs, SvfState, SvfFilter), Butterworth Q table
 │   │   │   ├── Biquad.h                    double-precision transposed DF-II biquad (K-weighting, head shadow)
 │   │   │   ├── Crossover.h                 LinkwitzRiley4, LinkwitzRileyAllPass, ThreeBandSplitter
-│   │   │   ├── DistortionEstimator.h       per-block least-squares THD+N of a nonlinear stage (DistortionSums, DistortionEnergy)
+│   │   │   ├── DistortionEstimator.h       least-squares THD+N of a nonlinear stage over 25 ms windows (DistortionSums, DistortionEnergy, DistortionWindow)
 │   │   │   ├── EnvelopeFollower.h          EnvelopeFollower, GainSmoother, MeanSquareFollower
 │   │   │   ├── FirDesign.h                 flub::fir: Bessel I0, Kaiser window, sinc (prepare-time design only)
 │   │   │   ├── Oversampler.h               1× / 2× / 4× cascaded half-band polyphase oversampler (HalfbandStage, Oversampler)
@@ -202,7 +202,7 @@ Flubsound/
 │   ├── test_engine.cpp                     Parameters, ParameterStore, MacroMap, protection loops, ModuleSlot, ProcessingChain, MixEngine, preset round trip
 │   ├── test_modes.cpp                      Gaming mode policy through the full chain: what each Gaming macro does to effective values and sound
 │   ├── test_protection_gaps.cpp            SafetyGovernor clip-energy branch, LoudnessMatch, A/B click-freedom, Music Width / Clarity macros, headset ceiling caps and air cut-off
-│   ├── test_distortion.cpp                 measured THD+N: estimator vs harmonic analysis, in-stage readings, DistortionMonitor, SafetyGovernor on measured distortion
+│   ├── test_distortion.cpp                 measured THD+N: estimator vs harmonic analysis, in-stage readings, block-size independence, DistortionMonitor, SafetyGovernor on measured distortion
 │   ├── test_factory_presets.cpp            every presets/factory/*.json: metadata, keys, protection rules, render below the ceiling
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json
 │   ├── test_json.cpp                       JSON parser/writer
@@ -836,7 +836,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_drift_fifo.cpp`: the app's capture FIFO in a simulated producer / device clock pair (±200 and ±2000 ppm, stalls, 7.1 and mono sources);
   - `test_modes.cpp`: the Gaming mode policy through the full chain (macros → effective values → sound);
   - `test_protection_gaps.cpp`: the SafetyGovernor's clip-energy branch (as a unit and through the chain), LoudnessMatch as a unit, click-free A/B bank switches and bypass toggles, the Music Width and Clarity macros, the master limiter at the headset ceiling caps and the air exciter's cut-off below 42 kHz;
-  - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share);
+  - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings and their independence of the host block size, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share);
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.

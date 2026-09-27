@@ -148,15 +148,20 @@ TEST_CASE ("RTSan: an allocation inside a nonblocking function stops the process
 }
 #endif
 
-// Measured THD+N (tests/test_distortion.cpp): the per-block estimator the
-// Saturator and the maximizer's clipper run inside process(), and the
-// monitor / governor updates ProcessingChain::process calls every block.
+// Measured THD+N (tests/test_distortion.cpp): the estimator and its 25 ms
+// window, which the Saturator and the maximizer's clipper run inside
+// process(), and the monitor / governor updates ProcessingChain::process
+// calls every block.
 #include "flub/dsp/DistortionEstimator.h"
 #include "flub/engine/Protection.h"
 
 static_assert (std::is_same_v<decltype (&DistortionSums::add), void (DistortionSums::*) (float, float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DistortionSums::residualEnergy), double (DistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DistortionSums::outputEnergy), double (DistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionSums::merge), void (DistortionSums::*) (const DistortionSums&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionSums::isFinite), bool (DistortionSums::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DistortionWindow::advance), bool (DistortionWindow::*) (int, float&, float*) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<DistortionWindow>);
 static_assert (std::is_same_v<decltype (&DistortionEnergy::add), void (DistortionEnergy::*) (const DistortionSums&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DistortionEnergy::ratioDb), float (DistortionEnergy::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DistortionMonitor::update), float (DistortionMonitor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);

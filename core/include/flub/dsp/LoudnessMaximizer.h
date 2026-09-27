@@ -85,6 +85,9 @@ public:
     float getClipEnergyRatioDb() const noexcept { return clipRatioDb.load (std::memory_order_relaxed); }
     /** THD+N of the soft clipper over the last 25 ms analysis window (dB re its output; -160 = clean or off). */
     float getDistortionDb() const noexcept { return distortionDb.load (std::memory_order_relaxed); }
+    /** The clip energy ratio over that same window (the chain floors the
+        governor's clipper input with it; getClipEnergyRatioDb() is per block). */
+    float getWindowClipEnergyDb() const noexcept { return windowClipDb.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -128,7 +131,8 @@ private:
     bool truePeak = true;
     ProcessSpec spec;
     MaximizerParams params;
-    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f };
+    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
+        windowClipDb { -160.0f };
     DistortionWindow distortionWindow; // clipper THD+N sums over a 25 ms window
 
     bool prepared = false;

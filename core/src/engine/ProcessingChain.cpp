@@ -708,11 +708,12 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     const float satDistortionDb = satActive ? saturator.getDistortionDb() : kMinusInfDb;
     const float clipDistortionDb = maxActive ? maximizer.getDistortionDb() : kMinusInfDb;
     distortion.update (satDistortionDb, clipDistortionDb, n); // measured THD+N (meters)
-    // The governor sees the clipper's share floored at its clip energy ratio,
-    // the former proxy: that reads above the clipper's THD+N (it also counts
-    // the in-phase part, a gain change), so the governor never backs off
-    // later on clipping than before, and the saturator's THD+N is added.
-    const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getClipEnergyRatioDb()) : kMinusInfDb;
+    // The governor sees the clipper's share floored at its clip energy ratio
+    // over the same 25 ms window, the former proxy: on a steady tone that
+    // reads above the THD+N (it also counts the in-phase part of the removed
+    // signal, a gain change), so the governor does not back off later on
+    // clipping than it did on the proxy; the saturator's THD+N is added.
+    const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getWindowClipEnergyDb()) : kMinusInfDb;
     governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
     autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
     loudnessMatch.measureWet (st);

@@ -1,20 +1,21 @@
 // Flubsound Pro - protection & loudness control loops (all RT-safe).
 //
 // DistortionMonitor (measured THD+N of the chain's nonlinear stages):
-//   Per block it power-sums the THD+N readings of the stages in series (the
-//   saturator and the maximizer's soft clipper, each measured around its own
-//   curve, see flub/dsp/DistortionEstimator.h); a stage that is fully
-//   bypassed feeds -160 dB. A power-domain one-pole with tau = 300 ms
+//   Per block it power-sums the latest THD+N readings (25 ms windows) of the
+//   stages in series (the saturator and the maximizer's soft clipper, each
+//   measured around its own curve, see flub/dsp/DistortionEstimator.h); a
+//   stage that is fully bypassed feeds -160 dB. A power-domain one-pole with tau = 300 ms
 //   smooths the block value for the meters (MeterBus::distortionDb).
 //
 // SafetyGovernor (THD / over-processing protection):
 //   Inputs per block: maximizer limiter GR (dB) and distortion (dB): the
 //   measured THD+N of the saturator power-summed with the clipper's share,
-//   which is its measured THD+N floored at its clip energy ratio (the former
-//   proxy, never lower on a clipper), so the governor never acts later than
-//   it did on the proxy alone. Budget: limiter GR averaged over ~3 s must
-//   stay above -6 dB, distortion (power average over ~3 s) below -30 dB
-//   (~3.2 % RMS of the output). When over budget, scale falls at 15 %/s (min 0.3); when
+//   which is its measured THD+N floored at its clip energy ratio over the
+//   same 25 ms window (the former proxy, which reads higher on a steady
+//   tone), so the governor does not act later on clipping than it did on
+//   the proxy alone. Budget: limiter GR averaged over ~3 s must stay above
+//   -6 dB, distortion (power average over ~3 s) below -30 dB (~3.2 % RMS of
+//   the output). When over budget, scale falls at 15 %/s (min 0.3); when
 //   under budget minus 1.5 dB hysteresis it recovers at 3 %/s. The scale
 //   multiplies every "governed" macro amount; base values are never touched.
 //

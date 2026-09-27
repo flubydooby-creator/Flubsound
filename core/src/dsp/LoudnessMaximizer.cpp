@@ -262,6 +262,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     clipRatioDb.store (kMinusInfDb, std::memory_order_relaxed);
     distortionWindow.reset();
     distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
+    windowClipDb.store (kMinusInfDb, std::memory_order_relaxed);
     fresh = true;
 }
 
@@ -551,8 +552,11 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
         seg.numChannels = spec.numChannels;
         processSegment (seg, clipDiff, clipIn, glueMin);
         grMin = std::min (grMin, limiter.getGainReductionDb());
-        if (float db = kMinusInfDb; distortionWindow.advance (len, db))
+        if (float db = kMinusInfDb, clipDb = kMinusInfDb; distortionWindow.advance (len, db, &clipDb))
+        {
             distortionDb.store (db, std::memory_order_relaxed);
+            windowClipDb.store (clipDb, std::memory_order_relaxed);
+        }
     }
 
     limiterGrDb.store (grMin, std::memory_order_relaxed);
