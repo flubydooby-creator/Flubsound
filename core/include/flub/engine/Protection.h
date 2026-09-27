@@ -24,7 +24,21 @@
 //   -6 dB, distortion (power average over ~3 s) below -30 dB (~3.2 % RMS of
 //   the output). When over budget, scale falls at 15 %/s (min 0.3); when
 //   under budget minus 1.5 dB hysteresis it recovers at 3 %/s. The scale
-//   multiplies every "governed" macro amount; base values are never touched.
+//   multiplies every "governed" macro amount.
+//   The loop ticks on a fixed 10 ms grid counted from reset() - the grid the
+//   maximizer's limiter-GR windows close on - with dt = 10 ms, however the
+//   host splits the audio into blocks (docs/11 E06 slice): a block that
+//   closes no window leaves the scale alone, one that closes k windows ticks
+//   k times on its readings. A per-block tick (dt = block length) moved the
+//   scale on the block grid, which alone spread Boost 100 + Loudness 100 by
+//   0.29 LU over blocks 64-4096 on kick-heavy programme.
+//   Protection strength (ProtectionStrength, a host setting, not a preset
+//   value): Off (the default) never touches base values, as before; Normal
+//   also scales the base max.drive, sat.drive and bass.harmonics by the same
+//   scale (ProcessingChain::applyParameters); Strict does that and lets the
+//   scale fall to 0 instead of 0.3.
+//   getState() / getReason() say what the loop is doing and which budget
+//   made it back off (published on MeterBus for the UI and the CLI).
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -266,24 +280,77 @@ private:
     float harmonicsBlockDb = -160.0f, harmonicsSmoothedDb = -160.0f, harmonicsSmoothedPow = 0.0f;
 };
 
+/** How far the SafetyGovernor reaches (see the header comment). */
+enum class ProtectionStrength : int
+{
+    Off = 0,    // governed macro amounts only; base values untouched (the default)
+    Normal = 1, // also the base max.drive, sat.drive and bass.harmonics
+    Strict = 2  // as Normal, and the scale may fall to 0
+};
+
 class SafetyGovernor
 {
 public:
     static constexpr float kGrBudgetDb = -6.0f;          // sustained limiting deeper than this = over-driven
     static constexpr float kDistortionBudgetDb = -30.0f; // THD+N above ~3.2 % RMS = audible distortion
+    static constexpr float kHysteresisDb = 1.5f;
+    static constexpr float kFallPerSec = 0.15f;
+    static constexpr float kRisePerSec = 0.03f;
+    static constexpr float kMinScale = 0.3f;       // floor at Off and Normal
+    static constexpr float kStrictMinScale = 0.0f; // floor at Strict
+    /** Tick length: the LoudnessMaximizer's limiter-GR window (the chain
+        checks that the two agree). */
+    static constexpr float kTickMs = 10.0f;
+
+    /** What the loop did at its last tick. */
+    enum class State : int
+    {
+        Idle = 0,       // scale 1, within budget
+        BackingOff = 1, // over budget: the scale falls (or sits at its floor)
+        Holding = 2,    // below 1, inside the hysteresis band: the scale holds
+        Recovering = 3  // below 1, comfortably under budget: the scale rises
+    };
+    /** Bits of getReason(): the budgets that made the scale fall. */
+    static constexpr uint32_t kReasonLimiter = 1u;    // ~3 s limiter GR average deeper than kGrBudgetDb
+    static constexpr uint32_t kReasonDistortion = 2u; // ~3 s THD+N average above kDistortionBudgetDb
 
     void prepare (double sampleRate) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
-    /** distortionDb: the distortion of the nonlinear stages this block (see
-        the header comment; ProcessingChain::process). */
+    /** Restarts the tick grid (not the loop state), for when the maximizer's
+        window grid restarts without a full reset (a dropped block). */
+    void restartTickGrid() noexcept FLUB_NONBLOCKING { pendingSamples = 0; }
+    /** Sets the scale's floor (Strict: 0, else kMinScale); any time on the
+        audio thread. A scale below a raised floor is lifted to it. */
+    void setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING;
+    /** Advances the tick grid by numSamples and ticks once per 10 ms window
+        closed, on these readings. distortionDb: the distortion of the
+        nonlinear stages this block (see the header comment;
+        ProcessingChain::process). */
     void update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** Advances the tick grid by numSamples without measuring: the windows
+        closed here leave the averages and the scale as they are (a block
+        hidden from the control loops, docs/11 E10). */
+    void skip (int numSamples) noexcept FLUB_NONBLOCKING;
     float getScale() const noexcept { return scale; }
     /** The ~3 s power average of the distortion input (what the budget is compared with). */
     float getAverageDistortionDb() const noexcept { return avgDistortionDb; }
+    /** The ~3 s average of the limiter GR input (dB <= 0). */
+    float getAverageGainReductionDb() const noexcept { return avgGrDb; }
+    State getState() const noexcept { return state; }
+    /** kReason* bits of the budgets that were over since the scale last left
+        1; 0 while the scale is 1. */
+    uint32_t getReason() const noexcept { return reason; }
 
 private:
+    void tick (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
+
     double sr = 48000.0;
+    int tickSamples = 480, pendingSamples = 0;
+    float tickAverage = 0.0f, tickFall = 0.0f, tickRise = 0.0f; // per-tick constants (prepare)
+    float minScale = kMinScale;
     float avgGrDb = 0.0f, avgDistortionDb = -160.0f, scale = 1.0f;
+    State state = State::Idle;
+    uint32_t reason = 0;
 };
 
 class AutoLevel
@@ -301,8 +368,10 @@ public:
     void setTargetLufs (float lufs) noexcept { target = lufs; }
     void setEnabled (bool on) noexcept { enabled = on; }
 
-    /** Measures and applies the levelling gain in place. */
-    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING;
+    /** Measures and applies the levelling gain in place. measure = false
+        (a block hidden from the control loops, docs/11 E10): the block is
+        not measured and the gain holds; it is still applied. */
+    void process (const AudioBlock& block, bool measure = true) noexcept FLUB_NONBLOCKING;
     float getGainDb() const noexcept { return gainDb; }
     /** True while the upper gate holds the gain through a loud event. */
     bool isHeld() const noexcept { return follower.isHeld(); }
@@ -349,8 +418,10 @@ public:
     void measureWet (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;
     /** Closes the block both sides were measured on and advances the
         comparison by its numSamples: bypassEngaged = the global bypass is on,
-        matching = loudness matching is on. */
-    void update (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING;
+        matching = loudness matching is on. measuredBlock = false: neither side
+        was measured on this block (hidden from the control loops, docs/11
+        E10), so it does not count towards the current 100 ms sub-block. */
+    void update (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock = true) noexcept FLUB_NONBLOCKING;
     /** Applies the wet trim to the processed block in place, as a linear
         ramp from the last block's value (click-free). */
     void applyWetTrim (const AudioBlock& wet) noexcept FLUB_NONBLOCKING;

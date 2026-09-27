@@ -85,6 +85,13 @@ float DistortionMonitor::smooth (float& statePow, float blockPow, int numSamples
 void SafetyGovernor::prepare (double sampleRate) noexcept
 {
     sr = sampleRate;
+    // The maximizer's limiter-GR window, counted the same way, so the ticks
+    // fall where its windows close (both grids start at reset()).
+    tickSamples = msToSamples (kTickMs, sampleRate);
+    const double dt = tickSamples / sampleRate;
+    tickAverage = static_cast<float> (std::exp (-dt / 3.0)); // ~3 s averaging
+    tickFall = static_cast<float> (kFallPerSec * dt);
+    tickRise = static_cast<float> (kRisePerSec * dt);
     reset();
 }
 
@@ -93,29 +100,59 @@ void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
     avgGrDb = 0.0f;
     avgDistortionDb = kMinusInfDb;
     scale = 1.0f;
+    state = State::Idle;
+    reason = 0;
+    pendingSamples = 0;
+}
+
+void SafetyGovernor::setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING
+{
+    minScale = s == ProtectionStrength::Strict ? kStrictMinScale : kMinScale;
+    scale = std::max (scale, minScale);
 }
 
 void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING
 {
-    constexpr float kHysteresisDb = 1.5f;
-    constexpr float kFallPerSec = 0.15f;
-    constexpr float kRisePerSec = 0.03f;
-    constexpr float kMinScale = 0.3f;
+    pendingSamples += numSamples;
+    while (pendingSamples >= tickSamples)
+    {
+        pendingSamples -= tickSamples;
+        tick (limiterGrDb, distortionDb);
+    }
+}
 
-    const double dt = numSamples / sr;
-    const float a = static_cast<float> (std::exp (-dt / 3.0)); // ~3 s averaging
+void SafetyGovernor::skip (int numSamples) noexcept FLUB_NONBLOCKING
+{
+    pendingSamples = (pendingSamples + numSamples) % tickSamples;
+}
 
+void SafetyGovernor::tick (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING
+{
+    const float a = tickAverage;
     avgGrDb = a * avgGrDb + (1.0f - a) * limiterGrDb;
     // Average the THD+N in the power domain (dB averages would under-weight bursts).
     avgDistortionDb = powerToDb (a * dbToPower (avgDistortionDb) + (1.0f - a) * dbToPower (distortionDb));
 
-    const bool over = avgGrDb < kGrBudgetDb || avgDistortionDb > kDistortionBudgetDb;
+    const bool grOver = avgGrDb < kGrBudgetDb, distortionOver = avgDistortionDb > kDistortionBudgetDb;
     const bool comfortablyUnder = avgGrDb > kGrBudgetDb + kHysteresisDb && avgDistortionDb < kDistortionBudgetDb - kHysteresisDb;
 
-    if (over)
-        scale = std::max (kMinScale, scale - static_cast<float> (kFallPerSec * dt));
+    if (grOver || distortionOver)
+    {
+        scale = std::max (minScale, scale - tickFall);
+        reason |= (grOver ? kReasonLimiter : 0u) | (distortionOver ? kReasonDistortion : 0u);
+        state = State::BackingOff;
+    }
     else if (comfortablyUnder)
-        scale = std::min (1.0f, scale + static_cast<float> (kRisePerSec * dt));
+    {
+        scale = std::min (1.0f, scale + tickRise);
+        state = scale < 1.0f ? State::Recovering : State::Idle;
+    }
+    else
+    {
+        state = scale < 1.0f ? State::Holding : State::Idle;
+    }
+    if (state == State::Idle)
+        reason = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,14 +173,19 @@ void AutoLevel::reset() noexcept
     frozen = false;
 }
 
-void AutoLevel::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
+void AutoLevel::process (const AudioBlock& block, bool measure) noexcept FLUB_NONBLOCKING
 {
-    follower.process (block); // measured BEFORE our gain: open-loop, unconditionally stable
+    if (measure)
+        follower.process (block); // measured BEFORE our gain: open-loop, unconditionally stable
     const double dt = block.numSamples / sr;
 
     if (enabled)
     {
-        if (follower.isActive()) // frozen during silence, pauses, fade-outs and loud events
+        if (! measure)
+        {
+            // Hidden from the loop (docs/11 E10): the gain holds, as in a pause.
+        }
+        else if (follower.isActive()) // frozen during silence, pauses, fade-outs and loud events
         {
             if (frozen)
             {
@@ -322,11 +364,14 @@ void ComparisonMatcher::closeSubBlock() noexcept FLUB_NONBLOCKING
     pendingSamples = 0;
 }
 
-void ComparisonMatcher::update (bool bypassEngaged, bool matching, int numSamples) noexcept FLUB_NONBLOCKING
+void ComparisonMatcher::update (bool bypassEngaged, bool matching, int numSamples, bool measuredBlock) noexcept FLUB_NONBLOCKING
 {
-    pendingSamples += numSamples;
-    if (pendingSamples >= subBlockSamples)
-        closeSubBlock();
+    if (measuredBlock)
+    {
+        pendingSamples += numSamples;
+        if (pendingSamples >= subBlockSamples)
+            closeSubBlock();
+    }
 
     const double dt = numSamples / sr;
     if (! matching)

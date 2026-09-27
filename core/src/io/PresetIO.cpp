@@ -3,10 +3,16 @@
 #include "flub/io/FilePath.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <sstream>
+#include <system_error>
 
 namespace flub::preset
 {
@@ -16,13 +22,17 @@ namespace
 {
 constexpr int kAppState[] = { BypassAll, LoudnessMatchBypass, LatencyProfile };
 
-// Schema version written by toJson(). Version 2 (docs/11 E01): a missing key
-// means TODAY's default. A version-1 file (or one without "version") omitted
-// values equal to the version-1 defaults, so its missing keys take the frozen
-// version-1 default instead: a parameter default change never re-voices a
-// sparse preset saved before it. Every future default change appends its old
-// value here (docs/11 E52).
-constexpr int kSchemaVersion = 2;
+// Newest minor of each OLDER major this build knows (index = major). A file
+// of an older major with a newer minor than listed here loads with a warning.
+constexpr int kKnownMinor[] = { 0, 0 };
+
+// Frozen version-1 defaults (docs/11 E01 / E52). A version-1 file (or one
+// without "version") omitted values equal to the version-1 defaults, so the
+// 1 -> 2 migration writes the version-1 default for each of these keys the
+// file does not carry: a default change never re-voices a sparse preset saved
+// before it. Only keys whose default changed since are listed. The next
+// default change bumps the major, adds kV2Defaults with the old values and a
+// 2 -> 3 step in kMigrations (tests/test_presets_golden.cpp fails until then).
 struct FrozenDefault
 {
     const char* key;
@@ -31,6 +41,18 @@ struct FrozenDefault
 constexpr FrozenDefault kV1Defaults[] = {
     { "virt.lfe", 0.0f }, // E01: +6 dB since version 2
 };
+
+json::Value migrateV1ToV2 (const json::Value& root)
+{
+    json::Value out = root;
+    json::Value params = root["params"].isObject() ? root["params"] : json::Value { json::Value::Object {} };
+    for (const auto& d : kV1Defaults)
+        if (params[d.key].isNull())
+            params.set (d.key, static_cast<double> (d.value));
+    out.set ("params", std::move (params));
+    out.set ("version", 2);
+    return out;
+}
 
 bool isUnset (const Preset& p, int id)
 {
@@ -50,7 +72,255 @@ int choiceFromJson (const Info& info, const json::Value& value)
         return static_cast<int> (std::lround (v));
     return -1;
 }
+
+/** Shortest round-trip text of a number ("1.5", "24"). */
+std::string numberText (double v)
+{
+    char buf[32];
+    const auto result = std::to_chars (buf, buf + sizeof (buf), v);
+    return result.ec == std::errc() ? std::string (buf, result.ptr) : std::string ("?");
+}
+
+/** Levenshtein distance, capped: returns > cap as soon as it is exceeded. */
+size_t editDistance (const std::string& a, const std::string& b, size_t cap)
+{
+    if ((a.size() > b.size() ? a.size() - b.size() : b.size() - a.size()) > cap)
+        return cap + 1;
+    std::vector<size_t> row (b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j)
+        row[j] = j;
+    for (size_t i = 1; i <= a.size(); ++i)
+    {
+        size_t diagonal = row[0];
+        row[0] = i;
+        size_t best = row[0];
+        for (size_t j = 1; j <= b.size(); ++j)
+        {
+            const size_t above = row[j];
+            row[j] = std::min ({ row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] == b[j - 1] ? 0u : 1u) });
+            diagonal = above;
+            best = std::min (best, row[j]);
+        }
+        if (best > cap)
+            return cap + 1;
+    }
+    return row[b.size()];
+}
+
+/** The known key closest to `key` (at most 2 edits), or "" when none is. */
+std::string closestKey (const std::string& key)
+{
+    std::string best;
+    size_t bestDistance = 3;
+    for (const auto& info : layout())
+    {
+        const size_t d = editDistance (key, info.key, bestDistance - 1);
+        if (d < bestDistance)
+        {
+            bestDistance = d;
+            best = info.key;
+        }
+    }
+    return best;
+}
+
+std::string unknownKeyWarning (const std::string& key)
+{
+    std::string w = "unknown parameter \"" + key + "\" ignored";
+    if (const auto near = closestKey (key); ! near.empty())
+        w += " (did you mean \"" + near + "\"?)";
+    return w;
+}
+
+std::string toLowerAscii (std::string s)
+{
+    for (auto& c : s)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char> (c - 'A' + 'a');
+    return s;
+}
+
+/** Clamps `f` to the parameter's range and reports a change. */
+float clampReported (const Info& info, float f, std::vector<std::string>& warnings)
+{
+    const float clamped = info.clamp (f);
+    if (clamped != f)
+        warnings.push_back ("\"" + info.key + "\" = " + numberText (static_cast<double> (f)) + " is out of range ["
+                            + numberText (static_cast<double> (info.minValue)) + ", " + numberText (static_cast<double> (info.maxValue))
+                            + "]: clamped to " + numberText (static_cast<double> (clamped)));
+    return clamped;
+}
 } // namespace
+
+std::string toString (SchemaVersion v)
+{
+    return std::to_string (v.majorVersion) + (v.minorVersion != 0 ? "." + std::to_string (v.minorVersion) : std::string());
+}
+
+bool parseSchemaVersion (const json::Value& version, SchemaVersion& out)
+{
+    std::string text;
+    if (version.isNull())
+        text = "1";
+    else if (version.isNumber())
+        text = numberText (version.asNumber()); // 2.1 -> "2.1"
+    else if (version.isString())
+        text = version.asString();
+    else
+        return false;
+
+    const auto dot = text.find ('.');
+    const std::string majorText = text.substr (0, dot);
+    const std::string minorText = dot == std::string::npos ? std::string ("0") : text.substr (dot + 1);
+    auto parseInt = [] (const std::string& t, int& v) {
+        if (t.empty() || t.size() > 6)
+            return false;
+        v = 0;
+        for (const char c : t)
+        {
+            if (c < '0' || c > '9')
+                return false;
+            v = v * 10 + (c - '0');
+        }
+        return true;
+    };
+    SchemaVersion v;
+    if (! parseInt (majorText, v.majorVersion) || ! parseInt (minorText, v.minorVersion) || v.majorVersion < 1)
+        return false;
+    out = v;
+    return true;
+}
+
+const std::vector<Migration>& migrations()
+{
+    static const std::vector<Migration> registry {
+        { 1, "fill keys a version-1 file omits with the frozen version-1 defaults (virt.lfe 0 dB)", &migrateV1ToV2 },
+    };
+    return registry;
+}
+
+bool migrate (const json::Value& root, json::Value& out, SchemaVersion& from, std::string& error)
+{
+    if (! parseSchemaVersion (root["version"], from))
+    {
+        error = "invalid preset \"version\" (expected major.minor, e.g. 2 or 2.1)";
+        return false;
+    }
+    if (from.majorVersion > kSchemaVersion.majorVersion)
+    {
+        error = "preset was saved by a newer Flubsound version (preset schema " + toString (from) + "; this build reads up to "
+                + std::to_string (kSchemaVersion.majorVersion) + ".x): update Flubsound to load it";
+        return false;
+    }
+    out = root;
+    for (int major = from.majorVersion; major < kSchemaVersion.majorVersion; ++major)
+    {
+        const auto& registry = migrations();
+        const auto step = std::find_if (registry.begin(), registry.end(), [major] (const Migration& m) { return m.fromMajor == major; });
+        if (step == registry.end())
+        {
+            error = "no migration from preset schema " + std::to_string (major);
+            return false;
+        }
+        out = step->apply (out);
+    }
+    return true;
+}
+
+std::vector<std::pair<std::string, float>> frozenDefaults (int majorVersion)
+{
+    std::vector<std::pair<std::string, float>> table;
+    if (majorVersion == 1)
+        for (const auto& d : kV1Defaults)
+            table.emplace_back (d.key, d.value);
+    return table;
+}
+
+std::string contentHash (const Preset& p)
+{
+    // 64-bit FNV-1a over (key bytes, 0, the value's IEEE-754 bits little
+    // endian) of every sound parameter in layout order. -0 hashes as +0.
+    uint64_t h = 14695981039346656037ull;
+    auto mix = [&h] (uint8_t byte) {
+        h ^= byte;
+        h *= 1099511628211ull;
+    };
+    const auto& t = layout();
+    for (size_t i = 0; i < t.size(); ++i)
+    {
+        if (isAppState (static_cast<int> (i)))
+            continue;
+        for (const char c : t[i].key)
+            mix (static_cast<uint8_t> (c));
+        mix (0);
+        float v = i < p.values.size() ? p.values[i] : t[i].defaultValue;
+        if (v == 0.0f)
+            v = 0.0f;
+        uint32_t bits = 0;
+        std::memcpy (&bits, &v, sizeof (bits));
+        for (int b = 0; b < 4; ++b)
+            mix (static_cast<uint8_t> (bits >> (8 * b)));
+    }
+    char buf[17];
+    std::snprintf (buf, sizeof (buf), "%016llx", static_cast<unsigned long long> (h));
+    return buf;
+}
+
+std::string makeUuid()
+{
+    std::random_device device;
+    std::mt19937_64 rng ((static_cast<uint64_t> (device()) << 32) ^ device());
+    uint8_t bytes[16];
+    for (size_t i = 0; i < 16; i += 8)
+    {
+        const uint64_t r = rng();
+        for (size_t b = 0; b < 8; ++b)
+            bytes[i + b] = static_cast<uint8_t> (r >> (8 * b));
+    }
+    bytes[6] = static_cast<uint8_t> ((bytes[6] & 0x0f) | 0x40); // version 4
+    bytes[8] = static_cast<uint8_t> ((bytes[8] & 0x3f) | 0x80); // RFC 4122 variant
+    static const char* const hex = "0123456789abcdef";
+    std::string s;
+    for (size_t i = 0; i < 16; ++i)
+    {
+        if (i == 4 || i == 6 || i == 8 || i == 10)
+            s += '-';
+        s += hex[bytes[i] >> 4];
+        s += hex[bytes[i] & 0x0f];
+    }
+    return s;
+}
+
+bool isValidUuid (const std::string& text)
+{
+    if (text.size() != 36)
+        return false;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        const char c = text[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23)
+        {
+            if (c != '-')
+                return false;
+        }
+        else if (! ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+const Preset* findByUuid (const std::vector<Preset>& presets, const std::string& uuid)
+{
+    if (! isValidUuid (uuid))
+        return nullptr;
+    const auto wanted = toLowerAscii (uuid);
+    for (const auto& p : presets)
+        if (p.uuid == wanted)
+            return &p;
+    return nullptr;
+}
 
 bool isAppState (int paramId) noexcept
 {
@@ -82,44 +352,68 @@ bool fromJson (const json::Value& v, Preset& out, std::string& error)
         error = "not a flubsound preset (missing \"format\": \"flubsound-preset\")";
         return false;
     }
-    const double version = v["version"].asNumber (1.0);
-    if (version > kSchemaVersion)
-    {
-        error = "preset was saved by a newer Flubsound version";
+    json::Value root;
+    SchemaVersion version;
+    if (! migrate (v, root, version, error))
         return false;
-    }
 
     out = makeDefault();
-    if (version < 2.0)
-        for (const auto& d : kV1Defaults)
-            if (const int id = findByKey (d.key); id >= 0)
-                out.values[static_cast<size_t> (id)] = d.value;
-    out.name = v["name"].asString();
-    out.category = v["category"].asString();
-    out.author = v["author"].asString();
-    out.description = v["description"].asString();
-    for (const auto& tag : v["tags"].asArray())
+    out.loadedVersion = version;
+    const int knownMinor = version.majorVersion == kSchemaVersion.majorVersion
+                               ? kSchemaVersion.minorVersion
+                               : kKnownMinor[std::min<size_t> (static_cast<size_t> (version.majorVersion), std::size (kKnownMinor) - 1)];
+    if (version.minorVersion > knownMinor)
+        out.warnings.push_back ("preset schema " + toString (version) + " is newer than this build knows ("
+                                + std::to_string (version.majorVersion) + "." + std::to_string (knownMinor)
+                                + "): settings added since are ignored");
+
+    out.name = root["name"].asString();
+    out.category = root["category"].asString();
+    out.author = root["author"].asString();
+    out.description = root["description"].asString();
+    for (const auto& tag : root["tags"].asArray())
         if (tag.isString())
             out.tags.push_back (tag.asString());
 
+    if (const auto& uuid = root["uuid"]; ! uuid.isNull())
+    {
+        if (uuid.isString() && isValidUuid (uuid.asString()))
+            out.uuid = toLowerAscii (uuid.asString());
+        else
+            out.warnings.push_back ("invalid \"uuid\" ignored");
+    }
+    if (root["contentHash"].isString())
+        out.savedContentHash = root["contentHash"].asString();
+
     const auto& t = layout();
     const auto& profileInfo = t[static_cast<size_t> (LatencyProfile)];
-    if (const int s = choiceFromJson (profileInfo, v["suggestedLatencyProfile"]); s >= 0)
-        out.suggestedLatencyProfile = static_cast<LatencyProfileValue> (s);
+    if (const auto& suggestion = root["suggestedLatencyProfile"]; ! suggestion.isNull())
+    {
+        if (const int s = choiceFromJson (profileInfo, suggestion); s >= 0)
+            out.suggestedLatencyProfile = static_cast<LatencyProfileValue> (s);
+        else
+            out.warnings.push_back ("unknown \"suggestedLatencyProfile\" ignored");
+    }
 
     std::vector<int> carried;
-    for (const auto& [key, value] : v["params"].asObject())
+    for (const auto& [key, value] : root["params"].asObject())
     {
         const int id = findByKey (key);
         if (id < 0)
-            continue; // forward compatible: ignore unknown keys
+        {
+            out.warnings.push_back (unknownKeyWarning (key)); // forward compatible: ignored
+            continue;
+        }
         const auto& info = t[static_cast<size_t> (id)];
         float f = info.defaultValue;
         if (info.unit == Unit::Choice && value.isString())
         {
             const int c = choiceFromJson (info, value);
             if (c < 0)
+            {
+                out.warnings.push_back ("\"" + key + "\": unknown choice \"" + value.asString() + "\" ignored");
                 continue;
+            }
             f = static_cast<float> (c);
         }
         else if (value.isBool())
@@ -132,11 +426,15 @@ bool fromJson (const json::Value& v, Preset& out, std::string& error)
         }
         else
         {
+            out.warnings.push_back ("\"" + key + "\": expected " + (info.unit == Unit::Choice ? "a label" : (info.unit == Unit::Toggle ? "true or false" : "a number")) + ", ignored");
             continue;
         }
         if (! std::isfinite (f))
+        {
+            out.warnings.push_back ("\"" + key + "\": not a finite number, ignored");
             continue;
-        out.values[static_cast<size_t> (id)] = info.clamp (f);
+        }
+        out.values[static_cast<size_t> (id)] = clampReported (info, f, out.warnings);
         if (isAppState (id))
             carried.push_back (id);
     }
@@ -158,7 +456,14 @@ json::Value toJson (const Preset& p, bool full)
 {
     json::Value root;
     root.set ("format", "flubsound-preset");
-    root.set ("version", kSchemaVersion);
+    // A number, so builds from before major.minor (which read "version" as a
+    // number) refuse a newer file instead of reading it as version 1. Minors
+    // 1..9 only: 2.10 would read back as 2.1.
+    static_assert (kSchemaVersion.minorVersion >= 0 && kSchemaVersion.minorVersion <= 9);
+    root.set ("version", kSchemaVersion.majorVersion + kSchemaVersion.minorVersion / 10.0);
+    if (isValidUuid (p.uuid))
+        root.set ("uuid", toLowerAscii (p.uuid));
+    root.set ("contentHash", contentHash (p));
     root.set ("name", p.name);
     root.set ("category", p.category);
     root.set ("author", p.author);
@@ -253,5 +558,32 @@ Preset captureFromStore (const ParameterStore& store, Bank bank)
     for (int i = 0; i < kNumParams; ++i)
         p.values[static_cast<size_t> (i)] = store.get (bank, i);
     return p;
+}
+
+std::vector<float> resolveSavedState (const std::vector<std::pair<std::string, float>>& saved, std::vector<std::string>* warnings)
+{
+    const auto& t = layout();
+    std::vector<float> values (t.size());
+    for (size_t i = 0; i < t.size(); ++i)
+        values[i] = t[i].defaultValue; // absent from the state: the default, not the previous value
+    std::vector<std::string> ignored;
+    for (const auto& [key, value] : saved)
+    {
+        const int id = findByKey (key);
+        if (id < 0)
+        {
+            ignored.push_back (unknownKeyWarning (key));
+            continue;
+        }
+        if (! std::isfinite (value))
+        {
+            ignored.push_back ("\"" + key + "\": not a finite number, ignored");
+            continue;
+        }
+        values[static_cast<size_t> (id)] = clampReported (t[static_cast<size_t> (id)], value, ignored);
+    }
+    if (warnings != nullptr)
+        *warnings = std::move (ignored);
+    return values;
 }
 } // namespace flub::preset

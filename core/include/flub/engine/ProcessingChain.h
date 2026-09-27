@@ -27,10 +27,22 @@
 //    -> output gain -> global bypass crossfade (dry delayed by total latency,
 //       optionally loudness matched) -> meters / analyser taps -> out (2 ch)
 //
-// Per block (RT): snapshot store -> MacroMap (Boost Intensity + mode macros,
-// governed) -> mode policy -> push params into modules -> process ->
-// telemetry (limiter GR, measured THD+N of saturator + clipper) ->
-// SafetyGovernor / AutoDrive updates for the next block.
+// Per block (RT): input sanitiser -> snapshot store -> MacroMap (Boost
+// Intensity + mode macros, governed; at protection strength Normal / Strict
+// also the base drives, see Protection.h) -> mode policy -> push params into
+// modules -> process -> telemetry (limiter GR, measured THD+N of saturator +
+// clipper) -> SafetyGovernor / AutoDrive updates for the next block.
+//
+// Input sanitiser (docs/11 E10 Phase 1), before anything else sees the block:
+//   * a NaN / Inf anywhere drops the whole block (silence out) and resets the
+//     signal path, not the control loops (they never see it);
+//   * a finite sample beyond +24 dBFS (kSanitiseLimit; no real source gets
+//     there, a driver or decoder fault does, e.g. 1e30) is muted - set to 0,
+//     not clamped: a clamped +24 dBFS sample would still hit every detector in
+//     the signal path - and the block is hidden from the control loops
+//     (AutoLevel, AutoDrive, the governor's detectors, the loudness match),
+//     which hold for it, so one corrupt sample cannot move them for seconds.
+//   Both are counted on MeterBus (corruptSampleCount, droppedBlockCount).
 //
 // Latency is the sum of the slot latencies for the current latency profile
 // and is constant until the next prepare(). Latency profiles (48 kHz):
@@ -187,6 +199,18 @@ public:
         atomic, taken by the next process()). */
     void redetectInputChannels() noexcept FLUB_NONBLOCKING { redetectRequest.store (true, std::memory_order_relaxed); }
 
+    /** How far the SafetyGovernor reaches (Protection.h): Off (default)
+        governs the macro amounts only, Normal also the base max.drive,
+        sat.drive and bass.harmonics, Strict as Normal with the scale's floor
+        at 0. A host / user safety setting, not a preset value: any thread
+        (one atomic), taken by the next process(). */
+    void setProtectionStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING { protectionStrength.store (static_cast<int> (s), std::memory_order_relaxed); }
+    ProtectionStrength getProtectionStrength() const noexcept { return static_cast<ProtectionStrength> (protectionStrength.load (std::memory_order_relaxed)); }
+
+    /** Input samples with a magnitude above this (+24 dBFS) are corrupt and
+        muted by the sanitiser (see the header comment). */
+    static constexpr float kSanitiseLimit = 15.85f;
+
     /** The dynamic EQ's internal mode bands (footsteps / anti-masking / voice
         in Gaming, de-harsh / air / de-boom in Music) occupy bands 4..7. */
     static constexpr int kFirstModeBand = 4, kNumModeBands = 4;
@@ -250,6 +274,7 @@ private:
     int totalLatency = 0;
 
     std::vector<float> base, effective; // kNumParams each (allocated in ctor); audio thread only
+    std::vector<float> governedBase;    // base with the governed base drives (protection Normal / Strict)
     std::vector<float> baseAtPrepare;   // structural values the chain was prepared with
     std::atomic<uint32_t> auditionMask { 0 }; // bit per module, see auditionBit()
     std::unique_ptr<std::atomic<float>[]> publishedEffective; // copy of effective for other threads
@@ -287,6 +312,8 @@ private:
     SafetyGovernor governor;
     DistortionMonitor distortion;
     ComparisonMatcher loudnessMatch;
+    std::atomic<int> protectionStrength { static_cast<int> (ProtectionStrength::Off) };
+    uint64_t corruptSamples = 0, droppedBlocks = 0; // input sanitiser, since prepare()
 
     // Surround fold (5.1 / 7.1 input): the virtualiser's binaural render B,
     // the unity BS.775 matrix D (Bs775Fold, LFE included) and the detector.

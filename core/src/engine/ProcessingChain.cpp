@@ -94,6 +94,9 @@ constexpr double kSpeechLinkMaxRate = 32000.0;
 constexpr double kGateFrameMs = 1024.0 * 1000.0 / 48000.0;
 constexpr double kQualityMinRate = 32000.0;
 
+// The governor ticks where the maximizer's limiter-GR windows close (docs/11 E06).
+static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
+
 int gateFftSizeFor (double sampleRate) noexcept
 {
     const double frame = kGateFrameMs * 0.001 * sampleRate;
@@ -179,6 +182,7 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
 {
     base.assign (static_cast<size_t> (kNumParams), 0.0f);
     effective.assign (static_cast<size_t> (kNumParams), 0.0f);
+    governedBase.assign (static_cast<size_t> (kNumParams), 0.0f);
     baseAtPrepare.assign (static_cast<size_t> (kNumParams), 0.0f);
     publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
     store.snapshot (base.data());
@@ -395,6 +399,9 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     tapScratch.assign (static_cast<size_t> (maxB), 0.0f);
 
     meterBus.latencyMs.store (static_cast<float> (1000.0 * totalLatency / sr), std::memory_order_relaxed);
+    corruptSamples = droppedBlocks = 0;
+    meterBus.corruptSampleCount.store (0, std::memory_order_relaxed);
+    meterBus.droppedBlockCount.store (0, std::memory_order_relaxed);
     reset();
 }
 
@@ -422,6 +429,7 @@ void ProcessingChain::resetSignalState() noexcept
     dryLimiter.reset();
     dryLimiterRunning = false;
     distortion.reset();
+    governor.restartTickGrid(); // the maximizer's window grid restarts with its slot
     inLevel.reset();
     outLevel.reset();
     outTruePeak.reset();
@@ -445,7 +453,21 @@ bool ProcessingChain::needsReprepare() const noexcept
 
 void ProcessingChain::applyParameters() noexcept
 {
-    MacroMap::apply (base.data(), effective.data(), governor.getScale());
+    // ---- Governor (docs/11 E06): the scale multiplies every governed macro
+    // amount and, at protection strength Normal / Strict, the base drives
+    // too (the store is never written) ----
+    const auto strength = static_cast<ProtectionStrength> (protectionStrength.load (std::memory_order_relaxed));
+    governor.setStrength (strength);
+    const float governorScale = governor.getScale();
+    const float* governed = base.data();
+    if (strength != ProtectionStrength::Off && governorScale < 1.0f)
+    {
+        std::copy (base.begin(), base.end(), governedBase.begin());
+        for (int id : { MaxDriveDb, SatDriveDb, BassHarmonics }) // all >= 0: scaled towards their minimum, 0
+            governedBase[static_cast<size_t> (id)] *= governorScale;
+        governed = governedBase.data();
+    }
+    MacroMap::apply (governed, effective.data(), governorScale);
     float* e = effective.data();
     // Mode / format policies below write their overrides into e, so the
     // values published at the end (effectiveValue(), GUI ghost markers) are
@@ -801,19 +823,44 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     if (n <= 0)
         return;
 
+    // ---- 0. Input sanitiser (docs/11 E10; see the header comment) ----
     // A single NaN/Inf from a misbehaving driver or upstream plug-in would latch
     // forever in IIR state: drop the block and restart the signal path cleanly.
     // The control loops (governor, AutoLevel, AutoDrive, ComparisonMatcher) have
     // not seen this block, so their converged state is kept.
-    float checksum = 0.0f;
+    float checksum = 0.0f, peak = 0.0f;
     for (int c = 0; c < io.numChannels; ++c)
+    {
+        const float* x = io.channel (c);
         for (int i = 0; i < n; ++i)
-            checksum += io.channel (c)[i] * 0.0f;
+        {
+            checksum += x[i] * 0.0f;
+            peak = std::max (peak, std::abs (x[i]));
+        }
+    }
     if (! std::isfinite (checksum))
     {
         io.clear();
         resetSignalState();
+        meterBus.droppedBlockCount.store (++droppedBlocks, std::memory_order_relaxed);
         return;
+    }
+    // Finite garbage (1e30 from a decoder fault) passes the check above:
+    // mute each such sample and hide the block from the control loops.
+    const bool contaminated = peak > kSanitiseLimit;
+    if (contaminated)
+    {
+        for (int c = 0; c < io.numChannels; ++c)
+        {
+            float* x = io.channel (c);
+            for (int i = 0; i < n; ++i)
+                if (std::abs (x[i]) > kSanitiseLimit)
+                {
+                    x[i] = 0.0f;
+                    ++corruptSamples;
+                }
+        }
+        meterBus.corruptSampleCount.store (corruptSamples, std::memory_order_relaxed);
     }
 
     store.snapshot (base.data());
@@ -831,7 +878,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     const AudioBlock in = io.firstChannels (config.inputChannels);
     const float g0 = inputGain.getCurrent();
     in.applyGainRamp (g0, inputGain.skip (n));
-    autoLevel.process (in);
+    autoLevel.process (in, ! contaminated);
 
     // ---- 2. Fold to stereo ----
     inputDetector.process (in);
@@ -842,7 +889,8 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     // ---- 3. Dry reference for global bypass / A-B ----
     const AudioBlock dry = dryBuffer.block (2, n);
     dry.copyFrom (st);
-    loudnessMatch.measureDry (dry);
+    if (! contaminated)
+        loudnessMatch.measureDry (dry);
     dryDelay.process (dry);
 
     inLevel.process (st);
@@ -884,14 +932,23 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     // clipping than it did on the proxy; the saturator's THD+N is added.
     const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getWindowClipEnergyDb()) : kMinusInfDb;
     // Its GR input is the deepest limiting per fixed 10 ms window, not per
-    // host block, so the budget does not depend on the buffer size.
-    governor.update (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
-    autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
-    loudnessMatch.measureWet (st);
+    // host block, and it ticks once per such window (docs/11 E06), so
+    // neither the budget nor the scale's steps depend on the buffer size.
+    // A block the sanitiser hid from the control loops only advances the grid.
+    if (contaminated)
+    {
+        governor.skip (n);
+    }
+    else
+    {
+        governor.update (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
+        autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
+        loudnessMatch.measureWet (st);
+    }
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
     // The louder side is turned down, never the quieter one up (docs/11 E37).
-    loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n);
+    loudnessMatch.update (on (e, BypassAll), on (e, LoudnessMatchBypass), n, ! contaminated);
     loudnessMatch.applyWetTrim (st);
     dryMatchGain.setTarget (dbToGain (loudnessMatch.getDryTrimDb()));
 
@@ -976,10 +1033,15 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.glueGainReductionDb.store (maxActive ? maximizer.getGlueReductionDb() : 0.0f, rl);
     m.clipEnergyRatioDb.store (maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, rl);
     m.distortionDb.store (distortion.getSmoothedDb(), rl);
+    m.harmonicsDb.store (distortion.getSmoothedHarmonicsDb(), rl);
     m.bassProtectionDb.store (active (SBass) ? bass.getProtectionDb() : 0.0f, rl);
     for (int b = 0; b < DynamicEq::kMaxBands && b < MeterBus::kMaxDynBands; ++b)
         m.dynEqGainDb[static_cast<size_t> (b)].store (dynEqActive ? dynEq.getBandGainDb (b) : 0.0f, rl);
     m.governorScale.store (governor.getScale(), rl);
+    m.governorState.store (static_cast<int> (governor.getState()), rl);
+    m.governorReason.store (governor.getReason(), rl);
+    m.governorGrDb.store (governor.getAverageGainReductionDb(), rl);
+    m.governorDistortionDb.store (governor.getAverageDistortionDb(), rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);
     m.activeChannelMask.store (inputDetector.getActiveMask(), rl);

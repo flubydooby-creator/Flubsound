@@ -36,9 +36,18 @@ struct MeterBus
     std::atomic<float> compGainReductionDb { 0.0f }, compUpwardGainDb { 0.0f };
     std::atomic<float> maxGainReductionDb { 0.0f }, glueGainReductionDb { 0.0f }, clipEnergyRatioDb { -160.0f };
     std::atomic<float> distortionDb { -160.0f }; // measured THD+N of saturator + clipper (dB re output, 300 ms smoothing)
+    // The share of the harmonics the bass harmonics and the air exciter add on
+    // purpose (dB re their output, 300 ms smoothing; not budgeted, docs/03 §14.5).
+    std::atomic<float> harmonicsDb { -160.0f };
     std::atomic<float> bassProtectionDb { 0.0f };
     std::array<std::atomic<float>, kMaxDynBands> dynEqGainDb {};
     std::atomic<float> governorScale { 1.0f };  // 1 = Boost Intensity fully applied
+    // SafetyGovernor (docs/11 E06): its SafetyGovernor::State, the
+    // SafetyGovernor::kReason* bits of the budgets that made it back off (0
+    // while the scale is 1), and the ~3 s averages compared with the budgets.
+    std::atomic<int> governorState { 0 };
+    std::atomic<uint32_t> governorReason { 0 };
+    std::atomic<float> governorGrDb { 0.0f }, governorDistortionDb { -160.0f };
     std::atomic<float> autoLevelGainDb { 0.0f };
     std::atomic<float> autoDriveDb { 0.0f };
 
@@ -52,6 +61,9 @@ struct MeterBus
     // Engine
     std::atomic<float> latencyMs { 0.0f };
     std::atomic<uint64_t> safetyClipCount { 0 };
+    // Input sanitiser (docs/11 E10), since prepare(): finite samples beyond
+    // +24 dBFS muted, and blocks dropped for a NaN / Inf.
+    std::atomic<uint64_t> corruptSampleCount { 0 }, droppedBlockCount { 0 };
 
     /** GUI -> audio: request integrated loudness / TP-hold reset. */
     std::atomic<bool> resetLoudnessRequest { false };
