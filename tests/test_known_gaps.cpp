@@ -26,6 +26,11 @@
 //     by the preset slice, kept as its regression test)
 //   * 3 kHz ILD added by Positional Focus (E24; closed by its 3 dB cap)
 //   * 3.2 kHz lift at Bluetooth hands-free rates, 8 / 16 / 32 kHz (E17)
+//   * protection (E06 slice, E10 Phase 1): integrated-loudness spread of
+//     governed macros over host block sizes 64..4096 (closed); disturbance
+//     of a single 1e30 sample and of a NaN burst (closed); DC after the
+//     maximizer at 24 dB drive per latency profile; 50 Hz THD+N of all Music
+//     macros at protection strength Off / Normal / Strict
 //
 // Every test prints its measured values ("    measured ...") so a tuning
 // session reads the numbers from one run of `flub_tests KnownGap`. The last
@@ -408,12 +413,22 @@ TEST_CASE ("KnownGap: pumping - a 2 kHz tone under 55 Hz kicks moves with every 
     CHECK_LE (rows[0].spread, 0.2);
     CHECK_LE (rows[0].dip, 0.3);
 
+    // Re-baselined by the docs/11 E06 slice (the governor ticks on its 10 ms
+    // grid and the chain's segments end there): spread 4.92 -> 3.60 dB, dip
+    // 2.97 -> 2.41, lift 3.33 -> 3.56, time > 1 dB down 32.2 -> 2.7 %. Not a
+    // pumping fix: Boost 100 governs here, and the governor's trajectory -
+    // hence this metric - depended on the host block before (CLI, same
+    // scene: 4.37 / 3.03 / 3.31 dB / 32.2 % at 64-sample blocks, 3.76 / 2.25 /
+    // 3.58 dB / 3.2 % at 480) and still differs between 64-256 and >= 480
+    // samples (the 25 ms THD+N windows close on the host's block grid). The
+    // time-down share flips between about 32 % and 3 % with small changes of
+    // the trajectory.
     // KNOWN_GAP: target max dip <= 6 dB (<= 3 dB only with multiband) per docs/11 E05 Done-when.
-    CHECK_NEAR (rows[1].dip, 2.97, 0.3);
+    CHECK_NEAR (rows[1].dip, 2.41, 0.3);
     // KNOWN_GAP: E59 reports p95 - p5 and lift / dip separately; docs/11 E05 / E02 set no target for them yet.
-    CHECK_NEAR (rows[1].spread, 4.92, 0.3);
-    CHECK_NEAR (rows[1].lift, 3.33, 0.3);
-    CHECK_NEAR (100.0 * rows[1].down, 32.2, 2.0);
+    CHECK_NEAR (rows[1].spread, 3.60, 0.3);
+    CHECK_NEAR (rows[1].lift, 3.56, 0.3);
+    CHECK_NEAR (100.0 * rows[1].down, 2.7, 2.0);
 }
 
 TEST_CASE ("KnownGap: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)")
@@ -808,10 +823,15 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     // make-up 6 dB, upward compression, the Footsteps bell) - a preset retune.
     CHECK_NEAR (before, 11.98, 0.3);
     CHECK_NEAR (staticLift, 6.98, 0.3);
-    // A 10 s event is a new level after 5 s (the upper gate's release), so
-    // Auto Level adapts to it; the 3 dB/s recovery closes the hole within
-    // 5 s (KNOWN_GAP: no Done-when for long events in docs/11 E21).
-    CHECK_NEAR (longHole1, 3.25, 0.3);
+    // A 10 s event: the upper gate's 5 s release counts only the blocks in
+    // which the 100 ms measure also reads above the gate, so whether this
+    // intermittent fire becomes a new level depended on the host block (a
+    // 3.25 dB hole 1-2 s after it at 512-sample blocks, none at 64 or 480;
+    // the CLI measured 2.93 dB at 256 / 512 / 1024 and -0.48 dB at 64 / 480).
+    // Since the chain's segments end on the governor's 10 ms grid (docs/11
+    // E06) the count is the same at every block size: no new level, no hole
+    // (KNOWN_GAP: no Done-when for long events in docs/11 E21).
+    CHECK_NEAR (longHole1, -0.31, 0.3);
     CHECK_LE (std::abs (longHole5), 1.0);
 }
 
@@ -1157,10 +1177,13 @@ TEST_CASE ("KnownGap closed: governed macros at 64..4096-sample blocks - Boost 1
     // The governor ticks on the maximizer's 10 ms GR-window grid and the chain
     // ends its processing segments on that grid, so the scale's trajectory -
     // the only block-size dependent part of the chain on this programme -
-    // is the same at every host block size. Before the E06 slice (a per-block
-    // tick with dt = block length and a new scale only at the next host
-    // block) this stimulus spread 0.29 LU on the CLI (-10.86 at 128 to
-    // -11.15 LUFS at 4096 samples).
+    // is nearly the same at every host block size. Before the E06 slice (a
+    // per-block tick with dt = block length, the new scale taking effect at
+    // the next host block) this scene spread 0.25 LU (-10.40 LUFS at 256 to
+    // -10.65 at 4096 samples); now 0.047 LU. What is left is the 25 ms
+    // THD+N windows of the saturator and the clipper, which close at the
+    // first segment boundary after 25 ms (1216 samples at 64-sample blocks,
+    // 1440 at 480 and above).
     const auto input = kickProgramme (20.0);
     RenderOptions o = boosted (ModeValue::Music, 100.0f);
     o.macros.push_back ({ "loudness", 100.0f });

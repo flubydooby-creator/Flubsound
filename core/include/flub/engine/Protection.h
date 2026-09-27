@@ -27,18 +27,22 @@
 //   multiplies every "governed" macro amount.
 //   The loop ticks on a fixed 10 ms grid counted from reset() - the grid the
 //   maximizer's limiter-GR windows close on - with dt = 10 ms, however the
-//   host splits the audio into blocks (docs/11 E06 slice): a block that
+//   host splits the audio into blocks (docs/11 E06 slice): a call that
 //   closes no window leaves the scale alone, one that closes k windows ticks
-//   k times on its readings. A per-block tick (dt = block length) moved the
-//   scale on the block grid, which alone spread Boost 100 + Loudness 100 by
-//   0.29 LU over blocks 64-4096 on kick-heavy programme.
+//   k times on its readings. ProcessingChain ends its processing segments on
+//   this grid (samplesToNextTick()), so each tick reads the window that just
+//   closed and its scale takes effect at the same sample for any host block
+//   size. A per-block tick (dt = block length, the new scale applied from the
+//   next host block) spread Boost 100 + Loudness 100 by 0.25 LU over blocks
+//   64-4096 on kick-heavy programme; now 0.05 LU.
 //   Protection strength (ProtectionStrength, a host setting, not a preset
 //   value): Off (the default) never touches base values, as before; Normal
 //   also scales the base max.drive, sat.drive and bass.harmonics by the same
 //   scale (ProcessingChain::applyParameters); Strict does that and lets the
 //   scale fall to 0 instead of 0.3.
 //   getState() / getReason() say what the loop is doing and which budget
-//   made it back off (published on MeterBus for the UI and the CLI).
+//   made it back off (published on MeterBus with the scale and both
+//   averages).
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -321,7 +325,7 @@ public:
     void restartTickGrid() noexcept FLUB_NONBLOCKING { pendingSamples = 0; }
     /** Samples until the next tick (1 .. one window): the chain ends its
         processing segments there, so a new scale takes effect on the grid. */
-    int samplesToNextTick() const noexcept { return tickSamples - pendingSamples; }
+    int samplesToNextTick() const noexcept FLUB_NONBLOCKING { return tickSamples - pendingSamples; }
     /** Sets the scale's floor (Strict: 0, else kMinScale); any time on the
         audio thread. A scale below a raised floor is lifted to it. */
     void setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING;

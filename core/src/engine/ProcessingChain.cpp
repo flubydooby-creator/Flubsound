@@ -867,11 +867,35 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     // grid, docs/11 E06), so a new scale takes effect at the same sample
     // whatever the host block size: a 4096-sample block no longer holds a
     // scale for 85 ms that a 64-sample host would have updated at the tick.
+    blockReadings = {};
     for (int start = 0; start < n;)
     {
         const int length = std::min (n - start, governor.samplesToNextTick());
         processSegment (io.subBlock (start, length), contaminated);
         start += length;
+    }
+    publishMeters (io.firstChannels (2), n);
+}
+
+void ProcessingChain::accumulateReadings() noexcept
+{
+    // The modules' "deepest in the last block" readings cover one segment:
+    // keep the host block's extremes, so the meters read as they did before
+    // the block was split (the clip energy ratio over the whole block).
+    auto& r = blockReadings;
+    if (! slots[SComp].isFullyBypassed())
+    {
+        r.compGrDb = std::min (r.compGrDb, compressor.getGainReductionDb());
+        r.compUpDb = std::max (r.compUpDb, compressor.getUpwardGainDb());
+    }
+    if (! slots[SMax].isFullyBypassed())
+    {
+        r.maxGrDb = std::min (r.maxGrDb, maximizer.getGainReductionDb());
+        r.glueGrDb = std::min (r.glueGrDb, maximizer.getGlueReductionDb());
+        // Removed energy = ratio x input energy, summed over the segments.
+        const double in = maximizer.getClipInputEnergy();
+        r.clipRemoved += in * std::pow (10.0, 0.1 * static_cast<double> (maximizer.getClipEnergyRatioDb()));
+        r.clipInput += in;
     }
 }
 
@@ -1009,8 +1033,8 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         dryMatchGain.skip (n);
     }
 
-    // ---- 8. Output meters / analyser ----
-    publishMeters (st, n);
+    // ---- 8. Analyser (the meters are published once per host block) ----
+    accumulateReadings();
     for (int i = 0; i < n; ++i)
         tapScratch[static_cast<size_t> (i)] = 0.5f * (st.channel (0)[i] + st.channel (1)[i]);
     analyzerTaps.post.push (tapScratch.data(), static_cast<size_t> (n));
@@ -1048,11 +1072,15 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     // the governor and distortion inputs).
     const auto active = [this] (int slot) { return ! slots[static_cast<size_t> (slot)].isFullyBypassed(); };
     const bool compActive = active (SComp), maxActive = active (SMax), dynEqActive = active (SDynEq);
-    m.compGainReductionDb.store (compActive ? compressor.getGainReductionDb() : 0.0f, rl);
-    m.compUpwardGainDb.store (compActive ? compressor.getUpwardGainDb() : 0.0f, rl);
-    m.maxGainReductionDb.store (maxActive ? maximizer.getGainReductionDb() : 0.0f, rl);
-    m.glueGainReductionDb.store (maxActive ? maximizer.getGlueReductionDb() : 0.0f, rl);
-    m.clipEnergyRatioDb.store (maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, rl);
+    const auto& r = blockReadings; // this host block's extremes over its segments
+    m.compGainReductionDb.store (compActive ? r.compGrDb : 0.0f, rl);
+    m.compUpwardGainDb.store (compActive ? r.compUpDb : 0.0f, rl);
+    m.maxGainReductionDb.store (maxActive ? r.maxGrDb : 0.0f, rl);
+    m.glueGainReductionDb.store (maxActive ? r.glueGrDb : 0.0f, rl);
+    m.clipEnergyRatioDb.store (maxActive && r.clipInput > 0.0 && r.clipRemoved > 0.0
+                                   ? static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (r.clipRemoved / r.clipInput)))
+                                   : kMinusInfDb,
+                               rl);
     m.distortionDb.store (distortion.getSmoothedDb(), rl);
     m.harmonicsDb.store (distortion.getSmoothedHarmonicsDb(), rl);
     m.bassProtectionDb.store (active (SBass) ? bass.getProtectionDb() : 0.0f, rl);

@@ -3,6 +3,7 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/dsp/Fft.h"
 #include "flub/dsp/StereoSpatializer.h"
 #include "flub/dsp/Svf.h"
 
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -172,6 +174,48 @@ double crossfeedDb (double c, double freq, double fs)
     const std::complex<double> lp = 1.0 / std::complex<double> (1.0, ratio);
     return 20.0 * std::log10 (std::abs (1.0 - 0.6 * c * lp));
 }
+
+/** Crossfeed ITD (ms): lag of the peak of the L'/R' cross-correlation
+    (parabolic interpolation), positive when the right (far) ear lags. */
+double crossCorrelationLagMs (const Planar& b, int from, double fs)
+{
+    const int n = static_cast<int> (b.ch[0].size());
+    const int maxLag = static_cast<int> (0.002 * fs);
+    std::vector<double> c (static_cast<size_t> (2 * maxLag + 1));
+    for (int k = -maxLag; k <= maxLag; ++k)
+    {
+        double acc = 0.0;
+        for (int i = from + maxLag; i < n - maxLag; ++i)
+            acc += static_cast<double> (b.ch[0][static_cast<size_t> (i)]) * b.ch[1][static_cast<size_t> (i + k)];
+        c[static_cast<size_t> (k + maxLag)] = acc;
+    }
+    size_t best = 0;
+    for (size_t i = 1; i < c.size(); ++i)
+        if (c[i] > c[best])
+            best = i;
+    double frac = 0.0;
+    if (best > 0 && best + 1 < c.size())
+    {
+        const double a = c[best - 1], m = c[best], z = c[best + 1];
+        frac = 0.5 * (a - z) / (a - 2.0 * m + z);
+    }
+    return (static_cast<double> (best) - maxLag + frac) / fs * 1000.0;
+}
+
+/** Magnitude-squared spectrum (nfft / 2 + 1 bins) of x, zero-padded. */
+std::vector<double> powerSpectrum (const std::vector<float>& x, int nfft)
+{
+    Fft fft;
+    fft.prepare (nfft);
+    std::vector<float> in (static_cast<size_t> (nfft), 0.0f);
+    std::copy_n (x.begin(), std::min (x.size(), in.size()), in.begin());
+    std::vector<Fft::Complex> bins (static_cast<size_t> (nfft / 2 + 1));
+    fft.forwardReal (in.data(), bins.data());
+    std::vector<double> p (bins.size());
+    for (size_t i = 0; i < bins.size(); ++i)
+        p[i] = static_cast<double> (std::norm (bins[i]));
+    return p;
+}
 } // namespace
 
 //==============================================================================
@@ -179,6 +223,9 @@ TEST_CASE ("StereoSpatializer: L'+R' == L+R for random stereo noise under random
 {
     FastRandom rng (0xC0FFEEu);
     const auto rnd = [&rng] (float lo, float hi) { return lo + (hi - lo) * 0.5f * (rng.nextBipolar() + 1.0f); };
+    // The mono guarantee covers width, focus, space and the Mono-safe
+    // crossfeed; the Bs2b / Meier crossfeed is a real L / R crossfeed with an
+    // interaural delay and is exempt (docs/11 E12, tested below).
     const auto randomParams = [&] {
         SpatializerParams p;
         p.width = rnd (0.0f, 2.0f);
@@ -186,6 +233,7 @@ TEST_CASE ("StereoSpatializer: L'+R' == L+R for random stereo noise under random
         p.positionalFocus = rnd (0.0f, 1.0f);
         p.space = rnd (0.0f, 1.0f);
         p.crossfeed = rnd (0.0f, 1.0f);
+        p.crossfeedType = CrossfeedType::MonoSafe;
         p.autoMonoSafety = rng.nextBipolar() > 0.0f;
         p.minCorrelation = rnd (-1.0f, 1.0f);
         return p;
@@ -288,33 +336,37 @@ TEST_CASE ("StereoSpatializer: width 0 folds to mono, L' == R' == (L + R) / 2")
 
 TEST_CASE ("StereoSpatializer: width 2 lifts S by 6 dB above the low cut and not below; M untouched")
 {
+    // Measured on a panned source (M = 4 S): the width polarity guard then
+    // allows the full shelf (it caps S' at M; docs/11 E12). A pure side
+    // signal (no M) is not widened.
     SpatializerParams p = neutral();
     p.width = 2.0f;
     p.widthLowCutHz = 180.0f;
-    CHECK_LE (std::abs (sideGainDb (p, 40.0)), 0.1);
-    CHECK_LE (sideGainDb (p, 90.0), 0.6); // half the cut: +0.4 dB (an LR4 sum: +0.5 dB)
-    CHECK_NEAR (sideGainDb (p, 2000.0), 6.02, 0.1);
-    CHECK_NEAR (sideGainDb (p, 10000.0), 6.02, 0.1);
+    CHECK_LE (std::abs (sideGainDb (p, 40.0, kFs, 4.0f)), 0.1);
+    CHECK_LE (sideGainDb (p, 90.0, kFs, 4.0f), 0.6); // half the cut: +0.4 dB (an LR4 sum: +0.5 dB)
+    CHECK_NEAR (sideGainDb (p, 2000.0, kFs, 4.0f), 6.02, 0.1);
+    CHECK_NEAR (sideGainDb (p, 10000.0, kFs, 4.0f), 6.02, 0.1);
+    CHECK_LE (std::abs (sideGainDb (p, 2000.0)), 0.01);
 
     // The response is exactly the 2nd-order (Q 1/sqrt 2) high shelf of Svf.h.
     const auto shelf = SvfCoeffs::make (FilterType::HighShelf, 180.0, 0.70710678, 20.0 * std::log10 (2.0), kFs);
     for (double f : { 60.0, 180.0, 400.0, 1000.0 })
-        CHECK_NEAR (sideGainDb (p, f), shelf.magnitudeDb (f, kFs), 0.05);
+        CHECK_NEAR (sideGainDb (p, f, kFs, 4.0f), shelf.magnitudeDb (f, kFs), 0.05);
 
     // Higher low cut moves the whole transition up.
     p.widthLowCutHz = 500.0f;
-    CHECK_LE (std::abs (sideGainDb (p, 150.0)), 0.1);
-    CHECK_NEAR (sideGainDb (p, 6000.0), 6.02, 0.1);
+    CHECK_LE (std::abs (sideGainDb (p, 150.0, kFs, 4.0f)), 0.1);
+    CHECK_NEAR (sideGainDb (p, 6000.0, kFs, 4.0f), 6.02, 0.1);
 
     // Same at the other sample rates.
     p.widthLowCutHz = 180.0f;
     for (double fs : { 44100.0, 192000.0 })
     {
-        CHECK_LE (std::abs (sideGainDb (p, 40.0, fs)), 0.1);
-        CHECK_NEAR (sideGainDb (p, 5000.0, fs), 6.02, 0.1);
+        CHECK_LE (std::abs (sideGainDb (p, 40.0, fs, 4.0f)), 0.1);
+        CHECK_NEAR (sideGainDb (p, 5000.0, fs, 4.0f), 6.02, 0.1);
     }
 
-    // Narrowing is broadband.
+    // Narrowing is broadband, and not guarded (it never flips an ear).
     p.width = 0.5f;
     CHECK_NEAR (sideGainDb (p, 40.0), -6.02, 0.05);
     CHECK_NEAR (sideGainDb (p, 5000.0), -6.02, 0.05);
@@ -440,9 +492,10 @@ TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono s
     const int start = n / 2, len = n / 2;
     const auto s = sideOf (out, start, len);
     const auto m = midOf (out, start, len);
-    // S = 0.5 * allpass (HP_300 (M)): about -6 dB re M for white noise.
+    // S = 0.5 * allpass (Dip_2k (HP_300 (M))): about -7.4 dB re M for white
+    // noise (-6.1 dB before the docs/11 E12 presence dip).
     const double ratioDb = rmsDb (s) - rmsDb (m);
-    CHECK_NEAR (ratioDb, -6.1, 0.5);
+    CHECK_NEAR (ratioDb, -7.4, 0.5);
 
     // Uncorrelated with M at lag 0 (the pre-delay keeps the Schroeder
     // direct tap out of it) ...
@@ -476,7 +529,8 @@ TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono s
     CHECK_NEAR (sp.getEffectiveWidth(), 1.0, 0.0);
 
     // Steady mono sines: the all-pass network is flat, so S / M is exactly
-    // 0.5 |HP_300 (f)| - -6.02 dB well above 300 Hz, < -25 dB at 80 Hz.
+    // 0.5 |HP_300 (f)| |Dip (f)|: -6.02 dB plus the presence dip (-7 dB at
+    // 2 kHz, Q 0.4) well above 300 Hz, < -25 dB at 80 Hz.
     const auto monoSineSideDb = [&p] (double freq) {
         StereoSpatializer sine1;
         setUp (sine1, p);
@@ -487,8 +541,11 @@ TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono s
         const auto sOut = sideOf (o, from, total - from);
         return toDb (toneAmplitude (sOut.data(), total - from, freq, kFs) / 0.4);
     };
-    CHECK_NEAR (monoSineSideDb (3000.0), -6.02, 0.05);
-    CHECK_NEAR (monoSineSideDb (9000.0), -6.02, 0.05);
+    const auto dip = SvfCoeffs::make (FilterType::Bell, 2000.0, 0.4, -7.0, kFs);
+    const auto hp = SvfCoeffs::make (FilterType::HighPass, 300.0, 0.70710678, 0.0, kFs);
+    for (const double f : { 1000.0, 2000.0, 3000.0, 9000.0 })
+        CHECK_NEAR (monoSineSideDb (f), -6.02 + dip.magnitudeDb (f, kFs) + hp.magnitudeDb (f, kFs), 0.05);
+    CHECK_NEAR (monoSineSideDb (2000.0), -13.0, 0.1);
     CHECK_LE (monoSineSideDb (80.0), -25.0);
 
     // Half the amount -> half the ambience amplitude.
@@ -502,8 +559,10 @@ TEST_CASE ("StereoSpatializer: space adds decorrelated S to a mono input; mono s
 
 TEST_CASE ("StereoSpatializer: crossfeed reduces low-frequency S only; M untouched")
 {
+    // The Mono-safe type: the pre-E12 M / S shelf, kept bit for bit.
     SpatializerParams p = neutral();
     p.crossfeed = 1.0f;
+    p.crossfeedType = CrossfeedType::MonoSafe;
     CHECK_NEAR (sideGainDb (p, 100.0), crossfeedDb (1.0, 100.0, kFs), 0.05);
     CHECK_LE (sideGainDb (p, 100.0), -7.0);
     CHECK_GE (sideGainDb (p, 8000.0), -0.1);
@@ -890,11 +949,14 @@ TEST_CASE ("StereoSpatializer: zero latency - an impulse comes out at its own sa
     CHECK (identical (neutralOut, stereo (imp, zero)));
 
     // Every stage busy: nothing before the impulse, the peak at the impulse.
+    // (The Mono-safe crossfeed, so that the mono sum below is exact; the
+    // Bs2b / Meier crossfeed is checked after it.)
     SpatializerParams p;
     p.width = 2.0f;
     p.positionalFocus = 1.0f;
     p.space = 1.0f;
     p.crossfeed = 0.5f;
+    p.crossfeedType = CrossfeedType::MonoSafe;
     setUp (sp, p);
     Planar out = stereo (imp, zero);
     processInBlocks (sp, out, 64);
@@ -907,6 +969,25 @@ TEST_CASE ("StereoSpatializer: zero latency - an impulse comes out at its own sa
     CHECK_GE (out.ch[0][static_cast<size_t> (at)], 0.5f);
     // M = 0.5 at the impulse and nowhere else: the mono sum is the impulse.
     CHECK_NEAR (out.ch[0][static_cast<size_t> (at)] + out.ch[1][static_cast<size_t> (at)], 1.0, 1.0e-6);
+
+    // Bs2b and Meier crossfeed: still nothing before the impulse and the near
+    // ear peaks at it; the far ear starts only after the interaural delay.
+    for (const auto type : { CrossfeedType::Bs2b, CrossfeedType::Meier })
+    {
+        SpatializerParams x = neutral();
+        x.crossfeed = 1.0f;
+        x.crossfeedType = type;
+        setUp (sp, x);
+        Planar xo = stereo (imp, zero);
+        processInBlocks (sp, xo, 64);
+        CHECK_NEAR (peakAbs (xo.ch[0].data(), at) + peakAbs (xo.ch[1].data(), at), 0.0, 0.0);
+        int nearPeak = 0;
+        for (int i = 0; i < n; ++i)
+            if (std::abs (xo.ch[0][static_cast<size_t> (i)]) > std::abs (xo.ch[0][static_cast<size_t> (nearPeak)]))
+                nearPeak = i;
+        CHECK (nearPeak == at);
+        CHECK_LE (peakAbs (xo.ch[1].data() + at, 10), 1.0e-3); // delay 0.235 ms = 11.3 samples
+    }
 }
 
 TEST_CASE ("StereoSpatializer: parameter jumps are click-free")
@@ -1185,6 +1266,7 @@ TEST_CASE ("StereoSpatializer (review): per-sample parameter thrash stays finite
             p.positionalFocus = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
             p.space = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
             p.crossfeed = rng.nextBipolar() > 0.0f ? 1.0f : 0.0f;
+            p.crossfeedType = CrossfeedType::MonoSafe; // mono-exact (the Bs2b / Meier thrash is below)
             p.autoMonoSafety = rng.nextBipolar() > 0.0f;
             p.minCorrelation = rng.nextBipolar();
             sp.setParams (p);
@@ -1197,6 +1279,23 @@ TEST_CASE ("StereoSpatializer (review): per-sample parameter thrash stays finite
         CHECK_GE (minW, 0.0f);
         CHECK_LE (maxW, 2.0f);
         CHECK_LE (std::max (peakAbs (out.ch[0].data(), n), peakAbs (out.ch[1].data(), n)), 16.0);
+
+        // Crossfeed type thrash (all three types, every sample): finite and bounded.
+        Planar thrash = stereo (in.ch[0], in.ch[1]);
+        StereoSpatializer xf;
+        setUp (xf, SpatializerParams {}, fs, 1);
+        for (int i = 0; i < n; ++i)
+        {
+            SpatializerParams p;
+            p.crossfeed = rng.nextBipolar() > -0.5f ? 1.0f : 0.0f;
+            const auto pick = rng.nextU32() % 3u;
+            p.crossfeedType = pick == 0u ? CrossfeedType::Bs2b : (pick == 1u ? CrossfeedType::Meier : CrossfeedType::MonoSafe);
+            p.width = rng.nextBipolar() > 0.0f ? 2.0f : 1.0f;
+            xf.setParams (p);
+            xf.process (thrash.block (i, 1));
+        }
+        CHECK (allFinite (thrash));
+        CHECK_LE (std::max (peakAbs (thrash.ch[0].data(), n), peakAbs (thrash.ch[1].data(), n)), 16.0);
     }
 }
 
@@ -1231,4 +1330,279 @@ TEST_CASE ("StereoSpatializer (review): re-prepare at another rate, empty blocks
     const double ratioDb = rmsDb (sideOf (buf, n / 2, n / 2)) - rmsDb (midOf (buf, n / 2, n / 2));
     CHECK_NEAR (ratioDb, -6.0, 0.6);
     CHECK_LE (maxMonoSumError (stereo (x, x), buf), 1.0e-5);
+}
+
+// ---- docs/11 E12 Phase A: stereo headphone imaging defects ----
+//
+// Every test prints its measured values; the "before" numbers in the
+// comments are the pre-E12 module measured by the same code.
+
+TEST_CASE ("StereoSpatializer (E12): Bs2b / Meier crossfeed ITD is 0.22-0.30 ms by cross-correlation at every rate")
+{
+    // A hard-left white noise at crossfeed 1: the far ear must lag the near
+    // ear by a real interaural delay. Before E12 the only crossfeed was the
+    // M / S shelf (now the Mono-safe type): 0.029 ms (1.4 samples) here,
+    // 0.24 samples in the docs/11 audit.
+    for (const double fs : kRates)
+        for (const auto type : { CrossfeedType::Bs2b, CrossfeedType::Meier, CrossfeedType::MonoSafe })
+        {
+            SpatializerParams p = neutral();
+            p.crossfeed = 1.0f;
+            p.crossfeedType = type;
+            StereoSpatializer sp;
+            setUp (sp, p, fs);
+            const int n = static_cast<int> (fs);
+            Planar buf = stereo (whiteNoise (n, 0.5f, 201u), std::vector<float> (static_cast<size_t> (n), 0.0f));
+            processInBlocks (sp, buf, 256);
+            const double itd = crossCorrelationLagMs (buf, n / 4, fs);
+            std::printf ("    measured crossfeed ITD, type %d, %.1f kHz: %.4f ms\n", static_cast<int> (type), fs / 1000.0, itd);
+            if (type == CrossfeedType::MonoSafe)
+            {
+                CHECK_LE (std::abs (itd), 0.05);
+            }
+            else
+            {
+                CHECK_GE (itd, 0.22);
+                CHECK_LE (itd, 0.30);
+            }
+        }
+}
+
+TEST_CASE ("StereoSpatializer (E12): Bs2b / Meier crossfeed keeps a hard-panned source's L+R power flat within 0.5 dB")
+{
+    // |near|^2 + |far|^2 = 1 at every frequency (before, with the M / S
+    // shelf: -2.4 dB at low frequencies, 2.43 dB of variation). The far ear
+    // sits the model's feed level below the near ear at low frequencies and
+    // is shadowed above the corner; a centred source sums coherently (the
+    // low-frequency build-up of a speaker pair's phantom centre).
+    struct Case
+    {
+        CrossfeedType type;
+        float amount;
+        double feedDb, centreDb;
+    };
+    for (const Case& c : { Case { CrossfeedType::Bs2b, 1.0f, 4.5, 2.74 }, Case { CrossfeedType::Meier, 1.0f, 9.5, 2.05 },
+                          Case { CrossfeedType::Bs2b, 0.3f, 15.0, 1.29 } })
+    {
+        SpatializerParams p = neutral();
+        p.crossfeed = c.amount;
+        p.crossfeedType = c.type;
+        double lo = 1.0e9, hi = -1.0e9;
+        for (double f = 20.0; f <= 20000.0; f *= std::pow (2.0, 1.0 / 6.0))
+        {
+            StereoSpatializer sp;
+            setUp (sp, p);
+            const auto x = sine (f, kFs, 48000, 0.25f);
+            Planar b = stereo (x, std::vector<float> (x.size(), 0.0f));
+            processInBlocks (sp, b, 256);
+            const double nearA = toneAmplitude (b.ch[0].data() + 24000, 24000, f, kFs) / 0.25;
+            const double farA = toneAmplitude (b.ch[1].data() + 24000, 24000, f, kFs) / 0.25;
+            const double power = 10.0 * std::log10 (nearA * nearA + farA * farA);
+            lo = std::min (lo, power);
+            hi = std::max (hi, power);
+            if (std::abs (f - 50.4) < 1.0)
+            {
+                std::printf ("    measured feed level at 50 Hz, type %d, amount %.1f: %.2f dB\n", static_cast<int> (c.type), static_cast<double> (c.amount), toDb (nearA / farA));
+                CHECK_NEAR (toDb (nearA / farA), c.feedDb, 0.2);
+            }
+        }
+        std::printf ("    measured hard-panned L+R power, type %d, amount %.1f: %.3f .. %.3f dB\n", static_cast<int> (c.type), static_cast<double> (c.amount), lo, hi);
+        CHECK_LE (hi - lo, 0.5);
+        CHECK_LE (std::max (std::abs (lo), std::abs (hi)), 0.5);
+
+        const auto centred = [&p] (double f) {
+            StereoSpatializer sp;
+            setUp (sp, p);
+            const auto x = sine (f, kFs, 48000, 0.25f);
+            Planar b = stereo (x, x);
+            processInBlocks (sp, b, 256);
+            return toDb (toneAmplitude (b.ch[0].data() + 24000, 24000, f, kFs) / 0.25);
+        };
+        const double lf = centred (40.0), hf = centred (12000.0);
+        std::printf ("    measured centred source, type %d, amount %.1f: %.2f dB at 40 Hz, %.2f dB at 12 kHz\n", static_cast<int> (c.type), static_cast<double> (c.amount), lf, hf);
+        CHECK_NEAR (lf, c.centreDb, 0.15);
+        CHECK_LE (std::abs (hf), 0.25);
+    }
+}
+
+TEST_CASE ("StereoSpatializer (E12): Space keeps a centred impulse within 2 dB ILD per 1/3 octave, steady tones within 5 dB over 1-4 kHz")
+{
+    // Centred source, space 1: L' / R' = (1 + A) / (1 - A). Before E12 (5 ms
+    // pre-delay, flat feed): 1.91 dB per 1/3 octave (500 Hz), and 9.27 dB on
+    // steady 1-4 kHz tones (the docs/11 audit's 9.3 dB).
+    SpatializerParams p = neutral();
+    p.space = 1.0f;
+    const int n = 48000, nfft = 1 << 16;
+    std::vector<float> imp (static_cast<size_t> (n), 0.0f);
+    imp[0] = 1.0f;
+    StereoSpatializer sp;
+    setUp (sp, p);
+    Planar b = stereo (imp, imp);
+    processInBlocks (sp, b, 256);
+    const auto pl = powerSpectrum (b.ch[0], nfft);
+    const auto pr = powerSpectrum (b.ch[1], nfft);
+    double worst = 0.0, worstHz = 0.0;
+    for (int k = -10; k <= 12; ++k) // 100 Hz .. 16 kHz
+    {
+        const double fc = 1000.0 * std::pow (2.0, k / 3.0);
+        double el = 0.0, er = 0.0;
+        for (size_t i = 1; i < pl.size(); ++i)
+        {
+            const double f = static_cast<double> (i) * kFs / nfft;
+            if (f >= fc * std::pow (2.0, -1.0 / 6.0) && f < fc * std::pow (2.0, 1.0 / 6.0))
+            {
+                el += pl[i];
+                er += pr[i];
+            }
+        }
+        const double ild = std::abs (10.0 * std::log10 (el / er));
+        if (ild > worst)
+        {
+            worst = ild;
+            worstHz = fc;
+        }
+    }
+    std::printf ("    measured space 1 centred impulse: max ILD per 1/3 octave %.2f dB (at %.0f Hz)\n", worst, worstHz);
+    CHECK_LE (worst, 1.0);
+
+    // Steady tones (1/24 octave): the ripple does not average out, so the
+    // ILD follows the ambience level |A|; the presence dip bounds it where a
+    // voice carries its presence.
+    double vocal = 0.0;
+    for (double f = 1000.0; f <= 4001.0; f *= std::pow (2.0, 1.0 / 24.0))
+    {
+        StereoSpatializer tone;
+        setUp (tone, p);
+        const auto x = sine (f, kFs, 72000, 0.25f);
+        Planar t = stereo (x, x);
+        processInBlocks (tone, t, 256);
+        vocal = std::max (vocal, std::abs (toDb (toneAmplitude (t.ch[0].data() + 36000, 36000, f, kFs) / toneAmplitude (t.ch[1].data() + 36000, 36000, f, kFs))));
+    }
+    std::printf ("    measured space 1 centred steady tones, 1-4 kHz: max ILD %.2f dB\n", vocal);
+    CHECK_LE (vocal, 5.0);
+    // KNOWN_GAP: above 5 kHz and at 300-700 Hz the ambience keeps |A| = 0.5
+    // and steady tones up to 9.5 dB of ILD (per-frequency, from the impulse
+    // response); bounding them needs a per-partial decorrelator (docs/11 E12
+    // Status, docs/03 section 7.9).
+    double fine = 0.0;
+    for (size_t i = 1; i < pl.size(); ++i)
+    {
+        const double f = static_cast<double> (i) * kFs / nfft;
+        if (f >= 250.0 && f <= 16000.0)
+            fine = std::max (fine, std::abs (10.0 * std::log10 (pl[i] / pr[i])));
+    }
+    std::printf ("    measured space 1 centred, per-frequency max ILD 250 Hz-16 kHz: %.2f dB\n", fine);
+    CHECK_NEAR (fine, 9.19, 0.3);
+}
+
+TEST_CASE ("StereoSpatializer (E12): width 2 writes no anti-phase into the far ear of a hard-panned source; partially panned sources still widen")
+{
+    // Before E12 a hard-left source at width 2 put an anti-phase copy at
+    // -6.0 dB re the source into the right ear (ILD 9.5 dB instead of
+    // infinite; -15.3 dB at 100 Hz, below the 180 Hz low cut, from the shelf
+    // transition). The width polarity guard caps S' at M: the far ear stays
+    // exactly silent at every frequency and the left ear is untouched, while
+    // an R = L / 2 source still goes from 6 to 14 dB of ILD.
+    SpatializerParams p = neutral();
+    p.width = 2.0f;
+    p.widthLowCutHz = 180.0f;
+    const int n = 96000;
+    for (const auto& x : { whiteNoise (n, 0.5f, 211u), sine (100.0, kFs, n, 0.5f), sine (1000.0, kFs, n, 0.5f), sine (5000.0, kFs, n, 0.5f) })
+    {
+        StereoSpatializer sp;
+        setUp (sp, p);
+        Planar b = stereo (x, std::vector<float> (x.size(), 0.0f));
+        const Planar in = b;
+        processInBlocks (sp, b, 256);
+        const double farDb = toDb (rms (b.ch[1].data(), n) / rms (x.data(), n));
+        std::printf ("    measured width 2 hard-left: far ear %.1f dB re source\n", farDb);
+        CHECK_LE (farDb, -20.0);
+        CHECK (peakAbs (b.ch[1].data(), n) == 0.0);
+        CHECK (identical (b, in));
+    }
+
+    for (const double f : { 1000.0, 5000.0 })
+    {
+        StereoSpatializer sp;
+        setUp (sp, p);
+        const auto x = sine (f, kFs, n, 0.5f);
+        Planar b = stereo (x, scaled (x, 0.5f));
+        const Planar in = b;
+        processInBlocks (sp, b, 256);
+        const double ild = toDb (toneAmplitude (b.ch[0].data() + n / 2, n / 2, f, kFs) / toneAmplitude (b.ch[1].data() + n / 2, n / 2, f, kFs));
+        std::printf ("    measured width 2, R = L / 2 at %.0f Hz: ILD %.2f dB (6.02 dB in)\n", f, ild);
+        CHECK_GE (ild, 13.0);
+        CHECK_LE (maxMonoSumError (in, b), 1.0e-6); // mono-sum loss 0 dB
+    }
+
+    // A source panned harder than the guard allows (R = L / 4) is widened
+    // only until its far ear reaches silence, never past it (no polarity flip).
+    {
+        StereoSpatializer sp;
+        setUp (sp, p);
+        const auto x = sine (2000.0, kFs, n, 0.5f);
+        Planar b = stereo (x, scaled (x, 0.25f));
+        processInBlocks (sp, b, 256);
+        const double farDb = toDb (toneAmplitude (b.ch[1].data() + n / 2, n / 2, 2000.0, kFs) / 0.5);
+        std::printf ("    measured width 2, R = L / 4 at 2 kHz: far ear %.1f dB re source (-12.0 in)\n", farDb);
+        CHECK_LE (farDb, -20.0);
+        double corr = 0.0;
+        for (int i = n / 2; i < n; ++i)
+            corr += static_cast<double> (b.ch[1][static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+        CHECK_GE (corr, -1.0e-3 * n); // no anti-phase copy
+    }
+}
+
+TEST_CASE ("StereoSpatializer (E12): crossfeed type changes, crossfeed toggles and widening with the guard are click-free")
+{
+    // Panned sine (R = L / 4, so the width guard widens it partially) at its
+    // peak when the parameters jump: no curvature spike above the steady
+    // renders' own (see "parameter jumps are click-free").
+    const int n = 24000, change = 12000;
+    const auto check = [&] (const SpatializerParams& from, const SpatializerParams& to, double freq) {
+        const double phase = 0.5 * kPi - kTwoPi * freq * change / kFs;
+        const auto x = sine (freq, kFs, n, 0.25f, phase);
+        const auto render = [&] (const SpatializerParams& first, const SpatializerParams& second) {
+            StereoSpatializer sp;
+            setUp (sp, first);
+            Planar buf = stereo (x, scaled (x, 0.25f));
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                if (pos == change)
+                    sp.setParams (second);
+                sp.process (buf.block (pos, 480));
+            }
+            return buf;
+        };
+        const Planar steadyFrom = render (from, from);
+        const Planar steadyTo = render (to, to);
+        const Planar jump = render (from, to);
+        for (size_t c = 0; c < 2; ++c)
+        {
+            const double bound = std::max (maxCurvature (steadyFrom.ch[c], 6000, 6000), maxCurvature (steadyTo.ch[c], 18000, 6000));
+            CHECK_LE (maxCurvature (jump.ch[c], change - 100, 9600), 2.0 * bound);
+        }
+    };
+    SpatializerParams a = neutral(), b = neutral();
+    b.crossfeed = 1.0f;
+    for (const auto type : { CrossfeedType::Bs2b, CrossfeedType::Meier, CrossfeedType::MonoSafe })
+    {
+        b.crossfeedType = type;
+        check (a, b, 300.0);
+        check (b, a, 300.0);
+    }
+    a = b = neutral();
+    a.crossfeed = b.crossfeed = 1.0f;
+    for (const auto& pair : { std::pair { CrossfeedType::Bs2b, CrossfeedType::Meier }, std::pair { CrossfeedType::Bs2b, CrossfeedType::MonoSafe },
+                             std::pair { CrossfeedType::Meier, CrossfeedType::MonoSafe } })
+    {
+        a.crossfeedType = pair.first;
+        b.crossfeedType = pair.second;
+        check (a, b, 300.0);
+        check (b, a, 300.0);
+    }
+    a = b = neutral();
+    b.width = 2.0f;
+    check (a, b, 1000.0);
+    check (b, a, 1000.0);
 }

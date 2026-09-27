@@ -169,6 +169,13 @@ static_assert (std::is_same_v<decltype (&DistortionMonitor::combineDb), float (*
 static_assert (hasNonblockingReset<DistortionMonitor>);
 static_assert (std::is_same_v<decltype (&SafetyGovernor::update), void (SafetyGovernor::*) (float, float, int) noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<SafetyGovernor>);
+// The governor's 10 ms tick grid, protection strength and hidden-block
+// path (docs/11 E06 slice / E10 Phase 1, tests/test_protection_gaps.cpp).
+static_assert (std::is_same_v<decltype (&SafetyGovernor::skip), void (SafetyGovernor::*) (int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::setStrength), void (SafetyGovernor::*) (ProtectionStrength) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::restartTickGrid), void (SafetyGovernor::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::samplesToNextTick), int (SafetyGovernor::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::setProtectionStrength), void (ProcessingChain::*) (ProtectionStrength) noexcept FLUB_NONBLOCKING>);
 
 // Neural slot (tests/test_neural_slot.cpp): ProcessingChain::process runs the
 // slot's AsyncModelProcessor (process / reset asserted above) and publishes
@@ -203,6 +210,8 @@ static_assert (hasNonblockingProcess<AutoLevel>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::measureDry), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::measureWet), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::update), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ComparisonMatcher::updateUnmeasured), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&AutoLevel::processUnmeasured), void (AutoLevel::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::applyWetTrim), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 
 // The surround fold and input-channel detection (tests/test_virtualizer_fold.cpp,

@@ -270,6 +270,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     limiterGrDb.store (0.0f, std::memory_order_relaxed);
     glueGrDb.store (0.0f, std::memory_order_relaxed);
     clipRatioDb.store (kMinusInfDb, std::memory_order_relaxed);
+    clipInputEnergy.store (0.0f, std::memory_order_relaxed);
     distortionWindow.reset();
     distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
     windowClipDb.store (kMinusInfDb, std::memory_order_relaxed);
@@ -618,5 +619,6 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
                               ? static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (clipDiff / clipIn)))
                               : kMinusInfDb;
     clipRatioDb.store (ratioDb, std::memory_order_relaxed);
+    clipInputEnergy.store (std::isfinite (clipIn) ? static_cast<float> (clipIn) : 0.0f, std::memory_order_relaxed);
 }
 } // namespace flub

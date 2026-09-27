@@ -1,16 +1,25 @@
 // Flubsound Pro - mono-compatible stereo widener / spatializer.
 //
-// Everything here operates on the SIDE signal only:
+// Width, focus and space operate on the SIDE signal only:
 //   M = (L + R) / 2,  S = (L - R) / 2,  L' = M + S',  R' = M - S'
-// so the mono fold-down L' + R' = 2M is preserved EXACTLY for every setting.
-// That is the core mono-compatibility guarantee (tested), and it also means
-// no comb filtering on mono playback, laptop speakers, or phone Bluetooth.
+// so the mono fold-down L' + R' = 2M is preserved EXACTLY for them. That is
+// the core mono-compatibility guarantee (tested), and it also means no comb
+// filtering on mono playback, laptop speakers, or phone Bluetooth. The one
+// exception is the bs2b / Meier headphone crossfeed (below): a real
+// crossfeed delays one ear against the other, which no M / S-only
+// processor can do, so it trades the exact mono sum for a real interaural
+// delay. Its Mono-safe type keeps the exact guarantee.
 //
 //   width     : S' = S_low * min(width, 1) + S_high * width, split at
 //               widthLowCutHz so the low end never gets wider. The split is
 //               complementary (S_low + S_high = S, a 2nd-order Q 0.707 shelf
 //               transition with LR4-like magnitude): an LR4 pair would sum to
 //               an all-pass that turns S by 180 degrees against M at the cut.
+//               Width polarity guard (docs/11 E12): the added side signal
+//               S_high * (width - 1) is applied only in the share that keeps
+//               S' below M (band envelopes above the low cut), so widening
+//               never writes an anti-phase copy into the far ear: a
+//               hard-panned source stays hard-panned at any width.
 //   positionalFocus (gaming): +0..3 dB bell on S at 3 kHz (Q 0.5, ~1-6 kHz).
 //               Interaural level differences in this region are the main
 //               lateral localisation cue for broadband transients
@@ -19,14 +28,29 @@
 //               100 % a source 6 dB to one side gains about 2.9 dB of ILD
 //               at 3 kHz. Off at sample rates <= 32 kHz (Bluetooth
 //               hands-free / speech links, mono and narrowband).
-//   space     : S += space * 0.5 * D(z^-5ms HP_300Hz(M)), D = 3 nested
-//               Schroeder all-passes (3.1/4.7/7.3 ms, g = 0.5): decorrelated
-//               ambience derived from the centre. The 5 ms pre-delay keeps
-//               the all-pass direct tap (-g x) from panning the centre. In
-//               mono it cancels (lives in S).
-//   crossfeed : S' -= crossfeed * 0.6 * LP1_700Hz(S) (first order):
-//               reduces low-frequency separation on headphones (bs2b-like
-//               comfort) without colouring M - also mono-exact.
+//   space     : S += space * 0.5 * D(z^-10ms W(M)), W = HP 300 Hz and a
+//               presence dip (-7 dB at 2 kHz, Q 0.4: -5..-7 dB over
+//               1-4 kHz), D = 3 nested Schroeder all-passes (3.1/4.7/7.3 ms,
+//               g = 0.5): decorrelated ambience derived from the centre. The
+//               10 ms pre-delay keeps the all-pass direct tap (-g x) from
+//               panning the centre and bounds the ILD it gives a centred
+//               source to < 1 dB per 1/3 octave. In mono it cancels (lives
+//               in S).
+//   crossfeed : headphone crossfeed, 0 .. 1, of the type crossfeedType:
+//               Bs2b / Meier (default Bs2b): energy-preserving L/R
+//               crossfeed. Each ear receives the other channel through a
+//               first-order head-shadow low-pass (bs2b 700 Hz, Meier 650 Hz)
+//               delayed by 0.235 ms (3rd-order Lagrange; with the low-pass
+//               the cross-correlation ITD is 0.27 ms at 44.1 / 48 kHz, about
+//               the 0.26 ms of a speaker at +-30 degrees), and its own
+//               channel through the complementary near-ear shelf, so
+//               |near|^2 + |far|^2 = 1 at every frequency. At crossfeed 1
+//               the far ear is 4.5 dB (bs2b) / 9.5 dB (Meier) below the
+//               near ear at low frequencies; the knob scales that feed
+//               ratio linearly.
+//               MonoSafe: the former M / S shelf, S' -= crossfeed * 0.6 *
+//               LP1_700Hz(S): narrows the low end without any delay, mono
+//               exact.
 //   autoMonoSafety: running L/R correlation (300 ms); if it drops below
 //               minCorrelation the effective width is pulled back towards 1
 //               (widths above 1 only: a narrowed image is never widened).
@@ -39,11 +63,20 @@
 #include "flub/common/SmoothedValue.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <vector>
 
 namespace flub
 {
+/** Headphone crossfeed model (docs/11 E12 Phase A). */
+enum class CrossfeedType
+{
+    Bs2b,    // energy-preserving L/R crossfeed, 700 Hz head shadow, 4.5 dB feed, 0.27 ms ITD
+    Meier,   // same structure, 650 Hz, 9.5 dB feed (subtler)
+    MonoSafe // M / S low shelf on S only: no delay, mono sum exact (the pre-E12 crossfeed)
+};
+
 struct SpatializerParams
 {
     float width = 1.0f;            // 0 (mono) .. 2
@@ -51,6 +84,7 @@ struct SpatializerParams
     float positionalFocus = 0.0f;  // 0 .. 1
     float space = 0.0f;            // 0 .. 1
     float crossfeed = 0.0f;        // 0 .. 1
+    CrossfeedType crossfeedType = CrossfeedType::Bs2b;
     bool autoMonoSafety = true;
     float minCorrelation = 0.0f;   // -1 .. 1
 
@@ -104,9 +138,12 @@ private:
     void controlTick() noexcept;
     void updateWidthTarget() noexcept;
     void designShelf (float width, float g0) noexcept;
+    void designWidthDetect (float g0) noexcept;
     void designFocus (float gainDb) noexcept;
+    void designCrossfeed (float ratio) noexcept;
     float prewarp (float hz) const noexcept;
-    float ambience (float mid) noexcept;
+    float onePoleG (float hz) const noexcept;
+    float ambience (float mid, int pos) noexcept;
     float correlationEstimate() const noexcept;
 
     ProcessSpec spec;
@@ -123,6 +160,11 @@ private:
     float shelfWidth = 1.0f, shelfG0 = 0.0f; // design the shelf coefficients hold
     SvfCoeffs shelfCoeffs;
     SvfState shelfState;
+    // Width polarity guard: envelopes of HP (M), HP (S) at the low cut and of
+    // the side signal the shelf adds; share of that signal that may be applied.
+    SvfCoeffs widthDetectCoeffs;
+    SvfState widthMidState, widthSideState;
+    float envWidthMid = 0.0f, envWidthSide = 0.0f, envWidthAdd = 0.0f, widthGuard = 1.0f;
 
     // Positional focus: 3 kHz bell on S.
     OnePoleSmoother focusDb;
@@ -138,18 +180,31 @@ private:
     float envMid = 0.0f, envSide = 0.0f, focusGuard = 1.0f;
     float envRelease = 0.0f, guardRelease = 0.0f;
 
-    // Space: HP 300 Hz (M) -> pre-delay -> nested all-pass network -> S.
-    SvfCoeffs spaceHpCoeffs;
-    SvfState spaceHpState;
+    // Space: HP 300 Hz (M) -> presence dip -> pre-delay -> nested all-pass network -> S.
+    SvfCoeffs spaceHpCoeffs, spaceDipCoeffs;
+    SvfState spaceHpState, spaceDipState;
     DelayBuffer preDelayLine, outerLine, middleLine, innerLine;
     int preDelaySamples = 1, outerDelay = 1, middleDelay = 1, innerDelay = 1;
     int writePos = 0, writeMask = 0;
     float lastAmbience = 0.0f;
     OnePoleSmoother spaceGain;
 
-    // Crossfeed: first-order TPT low-pass on S.
+    // Mono-safe crossfeed: first-order TPT low-pass on S.
     float crossfeedG = 0.0f, crossfeedState = 0.0f;
     OnePoleSmoother crossfeedGain;
+
+    // Bs2b / Meier crossfeed: head-shadow TPT low-pass per output channel,
+    // ITD lines on their outputs (3rd-order Lagrange read), near-ear shelf.
+    OnePoleSmoother xfeedRatio;        // far / near feed ratio at DC (0 = off)
+    OnePoleSmoother xfeedLogHz;        // ln (head-shadow corner)
+    float xfeedG = 0.0f;               // TPT coefficient of the current corner
+    float xfeedDesigned = 0.0f;        // ratio the two gains below hold
+    float xfeedNearCut = 0.0f;         // 1 - n0: near-ear shelf depth
+    float xfeedFar = 0.0f;             // g: far-ear gain at DC
+    float xfeedStateL = 0.0f, xfeedStateR = 0.0f;
+    DelayBuffer xfeedLineL, xfeedLineR;
+    int xfeedBase = 0;                 // integer part of the Lagrange read
+    std::array<float, 4> xfeedTaps {};
 
     // Output correlation (300 ms mean products) and the mono-safety pull.
     double corrCoeff = 0.0, corrLR = 0.0, corrLL = 0.0, corrRR = 0.0;

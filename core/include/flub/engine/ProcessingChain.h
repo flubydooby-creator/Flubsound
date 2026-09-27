@@ -264,6 +264,8 @@ private:
     /** process() after the input sanitiser, for one segment of the block
         that ends at or before the governor's next tick. */
     void processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING;
+    /** Folds one segment's module readings into blockReadings. */
+    void accumulateReadings() noexcept;
     /** reset() without the control loops (governor, AutoLevel, AutoDrive,
         ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;
@@ -317,6 +319,13 @@ private:
     ComparisonMatcher loudnessMatch;
     std::atomic<int> protectionStrength { static_cast<int> (ProtectionStrength::Off) };
     uint64_t corruptSamples = 0, droppedBlocks = 0; // input sanitiser, since prepare()
+    // The host block's module-meter extremes over its segments (process()).
+    struct BlockReadings
+    {
+        float compGrDb = 0.0f, compUpDb = 0.0f, maxGrDb = 0.0f, glueGrDb = 0.0f;
+        double clipRemoved = 0.0, clipInput = 0.0; // the clipper's energies (LoudnessMaximizer)
+    };
+    BlockReadings blockReadings;
 
     // Surround fold (5.1 / 7.1 input): the virtualiser's binaural render B,
     // the unity BS.775 matrix D (Bs775Fold, LFE included) and the detector.

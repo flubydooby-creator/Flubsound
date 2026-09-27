@@ -27,6 +27,7 @@
 #include "flub/engine/Protection.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -1231,4 +1232,325 @@ TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms
     CHECK_GE (s512, 0.5f);
     CHECK_NEAR (s64, s512, 0.05);
     CHECK_NEAR (s4096, s512, 0.05);
+}
+
+//==============================================================================
+// docs/11 E06 slice: the governor's tick grid, state / reason, protection
+// strength; E10 Phase 1: the input sanitiser
+//==============================================================================
+TEST_CASE ("Protection: the SafetyGovernor ticks once per 10 ms window whatever the block split, and a block that closes no window leaves the scale alone")
+{
+    // The same readings in 64-, 480- and 4096-sample calls (and a ragged
+    // split) give the same scale after the same number of samples: every
+    // tick has dt = 10 ms. skip() advances the grid without measuring.
+    const auto run = [] (std::initializer_list<int> pattern, int total) {
+        SafetyGovernor g;
+        g.prepare (kFs);
+        int done = 0;
+        while (done < total)
+            for (int n : pattern)
+            {
+                const int len = std::min (n, total - done);
+                if (len <= 0)
+                    break;
+                g.update (-20.0f, -40.0f, len); // the ~3 s GR average crosses -6 dB after ~1.1 s
+                done += len;
+            }
+        return g.getScale();
+    };
+    const int total = 480 * 300; // 3 s
+    const float s480 = run ({ 480 }, total);
+    CHECK (s480 < 1.0f);
+    CHECK (run ({ 64 }, total) == s480);
+    CHECK (run ({ 4096 }, total) == s480);
+    CHECK (run ({ 1, 7, 333, 1000, 2 }, total) == s480);
+
+    SafetyGovernor g;
+    g.prepare (kFs);
+    CHECK (g.samplesToNextTick() == 480);
+    g.update (-40.0f, -40.0f, 479); // no window closed: no tick at all
+    CHECK (g.getAverageGainReductionDb() == 0.0f);
+    CHECK (g.samplesToNextTick() == 1);
+    g.update (-40.0f, -40.0f, 1);
+    CHECK (g.getAverageGainReductionDb() < 0.0f);
+    CHECK (g.samplesToNextTick() == 480);
+    // A hidden block: the grid moves on, the averages and the scale do not.
+    const float avg = g.getAverageGainReductionDb();
+    g.skip (4800);
+    CHECK (g.getAverageGainReductionDb() == avg);
+    CHECK (g.samplesToNextTick() == 480);
+    g.skip (100);
+    CHECK (g.samplesToNextTick() == 380);
+    g.restartTickGrid();
+    CHECK (g.samplesToNextTick() == 480);
+}
+
+TEST_CASE ("Protection: the SafetyGovernor says what it is doing and why: backing off (limiter, distortion or both), holding, recovering, idle")
+{
+    SafetyGovernor g;
+    g.prepare (kFs);
+    const auto feed = [&] (float grDb, float distortionDb, double seconds) {
+        for (int i = 0; i < static_cast<int> (seconds * 100.0); ++i)
+            g.update (grDb, distortionDb, 480);
+    };
+    CHECK (g.getState() == SafetyGovernor::State::Idle);
+    CHECK (g.getReason() == 0u);
+
+    feed (-20.0f, -40.0f, 2.0); // limiter budget only (the average crosses -6 dB after ~1.1 s)
+    CHECK (g.getState() == SafetyGovernor::State::BackingOff);
+    CHECK (g.getReason() == SafetyGovernor::kReasonLimiter);
+    CHECK (g.getScale() < 1.0f);
+
+    feed (-20.0f, -10.0f, 2.0); // both
+    CHECK (g.getReason() == (SafetyGovernor::kReasonLimiter | SafetyGovernor::kReasonDistortion));
+
+    // Inside the hysteresis band: the scale holds, the reason is kept.
+    g.reset();
+    feed (0.0f, -10.0f, 2.0);
+    CHECK (g.getReason() == SafetyGovernor::kReasonDistortion);
+    feed (0.0f, -31.0f, 25.0); // the power average needs ~16 s to fall under -30 dB
+    CHECK (g.getState() == SafetyGovernor::State::Holding);
+    const float held = g.getScale();
+    feed (0.0f, -31.0f, 1.0);
+    CHECK (g.getScale() == held);
+    CHECK (g.getReason() == SafetyGovernor::kReasonDistortion);
+
+    // Comfortably under: recovering until the scale is back at 1, then idle
+    // with no reason.
+    feed (0.0f, -160.0f, 5.0);
+    CHECK (g.getState() == SafetyGovernor::State::Recovering);
+    CHECK (g.getReason() == SafetyGovernor::kReasonDistortion);
+    feed (0.0f, -160.0f, 40.0);
+    CHECK (g.getScale() == 1.0f);
+    CHECK (g.getState() == SafetyGovernor::State::Idle);
+    CHECK (g.getReason() == 0u);
+}
+
+TEST_CASE ("Protection: strength Off governs only the macro amounts, Normal also the base max.drive, sat.drive and bass.harmonics, Strict lets the scale reach 0; state and reason reach the MeterBus")
+{
+    // Base drives set, Boost 100 %, clipper at its maximum share: the clip
+    // energy trips the governor. 10 ms blocks, so the effective values of a
+    // block were computed with the scale published after the previous one.
+    constexpr int kBlock = 480;
+    const auto run = [] (ProtectionStrength strength, float& endScale, SafetyGovernor::State& state, uint32_t& reason) {
+        ParameterStore store;
+        store.set (Mode, static_cast<float> (ModeValue::Music));
+        store.set (BoostIntensity, 1.0f);
+        store.set (MaxClipAmount, 1.0f);
+        store.set (MaxDriveDb, 10.0f);
+        store.set (SaturationOn, 1.0f);
+        store.set (SatDriveDb, 6.0f);
+        store.set (BassHarmonics, 0.4f);
+        std::vector<float> base (static_cast<size_t> (kNumParams));
+        store.snapshot (base.data());
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlock, 2 });
+        chain.setProtectionStrength (strength);
+        CHECK (chain.getProtectionStrength() == strength);
+        auto hot = makeProgramme (static_cast<int> (kFs * 10.0), 0.5f, 3);
+        ScopedNoDenormals noDenormals;
+        float prevScale = 1.0f;
+        double maxError = 0.0;
+        for (int pos = 0; pos < hot.numSamples(); pos += kBlock)
+        {
+            chain.process (hot.block (pos, kBlock));
+            // Governed base values (Normal / Strict): base x scale, plus the
+            // governed Boost amount x scale (MacroMap).
+            const float s = strength == ProtectionStrength::Off ? 1.0f : prevScale;
+            const float boostSat = 4.0f, boostHarm = 0.3f, boostMax = 8.0f; // Music Boost 100 % amounts
+            maxError = std::max ({ maxError, static_cast<double> (std::abs (chain.effectiveValue (MaxDriveDb) - std::min (24.0f, 10.0f * s + boostMax * prevScale))),
+                                   static_cast<double> (std::abs (chain.effectiveValue (SatDriveDb) - std::min (24.0f, 6.0f * s + boostSat * prevScale))),
+                                   static_cast<double> (std::abs (chain.effectiveValue (BassHarmonics) - std::min (1.0f, 0.4f * s + boostHarm * prevScale))) });
+            prevScale = chain.meters().governorScale.load();
+        }
+        CHECK_LE (maxError, 1e-4);
+        std::vector<float> after (static_cast<size_t> (kNumParams));
+        store.snapshot (after.data());
+        CHECK (after == base); // the store is never written
+        const auto& m = chain.meters();
+        endScale = prevScale;
+        state = static_cast<SafetyGovernor::State> (m.governorState.load());
+        reason = m.governorReason.load();
+        CHECK_GE (m.governorDistortionDb.load(), SafetyGovernor::kDistortionBudgetDb);
+        CHECK_LE (m.governorGrDb.load(), 0.0f);
+    };
+    float off = 1.0f, normal = 1.0f, strict = 1.0f;
+    SafetyGovernor::State state {};
+    uint32_t reason = 0;
+    run (ProtectionStrength::Off, off, state, reason);
+    CHECK (off == SafetyGovernor::kMinScale); // 10 s of heavy clipping: at the floor
+    CHECK (state == SafetyGovernor::State::BackingOff);
+    CHECK ((reason & SafetyGovernor::kReasonDistortion) != 0u);
+    run (ProtectionStrength::Normal, normal, state, reason);
+    CHECK (normal >= SafetyGovernor::kMinScale);
+    CHECK (state != SafetyGovernor::State::Idle);
+    CHECK (reason != 0u);
+    run (ProtectionStrength::Strict, strict, state, reason);
+    CHECK (strict < SafetyGovernor::kMinScale);
+
+    // Raising the floor lifts a scale below it at once.
+    SafetyGovernor g;
+    g.prepare (kFs);
+    g.setStrength (ProtectionStrength::Strict);
+    for (int i = 0; i < 1000; ++i)
+        g.update (-20.0f, -10.0f, 480);
+    CHECK (g.getScale() == 0.0f);
+    g.setStrength (ProtectionStrength::Normal);
+    CHECK (g.getScale() == SafetyGovernor::kMinScale);
+}
+
+TEST_CASE ("Chain: a finite sample beyond +24 dBFS is muted and counted, and its block is hidden from AutoLevel, the governor, AutoDrive and the loudness match")
+{
+    // Hot, governed programme with AutoLevel on, in 10 ms blocks. A block
+    // with one 1e30 sample: the sample is muted (not clamped), the output
+    // stays finite and under the ceiling, and none of the control loops
+    // moves on that block. A NaN block is dropped and counted apart.
+    ParameterStore store;
+    store.set (Mode, static_cast<float> (ModeValue::Music));
+    store.set (BoostIntensity, 1.0f);
+    store.set (MaxClipAmount, 1.0f);
+    store.set (MaxDriveDb, 10.0f);
+    store.set (AutoLevelOn, 1.0f);
+    store.set (AutoLevelTargetLufs, -24.0f);
+    constexpr int kBlock = 480;
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    auto hot = makeProgramme (static_cast<int> (kFs * 6.0), 0.5f, 3);
+    runChain (chain, hot, kBlock);
+    const auto& m = chain.meters();
+    const float scaleBefore = m.governorScale.load(), gainBefore = m.autoLevelGainDb.load();
+    const float grAvgBefore = m.governorGrDb.load(), distAvgBefore = m.governorDistortionDb.load();
+    REQUIRE (scaleBefore < 1.0f);
+    REQUIRE (gainBefore < -1.0f);
+    CHECK (m.corruptSampleCount.load() == 0u);
+
+    auto spike = makeProgramme (kBlock, 0.5f, 5);
+    spike.ch[0][17] = 1.0e30f;
+    spike.ch[1][200] = -20.0f; // just past +24 dBFS
+    spike.ch[1][201] = 15.0f;  // just inside: real audio, kept
+    ScopedNoDenormals noDenormals;
+    chain.process (spike.block (0, kBlock));
+    CHECK (m.corruptSampleCount.load() == 2u);
+    CHECK (m.governorScale.load() == scaleBefore);
+    CHECK (m.autoLevelGainDb.load() == gainBefore);
+    CHECK (m.governorGrDb.load() == grAvgBefore);
+    CHECK (m.governorDistortionDb.load() == distAvgBefore);
+    for (const auto& c : spike.ch)
+        for (float v : c)
+        {
+            REQUIRE (std::isfinite (v));
+            CHECK_LE (std::abs (v), 1.0f);
+        }
+
+    // The next ordinary block is measured again.
+    auto next = makeProgramme (kBlock, 0.5f, 6);
+    chain.process (next.block (0, kBlock));
+    CHECK (m.governorDistortionDb.load() != distAvgBefore);
+    CHECK (m.corruptSampleCount.load() == 2u);
+
+    CHECK (m.droppedBlockCount.load() == 0u);
+    auto nan = makeProgramme (kBlock, 0.5f, 7);
+    nan.ch[1][3] = std::numeric_limits<float>::infinity();
+    chain.process (nan.block (0, kBlock));
+    CHECK (m.droppedBlockCount.load() == 1u);
+    CHECK (m.corruptSampleCount.load() == 2u);
+
+    // prepare() starts both counts again.
+    chain.prepare ({ kFs, kBlock, 2 });
+    CHECK (m.droppedBlockCount.load() == 0u);
+    CHECK (m.corruptSampleCount.load() == 0u);
+}
+
+TEST_CASE ("Chain: a host block runs in segments that end on the governor's 10 ms grid, so the output does not depend on the host block size while the governor acts")
+{
+    // Maximizer + saturator with Boost 100 % on hot programme: the governor
+    // backs off throughout. The chain's output at 480- and 4096-sample
+    // blocks (and a ragged split) agrees to float rounding; before the E06
+    // slice a 4096-sample block held a scale for 85 ms that a 480-sample
+    // host changed at every tick.
+    const auto render = [] (std::initializer_list<int> pattern) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (Mode, static_cast<float> (ModeValue::Music));
+        store.set (BoostIntensity, 1.0f);
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxClipAmount, 1.0f);
+        store.set (MaxDriveDb, 10.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 4096, 2 });
+        auto buf = makeProgramme (static_cast<int> (kFs * 4.0), 0.5f, 11);
+        ScopedNoDenormals noDenormals;
+        float lowest = 1.0f;
+        int pos = 0;
+        while (pos < buf.numSamples())
+            for (int n : pattern)
+            {
+                const int len = std::min (n, buf.numSamples() - pos);
+                if (len <= 0)
+                    break;
+                chain.process (buf.block (pos, len));
+                lowest = std::min (lowest, chain.meters().governorScale.load());
+                pos += len;
+            }
+        CHECK (lowest < 0.9f); // the governor acted
+        return buf;
+    };
+    const auto a = render ({ 480 }), b = render ({ 4096 }), c = render ({ 1000, 37, 4096, 5 });
+    double maxDiff = 0.0;
+    for (size_t ch = 0; ch < 2; ++ch)
+        for (size_t i = 0; i < a.ch[ch].size(); ++i)
+            maxDiff = std::max ({ maxDiff, static_cast<double> (std::abs (a.ch[ch][i] - b.ch[ch][i])), static_cast<double> (std::abs (a.ch[ch][i] - c.ch[ch][i])) });
+    CHECK_LE (maxDiff, 1e-4);
+}
+
+TEST_CASE ("Chain: the meters of a host block split on the governor grid read the whole block: the deepest limiter, glue and compressor GR and the clip energy ratio over all its segments")
+{
+    // The same programme in 960-sample blocks (two 480-sample segments each)
+    // and in 480-sample blocks (one segment each): each 960 block's meters
+    // must read the deeper GR of its two halves and their combined clip
+    // energy ratio - not the second half alone.
+    const auto run = [] (int blockSize) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (Mode, static_cast<float> (ModeValue::Music));
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxClipAmount, 0.6f);
+        store.set (MaxGlue, 0.5f);
+        store.set (MaxDriveDb, 12.0f);
+        store.set (CompressorOn, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, blockSize, 2 });
+        auto buf = makeProgramme (static_cast<int> (kFs * 3.0), 0.5f, 13);
+        ScopedNoDenormals noDenormals;
+        std::vector<std::array<float, 4>> readings;
+        for (int pos = 0; pos + blockSize <= buf.numSamples(); pos += blockSize)
+        {
+            chain.process (buf.block (pos, blockSize));
+            const auto& m = chain.meters();
+            readings.push_back ({ m.maxGainReductionDb.load(), m.glueGainReductionDb.load(), m.compGainReductionDb.load(), m.clipEnergyRatioDb.load() });
+        }
+        return readings;
+    };
+    const auto halves = run (480), whole = run (960);
+    REQUIRE (halves.size() == 2 * whole.size());
+    bool limiting = false, clipping = false;
+    double worstGr = 0.0, worstClip = 0.0;
+    for (size_t k = 0; k < whole.size(); ++k)
+    {
+        const auto& a = halves[2 * k];
+        const auto& b = halves[2 * k + 1];
+        for (size_t i = 0; i < 3; ++i)
+            worstGr = std::max (worstGr, static_cast<double> (std::abs (whole[k][i] - std::min (a[i], b[i]))));
+        limiting = limiting || whole[k][0] < -1.0f;
+        if (a[3] > -100.0f && b[3] > -100.0f)
+        {
+            clipping = true;
+            // The combined ratio lies between the two halves' ratios.
+            worstClip = std::max ({ worstClip, static_cast<double> (std::min (a[3], b[3]) - whole[k][3]), static_cast<double> (whole[k][3] - std::max (a[3], b[3])) });
+        }
+    }
+    CHECK (limiting);
+    CHECK (clipping);
+    CHECK_LE (worstGr, 1e-4);
+    CHECK_LE (worstClip, 1e-3);
 }

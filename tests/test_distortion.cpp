@@ -1080,6 +1080,8 @@ TEST_CASE ("Distortion: through the chain, the bass harmonics and the air excite
     clarity.setParams (cp);
     SafetyGovernor fedHarmonics;
     fedHarmonics.prepare (kFs);
+    DistortionMonitor harmonicsMirror; // what MeterBus::harmonicsDb should read
+    harmonicsMirror.prepare (kFs);
 
     const int len = static_cast<int> (kFs * 8.0);
     Planar prog (2, len);
@@ -1109,6 +1111,7 @@ TEST_CASE ("Distortion: through the chain, the bass harmonics and the air excite
         clarity.process (mirror.block (pos, n));
         const float bassDb = bass.getDistortionDb(), airDb = clarity.getDistortionDb();
         fedHarmonics.update (0.0f, DistortionMonitor::combineDb (bassDb, airDb), n);
+        harmonicsMirror.updateHarmonics (bassDb, airDb, n);
         const auto& m = chain.meters();
         scaleAtOne = scaleAtOne && m.governorScale.load() == 1.0f;
         meterSilent = meterSilent && m.distortionDb.load() == kMinusInfDb && m.clipEnergyRatioDb.load() == kMinusInfDb;
@@ -1125,6 +1128,13 @@ TEST_CASE ("Distortion: through the chain, the bass harmonics and the air excite
     CHECK (fedHarmonics.getScale() == 0.3f);
     CHECK (scaleAtOne);
     CHECK (meterSilent);
+    // The harmonics reading is published on MeterBus (docs/11 E59 gap): the
+    // monitor's 300 ms power-smoothed sum of the two generators. The chain's
+    // stages close their 25 ms windows on its 10 ms segment grid, the mirror's
+    // on 512-sample blocks, so the two agree within a fraction of a dB.
+    const float published = chain.meters().harmonicsDb.load();
+    CHECK_GE (published, SafetyGovernor::kDistortionBudgetDb + 20.0f);
+    CHECK_NEAR (published, harmonicsMirror.getSmoothedHarmonicsDb(), 0.5);
     // The chain's stages see what the mirror sees: the outputs agree (the
     // chain's output is delayed by its constant latency).
     const int latency = chain.getLatencySamples();

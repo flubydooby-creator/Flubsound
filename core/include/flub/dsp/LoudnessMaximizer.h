@@ -94,6 +94,10 @@ public:
     uint64_t getSafetyClipCount() const noexcept { return limiter.getSafetyClipCount(); }
     float getGlueReductionDb() const noexcept { return glueGrDb.load (std::memory_order_relaxed); }
     float getClipEnergyRatioDb() const noexcept { return clipRatioDb.load (std::memory_order_relaxed); }
+    /** The clipper's input energy behind that ratio (sum x^2 at the
+        oversampled rate, last block; 0 while the clipper is off), so a caller
+        that splits a block can combine the ratios exactly. */
+    float getClipInputEnergy() const noexcept { return clipInputEnergy.load (std::memory_order_relaxed); }
     /** THD+N of the soft clipper over the last 25 ms analysis window (dB re its output; -160 = clean or off). */
     float getDistortionDb() const noexcept { return distortionDb.load (std::memory_order_relaxed); }
     /** The clip energy ratio over that same window (the chain floors the
@@ -143,7 +147,7 @@ private:
     ProcessSpec spec;
     MaximizerParams params;
     std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
-        windowClipDb { -160.0f }, windowGrDb { 0.0f };
+        windowClipDb { -160.0f }, windowGrDb { 0.0f }, clipInputEnergy { 0.0f };
     int grWindowLength = 480, grWindowCount = 0; // limiter GR window (kGrWindowMs), samples
     float grWindowMin = 0.0f;                    // deepest GR in the open window (dB)
     DistortionWindow distortionWindow; // clipper THD+N sums over a window of at least 25 ms (closes at a segment boundary)
