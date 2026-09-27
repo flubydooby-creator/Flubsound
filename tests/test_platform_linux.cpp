@@ -1830,17 +1830,32 @@ TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_
     CHECK (info.executablePath == std::filesystem::read_symlink ("/proc/self/exe").string());
     CHECK (info.executableName == std::filesystem::read_symlink ("/proc/self/exe").filename().string());
 
-    // A window of another process (posix_spawn returns after the exec).
+    // A window of another process (posix_spawn returns after the exec). The
+    // kernel's /proc/<pid>/exe names the resolved binary, which is not
+    // "sleep" where /bin/sleep links to a multi-call binary (busybox,
+    // uutils coreutils) or /bin to /usr/bin: compare with the canonical path.
     pid_t child = 0;
     char arg0[] = "sleep", arg1[] = "30";
     char* childArgs[] = { arg0, arg1, nullptr };
     REQUIRE (::posix_spawn (&child, "/bin/sleep", nullptr, nullptr, childArgs, environ) == 0);
+    struct ChildGuard
+    {
+        pid_t pid;
+        ~ChildGuard()
+        {
+            ::kill (pid, SIGKILL);
+            int status = 0;
+            ::waitpid (pid, &status, 0);
+        }
+    } childGuard { child };
+    const auto sleepBinary = std::filesystem::canonical ("/bin/sleep");
     const Window other = makeWindow (static_cast<uint32_t> (child));
     activate (other);
     REQUIRE (foregroundApp->query (info));
     CHECK (info.processId == static_cast<uint32_t> (child));
     CHECK (! info.isThisProcess);
-    CHECK (info.executableName == "sleep");
+    CHECK (info.executablePath == sleepBinary.string());
+    CHECK (info.executableName == sleepBinary.filename().string());
 
     // Back to our own window: the cached description is not reused for it.
     activate (own);
@@ -1861,9 +1876,6 @@ TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_
     activate (0);
     CHECK (! foregroundApp->query (info));
 
-    ::kill (child, SIGKILL);
-    int status = 0;
-    ::waitpid (child, &status, 0);
     destroyWindow (d, own);
     destroyWindow (d, anonymous);
     deleteProperty (d, root, activeAtom);

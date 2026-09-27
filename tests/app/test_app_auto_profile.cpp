@@ -258,12 +258,12 @@ TEST_CASE ("App: AutoProfileSwitcher holds while Flubsound or no app is in front
     CHECK (s.update (spotify).empty());
     CHECK (s.update (ownWindow()).empty());
     // One switch at a time: the game's rule ends (restoring) before Spotify's applies.
-    CHECK (describe (s.update (spotify)) == Names { "End:cs2.exe:restore", "Apply:com.spotify.client" });
+    CHECK ((describe (s.update (spotify)) == Names { "End:cs2.exe:restore", "Apply:com.spotify.client" }));
     CHECK (s.getActiveRule()->stripName == "Music");
 
     // Straight from Spotify to Doom (same strip as the game, other rule).
     s.update (app ("/opt/games/Doom", 7));
-    CHECK (describe (s.update (app ("/opt/games/Doom", 7))) == Names { "End:com.spotify.client", "Apply:/opt/games/Doom" });
+    CHECK ((describe (s.update (app ("/opt/games/Doom", 7))) == Names { "End:com.spotify.client", "Apply:/opt/games/Doom" }));
 
     // Switched off: the active rule ends without restoring, samples are ignored.
     CHECK (describe (s.setEnabled (false)) == Names { "End:/opt/games/Doom" });

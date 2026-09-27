@@ -921,8 +921,10 @@ void EngineController::pollForegroundApp()
         return;
 
     // A preset changed on the rule's strip outside loadPreset() & co. (e.g.
-    // Reset strip, a renamed preset) counts as a manual change too.
-    if (const auto* rule = autoProfiles.getActiveRule())
+    // Reset strip, a renamed preset) counts as a manual change too. A rule
+    // that could not be applied (its preset is gone) loaded nothing to watch
+    // and keeps its error on show until its application leaves.
+    if (const auto* rule = autoProfiles.getActiveRule(); rule != nullptr && autoAppliedPresetId.isNotEmpty())
     {
         const auto stripName = rule->stripName;
         const int s = findStrip (stripName);

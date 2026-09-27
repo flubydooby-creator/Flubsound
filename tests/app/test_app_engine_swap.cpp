@@ -1,6 +1,6 @@
 // App-level tests: the crossfaded engine swap of AudioEngineHost (R1.5).
-// A structural change while the device runs (latency profile, strip layout)
-// builds a new engine on the message thread and hands it to the audio thread,
+// A structural change while the device runs (latency profile, strip layout,
+// neural model install / removal) builds a new engine on the message thread and hands it to the audio thread,
 // which pre-rolls it and crossfades (equal latency) or dips old out / new in
 // (latency change) over AudioEngineHost::kSwapFadeMs; the old engine is
 // destroyed back on the message thread. The host is started with a fake
@@ -12,6 +12,7 @@
 #include "engine/AudioEngineHost.h"
 
 #include "flub/engine/Parameters.h"
+#include "flub/neural/ReferenceRunners.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -203,6 +204,16 @@ Analysis analyse (const std::array<std::vector<float>, 2>& rec, size_t from, siz
     return a;
 }
 
+/** Bound on any sample step at output peak `peak`: the sine's own largest
+    step per unit of peak (steady state, +10 %), plus what the steepest point
+    of a raised-cosine fade (pi / 2F per sample) adds across two engines'
+    outputs (<= 2 x peak apart). A hard cut or a restart from silence would
+    step by a large part of the peak. */
+float stepBound (float stepPerPeak, float peak)
+{
+    return 1.1f * stepPerPeak * peak + 2.0f * peak * juce::MathConstants<float>::pi / (2.0f * static_cast<float> (kFadeSamples));
+}
+
 void setProfile (AudioEngineHost& host, flub::param::LatencyProfileValue profile)
 {
     for (int s = 0; s < host.getNumStrips(); ++s)
@@ -269,15 +280,12 @@ TEST_CASE ("App: engine swap on a latency-profile change and a layout change mid
     const size_t end = audio.recorded[0].size();
     const auto after = analyse (audio.recorded, end - 100 * kBlock, end);
 
-    // Bound on any step: the sine's own largest step at the loudest level seen
-    // anywhere (its steady-state step per unit of peak, +10 %), plus what the
-    // steepest point of a raised-cosine fade (pi / 2F per sample) adds across
-    // two engines' outputs (<= 2 x peak apart): a hard cut or a restart from
-    // silence would step by a large part of the peak.
+    // Bound on any step: the sine's own at the loudest level seen anywhere,
+    // plus the fade slope (stepBound).
     const size_t from = static_cast<size_t> (100 * kBlock);
     const auto whole = analyse (audio.recorded, from, end, 0.05f * before.peak);
     const float stepPerPeak = std::max ({ before.maxStep / before.peak, middle.maxStep / middle.peak, after.maxStep / after.peak });
-    const float bound = 1.1f * stepPerPeak * whole.peak + 2.0f * whole.peak * juce::MathConstants<float>::pi / (2.0f * static_cast<float> (kFadeSamples));
+    const float bound = stepBound (stepPerPeak, whole.peak);
     const auto swapOne = analyse (audio.recorded, swap1, swap1 + static_cast<size_t> (swapSamples), 0.05f * before.peak);
     std::cerr << "    swap: steady peak " << before.peak << " / " << middle.peak << " / " << after.peak << ", step bound " << bound
               << ", max step " << whole.maxStep << " (steady " << before.maxStep << "), longest gap " << whole.longestGap
@@ -421,6 +429,132 @@ TEST_CASE ("App: engine swap across a device restart (pending, mid-crossfade, wh
     restartIsClean ("while stopped");
 
     CHECK (host.getCompletedSwaps() == 0); // no swap ever completed: every one was cut short
+    CHECK (audio.allocations == 0);
+    CHECK (audio.deallocations == 0);
+    CHECK (audio.locks == 0);
+    host.audioDeviceStopped();
+}
+
+TEST_CASE ("App: neural model install and removal mid-stream go through the swap (model in the new engine, no click, no gap)")
+{
+    using Profile = flub::param::LatencyProfileValue;
+    AudioEngineHost host;
+    FakeAudioDevice device;
+    start (host, device);
+    DeviceThread audio (host);
+    REQUIRE (audio.run (400));
+
+    // A 10 ms-frame identity model (unity controls: the processor is a pure
+    // delay of its latency L = 2 frames, eligible for Balanced), whether or
+    // not its worker keeps up with this faster-than-real-time device: a
+    // missed frame falls back to the same unity gain. Every engine built
+    // gets its own runner from the factory.
+    constexpr int kFrame = 480;
+    int runnersMade = 0;
+    const auto factory = [&runnersMade]
+    {
+        ++runnersMade;
+        return std::make_unique<flub::IdentityRunner> (kFrame);
+    };
+
+    const auto steadyBefore = analyse (audio.recorded, audio.recorded[0].size() - 100 * kBlock, audio.recorded[0].size());
+    const int plainLatency = host.getLatencyInfo().engineSamples;
+    const size_t install = audio.recorded[0].size();
+    host.setNeuralModel (1, factory);
+    CHECK (host.hasNeuralModel (1));
+    CHECK (host.isSwapInProgress());
+    CHECK (runnersMade == 1);
+    CHECK (host.getMixEngine().chain (1).getNeuralStatus().state == flub::NeuralSlotState::Active);
+    CHECK (host.getMixEngine().chain (0).getNeuralStatus().state == flub::NeuralSlotState::Empty);
+    CHECK (! host.needsReprepare());
+    const int modelLatency = host.getLatencyInfo().engineSamples;
+    CHECK (modelLatency == plainLatency + 2 * kFrame);
+    REQUIRE (audio.runUntilSwaps (1));
+    REQUIRE (audio.run (300));
+    const auto steadyModel = analyse (audio.recorded, audio.recorded[0].size() - 100 * kBlock, audio.recorded[0].size());
+
+    // A profile change keeps the model (a fresh runner for the new engine);
+    // Low Latency's budget (1 frame) leaves it out of the chain, Balanced
+    // brings it back.
+    setProfile (host, Profile::LowLatency);
+    host.reconfigure();
+    CHECK (runnersMade == 2);
+    CHECK (host.getMixEngine().chain (1).getNeuralStatus().state == flub::NeuralSlotState::Ineligible);
+    REQUIRE (audio.runUntilSwaps (2));
+    setProfile (host, Profile::Balanced);
+    host.reconfigure();
+    CHECK (runnersMade == 3);
+    CHECK (host.getMixEngine().chain (1).getNeuralStatus().state == flub::NeuralSlotState::Active);
+    REQUIRE (audio.runUntilSwaps (3));
+    REQUIRE (audio.run (300));
+
+    // Removal: the next engine has no model and the old latency.
+    const size_t removal = audio.recorded[0].size();
+    host.clearNeuralModel (1);
+    CHECK (! host.hasNeuralModel (1));
+    CHECK (runnersMade == 3);
+    CHECK (host.getMixEngine().chain (1).getNeuralStatus().state == flub::NeuralSlotState::Empty);
+    CHECK (host.getLatencyInfo().engineSamples == plainLatency);
+    REQUIRE (audio.runUntilSwaps (4));
+    REQUIRE (audio.run (300));
+    const size_t end = audio.recorded[0].size();
+    const auto steadyAfter = analyse (audio.recorded, end - 100 * kBlock, end);
+
+    // Install and removal: no step beyond the sine's own plus the fade slope,
+    // no near-silence longer than one fade, and the level carries on.
+    const float stepPerPeak = std::max ({ steadyBefore.maxStep / steadyBefore.peak, steadyModel.maxStep / steadyModel.peak,
+                                          steadyAfter.maxStep / steadyAfter.peak });
+    for (const size_t at : { install, removal })
+    {
+        const auto swap = analyse (audio.recorded, at - kBlock, at + 40 * kBlock, 0.05f * steadyBefore.peak);
+        std::cerr << "    neural swap at " << at << ": max step " << swap.maxStep << " (bound " << stepBound (stepPerPeak, swap.peak)
+                  << "), longest gap " << swap.longestGap << ", peak " << swap.peak << "\n";
+        CHECK (swap.finite);
+        CHECK_LE (swap.maxStep, stepBound (stepPerPeak, swap.peak));
+        CHECK_LE (swap.longestGap, kFadeSamples);
+        CHECK (swap.longestGap > 10); // the latency changed: through the dip
+    }
+    CHECK (steadyModel.rms > 0.9f * steadyBefore.rms); // the identity model leaves the level alone
+    CHECK (steadyAfter.rms > 0.9f * steadyBefore.rms);
+
+    CHECK (audio.allocations == 0);
+    CHECK (audio.deallocations == 0);
+    CHECK (audio.locks == 0);
+    host.audioDeviceStopped();
+}
+
+TEST_CASE ("App: a strip the new layout removes plays its delayed tail out in the old engine instead of being cut")
+{
+    AudioEngineHost host;
+    FakeAudioDevice device;
+    host.setDeviceInputRouting (3, 0); // the sine feeds only System (strip 3)
+    host.audioDeviceAboutToStart (&device);
+    DeviceThread audio (host);
+    REQUIRE (audio.run (300));
+    const size_t swapAt = audio.recorded[0].size();
+    const auto steady = analyse (audio.recorded, swapAt - 50 * kBlock, swapAt);
+    const int latency = host.getLatencyInfo().engineSamples;
+
+    // Remove System. Its source stops now (the new engine has no such strip),
+    // but the old engine still holds `latency` samples of it in its delay
+    // lines: they play out (it gets silence from here on) before the old
+    // engine fades out, rather than stopping after the master limiter's few
+    // samples of look-ahead.
+    auto layout = host.getStripLayout();
+    layout.pop_back();
+    host.setStripLayout (layout);
+    CHECK (host.getLatencyInfo().engineSamples == latency); // equal latency: overlapping crossfade
+    REQUIRE (audio.runUntilSwaps (1));
+    REQUIRE (audio.run (20));
+
+    const auto tail = analyse (audio.recorded, swapAt + 100, swapAt + static_cast<size_t> (latency) - 20);
+    const auto afterwards = analyse (audio.recorded, audio.recorded[0].size() - 10 * kBlock, audio.recorded[0].size());
+    std::cerr << "    removed strip: steady rms " << steady.rms << ", tail rms " << tail.rms << " (latency " << latency
+              << "), afterwards peak " << afterwards.peak << "\n";
+    CHECK (steady.rms > 0.05f);
+    CHECK (tail.rms > 0.3f * steady.rms);
+    CHECK (afterwards.peak < 1.0e-4f); // nothing feeds the remaining strips
+    CHECK (! host.isStripActive (3));
     CHECK (audio.allocations == 0);
     CHECK (audio.deallocations == 0);
     CHECK (audio.locks == 0);

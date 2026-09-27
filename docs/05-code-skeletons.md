@@ -2287,4 +2287,4 @@ mix: out peak -1.05 dBFS, deepest master limiter GR -3.86 dB
 **Roadmap items visible in these files** (not implemented today):
 - a linear-phase EQ mode for offline/batch mastering (`ParametricEq.h`);
 - a minimum-phase / polyphase-IIR oversampler for a lower-latency profile (`Oversampler.h`);
-- a crossfaded, double-buffered engine swap instead of the short explicit dropout on structural re-prepare ([01 §3](01-architecture.md#3-process--thread-model)).
+- a crossfade on device-format changes (sample rate, buffer size, device): they restart the device, so the new engine fades in from silence; other structural changes already use the crossfaded engine swap ([01 §3](01-architecture.md#3-process--thread-model)).

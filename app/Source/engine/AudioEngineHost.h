@@ -32,14 +32,16 @@
 //         the message thread (AsyncUpdater). The first kSwapFadeMs of a
 //         started device fade in (no step from silence).
 //       - reconfigure() while the device runs (strip layout, latency profile,
-//         anything MixEngine::needsReprepare() reports): the CROSSFADED
-//         ENGINE SWAP. The new instance is configured with
+//         neural model install / removal, anything MixEngine::needsReprepare()
+//         reports): the CROSSFADED ENGINE SWAP. The new instance is configured with
 //         MixEngine::configureFrom (it shares the running engine's
 //         ParameterStores) while the old one keeps playing, and is handed to
 //         the audio thread through one atomic pointer (pendingSwap). The
 //         audio thread takes it at the start of a callback, runs both engines
 //         on the same input while the new one pre-rolls (its latency +
-//         kSwapSettleMs, so its delay lines hold real signal), then either
+//         kSwapSettleMs, so its delay lines hold real signal; a strip the new
+//         layout removed gets silence in the old engine, so its tail decays
+//         and fades out with it instead of being cut), then either
 //           equal latency : crossfades old -> new over kSwapFadeMs with
 //                           equal-GAIN raised-cosine curves (gOld + gNew = 1;
 //                           both carry the same programme, so equal power
@@ -173,6 +175,22 @@ public:
         Polled by this class at 5 Hz on the message thread, which then calls
         reconfigure() by itself. */
     bool needsReprepare() const noexcept { return latest->engine.needsReprepare(); }
+
+    /** Neural model for strip `strip`'s neural slot (docs/09 §1.1; message
+        thread). Installing, replacing or clearing (nullptr) a model is a
+        structural change and goes through reconfigure(): the crossfaded swap
+        while the device runs (the model's latency moves the output, so the
+        swap takes the latency-change path), at once otherwise. `factory`
+        makes a fresh runner for every engine built from now on (swaps,
+        device restarts): the engine a swap fades out keeps running its own
+        model, so one runner is never in two engines, and a model installed
+        directly with ProcessingChain::setNeuralModel() would not carry over.
+        Whether the model joins the chain (latency profile, sample rate,
+        block size) is getMixEngine().chain (strip).getNeuralStatus(). */
+    using NeuralModelFactory = std::function<std::unique_ptr<flub::ModelRunner>()>;
+    void setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config = {});
+    void clearNeuralModel (int strip) { setNeuralModel (strip, nullptr); }
+    bool hasNeuralModel (int strip) const noexcept;
 
     /** Increments after every MixEngine::configure (chains were re-created). */
     uint32_t getStructureGeneration() const noexcept { return structureGeneration.load (std::memory_order_acquire); }
@@ -309,6 +327,7 @@ private:
     void replaceEngineNow (std::unique_ptr<EngineInstance> next, bool fadeIn);
     void afterStructureChange();
     void collectRetired();
+    void clearRemovedStrips() noexcept;
     void dispose (EngineInstance* instance);
     void processBlock (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples,
                        StripSignalSource* offlineSource) noexcept;
@@ -360,6 +379,12 @@ private:
 
     // ---- Message-thread state ----------------------------------------------------------
     CaptureFactory captureFactory;
+    struct NeuralModelSetup
+    {
+        NeuralModelFactory factory;
+        flub::NeuralSlotConfig config;
+    };
+    std::array<NeuralModelSetup, kMaxStrips> neuralModels;
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;
     int deviceInputLatency = 0, deviceOutputLatency = 0;

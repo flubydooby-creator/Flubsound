@@ -1921,12 +1921,17 @@ public:
             cachedWindow = nullptr;
             cachedFrameProcess = processId;
             auto path = processImagePath (processId);
+            bool resolved = true;
             if (_wcsicmp (fileNameOf (path).c_str(), L"ApplicationFrameHost.exe") == 0)
             {
                 if (const DWORD hosted = hostedProcess (window, processId); hosted != 0)
                 {
                     processId = hosted;
                     path = processImagePath (hosted);
+                }
+                else
+                {
+                    resolved = false; // app still starting (or suspended): look again next poll
                 }
             }
             if (path.empty())
@@ -1936,7 +1941,7 @@ public:
             cached.executableName = toUtf8 (fileNameOf (path));
             cached.bundleId.clear();
             cached.isThisProcess = processId == GetCurrentProcessId();
-            cachedWindow = window;
+            cachedWindow = resolved ? window : nullptr;
         }
         info = cached;
         return true;

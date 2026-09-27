@@ -104,7 +104,7 @@ void setNeuralBypass (bool bypassed) noexcept;         // ModuleSlot fade; laten
 | **APO Lite mode** (Windows) | Host `flub_core` inside an APO for per-endpoint processing without the virtual driver: lowest possible latency, no per-app routing. |
 | **Native PipeWire filter node** (Linux) | `pw_filter` hosting the chain directly in the PipeWire graph. |
 | **Engine as a service** | Split the audio engine into a background service process with shared-memory IPC to the GUI. The GUI can crash or update without interrupting audio. The IPC layer is a Rust candidate (see `02-tech-stack.md`). |
-| **Double-buffered engine swap** | Crossfaded replacement of the whole `MixEngine` on latency-profile or device changes (no dropout), with RCU-style deferred reclamation. |
+| **Double-buffered engine swap** | Done in the desktop app for latency-profile, strip-layout and neural-model changes (crossfaded, RCU-style deferred reclamation, [01 §3](01-architecture.md#3-process--thread-model)). Remaining: device-format changes restart the device, so the new engine fades in from silence rather than crossfading. |
 | Plug-in hosting | Load VST3/CLAP plug-ins into a strip ("FX slot") after the maximizer's pre-stage, sandboxed in a separate process. |
 | Android | System-wide effects via Android's global `DynamicsProcessing` effect API (EQ, MBC, limiter), with a reduced feature set. |
 | Consoles / TVs | Hardware-partner SDK licensing of `flub_core` (DSP only). |

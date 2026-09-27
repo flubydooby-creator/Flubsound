@@ -6,20 +6,21 @@
 
 namespace flub
 {
-void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, int maxBlockSize)
+void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, int maxBlockSize, const ChainSetup& setup)
 {
     // Keep existing strips' parameter stores (their profiles/presets) when the
     // layout is re-configured, e.g. after a device sample-rate change.
-    build (configs, sr, maxBlockSize, strips);
+    build (configs, sr, maxBlockSize, strips, setup);
 }
 
-void MixEngine::configureFrom (const MixEngine& previous, const std::vector<StripConfig>& configs, double sr, int maxBlockSize)
+void MixEngine::configureFrom (const MixEngine& previous, const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
+                               const ChainSetup& setup)
 {
-    build (configs, sr, maxBlockSize, previous.strips);
+    build (configs, sr, maxBlockSize, previous.strips, setup);
 }
 
 void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
-                       const std::vector<std::unique_ptr<Strip>>& storesFrom)
+                       const std::vector<std::unique_ptr<Strip>>& storesFrom, const ChainSetup& setup)
 {
     sampleRate = sr;
     maxBlock = maxBlockSize;
@@ -39,6 +40,8 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         else
             s->store = std::make_shared<param::ParameterStore>();
         s->chain = std::make_unique<ProcessingChain> (*s->store);
+        if (setup != nullptr)
+            setup (static_cast<int> (i), *s->chain);
         s->chain->prepare ({ sr, maxBlockSize, s->config.inputChannels });
         s->gain.reset (sr, 20.0f, s->config.muted ? 0.0f : dbToGain (s->config.gainDb));
         next.push_back (std::move (s));

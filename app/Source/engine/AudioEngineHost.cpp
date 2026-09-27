@@ -153,7 +153,10 @@ void AudioEngineHost::setStripLayout (std::vector<flub::StripConfig> newLayout)
             releaseSlot (slot);
 
     for (size_t i = newLayout.size(); i < static_cast<size_t> (kMaxStrips); ++i)
+    {
         deviceInputFirst[i].store (-1);
+        neuralModels[i] = {};
+    }
 
     layout = std::move (newLayout);
     for (size_t i = 0; i < layout.size(); ++i)
@@ -196,6 +199,23 @@ void AudioEngineHost::reconfigure()
     afterStructureChange();
 }
 
+void AudioEngineHost::setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (strip < 0 || strip >= latest->numStrips)
+    {
+        jassertfalse;
+        return;
+    }
+    neuralModels[static_cast<size_t> (strip)] = { std::move (factory), config };
+    reconfigure();
+}
+
+bool AudioEngineHost::hasNeuralModel (int strip) const noexcept
+{
+    return strip >= 0 && strip < kMaxStrips && neuralModels[static_cast<size_t> (strip)].factory != nullptr;
+}
+
 bool AudioEngineHost::isSwapInProgress() const noexcept
 {
     return swapsRequested != swapsCompleted.load (std::memory_order_acquire);
@@ -211,14 +231,25 @@ std::unique_ptr<AudioEngineHost::EngineInstance> AudioEngineHost::buildEngine()
         configs[i].muted = stripMuted[i].load (std::memory_order_relaxed);
     }
 
+    // Every engine gets its own runner for each strip's neural model, installed
+    // before the chain's prepare(), so it is in the chain (and its latency)
+    // from the first block.
+    const auto installNeuralModel = [this] (int strip, flub::ProcessingChain& chain)
+    {
+        const auto& model = neuralModels[static_cast<size_t> (strip)];
+        if (model.factory != nullptr)
+            if (auto runner = model.factory())
+                chain.setNeuralModel (std::move (runner), model.config);
+    };
+
     auto next = std::make_unique<EngineInstance>();
     auto& engine = next->engine;
     // The new engine shares the newest engine's ParameterStores (profiles),
     // which that engine may still be using on the audio thread.
     if (latest != nullptr)
-        engine.configureFrom (latest->engine, configs, currentSampleRate, currentBlockSize);
+        engine.configureFrom (latest->engine, configs, currentSampleRate, currentBlockSize, installNeuralModel);
     else
-        engine.configure (configs, currentSampleRate, currentBlockSize);
+        engine.configure (configs, currentSampleRate, currentBlockSize, installNeuralModel);
 
     next->numStrips = engine.getNumStrips();
     next->maxBlock = currentBlockSize;
@@ -288,6 +319,7 @@ void AudioEngineHost::replaceEngineNow (std::unique_ptr<EngineInstance> next, bo
     active = latest;
     fading = nullptr;
     swapsRequested = swapsCompleted.load (std::memory_order_relaxed);
+    clearRemovedStrips();
 
     // After a device start the output fades in (no step from silence): the
     // start-up variant of a swap, without an old engine.
@@ -312,6 +344,17 @@ void AudioEngineHost::afterStructureChange()
     // audioDeviceAboutToStart (under the device manager's callback lock).
     notifyPending.store (true, std::memory_order_release);
     triggerAsyncUpdate();
+}
+
+void AudioEngineHost::clearRemovedStrips() noexcept
+{
+    // Strips beyond the active engine's layout are no longer active (and no
+    // old engine is left whose tail they would feed).
+    for (int s = active->numStrips; s < kMaxStrips; ++s)
+    {
+        hangoverRemaining[static_cast<size_t> (s)] = 0;
+        stripActive[static_cast<size_t> (s)].store (false, std::memory_order_relaxed);
+    }
 }
 
 void AudioEngineHost::collectRetired()
@@ -661,11 +704,7 @@ void AudioEngineHost::beginPendingSwap() noexcept
     fading = active;
     active = next;
     for (int s = next->numStrips; s < kMaxStrips; ++s)
-    {
-        // Strips the new layout removed are no longer active.
-        hangoverRemaining[static_cast<size_t> (s)] = 0;
-        stripActive[static_cast<size_t> (s)].store (false, std::memory_order_relaxed);
-    }
+        stripActive[static_cast<size_t> (s)].store (false, std::memory_order_relaxed); // removed by the new layout
 
     // Both engines run from here on; the new one is silent while it pre-rolls.
     //   equal latency : crossfade (gOld + gNew = 1) over [preroll, preroll + F)
@@ -713,6 +752,7 @@ void AudioEngineHost::mixSwap (const flub::AudioBlock& mix, int numSamples) noex
         // which destroys it (never freed here).
         retiredSwap.store (fading, std::memory_order_release);
         fading = nullptr;
+        clearRemovedStrips();
     }
     if (swapPos >= swapEnd)
     {
@@ -800,20 +840,35 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
             for (int s = 0; s < fading->numStrips; ++s)
             {
                 const auto si = static_cast<size_t> (s);
-                const flub::AudioBlock* src = s < current.numStrips ? current.stripInputs[si] : nullptr;
-                if (src == nullptr)
+                auto& buffer = fading->stripBuffers[si];
+                const flub::AudioBlock block = buffer.block (buffer.getNumChannels(), n);
+                if (s >= current.numStrips)
+                {
+                    // A strip the new layout removed (its sources are gone):
+                    // silence while its hang-over lasts, so its tail decays
+                    // and fades out with the old engine instead of being cut.
+                    if (hangoverRemaining[si] <= 0)
+                    {
+                        fading->stripInputs[si] = nullptr;
+                        continue;
+                    }
+                    block.clear();
+                    hangoverRemaining[si] -= n;
+                }
+                else if (const flub::AudioBlock* src = current.stripInputs[si]; src != nullptr)
+                {
+                    for (int c = 0; c < block.numChannels; ++c)
+                    {
+                        if (c < src->numChannels)
+                            std::memcpy (block.channel (c), src->channel (c), sizeof (float) * static_cast<size_t> (n));
+                        else
+                            std::memset (block.channel (c), 0, sizeof (float) * static_cast<size_t> (n));
+                    }
+                }
+                else
                 {
                     fading->stripInputs[si] = nullptr;
                     continue;
-                }
-                auto& buffer = fading->stripBuffers[si];
-                const flub::AudioBlock block = buffer.block (buffer.getNumChannels(), n);
-                for (int c = 0; c < block.numChannels; ++c)
-                {
-                    if (c < src->numChannels)
-                        std::memcpy (block.channel (c), src->channel (c), sizeof (float) * static_cast<size_t> (n));
-                    else
-                        std::memset (block.channel (c), 0, sizeof (float) * static_cast<size_t> (n));
                 }
                 fading->stripBlocks[si] = block;
                 fading->stripInputs[si] = &fading->stripBlocks[si];

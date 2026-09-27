@@ -24,6 +24,7 @@
 #include "flub/common/Realtime.h"
 #include "flub/dsp/TruePeakLimiter.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -45,9 +46,15 @@ public:
     /** Master limiter look-ahead: all strips on Low Latency / any other mix. */
     static constexpr float kMasterLookaheadLowLatencyMs = 0.5f, kMasterLookaheadMs = 1.0f;
 
+    /** Non-RT. Called for every new strip's chain before its prepare(), to
+        set up what takes effect at a prepare, e.g. a neural model
+        (ProcessingChain::setNeuralModel), so it is part of the engine from
+        its first block and in its latency. */
+    using ChainSetup = std::function<void (int strip, ProcessingChain& chain)>;
+
     /** Non-RT. Creates (or re-creates) strips and prepares everything; also
         picks the master look-ahead from the strips' latency profiles. */
-    void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
+    void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize, const ChainSetup& setup = {});
 
     /** Non-RT. As configure(), for a NEW engine that is to replace `previous`
         while `previous` may still be running process() on the audio thread:
@@ -56,7 +63,8 @@ public:
         the same parameters during a crossfaded swap. `previous` is only read
         (its store pointers are copied, never moved); the stores live as long
         as either engine. */
-    void configureFrom (const MixEngine& previous, const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
+    void configureFrom (const MixEngine& previous, const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize,
+                        const ChainSetup& setup = {});
 
     int getNumStrips() const noexcept { return static_cast<int> (strips.size()); }
     param::ParameterStore& params (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->store; }
@@ -94,7 +102,7 @@ private:
     };
 
     void build (const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
-                const std::vector<std::unique_ptr<Strip>>& storesFrom);
+                const std::vector<std::unique_ptr<Strip>>& storesFrom, const ChainSetup& setup);
 
     std::vector<std::unique_ptr<Strip>> strips;
     TruePeakLimiter master;
