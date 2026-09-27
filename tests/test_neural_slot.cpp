@@ -283,12 +283,13 @@ TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L 
 
         Planar a = input, b = input;
         render (reference, a, 256);
-        render (withModel, b, 256);
+        render (withModel, b, 256, true); // every control frame on time (no timer-dependent misses)
         CHECK_LE (maxDelayedError (b, a, L, 0), macros ? 1e-2 : 1e-6);
         CHECK (rms (b.ch[0].data() + silence + L, 48000) > 0.05);
         for (size_t c = 0; c < 2; ++c)
             CHECK_LE (peakAbs (b.ch[c].data(), L), 1e-9); // silent (anti-denormal offsets aside) until the signal is L late
         CHECK (withModel.getNeuralCounters().framesProcessed > 0);
+        CHECK (withModel.getNeuralCounters().deadlineMisses == 0);
         CHECK (withModel.getNeuralCounters().modelFailures == 0);
     }
 }
