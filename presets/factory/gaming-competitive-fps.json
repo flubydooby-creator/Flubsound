@@ -5,7 +5,7 @@
   "name": "Competitive FPS",
   "category": "Gaming",
   "author": "Flubsound",
-  "description": "For tactical and competitive shooters (Counter-Strike, Valorant, Rainbow Six). Footsteps and quiet cues are lifted by upward dynamics while gunfire is never compressed, explosion rumble is tamed so it cannot mask the steps that follow, and lateral cues are sharpened. No broadband downward compression and no crossfeed; suggested latency profile: Low Latency.",
+  "description": "For tactical and competitive shooters (Counter-Strike, Valorant, Rainbow Six). Footsteps and quiet cues are lifted the moment they rise out of the ambience, while the ambience itself is not raised and gunfire is never compressed; explosion rumble is tamed so it cannot mask the steps that follow, and lateral cues are sharpened. No broadband downward compression and no crossfeed; suggested latency profile: Low Latency.",
   "tags": ["fps", "competitive", "footsteps", "positional", "low-latency", "esports"],
   "suggestedLatencyProfile": "Low Latency",
   "params": {
@@ -15,7 +15,7 @@
     "macro.2": 0.55,
     "macro.3": 0.1,
     "macro.4": 0.3,
-    "macro.5": 0.35,
+    "macro.5": 0.2,
     "bass.subsonic": 30,
     "comp.ratio": 1,
     "comp.attack": 2,
@@ -23,6 +23,14 @@
     "eq.1.type": "Low Shelf",
     "eq.1.freq": 100,
     "eq.1.gain": -2,
-    "eq.1.q": 0.7
+    "eq.1.q": 0.7,
+    "dyneq.0.on": true,
+    "dyneq.0.shape": "Low Shelf",
+    "dyneq.0.q": 0.7,
+    "dyneq.0.threshold": -22,
+    "dyneq.0.ratio": 3,
+    "dyneq.0.range": 4.8,
+    "dyneq.0.attack": 10,
+    "dyneq.0.release": 250
   }
 }

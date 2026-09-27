@@ -47,6 +47,12 @@ constexpr float kClipHeadroomMinDb = 0.3f;
 // leaves no DC (the programme itself never passes the filter).
 constexpr double kClipDcBlockHz = 5.0;
 
+// Crest gate and depth cap (docs/11 E05 stage 1): the clipper input's
+// short-term power (linked, one-pole) and the width of the cap's C1 blend
+// (a fraction of (1 - depthGain) t, so it never reaches the knee start).
+constexpr float kClipRmsMs = 8.0f;
+constexpr float kCapBlend = 0.25f;
+
 // Envelope values below this are flushed (the host also sets FTZ/DAZ).
 constexpr float kEnvFlush = 1.0e-15f;
 
@@ -92,6 +98,23 @@ float LoudnessMaximizer::softClip (float x, float threshold, float knee) noexcep
     return std::copysign (std::min (y, threshold), x);
 }
 
+float LoudnessMaximizer::softClipCapped (float x, float threshold, float knee, float depthGain) noexcept
+{
+    const float y = softClip (x, threshold, knee);
+    const float ax = std::abs (x), ay = std::abs (y);
+    if (! (depthGain > 0.0f) || ! (ay < ax))
+        return y; // uncapped, or identity below the knee (NaN falls through)
+    // |y| = smoothmax (|clip (x)|, depthGain |x|): a quadratic C1 blend over
+    // |d| < w. At the knee start d = (depthGain - 1) ks <= -(1 - depthGain) t / 2
+    // < -w, so the curve is untouched up to there.
+    const float w = kCapBlend * (1.0f - std::min (depthGain, 1.0f)) * threshold;
+    const float d = depthGain * ax - ay;
+    if (d <= -w)
+        return y;
+    const float m = d >= w ? depthGain * ax : ay + (d + w) * (d + w) / (4.0f * w);
+    return std::copysign (m, x);
+}
+
 //==============================================================================
 MaximizerParams LoudnessMaximizer::sanitised (const MaximizerParams& in, const MaximizerParams& fallback) noexcept
 {
@@ -102,6 +125,8 @@ MaximizerParams LoudnessMaximizer::sanitised (const MaximizerParams& in, const M
     p.clipKnee = sanitise (p.clipKnee, 0.0f, 1.0f, fallback.clipKnee);
     p.glue = sanitise (p.glue, 0.0f, 1.0f, fallback.glue);
     p.releaseMs = sanitise (p.releaseMs, 5.0f, 1000.0f, fallback.releaseMs);
+    p.clipCrestDb = sanitise (p.clipCrestDb, 0.0f, 24.0f, fallback.clipCrestDb);
+    p.clipMaxDepthDb = sanitise (p.clipMaxDepthDb, 0.5f, 24.0f, fallback.clipMaxDepthDb);
     return p;
 }
 
@@ -116,6 +141,12 @@ void LoudnessMaximizer::updateClipThreshold() noexcept
 {
     const float headroomDb = lerp (kClipHeadroomMaxDb, kClipHeadroomMinDb, clipAmountS.getCurrent());
     clipThreshold = dbToGain (ceilingDb + headroomDb);
+}
+
+void LoudnessMaximizer::updateClipShape() noexcept
+{
+    crestGain = params.clipCrestDb > 0.0f ? dbToGain (params.clipCrestDb) : 0.0f;
+    depthGain = params.clipMaxDepthDb < 24.0f ? dbToGain (-params.clipMaxDepthDb) : 0.0f;
 }
 
 void LoudnessMaximizer::startGlue (bool immediate) noexcept
@@ -172,6 +203,7 @@ void LoudnessMaximizer::applyParamsImmediately() noexcept
     clipAmountS.setImmediate (params.clipAmount);
     clipKneeS.setImmediate (params.clipKnee);
     updateClipThreshold();
+    updateClipShape();
 
     if (params.glue > 0.0f)
     {
@@ -221,6 +253,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     clipWarmupLength = 2 * oversampler.latencySamples() + kClipWarmupExtra;
     const double gDc = std::tan (kPi * kClipDcBlockHz / fs);
     clipDcG = gDc / (1.0 + gDc);
+    clipPowerCoeff = 1.0f - onePoleCoeff (kClipRmsMs, fs);
 
     splitter.prepare (fs, kGlueLowMidHz, kGlueMidHighHz);
     for (size_t b = 0; b < bands.size(); ++b)
@@ -236,6 +269,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     // Structural limiter settings are passed through here.
     limiter.setLookaheadMs (lookaheadMs);
     limiter.setTruePeakDetection (truePeak);
+    limiter.setEnvelope (limiterEnvelope);
     limiter.prepare (spec);
     limiter.setParams ({ params.ceilingDb, params.releaseMs, params.autoRelease });
 
@@ -249,6 +283,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     oversampler.reset();
     dryDelay.reset();
     clipDcLp.fill (0.0);
+    clipPower = 0.0f;
     splitter.reset();
     antiDenormal = 0.0f;
     limiter.reset();
@@ -300,6 +335,7 @@ void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FL
         return;
     }
 
+    updateClipShape();
     driveDbS.setTarget (p.driveDb);
     ceilingDbS.setTarget (p.ceilingDb);
     clipAmountS.setTarget (p.clipAmount);
@@ -462,6 +498,27 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
     }
 
     // ---- 2) oversampled soft clipper, crossfaded against the aligned dry path --
+    // Crest gate: the clipper input's short-term linked power, tracked
+    // whether or not the clipper runs (so it starts from the real level);
+    // the threshold rises to crestGain x RMS.
+    for (int i = 0; i < n; ++i)
+    {
+        float p = 0.0f;
+        for (int c = 0; c < numCh; ++c)
+        {
+            const float x = data[static_cast<size_t> (c)][i];
+            p = std::max (p, x * x);
+        }
+        clipPower += clipPowerCoeff * (std::min (p, std::numeric_limits<float>::max()) - clipPower);
+        if (crestGain > 0.0f)
+        {
+            auto& t = thresholdBuf[static_cast<size_t> (i)];
+            t = std::max (t, crestGain * std::sqrt (clipPower));
+        }
+    }
+    if (clipPower < kEnvFlush)
+        clipPower = 0.0f;
+
     if (clipRunning)
     {
         const AudioBlock dry = dryBuffer.block (numCh, n);
@@ -488,7 +545,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                 for (int f = 0; f < osFactor; ++f, ++k)
                 {
                     const float x = u[k];
-                    const float y = softClip (x, t, knee);
+                    const float y = softClipCapped (x, t, knee, depthGain);
                     const double xd = static_cast<double> (x);
                     const double removed = static_cast<double> (w) * static_cast<double> (x - y);
                     rr += removed * removed;

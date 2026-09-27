@@ -31,6 +31,25 @@
 //            in tests - it exists only to make overs impossible).
 // threshold = ceiling - 0.05 dB: the margin absorbs interpolation error.
 // latency = L + D (1.5 ms + 20 samples at 48 kHz = 92 samples by default).
+//
+// Optional LF-safe envelope (docs/11 E05 stage 1; setEnvelope(), structural,
+// all off by default - the maximizer turns them on, the MixEngine master and
+// the chain's bypass-reference limiter keep the plain envelope):
+//   * lowFrequencyHold: the sliding minimum also covers the H samples after
+//     the peak (window L + Kh + 2 + H), so the gain holds H after each peak
+//     before it releases. H = 10 ms, or 25 ms while energy below 50 Hz is
+//     present (a 2nd-order 50 Hz low-pass of the channel mean carries more
+//     than 10 % of its power, 100 ms averages; back to 10 ms below 5 %):
+//     at least half a period of the lowest frequency present, so a steady
+//     bass note's gain does not ripple at twice its frequency.
+//   * smoothAttack: the box filter becomes two cascaded boxes whose lengths
+//     add up to L - Kh + 2 (a triangular kernel over the same L - Kh + 1
+//     samples): an S-shaped attack instead of a linear ramp with corners.
+//     The support is unchanged, so a[n] <= r[j] still holds.
+//   * programEnvelope: a slow program gain p follows g (attack 150 ms,
+//     release 800 ms, one-pole in the linear gain) and the output gain is
+//     min(g, p) <= g: sustained limiting keeps a base reduction, so dense
+//     kicks modulate everything else less. The ceiling guarantee is g's.
 #pragma once
 
 #include "Processor.h"
@@ -54,12 +73,23 @@ struct LimiterParams
     bool operator== (const LimiterParams&) const = default;
 };
 
+/** The optional LF-safe envelope stages (see the header comment); structural. */
+struct LimiterEnvelope
+{
+    bool lowFrequencyHold = false;
+    bool smoothAttack = false;
+    bool programEnvelope = false;
+
+    bool operator== (const LimiterEnvelope&) const = default;
+};
+
 class TruePeakLimiter final : public Processor
 {
 public:
     /** Structural: call before prepare(). */
     void setLookaheadMs (float ms) noexcept { lookaheadMs = ms; }
     void setTruePeakDetection (bool enabled) noexcept { truePeak = enabled; }
+    void setEnvelope (const LimiterEnvelope& e) noexcept { envelopeRequest = e; }
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
@@ -74,6 +104,8 @@ public:
     float getGainReductionDb() const noexcept { return grDb.load (std::memory_order_relaxed); }
     /** Number of samples the final safety clamp had to touch since prepare(). */
     uint64_t getSafetyClipCount() const noexcept { return safetyClips.load (std::memory_order_relaxed); }
+    /** The gain hold after each peak at the end of the last block (ms; 0 without lowFrequencyHold). */
+    float getHoldMs() const noexcept { return holdMs.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -117,9 +149,10 @@ private:
 
     float lookaheadMs = 1.5f;
     bool truePeak = true;
+    LimiterEnvelope envelopeRequest;
     ProcessSpec spec;
     LimiterParams params;
-    std::atomic<float> grDb { 0.0f };
+    std::atomic<float> grDb { 0.0f }, holdMs { 0.0f };
     std::atomic<uint64_t> safetyClips { 0 };
 
     // Structural values latched by prepare() (the setters above only take
@@ -130,23 +163,38 @@ private:
     int lookahead = 0;     // L
     int detectorDelay = 0; // D (TruePeakDetector::kDelay, or 0 for sample peak)
     int hold = 0;          // Kh: extra gain hold each side of a peak (true-peak mode)
+    LimiterEnvelope envelope; // latched from envelopeRequest
 
     RefinedPeakDetector detector;
     DelayLine audioDelay;  // L + D
 
-    // Sliding minimum of r over the last L + Kh + 2 samples: a monotonic deque
-    // (values increase from front to back) kept in a fixed power-of-two ring.
+    // Sliding minimum of r over the last L + Kh + 2 (+ H) samples: a monotonic
+    // deque (values increase from front to back) kept in a fixed power-of-two ring.
     std::vector<float> dequeValue;
     std::vector<uint32_t> dequeIndex;
     uint32_t dequeMask = 0, dequeFront = 0, dequeBack = 0; // back = one past the newest
-    uint32_t window = 2;                                   // L + Kh + 2
+    uint32_t window = 2;                                   // L + Kh + 2 + H
+    uint32_t baseWindow = 2;                               // L + Kh + 2
     uint32_t sampleIndex = 0;                              // wraps; only differences are used
 
-    // Box filter (running mean over L - Kh + 1 samples of the sliding minimum)
-    // and the per-sample ceiling history for the safety clamp (L + 1 samples).
+    // Box filter (running mean over L - Kh + 1 samples of the sliding minimum;
+    // with smoothAttack two cascaded boxes of ringSize + ring2Size - 1 = L -
+    // Kh + 1 samples) and the per-sample ceiling history for the safety clamp
+    // (L + 1 samples).
     std::vector<float> boxRing, ceilingRing;
-    int ringSize = 1, ringPos = 0, ceilingPos = 0;
-    double boxSum = 1.0, boxLength = 1.0;
+    std::vector<double> box2Ring;
+    int ringSize = 1, ringPos = 0, ceilingPos = 0, ring2Size = 1, ring2Pos = 0;
+    double boxSum = 1.0, boxLength = 1.0, box2Sum = 1.0, box2Length = 1.0;
+
+    // lowFrequencyHold: H (samples) and its LF detector (TPT SVF low-pass of
+    // the channel mean, double state; 100 ms power averages).
+    uint32_t holdShort = 0, holdLong = 0;
+    bool lowFrequencyPresent = false;
+    double lfA1 = 0.0, lfA2 = 0.0, lfA3 = 0.0, lfIc1 = 0.0, lfIc2 = 0.0;
+    double lfPower = 0.0, fullPower = 0.0, lfPowerCoeff = 0.0;
+
+    // programEnvelope: the slow program gain and its one-pole coefficients.
+    double programGain = 1.0, programAttack = 0.0, programRelease = 0.0;
 
     // Ceiling: smoothed in dB; linear value and detector threshold derived from it.
     LinearSmoothedValue ceilingDbS;

@@ -45,10 +45,10 @@
 // the same per-block readings the app's meters show - and accumulates the
 // deepest, mean and time-above values of limiter / glue / compressor gain
 // reduction, clip energy, measured THD+N, bass protection, the dynamic EQ's
-// mode bands, the SafetyGovernor scale and AutoLevel / AutoDrive. Means are
-// weighted by block length; "percent" values are shares of the programme's
-// frames. The chain's bass-harmonics and air-exciter readings are not
-// published on the MeterBus, so they are not part of it yet.
+// mode bands, the SafetyGovernor's scale, state and reasons, AutoLevel /
+// AutoDrive, and the intended harmonics of the bass harmonics generator and
+// air exciter (MeterBus::harmonicsDb). Means are weighted by block length;
+// "percent" values are shares of the programme's frames.
 #pragma once
 
 #include "Analysis.h"
@@ -97,6 +97,9 @@ struct RenderStats
 
     // Measured THD+N of saturator + clipper (the 300 ms smoothed meter, dB).
     float distortionMaxDb = -160.0f, distortionMeanDb = -160.0f; // mean = power mean
+    // Harmonics the bass harmonics generator and air exciter add on purpose
+    // (dB re their output, 300 ms smoothing; not budgeted by the governor).
+    float harmonicsMaxDb = -160.0f, harmonicsMeanDb = -160.0f; // mean = power mean
 
     // Compressor, bass protection, dynamic EQ mode bands 4..7 (Gaming:
     // footsteps / body / anti-masking / voice; Music: de-harsh / air / de-boom / 1 kHz).
@@ -107,6 +110,10 @@ struct RenderStats
     // Control loops.
     float governorScaleMin = 1.0f, governorScaleMean = 1.0f;
     float governorBackoffPercent = 0.0f; // frames with the Boost scale below 0.99
+    // Frames per SafetyGovernor::State (idle, backing off, holding,
+    // recovering) and frames whose reason bits name the limiter / distortion budget.
+    std::array<float, 4> governorStatePercent {};
+    float governorLimiterReasonPercent = 0.0f, governorDistortionReasonPercent = 0.0f;
     float autoLevelMinDb = 0.0f, autoLevelMaxDb = 0.0f;
     float autoDriveMaxDb = 0.0f;         // deepest drive reduction
 };

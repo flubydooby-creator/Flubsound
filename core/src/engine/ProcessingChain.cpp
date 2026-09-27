@@ -66,14 +66,13 @@ DynEqBandParams modeBand (DynEqMode mode, EqBandType shape, float freq, float q,
 constexpr std::array<float, ProcessingChain::kNumModeBands> kGamingModeBandHz { 3200.0f, 260.0f, 90.0f, 2000.0f };
 constexpr std::array<float, ProcessingChain::kNumModeBands> kMusicModeBandHz { 3500.0f, 12000.0f, 120.0f, 1000.0f };
 
-// Footsteps bands 4 / 5 (docs/11 E19 interim): the threshold sits near full
-// scale, so BoostBelow acts as a static bell - every cue under about -16 dBFS
-// (band 4) / -11 dBFS (band 5) in the band gets the full lift, with no
-// level-dependent ramp, so a short step under a bed is lifted like a steady
-// one and the step / bed contrast moves only as a static EQ moves it - that
-// rolls off over the loudest ~10 dB (gunfire and close explosions get little
-// or none) and over the hiss floor.
-constexpr float kFootstepsThresholdDb = -6.0f;
+// Footsteps bands 4 / 5 are the cue enhancer (docs/11 E19): DynEqMode::CueLift
+// lifts what rises out of the band's own background (a step under a bed from
+// its first milliseconds, at any programme level) and neither the stationary
+// bed nor loud events (see DynamicEq.h). Attack is the lift's rise once a
+// cue is detected, release its fall after the 30 ms hold.
+constexpr float kCueDetailAttackMs = 1.0f, kCueDetailReleaseMs = 40.0f;
+constexpr float kCueBodyAttackMs = 2.0f, kCueBodyReleaseMs = 60.0f;
 // At and below this rate the output is a Bluetooth hands-free / speech link
 // (8 / 16 / 32 kHz): the 3.2 kHz footsteps bell would sit at 0.2..0.8 x
 // Nyquist of an already harsh narrowband channel, so it is off (docs/11 E17).
@@ -112,16 +111,15 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double 
         const float footsteps = e[Macro1];
         const float voice = e[Macro5];
         const float detailRange = sampleRate > kSpeechLinkMaxRate ? 7.0f * footsteps : 0.0f;
-        // Quiet high-frequency detail (steps, reloads, cloth): a static lift
-        // with a loud roll-off (see kFootstepsThresholdDb).
-        dyn.setBand (4, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[0], 0.9f, kFootstepsThresholdDb, 3.0f, detailRange, 3.0f, 120.0f, -75.0f));
-        // Footstep "body" (heel impact) for heavier footwear / surfaces.
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[1], 1.2f, kFootstepsThresholdDb, 2.5f, 3.0f * footsteps, 5.0f, 150.0f, -75.0f));
-        // Anti-masking: very loud low end (explosions, vehicles) is tamed so it
-        // does not bury the steps that follow; normal bass is unaffected. It
-        // still follows Footsteps: docs/11 E20 decouples it inside E19's
-        // redesign and keys it to E21's "Tame" amount, not before (§5.1).
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, -22.0f, 3.0f, 6.0f * footsteps, 10.0f, 250.0f, -80.0f));
+        // Cue detail (steps, reloads, cloth) and footstep "body" (heel
+        // impact): cue enhancer bands (threshold / ratio unused, see above).
+        dyn.setBand (4, modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[0], 0.9f, 0.0f, 1.0f, detailRange, kCueDetailAttackMs, kCueDetailReleaseMs, -75.0f));
+        dyn.setBand (5, modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[1], 1.2f, 0.0f, 1.0f, 3.0f * footsteps, kCueBodyAttackMs, kCueBodyReleaseMs, -75.0f));
+        // Anti-masking (a CutAbove low shelf at 90 Hz) no longer follows
+        // Footsteps (docs/11 E20): Footsteps 100 changed the explosion level.
+        // The presets that tame loud LF carry that band as a user dynamic-EQ
+        // band until E21's Tame amount exists to key it to.
+        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, -22.0f, 3.0f, 0.0f, 10.0f, 250.0f, -80.0f));
         // Voice comms / dialogue / score intelligibility.
         dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
     }

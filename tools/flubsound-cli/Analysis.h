@@ -16,6 +16,7 @@
 #include "flub/io/Json.h"
 #include "flub/io/WavFile.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -71,6 +72,55 @@ std::string formatReport (const LoudnessReport& report, const std::string& title
 
 /** JSON object with the same values (null for "no measurement"). */
 json::Value reportToJson (const LoudnessReport& report, const std::string& file, const std::string& sourceFormat);
+
+// ---- Sound-quality metrics (docs/11 E59) ---------------------------------
+// Signal-level definitions shared by `flubsound-cli quality` (Commands.h,
+// measureQuality) and tests/test_known_gaps.cpp, so a number in a tuning
+// session and a number in a test mean the same thing. All are non-RT and
+// operate on one channel (usually the mid); a "window" must hold an integer
+// number of periods of every frequency it projects onto (1 s windows and
+// integer-Hz tones make every projection exact).
+
+/** THD+N of a sine at f0 over x[0, n): the power left after removing DC and
+    the fundamental, dB re the window's total power. */
+double sineThdnDb (const float* x, int n, double sampleRate, double f0);
+
+/** Total distortion + noise of a multitone over x[0, n): the power left after
+    removing DC and every excited tone, dB re the power of the excited tones
+    (MTND when `tones` is a sparse multitone). */
+double multitoneResidualDb (const float* x, int n, double sampleRate, const std::vector<double>& tones);
+
+/** Intermodulation of two tones f1 < f2 over x[0, n): the power at every
+    product |m f1 +- k f2| (m, k >= 1, m + k <= maxOrder) that is not a
+    harmonic of either tone, dB re the power of the two tones. */
+double twoToneImdDb (const float* x, int n, double sampleRate, double f1, double f2, int maxOrder = 5);
+
+/** SMPTE-style IMD of a low tone fLow and a high tone fHigh over x[0, n): the
+    power of the sidebands fHigh +- k fLow (k = 1..sidebands), dB re the high tone. */
+double smpteImdDb (const float* x, int n, double sampleRate, double fLow, double fHigh, int sidebands = 4);
+
+/** Envelope of a steady tone through a system: output / input amplitude at
+    `freqHz` in Hann-weighted 20 ms windows every 5 ms over [begin, end), dB. */
+std::vector<double> toneGainTrack (const std::vector<float>& out, const std::vector<float>& in, double sampleRate, double freqHz,
+                                   int begin, int end);
+
+/** Nearest-rank percentile (p in 0..1) of a non-empty vector. */
+double percentile (std::vector<double> values, double p);
+
+/** Summary of a toneGainTrack: spread p95 - p5, dip = median - min, lift =
+    max - median, the share of windows more than 1 dB below the median, and
+    the modulation spectrum: the amplitude (dB of gain) of the track's
+    components at k x `rateHz`, k = 1..4, over the whole periods it holds. */
+struct GainTrackStats
+{
+    double spreadDb = 0.0, dipDb = 0.0, liftDb = 0.0, downPercent = 0.0;
+    std::array<double, 4> modulationDb {};
+};
+
+GainTrackStats summariseGainTrack (const std::vector<double>& track, double rateHz);
+
+/** Energy centroid (ms) of x[begin, begin + n) re `begin`. */
+double energyCentroidMs (const std::vector<float>& x, int begin, int n, double sampleRate);
 
 /** "pcm16", "pcm24", "pcm32", "float32", "float64". */
 const char* sampleFormatName (io::SampleFormat format) noexcept;

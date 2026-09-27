@@ -1,6 +1,6 @@
 // Flubsound Pro CLI - the commands behind `process`, `batch`, `analyze`,
-// `params` and `presets` (main.cpp only parses the command line, prints help
-// and dispatches here).
+// `quality`, `params` and `presets` (main.cpp only parses the command line,
+// prints help and dispatches here).
 //
 // The batch building blocks are declared here so tests/test_offline_render.cpp
 // can run them directly: the folder walk (collectBatchJobs), one file
@@ -24,6 +24,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <array>
 #include <functional>
 #include <string>
 #include <vector>
@@ -40,6 +41,7 @@ enum ExitCode : int
 int runProcess (const CliOptions& options);
 int runBatch (const CliOptions& options);
 int runAnalyze (const CliOptions& options);
+int runQuality (const CliOptions& options);
 int runParams (const CliOptions& options);
 int runPresets (const CliOptions& options);
 
@@ -56,6 +58,70 @@ json::Value renderStatsToJson (const RenderStats& stats);
 
 /** One-line human-readable summary of the stats ("Stats   : ..." in `process`). */
 std::string formatStats (const RenderStats& stats);
+
+// ---- quality (docs/11 E59) ---------------------------------------------------
+// `flubsound-cli quality` renders a fixed set of pinned stimuli (48 kHz,
+// stereo, identical channels, generated here from fixed seeds) through one
+// parameter table and measures the mid of each render with the Analysis.h
+// quality metrics. tests/test_known_gaps.cpp runs the same function, so a
+// number printed by the CLI is the number a test pins.
+//
+//   thdn     sines at 40 / 60 / 100 / 1000 Hz, -6 dBFS peak, 2 s: THD+N over 1..2 s
+//   imd      50 + 63 Hz at -12 dBFS peak each (a bass third): products up to
+//            5th order; 60 Hz + 7 kHz 4:1 at -6 dBFS peak (SMPTE): sidebands
+//            7 kHz +- k 60 Hz, k = 1..4; both over 1..2 s
+//   mtnd     31 log-spaced tones 40 Hz..16 kHz (integer Hz, pink amplitudes,
+//            seeded phases) at -24 / -18 / -12 dBFS RMS, 2 s: residual after
+//            the tones over 1..2 s, and the output's integrated loudness
+//   ducking  55 Hz kicks (peak -6 dBFS, tau 100 ms, 350 ms) every 500 ms from
+//            250 ms under 1 / 2 / 4 / 8 kHz probes at -26 dBFS peak each, 6 s:
+//            each probe's gain track over 1..6 s (GainTrackStats, modulation
+//            at k x 2 Hz), plus the limiter's GR over the scene
+//   kick     50 + 80 Hz chirp kick (e^-18t, peak -6 dBFS) every 500 ms, 6 s:
+//            output vs input power 0-10 / 10-30 / 40-60 ms after each onset
+//            from 1 s on, and the shift of the energy centroid of 0-150 ms
+//   loudness pink noise at -18 dBFS RMS, 6 s: integrated loudness in and out,
+//            output true peak
+struct QualityReport
+{
+    struct Thdn
+    {
+        double hz = 0.0, db = 0.0;
+    };
+    struct Mtnd
+    {
+        double inputRmsDbfs = 0.0, outputLufs = 0.0, db = 0.0;
+    };
+    struct Ducking
+    {
+        double hz = 0.0;
+        GainTrackStats track;
+    };
+
+    std::vector<Thdn> thdn;
+    double bassImdDb = 0.0, smpteImdDb = 0.0;
+    std::vector<Mtnd> mtnd;
+    std::vector<Ducking> ducking;
+    float duckingLimiterGrMaxDb = 0.0f, duckingLimiterGrMeanDb = 0.0f;
+    double kickOnsetLiftDb = 0.0, kickBodyLiftDb = 0.0, kickLateLiftDb = 0.0, kickCentroidShiftMs = 0.0;
+    double pinkInLufs = 0.0, pinkOutLufs = 0.0, pinkOutTruePeakDbtp = 0.0;
+};
+
+/** Called on every rendered stimulus (2 planar channels) before it is
+    measured: tests inject known artefacts into a pass-through render to
+    check that each metric reads them (docs/11 E59 meta-validation). */
+using QualityInjector = std::function<void (std::vector<std::vector<float>>& outStereo)>;
+
+/** Renders and measures every quality stimulus with `values` (param::kNumParams
+    base values) at `blockSize`. Non-RT, allocates; about 34 s of audio. */
+bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
+                     const QualityInjector& inject = {});
+
+/** The `quality --json` object (dB rounded to 0.01). */
+json::Value qualityToJson (const QualityReport& report);
+
+/** Human-readable multi-line report. */
+std::string formatQuality (const QualityReport& report);
 
 // ---- batch ----------------------------------------------------------------
 struct BatchJob

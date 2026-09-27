@@ -18,7 +18,9 @@
 //   * stereo content in an 8-channel container: centre notch and FL-only
 //     separation of the fold (E27; closed by the stereo passthrough fold)
 //   * burst-footstep lift on isolated 20 / 40 / 80 ms bursts, and step/bed
-//     contrast at -14 / -24 / -40 LUFS (and -50 LUFS) (E19)
+//     contrast at -14 / -24 / -40 LUFS (and -50 LUFS) (E19; closed by the
+//     cue enhancer, kept as its regression tests; tests/test_scenes.cpp
+//     has the E60 scenes)
 //   * the Night Mode ambush scene: bed lift and post-event hole (E21; the
 //     hole closed by the AutoLevel slice, the bed lift still open)
 //   * kick onset: Punch 100 lift at 0-10 ms against 10-30 ms (E04, E05)
@@ -226,45 +228,10 @@ double residualAfterHarmonics (const float* x, int n, double f0, int harmonics, 
     return std::max (0.0, total - removed) / n;
 }
 
-/** THD+N (dB re total) of a sine at f0 over [begin, begin + n). */
-double thdPlusNoiseDb (const std::vector<float>& x, int begin, int n, double f0)
-{
-    double total = 0.0;
-    const double residual = residualAfterHarmonics (x.data() + begin, n, f0, 1, total);
-    return powerDb (residual) - powerDb (total);
-}
-
-/** Envelope of a steady tone through the chain: output / input amplitude at
-    `freq` in Hann-weighted 20 ms windows every 5 ms, as dB gain. */
-std::vector<double> toneGainTrack (const std::vector<float>& out, const std::vector<float>& in, double freq, int begin, int end)
-{
-    const int len = samplesOf (0.020), hop = samplesOf (0.005);
-    std::vector<double> hann (static_cast<size_t> (len));
-    for (int i = 0; i < len; ++i)
-        hann[static_cast<size_t> (i)] = 0.5 - 0.5 * std::cos (kTwoPi * i / len);
-    auto amplitude = [&] (const std::vector<float>& x, int start) {
-        double re = 0.0, im = 0.0;
-        for (int i = 0; i < len; ++i)
-        {
-            const double a = kTwoPi * freq * (start + i) / kFs;
-            const double v = hann[static_cast<size_t> (i)] * x[static_cast<size_t> (start + i)];
-            re += v * std::cos (a);
-            im += v * std::sin (a);
-        }
-        return std::sqrt (re * re + im * im);
-    };
-    std::vector<double> gains;
-    for (int start = begin; start + len <= end; start += hop)
-        gains.push_back (20.0 * std::log10 (std::max (1.0e-12, amplitude (out, start)) / std::max (1.0e-12, amplitude (in, start))));
-    return gains;
-}
-
-double percentile (std::vector<double> v, double p)
-{
-    std::sort (v.begin(), v.end());
-    const auto idx = static_cast<size_t> (std::clamp (p, 0.0, 1.0) * static_cast<double> (v.size() - 1) + 0.5); // nearest rank
-    return v[idx];
-}
+/** THD+N (dB re total) of a sine at f0 over [begin, begin + n): the CLI's
+    `quality` definition (Analysis.h sineThdnDb), as are the tone gain track
+    (toneGainTrack, 20 ms Hann windows every 5 ms) and percentile(). */
+double thdPlusNoiseDb (const std::vector<float>& x, int begin, int n, double f0) { return sineThdnDb (x.data() + begin, n, kFs, f0); }
 
 // ---- stimuli ----------------------------------------------------------------
 /** 55 Hz kicks (exp decay, tau 100 ms, 350 ms long, peak `kickPeak`) every
@@ -397,7 +364,7 @@ TEST_CASE ("KnownGap: pumping - a 2 kHz tone under 55 Hz kicks moves with every 
     for (auto& r : rows)
     {
         const auto out = render (input, resolve (boosted (ModeValue::Music, r.boost)));
-        const auto g = toneGainTrack (out[0], x, 2000.0, samplesOf (1.0), samplesOf (6.0));
+        const auto g = toneGainTrack (out[0], x, kFs, 2000.0, samplesOf (1.0), samplesOf (6.0));
         const double med = percentile (g, 0.5);
         r.spread = percentile (g, 0.95) - percentile (g, 0.05);
         r.dip = med - *std::min_element (g.begin(), g.end());
@@ -580,7 +547,7 @@ TEST_CASE ("KnownGap closed: stereo in an 8-channel container - FL/FR-only conte
     CHECK_GE (after.separation, 120.0);
 }
 
-TEST_CASE ("KnownGap: burst footsteps - Footsteps 100 gives isolated 20 / 40 / 80 ms steps out of digital silence a fraction of its steady lift (E19)")
+TEST_CASE ("KnownGap closed: burst footsteps - Footsteps 100 gives isolated 20 / 40 / 80 ms steps out of digital silence >= 90 % of its steady lift (E19)")
 {
     // buildBurstScene() with no bed, each burst at -60 dBFS RMS (inside the
     // -45..-60 dBFS range of docs/11 E19's Done-when). Lift = output vs input
@@ -589,14 +556,13 @@ TEST_CASE ("KnownGap: burst footsteps - Footsteps 100 gives isolated 20 / 40 / 8
     // else default. docs/11 E19 measured +0.3 / +0.6 / +1.1 dB against
     // +3.4 dB steady on its own stimulus.
     //
-    // The E19 interim (band 4 threshold -42 -> -6 dBFS: a static bell) raised
-    // the steady lift from 5.33 to 5.71 dB (the -60 dBFS burst's peaks no
-    // longer reach the threshold) but left the bursts at 0.51 / 0.88 / 1.58 ->
-    // 0.52 / 0.93 / 1.65 dB: between the steps the band sits in digital
-    // silence, below its -75 dB hiss floor, where BoostBelow's taper holds the
-    // gain at 0, and a burst then raises it at the band's 120 ms release (a
-    // rising BoostBelow gain is a "release"). Under any bed above the floor
-    // the interim bell gives short steps their full lift (next test).
+    // Before the E19 redesign (the interim static bell) the bursts got
+    // 0.52 / 0.93 / 1.65 dB against 5.71 dB steady (9 / 16 / 29 %): between
+    // the steps the band sat in digital silence, under its hiss floor, and a
+    // burst raised the gain at the band's 120 ms release. The cue enhancer
+    // (CueLift, DynamicEq.h) holds the background at the hiss floor there,
+    // so a step stands 15 dB out of it and gets the lift within 1-2 ms:
+    // 5.34 / 5.63 / 5.67 dB against 5.68 dB (94 / 99 / 100 %).
     RenderOptions footsteps;
     footsteps.mode = ModeValue::Gaming;
     footsteps.macros.push_back ({ "footsteps", 100.0f });
@@ -606,15 +572,16 @@ TEST_CASE ("KnownGap: burst footsteps - Footsteps 100 gives isolated 20 / 40 / 8
     measured ("isolated -60 dBFS bursts, Footsteps 100 lift: 80 ms", r.burstLiftDb[2], "dB");
     measured ("isolated -60 dBFS bursts, Footsteps 100 lift: steady", r.steadyLiftDb, "dB");
 
-    // KNOWN_GAP: target 20-50 ms bursts >= 80 % of the steady lift (interim bell: 20 ms >= 90 %) per docs/11 E19 Done-when.
-    // Today 9 / 16 / 29 % of the steady lift out of digital silence (the hiss taper, see above).
-    CHECK_NEAR (r.burstLiftDb[0], 0.52, 0.3);
-    CHECK_NEAR (r.burstLiftDb[1], 0.93, 0.3);
-    CHECK_NEAR (r.burstLiftDb[2], 1.65, 0.3);
-    CHECK_NEAR (r.steadyLiftDb, 5.71, 0.3);
+    // Target (docs/11 E19 Done-when): 20-50 ms bursts >= 80 % of the steady lift (the interim's 20 ms >= 90 % too).
+    CHECK_GE (r.burstLiftDb[0], 0.9 * r.steadyLiftDb);
+    CHECK_GE (r.burstLiftDb[1], 0.9 * r.steadyLiftDb);
+    CHECK_NEAR (r.burstLiftDb[0], 5.34, 0.3);
+    CHECK_NEAR (r.burstLiftDb[1], 5.63, 0.3);
+    CHECK_NEAR (r.burstLiftDb[2], 5.67, 0.3);
+    CHECK_NEAR (r.steadyLiftDb, 5.68, 0.3);
 }
 
-TEST_CASE ("KnownGap: step/bed contrast - the Footsteps 100 interim bell lifts 20 ms steps under a bed fully and contrast-neutrally below -14 LUFS; Competitive FPS still lifts the bed on quiet content (E19)")
+TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer lifts 20-80 ms steps under a bed by the same law at -14..-50 LUFS and raises their contrast; Competitive FPS keeps the bed within +1 dB (E19)")
 {
     // makeBurstScene() (steps 6 dB under a pink bed) at -14 / -24 / -40 LUFS,
     // plus -50 LUFS (docs/11 E19's quiet-material case). Metrics (mid channel):
@@ -623,12 +590,10 @@ TEST_CASE ("KnownGap: step/bed contrast - the Footsteps 100 interim bell lifts 2
     //   steady lift = the same over the last 500 ms of a 1 s burst;
     //   bed lift    = full-band power 200..400 ms after each burst onset;
     //   contrast change = (step / bed in the band) out minus in.
-    // A static EQ changes the in-band contrast too, because the steps (noise
-    // band-passed at 3.2 kHz, Q 1) sit closer to the bell's centre than the
-    // pink bed does: the reference is the same scene through a static +7 dB
-    // bell at 3.2 kHz, Q 0.9 (band 4's shape, as a user EQ band, every other
-    // module off), and the interim's "contrast change within +-0.5 dB" is
-    // measured against it.
+    // The reference is the same scene through a static +7 dB bell at 3.2 kHz,
+    // Q 0.9 (band 4's shape as a user EQ band, every other module off): a
+    // static EQ moves the contrast only by +0.77 dB, because the steps sit
+    // closer to its centre than the pink bed does.
     RenderOptions footsteps;
     footsteps.mode = ModeValue::Gaming;
     footsteps.macros.push_back ({ "footsteps", 100.0f });
@@ -665,64 +630,65 @@ TEST_CASE ("KnownGap: step/bed contrast - the Footsteps 100 interim bell lifts 2
         measured ("Competitive FPS contrast change" + at + "80 ms", fps[l].contrastChangeDb[2], "dB");
     }
 
-    // Footsteps 100 (docs/11 E19 interim, band 4 a static bell). Before it,
-    // per level: lift 20 / 40 / 80 ms / steady 0.00 / 0.00 / 0.00 / 0.00,
-    // 0.00 / 0.00 / 0.00 / 0.00, -0.01 / -0.13 / -0.17 / -0.34 and 3.81 /
-    // 3.18 / 2.57 / 2.30 dB; contrast change at 40 ms 0.00 / 0.00 / -0.52 /
-    // -1.44 dB. After it: 5.76 / 5.77 / 5.82 / 5.70 dB at -24 / -40 / -50 LUFS
-    // (contrast +0.76 dB, the static bell's own +0.76 dB), and 3.81 / 3.18 /
-    // 2.57 / 2.30 dB at -14 LUFS, where the steps' in-band peaks reach the
-    // loud roll-off above -16.5 dBFS (contrast -1.44 dB against the bell's
-    // +0.76).
-    for (int l = 1; l < kLevels; ++l)
-    {
-        // Interim Done-when: 20 ms steps >= 90 % of the steady lift, and the
-        // contrast change within +-0.5 dB of a static bell's.
-        CHECK_GE (fs[l].burstLiftDb[0], 0.9 * fs[l].steadyLiftDb);
-        for (int d = 0; d < 3; ++d)
-        {
-            CHECK_NEAR (fs[l].burstLiftDb[d], fs[l].steadyLiftDb, 0.3);
-            CHECK_NEAR (fs[l].contrastChangeDb[d], bell[l].contrastChangeDb[d], 0.5);
-        }
-        CHECK_NEAR (fs[l].steadyLiftDb, 5.70, 0.3);
-        CHECK_NEAR (fs[l].contrastChangeDb[1], 0.76, 0.3);
-        CHECK_NEAR (bell[l].contrastChangeDb[1], 0.76, 0.1);
-        // Lift within +-1 dB across levels (steady = the same law at every level).
-        CHECK_NEAR (fs[l].steadyLiftDb, fs[1].steadyLiftDb, 1.0);
-    }
-    // KNOWN_GAP: target module lift within +-1 dB across -14 / -24 / -40 LUFS per docs/11 E19 Done-when; at -14 LUFS
-    // the steps' peaks reach the interim bell's loud roll-off (the redesign's loud cap is relative to the programme).
-    const double fsLift14[4] = { 3.81, 3.18, 2.57, 2.30 }; // 20 / 40 / 80 ms, steady
-    for (int d = 0; d < 3; ++d)
-        CHECK_NEAR (fs[0].burstLiftDb[d], fsLift14[d], 0.3);
-    CHECK_NEAR (fs[0].steadyLiftDb, fsLift14[3], 0.3);
-    CHECK_NEAR (fs[0].contrastChangeDb[1], -1.44, 0.3);
-
-    // Competitive FPS. Before the interim: bed -1.85 / -1.21 / -0.43 / +4.39 dB;
-    // contrast change 20 / 40 / 80 ms 0.15 / 0.02 / -0.16, 0.25 / 0.13 / -0.03,
-    // -0.19 / -0.40 / -0.48 and -1.74 / -3.05 / -3.22 dB.
-    const double fpsBed[kLevels] = { -0.06, 0.66, 1.66, 4.37 };
-    const double fpsContrast[kLevels][3] = { { 0.05, -0.53, -1.11 }, { 0.83, 0.70, 0.52 }, { 0.82, 0.75, 0.70 }, { -0.89, -1.66, -1.67 } }; // 20 / 40 / 80 ms
+    // Footsteps 100. Before the E19 redesign (the interim static bell): lift
+    // 20 / 40 / 80 ms / steady 3.81 / 3.18 / 2.57 / 2.30 dB at -14 LUFS (the
+    // steps' peaks reached its loud roll-off) and 5.76 / 5.77 / 5.82 /
+    // 5.70 dB below; contrast change at 40 ms -1.44 dB at -14 LUFS, +0.76 dB
+    // (the static bell's own) below. After it (CueLift): 5.24 / 6.03 /
+    // 6.53 dB at every level; a 1 s steady burst becomes background after
+    // about 0.5 s (1.00 dB over its last 500 ms); contrast change +5.99 dB;
+    // the bed -1.13 dB (the default 20 Hz subsonic filter on the generator's
+    // infrasonic pink; the cue bands add nothing).
     for (int l = 0; l < kLevels; ++l)
     {
-        // KNOWN_GAP: target Competitive FPS bed <= +1 dB and step/bed contrast change >= +3 dB per docs/11 E19 Done-when.
+        // docs/11 E19 Done-when: lift within +-1 dB across the levels, 20-50 ms
+        // steps >= 80 % of the law (the 80 ms lift), contrast >= +3 dB, and
+        // well above a static bell's.
+        for (int d = 0; d < 3; ++d)
+            CHECK_NEAR (fs[l].burstLiftDb[d], fs[1].burstLiftDb[d], 1.0);
+        CHECK_GE (fs[l].burstLiftDb[0], 0.8 * fs[l].burstLiftDb[2]);
+        CHECK_GE (fs[l].contrastChangeDb[1], 3.0);
+        CHECK_GE (fs[l].contrastChangeDb[1], bell[l].contrastChangeDb[1] + 3.0);
+        CHECK_NEAR (fs[l].burstLiftDb[0], 5.24, 0.3);
+        CHECK_NEAR (fs[l].burstLiftDb[1], 6.03, 0.3);
+        CHECK_NEAR (fs[l].burstLiftDb[2], 6.53, 0.3);
+        CHECK_NEAR (fs[l].steadyLiftDb, 1.00, 0.3);
+        CHECK_NEAR (fs[l].contrastChangeDb[1], 5.99, 0.3);
+        CHECK_NEAR (fs[l].bedLiftDb, -1.13, 0.3);
+        CHECK_NEAR (bell[l].contrastChangeDb[1], 0.77, 0.1);
+    }
+
+    // Competitive FPS. Before the redesign: bed -0.06 / 0.66 / 1.66 / 4.37 dB;
+    // contrast change 20 / 40 / 80 ms 0.05 / -0.53 / -1.11, 0.83 / 0.70 /
+    // 0.52, 0.82 / 0.75 / 0.70 and -0.89 / -1.66 / -1.67 dB (docs/11 E19
+    // measured +10.9 dB and -6.0 dB on its own stimulus).
+    const double fpsBed[kLevels] = { -1.86, -1.30, -0.94, 0.69 };
+    const double fpsContrast[kLevels][3] = { { 4.39, 4.93, 5.17 }, { 4.49, 5.04, 5.26 }, { 4.58, 5.21, 5.67 }, { 4.55, 4.72, 5.21 } }; // 20 / 40 / 80 ms
+    for (int l = 0; l < kLevels; ++l)
+    {
+        // docs/11 E19 Done-when: Competitive FPS bed <= +1 dB and step/bed contrast change >= +3 dB.
+        CHECK_LE (fps[l].bedLiftDb, 1.0);
         CHECK_NEAR (fps[l].bedLiftDb, fpsBed[l], 0.3);
         for (int d = 0; d < 3; ++d)
+        {
+            CHECK_GE (fps[l].contrastChangeDb[d], 3.0);
             CHECK_NEAR (fps[l].contrastChangeDb[d], fpsContrast[l][d], 0.3);
+        }
     }
 }
 
-TEST_CASE ("E19 interim: the footsteps bell's loud roll-off keeps gunfire nearly unlifted in the gaming presets")
+TEST_CASE ("E19: the cue enhancer's loud cap keeps gunfire nearly unlifted in the gaming presets")
 {
-    // docs/11 E19 ships the interim bell "only with a preset check that the
-    // loud cap still protects gunfire". Scene: -40 dBFS white-noise bed, then
-    // ten shots (seeded white noise, tau 15 ms, peak -3 dBFS) 100 ms apart
-    // from 1 s. Metric: 3.2 kHz band power (mid, Q 1) over the first 30 ms of
-    // each shot, the preset as shipped vs the same preset with Footsteps 0.
-    // The presets' static bell is 7 dB x Footsteps at 3.2 kHz (Competitive FPS
-    // 5.6, Battle Royale 4.2, Night Mode 2.5 dB); on the shots it is mostly
-    // rolled off: +1.13 / +0.94 / +0.58 dB (before the interim, with band 4's
-    // -42 dBFS threshold: 0.00 dB). Output peaks stay under full scale.
+    // docs/11 E19 shipped its interim bell "only with a preset check that the
+    // loud cap still protects gunfire"; the redesign keeps the check. Scene:
+    // -40 dBFS white-noise bed, then ten shots (seeded white noise, tau 15 ms,
+    // peak -3 dBFS) 100 ms apart from 1 s. Metric: 3.2 kHz band power (mid,
+    // Q 1) over the first 30 ms of each shot, the preset as shipped vs the
+    // same preset with Footsteps 0. Interim bell (7 dB x Footsteps, rolled
+    // off on the shots): +1.13 / +0.94 / +0.58 dB (Competitive FPS, Battle
+    // Royale, Night Mode); the cue enhancer (peak 26..36 dB over the
+    // background withdraws the lift within 0.5 ms): +0.22 / +0.25 / +0.05 dB.
+    // Output peaks stay under full scale.
     const int n = samplesOf (3.0);
     auto x = whiteNoise (n, std::pow (10.0f, -40.0f / 20.0f) * std::sqrt (3.0f), 97);
     FastRandom rng (1234);
@@ -739,7 +705,7 @@ TEST_CASE ("E19 interim: the footsteps bell's loud roll-off keeps gunfire nearly
     {
         const char* file;
         double shotLiftDb;
-    } presets[] = { { "gaming-competitive-fps.json", 1.13 }, { "gaming-battle-royale.json", 0.94 }, { "gaming-night-mode.json", 0.58 } };
+    } presets[] = { { "gaming-competitive-fps.json", 0.22 }, { "gaming-battle-royale.json", 0.25 }, { "gaming-night-mode.json", 0.05 } };
     for (const auto& p : presets)
     {
         auto opts = factoryPreset (p.file);
@@ -749,7 +715,7 @@ TEST_CASE ("E19 interim: the footsteps bell's loud roll-off keeps gunfire nearly
         const double lift = powerDb (meanPower (bandPass (midOf (shipped), 3200.0, 1.0), shots))
                             - powerDb (meanPower (bandPass (midOf (without), 3200.0, 1.0), shots));
         measured (std::string (p.file) + " shot lift in the 3.2 kHz band vs Footsteps 0", lift, "dB");
-        CHECK_LE (lift, 1.5);
+        CHECK_LE (lift, 0.5);
         CHECK_NEAR (lift, p.shotLiftDb, 0.3);
         for (const auto& ch : shipped)
             CHECK_LE (peakAbs (ch.data(), n), 1.0);
@@ -819,10 +785,12 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     // Auto Level's own share of the bed lift is at its +6 dB cap.
     CHECK_LE (before - staticLift, AutoLevel::kMaxGainDb + 0.1);
     // KNOWN_GAP: target ambience lift <= +6 dB per docs/11 E21 Done-when. The
-    // rest is the preset's own: 6.98 dB with Auto Level off (compressor
-    // make-up 6 dB, upward compression, the Footsteps bell) - a preset retune.
-    CHECK_NEAR (before, 11.98, 0.3);
-    CHECK_NEAR (staticLift, 6.98, 0.3);
+    // rest is the preset's own: 6.72 dB with Auto Level off (compressor
+    // make-up 6 dB, upward compression) - a preset retune. The E19 redesign
+    // took the Footsteps bell's share out of it (11.98 / 6.98 -> 11.13 /
+    // 6.72 dB): the cue enhancer does not lift the bed.
+    CHECK_NEAR (before, 11.13, 0.3);
+    CHECK_NEAR (staticLift, 6.72, 0.3);
     // A 10 s event: the upper gate's 5 s release counts only the blocks in
     // which the 100 ms measure also reads above the gate, so whether this
     // intermittent fire becomes a new level depended on the host block (a
@@ -835,7 +803,7 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     CHECK_LE (std::abs (longHole5), 1.0);
 }
 
-TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick body more than its first 10 ms, Tighten and Boost 100 cut the onset (E04 / E05)")
+TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body, Tighten and Boost 100 cut the onset (E04 / E05)")
 {
     // Synthetic kick (50 Hz + 80 Hz chirp, e^-18t, peak -6 dBFS) every
     // 500 ms for 6 s, Music mode, maximizer off unless stated. Lift = output
@@ -886,9 +854,13 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick body more than its f
     measured ("Boost 100 onset (0-10) minus body (10-30)", b0 - b1, "dB");
 
     // KNOWN_GAP: target Punch 100 0-10 ms lift >= 10-30 ms lift + 2 dB per docs/11 E04 Done-when.
-    CHECK_NEAR (p0, 3.92, 0.3);
-    CHECK_NEAR (p1, 5.47, 0.3);
-    CHECK_NEAR (p0 - p1, -1.55, 0.3);
+    // docs/11 E04 step (1) took BassTighten out of the Punch macro: 0-10 /
+    // 10-30 ms 3.92 / 5.47 -> 5.38 / 4.70 dB, onset minus body -1.55 ->
+    // +0.68 dB. The rest is the full-band shaper's own smear (E04 steps 2-5).
+    CHECK_NEAR (p0, 5.38, 0.3);
+    CHECK_NEAR (p1, 4.70, 0.3);
+    CHECK_NEAR (p0 - p1, 0.68, 0.3);
+    CHECK_GE (p0, p1); // the onset no longer gets less than the body
     // KNOWN_GAP: target Tighten 0.5 0-10 ms change >= -0.5 dB per docs/11 E04 Done-when.
     CHECK_NEAR (t0, -2.04, 0.3);
     // KNOWN_GAP: target Boost 100 kick onset / body >= 0 dB per docs/11 E05 Done-when.
@@ -1004,11 +976,15 @@ TEST_CASE ("KnownGap: hands-free rates - at 8 / 16 / 32 kHz Footsteps 100 no lon
         CHECK_LE (fsExcess[k], 1.0);
         CHECK_NEAR (fsExcess[k], 0.0, 0.1);
     }
-    CHECK_NEAR (fsExcess[3], 6.43, 0.3); // 48 kHz: the footsteps bell (7 dB at 3.2 kHz) is on
+    // 48 kHz: the band is on, but since docs/11 E19 it is the cue enhancer,
+    // which leaves a steady tone alone (the interim bell gave it 6.43 dB);
+    // test_modes.cpp checks its lift on cues at 44.1 kHz and on hands-free rates.
+    CHECK_NEAR (fsExcess[3], 0.0, 0.1);
     // KNOWN_GAP: target 3.2 kHz lift from Competitive FPS <= +1 dB at 8 / 16 / 32 kHz per docs/11 E17 Done-when. The
     // rest is Clarity presence (centred at 3.2 kHz, raised by Boost and Voice & Score) and the voice band at 2 kHz;
     // E17's hands-free runtime override (Footsteps, Spatial, Bass and virtualiser off) is not built yet.
-    const double fpsToday[3] = { 2.42, 2.53, 2.54 };
+    // The E19 retune lowered the preset's Voice & Score (0.35 -> 0.2): 2.42 / 2.53 / 2.54 -> 1.75 / 1.79 / 1.79 dB.
+    const double fpsToday[3] = { 1.75, 1.79, 1.79 };
     for (int k = 0; k < 3; ++k)
         CHECK_NEAR (fpsExcess[k], fpsToday[k], 0.3);
 }
@@ -1030,7 +1006,7 @@ TEST_CASE ("KnownGap metrics: each metric reads an injected artefact at its inje
         for (size_t i = 0; i < out.size(); ++i)
             if (std::fmod (static_cast<double> (i) / kFs, 0.5) >= 0.25)
                 out[i] *= 0.5f;
-        const auto g = toneGainTrack (out, in, 2000.0, samplesOf (1.0), samplesOf (3.0));
+        const auto g = toneGainTrack (out, in, kFs, 2000.0, samplesOf (1.0), samplesOf (3.0));
         CHECK_NEAR (percentile (g, 0.95) - percentile (g, 0.05), 6.02, 0.1);
         CHECK_NEAR (*std::max_element (g.begin(), g.end()) - *std::min_element (g.begin(), g.end()), 6.02, 0.1);
     }
@@ -1062,6 +1038,109 @@ TEST_CASE ("KnownGap metrics: each metric reads an injected artefact at its inje
         CHECK_NEAR (flat.bedLiftDb, 0.0, 0.01);
         CHECK_NEAR (gained.bedLiftDb, -6.0, 0.05);
         CHECK_NEAR (gained.steadyLiftDb, -6.0, 0.05);
+    }
+}
+
+TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59)")
+{
+    // docs/11 E59 Done-when: each metric reports the injected value within
+    // +-10 % (of the power ratio for dB metrics: +-0.41 dB). The suite is
+    // `flubsound-cli quality` (Commands.h measureQuality); every module is
+    // off, so the chain passes the stimuli through and only the injected
+    // artefact shows.
+    auto values = resolve (RenderOptions {});
+    onlyModules (values, {});
+    QualityReport clean, cubic, modulated, delayed;
+    std::string error;
+    REQUIRE (measureQuality (values, 512, clean, error));
+    for (const auto& t : clean.thdn)
+        CHECK (t.db < -100.0);
+    CHECK (clean.bassImdDb < -100.0);
+    CHECK (clean.smpteImdDb < -100.0);
+    for (const auto& m : clean.mtnd)
+        CHECK (m.db < -100.0);
+    for (const auto& d : clean.ducking)
+        CHECK_NEAR (d.track.spreadDb, 0.0, 0.01);
+    CHECK_NEAR (clean.kickOnsetLiftDb - clean.kickBodyLiftDb, 0.0, 0.01);
+    CHECK_NEAR (clean.kickCentroidShiftMs, 0.0, 0.01);
+    CHECK_NEAR (clean.pinkOutLufs, clean.pinkInLufs, 0.01);
+
+    // 1 % cubic: y = x + c x^3 with c = 0.16, so the -6 dBFS (A = 0.5) sine's
+    // 3rd harmonic is 1 % of A. Expected values from the expansion of
+    // (sum a_i cos w_i t)^3: harmonic c A^3 / 4, fundamental A + 3 c A^3 / 4
+    // (+ 3 c A B^2 / 2 per other tone of amplitude B), 2f1 +- f2 products
+    // 3 c A^2 B / 4.
+    constexpr double c = 0.16;
+    REQUIRE (measureQuality (values, 512, cubic, error, [] (Channels& out) {
+        for (auto& ch : out)
+            for (auto& s : ch)
+                s = static_cast<float> (s + c * s * s * s);
+    }));
+    const double a = 0.5, h3 = c * a * a * a / 4.0, fund = a + 3.0 * c * a * a * a / 4.0;
+    const double thdExpected = 20.0 * std::log10 (h3 / std::sqrt (fund * fund + h3 * h3));
+    for (const auto& t : cubic.thdn)
+        CHECK_NEAR (t.db, thdExpected, 0.41);
+    const double b = 0.25, product = 0.75 * c * b * b * b, tone = b + c * b * b * b * (0.75 + 1.5);
+    CHECK_NEAR (cubic.bassImdDb, 10.0 * std::log10 (4.0 * product * product / (2.0 * tone * tone)), 0.41);
+    const double lo = 0.4, hi = 0.1, side = 0.75 * c * lo * lo * hi, hiOut = hi + c * (0.75 * hi * hi * hi + 1.5 * lo * lo * hi);
+    CHECK_NEAR (cubic.smpteImdDb, 10.0 * std::log10 (2.0 * side * side / (hiOut * hiOut)), 0.41);
+    measured ("meta: 1 % cubic THD+N (expected " + std::to_string (thdExpected) + ")", cubic.thdn[0].db, "dB");
+    measured ("meta: 1 % cubic bass IMD", cubic.bassImdDb, "dB");
+    measured ("meta: 1 % cubic SMPTE IMD", cubic.smpteImdDb, "dB");
+
+    // 6 dB 2 Hz square gain modulation: every probe's gain track spreads
+    // 6.02 dB, and its kick-rate component is the square wave's fundamental,
+    // (4 / pi) x 3.01 dB (3rd harmonic a third of that, even ones 0).
+    REQUIRE (measureQuality (values, 512, modulated, error, [] (Channels& out) {
+        for (auto& ch : out)
+            for (size_t i = 0; i < ch.size(); ++i)
+                if (std::fmod (static_cast<double> (i) / kFs, 0.5) >= 0.25)
+                    ch[i] *= 0.5f;
+    }));
+    const double squareFundamental = 4.0 / kPi * 0.5 * toDb (2.0);
+    for (const auto& d : modulated.ducking)
+    {
+        CHECK_NEAR (d.track.spreadDb, 6.02, 0.602);
+        CHECK_NEAR (d.track.modulationDb[0], squareFundamental, 0.1 * squareFundamental);
+        CHECK_NEAR (d.track.modulationDb[2], squareFundamental / 3.0, 0.1 * squareFundamental / 3.0);
+        CHECK (d.track.modulationDb[1] < 0.05);
+        CHECK_NEAR (d.track.downPercent, 50.0, 5.0);
+    }
+    measured ("meta: 6 dB 2 Hz square, 2 kHz probe 2 Hz modulation", modulated.ducking[1].track.modulationDb[0], "dB");
+
+    // 3 ms delay: the kick's energy centroid moves 3 ms.
+    REQUIRE (measureQuality (values, 512, delayed, error, [] (Channels& out) {
+        const auto d = static_cast<size_t> (samplesOf (0.003));
+        for (auto& ch : out)
+        {
+            ch.insert (ch.begin(), d, 0.0f);
+            ch.resize (ch.size() - d);
+        }
+    }));
+    CHECK_NEAR (delayed.kickCentroidShiftMs, 3.0, 0.3);
+    measured ("meta: 3 ms delay, kick centroid shift", delayed.kickCentroidShiftMs, "ms");
+
+    // MTND: noise 40 dB under a multitone reads -40 dB (the residual after
+    // the excited tones), a pure multitone reads nothing.
+    {
+        std::vector<double> tones { 50.0, 110.0, 230.0, 470.0, 1010.0, 2030.0, 4070.0, 8110.0 };
+        const int n = samplesOf (1.0);
+        std::vector<float> x (static_cast<size_t> (n));
+        double power = 0.0;
+        for (size_t k = 0; k < tones.size(); ++k)
+        {
+            const auto s = sine (tones[k], kFs, n, 0.1f);
+            for (int i = 0; i < n; ++i)
+                x[static_cast<size_t> (i)] += s[static_cast<size_t> (i)];
+            power += 0.5 * 0.01;
+        }
+        CHECK (multitoneResidualDb (x.data(), n, kFs, tones) < -100.0);
+        const auto noise = whiteNoise (n, 1.0f, 99);
+        const double noiseRms = rms (noise.data(), n);
+        const auto g = static_cast<float> (std::sqrt (power) * 0.01 / noiseRms);
+        for (int i = 0; i < n; ++i)
+            x[static_cast<size_t> (i)] += g * noise[static_cast<size_t> (i)];
+        CHECK_NEAR (multitoneResidualDb (x.data(), n, kFs, tones), -40.0, 0.41);
     }
 }
 

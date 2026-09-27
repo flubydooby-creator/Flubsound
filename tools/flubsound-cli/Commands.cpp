@@ -295,6 +295,10 @@ json::Value renderStatsToJson (const RenderStats& st)
     distortion.set ("thdnMaxDb", statValue (st.distortionMaxDb));
     distortion.set ("thdnMeanDb", statValue (st.distortionMeanDb));
 
+    json::Value harmonics;
+    harmonics.set ("maxDb", statValue (st.harmonicsMaxDb));
+    harmonics.set ("meanDb", statValue (st.harmonicsMeanDb));
+
     json::Value compressor;
     compressor.set ("grMaxDb", statValue (st.compGrMaxDb));
     compressor.set ("grMeanDb", statValue (st.compGrMeanDb));
@@ -315,6 +319,13 @@ json::Value renderStatsToJson (const RenderStats& st)
     governor.set ("scaleMin", std::round (st.governorScaleMin * 1000.0) / 1000.0);
     governor.set ("scaleMean", std::round (st.governorScaleMean * 1000.0) / 1000.0);
     governor.set ("backoffPercent", statValue (st.governorBackoffPercent));
+    json::Value states;
+    constexpr const char* kStateNames[] = { "idle", "backingOff", "holding", "recovering" };
+    for (size_t k = 0; k < st.governorStatePercent.size(); ++k)
+        states.set (kStateNames[k], statValue (st.governorStatePercent[k]));
+    governor.set ("statePercent", std::move (states));
+    governor.set ("limiterReasonPercent", statValue (st.governorLimiterReasonPercent));
+    governor.set ("distortionReasonPercent", statValue (st.governorDistortionReasonPercent));
 
     json::Value leveller;
     leveller.set ("autoLevelMinDb", statValue (st.autoLevelMinDb));
@@ -327,6 +338,7 @@ json::Value renderStatsToJson (const RenderStats& st)
     v.set ("glue", std::move (glue));
     v.set ("clipper", std::move (clipper));
     v.set ("distortion", std::move (distortion));
+    v.set ("harmonics", std::move (harmonics));
     v.set ("compressor", std::move (compressor));
     v.set ("bassProtectionMaxDb", statValue (st.bassProtectionMaxDb));
     v.set ("modeBands", std::move (bands));
@@ -811,6 +823,361 @@ int runAnalyze (const CliOptions& o)
         std::fputs (formatReport (r, o.input, format).c_str(), stdout);
         if (o.bands)
             std::fputs (("Bands   : " + formatBands (bands) + "\n").c_str(), stdout);
+    }
+    return kExitOk;
+}
+
+// ===========================================================================
+// quality (docs/11 E59)
+// ===========================================================================
+namespace
+{
+constexpr double kQualityFs = 48000.0;
+using Stereo = std::vector<std::vector<float>>;
+
+int qualitySamples (double seconds) { return static_cast<int> (std::lround (seconds * kQualityFs)); }
+
+io::AudioFileData qualityInput (const std::vector<float>& mono)
+{
+    io::AudioFileData d;
+    d.sampleRate = kQualityFs;
+    d.numChannels = 2;
+    d.channels = { mono, mono };
+    return d;
+}
+
+std::vector<float> sumOfSines (double seconds, const std::vector<std::pair<double, double>>& tones /* (Hz, peak) */)
+{
+    const int n = qualitySamples (seconds);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        double v = 0.0;
+        for (const auto& [f, a] : tones)
+            v += a * std::sin (kTwoPi * f * i / kQualityFs);
+        x[static_cast<size_t> (i)] = static_cast<float> (v);
+    }
+    return x;
+}
+
+/** Paul Kellet's refined pink filter on FastRandom white noise, scaled to rmsLevel. */
+std::vector<float> pinkNoise (int n, double rmsLevel, uint32_t seed)
+{
+    FastRandom rng (seed);
+    std::vector<float> v (static_cast<size_t> (n));
+    double b0 = 0.0, b1 = 0.0, b2 = 0.0, b3 = 0.0, b4 = 0.0, b5 = 0.0, b6 = 0.0, acc = 0.0;
+    for (auto& s : v)
+    {
+        const double w = rng.nextBipolar();
+        b0 = 0.99886 * b0 + w * 0.0555179;
+        b1 = 0.99332 * b1 + w * 0.0750759;
+        b2 = 0.96900 * b2 + w * 0.1538520;
+        b3 = 0.86650 * b3 + w * 0.3104856;
+        b4 = 0.55000 * b4 + w * 0.5329522;
+        b5 = -0.7616 * b5 - w * 0.0168980;
+        const double p = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362;
+        b6 = w * 0.115926;
+        s = static_cast<float> (p);
+        acc += p * p;
+    }
+    const double g = n > 0 && acc > 0.0 ? rmsLevel / std::sqrt (acc / n) : 0.0;
+    for (auto& s : v)
+        s = static_cast<float> (s * g);
+    return v;
+}
+
+/** The multitone's frequencies: 31 log-spaced integer frequencies 40 Hz .. 16 kHz. */
+std::vector<double> multitoneFrequencies()
+{
+    std::vector<double> f;
+    for (int k = 0; k <= 30; ++k)
+    {
+        const double hz = std::round (40.0 * std::pow (400.0, k / 30.0));
+        if (f.empty() || hz > f.back())
+            f.push_back (hz);
+    }
+    return f;
+}
+
+/** Pink amplitudes (1 / sqrt f), seeded phases, scaled to rmsLevel. */
+std::vector<float> multitone (double seconds, const std::vector<double>& freqs, double rmsLevel)
+{
+    FastRandom rng (20590);
+    std::vector<std::pair<double, double>> parts; // (amplitude, phase)
+    double power = 0.0;
+    for (double f : freqs)
+    {
+        const double a = 1.0 / std::sqrt (f);
+        parts.push_back ({ a, kPi * rng.nextBipolar() });
+        power += 0.5 * a * a;
+    }
+    const double g = rmsLevel / std::sqrt (power);
+    const int n = qualitySamples (seconds);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        double v = 0.0;
+        for (size_t k = 0; k < freqs.size(); ++k)
+            v += parts[k].first * std::sin (kTwoPi * freqs[k] * i / kQualityFs + parts[k].second);
+        x[static_cast<size_t> (i)] = static_cast<float> (g * v);
+    }
+    return x;
+}
+
+/** 55 Hz kicks (exp decay, tau 100 ms, 350 ms long, peak kickPeak) every 500 ms from 250 ms. */
+double kickAt (double t, double kickPeak)
+{
+    const double beat = std::fmod (t + 0.25, 0.5);
+    return t >= 0.25 && beat < 0.35 ? kickPeak * std::exp (-beat / 0.1) * std::sin (kTwoPi * 55.0 * beat) : 0.0;
+}
+
+std::vector<float> midOf (const Stereo& c)
+{
+    std::vector<float> m (c[0].size());
+    for (size_t i = 0; i < m.size(); ++i)
+        m[i] = 0.5f * (c[0][i] + c[1][i]);
+    return m;
+}
+
+double windowPower (const std::vector<float>& x, const std::vector<std::pair<int, int>>& windows)
+{
+    double acc = 0.0;
+    int64_t n = 0;
+    for (const auto& [b, e] : windows)
+        for (int i = b; i < e && i < static_cast<int> (x.size()); ++i, ++n)
+            acc += static_cast<double> (x[static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+    return n > 0 ? acc / static_cast<double> (n) : 0.0;
+}
+
+double powerRatioDb (double num, double den) { return 10.0 * std::log10 (std::max (1.0e-30, num)) - 10.0 * std::log10 (std::max (1.0e-30, den)); }
+
+json::Value dbValue (double v) { return json::Value (std::round (v * 100.0) / 100.0); }
+} // namespace
+
+bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
+                     const QualityInjector& inject)
+{
+    report = QualityReport();
+    const auto render = [&] (const std::vector<float>& mono, Stereo& out, RenderStats* stats) {
+        int latency = 0;
+        if (! renderPass (qualityInput (mono), values, blockSize, out, latency, error, nullptr, stats))
+            return false;
+        if (inject)
+            inject (out);
+        return true;
+    };
+    const int second = qualitySamples (1.0);
+    Stereo out;
+
+    // ---- THD+N of single sines ---------------------------------------------
+    for (double hz : { 40.0, 60.0, 100.0, 1000.0 })
+    {
+        if (! render (sumOfSines (2.0, { { hz, 0.5 } }), out, nullptr))
+            return false;
+        const auto mid = midOf (out);
+        report.thdn.push_back ({ hz, sineThdnDb (mid.data() + second, second, kQualityFs, hz) });
+    }
+
+    // ---- two-tone IMD ------------------------------------------------------
+    if (! render (sumOfSines (2.0, { { 50.0, 0.25 }, { 63.0, 0.25 } }), out, nullptr))
+        return false;
+    report.bassImdDb = twoToneImdDb (midOf (out).data() + second, second, kQualityFs, 50.0, 63.0, 5);
+    if (! render (sumOfSines (2.0, { { 60.0, 0.4 }, { 7000.0, 0.1 } }), out, nullptr))
+        return false;
+    report.smpteImdDb = smpteImdDb (midOf (out).data() + second, second, kQualityFs, 60.0, 7000.0, 4);
+
+    // ---- multitone MTND against output loudness ------------------------------
+    const auto tones = multitoneFrequencies();
+    for (double level : { -24.0, -18.0, -12.0 })
+    {
+        if (! render (multitone (2.0, tones, std::pow (10.0, level / 20.0)), out, nullptr))
+            return false;
+        const auto mid = midOf (out);
+        report.mtnd.push_back ({ level, analyse (out, kQualityFs).integratedLufs, multitoneResidualDb (mid.data() + second, second, kQualityFs, tones) });
+    }
+
+    // ---- ducking of probe tones under kicks ---------------------------------
+    {
+        const std::array<double, 4> probes { 1000.0, 2000.0, 4000.0, 8000.0 };
+        const int n = qualitySamples (6.0);
+        std::vector<float> x (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / kQualityFs;
+            double v = kickAt (t, 0.5);
+            for (double f : probes)
+                v += 0.05 * std::sin (kTwoPi * f * t);
+            x[static_cast<size_t> (i)] = static_cast<float> (v);
+        }
+        RenderStats stats;
+        if (! render (x, out, &stats))
+            return false;
+        const auto mid = midOf (out);
+        for (double f : probes)
+            report.ducking.push_back ({ f, summariseGainTrack (toneGainTrack (mid, x, kQualityFs, f, second, n), 2.0) });
+        report.duckingLimiterGrMaxDb = stats.limiterGrMaxDb;
+        report.duckingLimiterGrMeanDb = stats.limiterGrMeanDb;
+    }
+
+    // ---- kick onset / body and alignment -------------------------------------
+    {
+        const int n = qualitySamples (6.0);
+        std::vector<float> x (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / kQualityFs, beat = std::fmod (t, 0.5);
+            x[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat));
+        }
+        if (! render (x, out, nullptr))
+            return false;
+        const auto mid = midOf (out);
+        std::vector<std::pair<int, int>> w0, w1, w2;
+        double centroidShift = 0.0;
+        int kicks = 0;
+        for (int k = 2; k < 12; ++k) // onsets at 1.0 .. 5.5 s
+        {
+            const int s0 = qualitySamples (0.5 * k);
+            w0.push_back ({ s0, s0 + qualitySamples (0.010) });
+            w1.push_back ({ s0 + qualitySamples (0.010), s0 + qualitySamples (0.030) });
+            w2.push_back ({ s0 + qualitySamples (0.040), s0 + qualitySamples (0.060) });
+            centroidShift += energyCentroidMs (mid, s0, qualitySamples (0.150), kQualityFs) - energyCentroidMs (x, s0, qualitySamples (0.150), kQualityFs);
+            ++kicks;
+        }
+        report.kickOnsetLiftDb = powerRatioDb (windowPower (mid, w0), windowPower (x, w0));
+        report.kickBodyLiftDb = powerRatioDb (windowPower (mid, w1), windowPower (x, w1));
+        report.kickLateLiftDb = powerRatioDb (windowPower (mid, w2), windowPower (x, w2));
+        report.kickCentroidShiftMs = centroidShift / kicks;
+    }
+
+    // ---- loudness of pink noise ----------------------------------------------
+    {
+        const auto x = pinkNoise (qualitySamples (6.0), std::pow (10.0, -18.0 / 20.0), 5959);
+        if (! render (x, out, nullptr))
+            return false;
+        const auto in = analyse (qualityInput (x).channels, kQualityFs);
+        const auto o = analyse (out, kQualityFs);
+        report.pinkInLufs = in.integratedLufs;
+        report.pinkOutLufs = o.integratedLufs;
+        report.pinkOutTruePeakDbtp = o.truePeakDbtp;
+    }
+    return true;
+}
+
+json::Value qualityToJson (const QualityReport& r)
+{
+    json::Value thdn { json::Value::Array {} };
+    for (const auto& t : r.thdn)
+    {
+        json::Value v;
+        v.set ("hz", t.hz);
+        v.set ("db", dbValue (t.db));
+        thdn.push (std::move (v));
+    }
+    json::Value imd;
+    imd.set ("bassTwoToneDb", dbValue (r.bassImdDb));
+    imd.set ("smpteDb", dbValue (r.smpteImdDb));
+
+    json::Value mtnd { json::Value::Array {} };
+    for (const auto& m : r.mtnd)
+    {
+        json::Value v;
+        v.set ("inputRmsDbfs", m.inputRmsDbfs);
+        v.set ("outputLufs", dbValue (m.outputLufs));
+        v.set ("db", dbValue (m.db));
+        mtnd.push (std::move (v));
+    }
+
+    json::Value probes { json::Value::Array {} };
+    for (const auto& d : r.ducking)
+    {
+        json::Value v;
+        v.set ("hz", d.hz);
+        v.set ("spreadDb", dbValue (d.track.spreadDb));
+        v.set ("dipDb", dbValue (d.track.dipDb));
+        v.set ("liftDb", dbValue (d.track.liftDb));
+        v.set ("downPercent", dbValue (d.track.downPercent));
+        json::Value mod { json::Value::Array {} };
+        for (double m : d.track.modulationDb)
+            mod.push (dbValue (m));
+        v.set ("modulationDb", std::move (mod));
+        probes.push (std::move (v));
+    }
+    json::Value ducking;
+    ducking.set ("probes", std::move (probes));
+    ducking.set ("limiterGrMaxDb", dbValue (r.duckingLimiterGrMaxDb));
+    ducking.set ("limiterGrMeanDb", dbValue (r.duckingLimiterGrMeanDb));
+
+    json::Value kick;
+    kick.set ("onsetLiftDb", dbValue (r.kickOnsetLiftDb));
+    kick.set ("bodyLiftDb", dbValue (r.kickBodyLiftDb));
+    kick.set ("lateLiftDb", dbValue (r.kickLateLiftDb));
+    kick.set ("onsetMinusBodyDb", dbValue (r.kickOnsetLiftDb - r.kickBodyLiftDb));
+    kick.set ("centroidShiftMs", dbValue (r.kickCentroidShiftMs));
+
+    json::Value loudness;
+    loudness.set ("pinkInLufs", dbValue (r.pinkInLufs));
+    loudness.set ("pinkOutLufs", dbValue (r.pinkOutLufs));
+    loudness.set ("pinkOutTruePeakDbtp", dbValue (r.pinkOutTruePeakDbtp));
+
+    json::Value v;
+    v.set ("thdn", std::move (thdn));
+    v.set ("imd", std::move (imd));
+    v.set ("mtnd", std::move (mtnd));
+    v.set ("ducking", std::move (ducking));
+    v.set ("kick", std::move (kick));
+    v.set ("loudness", std::move (loudness));
+    return v;
+}
+
+std::string formatQuality (const QualityReport& r)
+{
+    std::string s = "THD+N   :";
+    for (const auto& t : r.thdn)
+        s += fmt (" %g Hz", t.hz) + fmt (" %.1f", t.db);
+    s += " dB (-6 dBFS sine)\n";
+    s += "IMD     : 50 + 63 Hz " + fmt ("%.1f dB", r.bassImdDb) + ", SMPTE 60 Hz + 7 kHz " + fmt ("%.1f dB", r.smpteImdDb) + "\n";
+    s += "MTND    :";
+    for (const auto& m : r.mtnd)
+        s += fmt (" %.0f dBFS", m.inputRmsDbfs) + fmt (" -> %.1f LUFS", m.outputLufs) + fmt (" %.1f dB;", m.db);
+    s += "\nDucking : under 55 Hz kicks (limiter GR max " + fmt ("%.1f", r.duckingLimiterGrMaxDb) + fmt (", mean %.1f dB)\n", r.duckingLimiterGrMeanDb);
+    for (const auto& d : r.ducking)
+        s += fmt ("          %5.0f Hz", d.hz) + fmt (": dip %.1f", d.track.dipDb) + fmt (", lift %.1f", d.track.liftDb)
+             + fmt (", p95-p5 %.1f dB", d.track.spreadDb) + fmt (", %.0f %% > 1 dB down", d.track.downPercent)
+             + fmt (", 2 Hz modulation %.2f dB\n", d.track.modulationDb[0]);
+    s += "Kick    : onset (0-10 ms) " + fmt ("%+.1f", r.kickOnsetLiftDb) + ", body (10-30 ms) " + fmt ("%+.1f", r.kickBodyLiftDb)
+         + ", 40-60 ms " + fmt ("%+.1f dB", r.kickLateLiftDb) + ", centroid " + fmt ("%+.2f ms\n", r.kickCentroidShiftMs);
+    s += "Loudness: pink -18 dBFS RMS " + fmt ("%.1f", r.pinkInLufs) + " -> " + fmt ("%.1f LUFS", r.pinkOutLufs) + ", true peak "
+         + fmt ("%.1f dBTP\n", r.pinkOutTruePeakDbtp);
+    return s;
+}
+
+int runQuality (const CliOptions& o)
+{
+    const Log log (o);
+    std::string error;
+    ResolvedParameters params;
+    if (! buildParameters (o.render, params, error))
+    {
+        log.error (error);
+        return kExitUsage;
+    }
+    logSettings (log, params, o.render);
+    QualityReport report;
+    if (! measureQuality (params.values, o.render.blockSize, report, error))
+    {
+        log.error (error);
+        return kExitFailure;
+    }
+    if (o.json)
+    {
+        json::Value v;
+        v.set ("preset", params.presetDescription);
+        v.set ("quality", qualityToJson (report));
+        printJson (v);
+    }
+    else
+    {
+        std::fputs (formatQuality (report).c_str(), stdout); // the result, printed even with --quiet
     }
     return kExitOk;
 }

@@ -610,7 +610,7 @@ TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter st
                 if (gainDb < 0.0f)
                     CHECK (gainToDb (static_cast<float> (outRms / referenceRms)) < -2.0f);
                 else
-                    CHECK (gainToDb (static_cast<float> (outRms / referenceRms)) > 1.0f);
+                    CHECK_GE (gainToDb (static_cast<float> (outRms / referenceRms)), 1.0f);
             }
         }
     }

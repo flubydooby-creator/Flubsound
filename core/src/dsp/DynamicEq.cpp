@@ -36,6 +36,24 @@ constexpr double kMaxShelfDetectorQ = 0.70710678118654752;
 // The boost of BoostBelow fades out over the 10 dB above the noise floor.
 constexpr float kFloorTaperDb = 10.0f;
 
+// CueLift (docs/11 E19, see the header): level smoothing, background
+// tracker, onset gate, hold and loud cap.
+constexpr double kCueLevelMs = 2.5;           // mean-square smoothing (at least four periods of f)
+constexpr double kCueBackgroundFallMs = 400.0; // background falls with this time constant ...
+constexpr double kCueBackgroundRiseDbPerSec = 5.0; // ... and rises at most this fast
+constexpr double kCueLearnMs = 300.0;         // after a (re)start the background first follows
+constexpr double kCueLearnFollowMs = 40.0;    // the level with this time constant, both ways
+constexpr float kCueGateLoDb = 2.0f;          // onset 0 at this level over the background ...
+constexpr float kCueGateHiDb = 4.5f;          // ... 1 at this
+constexpr double kCueHoldMs = 30.0;           // the onset target is held after the level drops
+constexpr float kCueCapReferenceDb = -55.0f;  // loud cap: the peak over max(background, this) ...
+constexpr float kCueCapLoDb = 26.0f;          // ... starts withdrawing the lift here ...
+constexpr float kCueCapHiDb = 36.0f;          // ... and has withdrawn it here
+constexpr float kCueTopLoDb = -6.0f;          // absolute roll-off of the band peak (dBFS) ...
+constexpr float kCueTopHiDb = -1.0f;          // ... none left at this
+constexpr double kCueCapDownMs = 0.5;         // the cap withdraws the lift this fast ...
+constexpr double kCueCapUpMs = 20.0;          // ... and gives it back this fast
+
 // Recursive states below this are flushed so silence cannot leave subnormals
 // circulating (the host also sets FTZ/DAZ, this is a cheap second line).
 constexpr float kStateFlush = 1.0e-20f;
@@ -74,7 +92,13 @@ float sanitise (float v, float lo, float hi, float fallback) noexcept
 bool isExpander (DynEqMode mode) noexcept
 {
     // Level up -> gain up: a rising gain is the attack (see GainSmoother).
-    return mode == DynEqMode::BoostAbove || mode == DynEqMode::CutBelow;
+    return mode == DynEqMode::BoostAbove || mode == DynEqMode::CutBelow || mode == DynEqMode::CueLift;
+}
+
+/** 0 at lo, 1 at hi, linear in between. */
+float ramp (float x, float lo, float hi) noexcept
+{
+    return std::clamp ((x - lo) / (hi - lo), 0.0f, 1.0f);
 }
 
 /** y = v0: the EQ section passes its input unchanged, whatever its state. */
@@ -112,6 +136,8 @@ float computeDynamicGainDb (DynEqMode mode, float levelDb, float thresholdDb, fl
             return std::min (rangeDb, std::max (0.0f, over) * (ratio - 1.0f));
         case DynEqMode::CutBelow:
             return -std::min (rangeDb, std::max (0.0f, -over) * (ratio - 1.0f));
+        case DynEqMode::CueLift:
+            break; // keyed to the background: DynamicEq::cueTargetDb
     }
     return 0.0f;
 }
@@ -158,7 +184,7 @@ void DynamicEq::setBand (int index, const DynEqBandParams& params) noexcept FLUB
     const DynEqBandParams& prev = targets[idx];
     DynEqBandParams p = params;
 
-    if (static_cast<uint8_t> (p.mode) > static_cast<uint8_t> (DynEqMode::CutBelow))
+    if (static_cast<uint8_t> (p.mode) > static_cast<uint8_t> (DynEqMode::CueLift))
         p.mode = DynEqMode::CutAbove;
     if (p.shape != EqBandType::Bell && p.shape != EqBandType::LowShelf && p.shape != EqBandType::HighShelf)
         p.shape = EqBandType::Bell;
@@ -226,6 +252,12 @@ void DynamicEq::clearBandState (BandState& band) noexcept
         h.fill (0.0f);
     band.segmentPeak = band.windowPeak = band.prevWindowPeak = band.env = 0.0f;
     band.windowCountdown = band.windowTicks;
+    band.segmentEnergy.fill (0.0f);
+    band.cuePower = 0.0f;
+    band.cueBackgroundValid = false;
+    band.cueHeld = 0.0f;
+    band.cueHoldCountdown = 0;
+    band.cueCap = 1.0f;
 }
 
 void DynamicEq::activateBand (int index, bool fadeIn) noexcept
@@ -307,6 +339,19 @@ void DynamicEq::updateDetector (BandState& band) const noexcept
     // After the hold, the envelope decays with a time constant of one window,
     // which turns the bucket staircase of a decaying signal into a smooth fall.
     band.envRelease = static_cast<float> (std::exp (-1.0 / static_cast<double> (band.windowTicks)));
+
+    // CueLift: the level averages at least four periods of the band
+    // frequency (15 ms at 260 Hz), or a narrow low band of a noise bed would
+    // swing by several dB and open the onset gate on its own.
+    const auto perTick = [this] (double ms) { return static_cast<float> (std::exp (-1000.0 / (ms * controlRate))); };
+    band.cuePowerCoeff = perTick (std::max (kCueLevelMs, 4000.0 / freq));
+    band.cueFallCoeff = 1.0f - perTick (kCueBackgroundFallMs);
+    band.cueRiseDbPerTick = static_cast<float> (kCueBackgroundRiseDbPerSec / controlRate);
+    band.cueHoldTicks = std::max (1, static_cast<int> (std::lround (kCueHoldMs * 0.001 * controlRate)));
+    band.cueLearnTicks = static_cast<int> (std::lround (kCueLearnMs * 0.001 * controlRate));
+    band.cueLearnCoeff = 1.0f - perTick (kCueLearnFollowMs);
+    band.cueCapDownCoeff = perTick (kCueCapDownMs);
+    band.cueCapUpCoeff = perTick (kCueCapUpMs);
 }
 
 void DynamicEq::updateEq (BandState& band, float totalDb, bool glide) const noexcept
@@ -326,6 +371,66 @@ void DynamicEq::updateEq (BandState& band, float totalDb, bool glide) const noex
         band.rampDelta = { static_cast<float> (next.g - prev.g), static_cast<float> (next.k - prev.k),
                            next.m0 - prev.m0, next.m1 - prev.m1, next.m2 - prev.m2 };
     }
+}
+
+//==============================================================================
+float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb) const noexcept
+{
+    // Linked mean square of the last control interval, smoothed.
+    float energy = 0.0f;
+    for (auto& e : band.segmentEnergy)
+    {
+        energy = std::max (energy, e);
+        e = 0.0f;
+    }
+    const float tickPower = energy * (1.0f / static_cast<float> (kControlInterval));
+    band.cuePower = tickPower + band.cuePowerCoeff * (band.cuePower - tickPower);
+    if (! (band.cuePower > kEnvFloor * kEnvFloor)) // also catches NaN
+        band.cuePower = 0.0f;
+    const float levelDb = powerToDb (band.cuePower);
+
+    // Background: slow rise, 400 ms fall, never below the hiss floor.
+    float& bg = band.cueBackgroundDb;
+    if (! band.cueBackgroundValid)
+    {
+        bg = levelDb;
+        band.cueBackgroundValid = true;
+        band.cueLearnCountdown = band.cueLearnTicks;
+    }
+    else if (band.cueLearnCountdown > 0)
+    {
+        // Learning (the first 300 ms after a reset or mode change): the
+        // level itself starts from rest, so the background follows it
+        // quickly instead of creeping up at 5 dB/s under a lifted bed.
+        --band.cueLearnCountdown;
+        bg += (levelDb - bg) * band.cueLearnCoeff;
+    }
+    else if (levelDb > bg)
+        bg += std::min (levelDb - bg, band.cueRiseDbPerTick);
+    else
+        bg += (levelDb - bg) * band.cueFallCoeff;
+    bg = std::max (bg, noiseFloorDb);
+
+    // Onset: how far the level stands out of the background, held for 30 ms.
+    const float onset = rangeDb * ramp (levelDb - bg, kCueGateLoDb, kCueGateHiDb) * ramp (levelDb, noiseFloorDb, noiseFloorDb + kFloorTaperDb);
+    if (onset >= band.cueHeld)
+    {
+        band.cueHeld = onset;
+        band.cueHoldCountdown = band.cueHoldTicks;
+    }
+    else if (band.cueHoldCountdown > 0)
+        --band.cueHoldCountdown;
+    else
+        band.cueHeld = onset;
+
+    // Loud cap on the band's peak (instant attack): relative to the
+    // background (or -55 dBFS, if higher), and absolute near full scale.
+    const float peakDb = gainToDb (band.env);
+    const float capTarget = (1.0f - ramp (peakDb - std::max (bg, kCueCapReferenceDb), kCueCapLoDb, kCueCapHiDb))
+                            * (1.0f - ramp (peakDb, kCueTopLoDb, kCueTopHiDb));
+    const float c = capTarget < band.cueCap ? band.cueCapDownCoeff : band.cueCapUpCoeff;
+    band.cueCap = capTarget + c * (band.cueCap - capTarget);
+    return band.cueHeld;
 }
 
 //==============================================================================
@@ -382,7 +487,9 @@ void DynamicEq::controlTick (int index) noexcept
     const float levelDb = gainToDb (band.env);
 
     // ---- gain computer + attack/release smoothing ---------------------------
-    const float targetDb = computeDynamicGainDb (band.mode, levelDb, thresholdDb, ratio, rangeDb, noiseFloorDb);
+    const bool cue = band.mode == DynEqMode::CueLift;
+    const float targetDb = cue ? cueTargetDb (band, rangeDb, noiseFloorDb)
+                               : computeDynamicGainDb (band.mode, levelDb, thresholdDb, ratio, rangeDb, noiseFloorDb);
     float dynDb = band.dynGain.process (targetDb);
     if (std::abs (dynDb - targetDb) < 1.0e-5f)
     {
@@ -390,6 +497,13 @@ void DynamicEq::controlTick (int index) noexcept
         // coefficient cache below can kick in once the gain is steady.
         band.dynGain.reset (targetDb);
         dynDb = targetDb;
+    }
+    if (cue)
+    {
+        float capped = dynDb * band.cueCap;
+        if (capped < 1.0e-4f)
+            capped = 0.0f; // land on the 0 dB identity
+        dynDb = capped;
     }
 
     const float totalDb = fadeGain * (staticDb + dynDb);
@@ -401,7 +515,7 @@ void DynamicEq::controlTick (int index) noexcept
         band.eqRamping = false;
 
     // ---- housekeeping: flush tiny states, recover from non-finite input ----
-    float sum = band.env;
+    float sum = band.env + band.cuePower;
     for (int c = 0; c < spec.numChannels; ++c)
         sum += flushTiny (band.detState[static_cast<size_t> (c)]) + flushTiny (band.eqState[static_cast<size_t> (c)]);
     if (! std::isfinite (sum))
@@ -430,6 +544,12 @@ void DynamicEq::controlTick (int index) noexcept
             band.segmentPeak = band.windowPeak = band.prevWindowPeak = band.env = 0.0f;
             for (auto& h : band.detHistory) // old-topology outputs must not feed the interpolator
                 h.fill (0.0f);
+            band.segmentEnergy.fill (0.0f);
+            band.cuePower = 0.0f;
+            band.cueBackgroundValid = false;
+            band.cueHeld = 0.0f;
+            band.cueHoldCountdown = 0;
+            band.cueCap = 1.0f;
             updateDetector (band);
         }
     }
@@ -497,12 +617,14 @@ void DynamicEq::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
                 SvfState s = band.detState[cs];
                 auto& h = band.detHistory[cs];
                 float y1 = h[0], y2 = h[1], y3 = h[2], y4 = h[3], y5 = h[4];
+                float energy = band.segmentEnergy[cs];
                 const float* x = block.channel (ch) + pos;
                 for (int i = 0; i < len; ++i)
                 {
                     const float y0 = svfTick (c, s, x[i]);
                     const float mid = kMid1 * (y3 + y2) + kMid3 * (y4 + y1) + kMid5 * (y5 + y0); // between y3 and y2
                     peak = std::max (peak, std::max (std::abs (y0), std::abs (mid)));
+                    energy += y0 * y0;
                     y5 = y4;
                     y4 = y3;
                     y3 = y2;
@@ -511,6 +633,7 @@ void DynamicEq::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
                 }
                 h = { y1, y2, y3, y4, y5 };
                 band.detState[cs] = s;
+                band.segmentEnergy[cs] = energy;
             }
             band.segmentPeak = peak;
         }

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <utility>
 
 namespace flub::cli
 {
@@ -283,4 +284,195 @@ std::string formatBands (const std::vector<BandLevel>& bands)
     return s + " (octave band Hz: dBFS)";
 }
 
+// ===========================================================================
+// Sound-quality metrics (docs/11 E59)
+// ===========================================================================
+namespace
+{
+/** sum x e^{-j w i} over x[0, n): (re, im) of the DFT projection at freqHz. */
+std::pair<double, double> project (const float* x, int n, double sampleRate, double freqHz)
+{
+    double re = 0.0, im = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double a = kTwoPi * freqHz * i / sampleRate;
+        re += x[i] * std::cos (a);
+        im += x[i] * std::sin (a);
+    }
+    return { re, im };
+}
+
+/** Power (A^2 / 2) of the component at freqHz over an integer number of its periods. */
+double tonePower (const float* x, int n, double sampleRate, double freqHz)
+{
+    const auto [re, im] = project (x, n, sampleRate, freqHz);
+    return 2.0 * (re * re + im * im) / (static_cast<double> (n) * n);
+}
+
+/** Mean square and mean of x[0, n). */
+std::pair<double, double> meanSquareAndMean (const float* x, int n)
+{
+    double total = 0.0, mean = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        total += static_cast<double> (x[i]) * x[i];
+        mean += x[i];
+    }
+    return { total / n, mean / n };
+}
+
+double ratioDb (double num, double den) { return 10.0 * std::log10 (std::max (1.0e-30, num)) - 10.0 * std::log10 (std::max (1.0e-30, den)); }
+
+bool nearHarmonic (double f, double f0) noexcept
+{
+    const double h = std::round (f / f0);
+    return h >= 1.0 && std::abs (f - h * f0) < 1.0e-6;
+}
+} // namespace
+
+double sineThdnDb (const float* x, int n, double sampleRate, double f0)
+{
+    if (n <= 0 || ! (sampleRate > 0.0))
+        return 0.0;
+    const auto [total, mean] = meanSquareAndMean (x, n);
+    const double residual = std::max (0.0, total - mean * mean - tonePower (x, n, sampleRate, f0));
+    return ratioDb (residual, total);
+}
+
+double multitoneResidualDb (const float* x, int n, double sampleRate, const std::vector<double>& tones)
+{
+    if (n <= 0 || ! (sampleRate > 0.0) || tones.empty())
+        return 0.0;
+    const auto [total, mean] = meanSquareAndMean (x, n);
+    double excited = 0.0;
+    for (double f : tones)
+        excited += tonePower (x, n, sampleRate, f);
+    return ratioDb (std::max (0.0, total - mean * mean - excited), excited);
+}
+
+double twoToneImdDb (const float* x, int n, double sampleRate, double f1, double f2, int maxOrder)
+{
+    if (n <= 0 || ! (sampleRate > 0.0))
+        return 0.0;
+    std::vector<double> products;
+    for (int m = 1; m < maxOrder; ++m)
+        for (int k = 1; m + k <= maxOrder; ++k)
+            for (double f : { m * f1 + k * f2, std::abs (m * f1 - k * f2) })
+            {
+                if (! (f > 0.0) || f >= 0.5 * sampleRate || nearHarmonic (f, f1) || nearHarmonic (f, f2))
+                    continue;
+                if (std::none_of (products.begin(), products.end(), [f] (double p) { return std::abs (p - f) < 1.0e-6; }))
+                    products.push_back (f);
+            }
+    double imd = 0.0;
+    for (double f : products)
+        imd += tonePower (x, n, sampleRate, f);
+    return ratioDb (imd, tonePower (x, n, sampleRate, f1) + tonePower (x, n, sampleRate, f2));
+}
+
+double smpteImdDb (const float* x, int n, double sampleRate, double fLow, double fHigh, int sidebands)
+{
+    if (n <= 0 || ! (sampleRate > 0.0))
+        return 0.0;
+    double side = 0.0;
+    for (int k = 1; k <= sidebands; ++k)
+        for (double f : { fHigh - k * fLow, fHigh + k * fLow })
+            if (f > 0.0 && f < 0.5 * sampleRate)
+                side += tonePower (x, n, sampleRate, f);
+    return ratioDb (side, tonePower (x, n, sampleRate, fHigh));
+}
+
+std::vector<double> toneGainTrack (const std::vector<float>& out, const std::vector<float>& in, double sampleRate, double freqHz,
+                                   int begin, int end)
+{
+    const int len = static_cast<int> (std::lround (0.020 * sampleRate)), hop = static_cast<int> (std::lround (0.005 * sampleRate));
+    std::vector<double> gains;
+    if (len <= 0 || hop <= 0)
+        return gains;
+    end = std::min ({ end, static_cast<int> (out.size()), static_cast<int> (in.size()) });
+    // Hann-weighted projection; the phase reference is the window start (the
+    // magnitude does not depend on it), so one table serves every window.
+    std::vector<double> wc (static_cast<size_t> (len)), ws (static_cast<size_t> (len));
+    for (int i = 0; i < len; ++i)
+    {
+        const double w = 0.5 - 0.5 * std::cos (kTwoPi * i / len), a = kTwoPi * freqHz * i / sampleRate;
+        wc[static_cast<size_t> (i)] = w * std::cos (a);
+        ws[static_cast<size_t> (i)] = w * std::sin (a);
+    }
+    const auto amplitude = [&] (const std::vector<float>& x, int start) {
+        double re = 0.0, im = 0.0;
+        for (int i = 0; i < len; ++i)
+        {
+            const double v = x[static_cast<size_t> (start + i)];
+            re += v * wc[static_cast<size_t> (i)];
+            im += v * ws[static_cast<size_t> (i)];
+        }
+        return std::sqrt (re * re + im * im);
+    };
+    for (int start = std::max (0, begin); start + len <= end; start += hop)
+        gains.push_back (20.0 * std::log10 (std::max (1.0e-12, amplitude (out, start)) / std::max (1.0e-12, amplitude (in, start))));
+    return gains;
+}
+
+double percentile (std::vector<double> v, double p)
+{
+    if (v.empty())
+        return 0.0;
+    std::sort (v.begin(), v.end());
+    const auto idx = static_cast<size_t> (std::clamp (p, 0.0, 1.0) * static_cast<double> (v.size() - 1) + 0.5); // nearest rank
+    return v[idx];
+}
+
+GainTrackStats summariseGainTrack (const std::vector<double>& g, double rateHz)
+{
+    GainTrackStats s;
+    if (g.empty())
+        return s;
+    const double med = percentile (g, 0.5);
+    s.spreadDb = percentile (g, 0.95) - percentile (g, 0.05);
+    s.dipDb = med - *std::min_element (g.begin(), g.end());
+    s.liftDb = *std::max_element (g.begin(), g.end()) - med;
+    s.downPercent = 100.0 * static_cast<double> (std::count_if (g.begin(), g.end(), [med] (double v) { return v < med - 1.0; }))
+                    / static_cast<double> (g.size());
+
+    // Modulation spectrum over the whole periods of rateHz the track holds
+    // (the track has one value per 5 ms, i.e. 200 per second).
+    constexpr double kTrackRate = 200.0;
+    if (rateHz > 0.0)
+    {
+        const double period = kTrackRate / rateHz;
+        const auto m = static_cast<int> (std::floor (static_cast<double> (g.size()) / period) * period + 1.0e-9);
+        if (m >= 2)
+        {
+            double mean = 0.0;
+            for (int i = 0; i < m; ++i)
+                mean += g[static_cast<size_t> (i)];
+            mean /= m;
+            for (size_t k = 0; k < s.modulationDb.size(); ++k)
+            {
+                double re = 0.0, im = 0.0;
+                for (int i = 0; i < m; ++i)
+                {
+                    const double a = kTwoPi * static_cast<double> (k + 1) * rateHz * i / kTrackRate;
+                    re += (g[static_cast<size_t> (i)] - mean) * std::cos (a);
+                    im += (g[static_cast<size_t> (i)] - mean) * std::sin (a);
+                }
+                s.modulationDb[k] = 2.0 * std::sqrt (re * re + im * im) / m;
+            }
+        }
+    }
+    return s;
+}
+
+double energyCentroidMs (const std::vector<float>& x, int begin, int n, double sampleRate)
+{
+    double e = 0.0, te = 0.0;
+    for (int i = 0; i < n && begin + i < static_cast<int> (x.size()); ++i)
+    {
+        const double v = static_cast<double> (x[static_cast<size_t> (begin + i)]);
+        e += v * v;
+        te += i * v * v;
+    }
+    return e > 0.0 && sampleRate > 0.0 ? 1000.0 * te / e / sampleRate : 0.0;
+}
 } // namespace flub::cli

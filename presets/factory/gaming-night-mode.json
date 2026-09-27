@@ -31,6 +31,14 @@
     "eq.1.type": "Low Shelf",
     "eq.1.freq": 90,
     "eq.1.gain": -3,
-    "eq.1.q": 0.7
+    "eq.1.q": 0.7,
+    "dyneq.0.on": true,
+    "dyneq.0.shape": "Low Shelf",
+    "dyneq.0.q": 0.7,
+    "dyneq.0.threshold": -22,
+    "dyneq.0.ratio": 3,
+    "dyneq.0.range": 2.1,
+    "dyneq.0.attack": 10,
+    "dyneq.0.release": 250
   }
 }

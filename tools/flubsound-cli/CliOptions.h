@@ -26,6 +26,7 @@ enum class Command
     Process,
     Batch,
     Analyze,
+    Quality,
     Params,
     Presets,
     Help,

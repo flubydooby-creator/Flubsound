@@ -545,14 +545,18 @@ TEST_CASE ("LoudnessMaximizer: clipAmount 0 disables the clipper (telemetry -160
         CHECK_LE (m.getGainReductionDb(), -10.0); // the limiter does all the work
     }
 
-    // On: the energy ratio tracks how hard the clipper works.
+    // On (crest gate off, depth uncapped: the plain curve clips the steady
+    // sine): the energy ratio tracks how hard the clipper works.
     double ratio[3] {};
     const float amounts[] = { 0.2f, 0.6f, 1.0f };
     for (int k = 0; k < 3; ++k)
     {
         LoudnessMaximizer m;
         prepareMax (m);
-        m.setParams (maxParams (18.0f, -1.0f, amounts[k]));
+        auto p = maxParams (18.0f, -1.0f, amounts[k]);
+        p.clipCrestDb = 0.0f;
+        p.clipMaxDepthDb = 24.0f;
+        m.setParams (p);
         Planar buf (2, n);
         setChannel (buf, 0, x);
         setChannel (buf, 1, x);
@@ -563,6 +567,20 @@ TEST_CASE ("LoudnessMaximizer: clipAmount 0 disables the clipper (telemetry -160
     }
     CHECK (ratio[0] < ratio[1]);
     CHECK (ratio[1] < ratio[2]);
+
+    // Defaults (docs/11 E05 crest gate): the same steady sine at 18 dB drive
+    // never stands 6 dB out of its own RMS, so it is not clipped at all.
+    {
+        LoudnessMaximizer m;
+        prepareMax (m);
+        m.setParams (maxParams (18.0f, -1.0f, 1.0f));
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        processInBlocks (m, buf, 256);
+        CHECK (m.getClipEnergyRatioDb() == -160.0f);
+        CHECK_LE (m.getGainReductionDb(), -10.0);
+    }
 
     // Quiet input with the clipper on: nothing is clipped.
     LoudnessMaximizer m;
@@ -872,11 +890,17 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: a NaN in one channel does not glitc
 TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the header formula")
 {
     // 1x oversampling, glue off, parameters applied instantly: the clipper
-    // input is exactly x * drive, so the telemetry can be recomputed.
+    // input is exactly x * drive, so the telemetry can be recomputed,
+    // including the crest gate (t' = max (t, 10^(crest/20) sqrt (P)), P the
+    // one-pole 8 ms average of the linked max-channel power, updated before
+    // each sample is clipped) and the depth cap (softClipCapped).
     const float driveDb = 12.0f, ceilingDb = -2.0f, clipAmount = 0.7f, knee = 0.4f;
     LoudnessMaximizer m;
     prepareMax (m, kFs, 2, 512, 1);
-    m.setParams (maxParams (driveDb, ceilingDb, clipAmount, 0.0f, knee));
+    auto params = maxParams (driveDb, ceilingDb, clipAmount, 0.0f, knee);
+    params.clipCrestDb = 3.0f;    // low enough for noise peaks to clip, and
+    params.clipMaxDepthDb = 2.0f; // a cap they reach
+    m.setParams (params);
     const int n = 4096;
     const auto l = sine (220.0, kFs, n, 0.3f);
     const auto r = whiteNoise (n, 0.2f, 91);
@@ -885,6 +909,17 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the he
     setChannel (buf, 1, r);
     const float drive = dbToGain (driveDb);
     const float t = dbToGain (ceilingDb + lerp (6.0f, 0.3f, clipAmount));
+    const float crest = dbToGain (params.clipCrestDb), depth = dbToGain (-params.clipMaxDepthDb);
+    const float powerCoeff = 1.0f - onePoleCoeff (8.0f, kFs);
+    float power = 0.0f;
+    std::vector<float> tEff (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const float a = l[static_cast<size_t> (i)] * drive, b = r[static_cast<size_t> (i)] * drive;
+        power += powerCoeff * (std::max (a * a, b * b) - power);
+        tEff[static_cast<size_t> (i)] = std::max (t, crest * std::sqrt (power));
+    }
+    int clippedBlocks = 0;
     for (int pos = 0; pos < n; pos += 512)
     {
         m.process (buf.block (pos, 512));
@@ -893,12 +928,21 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the he
             for (int i = pos; i < pos + 512; ++i)
             {
                 const float x = (*src)[static_cast<size_t> (i)] * drive;
-                const double d = static_cast<double> (x - LoudnessMaximizer::softClip (x, t, knee));
+                const double d = static_cast<double> (x - LoudnessMaximizer::softClipCapped (x, tEff[static_cast<size_t> (i)], knee, depth));
                 diff += d * d;
                 in += static_cast<double> (x) * static_cast<double> (x);
             }
-        CHECK_NEAR (m.getClipEnergyRatioDb(), 10.0 * std::log10 (diff / in), 0.01);
+        if (diff > 0.0)
+        {
+            ++clippedBlocks;
+            CHECK_NEAR (m.getClipEnergyRatioDb(), 10.0 * std::log10 (diff / in), 0.01);
+        }
+        else
+        {
+            CHECK (m.getClipEnergyRatioDb() == -160.0f);
+        }
     }
+    CHECK_GE (clippedBlocks, 4); // the noise channel's peaks stand out of its RMS
 }
 
 TEST_CASE ("LoudnessMaximizer [adversarial]: glue is 2:1 above ceiling - 6 dB and an all-pass (no gain) below it")

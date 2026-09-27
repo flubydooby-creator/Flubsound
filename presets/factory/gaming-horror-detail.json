@@ -24,6 +24,14 @@
     "comp.makeup": 1.5,
     "comp.upThreshold": -38,
     "comp.upRatio": 2.5,
-    "comp.upFloor": -70
+    "comp.upFloor": -70,
+    "dyneq.0.on": true,
+    "dyneq.0.shape": "Low Shelf",
+    "dyneq.0.q": 0.7,
+    "dyneq.0.threshold": -22,
+    "dyneq.0.ratio": 3,
+    "dyneq.0.range": 3.0,
+    "dyneq.0.attack": 10,
+    "dyneq.0.release": 250
   }
 }

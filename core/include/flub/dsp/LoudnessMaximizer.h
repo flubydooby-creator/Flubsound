@@ -13,11 +13,22 @@
 //        Shaves sub-millisecond transients (snare/gunshot crack) cheaply, so
 //        the limiter only handles the longer peaks -> less audible pumping.
 //        clipAmount = 0 disables the clipper entirely (limiter-only).
+//        Crest gate and depth cap (docs/11 E05 stage 1): the threshold is
+//        raised to clipCrestDb above the signal's short-term RMS (linked
+//        max-channel power, one-pole kClipRmsMs = 8 ms), t' = max(t,
+//        10^(crest/20) rms), so steady tones and bass (crest 3 dB) are never
+//        clipped and only transients that stand out of their own level are;
+//        and each sample loses at most clipMaxDepthDb:
+//          |y| = smoothmax(|clip(x)|, 10^(-depth/20) |x|)
+//        (a C1 quadratic blend over +-0.25 (1 - 10^(-depth/20)) t'), so drive
+//        beyond it becomes limiter gain reduction instead of clip depth.
 //        Delta design: out = x + HP5(clip(x^) - x^), the correction band-
 //        limited by the downsampler and passed through a 5 Hz 1st-order
 //        high-pass (docs/11 E10), so clipping an asymmetric waveform leaves
 //        no DC on the driver.
-//     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak).
+//     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak),
+//        with the LF-safe envelope (LimiterEnvelope: 10 / 25 ms gain hold,
+//        S-shaped attack, program envelope; setLimiterEnvelope(), all on).
 // Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
 //   the last block (how hard the clipper works), the limiter's gain
 //   reduction, and distortionDb: the clipper's THD+N over the last analysis
@@ -55,6 +66,8 @@ struct MaximizerParams
     float glue = 0.0f;       // 0 .. 1
     float releaseMs = 60.0f; // 5 .. 1000
     bool autoRelease = true;
+    float clipCrestDb = 6.0f;    // 0 .. 24; 0 = no crest gate (clip at t)
+    float clipMaxDepthDb = 3.0f; // 0.5 .. 24; 24 = depth not capped
 
     bool operator== (const MaximizerParams&) const = default;
 };
@@ -70,6 +83,8 @@ public:
     }
     void setLookaheadMs (float ms) noexcept { lookaheadMs = ms; }
     void setTruePeakDetection (bool enabled) noexcept { truePeak = enabled; }
+    /** The final limiter's LF-safe envelope stages (default: all on). */
+    void setLimiterEnvelope (const LimiterEnvelope& e) noexcept { limiterEnvelope = e; }
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
@@ -82,6 +97,9 @@ public:
 
     /** Soft-clip transfer curve (threshold t, knee 0..1), exposed for tests/GUI. */
     static float softClip (float x, float threshold, float knee) noexcept;
+    /** softClip with the depth cap: |y| >= depthGain |x| (C1 blend), depthGain
+        = 10^(-clipMaxDepthDb / 20); depthGain 0 = uncapped (softClip itself). */
+    static float softClipCapped (float x, float threshold, float knee, float depthGain) noexcept;
 
     /** Deepest limiter gain reduction in the last block (dB <= 0; the meter). */
     float getGainReductionDb() const noexcept { return limiterGrDb.load (std::memory_order_relaxed); }
@@ -138,12 +156,14 @@ private:
     void startClipper (bool immediate) noexcept;
     void updateCeiling (float newCeilingDb) noexcept;
     void updateClipThreshold() noexcept;
+    void updateClipShape() noexcept;
     void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain) noexcept;
 
     int clipOsFactor = 4;
     Oversampler::Quality clipOsQuality = Oversampler::Quality::High;
     float lookaheadMs = 1.5f;
     bool truePeak = true;
+    LimiterEnvelope limiterEnvelope { true, true, true };
     ProcessSpec spec;
     MaximizerParams params;
     std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
@@ -173,6 +193,9 @@ private:
     // TPT one-pole low-pass state per channel (double) and its coefficient.
     std::array<double, kMaxChannels> clipDcLp {};
     double clipDcG = 0.0;
+    // Crest gate: short-term linked power of the clipper input and its
+    // coefficient; crest and depth gains from the params (0 = off).
+    float clipPower = 0.0f, clipPowerCoeff = 0.0f, crestGain = 0.0f, depthGain = 0.0f;
 
     // Glue: 3-band split, per-band linked compressor, crossfaded against the input.
     ThreeBandSplitter splitter;

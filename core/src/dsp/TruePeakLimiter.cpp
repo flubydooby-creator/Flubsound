@@ -58,6 +58,20 @@ constexpr float kRecoveredGain = 0.98855309f; // 10^(-0.1 / 20)
 // recovered limiter is bit-transparent (y = x delayed).
 constexpr double kLand = 1.0e-7;
 
+// LF-safe envelope (docs/11 E05 stage 1, LimiterEnvelope): gain hold after
+// each peak, longer while energy below kLfCornerHz is present (a detector
+// with hysteresis on the low band's share of the power), and the program
+// envelope's one-pole times.
+constexpr float kHoldShortMs = 10.0f;
+constexpr float kHoldLongMs = 25.0f;
+constexpr double kLfCornerHz = 50.0;
+constexpr float kLfPowerMs = 100.0f;
+constexpr double kLfEnterShare = 0.10;  // low band > 10 % of the power: long hold
+constexpr double kLfExitShare = 0.05;   // back to the short hold below 5 %
+constexpr double kLfMinPower = 1.0e-12; // below -120 dBFS the decision holds
+constexpr float kProgramAttackMs = 150.0f;
+constexpr float kProgramReleaseMs = 800.0f;
+
 float sanitise (float v, float lo, float hi, float fallback) noexcept
 {
     return std::isfinite (v) ? std::clamp (v, lo, hi) : fallback;
@@ -166,22 +180,50 @@ void TruePeakLimiter::prepare (const ProcessSpec& newSpec)
     detectorDelay = detectTruePeak ? TruePeakDetector::kDelay : 0;
 
     hold = detectTruePeak ? std::min (kTruePeakHold, lookahead / 3) : 0;
+    envelope = envelopeRequest;
 
     detector.prepare (spec.numChannels);
     audioDelay.prepare (spec.numChannels, lookahead + detectorDelay);
 
-    // The deque holds at most L + Kh + 2 live entries plus the one that
+    // Gain hold after the peak (lowFrequencyHold): H extends the sliding
+    // minimum's window.
+    holdShort = envelope.lowFrequencyHold ? static_cast<uint32_t> (msToSamples (kHoldShortMs, spec.sampleRate)) : 0u;
+    holdLong = envelope.lowFrequencyHold ? static_cast<uint32_t> (msToSamples (kHoldLongMs, spec.sampleRate)) : 0u;
+    {
+        const double g = std::tan (kPi * std::min (kLfCornerHz, 0.4 * spec.sampleRate) / spec.sampleRate);
+        constexpr double k = 1.41421356237309505; // Butterworth, Q = 1 / sqrt 2
+        lfA1 = 1.0 / (1.0 + g * (g + k));
+        lfA2 = g * lfA1;
+        lfA3 = g * lfA2;
+        lfPowerCoeff = 1.0 - static_cast<double> (onePoleCoeff (kLfPowerMs, spec.sampleRate));
+    }
+
+    // The deque holds at most L + Kh + 2 + H live entries plus the one that
     // expires on the current sample.
-    window = static_cast<uint32_t> (lookahead + hold + 2);
-    const int capacity = nextPowerOfTwo (lookahead + hold + 3);
+    baseWindow = static_cast<uint32_t> (lookahead + hold + 2);
+    const int capacity = nextPowerOfTwo (lookahead + hold + 3 + static_cast<int> (holdLong));
     dequeValue.assign (static_cast<size_t> (capacity), 1.0f);
     dequeIndex.assign (static_cast<size_t> (capacity), 0u);
     dequeMask = static_cast<uint32_t> (capacity - 1);
 
-    ringSize = lookahead - hold + 1;
+    // Attack: one box of L - Kh + 1 samples, or (smoothAttack) two cascaded
+    // boxes over the same support (lengths M1 + M2 - 1 = L - Kh + 1).
+    const int support = lookahead - hold + 1;
+    ringSize = support;
+    ring2Size = 1;
+    if (envelope.smoothAttack && support >= 3)
+    {
+        ringSize = (support + 2) / 2;
+        ring2Size = support + 1 - ringSize;
+    }
     boxRing.assign (static_cast<size_t> (ringSize), 1.0f);
     boxLength = static_cast<double> (ringSize);
+    box2Ring.assign (static_cast<size_t> (ring2Size), 1.0);
+    box2Length = static_cast<double> (ring2Size);
     ceilingRing.assign (static_cast<size_t> (lookahead + 1), 1.0f);
+
+    programAttack = std::exp (-1.0 / (static_cast<double> (kProgramAttackMs) * 0.001 * spec.sampleRate));
+    programRelease = std::exp (-1.0 / (static_cast<double> (kProgramReleaseMs) * 0.001 * spec.sampleRate));
 
     gapSamples = std::max (1, msToSamples (kRunGapMs, spec.sampleRate));
     blendStart = std::max (1, msToSamples (kBlendStartMs, spec.sampleRate));
@@ -204,7 +246,16 @@ void TruePeakLimiter::reset() noexcept FLUB_NONBLOCKING
     std::fill (boxRing.begin(), boxRing.end(), 1.0f);
     boxSum = static_cast<double> (ringSize);
     ringPos = 0;
+    std::fill (box2Ring.begin(), box2Ring.end(), 1.0);
+    box2Sum = static_cast<double> (ring2Size);
+    ring2Pos = 0;
     ceilingPos = 0;
+
+    lowFrequencyPresent = false;
+    window = baseWindow + holdShort;
+    lfIc1 = lfIc2 = lfPower = fullPower = 0.0;
+    programGain = 1.0;
+    holdMs.store (envelope.lowFrequencyHold ? kHoldShortMs : 0.0f, std::memory_order_relaxed);
 
     // No previous output to click against: the ceiling starts at its target.
     ceilingDbS.reset (spec.sampleRate, kCeilingSmoothMs, params.ceilingDb);
@@ -274,6 +325,9 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
 
     float minGain = 1.0f;
     uint64_t clips = 0;
+    const bool lfHold = envelope.lowFrequencyHold;
+    const bool program = envelope.programEnvelope;
+    const double invCh = 1.0 / numCh;
 
     // Strictly per sample with all state carried across calls, so the output
     // is bit-identical for any host block size.
@@ -303,6 +357,28 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         // Written as a comparison so +Inf gives 0 and NaN gives 1.
         const float r = peak > thresholdLin ? thresholdLin / peak : 1.0f;
 
+        // ---- 2b) LF detector: the gain hold H after each peak (lowFrequencyHold) ----
+        // The low band's share of the channel mean's power, with hysteresis,
+        // picks 10 or 25 ms (the window may shrink by many samples at once:
+        // the expiry below is a loop).
+        if (lfHold)
+        {
+            double mean = 0.0;
+            for (int c = 0; c < numCh; ++c)
+                mean += static_cast<double> (data[static_cast<size_t> (c)][i]);
+            mean = std::isfinite (mean) ? mean * invCh : 0.0;
+            const double v3 = mean - lfIc2;
+            const double v1 = lfA1 * lfIc1 + lfA2 * v3;
+            const double v2 = lfIc2 + lfA2 * lfIc1 + lfA3 * v3;
+            lfIc1 = 2.0 * v1 - lfIc1;
+            lfIc2 = 2.0 * v2 - lfIc2;
+            lfPower += lfPowerCoeff * (v2 * v2 - lfPower);
+            fullPower += lfPowerCoeff * (mean * mean - fullPower);
+            if (fullPower > kLfMinPower)
+                lowFrequencyPresent = lfPower > (lowFrequencyPresent ? kLfExitShare : kLfEnterShare) * fullPower;
+            window = baseWindow + (lowFrequencyPresent ? holdLong : holdShort);
+        }
+
         // ---- 3) sliding minimum over r[n-L-Kh-1 .. n] (monotonic deque) -----------
         // Entries increase from front to back; anything at the back that is
         // not smaller than r can never be the minimum again. Each entry is
@@ -313,9 +389,11 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         dqValue[dequeBack & dequeMask] = r;
         dqIndex[dequeBack & dequeMask] = sampleIndex;
         ++dequeBack;
-        // Exactly one index leaves the window per sample; if it is still in
-        // the deque it is the oldest entry, i.e. the front.
-        if (sampleIndex - dqIndex[dequeFront & dequeMask] >= window)
+        // Without the adaptive hold exactly one index leaves the window per
+        // sample; if it is still in the deque it is the oldest entry, i.e. the
+        // front. A shrinking hold can expire several at once. The newest
+        // entry (age 0) never expires, so the deque is never empty here.
+        while (sampleIndex - dqIndex[dequeFront & dequeMask] >= window)
             ++dequeFront;
         const float m = dqValue[dequeFront & dequeMask];
         ++sampleIndex;
@@ -347,7 +425,22 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         // computed with: the clamp level this output sample was limited to.
         const float clampLin = ceilHist[ceilingPos];
         // (A division, so that a window full of 1.0 gives exactly 1.0.)
-        const double env = std::clamp (boxSum / boxLength, 0.0, 1.0);
+        double env = std::clamp (boxSum / boxLength, 0.0, 1.0);
+        if (ring2Size > 1)
+        {
+            // smoothAttack: the second box of the cascade (triangular kernel).
+            box2Sum += env - box2Ring[static_cast<size_t> (ring2Pos)];
+            box2Ring[static_cast<size_t> (ring2Pos)] = env;
+            if (++ring2Pos == ring2Size)
+            {
+                ring2Pos = 0;
+                double s2 = 0.0;
+                for (int k = 0; k < ring2Size; ++k)
+                    s2 += box2Ring[static_cast<size_t> (k)];
+                box2Sum = s2;
+            }
+            env = std::clamp (box2Sum / box2Length, 0.0, 1.0);
+        }
 
         // ---- 5) program-dependent release ----------------------------------------
         // runSpan = time from the first to the latest over of the current run
@@ -380,7 +473,24 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
             if (env - gain < kLand)
                 gain = env;
         }
-        const float g = static_cast<float> (gain);
+        double outGain = gain;
+        if (program)
+        {
+            // Program envelope: a slow follower of g; the output takes the
+            // lower of the two, so it can only reduce further.
+            if (gain < programGain)
+            {
+                programGain = gain + programAttack * (programGain - gain);
+            }
+            else
+            {
+                programGain = gain + programRelease * (programGain - gain);
+                if (gain - programGain < kLand)
+                    programGain = gain;
+            }
+            outGain = std::min (gain, programGain);
+        }
+        const float g = static_cast<float> (outGain);
         minGain = std::min (minGain, g);
 
         // ---- 6) delayed audio, gain, final safety clamp --------------------------
@@ -402,6 +512,17 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         audioDelay.advance();
     }
 
+    if (lfHold)
+    {
+        // No subnormal detector states after the input falls silent.
+        if (std::abs (lfIc1) < 1.0e-30 && std::abs (lfIc2) < 1.0e-30)
+            lfIc1 = lfIc2 = 0.0;
+        if (lfPower < 1.0e-30)
+            lfPower = 0.0;
+        if (fullPower < 1.0e-30)
+            fullPower = 0.0;
+        holdMs.store (lowFrequencyPresent ? kHoldLongMs : kHoldShortMs, std::memory_order_relaxed);
+    }
     grDb.store (gainToDb (minGain), std::memory_order_relaxed);
     if (clips > 0)
         safetyClips.fetch_add (clips, std::memory_order_relaxed);

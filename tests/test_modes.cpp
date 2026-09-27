@@ -4,8 +4,9 @@
 // binaural policy in ProcessingChain::applyParameters).
 //
 // Audible checks measure the steady-state level of test tones in the last
-// 0.5 s of a 1 s render (integer periods of every tone used), always against
-// the same chain with the macro at 0. Where a macro engages several modules,
+// 0.5 s of a 1 s render (integer periods of every tone used) - or, for the
+// Footsteps cue enhancer, a tone burst rising out of a pink bed - always
+// against the same chain with the macro at 0. Where a macro engages several modules,
 // the GUI's audition bypass holds the others off so one mechanism is
 // measured at a time.
 #include "TestFramework.h"
@@ -140,18 +141,65 @@ double rmsDiff (const Planar& a, const Planar& b)
         }
     return std::sqrt (acc / (2.0 * static_cast<double> (a.ch[0].size())));
 }
+
+/** A 1.2 s stereo pink bed at `bedDb` dBFS RMS (none below -150) with a
+    tone burst at `freq`: peak `burstDb` dBFS, 80 ms from 0.8 s (after the
+    cue bands have learnt the bed), 2 ms raised-cosine edges. */
+Planar burstOverBed (double freq, float burstDb, float bedDb, double fs = kFs)
+{
+    const int len = static_cast<int> (1.2 * fs), onset = static_cast<int> (0.8 * fs), n = static_cast<int> (0.08 * fs);
+    const int edge = static_cast<int> (0.002 * fs);
+    Planar p (2, len);
+    if (bedDb > -150.0f)
+        p.ch[0] = p.ch[1] = pinkNoise (len, dbToGain (bedDb), 97);
+    const double a = dbToGain (burstDb);
+    for (int i = 0; i < n; ++i)
+    {
+        const double w = i < edge ? 0.5 - 0.5 * std::cos (kPi * i / edge) : (i >= n - edge ? 0.5 - 0.5 * std::cos (kPi * (n - i) / edge) : 1.0);
+        const auto v = static_cast<float> (a * w * std::sin (kTwoPi * freq * (onset + i) / fs));
+        p.ch[0][static_cast<size_t> (onset + i)] += v;
+        p.ch[1][static_cast<size_t> (onset + i)] += v;
+    }
+    return p;
+}
+
+/** The latency (samples) of a Gaming-mode chain set up by `setup`. */
+int chainLatency (const Setup& setup, double fs)
+{
+    ParameterStore store;
+    store.set (Mode, static_cast<float> (ModeValue::Gaming));
+    setup (store);
+    ProcessingChain chain (store);
+    chain.prepare ({ fs, kBlock, 2 });
+    return chain.getLatencySamples();
+}
+
+/** Lift (dB) of the burst at `freq` over [fromMs, toMs) after its onset:
+    output amplitude with `on` against the same chain with `off`. `onRender`
+    (optional) receives the `on` render. */
+double burstLift (const Setup& on, const Setup& off, const Planar& in, double freq, double fromMs, double toMs,
+                  std::initializer_list<int> held = {}, double fs = kFs, Render* onRender = nullptr)
+{
+    // Windows in the output, i.e. after each chain's latency.
+    const int a = static_cast<int> ((0.8 + fromMs * 0.001) * fs), n = static_cast<int> ((toMs - fromMs) * 0.001 * fs);
+    const int a1 = a + chainLatency (on, fs), a0 = a + chainLatency (off, fs);
+    auto r1 = renderGaming (on, in, held, fs);
+    const auto r0 = renderGaming (off, in, held, fs);
+    const double lift = toDb (toneAmplitude (r1.out.ch[0].data() + a1, n, freq, fs) / toneAmplitude (r0.out.ch[0].data() + a0, n, freq, fs));
+    CHECK_NEAR (toDb (toneAmplitude (r1.out.ch[1].data() + a1, n, freq, fs) / toneAmplitude (r0.out.ch[1].data() + a0, n, freq, fs)), lift, 0.01); // stereo-linked
+    if (onRender != nullptr)
+        *onRender = std::move (r1);
+    return lift;
+}
 } // namespace
 
 // ---------------------------------------------------------------------------
-TEST_CASE ("Gaming Footsteps (M1): mode band 4 is a static 3.2 kHz lift (7 dB x Footsteps) for everything but the loudest cues and hiss")
+TEST_CASE ("Gaming Footsteps (M1): mode band 4 is the cue enhancer - a 3.2 kHz cue rising out of the bed gets 7 dB x Footsteps from its first milliseconds at any level; a steady sound, loud cues and hiss get none")
 {
-    // Mode band 4: BoostBelow bell at 3.2 kHz, threshold -6 dB, ratio 3,
-    // range 7 dB x Footsteps, hiss floor -75 dB (docs/11 E19 interim). With the
-    // threshold near full scale the law (1 - 1/3) x (-6 - level) reaches the
-    // range at -16.5 dBFS, so the band is a static bell for every quieter cue
-    // (the same lift at -20 and at -60 dBFS: no level-dependent ramp, so a
-    // step / bed contrast moves only as a static EQ moves it) that rolls off
-    // over the loudest 10 dB.
+    // Mode band 4: DynEqMode::CueLift bell at 3.2 kHz, Q 0.9, range 7 dB x
+    // Footsteps, hiss floor -75 dB (docs/11 E19, see DynamicEq.h): the lift
+    // is keyed to how far the band stands out of its own slow background,
+    // not to a fixed threshold.
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 4) == 3200.0f);
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 5) == 260.0f);
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 6) == 90.0f);
@@ -160,121 +208,113 @@ TEST_CASE ("Gaming Footsteps (M1): mode band 4 is a static 3.2 kHz lift (7 dB x 
     CHECK (ProcessingChain::modeBandFrequency (ModeValue::Gaming, 8) == 0.0f);
     const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 4);
 
-    // Footsteps engages the dynamic EQ and the compressor (upward, max
-    // 3 dB x smoothstep(0.3, 1)) even when both are stored off.
+    // Footsteps engages the dynamic EQ only: the broadband upward compressor
+    // it used to add lifted the bed with the steps (docs/11 E19).
     const auto footsteps = [] (float amount) { return macroOnly (Macro1, amount, { DynEqOn, CompressorOn }); };
     {
         const auto e0 = effectiveAfterPrepare (footsteps (0.0f));
         CHECK (e0[DynEqOn] < 0.5f);
-        CHECK (e0[CompressorOn] < 0.5f);
-        const auto e5 = effectiveAfterPrepare (footsteps (0.5f));
-        CHECK (e5[DynEqOn] >= 0.5f);
-        CHECK (e5[CompressorOn] >= 0.5f);
-        CHECK_NEAR (e5[CompUpMaxGainDb], 3.0 * 0.198251, 1e-4);
         const auto e1 = effectiveAfterPrepare (footsteps (1.0f));
-        CHECK_NEAR (e1[CompUpMaxGainDb], 3.0, 1e-4);
+        CHECK (e1[DynEqOn] >= 0.5f);
+        CHECK (e1[CompressorOn] < 0.5f);
+        CHECK (e1[CompUpMaxGainDb] == 0.0f);
     }
 
-    // The band on its own (compressor held off): lift of the 3.2 kHz tone
-    // against Footsteps at 0.
-    const auto lift = [&] (float amount, float levelDb, std::initializer_list<int> held, Render* keep = nullptr, double fs = kFs) {
-        const auto ref = renderGaming (footsteps (0.0f), tone (f, levelDb, 1.0f, fs), held, fs);
-        auto r = renderGaming (footsteps (amount), tone (f, levelDb, 1.0f, fs), held, fs);
-        const double l = r.toneDb (0, f) - ref.toneDb (0, f);
-        CHECK_NEAR (r.toneDb (1, f) - ref.toneDb (1, f), l, 0.01); // stereo-linked: both ears alike
-        if (keep != nullptr)
-            *keep = std::move (r);
-        return l;
-    };
     Render r { Planar (2, 1), {}, 0.0f, 0.0f, {}, kFs };
-    // Quiet and moderate cues alike: the full range (7 dB x Footsteps).
+    // A cue as loud as the bed's full-band RMS (about 9 dB over the bed in
+    // the band) gets the full range at -60, -40 and -20 dBFS alike, within
+    // 2-12 ms of its onset nearly all of it, and none once it has ended.
     for (const float level : { -60.0f, -40.0f, -20.0f })
     {
-        CHECK_NEAR (lift (1.0f, level, { CompressorOn }, &r), 7.0, 0.2);
-        CHECK_NEAR (r.dynEqDb[4], 7.0, 0.05);
+        const auto in = burstOverBed (f, level, level);
+        CHECK_NEAR (burstLift (footsteps (1.0f), footsteps (0.0f), in, f, 10.0, 70.0, {}, kFs, &r), 7.0, 0.3);
+        CHECK_LE (std::abs (r.dynEqDb[4]), 0.01f); // released 0.3 s after the cue
+        CHECK_GE (burstLift (footsteps (1.0f), footsteps (0.0f), in, f, 2.0, 12.0), 6.0);
     }
-    CHECK_NEAR (lift (0.5f, -60.0f, { CompressorOn }), 3.5, 0.2);
-    // Loud roll-off: -10 dBFS is 4 dB under the threshold -> (1 - 1/3) x 4 =
-    // +2.7 dB; a -3 dBFS (gunfire-level) cue is above it and not lifted.
-    CHECK_NEAR (lift (1.0f, -10.0f, { CompressorOn }, &r), 4.0 * (1.0 - 1.0 / 3.0), 0.3);
-    CHECK_NEAR (r.dynEqDb[4], 4.0 * (1.0 - 1.0 / 3.0), 0.3);
-    CHECK_LE (std::abs (lift (1.0f, -3.0f, { CompressorOn }, &r)), 0.05);
-    CHECK_LE (r.dynEqDb[4], 0.01f);
-    // Hiss taper: at -80 dBFS (under the -75 dB floor) nothing is lifted.
-    CHECK_LE (std::abs (lift (1.0f, -80.0f, { CompressorOn }, &r)), 0.05);
-    CHECK_LE (r.dynEqDb[4], 0.01f);
-
-    // The whole macro: the compressor's upward gain (3 dB at 100 %) adds to
-    // the band's 7 dB on a -60 dBFS cue.
-    CHECK_NEAR (lift (1.0f, -60.0f, {}, &r), 10.0, 0.3);
-    CHECK_NEAR (r.compUpwardDb, 3.0, 0.2);
+    CHECK_NEAR (burstLift (footsteps (0.5f), footsteps (0.0f), burstOverBed (f, -40.0f, -40.0f), f, 10.0, 70.0), 3.5, 0.2);
+    // Out of digital silence (the background is the hiss floor): the full range.
+    CHECK_NEAR (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -60.0f, -200.0f), f, 10.0, 70.0), 7.0, 0.3);
+    // Under the -75 dB hiss floor nothing is lifted.
+    CHECK_LE (std::abs (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -90.0f, -200.0f), f, 10.0, 70.0)), 0.05);
+    // A loud cue (gunfire level, -3 dBFS over a -50 dBFS bed) hits the loud
+    // cap: at most a trace of lift.
+    CHECK_LE (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -3.0f, -50.0f), f, 10.0, 70.0), 0.3);
+    // A steady tone is the background itself: not lifted, at any level.
+    for (const float level : { -60.0f, -40.0f, -20.0f })
+    {
+        const auto ref = renderGaming (footsteps (0.0f), tone (f, level));
+        r = renderGaming (footsteps (1.0f), tone (f, level));
+        CHECK_LE (std::abs (r.toneDb (0, f) - ref.toneDb (0, f)), 0.05);
+        CHECK_LE (std::abs (r.dynEqDb[4]), 0.01f);
+    }
 
     // Speech-link rates (docs/11 E17): at 32 kHz and below the output is a
     // Bluetooth hands-free link, where 3.2 kHz is 0.2..0.8 x Nyquist of a
     // narrowband channel; the band is off there and on again at 44.1 kHz.
     for (const double fs : { 8000.0, 16000.0, 32000.0 })
     {
-        CHECK_LE (std::abs (lift (1.0f, -60.0f, { CompressorOn }, &r, fs)), 0.05);
+        CHECK_LE (std::abs (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -40.0f, -40.0f, fs), f, 10.0, 70.0, {}, fs, &r)), 0.05);
         CHECK_LE (std::abs (r.dynEqDb[4]), 0.01f);
     }
-    CHECK_NEAR (lift (1.0f, -60.0f, { CompressorOn }, &r, 44100.0), 7.0, 0.2);
+    CHECK_NEAR (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -40.0f, -40.0f, 44100.0), f, 10.0, 70.0, {}, 44100.0), 7.0, 0.3);
 }
 
-TEST_CASE ("Gaming Footsteps (M1): mode band 5 is a static 260 Hz footstep-body lift (3 dB x Footsteps) that rolls off on loud low-mids")
+TEST_CASE ("Gaming Footsteps (M1): mode band 5 is the footstep-body cue enhancer at 260 Hz (3 dB x Footsteps); a steady low-mid and loud hits are not lifted")
 {
-    // Mode band 5: BoostBelow bell at 260 Hz, threshold -6 dB, ratio 2.5,
-    // range 3 dB x Footsteps (heel impact; docs/11 E19 interim). The law
-    // (1 - 1/2.5) x (-6 - level) reaches the range at -11 dBFS. The compressor
-    // Footsteps also engages is held off so only the dynamic EQ is measured.
+    // Mode band 5: CueLift bell at 260 Hz, Q 1.2, range 3 dB x Footsteps
+    // (heel impact), level averaged over four periods (15 ms).
     const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 5);
-    const auto lift = [f] (float amount, float levelDb, float* bandDb = nullptr) {
-        const auto ref = renderGaming (macroOnly (Macro1, 0.0f, { DynEqOn, CompressorOn }), tone (f, levelDb), { CompressorOn });
-        const auto r = renderGaming (macroOnly (Macro1, amount, { DynEqOn, CompressorOn }), tone (f, levelDb), { CompressorOn });
-        const double l = r.toneDb (0, f) - ref.toneDb (0, f);
-        CHECK_NEAR (r.toneDb (1, f) - ref.toneDb (1, f), l, 0.01); // stereo-linked
-        if (bandDb != nullptr)
-            *bandDb = r.dynEqDb[5];
-        return l;
-    };
-    float band = 0.0f;
-    // -60 and -20 dBFS: the full range.
-    CHECK_NEAR (lift (1.0f, -60.0f, &band), 3.0, 0.15);
-    CHECK_NEAR (band, 3.0, 0.05);
-    CHECK_NEAR (lift (1.0f, -20.0f, &band), 3.0, 0.15);
-    CHECK_NEAR (band, 3.0, 0.05);
-    CHECK_NEAR (lift (0.5f, -60.0f), 1.5, 0.1);
-    // -8 dBFS: 2 dB under the threshold -> (1 - 1/2.5) x 2 = +1.2 dB.
-    CHECK_NEAR (lift (1.0f, -8.0f, &band), 2.0 * (1.0 - 1.0 / 2.5), 0.15);
-    CHECK_NEAR (band, 2.0 * (1.0 - 1.0 / 2.5), 0.15);
-    // -3 dBFS (above the threshold): no boost from band 5; the 0.06 dB left
-    // is the skirt of the 3.2 kHz band 4 bell.
-    CHECK_LE (std::abs (lift (1.0f, -3.0f, &band)), 0.1);
-    CHECK_LE (band, 0.01f);
+    const auto footsteps = [] (float amount) { return macroOnly (Macro1, amount, { DynEqOn, CompressorOn }); };
+    Render r { Planar (2, 1), {}, 0.0f, 0.0f, {}, kFs };
+    for (const float level : { -50.0f, -30.0f })
+    {
+        CHECK_NEAR (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, level, level), f, 15.0, 75.0, {}, kFs, &r), 3.0, 0.3);
+        CHECK_LE (std::abs (r.dynEqDb[5]), 0.05f); // released (the slower low-band level leaves a 0.03 dB tail)
+    }
+    CHECK_NEAR (burstLift (footsteps (0.5f), footsteps (0.0f), burstOverBed (f, -40.0f, -40.0f), f, 15.0, 75.0), 1.5, 0.2);
+    CHECK_LE (burstLift (footsteps (1.0f), footsteps (0.0f), burstOverBed (f, -3.0f, -50.0f), f, 15.0, 75.0), 0.3);
+    const auto ref = renderGaming (footsteps (0.0f), tone (f, -30.0f));
+    r = renderGaming (footsteps (1.0f), tone (f, -30.0f));
+    CHECK_LE (std::abs (r.toneDb (0, f) - ref.toneDb (0, f)), 0.05);
+    CHECK_LE (std::abs (r.dynEqDb[5]), 0.01f);
 }
 
-TEST_CASE ("Gaming Footsteps (M1): anti-masking band 6 tames a very loud 90 Hz rumble; normal bass is untouched")
+TEST_CASE ("Gaming: anti-masking band 6 no longer follows Footsteps - Footsteps 100 leaves a loud 90 Hz rumble alone; the presets carry the band as a user band (E20)")
 {
-    // Mode band 6: CutAbove low shelf at 90 Hz, threshold -22 dB, ratio 3,
-    // range 6 dB x Footsteps (docs/11 E20 decouples it from Footsteps inside
-    // E19's redesign, not before). The compressor Footsteps also engages is
-    // held off so only the dynamic EQ is measured. At 90 Hz the static 260 Hz
-    // footstep-body bell (band 5, +3 dB since the E19 interim) adds its skirt,
-    // +0.3 dB, to both cases.
+    // docs/11 E20 Done-when: "Footsteps 100 no longer changes the explosion
+    // level". Mode band 6 (the CutAbove low shelf at 90 Hz, 6 dB x Footsteps
+    // before) is off in the Gaming mode policy until E21's Tame amount
+    // exists to key it to.
     const double f = ProcessingChain::modeBandFrequency (ModeValue::Gaming, 6);
-    const auto render = [f] (float amount, float levelDb) {
-        return renderGaming (macroOnly (Macro1, amount, { CompressorOn }), tone (f, levelDb), { CompressorOn });
+    const auto footsteps = [] (float amount) { return macroOnly (Macro1, amount, { CompressorOn }); };
+    const auto loudRef = renderGaming (footsteps (0.0f), tone (f, -6.0f)), loud = renderGaming (footsteps (1.0f), tone (f, -6.0f));
+    CHECK_LE (std::abs (loud.toneDb (0, f) - loudRef.toneDb (0, f)), 0.05);
+    CHECK (loud.dynEqDb[6] == 0.0f);
+
+    // The presets that tamed loud LF (Competitive FPS: 6 dB x its Footsteps
+    // 0.8) store the same band as user band 0, so their explosion handling is
+    // unchanged: -6 dBFS rumble is cut by the full 4.8 dB (half of it at the
+    // shelf's corner), a -30 dBFS bass line not at all.
+    const auto antiMasking = [] (bool bandOn) {
+        return [bandOn] (ParameterStore& s) {
+            s.set (dyn (0, DynFieldOn), bandOn ? 1.0f : 0.0f);
+            s.set (dyn (0, DynFieldMode), 0.0f);  // Cut Above
+            s.set (dyn (0, DynFieldShape), 1.0f); // Low Shelf
+            s.set (dyn (0, DynFieldFreq), 90.0f);
+            s.set (dyn (0, DynFieldQ), 0.7f);
+            s.set (dyn (0, DynFieldThreshold), -22.0f);
+            s.set (dyn (0, DynFieldRatio), 3.0f);
+            s.set (dyn (0, DynFieldRange), 4.8f);
+            s.set (dyn (0, DynFieldAttack), 10.0f);
+            s.set (dyn (0, DynFieldRelease), 250.0f);
+        };
     };
-    constexpr double kBodySkirtDb = 0.3;
-    // -6 dBFS explosion rumble: the full 6 dB cut, which a shelf applies half
-    // of at its corner frequency.
-    const auto loudRef = render (0.0f, -6.0f), loud = render (1.0f, -6.0f);
-    CHECK_NEAR (loud.dynEqDb[6], -6.0, 0.1);
-    CHECK_NEAR (loud.toneDb (0, f) - loudRef.toneDb (0, f), -3.0 + kBodySkirtDb, 0.3);
-    CHECK_NEAR (loud.toneDb (1, f) - loudRef.toneDb (1, f), -3.0 + kBodySkirtDb, 0.3);
-    // -30 dBFS bass line: below the threshold, so no cut at all.
-    const auto normalRef = render (0.0f, -30.0f), normal = render (1.0f, -30.0f);
-    CHECK_GE (normal.dynEqDb[6], -0.01f);
-    CHECK_NEAR (normal.toneDb (0, f) - normalRef.toneDb (0, f), kBodySkirtDb, 0.1);
+    const auto cutRef = renderGaming (antiMasking (false), tone (f, -6.0f)), cut = renderGaming (antiMasking (true), tone (f, -6.0f));
+    CHECK_NEAR (cut.dynEqDb[0], -4.8, 0.1);
+    CHECK_NEAR (cut.toneDb (0, f) - cutRef.toneDb (0, f), -2.4, 0.3);
+    const auto quietRef = renderGaming (antiMasking (false), tone (f, -30.0f)), quiet = renderGaming (antiMasking (true), tone (f, -30.0f));
+    CHECK_GE (quiet.dynEqDb[0], -0.01f);
+    CHECK_LE (std::abs (quiet.toneDb (0, f) - quietRef.toneDb (0, f)), 0.05);
 }
 
 TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre 3 kHz source; the mono sum is untouched")
@@ -509,21 +549,22 @@ TEST_CASE ("Gaming: binaural lock on a 7.1 strip - width 1, space 0 and focus 0 
 
 TEST_CASE ("Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen")
 {
-    // Footsteps switches the compressor on for its upward section. With
+    // Detail switches the compressor on for its upward section (the only
+    // Gaming macro that still does, docs/11 E19). With
     // comp.ratio left at its default the downward section stays off, so a
     // loud -10 dBFS "gunshot" tone passes at its own level; a preset that
     // chose a ratio (1.5:1 here) keeps it, and so does a compressor the user
     // switched on.
     const std::initializer_list<int> held { DynEqOn, ClarityOn, BassOn, SpatialOn, SaturationOn, MaximizerOn };
     const auto loud = tone (1000.0, -10.0f);
-    const auto off = renderGaming (macroOnly (Macro1, 0.0f, { CompressorOn }), loud, held);
-    const auto macro = renderGaming (macroOnly (Macro1, 1.0f, { CompressorOn }), loud, held);
+    const auto off = renderGaming (macroOnly (Macro4, 0.0f, { CompressorOn }), loud, held);
+    const auto macro = renderGaming (macroOnly (Macro4, 1.0f, { CompressorOn }), loud, held);
     CHECK (macro.eff (CompressorOn) >= 0.5f);
     CHECK (macro.eff (CompRatio) == 1.0f);
     CHECK_NEAR (macro.toneDb (0, 1000.0), off.toneDb (0, 1000.0), 0.2);
 
     const auto chosen = renderGaming ([] (ParameterStore& s) {
-        macroOnly (Macro1, 1.0f, { CompressorOn }) (s);
+        macroOnly (Macro4, 1.0f, { CompressorOn }) (s);
         s.set (CompRatio, 1.5f);
     }, loud, held);
     CHECK (chosen.eff (CompRatio) == 1.5f);
@@ -532,7 +573,7 @@ TEST_CASE ("Gaming: a compressor switched on only by a macro is upward-only - lo
     // Rendered (not just prepared), so the chain's per-block override has run.
     const auto userOn = renderGaming ([] (ParameterStore& s) {
         s.set (CompressorOn, 1.0f);
-        s.set (Macro1, 1.0f);
+        s.set (Macro4, 1.0f);
     }, loud, held);
     CHECK (userOn.eff (CompRatio) == layout()[static_cast<size_t> (CompRatio)].defaultValue);
     CHECK (userOn.toneDb (0, 1000.0) < off.toneDb (0, 1000.0) - 1.0); // the user's 2.5:1 compresses

@@ -244,9 +244,13 @@ TEST_CASE ("Protection: the SafetyGovernor's clip-energy branch alone backs off 
 TEST_CASE ("Protection: governed Boost drive into heavy clipping trips the clip-energy budget; the governor scales only the governed contributions, never the base values, and releases when the signal calms")
 {
     // Base drive 10 dB + Boost 100 % (+8 dB governed) with the clipper at its
-    // maximum share (threshold 0.3 dB above the ceiling): the clipper does
-    // nearly all the work, so the limiter's GR average stays inside its
-    // -6 dB budget and only the clip-energy branch can trip the governor.
+    // maximum share (threshold 0.3 dB above the ceiling) on a 750 Hz pulse
+    // (cos k w / k, k = 1..4, peak 0.3): the clipper works hard on its
+    // peaks, so the limiter's GR average stays inside its -6 dB budget and
+    // only the clip-energy branch can trip the governor. (Until docs/11 E05
+    // stage 1 the hot programme was the kick / bass / pad mix at 0.5; the
+    // crest-gated clipper no longer clips its steady bass line, and the
+    // limiter's GR average went to -9.0 dB.)
     ParameterStore store;
     store.set (Mode, static_cast<float> (ModeValue::Music));
     store.set (BoostIntensity, 1.0f);
@@ -268,7 +272,21 @@ TEST_CASE ("Protection: governed Boost drive into heavy clipping trips the clip-
 
     const int hotLen = static_cast<int> (kFs * 8.0);
     const int calmLen = static_cast<int> (kFs * 20.0);
-    auto hot = makeProgramme (hotLen, 0.5f, 3);
+    Planar hot (2, hotLen);
+    {
+        constexpr int kPeriod = 64;
+        std::array<double, kPeriod> pulse {};
+        double peak = 0.0;
+        for (int i = 0; i < kPeriod; ++i)
+        {
+            for (int k = 1; k <= 4; ++k)
+                pulse[static_cast<size_t> (i)] += std::cos (kTwoPi * k * i / kPeriod) / k;
+            peak = std::max (peak, std::abs (pulse[static_cast<size_t> (i)]));
+        }
+        for (auto& c : hot.ch)
+            for (int i = 0; i < hotLen; ++i)
+                c[static_cast<size_t> (i)] = static_cast<float> (0.3 * pulse[static_cast<size_t> (i % kPeriod)] / peak);
+    }
     auto calm = makeProgramme (calmLen, 0.02f, 4);
 
     struct Governed
@@ -1119,9 +1137,11 @@ TEST_CASE ("GatedLoudness: the slow measure is corrected for its cold start, so 
 
 TEST_CASE ("Chain: a dropped NaN/Inf block resets the signal path but keeps the converged governor, AutoLevel and AutoDrive state")
 {
-    // Hot, heavily clipped programme (Boost 100 %, clipper at its maximum
-    // share) with AutoLevel on: the governor backs off and AutoLevel settles
-    // on a cut. None of the control loops sees the non-finite block, so their
+    // Hot, heavily limited programme (Boost 100 %, clipper at its maximum
+    // share, base drive 14 dB) with AutoLevel on: the governor backs off and
+    // AutoLevel settles on a cut. (Drive 10 dB until docs/11 E05 stage 1:
+    // with the crest-gated clipper this programme no longer clips hard
+    // enough there, and the governor stopped at 0.79.) None of the control loops sees the non-finite block, so their
     // state must survive it (a full reset used to snap the scale back to 1
     // and the AutoLevel gain to 0 dB, i.e. seconds of louder, harder-driven
     // audio after a single NaN).
@@ -1129,7 +1149,7 @@ TEST_CASE ("Chain: a dropped NaN/Inf block resets the signal path but keeps the 
     store.set (Mode, static_cast<float> (ModeValue::Music));
     store.set (BoostIntensity, 1.0f);
     store.set (MaxClipAmount, 1.0f);
-    store.set (MaxDriveDb, 10.0f);
+    store.set (MaxDriveDb, 14.0f);
     store.set (AutoLevelOn, 1.0f);
     store.set (AutoLevelTargetLufs, -24.0f);
     constexpr int kBlock = 512;
@@ -1208,13 +1228,16 @@ TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms
     // Maximizer alone, no clipper, Boost 0 (the scale changes no audio): the
     // output and the limiter's gain are the same at every block size. With a
     // per-block GR minimum the budget tripped by block size (min scale 1.0
-    // at 64, 0.69 at 512, 0.3 at 4096 samples for this drive).
+    // at 64, 0.69 at 512, 0.3 at 4096 samples at 14 dB drive). Drive 11.3 dB
+    // since docs/11 E05 stage 1: the limiter's gain hold and program
+    // envelope keep a steadier, deeper GR on this bass-heavy programme, so
+    // 14 dB now sits on the scale's floor (0.3) at every block size.
     const auto minScale = [] (int blockSize) {
         ParameterStore store;
         bypassAllModules (store);
         store.set (MaximizerOn, 1.0f);
         store.set (MaxClipAmount, 0.0f);
-        store.set (MaxDriveDb, 14.0f);
+        store.set (MaxDriveDb, 11.3f);
         ProcessingChain chain (store);
         chain.prepare ({ kFs, blockSize, 2 });
         auto buf = makeProgramme (static_cast<int> (kFs * 12.0), 0.5f, 3);
@@ -1228,7 +1251,7 @@ TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms
         return lowest;
     };
     const float s64 = minScale (64), s512 = minScale (512), s4096 = minScale (4096);
-    CHECK_LE (s512, 0.9f); // over budget: the governor acts (measured 0.74-0.76)
+    CHECK_LE (s512, 0.9f); // over budget: the governor acts (measured 0.78 at every block size)
     CHECK_GE (s512, 0.5f);
     CHECK_NEAR (s64, s512, 0.05);
     CHECK_NEAR (s4096, s512, 0.05);

@@ -14,16 +14,39 @@
 //     CutBelow   (downward expansion)   : g = -min(range, max(0,-o)(ratio - 1))
 //     floorTaper fades the boost to 0 as level falls from noiseFloorDb+10 to
 //     noiseFloorDb, so silence / hiss is never lifted.
+//     CueLift    (cue enhancer, docs/11 E19): g = +range x onset x cap x floorTaper,
+//                keyed to the band's own BACKGROUND instead of a fixed threshold
+//                (see "CueLift" below); threshold and ratio are not used.
 //   smoothing: GainSmoother (attack = level rising), control-rate coefficient
 //              update every kControlInterval samples (the SVF is modulation-safe).
 //
+// CueLift (the footstep / cue enhancer): a short cue under a steady bed
+// must get its lift from its first milliseconds, and the bed must not be
+// lifted at all. The band tracks
+//   level      the detector's mean square over a few ms (2.5 ms, or four
+//              periods of the band frequency if longer), stereo-linked (max),
+//              in dB;
+//   background a slow estimate of that level: it rises at most 5 dB/s and
+//              falls with a 400 ms time constant, so it sits near the bed's
+//              median and a 20-80 ms step barely moves it; never below the
+//              hiss floor (out of digital silence it IS the floor); for
+//              300 ms after a reset it follows the level (40 ms) to learn it;
+// and lifts only what stands out of the background: onset = 0 at 2 dB
+// over it, 1 at 4.5 dB over it, held for 30 ms after the level drops, then
+// released. A cue therefore gets the full range within about a millisecond
+// of rising out of the bed, whatever the programme level, and a stationary
+// bed (rain, wind, room tone) is not raised. The lift is withdrawn fast
+// (0.5 ms) by the loud cap - the band's PEAK 26..36 dB over the background
+// (or over -55 dBFS, if that is higher), and -6..-1 dBFS absolute - so
+// gunfire and explosions are not lifted.
+//
 // The chain's mode policy drives bands 4-7 (ProcessingChain::configureModeBands):
-// Gaming: footstep detail (BoostBelow bell 3.2 kHz) and footstep body
-// (BoostBelow bell 260 Hz), both with a -6 dBFS threshold (static lifts that
-// roll off on the loudest events), explosion anti-masking (CutAbove low shelf
-// 90 Hz), voice / score (BoostBelow bell 2 kHz). Music: de-harsh (CutAbove
-// bell 3.5 kHz), air lift (BoostBelow high shelf 12 kHz), de-boom (CutAbove
-// bell 120 Hz).
+// Gaming: footstep detail (CueLift bell 3.2 kHz) and footstep body (CueLift
+// bell 260 Hz), explosion anti-masking (off in the mode policy since docs/11
+// E20's decoupling: the presets that tame loud LF carry it as a user band),
+// voice / score (BoostBelow bell 2 kHz). Music: de-harsh (CutAbove bell
+// 3.5 kHz), air lift (BoostBelow high shelf 12 kHz), de-boom (CutAbove bell
+// 120 Hz).
 #pragma once
 
 #include "EnvelopeFollower.h"
@@ -42,7 +65,8 @@ enum class DynEqMode : uint8_t
     CutAbove = 0,
     BoostBelow,
     BoostAbove,
-    CutBelow
+    CutBelow,
+    CueLift // background-relative cue enhancer (mode bands only; see above)
 };
 
 struct DynEqBandParams
@@ -123,6 +147,22 @@ private:
         int windowTicks = 1, windowCountdown = 1;
 
         float coeffGainDb = 0.0f;             // gain the EQ coefficients were built for
+
+        // CueLift (see the header comment). The detector's energy is summed
+        // per channel over each control interval for every band (cheap), but
+        // only a CueLift band reads it.
+        std::array<float, kMaxChannels> segmentEnergy {};
+        float cuePower = 0.0f;                // linked mean square, smoothed
+        float cuePowerCoeff = 0.0f;           // per-tick one-pole coefficient
+        float cueBackgroundDb = 0.0f;
+        bool cueBackgroundValid = false;      // false: the next tick starts it at the level
+        float cueFallCoeff = 0.0f, cueRiseDbPerTick = 0.0f;
+        float cueLearnCoeff = 0.0f;
+        int cueLearnTicks = 0, cueLearnCountdown = 0;
+        float cueHeld = 0.0f;                 // onset target after the hold (dB)
+        int cueHoldTicks = 1, cueHoldCountdown = 0;
+        float cueCap = 1.0f;                  // loud-cap factor, smoothed
+        float cueCapDownCoeff = 0.0f, cueCapUpCoeff = 0.0f;
     };
 
     void activateBand (int index, bool fadeIn) noexcept;
@@ -130,6 +170,7 @@ private:
     void updateEq (BandState& band, float totalDb, bool glide) const noexcept;
     static void clearBandState (BandState& band) noexcept;
     void controlTick (int index) noexcept;
+    float cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb) const noexcept;
 
     ProcessSpec spec;
     double controlRate = 48000.0 / kControlInterval;

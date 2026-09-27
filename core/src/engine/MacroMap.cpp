@@ -16,7 +16,7 @@ namespace
 constexpr float kEngage = 0.02f;
 
 // clang-format off
-constexpr std::array<MacroEntry, 30> kMusicTable {{
+constexpr std::array<MacroEntry, 29> kMusicTable {{
     // ---- Boost Intensity: clarity/width first, bass next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.35f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAir,        0.30f, 0.10f, 0.60f, 1.0f, false },
@@ -28,9 +28,10 @@ constexpr std::array<MacroEntry, 30> kMusicTable {{
     { MacroSource::Boost, MaxGlue,           0.30f, 0.40f, 1.00f, 1.0f, false },
     { MacroSource::Boost, SatDriveDb,        4.00f, 0.60f, 1.00f, 1.0f, true  },
     // ---- M1 Punch ----
+    // No BassTighten (docs/11 E04): Tighten 0.5 cut the kick's first 10 ms
+    // by 2 dB, the opposite of punch.
     { MacroSource::M1, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M1, ClarityAttackDb,      6.00f, 0.00f, 1.00f, 1.0f, false },
-    { MacroSource::M1, BassTighten,          0.50f, 0.20f, 1.00f, 1.0f, false },
     // ---- M2 Width ----
     { MacroSource::M2, SpatialOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M2, SpatialWidth,         0.60f, 0.00f, 1.00f, 1.0f, false },
@@ -57,19 +58,20 @@ constexpr std::array<MacroEntry, 30> kMusicTable {{
     { MacroSource::Boost, MaximizerOn,       1.00f, 0.25f, 0.27f, 1.0f, false },
 }};
 
-constexpr std::array<MacroEntry, 27> kGamingTable {{
+// Gaming: the broadband upward compressor lifts the whole bed with the cues
+// (docs/11 E19), so only Detail - whose job is the environment - drives it.
+// Footsteps is the cue enhancer alone (mode bands 4 / 5, see
+// ProcessingChain::configureModeBands), and Boost no longer engages the
+// compressor.
+constexpr std::array<MacroEntry, 23> kGamingTable {{
     // ---- Boost Intensity: detail/positional first, impact next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.30f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAttackDb,   2.00f, 0.20f, 0.70f, 1.0f, false },
     { MacroSource::Boost, SpatialFocus,      0.30f, 0.00f, 0.60f, 1.0f, false },
-    { MacroSource::Boost, CompressorOn,      1.00f, 0.05f, 0.07f, 1.0f, false },
-    { MacroSource::Boost, CompUpMaxGainDb,   5.00f, 0.10f, 0.70f, 1.0f, false },
     { MacroSource::Boost, BassBoostDb,       3.00f, 0.30f, 0.90f, 1.0f, true  },
     { MacroSource::Boost, MaxDriveDb,        6.00f, 0.30f, 1.00f, 1.2f, true  },
-    // ---- M1 Footsteps (plus the internal footstep dynamic-EQ bands) ----
+    // ---- M1 Footsteps (the internal cue-enhancer dynamic-EQ bands) ----
     { MacroSource::M1, DynEqOn,              1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::M1, CompressorOn,         1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::M1, CompUpMaxGainDb,      3.00f, 0.30f, 1.00f, 1.0f, false },
     // ---- M2 Positional ----
     { MacroSource::M2, SpatialOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M2, SpatialFocus,         0.90f, 0.00f, 1.00f, 1.0f, false },

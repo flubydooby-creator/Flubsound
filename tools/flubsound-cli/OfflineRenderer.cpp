@@ -65,6 +65,10 @@ public:
         s.distortionMaxDb = std::max (s.distortionMaxDb, thd);
         thdPower += w * (thd > kMinusInfDb ? std::pow (10.0, 0.1 * thd) : 0.0);
 
+        const float harm = m.harmonicsDb.load (rl);
+        s.harmonicsMaxDb = std::max (s.harmonicsMaxDb, harm);
+        harmPower += w * (harm > kMinusInfDb ? std::pow (10.0, 0.1 * harm) : 0.0);
+
         const float comp = m.compGainReductionDb.load (rl);
         s.compGrMaxDb = std::min (s.compGrMaxDb, comp);
         compSum += w * comp;
@@ -83,6 +87,12 @@ public:
         s.governorScaleMin = std::min (s.governorScaleMin, scale);
         scaleSum += w * scale;
         backoff += scale < 0.99f ? w : 0.0;
+        const int state = m.governorState.load (rl);
+        if (state >= 0 && state < static_cast<int> (stateFrames.size()))
+            stateFrames[static_cast<size_t> (state)] += w;
+        const uint32_t reason = m.governorReason.load (rl);
+        limiterReason += (reason & SafetyGovernor::kReasonLimiter) != 0 ? w : 0.0;
+        distortionReason += (reason & SafetyGovernor::kReasonDistortion) != 0 ? w : 0.0;
 
         const float level = m.autoLevelGainDb.load (rl);
         s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
@@ -105,11 +115,16 @@ public:
         r.glueGrMeanDb = mean (glueSum);
         r.clipActivePercent = percent (clipActive);
         r.distortionMeanDb = thdPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (thdPower / total))) : kMinusInfDb;
+        r.harmonicsMeanDb = harmPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (harmPower / total))) : kMinusInfDb;
         r.compGrMeanDb = mean (compSum);
         for (size_t b = 0; b < r.modeBandMeanDb.size(); ++b)
             r.modeBandMeanDb[b] = mean (bandSum[b]);
         r.governorScaleMean = mean (scaleSum);
         r.governorBackoffPercent = percent (backoff);
+        for (size_t k = 0; k < stateFrames.size(); ++k)
+            r.governorStatePercent[k] = percent (stateFrames[k]);
+        r.governorLimiterReasonPercent = percent (limiterReason);
+        r.governorDistortionReasonPercent = percent (distortionReason);
         return r;
     }
 
@@ -118,7 +133,8 @@ private:
     const uint64_t safetyClipsAtStart;
     RenderStats s;
     double total = 0.0, grSum = 0.0, over1 = 0.0, over3 = 0.0, glueSum = 0.0, clipActive = 0.0, thdPower = 0.0, compSum = 0.0;
-    double scaleSum = 0.0, backoff = 0.0;
+    double scaleSum = 0.0, backoff = 0.0, harmPower = 0.0, limiterReason = 0.0, distortionReason = 0.0;
+    std::array<double, 4> stateFrames {};
     std::array<double, 4> bandSum {};
 };
 } // namespace

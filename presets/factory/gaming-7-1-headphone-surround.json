@@ -23,6 +23,14 @@
     "comp.ratio": 1.5,
     "comp.attack": 5,
     "comp.release": 150,
-    "comp.makeup": 2
+    "comp.makeup": 2,
+    "dyneq.0.on": true,
+    "dyneq.0.shape": "Low Shelf",
+    "dyneq.0.q": 0.7,
+    "dyneq.0.threshold": -22,
+    "dyneq.0.ratio": 3,
+    "dyneq.0.range": 2.7,
+    "dyneq.0.attack": 10,
+    "dyneq.0.release": 250
   }
 }

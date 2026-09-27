@@ -6,6 +6,7 @@
 //   flubsound-cli process -i in.wav -o out.wav [render options]
 //   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N]
 //   flubsound-cli analyze -i file.wav [--bands] [--json]
+//   flubsound-cli quality [chain options] [--json]
 //   flubsound-cli params  [--json]
 //   flubsound-cli presets [--dir <dir>] [--json]
 //
@@ -44,12 +45,14 @@ Usage:
   flubsound-cli process -i in.wav -o out.wav [render options]
   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N] [--recursive]
   flubsound-cli analyze -i file.wav [--bands] [--json]
+  flubsound-cli quality [preset / mode / macro / --set options] [--json]
   flubsound-cli params  [--json]
   flubsound-cli presets [--dir <dir>] [--json]
   flubsound-cli help <command>        detailed help for one command
   flubsound-cli --version
 
-Render options (process / batch):
+Render options (process / batch; quality takes all but the file options,
+--target-lufs and --format):
   -p, --preset <file.json|name>  preset file, or factory preset name (see `presets`)
       --preset-dir <dir>         factory preset folder for --preset <name>
   -m, --mode music|gaming        processing mode (selects the macro set)
@@ -101,8 +104,9 @@ and sample rate.
   * Render statistics of the delivered pass are printed ("Stats") and, with
     --json, written to render.stats: limiter / glue / compressor gain
     reduction (deepest, mean, time deeper than 1 / 3 dB), clip energy,
-    measured THD+N, bass protection, the dynamic EQ mode bands, the
-    SafetyGovernor's Boost scale and AutoLevel / AutoDrive, read from the
+    measured THD+N, the intended harmonics of the bass harmonics / air
+    exciter, bass protection, the dynamic EQ mode bands, the SafetyGovernor's
+    Boost scale, state and reasons, and AutoLevel / AutoDrive, read from the
     chain's meters once per block.
   * --bands: octave-band levels (31.5 Hz .. 16 kHz, dBFS) of the input and
     the rendered output (inputBands / outputBands with --json).
@@ -146,6 +150,35 @@ Values that cannot be measured (silence, < 400 ms) print as -inf / null.
 renders rather than class-1 IEC 61260 filtering).
 )";
 
+const char* const kQualityHelp = R"(flubsound-cli quality [preset / mode / macro / --set options] [--json]
+
+Measures the sound quality of a setting on pinned test stimuli (docs/11
+E59): the stimuli are generated (48 kHz, fixed seeds), rendered through the
+processing chain exactly as `process` would, and measured on the output mid.
+The settings options are those of `process` (--preset, --mode, --boost,
+--macro, --set, --ceiling, --profile, --block).
+
+  THD+N    sines at 40 / 60 / 100 / 1000 Hz, -6 dBFS peak: everything but the
+           fundamental, dB re the output
+  IMD      50 + 63 Hz (a bass third, -12 dBFS peak each): products up to 5th
+           order; SMPTE 60 Hz + 7 kHz 4:1: sidebands 7 kHz +- k x 60 Hz
+  MTND     31-tone pink multitone at -24 / -18 / -12 dBFS RMS: everything but
+           the tones, dB re the tones, with the output's integrated loudness
+  Ducking  1 / 2 / 4 / 8 kHz probes (-26 dBFS peak each) under 55 Hz kicks
+           (-6 dBFS peak, every 500 ms): per probe the dip (median - min),
+           lift (max - median), p95 - p5 of its gain in 20 ms windows, the
+           share of time > 1 dB down and the modulation at 2 Hz (kick rate)
+  Kick     synthetic kick every 500 ms: output vs input power 0-10, 10-30
+           and 40-60 ms after each onset, and the shift of the energy
+           centroid of 0-150 ms (timing: a 3 ms delay reads +3 ms)
+  Loudness pink noise at -18 dBFS RMS: integrated loudness in / out, true peak
+
+Examples:
+  flubsound-cli quality --mode music --boost 100
+  flubsound-cli quality --preset "Flubsound Signature" --json
+  flubsound-cli quality --set max.drive=12 --json
+)";
+
 const char* const kParamsHelp = R"(flubsound-cli params [--json]
 
 Lists every parameter of the processing chain: key (for --set and preset
@@ -174,6 +207,8 @@ void printHelp (const std::string& topic, std::FILE* stream)
         text = kBatchHelp;
     else if (t == "analyze" || t == "analyse")
         text = kAnalyzeHelp;
+    else if (t == "quality")
+        text = kQualityHelp;
     else if (t == "params" || t == "parameters")
         text = kParamsHelp;
     else if (t == "presets")
@@ -214,6 +249,7 @@ int main (int argc, char** argv)
             case Command::Process: return runProcess (options);
             case Command::Batch: return runBatch (options);
             case Command::Analyze: return runAnalyze (options);
+            case Command::Quality: return runQuality (options);
             case Command::Params: return runParams (options);
             case Command::Presets: return runPresets (options);
             case Command::None: break;

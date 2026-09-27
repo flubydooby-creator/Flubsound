@@ -103,8 +103,10 @@ enum CommandMask : unsigned
     kAnalyze = 1u << 2,
     kParams = 1u << 3,
     kPresets = 1u << 4,
+    kQuality = 1u << 5,
     kRender = kProcess | kBatch,
-    kAll = kProcess | kBatch | kAnalyze | kParams | kPresets
+    kChain = kRender | kQuality, // options that choose the chain's settings
+    kAll = kProcess | kBatch | kAnalyze | kParams | kPresets | kQuality
 };
 
 enum class Opt
@@ -144,23 +146,23 @@ struct OptionSpec
 constexpr OptionSpec kOptions[] = {
     { Opt::Input, "--input", "-i", true, false, kProcess | kBatch | kAnalyze },
     { Opt::Output, "--output", "-o", true, false, kRender },
-    { Opt::Preset, "--preset", "-p", true, false, kRender },
-    { Opt::PresetDir, "--preset-dir", nullptr, true, false, kRender },
-    { Opt::Mode, "--mode", "-m", true, false, kRender },
-    { Opt::Boost, "--boost", "-b", true, false, kRender },
-    { Opt::Macro, "--macro", nullptr, true, true, kRender },
-    { Opt::Set, "--set", "-s", true, true, kRender },
+    { Opt::Preset, "--preset", "-p", true, false, kChain },
+    { Opt::PresetDir, "--preset-dir", nullptr, true, false, kChain },
+    { Opt::Mode, "--mode", "-m", true, false, kChain },
+    { Opt::Boost, "--boost", "-b", true, false, kChain },
+    { Opt::Macro, "--macro", nullptr, true, true, kChain },
+    { Opt::Set, "--set", "-s", true, true, kChain },
     { Opt::TargetLufs, "--target-lufs", "-t", true, false, kRender },
-    { Opt::Ceiling, "--ceiling", "-c", true, false, kRender },
-    { Opt::Profile, "--profile", nullptr, true, false, kRender },
+    { Opt::Ceiling, "--ceiling", "-c", true, false, kChain },
+    { Opt::Profile, "--profile", nullptr, true, false, kChain },
     { Opt::Format, "--format", "-f", true, false, kRender },
-    { Opt::Block, "--block", nullptr, true, false, kRender },
+    { Opt::Block, "--block", nullptr, true, false, kChain },
     { Opt::Jobs, "--jobs", "-j", true, false, kBatch },
     { Opt::Recursive, "--recursive", "-r", false, false, kBatch },
     { Opt::Bands, "--bands", nullptr, false, false, kProcess | kAnalyze },
     { Opt::Json, "--json", nullptr, false, false, kAll },
     { Opt::Dir, "--dir", "-d", true, false, kPresets },
-    { Opt::Quiet, "--quiet", "-q", false, false, kRender },
+    { Opt::Quiet, "--quiet", "-q", false, false, kChain },
     { Opt::Help, "--help", "-h", false, false, kAll },
 };
 
@@ -181,6 +183,7 @@ unsigned maskFor (Command c) noexcept
         case Command::Analyze: return kAnalyze;
         case Command::Params: return kParams;
         case Command::Presets: return kPresets;
+        case Command::Quality: return kQuality;
         case Command::None:
         case Command::Help:
         case Command::Version: break;
@@ -197,6 +200,8 @@ Command commandFromName (const std::string& name)
         return Command::Batch;
     if (n == "analyze" || n == "analyse")
         return Command::Analyze;
+    if (n == "quality")
+        return Command::Quality;
     if (n == "params" || n == "parameters")
         return Command::Params;
     if (n == "presets")
@@ -587,7 +592,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
     out.command = commandFromName (args[0]);
     if (out.command == Command::None)
     {
-        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, params, presets, help)";
+        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, quality, params, presets, help)";
         return false;
     }
     if (out.command == Command::Help)
@@ -705,6 +710,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
                 return false;
             }
             break;
+        case Command::Quality:
         case Command::Params:
         case Command::Presets:
         case Command::None:
