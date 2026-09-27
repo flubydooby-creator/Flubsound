@@ -17,6 +17,14 @@
 // explains why and what to do instead (a one-line notice with the full text
 // on hover / click when the panel is short).
 //
+// Below the strips, "Auto profiles" (roadmap 2.5): one line per rule
+// ("cs2 -> Game: Competitive FPS, restores on exit") with a remove button, a
+// switch for the whole feature and "Add automatic profile..." (application
+// from the recently focused / audio-playing apps or typed, strip, preset,
+// mode, keep or restore on exit). The active rule or the last error is shown
+// under the list; where the foreground app cannot be detected (Wayland, no
+// platform services) the reason is shown instead and adding is disabled.
+//
 // While visible the panel asks AppRouting for live session updates.
 #pragma once
 
@@ -52,10 +60,12 @@ public:
 
 private:
     class StripRow;
+    class AutoProfileList;
 
     void showAssignMenu();
     void promptForExecutable (const juce::String& stripName);
     void showChipMenu (const juce::String& executable, const juce::String& error);
+    void showAddAutoProfileDialog();
     juce::String unsupportedReason() const;
     juce::TextLayout layoutReason (int width) const;
 
@@ -63,6 +73,7 @@ private:
     juce::Component rowHolder;
     juce::Viewport rowView;
     std::vector<std::unique_ptr<StripRow>> rows;
+    std::unique_ptr<AutoProfileList> autoProfiles;
     IconButton assignButton { "Assign an application to the selected strip", Icons::plus(), IconButton::Style::Framed };
     IconButton systemButton { "Open system routing settings", Icons::external(), IconButton::Style::Framed };
     juce::String reason;

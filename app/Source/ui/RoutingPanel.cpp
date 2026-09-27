@@ -395,6 +395,170 @@ private:
 };
 
 // =============================================================================
+// AutoProfileList - "while <app> is in front, <strip> plays <preset>"
+// =============================================================================
+class RoutingPanel::AutoProfileList : public juce::Component
+{
+public:
+    explicit AutoProfileList (RoutingPanel& p)
+        : panel (p)
+    {
+        setTitle ("Automatic profiles");
+
+        enable.setButtonText ("Follow the app in front");
+        Style::set (enable, "switch");
+        Style::describe (enable, "Switch presets automatically", "Load each rule's preset while its application is in the foreground");
+        enable.onClick = [this] { panel.controller.setAutoProfilesEnabled (enable.getToggleState()); };
+        addAndMakeVisible (enable);
+
+        addButton.setText ("Add automatic profile...");
+        addButton.setTooltip ("Load a preset on a strip while an application is in the foreground");
+        addButton.onClick = [this] { panel.showAddAutoProfileDialog(); };
+        addAndMakeVisible (addButton);
+
+        for (auto* label : { &emptyText, &statusText })
+        {
+            label->setFont (Theme::font (11.0f));
+            label->setColour (juce::Label::textColourId, Palette::muted);
+            label->setJustificationType (juce::Justification::topLeft);
+            label->setMinimumHorizontalScale (1.0f);
+            label->setBorderSize ({});
+            addChildComponent (*label);
+        }
+        emptyText.setText ("No automatic profiles. Add one to switch a strip's preset while a game or app is in the foreground.",
+                           juce::dontSendNotification);
+        refresh();
+    }
+
+    /** "cs2 -> Game: Competitive FPS (Gaming), restores on exit". */
+    static juce::String describeRule (const AutoProfileRule& rule, const PresetManager& presets)
+    {
+        const auto* preset = presets.findById (rule.presetId);
+        const juce::String mode = rule.mode == AutoProfileRule::Mode::Music ? " (Music)" : (rule.mode == AutoProfileRule::Mode::Gaming ? " (Gaming)" : "");
+        return displayNameOf (rule.executable) + " -> " + rule.stripName + ": " + (preset != nullptr ? preset->name : "missing preset " + rule.presetId)
+               + mode + (rule.restoreOnExit ? ", restores on exit" : ", kept on exit");
+    }
+
+    void refresh()
+    {
+        auto& ctrl = panel.controller;
+        const bool supported = ctrl.isAutoProfileSupported();
+        enable.setToggleState (ctrl.getAutoProfilesEnabled(), juce::dontSendNotification);
+        enable.setEnabled (supported);
+        addButton.setEnabled (supported);
+
+        const auto& rules = ctrl.getAutoProfileRules();
+        const auto* active = ctrl.getActiveAutoProfile();
+        rows.clear();
+        for (size_t i = 0; i < rules.size(); ++i)
+        {
+            auto row = std::make_unique<RuleRow>();
+            const auto& rule = rules[i];
+            row->label.setText (describeRule (rule, ctrl.getPresetManager()), juce::dontSendNotification);
+            row->label.setTooltip ("While " + rule.executable + " is in the foreground, the " + rule.stripName + " strip plays this preset"
+                                   + (rule.restoreOnExit ? "; its previous preset returns when the application leaves."
+                                                         : "; the preset stays when the application leaves."));
+            row->label.setFont (Theme::font (11.5f, active != nullptr && *active == rule));
+            row->label.setColour (juce::Label::textColourId, active != nullptr && *active == rule ? Theme::accent (*this) : Palette::text.withAlpha (0.88f));
+            row->label.setMinimumHorizontalScale (1.0f);
+            row->label.setBorderSize ({});
+            addAndMakeVisible (row->label);
+
+            row->remove = std::make_unique<IconButton> ("Remove the automatic profile for " + displayNameOf (rule.executable), Icons::close());
+            row->remove->setTooltip ("Remove this automatic profile");
+            juce::Component::SafePointer<RoutingPanel> safe (&panel);
+            const auto removed = rule;
+            // Deferred: removing rebuilds this list, which owns the button being clicked.
+            row->remove->onClick = [safe, removed]
+            {
+                juce::MessageManager::callAsync ([safe, removed]
+                                                 {
+                                                     if (safe == nullptr)
+                                                         return;
+                                                     auto remaining = safe->controller.getAutoProfileRules();
+                                                     remaining.erase (std::remove (remaining.begin(), remaining.end(), removed), remaining.end());
+                                                     safe->controller.setAutoProfileRules (remaining);
+                                                     safe->refreshRouting();
+                                                 });
+            };
+            addAndMakeVisible (*row->remove);
+            rows.push_back (std::move (row));
+        }
+
+        emptyText.setVisible (rules.empty());
+        const auto status = supported ? ctrl.describeAutoProfile() : ctrl.getAutoProfileUnsupportedReason();
+        statusText.setText (status, juce::dontSendNotification);
+        statusText.setColour (juce::Label::textColourId, supported || status.isEmpty() ? Palette::muted : Palette::amber.withAlpha (0.9f));
+        statusText.setVisible (status.isNotEmpty());
+        resized();
+        repaint();
+    }
+
+    int getPreferredHeight (int width) const
+    {
+        int h = kCaptionHeight + 6 + static_cast<int> (rows.size()) * kRowHeight;
+        if (emptyText.isVisible())
+            h += textHeight (emptyText.getText(), width) + 6;
+        if (statusText.isVisible())
+            h += textHeight (statusText.getText(), width) + 6;
+        return h + 6 + kButtonHeight;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        Theme::drawCaption (g, "AUTO PROFILES", getLocalBounds().removeFromTop (kCaptionHeight).toFloat());
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        auto caption = r.removeFromTop (kCaptionHeight);
+        enable.setBounds (caption.removeFromRight (juce::jmin (180, caption.getWidth() / 2 + 40)));
+        r.removeFromTop (6);
+        for (auto& row : rows)
+        {
+            auto line = r.removeFromTop (kRowHeight);
+            row->remove->setBounds (line.removeFromRight (22).withSizeKeepingCentre (22, 22));
+            line.removeFromRight (4);
+            row->label.setBounds (line);
+        }
+        for (auto* label : { &emptyText, &statusText })
+        {
+            if (! label->isVisible())
+                continue;
+            label->setBounds (r.removeFromTop (textHeight (label->getText(), getWidth())));
+            r.removeFromTop (6);
+        }
+        r.removeFromTop (6);
+        addButton.setBounds (r.removeFromTop (kButtonHeight));
+    }
+
+private:
+    static constexpr int kCaptionHeight = 20, kRowHeight = 24, kButtonHeight = 30;
+
+    struct RuleRow
+    {
+        juce::Label label;
+        std::unique_ptr<IconButton> remove;
+    };
+
+    static int textHeight (const juce::String& text, int width)
+    {
+        juce::AttributedString s;
+        s.append (text, Theme::font (11.0f), Palette::muted);
+        juce::TextLayout layout;
+        layout.createLayout (s, static_cast<float> (juce::jmax (40, width)));
+        return juce::roundToInt (layout.getHeight()) + 2;
+    }
+
+    RoutingPanel& panel;
+    juce::ToggleButton enable;
+    IconButton addButton { "Add automatic profile...", Icons::plus(), IconButton::Style::Framed };
+    juce::Label emptyText, statusText;
+    std::vector<std::unique_ptr<RuleRow>> rows;
+};
+
+// =============================================================================
 // RoutingPanel
 // =============================================================================
 RoutingPanel::RoutingPanel (EngineController& c)
@@ -415,6 +579,9 @@ RoutingPanel::RoutingPanel (EngineController& c)
     systemButton.onClick = [this] { controller.getRouting().openSystemRoutingSettings(); };
     addAndMakeVisible (systemButton);
 
+    autoProfiles = std::make_unique<AutoProfileList> (*this);
+    rowHolder.addAndMakeVisible (*autoProfiles);
+
     rebuildStrips();
 }
 
@@ -422,6 +589,7 @@ RoutingPanel::~RoutingPanel()
 {
     controller.getRouting().setLiveUpdates (false);
     rows.clear();
+    autoProfiles.reset();
 }
 
 void RoutingPanel::rebuildStrips()
@@ -496,6 +664,8 @@ void RoutingPanel::refreshRouting()
         }
         row->setApps (std::move (chips));
     }
+
+    autoProfiles->refresh();
 
     reason = unsupportedReason();
     assignButton.setEnabled (reason.isEmpty());
@@ -717,7 +887,7 @@ void RoutingPanel::resized()
     assignButton.setBounds (r.removeFromBottom (30));
     r.removeFromBottom (8);
 
-    int rowsHeight = 0;
+    int rowsHeight = autoProfiles->getPreferredHeight (r.getWidth()) + 8;
     for (auto& row : rows)
         rowsHeight += row->getPreferredHeight (r.getWidth()) + 8;
 
@@ -740,6 +910,10 @@ void RoutingPanel::resized()
         row->setBounds (0, y, width, h);
         y += h + 8;
     }
+    y += 4;
+    const int autoHeight = autoProfiles->getPreferredHeight (width);
+    autoProfiles->setBounds (0, y, width, autoHeight);
+    y += autoHeight + 8;
     rowHolder.setSize (width, juce::jmax (0, y - 8));
 }
 } // namespace flub::app::ui

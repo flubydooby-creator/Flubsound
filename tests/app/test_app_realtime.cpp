@@ -4,9 +4,12 @@
 // by block from a separate "device" thread with 8 device inputs feeding the
 // 7.1 Game strip, a fake per-app capture feeding the Music strip through its
 // DriftCompensatedFifo (including an underrun and re-prime), strip gain /
-// mute / master-ceiling and parameter changes, and the UI draining the
-// analyser taps through AnalyzerFeed between blocks. Every processed block
-// is wrapped in a RealtimeProbe: no allocation, no free and (Linux) no mutex.
+// mute / master-ceiling and parameter changes, the UI draining the analyser
+// taps through AnalyzerFeed between blocks, and a crossfaded engine swap
+// (latency profile Balanced -> Quality, reconfigured by the message thread
+// between two probed blocks; the whole swap runs inside the probed blocks).
+// Every processed block is wrapped in a RealtimeProbe: no allocation, no free
+// and (Linux) no mutex.
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
@@ -18,6 +21,8 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <thread>
@@ -178,9 +183,11 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
     REQUIRE (captureId >= 0);
     REQUIRE (capture != nullptr);
 
-    auto& engine = host.getMixEngine();
-    engine.params (0).set (flub::param::Mode, 1.0f); // Game strip: Gaming mode (virtualiser etc.)
-    engine.params (1).set (flub::param::BoostIntensity, 0.6f);
+    // The device thread re-fetches the engine after the swap (the UI does so
+    // when getStructureGeneration() changes).
+    std::atomic<flub::MixEngine*> engine { &host.getMixEngine() };
+    engine.load()->params (0).set (flub::param::Mode, 1.0f); // Game strip: Gaming mode (virtualiser etc.)
+    engine.load()->params (1).set (flub::param::BoostIntensity, 0.6f);
 
     // Device-side buffers (what a backend hands to the callback).
     std::array<std::vector<float>, kInputs> inputData;
@@ -197,8 +204,20 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
     int64_t tapSamples = 0;
     feed.addSink ([&tapSamples] (ui::AnalyzerFeed::Stream, const float*, int n) { tapSamples += n; });
 
-    constexpr int kWarmUpBlocks = 8, kBlocks = 600;
+    constexpr int kWarmUpBlocks = 8, kBlocks = 600, kSwapBlock = 470;
     BlockTotals totals;
+
+    // Swap hand-shake: the device thread stops before block kSwapBlock (1),
+    // this thread (the message thread) publishes the new engine (2).
+    std::atomic<int> swapStage { 0 };
+    const auto waitForStage = [&swapStage] (int stage)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds (30); // hang guard only
+        while (swapStage.load() != stage && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::yield();
+        return swapStage.load() == stage;
+    };
+    bool handshakeOk = true;
 
     // The "device thread": the backend's audio thread calls the callback.
     std::thread deviceThread ([&]
@@ -235,7 +254,12 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
             if (b == 400)
                 host.setMasterCeilingDb (-2.0f);
             if (b % 64 == 0)
-                engine.params (1).set (flub::param::BoostIntensity, (b / 64) % 2 == 0 ? 0.3f : 0.8f);
+                engine.load()->params (1).set (flub::param::BoostIntensity, (b / 64) % 2 == 0 ? 0.3f : 0.8f);
+            if (b == kSwapBlock)
+            {
+                swapStage.store (1);
+                handshakeOk = waitForStage (2) && handshakeOk;
+            }
 
             // ---- The callback, probed (not during warm-up: the first block on
             //      a new device thread promotes it, which may allocate once) --
@@ -258,10 +282,23 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
             // The UI drains the selected strip's taps (normally the message
             // thread; the rings are SPSC, one consumer at a time).
             if (b % 4 == 3)
-                feed.pull (engine.chain (1).taps());
+                feed.pull (engine.load()->chain (1).taps());
         }
     });
+
+    // The message thread: a latency-profile change on every strip, applied by
+    // the crossfaded swap while the device thread keeps calling back.
+    handshakeOk = waitForStage (1) && handshakeOk;
+    for (int s = 0; s < host.getNumStrips(); ++s)
+        host.getMixEngine().params (s).set (flub::param::LatencyProfile, static_cast<float> (flub::param::LatencyProfileValue::Quality));
+    host.reconfigure();
+    CHECK (host.isSwapInProgress());
+    engine.store (&host.getMixEngine());
+    swapStage.store (2);
     deviceThread.join();
+    CHECK (handshakeOk);
+    CHECK (host.getCompletedSwaps() == 1); // the whole swap ran inside the probed blocks
+    CHECK (! host.isSwapInProgress());
 
     const auto captures = host.getCaptures();
     REQUIRE (captures.size() == 1);
@@ -287,8 +324,8 @@ TEST_CASE ("App: AudioEngineHost device callback allocates, frees and locks noth
     CHECK (tapSamples > static_cast<int64_t> (kBlocks) * kBlock);
 
     ui::MeterSnapshot game, music;
-    game.read (engine.chain (0).meters());
-    music.read (engine.chain (1).meters());
+    game.read (engine.load()->chain (0).meters());
+    music.read (engine.load()->chain (1).meters());
     CHECK (game.inPeakDb[0] > -20.0f);
     CHECK (music.inPeakDb[0] > -20.0f);
 }

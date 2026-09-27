@@ -636,6 +636,11 @@ void AudioEngineHost::renderOffline (StripSignalSource& source, int numSamples, 
         return;
     }
 
+    // Offline rendering never crossfades: a swap or start-up fade left over
+    // from a stopped device ends here, on the newest engine.
+    if (swapRunning || fading != nullptr || pendingSwap.load (std::memory_order_acquire) != nullptr)
+        replaceEngineNow (nullptr, false);
+
     flub::ScopedNoDenormals noDenormals;
     processBlock (nullptr, 0, outputs, outputs != nullptr ? numOutputs : 0, numSamples, &source);
 }
@@ -655,6 +660,12 @@ void AudioEngineHost::beginPendingSwap() noexcept
 
     fading = active;
     active = next;
+    for (int s = next->numStrips; s < kMaxStrips; ++s)
+    {
+        // Strips the new layout removed are no longer active.
+        hangoverRemaining[static_cast<size_t> (s)] = 0;
+        stripActive[static_cast<size_t> (s)].store (false, std::memory_order_relaxed);
+    }
 
     // Both engines run from here on; the new one is silent while it pre-rolls.
     //   equal latency : crossfade (gOld + gNew = 1) over [preroll, preroll + F)
