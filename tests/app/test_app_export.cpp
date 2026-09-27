@@ -156,7 +156,7 @@ EngineController::Options headlessOptions (const flubapptest::TempFolder& temp)
 }
 } // namespace
 
-TEST_CASE ("App export: a folder of WAV / AIFF / FLAC renders each file; a corrupt WAV fails, a .txt is skipped, inputs stay untouched")
+TEST_CASE ("App: Export: a folder of WAV / AIFF / FLAC renders each file; a corrupt WAV fails, a .txt is skipped, inputs stay untouched")
 {
     flubapptest::TempFolder temp;
     const auto in = temp.file ("in"), out = temp.file ("out");
@@ -247,7 +247,7 @@ TEST_CASE ("App export: a folder of WAV / AIFF / FLAC renders each file; a corru
     CHECK (in.getNumberOfChildFiles (juce::File::findFiles) == 5);
 }
 
-TEST_CASE ("App export: FLAC 24 / 16 outputs meet the loudness target within 0.3 LU under the ceiling, measured on the file")
+TEST_CASE ("App: Export: FLAC 24 / 16 outputs meet the loudness target within 0.3 LU under the ceiling, measured on the file")
 {
     flubapptest::TempFolder temp;
     const auto in = temp.file ("in");
@@ -307,7 +307,7 @@ TEST_CASE ("App export: FLAC 24 / 16 outputs meet the loudness target within 0.3
     }
 }
 
-TEST_CASE ("App export: WAV output is byte-identical to flubsound-cli's renderer for the same WAV and parameters (float32 bit-exact)")
+TEST_CASE ("App: Export: WAV output is byte-identical to flubsound-cli's renderer for the same WAV and parameters (float32 bit-exact)")
 {
     flubapptest::TempFolder temp;
     const auto in = temp.file ("in");
@@ -376,7 +376,7 @@ TEST_CASE ("App export: WAV output is byte-identical to flubsound-cli's renderer
     }
 }
 
-TEST_CASE ("App export: cancel while a file renders completes that file and marks the rest cancelled; abort abandons it, writing nothing")
+TEST_CASE ("App: Export: cancel while a file renders completes that file and marks the rest cancelled; abort abandons it, writing nothing")
 {
     flubapptest::TempFolder temp;
     const auto in = temp.file ("in"), out = temp.file ("out");
@@ -448,7 +448,7 @@ TEST_CASE ("App export: cancel while a file renders completes that file and mark
     CHECK (countFiles (out) == 4);
 }
 
-TEST_CASE ("App export: an output folder that is an input folder, or would overwrite an input, is refused; nested outputs are not re-read")
+TEST_CASE ("App: Export: an output folder that is an input folder, or would overwrite an input, is refused; nested outputs are not re-read")
 {
     flubapptest::TempFolder temp;
     const auto root = temp.file ("A");
@@ -513,7 +513,7 @@ TEST_CASE ("App export: an output folder that is an input folder, or would overw
     CHECK (outputs.joinIntoString ("|") == "B/x.wav|x.wav|y_flac.wav|y.wav");
 }
 
-TEST_CASE ("App export: the dialog takes dropped folders and renders the selected strip's settings (Bypass All ignored) or a preset; fits 720 x 560")
+TEST_CASE ("App: Export: the dialog takes dropped folders and renders the selected strip's settings (Bypass All ignored) or a preset; fits 720 x 560")
 {
     flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
