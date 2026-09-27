@@ -1,0 +1,1197 @@
+# 11 — Flubsound Pro — Post-construction Enhancement Report
+
+This report lists what Flubsound Pro still needs, measured against what music listeners and gamers hear and against the tools they would otherwise use (Voicemeeter, Equalizer APO + Peace/AutoEQ, Boom 3D, FxSound, SteelSeries Sonar, Nahimic, Dolby Atmos for Headphones, Windows Sonic, DTS Headphone:X, Razer THX Spatial, Turtle Beach Superhuman Hearing / Audio Hub, Waves Nx / MaxxBass, iZotope Ozone, FabFilter Pro-Q / Pro-L, Sonarworks SoundID). It records defects and gaps only. What already works is documented in [01](01-architecture.md)–[10](10-headset-compatibility.md) and [TRACEABILITY][TR-sum].
+
+> **Method.** Thirteen area auditors (bass, loudness, clarity, spatial, gaming, music, headsets, adaptive, latency, platform, stability, UX, future-proofing) read the code and docs and measured the already-built binaries (the round-7 review build of `flubsound-cli`: `params`, `presets`, `process`, `analyze`) and scratch harnesses. Their findings were merged into the 60 enhancements below. Each group was then scored for benefit (1–5), difficulty and effort, and an adversarial skeptic re-checked every claim, re-ran the measurements it doubted and corrected the item. The corrected values are the ones reported here; where the skeptic overturned a finding, the item says so. No repository file other than this one was changed.
+>
+> **Limits.** All figures are objective measurements (CLI renders, analytic filter responses, code reading). Every perceptual claim in this report ("sounds boomy", "externalises", "fatiguing") is a hypothesis until it passes listening tests, and every device, latency and platform claim needs validation on real hardware. Nothing here has been heard by a listening panel, and none of the Windows or macOS platform code has run. Line numbers were taken from the audit snapshot. Other workflows are editing the tree, so they drift; the function and constant names are the stable reference.
+>
+> **Work in flight elsewhere (treated as "being built, not verified"):** automatic per-game profile switching by foreground app, the click-free crossfaded engine swap on structural changes, and UI scale with a high-contrast theme. Many items below depend on them.
+
+---
+
+## 1. Executive summary
+
+**Current state.** [TRACEABILITY][TR-sum] records 20 of 30 requirements as Implemented and tested, 1 as build-verified only (R4.1) and 9 as Partially implemented (R1.1 latency, R1.2 backends, R1.5 buffer management, R3.5 THD protection, R4.4 tray and hotkeys, R4.5 per-app routing, R4.6 virtual device, R5.3 neural, R6.1 headsets). 503/503 `flub_tests` and 34/34 `flub_app_tests` pass. Those tests prove safety and invariants: the ceiling holds, nothing allocates, nothing goes NaN. They do not test sound quality, and every defect below passed CI. The product's actual state for its two target audiences is:
+
+1. **Most users get no processed audio, or doubled audio.** Windows, the main gaming platform, has no first-party way to get system audio into Flubsound Pro: no virtual endpoint and no APO ([driver README][DRV]: "design, not implemented"). In a default build, Automatic routing chooses endpoint moves that always fail. `WinAppAudioRouter::isSupported()` returns true ([PlatformServices_win.cpp][PSW] :1071), but `setAppEndpoint` fails without `FLUB_ENABLE_UNDOCUMENTED_ROUTING`. The only per-app path that works, process loopback, plays the dry app and the processed copy together about 12.75 ms apart, which is comb filtering. macOS has no path at all (R4.5), and Linux needs a script and manual wiring (R4.6).
+2. **The 7.1 Game strip rarely receives 7.1, and mishandles it when it does.** Games render to stereo endpoints, so the virtualiser folds a stereo signal carried in an 8-channel container through two 30° virtual speakers (10.8 dB channel separation instead of full separation; a −15.4 dB notch at 1418 Hz on centred sources). When real 7.1 arrives, the LFE is discarded on the non-virtualised path (`downmixToStereo()`, "LFE dropped"; measured about −93 to −240 dBFS output) and under-calibrated on the virtualised one (0 dB instead of the +10 dB convention). The renderer is a spherical head whose only front/back cue is a 4 dB rear shelf; it has no elevation. Measured HRIRs cannot be loaded, and no output is taller than 7.1 or wider than stereo.
+3. **The gaming features mostly fail on real dynamics.** Footsteps lifts 20–80 ms steps by only +0.3 to +1.1 dB and does nothing (0 dB) on normally mastered mixes, because thresholds are absolute dBFS and the gain rises at the release rate. Impact boosts rumble (+3.3 dB) more than explosions (+1.3 dB) and cancels against Footsteps. In Night Mode, AutoLevel raises the ambience bed +16.6 dB, lets the event through, then leaves a 6.6 dB hole that has not recovered 6 s later. Nothing tames loud events, nothing ducks game audio under voice chat, and neither the Chat strip nor the microphone gets speech processing.
+4. **Loudness and protection are tuned for safety, not for sound.** Loudness 100 in Music holds −21.8 dB MTND indefinitely, because the governor budget is an unweighted −30 dB THD+N that sees only clipper and saturator THD, not limiter IMD. The soft clipper is a static waveshaper (THD+N −16 dB at 12 dB of drive), and the wideband limiter ducks a 2 kHz tone by up to 22.6 dB on every kick. The governor makes level sag 4.7 dB and hunt for 45 s. Presets push into the limiter because there is no headroom management, and base drive settings are never governed (R3.5 open part).
+5. **There is no headphone correction.** There is no per-device correction layer, no AutoEQ/Peace import and no target curves. The only EQ is 10 bands shared with taste presets, and every preset load wipes it. All 8 device profiles (Turtle Beach and Xbox families only, all `labVerified:false`) carry advice text and no sound data, and every one recommends the same two presets.
+6. **Stereo music on headphones gets little headphone-specific benefit.** The virtualiser never runs on stereo strips (`binaural = config.inputChannels > 2 && ...`). Crossfeed is a 700 Hz M/S low-frequency side cut with no ITD. "Space" puts up to 9.3 dB of interaural difference on centred vocals. Nothing compensates for listening level: the app never reads endpoint volume, and there is no ISO 226 contour. The "Late Night" contour is a static +1.7 dB.
+7. **Latency, the core competitive claim, has never been measured end to end, and every path that exists misses 10 ms.** The Low Latency profile saves about 2 ms but leaves 12.75 ms (Windows loopback FIFO) or about 21 ms (default PipeWire quantum) of buffering in place ([01 §5.3][01-53]). Presets silently override the latency profile, and MixEngine pads every strip to the slowest one, so a Quality music preset moves the Game strip from 4.00 ms to 28.17 ms. A second master look-ahead is stacked on top of the per-strip limiters.
+8. **The tests prove safety, not quality.** There are no multi-tone IMD, kick-alignment, pumping, sibilance, localisation, burst-footstep or scenario tests, and no listening-panel or real-game data (R2.9 "real-game efficacy" untested). There is no soak test, glitch detector, coverage-guided fuzzing or pluginval run, the plug-in has no tests, and about 2800 lines of Windows and macOS platform code have never executed.
+9. **The product cannot ship or be supported yet.** It has no installer, signing, update channel, logging, crash reporting or diagnostics export, and no LICENSE or SBOM, while the JUCE AGPLv3 obligation remains ([02 §6][02-6]). Preset and state formats have no migration: a version 1.1 preset is refused, stored state is sparse and tied to current defaults, and a corrupt settings file silently falls back to defaults. The headline controls are Boost and Loudness, yet there is no hearing-safety feature, and "Tournament Clean" calls a −1 dBTP limiter "hearing protection".
+
+**Where the gaps are closed.**
+
+| Gap | Traceability status | Enhancements that close it |
+|---|---|---|
+| 1 No system-wide path | R4.5, R4.6 Partially implemented | [E47](#e47) now, [E46](#e46), [E48](#e48), [E49](#e49); [E36](#e36) for first run |
+| 2 7.1 and spatial | R2.5, R2.9 notes; R4.6 | [E27](#e27), [E01](#e01), [E28](#e28), [E29](#e29), [E30](#e30), [E31](#e31) |
+| 3 Gaming dynamics | R2.9 "real-game efficacy" untested | [E19](#e19), [E21](#e21), [E20](#e20), [E22](#e22), [E23](#e23), [E18](#e18) |
+| 4 Loudness and protection | R3.5 Partially implemented | [E06](#e06), [E05](#e05), [E10](#e10), [E11](#e11), [E07](#e07), [E14](#e14) |
+| 5 Headphone correction | R6.1 Partially implemented | [E15](#e15), [E16](#e16), [E09](#e09) |
+| 6 Stereo music on headphones | R2.5 (implemented, limited) | [E12](#e12), [E32](#e32) |
+| 7 Latency | R1.1, R1.5 Partially implemented | [E42](#e42), [E40](#e40), [E50](#e50), [E44](#e44), [E45](#e45) |
+| 8 Quality verification | R1.5; R2.8/R2.9/R2.10/R3.2 sub-gaps | [E59](#e59), [E60](#e60), [E53](#e53) |
+| 9 Shipping and support | R4.1, R4.4; no licence | [E58](#e58), [E54](#e54), [E52](#e52), [E51](#e51), [E32](#e32) |
+
+**Conclusion.** Three things decide whether Flubsound Pro is worth using, and all three come before any new DSP: (a) get audio into the engine honestly: stop the failing Automatic route and the dry+wet doubling now ([E47](#e47)), and build the Windows endpoint path ([E46](#e46)); (b) run the Windows code on a real PC and measure what is heard, with a quality regression suite ([E53](#e53), [E59](#e59)); (c) fix the defects that make the product worse than bypass on common content: the stereo-in-8-channel fold, the preset latency override, the fake "loudness-matched" bypass, the Night Mode hole and the Footsteps law ([E27](#e27), [E40](#e40), [E37](#e37), [E21](#e21), [E19](#e19)). Several of these have one-day slices ([§3](#3-quick-win-enhancements)).
+
+---
+
+## 2. Prioritized enhancement list
+
+Priority is the skeptic-adjusted rank: **High** means it fixes a defect users hear or hit today, or it gates the credibility of other work. **Medium** means real value with a narrower audience or a dependency that is not ready. **Low** means small or speculative value this cycle. Within each group, items are ordered by benefit score, then ID. Benefit is on a 1–5 scale for music listening and gaming; difficulty is Low / Medium / High / Very high; effort is in engineer-days or engineer-weeks for the team in [07 §1][07-1]. "Quick win" and "Ambitious" tags refer to [§3](#3-quick-win-enhancements) and [§4](#4-ambitious--advanced-enhancements).
+
+### 2.1 High priority (25)
+
+| ID | Title | Category | Benefit | Difficulty | Effort | Tag |
+|---|---|---|---|---|---|---|
+| [E05](#e05) | Loudness maximizer redesign | Audio quality | 5 | Very high | 8–11 wk | Ambitious |
+| [E15](#e15) | Per-device headphone correction + AutoEQ import | Headsets | 5 | High | 8–13 wk (MVP 3–4 wk) | Ambitious |
+| [E19](#e19) | Footstep/detail enhancer redesign | Gaming | 5 | High | 4–6 wk (interim < 1 day) | Ambitious |
+| [E27](#e27) | Game-strip input awareness, native-HRTF bypass | Gaming | 5 | Medium | 6–7 wk (Phase 1 1.5–2 wk) | Quick win |
+| [E46](#e46) | First-party Windows endpoint driver or APO Lite | Stability & platform | 5 | Very high | 6–9 months | Ambitious |
+| [E53](#e53) | Verification of the real-time and platform layers | Stability & platform | 5 | High | 8–12 wk | |
+| [E06](#e06) | SafetyGovernor redesign | Audio quality | 4 | Very high | 8–10 wk (slice 1–1.5 wk) | Ambitious |
+| [E07](#e07) | HF harshness control | Audio quality | 4 | High | 5–6 wk | |
+| [E10](#e10) | Signal hygiene: anti-aliasing, DC, sanitising | Audio quality | 4 | Medium | 4–6 wk (Phase 1 4–6 days) | |
+| [E12](#e12) | Headphone stereo imaging for music | Music | 4 | High | 12–18 wk (Phase A 3–4 wk) | Ambitious |
+| [E14](#e14) | Music voicing: real Warmth, presets, intent specs | Presets | 4 | Medium | 4–7 wk | |
+| [E21](#e21) | Two-stage Smart Volume and Startle Guard | Gaming | 4 | High | 4–6 wk (slice 3–5 days) | Quick win |
+| [E32](#e32) | Listening-level awareness and hearing guard | Adaptive & intelligent | 4 | High | 10–13 wk | |
+| [E37](#e37) | Loudness-matched comparison everywhere | UX & workflow | 4 | Medium | 4–6 wk (slice 3–5 days) | Quick win |
+| [E39](#e39) | Progressive disclosure and laptop-size layout | UX & workflow | 4 | Medium | 4–6 wk | |
+| [E40](#e40) | Preset browser + latency-profile fix | Presets | 4 | Medium | 3–5 days + 2–3 wk | Quick win |
+| [E42](#e42) | Measured end-to-end latency, whole-path Low Latency | Latency & performance | 4 | High | 7–9 wk (E42a 4–6 days) | |
+| [E47](#e47) | Honest routing, doubling guard, route journal | Stability & platform | 4 | Medium | 2.5–3.5 wk (E47a 2–3 days) | |
+| [E51](#e51) | Device-handling robustness, feedback-loop guard | Stability & platform | 4 | Medium | 4.5–6 wk (Phase A 4–6 days) | Quick win |
+| [E56](#e56) | In-game control surface and automation API | UX & workflow | 4 | Medium | 7–9 wk (Phase A 3–5 days) | Quick win |
+| [E59](#e59) | Sound-quality regression suite | Stability & platform | 4 | Medium | 6–9 wk (slice 1 wk) | |
+| [E01](#e01) | Fold and calibrate the LFE | Audio quality | 3 | Medium | 4–6 days | Quick win |
+| [E36](#e36) | First-run onboarding wizard | UX & workflow | 3 | Medium | 6–9 wk (fix 1 day) | |
+| [E50](#e50) | Clock-domain correctness and polyphase ASRC | Stability & platform | 3 | Medium | 2.5–3.5 wk (Phase A 5–8 days) | Quick win |
+| [E58](#e58) | Licences, notices, SDK and reach | Future-proofing | 2 | Medium | licence 2–4 days after decision | |
+
+<a id="e05"></a>
+#### E05 · Loudness maximizer redesign: transient-aware clipping, LF-safe limiter envelope, multiband mode, transient preservation
+
+*Audio quality · benefit 5 · difficulty Very high · 8–11 engineer-weeks · Ambitious*
+
+- **What.** Gate the soft clipper on crest factor against a 5–10 ms envelope and cap its depth at about 3 dB (user-adjustable), so extra drive becomes limiter gain reduction (GR) rather than clip depth. Give the limiter an adaptive gain hold (at least half a period of the lowest frequency present), a two-stage fast + program envelope, a smoothed (cascaded-box or Hann) attack, 3–5 ms look-ahead in Quality only, and named styles (Transparent, Punchy, Aggressive, Safe). Couple Boost's attack amount to measured GR so transients survive heavy limiting. Multiband limiting comes last, only if cheaper fixes fail.
+- **Why.** Every listener hears this stage once Boost passes about 25 % (Boost engages `MaximizerOn` at 0.25–0.27). Music: at loud-end drives the output is grossly distorted, sustained bass ripples, and every kick ducks vocals and pads. Gaming: explosions pull footsteps and positional cues down through the wideband limiter.
+- **Expected benefit.** The most direct "cheap versus pro" lever at the loud end. Today: THD+N −16.0 dB for a −6 dBFS sine at 12 dB drive (limiter alone −37.7 dB); −32.5 dB on 40 Hz at about 7 dB GR (−30.3 dB in Low Latency); a 2 kHz tone ducked 22.6 dB under 55 Hz kicks and more than 1 dB down 36.4 % of the time; Boost 100 lowers kick onset/body by 3.9 dB. The clip cap alone only moves distortion into the limiter's LF ripple, so cap and envelope must ship together. The multiband mode is the least certain part and stays out of the first release.
+- **Approach.** (1) `LoudnessMaximizer` `updateClipThreshold()` / `softClip()`: a 5–10 ms RMS follower, crest-gated clip, `clip.maxDb` default 3 dB, excess routed to GR. (2) `TruePeakLimiter` already has run-based release blending (`kRunGapMs`, `kBlendStartMs`/`kBlendEndMs`) but only an 8-sample true-peak hold. Add a 10 ms (25 ms when < 50 Hz energy is present) gain hold after the look-ahead minimum, a triangular or Hann attack in place of the single `boxRing` (keeping Kh ≤ L/3), and a 300–800 ms program envelope, taking min(fast, program). (3) Look-ahead 3–5 ms in Quality only; Balanced stays at 1.5 ms (R1.1). (4) Styles as parameter bundles. (5) Before any multiband mode, try an LF-de-emphasised detector plus an LF-only limiter in the existing `ThreeBandSplitter` glue path. (6) Boost coupling in `ProcessingChain::applyParameters()`, hard-capped and slew-limited, because it is a positive-feedback loop.
+- **Depends on.** The [E06](#e06) quick slice first, so the loop being tuned is stable. [E04](#e04) for attack coupling. Ship the LF envelope with or before [E01](#e01)'s +10 dB LFE default. The MixEngine master limiter shares `TruePeakLimiter`, so the master bus changes too.
+- **Done when.** Sine at 12 dB drive: THD+N ≤ −30 dB at 60 Hz and 1 kHz. 40 Hz at about 7 dB GR: ≤ −45 dB in Balanced. 2 kHz under kicks: max dip ≤ 6 dB with the LF-de-emphasised detector (≤ 3 dB only with multiband). True-peak ceiling holds on the 11-rate matrix for strip and master. Boost 100 kick onset/body ≥ 0 dB. Integrated LUFS at max Boost within 1.5 LU of today. Loud-end MUSHRA on 10 masters against Pro-L 2 and Ozone at matched LUFS.
+- **Evidence.** [LoudnessMaximizer.cpp][LM] `updateClipThreshold()`, `softClip()`; [TruePeakLimiter.cpp][TPL] single `boxRing`, `kTruePeakHold = 8`; [ProcessingChain.cpp][PC] `prepare()` (2 ms Quality look-ahead); [MacroMap.cpp][MM] Boost rows; [03 §4.9][03-49]; CLI measurements above.
+
+<a id="e15"></a>
+#### E15 · Per-output-device correction layer with AutoEQ/Peace import and target curves
+
+*Headsets · benefit 5 · difficulty High · MVP 3–4 weeks, total 8–13 engineer-weeks · Ambitious*
+
+- **What.** A post-sum "Device correction" stage before the master limiter: 16-band minimum-phase PEQ with per-channel bands (unit imbalance) and an automatic preamp computed from `responseDb`. It is keyed to the output endpoint and kept out of presets, A/B and auto-profile restores. Import AutoEQ `ParametricEQ.txt` and Equalizer APO/Peace syntax. Later: GraphicEQ, target selector (Harman OE 2018 / IE 2019, diffuse field, a mild "competitive" 2–5 kHz lift), amount 0–100 %, bass/tilt preferences, boost caps, and a licence-checked per-model database including Turtle Beach models.
+- **Why.** For both music fidelity and competitive gaming, the largest audible error is the headphone's own response (typically ±5–10 dB with 5–10 kHz peaks). Every preset and footstep boost lands on top of it, and a hand-built correction is wiped on every preset load. Peace/AutoEQ, Sonar and SoundID all offer this.
+- **Expected benefit.** The highest-value item for both audiences. Most of it comes from importing a per-model `ParametricEQ.txt` (AutoEQ has already fitted it to a Harman target) into a per-endpoint stage. The classic SVF bell and Q-shelf are algebraically the RBJ cookbook responses, so imports match without [E09](#e09). Target selection and tilt need raw measurements that users rarely have and that may not be redistributable.
+- **Approach.** (1) `DeviceCorrection` between the strip sum and `master.process` in `MixEngine::process`: two mono `ParametricEq` instances (Classic response, 16 bands), preamp = −max(0, max responseDb over 20 Hz–20 kHz), coefficient sets swapped atomically with a 20 ms crossfade. (2) A `CorrectionStore` outside `ParameterStore`, so `PresetIO::applyToStore`, A/B banks and the auto-profile restore points never touch it, keyed on a stable endpoint ID (`IMMDevice::GetId`, CoreAudio UID, PipeWire node.name + serial). Never auto-apply from the family-level `DeviceProfiles` name match; only suggest. (3) Parsers in `core/src/io/` for AutoEQ and the APO subset (Preamp; Filter PK/LSC/HSC/LS/HS; Channel; slope-form shelves converted to RBJ Q); refuse Include/Convolution/Stage with a clear message. (4) Targets only when raw measurements exist. (5) Check each measurement source's licence separately (AutoEQ code is MIT; oratory1990, crinacle and Rtings data have their own terms).
+- **Depends on.** [E11](#e11)'s static-boost predictor for the preamp. [E16](#e16) only for automatic suggestion. The partitioned convolver (shared with [E12](#e12) Phase C, [E29](#e29)) for GraphicEQ FIRs. The device lab ([10 §5][10-5]) for in-house corrections.
+- **Done when.** A rendered log sweep matches the imported curve within 0.1 dB from 20 Hz to 20 kHz, checked against an independent numpy RBJ reference over 20+ real AutoEQ files. 0 dBFS pink input stays below 0 dBFS after the preamp. Preset load, A/B swap and auto-profile switch leave the correction untouched. An endpoint change swaps it without a click. Lab: residual against target ≤ ±2 dB from 100 Hz to 8 kHz on a Turtle Beach headset; blind preference test.
+- **Evidence.** [MixEngine.cpp][ME] `process()` (sum → master limiter only); [DeviceProfiles.h][DPh] `Profile` has no EQ, sensitivity or target fields; [device-profiles.json][DPJ] 8 entries, no sound data, all suggesting Flubsound Signature / Competitive FPS; [PresetIO.cpp][PIO] `applyToStore`; [PresetManager.cpp][PM] `loadIntoBank` keeps only `BypassAll`; [Svf.h][SVF] `SvfCoeffs::make()`; roadmap item 3.8 in [07][07]; [09 §2][09-2].
+
+<a id="e19"></a>
+#### E19 · Redesign the footstep/detail enhancer: programme-relative, onset-gated, and fast on real steps
+
+*Gaming · benefit 5 · difficulty High · 4–6 engineer-weeks, interim fix < 1 day · Ambitious*
+
+- **What.** A dedicated `CueEnhancer`: the lift is engaged from a slow (300–500 ms) background estimate, so a 20–40 ms step gets its lift from the first millisecond. Thresholds are programme-relative (per-band percentile floor plus offset, CutAbove from the recent median or gated LUFS, an absolute hiss floor), and the lift is gated on onset / spectral-flux likelihood in 1–6 kHz so stationary beds (rain, wind, room tone) are not raised. A minimum-statistics noise estimate replaces the fixed −75 dBFS upward-compression floor. After [E15](#e15), the cue band runs after device correction.
+- **Why.** The flagship competitive control lifts real footsteps by +0.3 / +0.6 / +1.1 dB on 20 / 40 / 80 ms bursts (+3.4 dB only on steady tones), does nothing (−0.00 dB) on content at −27.5 LUFS, and on quiet material (−51.5 LUFS) raises the ambience bed while contrast barely improves. A static +6 dB bell (Superhuman Hearing, Sonar) currently beats it.
+- **Expected benefit.** The largest gaming-audio defect. Measured contrast change: Footsteps 100 −4.2 dB; Competitive FPS −6.0 dB with the bed +10.9 dB. The skeptic found that about 60 % of the preset's bed lift comes from outside bands 4/5: Competitive FPS still lifts the bed +6.3 dB with Footsteps at 0 and +10.7 dB with Detail at 0, via Boost's `CompUpMaxGainDb` 5 dB, M1's 3 dB, M4's 8 dB and maximizer drive. The broadband upward compressor must therefore become background-relative too, or leave the gaming table.
+- **Approach.** (0) Interim, separate commit: set bands 4/5's threshold to about −6 dBFS in `configureModeBands`, so BoostBelow acts as a static bell with a hiss taper and loud roll-off (contrast-neutral, full lift from the first sample). Ship only with a preset check that the loud cap still protects gunfire. (1) `CueEnhancer` with background-relative expansion, onset gate, 30–60 ms hold, loud cap relative to the slow gated level. (2) The broadband upward compressor uses the same minimum-statistics floor. (3) Budget maximizer drive's bed lift per preset. (4) Reference the background tracker and loud cap to the pre-AutoLevel signal.
+- **Depends on.** [E21](#e21) (the guard must not duck the cue band; AutoLevel moves the reference). [E20](#e20) (band 6 moves off Footsteps). Rewriting all 9 gaming presets, [test_factory_presets.cpp][T-fp] and [test_modes.cpp][T-modes].
+- **Done when.** Module and Competitive FPS / Battle Royale presets: bed ≤ +1 dB and step/bed contrast ≥ +3 dB (today +10.9 dB and −6.0 dB). 20–50 ms bursts at −45 to −60 dBFS get ≥ 80 % of the steady law. Lift within ±1 dB across −14 / −24 / −40 LUFS. Interim config: contrast change within ±0.5 dB and ≥ 90 % of steady lift on 20 ms bursts. ABX on real captures against bypass and a static +6 dB bell, loudness-matched.
+- **Evidence.** [DynamicEq.cpp][DEQ] `isExpander()` (a rising gain counts as attack only for BoostAbove/CutBelow, so band 4 rises at its 120 ms release); [ProcessingChain.cpp][PC] `configureModeBands` absolute −42 / −45 / −36 dBFS thresholds; [MacroMap.cpp][MM] `kGamingTable`; [test_modes.cpp][T-modes] steady sines only; [08 C5][08-C5].
+
+<a id="e27"></a>
+#### E27 · Game-strip input awareness: channel-layout verification, active-channel detection, native-HRTF bypass and stereo upmix
+
+*Gaming · benefit 5 · difficulty Medium · Phase 1 1.5–2 weeks, total 6–7 engineer-weeks (upmix split out) · Quick win*
+
+- **What.** Detect energy in channels 2–7 with hysteresis and show "receiving 2 / 6 / 8 channels". When only FL/FR carry content, crossfade to a new stereo-passthrough fold (unity, loudness-matched). A manual "game renders its own HRTF" switch (later driven by the title database and auto-profile rules) forces virtualiser off, width 1, focus 0 and crossfeed 0. Read the backend channel layout (WAVEFORMATEXTENSIBLE mask for JUCE device inputs, ALSA/JACK channel map, CoreAudio `AudioChannelLayout`) and permute into the strip. Add a one-click round-trip channel check.
+- **Why.** Windows process loopback asks for an 8-channel container, and a game rendering for a stereo headset fills only FL/FR. `virt.on` defaults to true and 8 of 9 gaming presets leave it on. So stereo games and in-game-HRTF titles (CS2, Valorant, Fortnite 3D Headphones) get a second HRTF that pulls hard-left cues back to 30°. On Linux, a mis-ordered ALSA layout would put dialogue in a rear virtual speaker.
+- **Expected benefit.** This fixes the mainstream Windows gaming case. Measured, fold only: hard-left noise in FL of an 8-channel file comes out at L −27.2 / R −38.0 dBFS (10.8 dB separation; ILD 0.1 dB at 200–300 Hz), where a 2-channel file gives total separation. A centred source gets a −15.4 dB notch at 1418 Hz and +2.6 dB at 250 Hz, colouring voice and footsteps in the band-7 region. Layout reading closes a plausible Linux bug: `AudioEngineHost.cpp` hard-codes `FL FR FC LFE BL BR SL SR`, but ALSA's 8-channel order puts FC at index 4.
+- **Approach.** (1) Per-channel `MeanSquareFollower` after `autoLevel.process(in)`; surround when channels 2–7 exceed −50 dB relative to max(FL, FR) for 300 ms, stereo below −60 dB for 2 s. Publish `activeChannelMask` via `MeterBus`, shown next to the existing `virtualizerNeedsSurround` warning. (2) Do not just set virtMix to 0: `downmixToStereo()` applies BS.775 with a further −3 dB, so FL/FR-only content is 3.01 dB low, and the virt path is 0.84 dB below passthrough on uncorrelated content. Add a third fold state and a 300–500 ms loudness-matched ramp. (3) The `binaural` flag in `applyParameters()` must follow the detector. (4) Linux: verify first with a per-channel tone through `flubsound_game`; if the order is wrong this is a P0 bug fix. Then read the channel map and permute pointers in `AudioEngineHost::processBlock`. (5) Split the stereo-to-7.1 upmix into a separate Low item: it fabricates direction and is wrong for competitive play.
+- **Depends on.** Nothing for Phase 1. The database-driven flag needs [E26](#e26) and the in-flight auto profiles. The Windows round-trip check needs [E46](#e46) or a third-party cable. [E25](#e25), [E28](#e28) and [E30](#e30) reuse the detector and level matching.
+- **Done when.** 8-channel FL/FR-only input switches to passthrough within 2.5 s, equals a 2-channel render within 0.1 dB, with no level step above 1 dB during the switch; rear content switches back within 300 ms; −45 dB ambience does not trigger it. CLI: FL-only gives full separation (today 10.8 dB) and FL = FR has no notch deeper than 0.5 dB (today −15.4 dB). Linux per-channel tone test identifies all 8 channels. Listening: a hard-left CS2 cue stays hard left with the flag set.
+- **Evidence.** [test_virtualizer.cpp][T-virt] "7.1 fed only FL/FR equals the stereo layout exactly"; [AudioEngineHost.cpp][AEH] hard-coded channel string (~L30); [ProcessingChain.cpp][PC] `downmixToStereo()`, `binaural = config.inputChannels > 2 && ...`; [PlatformServices_win.cpp][PSW] `channelMaskFor(8)`; [Parameters.cpp][PAR] `virt.on` default; [DeviceProfiles.cpp][DP] `adviceFor` (double-HRTF warning only for headset surround); [08 C4][08-C4]; [09 §2][09-2].
+
+<a id="e46"></a>
+#### E46 · First-party Windows system-wide path: a virtual Game 7.1, System, Chat and Mic endpoint driver, or APO Lite
+
+*Stability & platform · benefit 5 · difficulty Very high · APO Lite 8–12 weeks; driver M1 4–6 months, M2 +3–4 months · Ambitious*
+
+- **What.** Two products tracked separately. **E46a APO Lite** ([02 §4.3][02-43]): allocation-free `flub_core` hosted in audiodg as a single-strip, per-endpoint System profile, with no driver signing and no capture FIFO. **E46b driver**: an attestation-signed fork of SimpleAudioSample exposing "Flubsound Game" (7.1) and "Flubsound System" render endpoints read through WASAPI loopback (M1), then Chat render, processed-mic and Mic endpoints and a zero-copy shared ring with sample-clock slaving (M2).
+- **Why.** Without it no Windows user gets whole-system processing without VB-Cable or Voicemeeter, which Flubsound Pro may not redistribute. Games never deliver 7.1, and per-app strips cannot work. Every competitor ships its own endpoint or APO.
+- **Expected benefit.** The largest competitive gap on the main gaming platform. The two tracks serve different people: APO Lite gives music and system audio processing but no 7.1 bed, no Game/Chat/Music separation, and it double-processes if the engine outputs to the same endpoint. The virtual 7.1 endpoint is what gaming needs (channel beds only, not ISpatialAudioClient objects). The latency gain arrives only at M2, since M1 still reads through loopback and keeps the 612-frame FIFO.
+- **Approach.** APO Lite: SFX/MFX APO, versioned shared-memory parameters, latency via `IAudioProcessingObject::GetLatency`, a heartbeat counter the app checks, mutual exclusion with the engine output on the same endpoint, vendor-APO detection. Driver: SimpleAudioSample fork (MIT) with `KSAUDIO_SPEAKER_7POINT1_SURROUND` 48 kHz float, captured into the existing capture slots at M1; the `FlubVirtualAudioShared.h` IOCTL ring at M2. The installer must set the Game endpoint's speaker configuration to 7.1, or games open it as stereo. Driver Verifier and CodeQL for drivers, `pnputil` installer with clean uninstall. Hire or contract a Windows audio driver engineer.
+- **Depends on.** [E47](#e47) first (honest, recoverable routing whose journal covers driver endpoints). [E42](#e42) to measure M2. The in-flight engine swap for format changes. Legal review, EV certificate, Partner Center onboarding (2–6 calendar weeks).
+- **Done when.** 72 h Driver Verifier under render + loopback stress. A 7.1 channel-ID file and the Windows speaker test reach the correct Game strip channels. CS2 and Apex show 8 active channels. The games launch and play with Vanguard, FACEIT and EAC present. M2: loopback-measured ≤ 12 ms end to end. APO Lite: null test confirms processing; the heartbeat survives reboot, a feature update and an OEM driver update; the double-processing guard fires.
+- **Evidence.** [driver README][DRV] ("design, not implemented", ABI header only); [TRACEABILITY Known gaps][TR-gaps] R4.5, R4.6; [EngineController.cpp][EC] `looksLikeLoopbackDevice` (matches "cable output", "vb-audio", "voicemeeter"); [02 §4.3][02-43]; [01 §5.3][01-53].
+
+<a id="e53"></a>
+#### E53 · Verification of the real-time and platform layers: soak, glitch detection, fuzzing, pluginval, real Windows and macOS execution
+
+*Stability & platform · benefit 5 · difficulty High · 8–12 engineer-weeks*
+
+- **What.** (0) A manual first-execution campaign on real Windows 10 22H2 and Windows 11 PCs. (1) libFuzzer + ASan targets for `json::parse`, `readWav`, `preset::fromJson`, `DeviceProfiles` and `stripStateFromJson`. (2) A randomised full-chain automation fuzz across block sizes and rates. (3) pluginval at strictness 10 plus plug-in state round-trip tests on three OSes. (4) A soak harness with a discontinuity detector (1 h nightly, 8 h per release). (5) A self-hosted Windows runner job for process loopback, MMCSS, autostart and the version-guarded `IPolicyConfig` vtable; a macOS smoke test.
+- **Why.** Every stability claim rests on short synthetic runs. About 2800 lines of Windows and macOS code have never executed, including [PlatformServices_win.cpp][PSW] (2147 lines: session enumeration, process-loopback capture, default-endpoint switching through an assumed `IPolicyConfig` slot 25, whose own comment warns "A wrong vtable layout would crash the calling process"). The plug-in has zero tests. The CI app job runs against a fake device and router only.
+- **Expected benefit.** The gating item for any gaming claim: [E50](#e50) Phase B, [E51](#e51), [E55](#e55) and [E56](#e56) cannot be validated without it. A 10-minute offline CLI soak was stable, so the risk sits in the real-time and device layers.
+- **Approach.** Step 0 first, with a written checklist in docs/10 and results recorded in TRACEABILITY R4.4/R4.5; budget 1–3 weeks for fixing what first execution breaks. Fuzz 5 min per target per PR and 1 h nightly, seeded from presets and test WAVs, replacing the fixed-seed loops in `test_json.cpp` and `test_wav.cpp`. Automation fuzz asserts finite output, true peak ≤ ceiling + 0.1 dB and no RTSan violation. Soak: a headless `--soak` mode on a PipeWire null sink with a 997 Hz phase-locked predictor (residual above −60 dBFS counts as a glitch), plus the same soak on the Windows runner. Land pluginval as non-blocking for one iteration.
+- **Depends on.** A Windows PC now; self-hosted Windows and Mac runners later (shared with [E49](#e49)). [E54](#e54)'s event ring can share counters.
+- **Done when.** A signed-off Windows checklist per feature with build and OS version. Fuzzers 1 h nightly with no crashes. pluginval strictness 10 passes on 3 OSes. An injected 1-sample skip in MixEngine is flagged. Nightly Linux and weekly Windows soaks report 0 discontinuities, 0 underruns, 0 NaN drops. The Windows loopback job captures a test tone within ±1 dB.
+- **Evidence.** [CI workflow][CI] (jobs: core, sanitizers, rtsan, app; no soak, fuzz or pluginval); roadmap items 1.1, 1.10, 2.12 in [07][07]; [TRACEABILITY Known gaps][TR-gaps] R1.5, R4.4, R4.5; [PlatformServices_win.cpp][PSW] ~L869.
+
+<a id="e06"></a>
+#### E06 · SafetyGovernor redesign: measure all distortion, feed-forward control, weighted per-mode budgets, dynamics budget, govern base settings
+
+*Audio quality · benefit 4 · difficulty Very high · slice 1–1.5 weeks, total 8–10 engineer-weeks · Ambitious*
+
+- **What.** (1) Measure the whole maximizer's nonlinearity (glue + clipper + limiter gain-modulation IMD) with a least-squares fit of output against the latency-aligned input. (2) Replace the slow asymmetric 3 s loop with feed-forward from pre-maximizer loudness and crest factor plus a PI trim with anti-windup, keeping per-strip state across `reset()` and engine swaps. (3) A masking-weighted metric (about 20 Bark bands) with per-mode budgets (Audiophile strict, Club lenient, Music about −40 dB). (4) A Music dynamics budget based on PLR / short-term crest. (5) Govern base `max.drive`, `sat.drive` and harmonics behind a visible "protection strength" control (Off / Normal / Strict). (6) Publish scale and reason in the UI and CLI JSON.
+- **Why.** Music: loud settings hold audible IMD indefinitely, loudness sags and hunts, and Boost + Loudness cuts LRA from 11.4 to 1.4 LU for +2 LU of loudness. Gaming: level breathing and uncontrolled distortion at high Boost.
+- **Expected benefit.** Closes the open part of R3.5 (base drive "measured but not limited"). Today: Loudness 100 gives −21.8 dB MTND with no back-off for 24 s; stationary programme sags 4.7 dB in 5 s and oscillates until 45 s; Music with all macros at 100 on 50 Hz gives 27.6 % THD+N; everything maxed gives −2.38 LUFS as a near-square wave. The skeptic re-measured block-size dependence as 0.22 LU (not 0.71) and traced it to the governor loop, not the maximizer (fixed drive gives −6.72 LUFS at every block size).
+- **Approach.** Correction to the original diagnosis: the maximizer already publishes a grid-aligned window GR (`getWindowGainReductionDb()`), and the governor consumes it. The remaining dependence comes from `SafetyGovernor::update` running per host block with a hard over/under decision and an `exp(-dt/3)` average fed a stale window value. Slice: tick the governor only when a window closes (dt = window length); add a base-drive path behind the strength control; revisit `kMinScale 0.3`; publish scale and reason via `MeterBus` and `--json`. Later: residual fit inside `LoudnessMaximizer`; feed-forward + PI; Bark metric from `Fft.cpp` every 50–100 ms; PLR instead of LRA (LRA is a multi-minute statistic); reason shown in `BoostPanel`.
+- **Depends on.** Slice: nothing; land it before [E05](#e05). The residual fit follows E05's structure. The in-flight engine swap must carry governor state. AutoLevel convergence is unverified (R3.2).
+- **Done when.** Block sizes 64–4096: integrated LUFS spread ≤ 0.05 LU with governed macros. Stationary programme: sag ≤ 1 dB, settled within 3 s, oscillation ≤ 0.2 dB. Loudness 100: residual under budget within 3 s. Boost 100 + Loudness 100 over 3 minutes: PLR ≥ 8 dB, LRA ≥ 6 LU. All Music macros at 100 on 50 Hz: THD+N ≤ 3 % at Normal, unchanged at Off. Scale and reason asserted in CLI `--json` tests.
+- **Evidence.** [Protection.cpp][PR] `SafetyGovernor::update(limiterGrDb, distortionDb)`, `kMinScale`; [Protection.h][PRh] budgets −6 dB GR / −30 dB THD+N; [LoudnessMaximizer.cpp][LM] window GR; [MacroMap.cpp][MM] `governed` flags; [TRACEABILITY Known gaps][TR-gaps] R3.5.
+
+<a id="e07"></a>
+#### E07 · High-frequency harshness control: post-enhancement de-ess/de-harsh guard, level-relative presence, tonal-balance governor
+
+*Audio quality · benefit 4 · difficulty High · 5–6 engineer-weeks*
+
+- **What.** A "Smoothness" de-esser/de-harsh stage (split-band detection over 4.5–10 kHz, threshold relative to broadband) in a second, post-enhancement `DynamicEq` instance after Clarity and the Saturator and before the Compressor and Maximizer, with depth scaled by Clarity, Boost and Detail. Presence becomes relative to programme balance (3 kHz against 200 Hz–1 kHz and 6–10 kHz) with 2–3 centre choices. A tonal-balance guard in Protection tracks the long-term relative 1/3-octave spectrum and scales back ungoverned presence, air and upward lifts, with a brightness meter. Gaming gets only a light de-harsh guard.
+- **Why.** Music: Boost + Clarity raises sibilance, loud masters get no presence while quiet ones get +6 dB, and the result is fatiguing, the classic complaint against FxSound/Boom-style enhancers. Gaming: the detail stack lifts 2–5 kHz on beds and nothing reacts.
+- **Expected benefit.** Stops sibilance/voice ratio rising (+2.1 dB at `-b 100`, +3.6 dB with Clarity 100, +4.6 dB at +8 dB input; a 7 kHz CutAbove band reverses it to −1.9 dB) and makes presence independent of mastering level (+5.7 dB at −45 dBFS against +0.9 dB at −12 dBFS). The gaming evidence is overstated: on −30 dBFS pink with Gaming, Boost 100 and all macros 100, the 2–5 kHz tilt against the mids is only +4.0 dB; most of the "+12.2 dB" is level, not brightness. "Presence ungoverned" is a documented design choice, not a TRACEABILITY gap.
+- **Approach.** (1) A new slot after `SSat` in `SlotIndex`; move the Music de-harsh mode band out of the pre-enhancement DynEq (`configureModeBands`). The upward compressor in `SComp` still follows, so detection must be relative. (2) Relative detection as the de-mud stage already does (`kDeMudRelativeDb`), with new governed MacroMap entries. (3) Replace `kPresenceThresholdDb −18` in `presenceGainDb()` with band followers; ship together with (1). (4) The tonal guard acts only on ungoverned macro lifts (presence, air, M5 voice band), never on the user's parametric EQ. (5) Brightness meter in `MeterBus`.
+- **Depends on.** The in-flight engine swap (a new slot changes `kNumSlots`). [E06](#e06)'s governor framework. [E04](#e04)'s HF band and [E08](#e08)'s air rebuild add brightness the guard must see.
+- **Done when.** Sung vocal at Boost 100 + Clarity 100: sibilance/voice ≤ +0.5 dB against bypass (≤ +1 dB at +8 dB input). Pink at −45 and −12 dBFS: presence lifts within 1.5 dB. Gaming full stack: 2–5 kHz lift minus 200 Hz–1 kHz lift ≤ +2 dB (today +4.0). The "gaming presets keep positional cues" test passes. Smoothness 0 is bit-exact. A 30-minute fatigue session on bright pop/rock at Boost 70 + Clarity 70.
+- **Evidence.** [ProcessingChain.h][PCh] `SlotIndex`; [ProcessingChain.cpp][PC] `configureModeBands` (Music de-harsh is a single 3.5 kHz bell before brightening); [ClarityEnhancer.cpp][CE] `presenceGainDb`, `kPresenceThresholdDb`; [MacroMap.cpp][MM] `governed=false` on presence and air.
+
+<a id="e10"></a>
+#### E10 · Signal hygiene: rate-aware anti-aliasing, ultrasonic band-limiting, DC blocker, and garbage-input sanitising
+
+*Audio quality · benefit 4 · difficulty Medium · Phase 1 4–6 days, total 4–6 engineer-weeks*
+
+- **What.** A residual-path DC high-pass after every nonlinear stage; per-sample input sanitising (non-finite and finite values above +24 dBFS) at the strip input and in each capture FIFO, with contaminated blocks hidden from control loops. Oversampling chosen by profile and rate with ≥ 100 dB half-band stopbands, or first-order ADAA in Low Latency. Band-limit harmonic residuals at 20–22 kHz at 88.2 kHz and above. A chain alias/DC/ultrasonic test matrix.
+- **Why.** Music: Warmth and Boost add inharmonic aliases and steady DC on the headphone driver. Gaming: one corrupt sample from a game or driver causes seconds of disturbance, a hearing-safety issue.
+- **Expected benefit.** DC: an asymmetric 100 + 200 Hz signal gives −20.9 dBFS output DC at max.drive 12 and −12.3 dBFS at 24 (input −204 dBFS). A single 1e30 sample: about 100 ms of silence, then +6.6 dB for seconds 3–4 and −2.1 dB for 5–6, lasting at least 4 s. Aliases: Warmth 100 at 44.1 kHz −44.6 dBc, sat.drive 24 −16.8 dBc (the saturator runs 2x Low in Balanced and Low Latency); FabFilter/Ozone-class tools stay below −90 dBc. At 192 kHz, 20–96 kHz holds −22.2 dB of total energy with all macros. Correction: NaN handling is better than claimed (240 ms of disturbance, no lasting change), because `resetSignalState()` does not reset AutoLevel, AutoDrive, the governor or LoudnessMatch.
+- **Approach.** (1) y = x + HP₅Hz(clip(x) − x), double state, in the maximizer clipper, Saturator, bass harmonics and air exciter (matching the delta-oversampling design of `Oversampler.h`). (2) Keep the non-finite block drop; additionally clamp and count |x| > 15.85 and set a per-block "contaminated" flag that AutoLevel, AutoDrive, governor detectors and LoudnessMatch skip. Sanitise in `DriftCompensatedFifo::push`. On Linux apps are mixed inside PipeWire before Flubsound Pro sees them, so cross-app NaN cannot be prevented there; document it. (3) Table keyed on (profile, rate): Quality/Balanced 4x with a redesigned ≥ 100 dB stage at 44.1/48 kHz, 2x at 88.2/96, 1x + residual LP22k at ≥ 176.4; Low Latency 2x + ADAA on Tape/Tube/Digital. Only go to 8x if 4x misses −70 dBc (`Oversampler::prepare` accepts only 1, 2, 4 today). (4) New `tests/test_signal_hygiene.cpp`.
+- **Depends on.** None for Phase 1. Phase 2 stays inside the [01 §5][01-5] budget, re-checks the governor's THD+N calibration, and relies on the in-flight engine swap for live profile changes.
+- **Done when.** DC at max.drive 24 ≤ −60 dBFS in every profile. The 1e30 spike disturbs ≤ 50 ms above −60 dBFS and changes level by ≤ 0.3 dB after 100 ms. The NaN burst does not regress. Worst in-band inharmonic ≤ −70 dBc (Quality/Balanced) and ≤ −60 dBc (Low Latency) for 1/5/7/10 kHz sines at extreme settings at 44.1/48/96/192 kHz. At 192 kHz, 22–96 kHz energy ≤ −60 dB. Realtime factor drops ≤ 25 %; [01 §5.1][01-51] table updated from measured values.
+- **Evidence.** [ProcessingChain.cpp][PC] `prepare()` (`saturator.setOversampling(2, Low)`), non-finite guard in `process()`; [test_saturator.cpp][T-sat] tests only 4x HQ; [Saturator.cpp][SAT] (only DC blocker is the Tube HP); [Oversampler.cpp][OS] `prepare`, Kaiser β 4.5; [08 B3][08-B3], [08 B5][08-B5].
+
+<a id="e12"></a>
+#### E12 · Headphone stereo imaging for music: virtual speakers, a proper crossfeed, and a centre-safe imager
+
+*Music · benefit 4 · difficulty High · Phase A 3–4 weeks; total 12–18 engineer-weeks · Ambitious*
+
+- **What.** Phase A: an energy-preserving L/R crossfeed with correct ITD (0.25–0.3 ms), head shadow and near-ear compensation, with bs2b and Meier presets (the current M/S shelf becomes "Mono-safe"); "Space" rebuilt as a band-weighted decorrelator with bounded ILD; width above 1 made frequency-dependent so it never writes strong anti-phase into the far ear. Phase B: "Virtual Speakers" for stereo strips using the virtualiser's existing Stereo layout (±30°), with an FDN room, diffuse-field EQ, phantom-centre handling, loudness match and headphone gating. Phase C: a partitioned convolver with BRIR/SOFA loading.
+- **Why.** Nearly all music is stereo and stays inside the head. Crossfeed narrows the bass rather than externalising, Space smears centred vocals, and width > 1 collapses hard-panned ILD. Externalisation is the main selling point of Dolby Atmos for Headphones, Waves Nx, Boom 3D and SoundID Virtual Monitoring.
+- **Expected benefit.** (A) Certain and cheap: removes three defects that harm stereo music today (crossfeed interaural delay 0.24 *samples*; up to 9.3 dB ILD on a centred impulse with space = 1; width 2 puts the far ear at −6.0 dB anti-phase). (B) Uncertain: the only renderer is a Brown-Duda sphere with first-order shadow, a rear shelf and 6 early taps, and no pinna cues. Frontal externalisation will be weak and front/back confusion likely. Waves Nx, SoundID and Dolby compete on data this model lacks, so Phase B is judged by a panel before it ships default-on.
+- **Approach.** Phase A: far-ear head-shadow LP (bs2b 700 Hz / 4.5 dB, Meier 650 Hz / 9.5 dB), fractional delay with the virtualiser's 3rd-order Lagrange, near-ear compensation for a flat L+R power sum; complementary velvet-noise decorrelators off below 300 Hz and −6 dB at 1–4 kHz with an ILD limiter on the correlated part; width > 1 only above `spatial.lowCut` with an S/M cap plus decorrelation (the STFT pan-index remap only in Quality, or dropped). Phase B: a `virt.stereo` key makes `binaural` true on stereo strips (no structural prepare needed); 16-line Hadamard FDN; diffuse-field EQ from the sphere model; EQ on M with the inverse of the averaged ±30° comb; the M2 Width macro drives room width and DRR on headphone output. Phase C: shared partitioned convolver ([E29](#e29)).
+- **Depends on.** Phase A: nothing. Phase B: a manual "output is headphones" setting (DeviceProfiles is family-level, [E16](#e16)) and the listening panel. Phase C: the convolver. Re-run preset intent checks ([E14](#e14)) after crossfeed/Space change.
+- **Done when.** Crossfeed ITD 0.22–0.30 ms by cross-correlation; L+R power flat within 0.5 dB; Space on a centred impulse ≤ 2 dB ILD per 1/3 octave; width 2: far-ear anti-phase ≤ −20 dB below lowCut, mono-sum loss ≤ 3 dB; no toggle click. Phase B: centred-vocal spectrum flat within ±1.5 dB (100 Hz–10 kHz), loudness match ≤ 0.3 LU. Go/no-go: blind MUSHRA (≥ 12 listeners, 6 tracks) against plain stereo and one commercial reference.
+- **Evidence.** [ProcessingChain.cpp][PC] `binaural = config.inputChannels > 2 && ...`; [test_virtualizer.cpp][T-virt] "stereo layout renders two mirrored virtual speakers" (unreachable in the product); [StereoSpatializer.cpp][SS] `kCrossfeedHz 700`, `kCrossfeedScale 0.6`, `kAllPassG 0.5`; [HeadphoneVirtualizer.h][HVh] renderer description; [08 C3][08-C3].
+
+<a id="e14"></a>
+#### E14 · Music voicing: a real Warmth macro, differentiated genre and device-class presets, and verified preset intent
+
+*Presets · benefit 4 · difficulty Medium · 4–7 engineer-weeks*
+
+- **What.** Remap Warmth to a tonal tilt (about +1.5 dB low shelf at 200 Hz, −1.5 dB high shelf at 7 kHz at 100 %) plus mostly 2nd-order saturation capped at about 0.5 % THD, with automatic level compensation; keep Tape grit for Lo-Fi and Warm Vinyl. Give each preset a measurable intent block (tonal envelope, LRA-loss bound, loudness offset, max THD) asserted in tests. Add rock/metal, orchestral/film, acoustic, R&B/vocal and electronic/ambient presets. Run the planned listening-panel voicing pass.
+- **Why.** Warmth at mid-knob is 3 % odd-order distortion. Presets are hard to tell apart tonally, and nothing verifies that a preset does what its description says.
+- **Expected benefit.** Warmth 50 on a −6 dBFS 1 kHz sine (max off): H2 −146 dB, H3 −30.5 dB, THD+N 2.99 %. Switching to Tube alone does not fix it (Warmth 50: H2 −29.4 / H3 −33.7 dB, 3.96 %; Warmth 100: 9.84 %), so the M5 drive range (`SatDriveDb 9`) must shrink by 10–15 dB and the audible warmth must come from the tilt. The differentiation claim is weaker than first stated: presets differ in dynamics, spatial and macros, not only tone, and Classical & Jazz Dynamic keeps LRA 20.19 LU on a −17.3 LUFS classical programme (it loses 1.35 LU only on loud-pop masters). Intent tests are still needed: nothing checks LRA, THD or tone today.
+- **Approach.** (1) Tilt via the spare ParametricEq slots 10–15 (`kMaxBands 16`), which conflicts with [E09](#e09), or a dedicated 2-section tilt; decide ownership first. Add a MacroMap "override" row kind for choice values, so Warmth selects Tube only when the user has not set `sat.type`, with a visible UI indication. Calibrate drive open-loop (THD ≤ 0.5 %, H2 > H3 at 100 %); do not close the loop on `DistortionEstimator`, which would make tone pump with the programme. (2) Optional `intent` object in preset JSON, asserted through the offline renderer; no pairwise "presets must differ by 1 dB" test. (3) Genre presets with intent blocks; device classes belong to [E15](#e15). (4) Panel per roadmap 1.4 (8 listeners, 40 tracks, 6 games), results in docs/10.
+- **Depends on.** [E11](#e11) (LRA bounds on loud masters), the E09 slot decision, [E12](#e12) Phase A (re-voices crossfeed and Space), a panel owner.
+- **Done when.** Warmth 50 and 100 at −6 dBFS 1 kHz: THD+N ≤ 0.5 %, H2 > H3, no inharmonic above −80 dBc; pink transfer +1.5 ± 0.3 dB at 200 Hz, −1.5 ± 0.3 dB at 10 kHz; toggle loudness change ≤ 0.3 LU. `test_factory_presets` asserts every intent block. Classical & Jazz loses ≤ 0.3 LU LRA on a −10.5 LUFS master with E11 on. Panel perception matches each preset's description.
+- **Evidence.** [MacroMap.cpp][MM] `kMusicTable` M5 (`SatDriveDb 9`, Tape); [test_factory_presets.cpp][T-fp] (completeness, keys, ceiling, "does not mute" only); [factory presets][FAC]; roadmap 1.4 in [07][07].
+
+<a id="e21"></a>
+#### E21 · Two-stage Smart Volume and Startle Guard (replacing AutoLevel in the night and competitive presets)
+
+*Gaming · benefit 4 · difficulty High · slice 3–5 days, total 4–6 engineer-weeks · Quick win*
+
+- **What.** (1) A slow leveller with an upper gate: blocks more than about 8 LU above the slow measure are left out of integration, quiet-context upward gain is capped (+6 dB), and downward adaptation freezes during short events. (2) A Startle Guard: a momentary-loudness cap at "slow reference + N LU" (Shield +6, Balanced +10, Off) implemented as a sidechain gain computer inside `TruePeakLimiter` so it adds no latency, with a sidechain weighting that does not duck the 2–5 kHz cue band. (3) A user "Dynamic range" control (10/15/20 LU), a multiband night stage, and corrected "hearing protection" wording in Tournament Clean.
+- **Why.** In Night Mode an explosion arrives far above ambience and footsteps then sit several dB down for seconds. A night mode that startles defeats its purpose. Music: Late Night misses its −20 LUFS target (−22.1 / −23.1 LUFS).
+- **Expected benefit.** The defect is confined to presets that enable Auto Level (Night Mode, Late Night, Podcast & Voice; the parameter default is off). Measured on an ambush scene (12 s of −50 dBFS ambience, then −12 dBFS gunfire): Competitive FPS has no gap (+3.0 dB before and after); Night Mode lifts the bed +16.6 dB, drops the event −5.2 dB, then leaves a 6.6 dB hole not recovered after 6 s. On competitive presets the full 38 dB contrast passes through (event peak −1.1 dBFS), so the guard is a comfort feature there, as in Dolby Volume, Sonar and Nahimic.
+- **Approach.** Slice in AutoLevel only: a 400 ms K-weighted momentary measure beside the 3 s one; freeze integration while momentary > slow + 8 LU; cap upward gain at +6 dB (today ±12); faster upward slew after a freeze (e.g. 3 dB/s for 2 s; today 1 dB/s); retune Night Mode's target. Then the guard in the limiter sidechain, AutoDrive and AutoLevel time constants separated ≥ 5x or merged, the multiband night stage and the Dynamic range control (which absorbs [E20](#e20)'s Tame). Run per strip before the MixEngine sum.
+- **Depends on.** [E19](#e19) (cue band excluded from the sidechain), [E20](#e20), [E22](#e22) (per-strip placement). Night Mode, Late Night and Podcast & Voice need retuning. The `TruePeakLimiter` API change touches every strip and the master.
+- **Done when.** Night Mode: ambience lift ≤ +6 dB and ambience 1 s after the event within 1 dB of its pre-event value. Competitive presets with the guard on: event minus ambience ≤ N + 1 LU, step band within 1 dB of its pre-event gain after 1 s. First combat event after 10 s of quiet ≤ steady-state events + 1 dB. Late Night within ±1 LU of −20 LUFS. Low Latency chain latency unchanged. 10 minutes of mixed programme with no leveller oscillation above 1 dB.
+- **Evidence.** [Protection.cpp][PR] `AutoLevel::process` (`slew(gainDb, desired, 1.0f, 4.0f, dt)`, ±12 dB clamp, 3000 ms gated loudness, open loop on the input); [Parameters.cpp][PAR] Auto Level default off; `gaming-night-mode.json`, `music-late-night-low-volume.json`, `gaming-tournament-clean.json` in [presets/factory][FAC]; [08 C5][08-C5].
+
+<a id="e32"></a>
+#### E32 · Listening-level awareness: endpoint volume and device sensitivity driving ISO 226 loudness compensation and a hearing guard
+
+*Adaptive & intelligent · benefit 4 · difficulty High · wording fix hours; relative contour 4–5 weeks; absolute SPL + dosimeter 5–6 weeks*
+
+- **What.** (a) Correct the two false preset descriptions now. (b) Read endpoint volume (WASAPI `IAudioEndpointVolume`, CoreAudio `kAudioDevicePropertyVolumeDecibels`, PipeWire/Pulse node volume) and drive an ISO 226:2023 contour relative to a user-set reference volume, inside the governor and headroom accounting, with volume-aware bass protection; it replaces Late Night's static contour. (c) Absolute SPL from device sensitivity/impedance and optional calibration, feeding an ITU-T H.870 / WHO-style dosimeter (A-weighted, rolling 7-day dose, notifications) and an optional "Max listening level" loudness cap that also limits Boost and upward-compression maxima, with a 75 dBA sensitive/kids mode.
+- **Why.** Music: at late-night levels 40–60 Hz needs 10–15 dB more to sound balanced, while bass protection withdraws boost exactly when the ear needs it. Gaming and safety: a product built around Boost and upward compression has no SPL or dose awareness, and a −1 dBTP ceiling can mean more than 100 dB SPL.
+- **Expected benefit.** The most audible music improvement in this group, and the fix for false shipped wording: `music-late-night-low-volume.json` promises "a loudness contour (adaptive bass lift...)" but is a static bass +3 / eq.9 +1.5 dB (tilt +1.8 / +1.7 dB at −14 and −34 dBFS RMS); `gaming-tournament-clean.json` calls a −1 dBTP limiter "hearing protection". Boost 100 adds +5.45 LU with no warning. The relative mode delivers most of the value without SPL accuracy. Hardware dials on many USB and wireless headsets are invisible to the OS, so uncalibrated SPL error of 10–20 dB is realistic.
+- **Approach.** Ship relative mode first. Measure digital level at the master output after strip faders, so only the endpoint and hardware dial remain unknown. Budget the contour against governor headroom and the bass-protection cap. An optional "volume takeover" (hold the OS endpoint, attenuate after the master limiter) must be opt-in, since it breaks the Windows volume flyout and media keys unless mirrored. The dosimeter shows "uncalibrated" rather than a number without a profile or calibration, and never claims H.870 compliance.
+- **Depends on.** PlatformServices on 3 OSes; a sensitivity field in `DeviceProfiles.h`; the device lab (roadmap 1.10, [10 §5][10-5]); roadmap 2.11 (the existing hearing-guard slot); the in-flight UI work.
+- **Done when.** ISO 226:2023 within 0.1 dB of the tables (20–100 phon). Contour gain at 50 Hz tracks endpoint change within 1 dB from 0 to −40 dB, with no step on ramps. Limiter GR < 1 dB on pink + contour at −30 dB endpoint volume. Synthetic-clock dose matches a hand computation. The cap never exceeds its A-weighted Leq over 5 s. Coupler error ≤ 3 dB on 5 calibrated headsets. A 10-listener bass-balance test at 50/60/70/80 phon against today's Late Night.
+- **Evidence.** No `IAudioEndpointVolume`, ISO 226, SPL or dose code in `core/` or `app/Source`; [03 §11.9][03-119] "No automatic loudness compensation"; [DeviceProfiles.h][DPh] (no sensitivity field); [MeterBus.h][MB] (dBFS/LUFS only); [08 F][08-F].
+
+<a id="e37"></a>
+#### E37 · Fair comparison everywhere: loudness-matched A/B, preset audition, module and virt toggles, and a blind mode
+
+*UX & workflow · benefit 4 · difficulty Medium · slice 3–5 days, total 4–6 engineer-weeks · Quick win*
+
+- **What.** Replace the capped, raise-only bypass match with a `ComparisonMatcher` that only attenuates the louder side (processed or bypass, bank A/B, current or previewed preset, module on/off, virt on/off), acquires in about 1 s and freezes during a comparison. Keep per-bank and per-preset LUFS offsets so a flip is right from the first second. Add a true-original tap before input gain and AutoLevel, "Processed +x LU" on Bypass, a "matched ±x LU" indicator, and a blind A/B/X mode.
+- **Why.** Every comparison favours the louder setting: Boost 100 is +5.45 LU over bypass on a normal master, presets span 4–7 LU, and A/B is not matched at all. That drives "louder = better" choices and the fatigue risk the roadmap names.
+- **Expected benefit.** Fixes a shipped feature that does not do what its label says: the "loudness-matched" bypass is 3.10 LU too quiet on a dense −16 LUFS signal (−11.82 against −8.72 LUFS) and 1.91 LU too quiet on a peaky kick signal, because the dry reference is capped at the ceiling and also limited by `dryLimiter`. A/B is a bare bank flip. The benefit is indirect (better choices), hence 4 rather than 5.
+- **Approach.** Phase 1: `wetTrimDb ≤ 0`, `dryTrimDb ≤ 0`, applied only while Bypass or Compare is armed; fast acquire, then freeze the trim for the comparison (continuous tracking audibly rides the reference level). Phase 2: per-bank offsets from `inShortTermLufs` / `shortTermLufs`, applied instantly on toggle and then refined. Phase 3: true-original tap and continuously running per-slot K-weighted probes, so hold-to-bypass knows its delta when the hold starts. Phase 4: UI and ABX. The "latency.profile written into one bank" bug is fixed once, in [E40](#e40).
+- **Depends on.** [E40](#e40)'s quick slice first (an A/B flip must never re-prepare the engine). Rebase onto the in-flight engine swap.
+- **Done when.** `process --set bypass=on bypass.matched=on` gap ≤ 0.5 LU on the dense and peaky signals, with the dry path ≤ ceiling. New tests in `tests/test_protection_gaps.cpp` with the cap engaged: within 0.5 LU and trim variance ≤ 0.2 dB during a 10 s frozen comparison. Two presets 4 LU apart are matched within 1 LU 1 s after a flip, and `needsReprepare()` stays false. RTSan with 4 strips and probes. A matched ABX of Boost 0 against Boost 100 shows no level-driven preference.
+- **Evidence.** [ProcessingChain.cpp][PC] `matchDb = min(matchDb, ceiling - dryPeakHold)` (dry tap after AutoLevel); [Protection.cpp][PR] `LoudnessMatch::getDryGainDb` (3 dB/s slew, ±12 dB); [EngineController.cpp][EC] `setActiveBank` (plain flip); [03 §14.6][03-146] (1.2–1.5 LU shortfall); TRACEABILITY R2.10 note.
+
+<a id="e39"></a>
+#### E39 · Progressive disclosure: Simple default view, plain-language tooltips, relevance-ordered rack, compact mode and a lower minimum size
+
+*UX & workflow · benefit 4 · difficulty Medium · quick slice < 1 week, total 4–6 engineer-weeks*
+
+- **What.** "Simple" as the default view (Boost, 5 macros, preset and headphone picker, Compare/Bypass, one loudness meter), with the rack as "Advanced". A one-sentence "what you will hear" hint per parameter, per mode where macros differ. Rack cards ordered by mode relevance, with modules the active profile disables hidden (the Noise Gate is currently the first, greyed card outside Quality). A layout reflow below 1100 px and a minimum of about 800x560. A compact tray flyout (Boost, preset stepper, bypass) instead of an always-on-top window.
+- **Why.** A listener faces the same 195-parameter side-scrolling rack as an engineer. On a 1366x768 laptop at 125 % scaling (1093x614 effective) the 1100x700 minimum window does not fit, and only 2 of 10 cards are visible at minimum size.
+- **Expected benefit.** The Simple view and laptop fit are the value, a hard usability fix for laptop gamers. An always-on-top compact window has little gaming value (exclusive and borderless fullscreen hide it; hotkeys already give feedback), so its effort goes to the reflow.
+- **Approach.** Hints in a keyed data file (e.g. `presets/param-hints.json` keyed by `param::Info::key`, with a mode dimension), not English strings in core `param::Info`, which would make localisation ([E41](#e41)) harder; `flubsound-cli params --json` can read the table. A per-mode relevance table in `ModuleRack.cpp`; the gate card hidden unless `gateInChain`. Breakpoints in `MainComponent::resized()` with a header overflow menu. Lower `kMinWidth`/`kMinHeight` only after the layout test passes. Persist the last view rather than guessing from "has user presets".
+- **Depends on.** The in-flight UI scale / high-contrast work must merge first (same sizing code). [E37](#e37) for Compare semantics, [E38](#e38) for active-now chips, [E41](#e41) for where hints live.
+- **Done when.** Screenshots at 800x560, 1093x614 and 1100x700 at scales 1.0 and 1.25; a layout test asserts no child exceeds the window and Simple controls are visible. Every parameter key has a hint ≤ 140 characters per relevant mode. The gate card is absent outside Quality. Moderated test with 6–8 non-experts ("make footsteps louder", "make it warmer") completed without opening Advanced; SUS compared with the current build.
+- **Evidence.** [ModuleCard.cpp][MC] tooltip = parameter name only (~L169/174); [MainWindow.h][MW] `kMinWidth = 1100, kMinHeight = 700`; [06 §13][06-13]; `screenshot-min-1100x700.png` in [docs/images](images/); `flubsound-cli params --json` count 195.
+
+<a id="e40"></a>
+#### E40 · Preset browser with search, tags, descriptions, device and game suggestions, and hover audition
+
+*Presets · benefit 4 · difficulty Medium · quick slice 3–5 days; browser 2–3 weeks (+1 week audition bank) · Quick win*
+
+- **What.** Quick slice: presets no longer write `latency.profile` (a suggestion prompt instead); the noise gate is in the Quality chain only when used; a per-strip sync group so only strips that share A/V content are padded together. Browser: a popover with search, tag chips, favourites and recents, Factory/User/Device groups, the description pane, "Recommended for <headset>" from `adviceFor`, and loudness-matched audition in a non-persisted third bank.
+- **Why.** Every factory preset ships a paragraph of description and 5–6 tags that the UI never shows. Stepping presets moves latency from 4 ms to 28 ms with a dropout for 5 of 12 music presets.
+- **Expected benefit.** The quick slice is a gaming-latency correctness fix. Measured: Warm Vinyl and Podcast & Voice render at 1352 samples (28.17 ms) in Quality against 192 (4.00 ms) in Balanced and 100 in Low Latency. Because MixEngine pads every strip to the largest strip latency and `loadIntoBank` preserves only `BypassAll`, choosing Warm Vinyl on the Music strip silently delays the Game strip to 28 ms. The browser itself is Medium value.
+- **Approach.** (1) `PresetManager::loadIntoBank` preserves `LatencyProfile` (and `LoudnessMatchBypass`) like `BypassAll`, recording `suggestedProfile` for an [E42](#e42) prompt. (2) `ProcessingChain::prepare` includes the gate only when Quality and `gate.on`; `needsReprepare` learns that `gate.on` is structural in Quality only. Warm Vinyl in Quality then drops to about 328 samples. (3) MixEngine `syncGroup` (also needed by [E35](#e35)). Browser: a CallOutBox searching name, description and tags; no "Recommended for <game>" until the in-flight auto-profile switcher lands. The audition bank never changes latency or mode-structural state and is excluded from state save, plug-in state and A/B copy. Measure aliasing before moving Warm Vinyl / Lo-Fi to Balanced (they lose the Quality 2x HQ saturator).
+- **Depends on.** Quick slice: nothing. Browser: [E37](#e37), [E42](#e42) prompt, [E39](#e39), the in-flight auto profiles. E37's A/B correctness depends on this slice.
+- **Done when.** `process -p "Warm Vinyl" --profile quality --json` reports about 328 samples with the gate off and 1352 with it on. A Music strip in Quality and a Game strip in Low Latency in separate sync groups leave the Game output at chain latency plus master look-ahead (about 100 + 48 samples), not 1352. Loading each of the 24 factory presets leaves `latency.profile` unchanged and `needsReprepare()` false. Audition restores on mouse-out with bank B bit-identical. Users find a "late-night quiet listening" preset in under 20 s.
+- **Evidence.** [PresetManager.cpp][PM] parses description and tags (~L85–87) and `loadIntoBank` (~L238–249); [HeaderBar.cpp][HB] lists names only; [ProcessingChain.cpp][PC] `needsReprepare`, `gateInChain`; [MixEngine.cpp][ME] `build()` padding; [06 §6.1][06-61] "brief dropout".
+
+<a id="e42"></a>
+#### E42 · Real end-to-end latency: a loopback measurement tool and a whole-path Low Latency policy
+
+*Latency & performance · benefit 4 · difficulty High · E42a 4–6 days; total 7–9 engineer-weeks*
+
+- **What.** **E42a** (do first): `latency.profile` becomes app state with a suggestion prompt; padding only within sync groups, with latency reported per strip; look-aheads defined in ms; Quality clamped to Balanced below 32 kHz; totals labelled "estimated" and including the known PipeWire quantum. **E42b**: an adaptive capture-FIFO target (packet jitter p99 + margin, capped at 612). **E42c**: smallest stable device period on Low Latency (IAudioClient3, CoreAudio, ASIO) with xrun step-back. **E42d**: a loopback probe (exponential sweep, cable or mic at the earcup) with results stored per device. Remove the master look-ahead when a single strip is active or strip ceilings guarantee the master ceiling. Get ASIO into CI after a licence check.
+- **Why.** The 10 ms claim is an estimate for an unbuilt driver. Real paths add 12.75 ms (Windows loopback FIFO) or 21.3 ms (PipeWire default) before device buffering. Low Latency saves about 2 ms while costing clipper fidelity, and loading Competitive FPS on the Game strip can leave it at another strip's latency. At Bluetooth hands-free rates Quality reaches lip-sync-breaking latency.
+- **Expected benefit.** The high-value part is E42a. Loading `music-audiophile-subtle` on the Music strip moves the Game strip from 192 or 100 samples to 1352 (28.17 ms instead of 4.00 or 2.08 ms); Quality at 8 kHz is 1152 samples (144 ms), Balanced 92 (11.5 ms). Correction: the UI does not under-report the capture FIFO (`HeaderBar` and `SettingsDialog` add `captureBufferMs`); what is missing is the PipeWire quantum, Bluetooth codec delay and any measurement. Shared-mode loopback delivers about 10 ms packets, so E42b realistically saves 2–4 ms; the structural FIFO fix is [E46](#e46) M2. Most players own no loopback cable or measurement mic, so never gate "Competitive FPS" on a measured result.
+- **Approach.** E42a: save/restore `LatencyProfile` in `loadIntoBank` and call `EngineController::applyLatencyProfile` from the prompt; `StripConfig::syncGroup` in `MixEngine::build` (default: each strip its own group); ms-based look-aheads and the < 32 kHz clamp in `ProcessingChain::prepare`. E42b: fixed-point analysis against the drift controller before shipping, tau ≈ 10 s with hysteresis. E42c: smallest `getAvailableBufferSizes()` ≥ 64, step up after > 2 xruns in 10 s using [E45](#e45)'s histogram. E42d: `LatencyProbe` with `flub::Fft` deconvolution, parabolic peak, median of 10 runs, reject < 30 dB SNR. The `PIPEWIRE_LATENCY` step belongs to [E48](#e48).
+- **Depends on.** The in-flight crossfaded engine swap (click-free profile, padding and buffer changes); [E45](#e45); [E46](#e46) M2; [E48](#e48).
+- **Done when.** Game strip in Low Latency plus a Quality preset on Music reports 100 samples at 48 kHz (today 1352). Loading `music-audiophile-subtle` leaves `LatencyProfile` unchanged and raises the prompt. Quality at 8 and 16 kHz ≤ Balanced; look-ahead ms constant from 44.1 to 192 kHz. Two-strip sum at −1 dBTP without master look-ahead. 8 h FIFO soak at ±200 ppm with no xruns, target below 612 frames and pitch deviation < 1 cent. Probe accurate to ±1 sample offline and within 0.2 ms of RTL Utility on 3 interfaces.
+- **Evidence.** [TRACEABILITY Known gaps][TR-gaps] R1.1, R1.2; [01 §5.3][01-53] (612 frames = 12.75 ms; 1024/48000 = 21.3 ms); [AudioEngineHost.cpp][AEH] `getLatencyInfo()`, `openDevice()` (device-reported only); [PresetManager.cpp][PM] `loadIntoBank`; [MixEngine.cpp][ME] `build()`; [01 §5.1][01-51] master +44/+68 samples; [08 A1][08-A1].
+
+<a id="e47"></a>
+#### E47 · Routing correctness and recovery: honest Automatic method, dry+wet doubling guard, route journal
+
+*Stability & platform · benefit 4 · difficulty Medium · E47a 2–3 days; total 2.5–3.5 engineer-weeks*
+
+- **What.** **E47a**: split the Windows router's capability into `canList` and `canMoveEndpoint`, so without `FLUB_ENABLE_UNDOCUMENTED_ROUTING` Automatic resolves to process capture (Windows build 20348+) or to Disabled with an explanation; add an "unsupported router" test and a red "No apps are being processed" state. Then: block a process capture whose app renders to the device Flubsound Pro outputs to, with an honest fix (open `ms-settings:apps-volume`, list spare endpoints) and an amber "original also audible" badge. A route journal written atomically before every move, restored at startup (including clearing WirePlumber restore-stream entries), with a simulated-crash test.
+- **Why.** Every endpoint move fails in Automatic mode today. The working capture path comb-filters music and smears footstep transients by playing dry and wet about 12.75 ms apart (notches at about 78 Hz spacing). A crash can leave games silent in `flubsound_game`, the known Sonar and Wave Link failure.
+- **Expected benefit.** A correctness fix confirmed in code: Automatic is the default, `isSupported()` returns true, `setAppEndpoint` fails without the opt-in define, and `AppRouting::getEffectiveMethod` prefers EndpointRouting whenever `isSupported()`. After the fix, most Windows users get an honest "not available, here is why" rather than new processed audio, which is still better than the current failure modes. On Linux the journal fixes a severe case: WirePlumber remembers the move and routes are undone only in `AppRouting::shutdown`.
+- **Approach.** `isEndpointRoutingSupported` uses `canMoveEndpoint`. Same-endpoint guard compares the session's `currentEndpointId` with the engine output's MMDevice ID. Treat an `ISimpleAudioVolume` session-mute trick as a gated experiment: ship only if a runtime self-test shows loopback capture survives the mute. Journal keyed on pid + start time + exe path, covering Linux pactl/metadata moves, the undocumented Windows adapter and later [E46](#e46) endpoints.
+- **Depends on.** Nothing for E47a. The in-flight auto-profile switching must use the corrected effective method. [E48](#e48)'s headless PipeWire CI hosts the Linux crash test.
+- **Done when.** With an unsupported router, Automatic gives ProcessCapture (fake build ≥ 20348) or Disabled with a reason, never EndpointRouting. The red state appears with zero live routes. A capture on the output's endpoint is blocked; another endpoint is allowed. Simulated crash (TerminateProcess / SIGKILL) and restart restore the previous endpoint. Linux: a `pw-play` stream moved to `flubsound_game`, `kill -9`, restart: the stream returns to the default sink and WirePlumber does not re-apply the route.
+- **Evidence.** [PlatformServices_win.cpp][PSW] `WinAppAudioRouter::isSupported()` (~L1071), `setAppEndpoint` `#else` branch; [AppRouting.cpp][AR] `getEffectiveMethod` (~L93–107), restore only on clean shutdown (~L60–83); [01 §4.6][01-46]; [PlatformServices_linux.cpp][PSL] restore-stream comment (~L2040); [06 §8][06-8]; [08 D7][08-D7].
+
+<a id="e51"></a>
+#### E51 · Device-handling robustness: feedback-loop guard, stable endpoint IDs, auto-recovery, safe fallback profile, visible errors
+
+*Stability & platform · benefit 4 · difficulty Medium · Phase A 4–6 days; total 4.5–6 engineer-weeks · Quick win*
+
+- **What.** Phase A: never let the output become the loopback partner of the current input (CABLE Input/Output, Voicemeeter In/Out and AUX, BlackHole, `flubsound_*` and `.monitor`); ramp the output to silence, reset protection state, and show a banner that surfaces `getLastDeviceError()` with Retry, Choose output and Open sound settings; show "--" instead of a stale latency while offline. Later: track the preferred output by stable ID, "follow system default (excluding virtual devices)", event-driven hot-plug (`IMMNotificationClient`, CoreAudio and PipeWire listeners) with backoff and sleep/resume handling, and a safe-speaker profile (virtualiser off, bass ≤ +3 dB, −6 dB trim) on unplanned fallback to speakers.
+- **Why.** In the Windows cable setup the system default output *is* CABLE Input. When a wireless headset drops, JUCE's `audioDeviceListChanged` re-initialises with `selectDefaultDeviceOnFailure = true`, so the output becomes CABLE Input while the input is still CABLE Output: a closed loop through Boost. Errors show "offline" next to a fake 5.4 ms latency.
+- **Expected benefit.** Affects most wireless-headset gamers. The claim that the loop "plays at −1 dBTP when the headset returns" is unproven, but the demonstrated harms are: anything recording CABLE Output (OBS, Discord) captures a howl; governor, AutoLevel and overload watchdog accumulate step-downs during the loop, leaving the returning headset ducked; on non-cable setups, headphone voicing (virtualiser, bass) is sent to laptop speakers.
+- **Approach.** `isLoopbackPair(input, output)` from a pair table extending `looksLikeLoopbackDevice`, checked in the device-manager change callback and again after JUCE's own `initialiseFromXML(..., true)`. Stronger: pass `selectDefaultDeviceOnFailure = false` in `openDevice` and select explicitly (preferred device, else default excluding virtual/loopback devices, else silence + banner), which also covers the Linux `flubsound_*` default-sink case. Stable IDs share [E52](#e52)'s settings migration. Provide an override for false positives.
+- **Depends on.** Phase A: nothing. The in-flight engine swap for click-free switches. Real Windows validation needs [E53](#e53) step 0 and [10 §5][10-5] test 5.
+- **Done when.** Fake-device test of the exact real-world case (preferred output removed; input "CABLE Output"; default "CABLE Input"): output silent within one ramp, banner text shown, governor and AutoLevel state unchanged when the headset returns. Rename, callback error, exclusive-mode busy and fallback-to-speakers cases. Device lab: 20 power cycles of a 2.4 GHz headset with OBS recording CABLE Output show no howl and the returning level within 0.5 dB.
+- **Evidence.** [AudioEngineHost.cpp][AEH] `openDevice()` `initialise(..., true)`; [EngineController.cpp][EC] `trackPreferredOutput` (name strings, 5 s rescan), `lastDeviceError` with no retry or UI consumer; [HeaderBar.cpp][HB] "offline"; [FlubsoundApplication.cpp][FA] (prints the error to stdout only); [08 D3][08-D3].
+
+<a id="e56"></a>
+#### E56 · In-game control surface and automation API: correct hotkey target, OSD, more actions, local API, Stream Deck and MIDI
+
+*UX & workflow · benefit 4 · difficulty Medium · Phase A 3–5 days; total 7–9 engineer-weeks · Quick win*
+
+- **What.** Phase A: hotkeys target the auto-profile rule's strip (once that lands), otherwise a user-chosen `hotkeyStrip` (default Game), never the GUI selection; new actions Focus (a latched Footsteps override), ChatMix ±, Night and Bypass. Then: a click-through, non-activating OSD fading after about 1.2 s, with earcons for exclusive fullscreen; command-line forwarding to the running instance and `flubsound-cli ctl`; a localhost, token- and Origin-checked JSON-RPC over WebSocket; MIDI/OSC learn; a Stream Deck plug-in.
+- **Why.** Boost+ mid-match raises the Music strip if Music was last clicked. Feedback goes to tray toasts that Focus Assist hides and that JUCE does not implement on Linux or macOS ("// xxx Not implemented!"). There is no footstep or ChatMix toggle. Streamers expect Stream Deck and MIDI control (Sonar, Voicemeeter).
+- **Expected benefit.** The hotkey fix, Focus, ChatMix and OSD carry the benefit. The strip-explicit overloads already exist (`int strip = -1`), so the target fix is about a day. The API, Stream Deck and MIDI serve streamers, a narrower group (benefit 2–3 on their own).
+- **Approach.** `AppSettings.hotkeyStrip`; `HotkeyManager::perform` passes an explicit target; feedback names the strip. Focus is a transient Macro1 override through the smoothed parameter path. ChatMix is one balance value applied to Game and Chat strip gains in MixEngine. On Windows keep momentary (hold) actions off by default: `RegisterHotKey` has no key-up and a `WH_KEYBOARD_LL` hook is anti-cheat-sensitive. OSD with `WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED`, measured with PresentMon because a topmost layered window can knock a borderless game out of independent flip. The WebSocket server binds loopback only and checks token and Origin (DNS rebinding, browser CSRF).
+- **Depends on.** Phase A: nothing. [E52](#e52) UUIDs for LoadPreset and Stream Deck buttons; [E55](#e55) Tournament mode disables the OSD and hooks; [E53](#e53) step 0 to verify Windows hotkeys; [E54](#e54) to distribute the Stream Deck plug-in.
+- **Done when.** GUI selection = Music, `hotkeyStrip` = Game: BoostUp changes only Game's Boost and the feedback names Game. Focus toggles Macro1 to 1 and back. ChatMix moves Game and Chat gains in opposite directions only. PresentMon over borderless CS2 and Apex shows no presentation-mode change or < 1 ms added frame time and no focus loss. API rejects bad token and Origin; 1 h of 30 Hz meter streaming with no audio-thread allocation under RTSan.
+- **Evidence.** [HotkeyManager.cpp][HK] `perform` uses `getSelectedStrip()` (~L189–217); [AppSettings.h][AS] `HotkeyAction` (6 actions); [FlubsoundApplication.cpp][FA] `trayIcon->notify`, `anotherInstanceStarted` ignores the command line; JUCE `juce_SystemTrayIcon_linux.cpp` / `_mac.cpp` "Not implemented"; [09 §4][09-4].
+
+<a id="e59"></a>
+#### E59 · Sound-quality regression suite with numeric targets (not only safety)
+
+*Stability & platform · benefit 4 · difficulty Medium · slice 1 week; total 6–9 engineer-weeks*
+
+- **What.** A `Quality:` test group and matching CLI scripts with per-profile, per-rate thresholds: two-tone and multi-tone IMD for the harmonics generator; kick alignment (centroid shift < 2 ms, first-10 ms loss < 1 dB); bass-protection onset overshoot; sine THD+N at 40/60/100 Hz against 3/6/9 dB GR; pink-multitone MTND against output LUFS; a tone-under-kick pumping index; governor drift on stationary programme; sibilance/voice ratio; presence invariance over 30 dB; transient onset/body gain at 60 ms spacing; alias, DC and ultrasonic bounds; LFE presence and level; Music-mode band assertions. CLI `--json` gains governor, GR, clipper, saturator and harmonics statistics.
+- **Why.** All 503 tests pass while the product holds −21.8 dB MTND, dips a tone under kicks, drops the LFE, turns bass chords into IMD and raises sibilance. Tuning changes are assumed, not measured.
+- **Expected benefit.** The precondition for proving any retuning in [E01](#e01)–[E07](#e07), [E19](#e19) and [E21](#e21). The skeptic showed why stimuli and definitions must be pinned: with a 440 Hz tone under 55 Hz kicks, the p95–p5 envelope index is 0.1 dB at Boost 0, 0.4 dB at Boost 50 and 4.1 dB at Boost 100, while max–min is about 13–15 dB, more than half of it *upward* gain between kicks. The earlier "21–22 dB dip" depends on the stimulus, and a "≤ 3 dB" target would nearly pass today on some stimuli and fail badly on others. `DistortionMonitor` already exposes block and smoothed THD and harmonics readings, so part of the telemetry exists.
+- **Approach.** `tests/QualityMetrics.h`, `tests/test_quality.cpp`, `tests/quality_targets.json` pinning stimulus and metric definitions; report p95–p5 and max–min with lift and dip separately. Set thresholds from a transparent reference limiter at the same output LUFS plus a margin, not by guessing. A KNOWN_GAP ratchet in `tests/TestFramework.h` with per-compiler baselines and margins ≥ 0.5 dB. `ChainStats` from existing getters with relaxed atomic max/sum accumulators, added to the `test_rtsan.cpp` static asserts. Nightly full matrix (about 1350 renders, 3–6 min), per-PR subset. `tools/scripts/quality-report.py` for tuning sessions.
+- **Depends on.** Nothing. Must land before the bass-IMD, sibilance, pumping and LFE retuning. [E60](#e60) reuses it.
+- **Done when.** Meta-validation on a pass-through chain with injected artefacts (1 % cubic, 6 dB 2 Hz square gain modulation, 3 ms delay): each metric reports the injected value within ±10 %. Today's values reproduce with the pinned stimuli. THD+N and IMD cross-checked in REW. `render.stats` GR matches a hand computation. Each later fix flips its KNOWN_GAP, and a deliberately regressed build fails the ratchet.
+- **Evidence.** [test_limiter.cpp][T-lim] (24 cases: ceiling, latency, release, allocation, NaN, block size); `test_maximizer.cpp` (safety and telemetry); [test_bass_engine.cpp][T-bass] (single tone only); `test_clarity.cpp`, `test_dynamic_eq.cpp` (no sibilance test); `test_engine.cpp` (ceiling, finite, RMS); [Protection.h][PRh] `DistortionMonitor` getters; TRACEABILITY sub-gaps R2.8, R2.9, R2.10, R3.2.
+
+<a id="e01"></a>
+#### E01 · Fold and calibrate the LFE in every path (downmix, capture FIFO, virtualiser)
+
+*Audio quality · benefit 3 · difficulty Medium · 4–6 engineer-days · Quick win*
+
+- **What.** Stop discarding the LFE: add it to the BS.775 stereo downmix and to the 7.1-to-stereo capture FIFO through an LR4 120 Hz low-pass, from one shared fold helper. Default the LFE to the +10 dB in-band convention (or +6 dB until [E05](#e05)'s LF envelope lands) with that gain inside the headroom budget. Add an "LFE fold" choice (Off / 0 dB / +10 dB), default +10 dB for Gaming and 0 dB for Music, because 5.1 music and film is often bass-managed. Replace the test that asserts "LFE dropped".
+- **Why.** Games put most explosion, engine and impact energy in the LFE. Today it is silent whenever the virtualiser is off and 10 dB light when it is on.
+- **Expected benefit.** Fixes a correctness defect. Measured (50 Hz at −12 dBFS, max and bass off): LFE only gives −93.3 dBFS with virt off (silent) and −15.0 dBFS with virt on, equal to one main channel and 10 dB under the convention. Reach is narrower than first claimed: 7.1 reaches the Game strip reliably only through the Linux `flubsound_game` sink or an endpoint that exposes 7.1; the Windows 7.1 driver does not exist (R4.6). Virt is on by default, so the silent case is off-default. The claim that users compensate with bass boost is unmeasured and dropped.
+- **Approach.** (1) `flub::Bs775Fold` (prepare, reset, per-instance LR4 state, `g_lfe`) used by `ProcessingChain::downmixToStereo`, `DriftCompensatedFifo.cpp` and `TestSignalGenerator.cpp`, so the three copies cannot drift. (2) No all-pass "phase alignment" on the mains: LFE and mains carry different signals, and a 120 Hz rotation on every 5.1/7.1 music file buys nothing measurable. (3) Keep `virt.lfe` absolute; change its default for the Game strip and widen `kMaxLfeDb` to about +16. (4) Migration: `PresetIO` omits values equal to the default, so any default change silently re-voices sparse user presets. Add a v2 schema that fills absent keys of v1 presets from a frozen v1-defaults table (shared with every default change, see [E52](#e52)). (5) Route the worst-case LFE + centre sum through the existing `kTrim`/AutoLevel budget, not a fixed attenuation.
+- **Depends on.** Merge after the in-flight engine swap and auto profiles (they touch the FIFO and `EngineController`). The v1-defaults shim. Windows reach needs [E46](#e46).
+- **Done when.** LFE-only 50 Hz at −12 dBFS: virt-on and virt-off folds within 1 dB of each other and of +10 dB relative to one main. A 5.1 pink reference with band-limited LFE: LFE-to-mains ratio within 1 dB in the chain fold, FIFO fold and virtualiser. Off is bit-identical to today. A v1 preset without `virt.lfe` still loads 0 dB. No allocation on the capture thread. Listening: an explosion-heavy 7.1 capture A/B'd at matched LUFS against Windows Sonic and Dolby Atmos for Headphones.
+- **Evidence.** [ProcessingChain.cpp][PC] `downmixToStereo()` "ITU-R BS.775 downmix (LFE dropped)"; [test_drift_fifo.cpp][T-drift] "DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (LFE dropped, -3 dB)"; [HeadphoneVirtualizer.cpp][HV] `lfeGainDb` default 0, `kMaxLfeDb`; `gaming-7-1-headphone-surround.json` `virt.lfe −4`; [PresetIO.cpp][PIO] sparse `toJson`; [PluginProcessor.cpp][PP] `NormalisableRange` of `virt.lfe`.
+
+<a id="e36"></a>
+#### E36 · First-run onboarding wizard that gets sound flowing and sets a safe, audible starting point
+
+*UX & workflow · benefit 3 · difficulty Medium · default-preset fix 1 day; minimal wizard 2 weeks; full 6–9 engineer-weeks*
+
+- **What.** Ship first, separately: fresh strips load "Flubsound Signature" (Music) or "Competitive FPS" (Gaming) instead of parameter defaults at Boost 0. Then a re-runnable wizard: (1) output device and transducer type, with headphone-model search feeding [E15](#e15); (2) detect Windows Sonic, Dolby, Nahimic and OEM APOs on the endpoint (reported as "detected", never "none present"); (3) get sound flowing with a live "signal reaching strip" check; (4) choose a preset per strip with matched audition once [E37](#e37) exists.
+- **Why.** No OS produces processed audio after install without expert steps. Strips start at Boost 0 % with a 195-parameter console, and stacked OEM HRTFs go undetected, so first impressions fail.
+- **Expected benefit.** Music at Boost 0 on the dense signal measures −16.01 LUFS against −16.00 in: no audible change, so the default-preset fix is the highest-return piece in the group. The wizard cannot deliver a sub-3-minute flow on Windows today: endpoint routing fails ([E47](#e47)), drivers do not exist, and process capture doubles the signal unless the app's output is moved off the monitored endpoint. The Windows step reduces to "install VB-Cable"; macOS has no routing; only Linux can be fully automated.
+- **Approach.** `OnboardingWizard` under `app/Source/ui/onboarding/` with an `AppSettings` completion flag. Windows: detect a VB-Cable or Voicemeeter pair and guide through `ms-settings:apps-volume`, checking that the app's session peak on the physical endpoint is silent while the strip input is not. Linux: run `flubsound-pipewire-setup.sh` via `ChildProcess` only with explicit consent, record what it created and offer Undo. macOS: state the limitation. Stacked-processing detection from the endpoint property store and a JSON table of APO CLSIDs. Signal check: `MeterBus` `inPeakDb` above −60 dBFS for 1 s, plus a doubled-audio heuristic. Drop the dose meter (it belongs to [E32](#e32)).
+- **Depends on.** [E46](#e46) (the real Windows unblocker), macOS routing ([E49](#e49)), [E37](#e37), [E15](#e15), the in-flight UI scale/theme work, and [E40](#e40)'s latency-profile preservation so a first-run Quality preset cannot pad every strip to 28 ms.
+- **Done when.** `tests/app/test_app_onboarding.cpp`: state machine, persistence, fresh strips load a default preset (Boost > 0, Balanced or Low Latency), mocked SysFx/spatial flags; a capture whose session still renders to the output device produces a warning. Manual matrix: Windows 11 with and without VB-Cable, Ubuntu 24.04 PipeWire, macOS 14; time to processed audio reported per OS (target < 3 min on Linux and Windows with a cable), and the no-cable Windows outcome recorded honestly.
+- **Evidence.** [06 §9.2][06-92] "None of it exists in code yet"; [06 §9.1](06-gui.md#91-what-exists-today-implemented) defaults Boost 0 %; [TRACEABILITY Known gaps][TR-gaps] R4.1; [DeviceProfiles.cpp][DP] `adviceFor`; [08 D4][08-D4].
+
+<a id="e50"></a>
+#### E50 · Clock-domain correctness: drift compensation for cable inputs and a band-limited polyphase ASRC
+
+*Stability & platform · benefit 3 · difficulty Medium · Phase A 5–8 days; total 2.5–3.5 engineer-weeks · Quick win (Phase A)*
+
+- **What.** Phase A: replace the 4-point Catmull-Rom interpolator in `DriftCompensatedFifo` with a polyphase windowed-sinc ASRC (16–24 taps x 256 phases, linear phase interpolation, ≥ 100 dB image rejection) and report its fixed delay in `LatencyInfo`. Phase B: measure cable-input glitches first; if they occur, open cable inputs as separate WASAPI shared capture clients feeding a capture slot, and meanwhile warn when input and output endpoints differ.
+- **Why.** Every Windows process-loopback capture goes through this FIFO, so its interpolator colours all per-app audio. The cable path runs memcpy in a JUCE duplex device with no drift compensation.
+- **Expected benefit.** Exact-weight response loss at fractional phase 0.25 / 0.5: 8 kHz −0.12 / −0.23 dB; 12 kHz −0.55 / −1.07 dB; 16 kHz −1.44 / −3.25 dB; 20 kHz −2.62 / −8.41 dB. With a nominal ratio of 1 the phase is either stuck (a random, session-dependent top-octave shelf) or sweeping slowly with drift (slow HF modulation). That breaks transparency on the main Windows path. Below 12 kHz the error is ≤ 1 dB, and the 6–10 kHz pinna region loses only 0.1–0.6 dB, so the gaming claim ("HF cues smeared") is overstated. The cable "slips every tens of seconds" claim is unmeasured; if confirmed, Phase B rises to benefit 4–5.
+- **Approach.** Precompute the Kaiser table in `prepare()`; raise the "+4 interpolation window" term in `computeTargetFrames` to the kernel length; add `fixedDelayFrames()` to `AudioEngineHost::getLatencyInfo`. Scalar code is enough (about 1–2 MMAC/s per stereo slot). Phase B on Windows only (Linux null sinks share one PipeWire clock; macOS is [E49](#e49)), reusing the shape of `WinProcessLoopbackCapture`.
+- **Depends on.** Phase A: nothing. Phase B: a Windows machine ([E53](#e53) step 0) and its discontinuity detector.
+- **Done when.** New `test_drift_fifo.cpp` assertions: flat within ±0.1 dB to 20 kHz at phases 0 / 0.25 / 0.5 / 0.75 and ratios 1 ± 200 ppm; images ≤ −100 dB; THD+N ≤ −100 dB for 1 and 15 kHz at −1 dBFS under ±200 ppm; group delay = `fixedDelayFrames` ± 0.5 sample. Phase B: a 1 h real-rig glitch count before and after ([10 §5][10-5] test 1), target 0.
+- **Evidence.** [DriftCompensatedFifo.cpp][DCF] interpolator (~L339–360), `computeTargetFrames`; `DriftCompensatedFifo.h` "the Hermite interpolator does not band-limit"; [AudioEngineHost.cpp][AEH] `processBlock` memcpy of device inputs; [test_drift_fifo.cpp][T-drift] (no response or THD assertion); [driver README][DRV] ASRC spec; [08 D1][08-D1].
+
+<a id="e58"></a>
+#### E58 · Distribution readiness and reach: licences, notices, SBOM, C ABI SDK, mobile/ARM builds, CLAP and multichannel plug-in
+
+*Future-proofing · benefit 2 · difficulty Medium · licence part 2–4 days after the owner's decision; recommended scope 6–8 weeks*
+
+- **What.** High part: the owner chooses the business model (flub_core under MPL-2.0 or Apache-2.0 + commercial SDK; app and plug-in under AGPLv3 or a commercial JUCE licence), then LICENSE and LICENSES/ in REUSE layout, SPDX headers, `reuse lint` in CI, a DCO clause in CONTRIBUTING.md, and a hand-maintained THIRD_PARTY_NOTICES with a CI check against new `FetchContent_Declare` entries. A content-licence gate (SPDX `license` and `source` fields) for device profiles, presets, future HRIR/SOFA files and models. Medium part: a stable C ABI (`flub_c.h`, opaque handles, key-based parameters, marked experimental), Windows ARM64 and Linux aarch64 CI, CLAP, a surround-output plug-in variant. Deferred: iOS, Android, Wwise/FMOD.
+- **Why.** Every binary carries AGPL obligations that conflict with store and console terms, and there is no LICENSE at all. Without a DCO or CLA, contributions accepted before the decision make relicensing impossible.
+- **Expected benefit.** The licence decision is a legal release blocker. Nothing else here is audible. A CycloneDX SBOM adds little while JUCE is the only dependency. The first SOFA set added needs a licence check because Renderer B exists but ships no data. iOS allows no system-wide processing and Android offers only DynamicsProcessing ([09 §3][09-3]), so those builds have no product path.
+- **Approach.** As above; the C ABI needs `add_library` SHARED/export rules (flub_core is STATIC with no install rules and no `extern "C"`), exceptions caught at the boundary, `-fvisibility=hidden`, a C89 compile test like `tests/test_driver_shared_c.c`. CLAP via JUCE or `clap-juce-extensions` (JUCE 9.0.2 native CLAP support unverified). The surround variant links the ceiling across all channels including LFE. ASIO stays opt-in at build time and is never redistributed.
+- **Depends on.** The owner/legal decision (not engineering work) blocks everything. The C ABI waits for stable parameter keys ([E57](#e57) Phase B, if it happens). VST3 SDK terms matter for any hosting.
+- **Done when.** `reuse lint` passes; a PR adding a dependency without a notice fails; a fixture with a missing or non-allowlisted licence fails the content gate. A C11 program linking only `flub_c` renders a WAV that nulls against `flubsound-cli process` at −140 dBFS. ARM runners pass the core suite within a documented float tolerance. pluginval strictness 10 (VST3) and clap-validator pass. A 7.1 bus keeps every channel ≤ ceiling.
+- **Evidence.** No LICENSE at the repository root; [README licensing notes](../README.md); [02 §6][02-6]; [FlubJuce.cmake][FJ] (single `FetchContent_Declare`, JUCE 9.0.2 AGPLv3/commercial); `core/CMakeLists.txt` (STATIC, no install/export); [CI workflow][CI] desktop matrices only; `plugin/CMakeLists.txt` "VST3 Standalone"; [PluginProcessor.cpp][PP] `isBusesLayoutSupported` stereo output; [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+### 2.2 Medium priority (21)
+
+| ID | Title | Category | Benefit | Difficulty | Effort | Tag |
+|---|---|---|---|---|---|---|
+| [E49](#e49) | macOS system-wide and per-app processing via process taps | Stability & platform | 4 | High | 6–9 wk | Ambitious |
+| [E02](#e02) | Bass dynamics and phase coherence | Audio quality | 3 | High | 3.5–4.5 wk (subsonic slice 1–1.5 days) | Ambitious |
+| [E04](#e04) | Multiband look-ahead transient shaper, fix Tighten | Audio quality | 3 | High | 3–4 wk (slice 0.5–1 day) | |
+| [E09](#e09) | Professional EQ toolset | Audio quality | 3 | High | 7–10 wk | |
+| [E11](#e11) | Automatic headroom management | Audio quality | 3 | Medium | 6–10 days | |
+| [E17](#e17) | Bluetooth awareness | Headsets | 3 | Medium | 3.5–5 wk (slice 1–2 days) | Quick win |
+| [E18](#e18) | Microphone strip, virtual mic and sidetone | Headsets | 3 | Very high | 1 wk (sidetone) to months | Ambitious |
+| [E22](#e22) | ChatMix, voice-keyed ducking, strip-priority master | Gaming | 3 | High | 6–10 wk + routing | |
+| [E23](#e23) | Voice/Film mode and a real Chat strip default | Gaming | 3 | High | 8–11 wk (slice 1.5–2 days) | Quick win |
+| [E28](#e28) | Parametric binaural renderer quality | Gaming | 3 | High | 8–11 wk (E28a 1–1.5 wk) | |
+| [E30](#e30) | Output-aware rendering, bass management, haptics | Gaming | 3 | High | 14–19 wk | |
+| [E34](#e34) | Content and scene analysis | Adaptive & intelligent | 3 | High | 10–14 wk (slice 3–4 wk) | Ambitious |
+| [E38](#e38) | Show what the sound is doing | UX & workflow | 3 | Medium | 3–4 wk (slice 2–3 days) | Quick win |
+| [E44](#e44) | Multi-core, reliable real-time audio threads | Latency & performance | 3 | High | Phase A 1.5–2 wk; B 4–6 wk | |
+| [E45](#e45) | CPU governance, idle freeze, peak monitoring | Latency & performance | 3 | Medium | 5–6 wk | |
+| [E48](#e48) | Native, turnkey Linux | Stability & platform | 3 | High | 10–14 wk (E48a 3–5 days) | Ambitious |
+| [E52](#e52) | Versioned, migratable preset and state format | Stability & platform | 3 | Medium | 2.5–3.5 wk | Quick win |
+| [E54](#e54) | Release engineering and diagnostics | Stability & platform | 3 | High | 11–15 wk | Ambitious |
+| [E55](#e55) | Anti-cheat-safe process handling and matrix | Stability & platform | 3 | Low | 3–5 days + matrix | Quick win |
+| [E60](#e60) | Perceptual and real-game validation | Stability & platform | 3 | High | 4–6 months | Ambitious |
+| [E57](#e57) | Extensible audio graph, plug-in hosting, output buses | Future-proofing | 2 | Very high | 7–12 months (E57-A 6–8 wk) | Ambitious |
+
+<a id="e49"></a>
+#### E49 · macOS system-wide and per-app processing via process taps
+
+*Stability & platform · benefit 4 · difficulty High · 6–9 engineer-weeks (HAL plug-in deferred, +6–10 weeks) · Ambitious*
+
+- **What.** Roadmap 3.2: `CATapDescription` with `CATapMutedWhenTapped` in one private aggregate device clocked by the real output, giving per-app processing with no driver and no double signal, plus a global "everything except Flubsound Pro and apps already tapped" tap for the System strip. `NSAudioCaptureUsageDescription` and a permission onboarding screen. A libASPL HAL plug-in for macOS older than 14.2 and the processed mic is deferred.
+- **Why.** macOS has no path except BlackHole plus a Multi-Output Device, which loses volume keys and drifts. Boom 3D, SoundSource, eqMac and FxSound for Mac all ship one, so this is basic function, not a differentiator.
+- **Expected benefit.** Opens macOS for music listeners (a large Mac audience); gaming value is small. Priority is Medium rather than High because none of the 622 lines of Mac code has run, and Windows, the gaming platform, has not run either ([E53](#e53)).
+- **Approach.** (1) Run the existing `PlatformServices_mac.mm` on a real Mac first and fix it. (2) Choose the host design explicitly: (a, preferred) JUCE opens the private aggregate as a duplex device, so tap channels arrive as ordinary inputs through the existing `deviceInputFirst` memcpy path: one clock, no FIFO, no [E50](#e50) dependency, but a route change rebuilds the aggregate and restarts the device, hidden by the in-flight engine swap; or (b) a separate IOProc feeding a capture-slot FIFO at a fixed ratio (the HAL already drift-compensates). (3) Rebuild the global tap's exclusion list on route changes, or routed apps are captured twice. (4) Add the usage string via `PLIST_TO_MERGE` in `app/CMakeLists.txt`; onboarding detects denial and deep-links to Privacy & Security. (5) Keep AppRouting and RoutingPanel unchanged behind the router and capture interfaces. (6) Tap tests run on a self-hosted Mac; hosted CI cannot grant audio-capture TCC.
+- **Depends on.** [E53](#e53) step 0 for the Mac, [E54](#e54) Developer ID signing and notarisation (ad-hoc builds lose the TCC grant on every rebuild), [E50](#e50) only for design (b), a Mac on macOS 14.2+ and a self-hosted runner.
+- **Done when.** Music.app, Spotify and a game on three strips: null test shows no dry leak above −90 dBFS and volume keys work. Route changes during playback give zero discontinuities (b) or one crossfaded transition < 50 ms (a). A routed app never appears in the System strip. Unplug/replug with taps active. Permission denial shows onboarding, not silence. 8 h tone soak through a tap with zero discontinuities.
+- **Evidence.** [PlatformServices.h](../app/Source/platform/PlatformServices.h) ("designed, not implemented... roadmap 3.2"); [PlatformServices_mac.mm][PSM] tap design in comments (~L290–360); [platform/macos/README.md][MAC] "Not yet verified on a Mac"; [08 D8][08-D8]; [TRACEABILITY Known gaps][TR-gaps] R4.4, R4.5.
+
+<a id="e02"></a>
+#### E02 · Bass engine dynamics and phase coherence: look-ahead split-band protection and one shared crossover
+
+*Audio quality · benefit 3 · difficulty High · subsonic slice 1–1.5 days; total 3.5–4.5 engineer-weeks · Ambitious*
+
+- **What.** (0) A `bass.subsonicOrder` parameter (2/4, default 4) with gaming and music presets moved from HP4 at 25–30 Hz to HP2 at ≤ 20 Hz. (a) Split the shelf-protection detector into sub (< 60 Hz, 25 ms hold) and punch (60–150 Hz, 8 ms hold) bands that withdraw independently, with a program-dependent release and optional 2 ms look-ahead in Quality only. (b) Only when [E04](#e04) needs it: fold mono-bass and tighten onto one shared LR4 split. Publish onset-overshoot telemetry.
+- **Why.** Music: sustained bass lines pump in time with the kick. Gaming: 28–30 Hz subsonic filters remove rumble that headphones reproduce well.
+- **Expected benefit.** Part (a) has the clear music payoff: Bass Head settings move a 32 Hz line by +3.2 to +6.2 dB with the kicks. Part (b) is much smaller than claimed. Of the 15.9 ms analytic group delay at 40 Hz, HP4 at 25 Hz contributes 8.2 ms, the 110 Hz LR4 4.6 ms and the 150 Hz LR4 3.2 ms; a shared split removes about 3.2 ms, while HP2 at 20 Hz alone removes 4.8 ms. The +2.6 dBFS explosion overshoot was measured with the maximizer off (off-default); with it on it is limiter GR, which is [E05](#e05)'s problem. The stacked-phase issue affects only 7 presets using mono-bass or tighten.
+- **Approach.** Look-ahead does not fit in Balanced ([01 §5.1][01-51]: only look-ahead stages have latency; Balanced is at the edge of R1.1). (a) In `BassEngine::processSegment` stage 3 (detector constants `kDetectorAttackMs 10`, `kDetectorReleaseMs 150`, `kHoldMs 25`): two detectors applied as shelf plus 60–150 Hz bell, two-stage release reusing `TruePeakLimiter`'s blend pattern, look-ahead via `latencySamples()` set only for Quality. (b) One LR4 for mono-bass and tighten, subsonic stays a separate HP; no linear-phase low band (an FIR crossover at 60–120 Hz needs tens of ms). Redo the `ParkedStage` engage/disengage paths and their tests.
+- **Depends on.** The v1-defaults preset shim ([E01](#e01), [E52](#e52)). Do (b) only with E04's LF band. Subsonic ≤ 20 Hz passes more rumble into the maximizer until E05 lands.
+- **Done when.** 32 Hz line + 55 Hz kicks at Bass Head: line modulation ≤ 1 dB. Subsonic slice: 40 Hz group delay ≤ 11 ms for the Bass Head chain and 28 Hz within 3 dB of input on gaming presets. Balanced and Low Latency totals unchanged. `test_bass_engine.cpp` transition/click tests pass. With max on, explosion-onset GR ≥ 2 dB lower. ABX of (b) on/off before committing two weeks to it.
+- **Evidence.** [BassEngine.cpp][BE] detector constants, `processSegment` stages 1–4, `ParkedStage`; [03 §4.3](03-dsp-design.md#43-algorithm--maths) and [§4.9][03-49] (3–4 dB onset overshoot accepted); measurements above.
+
+<a id="e04"></a>
+#### E04 · Multiband, look-ahead transient shaper with a real punch/tactile control (and fix Tighten)
+
+*Audio quality · benefit 3 · difficulty High · slice 0.5–1 day; Tighten fix 2–3 days; full 3–4 engineer-weeks*
+
+- **What.** Rebuild the Clarity transient shaper in 3 LR4 bands (adjustable 60–200 Hz split, 4 kHz), with per-band attack/sustain, a 1–3 ms HF hold (25 ms anti-ripple hold for LF only), program-dependent release and a speed control, plus optional look-ahead in Quality. Add a signed LF attack for tactile punch in the 40–100 Hz chest region. Fix `BassEngine` Tighten so it never attenuates the first 20 ms, and remove Tighten from the Music Punch macro now.
+- **Why.** Music: Punch smears the attack into the body, and attack boosts arrive late. Gaming: HF step onsets lose lift while an explosion rings, and automatic fire and fast percussion get about a third of the set effect (+12 dB attack gives +11.7 dB on isolated hits but +3.8 dB at 75 ms spacing).
+- **Expected benefit.** Re-measured on a synthetic kick (max off): Punch 100 gives +3.7 dB at 0–10 ms but +4.8 dB at 10–30 ms, so onset-to-body gets about 1 dB worse; `clarity.attack=6` alone gives +5.1 / +4.5 / +2.3 dB at 0–10 / 10–30 / 40–60 ms (the smear is the full-band shaper itself); `bass.tighten=0.5` costs −2.2 dB at 0–10 ms. The earlier "−8.9 dB" did not reproduce in size. Gaming benefit is overstated: Footsteps (M1) and Detail (M4) do not touch the transient shaper at all; only Boost and Impact drive `ClarityAttackDb`, so HF-band gaming mappings are new, not remaps. A signed LF "tactile" control is a real feature gap against Razer/Nahimic-style punch sliders.
+- **Approach.** (1) Remove the M1 `BassTighten` entry in `MacroMap.cpp`, re-baseline factory-preset and mode tests. (2) Tighten: gate the sustain indicator until the attack indicator has decayed. (3) `ClarityEnhancer` stage 1: 3 bands with per-band `TransientShaper` and `PeakHold`; keep `clarity.attack/sustain` as "all bands" and add `attackLow`/`attackHigh` offsets (no preset migration, plug-in automation stays valid); bypass the splitter when neutral to keep the bit-exact transparency contract. (4) New M1/M4 entries to `attackHigh` (+2–3 dB), Impact to `attackLow`. (5) Quality-only look-ahead.
+- **Depends on.** [E02](#e02)(b) if the LF split is shared; the Tighten fix touches the shaper shared by Bass and Clarity.
+- **Done when.** Punch 100: 0–10 ms lift ≥ 10–30 ms lift + 2 dB. +12 dB attack at 75 ms spacing ≥ +9 dB. Gain peak within 1 ms of onset, no bump > 1 dB at 40–60 ms. Tighten 0.5: 0–10 ms change ≥ −0.5 dB. Neutral settings bit-exact (`test_transparency.cpp`). Steady 40 Hz modulation ≤ 0.1 dB with bands at ±12 dB. HF step lift under an explosion tail within 1 dB of isolated at Boost 100 + Impact 100.
+- **Evidence.** `TransientShaper.cpp` `kHoldMs 25`, `kAttackPairReleaseMs 60`, `kGainSmoothMs 1`, test "detection is linked"; [BassEngine.cpp][BE] `kTightenHz 150`; [ClarityEnhancer.cpp][CE] stage 1 (one linked full-band gain); [MacroMap.cpp][MM] `kMusicTable` M1, `kGamingTable`.
+
+<a id="e09"></a>
+#### E09 · Professional EQ toolset: more bands, analog-matched response, and dynamic-EQ knee, relative threshold and sidechain
+
+*Audio quality · benefit 3 · difficulty High · 7–10 engineer-weeks for the kept scope*
+
+- **What.** Phase A: 16 user EQ bands with add/remove in the editor; a per-EQ "Classic (RBJ) / Analog-matched" response switch (Vicanek matched biquads mapped to the SVF); 6 dB/oct and tilt shelves; per-band L/R and M/S targets. Phase B: after [E07](#e07) frees the mode bands, 8 user DynEq bands with a soft knee, RMS/peak blend, relative (versus broadband) thresholds and optional 1–3 ms look-ahead in Quality/Balanced; a per-band sidechain from {self, M, S, Chat strip}. Linear phase and a soothe-style resonance mode are cut.
+- **Why.** Music: top-octave air and correction bells land short of nominal above 12 kHz, and 10 shared bands are tight for correction plus taste. Gaming: a Chat-keyed band enables voice-aware unmasking.
+- **Expected benefit.** Recomputed from `SvfCoeffs::make`: a 12 kHz Q1 +6 dB bell reads +3.14 / +1.37 dB at 15 / 17 kHz at 44.1 kHz (analog +4.95 / +3.95 dB); a 16 kHz bell reads +1.72 dB at 19 kHz (analog +5.32). The audible payoff is small: the curve editor already draws the exact digital response, the error sits above about 13 kHz, and headphone correction must stay Classic anyway ([E15](#e15)). 16 bands matter mainly if E15 does not ship; with E15, 10 taste bands matches FxSound and Boom 3D. The DynEq knee, relative threshold and Chat sidechain have real gaming value.
+- **Approach.** `param::kEqBands` 10 → 16 with `sinceVersion = 2` so AUv2 automation order is stable (plug-in IDs are keyed by `Info::key`); decide ownership of slots 10–15 with [E14](#e14) first. Matched designs mapped to Simper (g, k, m0, m1, m2) with double storage; Classic stays bit-identical (the current bell and shelves are exactly the RBJ cookbook). First-order shelves and tilt as pole-zero-cancelled SVF sections. Type-change crossfade over the existing 5 ms window (low priority). DynEq knee in `computeDynamicGainDb`. Sidechain: `MixEngine::process` already holds every strip's input block, so pass a const pointer to the Chat input with a defined strip order. Look-ahead is profile-gated and structural.
+- **Depends on.** [E07](#e07) before 8 user DynEq bands; [E14](#e14) over slots 10–15; [E15](#e15) needs Classic RBJ-exact; the in-flight engine swap for look-ahead changes.
+- **Done when.** Matched within 0.5 dB of analog for fc ≤ 0.35 fs and Q ≤ 4 (1 dB elsewhere below 0.45 fs) at 44.1/48/96 kHz. Classic bit-exact against golden coefficients and within 0.01 dB of an independent RBJ implementation. A v1 preset loads into 16 bands with identical sound (null ≤ −120 dB). Relative threshold invariant within 0.5 dB to ±20 dB broadband changes. A Chat-keyed band attenuates Game 3 kHz only while Chat is above threshold. Blind ABX Classic vs Matched on a 12 kHz shelf; if inaudible, de-prioritise Matched.
+- **Evidence.** [Parameters.h][PARh] `kEqBands = 10`, `kDynEqBands = 4` against `ParametricEq::kMaxBands = 16`; [Svf.h][SVF] `SvfCoeffs::make()` pre-warps at fc only; [DynamicEq.cpp][DEQ] `computeDynamicGainDb` (no knee); [03 §3.6](03-dsp-design.md) "no look-ahead", §2.9 5 ms dry flash; [MixEngine.cpp][ME] `process`.
+
+<a id="e11"></a>
+#### E11 · Automatic headroom management (engine-side OS volume split out)
+
+*Audio quality · benefit 3 · difficulty Medium · 6–10 engineer-days (engine-side volume, if pursued: 5–8 weeks, Low)*
+
+- **What.** Predict the chain's static maximum boost (EQ, bass shelf, presence/air, DynEq static gains, macro contributions after `MacroMap::apply`, the virtualiser's −3 dB trim) on a 1/12-octave grid weighted by a programme-spectrum envelope, and apply a matching automatic preamp before the chain through `inputGain`'s 20 ms smoother (`auto.preamp`, `auto.preampAllowance` default 1 dB). Show "Limiter active x %" in the header and LoudnessPanel.
+- **Why.** On hot modern masters the −1 dBTP limiter eats the enhancement, and hot game mixes lose transient detail the same way. Peace/Equalizer APO users set a preamp by hand.
+- **Expected benefit.** Narrower than first scored. On a genre-typical classical programme (−17.3 LUFS, LRA 20.2 LU, −0.5 dBTP) Classical & Jazz Dynamic keeps LRA 20.19 LU and the limiter never engages: that preset is already a pure safety limiter. The 1.35 LU loss came from a −10.54 LUFS pop master. The real gain is on hot masters and game mixes, where EQ, bass and clarity boosts drive the limiter (Signature raises a quiet intro +0.79 dB and lowers the loud section −1.09 dB). Moving OS volume into the engine has unclear benefit (on Linux the slider is already pre-chain on the `flubsound_*` sink; Windows is a monitoring path) and a high hearing risk, so it is split out.
+- **Approach.** Predictor on the control thread, published as an atomic. With AutoLevel or the loudness target on, the preamp must come before the AutoLevel detector or AutoLevel cancels it. Keep `max.on` and drive 0 on dynamic presets: the CLI and plug-in have no MixEngine master limiter, so `max.on = 0` would remove the only ceiling. Allow a user override (the predictor under-predicts on bass-heavy content; Bass Head already sets `eq.output −1.5` by hand).
+- **Depends on.** None for the preamp. [E15](#e15) reuses the predictor; [E14](#e14)'s LRA bounds depend on it.
+- **Done when.** On a hot master (−10 to −9 LUFS, −0.3 dBTP), Signature and Punchy Pop show limiter active ≤ 2 % and the intro/loud-section delta within ±0.3 dB of input. The −17 LUFS classical LRA stays within 0.1 LU. Predicted maximum boost within 1 dB of the rendered pink transfer maximum for every factory preset at Boost 0/50/100. Loudness-matched blind comparison on 6 hot masters.
+- **Evidence.** [factory presets][FAC] (`eq.output` 0 except Bass Head); [ProcessingChain.cpp][PC] `process` (inputGain before AutoLevel); [MeterBus.h][MB]; measurements above.
+
+<a id="e17"></a>
+#### E17 · Bluetooth awareness: transport and codec detection, per-codec policy, latency offset, and a hands-free speech policy
+
+*Headsets · benefit 3 · difficulty Medium · slice 1–2 days; full 3.5–5 engineer-weeks · Quick win (slice)*
+
+- **What.** Slice: detection fixes (Bluetooth voice profiles at ≤ 32 kHz are hands-free; drop "wireless" from the USB tokens; Bluetooth evidence beats a profile's `typicalConnection`) plus a sample-rate rule in `configureModeBands` that clamps or disables gaming band 4 (3200 Hz) when fs ≤ 32 kHz. Then: a Linux transport and codec query from PipeWire node properties; per-codec ceiling and air policy; codec delay (labelled "about") in the latency readout; a hands-free runtime override (Footsteps, Spatial, Bass and virtualiser off, −3 dBTP); an automated version of [10 §5][10-5] test 6.
+- **Why.** A Bluetooth Stealth Pro on Linux is treated as USB with a −1 dBTP ceiling, and on hands-free the Footsteps band adds a large lift into an already harsh narrowband link.
+- **Expected benefit.** Mostly correctness at the edges. The wrong cap costs about 1 dB. The Stealth Pro is normally used through its 2.4 GHz base station, where "USB" is correct. On hands-free links the game sound is already poor; removing the +8.7 dB (Footsteps 100) / +13.9 dB (Competitive FPS) lift near 0.8 × Nyquist at 8 kHz makes it less harsh, not good. Worth doing, but after [E19](#e19) and [E21](#e21).
+- **Approach.** Use a runtime override rather than loading a preset: it needs no snapshot/restore, survives a crash mid-call and does not fight the auto-profile switcher. Linux: `pactl` sink-input lookup fails under pipewire-jack (the multi-strip path), so resolve the sink through `pw-dump` links from Flubsound's JACK node and read `device.bus`, `api.bluez5.profile`, `api.bluez5.codec`; keep pactl (`bluetooth.codec`) as the PulseAudio fallback. Windows already classifies BTHENUM/BTHHFENUM, so the override works there without a codec read.
+- **Depends on.** The in-flight auto profiles and engine swap (a 48k/2 → 16k/1 change is a stop/re-prepare). [E18](#e18) reuses the hands-free state; [E24](#e24) disables focus under it.
+- **Done when.** Table tests: "Stealth Pro" 48k/2 + Bluetooth hint → bluetooth, cap −2; "Stealth 600 Gen 3" 32k/1 → hands-free; "Wireless Headset" without hint → not USB. CLI at 8/16/32 kHz: 3.2 kHz lift from Footsteps 100 / Competitive FPS ≤ +1 dB. Parser tests on captured `pw-dump` and pactl JSON (PipeWire 1.0/1.2, PulseAudio 16) for SBC, AAC, LDAC, mSBC, LC3-SWB. Automated rate-switch test with no NaN and no over-ceiling samples. Manual check on a real headset under Fedora/PipeWire.
+- **Evidence.** [PlatformServices_linux.cpp][PSL] `queryOutputTransport` returns Unknown; [DeviceProfiles.cpp][DP] `detectConnection` (hands-free only ≤ 16000 Hz; "wireless" → USB), `Database::match` fallback; [PlatformServices_win.cpp][PSW] BTHENUM classification; [08 A5][08-A5].
+
+<a id="e18"></a>
+#### E18 · Microphone strip, virtual mic and sidetone
+
+*Headsets · benefit 3 · difficulty Very high · hardware sidetone 1 week; Linux strip + virtual source 6–9 weeks; Windows virtual mic gated on the driver · Ambitious*
+
+- **What.** First, a hardware sidetone slider (ALSA mixer "*Sidetone*" controls on USB headsets). Then a capture strip (high-pass, gate, EQ, compressor, de-esser, limiter, later neural denoise) whose output goes to a virtual mic: a PipeWire Audio/Source node on Linux first, the driver MIC endpoint on Windows, the HAL plug-in on macOS. Optional low-latency software sidetone after the master limiter (−30 to −10 dB, feedback guard). Mic presets per mic type.
+- **Why.** Chat is half of gaming audio, and Sonar ClearCast, NVIDIA Broadcast and Voicemeeter all process the mic. Budget headsets without hardware sidetone make players shout.
+- **Expected benefit.** Feature parity for the outgoing voice path; it changes what the player hears only through sidetone. Discord's built-in Krisp, AGC and echo cancellation (and NVIDIA Broadcast on RTX machines) already cover most denoise and levelling value, so the marginal gain for teammates is small. The Windows virtual mic is blocked on a driver that does not exist.
+- **Approach.** CaptureStrip excluded from `maxStripLatency` padding (shared with [E23](#e23)); mono chain; second output block; sidetone after the master limiter with a clip guard. A 256-point spectral gate (187.5 Hz bins) gives musical noise on voice, so plan an RNNoise-class model in the neural slot as the real denoiser. On Windows, JUCE's combined WASAPI input/output device allows mic-in to sidetone-out without the driver; only the virtual mic endpoint needs it. The 10 ms software sidetone target needs a PipeWire quantum ≤ 256; show a warning otherwise.
+- **Depends on.** The padding exemption ([E23](#e23), [E40](#e40) sync groups), a shipped model ([E35](#e35), R5.3), the Windows driver ([E46](#e46)), [E17](#e17)'s hands-free state, lab data for `micMonitoring`.
+- **Done when.** The sidetone slider reads/writes the ALSA control on a real USB headset and persists across reconnects. Game strip latency unchanged with the capture strip on; ≥ 10 dB stationary fan-noise reduction. Sidetone delay = device period + chain latency, ≤ 10 ms at quantum 128/48k, warning at 1024, feedback guard trips on a synthetic loop. `pw-record` from "Flubsound Mic" is silent within 50 ms of engine stop. Blind comparison against Discord Krisp alone; ship software denoise only if rated at least equal.
+- **Evidence.** [10 §4][10-4] "Flubsound does not process your microphone in this version"; [TRACEABILITY Known gaps][TR-gaps] R6.1; [driver README][DRV] MIC endpoint (design only); [09 §1.2](09-future-roadmap.md#12-candidate-neural-features-prioritised) N1; [MixEngine.cpp][ME] (render strips only); [08 C8](08-pitfalls-and-solutions.md#c8-voice-chat-problems).
+
+<a id="e22"></a>
+#### E22 · ChatMix, voice-keyed spectral ducking and strip-priority master protection
+
+*Gaming · benefit 3 · difficulty High · 6–10 engineer-weeks plus the routing prerequisite*
+
+- **What.** (0) The Linux prerequisite: automated sink-monitor wiring and a strip-mapping UI, or the feature has no input. (1) Strip-priority master protection, first via per-strip ceiling offsets (Game −3 dBTP while Chat is active), then a sub-limiter only if needed. (2) A ChatMix balance with complementary gains (both 0 dB at centre) and hotkeys. (3) Voice activity on the Chat strip drives a 3–6 dB dynamic dip at 1–4 kHz on Game and Music, turns off Game's 2 kHz Voice & Score lift while chat is active, and protects the footstep band. (4) Optional routing of Chat to the headset's physical Chat endpoint, and a warning when the output is a Chat endpoint.
+- **Why.** Teammates' callouts are masked by the game, and the shared master limiter ducks chat on every explosion. Sonar ChatMix, Turtle Beach Chat Boost and Discord attenuation all solve this.
+- **Expected benefit.** High once chat reaches the Chat strip, which today it mostly does not: Windows per-process loopback cannot mute the original output, so a Discord capture is heard twice; Linux wiring is manual; macOS is unsupported. The master-limiter coupling (one −1 dBTP limiter with 50 ms auto-release over the sum) is a real mixing defect but also needs two fed strips. Realised benefit today is about 3; priority follows the routing work.
+- **Approach.** Order (0) → (1) → ChatMix → ducking. Pass the "external voice active" flag as an atomic in the chain's parameter push. `MixEngine::setStripGainDb` is already smoothed, so ChatMix is mostly UI and persistence. Measure master-limiter engagement with the ceiling offsets before building a sub-limiter. A MixEngine-level harness is required, because the CLI renders one chain.
+- **Depends on.** Routing ([E46](#e46), [E48](#e48)/R4.6). [E23](#e23), [E21](#e21), [E18](#e18). The in-flight engine swap must carry or reset sidechain state.
+- **Done when.** New `tests/test_mix_engine_sidechain.cpp`: −1 dBTP explosions on Game with speech on Chat change Chat short-term level < 0.5 dB; the Game 1–4 kHz dip occurs only while speech is active; false-positive duty < 5 % on 10 s of music. ChatMix sweep: complementary, 0/0 at centre, no zipper noise. Latency unchanged or changed by exactly the documented look-ahead. Play test on Linux against Sonar ChatMix on Windows.
+- **Evidence.** [MixEngine.h][MEh] (strip → pad → sum → single master limiter); [MixEngine.cpp][ME] `process()` (no cross-strip signal); [ProcessingChain.cpp][PC] `configureModeBands` band 7; [AppSettings.h][AS] `HotkeyAction`; [02 Tech stack](02-tech-stack.md) (loopback cannot mute the original); [TRACEABILITY Known gaps][TR-gaps] R4.5, R4.6.
+
+<a id="e23"></a>
+#### E23 · Voice/Film mode and a real Chat strip default (speech leveller, low-latency denoise)
+
+*Gaming · benefit 3 · difficulty High · slice 1.5–2 days; total 8–11 engineer-weeks · Quick win (slice)*
+
+- **What.** Slice: a "Voice Chat" factory preset in Music mode (HPF 100–120 Hz, de-mud, presence, speech leveller to about −18 to −20 LUFS short-term, no maximizer drive), assigned to the Chat strip on first run without overwriting saved state. Then chat-only denoise with a padding exemption, a third mode "Voice / Film" (Dialogue, Night, De-ess, Bandwidth, Background macros), and a dialogue path before the virtualiser (centre channel, or centre extraction in Quality).
+- **Why.** Incoming Discord/Teams audio gets Music mode with the maximizer on, and no noise reduction in Balanced or Low Latency. Quiet and loud teammates stay mismatched. Streams and films have no dialogue mode.
+- **Expected benefit.** The slice fixes a real misconfiguration (Mode defaults to Music, `MaximizerOn` to true), under the same routing precondition as [E22](#e22). The full mode competes in a crowded field (Dolby dialogue enhancer, Nahimic voice, Windows voice clarity), and stereo centre extraction is research.
+- **Approach.** The padding exemption must also change the master look-ahead rule in `MixEngine::build` (`allLowLatency` ignores alignment), or Game latency still grows from 0.5 to 1 ms. Level speech with a syllable-scale upward compressor (50–200 ms), with [E21](#e21)'s fixed AutoLevel only as a slow trim (today it slews at 1 dB/s). The third mode touches 73 `ModeValue::` references in 21 files, tray, hotkeys and CLI `--mode`.
+- **Depends on.** Routing (R4.5/R4.6), [E21](#e21), [E22](#e22), [E18](#e18) (same exemption), the in-flight auto profiles (mode enum), the neural slot for RNNoise-class denoise.
+- **Done when.** Preset test: maximizer off; −35 and −12 LUFS speech end within 3 LU short-term; ceiling held. Chat unaligned in Quality with Game in Low Latency leaves Game latency and master look-ahead unchanged. Mode audit covers all three modes. Denoise ≥ 8 dB with STOI drop < 0.05, confirmed by listening. Discord captures from 5 mic types, bypass vs Voice Chat.
+- **Evidence.** [Parameters.cpp][PAR] Mode default Music, `MaximizerOn` true; [MacroMap.cpp][MM] (only `kMusicTable`, `kGamingTable`); [ProcessingChain.cpp][PC] `prepare()` `gateInChain` only in Quality; [01 §5.1][01-51] gate "(not in chain)"; [MixEngine.cpp][ME] `build`; [08 C8](08-pitfalls-and-solutions.md#c8-voice-chat-problems).
+
+<a id="e28"></a>
+#### E28 · Parametric binaural renderer quality: pinna and front/back cues, diffuse-field timbre, real room, level normalisation
+
+*Gaming · benefit 3 · difficulty High · E28a 1–1.5 weeks; total 8–11 engineer-weeks*
+
+- **What.** **E28a** (split out, High on its own): per-layout diffuse-field power normalisation plus an adaptive virt make-up gain so virt on/off stays within 1 LU for correlated and uncorrelated content, and fold-headroom handling for correlated overs. Then: angle-continuous pinna and Blauert directional-band cues replacing the binary rear shelf, with an optional "Competitive" front/back contrast; a minimum-phase diffuse-field inverse and centre-timbre match; directional early reflections plus an 8-line FDN tail with room presets (Dry/Competitive as the gaming default).
+- **Why.** Front and back differ only by a gentle HF tilt (FL vs BL near-ear difference ≤ 0.3 dB below 2 kHz), the classic recipe for front/back confusion, and the default room has no measurable effect (room 0.15 vs 0 changes IACC by 0.01; FC IACC 1.00). Music: FC is 4.3 dB darker than the sides, and the virt toggle shifts loudness.
+- **Expected benefit.** Only for discrete 5.1/7.1 input (Linux 7.1 sink, 8-channel cables, multichannel files, the future Windows driver); after [E27](#e27), stereo-in-8-channel content bypasses the virtualiser. Within that reach the defects are real: measured virt on/off −3.43 LU on correlated 7-speaker noise and +2.33 LU on uncorrelated (5.8 LU spread); a 28 dB peak-to-notch range in 4–8 kHz on a correlated 7-speaker impulse.
+- **Approach.** A static per-layout gain cannot meet 1 LU because the error flips sign. Run the cheap `downmixToStereo()` on a copy every block (it already runs during crossfades), compute K-weighted short-term power of both paths, and servo a slow make-up gain (3 s, clamped ±4 dB), keeping the extra cost below 0.05 % of a core. Pinna echo taps via the existing fractional delay; diffuse-field inverse table over head radius; image-source ER through `EarPath` pairs; Hadamard FDN.
+- **Depends on.** [E27](#e27) first; precedes [E29](#e29) (shared normalisation law); gaming presets re-voiced afterwards; a Windows rig for the Windows Sonic comparison.
+- **Done when.** Virt on vs off within 1 LU for correlated and uncorrelated 7.1 and 5.1 pink (CLI `analyze`). Pre-limiter peak of full-scale correlated 7-speaker content ≤ +1 dBFS. FL vs BL near-ear difference ≥ 3 dB in ≥ 2 directional bands. Centre IACC < 0.6 at the default room; RT60 within 20 %. 4–8 kHz peak-to-notch < 12 dB. FC vs side tilt within 1 dB. CPU < 1.5 % of a core. 8-direction forced-choice test against the old renderer and Windows Sonic; ship only if reversals drop.
+- **Evidence.** [HeadphoneVirtualizer.cpp][HV] `kRearShelfHz 4000` / −4 dB, `kReflectionMs` mono bus, `kTrim −3 dB`; [03 §8.3][03-83], [§8.9][03-89]; [08 C6][08-C6].
+
+<a id="e30"></a>
+#### E30 · Output-aware rendering: headphone/speaker detection, multichannel speaker output, bass management, haptics, crosstalk cancellation
+
+*Gaming · benefit 3 · difficulty High · detection + banner 1.5 weeks; total 14–19 engineer-weeks*
+
+- **What.** Read the endpoint form factor on all three OSes into `DeviceProfiles` and suggest (banner, not silent switch) a render policy: Headphone Binaural, Speaker Downmix, Speaker Transaural or Multichannel. Make the master bus follow the device (2.0/2.1/5.1/7.1): route Game 7.1 straight through with a linked per-channel limiter, LR4 bass management fed by the mains' low band plus calibrated LFE, a haptics aux output (20–80 Hz, own limiter), per-class bass policy, an in-app lowest-audible-tone calibration and, last, a regularised crosstalk canceller.
+- **Why.** Users with 5.1/7.1 speakers, AVRs or subwoofers lose discrete surround and the LFE; 2.1 music systems need bass management; haptics is an immersion differentiator (Razer HyperSense, Woojer).
+- **Expected benefit.** Smaller than claimed. Stereo content on speakers is never binauralised (the virtualiser runs only for > 2 input channels), and [E27](#e27) removes the stereo-in-8-channel exposure. What is unique here: multichannel speaker users (channels ≥ 2 are zero-filled, MixEngine masters 2 channels, Settings limits outputs to 2, `kMaxMeterChannels = 2`), 2.1 bass management, and form-factor-driven bass policy. Haptics and crosstalk cancellation are niche.
+- **Approach.** `PlatformServices_win.cpp` already reads `PKEY_AudioEndpoint_FormFactor` but acts only on HDMI; map all values. Combo jacks misreport (Realtek reports Speakers for headphones), so banner first. Multichannel speaker output must either run DynamicEq and the compressor N-channel with linked detection on the Game strip or state plainly that Gaming mode is stereo-only; today every Gaming-mode stage runs after the fold. Audit every 2-channel assumption (meters, governor, DistortionMonitor, export, plug-in bus, `mixSwap()`). Crosstalk cancellation waits for [E28](#e28)'s head model.
+- **Depends on.** [E27](#e27), PlatformServices on 3 OSes, the in-flight engine swap for channel-count changes, [E46](#e46) for discrete game surround, device-lab data before automatic switching.
+- **Done when.** Form factor drives the suggested policy; an 8-channel MixEngine uses a linked limiter; LR4 sums flat within 0.1 dB; LFE gets +10 dB; an 8-output fake device gets content on channels 2–7. Protection tests re-run at 2, 6 and 8 output channels. Footstep gain measured per channel of the multichannel Game path, or a documented "Gaming mode off" state. Detection checked on 10+ endpoints. 1 h haptics soak. Crosstalk cancellation tested in a room at 3 speaker spans.
+- **Evidence.** [AudioEngineHost.cpp][AEH] `processBlock()` (channels ≥ 2 silenced); [MixEngine.cpp][ME] master loop `c < 2`; [MeterBus.h][MB] `kMaxMeterChannels = 2`; [ProcessingChain.h][PCh] "from here on the chain is STEREO"; [PlatformServices_win.cpp][PSW] `transportFromEnumerator`; [09 §2][09-2], [§4][09-4].
+
+<a id="e34"></a>
+#### E34 · Content and scene analysis: classifier-driven mode morphing, material-aware macros, game scene states
+
+*Adaptive & intelligent · benefit 3 · difficulty High · slice 3–4 weeks; total 10–14 engineer-weeks · Ambitious*
+
+- **What.** A per-strip analysis tap (pre-fold, off the audio path, about 10 Hz) computing modulation energy, spectral flux, onset density, HNR, tilt, sub-100 Hz share, short-term PLR/crest, headroom, correlation and 7.1 spread. First slice: "Smart" macro scaling (e.g. shrink attack and drive as PLR falls below about 9 LU, scale bass with measured LF excess and air with HF tilt) and CLI `analyze` extensions (tilt, crest, M/S width, `suggest`). Later: a Music / Speech / Game-FX / Silence classifier that morphs macro targets over 1–2 s with a user lock. Game scene states and a post-event cue lift go to an experiment branch.
+- **Why.** The same macro offsets hit a −9 LUFS brick-walled master and a −23 LUFS classical recording, so Punch on a limited master makes it quieter and flatter, and talk content gets music processing.
+- **Expected benefit.** Smart scaling for limited masters is real, but the dense-signal evidence was wrong: the Music Boost 0 crest drop (PLR 12.47 → 10.6) comes from BassEngine alone (bass off restores the input), and Punch 100 merely restores input crest. The valid evidence is the original −11.45 against −11.06 LUFS on a real master. Per-app routing already separates Game, Music and Chat, so a classifier mainly helps the System strip. The 1.5 s post-event lift has no basis in forward masking (which decays in about 100–200 ms); it would be compensating game-mix ducking, which needs per-title evidence.
+- **Approach.** E34 owns the tap and `AnalysisState` publisher; [E35](#e35) reuses them. Smart scaling through a `MacroModulation` of slewed multipliers in `MacroMap::apply`, with a per-preset flag and a re-tune pass. Classifier defaults to "suggest" in Music and automatic only on the System strip; morph only across silence or on a strong posterior with ≥ 5 s hysteresis. Note that live and offline renders will diverge once analysis runs on a worker.
+- **Depends on.** Genre target curves (data work). The in-flight per-game auto profiles overlap the scene idea. The "Startle Guard" cap does not exist yet ([E21](#e21)).
+- **Done when.** On a real limited master (PLR < 8 LU), Punch 100 lowers integrated loudness ≤ 0.1 LU and raises true peak ≤ 0.5 dB, with PLR 12+ material unchanged within 0.2 LU. Synthetic speech/music/silence unit tests; no class flips over 60 s of steady music; ≥ 90 % frame accuracy at 1 s on GTZAN or MUSAN subsets. Offline renders bit-identical twice. MUSHRA of Smart vs static macros on 10 masters from −23 to −8 LUFS.
+- **Evidence.** [MacroMap.cpp][MM] `apply()` (no signal input); no classifier or speech-detection code in the tree; `flubsound-cli help analyze` (loudness and peaks only); [09 §1.2](09-future-roadmap.md#12-candidate-neural-features-prioritised) N2/N5.
+
+<a id="e38"></a>
+#### E38 · Show what the sound is doing: net tone curve, active-now chips, in-out loudness and governor readouts
+
+*UX & workflow · benefit 3 · difficulty Medium · slice 2–3 days; net curve and chips 3–4 weeks · Quick win (slice)*
+
+- **What.** Slice: an in-to-out LU delta, the governor's reason code, bass-harmonics and air-exciter distortion rows, and CLI render-JSON statistics (governor min/mean, limiter GR max and % active, THD per source, safety-clip count). Then a "Net tone" curve summing the actual linear stages at the current level, toggleable against the EQ-only curve, and "active now" chips under the Boost dial from effective values (e.g. "Bass +3.1 dB @ 70 Hz · Width 118 % · Maximizer drive 4 dB"). A brightness meter arrives with [E07](#e07).
+- **Why.** Boost 55 % shows a flat curve, five macros at 0 % and GR 0.0, so users cannot tell what changed.
+- **Expected benefit.** Trust and tuning. A concrete blind spot: at Boost 0 in Music, BassEngine alone lowers true peak from −3.52 to −5.40 dBTP and PLR from 12.47 to 10.6 at unchanged loudness, and the UI says nothing. Correction: a distortion readout already exists (`LoudnessPanel` draws a Distortion row from `MeterBus.distortionDb`), so R3.5's "not shown" applies only to the harmonics and air readings.
+- **Approach.** Do not hand-write response formulas that duplicate each module's filter design and drift from it. Have each linear stage publish its current biquad/SVF coefficients (a small seqlock snapshot per block) and evaluate |H| in the UI; nonlinear stages appear as chips only. Smooth and label level-dependent curves. Keep `EqCurveEditor`'s cached-image strategy at a 10–15 Hz repaint. Remove rather than add readouts where the meter column is dense ([E39](#e39)).
+- **Depends on.** [E07](#e07) for brightness, [E39](#e39) as the Simple-view host, the in-flight UI scale/theme work.
+- **Done when.** The coefficient-derived curve matches a swept-sine measurement of the linear chain at −30 dBFS within 0.3 dB. Music at Boost 0 on the dense signal shows the subsonic high-pass and a chip names it. Boost 55 gives a non-flat curve and ≥ 3 chips. `test_offline_render` asserts the new JSON keys on Club Loud.
+- **Evidence.** [06 §6.5][06-65] (curve = `ParametricEq::responseDb` + `eq.output` only); [LoudnessPanel.cpp][LP] Distortion row (~L183–206); [BoostPanel.cpp](../app/Source/ui/BoostPanel.cpp); [TRACEABILITY Known gaps][TR-gaps] R3.5; CLI `render` JSON fields.
+
+<a id="e44"></a>
+#### E44 · Multi-core, reliable real-time audio threads: parallel strips, rtkit, workgroups and visible RT status
+
+*Latency & performance · benefit 3 · difficulty High · Phase A 1.5–2 weeks; Phase B 4–6 weeks*
+
+- **What.** Phase A: the rtkit `MakeThreadRealtime` fallback over D-Bus from the message thread (or the Realtime portal under Flatpak), with `RLIMIT_RTTIME` handling; preallocated saved-policy objects; an RT status line in Settings and overload notifications ("Audio thread: real-time (FIFO 20 via rtkit)" or "NOT real-time" with a fix); a macOS audit so `promoteAudioThread` does not overwrite the HAL's own time-constraint policy. Phase B, optional: strips as jobs on a small RT worker pool with a lock-free barrier, a deadline and a serial fallback, workers joined to the device `os_workgroup` on macOS.
+- **Why.** On most Linux desktops the audio thread silently stays SCHED_OTHER and competes with the game; four strips run serially on one thread.
+- **Expected benefit.** Linux: real, since `promoteAudioThread` leaves SCHED_OTHER on EPERM ("RealtimeKit... not wired up") and allocates on the audio thread. Windows already has MMCSS, so only visibility improves. macOS: the HAL IO thread is already in the device workgroup; only Phase B workers would need to join. `promotionHandle` is written and never read, so RT status is invisible everywhere. Phase B pays off only at 96–192 kHz or heavy multi-strip use (4 strips average 22 % of budget at 48 kHz/128 against 107 % at 192 kHz Quality); games render at 48 kHz.
+- **Approach.** Record the audio thread's TID on the first callback; call rtkit at ≤ `MaxRealtimePriority` from the message thread, reusing the libdbus plumbing of the portal hotkeys. Phase B only when [E45](#e45)'s histogram shows serial cost > about 40 % of budget and blocks ≥ 256 frames, with `WaitOnAddress` / futex / `os_sync` waits and a mandatory deadline fallback.
+- **Depends on.** [E45](#e45)'s histogram; the in-flight engine swap; on [E48](#e48)'s native PipeWire path Phase A is unnecessary (the data thread is already RT) but stays for the JUCE fallback.
+- **Done when.** A first-callback test asserts `promoteAudioThread` performs no allocation; a mock rtkit on the private dbus-daemon verifies the call sequence and RLIMIT precondition. On Ubuntu 24.04, Fedora 40 and SteamOS desktop with default limits, Settings shows real-time and `chrt -p` shows SCHED_FIFO/RR; xruns/hour under a game-like `stress-ng` load are lower than baseline. macOS `thread_policy_get` shows no worse constraint at 64 frames. Phase B: p99.9 callback time ≥ 40 % lower at 4 strips/192 kHz/512 Quality, no regression at 48 kHz/128, 24 h soak with 0 extra xruns.
+- **Evidence.** [AudioEngineHost.cpp][AEH] `processBlock()`, `promotionHandle` (written ~L875, never read); [MixEngine.cpp][ME] serial strip loop; [PlatformServices_linux.cpp][PSL] `promoteAudioThread` (~L2563–2595); [PlatformServices_mac.mm][PSM] (~L549); [08 D5](08-pitfalls-and-solutions.md#d5-power-management-windows-11-ecoqos-hybrid-cpus).
+
+<a id="e45"></a>
+#### E45 · CPU governance: idle freeze, rate-aware cost, power policy, peak-callback monitoring and a latency-neutral shed ladder
+
+*Latency & performance · benefit 3 · difficulty Medium · 5–6 engineer-weeks*
+
+- **What.** Freeze a strip whose *fed* input stays below −120 dBFS longer than its longest tail, outputting latency-aligned zeros and resuming with pre-roll and a 5 ms crossfade. Time every callback into a lock-free histogram (mean, p99, p99.9, max), show "peak %", feed p99.9 into `OverloadWatchdog`, and detect discontinuities from host timestamps. Spread the spectral gate's frame work across hops (moved here from [E43](#e43)). Gate analysers on visibility; an opt-in battery mode (EcoQoS allowed, lighter oversampling). Replace the profile-stepping overload response with a cost-ranked, latency-neutral shed ladder that recovers with hysteresis and only prompts for profile changes. A committed benchmark tool and CI perf gate.
+- **Why.** Silence costs 86–93 % of full processing (73.1 µs against 84.9 µs), power throttling is always disabled, a 2 Hz average hides 3–9x callback spikes (Balanced/128 mean 83.9 µs, max 544.6 µs; gate block 64 mean 87.9 µs, max 579 µs), and the only overload response is a latency-profile step (for example Quality → Balanced, 28.17 → 4.00 ms at 48 kHz) that re-prepares the engine and never steps back.
+- **Expected benefit.** Fed-but-silent input is the default Windows setup: `processBlock` marks a strip as fed whenever a device input is mapped or a capture slot is live, so the existing 0.5 s hangover never fires for a VB-Cable or loopback input streaming zeros. That is the main idle battery drain on laptops and handhelds. Correction: the watchdog also reacts to 3 device-reported glitches in 10 polls; the gap is backends that report no glitch count (−1). Battery and robustness work, no sound improvement.
+- **Approach.** Freeze at the fed-silence point in `processBlock`; freeze AutoLevel and governor state too so wake-up does not pump; err long on tails (HRIR, gate hangover, auto-release). Order the shed ladder from a measured per-module cost table from `tools/flub-bench`, not by hand. CI gates on instruction counts (cachegrind / perf stat), since wall-clock CI is too noisy.
+- **Depends on.** [E10](#e10) for rate-aware oversampling; the in-flight engine swap for shed steps that re-prepare; [E44](#e44) for RT status in notifications.
+- **Done when.** Frozen-then-resumed strips null against continuous processing to −90 dBFS for impulse, footstep and music at 44.1/48/96 kHz. Fed-silence strip CPU down ≥ 90 %; package power at idle with a VB-Cable input streaming zeros measured before and after. A 3x spike every 500 ms with `glitchCount = −1` is caught. The ladder recovers fully and never changes profile without a prompt. Gate max/mean < 1.5 at block 64. The CI perf job fails an injected 20 % regression.
+- **Evidence.** [MixEngine.cpp][ME] (skips only `in == nullptr`); [AudioEngineHost.cpp][AEH] fed/hangover logic (~L757–788); [PlatformServices_win.cpp][PSW] `disablePowerThrottling()` unconditional; [OverloadWatchdog.h][OW] (90 % x 4 polls at 2 Hz; glitch rule); [03 §15.2][03-152] ("throwaway benchmark"); [CI workflow][CI] (no perf job); TRACEABILITY R1.5.
+
+<a id="e48"></a>
+#### E48 · Native, turnkey Linux: PipeWire filter node, auto-linking, node.latency, rtkit, Flatpak, CI
+
+*Stability & platform · benefit 3 · difficulty High · E48a 3–5 days; total 10–14 engineer-weeks · Ambitious*
+
+- **What.** **E48a** (High on its own): set `PIPEWIRE_LATENCY` before the device opens (256/48000 Balanced, 128/48000 Low Latency, never locking the quantum on Balanced) and auto-link sink monitors through the libpipewire registry. Then roadmap 3.5: `flub_core` in a `pw_filter` with one port group per strip, sinks created from the app (no script), registry events instead of `pactl` polling, a strip-mapping UI, Flatpak with the Realtime and GlobalShortcuts portals, a headless PipeWire + WirePlumber CI job, and a headless mode for SteamOS Game Mode.
+- **Why.** Linux setup needs a script, manual qpwgraph wiring and a typed map, adds about 21.3 ms of quantum, and breaks under Flatpak (no pactl). EasyEffects is one click.
+- **Expected benefit.** Matters for SteamOS handhelds and Linux desktops, a few percent of the Steam audience, hence below [E46](#e46) and [E47](#e47). The biggest SteamOS obstacle was missing from the original: most Steam Deck play happens in Game Mode (gamescope), where a desktop JUCE window and tray are unreachable. E48a captures much of the value for the least effort.
+- **Approach.** `pw_filter_new_simple` with `PW_FILTER_FLAG_RT_PROCESS`; Game 8 ports, others stereo; null-audio-sink adapters created by the app; `node.latency` and `node.lock-quantum` only for Low Latency; target.object metadata moves; report the actual graph quantum to [E42](#e42). Keep the JUCE ALSA/JACK path as a fallback. Headless mode autostarted in Game Mode and controlled by hotkeys and auto profiles, with a documented "non-Steam game" launcher for the UI. Support WirePlumber 0.4 and 0.5.
+- **Depends on.** [E47](#e47)'s journal for metadata moves; [E42](#e42) consumes the quantum; [E44](#e44) Phase A only for the fallback; the in-flight engine swap inside the pw_filter callback; the in-flight auto profiles for UI-less use.
+- **Done when.** The CI job passes 20 consecutive runs. Manual matrix: Fedora 40+ GNOME, Ubuntu 24.04, KDE Neon, SteamOS 3.6 Desktop and Game Mode (processed game audio via autostart, no UI interaction). A fresh install reaches processed game audio with no manual steps. `pw-top` shows the requested quantum with other clients unaffected on Balanced. Loopback-measured ≤ 12 ms at 128/48000 on a USB interface. Flatpak passes the same flow. `kill -9` during a routed session restores default routing.
+- **Evidence.** [platform/linux/README.md][LNX] (native node, `node.latency`, RealtimeKit as roadmap; Flatpak "has no pactl"); [TRACEABILITY Known gaps][TR-gaps] R1.2, R4.6; [01 §5.3][01-53]; [EngineController.cpp][EC] `applyDeviceInputPolicy` (text map); [08 D9](08-pitfalls-and-solutions.md#d9-linux-diversity).
+
+<a id="e52"></a>
+#### E52 · Versioned, migratable, self-contained preset and state format (v2)
+
+*Stability & platform · benefit 3 · difficulty Medium · Phase A 1–1.5 weeks; Phase B 1.5–2 weeks · Quick win (Phase A)*
+
+- **What.** Phase A: the plug-in reads `flubStateVersion` and resets parameters missing from saved state to their defaults; a golden-render regression per factory preset (1/3-octave band RMS and integrated LUFS within ±0.05 dB, on one reference platform); unknown-key and clamp warnings from `fromJson` in CLI stderr/`--json` and as an app toast. Phase B: `version` as major.minor (newer minor loads with warnings, newer major is refused), a migration registry and alias table, full-state user presets, `uuid` and `contentHash` (auto-profile rules keyed by uuid), and settings `schemaVersion` with `isValidFile`, rotating `.bak1–3` and `.corrupt-<ts>` quarantine. The signed `.flubpack`, asset store and Scene export move to [E54](#e54).
+- **Why.** Changing any default re-voices every saved preset silently; newer presets are refused; a corrupt settings file silently wipes routing and hotkeys; renaming a preset file breaks auto-profile rules; plug-in project recall is not deterministic.
+- **Expected benefit.** Protects voicing and recall, not sound. Verified with the CLI: the typo key `bost` renders with exit 0 at "boost 10 %"; a version 1.1 preset is refused with exit 2. Factory presets store only 8–32 keys. The plug-in writes its state version and never reads it, and missing parameters "keep their current values", a real DAW recall bug. Must land before the first public release, not ahead of audible or safety work.
+- **Approach.** As above; coordinate uuid-based rules now, before the in-flight auto-profile rule format freezes (the one time-critical coupling). Factory presets may stay sparse because the golden test protects them.
+- **Depends on.** The in-flight auto profiles; [E53](#e53) fuzzers cover `fromJson` and migrations; [E54](#e54) for pack signing.
+- **Done when.** `bost` reported with an exact warning; 1.1 loads with warnings; 2.0 refused; v1 → v2 round trip. Truncated or garbage settings restore `.bak` and leave a `.corrupt` file. Plug-in: a parameter absent from an older state equals its default after load. Changing one default in the parameter layout fails CI.
+- **Evidence.** [PresetIO.cpp][PIO] (rejects version > 1 ~L39, drops unknown keys ~L57, sparse `toJson`); [PluginProcessor.cpp][PP] (writes the version, never reads it; ~L462–473); `AppSettings.cpp` (no `isValidFile`, autosave after 2 s); [DeviceProfiles.cpp][DP] (rejects version > 1); [PresetManager.cpp][PM] ids `user:<file name>`.
+
+<a id="e54"></a>
+#### E54 · Release engineering: signed installers, update channel, content packs, logging, crash reporting, diagnostics and opt-in telemetry
+
+*Stability & platform · benefit 3 · difficulty High · diagnostics slice 1–1.5 weeks; total 11–15 engineer-weeks without telemetry · Ambitious*
+
+- **What.** In this order: (1) a lock-free audio-thread event ring (xrun, underrun, NaN drop, governor and overload steps, device and route changes) drained at 2 Hz to a rotating log, plus "Export diagnostics" (zip); (2) Crashpad or sentry-native with CI symbol upload and consent-gated upload; (3) signed MSIX/MSI, notarised pkg, AppImage (Flatpak later); (4) an ed25519-signed update manifest with stable/beta channels, staged rollout and N−1 rollback (WinSparkle, Sparkle 2, notify-only on Linux); (5) signed, versioned content packs for presets, device profiles, HRTF sets, correction data and models, merged over the compiled-in floor; (6) opt-in, audio-free telemetry with a published schema, last.
+- **Why.** Unsigned binaries trigger SmartScreen and Gatekeeper; a new headset or fixed curve needs a full release; field reports of crackles or "no sound after update" cannot be diagnosed.
+- **Expected benefit.** Mostly indirect, but it gates any real release. Near-term user impact is diagnosability: there is no Logger, FileLogger or minidump handler, two DBG calls, and the device error is only printed to stdout. The diagnostics slice should be treated as High before any beta. Correction: signing no longer removes SmartScreen warnings for a new publisher (EV certificates lost instant reputation in 2024). Telemetry has no users yet and carries privacy obligations for audio software, so it is deferred.
+- **Approach.** Share event counters with the [E53](#e53) soak. Content packs require [E52](#e52)'s schemas; `juce_add_binary_data(FlubsoundPresets)` and the generated `DeviceProfilesData.cpp` remain the fallback floor. Plan certificate lead times (Azure Trusted Signing eligibility, Apple Developer ID enrolment).
+- **Depends on.** [E52](#e52), [E53](#e53); [E49](#e49) needs Developer ID; the driver-ABI field only once [E46](#e46) exists.
+- **Done when.** The diagnostics zip from a soak run contains an injected glitch. A forced crash yields a symbolicated report. Artifacts pass `signtool verify /pa`, `spctl -a -vv` and `stapler validate`; the SmartScreen result is recorded over time, not gated. Stable → beta → rollback works on a VM and a tampered manifest is refused. A device-profile pack changes a ceiling without an app release.
+- **Evidence.** [CI workflow][CI] (build, test, screenshots only); roadmap 1.7, 1.8, 3.3, 3.4, 3.11 in [07][07]; no logging or crash handler in `app/Source`; [02 §1](02-tech-stack.md) Crashpad/Sentry "(planned)"; [EngineController.cpp][EC] `lastDeviceError`.
+
+<a id="e55"></a>
+#### E55 · Anti-cheat-safe process handling and a verified anti-cheat matrix
+
+*Stability & platform · benefit 3 · difficulty Low · 3–5 engineer-days plus 1–2 calendar weeks of matrix testing · Quick win*
+
+- **What.** Cache {pid + process creation time → exe, display name} across session enumerations so each game process is opened once (optionally parse `IAudioSessionControl2` session identifiers to avoid even that). A Tournament mode that stops enumeration and foreground polling, disables auto profiles, the OSD and overlays, freezes routing and shows a header badge (optionally auto-enabled when vgc, BEService or EasyAntiCheat services run). Run and publish the roadmap 2.12 matrix (Valorant/Vanguard, CS2/VAC, Fortnite and Apex/EAC, R6/BattlEye, FACEIT) with functional as well as kick/warning columns. Plan attestation signing and vendor allow-listing for the driver.
+- **Why.** Kernel anti-cheats log or strip handles to game processes; a ban or kick would end the product's gaming credibility.
+- **Expected benefit.** Lower than first scored. The foreground half is already fixed (`WinForegroundApp::query` opens only on foreground change). Session enumeration opens every session's process on every 2 s pass (about 1800 opens/hour per game) with `PROCESS_QUERY_LIMITED_INFORMATION`, the right Task Manager, Discord and Steam use; anti-cheats target VM_READ/VM_WRITE and injection, so ban risk is low. The value is less needless work, a reassurance switch, and the untested functional question of whether loopback capture and routing work at all for Vanguard/EAC/BattlEye-protected games.
+- **Approach.** Member cache in `WinAppAudioRouter::enumerateSessions`, creation time from `GetProcessTimes` on the single first open, eviction when a pid's session disappears. Tournament mode in `AppSettings` plus a tray toggle. The matrix records title, anti-cheat version, build hash, hours played, kicks/warnings and functional results, and states that no-kick results are weak evidence (VAC bans in delayed waves).
+- **Depends on.** [E53](#e53) step 0 (the Windows code must run first); the in-flight auto profiles (shared foreground path); [E56](#e56) OSD and hooks in the matrix; [E54](#e54) signed binaries; [E46](#e46) for attestation.
+- **Done when.** Cache unit test (a reused pid with a new creation time is re-resolved; a known pid is not re-opened). A 1 h ETW / Process Monitor trace with a game running shows ≤ 1 OpenProcess per new pid. The published matrix covers 6 titles and is re-run each major release.
+- **Evidence.** [PlatformServices_win.cpp][PSW] `processImagePath()` (OpenProcess + `QueryFullProcessImageNameW`, ~L425) called from `enumerateSessions` (~L1151), `WinForegroundApp::query` (~L1918–1937); [06 §8][06-8]; [01 §4.6][01-46]; [08 C7][08-C7] "nothing here is proven by a test yet"; [driver README][DRV] §9 risk row.
+
+<a id="e60"></a>
+#### E60 · Perceptual and real-game validation: scenario corpus, spatial auditory models, listening panels and playtests
+
+*Stability & platform · benefit 3 · difficulty High · 4–6 engineer-months plus participant and licence costs · Ambitious*
+
+- **What.** Stage 1 (now, CI): a seeded, licence-free scenario generator (ambience + panned steps + explosion; quiet → combat; dialogue over effects; speech → music → silence; quiet-to-loud track change) rendered at −14, −24 and −40 LUFS through `OfflineRenderer` for every gaming and night preset, measuring cue-band SNR gain, step/bed contrast, onset jump, recovery time and bed drift, with the [E59](#e59) ratchet; `analyze --bands --events` for user captures, correlated with 5+ real-game clips. Stage 2 (nightly): IACC, DRR and diffuse-field deviation in C++, plus AMT Baumgartner 2014 in Octave (GPL tooling, never shipped). Stage 3: after a licence-clean HRIR set exists, app wiring of `HrirSet`, an in-app localisation test and HRTF picker. Stage 4: pre-registered MUSHRA panel and playtests.
+- **Why.** The R2.9 claims (footsteps, positional audio, explosions) and the night presets were never checked on realistic dynamics; three burst files exposed three major defects. Music voicing and spatial defaults were never validated perceptually.
+- **Expected benefit.** Stage 1 is High on its own: it directly tests R2.9 and R3.2. The human studies would be confounded now, because the [E59](#e59) defects are unfixed and the Windows path adds a 12.75 ms FIFO the product means to replace. The picker needs a SOFA loader, app wiring and datasets that do not exist (nothing in `app/` or `tools/` references `HrirSet`; no `.sofa` in the repo).
+- **Approach.** Set spatial targets from bypass and a public reference HRTF, not guesses. Loudness-match panel stimuli to ±0.2 LU with the engine's `LoudnessMeter`. Keep competitor captures private (HeSuVi Atmos/DTS impulses derive from licensed products). Change no defaults before results.
+- **Depends on.** [E59](#e59); [E58](#e58)'s content gate for HRIR data; [E46](#e46) or another low-latency Windows path and the in-flight auto profiles for playtests; licensed competitor copies.
+- **Done when.** Bypass: cue SNR gain 0 ± 0.1 dB; a +6 dB step-band EQ reads about +6 dB; a 20 dB pumping compressor fails the recovery metric; metric rankings over real clips agree with synthetic scenes (Spearman ≥ 0.6). Spatial metrics reproduce today's weak values and respond correctly to a synthetic pinna-notch change. Picker test-retest Spearman ≥ 0.7 over 5 users. Pre-registered human-study criteria (localisation at least on par with Windows Sonic within the 95 % CI; fewer reversals than stereo bypass; no matched music-preference loss at Boost 50), with results in roadmap items 1.4 and 2.7 and TRACEABILITY R2.9 and R3.2.
+- **Evidence.** [test_modes.cpp][T-modes] (steady `tone(f, levelDb)` only); [test_virtualizer.cpp][T-virt] (32 cases) and `test_spatializer.cpp` (23 cases), no localisation metric; [HeadphoneVirtualizer.h][HVh] `HrirSet`, `setHrirSet`; [TRACEABILITY][TR-gaps] R2.9, R3.2 notes; roadmap 1.4, 2.7 in [07][07].
+
+<a id="e57"></a>
+#### E57 · Extensible audio graph: data-driven chain topology, sandboxed VST3/CLAP hosting, and a strip x bus output matrix
+
+*Future-proofing · benefit 2 · difficulty Very high · E57-A 6–8 weeks; full bundle 7–12 engineer-months · Ambitious*
+
+- **What.** Schedule only **E57-A**: a secondary output bus in MixEngine with a per-strip send mask, a pre/post tap and its own `TruePeakLimiter`, driven through a second `AudioDeviceManager` and a reverse `DriftCompensatedFifo`, plus one fixed "device correction" EQ slot after `SSpatial` (if [E15](#e15)'s post-sum stage is not preferred). Deferred: a module registry with stable type IDs and per-instance keys, off-thread chain builds swapped by the crossfade, user macro definitions, an out-of-process VST3/CLAP FX slot before the maximizer, and an N-strip x M-bus matrix including a Mic strip.
+- **Why.** Users cannot chain trusted plug-ins or keep correction and taste EQ separate; streamers want a clean Stream mix and simultaneous speakers and headphones. Sonar Streamer Mode and Voicemeeter set the bar.
+- **Expected benefit.** Near zero for listening. On Windows, OBS Application Audio Capture already takes raw game audio, and a separate stream endpoint needs a virtual device that does not exist (R4.6). Hosting serves a niche of Equalizer APO and Voicemeeter power users and breaks the governor's THD and loudness guarantees for third-party output. Medium only as E57-A; the full bundle is Low.
+- **Approach.** E57-A as above, reusing the `dryLimiter` pattern. Defer the registry until a second concrete multi-instance need exists (`kNumParams` appears 83 times; constexpr parameter IDs are used in 11 files, including `MacroMap`, the governor rules, `PresetIO` and the plug-in's `rawValues`). Hosting waits for [E58](#e58)'s licence decision (VST3 SDK and JUCE hosting terms); if built, run out of process, re-assert the ceiling after the slot, exclude it from Low Latency, and proxy editor windows from the child process.
+- **Depends on.** [E46](#e46) or VB-Cable for Windows OBS use; real-hardware validation of the drift FIFO (R1.5); the in-flight engine swap; [E58](#e58); [E52](#e52) v2 migration before plug-in state is stored; a microphone chain ([E18](#e18)).
+- **Done when.** Fake-device app test: an excluded strip measures < −120 dBFS on bus 1; the pre-tap bus is bit-identical to the gained input sum; bus 1 true peak ≤ its ceiling; a 10-minute ±200 ppm drift simulation and 1 h on two real USB devices with zero under/overruns. Every factory preset renders bit-identically with the correction EQ flat (null at −140 dBFS). Later phases only once E57-A use justifies them.
+- **Evidence.** [ProcessingChain.h][PCh] `enum SlotIndex` and fixed `std::array` slots; [Parameters.h][PARh] constexpr band counts, `kNumParams`; [MixEngine.h][MEh] `kMaxStrips = 4`, stereo out; [AudioEngineHost.cpp][AEH] (outputs 0/1 only); [09 §3][09-3], [§4][09-4]; [TRACEABILITY Known gaps][TR-gaps] R4.6.
+
+### 2.3 Low priority (14)
+
+| ID | Title | Category | Benefit | Difficulty | Effort | Tag |
+|---|---|---|---|---|---|---|
+| [E29](#e29) | Measured HRTF path, convolver, head tracking | Gaming | 3 | Very high | 16–22 wk | Ambitious |
+| [E33](#e33) | Hearing-profile personalisation, per-ear processing | Adaptive & intelligent | 3 | High | 8–12 wk (slice 2 wk) | Ambitious |
+| [E03](#e03) | Rebuild the virtual-bass generator | Audio quality | 2 | High | 4–5 wk (preset fix 2–4 h) | Ambitious |
+| [E08](#e08) | Rebuild the air exciter, codec bandwidth restoration | Audio quality | 2 | High | 6–8 wk | |
+| [E13](#e13) | Hi-res and sample-rate transparency | Music | 2 | Medium | 2–3 wk | |
+| [E16](#e16) | Hardware-ID headset identification, on-board DSP awareness | Headsets | 2 | Medium | slice 1.5–2 wk | Quick win |
+| [E20](#e20) | Bipolar Impact: LF punch / loud-event taming | Gaming | 2 | High | 3–4 wk (rekey 1 line) | |
+| [E24](#e24) | Per-source positional enhancement | Gaming | 2 | High | slice 0.5–1 day; redesign 6–9 wk | Quick win, Ambitious |
+| [E25](#e25) | Sound radar overlay | Gaming | 2 | Medium | 4–5 wk | |
+| [E26](#e26) | Per-title tuning and title database | Gaming | 2 | Medium | 4–5 wk code + content | |
+| [E31](#e31) | Height and object audio | Future-proofing | 2 | Very high | 10–14 wk | Ambitious |
+| [E35](#e35) | Neural runtime that can host models | Adaptive & intelligent | 2 | Very high | 18–28 wk (slice 5–7 wk) | Ambitious |
+| [E41](#e41) | Localisation and screen-reader support | UX & workflow | 2 | Medium | 5–7 wk (Wayland fix 0.5–1 day) | |
+| [E43](#e43) | SIMD kernels, ISA dispatch, a real FFT | Latency & performance | 2 | Medium | 4–6 wk (slice 2–3 days) | |
+
+<a id="e29"></a>
+#### E29 · Measured HRTF path: partitioned FFT convolver, SOFA/HeSuVi loading, HRTF picker and head tracking
+
+*Gaming · benefit 3 · difficulty Very high · 16–22 engineer-weeks · Ambitious*
+
+- **What.** First, cheaply: a SOFA loader (libmysofa, BSD) with polyphase resampling feeding the existing direct-form Renderer B at 256–512 taps, exposed as an "HRTF" picker, so HRTF choice can be user-tested. Then a non-uniform partitioned convolver (32–64-tap direct head, FFT partitions 64 → 256 → 1024, long partitions on a deadline worker) targeting ≤ 2 % of a core for 7.1 with 8192-tap BRIRs; a HeSuVi 14-channel WAV importer; a curated, licence-checked library (SADIE II, SONICOM, ARI-derived); a picker wizard; renderer reporting and speaker-angle UI; head orientation (headset IMU, webcam, OpenTrack UDP) as a scene rotation.
+- **Why.** Renderer B exists but nothing calls `setHrirSet`, so users cannot choose or personalise an HRTF. The 1024-tap direct form rules out BRIRs, which carry the externalisation Dolby, DTS and THX rely on. Head tracking is the strongest natural front/back cue.
+- **Expected benefit.** Gives enthusiasts what HeSuVi + Equalizer APO users already have. Reach is limited as for [E28](#e28) (discrete multichannel input only). The claimed music benefit (BRIR speaker simulation) does not exist in today's chain, because stereo never reaches the virtualiser; it needs a stereo "speaker simulation" path that disables crossfeed. High value per enthusiast, very high effort for a niche.
+- **Approach.** Adopt pffft or an equivalent SIMD real FFT first (`Fft.h` is "a small radix-2 complex FFT"). The deadline worker must also run in plug-in hosts that may not grant RT priority, with counted, visible fallback to the parametric renderer. `WavFile.cpp` rejects more than 8 channels, so HeSuVi needs its own reader. `setHrirSet()` is structural and goes through the in-flight engine swap.
+- **Depends on.** [E28](#e28)'s normalisation law, the engine swap, a faster FFT ([E43](#e43)), [E27](#e27), [E46](#e46) for Windows reach, licence review ([E58](#e58)), user hardware or OpenTrack. Must not delay E27, E28a or [E32](#e32).
+- **Done when.** Convolver error < −100 dBFS against direct form; zero-latency impulse; stall injection handled; no allocation; ≤ 2 % of a core for 7.1 with 8192 taps at 48 kHz; plug-in-host stall test shows counted misses and clean fallback. Loader within 0.2 dB up to 18 kHz. Swap without discontinuity. Motion-to-sound < 30 ms. Subjective comparison against E28's renderer and HeSuVi presets; loudness-matched stereo-BRIR preference test for music.
+- **Evidence.** `setHrirSet` referenced only in [HeadphoneVirtualizer.h][HVh] and tests; [03 §8.3][03-83] ("no host loads HRIR sets today"); `kMaxHrirTaps 1024` (16.5 % of a core for 7.1, [03 §15.2][03-152]); [ModuleCard.cpp][MC] (Room, Head and LFE only); [Fft.h][FFT]; [WavFile.cpp][WAV]; roadmap 2.6 in [07][07]; [09 §2][09-2].
+
+<a id="e33"></a>
+#### E33 · Hearing-profile personalisation with per-ear processing
+
+*Adaptive & intelligent · benefit 3 · difficulty High · slice 2 weeks; full 8–12 engineer-weeks · Ambitious*
+
+- **What.** Slice (worth Medium on its own): per-ear broadband gain and balance plus a per-ear 8-band EQ with manual entry, stored outside `ParameterStore`. Full: a global "Personal" stage with per-ear EQ and gentle per-ear 3–4 band WDRC; an in-app threshold test (6 frequencies from 500 Hz to 8 kHz, modified Hughson-Westlake, under 8 minutes) with calibration and a non-medical disclaimer; audiogram import (manual, Apple Health export); conservative fitting (half-gain or NAL-NL2-lite, capped at +15 dB, anchored to the better ear) behind the limiter and governor.
+- **Why.** Asymmetric hearing loss is common and cannot be expressed today: every EQ and dynamics stage is stereo-linked and there is no balance parameter. Apple, Samsung, Mimi and SoundID personalise; Sonar and Nahimic do not.
+- **Expected benefit.** Large for a minority, none for most listeners. The gaming claim is overstated: per-ear gain corrects a static ILD bias and restores audibility, but localisation deficits from hearing loss come largely from reduced high-frequency spectral and temporal processing, which amplification does not restore. "Restores lateralisation" is a hypothesis to test.
+- **Approach.** Storage outside `ParameterStore`, since `applyToStore` writes every parameter on preset load. Placement is the hard part: before `SComp`, the stereo-linked compressor and limiter duck *both* ears in response to the boosted worse ear, a dynamic ILD shift ([08 C1](08-pitfalls-and-solutions.md#c1-unlinked-dynamics-move-sounds)). Mitigate with headroom reservation and a ~12 dB cap on per-ear difference, or place it after `SMax` with its own per-ear true-peak limiter; measure both. Present it as a listening preference (FDA OTC hearing-aid rule, EU MDR).
+- **Depends on.** [E36](#e36)'s wizard framework, endpoint-volume get/lock on 3 OSes ([E32](#e32)), the unbuilt hearing guard (roadmap 2.11).
+- **Done when.** Per-ear magnitude within 1 dB of target at audiometric frequencies. A hard-panned source at −40/−20/−6 dBFS with a +12 dB right-ear HF profile keeps its ILD within 1 dB of the static per-ear gain through the whole chain at Boost 100. True peak ≤ ceiling on dense material with a +15 dB profile. Profile survives 5 preset loads; `test_rtsan` passes. Simulated listeners converge within 5 dB in under 8 minutes. A study with 10–15 participants with asymmetric or HF loss covers blind preference and footstep localisation; the gaming benefit is claimed only if localisation error drops.
+- **Evidence.** No audiogram or hearing code in `core/`, `app/` or `tools/`; `flubsound-cli params` (no channel selector on `eq.*`/`dyneq.*`, no balance); `DynamicEq.h` "STEREO-LINKED"; [PresetIO.cpp][PIO] `applyToStore`; [ProcessingChain.h][PCh] `SlotIndex`; [09 §1.2](09-future-roadmap.md#12-candidate-neural-features-prioritised) N7.
+
+<a id="e03"></a>
+#### E03 · Rebuild the virtual-bass (harmonics) generator: multiband, IMD-free, speaker-aware orders
+
+*Audio quality · benefit 2 · difficulty High · preset fix 2–4 hours; multiband rebuild 4–5 engineer-weeks · Ambitious*
+
+- **What.** Now: fix `device-laptop-speakers.json` `bass.subsonic 40` (redundant with its `replaceFundamental`) and add a regression test. Later: 4–6 band-pass bands (1/3–1/2 octave) between 25 Hz and the harmonics cutoff, each with its own envelope-normalised shaper; orders up to T8–T10 for the lowest bands so at least three partials land above the cutoff; the harmonic source tapped before the subsonic HP; the post-HP raised to HP4; per-band loudness matching. The pitch-tracked / phase-vocoder hybrid is cut (40–80 ms frames; Quality/offline only).
+- **Why.** Music on laptop and small speakers: polyphonic bass (bass + kick, chords, octave synths) turns into dissonant IMD, and the lowest octave the feature exists to restore is lost. Gaming: explosions become fuzz.
+- **Expected benefit.** Most of the laptop "lost octave" is a preset bug: for a 30 Hz tone, audible-band (≥ 120 Hz) energy is −27.0 dB with the preset's subsonic 40 and −17.8 dB with subsonic 0 (+9.2 dB), because the stage-1 subsonic runs before the stage-4 harmonic source. The rebuild's residual benefit is IMD reduction for speaker users: 41 + 55 Hz gives non-harmonic/harmonic power of −0.9 / +2.9 / +4.5 dB at character 0 / 0.5 / 1 (single tone −104.5 dB). Headphone users get almost nothing (harmonics default 0; headphone presets ≤ 0.2).
+- **Approach.** Extend the T2–T5 polynomials in `BassEngine::processSegment` stage 4 and the `ParallelDistortion.h` telemetry per band. Tapping pre-subsonic misses the shelf and protection, so recalibrate gain. Multiband reduces IMD only for notes in different bands, so state targets per interval. Take cutoffs from device profiles only after the device lab has measured them.
+- **Depends on.** None for the preset fix. The source relocation after [E02](#e02)'s subsonic decision; device-lab data (R6.1).
+- **Done when.** Preset slice: laptop preset gives ≥ −19 dB audible-band energy for 30 Hz (today −27.0). Rebuild: 41 + 55 Hz non-harmonic/harmonic ≤ −10 dB at character 0.5 (target set after checking band placement); E1–B1–E2 chord IMD above cutoff ≤ −15 dB relative to harmonics; single-tone purity ≤ −90 dB; CPU per strip within budget in Low Latency. MUSHRA on real laptop speakers against the *fixed* preset.
+- **Evidence.** [BassEngine.cpp][BE] `processSegment()` stage 4 (one band, T2–T5, 2nd-order `harmPostHp`) after stage 1; [test_bass_engine.cpp][T-bass] (single-tone only); `device-laptop-speakers.json` in [presets/factory][FAC]; `ParallelDistortion.h`.
+
+<a id="e08"></a>
+#### E08 · Rebuild the air exciter and add codec bandwidth restoration
+
+*Audio quality · benefit 2 · difficulty High · 6–8 engineer-weeks*
+
+- **What.** Rebuild "Air" with a selectable source band (2–5, 3.5–7 or 5–10 kHz), even/odd balance, transient-weighted depth and a wider mix range (about −6 dB), using the Saturator's 2x delta-path oversampling only when the 5–10 kHz band is selected (fixed latency per profile: none in Low Latency, where that band is unavailable). Add a "codec restore" mode for lossy *sources* only: a 4096-point spectral-edge detector (13–17 kHz cutoffs, seconds of hysteresis) and SBR-like spectral translation of the octave below the edge, capped at the extrapolated slope. Add alias-floor tests at 44.1 and 48 kHz.
+- **Why.** At full setting "Air" adds only +1.7 dB at 10–16 kHz and cannot restore the top octave that low-bitrate streams lose.
+- **Expected benefit.** Small. Codec restore cannot help Bluetooth *output*: SBC/AAC encoding happens after Flubsound Pro and cuts the synthesised octave off again, so it must never auto-enable for Bluetooth outputs. The claim that air cannot run at 44.1 kHz is wrong: `ClarityAir` is forced to 0 only below 42 kHz, where Nyquist ≤ 16 kHz makes a top-octave exciter pointless. Gaming benefit is negligible; most listeners over 30 and most gaming headsets roll off above 15–18 kHz.
+- **Approach.** `ClarityEnhancer` air stage (`kAirLowHz 3500`, `kAirHighHz 7000`, `kAirShelfMaxDb 2`, `kAirMixMax −12 dB`); `Oversampler.h` in delta mode as `Saturator.cpp` uses it; correct [01 §5.1][01-51]'s zero-latency Clarity statement for Balanced/Quality when the oversampled band is active. Validate codec restore on 50 full-band tracks and dark acoustic masters for false positives.
+- **Depends on.** [E07](#e07)'s Smoothness stage must sit after it; shares Oversampler/Saturator code.
+- **Done when.** Alias floor of 7 and 12 kHz tones at air = 1 in the 5–10 kHz band ≤ −70 dB at 44.1 and 48 kHz. Air = 1 on pink raises 10–16 kHz by ≥ +4 dB. Air = 0 bit-exact; reported latency correct per profile and rate. Codec edge detected within 500 Hz on 128 kbps AAC, zero false positives on the 50-track set. ABX on lossy streams against the lossless original.
+- **Evidence.** [ClarityEnhancer.cpp][CE] air constants (no oversampling); [ProcessingChain.cpp][PC] `ClarityAir = 0` below 42 kHz; [03 §5](03-dsp-design.md) residual aliases −25 to −44 dB at 17–21 kHz; [08 A5][08-A5].
+
+<a id="e13"></a>
+#### E13 · Hi-res and sample-rate transparency: signal-path display, offline SRC and export rate
+
+*Music · benefit 2 · difficulty Medium · 2–3 engineer-weeks (follow-content-rate deferred)*
+
+- **What.** A signal-path display (device rate, capture rate, FIFO ratio, chain rate) that says "unknown" or "resampled by Windows" rather than showing the mix format as a source rate; a Linux sink-versus-device mismatch flag; a polyphase windowed-sinc SRC (≥ 140 dB stopband, or vendored r8brain-free-src, MIT) with `--out-rate` in `flubsound-cli process/batch` and the export dialog, followed by TPDF dither; documentation of an exclusive-mode/ASIO music route. "Follow content rate" is deferred until the native PipeWire node and the verified engine swap exist.
+- **Why.** 44.1 kHz and hi-res sources are resampled by the OS mixer before Flubsound Pro sees them, and nothing tells the user. Audiophile listeners expect Roon or foobar2000-style transparency.
+- **Expected benefit.** Small: honesty about where resampling happens, and a chosen export rate. Games render at the device rate, so gaming gains nothing. The audible difference from avoiding a decent OS resampler is negligible for most listeners. On the Windows loopback path the source rate cannot be known.
+- **Approach.** A `SignalPath` struct published from `AudioEngineHost`; PipeWire node rates on Linux; process at the source rate, then SRC, then dither; re-apply the ceiling check after SRC in export (SRC can create new inter-sample overs).
+- **Depends on.** The in-flight engine swap and [E48](#e48) for the deferred part; [E46](#e46) for true source-rate visibility on Windows.
+- **Done when.** Passband ripple ≤ 0.01 dB to 20 kHz, image/alias rejection ≥ 130 dB, 44.1 → 48 → 44.1 null ≤ −120 dB on band-limited noise. `--out-rate` writes the correct header and length (±1 sample) and true peak ≤ ceiling + 0.1 dB. The Linux mismatch flag appears on a fake device with differing rates; the Windows loopback path shows "resampled by Windows", never a number.
+- **Evidence.** [AudioEngineHost.cpp][AEH] `captureRate = currentSampleRate` (~L518); [06 GUI](06-gui.md) "usually 48 kHz"; [08 A6][08-A6] (rate-mismatch flag is roadmap); CLI writes the input rate only; 96 kHz Signature runs at 11.4x realtime (the DSP is not the problem).
+
+<a id="e16"></a>
+#### E16 · Hardware-ID headset identification with per-model feature flags and on-board DSP awareness
+
+*Headsets · benefit 2 · difficulty Medium · slice 1.5–2 weeks; hardware IDs 1.5–2 weeks with [E15](#e15) · Quick win (slice)*
+
+- **What.** Slice: token hygiene (generic single-word tokens such as "atlas", "stealth", "recon", "pdp" count only with a vendor or headset-class word and no speaker-class word), a regression corpus of 100+ endpoint strings, and a per-device "headset enhancement is ON" toggle that clamps Footsteps and Detail to 30 % and forces the virtualiser off, with a visible "capped" indicator, offered after user confirmation for profiles with on-board DSP. Later, with E15's auto-suggest: hardware identity (USB VID:PID from the Windows device instance path, IOKit, PipeWire `device.vendor.id`/`device.product.id`, Bluetooth name/CoD), per-model entries with feature flags, and the device lab before any `labVerified:true`.
+- **Why.** Gaming: stacking the Footsteps band (+7.1 dB at 3.2 kHz) on Superhuman Hearing or on-board EQ is harsh over long sessions; misclassification gives wrong advice and misses controller-attached headsets.
+- **Expected benefit.** Today's harm is overstated: no entry has a `ceilingDbTp`, all suggest the same presets, and `adviceFor` takes no action for USB, analog or unknown connections, so a misclassification ("Atlas Sound Ceiling Speaker" → `turtle-beach-atlas`, "Headphones (Jabra Elite Pro)" → `elite-pro`, a missed "Headset Earphone (Xbox Controller)") only produces a wrong or missing banner. The one audible problem is solved by the per-device toggle without hardware-ID work.
+- **Approach.** In `Database::match`, a `generic` flag in the JSON and a speaker-class veto, keeping the specificity scoring. The toggle clamps macro inputs in `MacroMap::apply`. Drop the "play a 3 kHz tone and ask" check, which does not reliably detect on-board processing. `DeviceIdentity {bus, vid, pid, name}` later, with VID:PID beating name tokens and asking the user when ambiguous (dongles serve several headsets; PIDs are reused).
+- **Depends on.** The per-device store shared with [E15](#e15) (build once); the device lab ([10 §5][10-5]).
+- **Done when.** Corpus: 0 false positives on ≥ 30 non-headset names and the correct family on ≥ 95 % of known headset strings. Footsteps 100 with the toggle on nulls against a Footsteps 30 render (≤ −90 dB) and the virtualiser is bypassed; a fake device change applies and removes the cap. Every lab-verified entry records ID strings and an on-board DSP on/off frequency-response delta.
+- **Evidence.** [device-profiles.json][DPJ] (8 family entries, `labVerified:false`, broad single-word tokens); [DeviceProfiles.cpp][DP] `Database::match`, `adviceFor`; [08 C9][08-C9]; TRACEABILITY R6.1.
+
+<a id="e20"></a>
+#### E20 · Bipolar Impact: event-keyed LF punch on one side, loud-event taming on the other
+
+*Gaming · benefit 2 · difficulty High · band-6 rekey: one line; Punch 1–2.5 weeks if built*
+
+- **What.** Re-scoped: (1) fold "Tame" into [E21](#e21) as that guard's Dynamic range depth plus an LF-shelf stage, not a second downward compressor; (2) re-key anti-masking band 6 from Footsteps to that Tame amount now; (3) defer "Punch", an LF/LFE onset detector triggering a short (80–300 ms), governed, headroom-reserved LF gain and harmonic burst, with the static `BassBoostDb` removed from M3 so rumble is not lifted. Avoid a bipolar macro: keep M3 as 0..1 Punch.
+- **Why.** "Impact" lifts quiet rumble +3.3 dB and the explosion only +1.3 dB (+0.8 dB with max), raises the explosion peak from −2.7 to −1.1 dBFS, and with Footsteps 70 the explosion drops −0.4 dB. No control reduces gunfire or explosions except as a side effect.
+- **Expected benefit.** Small once E21 exists: Tame duplicates E21's cap, and competitive players generally want less low-end boom, not more. Punch helps cinematic single-player, a minority case, with no music benefit. The mislabelling is a naming and tuning problem, not a hazard. A bipolar macro would cost about a week of plumbing (Parameters range, preset validation, BoostPanel, tray and hotkey step logic, CLI `--macro`, auto-profile switcher, tests) before any DSP.
+- **Approach.** The rekey is a one-line change in `configureModeBands` (band 6 range = 6 dB x footsteps today). If Punch is built: `TransientShaper` indicator on a `Crossover` LR4 40–150 Hz band, with governed headroom, keeping in mind that LF onset boosts arrive exactly when the limiter is busiest.
+- **Depends on.** [E21](#e21) first; [E19](#e19) (band-6 coupling moves out of Footsteps); retune presets that use macro 3 (Competitive FPS 0.1, Battle Royale 0.25, Cinematic Adventure).
+- **Done when.** Rekey: Footsteps 100 no longer changes the explosion level. Punch: onset-window LF ≥ +3 dB, rumble-only window within ±0.5 dB, ceiling held. Tame tests live in E21's suite (explosion short-term loudness down ≥ 6 dB; a step 150 ms later within ±1 dB of its no-explosion level).
+- **Evidence.** [MacroMap.cpp][MM] `kGamingTable` M3 (`BassBoostDb 6`, `BassHarmonics 0.25`, `ClarityAttackDb 4`; `apply` skips v ≤ 0); [Parameters.cpp][PAR] macro range 0..1; [ProcessingChain.cpp][PC] `configureModeBands` band 6; [08 C5][08-C5].
+
+<a id="e24"></a>
+#### E24 · Frequency-consistent, per-source positional enhancement (replace the 3 kHz M/S focus bell)
+
+*Gaming · benefit 2 · difficulty High · slice 0.5–1 day; redesign 6–9 engineer-weeks · Quick win (slice), Ambitious (redesign)*
+
+- **What.** Slice now: force focus to 0 under the binaural lock (already-HRTF-rendered content) and under [E17](#e17)'s hands-free override, cap `kFocusMaxDb` at 3 dB, and fix the [08 C3][08-C3] wording and tests. Then a listening test of today's focus (off / 50 / 100 %) on HRTF-rendered footsteps decides between removing focus from the competitive presets and building a zero-latency LR4 filterbank ILD expander above 1.2 kHz (capped ratio), with an optional rear-emphasis cue, a binaural-input detector and an STFT per-bin mode for Quality only.
+- **Why.** The fixed 3 kHz, Q 0.5 bell on S is still applied to content that games have already HRTF-rendered, where extra ILD is unprincipled; it cannot separate sources (8.1 dB far-ear leak under a louder centred source) and does nothing for front/back.
+- **Expected benefit.** The claimed harm is not established. The measurement (6 dB flat ILD becoming 11.0–11.3 dB) used broadband noise with a flat ILD, which no real source has; natural HRTF ILDs range from about 0 dB below 1 kHz to 15–20 dB above 4 kHz. The Q 0.5 bell is about 2.5 octaves wide. Whether focus helps or hurts localisation is unmeasured in both directions. The binaural-lock fix is the one clear defect. The redesign is research with no commercial precedent of measured azimuth gains.
+- **Approach.** Slice in `ProcessingChain` (the binaural branch that still allows focus). Replace the flat-ILD test signal with HRTF-rendered sources from a public set at 15° steps. If building: `Crossover.h` bands, proportional ILD expansion to a cap, CPU checked on the Low Latency strip (about 40 biquads per sample), user override for the binaural detector.
+- **Depends on.** [E17](#e17), [E19](#e19) (cue boost before spatial), a listening study (gates everything past the slice), the in-flight engine swap.
+- **Done when.** Slice: focus is 0 under the binaural lock and hands-free, and capped focus adds ≤ 3 dB ILD at 3 kHz. The HRTF-rendered method reports per-band deviation from the original HRTF ILD. A pointing task (10+ players, focus off/50/100) decides redesign, keep or remove. Any redesign keeps Low Latency latency, mono sum within ±0.5 dB, centred sources unchanged and front/back confusion not increased.
+- **Evidence.** [StereoSpatializer.cpp][SS] `kFocusHz 3000`, `kFocusQ 0.5`, `kFocusMaxDb 6`; [ProcessingChain.cpp][PC] "Focus (an ILD emphasis) is still allowed" under the binaural lock; [03 §7.9][03-79] (8.1 dB leak); [08 C3][08-C3]; [MacroMap.cpp][MM] M2 `SpatialFocus 0.9`, Boost 0.3.
+
+<a id="e25"></a>
+#### E25 · Sound radar overlay (DSP-first, opt-in, tournament-lockable)
+
+*Gaming · benefit 2 · difficulty Medium · 4–5 engineer-weeks*
+
+- **What.** An 8-sector direction vector from the Game strip's pre-fold channel energies in two bands (steps 1–5 kHz, impacts below 300 Hz) with log-energy-flux onset detection (fixed ring, running percentile), and a stereo "L/R only" mode chosen from [E27](#e27)'s active-channel mask and labelled in the overlay itself. Published through `MeterBus` (new arrays; `kMaxMeterChannels` is 2) and drawn in a translucent, click-through, always-on-top overlay with an accessibility toggle. Strictly opt-in; forced off by a new Tournament mode setting ([E55](#e55)). An event classifier can come later.
+- **Why.** An accessibility feature (hard-of-hearing players, one-sided hearing loss) and a feature-list match for Nahimic Sound Tracker and ASUS Sonic Radar.
+- **Expected benefit.** Small competitive value today. On Windows the Game strip receives stereo on FL/FR inside an 8-channel container, so the radar is a left/right indicator with no front/back, information players already hear. Discrete 7.1 arrives only via the Linux 7.1 sink or an 8-channel cable. Score rises to 3 once E27 and the Windows Game endpoint ([E46](#e46)) ship.
+- **Approach.** Share the per-channel `MeanSquareFollower` stage with E27 (after `autoLevel.process(in)`, before the fold), band-split with `Svf.h`. Measure the overlay with PresentMon: a topmost layered window can knock a fullscreen-optimised DX11/DX12 game out of independent flip. Offer "second monitor only" if it does. Keep onset-to-display below about 50 ms.
+- **Depends on.** [E27](#e27) Phase 1 (hard); [E46](#e46) for full value; the in-flight UI scale/theme work; [E55](#e55)'s Tournament mode.
+- **Done when.** Unit tests for per-speaker bursts, two simultaneous sources, ambience false-onset rate, stereo panning with the no-front/back flag and no allocation; FL/FR-only content in the 8-channel container reports stereo-LR and lights no rear sector. A circling Game71 test signal tracks. PresentMon over a borderless flip-model title shows "Hardware: Independent Flip" preserved or the cost documented. A 5–8 player study measures time to turn toward a sound.
+- **Evidence.** [09 Future roadmap](09-future-roadmap.md) (radar for v1.3, tied to the unbuilt N2); no radar or overlay code in `app/Source` or `core`; TRACEABILITY R5.3; [08 C7][08-C7]; [PlatformServices_win.cpp][PSW] `channelMaskFor(8)`; [MeterBus.h][MB].
+
+<a id="e26"></a>
+#### E26 · Per-title tuning: exposed mode-band parameters, footstep-fit tool and a curated title database
+
+*Gaming · benefit 2 · difficulty Medium · 4–5 engineer-weeks of code, plus 1–2 days per title of content and recurring upkeep*
+
+- **What.** Expose the Gaming (and Music) mode bands as preset-level parameters: `gaming.detail.{freq,q,thr}`, `gaming.body.{freq,q,thr}`, `gaming.antimask.freq`, `gaming.voice.{freq,q}`, with macros still scaling the amount and `modeBandFrequency()` reading effective values. A fit tool that proposes band 4/5 centre, Q *and threshold* from a marked capture, with a confidence value. A curated, versioned, offline-updatable title database (exe, Steam/Epic app ID → genre → preset, "renders own HRTF" flag, "verified on game build X") consumed after user rules in the in-flight auto profiles. On Linux, identify the game from the sink input on `flubsound_game` rather than focus (fixes Wayland).
+- **Why.** Footstep spectra differ by title and surface; hard-coded bands and 9 genre presets cannot match per-game presets from Sonar, Nahimic or THX, and auto switching can only pick generic presets.
+- **Expected benefit.** Speculative: R2.9 "real-game efficacy" is untested, so this refines a feature never shown to help in a real game. The database is content upkeep that goes stale with every audio patch. Build the database only after the R2.9 playtest shows the genre footstep bands help at all.
+- **Approach.** New parameters keyed by string ID with `sinceVersion` (plug-in automation stays valid; older presets load because unknown keys are ignored). The fitter weights the step-to-background ratio by absolute step level relative to the band threshold and searches only where step energy is within 10 dB of its maximum, so background holes do not fool it. The database is embedded with a script following `embed-device-profiles.py`, with a drift test; titles are named without implying endorsement.
+- **Depends on.** R2.9 efficacy evidence (roadmap 1.4, 2.7) as go/no-go; the in-flight `AutoProfile.h`; [E27](#e27) shares the HRTF flag; legal capture of game audio.
+- **Done when.** Default values give bit-identical output to today's constexpr bands. Synthetic clicks at 2.8 kHz / Q 1.5 over pink with a decoy notch recover the centre within 1/6 octave. Schema, precedence and Steam-path parser tests. Per-title footstep-detection or ABX test with the 20 planned players; entries ship only for titles with a measured improvement.
+- **Evidence.** [ProcessingChain.cpp][PC] `kGamingModeBandHz {3200, 260, 90, 2000}`, literal thresholds in `configureModeBands`; 9 `gaming-*.json` presets in [presets/factory][FAC]; [AutoProfile.h][AP] (user rules only); `PlatformServices.h` `ForegroundApp` unsupported on Wayland; TRACEABILITY R2.9.
+
+<a id="e31"></a>
+#### E31 · Height and object audio: 16-channel format, 7.1.4 layouts, elevation cues, Spatial Sound provider
+
+*Future-proofing · benefit 2 · difficulty Very high · 10–14 engineer-weeks, excluding Windows provider work · Ambitious*
+
+- **What.** Raise `kMaxChannels` to 16 with the layout carried explicitly in `StripConfig` and the WAV reader (`dwChannelMask` including top-channel bits), add 5.1.2 / 5.1.4 / 7.1.2 / 7.1.4 layouts with per-speaker elevation, model elevation cues on top of [E28](#e28)'s pinna model, expose a 12-channel Game node on PipeWire (macOS after its HAL plug-in), add an internal object API and FOA/HOA input for VR and web content. On Windows, get a written answer from Microsoft on third-party Spatial Sound provider requirements before any engineering.
+- **Why.** Atmos-enabled titles emit 7.1.4 beds and objects, and routing through Flubsound Pro flattens height; Atmos and 360 music need height rendering.
+- **Expected benefit.** Very small near-term reach. On Windows, height and objects reach third-party processing only through partnership-gated `ISpatialAudioClient` providers, and routing into a 7.1 endpoint removes height. Atmos content is Dolby-encoded (TrueHD, E-AC-3 JOC, AC-4) and cannot be decoded without a Dolby licence, so Flubsound Pro only ever sees decoded PCM beds. Remaining value: decoded multichannel beds with height, and FOA/HOA.
+- **Approach.** `layoutFor()` infers layout from channel count, which is ambiguous at 10 channels. Audit every `std::array<…, kMaxChannels>` for memory growth (140 references across 53 files). Ambisonics shares the SH-domain path with [E29](#e29)'s head-tracking rotation. Do not market any Atmos support.
+- **Depends on.** [E28](#e28), [E29](#e29), [E30](#e30), virtual endpoints (roadmap 2.1–2.3), a Microsoft partnership, Dolby licensing for native decode (out of scope).
+- **Done when.** 16-channel chain at 11 rates with no allocation; the CLI round-trips 10/12/16-channel WAVs with explicit masks; 7.1 output bit-identical after the raise; the elevation notch moves ≥ 1/3 octave between 0° and 45°; a PipeWire 12-channel sink integration test; an up/level discrimination test with 10 listeners above 70 % correct.
+- **Evidence.** [AudioBlock.h][AB] `kMaxChannels = 8`; `ChannelLayout {Stereo, Surround51, Surround71}`; [03 §8.9][03-89] "no elevation"; [WavFile.cpp][WAV]; [driver README][DRV] Game endpoint 7.1 (0x63F); [09 §2][09-2] object audio "investigate".
+
+<a id="e35"></a>
+#### E35 · Neural runtime that can host the planned models: analysis taps, band masks, shared scheduler, ONNX Runtime
+
+*Adaptive & intelligent · benefit 2 · difficulty Very high · thin slice 5–7 weeks; full runtime 18–28 engineer-weeks, excluding model training · Ambitious*
+
+- **What.** Thin slice (Medium on its own): `ControlKind::BandGains` with an ERB filter-bank renderer, a native RNNoise runner on the Chat strip only, and the MixEngine per-strip sync group so the Chat model's latency does not pad the Game strip. Later: an Analysis model kind reusing [E34](#e34)'s tap (zero audio latency; a missed deadline holds the last value), a shared inference scheduler replacing per-slot pollers, ONNX Runtime behind `FLUB_WITH_ORT` (CPU execution provider first), a signed model manifest, UI status and counters.
+- **Why.** N1 chat/mic denoise and N2 event detection cannot be expressed today: controls are gain-only, the slot is post-fold stereo, one model per strip, and 10–20 ms of added latency breaks the low-latency promise.
+- **Expected benefit.** Enables features rather than sound, and near-term uses are blocked or covered: mic denoise needs a microphone path that does not exist ([E18](#e18)); incoming-chat denoise overlaps Discord Krisp and in-game VOIP processing (Sonar does offer it, so it has some table-stakes value); N2 has no model and no labelled game-SFX corpus, which is months of unbudgeted research.
+- **Approach.** RNNoise's 22 band gains alone drop its pitch-comb postfilter, so either port the postfilter or measure the loss. With 480-sample frames the latency is 960 samples (20 ms): within Balanced's 2-frame budget, not Low Latency, which is acceptable for Chat. DirectML adds GPU dispatch jitter that can exceed a 10 ms frame deadline for tiny models, so it is never a default. DeepFilterNet's look-ahead restricts it to Chat in Quality or offline.
+- **Depends on.** [E18](#e18), [E34](#e34)'s tap, the sync group ([E40](#e40)/[E42](#e42)), a game-event dataset, ORT packaging and signing ([E54](#e54)), model licences (RNNoise BSD-3, DeepFilterNet MIT/Apache-2.0).
+- **Done when.** An Analysis runner adds 0 latency in every profile. BandGains at unity nulls below −90 dB. `test_rtsan` passes with 4 strips and a model on Chat. Game output latency unchanged when Chat hosts RNNoise. RNNoise on the DNS Challenge blind set gains ≥ 0.5 DNSMOS OVRL over unprocessed, with stock RNNoise measured to quantify the gains-only loss. 0 deadline misses over 10 minutes with 4 models on a reference 4-core laptop (CPU EP).
+- **Evidence.** [ModelRunner.h][MR] `ControlKind {BroadbandGain, ChannelGains}`; [Eligibility.cpp][ELIG] `neuralLatencyBudgetFrames`; [ProcessingChain.h][PCh] neural slot after the fold; [09 §1.1][09-11]; [TRACEABILITY Known gaps][TR-gaps] R5.3.
+
+<a id="e41"></a>
+#### E41 · Localisation and full screen-reader support
+
+*UX & workflow · benefit 2 · difficulty Medium · Wayland fix 0.5–1 day; full 5–7 engineer-weeks plus ongoing translation*
+
+- **What.** Now: fix the Wayland hotkey false-mismatch warning by canonicalising localised portal trigger descriptions ("Strg+Alt+Hoch", "Umschalt", "Maj", "Bild auf") and reporting "Bound (desktop shows: X)" when a description cannot be parsed, instead of "Reassigned". Later: `TRANS()` on about 680 literals with LocalisedStrings per locale (DE, FR, ES, PT-BR first; JA, ZH, KO after a font strategy), parameter names translated app-side only, a pseudo-locale for overflow screenshots, `AccessibilityValueInterface` on meters, LUFS, a spectrum band summary and the governor chip (throttled to 1–2 Hz), and announcements for governor, bypass, A/B and preset changes.
+- **Why.** Competitors ship in 10–20+ languages; a German desktop shows a false hotkey warning; visually impaired players and listeners get only static titles.
+- **Expected benefit.** Reach and inclusion, not sound. The Wayland warning is a real defect: `portal::sameTrigger` canonicalises through fixed English modifier and key tables. Screen-reader live values matter for a small, underserved group. Translation mostly buys store-listing parity with Sonar, Nahimic and FxSound.
+- **Approach.** Sequence after the in-flight UI scale/high-contrast work (same component bounds). German and French strings run about 30 % longer and break tuned layouts; audio jargon machine-translates badly, so use a glossary and native review. Bundling Noto CJK adds 5–15 MB, so prefer system fonts. RTL is out of scope.
+- **Depends on.** The in-flight UI work; a translation workflow; [E39](#e39) for where hint texts live.
+- **Done when.** `test_app_hotkeys` gets a case where the mock portal returns "Strg+Alt+Hoch" for CTRL+ALT+Up and expects Registered (the only piece to land now). CI lint finds 0 bare user-facing literals. Pseudo-locale, DE and JA screenshots show no text overflow. Scripted NVDA, VoiceOver and Orca passes read the LUFS value, announce a governor transition and toggle A/B.
+- **Evidence.** No `TRANS`, `juce::translate` or `LocalisedStrings` in `app/Source`; no custom `AccessibilityHandler`; [06 §2.8][06-28], [§13][06-13]; [PlatformServices_linux.cpp][PSL] `portal::sameTrigger` (~L1286); [TRACEABILITY Known gaps][TR-gaps] R4.1.
+
+<a id="e43"></a>
+#### E43 · SIMD kernels, ISA dispatch and a real FFT
+
+*Latency & performance · benefit 2 · difficulty Medium · quick subset 2–3 days; full 4–6 engineer-weeks*
+
+- **What.** Quick subset: 8 independent partial accumulators, reduced in a fixed tree, in `TruePeakDetector::processSample` and the `HalfbandStage` up/down loops, with regenerated golden tolerances. Then `-ffp-contract=off` (or an MSVC `/fp:precise` check) so ISA paths do not fuse differently; SSE2/NEON and AVX2/FMA wrappers with dispatch chosen in `prepare()`; SoA channel lanes for EQ, DynEq and crossover biquads (8 lanes for Game 7.1); PFFFT (or vDSP on Apple) behind the `Fft` interface. The gate's frame spreading moves to [E45](#e45).
+- **Why.** The TP detector runs 2.5–3.5x slower than it needs to, and scalar DSP blocks the partitioned convolver and future mobile or console reach.
+- **Expected benefit.** No audible difference, and today's headroom is adequate (4 strips at full Boost average about 22 % of budget at 48 kHz/128). Measured 41.1–46.6 ns/sample/channel as built against 13.2–17.0 ns with reassociation (120 `addss` against 33 `addps`); whole-strip gains are smaller than the kernel gains. Two planned steps are already done or overstated: the oversampler already skips zero taps, and the TP detector already keeps a mirrored delay line.
+- **Approach.** No `-ffast-math`. Benchmark any symmetric-tap fold before keeping it. PFFFT requires 16-byte alignment and sizes that are multiples of 16 (32 for real transforms), which may not fit the gate's frame sizes. CI forces each ISA path.
+- **Depends on.** [E45](#e45)'s committed benchmark; a future convolver ([E29](#e29)) or neural model would raise its priority.
+- **Done when.** TP detector and oversampler ns/sample/channel ≥ 2x lower than 41–47 ns, with whole-strip gain reported honestly. SIMD against scalar null < −120 dBFS for every module from 44.1 to 192 kHz under forced SSE2 and AVX2. R3.1 true-peak tests still pass. An arm64 runner covers NEON.
+- **Evidence.** [TruePeakDetector.h][TPD] and [Oversampler.cpp][OS] sequential `acc +=` loops; [FlubCompilerSettings.cmake][CS] (only `-fno-math-errno`, no `-march`); [Fft.h][FFT] "Reference implementation... Production builds should swap in PFFFT"; [03 §15.2][03-152].
+
+---
+
+## 3. Quick-win enhancements
+
+High impact for relatively low effort. §3.1 lists the items tagged as quick wins; §3.2 lists quick slices carved out of larger items, which are often the best return in the report. Effort is engineer-days unless stated.
+
+### 3.1 Tagged quick wins
+
+| ID | Quick-win scope | Effort | Impact | Why it pays |
+|---|---|---|---|---|
+| [E40](#e40) | Presets stop writing `latency.profile`; per-strip sync groups; gate only when used | 3–5 | Game strip stays at 2–4 ms instead of 28.17 ms when a Quality music preset loads | Silent gaming-latency regression fixed at its root |
+| [E27](#e27) | Active-channel detector, stereo passthrough fold, manual own-HRTF switch | 7–10 | Full L/R separation and no −15.4 dB centre notch for stereo and in-game-HRTF titles on the Windows path | Mainstream Windows gaming case, today double-processed by default |
+| [E37](#e37) | Attenuate-only, frozen, fast-acquire comparison matcher | 3–5 | "Loudness-matched" bypass error from 3.10 / 1.91 LU to ≤ 0.5 LU | Shipped claim is currently false; drives every tuning choice |
+| [E21](#e21) | AutoLevel upper gate, +6 dB upward cap, fast post-event recovery; Tournament Clean wording | 3–5 | Night Mode bed lift from +16.6 to ≤ +6 dB, post-event 6.6 dB hole closed within 1 s | A night preset that startles defeats its purpose |
+| [E51](#e51) | Loopback-pair guard, protection-state reset, error banner, no stale latency | 4–6 | No closed CABLE loop through Boost when a wireless headset drops; visible device errors | Hits most wireless-headset gamers in the cable setup |
+| [E56](#e56) | Hotkeys target a chosen strip; Focus, ChatMix, Night, Bypass actions | 3–5 | Boost+ mid-match no longer changes the Music strip | Live bug; overloads already exist |
+| [E52](#e52) | Plug-in resets missing parameters; golden renders per factory preset; unknown-key warnings | 5–8 | Deterministic DAW recall; default changes can no longer re-voice presets unnoticed | Protects every later tuning change |
+| [E50](#e50) | Polyphase ASRC in the capture FIFO with its delay reported | 5–8 | Removes up to −8.41 dB of random top-octave loss on every Windows per-app capture | Transparency on the primary path |
+| [E01](#e01) | Shared BS.775 + LFE fold, calibrated LFE default (+6 dB first), v1-defaults shim | 4–6 | LFE audible in every 7.1 fold (today −93 dBFS with virt off, 10 dB light with virt on) | Correctness defect, small change |
+| [E38](#e38) | In-to-out LU delta, governor reason, harmonics/air distortion rows, CLI stats | 2–3 | Users and tuners see what Boost and the governor are doing | Cheap telemetry that also feeds [E59](#e59) |
+| [E17](#e17) | Hands-free detection fixes; band-4 clamp at fs ≤ 32 kHz | 1–2 | Removes the +8.7 / +13.9 dB 3.2 kHz lift into narrowband links | Protects any narrowband output, no platform code |
+| [E55](#e55) | Per-(pid, start time) process cache; Tournament mode | 3–5 | ~1800 OpenProcess calls/hour/game → one per process | Removes needless work near anti-cheats |
+| [E24](#e24) | Focus off under binaural lock and hands-free; cap at 3 dB | 0.5–1 | No extra ILD on already HRTF-rendered content | The one clear focus defect |
+| [E23](#e23) | "Voice Chat" preset on the Chat strip at first run | 1.5–2 | Chat no longer loudness-maximised in Music mode | Needs routing to be heard ([E22](#e22)) |
+| [E16](#e16) | Token hygiene, endpoint corpus, per-device "headset enhancement is ON" cap | 7–10 | No Footsteps stacking on Superhuman Hearing / on-board EQ; no speaker misclassification | Solves the audible part without hardware IDs |
+
+### 3.2 Quick slices of larger items
+
+| ID | Slice | Effort | Impact |
+|---|---|---|---|
+| [E36](#e36) | Fresh strips load Signature / Competitive FPS instead of Boost 0 defaults | 1 | First launch is audibly different from bypass (today −16.01 vs −16.00 LUFS) |
+| [E19](#e19) | Bands 4/5 threshold to about −6 dBFS (static bell with hiss taper) | < 1 | Full footstep lift from the first sample, contrast-neutral, parity with Superhuman Hearing / Sonar |
+| [E32](#e32) | Correct Late Night "adaptive" and Tournament Clean "hearing protection" wording | hours | Removes two false claims |
+| [E47](#e47) | E47a: `canList` / `canMoveEndpoint` split, honest Automatic, red "no apps processed" state | 2–3 | Default routing stops choosing a method that always fails |
+| [E42](#e42) | E42a: ms-based look-aheads, Quality clamped below 32 kHz, "estimated" labels, per-strip latency | 4–6 (with E40) | Quality at 8 kHz drops from 144 ms; honest latency readout |
+| [E04](#e04) | Remove `BassTighten` from the Music Punch macro | 0.5–1 | Punch stops cutting the kick onset (−2.2 dB at 0–10 ms from Tighten) |
+| [E03](#e03) | Laptop Speakers preset subsonic 40 → 0/20 | 0.2 | +9.2 dB audible harmonic energy for a 30 Hz tone |
+| [E02](#e02) | `bass.subsonicOrder`; gaming/music presets to HP2 ≤ 20 Hz | 1–1.5 | 4.8 ms less LF group delay; 20–28 Hz rumble kept on headphones |
+| [E20](#e20) | Re-key anti-masking band 6 from Footsteps to Tame (one line) | < 1 | Footsteps no longer lowers explosions |
+| [E10](#e10) | Residual-path DC high-pass; +24 dBFS sanitiser hidden from control loops | 4–6 | Output DC from −12.3 dBFS to ≤ −60 dBFS; no multi-second +6.6 dB excursion after a corrupt sample |
+| [E06](#e06) | Governor ticks on the window grid; base-drive strength control; scale/reason published | 5–8 | Stable loop to tune [E05](#e05) against; closes part of R3.5 |
+| [E28](#e28) | E28a: diffuse-field normalisation + adaptive virt make-up gain | 5–8 | Virt toggle loudness error from a 5.8 LU spread to ≤ 1 LU, so A/B is fair |
+| [E41](#e41) | Localised Wayland portal trigger aliases | 0.5–1 | No false "Reassigned" hotkey warnings on non-English desktops |
+| [E48](#e48) | E48a: `PIPEWIRE_LATENCY` and automatic monitor linking | 3–5 | Removes most of the ~21 ms Linux quantum and the manual qpwgraph step |
+| [E53](#e53) | Step 0: run the Windows app end to end on real PCs | 5 + fixes | First evidence that the main gaming platform works at all |
+| [E59](#e59) | `render.stats` in `--json` + KNOWN_GAP tests for pumping, 60 Hz THD+N, 7.1 LFE | 5 | Every later audio fix becomes provable |
+| [E54](#e54) | Event ring, rotating log, "Export diagnostics" | 5–8 | Field reports become actionable before any beta |
+| [E45](#e45) | Callback-time histogram, peak %, p99.9 into the watchdog | 3–4 | Spikes 3–9x the mean become visible |
+| [E58](#e58) | LICENSE, SPDX, `reuse lint`, DCO (after the owner's decision) | 2–4 | Unblocks any release and keeps relicensing possible |
+
+---
+
+## 4. Ambitious / advanced enhancements
+
+Higher effort, potentially transformative. "Transformative" is conditional: each row names the evidence that must exist before the effort is committed.
+
+| ID | Title | Effort | Why transformative | Gate before committing |
+|---|---|---|---|---|
+| [E46](#e46) | Windows endpoint driver / APO Lite | 6–9 months (APO Lite 8–12 wk) | Turns Flubsound Pro from a monitoring tool into a product on the main gaming platform: whole-system processing, real 7.1 beds, per-app strips, no FIFO at M2 | A Windows driver engineer; E47 honesty shipped; early anti-cheat test of a signed build |
+| [E15](#e15) | Per-device correction + AutoEQ | 8–13 wk (MVP 3–4) | Fixes the largest audible error in the chain (the headphone itself); parity with Peace/AutoEQ, Sonar, SoundID | Stable endpoint IDs; E11 preamp; licence review of any bundled data |
+| [E05](#e05) | Maximizer redesign | 8–11 wk | Moves the loud end from "cheap enhancer" (THD+N −16 dB, 22.6 dB cross-band ducking) towards Pro-L / Ozone behaviour | E06 slice and E59 metrics in place; loud-end MUSHRA against Pro-L 2 / Ozone |
+| [E19](#e19) | Footstep/cue enhancer redesign | 4–6 wk | Makes the flagship competitive feature work on real, transient footsteps across mastering levels | Interim bell shipped; scenario corpus (E60 stage 1); loudness-matched ABX |
+| [E06](#e06) | SafetyGovernor redesign | 8–10 wk | Protection that measures what is heard (weighted, whole-stage) instead of clipper THD only; closes R3.5 | Slice shipped; residual fit validated against injected artefacts |
+| [E12](#e12) | Headphone imaging for music | 12–18 wk | The main selling point of Dolby Atmos for Headphones, Waves Nx and SoundID; stereo music is today left inside the head | Phase A done; Phase B ships default-on only if a blind MUSHRA beats plain stereo |
+| [E48](#e48) | Native, turnkey Linux | 10–14 wk | EasyEffects-class one-click setup and a usable SteamOS Game Mode | E48a shipped; headless mode design |
+| [E49](#e49) | macOS process taps | 6–9 wk | Opens the Mac music audience, which today has no path at all | E53 step 0 on a Mac; Developer ID |
+| [E60](#e60) | Perceptual and real-game validation | 4–6 months | First evidence that any perceptual claim (R2.9, spatial, voicing) is true | E59 fixes landed; low-latency Windows path for playtests |
+| [E34](#e34) | Content and scene analysis | 10–14 wk | Macros that respond to the material instead of fixed offsets | Smart-scaling slice proves value on real limited masters |
+| [E54](#e54) | Release engineering | 11–15 wk | Makes the product installable, updatable and supportable | E52 schemas; certificates |
+| [E29](#e29) | Measured HRTF, convolver, head tracking | 16–22 wk | Individual HRTF choice and head tracking resolve front/back, where the sphere model cannot | SOFA loader on the direct renderer shows users prefer a chosen HRTF |
+| [E18](#e18) | Mic strip, virtual mic, sidetone | 1 wk to months | Completes the chat loop (Sonar ClearCast, NVIDIA Broadcast parity) | Hardware sidetone first; beats Discord Krisp in blind test |
+| [E33](#e33) | Hearing-profile personalisation | 8–12 wk | Per-ear processing for listeners with asymmetric loss, which no gaming suite offers | Whole-chain ILD test passes; participant study |
+| [E35](#e35) | Neural runtime | 18–28 wk | Hosts denoise and event-detection models the fixed-gain slot cannot | A model worth shipping and a microphone path exist |
+| [E02](#e02) | Bass dynamics and shared crossover | 3.5–4.5 wk | Removes kick-locked pumping of sustained bass | ABX shows the shared crossover's ~3 ms is audible before building it |
+| [E03](#e03) | Multiband virtual bass | 4–5 wk | Clean psychoacoustic bass on laptops and small speakers | MUSHRA against the *fixed* laptop preset |
+| [E24](#e24) | Per-source positional enhancement | 6–9 wk | Frequency-consistent cue sharpening instead of a single bell | Pointing test shows today's focus helps at all |
+| [E31](#e31) | Height and object audio | 10–14 wk | Keeps height from Atmos-era beds and VR content | Microsoft provider answer; decoded PCM beds with height actually reach users |
+| [E57](#e57) | Extensible graph, hosting, output buses | 7–12 months | Voicemeeter-class routing and user plug-in chains | E57-A use justifies later phases; E58 licence decision |
+
+---
+
+## 5. Recommended implementation order
+
+The phases assume the team in [07 §1][07-1] (about 6.5 FTE) and the three in-flight features. Four rules decide the order: (1) stop harm users hear today before adding features; (2) measure before tuning ([E59](#e59), [E53](#e53) step 0 before [E05](#e05), [E07](#e07), [E19](#e19), [E21](#e21) retuning); (3) honesty and recoverability before reach ([E47](#e47) before [E46](#e46); [E52](#e52) before [E54](#e54) content packs); (4) nothing that relies on the crossfaded engine swap, auto-profile switching or UI scale merges before those are verified.
+
+### 5.1 Phase 0 — this week (stop the harm; each ≤ 1 day, no dependencies)
+
+[E36](#e36) default preset on fresh strips · [E19](#e19) interim static bell · [E32](#e32)/[E21](#e21) wording fixes (Late Night, Tournament Clean) · [E04](#e04) Tighten out of Punch · [E03](#e03) laptop-preset subsonic · [E20](#e20) band-6 re-key · [E24](#e24) focus off under binaural lock · [E41](#e41) Wayland alias fix · [E17](#e17) hands-free detection and band-4 clamp. In parallel, non-engineering: the owner's licence decision ([E58](#e58)), a Windows test PC and a Windows driver engineer hire or contract ([E46](#e46)).
+
+*Rationale:* these are one-line to one-day changes that remove measured harm (inaudible first launch, zero-lift footsteps, false claims, onset loss, double ILD). Preset-affecting ones get a golden-render baseline first if [E52](#e52) Phase A is ready; otherwise a manual render diff.
+
+### 5.2 Phase 1 — next 2 weeks (correctness and measurement foundations)
+
+| Track | Items | Why now |
+|---|---|---|
+| Honest routing and latency | [E47](#e47) E47a · [E40](#e40) slice + [E42](#e42) E42a (one change set) · [E51](#e51) Phase A | Default routing fails; presets pad the Game strip to 28 ms; cable loops. All small, all correctness |
+| Measurement | [E53](#e53) step 0 · [E59](#e59) slice · [E38](#e38) slice | Every later fix needs a before/after number, and Windows has never run |
+| Fair comparison | [E37](#e37) slice (after E40's latency fix) | Every tuning and preset decision after this depends on matched comparisons |
+| Loops and dynamics | [E06](#e06) slice · [E21](#e21) slice | A stable governor before [E05](#e05); the Night Mode hole |
+| Safety | [E10](#e10) Phase 1 · [E52](#e52) Phase A | DC and corrupt-sample excursions; deterministic recall and golden renders |
+| Gaming input | [E27](#e27) Phase 1 (starts; finishes in Phase 2) | The largest default-on gaming defect on Windows |
+
+### 5.3 Phase 2 — next quarter (weeks 3–13)
+
+| Track | Items | Dependency notes |
+|---|---|---|
+| Finish quick wins | [E27](#e27) Phase 1, [E50](#e50) Phase A, [E01](#e01) (+6 dB default), [E56](#e56) Phase A, [E55](#e55), [E16](#e16) slice, [E23](#e23) slice, [E02](#e02) subsonic slice, [E04](#e04) Tighten fix, [E28](#e28) E28a, [E48](#e48) E48a, [E45](#e45) histogram, [E58](#e58) licence files | E01 merges after the in-flight engine swap and auto profiles; E28a after E27 |
+| Quality engine | [E59](#e59) full → [E05](#e05) stage 1 (clip cap + LF envelope together) → [E07](#e07) | E05 after E06 slice and E59; E07 needs the engine swap for a new slot |
+| Gaming dynamics | [E19](#e19) full redesign | After E21 slice; re-tunes all 9 gaming presets |
+| Headphones | [E11](#e11) preamp → [E15](#e15) MVP | E15 reuses E11's predictor; per-endpoint store shared with E16 |
+| UX | [E39](#e39), [E40](#e40) browser | E39 after the in-flight UI scale/theme merges; browser uses E37 matching |
+| Platform | [E47](#e47) rest, [E51](#e51) rest, [E52](#e52) Phase B, [E53](#e53) fuzzers + pluginval + Linux soak, [E54](#e54) diagnostics + crash reporting, [E46](#e46) APO Lite (start) | E52 uuids before the auto-profile rule format freezes; E46 after E47 |
+| Validation | [E60](#e60) stage 1 scenario corpus | Uses E59's metric library |
+
+This quarter is at the team's capacity. If it slips, drop in this order: E40 browser, E39 reflow below 1100 px, E07's tonal guard (keep Smoothness), E46 APO Lite start. Do not drop E59, E05 stage 1, E19 or E15 MVP.
+
+### 5.4 Phase 3 — following two quarters (months 4–9)
+
+- **Windows reach:** [E46](#e46) driver M1 then M2, with [E55](#e55)'s anti-cheat matrix run against signed builds and [E53](#e53)'s self-hosted Windows runner.
+- **Latency:** [E42](#e42) E42b–E42d, [E44](#e44) Phase A, [E45](#e45) full ladder and idle freeze.
+- **Sound:** [E05](#e05) styles and Boost coupling, [E06](#e06) residual fit and weighted budgets, [E10](#e10) Phase 2, [E12](#e12) Phase A then Phase B behind a panel gate, [E14](#e14) with the listening panel, [E32](#e32) relative contour, [E02](#e02)(a), [E04](#e04) multiband shaper, [E09](#e09) Phase A, [E28](#e28) renderer, [E21](#e21) Startle Guard.
+- **Chat and platforms:** [E22](#e22) (Linux routing prerequisite, strip-priority master, ChatMix), [E17](#e17) remainder, [E18](#e18) hardware sidetone, [E48](#e48) native node, [E49](#e49) macOS taps, [E54](#e54) packaging and update channel, [E37](#e37) and [E38](#e38) full, [E36](#e36) wizard (after E37 and E46 progress), [E30](#e30) detection and banner, [E13](#e13), [E34](#e34) Smart-scaling slice.
+- **Validation:** [E60](#e60) stages 2 and 4 once the E59 defects are fixed and a low-latency Windows path exists.
+
+### 5.5 Later, or gated on evidence
+
+[E03](#e03) multiband rebuild · [E08](#e08) · [E09](#e09) Phase B · [E12](#e12) Phase C · [E18](#e18) software strip and virtual mic · [E20](#e20) Punch · [E23](#e23) Voice/Film mode · [E24](#e24) redesign · [E25](#e25) (after E27 and E46) · [E26](#e26) (after R2.9 playtests) · [E29](#e29) (SOFA picker first) · [E30](#e30) multichannel output, haptics, crosstalk cancellation · [E31](#e31) · [E32](#e32) absolute SPL and dosimeter (after device lab) · [E33](#e33) (per-ear slice may move earlier) · [E35](#e35) (thin slice after E18) · [E41](#e41) translation · [E43](#e43) · [E57](#e57) (E57-A first) · [E58](#e58) C ABI, ARM, CLAP.
+
+### 5.6 Key dependency edges
+
+| Before | After | Reason |
+|---|---|---|
+| E06 slice | E05 | Tune the maximizer against a stable governor loop |
+| E05 LF envelope | E01 at +10 dB | +10 dB LFE moves limiter GR onto explosions |
+| E59 | E02–E07, E19, E21 retuning | Fixes must be provable |
+| E40 slice | E37, E36, E42 | No preset or A/B action may re-prepare the engine or pad the Game strip |
+| E47 | E46, E36 | Routing must be honest and recoverable before new endpoints exist |
+| E27 | E25, E28, E29, E30 | Stereo-in-8-channel content must leave the virtualiser first |
+| E11 predictor | E15 preamp, E14 LRA bounds | Shared static-boost model |
+| E52 | E54 content packs, E56 preset UUIDs | Versioned, mergeable schemas |
+| E53 step 0 | E50 Phase B, E51, E55, E46 validation | Windows code must run before it can be validated |
+| E21 | E20, E22 | Tame and per-strip placement belong to the guard |
+| E58 decision | any release, E57 hosting, bundled datasets | Legal blocker |
+| In-flight engine swap | E07, E09 look-ahead, E27, E40, E42, E45, E49(a) | Structural changes must be click-free |
+
+---
+
+## 6. Updated risk assessment for the proposed enhancements
+
+Likelihood and impact are Low / Medium / High / Very high. The [07 §8][07-8] register covers the original build; these are the risks of the work proposed here.
+
+| # | Risk | Category | Likelihood | Impact | Mitigation | Items |
+|---|---|---|---|---|---|---|
+| T1 | New holds, envelopes, residual filters or the Startle Guard open a true-peak overshoot path (R3.1 is measured, not proven) | Technical | Medium | High | Re-run the 11-rate matrix and dense stress set for strip and master limiter on every change; E59 ratchet; no merge without it | E05, E10, E21, E01 |
+| T2 | Structural changes depend on the crossfaded engine swap, which is not verified; clicks or dropouts return | Technical | High | High | Gate merges on the swap's click harness; keep latency-constant bypass; prefer runtime overrides over preset swaps | E07, E09, E27, E40, E42, E45 |
+| T3 | Interacting control loops (governor, AutoLevel, AutoDrive, Startle Guard, adaptive FIFO, virt make-up gain) oscillate or pump | Technical | Medium | High | Time constants separated ≥ 5x or merged; fixed-point analysis; 8 h and 24 h soaks; oscillation assertions | E06, E21, E28, E42 |
+| T4 | CPU growth (multiband, 4x oversampling, FDN, convolution) across 4 strips trips the overload step-down on laptops | Technical | Medium | Medium | E45 per-module cost table and CI perf gate; profile-gate heavy stages; idle freeze | E04, E05, E10, E12, E28, E29 |
+| T5 | Default or range changes silently re-voice sparse user presets or remap DAW automation | Technical | High | Medium | v1-defaults shim, golden renders, `sinceVersion`, release notes | E01, E02, E09, E14, E20 |
+| T6 | Kernel driver bug (BSOD), or Windows / OEM updates remove APO registration | Technical | Medium | Very high | Driver Verifier 72 h, IOCTL fuzzing, staged rollout; APO heartbeat and self-test | E46 |
+| P1 | Objective targets do not track perception; synthetic stimuli are gamed | Perceptual | Medium | High | Pin stimuli and definitions; correlate with real captures (Spearman ≥ 0.6); ABX gates before defaults change | E59, E60, E19 |
+| P2 | Correct changes read as regressions because they are quieter (preamp, clip cap, attenuate-only compare, relative upward compression) | Perceptual | High | Medium | Loudness-matched comparisons everywhere; "Processed +x LU" labels; release notes | E05, E11, E19, E37 |
+| P3 | Parametric spatial features are judged phasey or distant against Dolby, Waves Nx or HeSuVi | Perceptual | High | Medium | Default off; panel go/no-go; do not market without significant results | E12, E24, E28 |
+| P4 | Protection or clarity guards dull gaming cues (de-esser on gunshots, guard ducking footsteps) | Perceptual | Medium | High | Exclude the cue band from sidechains; "gaming presets keep positional cues" test; gaming guard default off or light | E07, E21, E22 |
+| P5 | Wrong correction on the wrong device, or an uncalibrated SPL estimate shows "safe" | Perceptual | Medium | High | Never auto-apply from name matches; show the active correction; "uncalibrated" instead of a number | E15, E16, E32, E33 |
+| A1 | Kernel anti-cheats block or flag the driver, process access, overlays or hooks | Platform / anti-cheat | Medium | Very high | Early signed-build tests; process cache; Tournament mode; no low-level hooks by default; functional matrix per release | E46, E55, E56, E25 |
+| A2 | First execution of the Windows and macOS code reveals design-level faults (IPolicyConfig slot, loopback doubling) | Platform | High | High | E53 step 0 before any Windows claim; budget 1–3 weeks of fixes | E53, E47, E49 |
+| A3 | Overlays and OSD force composed presentation over borderless games, adding latency | Platform | Medium | Medium | PresentMon measurement; optional; second-monitor mode | E25, E56 |
+| A4 | API and version churn: PipeWire/WirePlumber 0.4 vs 0.5, macOS tap API point releases, Windows builds | Platform | High | Medium | Support matrices in CI; version-guarded code paths; self-hosted runners | E47, E48, E49 |
+| A5 | Misdetection of form factor, Bluetooth profile or device family triggers the wrong policy | Platform | Medium | Medium | Banner suggestions before automatic switching; endpoint corpora; user overrides | E16, E17, E30 |
+| L1 | JUCE AGPLv3 conflicts with a closed or store release; no LICENSE; contributions without DCO block relicensing | Legal | High | Very high | Owner decision now; LICENSE, SPDX, DCO before outside contributions | E58 |
+| L2 | HRTF and headphone-measurement data carry restrictive terms (CC BY-SA, crinacle, Rtings) | Legal | Medium | High | Content-licence gate; import-only release as fallback | E15, E29, E60 |
+| L3 | Marketing or UI implies Atmos, DTS or THX support, vendor endorsement, "hearing protection" or H.870 compliance | Legal | Medium | High | Wording review; non-affiliation note; never claim Atmos decode or dose compliance without lab data | E31, E32, E12, E26 |
+| L4 | Hearing-health and personalisation features fall under medical-device rules; telemetry under GDPR/CCPA | Legal | Medium | High | Present as listening preference; opt-in, audio-free telemetry with a published schema | E32, E33, E54 |
+| L5 | ASIO and VST3 SDK terms restrict CI use, redistribution or hosting | Legal | Medium | Medium | Keep SDKs out of the repository; opt-in build flags; review before hosting | E42, E57, E58 |
+| S1 | No Windows driver engineer; the driver takes 6–9 months | Schedule | High | Very high | Contract early; APO Lite in parallel; E47 honesty and cable guidance meanwhile | E46, E36 |
+| S2 | Effort underestimates: the skeptic raised most estimates by 20–60 % | Schedule | High | High | Plan at the upper bound; ship slices first; Phase 2 drop order (§5.3) | All |
+| S3 | The three in-flight features slip or fail verification | Schedule | High | High | Keep dependent work behind flags; do independent slices first | E01, E07, E26, E27, E39, E40 |
+| S4 | Listening panel, playtests and device lab cannot recruit or lack hardware | Schedule | High | Medium | Book the lab and panel now; pre-register protocols; objective gates meanwhile | E12, E14, E60, E15, E16 |
+| S5 | Ambitious items (E57, E29, E31, E35) absorb time from High fixes | Schedule | Medium | High | Evidence gates in §4; no Phase 3 start before Phase 2 High items close | E29, E31, E35, E57 |
+| S6 | Certificate, notarisation and Partner Center lead times | Schedule | Medium | Medium | Start enrolment in Phase 0 | E46, E49, E54 |
+
+Listening tests and real-hardware validation are still required before any perceptual, device, latency or platform claim in this report is used in the product or its marketing.
+
+<!-- Link references -->
+[TR-sum]: TRACEABILITY.md#summary
+[TR-gaps]: TRACEABILITY.md#known-gaps
+[01-5]: 01-architecture.md#5-latency-budget
+[01-51]: 01-architecture.md#51-algorithmic-latency-per-profile-48-khz-the-only-latency-sources-in-the-chain
+[01-53]: 01-architecture.md#53-capture-paths-that-exist-today-add-their-own-buffering
+[01-46]: 01-architecture.md#46-per-application-routing-flow
+[02-43]: 02-tech-stack.md#43-why-not-an-apo-as-the-primary-windows-mechanism
+[02-6]: 02-tech-stack.md#6-licensing-summary-third-party-components
+[03-49]: 03-dsp-design.md#49-reviewed-design-decisions--known-limitations
+[03-79]: 03-dsp-design.md#79-known-limitations
+[03-83]: 03-dsp-design.md#83-algorithm--maths-as-implemented
+[03-89]: 03-dsp-design.md#89-known-limitations
+[03-119]: 03-dsp-design.md#119-known-limitations
+[03-146]: 03-dsp-design.md#146-bypass-ab-and-latency-profiles
+[03-152]: 03-dsp-design.md#152-cpu-per-module-indicative
+[06-28]: 06-gui.md#28-accessibility
+[06-61]: 06-gui.md#61-headerbar--mode-strip-presets-ab-bypass-status
+[06-65]: 06-gui.md#65-eqcurveeditor--the-interactive-eq-curve
+[06-8]: 06-gui.md#8-per-app-routing-ux
+[06-92]: 06-gui.md#92-planned-onboarding-roadmap-16-and-36-not-implemented
+[06-13]: 06-gui.md#13-known-limitations
+[07]: 07-roadmap.md
+[07-1]: 07-roadmap.md#1-team--assumptions
+[07-8]: 07-roadmap.md#8-risk-register
+[08-A1]: 08-pitfalls-and-solutions.md#a1-buffers-stack-up-silently
+[08-A5]: 08-pitfalls-and-solutions.md#a5-bluetooth-headphones
+[08-A6]: 08-pitfalls-and-solutions.md#a6-hidden-resampling
+[08-B3]: 08-pitfalls-and-solutions.md#b3-aliasing-from-nonlinear-stages
+[08-B5]: 08-pitfalls-and-solutions.md#b5-dc-and-sub-sonic-energy
+[08-C3]: 08-pitfalls-and-solutions.md#c3-wideners-and-crossfeed-corrupt-localisation
+[08-C4]: 08-pitfalls-and-solutions.md#c4-double-hrtf
+[08-C5]: 08-pitfalls-and-solutions.md#c5-masking-after-loud-events
+[08-C6]: 08-pitfalls-and-solutions.md#c6-frontback-confusion-in-virtual-surround
+[08-C7]: 08-pitfalls-and-solutions.md#c7-anti-cheat-and-tournament-rules
+[08-C9]: 08-pitfalls-and-solutions.md#c9-headset-on-board-dsp-stacking-with-flubsound-eg-turtle-beach-superhuman-hearing
+[08-D1]: 08-pitfalls-and-solutions.md#d1-clock-drift-between-clock-domains-windows--macos--linux
+[08-D3]: 08-pitfalls-and-solutions.md#d3-device-changes-hot-plug-sleepresume
+[08-D4]: 08-pitfalls-and-solutions.md#d4-double-processing-by-oem-enhancements
+[08-D7]: 08-pitfalls-and-solutions.md#d7-undocumented-per-app-routing-api
+[08-D8]: 08-pitfalls-and-solutions.md#d8-macos-permissions-and-installation
+[08-F]: 08-pitfalls-and-solutions.md#f-product--safety
+[09-11]: 09-future-roadmap.md#11-how-a-neural-module-plugs-in-framework-in-the-core-no-runtime-or-model-yet
+[09-2]: 09-future-roadmap.md#2-spatial--device-features
+[09-3]: 09-future-roadmap.md#3-platform--host-expansion
+[09-4]: 09-future-roadmap.md#4-ecosystem--product
+[10-4]: 10-headset-compatibility.md#4-recommended-setup-all-turtle-beach-models
+[10-5]: 10-headset-compatibility.md#5-validation-plan-device-lab
+[PC]: ../core/src/engine/ProcessingChain.cpp
+[PCh]: ../core/include/flub/engine/ProcessingChain.h
+[BE]: ../core/src/dsp/BassEngine.cpp
+[HV]: ../core/src/dsp/HeadphoneVirtualizer.cpp
+[HVh]: ../core/include/flub/dsp/HeadphoneVirtualizer.h
+[LM]: ../core/src/dsp/LoudnessMaximizer.cpp
+[TPL]: ../core/src/dsp/TruePeakLimiter.cpp
+[PR]: ../core/src/engine/Protection.cpp
+[PRh]: ../core/include/flub/engine/Protection.h
+[MM]: ../core/src/engine/MacroMap.cpp
+[CE]: ../core/src/dsp/ClarityEnhancer.cpp
+[SS]: ../core/src/dsp/StereoSpatializer.cpp
+[DEQ]: ../core/src/dsp/DynamicEq.cpp
+[ME]: ../core/src/engine/MixEngine.cpp
+[MEh]: ../core/include/flub/engine/MixEngine.h
+[PIO]: ../core/src/io/PresetIO.cpp
+[DP]: ../core/src/engine/DeviceProfiles.cpp
+[DPh]: ../core/include/flub/engine/DeviceProfiles.h
+[PAR]: ../core/src/engine/Parameters.cpp
+[PARh]: ../core/include/flub/engine/Parameters.h
+[SVF]: ../core/include/flub/dsp/Svf.h
+[OS]: ../core/src/dsp/Oversampler.cpp
+[TPD]: ../core/include/flub/dsp/TruePeakDetector.h
+[FFT]: ../core/include/flub/dsp/Fft.h
+[SAT]: ../core/src/dsp/Saturator.cpp
+[WAV]: ../core/src/io/WavFile.cpp
+[AB]: ../core/include/flub/common/AudioBlock.h
+[MB]: ../core/include/flub/engine/MeterBus.h
+[ELIG]: ../core/src/neural/Eligibility.cpp
+[MR]: ../core/include/flub/neural/ModelRunner.h
+[PSW]: ../app/Source/platform/PlatformServices_win.cpp
+[PSL]: ../app/Source/platform/PlatformServices_linux.cpp
+[PSM]: ../app/Source/platform/PlatformServices_mac.mm
+[AEH]: ../app/Source/engine/AudioEngineHost.cpp
+[EC]: ../app/Source/engine/EngineController.cpp
+[AR]: ../app/Source/engine/AppRouting.cpp
+[DCF]: ../app/Source/engine/DriftCompensatedFifo.cpp
+[OW]: ../app/Source/engine/OverloadWatchdog.h
+[AP]: ../app/Source/engine/AutoProfile.h
+[HK]: ../app/Source/shell/HotkeyManager.cpp
+[MW]: ../app/Source/shell/MainWindow.h
+[PM]: ../app/Source/presets/PresetManager.cpp
+[AS]: ../app/Source/settings/AppSettings.h
+[FA]: ../app/Source/FlubsoundApplication.cpp
+[MC]: ../app/Source/ui/ModuleCard.cpp
+[HB]: ../app/Source/ui/HeaderBar.cpp
+[LP]: ../app/Source/ui/LoudnessPanel.cpp
+[PP]: ../plugin/Source/PluginProcessor.cpp
+[DPJ]: ../presets/devices/device-profiles.json
+[FAC]: ../presets/factory/
+[DRV]: ../platform/windows/driver/README.md
+[LNX]: ../platform/linux/README.md
+[MAC]: ../platform/macos/README.md
+[CI]: ../.github/workflows/ci.yml
+[CS]: ../cmake/FlubCompilerSettings.cmake
+[FJ]: ../cmake/FlubJuce.cmake
+[T-drift]: ../tests/test_drift_fifo.cpp
+[T-virt]: ../tests/test_virtualizer.cpp
+[T-modes]: ../tests/test_modes.cpp
+[T-fp]: ../tests/test_factory_presets.cpp
+[T-bass]: ../tests/test_bass_engine.cpp
+[T-lim]: ../tests/test_limiter.cpp
+[T-sat]: ../tests/test_saturator.cpp

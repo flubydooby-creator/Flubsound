@@ -223,6 +223,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     }
     glueWarmupLength = std::max (1, msToSamples (kGlueWarmupMs, fs));
     distortionWindow.prepare (fs);
+    grWindowLength = std::max (1, msToSamples (kGrWindowMs, fs));
 
     // Structural limiter settings are passed through here.
     limiter.setLookaheadMs (lookaheadMs);
@@ -263,6 +264,9 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     distortionWindow.reset();
     distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
     windowClipDb.store (kMinusInfDb, std::memory_order_relaxed);
+    grWindowCount = 0;
+    grWindowMin = 0.0f;
+    windowGrDb.store (0.0f, std::memory_order_relaxed);
     fresh = true;
 }
 
@@ -520,8 +524,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         dryDelay.process (seg); // keeps the latency constant with the clipper off
     }
 
-    // ---- 3) true-peak limiter at the ceiling -----------------------------------
-    limiter.process (seg);
+    // ---- 3) the true-peak limiter at the ceiling runs in process() ------------
 }
 
 void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
@@ -535,6 +538,8 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
     const AudioBlock io = block.firstChannels (numCh);
     double clipDiff = 0.0, clipIn = 0.0;
     float glueMin = 1.0f, grMin = 0.0f;
+    double closedGrSumDb = 0.0;
+    int closedGrWindows = 0;
     for (int pos = 0; pos < numSamples; pos += spec.maxBlockSize)
     {
         const int len = std::min (spec.maxBlockSize, numSamples - pos);
@@ -551,7 +556,31 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
         }
         seg.numChannels = spec.numChannels;
         processSegment (seg, clipDiff, clipIn, glueMin);
-        grMin = std::min (grMin, limiter.getGainReductionDb());
+
+        // ---- 3) true-peak limiter at the ceiling ----------------------------
+        // Run in pieces that end on a fixed grid of kGrWindowMs windows
+        // (counted from reset(); the limiter is strictly per sample, so the
+        // split changes nothing audible) to take the deepest GR per window:
+        // unlike the per-block minimum, that does not depend on the host
+        // block size.
+        for (int done = 0; done < len;)
+        {
+            const int piece = std::min (len - done, grWindowLength - grWindowCount);
+            limiter.process (seg.subBlock (done, piece));
+            const float pieceGrDb = limiter.getGainReductionDb();
+            grMin = std::min (grMin, pieceGrDb);
+            grWindowMin = std::min (grWindowMin, pieceGrDb);
+            done += piece;
+            grWindowCount += piece;
+            if (grWindowCount >= grWindowLength)
+            {
+                closedGrSumDb += grWindowMin;
+                ++closedGrWindows;
+                grWindowMin = 0.0f;
+                grWindowCount = 0;
+            }
+        }
+
         if (float db = kMinusInfDb, clipDb = kMinusInfDb; distortionWindow.advance (len, db, &clipDb))
         {
             distortionDb.store (db, std::memory_order_relaxed);
@@ -560,6 +589,8 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
     }
 
     limiterGrDb.store (grMin, std::memory_order_relaxed);
+    if (closedGrWindows > 0) // several in a long block: their mean, so each window counts once
+        windowGrDb.store (static_cast<float> (closedGrSumDb / closedGrWindows), std::memory_order_relaxed);
     glueGrDb.store (gainToDb (glueMin), std::memory_order_relaxed);
     const float ratioDb = clipDiff > 0.0 && clipIn > 0.0
                               ? static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (clipDiff / clipIn)))

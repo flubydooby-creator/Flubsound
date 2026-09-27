@@ -140,7 +140,7 @@ private:
     ProcessSpec spec;
     BassEngineParams params;
     std::atomic<float> protectionDb { 0.0f };
-    ParallelDistortionWindow distortionWindow; // harmonics telemetry: sums over a 25 ms window
+    ParallelDistortionWindow distortionWindow; // harmonics telemetry: sums over a window of at least 25 ms (closes at a block boundary)
     std::atomic<float> distortionDb { -160.0f };
 
     double controlRate = 48000.0 / kControlInterval;

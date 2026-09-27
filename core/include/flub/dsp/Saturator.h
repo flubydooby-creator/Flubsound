@@ -126,7 +126,7 @@ private:
     std::vector<float> depthBuf, tubeBuf, bumpBuf, gainBuf, mixBuf; // maxBlockSize
     std::vector<float> distWeightBuf; // maxBlockSize: curve deviation weight re the linear path (THD+N telemetry)
 
-    DistortionWindow distortionWindow; // sums over a 25 ms window, whatever the host block size
+    DistortionWindow distortionWindow; // sums over a window of at least 25 ms (closes at a segment boundary)
     std::atomic<float> distortionDb { -160.0f };
 
     std::array<ChannelState, kMaxChannels> channelState {};

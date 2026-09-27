@@ -4,7 +4,10 @@
 // The unit is the reference model frame, kNeuralReferenceFrameMs (10 ms, the
 // hop of the voice-denoise class of models). A model's latency is what its
 // processor reports (AsyncModelProcessor: frameSize * (1 + safetyFrames)):
-//   Offline (batch render) : any model; nothing waits for the output.
+//   Offline (batch render) : any model. No real-time deadline: the chain
+//                            runs the processor in offline mode (the model
+//                            runs inside process(), so a render faster than
+//                            real time still gets every frame's result).
 //   Quality                : any model ("heavy" models are allowed only here
 //                            and offline).
 //   Balanced               : light models, latency <= 2 reference frames
@@ -24,7 +27,7 @@ inline constexpr double kNeuralReferenceFrameMs = 10.0;
 enum class ModelContext : int
 {
     Realtime = 0, // live playback through the app / plug-in
-    Offline = 1   // batch rendering (CLI, offline export)
+    Offline = 1   // batch rendering (CLI, offline export): AsyncModelConfig::offline, never on an audio thread
 };
 
 /** Latency budget of a profile in reference frames (Quality: unbounded, returns 0). */

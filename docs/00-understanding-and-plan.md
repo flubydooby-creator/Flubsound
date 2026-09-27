@@ -145,3 +145,5 @@ The work was run as a sequence of review loops:
 ## 5. Requirement traceability matrix
 
 See [`TRACEABILITY.md`](TRACEABILITY.md). It is generated at the end of the delivery loop and lists, for every requirement ID, the design section, the implementing files and the tests that prove it.
+
+What is still missing or needs improvement, with a prioritized plan, is in [`11-enhancement-report.md`](11-enhancement-report.md) (post-construction enhancement report).

@@ -132,7 +132,7 @@ private:
     TransientShaper::SvfGlide airShelf;
     float airShelfDb = 0.0f;
     std::array<SvfState, kMaxChannels> airShelfState {};
-    ParallelDistortionWindow distortionWindow; // exciter telemetry: sums over a 25 ms window
+    ParallelDistortionWindow distortionWindow; // exciter telemetry: sums over a window of at least 25 ms (closes at a block boundary)
     std::atomic<float> distortionDb { -160.0f };
 
     // Per-segment scratch (a segment never exceeds one control interval).

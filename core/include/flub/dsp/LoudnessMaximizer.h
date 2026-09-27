@@ -16,13 +16,14 @@
 //     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak).
 // Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
 //   the last block (how hard the clipper works), the limiter's gain
-//   reduction, and distortionDb: the clipper's THD+N over the last 25 ms
-//   analysis window (independent of the host block size),
+//   reduction, and distortionDb: the clipper's THD+N over the last analysis
+//   window (closed at the first segment boundary at or after 25 ms),
 //   measured at the oversampled rate around the curve itself, where input
 //   and clipped output are aligned (DistortionEstimator.h: residual after the
 //   least-squares gain, relative to the output energy). The chain feeds the
-//   limiter GR and the combined THD+N of the nonlinear stages (this one
-//   floored at clipEnergyRatioDb) to the SafetyGovernor, which backs the
+//   limiter GR (deepest per 10 ms window, getWindowGainReductionDb()) and the combined THD+N of the nonlinear stages (this one
+//   floored at the clip energy ratio over the same window,
+//   getWindowClipEnergyDb()) to the SafetyGovernor, which backs the
 //   governed macro contributions off when either exceeds its budget.
 // latency = clipper oversampler latency + limiter latency.
 #pragma once
@@ -78,7 +79,13 @@ public:
     /** Soft-clip transfer curve (threshold t, knee 0..1), exposed for tests/GUI. */
     static float softClip (float x, float threshold, float knee) noexcept;
 
+    /** Deepest limiter gain reduction in the last block (dB <= 0; the meter). */
     float getGainReductionDb() const noexcept { return limiterGrDb.load (std::memory_order_relaxed); }
+    /** Deepest limiter gain reduction per fixed kGrWindowMs window (dB <= 0),
+        the mean over the windows that closed in the last block that closed
+        any: the SafetyGovernor's GR input, independent of the host block size. */
+    float getWindowGainReductionDb() const noexcept { return windowGrDb.load (std::memory_order_relaxed); }
+    static constexpr float kGrWindowMs = 10.0f;
     /** Engagements of the limiter's final safety clamp since prepare() (0 in normal operation). */
     uint64_t getSafetyClipCount() const noexcept { return limiter.getSafetyClipCount(); }
     float getGlueReductionDb() const noexcept { return glueGrDb.load (std::memory_order_relaxed); }
@@ -132,8 +139,10 @@ private:
     ProcessSpec spec;
     MaximizerParams params;
     std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
-        windowClipDb { -160.0f };
-    DistortionWindow distortionWindow; // clipper THD+N sums over a 25 ms window
+        windowClipDb { -160.0f }, windowGrDb { 0.0f };
+    int grWindowLength = 480, grWindowCount = 0; // limiter GR window (kGrWindowMs), samples
+    float grWindowMin = 0.0f;                    // deepest GR in the open window (dB)
+    DistortionWindow distortionWindow; // clipper THD+N sums over a window of at least 25 ms (closes at a segment boundary)
 
     bool prepared = false;
     bool fresh = true;           // nothing processed since prepare()/reset(): setParams() applies instantly

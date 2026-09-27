@@ -680,9 +680,11 @@ bool writeWavImpl (const std::string& path, const AudioFileData& data, SampleFor
         f.close();
         // Do not leave a truncated file behind - but only delete regular files: the
         // path may be a device or FIFO (e.g. /dev/full), which must never be unlinked.
+        // Both calls take the UTF-8 path (a narrow string is ANSI on Windows).
         std::error_code ec;
-        if (std::filesystem::is_regular_file (path, ec))
-            std::filesystem::remove (pathFromUtf8 (path), ec);
+        const auto fsPath = pathFromUtf8 (path);
+        if (std::filesystem::is_regular_file (fsPath, ec))
+            std::filesystem::remove (fsPath, ec);
         return fail ("write error (disk full?)");
     }
     return true;

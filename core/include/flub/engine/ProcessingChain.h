@@ -36,9 +36,9 @@
 // exactly those of a chain without it. A model installed with
 // setNeuralModel() takes effect at the next prepare() (needsReprepare()
 // reports the pending change), where it joins the chain only if
-// isEligible (profile, L, sampleRate) holds and its sample rate matches;
-// otherwise it stays out (no worker, no latency) and getNeuralStatus() says
-// why. It sits after the gate and before the EQ: upstream of every dynamics
+// isEligible (profile, L, sampleRate) holds, its sample rate matches and (in
+// real time) maxBlockSize fits its safety frames; otherwise it stays out (no
+// worker, no latency) and getNeuralStatus() says why. It sits after the gate and before the EQ: upstream of every dynamics
 // stage, so the compressor and the maximizer's true-peak limiter act on what
 // the model's controls did and the ceiling guarantee holds whatever gain it
 // applies (up to AsyncModelConfig::maxGain); downstream of the gate, whose
@@ -87,8 +87,12 @@ struct ChainConfig
 /** Settings for the neural slot (ProcessingChain::setNeuralModel). */
 struct NeuralSlotConfig
 {
-    AsyncModelConfig processor;                     // safety frames, fallback, ramp, gain bound
-    ModelContext context = ModelContext::Realtime;  // Offline (batch render): any model is eligible
+    AsyncModelConfig processor;                     // safety frames, fallback, ramp, gain bound (offline is set from context)
+    /** Offline (batch render, never an audio callback): any model is
+        eligible, any block length is accepted, and the processor runs in
+        offline mode, so a render faster than real time gets every frame's
+        result (AsyncModelProcessor.h). */
+    ModelContext context = ModelContext::Realtime;
 };
 
 /** Why the neural slot is (not) in the chain, as of the last prepare(). */
@@ -99,7 +103,8 @@ enum class NeuralSlotState : int
     Ineligible = 2,         // L exceeds the prepared latency profile's budget
     SampleRateMismatch = 3, // the model was trained for another sample rate
     InvalidModel = 4,       // the runner's description is invalid (inert processor)
-    PrepareFailed = 5       // the runner's prepare() or the worker thread threw
+    PrepareFailed = 5,      // the runner's prepare() or the worker thread threw
+    BlockTooLarge = 6       // Realtime: maxBlockSize > safetyFrames * frameSize, so frames would miss whatever the model's speed
 };
 
 struct NeuralSlotStatus
@@ -204,6 +209,9 @@ private:
     void applyParameters() noexcept;
     void publishEffective() noexcept;
     void publishMeters (const AudioBlock& out, int numSamples) noexcept;
+    /** reset() without the control loops (governor, AutoLevel, AutoDrive,
+        LoudnessMatch): the signal path, its meters and the distortion monitor. */
+    void resetSignalState() noexcept;
     void downmixToStereo (const AudioBlock& io) noexcept;
     void prepareNeuralSlot (const ProcessSpec& stereo);
     bool inChain (int slot) const noexcept { return (slot != SGate || gateInChain) && (slot != SNeural || neuralInChain); }

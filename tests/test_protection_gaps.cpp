@@ -9,7 +9,11 @@
 //   * the LoudnessMatch class as a unit;
 //   * click-free A/B bank switches and global bypass toggles;
 //   * the Music Width and Clarity macros (MacroMap values and their audible
-//     direction through the chain).
+//     direction through the chain);
+//   * GatedLoudness's relative-gate release and cold-start correction (through
+//     AutoLevel and AutoDrive), the control loops across a dropped NaN block,
+//     the meters of slots switched off mid-stream, and the governor's GR input
+//     across block sizes.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -18,9 +22,11 @@
 #include "flub/engine/DeviceProfiles.h"
 #include "flub/engine/MixEngine.h"
 #include "flub/engine/ProcessingChain.h"
+#include "flub/engine/Protection.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 using namespace flub;
@@ -802,4 +808,266 @@ TEST_CASE ("Macros: through the chain, Width raises the side / mid ratio and Cla
     CHECK_GE (quietFull, quietHalf + 1.0);
     CHECK_GE (quietFull, 3.0);
     CHECK_LE (loudFull, quietFull - 2.0);
+}
+
+//==============================================================================
+// GatedLoudness: relative-gate release and cold start; the chain's control
+// loops across a dropped block; meters of bypassed slots; the governor's GR
+// input across block sizes
+//==============================================================================
+namespace
+{
+/** Feeds `seconds` of a stereo 1 kHz sine of peak `amplitude` (at 1 kHz the
+    K-weighting is ~0 dB, so a peak of X dBFS reads about X LUFS) to
+    `perBlock` in 480-sample blocks; `phase` carries on across calls. */
+template <typename Fn>
+void feedTone (double seconds, float amplitude, double& phase, Fn&& perBlock)
+{
+    constexpr int kBlock = 480;
+    Planar p (2, kBlock);
+    const int blocks = static_cast<int> (std::lround (seconds * kFs / kBlock));
+    for (int b = 0; b < blocks; ++b)
+    {
+        for (int i = 0; i < kBlock; ++i)
+        {
+            const float v = amplitude * static_cast<float> (std::sin (phase));
+            p.ch[0][static_cast<size_t> (i)] = v;
+            p.ch[1][static_cast<size_t> (i)] = v;
+            phase = std::fmod (phase + kTwoPi * 1000.0 / kFs, kTwoPi);
+        }
+        perBlock (p.block());
+    }
+}
+} // namespace
+
+TEST_CASE ("GatedLoudness: programme more than 20 LU below the last one is held out for 3 s, then the slow measure restarts, so AutoLevel converges on it and AutoDrive releases its reduction")
+{
+    // Loud (-8 LUFS) then quiet (-30 LUFS, 22 LU below): the relative gate
+    // closes on the quiet programme, and the slow measure it compares with
+    // only moves while the gate is open. Without the release it stayed
+    // closed for good (AutoLevel frozen near -9.4 dB, AutoDrive at its floor).
+    AutoLevel al;
+    al.prepare (kFs, 2);
+    al.setEnabled (true);
+    al.setTargetLufs (-18.0f);
+    AutoDrive ad;
+    ad.prepare (kFs, 2);
+    constexpr float kDriveTarget = -14.0f, kRequestedDrive = 12.0f;
+    const auto both = [&] (const AudioBlock& b) {
+        ad.update (b, kDriveTarget, true, kRequestedDrive);
+        al.process (b); // in place: AutoDrive saw the block first
+    };
+
+    double phase = 0.0;
+    feedTone (20.0, dbToGain (-8.0f), phase, both);
+    CHECK_NEAR (al.getGainDb(), -10.0, 0.3); // -18 - (-8)
+    CHECK (ad.getReductionDb() == -kRequestedDrive); // 6 LU over: at its floor
+
+    // The momentary follower needs about 0.7 s to fall 20 LU (the gate is
+    // open that long); from then on both loops hold...
+    feedTone (1.0, dbToGain (-30.0f), phase, both);
+    const float heldGain = al.getGainDb(), heldReduction = ad.getReductionDb();
+    CHECK_LE (heldGain, -9.0f);
+    feedTone (1.5, dbToGain (-30.0f), phase, both); // 2.5 s of quiet programme in all
+    CHECK (al.getGainDb() == heldGain);
+    CHECK (ad.getReductionDb() == heldReduction);
+    // ...and a pause (digital silence) neither releases nor restarts the count.
+    feedTone (5.0, 0.0f, phase, both);
+    CHECK (al.getGainDb() == heldGain);
+    CHECK (ad.getReductionDb() == heldReduction);
+
+    // After 3 s of quiet programme the slow measure restarts on it: AutoLevel
+    // climbs at 1 dB/s to +12 dB (-18 - (-30)), AutoDrive (16 LU under its
+    // target) gives the drive back at 2 dB/s.
+    std::vector<float> gains;
+    feedTone (30.0, dbToGain (-30.0f), phase, [&] (const AudioBlock& b) {
+        both (b);
+        gains.push_back (al.getGainDb());
+    });
+    CHECK_NEAR (al.getGainDb(), 12.0, 0.2);
+    CHECK (ad.getReductionDb() == 0.0f);
+    float prev = heldGain, largestStep = 0.0f;
+    for (float g : gains)
+    {
+        CHECK (g >= prev - 1e-4f); // only ever up (float noise of the reading once settled)
+        largestStep = std::max (largestStep, g - prev);
+        prev = g;
+    }
+    CHECK_LE (largestStep, 0.01f + 1e-5f); // slewed at 1 dB/s (0.01 dB per 10 ms block)
+}
+
+TEST_CASE ("GatedLoudness: the slow measure is corrected for its cold start, so AutoLevel leaves a source at its target alone and never moves the wrong way")
+{
+    // Reference: the settled reading of a -20 dBFS tone.
+    GatedLoudness settled;
+    settled.prepare (kFs, 2);
+    double phase = 0.0;
+    feedTone (20.0, dbToGain (-20.0f), phase, [&] (const AudioBlock& b) { settled.process (b); });
+    const float ref = settled.getLufs();
+    CHECK_NEAR (ref, -20.0, 0.2);
+
+    // A fresh measure reads the same level from its first open block on (the
+    // uncorrected one-pole read 8 dB low after 0.5 s and 3 dB low after 2 s).
+    GatedLoudness fresh;
+    fresh.prepare (kFs, 2);
+    phase = 0.0;
+    int block = 0;
+    double worst = 0.0;
+    feedTone (6.0, dbToGain (-20.0f), phase, [&] (const AudioBlock& b) {
+        fresh.process (b);
+        if (block++ > 0)
+        {
+            CHECK (fresh.isActive());
+            worst = std::max (worst, static_cast<double> (std::abs (fresh.getLufs() - ref)));
+        }
+    });
+    CHECK_LE (worst, 0.1);
+
+    // AutoLevel from reset: a source at the target stays at 0 dB (it used to
+    // climb to +2.4 dB), one 6 dB over it only ever goes down (it used to rise
+    // to +0.5 dB first) and reaches -6 dB at 4 dB/s.
+    for (float levelDb : { -18.0f, -12.0f })
+    {
+        AutoLevel al;
+        al.prepare (kFs, 2);
+        al.setEnabled (true);
+        al.setTargetLufs (-18.0f);
+        phase = 0.0;
+        float highest = -100.0f, lowest = 100.0f;
+        std::vector<float> gains;
+        feedTone (8.0, dbToGain (levelDb), phase, [&] (const AudioBlock& b) {
+            al.process (b);
+            highest = std::max (highest, al.getGainDb());
+            lowest = std::min (lowest, al.getGainDb());
+            gains.push_back (al.getGainDb());
+        });
+        if (levelDb == -18.0f)
+        {
+            CHECK_LE (highest, 0.15f);
+            CHECK_GE (lowest, -0.15f);
+        }
+        else
+        {
+            CHECK_LE (highest, 0.0f);
+            CHECK_NEAR (gains[149], -6.0, 0.15); // after 1.5 s
+            CHECK_NEAR (gains.back(), -6.0, 0.15);
+        }
+    }
+}
+
+TEST_CASE ("Chain: a dropped NaN/Inf block resets the signal path but keeps the converged governor, AutoLevel and AutoDrive state")
+{
+    // Hot, heavily clipped programme (Boost 100 %, clipper at its maximum
+    // share) with AutoLevel on: the governor backs off and AutoLevel settles
+    // on a cut. None of the control loops sees the non-finite block, so their
+    // state must survive it (a full reset used to snap the scale back to 1
+    // and the AutoLevel gain to 0 dB, i.e. seconds of louder, harder-driven
+    // audio after a single NaN).
+    ParameterStore store;
+    store.set (Mode, static_cast<float> (ModeValue::Music));
+    store.set (BoostIntensity, 1.0f);
+    store.set (MaxClipAmount, 1.0f);
+    store.set (MaxDriveDb, 10.0f);
+    store.set (AutoLevelOn, 1.0f);
+    store.set (AutoLevelTargetLufs, -24.0f);
+    constexpr int kBlock = 512;
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    auto hot = makeProgramme (static_cast<int> (kFs * 8.0), 0.5f, 3);
+    runChain (chain, hot, kBlock);
+
+    const auto& m = chain.meters();
+    const float scaleBefore = m.governorScale.load(), gainBefore = m.autoLevelGainDb.load();
+    REQUIRE (scaleBefore < 0.6f);
+    REQUIRE (gainBefore < -3.0f);
+
+    auto more = makeProgramme (kBlock * 4, 0.5f, 5);
+    more.ch[0][static_cast<size_t> (kBlock + 17)] = std::numeric_limits<float>::quiet_NaN();
+    runChain (chain, more, kBlock);
+    for (auto& c : more.ch)
+        for (int i = kBlock; i < 2 * kBlock; ++i)
+            REQUIRE (c[static_cast<size_t> (i)] == 0.0f); // the dropped block is silence
+    // Three processed blocks since: each loop moved at most its own slew.
+    const double dt = 3.0 * kBlock / kFs;
+    CHECK_LE (std::abs (m.governorScale.load() - scaleBefore), 0.15 * dt + 1e-5);
+    CHECK_LE (std::abs (m.autoLevelGainDb.load() - gainBefore), 4.0 * dt + 1e-4);
+    for (auto& c : more.ch)
+        for (float v : c)
+            REQUIRE (std::isfinite (v));
+    CHECK (rms (more.ch[0].data() + 3 * kBlock, kBlock) > 1e-3); // audio resumed
+}
+
+TEST_CASE ("Chain: a maximizer, compressor, bass engine or dynamic EQ switched off mid-stream publishes no gain reduction and no clip energy (its last readings are not held)")
+{
+    ParameterStore store;
+    bypassAllModules (store);
+    store.set (MaximizerOn, 1.0f);
+    store.set (MaxDriveDb, 20.0f);
+    store.set (MaxClipAmount, 0.5f);
+    store.set (CompressorOn, 1.0f);
+    // A bass boost the headroom protection has to withdraw, and one dynamic
+    // EQ band cutting hard at the kick.
+    store.set (BassOn, 1.0f);
+    store.set (BassBoostDb, 12.0f);
+    store.set (BassProtectDb, -30.0f);
+    store.set (DynEqOn, 1.0f);
+    store.set (dyn (0, DynFieldOn), 1.0f);
+    store.set (dyn (0, DynFieldFreq), 60.0f);
+    store.set (dyn (0, DynFieldThreshold), -50.0f);
+    constexpr int kBlock = 512;
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    auto hot = makeProgramme (static_cast<int> (kFs * 2.0), 0.5f, 3);
+    runChain (chain, hot, kBlock);
+    const auto& m = chain.meters();
+    REQUIRE (m.clipEnergyRatioDb.load() > -40.0f); // clipping hard...
+    REQUIRE (m.maxGainReductionDb.load() < -0.5f); // ...and limiting
+    REQUIRE (m.compGainReductionDb.load() < -0.5f);
+    REQUIRE (m.bassProtectionDb.load() > 0.5f);
+    REQUIRE (std::abs (m.dynEqGainDb[0].load()) > 0.5f);
+
+    // Off (the slot fades out over 20 ms, then stops processing).
+    for (int id : { MaximizerOn, CompressorOn, BassOn, DynEqOn })
+        store.set (id, 0.0f);
+    auto more = makeProgramme (static_cast<int> (kFs * 0.5), 0.5f, 4);
+    runChain (chain, more, kBlock);
+    CHECK (m.clipEnergyRatioDb.load() == kMinusInfDb);
+    CHECK (m.maxGainReductionDb.load() == 0.0f);
+    CHECK (m.glueGainReductionDb.load() == 0.0f);
+    CHECK (m.compGainReductionDb.load() == 0.0f);
+    CHECK (m.compUpwardGainDb.load() == 0.0f);
+    CHECK (m.bassProtectionDb.load() == 0.0f);
+    for (const auto& g : m.dynEqGainDb)
+        CHECK (g.load() == 0.0f);
+}
+
+TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms window, so the same programme and drive govern the same at 64- and 4096-sample blocks")
+{
+    // Maximizer alone, no clipper, Boost 0 (the scale changes no audio): the
+    // output and the limiter's gain are the same at every block size. With a
+    // per-block GR minimum the budget tripped by block size (min scale 1.0
+    // at 64, 0.69 at 512, 0.3 at 4096 samples for this drive).
+    const auto minScale = [] (int blockSize) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxClipAmount, 0.0f);
+        store.set (MaxDriveDb, 14.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, blockSize, 2 });
+        auto buf = makeProgramme (static_cast<int> (kFs * 12.0), 0.5f, 3);
+        float lowest = 1.0f;
+        ScopedNoDenormals noDenormals;
+        for (int pos = 0; pos < buf.numSamples(); pos += blockSize)
+        {
+            chain.process (buf.block (pos, std::min (blockSize, buf.numSamples() - pos)));
+            lowest = std::min (lowest, chain.meters().governorScale.load());
+        }
+        return lowest;
+    };
+    const float s64 = minScale (64), s512 = minScale (512), s4096 = minScale (4096);
+    CHECK_LE (s512, 0.9f); // over budget: the governor acts (measured 0.74-0.76)
+    CHECK_GE (s512, 0.5f);
+    CHECK_NEAR (s64, s512, 0.05);
+    CHECK_NEAR (s4096, s512, 0.05);
 }

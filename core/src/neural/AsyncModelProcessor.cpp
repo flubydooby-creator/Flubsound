@@ -5,6 +5,13 @@
 #include <cmath>
 #include <cstring>
 
+#if defined(FLUB_RTSAN) && defined(__has_include)
+    #if __has_include(<sanitizer/rtsan_interface.h>)
+        #include <sanitizer/rtsan_interface.h>
+        #define FLUB_HAS_RTSAN_DISABLER 1
+    #endif
+#endif
+
 namespace flub
 {
 namespace
@@ -108,7 +115,8 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
     if (rateMatches)
     {
         runner->prepare (s.sampleRate); // may throw: the processor then stays unprepared
-        startWorker();                  // so may std::thread (std::system_error), with the same result
+        if (! config.offline)
+            startWorker();              // so may std::thread (std::system_error), with the same result
     }
     modelActive = rateMatches;
     prepared = true;
@@ -153,8 +161,11 @@ void AsyncModelProcessor::reset() noexcept FLUB_NONBLOCKING
 
 int AsyncModelProcessor::getPendingFrames() const noexcept
 {
+    // handled first: submitFrame() counts a frame before publishing it, so
+    // handled <= submitted on every thread and this never goes negative.
     const uint64_t handled = framesHandled.load (std::memory_order_acquire);
-    return static_cast<int> (framesSubmitted.load (std::memory_order_acquire) - handled);
+    const uint64_t submitted = framesSubmitted.load (std::memory_order_acquire);
+    return submitted > handled ? static_cast<int> (submitted - handled) : 0;
 }
 
 // ---- audio thread -----------------------------------------------------------
@@ -231,15 +242,29 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
 void AsyncModelProcessor::submitFrame() noexcept
 {
     const uint64_t seq = nextSubmitSeq++;
+    if (config.offline)
+    {
+        // Not real time (see the header): the result is queued before this
+        // frame's boundary returns, long before the frame reaches the output.
+#if defined(FLUB_HAS_RTSAN_DISABLER)
+        __rtsan::ScopedDisabler notRealtime; // a runner may allocate in run()
+#endif
+        bool resetPending = discontinuity;
+        runFrame (stagingFrame.data(), seq, resetPending);
+        discontinuity = false;
+        return;
+    }
     if (float* slot = inQueue.beginWrite())
     {
         std::memcpy (slot, stagingFrame.data(), sizeof (float) * static_cast<size_t> (inputFloats));
         FrameQueue::Header h;
         h.seq = seq;
         h.discontinuity = discontinuity;
+        // Counted before it is published: the release in commitWrite() orders
+        // this before the worker's framesHandled increment for the frame.
+        framesSubmitted.fetch_add (1, std::memory_order_relaxed);
         inQueue.commitWrite (h);
         discontinuity = false;
-        framesSubmitted.fetch_add (1, std::memory_order_relaxed);
     }
     // A full queue drops the frame (the worker is stalled); its boundary then
     // counts as a deadline miss. The discontinuity flag waits for a frame that
@@ -307,9 +332,50 @@ void AsyncModelProcessor::stopWorker() noexcept
     worker.join();
 }
 
+void AsyncModelProcessor::runFrame (const float* frame, uint64_t seq, bool& resetPending) noexcept
+{
+    if (resetPending)
+    {
+        try
+        {
+            runner->reset();
+        }
+        catch (...)
+        {
+        }
+        resetPending = false;
+    }
+    bool ok = false;
+    try
+    {
+        ok = runner->run (frame, workerControls.data());
+    }
+    catch (...) // e.g. Ort::Exception: a failed frame, not a dead worker
+    {
+        ok = false;
+    }
+    framesProcessed.fetch_add (1, std::memory_order_relaxed);
+    const auto numControls = static_cast<size_t> (desc.numControls);
+    for (size_t k = 0; k < numControls && ok; ++k)
+    {
+        ok = std::isfinite (workerControls[k]);
+        workerControls[k] = std::clamp (workerControls[k], 0.0f, config.maxGain);
+    }
+
+    // Drop the result if the queue is full: the audio thread has not
+    // consumed for a while (stopped stream), and it would be stale.
+    if (float* slot = outQueue.beginWrite())
+    {
+        std::memcpy (slot, workerControls.data(), sizeof (float) * numControls);
+        FrameQueue::Header out;
+        out.seq = seq;
+        out.ok = ok;
+        outQueue.commitWrite (out);
+    }
+}
+
 void AsyncModelProcessor::workerLoop() noexcept
 {
-    const auto numControls = static_cast<size_t> (desc.numControls);
     bool resetPending = false;
     while (! stopRequested.load (std::memory_order_acquire))
     {
@@ -323,45 +389,7 @@ void AsyncModelProcessor::workerLoop() noexcept
         resetPending = resetPending || in.discontinuity;
 
         if (in.seq >= firstUsefulSeq.load (std::memory_order_acquire))
-        {
-            if (resetPending)
-            {
-                try
-                {
-                    runner->reset();
-                }
-                catch (...)
-                {
-                }
-                resetPending = false;
-            }
-            bool ok = false;
-            try
-            {
-                ok = runner->run (frame, workerControls.data());
-            }
-            catch (...) // e.g. Ort::Exception: a failed frame, not a dead worker
-            {
-                ok = false;
-            }
-            framesProcessed.fetch_add (1, std::memory_order_relaxed);
-            for (size_t k = 0; k < numControls && ok; ++k)
-            {
-                ok = std::isfinite (workerControls[k]);
-                workerControls[k] = std::clamp (workerControls[k], 0.0f, config.maxGain);
-            }
-
-            // Drop the result if the queue is full: the audio thread has not
-            // consumed for a while (stopped stream), and it would be stale.
-            if (float* slot = outQueue.beginWrite())
-            {
-                std::memcpy (slot, workerControls.data(), sizeof (float) * numControls);
-                FrameQueue::Header out;
-                out.seq = in.seq;
-                out.ok = ok;
-                outQueue.commitWrite (out);
-            }
-        }
+            runFrame (frame, in.seq, resetPending);
         inQueue.release();
         framesHandled.fetch_add (1, std::memory_order_release); // after the result is published
     }

@@ -375,7 +375,7 @@ The app's latency readout includes the capture FIFO target of a running process-
 
 | Failure | Behaviour |
 |---|---|
-| NaN/Inf in the input (bad driver or plug-in) | The chain drops the block (outputs silence) and resets its state instead of latching garbage. |
+| NaN/Inf in the input (bad driver or plug-in) | The chain drops the block (outputs silence) and resets its signal-path state instead of latching garbage; the control loops (governor, AutoLevel, AutoDrive, loudness match), which never saw the block, keep theirs. |
 | Capture underrun / overrun | `DriftCompensatedFifo` fades to silence (then re-primes and fades back in over 5 ms) or drops the oldest frames, and counts the event in its `Stats` (available through `AudioEngineHost::getCaptures()` and `EngineController::getCaptureStreams()`, and shown per stream in Settings › Processing and the header's latency tooltip). The PI loop re-centres the fill level. |
 | Device removed / sleep / default-device change | JUCE reports the change and the host re-prepares for the new device format; the output fades in over 10 ms after the restart (§3). When the preferred output (for example a USB headset) disappears, JUCE falls back to another device; `EngineController` switches back as soon as the preferred device is listed again (rescan every 5 s while it is missing). With the virtual driver (design), the virtual endpoints would stay the default so apps are unaffected. |
 | Over-driven settings | The SafetyGovernor withdraws governed macro gain, and the limiter + master limiter guarantee the ceiling. |

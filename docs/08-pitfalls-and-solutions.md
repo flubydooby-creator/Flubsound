@@ -120,7 +120,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 ### B6b. Real-time levelling during pauses and fade-outs
 - **Symptom:** the level jumps up after a pause, or a fade-out gets "pulled back up".
 - **Root cause:** a naive running loudness estimate keeps decaying through silence, and the levelling loop chases it.
-- **Solution:** all loudness control loops (AutoLevel, AutoDrive, LoudnessMatch) use `GatedLoudness`. The slow 3 s measure only advances while programme is present: block RMS above −70 dBFS, a fast 100 ms follower above −50 LUFS, and within 20 LU of the slow value. Adaptation is additionally slew-limited to +1 dB/s up and −4 dB/s down.
+- **Solution:** all loudness control loops (AutoLevel, AutoDrive, LoudnessMatch) use `GatedLoudness`. The slow 3 s measure only advances while programme is present: block RMS above −70 dBFS, a fast 100 ms follower above −50 LUFS, and within 20 LU of the slow value (a programme held out by that relative gate for 3 s restarts the slow measure, so a much quieter next source is not ignored for good). Adaptation is additionally slew-limited to +1 dB/s up and −4 dB/s down.
 - **Known limit:** a slow musical fade can still lift the gain by a dB or two before the relative gate closes. This is inherent to any look-ahead-free leveller. Players that support per-track loudness normalisation (ReplayGain / LUFS) should use it, and AutoLevel stays off in the gaming presets.
 - **Verification:** "AutoLevel: brings a quiet source towards the target, slew limited, frozen in silence" (`tests/test_engine.cpp`).
 

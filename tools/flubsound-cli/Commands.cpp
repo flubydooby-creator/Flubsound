@@ -74,26 +74,42 @@ std::string fmt (const char* format, double v)
     return buf;
 }
 
+bool isUtf8Continuation (char c) { return (static_cast<unsigned char> (c) & 0xC0) == 0x80; }
+
+/** Column width of a UTF-8 string: code points, not bytes (file names and
+    preset descriptions may be non-ASCII). */
+size_t displayWidth (const std::string& s)
+{
+    return static_cast<size_t> (std::count_if (s.begin(), s.end(), [] (char c) { return ! isUtf8Continuation (c); }));
+}
+
 std::string padRight (std::string s, size_t width)
 {
-    if (s.size() < width)
-        s.append (width - s.size(), ' ');
+    const size_t w = displayWidth (s);
+    if (w < width)
+        s.append (width - w, ' ');
     return s;
 }
 
 std::string padLeft (std::string s, size_t width)
 {
-    if (s.size() < width)
-        s.insert (0, width - s.size(), ' ');
+    const size_t w = displayWidth (s);
+    if (w < width)
+        s.insert (0, width - w, ' ');
     return s;
 }
 
-/** Keeps the end of long names ("...ong-file-name.wav"). */
+/** Keeps the end of long names ("...ong-file-name.wav"): the last width - 3
+    code points, never cutting inside a UTF-8 sequence. */
 std::string ellipsize (const std::string& s, size_t width)
 {
-    if (s.size() <= width || width < 4)
+    if (displayWidth (s) <= width || width < 4)
         return s;
-    return "..." + s.substr (s.size() - (width - 3));
+    size_t start = s.size();
+    for (size_t kept = 0; kept < width - 3 && start > 0;)
+        if (! isUtf8Continuation (s[--start]))
+            ++kept;
+    return "..." + s.substr (start);
 }
 
 void printJson (const json::Value& v)
@@ -496,7 +512,7 @@ std::string formatBatchSummary (const std::vector<BatchJob>& jobs, const std::ve
 
     size_t nameWidth = 4;
     for (const auto& j : jobs)
-        nameWidth = std::max (nameWidth, std::min<size_t> (j.displayName.size(), 48));
+        nameWidth = std::max (nameWidth, std::min<size_t> (displayWidth (j.displayName), 48));
 
     std::string table = "\n" + padRight ("File", nameWidth)
                         + "  In LUFS  Out LUFS  Out dBTP  Out LRA  Passes   Time  Status\n";
@@ -833,13 +849,13 @@ int runPresets (const CliOptions& o)
             arr.push (std::move (p));
         }
         json::Value v;
-        v.set ("dir", dir->string());
+        v.set ("dir", io::pathToUtf8 (*dir));
         v.set ("presets", std::move (arr));
         printJson (v);
         return kExitOk;
     }
 
-    std::string out = "Factory presets in " + dir->string() + " (" + std::to_string (entries.size()) + "):\n";
+    std::string out = "Factory presets in " + io::pathToUtf8 (*dir) + " (" + std::to_string (entries.size()) + "):\n";
     if (entries.empty())
     {
         out += "  (none)\n";
@@ -849,8 +865,8 @@ int runPresets (const CliOptions& o)
     size_t nameW = 4, catW = 8;
     for (const auto& e : entries)
     {
-        nameW = std::max (nameW, e.name.size());
-        catW = std::max (catW, e.category.size());
+        nameW = std::max (nameW, displayWidth (e.name));
+        catW = std::max (catW, displayWidth (e.category));
     }
     out += "\n  " + padRight ("NAME", nameW + 2) + padRight ("CATEGORY", catW + 2) + padRight ("MODE", 8) + "FILE\n";
     for (const auto& e : entries)

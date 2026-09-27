@@ -73,7 +73,7 @@ static_assert (hasNonblockingProcess<ProcessingChain>);
 static_assert (std::is_same_v<decltype (&MixEngine::process),
                               void (MixEngine::*) (const AudioBlock* const*, const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 
-// reset(): ProcessingChain::reset (a NaN / Inf block), ModuleSlot::reset and
+// reset(): ProcessingChain::resetSignalState (a NaN / Inf block), ModuleSlot::reset and
 // ModuleSlot::process (re-activation) and applyParameters (virtualiser
 // format change) call it on the audio thread.
 template <class Module>

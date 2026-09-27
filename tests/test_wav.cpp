@@ -22,6 +22,7 @@
 #include <fstream>
 #include <limits>
 #include <random>
+#include <string_view>
 
 #if defined(__linux__)
     #include <sys/stat.h>
@@ -34,23 +35,24 @@ using namespace flubtest;
 
 namespace
 {
-/** Unique file in the system temp directory, removed on destruction. */
+/** Unique file in the system temp directory, removed on destruction. `path`
+    is UTF-8; `stem` (UTF-8, may be non-ASCII) starts the file name. */
 class TempFile
 {
 public:
-    TempFile()
+    explicit TempFile (std::string_view stem = "flub_wav_test")
     {
         static int counter = 0;
         const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
-        const auto name = "flub_wav_test_" + std::to_string (ticks) + "_" + std::to_string (std::random_device {}()) + "_"
+        const auto name = std::string (stem) + "_" + std::to_string (ticks) + "_" + std::to_string (std::random_device {}()) + "_"
                           + std::to_string (++counter) + ".wav";
-        path = (std::filesystem::temp_directory_path() / name).string();
+        path = io::pathToUtf8 (std::filesystem::temp_directory_path() / io::pathFromUtf8 (name));
     }
 
     ~TempFile()
     {
         std::error_code ec;
-        std::filesystem::remove (path, ec);
+        std::filesystem::remove (io::pathFromUtf8 (path), ec);
     }
 
     TempFile (const TempFile&) = delete;
@@ -1074,8 +1076,10 @@ TEST_CASE ("WavFile: UTF-8 paths with non-ASCII characters round trip on every p
 {
     // Core file APIs take UTF-8 (flub/io/FilePath.h). On Windows a narrow
     // path would be read in the ANSI code page and mangle these characters.
-    const std::string dir = io::pathToUtf8 (std::filesystem::temp_directory_path());
-    const std::string path = dir + "/flub_\xC3\xBC\xC3\xB1\xC3\xAF_\xE6\x97\xA5\xE6\x9C\xAC_\xF0\x9F\x8E\xA7.wav"; // "flub_üñï_日本_🎧.wav"
+    // The unique suffix keeps concurrent test runs from sharing the file.
+    TempFile file ("flub_\xC3\xBC\xC3\xB1\xC3\xAF_\xE6\x97\xA5\xE6\x9C\xAC_\xF0\x9F\x8E\xA7"); // "flub_üñï_日本_🎧_<unique>.wav"
+    const std::string& path = file.path;
+    CHECK (path.find ("flub_\xC3\xBC\xC3\xB1\xC3\xAF_\xE6\x97\xA5\xE6\x9C\xAC_\xF0\x9F\x8E\xA7_") != std::string::npos);
     AudioFileData d = makeSignal (2, 4800, 48000.0);
     std::string error;
     REQUIRE (writeWav (path, d, SampleFormat::Float32, error));

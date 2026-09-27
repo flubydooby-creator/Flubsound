@@ -2,7 +2,8 @@
 // §6.4 and §14.5):
 //   * the per-block least-squares estimator (flub/dsp/DistortionEstimator.h)
 //     against a Goertzel harmonic analysis of a sine through tanh and the
-//     tube curve, and on linear gain stages;
+//     tube curve, and on linear gain stages, and the length of its analysis
+//     window (closed at a block boundary at or after 25 ms);
 //   * the in-stage readings of the Saturator and of the maximizer's soft
 //     clipper against a harmonic analysis of what the stages actually do;
 //   * the DistortionMonitor (power sum of the stages, 300 ms meter smoothing);
@@ -22,6 +23,7 @@
 #include "flub/common/Denormals.h"
 #include "flub/dsp/DistortionEstimator.h"
 #include "flub/dsp/LoudnessMaximizer.h"
+#include "flub/dsp/ParallelDistortion.h"
 #include "flub/dsp/Saturator.h"
 #include "flub/engine/ProcessingChain.h"
 #include "flub/engine/Protection.h"
@@ -318,6 +320,36 @@ TEST_CASE ("Distortion: the readings do not depend on the host block size: a 55 
         }
         CHECK_NEAR (satDb, satRef, 0.2); // measured: < 0.05 dB
         CHECK_NEAR (clipDb, clipRef, 0.2);
+    }
+}
+
+TEST_CASE ("Distortion: an analysis window closes at the first block boundary at or after 25 ms, so it spans ceil(1200 / n) * n samples in n-sample blocks at 48 kHz")
+{
+    // The documented window length (DistortionEstimator.h, docs §14.5): the
+    // stages add whole blocks, and the overshoot is not carried over.
+    for (const int n : { 1, 7, 600, 1024, 1199, 1200, 1201, 4096 })
+    {
+        DistortionWindow window;
+        ParallelDistortionWindow parallel;
+        window.prepare (kFs);
+        parallel.prepare (kFs);
+        REQUIRE (window.getLength() == 1200);
+        REQUIRE (parallel.getLength() == 1200);
+        const int expected = (1200 + n - 1) / n * n;
+        int counted = 0, closes = 0;
+        for (int blocks = 0; closes < 3; ++blocks)
+        {
+            REQUIRE (blocks < 4 * 1200);
+            counted += n;
+            float db = 0.0f;
+            const bool closed = window.advance (n, db);
+            CHECK (parallel.advance (n, db) == closed);
+            if (! closed)
+                continue;
+            CHECK (counted == expected);
+            counted = 0;
+            ++closes;
+        }
     }
 }
 

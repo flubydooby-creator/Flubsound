@@ -4,7 +4,8 @@
 // network, test stand-in). It never runs on the audio thread: the
 // AsyncModelProcessor that owns it calls prepare() on the thread that prepares
 // the processor (before its worker starts) and reset() / run() on its single
-// inference worker thread, one frame at a time. So a runner needs no locking,
+// inference worker thread, one frame at a time (in offline mode, which has
+// no worker, on the thread that calls process()). So a runner needs no locking,
 // may allocate in prepare() and should not allocate in run() (that only costs
 // time, but time is what the deadline is made of).
 //
@@ -66,13 +67,14 @@ public:
         on the audio thread). May allocate (sessions, scratch tensors). */
     virtual void prepare (double sampleRate) { (void) sampleRate; }
 
-    /** Worker thread: clear recurrent state before the first frame after the
-        processor was prepared or reset (the audio is discontinuous there). */
+    /** Worker thread (offline mode: the caller of process()): clear
+        recurrent state before the first frame after the processor was
+        prepared or reset (the audio is discontinuous there). */
     virtual void reset() {}
 
-    /** Worker thread. inFrame holds numInputChannels planar blocks of
-        frameSize samples (channel c at inFrame[c * frameSize]); write
-        numControls values to outControls. Return false on failure: the
+    /** Worker thread (offline mode: the caller of process()). inFrame
+        holds numInputChannels planar blocks of frameSize samples (channel c
+        at inFrame[c * frameSize]); write numControls values to outControls. Return false on failure: the
         processor then treats the frame like a deadline miss (last good control,
         then neutral) and counts it in getModelFailures(). An exception
         escaping run() counts as a failure too (one escaping reset() is

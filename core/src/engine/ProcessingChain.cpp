@@ -138,6 +138,7 @@ const char* neuralSlotReason (NeuralSlotState state) noexcept
         case NeuralSlotState::SampleRateMismatch: return "Bypassed: the model was trained for a different sample rate.";
         case NeuralSlotState::InvalidModel: return "Bypassed: the model's description is invalid.";
         case NeuralSlotState::PrepareFailed: return "Bypassed: the model failed to start.";
+        case NeuralSlotState::BlockTooLarge: return "Bypassed: the audio buffer is longer than the model's safety margin.";
     }
     return "";
 }
@@ -146,7 +147,10 @@ void ProcessingChain::setNeuralModel (std::unique_ptr<ModelRunner> runner, const
 {
     // Built now (describe() only: no allocation of queues, no thread), swapped
     // in by the next prepare(), so the audio thread never sees it change.
-    pendingNeural = runner != nullptr ? std::make_unique<AsyncModelProcessor> (std::move (runner), neuralConfig.processor) : nullptr;
+    // Offline rendering runs the model inside process() (no deadline to miss).
+    AsyncModelConfig processorConfig = neuralConfig.processor;
+    processorConfig.offline = neuralConfig.context == ModelContext::Offline;
+    pendingNeural = runner != nullptr ? std::make_unique<AsyncModelProcessor> (std::move (runner), processorConfig) : nullptr;
     pendingContext = neuralConfig.context;
     neuralChangePending.store (true, std::memory_order_release);
 }
@@ -199,6 +203,8 @@ void ProcessingChain::prepareNeuralSlot (const ProcessSpec& stereo)
             state = NeuralSlotState::SampleRateMismatch; // it would only delay: keep it out
         else if (! isEligible (static_cast<LatencyProfileValue> (profileAtPrepare), modelLatency, stereo.sampleRate, neuralContext))
             state = NeuralSlotState::Ineligible;
+        else if (stereo.maxBlockSize > neural->getMaxBlockSizeWithoutMisses())
+            state = NeuralSlotState::BlockTooLarge; // a result can only arrive in a later block than its frame's
         else
         {
             try
@@ -331,6 +337,15 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
 void ProcessingChain::reset() noexcept
 {
+    resetSignalState();
+    autoLevel.reset();
+    autoDrive.reset();
+    governor.reset();
+    loudnessMatch.reset();
+}
+
+void ProcessingChain::resetSignalState() noexcept
+{
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
             slots[static_cast<size_t> (s)].reset();
@@ -339,11 +354,7 @@ void ProcessingChain::reset() noexcept
     dryDelay.reset();
     dryLimiter.reset();
     dryLimiterRunning = false;
-    autoLevel.reset();
-    autoDrive.reset();
-    governor.reset();
     distortion.reset();
-    loudnessMatch.reset();
     inLevel.reset();
     outLevel.reset();
     outTruePeak.reset();
@@ -616,7 +627,9 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
         return;
 
     // A single NaN/Inf from a misbehaving driver or upstream plug-in would latch
-    // forever in IIR state: drop the block and restart the chain cleanly.
+    // forever in IIR state: drop the block and restart the signal path cleanly.
+    // The control loops (governor, AutoLevel, AutoDrive, LoudnessMatch) have
+    // not seen this block, so their converged state is kept.
     float checksum = 0.0f;
     for (int c = 0; c < io.numChannels; ++c)
         for (int i = 0; i < n; ++i)
@@ -624,7 +637,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     if (! std::isfinite (checksum))
     {
         io.clear();
-        reset();
+        resetSignalState();
         return;
     }
 
@@ -714,12 +727,14 @@ void ProcessingChain::process (const AudioBlock& io) noexcept FLUB_NONBLOCKING
     distortion.updateHarmonics (! slots[SBass].isFullyBypassed() ? bass.getDistortionDb() : kMinusInfDb,
                                 ! slots[SClarity].isFullyBypassed() ? clarity.getDistortionDb() : kMinusInfDb, n);
     // The governor sees the clipper's share floored at its clip energy ratio
-    // over the same 25 ms window, the former proxy: on a steady tone that
+    // over the same analysis window, the former proxy: on a steady tone that
     // reads above the THD+N (it also counts the in-phase part of the removed
     // signal, a gain change), so the governor does not back off later on
     // clipping than it did on the proxy; the saturator's THD+N is added.
     const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getWindowClipEnergyDb()) : kMinusInfDb;
-    governor.update (maxActive ? maximizer.getGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
+    // Its GR input is the deepest limiting per fixed 10 ms window, not per
+    // host block, so the budget does not depend on the buffer size.
+    governor.update (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
     autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
     loudnessMatch.measureWet (st);
 
@@ -808,15 +823,20 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.loudnessRangeLu.store (outLoudness.getLoudnessRangeLu(), rl);
     m.correlation.store (outLevel.getCorrelation(), rl);
     m.effectiveWidth.store (spatial.getEffectiveWidth(), rl);
-    m.compGainReductionDb.store (compressor.getGainReductionDb(), rl);
-    m.compUpwardGainDb.store (compressor.getUpwardGainDb(), rl);
-    m.maxGainReductionDb.store (maximizer.getGainReductionDb(), rl);
-    m.glueGainReductionDb.store (maximizer.getGlueReductionDb(), rl);
-    m.clipEnergyRatioDb.store (maximizer.getClipEnergyRatioDb(), rl);
+    // A fully bypassed slot is not processed, so its module's readings would
+    // hold their last value: publish "no action" instead (the same gate as
+    // the governor and distortion inputs).
+    const auto active = [this] (int slot) { return ! slots[static_cast<size_t> (slot)].isFullyBypassed(); };
+    const bool compActive = active (SComp), maxActive = active (SMax), dynEqActive = active (SDynEq);
+    m.compGainReductionDb.store (compActive ? compressor.getGainReductionDb() : 0.0f, rl);
+    m.compUpwardGainDb.store (compActive ? compressor.getUpwardGainDb() : 0.0f, rl);
+    m.maxGainReductionDb.store (maxActive ? maximizer.getGainReductionDb() : 0.0f, rl);
+    m.glueGainReductionDb.store (maxActive ? maximizer.getGlueReductionDb() : 0.0f, rl);
+    m.clipEnergyRatioDb.store (maxActive ? maximizer.getClipEnergyRatioDb() : kMinusInfDb, rl);
     m.distortionDb.store (distortion.getSmoothedDb(), rl);
-    m.bassProtectionDb.store (bass.getProtectionDb(), rl);
+    m.bassProtectionDb.store (active (SBass) ? bass.getProtectionDb() : 0.0f, rl);
     for (int b = 0; b < DynamicEq::kMaxBands && b < MeterBus::kMaxDynBands; ++b)
-        m.dynEqGainDb[static_cast<size_t> (b)].store (dynEq.getBandGainDb (b), rl);
+        m.dynEqGainDb[static_cast<size_t> (b)].store (dynEqActive ? dynEq.getBandGainDb (b) : 0.0f, rl);
     m.governorScale.store (governor.getScale(), rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);

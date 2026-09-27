@@ -40,6 +40,62 @@ bool sameFolder (const juce::File& a, const juce::File& b)
     return a == b || canonical (a) == canonical (b);
 }
 
+/** canonical() of a folder with a trailing separator: "is below" by prefix. */
+juce::String canonicalFolder (const juce::File& folder)
+{
+    const auto sep = juce::File::getSeparatorString();
+    const auto key = canonical (folder);
+    return key.endsWith (sep) ? key : key + sep;
+}
+
+constexpr const char* kAborted = "Aborted"; // an item stopped through abort()
+
+bool isAborted (const std::atomic<bool>* flag) noexcept
+{
+    return flag != nullptr && flag->load (std::memory_order_relaxed);
+}
+
+/** The writer's stream for writeFlac(): forwards everything to `inner` and
+    records any failure in `failed`, which outlives the writer. JUCE's
+    FlacWriter ignores the results of its last writes (the final frame and
+    the STREAMINFO rewrite in FLAC__stream_encoder_finish) and of its final
+    flush(), and deletes the stream with itself. */
+class FailureTrackingStream final : public juce::OutputStream
+{
+public:
+    FailureTrackingStream (std::unique_ptr<juce::OutputStream> innerStream, bool& failedFlag)
+        : inner (std::move (innerStream)), failed (failedFlag)
+    {
+    }
+
+    ~FailureTrackingStream() override { flush(); } // the inner stream's own destructor cannot report
+
+    void flush() override
+    {
+        inner->flush();
+        if (auto* file = dynamic_cast<juce::FileOutputStream*> (inner.get()); file != nullptr && file->getStatus().failed())
+            failed = true;
+    }
+    bool setPosition (juce::int64 pos) override { return record (inner->setPosition (pos)); }
+    juce::int64 getPosition() override { return inner->getPosition(); }
+    bool write (const void* data, size_t numBytes) override { return record (inner->write (data, numBytes)); }
+    bool writeRepeatedByte (juce::uint8 byte, size_t numTimesToRepeat) override
+    {
+        return record (inner->writeRepeatedByte (byte, numTimesToRepeat));
+    }
+
+private:
+    bool record (bool ok) noexcept
+    {
+        if (! ok)
+            failed = true;
+        return ok;
+    }
+
+    std::unique_ptr<juce::OutputStream> inner;
+    bool& failed;
+};
+
 /** The TPDF dither of flub::io::writeWav (core/src/io/WavFile.cpp): splitmix64
     with the same fixed seed, two uniforms per sample, +-1 LSB triangular.
     FLAC exports are dithered exactly like the WAV writer's PCM formats. */
@@ -86,7 +142,9 @@ ExportJob::ExportJob()
 ExportJob::~ExportJob()
 {
     // Quitting / closing the dialog must not wait for a long file: abort the
-    // render between blocks (the partial file is never moved into place).
+    // item between blocks or stages - decode, render, encode, read-back (one
+    // loudness analysis still runs to its end) - and never move its partial
+    // file into place.
     abort();
     stopThread (-1);
 }
@@ -249,17 +307,22 @@ bool ExportJob::plan (const ExportSettings& s, const juce::AudioFormatManager& m
             candidates.push_back ({ file, displayName.replaceCharacter ('\\', '/') });
     };
 
+    const auto outputKey = canonicalFolder (s.outputFolder);
     for (const auto& in : s.inputs)
     {
         if (in.isDirectory())
         {
             // Only an output folder nested in the input folder holds files the
             // scan would pick up (one above the input folder contains every
-            // input, so it must not be used as an exclusion).
-            const bool outputNested = s.outputFolder.isAChildOf (in);
-            for (const auto& f : in.findChildFiles (juce::File::findFiles, s.recursive, "*", juce::File::FollowSymlinks::noCycles))
+            // input, so it must not be used as an exclusion). Lexically or
+            // through a symlink / ".." (canonical paths).
+            const bool outputNested = s.outputFolder.isAChildOf (in) || outputKey.startsWith (canonicalFolder (in));
+            const int whatToFind = juce::File::findFiles | juce::File::ignoreHiddenFiles;
+            for (const auto& f : in.findChildFiles (whatToFind, s.recursive, "*", juce::File::FollowSymlinks::noCycles))
             {
-                if (outputNested && f.isAChildOf (s.outputFolder))
+                if (f.getFileName().startsWithChar ('.'))
+                    continue; // macOS AppleDouble "._x.wav" (not hidden on Windows), our hidden temporary files
+                if (outputNested && (f.isAChildOf (s.outputFolder) || canonical (f).startsWith (outputKey)))
                     continue; // never re-process our own results
                 add (f, f.getRelativePathFrom (in));
             }
@@ -338,7 +401,7 @@ bool ExportJob::plan (const ExportSettings& s, const juce::AudioFormatManager& m
 // Decoding / encoding
 // =============================================================================
 bool ExportJob::decode (const juce::AudioFormatManager& manager, const juce::File& file, flub::io::AudioFileData& out, juce::String& description,
-                        juce::String& error)
+                        juce::String& error, const std::atomic<bool>* abortFlag)
 {
     // createReaderFor (File) is not const, although it only reads the list.
     std::unique_ptr<juce::AudioFormatReader> reader (const_cast<juce::AudioFormatManager&> (manager).createReaderFor (file));
@@ -380,6 +443,11 @@ bool ExportJob::decode (const juce::AudioFormatManager& manager, const juce::Fil
     std::vector<float*> dest (static_cast<size_t> (numChannels));
     for (juce::int64 pos = 0; pos < length; pos += kDecodeBlock)
     {
+        if (isAborted (abortFlag))
+        {
+            error = kAborted;
+            return false;
+        }
         const int n = static_cast<int> (std::min<juce::int64> (kDecodeBlock, length - pos));
         for (size_t c = 0; c < dest.size(); ++c)
             dest[c] = out.channels[c].data() + pos;
@@ -393,8 +461,14 @@ bool ExportJob::decode (const juce::AudioFormatManager& manager, const juce::Fil
 }
 
 bool ExportJob::encode (const juce::AudioFormatManager& manager, const juce::File& file, ExportFormat format, flub::cli::RenderResult& result,
-                        juce::String& error)
+                        juce::String& error, const std::atomic<bool>* abortFlag)
 {
+    if (isAborted (abortFlag))
+    {
+        error = kAborted;
+        return false;
+    }
+
     // Written next to the target and moved into place when complete, so a
     // failed or aborted export never leaves a truncated file under the real name.
     juce::TemporaryFile temp (file, juce::TemporaryFile::useHiddenFile);
@@ -414,72 +488,107 @@ bool ExportJob::encode (const juce::AudioFormatManager& manager, const juce::Fil
     }
     else
     {
-        const int bits = format == ExportFormat::Flac24 ? 24 : 16;
-        const auto& channels = result.output.channels;
-        if (channels.size() != 2)
+        auto fileStream = temp.getFile().createOutputStream();
+        if (fileStream == nullptr || fileStream->failedToOpen())
         {
-            error = "Internal error: the render is not stereo";
+            error = "Cannot write " + file.getFullPathName();
             return false;
         }
+        if (! writeFlac (std::move (fileStream), format == ExportFormat::Flac24 ? 24 : 16, result.output, error, abortFlag))
         {
-            auto fileStream = temp.getFile().createOutputStream();
-            if (fileStream == nullptr || fileStream->failedToOpen())
-            {
-                error = "Cannot write " + file.getFullPathName();
-                return false;
-            }
-            std::unique_ptr<juce::OutputStream> stream (std::move (fileStream));
-            juce::FlacAudioFormat flac;
-            auto writer = flac.createWriterFor (stream, juce::AudioFormatWriterOptions()
-                                                            .withSampleRate (result.output.sampleRate)
-                                                            .withNumChannels (2)
-                                                            .withBitsPerSample (bits)
-                                                            .withQualityOptionIndex (kFlacQuality));
-            if (writer == nullptr)
-            {
-                error = "The FLAC encoder cannot write " + juce::String (result.output.sampleRate, 0) + " Hz audio";
-                return false;
-            }
-
-            // Dithered integers (interleaved dither order, like writeWav),
-            // left-aligned in 32 bits as AudioFormatWriter::write expects.
-            TpdfDither dither;
-            const double scale = bits == 24 ? 8388608.0 : 32768.0;
-            const int shift = 1 << (32 - bits);
-            const auto numFrames = channels[0].size();
-            std::vector<int> left (kEncodeBlock), right (kEncodeBlock);
-            for (size_t frame = 0; frame < numFrames;)
-            {
-                const auto n = std::min (static_cast<size_t> (kEncodeBlock), numFrames - frame);
-                for (size_t i = 0; i < n; ++i)
-                {
-                    left[i] = quantise (channels[0][frame + i], scale, dither) * shift;
-                    right[i] = quantise (channels[1][frame + i], scale, dither) * shift;
-                }
-                const int* data[] = { left.data(), right.data(), nullptr };
-                if (! writer->write (data, static_cast<int> (n)))
-                {
-                    error = "Write error (disk full?): " + file.getFullPathName();
-                    return false;
-                }
-                frame += n;
-            }
-        } // the writer finishes the stream (STREAMINFO) and closes the file here
+            if (error != kAborted)
+                error << ": " << file.getFullPathName();
+            return false;
+        }
 
         // Report what was delivered: the quantised, dithered samples.
         flub::io::AudioFileData written;
         juce::String description;
-        if (! decode (manager, temp.getFile(), written, description, error))
+        if (! decode (manager, temp.getFile(), written, description, error, abortFlag))
         {
-            error = "Cannot read back " + file.getFullPathName() + ": " + error;
+            if (error != kAborted)
+                error = "Cannot read back " + file.getFullPathName() + ": " + error;
             return false;
         }
         result.outputReport = flub::cli::analyse (written.channels, written.sampleRate);
     }
 
+    if (isAborted (abortFlag))
+    {
+        error = kAborted; // the temporary file is deleted, nothing is moved into place
+        return false;
+    }
     if (! temp.overwriteTargetFileWithTemporary())
     {
         error = "Cannot replace " + file.getFullPathName();
+        return false;
+    }
+    return true;
+}
+
+bool ExportJob::writeFlac (std::unique_ptr<juce::OutputStream> stream, int bitsPerSample, const flub::io::AudioFileData& audio,
+                           juce::String& error, const std::atomic<bool>* abortFlag)
+{
+    const auto& channels = audio.channels;
+    if (channels.size() != 2)
+    {
+        error = "Internal error: the render is not stereo";
+        return false;
+    }
+    if (stream == nullptr)
+    {
+        error = "Cannot write";
+        return false;
+    }
+
+    bool streamFailed = false;
+    {
+        std::unique_ptr<juce::OutputStream> tracked = std::make_unique<FailureTrackingStream> (std::move (stream), streamFailed);
+        juce::FlacAudioFormat flac;
+        auto writer = flac.createWriterFor (tracked, juce::AudioFormatWriterOptions()
+                                                         .withSampleRate (audio.sampleRate)
+                                                         .withNumChannels (2)
+                                                         .withBitsPerSample (bitsPerSample)
+                                                         .withQualityOptionIndex (kFlacQuality));
+        if (writer == nullptr)
+        {
+            error = "The FLAC encoder cannot write " + juce::String (audio.sampleRate, 0) + " Hz audio";
+            return false;
+        }
+
+        // Dithered integers (interleaved dither order, like writeWav),
+        // left-aligned in 32 bits as AudioFormatWriter::write expects.
+        TpdfDither dither;
+        const double scale = bitsPerSample == 24 ? 8388608.0 : 32768.0;
+        const int shift = 1 << (32 - bitsPerSample);
+        const auto numFrames = channels[0].size();
+        std::vector<int> left (kEncodeBlock), right (kEncodeBlock);
+        for (size_t frame = 0; frame < numFrames;)
+        {
+            if (isAborted (abortFlag))
+            {
+                error = kAborted;
+                return false;
+            }
+            const auto n = std::min (static_cast<size_t> (kEncodeBlock), numFrames - frame);
+            for (size_t i = 0; i < n; ++i)
+            {
+                left[i] = quantise (channels[0][frame + i], scale, dither) * shift;
+                right[i] = quantise (channels[1][frame + i], scale, dither) * shift;
+            }
+            const int* data[] = { left.data(), right.data(), nullptr };
+            if (! writer->write (data, static_cast<int> (n)))
+            {
+                error = "Write error (disk full?)";
+                return false;
+            }
+            frame += n;
+        }
+    } // the writer finishes the stream (last frame, STREAMINFO), flushes and closes it here
+
+    if (streamFailed) // a failure the writer itself does not report
+    {
+        error = "Write error (disk full?)";
         return false;
     }
     return true;
@@ -619,8 +728,10 @@ void ExportJob::run()
                  progress.current = -1;
                  progress.running = false;
                  progress.completed = true;
+                 // Cleared before the change message is posted: a listener
+                 // reading isRunning() for this message must see false.
+                 running.store (false);
              });
-    running.store (false);
     finishedEvent.signal();
 }
 
@@ -643,7 +754,7 @@ void ExportJob::processItem (size_t index, const std::vector<float>& values, con
         flub::io::AudioFileData input;
         juce::String error;
         std::string e;
-        if (! decode (formats, item.input, input, item.inputFormat, error))
+        if (! decode (formats, item.input, input, item.inputFormat, error, &abortRequested))
         {
             fail (error);
         }
@@ -661,9 +772,13 @@ void ExportJob::processItem (size_t index, const std::vector<float>& values, con
             item.inTruePeakDbtp = inReport.truePeakDbtp;
 
             flub::cli::RenderResult rr;
-            if (! flub::cli::renderFile (input, values, renderSettings, rr, e))
+            if (abortRequested.load())
             {
-                fail (e == flub::cli::kAbortedError ? juce::String ("Aborted") : toJuce (e));
+                fail (kAborted);
+            }
+            else if (! flub::cli::renderFile (input, values, renderSettings, rr, e))
+            {
+                fail (e == flub::cli::kAbortedError ? juce::String (kAborted) : toJuce (e));
             }
             else
             {
@@ -674,7 +789,7 @@ void ExportJob::processItem (size_t index, const std::vector<float>& values, con
                 const auto folder = item.output.getParentDirectory();
                 if (const auto r = folder.createDirectory(); r.failed())
                     fail ("Cannot create " + folder.getFullPathName() + ": " + r.getErrorMessage());
-                else if (! encode (formats, item.output, settings.format, rr, error))
+                else if (! encode (formats, item.output, settings.format, rr, error, &abortRequested))
                     fail (error);
                 else
                 {

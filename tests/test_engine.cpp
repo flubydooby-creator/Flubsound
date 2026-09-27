@@ -646,9 +646,11 @@ TEST_CASE ("Chain: AutoDrive pulls a hot drive down to the loudness target at <=
         prev = r;
     }
     CHECK_LE (fastest, 2.0 + 1e-3);
-    // Far over the target (error > 4 LU) the loop runs at exactly that limit...
+    // Far over the target (error > 4 LU) the loop runs at exactly that limit
+    // (the gated loudness reads the output level from its first open block,
+    // so from the start until the error falls under 4 LU at about 4 s)...
     const auto reductionAt = [&] (double seconds) { return reduction[static_cast<size_t> (seconds / blockSec)]; };
-    CHECK_NEAR (reductionAt (5.0) - reductionAt (2.0), -6.0, 0.3);
+    CHECK_NEAR (reductionAt (4.0) - reductionAt (1.0), -6.0, 0.3);
     // ...and it settles inside its dead band, with drive to spare (the target
     // is reached by the loop, not by the 0 dB drive floor).
     CHECK_GE (shortTerm.back(), kTarget - 1.0f);

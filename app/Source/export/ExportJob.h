@@ -6,17 +6,19 @@
 //     file whose extension one of juce::AudioFormatManager's basic formats
 //     claims (WAV, AIFF, FLAC, Ogg Vorbis, and MP3 when JUCE_USE_MP3AUDIOFORMAT
 //     is on - JUCE 9's default, which the app keeps) is a job item; other
-//     files are listed as skipped. Items are sorted by display name (the path
-//     relative to the input folder) and mapped to that relative path below
-//     the output folder with the output format's extension. On a clash
-//     (a.wav and a.flac -> a.wav) the file that already has the output
-//     extension keeps the name and the other gets its source extension
-//     appended ("a_flac.wav").
+//     files are listed as skipped. A folder scan leaves out hidden files and
+//     names starting with '.' (macOS "._x.wav" AppleDouble files). Items are
+//     sorted by display name (the path relative to the input folder) and
+//     mapped to that relative path below the output folder with the output
+//     format's extension. On a clash (a.wav and a.flac -> a.wav) the file
+//     that already has the output extension keeps the name and the other
+//     gets its source extension appended ("a_flac.wav").
 //   * Never overwrites an input: the output folder must not be an input
 //     folder or the folder of an input file (validate()), and an output path
 //     that is also an input (an output folder above a recursive input folder)
 //     refuses the whole job. Files inside an output folder nested in an input
-//     folder are ignored (never re-process our own results), like the CLI.
+//     folder (lexically or through a symlink / "..") are ignored (never
+//     re-process our own results), like the CLI.
 //   * Decoding: juce::AudioFormatReader, at the file's own sample rate (no
 //     resampling, as in the CLI); 1, 2, 6 or 8 channels (flub::cli::checkRenderable).
 //   * Rendering: flub::cli::renderFile (tools/flubsound-cli/OfflineRenderer),
@@ -29,8 +31,9 @@
 //     `flubsound-cli process` for the same decoded input and parameters);
 //     FLAC 16 / 24 through juce::FlacAudioFormat with the same TPDF dither
 //     generator. Files are written to a temporary file next to the target
-//     and moved into place when complete. The output report measures the
-//     file as written (PCM / FLAC read back).
+//     and moved into place when complete; a write failure (also one while
+//     the FLAC encoder finishes the stream) fails the item. The output
+//     report measures the file as written (PCM / FLAC read back).
 //
 // Threading: start() is called on the message thread and returns at once;
 // one juce::Thread works through the items in order. Progress and results
@@ -39,9 +42,10 @@
 // ChangeBroadcaster (asynchronously, on the message thread). cancel() stops
 // after the file being rendered (it is completed and written; the remaining
 // items become Cancelled). abort() - and the destructor, which then waits
-// for the thread - also abandons the current render between two blocks
-// (RenderSettings::abort). waitForCompletion() is the explicit completion
-// signal for tests and headless callers.
+// for the thread - also abandons the current item between two blocks or
+// stages (decode, render through RenderSettings::abort, encode, read-back);
+// a single loudness analysis still runs to its end. waitForCompletion() is
+// the explicit completion signal for tests and headless callers.
 #pragma once
 
 #include "OfflineRenderer.h"
@@ -53,6 +57,7 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -144,15 +149,18 @@ public:
 
     /** Stop after the file being rendered. Thread-safe, idempotent. */
     void cancel() noexcept { cancelRequested.store (true); }
-    /** Stop now: cancel() plus the render in progress is abandoned at its
-        next block (that item fails as "Aborted"; nothing is written under
-        its name). The destructor does this. Thread-safe, idempotent. */
+    /** Stop now: cancel() plus the item in progress is abandoned at its next
+        block or stage (decode, render, encode, read-back; a loudness analysis
+        already running finishes first). That item fails as "Aborted" and
+        nothing is written under its name. The destructor does this.
+        Thread-safe, idempotent. */
     void abort() noexcept
     {
         cancelRequested.store (true);
         abortRequested.store (true);
     }
 
+    /** False from the moment the final progress (completed) is published. */
     bool isRunning() const noexcept { return running.load(); }
     /** Blocks until the job has finished (or `timeoutMs` passed, a hang
         guard; -1 = forever). True if it finished. */
@@ -182,13 +190,22 @@ public:
     /** The renderer settings `flubsound-cli process` would use (makeRenderSettings). */
     static flub::cli::RenderSettings makeRenderSettings (const ExportSettings& settings, const std::vector<float>& values);
 
-    /** Decodes a whole file to planar float (any registered format). */
+    /** Decodes a whole file to planar float (any registered format). A
+        non-null `abortFlag` is polled per block: set, it fails as "Aborted". */
     static bool decode (const juce::AudioFormatManager& formats, const juce::File& file, flub::io::AudioFileData& out,
-                        juce::String& description, juce::String& error);
+                        juce::String& description, juce::String& error, const std::atomic<bool>* abortFlag = nullptr);
     /** Writes a render in `format` to `file` (through a temporary file) and
-        sets result.outputReport to the analysis of the file as written. */
+        sets result.outputReport to the analysis of the file as written.
+        `abortFlag` is polled before, per FLAC block, during the read-back and
+        before the file is moved into place ("Aborted": nothing is written). */
     static bool encode (const juce::AudioFormatManager& formats, const juce::File& file, ExportFormat format,
-                        flub::cli::RenderResult& result, juce::String& error);
+                        flub::cli::RenderResult& result, juce::String& error, const std::atomic<bool>* abortFlag = nullptr);
+    /** encode()'s FLAC writer: `audio` (stereo) as dithered 16 / 24-bit FLAC
+        into `stream`. Fails on any stream failure, including the ones JUCE's
+        FlacWriter ignores while it finishes the stream (last frame, STREAMINFO,
+        final flush), and with "Aborted" when `abortFlag` is set. */
+    static bool writeFlac (std::unique_ptr<juce::OutputStream> stream, int bitsPerSample, const flub::io::AudioFileData& audio,
+                           juce::String& error, const std::atomic<bool>* abortFlag = nullptr);
 
     static juce::String extensionFor (ExportFormat format);      // ".wav" / ".flac"
     static juce::String describeFormat (ExportFormat format);    // "WAV 32-bit float", ...

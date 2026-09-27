@@ -1,17 +1,19 @@
 // Tests for ProcessingChain's neural slot (docs/09-future-roadmap.md §1.1):
 // empty by default and then invisible (latency and output bit-identical to a
 // chain without it), an eligible model adds exactly its fixed latency L, an
-// ineligible one stays out with the reason reported, a model ahead of the
-// maximizer cannot push past the true-peak ceiling, the slot's bypass keeps
-// the latency, process() stays allocation-free and clearNeuralModel() gives
-// the original latency back.
+// ineligible one or one whose safety frames do not cover the host buffer
+// stays out with the reason reported, an Offline render with no waiting gets
+// every frame's result, a model ahead of the maximizer cannot push past the
+// true-peak ceiling, the slot's bypass keeps the latency, process() stays
+// allocation-free and clearNeuralModel() gives the original latency back.
 //
 // Determinism: the models run on the real worker thread. Where the model's
 // controls matter, the test waits for the worker after every block
 // (AsyncModelProcessor::getPendingFrames() == 0; the bound is a hang guard)
 // with host blocks no longer than safetyFrames * frameSize, so every result
 // is on time (tests/test_neural.cpp explains why). An identity model's gain
-// is 1 whether or not its result arrives, so those renders need no waiting.
+// is 1 whether or not its result arrives, so those renders need no waiting,
+// and an Offline slot runs the model inside process(), so it needs none either.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -142,6 +144,39 @@ private:
     bool throws;
 };
 
+/** A different gain for every frame (cycling through kGains, restarting at
+    the runner's reset()), so a control applied to the wrong frame shows.
+    Records the thread run() is called on. */
+class PerFrameGainRunner : public ModelRunner
+{
+public:
+    static constexpr float kGains[3] { 0.5f, 0.25f, 0.8f };
+
+    explicit PerFrameGainRunner (int frameSize) : frame (frameSize) {}
+
+    ModelDescription describe() const override
+    {
+        ModelDescription d;
+        d.frameSize = frame;
+        return d;
+    }
+
+    void reset() override { runs = 0; }
+
+    bool run (const float*, float* outControls) override
+    {
+        outControls[0] = kGains[runs++ % 3];
+        runThread = std::this_thread::get_id();
+        return true;
+    }
+
+    std::thread::id runThread;
+
+private:
+    int frame;
+    int runs = 0;
+};
+
 ModelDescription description (int frameSize, double sampleRate = 0.0)
 {
     ModelDescription d;
@@ -150,11 +185,12 @@ ModelDescription description (int frameSize, double sampleRate = 0.0)
     return d;
 }
 
-/** One safety frame (L = 2 * frameSize), fast worker polling. */
-NeuralSlotConfig slotConfig()
+/** One safety frame by default (L = 2 * frameSize), fast worker polling. A
+    host block may be at most safetyFrames * frameSize (BlockTooLarge). */
+NeuralSlotConfig slotConfig (int safetyFrames = 1)
 {
     NeuralSlotConfig c;
-    c.processor.safetyFrames = 1;
+    c.processor.safetyFrames = safetyFrames;
     c.processor.workerPollMicroseconds = 100; // keeps the per-block waits short
     return c;
 }
@@ -175,10 +211,10 @@ TEST_CASE ("NeuralSlot: with no model the latency is the reference value per pro
         ProcessingChain cleared (store);     // a model active, then cleared and re-prepared
         emptied.setNeuralModel (std::make_unique<IdentityRunner> (256), slotConfig());
         emptied.clearNeuralModel();
-        cleared.setNeuralModel (std::make_unique<IdentityRunner> (128), slotConfig()); // L = 256 <= 480: eligible everywhere
+        cleared.setNeuralModel (std::make_unique<IdentityRunner> (128), slotConfig (2)); // L = 384 <= 480: eligible everywhere
         cleared.prepare ({ kFs, 256, 2 });
         CHECK (cleared.getNeuralStatus().state == NeuralSlotState::Active);
-        CHECK (cleared.getLatencySamples() == reference[profile] + 256);
+        CHECK (cleared.getLatencySamples() == reference[profile] + 384);
         cleared.clearNeuralModel();
         CHECK (cleared.needsReprepare());
 
@@ -350,9 +386,9 @@ TEST_CASE ("NeuralSlot: a sample-rate mismatch, an invalid description or a fail
         int modelLatency;
     };
     Case cases[3] {
-        { std::make_unique<DescribedRunner> (description (128, 44100.0)), NeuralSlotState::SampleRateMismatch, 256 },
+        { std::make_unique<DescribedRunner> (description (256, 44100.0)), NeuralSlotState::SampleRateMismatch, 512 },
         { std::make_unique<DescribedRunner> (description (0)), NeuralSlotState::InvalidModel, 0 },
-        { std::make_unique<DescribedRunner> (description (128), 0.0f, true), NeuralSlotState::PrepareFailed, 256 },
+        { std::make_unique<DescribedRunner> (description (256), 0.0f, true), NeuralSlotState::PrepareFailed, 512 },
     };
     for (auto& k : cases)
     {
@@ -379,9 +415,134 @@ TEST_CASE ("NeuralSlot: a sample-rate mismatch, an invalid description or a fail
     // The same model at its own rate runs.
     ParameterStore store;
     ProcessingChain chain (store);
-    chain.setNeuralModel (std::make_unique<DescribedRunner> (description (128, 44100.0)), slotConfig());
+    chain.setNeuralModel (std::make_unique<DescribedRunner> (description (256, 44100.0)), slotConfig());
     chain.prepare ({ 44100.0, 256, 2 });
     CHECK (chain.getNeuralStatus().state == NeuralSlotState::Active);
+}
+
+TEST_CASE ("NeuralSlot: a host buffer longer than the model's safety frames keeps it out in real time (BlockTooLarge)")
+{
+    // A result can only be picked up by a later process() call than the one
+    // that submitted its frame, so with blocks longer than safetyFrames *
+    // frameSize a fixed fraction of frames (53 % for 480-sample frames and
+    // 1024-sample buffers) would miss even with an instant model, while the
+    // status read Active. prepare() keeps such a model out instead.
+    struct Case
+    {
+        LatencyProfileValue profile;
+        int frameSize, safetyFrames, maxBlock;
+        NeuralSlotState expected;
+    };
+    const Case cases[] {
+        { LatencyProfileValue::Balanced, 480, 1, 1024, NeuralSlotState::BlockTooLarge },
+        { LatencyProfileValue::Balanced, 480, 1, 481, NeuralSlotState::BlockTooLarge },
+        { LatencyProfileValue::Balanced, 480, 1, 480, NeuralSlotState::Active },
+        { LatencyProfileValue::LowLatency, 240, 1, 512, NeuralSlotState::BlockTooLarge },
+        { LatencyProfileValue::LowLatency, 240, 1, 256, NeuralSlotState::BlockTooLarge },
+        { LatencyProfileValue::LowLatency, 240, 1, 240, NeuralSlotState::Active },
+        { LatencyProfileValue::Quality, 240, 3, 720, NeuralSlotState::Active },
+        { LatencyProfileValue::Quality, 240, 0, 64, NeuralSlotState::BlockTooLarge }, // no safety frame: every frame would miss
+    };
+    const int reference[3] { kQualityLatency, kBalancedLatency, kLowLatency };
+    for (const auto& k : cases)
+    {
+        ParameterStore store;
+        store.set (LatencyProfile, static_cast<float> (k.profile));
+        ProcessingChain chain (store);
+        chain.setNeuralModel (std::make_unique<IdentityRunner> (k.frameSize), slotConfig (k.safetyFrames));
+        chain.prepare ({ kFs, k.maxBlock, 2 });
+        const auto status = chain.getNeuralStatus();
+        CHECK (status.state == k.expected);
+        CHECK (status.modelLatencySamples == k.frameSize * (1 + k.safetyFrames));
+        const int base = reference[static_cast<int> (k.profile)];
+        if (k.expected == NeuralSlotState::BlockTooLarge)
+        {
+            CHECK (std::strstr (neuralSlotReason (status.state), "Bypassed") != nullptr);
+            CHECK (std::strstr (neuralSlotReason (status.state), "buffer") != nullptr);
+            CHECK (chain.getNeuralProcessor() == nullptr);
+            CHECK (chain.getLatencySamples() == base);
+        }
+        else
+        {
+            REQUIRE (chain.getNeuralProcessor() != nullptr);
+            CHECK (chain.getNeuralProcessor()->getMaxBlockSizeWithoutMisses() >= k.maxBlock);
+            CHECK (chain.getLatencySamples() == base + status.modelLatencySamples);
+        }
+    }
+
+    // The model stays installed: a smaller buffer brings it in, and an
+    // Offline render (no real-time deadline) accepts any block length.
+    ParameterStore store;
+    store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::Balanced));
+    ProcessingChain chain (store);
+    chain.setNeuralModel (std::make_unique<IdentityRunner> (480), slotConfig());
+    chain.prepare ({ kFs, 1024, 2 });
+    CHECK (chain.getNeuralStatus().state == NeuralSlotState::BlockTooLarge);
+    chain.prepare ({ kFs, 256, 2 });
+    CHECK (chain.getNeuralStatus().state == NeuralSlotState::Active);
+    NeuralSlotConfig offline = slotConfig();
+    offline.context = ModelContext::Offline;
+    chain.setNeuralModel (std::make_unique<IdentityRunner> (480), offline);
+    chain.prepare ({ kFs, 1024, 2 });
+    CHECK (chain.getNeuralStatus().state == NeuralSlotState::Active);
+    REQUIRE (chain.getNeuralProcessor() != nullptr);
+    CHECK (chain.getNeuralProcessor()->getConfig().offline);
+}
+
+TEST_CASE ("NeuralSlot: an Offline render faster than real time applies every frame's model result, reproducibly")
+{
+    // A heavy model (100 ms frames, no safety frame: L = 4800) that only the
+    // Offline context admits in Low Latency, rendered back to back in
+    // 1024-sample blocks with no waiting at all: far faster than real time,
+    // and with blocks longer than safetyFrames * frameSize. Every other module
+    // is bypassed, so the chain is a pure delay and each frame's own gain
+    // (0.5, 0.25, 0.8, ...) must be visible on exactly that frame's samples.
+    const int frame = 4800, frames = 20, n = frame * frames, block = 1024;
+    const auto input = makeProgramme (n, 0.3f);
+    NeuralSlotConfig offline = slotConfig (0);
+    offline.context = ModelContext::Offline;
+    offline.processor.controlRampMs = 1.0f; // 48 samples
+
+    Planar outputs[2] { input, input };
+    for (Planar& out : outputs)
+    {
+        ParameterStore store;
+        store.set (LatencyProfile, static_cast<float> (LatencyProfileValue::LowLatency));
+        bypassAllModules (store);
+        ProcessingChain realtime (store);
+        realtime.setNeuralModel (std::make_unique<PerFrameGainRunner> (frame), slotConfig (0));
+        realtime.prepare ({ kFs, block, 2 });
+        CHECK (realtime.getNeuralStatus().state == NeuralSlotState::Ineligible);
+
+        ProcessingChain chain (store);
+        auto runner = std::make_unique<PerFrameGainRunner> (frame);
+        const PerFrameGainRunner* model = runner.get();
+        chain.setNeuralModel (std::move (runner), offline);
+        chain.prepare ({ kFs, block, 2 });
+        REQUIRE (chain.getNeuralStatus().state == NeuralSlotState::Active);
+        const int total = chain.getLatencySamples();
+        CHECK (total == kLowLatency + frame);
+
+        render (chain, out, block); // no waitForModel
+        CHECK (model->runThread == std::this_thread::get_id()); // the model ran inside process()
+        const auto counters = chain.getNeuralCounters();
+        CHECK (counters.deadlineMisses == 0);
+        CHECK (counters.modelFailures == 0);
+        CHECK (counters.framesProcessed == static_cast<uint64_t> (frames));
+        CHECK (chain.getNeuralProcessor()->getPendingFrames() == 0);
+
+        // Output frame k (input frame k, total samples later) carries gain k.
+        double worst = 0.0;
+        for (int k = 0; k * frame + total < n; ++k)
+        {
+            const float g = PerFrameGainRunner::kGains[k % 3];
+            for (int j = k * frame + 48; j < (k + 1) * frame && j + total < n; ++j)
+                for (size_t c = 0; c < 2; ++c)
+                    worst = std::max (worst, static_cast<double> (std::abs (out.ch[c][static_cast<size_t> (j + total)] - g * input.ch[c][static_cast<size_t> (j)])));
+        }
+        CHECK_LE (worst, 1e-6);
+    }
+    CHECK (bitIdentical (outputs[0], outputs[1])); // the same bytes on every run
 }
 
 TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter still holds the true-peak ceiling on hot material")
@@ -509,10 +670,10 @@ TEST_CASE ("NeuralSlot: process() with an active model is allocation-free (bypas
         store.set (LatencyProfile, static_cast<float> (profile));
         store.set (BoostIntensity, 0.7f);
         ProcessingChain chain (store);
-        chain.setNeuralModel (std::make_unique<ConstantGainRunner> (128, -3.0f), slotConfig()); // L = 256: eligible everywhere
-        chain.prepare ({ kFs, 512, 2 });
+        chain.setNeuralModel (std::make_unique<ConstantGainRunner> (128, -3.0f), slotConfig (2)); // L = 384: eligible everywhere
+        chain.prepare ({ kFs, 256, 2 });
         REQUIRE (chain.getNeuralStatus().state == NeuralSlotState::Active);
-        auto buf = makeProgramme (512 * 40, 0.5f);
+        auto buf = makeProgramme (256 * 40, 0.5f);
         AllocationGuard guard;
         for (int b = 0; b < 40; ++b)
         {
@@ -524,8 +685,8 @@ TEST_CASE ("NeuralSlot: process() with an active model is allocation-free (bypas
                 store.set (Mode, 1.0f);
             }
             if (b == 30)
-                buf.ch[0][static_cast<size_t> (b * 512)] = std::numeric_limits<float>::quiet_NaN(); // chain.reset()
-            chain.process (buf.block (b * 512, 512));
+                buf.ch[0][static_cast<size_t> (b * 256)] = std::numeric_limits<float>::quiet_NaN(); // chain.reset()
+            chain.process (buf.block (b * 256, 256));
         }
         CHECK (guard.allocations() == 0);
     }

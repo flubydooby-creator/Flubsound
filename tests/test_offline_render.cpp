@@ -5,7 +5,7 @@
 // (folder walk, parallel jobs, per-file results, a corrupt file).
 //
 // Every test works in its own folder below the system temp path, named after
-// the test and removed afterwards.
+// the test plus a unique suffix and removed afterwards.
 #include "TestFramework.h"
 
 #include "Analysis.h"
@@ -21,11 +21,13 @@
 #include "flub/io/WavFile.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <random>
 #include <set>
 #include <thread>
 
@@ -37,14 +39,26 @@ namespace
 {
 namespace fs = std::filesystem;
 
-/** A fresh folder below the system temp path, removed (with its contents) on destruction. */
+/** A fresh folder below the system temp path, removed (with its contents) on
+    destruction. The name is unique to this instance (ticks, random, counter)
+    and the folder must not exist yet, so test runs on the same machine at the
+    same time never share, wipe or fill each other's folders. */
 struct TempDir
 {
-    explicit TempDir (const std::string& name) : path (fs::temp_directory_path() / ("flub_test_offline_render_" + name))
+    explicit TempDir (const std::string& name)
     {
-        std::error_code ec;
-        fs::remove_all (path, ec);
-        fs::create_directories (path, ec);
+        static std::atomic<int> counter { 0 };
+        for (int attempt = 0;; ++attempt)
+        {
+            const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+            path = fs::temp_directory_path()
+                   / ("flub_test_offline_render_" + name + "_" + std::to_string (ticks) + "_" + std::to_string (std::random_device {}())
+                      + "_" + std::to_string (++counter));
+            std::error_code ec;
+            if (fs::create_directory (path, ec)) // false: the name exists already (or an error)
+                break;
+            REQUIRE (attempt < 100);
+        }
     }
 
     ~TempDir()
@@ -220,7 +234,9 @@ TEST_CASE ("OfflineRenderer: bypassed modules render the input sample for sample
 TEST_CASE ("OfflineRenderer: the render is bit-identical at every block size")
 {
     // Priming snaps every smoother onto its target, so with fixed parameters
-    // (AutoLevel and AutoDrive off, their defaults) --block changes only the
+    // (AutoLevel and AutoDrive off, their defaults) and the SafetyGovernor
+    // idle (scale 1: it is updated once per block and applied from the next,
+    // so once it moves the block size shifts it) --block changes only the
     // speed, never the samples.
     const auto input = makeProgramme (2, 48000.0, 1.5, 0.3f, 5);
     const auto values = boostedValues (60.0f);
@@ -277,6 +293,31 @@ TEST_CASE ("OfflineRenderer: --target-lufs lands within 0.3 LU of the target, lo
         CHECK (rr.driveDb == 0.0f);
         CHECK (rr.outputGainDb < -3.0f);
         CHECK (std::any_of (rr.notes.begin(), rr.notes.end(), [] (const std::string& n) { return contains (n, "output.gain lowered"); }));
+    }
+}
+
+TEST_CASE ("OfflineRenderer: a quiet --target-lufs beyond output.gain's -24 dB is reached by lowering input.gain")
+{
+    // A hot programme (about -8 LUFS) to -45 LUFS needs more than output.gain's
+    // 24 dB of attenuation; input.gain supplies the rest, with the maximizer on
+    // (drive already 0 dB) and off.
+    const auto input = makeProgramme (2, 48000.0, 3.0, 0.9f, 23);
+    CHECK (analyse (input.channels, input.sampleRate).integratedLufs > -12.0f);
+    RenderSettings settings;
+    settings.targetLufs = -45.0f;
+    std::string error;
+    for (const bool maximizer : { true, false })
+    {
+        auto values = defaultValues();
+        values[static_cast<size_t> (MaximizerOn)] = maximizer ? 1.0f : 0.0f;
+        RenderResult rr;
+        REQUIRE (renderFile (input, values, settings, rr, error));
+        CHECK (rr.targetReached);
+        CHECK_NEAR (rr.outputReport.integratedLufs, -45.0, 0.3);
+        CHECK (rr.outputGainDb == layout()[static_cast<size_t> (OutputGainDb)].minValue);
+        CHECK (rr.inputGainDb < -1.0f);
+        CHECK (std::any_of (rr.notes.begin(), rr.notes.end(), [] (const std::string& n) { return contains (n, "input.gain lowered"); }));
+        CHECK (std::none_of (rr.notes.begin(), rr.notes.end(), [] (const std::string& n) { return contains (n, "not reachable"); }));
     }
 }
 
@@ -621,6 +662,79 @@ TEST_CASE ("CLI batch: parallel jobs give per-file results at the loudness targe
     CHECK (doc["summary"]["jobs"].asNumber() == 3.0);
     REQUIRE (doc["skipped"].asArray().size() == 1);
     CHECK (doc["skipped"].asArray()[0].asString() == "notes.txt");
+}
+
+namespace
+{
+/** Strict UTF-8 check (well-formed lead / continuation structure). */
+bool isValidUtf8 (const std::string& s)
+{
+    for (size_t i = 0; i < s.size();)
+    {
+        const auto c = static_cast<unsigned char> (s[i]);
+        const size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (len == 0 || i + len > s.size())
+            return false;
+        for (size_t k = 1; k < len; ++k)
+            if ((static_cast<unsigned char> (s[i + k]) & 0xC0) != 0x80)
+                return false;
+        i += len;
+    }
+    return true;
+}
+
+size_t codePoints (const std::string& s)
+{
+    return static_cast<size_t> (std::count_if (s.begin(), s.end(), [] (char c) { return (static_cast<unsigned char> (c) & 0xC0) != 0x80; }));
+}
+} // namespace
+
+TEST_CASE ("CLI batch: the summary table shortens long UTF-8 names on a code point boundary and keeps the columns aligned")
+{
+    // "日本語の曲名" (6 code points, 18 bytes) x 4 + "a.wav": 29 code points,
+    // 77 bytes. A byte-based cut to 48 columns would start inside a 3-byte
+    // sequence (45 bytes kept, 40 of them CJK) and misalign the columns.
+    const std::string cjk = "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x81\xAE\xE6\x9B\xB2\xE5\x90\x8D";
+    std::string longName;
+    for (int i = 0; i < 4; ++i)
+        longName += cjk;
+    longName += "a.wav";
+    const std::string veryLong = "sub/" + longName + longName; // 62 code points: ellipsized
+
+    std::vector<BatchJob> jobs (3);
+    jobs[0].displayName = longName;
+    jobs[1].displayName = veryLong;
+    jobs[2].displayName = "short.wav";
+    std::vector<BatchResult> results (3);
+    for (auto& r : results)
+        r.error = "boom";
+
+    const std::string table = formatBatchSummary (jobs, results, {}, 1.0);
+    CHECK (isValidUtf8 (table));
+    CHECK (contains (table, longName)); // 29 code points fit the column uncut
+    CHECK (contains (table, "..." + cjk.substr (3) + cjk + "a.wav" + longName)); // the last 45 code points of veryLong
+
+    // "Status" in the header and "FAILED" in every row start in the same column.
+    std::vector<std::string> lines;
+    for (size_t pos = 0, next; pos < table.size(); pos = next + 1)
+    {
+        next = table.find ('\n', pos);
+        if (next == std::string::npos)
+            next = table.size();
+        lines.push_back (table.substr (pos, next - pos));
+    }
+    const auto header = std::find_if (lines.begin(), lines.end(), [] (const std::string& l) { return contains (l, "Status"); });
+    REQUIRE (header != lines.end());
+    const size_t statusColumn = codePoints (header->substr (0, header->find ("Status")));
+    CHECK (statusColumn == 48 + 55); // the name column is 48 wide
+    int rows = 0;
+    for (const auto& l : lines)
+        if (contains (l, "FAILED: boom"))
+        {
+            ++rows;
+            CHECK (codePoints (l.substr (0, l.find ("FAILED"))) == statusColumn);
+        }
+    CHECK (rows == 3);
 }
 
 TEST_CASE ("CLI batch: the command writes the folder tree and exits 1 when a file failed, 2 on usage errors")

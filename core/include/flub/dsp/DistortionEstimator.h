@@ -19,11 +19,13 @@
 // channel.
 //
 // The stages accumulate the sums over a DistortionWindow of at least 25 ms
-// (kWindowSeconds), not over the host block: over a stretch much shorter than
-// a bass period, the fundamental and its harmonics are nearly collinear, so g
-// absorbs most of the harmonics (a 55 Hz sine through 12 dB of tape drive
-// read 8 dB low in 64-sample blocks and 14 dB low in 32-sample blocks). From
-// about 10 ms on the reading at 55 Hz no longer depends on the length.
+// (kWindowSeconds; it closes at the first block boundary at or after that, so
+// it can be up to one block longer), not over the host block: over a stretch
+// much shorter than a bass period, the fundamental and its harmonics are
+// nearly collinear, so g absorbs most of the harmonics (a 55 Hz sine through
+// 12 dB of tape drive read 8 dB low in 64-sample blocks and 14 dB low in
+// 32-sample blocks). From about 10 ms on the reading at 55 Hz no longer
+// depends on the length.
 #pragma once
 
 #include "flub/common/AudioBlock.h"
@@ -105,8 +107,12 @@ struct DistortionEnergy
     }
 };
 
-/** Per-channel sums over an analysis window of a fixed length (base-rate
-    samples), independent of how the host splits the stream into blocks. */
+/** Per-channel sums over an analysis window of at least kWindowSeconds
+    (getLength() base-rate samples). The caller adds whole blocks (or
+    segments), so the window closes at the first block boundary at or after
+    getLength() samples and the overshoot is not carried over: with blocks of
+    n samples a window spans ceil(getLength() / n) * n samples, 25 ms up to
+    25 ms + one block (exactly one block when blocks are longer). */
 class DistortionWindow
 {
 public:

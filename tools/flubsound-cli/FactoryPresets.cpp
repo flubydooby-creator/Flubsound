@@ -239,7 +239,7 @@ bool resolvePreset (const std::string& spec, const std::string& explicitPresetDi
     const auto entries = scanPresetDir (*dir, problems);
     if (entries.empty())
     {
-        error = "no factory presets found in " + dir->string();
+        error = "no factory presets found in " + io::pathToUtf8 (*dir);
         return false;
     }
 
@@ -285,7 +285,7 @@ bool resolvePreset (const std::string& spec, const std::string& explicitPresetDi
     std::vector<const FactoryPresetEntry*> all;
     for (const auto& e : entries)
         all.push_back (&e);
-    error = "unknown preset '" + spec + "' (not a file, not a factory preset in " + dir->string() + "). Available:"
+    error = "unknown preset '" + spec + "' (not a file, not a factory preset in " + io::pathToUtf8 (*dir) + "). Available:"
             + describeCandidates (all);
     return false;
 }

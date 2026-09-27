@@ -8,9 +8,13 @@
 //   flub::cli::renderFile + writeRender (what `flubsound-cli process` runs)
 //   give byte-identical files (float32 bit-exact, PCM16 with the same dither).
 // * Cancel: requested while the first file renders, the job completes that
-//   file and marks the rest cancelled; abort abandons it without a file.
+//   file and marks the rest cancelled; abort abandons it without a file, also
+//   in the decode / encode stages. isRunning() is false as soon as the final
+//   progress is visible.
 // * Safety: an output folder that is an input folder (or would overwrite an
-//   input) is refused.
+//   input) is refused; a scan skips hidden / "._" files and an output folder
+//   nested through a symlink.
+// * A FLAC stream failure while the encoder finishes (last frame) fails the file.
 // * The dialog: headless construction, the selected strip's snapshot (Bypass
 //   All ignored) or a preset as the parameter source, its layout at the
 //   minimum size, and a Start through the dialog.
@@ -32,6 +36,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <memory>
 #include <vector>
 
 using namespace flub::app;
@@ -143,6 +148,30 @@ int countFiles (const juce::File& folder)
     return folder.getNumberOfChildFiles (juce::File::findFiles | juce::File::ignoreHiddenFiles, "*")
            + folder.getNumberOfChildFiles (juce::File::findFiles, ".*"); // + hidden temporary files, if any were left
 }
+
+/** A memory stream that refuses to grow past `limit` bytes (a full disk). */
+class LimitedStream final : public juce::MemoryOutputStream
+{
+public:
+    LimitedStream (juce::MemoryBlock& block, size_t maxBytes)
+        : juce::MemoryOutputStream (block, false), limit (maxBytes)
+    {
+    }
+
+    bool write (const void* data, size_t numBytes) override
+    {
+        return fits (numBytes) && juce::MemoryOutputStream::write (data, numBytes);
+    }
+    bool writeRepeatedByte (juce::uint8 byte, size_t numTimesToRepeat) override
+    {
+        return fits (numTimesToRepeat) && juce::MemoryOutputStream::writeRepeatedByte (byte, numTimesToRepeat);
+    }
+
+private:
+    bool fits (size_t numBytes) { return static_cast<size_t> (getPosition()) + numBytes <= limit; }
+
+    size_t limit;
+};
 
 EngineController::Options headlessOptions (const flubapptest::TempFolder& temp)
 {
@@ -446,6 +475,162 @@ TEST_CASE ("App: Export: cancel while a file renders completes that file and mar
     CHECK (job.getProgress().finished == 4);
     CHECK (! job.getProgress().cancelled);
     CHECK (countFiles (out) == 4);
+}
+
+TEST_CASE ("App: Export: abort stops the decode, encode and read-back stages too; nothing is moved into place")
+{
+    flubapptest::TempFolder temp;
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    juce::WavAudioFormat wav;
+    const auto programme = makeProgramme (2, 48000.0, 0.5, 0.2f, 131);
+    const auto source = temp.file ("source.wav");
+    REQUIRE (writeWithJuce (wav, source, programme, 48000.0, 24));
+
+    const std::atomic<bool> aborted { true }, running { false };
+    flub::io::AudioFileData data;
+    juce::String description, error;
+    CHECK (! ExportJob::decode (formats, source, data, description, error, &aborted));
+    CHECK (error == "Aborted");
+    REQUIRE (ExportJob::decode (formats, source, data, description, error, &running));
+
+    // The render to encode: the decoded (stereo) source as the output.
+    flub::cli::RenderResult rr;
+    rr.output = data;
+    const auto out = temp.file ("out");
+    REQUIRE (out.createDirectory().wasOk());
+    for (const auto format : { ExportFormat::WavPcm24, ExportFormat::Flac16 })
+    {
+        const auto target = out.getChildFile ("song" + ExportJob::extensionFor (format));
+        error.clear();
+        CHECK (! ExportJob::encode (formats, target, format, rr, error, &aborted));
+        CHECK (error == "Aborted");
+        CHECK (! target.exists());
+        CHECK (countFiles (out) == 0); // no temporary file either
+    }
+
+    juce::MemoryBlock flacBytes;
+    CHECK (! ExportJob::writeFlac (std::make_unique<juce::MemoryOutputStream> (flacBytes, false), 24, data, error, &aborted));
+    CHECK (error == "Aborted");
+
+    // Not aborted: the same calls write the files.
+    for (const auto format : { ExportFormat::WavPcm24, ExportFormat::Flac16 })
+    {
+        const auto target = out.getChildFile ("song" + ExportJob::extensionFor (format));
+        CHECK (ExportJob::encode (formats, target, format, rr, error, &running));
+        CHECK (target.existsAsFile());
+    }
+    CHECK (countFiles (out) == 2);
+}
+
+TEST_CASE ("App: Export: a FLAC stream that fails while the encoder finishes (last frame) fails the file")
+{
+    // 3 x 4096 + 100 frames: the last, partial block is encoded only when the
+    // writer finishes the stream, where JUCE's FlacWriter ignores failures.
+    const auto programme = makeProgramme (2, 48000.0, (3.0 * 4096.0 + 100.0) / 48000.0, 0.2f, 141);
+    REQUIRE (programme.getNumSamples() == 3 * 4096 + 100);
+    const auto audio = toFileData (programme, 48000.0);
+
+    juce::MemoryBlock complete;
+    juce::String error;
+    REQUIRE (ExportJob::writeFlac (std::make_unique<juce::MemoryOutputStream> (complete, false), 16, audio, error));
+    const auto size = complete.getSize();
+    REQUIRE (size > 1000);
+
+    // Room for everything but the last byte: only the final frame's write fails.
+    juce::MemoryBlock partial;
+    error.clear();
+    CHECK (! ExportJob::writeFlac (std::make_unique<LimitedStream> (partial, size - 1), 16, audio, error));
+    CHECK (error.contains ("Write error"));
+    // A failure in the middle of the stream is reported too.
+    juce::MemoryBlock half;
+    error.clear();
+    CHECK (! ExportJob::writeFlac (std::make_unique<LimitedStream> (half, size / 2), 16, audio, error));
+    CHECK (error.contains ("Write error"));
+    // Exactly enough room: no failure.
+    juce::MemoryBlock exact;
+    CHECK (ExportJob::writeFlac (std::make_unique<LimitedStream> (exact, size), 16, audio, error));
+    CHECK (exact == complete);
+}
+
+TEST_CASE ("App: Export: isRunning() is already false when the final progress (completed) is visible")
+{
+    // The dialog enables its controls from isRunning() when the last change
+    // message arrives: the flag must be clear before that message is posted.
+    flubapptest::TempFolder temp;
+    const auto in = temp.file ("in");
+    REQUIRE (in.createDirectory().wasOk());
+    REQUIRE (in.getChildFile ("notes.txt").replaceWithText ("not audio")); // skipped: the job ends at once
+
+    ExportSettings s;
+    s.inputs.add (in);
+    s.outputFolder = temp.file ("out");
+    s.values = defaultValues();
+
+    ExportJob job;
+    int stillRunning = 0;
+    for (int run = 0; run < 200; ++run)
+    {
+        juce::String error;
+        REQUIRE (job.start (s, error));
+        while (! job.getProgress().completed)
+        {
+        }
+        if (job.isRunning())
+            ++stillRunning;
+        REQUIRE (job.waitForCompletion (kHangGuardMs));
+    }
+    CHECK (stillRunning == 0);
+}
+
+TEST_CASE ("App: Export: a folder scan skips hidden and '._' files, and an output folder nested through a symlink")
+{
+    flubapptest::TempFolder temp;
+    juce::WavAudioFormat wav;
+    const auto programme = makeProgramme (1, 48000.0, 0.2, 0.2f, 151);
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+
+    // macOS AppleDouble sidecar (not audio) and a hidden WAV next to a real one.
+    const auto in = temp.file ("in");
+    REQUIRE (in.createDirectory().wasOk());
+    REQUIRE (writeWithJuce (wav, in.getChildFile ("a.wav"), programme, 48000.0, 16));
+    REQUIRE (writeWithJuce (wav, in.getChildFile (".b.wav"), programme, 48000.0, 16));
+    const unsigned char appleDouble[] = { 0x00, 0x05, 0x16, 0x07, 0x00, 0x02, 0x00, 0x00 };
+    REQUIRE (in.getChildFile ("._a.wav").replaceWithData (appleDouble, sizeof (appleDouble)));
+
+    ExportSettings s;
+    s.values = defaultValues();
+    s.inputs = { in };
+    s.outputFolder = temp.file ("out");
+    std::vector<ExportItem> items;
+    juce::String error;
+    REQUIRE (ExportJob::plan (s, formats, items, error));
+    REQUIRE (items.size() == 1);
+    CHECK (items[0].displayName == "a.wav");
+    // A hidden file added explicitly is still an input.
+    s.inputs = { in.getChildFile (".b.wav") };
+    REQUIRE (ExportJob::plan (s, formats, items, error));
+    REQUIRE (items.size() == 1);
+    CHECK (items[0].displayName == ".b.wav");
+
+    // Input folder "link" -> "real"; output real/Exports (from a first run)
+    // holds x.wav, which the source real/x.wav maps to again.
+    const auto real = temp.file ("real"), link = temp.file ("link");
+    const auto exports = real.getChildFile ("Exports");
+    REQUIRE (exports.createDirectory().wasOk());
+    REQUIRE (writeWithJuce (wav, real.getChildFile ("x.wav"), programme, 48000.0, 16));
+    REQUIRE (writeWithJuce (wav, exports.getChildFile ("x.wav"), programme, 48000.0, 16));
+    if (! real.createSymbolicLink (link, true))
+        return; // no symbolic links here (Windows without the privilege): not checked
+    s.inputs = { link };
+    s.recursive = true;
+    s.outputFolder = exports;
+    REQUIRE (ExportJob::validate (s, error));
+    REQUIRE (ExportJob::plan (s, formats, items, error));
+    REQUIRE (items.size() == 1);
+    CHECK (items[0].displayName == "x.wav");
+    CHECK (items[0].output == exports.getChildFile ("x.wav"));
 }
 
 TEST_CASE ("App: Export: an output folder that is an input folder, or would overwrite an input, is refused; nested outputs are not re-read")

@@ -90,9 +90,10 @@ and sample rate.
   * --target-lufs L: render, measure the integrated loudness (EBU R128),
     move max.drive (0..24 dB) by the error and render again - up to 4 more
     passes, stopping within 0.3 LU. Beyond 24 dB of drive input.gain is
-    raised; below 0 dB of drive output.gain is lowered. The maximizer's
-    true-peak limiter holds the ceiling (--ceiling, default from the preset /
-    -1 dBTP); a measured overshoot is trimmed off the delivered file.
+    raised; below 0 dB of drive output.gain is lowered, then input.gain
+    (down to -24 dB each). The maximizer's true-peak limiter holds the
+    ceiling (--ceiling, default from the preset / -1 dBTP); a measured
+    overshoot is trimmed off the delivered file.
   * Percent parameters are stored as 0..1: --set clarity.air=0.4 or =40%.
 
 Examples:

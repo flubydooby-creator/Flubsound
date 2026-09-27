@@ -81,7 +81,10 @@ public:
     /** Drops the frame returned by the last successful peek(). */
     void release() noexcept { tail.store (tail.load (std::memory_order_relaxed) + 1, std::memory_order_release); }
 
-    /** Approximate fill level; exact when called from either endpoint thread. */
+    /** Snapshot of the fill level: an upper bound from the producer thread
+        (the consumer may have released since), a lower bound from the
+        consumer thread (the producer may have committed since), approximate
+        elsewhere. */
     size_t size() const noexcept
     {
         const size_t r = tail.load (std::memory_order_acquire); // tail first: head only grows, so this never underflows

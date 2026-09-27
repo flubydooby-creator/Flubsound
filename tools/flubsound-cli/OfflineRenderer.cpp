@@ -213,9 +213,10 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
         //   louder : max.drive (up to 24 dB) -> input.gain (ahead of the
         //            maximizer, so its ceiling still holds)
         //   quieter: max.drive (down to 0 dB) -> output.gain (post-maximizer
-        //            attenuation, which can only lower the true peak)
-        // With the maximizer explicitly off only output.gain is left (and
-        // --ceiling was already reported as not guaranteed).
+        //            attenuation, which can only lower the true peak) ->
+        //            input.gain (ahead of the maximizer)
+        // With the maximizer explicitly off output.gain moves first, then
+        // input.gain (and --ceiling was already reported as not guaranteed).
         struct Point
         {
             int knob;
@@ -245,12 +246,14 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
                     knob = InputGainDb;
                 else if (! louder && canMove (OutputGainDb, false))
                     knob = OutputGainDb;
+                else if (! louder && canMove (InputGainDb, false))
+                    knob = InputGainDb;
             }
             else if (canMove (OutputGainDb, louder))
             {
                 knob = OutputGainDb;
             }
-            else if (louder && canMove (InputGainDb, true))
+            else if (canMove (InputGainDb, louder))
             {
                 knob = InputGainDb;
             }
@@ -262,7 +265,8 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
                     why = maximizerOn ? "maximizer drive and input.gain are at their maximum"
                                       : "output.gain and input.gain are at their maximum (the maximizer is off)";
                 else
-                    why = "output.gain is at its minimum";
+                    why = maximizerOn ? "maximizer drive is 0 dB and output.gain and input.gain are at their minimum"
+                                      : "output.gain and input.gain are at their minimum (the maximizer is off)";
                 result.notes.push_back ("warning: loudness target not reachable: " + why);
                 break;
             }
@@ -292,9 +296,15 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
 
             if (knob == InputGainDb && ! inputNoteAdded)
             {
-                result.notes.push_back (maximizerOn ? "maximizer drive is at its " + formatFloat ("%.0f", rangeOf (MaxDriveDb).maxValue)
-                                                          + " dB maximum: input.gain raised to reach the target"
-                                                    : std::string ("input.gain raised to reach the target (the maximizer is off)"));
+                std::string note;
+                if (louder)
+                    note = maximizerOn ? "maximizer drive is at its " + formatFloat ("%.0f", rangeOf (MaxDriveDb).maxValue)
+                                             + " dB maximum: input.gain raised to reach the target"
+                                       : std::string ("input.gain raised to reach the target (the maximizer is off)");
+                else
+                    note = maximizerOn ? "maximizer drive is 0 dB and output.gain is at its minimum: input.gain lowered to reach the target"
+                                       : std::string ("output.gain is at its minimum: input.gain lowered to reach the target (the maximizer is off)");
+                result.notes.push_back (note);
                 inputNoteAdded = true;
             }
             if (knob == OutputGainDb && maximizerOn && ! outputNoteAdded)

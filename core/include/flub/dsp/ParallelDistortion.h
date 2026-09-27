@@ -22,8 +22,9 @@
 // zero.) For a sinusoid the residual is exactly the energy of the harmonics
 // the generator adds (plus aliases), whatever its linear branch; on
 // programme it also contains intermodulation. Like DistortionWindow, the
-// sums run over an analysis window of at least 25 ms, independent of the
-// host block size. Cost: six multiply-adds (in double) per sample and channel.
+// sums run over an analysis window of at least 25 ms that closes at the
+// first block boundary at or after that (up to one block longer). Cost: six
+// multiply-adds (in double) per sample and channel.
 #pragma once
 
 #include "DistortionEstimator.h"
@@ -85,8 +86,9 @@ struct ParallelDistortionSums
     static constexpr double kCollinear = 1.0e-9;
 };
 
-/** Per-channel sums over an analysis window of a fixed length (base-rate
-    samples), independent of how the host splits the stream into blocks. */
+/** Per-channel sums over an analysis window of at least
+    DistortionWindow::kWindowSeconds, closed at the first block boundary at or
+    after getLength() samples, as in DistortionWindow. */
 class ParallelDistortionWindow
 {
 public:

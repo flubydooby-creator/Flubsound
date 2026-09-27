@@ -20,8 +20,8 @@
 // (ChangeListener): status per file, loudness in / out, true peak, error or
 // renderer notes; double-click a finished row (or select it and press
 // Reveal) to show the file. Cancel stops after the file being rendered;
-// closing the dialog aborts the render in progress (its partial file is
-// discarded). Message thread only.
+// closing the dialog aborts the file in progress at its next block or stage
+// (its partial file is discarded). Message thread only.
 #pragma once
 
 #include "ExportJob.h"

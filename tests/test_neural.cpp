@@ -11,7 +11,8 @@
 // submitted it, so a test that waits for the worker between blocks
 // (waitForWorker: getPendingFrames() == 0, bounded only as a hang guard)
 // gets every result on time. Slowness is scripted with a test-owned gate the
-// model blocks on, never with a sleep of some length.
+// model blocks on, never with a sleep of some length. Offline mode runs the
+// model inside process() and needs no waiting at all.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -328,6 +329,62 @@ TEST_CASE ("Neural: the control computed from a frame is applied to exactly that
     }
     CHECK_LE (worst, 1.0e-5);
     CHECK (p.getDeadlineMisses() == 0);
+}
+
+TEST_CASE ("Neural: offline mode runs the model inside process(), so a render faster than real time gets every frame's result")
+{
+    // The frame-alignment scenario above, rendered back to back with no
+    // waiting and with blocks far longer than safetyFrames * frameSize: an
+    // asynchronous processor would miss most of these frames (by a number
+    // that depends on thread scheduling) and fall back to the dry signal.
+    // Offline, each frame's result is there at its boundary, even with no
+    // safety frame, and two renders give the same bytes.
+    for (int safety : { 0, 1 })
+    {
+        AsyncModelConfig cfg;
+        cfg.safetyFrames = safety;
+        cfg.controlRampMs = 0.5f;
+        cfg.maxGain = 16.0f;
+        cfg.offline = true;
+        const int frames = 60;
+        Planar input (1, kFrame * frames);
+        for (int k = 0; k < frames; ++k)
+            std::fill_n (input.ch[0].begin() + k * kFrame, kFrame, 0.1f + 0.08f * static_cast<float> ((k * 7) % 10));
+
+        Planar renders[2] { input, input };
+        for (Planar& buf : renders)
+        {
+            AsyncModelProcessor p (std::make_unique<InverseLevelRunner> (kFrame), cfg);
+            p.prepare (spec (1, 1000));
+            CHECK (p.getMaxBlockSizeWithoutMisses() == std::numeric_limits<int>::max());
+            const int latency = p.latencySamples();
+            CHECK (latency == kFrame * (1 + safety));
+            REQUIRE (runBlocks (p, buf, 0, kFrame * frames, { 1000, 37, 700 }, false));
+
+            double worst = 0.0;
+            for (int k = 0; k + latency / kFrame < frames; ++k)
+            {
+                const int first = latency + k * kFrame;
+                for (int i = first + 24; i < first + kFrame; ++i)
+                    worst = std::max (worst, std::abs (static_cast<double> (buf.ch[0][static_cast<size_t> (i)]) - 1.0));
+            }
+            CHECK_LE (worst, 1.0e-5);
+            CHECK (p.getDeadlineMisses() == 0);
+            CHECK (p.getFramesProcessed() == static_cast<uint64_t> (frames));
+            CHECK (p.getPendingFrames() == 0);
+        }
+        CHECK (renders[0].ch[0] == renders[1].ch[0]);
+    }
+
+    // Asynchronously, a block can be at most safetyFrames * frameSize long for
+    // every result to be on time (a result is picked up in a later block).
+    for (int safety : { 0, 1, 3 })
+    {
+        AsyncModelConfig cfg;
+        cfg.safetyFrames = safety;
+        const AsyncModelProcessor p (std::make_unique<IdentityRunner> (kFrame), cfg);
+        CHECK (p.getMaxBlockSizeWithoutMisses() == safety * kFrame);
+    }
 }
 
 TEST_CASE ("Neural: a constant -6 dB model scales the delayed input by -6 dB once the control ramp has settled")
