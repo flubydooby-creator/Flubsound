@@ -20,6 +20,12 @@
 //                    process tree directly into the strip through a
 //                    DriftCompensatedFifo (AudioEngineHost::startProcessCapture).
 //
+// Both need the router to list the running apps (canList). Endpoint routing
+// also needs it to move them (canMoveEndpoint): a Windows build without
+// FLUB_ENABLE_UNDOCUMENTED_ROUTING lists but cannot move, so Automatic takes
+// process capture there, or Disabled with getUnavailableReason(); it never
+// picks a method whose every move fails.
+//
 // Threading: AppAudioRouter calls block for 5-30 ms (COM / pactl), so session
 // enumeration and endpoint moves run on a background worker ("Flubsound
 // routing", every 2 s while routes exist or live updates are on, or on
@@ -81,16 +87,24 @@ public:
     void shutdown();
 
     // ---- Capabilities ------------------------------------------------------------
+    /** Apps can be listed and moved to another endpoint (router canList and
+        canMoveEndpoint). */
     bool isEndpointRoutingSupported() const noexcept;
-    bool isCaptureSupported() const noexcept { return captureSupported; }
-    /** True if sessions can be enumerated at all (router object available). */
-    bool canEnumerateApps() const noexcept { return router != nullptr; }
+    /** Process captures can start: the platform captures and the router lists
+        the apps to capture. */
+    bool isCaptureSupported() const noexcept { return captureSupported && canEnumerateApps(); }
+    /** True if sessions can be enumerated (router available and canList()). */
+    bool canEnumerateApps() const noexcept;
 
     Method getMethod() const noexcept { return method; }
     void setMethod (Method newMethod);
     /** Automatic -> EndpointRouting if supported, else ProcessCapture if
-        supported, else Disabled. */
+        supported, else Disabled. An explicit method that is not supported
+        gives Disabled. */
     Method getEffectiveMethod() const noexcept;
+    /** Why getEffectiveMethod() is Disabled and what to do instead
+        (user-presentable); empty when a method is in effect. */
+    juce::String getUnavailableReason() const;
 
     // ---- Routes ----------------------------------------------------------------------
     const std::vector<AppRoute>& getRoutes() const noexcept { return routes; }
@@ -105,6 +119,10 @@ public:
     // ---- Live state ------------------------------------------------------------------
     /** Last enumeration result (message thread copy). */
     const std::vector<AppState>& getApps() const noexcept { return apps; }
+    /** Running applications whose audio reaches a strip through us right now
+        (moved to a strip endpoint, or captured), counted once per process.
+        0 = per-app routing processes nothing (the panel's red state). */
+    int getProcessedAppCount() const;
     /** Requests an enumeration + apply pass now (asynchronous). */
     void refresh();
     /** Keep enumerating every 2 s even without routes (e.g. while a routing

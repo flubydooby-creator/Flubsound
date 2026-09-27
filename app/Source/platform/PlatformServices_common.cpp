@@ -145,10 +145,11 @@ class UnsupportedRouter final : public AppAudioRouter
 public:
     bool isSupported() const override { return false; }
     std::vector<AudioSessionInfo> enumerateSessions() override { return {}; }
+    std::string cannotMoveReason() const override { return "Per-application routing is not supported on this operating system. Choose a Flubsound output device per app in the system sound settings instead."; }
 
     bool setAppEndpoint (uint32_t, const std::string&, std::string& error) override
     {
-        error = "Per-application routing is not supported on this operating system.";
+        error = cannotMoveReason();
         return false;
     }
 

@@ -741,7 +741,10 @@ void EngineController::updateOverloadWatchdog (const EngineStatus& status)
     // like a user change - parameter writes on this (message) thread, the
     // re-prepare follows in AudioEngineHost's poll - and reported through the
     // same Change::Device (header tooltip, one tray bubble, Settings text).
-    if (const auto next = loadReducer.update (settings->getReduceLoadOnOverload(), overloadWatchdog.isOverloaded(), getLatencyProfile()))
+    // Only polls that are still stressed count towards the step: the latched
+    // isOverloaded() outlasts every episode by exitPolls calm polls, so a
+    // single xrun burst at low load would otherwise always step.
+    if (const auto next = loadReducer.update (settings->getReduceLoadOnOverload(), overloadWatchdog.isStressed(), getLatencyProfile()))
     {
         applyLatencyProfile (*next);
         changed = true;

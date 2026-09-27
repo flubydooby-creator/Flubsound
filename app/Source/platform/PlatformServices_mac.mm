@@ -26,6 +26,7 @@
 #include <mach/thread_policy.h>
 #include <pthread.h>
 
+#include <atomic>
 #include <map>
 #include <vector>
 
@@ -130,7 +131,10 @@ private:
         }
 
         EventHotKeyRef hotKeyRef = nullptr;
-        const UInt32 nativeId = nextNativeId++;
+        // Unique in the process, not per instance: every instance registers
+        // under the same signature and sees every one of its hot key events.
+        static std::atomic<UInt32> nativeIdCounter { 1 };
+        const UInt32 nativeId = nativeIdCounter.fetch_add (1);
 
         // Fails with eventHotKeyExistsErr when another app / the system owns
         // the chord. macOS 15+ also rejects chords whose only modifiers are
@@ -235,7 +239,8 @@ private:
         return -1;
     }
 
-    void dispatch (UInt32 nativeId)
+    /** Runs the callback registered under 'nativeId'; false if it is not ours. */
+    bool dispatch (UInt32 nativeId)
     {
         for (const auto& item : entries)
         {
@@ -251,9 +256,10 @@ private:
                 {
                     // Never let an exception unwind through the Carbon event dispatcher.
                 }
-                return;
+                return true;
             }
         }
+        return false;
     }
 
     static OSStatus handleHotKeyEvent (EventHandlerCallRef, EventRef event, void* userData)
@@ -273,13 +279,13 @@ private:
         if (status != noErr || hotKeyId.signature != kSignature || userData == nullptr)
             return eventNotHandledErr;
 
-        static_cast<MacGlobalHotkeys*> (userData)->dispatch (hotKeyId.id);
-        return noErr;
+        // Another instance's hot key (same signature): let the event reach
+        // the next handler, which is that instance's.
+        return static_cast<MacGlobalHotkeys*> (userData)->dispatch (hotKeyId.id) ? noErr : eventNotHandledErr;
     }
 
     EventHandlerUPP handlerUpp = nullptr;
     EventHandlerRef handlerRef = nullptr;
-    UInt32 nextNativeId = 1;
     std::map<int, Entry> entries;
 };
 
@@ -309,10 +315,15 @@ public:
     bool isSupported() const override { return false; }
     std::vector<AudioSessionInfo> enumerateSessions() override { return {}; }
 
+    std::string cannotMoveReason() const override
+    {
+        return "macOS has no per-application output setting. Choose \"Flubsound\" as the output device inside the "
+               "application, or use a Flubsound device as the system output.";
+    }
+
     bool setAppEndpoint (uint32_t, const std::string&, std::string& error) override
     {
-        error = "macOS has no per-application output setting. Choose \"Flubsound\" as the output device inside the "
-                "application, or use a Flubsound device as the system output.";
+        error = cannotMoveReason();
         return false;
     }
 
@@ -419,10 +430,20 @@ public:
                 if (shouldStart ? status == SMAppServiceStatusEnabled : ! registered)
                     return true; // already in the requested state (unregistering twice is an error)
 
+                // Registered but waiting for the user's approval (also what
+                // the status reads after the user switched the item off in
+                // Login Items): only System Settings can finish it, and a
+                // second register is commonly refused ("Operation not
+                // permitted") without ever sending the user there.
+                if (shouldStart && status == SMAppServiceStatusRequiresApproval)
+                    return askForApproval (error);
+
                 NSError* nsError = nil;
                 const BOOL ok = shouldStart ? [service registerAndReturnError:&nsError] : [service unregisterAndReturnError:&nsError];
                 if (! ok)
                 {
+                    if (shouldStart && service.status == SMAppServiceStatusRequiresApproval)
+                        return askForApproval (error);
                     const char* reason = nsError != nil ? nsError.localizedDescription.UTF8String : nullptr;
                     error = std::string (shouldStart ? "Could not add Flubsound Pro to the login items: " : "Could not remove Flubsound Pro from the login items: ")
                             + (reason != nullptr ? reason : "unknown error");
@@ -430,11 +451,7 @@ public:
                 }
 
                 if (shouldStart && service.status == SMAppServiceStatusRequiresApproval)
-                {
-                    [SMAppService openSystemSettingsLoginItems];
-                    error = "Allow Flubsound Pro in System Settings > General > Login Items to finish.";
-                    return false;
-                }
+                    return askForApproval (error);
                 return true;
             }
         }
@@ -442,6 +459,17 @@ public:
         error = "Starting at login needs macOS 13 or later. Add Flubsound Pro in System Settings > Users & Groups > Login Items instead.";
         return false;
     }
+
+private:
+#if FLUB_HAVE_SMAPPSERVICE
+    /** Sends the user to Login Items, the only place that approves the entry. */
+    API_AVAILABLE (macos (13.0)) static bool askForApproval (std::string& error)
+    {
+        [SMAppService openSystemSettingsLoginItems];
+        error = "Allow Flubsound Pro in System Settings > General > Login Items to finish.";
+        return false;
+    }
+#endif
 };
 
 //==============================================================================

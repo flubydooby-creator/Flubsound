@@ -10,7 +10,8 @@
 //             FLUB_ENABLE_UNDOCUMENTED_ROUTING (otherwise each move fails
 //             and points to the documented fallback, ms-settings:apps-volume);
 //             per-process capture via
-//             AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK (Win10 20348+);
+//             AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK (Windows 10 2004,
+//             build 19041+, and Windows 11; see windows_builds below);
 //             EcoQoS opt-out via SetProcessInformation(ProcessPowerThrottling);
 //             MMCSS "Pro Audio" for the audio thread.
 //   macOS   : Carbon RegisterEventHotKey. Per-app capture and routing are
@@ -168,12 +169,30 @@ struct AudioSessionInfo
 };
 
 /** Per-application routing: which output endpoint an app renders to. The
-    engine exposes one virtual endpoint per strip ("Flubsound Game", ...). */
+    engine exposes one virtual endpoint per strip ("Flubsound Game", ...).
+    Two separate capabilities: listing the apps that play audio (canList)
+    and moving one to another endpoint (canMoveEndpoint). Windows lists
+    everywhere but moves only in builds with FLUB_ENABLE_UNDOCUMENTED_ROUTING,
+    so a caller that needs moves must ask canMoveEndpoint(), not canList(). */
 class AppAudioRouter
 {
 public:
     virtual ~AppAudioRouter() = default;
+
+    /** Per-app routing works end to end: listing and moving. */
     virtual bool isSupported() const = 0;
+
+    /** enumerateSessions() reports the running audio applications. The
+        default is isSupported() (an OS that does both or neither). */
+    virtual bool canList() const { return isSupported(); }
+
+    /** setAppEndpoint() can move an application in this build on this
+        system (it may still fail for one app, e.g. access denied). */
+    virtual bool canMoveEndpoint() const { return isSupported(); }
+
+    /** A user-presentable reason when canMoveEndpoint() == false (what the
+        user can do instead); empty = none known. */
+    virtual std::string cannotMoveReason() const { return {}; }
 
     virtual std::vector<AudioSessionInfo> enumerateSessions() = 0;
 
@@ -186,6 +205,23 @@ public:
 
     static std::unique_ptr<AppAudioRouter> create();
 };
+
+// ---------------------------------------------------------------------------
+/** Windows build gates, here (not in PlatformServices_win.cpp) so tests on
+    every OS can check them. */
+namespace windows_builds
+{
+/** Per-process loopback capture (ActivateAudioInterfaceAsync with
+    AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK). Microsoft documents it from
+    build 20348 (Server 2022), but the activation works from Windows 10 2004
+    (build 19041) on, which includes 20H2-22H2 (19042-19045): OBS's
+    Application Audio Capture gates at 19041 for that reason. A build that
+    still refuses it fails the activation or IAudioClient::Initialize, which
+    start() reports as a readable error. */
+inline constexpr uint32_t kFirstProcessLoopback = 19041;
+
+constexpr bool hasProcessLoopback (uint32_t build) noexcept { return build >= kFirstProcessLoopback; }
+} // namespace windows_builds
 
 // ---------------------------------------------------------------------------
 /** Captures the audio of one process (tree) as interleaved float frames.

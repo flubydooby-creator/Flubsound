@@ -68,7 +68,32 @@
 //   * Per-app captures: each capture has its own DriftCompensatedFifo in a
 //     fixed slot array (the capture thread is the producer, the audio thread
 //     the consumer). Slots are only (re)allocated after the audio thread has
-//     provably stopped reading them (see waitForAudioThreadToPass()).
+//     provably stopped reading them: releaseSlot() waits (bounded) for one
+//     callback to finish; if the device callback is stalled past the bound,
+//     the slot is QUARANTINED and no capture reuses it until a callback has
+//     completed (see waitForAudioThreadToPass()). Captures run at the device
+//     rate (FIFO nominal ratio 1): when the device rate changes, every
+//     running capture is restarted at the new rate on the message thread
+//     (restartCapturesAtDeviceRate()), keeping its capture id.
+//
+// DEVICE SAFETY (docs/11 E51 Phase A)
+//   * Loopback-pair guard: at every device start the output and input device
+//     names are checked (isLoopbackPair: CABLE Input <-> CABLE Output, the
+//     same Voicemeeter bus, BlackHole / Soundflower / Loopback as both ends,
+//     a sink and its ".monitor"). A pair would close a feedback loop through
+//     the engine (typical: a wireless headset drops, JUCE falls back to the
+//     system default output, which in the cable setup IS CABLE Input). The
+//     output is then held at silence from the first sample (or ramped down
+//     over kSwapFadeMs if the guard trips while running) and the engine is
+//     frozen, so no protection loop (governor, AutoLevel) accumulates
+//     step-downs. A new device start builds a fresh engine anyway, so every
+//     device change starts from clean protection state. allowLoopbackPair()
+//     is the per-pair override for deliberate setups.
+//   * getDeviceSafetyState() / onDeviceSafetyChanged: what a banner shows
+//     (loopback pair, device error, device failed to open), cleared by the
+//     next successful device start.
+//   * getLatencyInfo().valid is false while no device runs (or the guard
+//     holds the output): show "--", never a stale number.
 #pragma once
 
 #include "DriftCompensatedFifo.h"
@@ -78,6 +103,7 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_events/juce_events.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <functional>
@@ -88,12 +114,52 @@ namespace flub::app
 {
 struct LatencyInfo
 {
+    /** One strip's share of the engine latency (docs/11 E42a). The MixEngine
+        pads every strip to the slowest one so strips stay in sync:
+        ownSamples is what the strip's own chain plus the master limiter
+        needs, outputSamples what it really gets (= engineSamples), and
+        paddingSamples the difference another strip's profile adds. */
+    struct Strip
+    {
+        int ownSamples = 0, paddingSamples = 0, outputSamples = 0;
+        double ownMs = 0.0, paddingMs = 0.0, outputMs = 0.0;
+    };
+
+    /** False while no device runs (closed, stopped, failed, offline
+        rendering) or the loopback guard holds the output at silence: the
+        numbers below describe no audible path, so show "--". */
+    bool valid = false;
+    /** Always true today: device latencies are what the driver reports, and
+        Bluetooth codec delay and the OS mixer are not included. Nothing is
+        measured end to end yet (docs/11 E42d). Label totals "estimated". */
+    bool estimated = true;
+
     double sampleRate = 0.0;
     int blockSize = 0;
     int deviceInputSamples = 0, deviceOutputSamples = 0, engineSamples = 0;
     double deviceInputMs = 0.0, deviceOutputMs = 0.0, engineMs = 0.0;
+    double graphQuantumMs = 0.0;  // a known audio-graph quantum above the device (setGraphQuantumMs), 0 if unknown
     double captureBufferMs = 0.0; // extra FIFO latency of per-app capture streams (max over captures)
-    double totalMs = 0.0;         // device input + device output + engine
+    double totalMs = 0.0;         // device input + device output + engine + graph quantum
+    int numStrips = 0;
+    std::array<Strip, flub::MixEngine::kMaxStrips> strips {};
+};
+
+/** What a device-error banner shows (docs/11 E51). Message thread. */
+struct DeviceSafetyState
+{
+    enum class Kind
+    {
+        None,
+        LoopbackPair, // the output is the loopback partner of the input: output held at silence
+        DeviceError,  // the device reported an error, or no output device could be opened
+    };
+
+    Kind kind = Kind::None;
+    juce::String message;                             // banner text, empty for None
+    juce::String inputDeviceName, outputDeviceName;  // the pair (LoopbackPair) or the device (DeviceError)
+    bool outputMuted = false;                         // the loopback guard holds the output at silence
+    uint32_t generation = 0;                          // increments on every change
 };
 
 struct EngineStatus
@@ -209,6 +275,34 @@ public:
     juce::String getLastDeviceError() const;
 
     // =========================================================================
+    // Device safety (message thread; see DEVICE SAFETY above)
+    // =========================================================================
+    /** True when capturing `inputDeviceName` while playing to
+        `outputDeviceName` closes a loop: the output is the loopback partner
+        of the input (exact partner pairs, not vendor tokens). Pure. */
+    static bool isLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName);
+
+    /** Re-checks a device pair now (called at every device start with the
+        device manager's names; UI code may call it after changing devices
+        itself). A pair trips the guard, anything else releases it. */
+    void checkLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName);
+
+    /** Per-pair override for deliberate setups (e.g. monitoring through a
+        cable on purpose). Re-checks the current pair. Not persisted here. */
+    void allowLoopbackPair (const juce::String& inputDeviceName, const juce::String& outputDeviceName);
+    void clearAllowedLoopbackPairs();
+
+    DeviceSafetyState getDeviceSafetyState() const { return safety; }
+    /** Called on the message thread whenever getDeviceSafetyState() changes. */
+    std::function<void()> onDeviceSafetyChanged;
+    /** Dismisses a device error (e.g. after the user pressed Retry and the
+        device reopened, or chose to ignore it). A tripped loopback guard
+        stays until the pair changes or is allowed. */
+    void clearDeviceError();
+    /** True while the loopback guard holds the output at silence. */
+    bool isOutputMutedByGuard() const noexcept { return guardMuted.load (std::memory_order_acquire); }
+
+    // =========================================================================
     // Strip mix controls (any thread; applied click-free on the audio thread)
     // =========================================================================
     void setStripGainDb (int strip, float gainDb) noexcept;
@@ -259,9 +353,18 @@ public:
         int strip = -1;
         uint32_t processId = 0;
         bool running = false;
+        double sampleRate = 0.0;   // the rate the capture delivers (the device rate, see restartCapturesAtDeviceRate)
+        juce::String restartError; // non-empty while a restart at a new device rate is failing
         DriftCompensatedFifo::Stats stats;
     };
     std::vector<CaptureInfo> getCaptures() const;
+
+    /** Restarts every capture whose rate differs from the device rate at the
+        device rate (same id, same strip, FIFO re-primed). Runs by itself
+        (asynchronously, then retried at 1 Hz for kMaxCaptureRestartAttempts)
+        after a device rate change; public for tests. Message thread. */
+    void restartCapturesAtDeviceRate();
+    static constexpr int kMaxCaptureRestartAttempts = 3;
 
     // =========================================================================
     // Offline rendering (message thread, no device open)
@@ -279,6 +382,14 @@ public:
     // Telemetry (message thread)
     // =========================================================================
     LatencyInfo getLatencyInfo() const;
+    /** "12.3 ms" style total (device + engine + quantum + app capture) with
+        "est." when estimated, or "--" when !valid. */
+    static juce::String formatTotalLatency (const LatencyInfo& info);
+    /** A known audio-graph quantum that sits above the device and is not in
+        the device's reported latency (e.g. the PipeWire quantum when JUCE
+        talks ALSA to PipeWire's pcm plug-in); 0 = none / unknown. Added to
+        LatencyInfo::totalMs. Message thread. */
+    void setGraphQuantumMs (double ms) noexcept { graphQuantumMs = std::max (0.0, ms); }
     EngineStatus getStatus() const;
     double getSampleRate() const noexcept { return currentSampleRate; }
     int getBlockSize() const noexcept { return currentBlockSize; }
@@ -301,6 +412,13 @@ private:
         std::atomic<int> strip { -1 };
         std::atomic<bool> live { false }; // audio thread may read the FIFO
         uint32_t processId = 0;
+        // Message thread only:
+        int channels = 2;
+        bool restartPending = false;       // stopped; to be restarted at the device rate
+        int restartAttempts = 0;
+        juce::String restartError;
+        bool quarantined = false;          // released while a callback was stalled (see waitForAudioThreadToPass)
+        uint64_t quarantineCounter = 0;    // callbackCounter when it was released
     };
 
     /** One complete engine: the MixEngine plus the audio thread's working set
@@ -334,8 +452,17 @@ private:
     void beginPendingSwap() noexcept;
     void mixSwap (const flub::AudioBlock& mix, int numSamples) noexcept;
     void applyPendingMixSettings (EngineInstance& instance) noexcept;
-    void waitForAudioThreadToPass();
+    /** Waits (at most kAudioThreadPassTimeoutMs) until a callback that may
+        have read the old state has returned. False if it timed out while a
+        callback was stalled; `startCounter` receives the counter it waited on. */
+    bool waitForAudioThreadToPass (uint64_t& startCounter);
+    static constexpr juce::uint32 kAudioThreadPassTimeoutMs = 250;
     void releaseSlot (CaptureSlot& slot);
+    bool isSlotQuarantined (CaptureSlot& slot) noexcept;
+    void startCaptureInSlot (CaptureSlot& slot, std::string& error);
+    void applyDeviceStartSafety (juce::AudioIODevice* device);
+    void setSafetyState (DeviceSafetyState next);
+    void applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples) noexcept;
 
     juce::AudioDeviceManager deviceManager;
     std::vector<flub::StripConfig> layout;
@@ -373,6 +500,8 @@ private:
     std::array<std::atomic<int>, kMaxStrips> deviceInputFirst {};
     std::atomic<bool> engineReady { false }, callbackRunning { false };
     std::atomic<bool> configurePending { false }, notifyPending { false }, errorPending { false };
+    std::atomic<bool> guardMuted { false };    // loopback guard: output held at silence (message -> audio thread)
+    float guardGain = 1.0f;                    // audio thread (or message thread before the callback starts)
     std::atomic<uint64_t> callbackCounter { 0 };
     std::atomic<uint32_t> structureGeneration { 0 };
     std::array<CaptureSlot, kMaxCaptures> captureSlots;
@@ -394,6 +523,12 @@ private:
     uint32_t swapsRequested = 0; // swaps published that the audio thread will complete
     juce::CriticalSection errorLock;
     juce::String lastDeviceError;
+    DeviceSafetyState safety;
+    std::vector<std::pair<juce::String, juce::String>> allowedLoopbackPairs; // (input, output)
+    juce::String guardInputName, guardOutputName; // the pair last checked
+    bool captureRestartNeeded = false;
+    juce::uint32 lastCaptureRestartMs = 0;
+    double graphQuantumMs = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngineHost)
 };

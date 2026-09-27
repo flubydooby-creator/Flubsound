@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -281,115 +282,8 @@ TEST_CASE ("Platform: SystemTuning promote/revert restores the thread's policy")
     CHECK (restored);
 }
 
-#if FLUB_HAVE_X11_HEADERS
-TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord another client holds, and release on unregister")
-{
-    // Needs an X server (CI runs the platform tests under Xvfb too) and
-    // libXtst to synthesise key events; skipped otherwise.
-    auto hotkeys = GlobalHotkeys::create();
-    if (! hotkeys->isSupported())
-    {
-        std::cerr << "    (no X11 display: skipped)\n";
-        return;
-    }
-    void* xtst = ::dlopen ("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
-    if (xtst == nullptr)
-    {
-        std::cerr << "    (libXtst not available: skipped)\n";
-        return;
-    }
-    using FakeKey = int (*) (Display*, unsigned int, Bool, unsigned long);
-    const auto fakeKey = reinterpret_cast<FakeKey> (::dlsym (xtst, "XTestFakeKeyEvent"));
-    REQUIRE (fakeKey != nullptr);
-    const X11Api* x = X11Api::get();
-    REQUIRE (x != nullptr);
-    Display* d = x->openDisplay (nullptr);
-    REQUIRE (d != nullptr);
-
-    std::atomic<int> fired { 0 };
-    const auto chordG = chord (KeyChord::Ctrl | KeyChord::Alt, 'G');
-    std::vector<GlobalHotkeys::BindingResult> results; // reported synchronously, on this thread
-    hotkeys->setBindingListener ([&results] (const GlobalHotkeys::BindingResult& r) { results.push_back (r); });
-    REQUIRE (hotkeys->registerHotkey (7, chordG, "Boost +10%", [&fired] { ++fired; }));
-    CHECK (results == (std::vector<GlobalHotkeys::BindingResult> { { 7, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
-
-    const auto key = [&] (KeySym sym, bool down) {
-        fakeKey (d, x->keysymToKeycode (d, sym), down ? True : False, 0);
-        x->flush (d);
-    };
-    const auto waitFor = [&fired] (int count) {
-        for (int i = 0; i < 200 && fired.load() < count; ++i)
-            std::this_thread::sleep_for (std::chrono::milliseconds (5));
-        return fired.load();
-    };
-    const auto press = [&] (int repeats) {
-        key (XK_Control_L, true);
-        key (XK_Alt_L, true);
-        for (int i = 0; i < repeats; ++i)
-            key (XK_g, true); // key repeat: presses without a release
-        key (XK_g, false);
-        key (XK_Alt_L, false);
-        key (XK_Control_L, false);
-    };
-
-    press (1);
-    CHECK (waitFor (1) == 1);
-    press (5); // held key: one action, not five
-    CHECK (waitFor (2) == 2);
-    std::this_thread::sleep_for (std::chrono::milliseconds (100));
-    CHECK (fired.load() == 2);
-
-    // Other modifiers do not fire.
-    key (XK_Control_L, true);
-    key (XK_g, true);
-    key (XK_g, false);
-    key (XK_Control_L, false);
-    std::this_thread::sleep_for (std::chrono::milliseconds (100));
-    CHECK (fired.load() == 2);
-
-    // Another client (a second service) cannot take the same chord ...
-    auto other = GlobalHotkeys::create();
-    REQUIRE (other->isSupported());
-    std::vector<GlobalHotkeys::BindingResult> otherResults;
-    other->setBindingListener ([&otherResults] (const GlobalHotkeys::BindingResult& r) { otherResults.push_back (r); });
-    CHECK (! other->registerHotkey (1, chordG, [] {}));
-    // ... until it is released here.
-    hotkeys->unregisterHotkey (7);
-    CHECK (other->registerHotkey (1, chordG, [] {}));
-    other->unregisterAll();
-    CHECK (otherResults == (std::vector<GlobalHotkeys::BindingResult> { { 1, GlobalHotkeys::BindingResult::Status::Unavailable, {} },
-                                                                        { 1, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
-
-    // Navigation keys work too (the app's defaults are Ctrl+Alt+arrows).
-    std::atomic<int> arrow { 0 };
-    REQUIRE (hotkeys->registerHotkey (10, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [&arrow] { ++arrow; }));
-    key (XK_Control_L, true);
-    key (XK_Alt_L, true);
-    key (XK_Up, true);
-    key (XK_Up, false);
-    key (XK_Alt_L, false);
-    key (XK_Control_L, false);
-    for (int i = 0; i < 200 && arrow.load() < 1; ++i)
-        std::this_thread::sleep_for (std::chrono::milliseconds (5));
-    CHECK (arrow.load() == 1);
-    hotkeys->unregisterHotkey (10);
-
-    // Bare keys and unmappable key codes are refused.
-    results.clear();
-    CHECK (! hotkeys->registerHotkey (8, chord (KeyChord::None, 'G'), [] {}));
-    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Ctrl, 0x13), [] {}));
-    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Shift, 'G'), [] {}));
-    CHECK (results.size() == 3);
-    for (const auto& r : results)
-        CHECK (r.status == GlobalHotkeys::BindingResult::Status::Unavailable);
-
-    x->closeDisplay (d);
-    ::dlclose (xtst);
-}
-#endif
-
 // ---------------------------------------------------------------------------
-// Start with the OS: XDG autostart entry
+// Shared helpers (environment, temporary directories, bounded waits)
 // ---------------------------------------------------------------------------
 namespace
 {
@@ -425,13 +319,24 @@ private:
     std::optional<std::string> previous;
 };
 
-/** A fresh directory under $TMPDIR (or /tmp), removed with its contents. */
+/** A fresh directory under $TMPDIR (or /tmp), removed with its contents.
+    One that will hold Unix sockets ('holdsSockets') is made in /tmp instead
+    when $TMPDIR is so long that a socket path in it would not fit
+    sockaddr_un::sun_path (108 bytes): bind() would fail, and dbus-daemon
+    would not start (which the D-Bus tests report as a failure). */
 struct TempDir
 {
-    TempDir()
+    explicit TempDir (bool holdsSockets = false)
     {
+        // The longest socket name used below it: dbus-daemon's
+        // "/dbus-XXXXXXXXXX" or the triggers test's "/run dir/bus".
+        constexpr size_t kSocketNameRoom = 32;
         const char* base = std::getenv ("TMPDIR");
-        std::string pattern = std::string (base != nullptr && base[0] == '/' ? base : "/tmp") + "/flub-autostart-XXXXXX";
+        std::string root = base != nullptr && base[0] == '/' ? base : "/tmp";
+        const std::string name = holdsSockets ? "/flub-XXXXXX" : "/flub-autostart-XXXXXX";
+        if (holdsSockets && root.size() + name.size() + kSocketNameRoom >= sizeof (sockaddr_un::sun_path))
+            root = "/tmp";
+        std::string pattern = root + name;
         if (::mkdtemp (pattern.data()) != nullptr)
             path = pattern;
     }
@@ -447,6 +352,170 @@ struct TempDir
     std::string path;
 };
 
+/** Bound for every wait on the bus, the daemon, the X server or a service
+    thread: a hang guard only, never a timing assertion. */
+constexpr auto kHangGuard = std::chrono::seconds (10);
+
+template <typename Predicate>
+bool waitUntil (Predicate predicate)
+{
+    const auto deadline = std::chrono::steady_clock::now() + kHangGuard;
+    while (! predicate())
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+            return false;
+        std::this_thread::sleep_for (std::chrono::milliseconds (1));
+    }
+    return true;
+}
+
+std::string findInPath (const char* name)
+{
+    const char* path = std::getenv ("PATH");
+    std::istringstream dirs (path != nullptr ? path : "/usr/local/bin:/usr/bin:/bin");
+    for (std::string dir; std::getline (dirs, dir, ':');)
+        if (! dir.empty() && ::access ((dir + "/" + name).c_str(), X_OK) == 0)
+            return dir + "/" + name;
+    return {};
+}
+
+} // namespace
+
+#if FLUB_HAVE_X11_HEADERS
+TEST_CASE ("Platform: X11 global hotkeys fire once per press, refuse a chord another client holds, and release on unregister")
+{
+    // Needs an X server (CI runs the platform tests under Xvfb too) and
+    // libXtst to synthesise key events; skipped otherwise. Not a Wayland
+    // session, or the factory would pick the desktop's real portal.
+    ScopedEnv noWayland ("WAYLAND_DISPLAY", nullptr);
+    ScopedEnv session ("XDG_SESSION_TYPE", nullptr);
+    auto hotkeys = GlobalHotkeys::create();
+    if (! hotkeys->isSupported())
+    {
+        std::cerr << "    (no X11 display: skipped)\n";
+        return;
+    }
+    void* xtst = ::dlopen ("libXtst.so.6", RTLD_NOW | RTLD_LOCAL);
+    if (xtst == nullptr)
+    {
+        std::cerr << "    (libXtst not available: skipped)\n";
+        return;
+    }
+    using FakeKey = int (*) (Display*, unsigned int, Bool, unsigned long);
+    const auto fakeKey = reinterpret_cast<FakeKey> (::dlsym (xtst, "XTestFakeKeyEvent"));
+    REQUIRE (fakeKey != nullptr);
+    const X11Api* x = X11Api::get();
+    REQUIRE (x != nullptr);
+    Display* d = x->openDisplay (nullptr);
+    REQUIRE (d != nullptr);
+
+    std::atomic<int> fired { 0 };
+    const auto chordG = chord (KeyChord::Ctrl | KeyChord::Alt, 'G');
+    std::vector<GlobalHotkeys::BindingResult> results; // reported synchronously, on this thread
+    hotkeys->setBindingListener ([&results] (const GlobalHotkeys::BindingResult& r) { results.push_back (r); });
+    REQUIRE (hotkeys->registerHotkey (7, chordG, "Boost +10%", [&fired] { ++fired; }));
+    CHECK (results == (std::vector<GlobalHotkeys::BindingResult> { { 7, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
+
+    const auto key = [&] (KeySym sym, bool down) {
+        fakeKey (d, x->keysymToKeycode (d, sym), down ? True : False, 0);
+        x->flush (d);
+    };
+    const auto waitFor = [&fired] (int count) {
+        waitUntil ([&fired, count] { return fired.load() >= count; });
+        return fired.load();
+    };
+    const auto press = [&] (int repeats) {
+        key (XK_Control_L, true);
+        key (XK_Alt_L, true);
+        for (int i = 0; i < repeats; ++i)
+            key (XK_g, true); // key repeat: presses without a release
+        key (XK_g, false);
+        key (XK_Alt_L, false);
+        key (XK_Control_L, false);
+    };
+
+    press (1);
+    CHECK (waitFor (1) == 1);
+    press (5); // held key: one action, not five
+    CHECK (waitFor (2) == 2);
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    CHECK (fired.load() == 2);
+
+    // Other modifiers do not fire.
+    key (XK_Control_L, true);
+    key (XK_g, true);
+    key (XK_g, false);
+    key (XK_Control_L, false);
+    std::this_thread::sleep_for (std::chrono::milliseconds (100));
+    CHECK (fired.load() == 2);
+
+    // Modifiers let go before the key (a common way to release a chord):
+    // that release still ends the press, so the next press fires again.
+    key (XK_Control_L, true);
+    key (XK_Alt_L, true);
+    key (XK_g, true);
+    key (XK_Alt_L, false);
+    key (XK_Control_L, false);
+    key (XK_g, false);
+    CHECK (waitFor (3) == 3);
+    press (1);
+    CHECK (waitFor (4) == 4);
+
+    // The same chord for a second action is refused (one press would run
+    // both; Windows refuses it too); the first keeps working, and the same
+    // id may take its own chord again.
+    results.clear();
+    CHECK (! hotkeys->registerHotkey (11, chordG, [] {}));
+    CHECK (results == (std::vector<GlobalHotkeys::BindingResult> { { 11, GlobalHotkeys::BindingResult::Status::Unavailable, {} } }));
+    REQUIRE (hotkeys->registerHotkey (7, chordG, "Boost +10%", [&fired] { ++fired; }));
+    press (1);
+    CHECK (waitFor (5) == 5);
+
+    // Another client (a second service) cannot take the same chord ...
+    auto other = GlobalHotkeys::create();
+    REQUIRE (other->isSupported());
+    std::vector<GlobalHotkeys::BindingResult> otherResults;
+    other->setBindingListener ([&otherResults] (const GlobalHotkeys::BindingResult& r) { otherResults.push_back (r); });
+    CHECK (! other->registerHotkey (1, chordG, [] {}));
+    // ... until it is released here.
+    hotkeys->unregisterHotkey (7);
+    CHECK (other->registerHotkey (1, chordG, [] {}));
+    other->unregisterAll();
+    CHECK (otherResults == (std::vector<GlobalHotkeys::BindingResult> { { 1, GlobalHotkeys::BindingResult::Status::Unavailable, {} },
+                                                                        { 1, GlobalHotkeys::BindingResult::Status::Registered, {} } }));
+
+    // Navigation keys work too (the app's defaults are Ctrl+Alt+arrows).
+    std::atomic<int> arrow { 0 };
+    REQUIRE (hotkeys->registerHotkey (10, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [&arrow] { ++arrow; }));
+    key (XK_Control_L, true);
+    key (XK_Alt_L, true);
+    key (XK_Up, true);
+    key (XK_Up, false);
+    key (XK_Alt_L, false);
+    key (XK_Control_L, false);
+    CHECK (waitUntil ([&arrow] { return arrow.load() >= 1; }));
+    CHECK (arrow.load() == 1);
+    hotkeys->unregisterHotkey (10);
+
+    // Bare keys and unmappable key codes are refused.
+    results.clear();
+    CHECK (! hotkeys->registerHotkey (8, chord (KeyChord::None, 'G'), [] {}));
+    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Ctrl, 0x13), [] {}));
+    CHECK (! hotkeys->registerHotkey (9, chord (KeyChord::Shift, 'G'), [] {}));
+    CHECK (results.size() == 3);
+    for (const auto& r : results)
+        CHECK (r.status == GlobalHotkeys::BindingResult::Status::Unavailable);
+
+    x->closeDisplay (d);
+    ::dlclose (xtst);
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Start with the OS: XDG autostart entry
+// ---------------------------------------------------------------------------
+namespace
+{
 std::string readText (const std::string& path)
 {
     std::ifstream in (path, std::ios::binary);
@@ -742,42 +811,17 @@ TEST_CASE ("Platform: XDG autostart falls back to ~/.config when $XDG_CONFIG_HOM
 // ---------------------------------------------------------------------------
 namespace
 {
-/** Bound for every wait on the bus, the daemon or the service thread: a hang
-    guard only, never a timing assertion. */
-constexpr auto kHangGuard = std::chrono::seconds (10);
-
-template <typename Predicate>
-bool waitUntil (Predicate predicate)
-{
-    const auto deadline = std::chrono::steady_clock::now() + kHangGuard;
-    while (! predicate())
-    {
-        if (std::chrono::steady_clock::now() > deadline)
-            return false;
-        std::this_thread::sleep_for (std::chrono::milliseconds (1));
-    }
-    return true;
-}
-
-std::string findInPath (const char* name)
-{
-    const char* path = std::getenv ("PATH");
-    std::istringstream dirs (path != nullptr ? path : "/usr/local/bin:/usr/bin:/bin");
-    for (std::string dir; std::getline (dirs, dir, ':');)
-        if (! dir.empty() && ::access ((dir + "/" + name).c_str(), X_OK) == 0)
-            return dir + "/" + name;
-    return {};
-}
-
 /** A private dbus-daemon (session bus configuration) for one test: started
     with --nofork, its address read from a pipe, SIGTERMed and reaped on
-    destruction. address stays empty when dbus-daemon is missing or fails. */
+    destruction. address stays empty when dbus-daemon is missing
+    (installed == false) or fails to start. */
 class PrivateSessionBus
 {
 public:
     PrivateSessionBus()
     {
         const std::string daemon = findInPath ("dbus-daemon");
+        installed = ! daemon.empty();
         if (daemon.empty() || dir.path.empty())
             return;
         const std::string config = dir.path + "/session.conf";
@@ -824,7 +868,10 @@ public:
             address = line.substr (0, end);
     }
 
-    ~PrivateSessionBus()
+    ~PrivateSessionBus() { stop(); }
+
+    /** Ends the daemon (every connection to it is lost). */
+    void stop()
     {
         if (pid > 0)
         {
@@ -832,13 +879,15 @@ public:
             int status = 0;
             ::waitpid (pid, &status, 0);
         }
+        pid = -1;
     }
 
     PrivateSessionBus (const PrivateSessionBus&) = delete;
     PrivateSessionBus& operator= (const PrivateSessionBus&) = delete;
 
-    TempDir dir;
+    TempDir dir { true }; // holds the bus socket
     pid_t pid = -1;
+    bool installed = false;
     std::string address;
 };
 
@@ -988,6 +1037,39 @@ public:
         triggerDescriptions[shortcutId] = triggerDescription;
     }
 
+    /** BindShortcuts answers without trigger_description for a shortcut, as
+        GNOME does when the user removed its key. */
+    void omitTrigger (const std::string& shortcutId)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        omittedTriggers.insert (shortcutId);
+    }
+
+    /** Holds back the answers to the version probe (Properties.Get) until
+        releaseVersion(), as for a portal that D-Bus is still starting. */
+    void holdVersion()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        holdingVersion = true;
+    }
+    void releaseVersion() { release (holdingVersion); }
+
+    /** Holds back BindShortcuts' Response until releaseBinds(), as while the
+        desktop's dialog is open. The method reply is sent at once. */
+    void holdBinds()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        holdingBinds = true;
+    }
+    void releaseBinds() { release (holdingBinds); }
+
+    /** Version probes received so far. */
+    size_t versionProbes()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return probes;
+    }
+
     /** Response code of the next BindShortcuts (1 = the user cancelled the
         dialog, 2 = other failure; no results then). */
     void setBindResponse (uint32_t code)
@@ -1048,6 +1130,33 @@ private:
         [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
     }
 
+    /** Stops holding (flag = false) and sends what was held, in order, from
+        the mock's thread. */
+    void release (bool& holding)
+    {
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            holding = false;
+            jobs.push_back ([this]
+                            {
+                                for (auto& message : held)
+                                    send (message.get());
+                                held.clear();
+                            });
+        }
+        wake();
+    }
+
+    /** Sends 'message' now, or keeps it for release() while 'holding'
+        (mock thread). */
+    void sendOrHold (dbus::MessageRef message, bool holding)
+    {
+        if (holding)
+            held.push_back (std::move (message));
+        else
+            send (message.get());
+    }
+
     /** Same loop shape as the service: poll the bus fd and the wake pipe,
         never block inside libdbus. */
     void serve()
@@ -1091,6 +1200,12 @@ private:
             dbus::readString (*api, &args, iface);
             api->iterNext (&args);
             dbus::readString (*api, &args, property);
+            bool hold = false;
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                ++probes;
+                hold = holdingVersion;
+            }
             if (! globalShortcuts || iface != portal::kShortcutsInterface || property != "version")
                 return replyError (call, "org.freedesktop.DBus.Error.InvalidArgs", "No such interface or property");
             dbus::MessageRef reply (extra.newMethodReturn (call));
@@ -1100,7 +1215,7 @@ private:
             api->iterOpenContainer (&out, dbus::kTypeVariant, "u", &variant);
             api->iterAppendBasic (&variant, dbus::kTypeUInt32, &version);
             api->iterCloseContainer (&out, &variant);
-            return send (reply.get());
+            return sendOrHold (std::move (reply), hold);
         }
 
         const std::string requestBase = std::string (portal::kObjectPath) + "/request/" + portal::busPathElement (sender) + "/";
@@ -1119,7 +1234,7 @@ private:
             }
             replyPath (call, requestBase + token);
             // The spec types session_handle as 's'.
-            return respond (sender, requestBase + token, 0,
+            return respond (sender, requestBase + token, 0, false,
                             [&] (dbus::Iter* results) { dbus::appendDictEntry (*api, results, "session_handle", dbus::kTypeString, session); });
         }
 
@@ -1146,18 +1261,21 @@ private:
             dbus::readString (*api, &args, parentWindow);
             api->iterNext (&args);
             dbus::readVardictString (*api, &args, "handle_token", token);
-            std::set<std::string> refusedNow;
+            std::set<std::string> refusedNow, omittedNow;
             std::map<std::string, std::string> triggersNow;
             uint32_t code = 0;
+            bool hold = false;
             {
                 std::lock_guard<std::mutex> guard (mutex);
                 binds.push_back (bind);
                 refusedNow = refused;
+                omittedNow = omittedTriggers;
                 triggersNow = triggerDescriptions;
                 code = bindResponse;
+                hold = holdingBinds;
             }
             replyPath (call, requestBase + token);
-            return respond (sender, requestBase + token, code,
+            return respond (sender, requestBase + token, code, hold,
                             [&] (dbus::Iter* results)
                             {
                                 if (code != 0)
@@ -1177,8 +1295,9 @@ private:
                                     api->iterOpenContainer (&item, dbus::kTypeArray, "{sv}", &properties);
                                     dbus::appendDictEntry (*api, &properties, "description", dbus::kTypeString, shortcut.description);
                                     const auto described = triggersNow.find (shortcut.id);
-                                    dbus::appendDictEntry (*api, &properties, "trigger_description", dbus::kTypeString,
-                                                           described != triggersNow.end() ? described->second : shortcut.preferredTrigger);
+                                    if (omittedNow.count (shortcut.id) == 0)
+                                        dbus::appendDictEntry (*api, &properties, "trigger_description", dbus::kTypeString,
+                                                               described != triggersNow.end() ? described->second : shortcut.preferredTrigger);
                                     api->iterCloseContainer (&item, &properties);
                                     api->iterCloseContainer (&list, &item);
                                 }
@@ -1222,9 +1341,10 @@ private:
         send (reply.get());
     }
 
-    /** Request::Response (code, results) to the caller only. */
+    /** Request::Response (code, results) to the caller only (held while
+        'hold', see holdBinds()). */
     template <typename AddResults>
-    void respond (const std::string& to, const std::string& requestPath, uint32_t code, AddResults addResults)
+    void respond (const std::string& to, const std::string& requestPath, uint32_t code, bool hold, AddResults addResults)
     {
         dbus::MessageRef signal (extra.newSignal (requestPath.c_str(), portal::kRequestInterface, "Response"));
         dbus::Iter args, results;
@@ -1234,7 +1354,7 @@ private:
         api->iterOpenContainer (&args, dbus::kTypeArray, "{sv}", &results);
         addResults (&results);
         api->iterCloseContainer (&args, &results);
-        send (signal.get());
+        sendOrHold (std::move (signal), hold);
     }
 
     const bool globalShortcuts;
@@ -1247,9 +1367,12 @@ private:
     std::string clientName;
     std::vector<std::string> created, closed;
     std::vector<Bind> binds;
-    std::set<std::string> refused;
+    std::set<std::string> refused, omittedTriggers;
     std::map<std::string, std::string> triggerDescriptions;
     uint32_t bindResponse = 0;
+    bool holdingVersion = false, holdingBinds = false;
+    size_t probes = 0;
+    std::vector<dbus::MessageRef> held; // mock thread only
 };
 
 /** Records what a service reports to its binding listener, and on which
@@ -1299,7 +1422,9 @@ std::vector<std::string> ids (const MockPortal::Bind& bind)
     return result;
 }
 
-/** Skips (true) when libdbus-1 or dbus-daemon is missing. */
+/** Skips (true) when libdbus-1 or dbus-daemon is missing. A dbus-daemon
+    that is installed but does not start is a failure, not a skip, so the
+    portal tests cannot turn green without running. */
 bool skipWithoutDBus (const PrivateSessionBus& bus)
 {
     if (dbus::Api::get() == nullptr)
@@ -1307,9 +1432,14 @@ bool skipWithoutDBus (const PrivateSessionBus& bus)
         std::cerr << "    (libdbus-1.so.3 not available: skipped)\n";
         return true;
     }
-    if (bus.address.empty())
+    if (! bus.installed)
     {
         std::cerr << "    (dbus-daemon not available: skipped)\n";
+        return true;
+    }
+    if (bus.address.empty())
+    {
+        ::flubtest::reportFailure (__FILE__, __LINE__, "dbus-daemon is installed but the private session bus did not start");
         return true;
     }
     return false;
@@ -1345,7 +1475,7 @@ TEST_CASE ("Platform: portal shortcut triggers use the XDG shortcuts format and 
 
     // Without DBUS_SESSION_BUS_ADDRESS the systemd user bus socket is used
     // (escaped as a D-Bus address), never X11 autolaunch.
-    TempDir temp;
+    TempDir temp (true); // holds a socket
     REQUIRE (! temp.path.empty());
     const std::string runtime = temp.path + "/run dir";
     REQUIRE (::mkdir (runtime.c_str(), 0700) == 0);
@@ -1388,6 +1518,7 @@ TEST_CASE ("Platform: Wayland global hotkeys bind through the GlobalShortcuts po
     // A long settle time: only applyNow() sends, so every step is one
     // deterministic batch (production coalesces bursts for 50 ms).
     PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+    REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
     REQUIRE (hotkeys.isSupported());
     CHECK (hotkeys.getPortalVersion() == 1);
 
@@ -1523,12 +1654,42 @@ TEST_CASE ("Platform: portal trigger descriptions compare by modifiers and key, 
     CHECK (portal::sameTrigger ("CTRL+Delete", "Ctrl+Del"));
     CHECK (portal::sameTrigger ("CTRL+space", "Ctrl+Space"));
 
+    // GNOME (xdg-desktop-portal-gnome): GTK accelerators in a localised
+    // sentence, one or two of them ("Press %s", "Press %s or %s").
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Press <Control><Alt>Up"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Dr\xc3\xbc" "cken Sie <Control><Alt>Up"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Press <Control><Alt>Up or <Super>u"));
+    CHECK (portal::sameTrigger ("LOGO+u", "Press <Control><Alt>Up or <Super>u"));
+    CHECK (portal::sameTrigger ("CTRL+Page_Up", "Press <Primary>Page_Up"));
+    CHECK (portal::sameTrigger ("F13", "Press F13"));
+    // Qt's native text in other languages (KDE), and lists of triggers.
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Strg+Alt+Hoch"));
+    CHECK (portal::sameTrigger ("CTRL+SHIFT+Page_Up", "Strg+Umschalt+Bild auf"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Page_Down", "Strg+Alt+Bild ab"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Home", "Strg+Alt+Pos1"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Delete", "Strg+Alt+Entf"));
+    CHECK (portal::sameTrigger ("CTRL+SHIFT+Up", "Ctrl+Maj+Haut"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Left", "Ctrl+Alt+Gauche"));
+    CHECK (portal::sameTrigger ("CTRL+SHIFT+Down", "Ctrl+May\xc3\xbas+Abajo"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Page_Up", "Ctrl+Alt+Re P\xc3\xa1g"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Cima"));
+    CHECK (portal::sameTrigger ("CTRL+space", "Strg+Leertaste"));
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Up, Ctrl+U")); // either key fires
+    CHECK (portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+U; Ctrl+Alt+Up"));
+
     CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Down"));      // another key
     CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Up"));            // other modifiers
     CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Shift+Up"));
     CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt"));           // no key
-    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Up, Ctrl+U")); // two keys
-    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Strg+Alt+Hoch"));      // localised: shown as reassigned
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Ctrl+Alt+Down, Ctrl+U")); // neither key
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Strg+Alt+Runter"));    // localised, another key
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Press <Control><Alt>Down"));
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Press <Control>Up"));
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Press <Control><Alt>"));
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Hoch"));               // modifiers missing
+    CHECK (! portal::sameTrigger ("F13", "Umschalt F13"));               // a modifier word is not a prefix
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", "Strg+Alt+Oben"));      // unknown name: shown as reassigned
+    CHECK (! portal::sameTrigger ("CTRL+ALT+Up", ""));
 
     // libdbus aborts on invalid UTF-8, so a caller's description is repaired.
     CHECK (portal::validUtf8 ("Boost +10%") == "Boost +10%");
@@ -1555,6 +1716,7 @@ TEST_CASE ("Platform: Wayland portal shortcuts carry the action's description an
     REQUIRE (mock.ok());
 
     PortalGlobalHotkeys hotkeys (std::chrono::hours (1)); // only applyNow() sends
+    REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
     REQUIRE (hotkeys.isSupported());
     BindingLog log;
     log.attach (hotkeys);
@@ -1646,10 +1808,13 @@ TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalSho
     ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
     ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
 
-    // No portal on the bus at all.
+    // No portal on the bus at all (the probe's answer, ServiceUnknown, is
+    // waited for: the constructor itself only waits briefly).
     {
         auto hotkeys = GlobalHotkeys::create();
-        REQUIRE (hotkeys != nullptr);
+        auto* portalHotkeys = dynamic_cast<PortalGlobalHotkeys*> (hotkeys.get());
+        REQUIRE (portalHotkeys != nullptr);
+        REQUIRE (portalHotkeys->waitUntilProbed (kHangGuard));
         CHECK (! hotkeys->isSupported());
         CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl | KeyChord::Alt, 'G'), [] {}));
         hotkeys->unregisterAll();
@@ -1660,7 +1825,9 @@ TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalSho
         MockPortal mock (false);
         REQUIRE (mock.ok());
         auto hotkeys = GlobalHotkeys::create();
-        REQUIRE (dynamic_cast<PortalGlobalHotkeys*> (hotkeys.get()) != nullptr);
+        auto* portalHotkeys = dynamic_cast<PortalGlobalHotkeys*> (hotkeys.get());
+        REQUIRE (portalHotkeys != nullptr);
+        REQUIRE (portalHotkeys->waitUntilProbed (kHangGuard));
         CHECK (! hotkeys->isSupported());
         CHECK (! hotkeys->registerHotkey (1, chord (KeyChord::Ctrl | KeyChord::Alt, 'G'), [] {}));
         CHECK (mock.createdSessions().empty());
@@ -1672,6 +1839,206 @@ TEST_CASE ("Platform: Wayland global hotkeys are unsupported without a GlobalSho
         ScopedEnv noRuntimeDir ("XDG_RUNTIME_DIR", nullptr);
         auto hotkeys = GlobalHotkeys::create();
         CHECK (! hotkeys->isSupported());
+    }
+}
+
+TEST_CASE ("Platform: Wayland portal probe does not block start-up: a portal that answers late or appears later is used")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    const std::vector<BindingLog::Result> registered { { 3, Status::Registered, {} } };
+
+    // A portal still being started at login answers the probe late. The
+    // constructor does not wait for it (here: not at all): the service
+    // counts as supported and the request waits for the answer.
+    {
+        MockPortal mock (true);
+        mock.holdVersion();
+        REQUIRE (mock.ok());
+        BindingLog log; // outlives the service, which may report until destroyed
+        PortalGlobalHotkeys hotkeys (std::chrono::hours (1), std::chrono::milliseconds (0));
+        log.attach (hotkeys);
+        CHECK (hotkeys.isSupported());
+        REQUIRE (waitUntil ([&mock] { return mock.versionProbes() == 1; }));
+        CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+        hotkeys.applyNow();
+        CHECK (! hotkeys.waitUntilSettled (std::chrono::milliseconds (100))); // nothing can be bound yet
+        CHECK (mock.bindCalls().empty());
+        CHECK (log.size() == 0);
+
+        mock.releaseVersion();
+        REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+        CHECK (hotkeys.getPortalVersion() == 1);
+        CHECK (mock.bindCalls().size() == 1);
+        CHECK (log.take() == registered);
+    }
+
+    // No portal at start-up: unsupported, until one appears on the bus
+    // (NameOwnerChanged), which is probed and then used.
+    BindingLog log; // outlives the service, which reports the portal leaving
+    PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+    REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
+    CHECK (! hotkeys.isSupported());
+    CHECK (! hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), [] {}));
+
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+    REQUIRE (waitUntil ([&hotkeys] { return hotkeys.isSupported(); }));
+    CHECK (hotkeys.getPortalVersion() == 1);
+    log.attach (hotkeys);
+    std::atomic<int> boost { 0 };
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [&boost] { ++boost; }));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (log.take() == registered);
+    REQUIRE (mock.createdSessions().size() == 1);
+    mock.emit ("Activated", mock.createdSessions()[0], "flubsound-3");
+    REQUIRE (waitUntil ([&boost] { return boost.load() == 1; }));
+}
+
+TEST_CASE ("Platform: Wayland portal: after the session bus is lost, shortcuts are reported unavailable and new requests are refused")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+    BindingLog log;
+    PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+    REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
+    REQUIRE (hotkeys.isSupported());
+    log.attach (hotkeys);
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 3, Status::Registered, {} } }));
+
+    bus.stop(); // dbus restart: the connection is gone
+    REQUIRE (waitUntil ([&hotkeys] { return ! hotkeys.isSupported(); }));
+    // Refused and reported at once, not left "waiting for the desktop".
+    CHECK (! hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), "Boost -10%", [] {}));
+    const auto reportedFor = [&log] (int id)
+    {
+        std::lock_guard<std::mutex> guard (log.mutex);
+        return std::any_of (log.results.begin(), log.results.end(), [id] (const BindingLog::Result& r) { return r.id == id; });
+    };
+    REQUIRE (waitUntil ([&reportedFor] { return reportedFor (3) && reportedFor (5); }));
+    hotkeys.unregisterAll();
+    CHECK (hotkeys.waitUntilSettled (kHangGuard));
+    // The bus may first announce the portal leaving (reported as well).
+    for (const auto& r : log.take())
+        CHECK (r.status == Status::Unavailable);
+}
+
+TEST_CASE ("Platform: Wayland portal: an answer for a set changed since, or for a session the desktop closed, is not reported as the outcome")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+    BindingLog log;
+    PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+    REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
+    log.attach (hotkeys);
+
+    // The user changes the chord while the desktop's dialog for the first
+    // one is open, then cancels that dialog: the new chord is bound, and
+    // only its outcome is reported (not "Declined" for the old chord).
+    mock.holdBinds();
+    mock.setBindResponse (1);
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (waitUntil ([&mock] { return mock.bindCalls().size() == 1; }));
+    mock.setBindResponse (0);
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x24), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    mock.releaseBinds();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    auto binds = mock.bindCalls();
+    REQUIRE (binds.size() == 2);
+    CHECK (binds[1].shortcuts.at (0).preferredTrigger == "CTRL+ALT+Home");
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 3, Status::Registered, {} } }));
+
+    // The desktop closes the session while BindShortcuts waits for the
+    // user: declined at once, and the late success is ignored (those keys
+    // could never fire). Only the next batch's outcome (declined by the
+    // user here) follows.
+    mock.holdBinds();
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (waitUntil ([&mock] { return mock.bindCalls().size() == 3; }));
+    REQUIRE (mock.createdSessions().size() == 3);
+    mock.closeSession (mock.createdSessions()[2]);
+    REQUIRE (waitUntil ([&log] { return log.size() == 1; }));
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 3, Status::Declined, {} } }));
+    mock.releaseBinds(); // response 0 for the closed session
+    mock.setBindResponse (1);
+    CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), "Boost +10%", [] {}));
+    hotkeys.applyNow();
+    REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+    CHECK (mock.bindCalls().size() == 4);
+    CHECK (log.take() == (std::vector<BindingLog::Result> { { 3, Status::Declined, {} } }));
+}
+
+TEST_CASE ("Platform: Wayland portal: GNOME's and localised descriptions of the requested key count as registered, a GNOME shortcut without a key does not")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv busAddress ("DBUS_SESSION_BUS_ADDRESS", bus.address.c_str());
+    ScopedEnv wayland ("WAYLAND_DISPLAY", "wayland-flubtest");
+    MockPortal mock (true);
+    REQUIRE (mock.ok());
+    mock.describeTrigger ("flubsound-3", "Strg+Alt+Hoch");                     // KDE in German
+    mock.describeTrigger ("flubsound-5", "Press <Control><Alt>Down");          // GNOME
+    mock.describeTrigger ("flubsound-7", "Appuyez sur <Control><Alt>p ou <Super>u"); // GNOME, localised, two keys
+    mock.describeTrigger ("flubsound-8", "Strg+Alt+Oben");                     // not understood
+    mock.omitTrigger ("flubsound-9");                                          // no trigger_description
+    const auto registerSet = [] (PortalGlobalHotkeys& hotkeys)
+    {
+        CHECK (hotkeys.registerHotkey (3, chord (KeyChord::Ctrl | KeyChord::Alt, 0x26), "Boost +10%", [] {}));
+        CHECK (hotkeys.registerHotkey (5, chord (KeyChord::Ctrl | KeyChord::Alt, 0x28), "Boost -10%", [] {}));
+        CHECK (hotkeys.registerHotkey (7, chord (KeyChord::Ctrl | KeyChord::Alt, 'P'), "Next Preset", [] {}));
+        CHECK (hotkeys.registerHotkey (8, chord (KeyChord::Ctrl | KeyChord::Alt, 0x24), "Mode", [] {}));
+        CHECK (hotkeys.registerHotkey (9, chord (KeyChord::Ctrl | KeyChord::Alt, 'B'), "Bypass", [] {}));
+        hotkeys.applyNow();
+    };
+
+    // GNOME leaves trigger_description out when the user removed the key.
+    {
+        ScopedEnv desktop ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME");
+        BindingLog log;
+        PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+        REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
+        log.attach (hotkeys);
+        registerSet (hotkeys);
+        REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+        CHECK (log.take() == (std::vector<BindingLog::Result> { { 3, Status::Registered, {} },
+                                                                { 5, Status::Registered, {} },
+                                                                { 7, Status::Registered, {} },
+                                                                { 8, Status::Reassigned, "Strg+Alt+Oben" },
+                                                                { 9, Status::Declined, {} } }));
+    }
+    // Elsewhere a missing description means the requested key.
+    {
+        ScopedEnv desktop ("XDG_CURRENT_DESKTOP", "KDE");
+        BindingLog log;
+        PortalGlobalHotkeys hotkeys (std::chrono::hours (1));
+        REQUIRE (hotkeys.waitUntilProbed (kHangGuard));
+        log.attach (hotkeys);
+        registerSet (hotkeys);
+        REQUIRE (hotkeys.waitUntilSettled (kHangGuard));
+        const auto results = log.take();
+        REQUIRE (results.size() == 5);
+        CHECK (results[4] == (BindingLog::Result { 9, Status::Registered, {} }));
     }
 }
 
@@ -1832,12 +2199,14 @@ TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_
 
     // A window of another process (posix_spawn returns after the exec). The
     // kernel's /proc/<pid>/exe names the resolved binary, which is not
-    // "sleep" where /bin/sleep links to a multi-call binary (busybox,
-    // uutils coreutils) or /bin to /usr/bin: compare with the canonical path.
+    // "sleep" where sleep links to a multi-call binary (busybox, uutils
+    // coreutils) or /bin to /usr/bin: compare with the canonical path.
+    const std::string sleepProgram = findInPath ("sleep"); // not always /bin/sleep (NixOS)
+    REQUIRE (! sleepProgram.empty());
     pid_t child = 0;
     char arg0[] = "sleep", arg1[] = "30";
     char* childArgs[] = { arg0, arg1, nullptr };
-    REQUIRE (::posix_spawn (&child, "/bin/sleep", nullptr, nullptr, childArgs, environ) == 0);
+    REQUIRE (::posix_spawn (&child, sleepProgram.c_str(), nullptr, nullptr, childArgs, environ) == 0);
     struct ChildGuard
     {
         pid_t pid;
@@ -1848,7 +2217,7 @@ TEST_CASE ("Platform: X11 foreground app follows _NET_ACTIVE_WINDOW and _NET_WM_
             ::waitpid (pid, &status, 0);
         }
     } childGuard { child };
-    const auto sleepBinary = std::filesystem::canonical ("/bin/sleep");
+    const auto sleepBinary = std::filesystem::canonical (sleepProgram);
     const Window other = makeWindow (static_cast<uint32_t> (child));
     activate (other);
     REQUIRE (foregroundApp->query (info));

@@ -22,7 +22,7 @@ has no built-in virtual devices, and each alternative falls short:
 
 | Option | Why it is not enough on its own |
 |---|---|
-| Process loopback capture (`ProcessLoopbackCapture`, Win10 20348+/Win11) | Copies an app's audio but cannot silence the original, so the user hears the unprocessed signal too. Not available on Windows 10 22H2. |
+| Process loopback capture (`ProcessLoopbackCapture`, Win10 2004 / build 19041+, Win11) | Copies an app's audio but cannot silence the original, so the user hears the unprocessed signal too. Microsoft documents the API from build 20348; Flubsound gates at 19041 like OBS's Application Audio Capture, so Windows 10 2004-22H2 (19041-19045) use it. Not yet run on a 19045 machine. |
 | APO on the real device (Equalizer APO model) | Processes the final system mix. It cannot tell apps apart, it is fragile across driver updates, and the Windows 11 APO rules restrict third-party APOs. |
 | Third-party cables (VB-Cable, VoiceMeeter) | Cannot be redistributed, have their own licence terms, and are a support burden. |
 

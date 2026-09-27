@@ -78,6 +78,12 @@ public:
     const Config& getConfig() const noexcept { return config; }
     const State& getState() const noexcept { return state; }
     bool isOverloaded() const noexcept { return state.overloaded; }
+    /** Overloaded AND the latest poll was not calm (load >= exitLoad, or a
+        fresh glitch). isOverloaded() is the latched hysteresis state, which
+        stays true for at least exitPolls polls after any start, including a
+        single glitch burst at low load; "how long has the overload lasted"
+        (AutoLoadReducer) must count only these polls. */
+    bool isStressed() const noexcept { return state.overloaded && state.calmStreak == 0; }
 
     /** One poll. Returns the transition this sample caused, if any. */
     Event update (const Sample& s) noexcept

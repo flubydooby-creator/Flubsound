@@ -21,7 +21,11 @@
 //
 //   * A step needs an overload that has lasted stepAfterPolls polls while the
 //     setting is on (6 polls = 3 s at 2 Hz, on top of the watchdog's own 2 s
-//     to declare it), and ...
+//     to declare it). The controller passes OverloadWatchdog::isStressed()
+//     as `overloaded`: an overloaded poll that is itself calm (load < 75 %,
+//     no new glitch) resets the count, so an episode started by one xrun
+//     burst at low load never steps, while one that keeps glitching or stays
+//     hot does. And ...
 //   * ... at least minPollsBetweenSteps polls (60 = 30 s) since the previous
 //     step or manual profile change, so the re-prepared engine (and its own
 //     brief dropout) gets time to show whether the step was enough.

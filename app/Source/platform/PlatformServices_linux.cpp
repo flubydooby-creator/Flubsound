@@ -352,8 +352,8 @@ bool isExecutableInPath (const char* name)
         GlobalShortcuts interface (KDE Plasma 5.27+, GNOME 48+, Hyprland),
         implemented by PortalGlobalHotkeys below; GlobalHotkeys::create()
         picks it in a Wayland session. Without the portal isSupported() ==
-        false and the UI asks users to bind the actions in their desktop's
-        keyboard settings instead. */
+        false (until one appears on the bus) and the UI asks users to bind
+        the actions in their desktop's keyboard settings instead. */
 
 /** True in a Wayland session, where X key grabs are not global. */
 bool isWaylandSession()
@@ -546,6 +546,7 @@ public:
         // chord, so another client (or an immediate re-bind) can grab it.
         api->sync (display, False);
         bindings.erase (it);
+        wakeEventThread();
     }
 
     void unregisterAll() override
@@ -562,7 +563,9 @@ public:
 
 private:
     /** XGrabKey for every lock-key variant; false if the chord is invalid,
-        unmappable or grabbed by another client. */
+        unmappable, grabbed by another client or already bound to another id
+        here (X lets a client grab its own chord again without an error, so
+        one press would run both actions; Windows refuses it too). */
     bool grab (int id, const KeyChord& chord, std::function<void()> callback)
     {
         if (display == nullptr || ! callback)
@@ -578,6 +581,9 @@ private:
         const KeyCode keycode = api->keysymToKeycode (display, keysym);
         if (keycode == 0)
             return false;
+        for (const auto& [otherId, other] : bindings)
+            if (otherId != id && other.keycode == keycode && other.modifiers == mods)
+                return false;
 
         // Grab synchronously so a BadAccess (someone else owns the chord) is
         // seen here. The error handler is process-wide, so it is only swapped
@@ -597,6 +603,7 @@ private:
         }
         api->setErrorHandler (previousErrorHandler);
         grabErrorDisplay = nullptr;
+        wakeEventThread();
         if (failed)
             return false;
 
@@ -611,6 +618,17 @@ private:
         std::function<void()> callback;
         bool down = false; // suppresses key repeat until the release
     };
+
+    /** XSync outside the event thread reads whatever is waiting on the
+        socket, key events included, into Xlib's queue; the event thread may
+        then sleep in poll() on an empty socket with a press queued. A byte
+        on the wake pipe makes it drain the queue (a spurious wake is
+        harmless). Mutex held. */
+    void wakeEventThread()
+    {
+        const char byte = 0;
+        [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
+    }
 
     void eventLoop()
     {
@@ -630,11 +648,21 @@ private:
                     const unsigned int mods = key.state & kChordModifierMask;
                     for (auto& [id, b] : bindings)
                     {
-                        if (b.keycode != key.keycode || b.modifiers != mods)
+                        if (b.keycode != key.keycode)
                             continue;
-                        if (event.type == KeyPress && ! b.down)
+                        // A release ends the press whatever modifiers are
+                        // still held: users often let go of Ctrl/Alt first,
+                        // and the key's release then carries no modifiers.
+                        if (event.type == KeyRelease)
+                        {
+                            b.down = false;
+                            continue;
+                        }
+                        if (b.modifiers != mods)
+                            continue;
+                        if (! b.down)
                             fire.push_back (b.callback);
-                        b.down = event.type == KeyPress;
+                        b.down = true;
                     }
                 }
             }
@@ -946,14 +974,29 @@ public:
     already bound is not sent at all. ListShortcuts is not used: the
     BindShortcuts response already lists what was bound.
 
+    Start-up probe: Properties.Get (GlobalShortcuts, "version"), sent by the
+    service thread without blocking. The constructor waits for its answer
+    only briefly (kProbeWait, 250 ms): a running portal, or D-Bus saying
+    there is none, answers at once, but a portal that D-Bus is still
+    starting at login may take seconds. Until the answer the service counts
+    as supported and requests wait for it. No portal or no GlobalShortcuts
+    interface makes it unsupported, until NameOwnerChanged shows a portal
+    appearing, which is probed again; a timeout or failed activation is
+    retried with a growing delay (2 s up to 60 s). Losing the session bus
+    makes it unsupported for the rest of the run.
+
     Results are asynchronous, so registerHotkey() returns true when the chord
-    can be requested (valid chord with a trigger name, portal present). The
-    outcome goes to the binding listener from the service thread once the
-    batch is answered: Registered, Reassigned (the response's
-    trigger_description names another key than preferred_trigger; compared
-    by portal::sameTrigger), Declined (response code 1 or 2, or the id is
-    missing from the bound list) or Unavailable (a D-Bus error). A batch
-    that needs no new binding repeats the previous outcome. Refusals and
+    can be requested (valid chord with a trigger name, portal present or
+    still being probed). The outcome goes to the binding listener from the
+    service thread once the batch is answered: Registered, Reassigned (the
+    response's trigger_description names another key than
+    preferred_trigger, or one portal::sameTrigger cannot read; shown with
+    the desktop's own text, never as Registered), Declined (response code
+    1 or 2, the id is missing from the bound list, or GNOME bound it
+    without a key) or Unavailable (a D-Bus error, or no portal to ask). A
+    batch that needs no new binding repeats the previous outcome. An answer
+    to a batch the wanted set has changed since is not reported (it is not
+    the outcome of what is wanted now); the next batch's is. Refusals and
     errors are also logged to stderr.
 
     Threading: one private connection to the session bus, serviced by the
@@ -1229,9 +1272,15 @@ std::string triggerFor (const KeyChord& chord)
 /** A trigger reduced to its modifiers and a canonical key name, so the
     preferred_trigger sent ("CTRL+ALT+Page_Up") can be compared with the
     trigger_description a desktop answers with ("Ctrl+Alt+PgUp",
-    "<Control><Alt>Page_Up", "Alt+Ctrl+Page Up"). Knows the English names
-    only: a localised description ("Strg+Alt+Bild auf") compares as a
-    different key and is reported as reassigned, showing the desktop's text. */
+    "<Control><Alt>Page_Up", "Alt+Ctrl+Page Up"). Besides the English names
+    it knows the modifier and key names Qt shows in the first target
+    languages (KDE's description is Qt's native text: German
+    "Strg+Umschalt+Bild auf", French "Ctrl+Maj+Haut", Spanish "Ctrl+Mayús+Arriba",
+    Brazilian Portuguese "Ctrl+Alt+Cima"). The tables only map names to the
+    same key in every language, so an alias can never make a different key
+    compare equal. A description still not understood compares as a different
+    key and is reported as reassigned with the desktop's own text, never as
+    registered. */
 struct CanonicalTrigger
 {
     uint32_t modifiers = 0;
@@ -1239,21 +1288,65 @@ struct CanonicalTrigger
     bool operator== (const CanonicalTrigger&) const = default;
 };
 
-/** false when 'text' names no key, or more than one. */
-bool canonicalTrigger (const std::string& text, CanonicalTrigger& out)
+/** 'name' (lower case, without spaces, '_' and '-') as a KeyChord modifier;
+    0 if it names none. */
+uint32_t modifierFromName (const std::string& name)
 {
     static const std::map<std::string, uint32_t> modifierNames {
         { "ctrl", KeyChord::Ctrl },  { "control", KeyChord::Ctrl }, { "primary", KeyChord::Ctrl }, { "strg", KeyChord::Ctrl },
         { "alt", KeyChord::Alt },    { "mod1", KeyChord::Alt },     { "shift", KeyChord::Shift },  { "logo", KeyChord::Super },
         { "super", KeyChord::Super }, { "meta", KeyChord::Super },  { "win", KeyChord::Super },    { "windows", KeyChord::Super },
         { "mod4", KeyChord::Super }, { "cmd", KeyChord::Super },    { "command", KeyChord::Super },
+        // Shift as Qt translates it: de, fr, es, it.
+        { "umschalt", KeyChord::Shift }, { "maj", KeyChord::Shift }, { "may\xc3\xbas", KeyChord::Shift }, { "mayus", KeyChord::Shift },
+        { "maiusc", KeyChord::Shift },
     };
+    const auto it = modifierNames.find (name);
+    return it != modifierNames.end() ? it->second : 0;
+}
+
+/** 'name' (as for modifierFromName) as the canonical key name. */
+std::string canonicalKeyName (const std::string& name)
+{
     static const std::map<std::string, std::string> keyAliases {
         { "pgup", "pageup" },     { "prior", "pageup" },   { "pgdown", "pagedown" }, { "pgdn", "pagedown" },
         { "next", "pagedown" },   { "del", "delete" },     { "ins", "insert" },      { "spacebar", "space" },
         { "uparrow", "up" },      { "downarrow", "down" }, { "leftarrow", "left" },  { "rightarrow", "right" },
+        { "\xe2\x86\x91", "up" }, { "\xe2\x86\x93", "down" }, { "\xe2\x86\x90", "left" }, { "\xe2\x86\x92", "right" },
+        // German (Qt): Hoch, Runter, Links, Rechts, Bild auf / ab, Pos1, Ende, Einfg, Entf, Leertaste.
+        { "hoch", "up" },         { "runter", "down" },    { "links", "left" },      { "rechts", "right" },
+        { "bildauf", "pageup" },  { "bildab", "pagedown" }, { "pos1", "home" },      { "ende", "end" },
+        { "einfg", "insert" },    { "entf", "delete" },    { "leertaste", "space" },
+        // French: Haut, Bas, Gauche, Droite, Page haut / bas, Début, Fin, Inser, Suppr, Espace.
+        { "haut", "up" },         { "bas", "down" },       { "gauche", "left" },     { "droite", "right" },
+        { "pagehaut", "pageup" }, { "pagebas", "pagedown" }, { "d\xc3\xa9" "but", "home" }, { "fin", "end" },
+        { "inser", "insert" },    { "suppr", "delete" },   { "espace", "space" },
+        // Spanish: Arriba, Abajo, Izquierda, Derecha, Re Pág / Av Pág, Inicio, Fin, Insert, Supr, Espacio.
+        { "arriba", "up" },       { "abajo", "down" },     { "izquierda", "left" },  { "derecha", "right" },
+        { "rep\xc3\xa1g", "pageup" }, { "avp\xc3\xa1g", "pagedown" }, { "inicio", "home" }, { "supr", "delete" },
+        { "espacio", "space" },
+        // Brazilian Portuguese: Cima, Baixo, Esquerda, Direita, Início, Fim, Espaço.
+        { "cima", "up" },         { "baixo", "down" },     { "esquerda", "left" },   { "direita", "right" },
+        { "in\xc3\xad" "cio", "home" }, { "fim", "end" }, { "espa\xc3\xa7o", "space" },
     };
+    const auto it = keyAliases.find (name);
+    return it != keyAliases.end() ? it->second : name;
+}
 
+/** Lower case (ASCII letters; other UTF-8 bytes are kept) without the
+    spaces, '_' and '-' that names are written with or without. */
+std::string normalisedName (const std::string& text)
+{
+    std::string out;
+    for (const char c : text)
+        if (c != ' ' && c != '_' && c != '-')
+            out += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+    return out;
+}
+
+/** false when 'text' names no key, or more than one. */
+bool canonicalTrigger (const std::string& text, CanonicalTrigger& out)
+{
     out = {};
     std::vector<std::string> tokens;
     std::string token;
@@ -1262,31 +1355,115 @@ bool canonicalTrigger (const std::string& text, CanonicalTrigger& out)
         if (c == '+' || c == '<' || c == '>')
         {
             if (! token.empty())
-                tokens.push_back (token);
+                tokens.push_back (normalisedName (token));
             token.clear();
         }
-        else if (c != ' ' && c != '_' && c != '-')
-            token += static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+        else
+            token += c;
     }
     for (const auto& t : tokens)
     {
-        if (const auto modifier = modifierNames.find (t); modifier != modifierNames.end())
-            out.modifiers |= modifier->second;
+        if (t.empty())
+            continue;
+        if (const uint32_t modifier = modifierFromName (t); modifier != 0)
+            out.modifiers |= modifier;
         else if (! out.key.empty())
             return false;
-        else if (const auto alias = keyAliases.find (t); alias != keyAliases.end())
-            out.key = alias->second;
         else
-            out.key = t;
+            out.key = canonicalKeyName (t);
     }
     return ! out.key.empty();
 }
 
-/** True when the desktop's trigger_description names the trigger requested. */
+/** The single triggers a trigger_description lists. GNOME answers with its
+    GTK accelerators inside a localised sentence ("Press <Control><Alt>Up",
+    "Press <Control><Alt>Up or <Super>u"): each "<Mod>...key" run is one
+    trigger and the words around them are dropped. Other desktops list
+    triggers separated by ',' or ';' (Qt's list format). */
+std::vector<std::string> triggerAlternatives (const std::string& text)
+{
+    std::vector<std::string> out;
+    const auto isSpace = [] (char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+    if (text.find ('<') != std::string::npos)
+    {
+        for (size_t start = text.find ('<'); start != std::string::npos; start = text.find ('<', start))
+        {
+            size_t end = start;
+            while (end < text.size() && text[end] == '<') // the <Modifier> groups
+            {
+                const size_t close = text.find ('>', end);
+                end = close == std::string::npos ? text.size() : close + 1;
+            }
+            while (end < text.size() && ! isSpace (text[end]) && text[end] != ',' && text[end] != ';' && text[end] != '<')
+                ++end; // the key name
+            out.push_back (text.substr (start, end - start));
+            start = end;
+        }
+        return out;
+    }
+    size_t start = 0;
+    for (size_t i = 0; i <= text.size(); ++i)
+    {
+        if (i < text.size() && text[i] != ',' && text[i] != ';')
+            continue;
+        const std::string piece = text.substr (start, i - start);
+        if (piece.find_first_not_of (" \t\r\n") != std::string::npos)
+            out.push_back (piece);
+        start = i + 1;
+    }
+    return out;
+}
+
+/** True when one trigger 'alternative' names 'wanted'. Leading words that
+    are not a modifier are skipped if the whole text does not match, which
+    drops a localised prefix such as "Press F13" / "Drücken Sie Strg+Alt+Hoch". */
+bool alternativeNames (const std::string& alternative, const CanonicalTrigger& wanted)
+{
+    std::string rest = alternative;
+    for (;;)
+    {
+        CanonicalTrigger actual;
+        if (canonicalTrigger (rest, actual) && actual == wanted)
+            return true;
+        const size_t wordStart = rest.find_first_not_of (" \t");
+        if (wordStart == std::string::npos)
+            return false;
+        const size_t wordEnd = rest.find_first_of (" \t", wordStart);
+        if (wordEnd == std::string::npos)
+            return false; // one word left: already compared
+        const std::string word = rest.substr (wordStart, wordEnd - wordStart);
+        if (word.find ('+') != std::string::npos || modifierFromName (normalisedName (word)) != 0)
+            return false; // part of the trigger, not a prefix
+        rest = rest.substr (wordEnd);
+    }
+}
+
+/** True when the desktop's trigger_description names the trigger requested
+    (as one of the triggers it lists). */
 bool sameTrigger (const std::string& preferredTrigger, const std::string& triggerDescription)
 {
-    CanonicalTrigger preferred, actual;
-    return canonicalTrigger (preferredTrigger, preferred) && canonicalTrigger (triggerDescription, actual) && preferred == actual;
+    CanonicalTrigger preferred;
+    if (! canonicalTrigger (preferredTrigger, preferred))
+        return false;
+    for (const auto& alternative : triggerAlternatives (triggerDescription))
+        if (alternativeNames (alternative, preferred))
+            return true;
+    return false;
+}
+
+/** True when $XDG_CURRENT_DESKTOP (a ':' list, "ubuntu:GNOME") names GNOME,
+    whose portal back-end leaves trigger_description out for a shortcut
+    without a key. */
+bool desktopIsGnome()
+{
+    const char* desktop = std::getenv ("XDG_CURRENT_DESKTOP");
+    if (desktop == nullptr)
+        return false;
+    std::string list = std::string (desktop) + ":";
+    for (size_t start = 0, colon = 0; (colon = list.find (':', start)) != std::string::npos; start = colon + 1)
+        if (normalisedName (list.substr (start, colon - start)) == "gnome")
+            return true;
+    return false;
 }
 
 /** 'text' with NUL bytes and every byte that does not start a valid UTF-8
@@ -1416,15 +1593,33 @@ class PortalGlobalHotkeys final : public GlobalHotkeys
 public:
     /** Changes closer together than this are bound as one set. */
     static constexpr std::chrono::milliseconds kSettleTime { 50 };
-    /** Bound for the start-up probe (D-Bus may have to start the portal). */
-    static constexpr int kProbeTimeoutMs = 3000;
+    /** How long the constructor waits for the start-up probe (the portal's
+        GlobalShortcuts version). A running portal answers in milliseconds,
+        and so does D-Bus when there is no portal at all (ServiceUnknown). A
+        portal that D-Bus is still starting at login can take seconds; the
+        constructor (on the message thread) does not wait for that, the
+        answer is handled on the service thread when it comes. */
+    static constexpr std::chrono::milliseconds kProbeWait { 250 };
+    /** A probe that gets no answer at all within this is given up and sent
+        again (hang guard for a portal that owns the name but never replies;
+        D-Bus itself fails an activation after about 25 s). */
+    static constexpr std::chrono::seconds kProbeReplyTimeout { 30 };
+    /** Delay before the probe is repeated after a timeout or a failed
+        activation; doubled per failure up to kProbeRetryMax. */
+    static constexpr std::chrono::seconds kProbeRetryFirst { 2 }, kProbeRetryMax { 60 };
 
-    explicit PortalGlobalHotkeys (std::chrono::milliseconds settleTimeIn = kSettleTime)
-        : settleTime (settleTimeIn)
+    explicit PortalGlobalHotkeys (std::chrono::milliseconds settleTimeIn = kSettleTime, std::chrono::milliseconds probeWait = kProbeWait)
+        : settleTime (settleTimeIn), gnomeBackend (portal::desktopIsGnome())
     {
         api = dbus::Api::get();
         if (api == nullptr || ! start())
+        {
             closeConnection();
+            std::lock_guard<std::mutex> guard (mutex);
+            stopped = true;
+            return;
+        }
+        waitUntilProbed (probeWait);
     }
 
     ~PortalGlobalHotkeys() override
@@ -1447,23 +1642,37 @@ public:
     }
 
     using GlobalHotkeys::registerHotkey;
+
+    /** True while the portal can be asked: from construction until the start-up
+        probe finds no GlobalShortcuts portal (or the session bus is lost),
+        and again once a portal with it appears on the bus. When the probe
+        is still unanswered after the constructor's wait (a portal starting
+        at login), this is true and requests wait for the answer. */
     bool isSupported() const override { return supported; }
 
-    /** GlobalShortcuts interface version the portal reported (0 = none). */
+    /** GlobalShortcuts interface version the portal reported (0 = none yet). */
     uint32_t getPortalVersion() const noexcept { return portalVersion; }
 
     bool registerHotkey (int id, const KeyChord& chord, const std::string& description, std::function<void()> callback) override
     {
         Shortcut shortcut { portal::triggerFor (chord), portal::shortcutDescription (description, chord) };
-        if (! supported || ! callback || ! detail::isValidChord (chord) || shortcut.trigger.empty())
+        bool accepted = false;
+        if (callback && detail::isValidChord (chord) && ! shortcut.trigger.empty())
+        {
+            // Under the lock the service thread takes to switch support off,
+            // so a request is either refused here or reported by it.
+            std::lock_guard<std::mutex> guard (mutex);
+            if (supported && ! stopped)
+            {
+                wanted[id] = Wanted { std::move (shortcut), std::move (callback) };
+                noteChange();
+                accepted = true;
+            }
+        }
+        if (! accepted)
         {
             reportBinding (id, BindingResult::Status::Unavailable);
             return false;
-        }
-        {
-            std::lock_guard<std::mutex> guard (mutex);
-            wanted[id] = Wanted { std::move (shortcut), std::move (callback) };
-            noteChange();
         }
         wake();
         return true;
@@ -1503,11 +1712,20 @@ public:
     }
 
     /** Waits, at most 'timeout', until every change so far has been sent and
-        the portal has answered (tests). */
+        the portal has answered, or the service has stopped (tests). */
     bool waitUntilSettled (std::chrono::milliseconds timeout)
     {
         std::unique_lock<std::mutex> lock (mutex);
-        return settledCondition.wait_for (lock, timeout, [this] { return settledRevision == revision; });
+        return stateCondition.wait_for (lock, timeout, [this] { return settledRevision == revision || stopped; });
+    }
+
+    /** Waits, at most 'timeout', until the first probe has been answered (or
+        failed), so isSupported() is no longer tentative, or the service has
+        stopped. */
+    bool waitUntilProbed (std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lock (mutex);
+        return stateCondition.wait_for (lock, timeout, [this] { return probeAnswered || stopped; });
     }
 
 private:
@@ -1541,8 +1759,21 @@ private:
         uint64_t revision = 0;
     };
 
+    /** What the service knows about the portal (service thread only). */
+    enum class Probe
+    {
+        Waiting, // Properties.Get sent, no answer yet
+        Retry,   // no usable answer (timeout, failed activation): asked again at probeRetryAt
+        Present, // GlobalShortcuts answered: requests are bound
+        Absent,  // no portal or no GlobalShortcuts: unsupported until a portal appears
+        Gone     // the portal left the bus: asked again when it comes back
+    };
+
     static constexpr uint64_t kReapply = ~uint64_t (0);
 
+    /** Connects and starts the service thread, which probes the portal. The
+        match rules (NameOwnerChanged included) are in place whatever the
+        probe finds, so a portal that appears later is noticed. */
     bool start()
     {
         const std::string address = portal::sessionBusAddress();
@@ -1562,9 +1793,8 @@ private:
             return false;
 
         uniqueName = dbus::str (api->busGetUniqueName (connection));
-        portalVersion = probeVersion();
         int fd = -1;
-        if (portalVersion == 0 || api->connectionGetUnixFd (connection, &fd) == 0 || ::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
+        if (api->connectionGetUnixFd (connection, &fd) == 0 || ::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
             return false;
 
         for (const char* rule : portal::kMatchRules)
@@ -1572,43 +1802,10 @@ private:
         api->connectionFlush (connection);
 
         busFd = fd;
-        supported = true;
+        supported = true; // tentatively, until the probe answers
         running = true;
         thread = std::thread ([this] { run(); });
         return true;
-    }
-
-    /** Properties.Get (GlobalShortcuts, "version"): 0 when the portal is
-        missing or has no GlobalShortcuts interface. Also learns the portal's
-        unique bus name, the only sender whose signals are accepted. */
-    uint32_t probeVersion()
-    {
-        dbus::MessageRef call (api->messageNewMethodCall (portal::kService, portal::kObjectPath, "org.freedesktop.DBus.Properties", "Get"));
-        if (call == nullptr)
-            return 0;
-        dbus::Iter args;
-        api->iterInitAppend (call.get(), &args);
-        if (! dbus::appendBasic (*api, &args, dbus::kTypeString, portal::kShortcutsInterface)
-            || ! dbus::appendBasic (*api, &args, dbus::kTypeString, "version"))
-            return 0;
-
-        dbus::Error error;
-        api->errorInit (&error);
-        dbus::MessageRef reply (api->sendWithReplyAndBlock (connection, call.get(), kProbeTimeoutMs, &error));
-        api->errorFree (&error); // ServiceUnknown (no portal), InvalidArgs (no GlobalShortcuts), timeout
-        if (reply == nullptr)
-            return 0;
-
-        uint32_t version = 0;
-        dbus::Iter it, value;
-        if (api->iterInit (reply.get(), &it) != 0 && api->iterGetArgType (&it) == dbus::kTypeVariant)
-        {
-            api->iterRecurse (&it, &value);
-            if (api->iterGetArgType (&value) == dbus::kTypeUInt32)
-                api->iterGetBasic (&value, &version);
-        }
-        portalOwner = dbus::str (api->messageGetSender (reply.get()));
-        return portalOwner.empty() ? 0 : version;
     }
 
     void closeConnection()
@@ -1640,7 +1837,17 @@ private:
             std::lock_guard<std::mutex> guard (mutex);
             settledRevision = rev;
         }
-        settledCondition.notify_all();
+        stateCondition.notify_all();
+    }
+
+    /** True when the wanted set changed after the batch 'batchRevision' was
+        sent: its answer is not the outcome of what is wanted now, so it is
+        not reported. The next applyWantedSet() re-reports it (same set) or
+        binds the new set and reports that. */
+    bool superseded (uint64_t batchRevision)
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return revision != batchRevision;
     }
 
     //--------------------------------------------------------------------------
@@ -1648,12 +1855,12 @@ private:
     void run()
     {
         pollfd fds[2] = { { busFd, POLLIN, 0 }, { wakePipe[0], POLLIN, 0 } };
+        sendProbe();
         while (running)
         {
             if (api->connectionReadWrite (connection, 0) == 0) // reads and writes what it can, never blocks
             {
-                portal::log ("lost the connection to the session bus; shortcuts stop working");
-                report (wantedShortcuts(), BindingResult::Status::Unavailable);
+                onDisconnected();
                 break;
             }
             while (dbus::Message* message = api->connectionPopMessage (connection))
@@ -1662,7 +1869,9 @@ private:
                 handleMessage (message);
             }
 
-            int timeoutMs = applyWantedSet();
+            const int probeTimeoutMs = serviceProbe();
+            const int applyTimeoutMs = applyWantedSet();
+            int timeoutMs = probeTimeoutMs < 0 ? applyTimeoutMs : (applyTimeoutMs < 0 ? probeTimeoutMs : std::min (probeTimeoutMs, applyTimeoutMs));
             if (api->connectionGetDispatchStatus (connection) == dbus::kDispatchDataRemains)
                 timeoutMs = 0; // already read into libdbus's queue: poll would not see it
             fds[0].events = static_cast<short> (POLLIN | (api->connectionHasMessagesToSend (connection) != 0 ? POLLOUT : 0));
@@ -1675,12 +1884,176 @@ private:
         }
     }
 
+    /** The session bus connection is gone (dbus restart): nothing can be
+        bound any more. Every wanted shortcut is reported Unavailable, and
+        from now on the service is unsupported, so later requests are refused
+        (and reported) at once instead of waiting forever. */
+    void onDisconnected()
+    {
+        portal::log ("lost the connection to the session bus; shortcuts stop working");
+        std::map<int, Shortcut> lost;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            stopped = true;
+            supported = false;
+            probeAnswered = true;
+            for (const auto& [id, w] : wanted)
+                lost.emplace (id, w.shortcut);
+        }
+        stateCondition.notify_all();
+        report (lost, BindingResult::Status::Unavailable);
+    }
+
+    //--------------------------------------------------------------------------
+    // Probe: Properties.Get (GlobalShortcuts, "version"), sent without
+    // blocking and answered in handleMessage. It also learns the portal's
+    // unique bus name, the only sender whose signals are accepted.
+    void sendProbe()
+    {
+        dbus::MessageRef call (api->messageNewMethodCall (portal::kService, portal::kObjectPath, "org.freedesktop.DBus.Properties", "Get"));
+        dbus::Iter args;
+        uint32_t serial = 0;
+        if (call != nullptr)
+            api->iterInitAppend (call.get(), &args);
+        if (call != nullptr && dbus::appendBasic (*api, &args, dbus::kTypeString, portal::kShortcutsInterface)
+            && dbus::appendBasic (*api, &args, dbus::kTypeString, "version") && api->connectionSend (connection, call.get(), &serial) != 0)
+        {
+            probe = Probe::Waiting;
+            probeSerial = serial;
+            probeDeadline = std::chrono::steady_clock::now() + kProbeReplyTimeout;
+            return;
+        }
+        onProbeFailed ("could not ask the portal for its version");
+    }
+
+    /** Sends a due retry or gives up on an unanswered probe; returns the poll
+        timeout in ms until the next of those (-1 = none). */
+    int serviceProbe()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (probe == Probe::Retry && now >= probeRetryAt)
+            sendProbe();
+        else if (probe == Probe::Waiting && now >= probeDeadline)
+            onProbeFailed ("the portal did not answer");
+
+        const auto msUntil = [now] (std::chrono::steady_clock::time_point t)
+        { return static_cast<int> (std::max<int64_t> (0, std::chrono::ceil<std::chrono::milliseconds> (t - now).count())); };
+        if (probe == Probe::Waiting)
+            return msUntil (probeDeadline);
+        if (probe == Probe::Retry)
+            return msUntil (probeRetryAt);
+        return -1;
+    }
+
+    void onProbeReply (dbus::Message* message, int type)
+    {
+        if (type == dbus::kMessageMethodReturn)
+        {
+            uint32_t version = 0;
+            dbus::Iter it, value;
+            if (api->iterInit (message, &it) != 0 && api->iterGetArgType (&it) == dbus::kTypeVariant)
+            {
+                api->iterRecurse (&it, &value);
+                if (api->iterGetArgType (&value) == dbus::kTypeUInt32)
+                    api->iterGetBasic (&value, &version);
+            }
+            const std::string owner = dbus::str (api->messageGetSender (message));
+            if (version > 0 && ! owner.empty())
+                onPortalFound (owner, version);
+            else
+                onPortalAbsent ("the portal reports no GlobalShortcuts version");
+            return;
+        }
+
+        // No portal on the bus (and none D-Bus can start) or no GlobalShortcuts
+        // interface: a definite no. Anything else (TimedOut while D-Bus starts
+        // the portal, a failed activation, NoReply) is asked again later.
+        const std::string name = dbus::str (api->messageGetErrorName (message));
+        static const std::set<std::string> absent {
+            "org.freedesktop.DBus.Error.ServiceUnknown",   "org.freedesktop.DBus.Error.NameHasNoOwner",
+            "org.freedesktop.DBus.Error.InvalidArgs",      "org.freedesktop.DBus.Error.UnknownInterface",
+            "org.freedesktop.DBus.Error.UnknownProperty",  "org.freedesktop.DBus.Error.UnknownMethod",
+            "org.freedesktop.DBus.Error.UnknownObject",
+        };
+        if (absent.count (name) != 0)
+            onPortalAbsent ("no GlobalShortcuts portal (" + name + ")");
+        else
+            onProbeFailed ("the portal could not be asked (" + name + ")");
+    }
+
+    /** A GlobalShortcuts portal answered: supported, and whatever is wanted
+        (requested while the probe was out, or before the portal went away)
+        is bound and reported. */
+    void onPortalFound (const std::string& owner, uint32_t version)
+    {
+        if (probeFailureLogged)
+            portal::log ("the portal answered; binding the shortcuts");
+        portalOwner = owner;
+        portalVersion = version;
+        probe = Probe::Present;
+        probeRetryDelay = kProbeRetryFirst;
+        probeFailureLogged = false;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            supported = true;
+            probeAnswered = true;
+        }
+        stateCondition.notify_all();
+        handledRevision = kReapply; // binds (or re-reports) the wanted set
+    }
+
+    /** No GlobalShortcuts portal: unsupported (requests are refused at once)
+        until NameOwnerChanged shows a portal appearing, which is probed
+        again. Shortcuts already requested are reported Unavailable but kept,
+        so they are bound if a portal turns up. */
+    void onPortalAbsent (const std::string& reason)
+    {
+        probe = Probe::Absent;
+        std::map<int, Shortcut> lost;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            supported = false;
+            probeAnswered = true;
+            for (const auto& [id, w] : wanted)
+                lost.emplace (id, w.shortcut);
+        }
+        stateCondition.notify_all();
+        if (! lost.empty())
+        {
+            portal::log (reason);
+            report (lost, BindingResult::Status::Unavailable);
+        }
+    }
+
+    /** No usable answer: still supported (the portal may be starting), asked
+        again after a growing delay. Requested shortcuts are reported
+        Unavailable meanwhile and bound once the portal answers. */
+    void onProbeFailed (const std::string& reason)
+    {
+        probe = Probe::Retry;
+        probeRetryAt = std::chrono::steady_clock::now() + probeRetryDelay;
+        probeRetryDelay = std::min<std::chrono::seconds> (probeRetryDelay * 2, kProbeRetryMax);
+        if (! probeFailureLogged)
+            portal::log (reason + "; asking again");
+        probeFailureLogged = true;
+        std::map<int, Shortcut> waiting;
+        {
+            std::lock_guard<std::mutex> guard (mutex);
+            probeAnswered = true;
+            for (const auto& [id, w] : wanted)
+                waiting.emplace (id, w.shortcut);
+        }
+        stateCondition.notify_all();
+        report (waiting, BindingResult::Status::Unavailable);
+    }
+
+    //--------------------------------------------------------------------------
     /** Starts binding the wanted set once it has settled; returns the poll
         timeout in ms (-1 = until woken). */
     int applyWantedSet()
     {
-        if (pending.stage != Stage::Idle)
-            return -1;
+        if (pending.stage != Stage::Idle || probe == Probe::Waiting)
+            return -1; // the probe's answer applies the set
 
         std::map<int, Shortcut> want;
         uint64_t rev = 0;
@@ -1698,6 +2071,14 @@ private:
         }
         handledRevision = rev;
 
+        if (probe != Probe::Present)
+        {
+            // No portal to ask (retrying, absent or gone): nothing can be
+            // bound now; the set is bound when a portal answers.
+            report (want, BindingResult::Status::Unavailable);
+            markSettled (rev);
+            return -1;
+        }
         if (want == bound && (want.empty() || ! session.empty()))
         {
             // e.g. unregisterAll() + the same registrations again: nothing to
@@ -1722,6 +2103,13 @@ private:
     {
         for (const auto& entry : shortcuts)
             reportBinding (entry.first, status);
+    }
+
+    /** report() unless the batch was superseded (see superseded()). */
+    void reportBatch (const Pending& batch, BindingResult::Status status)
+    {
+        if (! superseded (batch.revision))
+            report (batch.shortcuts, status);
     }
 
     std::string nextToken() { return "flubsound" + std::to_string (++tokenCounter); }
@@ -1804,6 +2192,12 @@ private:
     void handleMessage (dbus::Message* message)
     {
         const int type = api->messageGetType (message);
+        if ((type == dbus::kMessageMethodReturn || type == dbus::kMessageError) && probe == Probe::Waiting
+            && api->messageGetReplySerial (message) == probeSerial)
+        {
+            onProbeReply (message, type);
+            return;
+        }
         if ((type == dbus::kMessageMethodReturn || type == dbus::kMessageError) && pending.stage != Stage::Idle
             && api->messageGetReplySerial (message) == pending.serial)
         {
@@ -1819,7 +2213,7 @@ private:
                 dbus::readString (*api, &it, text);
             portal::log (std::string (pending.stage == Stage::Binding ? "BindShortcuts" : "CreateSession") + " failed: "
                          + dbus::str (api->messageGetErrorName (message)) + " " + text);
-            report (pending.shortcuts, BindingResult::Status::Unavailable);
+            reportBatch (pending, BindingResult::Status::Unavailable);
             finishPending();
             return;
         }
@@ -1833,7 +2227,7 @@ private:
 
         if (interfaceName == "org.freedesktop.DBus" && member == "NameOwnerChanged" && sender == "org.freedesktop.DBus")
             onPortalOwnerChanged (message);
-        else if (sender != portalOwner)
+        else if (portalOwner.empty() || sender != portalOwner)
             return; // nobody but the portal may press our shortcuts
         else if (interfaceName == portal::kRequestInterface && member == "Response" && pending.stage != Stage::Idle
                  && (path == pending.requestPath || (! pending.returnedPath.empty() && path == pending.returnedPath)))
@@ -1844,6 +2238,14 @@ private:
         {
             portal::log ("the desktop closed the session; shortcuts are requested again when the hotkey settings change");
             report (bound, BindingResult::Status::Declined);
+            // A BindShortcuts still waiting for its answer binds into the
+            // closed session: its shortcuts can never fire, so they are
+            // declined now and its late Response is ignored.
+            if (pending.stage == Stage::Binding)
+            {
+                reportBatch (pending, BindingResult::Status::Declined);
+                finishPending();
+            }
             session.clear();
             bound.clear();
             results.clear();
@@ -1868,12 +2270,12 @@ private:
                 session = handle;
                 if (bindShortcuts())
                     return;
-                report (pending.shortcuts, BindingResult::Status::Unavailable);
+                reportBatch (pending, BindingResult::Status::Unavailable);
             }
             else
             {
                 portal::log ("the desktop did not open a session (response " + std::to_string (code) + ")");
-                report (pending.shortcuts, code != 0 ? BindingResult::Status::Declined : BindingResult::Status::Unavailable);
+                reportBatch (pending, code != 0 ? BindingResult::Status::Declined : BindingResult::Status::Unavailable);
             }
             finishPending();
             return;
@@ -1902,8 +2304,9 @@ private:
         if (code != 0)
             portal::log (code == 1 ? "the user declined the shortcuts" : "the desktop refused the shortcuts (response " + std::to_string (code) + ")");
 
-        // An empty trigger_description (some back-ends send none) counts as
-        // the requested trigger.
+        // Answered after the wanted set changed again: remembered (so the
+        // same set is not bound twice) but not reported, see superseded().
+        const bool current = ! superseded (pending.revision);
         results.clear();
         for (const auto& [id, shortcut] : pending.shortcuts)
         {
@@ -1914,12 +2317,24 @@ private:
                 if (code == 0)
                     portal::log ("\"" + shortcut.description + "\" (" + shortcut.trigger + ") was not bound by the desktop");
             }
-            else if (found->second.empty() || portal::sameTrigger (shortcut.trigger, found->second))
+            else if (found->second.empty())
+            {
+                // No trigger_description. GNOME leaves it out only when the
+                // user removed every key in its dialog (or set three or
+                // more), so the shortcut may have no key: not "Registered".
+                // Other back-ends send none at all (bound as requested).
+                if (gnomeBackend)
+                    portal::log ("\"" + shortcut.description + "\" was bound without a key the desktop names");
+                else
+                    result.status = BindingResult::Status::Registered;
+            }
+            else if (portal::sameTrigger (shortcut.trigger, found->second))
                 result.status = BindingResult::Status::Registered;
             else
                 result = BindingResult { id, BindingResult::Status::Reassigned, found->second };
             results[id] = result;
-            reportBinding (id, result.status, result.trigger);
+            if (current)
+                reportBinding (id, result.status, result.trigger);
         }
 
         // Remembered even when refused, so re-registering the same set does
@@ -1949,8 +2364,9 @@ private:
             callback();
     }
 
-    /** The portal restarted (or went away): its sessions are gone. Rebind the
-        wanted set with the new instance. */
+    /** The portal restarted, went away or appeared: its sessions are gone. A
+        new instance is probed (it may lack GlobalShortcuts), and the wanted
+        set is bound again once it answers. */
     void onPortalOwnerChanged (dbus::Message* message)
     {
         dbus::Iter it;
@@ -1963,12 +2379,20 @@ private:
         session.clear();
         bound.clear();
         results.clear();
-        if (newOwner.empty())
+        if (newOwner.empty() && probe == Probe::Present)
             report (wantedShortcuts(), BindingResult::Status::Unavailable);
         if (pending.stage != Stage::Idle)
             finishPending();
-        if (! newOwner.empty())
-            handledRevision = kReapply; // rebinds, and reports the new outcome
+        if (newOwner.empty())
+        {
+            if (probe != Probe::Absent)
+                probe = Probe::Gone; // an Absent service stays unsupported
+        }
+        else
+        {
+            probeRetryDelay = kProbeRetryFirst;
+            sendProbe();
+        }
     }
 
     std::map<int, Shortcut> wantedShortcuts()
@@ -1982,10 +2406,11 @@ private:
 
     const dbus::Api* api = nullptr;
     const std::chrono::milliseconds settleTime;
+    const bool gnomeBackend; // XDG_CURRENT_DESKTOP names GNOME (see onResponse)
     dbus::Connection* connection = nullptr;
     std::string uniqueName;
-    uint32_t portalVersion = 0;
-    bool supported = false;
+    std::atomic<uint32_t> portalVersion { 0 };
+    std::atomic<bool> supported { false }; // written under 'mutex'
     int busFd = -1;
     int wakePipe[2] = { -1, -1 };
     std::atomic<bool> running { false };
@@ -1993,13 +2418,15 @@ private:
 
     // Shared with the callers of registerHotkey / unregister* (mutex).
     std::mutex mutex;
-    std::condition_variable settledCondition;
+    std::condition_variable stateCondition; // settledRevision, probeAnswered, stopped
     std::map<int, Wanted> wanted;
     uint64_t revision = 0, settledRevision = 0;
     std::chrono::steady_clock::time_point lastChange;
     bool applyImmediately = false;
+    bool probeAnswered = false; // the first probe was answered (or failed)
+    bool stopped = false;       // no service thread: never started, or the bus connection was lost
 
-    // Service thread only (the constructor sets portalOwner before it starts).
+    // Service thread only.
     std::string portalOwner;
     std::string session;
     std::map<int, Shortcut> bound;
@@ -2007,6 +2434,11 @@ private:
     Pending pending;
     uint64_t handledRevision = 0;
     unsigned int tokenCounter = 0;
+    Probe probe = Probe::Waiting;
+    uint32_t probeSerial = 0;
+    std::chrono::steady_clock::time_point probeDeadline, probeRetryAt;
+    std::chrono::seconds probeRetryDelay = kProbeRetryFirst;
+    bool probeFailureLogged = false;
 };
 
 //==============================================================================

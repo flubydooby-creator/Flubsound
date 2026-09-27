@@ -3,7 +3,6 @@
 #include "FlubLookAndFeel.h"
 #include "LevelMeters.h"
 #include "Theme.h"
-#include "platform/PlatformBridge.h"
 
 #include <cmath>
 #include <iterator>
@@ -741,24 +740,11 @@ void RoutingPanel::setSelectedStrip (int strip)
         assignButton.setTooltip ("Route an application's audio to the " + controller.getStripName (strip) + " strip");
 }
 
-juce::String RoutingPanel::unsupportedReason() const
-{
-    auto& routing = controller.getRouting();
-    if (routing.getEffectiveMethod() != AppRouting::Method::Disabled)
-        return {};
-    if (! platform_bridge::servicesCompiledIn())
-        return "Per-app routing needs the Flubsound platform services, which are not part of this build. "
-               "Send apps to a Flubsound output device in your system sound settings instead.";
-    if (routing.getMethod() == AppRouting::Method::Disabled)
-        return "Per-app routing is switched off (Settings > Processing).";
-    return "This system supports neither per-app endpoint routing nor process capture. "
-           "Choose a Flubsound output device per app in the system sound settings instead.";
-}
-
 void RoutingPanel::refreshRouting()
 {
     auto& routing = controller.getRouting();
     const auto& apps = routing.getApps();
+    bool anyAssignedRunning = false, anyAssignedFailing = false;
 
     for (auto& row : rows)
     {
@@ -785,6 +771,8 @@ void RoutingPanel::refreshRouting()
                 else if (chip.state == State::NotRunning)
                     chip.state = State::Idle;
             }
+            anyAssignedRunning = anyAssignedRunning || chip.state == State::Playing || chip.state == State::Idle;
+            anyAssignedFailing = anyAssignedFailing || chip.state == State::Error;
             chips.push_back (std::move (chip));
         }
         row->setApps (std::move (chips));
@@ -792,7 +780,25 @@ void RoutingPanel::refreshRouting()
 
     autoProfiles->refresh();
 
-    reason = unsupportedReason();
+    // The red state: no application reaches a strip through us, whatever the
+    // reason (an unavailable method gives its own).
+    reason = routing.getUnavailableReason();
+    noAppsProcessed = routing.getProcessedAppCount() == 0;
+    if (! noAppsProcessed)
+        noticeDetail = {};
+    else if (reason.isNotEmpty())
+        noticeDetail = reason;
+    else if (routing.getRoutes().empty())
+        noticeDetail = "No application is assigned to a strip yet. Use \"Assign app to strip...\" below.";
+    else if (anyAssignedFailing)
+        noticeDetail = "The assigned applications could not be routed. Click an application marked '!' for the reason.";
+    else if (anyAssignedRunning)
+        noticeDetail = "The assigned applications are not routed yet.";
+    else
+        noticeDetail = "None of the assigned applications is running. Each one is routed when it starts.";
+    notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail : reason;
+    setDescription (notice);
+
     assignButton.setEnabled (reason.isEmpty());
     systemButton.setEnabled (routing.canEnumerateApps());
     systemButton.setTooltip (routing.canEnumerateApps() ? "Open the operating system's per-app audio device settings"
@@ -988,48 +994,69 @@ void RoutingPanel::paint (juce::Graphics& g)
     Theme::drawPill (g, h.removeFromRight (w).withSizeKeepingCentre (w, 16.0f), label,
                      method == AppRouting::Method::Disabled ? Palette::muted : Theme::accent (*this), method != AppRouting::Method::Disabled);
 
-    if (reason.isNotEmpty() && ! reasonArea.isEmpty())
+    if (notice.isNotEmpty() && ! noticeArea.isEmpty())
     {
-        auto r = reasonArea.toFloat();
-        g.setColour (Palette::well.withAlpha (0.7f));
+        // Red state: alert colour (vermillion with the colour-blind palette)
+        // plus a '!' shape and a title, so it never relies on colour alone.
+        const auto alert = Theme::statusColours (*this).hot;
+        auto r = noticeArea.toFloat();
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.1f) : Palette::well.withAlpha (0.7f));
         g.fillRoundedRectangle (r, 6.0f);
-        g.setColour (Palette::border);
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.75f) : Palette::border);
         g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
-        if (reasonCompact)
+        if (noticeCompact)
         {
             auto line = r.reduced (9.0f, 0.0f);
             auto icon = line.removeFromLeft (14.0f).withSizeKeepingCentre (14.0f, 14.0f);
-            g.setColour (Palette::amber.withAlpha (0.9f));
-            g.drawEllipse (icon.reduced (1.0f), 1.3f);
+            g.setColour (noAppsProcessed ? alert : Palette::amber.withAlpha (0.9f));
+            if (noAppsProcessed)
+                g.fillEllipse (icon.reduced (0.5f));
+            else
+                g.drawEllipse (icon.reduced (1.0f), 1.3f);
             g.setFont (Theme::font (10.0f, true));
-            g.drawText ("i", icon, juce::Justification::centred, false);
+            if (noAppsProcessed)
+                g.setColour (Palette::well);
+            g.drawText (noAppsProcessed ? "!" : "i", icon, juce::Justification::centred, false);
             line.removeFromLeft (7.0f);
-            g.setColour (Palette::muted);
-            g.setFont (Theme::font (11.5f));
-            g.drawText ("Per-app routing unavailable - why?", line, juce::Justification::centredLeft, true);
+            g.setColour (noAppsProcessed ? alert : Palette::muted);
+            g.setFont (Theme::font (11.5f, noAppsProcessed));
+            juce::String text (noAppsProcessed ? "No apps are being processed - why?" : "Per-app routing unavailable - why?");
+            if (noAppsProcessed && juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text) > line.getWidth())
+                text = "No apps processed - why?"; // the narrow panel
+            g.drawText (text, line, juce::Justification::centredLeft, true);
         }
         else
         {
-            layoutReason (reasonArea.getWidth()).draw (g, r.reduced (9.0f, 6.0f));
+            layoutNotice (noticeArea.getWidth()).draw (g, r.reduced (9.0f, 6.0f));
         }
     }
 }
 
 void RoutingPanel::mouseMove (const juce::MouseEvent& e)
 {
-    setTooltip (reasonCompact && reasonArea.contains (e.getPosition()) ? reason : juce::String());
+    setTooltip (noticeCompact && noticeArea.contains (e.getPosition()) ? notice : juce::String());
 }
 
 void RoutingPanel::mouseUp (const juce::MouseEvent& e)
 {
-    if (reasonCompact && reasonArea.contains (e.getPosition()))
-        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Per-app routing", reason, "OK", this);
+    if (noticeCompact && noticeArea.contains (e.getPosition()))
+        juce::AlertWindow::showMessageBoxAsync (noAppsProcessed ? juce::MessageBoxIconType::WarningIcon : juce::MessageBoxIconType::InfoIcon,
+                                                noAppsProcessed ? "No apps are being processed" : "Per-app routing",
+                                                noAppsProcessed ? noticeDetail : notice, "OK", this);
 }
 
-juce::TextLayout RoutingPanel::layoutReason (int width) const
+juce::TextLayout RoutingPanel::layoutNotice (int width) const
 {
     juce::AttributedString text;
-    text.append (reason, Theme::font (11.0f), Palette::muted);
+    if (noAppsProcessed)
+    {
+        text.append ("No apps are being processed\n", Theme::font (12.0f, true), Theme::statusColours (*this).hot);
+        text.append (noticeDetail, Theme::font (11.0f), Palette::muted);
+    }
+    else
+    {
+        text.append (notice, Theme::font (11.0f), Palette::muted);
+    }
     text.setLineSpacing (1.5f);
     juce::TextLayout layout;
     layout.createLayout (text, static_cast<float> (juce::jmax (40, width - 18)));
@@ -1042,7 +1069,7 @@ void RoutingPanel::resized()
     headerArea = r.removeFromTop (20);
     r.removeFromTop (8);
 
-    // Footer: the two actions stacked, the explanation (if any) above them.
+    // Footer: the two actions stacked. The notice (if any) goes under the header.
     systemButton.setBounds (r.removeFromBottom (30));
     r.removeFromBottom (6);
     assignButton.setBounds (r.removeFromBottom (30));
@@ -1052,14 +1079,14 @@ void RoutingPanel::resized()
     for (auto& row : rows)
         rowsHeight += row->getPreferredHeight (r.getWidth()) + 8;
 
-    reasonArea = {};
-    reasonCompact = false;
-    if (reason.isNotEmpty())
+    noticeArea = {};
+    noticeCompact = false;
+    if (notice.isNotEmpty())
     {
-        const int fullHeight = juce::roundToInt (layoutReason (r.getWidth()).getHeight()) + 13;
-        reasonCompact = rowsHeight + fullHeight + 8 > r.getHeight();
-        reasonArea = r.removeFromBottom (reasonCompact ? 26 : fullHeight);
-        r.removeFromBottom (8);
+        const int fullHeight = juce::roundToInt (layoutNotice (r.getWidth()).getHeight()) + 13;
+        noticeCompact = rowsHeight + fullHeight + 8 > r.getHeight();
+        noticeArea = r.removeFromTop (noticeCompact ? 26 : fullHeight);
+        r.removeFromTop (8);
     }
 
     rowView.setBounds (r);

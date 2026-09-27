@@ -12,10 +12,14 @@
 // Footer: "Assign app to strip..." (running audio sessions from AppRouting,
 // or a typed executable name) for the selected strip and "System sound
 // settings" (the OS's per-app audio device page).
-// When per-app routing is unavailable (no platform services, unsupported OS
-// version, or switched off) the assign button is greyed out and the panel
-// explains why and what to do instead (a one-line notice with the full text
-// on hover / click when the panel is short).
+// While no application is processed through per-app routing (nothing moved
+// to a strip endpoint or captured: none assigned, none running, every one
+// failing, or routing unavailable) a red "No apps are being processed" notice
+// sits under the header and says why. When per-app routing is unavailable
+// (no platform services, a Windows build that cannot move apps and has no
+// process capture, or switched off) the assign button is also greyed out and
+// the notice says what to do instead. When the panel is short the notice is
+// one line, with the full text on hover / click.
 //
 // Below the strips, "Auto profiles" (roadmap 2.5): one line per rule
 // ("cs2 -> Game: Competitive FPS, restores on exit") with a remove button, a
@@ -86,6 +90,11 @@ public:
     void mouseMove (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
 
+    /** The red "No apps are being processed" state is shown. */
+    bool isShowingNoAppsProcessed() const noexcept { return noAppsProcessed; }
+    /** The notice's full text (empty = no notice). */
+    const juce::String& getNotice() const noexcept { return notice; }
+
 private:
     class StripRow;
     class AutoProfileList;
@@ -94,8 +103,7 @@ private:
     void promptForExecutable (const juce::String& stripName);
     void showChipMenu (const juce::String& executable, const juce::String& error);
     void showAddAutoProfileDialog();
-    juce::String unsupportedReason() const;
-    juce::TextLayout layoutReason (int width) const;
+    juce::TextLayout layoutNotice (int width) const;
 
     EngineController& controller;
     juce::Component rowHolder;
@@ -104,9 +112,12 @@ private:
     std::unique_ptr<AutoProfileList> autoProfiles;
     IconButton assignButton { "Assign an application to the selected strip", Icons::plus(), IconButton::Style::Framed };
     IconButton systemButton { "Open system routing settings", Icons::external(), IconButton::Style::Framed };
-    juce::String reason;
-    juce::Rectangle<int> headerArea, reasonArea;
-    bool reasonCompact = false; // one-line notice (full text on hover / click) when space is short
+    juce::String reason;   // why per-app routing is unavailable (AppRouting::getUnavailableReason)
+    juce::String notice;   // text of the notice under the header: the red state's or `reason`
+    juce::String noticeDetail; // the red state's explanation (below its title)
+    bool noAppsProcessed = false;
+    juce::Rectangle<int> headerArea, noticeArea;
+    bool noticeCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;
 };
 } // namespace flub::app::ui

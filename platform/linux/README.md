@@ -113,8 +113,14 @@ X11 otherwise.
   the binding listener (`Registered` / `Unavailable`) before it returns.
   X11 has no list of shortcuts, so the action's description is not used.
   `XkbSetDetectableAutoRepeat` and a
-  per-chord "down" flag make a held key fire once. Bare keys, F-keys
-  included, are refused because they would steal normal typing.
+  per-chord "down" flag make a held key fire once; the key's release clears
+  the flag whatever modifiers are still held, so letting go of Ctrl/Alt
+  before the key does not swallow the next press. Bare keys, F-keys
+  included, are refused because they would steal normal typing, and so is
+  a chord another action already uses (X would accept the second grab from
+  the same client and one press would run both actions; Windows refuses it
+  too). Registering and unregistering wake the event thread after their
+  `XSync`, which can read a pending key event into Xlib's queue.
 - **Wayland.** Grabbing keys is forbidden by design (an X grab through
   XWayland only sees keys while an XWayland window has focus). The
   sanctioned API is the **xdg-desktop-portal GlobalShortcuts** interface
@@ -128,11 +134,23 @@ X11 otherwise.
     path is compiled and tested everywhere.
   - The service opens a private connection to the session bus
     (`$DBUS_SESSION_BUS_ADDRESS`, else `$XDG_RUNTIME_DIR/bus`; never X11
-    autolaunch) and reads the interface's `version` property. When the
-    portal or the interface is missing, `isSupported() == false` and the UI
-    suggests binding Flubsound's actions in the desktop's keyboard settings.
-    Otherwise its own thread serves the connection (`poll` on the bus fd
-    plus a wake pipe) and calls the callbacks, once per `Activated` signal.
+    autolaunch). Its own thread serves the connection (`poll` on the bus fd
+    plus a wake pipe) and asks for the interface's `version` property
+    without blocking. The constructor, on the message thread, waits for
+    that answer for at most 250 ms: a running portal answers at once, and
+    so does D-Bus when there is none, but a portal that D-Bus is still
+    starting at login can take seconds. Until the answer the service counts
+    as supported and registrations wait for it. When the portal or the
+    interface is missing, `isSupported() == false` and the UI suggests
+    binding Flubsound's actions in the desktop's keyboard settings; a portal
+    that appears on the bus later (`NameOwnerChanged`) is asked again and
+    then used. A probe that times out or whose D-Bus activation fails is
+    retried after 2 s, doubling up to 60 s, with the requested shortcuts
+    reported `Unavailable` meanwhile and bound once the portal answers. If
+    the session bus connection is lost, every shortcut is reported
+    `Unavailable` and the service turns unsupported, so later registrations
+    are refused at once instead of waiting forever. The service thread
+    calls the callbacks, once per `Activated` signal.
     `Deactivated` (key release) is ignored. Signals count only when they come
     from the portal's unique bus name and name the current session.
   - `CreateSession`, then, once its `Response` signal carries the
@@ -152,14 +170,28 @@ X11 otherwise.
     service's thread once the portal answers, and `HotkeyManager` shows it
     per action on the Hotkeys page: an id in the `BindShortcuts` response is
     `Registered`, or `Reassigned` when its `trigger_description` names
-    another key (compared by modifiers and key with common aliases such as
-    `PgUp` / `Page_Up` and `Meta` / `LOGO`; English names only, so a
-    localised description counts as another key and is shown verbatim). An
-    id missing from the response, or a response code 1 (the user cancelled)
-    or 2, is `Declined`; a D-Bus error is `Unavailable`. A batch that needs
-    no new binding repeats the previous outcome, a session the desktop
-    closes later turns its shortcuts `Declined`, and a portal that goes away
-    turns them `Unavailable`. Refusals and errors are also logged to stderr.
+    another key. Triggers are compared by modifiers and key with common
+    aliases such as `PgUp` / `Page_Up` and `Meta` / `LOGO`, the modifier and
+    key names Qt (KDE) shows in German, French, Spanish and Brazilian
+    Portuguese (`Strg+Umschalt+Bild auf`, `Ctrl+Maj+Haut`,
+    `Ctrl+Mayús+Arriba`, `Ctrl+Alt+Cima`), and GNOME's form, GTK
+    accelerators inside a localised sentence (`Press <Control><Alt>Up`,
+    `Press <Control><Alt>Up or <Super>u`); a description listing several
+    triggers matches when one of them is the requested one. A description
+    still not understood is shown verbatim as `Reassigned` ("Bound by the
+    desktop as …"), never as `Registered`. An id without a
+    `trigger_description` is `Registered`, except under GNOME
+    (`XDG_CURRENT_DESKTOP`), which leaves it out when the user removed the
+    key: `Declined` there. An id missing from the response, or a response
+    code 1 (the user cancelled) or 2, is `Declined`; a D-Bus error is
+    `Unavailable`. A batch that needs no new binding repeats the previous
+    outcome, a session the desktop closes later turns its shortcuts
+    `Declined` (also while its `BindShortcuts` is still waiting for the
+    user; that late answer is ignored), and a portal that goes away turns
+    them `Unavailable`. An answer to a batch that the hotkey settings have
+    changed since is not reported, since it is not the outcome of the
+    current chords; the next batch's is. Refusals and errors are also logged
+    to stderr.
   - Rebinding: the interface has no "unbind", and a session's shortcuts are
     bound once. A changed set is therefore bound in a new session and the
     old one is closed (`Session.Close`). Desktops remember the user's choice
@@ -178,8 +210,12 @@ Tests in `tests/test_platform_linux.cpp`:
 
 - `Platform: X11 global hotkeys fire once per press, refuse a chord another
   client holds, and release on unregister` synthesises key events with
-  XTest. It is skipped without an X display or `libXtst`; CI runs it under
-  `xvfb-run` in the `sanitizers` job.
+  XTest. It also releases the modifiers before the key and presses again,
+  and registers the same chord for a second action. It clears
+  `WAYLAND_DISPLAY` and `XDG_SESSION_TYPE`, so on a Wayland desktop it uses
+  XWayland instead of the desktop's real portal. It is skipped without an X
+  display or `libXtst`; CI runs it under `xvfb-run` in the `sanitizers`
+  job. Its waits are 10 s hang guards, not timing assertions.
 - `Platform: Wayland global hotkeys bind through the GlobalShortcuts portal,
   fire once per activation and rebind in a new session` starts a private
   `dbus-daemon` and a mock portal implemented in the test with libdbus. It
@@ -197,10 +233,22 @@ Tests in `tests/test_platform_linux.cpp`:
   dialog, a repaired non-UTF-8 description and a session the desktop
   closes. `Platform: Wayland global hotkeys are unsupported without a
   GlobalShortcuts portal` covers a bus without a portal, a portal without
-  the interface and no bus at all. These are skipped without `dbus-daemon`
-  or libdbus-1; the CI `sanitizers` job installs `dbus`. `Platform: portal
-  trigger descriptions compare by modifiers and key, and shortcut
-  descriptions are made valid UTF-8` needs neither.
+  the interface and no bus at all. `Platform: Wayland portal probe does
+  not block start-up: a portal that answers late or appears later is used`,
+  `Platform: Wayland portal: after the session bus is lost, shortcuts are
+  reported unavailable and new requests are refused`, `Platform: Wayland
+  portal: an answer for a set changed since, or for a session the desktop
+  closed, is not reported as the outcome` and `Platform: Wayland portal:
+  GNOME's and localised descriptions of the requested key count as
+  registered, a GNOME shortcut without a key does not` cover the start-up
+  probe, bus loss, stale answers and trigger descriptions (German
+  `Strg+Alt+Hoch` for `CTRL+ALT+Up` is `Registered`). These are skipped
+  without `dbus-daemon` or libdbus-1, and fail (not skip) when
+  `dbus-daemon` is installed but does not start; the CI `sanitizers` job
+  installs `dbus`. The bus socket goes to `/tmp` when `$TMPDIR` is too long
+  for a Unix socket path. `Platform: portal trigger descriptions compare by
+  modifiers and key, and shortcut descriptions are made valid UTF-8` needs
+  neither.
 
 ## Start at sign-in
 

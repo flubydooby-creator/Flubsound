@@ -423,3 +423,95 @@ TEST_CASE ("App: overload response: a profile chosen by hand resets the ladder, 
 
     controller.removeListener (&changes);
 }
+
+TEST_CASE ("App: overload response: one xrun burst at low load starts an overload but never steps; glitching or hot polls that go on still do")
+{
+    // Regression (hardening, watchdog): the reducer used to count the
+    // watchdog's LATCHED overload, which lasts at least 10 polls after any
+    // start, so the "6 more polls" filter never filtered: 3 glitches at 30 %
+    // load stepped Quality -> Balanced 5 polls later.
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    controller.setLatencyProfile (Profile::Quality);
+    controller.setReduceLoadOnOverload (true);
+
+    auto status = runningStatus (0.30);
+    status.glitches = 0;
+    const auto poll = [&controller, &status] (int newGlitches)
+    {
+        status.glitches += newGlitches;
+        controller.updateOverloadWatchdog (status);
+    };
+
+    // Let the rate limit of the manual choice above pass (60 calm polls).
+    for (int i = 0; i < 60; ++i)
+        poll (0);
+    CHECK (! controller.getOverloadState().overloaded);
+
+    // A disk / driver hiccup: 3 glitches in one poll at 30 % load.
+    poll (3);
+    CHECK (controller.getOverloadState().overloaded); // reported, as before
+    for (int i = 0; i < 9; ++i)
+    {
+        poll (0);
+        CHECK (controller.getOverloadState().overloaded); // latched for 10 calm polls ...
+        CHECK (allStripsAt (controller, Profile::Quality)); // ... but no step
+    }
+    poll (0);
+    CHECK (! controller.getOverloadState().overloaded);
+    for (int i = 0; i < 100; ++i)
+        poll (0);
+    CHECK (allStripsAt (controller, Profile::Quality));
+    CHECK (! controller.hasReducedLoad());
+    CHECK (controller.getLoadReductionState().sessionSteps == 0);
+
+    // Glitches that keep coming at low load: each poll is stressed, and after
+    // the start poll plus 5 more the profile steps down.
+    poll (3);
+    CHECK (controller.getOverloadState().overloaded);
+    for (int i = 0; i < 4; ++i)
+        poll (1);
+    CHECK (allStripsAt (controller, Profile::Quality));
+    poll (1);
+    CHECK (allStripsAt (controller, Profile::Balanced));
+    CHECK (controller.getLoadReductionState().sessionSteps == 1);
+
+    // A calm poll in the middle of an episode restarts the count.
+    controller.setLatencyProfile (Profile::Quality);
+    for (int i = 0; i < 60; ++i)
+        poll (0); // ends the episode and lets the rate limit pass
+    CHECK (! controller.getOverloadState().overloaded);
+    status.cpuLoad = 0.97;
+    for (int i = 0; i < 4; ++i)
+        poll (0); // hot: the overload starts on the 4th poll (stressed 1)
+    CHECK (controller.getOverloadState().overloaded);
+    for (int i = 0; i < 4; ++i)
+        poll (0); // stressed 2..5
+    status.cpuLoad = 0.30;
+    poll (0); // calm: still overloaded, count back to 0
+    CHECK (controller.getOverloadState().overloaded);
+    status.cpuLoad = 0.97;
+    for (int i = 0; i < 5; ++i)
+        poll (0);
+    CHECK (allStripsAt (controller, Profile::Quality));
+    poll (0);
+    CHECK (allStripsAt (controller, Profile::Balanced));
+
+    // The pure pieces agree: isStressed() is the latched state AND a poll
+    // that was not calm.
+    OverloadWatchdog watchdog;
+    OverloadWatchdog::Sample sample;
+    sample.running = true;
+    sample.load = 0.3;
+    sample.glitchCount = 0;
+    watchdog.update (sample);
+    sample.glitchCount = 3;
+    CHECK (watchdog.update (sample) == OverloadWatchdog::Event::OverloadStarted);
+    CHECK (watchdog.isStressed());
+    watchdog.update (sample);
+    CHECK (watchdog.isOverloaded());
+    CHECK (! watchdog.isStressed());
+    sample.load = 0.8; // between the thresholds: not calm
+    watchdog.update (sample);
+    CHECK (watchdog.isStressed());
+}

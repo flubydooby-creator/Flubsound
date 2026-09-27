@@ -108,9 +108,16 @@ void AppRouting::shutdown()
 }
 
 // =============================================================================
+bool AppRouting::canEnumerateApps() const noexcept
+{
+    return router != nullptr && router->canList();
+}
+
 bool AppRouting::isEndpointRoutingSupported() const noexcept
 {
-    return router != nullptr && router->isSupported();
+    // Listing alone is not enough: Windows lists everywhere, but moves only
+    // with the opt-in adapter; without it every move would fail.
+    return canEnumerateApps() && router->canMoveEndpoint();
 }
 
 AppRouting::Method AppRouting::getEffectiveMethod() const noexcept
@@ -118,15 +125,62 @@ AppRouting::Method AppRouting::getEffectiveMethod() const noexcept
     switch (method)
     {
         case Method::EndpointRouting: return isEndpointRoutingSupported() ? Method::EndpointRouting : Method::Disabled;
-        case Method::ProcessCapture: return captureSupported ? Method::ProcessCapture : Method::Disabled;
+        case Method::ProcessCapture: return isCaptureSupported() ? Method::ProcessCapture : Method::Disabled;
         case Method::Disabled: return Method::Disabled;
         case Method::Automatic: break;
     }
     if (isEndpointRoutingSupported())
         return Method::EndpointRouting;
-    if (captureSupported)
+    if (isCaptureSupported())
         return Method::ProcessCapture;
     return Method::Disabled;
+}
+
+juce::String AppRouting::getUnavailableReason() const
+{
+    if (getEffectiveMethod() != Method::Disabled)
+        return {};
+
+    constexpr const char* instead = "Choose a Flubsound output device per app in the system sound settings instead.";
+    if (method == Method::Disabled)
+        return "Per-app routing is switched off (Settings > Processing).";
+    if (router == nullptr && ! platform_bridge::servicesCompiledIn())
+        return juce::String ("Per-app routing needs the Flubsound platform services, which are not part of this build. ") + instead;
+    // The platform's own reason says what to do instead (e.g. macOS: pick the
+    // device inside the app); the generic ones get the system settings hint.
+    const juce::String platformReason (router != nullptr ? juce::String (router->cannotMoveReason()) : juce::String());
+    if (! canEnumerateApps())
+        return platformReason.isNotEmpty() ? platformReason
+                                           : juce::String ("Running applications cannot be listed on this system, so per-app routing is unavailable. ") + instead;
+
+    const auto moveReason = platformReason.isNotEmpty() ? platformReason
+                                                        : juce::String ("Moving applications to another output device is not supported on this system. ") + instead;
+#if JUCE_WINDOWS
+    const juce::String captureReason ("Per-app capture needs Windows 10 version 2004 (build 19041) or later, or Windows 11.");
+#else
+    const juce::String captureReason ("Per-app capture is not available on this system.");
+#endif
+
+    switch (method)
+    {
+        case Method::EndpointRouting:
+            return moveReason + (isCaptureSupported() ? " Choose Automatic or Process capture in Settings > Processing." : "");
+        case Method::ProcessCapture:
+            return captureReason + (isEndpointRoutingSupported() ? juce::String (" Choose Automatic or Endpoint routing in Settings > Processing.")
+                                                                 : " " + juce::String (instead));
+        case Method::Automatic:
+        case Method::Disabled: break;
+    }
+    return captureReason + " " + moveReason; // Automatic: neither method works
+}
+
+int AppRouting::getProcessedAppCount() const
+{
+    std::set<uint32_t> processed;
+    for (const auto& a : apps)
+        if (a.routed || a.captureId >= 0)
+            processed.insert (a.processId);
+    return static_cast<int> (processed.size());
 }
 
 void AppRouting::setMethod (Method newMethod)

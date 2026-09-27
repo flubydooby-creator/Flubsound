@@ -7,8 +7,10 @@ global hotkeys (Carbon `RegisterEventHotKey`), thread tuning
 USB from Bluetooth), and start at login: `SMAppService.mainAppService`
 (ServiceManagement, macOS 13+) registers the app bundle as a login item,
 the Settings switch reads `status == SMAppServiceStatusEnabled` back, and if
-macOS reports `RequiresApproval` the app opens System Settings › General ›
-Login Items. Older macOS reports it unsupported and the switch is hidden.
+macOS reports `RequiresApproval` (after registering, or because the user
+switched the item off in Login Items) the app opens System Settings › General ›
+Login Items instead of registering again. Older macOS reports it unsupported
+and the switch is hidden.
 
 The foreground application for automatic profiles (`docs/06-gui.md` §8.1)
 comes from `NSWorkspace.frontmostApplication` (`MacForegroundApp`), queried

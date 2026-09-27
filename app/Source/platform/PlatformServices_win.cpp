@@ -415,10 +415,6 @@ DWORD windowsBuildNumber()
     return build;
 }
 
-/** Process loopback capture exists since Windows 10 build 20348 (Server 2022)
-    and in every Windows 11 build; Windows 10 21H2/22H2 (1904x) lack it. */
-constexpr DWORD kFirstProcessLoopbackBuild = 20348;
-
 /** The per-app endpoint API changed its interface id in build 21390. */
 [[maybe_unused]] constexpr DWORD kAudioPolicyConfigIidChangeBuild = 21390;
 
@@ -1062,13 +1058,35 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
     sounds session and Flubsound's own sessions are skipped - routing our
     own output into our virtual devices would create a feedback loop.
 
-    isSupported() is true: listing works everywhere. setAppEndpoint() needs the
-    opt-in undocumented adapter above; without it (or when it fails) it returns
-    false with an explanation and the UI offers openSystemRoutingSettings(). */
+    canList() is true: listing works everywhere. Moving needs the opt-in
+    undocumented adapter above, so canMoveEndpoint() (and isSupported()) is
+    false without it: automatic routing then never picks endpoint moves, and
+    setAppEndpoint() returns false with cannotMoveReason(); the UI offers
+    openSystemRoutingSettings(). With the adapter a move can still fail on a
+    build whose interface changed (E_NOINTERFACE, reported per app). */
 class WinAppAudioRouter final : public AppAudioRouter
 {
 public:
-    bool isSupported() const override { return true; }
+    bool isSupported() const override { return canList() && canMoveEndpoint(); }
+    bool canList() const override { return true; }
+
+    bool canMoveEndpoint() const override
+    {
+#if defined(FLUB_ENABLE_UNDOCUMENTED_ROUTING)
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    std::string cannotMoveReason() const override
+    {
+        if (canMoveEndpoint())
+            return {};
+        return "This build of Flubsound cannot move applications between output devices by itself (Windows only offers "
+               "an undocumented API for it). Choose the output for each app in Windows Settings > System > Sound > "
+               "Volume mixer (Windows 11) or App volume and device preferences (Windows 10).";
+    }
 
     std::vector<AudioSessionInfo> enumerateSessions() override
     {
@@ -1197,9 +1215,7 @@ public:
         return undocumented_routing::setPersistedDefaultEndpoint (static_cast<DWORD> (processId), mmDeviceId, error);
 #else
         (void) endpointIdOrName;
-        error = "This build of Flubsound cannot move applications between output devices by itself (Windows only offers "
-                "an undocumented API for it). Choose the output for this app in Windows Settings > System > Sound > "
-                "Volume mixer (Windows 11) or App volume and device preferences (Windows 10).";
+        error = cannotMoveReason();
         return false;
 #endif
     }
@@ -1343,8 +1359,9 @@ private:
 };
 
 /*  Per-process capture through the documented process-loopback virtual device
-    (Windows 10 build 20348+ / Windows 11; see Microsoft's ApplicationLoopback
-    sample):
+    (Windows 10 2004 / build 19041+ and Windows 11; Microsoft's
+    ApplicationLoopback sample documents 20348, see windows_builds in the
+    header for why 19041):
 
       ActivateAudioInterfaceAsync (VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
           IAudioClient, PROPVARIANT{VT_BLOB: AUDIOCLIENT_ACTIVATION_PARAMS})
@@ -1374,7 +1391,7 @@ class WinProcessLoopbackCapture final : public ProcessLoopbackCapture
 public:
     ~WinProcessLoopbackCapture() override { stop(); }
 
-    bool isSupported() const override { return windowsBuildNumber() >= kFirstProcessLoopbackBuild; }
+    bool isSupported() const override { return windows_builds::hasProcessLoopback (windowsBuildNumber()); }
 
     bool start (uint32_t processId,
                 bool includeProcessTree,
@@ -1393,7 +1410,7 @@ public:
 
         if (! isSupported())
         {
-            error = "Per-application capture needs Windows 11 or Windows 10 build 20348+ (this is build "
+            error = "Per-application capture needs Windows 11 or Windows 10 version 2004 (build 19041) or later (this is build "
                   + std::to_string (windowsBuildNumber()) + ").";
             return false;
         }

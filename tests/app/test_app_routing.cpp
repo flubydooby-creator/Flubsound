@@ -8,7 +8,9 @@
 
 #include "engine/AppRouting.h"
 #include "engine/AudioEngineHost.h"
+#include "engine/EngineController.h"
 #include "settings/AppSettings.h"
+#include "ui/RoutingPanel.h"
 
 #include <condition_variable>
 #include <map>
@@ -29,7 +31,9 @@ namespace
 struct RouterScript
 {
     std::mutex lock;
-    bool supported = true;
+    bool listable = true, movable = true; // canList(), canMoveEndpoint()
+    bool claimsSupport = false;           // isSupported() true even if it cannot move (the Windows router before E47a)
+    std::string cannotMove;               // cannotMoveReason()
     std::vector<AudioSessionInfo> sessions;
     std::map<uint32_t, std::string> failures;          // pid -> error returned by setAppEndpoint
     std::vector<std::pair<uint32_t, std::string>> moves; // every setAppEndpoint call (pid, endpoint)
@@ -93,7 +97,25 @@ public:
     bool isSupported() const override
     {
         const std::lock_guard<std::mutex> g (script.lock);
-        return script.supported;
+        return script.claimsSupport || (script.listable && script.movable);
+    }
+
+    bool canList() const override
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        return script.listable;
+    }
+
+    bool canMoveEndpoint() const override
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        return script.movable;
+    }
+
+    std::string cannotMoveReason() const override
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        return script.movable ? std::string() : script.cannotMove;
     }
 
     std::vector<AudioSessionInfo> enumerateSessions() override
@@ -373,7 +395,7 @@ TEST_CASE ("App: AppRouting method resolution, process-capture fallback and capt
     // Sessions can be enumerated, endpoints cannot be moved, captures work
     // (e.g. Windows without the undocumented routing adapter).
     RouterScript script;
-    script.supported = false;
+    script.movable = false;
     script.flickeringPid = 900; // every pass publishes a change, so passes can be counted
     script.setSessions ({ session (500, "game.exe"), session (600, "exited.exe"), session (700, "music.exe"), session (900, "idle.exe") });
 
@@ -560,7 +582,7 @@ TEST_CASE ("App: AppRouting retries a given-up capture after a re-mapping, a met
     auto captures = useFakeCaptures (host, { 600 });
 
     RouterScript script;
-    script.supported = false;   // Automatic -> process capture
+    script.movable = false;     // Automatic -> process capture
     script.flickeringPid = 900; // every pass publishes a change, so passes can be counted
     script.setSessions ({ session (500, "game.exe"), session (600, "voice.exe"), session (900, "idle.exe") });
 
@@ -643,7 +665,7 @@ TEST_CASE ("App: AppRouting discards a worker pass computed from an outdated con
     auto captures = useFakeCaptures (host);
 
     RouterScript script;
-    script.supported = false; // Automatic -> process capture
+    script.movable = false;   // Automatic -> process capture
     script.flickeringPid = 900;
     script.setSessions ({ session (500, "game.exe"), session (700, "music.exe"), session (900, "idle.exe") });
 
@@ -753,4 +775,167 @@ TEST_CASE ("App: AppRouting does not take a reused process id for the routed pro
     REQUIRE (flubapptest::pumpMessagesUntil ([&] { return wasMoved (script, 101, "") && wasMoved (script, 102, ""); }));
 
     routing.shutdown();
+}
+
+// =============================================================================
+// E47a: a router that lists applications but cannot move them (Windows without
+// FLUB_ENABLE_UNDOCUMENTED_ROUTING). Its isSupported() claims support, like the
+// Windows router did before the canList / canMoveEndpoint split: Automatic
+// must still never resolve to endpoint routing, whose every move would fail.
+TEST_CASE ("App: AppRouting with a router that lists but cannot move never picks endpoint routing (unsupported router)")
+{
+    const flubapptest::TempFolder temp;
+    AppSettings settings (temp.file ("settings.xml"), false);
+    AudioEngineHost host;
+    const juce::String windowsHint ("Choose the output for each app in Windows Settings (test)");
+
+    // With process capture ("fake build >= 19041"): Automatic -> capture, no move is ever tried.
+    {
+        RouterScript script;
+        script.claimsSupport = true;
+        script.movable = false;
+        script.cannotMove = windowsHint.toStdString();
+        script.setSessions ({ session (100, "cs2.exe"), session (200, "Discord.exe") });
+        useFakeCaptures (host);
+
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
+        CHECK (routing.canEnumerateApps());
+        CHECK (! routing.isEndpointRoutingSupported());
+        CHECK (routing.isCaptureSupported());
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::ProcessCapture);
+        CHECK (routing.getUnavailableReason().isEmpty());
+        CHECK (routing.getProcessedAppCount() == 0);
+
+        routing.setRoute ("cs2", "Game");
+        routing.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&]
+        {
+            const auto* cs2 = findApp (routing, 100);
+            return cs2 != nullptr && cs2->captureId >= 0;
+        }));
+        CHECK (script.getMoves().empty());
+        CHECK (routing.getProcessedAppCount() == 1); // Discord is listed but not assigned
+        CHECK (findApp (routing, 100)->error.isEmpty());
+
+        // Explicit endpoint routing: Disabled with the platform's reason, and
+        // the pointer to the methods that work; the capture stops.
+        routing.setMethod (AppRouting::Method::EndpointRouting);
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::Disabled);
+        CHECK (routing.getUnavailableReason().startsWith (windowsHint));
+        CHECK (routing.getUnavailableReason().contains ("Process capture"));
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return host.getCaptures().empty() && routing.getProcessedAppCount() == 0; }));
+        CHECK (script.getMoves().empty());
+        routing.setMethod (AppRouting::Method::Automatic); // the settings are shared with the next block
+        routing.removeRoute ("cs2");
+        routing.shutdown();
+        CHECK (script.getMoves().empty()); // nothing to undo either
+    }
+
+    // Without process capture ("fake build < 19041"): Disabled with a reason, never EndpointRouting.
+    {
+        RouterScript script;
+        script.claimsSupport = true;
+        script.movable = false;
+        script.cannotMove = windowsHint.toStdString();
+        script.setSessions ({ session (100, "cs2.exe") });
+
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), false);
+        CHECK (routing.getMethod() == AppRouting::Method::Automatic);
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::Disabled);
+        const auto reason = routing.getUnavailableReason();
+        CHECK (reason.contains (windowsHint));
+        CHECK (reason.startsWith ("Per-app capture"));
+        routing.setMethod (AppRouting::Method::ProcessCapture);
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::Disabled);
+        CHECK (routing.getUnavailableReason().startsWith ("Per-app capture"));
+        routing.setMethod (AppRouting::Method::Disabled);
+        CHECK (routing.getUnavailableReason() == "Per-app routing is switched off (Settings > Processing).");
+        routing.setMethod (AppRouting::Method::Automatic);
+
+        routing.setRoute ("cs2", "Game");
+        routing.setLiveUpdates (true); // enumerate although no method is in effect (the panel does)
+        routing.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return findApp (routing, 100) != nullptr; }));
+        routing.refresh();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return script.getEnumerations() >= 2; }));
+        CHECK (script.getMoves().empty());
+        CHECK (findApp (routing, 100)->error.isEmpty()); // no failing move to report
+        CHECK (routing.getProcessedAppCount() == 0);
+        routing.shutdown();
+    }
+
+    // A router that cannot even list: capture has nothing to capture either.
+    {
+        RouterScript script;
+        script.listable = false;
+        script.movable = false;
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
+        CHECK (! routing.canEnumerateApps());
+        CHECK (! routing.isCaptureSupported());
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::Disabled);
+        CHECK (routing.getUnavailableReason().startsWith ("Running applications cannot be listed"));
+    }
+
+    // A router that lists and moves still prefers endpoint routing.
+    {
+        RouterScript script;
+        AppRouting routing (host, settings, std::make_unique<FakeRouter> (script), true);
+        CHECK (routing.getEffectiveMethod() == AppRouting::Method::EndpointRouting);
+        CHECK (routing.getUnavailableReason().isEmpty());
+    }
+}
+
+TEST_CASE ("App: process-loopback capture is gated at Windows 10 2004 (build 19041), not 20348")
+{
+    namespace wb = flub::platform::windows_builds;
+    CHECK (wb::kFirstProcessLoopback == 19041u);
+    CHECK (! wb::hasProcessLoopback (0));     // build unknown
+    CHECK (! wb::hasProcessLoopback (18363)); // Windows 10 1909
+    CHECK (wb::hasProcessLoopback (19041));   // 2004
+    CHECK (wb::hasProcessLoopback (19045));   // 22H2, the most common Windows 10 build
+    CHECK (wb::hasProcessLoopback (20348));   // Server 2022, Microsoft's documented minimum
+    CHECK (wb::hasProcessLoopback (22631));   // Windows 11 23H2
+}
+
+TEST_CASE ("App: the routing panel shows the red \"No apps are being processed\" state while no app is routed or captured")
+{
+    const flubapptest::TempFolder temp;
+    EngineController::Options o;
+    o.openAudioDevice = false;
+    o.restoreState = false;
+    o.enableAppRouting = false; // nothing is enumerated: zero live routes
+    o.settingsFile = temp.file ("settings.xml");
+    o.persistSettings = false;
+    o.foregroundAppFactory = [] { return std::unique_ptr<flub::platform::ForegroundApp>(); };
+    EngineController controller (o);
+    auto& routing = controller.getRouting();
+    REQUIRE (routing.getProcessedAppCount() == 0);
+
+    ui::RoutingPanel panel (controller);
+    panel.setSize (340, 900);
+    panel.refreshRouting();
+    CHECK (panel.isShowingNoAppsProcessed());
+    CHECK (panel.getNotice().startsWith ("No apps are being processed. "));
+    CHECK (panel.getDescription() == panel.getNotice()); // screen readers get it too
+    if (routing.getUnavailableReason().isEmpty())
+        CHECK (panel.getNotice().contains ("No application is assigned"));
+    else
+        CHECK (panel.getNotice().contains (routing.getUnavailableReason()));
+
+    // Assigned but not running: still red, and it says why.
+    if (routing.getUnavailableReason().isEmpty())
+    {
+        routing.setRoute ("cs2.exe", "Game");
+        panel.refreshRouting();
+        CHECK (panel.isShowingNoAppsProcessed());
+        CHECK (panel.getNotice().contains ("None of the assigned applications is running"));
+    }
+
+    // Switched off: still red, with the reason.
+    routing.setMethod (AppRouting::Method::Disabled);
+    panel.refreshRouting();
+    CHECK (panel.isShowingNoAppsProcessed());
+    CHECK (panel.getNotice() == "No apps are being processed. Per-app routing is switched off (Settings > Processing).");
+
+    controller.shutdown();
 }
