@@ -25,7 +25,7 @@ struct MeterSnapshot
     float correlation = 1.0f, effectiveWidth = 1.0f;
 
     float compGainReductionDb = 0.0f, compUpwardGainDb = 0.0f;
-    float maxGainReductionDb = 0.0f, glueGainReductionDb = 0.0f, clipEnergyRatioDb = -160.0f;
+    float maxGainReductionDb = 0.0f, glueGainReductionDb = 0.0f, clipEnergyRatioDb = -160.0f, distortionDb = -160.0f;
     float bassProtectionDb = 0.0f;
     std::array<float, flub::MeterBus::kMaxDynBands> dynEqGainDb {};
     float governorScale = 1.0f, autoLevelGainDb = 0.0f, autoDriveDb = 0.0f;

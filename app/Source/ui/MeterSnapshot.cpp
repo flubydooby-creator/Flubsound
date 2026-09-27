@@ -29,6 +29,7 @@ void MeterSnapshot::read (const flub::MeterBus& bus) noexcept
     maxGainReductionDb = bus.maxGainReductionDb.load (rl);
     glueGainReductionDb = bus.glueGainReductionDb.load (rl);
     clipEnergyRatioDb = bus.clipEnergyRatioDb.load (rl);
+    distortionDb = bus.distortionDb.load (rl);
     bassProtectionDb = bus.bassProtectionDb.load (rl);
     for (size_t b = 0; b < dynEqGainDb.size(); ++b)
         dynEqGainDb[b] = bus.dynEqGainDb[b].load (rl);

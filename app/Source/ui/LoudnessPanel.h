@@ -3,8 +3,9 @@
 //   LOUDNESS  momentary / short-term / integrated LUFS (EBU R128 / BS.1770),
 //             loudness range (LU), true-peak maximum, auto-level gain
 //   DYNAMICS  gain-reduction meters: compressor (with upward gain), limiter,
-//             multiband glue, clipper energy (vs. the SafetyGovernor's
-//             -30 dB budget), bass protection, master safety limiter
+//             multiband glue, distortion (measured THD+N of saturator and
+//             clipper vs. the SafetyGovernor's -30 dB budget), bass
+//             protection, master safety limiter
 //   STEREO    correlation meter (-1 .. +1) and effective width
 // All values come from one MeterSnapshot per display frame; gain-reduction
 // bars get a short release so they stay readable. Their colours, the

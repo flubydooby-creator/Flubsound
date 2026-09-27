@@ -53,7 +53,10 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
     followGr (shown.bass, s.active ? s.bassProtectionDb : 0.0f);
     followGr (shown.master, s.active ? s.masterGainReductionDb : 0.0f);
     shown.compUp = juce::jmax (s.active ? finiteOr (s.compUpwardGainDb, 0.0f) : 0.0f, shown.compUp - release);
-    shown.clip = juce::jmax (s.active ? finiteOr (s.clipEnergyRatioDb, -160.0f) : -160.0f, shown.clip - release * 2.0f);
+    // What the Safety Governor weighs: measured THD+N of the saturator and the
+    // clipper, floored by the clipper's clip-energy ratio (03 §14.5).
+    const float distortion = juce::jmax (finiteOr (s.distortionDb, -160.0f), finiteOr (s.clipEnergyRatioDb, -160.0f));
+    shown.clip = juce::jmax (s.active ? distortion : -160.0f, shown.clip - release * 2.0f);
 
     const float smooth = 1.0f - std::exp (-dt / 0.15f);
     shown.correlation += (juce::jlimit (-1.0f, 1.0f, finiteOr (s.correlation, 1.0f)) - shown.correlation) * smooth;
@@ -177,12 +180,13 @@ void LoudnessPanel::paint (juce::Graphics& g)
     drawGainReductionRow (g, r.removeFromTop (rowH), "Bass protect", shown.bass, 12.0f);
     drawGainReductionRow (g, r.removeFromTop (rowH), "Master", shown.master, 12.0f);
     {
-        // Clipper: energy of what the clipper removed relative to the signal.
+        // Distortion: measured THD+N of saturator + clipper (floored by the
+        // clip-energy ratio), against the Safety Governor's budget.
         auto row = r.removeFromTop (rowH);
         const float nameWidth = juce::jmin (84.0f, row.getWidth() * 0.36f);
         g.setColour (Palette::muted);
         g.setFont (Theme::font (11.5f));
-        g.drawText ("Clipper", row.removeFromLeft (nameWidth), juce::Justification::centredLeft, true);
+        g.drawText ("Distortion", row.removeFromLeft (nameWidth), juce::Justification::centredLeft, true);
         auto valueArea = row.removeFromRight (46.0f);
         auto bar = row.withSizeKeepingCentre (row.getWidth(), juce::jmin (6.0f, row.getHeight() - 6.0f));
         g.setColour (Palette::well);
