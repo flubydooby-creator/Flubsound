@@ -9,7 +9,8 @@
 // and full parameter state (both A/B banks), master enable, selected strip,
 // the automatic overload response, device-input routing, hotkey chords, start
 // minimised / close to tray / start with the OS, the app routing map
-// (executable -> strip) and the window position.
+// (executable -> strip), the automatic profile rules (foreground app ->
+// preset on a strip) and the window position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -41,6 +42,27 @@ struct AppRoute
 {
     juce::String executable; // case-insensitive match, e.g. "cs2.exe", "Spotify"
     juce::String stripName;  // target strip ("Game", "Music", ...)
+};
+
+/** Automatic profile switching (roadmap 2.5): while `executable` is the
+    foreground application, the strip `stripName` plays `presetId` (see
+    AutoProfileSwitcher / EngineController::pollForegroundApp). */
+struct AutoProfileRule
+{
+    enum class Mode
+    {
+        Preset, // the preset's own Music / Gaming mode
+        Music,
+        Gaming
+    };
+
+    juce::String executable; // matched like AppRoute ("cs2.exe", "/usr/bin/foo"), or a macOS bundle id
+    juce::String stripName;  // target strip ("Game", "Music", ...)
+    juce::String presetId;   // "factory:..." / "user:..."
+    Mode mode = Mode::Preset;
+    bool restoreOnExit = false; // put the strip's previous preset back when the app leaves the foreground
+
+    bool operator== (const AutoProfileRule&) const = default;
 };
 
 class AppSettings
@@ -146,6 +168,16 @@ public:
         (Linux PipeWire / PulseAudio null-sink name). */
     juce::String getStripEndpointId (const juce::String& stripName) const;
     void setStripEndpointId (const juce::String& stripName, const juce::String& endpointId);
+
+    // ---- Automatic profiles ------------------------------------------------------------
+    /** Master switch for the rules below (default on; rules only exist when the
+        user added them). */
+    bool getAutoProfilesEnabled() const;
+    void setAutoProfilesEnabled (bool enabled);
+    /** In priority order: the first rule matching the foreground app wins.
+        Rules without an executable, strip or preset are dropped. */
+    std::vector<AutoProfileRule> getAutoProfileRules() const;
+    void setAutoProfileRules (const std::vector<AutoProfileRule>& rules);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

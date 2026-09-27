@@ -26,6 +26,8 @@ constexpr const char* windowState = "ui.windowState";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
+constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
+constexpr const char* autoProfileRules = "autoProfile.rules";
 } // namespace Keys
 
 struct NamedKey
@@ -456,5 +458,45 @@ juce::String AppSettings::getStripEndpointId (const juce::String& stripName) con
 void AppSettings::setStripEndpointId (const juce::String& stripName, const juce::String& endpointId)
 {
     properties->setValue (stripKey (stripName, "endpoint"), endpointId);
+}
+
+// ---- Automatic profiles -------------------------------------------------------------------------------------
+bool AppSettings::getAutoProfilesEnabled() const { return properties->getBoolValue (Keys::autoProfilesEnabled, true); }
+void AppSettings::setAutoProfilesEnabled (bool enabled) { properties->setValue (Keys::autoProfilesEnabled, enabled); }
+
+std::vector<AutoProfileRule> AppSettings::getAutoProfileRules() const
+{
+    std::vector<AutoProfileRule> rules;
+    if (auto xml = properties->getXmlValue (Keys::autoProfileRules))
+    {
+        for (auto* e : xml->getChildWithTagNameIterator ("RULE"))
+        {
+            AutoProfileRule r;
+            r.executable = e->getStringAttribute ("exe").trim();
+            r.stripName = e->getStringAttribute ("strip").trim();
+            r.presetId = e->getStringAttribute ("preset").trim();
+            const auto mode = e->getStringAttribute ("mode");
+            r.mode = mode == "music" ? AutoProfileRule::Mode::Music : (mode == "gaming" ? AutoProfileRule::Mode::Gaming : AutoProfileRule::Mode::Preset);
+            r.restoreOnExit = e->getBoolAttribute ("restore", false);
+            if (r.executable.isNotEmpty() && r.stripName.isNotEmpty() && r.presetId.isNotEmpty())
+                rules.push_back (r);
+        }
+    }
+    return rules;
+}
+
+void AppSettings::setAutoProfileRules (const std::vector<AutoProfileRule>& rules)
+{
+    juce::XmlElement xml ("AUTOPROFILES");
+    for (const auto& r : rules)
+    {
+        auto* e = xml.createNewChildElement ("RULE");
+        e->setAttribute ("exe", r.executable);
+        e->setAttribute ("strip", r.stripName);
+        e->setAttribute ("preset", r.presetId);
+        e->setAttribute ("mode", r.mode == AutoProfileRule::Mode::Music ? "music" : (r.mode == AutoProfileRule::Mode::Gaming ? "gaming" : "preset"));
+        e->setAttribute ("restore", r.restoreOnExit);
+    }
+    properties->setValue (Keys::autoProfileRules, &xml);
 }
 } // namespace flub::app

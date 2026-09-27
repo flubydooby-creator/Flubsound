@@ -27,6 +27,8 @@ std::unique_ptr<flub::platform::AppAudioRouter> createAppAudioRouter();
 std::unique_ptr<flub::platform::ProcessLoopbackCapture> createProcessLoopbackCapture();
 /** "Start with the OS" (sign-in) entry; nullptr = treat as unsupported. */
 std::unique_ptr<flub::platform::AutoStart> createAutoStart();
+/** Foreground application (automatic profiles); nullptr = unsupported. */
+std::unique_ptr<flub::platform::ForegroundApp> createForegroundApp();
 
 /** True if a capture object can be created and reports isSupported(). Creates
     and destroys a probe object: call from the message thread, not per block. */

@@ -182,12 +182,21 @@ public:
         return false;
     }
 };
+
+class UnsupportedForegroundApp final : public ForegroundApp
+{
+public:
+    bool isSupported() const override { return false; }
+    bool query (ForegroundAppInfo&) override { return false; }
+    std::string unsupportedReason() const override { return "The foreground application cannot be detected on this operating system."; }
+};
 } // namespace
 
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<UnsupportedHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<UnsupportedRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<UnsupportedCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<UnsupportedAutoStart>(); }
+std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<UnsupportedForegroundApp>(); }
 
 bool SystemTuning::disablePowerThrottling() { return true; }
 void* SystemTuning::promoteAudioThread() { return nullptr; }

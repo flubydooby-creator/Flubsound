@@ -33,6 +33,11 @@ std::unique_ptr<flub::platform::AutoStart> createAutoStart()
     return flub::platform::AutoStart::create();
 }
 
+std::unique_ptr<flub::platform::ForegroundApp> createForegroundApp()
+{
+    return flub::platform::ForegroundApp::create();
+}
+
 bool disablePowerThrottling()
 {
     return flub::platform::SystemTuning::disablePowerThrottling();
@@ -54,6 +59,7 @@ std::unique_ptr<flub::platform::GlobalHotkeys> createGlobalHotkeys() { return {}
 std::unique_ptr<flub::platform::AppAudioRouter> createAppAudioRouter() { return {}; }
 std::unique_ptr<flub::platform::ProcessLoopbackCapture> createProcessLoopbackCapture() { return {}; }
 std::unique_ptr<flub::platform::AutoStart> createAutoStart() { return {}; }
+std::unique_ptr<flub::platform::ForegroundApp> createForegroundApp() { return {}; }
 bool disablePowerThrottling() { return false; }
 void* promoteAudioThread() { return nullptr; }
 void revertAudioThread (void*) {}

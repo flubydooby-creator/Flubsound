@@ -4,6 +4,7 @@
 #include "flub/engine/MacroMap.h"
 #include "flub/io/Json.h"
 #include "flub/io/PresetIO.h"
+#include "platform/PlatformBridge.h"
 #include "platform/PlatformServices.h"
 
 #include <algorithm>
@@ -21,6 +22,7 @@ constexpr int kRescanEveryTicks = 5 * kTimerHz;  // missing preferred output: re
                                                  // (ALSA probes every PCM device; too slow for every tick)
 
 constexpr const char* kStateFormat = "flubsound-strip-state";
+constexpr int kMaxRecentForegroundApps = 8;
 
 juce::String stripStateToJson (const ParameterStore& store)
 {
@@ -114,6 +116,11 @@ EngineController::EngineController (Options opts)
     if (options.enableAppRouting)
         routing->start();
 
+    // Automatic profiles: the rules are live from here on; the 2 Hz timer polls.
+    foregroundApp = options.foregroundAppFactory ? options.foregroundAppFactory() : platform_bridge::createForegroundApp();
+    autoProfiles.setEnabled (settings->getAutoProfilesEnabled());
+    autoProfiles.setRules (settings->getAutoProfileRules());
+
     startTimerHz (kTimerHz);
 }
 
@@ -130,6 +137,12 @@ void EngineController::shutdown()
 
     stopTimer();
     routing->shutdown();
+
+    // An auto profile that restores on exit gives its strip back, so the
+    // saved state is the user's own and not the game's.
+    if (const auto* rule = autoProfiles.getActiveRule(); rule != nullptr && rule->restoreOnExit)
+        endAutoProfile ({ AutoProfileSwitcher::Action::Kind::End, *rule, true });
+    foregroundApp.reset();
 
     if (options.openAudioDevice)
     {
@@ -320,6 +333,7 @@ bool EngineController::loadPreset (const PresetInfo& preset, int strip, juce::St
     if (! presets->loadIntoStrip (s, preset, getParams (s), error))
         return false;
     settings->setLastPreset (getStripName (s), preset.id);
+    presetChangedByUser (s);
     notify (Change::Preset);
     return true;
 }
@@ -331,6 +345,7 @@ bool EngineController::nextPreset (int strip)
     if (! presets->stepPreset (s, +1, getParams (s), error))
         return false;
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
+    presetChangedByUser (s);
     notify (Change::Preset);
     return true;
 }
@@ -342,6 +357,7 @@ bool EngineController::previousPreset (int strip)
     if (! presets->stepPreset (s, -1, getParams (s), error))
         return false;
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
+    presetChangedByUser (s);
     notify (Change::Preset);
     return true;
 }
@@ -373,6 +389,7 @@ juce::String EngineController::saveUserPreset (const juce::String& name, const j
     {
         presets->setCurrentPresetId (s, id, &store);
         settings->setLastPreset (getStripName (s), id);
+        presetChangedByUser (s);
         notify (Change::Preset);
     }
     return id;
@@ -821,6 +838,7 @@ void EngineController::timerCallback()
 {
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     updateOverloadWatchdog (host->getStatus());
+    pollForegroundApp();
 
     if (++timerTicks % kPersistEveryTicks == 0)
         persistStripStates (false);
@@ -841,5 +859,207 @@ void EngineController::timerCallback()
 void EngineController::renderOffline (StripSignalSource& source, int numSamples)
 {
     host->renderOffline (source, numSamples);
+}
+
+// =============================================================================
+// Automatic profiles (foreground application -> preset)
+// =============================================================================
+bool EngineController::isAutoProfileSupported() const
+{
+    return foregroundApp != nullptr && foregroundApp->isSupported();
+}
+
+juce::String EngineController::getAutoProfileUnsupportedReason() const
+{
+    if (isAutoProfileSupported())
+        return {};
+    if (foregroundApp != nullptr)
+        return juce::String::fromUTF8 (foregroundApp->unsupportedReason().c_str());
+    if (! platform_bridge::servicesCompiledIn())
+        return "Automatic profiles need the Flubsound platform services, which are not part of this build.";
+    return "The foreground application cannot be detected on this system.";
+}
+
+void EngineController::setAutoProfilesEnabled (bool shouldBeEnabled)
+{
+    settings->setAutoProfilesEnabled (shouldBeEnabled);
+    applyAutoProfileActions (autoProfiles.setEnabled (shouldBeEnabled));
+    autoProfileError = {};
+    notify (Change::Settings);
+}
+
+void EngineController::setAutoProfileRules (std::vector<AutoProfileRule> rules)
+{
+    rules.erase (std::remove_if (rules.begin(), rules.end(),
+                                 [] (const AutoProfileRule& r)
+                                 { return r.executable.trim().isEmpty() || r.stripName.isEmpty() || r.presetId.isEmpty(); }),
+                 rules.end());
+    settings->setAutoProfileRules (rules);
+    applyAutoProfileActions (autoProfiles.setRules (std::move (rules)));
+    autoProfileError = {};
+    notify (Change::Settings);
+}
+
+juce::String EngineController::describeAutoProfile() const
+{
+    if (autoProfileError.isNotEmpty())
+        return autoProfileError;
+    const auto* rule = autoProfiles.getActiveRule();
+    if (rule == nullptr)
+        return {};
+    const auto* preset = presets->findById (rule->presetId);
+    auto app = rule->executable.replaceCharacter ('\\', '/').fromLastOccurrenceOf ("/", false, false);
+    if (app.endsWithIgnoreCase (".exe"))
+        app = app.dropLastCharacters (4);
+    return app + " in front: " + rule->stripName + " plays " + (preset != nullptr ? preset->name : rule->presetId)
+           + (rule->restoreOnExit ? " (restored when it leaves)" : "");
+}
+
+void EngineController::pollForegroundApp()
+{
+    if (! isAutoProfileSupported() || ! autoProfiles.isEnabled())
+        return;
+
+    // A preset changed on the rule's strip outside loadPreset() & co. (e.g.
+    // Reset strip, a renamed preset) counts as a manual change too.
+    if (const auto* rule = autoProfiles.getActiveRule())
+    {
+        const auto stripName = rule->stripName;
+        const int s = findStrip (stripName);
+        if (s < 0 || presets->getCurrentPresetId (s) != autoAppliedPresetId)
+            cancelAutoProfile (stripName);
+    }
+
+    flub::platform::ForegroundAppInfo info;
+    AutoProfileSwitcher::Sample sample;
+    sample.valid = foregroundApp->query (info);
+    if (sample.valid)
+    {
+        sample.isThisProcess = info.isThisProcess;
+        sample.processId = info.processId;
+        sample.executable = juce::String::fromUTF8 ((info.executablePath.empty() ? info.executableName : info.executablePath).c_str());
+        sample.bundleId = juce::String::fromUTF8 (info.bundleId.c_str());
+
+        // Recently seen applications, for the "add rule" menu.
+        const auto name = juce::String::fromUTF8 (info.executableName.c_str());
+        if (! info.isThisProcess && name.isNotEmpty() && recentForegroundApps[0] != name)
+        {
+            recentForegroundApps.removeString (name);
+            recentForegroundApps.insert (0, name);
+            while (recentForegroundApps.size() > kMaxRecentForegroundApps)
+                recentForegroundApps.remove (recentForegroundApps.size() - 1);
+        }
+    }
+
+    applyAutoProfileActions (autoProfiles.update (sample));
+}
+
+void EngineController::applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions)
+{
+    for (const auto& action : actions)
+    {
+        if (action.kind == AutoProfileSwitcher::Action::Kind::Apply)
+            applyAutoProfile (action.rule);
+        else
+            endAutoProfile (action);
+    }
+    if (! actions.empty())
+        notify (Change::Routing); // the routing panel shows the active rule
+}
+
+void EngineController::applyAutoProfile (const AutoProfileRule& rule)
+{
+    autoRestorePoint.reset();
+    autoAppliedPresetId = {};
+    autoProfileError = {};
+
+    const int s = findStrip (rule.stripName);
+    const auto* info = presets->findById (rule.presetId);
+    if (s < 0 || info == nullptr)
+    {
+        autoProfileError = "Automatic profile for " + rule.executable + ": "
+                           + (s < 0 ? "there is no " + rule.stripName + " strip." : "the preset " + rule.presetId + " no longer exists.");
+        return;
+    }
+
+    auto& store = getParams (s);
+    if (rule.restoreOnExit)
+    {
+        AutoProfileRestorePoint point;
+        point.stripName = getStripName (s);
+        point.presetId = presets->getCurrentPresetId (s);
+        point.presetModified = presets->isModified (s, store);
+        point.activeBank = store.getActiveBank();
+        for (int i = 0; i < kNumParams; ++i)
+        {
+            point.bankA.push_back (store.get (Bank::A, i));
+            point.bankB.push_back (store.get (Bank::B, i));
+        }
+        autoRestorePoint = std::move (point);
+    }
+
+    // Like loadPreset(), but not a manual change (that would cancel the rule).
+    const auto preset = *info;
+    juce::String error;
+    if (! presets->loadIntoStrip (s, preset, store, error))
+    {
+        autoRestorePoint.reset();
+        autoProfileError = "Automatic profile for " + rule.executable + ": " + error;
+        return;
+    }
+    if (rule.mode != AutoProfileRule::Mode::Preset)
+        store.set (Mode, static_cast<float> (static_cast<int> (rule.mode == AutoProfileRule::Mode::Gaming ? ModeValue::Gaming : ModeValue::Music)));
+    autoAppliedPresetId = preset.id;
+    settings->setLastPreset (getStripName (s), preset.id);
+    notify (Change::Preset);
+}
+
+void EngineController::endAutoProfile (const AutoProfileSwitcher::Action& action)
+{
+    auto point = std::move (autoRestorePoint);
+    autoRestorePoint.reset();
+    autoAppliedPresetId = {};
+    autoProfileError = {};
+
+    const int s = point.has_value() ? findStrip (point->stripName) : -1;
+    if (! action.restore || s < 0 || ! point->stripName.equalsIgnoreCase (action.rule.stripName))
+        return;
+
+    // The strip's own state again, both banks. Application state that shares
+    // the store (Bypass All, latency profile, loudness-matched bypass) stays
+    // as it is now. A preset that was modified before is loaded first so the
+    // restored values still show as "modified" against it.
+    auto& store = getParams (s);
+    store.setActiveBank (point->activeBank);
+    const auto* info = presets->findById (point->presetId);
+    juce::String error;
+    const bool reference = info != nullptr && point->presetModified && presets->loadIntoStrip (s, PresetInfo (*info), store, error);
+
+    for (const auto bank : { Bank::A, Bank::B })
+    {
+        const auto& values = bank == Bank::A ? point->bankA : point->bankB;
+        for (int i = 0; i < kNumParams && i < static_cast<int> (values.size()); ++i)
+            if (i != BypassAll && i != LatencyProfile && i != LoudnessMatchBypass)
+                store.set (bank, i, values[static_cast<size_t> (i)]);
+    }
+    if (! reference)
+        presets->setCurrentPresetId (s, info != nullptr ? point->presetId : juce::String(), &store);
+    settings->setLastPreset (getStripName (s), info != nullptr ? point->presetId : juce::String());
+    notify (Change::Preset);
+}
+
+void EngineController::presetChangedByUser (int strip)
+{
+    cancelAutoProfile (getStripName (strip));
+}
+
+void EngineController::cancelAutoProfile (const juce::String& stripName)
+{
+    if (! autoProfiles.cancelStrip (stripName))
+        return;
+    autoRestorePoint.reset();
+    autoAppliedPresetId = {};
+    autoProfileError = {};
+    notify (Change::Routing);
 }
 } // namespace flub::app

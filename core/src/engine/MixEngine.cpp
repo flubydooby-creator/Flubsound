@@ -8,11 +8,25 @@ namespace flub
 {
 void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, int maxBlockSize)
 {
+    // Keep existing strips' parameter stores (their profiles/presets) when the
+    // layout is re-configured, e.g. after a device sample-rate change.
+    build (configs, sr, maxBlockSize, strips);
+}
+
+void MixEngine::configureFrom (const MixEngine& previous, const std::vector<StripConfig>& configs, double sr, int maxBlockSize)
+{
+    build (configs, sr, maxBlockSize, previous.strips);
+}
+
+void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
+                       const std::vector<std::unique_ptr<Strip>>& storesFrom)
+{
     sampleRate = sr;
     maxBlock = maxBlockSize;
 
-    // Keep existing strips' parameter stores (their profiles/presets) when the
-    // layout is re-configured, e.g. after a device sample-rate change.
+    // storesFrom is this engine's own strips (configure) or a running engine's
+    // (configureFrom): only its store pointers are copied, so it is untouched
+    // until `strips` is replaced below.
     std::vector<std::unique_ptr<Strip>> next;
     const size_t count = std::min (configs.size(), static_cast<size_t> (kMaxStrips));
     for (size_t i = 0; i < count; ++i)
@@ -20,10 +34,10 @@ void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, i
         auto s = std::make_unique<Strip>();
         s->config = configs[i];
         s->config.inputChannels = std::clamp (s->config.inputChannels, 2, kMaxChannels);
-        if (i < strips.size() && strips[i]->store != nullptr)
-            s->store = std::move (strips[i]->store);
+        if (i < storesFrom.size() && storesFrom[i]->store != nullptr)
+            s->store = storesFrom[i]->store;
         else
-            s->store = std::make_unique<param::ParameterStore>();
+            s->store = std::make_shared<param::ParameterStore>();
         s->chain = std::make_unique<ProcessingChain> (*s->store);
         s->chain->prepare ({ sr, maxBlockSize, s->config.inputChannels });
         s->gain.reset (sr, 20.0f, s->config.muted ? 0.0f : dbToGain (s->config.gainDb));

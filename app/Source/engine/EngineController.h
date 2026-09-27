@@ -1,7 +1,8 @@
 // Flubsound Pro - EngineController: the ONE object the UI talks to.
 //
 // Owns (in construction order): AppSettings, AudioEngineHost (device +
-// MixEngine), PresetManager, AppRouting. Everything here is MESSAGE THREAD
+// MixEngine), PresetManager, AppRouting, the platform ForegroundApp service
+// (automatic profiles). Everything here is MESSAGE THREAD
 // only unless noted; the audio thread is reached exclusively through
 // ParameterStore atomics, MeterBus atomics and SPSC rings.
 //
@@ -45,6 +46,11 @@
 //              setReduceLoadOnOverload(), hasReducedLoad(),
 //              describeLoadReduction(), restoreLatencyProfile().
 // Routing      getRouting() (per-app routing, executable -> strip).
+// Auto profile getAutoProfileRules() / setAutoProfileRules(): "while <app> is
+//              in the foreground, <strip> plays <preset>" (roadmap 2.5,
+//              AutoProfile.h). The controller polls the foreground app at
+//              2 Hz (pollForegroundApp) and loads / restores presets itself;
+//              isAutoProfileSupported(), describeAutoProfile() for the UI.
 // Settings     getSettings() (tray / start-up / hotkeys ...).
 // Listening    addListener(); Listener::engineControllerChanged(Change) is
 //              called on the message thread for state the UI cannot poll
@@ -54,6 +60,7 @@
 #include "AppRouting.h"
 #include "AudioEngineHost.h"
 #include "AutoLoadReducer.h"
+#include "AutoProfile.h"
 #include "OverloadWatchdog.h"
 #include "presets/PresetManager.h"
 #include "settings/AppSettings.h"
@@ -64,7 +71,9 @@
 #include <juce_events/juce_events.h>
 
 #include <array>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace flub::app
@@ -97,6 +106,10 @@ public:
         bool enableAppRouting = true; // enumerate sessions / captures
         juce::File settingsFile;      // empty: default location
         bool persistSettings = true;  // false: never write the settings file
+        /** Source of the foreground application for automatic profiles; empty =
+            the platform's (platform_bridge::createForegroundApp). Tests inject
+            a fake; a factory returning nullptr turns the feature off. */
+        std::function<std::unique_ptr<flub::platform::ForegroundApp>()> foregroundAppFactory;
     };
 
     EngineController();
@@ -258,6 +271,33 @@ public:
     /** Writes strip states / device state / settings now. */
     void saveState();
 
+    // ---- Automatic profiles (foreground application -> preset, AutoProfile.h) -----------------
+    /** True when the foreground application can be detected on this system. */
+    bool isAutoProfileSupported() const;
+    /** Why it cannot (user-presentable, e.g. "Wayland does not let ..."); empty when supported. */
+    juce::String getAutoProfileUnsupportedReason() const;
+    bool getAutoProfilesEnabled() const noexcept { return autoProfiles.isEnabled(); }
+    /** Master switch (persisted, default on). Off ends an active rule without
+        restoring. Broadcasts Change::Settings. */
+    void setAutoProfilesEnabled (bool shouldBeEnabled);
+    const std::vector<AutoProfileRule>& getAutoProfileRules() const noexcept { return autoProfiles.getRules(); }
+    /** Replaces the rules (first match wins; persisted). An active rule that is
+        no longer in the list ends without restoring. Broadcasts Change::Settings. */
+    void setAutoProfileRules (std::vector<AutoProfileRule> rules);
+    /** The rule currently applied, nullptr if none. */
+    const AutoProfileRule* getActiveAutoProfile() const noexcept { return autoProfiles.getActiveRule(); }
+    /** One line for the UI: what is active, the last error, or "". */
+    juce::String describeAutoProfile() const;
+    /** Executable names recently seen in the foreground (newest first, at most
+        8, never Flubsound itself): the "add rule" menu offers them. */
+    const juce::StringArray& getRecentForegroundApps() const noexcept { return recentForegroundApps; }
+    /** One foreground poll. The controller's timer calls it at 2 Hz (cheap: a
+        few system calls; the process path is only looked up when the
+        foreground window changes); tests call it directly. Loads the rule's
+        preset (+ mode) on its strip, or restores / releases the strip, and
+        broadcasts Change::Preset and Change::Routing when it did. */
+    void pollForegroundApp();
+
     // ---- Headless ------------------------------------------------------------------------------
     /** Runs audio through the engine without a device (screenshot mode). */
     void renderOffline (StripSignalSource& source, int numSamples);
@@ -277,6 +317,11 @@ private:
     void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
+    void applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions);
+    void applyAutoProfile (const AutoProfileRule& rule);
+    void endAutoProfile (const AutoProfileSwitcher::Action& action);
+    void presetChangedByUser (int strip);
+    void cancelAutoProfile (const juce::String& stripName);
 
     Options options;
     std::unique_ptr<AppSettings> settings;
@@ -302,6 +347,21 @@ private:
 
     OverloadWatchdog overloadWatchdog;
     AutoLoadReducer loadReducer;
+
+    // Automatic profiles (message thread)
+    /** A strip's state before an auto profile with "restore on exit" replaced it. */
+    struct AutoProfileRestorePoint
+    {
+        juce::String stripName, presetId;
+        bool presetModified = false;
+        flub::param::Bank activeBank = flub::param::Bank::A;
+        std::vector<float> bankA, bankB;
+    };
+    std::unique_ptr<flub::platform::ForegroundApp> foregroundApp;
+    AutoProfileSwitcher autoProfiles;
+    std::optional<AutoProfileRestorePoint> autoRestorePoint;
+    juce::String autoAppliedPresetId, autoProfileError;
+    juce::StringArray recentForegroundApps;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };

@@ -21,21 +21,48 @@
 //     mute / ceiling from atomics owned by this class, and captured audio from
 //     SPSC rings. Telemetry goes out through each chain's MeterBus.
 //   * The engine STRUCTURE (MixEngine::configure: strips, chains, buffers) is
-//     only ever changed on the MESSAGE THREAD, while the callback is detached:
-//       - device (re)start: audioDeviceAboutToStart() runs on the message
-//         thread in practice and configures synchronously. If a backend ever
-//         calls it from another thread, the callback outputs silence and the
-//         configure is posted to the message thread (AsyncUpdater).
-//       - reconfigure(): removeAudioCallback -> configure -> addAudioCallback.
-//         This is a brief, explicit dropout (one device restart of the
-//         callback, typically 5-30 ms of silence). It is used for strip layout
-//         changes and structural parameters (latency profile). A crossfaded,
-//         double-buffered engine swap is a roadmap item.
-//     Consequently message-thread code may use MixEngine::chain(i) (meters,
-//     analyser taps) freely, but must RE-FETCH it after a reconfiguration:
-//     MixEngine::configure re-creates the ProcessingChain objects. The
-//     ParameterStore objects survive reconfiguration (they only disappear if a
-//     strip is removed from the layout).
+//     never changed on the audio thread. A structural change builds a NEW
+//     engine instance (MixEngine + this class's per-engine working set) on
+//     the MESSAGE THREAD and never modifies one the audio thread can see:
+//       - device (re)start (sample rate / buffer size / device change):
+//         audioDeviceAboutToStart() runs on the message thread in practice
+//         and replaces the engine synchronously - the device is stopped, so
+//         nothing is processing. If a backend ever calls it from another
+//         thread, the callback outputs silence and the configure is posted to
+//         the message thread (AsyncUpdater). The first kSwapFadeMs of a
+//         started device fade in (no step from silence).
+//       - reconfigure() while the device runs (strip layout, latency profile,
+//         anything MixEngine::needsReprepare() reports): the CROSSFADED
+//         ENGINE SWAP. The new instance is configured with
+//         MixEngine::configureFrom (it shares the running engine's
+//         ParameterStores) while the old one keeps playing, and is handed to
+//         the audio thread through one atomic pointer (pendingSwap). The
+//         audio thread takes it at the start of a callback, runs both engines
+//         on the same input while the new one pre-rolls (its latency +
+//         kSwapSettleMs, so its delay lines hold real signal), then either
+//           equal latency : crossfades old -> new over kSwapFadeMs with
+//                           equal-GAIN raised-cosine curves (gOld + gNew = 1;
+//                           both carry the same programme, so equal power
+//                           would bump +3 dB and could pass the master
+//                           limiter's ceiling; equal gain never exceeds
+//                           max(|old|, |new|)), or
+//           latency change: fades old out over kSwapFadeMs ending where the
+//                           new one fades in over kSwapFadeMs (a 2 x 10 ms
+//                           dip: overlapping two copies offset in time would
+//                           comb-filter, and a sine could cancel; the
+//                           programme jumps by the latency difference inside
+//                           the dip, which no crossfade can avoid).
+//         The old instance goes back through a second atomic (retiredSwap)
+//         and is destroyed on the message thread (timer / next reconfigure):
+//         the audio thread never allocates or frees. One swap runs at a time;
+//         a newer request replaces a pending one that the audio thread has
+//         not taken yet (disposed at once, it never ran).
+//     Consequently message-thread code may use getMixEngine() / chain(i)
+//     (meters, analyser taps) freely, but must RE-FETCH them after a
+//     reconfiguration (getStructureGeneration() changes): the newest engine
+//     has new ProcessingChain objects. The ParameterStore objects survive
+//     reconfiguration (they only disappear if a strip is removed from the
+//     layout).
 //   * Per-app captures: each capture has its own DriftCompensatedFifo in a
 //     fixed slot array (the capture thread is the producer, the audio thread
 //     the consumer). Slots are only (re)allocated after the audio thread has
@@ -123,22 +150,37 @@ public:
     void setStripLayout (std::vector<flub::StripConfig> newLayout);
     /** Current layout, including the live strip gain / mute values. */
     std::vector<flub::StripConfig> getStripLayout() const;
-    int getNumStrips() const noexcept { return mixEngine.getNumStrips(); }
+    int getNumStrips() const noexcept { return latest->engine.getNumStrips(); }
 
-    /** Re-creates the engine for the current device format. Brief dropout. */
+    /** Re-creates the engine for the current device format. While the device
+        runs, the new engine replaces the old one through the crossfaded swap
+        (see THREADING CONTRACT; no dropout); otherwise at once. */
     void reconfigure();
+
+    /** Swap timing (see THREADING CONTRACT). A swap lasts the new engine's
+        latency + kSwapSettleMs + kSwapFadeMs (equal latency) or the same
+        plus another kSwapFadeMs of fade-in (latency change), during which
+        both engines run. */
+    static constexpr double kSwapFadeMs = 10.0, kSwapSettleMs = 10.0;
+
+    /** True from reconfigure() publishing a new engine until the audio thread
+        has finished crossfading to it (message thread). */
+    bool isSwapInProgress() const noexcept;
+    /** Engine swaps the audio thread has completed (any thread). */
+    uint32_t getCompletedSwaps() const noexcept { return swapsCompleted.load (std::memory_order_acquire); }
 
     /** A structural parameter changed (latency profile): reconfigure() needed.
         Polled by this class at 5 Hz on the message thread, which then calls
         reconfigure() by itself. */
-    bool needsReprepare() const noexcept { return mixEngine.needsReprepare(); }
+    bool needsReprepare() const noexcept { return latest->engine.needsReprepare(); }
 
     /** Increments after every MixEngine::configure (chains were re-created). */
     uint32_t getStructureGeneration() const noexcept { return structureGeneration.load (std::memory_order_acquire); }
 
-    /** Direct engine access. params()/chain() are message-thread safe; do not
-        call configure()/process()/setStrip*() on it - use this class. */
-    flub::MixEngine& getMixEngine() noexcept { return mixEngine; }
+    /** Direct access to the newest engine (the one a swap in progress fades
+        to). params()/chain() are message-thread safe; do not call
+        configure()/process()/setStrip*() on it - use this class. */
+    flub::MixEngine& getMixEngine() noexcept { return latest->engine; }
 
     /** Called (asynchronously) on the message thread after every
         (re)configuration. */
@@ -243,29 +285,64 @@ private:
         uint32_t processId = 0;
     };
 
+    /** One complete engine: the MixEngine plus the audio thread's working set
+        for it. Built and destroyed on the message thread only. */
+    struct EngineInstance
+    {
+        flub::MixEngine engine;
+        std::array<flub::AudioBuffer, kMaxStrips> stripBuffers;
+        std::array<flub::AudioBlock, kMaxStrips> stripBlocks {};
+        std::array<const flub::AudioBlock*, kMaxStrips> stripInputs {};
+        std::array<float, kMaxStrips> appliedGainDb {};
+        std::array<bool, kMaxStrips> appliedMuted {};
+        float appliedCeilingDb = -1.0f;
+        flub::AudioBuffer mixOutput;
+        int numStrips = 0, maxBlock = 512, latencySamples = 0;
+        int prerollSamples = 0;     // audible only after this many samples (latency + settle)
+        std::vector<float> fadeIn;  // raised-cosine 0 -> 1 over kSwapFadeMs (its fade-out is 1 - fadeIn)
+    };
+
     void handleAsyncUpdate() override;
     void timerCallback() override;
-    void configureEngine (double sampleRate, int blockSize);
+    void configureEngine (double sampleRate, int blockSize, bool fadeIn);
+    std::unique_ptr<EngineInstance> buildEngine();
+    void replaceEngineNow (std::unique_ptr<EngineInstance> next, bool fadeIn);
+    void afterStructureChange();
+    void collectRetired();
+    void dispose (EngineInstance* instance);
     void processBlock (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples,
                        StripSignalSource* offlineSource) noexcept;
-    void applyPendingMixSettings() noexcept;
+    void beginPendingSwap() noexcept;
+    void mixSwap (const flub::AudioBlock& mix, int numSamples) noexcept;
+    void applyPendingMixSettings (EngineInstance& instance) noexcept;
     void waitForAudioThreadToPass();
     void releaseSlot (CaptureSlot& slot);
 
     juce::AudioDeviceManager deviceManager;
-    flub::MixEngine mixEngine;
     std::vector<flub::StripConfig> layout;
 
-    // ---- Audio-thread working set (sized by configureEngine) -------------------
-    std::array<flub::AudioBuffer, kMaxStrips> stripBuffers;
-    std::array<flub::AudioBlock, kMaxStrips> stripBlocks {};
-    std::array<const flub::AudioBlock*, kMaxStrips> stripInputs {};
+    // ---- Engine instances ---------------------------------------------------------
+    // `instances` owns every live instance (message thread). `latest` is the
+    // newest (message thread; getMixEngine). The audio thread (or the message
+    // thread while no callback can run) uses `active`, plus `fading` - the old
+    // engine - during a swap; pendingSwap / retiredSwap hand instances between
+    // the two threads.
+    std::vector<std::unique_ptr<EngineInstance>> instances;
+    EngineInstance* latest = nullptr;
+    EngineInstance* active = nullptr;
+    EngineInstance* fading = nullptr;
+    std::atomic<EngineInstance*> pendingSwap { nullptr }, retiredSwap { nullptr };
+    std::atomic<uint32_t> swapsCompleted { 0 };
+
+    // ---- Audio-thread working set (host level; per-engine state is in EngineInstance)
     std::array<int, kMaxStrips> hangoverRemaining {};
-    std::array<float, kMaxStrips> appliedGainDb {};
-    std::array<bool, kMaxStrips> appliedMuted {};
-    float appliedCeilingDb = -1.0f;
-    flub::AudioBuffer mixOutput;
-    int maxBlock = 512, numStripsConfigured = 0, hangoverSamples = 24000;
+    int hangoverSamples = 24000;
+    // A swap (or the fade-in after a device start, which has no old engine)
+    // in samples since it began: the old engine's gain falls from
+    // swapFadeOutStart, the new one's rises from swapFadeInStart, the old one
+    // is retired at swapOldEnd and the transition ends at swapEnd.
+    bool swapRunning = false, swapCounts = false;
+    int swapPos = 0, swapFadeInStart = 0, swapFadeOutStart = 0, swapOldEnd = 0, swapEnd = 0;
     juce::Thread::ThreadID promotedThread = nullptr;
     void* promotionHandle = nullptr;
 
@@ -289,6 +366,7 @@ private:
     double pendingSampleRate = 0.0;
     int pendingBlockSize = 0, pendingInputLatency = 0, pendingOutputLatency = 0;
     bool callbackAttached = false;
+    uint32_t swapsRequested = 0; // swaps published that the audio thread will complete
     juce::CriticalSection errorLock;
     juce::String lastDeviceError;
 

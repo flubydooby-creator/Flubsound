@@ -12,7 +12,10 @@
 // hotkeys use the X11 headers when present at build time and load libX11
 // with dlopen at run time (no link dependency); in Wayland sessions they go
 // through the xdg-desktop-portal GlobalShortcuts interface over D-Bus, with
-// libdbus-1 loaded the same way (no headers, no link dependency).
+// libdbus-1 loaded the same way (no headers, no link dependency). The
+// foreground application (automatic profiles) is read from the X11
+// _NET_ACTIVE_WINDOW / _NET_WM_PID properties through the same run-time
+// libX11; Wayland sessions report it unsupported.
 //
 // Start with the OS: an XDG autostart entry (Desktop Application Autostart
 // Specification), honoured by GNOME, KDE Plasma, Xfce, Cinnamon, MATE and
@@ -23,7 +26,8 @@
 // called on the thread it tunes. GlobalHotkeys callbacks run on the
 // service's own X event / D-Bus thread, not on the thread that created it.
 // AutoStart does
-// small blocking file IO: message thread, on user action.
+// small blocking file IO: message thread, on user action. ForegroundApp:
+// create, query and destroy on the message thread.
 #if defined(__linux__)
 
 #include "PlatformServices.h"
@@ -53,6 +57,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -61,11 +66,12 @@
 #include <type_traits>
 #include <vector>
 
-// X11 global hotkeys (see LinuxGlobalHotkeys): headers only, libX11 itself is
-// loaded at run time.
+// X11 global hotkeys (see LinuxGlobalHotkeys) and the foreground window
+// (LinuxForegroundApp): headers only, libX11 itself is loaded at run time.
 // FLUB_NO_X11 forces the header-less build (no global hotkeys) for testing.
-#if ! defined(FLUB_NO_X11) && __has_include(<X11/Xlib.h>) && __has_include(<X11/keysym.h>)
+#if ! defined(FLUB_NO_X11) && __has_include(<X11/Xlib.h>) && __has_include(<X11/keysym.h>) && __has_include(<X11/Xatom.h>)
     #define FLUB_HAVE_X11_HEADERS 1
+    #include <X11/Xatom.h>
     #include <X11/Xlib.h>
     #include <X11/keysym.h>
     // X.h defines None and Xlib.h Status as macros, which would break
@@ -360,7 +366,8 @@ bool isWaylandSession()
 }
 
 #if FLUB_HAVE_X11_HEADERS
-/** The libX11 entry points the hotkey service needs, resolved with dlopen. */
+/** The libX11 entry points the hotkey and foreground-window services need,
+    resolved with dlopen. */
 struct X11Api
 {
     void* lib = nullptr;
@@ -378,6 +385,10 @@ struct X11Api
     int (*connectionNumber) (Display*) = nullptr;
     XErrorHandler (*setErrorHandler) (XErrorHandler) = nullptr;
     Bool (*setDetectableAutoRepeat) (Display*, Bool, Bool*) = nullptr; // Xkb, optional
+    Atom (*internAtom) (Display*, const char*, Bool) = nullptr;
+    int (*getWindowProperty) (Display*, Window, Atom, long, long, Bool, Atom, Atom*, int*, unsigned long*, unsigned long*,
+                              unsigned char**) = nullptr;
+    int (*free) (void*) = nullptr;
 
     static const X11Api* get()
     {
@@ -393,7 +404,8 @@ struct X11Api
                             && sym (a.grabKey, "XGrabKey") && sym (a.ungrabKey, "XUngrabKey") && sym (a.selectInput, "XSelectInput")
                             && sym (a.pending, "XPending") && sym (a.nextEvent, "XNextEvent") && sym (a.sync, "XSync")
                             && sym (a.flush, "XFlush") && sym (a.connectionNumber, "XConnectionNumber")
-                            && sym (a.setErrorHandler, "XSetErrorHandler");
+                            && sym (a.setErrorHandler, "XSetErrorHandler") && sym (a.internAtom, "XInternAtom")
+                            && sym (a.getWindowProperty, "XGetWindowProperty") && sym (a.free, "XFree");
             sym (a.setDetectableAutoRepeat, "XkbSetDetectableAutoRepeat");
             if (! ok)
             {
@@ -659,6 +671,243 @@ public:
 
     void unregisterHotkey (int) override {}
     void unregisterAll() override {}
+};
+#endif
+
+//==============================================================================
+// ForegroundApp - X11 _NET_ACTIVE_WINDOW + _NET_WM_PID
+//==============================================================================
+/*  EWMH window managers (every X11 desktop: GNOME/Xorg, KDE/X11, Xfce,
+    Cinnamon, MATE, i3, ...) publish the focused client window as
+    _NET_ACTIVE_WINDOW on the root window, and clients publish their process
+    id as _NET_WM_PID (Xlib-based toolkits, GTK, Qt, SDL, Wine and JUCE all
+    do). Each query is two XGetWindowProperty round trips on a private
+    Display connection plus, when the window changed, a readlink of
+    /proc/<pid>/exe. A window that is destroyed between the two reads raises
+    BadWindow, which a temporary error handler (for this connection only)
+    swallows. Wayland has no portable equivalent: XWayland only knows about
+    X clients, so the service reports itself unsupported in a Wayland
+    session. Message thread only (like the key grabs, the error handler is
+    process-wide and only swapped in around the query). */
+namespace foreground
+{
+/** First NUL-terminated field of /proc/<pid>/cmdline text (argv[0]). */
+std::string firstArgument (const std::string& cmdline)
+{
+    return cmdline.substr (0, cmdline.find ('\0'));
+}
+
+std::string baseName (const std::string& path)
+{
+    const auto slash = path.find_last_of ("/\\");
+    return slash == std::string::npos ? path : path.substr (slash + 1);
+}
+
+bool endsWithExe (const std::string& name)
+{
+    if (name.size() < 5)
+        return false;
+    std::string tail = name.substr (name.size() - 4);
+    for (auto& c : tail)
+        c = static_cast<char> (std::tolower (static_cast<unsigned char> (c)));
+    return tail == ".exe";
+}
+
+/** The executable a process should be known by, from its /proc/<pid>/exe
+    link target, its cmdline and its comm name (any may be empty: exe is
+    unreadable for other users' processes). Wine and Proton run every
+    Windows program in a "wine[64][-preloader]" loader whose argv[0] is the
+    program's Windows path ("C:\\Games\\cs2.exe"): that path is reported,
+    so rules written for the Windows executable match on Linux too. */
+void describeExecutable (const std::string& exeLink, const std::string& cmdline, const std::string& comm, ForegroundAppInfo& info)
+{
+    const auto loader = baseName (exeLink);
+    const bool isWine = loader == "wine" || loader == "wine64" || loader == "wine-preloader" || loader == "wine64-preloader";
+    const auto argument = firstArgument (cmdline);
+    if (isWine && endsWithExe (argument))
+    {
+        info.executablePath = argument;
+        info.executableName = baseName (argument);
+        return;
+    }
+    if (! exeLink.empty())
+    {
+        info.executablePath = exeLink;
+        info.executableName = loader;
+        return;
+    }
+    info.executablePath.clear();
+    info.executableName = ! comm.empty() ? comm : baseName (argument);
+}
+
+/** Small /proc text file (cmdline / comm), at most 4 KiB; "" on failure. */
+std::string readProcFile (const std::string& path)
+{
+    const int fd = ::open (path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return {};
+    std::string text (4096, '\0');
+    size_t used = 0;
+    while (used < text.size())
+    {
+        const auto n = ::read (fd, text.data() + used, text.size() - used);
+        if (n <= 0)
+            break;
+        used += static_cast<size_t> (n);
+    }
+    ::close (fd);
+    text.resize (used);
+    while (! text.empty() && text.back() == '\n')
+        text.pop_back();
+    return text;
+}
+
+std::string readExeLink (uint32_t pid)
+{
+    std::string target (PATH_MAX, '\0');
+    const auto n = ::readlink (("/proc/" + std::to_string (pid) + "/exe").c_str(), target.data(), target.size());
+    if (n <= 0)
+        return {};
+    target.resize (static_cast<size_t> (n));
+    // A replaced / deleted binary reads as "<path> (deleted)".
+    static constexpr const char deleted[] = " (deleted)";
+    constexpr size_t deletedLength = sizeof (deleted) - 1;
+    if (target.size() > deletedLength && target.compare (target.size() - deletedLength, deletedLength, deleted) == 0)
+        target.resize (target.size() - deletedLength);
+    return target;
+}
+
+/** Fills 'info' for process 'pid' from /proc; false if the process is gone. */
+bool describeProcess (uint32_t pid, ForegroundAppInfo& info)
+{
+    const auto dir = "/proc/" + std::to_string (pid);
+    const auto comm = readProcFile (dir + "/comm");
+    const auto cmdline = readProcFile (dir + "/cmdline");
+    const auto exe = readExeLink (pid);
+    if (comm.empty() && cmdline.empty() && exe.empty())
+        return false;
+    info.processId = pid;
+    describeExecutable (exe, cmdline, comm, info);
+    info.bundleId.clear();
+    info.isThisProcess = pid == static_cast<uint32_t> (::getpid());
+    return ! info.executableName.empty();
+}
+} // namespace foreground
+
+#if FLUB_HAVE_X11_HEADERS
+std::atomic<Display*> foregroundErrorDisplay { nullptr };
+XErrorHandler previousForegroundErrorHandler = nullptr;
+
+int onForegroundError (Display* display, XErrorEvent* event)
+{
+    if (display == foregroundErrorDisplay.load())
+        return 0; // BadWindow: the window closed between the reads
+    return previousForegroundErrorHandler != nullptr ? previousForegroundErrorHandler (display, event) : 0;
+}
+
+class LinuxForegroundApp final : public ForegroundApp
+{
+public:
+    LinuxForegroundApp()
+    {
+        api = X11Api::get();
+        const char* displayName = std::getenv ("DISPLAY");
+        if (api == nullptr || isWaylandSession() || displayName == nullptr || *displayName == '\0')
+            return;
+        display = api->openDisplay (nullptr);
+        if (display == nullptr)
+            return;
+        root = api->defaultRootWindow (display);
+        activeWindowAtom = api->internAtom (display, "_NET_ACTIVE_WINDOW", False);
+        pidAtom = api->internAtom (display, "_NET_WM_PID", False);
+    }
+
+    ~LinuxForegroundApp() override
+    {
+        if (display != nullptr)
+            api->closeDisplay (display);
+    }
+
+    bool isSupported() const override { return display != nullptr; }
+
+    std::string unsupportedReason() const override
+    {
+        if (display != nullptr)
+            return {};
+        if (isWaylandSession())
+            return "Wayland does not let applications see which window is in the foreground, so profiles cannot follow the active "
+                   "application. Switch presets by hand or with the global shortcuts, or use an X11 session.";
+        if (api == nullptr)
+            return "The foreground application cannot be detected: the X11 client library (libX11) is not installed.";
+        return "The foreground application cannot be detected: no X11 display is available.";
+    }
+
+    bool query (ForegroundAppInfo& info) override
+    {
+        if (display == nullptr)
+            return false;
+
+        foregroundErrorDisplay = display;
+        previousForegroundErrorHandler = api->setErrorHandler (&onForegroundError);
+        unsigned long window = 0, pid = 0;
+        const bool found = readProperty (root, activeWindowAtom, XA_WINDOW, window) && window != 0
+                           && readProperty (static_cast<Window> (window), pidAtom, XA_CARDINAL, pid) && pid != 0
+                           && pid <= std::numeric_limits<uint32_t>::max();
+        api->setErrorHandler (previousForegroundErrorHandler);
+        foregroundErrorDisplay = nullptr;
+        if (! found)
+            return false;
+
+        // Same window, same process: the cached description (no /proc reads).
+        if (static_cast<Window> (window) != cachedWindow || static_cast<uint32_t> (pid) != cached.processId)
+        {
+            cachedWindow = 0;
+            if (! foreground::describeProcess (static_cast<uint32_t> (pid), cached))
+                return false;
+            cachedWindow = static_cast<Window> (window);
+        }
+        info = cached;
+        return true;
+    }
+
+private:
+    /** One 32-bit item of a property of the given type; false if missing. */
+    bool readProperty (Window window, Atom property, Atom type, unsigned long& value) const
+    {
+        Atom actualType = 0;
+        int actualFormat = 0;
+        unsigned long count = 0, remaining = 0;
+        unsigned char* data = nullptr;
+        const int status = api->getWindowProperty (display, window, property, 0, 1, False, type, &actualType, &actualFormat, &count,
+                                                   &remaining, &data);
+        const bool ok = status == Success && actualType == type && actualFormat == 32 && count >= 1 && data != nullptr;
+        if (ok)
+            std::memcpy (&value, data, sizeof (value)); // format 32 is returned as an array of long
+        if (data != nullptr)
+            api->free (data);
+        return ok;
+    }
+
+    const X11Api* api = nullptr;
+    Display* display = nullptr;
+    Window root = 0;
+    Atom activeWindowAtom = 0, pidAtom = 0;
+    Window cachedWindow = 0;
+    ForegroundAppInfo cached;
+};
+#else
+class LinuxForegroundApp final : public ForegroundApp
+{
+public:
+    bool isSupported() const override { return false; } // built without X11 headers
+    bool query (ForegroundAppInfo&) override { return false; }
+
+    std::string unsupportedReason() const override
+    {
+        return isWaylandSession() ? "Wayland does not let applications see which window is in the foreground, so profiles cannot "
+                                    "follow the active application."
+                                  : "This build cannot detect the foreground application (built without X11 support).";
+    }
 };
 #endif
 
@@ -2395,6 +2644,7 @@ std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create()
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<LinuxAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<LinuxProcessLoopbackCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<LinuxAutoStart>(); }
+std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<LinuxForegroundApp>(); }
 } // namespace flub::platform
 
 #endif // __linux__

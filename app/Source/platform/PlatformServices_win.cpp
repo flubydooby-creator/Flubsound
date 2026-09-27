@@ -30,6 +30,7 @@
 //                     on an internal MMCSS "Pro Audio" thread.
 //   SystemTuning    : promote/revert must be called on the thread concerned.
 //   AutoStart       : any thread (registry calls only; message thread in the app).
+//   ForegroundApp   : one thread (the message thread in the app); user32 only.
 #if defined(_WIN32)
 
 #include "PlatformServices.h"
@@ -1888,6 +1889,92 @@ public:
     }
 };
 
+//==============================================================================
+// ForegroundApp - GetForegroundWindow + QueryFullProcessImageNameW
+//==============================================================================
+/*  The foreground window's owning process. PROCESS_QUERY_LIMITED_INFORMATION
+    is granted for processes of other users and most elevated ones, so games
+    started "as administrator" are still recognised; protected processes and
+    the secure desktop (UAC prompt, lock screen: no foreground window) are
+    not, and query() returns false for them. UWP / packaged apps draw inside
+    an ApplicationFrameHost.exe frame; the process of the hosted child
+    window is reported instead. The image path is cached while the same
+    window and process stay in front. Message thread (any one thread). */
+class WinForegroundApp final : public ForegroundApp
+{
+public:
+    bool isSupported() const override { return true; }
+    std::string unsupportedReason() const override { return {}; }
+
+    bool query (ForegroundAppInfo& info) override
+    {
+        const HWND window = GetForegroundWindow();
+        if (window == nullptr)
+            return false;
+        DWORD processId = 0;
+        GetWindowThreadProcessId (window, &processId);
+        if (processId == 0)
+            return false;
+
+        if (window != cachedWindow || processId != cachedFrameProcess)
+        {
+            cachedWindow = nullptr;
+            cachedFrameProcess = processId;
+            auto path = processImagePath (processId);
+            if (_wcsicmp (fileNameOf (path).c_str(), L"ApplicationFrameHost.exe") == 0)
+            {
+                if (const DWORD hosted = hostedProcess (window, processId); hosted != 0)
+                {
+                    processId = hosted;
+                    path = processImagePath (hosted);
+                }
+            }
+            if (path.empty())
+                return false;
+            cached.processId = static_cast<uint32_t> (processId);
+            cached.executablePath = toUtf8 (path);
+            cached.executableName = toUtf8 (fileNameOf (path));
+            cached.bundleId.clear();
+            cached.isThisProcess = processId == GetCurrentProcessId();
+            cachedWindow = window;
+        }
+        info = cached;
+        return true;
+    }
+
+private:
+    /** The first child window of a UWP frame that belongs to another process
+        (the app's CoreWindow); 0 if there is none (e.g. a suspended app). */
+    static DWORD hostedProcess (HWND frame, DWORD frameProcess)
+    {
+        struct Search
+        {
+            DWORD frame = 0, found = 0;
+        } search { frameProcess, 0 };
+
+        EnumChildWindows (
+            frame,
+            [] (HWND child, LPARAM context) -> BOOL
+            {
+                auto& s = *reinterpret_cast<Search*> (context);
+                DWORD pid = 0;
+                GetWindowThreadProcessId (child, &pid);
+                if (pid != 0 && pid != s.frame)
+                {
+                    s.found = pid;
+                    return FALSE;
+                }
+                return TRUE;
+            },
+            reinterpret_cast<LPARAM> (&search));
+        return search.found;
+    }
+
+    HWND cachedWindow = nullptr;
+    DWORD cachedFrameProcess = 0;
+    ForegroundAppInfo cached;
+};
+
 // Token returned by promoteAudioThread when MMCSS was unavailable and we fell
 // back to a plain thread-priority boost.
 char threadPriorityFallbackToken = 0;
@@ -2054,6 +2141,7 @@ std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<WinAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<WinProcessLoopbackCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<WinAutoStart>(); }
+std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<WinForegroundApp>(); }
 } // namespace flub::platform
 
 #endif // _WIN32

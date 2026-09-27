@@ -1041,3 +1041,74 @@ TEST_CASE ("Chain: runs at every sample rate a headset may use (8 kHz hands-free
             }
         }
 }
+
+TEST_CASE ("MixEngine: configureFrom builds a second engine that shares the running engine's parameter stores")
+{
+    // What a host's crossfaded engine swap relies on: the new engine is built
+    // beside the old one, which keeps processing exactly as before.
+    const std::vector<StripConfig> oldLayout { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false } };
+    MixEngine running, reference;
+    running.configure (oldLayout, kFs, 256);
+    reference.configure (oldLayout, kFs, 256);
+    running.params (1).set (BoostIntensity, 0.7f);
+    reference.params (1).set (BoostIntensity, 0.7f);
+
+    Planar game (8, 256), music (2, 256), out (2, 256), refGame (8, 256), refMusic (2, 256), refOut (2, 256);
+    const AudioBlock gb = game.block(), mb = music.block(), rgb = refGame.block(), rmb = refMusic.block();
+    const AudioBlock* inputs[] = { &gb, &mb };
+    const AudioBlock* refInputs[] = { &rgb, &rmb };
+    int64_t t = 0;
+    float maxDiff = 0.0f;
+    const auto run = [&] (int blocks)
+    {
+        for (int b = 0; b < blocks; ++b, t += 256)
+        {
+            for (int i = 0; i < 256; ++i)
+            {
+                const float v = 0.3f * static_cast<float> (std::sin (kTwoPi * 220.0 * static_cast<double> (t + i) / kFs));
+                for (auto* p : { &game, &refGame })
+                    for (auto& c : p->ch)
+                        c[static_cast<size_t> (i)] = v;
+                for (auto* p : { &music, &refMusic })
+                    for (auto& c : p->ch)
+                        c[static_cast<size_t> (i)] = 0.5f * v;
+            }
+            running.process (inputs, out.block());
+            reference.process (refInputs, refOut.block());
+            for (size_t c = 0; c < 2; ++c)
+                for (size_t i = 0; i < 256; ++i)
+                    maxDiff = std::max (maxDiff, std::abs (out.ch[c][i] - refOut.ch[c][i]));
+        }
+    };
+    run (20);
+
+    // A structural change (Quality on Music) and a third strip: a new engine.
+    running.params (1).set (LatencyProfile, 0.0f);
+    reference.params (1).set (LatencyProfile, 0.0f);
+    CHECK (running.needsReprepare());
+    auto next = std::make_unique<MixEngine>();
+    next->configureFrom (running, { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } }, kFs, 256);
+    REQUIRE (next->getNumStrips() == 3);
+    CHECK (&next->params (0) == &running.params (0)); // the same stores: profiles carry over
+    CHECK (&next->params (1) == &running.params (1));
+    CHECK (next->params (1).get (BoostIntensity) == 0.7f);
+    CHECK (next->params (2).get (BoostIntensity) == ParameterStore().get (BoostIntensity)); // a new strip: defaults
+    CHECK (! next->needsReprepare());
+    CHECK (running.needsReprepare()); // the running engine was not re-prepared ...
+    CHECK (next->getLatencySamples() > running.getLatencySamples());
+
+    // ... and keeps processing sample for sample as if nothing happened.
+    run (20);
+    CHECK (maxDiff == 0.0f);
+
+    // A parameter written through either engine reaches both; the stores
+    // outlive the engine they were created in.
+    next->params (1).set (BoostIntensity, 0.2f);
+    CHECK (running.params (1).get (BoostIntensity) == 0.2f);
+    MixEngine third;
+    third.configureFrom (*next, { { "Game", 8, 0.0f, false } }, kFs, 256);
+    next.reset();
+    CHECK (third.params (0).get (Mode) == running.params (0).get (Mode));
+    third.params (0).set (Mode, 1.0f);
+    CHECK (running.params (0).get (Mode) == 1.0f);
+}

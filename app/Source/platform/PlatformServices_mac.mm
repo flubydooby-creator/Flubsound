@@ -6,6 +6,9 @@
 //   CMake: target_link_libraries (<app> PRIVATE "-framework Carbon" "-framework AppKit"
 //                                               "-framework ServiceManagement")
 //
+// The foreground application (automatic profiles) is
+// NSWorkspace.frontmostApplication, queried on the main thread.
+//
 // Kept deliberately small and conservative: per-app routing and per-process
 // capture are documented designs (see below and platform/macos/README.md)
 // that report isSupported() == false until they are implemented and tested
@@ -441,6 +444,39 @@ public:
     }
 };
 
+//==============================================================================
+// ForegroundApp - NSWorkspace.frontmostApplication
+//==============================================================================
+/*  The application that receives key events. NSWorkspace updates it on the
+    main run loop, so query from the main (message) thread. Needs no
+    Accessibility or Screen Recording permission. The executable path comes
+    from executableURL (nil for some agents), the name falls back to the
+    localized application name. */
+class MacForegroundApp final : public ForegroundApp
+{
+public:
+    bool isSupported() const override { return true; }
+    std::string unsupportedReason() const override { return {}; }
+
+    bool query (ForegroundAppInfo& info) override
+    {
+        @autoreleasepool
+        {
+            NSRunningApplication* app = [[NSWorkspace sharedWorkspace] frontmostApplication];
+            if (app == nil || app.processIdentifier <= 0)
+                return false;
+
+            const auto text = [] (NSString* s) { return s != nil && s.UTF8String != nullptr ? std::string (s.UTF8String) : std::string(); };
+            info.processId = static_cast<uint32_t> (app.processIdentifier);
+            info.executablePath = app.executableURL != nil ? text (app.executableURL.path) : std::string();
+            info.executableName = app.executableURL != nil ? text (app.executableURL.lastPathComponent) : text (app.localizedName);
+            info.bundleId = text (app.bundleIdentifier);
+            info.isThisProcess = app.processIdentifier == [NSProcessInfo processInfo].processIdentifier;
+            return ! info.executableName.empty() || ! info.bundleId.empty();
+        }
+    }
+};
+
 // Non-null token returned by promoteAudioThread on success.
 char timeConstraintToken = 0;
 } // namespace
@@ -580,6 +616,7 @@ std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<MacAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<MacProcessLoopbackCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<MacAutoStart>(); }
+std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<MacForegroundApp>(); }
 } // namespace flub::platform
 
 #endif // __APPLE__

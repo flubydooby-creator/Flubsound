@@ -50,9 +50,10 @@ AudioEngineHost::AudioEngineHost()
 
     // Strips and parameter stores must exist before anything else (UI, preset
     // restore) touches the engine, so configure once for a nominal format.
-    configureEngine (currentSampleRate, currentBlockSize);
+    configureEngine (currentSampleRate, currentBlockSize, false);
 
-    // Structural parameter changes (latency profile) are picked up here.
+    // Structural parameter changes (latency profile) are picked up here, and
+    // engines retired by a swap are destroyed.
     startTimerHz (5);
 }
 
@@ -126,6 +127,10 @@ void AudioEngineHost::closeDevice()
     engineReady.store (false, std::memory_order_release);
     callbackRunning.store (false, std::memory_order_release);
     deviceInputLatency = deviceOutputLatency = 0;
+
+    // No callback can run now: a swap in flight ends here, on the newest engine.
+    if (latest != nullptr)
+        replaceEngineNow (nullptr, false);
 }
 
 // =============================================================================
@@ -163,27 +168,41 @@ void AudioEngineHost::setStripLayout (std::vector<flub::StripConfig> newLayout)
 void AudioEngineHost::reconfigure()
 {
     JUCE_ASSERT_MESSAGE_THREAD
-    if (callbackAttached && deviceManager.getCurrentAudioDevice() != nullptr)
+    collectRetired();
+
+    if (! callbackRunning.load (std::memory_order_acquire))
     {
-        // Explicit, brief dropout: detach (JUCE calls audioDeviceStopped), then
-        // re-attach (JUCE calls audioDeviceAboutToStart on this thread, which
-        // re-configures the engine before the first new callback).
-        deviceManager.removeAudioCallback (this);
-        deviceManager.addAudioCallback (this);
+        // Nothing is processing: replace the engine at once.
+        configureEngine (currentSampleRate, currentBlockSize, false);
+        return;
     }
+
+    // The device is starting from another thread (the callback is silent until
+    // handleAsyncUpdate configures, which uses the current layout anyway).
+    if (! engineReady.load (std::memory_order_acquire))
+        return;
+
+    // The crossfaded swap: build the new engine here while the old one keeps
+    // running, then hand it to the audio thread (see the THREADING CONTRACT).
+    auto next = buildEngine();
+    EngineInstance* raw = next.get();
+    instances.push_back (std::move (next));
+    latest = raw;
+    if (auto* superseded = pendingSwap.exchange (raw, std::memory_order_acq_rel))
+        dispose (superseded); // never reached the audio thread; its swap is replaced by this one
     else
-    {
-        configureEngine (currentSampleRate, currentBlockSize);
-    }
+        ++swapsRequested;
+
+    afterStructureChange();
 }
 
-void AudioEngineHost::configureEngine (double sampleRate, int blockSize)
+bool AudioEngineHost::isSwapInProgress() const noexcept
 {
-    JUCE_ASSERT_MESSAGE_THREAD
-    currentSampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
-    currentBlockSize = std::clamp (blockSize > 0 ? blockSize : 512, 16, 16384);
-    maxBlock = currentBlockSize;
+    return swapsRequested != swapsCompleted.load (std::memory_order_acquire);
+}
 
+std::unique_ptr<AudioEngineHost::EngineInstance> AudioEngineHost::buildEngine()
+{
     std::vector<flub::StripConfig> configs = layout;
     for (size_t i = 0; i < configs.size(); ++i)
     {
@@ -192,36 +211,100 @@ void AudioEngineHost::configureEngine (double sampleRate, int blockSize)
         configs[i].muted = stripMuted[i].load (std::memory_order_relaxed);
     }
 
-    mixEngine.configure (configs, currentSampleRate, maxBlock);
-    numStripsConfigured = mixEngine.getNumStrips();
+    auto next = std::make_unique<EngineInstance>();
+    auto& engine = next->engine;
+    // The new engine shares the newest engine's ParameterStores (profiles),
+    // which that engine may still be using on the audio thread.
+    if (latest != nullptr)
+        engine.configureFrom (latest->engine, configs, currentSampleRate, currentBlockSize);
+    else
+        engine.configure (configs, currentSampleRate, currentBlockSize);
+
+    next->numStrips = engine.getNumStrips();
+    next->maxBlock = currentBlockSize;
+    for (size_t i = 0; i < static_cast<size_t> (kMaxStrips); ++i)
+    {
+        const bool used = static_cast<int> (i) < next->numStrips;
+        next->stripBuffers[i].setSize (used ? configs[i].inputChannels : 2, next->maxBlock);
+        next->appliedGainDb[i] = used ? configs[i].gainDb : 0.0f;
+        next->appliedMuted[i] = used && configs[i].muted;
+    }
+    next->mixOutput.setSize (2, next->maxBlock);
+    next->appliedCeilingDb = masterCeilingDb.load (std::memory_order_relaxed);
+    engine.setMasterCeilingDb (next->appliedCeilingDb);
+
+    // Swap timing: audible only once its delay lines hold real signal and its
+    // detectors have seen some of it; raised-cosine fades (smooth at both ends).
+    next->latencySamples = engine.getLatencySamples();
+    next->prerollSamples = next->latencySamples + static_cast<int> (std::lround (kSwapSettleMs * 0.001 * currentSampleRate));
+    const auto fadeLength = static_cast<size_t> (std::max (1L, std::lround (kSwapFadeMs * 0.001 * currentSampleRate)));
+    next->fadeIn.resize (fadeLength);
+    for (size_t k = 0; k < fadeLength; ++k)
+        next->fadeIn[k] = static_cast<float> (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (static_cast<double> (k) + 0.5)
+                                                                        / static_cast<double> (fadeLength)));
+    return next;
+}
+
+void AudioEngineHost::configureEngine (double sampleRate, int blockSize, bool fadeIn)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    currentSampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    currentBlockSize = std::clamp (blockSize > 0 ? blockSize : 512, 16, 16384);
+
+    replaceEngineNow (buildEngine(), fadeIn);
 
     for (size_t i = 0; i < static_cast<size_t> (kMaxStrips); ++i)
     {
-        const bool used = static_cast<int> (i) < numStripsConfigured;
-        stripBuffers[i].setSize (used ? configs[i].inputChannels : 2, maxBlock);
-        stripBlocks[i] = {};
-        stripInputs[i] = nullptr;
         hangoverRemaining[i] = 0;
-        appliedGainDb[i] = used ? configs[i].gainDb : 0.0f;
-        appliedMuted[i] = used && configs[i].muted;
         stripActive[i].store (false, std::memory_order_relaxed);
     }
-
-    mixOutput.setSize (2, maxBlock);
-    appliedCeilingDb = masterCeilingDb.load (std::memory_order_relaxed);
-    mixEngine.setMasterCeilingDb (appliedCeilingDb);
     hangoverSamples = static_cast<int> (std::lround (0.5 * currentSampleRate));
 
     // Captures keep their own clock/rate; only the consumer side follows the
-    // device. Captures on strips that vanished are parked (not consumed).
+    // device (the audio thread is not reading the FIFOs here).
     for (auto& slot : captureSlots)
+        if (slot.capture != nullptr)
+            slot.fifo.setConsumerFormat (currentSampleRate, currentBlockSize);
+
+    afterStructureChange();
+}
+
+void AudioEngineHost::replaceEngineNow (std::unique_ptr<EngineInstance> next, bool fadeIn)
+{
+    // Only while the audio thread cannot touch the engines: no callback is
+    // running, or it runs silent (engineReady == false).
+    if (next != nullptr)
     {
-        if (slot.capture == nullptr)
-            continue;
-        if (slot.strip.load (std::memory_order_relaxed) >= numStripsConfigured)
-            slot.strip.store (-1, std::memory_order_relaxed);
-        slot.fifo.setConsumerFormat (currentSampleRate, maxBlock);
+        latest = next.get();
+        instances.push_back (std::move (next));
     }
+
+    // Everything but the newest engine goes: a pending swap never started, a
+    // swap in flight ends on the newest engine.
+    pendingSwap.store (nullptr, std::memory_order_relaxed);
+    retiredSwap.store (nullptr, std::memory_order_relaxed);
+    instances.erase (std::remove_if (instances.begin(), instances.end(), [this] (const auto& i) { return i.get() != latest; }),
+                     instances.end());
+    active = latest;
+    fading = nullptr;
+    swapsRequested = swapsCompleted.load (std::memory_order_relaxed);
+
+    // After a device start the output fades in (no step from silence): the
+    // start-up variant of a swap, without an old engine.
+    swapRunning = fadeIn;
+    swapCounts = false;
+    swapPos = 0;
+    swapFadeOutStart = swapOldEnd = 0;
+    swapFadeInStart = active->latencySamples;
+    swapEnd = swapFadeInStart + static_cast<int> (active->fadeIn.size());
+}
+
+void AudioEngineHost::afterStructureChange()
+{
+    // Captures on strips that vanished are parked (not consumed).
+    for (auto& slot : captureSlots)
+        if (slot.capture != nullptr && slot.strip.load (std::memory_order_relaxed) >= latest->numStrips)
+            slot.strip.store (-1, std::memory_order_relaxed);
 
     structureGeneration.fetch_add (1, std::memory_order_acq_rel);
 
@@ -231,9 +314,23 @@ void AudioEngineHost::configureEngine (double sampleRate, int blockSize)
     triggerAsyncUpdate();
 }
 
+void AudioEngineHost::collectRetired()
+{
+    if (auto* retired = retiredSwap.exchange (nullptr, std::memory_order_acq_rel))
+        dispose (retired);
+}
+
+void AudioEngineHost::dispose (EngineInstance* instance)
+{
+    jassert (instance != latest && instance != nullptr);
+    instances.erase (std::remove_if (instances.begin(), instances.end(), [instance] (const auto& i) { return i.get() == instance; }),
+                     instances.end());
+}
+
 void AudioEngineHost::timerCallback()
 {
-    if (mixEngine.needsReprepare())
+    collectRetired();
+    if (latest->engine.needsReprepare())
         reconfigure();
 }
 
@@ -247,7 +344,7 @@ void AudioEngineHost::handleAsyncUpdate()
         {
             deviceInputLatency = pendingInputLatency;
             deviceOutputLatency = pendingOutputLatency;
-            configureEngine (pendingSampleRate, pendingBlockSize);
+            configureEngine (pendingSampleRate, pendingBlockSize, true);
             engineReady.store (true, std::memory_order_release);
         }
     }
@@ -313,30 +410,31 @@ std::vector<flub::StripConfig> AudioEngineHost::getStripLayout() const
     return result;
 }
 
-void AudioEngineHost::applyPendingMixSettings() noexcept
+void AudioEngineHost::applyPendingMixSettings (EngineInstance& instance) noexcept
 {
-    for (int i = 0; i < numStripsConfigured; ++i)
+    auto& engine = instance.engine;
+    for (int i = 0; i < instance.numStrips; ++i)
     {
         const auto idx = static_cast<size_t> (i);
         const float g = stripGainDb[idx].load (std::memory_order_relaxed);
-        if (g != appliedGainDb[idx])
+        if (g != instance.appliedGainDb[idx])
         {
-            mixEngine.setStripGainDb (i, g);
-            appliedGainDb[idx] = g;
+            engine.setStripGainDb (i, g);
+            instance.appliedGainDb[idx] = g;
         }
         const bool m = stripMuted[idx].load (std::memory_order_relaxed);
-        if (m != appliedMuted[idx])
+        if (m != instance.appliedMuted[idx])
         {
-            mixEngine.setStripMuted (i, m);
-            appliedMuted[idx] = m;
+            engine.setStripMuted (i, m);
+            instance.appliedMuted[idx] = m;
         }
     }
 
     const float ceiling = masterCeilingDb.load (std::memory_order_relaxed);
-    if (ceiling != appliedCeilingDb)
+    if (ceiling != instance.appliedCeilingDb)
     {
-        mixEngine.setMasterCeilingDb (ceiling);
-        appliedCeilingDb = ceiling;
+        engine.setMasterCeilingDb (ceiling);
+        instance.appliedCeilingDb = ceiling;
     }
 }
 
@@ -383,7 +481,7 @@ void AudioEngineHost::setCaptureFactory (CaptureFactory factory)
 int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::String& error)
 {
     JUCE_ASSERT_MESSAGE_THREAD
-    if (strip < 0 || strip >= numStripsConfigured)
+    if (strip < 0 || strip >= latest->numStrips)
     {
         error = "Invalid strip";
         return -1;
@@ -418,7 +516,7 @@ int AudioEngineHost::startProcessCapture (int strip, uint32_t processId, juce::S
     // Request the device rate so the FIFO's nominal ratio is 1 and the
     // resampler only has to absorb clock drift.
     const double captureRate = currentSampleRate;
-    slot.fifo.prepare (channels, captureRate, currentSampleRate, maxBlock);
+    slot.fifo.prepare (channels, captureRate, currentSampleRate, currentBlockSize);
 
     DriftCompensatedFifo* fifo = &slot.fifo;
     std::string startError;
@@ -458,7 +556,7 @@ void AudioEngineHost::setCaptureStrip (int captureId, int strip)
     JUCE_ASSERT_MESSAGE_THREAD
     if (captureId < 0 || captureId >= kMaxCaptures)
         return;
-    captureSlots[static_cast<size_t> (captureId)].strip.store (strip >= 0 && strip < numStripsConfigured ? strip : -1,
+    captureSlots[static_cast<size_t> (captureId)].strip.store (strip >= 0 && strip < latest->numStrips ? strip : -1,
                                                                std::memory_order_relaxed);
 }
 
@@ -526,7 +624,7 @@ void AudioEngineHost::prepareOffline (double sampleRate, int blockSize)
 {
     JUCE_ASSERT_MESSAGE_THREAD
     jassert (! callbackRunning.load());
-    configureEngine (sampleRate, blockSize);
+    configureEngine (sampleRate, blockSize, false);
 }
 
 void AudioEngineHost::renderOffline (StripSignalSource& source, int numSamples, float* const* outputs, int numOutputs)
@@ -545,20 +643,93 @@ void AudioEngineHost::renderOffline (StripSignalSource& source, int numSamples, 
 // =============================================================================
 // Audio thread
 // =============================================================================
+void AudioEngineHost::beginPendingSwap() noexcept
+{
+    // One swap at a time, and only once the message thread has collected the
+    // engine the previous one retired (retiredSwap is a single slot).
+    if (swapRunning || retiredSwap.load (std::memory_order_acquire) != nullptr)
+        return;
+    auto* next = pendingSwap.exchange (nullptr, std::memory_order_acq_rel);
+    if (next == nullptr)
+        return;
+
+    fading = active;
+    active = next;
+
+    // Both engines run from here on; the new one is silent while it pre-rolls.
+    //   equal latency : crossfade (gOld + gNew = 1) over [preroll, preroll + F)
+    //   latency change: old fades out over [preroll - F, preroll) and is
+    //                   retired, then the new one fades in over [preroll, preroll + F)
+    const int fade = static_cast<int> (next->fadeIn.size());
+    const int preroll = std::max (next->prerollSamples, fade);
+    const bool overlap = next->latencySamples == fading->latencySamples;
+    swapPos = 0;
+    swapFadeInStart = preroll;
+    swapFadeOutStart = overlap ? preroll : preroll - fade;
+    swapOldEnd = swapFadeOutStart + fade;
+    swapEnd = preroll + fade;
+    swapCounts = true;
+    swapRunning = true;
+}
+
+void AudioEngineHost::mixSwap (const flub::AudioBlock& mix, int numSamples) noexcept
+{
+    // mix holds the active (new) engine's output; the old engine's is in
+    // fading->mixOutput. Both fade with the new engine's raised-cosine table.
+    const float* fadeIn = active->fadeIn.data();
+    const int fade = static_cast<int> (active->fadeIn.size());
+    const auto gainAt = [fadeIn, fade] (int pos, int start) noexcept
+    {
+        return pos < start ? 0.0f : (pos - start < fade ? fadeIn[pos - start] : 1.0f);
+    };
+
+    for (int c = 0; c < 2; ++c)
+    {
+        float* d = mix.channel (c);
+        const float* old = fading != nullptr ? fading->mixOutput.channel (c) : nullptr;
+        for (int k = 0; k < numSamples; ++k)
+        {
+            const int pos = swapPos + k;
+            const float gNew = gainAt (pos, swapFadeInStart);
+            d[k] = old != nullptr ? gNew * d[k] + (1.0f - gainAt (pos, swapFadeOutStart)) * old[k] : gNew * d[k];
+        }
+    }
+
+    swapPos += numSamples;
+    if (fading != nullptr && swapPos >= swapOldEnd)
+    {
+        // The old engine is silent from here on: back to the message thread,
+        // which destroys it (never freed here).
+        retiredSwap.store (fading, std::memory_order_release);
+        fading = nullptr;
+    }
+    if (swapPos >= swapEnd)
+    {
+        swapRunning = false;
+        if (swapCounts)
+            swapsCompleted.fetch_add (1, std::memory_order_acq_rel);
+    }
+}
+
 void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs,
                                     int numSamples, StripSignalSource* offlineSource) noexcept
 {
-    applyPendingMixSettings();
+    beginPendingSwap();
+
+    auto& current = *active;
+    applyPendingMixSettings (current);
+    if (fading != nullptr)
+        applyPendingMixSettings (*fading);
 
     for (int pos = 0; pos < numSamples;)
     {
-        const int n = std::min (numSamples - pos, maxBlock);
+        const int n = std::min ({ numSamples - pos, current.maxBlock, fading != nullptr ? fading->maxBlock : current.maxBlock });
 
         // ---- 1. Gather strip inputs into the preallocated strip buffers ----
-        for (int s = 0; s < numStripsConfigured; ++s)
+        for (int s = 0; s < current.numStrips; ++s)
         {
             const auto si = static_cast<size_t> (s);
-            auto& buffer = stripBuffers[si];
+            auto& buffer = current.stripBuffers[si];
             const int channels = buffer.getNumChannels();
             const flub::AudioBlock block = buffer.block (channels, n);
             bool fed = false;
@@ -606,17 +777,47 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
                 fed = true;
             }
 
-            stripBlocks[si] = block;
-            stripInputs[si] = fed ? &stripBlocks[si] : nullptr;
+            current.stripBlocks[si] = block;
+            current.stripInputs[si] = fed ? &current.stripBlocks[si] : nullptr;
             stripActive[si].store (fed, std::memory_order_relaxed);
         }
 
-        // ---- 2. Mix ------------------------------------------------------------
-        const flub::AudioBlock mix = mixOutput.block (2, n);
-        if (numStripsConfigured > 0)
-            mixEngine.process (stripInputs.data(), mix);
+        // ---- 1b. During a swap the old engine gets the same input (copied:
+        //          the engines process in place; its strip layout may differ) --
+        if (fading != nullptr)
+        {
+            for (int s = 0; s < fading->numStrips; ++s)
+            {
+                const auto si = static_cast<size_t> (s);
+                const flub::AudioBlock* src = s < current.numStrips ? current.stripInputs[si] : nullptr;
+                if (src == nullptr)
+                {
+                    fading->stripInputs[si] = nullptr;
+                    continue;
+                }
+                auto& buffer = fading->stripBuffers[si];
+                const flub::AudioBlock block = buffer.block (buffer.getNumChannels(), n);
+                for (int c = 0; c < block.numChannels; ++c)
+                {
+                    if (c < src->numChannels)
+                        std::memcpy (block.channel (c), src->channel (c), sizeof (float) * static_cast<size_t> (n));
+                    else
+                        std::memset (block.channel (c), 0, sizeof (float) * static_cast<size_t> (n));
+                }
+                fading->stripBlocks[si] = block;
+                fading->stripInputs[si] = &fading->stripBlocks[si];
+            }
+            fading->engine.process (fading->stripInputs.data(), fading->mixOutput.block (2, n));
+        }
+
+        // ---- 2. Mix (and the swap / start-up fade) --------------------------------
+        const flub::AudioBlock mix = current.mixOutput.block (2, n);
+        if (current.numStrips > 0)
+            current.engine.process (current.stripInputs.data(), mix);
         else
             mix.clear();
+        if (swapRunning)
+            mixSwap (mix, n);
 
         // ---- 3. Device outputs (stereo engine; extra channels silent) -----------
         for (int c = 0; c < numOutputs; ++c)
@@ -691,7 +892,7 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
         configurePending.store (false, std::memory_order_release);
         deviceInputLatency = device->getInputLatencyInSamples();
         deviceOutputLatency = device->getOutputLatencyInSamples();
-        configureEngine (sampleRate, blockSize);
+        configureEngine (sampleRate, blockSize, true);
         engineReady.store (true, std::memory_order_release);
     }
     else
@@ -743,7 +944,7 @@ LatencyInfo AudioEngineHost::getLatencyInfo() const
     const bool deviceOpen = deviceManager.getCurrentAudioDevice() != nullptr;
     info.deviceInputSamples = deviceOpen ? deviceInputLatency : 0;
     info.deviceOutputSamples = deviceOpen ? deviceOutputLatency : 0;
-    info.engineSamples = mixEngine.getLatencySamples();
+    info.engineSamples = latest->engine.getLatencySamples();
     info.deviceInputMs = samplesToMs (info.deviceInputSamples, currentSampleRate);
     info.deviceOutputMs = samplesToMs (info.deviceOutputSamples, currentSampleRate);
     info.engineMs = samplesToMs (info.engineSamples, currentSampleRate);

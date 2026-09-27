@@ -16,6 +16,8 @@
 //
 // Threading: configure() is non-RT (allocates, prepares chains). process() is
 // the device callback. Profile/preset changes only touch ParameterStores.
+// configureFrom() builds a second engine beside a running one (sharing its
+// ParameterStores), so a host can swap engines without stopping the audio.
 #pragma once
 
 #include "ProcessingChain.h"
@@ -47,6 +49,15 @@ public:
         picks the master look-ahead from the strips' latency profiles. */
     void configure (const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
 
+    /** Non-RT. As configure(), for a NEW engine that is to replace `previous`
+        while `previous` may still be running process() on the audio thread:
+        strip i shares previous's ParameterStore i (strips beyond previous's
+        count get a fresh one), so profiles carry over and both engines follow
+        the same parameters during a crossfaded swap. `previous` is only read
+        (its store pointers are copied, never moved); the stores live as long
+        as either engine. */
+    void configureFrom (const MixEngine& previous, const std::vector<StripConfig>& strips, double sampleRate, int maxBlockSize);
+
     int getNumStrips() const noexcept { return static_cast<int> (strips.size()); }
     param::ParameterStore& params (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->store; }
     ProcessingChain& chain (int strip) noexcept { return *strips[static_cast<size_t> (strip)]->chain; }
@@ -76,11 +87,14 @@ private:
     struct Strip
     {
         StripConfig config;
-        std::unique_ptr<param::ParameterStore> store;
+        std::shared_ptr<param::ParameterStore> store; // shared with the engine it was configured from
         std::unique_ptr<ProcessingChain> chain;
         DelayLine pad;
         LinearSmoothedValue gain;
     };
+
+    void build (const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
+                const std::vector<std::unique_ptr<Strip>>& storesFrom);
 
     std::vector<std::unique_ptr<Strip>> strips;
     TruePeakLimiter master;

@@ -26,6 +26,11 @@
 //             own event thread. No per-process capture: apps are routed into
 //             the null sinks.
 //
+// Foreground application (ForegroundApp, for automatic profile switching):
+// Windows GetForegroundWindow + QueryFullProcessImageNameW; macOS
+// NSWorkspace.frontmostApplication; Linux X11 _NET_ACTIVE_WINDOW +
+// _NET_WM_PID (libX11 loaded at run time), unsupported under Wayland.
+//
 // Start with the OS (AutoStart): Windows HKCU\...\CurrentVersion\Run value;
 // macOS SMAppService.mainAppService (macOS 13+, unsupported on older
 // systems); Linux an XDG autostart entry
@@ -261,6 +266,57 @@ public:
     virtual bool setEnabled (bool shouldStart, const std::string& executablePath, std::string& error) = 0;
 
     static std::unique_ptr<AutoStart> create();
+};
+
+// ---------------------------------------------------------------------------
+/** The application whose window has the keyboard focus. */
+struct ForegroundAppInfo
+{
+    uint32_t processId = 0;
+    std::string executablePath; // absolute UTF-8 path when known ("C:\\Games\\cs2.exe", "/usr/bin/foo")
+    std::string executableName; // file name ("cs2.exe", "foo"); never empty after a successful query
+    std::string bundleId;       // macOS bundle identifier ("com.spotify.client"); empty elsewhere
+    bool isThisProcess = false; // Flubsound's own window is in the foreground
+
+    bool operator== (const ForegroundAppInfo&) const = default;
+};
+
+/** "Which application is in the foreground?" - polled by the app's message
+    thread (EngineController, 2 Hz) for automatic profile switching. Each
+    query is a few cheap system calls; the process path is cached while the
+    same window / process stays in front.
+      Windows : GetForegroundWindow -> GetWindowThreadProcessId ->
+                OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION) +
+                QueryFullProcessImageNameW. A UWP app's frame window belongs
+                to ApplicationFrameHost.exe; its hosted child's process is
+                reported instead.
+      macOS   : NSWorkspace.sharedWorkspace.frontmostApplication
+                (processIdentifier, executableURL, bundleIdentifier). Needs no
+                permission. Main thread only.
+      Linux   : X11: _NET_ACTIVE_WINDOW on the root window (set by EWMH
+                window managers) -> the window's _NET_WM_PID ->
+                readlink /proc/<pid>/exe. Wine / Proton games report the
+                Windows executable (argv[0], e.g. "cs2.exe") instead of the
+                wine loader. libX11 is loaded at run time. Wayland has no
+                portable foreground-window API: isSupported() == false in a
+                Wayland session (XWayland only sees X clients), and without
+                an X display.
+    Create, query and destroy on one thread (the message thread). */
+class ForegroundApp
+{
+public:
+    virtual ~ForegroundApp() = default;
+    virtual bool isSupported() const = 0;
+
+    /** Fills 'info' with the current foreground application. false when
+        there is none or it cannot be determined (no focused window, the
+        desktop, a process we may not inspect, unsupported system). */
+    virtual bool query (ForegroundAppInfo& info) = 0;
+
+    /** A user-presentable reason when isSupported() == false; empty otherwise. */
+    virtual std::string unsupportedReason() const = 0;
+
+    static std::unique_ptr<ForegroundApp> create();
 };
 
 // ---------------------------------------------------------------------------
