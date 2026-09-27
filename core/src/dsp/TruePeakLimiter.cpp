@@ -193,7 +193,7 @@ void TruePeakLimiter::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void TruePeakLimiter::reset() noexcept
+void TruePeakLimiter::reset() noexcept FLUB_NONBLOCKING
 {
     detector.reset();
     audioDelay.reset();
@@ -225,7 +225,7 @@ int TruePeakLimiter::latencySamples() const noexcept
     return lookahead + detectorDelay;
 }
 
-void TruePeakLimiter::setParams (const LimiterParams& newParams) noexcept
+void TruePeakLimiter::setParams (const LimiterParams& newParams) noexcept FLUB_NONBLOCKING
 {
     const LimiterParams p = sanitised (newParams, params);
     if (p == params)

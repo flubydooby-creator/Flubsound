@@ -75,7 +75,7 @@ public:
     virtual ~Processor() = default;
 
     virtual void prepare (const ProcessSpec& spec) = 0;              // [1] non-RT: may allocate, may be slow
-    virtual void reset() noexcept = 0;                               // [2] audio thread allowed
+    virtual void reset() noexcept FLUB_NONBLOCKING = 0;              // [2] audio thread allowed
 
     /** In-place processing. block.numSamples <= spec.maxBlockSize and
         block.numChannels <= spec.numChannels are guaranteed by the caller. */

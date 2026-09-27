@@ -59,12 +59,12 @@ public:
     }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override;
     const char* name() const noexcept override { return "Saturation"; }
 
-    void setParams (const SaturatorParams& p) noexcept;
+    void setParams (const SaturatorParams& p) noexcept FLUB_NONBLOCKING;
     const SaturatorParams& getParams() const noexcept { return params; }
 
     /** The static curve, exposed for tests and the GUI transfer plot. */

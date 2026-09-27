@@ -203,7 +203,7 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void ClarityEnhancer::reset() noexcept
+void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
 {
     controlCountdown = kControlInterval;
     const double sr = spec.sampleRate;
@@ -237,7 +237,7 @@ void ClarityEnhancer::reset() noexcept
 }
 
 //==============================================================================
-void ClarityEnhancer::setParams (const ClarityParams& newParams) noexcept
+void ClarityEnhancer::setParams (const ClarityParams& newParams) noexcept FLUB_NONBLOCKING
 {
     const ClarityParams p = sanitise (newParams, params);
     if (p == params)

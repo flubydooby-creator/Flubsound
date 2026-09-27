@@ -60,11 +60,11 @@ class BassEngine final : public Processor
 {
 public:
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Bass Engine"; }
 
-    void setParams (const BassEngineParams& p) noexcept;
+    void setParams (const BassEngineParams& p) noexcept FLUB_NONBLOCKING;
     const BassEngineParams& getParams() const noexcept { return params; }
 
     /** Boost currently withdrawn by the protection stage (dB >= 0), for the GUI. */

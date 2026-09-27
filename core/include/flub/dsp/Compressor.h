@@ -61,12 +61,12 @@ public:
     void setLookaheadMs (float ms) noexcept { lookaheadMs = ms; }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override;
     const char* name() const noexcept override { return "Compressor"; }
 
-    void setParams (const CompressorParams& p) noexcept;
+    void setParams (const CompressorParams& p) noexcept FLUB_NONBLOCKING;
     const CompressorParams& getParams() const noexcept { return params; }
 
     /** Static curve (dB in -> total gain dB), exposed for tests and the GUI. */

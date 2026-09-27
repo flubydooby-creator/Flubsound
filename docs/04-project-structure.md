@@ -461,7 +461,7 @@ Notes:
 | `FLUB_BUILD_APP_TESTS` | `ON` | root | only with `FLUB_BUILD_APP=ON` | `enable_testing()` + `tests/app/` (`flub_app_tests`). It compiles the app's sources and JUCE a second time, so turn it off for a faster app-only build. |
 | `FLUB_WARNINGS_AS_ERRORS` | `OFF` | root | targets linking `flub::compiler_settings` | `-Werror` / `/WX` |
 | `FLUB_SANITIZE` | `OFF` | root | same; GCC/Clang only (ignored on MSVC) | `-fsanitize=address,undefined -fno-omit-frame-pointer` (compile + link) |
-| `FLUB_RTSAN` | `OFF` | root | same; configure fails unless the C++ compiler is Clang ≥ 20, and with `FLUB_SANITIZE` or `FLUB_BUILD_PLUGIN` | defines `FLUB_RTSAN=1`, so `FLUB_NONBLOCKING` (`common/Realtime.h`) marks `ProcessingChain::process`, `MixEngine::process` and every `Processor::process` override `[[clang::nonblocking]]`; `-fsanitize=realtime` (compile + link) and `-Wno-function-effects` (C++ only). CI job `rtsan`. |
+| `FLUB_RTSAN` | `OFF` | root | same; configure fails unless the C++ compiler is Clang ≥ 20, and with `FLUB_SANITIZE` or `FLUB_BUILD_PLUGIN` | defines `FLUB_RTSAN=1`, so `FLUB_NONBLOCKING` (`common/Realtime.h`) marks `ProcessingChain::process`, `MixEngine::process`, every `Processor::process` and `Processor::reset` override and the module setters the audio thread calls `[[clang::nonblocking]]`; `-fsanitize=realtime` (compile + link) and `-Wno-function-effects` (C++ only). CI job `rtsan`. |
 | `FLUB_JUCE_VERSION` | `9.0.2` | `cmake/FlubJuce.cmake` | JUCE fetch | git tag passed to `FetchContent_Declare` |
 | `FETCHCONTENT_SOURCE_DIR_JUCE` | unset | CMake built-in | JUCE fetch | use a local JUCE checkout instead of cloning |
 | `FLUB_ASIO_SDK_DIR` | `""` | `app/CMakeLists.txt` | `FlubsoundPro` (Windows) | `JUCE_ASIO=1` and adds `<dir>/common` to the includes. Warns if `common/iasiodrv.h` is missing. |
@@ -623,7 +623,7 @@ class Foo final : public Processor
 public:
     void setSomethingStructural (int x) noexcept;   // "Structural: call before prepare()"
     void prepare (const ProcessSpec& spec) override; // may allocate
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;                          // audio thread allowed: RTSan-checked too
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override; // RTSan-checked in FLUB_RTSAN builds
     int latencySamples() const noexcept override;   // constant between prepare() calls
     const char* name() const noexcept override { return "Foo"; }
@@ -679,7 +679,7 @@ The example module is called `Foo`, with parameter group `"Foo"`, key prefix `fo
 
 **3. Tests: `tests/test_foo.cpp`.** The glob picks the file up. At minimum, cover the `CONTRIBUTING.md` checklist:
 - an `AllocationGuard` check around `process()`;
-- `FLUB_NONBLOCKING` on `process()` (declaration and definition), so the `rtsan` CI job checks it under RealtimeSanitizer, and a `hasNonblockingProcess<Foo>` line in `tests/test_rtsan.cpp`, so the annotation cannot silently go missing;
+- `FLUB_NONBLOCKING` on `process()`, `reset()` and every setter `ProcessingChain` calls on the audio thread (declaration and definition), so the `rtsan` CI job checks them under RealtimeSanitizer, and `hasNonblockingProcess<Foo>` / `hasNonblockingReset<Foo>` / `hasNonblockingSetParams<Foo, FooParams>` lines in `tests/test_rtsan.cpp`, so the annotations cannot silently go missing;
 - block-size invariance for blocks of 1, 7, 64 and 512 samples;
 - `latencySamples()` equal to the measured impulse delay;
 - finite, bounded output for silence, DC, full-scale noise, impulses and extreme parameters, at 44.1–192 kHz and 1–8 channels;
@@ -897,7 +897,7 @@ There are two platform locations with different roles:
 | `app` (`needs: core`) | `windows-2022`, `macos-14`, `ubuntu-24.04` | Ninja, Release, `FLUB_BUILD_APP=ON`, `FLUB_BUILD_PLUGIN=ON`, `FLUB_BUILD_APP_TESTS=ON`, unit tests and tools OFF; `build/_deps` cached under key `juce-<FLUB_JUCE_VERSION>-<runner.os>`, the version read from `cmake/FlubJuce.cmake` | build → `ctest --test-dir build --output-on-failure --timeout 300`, which runs `flub_app_tests` (the only registered test there) with no audio device or display. On Linux: three headless screenshots at 1440×900 under `xvfb-run` (`--mode music`, `--mode gaming`, `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"`), uploaded as artifact `screenshots` |
 
 What CI does **not** run today:
-- RealtimeSanitizer on anything but the unit tests (the app and the plug-in are not built with it; `reset()`, setters and the app's own callback code are not annotated; the app's callback is instead checked for allocations, frees and, on Linux, mutex locks by `flub_app_tests`);
+- RealtimeSanitizer on anything but the unit tests (the app and the plug-in are not built with it; the app's own callback code is not annotated; the app's callback is instead checked for allocations, frees and, on Linux, mutex locks by `flub_app_tests`);
 - sanitizers on Windows or macOS;
 - tests against the built app or plug-in binaries: `flub_app_tests` compiles the app's sources into its own executable (and `flub_tests` compiles the Linux platform services and the drift FIFO), but nothing opens a real audio device, drives the GUI or loads the plug-in;
 - pluginval (roadmap item 2.9);

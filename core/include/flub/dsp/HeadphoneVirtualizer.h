@@ -88,7 +88,7 @@ public:
     void setHrirSet (std::shared_ptr<const HrirSet> set) { hrir = std::move (set); }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Headphone Virtualizer"; }
 
@@ -96,7 +96,7 @@ public:
         filters are redesigned on 16-sample control ticks; a layout change
         fades out (~5 ms), swaps at silence, pre-rolls (2 ms, up to 10 ms for
         an HRIR) and fades back in (~5 ms). See HeadphoneVirtualizer.cpp. */
-    void setParams (const VirtualizerParams& p) noexcept;
+    void setParams (const VirtualizerParams& p) noexcept FLUB_NONBLOCKING;
     const VirtualizerParams& getParams() const noexcept { return params; }
 
     /** Speaker azimuth in degrees for a channel of a layout (NaN for LFE). */

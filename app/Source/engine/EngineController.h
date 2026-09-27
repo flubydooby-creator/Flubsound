@@ -37,7 +37,9 @@
 //              setActiveBank, toggleAB, copyActiveToOtherBank.
 // Device       getDeviceManager() (e.g. for juce::AudioDeviceSelectorComponent;
 //              the selection is persisted automatically), getLatencyInfo(),
-//              getStatus() (CPU, xruns), getDeviceInputStrip().
+//              getStatus() (CPU, xruns), getDeviceInputStrip(),
+//              getOverloadState() (CPU-overload watchdog), getCaptureStreams()
+//              (per-app capture FIFO statistics).
 // Routing      getRouting() (per-app routing, executable -> strip).
 // Settings     getSettings() (tray / start-up / hotkeys ...).
 // Listening    addListener(); Listener::engineControllerChanged(Change) is
@@ -47,6 +49,7 @@
 
 #include "AppRouting.h"
 #include "AudioEngineHost.h"
+#include "OverloadWatchdog.h"
 #include "presets/PresetManager.h"
 #include "settings/AppSettings.h"
 
@@ -57,6 +60,7 @@
 
 #include <array>
 #include <memory>
+#include <vector>
 
 namespace flub::app
 {
@@ -170,6 +174,26 @@ public:
     /** Re-opens the device from the saved state (e.g. after a failure). */
     juce::String reopenDevice();
 
+    /** CPU-overload watchdog (OverloadWatchdog): sustained load >= 90 % or a
+        burst of xruns / overrunning callbacks. Notify only: the header shows
+        it and the episodes are counted for the session; nothing in the
+        engine is changed (docs/01-architecture.md §7). */
+    const OverloadWatchdog::State& getOverloadState() const noexcept { return overloadWatchdog.getState(); }
+    /** One watchdog poll. The controller's timer calls it at 2 Hz with
+        getStatus(); tests feed statuses directly. Broadcasts Change::Device
+        when an overload starts or ends. */
+    void updateOverloadWatchdog (const EngineStatus& status);
+
+    /** A running per-app capture with its FIFO statistics
+        (DriftCompensatedFifo::Stats), the application's display name (from
+        AppRouting; empty if unknown) and the name of the strip it feeds. */
+    struct CaptureStream
+    {
+        AudioEngineHost::CaptureInfo info;
+        juce::String appName, stripName;
+    };
+    std::vector<CaptureStream> getCaptureStreams() const;
+
     // ---- Output device profile (headsets, e.g. Turtle Beach families) ------------------
     /** Advice for the current output device: the ceiling cap already applied to
         the master limiter (-1 / -2 Bluetooth / -3 dBTP hands-free), whether the
@@ -244,6 +268,8 @@ private:
     int simulatedOutputChannels = 2;
     bool preferredMissing = false, restoringPreferred = false;
     bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
+
+    OverloadWatchdog overloadWatchdog;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };

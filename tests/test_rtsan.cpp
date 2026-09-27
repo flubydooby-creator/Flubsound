@@ -2,9 +2,13 @@
 // other build this file compiles to nothing). They make sure that job is
 // green because the audio entry points really are checked, not because the
 // annotation or the sanitizer silently went missing:
-//  * compile time: ProcessingChain::process, MixEngine::process and every
-//    Processor::process override carry [[clang::nonblocking]] (in Clang the
-//    effect is part of the function type, so std::is_same sees it);
+//  * compile time: ProcessingChain::process, MixEngine::process, every
+//    Processor::process and Processor::reset override, and the module
+//    setters the audio thread calls (ProcessingChain::applyParameters, the
+//    master limiter's setParams from MixEngine::setMasterCeilingDb, and the
+//    TransientShaper setters inside BassEngine / ClarityEnhancer::setParams)
+//    carry [[clang::nonblocking]] (in Clang the effect is part of the
+//    function type, so std::is_same sees it);
 //  * run time: a nonblocking function that allocates is stopped by RTSan.
 //    That runs in a forked child so the expected report does not end this
 //    test run; it needs halt_on_error=1 (RTSan's default, and what CI sets).
@@ -26,9 +30,11 @@
 #include "flub/dsp/Saturator.h"
 #include "flub/dsp/SpectralNoiseGate.h"
 #include "flub/dsp/StereoSpatializer.h"
+#include "flub/dsp/TransientShaper.h"
 #include "flub/dsp/TruePeakLimiter.h"
 #include "flub/engine/MixEngine.h"
 #include "flub/engine/ProcessingChain.h"
+#include "flub/neural/AsyncModelProcessor.h"
 
 #include <type_traits>
 #include <vector>
@@ -62,9 +68,54 @@ static_assert (hasNonblockingProcess<Saturator>);
 static_assert (hasNonblockingProcess<SpectralNoiseGate>);
 static_assert (hasNonblockingProcess<StereoSpatializer>);
 static_assert (hasNonblockingProcess<TruePeakLimiter>);
+static_assert (hasNonblockingProcess<AsyncModelProcessor>);
 static_assert (hasNonblockingProcess<ProcessingChain>);
 static_assert (std::is_same_v<decltype (&MixEngine::process),
                               void (MixEngine::*) (const AudioBlock* const*, const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+
+// reset(): ProcessingChain::reset (a NaN / Inf block), ModuleSlot::reset and
+// ModuleSlot::process (re-activation) and applyParameters (virtualiser
+// format change) call it on the audio thread.
+template <class Module>
+constexpr bool hasNonblockingReset = std::is_same_v<decltype (&Module::reset), void (Module::*)() noexcept FLUB_NONBLOCKING>;
+
+static_assert (! std::is_same_v<void (Processor::*)() noexcept, void (Processor::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<Processor>);
+static_assert (hasNonblockingReset<BassEngine>);
+static_assert (hasNonblockingReset<ClarityEnhancer>);
+static_assert (hasNonblockingReset<Compressor>);
+static_assert (hasNonblockingReset<DynamicEq>);
+static_assert (hasNonblockingReset<HeadphoneVirtualizer>);
+static_assert (hasNonblockingReset<LoudnessMaximizer>);
+static_assert (hasNonblockingReset<ParametricEq>);
+static_assert (hasNonblockingReset<Saturator>);
+static_assert (hasNonblockingReset<SpectralNoiseGate>);
+static_assert (hasNonblockingReset<StereoSpatializer>);
+static_assert (hasNonblockingReset<TruePeakLimiter>);
+static_assert (hasNonblockingReset<TransientShaper>);
+
+// Parameter setters called once per block by ProcessingChain::applyParameters
+// (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the
+// app's device callback calls; the TransientShaper setters from BassEngine /
+// ClarityEnhancer::setParams).
+template <class Module, class Params>
+constexpr bool hasNonblockingSetParams =
+    std::is_same_v<decltype (&Module::setParams), void (Module::*) (const Params&) noexcept FLUB_NONBLOCKING>;
+
+static_assert (hasNonblockingSetParams<BassEngine, BassEngineParams>);
+static_assert (hasNonblockingSetParams<ClarityEnhancer, ClarityParams>);
+static_assert (hasNonblockingSetParams<Compressor, CompressorParams>);
+static_assert (hasNonblockingSetParams<HeadphoneVirtualizer, VirtualizerParams>);
+static_assert (hasNonblockingSetParams<LoudnessMaximizer, MaximizerParams>);
+static_assert (hasNonblockingSetParams<Saturator, SaturatorParams>);
+static_assert (hasNonblockingSetParams<SpectralNoiseGate, NoiseGateParams>);
+static_assert (hasNonblockingSetParams<StereoSpatializer, SpatializerParams>);
+static_assert (hasNonblockingSetParams<TruePeakLimiter, LimiterParams>);
+static_assert (std::is_same_v<decltype (&DynamicEq::setBand), void (DynamicEq::*) (int, const DynEqBandParams&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParametricEq::setBand), void (ParametricEq::*) (int, const EqBandParams&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ParametricEq::setOutputGainDb), void (ParametricEq::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TransientShaper::setAttackDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TransientShaper::setSustainDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
 
 #if defined(__linux__) || defined(__APPLE__)
 /** Deliberately breaks the real-time contract: the vector escapes, so the

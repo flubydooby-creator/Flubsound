@@ -220,7 +220,7 @@ void ParametricEq::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void ParametricEq::reset() noexcept
+void ParametricEq::reset() noexcept FLUB_NONBLOCKING
 {
     for (size_t b = 0; b < bandDsp.size(); ++b)
         snapBand (bandDsp[b], targets[b]);
@@ -230,7 +230,7 @@ void ParametricEq::reset() noexcept
 }
 
 //==============================================================================
-void ParametricEq::setBand (int index, const EqBandParams& params) noexcept
+void ParametricEq::setBand (int index, const EqBandParams& params) noexcept FLUB_NONBLOCKING
 {
     if (index < 0 || index >= kMaxBands)
         return;
@@ -256,7 +256,7 @@ const EqBandParams& ParametricEq::getBand (int index) const noexcept
     return targets[static_cast<size_t> (std::clamp (index, 0, kMaxBands - 1))];
 }
 
-void ParametricEq::setOutputGainDb (float db) noexcept
+void ParametricEq::setOutputGainDb (float db) noexcept FLUB_NONBLOCKING
 {
     outputGainDb = clampOr (db, kMinOutputDb, kMaxOutputDb, 0.0f);
     outputGain.setTarget (dbToGain (outputGainDb));

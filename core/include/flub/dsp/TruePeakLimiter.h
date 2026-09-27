@@ -62,12 +62,12 @@ public:
     void setTruePeakDetection (bool enabled) noexcept { truePeak = enabled; }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override;
     const char* name() const noexcept override { return "True-Peak Limiter"; }
 
-    void setParams (const LimiterParams& p) noexcept;
+    void setParams (const LimiterParams& p) noexcept FLUB_NONBLOCKING;
     const LimiterParams& getParams() const noexcept { return params; }
 
     /** Deepest gain reduction in the last block (dB, <= 0). */

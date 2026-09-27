@@ -50,7 +50,7 @@
 **What we do to get Rust-like safety.**
 - A strict RT contract (`core/include/flub/dsp/Processor.h`), with `noexcept` on the audio path.
 - Allocation-counting unit tests: every module's `process()` is proven heap-free.
-- ASan + UBSan over the full suite in CI. Clang RealtimeSanitizer (`-fsanitize=realtime`, Clang 20, the `FLUB_RTSAN` build option) over the full suite in the CI job `rtsan`: `ProcessingChain::process`, `MixEngine::process` and every `Processor::process` override are `[[clang::nonblocking]]` in that build, so an allocation, free, lock or blocking system call anywhere below them aborts the run. `reset()`, the setters and host callback code are not annotated; the allocation-counting tests still cover those.
+- ASan + UBSan over the full suite in CI. Clang RealtimeSanitizer (`-fsanitize=realtime`, Clang 20, the `FLUB_RTSAN` build option) over the full suite in the CI job `rtsan`: `ProcessingChain::process`, `MixEngine::process`, every `Processor::process` and `Processor::reset` override and the module setters the audio thread calls are `[[clang::nonblocking]]` in that build, so an allocation, free, lock or blocking system call anywhere below them aborts the run. Host callback code is not annotated; the allocation-counting tests still cover it.
 - `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (with `-Wno-sign-conversion`), with warnings as errors in the Linux CI builds.
 
 **Revisit when** the engine is split into a separate service process (roadmap). The IPC/service layer is a good candidate for Rust because it is not bound to JUCE or driver SDKs.

@@ -210,7 +210,7 @@ void SpectralNoiseGate::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void SpectralNoiseGate::reset() noexcept
+void SpectralNoiseGate::reset() noexcept FLUB_NONBLOCKING
 {
     if (! prepared)
         return;
@@ -232,7 +232,7 @@ int SpectralNoiseGate::latencySamples() const noexcept
 }
 
 //==============================================================================
-void SpectralNoiseGate::setParams (const NoiseGateParams& p) noexcept
+void SpectralNoiseGate::setParams (const NoiseGateParams& p) noexcept FLUB_NONBLOCKING
 {
     NoiseGateParams q = p;
     q.thresholdDb = sanitise (q.thresholdDb, 0.0f, 20.0f, params.thresholdDb);

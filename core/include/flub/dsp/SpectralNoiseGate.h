@@ -41,12 +41,12 @@ public:
     void setFftSize (int size) noexcept { fftSize = size; }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override;
     const char* name() const noexcept override { return "Spectral Noise Gate"; }
 
-    void setParams (const NoiseGateParams& p) noexcept;
+    void setParams (const NoiseGateParams& p) noexcept FLUB_NONBLOCKING;
     const NoiseGateParams& getParams() const noexcept { return params; }
 
 private:

@@ -126,7 +126,7 @@ void DynamicEq::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void DynamicEq::reset() noexcept
+void DynamicEq::reset() noexcept FLUB_NONBLOCKING
 {
     controlCountdown = kControlInterval;
     lastNumChannels = spec.numChannels;
@@ -149,7 +149,7 @@ void DynamicEq::reset() noexcept
 }
 
 //==============================================================================
-void DynamicEq::setBand (int index, const DynEqBandParams& params) noexcept
+void DynamicEq::setBand (int index, const DynEqBandParams& params) noexcept FLUB_NONBLOCKING
 {
     if (index < 0 || index >= kMaxBands)
         return;

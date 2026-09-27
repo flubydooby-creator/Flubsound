@@ -17,6 +17,7 @@
 #include "EnvelopeFollower.h"
 #include "Svf.h"
 #include "flub/common/AudioBlock.h"
+#include "flub/common/Realtime.h"
 #include "flub/common/SmoothedValue.h"
 
 #include <algorithm>
@@ -29,11 +30,11 @@ class TransientShaper
 {
 public:
     void prepare (double sampleRate) noexcept;
-    void reset() noexcept;
+    void reset() noexcept FLUB_NONBLOCKING;
 
     /** -12 .. +12 dB each. RT-safe. */
-    void setAttackDb (float db) noexcept;
-    void setSustainDb (float db) noexcept;
+    void setAttackDb (float db) noexcept FLUB_NONBLOCKING;
+    void setSustainDb (float db) noexcept FLUB_NONBLOCKING;
 
     /** Returns the linear gain to apply to the current sample, given the
         linked detector input max_c |x_c[n]|. Call exactly once per sample. */

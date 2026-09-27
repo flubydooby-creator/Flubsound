@@ -229,7 +229,7 @@ void StereoSpatializer::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void StereoSpatializer::reset() noexcept
+void StereoSpatializer::reset() noexcept FLUB_NONBLOCKING
 {
     clearState();
 
@@ -269,7 +269,7 @@ void StereoSpatializer::clearState() noexcept
     corrLR = corrLL = corrRR = 0.0;
 }
 
-void StereoSpatializer::setParams (const SpatializerParams& p) noexcept
+void StereoSpatializer::setParams (const SpatializerParams& p) noexcept FLUB_NONBLOCKING
 {
     const SpatializerParams s = sanitise (p, params);
     if (s == params)

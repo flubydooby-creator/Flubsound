@@ -251,7 +251,7 @@ void Compressor::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void Compressor::reset() noexcept
+void Compressor::reset() noexcept FLUB_NONBLOCKING
 {
     const double fs = spec.sampleRate;
     const bool hpOn = params.sidechainHpHz > 0.0f;
@@ -309,7 +309,7 @@ int Compressor::latencySamples() const noexcept
 }
 
 //==============================================================================
-void Compressor::setParams (const CompressorParams& newParams) noexcept
+void Compressor::setParams (const CompressorParams& newParams) noexcept FLUB_NONBLOCKING
 {
     const CompressorParams p = sanitised (newParams, params);
     if (p == params)

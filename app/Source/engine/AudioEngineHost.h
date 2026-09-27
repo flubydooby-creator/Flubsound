@@ -74,7 +74,9 @@ struct EngineStatus
     juce::String deviceName, deviceTypeName;
     int numInputChannels = 0, numOutputChannels = 0;
     double cpuLoad = 0.0;          // 0..1, JUCE's callback load measurement
-    int xruns = -1;                // -1 if the device does not report them
+    int xruns = -1;                // the device's own xrun count; -1 if it does not report them
+    int glitches = 0;              // xruns (when reported) + callbacks that overran their buffer
+                                   // period (juce::AudioDeviceManager::getXRunCount); 0 if no device
     uint64_t callbacks = 0;
 };
 

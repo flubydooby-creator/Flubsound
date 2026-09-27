@@ -325,10 +325,19 @@ public:
           << juce::String (li.deviceOutputMs, 1) << " ms";
         if (li.captureBufferMs > 0.0)
             t << "  +  app capture " << juce::String (li.captureBufferMs, 1) << " ms";
-        t << "  =  " << juce::String (li.totalMs + li.captureBufferMs, 1) << " ms";
-        if (t != latencyText)
+        t << "  =  " << juce::String (li.totalMs + li.captureBufferMs, 1) << " ms\n";
+        t << describeCpuLine (status, controller.getOverloadState());
+
+        auto captures = describeCaptureStreams (controller.getCaptureStreams());
+        if (captures.isEmpty())
+            captures = "No per-app capture streams. Endpoint routing and device inputs do not use one.";
+        if (t != latencyText || captures != captureText)
         {
+            const bool relayout = captures != captureText; // the capture block wraps its text
             latencyText = t;
+            captureText = captures;
+            if (relayout)
+                resized();
             repaint();
         }
     }
@@ -345,17 +354,37 @@ public:
         g.setColour (Palette::text.withAlpha (0.85f));
         g.setFont (Theme::font (12.0f));
         g.drawFittedText (latencyText, latencyArea.reduced (12, 8), juce::Justification::topLeft, 4, 1.0f);
+
+        // Per-app capture streams: DriftCompensatedFifo statistics (R1.5).
+        drawSectionTitle (g, captureTitle, "Per-app capture streams");
+        r = captureArea.toFloat();
+        g.setColour (Palette::well);
+        g.fillRoundedRectangle (r, 6.0f);
+        g.setColour (Palette::border);
+        g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
+        captureLayout.draw (g, captureArea.reduced (12, 8).toFloat());
     }
 
     void resized() override
     {
-        // Flow layout: the live latency block follows the form (anchoring it
-        // to the bottom made it collide with the Display rows on short
-        // dialogs). SettingsDialog's minimum size keeps all of it visible.
+        // Flow layout: the live latency and capture blocks follow the form
+        // (anchoring them to the bottom made them collide with the Display
+        // rows on short dialogs). The page sets its own height for its width
+        // and scrolls in the dialog when that is taller (one line per
+        // capture stream).
         const auto r = getLocalBounds();
         const int formBottom = form.layout (r);
         latencyTitle = { r.getX(), formBottom + 14, r.getWidth(), 22 };
-        latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), 70 };
+        latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), 4 * kTextLine + 16 };
+        captureTitle = { r.getX(), latencyArea.getBottom() + 14, r.getWidth(), 22 };
+        juce::AttributedString text;
+        text.setWordWrap (juce::AttributedString::byWord);
+        text.setLineSpacing (3.0f);
+        text.append (captureText, Theme::font (12.0f), Palette::text.withAlpha (0.85f));
+        captureLayout.createLayout (text, static_cast<float> (juce::jmax (80, r.getWidth() - 24)));
+        captureArea = { r.getX(), captureTitle.getBottom() + 6, r.getWidth(), static_cast<int> (std::ceil (captureLayout.getHeight())) + 16 };
+        if (const int h = captureArea.getBottom() + 4; h != getHeight())
+            setSize (getWidth(), h);
     }
 
 private:
@@ -363,8 +392,11 @@ private:
     std::function<void (MeterPalette)> onPaletteChanged;
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, paletteBox;
     FormLayout form;
-    juce::String latencyText;
-    juce::Rectangle<int> latencyArea, latencyTitle;
+    static constexpr int kTextLine = 15; // line pitch of the 12 px text blocks
+
+    juce::String latencyText, captureText;
+    juce::TextLayout captureLayout; // one wrapped paragraph per capture stream
+    juce::Rectangle<int> latencyArea, latencyTitle, captureArea, captureTitle;
 };
 
 // =============================================================================
@@ -705,10 +737,13 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
     audioView.setViewedComponent (audioPage.get(), false);
-    audioView.setScrollBarsShown (true, false);
-    audioView.setScrollBarThickness (8);
-    addChildComponent (audioView);
-    addChildComponent (*processingPage);
+    processingView.setViewedComponent (processingPage.get(), false);
+    for (auto* view : { &audioView, &processingView })
+    {
+        view->setScrollBarsShown (true, false);
+        view->setScrollBarThickness (8);
+        addChildComponent (*view);
+    }
     addChildComponent (*hotkeysPage);
     addChildComponent (*generalPage);
 
@@ -721,6 +756,7 @@ SettingsDialog::~SettingsDialog()
 {
     stopTimer();
     audioView.setViewedComponent (nullptr, false);
+    processingView.setViewedComponent (nullptr, false);
 }
 
 juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
@@ -777,13 +813,57 @@ juce::String SettingsDialog::describeOutputDevice (EngineController& controller,
     return s;
 }
 
+juce::String SettingsDialog::describeCaptureStreams (const std::vector<EngineController::CaptureStream>& streams)
+{
+    const auto count = [] (uint64_t n, const char* singular, const char* plural)
+    { return juce::String (static_cast<juce::int64> (n)) + " " + (n == 1 ? singular : plural); };
+
+    juce::StringArray lines;
+    for (const auto& stream : streams)
+    {
+        const auto& st = stream.info.stats;
+        const int ppm = juce::roundToInt (st.correctionPpm);
+        juce::String line;
+        line << (stream.appName.isNotEmpty() ? stream.appName : "Process " + juce::String (stream.info.processId));
+        if (stream.stripName.isNotEmpty())
+            line << " (" << stream.stripName << ")";
+        line << ": ";
+        if (! stream.info.running)
+            line << "stopped  -  ";
+        else if (! st.streaming)
+            line << "priming  -  ";
+        line << "fill " << juce::String (st.fillMs, 1) << " / " << juce::String (st.targetMs, 1) << " ms, drift " << (ppm > 0 ? "+" : "") << ppm
+             << " ppm  -  " << count (st.underruns, "underrun", "underruns") << ", " << count (st.overflows, "overflow", "overflows");
+        if (st.droppedFrames > 0)
+            line << ", " << count (st.droppedFrames, "frame", "frames") << " dropped";
+        lines.add (line);
+    }
+    return lines.joinIntoString ("\n");
+}
+
+juce::String SettingsDialog::describeCpuLine (const EngineStatus& status, const OverloadWatchdog::State& overload)
+{
+    if (! status.deviceOpen)
+        return "CPU  -  no audio device open";
+    juce::String t;
+    t << "CPU " << juce::roundToInt (status.cpuLoad * 100.0) << " %";
+    if (status.xruns >= 0)
+        t << "  -  " << status.xruns << (status.xruns == 1 ? " xrun" : " xruns");
+    t << "  -  ";
+    if (overload.overloaded)
+        t << "OVERLOAD now (peak " << juce::roundToInt (overload.peakLoad * 100.0) << " %)";
+    else
+        t << static_cast<juce::int64> (overload.episodes) << (overload.episodes == 1 ? " overload" : " overloads") << " this session";
+    return t;
+}
+
 void SettingsDialog::showPage (Page page)
 {
     current = page;
     for (size_t i = 0; i < navButtons.size(); ++i)
         navButtons[i].setToggleState (static_cast<int> (i) == static_cast<int> (page), juce::dontSendNotification);
     audioView.setVisible (page == Page::Audio);
-    processingPage->setVisible (page == Page::Processing);
+    processingView.setVisible (page == Page::Processing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
     if (page == Page::Processing)
@@ -836,7 +916,10 @@ void SettingsDialog::resized()
     const int scrollbar = audioView.getScrollBarThickness() + 6;
     audioView.setBounds (pageArea.withTrimmedLeft (-10).withTrimmedRight (-scrollbar));
     audioPage->setSize (audioView.getWidth() - scrollbar, juce::jmax (1, audioPage->getHeight()));
-    processingPage->setBounds (pageArea);
+    // The Processing page scrolls the same way (its scrollbar in the right
+    // margin, so its content keeps the page width).
+    processingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
+    processingPage->setSize (pageArea.getWidth(), juce::jmax (1, processingPage->getHeight()));
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);
 }

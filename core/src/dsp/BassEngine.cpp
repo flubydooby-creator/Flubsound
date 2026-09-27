@@ -243,7 +243,7 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void BassEngine::reset() noexcept
+void BassEngine::reset() noexcept FLUB_NONBLOCKING
 {
     controlCountdown = kControlInterval;
     const double sr = spec.sampleRate;
@@ -293,7 +293,7 @@ void BassEngine::reset() noexcept
 }
 
 //==============================================================================
-void BassEngine::setParams (const BassEngineParams& newParams) noexcept
+void BassEngine::setParams (const BassEngineParams& newParams) noexcept FLUB_NONBLOCKING
 {
     const BassEngineParams p = sanitise (newParams, params);
     if (p == params)

@@ -233,7 +233,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void LoudnessMaximizer::reset() noexcept
+void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
 {
     const double fs = spec.sampleRate;
     oversampler.reset();
@@ -267,7 +267,7 @@ int LoudnessMaximizer::latencySamples() const noexcept
     return oversampler.latencySamples() + limiter.latencySamples();
 }
 
-void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept
+void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FLUB_NONBLOCKING
 {
     const MaximizerParams p = sanitised (newParams, params);
     if (p == params)

@@ -484,7 +484,7 @@ flowchart LR
     subgraph MSG["Message thread"]
         PB["ParameterBinder × 2<br/>30 Hz timers"]
         FR["MainComponent::frame()<br/>VBlankAttachment"]
-        EC["EngineController<br/>1 Hz timer · Listener"]
+        EC["EngineController<br/>2 Hz timer · Listener"]
         VW["Views"]
     end
     PB -->|"set(id, v) on user gesture"| PS
@@ -536,9 +536,9 @@ flowchart LR
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
 | `ParameterBinder` × 2 (Boost panel, module rack) | 30 Hz `juce::Timer` | `store.version()` poll → control refresh; effective-value rings |
 | `ModuleCard` ear | 10 Hz, only while held | safety net: ends the audition if the button is no longer down, the card is hidden or the app lost the foreground |
-| `SettingsDialog` | 2 Hz | live latency text (Processing); device-profile text (Audio) |
+| `SettingsDialog` | 2 Hz | live latency, CPU and capture-stream text (Processing); device-profile text (Audio) |
 | `AudioEngineHost` | 5 Hz | structural re-prepare poll (latency profile, layout) → `Change::Engine` |
-| `EngineController` | 1 Hz | strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
+| `EngineController` | 2 Hz | CPU-overload watchdog poll (`OverloadWatchdog`, §6.1) → `Change::Device` when an overload starts or ends; strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
 | `AppRouting` worker | every 2 s while routes exist, captures run or live updates are on; immediately on `refresh()` | session enumeration, endpoint moves |
 | `AppSettings` | writes debounced 2 s after a change | settings file |
 | `ScreenshotDriver` | 60 Hz | offline rendering paced in real time (§11) |
@@ -587,7 +587,7 @@ flowchart LR
 | `Engine` | engine re-configured (rate, latency profile, layout, device restart) | release any ear hold (the new chains start without auditions); rebuild header strip buttons and routing rows only if the strip names or channel counts changed; reset analysis; refresh header, status and banner |
 | `SelectedStrip` | `setSelectedStrip()` (which also recomputes the device advice for the new strip's mode) | release any ear hold; refresh the header; select the routing row; reset analysis; refresh the banner |
 | `MasterEnable`, `Parameters` | bypass, mode, boost, A/B through the controller | refresh the header and the banner |
-| `Device`, `Settings` | device opened, changed or failed; device-input or routing settings | header status, routing refresh, banner refresh |
+| `Device`, `Settings` | device opened, changed or failed; a CPU overload started or ended; device-input or routing settings | header status, routing refresh, banner refresh |
 | `Routing` | routing worker results, route edits | `RoutingPanel::refreshRouting()` |
 
 `TrayIcon` listens for `MasterEnable` only, and redraws its icon.
@@ -618,7 +618,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 | **Preset menu (…)** | current preset | preset files | **Save** (user preset *and* modified) · **Save as…** (name, category, description) · **Rename…** (user only) · **Delete** (user only; confirmation, moved to the trash) · **Import…** (`*.json`, loaded straight into the strip) · **Export…** (defaults to `<Documents>/<name>.flubpreset.json`) · **Show preset folder** · **Reset strip to defaults** (active bank only; keeps `mode`, `latency.profile` and `bypass`) |
 | **A / B + copy** | `getActiveBank()` | `setActiveBank()`, `copyActiveToOtherBank()` | Switching is one atomic bank flip; continuous parameters glide, so it is click-free. The copy tooltip reads "Copy A to B" or "Copy B to A" |
 | **Bypass** | `isEnabled()`, `bypass.matched` of the selected strip | `toggleEnabled()` → `bypass` on **every strip, both banks** | "warning" style, label *Bypass* / *Bypassed*. **Right-click** shows a menu with **Loudness-matched bypass**, an application-wide setting written to `bypass.matched` on every strip and both banks |
-| **Latency / CPU** | `getLatencyInfo()`, `getStatus()` | — | Top line `totalMs + captureBufferMs` with one decimal. Bottom line: CPU %, amber above 70 %, or `offline` (the caption then reads DEVICE). Hover shows the breakdown "device in + engine + device out (+ app capture)" plus the output-device profile |
+| **Latency / CPU** | `getLatencyInfo()`, `getStatus()`, `getOverloadState()`, `getCaptureStreams()` | — | Top line `totalMs + captureBufferMs` with one decimal. Bottom line: CPU %, amber above 70 %, or `offline` (the caption then reads DEVICE). When the device reports xruns (`juce::AudioIODevice::getXRunCount() >= 0`) the count follows the CPU %, `42% · 3 xr`, and the readout widens by 34 px. A sustained overload (below) turns the line bold in the *hot* status colour with the caption OVERLOAD (compact: a `!` prefix). Hover shows the breakdown "device in + engine + device out (+ app capture)", the CPU load and xruns, the overload warning with the recommended action or the session's overload count, one line per per-app capture stream (§6.11) and the output-device profile |
 | **Settings** | — | opens `SettingsDialog` | gear button |
 
 - **"Modified" semantics.** `PresetManager::isModified()` compares the active bank's values with a snapshot taken when the preset was loaded or saved, so reverting an edit clears the dot. The comparison runs only after `store.version()` changed.
@@ -626,6 +626,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
   - Which bank is active does not count, only the values heard. Switching to a B bank whose values differ therefore shows the dot.
   - The ear button never marks the preset as modified: it is an engine audition, not a store write (§6.9).
 - **Rates.** `refresh()` is event-driven (§5.5). `updateStatus()` runs every 15 frames. `animate()` runs every frame, but only while the thumb is moving.
+- **CPU-overload watchdog.** `engine/OverloadWatchdog.h` is the decision logic, plain C++ fed one sample per poll; `EngineController` polls it at 2 Hz with `getStatus()`: the callback's CPU load and a glitch counter (device xruns when reported plus callbacks that overran their buffer period, `juce::AudioDeviceManager::getXRunCount()`). An overload starts after 4 consecutive polls (2 s) at ≥ 90 % load, or ≥ 3 new glitches within 10 polls (5 s); it ends after 10 consecutive calm polls (5 s below 75 % with no new glitch), or when the device stops. The two thresholds and the two durations are the hysteresis that keeps a load hovering near 90 % from flapping. The policy is **notify only** (`01-architecture.md` §7): the readout and its tooltip warn and recommend the Low Latency profile or a larger buffer, and Settings › Processing counts the episodes of the session; the engine is not changed. Automatic degradation and a tray notification are **Roadmap**. `tests/app/test_app_overload.cpp` covers the logic, the notification and the text.
 
 **Global parameters driven from the header**
 
@@ -955,7 +956,7 @@ Row heights adapt between 14 and 22 px.
 
 `ui/SettingsDialog.*` is a non-modal, resizable `DialogWindow` titled "Flubsound Pro - Settings":
 
-- 780 × 600 by default; the minimum of 720 × 580 is the smallest size at which every page fits; the maximum is 1600 × 1200;
+- 780 × 600 by default; the minimum of 720 × 580 is the smallest size at which every page fits (the Audio and Processing pages scroll when their live content is taller); the maximum is 1600 × 1200;
 - native title bar, Esc closes, only one instance open at a time;
 - a 170 px left navigation of "tab" buttons;
 - a 2 Hz refresh timer.
@@ -963,7 +964,7 @@ Row heights adapt between 14 and 22 px.
 | Page | Contents |
 |---|---|
 | **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · every guidance message, one bulleted paragraph each; the box grows with its text and the page scrolls when it is longer than the dialog. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
-| **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare. Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, and "device in + engine + device out (+ app capture) = total" |
+| **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare. Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, "device in + engine + device out (+ app capture) = total", and a CPU line: load, device xruns when reported, and "OVERLOAD now (peak x %)" or "n overloads this session". **Per-app capture streams** block: one wrapped line per running capture, from its `DriftCompensatedFifo::Stats` (`EngineController::getCaptureStreams()`), e.g. `Discord (Chat): fill 21.3 / 20.0 ms, drift +42 ppm  -  1 underrun, 0 overflows` (application name from `AppRouting`, else `Process <pid>`; `priming` or `stopped` when not streaming; dropped frames when any), or a note that there are none |
 | **Hotkeys** | *Enable system-wide hotkeys* switch. One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. The status line reads one of: "All shortcuts are registered", "Shortcuts are switched off", the chords that failed ("probably used by another application"), an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
 | **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
 

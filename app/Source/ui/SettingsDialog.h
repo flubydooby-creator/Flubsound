@@ -9,8 +9,10 @@
 //               guidance (the page scrolls when that is long).
 //   Processing  latency profile (applied to every strip and both A/B banks;
 //               the engine re-prepares with a brief dropout), live latency
-//               breakdown, device-input routing, per-app routing method and
-//               the meter palette (standard / colour-blind safe).
+//               breakdown with CPU / xruns / overloads, the per-app capture
+//               streams' FIFO statistics, device-input routing, per-app
+//               routing method and the meter palette (standard / colour-blind
+//               safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; chords
 //               that could not be registered are listed.
@@ -29,6 +31,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <vector>
 
 namespace flub::app::ui
 {
@@ -52,7 +55,8 @@ public:
     };
 
     /** Smallest window size at which every page fits (the Processing page's
-        help text wraps more on narrow windows). */
+        help text wraps more on narrow windows). The Audio and Processing
+        pages scroll when their live content is taller. */
     static constexpr int kMinWidth = 720, kMinHeight = 580;
 
     SettingsDialog (EngineController& controller, HotkeyHooks hooks, std::function<void (MeterPalette)> onMeterPaletteChanged,
@@ -72,6 +76,16 @@ public:
         each; maxMessages < 0 includes every guidance message. */
     static juce::String describeOutputDevice (EngineController& controller, int maxMessages = -1);
 
+    /** One line per per-app capture stream (EngineController::getCaptureStreams):
+        application and strip, the DriftCompensatedFifo fill against its target,
+        the drift correction and the underrun / overflow / dropped-frame counts.
+        Empty if there are none. */
+    static juce::String describeCaptureStreams (const std::vector<EngineController::CaptureStream>& streams);
+
+    /** CPU load, device xruns (when reported) and the overload watchdog's
+        state and session count, on one line. */
+    static juce::String describeCpuLine (const EngineStatus& status, const OverloadWatchdog::State& overload);
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -88,6 +102,7 @@ private:
     std::unique_ptr<AudioPage> audioPage;
     juce::Viewport audioView; // the Audio page scrolls when the guidance is long
     std::unique_ptr<ProcessingPage> processingPage;
+    juce::Viewport processingView; // ... and the Processing page when there are many capture streams
     std::unique_ptr<HotkeysPage> hotkeysPage;
     std::unique_ptr<GeneralPage> generalPage;
     Page current = Page::Audio;

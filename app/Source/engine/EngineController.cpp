@@ -15,10 +15,10 @@ using namespace flub::param;
 
 namespace
 {
-constexpr int kTimerHz = 1;
+constexpr int kTimerHz = 2;                      // also the overload watchdog's poll rate
 constexpr int kPersistEveryTicks = 5 * kTimerHz; // strip state autosave: every 5 s
 constexpr int kRescanEveryTicks = 5 * kTimerHz;  // missing preferred output: rescan every 5 s
-                                                 // (ALSA probes every PCM device; too slow for 1 Hz)
+                                                 // (ALSA probes every PCM device; too slow for every tick)
 
 constexpr const char* kStateFormat = "flubsound-strip-state";
 
@@ -709,9 +709,40 @@ void EngineController::trackPreferredOutput (bool rescan)
 }
 
 // =============================================================================
+void EngineController::updateOverloadWatchdog (const EngineStatus& status)
+{
+    OverloadWatchdog::Sample sample;
+    sample.running = status.deviceOpen && status.running;
+    sample.load = status.cpuLoad;
+    sample.glitchCount = status.deviceOpen ? static_cast<int64_t> (status.glitches) : -1;
+
+    // Notify only (docs/01 §7): the header's CPU readout turns into an
+    // overload warning; the engine itself is left alone.
+    if (overloadWatchdog.update (sample) != OverloadWatchdog::Event::None)
+        notify (Change::Device);
+}
+
+std::vector<EngineController::CaptureStream> EngineController::getCaptureStreams() const
+{
+    std::vector<CaptureStream> streams;
+    for (const auto& info : host->getCaptures())
+    {
+        CaptureStream stream;
+        stream.info = info;
+        stream.stripName = getStripName (info.strip);
+        for (const auto& app : routing->getApps())
+            if (app.captureId == info.id && app.processId == info.processId)
+                stream.appName = app.displayName.isNotEmpty() ? app.displayName : app.executable;
+        streams.push_back (stream);
+    }
+    return streams;
+}
+
 void EngineController::timerCallback()
 {
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
+    updateOverloadWatchdog (host->getStatus());
+
     if (++timerTicks % kPersistEveryTicks == 0)
         persistStripStates (false);
 

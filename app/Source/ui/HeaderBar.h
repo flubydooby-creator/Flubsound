@@ -13,7 +13,9 @@
 // * A/B: active bank of the selected strip + copy to the other bank.
 // * Bypass: master enable (every strip); it is loudness matched while the
 //   "Loudness-matched bypass" parameter is on (right-click to change).
-// * Latency (device + engine) and CPU readout, settings dialog.
+// * Latency (device + engine) and CPU readout (with the device's xrun count
+//   when it reports one, and the CPU-overload watchdog's warning), settings
+//   dialog.
 // Message thread only; refresh() pulls everything from the controller.
 #pragma once
 
@@ -47,6 +49,20 @@ public:
     void animate (double dtSeconds);
 
     std::function<void()> onSettingsRequested;
+
+    /** The bottom line of the latency / CPU readout. */
+    struct CpuReadout
+    {
+        juce::String caption;  // "CPU", "OVERLOAD" or "DEVICE" (hidden when compact)
+        juce::String value;    // "42%", "42% . 3 xr" (middle dot; device xruns), "offline"
+        bool warn = false;     // amber: load above 70 %
+        bool overload = false; // hot: sustained overload (OverloadWatchdog)
+    };
+    static CpuReadout formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload);
+
+    /** The CPU part of the readout's tooltip: load, device xruns, and the
+        overload warning with the recommended action or the session count. */
+    static juce::String describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload);
 
     void paint (juce::Graphics& g) override;
     void paintOverChildren (juce::Graphics& g) override;
@@ -84,8 +100,9 @@ private:
 
     std::vector<juce::String> presetIds; // combo item id - 1 -> preset id
     juce::Rectangle<int> logoArea, modeArea, stripArea, presetArea, abArea, readoutArea;
-    juce::String latencyText, cpuText;
-    bool cpuHot = false, compact = false, presetModified = false, deviceOpen = false;
+    juce::String latencyText;
+    CpuReadout cpu;
+    bool compact = false, presetModified = false, wideReadout = false;
     std::vector<bool> stripActive;
     float thumbPos = 0.0f, thumbTarget = 0.0f; // 0 = Music, 1 = Gaming
 };

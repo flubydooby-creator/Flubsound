@@ -89,7 +89,7 @@ void TransientShaper::prepare (double sampleRate) noexcept
     reset();
 }
 
-void TransientShaper::reset() noexcept
+void TransientShaper::reset() noexcept FLUB_NONBLOCKING
 {
     hold.reset();
     attackFast.reset (kDetectorFloor);
@@ -101,7 +101,7 @@ void TransientShaper::reset() noexcept
     gainDbState = 0.0f;
 }
 
-void TransientShaper::setAttackDb (float db) noexcept
+void TransientShaper::setAttackDb (float db) noexcept FLUB_NONBLOCKING
 {
     if (std::isnan (db))
         return; // keep the last valid setting
@@ -109,7 +109,7 @@ void TransientShaper::setAttackDb (float db) noexcept
     attackAmount.setTarget (attackDb);
 }
 
-void TransientShaper::setSustainDb (float db) noexcept
+void TransientShaper::setSustainDb (float db) noexcept FLUB_NONBLOCKING
 {
     if (std::isnan (db))
         return;

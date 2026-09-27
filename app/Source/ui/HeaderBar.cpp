@@ -14,6 +14,8 @@ namespace
 constexpr int kModeRadioGroup = 0x10de;
 constexpr int kStripRadioGroup = 0x5171;
 constexpr int kBankRadioGroup = 0xab;
+
+const juce::String kDot { juce::CharPointer_UTF8 (" \xc2\xb7 ") };
 } // namespace
 
 // =============================================================================
@@ -271,19 +273,66 @@ void HeaderBar::refresh()
     repaint();
 }
 
+HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload)
+{
+    CpuReadout r;
+    if (! status.deviceOpen)
+    {
+        r.caption = "DEVICE";
+        r.value = "offline";
+        return r;
+    }
+    r.overload = overload.overloaded;
+    r.warn = status.cpuLoad > 0.7;
+    r.caption = r.overload ? "OVERLOAD" : "CPU";
+    r.value = juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%";
+    if (status.xruns >= 0) // only devices that report xruns themselves
+        r.value << kDot << status.xruns << " xr";
+    return r;
+}
+
+juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload)
+{
+    if (! status.deviceOpen)
+        return "CPU: no audio device open";
+
+    juce::String t;
+    t << "CPU: " << juce::roundToInt (status.cpuLoad * 100.0) << " % of the audio callback's time budget";
+    if (status.xruns >= 0)
+        t << "; " << status.xruns << (status.xruns == 1 ? " xrun" : " xruns") << " reported by the device since it started";
+    if (overload.overloaded)
+    {
+        t << "\nOverload: the audio callback is running out of time (sustained load of 90 % or more, or repeated dropouts; peak "
+          << juce::roundToInt (overload.peakLoad * 100.0) << " %, " << static_cast<juce::int64> (overload.episodeGlitches)
+          << " dropouts). Try the Low Latency profile (Settings > Processing), which is also the cheapest, or a larger buffer "
+             "(Settings > Audio).";
+    }
+    else if (overload.episodes > 0)
+    {
+        t << "\n" << static_cast<juce::int64> (overload.episodes) << (overload.episodes == 1 ? " overload" : " overloads")
+          << " this session (the last peaked at " << juce::roundToInt (overload.peakLoad * 100.0) << " %)";
+    }
+    return t;
+}
+
 void HeaderBar::updateStatus()
 {
     const auto li = controller.getLatencyInfo();
     const auto status = controller.getStatus();
 
     const auto newLatency = juce::String (li.totalMs + li.captureBufferMs, 1) + " ms";
-    const auto newCpu = status.deviceOpen ? juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%" : juce::String ("offline");
-    const bool hot = status.cpuLoad > 0.7;
-    bool changed = newLatency != latencyText || newCpu != cpuText || hot != cpuHot || deviceOpen != status.deviceOpen;
-    deviceOpen = status.deviceOpen;
+    const auto newCpu = formatCpuReadout (status, controller.getOverloadState());
+    bool changed = newLatency != latencyText || newCpu.caption != cpu.caption || newCpu.value != cpu.value || newCpu.warn != cpu.warn
+                   || newCpu.overload != cpu.overload;
     latencyText = newLatency;
-    cpuText = newCpu;
-    cpuHot = hot;
+    cpu = newCpu;
+
+    // The readout widens while the device reports xruns (the count follows the CPU %).
+    if (const bool wide = status.deviceOpen && status.xruns >= 0; wide != wideReadout)
+    {
+        wideReadout = wide;
+        resized();
+    }
 
     for (size_t i = 0; i < stripActive.size(); ++i)
     {
@@ -312,6 +361,10 @@ void HeaderBar::mouseMove (const juce::MouseEvent& e)
         << juce::String (li.deviceOutputMs, 1) << " ms";
     if (li.captureBufferMs > 0.0)
         tip << " + app capture " << juce::String (li.captureBufferMs, 1) << " ms";
+    tip << "\n" << describeCpu (controller.getStatus(), controller.getOverloadState());
+    const auto streams = controller.getCaptureStreams();
+    if (! streams.empty())
+        tip << "\nApp capture: " << SettingsDialog::describeCaptureStreams (streams).replace ("\n", "\nApp capture: ");
     tip << "\n" << SettingsDialog::describeOutputDevice (controller, 1);
     setTooltip (tip);
 }
@@ -639,17 +692,23 @@ void HeaderBar::paint (juce::Graphics& g)
         auto r = readoutArea.toFloat();
         auto row1 = r.removeFromTop (r.getHeight() * 0.5f).withTrimmedTop (2.0f);
         auto row2 = r.withTrimmedBottom (2.0f);
+        // A sustained overload (OverloadWatchdog) turns the CPU line into the
+        // hot status colour, with the caption (or a "!" when compact) saying so.
+        const auto hot = Theme::statusColours (*this).hot;
         if (! compact)
         {
             Theme::drawCaption (g, "LATENCY", row1, Palette::faint);
-            Theme::drawCaption (g, deviceOpen ? "CPU" : "DEVICE", row2, Palette::faint);
+            Theme::drawCaption (g, cpu.caption, row2, cpu.overload ? hot : Palette::faint);
         }
         g.setFont (Theme::numeric (12.5f));
         g.setColour (Palette::text);
         g.drawText (latencyText, row1, juce::Justification::centredRight, false);
-        g.setFont (Theme::numeric (12.5f, false));
-        g.setColour (cpuHot ? Palette::amber : Palette::muted);
-        g.drawText (compact && deviceOpen ? "CPU " + cpuText : cpuText, row2, juce::Justification::centredRight, false);
+        g.setFont (Theme::numeric (12.5f, cpu.overload));
+        g.setColour (cpu.overload ? hot : (cpu.warn ? Palette::amber : Palette::muted));
+        auto value = cpu.value;
+        if (compact && cpu.caption != "DEVICE")
+            value = (cpu.overload ? "! " : "CPU ") + value;
+        g.drawText (value, row2, juce::Justification::centredRight, false);
     }
 }
 
@@ -710,7 +769,7 @@ void HeaderBar::resized()
     // Right side, from the right edge.
     settingsButton.setBounds (centred (r.removeFromRight (34), 34));
     r.removeFromRight (compact ? 8 : 10);
-    readoutArea = centred (r.removeFromRight (compact ? 74 : 104), 34);
+    readoutArea = centred (r.removeFromRight ((compact ? 74 : 104) + (wideReadout ? 34 : 0)), 34);
     r.removeFromRight (compact ? 10 : 12);
     bypassButton->setBounds (centreY (r.removeFromRight (compact ? 76 : 84)));
     r.removeFromRight (compact ? 8 : 10);

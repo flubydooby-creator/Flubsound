@@ -432,7 +432,7 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void HeadphoneVirtualizer::reset() noexcept
+void HeadphoneVirtualizer::reset() noexcept FLUB_NONBLOCKING
 {
     swapLayout();
     reflHpState.reset();
@@ -450,7 +450,7 @@ void HeadphoneVirtualizer::reset() noexcept
 }
 
 //==============================================================================
-void HeadphoneVirtualizer::setParams (const VirtualizerParams& p) noexcept
+void HeadphoneVirtualizer::setParams (const VirtualizerParams& p) noexcept FLUB_NONBLOCKING
 {
     const VirtualizerParams s = sanitise (p);
     if (s == params)

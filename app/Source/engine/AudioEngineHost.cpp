@@ -767,6 +767,7 @@ EngineStatus AudioEngineHost::getStatus() const
         st.numInputChannels = device->getActiveInputChannels().countNumberOfSetBits();
         st.numOutputChannels = device->getActiveOutputChannels().countNumberOfSetBits();
         st.xruns = device->getXRunCount();
+        st.glitches = deviceManager.getXRunCount();
         st.cpuLoad = deviceManager.getCpuUsage();
     }
     st.running = callbackRunning.load (std::memory_order_acquire) && engineReady.load (std::memory_order_acquire);

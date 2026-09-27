@@ -2,13 +2,16 @@
 //
 // Threading contract. Enforced by review, by the allocation-counting tests
 // in tests/ (flubtest::AllocationGuard around process() / reset() /
-// setters) and, for process(), by RealtimeSanitizer: the base and every
-// override are declared FLUB_NONBLOCKING (flub/common/Realtime.h), which the
-// FLUB_RTSAN build (Clang 20, CI job 'rtsan') turns into
+// setters) and by RealtimeSanitizer: process() and reset() of the base and
+// of every override, and the parameter setters ProcessingChain calls on the
+// audio thread, are declared FLUB_NONBLOCKING (flub/common/Realtime.h),
+// which the FLUB_RTSAN build (Clang 20, CI job 'rtsan') turns into
 // [[clang::nonblocking]], so an allocation, free, lock or blocking system
-// call anywhere below process() aborts the test run. Declare new overrides
-// the same way (and list them in tests/test_rtsan.cpp):
+// call anywhere below them aborts the test run. Declare new overrides and
+// audio-thread setters the same way (and list them in tests/test_rtsan.cpp):
 //   void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+//   void reset() noexcept FLUB_NONBLOCKING override;
+//   void setParams (const MyParams& p) noexcept FLUB_NONBLOCKING;
 //
 //   prepare()  : non-realtime thread only. May allocate, may be slow.
 //   reset()    : audio thread allowed. No allocation, no locks, no I/O.
@@ -40,7 +43,7 @@ public:
     virtual ~Processor() = default;
 
     virtual void prepare (const ProcessSpec& spec) = 0;
-    virtual void reset() noexcept = 0;
+    virtual void reset() noexcept FLUB_NONBLOCKING = 0;
 
     /** In-place processing. block.numSamples <= spec.maxBlockSize and
         block.numChannels <= spec.numChannels are guaranteed by the caller. */

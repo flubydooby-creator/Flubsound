@@ -154,7 +154,7 @@ Beta                         [closed]      [public]      [1.0]
 | Level | What | When |
 |---|---|---|
 | Unit (property-based) | Frequency responses vs analytic curves, latency exactness, mono-sum invariance, true-peak ceiling, zero allocations, block-size invariance, finite outputs | Every commit (CI) |
-| Sanitizers | ASan + UBSan full suite (every commit, CI); RTSan full suite with `ProcessingChain::process`, `MixEngine::process` and every `Processor::process` override `[[clang::nonblocking]]` (CI job `rtsan`, Clang 20; `reset()`, setters and the app's callback code are not annotated yet) | Every commit (CI) |
+| Sanitizers | ASan + UBSan full suite (every commit, CI); RTSan full suite with `ProcessingChain::process`, `MixEngine::process`, every `Processor::process` and `Processor::reset` override and the audio-thread module setters `[[clang::nonblocking]]` (CI job `rtsan`, Clang 20; the app's callback code is not annotated yet) | Every commit (CI) |
 | Integration | Chain/mixer tests and preset validation (each factory preset rendered and checked) every commit; the CI also smoke-tests the CLI (`params`, `presets`); a CLI render end-to-end test is planned | Every commit (CI) |
 | Golden renders (planned) | Reference programme through every preset; spectral/loudness diffs with tolerances | Nightly |
 | Soak | 8–24 h device runs with a glitch detector (sine through a loopback cable, discontinuity detection) | Weekly + release candidates |

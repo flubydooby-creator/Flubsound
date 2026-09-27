@@ -51,14 +51,14 @@ public:
     static constexpr int kControlInterval = 16;
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Parametric EQ"; }
 
     /** RT-safe. Values are clamped to the documented ranges. */
-    void setBand (int index, const EqBandParams& params) noexcept;
+    void setBand (int index, const EqBandParams& params) noexcept FLUB_NONBLOCKING;
     const EqBandParams& getBand (int index) const noexcept;
-    void setOutputGainDb (float db) noexcept;
+    void setOutputGainDb (float db) noexcept FLUB_NONBLOCKING;
 
     /** Exact magnitude (dB) of a set of bands at freqHz, for GUI curves.
         Pure function: safe on any thread. Ignores smoothing state. */

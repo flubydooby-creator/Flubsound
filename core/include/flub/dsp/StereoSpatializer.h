@@ -58,11 +58,11 @@ class StereoSpatializer final : public Processor
 {
 public:
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Stereo & Space"; }
 
-    void setParams (const SpatializerParams& p) noexcept;
+    void setParams (const SpatializerParams& p) noexcept FLUB_NONBLOCKING;
     const SpatializerParams& getParams() const noexcept { return params; }
 
     /** Output L/R correlation (-1..1) and the width actually applied. */

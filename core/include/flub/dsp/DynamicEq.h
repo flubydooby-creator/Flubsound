@@ -69,11 +69,11 @@ public:
     static constexpr int kControlInterval = 16;
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     const char* name() const noexcept override { return "Dynamic EQ"; }
 
-    void setBand (int index, const DynEqBandParams& params) noexcept;
+    void setBand (int index, const DynEqBandParams& params) noexcept FLUB_NONBLOCKING;
     const DynEqBandParams& getBand (int index) const noexcept;
 
     /** Currently applied total gain of a band in dB (static + dynamic), for the

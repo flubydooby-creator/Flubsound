@@ -242,7 +242,7 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     reset();
 }
 
-void Saturator::reset() noexcept
+void Saturator::reset() noexcept FLUB_NONBLOCKING
 {
     oversampler.reset();
     dryDelay.reset();
@@ -266,7 +266,7 @@ int Saturator::latencySamples() const noexcept
     return oversampler.latencySamples();
 }
 
-void Saturator::setParams (const SaturatorParams& p) noexcept
+void Saturator::setParams (const SaturatorParams& p) noexcept FLUB_NONBLOCKING
 {
     const SaturatorParams s = sanitise (p);
     if (s == params)

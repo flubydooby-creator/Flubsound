@@ -59,12 +59,12 @@ public:
     void setTruePeakDetection (bool enabled) noexcept { truePeak = enabled; }
 
     void prepare (const ProcessSpec& spec) override;
-    void reset() noexcept override;
+    void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
     int latencySamples() const noexcept override;
     const char* name() const noexcept override { return "Loudness Maximizer"; }
 
-    void setParams (const MaximizerParams& p) noexcept;
+    void setParams (const MaximizerParams& p) noexcept FLUB_NONBLOCKING;
     const MaximizerParams& getParams() const noexcept { return params; }
 
     /** Soft-clip transfer curve (threshold t, knee 0..1), exposed for tests/GUI. */
