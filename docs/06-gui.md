@@ -894,7 +894,7 @@ Selecting a band also selects it on the EQ module card, and vice versa. Every ed
 | **GAIN REDUCTION** | Bars on a 12 dB full scale, amber, released at 18 dB/s on screen: **Compressor** (plus an accent bar from the right for upward gain), **Limiter** (maximizer), **Glue** (multiband), **Bass protect**, **Master** (master safety limiter). **Distortion** shows what the Safety Governor weighs, the measured THD+N of the saturator and the clipper (floored by the clipper's clip-energy ratio, 03 §14.5), on a −60…−10 dB scale with a marker at −30 dB, the governor's budget. The bar turns red above the budget and falls at 36 dB/s. **Harmonics** (same scale, accent, no budget) is what the bass harmonics and the air exciter add on purpose (`MeterBus::harmonicsDb`) |
 | **STEREO** | **Correlation** −1…+1 from the centre: red < 0, amber < 0.3, green otherwise; smoothed τ = 150 ms. **Width** 0–200 % (a marker at 100 %) from the spatializer's `effectiveWidth`; readout clamped to 0–300 % |
 
-Row heights adapt between 14 and 22 px.
+Row heights adapt between 14 and 22 px. When the full layout does not fit (a short window with a banner, e.g. 1100 × 700 with the device banner) the panel goes compact: smaller captions and gaps, the LUFS unit line dropped, rows down to 12 px.
 
 **Tested** (`tests/app/test_app_meters.cpp`): through the engine, the correlation meter reads +1 for a mono sine, −1 for an anti-phase one and ≈ 0 for independent noise, and SHORT reads −20.0 LUFS for a −20 dBFS 1 kHz sine on both channels. `tests/app/test_app_ui_status.cpp`: the IN>OUT text and the limiter share (> 0.95 after 40 s limiting, < 0.05 after 40 s not, 0.5 ± 0.06 alternating by the second).
 

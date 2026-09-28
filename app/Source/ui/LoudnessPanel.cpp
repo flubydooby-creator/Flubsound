@@ -177,14 +177,19 @@ void LoudnessPanel::paint (juce::Graphics& g)
     const auto status = Theme::statusColours (*this); // follows the meter palette
 
     auto r = getLocalBounds().toFloat().reduced (14.0f, 12.0f);
-    const float fixed = 18.0f + 60.0f + 20.0f + 20.0f + 10.0f + 18.0f + 10.0f + 18.0f; // captions / readouts / gaps
     const int grRows = 7, stereoRows = 2;
-    const float rowH = juce::jlimit (14.0f, 22.0f, (r.getHeight() - fixed) / static_cast<float> (grRows + stereoRows));
+    // Compact when the full layout does not fit (a short window with a
+    // banner): smaller captions, readouts and gaps, rows down to 12 px.
+    constexpr float kFullFixed = 18.0f + 60.0f + 20.0f + 20.0f + 10.0f + 18.0f + 10.0f + 18.0f; // captions / readouts / gaps
+    const bool compact = r.getHeight() < kFullFixed + 14.0f * static_cast<float> (grRows + stereoRows);
+    const float captionH = compact ? 16.0f : 18.0f, bigH = compact ? 46.0f : 60.0f, gapH = compact ? 4.0f : 10.0f;
+    const float fixed = 3.0f * captionH + bigH + 20.0f + 20.0f + 2.0f * gapH;
+    const float rowH = juce::jlimit (compact ? 12.0f : 14.0f, 22.0f, (r.getHeight() - fixed) / static_cast<float> (grRows + stereoRows));
 
     // ---- Loudness ----
-    Theme::drawCaption (g, "LOUDNESS", r.removeFromTop (18.0f));
+    Theme::drawCaption (g, "LOUDNESS", r.removeFromTop (captionH));
     {
-        auto big = r.removeFromTop (60.0f);
+        auto big = r.removeFromTop (bigH);
         const float colW = big.getWidth() / 3.0f;
         auto column = [&] (const juce::String& name, float lufs, bool emphasise) -> juce::Rectangle<float>
         {
@@ -194,9 +199,12 @@ void LoudnessPanel::paint (juce::Graphics& g)
             g.setColour (lufs <= -70.0f ? Palette::faint : (emphasise ? accent : Palette::text));
             g.setFont (Theme::numeric (emphasise ? 25.0f : 21.0f));
             g.drawText (Theme::formatLufs (lufs), c.removeFromTop (30.0f), juce::Justification::centredLeft, false);
-            g.setColour (Palette::faint);
-            g.setFont (Theme::font (10.0f));
-            g.drawText ("LUFS", c, juce::Justification::topLeft, false);
+            if (c.getHeight() >= 10.0f) // no unit line when compact
+            {
+                g.setColour (Palette::faint);
+                g.setFont (Theme::font (10.0f));
+                g.drawText ("LUFS", c, juce::Justification::topLeft, false);
+            }
             return area;
         };
         column ("MOMENT.", shown.momentary, false);
@@ -236,8 +244,8 @@ void LoudnessPanel::paint (juce::Graphics& g)
               shown.preamp < -0.05f ? plain : Palette::faint);
     }
     // ---- Dynamics ----
-    r.removeFromTop (10.0f);
-    Theme::drawCaption (g, "GAIN REDUCTION", r.removeFromTop (18.0f));
+    r.removeFromTop (gapH);
+    Theme::drawCaption (g, "GAIN REDUCTION", r.removeFromTop (captionH));
     drawGainReductionRow (g, r.removeFromTop (rowH), "Compressor", shown.comp, 12.0f, shown.compUp);
     drawGainReductionRow (g, r.removeFromTop (rowH), "Limiter", shown.limiter, 12.0f);
     drawGainReductionRow (g, r.removeFromTop (rowH), "Glue", shown.glue, 12.0f);
@@ -250,8 +258,8 @@ void LoudnessPanel::paint (juce::Graphics& g)
     drawLevelRow (g, r.removeFromTop (rowH), "Harmonics", shown.harmonics, -160.0f, accent.withAlpha (0.8f));
 
     // ---- Stereo ----
-    r.removeFromTop (10.0f);
-    Theme::drawCaption (g, "STEREO", r.removeFromTop (18.0f));
+    r.removeFromTop (gapH);
+    Theme::drawCaption (g, "STEREO", r.removeFromTop (captionH));
     {
         auto row = r.removeFromTop (rowH);
         const float nameWidth = juce::jmin (84.0f, row.getWidth() * 0.36f);

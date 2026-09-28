@@ -76,13 +76,13 @@ struct SoakProgramme::Impl
     int64_t rampStart = 0, rampFrames = 1;
 
     Impl (double sampleRate, uint32_t seed)
-        : fs (sampleRate), rng (seed ^ 0x5eed50a4u), sceneFrames (static_cast<int64_t> (std::lround (kSceneSeconds * sampleRate)))
+        : fs (sampleRate), rng (seed ^ 0x5eed50a4u), sceneFrames (static_cast<int64_t> (std::llround (kSceneSeconds * sampleRate)))
     {
         voices.reserve (128);
     }
 
     double uniform (double lo, double hi) noexcept { return lo + (hi - lo) * 0.5 * (1.0 + rng.nextBipolar()); }
-    int64_t ms (double v) const noexcept { return static_cast<int64_t> (std::lround (v * 0.001 * fs)); }
+    int64_t ms (double v) const noexcept { return static_cast<int64_t> (std::llround (v * 0.001 * fs)); }
     double msF (double v) const noexcept { return v * 0.001 * fs; }
 
     void pan (Voice& v, double position /* 0 = left .. 1 = right */) noexcept
@@ -174,14 +174,15 @@ struct SoakProgramme::Impl
         if (uniform (0.0, 1.0) < 0.15)
             for (int k = 0; k < 5; ++k)
             {
+                // (A reference from add() is used before the next add(), which may reallocate.)
                 auto& crack = add (Voice::Noise, 3000.0, 0.18, 2.0, 0.0, 80.0);
                 crack.start += ms (100.0) * k;
                 crack.decayFrames = msF (25.0);
+                pan (crack, 0.35);
                 auto& thump = add (Voice::Tone, 200.0, 0.18, 2.0, 0.0, 120.0);
                 thump.start += ms (100.0) * k;
                 thump.freqEnd = 60.0;
                 thump.decayFrames = msF (40.0);
-                pan (crack, 0.35);
                 pan (thump, 0.35);
             }
     }
@@ -348,7 +349,7 @@ public:
     /** Frames until the next action: interval x U(0.5, 1.5). */
     int64_t nextGap (double sampleRate) noexcept
     {
-        return std::max<int64_t> (1, static_cast<int64_t> (std::lround (set.intervalMs * 0.001 * sampleRate * uniform (0.5, 1.5))));
+        return std::max<int64_t> (1, static_cast<int64_t> (std::llround (set.intervalMs * 0.001 * sampleRate * uniform (0.5, 1.5))));
     }
 
     /** Applies one action; returns (kind, description). */
@@ -536,9 +537,14 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
 
     SoakProgramme programme (fs, s.seed);
     Automation automation (*store, s);
+    // Zipper noise recurs at the block rate: the detector must not read it
+    // as the waveform's own structure.
+    DiscontinuitySettings detectorSettings = s.detector;
+    if (detectorSettings.blockSize <= 0)
+        detectorSettings.blockSize = blockSize;
     DiscontinuityDetector in, out;
-    in.prepare (fs, 2, s.detector);
-    out.prepare (fs, 2, s.detector);
+    in.prepare (fs, 2, detectorSettings);
+    out.prepare (fs, 2, detectorSettings);
 
     std::vector<std::pair<int64_t, std::string>> actions; // (frame, description)
     std::map<std::string, int64_t> kinds;
@@ -600,6 +606,8 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
         report.output[static_cast<size_t> (t)] = out.count (static_cast<DiscontinuityType> (t));
         report.input[static_cast<size_t> (t)] = in.count (static_cast<DiscontinuityType> (t));
     }
+    report.outputKinks = out.kinks();
+    report.outputRecurring = out.recurring();
     for (const auto& e : out.events())
     {
         SoakDetection d;
@@ -638,7 +646,12 @@ json::Value soakToJson (const SoakReport& r)
     for (const auto& [kind, count] : r.actionCounts)
         actions.set (kind, static_cast<double> (count));
     v.set ("actions", std::move (actions));
-    v.set ("output", countsToJson (r.output));
+    auto output = countsToJson (r.output);
+    json::Value aside;
+    aside.set ("kinks", static_cast<double> (r.outputKinks));
+    aside.set ("recurring", static_cast<double> (r.outputRecurring));
+    output.set ("setAside", std::move (aside));
+    v.set ("output", std::move (output));
     v.set ("input", countsToJson (r.input));
     json::Value list { json::Value::Array {} };
     for (const auto& d : r.detections)
@@ -685,7 +698,8 @@ std::string formatSoak (const SoakReport& r)
             s += " " + kind + " " + std::to_string (count);
         s += "\n";
     }
-    s += "Output  : " + countsToText (r.output) + "\n";
+    s += "Output  : " + countsToText (r.output) + " (set aside as the waveform's own: " + std::to_string (r.outputKinks) + " kinks, "
+         + std::to_string (r.outputRecurring) + " recurring)\n";
     s += "Input   : " + countsToText (r.input) + " (programme self-check)\n";
     for (const auto& d : r.detections)
     {
@@ -704,7 +718,7 @@ std::string formatSoak (const SoakReport& r)
         }
         if (! d.lastAction.empty())
         {
-            std::snprintf (buf, sizeof (buf), "  after: %s (%.0f ms before)", d.lastAction.c_str(), d.lastActionAgeMs);
+            std::snprintf (buf, sizeof (buf), "  after: %s (%.1f ms before)", d.lastAction.c_str(), d.lastActionAgeMs);
             s += buf;
         }
         s += "\n";

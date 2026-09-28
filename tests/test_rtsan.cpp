@@ -19,6 +19,7 @@
 
 #include "TestFramework.h"
 
+#include "flub/analysis/Discontinuity.h"
 #include "flub/common/Realtime.h"
 #include "flub/dsp/BackgroundTracker.h"
 #include "flub/dsp/BassEngine.h"
@@ -102,6 +103,8 @@ static_assert (hasNonblockingReset<AsyncModelProcessor>);
 // tracker per control tick.
 static_assert (hasNonblockingReset<BackgroundTracker>);
 static_assert (std::is_same_v<decltype (&BackgroundTracker::update), float (BackgroundTracker::*) (float, float) noexcept FLUB_NONBLOCKING>);
+// The glitch detector (docs/11 E53) can watch a real-time stream.
+static_assert (std::is_same_v<decltype (&DiscontinuityDetector::process), void (DiscontinuityDetector::*) (const float* const*, int) noexcept FLUB_NONBLOCKING>);
 
 // Parameter setters called once per block by ProcessingChain::applyParameters
 // (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the

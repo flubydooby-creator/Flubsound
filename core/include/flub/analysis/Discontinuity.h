@@ -2,25 +2,39 @@
 //
 // DiscontinuityDetector watches a stream of planar audio, block by block,
 // for the four ways a real-time path or a parameter change breaks a signal:
-//   Click      a value discontinuity: an impulse, a step, a skipped or
+//   Click      a single break in value: an impulse, a step, a skipped or
 //              repeated sample. Found on the 4th-order difference of the
 //              signal (a high-pass that is -60 dB at 1 kHz and +24 dB at
 //              Nyquist at 48 kHz, so smooth programme leaves little and a
-//              break leaves a spike): a residual sample is a candidate when
-//              it is clickRatioDb over the residual's RMS on BOTH sides
-//              (windowMs each, a few samples of guard) and above
-//              clickFloorDb. Both sides, so the onset or end of a sound (the
-//              residual stays up on one side) is not one. A side's RMS is
-//              that of the second-quietest of its four blocks, so a second
-//              break close by does not hide the first. A candidate is a
-//              click when cubic fits of the 8 samples on either side of it
-//              show a jump in value (or one sample off both) that explains
-//              at least half of the spike; a jump in slope only (a hard
-//              clipper's corner) is distortion, counted apart as a kink.
+//              break leaves a spike). A residual sample counts when it is
+//                * clickRatioDb over the residual's RMS on BOTH sides
+//                  (windowMs each, a few samples of guard): the onset or
+//                  end of a sound, where the residual stays up on one side,
+//                  is not a click. A side's RMS is that of the second-
+//                  quietest of its four blocks, so a second break close by
+//                  does not hide the first;
+//                * above clickFloorDb (default -50 dBFS: the residual of
+//                  a -60 dBFS step, E53's glitch level; a -66 dBFS impulse);
+//                * a break in value: cubic fits of the 8 samples on either
+//                  side show a jump in value (or one sample off both) that
+//                  explains at least half of the spike and more than a
+//                  change of slope would. A break in slope only (a kink:
+//                  the corner where a limiter or clipper catches a peak) is
+//                  the processing's distortion, counted apart (kinks());
+//                * not recurring: no spike of at least 0.3 x its size
+//                  between 0.5 and repeatMs away on either side. A spike
+//                  that recurs is the waveform's own structure - the
+//                  corners of a clipped bass wave, the pulses of a buzzy
+//                  voice through saturation, once per pitch period - not a
+//                  break (counted apart: recurring()). Recurrences at 1 or
+//                  2 x blockSize (when given) do not count: zipper noise, a
+//                  step at every block boundary while a parameter moves,
+//                  recurs at exactly that lag.
 //              One event per windowMs.
 //   Dropout    a run of exact zeros of at least minDropoutMs that starts
-//              abruptly (the residual at its edge passes the Click rule) on
-//              a channel whose RMS over the 10 ms before was at least
+//              abruptly (the residual at its edge is clickRatioDb over the
+//              residual before it and above clickFloorDb) on a channel
+//              whose RMS over the 10 ms before was at least
 //              dropoutActivityDb: an underrun or a muted block. A fade into
 //              digital silence is not abrupt. Clicks at the edges of a
 //              dropout belong to it and are not counted again.
@@ -32,7 +46,7 @@
 //              the step; one event per 2 x dcStepWindowMs). A step also
 //              reads as a Click where it is abrupt.
 // Sensitivity is relative, so it depends on the programme: on tones and
-// bass-heavy music a 1-sample skip or a -60 dBFS step reads tens of dB over
+// tonal music a 1-sample skip or a -60 dBFS impulse reads 30-100 dB over
 // the threshold; on broadband noise the residual is high and only large
 // breaks show (the E53 soak uses tonal programme for that reason).
 //
@@ -66,8 +80,10 @@ const char* discontinuityName (DiscontinuityType type) noexcept;
 struct DiscontinuitySettings
 {
     float clickRatioDb = 24.0f;       // Click: residual spike over its RMS on both sides ...
-    float clickFloorDb = -70.0f;      // ... and at least this (dBFS)
+    float clickFloorDb = -50.0f;      // ... and at least this (dBFS; a -60 dBFS step or a -66 dBFS impulse)
     double windowMs = 2.0;            // ... RMS window on each side
+    double repeatMs = 25.0;           // ... and not recurring within this (a pitch period)
+    int blockSize = 0;                // ... except at 1 and 2 blocks (0 = unknown)
     double minDropoutMs = 0.5;        // Dropout: exact zeros for at least this long ...
     float dropoutActivityDb = -60.0f; // ... after at least this RMS (10 ms before)
     float dcStepDb = -30.0f;          // DcStep: the 2 Hz low-passed signal moves this much ...
@@ -100,13 +116,15 @@ public:
     void process (const float* const* channels, int numFrames) noexcept FLUB_NONBLOCKING;
 
     /** End of the stream: closes open dropout / non-finite runs. The last
-        few ms (windowMs or minDropoutMs, + 6 samples) are not judged for
-        clicks: there is no look-ahead left. */
+        few ms (the look-ahead: repeatMs or windowMs, + 6 samples) are not
+        judged for clicks. */
     void finish() noexcept;
 
     int64_t count (DiscontinuityType type) const noexcept { return counts[static_cast<size_t> (type)]; }
     int64_t total() const noexcept;
-    /** Slope-only breaks (a hard clipper's corners): distortion, not counted as clicks. */
+    /** Click candidates set aside because they recur (waveform structure)
+        or break the slope only (kinks: a limiter or clipper catching a peak). */
+    int64_t recurring() const noexcept { return recurringCount; }
     int64_t kinks() const noexcept { return kinkCount; }
     const std::vector<Discontinuity>& events() const noexcept { return list; }
     int64_t framesSeen() const noexcept { return frames; }
@@ -142,6 +160,7 @@ private:
 
     void push (Channel& ch, int c, double sample, int64_t frame) noexcept;
     void judgeClick (Channel& ch, int c, int64_t centre) noexcept;
+    bool recurs (const Channel& ch, int64_t centre, double peak) const noexcept;
     bool isValueBreak (const Channel& ch, int64_t centre, double peak) const noexcept;
     bool isDropout (const Channel& ch, int64_t length) const noexcept;
     void closeZeroRun (Channel& ch, int c, int64_t end) noexcept;
@@ -150,23 +169,24 @@ private:
 
     DiscontinuitySettings settings;
     double fs = 48000.0;
-    int window = 96, block = 24, guard = 6, lookAhead = 102, ringSize = 206;
+    int window = 96, block = 24, guard = 6, lookAhead = 1206, ringSize = 2412;
+    int minRepeat = 24, maxRepeat = 1200, blockSize = 0;
     int minDropout = 24;
-    double clickRatio = 15.85, clickFloor = 3.16e-4, activityThreshold = 1.0e-6, dcStep = 0.01;
+    double clickRatio = 15.85, clickFloor = 3.16e-3, activityThreshold = 1.0e-6, dcStep = 0.03;
     double activityCoeff = 0.0;
     std::array<double, 3> lpB {}, lpA {};
     int dcDelay = 375;
     // Cubic least-squares fits over kFit samples on one side of a break
-    // (positions -kFit..-1 and 1..kFit): the weights of the value at 0, and
-    // the hat matrix for the fit's residual.
+    // (positions -kFit..-1 and 1..kFit): the weights of the value and the
+    // slope at 0, and the hat matrix for the fit's residual.
     static constexpr int kFit = 8;
     struct SideFit
     {
-        std::array<double, kFit> value {};
+        std::array<double, kFit> value {}, slope {};
         std::array<std::array<double, kFit>, kFit> hat {};
     };
     SideFit fitLeft, fitRight;
-    int64_t frames = 0, kinkCount = 0;
+    int64_t frames = 0, recurringCount = 0, kinkCount = 0;
     std::array<int64_t, kNumDiscontinuityTypes> counts {};
     std::vector<Channel> chans;
     std::vector<Discontinuity> list;

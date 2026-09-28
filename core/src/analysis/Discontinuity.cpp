@@ -47,10 +47,14 @@ void DiscontinuityDetector::prepare (double sampleRate, int numChannels, const D
     window = block * kBlocks;
     minDropout = samplesOf (s.minDropoutMs, 1);
     guard = kGuard;
-    // A centre is judged once its after-window, and a dropout that starts
-    // there, can be seen: minDropout samples at least.
-    lookAhead = guard + std::max (window, minDropout);
-    ringSize = guard + window + lookAhead + 2;
+    minRepeat = samplesOf (0.5, kOrder + 2);
+    maxRepeat = std::max (minRepeat, samplesOf (s.repeatMs, 0));
+    blockSize = std::max (0, s.blockSize);
+    // A centre is judged once its after-window, a dropout that starts there
+    // and a recurrence after it can be seen; the ring also holds the window
+    // and the recurrence range before it.
+    lookAhead = guard + std::max ({ window, minDropout, maxRepeat });
+    ringSize = std::max (guard + window, maxRepeat) + lookAhead + 2;
     clickRatio = dbToLinear (s.clickRatioDb);
     clickFloor = dbToLinear (s.clickFloorDb);
     activityThreshold = dbToLinear (2.0 * s.dropoutActivityDb); // mean square
@@ -73,13 +77,13 @@ void DiscontinuityDetector::prepare (double sampleRate, int numChannels, const D
             const double t = side == 0 ? static_cast<double> (i - kFit) : static_cast<double> (i + 1);
             a[static_cast<size_t> (i)] = { 1.0, t, t * t, t * t * t };
         }
-        // Normal matrix, inverted by Gauss-Jordan (4 x 4, well conditioned for these t).
+        // Normal matrix | identity, reduced by Gauss-Jordan (4 x 4, well conditioned here).
         std::array<std::array<double, 8>, 4> m {};
         for (size_t r = 0; r < 4; ++r)
         {
             for (size_t c = 0; c < 4; ++c)
-                for (size_t i = 0; i < static_cast<size_t> (kFit); ++i)
-                    m[r][c] += a[i][r] * a[i][c];
+                for (const auto& row : a)
+                    m[r][c] += row[r] * row[c];
             m[r][4 + r] = 1.0;
         }
         for (size_t p = 0; p < 4; ++p)
@@ -95,13 +99,15 @@ void DiscontinuityDetector::prepare (double sampleRate, int numChannels, const D
                         m[r][c] -= f * m[p][c];
                 }
         }
-        auto& fit = side == 0 ? fitLeft : fitRight;
         std::array<std::array<double, kFit>, 4> proj {}; // P
         for (size_t r = 0; r < 4; ++r)
             for (size_t i = 0; i < static_cast<size_t> (kFit); ++i)
                 for (size_t c = 0; c < 4; ++c)
                     proj[r][i] += m[r][4 + c] * a[i][c];
+        auto& fit = side == 0 ? fitLeft : fitRight;
         fit.value = proj[0];
+        fit.slope = proj[1];
+        fit.hat = {};
         for (size_t i = 0; i < static_cast<size_t> (kFit); ++i)
             for (size_t j = 0; j < static_cast<size_t> (kFit); ++j)
                 for (size_t c = 0; c < 4; ++c)
@@ -136,6 +142,7 @@ void DiscontinuityDetector::reset() noexcept
         ch.dcHistory = std::move (dc);
     }
     frames = 0;
+    recurringCount = 0;
     kinkCount = 0;
     counts = {};
     list.clear();
@@ -301,55 +308,113 @@ void DiscontinuityDetector::judgeClick (Channel& ch, int c, int64_t centre) noex
     double peak = v;
     for (int k = 1; k <= kOrder; ++k)
         peak = std::max (peak, std::abs (at (centre + k)));
-    ch.holdUntil = centre + window + guard;
-    if (isValueBreak (ch, centre, peak))
-        report ({ DiscontinuityType::Click, c, centre, 0, linearToDb (peak), linearToDb (peak / std::max (ref, 1.0e-12)) });
-    else
+    if (! isValueBreak (ch, centre, peak))
+    {
         ++kinkCount;
+        ch.holdUntil = centre + kOrder + 1; // the rest of this spike's pattern
+        return;
+    }
+    if (recurs (ch, centre, peak))
+    {
+        ++recurringCount;
+        ch.holdUntil = centre + kOrder + 1;
+        return;
+    }
+    report ({ DiscontinuityType::Click, c, centre, 0, linearToDb (peak), linearToDb (peak / std::max (ref, 1.0e-12)) });
+    ch.holdUntil = centre + window + guard;
+}
+
+bool DiscontinuityDetector::recurs (const Channel& ch, int64_t centre, double peak) const noexcept
+{
+    // A spike of at least 0.3 x this one between minRepeat and maxRepeat
+    // samples away, either side, except within a spike's pattern (+- kGuard)
+    // of 1 and 2 blocks.
+    const double level = 0.3 * peak;
+    for (int lag = minRepeat; lag <= maxRepeat; ++lag)
+    {
+        if (blockSize > 0 && (std::abs (lag - blockSize) <= kGuard || std::abs (lag - 2 * blockSize) <= kGuard))
+            continue;
+        const int64_t back = centre - lag, ahead = centre + lag;
+        if ((back >= 0 && std::abs (ch.r[static_cast<size_t> (back % ringSize)]) >= level)
+            || std::abs (ch.r[static_cast<size_t> (ahead % ringSize)]) >= level)
+            return true;
+    }
+    return false;
 }
 
 bool DiscontinuityDetector::isValueBreak (const Channel& ch, int64_t centre, double peak) const noexcept
 {
     // The break sits within a few samples of the first residual sample over
     // the threshold. For each position b there, fit a cubic to the kFit
-    // samples on each side (b itself excluded) and keep the b whose fits are
-    // best: the signal is smooth on both sides of a break (the residual was
-    // 24 dB down there), so the fits are good only at the break.
+    // samples on each side (b itself excluded): the signal is smooth on both
+    // sides of a break (its residual was clickRatioDb down there), so the
+    // fits are good wherever they do not straddle it. What a break in value
+    // leaves in the 4th difference: a step J peaks at 3 |J|, a sample D off
+    // both sides (an impulse) at 6 |D|. A kink (a change of slope K) fits
+    // well at its corner and one sample either side, where the fits disagree
+    // by K in value, so the value evidence is the smallest over the
+    // positions that fit well; a click needs it at 1/4 of the spike or more.
+    // Needs xs from centre - kFit - 3 to centre + kFit + 4: in the ring.
     const auto x = [&ch, this] (int64_t f) noexcept { return ch.xs[static_cast<size_t> (f % ringSize)]; };
-    double bestError = -1.0, bestJump = 0.0, bestOff = 0.0;
-    for (int64_t b = centre - 2; b <= centre + kOrder - 1; ++b)
+    constexpr int kCandidates = kOrder + 2;
+    std::array<double, kCandidates> error {}, valueShare {};
+    double bestError = -1.0;
+    for (int k = 0; k < kCandidates; ++k)
     {
+        const int64_t b = centre - 2 + k;
         std::array<double, kFit> left {}, right {};
         for (int i = 0; i < kFit; ++i)
         {
             left[static_cast<size_t> (i)] = x (b - kFit + i);
             right[static_cast<size_t> (i)] = x (b + 1 + i);
         }
-        double vL = 0.0, vR = 0.0, error = 0.0;
+        double vL = 0.0, vR = 0.0, sL = 0.0, sR = 0.0, e = 0.0;
         for (size_t i = 0; i < static_cast<size_t> (kFit); ++i)
         {
             vL += fitLeft.value[i] * left[i];
             vR += fitRight.value[i] * right[i];
+            sL += fitLeft.slope[i] * left[i];
+            sR += fitRight.slope[i] * right[i];
             double eL = left[i], eR = right[i];
             for (size_t j = 0; j < static_cast<size_t> (kFit); ++j)
             {
                 eL -= fitLeft.hat[i][j] * left[j];
                 eR -= fitRight.hat[i][j] * right[j];
             }
-            error += eL * eL + eR * eR;
+            e += eL * eL + eR * eR;
         }
-        if (bestError < 0.0 || error < bestError)
-        {
-            const double xb = x (b);
-            bestError = error;
-            bestJump = vR - vL;                                    // a step
-            bestOff = std::min (std::abs (xb - vL), std::abs (xb - vR)); // one sample off both sides
-        }
+        const double xb = x (b);
+        const auto i = static_cast<size_t> (k);
+        error[i] = e;
+        // A corner between two samples leaves the nearer one off both fits
+        // by up to |K| / 4: only what is off beyond that is an impulse.
+        const double off = std::min (std::abs (xb - vL), std::abs (xb - vR));
+        valueShare[i] = std::max (3.0 * std::abs (vR - vL), 6.0 * std::max (0.0, off - 0.25 * std::abs (sR - sL)));
+        bestError = bestError < 0.0 ? e : std::min (bestError, e);
     }
-    // What a jump in value leaves in the 4th difference: a step J peaks at
-    // 3 |J|, an impulse D at 6 |D| (a slope change K, at 2 |K|, is a kink).
-    const double valueShare = std::max (3.0 * std::abs (bestJump), 6.0 * bestOff);
-    return valueShare >= 0.5 * peak;
+    // "Fits well": within 4 x the best fit, or residuals under 1 % of the spike.
+    const double good = std::max (4.0 * bestError, 2.0 * kFit * (0.01 * peak) * (0.01 * peak));
+    size_t chosen = 0;
+    double value = -1.0;
+    for (size_t k = 0; k < static_cast<size_t> (kCandidates); ++k)
+        if (error[k] <= good && (value < 0.0 || valueShare[k] < value))
+        {
+            value = valueShare[k];
+            chosen = k;
+        }
+    // The fits are trusted only where they predict the programme: each
+    // side's fit, one sample further out, must predict the sample next to
+    // the break within 10 % of the spike (a cubic over 8 samples follows
+    // bass and a kick, but not a 1 kHz tone). Untrusted: a click.
+    const int64_t b = centre - 2 + static_cast<int64_t> (chosen);
+    double predictedL = 0.0, predictedR = 0.0;
+    for (int i = 0; i < kFit; ++i)
+    {
+        predictedL += fitLeft.value[static_cast<size_t> (i)] * x (b - 1 - kFit + i);
+        predictedR += fitRight.value[static_cast<size_t> (i)] * x (b + 2 + i);
+    }
+    const double predictionError = std::max (std::abs (predictedL - x (b - 1)), std::abs (predictedR - x (b + 1)));
+    return predictionError > 0.1 * peak || value >= 0.25 * peak;
 }
 
 bool DiscontinuityDetector::isDropout (const Channel& ch, int64_t length) const noexcept
