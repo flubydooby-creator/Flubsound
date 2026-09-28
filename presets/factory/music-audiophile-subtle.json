@@ -4,7 +4,7 @@
   "uuid": "22e4cfd3-2671-46ce-99de-57ccd87a91d1",
   "name": "Audiophile Subtle",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Almost transparent: for high-quality recordings and hi-fi headphones where you want the original, just a little more comfortable. A trace of sub-bass and air, light headphone crossfeed and a limiter-only safety ceiling (no clipper, no drive). Suggested latency profile: Quality.",
   "tags": ["audiophile", "transparent", "hi-fi", "crossfeed", "subtle"],
   "suggestedLatencyProfile": "Quality",

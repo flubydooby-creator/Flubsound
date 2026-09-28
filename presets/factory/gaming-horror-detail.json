@@ -4,7 +4,7 @@
   "uuid": "6551380f-706b-4f4e-b81b-5a4de58563ff",
   "name": "Horror Detail",
   "category": "Gaming",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "For horror and stealth games, where the quietest sound matters most. Upward compression and the Detail and Footsteps macros lift creaks, breathing and distant steps out of the silence (nothing below -70 dBFS is lifted, so digital silence and hiss stay down), a low drone lift adds dread, and jump scares are only lightly held back.",
   "tags": ["horror", "detail", "ambience", "footsteps", "immersive"],
   "params": {

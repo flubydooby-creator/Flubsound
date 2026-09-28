@@ -50,6 +50,6 @@ Every module test contains an `AllocationGuard` check. Please keep it that way.
 Factory presets live in `presets/factory/<category>-<slug>.json` and are validated by `tests/test_factory_presets.cpp`. They must:
 - set only non-default parameters (string keys from `flub::param::layout()`),
 - keep the maximizer on, `max.drive` at 0 and the ceiling at ≤ −1 dBTP (≤ −2 dBTP for Bluetooth presets),
-- include a clear description and tags (author `Flubsound`).
+- include a clear description and tags (author `Flubsound (Flubes & Claude)` for factory presets; the project is written by Flubes and Claude, see [AUTHORS.md](AUTHORS.md)).
 
 The full list of checks is in `presets/README.md`.

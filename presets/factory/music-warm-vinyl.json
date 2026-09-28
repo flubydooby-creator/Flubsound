@@ -4,7 +4,7 @@
   "uuid": "d944c4de-ff8f-4a48-b0e2-9c01db7dedf2",
   "name": "Warm Vinyl",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "An analogue record-player colour for soul, classic rock, jazz-funk and singer-songwriter music. Oversampled tape saturation, a soft top end, a little low-mid body and bass summed to mono below 150 Hz as on a vinyl cut. Transients are slightly rounded; raise Warmth for more tape drive.",
   "tags": ["warm", "vinyl", "analog", "tape", "soul", "rock"],
   "suggestedLatencyProfile": "Quality",

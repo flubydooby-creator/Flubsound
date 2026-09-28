@@ -4,7 +4,7 @@
   "uuid": "0d5c5cb4-fadf-48a3-8248-3880e74fc1fe",
   "name": "Podcast & Voice",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Clear, even speech for podcasts, audiobooks, lectures and talk radio. Rumble and boxiness are removed, a light spectral gate lowers background hiss, a compressor and Auto Level at -16 LUFS keep every speaker at the same level, and a de-esser tames sibilance. The spectral gate runs only in the Quality latency profile, the suggested one; in Balanced and Low Latency everything else still applies.",
   "tags": ["podcast", "voice", "speech", "audiobook", "dialogue", "noise-reduction"],
   "suggestedLatencyProfile": "Quality",

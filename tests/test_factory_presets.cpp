@@ -325,8 +325,8 @@ TEST_CASE ("Factory presets: metadata, keys, labels and output protection are va
             fail (f, "name and description must not be empty");
         if (p.category != "Music" && p.category != "Gaming" && p.category != "Device")
             fail (f, "category must be Music, Gaming or Device, not '" + p.category + "'");
-        if (p.author != "Flubsound")
-            fail (f, "author must be \"Flubsound\"");
+        if (p.author != "Flubsound (Flubes & Claude)")
+            fail (f, "author must be \"Flubsound (Flubes & Claude)\"");
         if (p.tags.empty() || root["tags"].asArray().size() != p.tags.size())
             fail (f, "tags must be a non-empty array of strings");
         // Stable identity (docs/11 E52): rules, hotkeys and packs refer to it.

@@ -167,7 +167,7 @@ The test enforces all of the following:
   * `"format": "flubsound-preset"`, `"version": 1`;
   * a lower-case `uuid`, unique among the factory presets, and no `fromJson` warning;
   * name, category, description and tags are present;
-  * the author is `Flubsound`;
+  * the author is `Flubsound (Flubes & Claude)`;
   * the category is Music, Gaming or Device;
   * Gaming presets are in Gaming mode and Music presets in Music mode (the Device presets use Music mode too).
 * **Parameters:**

@@ -30,6 +30,7 @@ set(FLUB_FACTORY_PRESET_DIR "${PROJECT_SOURCE_DIR}/presets/factory" CACHE PATH "
 juce_add_gui_app(FlubsoundPro
     PRODUCT_NAME "Flubsound Pro"
     COMPANY_NAME "Flubsound"
+    COMPANY_COPYRIGHT "Copyright (c) 2026 Flubes and Claude (co-authors)"
     BUNDLE_ID com.flubsound.pro
     VERSION ${PROJECT_VERSION}
     NEEDS_WEB_BROWSER FALSE

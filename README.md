@@ -134,6 +134,10 @@ Details: [docs/04-project-structure.md](docs/04-project-structure.md).
 
 ---
 
+## Authors
+
+Flubsound Pro is written by **Flubes** ([@flubydooby-creator](https://github.com/flubydooby-creator)), co-author and project owner, and **Claude** (Anthropic), co-author. See [AUTHORS.md](AUTHORS.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). It covers the real-time contract, style and the adversarial review checklist.

@@ -4,7 +4,7 @@
   "uuid": "c3d1f608-750c-4a10-ab4a-5321c1ce864f",
   "name": "Night Mode Gaming",
   "category": "Gaming",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Play late without waking the house. Auto Level brings every game towards -20 LUFS, firm downward compression catches explosions and gunfire while upward compression keeps footsteps, dialogue and quiet details audible, and the deep rumble that travels through walls is reduced. Boost stays low.",
   "tags": ["night", "low-volume", "auto-level", "compression", "dialogue"],
   "params": {

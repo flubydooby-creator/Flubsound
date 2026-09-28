@@ -4,7 +4,7 @@
   "uuid": "e5d06a3a-0837-475c-99b6-29312c160d80",
   "name": "Earbuds",
   "category": "Device",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Tuned for in-ear and open earbuds. Adds the sub-bass weight small drivers lose to fit and seal (with a little harmonic support), dynamically tames the 6-8 kHz in-ear resonance on sibilants and cymbals, and uses crossfeed to relax hard-panned mixes that feel unnatural so close to the ear.",
   "tags": ["earbuds", "in-ear", "iem", "headphones", "crossfeed", "de-harsh"],
   "params": {

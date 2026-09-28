@@ -48,6 +48,7 @@ for format in VST3 AU Standalone; do
 done
 
 cp "$root/tools/scripts/TESTING.txt" "$stage/TESTING.txt"
+cp "$root/AUTHORS.md" "$stage/"
 cp "$root/LICENSE" "$stage/" 2>/dev/null || true
 git -C "$root" rev-parse --short HEAD > "$stage/VERSION.txt" 2>/dev/null || echo "unknown" > "$stage/VERSION.txt"
 

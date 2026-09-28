@@ -18,6 +18,7 @@ juce_add_plugin(FlubsoundFX
     PRODUCT_NAME "Flubsound FX"
     PLUGIN_NAME "Flubsound FX"
     COMPANY_NAME "Flubsound"
+    COMPANY_COPYRIGHT "Copyright (c) 2026 Flubes and Claude (co-authors)"
     BUNDLE_ID com.flubsound.fx
     VERSION ${PROJECT_VERSION}
     DESCRIPTION "Real-time enhancement for music and games: EQ, bass, clarity, space, loudness"

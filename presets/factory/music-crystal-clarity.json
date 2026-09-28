@@ -4,7 +4,7 @@
   "uuid": "e410936b-6992-4677-9337-f22ed0d380a3",
   "name": "Crystal Clarity",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Maximum detail without harshness for acoustic, vocal and well-recorded music. Low-mid mud is trimmed, presence rises only when the 3 kHz region is quiet, and air is added by a harmonic exciter plus a 12 kHz shelf. A dynamic de-harsh band and a 7 kHz de-esser keep sibilance and cymbals smooth.",
   "tags": ["clarity", "detail", "vocals", "acoustic", "air"],
   "params": {

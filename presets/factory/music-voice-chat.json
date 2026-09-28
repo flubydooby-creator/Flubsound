@@ -4,7 +4,7 @@
   "uuid": "f5cdf603-63e7-40ef-9718-9ca544ce2146",
   "name": "Voice Chat",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "For the Chat strip: Discord, Teams, Zoom and in-game voice. Rumble below 110 Hz and boxiness are removed, presence is lifted for intelligibility, and a speech leveller (Auto Level at -19 LUFS plus a syllable-speed compressor and upward compression) brings quiet and loud teammates to about the same level, -18 to -20 LUFS short-term. No loudness maximizing: the maximizer is only its true-peak limiter (no drive, no clipper, no glue), and Boost stays below the point where it adds drive. Flubsound loads it on a fresh Chat strip.",
   "tags": ["voice", "chat", "speech", "discord", "leveller", "default"],
   "params": {

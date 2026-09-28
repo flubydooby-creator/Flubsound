@@ -4,7 +4,7 @@
   "uuid": "67ba4f55-c151-4574-81c4-75430fcd35e2",
   "name": "Classical & Jazz Dynamic",
   "category": "Music",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Keeps the full dynamic range of orchestral, chamber and jazz recordings. There is no maximizer drive, no clipper and no compression: only a slow, transparent limiter at -1 dBTP, a little warmth for cello and double bass, a touch of air, and crossfeed that makes hard-panned vintage jazz stereo comfortable on headphones.",
   "tags": ["classical", "jazz", "dynamic", "acoustic", "crossfeed", "no-compression"],
   "suggestedLatencyProfile": "Quality",

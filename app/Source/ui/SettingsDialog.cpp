@@ -1000,6 +1000,7 @@ public:
         auto* app = juce::JUCEApplicationBase::getInstance();
         g.drawText ("Flubsound Pro " + (app != nullptr ? app->getApplicationVersion() : juce::String()) + "  -  Music & Gaming Edition", versionLine,
                     juce::Justification::centredLeft, true);
+        g.drawText ("By Flubes and Claude (co-authors)", creditsLine, juce::Justification::centredLeft, true);
     }
 
     void resized() override
@@ -1041,6 +1042,7 @@ public:
         presetsLine.removeFromRight (8);
         r.removeFromTop (22);
         versionLine = r.removeFromTop (22);
+        creditsLine = r.removeFromTop (18);
     }
 
 private:
@@ -1073,7 +1075,7 @@ private:
     IconButton revealPresets { "Show the user preset folder", Icons::external(), IconButton::Style::Framed };
     static constexpr int kFollowSystemId = 1; // other UI scale items use their percentage as id
     juce::ComboBox scaleBox, themeBox;
-    juce::Rectangle<int> startupTitle, appearanceTitle, filesTitle, settingsLine, presetsLine, versionLine, scaleLine, themeLine;
+    juce::Rectangle<int> startupTitle, appearanceTitle, filesTitle, settingsLine, presetsLine, versionLine, creditsLine, scaleLine, themeLine;
 };
 
 // =============================================================================

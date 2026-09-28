@@ -4,7 +4,7 @@
   "uuid": "5be46f63-9ab4-49d1-b2a9-ef5b919e102a",
   "name": "Laptop Speakers",
   "category": "Device",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Makes built-in laptop and tablet speakers sound fuller and wider. Bass the drivers cannot reproduce is replaced by psychoacoustic harmonics above a 150 Hz speaker limit (small-speaker mode), which also frees headroom, the image is widened above 300 Hz, the tinny edge is softened and gentle compression adds density.",
   "tags": ["laptop", "small-speakers", "harmonic-bass", "psychoacoustic", "speakers"],
   "params": {

@@ -1,6 +1,8 @@
 Flubsound Pro - test build
 ==========================
 
+Written by Flubes and Claude (co-authors).
+
 This is an unsigned test build made by CI from the commit in VERSION.txt.
 It is for trying the app out, not a release. Start with your headset volume
 LOW: Flubsound can add gain (Boost, bass, the maximizer).

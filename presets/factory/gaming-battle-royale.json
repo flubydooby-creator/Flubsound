@@ -4,7 +4,7 @@
   "uuid": "5a8768b5-dec9-4ced-8925-c78d0a7112e2",
   "name": "Battle Royale",
   "category": "Gaming",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "For large-map shooters (Apex Legends, Warzone, Fortnite, PUBG). Footsteps and other cues are lifted as they rise out of the ambience (the ambience itself is not raised), distant gunfire direction comes forward, close explosions and vehicles are gently held back so distant cues stay audible, and squad callouts stay clear. Suggested latency profile: Low Latency, for fast reactions.",
   "tags": ["battle-royale", "footsteps", "positional", "long-range", "low-latency"],
   "suggestedLatencyProfile": "Low Latency",

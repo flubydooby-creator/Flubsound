@@ -4,7 +4,7 @@
   "uuid": "445d1267-bae0-45b8-a6ae-10caee61ab12",
   "name": "Bluetooth Headphones",
   "category": "Device",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "For Bluetooth (A2DP) headphones and earbuds. The ceiling is -2 dBTP because lossy codecs (SBC, AAC, aptX, LDAC) overshoot peaks, the clipper is kept soft and the air exciter low so the codec is not fed extra high-frequency distortion, and bass is centred below 120 Hz for efficient joint-stereo coding. Bluetooth itself adds 100-300 ms latency.",
   "tags": ["bluetooth", "wireless", "headphones", "codec-safe", "a2dp"],
   "params": {

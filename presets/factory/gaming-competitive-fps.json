@@ -4,7 +4,7 @@
   "uuid": "22e4bf40-b070-485a-8fd6-c4f6cfddeaad",
   "name": "Competitive FPS",
   "category": "Gaming",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "For tactical and competitive shooters (Counter-Strike, Valorant, Rainbow Six). Footsteps and quiet cues are lifted the moment they rise out of the ambience, while the ambience itself is not raised and gunfire is never compressed; explosion rumble is tamed so it cannot mask the steps that follow, and lateral cues are sharpened. No broadband downward compression and no crossfeed; suggested latency profile: Low Latency.",
   "tags": ["fps", "competitive", "footsteps", "positional", "low-latency", "esports"],
   "suggestedLatencyProfile": "Low Latency",

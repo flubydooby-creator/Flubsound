@@ -4,7 +4,7 @@
   "uuid": "8736a4e7-ab3b-4c35-9fae-ffc23fd4c9d3",
   "name": "Tournament Clean",
   "category": "Gaming",
-  "author": "Flubsound",
+  "author": "Flubsound (Flubes & Claude)",
   "description": "Minimal processing for events and leagues that restrict audio enhancement. Every module is off except the true-peak limiter at -1 dBTP (limiter only, no clipper, no drive), so the only change to the game's sound is that digital peaks above the ceiling are limited instead of clipping. It does not limit how loud you listen and is not hearing protection: that depends on your volume setting. Suggested latency profile: Low Latency.",
   "tags": ["tournament", "clean", "minimal", "esports", "low-latency", "limiter-only"],
   "suggestedLatencyProfile": "Low Latency",
