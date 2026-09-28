@@ -24,7 +24,11 @@
 //                                      focus 0 when the virtualiser produced
 //                                      binaural output or the game renders
 //                                      its own HRTF, virt.ownHrtf)
-//    -> [slot] Compressor (look-ahead, up/down)
+//    -> [slot] Compressor (look-ahead, up/down), with the Startle Guard
+//              (guard.range, docs/11 E21; StartleGuard.h) measuring its
+//              input and turning down its output: a fast, programme-relative
+//              ceiling for loud events that uses the slot's latency as its
+//              look-ahead (off by default)
 //    -> [slot] LoudnessMaximizer (glue + clipper + true-peak limiter)
 //    -> output gain -> global bypass crossfade (dry delayed by total latency,
 //       optionally loudness matched) -> meters / analyser taps -> out (2 ch)
@@ -116,6 +120,7 @@
 #include "ModuleSlot.h"
 #include "Parameters.h"
 #include "Protection.h"
+#include "StartleGuard.h"
 #include "flub/analysis/LoudnessMeter.h"
 #include "flub/analysis/PeakMeters.h"
 #include "flub/common/Realtime.h"
@@ -134,6 +139,7 @@
 #include "flub/dsp/Saturator.h"
 #include "flub/dsp/SpectralNoiseGate.h"
 #include "flub/dsp/StereoSpatializer.h"
+#include "flub/dsp/WeightedResidual.h"
 #include "flub/neural/AsyncModelProcessor.h"
 #include "flub/neural/Eligibility.h"
 
@@ -317,6 +323,27 @@ public:
     float getPredictedBoostHz() const noexcept { return predictedBoostHz.load (std::memory_order_relaxed); }
     float getAutoPreampDb() const noexcept { return autoPreampDb.load (std::memory_order_relaxed); }
 
+    // ---- Governor measurements at protection strength Normal / Strict
+    // (docs/11 E06 Phase 3; Protection.h). Published once per block;
+    // any thread. -160 dB / PlrMeter::kNoReading while Off or not yet measured.
+    /** The drive span's (saturator to maximizer) audible residual (WeightedResidual::getWeightedDb). */
+    float getDriveResidualDb() const noexcept { return driveResidualDb.load (std::memory_order_relaxed); }
+    /** The drive span's flat residual (WeightedResidual::getPlainResidualDb). */
+    float getDriveResidualFlatDb() const noexcept { return driveResidualFlatDb.load (std::memory_order_relaxed); }
+    /** The bass harmonics' share of the bass engine's audible residual (the harmonics loop's reading). */
+    float getHarmonicsResidualDb() const noexcept { return harmonicsResidualDb.load (std::memory_order_relaxed); }
+    /** The output's peak-to-loudness ratio over ~3 s (PlrMeter). */
+    float getOutputPlrDb() const noexcept { return outputPlrDb.load (std::memory_order_relaxed); }
+    /** The governor's extra scale on the bass harmonics (1 at Off). */
+    float getGovernorHarmonicsScale() const noexcept { return governorHarmonicsScale.load (std::memory_order_relaxed); }
+
+    /** The Startle Guard's deepest gain in the last block (dB <= 0; 0 while
+        guard.range is Off and released). Any thread. */
+    float getStartleGuardGainDb() const noexcept { return startleGuard.getBlockGainDb(); }
+    /** The guard itself (its bands' gains and references), for tests and
+        diagnostics on the audio thread or after a render. */
+    const StartleGuard& getStartleGuard() const noexcept { return startleGuard; }
+
     MeterBus& meters() noexcept { return meterBus; }
     AnalyzerTaps& taps() noexcept { return analyzerTaps; }
 
@@ -339,6 +366,13 @@ private:
     void processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING;
     /** Folds one segment's module readings into blockReadings. */
     void accumulateReadings() noexcept;
+    /** Governor taps at Normal / Strict (docs/11 E06 Phase 3), before slot
+        `slot` processes: the bass span's input (SBass) and output (SClarity),
+        the drive span's input (SSat), the maximizer's input peak (SMax);
+        with kNumSlots, the drive span's output after the last slot. */
+    void protectionTap (const AudioBlock& st, int slot, bool contaminated) noexcept FLUB_NONBLOCKING;
+    /** The measured loop's readings for the governor's next tick. */
+    SafetyGovernor::Readings governorReadings (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
     /** reset() without the control loops (governor, AutoLevel, AutoDrive,
         ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;
@@ -403,12 +437,27 @@ private:
     LinearSmoothedValue preampGain;
     std::atomic<float> predictedBoostDb { 0.0f }, predictedBoostHz { 1000.0f }, autoPreampDb { 0.0f };
     AutoLevel autoLevel;
+    StartleGuard startleGuard;
     AutoDrive autoDrive;
     SafetyGovernor governor;
     DistortionMonitor distortion;
     ComparisonMatcher loudnessMatch;
     std::atomic<int> protectionStrength { static_cast<int> (ProtectionStrength::Off) };
     ProtectionStrength appliedStrength = ProtectionStrength::Off; // as of the current segment (audio thread)
+    // Measured loop (Normal / Strict, docs/11 E06 Phase 3): two spans, mid
+    // channel, each input delayed by its span's latency: the bass engine
+    // (its harmonics), and the saturator to the maximizer's output (the
+    // drive); the pre-maximizer peaks; the input's and the output's PLR.
+    WeightedResidual bassSpan, driveSpan;
+    DelayLine bassSpanDelay, driveSpanDelay;
+    std::vector<float> bassSpanInput, driveSpanInput, spanOutput; // maxBlockSize each
+    DriveFeedForward feedForward;
+    PlrMeter plrMeter, inputPlrMeter;
+    float preMaxPeak = 0.0f, driveAtFullScale = 0.0f, lastHarmonicsResidualDb = kMinusInfDb;
+    bool spanRunning = false;
+    std::atomic<float> driveResidualDb { kMinusInfDb }, driveResidualFlatDb { kMinusInfDb }, harmonicsResidualDb { kMinusInfDb },
+        outputPlrDb { PlrMeter::kNoReading },
+        governorHarmonicsScale { 1.0f };
     uint64_t corruptSamples = 0, droppedBlocks = 0; // input sanitiser, since prepare()
     // The host block's module-meter extremes over its segments (process()).
     struct BlockReadings

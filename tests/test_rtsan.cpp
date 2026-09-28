@@ -240,6 +240,13 @@ static_assert (std::is_same_v<decltype (&ComparisonMatcher::update), void (Compa
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::updateUnmeasured), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&AutoLevel::processUnmeasured), void (AutoLevel::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::applyWetTrim), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+// The Startle Guard ProcessingChain::process runs around the compressor slot
+// (tests/test_dynamics_guard.cpp, docs/11 E21) and its per-block settings.
+static_assert (std::is_same_v<decltype (&StartleGuard::measure), void (StartleGuard::*) (const AudioBlock&, bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&StartleGuard::apply), void (StartleGuard::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&StartleGuard::setCeilingLu), void (StartleGuard::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&StartleGuard::setLevelOffsetDb), void (StartleGuard::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<StartleGuard>);
 
 // The surround fold and input-channel detection (tests/test_virtualizer_fold.cpp,
 // docs/11 E01 / E27): ProcessingChain::process runs the detector and the

@@ -23,8 +23,10 @@
 // the generator adds (plus aliases), whatever its linear branch; on
 // programme it also contains intermodulation. Like DistortionWindow, the
 // sums run over an analysis window of at least 25 ms that closes at the
-// first block boundary at or after that (up to one block longer). Cost: six
-// multiply-adds (in double) per sample and channel.
+// first block boundary at or after that (up to one block longer; on the
+// chain's 10 ms grid where the host's boundaries allow, see
+// ParallelDistortionWindow). Cost: six multiply-adds (in double) per sample
+// and channel.
 #pragma once
 
 #include "DistortionEstimator.h"
@@ -87,15 +89,23 @@ struct ParallelDistortionSums
 };
 
 /** Per-channel sums over an analysis window of at least
-    DistortionWindow::kWindowSeconds, closed at the first block boundary at or
-    after getLength() samples, as in DistortionWindow. */
+    DistortionWindow::kWindowSeconds, closed at a block boundary at or after
+    getLength() samples, as in DistortionWindow - but, since the governor's
+    harmonics loop reads it (docs/11 E06 Phase 3), preferably at one on a
+    kGridMs grid counted from reset(): the processing chain ends its segments
+    on that grid (the SafetyGovernor's ticks), so there the window closes at
+    30 ms whatever the host block size. A host whose boundaries miss the grid
+    closes it at the first boundary one grid step past getLength(). */
 class ParallelDistortionWindow
 {
 public:
+    static constexpr float kGridMs = 10.0f;
+
     /** Non-RT (prepare()). */
     void prepare (double sampleRate) noexcept
     {
         length = std::max (1, static_cast<int> (std::lround (sampleRate * DistortionWindow::kWindowSeconds)));
+        grid = std::max (1, msToSamples (kGridMs, sampleRate));
         reset();
     }
 
@@ -103,6 +113,7 @@ public:
     {
         sums.fill ({});
         count = 0;
+        phase = 0;
     }
 
     /** The running sums of channel c (0 <= c < kMaxChannels). */
@@ -115,7 +126,8 @@ public:
     bool advance (int n, float& ratioDb) noexcept FLUB_NONBLOCKING
     {
         count += n;
-        if (count < length)
+        phase = (phase + n) % grid;
+        if (count < length || (phase != 0 && count < length + grid))
             return false;
         DistortionEnergy e;
         for (const auto& s : sums)
@@ -128,7 +140,8 @@ public:
             }
         }
         ratioDb = e.ratioDb();
-        reset();
+        sums.fill ({});
+        count = 0; // the grid phase runs on
         return true;
     }
 
@@ -136,6 +149,6 @@ public:
 
 private:
     std::array<ParallelDistortionSums, kMaxChannels> sums {};
-    int length = 1200, count = 0;
+    int length = 1200, grid = 480, count = 0, phase = 0;
 };
 } // namespace flub

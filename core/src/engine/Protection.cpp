@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace flub
 {
@@ -39,8 +40,8 @@ void DistortionMonitor::reset() noexcept FLUB_NONBLOCKING
 {
     blockDb = smoothedDb = kMinusInfDb;
     smoothedPow = 0.0f;
-    harmonicsBlockDb = harmonicsSmoothedDb = kMinusInfDb;
-    harmonicsSmoothedPow = 0.0f;
+    harmonicsBlockDb = harmonicsSmoothedDb = bassSmoothedDb = kMinusInfDb;
+    harmonicsSmoothedPow = bassSmoothedPow = 0.0f;
 }
 
 float DistortionMonitor::combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING
@@ -68,9 +69,12 @@ float DistortionMonitor::updateHarmonics (float bassDb, float airDb, int numSamp
 {
     // Same combination as the THD+N (the air exciter follows the bass engine
     // in the chain), kept in its own sums: these stages add harmonics on
-    // purpose, so their share is reported, never budgeted.
+    // purpose, so their share is not in the THD+N budget (at Normal / Strict
+    // the governor's harmonics loop budgets the bass share by what the
+    // programme leaves exposed, docs/11 E06 Phase 3).
     harmonicsBlockDb = combineDb (bassDb, airDb);
     harmonicsSmoothedDb = smooth (harmonicsSmoothedPow, dbToPower (bassDb) + dbToPower (airDb), numSamples);
+    bassSmoothedDb = smooth (bassSmoothedPow, dbToPower (bassDb), numSamples);
     return harmonicsBlockDb;
 }
 
@@ -79,6 +83,101 @@ float DistortionMonitor::smooth (float& statePow, float blockPow, int numSamples
     const float a = static_cast<float> (std::exp (-(numSamples / sr) / kMeterTauSeconds));
     statePow = a * statePow + (1.0f - a) * blockPow;
     return powerToDb (statePow);
+}
+
+// ---------------------------------------------------------------------------
+void DriveFeedForward::reset() noexcept FLUB_NONBLOCKING
+{
+    peaksDb.fill (kMinusInfDb);
+    count = pos = 0;
+}
+
+void DriveFeedForward::push (float peak) noexcept FLUB_NONBLOCKING
+{
+    peaksDb[static_cast<size_t> (pos)] = gainToDb (peak);
+    pos = (pos + 1) % kTicks;
+    count = std::min (count + 1, kTicks);
+}
+
+float DriveFeedForward::driveForBudget (float ceilingDb, float grBudgetDb) const noexcept FLUB_NONBLOCKING
+{
+    // Predicted average GR at drive D: the mean over the programme ticks of
+    // how far the tick's peak would go past the ceiling. It ignores the
+    // clipper and the limiter's release, so it is an upper bound and the
+    // governor's PI trim takes the rest.
+    constexpr float kProgrammeDb = -70.0f;
+    constexpr int kMinTicks = 50;
+    int n = 0;
+    for (int i = 0; i < count; ++i)
+        n += peaksDb[static_cast<size_t> (i)] > kProgrammeDb ? 1 : 0;
+    if (n < kMinTicks)
+        return std::numeric_limits<float>::infinity();
+    const float target = -grBudgetDb;
+    const auto meanOver = [&] (float drive) {
+        double sum = 0.0;
+        for (int i = 0; i < count; ++i)
+        {
+            const float p = peaksDb[static_cast<size_t> (i)];
+            if (p > kProgrammeDb)
+                sum += std::max (0.0f, p + drive - ceilingDb);
+        }
+        return static_cast<float> (sum / n);
+    };
+    float lo = -48.0f, hi = 72.0f;
+    if (meanOver (hi) < target)
+        return std::numeric_limits<float>::infinity();
+    for (int it = 0; it < 24; ++it)
+    {
+        const float mid = 0.5f * (lo + hi);
+        (meanOver (mid) < target ? lo : hi) = mid;
+    }
+    return lo;
+}
+
+// ---------------------------------------------------------------------------
+void PlrMeter::prepare (double sampleRate, int numChannels)
+{
+    loudness.prepare (sampleRate, numChannels, 3000.0f);
+    pole = static_cast<double> (onePoleCoeff (3000.0f, sampleRate));
+    reset();
+}
+
+void PlrMeter::reset() noexcept FLUB_NONBLOCKING
+{
+    loudness.reset();
+    peaks.fill (0.0f);
+    pos = count = 0;
+    tickPeak = 0.0f;
+    residual = 1.0;
+}
+
+void PlrMeter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
+{
+    loudness.process (block);
+    residual *= std::pow (pole, static_cast<double> (block.numSamples));
+    for (int c = 0; c < block.numChannels; ++c)
+        for (int i = 0; i < block.numSamples; ++i)
+            tickPeak = std::max (tickPeak, std::abs (block.channel (c)[i]));
+}
+
+void PlrMeter::tick() noexcept FLUB_NONBLOCKING
+{
+    peaks[static_cast<size_t> (pos)] = tickPeak;
+    pos = (pos + 1) % DriveFeedForward::kTicks;
+    count = std::min (count + 1, DriveFeedForward::kTicks);
+    tickPeak = 0.0f;
+}
+
+float PlrMeter::getPlrDb() const noexcept FLUB_NONBLOCKING
+{
+    const float raw = loudness.getLufs();
+    const float lufs = residual < 0.999 ? raw - static_cast<float> (10.0 * std::log10 (1.0 - residual)) : raw;
+    if (count < 100 || ! (lufs > -50.0f))
+        return kNoReading;
+    float peak = 0.0f;
+    for (int i = 0; i < count; ++i)
+        peak = std::max (peak, peaks[static_cast<size_t> (i)]);
+    return gainToDb (peak) - lufs;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +191,8 @@ void SafetyGovernor::prepare (double sampleRate) noexcept
     tickAverage = static_cast<float> (std::exp (-dt / 3.0)); // ~3 s averaging
     tickFall = static_cast<float> (kFallPerSec * dt);
     tickRise = static_cast<float> (kRisePerSec * dt);
+    tickSeconds = static_cast<float> (dt);
+    grFastCoeff = static_cast<float> (std::exp (-dt / kGrAverageSeconds));
     reset();
 }
 
@@ -103,12 +204,45 @@ void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
     state = State::Idle;
     reason = 0;
     pendingSamples = 0;
+    measuredRunning = false;
+    grFastDb = driveDb = harmonicsDb = 0.0f;
+    harmonicsScale = 1.0f;
+    grLoop = residualLoop = plrLoop = harmonicsLoop = {};
 }
 
 void SafetyGovernor::setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING
 {
     minScale = s == ProtectionStrength::Strict ? kStrictMinScale : kMinScale;
     scale = std::max (scale, minScale);
+    if (s != strength)
+    {
+        // The measured loop (re)starts from the scales as they are; Off has
+        // no harmonics scale.
+        measuredRunning = false;
+        if (s == ProtectionStrength::Off)
+            harmonicsScale = 1.0f;
+    }
+    strength = s;
+}
+
+SafetyGovernor::Budgets SafetyGovernor::budgetsFor (ProtectionStrength s, bool music) noexcept
+{
+    // Provisional values (docs/11 E06 Phase 3), until the E60 listening
+    // panel: Music about 5 dB stricter than Gaming on the audible residual,
+    // a dynamics budget in Music only (games need their quiet cues loud),
+    // Strict 6 dB stricter on the residual, 2 dB on the limiter, 2 dB more
+    // PLR.
+    Budgets b;
+    b.grDb = kGrBudgetDb;
+    b.residualDb = music ? -35.0f : -30.0f;
+    b.plrDb = music ? 8.0f : 0.0f;
+    if (s == ProtectionStrength::Strict)
+    {
+        b.grDb += 2.0f;
+        b.residualDb -= 6.0f;
+        b.plrDb = music ? 10.0f : 0.0f;
+    }
+    return b;
 }
 
 void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING
@@ -119,6 +253,166 @@ void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSampl
         pendingSamples -= tickSamples;
         tick (limiterGrDb, distortionDb);
     }
+}
+
+void SafetyGovernor::update (const Readings& r, int numSamples) noexcept FLUB_NONBLOCKING
+{
+    pendingSamples += numSamples;
+    while (pendingSamples >= tickSamples)
+    {
+        pendingSamples -= tickSamples;
+        if (strength == ProtectionStrength::Off)
+            tick (r.limiterGrDb, r.distortionDb);
+        else
+            measuredTick (r);
+    }
+}
+
+float SafetyGovernor::Loop::step (float e, float dt, float offsetDb, float gain) noexcept FLUB_NONBLOCKING
+{
+    // A reading far from its set point (or none, -160 dB) is taken as 12 dB
+    // off, so a loop that was idle does not kick when a reading appears.
+    constexpr float kMaxErrorDb = 12.0f;
+    lastError = std::clamp (e, -kMaxErrorDb, kMaxErrorDb);
+    // Over the set point: PI. Within kHoldBandDb under it: hold. Further
+    // under: the integral recovers (no proportional term, so the scale does
+    // not jump up when the reading drops). The band keeps the loop off the
+    // edge of stages that switch in at a threshold (the maximizer's glue on
+    // a steady bass tone read 13 dB more residual per dB of drive), where a
+    // plain PI would hunt.
+    // Over the set point the integral runs on the error plus kApproachDb, so
+    // it reaches the set point in finite time instead of creeping up to it.
+    const float cap = holdLeft > 0.0f ? ceiling : 0.0f;
+    if (verifyLeft > 0.0f)
+    {
+        // Just stepped to the probe cap: wait for the readings to show it.
+        verifyLeft -= dt;
+        integral = std::clamp (integral, -120.0f, cap - offsetDb);
+        return std::min (cap, offsetDb + integral);
+    }
+    float p = 0.0f;
+    if (lastError > 0.0f)
+    {
+        integral -= gain * kIntGain * (lastError + kApproachDb) * dt;
+        p = gain * kPropGain * lastError;
+    }
+    else if (lastError < -kHoldBandDb)
+    {
+        integral -= gain * kIntGain * (lastError + kHoldBandDb) * dt;
+    }
+    integral = std::clamp (integral, -120.0f, cap - offsetDb);
+    return std::min (cap, offsetDb + integral - p);
+}
+
+void SafetyGovernor::Loop::track (float candidate, float applied, float dt) noexcept FLUB_NONBLOCKING
+{
+    if (candidate < applied)
+        integral += applied - candidate;
+    // Probe memory: a stage that switches in at a threshold (the glue on a
+    // steady bass tone) reads far under the budget just below it, so plain
+    // recovery would climb back into it every few seconds.
+    const bool over = lastError > 0.0f;
+    if (over && ! wasOver)
+    {
+        holdTime = std::abs (lastApplied - lastOnset) <= 1.0f ? std::min (2.0f * holdTime, kMaxProbeHoldSeconds) : kProbeHoldSeconds;
+        lastOnset = lastApplied;
+        ceiling = lastApplied - kProbeMarginDb;
+        holdLeft = holdTime;
+        // Step to the cap (from where this tick's candidate is, if lower) and
+        // wait for the readings - unless the back-off starts far over (the
+        // programme changed, not a probe that went a little too far).
+        integral += std::min (0.0f, ceiling - candidate);
+        verifyLeft = lastError < kProbeErrorDb ? kVerifySeconds : 0.0f;
+    }
+    else if (! over && holdLeft > 0.0f)
+    {
+        holdLeft -= dt;
+    }
+    wasOver = over;
+    lastApplied = applied;
+}
+
+void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
+{
+    const float dt = tickSeconds;
+    // The meters' ~3 s averages, as in tick().
+    const float a = tickAverage;
+    avgGrDb = a * avgGrDb + (1.0f - a) * r.limiterGrDb;
+    avgDistortionDb = powerToDb (a * dbToPower (avgDistortionDb) + (1.0f - a) * dbToPower (r.distortionDb));
+    grFastDb = grFastCoeff * grFastDb + (1.0f - grFastCoeff) * r.limiterGrDb;
+
+    const auto b = budgetsFor (strength, musicMode);
+    const float ffDb = gainToDb (std::clamp (r.feedForwardScale, 1.0e-3f, 1.0f));
+    const float floorDb = minScale > 0.0f ? gainToDb (minScale) : kFloorDb;
+    if (! measuredRunning)
+    {
+        // Start from the scales as they are (bumpless).
+        driveDb = scale > 0.0f ? std::max (kFloorDb, gainToDb (scale)) : kFloorDb;
+        harmonicsDb = harmonicsScale > 0.0f ? std::max (kFloorDb, gainToDb (harmonicsScale)) : kFloorDb;
+        grLoop = residualLoop = plrLoop = harmonicsLoop = {};
+        grLoop.integral = driveDb - ffDb;
+        residualLoop.integral = plrLoop.integral = driveDb;
+        harmonicsLoop.integral = harmonicsDb;
+        grLoop.lastApplied = residualLoop.lastApplied = plrLoop.lastApplied = driveDb;
+        harmonicsLoop.lastApplied = harmonicsDb;
+        measuredRunning = true;
+    }
+
+    // Drive scale: the lowest of three loops, each a PI on its error in dB
+    // (> 0 = over its set point, kSetPointMarginDb inside the budget); the
+    // limiter loop is a trim around the feed-forward.
+    const float eGr = (b.grDb + kSetPointMarginDb) - grFastDb;
+    const float eResidual = r.driveResidualDb - (b.residualDb - kSetPointMarginDb);
+    // The dynamics budget is what the chain may take away: programme that
+    // arrives under the budget may lose kPlrAllowanceDb more.
+    const bool plrBudget = b.plrDb > 0.0f && r.plrDb < PlrMeter::kNoReading && r.inputPlrDb < PlrMeter::kNoReading;
+    // (The set point is kPlrMarginDb over the budget, but never above the
+    // input's PLR less the allowance: a steady tone's PLR cannot be raised
+    // by any drive.)
+    const float plrSetPoint = plrBudget ? std::min (b.plrDb + kPlrMarginDb, r.inputPlrDb - kPlrAllowanceDb) : 0.0f;
+    const float ePlr = plrBudget ? plrSetPoint - r.plrDb : -12.0f;
+    const float uGr = grLoop.step (eGr, dt, ffDb, kTrimGain);
+    const float uResidual = residualLoop.step (eResidual, dt, 0.0f);
+    const float uPlr = plrLoop.step (ePlr, dt, 0.0f);
+    const float target = std::max (floorDb, std::min ({ uGr, uResidual, uPlr }));
+    const float before = driveDb;
+    driveDb = std::clamp (target, driveDb - kFallDbPerSec * dt, driveDb + kRiseDbPerSec * dt);
+    grLoop.track (uGr, driveDb, dt);
+    residualLoop.track (uResidual, driveDb, dt);
+    plrLoop.track (uPlr, driveDb, dt);
+    scale = driveDb <= kFloorDb ? 0.0f : std::max (minScale, dbToGain (driveDb));
+
+    // Harmonics scale: its own loop on the bass harmonics' audible residual.
+    // Small Speaker Mode's harmonics replace the fundamental: Normal leaves them.
+    const bool harmonicsGoverned = r.harmonicsResidualDb > kMinusInfDb
+                                   && ! (strength == ProtectionStrength::Normal && harmonicsReplace);
+    const float eHarmonics = harmonicsGoverned ? r.harmonicsResidualDb - (b.residualDb - kSetPointMarginDb) : -12.0f;
+    const float uHarmonics = std::max (kFloorDb, harmonicsLoop.step (eHarmonics, dt, 0.0f));
+    const float harmonicsBefore = harmonicsDb;
+    harmonicsDb = std::clamp (uHarmonics, harmonicsDb - kHarmonicsFallDbPerSec * dt, harmonicsDb + kRiseDbPerSec * dt);
+    harmonicsLoop.track (uHarmonics, harmonicsDb, dt);
+    harmonicsScale = harmonicsDb <= kFloorDb ? 0.0f : dbToGain (harmonicsDb);
+
+    // State and reasons, as the Off loop reports them.
+    constexpr float kStep = 1.0e-4f;
+    const bool driveFell = driveDb < before - kStep, harmonicsFell = harmonicsDb < harmonicsBefore - kStep;
+    const bool driveOver = eGr > 0.0f || eResidual > 0.0f || (plrBudget && ePlr > 0.0f);
+    const bool harmonicsOver = harmonicsGoverned && eHarmonics > 0.0f;
+    const bool atFloor = driveDb <= floorDb + kStep, harmonicsAtFloor = harmonicsDb <= kFloorDb + kStep;
+    if (driveFell || harmonicsFell || (driveOver && atFloor) || (harmonicsOver && harmonicsAtFloor))
+    {
+        reason |= (eGr > 0.0f ? kReasonLimiter : 0u) | (eResidual > 0.0f ? kReasonDistortion : 0u)
+                  | (plrBudget && ePlr > 0.0f ? kReasonDynamics : 0u) | (harmonicsOver ? kReasonHarmonics : 0u);
+        state = State::BackingOff;
+    }
+    else if (driveDb >= -kStep && harmonicsDb >= -kStep)
+        state = State::Idle;
+    else if (driveDb > before + kStep || harmonicsDb > harmonicsBefore + kStep)
+        state = State::Recovering;
+    else
+        state = State::Holding;
+    if (state == State::Idle)
+        reason = 0;
 }
 
 void SafetyGovernor::skip (int numSamples) noexcept FLUB_NONBLOCKING

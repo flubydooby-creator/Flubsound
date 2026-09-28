@@ -143,7 +143,10 @@ int gateFftSizeFor (double sampleRate) noexcept
     return 1 << std::clamp (log2Size, 8, 12); // SpectralNoiseGate: 256 .. 4096
 }
 
-void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate) noexcept
+/** tame / tameThresholdDb: the Gaming anti-masking band's depth (0..1) and
+    threshold, keyed to the Dynamic Range control (docs/11 E20 / E21,
+    StartleGuard.h). */
+void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate, float tame, float tameThresholdDb) noexcept
 {
     const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
     if (mode == ModeValue::Gaming)
@@ -157,9 +160,11 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double 
         dyn.setBand (5, modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[1], 1.2f, 0.0f, 1.0f, 3.0f * footsteps, kCueBodyAttackMs, kCueBodyReleaseMs, -75.0f));
         // Anti-masking (a CutAbove low shelf at 90 Hz) no longer follows
         // Footsteps (docs/11 E20): Footsteps 100 changed the explosion level.
-        // The presets that tame loud LF carry that band as a user dynamic-EQ
-        // band until E21's Tame amount exists to key it to.
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, -22.0f, 3.0f, 0.0f, 10.0f, 250.0f, -80.0f));
+        // It is the Tame stage of the Dynamic Range control (guard.range,
+        // docs/11 E21): off (range 0) with the guard, as before E21; the
+        // presets that tamed loud LF carry their old band as user band 0.
+        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, tameThresholdDb,
+                                  tame > 0.0f ? StartleGuard::kTameRatio : 3.0f, tame * StartleGuard::kTameMaxRangeDb, 10.0f, 250.0f, -80.0f));
         // Voice comms / dialogue / score intelligibility.
         dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
     }
@@ -435,9 +440,29 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     dryMatchGain.reset (sr, 50.0f, 1.0f);
 
     autoLevel.prepare (sr, config.inputChannels);
+    // The guard measures ahead of the compressor slot and applies its gains
+    // to what leaves it: the slot's latency is its look-ahead.
+    startleGuard.prepare (sr, maxB, slots[SComp].latencySamples());
     autoDrive.prepare (sr, 2);
     governor.prepare (sr);
     distortion.prepare (sr);
+    {
+        // The governor's spans (docs/11 E06 Phase 3): the bass engine alone,
+        // and the saturator to the maximizer, each input delayed by the
+        // latency of its slots.
+        int driveLatency = 0;
+        for (int s = SSat; s <= SMax; ++s)
+            driveLatency += slots[static_cast<size_t> (s)].latencySamples();
+        bassSpanDelay.prepare (1, slots[SBass].latencySamples());
+        driveSpanDelay.prepare (1, driveLatency);
+        bassSpan.prepare (sr);
+        driveSpan.prepare (sr);
+        bassSpanInput.assign (static_cast<size_t> (maxB), 0.0f);
+        driveSpanInput.assign (static_cast<size_t> (maxB), 0.0f);
+        spanOutput.assign (static_cast<size_t> (maxB), 0.0f);
+        plrMeter.prepare (sr, 2);
+        inputPlrMeter.prepare (sr, 2);
+    }
     loudnessMatch.prepare (sr, 2);
 
     inLevel.prepare (sr, 2);
@@ -465,6 +490,7 @@ void ProcessingChain::reset() noexcept
     resetSignalState();
     inputDetector.reset();
     autoLevel.reset();
+    startleGuard.reset();
     autoDrive.reset();
     governor.reset();
     loudnessMatch.reset();
@@ -486,6 +512,7 @@ void ProcessingChain::resetSignalState() noexcept
     dryWarmup = 0;
     distortion.reset();
     governor.restartTickGrid(); // the maximizer's window grid restarts with its slot
+    spanRunning = false;        // the governor's span measurements restart with the signal path
     inLevel.reset();
     outLevel.reset();
     outTruePeak.reset();
@@ -532,6 +559,36 @@ void ProcessingChain::applyParameters() noexcept
     }
     MacroMap::apply (governed, effective.data(), governorScale);
     float* e = effective.data();
+    // The measured loop (Normal / Strict, docs/11 E06 Phase 3): its own
+    // scale on the bass harmonics, the budgets of the mode, Small Speaker
+    // Mode, and the maximizer drive at the full scale for the feed-forward.
+    if (strength != ProtectionStrength::Off)
+    {
+        e[BassHarmonics] *= governor.getHarmonicsScale();
+        governor.setMusicMode (static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Music);
+        governor.setHarmonicsReplaceFundamental (on (e, BassReplaceFundamental));
+        if (governorScale < 1.0f)
+            MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
+        driveAtFullScale = governorScale < 1.0f ? ungoverned[static_cast<size_t> (MaxDriveDb)] : e[MaxDriveDb];
+    }
+    if (strength == ProtectionStrength::Off)
+    {
+        spanRunning = false;
+    }
+    else if (! spanRunning)
+    {
+        bassSpanDelay.reset();
+        driveSpanDelay.reset();
+        bassSpan.reset();
+        driveSpan.reset();
+        feedForward.reset();
+        plrMeter.reset();
+        inputPlrMeter.reset();
+        preMaxPeak = 0.0f;
+        lastHarmonicsResidualDb = kMinusInfDb;
+        spanRunning = true;
+    }
+    governorHarmonicsScale.store (governor.getHarmonicsScale(), std::memory_order_relaxed);
     // Mode / format policies below write their overrides into e, so the
     // values published at the end (effectiveValue(), GUI ghost markers) are
     // the ones actually applied.
@@ -615,7 +672,14 @@ void ProcessingChain::applyParameters() noexcept
         dp.noiseFloorDb = e[dyn (b, DynFieldNoiseFloor)];
         dynEq.setBand (b, dp);
     }
-    configureModeBands (dynEq, mode, e, config.sampleRate);
+    // ---- Startle Guard and Tame (docs/11 E21 / E20; StartleGuard.h) ----
+    const int guardRange = idx (e, GuardRange);
+    startleGuard.setCeilingLu (StartleGuard::ceilingLuFor (guardRange));
+    const float tame = StartleGuard::tameAmountFor (guardRange);
+    float tameThresholdDb = StartleGuard::kTameMaxThresholdDb;
+    if (tame > 0.0f && startleGuard.getReferenceLufs() > -60.0f)
+        tameThresholdDb = std::min (tameThresholdDb, startleGuard.getReferenceLufs() + StartleGuard::kTameOverReferenceDb);
+    configureModeBands (dynEq, mode, e, config.sampleRate, tame, tameThresholdDb);
     slots[SDynEq].setActive (active (DynEqOn));
 
     // ---- Bass ----
@@ -1107,6 +1171,98 @@ void ProcessingChain::accumulateReadings() noexcept
     }
 }
 
+void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contaminated) noexcept FLUB_NONBLOCKING
+{
+    const int n = st.numSamples;
+    const float* l = st.channel (0);
+    const float* r = st.channel (1);
+    const auto mid = [n, l, r] (std::vector<float>& to) {
+        for (int i = 0; i < n; ++i)
+            to[static_cast<size_t> (i)] = 0.5f * (l[i] + r[i]);
+    };
+    const auto delayed = [n] (std::vector<float>& x, DelayLine& d) {
+        float* ch[1] = { x.data() };
+        d.process (AudioBlock (ch, 1, n));
+    };
+    switch (slot)
+    {
+        case SBass:
+            // The bass span's input (and the input's PLR).
+            mid (bassSpanInput);
+            delayed (bassSpanInput, bassSpanDelay);
+            if (! contaminated)
+                inputPlrMeter.process (st);
+            return;
+        case SClarity:
+            // The bass span's output.
+            mid (spanOutput);
+            if (! contaminated)
+                bassSpan.process (bassSpanInput.data(), spanOutput.data(), n);
+            return;
+        case SSat:
+            mid (driveSpanInput);
+            delayed (driveSpanInput, driveSpanDelay);
+            return;
+        case SMax:
+            if (! contaminated)
+                for (int i = 0; i < n; ++i)
+                    preMaxPeak = std::max ({ preMaxPeak, std::abs (l[i]), std::abs (r[i]) });
+            return;
+        default: break;
+    }
+    // The drive span's output and the output's PLR; the feed-forward's and
+    // the PLRs' windows step with the governor's ticks (segments end on them).
+    if (! contaminated)
+    {
+        mid (spanOutput);
+        driveSpan.process (driveSpanInput.data(), spanOutput.data(), n);
+        plrMeter.process (st);
+    }
+    if (governor.samplesToNextTick() == n)
+    {
+        feedForward.push (preMaxPeak);
+        plrMeter.tick();
+        inputPlrMeter.tick();
+        preMaxPeak = 0.0f;
+    }
+}
+
+SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING
+{
+    SafetyGovernor::Readings r;
+    r.limiterGrDb = limiterGrDb;
+    r.distortionDb = distortionDb;
+    if (driveSpan.hasReading())
+        r.driveResidualDb = driveSpan.getWeightedDb();
+    // The bass engine's audible residual is split by the share its harmonics
+    // generator's own meter gives the harmonics (measured exactly around the
+    // generator): that share is the harmonics scale's; the rest - the
+    // protection riding the boost shelf (on a steady 50 Hz tone its 10 ms
+    // envelope ripples and adds a 3rd harmonic), the generator's envelope on
+    // noise - follows the bass boost, which the drive scale governs, so it
+    // joins the drive span's reading.
+    if (bassSpan.hasReading())
+    {
+        const float flat = bassSpan.getPlainResidualDb(), audible = bassSpan.getWeightedDb();
+        const float harmonics = distortion.getSmoothedBassHarmonicsDb();
+        const double share = flat > kMinusInfDb && harmonics > kMinusInfDb ? std::min (1.0, std::pow (10.0, 0.1 * static_cast<double> (harmonics - flat))) : 0.0;
+        if (share > 0.0)
+            r.harmonicsResidualDb = audible + static_cast<float> (10.0 * std::log10 (share));
+        if (share < 1.0)
+            r.driveResidualDb = DistortionMonitor::combineDb (r.driveResidualDb, audible + static_cast<float> (10.0 * std::log10 (1.0 - share)));
+    }
+    lastHarmonicsResidualDb = r.harmonicsResidualDb;
+    r.plrDb = plrMeter.getPlrDb();
+    r.inputPlrDb = inputPlrMeter.getPlrDb();
+    // Feed-forward: the drive the pre-maximizer peaks allow within the GR
+    // budget, as a share of the drive at the full scale.
+    const float allowed = feedForward.driveForBudget (effective[static_cast<size_t> (MaxCeilingDb)],
+                                                      SafetyGovernor::budgetsFor (appliedStrength, idx (effective.data(), Mode) == static_cast<int> (ModeValue::Music)).grDb);
+    if (driveAtFullScale > 0.0f && std::isfinite (allowed))
+        r.feedForwardScale = std::clamp (allowed / driveAtFullScale, 0.0f, 1.0f);
+    return r;
+}
+
 void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING
 {
     const int n = io.numSamples;
@@ -1189,7 +1345,19 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
                             maximizer.setUpstreamLiftDb (preMaxBackground.get() - bedInBackground.get());
                     }
             }
+            // The Startle Guard (docs/11 E21) measures what enters the
+            // compressor slot and turns down what leaves it, one slot
+            // latency later: its look-ahead, without latency of its own.
+            if (s == SComp)
+            {
+                startleGuard.setLevelOffsetDb (autoLevel.getGainDb());
+                startleGuard.measure (st, contaminated);
+            }
+            if (spanRunning && (s == SBass || s == SClarity || s == SSat || s == SMax))
+                protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06)
             slots[static_cast<size_t> (s)].process (st);
+            if (s == SComp)
+                startleGuard.apply (st);
         }
     if (neuralInChain)
     {
@@ -1201,6 +1369,9 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     if (bedBudget)
         bedLiftHold = maximizer.getBedQuietWeight() < 0.999f ? static_cast<int> (kBedLiftHoldSeconds * config.sampleRate)
                                                              : std::max (0, bedLiftHold - n);
+
+    if (spanRunning)
+        protectionTap (st, kNumSlots, contaminated); // the governor's drive span output and PLR (docs/11 E06)
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();
@@ -1240,7 +1411,12 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     }
     else
     {
-        governor.update (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb), n);
+        const float grDb = maxActive ? maximizer.getWindowGainReductionDb() : 0.0f;
+        const float stageDb = DistortionMonitor::combineDb (satDistortionDb, clipGovernorDb);
+        if (appliedStrength == ProtectionStrength::Off)
+            governor.update (grDb, stageDb, n);
+        else
+            governor.update (governorReadings (grDb, stageDb), n);
         autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
         loudnessMatch.measureWet (st);
     }
@@ -1355,6 +1531,10 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.governorReason.store (governor.getReason(), rl);
     m.governorGrDb.store (governor.getAverageGainReductionDb(), rl);
     m.governorDistortionDb.store (governor.getAverageDistortionDb(), rl);
+    driveResidualDb.store (spanRunning ? driveSpan.getWeightedDb() : kMinusInfDb, rl);
+    driveResidualFlatDb.store (spanRunning ? driveSpan.getPlainResidualDb() : kMinusInfDb, rl);
+    harmonicsResidualDb.store (spanRunning ? lastHarmonicsResidualDb : kMinusInfDb, rl);
+    outputPlrDb.store (spanRunning ? plrMeter.getPlrDb() : PlrMeter::kNoReading, rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);
     m.activeChannelMask.store (inputDetector.getActiveMask(), rl);

@@ -277,6 +277,9 @@ public:
     float getHarmonicsBlockDb() const noexcept { return harmonicsBlockDb; }
     /** Block harmonics reading smoothed in the power domain (tau = kMeterTauSeconds). */
     float getSmoothedHarmonicsDb() const noexcept { return harmonicsSmoothedDb; }
+    /** The bass harmonics generator's share alone, smoothed the same way
+        (the governor's harmonics loop, docs/11 E06 Phase 3). */
+    float getSmoothedBassHarmonicsDb() const noexcept { return bassSmoothedDb; }
 
 private:
     /** Advances a power-domain one-pole (tau = kMeterTauSeconds) by numSamples. */
@@ -285,6 +288,7 @@ private:
     double sr = 48000.0;
     float blockDb = -160.0f, smoothedDb = -160.0f, smoothedPow = 0.0f;
     float harmonicsBlockDb = -160.0f, harmonicsSmoothedDb = -160.0f, harmonicsSmoothedPow = 0.0f;
+    float bassSmoothedDb = -160.0f, bassSmoothedPow = 0.0f;
 };
 
 /** How far the SafetyGovernor reaches (see the header comment). */
@@ -293,6 +297,53 @@ enum class ProtectionStrength : int
     Off = 0,    // governed macro amounts only; base values untouched (the default)
     Normal = 1, // also the base max.drive, sat.drive and bass.harmonics
     Strict = 2  // as Normal, and the scale may fall to 0
+};
+
+/** Pre-maximizer peak statistics for the governor's feed-forward (docs/11
+    E06 Phase 3, see the header comment): the maximizer input's peak per
+    10 ms tick over the last 3 s, and the drive that would keep the
+    limiter's average gain reduction at a budget. */
+class DriveFeedForward
+{
+public:
+    static constexpr int kTicks = 300; // 3 s of 10 ms ticks
+
+    void reset() noexcept FLUB_NONBLOCKING;
+    /** One tick's peak of the maximizer input (linear, before the drive). */
+    void push (float peak) noexcept FLUB_NONBLOCKING;
+    /** The drive (dB) at which the mean over the ticks of max (0, peak +
+        drive - ceiling) equals -grBudgetDb; +inf while fewer than 50 ticks
+        (0.5 s) of programme (peaks above -70 dBFS) are held. */
+    float driveForBudget (float ceilingDb, float grBudgetDb) const noexcept FLUB_NONBLOCKING;
+
+private:
+    std::array<float, kTicks> peaksDb {};
+    int count = 0, pos = 0;
+};
+
+/** Peak-to-loudness ratio of the chain's output over ~3 s (docs/11 E06
+    Phase 3): the highest sample peak of the last 3 s of 10 ms ticks
+    against a 3 s K-weighted loudness (its one-pole's cold start corrected,
+    as in GatedLoudness). */
+class PlrMeter
+{
+public:
+    void prepare (double sampleRate, int numChannels);
+    void reset() noexcept FLUB_NONBLOCKING;
+    void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING;
+    /** Closes a 10 ms tick: the peak since the last one joins the window. */
+    void tick() noexcept FLUB_NONBLOCKING;
+    /** PLR in dB; kNoReading while the loudness is below -50 LUFS or the
+        window is not yet 1 s long. */
+    float getPlrDb() const noexcept FLUB_NONBLOCKING;
+    static constexpr float kNoReading = 1000.0f;
+
+private:
+    LoudnessFollower loudness;
+    std::array<float, DriveFeedForward::kTicks> peaks {};
+    int pos = 0, count = 0;
+    float tickPeak = 0.0f;
+    double pole = 0.0, residual = 1.0; // the follower's one-pole, and pole^samples since reset
 };
 
 class SafetyGovernor
@@ -320,6 +371,55 @@ public:
     /** Bits of getReason(): the budgets that made the scale fall. */
     static constexpr uint32_t kReasonLimiter = 1u;    // ~3 s limiter GR average deeper than kGrBudgetDb
     static constexpr uint32_t kReasonDistortion = 2u; // ~3 s THD+N average above kDistortionBudgetDb
+    static constexpr uint32_t kReasonDynamics = 4u;   // Normal / Strict: output PLR under its budget
+    static constexpr uint32_t kReasonHarmonics = 8u;  // Normal / Strict: exposed bass harmonics over the budget
+
+    /** The measured loop's budgets (Normal / Strict, docs/11 E06 Phase 3). */
+    struct Budgets
+    {
+        float grDb = -6.0f;        // limiter GR, ~0.5 s average (dB <= 0)
+        float residualDb = -35.0f; // audible span residual (WeightedResidual, dB re the output)
+        float plrDb = 8.0f;        // output peak-to-loudness ratio; 0 = no dynamics budget
+    };
+    /** Programme that arrives with less PLR than the budget may lose at most
+        this much more (a steady tone has about 3-5 dB; a mastered track 6-8). */
+    static constexpr float kPlrAllowanceDb = 1.0f;
+    /** The dynamics loop's set point over its budget (smaller than
+        kSetPointMarginDb: much of a chain's PLR reduction is not the drive's). */
+    static constexpr float kPlrMarginDb = 0.5f;
+    /** Per strength and mode (music = Music mode, else Gaming). Off has no
+        measured loop; it returns Normal's. */
+    static Budgets budgetsFor (ProtectionStrength s, bool music) noexcept;
+
+    /** One tick's readings for the measured loop (Normal / Strict). */
+    struct Readings
+    {
+        float limiterGrDb = 0.0f;                 // deepest limiter GR in the window (dB <= 0)
+        float distortionDb = -160.0f;             // the stage THD+N the Off loop uses (averaged for the meters)
+        float driveResidualDb = -160.0f;          // audible residual of the drive span (saturator .. maximizer)
+        float harmonicsResidualDb = -160.0f;      // audible residual of the bass engine's harmonics (-160: none)
+        float plrDb = PlrMeter::kNoReading;       // output PLR over ~3 s
+        float inputPlrDb = PlrMeter::kNoReading;  // the span input's PLR over ~3 s
+        float feedForwardScale = 1.0f;            // drive scale the pre-maximizer peaks predict for the GR budget
+    };
+    /** Measured-loop constants: PI gains on dB errors (u = 20 log10 scale),
+        the set point below each budget, and the slew limits of u. */
+    static constexpr float kPropGain = 0.3f;       // dB of u per dB of error
+    static constexpr float kIntGain = 2.0f;        // dB of u per dB of error and second
+    static constexpr float kTrimGain = 0.25f;      // the limiter loop's PI, a trim around the feed-forward
+    static constexpr float kSetPointMarginDb = 1.5f;
+    static constexpr float kHoldBandDb = 3.0f;     // under the set point: hold; further under: recover
+    static constexpr float kApproachDb = 1.0f;     // added to an error over the set point (finite-time approach)
+    static constexpr float kProbeMarginDb = 1.0f;  // recovery cap under the level of the last back-off ...
+    static constexpr float kProbeHoldSeconds = 4.0f;    // ... held this long after it,
+    static constexpr float kMaxProbeHoldSeconds = 64.0f; // doubling to this while probes fail at the same level
+    static constexpr float kVerifySeconds = 0.5f;  // wait after stepping to the cap, before integrating on
+    static constexpr float kProbeErrorDb = 6.0f;   // a back-off starting further over is not a probe
+    static constexpr float kFallDbPerSec = 6.0f;            // drive scale (about the limiter's programme release)
+    static constexpr float kHarmonicsFallDbPerSec = 12.0f;  // harmonics scale
+    static constexpr float kRiseDbPerSec = 1.0f;
+    static constexpr float kGrAverageSeconds = 0.5f;
+    static constexpr float kFloorDb = -60.0f;      // u at which a floor-0 scale is taken as 0
 
     void prepare (double sampleRate) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
@@ -335,13 +435,28 @@ public:
     /** Advances the tick grid by numSamples and ticks once per 10 ms window
         closed, on these readings. distortionDb: the distortion of the
         nonlinear stages this block (see the header comment;
-        ProcessingChain::process). */
+        ProcessingChain::process). At Normal / Strict the measured loop
+        runs on them alone (no span residual, PLR or feed-forward). */
     void update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** As update(), with the measured loop's readings (Off uses only
+        limiterGrDb and distortionDb, as above). */
+    void update (const Readings& readings, int numSamples) noexcept FLUB_NONBLOCKING;
+    /** Selects the measured loop's budgets (Music or Gaming); any time on the
+        audio thread. */
+    void setMusicMode (bool music) noexcept FLUB_NONBLOCKING { musicMode = music; }
+    /** Small Speaker Mode: the bass harmonics stand in for a fundamental the
+        output no longer carries, so Normal leaves them alone (Strict still
+        governs them). */
+    void setHarmonicsReplaceFundamental (bool replacing) noexcept FLUB_NONBLOCKING { harmonicsReplace = replacing; }
     /** Advances the tick grid by numSamples without measuring: the windows
         closed here leave the averages and the scale as they are (a block
         hidden from the control loops, docs/11 E10). */
     void skip (int numSamples) noexcept FLUB_NONBLOCKING;
     float getScale() const noexcept { return scale; }
+    /** Extra scale on the bass harmonics (Normal / Strict; 1 at Off). */
+    float getHarmonicsScale() const noexcept { return harmonicsScale; }
+    /** Whether the last tick ran the measured loop (strength Normal / Strict). */
+    bool isMeasuredLoop() const noexcept { return strength != ProtectionStrength::Off; }
     /** The ~3 s power average of the distortion input (what the budget is compared with). */
     float getAverageDistortionDb() const noexcept { return avgDistortionDb; }
     /** The ~3 s average of the limiter GR input (dB <= 0). */
@@ -352,13 +467,46 @@ public:
     uint32_t getReason() const noexcept { return reason; }
 
 private:
+    /** One PI loop of the measured control (u in dB of scale). */
+    struct Loop
+    {
+        float integral = 0.0f;
+        /** Advances by one tick on error e (dB, > 0 = over its set point) and
+            returns the candidate u (<= 0). offsetDb shifts the loop (the
+            feed-forward); gain scales its PI gains (a trim around a
+            feed-forward runs at kTrimGain). */
+        float step (float e, float dt, float offsetDb, float gain = 1.0f) noexcept FLUB_NONBLOCKING;
+        /** Anti-windup (a loop that asked for less than was applied starts
+            the next tick from what was applied) and the probe memory: at the
+            onset of a back-off, recovery is capped kProbeMarginDb under the
+            level that went over, for a hold that doubles (up to
+            kMaxProbeHoldSeconds) while back-offs keep starting within 1 dB of
+            the last one, and restarts at kProbeHoldSeconds otherwise. At the
+            onset the loop steps to that cap and waits kVerifySeconds (about
+            the readings' lag) before it integrates further, so a failed
+            probe costs kProbeMarginDb, not what the lag would add. */
+        void track (float candidate, float applied, float dt) noexcept FLUB_NONBLOCKING;
+        float lastError = 0.0f, lastApplied = 0.0f;
+        float ceiling = 0.0f, holdLeft = 0.0f, holdTime = kProbeHoldSeconds, lastOnset = 1.0f, verifyLeft = 0.0f;
+        bool wasOver = false;
+    };
+
     void tick (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
+    void measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING;
+    /** Restarts the measured loop from the current scales. */
+    void startMeasured() noexcept FLUB_NONBLOCKING;
 
     double sr = 48000.0;
     int tickSamples = 480, pendingSamples = 0;
     float tickAverage = 0.0f, tickFall = 0.0f, tickRise = 0.0f; // per-tick constants (prepare)
+    float tickSeconds = 0.01f, grFastCoeff = 0.0f;
     float minScale = kMinScale;
     float avgGrDb = 0.0f, avgDistortionDb = -160.0f, scale = 1.0f;
+    // Measured loop (Normal / Strict).
+    ProtectionStrength strength = ProtectionStrength::Off;
+    bool musicMode = true, harmonicsReplace = false, measuredRunning = false;
+    float grFastDb = 0.0f, driveDb = 0.0f, harmonicsDb = 0.0f, harmonicsScale = 1.0f;
+    Loop grLoop, residualLoop, plrLoop, harmonicsLoop;
     State state = State::Idle;
     uint32_t reason = 0;
 };

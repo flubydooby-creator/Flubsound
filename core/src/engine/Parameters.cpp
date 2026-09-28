@@ -192,6 +192,17 @@ std::vector<Info> buildLayout()
     // reach the limiter (a quiet game bed); 24 dB = no budget (the default).
     set (MaxBedLiftDb, v3 (make ("max.bedLift", "Bed Lift Budget", "Maximizer", Unit::Db, 0.0f, 24.0f, 24.0f)));
 
+    // ---- Dynamics (added in layout version 4) ------------------------------------------------
+    auto v4 = [] (Info i) {
+        i.sinceVersion = 4;
+        return i;
+    };
+    // docs/11 E21 / E20: the Startle Guard's ceiling over the recent programme
+    // and the Gaming Tame band keyed to it (StartleGuard.h). Off by default,
+    // so every preset saved before it sounds as it did.
+    set (GuardRange, v4 (choice ("guard.range", "Dynamic Range", "Global",
+                                 { "Off", "20 LU", "15 LU", "10 LU (Balanced)", "6 LU (Shield)" }, 0)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

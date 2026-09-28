@@ -40,7 +40,8 @@
 //     of a single 1e30 sample and of a NaN burst (closed); DC after the
 //     maximizer at 24 dB drive per latency profile (closed in every profile
 //     by E05 stage 1); 50 Hz THD+N of all Music
-//     macros at protection strength Off / Normal / Strict
+//     macros at protection strength Off / Normal / Strict (closed at Normal
+//     by E06 Phase 3's measured loop)
 //   * hot master (-9.2 LUFS, -0.35 dBTP): limiter time > 1 dB and clip energy
 //     of Signature and Punchy Pop with and without the automatic preamp (E11)
 //
@@ -1603,12 +1604,15 @@ TEST_CASE ("KnownGap closed: DC after the maximizer - an asymmetric 100 + 200 Hz
     }
 }
 
-TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protection strength Off, Normal and Strict, with and without driven base settings (E06)")
+TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 3 % at protection strength Normal, unchanged at Off; with and without driven base settings (E06)")
 {
     // -12 dBFS 50 Hz, Music, Boost 100 and macros 1-5 at 100 %, THD+N over
-    // 6..10 s. Off governs the macro amounts only (as before E06); Normal
-    // also scales the base max.drive, sat.drive and bass.harmonics; Strict
-    // does that and lets the scale fall to 0 instead of 0.3. Scene b adds
+    // 6..10 s. Off governs the macro amounts only (as before E06), with the
+    // stepwise loop; Normal also scales the base max.drive, sat.drive and
+    // bass.harmonics, and since docs/11 E06 Phase 3 runs the measured loop
+    // (the audible residuals of the bass engine and of the saturator ..
+    // maximizer span, a harmonics scale of its own, PLR, feed-forward);
+    // Strict does that with stricter budgets and a floor of 0. Scene b adds
     // driven base settings (max.drive 12, Tape saturation at 12 dB).
     const auto input = stereoOf (sine (50.0, kFs, samplesOf (10.0), std::pow (10.0f, -12.0f / 20.0f)));
     RenderOptions o = boosted (ModeValue::Music, 100.0f);
@@ -1619,7 +1623,7 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
     setValue (driven, MaxDriveDb, 12.0f);
     setValue (driven, SaturationOn, 1.0f);
     setValue (driven, SatDriveDb, 12.0f);
-    double thd[2][3] = {}, governed[2][3] = {}, harmonics[2][3] = {};
+    double thd[2][3] = {}, harmonics[2][3] = {};
     for (int scene = 0; scene < 2; ++scene)
         for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal, ProtectionStrength::Strict })
         {
@@ -1627,7 +1631,6 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
             const auto out = renderAtStrength (input, scene == 0 ? macros : driven, s, &gr);
             const auto k = static_cast<size_t> (s);
             thd[scene][k] = thdPlusNoiseDb (out[0], samplesOf (6.0), samplesOf (4.0), 50.0);
-            governed[scene][k] = gr.distortionDb;
             harmonics[scene][k] = gr.harmonicsDb;
             const std::string tag = std::string (scene == 0 ? "all Music macros 100" : "... with max.drive 12 + sat.drive 12")
                                     + ", strength " + std::to_string (static_cast<int> (s));
@@ -1637,46 +1640,23 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
             measured (tag + ": governor THD+N input (3 s average)", gr.distortionDb, "dB");
             measured (tag + ": bass harmonics + air exciter share", gr.harmonicsDb, "dB");
         }
-    // Off is the behaviour before E06 (the CLI measures 20.3 % on scene a).
+    // Off is the behaviour before E06 (the CLI measures 20.3 % on scene a),
+    // bit for bit: the measured loop and its analysers do not run at Off.
+    // (Re-based for docs/11 E04 and E05 step 5 in Phase 2; unchanged by Phase 3.)
     CHECK_NEAR (thd[0][0], -13.85, 0.3);
-    // KNOWN_GAP: target <= 3 % (-30.5 dB) at Normal per docs/11 E06 Done-when.
-    // Music's base drives are 0 dB: every drive on scene a is a governed
-    // macro amount, already scaled at Off, and the scale sits at its 0.3
-    // floor, so Normal changes nothing here. Strict (floor 0) removes every
-    // governed amount and still measures 5.3 %: the rest is ungoverned (the
-    // governor's own input stays over its -30 dB budget at scale 0).
-    // Re-based for docs/11 E04 (Punch no longer drives BassTighten, whose
-    // gain riding on the 50 Hz sine had masked some distortion): Strict
-    // -25.51 -> -24.48 dB, driven scene at Off -15.27 -> -14.86 dB (with the
-    // Tighten row restored the tree measures -25.54 / -15.19).
-    CHECK_NEAR (thd[0][1], thd[0][0], 0.05);
-    // docs/11 E06 step 1 (the maximizer's whole-stage residual, the
-    // limiter's gain modulation included, feeds the governor at Normal /
-    // Strict) does not move scene a: the limiter holds its gain flat over
-    // a steady 50 Hz (E05 stage 1), and the scale is at its 0.3 floor
-    // already. What the output carries at Off and Normal is the bass
-    // harmonics generator's intended harmonics (Boost and Warmth's
-    // bass.harmonics at 0.3 of their amounts): -13.6 dB of the output by
-    // itself (DistortionMonitor's harmonics reading), the whole -14.0 dB
-    // THD+N within 0.4 dB. <= 3 % at Normal therefore needs Normal to govern
-    // the harmonics below the 0.3 floor or count them against a budget
-    // (E06 steps 3 / 5), not a better distortion measure.
-    CHECK_GE (harmonics[0][1], thd[0][1] - 1.0);
-    CHECK_NEAR (thd[0][2], -24.48, 0.3);
-    CHECK_GE (governed[0][2], SafetyGovernor::kDistortionBudgetDb);
-    // Driven base settings: Normal governs them too, and the governor's
-    // measured input (saturator + clipper, and since docs/11 E06 step 1 the
-    // maximizer's whole-stage residual) falls 6 dB; the output's THD+N does
-    // not: it is the harmonics generator's (the same -13.6 dB share), which
-    // no strength below Strict takes under the 0.3 floor.
-    // Re-based for docs/11 E05 step 5 (Boost 100's LF-first limiter holds
-    // the 50 Hz low band 3 dB under the ceiling while the harmonics above
-    // 120 Hz pass, so their share of the output rises): driven scene at Off
-    // -14.86 -> -12.96 dB; Normal and Strict move by less than 0.3 dB.
     CHECK_NEAR (thd[1][0], -12.96, 0.3);
-    CHECK_NEAR (thd[1][1], -14.05, 0.3);
-    CHECK_NEAR (thd[1][2], -20.63, 0.3);
-    CHECK_LE (governed[1][1], governed[1][0] - 3.0);
+    // The Done-when row: <= 3 % (-30.46 dB) at Normal. Before Phase 3 Normal
+    // read 20.0 % (-13.96 dB): the bass harmonics generator's intended
+    // harmonics (-13.6 dB of the output) at the 0.3 floor, which no budget
+    // counted. Now the harmonics are budgeted on their own scale by what the
+    // programme leaves audible (a steady tone masks none of them), and the
+    // drive span's residual (saturator, glue, limiter) on the drive scale.
+    CHECK_LE (thd[0][1], -30.46);
+    CHECK_LE (harmonics[0][1], harmonics[0][0] - 20.0); // the harmonics were taken down, ...
+    CHECK_LE (thd[0][2], -30.46);                         // ... also at Strict (it read 6.0 %)
+    // Driven base settings: Normal governs them too (before: 19.9 %).
+    CHECK_LE (thd[1][1], -30.46);
+    CHECK_LE (thd[1][2], -30.46);
 }
 
 TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; Signature and Punchy Pop still limit > 1 dB more than 2 % of the time (E11)")

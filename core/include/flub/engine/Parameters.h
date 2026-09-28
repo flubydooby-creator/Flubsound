@@ -184,6 +184,9 @@ enum Id : int
     MaxLfLimit,       // LF-first limiter in the maximizer's glue path, 0..1 (docs/11 E05 step 5)
     MaxBedLiftDb,     // drive budget on programme far below the ceiling, dB (24 = none; docs/11 E19 step 3)
 
+    // Dynamics
+    GuardRange,       // Choice: Dynamic Range / Startle Guard ceiling, GuardRangeValue (docs/11 E21; StartleGuard.h)
+
     kNumScalarParams
 };
 
@@ -220,6 +223,9 @@ enum class ModeValue : int { Music = 0, Gaming = 1 };
 enum class LatencyProfileValue : int { Quality = 0, Balanced = 1, LowLatency = 2 };
 enum class InputModeValue : int { Auto = 0, ForceSurround = 1, ForceStereo = 2 }; // VirtInputMode
 enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Safe }; // MaxStyle
+/** GuardRange: how far an event may rise over the recent programme (LU);
+    Off = no guard and no Tame (the default). */
+enum class GuardRangeValue : int { Off = 0, Lu20, Lu15, Lu10Balanced, Lu6Shield };
 
 /** A named maximizer style (docs/11 E05 step 4): the values it gives the six
     maximizer controls it owns while it is selected. Custom owns none (the

@@ -1377,19 +1377,25 @@ TEST_CASE ("Protection: strength Off governs only the macro amounts, Normal also
         CHECK (chain.getProtectionStrength() == strength);
         auto hot = makeProgramme (static_cast<int> (kFs * 10.0), 0.5f, 3);
         ScopedNoDenormals noDenormals;
-        float prevScale = 1.0f;
+        float prevScale = 1.0f, prevHarmonicsScale = 1.0f;
         double maxError = 0.0;
         for (int pos = 0; pos < hot.numSamples(); pos += kBlock)
         {
             chain.process (hot.block (pos, kBlock));
             // Governed base values (Normal / Strict): base x scale, plus the
-            // governed Boost amount x scale (MacroMap).
+            // governed Boost amount x scale (MacroMap); at Normal / Strict
+            // the bass harmonics also carry the measured loop's harmonics
+            // scale (docs/11 E06 Phase 3; 1 at Off).
             const float s = strength == ProtectionStrength::Off ? 1.0f : prevScale;
             const float boostSat = 4.0f, boostHarm = 0.3f, boostMax = 8.0f; // Music Boost 100 % amounts
             maxError = std::max ({ maxError, static_cast<double> (std::abs (chain.effectiveValue (MaxDriveDb) - std::min (24.0f, 10.0f * s + boostMax * prevScale))),
                                    static_cast<double> (std::abs (chain.effectiveValue (SatDriveDb) - std::min (24.0f, 6.0f * s + boostSat * prevScale))),
-                                   static_cast<double> (std::abs (chain.effectiveValue (BassHarmonics) - std::min (1.0f, 0.4f * s + boostHarm * prevScale))) });
+                                   static_cast<double> (std::abs (chain.effectiveValue (BassHarmonics)
+                                                                  - std::min (1.0f, 0.4f * s + boostHarm * prevScale) * prevHarmonicsScale)) });
             prevScale = chain.meters().governorScale.load();
+            prevHarmonicsScale = chain.getGovernorHarmonicsScale();
+            if (strength == ProtectionStrength::Off)
+                REQUIRE (prevHarmonicsScale == 1.0f);
         }
         CHECK_LE (maxError, 1e-4);
         std::vector<float> after (static_cast<size_t> (kNumParams));
@@ -1399,7 +1405,13 @@ TEST_CASE ("Protection: strength Off governs only the macro amounts, Normal also
         endScale = prevScale;
         state = static_cast<SafetyGovernor::State> (m.governorState.load());
         reason = m.governorReason.load();
-        CHECK_GE (m.governorDistortionDb.load(), SafetyGovernor::kDistortionBudgetDb);
+        // Off: the stepwise loop's 3 s THD+N average is over its budget. Normal /
+        // Strict run the measured loop (docs/11 E06 Phase 3), which holds the
+        // audible drive-span residual near its set point instead.
+        if (strength == ProtectionStrength::Off)
+            CHECK_GE (m.governorDistortionDb.load(), SafetyGovernor::kDistortionBudgetDb);
+        else
+            CHECK_LE (chain.getDriveResidualDb(), SafetyGovernor::budgetsFor (strength, true).residualDb + 3.0f);
         CHECK_LE (m.governorGrDb.load(), 0.0f);
     };
     float off = 1.0f, normal = 1.0f, strict = 1.0f;
