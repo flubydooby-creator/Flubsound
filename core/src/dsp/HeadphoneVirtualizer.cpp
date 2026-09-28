@@ -16,8 +16,9 @@
 // Level match (docs/11 E28a). The chain's alternative to this module is the
 // BS.775 downmix 0.7071 * D, and this module's trim is the same 0.7071, so
 // matching the ear sums to D matches virt on to virt off. Both are K-weighted
-// (BS.1770: the +4 dB shelf and the 38 Hz high-pass, as SVFs) and summed over
-// both channels, as a loudness meter does. The loudness ratio depends on the
+// (BS.1770: the +4 dB shelf and the 38 Hz high-pass, as SVFs on four lanes,
+// run on every other sample) and summed over both channels, as a loudness
+// meter does. The loudness ratio depends on the
 // content: a single speaker reaches both ears here and one side there (+3 dB
 // here); uncorrelated speakers add in power in both folds; correlated ones add
 // in amplitude in both, but here with ITD and head-shadow differences that
@@ -92,8 +93,17 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <complex>
 #include <limits>
+
+#if defined(__SSE__) || defined(_M_X64) || defined(_M_IX86_FP)
+    #include <xmmintrin.h>
+    #define FLUB_VIRT_SSE 1
+#else
+    #define FLUB_VIRT_SSE 0
+#endif
 
 namespace flub
 {
@@ -212,18 +222,59 @@ std::array<float, 2> downmixWeights (int c) noexcept
 constexpr int kGridFirst = -17, kGridLast = 13;
 double gridFrequency (int k) noexcept { return 1000.0 * std::pow (2.0, k / 3.0); }
 
-/** One K-weighting SVF on four lanes (the arithmetic of svfTick). */
-void svfLanes (const SvfCoeffs& c, std::array<float, 4>& ic1, std::array<float, 4>& ic2, std::array<float, 4>& v) noexcept
+/** Four floats that the level match's K-weighting runs in parallel (D left /
+    right, ears left / right): one SSE register where there is one, else
+    plain floats. The arithmetic is the same either way. */
+#if FLUB_VIRT_SSE
+struct Lane4
 {
-    for (size_t k = 0; k < 4; ++k)
+    __m128 v;
+};
+inline Lane4 lane4 (float a, float b, float c, float d) noexcept { return { _mm_setr_ps (a, b, c, d) }; }
+inline Lane4 lane4 (const std::array<float, 4>& a) noexcept { return { _mm_loadu_ps (a.data()) }; }
+inline Lane4 splat (float a) noexcept { return { _mm_set1_ps (a) }; }
+inline Lane4 operator+ (Lane4 a, Lane4 b) noexcept { return { _mm_add_ps (a.v, b.v) }; }
+inline Lane4 operator- (Lane4 a, Lane4 b) noexcept { return { _mm_sub_ps (a.v, b.v) }; }
+inline Lane4 operator* (Lane4 a, Lane4 b) noexcept { return { _mm_mul_ps (a.v, b.v) }; }
+inline void store (Lane4 a, std::array<float, 4>& out) noexcept { _mm_storeu_ps (out.data(), a.v); }
+#else
+struct Lane4
+{
+    std::array<float, 4> v;
+};
+inline Lane4 lane4 (float a, float b, float c, float d) noexcept { return { { a, b, c, d } }; }
+inline Lane4 lane4 (const std::array<float, 4>& a) noexcept { return { a }; }
+inline Lane4 splat (float a) noexcept { return { { a, a, a, a } }; }
+template <typename Op>
+inline Lane4 each (Lane4 a, Lane4 b, Op op) noexcept
+{
+    return { { op (a.v[0], b.v[0]), op (a.v[1], b.v[1]), op (a.v[2], b.v[2]), op (a.v[3], b.v[3]) } };
+}
+inline Lane4 operator+ (Lane4 a, Lane4 b) noexcept { return each (a, b, [] (float x, float y) { return x + y; }); }
+inline Lane4 operator- (Lane4 a, Lane4 b) noexcept { return each (a, b, [] (float x, float y) { return x - y; }); }
+inline Lane4 operator* (Lane4 a, Lane4 b) noexcept { return each (a, b, [] (float x, float y) { return x * y; }); }
+inline void store (Lane4 a, std::array<float, 4>& out) noexcept { out = a.v; }
+#endif
+
+/** SVF coefficients broadcast to four lanes. */
+struct SvfLanes
+{
+    Lane4 a1, a2, a3, m0, m1, m2;
+    explicit SvfLanes (const SvfCoeffs& c) noexcept
+        : a1 (splat (c.a1)), a2 (splat (c.a2)), a3 (splat (c.a3)), m0 (splat (c.m0)), m1 (splat (c.m1)), m2 (splat (c.m2))
     {
-        const float v3 = v[k] - ic2[k];
-        const float v1 = c.a1 * ic1[k] + c.a2 * v3;
-        const float v2 = ic2[k] + c.a2 * ic1[k] + c.a3 * v3;
-        ic1[k] = 2.0f * v1 - ic1[k];
-        ic2[k] = 2.0f * v2 - ic2[k];
-        v[k] = c.m0 * v[k] + c.m1 * v1 + c.m2 * v2;
     }
+};
+
+/** One SVF tick on four lanes (the arithmetic of svfTick). */
+inline Lane4 svfLanes (const SvfLanes& c, Lane4& ic1, Lane4& ic2, Lane4 v0) noexcept
+{
+    const Lane4 v3 = v0 - ic2;
+    const Lane4 v1 = c.a1 * ic1 + c.a2 * v3;
+    const Lane4 v2 = ic2 + c.a2 * ic1 + c.a3 * v3;
+    ic1 = (v1 + v1) - ic1;
+    ic2 = (v2 + v2) - ic2;
+    return c.m0 * v0 + c.m1 * v1 + c.m2 * v2;
 }
 
 /** Woodworth path length to one ear in units of the head radius (delay = value * a/c).
@@ -502,8 +553,10 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
         v->assign (scratch, 0.0f);
 
     // Level match and fold headroom (E28a).
-    kShelf = SvfCoeffs::make (FilterType::HighShelf, kKShelfHz, kKShelfQ, kKShelfDb, fs);
-    kHighPass = SvfCoeffs::make (FilterType::HighPass, kKHighPassHz, kKHighPassQ, 0.0, fs);
+    // The servo's K-weighting runs on every other sample (renderSegment), so
+    // it is designed for fs / 2; the diffuse-field grid uses the full rate.
+    kShelf = SvfCoeffs::make (FilterType::HighShelf, kKShelfHz, kKShelfQ, kKShelfDb, 0.5 * fs);
+    kHighPass = SvfCoeffs::make (FilterType::HighPass, kKHighPassHz, kKHighPassQ, 0.0, 0.5 * fs);
     averageCoeff = 1.0 - std::exp (-kControlInterval / (static_cast<double> (kMakeupAverageMs) * 0.001 * fs));
     makeupSlew = dbToGain (kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
     headroomHoldSamples = msToSamples (kHeadroomHoldMs, fs);
@@ -703,8 +756,11 @@ void HeadphoneVirtualizer::swapLayout() noexcept
 
 double HeadphoneVirtualizer::pathWeight (double freqHz) const noexcept
 {
+    // |K|^2 at the session rate (the servo's copy runs at fs / 2).
     const double fs = spec.sampleRate;
-    return std::norm (kShelf.response (freqHz, fs)) * std::norm (kHighPass.response (freqHz, fs));
+    const auto shelf = SvfCoeffs::make (FilterType::HighShelf, kKShelfHz, kKShelfQ, kKShelfDb, fs);
+    const auto highPass = SvfCoeffs::make (FilterType::HighPass, kKHighPassHz, kKHighPassQ, 0.0, fs);
+    return std::norm (shelf.response (freqHz, fs)) * std::norm (highPass.response (freqHz, fs));
 }
 
 float HeadphoneVirtualizer::diffuseGainFor() const noexcept
@@ -1012,10 +1068,12 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         if (measure)
         {
             const auto d = downmixWeights (c);
-            for (int i = 0; i < length; ++i)
+            for (size_t side = 0; side < 2; ++side)
             {
-                dl[i] += d[0] * x[i];
-                dr[i] += d[1] * x[i];
+                float* const ref = side == 0 ? dl : dr;
+                if (d[side] != 0.0f) // only the centre feeds both sides
+                    for (int i = 0; i < length; ++i)
+                        ref[i] += d[side] * x[i];
             }
         }
 
@@ -1051,17 +1109,42 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
     const bool limit = params.foldHeadroom;
     float* const outL = block.channel (0) + start;
     float* const outR = numInputs >= 2 ? block.channel (1) + start : nullptr;
-    std::array<float, 4> lanes {};
+    if (measure)
+    {
+        // K-weighted power, in place: dl = D (both channels), dr = the ear
+        // sums before the make-up. Measured on every other sample (even
+        // stream positions; the others read 0): the mean square of the
+        // subsampled signal is that of the signal, and at fs / 2 the
+        // K-weighting still covers the band where it differs (see prepare()).
+        // Half the cost; the servo only needs the ratio of two powers.
+        const SvfLanes ks (kShelf), kh (kHighPass);
+        Lane4 s1 = lane4 (kShelf1), s2 = lane4 (kShelf2), h1 = lane4 (kHp1), h2 = lane4 (kHp2);
+        std::array<float, 4> y {};
+        const int first = servoPhase & 1; // first even stream position
+        for (int i = first; i < length; i += 2)
+        {
+            const Lane4 k = svfLanes (kh, h1, h2, svfLanes (ks, s1, s2, lane4 (dl[i], dr[i], l[i], r[i])));
+            store (k * k, y);
+            dl[i] = y[0] + y[1];
+            dr[i] = y[2] + y[3];
+        }
+        for (int i = 1 - first; i < length; i += 2)
+            dl[i] = dr[i] = 0.0f;
+        store (s1, kShelf1);
+        store (s2, kShelf2);
+        store (h1, kHp1);
+        store (h2, kHp2);
+        for (auto* st : { &kShelf1, &kShelf2, &kHp1, &kHp2 })
+            for (auto& x : *st)
+                x = flushed (x);
+    }
     double eRef = periodRef, eBin = periodBin;
     for (int i = 0; i < length; ++i)
     {
         if (measure)
         {
-            lanes = { dl[i], dr[i], l[i], r[i] };
-            svfLanes (kShelf, kShelf1, kShelf2, lanes);
-            svfLanes (kHighPass, kHp1, kHp2, lanes);
-            eRef += static_cast<double> (lanes[0] * lanes[0] + lanes[1] * lanes[1]);
-            eBin += static_cast<double> (lanes[2] * lanes[2] + lanes[3] * lanes[3]);
+            eRef += static_cast<double> (dl[i]);
+            eBin += static_cast<double> (dr[i]);
         }
 
         const int phase = ++servoPhase;
@@ -1069,14 +1152,9 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         float yl = kTrim * (m * l[i] + lfeOut[i]);
         float yr = kTrim * (m * r[i] + lfeOut[i]);
 
-        // Fold headroom: instant attack to exactly the ceiling, hold, release.
-        const float peak = std::max (std::abs (yl), std::abs (yr)) * headroomGain;
-        if (limit && peak > kHeadroomCeiling && std::isfinite (peak))
-        {
-            headroomGain *= kHeadroomCeiling / peak;
-            headroomHold = headroomHoldSamples;
-        }
-        else if (headroomHold > 0)
+        // Fold headroom: hold, then release; an over drops the gain at once
+        // to exactly the ceiling (and restarts the hold).
+        if (headroomHold > 0)
         {
             --headroomHold;
         }
@@ -1085,6 +1163,12 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
             headroomGain += (1.0f - headroomGain) * headroomRelease;
             if (headroomGain > 0.999999f)
                 headroomGain = 1.0f;
+        }
+        const float peak = std::max (std::abs (yl), std::abs (yr));
+        if (limit && peak * headroomGain > kHeadroomCeiling && std::isfinite (peak))
+        {
+            headroomGain = kHeadroomCeiling / peak;
+            headroomHold = headroomHoldSamples;
         }
         float g = headroomGain;
         if (fading)
@@ -1117,9 +1201,6 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
     }
     periodRef = eRef;
     periodBin = eBin;
-    for (auto* st : { &kShelf1, &kShelf2, &kHp1, &kHp2 })
-        for (auto& v : *st)
-            v = flushed (v);
 
     for (int c = 2; c < numInputs; ++c)
         std::fill_n (block.channel (c) + start, length, 0.0f);

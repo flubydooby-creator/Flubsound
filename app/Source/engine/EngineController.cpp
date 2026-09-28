@@ -10,6 +10,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <optional>
+#include <string>
 
 namespace flub::app
 {
@@ -42,6 +45,43 @@ constexpr float kFirstRunGameDetail = 0.15f;    // Macro 4
 // ChatMix (docs/11 E56): the strips it balances.
 constexpr const char* kChatMixGameStrip = "Game";
 constexpr const char* kChatMixChatStrip = "Chat";
+
+// Protection strength (docs/11 E06): a host setting, stored by name.
+constexpr const char* kProtectionStrengthKey = "protection.strength";
+
+// PipeWire quantum requests (docs/11 E48a): pipewire::planLatencyEnvironment's
+// values (PlatformServices_linux.cpp).
+constexpr const char* kPipeWireBalancedLatency = "256/48000";
+constexpr const char* kPipeWireLowLatency = "128/48000";
+constexpr const char* kPipeWireLockQuantumProps = "{ node.lock-quantum = true }";
+
+#if defined(__linux__)
+/** PIPEWIRE_LATENCY / PIPEWIRE_PROPS as the user started Flubsound: read
+    during static initialisation, before the per-app router exports its own
+    request (AppAudioRouter::create), so a value found later can be told
+    apart from the user's. */
+struct StartupPipeWireEnvironment
+{
+    std::optional<std::string> latency, props;
+
+    static std::optional<std::string> read (const char* name)
+    {
+        const char* v = std::getenv (name);
+        return v != nullptr && *v != '\0' ? std::optional<std::string> (v) : std::nullopt;
+    }
+};
+const StartupPipeWireEnvironment startupPipeWire { StartupPipeWireEnvironment::read ("PIPEWIRE_LATENCY"),
+                                                  StartupPipeWireEnvironment::read ("PIPEWIRE_PROPS") };
+#endif
+
+ProtectionStrength protectionStrengthFromName (const juce::String& name)
+{
+    if (name.equalsIgnoreCase ("normal"))
+        return ProtectionStrength::Normal;
+    if (name.equalsIgnoreCase ("strict"))
+        return ProtectionStrength::Strict;
+    return ProtectionStrength::Off;
+}
 
 juce::String stripStateToJson (const ParameterStore& store)
 {
@@ -94,7 +134,12 @@ EngineController::EngineController (Options opts)
     settings->migratePresetReferences (presets->getLegacyIdAliases()); // docs/11 E52: one-time id -> uuid (settings schema 2)
     routing =std::make_unique<AppRouting> (*host, *settings);
 
-    host->onEngineConfigured = [this] { notify (Change::Engine); };
+    protectionStrength = protectionStrengthFromName (settings->getPropertiesFile().getValue (kProtectionStrengthKey, "off"));
+    host->onEngineConfigured = [this]
+    {
+        applyProtectionStrength(); // the new engine's chains start at Off
+        notify (Change::Engine);
+    };
     host->onDeviceError = [this] (const juce::String& message)
     {
         lastDeviceError = message;
@@ -102,6 +147,18 @@ EngineController::EngineController (Options opts)
     };
     host->onDeviceSafetyChanged = [this] { notify (Change::Device); }; // the header's device warning
     presets->onPresetListChanged = [this] { notify (Change::Preset); };
+    presets->onPresetWarnings = [this] (const PresetInfo& preset, const juce::StringArray& warnings)
+    {
+        // Taken by the UI on the Change::Preset that follows (a toast).
+        if (warnings.isEmpty())
+            return;
+        if (pendingPresetWarnings.size() >= kMaxPendingNotices)
+            pendingPresetWarnings.erase (pendingPresetWarnings.begin());
+        pendingPresetWarnings.push_back ({ preset.name, warnings });
+        // A load announces them itself (Change::Preset right after); an
+        // import reports them after its list change: announce those once.
+        triggerAsyncUpdate();
+    };
     routing->onChanged = [this] { notify (Change::Routing); };
 
     for (int i = 0; i < getNumStrips(); ++i)
@@ -121,9 +178,13 @@ EngineController::EngineController (Options opts)
         applyMasterEnableToStrip (i);
         persistedVersions[static_cast<size_t> (i)] = getParams (i).version();
     }
+    applyProtectionStrength();
 
     loadDeviceProfiles();
     preferredOutputName = settings->getPreferredOutputDevice();
+
+    // Before the device opens: PipeWire reads the request when the stream opens.
+    requestGraphQuantum (getLatencyProfile(), false);
 
     if (options.openAudioDevice)
     {
@@ -158,6 +219,7 @@ void EngineController::shutdown()
     isShutDown = true;
 
     stopTimer();
+    cancelPendingUpdate();
     routing->shutdown();
 
     // Latched hotkey overrides are per session: the saved state is the user's own.
@@ -180,6 +242,7 @@ void EngineController::shutdown()
     settings->save();
 
     host->onEngineConfigured = nullptr;
+    presets->onPresetWarnings = nullptr;
     host->onDeviceError = nullptr;
     host->onDeviceSafetyChanged = nullptr;
     host->closeDevice();
@@ -393,6 +456,7 @@ bool EngineController::loadPreset (const PresetInfo& preset, int strip, juce::St
         return false;
     settings->setLastPreset (getStripName (s), preset.id);
     presetChangedByUser (s);
+    presetLoadedByUser (preset);
     notify (Change::Preset);
     return true;
 }
@@ -405,6 +469,8 @@ bool EngineController::nextPreset (int strip)
         return false;
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
     presetChangedByUser (s);
+    if (const auto* info = presets->findById (presets->getCurrentPresetId (s)))
+        presetLoadedByUser (*info);
     notify (Change::Preset);
     return true;
 }
@@ -417,6 +483,8 @@ bool EngineController::previousPreset (int strip)
         return false;
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
     presetChangedByUser (s);
+    if (const auto* info = presets->findById (presets->getCurrentPresetId (s)))
+        presetLoadedByUser (*info);
     notify (Change::Preset);
     return true;
 }
@@ -452,6 +520,61 @@ juce::String EngineController::saveUserPreset (const juce::String& name, const j
         notify (Change::Preset);
     }
     return id;
+}
+
+juce::String EngineController::renameUserPreset (const PresetInfo& preset, const juce::String& newName, juce::String& error)
+{
+    const auto oldId = preset.id; // `preset` may point into the list the rename rebuilds
+    const auto id = presets->renameUserPreset (preset, newName, error);
+    if (id.isEmpty())
+        return {};
+
+    // A preset keeps its uuid, so usually nothing refers to a new id; one
+    // that had none (its file could not be written before) has one now.
+    if (id != oldId)
+    {
+        for (int s = 0; s < getNumStrips(); ++s)
+            if (settings->getLastPreset (getStripName (s)) == oldId)
+                settings->setLastPreset (getStripName (s), id);
+        auto rules = autoProfiles.getRules();
+        bool changed = false;
+        for (auto& rule : rules)
+            if (rule.presetId == oldId)
+            {
+                rule.presetId = id;
+                changed = true;
+            }
+        if (changed)
+            setAutoProfileRules (std::move (rules));
+    }
+    notify (Change::Preset);
+    return id;
+}
+
+std::vector<EngineController::PresetWarnings> EngineController::takePresetWarnings()
+{
+    std::vector<PresetWarnings> taken;
+    taken.swap (pendingPresetWarnings);
+    return taken;
+}
+
+std::optional<EngineController::LatencySuggestion> EngineController::takeLatencySuggestion()
+{
+    auto taken = pendingLatencySuggestion;
+    pendingLatencySuggestion.reset();
+    return taken;
+}
+
+void EngineController::presetLoadedByUser (const PresetInfo& preset)
+{
+    // docs/11 E42a: the profile stays (a preset never re-prepares the engine,
+    // PresetManager::loadIntoBank); a different suggestion becomes a prompt.
+    pendingLatencySuggestion.reset();
+    if (! preset.suggestedLatencyProfile.has_value())
+        return;
+    const auto current = getLatencyProfile();
+    if (*preset.suggestedLatencyProfile != current)
+        pendingLatencySuggestion = LatencySuggestion { preset.name, *preset.suggestedLatencyProfile, current };
 }
 
 Bank EngineController::getActiveBank (int strip)
@@ -611,6 +734,31 @@ juce::String EngineController::reopenDevice()
     applyDeviceInputPolicy();
     notify (Change::Device);
     return lastDeviceError;
+}
+
+juce::String EngineController::retryDevice()
+{
+    const auto safety = host->getDeviceSafetyState();
+    if (safety.kind == DeviceSafetyState::Kind::LoopbackPair)
+    {
+        // The pair as the device manager has it now (the user may have
+        // switched the system output back to the headset meanwhile).
+        auto input = safety.inputDeviceName, output = safety.outputDeviceName;
+        if (options.openAudioDevice && getDeviceManager().getCurrentAudioDevice() != nullptr)
+        {
+            const auto setup = getDeviceManager().getAudioDeviceSetup();
+            input = setup.inputDeviceName;
+            output = setup.outputDeviceName;
+        }
+        host->checkLoopbackPair (input, output);
+        return {};
+    }
+    if (! options.openAudioDevice)
+    {
+        host->clearDeviceError(); // nothing to re-open: the banner is dismissed
+        return {};
+    }
+    return reopenDevice();
 }
 
 bool EngineController::looksLikeLoopbackDevice (const juce::String& inputDeviceName)
@@ -1018,7 +1166,108 @@ void EngineController::setLatencyProfile (LatencyProfileValue profile)
 {
     applyLatencyProfile (profile);
     loadReducer.profileChangedByUser();
+    // A choice by hand only: the automatic overload response steps down to
+    // shed DSP load, and a smaller quantum would add callbacks, not remove them.
+    requestGraphQuantum (profile, true);
     notify (Change::Settings);
+}
+
+EngineController::GraphQuantumPlan EngineController::planGraphQuantum (LatencyProfileValue profile, const char* userLatency,
+                                                                       const char* userProps)
+{
+    GraphQuantumPlan plan;
+    if (userLatency != nullptr && *userLatency != '\0')
+        return plan; // the user's own request wins, for every profile
+    const bool low = profile == LatencyProfileValue::LowLatency;
+    plan.latency = low ? kPipeWireLowLatency : kPipeWireBalancedLatency;
+    if (userProps == nullptr || *userProps == '\0')
+    {
+        if (low)
+            plan.props = kPipeWireLockQuantumProps;
+        else
+            plan.clearProps = true;
+    }
+    return plan;
+}
+
+bool EngineController::applyGraphQuantum (LatencyProfileValue profile, const char* userLatency, const char* userProps)
+{
+   #if defined(__linux__)
+    const auto plan = planGraphQuantum (profile, userLatency, userProps);
+    const auto current = [] (const char* name) { const char* v = std::getenv (name); return juce::String (v != nullptr ? v : ""); };
+    bool changed = false;
+    if (plan.latency.isNotEmpty() && current ("PIPEWIRE_LATENCY") != plan.latency)
+    {
+        ::setenv ("PIPEWIRE_LATENCY", plan.latency.toRawUTF8(), 1);
+        changed = true;
+    }
+    if (plan.props.isNotEmpty() && current ("PIPEWIRE_PROPS") != plan.props)
+    {
+        ::setenv ("PIPEWIRE_PROPS", plan.props.toRawUTF8(), 1);
+        changed = true;
+    }
+    else if (plan.clearProps && current ("PIPEWIRE_PROPS") == kPipeWireLockQuantumProps)
+    {
+        ::unsetenv ("PIPEWIRE_PROPS"); // only the lock this process exported
+        changed = true;
+    }
+    return changed;
+   #else
+    juce::ignoreUnused (profile, userLatency, userProps);
+    return false;
+   #endif
+}
+
+void EngineController::requestGraphQuantum (LatencyProfileValue profile, bool reopen)
+{
+   #if defined(__linux__)
+    // A device session only: tests and headless renders leave the process
+    // environment alone.
+    if (! options.openAudioDevice)
+        return;
+    const auto& user = startupPipeWire;
+    if (! applyGraphQuantum (profile, user.latency ? user.latency->c_str() : nullptr, user.props ? user.props->c_str() : nullptr))
+        return;
+    // PipeWire reads the request when a stream opens: re-open a device that
+    // talks to it (pipewire-jack, or ALSA through PipeWire's plug-in).
+    auto* device = getDeviceManager().getCurrentAudioDevice();
+    if (reopen && device != nullptr && (device->getTypeName() == "JACK" || device->getTypeName() == "ALSA"))
+    {
+        persistDeviceState();
+        reopenDevice();
+    }
+   #else
+    juce::ignoreUnused (profile, reopen);
+   #endif
+}
+
+void EngineController::setProtectionStrength (ProtectionStrength strength)
+{
+    protectionStrength = strength;
+    settings->getPropertiesFile().setValue (kProtectionStrengthKey, getProtectionStrengthName (strength).toLowerCase());
+    applyProtectionStrength();
+    notify (Change::Settings);
+}
+
+void EngineController::applyProtectionStrength()
+{
+    // A relaxed atomic per chain, taken by the audio thread at its next
+    // segment (ProcessingChain::setProtectionStrength). The newest engine's
+    // chains: an engine being faded out keeps its own until it is retired.
+    for (int s = 0; s < getNumStrips(); ++s)
+        if (auto& chain = getChain (s); chain.getProtectionStrength() != protectionStrength)
+            chain.setProtectionStrength (protectionStrength);
+}
+
+juce::String EngineController::getProtectionStrengthName (ProtectionStrength strength)
+{
+    switch (strength)
+    {
+        case ProtectionStrength::Normal: return "Normal";
+        case ProtectionStrength::Strict: return "Strict";
+        case ProtectionStrength::Off: break;
+    }
+    return "Off";
 }
 
 void EngineController::setReduceLoadOnOverload (bool shouldReduce)
@@ -1081,6 +1330,7 @@ void EngineController::timerCallback()
 {
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     updateOverloadWatchdog (host->getStatus());
+    applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
     pollForegroundApp();
 
     if (++timerTicks % kPersistEveryTicks == 0)
@@ -1097,6 +1347,12 @@ void EngineController::timerCallback()
             notify (Change::Device);
         }
     }
+}
+
+void EngineController::handleAsyncUpdate()
+{
+    if (! pendingPresetWarnings.empty())
+        notify (Change::Preset);
 }
 
 void EngineController::renderOffline (StripSignalSource& source, int numSamples)

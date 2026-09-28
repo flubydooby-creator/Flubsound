@@ -13,6 +13,8 @@
 // is reported as kMinusInfDb and printed as "-inf" (null in JSON).
 #pragma once
 
+#include "flub/analysis/Discontinuity.h"
+#include "flub/analysis/SceneEvents.h"
 #include "flub/io/Json.h"
 #include "flub/io/WavFile.h"
 
@@ -144,6 +146,73 @@ double powerShareAboveDb (const float* x, int n, double sampleRate, double fromH
 
 /** |mean| of x[0, n) in dBFS (-160 floor). */
 double dcDbfs (const float* x, int n);
+
+// ---- Scene events and band tracks (docs/11 E60, `analyze --events`) --------
+// For user captures: flub::analyseSceneEvents (flub/analysis/SceneEvents.h,
+// the detector the E60 scene tests use) over the whole programme.
+
+/** Events of the programme: all channels (mean square), full band, or in one
+    band (bandHz > 0: RBJ band-pass, Q 1, as the E60 step band is read). */
+struct EventsReport
+{
+    double frameSeconds = 0.01;
+    double bandHz = 0.0;                      // 0 = full band
+    std::vector<SceneEvent> events;           // in order of their start
+    std::array<int, 4> counts {};             // per SceneEventType
+    float backgroundMedianDb = -160.0f;       // median of the frames' background
+};
+
+EventsReport sceneEvents (const std::vector<std::vector<float>>& channels, double sampleRate, double bandHz = 0.0);
+
+/** Octave-band level tracks (`--bands --events`): the octave bands of
+    octaveBands() (the mid, RBJ Q sqrt 2, 31.5 Hz .. 16 kHz), each read by
+    analyseSceneEvents; levels are power means over kTrackSeconds frames,
+    with their 10th / 50th / 90th percentiles and the band's events. */
+struct BandTrack
+{
+    float centreHz = 0.0f;
+    std::vector<float> levelDb;               // one per kTrackSeconds frame (dBFS, -160 floor)
+    float p10Db = -160.0f, medianDb = -160.0f, p90Db = -160.0f;
+    std::vector<SceneEvent> events;
+    std::array<int, 4> counts {};             // per SceneEventType
+};
+
+inline constexpr double kTrackSeconds = 0.1;
+
+std::vector<BandTrack> bandTracks (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** { frameSeconds, band, backgroundMedianDb, counts {onset, loud, silence,
+    level-change}, list [{ type, start, end, levelDb, overBackgroundDb }] }. */
+json::Value eventsToJson (const EventsReport& report);
+
+/** { frameSeconds, bands [{ hz, p10Db, medianDb, p90Db, counts, levelsDb [...],
+    events [...] }] }. */
+json::Value bandTracksToJson (const std::vector<BandTrack>& tracks);
+
+/** Multi-line text: counts, then at most maxLines events. */
+std::string formatEvents (const EventsReport& report, size_t maxLines = 50);
+
+/** Multi-line text: one row per band (percentiles and event counts). */
+std::string formatBandTracks (const std::vector<BandTrack>& tracks);
+
+// ---- Glitches (docs/11 E53, `analyze --glitches`) ---------------------------
+/** flub::DiscontinuityDetector (default settings) over every channel of a
+    file (a loopback capture, a render). */
+struct GlitchReport
+{
+    double sampleRate = 48000.0;
+    std::array<int64_t, kNumDiscontinuityTypes> counts {};
+    std::vector<Discontinuity> events; // the first 100
+};
+
+GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** { click, dropout, non-finite, dc-step, total, list [{ type, channel,
+    seconds, lengthMs, levelDb, overDb }] }. */
+json::Value glitchesToJson (const GlitchReport& report);
+
+/** Multi-line text: counts, then at most maxLines events. */
+std::string formatGlitches (const GlitchReport& report, size_t maxLines = 50);
 
 /** "pcm16", "pcm24", "pcm32", "float32", "float64". */
 const char* sampleFormatName (io::SampleFormat format) noexcept;

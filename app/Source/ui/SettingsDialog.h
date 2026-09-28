@@ -18,8 +18,11 @@
 //               automatic overload response (switch, what it changed and a
 //               Restore button), live latency breakdown with CPU / xruns /
 //               overloads, the per-app capture streams' FIFO statistics,
-//               device-input routing, per-app routing method and the meter
-//               palette (standard / colour-blind safe).
+//               device-input routing, per-app routing method, protection
+//               strength (docs/11 E06: Off / Normal / Strict, engine-wide),
+//               the selected strip's Automatic Preamp (docs/11 E11) with its
+//               live prediction, and the meter palette (standard /
+//               colour-blind safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; each
 //               row shows its registration status (registered, in use,

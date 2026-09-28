@@ -32,7 +32,8 @@ target_sources(flub_tests PRIVATE
     "${FLUB_CLI_DIR}/CliOptions.cpp"
     "${FLUB_CLI_DIR}/Commands.cpp"
     "${FLUB_CLI_DIR}/FactoryPresets.cpp"
-    "${FLUB_CLI_DIR}/OfflineRenderer.cpp")
+    "${FLUB_CLI_DIR}/OfflineRenderer.cpp"
+    "${FLUB_CLI_DIR}/Soak.cpp")
 target_include_directories(flub_tests PRIVATE "${FLUB_CLI_DIR}")
 target_compile_definitions(flub_tests PRIVATE FLUB_SOURCE_PRESET_DIR="${PROJECT_SOURCE_DIR}/presets/factory")
 if(WIN32)

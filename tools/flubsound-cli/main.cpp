@@ -5,8 +5,9 @@
 //
 //   flubsound-cli process -i in.wav -o out.wav [render options]
 //   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N]
-//   flubsound-cli analyze -i file.wav [--bands] [--json]
+//   flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--json]
 //   flubsound-cli quality [chain options] [--json]
+//   flubsound-cli soak    [chain options] [--minutes M] [--seed N] [--json]
 //   flubsound-cli params  [--json]
 //   flubsound-cli presets [--dir <dir>] [--json]
 //
@@ -44,15 +45,16 @@ const char* const kGeneralHelp = R"(flubsound-cli - Flubsound Pro batch processo
 Usage:
   flubsound-cli process -i in.wav -o out.wav [render options]
   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N] [--recursive]
-  flubsound-cli analyze -i file.wav [--bands] [--json]
+  flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--json]
   flubsound-cli quality [preset / mode / macro / --set options] [--json]
+  flubsound-cli soak    [preset / mode / macro / --set options] [--minutes M] [--json]
   flubsound-cli params  [--json]
   flubsound-cli presets [--dir <dir>] [--json]
   flubsound-cli help <command>        detailed help for one command
   flubsound-cli --version
 
-Render options (process / batch; quality takes all but the file options,
---target-lufs and --format):
+Render options (process / batch; quality and soak take all but the file
+options, --target-lufs and --format):
   -p, --preset <file.json|name>  preset file, or factory preset name (see `presets`)
       --preset-dir <dir>         factory preset folder for --preset <name>
   -m, --mode music|gaming        processing mode (selects the macro set)
@@ -78,6 +80,9 @@ Render options (process / batch; quality takes all but the file options,
       --json                     machine-readable result on stdout (process /
                                  batch: render.stats, see `help process`)
       --bands                    process / analyze: octave-band levels
+      --events                   analyze: scene events (onsets, loud events,
+                                 silences, level changes; see `help analyze`)
+      --glitches                 analyze: clicks, dropouts, NaN / Inf, DC steps
 
 Precedence: defaults < --preset < --mode < --boost/--macro/--profile/--ceiling
 < --set. Bypass is never taken from a preset (use --set bypass=on).
@@ -142,7 +147,7 @@ Example:
   flubsound-cli batch -i ./album -o ./album-fx --mode music --boost 40 --target-lufs -14 --jobs 4 --format pcm24
 )";
 
-const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--bands] [--json]
+const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--bands] [--events [--event-band Hz]] [--glitches] [--json]
 
 Measures a WAV file with the engine's meters:
   integrated loudness (LUFS, EBU R128 gating), loudness range (LU, EBU Tech
@@ -154,6 +159,29 @@ Values that cannot be measured (silence, < 400 ms) print as -inf / null.
 --bands adds octave-band levels of the mean of all channels (31.5 Hz ..
 16 kHz, dBFS RMS; RBJ band-passes about one octave wide, for comparing
 renders rather than class-1 IEC 61260 filtering).
+
+--events (docs/11 E60; for game and film captures) reads the programme in
+10 ms frames of all channels against its own background (a slow floor that
+rises at most 5 dB/s) and lists
+  onset         the level 6 dB or more over the background for <= 300 ms
+                (a step, a click, a short cue)
+  loud          the peak 20 dB over the background or above -6 dBFS (shots,
+                explosions; frames < 150 ms apart are one event)
+  silence       under -70 dBFS for >= 300 ms
+  level-change  the median level over 2 s after a frame differs by >= 6 dB
+                from the median over 2 s before it (a scene or track change)
+--event-band Hz reads the events in one band (RBJ band-pass, Q 1), e.g.
+3200 for footsteps. --bands --events adds per octave band (of the mid, as
+--bands) a level track in 100 ms frames, its 10th / 50th / 90th
+percentiles and the band's own events (bandTracks with --json).
+
+--glitches (docs/11 E53; for loopback captures and renders) runs the
+discontinuity detector over every channel: clicks (the 4th-order difference
+24 dB over its RMS on both sides and above -70 dBFS: impulses, steps,
+skipped or repeated samples), dropouts (>= 0.5 ms of exact zeros starting
+abruptly after programme), NaN / Inf runs and DC steps (the 2 Hz low-passed
+signal moving >= -30 dBFS within 250 ms). It is most sensitive on tonal
+programme (a test tone); on broadband noise only large breaks show.
 )";
 
 const char* const kQualityHelp = R"(flubsound-cli quality [preset / mode / macro / --set options] [--json]
@@ -190,6 +218,41 @@ Examples:
   flubsound-cli quality --mode music --macro warmth=100 --profile low-latency --rate 44100
 )";
 
+const char* const kSoakHelp = R"(flubsound-cli soak [preset / mode / macro / --set options] [--minutes M | --seconds S]
+                   [--seed N] [--automation off|user|all] [--interval ms] [--rate R] [--json]
+
+Runs the processing chain for a long time on generated programme with
+parameter automation and watches its output for discontinuities (docs/11
+E53): the offline half of the soak, without devices.
+
+  * Programme: seeded and licence-free, a 30 s cycle of 6 s scenes - music
+    (bass, chords, a 997 Hz lead, kicks), game (a quiet bed, 3.2 kHz steps,
+    shots, an explosion), speech-like syllables, a loud section that drives
+    the maximizer, and a fade into 1 s of digital silence and back. It is
+    smooth and tonal, so the detector reads it at full sensitivity; the
+    input is watched too (a self-check).
+  * Automation (--automation, default user; --interval, default 250 ms mean,
+    +-50 %): one host action per interval between blocks - Boost or a macro,
+    a gain / EQ / bass / clarity / width / compressor / drive parameter,
+    a module on / off, the mode, a factory preset, bypass, an A/B switch.
+    `all` sets any non-structural parameter to a random value instead.
+    The latency profile never changes (it re-prepares the chain).
+  * Watched: clicks, dropouts, NaN / Inf, DC steps on the stereo output
+    (see `help analyze`, --glitches), each with the last automation action
+    before it; the output's peak; the wall time per block against its
+    real-time budget (--block, default 512, at --rate, default 48000).
+
+--seconds S / --minutes M: length (default 10 minutes). Exit code 0 if the
+output has no discontinuity, 1 if it has one (or the programme itself read
+as discontinuous). tools/scripts/soak.py runs the long soak over several
+settings. Everything but the timing is deterministic for a seed.
+
+Examples:
+  flubsound-cli soak --minutes 60
+  flubsound-cli soak --preset "Competitive FPS" --seconds 120 --seed 7 --json
+  flubsound-cli soak --automation all --interval 50 --minutes 10
+)";
+
 const char* const kParamsHelp = R"(flubsound-cli params [--json]
 
 Lists every parameter of the processing chain: key (for --set and preset
@@ -220,6 +283,8 @@ void printHelp (const std::string& topic, std::FILE* stream)
         text = kAnalyzeHelp;
     else if (t == "quality")
         text = kQualityHelp;
+    else if (t == "soak")
+        text = kSoakHelp;
     else if (t == "params" || t == "parameters")
         text = kParamsHelp;
     else if (t == "presets")
@@ -282,6 +347,7 @@ int main (int argc, char** argv)
             case Command::Batch: return runBatch (options);
             case Command::Analyze: return runAnalyze (options);
             case Command::Quality: return runQuality (options);
+            case Command::Soak: return runSoak (options);
             case Command::Params: return runParams (options);
             case Command::Presets: return runPresets (options);
             case Command::None: break;

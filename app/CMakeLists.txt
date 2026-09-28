@@ -72,6 +72,7 @@ set(FLUB_APP_SOURCES
     Source/ui/MeterSnapshot.cpp
     Source/ui/ModuleCard.cpp
     Source/ui/ModuleRack.cpp
+    Source/ui/NoticeBanners.cpp
     Source/ui/ParamGrid.cpp
     Source/ui/ParamKnob.cpp
     Source/ui/ParameterBinding.cpp

@@ -1,7 +1,7 @@
 // Flubsound Pro - headless visual verification.
 //
 //   FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds S] [--scale F]
-//                [--device "output device name"]
+//                [--device "output device name"] [--state name[,name...]]
 //
 // No audio device is opened. The engine runs offline on synthetic programme
 // audio (TestSignalGenerator: drum/bass/pad music; in gaming mode a 7.1 game
@@ -13,6 +13,21 @@
 // e.g. 2 for a HiDPI check) and the app quits (exit code 0 on success, 1 on
 // failure, 2 for bad arguments). --device pretends that output device is
 // open, so the headset profile, its advice banner and ceiling cap show up.
+// --state puts the UI into a state that needs a real device or a real
+// mistake to reach, through the same code paths where it can:
+//   device-error    the device reports an error (AudioEngineHost::audioDeviceError)
+//   loopback        the output is the loopback partner of the input that
+//                   feeds the Game strip (the guard mutes the output)
+//   preset-warning  the reader warnings of a preset with a typo'd key, parsed
+//                   by flub::preset::fromJson, as the notice bar shows them
+//   recovery        the notice for a damaged settings file restored from .bak1
+//   latency-prompt  a preset made for another latency profile is loaded
+//                   (Audiophile Subtle / Competitive FPS on Balanced)
+//   governor        Boost 100 %, Loudness / Impact 100 %, maximizer drive
+//                   12 dB, protection Strict: the governor backs off (use
+//                   --seconds 8 so its 3 s averages settle)
+// Without --state the notice bar starts empty (the scene's own preset loads
+// would otherwise leave a latency prompt in every screenshot).
 //
 // Note for UI code: in this mode the component is on screen (under xvfb on CI),
 // isShowing() is true and every juce::Timer runs normally.
@@ -39,6 +54,7 @@ public:
         double seconds = 3.5; // > 3 s so the short-term (3 s) loudness window is full
         float scale = 1.0f;
         juce::String simulatedDevice; // --device: headset profile / advice banner preview
+        juce::StringArray states;     // --state (see above)
     };
 
     /** Parses the screenshot arguments; returns false if --screenshot is absent
@@ -56,6 +72,7 @@ public:
 private:
     void timerCallback() override;
     void setUpScene();
+    void applyStates (int gameStrip, int focusStrip);
     void finish();
 
     EngineController& controller;

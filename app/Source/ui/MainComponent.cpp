@@ -16,6 +16,7 @@ constexpr const char* kPrefAnalyzer = "ui.analyzer";
 MainComponent::MainComponent (EngineController& c)
     : controller (c),
       header (c),
+      deviceError (c),
       deviceBanner (c),
       routing (c),
       boost (c),
@@ -46,12 +47,24 @@ MainComponent::MainComponent (EngineController& c)
     // ---- Wiring ----
     header.onSettingsRequested = [this] { openSettings(); };
     header.onExportRequested = [this] { openExport(); };
+    addChildComponent (deviceError);
+    deviceError.onChooseOutput = [this] { openSettings (true); };
+    deviceError.onOpenSoundSettings = [this] { controller.getRouting().openSystemRoutingSettings(); };
+    deviceError.refresh();
     addChildComponent (deviceBanner);
     deviceBanner.onDetailsRequested = [this] { openSettings (true); }; // the full guidance is on the Audio page
     deviceBanner.refresh();
+    addChildComponent (notices);
+    notices.onVisibilityChanged = [this] { resized(); };
+    if (const auto& recovery = controller.getSettings().getRecovery(); recovery.wasDamaged())
+        notices.post (NoticeBar::recoveryNotice (recovery));
+    takePresetNotices(); // warnings of the presets restored at start-up
     levels.onResetRequested = [this] { requestLoudnessReset(); };
     loudness.onResetRequested = [this] { requestLoudnessReset(); };
-    loudness.setTooltip ("Click the integrated loudness to reset it (also resets the true-peak hold)");
+    loudness.setTooltip ("Click the integrated loudness to reset it (also resets the true-peak hold).\n"
+                         "IN>OUT: short-term loudness out minus in. LIM: share of about the last 10 s with the limiter more than 1 dB down. "
+                         "PRE: the automatic preamp (off unless Automatic Preamp is on).\n"
+                         "Harmonics: what the bass harmonics and the air exciter add on purpose (not counted against the distortion budget).");
     rack.onLayoutModeChanged = [this] { resized(); };
     rack.onEqBandSelected = [this] (int band) { analyzer.getEqEditor().selectBand (band); };
     analyzer.getEqEditor().onBandSelected = [this] (int band) { rack.setSelectedEqBand (band); };
@@ -157,6 +170,8 @@ void MainComponent::frame (double timestampSeconds)
     snapshot.read (chain.meters());
     snapshot.masterGainReductionDb = controller.getMasterGainReductionDb();
     snapshot.active = controller.isStripActive (strip);
+    snapshot.autoPreampDb = chain.getAutoPreampDb();
+    snapshot.predictedBoostDb = chain.getPredictedBoostDb();
 
     const double sampleRate = controller.getHost().getSampleRate();
     analyzer.getAnalyzer().setSampleRate (sampleRate);
@@ -171,7 +186,7 @@ void MainComponent::frame (double timestampSeconds)
     history.advance();
     levels.update (snapshot, dt);
     loudness.update (snapshot, dt);
-    boost.setGovernorScale (snapshot.governorScale);
+    boost.update (snapshot);
     routing.updateMeters (dt);
     header.animate (dt);
 
@@ -220,6 +235,7 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
         case Change::Preset:
             header.refreshPresets();
             refreshDeviceBanner(); // the "Use <preset>" offer hides once it is loaded
+            takePresetNotices();
             break;
         case Change::Engine:
             rack.releaseListening(); // the re-created chains start without auditions
@@ -252,6 +268,12 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             header.updateStatus();
             routing.refreshRouting();
             refreshDeviceBanner();
+            // The latency prompt goes once the profile is the suggested one.
+            if (shownSuggestion.has_value() && controller.getLatencyProfile() == shownSuggestion->suggested)
+            {
+                shownSuggestion.reset();
+                notices.dismiss (NoticeBar::kLatencyKey);
+            }
             break;
         case Change::Routing:
             routing.refreshRouting();
@@ -261,8 +283,28 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
 
 void MainComponent::refreshDeviceBanner()
 {
-    if (deviceBanner.refresh())
+    const bool errorChanged = deviceError.refresh();
+    if (deviceBanner.refresh() || errorChanged)
         resized();
+}
+
+void MainComponent::takePresetNotices()
+{
+    for (const auto& w : controller.takePresetWarnings())
+        notices.post (NoticeBar::presetWarningsNotice (w));
+
+    if (auto suggestion = controller.takeLatencySuggestion())
+    {
+        const auto suggested = suggestion->suggested;
+        shownSuggestion = suggestion;
+        notices.post (NoticeBar::latencyNotice (*suggestion, [this, suggested] { controller.setLatencyProfile (suggested); }));
+    }
+    else if (shownSuggestion.has_value() && controller.getCurrentPresetName() != shownSuggestion->presetName)
+    {
+        // Another preset was loaded since: the prompt no longer applies.
+        shownSuggestion.reset();
+        notices.dismiss (NoticeBar::kLatencyKey);
+    }
 }
 
 juce::String MainComponent::currentStripSignature() const
@@ -346,9 +388,19 @@ void MainComponent::resized()
     const int gap = 10;
     const int w = getWidth();
 
+    if (deviceError.shouldShow())
+    {
+        deviceError.setBounds (r.removeFromTop (DeviceErrorBanner::kHeight));
+        r.removeFromTop (gap);
+    }
     if (deviceBanner.shouldShow())
     {
         deviceBanner.setBounds (r.removeFromTop (DeviceAdviceBanner::kHeight));
+        r.removeFromTop (gap);
+    }
+    if (notices.shouldShow())
+    {
+        notices.setBounds (r.removeFromTop (DeviceAdviceBanner::kHeight));
         r.removeFromTop (gap);
     }
 
@@ -360,10 +412,10 @@ void MainComponent::resized()
 
     auto right = r.removeFromRight (juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
     r.removeFromRight (gap);
-    // The loudness panel's content has a fixed height (~340 px): on tall
+    // The loudness panel's content has a fixed height (~380 px): on tall
     // windows the level meters take the spare height instead of leaving the
     // loudness panel half empty.
-    constexpr int kLoudnessNeeds = 400;
+    constexpr int kLoudnessNeeds = 440;
     const int levelsH = juce::jlimit (196, 560, juce::jmax (juce::roundToInt (right.getHeight() * 0.40), right.getHeight() - kLoudnessNeeds - gap));
     levels.setBounds (right.removeFromTop (levelsH));
     right.removeFromTop (gap);

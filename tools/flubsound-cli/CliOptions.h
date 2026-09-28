@@ -15,6 +15,7 @@
 #include "flub/engine/Protection.h"
 #include "flub/io/WavFile.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +29,7 @@ enum class Command
     Batch,
     Analyze,
     Quality,
+    Soak,
     Params,
     Presets,
     Help,
@@ -75,7 +77,16 @@ struct CliOptions
     bool recursive = false;   // `batch --recursive`
     bool bands = false;       // `process` / `analyze --bands`: octave-band levels
     int jobs = 0;             // `batch --jobs` (0 = hardware concurrency)
-    double rate = 48000.0;    // `quality --rate`: sample rate of the hygiene family
+    double rate = 48000.0;    // `quality --rate`: sample rate of the hygiene family; `soak --rate`
+    // `analyze --events / --event-band / --glitches` (docs/11 E60, E53)
+    bool events = false;      // scene events (with --bands: per octave band, and level tracks)
+    double eventBandHz = 0.0; // the events list in one band (0 = full band)
+    bool glitches = false;    // discontinuity detector
+    // `soak` (docs/11 E53)
+    double soakSeconds = 600.0;
+    uint32_t seed = 1;
+    std::string automation = "user"; // off | user | all
+    double intervalMs = 250.0;
     RenderOptions render;
 };
 

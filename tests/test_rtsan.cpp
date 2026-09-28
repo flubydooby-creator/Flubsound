@@ -116,6 +116,7 @@ static_assert (hasNonblockingSetParams<ClarityEnhancer, ClarityParams>);
 static_assert (hasNonblockingSetParams<Compressor, CompressorParams>);
 static_assert (hasNonblockingSetParams<HeadphoneVirtualizer, VirtualizerParams>);
 static_assert (hasNonblockingSetParams<LoudnessMaximizer, MaximizerParams>);
+static_assert (std::is_same_v<decltype (&LoudnessMaximizer::setUpstreamLiftDb), void (LoudnessMaximizer::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingSetParams<Saturator, SaturatorParams>);
 static_assert (hasNonblockingSetParams<SpectralNoiseGate, NoiseGateParams>);
 static_assert (hasNonblockingSetParams<StereoSpatializer, SpatializerParams>);
@@ -244,6 +245,7 @@ static_assert (std::is_same_v<decltype (&Bs775Fold::process), void (Bs775Fold::*
 static_assert (hasNonblockingReset<Bs775Fold>);
 static_assert (std::is_same_v<decltype (&Bs775Fold::setLfeGain), void (Bs775Fold::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&LfeFold::addTo), void (LfeFold::*) (const float*, float*, float*, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::addToMono), void (LfeFold::*) (const float*, float*, int) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&LfeFold::skip), void (LfeFold::*) (int) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&LfeFold::setGain), void (LfeFold::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&LfeFold::clearState), void (LfeFold::*)() noexcept FLUB_NONBLOCKING>);

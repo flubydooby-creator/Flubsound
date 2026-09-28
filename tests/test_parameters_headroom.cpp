@@ -83,7 +83,7 @@ ProcessingChain::StaticBoostModel modelOf (ParameterStore& store)
 } // namespace
 
 //==============================================================================
-TEST_CASE ("Parameters (E11 / E05): auto.preamp, auto.preampAllowance, max.clipCrest, max.clipMaxDb and max.style - layout version 3, defaults that keep every older preset's sound")
+TEST_CASE ("Parameters (E11 / E05 / E19): auto.preamp, auto.preampAllowance, max.clipCrest, max.clipMaxDb, max.style, max.lfLimit and max.bedLift - layout version 3, defaults that keep every older preset's sound")
 {
     const auto& t = layout();
     struct Expect
@@ -98,6 +98,8 @@ TEST_CASE ("Parameters (E11 / E05): auto.preamp, auto.preampAllowance, max.clipC
         { "max.clipCrest", MaxClipCrestDb, 6.0f, 0.0f, 24.0f },   // the stage 1 clipper's MaximizerParams::clipCrestDb
         { "max.clipMaxDb", MaxClipMaxDb, 3.0f, 0.5f, 24.0f },     // ... and clipMaxDepthDb
         { "max.style", MaxStyle, 0.0f, 0.0f, 4.0f },               // Custom
+        { "max.lfLimit", MaxLfLimit, 0.0f, 0.0f, 1.0f },           // off: MaximizerParams::lfLimit (docs/11 E05 step 5)
+        { "max.bedLift", MaxBedLiftDb, 24.0f, 0.0f, 24.0f },       // 24 = no budget (docs/11 E19 step 3)
     };
     for (const auto& x : expected)
     {
@@ -112,6 +114,8 @@ TEST_CASE ("Parameters (E11 / E05): auto.preamp, auto.preampAllowance, max.clipC
     const MaximizerParams stage1;
     CHECK (t[static_cast<size_t> (MaxClipCrestDb)].defaultValue == stage1.clipCrestDb);
     CHECK (t[static_cast<size_t> (MaxClipMaxDb)].defaultValue == stage1.clipMaxDepthDb);
+    CHECK (t[static_cast<size_t> (MaxLfLimit)].defaultValue == stage1.lfLimit);
+    CHECK (t[static_cast<size_t> (MaxBedLiftDb)].defaultValue == stage1.bedLiftDb);
     CHECK (t[static_cast<size_t> (MaxStyle)].choices.size() == 5);
     CHECK (t[static_cast<size_t> (MaxStyle)].choices[0] == "Custom");
 

@@ -197,6 +197,7 @@ TEST_CASE ("HeadphoneVirtualizer: the LFE uses the shared LfeFold - up to +16 dB
     p.layout = ChannelLayout::Surround71;
     p.roomAmount = 0.0f;
     p.lfeGainDb = 16.0f;
+    p.foldHeadroom = false; // the tone reaches +1 dBFS: the level itself, not the E28a headroom
     HeadphoneVirtualizer v;
     v.prepare ({ kFs, 256, 8 });
     v.setParams (p);

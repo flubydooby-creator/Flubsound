@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 
 #include "FlubLookAndFeel.h"
+#include "ParameterBinding.h"
 #include "platform/PlatformBridge.h"
 #include "presets/PresetManager.h"
 
@@ -352,7 +353,7 @@ class SettingsDialog::ProcessingPage : public juce::Component
 {
 public:
     ProcessingPage (EngineController& c, std::function<void (MeterPalette)> onPalette, MeterPalette palette)
-        : controller (c), onPaletteChanged (std::move (onPalette))
+        : controller (c), onPaletteChanged (std::move (onPalette)), binder ([this] { return &controller.getSelectedParams(); })
     {
         const auto& profileInfo = layout()[static_cast<size_t> (LatencyProfile)];
         for (size_t i = 0; i < profileInfo.choices.size(); ++i)
@@ -406,6 +407,19 @@ public:
             controller.getRouting().setMethod (methods[id - 1]);
         };
 
+        // Protection (docs/11 E06 / E11).
+        protectionBox.addItem ("Off: govern the macro amounts only", 1);
+        protectionBox.addItem ("Normal: also the preset's own drive and harmonics", 2);
+        protectionBox.addItem ("Strict: as Normal, down to 0", 3);
+        protectionBox.setTitle ("Protection strength");
+        protectionBox.onChange = [this]
+        {
+            controller.setProtectionStrength (static_cast<flub::ProtectionStrength> (juce::jlimit (0, 2, protectionBox.getSelectedId() - 1)));
+        };
+        Style::set (preampToggle, "switch");
+        binder.bindToggle (preampToggle, AutoPreampOn);
+        preampToggle.setTitle ("Automatic preamp");
+
         paletteBox.addItem ("Standard (green / amber / red)", 1);
         paletteBox.addItem ("Colour-blind safe (blue / yellow / vermillion)", 2);
         paletteBox.setSelectedId (palette == MeterPalette::ColourBlindSafe ? 2 : 1, juce::dontSendNotification);
@@ -416,9 +430,10 @@ public:
                 onPaletteChanged (paletteBox.getSelectedId() == 2 ? MeterPalette::ColourBlindSafe : MeterPalette::Standard);
         };
 
-        for (auto* box : { &latencyBox, &inputModeBox, &inputStripBox, &routingBox, &paletteBox })
+        for (auto* box : { &latencyBox, &inputModeBox, &inputStripBox, &routingBox, &protectionBox, &paletteBox })
             addAndMakeVisible (*box);
         addAndMakeVisible (autoReduceToggle);
+        addAndMakeVisible (preampToggle);
         addAndMakeVisible (restoreButton);
 
         form.section ("Latency");
@@ -440,6 +455,14 @@ public:
                   routing.canEnumerateApps() ? juce::String ("Unsupported methods are greyed out.")
                                              : juce::String ("Per-app routing is not available on this system."),
                   220);
+        form.section ("Protection");
+        form.row ("Protection strength", protectionBox,
+                  "The safety governor always scales the Boost and macro amounts back when the limiter works too hard or distortion "
+                  "gets audible. Normal also governs the preset's own maximizer drive, saturation drive and bass harmonics; Strict "
+                  "lets it go down to 0. Every strip; the Boost panel's governor chip shows what it does.",
+                  330);
+        form.row ({}, preampToggle, describePreamp(), 520);
+        preampRow = form.rows.size() - 1;
         form.section ("Display");
         form.row ("Meter colours", paletteBox, {}, 330);
         refresh();
@@ -467,6 +490,15 @@ public:
         const auto method = controller.getRouting().getMethod();
         routingBox.setSelectedId (method == M::EndpointRouting ? 2 : (method == M::ProcessCapture ? 3 : (method == M::Disabled ? 4 : 1)),
                                   juce::dontSendNotification);
+
+        protectionBox.setSelectedId (static_cast<int> (controller.getProtectionStrength()) + 1, juce::dontSendNotification);
+        preampToggle.setButtonText ("Automatic preamp on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
+        if (const auto text = describePreamp(); text != form.rows[preampRow].help)
+        {
+            form.rows[preampRow].help = text;
+            resized();
+            repaint();
+        }
 
         const auto li = controller.getLatencyInfo();
         const auto status = controller.getStatus();
@@ -546,10 +578,26 @@ private:
         return text.isNotEmpty() ? text : juce::String ("None: the latency profile is the one you chose.");
     }
 
+    /** The Automatic Preamp row's help: what it does and, live, what the
+        selected strip's chain predicts and takes off (docs/11 E11). */
+    juce::String describePreamp()
+    {
+        auto& chain = controller.getChain (controller.getSelectedStrip());
+        juce::String t ("Takes the boost the strip's EQ, bass, clarity and macros add (less a 1 dB allowance) off before processing, "
+                        "so hot music does not drive the limiter. Saved with the preset. Predicted boost now: ");
+        t << Theme::formatSignedDb (chain.getPredictedBoostDb()) << " dB";
+        if (chain.getAutoPreampDb() < -0.05f)
+            t << ", preamp " << Theme::formatSignedDb (chain.getAutoPreampDb()) << " dB";
+        return t << ".";
+    }
+
     EngineController& controller;
     std::function<void (MeterPalette)> onPaletteChanged;
-    juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, paletteBox;
+    juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, protectionBox, paletteBox;
     juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
+    juce::ToggleButton preampToggle { "Automatic preamp" };
+    ParameterBinder binder; // after the controls it binds
+    size_t preampRow = 0;
     juce::TextButton restoreButton { "Restore" };
     FormLayout form;
     size_t reductionRow = 0; // the "Automatic change" row: its help is the live description

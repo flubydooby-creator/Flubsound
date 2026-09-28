@@ -20,6 +20,8 @@ set(FLUB_CLI_SOURCES
     FactoryPresets.h
     OfflineRenderer.cpp
     OfflineRenderer.h
+    Soak.cpp
+    Soak.h
     Utf8Windows.h)
 
 add_executable(flubsound-cli ${FLUB_CLI_SOURCES})

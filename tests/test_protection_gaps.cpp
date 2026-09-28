@@ -1585,3 +1585,149 @@ TEST_CASE ("Chain: the meters of a host block split on the governor grid read th
     CHECK_LE (worstGr, 1e-4);
     CHECK_LE (worstClip, 1e-3);
 }
+
+//==============================================================================
+// docs/11 E06 step 1: at protection strength Normal / Strict the governor's
+// maximizer input is the whole-stage residual, so it sees the limiter's
+// gain-modulation IMD the clipper's own THD+N cannot; Off is unchanged.
+TEST_CASE ("Chain: at Normal the governor backs off on the limiter's gain-modulation IMD (the maximizer's whole-stage residual); Off does not see it, as before (docs/11 E06 step 1)")
+{
+    // 55 Hz kicks under a 2 kHz tone through the limiter alone (clipper
+    // off, base max.drive 12 dB): the clipper reads -160 dB, the limiter's
+    // GR averages about -4 dB (inside its -6 dB budget), and its gain
+    // modulation of the tone reads about -27 dB (over the -30 dB budget).
+    const int n = static_cast<int> (kFs * 6.0);
+    Planar in (2, n);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t + 0.25, 0.5);
+        const double kick = t >= 0.25 && beat < 0.35 ? 0.5 * std::exp (-beat / 0.1) * std::sin (kTwoPi * 55.0 * beat) : 0.0;
+        in.ch[0][static_cast<size_t> (i)] = in.ch[1][static_cast<size_t> (i)] = static_cast<float> (0.1 * std::sin (kTwoPi * 2000.0 * t) + kick);
+    }
+    uint32_t normalReason = 0;
+    const auto run = [&] (ProtectionStrength strength, float& scale, float& distortion) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxDriveDb, 12.0f);
+        store.set (MaxClipAmount, 0.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        chain.setProtectionStrength (strength);
+        Planar buf = in;
+        runChain (chain, buf, 512);
+        scale = chain.meters().governorScale.load();
+        distortion = chain.meters().governorDistortionDb.load();
+        normalReason = chain.meters().governorReason.load();
+        return buf;
+    };
+    float offScale = 0.0f, offDist = 0.0f, normalScale = 0.0f, normalDist = 0.0f;
+    run (ProtectionStrength::Off, offScale, offDist);
+    run (ProtectionStrength::Normal, normalScale, normalDist);
+    std::cout << "    measured governor at Off: scale " << offScale << ", THD+N input " << offDist << " dB; at Normal: scale " << normalScale
+              << ", THD+N input " << normalDist << " dB\n";
+    CHECK (offScale == 1.0f);           // Off: the clipper's reading only (-160 dB), as before
+    CHECK_LE (offDist, -150.0f);
+    CHECK_GE (normalDist, -40.0f);       // the residual is seen (about -31 dB once the drive is governed down) ...
+    CHECK_LE (normalScale, 0.6f);        // ... and the base drive is governed down for it
+    CHECK ((normalReason & SafetyGovernor::kReasonDistortion) != 0u);
+}
+
+//==============================================================================
+// docs/11 E05 / E10: the bypass reference's safety limiter has the LF-safe envelope.
+TEST_CASE ("Chain: the bypass reference of hot bass is limited without DC or THD (the LF-safe envelope on the reference limiter, docs/11 E10 / E05)")
+{
+    // Bypass engaged (loudness matching off), input over the -1 dBTP
+    // ceiling: 100 + 200 Hz (asymmetric, +1.5 dBFS peak) and 50 Hz at +2.9
+    // dBFS. With the plain envelope the reference carried -55.7 dBFS DC
+    // and -39.2 dB THD+N (the gain released between the peaks).
+    const int n = static_cast<int> (kFs * 4.0), from = static_cast<int> (kFs * 2.0);
+    for (int sig = 0; sig < 2; ++sig)
+    {
+        ParameterStore store;
+        store.set (BypassAll, 1.0f);
+        store.set (LoudnessMatchBypass, 0.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        Planar buf (2, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / kFs;
+            buf.ch[0][static_cast<size_t> (i)] = buf.ch[1][static_cast<size_t> (i)] = static_cast<float> (
+                sig == 0 ? 0.6 * std::sin (kTwoPi * 100.0 * t) + 0.6 * std::cos (kTwoPi * 200.0 * t) : 1.4 * std::sin (kTwoPi * 50.0 * t));
+        }
+        runChain (chain, buf, 512);
+        const auto& y = buf.ch[0];
+        CHECK_LE (peakAbs (y.data() + from, n - from), std::pow (10.0, -1.0 / 20.0));
+        if (sig == 0)
+        {
+            double dc = 0.0;
+            for (int i = from; i < n; ++i)
+                dc += y[static_cast<size_t> (i)];
+            const double dcDb = toDb (std::abs (dc) / (n - from));
+            std::cout << "    measured bypass reference DC = " << dcDb << " dBFS\n";
+            CHECK_LE (dcDb, -100.0); // docs/11 E10 Done-when: <= -60 dBFS
+        }
+        else
+        {
+            // Residual after the 50 Hz fundamental and DC (whole periods).
+            double c = 0.0, s = 0.0, m = 0.0, total = 0.0, residual = 0.0;
+            const int len = n - from;
+            for (int i = from; i < n; ++i)
+            {
+                const double a = kTwoPi * 50.0 * i / kFs, v = y[static_cast<size_t> (i)];
+                c += v * std::cos (a);
+                s += v * std::sin (a);
+                m += v;
+                total += v * v;
+            }
+            c *= 2.0 / len;
+            s *= 2.0 / len;
+            m /= len;
+            for (int i = from; i < n; ++i)
+            {
+                const double a = kTwoPi * 50.0 * i / kFs;
+                const double e = y[static_cast<size_t> (i)] - c * std::cos (a) - s * std::sin (a) - m;
+                residual += e * e;
+            }
+            const double thdDb = 10.0 * std::log10 (std::max (1.0e-30, residual / total));
+            std::cout << "    measured bypass reference 50 Hz THD+N = " << thdDb << " dB\n";
+            CHECK_LE (thdDb, -100.0);
+        }
+    }
+}
+
+//==============================================================================
+// docs/11 E19 step 3: the maximizer's bed-lift budget counts the chain's lift.
+TEST_CASE ("Chain: with max.bedLift the chain lifts a quiet bed by at most the budget, the lift ahead of the maximizer included, and leaves loud programme alone (docs/11 E19 step 3)")
+{
+    // EQ output +4 dB and max.drive 3 dB: a -40 dBFS pink bed comes out 7 dB
+    // up; with a 1 dB budget, 1 dB. A -8 dBFS-RMS pink programme reaches the
+    // ceiling, so the budget leaves it as it was.
+    const int n = static_cast<int> (kFs * 6.0), from = static_cast<int> (kFs * 4.0);
+    const auto render = [&] (float rmsDb, float budgetDb) {
+        ParameterStore store;
+        bypassAllModules (store);
+        store.set (EqOn, 1.0f);
+        store.set (EqOutputGainDb, 4.0f);
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxDriveDb, 3.0f);
+        store.set (MaxBedLiftDb, budgetDb);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        Planar in (2, n);
+        in.ch[0] = pinkNoise (n, static_cast<float> (std::pow (10.0, rmsDb / 20.0)), 81);
+        in.ch[1] = pinkNoise (n, static_cast<float> (std::pow (10.0, rmsDb / 20.0)), 82);
+        Planar buf = in;
+        runChain (chain, buf, 512);
+        const int lat = chain.getLatencySamples();
+        return toDb (rms (buf.ch[0].data() + from + lat, n - from - lat) / rms (in.ch[0].data() + from, n - from - lat));
+    };
+    const double quietFull = render (-40.0f, 24.0f), quietBudget = render (-40.0f, 1.0f);
+    const double loudFull = render (-8.0f, 24.0f), loudBudget = render (-8.0f, 1.0f);
+    std::cout << "    measured -40 dBFS bed: lift " << quietFull << " dB, with a 1 dB budget " << quietBudget << " dB; -8 dBFS programme "
+              << loudFull << " -> " << loudBudget << " dB\n";
+    CHECK_NEAR (quietFull, 7.0, 0.1);
+    CHECK_NEAR (quietBudget, 1.0, 0.2);
+    CHECK_NEAR (loudBudget, loudFull, 0.1);
+}

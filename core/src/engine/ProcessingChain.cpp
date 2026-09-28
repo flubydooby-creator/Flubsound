@@ -93,6 +93,14 @@ constexpr double kSpeechLinkMaxRate = 32000.0;
 constexpr double kGateFrameMs = 1024.0 * 1000.0 / 48000.0;
 constexpr double kQualityMinRate = 32000.0;
 
+// max.bedLift at its maximum means no budget (LoudnessMaximizer.h).
+constexpr float kNoBedLiftBudgetDb = 24.0f;
+constexpr double kBedLiftHoldSeconds = 2.0;
+constexpr float kBedEventLu = 6.0f;
+constexpr float kBedShortMs = 50.0f, kBedEventMs = 400.0f; // level fed to the background trackers; event loudness
+constexpr double kBedStepMs = 10.0;                          // background tracker step
+constexpr float kBedFloorLufs = -100.0f;
+
 // The governor ticks where the maximizer's limiter-GR windows close (docs/11 E06).
 static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 
@@ -405,6 +413,10 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
                                        : totalLatency;
         dryLimiter.setTruePeakDetection (truePeak);
         dryLimiter.setLookaheadMs (static_cast<float> (1000.0 * lookahead / sr));
+        // The maximizer's LF-safe envelope (docs/11 E05 / E10): a hot
+        // reference is limited without rippling its bass, so the bypass
+        // side carries no limiter THD or DC either. Unity while idle.
+        dryLimiter.setEnvelope ({ true, true, true });
         dryLimiter.prepare ({ sr, maxB, 2 });
     }
     dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples()));
@@ -433,6 +445,12 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     outTruePeak.prepare (2);
     outLoudness.prepare (sr, 2);
     inLoudness.prepare (sr, 2, 3000.0f);
+    bedInShort.prepare (sr, 2, kBedShortMs);
+    preMaxShort.prepare (sr, 2, kBedShortMs);
+    bedEventLoudness.prepare (sr, 2, kBedEventMs);
+    bedStepLength = std::max (1, static_cast<int> (std::lround (kBedStepMs * 0.001 * sr)));
+    bedInBackground.prepare (1000.0 / kBedStepMs);
+    preMaxBackground.prepare (1000.0 / kBedStepMs);
     tapScratch.assign (static_cast<size_t> (maxB), 0.0f);
 
     meterBus.latencyMs.store (static_cast<float> (1000.0 * totalLatency / sr), std::memory_order_relaxed);
@@ -472,6 +490,12 @@ void ProcessingChain::resetSignalState() noexcept
     outTruePeak.reset();
     outLoudness.reset();
     inLoudness.reset();
+    bedInShort.reset();
+    preMaxShort.reset();
+    bedEventLoudness.reset();
+    bedInBackground.reset();
+    preMaxBackground.reset();
+    bedStepCount = bedLiftHold = 0;
 }
 
 bool ProcessingChain::needsReprepare() const noexcept
@@ -724,6 +748,7 @@ void ProcessingChain::applyParameters() noexcept
     mp.clipCrestDb = e[MaxClipCrestDb];
     mp.clipMaxDepthDb = e[MaxClipMaxDb];
     mp.lfLimit = e[MaxLfLimit];
+    mp.bedLiftDb = e[MaxBedLiftDb];
     maximizer.setParams (mp);
     slots[SMax].setActive (active (MaximizerOn));
 
@@ -1120,6 +1145,20 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
 
     inLevel.process (st);
     inLoudness.process (st);
+    // The bed-lift budget (docs/11 E19 step 3, see the header comment):
+    // the input's short-term level, and whether this is the programme's bed
+    // (not an event: a 400 ms loudness more than kBedEventLu over the
+    // input's background; not loud programme; not within the hold after).
+    const bool bedBudget = e[MaxBedLiftDb] < kNoBedLiftBudgetDb;
+    if (bedBudget)
+    {
+        bedInShort.process (st);
+        bedEventLoudness.process (st);
+        if (bedInBackground.get() > kMinusInfDb && ! bedInBackground.isLearning()
+            && bedEventLoudness.getLufs() > bedInBackground.get() + kBedEventLu)
+            bedLiftHold = static_cast<int> (kBedLiftHoldSeconds * config.sampleRate);
+    }
+    const bool bedMeasure = bedBudget && ! contaminated && bedLiftHold == 0;
     for (int i = 0; i < n; ++i)
         tapScratch[static_cast<size_t> (i)] = 0.5f * (st.channel (0)[i] + st.channel (1)[i]);
     analyzerTaps.pre.push (tapScratch.data(), static_cast<size_t> (n));
@@ -1132,13 +1171,35 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     }
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
+        {
+            // The maximizer's bed-lift budget counts the lift of everything
+            // ahead of it: the background of the programme's level here
+            // against that of the chain's input, stepped every 10 ms while
+            // the programme is its bed.
+            if (s == SMax && bedBudget)
+            {
+                preMaxShort.process (st);
+                for (bedStepCount += n; bedStepCount >= bedStepLength; bedStepCount -= bedStepLength)
+                    if (bedMeasure)
+                    {
+                        bedInBackground.update (bedInShort.getLufs(), kBedFloorLufs);
+                        preMaxBackground.update (preMaxShort.getLufs(), kBedFloorLufs);
+                        if (! bedInBackground.isLearning() && bedInBackground.get() > kBedFloorLufs)
+                            maximizer.setUpstreamLiftDb (preMaxBackground.get() - bedInBackground.get());
+                    }
+            }
             slots[static_cast<size_t> (s)].process (st);
+        }
     if (neuralInChain)
     {
         neuralMisses.store (neural->getDeadlineMisses(), std::memory_order_relaxed);
         neuralFailures.store (neural->getModelFailures(), std::memory_order_relaxed);
         neuralFrames.store (neural->getFramesProcessed(), std::memory_order_relaxed);
     }
+
+    if (bedBudget)
+        bedLiftHold = maximizer.getBedQuietWeight() < 0.999f ? static_cast<int> (kBedLiftHoldSeconds * config.sampleRate)
+                                                             : std::max (0, bedLiftHold - n);
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();

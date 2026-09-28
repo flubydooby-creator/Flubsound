@@ -558,4 +558,293 @@ double energyCentroidMs (const std::vector<float>& x, int begin, int n, double s
     }
     return e > 0.0 && sampleRate > 0.0 ? 1000.0 * te / e / sampleRate : 0.0;
 }
+// ===========================================================================
+// Scene events and band tracks (docs/11 E60)
+// ===========================================================================
+namespace
+{
+std::array<int, 4> countEvents (const std::vector<SceneEvent>& events)
+{
+    std::array<int, 4> c {};
+    for (const auto& e : events)
+        ++c[static_cast<size_t> (e.type)];
+    return c;
+}
+
+json::Value countsToJson (const std::array<int, 4>& counts)
+{
+    json::Value v;
+    for (int t = 0; t < 4; ++t)
+        v.set (sceneEventName (static_cast<SceneEventType> (t)), counts[static_cast<size_t> (t)]);
+    return v;
+}
+
+json::Value sceneEventToJson (const SceneEvent& e)
+{
+    json::Value v;
+    v.set ("type", sceneEventName (e.type));
+    v.set ("start", std::round (e.startSeconds * 1000.0) / 1000.0);
+    v.set ("end", std::round (e.endSeconds * 1000.0) / 1000.0);
+    v.set ("levelDb", jsonNumber (e.levelDb, 2));
+    v.set ("overBackgroundDb", jsonNumber (e.overBackgroundDb, 2));
+    return v;
+}
+
+std::string countsText (const std::array<int, 4>& counts)
+{
+    std::string s;
+    for (int t = 0; t < 4; ++t)
+        s += (t == 0 ? "" : ", ") + std::to_string (counts[static_cast<size_t> (t)]) + " " + sceneEventName (static_cast<SceneEventType> (t));
+    return s;
+}
+
+std::string hzLabel (double hz)
+{
+    char buf[32];
+    if (hz >= 1000.0)
+        std::snprintf (buf, sizeof (buf), "%gk", hz / 1000.0);
+    else
+        std::snprintf (buf, sizeof (buf), "%g", hz);
+    return buf;
+}
+
+/** Nearest-rank percentile of dB values (p in 0..1), -160 for none. */
+float percentileDb (std::vector<float> v, double p)
+{
+    if (v.empty())
+        return kMinusInfDb;
+    const auto k = static_cast<size_t> (std::clamp (std::ceil (p * static_cast<double> (v.size())) - 1.0, 0.0, static_cast<double> (v.size() - 1)));
+    std::nth_element (v.begin(), v.begin() + static_cast<std::ptrdiff_t> (k), v.end());
+    return v[k];
+}
+} // namespace
+
+EventsReport sceneEvents (const std::vector<std::vector<float>>& channels, double sampleRate, double bandHz)
+{
+    EventsReport r;
+    SceneEventSettings settings;
+    settings.bandHz = bandHz;
+    const SceneAnalysis a = analyseSceneEvents (channels, sampleRate, settings);
+    r.frameSeconds = a.frameSeconds;
+    r.bandHz = bandHz;
+    r.events = a.events;
+    r.counts = countEvents (a.events);
+    std::vector<float> backgrounds;
+    backgrounds.reserve (a.frames.size());
+    for (const auto& f : a.frames)
+        backgrounds.push_back (f.backgroundDb);
+    r.backgroundMedianDb = percentileDb (std::move (backgrounds), 0.5);
+    return r;
+}
+
+std::vector<BandTrack> bandTracks (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    std::vector<BandTrack> tracks;
+    if (channels.empty() || channels[0].empty() || ! (sampleRate > 0.0))
+        return tracks;
+    // The mid, as octaveBands() reads it.
+    const size_t n = channels[0].size();
+    std::vector<std::vector<float>> mid (1, std::vector<float> (n, 0.0f));
+    for (size_t i = 0; i < n; ++i)
+    {
+        double acc = 0.0;
+        for (const auto& c : channels)
+            acc += i < c.size() ? static_cast<double> (c[i]) : 0.0;
+        mid[0][i] = static_cast<float> (acc / static_cast<double> (channels.size()));
+    }
+
+    constexpr std::array<float, 10> kNominalHz { 31.5f, 63.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
+    for (size_t k = 0; k < kNominalHz.size(); ++k)
+    {
+        const double centre = 1000.0 * std::pow (2.0, static_cast<double> (k) - 5.0);
+        if (centre >= 0.4 * sampleRate)
+            break;
+        SceneEventSettings settings;
+        settings.bandHz = centre;
+        settings.bandQ = 1.41421356237309505; // as octaveBands()
+        const SceneAnalysis a = analyseSceneEvents (mid, sampleRate, settings);
+        BandTrack t;
+        t.centreHz = kNominalHz[k];
+        const int per = std::max (1, static_cast<int> (std::lround (kTrackSeconds / a.frameSeconds)));
+        for (size_t f = 0; f + static_cast<size_t> (per) <= a.frames.size(); f += static_cast<size_t> (per))
+        {
+            double power = 0.0;
+            for (int j = 0; j < per; ++j)
+                power += std::pow (10.0, 0.1 * a.frames[f + static_cast<size_t> (j)].levelDb);
+            t.levelDb.push_back (static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (std::max (power / per, 1.0e-16)))));
+        }
+        t.p10Db = percentileDb (t.levelDb, 0.1);
+        t.medianDb = percentileDb (t.levelDb, 0.5);
+        t.p90Db = percentileDb (t.levelDb, 0.9);
+        t.events = a.events;
+        t.counts = countEvents (a.events);
+        tracks.push_back (std::move (t));
+    }
+    return tracks;
+}
+
+json::Value eventsToJson (const EventsReport& r)
+{
+    json::Value v;
+    v.set ("frameSeconds", r.frameSeconds);
+    v.set ("bandHz", r.bandHz > 0.0 ? json::Value (r.bandHz) : json::Value());
+    v.set ("backgroundMedianDb", jsonNumber (r.backgroundMedianDb, 2));
+    v.set ("counts", countsToJson (r.counts));
+    json::Value list { json::Value::Array {} };
+    for (const auto& e : r.events)
+        list.push (sceneEventToJson (e));
+    v.set ("list", std::move (list));
+    return v;
+}
+
+json::Value bandTracksToJson (const std::vector<BandTrack>& tracks)
+{
+    json::Value v;
+    v.set ("frameSeconds", kTrackSeconds);
+    json::Value bands { json::Value::Array {} };
+    for (const auto& t : tracks)
+    {
+        json::Value b;
+        b.set ("hz", static_cast<double> (t.centreHz));
+        b.set ("p10Db", jsonNumber (t.p10Db, 2));
+        b.set ("medianDb", jsonNumber (t.medianDb, 2));
+        b.set ("p90Db", jsonNumber (t.p90Db, 2));
+        b.set ("counts", countsToJson (t.counts));
+        b.set ("levelsDb", jsonArray (t.levelDb, 1));
+        json::Value list { json::Value::Array {} };
+        for (const auto& e : t.events)
+            list.push (sceneEventToJson (e));
+        b.set ("events", std::move (list));
+        bands.push (std::move (b));
+    }
+    v.set ("bands", std::move (bands));
+    return v;
+}
+
+std::string formatEvents (const EventsReport& r, size_t maxLines)
+{
+    std::string s = "Events  : " + countsText (r.counts) + " (" + (r.bandHz > 0.0 ? hzLabel (r.bandHz) + " Hz band" : std::string ("full band"))
+                    + ", background median " + formatDb (r.backgroundMedianDb, 1) + " dB)\n";
+    char buf[160];
+    for (size_t i = 0; i < r.events.size() && i < maxLines; ++i)
+    {
+        const auto& e = r.events[i];
+        std::snprintf (buf, sizeof (buf), "  %9.3f - %9.3f s  %-12s %7s dB", e.startSeconds, e.endSeconds, sceneEventName (e.type),
+                       formatDb (e.levelDb, 1).c_str());
+        s += buf;
+        if (e.type == SceneEventType::Onset || e.type == SceneEventType::Loud)
+            std::snprintf (buf, sizeof (buf), "  %+.1f dB over the background\n", static_cast<double> (e.overBackgroundDb));
+        else if (e.type == SceneEventType::LevelChange)
+            std::snprintf (buf, sizeof (buf), "  %+.1f dB step\n", static_cast<double> (e.overBackgroundDb));
+        else
+            std::snprintf (buf, sizeof (buf), "\n");
+        s += buf;
+    }
+    if (r.events.size() > maxLines)
+        s += "  ... (" + std::to_string (r.events.size() - maxLines) + " more; --json lists all)\n";
+    return s;
+}
+
+std::string formatBandTracks (const std::vector<BandTrack>& tracks)
+{
+    std::string s = "Band tracks (octave bands of the mid, 100 ms frames; dBFS):\n       Hz     p10  median     p90  onset  loud  silence  change\n";
+    char buf[160];
+    for (const auto& t : tracks)
+    {
+        std::snprintf (buf, sizeof (buf), "  %7s  %6s  %6s  %6s  %5d  %4d  %7d  %6d\n", hzLabel (t.centreHz).c_str(), formatDb (t.p10Db, 1).c_str(),
+                       formatDb (t.medianDb, 1).c_str(), formatDb (t.p90Db, 1).c_str(), t.counts[0], t.counts[1], t.counts[2], t.counts[3]);
+        s += buf;
+    }
+    return s;
+}
+
+// ===========================================================================
+// Glitches (docs/11 E53)
+// ===========================================================================
+GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    GlitchReport r;
+    r.sampleRate = sampleRate;
+    if (channels.empty())
+        return r;
+    DiscontinuityDetector d;
+    d.prepare (sampleRate, static_cast<int> (channels.size()));
+    size_t length = channels[0].size();
+    for (const auto& c : channels)
+        length = std::min (length, c.size());
+    std::vector<const float*> ptrs (channels.size());
+    for (size_t pos = 0; pos < length; pos += kAnalysisBlock)
+    {
+        for (size_t c = 0; c < channels.size(); ++c)
+            ptrs[c] = channels[c].data() + pos;
+        d.process (ptrs.data(), static_cast<int> (std::min<size_t> (kAnalysisBlock, length - pos)));
+    }
+    d.finish();
+    for (int t = 0; t < kNumDiscontinuityTypes; ++t)
+        r.counts[static_cast<size_t> (t)] = d.count (static_cast<DiscontinuityType> (t));
+    r.events = d.events();
+    return r;
+}
+
+json::Value glitchesToJson (const GlitchReport& r)
+{
+    json::Value v;
+    int64_t total = 0;
+    for (int t = 0; t < kNumDiscontinuityTypes; ++t)
+    {
+        v.set (discontinuityName (static_cast<DiscontinuityType> (t)), static_cast<double> (r.counts[static_cast<size_t> (t)]));
+        total += r.counts[static_cast<size_t> (t)];
+    }
+    v.set ("total", static_cast<double> (total));
+    json::Value list { json::Value::Array {} };
+    for (const auto& e : r.events)
+    {
+        json::Value g;
+        g.set ("type", discontinuityName (e.type));
+        g.set ("channel", e.channel);
+        g.set ("seconds", std::round (static_cast<double> (e.frame) / r.sampleRate * 10000.0) / 10000.0);
+        if (e.length > 0)
+            g.set ("lengthMs", std::round (1000.0 * static_cast<double> (e.length) / r.sampleRate * 100.0) / 100.0);
+        g.set ("levelDb", jsonNumber (e.levelDb, 2));
+        if (e.type == DiscontinuityType::Click)
+            g.set ("overDb", jsonNumber (e.overDb, 2));
+        list.push (std::move (g));
+    }
+    v.set ("list", std::move (list));
+    return v;
+}
+
+std::string formatGlitches (const GlitchReport& r, size_t maxLines)
+{
+    std::string s = "Glitches: ";
+    int64_t total = 0;
+    for (int t = 0; t < kNumDiscontinuityTypes; ++t)
+    {
+        s += (t == 0 ? "" : ", ") + std::to_string (r.counts[static_cast<size_t> (t)]) + " " + discontinuityName (static_cast<DiscontinuityType> (t));
+        total += r.counts[static_cast<size_t> (t)];
+    }
+    s += "\n";
+    char buf[160];
+    for (size_t i = 0; i < r.events.size() && i < maxLines; ++i)
+    {
+        const auto& e = r.events[i];
+        std::snprintf (buf, sizeof (buf), "  %10.4f s  ch %d  %-10s %7.1f dB", static_cast<double> (e.frame) / r.sampleRate, e.channel,
+                       discontinuityName (e.type), static_cast<double> (e.levelDb));
+        s += buf;
+        if (e.type == DiscontinuityType::Click)
+        {
+            std::snprintf (buf, sizeof (buf), " (+%.1f dB over the residual)", static_cast<double> (e.overDb));
+            s += buf;
+        }
+        if (e.length > 0)
+        {
+            std::snprintf (buf, sizeof (buf), " %.2f ms", 1000.0 * static_cast<double> (e.length) / r.sampleRate);
+            s += buf;
+        }
+        s += "\n";
+    }
+    if (total > static_cast<int64_t> (std::min (r.events.size(), maxLines)))
+        s += "  ... (" + std::to_string (total - static_cast<int64_t> (std::min (r.events.size(), maxLines))) + " more)\n";
+    return s;
+}
 } // namespace flub::cli

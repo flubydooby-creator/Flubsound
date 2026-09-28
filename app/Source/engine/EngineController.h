@@ -42,17 +42,27 @@
 //              setActiveBank, toggleAB, copyActiveToOtherBank. A strip with
 //              no saved state starts from a default preset (docs/11 E36):
 //              Signature (Music, System), Voice Chat (Chat), a capped
-//              Competitive FPS (Game).
+//              Competitive FPS (Game). renameUserPreset keeps the uuid.
+// Notices      takePresetWarnings() (reader warnings of a preset loaded or
+//              imported, docs/11 E52) and takeLatencySuggestion() (a loaded
+//              preset was made for another latency profile, docs/11 E42a):
+//              queued here, taken by the UI on Change::Preset.
 // Device       getDeviceManager() (e.g. for juce::AudioDeviceSelectorComponent;
 //              the selection is persisted automatically), getLatencyInfo(),
 //              getStatus() (CPU, xruns), getDeviceInputStrip(),
 //              getOverloadState() (CPU-overload watchdog), getCaptureStreams()
 //              (per-app capture FIFO statistics), getDeviceSafetyState()
-//              (loopback pair / device error warning).
+//              (loopback pair / device error warning) and retryDevice()
+//              for the device banner (docs/11 E51).
 // Profile      getLatencyProfile() / setLatencyProfile() (every strip, both
 //              banks); the opt-in automatic overload response:
 //              setReduceLoadOnOverload(), hasReducedLoad(),
-//              describeLoadReduction(), restoreLatencyProfile().
+//              describeLoadReduction(), restoreLatencyProfile(). On Linux a
+//              profile chosen by hand also asks PipeWire for its quantum and
+//              re-opens a JACK / ALSA device (docs/11 E48a, planGraphQuantum).
+// Protection   getProtectionStrength() / setProtectionStrength(): how far the
+//              SafetyGovernor reaches (docs/11 E06; persisted, every strip,
+//              re-applied to every engine the host builds).
 // Correction   getDeviceCorrection(): the output endpoint's headphone /
 //              speaker correction (docs/11 E15; import an AutoEQ / Equalizer
 //              APO ParametricEQ.txt with importDeviceCorrection, enable /
@@ -92,7 +102,7 @@
 
 namespace flub::app
 {
-class EngineController final : private juce::Timer, private juce::ChangeListener
+class EngineController final : private juce::Timer, private juce::ChangeListener, private juce::AsyncUpdater
 {
 public:
     enum class Change
@@ -198,6 +208,35 @@ public:
     /** Saves the strip's active bank as a user preset; returns its id. */
     juce::String saveUserPreset (const juce::String& name, const juce::String& category, const juce::String& description, int strip,
                                  juce::String& error);
+    /** Renames a user preset's file and name, keeping its uuid (docs/11 E52:
+        strips and automatic profile rules that play it keep working). A
+        preset that had no uuid gets one; the strips' saved last preset and
+        the rules follow. Returns the id, empty with `error` on failure. */
+    juce::String renameUserPreset (const PresetInfo& preset, const juce::String& newName, juce::String& error);
+
+    /** Reader warnings (unknown keys, clamped values, a newer minor version)
+        of a preset loaded into a strip or imported (docs/11 E52,
+        PresetManager::onPresetWarnings), oldest first. Queued (at most
+        kMaxPendingNotices) until the UI takes them on Change::Preset. */
+    struct PresetWarnings
+    {
+        juce::String presetName;
+        juce::StringArray warnings;
+    };
+    std::vector<PresetWarnings> takePresetWarnings();
+
+    /** A preset loaded by hand (loadPreset, next / previous) that was made for
+        another latency profile than the engine runs (docs/11 E42a). Loading
+        never changes the profile; the UI offers the switch
+        (setLatencyProfile) instead. Only the latest one is kept. */
+    struct LatencySuggestion
+    {
+        juce::String presetName;
+        flub::param::LatencyProfileValue suggested = flub::param::LatencyProfileValue::Balanced;
+        flub::param::LatencyProfileValue current = flub::param::LatencyProfileValue::Balanced;
+    };
+    std::optional<LatencySuggestion> takeLatencySuggestion();
+    static constexpr size_t kMaxPendingNotices = 8;
 
     flub::param::Bank getActiveBank (int strip = -1);
     void setActiveBank (flub::param::Bank bank, int strip = -1);
@@ -213,6 +252,12 @@ public:
 
     /** Re-opens the device from the saved state (e.g. after a failure). */
     juce::String reopenDevice();
+    /** The device banner's Retry (docs/11 E51): a device error re-opens the
+        device from the saved state (without an open device, e.g. headless,
+        the error is dismissed); a loopback pair is checked again with the
+        current device names (it clears once the output is no longer the
+        input's partner). Returns the error of a failed re-open. */
+    juce::String retryDevice();
     /** What the header shows as a device warning (docs/11 E51): a loopback
         pair holding the output at silence, or a device error.
         Change::Device is broadcast whenever it changes. */
@@ -235,8 +280,32 @@ public:
     flub::param::LatencyProfileValue getLatencyProfile();
     /** A user choice (Settings > Processing): every strip, both banks; the
         engine re-prepares on the message thread (AudioEngineHost's poll, a
-        brief dropout). Resets the automatic ladder. Broadcasts Change::Settings. */
+        brief dropout). Resets the automatic ladder. On Linux it also asks
+        PipeWire for the profile's quantum (planGraphQuantum) and, when that
+        changed the request, re-opens a JACK / ALSA device, because PipeWire
+        reads the request only when a stream opens (another brief dropout).
+        Broadcasts Change::Settings. */
     void setLatencyProfile (flub::param::LatencyProfileValue profile);
+
+    /** docs/11 E48a: what to export for a latency profile. The values are the
+        platform layer's (pipewire::planLatencyEnvironment): Quality and
+        Balanced ask for 256/48000 (5.3 ms) and never lock the quantum; Low
+        Latency asks for 128/48000 (2.7 ms) and locks it while it runs
+        (node.lock-quantum through PIPEWIRE_PROPS). userLatency / userProps
+        are what the user exported before Flubsound started (nullptr = unset):
+        a user's PIPEWIRE_LATENCY wins over every profile, a user's
+        PIPEWIRE_PROPS is never replaced or removed. */
+    struct GraphQuantumPlan
+    {
+        juce::String latency;    // PIPEWIRE_LATENCY to export; empty: leave it alone
+        juce::String props;      // PIPEWIRE_PROPS to export; empty: see clearProps
+        bool clearProps = false; // remove the quantum lock this process exported
+    };
+    static GraphQuantumPlan planGraphQuantum (flub::param::LatencyProfileValue profile, const char* userLatency, const char* userProps);
+    /** Exports planGraphQuantum's plan into this process's environment
+        (Linux; elsewhere it does nothing and returns false). Message thread,
+        while no other thread reads the environment. True when it changed. */
+    static bool applyGraphQuantum (flub::param::LatencyProfileValue profile, const char* userLatency, const char* userProps);
     /** Turns the automatic overload response on / off (persisted; default off).
         Broadcasts Change::Settings. */
     void setReduceLoadOnOverload (bool shouldReduce);
@@ -252,6 +321,18 @@ public:
         automatic step (a user change: the ladder resets; it never steps back
         up by itself). Does nothing while hasReducedLoad() is false. */
     void restoreLatencyProfile();
+
+    // ---- Protection strength (docs/11 E06) --------------------------------------------
+    /** How far the SafetyGovernor reaches (flub::ProtectionStrength): Off
+        (default) governs the macro amounts only, Normal also the base
+        max.drive / sat.drive / bass.harmonics, Strict as Normal with the
+        scale's floor at 0. A host setting, not a preset parameter: persisted
+        in the settings, applied to every strip at once (a relaxed atomic,
+        click-free) and to every engine the host builds later (device
+        restarts, swaps). Broadcasts Change::Settings. */
+    void setProtectionStrength (flub::ProtectionStrength strength);
+    flub::ProtectionStrength getProtectionStrength() const noexcept { return protectionStrength; }
+    static juce::String getProtectionStrengthName (flub::ProtectionStrength strength);
 
     /** A running per-app capture with its FIFO statistics
         (DriftCompensatedFifo::Stats), the application's display name (from
@@ -404,6 +485,7 @@ public:
 private:
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    void handleAsyncUpdate() override; // announces preset warnings no preset load announced
     void notify (Change change);
     int resolveStrip (int strip) const noexcept;
     void applyMasterEnableToStrip (int strip);
@@ -417,6 +499,12 @@ private:
     void trackPreferredOutput (bool rescan);
     void applyDeviceCorrection();
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
+    void applyProtectionStrength();
+    /** Exports the profile's PipeWire quantum request (a device session on
+        Linux only); with `reopen`, re-opens a JACK / ALSA device when the
+        request changed. */
+    void requestGraphQuantum (flub::param::LatencyProfileValue profile, bool reopen);
+    void presetLoadedByUser (const PresetInfo& preset);
     void applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions);
     void applyAutoProfile (const AutoProfileRule& rule);
     void endAutoProfile (const AutoProfileSwitcher::Action& action);
@@ -470,6 +558,10 @@ private:
 
     OverloadWatchdog overloadWatchdog;
     AutoLoadReducer loadReducer;
+    flub::ProtectionStrength protectionStrength = flub::ProtectionStrength::Off;
+
+    std::vector<PresetWarnings> pendingPresetWarnings;
+    std::optional<LatencySuggestion> pendingLatencySuggestion;
 
     // Hotkey-driven state (docs/11 E56), per session.
     std::array<Latch, AudioEngineHost::kMaxStrips> focusLatches, nightLatches;

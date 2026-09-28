@@ -5,7 +5,9 @@
 //   +--------------------------------------------------------------------+
 //   | HeaderBar: logo, mode, strip, presets, A/B, bypass, latency, gear  |
 //   +--------------------------------------------------------------------+
+//   | DeviceErrorBanner (only while the output is muted or failed, E51)  |
 //   | DeviceAdviceBanner (only for a recognised headset / Bluetooth)     |
+//   | NoticeBar (preset warnings, settings recovery, latency prompt)     |
 //   +-----------+----------------------------------------+---------------+
 //   | Routing   | BoostPanel (Boost Intensity + macros)  | LevelMeters   |
 //   | Panel     +----------------------------------------+               |
@@ -45,6 +47,7 @@
 #include "LoudnessPanel.h"
 #include "MeterSnapshot.h"
 #include "ModuleRack.h"
+#include "NoticeBanners.h"
 #include "RoutingPanel.h"
 #include "SettingsDialog.h"
 #include "WaveformHistory.h"
@@ -53,6 +56,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <memory>
+#include <optional>
 
 namespace flub::app::ui
 {
@@ -64,6 +68,11 @@ public:
 
     /** Gives the settings dialog access to the application's hotkey manager. */
     void setHotkeyHooks (HotkeyHooks hooks) { hotkeyHooks = std::move (hooks); }
+
+    /** The banners under the header (headless screenshots and tests). */
+    DeviceErrorBanner& getDeviceErrorBanner() noexcept { return deviceError; }
+    NoticeBar& getNoticeBar() noexcept { return notices; }
+    BoostPanel& getBoostPanel() noexcept { return boost; }
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -82,6 +91,9 @@ private:
     /** Opens the Export / batch process dialog, or brings it to the front. */
     void openExport();
     void refreshDeviceBanner();
+    /** Posts the preset reader warnings and the latency-profile suggestion
+        the controller queued (Change::Preset). */
+    void takePresetNotices();
     juce::String currentStripSignature() const;
     void loadUiPreferences();
     void saveUiPreferences();
@@ -91,7 +103,9 @@ private:
     std::unique_ptr<FlubLookAndFeel> ownLookAndFeel; // only when the app default is not a FlubLookAndFeel
 
     HeaderBar header;
+    DeviceErrorBanner deviceError;
     DeviceAdviceBanner deviceBanner;
+    NoticeBar notices;
     RoutingPanel routing;
     BoostPanel boost;
     AnalyzerPanel analyzer;
@@ -114,6 +128,7 @@ private:
     uint32_t lastGeneration = 0;
     flub::param::ModeValue mode = flub::param::ModeValue::Music;
     bool modeKnown = false;
+    std::optional<EngineController::LatencySuggestion> shownSuggestion; // the latency prompt on the notice bar
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

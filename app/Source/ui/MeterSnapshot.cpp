@@ -34,6 +34,12 @@ void MeterSnapshot::read (const flub::MeterBus& bus) noexcept
     for (size_t b = 0; b < dynEqGainDb.size(); ++b)
         dynEqGainDb[b] = bus.dynEqGainDb[b].load (rl);
     governorScale = bus.governorScale.load (rl);
+    governorState = bus.governorState.load (rl);
+    governorReason = bus.governorReason.load (rl);
+    governorGrDb = bus.governorGrDb.load (rl);
+    governorDistortionDb = bus.governorDistortionDb.load (rl);
+    harmonicsDb = bus.harmonicsDb.load (rl);
+    inputFold = bus.inputFold.load (rl);
     autoLevelGainDb = bus.autoLevelGainDb.load (rl);
     autoDriveDb = bus.autoDriveDb.load (rl);
     latencyMs = bus.latencyMs.load (rl);

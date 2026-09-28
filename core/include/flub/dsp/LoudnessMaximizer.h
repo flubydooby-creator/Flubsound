@@ -1,6 +1,18 @@
 // Flubsound Pro - intelligent true-peak loudness maximizer + soft clipper.
 //
 //   x * drive
+//     Bed-lift budget (bedLiftDb, docs/11 E19 step 3): the drive is loudness
+//     only where it pushes the programme into the limiter; on quiet
+//     programme the chain's static lifts (EQ, compressor make-up, drive)
+//     just raise everything - a game's ambience bed with its cues. With a
+//     budget B, programme that stays well clear of the ceiling is lifted at
+//     most B dB in all: the drive becomes D - w max (0, U + D - B), where U
+//     is the lift upstream of the maximizer (setUpstreamLiftDb(), measured
+//     by the chain) and w follows the input's headroom h = ceiling - P, P =
+//     its peak (instant attack, 400 ms release): 0 where D reaches the
+//     ceiling (h <= D), 1 from 6 dB of spare headroom on, linear between.
+//     The drive may go down to D - 12 dB; it glides with 20 ms. Loud
+//     programme (combat) keeps D. 24 dB = no budget (the default).
 //     -> [glue] 3-band pre-compression (ThreeBandSplitter 120 Hz / 4 kHz,
 //        linked per band, ratio 2:1, threshold ceiling - 6 dB, 5/80 ms,
 //        amount = glue). Balances the band levels so one band (usually the
@@ -67,8 +79,10 @@
 #include "flub/common/DelayLine.h"
 #include "flub/common/SmoothedValue.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <vector>
 
 namespace flub
@@ -85,6 +99,7 @@ struct MaximizerParams
     float clipCrestDb = 6.0f;    // 0 .. 24; 0 = no crest gate (clip at t)      (max.clipCrest)
     float clipMaxDepthDb = 3.0f; // 0.5 .. 24; 24 = depth not capped           (max.clipMaxDb)
     float lfLimit = 0.0f;        // 0 .. 1; LF-first limiter in the glue path   (max.lfLimit)
+    float bedLiftDb = 24.0f;     // 0 .. 24; drive budget below the ceiling  (max.bedLift; 24 = none)
 
     bool operator== (const MaximizerParams&) const = default;
 };
@@ -110,6 +125,12 @@ public:
     const char* name() const noexcept override { return "Loudness Maximizer"; }
 
     void setParams (const MaximizerParams& p) noexcept FLUB_NONBLOCKING;
+    /** The static lift ahead of the maximizer (dB, output re input of the
+        chain's modules), for the bed-lift budget; the chain sets it per block. */
+    void setUpstreamLiftDb (float db) noexcept FLUB_NONBLOCKING { upstreamLiftDb = std::isfinite (db) ? std::clamp (db, -24.0f, 24.0f) : 0.0f; }
+    /** The budget's weight at the end of the last block: 1 on quiet
+        programme, 0 where the drive reaches the ceiling (audio thread). */
+    float getBedQuietWeight() const noexcept { return bedQuiet; }
     const MaximizerParams& getParams() const noexcept { return params; }
 
     /** Soft-clip transfer curve (threshold t, knee 0..1), exposed for tests/GUI. */
@@ -237,6 +258,11 @@ private:
     bool glueRunning = false;
     int glueWarmup = 0, glueWarmupLength = 1;
     float antiDenormal = 0.0f;   // alternates 1e-20 / 0 on the splitter input
+    // Bed-lift budget: the input's peak follower, the drive cap (dB) and
+    // their coefficients.
+    float bedPeak = 0.0f, bedCapDb = 24.0f, bedPeakRelease = 0.0f, bedCapCoeff = 0.0f, upstreamLiftDb = 0.0f;
+    float bedQuiet = 1.0f; // w: 1 = quiet programme (the budget applies in full), 0 = the drive reaches the ceiling
+    bool bedCapActive = false;
     // LF-first limiter: its follower of the low band's held peak (after the
     // glue gain), coefficients, threshold and smoothed amount.
     float lfEnv = 0.0f, lfAttack = 0.0f, lfRelease = 0.0f, lfThreshold = 1.0f;

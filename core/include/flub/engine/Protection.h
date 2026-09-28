@@ -20,7 +20,10 @@
 //   clipper's share, which is its measured THD+N floored at its clip energy
 //   ratio over the same analysis window (the former proxy, which reads
 //   higher on a steady tone), so the governor does not act later on
-//   clipping than it did on the proxy alone. Budget: limiter GR averaged over ~3 s must stay above
+//   clipping than it did on the proxy alone. At protection strength Normal
+//   and Strict the chain raises the maximizer's share to its whole-stage
+//   residual when that reads higher (the clipper and the limiter together,
+//   the limiter's gain-modulation IMD included; docs/11 E06 step 1). Budget: limiter GR averaged over ~3 s must stay above
 //   -6 dB, distortion (power average over ~3 s) below -30 dB (~3.2 % RMS of
 //   the output). When over budget, scale falls at 15 %/s (min 0.3); when
 //   under budget minus 1.5 dB hysteresis it recovers at 3 %/s. The scale

@@ -51,6 +51,15 @@ constexpr float kLfHeadroomGain = 0.70794578f; // -3 dB
 constexpr float kLfAttackMs = 1.0f;
 constexpr float kLfReleaseMs = 250.0f;
 
+// Bed-lift budget (docs/11 E19 step 3, header): the input peak's release,
+// the headroom over the drive from which only the budget applies, and the
+// cap's glide (a loud onset raises it this fast; its fall follows the peak).
+constexpr float kBedPeakReleaseMs = 400.0f;
+constexpr float kBedKneeDb = 6.0f;
+constexpr float kBedCapGlideMs = 20.0f;
+constexpr float kMaxBedTrimDb = 12.0f;
+constexpr float kNoBedBudgetDb = 24.0f;
+
 // Clipper threshold headroom above the ceiling: lerp (+6 dB, +0.3 dB, amount).
 constexpr float kClipHeadroomMaxDb = 6.0f;
 constexpr float kClipHeadroomMinDb = 0.3f;
@@ -138,6 +147,7 @@ MaximizerParams LoudnessMaximizer::sanitised (const MaximizerParams& in, const M
     p.clipKnee = sanitise (p.clipKnee, 0.0f, 1.0f, fallback.clipKnee);
     p.glue = sanitise (p.glue, 0.0f, 1.0f, fallback.glue);
     p.lfLimit = sanitise (p.lfLimit, 0.0f, 1.0f, fallback.lfLimit);
+    p.bedLiftDb = sanitise (p.bedLiftDb, 0.0f, kNoBedBudgetDb, fallback.bedLiftDb);
     p.releaseMs = sanitise (p.releaseMs, 5.0f, 1000.0f, fallback.releaseMs);
     p.clipCrestDb = sanitise (p.clipCrestDb, 0.0f, 24.0f, fallback.clipCrestDb);
     p.clipMaxDepthDb = sanitise (p.clipMaxDepthDb, 0.5f, 24.0f, fallback.clipMaxDepthDb);
@@ -220,6 +230,13 @@ void LoudnessMaximizer::applyParamsImmediately() noexcept
 {
     driveDbS.setImmediate (params.driveDb);
     driveGain = dbToGain (params.driveDb);
+    // A budget starts at its floor (nothing heard yet; a loud start raises
+    // the cap within the glide).
+    bedCapActive = params.bedLiftDb < kNoBedBudgetDb;
+    bedCapDb = bedCapActive ? params.driveDb - std::clamp (upstreamLiftDb + params.driveDb - params.bedLiftDb, 0.0f, kMaxBedTrimDb)
+                            : kNoBedBudgetDb;
+    if (bedCapActive)
+        driveGain = dbToGain (bedCapDb);
     ceilingDbS.setImmediate (params.ceilingDb);
     updateCeiling (params.ceilingDb);
     clipAmountS.setImmediate (params.clipAmount);
@@ -290,6 +307,8 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
         bands[b].release = onePoleCoeff (kGlueReleaseMs, fs);
     }
     glueWarmupLength = std::max (1, msToSamples (kGlueWarmupMs, fs));
+    bedPeakRelease = onePoleCoeff (kBedPeakReleaseMs, fs);
+    bedCapCoeff = onePoleCoeff (kBedCapGlideMs, fs);
     lfAttack = onePoleCoeff (kLfAttackMs, fs);
     lfRelease = onePoleCoeff (kLfReleaseMs, fs);
     distortionWindow.prepare (fs);
@@ -318,6 +337,10 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     splitter.reset();
     antiDenormal = 0.0f;
     lfEnv = 0.0f;
+    bedPeak = 0.0f;
+    bedQuiet = 1.0f;
+    bedCapDb = kNoBedBudgetDb;
+    bedCapActive = false;
     limiter.reset();
     for (auto& b : bands)
     {
@@ -434,6 +457,23 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         const auto si = static_cast<size_t> (i);
         if (driveDbS.isSmoothing())
             driveGain = dbToGain (driveDbS.next());
+        if (params.bedLiftDb < kNoBedBudgetDb || bedCapActive)
+        {
+            // Bed-lift budget: the drive follows the input's headroom (header).
+            float peak = 0.0f;
+            for (int c = 0; c < numCh; ++c)
+                peak = std::max (peak, std::abs (data[static_cast<size_t> (c)][i]));
+            bedPeak = peak >= bedPeak ? std::min (peak, 1.0e6f) : peak + bedPeakRelease * (bedPeak - peak);
+            const float drive = driveDbS.getCurrent();
+            const float excess = std::clamp (upstreamLiftDb + drive - params.bedLiftDb, 0.0f, kMaxBedTrimDb);
+            const float spareDb = ceilingDb - gainToDb (bedPeak) - drive;
+            bedQuiet = std::clamp (spareDb / kBedKneeDb, 0.0f, 1.0f);
+            const float target = params.bedLiftDb < kNoBedBudgetDb ? drive - excess * bedQuiet : drive;
+            bedCapDb = target + bedCapCoeff * (bedCapDb - target);
+            // Released: back on the plain drive once the cap has glided up to it.
+            bedCapActive = params.bedLiftDb < kNoBedBudgetDb || bedCapDb < drive - 1.0e-3f;
+            driveGain = dbToGain (bedCapActive ? std::min (drive, bedCapDb) : drive);
+        }
 
         bool thresholdDirty = false;
         if (ceilingDbS.isSmoothing())

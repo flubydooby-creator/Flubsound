@@ -1344,6 +1344,8 @@ TEST_CASE ("Chain: a stereo game in an 8-channel container switches to the passt
         // linear fade is RMS-compensated, next test). The BS.775 fold starts
         // 3.01 dB below, the virtualiser about 0.8 dB, whose short-term level
         // also wanders with the noise's spectrum in the steady fold (0.5..1.9 s).
+        // (The virtualiser started 0.8 dB below until its level match, docs/11
+        // E28a, put it at the downmix's loudness: now 2.9 dB.)
         const int w = static_cast<int> (0.02 * kFs);
         double lowest = 0.0;
         auto track = [&] (double from, double to, double& first, double& last) {
@@ -1369,7 +1371,7 @@ TEST_CASE ("Chain: a stereo game in an 8-channel container switches to the passt
         const double switchStep = track (1.9, 3.0, first, last);
         std::cout << "    measured " << (virt ? "virtualiser" : "BS.775") << " -> passthrough: start " << first << " dB, largest 20 ms step "
                   << switchStep << " dB (steady fold: " << steadyStep << " dB)\n";
-        CHECK_NEAR (first, virt ? -0.8 : -3.01, virt ? 0.5 : 0.01);
+        CHECK_NEAR (first, virt ? -2.9 : -3.01, virt ? 0.5 : 0.01);
         CHECK_NEAR (last, 0.0, 0.01);
         CHECK_LE (switchStep, virt ? 0.5 : 0.2);
         CHECK_GE (lowest, first - (virt ? 0.3 : 0.01));
@@ -1410,21 +1412,30 @@ TEST_CASE ("Chain: the passthrough ramp is power-compensated - centred pink nois
         }
         return 10.0 * std::log10 (out / in);
     };
-    double virtMax = -100.0, passMin = 100.0, fadeMax = -100.0, fadeMin = 100.0;
+    // The virtualiser fold was up to 2.6 dB above the passthrough; since its
+    // level match (docs/11 E28a) it sits about 3 dB below it (the downmix's
+    // loudness), so the ramp must stay between the two folds either way.
+    double virtMax = -100.0, virtMin = 100.0, passMin = 100.0, passMax = -100.0, fadeMax = -100.0, fadeMin = 100.0;
     for (int i = static_cast<int> (1.0 * kFs); i + w <= static_cast<int> (1.9 * kFs); i += w / 4)
+    {
         virtMax = std::max (virtMax, level (i)); // the virtualiser fold, before the decision
+        virtMin = std::min (virtMin, level (i));
+    }
     for (int i = static_cast<int> (1.9 * kFs); i + w <= static_cast<int> (2.6 * kFs); i += w / 4)
     {
         fadeMax = std::max (fadeMax, level (i));
         fadeMin = std::min (fadeMin, level (i));
     }
     for (int i = static_cast<int> (2.6 * kFs); i + w + latency <= n; i += w / 4)
+    {
         passMin = std::min (passMin, level (i)); // passthrough: 0 dB
+        passMax = std::max (passMax, level (i));
+    }
     std::cout << "    measured centred pink: virtualiser fold up to " << virtMax << " dB, during the ramp " << fadeMin << " .. " << fadeMax
               << " dB, passthrough from " << passMin << " dB\n";
     CHECK_NEAR (passMin, 0.0, 0.01);
-    CHECK_LE (fadeMax, virtMax + 0.3);
-    CHECK_GE (fadeMin, passMin - 0.3);
+    CHECK_LE (fadeMax, std::max (virtMax, passMax) + 0.3);
+    CHECK_GE (fadeMin, std::min (virtMin, passMin) - 0.3);
 }
 
 TEST_CASE ("Chain: rear content switches back to surround within 300 ms and latches through 30 s of rear silence; -45 dB ambience never leaves surround; redetect starts over (E27)")
@@ -1563,7 +1574,10 @@ TEST_CASE ("Chain: the LFE folds at virt.lfe re one main in both folds; virt.lfe
         const double off = level (3, false, lfeDb) - level (0, false, lfeDb);
         const double on = level (3, true, lfeDb) - level (0, true, lfeDb);
         CHECK_NEAR (off, lfeDb, 0.05);
-        CHECK_NEAR (on, lfeDb, 0.1);
+        // The virtualiser sends FL to both ears at the downmix's loudness
+        // (level match, docs/11 E28a): 3 dB lower at each ear; the LFE is not
+        // scaled, so it is virt.lfe above one main in loudness in both folds.
+        CHECK_NEAR (on, lfeDb + 3.01, 0.1);
     }
 
     // LFE fold off: the v1 BS.775 downmix (LFE dropped, -3 dB), delayed by the

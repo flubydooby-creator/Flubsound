@@ -11,7 +11,8 @@
 // (0.05-0.5 dB, 2 % for time shares), not tuning; gcc 13 and clang 18
 // (Linux x86-64, Release) measure identical values to 0.01 dB.
 //
-//   * pumping: a 2 kHz tone under 55 Hz kicks at Boost 100 (E05, E02)
+//   * pumping: a 2 kHz tone under 55 Hz kicks at Boost 100 (E05, E02; closed
+//     by E05 step 5's LF-first limiter)
 //   * 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05;
 //     closed by E05 stage 1)
 //   * the E59 quality suite (`flubsound-cli quality`, Commands.h
@@ -355,7 +356,7 @@ BurstResult measureBursts (const BurstScene& s, const std::vector<float>& values
 } // namespace
 
 // =============================================================================
-TEST_CASE ("KnownGap: pumping - a 2 kHz tone under 55 Hz kicks moves with every kick at Boost 100 (E05 / E02)")
+TEST_CASE ("KnownGap closed: pumping - a 2 kHz tone under 55 Hz kicks dips <= 3 dB at Boost 100 (E05 step 5 / E02)")
 {
     // Stimulus: 2 kHz at -20 dBFS peak plus 55 Hz kicks (peak -6 dBFS, tau
     // 100 ms) every 500 ms, 6 s, Music mode. Metric: the tone's gain in 20 ms
@@ -409,13 +410,19 @@ TEST_CASE ("KnownGap: pumping - a 2 kHz tone under 55 Hz kicks moves with every 
     // takes the kicks instead (GR mean -0.24 -> -2.68 dB). With the drive
     // held fixed the same stage halves the dip: maximizer alone at 12 dB,
     // `quality` ducking 2 kHz probe dip 8.9 -> 3.7 dB, p95 - p5 6.3 -> 4.6.
-    // KNOWN_GAP: target max dip <= 6 dB (<= 3 dB only with multiband) per docs/11 E05 Done-when.
-    CHECK_NEAR (rows[1].dip, 5.52, 0.3);
-    CHECK_LE (rows[1].dip, 6.0);
-    // KNOWN_GAP: E59 reports p95 - p5 and lift / dip separately; docs/11 E05 / E02 set no target for them yet.
-    CHECK_NEAR (rows[1].spread, 4.86, 0.3);
-    CHECK_NEAR (rows[1].lift, 1.74, 0.3);
-    CHECK_NEAR (100.0 * rows[1].down, 14.0, 3.0);
+    // docs/11 E05 step 5: Boost's LF-first limiter (max.lfLimit, from Boost
+    // 50 %) limits the kicks in the low band before the bands are summed, so
+    // the wideband limiter no longer ducks the tone with them: spread 4.86
+    // -> 1.25 dB, dip 5.52 -> 2.49, lift 1.74 -> 0.97, time > 1 dB down 14.0
+    // -> 6.0 %, integrated -10.19 -> -9.35 LUFS (CLI). docs/11 E05
+    // Done-when: max dip <= 6 dB met, and the <= 3 dB it expected only from
+    // a multiband mode.
+    CHECK_NEAR (rows[1].dip, 2.49, 0.3);
+    CHECK_LE (rows[1].dip, 3.0);
+    // E59 reports p95 - p5 and lift / dip separately; docs/11 E05 / E02 set no target for them.
+    CHECK_NEAR (rows[1].spread, 1.25, 0.3);
+    CHECK_NEAR (rows[1].lift, 0.97, 0.3);
+    CHECK_NEAR (100.0 * rows[1].down, 6.0, 3.0);
 }
 
 TEST_CASE ("KnownGap closed: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)")
@@ -520,7 +527,7 @@ TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - TH
     CHECK_NEAR (limiterOnly.pinkOutLufs, -8.31, 0.2);
 }
 
-TEST_CASE ("KnownGap: Music Boost 100 on the E59 quality suite - loudness within 1.5 LU of the pre-E05 maximizer, probes under kicks, kick onset (E05 stage 1)")
+TEST_CASE ("KnownGap closed: Music Boost 100 on the E59 quality suite - loudness within 1.5 LU of the pre-E05 maximizer, probes under kicks dip <= 3 dB, kick onset >= body (E05 stage 1, step 5)")
 {
     // `flubsound-cli quality --mode music --boost 100` (the whole chain,
     // governed). docs/11 E05 Done-when: integrated loudness at max Boost
@@ -539,12 +546,19 @@ TEST_CASE ("KnownGap: Music Boost 100 on the E59 quality suite - loudness within
     // dB. Before, the old clipper's distortion of the kicks (THD+N over the
     // -30 dB budget) made the governor hold Boost at ~0.64 of its amount;
     // now the full governed drive reaches the limiter (see the pumping
-    // KnownGap above). KNOWN_GAP: <= 3 dB only with multiband, docs/11 E05.
-    CHECK_LE (q.ducking[1].track.dipDb, 6.0);
-    CHECK_NEAR (q.ducking[1].track.dipDb, 5.37, 0.4);
-    CHECK_NEAR (q.ducking[1].track.spreadDb, 4.99, 0.4);
-    // Kick onset minus body -1.80 -> -1.18 dB (KNOWN_GAP: >= 0).
-    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, -1.18, 0.3);
+    // KnownGap above). docs/11 E05 step 5 (Boost's LF-first limiter,
+    // max.lfLimit): dip 5.37 -> 2.55 dB, p95 - p5 4.99 -> 1.09 dB - under the
+    // <= 3 dB the item expected only from a multiband mode; pink loudness
+    // unchanged. The cost: the kick's low band is held 3 dB under the
+    // ceiling (CLI, the pumping scene: its < 150 Hz lift +4.0 -> +1.3 dB,
+    // the 2 kHz tone +5.8 -> +7.5 dB).
+    CHECK_LE (q.ducking[1].track.dipDb, 3.0);
+    CHECK_NEAR (q.ducking[1].track.dipDb, 2.55, 0.4);
+    CHECK_NEAR (q.ducking[1].track.spreadDb, 1.09, 0.4);
+    // Kick onset minus body -1.80 -> -1.18 dB (stage 1) -> +0.21 dB (step 5;
+    // docs/11 E05 Done-when >= 0 met).
+    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, 0.21, 0.3);
+    CHECK_GE (q.kickOnsetLiftDb - q.kickBodyLiftDb, 0.0);
     // A steady 1 kHz sine at Boost 100: -50.3 -> -94.8 dB THD+N.
     CHECK_LE (q.thdn[3].db, -80.0);
 }
@@ -575,15 +589,18 @@ TEST_CASE ("KnownGap: 7.1 LFE - an LFE-only 50 Hz tone folds at +6 dB re one mai
     measured ("LFE re FL, virt off", lfeOff - mainOff, "dB");
     measured ("LFE re FL, virt on", lfeOn - mainOn, "dB");
 
-    // The FL reference (not a gap): the BS.775 fold and the virtualiser both pass one main at about -3 dB.
+    // The FL reference (not a gap): the BS.775 fold passes one main at -3 dB
+    // to one side. The virtualiser sends it to both ears and, since its level
+    // match (docs/11 E28a), at the downmix's loudness: 3 dB lower at each ear
+    // (-15.01 -> -18.04 dBFS), while the LFE keeps its level.
     CHECK_NEAR (mainOff, -15.05, 0.3);
-    CHECK_NEAR (mainOn, -15.01, 0.3);
+    CHECK_NEAR (mainOn, -18.04, 0.3);
     // Fixed by E01 (shared Bs775Fold / LfeFold, virt.lfe default +6 dB):
     // before, the LFE was dropped with the virtualiser off (-240 dBFS, exact
     // silence) and sat at -0.03 dB re FL with it on. Now both folds put it at
     // virt.lfe re one main and within 1 dB of each other (E01 Done-when).
     CHECK_NEAR (lfeOff - mainOff, 6.00, 0.3);
-    CHECK_NEAR (lfeOn - mainOn, 5.97, 0.3);
+    CHECK_NEAR (lfeOn - mainOn, 8.99, 0.3); // 5.97 before E28a: per ear; the loudness ratio is the downmix's
     CHECK_LE (std::abs (lfeOn - lfeOff), 1.0);
     // KNOWN_GAP: target LFE = FL + 10 dB (+-1 dB) per docs/11 E01 Done-when;
     // the default stays +6 dB until E05's LF-safe limiter envelope lands.
@@ -663,9 +680,11 @@ TEST_CASE ("KnownGap closed: stereo in an 8-channel container - FL/FR-only conte
     // Before: the fold this content got before E27 (still what Force Surround
     // gives): -16.78 dB at 1412 Hz and +3.34 dB at the top, re the input,
     // and 10.74 dB separation (docs/11 E27, on its own stimulus: a -15.4 dB
-    // notch at 1418 Hz, +2.6 dB at 250 Hz and 10.8 dB separation).
-    CHECK_NEAR (before.minGain, -16.78, 0.5);
-    CHECK_NEAR (before.maxGain, 3.34, 0.3);
+    // notch at 1418 Hz, +2.6 dB at 250 Hz and 10.8 dB separation). Since the
+    // virtualiser's level match (docs/11 E28a) the whole curve sits 2.9 dB
+    // lower, at the downmix's loudness: -19.70 dB and +0.48 dB.
+    CHECK_NEAR (before.minGain, -19.70, 0.5);
+    CHECK_NEAR (before.maxGain, 0.48, 0.3);
     CHECK_NEAR (before.separation, 10.74, 0.3);
     // Closed by E27 Phase 1 (target per docs/11 E27 Done-when: no notch deeper
     // than 0.5 dB, full separation; the passthrough equals a 2-channel render).
@@ -936,7 +955,7 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     CHECK_LE (std::abs (longHole5), 1.0);
 }
 
-TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body, Tighten and Boost 100 cut the onset (E04 / E05)")
+TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body, Tighten cuts the onset, Boost 100 no longer does (E04 / E05)")
 {
     // Synthetic kick (50 Hz + 80 Hz chirp, e^-18t, peak -6 dBFS) every
     // 500 ms for 6 s, Music mode, maximizer off unless stated. Lift = output
@@ -996,10 +1015,13 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     CHECK_GE (p0, p1); // the onset no longer gets less than the body
     // KNOWN_GAP: target Tighten 0.5 0-10 ms change >= -0.5 dB per docs/11 E04 Done-when.
     CHECK_NEAR (t0, -2.04, 0.3);
-    // KNOWN_GAP: target Boost 100 kick onset / body >= 0 dB per docs/11 E05 Done-when.
-    // docs/11 E05 stage 1 (crest-gated clipper, LF-safe limiter envelope):
-    // -1.80 -> -1.18 dB; the rest needs E05's Boost-to-attack coupling (E04).
-    CHECK_NEAR (b0 - b1, -1.18, 0.3);
+    // docs/11 E05 Done-when, Boost 100 kick onset / body >= 0 dB: stage 1
+    // (crest-gated clipper, LF-safe limiter envelope) -1.80 -> -1.18 dB;
+    // met by step 5, Boost's LF-first limiter (max.lfLimit from Boost 50 %):
+    // the kick is limited in the low band 3 dB under the ceiling, so the
+    // wideband limiter and the clipper no longer take its onset: +0.21 dB.
+    CHECK_NEAR (b0 - b1, 0.21, 0.3);
+    CHECK_GE (b0 - b1, 0.0);
 }
 
 TEST_CASE ("KnownGap closed: 30 Hz audible-band energy - the laptop preset keeps the harmonics of a 30 Hz tone (E03)")
@@ -1378,6 +1400,7 @@ namespace
 struct GovernorReading
 {
     double scale = 1.0, distortionDb = -160.0; // at the end of the render
+    double harmonicsDb = -160.0;                // the intentional harmonic generators' share (bass harmonics, air)
 };
 
 Channels renderAtStrength (const io::AudioFileData& input, const std::vector<float>& values, ProtectionStrength strength,
@@ -1402,7 +1425,7 @@ Channels renderAtStrength (const io::AudioFileData& input, const std::vector<flo
     for (int pos = 0; pos < n + latency; pos += kBlock)
         chain.process (buf.block (pos, std::min (kBlock, n + latency - pos)));
     if (reading != nullptr)
-        *reading = { chain.meters().governorScale.load(), chain.meters().governorDistortionDb.load() };
+        *reading = { chain.meters().governorScale.load(), chain.meters().governorDistortionDb.load(), chain.meters().harmonicsDb.load() };
     Channels out (2);
     for (int c = 0; c < 2; ++c)
         out[static_cast<size_t> (c)].assign (buf.ch[static_cast<size_t> (c)].begin() + latency, buf.ch[static_cast<size_t> (c)].end());
@@ -1596,7 +1619,7 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
     setValue (driven, MaxDriveDb, 12.0f);
     setValue (driven, SaturationOn, 1.0f);
     setValue (driven, SatDriveDb, 12.0f);
-    double thd[2][3] = {}, governed[2][3] = {};
+    double thd[2][3] = {}, governed[2][3] = {}, harmonics[2][3] = {};
     for (int scene = 0; scene < 2; ++scene)
         for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal, ProtectionStrength::Strict })
         {
@@ -1605,12 +1628,14 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
             const auto k = static_cast<size_t> (s);
             thd[scene][k] = thdPlusNoiseDb (out[0], samplesOf (6.0), samplesOf (4.0), 50.0);
             governed[scene][k] = gr.distortionDb;
+            harmonics[scene][k] = gr.harmonicsDb;
             const std::string tag = std::string (scene == 0 ? "all Music macros 100" : "... with max.drive 12 + sat.drive 12")
                                     + ", strength " + std::to_string (static_cast<int> (s));
             measured (tag + ": 50 Hz THD+N", thd[scene][k], "dB");
             measured (tag + ": 50 Hz THD+N (percent)", 100.0 * std::pow (10.0, thd[scene][k] / 20.0), "%");
             measured (tag + ": governor scale at 10 s", gr.scale, "");
             measured (tag + ": governor THD+N input (3 s average)", gr.distortionDb, "dB");
+            measured (tag + ": bass harmonics + air exciter share", gr.harmonicsDb, "dB");
         }
     // Off is the behaviour before E06 (the CLI measures 20.3 % on scene a).
     CHECK_NEAR (thd[0][0], -13.85, 0.3);
@@ -1619,22 +1644,36 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
     // macro amount, already scaled at Off, and the scale sits at its 0.3
     // floor, so Normal changes nothing here. Strict (floor 0) removes every
     // governed amount and still measures 5.3 %: the rest is ungoverned (the
-    // governor's own input stays over its -30 dB budget at scale 0, and the
-    // limiter's LF distortion is not measured at all - docs/11 E06 step 1,
-    // E05's LF envelope).
+    // governor's own input stays over its -30 dB budget at scale 0).
     // Re-based for docs/11 E04 (Punch no longer drives BassTighten, whose
     // gain riding on the 50 Hz sine had masked some distortion): Strict
     // -25.51 -> -24.48 dB, driven scene at Off -15.27 -> -14.86 dB (with the
     // Tighten row restored the tree measures -25.54 / -15.19).
     CHECK_NEAR (thd[0][1], thd[0][0], 0.05);
+    // docs/11 E06 step 1 (the maximizer's whole-stage residual, the
+    // limiter's gain modulation included, feeds the governor at Normal /
+    // Strict) does not move scene a: the limiter holds its gain flat over
+    // a steady 50 Hz (E05 stage 1), and the scale is at its 0.3 floor
+    // already. What the output carries at Off and Normal is the bass
+    // harmonics generator's intended harmonics (Boost and Warmth's
+    // bass.harmonics at 0.3 of their amounts): -13.6 dB of the output by
+    // itself (DistortionMonitor's harmonics reading), the whole -14.0 dB
+    // THD+N within 0.4 dB. <= 3 % at Normal therefore needs Normal to govern
+    // the harmonics below the 0.3 floor or count them against a budget
+    // (E06 steps 3 / 5), not a better distortion measure.
+    CHECK_GE (harmonics[0][1], thd[0][1] - 1.0);
     CHECK_NEAR (thd[0][2], -24.48, 0.3);
     CHECK_GE (governed[0][2], SafetyGovernor::kDistortionBudgetDb);
     // Driven base settings: Normal governs them too, and the governor's
-    // measured input (saturator + clipper) falls 6 dB; the output's THD+N
-    // does not, because less clipper drive hands the 50 Hz peaks to the
-    // limiter, whose distortion the governor does not see (KNOWN_GAP, E06
-    // step 1).
-    CHECK_NEAR (thd[1][0], -14.86, 0.3);
+    // measured input (saturator + clipper, and since docs/11 E06 step 1 the
+    // maximizer's whole-stage residual) falls 6 dB; the output's THD+N does
+    // not: it is the harmonics generator's (the same -13.6 dB share), which
+    // no strength below Strict takes under the 0.3 floor.
+    // Re-based for docs/11 E05 step 5 (Boost 100's LF-first limiter holds
+    // the 50 Hz low band 3 dB under the ceiling while the harmonics above
+    // 120 Hz pass, so their share of the output rises): driven scene at Off
+    // -14.86 -> -12.96 dB; Normal and Strict move by less than 0.3 dB.
+    CHECK_NEAR (thd[1][0], -12.96, 0.3);
     CHECK_NEAR (thd[1][1], -14.05, 0.3);
     CHECK_NEAR (thd[1][2], -20.63, 0.3);
     CHECK_LE (governed[1][1], governed[1][0] - 3.0);

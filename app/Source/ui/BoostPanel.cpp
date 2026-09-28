@@ -3,6 +3,7 @@
 #include "FlubLookAndFeel.h"
 #include "Theme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace flub::app::ui
@@ -11,13 +12,20 @@ using namespace flub::param;
 
 namespace
 {
+const juce::String kDot { juce::CharPointer_UTF8 (" \xc2\xb7 ") };
+
+juce::String percent (float v01)
+{
+    return juce::String (juce::roundToInt (v01 * 100.0f)) + "%";
+}
+
 const char* macroTip (ModeValue mode, int index)
 {
-    static const char* music[] = { "Punch: transient attack and a tighter low end", "Width: stereo width and a sense of space",
+    static const char* music[] = { "Punch: transient attack and impact", "Width: stereo width and a sense of space",
                                    "Clarity: presence, air and de-mud (with dynamic de-harsh)",
                                    "Loudness: maximizer drive and multiband glue (safety governed)",
                                    "Warmth: tape saturation and harmonic bass (safety governed)" };
-    static const char* gaming[] = { "Footsteps: lifts quiet high-frequency cues (steps, reloads) and tames masking booms",
+    static const char* gaming[] = { "Footsteps: lifts cues (steps, reloads) as they rise out of the ambience",
                                     "Positional: sharpens left / right / front / back placement",
                                     "Impact: weight for explosions and gunshots (safety governed)",
                                     "Detail: brings up quiet ambience and distant cues (upward compression)",
@@ -160,6 +168,7 @@ BoostPanel::BoostPanel (EngineController& c)
         addAndMakeVisible (knob);
         binder.bindSlider (knob.slider, Macro1 + static_cast<int> (i));
     }
+    governor = describeGovernor ({}, controller.getProtectionStrength());
     setMode (ModeValue::Music);
 }
 
@@ -178,11 +187,253 @@ void BoostPanel::setMode (ModeValue newMode)
 
 void BoostPanel::setGovernorScale (float scale)
 {
-    const bool wasLimiting = dial.getGovernorScale() < 0.985f;
-    const int before = juce::roundToInt (dial.getGovernorScale() * 100.0f);
-    dial.setGovernorScale (scale);
-    if (wasLimiting != (dial.getGovernorScale() < 0.985f) || before != juce::roundToInt (dial.getGovernorScale() * 100.0f))
-        repaint (headerArea);
+    MeterSnapshot s;
+    s.governorScale = scale;
+    s.governorState = scale < 0.985f ? static_cast<int> (flub::SafetyGovernor::State::Holding) : 0;
+    update (s);
+}
+
+void BoostPanel::update (const MeterSnapshot& snapshot)
+{
+    dial.setGovernorScale (snapshot.governorScale);
+    auto next = describeGovernor (snapshot, controller.getProtectionStrength());
+    if (next.text != governor.text || next.detail != governor.detail)
+    {
+        const bool textChanged = next.text != governor.text;
+        governor = std::move (next);
+        if (textChanged)
+            repaint (headerArea);
+    }
+
+    // The chips change with parameters and slow meters: a few times a second.
+    if (++framesSinceStages >= 15)
+    {
+        framesSinceStages = 0;
+        refreshStages (snapshot);
+    }
+}
+
+void BoostPanel::refreshStages (const MeterSnapshot& snapshot)
+{
+    const int strip = controller.getSelectedStrip();
+    auto& chain = controller.getChain (strip);
+    auto next = describeActiveStages ([&chain] (int id) { return chain.effectiveValue (id); }, snapshot, controller.getStripChannels (strip));
+    const bool same = next.size() == stages.size()
+                      && std::equal (next.begin(), next.end(), stages.begin(), [] (const ActiveStage& a, const ActiveStage& b) { return a.text == b.text; });
+    stages = std::move (next);
+    if (! same)
+    {
+        juce::StringArray texts;
+        for (const auto& st : stages)
+            texts.add (st.text);
+        setDescription ("Active now: " + (texts.isEmpty() ? juce::String ("nothing") : texts.joinIntoString (", ")));
+        repaint (chipsArea);
+    }
+}
+
+BoostPanel::GovernorReadout BoostPanel::describeGovernor (const MeterSnapshot& s, flub::ProtectionStrength strength)
+{
+    using G = flub::SafetyGovernor;
+    GovernorReadout r;
+    const float scale = juce::jlimit (0.0f, 1.0f, std::isfinite (s.governorScale) ? s.governorScale : 1.0f);
+    const auto state = static_cast<G::State> (juce::jlimit (0, 3, s.governorState));
+    const auto pct = percent (scale);
+    r.limiting = scale < 0.985f;
+
+    juce::StringArray reasons;
+    if ((s.governorReason & G::kReasonLimiter) != 0)
+        reasons.add ("limiter");
+    if ((s.governorReason & G::kReasonDistortion) != 0)
+        reasons.add ("distortion");
+
+    if (! r.limiting && state == G::State::Idle)
+        r.text = "Safety governor OK";
+    else
+    {
+        r.text = "Governor " + pct;
+        if (state == G::State::BackingOff)
+            r.text << kDot << (reasons.isEmpty() ? juce::String ("backing off") : reasons.joinIntoString (" + "));
+        else if (state == G::State::Holding)
+            r.text << kDot << "holding";
+        else if (state == G::State::Recovering)
+            r.text << kDot << "recovering";
+    }
+
+    r.detail << "The safety governor applies " << pct << " of the governed Boost and macro amounts (bass, drive, saturation).\n";
+    switch (state)
+    {
+        case G::State::Idle: r.detail << "Within its budgets."; break;
+        case G::State::BackingOff:
+            r.detail << "Backing off: " << (reasons.isEmpty() ? juce::String ("over budget") : reasons.joinIntoString (" and ") + " over budget") << ".";
+            break;
+        case G::State::Holding: r.detail << "Holding: close to a budget, the amounts stay where they are."; break;
+        case G::State::Recovering: r.detail << "Recovering: comfortably within budget, the amounts rise again."; break;
+    }
+    r.detail << "\nLimiter, 3 s average: " << Theme::formatDb (s.governorGrDb, 1) << " dB (budget " << juce::String (G::kGrBudgetDb, 0) << " dB)";
+    r.detail << "\nDistortion (THD+N), 3 s average: " << Theme::formatDb (s.governorDistortionDb, 0, -120.0f) << " dB (budget "
+             << juce::String (G::kDistortionBudgetDb, 0) << " dB)";
+    r.detail << "\nProtection strength: " << EngineController::getProtectionStrengthName (strength);
+    switch (strength)
+    {
+        case flub::ProtectionStrength::Off: r.detail << " (the macro amounts only)"; break;
+        case flub::ProtectionStrength::Normal: r.detail << " (also the preset's own maximizer drive, saturation drive and bass harmonics)"; break;
+        case flub::ProtectionStrength::Strict: r.detail << " (as Normal, and the amounts may fall to 0)"; break;
+    }
+    r.detail << ". Click to change.";
+    return r;
+}
+
+std::vector<BoostPanel::ActiveStage> BoostPanel::describeActiveStages (const std::function<float (int)>& e, const MeterSnapshot& s,
+                                                                      int stripChannels)
+{
+    std::vector<ActiveStage> out;
+    const auto on = [&e] (int id) { return e (id) > 0.5f; };
+    const auto add = [&out] (juce::String text, juce::String detail) { out.push_back ({ std::move (text), std::move (detail) }); };
+    const auto finite = [] (float v, float fallback) { return std::isfinite (v) ? v : fallback; };
+
+    if (on (AutoLevelOn))
+        add ("Auto level " + Theme::formatSignedDb (finite (s.autoLevelGainDb, 0.0f)) + " dB",
+             "Auto level: levels the input towards " + juce::String (juce::roundToInt (e (AutoLevelTargetLufs))) + " LUFS");
+    if (const float preamp = finite (s.autoPreampDb, 0.0f); preamp < -0.05f)
+        add ("Preamp " + Theme::formatSignedDb (preamp) + " dB",
+             "Automatic preamp: takes the predicted boost of the chain (" + Theme::formatSignedDb (finite (s.predictedBoostDb, 0.0f))
+                 + " dB) less its allowance off the signal");
+    if (on (GateOn))
+        add ("Noise gate", "Spectral noise gate");
+
+    if (on (EqOn))
+    {
+        int bands = 0;
+        for (int b = 0; b < kEqBands; ++b)
+        {
+            const bool bandOn = e (eq (b, EqFieldOn)) > 0.5f;
+            const int type = juce::roundToInt (e (eq (b, EqFieldType)));
+            const bool hasGain = type <= 2; // Bell, Low Shelf, High Shelf; cuts, notch and band pass shape without gain
+            if (bandOn && (! hasGain || std::abs (e (eq (b, EqFieldGain))) >= 0.1f))
+                ++bands;
+        }
+        const float output = e (EqOutputGainDb);
+        if (bands > 0 || std::abs (output) >= 0.1f)
+        {
+            juce::String text = "EQ " + juce::String (bands) + (bands == 1 ? " band" : " bands");
+            if (std::abs (output) >= 0.1f)
+                text << ", " << Theme::formatSignedDb (output) << " dB";
+            add (text, "Parametric EQ: bands that shape the sound, and the EQ output gain");
+        }
+    }
+    if (on (DynEqOn))
+    {
+        float deepest = 0.0f;
+        for (const float g : s.dynEqGainDb)
+            if (std::abs (finite (g, 0.0f)) > std::abs (deepest))
+                deepest = g;
+        if (std::abs (deepest) >= 0.5f)
+            add ("Dynamic EQ " + Theme::formatSignedDb (deepest) + " dB", "Dynamic EQ: the band acting most right now");
+    }
+
+    if (on (BassOn))
+    {
+        if (const float hz = e (BassSubsonic); hz > 0.5f)
+            add ("Subsonic " + juce::String (juce::roundToInt (hz)) + " Hz", "Subsonic high-pass: removes rumble below the speaker's range");
+        if (const float db = e (BassBoostDb); db >= 0.1f)
+            add ("Bass " + Theme::formatSignedDb (db) + " dB @ " + juce::String (juce::roundToInt (e (BassBoostFreq))) + " Hz", "Bass shelf");
+        if (const float h = e (BassHarmonics); h >= 0.01f)
+            add ("Harmonics " + percent (h), "Harmonic bass: adds harmonics so small speakers suggest the low end");
+        if (const float t = e (BassTighten); t >= 0.01f)
+            add ("Tighten " + percent (t), "Bass tighten: shortens the low end's decay");
+        if (const float hz = e (BassMonoBelow); hz > 0.5f)
+            add ("Mono bass < " + juce::String (juce::roundToInt (hz)) + " Hz", "Bass below this frequency is played in mono");
+    }
+    if (on (ClarityOn))
+    {
+        if (const float v = e (ClarityPresence); v >= 0.01f)
+            add ("Presence " + percent (v), "Presence lift around " + juce::String (juce::roundToInt (e (ClarityPresenceFreq))) + " Hz");
+        if (const float v = e (ClarityAir); v >= 0.01f)
+            add ("Air " + percent (v), "Air: high-frequency shelf");
+        if (const float v = e (ClarityDeMud); v >= 0.01f)
+            add ("De-mud " + percent (v), "De-mud: lowers the 200 - 500 Hz build-up");
+        if (const float v = e (ClarityAttackDb); std::abs (v) >= 0.1f)
+            add ("Attack " + Theme::formatSignedDb (v) + " dB", "Transient shaper: attack");
+        if (const float v = e (ClaritySustainDb); std::abs (v) >= 0.1f)
+            add ("Sustain " + Theme::formatSignedDb (v) + " dB", "Transient shaper: sustain");
+    }
+    if (on (SaturationOn))
+        if (const float drive = e (SatDriveDb); drive >= 0.1f)
+        {
+            const auto& types = layout()[static_cast<size_t> (SatType)].choices;
+            const auto t = static_cast<size_t> (juce::jlimit (0, static_cast<int> (types.size()) - 1, juce::roundToInt (e (SatType))));
+            add (juce::String (types[t]) + " " + juce::String (drive, 1) + " dB", "Saturation drive");
+        }
+    if (on (SpatialOn))
+    {
+        if (const float w = e (SpatialWidth); std::abs (w - 1.0f) >= 0.02f)
+            add ("Width " + percent (w), "Stereo width (100% = unchanged)");
+        if (const float v = e (SpatialFocus); v >= 0.01f)
+            add ("Focus " + percent (v), "Positional focus");
+        if (const float v = e (SpatialSpace); v >= 0.01f)
+            add ("Space " + percent (v), "Space: early reflections");
+        if (const float v = e (SpatialCrossfeed); v >= 0.01f)
+            add ("Crossfeed " + percent (v), "Headphone crossfeed");
+    }
+    if (on (VirtualizerOn) && stripChannels > 2 && s.inputFold == 0)
+        add ("Virtualizer", "Headphone virtualiser: binaural render of the surround input");
+    if (on (CompressorOn))
+    {
+        juce::String text = "Compressor " + juce::String (e (CompRatio), 1) + ":1";
+        if (const float gr = finite (s.compGainReductionDb, 0.0f); gr < -0.5f)
+            text << " " << Theme::formatSignedDb (gr) << " dB";
+        add (text, "Compressor ratio and its gain reduction now");
+    }
+    if (on (MaximizerOn))
+    {
+        if (const float drive = e (MaxDriveDb); drive >= 0.1f)
+            add ("Maximizer " + Theme::formatSignedDb (drive) + " dB drive", "Loudness maximizer drive into the clipper and limiter");
+        if (const float gr = finite (s.maxGainReductionDb, 0.0f); gr < -0.5f)
+            add ("Limiter " + Theme::formatSignedDb (gr) + " dB", "The maximizer's limiter is reducing gain now");
+    }
+    return out;
+}
+
+juce::String BoostPanel::getTooltip()
+{
+    const auto p = getMouseXYRelative().toFloat();
+    if (governorChip.contains (p))
+        return governor.detail;
+    if (chipsArea.toFloat().contains (p))
+    {
+        if (stages.empty())
+            return "Active now: no stage changes the sound (flat).";
+        juce::String tip ("Active now:");
+        for (const auto& st : stages)
+            tip << "\n" << st.text << kDot << st.detail;
+        return tip;
+    }
+    return {};
+}
+
+void BoostPanel::mouseUp (const juce::MouseEvent& e)
+{
+    if (governorChip.contains (e.position))
+        showStrengthMenu();
+}
+
+void BoostPanel::showStrengthMenu()
+{
+    using S = flub::ProtectionStrength;
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Protection strength");
+    const auto current = controller.getProtectionStrength();
+    menu.addItem (1, "Off: govern the macro amounts only", true, current == S::Off);
+    menu.addItem (2, "Normal: also the preset's own drive and harmonics", true, current == S::Normal);
+    menu.addItem (3, "Strict: as Normal, down to 0", true, current == S::Strict);
+    juce::Component::SafePointer<BoostPanel> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetScreenArea (localAreaToGlobal (governorChip.toNearestInt())),
+                        [safe] (int result)
+                        {
+                            if (safe == nullptr || result < 1 || result > 3)
+                                return;
+                            safe->controller.setProtectionStrength (static_cast<S> (result - 1));
+                        });
 }
 
 void BoostPanel::paint (juce::Graphics& g)
@@ -194,14 +445,12 @@ void BoostPanel::paint (juce::Graphics& g)
     Theme::drawCaption (g, mode == ModeValue::Gaming ? "GAMING MACROS" : "MUSIC MACROS", header, Palette::muted);
 
     // Safety governor status (right end of the header): how much of the
-    // governed Boost / macro amounts is applied right now.
-    const float gov = dial.getGovernorScale();
-    const bool limiting = gov < 0.985f;
-    const auto status = limiting ? "Safety governor: " + juce::String (juce::roundToInt (gov * 100.0f)) + "% applied"
-                                 : juce::String ("Safety governor OK");
+    // governed Boost / macro amounts is applied right now, and why.
+    const bool limiting = governor.limiting;
     g.setFont (Theme::font (11.5f));
-    const float sw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), status);
+    const float sw = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), governor.text);
     auto chip = header.removeFromRight (sw + 26.0f).withSizeKeepingCentre (sw + 26.0f, 18.0f);
+    governorChip = chip;
     const auto colour = limiting ? Palette::amber : Palette::green;
     g.setColour (colour.withAlpha (0.1f));
     g.fillRoundedRectangle (chip, 9.0f);
@@ -210,7 +459,43 @@ void BoostPanel::paint (juce::Graphics& g)
     g.setColour (colour);
     g.fillEllipse (chip.withWidth (18.0f).withSizeKeepingCentre (6.0f, 6.0f).translated (4.0f, 0.0f));
     g.setColour (limiting ? Palette::amber : Palette::text.withAlpha (0.85f));
-    g.drawText (status, chip.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, false);
+    g.drawText (governor.text, chip.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, false);
+
+    // Active-now chips under the macros; what does not fit is counted.
+    if (! chipsArea.isEmpty())
+    {
+        auto row = chipsArea.toFloat();
+        g.setFont (Theme::font (11.0f));
+        Theme::drawCaption (g, "ACTIVE", row.removeFromLeft (48.0f), Palette::faint);
+        const auto accent = Theme::accent (*this);
+        shownStages = 0;
+        if (stages.empty())
+        {
+            g.setColour (Palette::faint);
+            g.drawText ("Flat: no stage changes the sound", row, juce::Justification::centredLeft, true);
+        }
+        for (size_t i = 0; i < stages.size(); ++i)
+        {
+            const float w = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), stages[i].text) + 16.0f;
+            const bool last = i + 1 == stages.size();
+            const float reserve = last ? 0.0f : 34.0f; // room for "+N"
+            if (w + reserve > row.getWidth())
+            {
+                g.setColour (Palette::muted);
+                g.drawText ("+" + juce::String (static_cast<int> (stages.size() - i)), row, juce::Justification::centredLeft, false);
+                break;
+            }
+            auto pill = row.removeFromLeft (w).withSizeKeepingCentre (w, 17.0f);
+            row.removeFromLeft (5.0f);
+            g.setColour (accent.withAlpha (0.1f));
+            g.fillRoundedRectangle (pill, 8.5f);
+            g.setColour (accent.withAlpha (0.35f));
+            g.drawRoundedRectangle (pill.reduced (0.5f), 8.5f, 1.0f);
+            g.setColour (Palette::text.withAlpha (0.9f));
+            g.drawText (stages[i].text, pill, juce::Justification::centred, false);
+            ++shownStages;
+        }
+    }
 
     // Divider between the dial and the macros.
     g.setColour (Palette::border);
@@ -232,6 +517,8 @@ void BoostPanel::resized()
 
     r.removeFromLeft (26);
     macroArea = r;
+    // The chips row takes the bottom of the macro column when the knobs can spare it.
+    chipsArea = r.getHeight() >= 104 ? r.removeFromBottom (20) : juce::Rectangle<int>();
 
     // Macros: evenly spaced (at most 170 px apart, centred), smaller than the dial.
     const int n = static_cast<int> (macros.size());

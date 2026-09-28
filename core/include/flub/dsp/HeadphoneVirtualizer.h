@@ -223,8 +223,9 @@ private:
     // (kept apart from the level match) and the reference downmix D.
     std::vector<float> accL, accR, bus, lfeBus, refL, refR;
 
-    // Level match (E28a). K-weighting (BS.1770 shelf and RLB high-pass) of
-    // four lanes: D left / right, binaural left / right.
+    // Level match (E28a). K-weighting (BS.1770 shelf and RLB high-pass,
+    // designed for fs / 2: it runs on every other sample) of four lanes:
+    // D left / right, binaural left / right.
     SvfCoeffs kShelf, kHighPass;
     std::array<float, 4> kShelf1 {}, kShelf2 {}, kHp1 {}, kHp2 {}; // SVF states per lane
     double periodRef = 0.0, periodBin = 0.0; // this period's K-weighted energies

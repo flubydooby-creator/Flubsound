@@ -1,6 +1,6 @@
 // Flubsound Pro CLI - the commands behind `process`, `batch`, `analyze`,
-// `quality`, `params` and `presets` (main.cpp only parses the command line,
-// prints help and dispatches here).
+// `quality`, `soak`, `params` and `presets` (main.cpp only parses the command
+// line, prints help and dispatches here).
 //
 // The batch building blocks are declared here so tests/test_offline_render.cpp
 // can run them directly: the folder walk (collectBatchJobs), one file
@@ -43,6 +43,7 @@ int runProcess (const CliOptions& options);
 int runBatch (const CliOptions& options);
 int runAnalyze (const CliOptions& options);
 int runQuality (const CliOptions& options);
+int runSoak (const CliOptions& options);
 int runParams (const CliOptions& options);
 int runPresets (const CliOptions& options);
 

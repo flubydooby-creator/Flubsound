@@ -562,39 +562,13 @@ void HeaderBar::renamePreset (const PresetInfo& preset)
         if (newName.isEmpty() || newName == preset.name)
             return;
 
-        // PresetManager has no rename: write the preset under the new name,
-        // then delete the old file and move the strips that used it.
-        auto& ctrl = safe->controller;
-        auto& presets = ctrl.getPresetManager();
+        // A rename keeps the preset's uuid (docs/11 E52): the strips and the
+        // automatic profile rules that play it keep working.
         juce::String error;
-        flub::param::ParameterStore temp;
-        if (! presets.loadIntoBank (preset, temp, Bank::A, error))
+        if (safe->controller.renameUserPreset (preset, newName, error).isEmpty())
         {
             safe->showError ("Could not rename the preset", error);
             return;
-        }
-        temp.setActiveBank (Bank::A);
-
-        std::vector<int> users;
-        for (int s = 0; s < ctrl.getNumStrips(); ++s)
-            if (presets.getCurrentPresetId (s) == preset.id)
-                users.push_back (s);
-
-        const auto newId = presets.saveUserPreset (newName, preset.category, preset.description, temp, error, false);
-        if (newId.isEmpty())
-        {
-            safe->showError ("Could not rename the preset", error);
-            return;
-        }
-        if (const auto* old = presets.findById (preset.id); old != nullptr && newId != preset.id)
-        {
-            const auto oldCopy = *old;
-            presets.deleteUserPreset (oldCopy, error);
-        }
-        for (const int s : users)
-        {
-            presets.setCurrentPresetId (s, newId, nullptr); // keeps the strip's "modified" state
-            ctrl.getSettings().setLastPreset (ctrl.getStripName (s), newId);
         }
         safe->refreshPresets();
     }),

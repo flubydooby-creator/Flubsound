@@ -3,7 +3,9 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/analysis/LoudnessMeter.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
+#include "flub/dsp/TruePeakDetector.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,11 +25,16 @@ constexpr float kTrim = 0.70794578f; // -3 dB headroom trim
 // 7.1 channel indices (Windows order): FL FR FC LFE BL BR SL SR
 constexpr int FL = 0, FC = 2, LFE = 3, BL = 4, SL = 6, SR = 7;
 
+/** The renderer on its own: most tests check the model's exact paths, so the
+    level match and the fold headroom (docs/11 E28a) are off unless a test
+    turns them on (they have their own tests at the end of this file). */
 VirtualizerParams paramsFor (ChannelLayout layout, float room = 0.0f)
 {
     VirtualizerParams p;
     p.layout = layout;
     p.roomAmount = room;
+    p.levelMatch = false;
+    p.foldHeadroom = false;
     return p;
 }
 
@@ -999,8 +1006,12 @@ TEST_CASE ("HeadphoneVirtualizer [adversarial]: bit-exact under random block par
     // angles, head, room, LFE and two layout swaps); each interval is cut
     // into random blocks of 1 .. 4096 samples. The header promises output
     // that is sample-identical for any host block size.
-    for (bool withHrir : { false, true })
+    // Also with the level match and the fold headroom (docs/11 E28a) on and
+    // toggled: 0.5 noise on every channel drives the headroom gain too.
+    for (int variant = 0; variant < 3; ++variant)
     {
+        const bool withHrir = variant == 1;
+        const bool matched = variant == 2;
         const int interval = 700, numIntervals = 40, n = interval * numIntervals;
         std::vector<std::vector<float>> ref;
         for (uint32_t seed : { 0u, 1u, 2u, 3u })
@@ -1013,6 +1024,8 @@ TEST_CASE ("HeadphoneVirtualizer [adversarial]: bit-exact under random block par
             for (int k = 0; k < numIntervals; ++k)
             {
                 auto p = paramsFor (k >= 15 && k < 22 ? ChannelLayout::Surround51 : ChannelLayout::Surround71, 0.1f * static_cast<float> (k % 7));
+                p.levelMatch = matched && k % 9 != 8;
+                p.foldHeadroom = matched && k % 11 != 10;
                 const float ph = static_cast<float> (k) * 0.7f;
                 p.frontAngleDeg = 33.5f + 11.5f * std::sin (ph);
                 p.sideAngleDeg = 100.0f + 20.0f * std::sin (1.3f * ph);
@@ -1272,5 +1285,288 @@ TEST_CASE ("HeadphoneVirtualizer [adversarial]: switching renderer (HRIR 7.1 -> 
         }
         CHECK (before > 0.0 && after > 0.0);
         CHECK_LE (during, 1.5 * std::max (before, after));
+    }
+}
+
+//==============================================================================
+// Level match and fold headroom (docs/11 E28a).
+namespace
+{
+/** K-weighted power (BS.1770 filters, channels 0 and 1 summed) from `from`
+    on, in dB: the integrated loudness of stationary content + 0.691. */
+double kPowerDb (const Planar& buf, int from)
+{
+    const auto s1 = LoudnessMeter::kWeightingStage1 (kFs), s2 = LoudnessMeter::kWeightingStage2 (kFs);
+    double e = 0.0;
+    const int n = static_cast<int> (buf.ch[0].size());
+    for (size_t c = 0; c < 2; ++c)
+    {
+        BiquadState a, b;
+        for (int i = 0; i < n; ++i)
+        {
+            const double y = biquadTick (s2, b, biquadTick (s1, a, static_cast<double> (buf.ch[c][static_cast<size_t> (i)])));
+            if (i >= from)
+                e += y * y;
+        }
+    }
+    return 10.0 * std::log10 (std::max (1.0e-30, e / (n - from)));
+}
+
+/** Pink noise on every speaker of a layout (LFE silent): one signal on all
+    (correlated) or one per speaker, each at rmsLevel. */
+Planar pinkOnSpeakers (ChannelLayout layout, int n, bool correlated, float rmsLevel = 0.0316f)
+{
+    const int channels = channelCount (layout);
+    Planar buf (channels, n);
+    for (int c = 0; c < channels; ++c)
+        if (c != LFE)
+            fill (buf, c, pinkNoise (n, rmsLevel, correlated ? 4242u : 5000u + static_cast<uint32_t> (c)));
+    return buf;
+}
+
+/** The chain's alternative with virt off: 0.7071 x the BS.775 matrix. */
+Planar downmixOf (const Planar& in)
+{
+    Planar d = in;
+    Bs775Fold fold;
+    fold.prepare (kFs, 0.0f);
+    fold.process (d.block (0, static_cast<int> (d.ch[0].size())), Bs775Fold::kMatrixGain);
+    return d;
+}
+
+VirtualizerParams matchedFor (ChannelLayout layout, float room = 0.15f)
+{
+    auto p = paramsFor (layout, room);
+    p.levelMatch = true;
+    p.foldHeadroom = true;
+    return p;
+}
+
+double largestStep (const std::vector<float>& y, int from, int to)
+{
+    double m = 0.0;
+    for (int i = std::max (1, from); i < to; ++i)
+        m = std::max (m, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - y[static_cast<size_t> (i - 1)])));
+    return m;
+}
+} // namespace
+
+TEST_CASE ("HeadphoneVirtualizer: level match - 5.1 and 7.1 pink, correlated or not, lands within 0.5 LU of the BS.775 downmix, also for an HRIR set (docs/11 E28a)")
+{
+    // docs/11 E28a Done-when: virt on vs off within 1 LU for correlated and
+    // uncorrelated 7.1 and 5.1 pink. -30 dBFS RMS pink on every speaker,
+    // room 0.15 (the default); loudness over 3..6 s (the servo averages 3 s).
+    // Before: the renderer with the fixed -3 dB trim only.
+    struct Case
+    {
+        ChannelLayout layout;
+        bool correlated, hrir;
+        double before;
+    };
+    const Case cases[] = {
+        { ChannelLayout::Surround51, true, false, 0.81 }, { ChannelLayout::Surround51, false, false, 3.63 },
+        { ChannelLayout::Surround71, true, false, 1.39 }, { ChannelLayout::Surround71, false, false, 3.83 },
+        { ChannelLayout::Surround71, true, true, -2.98 }, { ChannelLayout::Surround71, false, true, 0.71 },
+    };
+    const int n = static_cast<int> (6.0 * kFs), from = static_cast<int> (3.0 * kFs);
+    for (const auto& k : cases)
+    {
+        const Planar in = pinkOnSpeakers (k.layout, n, k.correlated);
+        const double ref = kPowerDb (downmixOf (in), from);
+        double diff[2] {};
+        for (bool match : { false, true })
+        {
+            HeadphoneVirtualizer v;
+            if (k.hrir)
+                v.setHrirSet (makeImpulseSet (makeImpulseSpec(), kFs, false));
+            auto p = matchedFor (k.layout);
+            p.levelMatch = p.foldHeadroom = match;
+            setUp (v, p, kFs, 512, channelCount (k.layout));
+            Planar out = in;
+            processInBlocks (v, out, 512);
+            diff[match ? 1 : 0] = kPowerDb (out, from) - ref;
+            if (match)
+            {
+                // The make-up stays within +-4 dB of the diffuse-field gain.
+                CHECK_LE (std::abs (v.getMakeupDb() - v.getDiffuseMakeupDb()), 4.0f + 1e-4f);
+                std::cout << "    measured " << (k.layout == ChannelLayout::Surround51 ? "5.1" : "7.1") << (k.hrir ? " HRIR" : "")
+                          << (k.correlated ? " correlated" : " uncorrelated") << ": virt re downmix " << diff[0] << " -> " << diff[1]
+                          << " LU (diffuse " << v.getDiffuseMakeupDb() << " dB, make-up " << v.getMakeupDb() << " dB)\n";
+            }
+        }
+        CHECK_NEAR (diff[0], k.before, 0.3);
+        CHECK_LE (std::abs (diff[1]), 0.5);
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer: level match - diffuse-field gain per layout; the make-up moves at most 6 dB/s, stops 4 dB from it, and silence freezes it (docs/11 E28a)")
+{
+    // The diffuse-field gains of the default design (room 0.15).
+    for (auto [layout, db] : { std::pair { ChannelLayout::Stereo, -2.87f }, std::pair { ChannelLayout::Surround51, -3.84f },
+                               std::pair { ChannelLayout::Surround71, -4.03f } })
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, matchedFor (layout), kFs, 512, channelCount (layout));
+        std::cout << "    measured diffuse-field gain " << channelCount (layout) << " ch: " << v.getDiffuseMakeupDb() << " dB\n";
+        CHECK_NEAR (v.getDiffuseMakeupDb(), db, 0.05);
+        CHECK_NEAR (v.getMakeupDb(), v.getDiffuseMakeupDb(), 1e-4); // the starting point
+    }
+
+    // FL = -FR at 100 Hz: the downmix keeps both, the two ears nearly cancel
+    // it (both speakers reach each ear at about unity), so the servo asks for
+    // far more than +4 dB: it slews there at 6 dB/s and stops at the clamp.
+    // Then 2 s of silence: the make-up does not move.
+    const int n = static_cast<int> (3.0 * kFs), quiet = static_cast<int> (2.0 * kFs);
+    HeadphoneVirtualizer v;
+    setUp (v, matchedFor (ChannelLayout::Surround71));
+    const float diffuse = v.getDiffuseMakeupDb();
+    Planar buf (8, n + quiet);
+    const auto x = sine (100.0, kFs, n, 0.1f);
+    for (int i = 0; i < n; ++i)
+    {
+        buf.ch[0][static_cast<size_t> (i)] = x[static_cast<size_t> (i)];
+        buf.ch[1][static_cast<size_t> (i)] = -x[static_cast<size_t> (i)];
+    }
+    float prev = v.getMakeupDb(), fastest = 0.0f;
+    for (int pos = 0; pos < n + quiet; pos += 64)
+    {
+        v.process (buf.block (pos, 64));
+        fastest = std::max (fastest, std::abs (v.getMakeupDb() - prev));
+        prev = v.getMakeupDb();
+        if (pos + 64 == n)
+        {
+            CHECK_NEAR (v.getMakeupDb(), diffuse + 4.0f, 1e-3);
+        }
+    }
+    std::cout << "    measured largest make-up change per 64 samples: " << fastest << " dB\n";
+    CHECK_LE (fastest, 6.0f * 64.0f / 48000.0f + 1e-3f);
+    CHECK_NEAR (v.getMakeupDb(), diffuse + 4.0f, 1e-3); // silence froze it
+}
+
+TEST_CASE ("HeadphoneVirtualizer: level match - reset() keeps what it learned, a layout change starts over at the new diffuse-field gain (docs/11 E28a)")
+{
+    const int n = static_cast<int> (2.0 * kFs);
+    HeadphoneVirtualizer v;
+    setUp (v, matchedFor (ChannelLayout::Surround71));
+    Planar in = pinkOnSpeakers (ChannelLayout::Surround71, n, true);
+    processInBlocks (v, in, 512);
+    const float learned = v.getMakeupDb();
+    CHECK (std::abs (learned - v.getDiffuseMakeupDb()) > 1.0f); // correlated content needs about 2.6 dB more
+    v.reset(); // what the chain does whenever virt comes back on
+    CHECK_NEAR (v.getMakeupDb(), learned, 1e-6);
+
+    // 5.1: the swap (fade out, swap at silence) re-seeds at the 5.1 gain.
+    v.setParams (matchedFor (ChannelLayout::Surround51));
+    Planar silence (8, 2048);
+    processInBlocks (v, silence, 64);
+    CHECK_NEAR (v.getMakeupDb(), v.getDiffuseMakeupDb(), 1e-4);
+    CHECK_NEAR (v.getDiffuseMakeupDb(), -3.84f, 0.05);
+}
+
+TEST_CASE ("HeadphoneVirtualizer: fold headroom - full-scale correlated 5.1 / 7.1 stays at 0 dBFS (true peak <= +1 dBTP), content below 0 dBFS is untouched (docs/11 E28a)")
+{
+    // docs/11 E28a Done-when: pre-limiter peak of full-scale correlated
+    // 7-speaker content <= +1 dBFS. Pink noise normalised to a 0 dBFS peak on
+    // every speaker, level match on; peaks after the first 0.5 s.
+    const int n = static_cast<int> (3.0 * kFs), from = static_cast<int> (0.5 * kFs);
+    for (auto [layout, before] : { std::pair { ChannelLayout::Surround51, 7.81 }, std::pair { ChannelLayout::Surround71, 10.11 } })
+    {
+        Planar in = pinkOnSpeakers (layout, n, true, 0.2f);
+        const double scale = 1.0 / peakAbs (in.ch[0].data(), n);
+        for (auto& c : in.ch)
+            for (auto& s : c)
+                s = static_cast<float> (s * scale);
+        double peak[2] {}, truePeak = 0.0;
+        for (bool headroom : { false, true })
+        {
+            HeadphoneVirtualizer v;
+            auto p = matchedFor (layout);
+            p.foldHeadroom = headroom;
+            setUp (v, p, kFs, 512, channelCount (layout));
+            Planar out = in;
+            processInBlocks (v, out, 512);
+            CHECK (allFinite (out));
+            for (size_t e = 0; e < 2; ++e)
+                peak[headroom ? 1 : 0] = std::max (peak[headroom ? 1 : 0], peakAbs (out.ch[e].data() + from, n - from));
+            if (headroom)
+            {
+                TruePeakDetector tp;
+                tp.prepare (2);
+                for (int e = 0; e < 2; ++e)
+                    for (int i = 0; i < n; ++i)
+                    {
+                        const float y = tp.processSample (e, out.ch[static_cast<size_t> (e)][static_cast<size_t> (i)]);
+                        if (i >= from)
+                            truePeak = std::max (truePeak, static_cast<double> (std::abs (y)));
+                    }
+                CHECK_LE (v.getHeadroomGainDb(), -3.0f);
+            }
+        }
+        std::cout << "    measured full-scale correlated " << channelCount (layout) << " ch: peak " << toDb (peak[0]) << " -> "
+                  << toDb (peak[1]) << " dBFS, true peak " << toDb (truePeak) << " dBTP\n";
+        CHECK_NEAR (toDb (peak[0]), before, 0.3);
+        CHECK_LE (peak[1], 1.0 + 1e-6);
+        CHECK_LE (toDb (truePeak), 1.0);
+    }
+
+    // -34 dBFS RMS: the headroom gain never moves, the output is bit-identical.
+    const int m = static_cast<int> (1.0 * kFs);
+    const Planar in = pinkOnSpeakers (ChannelLayout::Surround71, m, true, 0.02f);
+    std::vector<std::vector<float>> outs;
+    for (bool headroom : { false, true })
+    {
+        HeadphoneVirtualizer v;
+        auto p = matchedFor (ChannelLayout::Surround71);
+        p.foldHeadroom = headroom;
+        setUp (v, p);
+        Planar out = in;
+        processInBlocks (v, out, 256);
+        CHECK (v.getHeadroomGainDb() == 0.0f);
+        outs.push_back (out.ch[0]);
+    }
+    CHECK (peakAbs (outs[0].data(), m) < 1.0);
+    CHECK (maxAbsDiff (outs[0], outs[1]) == 0.0);
+}
+
+TEST_CASE ("HeadphoneVirtualizer: switching the level match and the fold headroom on and off is click-free (docs/11 E28a)")
+{
+    // A 200 Hz sine on every speaker (correlated). Level match: off at 1 s,
+    // on at 2 s: the make-up glides at 6 dB/s. Fold headroom on a 0.5 sine
+    // (about +7 dBFS without it): off at 1 s, on at 2 s: it releases over
+    // 150 ms, and when it comes back its first gain drop is a single
+    // flattened rising edge. The largest sample step around each switch
+    // stays within 1.25x the steady maximum of the louder side.
+    const int n = static_cast<int> (3.0 * kFs), off = static_cast<int> (1.0 * kFs), on = static_cast<int> (2.0 * kFs);
+    for (bool headroomCase : { false, true })
+    {
+        const float amp = headroomCase ? 0.5f : 0.1f;
+        Planar buf (8, n);
+        const auto x = sine (200.0, kFs, n, amp);
+        for (int c = 0; c < 8; ++c)
+            if (c != LFE)
+                fill (buf, c, x);
+        HeadphoneVirtualizer v;
+        auto p = matchedFor (ChannelLayout::Surround71);
+        setUp (v, p);
+        for (int pos = 0; pos < n; pos += 128)
+        {
+            if (pos == off || pos == on)
+            {
+                (headroomCase ? p.foldHeadroom : p.levelMatch) = pos == on;
+                v.setParams (p);
+            }
+            v.process (buf.block (pos, 128));
+        }
+        CHECK (allFinite (buf));
+        for (size_t e = 0; e < 2; ++e)
+        {
+            const auto& y = buf.ch[e];
+            const double steadyOn = largestStep (y, off - 9600, off), steadyOff = largestStep (y, on - 9600, on);
+            const double atOff = largestStep (y, off, off + 9600), atOn = largestStep (y, on, on + 9600);
+            std::cout << "    measured " << (headroomCase ? "fold headroom" : "level match") << " ear " << e << ": steady steps "
+                      << steadyOn << " / " << steadyOff << ", at the switches " << atOff << " / " << atOn << "\n";
+            CHECK_LE (atOff, 1.25 * std::max (steadyOn, steadyOff));
+            CHECK_LE (atOn, 1.25 * std::max (steadyOn, steadyOff));
+        }
     }
 }

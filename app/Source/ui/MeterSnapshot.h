@@ -10,6 +10,7 @@
 #include "flub/engine/MeterBus.h"
 
 #include <array>
+#include <cstdint>
 
 namespace flub::app::ui
 {
@@ -29,6 +30,17 @@ struct MeterSnapshot
     float bassProtectionDb = 0.0f;
     std::array<float, flub::MeterBus::kMaxDynBands> dynEqGainDb {};
     float governorScale = 1.0f, autoLevelGainDb = 0.0f, autoDriveDb = 0.0f;
+    // SafetyGovernor (docs/11 E06): SafetyGovernor::State, kReason* bits and
+    // the ~3 s averages its budgets are compared with.
+    int governorState = 0;
+    uint32_t governorReason = 0;
+    float governorGrDb = 0.0f, governorDistortionDb = -160.0f;
+    float harmonicsDb = -160.0f; // intended harmonics (bass harmonics, air exciter)
+    int inputFold = 0;           // 0 surround (virtualiser), 1 stereo passthrough
+
+    // Not on the MeterBus: the chain's automatic preamp (docs/11 E11), set
+    // by the owner from ProcessingChain::getAutoPreampDb / getPredictedBoostDb.
+    float autoPreampDb = 0.0f, predictedBoostDb = 0.0f;
 
     float latencyMs = 0.0f;
     float masterGainReductionDb = 0.0f; // master safety limiter (MixEngine)

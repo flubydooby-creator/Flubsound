@@ -1,5 +1,10 @@
 #include "ScreenshotDriver.h"
 
+#include "ui/MainComponent.h"
+
+#include "flub/io/Json.h"
+#include "flub/io/PresetIO.h"
+
 #include <algorithm>
 
 namespace flub::app
@@ -65,6 +70,26 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
         options.simulatedDevice = args[deviceIndex + 1].unquoted();
     }
 
+    const int stateIndex = args.indexOf ("--state");
+    if (stateIndex >= 0)
+    {
+        static const juce::StringArray known { "device-error", "loopback", "preset-warning", "recovery", "latency-prompt", "governor" };
+        options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
+        options.states.trim();
+        options.states.removeEmptyStrings();
+        for (const auto& state : options.states)
+            if (! known.contains (state))
+            {
+                error = "--state must be one or more of " + known.joinIntoString (", ") + " (comma separated)";
+                return false;
+            }
+        if (options.states.isEmpty())
+        {
+            error = "--state needs a state, e.g. --state device-error";
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -128,6 +153,8 @@ void ScreenshotDriver::setUpScene()
     if (options.simulatedDevice.isNotEmpty())
         controller.simulateOutputDevice (options.simulatedDevice, controller.getHost().getSampleRate(), 2);
 
+    applyStates (gameStrip, focus);
+
     sampleRate = controller.getHost().getSampleRate();
     generator = std::make_unique<TestSignalGenerator> (sampleRate);
     if (gaming)
@@ -143,6 +170,70 @@ void ScreenshotDriver::setUpScene()
     else
     {
         generator->setProgramme (musicStrip, TestSignalGenerator::Programme::Music, 0.0f);
+    }
+}
+
+void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
+{
+    auto* main = dynamic_cast<ui::MainComponent*> (&target);
+    if (main != nullptr)
+        main->getNoticeBar().clear(); // the scene's preset loads are not what a screenshot shows
+    const auto& states = options.states;
+
+    if (states.contains ("latency-prompt"))
+    {
+        // The real path: a preset made for another profile, loaded by hand.
+        controller.setLatencyProfile (LatencyProfileValue::Balanced);
+        const auto* preset = controller.getPresetManager().findByName (options.gamingMode ? "Competitive FPS" : "Audiophile Subtle");
+        juce::String error;
+        if (preset != nullptr)
+            controller.loadPreset (*preset, focusStrip, error);
+        controller.setBoost (0.55f, focusStrip);
+    }
+    if (states.contains ("governor"))
+    {
+        auto& store = controller.getParams (focusStrip);
+        controller.setBoost (1.0f, focusStrip);
+        store.set (options.gamingMode ? Macro3 : Macro4, 1.0f); // Impact / Loudness
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxDriveDb, 12.0f);
+        controller.setProtectionStrength (flub::ProtectionStrength::Strict);
+    }
+    if (states.contains ("device-error"))
+        controller.getHost().audioDeviceError ("The device \"USB Headset\" was disconnected (the driver stopped the stream)");
+    if (states.contains ("loopback"))
+    {
+        controller.getHost().setDeviceInputRouting (gameStrip, 0);
+        controller.getHost().checkLoopbackPair ("CABLE Output (VB-Audio Virtual Cable)", "CABLE Input (VB-Audio Virtual Cable)");
+    }
+    if (main == nullptr)
+        return;
+    if (states.contains ("recovery"))
+    {
+        AppSettings::Recovery recovery;
+        recovery.quarantined = controller.getSettings().getFile().getSiblingFile (controller.getSettings().getFile().getFileName()
+                                                                                    + ".corrupt-20260928-091500");
+        recovery.restoredFromBackup = 1;
+        main->getNoticeBar().post (ui::NoticeBar::recoveryNotice (recovery));
+    }
+    if (states.contains ("preset-warning"))
+    {
+        // A user preset with a typo'd key and an out-of-range value, read by
+        // the same reader as every preset load.
+        const std::string text = R"({ "format": "flubsound-preset", "version": 2, "name": "My Club Mix", "mode": "Music",
+                                      "params": { "bost": 0.6, "bass.boost": 40 } })";
+        flub::json::Value root;
+        std::string parseError;
+        flub::preset::Preset preset;
+        if (flub::json::parse (text, root, parseError) && flub::preset::fromJson (root, preset, parseError))
+        {
+            EngineController::PresetWarnings warnings;
+            warnings.presetName = juce::String::fromUTF8 (preset.name.c_str());
+            for (const auto& w : preset.warnings)
+                warnings.warnings.add (juce::String::fromUTF8 (w.c_str()));
+            if (! warnings.warnings.isEmpty())
+                main->getNoticeBar().post (ui::NoticeBar::presetWarningsNotice (warnings));
+        }
     }
 }
 

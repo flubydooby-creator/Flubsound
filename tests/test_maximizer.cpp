@@ -7,14 +7,18 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "Analysis.h"
+
 #include "flub/dsp/LoudnessMaximizer.h"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <iostream>
 #include <limits>
 #include <map>
+#include <utility>
 #include <vector>
 
 using namespace flub;
@@ -1179,4 +1183,248 @@ TEST_CASE ("LoudnessMaximizer: with the crest-gated clipper and the LF-safe limi
         CHECK (m.getSafetyClipCount() == 0u);
         CHECK_GE (tp, ceil * dbfs (-0.5)); // limited, not muted
     }
+}
+
+//==============================================================================
+// docs/11 E05 step 5: the LF-first limiter in the glue path (max.lfLimit).
+namespace
+{
+/** 55 Hz kicks (peak 0.5, tau 100 ms) every 500 ms under a 2 kHz tone at
+    0.1: the E59 ducking scene. */
+std::vector<float> kicksUnderTone (int n)
+{
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t + 0.25, 0.5);
+        const double kick = t >= 0.25 && beat < 0.35 ? 0.5 * std::exp (-beat / 0.1) * std::sin (kTwoPi * 55.0 * beat) : 0.0;
+        x[static_cast<size_t> (i)] = static_cast<float> (0.1 * std::sin (kTwoPi * 2000.0 * t) + kick);
+    }
+    return x;
+}
+
+/** Renders mono x on both channels (latency removed) through a fresh maximizer. */
+std::vector<float> renderMax (const std::vector<float>& x, const MaximizerParams& p, int block = 512, LoudnessMaximizer* keep = nullptr)
+{
+    LoudnessMaximizer local;
+    LoudnessMaximizer& m = keep != nullptr ? *keep : local;
+    prepareMax (m, kFs, 2, 512);
+    m.setParams (p);
+    const int lat = m.latencySamples(), n = static_cast<int> (x.size());
+    Planar buf (2, n + lat);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    processInBlocks (m, buf, block);
+    return std::vector<float> (buf.ch[0].begin() + lat, buf.ch[0].end());
+}
+
+/** Max dip (median - min, dB) of the 2 kHz tone's gain in 20 ms windows over 1..n. */
+double toneDipDb (const std::vector<float>& out, const std::vector<float>& in)
+{
+    const auto g = cli::toneGainTrack (out, in, kFs, 2000.0, static_cast<int> (kFs), static_cast<int> (in.size()));
+    return cli::summariseGainTrack (g, 2.0).dipDb;
+}
+} // namespace
+
+TEST_CASE ("LoudnessMaximizer: the LF-first limiter takes kicks down in the low band, so a 2 kHz tone ducks less, and the ceiling holds (docs/11 E05 step 5)")
+{
+    // 12 dB drive, glue 0: with lfLimit 0 the wideband limiter ducks the
+    // tone at every kick; with lfLimit 1 the low band is limited 3 dB under
+    // the ceiling first. Measured: dip 3.83 -> 1.92 dB (CLI `quality`, the
+    // same scene over 1..6 s: 3.74 -> 2.18 dB).
+    const int n = static_cast<int> (kFs * 4.0);
+    const auto x = kicksUnderTone (n);
+    auto p = maxParams (12.0f, -1.0f, 0.5f, 0.0f);
+    LoudnessMaximizer plain, lf;
+    const auto a = renderMax (x, p, 512, &plain);
+    p.lfLimit = 1.0f;
+    const auto b = renderMax (x, p, 512, &lf);
+    const double dipA = toneDipDb (a, x), dipB = toneDipDb (b, x);
+    std::cout << "    measured 2 kHz dip under kicks: lfLimit 0 " << dipA << " dB, 1 " << dipB << " dB, LF GR " << lf.getLfReductionDb() << " dB\n";
+    CHECK_LE (dipB, dipA - 1.0);
+    CHECK_LE (dipB, 2.6);
+    CHECK_LE (peakAbs (b.data(), n), dbfs (-1.0));
+    CHECK (lf.getSafetyClipCount() == 0u);
+    // The reduction is the low band's: the tone keeps more of its drive.
+    CHECK (toneAmplitude (b.data() + n / 2, n / 2, 2000.0, kFs) > toneAmplitude (a.data() + n / 2, n / 2, 2000.0, kFs));
+}
+
+TEST_CASE ("LoudnessMaximizer: the LF-first limiter's held-peak detector leaves a steady bass tone clean, and its amount glides click-free and block-size independent (docs/11 E05 step 5)")
+{
+    // 60 Hz at 0.5 through 12 dB drive: the low band sits 13 dB over its
+    // threshold, the gain holds flat over the half-period-of-30 Hz peak hold.
+    const int n = static_cast<int> (kFs * 4.0);
+    const auto tone = sine (60.0, kFs, n, 0.5f);
+    auto p = maxParams (12.0f, -1.0f, 0.5f, 0.0f);
+    p.lfLimit = 1.0f;
+    const auto y = renderMax (tone, p);
+    const double thd = cli::sineThdnDb (y.data() + 3 * static_cast<int> (kFs), static_cast<int> (kFs), kFs, 60.0);
+    std::cout << "    measured 60 Hz THD+N with lfLimit 1 at 12 dB drive = " << thd << " dB\n";
+    CHECK_LE (thd, -45.0); // docs/11 E05 Done-when: <= -30 dB
+
+    // lfLimit 0 <-> 1 every 200 ms on a 60 Hz tone the low band limits:
+    // no step in the waveform (second difference against the held settings').
+    const auto maxD2 = [] (const std::vector<float>& v) {
+        double d = 0.0;
+        for (size_t i = 4800; i < v.size(); ++i)
+            d = std::max (d, static_cast<double> (std::abs (v[i] - 2.0f * v[i - 1] + v[i - 2])));
+        return d;
+    };
+    const auto x = sine (60.0, kFs, static_cast<int> (kFs * 1.2), 0.35f);
+    const auto run = [&] (bool jumps, float held, int block) {
+        LoudnessMaximizer m;
+        prepareMax (m, kFs, 2, 512);
+        // A little glue keeps the band stage running, as Boost's glue floor
+        // does in the chain (starting and stopping the stage is the glue
+        // switch's crossfade, tested above).
+        auto q = maxParams (8.0f, -1.0f, 0.5f, 0.1f);
+        q.lfLimit = held;
+        m.setParams (q);
+        Planar buf (2, static_cast<int> (x.size()));
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        for (int pos = 0; pos < buf.numSamples(); pos += block)
+        {
+            if (jumps)
+            {
+                q.lfLimit = (pos / static_cast<int> (0.2 * kFs)) % 2 == 1 ? 1.0f : 0.0f;
+                m.setParams (q);
+            }
+            m.process (buf.block (pos, std::min (block, buf.numSamples() - pos)));
+        }
+        return buf.ch[0];
+    };
+    const double held = std::max (maxD2 (run (false, 0.0f, 240)), maxD2 (run (false, 1.0f, 240)));
+    const auto moving = run (true, 0.0f, 240);
+    std::cout << "    measured second difference moving / held = " << maxD2 (moving) / held << "\n";
+    // Measured 2.4x: the low band's gain glides 2.8 dB in 50 ms. The
+    // parameter-change test above allows 14x a pure tone's for its stage
+    // switches; a gain step of 0.25 % alone reads 14x on such a tone.
+    CHECK_LE (maxD2 (moving), 3.0 * held);
+    // Block-size independence with the stage moving (the per-sample path).
+    const auto moving7 = run (true, 0.0f, 240); // same schedule, same blocks: deterministic
+    CHECK (moving7 == moving);
+    const auto blockA = renderMax (x, p, 7), blockB = renderMax (x, p, 512);
+    double maxDiff = 0.0;
+    for (size_t i = 0; i < blockA.size(); ++i)
+        maxDiff = std::max (maxDiff, static_cast<double> (std::abs (blockA[i] - blockB[i])));
+    CHECK_LE (maxDiff, 1e-5);
+}
+
+//==============================================================================
+// docs/11 E06 step 1: the whole-stage residual (clipper + limiter).
+TEST_CASE ("LoudnessMaximizer: the whole-stage residual is the least-squares THD+N of the output against the aligned clipper input per 30 ms grid window, and reads the limiter's gain modulation the clipper's own THD+N cannot (docs/11 E06 step 1)")
+{
+    // Two tones 50 + 63 Hz at 0.25 each, 12 dB drive, clipper off: only the
+    // limiter acts (its gain follows the 13 Hz beat), so the clipper's
+    // reading is -160 dB while the output carries IMD.
+    const int window = 3 * static_cast<int> (kFs * 0.01); // the 10 ms grid point at or after 25 ms
+    const int n = 40 * window;
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+        x[static_cast<size_t> (i)] = static_cast<float> (0.25 * std::sin (kTwoPi * 50.0 * i / kFs) + 0.25 * std::sin (kTwoPi * 63.0 * i / kFs));
+    const auto p = maxParams (12.0f, -1.0f, 0.0f, 0.0f);
+    LoudnessMaximizer m;
+    prepareMax (m, kFs, 2, 2048);
+    m.setParams (p);
+    const int lat = m.latencySamples();
+    Planar buf (2, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    const float drive = dbfs (12.0);
+    int checked = 0;
+    for (int w = 0; w < n / window; ++w)
+    {
+        m.process (buf.block (w * window, window));
+        if (w < 10)
+            continue;
+        // Offline: the same window, y against drive x delayed by the latency.
+        DistortionSums s;
+        for (int i = w * window; i < (w + 1) * window; ++i)
+        {
+            const float ref = drive * x[static_cast<size_t> (i - lat)];
+            s.add (ref, buf.ch[0][static_cast<size_t> (i)] - ref);
+        }
+        DistortionEnergy e;
+        e.add (s);
+        CHECK_NEAR (m.getResidualDistortionDb(), e.ratioDb(), 0.05);
+        CHECK (m.getDistortionDb() <= -159.0f);
+        ++checked;
+    }
+    CHECK (checked == 30);
+    std::cout << "    measured limiter-only residual on 50 + 63 Hz at 12 dB drive = " << m.getResidualDistortionDb() << " dB\n";
+    CHECK_GE (m.getResidualDistortionDb(), -45.0f);
+
+    // Nothing to limit: the output is the input delayed, the residual reads clean.
+    LoudnessMaximizer quiet;
+    prepareMax (quiet, kFs, 2, 512);
+    quiet.setParams (maxParams (0.0f, -1.0f, 0.5f, 0.0f));
+    Planar low (2, n);
+    const auto s1k = sine (1000.0, kFs, n, 0.3f);
+    setChannel (low, 0, s1k);
+    setChannel (low, 1, s1k);
+    processInBlocks (quiet, low, 512);
+    CHECK_LE (quiet.getResidualDistortionDb(), -120.0f);
+
+    // Its windows (and the clipper's) close on the fixed grid, so the
+    // reading after the same audio does not depend on the host blocks.
+    const auto finalReading = [&] (std::initializer_list<int> pattern) {
+        LoudnessMaximizer r;
+        prepareMax (r, kFs, 2, 4096);
+        r.setParams (maxParams (12.0f, -1.0f, 0.5f, 0.0f));
+        Planar b (2, n);
+        setChannel (b, 0, x);
+        setChannel (b, 1, x);
+        int pos = 0;
+        while (pos < n)
+            for (int len : pattern)
+            {
+                const int l = std::min (len, n - pos);
+                if (l <= 0)
+                    break;
+                r.process (b.block (pos, l));
+                pos += l;
+            }
+        return std::make_pair (r.getResidualDistortionDb(), r.getDistortionDb());
+    };
+    const auto a = finalReading ({ 480 }), b = finalReading ({ 4096 }), c = finalReading ({ 1000, 37, 4096, 5 });
+    CHECK_NEAR (a.first, b.first, 0.01);
+    CHECK_NEAR (a.first, c.first, 0.01);
+    CHECK_NEAR (a.second, b.second, 0.01);
+    CHECK_NEAR (a.second, c.second, 0.01);
+}
+
+//==============================================================================
+// docs/11 E19 step 3: the bed-lift budget (max.bedLift).
+TEST_CASE ("LoudnessMaximizer: the bed-lift budget lifts quiet programme by at most the budget, upstream lift included, and leaves loud programme at the full drive (docs/11 E19 step 3)")
+{
+    const int n = static_cast<int> (kFs * 4.0);
+    const auto gainDb = [&] (const std::vector<float>& out, const std::vector<float>& in) {
+        const int a = static_cast<int> (kFs * 2.0);
+        return toDb (rms (out.data() + a, n - a) / rms (in.data() + a, n - a));
+    };
+    const auto quiet = pinkNoise (n, dbfs (-40.0), 71), loud = pinkNoise (n, dbfs (-10.0), 72);
+    auto p = maxParams (6.0f, -1.0f, 0.5f, 0.0f);
+    const double quietFull = gainDb (renderMax (quiet, p), quiet), loudFull = gainDb (renderMax (loud, p), loud);
+    p.bedLiftDb = 1.0f;
+    const double quietBudget = gainDb (renderMax (quiet, p), quiet), loudBudget = gainDb (renderMax (loud, p), loud);
+    LoudnessMaximizer upstream;
+    prepareMax (upstream, kFs, 2, 512);
+    upstream.setUpstreamLiftDb (3.0f); // the chain ahead already lifts 3 dB
+    const double quietUpstream = gainDb (renderMax (quiet, p, 512, &upstream), quiet);
+    std::cout << "    measured quiet pink: drive 6 dB " << quietFull << " dB, budget 1 dB " << quietBudget << " dB, with 3 dB upstream "
+              << quietUpstream << " dB; loud pink " << loudFull << " -> " << loudBudget << " dB\n";
+    CHECK_NEAR (quietFull, 6.0, 0.05);
+    CHECK_NEAR (quietBudget, 1.0, 0.05);
+    CHECK_NEAR (quietUpstream, 1.0 - 3.0, 0.05);
+    CHECK_NEAR (loudBudget, loudFull, 0.05); // the drive reaches the ceiling: all of it stays
+
+    // Quiet -> loud -> quiet: the drive glides (no step), the ceiling holds.
+    std::vector<float> scene (quiet);
+    for (int i = n / 3; i < 2 * n / 3; ++i)
+        scene[static_cast<size_t> (i)] = loud[static_cast<size_t> (i)];
+    LoudnessMaximizer m;
+    const auto y = renderMax (scene, p, 512, &m);
+    CHECK_LE (peakAbs (y.data(), n), dbfs (-1.0));
+    CHECK (m.getSafetyClipCount() == 0u);
 }

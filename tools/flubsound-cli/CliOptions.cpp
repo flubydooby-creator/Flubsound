@@ -104,9 +104,10 @@ enum CommandMask : unsigned
     kParams = 1u << 3,
     kPresets = 1u << 4,
     kQuality = 1u << 5,
+    kSoak = 1u << 6,
     kRender = kProcess | kBatch,
-    kChain = kRender | kQuality, // options that choose the chain's settings
-    kAll = kProcess | kBatch | kAnalyze | kParams | kPresets | kQuality
+    kChain = kRender | kQuality | kSoak, // options that choose the chain's settings
+    kAll = kProcess | kBatch | kAnalyze | kParams | kPresets | kQuality | kSoak
 };
 
 enum class Opt
@@ -129,6 +130,14 @@ enum class Opt
     Jobs,
     Recursive,
     Bands,
+    Events,
+    EventBand,
+    Glitches,
+    Seconds,
+    Minutes,
+    Seed,
+    Automation,
+    Interval,
     Json,
     Dir,
     Quiet,
@@ -158,12 +167,20 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Ceiling, "--ceiling", "-c", true, false, kChain },
     { Opt::Profile, "--profile", nullptr, true, false, kChain },
     { Opt::Protection, "--protection", nullptr, true, false, kChain },
-    { Opt::Rate, "--rate", nullptr, true, false, kQuality },
+    { Opt::Rate, "--rate", nullptr, true, false, kQuality | kSoak },
     { Opt::Format, "--format", "-f", true, false, kRender },
     { Opt::Block, "--block", nullptr, true, false, kChain },
     { Opt::Jobs, "--jobs", "-j", true, false, kBatch },
     { Opt::Recursive, "--recursive", "-r", false, false, kBatch },
     { Opt::Bands, "--bands", nullptr, false, false, kProcess | kAnalyze },
+    { Opt::Events, "--events", nullptr, false, false, kAnalyze },
+    { Opt::EventBand, "--event-band", nullptr, true, false, kAnalyze },
+    { Opt::Glitches, "--glitches", nullptr, false, false, kAnalyze },
+    { Opt::Seconds, "--seconds", nullptr, true, false, kSoak },
+    { Opt::Minutes, "--minutes", nullptr, true, false, kSoak },
+    { Opt::Seed, "--seed", nullptr, true, false, kSoak },
+    { Opt::Automation, "--automation", nullptr, true, false, kSoak },
+    { Opt::Interval, "--interval", nullptr, true, false, kSoak },
     { Opt::Json, "--json", nullptr, false, false, kAll },
     { Opt::Dir, "--dir", "-d", true, false, kPresets },
     { Opt::Quiet, "--quiet", "-q", false, false, kChain },
@@ -188,6 +205,7 @@ unsigned maskFor (Command c) noexcept
         case Command::Params: return kParams;
         case Command::Presets: return kPresets;
         case Command::Quality: return kQuality;
+        case Command::Soak: return kSoak;
         case Command::None:
         case Command::Help:
         case Command::Version: break;
@@ -206,6 +224,8 @@ Command commandFromName (const std::string& name)
         return Command::Analyze;
     if (n == "quality")
         return Command::Quality;
+    if (n == "soak")
+        return Command::Soak;
     if (n == "params" || n == "parameters")
         return Command::Params;
     if (n == "presets")
@@ -401,8 +421,85 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
             return true;
         }
 
+        case Opt::EventBand:
+        {
+            double d = 0.0;
+            std::string t = toLower (v);
+            double scale = 1.0;
+            if (endsWith (t, "khz") || endsWith (t, "k"))
+            {
+                t = trim (t.substr (0, t.size() - (endsWith (t, "khz") ? 3 : 1)));
+                scale = 1000.0;
+            }
+            else if (endsWith (t, "hz"))
+                t = trim (t.substr (0, t.size() - 2));
+            if (! parseNumber (t, d) || d * scale < 20.0 || d * scale > 20000.0)
+            {
+                error = "--event-band expects a band centre from 20 Hz to 20 kHz, got '" + value + "'";
+                return false;
+            }
+            o.eventBandHz = d * scale;
+            o.events = true;
+            return true;
+        }
+
+        case Opt::Seconds:
+        case Opt::Minutes:
+        {
+            double d = 0.0;
+            const double scale = spec.id == Opt::Minutes ? 60.0 : 1.0;
+            if (! parseNumber (v, d) || d * scale < 0.1 || d * scale > 7.0 * 24.0 * 3600.0)
+            {
+                error = std::string (spec.longName) + " expects a duration from 0.1 s to 7 days, got '" + value + "'";
+                return false;
+            }
+            o.soakSeconds = d * scale;
+            return true;
+        }
+
+        case Opt::Seed:
+        {
+            double d = 0.0;
+            if (! parseNumber (v, d) || d < 1.0 || d > 4294967295.0 || d != std::floor (d))
+            {
+                error = "--seed expects a whole number from 1 to 4294967295, got '" + value + "'";
+                return false;
+            }
+            o.seed = static_cast<uint32_t> (d);
+            return true;
+        }
+
+        case Opt::Automation:
+        {
+            const std::string k = looseKey (v);
+            if (k != "off" && k != "user" && k != "all")
+            {
+                error = "--automation expects off, user or all, got '" + value + "'";
+                return false;
+            }
+            o.automation = k;
+            return true;
+        }
+
+        case Opt::Interval:
+        {
+            double d = 0.0;
+            std::string t = toLower (v);
+            if (endsWith (t, "ms"))
+                t = trim (t.substr (0, t.size() - 2));
+            if (! parseNumber (t, d) || d < 10.0 || d > 600000.0)
+            {
+                error = "--interval expects a mean time between automation actions from 10 to 600000 ms, got '" + value + "'";
+                return false;
+            }
+            o.intervalMs = d;
+            return true;
+        }
+
         case Opt::Recursive: o.recursive = true; return true;
         case Opt::Bands: o.bands = true; return true;
+        case Opt::Events: o.events = true; return true;
+        case Opt::Glitches: o.glitches = true; return true;
         case Opt::Json: o.json = true; return true;
         case Opt::Quiet: o.quiet = true; return true;
         case Opt::Help: return true; // handled by the caller
@@ -625,7 +722,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
     out.command = commandFromName (args[0]);
     if (out.command == Command::None)
     {
-        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, quality, params, presets, help)";
+        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, quality, soak, params, presets, help)";
         return false;
     }
     if (out.command == Command::Help)
@@ -744,6 +841,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
             }
             break;
         case Command::Quality:
+        case Command::Soak:
         case Command::Params:
         case Command::Presets:
         case Command::None:

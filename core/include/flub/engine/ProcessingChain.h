@@ -33,7 +33,20 @@
 // Intensity + mode macros, governed; at protection strength Normal / Strict
 // also the base drives, see Protection.h) -> mode policy -> push params into
 // modules -> process -> telemetry (limiter GR, measured THD+N of saturator +
-// clipper) -> SafetyGovernor / AutoDrive updates for the next block.
+// clipper; at Normal / Strict the maximizer's share is at least its
+// whole-stage residual, the limiter's gain modulation included, docs/11
+// E06 step 1) -> SafetyGovernor / AutoDrive updates for the next block.
+//
+// Bed-lift budget (max.bedLift, docs/11 E19 step 3; LoudnessMaximizer.h):
+// the chain measures the lift ahead of the maximizer as the background
+// (BackgroundTracker, the E19 minimum-statistics law, stepped every 10 ms
+// on a 50 ms K-weighted level) of the maximizer's input minus that of the
+// chain's input (after AutoLevel, whose levelling is on purpose): the bed's
+// lift, which 20-80 ms cues barely move. The trackers step only on the
+// programme's bed: not while a 400 ms loudness of the input reads more
+// than 6 LU over its background (an event), nor while the maximizer's
+// budget weight is below 1 (loud programme), nor for 2 s after either.
+// Only while a budget is set; the result goes to the maximizer.
 //
 // Automatic preamp (docs/11 E11). The chain's static maximum boost is
 // predicted from the effective values (macros included, the governor's
@@ -108,6 +121,7 @@
 #include "flub/common/Realtime.h"
 #include "flub/common/SmoothedValue.h"
 #include "flub/dsp/ActiveChannelDetector.h"
+#include "flub/dsp/BackgroundTracker.h"
 #include "flub/dsp/BassEngine.h"
 #include "flub/dsp/Bs775Fold.h"
 #include "flub/dsp/ClarityEnhancer.h"
@@ -422,8 +436,9 @@ private:
 
     // Global bypass dry path (post input stage, stereo): delayed by
     // totalLatency - dryLimiter latency, then (while bypass is engaged)
-    // loudness-matched and true-peak limited at the ceiling by dryLimiter, so
-    // it lines up with the processed path and never overshoots.
+    // loudness-matched and true-peak limited at the ceiling by dryLimiter
+    // (with the LF-safe envelope, docs/11 E10), so it lines up with the
+    // processed path and never overshoots.
     AudioBuffer dryBuffer;
     DelayLine dryDelay;
     TruePeakLimiter dryLimiter;
@@ -434,6 +449,12 @@ private:
     TruePeakMeter outTruePeak;
     LoudnessMeter outLoudness;
     LoudnessFollower inLoudness;
+    // The maximizer's bed-lift budget (docs/11 E19 step 3): the lift ahead
+    // of it, as the background of its input's level over the chain input's.
+    LoudnessFollower bedInShort, preMaxShort, bedEventLoudness;
+    BackgroundTracker bedInBackground, preMaxBackground;
+    int bedStepLength = 480, bedStepCount = 0; // background tracker steps (10 ms)
+    int bedLiftHold = 0;                       // samples the measures hold for after an event or loud programme
     MeterBus meterBus;
     AnalyzerTaps analyzerTaps;
     std::vector<float> tapScratch;

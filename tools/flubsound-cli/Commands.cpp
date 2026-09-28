@@ -1,6 +1,7 @@
 #include "Commands.h"
 
 #include "FactoryPresets.h"
+#include "Soak.h"
 
 #include "flub/common/Math.h"
 #include "flub/engine/MacroMap.h"
@@ -836,11 +837,20 @@ int runAnalyze (const CliOptions& o)
     const LoudnessReport r = analyse (input.channels, input.sampleRate);
     const std::string format = sampleFormatName (input.sourceFormat);
     const auto bands = o.bands ? octaveBands (input.channels, input.sampleRate) : std::vector<BandLevel> {};
+    const auto events = o.events ? sceneEvents (input.channels, input.sampleRate, o.eventBandHz) : EventsReport {};
+    const auto tracks = o.events && o.bands ? bandTracks (input.channels, input.sampleRate) : std::vector<BandTrack> {};
+    const auto glitches = o.glitches ? detectGlitches (input.channels, input.sampleRate) : GlitchReport {};
     if (o.json)
     {
         auto v = reportToJson (r, o.input, format);
         if (o.bands)
             v.set ("bands", bandsToJson (bands));
+        if (o.events)
+            v.set ("events", eventsToJson (events));
+        if (o.events && o.bands)
+            v.set ("bandTracks", bandTracksToJson (tracks));
+        if (o.glitches)
+            v.set ("glitches", glitchesToJson (glitches));
         printJson (v);
     }
     else
@@ -848,8 +858,81 @@ int runAnalyze (const CliOptions& o)
         std::fputs (formatReport (r, o.input, format).c_str(), stdout);
         if (o.bands)
             std::fputs (("Bands   : " + formatBands (bands) + "\n").c_str(), stdout);
+        if (o.events)
+            std::fputs (formatEvents (events).c_str(), stdout);
+        if (o.events && o.bands)
+            std::fputs (formatBandTracks (tracks).c_str(), stdout);
+        if (o.glitches)
+            std::fputs (formatGlitches (glitches).c_str(), stdout);
     }
     return kExitOk;
+}
+
+// ===========================================================================
+// soak (docs/11 E53)
+// ===========================================================================
+int runSoak (const CliOptions& o)
+{
+    const Log log (o);
+    ResolvedParameters params;
+    std::string error;
+    if (! buildParameters (o.render, params, error))
+    {
+        log.error (error);
+        return kExitUsage;
+    }
+    for (const auto& note : params.notes)
+        log.warning (note);
+
+    SoakSettings s;
+    s.seconds = o.soakSeconds;
+    s.sampleRate = o.rate;
+    s.blockSize = o.render.blockSize;
+    s.seed = o.seed;
+    s.automation = o.automation == "off" ? SoakAutomation::Off : o.automation == "all" ? SoakAutomation::All : SoakAutomation::User;
+    s.intervalMs = o.intervalMs;
+    s.protection = o.render.protection;
+
+    // The factory presets the automation loads (none found: no preset switches).
+    if (const auto dir = findFactoryPresetDir (o.render.presetDir))
+    {
+        std::vector<std::string> problems;
+        for (const auto& entry : scanPresetDir (*dir, problems))
+        {
+            preset::Preset p;
+            std::string presetError;
+            if (preset::load (io::pathToUtf8 (entry.file), p, presetError) && p.values.size() == static_cast<size_t> (param::kNumParams))
+            {
+                s.presets.push_back (p.values);
+                s.presetNames.push_back (entry.name);
+            }
+        }
+    }
+    if (s.presets.empty() && s.automation == SoakAutomation::User)
+        log.warning ("no factory presets found: the automation does not switch presets");
+
+    log.info (describeSettings (params, o.render));
+    log.info ("Soak    : " + fmt ("%.1f", s.seconds) + " s of generated programme, automation " + soakAutomationName (s.automation) + " every "
+              + fmt ("%.0f", s.intervalMs) + " ms (seed " + std::to_string (s.seed) + ", " + std::to_string (s.presets.size())
+              + " presets)\n");
+    if (! o.quiet)
+        s.progress = [&log, &s] (double seconds) {
+            log.info ("  " + fmt ("%.0f", seconds) + " / " + fmt ("%.0f", s.seconds) + " s\n");
+        };
+
+    SoakReport report;
+    if (! soakChain (params.values, s, report, error))
+    {
+        log.error (error);
+        return kExitFailure;
+    }
+    if (o.json)
+        printJson (soakToJson (report));
+    else
+        std::fputs (formatSoak (report).c_str(), stdout);
+    if (report.inputTotal() > 0)
+        log.warning ("the generated programme itself read as discontinuous: the run is not valid");
+    return report.outputTotal() == 0 && report.inputTotal() == 0 ? kExitOk : kExitFailure;
 }
 
 // ===========================================================================

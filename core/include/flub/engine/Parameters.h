@@ -182,6 +182,7 @@ enum Id : int
     MaxClipMaxDb,     // clipper depth cap: no sample loses more than this (24 = uncapped)
     MaxStyle,         // Choice: Custom, Transparent, Punchy, Aggressive, Safe (maxStyleValues)
     MaxLfLimit,       // LF-first limiter in the maximizer's glue path, 0..1 (docs/11 E05 step 5)
+    MaxBedLiftDb,     // drive budget on programme far below the ceiling, dB (24 = none; docs/11 E19 step 3)
 
     kNumScalarParams
 };
