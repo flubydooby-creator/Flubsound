@@ -96,6 +96,39 @@ constexpr double kQualityMinRate = 32000.0;
 // The governor ticks where the maximizer's limiter-GR windows close (docs/11 E06).
 static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 
+// The parameters the static-boost prediction reads (docs/11 E11); a change
+// of any of them (or of the fold) re-runs it. Enable values are the modules'
+// active states (audition bypass included).
+constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, ClarityOn,
+                                       ClarityPresence, ClarityPresenceFreq, ClarityAir, SaturationOn, SatMix, SatOutputDb,
+                                       AutoPreampOn, AutoPreampAllowanceDb };
+constexpr EqField kHeadroomEqFields[] = { EqFieldOn, EqFieldType, EqFieldFreq, EqFieldGain, EqFieldQ, EqFieldSlope };
+constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldFreq, DynFieldQ, DynFieldStaticGain };
+constexpr int kHeadroomParamCount = static_cast<int> (std::size (kHeadroomScalarIds) + kEqBands * std::size (kHeadroomEqFields)
+                                                      + kDynEqBands * std::size (kHeadroomDynFields));
+
+// The clarity presence bell and air shelf, the bass shelf and subsonic
+// filter as their modules design them (ClarityEnhancer.cpp, BassEngine.cpp).
+constexpr double kPresenceQ = 0.8, kPresenceMaxDb = 6.0;
+constexpr double kAirShelfHz = 10000.0, kAirShelfQ = 0.70710678118654752, kAirShelfMaxDb = 2.0;
+constexpr double kBassShelfQ = 0.7, kBassMaxBoostDb = 15.0;
+
+/** A named maximizer style (docs/11 E05 step 4) owns its six controls: their
+    effective values become the style's (published like every other
+    override, so the GUI's markers show what is applied). */
+void applyMaxStyle (float* e) noexcept
+{
+    if (const MaxStyleValues* s = maxStyleValues (static_cast<MaxStyleValue> (idx (e, MaxStyle))))
+    {
+        e[MaxClipAmount] = s->clipAmount;
+        e[MaxClipKnee] = s->clipKnee;
+        e[MaxClipCrestDb] = s->clipCrestDb;
+        e[MaxClipMaxDb] = s->clipMaxDb;
+        e[MaxReleaseMs] = s->releaseMs;
+        e[MaxAutoRelease] = s->autoRelease ? 1.0f : 0.0f;
+    }
+}
+
 int gateFftSizeFor (double sampleRate) noexcept
 {
     const double frame = kGateFrameMs * 0.001 * sampleRate;
@@ -182,6 +215,8 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
     effective.assign (static_cast<size_t> (kNumParams), 0.0f);
     governedBase.assign (static_cast<size_t> (kNumParams), 0.0f);
     baseAtPrepare.assign (static_cast<size_t> (kNumParams), 0.0f);
+    headroomInput.assign (static_cast<size_t> (kNumParams), 0.0f);
+    ungoverned.assign (static_cast<size_t> (kNumParams), 0.0f);
     publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
     store.snapshot (base.data());
     MacroMap::apply (base.data(), effective.data(), 1.0f);
@@ -379,6 +414,11 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     passMix.reset (sr, kPassFadeMs, config.inputChannels > 2 && stereoFoldFor (e, ActiveChannelDetector::Fold::Surround) ? 1.0f : 0.0f);
 
     inputGain.reset (sr, 20.0f, dbToGain (e[InputGainDb]));
+    // The first block predicts at once and starts the preamp at its value
+    // (no glide from unity: nothing has been heard yet).
+    preampGain.reset (sr, 20.0f, 1.0f);
+    headroomKeyValid = false;
+    headroomHoldoff = 0;
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
     bypassMix.reset (sr, 30.0f, on (e, BypassAll) ? 1.0f : 0.0f);
     dryMatchGain.reset (sr, 50.0f, 1.0f);
@@ -655,10 +695,12 @@ void ProcessingChain::applyParameters() noexcept
     kp.upRatio = e[CompUpRatio];
     kp.upMaxGainDb = e[CompUpMaxGainDb];
     kp.upFloorDb = e[CompUpFloorDb];
+    kp.upRelativeFloor = mode == ModeValue::Gaming; // docs/11 E19: Detail does not lift the bed
     compressor.setParams (kp);
     slots[SComp].setActive (active (CompressorOn));
 
     // ---- Maximizer (AutoDrive may only reduce the requested drive) ----
+    applyMaxStyle (e);
     MaximizerParams mp;
     mp.driveDb = std::max (0.0f, e[MaxDriveDb] + autoDrive.getReductionDb());
     mp.ceilingDb = e[MaxCeilingDb];
@@ -679,10 +721,151 @@ void ProcessingChain::applyParameters() noexcept
     mp.glue = glueArmed ? std::max (kGlueFloor, e[MaxGlue]) : e[MaxGlue];
     mp.releaseMs = e[MaxReleaseMs];
     mp.autoRelease = on (e, MaxAutoRelease);
+    mp.clipCrestDb = e[MaxClipCrestDb];
+    mp.clipMaxDepthDb = e[MaxClipMaxDb];
     maximizer.setParams (mp);
     slots[SMax].setActive (active (MaximizerOn));
 
+    // ---- Automatic preamp (docs/11 E11): the prediction's inputs are the
+    // applied values with the modules' active states, and the bass boost
+    // the macros ask for before the governor scales it (a preamp that
+    // followed the governor would feed its loop) ----
+    std::copy (effective.begin(), effective.end(), headroomInput.begin());
+    float* h = headroomInput.data();
+    for (int id : { EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn })
+        h[id] = active (id) ? 1.0f : 0.0f;
+    if (governorScale < 1.0f)
+    {
+        MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
+        h[BassBoostDb] = ungoverned[static_cast<size_t> (BassBoostDb)];
+    }
+    updateHeadroom (h, config.inputChannels > 2 && ! stereoFold, false);
+
     publishEffective();
+}
+
+void ProcessingChain::updateHeadroom (const float* h, bool surroundFold, bool force) noexcept FLUB_NONBLOCKING
+{
+    static_assert (kHeadroomKeySize == kHeadroomParamCount + 1);
+    std::array<float, kHeadroomKeySize> key {};
+    size_t k = 0;
+    for (int id : kHeadroomScalarIds)
+        key[k++] = h[id];
+    for (int b = 0; b < kEqBands; ++b)
+        for (EqField f : kHeadroomEqFields)
+            key[k++] = h[eq (b, f)];
+    for (int b = 0; b < kDynEqBands; ++b)
+        for (DynField f : kHeadroomDynFields)
+            key[k++] = h[dyn (b, f)];
+    key[k] = surroundFold ? 1.0f : 0.0f;
+
+    const bool first = ! headroomKeyValid;
+    if (! first && (key == headroomKey || (headroomHoldoff > 0 && ! force)))
+        return;
+    headroomKey = key;
+    headroomKeyValid = true;
+    headroomHoldoff = std::max (1, static_cast<int> (kHeadroomUpdateMs * 0.001 * config.sampleRate));
+
+    buildStaticBoostModel (h, config.sampleRate, surroundFold, headroomModel);
+    const headroom::Prediction p = predictStaticBoost (headroomModel, headroom::Weighting::Programme);
+    const float preamp = on (h, AutoPreampOn) ? headroom::preampDb (p, h[AutoPreampAllowanceDb]) : 0.0f;
+    predictedBoostDb.store (static_cast<float> (p.maxBoostDb), std::memory_order_relaxed);
+    predictedBoostHz.store (static_cast<float> (p.atHz), std::memory_order_relaxed);
+    autoPreampDb.store (preamp, std::memory_order_relaxed);
+    preampGain.setTarget (dbToGain (preamp));
+    if (first)
+        preampGain.setImmediate (preampGain.getTarget());
+}
+
+double ProcessingChain::StaticBoostModel::responseDb (double freqHz) const noexcept FLUB_NONBLOCKING
+{
+    // |H|^2 of each SVF section at s = j W, W = tan (pi f / fs) / g (Svf.h):
+    //   H = (m0 (1 - W^2) + m2 + j (m0 k + m1) W) / (1 - W^2 + j k W)
+    const double t = std::tan (kPi * std::clamp (freqHz, 0.0, 0.4999 * sampleRate) / sampleRate);
+    double power = 1.0;
+    for (int i = 0; i < numSections; ++i)
+    {
+        const SvfCoeffs& c = sections[static_cast<size_t> (i)];
+        const double w = t / c.g, w2 = w * w;
+        const double m0 = c.m0, m1 = c.m1, m2 = c.m2;
+        const double nr = m0 * (1.0 - w2) + m2, ni = (m0 * c.k + m1) * w;
+        const double dr = 1.0 - w2, di = c.k * w;
+        power *= (nr * nr + ni * ni) / std::max (dr * dr + di * di, 1.0e-300);
+    }
+    return gainDb + 10.0 * std::log10 (std::max (power, 1.0e-30));
+}
+
+void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, bool surroundFold,
+                                             StaticBoostModel& m) noexcept FLUB_NONBLOCKING
+{
+    m.sampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
+    m.numSections = 0;
+    m.gainDb = surroundFold ? 20.0 * std::log10 (static_cast<double> (Bs775Fold::kMatrixGain)) : 0.0;
+    const double sr = m.sampleRate;
+    const auto add = [&m] (const SvfCoeffs& c) {
+        if (m.numSections < StaticBoostModel::kMaxSections)
+            m.sections[static_cast<size_t> (m.numSections++)] = c;
+    };
+    const auto addButterworth = [&add, sr] (FilterType type, double hz, int numSections) {
+        for (int s = 0; s < numSections; ++s)
+            add (SvfCoeffs::make (type, hz, butterworthQ (numSections, s), 0.0, sr));
+    };
+
+    if (on (e, EqOn))
+    {
+        for (int b = 0; b < kEqBands; ++b)
+        {
+            if (! on (e, eq (b, EqFieldOn)))
+                continue;
+            const double f = e[eq (b, EqFieldFreq)], q = e[eq (b, EqFieldQ)], g = e[eq (b, EqFieldGain)];
+            switch (static_cast<EqBandType> (std::clamp (idx (e, eq (b, EqFieldType)), 0, 6)))
+            {
+                case EqBandType::Bell: if (g != 0.0) add (SvfCoeffs::make (FilterType::Bell, f, q, g, sr)); break;
+                case EqBandType::LowShelf: if (g != 0.0) add (SvfCoeffs::make (FilterType::LowShelf, f, q, g, sr)); break;
+                case EqBandType::HighShelf: if (g != 0.0) add (SvfCoeffs::make (FilterType::HighShelf, f, q, g, sr)); break;
+                case EqBandType::Notch: add (SvfCoeffs::make (FilterType::Notch, f, q, 0.0, sr)); break;
+                case EqBandType::BandPass: add (SvfCoeffs::make (FilterType::BandPass, f, q, 0.0, sr)); break;
+                case EqBandType::LowCut: addButterworth (FilterType::HighPass, f, std::clamp (idx (e, eq (b, EqFieldSlope)) + 1, 1, 4)); break;
+                case EqBandType::HighCut: addButterworth (FilterType::LowPass, f, std::clamp (idx (e, eq (b, EqFieldSlope)) + 1, 1, 4)); break;
+            }
+        }
+        m.gainDb += e[EqOutputGainDb];
+    }
+    if (on (e, DynEqOn))
+    {
+        static constexpr FilterType shapes[] = { FilterType::Bell, FilterType::LowShelf, FilterType::HighShelf };
+        for (int b = 0; b < kDynEqBands; ++b)
+            if (on (e, dyn (b, DynFieldOn)) && e[dyn (b, DynFieldStaticGain)] != 0.0f)
+                add (SvfCoeffs::make (shapes[std::clamp (idx (e, dyn (b, DynFieldShape)), 0, 2)], e[dyn (b, DynFieldFreq)],
+                                      e[dyn (b, DynFieldQ)], e[dyn (b, DynFieldStaticGain)], sr));
+    }
+    if (on (e, BassOn))
+    {
+        if (e[BassSubsonic] > 0.0f)
+            addButterworth (FilterType::HighPass, std::clamp (static_cast<double> (e[BassSubsonic]), 10.0, 40.0), 2);
+        if (e[BassBoostDb] > 0.0f)
+            add (SvfCoeffs::make (FilterType::LowShelf, std::clamp (static_cast<double> (e[BassBoostFreq]), 30.0, 200.0), kBassShelfQ,
+                                  std::min (static_cast<double> (e[BassBoostDb]), kBassMaxBoostDb), sr));
+    }
+    if (on (e, ClarityOn))
+    {
+        if (e[ClarityPresence] > 0.0f)
+            add (SvfCoeffs::make (FilterType::Bell, e[ClarityPresenceFreq], kPresenceQ, kPresenceMaxDb * e[ClarityPresence], sr));
+        if (e[ClarityAir] > 0.0f)
+            add (SvfCoeffs::make (FilterType::HighShelf, kAirShelfHz, kAirShelfQ, kAirShelfMaxDb * e[ClarityAir], sr));
+    }
+    if (on (e, SaturationOn))
+    {
+        // Unity small-signal curve; the wet path carries the make-up.
+        const double mix = std::clamp (static_cast<double> (e[SatMix]), 0.0, 1.0);
+        m.gainDb += 20.0 * std::log10 (std::max (1.0 - mix + mix * std::pow (10.0, e[SatOutputDb] / 20.0), 1.0e-6));
+    }
+}
+
+headroom::Prediction ProcessingChain::predictStaticBoost (const StaticBoostModel& m, headroom::Weighting weighting) noexcept FLUB_NONBLOCKING
+{
+    return headroom::predictMaxBoostWith ([&m] (double f) { return m.responseDb (f); }, weighting, 20.0,
+                                          std::min (20000.0, 0.49 * m.sampleRate));
 }
 
 void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
@@ -909,6 +1092,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         outTruePeak.reset();
     }
     applyParameters();
+    headroomHoldoff = std::max (0, headroomHoldoff - n);
     const float* e = effective.data();
 
     // ---- 1. Input stage (all input channels) ----
@@ -939,7 +1123,12 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         tapScratch[static_cast<size_t> (i)] = 0.5f * (st.channel (0)[i] + st.channel (1)[i]);
     analyzerTaps.pre.push (tapScratch.data(), static_cast<size_t> (n));
 
-    // ---- 4. Module slots ----
+    // ---- 4. Automatic preamp (docs/11 E11; unity and untouched while off), module slots ----
+    if (preampGain.isSmoothing() || preampGain.getCurrent() != 1.0f)
+    {
+        const float p0 = preampGain.getCurrent();
+        st.applyGainRamp (p0, preampGain.skip (n));
+    }
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
             slots[static_cast<size_t> (s)].process (st);

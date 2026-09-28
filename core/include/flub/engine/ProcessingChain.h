@@ -10,6 +10,8 @@
 //         stereo fold or a game that renders its own HRTF);
 //       the LFE is folded by the same LfeFold in all three
 //       - from here on the chain is STEREO
+//    -> (dry reference for the global bypass, input meters, "pre" tap)
+//    -> automatic preamp (auto.preamp, docs/11 E11; unity while off)
 //    -> [slot] SpectralNoiseGate      (Quality latency profile only)
 //    -> [slot] Neural (AsyncModelProcessor; only while a model is installed
 //              and eligible for the latency profile, see setNeuralModel)
@@ -32,6 +34,29 @@
 // also the base drives, see Protection.h) -> mode policy -> push params into
 // modules -> process -> telemetry (limiter GR, measured THD+N of saturator +
 // clipper) -> SafetyGovernor / AutoDrive updates for the next block.
+//
+// Automatic preamp (docs/11 E11). The chain's static maximum boost is
+// predicted from the effective values (macros included, the governor's
+// scale not: the preamp follows what was asked for, not the governor's
+// reaction to it) on the exact digital responses of the level-independent
+// stages that can raise the level: the parametric EQ (bands and output
+// gain), the dynamic EQ's static gains, the bass shelf (at its full boost,
+// with the subsonic high-pass), presence (at its full lift) and the air
+// shelf, the saturator's wet make-up; the surround fold's -3 dB trim counts
+// against them. Left out: level-dependent boosts that withdraw on loud
+// material (the dynamic-EQ ranges and mode bands, the transient shaper),
+// harmonics (bass, air, saturation), the compressor's make-up (it follows
+// its own gain reduction) and the maximizer's drive (loudness on purpose).
+// The prediction uses headroom::predictMaxBoostWith (the 1/12-octave grid
+// and golden-section refinement of DeviceCorrection.h) with the programme
+// weighting, on the audio thread without allocation, whenever an input
+// changes, at most once per kHeadroomUpdateMs (a few tens of microseconds).
+// preamp = -max(0, prediction - auto.preampAllowance), glided over 20 ms.
+// It is applied after the dry reference and the input meters: AutoLevel's
+// detector does not see it (AutoLevel would otherwise cancel it), bypass
+// compares against the unprocessed signal, and every module - EQ first -
+// sees the lowered level, so a boosted chain reaches the maximizer with the
+// headroom its boosts use instead of driving the limiter.
 //
 // Input sanitiser (docs/11 E10 Phase 1), before anything else sees the block:
 //   * a NaN / Inf anywhere drops the whole block (silence out) and resets the
@@ -87,6 +112,7 @@
 #include "flub/dsp/Bs775Fold.h"
 #include "flub/dsp/ClarityEnhancer.h"
 #include "flub/dsp/Compressor.h"
+#include "flub/dsp/DeviceCorrection.h"
 #include "flub/dsp/DynamicEq.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
 #include "flub/dsp/LoudnessMaximizer.h"
@@ -244,6 +270,39 @@ public:
         the thread that prepares the chain (e.g. getPendingFrames()). */
     const AsyncModelProcessor* getNeuralProcessor() const noexcept { return neuralInChain ? neural.get() : nullptr; }
 
+    // ---- Automatic preamp (docs/11 E11; see the header comment) ----------
+    /** The chain's static response as far as it can raise the level: the
+        exact digital responses of its level-independent boosting stages and
+        a broadband gain. Trivially copyable, no allocation. */
+    struct StaticBoostModel
+    {
+        static constexpr int kMaxSections = 64; // EQ 10 x 4, dynamic EQ 4, bass 3, clarity 2
+        std::array<SvfCoeffs, kMaxSections> sections {};
+        int numSections = 0;
+        double gainDb = 0.0; // EQ output, saturation make-up, the surround fold's trim
+        double sampleRate = 48000.0;
+
+        /** Magnitude in dB at freqHz. RT-safe. */
+        double responseDb (double freqHz) const noexcept FLUB_NONBLOCKING;
+    };
+
+    /** Builds the model from effective values (param::kNumParams entries; a
+        module counts when its enable value is on). surroundFold: a 5.1 / 7.1
+        strip folds through the virtualiser or the BS.775 downmix (-3 dB).
+        RT-safe. */
+    static void buildStaticBoostModel (const float* effective, double sampleRate, bool surroundFold,
+                                       StaticBoostModel& model) noexcept FLUB_NONBLOCKING;
+    /** Maximum of the model's response over 20 Hz .. min (20 kHz, 0.49 fs). RT-safe. */
+    static headroom::Prediction predictStaticBoost (const StaticBoostModel& model,
+                                                    headroom::Weighting weighting) noexcept FLUB_NONBLOCKING;
+
+    /** The latest programme-weighted prediction behind the automatic preamp
+        (dB, and where), and the preamp it asks for (dB <= 0; 0 while
+        auto.preamp is off). Published by the audio thread; any thread. */
+    float getPredictedBoostDb() const noexcept { return predictedBoostDb.load (std::memory_order_relaxed); }
+    float getPredictedBoostHz() const noexcept { return predictedBoostHz.load (std::memory_order_relaxed); }
+    float getAutoPreampDb() const noexcept { return autoPreampDb.load (std::memory_order_relaxed); }
+
     MeterBus& meters() noexcept { return meterBus; }
     AnalyzerTaps& taps() noexcept { return analyzerTaps; }
 
@@ -270,6 +329,9 @@ private:
         ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;
     void foldToStereo (const AudioBlock& in) noexcept;
+    /** Re-predicts the static boost when an input changed (at most once per
+        kHeadroomUpdateMs unless forced) and sets the preamp's target. */
+    void updateHeadroom (const float* e, bool surroundFold, bool force) noexcept FLUB_NONBLOCKING;
     void prepareNeuralSlot (const ProcessSpec& stereo);
     bool inChain (int slot) const noexcept { return (slot != SGate || gateInChain) && (slot != SNeural || neuralInChain); }
 
@@ -312,6 +374,19 @@ private:
 
     // Gain staging / protection
     LinearSmoothedValue inputGain, outputGain, bypassMix, dryMatchGain;
+
+    // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
+    // prediction (headroomKey), a copy of the effective values it is made
+    // from (enables = active modules, the ungoverned bass boost), the model.
+    static constexpr int kHeadroomKeySize = 97;
+    static constexpr float kHeadroomUpdateMs = 10.0f;
+    std::array<float, kHeadroomKeySize> headroomKey {};
+    bool headroomKeyValid = false;
+    int headroomHoldoff = 0; // samples until the next prediction may run
+    std::vector<float> headroomInput, ungoverned; // kNumParams each (allocated in ctor)
+    StaticBoostModel headroomModel;
+    LinearSmoothedValue preampGain;
+    std::atomic<float> predictedBoostDb { 0.0f }, predictedBoostHz { 1000.0f }, autoPreampDb { 0.0f };
     AutoLevel autoLevel;
     AutoDrive autoDrive;
     SafetyGovernor governor;

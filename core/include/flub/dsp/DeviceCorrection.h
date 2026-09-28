@@ -38,8 +38,10 @@
 #include "Svf.h"
 #include "flub/common/SpscRing.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -135,6 +137,74 @@ namespace headroom
 
     /** -max(0, maxBoostDb - allowanceDb): <= 0 dB. */
     float preampDb (const Prediction& prediction, double allowanceDb = 0.0) noexcept;
+
+    /** predictMaxBoost's grid and refinement (the same points, so the same
+        result) without allocating and without std::function: for the audio
+        thread (ProcessingChain's automatic preamp). responseDb is any
+        callable double (double freqHz) that is itself real-time safe. */
+    template <typename Response>
+    Prediction predictMaxBoostWith (const Response& responseDb, Weighting weighting = Weighting::Flat, double loHz = 20.0,
+                                    double hiHz = 20000.0) noexcept
+    {
+        loHz = std::max (loHz, 1.0);
+        hiHz = std::max (hiHz, loHz);
+        const auto eval = [&] (double log2Hz) {
+            const double f = std::exp2 (log2Hz);
+            const double r = responseDb (f);
+            return (std::isfinite (r) ? r : 0.0) + (weighting == Weighting::Programme ? programmeEnvelopeDb (f) : 0.0);
+        };
+        // Golden-section search for the maximum of a unimodal eval on [a, b].
+        const auto goldenMax = [&eval] (double a, double b) {
+            constexpr double kInvPhi = 0.6180339887498949;
+            constexpr int kIterations = 40;
+            double c = b - kInvPhi * (b - a), d = a + kInvPhi * (b - a);
+            double fc = eval (c), fd = eval (d);
+            for (int i = 0; i < kIterations; ++i)
+            {
+                if (fc >= fd)
+                {
+                    b = d;
+                    d = c;
+                    fd = fc;
+                    c = b - kInvPhi * (b - a);
+                    fc = eval (c);
+                }
+                else
+                {
+                    a = c;
+                    c = d;
+                    fc = fd;
+                    d = a + kInvPhi * (b - a);
+                    fd = eval (d);
+                }
+            }
+            return fc >= fd ? Prediction { fc, c } : Prediction { fd, d };
+        };
+
+        const double x0 = std::log2 (loHz), span = std::log2 (hiHz) - x0;
+        const int steps = std::max (1, static_cast<int> (std::ceil (span * kPointsPerOctave - 1.0e-9)));
+        const auto xAt = [x0, span, steps] (int i) { return x0 + span * static_cast<double> (i) / static_cast<double> (steps); };
+
+        // A sliding window over the grid: point i is judged once point i + 1
+        // is known, in the same order as predictMaxBoost.
+        double yPrev = eval (xAt (0)), yCur = yPrev;
+        Prediction best { yCur, std::exp2 (xAt (0)) };
+        for (int i = 0; i <= steps; ++i)
+        {
+            const double yNext = i < steps ? eval (xAt (i + 1)) : yCur;
+            if (yCur > best.maxBoostDb)
+                best = { yCur, std::exp2 (xAt (i)) };
+            if (! (yCur < yPrev || yCur < yNext || (yCur == yPrev && yCur == yNext)))
+            {
+                const Prediction refined = goldenMax (xAt (i > 0 ? i - 1 : i), xAt (std::min (i + 1, steps)));
+                if (refined.maxBoostDb > best.maxBoostDb)
+                    best = { refined.maxBoostDb, std::exp2 (refined.atHz) }; // atHz held log2 Hz here
+            }
+            yPrev = yCur;
+            yCur = yNext;
+        }
+        return best;
+    }
 } // namespace headroom
 
 struct DeviceCorrectionSettings

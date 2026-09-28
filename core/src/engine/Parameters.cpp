@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <iterator>
 #include <unordered_map>
 
 namespace flub::param
@@ -62,6 +63,18 @@ std::vector<Info> buildLayout()
         lp.structural = true;
         set (LatencyProfile, std::move (lp));
     }
+    // Added in layout version 3 (docs/11 E11 / E05).
+    auto v3 = [] (Info i) {
+        i.sinceVersion = 3;
+        return i;
+    };
+    // The automatic preamp takes the chain's predicted static boost (EQ, bass
+    // shelf, presence / air, dynamic-EQ static gains, saturation make-up, the
+    // surround fold's trim; macros included) minus the allowance off the
+    // signal ahead of the modules (ProcessingChain.h). Off by default: every
+    // preset saved before it sounds as it did.
+    set (AutoPreampOn, v3 (toggle ("auto.preamp", "Automatic Preamp", "Global", false)));
+    set (AutoPreampAllowanceDb, v3 (make ("auto.preampAllowance", "Preamp Allowance", "Global", Unit::Db, 0.0f, 12.0f, 1.0f)));
 
     // ---- Module enables ----------------------------------------------------
     set (GateOn, toggle ("gate.on", "Noise Gate", "Modules", false));
@@ -167,6 +180,11 @@ std::vector<Info> buildLayout()
     set (MaxAutoRelease, toggle ("max.autoRelease", "Auto Release", "Maximizer", true));
     set (MaxAutoDrive, toggle ("max.autoDrive", "Loudness Target", "Maximizer", false));
     set (MaxTargetLufs, make ("max.target", "Target Loudness", "Maximizer", Unit::Lufs, -24.0f, -6.0f, -14.0f));
+    // docs/11 E05 steps 1 and 4. The defaults are the stage 1 clipper's fixed
+    // values and "Custom" (no style), so older presets keep their sound.
+    set (MaxClipCrestDb, v3 (make ("max.clipCrest", "Clipper Crest Gate", "Maximizer", Unit::Db, 0.0f, 24.0f, 6.0f)));
+    set (MaxClipMaxDb, v3 (make ("max.clipMaxDb", "Clipper Depth Limit", "Maximizer", Unit::Db, 0.5f, 24.0f, 3.0f)));
+    set (MaxStyle, v3 (choice ("max.style", "Maximizer Style", "Maximizer", { "Custom", "Transparent", "Punchy", "Aggressive", "Safe" }, 0)));
 
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
@@ -214,6 +232,27 @@ std::vector<Info> buildLayout()
     return t;
 }
 } // namespace
+
+const MaxStyleValues* maxStyleValues (MaxStyleValue style) noexcept
+{
+    // clip share, softness, crest gate, depth limit, release, auto release.
+    //  * Transparent: little, soft, deeply crest-gated clipping and a slow
+    //    release; the limiter does the work, cleanly.
+    //  * Punchy: the clipper takes more of each transient (lower crest gate,
+    //    deeper cap), so the limiter ducks the kick's onset less than its
+    //    body (onset / body -0.5 -> -0.1 dB at 12 dB drive, +1 LU).
+    //  * Aggressive: loud - a low crest gate and a deep cap put most of the
+    //    drive into the clipper.
+    //  * Safe: limiter only (no clipper), slow release: the fewest artefacts.
+    static constexpr MaxStyleValues styles[] = {
+        { 0.25f, 0.8f, 9.0f, 1.5f, 120.0f, true }, // Transparent
+        { 0.8f, 0.4f, 4.5f, 6.0f, 60.0f, true },   // Punchy
+        { 0.85f, 0.3f, 3.0f, 6.0f, 30.0f, true },  // Aggressive
+        { 0.0f, 0.5f, 6.0f, 3.0f, 150.0f, true },  // Safe
+    };
+    const int i = static_cast<int> (style) - 1;
+    return i >= 0 && i < static_cast<int> (std::size (styles)) ? &styles[i] : nullptr;
+}
 
 const std::vector<Info>& layout()
 {

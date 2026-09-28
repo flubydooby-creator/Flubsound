@@ -1,5 +1,6 @@
 // Tests for the look-ahead compressor: static curve (downward soft knee and
-// upward with floor taper), steady-state gains, stereo linking, sidechain
+// upward with floor taper, and the background-relative upward floor of
+// docs/11 E19), steady-state gains, stereo linking, sidechain
 // high-pass, look-ahead, parallel mix, auto makeup / release, latency,
 // click-free parameter changes, real-time safety, robustness and block-size
 // invariance.
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -293,6 +295,136 @@ TEST_CASE ("Compressor: upward compression lifts a -50 dBFS tone by ~5 dB and le
 
     // Loud material is not lifted either (the tone is above upThreshold).
     CHECK_NEAR (toneGainDb (comp, 1000.0, dbfs (-30.0), 0.5, 0.2), 0.0, 0.05);
+}
+
+TEST_CASE ("Compressor: relative upward floor - the static curve fades the lift from 3 to 9 dB over the background; with the background at the floor it only adds that fade (docs/11 E19)")
+{
+    CompressorParams p = downParams (-18.0f, 2.5f);
+    p.upThresholdDb = -40.0f;
+    p.upRatio = 2.0f;
+    p.upMaxGainDb = 10.0f;
+    p.upFloorDb = -75.0f;
+    p.upRelativeFloor = true;
+
+    // A -50 dB level: the fixed law gives (1 - 1/2) x 10 = 5 dB.
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -75.0f), 5.0, 1e-5); // background at the floor: 22 dB over it
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -59.0f), 5.0, 1e-5); // 9 dB over: full
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -56.0f), 2.5, 1e-5); // 6 dB over: half
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -53.0f), 0.0, 1e-9); // 3 dB over: none
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -50.0f), 0.0, 1e-9); // the background itself
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -45.0f), 0.0, 1e-9); // under it
+
+    // Without a background the curve is taken out of silence (background at
+    // the floor): the fixed curve times the relative fade near the floor.
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f), 5.0, 1e-5);
+    CHECK_NEAR (Compressor::computeGainDb (p, -69.0f), 10.0 * (6.0 / 12.0) * (3.0 / 6.0), 1e-4);
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, std::numeric_limits<float>::quiet_NaN()), 5.0, 1e-5);
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -120.0f), 5.0, 1e-5); // never under the floor
+
+    // The downward part and a fixed floor ignore the background.
+    CHECK_NEAR (Compressor::computeGainDb (p, -8.0f, -10.0f), Compressor::computeGainDb (p, -8.0f), 1e-6);
+    p.upRelativeFloor = false;
+    CHECK_NEAR (Compressor::computeGainDb (p, -50.0f, -50.0f), 5.0, 1e-5);
+}
+
+TEST_CASE ("Compressor: with the relative upward floor a steady bed is not lifted, a quiet sound 10 dB out of it is, the bed stays unlifted after it, and switching is click-free (docs/11 E19)")
+{
+    // 4 s of a -60 dBFS-RMS stereo pink bed with a -40 dBFS 1 kHz tone at
+    // 2.5 - 3.0 s. Upward threshold -30 dB, ratio 2, max 10 dB, floor -75,
+    // no downward section, release 100 ms. Gains are out vs the delayed
+    // input, full-band power over both channels.
+    CompressorParams p = downParams (-10.0f, 1.0f);
+    p.upThresholdDb = -30.0f;
+    p.upRatio = 2.0f;
+    p.upMaxGainDb = 10.0f;
+    p.upFloorDb = -75.0f;
+    const int n = static_cast<int> (4.0 * kFs);
+    Planar src (2, n);
+    setChannel (src, 0, pinkNoise (n, dbfs (-60.0), 11));
+    setChannel (src, 1, pinkNoise (n, dbfs (-60.0), 22));
+    const auto tone = sine (1000.0, kFs, n, dbfs (-40.0));
+    for (int i = static_cast<int> (2.5 * kFs); i < static_cast<int> (3.0 * kFs); ++i)
+        for (auto& c : src.ch)
+            c[static_cast<size_t> (i)] += tone[static_cast<size_t> (i)];
+
+    struct Result
+    {
+        double bedDb, toneDb, afterDb;
+        float backgroundDb;
+    };
+    const auto run = [&] (bool relative) {
+        auto q = p;
+        q.upRelativeFloor = relative;
+        Compressor comp;
+        comp.setParams (q);
+        prepareComp (comp);
+        const int lat = comp.latencySamples();
+        Planar buf (2, n);
+        for (int c = 0; c < 2; ++c)
+            setChannel (buf, c, src.ch[static_cast<size_t> (c)]);
+        processInBlocks (comp, buf, 256);
+        const auto gain = [&] (double from, double to) {
+            double po = 0.0, pi = 0.0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = static_cast<int> (from * kFs); i < static_cast<int> (to * kFs); ++i)
+                {
+                    const double o = buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i + lat)];
+                    const double x = src.ch[static_cast<size_t> (c)][static_cast<size_t> (i)];
+                    po += o * o;
+                    pi += x * x;
+                }
+            return 10.0 * std::log10 (po / pi);
+        };
+        // The background of the bed, read just before the tone (block end).
+        Compressor probe;
+        probe.setParams (q);
+        prepareComp (probe);
+        Planar head (2, static_cast<int> (2.5 * kFs));
+        for (int c = 0; c < 2; ++c)
+            setChannel (head, c, src.ch[static_cast<size_t> (c)]);
+        processInBlocks (probe, head, 256);
+        return Result { gain (1.5, 2.5), gain (2.8, 3.0), gain (3.5, 4.0), probe.getUpwardBackgroundDb() };
+    };
+    const auto fixed = run (false), rel = run (true);
+    std::printf ("    measured fixed floor: bed %+.2f dB, tone %+.2f dB, bed after %+.2f dB\n", fixed.bedDb, fixed.toneDb, fixed.afterDb);
+    std::printf ("    measured relative floor: bed %+.2f dB, tone %+.2f dB, bed after %+.2f dB, background %.2f dB\n", rel.bedDb, rel.toneDb,
+                 rel.afterDb, static_cast<double> (rel.backgroundDb));
+    CHECK_GE (fixed.bedDb, 6.0); // the fixed floor lifts the whole bed
+    CHECK_LE (std::abs (rel.bedDb), 0.5);
+    CHECK_LE (std::abs (rel.afterDb), 0.5);
+    CHECK_GE (rel.toneDb, 3.5); // the law gives 5 dB; the lift rises at the 100 ms release
+    CHECK_NEAR (rel.toneDb, fixed.toneDb, 1.0);
+    // The background sits in the lower part of the bed's held-peak spread,
+    // well above the floor.
+    CHECK (rel.backgroundDb > -60.0f && rel.backgroundDb < -40.0f);
+
+    // Switching the relative floor on and off under a steady quiet signal
+    // (-50 dBFS DC + a -54 dBFS tone: never near zero, so the applied gain can
+    // be read at every sample) glides: 10 dB of lift goes and comes back
+    // without a step.
+    auto q = p;
+    q.attackMs = 0.1f; // fastest attack: an unsmoothed switch would show directly
+    Compressor comp;
+    comp.setParams (q);
+    prepareComp (comp);
+    const int lat = comp.latencySamples();
+    const int seg = static_cast<int> (1.0 * kFs);
+    Planar buf (1, 3 * seg);
+    const auto t = sine (1000.0, kFs, 3 * seg, dbfs (-54.0));
+    for (int i = 0; i < 3 * seg; ++i)
+        buf.ch[0][static_cast<size_t> (i)] = dbfs (-50.0) + t[static_cast<size_t> (i)];
+    const auto in = buf.ch[0];
+    for (int s = 0; s < 3; ++s)
+    {
+        q.upRelativeFloor = s == 1;
+        comp.setParams (q);
+        for (int pos = s * seg; pos < (s + 1) * seg; pos += 480)
+            comp.process (buf.block (pos, 480));
+        if (s == 1)
+            CHECK_LE (comp.getUpwardGainDb(), 0.05f); // the steady signal is its own background
+    }
+    CHECK_NEAR (comp.getUpwardGainDb(), 10.0, 0.3); // fixed floor again: the full law (capped)
+    CHECK_LE (maxGainStepDb (in, buf.ch[0], lat, 0.001f, seg / 2), 0.1);
 }
 
 TEST_CASE ("Compressor: makeup is manual, or auto = half the reduction at 0 dBFS (knee included)")
@@ -878,12 +1010,16 @@ TEST_CASE ("Compressor: output is independent of the host block size (1, 7, 64, 
         src.ch[1][static_cast<size_t> (i)] = level * noise[static_cast<size_t> (n - 1 - i)];
     }
 
-    auto run = [&] (int blockSize)
+    // The relative upward floor (docs/11 E19) too, gliding on after prepare:
+    // its background tracker steps on the global sample phase.
+    auto run = [&] (int blockSize, bool relative)
     {
         Compressor comp;
         comp.setParams (p);
         prepareComp (comp, kFs, 2, 512, 1.5f);
-        comp.setParams (q);
+        auto r = q;
+        r.upRelativeFloor = relative;
+        comp.setParams (r);
         Planar buf (2, n); // (a copied Planar would still point at src's channels)
         for (int c = 0; c < 2; ++c)
             setChannel (buf, c, src.ch[static_cast<size_t> (c)]);
@@ -891,22 +1027,25 @@ TEST_CASE ("Compressor: output is independent of the host block size (1, 7, 64, 
         return buf.ch;
     };
 
-    const auto ref = run (1);
-    const int lat = static_cast<int> (std::lround (1.5 * kFs / 1000.0));
-    double changed = 0.0; // the gain really moves (not just a delayed copy)
-    for (int i = lat; i < n; ++i)
-        changed = std::max (changed, static_cast<double> (std::abs (ref[0][static_cast<size_t> (i)] - src.ch[0][static_cast<size_t> (i - lat)])));
-    CHECK_GE (changed, 0.05);
-
-    for (int bs : { 7, 64, 512 })
+    for (bool relative : { false, true })
     {
-        const auto out = run (bs);
-        double worst = 0.0;
-        for (int c = 0; c < 2; ++c)
-            for (int i = 0; i < n; ++i)
-                worst = std::max (worst, static_cast<double> (std::abs (out[static_cast<size_t> (c)][static_cast<size_t> (i)]
-                                                                        - ref[static_cast<size_t> (c)][static_cast<size_t> (i)])));
-        CHECK_LE (worst, 1e-6);
+        const auto ref = run (1, relative);
+        const int lat = static_cast<int> (std::lround (1.5 * kFs / 1000.0));
+        double changed = 0.0; // the gain really moves (not just a delayed copy)
+        for (int i = lat; i < n; ++i)
+            changed = std::max (changed, static_cast<double> (std::abs (ref[0][static_cast<size_t> (i)] - src.ch[0][static_cast<size_t> (i - lat)])));
+        CHECK_GE (changed, 0.05);
+
+        for (int bs : { 7, 64, 512 })
+        {
+            const auto out = run (bs, relative);
+            double worst = 0.0;
+            for (int c = 0; c < 2; ++c)
+                for (int i = 0; i < n; ++i)
+                    worst = std::max (worst, static_cast<double> (std::abs (out[static_cast<size_t> (c)][static_cast<size_t> (i)]
+                                                                            - ref[static_cast<size_t> (c)][static_cast<size_t> (i)])));
+            CHECK_LE (worst, 1e-6);
+        }
     }
 }
 
@@ -1255,6 +1394,7 @@ TEST_CASE ("Compressor [adversarial]: random automation, block sizes and signals
                 p.upRatio = uni (0.5f, 12.0f);
                 p.upMaxGainDb = uni (-2.0f, 20.0f);
                 p.upFloorDb = uni (-110.0f, -30.0f);
+                p.upRelativeFloor = rng.nextBipolar() > 0.0f;
                 comp.setParams (p);
 
                 const int len = std::min (n - pos, 1 + static_cast<int> (rng.nextU32() % 700u));
@@ -1264,6 +1404,8 @@ TEST_CASE ("Compressor [adversarial]: random automation, block sizes and signals
                 CHECK_GE (comp.getGainReductionDb(), -160.0f);
                 CHECK_GE (comp.getUpwardGainDb(), 0.0f);
                 CHECK_LE (comp.getUpwardGainDb(), 18.0f + 1.0e-3f);
+                CHECK (std::isfinite (comp.getUpwardBackgroundDb()));
+                CHECK_GE (comp.getUpwardBackgroundDb(), -110.0f); // never under the (smoothed) floor
                 pos += len;
             }
             CHECK (allFinite (buf));

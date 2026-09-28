@@ -80,6 +80,8 @@ enum Id : int
     LoudnessMatchBypass, // global bypass is loudness matched
     BypassAll,
     LatencyProfile,    // Choice: Quality, Balanced, Low Latency (structural)
+    AutoPreampOn,      // Toggle: automatic preamp from the chain's predicted static boost (docs/11 E11)
+    AutoPreampAllowanceDb, // boost the automatic preamp leaves in (dB)
 
     // Module enables (bypass with click-free, latency-compensated crossfade)
     GateOn,
@@ -176,6 +178,9 @@ enum Id : int
     MaxAutoRelease,
     MaxAutoDrive,     // drive becomes a maximum; a slow loop targets MaxTargetLufs
     MaxTargetLufs,
+    MaxClipCrestDb,   // clipper crest gate: threshold >= this far over the short-term RMS (0 = off, docs/11 E05)
+    MaxClipMaxDb,     // clipper depth cap: no sample loses more than this (24 = uncapped)
+    MaxStyle,         // Choice: Custom, Transparent, Punchy, Aggressive, Safe (maxStyleValues)
 
     kNumScalarParams
 };
@@ -212,6 +217,18 @@ constexpr int dyn (int band, DynField f) noexcept { return kDynBase + band * kDy
 enum class ModeValue : int { Music = 0, Gaming = 1 };
 enum class LatencyProfileValue : int { Quality = 0, Balanced = 1, LowLatency = 2 };
 enum class InputModeValue : int { Auto = 0, ForceSurround = 1, ForceStereo = 2 }; // VirtInputMode
+enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Safe };  // MaxStyle
+
+/** A named maximizer style (docs/11 E05 step 4): the values it gives the six
+    maximizer controls it owns while it is selected. Custom owns none (the
+    controls' own values apply, as in every preset saved before styles). */
+struct MaxStyleValues
+{
+    float clipAmount, clipKnee, clipCrestDb, clipMaxDb, releaseMs;
+    bool autoRelease;
+};
+/** nullptr for Custom (or an out-of-range value). */
+const MaxStyleValues* maxStyleValues (MaxStyleValue style) noexcept;
 
 /** The full, ordered table (index == Id). Built once, immutable afterwards. */
 const std::vector<Info>& layout();

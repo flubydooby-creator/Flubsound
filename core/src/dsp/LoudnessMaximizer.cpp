@@ -145,8 +145,11 @@ void LoudnessMaximizer::updateClipThreshold() noexcept
 
 void LoudnessMaximizer::updateClipShape() noexcept
 {
-    crestGain = params.clipCrestDb > 0.0f ? dbToGain (params.clipCrestDb) : 0.0f;
-    depthGain = params.clipMaxDepthDb < 24.0f ? dbToGain (-params.clipMaxDepthDb) : 0.0f;
+    // Gains, not dB, glide: both ends of each range are continuous in gain
+    // (crest 0 = gate off = gain 0; depth 24 = uncapped = gain 0, next to
+    // 10^(-24/20) = 0.063, where the cap hardly ever binds).
+    crestGainS.setTarget (params.clipCrestDb > 0.0f ? dbToGain (params.clipCrestDb) : 0.0f);
+    depthGainS.setTarget (params.clipMaxDepthDb < 24.0f ? dbToGain (-params.clipMaxDepthDb) : 0.0f);
 }
 
 void LoudnessMaximizer::startGlue (bool immediate) noexcept
@@ -204,6 +207,8 @@ void LoudnessMaximizer::applyParamsImmediately() noexcept
     clipKneeS.setImmediate (params.clipKnee);
     updateClipThreshold();
     updateClipShape();
+    crestGainS.setImmediate (crestGainS.getTarget());
+    depthGainS.setImmediate (depthGainS.getTarget());
 
     if (params.glue > 0.0f)
     {
@@ -250,6 +255,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     thresholdBuf.assign (static_cast<size_t> (spec.maxBlockSize), 1.0f);
     kneeBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipMixBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
+    depthBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipWarmupLength = 2 * oversampler.latencySamples() + kClipWarmupExtra;
     const double gDc = std::tan (kPi * kClipDcBlockHz / fs);
     clipDcG = gDc / (1.0 + gDc);
@@ -300,6 +306,8 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     glueS.reset (fs, kParamSmoothMs, params.glue);
     glueMixS.reset (fs, kGlueFadeMs, 0.0f);
     clipMixS.reset (fs, kClipFadeMs, 0.0f);
+    crestGainS.reset (fs, kParamSmoothMs, 0.0f);
+    depthGainS.reset (fs, kParamSmoothMs, 0.0f);
     applyParamsImmediately(); // no previous output to click against
 
     limiterGrDb.store (0.0f, std::memory_order_relaxed);
@@ -414,6 +422,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         thresholdBuf[si] = clipThreshold;
         kneeBuf[si] = clipKneeS.next();
         clipMixBuf[si] = clipMixS.next();
+        depthBuf[si] = depthGainS.next();
 
         if (! glueRunning)
         {
@@ -511,6 +520,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         }
         clipPowerFast += clipPowerCoeff * (std::min (p, std::numeric_limits<float>::max()) - clipPowerFast);
         clipPower += clipPowerCoeff * (clipPowerFast - clipPower);
+        const float crestGain = crestGainS.next();
         if (crestGain > 0.0f)
         {
             auto& t = thresholdBuf[static_cast<size_t> (i)];
@@ -543,6 +553,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                 const float t = thresholdBuf[si];
                 const float knee = kneeBuf[si];
                 const float w = clipMixBuf[si];
+                const float depthGain = depthBuf[si];
                 for (int f = 0; f < osFactor; ++f, ++k)
                 {
                     const float x = u[k];

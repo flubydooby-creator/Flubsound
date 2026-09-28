@@ -32,6 +32,17 @@ constexpr float kMaxLookaheadMs = 10.0f;
 // The upward gain fades out over the 12 dB above upFloorDb (header contract).
 constexpr float kUpTaperDb = 12.0f;
 
+// upRelativeFloor (docs/11 E19): the lift is scaled from 0 at kUpRelativeLoDb
+// over the background to 1 at kUpRelativeHiDb over it. The detector's held
+// peak of a stationary bed spreads a few dB above the tracked background
+// (which sits in the lower part of that spread), so 3 dB keeps the bed
+// itself unlifted; a sound 9 dB out of it gets the full law.
+constexpr float kUpRelativeLoDb = 3.0f;
+constexpr float kUpRelativeHiDb = 9.0f;
+
+// The background tracker steps at this control rate (global sample phase).
+constexpr uint32_t kBackgroundInterval = 16;
+
 // Detector level clamp: keeps the curve (and so the gain) finite for +Inf or
 // absurdly hot input. +100 dBFS is far beyond anything real.
 constexpr float kMaxLevelDb = 100.0f;
@@ -124,10 +135,11 @@ Compressor::Curve Compressor::makeCurve (const CompressorParams& p) noexcept
     c.upSlope = slopeFromRatio (p.upRatio);
     c.upMaxGainDb = p.upMaxGainDb;
     c.upFloorDb = p.upFloorDb;
+    c.upRelative = p.upRelativeFloor ? 1.0f : 0.0f;
     return c;
 }
 
-Compressor::CurveGain Compressor::evaluateCurve (const Curve& c, float levelDb) noexcept
+Compressor::CurveGain Compressor::evaluateCurve (const Curve& c, float levelDb, float backgroundDb) noexcept
 {
     CurveGain g;
 
@@ -151,10 +163,17 @@ Compressor::CurveGain Compressor::evaluateCurve (const Curve& c, float levelDb) 
 
     // Upward: lift what is below upThreshold by (1 - 1/upR) per dB, capped at
     // upMax, and fade the lift out towards the floor so that silence, hiss
-    // and room tone are never pulled up.
+    // and room tone are never pulled up. With the relative floor the lift is
+    // also faded out towards the programme's background, so a stationary bed
+    // is not pulled up either (upRelative glides the switch).
     if (c.upMaxGainDb > 0.0f && levelDb < c.upThresholdDb)
     {
-        const float taper = std::clamp ((levelDb - c.upFloorDb) / kUpTaperDb, 0.0f, 1.0f);
+        float taper = std::clamp ((levelDb - c.upFloorDb) / kUpTaperDb, 0.0f, 1.0f);
+        if (c.upRelative > 0.0f)
+        {
+            const float rel = std::clamp ((levelDb - backgroundDb - kUpRelativeLoDb) / (kUpRelativeHiDb - kUpRelativeLoDb), 0.0f, 1.0f);
+            taper *= 1.0f - c.upRelative * (1.0f - rel);
+        }
         g.up = std::min (c.upMaxGainDb, (c.upThresholdDb - levelDb) * c.upSlope) * taper;
     }
 
@@ -163,9 +182,16 @@ Compressor::CurveGain Compressor::evaluateCurve (const Curve& c, float levelDb) 
 
 float Compressor::computeGainDb (const CompressorParams& p, float levelDb) noexcept
 {
+    return computeGainDb (p, levelDb, kMinusInfDb);
+}
+
+float Compressor::computeGainDb (const CompressorParams& p, float levelDb, float backgroundDb) noexcept
+{
     const CompressorParams s = sanitised (p, CompressorParams {});
     const float x = std::isnan (levelDb) ? kMinusInfDb : std::clamp (levelDb, kMinusInfDb, kMaxLevelDb);
-    const CurveGain g = evaluateCurve (makeCurve (s), x);
+    // The background never sits under the floor (BackgroundTracker's contract).
+    const float b = std::isnan (backgroundDb) ? s.upFloorDb : std::clamp (backgroundDb, s.upFloorDb, kMaxLevelDb);
+    const CurveGain g = evaluateCurve (makeCurve (s), x, b);
     return g.down + g.up;
 }
 
@@ -173,7 +199,7 @@ float Compressor::autoMakeupDb (const CompressorParams& p) noexcept
 {
     // Half of the reduction a 0 dBFS peak receives: gets most of the lost level
     // back without pushing the compressed signal into the limiter.
-    return std::clamp (-0.5f * evaluateCurve (makeCurve (p), 0.0f).down, 0.0f, kMaxMakeupDb);
+    return std::clamp (-0.5f * evaluateCurve (makeCurve (p), 0.0f, kMinusInfDb).down, 0.0f, kMaxMakeupDb);
 }
 
 float Compressor::reductionOnsetGain (const Curve& c) noexcept
@@ -247,6 +273,7 @@ void Compressor::prepare (const ProcessSpec& newSpec)
     const double sustainLength = static_cast<double> (kSustainMs) * 0.001 * spec.sampleRate;
     sustainSamples = std::max (1, static_cast<int> (std::lround (sustainLength)));
     sustainStep = 1.0f / static_cast<float> (sustainSamples);
+    background.prepare (spec.sampleRate / static_cast<double> (kBackgroundInterval));
 
     reset();
 }
@@ -265,6 +292,7 @@ void Compressor::reset() noexcept FLUB_NONBLOCKING
     upSlopeS.reset (fs, kParamSmoothMs, slopeFromRatio (params.upRatio));
     upMaxS.reset (fs, kParamSmoothMs, params.upMaxGainDb);
     upFloorS.reset (fs, kParamSmoothMs, params.upFloorDb);
+    upRelativeS.reset (fs, kParamSmoothMs, params.upRelativeFloor ? 1.0f : 0.0f);
     makeupS.reset (fs, kParamSmoothMs, params.autoMakeup ? autoMakeupDb (params) : params.makeupDb);
     mixS.reset (fs, kParamSmoothMs, params.mix);
     hpMix.reset (fs, kHpFadeMs, hpOn ? 1.0f : 0.0f);
@@ -287,6 +315,8 @@ void Compressor::reset() noexcept FLUB_NONBLOCKING
     heldPeak = -1.0f; // forces the first gain computation
     levelDb = kMinusInfDb;
     target = {};
+    background.reset();
+    backgroundDb = params.upFloorDb;
 
     gainDb = 0.0; // the curve's value for silence
     updateTimeConstants();
@@ -301,6 +331,7 @@ void Compressor::reset() noexcept FLUB_NONBLOCKING
 
     grDb.store (0.0f, std::memory_order_relaxed);
     upDb.store (0.0f, std::memory_order_relaxed);
+    bgDb.store (backgroundDb, std::memory_order_relaxed);
 }
 
 int Compressor::latencySamples() const noexcept
@@ -325,6 +356,7 @@ void Compressor::setParams (const CompressorParams& newParams) noexcept FLUB_NON
     upSlopeS.setTarget (slopeFromRatio (p.upRatio));
     upMaxS.setTarget (p.upMaxGainDb);
     upFloorS.setTarget (p.upFloorDb);
+    upRelativeS.setTarget (p.upRelativeFloor ? 1.0f : 0.0f);
     makeupS.setTarget (p.autoMakeup ? autoMakeupDb (p) : p.makeupDb);
     mixS.setTarget (p.mix);
 
@@ -375,6 +407,7 @@ void Compressor::advanceSmoothers() noexcept
     glide (upSlopeS);
     glide (upMaxS);
     glide (upFloorS);
+    glide (upRelativeS);
     curve.thresholdDb = thresholdS.getCurrent();
     curve.kneeDb = kneeS.getCurrent();
     curve.slope = slopeS.getCurrent();
@@ -382,6 +415,7 @@ void Compressor::advanceSmoothers() noexcept
     curve.upSlope = upSlopeS.getCurrent();
     curve.upMaxGainDb = upMaxS.getCurrent();
     curve.upFloorDb = upFloorS.getCurrent();
+    curve.upRelative = upRelativeS.getCurrent();
     curveDirty = true;
     onsetDirty = onsetDirty || downMoving;
 
@@ -402,7 +436,7 @@ void Compressor::advanceSmoothers() noexcept
         hpRunning = false; // fully faded out: stop spending cycles on the filter
 
     smoothing = thresholdS.isSmoothing() || kneeS.isSmoothing() || slopeS.isSmoothing() || upThresholdS.isSmoothing()
-                || upSlopeS.isSmoothing() || upMaxS.isSmoothing() || upFloorS.isSmoothing() || makeupS.isSmoothing()
+                || upSlopeS.isSmoothing() || upMaxS.isSmoothing() || upFloorS.isSmoothing() || upRelativeS.isSmoothing() || makeupS.isSmoothing()
                 || mixS.isSmoothing() || hpMix.isSmoothing() || logHpFreq.isSmoothing();
 }
 
@@ -496,10 +530,22 @@ void Compressor::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
             levelDb = std::min (gainToDb (held), kMaxLevelDb);
             curveDirty = true;
         }
+        // The background of the held level, at control rate on the global
+        // phase (block-size independent). It only moves the curve while the
+        // relative floor is (partly) on.
+        if ((tick & (kBackgroundInterval - 1u)) == 0u)
+        {
+            const float b = background.update (levelDb, curve.upFloorDb);
+            if (b != backgroundDb)
+            {
+                backgroundDb = b;
+                curveDirty = curveDirty || curve.upRelative > 0.0f;
+            }
+        }
         if (curveDirty)
         {
             curveDirty = false;
-            target = evaluateCurve (curve, levelDb);
+            target = evaluateCurve (curve, levelDb, backgroundDb);
         }
         if (onsetDirty)
         {
@@ -592,5 +638,6 @@ void Compressor::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 
     grDb.store (blockMinDb, std::memory_order_relaxed);
     upDb.store (blockMaxDb, std::memory_order_relaxed);
+    bgDb.store (backgroundDb, std::memory_order_relaxed);
 }
 } // namespace flub

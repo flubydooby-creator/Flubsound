@@ -120,6 +120,14 @@ static_assert (std::is_same_v<decltype (&ParametricEq::setBand), void (Parametri
 static_assert (std::is_same_v<decltype (&ParametricEq::setOutputGainDb), void (ParametricEq::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TransientShaper::setAttackDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TransientShaper::setSustainDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
+// The automatic preamp's static-boost prediction (docs/11 E11), run by
+// ProcessingChain::applyParameters when its inputs change.
+static_assert (std::is_same_v<decltype (&ProcessingChain::buildStaticBoostModel),
+                              void (*) (const float*, double, bool, ProcessingChain::StaticBoostModel&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::predictStaticBoost),
+                              headroom::Prediction (*) (const ProcessingChain::StaticBoostModel&, headroom::Weighting) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::StaticBoostModel::responseDb),
+                              double (ProcessingChain::StaticBoostModel::*) (double) const noexcept FLUB_NONBLOCKING>);
 
 #if defined(__linux__) || defined(__APPLE__)
 /** Deliberately breaks the real-time contract: the vector escapes, so the

@@ -466,7 +466,7 @@ TEST_CASE ("Gaming Impact (M3): governed bass boost + harmonics and transient at
     CHECK_GE (on.toneDb (0, 150.0) - on.toneDb (0, 50.0), -20.0);
 }
 
-TEST_CASE ("Gaming Detail (M4): upward compression lifts quiet cues by its law (up to 8 dB); loud ones are not lifted")
+TEST_CASE ("Gaming Detail (M4): upward compression lifts quiet cues by its law (up to 8 dB) over the programme's background; a steady sound and loud ones are not lifted")
 {
     const auto detail = [] (float amount) { return macroOnly (Macro4, amount, { CompressorOn, ClarityOn }); };
     {
@@ -484,10 +484,34 @@ TEST_CASE ("Gaming Detail (M4): upward compression lifts quiet cues by its law (
     }
     // Upward threshold -45 dB, ratio 2: a -60 dBFS cue is lifted by
     // (1 - 1/2) x 15 = 7.5 dB (under the 8 dB cap); a -10 dBFS one is not.
-    const auto quietRef = renderGaming (detail (0.0f), tone (1000.0, -60.0f));
-    const auto quiet = renderGaming (detail (1.0f), tone (1000.0, -60.0f));
-    CHECK_NEAR (quiet.toneDb (0, 1000.0) - quietRef.toneDb (0, 1000.0), 7.5, 0.3);
+    // In Gaming the upward floor follows the programme's background (docs/11
+    // E19, Compressor upRelativeFloor): the cue here rises out of 0.4 s of
+    // silence (after the background's 300 ms learning time), where the
+    // background is the -75 dB floor, and a tone this far over it only
+    // becomes background after about 1.2 s (5 dB/s). The lift rises at the
+    // 120 ms release, so the last 0.5 s average under the law (about 6.7 dB);
+    // the meter (last block) reads it.
+    auto cue = tone (1000.0, -60.0f);
+    for (auto& c : cue.ch)
+        std::fill_n (c.begin(), kLen * 2 / 5, 0.0f);
+    const auto quietRef = renderGaming (detail (0.0f), cue);
+    const auto quiet = renderGaming (detail (1.0f), cue);
+    CHECK_NEAR (quiet.toneDb (0, 1000.0) - quietRef.toneDb (0, 1000.0), 6.7, 0.3);
     CHECK_NEAR (quiet.compUpwardDb, 7.5, 0.3);
+    // The same tone from the first sample is its own background: not lifted
+    // (the fixed -75 dB floor lifted it by the full 7.5 dB).
+    const auto steadyRef = renderGaming (detail (0.0f), tone (1000.0, -60.0f));
+    const auto steady = renderGaming (detail (1.0f), tone (1000.0, -60.0f));
+    CHECK_NEAR (steady.toneDb (0, 1000.0) - steadyRef.toneDb (0, 1000.0), 0.0, 0.3);
+    CHECK_LE (steady.compUpwardDb, 0.3f);
+    // Music mode keeps the fixed floor (Late Night lifts quiet passages).
+    const auto music = renderGaming ([] (ParameterStore& s) {
+        s.set (Mode, static_cast<float> (ModeValue::Music));
+        s.set (CompressorOn, 1.0f);
+        s.set (CompRatio, 1.0f);
+        s.set (CompUpMaxGainDb, 8.0f);
+    }, tone (1000.0, -60.0f), { DynEqOn, ClarityOn, BassOn, SpatialOn, SaturationOn, MaximizerOn });
+    CHECK_NEAR (music.compUpwardDb, 7.5, 0.3);
     const auto loudRef = renderGaming (detail (0.0f), tone (1000.0, -10.0f));
     const auto loud = renderGaming (detail (1.0f), tone (1000.0, -10.0f));
     CHECK_LE (loud.toneDb (0, 1000.0) - loudRef.toneDb (0, 1000.0), 0.05);

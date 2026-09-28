@@ -67,8 +67,8 @@ struct MaximizerParams
     float glue = 0.0f;       // 0 .. 1
     float releaseMs = 60.0f; // 5 .. 1000
     bool autoRelease = true;
-    float clipCrestDb = 6.0f;    // 0 .. 24; 0 = no crest gate (clip at t)
-    float clipMaxDepthDb = 3.0f; // 0.5 .. 24; 24 = depth not capped
+    float clipCrestDb = 6.0f;    // 0 .. 24; 0 = no crest gate (clip at t)      (max.clipCrest)
+    float clipMaxDepthDb = 3.0f; // 0.5 .. 24; 24 = depth not capped           (max.clipMaxDb)
 
     bool operator== (const MaximizerParams&) const = default;
 };
@@ -187,7 +187,7 @@ private:
     Oversampler oversampler;
     DelayLine dryDelay;
     AudioBuffer dryBuffer;
-    std::vector<float> thresholdBuf, kneeBuf, clipMixBuf; // per-sample clip controls (maxBlockSize)
+    std::vector<float> thresholdBuf, kneeBuf, clipMixBuf, depthBuf; // per-sample clip controls (maxBlockSize)
     bool clipRunning = false;
     int clipWarmup = 0, clipWarmupLength = 1;
     // Residual-path DC blocker on the clipper's correction (docs/11 E10):
@@ -195,8 +195,10 @@ private:
     std::array<double, kMaxChannels> clipDcLp {};
     double clipDcG = 0.0;
     // Crest gate: short-term linked power of the clipper input and its
-    // coefficient; crest and depth gains from the params (0 = off).
-    float clipPowerFast = 0.0f, clipPower = 0.0f, clipPowerCoeff = 0.0f, crestGain = 0.0f, depthGain = 0.0f;
+    // coefficient; crest and depth gains from the params (0 = off), gliding
+    // linearly (in gain) over kParamSmoothMs, so moving either is click-free.
+    float clipPowerFast = 0.0f, clipPower = 0.0f, clipPowerCoeff = 0.0f;
+    LinearSmoothedValue crestGainS, depthGainS;
 
     // Glue: 3-band split, per-band linked compressor, crossfaded against the input.
     ThreeBandSplitter splitter;

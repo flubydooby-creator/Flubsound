@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <vector>
@@ -685,6 +686,62 @@ TEST_CASE ("LoudnessMaximizer: parameter changes and stage on/off switches are c
     // step on this tone alone reads 14x).
     CHECK_LE (maxD2, 14.0 * baseline);
     CHECK_LE (planarPeak (buf), 1.0);
+}
+
+TEST_CASE ("LoudnessMaximizer: the clip crest gate and depth cap (max.clipCrest / max.clipMaxDb) glide - no step when they move, the new setting once the glide is over (docs/11 E05 step 1)")
+{
+    // A 100 Hz tone clipped hard (crest gate off, 14 dB drive), then the depth
+    // cap and the crest gate jump: 3 -> 12 dB and 0 -> 6 dB and back, every
+    // 200 ms. They used to take effect at once (the cap's gain stepped).
+    const int n = static_cast<int> (kFs * 1.2);
+    const auto x = sine (100.0, kFs, n, 0.35f);
+    const auto run = [&] (bool jumps, float crestDb, float depthDb) {
+        LoudnessMaximizer m;
+        prepareMax (m, kFs, 2, 512);
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        const int block = 128;
+        for (int pos = 0, b = 0; pos < n; pos += block, ++b)
+        {
+            MaximizerParams p = maxParams (14.0f, -1.0f, 1.0f, 0.0f, 0.2f);
+            p.clipCrestDb = crestDb;
+            p.clipMaxDepthDb = depthDb;
+            if (jumps && (b / 75) % 2 == 1) // 200 ms per state
+            {
+                p.clipCrestDb = 6.0f;
+                p.clipMaxDepthDb = 12.0f;
+            }
+            m.setParams (p);
+            m.process (buf.block (pos, std::min (block, n - pos)));
+        }
+        return buf;
+    };
+    const Planar moved = run (true, 0.0f, 3.0f);
+    CHECK (allFinite (moved));
+    // The largest second difference while the settings move, against the
+    // same tone held at either setting (its own bends: the clipper's knee).
+    const auto maxD2 = [] (const Planar& b, int from, int to) {
+        double d = 0.0;
+        const auto& y = b.ch[0];
+        for (int i = std::max (from, 2); i < to; ++i)
+            d = std::max (d, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - 2.0f * y[static_cast<size_t> (i - 1)]
+                                                          + y[static_cast<size_t> (i - 2)])));
+        return d;
+    };
+    const Planar heldA = run (false, 0.0f, 3.0f), heldB = run (false, 6.0f, 12.0f);
+    const double steady = std::max (maxD2 (heldA, 2000, n), maxD2 (heldB, 2000, n));
+    const double moving = maxD2 (moved, 2000, n);
+    std::printf ("    measured second difference moving / held = %.2f\n", moving / steady);
+    CHECK_LE (moving, 1.5 * steady);
+    // The last change (to 6 / 12 dB) is at 1.0 s; 150 ms later the output is
+    // that held setting's: the glide ends exactly on it.
+    const int from = static_cast<int> (kFs * 1.15);
+    double diff = 0.0;
+    for (int i = from; i < n; ++i)
+        diff = std::max (diff, static_cast<double> (std::abs (moved.ch[0][static_cast<size_t> (i)] - heldB.ch[0][static_cast<size_t> (i)])));
+    std::printf ("    measured largest difference to the held setting 150 ms after the change = %.2g\n", diff);
+    CHECK_LE (diff, 1.0e-3);
 }
 
 TEST_CASE ("LoudnessMaximizer: release and ceiling are passed to the limiter")

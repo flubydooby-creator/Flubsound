@@ -40,6 +40,8 @@
 //     maximizer at 24 dB drive per latency profile (closed in every profile
 //     by E05 stage 1); 50 Hz THD+N of all Music
 //     macros at protection strength Off / Normal / Strict
+//   * hot master (-9.2 LUFS, -0.35 dBTP): limiter time > 1 dB and clip energy
+//     of Signature and Punchy Pop with and without the automatic preamp (E11)
 //
 // Every test prints its measured values ("    measured ...") so a tuning
 // session reads the numbers from one run of `flub_tests KnownGap`. The last
@@ -786,9 +788,12 @@ TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer 
     // Competitive FPS. Before the redesign: bed -0.06 / 0.66 / 1.66 / 4.37 dB;
     // contrast change 20 / 40 / 80 ms 0.05 / -0.53 / -1.11, 0.83 / 0.70 /
     // 0.52, 0.82 / 0.75 / 0.70 and -0.89 / -1.66 / -1.67 dB (docs/11 E19
-    // measured +10.9 dB and -6.0 dB on its own stimulus).
-    const double fpsBed[kLevels] = { -1.86, -1.30, -0.94, 0.69 };
-    const double fpsContrast[kLevels][3] = { { 4.39, 4.93, 5.17 }, { 4.49, 5.04, 5.26 }, { 4.58, 5.21, 5.67 }, { 4.55, 4.72, 5.21 } }; // 20 / 40 / 80 ms
+    // measured +10.9 dB and -6.0 dB on its own stimulus). At -50 LUFS the
+    // Detail upward compressor lifted the bed until its floor followed the
+    // background (E19 step 2): bed 0.69 -> -0.93 dB, contrast 4.55 / 4.72 /
+    // 5.21 -> 4.63 / 5.35 / 5.81 dB.
+    const double fpsBed[kLevels] = { -1.86, -1.30, -0.94, -0.93 };
+    const double fpsContrast[kLevels][3] = { { 4.39, 4.93, 5.17 }, { 4.49, 5.04, 5.26 }, { 4.58, 5.21, 5.67 }, { 4.63, 5.35, 5.81 } }; // 20 / 40 / 80 ms
     for (int l = 0; l < kLevels; ++l)
     {
         // docs/11 E19 Done-when: Competitive FPS bed <= +1 dB and step/bed contrast change >= +3 dB.
@@ -910,12 +915,15 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     // Auto Level's own share of the bed lift is at its +6 dB cap.
     CHECK_LE (before - staticLift, AutoLevel::kMaxGainDb + 0.1);
     // KNOWN_GAP: target ambience lift <= +6 dB per docs/11 E21 Done-when. The
-    // rest is the preset's own: 6.72 dB with Auto Level off (compressor
-    // make-up 6 dB, upward compression) - a preset retune. The E19 redesign
-    // took the Footsteps bell's share out of it (11.98 / 6.98 -> 11.13 /
-    // 6.72 dB): the cue enhancer does not lift the bed.
+    // rest is the preset's own: 5.10 dB with Auto Level off (mostly the
+    // compressor make-up, 6 dB) - a preset retune. The E19 redesign took the
+    // Footsteps bell's share out of it (11.98 / 6.98 -> 11.13 / 6.72 dB: the
+    // cue enhancer does not lift the bed), and its step 2 the upward
+    // compressor's (6.72 -> 5.10 dB with Auto Level off: the upward floor
+    // follows the background). With Auto Level on the bed stays at 11.1 dB:
+    // Auto Level makes up the difference, to its +6 dB cap.
     CHECK_NEAR (before, 11.13, 0.3);
-    CHECK_NEAR (staticLift, 6.72, 0.3);
+    CHECK_NEAR (staticLift, 5.10, 0.3);
     // A 10 s event: the upper gate's 5 s release counts only the blocks in
     // which the 100 ms measure also reads above the gate, so whether this
     // intermittent fire becomes a new level depended on the host block (a
@@ -1630,4 +1638,80 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
     CHECK_NEAR (thd[1][1], -14.05, 0.3);
     CHECK_NEAR (thd[1][2], -20.63, 0.3);
     CHECK_LE (governed[1][1], governed[1][0] - 3.0);
+}
+
+TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; Signature and Punchy Pop still limit > 1 dB more than 2 % of the time (E11)")
+{
+    // A hot master: -20 dBFS-RMS pink noise with 55 Hz kicks (-6 dBFS peak)
+    // every 500 ms, through the maximizer alone at 10 dB drive, full clipper
+    // share and a -0.3 dBTP ceiling: about -9.5 LUFS, -0.35 dBTP.
+    const auto kicks = tonesUnderKicks (4.0, 1000.0, 0.0f, 0.5f);
+    const auto noiseL = pinkNoise (samplesOf (4.0), 0.1f, 311), noiseR = pinkNoise (samplesOf (4.0), 0.1f, 312);
+    Channels raw (2, kicks);
+    for (size_t i = 0; i < kicks.size(); ++i)
+    {
+        raw[0][i] += noiseL[i];
+        raw[1][i] += noiseR[i];
+    }
+    auto mastering = resolve (RenderOptions {});
+    onlyModules (mastering, { MaximizerOn });
+    setValue (mastering, MaxDriveDb, 10.0f);
+    setValue (mastering, MaxCeilingDb, -0.3f);
+    setValue (mastering, MaxClipAmount, 1.0f);
+    const auto hot = fileOf (render (fileOf (raw), mastering));
+    const auto master = analyse (hot.channels, kFs);
+    measured ("hot master integrated loudness", master.integratedLufs, "LUFS");
+    measured ("hot master true peak", master.truePeakDbtp, "dBTP");
+
+    struct Row
+    {
+        const char* file;
+        double over1Off, over1On, clipOff, clipOn; // pinned: limiter time > 1 dB (%), loudest clip energy (dB)
+    };
+    // Measured when auto.preamp landed (docs/11 E11).
+    const Row rows[] = {
+        { "music-flubsound-signature.json", 17.87, 7.47, -44.37, -53.05 },
+        { "music-punchy-pop.json", 49.33, 6.93, -36.47, -48.75 },
+    };
+    for (const auto& row : rows)
+    {
+        auto values = resolve (factoryPreset (row.file));
+        RenderResult off, on;
+        std::string error;
+        REQUIRE (renderFile (hot, values, RenderSettings {}, off, error));
+        setValue (values, AutoPreampOn, 1.0f);
+        REQUIRE (renderFile (hot, values, RenderSettings {}, on, error));
+        const std::string name = std::string (row.file).substr (6, std::string (row.file).size() - 11);
+        {
+            // The prediction and the preamp behind the "on" render.
+            ParameterStore store;
+            for (int id = 0; id < kNumParams; ++id)
+                store.set (id, values[static_cast<size_t> (id)]);
+            ProcessingChain chain (store);
+            chain.prepare ({ kFs, 64, 2 });
+            std::vector<float> l (64), r (64);
+            float* ch[2] = { l.data(), r.data() };
+            chain.process (AudioBlock (ch, 2, 64));
+            measured (name + " predicted static boost", chain.getPredictedBoostDb(), "dB");
+            measured (name + " automatic preamp", chain.getAutoPreampDb(), "dB");
+        }
+        measured (name + " limiter > 1 dB, preamp off", off.stats.limiterOver1DbPercent, "%");
+        measured (name + " limiter > 1 dB, preamp on", on.stats.limiterOver1DbPercent, "%");
+        measured (name + " limiter mean GR, preamp off", off.stats.limiterGrMeanDb, "dB");
+        measured (name + " limiter mean GR, preamp on", on.stats.limiterGrMeanDb, "dB");
+        measured (name + " clip energy max, preamp off", off.stats.clipEnergyMaxDb, "dB");
+        measured (name + " clip energy max, preamp on", on.stats.clipEnergyMaxDb, "dB");
+        measured (name + " integrated loudness, preamp off", off.outputReport.integratedLufs, "LUFS");
+        measured (name + " integrated loudness, preamp on", on.outputReport.integratedLufs, "LUFS");
+        CHECK_NEAR (off.stats.limiterOver1DbPercent, row.over1Off, 0.5);
+        CHECK_NEAR (on.stats.limiterOver1DbPercent, row.over1On, 0.5);
+        CHECK_NEAR (off.stats.clipEnergyMaxDb, row.clipOff, 0.5);
+        CHECK_NEAR (on.stats.clipEnergyMaxDb, row.clipOn, 0.5);
+        CHECK_LE (on.stats.limiterOver1DbPercent, off.stats.limiterOver1DbPercent);
+        CHECK_LE (on.stats.clipEnergyMaxDb, off.stats.clipEnergyMaxDb);
+        // KNOWN_GAP: target limiter active (> 1 dB) <= 2 % on a hot master for
+        // Signature and Punchy Pop per docs/11 E11 Done-when. The rest is
+        // their maximizer drive (Boost), which is loudness on purpose, and
+        // the 1 dB allowance.
+    }
 }

@@ -49,7 +49,9 @@
 #include "CliOptions.h"
 #include "OfflineRenderer.h"
 
+#include "flub/analysis/LoudnessMeter.h"
 #include "flub/common/Math.h"
+#include "flub/dsp/Biquad.h"
 #include "flub/engine/Parameters.h"
 #include "flub/io/PresetIO.h"
 #include "flub/io/WavFile.h"
@@ -422,6 +424,408 @@ void print (const std::string& what, const SceneResult& r)
 constexpr double kLevels[3] = { -14.0, -24.0, -40.0 };
 
 std::string levelName (int l) { return std::to_string (static_cast<int> (kLevels[l])) + " LUFS"; }
+
+// ---- stage 1 remainder: dialogue over effects, speech -> music -> silence,
+// ---- and a quiet -> loud track change (docs/11 E60) --------------------------
+double uniform (FastRandom& rng, double lo, double hi) { return lo + (hi - lo) * 0.5 * (static_cast<double> (rng.nextBipolar()) + 1.0); }
+
+/** Two-pole resonator (unity gain at its centre, roughly), run in double. */
+struct Resonator
+{
+    double a1 = 0.0, a2 = 0.0, g = 0.0, y1 = 0.0, y2 = 0.0;
+    void set (double hz, double bandwidthHz)
+    {
+        const double r = std::exp (-kPi * bandwidthHz / kFs);
+        a1 = 2.0 * r * std::cos (kTwoPi * hz / kFs);
+        a2 = -r * r;
+        g = 1.0 - r;
+    }
+    double process (double x)
+    {
+        const double y = g * x + a1 * y1 + a2 * y2;
+        y2 = y1;
+        y1 = y;
+        return y;
+    }
+};
+
+/** A speech-like mono signal in [from, to): phrases of 4-7 syllables (an
+    impulse train at 100-170 Hz through three vowel formants; every fourth
+    syllable a 4.5 kHz fricative), 30-70 ms between syllables and 0.4-0.6 s
+    between phrases. `syllables` / `pauses` are measurement windows: the
+    syllables' middles, and the phrase pauses less 50 ms at each end. */
+struct Speech
+{
+    std::vector<float> x;
+    std::vector<Window> syllables, pauses;
+};
+
+Speech makeSpeech (int n, double from, double to, uint32_t seed)
+{
+    static const double vowels[5][2] = { { 730, 1090 }, { 270, 2290 }, { 300, 870 }, { 530, 1840 }, { 570, 840 } };
+    Speech s;
+    s.x.assign (static_cast<size_t> (n), 0.0f);
+    FastRandom rng (seed);
+    const auto hiss = bandPass (whiteNoise (n, 1.0f, seed + 1), 4500.0, 1.5);
+    double t = from;
+    int k = 0;
+    while (t < to - 0.8)
+    {
+        const int syllables = 4 + static_cast<int> (rng.nextU32() % 4u);
+        const double f0 = uniform (rng, 100.0, 170.0);
+        for (int j = 0; j < syllables && t < to - 0.3; ++j, ++k)
+        {
+            const double dur = uniform (rng, 0.12, 0.24);
+            const int onset = samplesOf (t), len = samplesOf (dur);
+            const int edge = samplesOf (0.02);
+            const auto envelope = [&] (int i) {
+                const double a = i < edge ? 0.5 - 0.5 * std::cos (kPi * i / edge) : 1.0;
+                const double b = len - i < edge ? 0.5 - 0.5 * std::cos (kPi * (len - i) / edge) : 1.0;
+                return a * b;
+            };
+            if (k % 4 == 3)
+            {
+                for (int i = 0; i < len; ++i)
+                    s.x[static_cast<size_t> (onset + i)] += static_cast<float> (0.25 * envelope (i) * hiss[static_cast<size_t> (onset + i)]);
+            }
+            else
+            {
+                const auto& v = vowels[rng.nextU32() % 5u];
+                Resonator r1, r2, r3;
+                r1.set (v[0], 90.0);
+                r2.set (v[1], 110.0);
+                r3.set (2500.0, 150.0);
+                double phase = 1.0;
+                const double pitch = f0 * uniform (rng, 0.9, 1.1);
+                for (int i = 0; i < len; ++i)
+                {
+                    phase += (pitch * (1.0 - 0.1 * i / len)) / kFs; // a slight fall over the syllable
+                    const double pulse = phase >= 1.0 ? 1.0 : 0.0;
+                    if (phase >= 1.0)
+                        phase -= 1.0;
+                    const double y = r1.process (pulse) + 0.6 * r2.process (pulse) + 0.25 * r3.process (pulse);
+                    s.x[static_cast<size_t> (onset + i)] += static_cast<float> (envelope (i) * y);
+                }
+            }
+            s.syllables.push_back ({ onset + samplesOf (0.02), onset + len - samplesOf (0.02) });
+            t += dur + uniform (rng, 0.03, 0.07);
+        }
+        const double pause = uniform (rng, 0.4, 0.6);
+        if (t + pause < to)
+            s.pauses.push_back ({ samplesOf (t + 0.05), samplesOf (t + pause - 0.05) });
+        t += pause;
+    }
+    return s;
+}
+
+/** A stereo music-like signal: kick on every beat, snare on 2 and 4, hats on
+    the eighths, a bass note and a three-note pad (four harmonics each,
+    detuned between the channels) per bar. */
+Channels makeMusic (int n, double bpm, uint32_t seed)
+{
+    Channels m (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    const auto noise = whiteNoise (n, 1.0f, seed);
+    const auto snareNoise = highPass (noise, 1000.0), hatNoise = highPass (highPass (noise, 7000.0), 7000.0);
+    const double beat = 60.0 / bpm;
+    static const double roots[4] = { 55.0, 43.65, 65.41, 49.0 };   // A1 F1 C2 G1
+    static const double chords[4][3] = { { 220.0, 261.63, 329.63 }, { 174.61, 220.0, 261.63 }, { 261.63, 329.63, 392.0 }, { 196.0, 246.94, 293.66 } };
+    for (int b = 0; b * beat < n / kFs; ++b)
+    {
+        const int onset = samplesOf (b * beat), bar = (b / 4) % 4;
+        const int len = std::min (samplesOf (beat), n - onset);
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / kFs, tb = (b * beat) + t;
+            double mono = 0.9 * std::exp (-t / 0.12) * std::sin (kTwoPi * (45.0 * t + 10.0 * 0.03 * (1.0 - std::exp (-t / 0.03))));
+            if (b % 2 == 1)
+                mono += 0.45 * std::exp (-t / 0.08) * snareNoise[static_cast<size_t> (onset + i)];
+            const double bass = 0.35 * std::exp (-t / 0.3) * (std::sin (kTwoPi * roots[bar] * tb) + 0.3 * std::sin (kTwoPi * 2.0 * roots[bar] * tb));
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                double pad = 0.0;
+                for (double f : chords[bar])
+                    for (int h = 1; h <= 4; ++h)
+                        pad += std::sin (kTwoPi * f * h * (ch == 0 ? 0.997 : 1.003) * tb) / h;
+                const double hatGain = (i < samplesOf (beat / 2) ? 1.0 : 0.7) * (ch == 0 ? 0.8 : 1.2);
+                const int half = i % samplesOf (beat / 2);
+                const double hat = 0.12 * hatGain * std::exp (-half / (0.02 * kFs)) * hatNoise[static_cast<size_t> (onset + i)];
+                m[static_cast<size_t> (ch)][static_cast<size_t> (onset + i)] += static_cast<float> (mono + bass + 0.05 * pad + hat);
+            }
+        }
+    }
+    return m;
+}
+
+double integratedOf (const Channels& c) { return analyse (c, kFs).integratedLufs; }
+
+/** The signal through the BS.1770 K-weighting: the new scenes' level metrics
+    are loudness-weighted, so a preset's low-shelf or high-pass does not read
+    as turning music (kick and bass) down against speech. */
+Channels kWeighted (const Channels& c)
+{
+    Biquad s1, s2;
+    s1.setCoeffs (LoudnessMeter::kWeightingStage1 (kFs));
+    s2.setCoeffs (LoudnessMeter::kWeightingStage2 (kFs));
+    Channels k (c.size());
+    for (size_t ch = 0; ch < c.size(); ++ch)
+    {
+        k[ch].resize (c[ch].size());
+        for (size_t i = 0; i < c[ch].size(); ++i)
+            k[ch][i] = static_cast<float> (s2.processSample (static_cast<int> (ch), s1.processSample (static_cast<int> (ch), c[ch][i])));
+    }
+    return k;
+}
+
+void scaleTo (Channels& c, double lufs)
+{
+    const double g = std::pow (10.0, (lufs - integratedOf (c)) / 20.0);
+    for (auto& ch : c)
+        for (auto& v : ch)
+            v = static_cast<float> (v * g);
+}
+
+/** Turns the whole programme down where it would pass -1 dBFS; returns the
+    change in dB (<= 0). */
+double keepUnderFullScale (Channels& c)
+{
+    double peak = 0.0;
+    for (const auto& ch : c)
+        peak = std::max (peak, peakAbs (ch.data(), static_cast<int> (ch.size())));
+    const double limit = std::pow (10.0, -1.0 / 20.0);
+    if (peak <= limit)
+        return 0.0;
+    const double g = limit / peak;
+    for (auto& ch : c)
+        for (auto& v : ch)
+            v = static_cast<float> (v * g);
+    return 20.0 * std::log10 (g);
+}
+
+io::AudioFileData fileOf (Channels c)
+{
+    io::AudioFileData f;
+    f.sampleRate = kFs;
+    f.numChannels = 2;
+    f.channels = std::move (c);
+    return f;
+}
+
+double gainDb (const Channels& out, const Channels& in, const std::vector<Window>& w) { return powerDb (meanPower (out, w)) - powerDb (meanPower (in, w)); }
+
+Window span (double from, double to) { return { samplesOf (from), samplesOf (to) }; }
+
+// Dialogue over effects: 6 s of a stationary effects bed (the pink ambience
+// of the core scenes plus a 120 Hz engine rumble 3 dB under it) with centred
+// dialogue from 0.8 s at the same loudness as the effects (0 LU).
+struct DialogueScene
+{
+    io::AudioFileData input;
+    Channels dialogue; // the dialogue alone, as mixed into the input
+    Speech speech;
+    double fullScaleDb = 0.0;
+};
+
+DialogueScene makeDialogueScene (double lufs)
+{
+    const int n = samplesOf (6.0);
+    DialogueScene s;
+    const auto bedA = highPass (pinkNoise (n, 0.05f, 1357), 40.0), bedB = highPass (pinkNoise (n, 0.05f, 2468), 40.0);
+    auto rumble = lowPass (lowPass (whiteNoise (n, 1.0f, 97531), 120.0), 120.0);
+    const double rumbleGain = 0.05 * std::pow (10.0, -3.0 / 20.0) / rms (rumble.data(), n);
+    Channels fx (2, std::vector<float> (static_cast<size_t> (n)));
+    for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+    {
+        const double r = rumbleGain * rumble[i];
+        fx[0][i] = static_cast<float> (bedA[i] + r);
+        fx[1][i] = static_cast<float> (0.7 * bedA[i] + 0.71414284 * bedB[i] + r);
+    }
+    s.speech = makeSpeech (n, 0.8, 6.0, 777);
+    Channels voice { s.speech.x, s.speech.x };
+    scaleTo (voice, integratedOf (fx));
+    Channels c (2, std::vector<float> (static_cast<size_t> (n)));
+    for (size_t ch = 0; ch < 2; ++ch)
+        for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+            c[ch][i] = fx[ch][i] + voice[ch][i];
+    const double g = std::pow (10.0, (lufs - integratedOf (c)) / 20.0);
+    for (size_t ch = 0; ch < 2; ++ch)
+        for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+        {
+            c[ch][i] = static_cast<float> (c[ch][i] * g);
+            voice[ch][i] = static_cast<float> (voice[ch][i] * g);
+        }
+    s.fullScaleDb = keepUnderFullScale (c);
+    const double k = std::pow (10.0, s.fullScaleDb / 20.0);
+    for (auto& ch : voice)
+        for (auto& v : ch)
+            v = static_cast<float> (v * k);
+    s.dialogue = std::move (voice);
+    s.input = fileOf (std::move (c));
+    return s;
+}
+
+struct DialogueResult
+{
+    double snrGainDb = 0, dialogueLiftDb = 0, effectsLiftDb = 0;
+};
+
+/** Measured from 1.2 s (every tracker settled on the effects):
+      dialogue SNR gain  dialogue-only power over effects power in the
+                         speech band (2 kHz, Q 0.7: about 1-4 kHz), out minus
+                         in; the dialogue-only power is the syllables minus
+                         the pauses (the effects are stationary);
+      dialogue lift      the same dialogue-only power, K-weighted, out vs in;
+      effects lift       K-weighted power in the pauses, out vs in. */
+DialogueResult measureDialogue (const DialogueScene& s, const Channels& out)
+{
+    const auto& in = s.input.channels;
+    std::vector<Window> syl, pau;
+    for (const auto& w : s.speech.syllables)
+        if (w.first >= samplesOf (1.2))
+            syl.push_back (w);
+    for (const auto& w : s.speech.pauses)
+        if (w.first >= samplesOf (1.2))
+            pau.push_back (w);
+    const auto band = [] (const Channels& c) { return Channels { bandPass (c[0], 2000.0, 0.7), bandPass (c[1], 2000.0, 0.7) }; };
+    const auto inB = band (in), outB = band (out);
+    const double inDlg = meanPower (inB, syl) - meanPower (inB, pau), outDlg = meanPower (outB, syl) - meanPower (outB, pau);
+    DialogueResult r;
+    r.snrGainDb = (powerDb (outDlg) - powerDb (meanPower (outB, pau))) - (powerDb (inDlg) - powerDb (meanPower (inB, pau)));
+    const auto inK = kWeighted (in), outK = kWeighted (out);
+    r.dialogueLiftDb = powerDb (meanPower (outK, syl) - meanPower (outK, pau)) - powerDb (meanPower (inK, syl) - meanPower (inK, pau));
+    r.effectsLiftDb = gainDb (outK, inK, pau);
+    return r;
+}
+
+// Speech -> music -> silence: speech 0 - 5 s, music 5 - 8 s (each at the
+// programme level on its own), 1.5 s of silence (only the -80 dBFS hiss that
+// runs under the whole programme), speech again 9.5 - 11 s. The first speech
+// is long enough for Auto Level (3 dB/s, +6 dB cap) to settle on it.
+constexpr double kMusicFrom = 5.0, kSilenceFrom = 8.0, kSpeechAgain = 9.5, kSmsLength = 11.0;
+
+struct SmsScene
+{
+    io::AudioFileData input;
+    double fullScaleDb = 0.0;
+};
+
+SmsScene makeSpeechMusicSilence (double lufs)
+{
+    const int n = samplesOf (kSmsLength);
+    const auto speech1 = makeSpeech (samplesOf (kMusicFrom), 0.1, kMusicFrom, 4711).x;
+    const auto speech2 = makeSpeech (samplesOf (kSmsLength - kSpeechAgain), 0.0, kSmsLength - kSpeechAgain, 4712).x;
+    Channels sp1 { speech1, speech1 }, sp2 { speech2, speech2 };
+    auto music = makeMusic (samplesOf (kSilenceFrom - kMusicFrom), 120.0, 99);
+    scaleTo (sp1, lufs);
+    scaleTo (sp2, lufs);
+    scaleTo (music, lufs);
+    Channels c (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    const auto place = [&] (const Channels& part, double at) {
+        for (size_t ch = 0; ch < 2; ++ch)
+            std::copy (part[ch].begin(), part[ch].end(), c[ch].begin() + samplesOf (at));
+    };
+    place (sp1, 0.0);
+    place (music, kMusicFrom);
+    place (sp2, kSpeechAgain);
+    SmsScene s;
+    s.fullScaleDb = keepUnderFullScale (c);
+    const float hiss = static_cast<float> (std::pow (10.0, -80.0 / 20.0) * std::sqrt (3.0));
+    const auto h0 = whiteNoise (n, hiss, 31), h1 = whiteNoise (n, hiss, 32);
+    for (size_t i = 0; i < static_cast<size_t> (n); ++i)
+    {
+        c[0][i] += h0[i];
+        c[1][i] += h1[i];
+    }
+    s.input = fileOf (std::move (c));
+    return s;
+}
+
+struct SmsResult
+{
+    double balanceChangeDb = 0, musicOnsetJumpDb = 0, silenceLiftDb = 0, silenceOutDbfs = 0, speechReturnDb = 0;
+};
+
+/** All K-weighted gains, out vs in:
+    balance change   music gain (the last 2 s of it) minus speech gain (the
+                     2 s before the music): how far the chain moves music
+                     against speech;
+    music onset jump gain over the music's first 300 ms minus its last 2 s;
+    silence lift     gain on the hiss 0.3 - 1.4 s into the silence minus the
+                     speech gain: whether the noise floor comes up against
+                     the programme (and the hiss's output level, dBFS);
+    speech return    gain over the returning speech minus the speech before. */
+SmsResult measureSms (const SmsScene& s, const Channels& outRaw)
+{
+    const auto in = kWeighted (s.input.channels), out = kWeighted (outRaw);
+    SmsResult r;
+    const double speechGain = gainDb (out, in, { span (kMusicFrom - 2.0, kMusicFrom) });
+    const double musicGain = gainDb (out, in, { span (kSilenceFrom - 2.0, kSilenceFrom) });
+    r.balanceChangeDb = musicGain - speechGain;
+    r.musicOnsetJumpDb = gainDb (out, in, { span (kMusicFrom, kMusicFrom + 0.3) }) - musicGain;
+    r.silenceLiftDb = gainDb (out, in, { span (kSilenceFrom + 0.3, kSpeechAgain - 0.1) }) - speechGain;
+    r.silenceOutDbfs = powerDb (meanPower (outRaw, { span (kSilenceFrom + 0.3, kSpeechAgain - 0.1) }));
+    r.speechReturnDb = gainDb (out, in, { span (kSpeechAgain, kSmsLength) }) - speechGain;
+    return r;
+}
+
+// Track change: a quiet track (100 BPM, 15 LU under the programme level)
+// for 3.5 s, then a loud one (128 BPM, at the programme level) to 9.5 s.
+constexpr double kTrackChange = 3.5, kTrackLength = 9.5, kTrackSteady = 6.5;
+
+struct TrackScene
+{
+    io::AudioFileData input;
+    double fullScaleDb = 0.0;
+};
+
+TrackScene makeTrackChange (double lufs)
+{
+    auto quiet = makeMusic (samplesOf (kTrackChange), 100.0, 5);
+    auto loud = makeMusic (samplesOf (kTrackLength - kTrackChange), 128.0, 6);
+    scaleTo (quiet, lufs - 15.0);
+    scaleTo (loud, lufs);
+    Channels c (2);
+    for (size_t ch = 0; ch < 2; ++ch)
+    {
+        c[ch] = quiet[ch];
+        c[ch].insert (c[ch].end(), loud[ch].begin(), loud[ch].end());
+    }
+    TrackScene s;
+    s.fullScaleDb = keepUnderFullScale (c);
+    s.input = fileOf (std::move (c));
+    return s;
+}
+
+struct TrackResult
+{
+    double stepChangeDb = 0, overshootDb = 0, settleS = 0, peakDbfs = 0;
+};
+
+/** K-weighted gains, out vs in:
+    step change  gain on the loud track (its last 3 s) minus on the quiet
+                 one (1.5 - 3.5 s): how far the chain narrows (< 0) the step;
+    overshoot    gain over the loud track's first 500 ms minus its last 3 s;
+    settle       seconds after the change until the gain over two-beat
+                 windows (one beat apart) stays within 1 dB of the last 3 s,
+                 read over the 3 s after the change (3 s: not settled);
+    peak         the output's sample peak over the loud track's first second. */
+TrackResult measureTrack (const TrackScene& s, const Channels& outRaw)
+{
+    const auto in = kWeighted (s.input.channels), out = kWeighted (outRaw);
+    TrackResult r;
+    const double steady = gainDb (out, in, { span (kTrackSteady, kTrackLength) });
+    r.stepChangeDb = steady - gainDb (out, in, { span (1.5, kTrackChange) });
+    r.overshootDb = gainDb (out, in, { span (kTrackChange, kTrackChange + 0.5) }) - steady;
+    const double beat = 60.0 / 128.0;
+    for (double t = kTrackChange; t + 2.0 * beat <= kTrackSteady; t += beat)
+        if (std::abs (gainDb (out, in, { span (t, t + 2.0 * beat) }) - steady) > 1.0)
+            r.settleS = t + 2.0 * beat - kTrackChange;
+    double peak = 0.0;
+    for (const auto& ch : outRaw)
+        for (int i = samplesOf (kTrackChange); i < samplesOf (kTrackChange + 1.0); ++i)
+            peak = std::max (peak, static_cast<double> (std::abs (ch[static_cast<size_t> (i)])));
+    r.peakDbfs = toDb (peak);
+    return r;
+}
 } // namespace
 
 // =============================================================================
@@ -613,4 +1017,176 @@ TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 s
     // across -14 / -24 / -40 LUFS (docs/11 E19 Done-when).
     for (int l = 1; l < 3; ++l)
         CHECK_NEAR (pinned[0].v[l][0], pinned[0].v[0][0], 1.0);
+}
+
+TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background (docs/11 E19 step 2)")
+{
+    // The core scene at -60 LUFS (docs/11 E19's quiet material): Horror
+    // Detail (Detail 0.6) and Competitive FPS, as shipped and with the upward
+    // section off (upward threshold -80 dB). Before the floor followed the
+    // background (fixed -75 dBFS): bed lift 7.73 / 2.50 dB against 2.62 /
+    // 0.77 dB without the upward section, contrast 3.49 / 5.20 dB; at
+    // -50 LUFS 4.73 / 2.27 dB against 2.75 / 0.86 dB, contrast 2.33 / 4.40 dB
+    // (FPS 5.25 without it). At -14 / -24 / -40 LUFS the upward section is
+    // idle on this scene (its threshold is under the bed), so the matrix
+    // above does not move.
+    const auto scene = makeScene (-60.0);
+    struct Case
+    {
+        const char* file;
+        double bedDb, contrastDb;
+    } cases[] = { { "gaming-horror-detail.json", 2.62, 3.60 }, { "gaming-competitive-fps.json", 0.77, 5.28 } };
+    for (const auto& c : cases)
+    {
+        const auto shipped = resolve (factoryPreset (c.file));
+        auto noUp = shipped;
+        setValue (noUp, CompUpThresholdDb, -80.0f);
+        const auto a = measureScene (scene, render (scene.input, shipped));
+        const auto b = measureScene (scene, render (scene.input, noUp));
+        measured (std::string (c.file) + " at -60 LUFS: bed lift", a.bedLiftDb, "dB");
+        measured (std::string (c.file) + " at -60 LUFS: bed lift, upward section off", b.bedLiftDb, "dB");
+        measured (std::string (c.file) + " at -60 LUFS: contrast change", a.contrastChangeDb, "dB");
+        measured (std::string (c.file) + " at -60 LUFS: hole 1-2 s after", a.holeDb, "dB");
+        CHECK_NEAR (a.bedLiftDb, b.bedLiftDb, 0.1); // the upward section adds nothing to the bed
+        CHECK_GE (a.contrastChangeDb, b.contrastChangeDb - 0.1);
+        CHECK_NEAR (a.bedLiftDb, c.bedDb, 0.3);
+        CHECK_NEAR (a.contrastChangeDb, c.contrastDb, 0.3);
+        CHECK_LE (std::abs (a.holeDb), 0.3);
+    }
+}
+
+// =============================================================================
+// docs/11 E60 stage 1 remainder: dialogue over effects, speech -> music ->
+// silence, a quiet -> loud track change. Each pins its presets' values at
+// -14 / -24 / -40 LUFS (0.3 dB, 0.5 s for times) and checks the expectation
+// its scene is for; where a preset still fails it, the value is pinned and a
+// KNOWN_GAP comment names the target.
+namespace
+{
+std::vector<float> presetValues (const char* file)
+{
+    if (file == nullptr)
+    {
+        auto v = resolve (RenderOptions {});
+        setValue (v, BypassAll, 1.0f);
+        return v;
+    }
+    return resolve (factoryPreset (file));
+}
+} // namespace
+
+TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effects lift at -14 / -24 / -40 LUFS (E60; KnownGap: Voice & Score presets lower the dialogue-to-effects ratio)")
+{
+    // Metric validation, no render: the input with its dialogue doubled
+    // reads +6.02 dB of dialogue SNR gain and dialogue lift and no effects
+    // lift; bypass reads 0 (below).
+    {
+        const auto s = makeDialogueScene (-24.0);
+        auto louder = s.input.channels;
+        for (size_t ch = 0; ch < 2; ++ch)
+            for (size_t i = 0; i < louder[ch].size(); ++i)
+                louder[ch][i] += s.dialogue[ch][i];
+        const auto r = measureDialogue (s, louder);
+        measured ("dialogue doubled: dialogue SNR gain", r.snrGainDb, "dB");
+        CHECK_NEAR (r.snrGainDb, 6.02, 0.1);
+        CHECK_NEAR (r.dialogueLiftDb, 6.02, 0.1);
+        CHECK_NEAR (r.effectsLiftDb, 0.0, 0.01);
+    }
+
+    //                     dialogue SNR gain, dialogue lift, effects lift
+    struct Pinned
+    {
+        const char* file; // nullptr: bypass
+        double v[3][3];
+    };
+    static const Pinned pinned[] = {
+        { nullptr, { { 0.00, 0.00, 0.00 }, { 0.00, 0.00, 0.00 }, { 0.00, 0.00, 0.00 } } },
+        { "gaming-competitive-fps.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
+        { "gaming-moba-strategy.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
+        { "gaming-cinematic-adventure.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
+        { "gaming-night-mode.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
+    };
+    for (int l = 0; l < 3; ++l)
+    {
+        const auto scene = makeDialogueScene (kLevels[l]);
+        measured ("dialogue scene turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+        for (const auto& p : pinned)
+        {
+            const auto r = measureDialogue (scene, render (scene.input, presetValues (p.file)));
+            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+            measured (what + ": dialogue SNR gain", r.snrGainDb, "dB");
+            measured (what + ": dialogue lift", r.dialogueLiftDb, "dB");
+            measured (what + ": effects lift", r.effectsLiftDb, "dB");
+            const double got[3] = { r.snrGainDb, r.dialogueLiftDb, r.effectsLiftDb };
+            for (int m = 0; m < 3; ++m)
+                CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+        }
+    }
+}
+
+TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -14 / -24 / -40 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
+{
+    //                     balance change, music onset jump, silence lift, silence out (dBFS), speech return
+    struct Pinned
+    {
+        const char* file; // nullptr: bypass
+        double v[3][5];
+    };
+    static const Pinned pinned[] = {
+        { nullptr, { { 0.00, 0.00, 0.00, -80.00, 0.00 }, { 0.00, 0.00, 0.00, -80.00, 0.00 }, { 0.00, 0.00, 0.00, -80.00, 0.00 } } },
+        { "gaming-night-mode.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
+        { "music-late-night-low-volume.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
+        { "gaming-cinematic-adventure.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
+    };
+    for (int l = 0; l < 3; ++l)
+    {
+        const auto scene = makeSpeechMusicSilence (kLevels[l]);
+        measured ("speech -> music -> silence turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+        for (const auto& p : pinned)
+        {
+            const auto r = measureSms (scene, render (scene.input, presetValues (p.file)));
+            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+            measured (what + ": music vs speech balance change", r.balanceChangeDb, "dB");
+            measured (what + ": music onset jump", r.musicOnsetJumpDb, "dB");
+            measured (what + ": silence lift re speech", r.silenceLiftDb, "dB");
+            measured (what + ": silence output", r.silenceOutDbfs, "dBFS");
+            measured (what + ": speech return", r.speechReturnDb, "dB");
+            const double got[5] = { r.balanceChangeDb, r.musicOnsetJumpDb, r.silenceLiftDb, r.silenceOutDbfs, r.speechReturnDb };
+            for (int m = 0; m < 5; ++m)
+                CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+        }
+    }
+}
+
+TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -14 / -24 / -40 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
+{
+    //                     step change, overshoot, settle (s), peak (dBFS)
+    struct Pinned
+    {
+        const char* file; // nullptr: bypass
+        double v[3][4];
+    };
+    static const Pinned pinned[] = {
+        { nullptr, { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
+        { "gaming-night-mode.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
+        { "music-late-night-low-volume.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
+        { "gaming-racing.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
+    };
+    for (int l = 0; l < 3; ++l)
+    {
+        const auto scene = makeTrackChange (kLevels[l]);
+        measured ("track change turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+        for (const auto& p : pinned)
+        {
+            const auto r = measureTrack (scene, render (scene.input, presetValues (p.file)));
+            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+            measured (what + ": step change", r.stepChangeDb, "dB");
+            measured (what + ": overshoot", r.overshootDb, "dB");
+            measured (what + ": settle", r.settleS, "s");
+            measured (what + ": peak", r.peakDbfs, "dBFS");
+            const double got[4] = { r.stepChangeDb, r.overshootDb, r.settleS, r.peakDbfs };
+            for (int m = 0; m < 4; ++m)
+                CHECK_NEAR (got[m], p.v[l][m], m == 2 ? 0.5 : p.file == nullptr ? 0.1 : 0.3);
+        }
+    }
 }
