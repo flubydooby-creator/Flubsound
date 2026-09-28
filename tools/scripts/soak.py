@@ -22,9 +22,10 @@ The matrix (--only picks rows whose name contains the text):
   fuzz          every non-structural parameter to a random value, 100 ms apart
 
 Each row has its own seed (--seed adds to it), so a run is reproducible.
-A detection whose last action is in --known (default "bypass -> on", the
-open E53 finding: the dry path's true-peak limiter starts cold when the
-global bypass engages) is reported as known and does not fail the run.
+A detection whose last action is in --known (repeatable; none by default:
+the one known finding so far, a click 1.4 ms after "bypass -> on" from the
+dry path's cold true-peak limiter, is fixed) is reported as known and does
+not fail the run.
 Detections made while the global bypass was engaged (the output is the
 bypass reference, not the processing) are counted per row: in the fuzz row
 the reference's true-peak limiter clicks when a large input.gain drives it
@@ -85,10 +86,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0, help="added to every row's seed")
     ap.add_argument("--only", default="", help="rows whose name contains this")
     ap.add_argument("--known", action="append", default=None,
-                    help='last actions whose detections are known findings (default: "bypass -> on"); repeatable')
+                    help='last actions whose detections are known findings, e.g. "bypass -> on" (default: none); repeatable')
     ap.add_argument("--json", default="", help="write the full reports here")
     args = ap.parse_args()
-    known = set(args.known if args.known is not None else ["bypass -> on"])
+    known = set(args.known or [])
 
     rows = [r for r in MATRIX if args.only in r[0]]
     if not rows:

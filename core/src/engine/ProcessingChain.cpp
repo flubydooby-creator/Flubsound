@@ -483,6 +483,7 @@ void ProcessingChain::resetSignalState() noexcept
     dryDelay.reset();
     dryLimiter.reset();
     dryLimiterRunning = false;
+    dryWarmup = 0;
     distortion.reset();
     governor.restartTickGrid(); // the maximizer's window grid restarts with its slot
     inLevel.reset();
@@ -1257,14 +1258,16 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     {
         // The match only ever turns the reference down, but the input itself
         // can peak above the ceiling: the reference therefore passes a
-        // true-peak limiter at the ceiling. It
-        // runs only while bypass is engaged; started cold, it outputs silence
-        // for its latency (<= ~1.4 ms) at the very start of the 30 ms
-        // crossfade, where the dry weight is still below 5 %.
+        // true-peak limiter at the ceiling. It runs only while bypass is
+        // engaged; started cold, it outputs silence for its latency
+        // (<= ~1.4 ms), so the crossfade waits that long before it moves
+        // (the dry side would otherwise enter it as a step: docs/11 E53's
+        // soak found a click there).
         if (! dryLimiterRunning)
         {
             dryLimiter.reset();
             dryLimiterRunning = true;
+            dryWarmup = bypassMix.getCurrent() > 0.0f ? 0 : dryLimiter.latencySamples();
         }
         for (int i = 0; i < n; ++i)
         {
@@ -1275,7 +1278,11 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         dryLimiter.process (dry);
         for (int i = 0; i < n; ++i)
         {
-            const float b = bypassMix.next();
+            float b = bypassMix.getCurrent();
+            if (dryWarmup > 0)
+                --dryWarmup;
+            else
+                b = bypassMix.next();
             for (int c = 0; c < 2; ++c)
             {
                 float* w = st.channel (c);
@@ -1286,6 +1293,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     else
     {
         dryLimiterRunning = false;
+        dryWarmup = 0;
         dryMatchGain.skip (n);
     }
 

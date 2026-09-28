@@ -341,7 +341,7 @@ TEST_CASE ("Soak: the programme is deterministic, stays under full scale, and re
     CHECK (d.total() == 0);
 }
 
-TEST_CASE ("Soak: 10 s of the chain under user automation (E53 CI soak): no dropout, NaN or DC step; the only clicks are the known bypass-engage click")
+TEST_CASE ("Soak: 10 s of the chain under user automation (E53 CI soak): no click, dropout, NaN or DC step")
 {
     SoakSettings s;
     s.seconds = 10.0;
@@ -359,19 +359,11 @@ TEST_CASE ("Soak: 10 s of the chain under user automation (E53 CI soak): no drop
     CHECK (r.output[static_cast<size_t> (DiscontinuityType::NonFinite)] == 0);
     CHECK (r.output[static_cast<size_t> (DiscontinuityType::DcStep)] == 0);
     CHECK (r.outputPeakDbfs <= -0.9f); // the ceiling (-1 dBTP) holds through every action
-    // KNOWN_GAP: target 0 clicks per docs/11 E53 Done-when ("0 discontinuities").
-    // Every click so far is the global bypass engaging (see the KnownGap case
-    // below): about 1.4 ms after "bypass -> on".
-    int bypassClicks = 0;
-    for (const auto& d : r.detections)
-    {
-        CHECK (d.lastAction == "bypass -> on");
-        CHECK (d.lastActionAgeMs < 3.0);
-        CHECK (d.bypassed); // reported with the chain's state
-        bypassClicks += d.lastAction == "bypass -> on" ? 1 : 0;
-    }
-    CHECK (static_cast<int64_t> (r.detections.size()) == r.outputTotal());
-    CHECK (bypassClicks == static_cast<int> (r.detections.size()));
+    // docs/11 E53 Done-when: 0 discontinuities. Every click this soak found
+    // was the global bypass engaging (about 1.4 ms after "bypass -> on"),
+    // fixed in ProcessingChain step 7 (see the KnownGap closed case below).
+    CHECK (r.output[static_cast<size_t> (DiscontinuityType::Click)] == 0);
+    CHECK (r.detections.empty());
     CHECK (wall < 2.0);
 }
 
@@ -468,13 +460,15 @@ TEST_CASE ("KnownGap: a 1-sample skip in the chain's music output is flagged at 
     CHECK (flagged >= 11); // 11 today
 }
 
-TEST_CASE ("KnownGap: engaging the global bypass clicks ~1.4 ms in - the dry path's true-peak limiter starts cold (E53 soak finding)")
+TEST_CASE ("KnownGap closed: engaging the global bypass is click-free - the crossfade waits for the dry path's true-peak limiter (E53 soak finding)")
 {
     // A 110 Hz tone at -10 dBFS through the defaults; bypass on (or off) at
     // block 100. The dry reference passes a true-peak limiter that runs only
     // while bypass is engaged (ProcessingChain step 7): started cold it
-    // outputs silence for its latency (67 samples), so the dry path enters
-    // the 30 ms crossfade as a step of ~4.7 % of the dry signal.
+    // outputs silence for its latency (67 samples). The crossfade used to
+    // start at once, so the dry path entered it as a step of ~4.7 % of the
+    // dry signal (one click, -37.8 dB, 68 samples in); it now waits for the
+    // limiter's latency.
     const auto run = [] (bool engage) {
         auto store = std::make_unique<param::ParameterStore>();
         store->setActiveBank (param::Bank::A);
@@ -498,10 +492,6 @@ TEST_CASE ("KnownGap: engaging the global bypass clicks ~1.4 ms in - the dry pat
         }
         return detect (out);
     };
-    const auto on = run (true);
-    // KNOWN_GAP: target 0 clicks per docs/11 E53 Done-when (and E37: a click-free bypass).
-    REQUIRE (on.count (DiscontinuityType::Click) == 1);
-    CHECK_NEAR (static_cast<double> (on.events()[0].frame - 100 * 512), 68.0, 4.0);
-    CHECK_NEAR (on.events()[0].levelDb, -37.8, 1.0);
-    CHECK (run (false).total() == 0); // disengaging is clean
+    CHECK (run (true).total() == 0);  // engaging (was one click)
+    CHECK (run (false).total() == 0); // disengaging
 }

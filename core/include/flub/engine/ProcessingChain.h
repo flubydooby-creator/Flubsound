@@ -443,6 +443,7 @@ private:
     DelayLine dryDelay;
     TruePeakLimiter dryLimiter;
     bool dryLimiterRunning = false;
+    int dryWarmup = 0; // samples the crossfade waits after a cold start of dryLimiter (its latency)
 
     // Metering
     LevelMeter inLevel, outLevel;

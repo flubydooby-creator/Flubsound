@@ -1022,40 +1022,45 @@ TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 s
         CHECK_NEAR (pinned[0].v[l][0], pinned[0].v[0][0], 1.0);
 }
 
-TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background (docs/11 E19 step 2)")
+namespace
 {
-    // The core scene at -60 LUFS (docs/11 E19's quiet material): Horror
-    // Detail (Detail 0.6) and Competitive FPS, as shipped and with the upward
-    // section off (upward threshold -80 dB). Before the floor followed the
-    // background (fixed -75 dBFS): bed lift 7.73 / 2.50 dB against 2.62 /
-    // 0.77 dB without the upward section, contrast 3.49 / 5.20 dB; at
-    // -50 LUFS 4.73 / 2.27 dB against 2.75 / 0.86 dB, contrast 2.33 / 4.40 dB
-    // (FPS 5.25 without it). At -14 / -24 / -40 LUFS the upward section is
-    // idle on this scene (its threshold is under the bed), so the matrix
-    // above does not move.
+// The core scene at -60 LUFS (docs/11 E19's quiet material): Horror
+// Detail (Detail 0.6) and Competitive FPS, as shipped and with the upward
+// section off (upward threshold -80 dB). Before the floor followed the
+// background (fixed -75 dBFS): bed lift 7.73 / 2.50 dB against 2.62 /
+// 0.77 dB without the upward section, contrast 3.49 / 5.20 dB; at
+// -50 LUFS 4.73 / 2.27 dB against 2.75 / 0.86 dB, contrast 2.33 / 4.40 dB
+// (FPS 5.25 without it). At -14 / -24 / -40 LUFS the upward section is
+// idle on this scene (its threshold is under the bed), so the matrix
+// above does not move.
+void checkQuietSceneUpward (const char* file, double bedDb, double contrastDb)
+{
     const auto scene = makeScene (-60.0);
-    struct Case
-    {
-        const char* file;
-        double bedDb, contrastDb;
-    } cases[] = { { "gaming-horror-detail.json", 2.62, 3.60 }, { "gaming-competitive-fps.json", 0.77, 5.28 } };
-    for (const auto& c : cases)
-    {
-        const auto shipped = resolve (factoryPreset (c.file));
-        auto noUp = shipped;
-        setValue (noUp, CompUpThresholdDb, -80.0f);
-        const auto a = measureScene (scene, render (scene.input, shipped));
-        const auto b = measureScene (scene, render (scene.input, noUp));
-        measured (std::string (c.file) + " at -60 LUFS: bed lift", a.bedLiftDb, "dB");
-        measured (std::string (c.file) + " at -60 LUFS: bed lift, upward section off", b.bedLiftDb, "dB");
-        measured (std::string (c.file) + " at -60 LUFS: contrast change", a.contrastChangeDb, "dB");
-        measured (std::string (c.file) + " at -60 LUFS: hole 1-2 s after", a.holeDb, "dB");
-        CHECK_NEAR (a.bedLiftDb, b.bedLiftDb, 0.1); // the upward section adds nothing to the bed
-        CHECK_GE (a.contrastChangeDb, b.contrastChangeDb - 0.1);
-        CHECK_NEAR (a.bedLiftDb, c.bedDb, 0.3);
-        CHECK_NEAR (a.contrastChangeDb, c.contrastDb, 0.3);
-        CHECK_LE (std::abs (a.holeDb), 0.3);
-    }
+    const auto shipped = resolve (factoryPreset (file));
+    auto noUp = shipped;
+    setValue (noUp, CompUpThresholdDb, -80.0f);
+    const auto a = measureScene (scene, render (scene.input, shipped));
+    const auto b = measureScene (scene, render (scene.input, noUp));
+    measured (std::string (file) + " at -60 LUFS: bed lift", a.bedLiftDb, "dB");
+    measured (std::string (file) + " at -60 LUFS: bed lift, upward section off", b.bedLiftDb, "dB");
+    measured (std::string (file) + " at -60 LUFS: contrast change", a.contrastChangeDb, "dB");
+    measured (std::string (file) + " at -60 LUFS: hole 1-2 s after", a.holeDb, "dB");
+    CHECK_NEAR (a.bedLiftDb, b.bedLiftDb, 0.1); // the upward section adds nothing to the bed
+    CHECK_GE (a.contrastChangeDb, b.contrastChangeDb - 0.1);
+    CHECK_NEAR (a.bedLiftDb, bedDb, 0.3);
+    CHECK_NEAR (a.contrastChangeDb, contrastDb, 0.3);
+    CHECK_LE (std::abs (a.holeDb), 0.3);
+}
+} // namespace
+
+TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background: Horror Detail (docs/11 E19 step 2)")
+{
+    checkQuietSceneUpward ("gaming-horror-detail.json", 2.62, 3.60);
+}
+
+TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background: Competitive FPS (docs/11 E19 step 2)")
+{
+    checkQuietSceneUpward ("gaming-competitive-fps.json", 0.77, 5.28);
 }
 
 // =============================================================================
@@ -1078,24 +1083,10 @@ std::vector<float> presetValues (const char* file)
 }
 } // namespace
 
-TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effects lift at -14 / -24 / -40 LUFS (E60; KnownGap: Voice & Score presets lower the dialogue-to-effects ratio)")
+namespace
 {
-    // Metric validation, no render: the input with its dialogue doubled
-    // reads +6.02 dB of dialogue SNR gain and dialogue lift and no effects
-    // lift; bypass reads 0 (below).
-    {
-        const auto s = makeDialogueScene (-24.0);
-        auto louder = s.input.channels;
-        for (size_t ch = 0; ch < 2; ++ch)
-            for (size_t i = 0; i < louder[ch].size(); ++i)
-                louder[ch][i] += s.dialogue[ch][i];
-        const auto r = measureDialogue (s, louder);
-        measured ("dialogue doubled: dialogue SNR gain", r.snrGainDb, "dB");
-        CHECK_NEAR (r.snrGainDb, 6.02, 0.1);
-        CHECK_NEAR (r.dialogueLiftDb, 6.02, 0.1);
-        CHECK_NEAR (r.effectsLiftDb, 0.0, 0.01);
-    }
-
+void checkDialogueScene (int l)
+{
     // Expectation: no preset makes the dialogue harder to pick out of the
     // effects than bypass does (dialogue SNR gain >= 0). Competitive FPS
     // meets it (its cue enhancer lifts the syllables' onsets in the 3.2 kHz
@@ -1120,27 +1111,58 @@ TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effe
         { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.07, 0.29, 3.31 }, { -1.98, 3.86, 4.60 } } },
         { "gaming-night-mode.json", true, { { -5.86, -10.94, -6.06 }, { -6.18, -1.41, 3.71 }, { -1.31, 10.04, 10.54 } } },
     };
-    for (int l = 0; l < 3; ++l)
+    const auto scene = makeDialogueScene (kLevels[l]);
+    measured ("dialogue scene turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+    for (const auto& p : pinned)
     {
-        const auto scene = makeDialogueScene (kLevels[l]);
-        measured ("dialogue scene turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
-        for (const auto& p : pinned)
-        {
-            const auto r = measureDialogue (scene, render (scene.input, presetValues (p.file)));
-            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
-            measured (what + ": dialogue SNR gain", r.snrGainDb, "dB");
-            measured (what + ": dialogue lift", r.dialogueLiftDb, "dB");
-            measured (what + ": effects lift", r.effectsLiftDb, "dB");
-            const double got[3] = { r.snrGainDb, r.dialogueLiftDb, r.effectsLiftDb };
-            for (int m = 0; m < 3; ++m)
-                CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
-            if (! p.knownGap)
-                CHECK_GE (r.snrGainDb, -0.1);
-        }
+        const auto r = measureDialogue (scene, render (scene.input, presetValues (p.file)));
+        const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+        measured (what + ": dialogue SNR gain", r.snrGainDb, "dB");
+        measured (what + ": dialogue lift", r.dialogueLiftDb, "dB");
+        measured (what + ": effects lift", r.effectsLiftDb, "dB");
+        const double got[3] = { r.snrGainDb, r.dialogueLiftDb, r.effectsLiftDb };
+        for (int m = 0; m < 3; ++m)
+            CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+        if (! p.knownGap)
+            CHECK_GE (r.snrGainDb, -0.1);
     }
 }
+} // namespace
 
-TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -14 / -24 / -40 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
+TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effects lift at -14 LUFS (E60; KnownGap: Voice & Score presets lower the dialogue-to-effects ratio)")
+{
+    // Metric validation, no render: the input with its dialogue doubled
+    // reads +6.02 dB of dialogue SNR gain and dialogue lift and no effects
+    // lift; bypass reads 0 (below).
+    {
+        const auto s = makeDialogueScene (-24.0);
+        auto louder = s.input.channels;
+        for (size_t ch = 0; ch < 2; ++ch)
+            for (size_t i = 0; i < louder[ch].size(); ++i)
+                louder[ch][i] += s.dialogue[ch][i];
+        const auto r = measureDialogue (s, louder);
+        measured ("dialogue doubled: dialogue SNR gain", r.snrGainDb, "dB");
+        CHECK_NEAR (r.snrGainDb, 6.02, 0.1);
+        CHECK_NEAR (r.dialogueLiftDb, 6.02, 0.1);
+        CHECK_NEAR (r.effectsLiftDb, 0.0, 0.01);
+    }
+
+    checkDialogueScene (0);
+}
+
+TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effects lift at -24 LUFS (E60; KnownGap: Voice & Score presets lower the dialogue-to-effects ratio)")
+{
+    checkDialogueScene (1);
+}
+
+TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effects lift at -40 LUFS (E60; KnownGap: Voice & Score presets lower the dialogue-to-effects ratio)")
+{
+    checkDialogueScene (2);
+}
+
+namespace
+{
+void checkSpeechMusicSilence (int l)
 {
     // Expectations, docs/11 E21's Done-when read on this scene: the first
     // event after quiet at most 1 dB over the steady state (music onset jump
@@ -1171,32 +1193,47 @@ TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence a
         { "music-late-night-low-volume.json", { false, true, true }, { true, true, false },
           { { 2.14, 0.95, 7.47, -81.17, 0.34 }, { 2.76, 0.80, 8.35, -72.48, 1.01 }, { 3.46, -1.31, 3.78, -71.32, 2.45 } } },
     };
-    for (int l = 0; l < 3; ++l)
+    const auto scene = makeSpeechMusicSilence (kLevels[l]);
+    measured ("speech -> music -> silence turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+    for (const auto& p : pinned)
     {
-        const auto scene = makeSpeechMusicSilence (kLevels[l]);
-        measured ("speech -> music -> silence turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
-        for (const auto& p : pinned)
-        {
-            const auto r = measureSms (scene, render (scene.input, presetValues (p.file)));
-            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
-            measured (what + ": music vs speech balance change", r.balanceChangeDb, "dB");
-            measured (what + ": music onset jump", r.musicOnsetJumpDb, "dB");
-            measured (what + ": silence lift re speech", r.silenceLiftDb, "dB");
-            measured (what + ": silence output", r.silenceOutDbfs, "dBFS");
-            measured (what + ": speech return", r.speechReturnDb, "dB");
-            const double got[5] = { r.balanceChangeDb, r.musicOnsetJumpDb, r.silenceLiftDb, r.silenceOutDbfs, r.speechReturnDb };
-            for (int m = 0; m < 5; ++m)
-                CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
-            CHECK_LE (r.musicOnsetJumpDb, 1.0);
-            if (! p.returnGap[l])
-                CHECK_LE (std::abs (r.speechReturnDb), 1.0);
-            if (! p.silenceGap[l])
-                CHECK_LE (r.silenceLiftDb, 6.0);
-        }
+        const auto r = measureSms (scene, render (scene.input, presetValues (p.file)));
+        const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+        measured (what + ": music vs speech balance change", r.balanceChangeDb, "dB");
+        measured (what + ": music onset jump", r.musicOnsetJumpDb, "dB");
+        measured (what + ": silence lift re speech", r.silenceLiftDb, "dB");
+        measured (what + ": silence output", r.silenceOutDbfs, "dBFS");
+        measured (what + ": speech return", r.speechReturnDb, "dB");
+        const double got[5] = { r.balanceChangeDb, r.musicOnsetJumpDb, r.silenceLiftDb, r.silenceOutDbfs, r.speechReturnDb };
+        for (int m = 0; m < 5; ++m)
+            CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+        CHECK_LE (r.musicOnsetJumpDb, 1.0);
+        if (! p.returnGap[l])
+            CHECK_LE (std::abs (r.speechReturnDb), 1.0);
+        if (! p.silenceGap[l])
+            CHECK_LE (r.silenceLiftDb, 6.0);
     }
 }
+} // namespace
 
-TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -14 / -24 / -40 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
+TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -14 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
+{
+    checkSpeechMusicSilence (0);
+}
+
+TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -24 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
+{
+    checkSpeechMusicSilence (1);
+}
+
+TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -40 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
+{
+    checkSpeechMusicSilence (2);
+}
+
+namespace
+{
+void checkTrackChange (int l)
 {
     // Expectations, docs/11 E21's Done-when read on this scene: the loud
     // track's first 500 ms at most 1 dB over its steady state (overshoot
@@ -1222,29 +1259,42 @@ TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settlin
         { "gaming-night-mode.json", { true, false, true }, { { -9.76, 2.00, 1.88, -5.66 }, { -4.99, -0.05, 0.00, -7.66 }, { 3.75, -3.64, 2.34, -18.92 } } },
         { "music-late-night-low-volume.json", { true, false, true }, { { -8.94, 3.70, 1.41, -1.05 }, { -4.22, 0.48, 0.00, -4.75 }, { -0.15, -2.56, 2.34, -17.79 } } },
     };
-    for (int l = 0; l < 3; ++l)
+    const auto scene = makeTrackChange (kLevels[l]);
+    measured ("track change turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
+    for (const auto& p : pinned)
     {
-        const auto scene = makeTrackChange (kLevels[l]);
-        measured ("track change turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
-        for (const auto& p : pinned)
+        const auto r = measureTrack (scene, render (scene.input, presetValues (p.file)));
+        const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
+        measured (what + ": step change", r.stepChangeDb, "dB");
+        measured (what + ": overshoot", r.overshootDb, "dB");
+        measured (what + ": settle", r.settleS, "s");
+        measured (what + ": peak", r.peakDbfs, "dBFS");
+        const double got[4] = { r.stepChangeDb, r.overshootDb, r.settleS, r.peakDbfs };
+        for (int m = 0; m < 4; ++m)
+            CHECK_NEAR (got[m], p.v[l][m], m == 2 ? 0.5 : p.file == nullptr ? 0.1 : 0.3);
+        CHECK_LE (r.peakDbfs, -0.5);
+        if (! p.knownGap[l])
         {
-            const auto r = measureTrack (scene, render (scene.input, presetValues (p.file)));
-            const std::string what = std::string (p.file == nullptr ? "bypass" : p.file) + " at " + levelName (l);
-            measured (what + ": step change", r.stepChangeDb, "dB");
-            measured (what + ": overshoot", r.overshootDb, "dB");
-            measured (what + ": settle", r.settleS, "s");
-            measured (what + ": peak", r.peakDbfs, "dBFS");
-            const double got[4] = { r.stepChangeDb, r.overshootDb, r.settleS, r.peakDbfs };
-            for (int m = 0; m < 4; ++m)
-                CHECK_NEAR (got[m], p.v[l][m], m == 2 ? 0.5 : p.file == nullptr ? 0.1 : 0.3);
-            CHECK_LE (r.peakDbfs, -0.5);
-            if (! p.knownGap[l])
-            {
-                CHECK_LE (r.overshootDb, 1.0);
-                CHECK_LE (r.settleS, 1.0);
-            }
+            CHECK_LE (r.overshootDb, 1.0);
+            CHECK_LE (r.settleS, 1.0);
         }
     }
+}
+} // namespace
+
+TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -14 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
+{
+    checkTrackChange (0);
+}
+
+TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -24 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
+{
+    checkTrackChange (1);
+}
+
+TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -40 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
+{
+    checkTrackChange (2);
 }
 
 TEST_CASE ("SceneEvents: the background tracker's law, and the detector finds the steps, the combat, the silence and the track change of the scenes (E60)")
