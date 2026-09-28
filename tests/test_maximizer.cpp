@@ -608,7 +608,7 @@ TEST_CASE ("LoudnessMaximizer: the clipper shaves transients so the limiter redu
         setChannel (buf, 1, drums);
         gr[k] = meanLimiterGrDb (m, buf, 256);
     }
-    CHECK (gr[1] > gr[0] + 0.5); // less limiter gain reduction with the clipper
+    CHECK_GE (gr[1], gr[0] + 0.5); // less limiter gain reduction with the clipper
 }
 
 TEST_CASE ("LoudnessMaximizer: glue > 0 reduces limiter gain reduction on a bass-heavy signal")
@@ -677,7 +677,13 @@ TEST_CASE ("LoudnessMaximizer: parameter changes and stage on/off switches are c
     for (int i = 2000; i < n; ++i)
         maxD2 = std::max (maxD2, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - 2.0f * y[static_cast<size_t> (i - 1)]
                                                                 + y[static_cast<size_t> (i - 2)])));
-    CHECK_LE (maxD2, 12.0 * baseline);
+    // 14x (12x until docs/11 E05 stage 1; measured 9.8x before, 12.7x
+    // after): during the 50 ms glide to 14 dB drive the crest-gated clipper's
+    // RMS lags the rising tone and shaves a few peaks, and the limiter's
+    // program envelope hands over to its fast gain through a min(); both
+    // bend the waveform a little harder, neither steps it (a 0.25 % gain
+    // step on this tone alone reads 14x).
+    CHECK_LE (maxD2, 14.0 * baseline);
     CHECK_LE (planarPeak (buf), 1.0);
 }
 
@@ -892,8 +898,8 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the he
     // 1x oversampling, glue off, parameters applied instantly: the clipper
     // input is exactly x * drive, so the telemetry can be recomputed,
     // including the crest gate (t' = max (t, 10^(crest/20) sqrt (P)), P the
-    // one-pole 8 ms average of the linked max-channel power, updated before
-    // each sample is clipped) and the depth cap (softClipCapped).
+    // linked max-channel power through two cascaded 5 ms one-poles, updated
+    // before each sample is clipped) and the depth cap (softClipCapped).
     const float driveDb = 12.0f, ceilingDb = -2.0f, clipAmount = 0.7f, knee = 0.4f;
     LoudnessMaximizer m;
     prepareMax (m, kFs, 2, 512, 1);
@@ -910,13 +916,14 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: clip-energy telemetry equals the he
     const float drive = dbToGain (driveDb);
     const float t = dbToGain (ceilingDb + lerp (6.0f, 0.3f, clipAmount));
     const float crest = dbToGain (params.clipCrestDb), depth = dbToGain (-params.clipMaxDepthDb);
-    const float powerCoeff = 1.0f - onePoleCoeff (8.0f, kFs);
-    float power = 0.0f;
+    const float powerCoeff = 1.0f - onePoleCoeff (5.0f, kFs);
+    float powerFast = 0.0f, power = 0.0f;
     std::vector<float> tEff (static_cast<size_t> (n));
     for (int i = 0; i < n; ++i)
     {
         const float a = l[static_cast<size_t> (i)] * drive, b = r[static_cast<size_t> (i)] * drive;
-        power += powerCoeff * (std::max (a * a, b * b) - power);
+        powerFast += powerCoeff * (std::max (a * a, b * b) - powerFast);
+        power += powerCoeff * (powerFast - power);
         tEff[static_cast<size_t> (i)] = std::max (t, crest * std::sqrt (power));
     }
     int clippedBlocks = 0;
@@ -1078,5 +1085,41 @@ TEST_CASE ("LoudnessMaximizer [adversarial]: 192 kHz and the latency profiles ho
             CHECK_LE (tp, ceil * (clipDb <= -12.0 ? kTpTolerance : dbfs (0.5)));
             CHECK_GE (tp, ceil * dbfs (-0.5));
         }
+    }
+}
+
+TEST_CASE ("LoudnessMaximizer: with the crest-gated clipper and the LF-safe limiter the ceiling holds on the 11-rate matrix at 18 dB drive (docs/11 E05 stage 1)")
+{
+    // 8 .. 192 kHz, drums plus a 45 Hz bass line (the period hold engages)
+    // in the Balanced structure (4x HQ clipper, 1.5 ms look-ahead), clipper
+    // at its default share: sample peak exactly under the ceiling, true
+    // peak within the documented 0.1 dB, no safety clamp.
+    for (double fs : { 8000.0, 11025.0, 16000.0, 22050.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+    {
+        const int n = static_cast<int> (fs * 0.5);
+        const int tail = static_cast<int> (fs * 0.02);
+        auto dl = drumPattern (fs, n - tail - 200, 31), dr = drumPattern (fs, n - tail - 200, 32);
+        for (size_t i = 0; i < dl.size(); ++i)
+        {
+            const auto bass = static_cast<float> (0.5 * std::sin (kTwoPi * 45.0 * static_cast<double> (i) / fs));
+            dl[i] += bass;
+            dr[i] += bass;
+        }
+        dl = bandLimit (dl);
+        dr = bandLimit (dr);
+        LoudnessMaximizer m;
+        prepareMax (m, fs, 2, 512);
+        m.setParams (maxParams (18.0f, -1.0f, 0.5f, 0.0f));
+        Planar buf (2, n);
+        setChannel (buf, 0, dl);
+        setChannel (buf, 1, dr);
+        processInBlocks (m, buf, 512);
+        const double sp = planarPeak (buf), tp = planarTruePeak (buf), ceil = dbfs (-1.0);
+        if (! (sp <= ceil && tp <= ceil * kTpTolerance))
+            std::cerr << "    fs " << fs << ": sp " << toDb (sp) << " tp " << toDb (tp) << "\n";
+        CHECK_LE (sp, ceil);
+        CHECK_LE (tp, ceil * kTpTolerance);
+        CHECK (m.getSafetyClipCount() == 0u);
+        CHECK_GE (tp, ceil * dbfs (-0.5)); // limited, not muted
     }
 }

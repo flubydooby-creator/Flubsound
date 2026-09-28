@@ -13,11 +13,17 @@
 #include "TestSignals.h"
 
 #include "flub/common/Denormals.h"
+#include "flub/dsp/DynamicEq.h"
 #include "flub/engine/ProcessingChain.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <functional>
 #include <initializer_list>
+#include <limits>
+#include <utility>
 
 using namespace flub;
 using namespace flub::param;
@@ -151,7 +157,11 @@ Planar burstOverBed (double freq, float burstDb, float bedDb, double fs = kFs)
     const int edge = static_cast<int> (0.002 * fs);
     Planar p (2, len);
     if (bedDb > -150.0f)
-        p.ch[0] = p.ch[1] = pinkNoise (len, dbToGain (bedDb), 97);
+    {
+        const auto bed = pinkNoise (len, dbToGain (bedDb), 97);
+        for (auto& c : p.ch)
+            std::copy (bed.begin(), bed.end(), c.begin()); // keep the storage Planar points at
+    }
     const double a = dbToGain (burstDb);
     for (int i = 0; i < n; ++i)
     {
@@ -277,6 +287,63 @@ TEST_CASE ("Gaming Footsteps (M1): mode band 5 is the footstep-body cue enhancer
     r = renderGaming (footsteps (1.0f), tone (f, -30.0f));
     CHECK_LE (std::abs (r.toneDb (0, f) - ref.toneDb (0, f)), 0.05);
     CHECK_LE (std::abs (r.dynEqDb[5]), 0.01f);
+}
+
+TEST_CASE ("Gaming cue enhancer (DynamicEq CueLift): bit-identical for any host block split, an exact identity on a steady tone, and NaN input is flushed")
+{
+    // Band 4's settings at Footsteps 100, on the DynamicEq alone.
+    DynEqBandParams cue;
+    cue.enabled = true;
+    cue.mode = DynEqMode::CueLift;
+    cue.frequency = 3200.0f;
+    cue.q = 0.9f;
+    cue.rangeDb = 7.0f;
+    cue.attackMs = 1.0f;
+    cue.releaseMs = 40.0f;
+    cue.noiseFloorDb = -75.0f;
+    const auto run = [&cue] (Planar buf, const std::vector<int>& blocks) {
+        DynamicEq d;
+        d.prepare ({ kFs, 1024, 2 });
+        d.setBand (4, cue);
+        d.reset();
+        ScopedNoDenormals noDenormals;
+        size_t k = 0;
+        for (int pos = 0; pos < buf.numSamples();)
+        {
+            const int len = std::min (blocks[k++ % blocks.size()], buf.numSamples() - pos);
+            d.process (buf.block (pos, len));
+            pos += len;
+        }
+        return std::make_pair (std::move (buf), d.getBandGainDb (4));
+    };
+
+    // Bursts over a bed, in 512-sample blocks and in odd, varying ones.
+    const auto in = burstOverBed (3200.0, -40.0f, -40.0f);
+    const auto a = run (in, { 512 }).first, b = run (in, { 1, 37, 256, 5, 999, 16, 17 }).first;
+    CHECK (a.ch == b.ch);
+    CHECK_GE (toDb (toneAmplitude (a.ch[0].data() + static_cast<int> (0.81 * kFs), static_cast<int> (0.06 * kFs), 3200.0, kFs)) + 40.0, 6.5);
+
+    // A steady tone: once learnt, the band sits at exactly 0 dB, and the EQ
+    // is an exact identity (the last 0.3 s bit-identical to the input).
+    const auto toneIn = tone (3200.0, -30.0f);
+    const auto [toneOut, gainDb] = run (toneIn, { 256 });
+    CHECK (gainDb == 0.0f);
+    const auto tail = static_cast<std::ptrdiff_t> (0.7 * kFs);
+    CHECK (std::equal (toneOut.ch[0].begin() + tail, toneOut.ch[0].end(), toneIn.ch[0].begin() + tail));
+
+    // NaN / Inf for one block: flushed within two control intervals, and the
+    // band acts on the next burst again.
+    auto nan = burstOverBed (3200.0, -40.0f, -40.0f);
+    for (int i = static_cast<int> (0.5 * kFs); i < static_cast<int> (0.5 * kFs) + 256; ++i)
+        nan.ch[0][static_cast<size_t> (i)] = (i % 2 == 0) ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+    const auto [nanOut, nanGain] = run (nan, { 256 });
+    bool finite = true;
+    for (const auto& c : nanOut.ch)
+        for (size_t i = static_cast<size_t> (0.5 * kFs + 256 + 2 * DynamicEq::kControlInterval); i < c.size(); ++i)
+            finite = finite && std::isfinite (c[i]);
+    CHECK (finite);
+    CHECK (std::isfinite (nanGain));
+    CHECK_GE (toDb (toneAmplitude (nanOut.ch[0].data() + static_cast<int> (0.81 * kFs), static_cast<int> (0.06 * kFs), 3200.0, kFs)) + 40.0, 6.0);
 }
 
 TEST_CASE ("Gaming: anti-masking band 6 no longer follows Footsteps - Footsteps 100 leaves a loud 90 Hz rumble alone; the presets carry the band as a user band (E20)")

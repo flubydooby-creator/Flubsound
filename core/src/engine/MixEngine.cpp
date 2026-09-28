@@ -16,6 +16,7 @@ void MixEngine::configure (const std::vector<StripConfig>& configs, double sr, i
 void MixEngine::configureFrom (const MixEngine& previous, const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
                                const ChainSetup& setup)
 {
+    correction.setSettingsNow (previous.correction.getSettings()); // prepared at the new rate in build()
     build (configs, sr, maxBlockSize, previous.strips, setup);
 }
 
@@ -71,6 +72,7 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     // needsReprepare(), which brings the host back here.
     const auto isLowLatency = [] (const auto& s) { return s->chain->getLatencyProfile() == param::LatencyProfileValue::LowLatency; };
     const bool allLowLatency = ! strips.empty() && std::all_of (strips.begin(), strips.end(), isLowLatency);
+    correction.prepare ({ sr, maxBlockSize, 2 });
     master.setLookaheadMs (allLowLatency ? kMasterLookaheadLowLatencyMs : kMasterLookaheadMs);
     master.setTruePeakDetection (true);
     master.prepare ({ sr, maxBlockSize, 2 });
@@ -135,6 +137,7 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
         }
     }
 
+    correction.process (mix);
     master.process (mix);
     out.firstChannels (2).subBlock (0, n).copyFrom (mix);
     for (int c = 2; c < out.numChannels; ++c)

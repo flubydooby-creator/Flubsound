@@ -35,13 +35,16 @@
 // Optional LF-safe envelope (docs/11 E05 stage 1; setEnvelope(), structural,
 // all off by default - the maximizer turns them on, the MixEngine master and
 // the chain's bypass-reference limiter keep the plain envelope):
-//   * lowFrequencyHold: the sliding minimum also covers the H samples after
-//     the peak (window L + Kh + 2 + H), so the gain holds H after each peak
-//     before it releases. H = 10 ms, or 25 ms while energy below 50 Hz is
-//     present (a 2nd-order 50 Hz low-pass of the channel mean carries more
-//     than 10 % of its power, 100 ms averages; back to 10 ms below 5 %):
-//     at least half a period of the lowest frequency present, so a steady
-//     bass note's gain does not ripple at twice its frequency.
+//   * periodHold: the sliding minimum also covers the H samples after the
+//     peak (window L + Kh + 2 + H), so the gain holds H after each peak
+//     before it releases. H = the spacing of the recent peaks + 1/8 (the
+//     larger of the last two; a peak is a run of overs that starts > 0.5 ms
+//     after the previous over), at most 25 ms, and 0 for an isolated peak
+//     (none in the 25 ms before it): a periodic waveform's gain stays flat
+//     from one peak to the next - at least half a period of the lowest
+//     frequency that sets the peaks - so a bass note's gain does not ripple
+//     at its peak rate (no THD, no DC on asymmetric waveforms), while
+//     transients and dense programme are not held.
 //   * smoothAttack: the box filter becomes two cascaded boxes whose lengths
 //     add up to L - Kh + 2 (a triangular kernel over the same L - Kh + 1
 //     samples): an S-shaped attack instead of a linear ramp with corners.
@@ -76,7 +79,7 @@ struct LimiterParams
 /** The optional LF-safe envelope stages (see the header comment); structural. */
 struct LimiterEnvelope
 {
-    bool lowFrequencyHold = false;
+    bool periodHold = false;
     bool smoothAttack = false;
     bool programEnvelope = false;
 
@@ -104,7 +107,7 @@ public:
     float getGainReductionDb() const noexcept { return grDb.load (std::memory_order_relaxed); }
     /** Number of samples the final safety clamp had to touch since prepare(). */
     uint64_t getSafetyClipCount() const noexcept { return safetyClips.load (std::memory_order_relaxed); }
-    /** The gain hold after each peak at the end of the last block (ms; 0 without lowFrequencyHold). */
+    /** The gain hold after each peak at the end of the last block (ms; 0 without periodHold). */
     float getHoldMs() const noexcept { return holdMs.load (std::memory_order_relaxed); }
 
 private:
@@ -186,12 +189,9 @@ private:
     int ringSize = 1, ringPos = 0, ceilingPos = 0, ring2Size = 1, ring2Pos = 0;
     double boxSum = 1.0, boxLength = 1.0, box2Sum = 1.0, box2Length = 1.0;
 
-    // lowFrequencyHold: H (samples) and its LF detector (TPT SVF low-pass of
-    // the channel mean, double state; 100 ms power averages).
-    uint32_t holdShort = 0, holdLong = 0;
-    bool lowFrequencyPresent = false;
-    double lfA1 = 0.0, lfA2 = 0.0, lfA3 = 0.0, lfIc1 = 0.0, lfIc2 = 0.0;
-    double lfPower = 0.0, fullPower = 0.0, lfPowerCoeff = 0.0;
+    // periodHold: H (samples), its maximum, and the peak-spacing tracker.
+    uint32_t holdMax = 0, holdSamples = 0, peakGap = 1;
+    uint32_t sincePeakStart = 0, sinceOverSample = 0, spacingLast = 0, spacingPrev = 0;
 
     // programEnvelope: the slow program gain and its one-pole coefficients.
     double programGain = 1.0, programAttack = 0.0, programRelease = 0.0;

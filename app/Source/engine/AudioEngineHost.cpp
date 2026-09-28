@@ -299,6 +299,7 @@ std::unique_ptr<AudioEngineHost::EngineInstance> AudioEngineHost::buildEngine()
     else
         engine.configure (configs, currentSampleRate, currentBlockSize, installNeuralModel);
 
+    engine.getDeviceCorrection().setSettingsNow (deviceCorrection); // not yet visible to the audio thread
     next->numStrips = engine.getNumStrips();
     next->maxBlock = currentBlockSize;
     for (size_t i = 0; i < static_cast<size_t> (kMaxStrips); ++i)
@@ -443,6 +444,10 @@ void AudioEngineHost::timerCallback()
     if (latest->engine.needsReprepare())
         reconfigure();
 
+    // A device correction the hand-off ring had no room for (the audio thread
+    // did not run for several changes) is handed over again.
+    latest->engine.getDeviceCorrection().retryPending();
+
     // The guard's banner state follows device input map changes (the audio
     // thread applies them at once).
     if (loopbackPair.load (std::memory_order_relaxed) || safety.kind == DeviceSafetyState::Kind::LoopbackPair)
@@ -529,6 +534,20 @@ bool AudioEngineHost::isStripMuted (int strip) const noexcept
 void AudioEngineHost::setMasterCeilingDb (float db) noexcept
 {
     masterCeilingDb.store (std::clamp (db, -12.0f, 0.0f), std::memory_order_relaxed);
+}
+
+void AudioEngineHost::setDeviceCorrection (const flub::DeviceCorrectionSettings& settings)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    deviceCorrection = settings;
+    auto& correction = latest->engine.getDeviceCorrection();
+    // A running device: the audio thread (the only consumer) crossfades to it.
+    // A pending swap's engine gets it the same way when the audio thread takes
+    // it; the engine it fades out keeps the old curve for those few ms.
+    if (callbackRunning.load (std::memory_order_acquire))
+        correction.setSettings (settings);
+    else
+        correction.setSettingsNow (settings);
 }
 
 bool AudioEngineHost::isStripActive (int strip) const noexcept

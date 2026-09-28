@@ -15,20 +15,21 @@
 //        clipAmount = 0 disables the clipper entirely (limiter-only).
 //        Crest gate and depth cap (docs/11 E05 stage 1): the threshold is
 //        raised to clipCrestDb above the signal's short-term RMS (linked
-//        max-channel power, one-pole kClipRmsMs = 8 ms), t' = max(t,
+//        max-channel power, two cascaded 5 ms one-poles), t' = max(t,
 //        10^(crest/20) rms), so steady tones and bass (crest 3 dB) are never
 //        clipped and only transients that stand out of their own level are;
 //        and each sample loses at most clipMaxDepthDb:
 //          |y| = smoothmax(|clip(x)|, 10^(-depth/20) |x|)
-//        (a C1 quadratic blend over +-0.25 (1 - 10^(-depth/20)) t'), so drive
+//        (a C1 quadratic blend over +-0.45 (1 - 10^(-depth/20)) t'), so drive
 //        beyond it becomes limiter gain reduction instead of clip depth.
 //        Delta design: out = x + HP5(clip(x^) - x^), the correction band-
 //        limited by the downsampler and passed through a 5 Hz 1st-order
 //        high-pass (docs/11 E10), so clipping an asymmetric waveform leaves
 //        no DC on the driver.
 //     -> [limit] TruePeakLimiter at the ceiling (look-ahead, true peak),
-//        with the LF-safe envelope (LimiterEnvelope: 10 / 25 ms gain hold,
-//        S-shaped attack, program envelope; setLimiterEnvelope(), all on).
+//        with the LF-safe envelope (LimiterEnvelope: a gain hold over the
+//        peak spacing of periodic waveforms, S-shaped attack, program
+//        envelope; setLimiterEnvelope(), all on).
 // Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
 //   the last block (how hard the clipper works), the limiter's gain
 //   reduction, and distortionDb: the clipper's THD+N over the last analysis
@@ -195,7 +196,7 @@ private:
     double clipDcG = 0.0;
     // Crest gate: short-term linked power of the clipper input and its
     // coefficient; crest and depth gains from the params (0 = off).
-    float clipPower = 0.0f, clipPowerCoeff = 0.0f, crestGain = 0.0f, depthGain = 0.0f;
+    float clipPowerFast = 0.0f, clipPower = 0.0f, clipPowerCoeff = 0.0f, crestGain = 0.0f, depthGain = 0.0f;
 
     // Glue: 3-band split, per-band linked compressor, crossfaded against the input.
     ThreeBandSplitter splitter;

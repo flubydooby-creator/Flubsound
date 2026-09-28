@@ -102,6 +102,7 @@ The build above puts the CLI at `build/tools/flubsound-cli/flubsound-cli` (`flub
 flubsound-cli process -i song.wav -o song-enhanced.wav --preset "Punchy Pop" --boost 60 --target-lufs -12
 flubsound-cli batch   -i ./album -o ./album-enhanced --mode music --boost 40 --jobs 4 --format pcm24
 flubsound-cli analyze -i song-enhanced.wav            # integrated LUFS, LRA, true peak, ...
+flubsound-cli quality --mode music --boost 100         # THD+N, IMD, MTND, ducking, kick timing on pinned stimuli
 flubsound-cli params                                   # every parameter key, range and default
 flubsound-cli presets                                  # factory preset list
 ```

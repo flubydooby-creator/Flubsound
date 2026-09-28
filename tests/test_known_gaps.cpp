@@ -12,7 +12,13 @@
 // (Linux x86-64, Release) measure identical values to 0.01 dB.
 //
 //   * pumping: a 2 kHz tone under 55 Hz kicks at Boost 100 (E05, E02)
-//   * 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)
+//   * 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05;
+//     closed by E05 stage 1)
+//   * the E59 quality suite (`flubsound-cli quality`, Commands.h
+//     measureQuality: THD+N, two-tone / SMPTE IMD, multitone MTND against
+//     output loudness, ducking spectrum of 1-8 kHz probes under kicks, kick
+//     onset and timing, pink loudness) on the maximizer alone at 12 dB drive
+//     and on Music Boost 100 (E05 stage 1), and its meta-validation
 //   * 7.1 LFE fold, virtualiser off and on, against one main channel (E01;
 //     the LFE is folded since E01, the +10 dB target is still open)
 //   * stereo content in an 8-channel container: centre notch and FL-only
@@ -31,7 +37,8 @@
 //   * protection (E06 slice, E10 Phase 1): integrated-loudness spread of
 //     governed macros over host block sizes 64..4096 (closed); disturbance
 //     of a single 1e30 sample and of a NaN burst (closed); DC after the
-//     maximizer at 24 dB drive per latency profile; 50 Hz THD+N of all Music
+//     maximizer at 24 dB drive per latency profile (closed in every profile
+//     by E05 stage 1); 50 Hz THD+N of all Music
 //     macros at protection strength Off / Normal / Strict
 //
 // Every test prints its measured values ("    measured ...") so a tuning
@@ -390,15 +397,26 @@ TEST_CASE ("KnownGap: pumping - a 2 kHz tone under 55 Hz kicks moves with every 
     // samples (the 25 ms THD+N windows close on the host's block grid). The
     // time-down share flips between about 32 % and 3 % with small changes of
     // the trajectory.
+    // Re-baselined by docs/11 E05 stage 1 (crest-gated clipper, LF-safe
+    // limiter envelope): spread 3.60 -> 4.86 dB, dip 2.41 -> 5.52, lift 3.56
+    // -> 1.74, time > 1 dB down 2.7 -> 14.0 %, integrated -10.26 -> -10.19
+    // LUFS (CLI, same scene). The governor used to back Boost off to a mean
+    // scale of 0.64 because the clipper squared the kicks off (THD+N mean
+    // -30.4 dB, over the -30 dB budget); the crest-gated clipper leaves the
+    // kick's body alone (-32.7 dB), the scale stays at 1 and the limiter
+    // takes the kicks instead (GR mean -0.24 -> -2.68 dB). With the drive
+    // held fixed the same stage halves the dip: maximizer alone at 12 dB,
+    // `quality` ducking 2 kHz probe dip 8.9 -> 3.7 dB, p95 - p5 6.3 -> 4.6.
     // KNOWN_GAP: target max dip <= 6 dB (<= 3 dB only with multiband) per docs/11 E05 Done-when.
-    CHECK_NEAR (rows[1].dip, 2.41, 0.3);
+    CHECK_NEAR (rows[1].dip, 5.52, 0.3);
+    CHECK_LE (rows[1].dip, 6.0);
     // KNOWN_GAP: E59 reports p95 - p5 and lift / dip separately; docs/11 E05 / E02 set no target for them yet.
-    CHECK_NEAR (rows[1].spread, 3.60, 0.3);
-    CHECK_NEAR (rows[1].lift, 3.56, 0.3);
-    CHECK_NEAR (100.0 * rows[1].down, 2.7, 2.0);
+    CHECK_NEAR (rows[1].spread, 4.86, 0.3);
+    CHECK_NEAR (rows[1].lift, 1.74, 0.3);
+    CHECK_NEAR (100.0 * rows[1].down, 14.0, 3.0);
 }
 
-TEST_CASE ("KnownGap: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)")
+TEST_CASE ("KnownGap closed: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)")
 {
     // Maximizer alone (every other module off) at its defaults (Balanced,
     // clipper share 50 %, ceiling -1 dBTP) with max.drive 12 dB; 2 s sines,
@@ -416,10 +434,117 @@ TEST_CASE ("KnownGap: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer
         thd[k] = thdPlusNoiseDb (out[0], samplesOf (1.0), samplesOf (1.0), freqs[k]);
         measured (std::string ("THD+N at ") + (k == 0 ? "60 Hz" : "1 kHz"), thd[k], "dB");
     }
-    // KNOWN_GAP: target <= -30 dB at 60 Hz per docs/11 E05 Done-when.
-    CHECK_NEAR (thd[0], -16.11, 0.5);
-    // KNOWN_GAP: target <= -30 dB at 1 kHz per docs/11 E05 Done-when.
-    CHECK_NEAR (thd[1], -16.21, 0.5);
+    // Closed by docs/11 E05 stage 1: -16.11 / -16.21 -> -131.2 / -111.3 dB.
+    // The crest gate leaves a steady sine (crest 3 dB, under the 6 dB gate)
+    // unclipped, so the limiter takes the drive, and its period hold keeps
+    // the gain flat from one 60 Hz half-cycle peak to the next.
+    CHECK_LE (thd[0], -30.0); // docs/11 E05 Done-when: <= -30 dB at 60 Hz
+    CHECK_LE (thd[1], -30.0); // ... and at 1 kHz
+    CHECK_LE (thd[0], -100.0);
+    CHECK_LE (thd[1], -100.0);
+}
+
+TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - THD+N, IMD, MTND, ducking of 1-8 kHz probes under kicks, kick onset and loudness (E05 stage 1)")
+{
+    // `flubsound-cli quality --set max.drive=12` with every other module off
+    // (Commands.h measureQuality; stimuli and metrics defined there), with
+    // the clipper at its default share and off. Values before docs/11 E05
+    // stage 1 in the comments (same suite, pre-change build).
+    auto values = resolve (RenderOptions {});
+    onlyModules (values, { MaximizerOn });
+    setValue (values, MaxDriveDb, 12.0f);
+    QualityReport q, limiterOnly;
+    std::string error;
+    REQUIRE (measureQuality (values, 512, q, error));
+    setValue (values, MaxClipAmount, 0.0f);
+    REQUIRE (measureQuality (values, 512, limiterOnly, error));
+    for (const auto* r : { &q, &limiterOnly })
+    {
+        const std::string tag = r == &q ? "max.drive 12: " : "max.drive 12, clipper off: ";
+        for (const auto& t : r->thdn)
+            measured (tag + "THD+N at " + std::to_string (static_cast<int> (t.hz)) + " Hz", t.db, "dB");
+        measured (tag + "IMD 50 + 63 Hz", r->bassImdDb, "dB");
+        measured (tag + "IMD SMPTE", r->smpteImdDb, "dB");
+        for (const auto& m : r->mtnd)
+        {
+            measured (tag + "MTND at " + std::to_string (static_cast<int> (m.inputRmsDbfs)) + " dBFS", m.db, "dB");
+            measured (tag + "  output loudness", m.outputLufs, "LUFS");
+        }
+        measured (tag + "2 kHz probe under kicks: max dip", r->ducking[1].track.dipDb, "dB");
+        measured (tag + "2 kHz probe under kicks: p95-p5", r->ducking[1].track.spreadDb, "dB");
+        measured (tag + "2 kHz probe under kicks: 2 Hz modulation", r->ducking[1].track.modulationDb[0], "dB");
+        measured (tag + "kick onset minus body", r->kickOnsetLiftDb - r->kickBodyLiftDb, "dB");
+        measured (tag + "kick energy centroid shift", r->kickCentroidShiftMs, "ms");
+        measured (tag + "pink -18 dBFS out", r->pinkOutLufs, "LUFS");
+    }
+    // docs/11 E05 Done-when: sines at 12 dB drive <= -30 dB THD+N at 60 Hz
+    // and 1 kHz (before -16.3 / -16.2), and 40 Hz at about 7 dB GR <= -45 dB
+    // in Balanced (limiter alone, before -32.5).
+    for (const auto* r : { &q, &limiterOnly })
+        for (const auto& t : r->thdn)
+            CHECK_LE (t.db, -100.0);
+    // IMD: bass third -15.3 -> -33.5 dB, SMPTE 60 Hz + 7 kHz -5.1 -> -45.2 dB
+    // (the old clipper chopped the 7 kHz riding on the clipped 60 Hz; the
+    // limiter alone -37.8 -> -107.8 dB).
+    CHECK_NEAR (q.bassImdDb, -33.46, 1.0);
+    CHECK_NEAR (q.smpteImdDb, -45.21, 1.0);
+    CHECK_LE (limiterOnly.smpteImdDb, -90.0);
+    // MTND at -18 / -12 dBFS RMS in: -23.6 / -13.4 -> -30.1 / -21.6 dB, at
+    // -7.8 / -4.4 -> -8.3 / -7.7 LUFS out (the clipper's loudness came with
+    // its distortion; at matched loudness, -8 LUFS, about 6 dB cleaner).
+    CHECK_NEAR (q.mtnd[1].db, -30.09, 0.5);
+    CHECK_NEAR (q.mtnd[2].db, -21.63, 0.5);
+    CHECK_NEAR (q.mtnd[1].outputLufs, -8.27, 0.2);
+    CHECK_NEAR (q.mtnd[2].outputLufs, -7.67, 0.2);
+    // Ducking of the probes under 55 Hz kicks at a fixed 12 dB drive (the
+    // wideband limiter's pumping): max dip 8.9 -> 3.7 dB (docs/11 E05
+    // Done-when <= 6 dB), p95 - p5 6.3 -> 4.6 dB, 2 Hz modulation 2.07 ->
+    // 1.35 dB, the same on every probe from 1 to 8 kHz.
+    for (const auto& d : q.ducking)
+    {
+        CHECK_LE (d.track.dipDb, 6.0);
+        CHECK_NEAR (d.track.dipDb, 3.74, 0.4);
+        CHECK_NEAR (d.track.spreadDb, 4.56, 0.4);
+        CHECK_NEAR (d.track.modulationDb[0], 1.35, 0.2);
+    }
+    // Kick onset minus body -1.64 -> -0.51 dB (KNOWN_GAP: >= 0 per docs/11
+    // E05 Done-when at Boost 100; E04's attack coupling). The energy
+    // centroid moves 5.8 -> 8.6 ms later: the held gain lifts the kick's
+    // decay (KNOWN_GAP: < 2 ms per docs/11 E59 kick alignment).
+    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, -0.51, 0.3);
+    CHECK_NEAR (q.kickCentroidShiftMs, 8.62, 0.5);
+    // Loudness of -18 dBFS pink: -6.28 -> -6.90 LUFS (limiter alone -7.32 -> -8.31).
+    CHECK_NEAR (q.pinkOutLufs, -6.90, 0.2);
+    CHECK_NEAR (limiterOnly.pinkOutLufs, -8.31, 0.2);
+}
+
+TEST_CASE ("KnownGap: Music Boost 100 on the E59 quality suite - loudness within 1.5 LU of the pre-E05 maximizer, probes under kicks, kick onset (E05 stage 1)")
+{
+    // `flubsound-cli quality --mode music --boost 100` (the whole chain,
+    // governed). docs/11 E05 Done-when: integrated loudness at max Boost
+    // within 1.5 LU of today: pink -8.02 -> -8.71 LUFS.
+    QualityReport q;
+    std::string error;
+    REQUIRE (measureQuality (resolve (boosted (ModeValue::Music, 100.0f)), 512, q, error));
+    measured ("Music Boost 100: pink -18 dBFS out", q.pinkOutLufs, "LUFS");
+    measured ("Music Boost 100: 2 kHz probe under kicks: max dip", q.ducking[1].track.dipDb, "dB");
+    measured ("Music Boost 100: 2 kHz probe under kicks: p95-p5", q.ducking[1].track.spreadDb, "dB");
+    measured ("Music Boost 100: kick onset minus body", q.kickOnsetLiftDb - q.kickBodyLiftDb, "dB");
+    measured ("Music Boost 100: THD+N at 1 kHz", q.thdn[3].db, "dB");
+    CHECK_GE (q.pinkOutLufs, -8.02 - 1.5);
+    CHECK_NEAR (q.pinkOutLufs, -8.71, 0.2);
+    // The probes: dip 2.4 -> 5.4 dB, p95 - p5 3.5 -> 5.0 dB, lift 3.3 -> 1.6
+    // dB. Before, the old clipper's distortion of the kicks (THD+N over the
+    // -30 dB budget) made the governor hold Boost at ~0.64 of its amount;
+    // now the full governed drive reaches the limiter (see the pumping
+    // KnownGap above). KNOWN_GAP: <= 3 dB only with multiband, docs/11 E05.
+    CHECK_LE (q.ducking[1].track.dipDb, 6.0);
+    CHECK_NEAR (q.ducking[1].track.dipDb, 5.37, 0.4);
+    CHECK_NEAR (q.ducking[1].track.spreadDb, 4.99, 0.4);
+    // Kick onset minus body -1.80 -> -1.18 dB (KNOWN_GAP: >= 0).
+    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, -1.18, 0.3);
+    // A steady 1 kHz sine at Boost 100: -50.3 -> -94.8 dB THD+N.
+    CHECK_LE (q.thdn[3].db, -80.0);
 }
 
 TEST_CASE ("KnownGap: 7.1 LFE - an LFE-only 50 Hz tone folds at +6 dB re one main channel with the virtualiser off and on (E01)")
@@ -864,7 +989,9 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     // KNOWN_GAP: target Tighten 0.5 0-10 ms change >= -0.5 dB per docs/11 E04 Done-when.
     CHECK_NEAR (t0, -2.04, 0.3);
     // KNOWN_GAP: target Boost 100 kick onset / body >= 0 dB per docs/11 E05 Done-when.
-    CHECK_NEAR (b0 - b1, -1.73, 0.3);
+    // docs/11 E05 stage 1 (crest-gated clipper, LF-safe limiter envelope):
+    // -1.80 -> -1.18 dB; the rest needs E05's Boost-to-attack coupling (E04).
+    CHECK_NEAR (b0 - b1, -1.18, 0.3);
 }
 
 TEST_CASE ("KnownGap closed: 30 Hz audible-band energy - the laptop preset keeps the harmonics of a 30 Hz tone (E03)")
@@ -1192,6 +1319,46 @@ TEST_CASE ("CLI: render.stats reads the limiter GR of a steady sine as the hand-
         CHECK_NEAR (rr.stats.modeBandMaxDb[b], 0.0, 1.0e-6);
 }
 
+TEST_CASE ("CLI: `quality` takes the chain options but no files, and its JSON and render.stats carry the E59 statistics")
+{
+    CliOptions o;
+    std::string error;
+    REQUIRE (parseCommandLine ({ "quality", "--mode", "music", "--boost", "100", "--set", "max.drive=6", "--profile", "quality", "--json" }, o, error));
+    CHECK (o.command == Command::Quality);
+    CHECK (o.json);
+    CHECK (o.render.boostPercent.has_value());
+    CHECK (o.render.sets.size() == 1u);
+    CHECK (! parseCommandLine ({ "quality", "-i", "in.wav" }, o, error));
+    CHECK (! parseCommandLine ({ "quality", "--target-lufs", "-14" }, o, error));
+    CHECK (! parseCommandLine ({ "quality", "song.wav" }, o, error));
+
+    // Every family is in the JSON; the pass-through values are exact.
+    auto values = resolve (RenderOptions {});
+    onlyModules (values, {});
+    QualityReport q;
+    REQUIRE (measureQuality (values, 512, q, error));
+    const auto json = qualityToJson (q);
+    REQUIRE (json["thdn"].asArray().size() == 4u);
+    CHECK (json["imd"]["smpteDb"].isNumber());
+    REQUIRE (json["mtnd"].asArray().size() == 3u);
+    REQUIRE (json["ducking"]["probes"].asArray().size() == 4u);
+    CHECK (json["ducking"]["probes"].asArray()[1]["modulationDb"].asArray().size() == 4u);
+    CHECK_NEAR (json["kick"]["centroidShiftMs"].asNumber(), 0.0, 0.01);
+    CHECK_NEAR (json["loudness"]["pinkOutLufs"].asNumber(), json["loudness"]["pinkInLufs"].asNumber(), 0.01);
+    CHECK (formatQuality (q).find ("Ducking") != std::string::npos);
+
+    // render.stats: the harmonics reading and the governor's state / reason shares.
+    RenderResult rr;
+    REQUIRE (renderFile (stereoOf (sine (50.0, kFs, samplesOf (4.0), 0.5f)), resolve (boosted (ModeValue::Music, 100.0f)), RenderSettings {}, rr, error));
+    const auto st = renderStatsToJson (rr.stats);
+    CHECK (st["harmonics"]["maxDb"].isNumber()); // Boost 100 raises bass.harmonics
+    double shares = 0.0;
+    for (const char* k : { "idle", "backingOff", "holding", "recovering" })
+        shares += st["governor"]["statePercent"][k].isNumber() ? st["governor"]["statePercent"][k].asNumber() : 0.0;
+    CHECK_NEAR (shares, 100.0, 0.1);
+    CHECK (st["governor"]["distortionReasonPercent"].isNumber() || st["governor"]["distortionReasonPercent"].isNull());
+}
+
 // =============================================================================
 // Protection metrics (docs/11 E06 slice, E10 Phase 1)
 // =============================================================================
@@ -1352,7 +1519,7 @@ TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 
     CHECK_LE (burst.worstChangeDb, 0.3);
 }
 
-TEST_CASE ("KnownGap: DC after the maximizer - an asymmetric 100 + 200 Hz signal at 24 dB drive leaves <= -60 dBFS DC in Quality and Balanced; Low Latency and the limiter alone still leave some (E10)")
+TEST_CASE ("KnownGap closed: DC after the maximizer - an asymmetric 100 + 200 Hz signal at 24 dB drive leaves <= -60 dBFS DC in every profile, with and without the clipper (E10, E05)")
 {
     // 100 Hz + 200 Hz (+90 degrees), 0.35 each: no DC in, a strongly
     // asymmetric waveform. Default chain with max.drive 24, 2..4 s. Before
@@ -1374,10 +1541,12 @@ TEST_CASE ("KnownGap: DC after the maximizer - an asymmetric 100 + 200 Hz signal
     {
         LatencyProfileValue profile;
         const char* name;
-        double chainDb, limiterOnlyDb; // measured after E10 Phase 1
+        double chainDb, limiterOnlyDb; // measured after docs/11 E05 stage 1
     };
-    for (const auto& r : { Row { LatencyProfileValue::Quality, "Quality", -73.55, -51.42 }, Row { LatencyProfileValue::Balanced, "Balanced", -68.81, -49.02 },
-                           Row { LatencyProfileValue::LowLatency, "Low Latency", -58.70, -42.22 } })
+    // After E10 Phase 1: chain / limiter alone -73.55 / -51.42 (Quality),
+    // -68.81 / -49.02 (Balanced), -58.70 / -42.22 dBFS (Low Latency).
+    for (const auto& r : { Row { LatencyProfileValue::Quality, "Quality", -142.03, -141.68 }, Row { LatencyProfileValue::Balanced, "Balanced", -142.03, -141.68 },
+                           Row { LatencyProfileValue::LowLatency, "Low Latency", -141.17, -141.83 } })
     {
         RenderOptions o;
         o.profile = r.profile;
@@ -1388,15 +1557,18 @@ TEST_CASE ("KnownGap: DC after the maximizer - an asymmetric 100 + 200 Hz signal
         const double limiterOnly = dcDb (render (input, values));
         measured (std::string ("DC at max.drive 24, ") + r.name, dc, "dBFS");
         measured (std::string ("DC at max.drive 24 with the clipper off, ") + r.name, limiterOnly, "dBFS");
-        // docs/11 E10 Done-when: <= -60 dBFS in every profile. What is left
-        // comes from the true-peak limiter's gain modulation of the
-        // asymmetric waveform (the clipper-off rows; faster in Low Latency's
-        // 0.5 ms look-ahead). A residual high-pass there would move peaks
-        // past the ceiling (KNOWN_GAP for Low Latency and the limiter alone).
-        if (r.profile != LatencyProfileValue::LowLatency)
-            CHECK_LE (dc, -60.0);
-        CHECK_NEAR (dc, r.chainDb, 1.0);
-        CHECK_NEAR (limiterOnly, r.limiterOnlyDb, 1.0);
+        // docs/11 E10 Done-when: <= -60 dBFS in every profile. What was left
+        // after E10 Phase 1 came from the true-peak limiter's gain
+        // modulation of the asymmetric waveform: the gain dipped at the big
+        // peak and released before the next one. docs/11 E05 stage 1's
+        // period hold keeps it flat from peak to peak, so the product of
+        // gain and waveform carries no DC (float rounding is left), and the
+        // crest gate no longer clips this steady waveform.
+        CHECK_LE (dc, -60.0);
+        CHECK_LE (limiterOnly, -60.0);
+        // Rounding-level values (about -141 dBFS): bounded, not pinned.
+        CHECK_LE (dc, r.chainDb + 40.0);
+        CHECK_LE (limiterOnly, r.limiterOnlyDb + 40.0);
     }
 }
 
@@ -1442,16 +1614,20 @@ TEST_CASE ("KnownGap: all Music macros at 100 on a 50 Hz sine - THD+N at protect
     // governor's own input stays over its -30 dB budget at scale 0, and the
     // limiter's LF distortion is not measured at all - docs/11 E06 step 1,
     // E05's LF envelope).
+    // Re-based for docs/11 E04 (Punch no longer drives BassTighten, whose
+    // gain riding on the 50 Hz sine had masked some distortion): Strict
+    // -25.51 -> -24.48 dB, driven scene at Off -15.27 -> -14.86 dB (with the
+    // Tighten row restored the tree measures -25.54 / -15.19).
     CHECK_NEAR (thd[0][1], thd[0][0], 0.05);
-    CHECK_NEAR (thd[0][2], -25.51, 0.3);
+    CHECK_NEAR (thd[0][2], -24.48, 0.3);
     CHECK_GE (governed[0][2], SafetyGovernor::kDistortionBudgetDb);
     // Driven base settings: Normal governs them too, and the governor's
     // measured input (saturator + clipper) falls 6 dB; the output's THD+N
     // does not, because less clipper drive hands the 50 Hz peaks to the
     // limiter, whose distortion the governor does not see (KNOWN_GAP, E06
     // step 1).
-    CHECK_NEAR (thd[1][0], -15.27, 0.3);
-    CHECK_NEAR (thd[1][1], -14.11, 0.3);
-    CHECK_NEAR (thd[1][2], -20.83, 0.3);
+    CHECK_NEAR (thd[1][0], -14.86, 0.3);
+    CHECK_NEAR (thd[1][1], -14.05, 0.3);
+    CHECK_NEAR (thd[1][2], -20.63, 0.3);
     CHECK_LE (governed[1][1], governed[1][0] - 3.0);
 }

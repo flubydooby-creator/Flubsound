@@ -632,8 +632,8 @@ void ProcessingChain::applyParameters() noexcept
     virtualizer.setParams (vp);
 
     // ---- Compressor ----
-    // Gaming macros (Boost, Footsteps, Detail) switch the compressor on for
-    // its UPWARD section: quiet detail comes up. When only a macro engaged it
+    // The Gaming Detail macro switches the compressor on for its UPWARD
+    // section: quiet detail comes up. When only a macro engaged it
     // and nobody chose a downward ratio (comp.ratio still at its default), the
     // downward section stays off, so gunshots and explosions keep their
     // dynamics. Presets that set a ratio (e.g. 1.5:1 glue) keep it.

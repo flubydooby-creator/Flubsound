@@ -493,14 +493,18 @@ void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
             continue;
         // Attributes read back from XML are text: accept a whole number only
         // (a missing or malformed value leaves the parameter at its default).
+        // JUCE writes them with a '.' whatever the locale, so they are read
+        // with the core's locale-independent JSON number grammar, not strtod
+        // (a host that sets a ',' decimal locale would otherwise reset every
+        // fractional value to its default).
         const auto key = child[kParamIdProperty].toString().toStdString();
         const auto text = child[kParamValueProperty].toString().trim().toStdString();
-        char* end = nullptr;
-        const double value = std::strtod (text.c_str(), &end);
-        if (text.empty() || end != text.c_str() + text.size())
+        flub::json::Value number;
+        std::string parseError;
+        if (text.empty() || ! flub::json::parse (text, number, parseError) || ! number.isNumber())
             warnings.push_back ("\"" + key + "\": no numeric value, default used");
         else
-            carried.emplace_back (key, static_cast<float> (value));
+            carried.emplace_back (key, static_cast<float> (number.asNumber()));
     }
     std::vector<std::string> resolveWarnings; // unknown parameters, clamped values
     const auto values = flub::preset::resolveSavedState (carried, &resolveWarnings);

@@ -738,7 +738,11 @@ TEST_CASE ("Chain: on hot programme the loudness-matched bypass and the processe
         }
 
         const double processed = loudness (buf, 3.0, 6.0), input = loudness (in, 3.0, 6.0);
-        CHECK_GE (processed - input, 5.0); // processing is clearly louder
+        // Processing is clearly louder: pink +7.3 LU, kicks +4.5 LU (+7.9 /
+        // +6.0 LU until docs/11 E05 stage 1: its limiter holds the gain flat
+        // over each kick's half-cycles and its clipper no longer squares
+        // them off, which costs loudness on this kick programme).
+        CHECK_GE (processed - input, 4.0);
         std::vector<double> steps;
         for (double from = 6.0; from < 17.0; from += 2.0)
             steps.push_back (loudness (buf, from + 0.2, from + 2.0));
@@ -1228,16 +1232,17 @@ TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms
     // Maximizer alone, no clipper, Boost 0 (the scale changes no audio): the
     // output and the limiter's gain are the same at every block size. With a
     // per-block GR minimum the budget tripped by block size (min scale 1.0
-    // at 64, 0.69 at 512, 0.3 at 4096 samples at 14 dB drive). Drive 11.3 dB
-    // since docs/11 E05 stage 1: the limiter's gain hold and program
-    // envelope keep a steadier, deeper GR on this bass-heavy programme, so
-    // 14 dB now sits on the scale's floor (0.3) at every block size.
+    // at 64, 0.69 at 512, 0.3 at 4096 samples at 14 dB drive). Drive 12 dB
+    // since docs/11 E05 stage 1: the limiter's period hold and program
+    // envelope keep a steadier GR on this bass-heavy programme, so the
+    // budget now trips over a narrower range of drive (11.8 dB: never;
+    // 12.4 dB and up: the scale's floor, 0.3, at every block size).
     const auto minScale = [] (int blockSize) {
         ParameterStore store;
         bypassAllModules (store);
         store.set (MaximizerOn, 1.0f);
         store.set (MaxClipAmount, 0.0f);
-        store.set (MaxDriveDb, 11.3f);
+        store.set (MaxDriveDb, 12.0f);
         ProcessingChain chain (store);
         chain.prepare ({ kFs, blockSize, 2 });
         auto buf = makeProgramme (static_cast<int> (kFs * 12.0), 0.5f, 3);
@@ -1251,7 +1256,7 @@ TEST_CASE ("Protection: the governor's limiter-GR input is taken per fixed 10 ms
         return lowest;
     };
     const float s64 = minScale (64), s512 = minScale (512), s4096 = minScale (4096);
-    CHECK_LE (s512, 0.9f); // over budget: the governor acts (measured 0.78 at every block size)
+    CHECK_LE (s512, 0.9f); // over budget: the governor acts (measured 0.65 at every block size)
     CHECK_GE (s512, 0.5f);
     CHECK_NEAR (s64, s512, 0.05);
     CHECK_NEAR (s4096, s512, 0.05);
@@ -1427,12 +1432,14 @@ TEST_CASE ("Chain: a finite sample beyond +24 dBFS is muted and counted, and its
     // Hot, governed programme with AutoLevel on, in 10 ms blocks. A block
     // with one 1e30 sample: the sample is muted (not clamped), the output
     // stays finite and under the ceiling, and none of the control loops
-    // moves on that block. A NaN block is dropped and counted apart.
+    // moves on that block. A NaN block is dropped and counted apart. (Base
+    // drive 12 dB, 10 dB until docs/11 E05 stage 1: its crest-gated clipper
+    // and LF-safe limiter left this programme under the budgets at 10 dB.)
     ParameterStore store;
     store.set (Mode, static_cast<float> (ModeValue::Music));
     store.set (BoostIntensity, 1.0f);
     store.set (MaxClipAmount, 1.0f);
-    store.set (MaxDriveDb, 10.0f);
+    store.set (MaxDriveDb, 12.0f);
     store.set (AutoLevelOn, 1.0f);
     store.set (AutoLevelTargetLufs, -24.0f);
     constexpr int kBlock = 480;
@@ -1490,7 +1497,8 @@ TEST_CASE ("Chain: a host block runs in segments that end on the governor's 10 m
     // backs off throughout. The chain's output at 480- and 4096-sample
     // blocks (and a ragged split) agrees to float rounding; before the E06
     // slice a 4096-sample block held a scale for 85 ms that a 480-sample
-    // host changed at every tick.
+    // host changed at every tick. (Base drive 12 dB, 10 dB until docs/11 E05
+    // stage 1, whose maximizer governed this programme only to 0.905 there.)
     const auto render = [] (std::initializer_list<int> pattern) {
         ParameterStore store;
         bypassAllModules (store);
@@ -1498,7 +1506,7 @@ TEST_CASE ("Chain: a host block runs in segments that end on the governor's 10 m
         store.set (BoostIntensity, 1.0f);
         store.set (MaximizerOn, 1.0f);
         store.set (MaxClipAmount, 1.0f);
-        store.set (MaxDriveDb, 10.0f);
+        store.set (MaxDriveDb, 12.0f);
         ProcessingChain chain (store);
         chain.prepare ({ kFs, 4096, 2 });
         auto buf = makeProgramme (static_cast<int> (kFs * 4.0), 0.5f, 11);

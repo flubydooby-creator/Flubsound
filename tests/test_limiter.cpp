@@ -300,9 +300,10 @@ struct CeilingResult
 };
 
 CeilingResult runCeilingCase (const std::vector<float>& left, const std::vector<float>& right, double fs, float ceilingDb,
-                              float lookaheadMs = 1.5f, int blockSize = 256)
+                              float lookaheadMs = 1.5f, int blockSize = 256, const LimiterEnvelope& envelope = {})
 {
     TruePeakLimiter lim;
+    lim.setEnvelope (envelope);
     prepareLimiter (lim, fs, 2, 512, lookaheadMs);
     lim.setParams (limiterParams (ceilingDb, 80.0f, true));
     Planar buf (2, static_cast<int> (left.size()));
@@ -458,9 +459,13 @@ TEST_CASE ("TruePeakLimiter: ceiling holds in sample peak and independent true p
         };
         for (const auto& prog : programs)
         {
+            // The plain envelope (MixEngine master, bypass reference) and the
+            // maximizer's LF-safe one (docs/11 E05 stage 1).
+            for (const bool lfSafe : { false, true })
             for (float ceilingDb : { -1.0f, -0.1f })
             {
-                const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb);
+                const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb, 1.5f, 256,
+                                                 lfSafe ? LimiterEnvelope { true, true, true } : LimiterEnvelope {});
                 const double ceil = dbfs (ceilingDb);
                 reportIfFailed (res.samplePeak <= ceil && res.truePeak <= ceil * kTpTolerance && res.safetyClips == 0u, prog, fs,
                                 ceilingDb, res);
@@ -493,9 +498,11 @@ TEST_CASE ("TruePeakLimiter: full-band synthetic signals hold the sample ceiling
             { "tanh square 0 dBFS", tanhSquare (441.0, fs, n, tail, 1.0f), tanhSquare (3001.0, fs, n, tail, 1.0f) },
         };
         for (const auto& prog : programs)
+        for (const bool lfSafe : { false, true })
         {
             const float ceilingDb = -1.0f;
-            const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb);
+            const auto res = runCeilingCase (prog.l, prog.r, fs, ceilingDb, 1.5f, 256,
+                                             lfSafe ? LimiterEnvelope { true, true, true } : LimiterEnvelope {});
             const double ceil = dbfs (ceilingDb);
             reportIfFailed (res.samplePeak <= ceil && res.truePeak <= ceil * dbfs (2.0) && res.safetyClips == 0u, prog, fs, ceilingDb,
                             res);
@@ -511,10 +518,13 @@ TEST_CASE ("TruePeakLimiter: other ceilings and look-aheads hold the ceiling too
     const int n = 12000, tail = 1000;
     const auto noise = bandLimitedNoise (n, tail, 12.0f, 21);
     const auto square = bandLimit (naiveSquare (3000.0, kFs, n - 200, tail, 3.0f));
+    for (const bool lfSafe : { false, true })
     for (float lookaheadMs : { 0.0f, 0.5f, 1.0f, 5.0f })
         for (float ceilingDb : { -12.0f, -6.0f, 0.0f })
         {
             TruePeakLimiter lim;
+            if (lfSafe)
+                lim.setEnvelope ({ true, true, true });
             prepareLimiter (lim, kFs, 2, 512, lookaheadMs);
             lim.setParams (limiterParams (ceilingDb, 30.0f, true));
             Planar buf (2, n);
@@ -1214,4 +1224,141 @@ TEST_CASE ("TruePeakLimiter [adversarial]: CD-band programme (flat to 0.45 fs) s
         }
     CHECK_LE (worst, 0.15);
     CHECK_GE (worst, -0.5);
+}
+
+//==============================================================================
+// docs/11 E05 stage 1: the LF-safe envelope (LimiterEnvelope)
+//==============================================================================
+namespace
+{
+/** Limiter at a -1 dB ceiling with the given envelope; left = right = x.
+    Returns the latency-compensated left output. */
+std::vector<float> limitTone (const std::vector<float>& x, const LimiterEnvelope& envelope, TruePeakLimiter* keep = nullptr,
+                              int blockSize = 256)
+{
+    TruePeakLimiter local;
+    TruePeakLimiter& lim = keep != nullptr ? *keep : local;
+    lim.setEnvelope (envelope);
+    prepareLimiter (lim);
+    lim.setParams (limiterParams (-1.0f, 60.0f, true));
+    const int latency = lim.latencySamples();
+    Planar buf (2, static_cast<int> (x.size()) + latency);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    processInBlocks (lim, buf, blockSize);
+    return std::vector<float> (buf.ch[0].begin() + latency, buf.ch[0].end());
+}
+
+/** Residual after DC and the fundamental f0 over [begin, begin + n), dB re the total. */
+double thdnDb (const std::vector<float>& y, int begin, int n, double f0)
+{
+    double total = 0.0, mean = 0.0, re = 0.0, im = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        const double v = y[static_cast<size_t> (begin + i)];
+        total += v * v;
+        mean += v;
+        re += v * std::cos (kTwoPi * f0 * i / kFs);
+        im += v * std::sin (kTwoPi * f0 * i / kFs);
+    }
+    mean /= n;
+    const double residual = std::max (1.0e-30, total - mean * mean * n - 2.0 * (re * re + im * im) / n);
+    return 10.0 * std::log10 (residual / total);
+}
+} // namespace
+
+TEST_CASE ("TruePeakLimiter: the LF-safe envelope holds a bass tone's gain from peak to peak - 40 Hz at 7 dB GR distorts no more and an asymmetric waveform gets no DC")
+{
+    // 40 Hz at +6 dBFS into a -1 dB ceiling (7 dB GR): the plain envelope
+    // releases between the half-cycle peaks, 12.5 ms apart, and modulates
+    // the tone (docs/11 E05: -32.5 dB THD+N). The period hold covers the
+    // peak spacing (+1/8), so the gain is flat.
+    const int n = static_cast<int> (kFs * 2.0);
+    const auto x = sine (40.0, kFs, n, 2.0f);
+    TruePeakLimiter held;
+    const auto plain = limitTone (x, {});
+    const auto safe = limitTone (x, { true, true, true }, &held);
+    const double thdPlain = thdnDb (plain, static_cast<int> (kFs), static_cast<int> (kFs), 40.0);
+    const double thdSafe = thdnDb (safe, static_cast<int> (kFs), static_cast<int> (kFs), 40.0);
+    CHECK_GE (thdPlain, -40.0); // measured -33.2 dB
+    CHECK_LE (thdSafe, -90.0);  // docs/11 E05 Done-when <= -45 dB (measured below -100 dB)
+    CHECK_NEAR (held.getHoldMs(), 12.5 * 1.125, 0.1);
+    CHECK_LE (peakAbs (safe.data(), n), dbfs (-1.0));
+    CHECK (held.getSafetyClipCount() == 0u);
+
+    // 100 Hz + 200 Hz: only the big positive peak (every 10 ms) is limited.
+    // Released in between, gain x waveform carries DC; held, it cannot.
+    std::vector<float> asym (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+        asym[static_cast<size_t> (i)] = static_cast<float> (1.4 * std::sin (kTwoPi * 100.0 * i / kFs) + 1.4 * std::cos (kTwoPi * 200.0 * i / kFs));
+    const auto dc = [] (const std::vector<float>& y) {
+        double s = 0.0;
+        for (size_t i = y.size() / 2; i < y.size(); ++i)
+            s += y[i];
+        return toDb (std::abs (s) / static_cast<double> (y.size() - y.size() / 2));
+    };
+    const double dcPlain = dc (limitTone (asym, {})), dcSafe = dc (limitTone (asym, { true, true, true }));
+    CHECK_GE (dcPlain, -60.0); // measured about -45 dBFS
+    CHECK_LE (dcSafe, -70.0);  // measured -78 dBFS
+}
+
+TEST_CASE ("TruePeakLimiter: the period hold leaves isolated peaks and dense noise unheld, and the program envelope lands exactly on 0 dB afterwards")
+{
+    // Clicks 200 ms apart: every peak is isolated (none within 25 ms before
+    // it), so no hold. Long after the last one (the program gain releases
+    // with 800 ms and lands once within 1e-7) the output returns to the
+    // input bit for bit.
+    const int n = static_cast<int> (kFs * 16.0);
+    std::vector<float> clicks (static_cast<size_t> (n), 0.0f);
+    for (int k = 1; k < 8; ++k)
+        clicks[static_cast<size_t> (k * static_cast<int> (kFs * 0.2))] = 3.0f;
+    std::vector<float> quiet = sine (500.0, kFs, n, 0.1f);
+    for (size_t i = 0; i < quiet.size(); ++i)
+        quiet[i] += clicks[i];
+    TruePeakLimiter lim;
+    const auto y = limitTone (quiet, { true, true, true }, &lim);
+    CHECK_NEAR (lim.getHoldMs(), 0.0, 1.0e-6);
+    for (int i = n - static_cast<int> (kFs * 0.2); i < n; ++i)
+        REQUIRE (y[static_cast<size_t> (i)] == quiet[static_cast<size_t> (i)]);
+
+    // Dense white noise: peaks every few samples, so the hold stays short.
+    TruePeakLimiter dense;
+    limitTone (whiteNoise (n, 4.0f, 7), { true, true, true }, &dense);
+    CHECK_LE (dense.getHoldMs(), 2.0);
+}
+
+TEST_CASE ("TruePeakLimiter: with the LF-safe envelope the output is bit-identical for any block size, and process() does not allocate")
+{
+    const int n = static_cast<int> (kFs * 1.0);
+    std::vector<float> x (static_cast<size_t> (n));
+    FastRandom rng (9);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t, 0.25);
+        x[static_cast<size_t> (i)] = static_cast<float> (2.5 * std::exp (-beat * 20.0) * std::sin (kTwoPi * 55.0 * beat) + 0.6 * std::sin (kTwoPi * 45.0 * t)
+                                                         + 0.3 * rng.nextBipolar());
+    }
+    const auto reference = limitTone (x, { true, true, true }, nullptr, 512);
+    for (int block : { 1, 7, 64, 4096 })
+    {
+        const auto y = limitTone (x, { true, true, true }, nullptr, block);
+        bool same = y.size() == reference.size();
+        for (size_t i = 0; same && i < y.size(); ++i)
+            same = y[i] == reference[i];
+        CHECK (same);
+    }
+
+    TruePeakLimiter lim;
+    lim.setEnvelope ({ true, true, true });
+    prepareLimiter (lim);
+    lim.setParams (limiterParams (-1.0f, 60.0f, true));
+    Planar buf (2, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    AllocationGuard guard;
+    processInBlocks (lim, buf, 256);
+    lim.reset();
+    CHECK (guard.allocations() == 0);
+    CHECK_LE (planarPeak (buf), dbfs (-1.0));
+    CHECK (lim.getSafetyClipCount() == 0u);
 }

@@ -218,7 +218,8 @@ Flubsound/
 │   ├── test_presets_golden.cpp             docs/11 E52: parameter defaults, factory uuids / contentHashes and (reference platform only) golden renders against tests/golden
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input and UTF-8 (non-ASCII) paths
 │   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
-│   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 interim's gunfire check; metric meta-validation; render.stats vs a hand computation
+│   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 cue enhancer's gunfire check; metric meta-validation; render.stats vs a hand computation
+│   ├── test_scenes.cpp                     docs/11 E60 stage 1: seeded burst / quiet → combat / ambush programme at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned (ratchet), metric validation, E19's Done-when
 │   ├── golden/preset-render-baseline.json  baseline of tools/scripts/preset-render-diff.py (25 presets x 5 programmes, not read by flub_tests)
 │   ├── golden/parameter-defaults.json      every parameter default (test_presets_golden.cpp: a changed default needs a schema major and a migration)
 │   ├── golden/factory-presets.json         per factory preset: uuid, contentHash and the golden render (integrated LUFS, 1/3-octave bands)

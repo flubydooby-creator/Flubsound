@@ -53,6 +53,12 @@
 //              banks); the opt-in automatic overload response:
 //              setReduceLoadOnOverload(), hasReducedLoad(),
 //              describeLoadReduction(), restoreLatencyProfile().
+// Correction   getDeviceCorrection(): the output endpoint's headphone /
+//              speaker correction (docs/11 E15; import an AutoEQ / Equalizer
+//              APO ParametricEQ.txt with importDeviceCorrection, enable /
+//              compare / remove it). Stored per output endpoint, applied on
+//              the master sum before the limiter with an automatic preamp;
+//              presets, A/B banks and automatic profiles never touch it.
 // Routing      getRouting() (per-app routing, executable -> strip).
 // Auto profile getAutoProfileRules() / setAutoProfileRules(): "while <app> is
 //              in the foreground, <strip> plays <preset>" (roadmap 2.5,
@@ -274,6 +280,39 @@ public:
         <app data>/Flubsound/device-profiles.json when present). */
     const flub::device::Database& getDeviceProfiles() const noexcept { return deviceProfiles; }
 
+    // ---- Device correction (docs/11 E15) ------------------------------------------------
+    /** What the current output endpoint's correction is and does. */
+    struct DeviceCorrectionInfo
+    {
+        juce::String endpoint;      // the output endpoint it is stored for; empty while no output is open
+        bool hasCurve = false;      // a curve is stored for the endpoint
+        juce::String name;          // what was imported ("HD 600 ParametricEQ.txt")
+        bool enabled = false;       // stored on / off switch
+        bool comparing = false;     // momentary compare (session only)
+        int numFilters = 0;
+        float preampDb = 0.0f;      // automatic preamp applied (<= 0 dB; 0 while off)
+        double maxBoostDb = 0.0;    // predicted maximum boost of the curve incl. its own Preamp (docs/11 E11)
+        double maxBoostHz = 0.0;
+        juce::String curveText;     // the stored curve (APO syntax)
+    };
+    DeviceCorrectionInfo getDeviceCorrection() const;
+    /** Imports a ParametricEQ.txt for the current output endpoint, replacing
+        any curve it had, switched on, and persists it. Returns false with
+        `error` set (nothing changed) for an unsupported file or when no output
+        endpoint is open. `warnings` receives what was ignored or assumed.
+        Broadcasts Change::Settings. */
+    bool importDeviceCorrection (const juce::File& file, juce::String& error, juce::StringArray* warnings = nullptr);
+    bool importDeviceCorrectionText (const juce::String& text, const juce::String& name, juce::String& error,
+                                     juce::StringArray* warnings = nullptr);
+    /** On / off for the current endpoint's curve (persisted). */
+    void setDeviceCorrectionEnabled (bool shouldBeEnabled);
+    /** Compare: the curve's filters off, its broadband gain (preamp) kept, so
+        the A/B is not a loudness comparison. Per session; ends when the
+        endpoint changes. */
+    void setDeviceCorrectionCompare (bool comparing);
+    /** Forgets the current endpoint's curve. */
+    void removeDeviceCorrection();
+
     /** Device input -> strip policy (see AppSettings::DeviceInputMode). */
     void setDeviceInputMode (AppSettings::DeviceInputMode mode);
     void setDeviceInputStrip (int strip);
@@ -376,6 +415,7 @@ private:
     void updateDeviceProfile();
     void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
+    void applyDeviceCorrection();
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
     void applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions);
     void applyAutoProfile (const AutoProfileRule& rule);
@@ -425,6 +465,8 @@ private:
     int simulatedOutputChannels = 2;
     bool preferredMissing = false, restoringPreferred = false;
     bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
+    juce::String correctionEndpoint; // endpoint the applied device correction belongs to
+    bool correctionCompare = false;
 
     OverloadWatchdog overloadWatchdog;
     AutoLoadReducer loadReducer;

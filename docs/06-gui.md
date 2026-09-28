@@ -38,7 +38,8 @@
 | Design system: tokens, look-and-feel, vector icons | Implemented | `ui/Theme.*`, `ui/FlubLookAndFeel.*`, `ui/Widgets.*` |
 | Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation), the muted-strip icon and the app-chip error badge. A few amber/green indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
-| Settings dialog: Audio, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
+| Settings dialog: Audio, Correction, Processing, Hotkeys, General | Implemented | `ui/SettingsDialog.*` |
+| Headphone / speaker correction per output device ([11 E15](11-enhancement-report.md#e15) MVP) | Implemented: import an AutoEQ / Equalizer APO ParametricEQ.txt, on / off, compare, remove; stored per output device; automatic preamp. No bundled measurement data, no GraphicEQ, no target curves yet | `ui/SettingsDialog.*` (`CorrectionPage`), `engine/EngineController.*`, `settings/AppSettings.*` |
 | System tray / macOS menu-bar icon | Implemented | `shell/TrayIcon.*` |
 | Global hotkeys | Implemented on Windows (`RegisterHotKey`), macOS (Carbon `RegisterEventHotKey`) and Linux: `XGrabKey` under X11, the xdg-desktop-portal GlobalShortcuts interface in Wayland sessions ("unsupported" when the desktop has no such portal) | `shell/HotkeyManager.*`, `app/Source/platform/PlatformServices_*` |
 | Per-app routing UI | Implemented. Backend support differs per OS (§8). The routing model (`AppRouting`) is tested with a fake router and fake captures (`tests/app/test_app_routing.cpp`); `RoutingPanel`'s strip rows are not (its *Auto profiles* list is, below) | `ui/RoutingPanel.*`, `app/Source/engine/AppRouting.*` |
@@ -368,7 +369,7 @@ All four images are real renders of the app by the headless driver (§11). No au
 
 - The Game strip (7.1) is selected and the accent is magenta.
 - The driver plays a 7.1 game scene on Game and music at −12 dB on the Music strip, so both strips show activity dots.
-- The single amber diamond near 90 Hz is the live gain of the Gaming *anti-masking* mode band (dynamic-EQ band 6). The screenshot predates docs/11 E19's interim: the footstep bands became static bells, so a current build also shows diamonds at 3.2 kHz and 260 Hz (up to +3.2 / +1.4 dB at this preset's Footsteps 45 %, less on loud passages; a marker is drawn from 0.1 dB).
+- The single amber diamond near 90 Hz is the live gain of the Gaming *anti-masking* mode band (dynamic-EQ band 6). The screenshot predates docs/11 E19 and E20: that band is now this preset's user band 0 (same 90 Hz shelf, so its diamond sits in the same place), and the footstep bands 4 / 5 are the cue enhancer, which shows a diamond at 3.2 kHz / 260 Hz only while a cue rises out of the ambience (up to +3.2 / +1.4 dB at this preset's Footsteps 45 %; a marker is drawn from 0.1 dB).
 - The compressor shows −2.0 dB of gain reduction (*7.1 Headphone Surround* sets a 1.5:1 ratio, so its downward section stays in force).
 
 ![Headset advice banner for a Turtle Beach Stealth headset](images/app-gaming-headset-advice.png)
@@ -433,7 +434,7 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 │     ├─ AnalyzerFeed   (non-visual)        ui/AnalyzerFeed.*
 │     └─ MeterSnapshot  (non-visual)        ui/MeterSnapshot.*
 │  on demand: DialogWindow → SettingsDialog ui/SettingsDialog.*
-│     └─ AudioDeviceSelectorComponent | ProcessingPage | HotkeysPage | GeneralPage
+│     └─ AudioDeviceSelectorComponent | CorrectionPage | ProcessingPage | HotkeysPage | GeneralPage
 │  on demand: DialogWindow → ExportDialog   app/Source/export/ExportDialog.*
 │     └─ ExportJob (non-visual; one worker juce::Thread)   app/Source/export/ExportJob.*
 ├─ TrayIcon (SystemTrayIconComponent)       shell/TrayIcon.*
@@ -551,7 +552,7 @@ flowchart LR
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
 | `ParameterBinder` × 2 (Boost panel, module rack) | 30 Hz `juce::Timer` | `store.version()` poll → control refresh; effective-value rings |
 | `ModuleCard` ear | 10 Hz, only while held | safety net: ends the audition if the button is no longer down, the card is hidden or the app lost the foreground |
-| `SettingsDialog` | 2 Hz | live latency, CPU and capture-stream text (Processing); device-profile text (Audio) |
+| `SettingsDialog` | 2 Hz | live latency, CPU and capture-stream text (Processing); device-profile text (Audio); the output's correction status (Correction) |
 | `AudioEngineHost` | 5 Hz | structural re-prepare poll (latency profile, layout) → `Change::Engine` |
 | `EngineController` | 2 Hz | CPU-overload watchdog poll (`OverloadWatchdog`, §6.1) → `Change::Device` when an overload starts or ends, and when the opt-in `AutoLoadReducer` stepped the latency profile down; foreground-application poll for automatic profiles (§8.1; skipped when unsupported or switched off) → `Change::Preset` / `Change::Routing` when a rule applies or ends; strip-state autosave every 5 s (only when a store's `version()` changed); preferred-output rescan every 5 s while it is missing |
 | `AppRouting` worker | every 2 s while routes exist, captures run or live updates are on; immediately on `refresh()` | session enumeration, endpoint moves |
@@ -699,6 +700,8 @@ Each component below lists its purpose, what it reads and writes, its update rat
 | `macro.4` | 0–100 % / 0 % | **Loudness**: maximizer drive and multiband glue (safety governed) | **Detail**: brings up quiet ambience and distant cues (upward compression) |
 | `macro.5` | 0–100 % / 0 % | **Warmth**: tape saturation and harmonic bass (safety governed) | **Voice & Score**: dialogue, comms and music intelligibility |
 
+Two tooltips (`BoostPanel.cpp`) are out of date: Punch no longer drives Bass Tighten ([11 E04](11-enhancement-report.md#e04)), so there is no "tighter low end", and Footsteps is the cue enhancer, which lifts cues as they rise out of the ambience and no longer drives the anti-masking band ([11 E19](11-enhancement-report.md#e19), [E20](11-enhancement-report.md#e20)), so it does not "tame masking booms".
+
 The macros add staged contributions on top of the preset's base values (`MacroMap`, [`05-code-skeletons.md`](05-code-skeletons.md) §3). The Boost and macro knobs are the sources, so they never show an effective ring. The module knobs they drive do.
 
 ### 6.4 `AnalyzerPanel` / `SpectrumAnalyzer` — pre vs post spectrum
@@ -792,7 +795,7 @@ Bands 0–3 are the user dynamic bands at `dyneq.<b>.freq`. Bands 4–7 are the 
 
 | Mode | Band 4 | Band 5 | Band 6 | Band 7 |
 |---|---|---|---|---|
-| Gaming | 3.2 kHz footstep lift (upward) | 260 Hz footstep body (upward) | 90 Hz low-shelf anti-masking (cut above) | 2 kHz voice & score (upward) |
+| Gaming | 3.2 kHz footstep cue lift | 260 Hz footstep-body cue lift | 90 Hz low-shelf anti-masking (inactive since 11 E20; the presets use a user band) | 2 kHz voice & score (upward) |
 | Music | 3.5 kHz dynamic de-harsh | 12 kHz air shelf (upward) | 120 Hz de-boom | 1 kHz (inactive; range 0) |
 
 **Interaction**
@@ -993,6 +996,7 @@ Row heights adapt between 14 and 22 px.
 | Page | Contents |
 |---|---|
 | **Audio** | **OUTPUT DEVICE PROFILE** box (`describeOutputDevice`): device · profile or "generic device" · connection · safety ceiling · "narrowband (speech) format" · suggested preset · every guidance message, one bulleted paragraph each; the box grows with its text and the page scrolls when it is longer than the dialog. Below it, `juce::AudioDeviceSelectorComponent`: device type, device, rate, buffer; 0–16 inputs (one 7.1 strip + three stereo strips); 1–2 outputs; channels as stereo pairs; no MIDI. The EngineController persists the selection |
+| **Correction** | **Headphone / speaker correction** for the open output device ([11 E15](11-enhancement-report.md#e15); DSP in [03 §14.10](03-dsp-design.md#1410-device-correction-and-the-headroom-predictor-desktop-app)). An intro says what it is and that Flubsound ships no measurement data. A status block: `Output: <device>` and `describeDeviceCorrection()`, e.g. `HD 600 ParametricEQ.txt  -  10 filters  -  preamp -5.7 dB (max boost +5.7 dB at 20 Hz)`, `...  -  off`, `...  -  comparing (filters off)`, "No correction for this output." or "Open an output device to import a correction for it.". **Import ParametricEQ.txt...** (a file chooser; the file must be an AutoEQ or Equalizer APO / Peace ParametricEQ text: refused commands such as GraphicEQ, Include or corner-frequency shelves are reported with their line, ignored lines such as `Device:` or a centre channel as notes, below the buttons); **Compare** (a toggle: the curve's filters off, its broadband gain kept, so the comparison is not a loudness one; per session, ends on an endpoint change); **Remove**; *Correction on for this output* (switch, persisted). The curve belongs to the output device: presets, A/B and automatic profiles never change it, and switching the output device switches (or removes) it without a click (20 ms crossfade) |
 | **Processing** | **Latency profile** (Quality / Balanced / Low Latency), written to every strip and both banks so A/B never triggers a re-prepare (`EngineController::setLatencyProfile()`). Help text: Quality adds the spectral gate and the highest oversampling; Balanced ≈ 4 ms is the default; Low Latency ≈ 2 ms. **Reduce processing load automatically when the CPU overloads** (switch, default off; §6.1), and **Automatic change**: what it changed (or "None") with a **Restore** button, enabled only after an automatic step. **Device input**: Automatic (only inputs that look like a virtual cable or loopback, never a microphone) / Always / Off. **Input feeds strip** (default Game). **Per-app routing**: Automatic / Endpoint routing / Process capture / Off, with unsupported entries greyed out. **Meter colours**: Standard / Colour-blind safe. **Current latency** block: device and type, rate, block size, "device in + engine + device out (+ app capture) = total", and a CPU line: load, device xruns when reported, and "OVERLOAD now (peak x %)" or "n overloads this session". **Per-app capture streams** block: one wrapped line per running capture, from its `DriftCompensatedFifo::Stats` (`EngineController::getCaptureStreams()`), e.g. `Discord (Chat): fill 21.3 / 20.0 ms, drift +42 ppm  -  1 underrun, 0 overflows` (application name from `AppRouting`, else `Process <pid>`; `priming` or `stopped` when not streaming; dropped frames when any), or a note that there are none |
 | **Hotkeys** | *Enable system-wide hotkeys* switch. *Hotkeys act on*: the strip the strip-level hotkeys control (§7.2; default Game). One row per action with a text editor: type a chord such as `Ctrl+Alt+F`, `Ctrl+Shift+F5` or `None`, then Return or leave the field; Esc reverts. A reset button's tooltip names the default. Next to each row, its registration status (`HotkeyManager::getStatus`, §7.2): "Registered" (green), "In use / could not register" or "Declined by the desktop" (amber), "Bound by the desktop as <key>", "Waiting for the desktop", "Not assigned", "Off" or "Not supported here". The page polls it at 4 Hz while visible, so answers the desktop gives later appear by themselves. The status line below reads one of: "All shortcuts are registered", "Shortcuts are switched off", "Some shortcuts are not active (see each row) …", "Waiting for the desktop to confirm the shortcuts …", "The desktop bound some shortcuts to other keys …", an invalid-chord message, or "not available here" (no platform support / Wayland without the GlobalShortcuts portal; the chords are still saved) |
 | **General** | *Start Flubsound Pro when I sign in* (§7.1; hidden where unsupported); *Start minimised*; *Close button keeps Flubsound running in the tray*; **Appearance**: *UI scale* (Follow system, 75–200 %) and *Theme* (Standard (dark) / High contrast), both applied app-wide at once and persisted (§2.8); paths of the settings file and the user preset folder, each with **Show**; version line `Flubsound Pro <version>  -  Music & Gaming Edition` |
@@ -1179,7 +1183,7 @@ There is no wizard yet. First-run behaviour is built from defaults and in-contex
 
 - **Sensible defaults** (`EngineController`, `AppSettings`):
   - four strips (Game 7.1, Music, Chat, System);
-  - a strip with no saved state at start-up (a first run) loads a default factory preset ([11 E36](11-enhancement-report.md#e36), `EngineController::loadFirstRunDefault`): *Flubsound Signature* on Music and System (and any other stereo strip), *Voice Chat* on Chat ([11 E23](11-enhancement-report.md#e23): speech levelled to about −18 to −20 LUFS, no maximizer drive), and on Game (and any strip with more than 2 channels) *First Run – Game*: *Competitive FPS* with Boost 20 %, Footsteps 30 % and Detail 15 %, shown as a modified *Competitive FPS*, because as shipped it lifts −50 / −60 dBFS pink beds by +4.9 / +9.7 LU (capped: +2.7 / +2.6 LU; step/bed contrast change +0.06 to +0.49 dB on the E59 burst scenes). A/B start equal, no default sets a latency profile (Balanced), ceiling −1 dBTP, and saved state is never overwritten. Headless runs without state restore (screenshots) keep the parameter defaults (Boost 0 %);
+  - a strip with no saved state at start-up (a first run) loads a default factory preset ([11 E36](11-enhancement-report.md#e36), `EngineController::loadFirstRunDefault`): *Flubsound Signature* on Music and System (and any other stereo strip), *Voice Chat* on Chat ([11 E23](11-enhancement-report.md#e23): speech levelled to about −18 to −20 LUFS, no maximizer drive), and on Game (and any strip with more than 2 channels) *First Run – Game*: *Competitive FPS* with Boost 20 %, Footsteps 30 % and Detail 15 %, shown as a modified *Competitive FPS*, because as shipped it lifted −50 / −60 dBFS pink beds by +4.9 / +9.7 LU (capped: +2.7 / +2.6 LU; step/bed contrast change +0.06 to +0.49 dB on the E59 burst scenes). Since [11 E19](11-enhancement-report.md#e19)'s cue enhancer and preset retune, Competitive FPS as shipped lifts them +2.6 / +2.5 LU and the capped variant +1.0 / +0.9 LU (CLI), so the cap is due for review under E36. A/B start equal, no default sets a latency profile (Balanced), ceiling −1 dBTP, and saved state is never overwritten. Headless runs without state restore (screenshots) keep the parameter defaults (Boost 0 %);
   - the Game strip, and any strip with more than 2 channels, starts in Gaming mode;
   - master enabled;
   - the saved (or default) audio device is opened; without a saved choice, Windows uses JUCE's *Windows Audio (Low Latency Mode)* type (`IAudioClient3`), falling back to *Windows Audio*;
@@ -1287,8 +1291,9 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Reduce processing load automatically when the CPU overloads | `engine.reduceLoadOnOverload` (§6.1); a profile it stepped to is saved like a manual one, the Restore offer is per session | off |
 | Routing method and routes; preferred output device | `AppSettings` | Automatic; none |
 | Automatic profiles: switch and rules (application, strip, preset id, mode, restore on exit; in order) | `autoProfile.enabled`, `autoProfile.rules` (§8.1) | on; none |
+| Device corrections: one per output device (device name, imported file name, on / off, the curve as Equalizer APO text) | `device.corrections` (§6.11 Correction); never part of a strip state or a preset | none |
 
-**Not persisted:** banner dismissal (per session and device), the expanded card, the selected EQ band, the Settings page and the Export / batch process dialog's inputs, output folder and options.
+**Not persisted:** banner dismissal (per session and device), the correction's Compare toggle, the expanded card, the selected EQ band, the Settings page and the Export / batch process dialog's inputs, output folder and options.
 
 ---
 
@@ -1300,6 +1305,7 @@ These describe the behaviour of the current code.
 - **Per-app routing on macOS** is not implemented. **On Windows**, moving an application needs the opt-in `FLUB_ENABLE_UNDOCUMENTED_ROUTING` build (§8).
 - **Automatic profiles on Wayland** are unsupported: Wayland does not let applications see which window is in the foreground (§8.1). X11 needs an EWMH window manager that publishes `_NET_ACTIVE_WINDOW` and clients that set `_NET_WM_PID`. On Windows and macOS the foreground detection has not been run yet (compiled with MinGW only / not yet built on a Mac).
 - **Accessibility gaps** are listed in §2.8.
+- **Device correction** (§6.11) is keyed by the output device's name as the audio backend reports it, not yet by a stable endpoint ID ([11 E51](11-enhancement-report.md#e51)), so two identical headsets share a curve and a renamed device loses it. There is no curve editor or graph, no GraphicEQ import, no target selection and no model search ([11 E15](11-enhancement-report.md#e15) later stages, [E16](11-enhancement-report.md#e16)).
 - **Export / batch process** (§6.12) renders one file at a time (the CLI's `batch --jobs N` runs several in parallel), has no progress within a file, and does not resample (outputs keep the input's rate). Outputs are always stereo WAV (float32 / PCM24 / PCM16) or FLAC (24 / 16-bit); there is no MP3 / Ogg / AAC output. Cancel waits for the file being rendered to finish.
 
 ---
@@ -1316,5 +1322,5 @@ These describe the behaviour of the current code.
 | R4.6 | Virtual audio device / cable support | §6.11 (Settings › Processing: **Device input**, with *Automatic (virtual cables / loopback only)* / *Always process the device input* / *Off*, and **Input feeds strip**), §8 (endpoint routing to the `Flubsound <Strip>` / `flubsound_<strip>` endpoints). The virtual devices themselves are designs (`platform/windows/driver/README.md`, `platform/macos/README.md`); the Linux null sinks exist (`platform/linux/`) | `ui/SettingsDialog.*` (`ProcessingPage`), `engine/EngineController.*` (`setDeviceInputMode`, `setDeviceInputStrip`, `looksLikeLoopbackDevice`: Flubsound, VB-Audio / "CABLE Output", VoiceMeeter, BlackHole, Soundflower, "loopback"), `engine/AudioEngineHost.*` (`setDeviceInputMap`) |
 | R2.10 | Per-module bypass + A/B | §6.1, §6.9 | `ui/HeaderBar.*`, `ui/ModuleCard.*` |
 | R3.4 | Boost Intensity 0–100 % | §6.3 | `ui/BoostPanel.*` |
-| R6.1 | Headset-aware safety and setup advice | §6.2, §11 (`--device`) | `ui/DeviceAdviceBanner.*`, `shell/ScreenshotDriver.*` |
+| R6.1 | Headset-aware safety and setup advice | §6.2, §6.11 (Correction: per-device correction curve), §11 (`--device`) | `ui/DeviceAdviceBanner.*`, `ui/SettingsDialog.*`, `shell/ScreenshotDriver.*` |
 | R5.1, R5.2 | Batch processing and export of enhanced audio (in the app) | §6.12 | `export/ExportDialog.*`, `export/ExportJob.*`, `tools/flubsound-cli/OfflineRenderer.*` |

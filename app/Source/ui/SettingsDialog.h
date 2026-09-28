@@ -7,6 +7,12 @@
 //               the matched headset / device profile, its connection, the
 //               safety ceiling applied to the master limiter and all of its
 //               guidance (the page scrolls when that is long).
+//   Correction  the output device's headphone / speaker correction (docs/11
+//               E15): import an AutoEQ or Equalizer APO / Peace
+//               ParametricEQ.txt, switch it on / off, hold a level-fair
+//               compare, remove it; shows the output it belongs to, the
+//               filter count, the automatic preamp and the predicted maximum
+//               boost, and what an import refused or ignored.
 //   Processing  latency profile (applied to every strip and both A/B banks;
 //               the engine re-prepares with a brief dropout), the opt-in
 //               automatic overload response (switch, what it changed and a
@@ -57,6 +63,7 @@ public:
     enum class Page
     {
         Audio,
+        Correction,
         Processing,
         Hotkeys,
         General
@@ -94,11 +101,17 @@ public:
         state and session count, on one line. */
     static juce::String describeCpuLine (const EngineStatus& status, const OverloadWatchdog::State& overload);
 
+    /** The Correction page's status line: "HD 600.txt  -  10 filters  -
+        preamp -5.7 dB (max boost +5.7 dB at 3.7 kHz)", "... off", or that the
+        output has no correction / no output is open. */
+    static juce::String describeDeviceCorrection (const EngineController::DeviceCorrectionInfo& info);
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
 private:
     class AudioPage;
+    class CorrectionPage;
     class ProcessingPage;
     class HotkeysPage;
     class GeneralPage;
@@ -106,9 +119,10 @@ private:
     void timerCallback() override;
 
     EngineController& controller;
-    std::array<juce::TextButton, 4> navButtons;
+    std::array<juce::TextButton, 5> navButtons;
     std::unique_ptr<AudioPage> audioPage;
     juce::Viewport audioView; // the Audio page scrolls when the guidance is long
+    std::unique_ptr<CorrectionPage> correctionPage;
     std::unique_ptr<ProcessingPage> processingPage;
     juce::Viewport processingView; // ... and the Processing page when there are many capture streams
     std::unique_ptr<HotkeysPage> hotkeysPage;

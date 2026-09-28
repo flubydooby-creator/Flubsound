@@ -31,6 +31,7 @@ constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
 constexpr const char* autoProfileRules = "autoProfile.rules";
+constexpr const char* deviceCorrections = "device.corrections";
 } // namespace Keys
 
 struct NamedKey
@@ -536,5 +537,70 @@ void AppSettings::setAutoProfileRules (const std::vector<AutoProfileRule>& rules
         e->setAttribute ("restore", r.restoreOnExit);
     }
     properties->setValue (Keys::autoProfileRules, &xml);
+}
+// ---- Device correction ---------------------------------------------------------------
+namespace
+{
+void storeDeviceCorrections (juce::PropertiesFile& properties, const std::vector<DeviceCorrectionEntry>& entries)
+{
+    juce::XmlElement xml ("CORRECTIONS");
+    for (const auto& e : entries)
+    {
+        auto* child = xml.createNewChildElement ("ENDPOINT");
+        child->setAttribute ("id", e.endpoint);
+        child->setAttribute ("name", e.name);
+        child->setAttribute ("enabled", e.enabled);
+        child->addTextElement (e.curveText);
+    }
+    properties.setValue (Keys::deviceCorrections, &xml);
+}
+} // namespace
+
+std::vector<DeviceCorrectionEntry> AppSettings::getDeviceCorrections() const
+{
+    std::vector<DeviceCorrectionEntry> entries;
+    if (auto xml = properties->getXmlValue (Keys::deviceCorrections))
+    {
+        for (auto* e : xml->getChildWithTagNameIterator ("ENDPOINT"))
+        {
+            DeviceCorrectionEntry entry;
+            entry.endpoint = e->getStringAttribute ("id");
+            entry.name = e->getStringAttribute ("name");
+            entry.enabled = e->getBoolAttribute ("enabled", true);
+            entry.curveText = e->getAllSubText();
+            if (entry.endpoint.isNotEmpty())
+                entries.push_back (entry);
+        }
+    }
+    return entries;
+}
+
+std::optional<DeviceCorrectionEntry> AppSettings::getDeviceCorrection (const juce::String& endpoint) const
+{
+    for (auto& e : getDeviceCorrections())
+        if (e.endpoint == endpoint)
+            return e;
+    return std::nullopt;
+}
+
+void AppSettings::setDeviceCorrection (const DeviceCorrectionEntry& entry)
+{
+    if (entry.endpoint.isEmpty())
+        return;
+    auto entries = getDeviceCorrections();
+    const auto it = std::find_if (entries.begin(), entries.end(), [&entry] (const auto& e) { return e.endpoint == entry.endpoint; });
+    if (it != entries.end())
+        *it = entry;
+    else
+        entries.push_back (entry);
+
+    storeDeviceCorrections (*properties, entries);
+}
+
+void AppSettings::removeDeviceCorrection (const juce::String& endpoint)
+{
+    auto entries = getDeviceCorrections();
+    entries.erase (std::remove_if (entries.begin(), entries.end(), [&endpoint] (const auto& e) { return e.endpoint == endpoint; }), entries.end());
+    storeDeviceCorrections (*properties, entries);
 }
 } // namespace flub::app

@@ -58,17 +58,18 @@ constexpr float kRecoveredGain = 0.98855309f; // 10^(-0.1 / 20)
 // recovered limiter is bit-transparent (y = x delayed).
 constexpr double kLand = 1.0e-7;
 
-// LF-safe envelope (docs/11 E05 stage 1, LimiterEnvelope): gain hold after
-// each peak, longer while energy below kLfCornerHz is present (a detector
-// with hysteresis on the low band's share of the power), and the program
-// envelope's one-pole times.
-constexpr float kHoldShortMs = 10.0f;
-constexpr float kHoldLongMs = 25.0f;
-constexpr double kLfCornerHz = 50.0;
-constexpr float kLfPowerMs = 100.0f;
-constexpr double kLfEnterShare = 0.10;  // low band > 10 % of the power: long hold
-constexpr double kLfExitShare = 0.05;   // back to the short hold below 5 %
-constexpr double kLfMinPower = 1.0e-12; // below -120 dBFS the decision holds
+// LF-safe envelope (docs/11 E05 stage 1, LimiterEnvelope). Period hold:
+// the gain holds after each peak for the spacing of the recent peaks (+1/8),
+// so a periodic waveform's gain stays flat from one peak to the next instead
+// of releasing in between (at least half a period of the lowest frequency
+// that sets the peaks), up to kMaxHoldMs (half a period of 20 Hz). A peak is
+// a run of overs (r < 1) that starts more than kPeakGapMs after the last
+// over; an isolated peak (none within kMaxHoldMs before it) gets no hold,
+// so transients and dense broadband programme are not held (a fixed 10 ms
+// hold on every peak, docs/11 E05's first proposal, cost 1-2 LU on
+// kick-heavy programme and lengthened every duck).
+constexpr float kMaxHoldMs = 25.0f;
+constexpr float kPeakGapMs = 0.5f;
 constexpr float kProgramAttackMs = 150.0f;
 constexpr float kProgramReleaseMs = 800.0f;
 
@@ -185,23 +186,14 @@ void TruePeakLimiter::prepare (const ProcessSpec& newSpec)
     detector.prepare (spec.numChannels);
     audioDelay.prepare (spec.numChannels, lookahead + detectorDelay);
 
-    // Gain hold after the peak (lowFrequencyHold): H extends the sliding
-    // minimum's window.
-    holdShort = envelope.lowFrequencyHold ? static_cast<uint32_t> (msToSamples (kHoldShortMs, spec.sampleRate)) : 0u;
-    holdLong = envelope.lowFrequencyHold ? static_cast<uint32_t> (msToSamples (kHoldLongMs, spec.sampleRate)) : 0u;
-    {
-        const double g = std::tan (kPi * std::min (kLfCornerHz, 0.4 * spec.sampleRate) / spec.sampleRate);
-        constexpr double k = 1.41421356237309505; // Butterworth, Q = 1 / sqrt 2
-        lfA1 = 1.0 / (1.0 + g * (g + k));
-        lfA2 = g * lfA1;
-        lfA3 = g * lfA2;
-        lfPowerCoeff = 1.0 - static_cast<double> (onePoleCoeff (kLfPowerMs, spec.sampleRate));
-    }
+    // Gain hold after the peak (periodHold): H extends the sliding minimum's window.
+    holdMax = envelope.periodHold ? static_cast<uint32_t> (msToSamples (kMaxHoldMs, spec.sampleRate)) : 0u;
+    peakGap = static_cast<uint32_t> (std::max (1, msToSamples (kPeakGapMs, spec.sampleRate)));
 
     // The deque holds at most L + Kh + 2 + H live entries plus the one that
     // expires on the current sample.
     baseWindow = static_cast<uint32_t> (lookahead + hold + 2);
-    const int capacity = nextPowerOfTwo (lookahead + hold + 3 + static_cast<int> (holdLong));
+    const int capacity = nextPowerOfTwo (lookahead + hold + 3 + static_cast<int> (holdMax));
     dequeValue.assign (static_cast<size_t> (capacity), 1.0f);
     dequeIndex.assign (static_cast<size_t> (capacity), 0u);
     dequeMask = static_cast<uint32_t> (capacity - 1);
@@ -251,11 +243,11 @@ void TruePeakLimiter::reset() noexcept FLUB_NONBLOCKING
     ring2Pos = 0;
     ceilingPos = 0;
 
-    lowFrequencyPresent = false;
-    window = baseWindow + holdShort;
-    lfIc1 = lfIc2 = lfPower = fullPower = 0.0;
+    window = baseWindow;
+    holdSamples = spacingLast = spacingPrev = 0;
+    sincePeakStart = sinceOverSample = 2 * holdMax + peakGap; // no recent peak
     programGain = 1.0;
-    holdMs.store (envelope.lowFrequencyHold ? kHoldShortMs : 0.0f, std::memory_order_relaxed);
+    holdMs.store (0.0f, std::memory_order_relaxed);
 
     // No previous output to click against: the ceiling starts at its target.
     ceilingDbS.reset (spec.sampleRate, kCeilingSmoothMs, params.ceilingDb);
@@ -325,9 +317,9 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
 
     float minGain = 1.0f;
     uint64_t clips = 0;
-    const bool lfHold = envelope.lowFrequencyHold;
+    const bool periodHold = envelope.periodHold;
     const bool program = envelope.programEnvelope;
-    const double invCh = 1.0 / numCh;
+    const uint32_t counterCap = 2 * holdMax + peakGap;
 
     // Strictly per sample with all state carried across calls, so the output
     // is bit-identical for any host block size.
@@ -357,26 +349,29 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         // Written as a comparison so +Inf gives 0 and NaN gives 1.
         const float r = peak > thresholdLin ? thresholdLin / peak : 1.0f;
 
-        // ---- 2b) LF detector: the gain hold H after each peak (lowFrequencyHold) ----
-        // The low band's share of the channel mean's power, with hysteresis,
-        // picks 10 or 25 ms (the window may shrink by many samples at once:
-        // the expiry below is a loop).
-        if (lfHold)
+        // ---- 2b) period hold: H = the recent peak spacing (periodHold) --------
+        // A peak starts when r < 1 after more than peakGap samples without an
+        // over; the spacing of peak starts sets the hold (max of the last two,
+        // so alternating big / small peaks are covered). The window may
+        // shrink by many samples at once: the expiry below is a loop.
+        if (periodHold)
         {
-            double mean = 0.0;
-            for (int c = 0; c < numCh; ++c)
-                mean += static_cast<double> (data[static_cast<size_t> (c)][i]);
-            mean = std::isfinite (mean) ? mean * invCh : 0.0;
-            const double v3 = mean - lfIc2;
-            const double v1 = lfA1 * lfIc1 + lfA2 * v3;
-            const double v2 = lfIc2 + lfA2 * lfIc1 + lfA3 * v3;
-            lfIc1 = 2.0 * v1 - lfIc1;
-            lfIc2 = 2.0 * v2 - lfIc2;
-            lfPower += lfPowerCoeff * (v2 * v2 - lfPower);
-            fullPower += lfPowerCoeff * (mean * mean - fullPower);
-            if (fullPower > kLfMinPower)
-                lowFrequencyPresent = lfPower > (lowFrequencyPresent ? kLfExitShare : kLfEnterShare) * fullPower;
-            window = baseWindow + (lowFrequencyPresent ? holdLong : holdShort);
+            if (r < 1.0f)
+            {
+                if (sinceOverSample > peakGap)
+                {
+                    const uint32_t spacing = sincePeakStart;
+                    spacingPrev = spacing <= holdMax ? spacingLast : 0u;
+                    spacingLast = spacing <= holdMax ? spacing : 0u;
+                    const uint32_t recent = std::max (spacingLast, spacingPrev);
+                    holdSamples = std::min (holdMax, recent + recent / 8u);
+                    window = baseWindow + holdSamples;
+                    sincePeakStart = 0;
+                }
+                sinceOverSample = 0;
+            }
+            sincePeakStart = std::min (sincePeakStart + 1u, counterCap);
+            sinceOverSample = std::min (sinceOverSample + 1u, counterCap);
         }
 
         // ---- 3) sliding minimum over r[n-L-Kh-1 .. n] (monotonic deque) -----------
@@ -512,17 +507,8 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         audioDelay.advance();
     }
 
-    if (lfHold)
-    {
-        // No subnormal detector states after the input falls silent.
-        if (std::abs (lfIc1) < 1.0e-30 && std::abs (lfIc2) < 1.0e-30)
-            lfIc1 = lfIc2 = 0.0;
-        if (lfPower < 1.0e-30)
-            lfPower = 0.0;
-        if (fullPower < 1.0e-30)
-            fullPower = 0.0;
-        holdMs.store (lowFrequencyPresent ? kHoldLongMs : kHoldShortMs, std::memory_order_relaxed);
-    }
+    if (periodHold)
+        holdMs.store (static_cast<float> (1000.0 * holdSamples / spec.sampleRate), std::memory_order_relaxed);
     grDb.store (gainToDb (minGain), std::memory_order_relaxed);
     if (clips > 0)
         safetyClips.fetch_add (clips, std::memory_order_relaxed);

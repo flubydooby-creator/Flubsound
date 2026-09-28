@@ -11,7 +11,8 @@
 // the hotkey strip, start
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
-// preset on a strip), the UI scale and theme, and the window position.
+// preset on a strip), the device corrections (one per output endpoint,
+// docs/11 E15), the UI scale and theme, and the window position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -25,6 +26,7 @@
 #include <juce_data_structures/juce_data_structures.h>
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace flub::app
@@ -71,6 +73,19 @@ struct AutoProfileRule
     bool restoreOnExit = false; // put the strip's previous preset back when the app leaves the foreground
 
     bool operator== (const AutoProfileRule&) const = default;
+};
+
+/** A headphone / speaker correction stored for one output endpoint (docs/11
+    E15). The curve is kept as Equalizer APO text (flub::eqtext::format), so
+    the settings file stays readable and a curve survives format changes. */
+struct DeviceCorrectionEntry
+{
+    juce::String endpoint;  // output endpoint key (EngineController: the output device name)
+    juce::String name;      // what the user imported, e.g. "HD 600 ParametricEQ.txt"
+    bool enabled = true;
+    juce::String curveText; // APO / AutoEQ ParametricEQ syntax
+
+    bool operator== (const DeviceCorrectionEntry&) const = default;
 };
 
 class AppSettings
@@ -203,6 +218,16 @@ public:
         Rules without an executable, strip or preset are dropped. */
     std::vector<AutoProfileRule> getAutoProfileRules() const;
     void setAutoProfileRules (const std::vector<AutoProfileRule>& rules);
+
+    // ---- Device correction (docs/11 E15) ------------------------------------------------
+    /** Every stored correction, one per endpoint. Never part of a preset, a
+        strip state or an automatic profile. */
+    std::vector<DeviceCorrectionEntry> getDeviceCorrections() const;
+    /** The endpoint's correction (exact, case-sensitive key); nullopt if none. */
+    std::optional<DeviceCorrectionEntry> getDeviceCorrection (const juce::String& endpoint) const;
+    /** Adds or replaces the entry for entry.endpoint (ignored if the key is empty). */
+    void setDeviceCorrection (const DeviceCorrectionEntry& entry);
+    void removeDeviceCorrection (const juce::String& endpoint);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

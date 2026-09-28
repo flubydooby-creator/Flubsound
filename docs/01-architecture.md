@@ -236,10 +236,10 @@ flowchart LR
 
   Macros can also *engage* modules. For example, turning up *Warmth* switches Saturation on (`core/src/engine/MacroMap.cpp`). In Gaming, a compressor that only macros switched on runs upward-only (ratio 1:1) unless a ratio was chosen, so loud events keep their dynamics.
 - **Mode bands.** Dynamic-EQ bands 4–7 belong to the mode policy, not to the user:
-  - Gaming: footstep lift (3.2 kHz and 260 Hz upward compression), explosion anti-masking (90 Hz low shelf, cut above) and voice/score presence (2 kHz).
+  - Gaming: the footstep cue enhancer (3.2 kHz and 260 Hz: a lift for what rises out of each band's own background, [11 E19](11-enhancement-report.md#e19)), explosion anti-masking (90 Hz low shelf, cut above; off in the mode policy since [11 E20](11-enhancement-report.md#e20), the presets that want it carry it as a user band) and voice/score presence (2 kHz).
   - Music: dynamic de-harsh (3.5 kHz), air lift (12 kHz shelf) and de-boom (120 Hz); band 7 is unused in Music.
 
-  Each band's range scales with its source: Footsteps (bands 4–6) and Voice & Score (band 7) in Gaming; Clarity (de-harsh, air) and Boost Intensity (de-boom) in Music (`configureModeBands()` in `ProcessingChain.cpp`).
+  Each band's range scales with its source: Footsteps (bands 4–5) and Voice & Score (band 7) in Gaming; Clarity (de-harsh, air) and Boost Intensity (de-boom) in Music (`configureModeBands()` in `ProcessingChain.cpp`).
 - **Glue arming.** The maximizer's 3-band glue splitter is only in the signal path while glue is *armed*: the preset sets `max.glue` > 0, or a macro that can raise it (Music: Boost Intensity, Loudness) is above zero. While armed, a 0.001 floor keeps the splitter engaged so Boost crossing the glue start point (40 %) never crossfades against the splitter's all-pass-shifted sum. Disarmed, the splitter is out of the path, because its all-pass rotation would raise the crest factor of flat-topped masters by 1–3 dB.
 - **Protection loops** close around the output (`core/src/engine/Protection.cpp`):
   - The SafetyGovernor keeps the ~3 s average limiter gain reduction above −6 dB and the measured THD+N of the saturator and the soft clipper below −30 dB (each measured over 25 ms windows; the clipper's share floored at its clip energy ratio over the same window, the former proxy, so it does not act later on clipping than before). Over budget, its scale falls at 15 %/s (minimum 0.3); comfortably under budget (1.5 dB hysteresis) it recovers at 3 %/s.

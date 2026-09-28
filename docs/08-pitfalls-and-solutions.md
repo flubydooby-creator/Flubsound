@@ -141,9 +141,9 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 - **Symptom:** far footsteps sound as close as near ones.
 - **Root cause:** loudness is a primary distance cue, and heavy compression flattens it.
 - **Solution:**
-  - Instead of global squashing, Gaming uses **targeted** processing: upward compression of *quiet high-frequency detail* only (footstep band 3.2 kHz, `BoostBelow`) and **anti-masking** of very loud lows (explosions).
+  - Instead of global squashing, Gaming uses **targeted** processing: a *cue enhancer* that lifts only what rises out of the ambience in the footstep bands (3.2 kHz and 260 Hz, `CueLift`, [11 E19](11-enhancement-report.md#e19)), so a step keeps its level relative to the bed and to other steps, and **anti-masking** of very loud lows (explosions; a user dynamic-EQ band in the presets that use it).
   - The upward compressor has a noise-floor taper and a gentle ratio.
-  - When only Gaming macros (Boost Intensity, *Footsteps*, *Detail*) switch the compressor on and no ratio was chosen, the chain runs it at 1:1: it only lifts quiet sounds, and gunshots and explosions keep their dynamics (03 §9.7; test *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*). The *Competitive FPS* preset sets 1:1 explicitly; other Gaming presets choose a gentle downward ratio on purpose.
+  - When only the Gaming *Detail* macro switches the compressor on and no ratio was chosen, the chain runs it at 1:1: it only lifts quiet sounds, and gunshots and explosions keep their dynamics (03 §9.7; test *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*). The *Competitive FPS* preset sets 1:1 explicitly; other Gaming presets choose a gentle downward ratio on purpose.
 
 ### C3. Wideners and crossfeed corrupt localisation
 - **Symptom:** blurry or phasey positions, and "inside-the-head" confusion.
@@ -161,7 +161,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 
 ### C5. Masking after loud events
 - **Symptom:** footsteps inaudible for a second after a grenade.
-- **Solution:** a fast auto-release limiter (release/5 for isolated peaks), the anti-masking low-shelf dynamic-EQ band (gaming mode band 6, 90 Hz, scaled by *Footsteps*), per-band glue where a preset arms it (e.g. *Cinematic Adventure*; no Gaming macro raises glue), and a fast bass-protection release (150 ms).
+- **Solution:** a fast auto-release limiter (release/5 for isolated peaks), the anti-masking low-shelf dynamic-EQ band (90 Hz, cut above −22 dBFS; user band 0 in the gaming presets that tame loud LF, no longer scaled by *Footsteps* since [11 E20](11-enhancement-report.md#e20)), the footstep cue enhancer, whose background falls back with a 400 ms time constant after the event, so the next step is lifted again (step lift 1–2 s after the combat scene within 0.4 dB of before in `tests/test_scenes.cpp`), per-band glue where a preset arms it (e.g. *Cinematic Adventure*; no Gaming macro raises glue), and a fast bass-protection release (150 ms).
 
 ### C6. Front/back confusion in virtual surround
 - **Symptom:** rear sounds are heard in front.

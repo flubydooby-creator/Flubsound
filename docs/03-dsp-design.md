@@ -36,7 +36,7 @@
 | [11](#11-loudness-maximizer--soft-clipper) | Loudness maximizer + soft clipper | `core/src/dsp/LoudnessMaximizer.cpp` |
 | [12](#12-spectral-noise-gate) | Spectral noise gate | `core/src/dsp/SpectralNoiseGate.cpp` |
 | [13](#13-metering-loudness-lra-true-peak-rms-and-correlation) | Metering: loudness, LRA, true peak, RMS and correlation | `core/src/analysis/LoudnessMeter.cpp`, `core/include/flub/analysis/{PeakMeters,LoudnessFollower,ChannelWeights}.h` |
-| [14](#14-macros-musicgaming-modes--protection-loops) | Macros, Music/Gaming modes & protection loops | `core/src/engine/{MacroMap,ProcessingChain,Protection,MixEngine}.cpp` |
+| [14](#14-macros-musicgaming-modes--protection-loops) | Macros, Music/Gaming modes & protection loops; device correction and the headroom predictor (§14.10) | `core/src/engine/{MacroMap,ProcessingChain,Protection,MixEngine}.cpp`, `core/src/dsp/DeviceCorrection.cpp`, `core/src/io/ParametricEqText.cpp` |
 | [15](#15-chain-level-cpu-and-latency-summary) | Chain-level CPU and latency summary | `core/src/engine/{ProcessingChain,ModuleSlot,MixEngine}.cpp` |
 
 ---
@@ -351,7 +351,8 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
     ─► global bypass crossfade (30 ms) with the dry reference (tapped after the fold, delayed by the chain latency):
                      × match trim (0 … −20 dB, the louder side only) → TRUE-PEAK LIMITER @ max.ceiling
                      (only while bypass is engaged; its latency is taken out of the dry delay, so none is added)
-    ─► (desktop app only) Σ strips → master TP limiter −1 dBTP, 1 ms look-ahead (0.5 ms when every strip is Low Latency)
+    ─► (desktop app only) Σ strips → device correction (the output endpoint's curve, automatic preamp ≤ 0 dB, §14.10)
+                     → master TP limiter −1 dBTP, 1 ms look-ahead (0.5 ms when every strip is Low Latency)
 ```
 
 ### 1.3 Where gain is added and removed
@@ -389,6 +390,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 - **Neither can the matched bypass.** The dry reference never passes the maximizer. The loudness match used to raise it, with a per-block cap at `max.ceiling` − held dry peak that was not enough on its own (the gain ramps over 50 ms, so a new, louder dry peak could arrive while it was still high): CLI renders of pink noise with 55 Hz kicks under the Loudness macro peaked at −0.13 to +0.28 dBFS against a −1 dBTP ceiling. The match now only ever turns the louder side down ([11 E37](11-enhancement-report.md#e37)), but the input itself can peak above the ceiling. The reference therefore passes a dedicated `TruePeakLimiter` at `max.ceiling` (true-peak detection, 80 ms auto release) that fits inside the chain latency the dry path is delayed by anyway (§14.6), so every host (app, plug-in, CLI) now gets the ceiling in bypass too. Test: *Chain: matched bypass never overshoots the ceiling when a louder dry peak arrives*.
   - Hosts that run a single `ProcessingChain` (plug-in, CLI) therefore need no extra safety net. With `--ceiling` or `--target-lufs` the CLI switches the maximizer on, or warns if `max.on=off` was requested explicitly (`tools/flubsound-cli/CliOptions.cpp`); it also warns if the measured true peak of a render exceeds the ceiling by more than 0.1 dB (`OfflineRenderer.cpp`).
   - In the desktop app several strips, each at its own ceiling, can sum above it. The `MixEngine` master limiter (−1 dBTP, 1 ms look-ahead or 0.5 ms when every strip runs Low Latency, 50 ms auto release, `MixEngine.cpp`) catches that; its safety-clamp count is exposed as `MixEngine::getMasterSafetyClipCount()`.
+  - The desktop app's device correction (§14.10) sits between the strip sum and that limiter. Its automatic preamp is −max(0, the curve's maximum boost over 20 Hz – 20 kHz), predicted on the exact digital response, so no steady sine leaves it louder than it entered; the master limiter still guarantees the ceiling.
 - **Glue is out of the path unless armed.** The maximizer's 3-band glue splitter is an all-pass, and a phase rotator raises the crest factor of flat-topped (mastered) material, which the limiter would then have to take back. `applyParameters()` therefore keeps the 0.001 glue floor only while glue is *armed* (`base[max.glue] > 0`, or a macro that can raise glue is above zero); otherwise glue is 0 and the splitter is out of the path. §11.3.2 has the rule, the measurements and the test (*Chain: with glue disarmed the maximizer passes hot flat-topped material untouched*: a −5 dBFS 100 Hz square passes the default maximizer unchanged within 1e−6 of the delayed input, with no gain reduction).
 - **Known onset overshoots** are left for the limiter by design:
   - the bass protection's 10 ms detector attack lets a sudden loud bass note overshoot its cap by up to ≈ 3–4 dB, from roughly 12 ms to 40 ms after the onset (§4.3.3, §4.9);
@@ -684,9 +686,26 @@ Worked example (threshold −30 dBFS, ratio 2, range 6 dB, noise floor −70 dBF
 
 The noise-floor taper is what makes `BoostBelow` safe: silence and hiss are never lifted. On digital silence the level is −160 dB, so the taper is 0.
 
+**`CueLift` (the Gaming cue enhancer, docs/11 E19).** A fifth mode, used only by the Gaming mode bands 4 and 5 (the user bands' `mode` parameter offers the four above). Its threshold and ratio are unused; the gain is keyed to the band's own *background* instead:
+
+```
+level      = 10 log10( mean square of the detector, linked (max over channels),
+                       one-pole over max(2.5 ms, 4 / f) )
+background : starts at the level; for 300 ms after a (re)start follows it (40 ms);
+             then rises at most 5 dB/s and falls with a 400 ms time constant;
+             never below noiseFloor'
+onset      = range' · ramp(level − background, 2 dB → 4.5 dB) · taper   (taper as BoostBelow)
+held       = onset, held for 30 ms after it drops, then free to fall
+cap        = (1 − ramp(peakDb − max(background, −55 dBFS), 26 dB → 36 dB))
+             · (1 − ramp(peakDb, −6 dBFS → −1 dBFS))                     peakDb: the peak envelope above
+dyn        = GainSmoother(held) · cap'     cap' = cap, falling in 0.5 ms, rising in 20 ms
+```
+
+A step or reload stands several dB out of a steady bed at any programme level, so it gets the full range within about 1–2 ms (the 20 ms steps of *KnownGap closed: step/bed contrast* get 5.2 dB of a 7 dB range, 40–80 ms steps 6.0–6.5 dB, at −14 to −50 LUFS alike). The bed is its own background and is not lifted (bed lift +0.01 to +0.07 dB at Footsteps 100 in `tests/test_scenes.cpp`), nor is any steady tone. Out of digital silence the background is the hiss floor, so an isolated −60 dBFS step is 15 dB out of it and gets 94–100 % of the range. Gunfire and explosions reach the cap: their peak stands 26–36 dB or more over the background, and the lift is withdrawn within 0.5 ms (+0.05 to +0.25 dB on −3 dBFS shots in the gaming presets). A new, louder bed is lifted only while it stands 2–4.5 dB over the old background, i.e. until the background has risen, at most about a second for a 5 dB step. `expanderMode` is true for `CueLift` (a rising gain is the attack).
+
 **Smoothing of the dynamic gain.**
 - `dyn = GainSmoother(targetDb)` runs at control rate with the band's `attackMs` / `releaseMs` as one-pole time constants.
-- `expanderMode` is true for `BoostAbove` and `CutBelow`, so "attack" is always the response to a *rising* detector level (§0.9).
+- `expanderMode` is true for `BoostAbove`, `CutBelow` and `CueLift`, so "attack" is always the response to a *rising* detector level (§0.9).
 - Once within 1e-5 dB, the gain snaps exactly onto its target.
 - Time constants shorter than one control period (0.33 ms at 48 kHz) effectively act within a single tick.
 
@@ -747,9 +766,9 @@ EQ      = SvfCoeffs::make(shape ∈ {Bell, LowShelf, HighShelf}, f', Q', totalDb
 
 | Mode | Band | Purpose | Mode / shape | f | Q | Thr (dBFS) | Ratio | Range | Att / Rel (ms) | Floor |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Gaming | 4 | footstep detail | BoostBelow / Bell | 3200 Hz | 0.9 | −6 | 3 | 7 dB × Footsteps (0 at ≤ 32 kHz) | 3 / 120 | −75 |
-| Gaming | 5 | footstep body (heel) | BoostBelow / Bell | 260 Hz | 1.2 | −6 | 2.5 | 3 dB × Footsteps | 5 / 150 | −75 |
-| Gaming | 6 | explosion anti-masking | CutAbove / Low Shelf | 90 Hz | 0.7 | −22 | 3 | 6 dB × Footsteps | 10 / 250 | −80 |
+| Gaming | 4 | footstep detail (cue enhancer) | CueLift / Bell | 3200 Hz | 0.9 | — | — | 7 dB × Footsteps (0 at ≤ 32 kHz) | 1 / 40 | −75 |
+| Gaming | 5 | footstep body (heel; cue enhancer) | CueLift / Bell | 260 Hz | 1.2 | — | — | 3 dB × Footsteps | 2 / 60 | −75 |
+| Gaming | 6 | explosion anti-masking (off: range 0, see below) | CutAbove / Low Shelf | 90 Hz | 0.7 | −22 | 3 | 0 | 10 / 250 | −80 |
 | Gaming | 7 | voice / score | BoostBelow / Bell | 2000 Hz | 0.7 | −36 | 2 | 4 dB × Voice & Score | 5 / 150 | −70 |
 | Music | 4 | dynamic de-harsh | CutAbove / Bell | 3500 Hz | 1.2 | −22 | 3 | 3 dB × Clarity | 2 / 80 | −80 |
 | Music | 5 | air lift | BoostBelow / High Shelf | 12 000 Hz | 0.7 | −45 | 2 | 3 dB × Clarity | 10 / 200 | −80 |
@@ -758,7 +777,7 @@ EQ      = SvfCoeffs::make(shape ∈ {Bell, LowShelf, HighShelf}, f', Q', totalDb
 
 The macro values used are the *effective* (post-MacroMap) values.
 
-Gaming bands 4 and 5 are the docs/11 E19 interim: with the threshold at −6 dBFS, the law `(1 − 1/ratio) × (−6 − level)` reaches the range at −16.5 dBFS (band 4) and −11 dBFS (band 5), so each band is a static bell for every quieter cue, with a hiss taper below −65 dBFS and a roll-off over the loudest ~10 dB. A 20 ms step under a bed gets the same lift as a steady one, and the step/bed contrast changes only as much as a static EQ changes it. Loud cues are rolled off: a −10 dBFS 3.2 kHz tone gets +2.7 dB, a −3 dBFS one nothing, and shots at −3 dBFS peak get +0.6 to +1.1 dB in the 3.2 kHz band in the gaming presets. Out of digital silence a step still gets little: the band sits below its hiss floor, where the taper holds the gain at 0, and the lift then rises at the 120 ms release. Band 4 is off when the chain runs at 32 kHz or less (docs/11 E17): those are Bluetooth hands-free rates, where 3.2 kHz sits at 0.2–0.8 × Nyquist of a narrowband link. Band 6 (anti-masking) still follows Footsteps, so the footstep control also tames explosions (an explosion 3 dB under full scale comes out 4.3 dB quieter at Footsteps 100). docs/11 E20 decouples it inside E19's redesign and keys it to E21's loud-event "Tame" amount; switching it off before then would remove the gaming presets' only loud-LF taming (Competitive FPS: +3.4 dB on −6 dBFS 55 Hz kicks).
+Gaming bands 4 and 5 are the docs/11 E19 cue enhancer (`CueLift`, §3.3): a cue that rises out of the band's own background gets the full range from its first milliseconds at any programme level, while the stationary bed, steady tones, loud events and hiss get none. Before it (the E19 interim) they were static bells with a −6 dBFS threshold: full lift for every cue under about −16 / −11 dBFS, including the bed itself, so the step/bed contrast moved only as a static EQ moves it (+0.8 dB), the loud roll-off cut −14 LUFS steps to 2.6–3.8 dB, and a step out of digital silence got 0.5–1.7 dB (the BoostBelow taper, below). Band 4 is off when the chain runs at 32 kHz or less (docs/11 E17): those are Bluetooth hands-free rates, where 3.2 kHz sits at 0.2–0.8 × Nyquist of a narrowband link. Band 6 (anti-masking) no longer follows Footsteps (docs/11 E20): at Footsteps 100 an explosion 3 dB under full scale came out 4.3 dB quieter, so the footstep control was also a loud-event control. It is off in the Gaming mode policy until E21's loud-event "Tame" amount exists to key it to; the presets that tamed loud LF (Competitive FPS, Battle Royale, Night Mode, Horror Detail, 7.1 Headphone Surround) carry the same band as user band 0 with their old amount (6 dB × their old Footsteps value; switching it off alone gave Competitive FPS +3.4 dB on −6 dBFS 55 Hz kicks).
 
 The frequency column is a table in `ProcessingChain.cpp` (`kGamingModeBandHz`, `kMusicModeBandHz`); `ProcessingChain::modeBandFrequency(mode, band)` returns it for GUI markers (bands `kFirstModeBand = 4` … 4 + `kNumModeBands` − 1 = 7; 0 for any other band).
 
@@ -789,8 +808,8 @@ Measured distortion from the gain control (implementer's measurements):
 ### 3.7 Gaming vs Music usage
 
 - **Gaming.**
-  - The Footsteps macro scales bands 4 and 5: 2–5 kHz "scuff and tick" and 150–400 Hz heel energy get a static lift, rolled off on the loudest events (gunfire, close explosions) and on hiss (§3.4).
-  - The anti-masking low shelf only acts on *very* loud low-frequency events and recovers with a 250 ms release, so the steps after an explosion are not buried.
+  - The Footsteps macro scales bands 4 and 5, the cue enhancer: 2–5 kHz "scuff and tick" and 150–400 Hz heel energy are lifted as they rise out of the band's background, not the bed itself, the loudest events (gunfire, close explosions) or hiss (§3.3, §3.4).
+  - The anti-masking low shelf (a user band in the presets that use it, §3.4) only acts on *very* loud low-frequency events and recovers with a 250 ms release, so the steps after an explosion are not buried.
   - Voice & Score scales band 7.
   - Linked detection keeps every source's direction intact.
 - **Music.**
@@ -847,7 +866,7 @@ Measured distortion from the gain control (implementer's measurements):
   The envelope then decays with a time constant of one window, so a low-shelf band has an effective release floor of about 50 ms, whatever `releaseMs` is.
 - **Minimum 1 ms hold.** Loud bass leaking through the skirt of a high-Q treble bell with a very low threshold can still modulate the gain slightly. Example: 3 kHz, Q 2, threshold −45 dBFS, −3 dBFS 100 Hz gives sidebands at −65 dBc with an 80 ms release and −47 dBc with 5 ms.
 - **Residual level ripple** remains for tones very close to small rational fractions of fs: 0.13 dB near fs/4, 0.11 dB near fs/3, 0.04 dB near fs/6 (implementer's measurements).
-- **A BoostBelow lift out of silence rises at the release time.** The gain smoother picks attack or release by the direction of the gain, and a BoostBelow gain that rises is a "release". Below the noise floor the taper holds the gain at 0, so a cue that starts from digital silence gets its lift only at `releaseMs`. The Gaming footsteps band (120 ms release) gives isolated −60 dBFS bursts of 20 / 40 / 80 ms 0.5 / 0.9 / 1.7 dB against 5.7 dB steady (*KnownGap: burst footsteps*, `tests/test_known_gaps.cpp`). Under a bed above the floor the lift is already there. Timing the taper as an expander (attack when the level rises out of the floor) would fix it; docs/11 E19's redesign replaces the floor with a background estimate.
+- **A BoostBelow lift out of silence rises at the release time.** The gain smoother picks attack or release by the direction of the gain, and a BoostBelow gain that rises is a "release". Below the noise floor the taper holds the gain at 0, so a cue that starts from digital silence gets its lift only at `releaseMs`. The Gaming footsteps band gave isolated −60 dBFS bursts of 20 / 40 / 80 ms 0.5 / 0.9 / 1.7 dB against 5.7 dB steady while it was a BoostBelow band (120 ms release). Under a bed above the floor the lift is already there. The Gaming footsteps bands are `CueLift` since docs/11 E19, whose background sits at the floor in silence and whose rising gain is an attack: 5.3 / 5.6 / 5.7 dB (*KnownGap closed: burst footsteps*, `tests/test_known_gaps.cpp`).
 - **`getBand()` returns a reference to audio-thread state.** GUIs must read band settings from the `ParameterStore`, not from `getBand()`. Post-macro values come from `ProcessingChain::effectiveValue(id)`, which the audio thread publishes once per block through relaxed atomics, and the live dynamic gain from `getBandGainDb()`.
 
 ---
@@ -1062,7 +1081,7 @@ Macro contributions (section 14 has the full tables):
 
 - **Music.**
   - **Boost Intensity:** boost +5 dB over 20–80 % and harmonics +0.30 over 35–90 %, both governed.
-  - **Punch:** tighten +0.5 over 20–100 %.
+  - **Punch:** no longer drives tighten (docs/11 E04: tighten 0.5 took 2 dB off a kick's first 10 ms).
   - **Warmth:** engages Bass; harmonics +0.20 over 40–100 % and boost +2 dB over 30–100 %, both governed.
   - Boost Intensity also scales the de-boom dynamic-EQ band (120 Hz, §3.4), which holds boomy passages in check while the shelf boosts.
 - **Gaming.**
@@ -2344,11 +2363,9 @@ Module sanitising: out-of-range values clamp, and a non-finite field keeps its l
 ### 9.7 Gaming vs Music usage
 
 - **Gaming** (all ungoverned):
-  - **Boost Intensity** engages `comp.on` from about 6 % (smoothstep 5–7 %) and adds upward max +5 dB (10–70 %).
-  - **Footsteps** engages it and adds upward max +3 dB (30–100 %).
-  - **Detail** engages it and adds upward max +8 dB (0–100 %).
-  - Together they reach +16 dB (store range 0 … 18). With the default upward curve the lift is capped by the curve itself at +9 dB (above).
-  - **A macro-engaged compressor is upward-only.** When only these macros switched the module on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, `ProcessingChain::applyParameters()` sets the effective ratio to **1:1**. The downward slope `1 − 1/R` is then 0, so gunshots and explosions keep their dynamics while quiet cues are lifted. Before this rule the default downward curve (−18 dBFS, 2.5:1, 6 dB knee) took about 4.8 dB off a −10 dBFS tone at Footsteps 100 %. A preset that sets a ratio keeps it (the Gaming factory presets that engage the compressor choose 1:1 to 3:1), and so does a compressor the user switched on. The effective value shows the 1:1 (§14.1). Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen* (`tests/test_modes.cpp`: with only Footsteps engaging the compressor, the effective ratio reads 1:1 and a −10 dBFS 1 kHz tone stays within 0.2 dB of the macro-off level; with a stored 1.5:1 it comes out more than 1 dB lower). A compressor the user switched on is rendered too: its effective ratio stays at the default 2.5 and it takes more than 1 dB off the loud tone.
+  - **Detail** engages `comp.on` and adds upward max +8 dB (0–100 %). With the default upward curve the lift is capped by the curve itself at +9 dB (above).
+  - Boost Intensity (+5 dB, 10–70 %) and Footsteps (+3 dB, 30–100 %) drove it too until docs/11 E19: a broadband upward compressor lifts the ambience bed with the cues, so the footstep lift is the dynamic EQ's cue enhancer alone (§3.4).
+  - **A macro-engaged compressor is upward-only.** When only these macros switched the module on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, `ProcessingChain::applyParameters()` sets the effective ratio to **1:1**. The downward slope `1 − 1/R` is then 0, so gunshots and explosions keep their dynamics while quiet cues are lifted. Before this rule the default downward curve (−18 dBFS, 2.5:1, 6 dB knee) took about 4.8 dB off a −10 dBFS tone at Footsteps 100 %. A preset that sets a ratio keeps it (the Gaming factory presets that engage the compressor choose 1:1 to 3:1), and so does a compressor the user switched on. The effective value shows the 1:1 (§14.1). Test: *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen* (`tests/test_modes.cpp`: with only Detail engaging the compressor, the effective ratio reads 1:1 and a −10 dBFS 1 kHz tone stays within 0.2 dB of the macro-off level; with a stored 1.5:1 it comes out more than 1 dB lower). A compressor the user switched on is rendered too: its effective ratio stays at the default 2.5 and it takes more than 1 dB off the loud tone.
   - Where a downward ratio is in force, the 80 Hz sidechain high-pass keeps explosions from ducking everything.
   - The Low Latency profile uses a 0.5 ms look-ahead.
 - **Music.** No Music macro touches the compressor, and `comp.on` defaults to off. It is a user/preset tool, for example dynamic genres or night listening via the upward curve.
@@ -2406,7 +2423,7 @@ Sources: [`core/include/flub/dsp/TruePeakLimiter.h`](../core/include/flub/dsp/Tr
 ### 10.1 Purpose
 
 The limiter is the **only** stage that guarantees the ceiling (rule 5 of §1.1). It is used three times:
-- inside every strip's `LoudnessMaximizer` (section 11), at `max.ceiling`;
+- inside every strip's `LoudnessMaximizer` (section 11), at `max.ceiling`, with the LF-safe envelope of §10.3.5 ([11 E05](11-enhancement-report.md#e05) stage 1);
 - on every strip's global-bypass reference while bypass is engaged (`dryLimiter` in `ProcessingChain`, at `max.ceiling`, 1 ms look-ahead, 80 ms auto release; §14.5);
 - as the desktop app's master limiter in `MixEngine` across all strips (section 14).
 
@@ -2533,6 +2550,24 @@ run reset : no over for 25 ms AND g ≥ 10^(−0.1/20) (within 0.1 dB of unity)
   - `getSafetyClipCount()` counts clamp engagements since `prepare()` (not reset by `reset()`). The maximizer forwards its limiter's count (`LoudnessMaximizer::getSafetyClipCount()`); the chain publishes it per block as `MeterBus::safetyClipCount`; the desktop master limiter's count is `MixEngine::getMasterSafetyClipCount()`.
 - **Channels.** All channels are linked (one gain). Prepared channels missing from a block are fed zeros through the detector and the delay, so a channel that rejoins never replays stale audio.
 
+#### 10.3.5 LF-safe envelope (maximizer only)
+
+`setEnvelope (LimiterEnvelope)` (structural, read at `prepare()`) adds three optional stages ([11 E05](11-enhancement-report.md#e05) stage 1). The maximizer turns all three on; the MixEngine master and the bypass reference keep the plain envelope above (the E05 item's "master bus changes too" is still open).
+
+```
+periodHold     m[n] = min(r[n−L−Kh−1−H … n])          window L + Kh + 2 + H
+               H = min(25 ms, T + T/8),  T = max(last two spacings of peak starts), 0 when no peak in the 25 ms before
+               a peak start = r < 1 more than 0.5 ms after the previous over
+smoothAttack   a[n] = mean(mean(m, M1), M2),  M1 + M2 − 1 = L − Kh + 1      triangular kernel over the same support
+programEnvelope p[n] = g < p ? g + ca·(p − g) : g + cr·(p − g)   ca = 150 ms, cr = 800 ms (lands on g within 1e−7)
+               output gain = min(g[n], p[n])
+```
+
+- **Period hold.** A periodic waveform's peaks recur every T (a symmetric tone: every half period; an asymmetric one: every period). Holding the minimum for T + T/8 keeps the gain flat from one peak to the next instead of releasing in between, which is what modulated a bass tone at its peak rate (THD+N, and DC on asymmetric waveforms: gain × waveform). Isolated peaks (transients, a kick's first half-cycle) and dense broadband programme, whose overs are a few samples apart, get no or a tiny hold. A fixed 10 ms hold on every peak, E05's first proposal, cost 1–2 LU on kick-heavy programme and lengthened every duck, so the hold follows the measured spacing. 40 Hz at 7 dB GR: THD+N −33.2 dB plain, below −100 dB held (test); `getHoldMs()` reads 14.06 ms (12.5 ms spacing + 1/8).
+- **Smooth attack.** Two cascaded boxes whose lengths add up to the old box's support: the attack becomes an S-curve over the same samples. `a[n]` is still a convex combination of `m[n−L+Kh … n]`, so the bound `a[n] ≤ r[j]` of §10.3.2 holds unchanged.
+- **Program envelope.** A slow follower of the fast gain; the output takes the lower of the two, so it can only reduce further and the ceiling proof is g's. Sustained limiting (dense kicks) keeps a base reduction instead of pumping fully back up between hits: a 2 kHz probe under 55 Hz kicks at 12 dB drive dips 3.7 dB instead of 8.9 (`flubsound-cli quality`, §11.8).
+- **Cost and guarantees.** The window may shrink by many samples when H falls, so the deque's expiry is a loop; the deque is sized for the 25 ms maximum at `prepare()`. No allocation, no latency change, output bit-identical for any block size (tests).
+
 ### 10.4 Parameters
 
 The strip limiter has no keys of its own. `LoudnessMaximizer` passes its parameters through (section 11), and the latency profile sets the structural values.
@@ -2608,6 +2643,10 @@ The file contains an independent true-peak meter (8× FFT sinc reconstruction, s
   - *TruePeakLimiter: ceiling and release changes while limiting are click-free and never trip the safety clamp*
   - *TruePeakLimiter [adversarial]: ceiling automation while limiting never trips the safety clamp*
   - *TruePeakLimiter: sample-peak mode (true peak off) holds the sample ceiling with latency = lookahead*
+- **LF-safe envelope (§10.3.5):** the three ceiling tests above run with the plain and the LF-safe envelope, and
+  - *TruePeakLimiter: the LF-safe envelope holds a bass tone's gain from peak to peak - 40 Hz at 7 dB GR distorts no more and an asymmetric waveform gets no DC* (THD+N ≥ −40 dB plain, ≤ −90 dB held; DC ≥ −60 plain, ≤ −70 dBFS held)
+  - *TruePeakLimiter: the period hold leaves isolated peaks and dense noise unheld, and the program envelope lands exactly on 0 dB afterwards*
+  - *TruePeakLimiter: with the LF-safe envelope the output is bit-identical for any block size, and process() does not allocate*
 - **RT safety and robustness:**
   - *TruePeakLimiter: reset, setParams and process do not allocate*
   - *TruePeakLimiter: silence, DC, full-scale noise, impulses and extreme settings stay finite and under the ceiling*
@@ -2630,6 +2669,7 @@ The file contains an independent true-peak meter (8× FFT sinc reconstruction, s
 - **Release shape is fixed.** It is a one-pole in the linear gain domain; the run-gap and blend constants (25/25/50 ms) are not user parameters.
 - **NaN counts as a clamp.** A NaN reaching the output is counted as a safety-clamp engagement (it is zeroed). `ProcessingChain` drops non-finite blocks before they get there.
 - **The hold is fixed.** Kh = min(8, L/3) is a compile-time constant (`kTruePeakHold`), not a parameter. It is taken out of the attack ramp, so the ramp is Kh samples shorter (steeper) than the look-ahead alone would allow.
+- **The LF-safe envelope is the maximizer's only** (§10.3.5). The master and bypass-reference limiters still release between a bass tone's peaks. Its constants (25 ms maximum hold, 150 / 800 ms program envelope) are not parameters, and there are no named styles yet ([11 E05](11-enhancement-report.md#e05) step 4).
 
 ---
 
@@ -2641,8 +2681,8 @@ Sources: [`core/include/flub/dsp/LoudnessMaximizer.h`](../core/include/flub/dsp/
 
 The maximizer is the last slot of every strip. It makes programme louder under a hard true-peak ceiling while keeping distortion measurable and bounded. It has three stages:
 1. **Glue**: gentle 3-band 2:1 pre-compression. It balances the band levels so that one band, usually the bass, does not dominate the limiter.
-2. **Soft clipper**: oversampled. It shaves sub-millisecond transients (snare or gunshot crack) cheaply, so the limiter only handles the longer peaks, with less audible pumping.
-3. **True-peak limiter** at the ceiling (section 10).
+2. **Soft clipper**: oversampled, crest-gated and depth-capped ([11 E05](11-enhancement-report.md#e05) stage 1). It shaves the peaks that stand out of their own short-term level (snare or gunshot crack, a kick's first half-cycle) by at most 3 dB, and leaves steady tones and bass alone, so drive beyond that becomes limiter gain reduction instead of clip distortion.
+3. **True-peak limiter** at the ceiling (section 10), with the LF-safe envelope (§10.3.5).
 
 It also publishes the telemetry the SafetyGovernor needs: limiter gain reduction (per block for the meter, `getGainReductionDb()`, and the deepest per fixed 10 ms window for the governor, `getWindowGainReductionDb()`: the limiter runs in pieces that end on that grid, so the governor input does not depend on the host block size), the clipper's measured THD+N (`getDistortionDb()`, §11.3.5) and the clip energy ratio, per block (`getClipEnergyRatioDb()`) and over the THD+N's analysis window (at least 25 ms, §14.5; `getWindowClipEnergyDb()`, which floors the clipper's share of the governor input).
 
@@ -2726,6 +2766,20 @@ knee = 0 → hard clip at t;   t ≤ 0 → 0
 - `clipAmount = 1` puts t at −0.70 dBFS; `clipAmount → 0` would put it at +5.0 dBFS, but `clipAmount = 0` disables the clipper altogether.
 - The threshold t always sits 0.3–6 dB *above* the ceiling. With a large knee the soft region can start below it: at knee 1, ks = t/2, 6 dB under t. The clipper shaves transients; the limiter then brings everything to the ceiling.
 
+**Crest gate and depth cap** ([11 E05](11-enhancement-report.md#e05) stage 1, `MaximizerParams::clipCrestDb` = 6 dB and `clipMaxDepthDb` = 3 dB; no parameter keys yet):
+
+```
+P[n]  = two cascaded one-poles (5 ms each) of max_ch x_ch[n]²        linked short-term power of the clipper input (base rate)
+t'[n] = max(t, 10^(crest/20) · sqrt(P[n]))                          crest 0 → t' = t (gate off)
+y     = sign(x) · smoothmax(|clip(x; t', knee)|, g_d · |x|)          g_d = 10^(−depth/20); depth 24 → uncapped
+smoothmax(a, b) = a  (b − a ≤ −w),   b  (b − a ≥ w),   a + (b − a + w)² / 4w  between;   w = 0.45 (1 − g_d) t'
+```
+
+- **Crest gate.** A steady tone's peak is 3 dB over its RMS, under the 6 dB gate: it is never clipped, however hard it is driven, and the limiter takes the drive instead. A transient that stands out of the level before it (the RMS lags by ~10 ms) is clipped. The follower's ripple on a 40 Hz tone is about ±0.3 dB, so bass does not flicker across the gate.
+- **Depth cap.** No sample loses more than 3 dB to the clipper; the rest reaches the limiter. The blend is C1 and, because w ≤ 0.5 (1 − g_d) · ks, never touches the curve below the knee start: below ks the output is still bit-exact.
+- **Why.** At 12 dB drive the old clipper squared off a −6 dBFS sine: THD+N −16 dB at 40 Hz to 1 kHz, and a 7 kHz tone riding on a clipped 60 Hz one came out with −5.1 dB of SMPTE IMD. With the gate: below −100 dB and −45.2 dB (`flubsound-cli quality`, §11.8).
+- `softClipCapped()` is the public curve; `softClip()` is unchanged and is what `clipCrestDb = 0`, `clipMaxDepthDb = 24` reproduce.
+
 #### 11.3.4 Soft clipper: delta oversampling
 
 The clipper runs at `osFactor · fs` through the half-band oversampler (§0.6). **Only the correction is band-limited**:
@@ -2736,7 +2790,7 @@ e    = Down( clip(x̂) − x̂ )           the deviation is the only thing that 
 y[n] = x[n − L_os] + w[n] · HP5(e)[n] x delayed exactly by the oversampler round trip; w = clip crossfade weight
 ```
 
-- **Residual-path DC blocker** ([11 E10](11-enhancement-report.md#e10)). `HP5` is a 1st-order TPT high-pass at 5 Hz with double state (`G = g/(1 + g)`, `g = tan(π·5/fs)`, `HP = e − LP(e)`), on the correction only, never on the programme. Clipping an asymmetric waveform shifts its mean, so without it the correction carried DC to the driver: 100 + 200 Hz at 0.35 each (no DC in) left −15.8 dBFS DC at 24 dB drive in every profile. With it: −73.6 (Quality), −68.8 (Balanced), −58.7 dBFS (Low Latency); what remains comes from the true-peak limiter's gain modulation of the same waveform (−51.4 / −49.0 / −42.2 dBFS with the clipper off), which a residual filter after the limiter cannot remove without moving peaks past the ceiling (test *KnownGap: DC after the maximizer*). The state resets with the clipper and is flushed to 0 below 1e−30.
+- **Residual-path DC blocker** ([11 E10](11-enhancement-report.md#e10)). `HP5` is a 1st-order TPT high-pass at 5 Hz with double state (`G = g/(1 + g)`, `g = tan(π·5/fs)`, `HP = e − LP(e)`), on the correction only, never on the programme. Clipping an asymmetric waveform shifts its mean, so without it the correction carried DC to the driver: 100 + 200 Hz at 0.35 each (no DC in) left −15.8 dBFS DC at 24 dB drive in every profile. With it: −73.6 (Quality), −68.8 (Balanced), −58.7 dBFS (Low Latency); what remained came from the true-peak limiter's gain modulation of the same waveform (−51.4 / −49.0 / −42.2 dBFS with the clipper off). Since [11 E05](11-enhancement-report.md#e05) stage 1 the limiter's period hold (§10.3.5) keeps its gain flat from one of the waveform's peaks to the next, and the crest gate leaves this steady waveform unclipped: about −141 dBFS in every profile, with and without the clipper (test *KnownGap closed: DC after the maximizer*). The state resets with the clipper and is flushed to 0 below 1e−30.
 - **Unclipped audio is bit-transparent.** Where nothing exceeds ks, `clip(x̂) − x̂ = 0` exactly, and y is the exactly delayed input once the DC blocker's state has decayed (τ = 32 ms after the last clipped sample; it is flushed to exactly 0).
 - **The top octave does not droop.** If the programme itself passed the half-band filters, they would cut 20 kHz by 1.0 dB (High) to 2.3 dB (Low) at 44.1 kHz even when nothing clipped. Test *Transparency: the maximizer's oversampled clipper does not droop the top octave* holds 1, 15 and 19.5 kHz tones at −20 dBFS within **0.05 dB** for 2×/4×, Low/High, at 44.1 and 48 kHz.
 - **Aliasing.** The harmonics the curve creates above the original Nyquist are attenuated by the downsampler's alias rejection (§0.6). Delta oversampling changes nothing here, because the correction is the only part that carries them.
@@ -2762,7 +2816,7 @@ The clipper's share of the governor input is its **measured THD+N**, `getDistort
 distortionDb = 10 log10( Σ_ch (Σr² − (Σx̂r)² / Σx̂²) / Σ_ch Σ(x̂ − r)² )       = −160 dB when nothing was clipped or the clipper is off
 ```
 
-i.e. the energy left after the least-squares gain, relative to the output energy. Only `Σx̂r` is new; the other two sums are the clip-energy sums. The reading covers harmonics up to `osFactor · fs/2`, before the downsampler removes those above the base-rate Nyquist. On white noise through four one-pole low-passes (−3 dB near 6 kHz), peak −6 dBFS before drive, 48 kHz, 4× High, defaults otherwise, it reads 0–3 dB below the clip energy ratio over the same windows (power averages over 3.5 s, THD+N / windowed clip energy / per-block clip energy: −81.9 / −81.9 / −81.9 dB at 6 dB drive, −38.3 / −38.0 / −38.1 dB at 9 dB, −21.8 / −20.7 / −20.7 dB at 12 dB, −10.7 / −7.9 / −7.9 dB at 18 dB, with 512-sample blocks; the same within 1 dB with 64-sample blocks). The SafetyGovernor's budget is **−30 dB** (≈ 3.2 % RMS) of THD+N, measured in the chain over the saturator and the clipper together (§14.5). The table below is the clip energy ratio, measured on noise band-limited to 0.4 fs, peak −6 dBFS (true peak −5.88 dBFS) before drive, 48 kHz, 4× High, 1.5 ms, defaults otherwise. "Disarmed" is `glue = 0`, the chain's default; "armed" is the 0.001 floor:
+i.e. the energy left after the least-squares gain, relative to the output energy. (The measurements in the rest of this subsection predate the crest gate and depth cap of §11.3.3 and were not repeated; on this noise at 12 and 18 dB drive the gated clipper works less and the limiter more.) Only `Σx̂r` is new; the other two sums are the clip-energy sums. The reading covers harmonics up to `osFactor · fs/2`, before the downsampler removes those above the base-rate Nyquist. On white noise through four one-pole low-passes (−3 dB near 6 kHz), peak −6 dBFS before drive, 48 kHz, 4× High, defaults otherwise, it reads 0–3 dB below the clip energy ratio over the same windows (power averages over 3.5 s, THD+N / windowed clip energy / per-block clip energy: −81.9 / −81.9 / −81.9 dB at 6 dB drive, −38.3 / −38.0 / −38.1 dB at 9 dB, −21.8 / −20.7 / −20.7 dB at 12 dB, −10.7 / −7.9 / −7.9 dB at 18 dB, with 512-sample blocks; the same within 1 dB with 64-sample blocks). The SafetyGovernor's budget is **−30 dB** (≈ 3.2 % RMS) of THD+N, measured in the chain over the saturator and the clipper together (§14.5). The table below is the clip energy ratio, measured on noise band-limited to 0.4 fs, peak −6 dBFS (true peak −5.88 dBFS) before drive, 48 kHz, 4× High, 1.5 ms, defaults otherwise. "Disarmed" is `glue = 0`, the chain's default; "armed" is the 0.001 floor:
 
 | Drive | Limiter GR (block min), disarmed / armed | Clip energy ratio (block max), disarmed / armed | Glue GR, armed | True peak re ceiling, disarmed / armed |
 |---|---|---|---|---|
@@ -2840,7 +2894,7 @@ CPU (indicative, stereo, 12 dB drive). Re-measured after the glue-arming and lim
 | 2× Low, clip 0.5, glue disarmed, 0.5 ms (Low Latency default) | 254–255 | 1.2 % |
 | 2× Low, clip 0.5, glue floor, 0.5 ms | 321–333 | 1.5–1.6 % |
 
-The 4× clipper costs about 205–225 ns, the glue splitter 35–80 ns while it runs, and the true-peak limiter about 160 ns.
+The 4× clipper costs about 205–225 ns, the glue splitter 35–80 ns while it runs, and the true-peak limiter about 160 ns. The crest gate and the LF-safe envelope ([11 E05](11-enhancement-report.md#e05) stage 1) were measured as whole-render time only (see the E05 status in docs/11).
 
 ### 11.7 Gaming vs Music usage
 
@@ -2864,11 +2918,12 @@ The governed drive contributions are what the SafetyGovernor takes back when the
   - *LoudnessMaximizer: with 18 dB drive the ceiling holds on noise and drum-like programme (sample and true peak)* (true peak ≤ +0.1 dB while clip energy ≤ −12 dB, ≤ +0.5 dB beyond; sample peak exact)
   - *LoudnessMaximizer: extreme and full-band input still holds the sample ceiling exactly*
   - *LoudnessMaximizer [adversarial]: 192 kHz and the latency profiles hold the ceiling with 18 dB drive*
+  - *LoudnessMaximizer: with the crest-gated clipper and the LF-safe limiter the ceiling holds on the 11-rate matrix at 18 dB drive (docs/11 E05 stage 1)* (8 … 192 kHz, drums + 45 Hz bass, true peak ≤ +0.1 dB, no safety clamp)
 - **Stages and telemetry:**
   - *LoudnessMaximizer: clipAmount 0 disables the clipper (telemetry -160 dB); clipping shows up in the telemetry*
   - *LoudnessMaximizer: the clipper shaves transients so the limiter reduces less*
   - *LoudnessMaximizer: glue > 0 reduces limiter gain reduction on a bass-heavy signal*
-  - *LoudnessMaximizer [adversarial]: clip-energy telemetry equals the header formula*
+  - *LoudnessMaximizer [adversarial]: clip-energy telemetry equals the header formula* (including the crest gate's follower and the depth cap)
   - *Distortion: the saturator's and the soft clipper's in-stage readings match a harmonic analysis of what the stages do within 0.1 dB* (`tests/test_distortion.cpp`: a 750 Hz sine at 0.6 peak; at 6, 9 and 12 dB drive the clipper's THD+N reading equals a Goertzel analysis of `softClip` on the same sine at 192 kHz; measured difference < 0.001 dB)
   - *LoudnessMaximizer [adversarial]: glue is 2:1 above ceiling - 6 dB and an all-pass (no gain) below it*
   - *LoudnessMaximizer: release and ceiling are passed to the limiter*
@@ -2884,6 +2939,7 @@ The governed drive contributions are what the SafetyGovernor takes back when the
 
 Elsewhere:
 - *Transparency: the maximizer's oversampled clipper does not droop the top octave* (`tests/test_transparency.cpp`)
+- The E59 quality suite on the maximizer (`tests/test_known_gaps.cpp`, the same `measureQuality` as `flubsound-cli quality`): *KnownGap closed: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)*, *KnownGap: the maximizer at 12 dB drive on the E59 quality suite - …*, *KnownGap: Music Boost 100 on the E59 quality suite - …*, *KnownGap closed: DC after the maximizer - …*. Before → after E05 stage 1 at 12 dB drive, maximizer alone: THD+N of −6 dBFS sines at 40 / 60 / 100 / 1000 Hz −16.3 / −16.3 / −16.2 / −16.2 → −296 / −131 / −137 / −111 dB; IMD 50 + 63 Hz −15.3 → −33.5 dB, SMPTE −5.1 → −45.2 dB; MTND at −18 / −12 dBFS RMS −23.6 / −13.4 → −30.1 / −21.6 dB (output −7.8 / −4.4 → −8.3 / −7.7 LUFS); 2 kHz probe under 55 Hz kicks: dip 8.9 → 3.7 dB, p95 − p5 6.3 → 4.6 dB; kick onset minus body −1.64 → −0.51 dB; pink −18 dBFS −6.28 → −6.90 LUFS.
 - *Chain: full Music boost on a hot programme never exceeds the ceiling* (`tests/test_engine.cpp`)
 - *Chain: with glue disarmed the maximizer passes hot flat-topped material untouched* (`tests/test_engine.cpp`; ≤ 1e−6 against the delayed input, no gain reduction)
 - *MacroMap: glue is armed only while a source that can raise it is off zero* (`tests/test_engine.cpp`)
@@ -2897,6 +2953,9 @@ Elsewhere:
 - **Arming and disarming still comb briefly.** The stage switches on (30 ms fade-in after 10 ms warm-up) when glue becomes armed and fades out over 30 ms when it is disarmed. During each fade x is crossfaded against its all-pass (§11.3.2), so 120 Hz and 4 kHz dip for a few ms. This now happens when Boost Intensity or Loudness leaves or returns to zero, instead of at the glue start point. The same holds for any caller that passes `max.glue = 0` directly; it is inherent to "glue 0 skips the stage, bit-exact".
 - **No automatic loudness compensation inside the module.** Loudness targeting is AutoDrive's job (reduce-only), and fair A/B is the loudness-matched bypass (section 14).
 - **Clip controls are held per base-rate sample** across the oversampled sub-samples (inaudible at 50 ms ramps).
+- **Less loudness per dB of drive** ([11 E05](11-enhancement-report.md#e05) stage 1). Steady content is no longer clipped and the limiter holds its gain over a bass note's or a kick's periods, so the same drive is quieter where the old clipper squared waveforms off: pink −18 dBFS at 12 dB drive −6.28 → −6.90 LUFS, Music Boost 100 −8.02 → −8.71 LUFS (Done-when: within 1.5 LU), the Loudness macro on a kick programme +6.0 → +4.5 LU over the input.
+- **The limiter now does the pumping the clipper used to hide.** Where the old clipper's distortion held the governor back (Boost 100 on kicks, THD+N over the −30 dB budget), the full governed drive now reaches the limiter: a 2 kHz tone under 55 Hz kicks at Boost 100 dips 5.5 dB instead of 2.4 (within the E05 Done-when of 6 dB; ≤ 3 dB needs E05's LF-only limiter in the glue path, step 5). The held gain also lifts a kick's decay against its onset: the energy centroid of 0–150 ms moves 5.8 → 8.6 ms later at 12 dB drive (E59's alignment target is < 2 ms).
+- **Crest gate and depth cap are not user parameters** (`MaximizerParams` fields only); the E05 item asks for a user-adjustable `clip.maxDb` and named styles.
 
 ---
 
@@ -3330,7 +3389,7 @@ Every entry from `kMusicTable` / `kGamingTable` (amount at 100 %, active window,
 
 | Macro | Targets (amount at 100 %, active window; \* governed) | Internal dynamic-EQ companion (mode bands, set by `configureModeBands()`) |
 |---|---|---|
-| **Punch** | Clarity on; transient attack +6 dB (0–100 %); bass tighten +0.5 (20–100 %) | — |
+| **Punch** | Clarity on; transient attack +6 dB (0–100 %) (no bass tighten since docs/11 E04) | — |
 | **Width** | Stereo on; width +0.6 (0–100 %); space +0.35 (40–100 %) | — |
 | **Clarity** | Clarity on; presence +0.8 (0–100 %); air +0.7 (20–100 %); de-mud +0.5 (0–70 %); Dynamic EQ on | Band 4: **de-harsh** bell 3.5 kHz, Q 1.2, *cut above* −22 dBFS, 3:1, range 3 dB × Clarity, 2 / 80 ms. Band 5: **air** high shelf 12 kHz, Q 0.7, *boost below* −45 dBFS, 2:1, range 3 dB × Clarity, 10 / 200 ms |
 | **Loudness** | Maximizer on; drive +10 dB\* (0–100 %, curve^1.3); glue +0.5 (30–100 %) | — |
@@ -3354,7 +3413,7 @@ Maximum effective values with Boost and all five macros at 100 % (governor scale
 
 | Macro | Targets (\* governed) | Internal dynamic-EQ companion |
 |---|---|---|
-| **Footsteps** | Dynamic EQ on; Compressor on (upward only unless a ratio is set, see the policies below); upward max gain +3 dB (30–100 %) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *boost below* −6 dBFS, 3:1, range 7 dB × Footsteps (3 / 120 ms), floor −75 dBFS; off at 32 kHz and below. Band 5: **footstep body** bell 260 Hz, Q 1.2, *boost below* −6 dBFS, 2.5:1, range 3 dB × Footsteps (5 / 150 ms), floor −75 dBFS. Both are static bells for every cue quieter than about −16 / −11 dBFS, rolled off above (§3.4). Band 6: **explosion anti-masking** low shelf 90 Hz, Q 0.7, *cut above* −22 dBFS, 3:1, range 6 dB × Footsteps (10 / 250 ms), floor −80 dBFS |
+| **Footsteps** | Dynamic EQ on (docs/11 E19: no longer the compressor) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *cue lift*, range 7 dB × Footsteps (1 / 40 ms), floor −75 dBFS; off at 32 kHz and below. Band 5: **footstep body** bell 260 Hz, Q 1.2, *cue lift*, range 3 dB × Footsteps (2 / 60 ms), floor −75 dBFS. Both lift what rises out of the band's own background, not the bed, loud events or hiss (§3.3, §3.4). Band 6 (**explosion anti-masking**) no longer follows Footsteps (docs/11 E20); the presets that use it carry it as user band 0 |
 | **Positional** | Stereo on; positional focus +0.9 (0–100 %); width +0.25 (30–100 %, widens only above `spatial.lowCut`, default 180 Hz). Raises the ILD of partially panned sources; a hard-panned source keeps its infinite ILD (the focus's polarity guard, §7.3.2; §7.9) | — |
 | **Impact** (explosions, gunshots) | Bass on; bass boost +6 dB\* (0–100 %); harmonic bass +0.25\* (40–100 %); Clarity on; transient attack +4 dB (20–100 %) | — |
 | **Detail** (environment) | Compressor on (upward only unless a ratio is set); upward max gain +8 dB (0–100 %); Clarity on; air +0.4 (20–100 %) | — |
@@ -3363,19 +3422,19 @@ Maximum effective values with Boost and all five macros at 100 % (governor scale
 Maximum effective values with Boost and all macros at 100 %:
 - presence 1.0, positional focus 1.0 (1.2 clamped), transient attack +6 dB, air 0.4, de-mud 0.4;
 - width 1.25 (forced to 1 under the binaural lock);
-- upward max gain +16 dB. With the default upward curve the lift itself tops out at +9 dB (§9.3);
+- upward max gain +8 dB (Detail alone since docs/11 E19). With the default upward curve the lift itself tops out at +8 dB here (§9.3);
 - bass boost +9 dB, harmonic bass 0.25, maximizer drive +6 dB.
 
 **Why this footstep design works.**
 - Footsteps are quiet, transient and broadband, with their identifying energy around 2–5 kHz (the scuff and tick) and 150–400 Hz (the heel).
-- The *boost-below* bands 4 and 5, with their threshold at −6 dBFS, act as static bells confined to those regions (the docs/11 E19 interim). A 20 ms step under a bed gets its full lift from the first sample, and the step/bed contrast changes only as much as a static EQ changes it. The loudest events (gunfire, close explosions) sit in the roll-off above the threshold and get little or no lift. The lift is not programme-relative: steps whose in-band peaks come within ~10 dB of full scale (a −14 LUFS mix) get less. The interim bell also lifts ambience beds as much as it lifts steps.
-- The noise-floor taper keeps silence and hiss from being lifted. Band 4's lift fades out over the 10 dB above −75 dBFS (§3.3). A step that starts from digital silence therefore gets its lift only at the 120 ms release.
-- The anti-masking shelf only engages on *very* loud low-frequency events and recovers with a 250 ms release, so the steps after an explosion are not buried. It follows Footsteps until docs/11 E20 re-keys it to a loud-event "Tame" amount (E19 redesign, E21).
+- The *cue lift* bands 4 and 5 (docs/11 E19, §3.3) are confined to those regions and keyed to the band's own background: a step that stands out of the ambience gets the full lift within 1–2 ms at any programme level (−14 to −50 LUFS alike), and the ambience itself, steady sounds and hiss get none, so the step/bed contrast rises by about the full range (+6.0 dB at Footsteps 100; +5 dB for Competitive FPS) instead of moving only as a static EQ moves it. The loudest events (gunfire, close explosions) stand 26–36 dB or more over the background and reach the loud cap, which withdraws the lift within 0.5 ms.
+- The noise-floor taper keeps silence and hiss from being lifted: band 4's lift fades out over the 10 dB above −75 dBFS (§3.3). In digital silence the background is that floor, so a step out of silence gets its full lift at once.
+- The anti-masking shelf only engages on *very* loud low-frequency events and recovers with a 250 ms release, so the steps after an explosion are not buried. It no longer follows Footsteps (docs/11 E20); the presets that want it store it as user band 0, until E21's loud-event "Tame" amount exists to key it to.
 - All detection is stereo-linked (dynamic EQ, compressor, limiter), so none of this moves a source's apparent direction.
 
 **Gaming policies enforced by the chain** (independent of preset values; written into the effective values, so `effectiveValue()` reports them, §14.1):
 - **Crossfeed forced to 0.** It blurs interaural differences, the main lateral localisation cue.
-- **A macro-engaged compressor is upward-only.** When Boost Intensity, Footsteps or Detail switched the compressor on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, the effective ratio is 1:1: quiet cues are lifted, gunshots and explosions keep their dynamics. Presets that set a ratio (e.g. 1.5:1 glue) and a compressor the user switched on keep theirs (§9.7).
+- **A macro-engaged compressor is upward-only.** When Detail switched the compressor on (base `comp.on` off) and `comp.ratio` is still at its default 2.5, the effective ratio is 1:1: quiet cues are lifted, gunshots and explosions keep their dynamics. Presets that set a ratio (e.g. 1.5:1 glue) and a compressor the user switched on keep theirs (§9.7).
 - **Binaural lock** (both modes). When the virtualiser rendered 5.1/7.1 to binaural (`inputChannels > 2`, `virt.on` and the surround fold), the chain sets width 1, space 0, crossfeed 0 and focus 0: Positional focus, an ILD emphasis on the side channel, would add a second, unprincipled ILD on top of the virtualiser's own ([11 E24](11-enhancement-report.md#e24) (i)). The stereo passthrough fold of FL/FR-only content ([11 E27](11-enhancement-report.md#e27), §8) is not binaural, so the lock is off there. `virt.ownHrtf` forces the same four values (and the virtualiser off) on any strip: the game's own HRTF render already carries the cues.
 - **Low Latency presets.** Presets for competitive play (`gaming-competitive-fps`, `gaming-battle-royale`, `gaming-tournament-clean`) suggest the *Low Latency* profile (`"suggestedLatencyProfile"`; a preset never sets `latency.profile`, which is app state, [11 E40](11-enhancement-report.md#e40)): 0.5 ms look-aheads and 2× short (Low-quality) oversampling. That is **100 samples = 2.08 ms** of algorithmic latency at 48 kHz, 96 samples = 2.18 ms at 44.1 kHz (section 15).
 
@@ -3402,6 +3461,7 @@ Maximum effective values with Boost and all macros at 100 %:
 | **True-peak ceiling** (strip) | 4× interpolated peaks with parabolic refinement | Limiter gain | Look-ahead sliding-minimum + box-filter envelope reaches the required gain Kh samples before the peak arrives and holds it Kh samples after (Kh = 8 at the profile look-aheads); a final safety clamp counts any engagement, published per block as `MeterBus::safetyClipCount` (section 10). |
 | **Output trim** | — | Strip level after the maximizer | `output.gain` −24 … 0 dB (20 ms ramp). A trim cannot raise the level, so the strip ceiling also holds in the plug-in and the CLI, which have no master limiter. |
 | **Master limiter** (desktop app, `MixEngine`) | Sum of all strips, each padded to the slowest strip of its sync group (none by default) | Master gain | −1 dBTP, 1 ms look-ahead (68 samples at 48 kHz including the detector); 0.5 ms (44 samples) when every strip runs Low Latency. 50 ms auto release. Engages only when several strips overlap hot. Its safety-clamp count is `MixEngine::getMasterSafetyClipCount()`. |
+| **Device correction preamp** (desktop app, `DeviceCorrection`, [11 E15](11-enhancement-report.md#e15) / [E11](11-enhancement-report.md#e11)) | The output endpoint's correction curve (static, predicted on a 1/12-octave grid with golden-section refinement at every local maximum) | Correction gain, before the master limiter | −max(0, maximum boost − allowance), allowance 0 dB; both channels get the same preamp. Recomputed only when the curve changes (control thread). |
 | **Device ceiling cap** (desktop app) | Output device transport and profile (`device::adviceFor()`) | Master limiter ceiling | Default −1 dBTP; **Bluetooth A2DP −2 dBTP** (lossy codecs overshoot); **Bluetooth hands-free −3 dBTP**. A profile's own `ceilingDbTp` can lower it further; no shipped profile sets one yet. Strip ceilings are untouched: the cap only ever lowers the output. |
 | **Input sanitation** | Non-finite samples in the input block (Σ x·0 is non-finite) | Signal path | The block is output as silence and the signal-path state (modules, delays, meters) is reset; the control loops above keep theirs (§0.11). |
 | **Parameter sanitation** | Every `ParameterStore::set()` | Base values | NaN is ignored (the previous value stays), ±Inf and out-of-range values clamp to the parameter's range, so no automation, host or script value can put a NaN gain into the audio path. |
@@ -3548,7 +3608,7 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
   - *Macros: through the chain, Width raises the side / mid ratio and Clarity lifts quiet presence-band content, both in proportion to the macro* (side / mid −12.0 / −9.8 / −7.2 dB at Width 0 / 50 / 100 %; a quiet 3.2 kHz tone +0 / +2.4 / +4.8 dB at Clarity 0 / 50 / 100 %, a loud one −2.9 dB at 100 %)
 - **Device ceiling caps:** *Headset: the master limiter at the Bluetooth -2 dBTP and hands-free -3 dBTP caps holds the 4x true peak of hot inter-sample-peak material* (cap from `adviceFor()`, 44.1 / 48 / 16 / 8 kHz, ≥ 6 dB of master gain reduction: true peak ≤ cap + 0.1 dB on the 4× meter and an independent 4× interpolator, sample peak ≤ cap, no safety clamp; measured cap − 0.045 to − 0.050 dB), and the air cut-off test of §5.8.
 
-`tests/test_modes.cpp`: the Gaming mode policy through the full chain, at least one case per Gaming macro (Footsteps: mode bands 4 and 5 as static bells with their loud roll-off and hiss taper, band 4 off at 8 / 16 / 32 kHz, band 6 anti-masking; Positional: ILD up, mono sum unchanged, a hard-left source stays hard-left; Impact; Detail; Voice & Score: band 7), plus *Gaming: crossfeed is forced off - a hard-left source never leaks into the right ear, whatever the store says*, *Gaming: binaural lock on a 7.1 strip - width 1, space 0 and focus 0 whatever the store asks* (the published effective values read width 1, space 0, crossfeed 0 and focus 0; Positional 100 % leaves the binaural output bit-identical) and *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*. The Positional case also checks that a hard-left 3 kHz source keeps at least 60 dB of ILD (§7.9).
+`tests/test_modes.cpp`: the Gaming mode policy through the full chain, at least one case per Gaming macro (Footsteps: mode bands 4 and 5 as the cue enhancer - a burst rising out of a bed lifted by the range at any level and within 2–12 ms, a steady tone, a loud cue and hiss not - band 4 off at 8 / 16 / 32 kHz, band 6 no longer following Footsteps and the presets' user anti-masking band; Positional: ILD up, mono sum unchanged, a hard-left source stays hard-left; Impact; Detail; Voice & Score: band 7), plus *Gaming: crossfeed is forced off - a hard-left source never leaks into the right ear, whatever the store says*, *Gaming: binaural lock on a 7.1 strip - width 1, space 0 and focus 0 whatever the store asks* (the published effective values read width 1, space 0, crossfeed 0 and focus 0; Positional 100 % leaves the binaural output bit-identical) and *Gaming: a compressor switched on only by a macro is upward-only - loud sounds keep their dynamics unless a ratio was chosen*. The Positional case also checks that a hard-left 3 kHz source keeps at least 60 dB of ILD (§7.9).
 
 `tests/test_device_profiles.cpp`: *DeviceProfiles: advice caps the ceiling per connection and warns about stacked headset DSP*, and the matching and parsing tests.
 
@@ -3563,6 +3623,29 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 - **The governor's GR input is a window minimum.** It is the deepest limiting per fixed 10 ms window (so it no longer depends on the host block size: with the former per-block minimum, a drum programme at 14 dB drive held the scale at 1.0 in 64-sample blocks, 0.69 in 512 and 0.3 in 4096; now 0.74–0.76 in all three), averaged over about 3 s, so its budget refers to the deepest limiting per 10 ms, not to the mean gain. The scale itself is still updated once per host block and applied from the next block, so once the governor moves, a render changes slightly with the block size.
 - **Absolute gates assume the chain's nominal level.** The loudness gates are absolute (−70 dBFS RMS, −50 LUFS) plus relative (20 LU); very quiet sources below −50 LUFS never drive the loops. The relative gate's 3 s release (§14.5) also applies within a programme: a passage more than 20 LU below the preceding material that lasts over 3 s, including a slow fade-out that spends that long in the band between the relative and the absolute gate, restarts the measurement on itself.
 - **The matched bypass turns the processed side down.** The match never raises the reference (a raise needs headroom the reference does not have), so while a comparison lasts the processed side plays at the reference's loudness, and for 10 s after the last bypass-off; then it returns at 2 dB/s. The first flip into bypass is not matched: it hears the processed side at its own level, then the reference. A trim acquired while the processed side was still settling (a setting changed less than 3 s before the flip) stays for the whole comparison. Phase 2 of [11 E37](11-enhancement-report.md#e37) (per-bank offsets, A/B) is not built.
+
+### 14.10 Device correction and the headroom predictor (desktop app)
+
+[11 E15](11-enhancement-report.md#e15) MVP and [E11](11-enhancement-report.md#e11)'s predictor.
+
+**Purpose.** The largest audible error of a headphone is its own frequency response. `DeviceCorrection` (`core/include/flub/dsp/DeviceCorrection.h`) runs one correction curve per output endpoint on the stereo sum, between the strip sum and the master limiter (`MixEngine::getDeviceCorrection()`). It is not a parameter: presets, A/B banks, strip state and automatic profiles never read or write it. The desktop app stores one curve per output endpoint ([06](06-gui.md), Settings > Correction).
+
+**Curve.** Up to 16 filters per channel, each on the left, the right or both channels, plus a per-channel gain (the file's `Preamp`). Filter types: peaking, low / high shelf (RBJ shelf Q at the centre frequency), low / high pass with Q, band-pass (0 dB peak), notch, all-pass. Each is one TPT SVF section (`SvfCoeffs::make`, §0.2), which is algebraically the RBJ cookbook biquad (bilinear transform prewarped at the corner), so an AutoEQ curve is reproduced exactly; a 0 dB peak or shelf is skipped (an exact identity).
+
+**Import** (`core/include/flub/io/ParametricEqText.h`). AutoEQ `ParametricEQ.txt` and the Equalizer APO / Peace subset: `Preamp`, `Filter` (`ON` / `OFF`; `PK` / `PEQ` / `Modal`, `LSC` / `HSC` / `LS` / `HS` with Q, `LSC` / `HSC` with a slope in dB/oct (RBJ S = slope / 12, converted to Q at the filter's gain), `LP` / `HP` / `LPQ` / `HPQ`, `BP`, `NO`, `AP`; `Q` or `BW Oct` (analog relation Q = √2^BW / (2^BW − 1))), `Channel` (L / R / 1 / 2 / all; centre, LFE and surround channels are dropped with a warning) and `Device` (ignored with a warning). Refused with a message naming the line: `GraphicEQ` (needs the FIR convolver), `Include`, `Convolution`, `Stage`, the routing / scripting commands, the corner-frequency shelves `LS 6dB` / `LS 12dB` / `HS …`, more than 16 filters on a channel, |gain| > 30 dB, Fc outside 1 Hz – 100 kHz, Q outside (0, 100]. Numbers are parsed locale-independently. `format()` writes the curve back in APO syntax (shortest round-trip float form), and `parse (format (c)) == c`; the app stores curves in that form.
+
+**Headroom predictor** (`headroom::predictMaxBoost`, [11 E11](11-enhancement-report.md#e11)). The maximum of a response over 20 Hz – 20 kHz: a 1/12-octave grid (121 points), then a 40-step golden-section search on log frequency around every local maximum of the grid, so a narrow peak between grid points is found (a Q 12 bell a quarter grid step off a grid point: within 0.01 dB). Evaluated on `SvfCoeffs::response`, the exact digital response at the running rate. Flat weighting (the correction's) treats every frequency as able to carry full-scale programme; the Programme weighting subtracts a heuristic long-term programme envelope (−6 dB/oct below 40 Hz, 0 dB to 1 kHz, −3 dB/oct above) for a chain-wide preamp that should not give level away for treble boosts. Automatic preamp = −max(0, max − allowance) (allowance 0 dB for the correction; E11's chain preamp would use 1 dB). The same preamp goes to both channels, so their balance is kept. Range caveat: a low shelf keeps boosting below 20 Hz, so infrasonic content can still gain a few hundredths of a dB (0.025 dB at 18 Hz on the test curve); the master limiter holds the ceiling regardless.
+
+**Processing, transitions, cost.** Per channel: gain, then the sections in series, block by block (each section runs a whole block with its state in registers). Zero latency. A new curve is designed on the control thread and handed to the audio thread through a 4-deep SPSC ring; the audio thread then runs the old and the new filters side by side and crossfades over 20 ms with an equal-gain raised cosine (both carry the same programme, so the sum never exceeds the louder of the two), and continues on the new filters with their state. A curve that arrives during a crossfade waits for its end; only the newest waiting one is kept. Off (or no curve) is a bit-exact passthrough that costs nothing; Compare keeps the correction's broadband gain (file preamp + automatic preamp) and drops the filters, so an A/B is not a loudness comparison. State below −300 dBFS is flushed and a non-finite state restarts from rest at the end of each block. The app re-sends a curve the ring had no room for from its 5 Hz timer.
+
+**Tests that prove it** (`tests/test_device_correction.cpp`, `tests/app/test_app_device_correction.cpp`):
+- *rendered response matches an independent RBJ reference within 0.1 dB, 20 Hz – 20 kHz*: a synthetic AutoEQ-style curve (10 filters) and a per-channel curve with every other filter type, at 44.1 / 48 / 96 kHz, 24 points per octave, the rendered 1 s impulse response's DFT against the cookbook biquads evaluated at e^jω (no shared code): worst 0.0003 dB.
+- *after the automatic preamp no sine grows and 0 dBFS pink stays below 0 dBFS*: without the file's preamp the synthetic curve gets −5.67 dB; steady sines at the predicted maximum and elsewhere ≤ +0.005 dB; 10 s of pink noise normalised to a 0 dBFS sample peak leaves at −2.69 dBFS.
+- *a curve change crossfades click-free over 20 ms*: 1 kHz + 60 Hz tones, curve A → B: the output stays within −64 dBFS of the ideal equal-gain crossfade of the two steady outputs, no sample step in the fade is larger than the steady signal's largest; afterwards the output is B's to 1e−4; a change inside a fade waits and the newest wins.
+- import, refusal, warning and round-trip cases; off = bit-exact; compare = flat at the broadband gain; allocation-free `process()`, NaN / Inf recovery, block-size invariance (1 … 4096 samples, bit-identical including a crossfade); the MixEngine hook (a +6 dB bell's preamp lowers 100 Hz by 6 dB; a full-scale 3 kHz tone still meets −1 dBFS after the limiter; the settings survive `configure()` at a new rate and `configureFrom()`); the headroom predictor cases above.
+- App: the curve belongs to its endpoint, survives preset loads, A/B, automatic profiles, a strip-layout rebuild and a restart, and follows endpoint changes; off / compare / remove, rendered through the whole engine.
+
+**Known limitations.** GraphicEQ, target curves, amount, per-model suggestions and in-house measurements are later E15 stages; the endpoint key is the output device name as JUCE reports it (not yet `IMMDevice::GetId` / the CoreAudio UID / the PipeWire node name, [11 E51](11-enhancement-report.md#e51)). Neither the plug-in nor the CLI has a correction stage.
 
 ---
 

@@ -604,13 +604,16 @@ TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter st
 
             // The model did act (maximizer alone: -6 dB before a limiter that
             // was taking ~2-4 dB off leaves the output clearly quieter; +12 dB
-            // is squashed to the same ceiling, louder).
+            // is squashed to the same ceiling, louder: +0.7 dB RMS since
+            // docs/11 E05 stage 1, whose crest-gated clipper leaves this
+            // programme's steady parts alone and whose limiter holds its gain
+            // over the bass line's periods; more than 1 dB before).
             if (! fullBoost)
             {
                 if (gainDb < 0.0f)
                     CHECK (gainToDb (static_cast<float> (outRms / referenceRms)) < -2.0f);
                 else
-                    CHECK_GE (gainToDb (static_cast<float> (outRms / referenceRms)), 1.0f);
+                    CHECK_GE (gainToDb (static_cast<float> (outRms / referenceRms)), 0.4f);
             }
         }
     }

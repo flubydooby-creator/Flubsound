@@ -426,12 +426,15 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
         CHECK_LE (lu, 3.0); // docs/11 E36 Done-when
     }
 
-    // Competitive FPS as shipped fails the same measurement: the caps are what pass it.
+    // Competitive FPS as shipped: before docs/11 E19's cue enhancer it failed
+    // the same measurement (+9.8 LU; the caps were what passed it). The cue
+    // enhancer no longer lifts a stationary bed, so it passes too (+2.5 LU).
     juce::String error;
     REQUIRE (controller.loadPreset ("factory:gaming-competitive-fps", game, error));
     const double shipped = lift (-60.0);
     std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
-    CHECK_GE (shipped, 6.0);
+    CHECK_LE (shipped, 3.0);
+    CHECK_NEAR (shipped, 2.53, 0.3);
 }
 
 // =============================================================================

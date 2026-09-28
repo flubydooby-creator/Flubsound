@@ -14,9 +14,15 @@
 // otherwise (24 / 48 samples + the 20-sample detector at 48 kHz).
 //
 //   strip 0 (Game, 7.1) --chain--> pad --+
-//   strip 1 (Music, 2)  --chain--> pad --+--> sum -> master limiter -> out
+//   strip 1 (Music, 2)  --chain--> pad --+--> sum -> device correction -> master limiter -> out
 //   strip 2 (Chat, 2)   --chain--> pad --+
 //   (pad = slowest chain in the strip's sync group - own chain; 0 alone)
+//
+// The device correction (docs/11 E15, DeviceCorrection.h) is the output
+// endpoint's headphone / speaker correction curve with its automatic
+// preamp: zero latency, flat and free until the host gives it a curve,
+// never touched by presets, A/B banks or strip parameters. configure()
+// keeps its settings; configureFrom() copies the running engine's.
 //
 // Threading: configure() is non-RT (allocates, prepares chains). process() is
 // the device callback. Profile/preset changes only touch ParameterStores.
@@ -26,6 +32,7 @@
 
 #include "ProcessingChain.h"
 #include "flub/common/Realtime.h"
+#include "flub/dsp/DeviceCorrection.h"
 #include "flub/dsp/TruePeakLimiter.h"
 
 #include <functional>
@@ -106,6 +113,13 @@ public:
     float getMasterGainReductionDb() const noexcept { return master.getGainReductionDb(); }
     uint64_t getMasterSafetyClipCount() const noexcept { return master.getSafetyClipCount(); }
 
+    /** The output endpoint's correction on the stereo sum, before the master
+        limiter (docs/11 E15). Its setters are control-thread only
+        (DeviceCorrection::setSettings hands designs to the audio thread);
+        use setSettingsNow() only on an engine that is not yet running. */
+    DeviceCorrection& getDeviceCorrection() noexcept { return correction; }
+    const DeviceCorrection& getDeviceCorrection() const noexcept { return correction; }
+
     /** Any chain that needs a structural re-prepare (host polls this). A
         latency-profile change is structural, so re-configuring also
         re-decides the master look-ahead. */
@@ -126,6 +140,7 @@ private:
                 const std::vector<std::unique_ptr<Strip>>& storesFrom, const ChainSetup& setup);
 
     std::vector<std::unique_ptr<Strip>> strips;
+    DeviceCorrection correction;
     TruePeakLimiter master;
     AudioBuffer mixBuffer;
     double sampleRate = 48000.0;

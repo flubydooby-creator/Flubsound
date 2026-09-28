@@ -50,8 +50,8 @@ constexpr double kClipDcBlockHz = 5.0;
 // Crest gate and depth cap (docs/11 E05 stage 1): the clipper input's
 // short-term power (linked, one-pole) and the width of the cap's C1 blend
 // (a fraction of (1 - depthGain) t, so it never reaches the knee start).
-constexpr float kClipRmsMs = 8.0f;
-constexpr float kCapBlend = 0.25f;
+constexpr float kClipRmsMs = 5.0f; // per stage of a 2-stage cascade
+constexpr float kCapBlend = 0.45f;
 
 // Envelope values below this are flushed (the host also sets FTZ/DAZ).
 constexpr float kEnvFlush = 1.0e-15f;
@@ -283,7 +283,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     oversampler.reset();
     dryDelay.reset();
     clipDcLp.fill (0.0);
-    clipPower = 0.0f;
+    clipPower = clipPowerFast = 0.0f;
     splitter.reset();
     antiDenormal = 0.0f;
     limiter.reset();
@@ -509,15 +509,16 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
             const float x = data[static_cast<size_t> (c)][i];
             p = std::max (p, x * x);
         }
-        clipPower += clipPowerCoeff * (std::min (p, std::numeric_limits<float>::max()) - clipPower);
+        clipPowerFast += clipPowerCoeff * (std::min (p, std::numeric_limits<float>::max()) - clipPowerFast);
+        clipPower += clipPowerCoeff * (clipPowerFast - clipPower);
         if (crestGain > 0.0f)
         {
             auto& t = thresholdBuf[static_cast<size_t> (i)];
             t = std::max (t, crestGain * std::sqrt (clipPower));
         }
     }
-    if (clipPower < kEnvFlush)
-        clipPower = 0.0f;
+    if (clipPower < kEnvFlush && clipPowerFast < kEnvFlush)
+        clipPower = clipPowerFast = 0.0f;
 
     if (clipRunning)
     {

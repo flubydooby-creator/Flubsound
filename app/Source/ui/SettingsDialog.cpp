@@ -214,6 +214,138 @@ private:
 };
 
 // =============================================================================
+// Correction page (docs/11 E15)
+// =============================================================================
+class SettingsDialog::CorrectionPage : public juce::Component
+{
+public:
+    explicit CorrectionPage (EngineController& c)
+        : controller (c)
+    {
+        Style::set (enabledToggle, "switch");
+        enabledToggle.onClick = [this] { controller.setDeviceCorrectionEnabled (enabledToggle.getToggleState()); refresh(); };
+        compareButton.setClickingTogglesState (true);
+        Style::describe (compareButton, "Compare", "Hear the output without the correction's filters, at the same broadband level (the preamp stays)");
+        compareButton.onClick = [this] { controller.setDeviceCorrectionCompare (compareButton.getToggleState()); refresh(); };
+        Style::describe (importButton, "Import ParametricEQ.txt", "An AutoEQ or Equalizer APO / Peace ParametricEQ.txt for this output device");
+        importButton.onClick = [this] { chooseFile(); };
+        removeButton.onClick = [this]
+        {
+            controller.removeDeviceCorrection();
+            message = {};
+            refresh();
+        };
+        for (auto* b : { static_cast<juce::Component*> (&importButton), static_cast<juce::Component*> (&enabledToggle),
+                         static_cast<juce::Component*> (&compareButton), static_cast<juce::Component*> (&removeButton) })
+            addAndMakeVisible (*b);
+        refresh();
+    }
+
+    void refresh()
+    {
+        const auto info = controller.getDeviceCorrection();
+        enabledToggle.setToggleState (info.enabled, juce::dontSendNotification);
+        compareButton.setToggleState (info.comparing, juce::dontSendNotification);
+        enabledToggle.setEnabled (info.hasCurve);
+        compareButton.setEnabled (info.hasCurve && info.enabled);
+        removeButton.setEnabled (info.hasCurve);
+        importButton.setEnabled (info.endpoint.isNotEmpty());
+        const auto text = (info.endpoint.isNotEmpty() ? "Output: " + info.endpoint : juce::String ("No output device open.")) + "\n"
+                          + describeDeviceCorrection (info);
+        if (text != statusText)
+        {
+            statusText = text;
+            repaint();
+        }
+    }
+
+    /** Imports `file` for the current output (the file chooser's result). */
+    void importFile (const juce::File& file)
+    {
+        juce::String error;
+        juce::StringArray warnings;
+        if (controller.importDeviceCorrection (file, error, &warnings))
+            message = warnings.isEmpty() ? "Imported " + file.getFileName() + "."
+                                         : "Imported " + file.getFileName() + ", with notes:\n" + warnings.joinIntoString ("\n");
+        else
+            message = "Not imported: " + error;
+        messageIsError = error.isNotEmpty();
+        refresh();
+        resized();
+        repaint();
+    }
+
+    const juce::String& getMessage() const noexcept { return message; }
+    const juce::String& getStatusText() const noexcept { return statusText; }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawSectionTitle (g, titleArea, "Headphone / speaker correction");
+        g.setFont (Theme::font (11.5f));
+        g.setColour (Palette::faint.brighter (0.2f));
+        g.drawFittedText (kIntro, introArea, juce::Justification::topLeft, 5, 1.0f);
+        g.setFont (Theme::font (12.5f));
+        g.setColour (Palette::text.withAlpha (0.88f));
+        g.drawFittedText (statusText, statusArea, juce::Justification::topLeft, 3, 1.0f);
+        if (message.isNotEmpty())
+        {
+            g.setFont (Theme::font (11.5f));
+            g.setColour (messageIsError ? Palette::amber : Palette::muted);
+            g.drawFittedText (message, messageArea, juce::Justification::topLeft, 8, 1.0f);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        titleArea = r.removeFromTop (22);
+        r.removeFromTop (8);
+        const auto width = static_cast<float> (juce::jmax (80, r.getWidth()));
+        const int introLines = juce::jlimit (1, 5, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), kIntro) / width)) + 1);
+        introArea = r.removeFromTop (introLines * 15 + 4);
+        r.removeFromTop (10);
+        statusArea = r.removeFromTop (3 * 17);
+        r.removeFromTop (8);
+        auto buttons = r.removeFromTop (kRowHeight);
+        importButton.setBounds (buttons.removeFromLeft (200).reduced (0, 2));
+        buttons.removeFromLeft (10);
+        compareButton.setBounds (buttons.removeFromLeft (100).reduced (0, 2));
+        buttons.removeFromLeft (10);
+        removeButton.setBounds (buttons.removeFromLeft (100).reduced (0, 2));
+        r.removeFromTop (8);
+        enabledToggle.setBounds (r.removeFromTop (26).withWidth (360));
+        r.removeFromTop (12);
+        messageArea = r.removeFromTop (8 * 15);
+    }
+
+private:
+    static constexpr const char* kIntro
+        = "A correction curve for the output device: an AutoEQ or Equalizer APO / Peace ParametricEQ.txt. It runs on the final mix, "
+          "before the safety limiter, with an automatic preamp so that it cannot clip, and it is remembered for this output only: "
+          "presets, A/B and automatic profiles never change it. Flubsound ships no measurement data; use a file whose licence allows it.";
+
+    void chooseFile()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Import a ParametricEQ.txt", juce::File(), "*.txt");
+        juce::Component::SafePointer<CorrectionPage> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe != nullptr && fc.getResult() != juce::File())
+                                      safe->importFile (fc.getResult());
+                              });
+    }
+
+    EngineController& controller;
+    juce::TextButton importButton { "Import ParametricEQ.txt..." }, compareButton { "Compare" }, removeButton { "Remove" };
+    juce::ToggleButton enabledToggle { "Correction on for this output" };
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::String statusText, message;
+    bool messageIsError = false;
+    juce::Rectangle<int> titleArea, introArea, statusArea, messageArea;
+};
+
+// =============================================================================
 // Processing page
 // =============================================================================
 class SettingsDialog::ProcessingPage : public juce::Component
@@ -904,7 +1036,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
 {
     setTitle ("Flubsound settings");
 
-    static const char* names[] = { "Audio", "Processing", "Hotkeys", "General" };
+    static const char* names[] = { "Audio", "Correction", "Processing", "Hotkeys", "General" };
     for (size_t i = 0; i < navButtons.size(); ++i)
     {
         auto& b = navButtons[i];
@@ -917,6 +1049,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     }
 
     audioPage = std::make_unique<AudioPage> (controller);
+    correctionPage = std::make_unique<CorrectionPage> (controller);
     processingPage = std::make_unique<ProcessingPage> (controller, std::move (onPalette), palette);
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
@@ -928,6 +1061,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
         view->setScrollBarThickness (8);
         addChildComponent (*view);
     }
+    addChildComponent (*correctionPage);
     addChildComponent (*hotkeysPage);
     addChildComponent (*generalPage);
 
@@ -1044,17 +1178,39 @@ juce::String SettingsDialog::describeCpuLine (const EngineStatus& status, const 
     return t;
 }
 
+juce::String SettingsDialog::describeDeviceCorrection (const EngineController::DeviceCorrectionInfo& info)
+{
+    if (info.endpoint.isEmpty())
+        return "Open an output device to import a correction for it.";
+    if (! info.hasCurve)
+        return "No correction for this output.";
+    juce::String s;
+    s << (info.name.isNotEmpty() ? info.name : juce::String ("Imported curve")) << "  -  " << info.numFilters
+      << (info.numFilters == 1 ? " filter" : " filters");
+    if (! info.enabled)
+        return s << "  -  off";
+    const auto hz = info.maxBoostHz >= 1000.0 ? juce::String (info.maxBoostHz / 1000.0, 1) + " kHz" : juce::String (juce::roundToInt (info.maxBoostHz)) + " Hz";
+    s << "  -  preamp " << juce::String (info.preampDb, 1) << " dB (max boost " << (info.maxBoostDb >= 0.0 ? "+" : "")
+      << juce::String (info.maxBoostDb, 1) << " dB at " << hz << ")";
+    if (info.comparing)
+        s << "  -  comparing (filters off)";
+    return s;
+}
+
 void SettingsDialog::showPage (Page page)
 {
     current = page;
     for (size_t i = 0; i < navButtons.size(); ++i)
         navButtons[i].setToggleState (static_cast<int> (i) == static_cast<int> (page), juce::dontSendNotification);
     audioView.setVisible (page == Page::Audio);
+    correctionPage->setVisible (page == Page::Correction);
     processingView.setVisible (page == Page::Processing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
     if (page == Page::Processing)
         processingPage->refresh();
+    if (page == Page::Correction)
+        correctionPage->refresh();
     if (page == Page::Hotkeys)
         hotkeysPage->refresh();
     if (page == Page::General)
@@ -1068,6 +1224,8 @@ void SettingsDialog::timerCallback()
         processingPage->refresh();
     if (current == Page::Audio)
         audioPage->refresh();
+    if (current == Page::Correction)
+        correctionPage->refresh();
 }
 
 void SettingsDialog::paint (juce::Graphics& g)
@@ -1107,6 +1265,7 @@ void SettingsDialog::resized()
     // margin, so its content keeps the page width).
     processingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
     processingPage->setSize (pageArea.getWidth(), juce::jmax (1, processingPage->getHeight()));
+    correctionPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);
 }

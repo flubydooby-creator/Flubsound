@@ -3,6 +3,7 @@
 
 #include "flub/engine/MacroMap.h"
 #include "flub/io/Json.h"
+#include "flub/io/ParametricEqText.h"
 #include "flub/io/PresetIO.h"
 #include "platform/PlatformBridge.h"
 #include "platform/PlatformServices.h"
@@ -732,6 +733,7 @@ void EngineController::updateDeviceProfile()
         deviceAdvice = {};
         currentOutputName = {};
         host->setMasterCeilingDb (-1.0f);
+        applyDeviceCorrection();
         return;
     }
     applyDeviceProfile (getDeviceManager().getAudioDeviceSetup().outputDeviceName, device->getCurrentSampleRate(),
@@ -774,6 +776,135 @@ void EngineController::applyDeviceProfile (const juce::String& outputName, doubl
     // Applied to the master limiter on the audio thread (atomic hand-off); user
     // presets keep their own ceilings, the cap only ever lowers the output.
     host->setMasterCeilingDb (deviceAdvice.ceilingDbTp);
+
+    // The endpoint's own correction curve (never from the family-level
+    // profile match above: a family name says nothing about one unit).
+    applyDeviceCorrection();
+}
+
+// =============================================================================
+// Device correction (docs/11 E15)
+// =============================================================================
+void EngineController::applyDeviceCorrection()
+{
+    if (currentOutputName != correctionEndpoint)
+    {
+        correctionEndpoint = currentOutputName;
+        correctionCompare = false;
+    }
+
+    // No stored (or no readable) curve: the default settings, a flat unity stage.
+    flub::DeviceCorrectionSettings next;
+    if (correctionEndpoint.isNotEmpty())
+        if (const auto entry = settings->getDeviceCorrection (correctionEndpoint))
+            if (flub::CorrectionCurve curve; flub::eqtext::parse (entry->curveText.toStdString(), curve).ok)
+            {
+                next.curve = curve;
+                next.enabled = entry->enabled;
+                next.compare = correctionCompare && entry->enabled;
+            }
+
+    if (! (next == host->getDeviceCorrection()))
+        host->setDeviceCorrection (next);
+}
+
+EngineController::DeviceCorrectionInfo EngineController::getDeviceCorrection() const
+{
+    DeviceCorrectionInfo info;
+    info.endpoint = currentOutputName;
+    if (const auto entry = currentOutputName.isNotEmpty() ? settings->getDeviceCorrection (currentOutputName) : std::nullopt)
+    {
+        const auto& applied = host->getDeviceCorrection();
+        info.hasCurve = true;
+        info.name = entry->name;
+        info.enabled = entry->enabled;
+        info.comparing = applied.compare;
+        info.numFilters = applied.curve.numFilters;
+        info.curveText = entry->curveText;
+        info.preampDb = host->getDeviceCorrectionPreampDb();
+        const auto prediction = host->getDeviceCorrectionPrediction();
+        info.maxBoostDb = prediction.maxBoostDb;
+        info.maxBoostHz = prediction.atHz;
+    }
+    return info;
+}
+
+bool EngineController::importDeviceCorrection (const juce::File& file, juce::String& error, juce::StringArray* warnings)
+{
+    constexpr juce::int64 kMaxFileBytes = 256 * 1024; // ParametricEQ.txt files are a few hundred bytes
+    if (! file.existsAsFile())
+    {
+        error = "File not found: " + file.getFullPathName();
+        return false;
+    }
+    if (file.getSize() > kMaxFileBytes)
+    {
+        error = "Not a ParametricEQ.txt (the file is larger than 256 KB).";
+        return false;
+    }
+    return importDeviceCorrectionText (file.loadFileAsString(), file.getFileName(), error, warnings);
+}
+
+bool EngineController::importDeviceCorrectionText (const juce::String& text, const juce::String& name, juce::String& error,
+                                                   juce::StringArray* warnings)
+{
+    if (currentOutputName.isEmpty())
+    {
+        error = "No output device is open: choose one on the Audio page first.";
+        return false;
+    }
+
+    flub::CorrectionCurve curve;
+    const auto result = flub::eqtext::parse (text.toStdString(), curve);
+    if (! result.ok)
+    {
+        error = juce::String::fromUTF8 (result.error.c_str());
+        return false;
+    }
+    if (warnings != nullptr)
+        for (const auto& w : result.warnings)
+            warnings->add (juce::String::fromUTF8 (w.c_str()));
+
+    DeviceCorrectionEntry entry;
+    entry.endpoint = currentOutputName;
+    entry.name = name;
+    entry.enabled = true;
+    entry.curveText = juce::String::fromUTF8 (flub::eqtext::format (curve).c_str());
+    settings->setDeviceCorrection (entry);
+    correctionCompare = false;
+    applyDeviceCorrection();
+    notify (Change::Settings);
+    return true;
+}
+
+void EngineController::setDeviceCorrectionEnabled (bool shouldBeEnabled)
+{
+    auto entry = currentOutputName.isNotEmpty() ? settings->getDeviceCorrection (currentOutputName) : std::nullopt;
+    if (! entry || entry->enabled == shouldBeEnabled)
+        return;
+    entry->enabled = shouldBeEnabled;
+    settings->setDeviceCorrection (*entry);
+    applyDeviceCorrection();
+    notify (Change::Settings);
+}
+
+void EngineController::setDeviceCorrectionCompare (bool comparing)
+{
+    if (correctionCompare == comparing)
+        return;
+    correctionCompare = comparing;
+    applyDeviceCorrection();
+    notify (Change::Settings);
+}
+
+void EngineController::removeDeviceCorrection()
+{
+    if (currentOutputName.isEmpty() || ! settings->getDeviceCorrection (currentOutputName))
+        return;
+    settings->removeDeviceCorrection (currentOutputName);
+    correctionCompare = false;
+    applyDeviceCorrection();
+    notify (Change::Settings);
 }
 
 void EngineController::trackPreferredOutput (bool rescan)

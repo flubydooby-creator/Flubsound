@@ -318,6 +318,27 @@ public:
     void setMasterCeilingDb (float db) noexcept;
     float getMasterCeilingDb() const noexcept { return masterCeilingDb.load (std::memory_order_relaxed); }
 
+    // =========================================================================
+    // Device correction (message thread; docs/11 E15)
+    // =========================================================================
+    /** The output endpoint's correction curve, run on the stereo sum before
+        the master limiter (MixEngine::getDeviceCorrection). While the device
+        runs it reaches the audio thread through the DeviceCorrection's SPSC
+        hand-off and crossfades in over DeviceCorrection::kCrossfadeMs (an
+        endpoint change swaps curves without a click); otherwise it applies
+        at once. Every engine built later (swaps, device restarts) starts on
+        it. Not a parameter: presets, A/B banks and automatic profiles never
+        touch it (EngineController keys it to the output endpoint). */
+    void setDeviceCorrection (const flub::DeviceCorrectionSettings& settings);
+    const flub::DeviceCorrectionSettings& getDeviceCorrection() const noexcept { return deviceCorrection; }
+    /** The automatic preamp of the current curve (dB, <= 0) and the
+        predicted maximum boost it came from (docs/11 E11). */
+    float getDeviceCorrectionPreampDb() const noexcept { return latest->engine.getDeviceCorrection().getPreampDb(); }
+    flub::headroom::Prediction getDeviceCorrectionPrediction() const noexcept
+    {
+        return latest->engine.getDeviceCorrection().getPrediction();
+    }
+
     /** True while the strip receives audio (device input, a capture, or the
         silence hang-over that lets tails decay after a source stops). */
     bool isStripActive (int strip) const noexcept;
@@ -522,6 +543,7 @@ private:
         flub::NeuralSlotConfig config;
     };
     std::array<NeuralModelSetup, kMaxStrips> neuralModels;
+    flub::DeviceCorrectionSettings deviceCorrection; // every new engine starts on it
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;
     int deviceInputLatency = 0, deviceOutputLatency = 0;

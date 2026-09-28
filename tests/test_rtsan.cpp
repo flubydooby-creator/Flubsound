@@ -23,6 +23,7 @@
 #include "flub/dsp/BassEngine.h"
 #include "flub/dsp/ClarityEnhancer.h"
 #include "flub/dsp/Compressor.h"
+#include "flub/dsp/DeviceCorrection.h"
 #include "flub/dsp/DynamicEq.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
 #include "flub/dsp/LoudnessMaximizer.h"
@@ -60,6 +61,7 @@ static_assert (hasNonblockingProcess<Processor>);
 static_assert (hasNonblockingProcess<BassEngine>);
 static_assert (hasNonblockingProcess<ClarityEnhancer>);
 static_assert (hasNonblockingProcess<Compressor>);
+static_assert (hasNonblockingProcess<DeviceCorrection>);
 static_assert (hasNonblockingProcess<DynamicEq>);
 static_assert (hasNonblockingProcess<HeadphoneVirtualizer>);
 static_assert (hasNonblockingProcess<LoudnessMaximizer>);
@@ -84,6 +86,7 @@ static_assert (hasNonblockingReset<Processor>);
 static_assert (hasNonblockingReset<BassEngine>);
 static_assert (hasNonblockingReset<ClarityEnhancer>);
 static_assert (hasNonblockingReset<Compressor>);
+static_assert (hasNonblockingReset<DeviceCorrection>);
 static_assert (hasNonblockingReset<DynamicEq>);
 static_assert (hasNonblockingReset<HeadphoneVirtualizer>);
 static_assert (hasNonblockingReset<LoudnessMaximizer>);
