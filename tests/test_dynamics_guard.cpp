@@ -499,4 +499,3 @@ TEST_CASE ("Tame (docs/11 E20 via E21): the Dynamic Range control keys the Gamin
             CHECK_LE (std::abs (stepChange), 1.0);
     }
 }
-}
