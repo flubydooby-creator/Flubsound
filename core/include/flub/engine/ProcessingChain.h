@@ -394,6 +394,7 @@ private:
     DistortionMonitor distortion;
     ComparisonMatcher loudnessMatch;
     std::atomic<int> protectionStrength { static_cast<int> (ProtectionStrength::Off) };
+    ProtectionStrength appliedStrength = ProtectionStrength::Off; // as of the current segment (audio thread)
     uint64_t corruptSamples = 0, droppedBlocks = 0; // input sanitiser, since prepare()
     // The host block's module-meter extremes over its segments (process()).
     struct BlockReadings

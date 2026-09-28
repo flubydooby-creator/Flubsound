@@ -9,12 +9,18 @@
 //   poll directly (no timers, no waiting), then check the strip's preset,
 //   mode and parameters, the restore of the previous state, the manual
 //   cancel and the persistence of the rules through AppSettings.
+// * docs/11 E52: rules reference presets by uuid; a settings file written
+//   before uuids (PresetManager ids) is migrated once and keeps working
+//   after the preset file is renamed.
 // * The routing panel lists the rules and explains an unsupported system.
 #include "AppTestSupport.h"
 
 #include "engine/AutoProfile.h"
 #include "engine/EngineController.h"
+#include "presets/PresetManager.h"
 #include "ui/RoutingPanel.h"
+
+#include "flub/io/Json.h"
 
 #include <functional>
 #include <memory>
@@ -547,6 +553,99 @@ TEST_CASE ("App: automatic profiles: a keep rule leaves its preset and mode, a m
     EngineController again (headlessOptions (temp, script));
     CHECK (again.getAutoProfileRules() == rules);
     CHECK (! again.getAutoProfilesEnabled());
+}
+
+TEST_CASE ("App: automatic profiles: a settings file from before preset uuids keeps working - rules and strip presets move to uuids once and survive a rename (E52)")
+{
+    const flubapptest::TempFolder temp;
+    ForegroundScript script;
+
+    // A user preset saved before E52 (no uuid) in the default preset folder,
+    // which EngineController's PresetManager scans. Removed afterwards.
+    const auto presetFolder = PresetManager::getDefaultUserPresetFolder();
+    const auto oldFile = presetFolder.getChildFile ("E52 Rule Target.flubpreset.json");
+    const auto renamedFile = presetFolder.getChildFile ("E52 Renamed.flubpreset.json");
+    struct Cleanup
+    {
+        juce::File a, b;
+        ~Cleanup()
+        {
+            a.deleteFile();
+            b.deleteFile();
+        }
+    } cleanup { oldFile, renamedFile };
+    REQUIRE (presetFolder.createDirectory().wasOk());
+    REQUIRE (oldFile.replaceWithText (R"({ "format": "flubsound-preset", "version": 1, "name": "E52 Rule Target", "category": "User",
+                                           "params": { "mode": "Gaming", "boost": 0.12 } })"));
+
+    // The settings file as a build before E52 wrote it: schema 1 (no
+    // settings.schemaVersion), presets referenced by PresetManager ids.
+    const auto settingsFile = temp.file ("settings.xml");
+    REQUIRE (settingsFile.replaceWithText (R"(<?xml version="1.0" encoding="UTF-8"?>
+<PROPERTIES>
+  <VALUE name="strip.Game.preset" val="factory:gaming-competitive-fps"/>
+  <VALUE name="strip.Music.preset" val="user:E52 Rule Target.flubpreset.json"/>
+  <VALUE name="autoProfile.rules">
+    <AUTOPROFILES>
+      <RULE exe="cs2.exe" strip="Game" preset="user:E52 Rule Target.flubpreset.json" mode="preset" restore="0"/>
+      <RULE exe="ghost.exe" strip="Game" preset="user:deleted.flubpreset.json" mode="preset" restore="0"/>
+    </AUTOPROFILES>
+  </VALUE>
+</PROPERTIES>
+)"));
+
+    auto options = headlessOptions (temp, script, true);
+    options.restoreState = true;
+    juce::String userUuid;
+    {
+        EngineController controller (options);
+        auto& settings = controller.getSettings();
+        CHECK (settings.getSchemaVersion() == AppSettings::kSchemaVersion);
+
+        // The user preset got a uuid (written into its file), and every
+        // reference to it and to the factory preset is that uuid now.
+        flub::json::Value root;
+        std::string error;
+        REQUIRE (flub::json::parse (oldFile.loadFileAsString().toStdString(), root, error));
+        userUuid = juce::String (root["uuid"].asString());
+        REQUIRE (userUuid.isNotEmpty());
+        const auto fpsUuid = controller.getPresetManager().findById ("factory:gaming-competitive-fps")->id;
+        CHECK (fpsUuid == "22e4bf40-b070-485a-8fd6-c4f6cfddeaad");
+
+        const auto rules = controller.getAutoProfileRules();
+        REQUIRE (rules.size() == 2);
+        CHECK (rules[0].presetId == userUuid);
+        CHECK (rules[1].presetId == "user:deleted.flubpreset.json"); // unknown: kept, reported as missing
+        CHECK (settings.getLastPreset ("Game") == fpsUuid);
+        CHECK (settings.getLastPreset ("Music") == userUuid);
+        const int game = controller.findStrip ("Game"), music = controller.findStrip ("Music");
+        CHECK (controller.getCurrentPresetId (game) == fpsUuid); // restored from the old reference
+        CHECK (controller.getCurrentPresetId (music) == userUuid);
+
+        // Renamed (a new file name): the rule still plays it.
+        juce::String renameError;
+        const auto* info = controller.getPresetManager().findById (userUuid);
+        REQUIRE (info != nullptr);
+        REQUIRE (controller.getPresetManager().renameUserPreset (*info, "E52 Renamed", renameError) == userUuid);
+        CHECK (! oldFile.exists());
+        CHECK (renamedFile.existsAsFile());
+        script.show ("C:\\Games\\cs2.exe", 31);
+        poll (controller, 2);
+        REQUIRE (controller.getActiveAutoProfile() != nullptr);
+        CHECK (controller.getCurrentPresetId (game) == userUuid);
+        CHECK (controller.getCurrentPresetName (game) == "E52 Renamed");
+        CHECK (controller.describeAutoProfile().contains ("E52 Renamed"));
+        controller.saveState();
+    }
+
+    // Written back as schema 2 with uuids, and not migrated again.
+    AppSettings reread (settingsFile, false);
+    CHECK (reread.getSchemaVersion() == AppSettings::kSchemaVersion);
+    CHECK (reread.getAutoProfileRules()[0].presetId == userUuid);
+    CHECK (reread.getLastPreset ("Music") == userUuid);
+    EngineController again (options);
+    CHECK (again.getCurrentPresetId (again.findStrip ("Music")) == userUuid);
+    CHECK (again.getAutoProfileRules()[0].presetId == userUuid);
 }
 
 TEST_CASE ("App: automatic profiles: the routing panel lists the rules and explains a system where the foreground app cannot be detected")

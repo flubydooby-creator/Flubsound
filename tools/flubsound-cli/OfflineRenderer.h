@@ -48,11 +48,14 @@
 // mode bands, the SafetyGovernor's scale, state and reasons, AutoLevel /
 // AutoDrive, and the intended harmonics of the bass harmonics generator and
 // air exciter (MeterBus::harmonicsDb). Means are weighted by block length;
-// "percent" values are shares of the programme's frames.
+// "percent" values are shares of the programme's frames. The governor's
+// scale, state and reason bits are also kept as read after the last block
+// of programme (governorScaleEnd / StateEnd / ReasonEnd, docs/11 E06 (6)).
 #pragma once
 
 #include "Analysis.h"
 
+#include "flub/engine/Protection.h"
 #include "flub/io/WavFile.h"
 
 #include <array>
@@ -71,6 +74,7 @@ struct RenderSettings
     float toleranceLu = 0.3f;
     int maxIterations = 4;                 // corrective re-renders after the first pass
     std::optional<float> verifyCeilingDb;  // hold (maximizer on) / report a true peak above this
+    ProtectionStrength protection = ProtectionStrength::Off; // ProcessingChain::setProtectionStrength
     // Optional: another thread sets it to stop the render between blocks
     // (renderFile / renderPass then fail with kAbortedError). The CLI leaves
     // it null; the app's Export / batch job uses it to quit without waiting.
@@ -114,6 +118,10 @@ struct RenderStats
     // recovering) and frames whose reason bits name the limiter / distortion budget.
     std::array<float, 4> governorStatePercent {};
     float governorLimiterReasonPercent = 0.0f, governorDistortionReasonPercent = 0.0f;
+    // After the last block of programme: scale, SafetyGovernor::State and reason bits.
+    float governorScaleEnd = 1.0f;
+    int governorStateEnd = 0;
+    uint32_t governorReasonEnd = 0;
     float autoLevelMinDb = 0.0f, autoLevelMaxDb = 0.0f;
     float autoDriveMaxDb = 0.0f;         // deepest drive reduction
 };
@@ -153,8 +161,9 @@ bool writeRender (const std::string& path, io::SampleFormat format, RenderResult
 /** A single latency-compensated pass (no targeting). `outStereo` receives
     2 planar channels of input length. A non-null `abort` is polled once per
     block (see RenderSettings::abort); a non-null `stats` receives the pass's
-    statistics. */
+    statistics; `protection` is the chain's protection strength. */
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort = nullptr, RenderStats* stats = nullptr);
+                 const std::atomic<bool>* abort = nullptr, RenderStats* stats = nullptr,
+                 ProtectionStrength protection = ProtectionStrength::Off);
 } // namespace flub::cli

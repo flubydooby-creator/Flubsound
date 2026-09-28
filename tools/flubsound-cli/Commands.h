@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <array>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +56,9 @@ RenderSettings makeRenderSettings (const RenderOptions& options, const ResolvedP
 /** The `render.stats` object of `process` / `batch --json` (RenderStats,
     dB rounded to 0.01, null at the -160 dB floor). */
 json::Value renderStatsToJson (const RenderStats& stats);
+
+/** "idle", "backingOff", "holding", "recovering" (SafetyGovernor::State order). */
+const char* governorStateName (int state) noexcept;
 
 /** One-line human-readable summary of the stats ("Stats   : ..." in `process`). */
 std::string formatStats (const RenderStats& stats);
@@ -115,13 +119,42 @@ using QualityInjector = std::function<void (std::vector<std::vector<float>>& out
 /** Renders and measures every quality stimulus with `values` (param::kNumParams
     base values) at `blockSize`. Non-RT, allocates; about 34 s of audio. */
 bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
-                     const QualityInjector& inject = {});
+                     const QualityInjector& inject = {}, ProtectionStrength protection = ProtectionStrength::Off);
+
+/** Signal hygiene (docs/11 E10) at any sample rate: `quality`'s hygiene
+    family, measured at `--rate` (default 48 kHz) on the output mid.
+      alias       sines at 1 / 5 / 7 / 10 kHz (those below 0.45 fs), -6 dBFS
+                  peak, on odd FFT bins of a 65536-point analysis after
+                  0.5 s: worstAliasDbc (Analysis.h) in 20 Hz .. 20 kHz
+      dc          0.35 sin (100 Hz) + 0.35 cos (200 Hz) (an asymmetric
+                  waveform with no DC), 4 s: output DC over 2..4 s
+      ultrasonic  at 88.2 kHz and above: the 31-tone pink multitone (40 Hz ..
+                  16 kHz) at -18 dBFS RMS, 2 s: power at and above 22 kHz
+                  re the whole output over the last second */
+struct HygieneReport
+{
+    struct Alias
+    {
+        double hz = 0.0, dbc = 0.0; // hz: the exact (bin-centred) tone
+    };
+    double sampleRate = 48000.0;
+    std::vector<Alias> alias;
+    double worstAliasDbc = -160.0; // over the tones
+    double dcDbfs = -160.0;
+    std::optional<double> ultrasonicDb; // only at 88.2 kHz and above
+};
+
+bool measureHygiene (const std::vector<float>& values, double sampleRate, int blockSize, HygieneReport& report, std::string& error,
+                     ProtectionStrength protection = ProtectionStrength::Off);
+
+/** The hygiene object of `quality --json` (dB rounded to 0.01). */
+json::Value hygieneToJson (const HygieneReport& report);
 
 /** The `quality --json` object (dB rounded to 0.01). */
 json::Value qualityToJson (const QualityReport& report);
 
-/** Human-readable multi-line report. */
-std::string formatQuality (const QualityReport& report);
+/** Human-readable multi-line report (the hygiene lines when `hygiene` is given). */
+std::string formatQuality (const QualityReport& report, const HygieneReport* hygiene = nullptr);
 
 // ---- batch ----------------------------------------------------------------
 struct BatchJob

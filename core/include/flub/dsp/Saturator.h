@@ -15,12 +15,18 @@
 //             b = 0.2 -> even harmonics; DC removed by a 10 Hz high-pass.
 //   Digital : cubic soft clip f(x) = x - (4/27) x^3 for |x| < 1.5, +-1 beyond
 //             (f'(0) = 1, f(1.5) = 1, f'(1.5) = 0: odd harmonics, hard-ish).
-// Runs at 2x (default) or 4x via Oversampler; latency = oversampler latency.
+// Runs at 1x, 2x (default) or 4x via Oversampler, or an explicit
+// Oversampler::Design (the chain uses Oversampler::forProfile: 4x with the
+// 2x designs' latency below 176.4 kHz); latency = oversampler latency.
 // Dry/wet mix is latency-aligned internally (the dry path is delayed).
 // Telemetry: getDistortionDb() = THD+N of the stage over the last completed
 // 25 ms analysis window (DistortionEstimator.h), measured at the oversampled rate around the curve,
 // where input and shaped output are aligned; depth, mix and output gain are
-// folded in, the linear post filters (tube DC blocker, tape head bump) are not.
+// folded in, the linear post filters (residual-path and tube DC blockers, tape
+// head bump) are not.
+// Residual-path DC blocker (docs/11 E10): the band-limited deviation passes a
+// 5 Hz 1st-order high-pass before it joins the dry path, so no curve leaves
+// DC; the programme never passes it.
 #pragma once
 
 #include "DistortionEstimator.h"
@@ -60,9 +66,10 @@ public:
     /** Structural: call before prepare(). factor 1, 2 or 4. */
     void setOversampling (int factor, Oversampler::Quality q = Oversampler::Quality::High) noexcept
     {
-        osFactor = factor;
-        osQuality = q;
+        osDesign = Oversampler::design (factor, q);
     }
+    /** Structural: call before prepare(). An explicit design (factor 1, 2 or 4). */
+    void setOversampling (const Oversampler::Design& design) noexcept { osDesign = design; }
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
@@ -103,6 +110,7 @@ private:
         SvfState pre, de;  // tape pre-/de-emphasis (oversampled rate)
         SvfState bump;     // tape head-bump band-pass (base rate)
         float dcLp = 0.0f; // tube DC blocker integrator (base rate)
+        double residualDcLp = 0.0; // residual-path DC blocker on the deviation (base rate)
     };
 
     static DriveGains driveGains (float driveDb) noexcept;
@@ -112,8 +120,7 @@ private:
     void runCurve (SaturationType type, ChannelState& st, float* d, int n) noexcept;
     void processSegment (const AudioBlock& io, int start, int length) noexcept;
 
-    int osFactor = 2;
-    Oversampler::Quality osQuality = Oversampler::Quality::High;
+    Oversampler::Design osDesign = Oversampler::design (2, Oversampler::Quality::High);
     ProcessSpec spec;
     SaturatorParams params;
 
@@ -132,6 +139,7 @@ private:
     std::array<ChannelState, kMaxChannels> channelState {};
     SvfCoeffs preEmphasis, deEmphasis, headBump;
     float dcBlockG = 0.0f; // TPT one-pole coefficient g / (1 + g) of the 10 Hz DC blocker
+    double residualDcG = 0.0; // the same for the 5 Hz residual-path DC blocker
 
     LinearSmoothedValue driveSmoother, mixSmoother, outputSmoother;
     DriveGains steady;     // drive-derived values while the drive is not ramping

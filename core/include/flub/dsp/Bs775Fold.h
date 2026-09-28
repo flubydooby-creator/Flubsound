@@ -14,7 +14,11 @@
 // a = the LFE level relative to ONE main channel (virt.lfe), LP = LfeFold's
 // low-pass. HeadphoneVirtualizer renders its LFE with the same LfeFold: its
 // main channels reach the near ear at unity below ~200 Hz and both paths
-// share its -3 dB trim, so "a dB above one main" holds in every fold.
+// share its -3 dB trim, so "a dB above one main" holds in every fold. Its
+// level match (docs/11 E28a) then scales the mains by the loudness ratio to
+// this fold and leaves the LFE alone, so the LFE keeps its level in both
+// folds; a main channel that the virtualiser sends to both ears sits about
+// 3 dB lower at each ear than here, at the same loudness.
 //
 // LFE low-pass: 4th-order Butterworth at 120 Hz (two SVF sections), the
 // virtualiser's filter since v1. docs/11 E01 proposes an LR4; an LR4 only
@@ -98,6 +102,18 @@ public:
             a[i] += y;
             b[i] += y;
         }
+        store (state[0], s0);
+        store (state[1], s1);
+    }
+
+    /** Adds gain * LP(x) to a only (n samples): the virtualiser keeps its LFE
+        apart so its level match can leave it alone (docs/11 E28a). */
+    void addToMono (const float* x, float* a, int n) noexcept FLUB_NONBLOCKING
+    {
+        const SvfCoeffs c0 = coeffs[0], c1 = coeffs[1];
+        SvfState s0 = state[0], s1 = state[1];
+        for (int i = 0; i < n; ++i)
+            a[i] += svfTick (c1, s1, svfTick (c0, s0, x[i])) * gain.next();
         store (state[0], s0);
         store (state[1], s1);
     }

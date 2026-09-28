@@ -38,6 +38,19 @@ constexpr float kGlueReleaseMs = 80.0f;
 // tone's level has no ripple and the gain does not modulate the waveform.
 constexpr std::array<double, 3> kBandLowestHz { 30.0, 60.0, 2000.0 };
 
+// LF-first limiter (docs/11 E05 step 5): the low band's threshold under the
+// ceiling and its follower. The detector is the band's held peak (half a
+// period of 30 Hz, see kBandLowestHz), so the gain is flat on steady bass;
+// the 1 ms attack takes a kick's first cycle, the release outlasts its body
+// and the gap to the next one. Tuned on the E59 quality suite at Music
+// Boost 100 (threshold 0 / -1 / -2 / -3 / -6 dB: kick onset - body -0.55 /
+// -0.29 / -0.02 / +0.21 / +0.50 dB, 2 kHz probe dip 3.81 / 3.39 / 2.91 /
+// 2.55 / 2.05 dB; release 60 / 120 / 250 ms: bass two-tone IMD at 12 dB
+// drive -27.1 / -31.7 / -37.2 dB).
+constexpr float kLfHeadroomGain = 0.70794578f; // -3 dB
+constexpr float kLfAttackMs = 1.0f;
+constexpr float kLfReleaseMs = 250.0f;
+
 // Clipper threshold headroom above the ceiling: lerp (+6 dB, +0.3 dB, amount).
 constexpr float kClipHeadroomMaxDb = 6.0f;
 constexpr float kClipHeadroomMinDb = 0.3f;
@@ -124,6 +137,7 @@ MaximizerParams LoudnessMaximizer::sanitised (const MaximizerParams& in, const M
     p.clipAmount = sanitise (p.clipAmount, 0.0f, 1.0f, fallback.clipAmount);
     p.clipKnee = sanitise (p.clipKnee, 0.0f, 1.0f, fallback.clipKnee);
     p.glue = sanitise (p.glue, 0.0f, 1.0f, fallback.glue);
+    p.lfLimit = sanitise (p.lfLimit, 0.0f, 1.0f, fallback.lfLimit);
     p.releaseMs = sanitise (p.releaseMs, 5.0f, 1000.0f, fallback.releaseMs);
     p.clipCrestDb = sanitise (p.clipCrestDb, 0.0f, 24.0f, fallback.clipCrestDb);
     p.clipMaxDepthDb = sanitise (p.clipMaxDepthDb, 0.5f, 24.0f, fallback.clipMaxDepthDb);
@@ -135,6 +149,7 @@ void LoudnessMaximizer::updateCeiling (float newCeilingDb) noexcept
     ceilingDb = newCeilingDb;
     ceilingLin = dbToGain (newCeilingDb);
     glueThreshold = ceilingLin * kGlueThresholdGain;
+    lfThreshold = ceilingLin * kLfHeadroomGain;
 }
 
 void LoudnessMaximizer::updateClipThreshold() noexcept
@@ -164,10 +179,12 @@ void LoudnessMaximizer::startGlue (bool immediate) noexcept
         b.bucket = b.prevBucket = b.env = 0.0f;
         b.countdown = b.holdLength;
     }
+    lfEnv = 0.0f;
     glueRunning = true;
     if (immediate)
     {
         glueS.setImmediate (params.glue);
+        lfLimitS.setImmediate (params.lfLimit);
         glueMixS.setImmediate (1.0f);
         glueWarmup = 0;
     }
@@ -175,6 +192,8 @@ void LoudnessMaximizer::startGlue (bool immediate) noexcept
     {
         glueS.setImmediate (0.0f);
         glueS.setTarget (params.glue);
+        lfLimitS.setImmediate (0.0f);
+        lfLimitS.setTarget (params.lfLimit);
         glueMixS.setImmediate (0.0f);
         glueWarmup = glueWarmupLength;
     }
@@ -210,7 +229,7 @@ void LoudnessMaximizer::applyParamsImmediately() noexcept
     crestGainS.setImmediate (crestGainS.getTarget());
     depthGainS.setImmediate (depthGainS.getTarget());
 
-    if (params.glue > 0.0f)
+    if (bandStageWanted (params))
     {
         startGlue (true);
     }
@@ -219,6 +238,7 @@ void LoudnessMaximizer::applyParamsImmediately() noexcept
         glueRunning = false;
         glueWarmup = 0;
         glueS.setImmediate (0.0f);
+        lfLimitS.setImmediate (0.0f);
         glueMixS.setImmediate (0.0f);
     }
 
@@ -252,6 +272,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     dryDelay.prepare (spec.numChannels, oversampler.latencySamples());
     dryBuffer.setSize (spec.numChannels, spec.maxBlockSize);
     padBuffer.setSize (spec.numChannels, spec.maxBlockSize);
+    residualRef.setSize (spec.numChannels, spec.maxBlockSize);
     thresholdBuf.assign (static_cast<size_t> (spec.maxBlockSize), 1.0f);
     kneeBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
     clipMixBuf.assign (static_cast<size_t> (spec.maxBlockSize), 0.0f);
@@ -269,7 +290,10 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
         bands[b].release = onePoleCoeff (kGlueReleaseMs, fs);
     }
     glueWarmupLength = std::max (1, msToSamples (kGlueWarmupMs, fs));
+    lfAttack = onePoleCoeff (kLfAttackMs, fs);
+    lfRelease = onePoleCoeff (kLfReleaseMs, fs);
     distortionWindow.prepare (fs);
+    residualWindow.prepare (fs);
     grWindowLength = std::max (1, msToSamples (kGrWindowMs, fs));
 
     // Structural limiter settings are passed through here.
@@ -278,6 +302,7 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     limiter.setEnvelope (limiterEnvelope);
     limiter.prepare (spec);
     limiter.setParams ({ params.ceilingDb, params.releaseMs, params.autoRelease });
+    residualDelay.prepare (spec.numChannels, oversampler.latencySamples() + limiter.latencySamples());
 
     prepared = true;
     reset();
@@ -292,6 +317,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     clipPower = clipPowerFast = 0.0f;
     splitter.reset();
     antiDenormal = 0.0f;
+    lfEnv = 0.0f;
     limiter.reset();
     for (auto& b : bands)
     {
@@ -304,6 +330,7 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
     clipAmountS.reset (fs, kParamSmoothMs, params.clipAmount);
     clipKneeS.reset (fs, kParamSmoothMs, params.clipKnee);
     glueS.reset (fs, kParamSmoothMs, params.glue);
+    lfLimitS.reset (fs, kParamSmoothMs, params.lfLimit);
     glueMixS.reset (fs, kGlueFadeMs, 0.0f);
     clipMixS.reset (fs, kClipFadeMs, 0.0f);
     crestGainS.reset (fs, kParamSmoothMs, 0.0f);
@@ -312,13 +339,18 @@ void LoudnessMaximizer::reset() noexcept FLUB_NONBLOCKING
 
     limiterGrDb.store (0.0f, std::memory_order_relaxed);
     glueGrDb.store (0.0f, std::memory_order_relaxed);
+    lfGrDb.store (0.0f, std::memory_order_relaxed);
     clipRatioDb.store (kMinusInfDb, std::memory_order_relaxed);
     clipInputEnergy.store (0.0f, std::memory_order_relaxed);
     distortionWindow.reset();
     distortionDb.store (kMinusInfDb, std::memory_order_relaxed);
+    residualDelay.reset();
+    residualWindow.reset();
+    residualDb.store (kMinusInfDb, std::memory_order_relaxed);
     windowClipDb.store (kMinusInfDb, std::memory_order_relaxed);
     grWindowCount = 0;
     grWindowMin = 0.0f;
+    analysisPending = 0;
     windowGrDb.store (0.0f, std::memory_order_relaxed);
     fresh = true;
 }
@@ -349,7 +381,7 @@ void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FL
     clipAmountS.setTarget (p.clipAmount);
     clipKneeS.setTarget (p.clipKnee);
 
-    if (p.glue > 0.0f)
+    if (bandStageWanted (p))
     {
         if (! glueRunning)
         {
@@ -358,6 +390,7 @@ void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FL
         else
         {
             glueS.setTarget (p.glue);
+            lfLimitS.setTarget (p.lfLimit);
             if (glueWarmup == 0)
                 glueMixS.setTarget (1.0f);
         }
@@ -366,6 +399,7 @@ void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FL
     {
         // Fade the bands out; the stage stops once the fade has finished.
         glueS.setTarget (0.0f);
+        lfLimitS.setTarget (0.0f);
         glueWarmup = 0;
         glueMixS.setTarget (0.0f);
     }
@@ -386,7 +420,7 @@ void LoudnessMaximizer::setParams (const MaximizerParams& newParams) noexcept FL
 
 //==============================================================================
 void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy,
-                                        float& glueMinGain) noexcept
+                                        float& glueMinGain, float& lfMinGain) noexcept
 {
     const int n = seg.numSamples;
     const int numCh = seg.numChannels;
@@ -435,10 +469,11 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         }
 
         // Glue: split every channel, one linked level per band.
-        if (glueWarmup > 0 && --glueWarmup == 0 && params.glue > 0.0f)
+        if (glueWarmup > 0 && --glueWarmup == 0 && bandStageWanted (params))
             glueMixS.setTarget (1.0f);
         const float mix = glueMixS.next();
         const float amount = glueS.next();
+        const float lfAmount = lfLimitS.next();
 
         std::array<std::array<float, kNumBands>, kMaxChannels> split {};
         std::array<float, kNumBands> level {};
@@ -467,6 +502,7 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                 level[b] = std::max (level[b], std::abs (split[static_cast<size_t> (c)][b]));
 
         std::array<float, kNumBands> bandGain {};
+        float lowHeld = 0.0f;
         for (size_t b = 0; b < kNumBands; ++b)
         {
             auto& det = bands[b];
@@ -474,6 +510,8 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
             // the last holdLength .. 2 holdLength samples.
             det.bucket = std::max (det.bucket, level[b]);
             const float held = std::max (det.bucket, det.prevBucket);
+            if (b == 0)
+                lowHeld = held;
             if (--det.countdown <= 0)
             {
                 det.prevBucket = det.bucket;
@@ -492,6 +530,22 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
             glueMinGain = std::min (glueMinGain, 1.0f + mix * (bandGain[b] - 1.0f));
         }
 
+        // LF-first limiter on the low band (after its glue gain): followed
+        // whatever the amount, so it starts from the real level.
+        {
+            const float lowLevel = lowHeld * bandGain[0];
+            const float coeff = lowLevel > lfEnv ? lfAttack : lfRelease;
+            lfEnv = lowLevel + coeff * (lfEnv - lowLevel);
+            if (lfEnv < kEnvFlush)
+                lfEnv = 0.0f;
+            if (lfAmount > 0.0f && lfEnv > lfThreshold)
+            {
+                const float lfGain = 1.0f + lfAmount * (lfThreshold / lfEnv - 1.0f);
+                bandGain[0] *= lfGain;
+                lfMinGain = std::min (lfMinGain, 1.0f + mix * (lfGain - 1.0f));
+            }
+        }
+
         for (int c = 0; c < numCh; ++c)
         {
             const auto ci = static_cast<size_t> (c);
@@ -502,9 +556,13 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
         }
 
         // Fully faded out and switched off: stop spending cycles on the stage.
-        if (mix == 0.0f && ! glueMixS.isSmoothing() && glueWarmup == 0 && ! (params.glue > 0.0f))
+        if (mix == 0.0f && ! glueMixS.isSmoothing() && glueWarmup == 0 && ! bandStageWanted (params))
             glueRunning = false;
     }
+
+    // The clipper's input is the whole-stage residual's reference (aligned
+    // with the limiter's output in process()).
+    residualRef.block (numCh, n).copyFrom (seg);
 
     // ---- 2) oversampled soft clipper, crossfaded against the aligned dry path --
     // Crest gate: the clipper input's short-term linked power, tracked
@@ -629,13 +687,20 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
 
     const AudioBlock io = block.firstChannels (numCh);
     double clipDiff = 0.0, clipIn = 0.0;
-    float glueMin = 1.0f, grMin = 0.0f;
+    float glueMin = 1.0f, lfMin = 1.0f, grMin = 0.0f;
     double closedGrSumDb = 0.0;
     int closedGrWindows = 0;
-    for (int pos = 0; pos < numSamples; pos += spec.maxBlockSize)
+    // The block runs in pieces that end on a fixed grid of kGrWindowMs
+    // windows counted from reset() (every stage is strictly per sample, so
+    // the split changes nothing audible): the limiter's deepest GR is taken
+    // per window, and the analysis windows (the clipper's THD+N and the
+    // whole-stage residual, >= 25 ms) close only on that grid, so neither
+    // depends on the host block size (docs/11 E06).
+    for (int pos = 0; pos < numSamples;)
     {
-        const int len = std::min (spec.maxBlockSize, numSamples - pos);
+        const int len = std::min ({ spec.maxBlockSize, numSamples - pos, grWindowLength - grWindowCount });
         AudioBlock seg = io.subBlock (pos, len);
+        pos += len;
         // Prepared channels missing from this block are run on silence (the
         // output of those lanes is discarded). Otherwise their dry-delay line
         // and oversampler history would stand still and release audio from
@@ -647,36 +712,50 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
             seg.ch[static_cast<size_t> (c)] = pad;
         }
         seg.numChannels = spec.numChannels;
-        processSegment (seg, clipDiff, clipIn, glueMin);
+        processSegment (seg, clipDiff, clipIn, glueMin, lfMin);
 
         // ---- 3) true-peak limiter at the ceiling ----------------------------
-        // Run in pieces that end on a fixed grid of kGrWindowMs windows
-        // (counted from reset(); the limiter is strictly per sample, so the
-        // split changes nothing audible) to take the deepest GR per window:
-        // unlike the per-block minimum, that does not depend on the host
-        // block size.
-        for (int done = 0; done < len;)
+        limiter.process (seg);
+        const float pieceGrDb = limiter.getGainReductionDb();
+        grMin = std::min (grMin, pieceGrDb);
+        grWindowMin = std::min (grWindowMin, pieceGrDb);
+        grWindowCount += len;
+        analysisPending += len;
+        const bool onGrid = grWindowCount >= grWindowLength;
+        if (onGrid)
         {
-            const int piece = std::min (len - done, grWindowLength - grWindowCount);
-            limiter.process (seg.subBlock (done, piece));
-            const float pieceGrDb = limiter.getGainReductionDb();
-            grMin = std::min (grMin, pieceGrDb);
-            grWindowMin = std::min (grWindowMin, pieceGrDb);
-            done += piece;
-            grWindowCount += piece;
-            if (grWindowCount >= grWindowLength)
+            closedGrSumDb += grWindowMin;
+            ++closedGrWindows;
+            grWindowMin = 0.0f;
+            grWindowCount = 0;
+        }
+
+        // ---- 4) whole-stage residual: limiter output against the aligned clipper input
+        {
+            const AudioBlock ref = residualRef.block (spec.numChannels, len);
+            residualDelay.process (ref);
+            for (int c = 0; c < numCh; ++c)
             {
-                closedGrSumDb += grWindowMin;
-                ++closedGrWindows;
-                grWindowMin = 0.0f;
-                grWindowCount = 0;
+                const float* x = ref.channel (c);
+                const float* y = seg.channel (c);
+                DistortionSums sums;
+                for (int i = 0; i < len; ++i)
+                    sums.add (x[i], y[i] - x[i]);
+                if (sums.isFinite())
+                    residualWindow.channel (c).merge (sums);
             }
         }
 
-        if (float db = kMinusInfDb, clipDb = kMinusInfDb; distortionWindow.advance (len, db, &clipDb))
+        if (onGrid)
         {
-            distortionDb.store (db, std::memory_order_relaxed);
-            windowClipDb.store (clipDb, std::memory_order_relaxed);
+            if (float db = kMinusInfDb, clipDb = kMinusInfDb; distortionWindow.advance (analysisPending, db, &clipDb))
+            {
+                distortionDb.store (db, std::memory_order_relaxed);
+                windowClipDb.store (clipDb, std::memory_order_relaxed);
+            }
+            if (float db = kMinusInfDb; residualWindow.advance (analysisPending, db))
+                residualDb.store (db, std::memory_order_relaxed);
+            analysisPending = 0;
         }
     }
 
@@ -684,6 +763,7 @@ void LoudnessMaximizer::process (const AudioBlock& block) noexcept FLUB_NONBLOCK
     if (closedGrWindows > 0) // several in a long block: their mean, so each window counts once
         windowGrDb.store (static_cast<float> (closedGrSumDb / closedGrWindows), std::memory_order_relaxed);
     glueGrDb.store (gainToDb (glueMin), std::memory_order_relaxed);
+    lfGrDb.store (gainToDb (lfMin), std::memory_order_relaxed);
     const float ratioDb = clipDiff > 0.0 && clipIn > 0.0
                               ? static_cast<float> (std::max (static_cast<double> (kMinusInfDb), 10.0 * std::log10 (clipDiff / clipIn)))
                               : kMinusInfDb;

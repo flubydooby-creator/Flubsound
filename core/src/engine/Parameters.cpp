@@ -185,6 +185,9 @@ std::vector<Info> buildLayout()
     set (MaxClipCrestDb, v3 (make ("max.clipCrest", "Clipper Crest Gate", "Maximizer", Unit::Db, 0.0f, 24.0f, 6.0f)));
     set (MaxClipMaxDb, v3 (make ("max.clipMaxDb", "Clipper Depth Limit", "Maximizer", Unit::Db, 0.5f, 24.0f, 3.0f)));
     set (MaxStyle, v3 (choice ("max.style", "Maximizer Style", "Maximizer", { "Custom", "Transparent", "Punchy", "Aggressive", "Safe" }, 0)));
+    // docs/11 E05 step 5: the low band is limited before the bands are summed
+    // (LoudnessMaximizer.h). 0 by default; Boost's top range raises it.
+    set (MaxLfLimit, v3 (make ("max.lfLimit", "LF-First Limiting", "Maximizer", Unit::Percent, 0.0f, 1.0f, 0.0f)));
 
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };

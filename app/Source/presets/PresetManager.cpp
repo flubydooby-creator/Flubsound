@@ -82,9 +82,14 @@ void PresetManager::setUserPresetFolder (const juce::File& folder)
 
 void PresetManager::refresh()
 {
+    std::map<juce::String, juce::File> previousOwners; // uuid -> the user preset file that had it
+    for (const auto& p : presets)
+        if (! p.isFactory && p.uuid.isNotEmpty())
+            previousOwners[p.uuid] = p.file;
+
     presets.clear();
     scanFactory();
-    scanUser();
+    scanUser (previousOwners);
     sortAndPublish();
 }
 
@@ -166,22 +171,44 @@ void PresetManager::scanFactory()
 #endif
 }
 
-void PresetManager::scanUser()
+void PresetManager::scanUser (const std::map<juce::String, juce::File>& previousOwners)
 {
     if (! userFolder.isDirectory())
         return;
 
-    // By file name, so which of two files with the same uuid (a copy made
-    // outside the app) keeps it does not depend on the directory order.
-    auto files = userFolder.findChildFiles (juce::File::findFiles, false, "*.json");
-    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) { return a.getFileName() < b.getFileName(); });
-    for (const auto& file : files)
+    struct Found
     {
-        flub::preset::Preset p;
+        juce::File file;
+        flub::preset::Preset preset;
+        bool ownedBefore = false;
+    };
+    std::vector<Found> found;
+    for (const auto& file : userFolder.findChildFiles (juce::File::findFiles, false, "*.json"))
+    {
+        Found f { file, {}, false };
         juce::String error;
-        if (! parseJsonText (file.loadFileAsString().toStdString(), p, error))
+        if (! parseJsonText (file.loadFileAsString().toStdString(), f.preset, error))
             continue; // not a preset (or damaged, or a newer major): ignore, never rewritten
+        const auto owner = previousOwners.find (juce::String (f.preset.uuid));
+        f.ownedBefore = owner != previousOwners.end() && owner->second == file;
+        found.push_back (std::move (f));
+    }
 
+    // Of two files with the same uuid (a copy made outside the app), the one
+    // that had it on the last scan keeps it, else the first by file name, so
+    // the outcome does not depend on the directory order.
+    std::sort (found.begin(), found.end(),
+               [] (const Found& a, const Found& b)
+               {
+                   if (a.ownedBefore != b.ownedBefore)
+                       return a.ownedBefore;
+                   return a.file.getFileName() < b.file.getFileName();
+               });
+
+    for (const auto& f : found)
+    {
+        const auto& file = f.file;
+        const auto& p = f.preset;
         auto info = describe (p);
         // A preset without a uuid (saved before docs/11 E52, or by hand), or
         // with one another preset has, gets a new one, written into its file

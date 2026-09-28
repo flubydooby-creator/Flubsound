@@ -16,7 +16,7 @@ namespace
 constexpr float kEngage = 0.02f;
 
 // clang-format off
-constexpr std::array<MacroEntry, 29> kMusicTable {{
+constexpr std::array<MacroEntry, 30> kMusicTable {{
     // ---- Boost Intensity: clarity/width first, bass next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.35f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAir,        0.30f, 0.10f, 0.60f, 1.0f, false },
@@ -27,6 +27,10 @@ constexpr std::array<MacroEntry, 29> kMusicTable {{
     { MacroSource::Boost, MaxDriveDb,        8.00f, 0.30f, 1.00f, 1.2f, true  },
     { MacroSource::Boost, MaxGlue,           0.30f, 0.40f, 1.00f, 1.0f, false },
     { MacroSource::Boost, SatDriveDb,        4.00f, 0.60f, 1.00f, 1.0f, true  },
+    // The LF-first limiter (docs/11 E05 step 5) in Boost's top half (no
+    // factory preset goes past 45 %): kicks are limited in the low band
+    // instead of ducking the whole mix. Ungoverned: it only takes level away.
+    { MacroSource::Boost, MaxLfLimit,        1.00f, 0.50f, 1.00f, 1.0f, false },
     // ---- M1 Punch ----
     // No BassTighten (docs/11 E04): Tighten 0.5 cut the kick's first 10 ms
     // by 2 dB, the opposite of punch.

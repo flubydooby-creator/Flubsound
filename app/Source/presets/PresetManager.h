@@ -4,8 +4,8 @@
 //   time (juce_add_binary_data, target FlubsoundPresets). Their display name,
 //   category, author and tags come from the JSON (flub::preset format).
 // * User presets live in <userApplicationDataDirectory>/Flubsound/Presets as
-//   *.flubpreset.json (same format) and can be saved, overwritten, deleted
-//   and imported.
+//   *.flubpreset.json (same format) and can be saved, overwritten, renamed,
+//   deleted and imported.
 // * Presets are applied to a strip's ParameterStore bank with
 //   flub::preset::applyToStore (lock-free atomic writes; the audio thread
 //   glides continuous values and crossfades discrete ones).
@@ -174,7 +174,7 @@ public:
 
 private:
     void scanFactory();
-    void scanUser();
+    void scanUser (const std::map<juce::String, juce::File>& previousOwners);
     void sortAndPublish();
     static bool parseJsonText (const std::string& text, flub::preset::Preset& out, juce::String& error);
     static PresetInfo describe (const flub::preset::Preset& p);

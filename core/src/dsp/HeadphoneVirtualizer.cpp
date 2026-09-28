@@ -1,7 +1,7 @@
 // Flubsound Pro - multichannel (5.1 / 7.1) to binaural headphone virtualiser.
 //
-// Signal flow (every path adds into two ear accumulators; the sum is scaled by
-// the -3 dB headroom trim and, during a layout swap, by the swap fade):
+// Signal flow (every speaker path adds into two ear accumulators; the output
+// is (make-up * speakers + LFE) * -3 dB trim * fold headroom * swap fade):
 //
 //   speaker (parametric):  x -> rear-cue shelf -> ITD line -+-> Lagrange(D_L) -> shadow_L -> ear L
 //                                                           +-> Lagrange(D_R) -> shadow_R -> ear R
@@ -10,6 +10,40 @@
 //                          (LfeFold, shared with the chain's BS.775 fold)
 //   room:                  sum of speaker inputs -> HP 200 Hz -> LP 5 kHz -> 6 taps
 //                          (4 .. 19 ms, alternating ears) * roomAmount
+//   level match (E28a):    D = BS.775 matrix of the speaker inputs (no LFE);
+//                          K-weighted powers of D and of the ear sums -> make-up
+//
+// Level match (docs/11 E28a). The chain's alternative to this module is the
+// BS.775 downmix 0.7071 * D, and this module's trim is the same 0.7071, so
+// matching the ear sums to D matches virt on to virt off. Both are K-weighted
+// (BS.1770: the +4 dB shelf and the 38 Hz high-pass, as SVFs) and summed over
+// both channels, as a loudness meter does. The loudness ratio depends on the
+// content: a single speaker reaches both ears here and one side there (+3 dB
+// here); uncorrelated speakers add in power in both folds; correlated ones add
+// in amplitude in both, but here with ITD and head-shadow differences that
+// comb the highs. So a fixed gain cannot match both ends, and the gain is:
+//   diffuse = sqrt(P_D / P_ears) for uncorrelated pink noise on every speaker,
+//             computed from the running design at a layout swap: a 1/3-octave
+//             grid (20 Hz .. 20 kHz) of |K|^2 times |shadow|^2 |shelf|^2 per
+//             ear path (or |HRIR|^2), plus the reflections' power;
+//   make-up  = sqrt(<P_D> / <P_ears>), the powers averaged over 3 s (one-pole,
+//             per 16-sample period, only periods of D above -70 LUFS: silence
+//             freezes it), clamped to diffuse +-4 dB, moving at most 6 dB/s,
+//             and ramped linearly across each period. Before any content it
+//             is the diffuse gain.
+// It is feed-forward (the render is measured before the make-up), so it
+// cannot oscillate. The LFE is outside it: it is the same LfeFold in both
+// folds. The averages survive reset() (the chain resets the module whenever
+// virt comes back on, and the content has not changed); prepare() and a
+// layout swap start them again. levelMatch off glides the make-up to unity.
+//
+// Fold headroom (E28a). Correlated content on every speaker adds up: 7.1 with
+// the same full-scale signal everywhere reaches about +10 dBFS. A linked peak
+// gain on the output (before the swap fade) holds it at 0 dBFS: when a sample
+// would exceed 0 dBFS the gain drops at once to exactly 0 dBFS / peak, holds
+// for 10 ms and then recovers with a 150 ms one-pole. It has no look-ahead
+// (the module has zero latency), so the first rising edge of an over is
+// flattened; below 0 dBFS it does nothing. foldHeadroom off lets it recover.
 //
 // Geometry (Brown & Duda 1998 spherical head, radius a, c = 343 m/s): for a
 // source at azimuth az and an ear at -90 (left) / +90 (right) degrees,
@@ -101,6 +135,21 @@ constexpr float kFadeMs = 5.0f;               // layout swap: fade out, swap, fa
 constexpr float kPrerollMs = 2.0f;            // silent pre-roll after a swap (parametric)
 constexpr float kMaxHrirPrerollMs = 10.0f;    // ... and the cap for an HRIR pre-roll
 
+// Level match and fold headroom (docs/11 E28a, see the file comment).
+constexpr double kKShelfHz = 1681.974450955533; // BS.1770 stage 1 (high shelf)
+constexpr double kKShelfQ = 0.7071752369554196;
+constexpr double kKShelfDb = 3.999843853973347;
+constexpr double kKHighPassHz = 38.13547087602444; // stage 2 (RLB high-pass)
+constexpr double kKHighPassQ = 0.5003270373238773;
+constexpr float kMakeupAverageMs = 3000.0f; // power averages (one-pole)
+constexpr float kMakeupSlewDbPerS = 6.0f;
+constexpr float kMakeupRangeDb = 4.0f;      // around the diffuse-field gain
+// Gate: K-weighted mean square of D summed over both channels >= -70 LUFS.
+constexpr double kMakeupGate = 1.1695e-7;   // 10^((-70 + 0.691) / 10)
+constexpr float kHeadroomCeiling = 1.0f;    // 0 dBFS
+constexpr float kHeadroomHoldMs = 10.0f;
+constexpr float kHeadroomReleaseMs = 150.0f;
+
 // Longest HRIR kept by the direct-form convolver (21 ms at 48 kHz: every
 // anechoic HRIR set fits). Direct form costs O(taps) per sample and ear: 1024
 // taps for 7.1 at 48 kHz is already ~16 % of a core, so longer sets (BRIRs
@@ -137,10 +186,45 @@ VirtualizerParams sanitise (const VirtualizerParams& p) noexcept
     s.roomAmount = clampOr (p.roomAmount, 0.0f, 1.0f, d.roomAmount);
     s.lfeGainDb = clampOr (p.lfeGainDb, kMinLfeDb, kMaxLfeDb, d.lfeGainDb);
     s.lfeOn = p.lfeOn;
+    s.levelMatch = p.levelMatch;
+    s.foldHeadroom = p.foldHeadroom;
     return s;
 }
 
 bool hasLfe (ChannelLayout l) noexcept { return l != ChannelLayout::Stereo; }
+
+/** The BS.775 matrix D (Bs775Fold without its overall gain and the LFE):
+    channel c's weight into the left and right output. */
+std::array<float, 2> downmixWeights (int c) noexcept
+{
+    constexpr float k = Bs775Fold::kMatrixGain;
+    if (c == 0)
+        return { 1.0f, 0.0f };
+    if (c == 1)
+        return { 0.0f, 1.0f };
+    if (c == 2)
+        return { k, k };
+    return c % 2 == 0 ? std::array<float, 2> { k, 0.0f } : std::array<float, 2> { 0.0f, k };
+}
+
+/** The 1/3-octave grid of the diffuse-field gain, 20 Hz .. 20 kHz (pink noise
+    has equal power per band, so every point weighs the same). */
+constexpr int kGridFirst = -17, kGridLast = 13;
+double gridFrequency (int k) noexcept { return 1000.0 * std::pow (2.0, k / 3.0); }
+
+/** One K-weighting SVF on four lanes (the arithmetic of svfTick). */
+void svfLanes (const SvfCoeffs& c, std::array<float, 4>& ic1, std::array<float, 4>& ic2, std::array<float, 4>& v) noexcept
+{
+    for (size_t k = 0; k < 4; ++k)
+    {
+        const float v3 = v[k] - ic2[k];
+        const float v1 = c.a1 * ic1[k] + c.a2 * v3;
+        const float v2 = ic2[k] + c.a2 * ic1[k] + c.a3 * v3;
+        ic1[k] = 2.0f * v1 - ic1[k];
+        ic2[k] = 2.0f * v2 - ic2[k];
+        v[k] = c.m0 * v[k] + c.m1 * v1 + c.m2 * v2;
+    }
+}
 
 /** Woodworth path length to one ear in units of the head radius (delay = value * a/c).
     theta is the angle between the source and the ear axis in radians (0 .. pi). */
@@ -353,6 +437,24 @@ bool HeadphoneVirtualizer::loadHrir()
         }
         path.history.assign (2 * static_cast<size_t> (length), 0.0f);
         path.present = true;
+
+        // Level match: both ears' K-weighted power on the diffuse-field grid
+        // (a DFT of the IR at each grid frequency).
+        path.diffusePower = 0.0;
+        for (int g = kGridFirst; g <= kGridLast; ++g)
+        {
+            const double f = gridFrequency (g);
+            if (f >= 0.45 * spec.sampleRate)
+                break;
+            const std::complex<double> step = std::polar (1.0, -kTwoPi * f / spec.sampleRate);
+            for (const auto& rev : path.reversed)
+            {
+                std::complex<double> h (0.0, 0.0), z (1.0, 0.0);
+                for (int k = 0; k < length; ++k, z *= step)
+                    h += static_cast<double> (rev[static_cast<size_t> (length - 1 - k)]) * z;
+                path.diffusePower += pathWeight (f) * std::norm (h);
+            }
+        }
     }
     return true;
 }
@@ -396,9 +498,17 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     lfe.prepare (fs, LfeFold::gainFor (params.lfeOn, params.lfeGainDb));
 
     const auto scratch = static_cast<size_t> (spec.maxBlockSize);
-    accL.assign (scratch, 0.0f);
-    accR.assign (scratch, 0.0f);
-    bus.assign (scratch, 0.0f);
+    for (auto* v : { &accL, &accR, &bus, &lfeBus, &refL, &refR })
+        v->assign (scratch, 0.0f);
+
+    // Level match and fold headroom (E28a).
+    kShelf = SvfCoeffs::make (FilterType::HighShelf, kKShelfHz, kKShelfQ, kKShelfDb, fs);
+    kHighPass = SvfCoeffs::make (FilterType::HighPass, kKHighPassHz, kKHighPassQ, 0.0, fs);
+    averageCoeff = 1.0 - std::exp (-kControlInterval / (static_cast<double> (kMakeupAverageMs) * 0.001 * fs));
+    makeupSlew = dbToGain (kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
+    headroomHoldSamples = msToSamples (kHeadroomHoldMs, fs);
+    headroomRelease = static_cast<float> (1.0 - std::exp (-1.0 / (static_cast<double> (kHeadroomReleaseMs) * 0.001 * fs)));
+    servoSeeded = false;
 
     // Geometry smoothers step once per control period, so their coefficient
     // is computed for the control rate.
@@ -432,6 +542,15 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
 
 void HeadphoneVirtualizer::reset() noexcept FLUB_NONBLOCKING
 {
+    // The level match's averages and make-up are kept (see the file comment);
+    // its filters, its period and the fold headroom restart.
+    for (auto* st : { &kShelf1, &kShelf2, &kHp1, &kHp2 })
+        st->fill (0.0f);
+    periodRef = periodBin = 0.0;
+    servoPhase = 0;
+    makeupFrom = makeupTo;
+    headroomGain = 1.0f;
+    headroomHold = 0;
     swapLayout();
     reflHpState.reset();
     reflLpState.reset();
@@ -549,6 +668,7 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     // so everything may jump: new roles and renderer, geometry at its targets,
     // clean per-channel state. A silent pre-roll then lets the new paths fill
     // before the fade-in, which hides the rest of the filters' start-up.
+    const bool layoutChanged = params.layout != runningLayout;
     runningLayout = params.layout;
     const bool withLfe = hasLfe (runningLayout);
     const int numLayoutChannels = channelCount (runningLayout);
@@ -567,6 +687,71 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     clearState();
     fadeDir = 0;
     holdRemaining = useHrir ? holdHrir : holdParametric;
+
+    // Level match: the new design's diffuse-field gain. A new layout (or the
+    // first swap after prepare()) starts the averages again at it; the
+    // output is silent here, so the make-up may jump.
+    diffuseGain = diffuseGainFor();
+    if (layoutChanged || ! servoSeeded)
+    {
+        avgRef = avgBin = 0.0;
+        learned = false;
+        makeupFrom = makeupTo = params.levelMatch ? diffuseGain : 1.0f;
+        servoSeeded = true;
+    }
+}
+
+double HeadphoneVirtualizer::pathWeight (double freqHz) const noexcept
+{
+    const double fs = spec.sampleRate;
+    return std::norm (kShelf.response (freqHz, fs)) * std::norm (kHighPass.response (freqHz, fs));
+}
+
+float HeadphoneVirtualizer::diffuseGainFor() const noexcept
+{
+    // Uncorrelated pink noise of equal power on every speaker: the K-weighted
+    // power of D over both channels against that of the ear sums (see the
+    // file comment). Runs at a layout swap (a few hundred filter responses).
+    const double fs = spec.sampleRate;
+    double ref = 0.0, ears = 0.0;
+    int numSpeakers = 0;
+    for (int c = 0; c < kMaxChannels; ++c)
+    {
+        if (speakers[static_cast<size_t> (c)].role != Role::Speaker)
+            continue;
+        ++numSpeakers;
+        if (useHrir && hrirPaths[static_cast<size_t> (c)].present)
+            ears += hrirPaths[static_cast<size_t> (c)].diffusePower;
+    }
+    const double room = static_cast<double> (roomGain.getTarget());
+    for (int g = kGridFirst; g <= kGridLast; ++g)
+    {
+        const double f = gridFrequency (g);
+        if (f >= 0.45 * fs)
+            break;
+        const double w = pathWeight (f);
+        for (int c = 0; c < kMaxChannels; ++c)
+        {
+            const auto& sp = speakers[static_cast<size_t> (c)];
+            if (sp.role != Role::Speaker)
+                continue;
+            const auto d = downmixWeights (c);
+            ref += w * static_cast<double> (d[0] * d[0] + d[1] * d[1]);
+            if (! useHrir)
+            {
+                const double shelf = std::norm (sp.shelf.response (f, fs));
+                for (const auto& ear : sp.ears)
+                    ears += w * shelf * std::norm (ear.shadow.response (f, fs));
+            }
+        }
+        // Reflections: the bus carries every speaker (power numSpeakers), each
+        // ear three taps of summed squared weight 0.5.
+        const double band = std::norm (reflHpCoeffs.response (f, fs) * reflLpCoeffs.response (f, fs));
+        ears += w * room * room * numSpeakers * band;
+    }
+    if (! (ref > 0.0) || ! (ears > 0.0) || ! std::isfinite (ref / ears))
+        return 1.0f;
+    return static_cast<float> (std::sqrt (ref / ears));
 }
 
 void HeadphoneVirtualizer::tick() noexcept
@@ -707,7 +892,33 @@ void HeadphoneVirtualizer::renderHrir (HrirPath& path, const float* x, int lengt
 
 void HeadphoneVirtualizer::renderLfe (const float* x, int length) noexcept
 {
-    lfe.addTo (x, accL.data(), accR.data(), length);
+    lfe.addToMono (x, lfeBus.data(), length); // the same in both ears
+}
+
+void HeadphoneVirtualizer::updateMakeup() noexcept
+{
+    // End of a 16-sample period (stream time): fold its energies into the
+    // averages, then aim the next period's ramp at the new make-up.
+    if (params.levelMatch && periodRef >= kMakeupGate * kControlInterval && std::isfinite (periodRef) && std::isfinite (periodBin))
+    {
+        avgRef += averageCoeff * (periodRef - avgRef);
+        avgBin += averageCoeff * (periodBin - avgBin);
+        learned = true;
+    }
+    periodRef = periodBin = 0.0;
+
+    float target = 1.0f;
+    if (params.levelMatch)
+    {
+        target = diffuseGain;
+        if (learned && avgBin > 1.0e-30)
+        {
+            const float range = dbToGain (kMakeupRangeDb);
+            target = std::clamp (static_cast<float> (std::sqrt (avgRef / avgBin)), diffuseGain / range, diffuseGain * range);
+        }
+    }
+    makeupFrom = makeupTo;
+    makeupTo = std::clamp (target, makeupFrom / makeupSlew, makeupFrom * makeupSlew);
 }
 
 void HeadphoneVirtualizer::renderReflections (int length) noexcept
@@ -753,9 +964,21 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
     float* const l = accL.data();
     float* const r = accR.data();
     float* const sum = bus.data();
+    float* const lfeOut = lfeBus.data();
+    float* const dl = refL.data();
+    float* const dr = refR.data();
     std::fill_n (l, length, 0.0f);
     std::fill_n (r, length, 0.0f);
     std::fill_n (sum, length, 0.0f);
+    std::fill_n (lfeOut, length, 0.0f);
+    // The level match measures D while it is on (off, the make-up only
+    // glides to unity).
+    const bool measure = params.levelMatch;
+    if (measure)
+    {
+        std::fill_n (dl, length, 0.0f);
+        std::fill_n (dr, length, 0.0f);
+    }
 
     // Every input is read (into the accumulators) before any output is
     // written, so in-place processing is safe although ch 0/1 are both
@@ -786,6 +1009,15 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
 
         for (int i = 0; i < length; ++i)
             sum[i] += x[i];
+        if (measure)
+        {
+            const auto d = downmixWeights (c);
+            for (int i = 0; i < length; ++i)
+            {
+                dl[i] += d[0] * x[i];
+                dr[i] += d[1] * x[i];
+            }
+        }
 
         if (useHrir)
         {
@@ -810,35 +1042,84 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
     if (hrirLength > 0)
         hrirWrite = (hrirWrite + length) % hrirLength;
 
-    // Output: trim (and the swap fade), binaural in ch 0/1, the rest cleared.
+    // Output: (make-up * speakers + LFE) * trim * fold headroom * swap fade,
+    // binaural in ch 0/1, the rest cleared. Per sample, so the make-up ramp
+    // and the headroom gain are the same for any block partition.
     const bool fading = fadeDir != 0 || fadePos != fadeSamples;
     const float invFade = 1.0f / static_cast<float> (fadeSamples);
-    const auto gainAt = [this, fading, invFade] (int i) noexcept
-    {
-        if (! fading)
-            return kTrim;
-        // Integer position -> exact 0 / 1 end points.
-        const int pos = std::clamp (fadePos + fadeDir * (i + 1), 0, fadeSamples);
-        return kTrim * static_cast<float> (pos) * invFade;
-    };
-
+    const float invPeriod = 1.0f / static_cast<float> (kControlInterval);
+    const bool limit = params.foldHeadroom;
     float* const outL = block.channel (0) + start;
-    if (numInputs >= 2)
+    float* const outR = numInputs >= 2 ? block.channel (1) + start : nullptr;
+    std::array<float, 4> lanes {};
+    double eRef = periodRef, eBin = periodBin;
+    for (int i = 0; i < length; ++i)
     {
-        float* const outR = block.channel (1) + start;
-        for (int i = 0; i < length; ++i)
+        if (measure)
         {
-            const float g = gainAt (i);
-            outL[i] = l[i] * g;
-            outR[i] = r[i] * g;
+            lanes = { dl[i], dr[i], l[i], r[i] };
+            svfLanes (kShelf, kShelf1, kShelf2, lanes);
+            svfLanes (kHighPass, kHp1, kHp2, lanes);
+            eRef += static_cast<double> (lanes[0] * lanes[0] + lanes[1] * lanes[1]);
+            eBin += static_cast<double> (lanes[2] * lanes[2] + lanes[3] * lanes[3]);
+        }
+
+        const int phase = ++servoPhase;
+        const float m = makeupFrom + (makeupTo - makeupFrom) * (static_cast<float> (phase) * invPeriod);
+        float yl = kTrim * (m * l[i] + lfeOut[i]);
+        float yr = kTrim * (m * r[i] + lfeOut[i]);
+
+        // Fold headroom: instant attack to exactly the ceiling, hold, release.
+        const float peak = std::max (std::abs (yl), std::abs (yr)) * headroomGain;
+        if (limit && peak > kHeadroomCeiling && std::isfinite (peak))
+        {
+            headroomGain *= kHeadroomCeiling / peak;
+            headroomHold = headroomHoldSamples;
+        }
+        else if (headroomHold > 0)
+        {
+            --headroomHold;
+        }
+        else if (headroomGain < 1.0f)
+        {
+            headroomGain += (1.0f - headroomGain) * headroomRelease;
+            if (headroomGain > 0.999999f)
+                headroomGain = 1.0f;
+        }
+        float g = headroomGain;
+        if (fading)
+        {
+            // Integer position -> exact 0 / 1 end points.
+            const int pos = std::clamp (fadePos + fadeDir * (i + 1), 0, fadeSamples);
+            g *= static_cast<float> (pos) * invFade;
+        }
+        yl *= g;
+        yr *= g;
+
+        if (outR != nullptr)
+        {
+            outL[i] = yl;
+            outR[i] = yr;
+        }
+        else
+        {
+            outL[i] = 0.5f * (yl + yr); // mono host bus: the mono fold-down of the pair
+        }
+
+        if (phase == kControlInterval)
+        {
+            periodRef = eRef;
+            periodBin = eBin;
+            updateMakeup();
+            eRef = eBin = 0.0;
+            servoPhase = 0;
         }
     }
-    else
-    {
-        // Mono host bus: the mono fold-down of the binaural pair.
-        for (int i = 0; i < length; ++i)
-            outL[i] = 0.5f * (l[i] + r[i]) * gainAt (i);
-    }
+    periodRef = eRef;
+    periodBin = eBin;
+    for (auto* st : { &kShelf1, &kShelf2, &kHp1, &kHp2 })
+        for (auto& v : *st)
+            v = flushed (v);
 
     for (int c = 2; c < numInputs; ++c)
         std::fill_n (block.channel (c) + start, length, 0.0f);

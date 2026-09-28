@@ -30,6 +30,16 @@
 //   the consumer drops the OLDEST frames down to the target and counts it. If
 //   the ring is completely full the producer has no choice but to drop the
 //   newest frames; both are reported in Stats::droppedFrames.
+// * Sanitising (docs/11 E10): push() mutes every NaN / Inf sample and every
+//   finite one beyond +24 dBFS (ProcessingChain::kSanitiseLimit) and counts
+//   it (Stats::corruptSamples), so one bad sample from one application stays
+//   one silent sample of that stream: it never reaches the resampler's
+//   history or the other streams mixed into the same block, where the
+//   chain's own guard would have to drop or mute the whole mix. A clean
+//   same-layout push is still a straight copy (one scan to check it). On
+//   Linux, applications are mixed inside PipeWire before Flubsound sees
+//   them, so a NaN from one application reaches every capture of that mix;
+//   this guard (and the chain's) then limits it to the samples it hit.
 //
 // Threading: exactly one producer thread and one consumer thread.
 //   prepare()             non-RT, neither side running
@@ -66,6 +76,7 @@ public:
         uint64_t overflows = 0;         // times the oldest data was dropped (fill too high)
         uint64_t droppedFrames = 0;     // producer frames discarded (overflow + ring full)
         uint64_t framesPushed = 0;      // total producer frames received
+        uint64_t corruptSamples = 0;    // NaN / Inf / beyond +24 dBFS samples muted by push()
         float fillMs = 0.0f;            // smoothed fill level
         float targetMs = 0.0f;          // current target fill level
         float correctionPpm = 0.0f;     // PI controller output (+ = consuming faster)
@@ -117,6 +128,7 @@ private:
     static constexpr double kKi = 0.0225;     // 1/s^2
     static constexpr double kFillSmoothingSeconds = 1.5;
 
+    /** Converts (and sanitises) into producerScratch; returns the number of samples muted. */
     int convertChunk (const float* src, int numFrames, int srcChannels) noexcept;
     double computeTargetFrames() const noexcept;
     void renderFadeToSilence (float* const* dest, int numDestChannels, int numFrames, bool addToDest) noexcept;
@@ -130,7 +142,7 @@ private:
     // Producer side
     std::vector<float> producerScratch;
     std::atomic<float> burstEstimate { 0.0f };  // decaying peak of push sizes (frames)
-    std::atomic<uint64_t> framesPushed { 0 }, ringFullDrops { 0 };
+    std::atomic<uint64_t> framesPushed { 0 }, ringFullDrops { 0 }, corruptSamples { 0 };
 
     // Consumer side (only touched by the consumer or while it is stopped)
     double consumerRate = 48000.0, nominalRatio = 1.0;

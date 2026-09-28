@@ -1273,7 +1273,7 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
 
 ## 12. Persisted UI state
 
-The settings file is XML, `Flubsound Pro.settings` in the per-user application-data folder. Writes are debounced 2 s. Per-strip entries are keyed by strip *name*.
+The settings file is XML, `Flubsound Pro.settings` in the per-user application-data folder. Writes are debounced 2 s. Per-strip entries are keyed by strip *name*. Presets are referenced by their uuid (the `PresetManager` id), so a renamed user preset keeps its rules and strips; a file from before uuids (no `settings.schemaVersion`) is migrated once to schema 2 (docs/11 E52). A file that does not parse is never overwritten: it is renamed to `Flubsound Pro.settings.corrupt-<yyyymmdd-hhmmss>` and the newest valid of `.bak1`–`.bak3` restored (`AppSettings::getRecovery()`); each start that finds a changed, valid file backs it up to `.bak1`.
 
 | What | Key / mechanism | Default |
 |---|---|---|

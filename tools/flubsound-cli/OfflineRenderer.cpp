@@ -93,6 +93,9 @@ public:
         const uint32_t reason = m.governorReason.load (rl);
         limiterReason += (reason & SafetyGovernor::kReasonLimiter) != 0 ? w : 0.0;
         distortionReason += (reason & SafetyGovernor::kReasonDistortion) != 0 ? w : 0.0;
+        s.governorScaleEnd = scale;
+        s.governorStateEnd = state;
+        s.governorReasonEnd = reason;
 
         const float level = m.autoLevelGainDb.load (rl);
         s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
@@ -168,7 +171,7 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error)
 
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort, RenderStats* stats)
+                 const std::atomic<bool>* abort, RenderStats* stats, ProtectionStrength protection)
 {
     if (! checkRenderable (input, error))
         return false;
@@ -190,6 +193,7 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
     store->setActiveBank (Bank::A);
 
     auto chain = std::make_unique<ProcessingChain> (*store);
+    chain->setProtectionStrength (protection);
     chain->prepare ({ input.sampleRate, blockSize, chainChannels });
     const int latency = chain->getLatencySamples();
     latencySamples = latency;
@@ -272,7 +276,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     auto runPass = [&] (std::vector<std::vector<float>>& out, LoudnessReport& report) {
         const auto t0 = Clock::now();
         int latency = 0;
-        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats);
+        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats, settings.protection);
         renderSeconds += std::chrono::duration<double> (Clock::now() - t0).count();
         if (! ok)
             return false;

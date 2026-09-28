@@ -122,6 +122,8 @@ enum class Opt
     TargetLufs,
     Ceiling,
     Profile,
+    Protection,
+    Rate,
     Format,
     Block,
     Jobs,
@@ -155,6 +157,8 @@ constexpr OptionSpec kOptions[] = {
     { Opt::TargetLufs, "--target-lufs", "-t", true, false, kRender },
     { Opt::Ceiling, "--ceiling", "-c", true, false, kChain },
     { Opt::Profile, "--profile", nullptr, true, false, kChain },
+    { Opt::Protection, "--protection", nullptr, true, false, kChain },
+    { Opt::Rate, "--rate", nullptr, true, false, kQuality },
     { Opt::Format, "--format", "-f", true, false, kRender },
     { Opt::Block, "--block", nullptr, true, false, kChain },
     { Opt::Jobs, "--jobs", "-j", true, false, kBatch },
@@ -327,6 +331,23 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
             return true;
         }
 
+        case Opt::Protection:
+        {
+            const std::string k = looseKey (v);
+            if (k == "off")
+                r.protection = ProtectionStrength::Off;
+            else if (k == "normal")
+                r.protection = ProtectionStrength::Normal;
+            else if (k == "strict")
+                r.protection = ProtectionStrength::Strict;
+            else
+            {
+                error = "--protection expects off, normal or strict, got '" + value + "'";
+                return false;
+            }
+            return true;
+        }
+
         case Opt::Format:
         {
             const std::string k = looseKey (v);
@@ -353,6 +374,18 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
                 return false;
             }
             r.blockSize = n;
+            return true;
+        }
+
+        case Opt::Rate:
+        {
+            double d = 0.0;
+            if (! parseNumber (v, d) || d < 8000.0 || d > 768000.0 || d != std::floor (d))
+            {
+                error = "--rate expects a sample rate in Hz from 8000 to 768000, got '" + value + "'";
+                return false;
+            }
+            o.rate = d;
             return true;
         }
 

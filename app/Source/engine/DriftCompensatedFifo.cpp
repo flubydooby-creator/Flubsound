@@ -1,5 +1,7 @@
 #include "DriftCompensatedFifo.h"
 
+#include "flub/engine/ProcessingChain.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -11,6 +13,14 @@ namespace
 constexpr uint64_t kPhaseOne = 1ull << 32; // 32.32 fixed point
 constexpr float kInvPhaseOne = 1.0f / 4294967296.0f;
 constexpr float kMinus3dB = 0.70710678f;
+// Same limit as the chain's input sanitiser (+24 dBFS).
+constexpr float kSanitiseLimit = flub::ProcessingChain::kSanitiseLimit;
+
+/** False for NaN, +-Inf and finite values beyond +24 dBFS. */
+inline bool isSane (float v) noexcept
+{
+    return std::abs (v) <= kSanitiseLimit;
+}
 } // namespace
 
 // =============================================================================
@@ -30,6 +40,7 @@ void DriftCompensatedFifo::prepare (int numChannels, double producerSampleRate, 
     burstEstimate.store (0.0f, std::memory_order_relaxed);
     framesPushed.store (0, std::memory_order_relaxed);
     ringFullDrops.store (0, std::memory_order_relaxed);
+    corruptSamples.store (0, std::memory_order_relaxed);
     underruns.store (0, std::memory_order_relaxed);
     overflows.store (0, std::memory_order_relaxed);
     overflowDrops.store (0, std::memory_order_relaxed);
@@ -78,6 +89,16 @@ int DriftCompensatedFifo::convertChunk (const float* src, int numFrames, int src
     const auto sch = static_cast<size_t> (srcChannels);
     float* out = producerScratch.data();
 
+    // Every source sample that is used passes the sanitiser: a bad one is
+    // muted (and counted) before it can reach a downmix sum.
+    int muted = 0;
+    const auto clean = [&muted] (float v) noexcept {
+        if (isSane (v))
+            return v;
+        ++muted;
+        return 0.0f;
+    };
+
     for (int i = 0; i < numFrames; ++i)
     {
         const float* s = src + static_cast<size_t> (i) * sch;
@@ -85,19 +106,21 @@ int DriftCompensatedFifo::convertChunk (const float* src, int numFrames, int src
 
         if (srcChannels == 1)
         {
+            const float v = clean (s[0]);
             for (size_t c = 0; c < ch; ++c)
-                d[c] = s[0];
+                d[c] = v;
         }
         else if (channels == 2 && srcChannels >= 3)
         {
             // ITU-R BS.775 downmix, LFE dropped, -3 dB overall (same policy as
             // the chain). Order: FL FR FC LFE [BL BR] [SL SR].
-            float l = s[0] + kMinus3dB * s[2];
-            float r = s[1] + kMinus3dB * s[2];
+            const float centre = kMinus3dB * clean (s[2]);
+            float l = clean (s[0]) + centre;
+            float r = clean (s[1]) + centre;
             for (size_t p = 4; p + 1 < sch; p += 2)
             {
-                l += kMinus3dB * s[p];
-                r += kMinus3dB * s[p + 1];
+                l += kMinus3dB * clean (s[p]);
+                r += kMinus3dB * clean (s[p + 1]);
             }
             d[0] = kMinus3dB * l;
             d[1] = kMinus3dB * r;
@@ -106,12 +129,12 @@ int DriftCompensatedFifo::convertChunk (const float* src, int numFrames, int src
         {
             const size_t n = std::min (ch, sch);
             for (size_t c = 0; c < n; ++c)
-                d[c] = s[c];
+                d[c] = clean (s[c]);
             for (size_t c = n; c < ch; ++c)
                 d[c] = 0.0f;
         }
     }
-    return numFrames;
+    return muted;
 }
 
 int DriftCompensatedFifo::push (const float* interleaved, int numFrames, int numSourceChannels) noexcept
@@ -126,9 +149,18 @@ int DriftCompensatedFifo::push (const float* interleaved, int numFrames, int num
     framesPushed.fetch_add (static_cast<uint64_t> (numFrames), std::memory_order_relaxed);
 
     const auto ch = static_cast<size_t> (channels);
-    int accepted = 0;
+    int accepted = 0, muted = 0;
 
-    if (numSourceChannels == channels)
+    // One scan decides whether a same-layout push can be copied as it is.
+    bool sane = numSourceChannels == channels;
+    if (sane)
+    {
+        const size_t count = static_cast<size_t> (numFrames) * ch;
+        for (size_t i = 0; i < count && sane; ++i)
+            sane = isSane (interleaved[i]);
+    }
+
+    if (sane)
     {
         const size_t freeFrames = (ring.capacity() - ring.available()) / ch;
         const size_t n = std::min (static_cast<size_t> (numFrames), freeFrames);
@@ -140,8 +172,8 @@ int DriftCompensatedFifo::push (const float* interleaved, int numFrames, int num
         for (int pos = 0; pos < numFrames; pos += kChunkFrames)
         {
             const int chunk = std::min (kChunkFrames, numFrames - pos);
-            convertChunk (interleaved + static_cast<size_t> (pos) * static_cast<size_t> (numSourceChannels), chunk,
-                          numSourceChannels);
+            muted += convertChunk (interleaved + static_cast<size_t> (pos) * static_cast<size_t> (numSourceChannels), chunk,
+                                   numSourceChannels);
             const size_t freeFrames = (ring.capacity() - ring.available()) / ch;
             const size_t n = std::min (static_cast<size_t> (chunk), freeFrames);
             ring.push (producerScratch.data(), n * ch);
@@ -150,6 +182,9 @@ int DriftCompensatedFifo::push (const float* interleaved, int numFrames, int num
                 break;
         }
     }
+
+    if (muted > 0)
+        corruptSamples.fetch_add (static_cast<uint64_t> (muted), std::memory_order_relaxed);
 
     // Ring completely full (consumer stalled): the newest frames are lost.
     if (accepted < numFrames)
@@ -402,6 +437,7 @@ DriftCompensatedFifo::Stats DriftCompensatedFifo::getStats() const noexcept
     s.overflows = overflows.load (std::memory_order_relaxed);
     s.droppedFrames = overflowDrops.load (std::memory_order_relaxed) + ringFullDrops.load (std::memory_order_relaxed);
     s.framesPushed = framesPushed.load (std::memory_order_relaxed);
+    s.corruptSamples = corruptSamples.load (std::memory_order_relaxed);
     s.fillMs = fillMsStat.load (std::memory_order_relaxed);
     s.targetMs = targetMsStat.load (std::memory_order_relaxed);
     s.correctionPpm = correctionPpmStat.load (std::memory_order_relaxed);

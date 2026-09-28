@@ -2,12 +2,15 @@
 //
 // Signal flow per channel (x = input, L = oversampler round-trip latency):
 //
-//   x --+--> upsample x^ --> curve f (per type) --> f(x^) - x^ --> downsample --> d
-//       |                                                                        |
-//       +--> dry delay (L samples) ---------------------------------> x_d ---(+)--> s
+//   x --+--> upsample x^ --> curve f (per type) --> f(x^) - x^ --> downsample --> d --> HP5
+//       |                                                                                 |
+//       +--> dry delay (L samples) --------------------------------------------> x_d ---(+)--> s
 //   (delta oversampling: only the curve's deviation is band-limited, so the
 //    programme never passes the half-band filters and the top octave does
-//    not droop; the round-trip latency L is unchanged)
+//    not droop; the round-trip latency L is unchanged. The deviation's
+//    residual-path DC blocker, a 5 Hz 1st-order high-pass with double state
+//    (docs/11 E10), removes the DC an asymmetric waveform gets from every
+//    curve, e.g. 100 + 200 Hz through Tape: see test_signal_hygiene.cpp)
 //
 //   s'   = s - tubeW * LP10(s)                  tube DC blocker (10 Hz HP)
 //   s''  = s' + bumpBeta * tapeW * BP80(s')     tape head bump (+1 dB * drive/24 @ 80 Hz)
@@ -75,6 +78,9 @@ constexpr double kHeadBumpQ = 1.0;
 constexpr float kHeadBumpMaxDb = 1.0f; // at kMaxDriveDb
 
 constexpr double kDcBlockHz = 10.0;
+// Residual-path DC blocker on the curve's deviation (docs/11 E10), as on the
+// maximizer's clipper correction.
+constexpr double kResidualDcBlockHz = 5.0;
 
 // tanh (0.2): the tube bias b.
 constexpr float kTubeTanhBias = 0.19737532022490401f;
@@ -205,8 +211,12 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     if (! (spec.sampleRate > 0.0) || ! std::isfinite (spec.sampleRate))
         spec.sampleRate = 48000.0;
 
-    preparedFactor = osFactor >= 4 ? 4 : (osFactor >= 2 ? 2 : 1);
-    oversampler.prepare (spec.numChannels, spec.maxBlockSize, preparedFactor, osQuality);
+    Oversampler::Design design = osDesign;
+    design.factor = design.factor >= 4 ? 4 : (design.factor >= 2 ? 2 : 1);
+    design.d1 = std::max (1, design.d1);
+    design.d2 = std::max (1, design.d2);
+    preparedFactor = design.factor;
+    oversampler.prepare (spec.numChannels, spec.maxBlockSize, design);
     dryDelay.prepare (spec.numChannels, oversampler.latencySamples());
     dryBuffer.setSize (spec.numChannels, spec.maxBlockSize);
 
@@ -229,6 +239,8 @@ void Saturator::prepare (const ProcessSpec& newSpec)
     headBump = SvfCoeffs::make (FilterType::BandPass, kHeadBumpHz, kHeadBumpQ, 0.0, spec.sampleRate);
     const double gDc = std::tan (kPi * kDcBlockHz / spec.sampleRate);
     dcBlockG = static_cast<float> (gDc / (1.0 + gDc));
+    const double gResidual = std::tan (kPi * kResidualDcBlockHz / spec.sampleRate);
+    residualDcG = gResidual / (1.0 + gResidual);
 
     driveSmoother.reset (spec.sampleRate, kSmoothingMs, params.driveDb);
     mixSmoother.reset (spec.sampleRate, kSmoothingMs, params.mix);
@@ -488,17 +500,28 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
     // 4. Base-rate post-processing and latency-aligned dry/wet.
     const SvfCoeffs bumpC = headBump;
     const float dcG = dcBlockG;
+    const double devG = residualDcG;
     for (int c = 0; c < numChannels; ++c)
     {
         auto& st = channelState[static_cast<size_t> (c)];
         float* y = seg.channel (c);
         const float* x = dry.channel (c);
         float lpState = st.dcLp;
+        double devLp = st.residualDcLp;
         SvfState bumpState = st.bump;
         for (int i = 0; i < length; ++i)
         {
             const auto si = static_cast<size_t> (i);
-            float s = x[i] + y[i]; // exact dry + band-limited curve deviation
+
+            // Residual-path DC blocker (docs/11 E10): the band-limited curve
+            // deviation passes a 1st-order TPT high-pass at 5 Hz with double
+            // state, HP(d) = d - LP(d), so an asymmetric waveform leaves no DC
+            // in any type; the programme itself never passes the filter.
+            const double d = static_cast<double> (y[i]);
+            const double dv = (d - devLp) * devG;
+            const double dlp = dv + devLp;
+            devLp = dlp + dv;
+            float s = x[i] + static_cast<float> (d - dlp); // exact dry + band-limited curve deviation
 
             // Tube DC blocker: 1st-order TPT high-pass at 10 Hz, HP(s) = s - LP(s).
             // Always running so it is settled when a crossfade brings Tube in.
@@ -515,6 +538,9 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
             y[i] = xd + mixBuf[si] * (gainBuf[si] * core - xd);
         }
         st.dcLp = flushState (lpState);
+        // Flushed like the other states (kStateFloor, -300 dB), so a silent
+        // tail reaches exact zero; cleared after non-finite input.
+        st.residualDcLp = (std::abs (devLp) < kStateFloor || ! std::isfinite (devLp)) ? 0.0 : devLp;
         st.bump = bumpState;
         flushState (st.bump);
     }

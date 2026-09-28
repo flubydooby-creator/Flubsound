@@ -195,7 +195,7 @@ sequenceDiagram
   ├─ [slot] DynamicEq              4 user bands + 4 mode bands (footsteps / de-harsh …)
   ├─ [slot] BassEngine             subsonic · mono-bass · protected shelf · harmonics · tighten
   ├─ [slot] ClarityEnhancer        transients · de-mud · dynamic presence · air exciter
-  ├─ [slot] Saturator              tape / tube / digital, 2× oversampled
+  ├─ [slot] Saturator              tape / tube / digital, 4× oversampled (2× from 176.4 kHz)
   ├─ [slot] StereoSpatializer      side-only width / focus / space (mono-exact) · L/R crossfeed with ITD
   ├─ [slot] Compressor             look-ahead, linked, downward + upward
   ├─ [slot] LoudnessMaximizer      drive → 3-band glue (only while armed) → 4× soft clipper (2× in Low Latency)
@@ -321,7 +321,7 @@ These estimates are for the Windows virtual-driver path, which is designed but n
 | Stage | Quality | Balanced (default) | Low Latency (competitive) |
 |---|---|---|---|
 | Spectral noise gate (STFT) | 1024 smp | — (not in chain) | — |
-| Saturator oversampling (2×) | 32 smp (high-quality FIR) | 16 smp (short FIR) | 16 smp |
+| Saturator oversampling (4× below 176.4 kHz, 2× above; [11 E10](11-enhancement-report.md#e10)) | 32 smp | 16 smp | 16 smp |
 | Compressor look-ahead | 3 ms = 144 smp | 1 ms = 48 smp | 0.5 ms = 24 smp |
 | Maximizer clipper oversampling | 4× HQ: 36 smp | 4× HQ: 36 smp | 2× short: 16 smp |
 | True-peak limiter look-ahead + detector | 2 ms + 20 = 116 smp | 1.5 ms + 20 = 92 smp | 0.5 ms + 20 = 44 smp |

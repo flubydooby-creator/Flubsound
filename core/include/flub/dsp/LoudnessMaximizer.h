@@ -5,6 +5,14 @@
 //        linked per band, ratio 2:1, threshold ceiling - 6 dB, 5/80 ms,
 //        amount = glue). Balances the band levels so one band (usually the
 //        bass) does not dominate the limiter: louder AND less pumping.
+//        LF-first limiter (lfLimit, docs/11 E05 step 5): the low band alone
+//        is limited 3 dB under the ceiling before the bands are summed, from
+//        its own detector (the band's held peak over half a period of 30 Hz,
+//        1 ms attack, 250 ms release), so a kick's body is taken down in the
+//        low band instead of by the wideband limiter, which would duck the
+//        vocals and pads with it. The held peak keeps the gain flat on
+//        steady bass; gain = 1 + lfLimit (min (1, T / env) - 1). The stage
+//        runs while glue or lfLimit is above 0.
 //     -> [clip] oversampled soft clipper (clipOversampling x, default 4x):
 //        threshold t = ceilingLin * 10^(clipHeadroomDb/20), with
 //        clipHeadroomDb = lerp(+6 dB, +0.3 dB, clipAmount); soft knee:
@@ -33,7 +41,7 @@
 // Telemetry: clipEnergyRatioDb = 10 log10(sum (x - clip(x))^2 / sum x^2) over
 //   the last block (how hard the clipper works), the limiter's gain
 //   reduction, and distortionDb: the clipper's THD+N over the last analysis
-//   window (closed at the first segment boundary at or after 25 ms),
+//   window (closed on the 10 ms GR-window grid at or after 25 ms: 30 ms),
 //   measured at the oversampled rate around the curve itself, where input
 //   and clipped output are aligned (DistortionEstimator.h: residual after the
 //   least-squares gain, relative to the output energy). The chain feeds the
@@ -41,6 +49,13 @@
 //   floored at the clip energy ratio over the same window,
 //   getWindowClipEnergyDb()) to the SafetyGovernor, which backs the
 //   governed macro contributions off when either exceeds its budget.
+//   Whole-stage residual (docs/11 E06 step 1): the output of the clipper
+//   and the limiter against their input (after the drive and the glue
+//   stage), delayed by the stage's latency, over the same >= 25 ms windows:
+//   the least-squares gain per window and channel takes the ceiling and
+//   the average gain reduction, the residual is what the clipper and the
+//   limiter's gain modulation (IMD) add - the limiter's share that the
+//   clipper's own THD+N cannot see (getResidualDistortionDb()).
 // latency = clipper oversampler latency + limiter latency.
 #pragma once
 
@@ -69,6 +84,7 @@ struct MaximizerParams
     bool autoRelease = true;
     float clipCrestDb = 6.0f;    // 0 .. 24; 0 = no crest gate (clip at t)      (max.clipCrest)
     float clipMaxDepthDb = 3.0f; // 0.5 .. 24; 24 = depth not capped           (max.clipMaxDb)
+    float lfLimit = 0.0f;        // 0 .. 1; LF-first limiter in the glue path   (max.lfLimit)
 
     bool operator== (const MaximizerParams&) const = default;
 };
@@ -112,6 +128,8 @@ public:
     /** Engagements of the limiter's final safety clamp since prepare() (0 in normal operation). */
     uint64_t getSafetyClipCount() const noexcept { return limiter.getSafetyClipCount(); }
     float getGlueReductionDb() const noexcept { return glueGrDb.load (std::memory_order_relaxed); }
+    /** Deepest gain reduction of the LF-first limiter in the last block (dB <= 0, its amount applied). */
+    float getLfReductionDb() const noexcept { return lfGrDb.load (std::memory_order_relaxed); }
     float getClipEnergyRatioDb() const noexcept { return clipRatioDb.load (std::memory_order_relaxed); }
     /** The clipper's input energy behind that ratio (sum x^2 at the
         oversampled rate, last block; 0 while the clipper is off), so a caller
@@ -122,6 +140,10 @@ public:
     /** The clip energy ratio over that same window (the chain floors the
         governor's clipper input with it; getClipEnergyRatioDb() is per block). */
     float getWindowClipEnergyDb() const noexcept { return windowClipDb.load (std::memory_order_relaxed); }
+    /** THD+N of the clipper and the limiter together over the last analysis
+        window: the output against the latency-aligned input of the clipper
+        (see the header comment; dB re the output, -160 = clean). */
+    float getResidualDistortionDb() const noexcept { return residualDb.load (std::memory_order_relaxed); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -152,13 +174,16 @@ private:
     static constexpr int kNumBands = 3;
 
     static MaximizerParams sanitised (const MaximizerParams& p, const MaximizerParams& fallback) noexcept;
+    /** The glue stage (splitter) runs for the glue and for the LF-first limiter. */
+    static bool bandStageWanted (const MaximizerParams& p) noexcept { return p.glue > 0.0f || p.lfLimit > 0.0f; }
     void applyParamsImmediately() noexcept;
     void startGlue (bool immediate) noexcept;
     void startClipper (bool immediate) noexcept;
     void updateCeiling (float newCeilingDb) noexcept;
     void updateClipThreshold() noexcept;
     void updateClipShape() noexcept;
-    void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain) noexcept;
+    void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain,
+                         float& lfMinGain) noexcept;
 
     int clipOsFactor = 4;
     Oversampler::Quality clipOsQuality = Oversampler::Quality::High;
@@ -167,11 +192,17 @@ private:
     LimiterEnvelope limiterEnvelope { true, true, true };
     ProcessSpec spec;
     MaximizerParams params;
-    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
-        windowClipDb { -160.0f }, windowGrDb { 0.0f }, clipInputEnergy { 0.0f };
+    std::atomic<float> limiterGrDb { 0.0f }, glueGrDb { 0.0f }, lfGrDb { 0.0f }, clipRatioDb { -160.0f }, distortionDb { -160.0f },
+        windowClipDb { -160.0f }, windowGrDb { 0.0f }, clipInputEnergy { 0.0f }, residualDb { -160.0f };
     int grWindowLength = 480, grWindowCount = 0; // limiter GR window (kGrWindowMs), samples
     float grWindowMin = 0.0f;                    // deepest GR in the open window (dB)
-    DistortionWindow distortionWindow; // clipper THD+N sums over a window of at least 25 ms (closes at a segment boundary)
+    int analysisPending = 0;                     // samples since the last grid point (analysis windows)
+    DistortionWindow distortionWindow; // clipper THD+N sums over a window of at least 25 ms (closes on the GR-window grid)
+    // Whole-stage residual: the clipper's input, delayed by the clipper and
+    // limiter latency, against the limiter's output, over the same windows.
+    DistortionWindow residualWindow;
+    DelayLine residualDelay;
+    AudioBuffer residualRef;
 
     bool prepared = false;
     bool fresh = true;           // nothing processed since prepare()/reset(): setParams() applies instantly
@@ -206,6 +237,10 @@ private:
     bool glueRunning = false;
     int glueWarmup = 0, glueWarmupLength = 1;
     float antiDenormal = 0.0f;   // alternates 1e-20 / 0 on the splitter input
+    // LF-first limiter: its follower of the low band's held peak (after the
+    // glue gain), coefficients, threshold and smoothed amount.
+    float lfEnv = 0.0f, lfAttack = 0.0f, lfRelease = 0.0f, lfThreshold = 1.0f;
+    LinearSmoothedValue lfLimitS;
 
     TruePeakLimiter limiter;
 

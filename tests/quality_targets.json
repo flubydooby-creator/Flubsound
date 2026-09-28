@@ -1,0 +1,43 @@
+{
+  "format": "flubsound-quality-targets",
+  "version": 1,
+  "about": [
+    "Numeric sound-quality targets and KNOWN_GAP ratchet values (docs/11 E59).",
+    "A setting is a list of `flubsound-cli quality` chain options. A row names a metric of that command's --json",
+    "output (a dotted path into the `quality` object, array elements by index), the comparison its target needs,",
+    "and optionally the latency profile(s) and hygiene sample rate(s) it is measured at; `byProfile` overrides the",
+    "target value per profile. A row with `recorded` values is a KNOWN_GAP: it must not get worse than the value",
+    "recorded for the compiler that runs it (gcc, clang, appleclang, msvc) by more than `margin`; without a value",
+    "for that compiler the reference (gcc) value is used with twice the margin. A row without `recorded` must meet",
+    "its target. When a fix meets a gap row's target, drop `recorded` (the row then guards the target).",
+    "tier per-pr: evaluated by tests/test_cli_quality.cpp (fast, every build). tier nightly: only by",
+    "tools/scripts/quality-report.py (the full profile x rate matrix, also for tuning sessions)."
+  ],
+  "settings": {
+    "maximizer-12": {"about": "the maximizer alone at 12 dB drive (every other module off)", "args": ["--set", "gate.on=off", "eq.on=off", "dyneq.on=off", "bass.on=off", "clarity.on=off", "sat.on=off", "spatial.on=off", "virt.on=off", "comp.on=off", "max.on=on", "max.drive=12"]},
+    "music-boost-100": {"about": "Music, Boost 100 (the whole chain, governed)", "args": ["--mode", "music", "--boost", "100"]},
+    "warmth-100": {"about": "Music, Warmth 100 (sat.drive 9 Tape, bass harmonics, bass boost)", "args": ["--mode", "music", "--macro", "warmth=100"]},
+    "music-all-100": {"about": "Music, Boost 100 and every macro at 100", "args": ["--mode", "music", "--boost", "100", "--macro", "1=100", "2=100", "3=100", "4=100", "5=100"]},
+    "max-drive-24": {"about": "default chain at 24 dB maximizer drive", "args": ["--set", "max.drive=24"]}
+  },
+  "rows": [
+    {"id": "E05.max12.thdn60", "item": "E05", "setting": "maximizer-12", "metric": "thdn.1.db", "op": "<=", "target": -30.0, "tier": "per-pr", "source": "docs/11 E05 Done-when: sines at 12 dB drive <= -30 dB THD+N"},
+    {"id": "E05.max12.thdn1k", "item": "E05", "setting": "maximizer-12", "metric": "thdn.3.db", "op": "<=", "target": -30.0, "tier": "per-pr", "source": "docs/11 E05 Done-when"},
+    {"id": "E05.max12.dip", "item": "E05", "setting": "maximizer-12", "metric": "ducking.probes.1.dipDb", "op": "<=", "target": 6.0, "tier": "per-pr", "source": "docs/11 E05 Done-when: a probe under kicks dips <= 6 dB"},
+    {"id": "E05.max12.kickOnset", "item": "E05", "setting": "maximizer-12", "metric": "kick.onsetMinusBodyDb", "op": ">=", "target": 0.0, "recorded": {"gcc": -0.51, "clang": -0.51}, "margin": 0.5, "tier": "per-pr", "source": "docs/11 E05 Done-when: kick onset / body >= 0"},
+    {"id": "E59.max12.kickCentroid", "item": "E59", "setting": "maximizer-12", "metric": "kick.centroidShiftMs", "op": "<=", "target": 2.0, "recorded": {"gcc": 8.62, "clang": 8.62}, "margin": 0.5, "tier": "per-pr", "source": "docs/11 E59 What: kick centroid shift < 2 ms"},
+    {"id": "E05.boost100.dip", "item": "E05", "setting": "music-boost-100", "metric": "ducking.probes.1.dipDb", "op": "<=", "target": 6.0, "tier": "per-pr", "source": "docs/11 E05 Done-when"},
+    {"id": "E05.boost100.loudness", "item": "E05", "setting": "music-boost-100", "metric": "loudness.pinkOutLufs", "op": ">=", "target": -9.52, "tier": "per-pr", "source": "docs/11 E05 Done-when: max Boost within 1.5 LU of the pre-E05 -8.02 LUFS"},
+    {"id": "E05.boost100.thdn1k", "item": "E05", "setting": "music-boost-100", "metric": "thdn.3.db", "op": "<=", "target": -80.0, "tier": "per-pr", "source": "tests/test_known_gaps.cpp (Music Boost 100: a steady 1 kHz sine)"},
+    {"id": "E05.boost100.kickOnset", "item": "E05", "setting": "music-boost-100", "metric": "kick.onsetMinusBodyDb", "op": ">=", "target": 0.0, "recorded": {"gcc": -1.18, "clang": -1.18}, "margin": 0.5, "tier": "per-pr", "source": "docs/11 E05 Done-when: kick onset / body >= 0 at Boost 100"},
+    {"id": "E59.boost100.kickCentroid", "item": "E59", "setting": "music-boost-100", "metric": "kick.centroidShiftMs", "op": "<=", "target": 2.0, "recorded": {"gcc": 6.54, "clang": 6.54}, "margin": 0.5, "tier": "per-pr", "source": "docs/11 E59 What: kick centroid shift < 2 ms"},
+    {"id": "E10.warmth100.alias.pr", "item": "E10", "setting": "warmth-100", "metric": "hygiene.worstAliasDbc", "op": "<=", "target": -70.0, "byProfile": {"low-latency": -60.0}, "profiles": ["balanced"], "rates": [44100], "tier": "per-pr", "source": "docs/11 E10 Done-when: worst in-band inharmonic <= -70 dBc (Quality / Balanced), <= -60 dBc (Low Latency)"},
+    {"id": "E10.warmth100.alias", "item": "E10", "setting": "warmth-100", "metric": "hygiene.worstAliasDbc", "op": "<=", "target": -70.0, "byProfile": {"low-latency": -60.0}, "profiles": ["quality", "balanced", "low-latency"], "rates": [44100, 48000, 96000, 192000], "tier": "nightly", "source": "docs/11 E10 Done-when"},
+    {"id": "E10.warmth100.dc", "item": "E10", "setting": "warmth-100", "metric": "hygiene.dcDbfs", "op": "<=", "target": -60.0, "profiles": ["quality", "balanced", "low-latency"], "rates": [44100, 48000, 96000, 192000], "tier": "nightly", "source": "docs/11 E10 Done-when: DC <= -60 dBFS"},
+    {"id": "E10.warmth100.ultrasonic", "item": "E10", "setting": "warmth-100", "metric": "hygiene.ultrasonicDb", "op": "<=", "target": -60.0, "profiles": ["quality", "balanced", "low-latency"], "rates": [192000], "tier": "nightly", "source": "docs/11 E10 Done-when: at 192 kHz, 22-96 kHz energy <= -60 dB"},
+    {"id": "E10.maxdrive24.dc", "item": "E10", "setting": "max-drive-24", "metric": "hygiene.dcDbfs", "op": "<=", "target": -60.0, "profiles": ["quality", "balanced", "low-latency"], "rates": [48000], "tier": "nightly", "source": "docs/11 E10 Done-when: DC at max.drive 24 <= -60 dBFS in every profile"},
+    {"id": "E10.all100.alias", "item": "E10", "setting": "music-all-100", "metric": "hygiene.worstAliasDbc", "op": "<=", "target": -70.0, "profiles": ["balanced"], "rates": [44100], "recorded": {"gcc": -34.4, "clang": -34.4}, "margin": 0.5, "tier": "nightly", "source": "docs/11 E10 Done-when at extreme settings (the air exciter and saturator in series; see the E10 Status)"},
+    {"id": "E10.all100.ultrasonic", "item": "E10", "setting": "music-all-100", "metric": "hygiene.ultrasonicDb", "op": "<=", "target": -60.0, "profiles": ["balanced"], "rates": [192000], "recorded": {"gcc": -55.46, "clang": -55.46}, "margin": 0.5, "tier": "nightly", "source": "docs/11 E10 Done-when: at 192 kHz, 22-96 kHz energy <= -60 dB with all macros"},
+    {"id": "E10.all100.dc", "item": "E10", "setting": "music-all-100", "metric": "hygiene.dcDbfs", "op": "<=", "target": -60.0, "profiles": ["quality", "balanced", "low-latency"], "rates": [48000], "tier": "nightly", "source": "docs/11 E10 Done-when"}
+  ]
+}

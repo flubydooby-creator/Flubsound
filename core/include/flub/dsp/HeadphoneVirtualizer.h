@@ -32,6 +32,19 @@
 //   uniformly-partitioned FFT convolution (latency = 0 with a direct-form
 //   head block). Setting an HRIR set is structural (before prepare()).
 //
+// Level match (docs/11 E28a, levelMatch): the speakers' binaural sum is
+//   scaled so that its loudness equals the chain's BS.775 downmix of the same
+//   input (virt on/off within 1 LU). A per-layout diffuse-field gain (the
+//   K-weighted pink-noise power of every ear path, computed from the model or
+//   the HRIRs) is the starting point; a feed-forward servo (K-weighted powers
+//   of the downmix and of the render, 3 s averages, -70 LUFS gate, 6 dB/s
+//   slew, +-4 dB around the diffuse gain) trims it to the content, because
+//   correlated and uncorrelated content need different gains. The LFE is not
+//   scaled (it is the same in both folds).
+// Fold headroom (foldHeadroom): a linked zero-latency peak limiter keeps the
+//   binaural output at or below 0 dBFS, so correlated full-scale content on
+//   every channel is not handed to the chain as a +10 dBFS over (instant
+//   attack, 10 ms hold, 150 ms release; it never acts below 0 dBFS).
 // Output: binaural stereo in channels 0/1; channels >= 2 are cleared. The
 // chain treats everything after this module as stereo. -3 dB headroom trim.
 // Zero latency (ITD delays are part of the binaural cue, not added latency).
@@ -80,6 +93,8 @@ struct VirtualizerParams
     float roomAmount = 0.15f;    // 0 .. 1
     float lfeGainDb = 0.0f;      // -20 .. +16, re one main channel
     bool lfeOn = true;           // false: the LFE is not rendered (fades out over 20 ms)
+    bool levelMatch = true;      // loudness of the BS.775 downmix (E28a); off glides to unity
+    bool foldHeadroom = true;    // binaural output held at or below 0 dBFS (E28a)
 
     bool operator== (const VirtualizerParams&) const = default;
 };
@@ -104,6 +119,13 @@ public:
 
     /** Speaker azimuth in degrees for a channel of a layout (NaN for LFE). */
     static float speakerAzimuthDeg (ChannelLayout layout, int channel, const VirtualizerParams& p) noexcept;
+
+    /** Level match state, for meters and tests (read on the audio thread or
+        between process() calls): the make-up applied to the speakers now,
+        the running layout's diffuse-field gain, and the fold-headroom gain. */
+    float getMakeupDb() const noexcept { return gainToDb (makeupTo); }
+    float getDiffuseMakeupDb() const noexcept { return gainToDb (diffuseGain); }
+    float getHeadroomGainDb() const noexcept { return gainToDb (headroomGain); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -147,6 +169,7 @@ private:
     {
         std::vector<float> history;
         std::array<std::vector<float>, 2> reversed;
+        double diffusePower = 0.0; // both ears, K-weighted pink (level match)
         bool present = false;
     };
 
@@ -162,6 +185,9 @@ private:
     void renderHrir (HrirPath& path, const float* x, int length) noexcept;
     void renderLfe (const float* x, int length) noexcept;
     void renderReflections (int length) noexcept;
+    double pathWeight (double freqHz) const noexcept;
+    float diffuseGainFor() const noexcept;
+    void updateMakeup() noexcept;
 
     std::shared_ptr<const HrirSet> hrir;
     ProcessSpec spec;
@@ -193,8 +219,27 @@ private:
     int reflMask = 0, reflWrite = 0;
     LinearSmoothedValue roomGain;
 
-    // Scratch (maxBlockSize): ear accumulators and the reflection bus.
-    std::vector<float> accL, accR, bus;
+    // Scratch (maxBlockSize): ear accumulators, the reflection bus, the LFE
+    // (kept apart from the level match) and the reference downmix D.
+    std::vector<float> accL, accR, bus, lfeBus, refL, refR;
+
+    // Level match (E28a). K-weighting (BS.1770 shelf and RLB high-pass) of
+    // four lanes: D left / right, binaural left / right.
+    SvfCoeffs kShelf, kHighPass;
+    std::array<float, 4> kShelf1 {}, kShelf2 {}, kHp1 {}, kHp2 {}; // SVF states per lane
+    double periodRef = 0.0, periodBin = 0.0; // this period's K-weighted energies
+    double avgRef = 0.0, avgBin = 0.0;       // their 3 s averages
+    double averageCoeff = 0.0;               // per period
+    float diffuseGain = 1.0f;                // running layout's diffuse-field gain
+    float makeupFrom = 1.0f, makeupTo = 1.0f; // per-sample ramp across one period
+    float makeupSlew = 1.0f;                 // largest ratio per period (6 dB/s)
+    int servoPhase = 0;                      // samples into the period (stream time)
+    bool learned = false;                    // the averages hold gated content
+    bool servoSeeded = false;                // false until the first swap after prepare()
+
+    // Fold headroom (E28a): linked zero-latency peak gain.
+    float headroomGain = 1.0f, headroomRelease = 0.0f;
+    int headroomHold = 0, headroomHoldSamples = 0;
 
     // Control-rate state, aligned to absolute stream time.
     int samplesToTick = 0;

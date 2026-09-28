@@ -181,6 +181,7 @@ enum Id : int
     MaxClipCrestDb,   // clipper crest gate: threshold >= this far over the short-term RMS (0 = off, docs/11 E05)
     MaxClipMaxDb,     // clipper depth cap: no sample loses more than this (24 = uncapped)
     MaxStyle,         // Choice: Custom, Transparent, Punchy, Aggressive, Safe (maxStyleValues)
+    MaxLfLimit,       // LF-first limiter in the maximizer's glue path, 0..1 (docs/11 E05 step 5)
 
     kNumScalarParams
 };

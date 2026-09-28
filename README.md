@@ -103,6 +103,7 @@ flubsound-cli process -i song.wav -o song-enhanced.wav --preset "Punchy Pop" --b
 flubsound-cli batch   -i ./album -o ./album-enhanced --mode music --boost 40 --jobs 4 --format pcm24
 flubsound-cli analyze -i song-enhanced.wav            # integrated LUFS, LRA, true peak, ...
 flubsound-cli quality --mode music --boost 100         # THD+N, IMD, MTND, ducking, kick timing on pinned stimuli
+flubsound-cli quality --macro warmth=100 --rate 44100  # ... plus aliasing, DC and ultrasonic energy at 44.1 kHz
 flubsound-cli params                                   # every parameter key, range and default
 flubsound-cli presets                                  # factory preset list
 ```
@@ -122,7 +123,7 @@ core/        flub_core — primitives, DSP modules, analysis, engine, neural-mod
 tests/       zero-dependency unit tests (allocation-free proofs, response/latency/ceiling properties)
 app/         JUCE desktop app — engine host, GUI, tray, hotkeys, platform services
 plugin/      VST3 / AU / Standalone wrapper around the same ProcessingChain
-tools/       flubsound-cli — batch processing, export, loudness analysis; scripts/ (device-profile embedding)
+tools/       flubsound-cli — batch processing, export, loudness analysis; scripts/ (device-profile embedding, preset render diff, quality report)
 platform/    virtual-device designs & scripts (Windows WaveRT driver design, macOS HAL design, Linux PipeWire sinks)
 presets/     factory presets (JSON) — Music, Gaming, Device
 docs/        the design deliverables

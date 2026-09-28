@@ -49,8 +49,11 @@ int parseSchemaVersion (const juce::String& text)
 /** "<file>.corrupt-<yyyymmdd-hhmmss>" next to the file (never an existing one). */
 juce::File quarantineFileFor (const juce::File& file)
 {
-    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S");
-    return file.getSiblingFile (file.getFileName() + ".corrupt-" + stamp).getNonexistentSibling (false);
+    const auto name = file.getFileName() + ".corrupt-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S");
+    auto target = file.getSiblingFile (name);
+    for (int i = 2; target.exists(); ++i) // (getNonexistentSibling would number the name before ".corrupt-...")
+        target = file.getSiblingFile (name + "-" + juce::String (i));
+    return target;
 }
 
 struct NamedKey

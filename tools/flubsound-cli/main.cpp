@@ -66,6 +66,11 @@ Render options (process / batch; quality takes all but the file options,
       --profile quality|balanced|low-latency
                                  latency profile (default: from the preset,
                                  Balanced = what the real-time engine uses)
+      --protection off|normal|strict
+                                 SafetyGovernor reach (default off, like the
+                                 app): normal also governs the base max.drive,
+                                 sat.drive and bass.harmonics, strict lets the
+                                 scale fall to 0
   -f, --format f32|pcm24|pcm16   output sample format (default f32; PCM is
                                  TPDF dithered)
       --block N                  processing block size (default 512)
@@ -106,7 +111,8 @@ and sample rate.
     reduction (deepest, mean, time deeper than 1 / 3 dB), clip energy,
     measured THD+N, the intended harmonics of the bass harmonics / air
     exciter, bass protection, the dynamic EQ mode bands, the SafetyGovernor's
-    Boost scale, state and reasons, and AutoLevel / AutoDrive, read from the
+    Boost scale, state and reasons (time shares, and scale / state / reasons
+    at the end: governor.end), and AutoLevel / AutoDrive, read from the
     chain's meters once per block.
   * --bands: octave-band levels (31.5 Hz .. 16 kHz, dBFS) of the input and
     the rendered output (inputBands / outputBands with --json).
@@ -156,7 +162,7 @@ Measures the sound quality of a setting on pinned test stimuli (docs/11
 E59): the stimuli are generated (48 kHz, fixed seeds), rendered through the
 processing chain exactly as `process` would, and measured on the output mid.
 The settings options are those of `process` (--preset, --mode, --boost,
---macro, --set, --ceiling, --profile, --block).
+--macro, --set, --ceiling, --profile, --protection, --block).
 
   THD+N    sines at 40 / 60 / 100 / 1000 Hz, -6 dBFS peak: everything but the
            fundamental, dB re the output
@@ -172,11 +178,16 @@ The settings options are those of `process` (--preset, --mode, --boost,
            and 40-60 ms after each onset, and the shift of the energy
            centroid of 0-150 ms (timing: a 3 ms delay reads +3 ms)
   Loudness pink noise at -18 dBFS RMS: integrated loudness in / out, true peak
+  Hygiene  at --rate R (default 48000; the families above stay at 48 kHz):
+           worst alias in 20 Hz .. 20 kHz of 1 / 5 / 7 / 10 kHz sines at
+           -6 dBFS peak (dBc), output DC of 0.35 sin 100 Hz + 0.35 cos 200 Hz,
+           and at 88.2 kHz and above the multitone's power >= 22 kHz
 
 Examples:
   flubsound-cli quality --mode music --boost 100
   flubsound-cli quality --preset "Flubsound Signature" --json
   flubsound-cli quality --set max.drive=12 --json
+  flubsound-cli quality --mode music --macro warmth=100 --profile low-latency --rate 44100
 )";
 
 const char* const kParamsHelp = R"(flubsound-cli params [--json]
@@ -215,6 +226,24 @@ void printHelp (const std::string& topic, std::FILE* stream)
         text = kPresetsHelp;
     std::fputs (text, stream);
 }
+
+/** "gcc 13.3.0", "clang 20.1.2", "appleclang ...", "msvc 1943": the first word is the ratchet's compiler key. */
+const char* compilerDescription() noexcept
+{
+#if defined(_MSC_VER) && ! defined(__clang__)
+    #define FLUB_STRINGIFY2(x) #x
+    #define FLUB_STRINGIFY(x) FLUB_STRINGIFY2 (x)
+    return "msvc " FLUB_STRINGIFY (_MSC_VER);
+#elif defined(__apple_build_version__)
+    return "appleclang " __clang_version__;
+#elif defined(__clang__)
+    return "clang " __clang_version__;
+#elif defined(__GNUC__)
+    return "gcc " __VERSION__;
+#else
+    return "other";
+#endif
+}
 } // namespace
 
 // ===========================================================================
@@ -245,6 +274,9 @@ int main (int argc, char** argv)
                 return kExitOk;
             case Command::Version:
                 std::printf ("flubsound-cli %s (Flubsound Pro - Music & Gaming Edition)\n", FLUB_CLI_VERSION);
+                // The compiler names the KNOWN_GAP ratchet values that apply
+                // (tests/quality_targets.json, tools/scripts/quality-report.py).
+                std::printf ("built with: %s\n", compilerDescription());
                 return kExitOk;
             case Command::Process: return runProcess (options);
             case Command::Batch: return runBatch (options);

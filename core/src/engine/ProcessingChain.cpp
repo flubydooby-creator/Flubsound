@@ -347,7 +347,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
         case LatencyProfileValue::Quality:
             gateInChain = true;
             gate.setFftSize (gateFftSizeFor (sr));
-            saturator.setOversampling (2, Oversampler::Quality::High);
+            saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::Quality, sr));
             compressor.setLookaheadMs (3.0f);
             maximizer.setClipOversampling (4, Oversampler::Quality::High);
             maximizer.setLookaheadMs (2.0f);
@@ -355,7 +355,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             break;
         case LatencyProfileValue::LowLatency:
             gateInChain = false;
-            saturator.setOversampling (2, Oversampler::Quality::Low);
+            saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::LowLatency, sr));
             compressor.setLookaheadMs (0.5f);
             maximizer.setClipOversampling (2, Oversampler::Quality::Low);
             maximizer.setLookaheadMs (0.5f);
@@ -364,7 +364,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
         case LatencyProfileValue::Balanced:
         default:
             gateInChain = false;
-            saturator.setOversampling (2, Oversampler::Quality::Low);
+            saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::Balanced, sr));
             compressor.setLookaheadMs (1.0f);
             maximizer.setClipOversampling (4, Oversampler::Quality::High);
             maximizer.setLookaheadMs (1.5f);
@@ -495,6 +495,7 @@ void ProcessingChain::applyParameters() noexcept
     // too (the store is never written) ----
     const auto strength = static_cast<ProtectionStrength> (protectionStrength.load (std::memory_order_relaxed));
     governor.setStrength (strength);
+    appliedStrength = strength;
     const float governorScale = governor.getScale();
     const float* governed = base.data();
     if (strength != ProtectionStrength::Off && governorScale < 1.0f)
@@ -722,6 +723,7 @@ void ProcessingChain::applyParameters() noexcept
     mp.autoRelease = on (e, MaxAutoRelease);
     mp.clipCrestDb = e[MaxClipCrestDb];
     mp.clipMaxDepthDb = e[MaxClipMaxDb];
+    mp.lfLimit = e[MaxLfLimit];
     maximizer.setParams (mp);
     slots[SMax].setActive (active (MaximizerOn));
 
@@ -1158,7 +1160,14 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     // reads above the THD+N (it also counts the in-phase part of the removed
     // signal, a gain change), so the governor does not back off later on
     // clipping than it did on the proxy; the saturator's THD+N is added.
-    const float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getWindowClipEnergyDb()) : kMinusInfDb;
+    float clipGovernorDb = maxActive ? std::max (clipDistortionDb, maximizer.getWindowClipEnergyDb()) : kMinusInfDb;
+    // At protection strength Normal / Strict the maximizer's share is its
+    // whole-stage residual when that reads higher (docs/11 E06 step 1): the
+    // clipper and the limiter's gain modulation (IMD) together, which the
+    // clipper's own THD+N does not see. Off keeps the clipper's reading, so
+    // the default sounds as before.
+    if (maxActive && appliedStrength != ProtectionStrength::Off)
+        clipGovernorDb = std::max (clipGovernorDb, maximizer.getResidualDistortionDb());
     // Its GR input is the deepest limiting per fixed 10 ms window, not per
     // host block, and it ticks once per such window (docs/11 E06), so
     // neither the budget nor the scale's steps depend on the buffer size.

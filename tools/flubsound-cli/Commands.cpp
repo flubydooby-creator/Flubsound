@@ -269,9 +269,16 @@ RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParamet
     RenderSettings rs;
     rs.blockSize = o.blockSize;
     rs.targetLufs = o.targetLufs;
+    rs.protection = o.protection;
     if (o.ceilingDb || o.targetLufs)
         rs.verifyCeilingDb = p.values[static_cast<size_t> (param::MaxCeilingDb)];
     return rs;
+}
+
+const char* governorStateName (int state) noexcept
+{
+    constexpr const char* kStateNames[] = { "idle", "backingOff", "holding", "recovering" };
+    return state >= 0 && state < 4 ? kStateNames[state] : "idle";
 }
 
 json::Value renderStatsToJson (const RenderStats& st)
@@ -320,12 +327,22 @@ json::Value renderStatsToJson (const RenderStats& st)
     governor.set ("scaleMean", std::round (st.governorScaleMean * 1000.0) / 1000.0);
     governor.set ("backoffPercent", statValue (st.governorBackoffPercent));
     json::Value states;
-    constexpr const char* kStateNames[] = { "idle", "backingOff", "holding", "recovering" };
     for (size_t k = 0; k < st.governorStatePercent.size(); ++k)
-        states.set (kStateNames[k], statValue (st.governorStatePercent[k]));
+        states.set (governorStateName (static_cast<int> (k)), statValue (st.governorStatePercent[k]));
     governor.set ("statePercent", std::move (states));
     governor.set ("limiterReasonPercent", statValue (st.governorLimiterReasonPercent));
     governor.set ("distortionReasonPercent", statValue (st.governorDistortionReasonPercent));
+    // At the end of the programme (docs/11 E06 (6)): scale, state and reasons.
+    json::Value end;
+    end.set ("scale", std::round (st.governorScaleEnd * 1000.0) / 1000.0);
+    end.set ("state", governorStateName (st.governorStateEnd));
+    json::Value reasons { json::Value::Array {} };
+    if ((st.governorReasonEnd & SafetyGovernor::kReasonLimiter) != 0)
+        reasons.push (json::Value ("limiter"));
+    if ((st.governorReasonEnd & SafetyGovernor::kReasonDistortion) != 0)
+        reasons.push (json::Value ("distortion"));
+    end.set ("reasons", std::move (reasons));
+    governor.set ("end", std::move (end));
 
     json::Value leveller;
     leveller.set ("autoLevelMinDb", statValue (st.autoLevelMinDb));
@@ -353,6 +370,14 @@ std::string formatStats (const RenderStats& st)
                     + fmt (", %.0f %% of the time deeper than 1 dB)", st.limiterOver1DbPercent);
     s += ", THD+N max " + formatDb (st.distortionMaxDb, 1) + " dB";
     s += ", governor min " + fmt ("%.0f %%", 100.0 * st.governorScaleMin);
+    if (st.governorBackoffPercent > 0.0f || st.governorStateEnd != 0)
+    {
+        s += fmt (" (backing off %.0f %%", st.governorStatePercent[1]) + fmt (", holding %.0f %%", st.governorStatePercent[2])
+             + fmt ("; limiter %.0f %%", st.governorLimiterReasonPercent) + fmt (", THD+N %.0f %% of the time;", st.governorDistortionReasonPercent)
+             + " at the end " + governorStateName (st.governorStateEnd) + ")";
+    }
+    if (st.harmonicsMaxDb > kMinusInfDb)
+        s += ", harmonics max " + formatDb (st.harmonicsMaxDb, 1) + " dB";
     if (st.compGrMaxDb < 0.0f || st.compUpwardMaxDb > 0.0f)
         s += ", compressor GR max " + fmt ("%.1f dB", st.compGrMaxDb) + " / upward " + fmt ("+%.1f dB", st.compUpwardMaxDb);
     if (st.autoLevelMinDb != 0.0f || st.autoLevelMaxDb != 0.0f)
@@ -900,7 +925,7 @@ std::vector<double> multitoneFrequencies()
 }
 
 /** Pink amplitudes (1 / sqrt f), seeded phases, scaled to rmsLevel. */
-std::vector<float> multitone (double seconds, const std::vector<double>& freqs, double rmsLevel)
+std::vector<float> multitone (double seconds, const std::vector<double>& freqs, double rmsLevel, double sampleRate = kQualityFs)
 {
     FastRandom rng (20590);
     std::vector<std::pair<double, double>> parts; // (amplitude, phase)
@@ -912,13 +937,13 @@ std::vector<float> multitone (double seconds, const std::vector<double>& freqs, 
         power += 0.5 * a * a;
     }
     const double g = rmsLevel / std::sqrt (power);
-    const int n = qualitySamples (seconds);
+    const int n = static_cast<int> (std::lround (seconds * sampleRate));
     std::vector<float> x (static_cast<size_t> (n));
     for (int i = 0; i < n; ++i)
     {
         double v = 0.0;
         for (size_t k = 0; k < freqs.size(); ++k)
-            v += parts[k].first * std::sin (kTwoPi * freqs[k] * i / kQualityFs + parts[k].second);
+            v += parts[k].first * std::sin (kTwoPi * freqs[k] * i / sampleRate + parts[k].second);
         x[static_cast<size_t> (i)] = static_cast<float> (g * v);
     }
     return x;
@@ -955,12 +980,12 @@ json::Value dbValue (double v) { return json::Value (std::round (v * 100.0) / 10
 } // namespace
 
 bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
-                     const QualityInjector& inject)
+                     const QualityInjector& inject, ProtectionStrength protection)
 {
     report = QualityReport();
     const auto render = [&] (const std::vector<float>& mono, Stereo& out, RenderStats* stats) {
         int latency = 0;
-        if (! renderPass (qualityInput (mono), values, blockSize, out, latency, error, nullptr, stats))
+        if (! renderPass (qualityInput (mono), values, blockSize, out, latency, error, nullptr, stats, protection))
             return false;
         if (inject)
             inject (out);
@@ -1063,6 +1088,89 @@ bool measureQuality (const std::vector<float>& values, int blockSize, QualityRep
     return true;
 }
 
+// ---- hygiene (docs/11 E10) --------------------------------------------------
+bool measureHygiene (const std::vector<float>& values, double sampleRate, int blockSize, HygieneReport& report, std::string& error,
+                     ProtectionStrength protection)
+{
+    report = HygieneReport();
+    report.sampleRate = sampleRate;
+    const auto samples = [sampleRate] (double seconds) { return static_cast<int> (std::lround (seconds * sampleRate)); };
+    const auto render = [&] (std::vector<float> mono, Stereo& out) {
+        io::AudioFileData d;
+        d.sampleRate = sampleRate;
+        d.numChannels = 2;
+        d.channels = { mono, mono };
+        int latency = 0;
+        return renderPass (d, values, blockSize, out, latency, error, nullptr, nullptr, protection);
+    };
+    Stereo out;
+
+    // Aliases of single sines, measured on the last 65536 samples.
+    constexpr int kAliasN = 65536;
+    for (double hz : { 1000.0, 5000.0, 7000.0, 10000.0 })
+    {
+        if (hz > 0.45 * sampleRate)
+            continue;
+        const int bin = aliasToneBin (hz, sampleRate, kAliasN);
+        const double f0 = bin * sampleRate / kAliasN;
+        const int n = samples (0.5) + kAliasN;
+        std::vector<float> x (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            x[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::sin (kTwoPi * f0 * i / sampleRate));
+        if (! render (std::move (x), out))
+            return false;
+        const auto mid = midOf (out);
+        const double dbc = worstAliasDbc (mid.data() + (n - kAliasN), kAliasN, sampleRate, bin);
+        report.alias.push_back ({ f0, dbc });
+        report.worstAliasDbc = std::max (report.worstAliasDbc, dbc);
+    }
+
+    // DC of an asymmetric waveform (the stimulus of the E10 DC KnownGap).
+    {
+        const int n = samples (4.0);
+        std::vector<float> x (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            x[static_cast<size_t> (i)] = static_cast<float> (0.35 * std::sin (kTwoPi * 100.0 * i / sampleRate) + 0.35 * std::cos (kTwoPi * 200.0 * i / sampleRate));
+        if (! render (std::move (x), out))
+            return false;
+        const auto mid = midOf (out);
+        const int from = samples (2.0);
+        report.dcDbfs = dcDbfs (mid.data() + from, n - from);
+    }
+
+    // Ultrasonic share of an in-band multitone (only where there is an ultrasonic band).
+    if (sampleRate >= 88200.0)
+    {
+        const int n = samples (2.0);
+        auto x = multitone (2.0, multitoneFrequencies(), std::pow (10.0, -18.0 / 20.0), sampleRate);
+        if (! render (std::move (x), out))
+            return false;
+        const auto mid = midOf (out);
+        const int from = samples (1.0);
+        report.ultrasonicDb = powerShareAboveDb (mid.data() + from, n - from, sampleRate, 22000.0);
+    }
+    return true;
+}
+
+json::Value hygieneToJson (const HygieneReport& r)
+{
+    json::Value alias { json::Value::Array {} };
+    for (const auto& a : r.alias)
+    {
+        json::Value v;
+        v.set ("hz", std::round (a.hz * 100.0) / 100.0);
+        v.set ("dbc", dbValue (a.dbc));
+        alias.push (std::move (v));
+    }
+    json::Value v;
+    v.set ("sampleRate", r.sampleRate);
+    v.set ("alias", std::move (alias));
+    v.set ("worstAliasDbc", dbValue (r.worstAliasDbc));
+    v.set ("dcDbfs", dbValue (r.dcDbfs));
+    v.set ("ultrasonicDb", r.ultrasonicDb ? dbValue (*r.ultrasonicDb) : json::Value());
+    return v;
+}
+
 json::Value qualityToJson (const QualityReport& r)
 {
     json::Value thdn { json::Value::Array {} };
@@ -1129,7 +1237,7 @@ json::Value qualityToJson (const QualityReport& r)
     return v;
 }
 
-std::string formatQuality (const QualityReport& r)
+std::string formatQuality (const QualityReport& r, const HygieneReport* h)
 {
     std::string s = "THD+N   :";
     for (const auto& t : r.thdn)
@@ -1148,6 +1256,16 @@ std::string formatQuality (const QualityReport& r)
          + ", 40-60 ms " + fmt ("%+.1f dB", r.kickLateLiftDb) + ", centroid " + fmt ("%+.2f ms\n", r.kickCentroidShiftMs);
     s += "Loudness: pink -18 dBFS RMS " + fmt ("%.1f", r.pinkInLufs) + " -> " + fmt ("%.1f LUFS", r.pinkOutLufs) + ", true peak "
          + fmt ("%.1f dBTP\n", r.pinkOutTruePeakDbtp);
+    if (h != nullptr)
+    {
+        s += "Hygiene : at " + fmt ("%g Hz", h->sampleRate) + ": worst alias";
+        for (const auto& a : h->alias)
+            s += fmt (" %.0f Hz", a.hz) + fmt (" %.1f", a.dbc);
+        s += " dBc (-6 dBFS sine), DC " + fmt ("%.1f dBFS", h->dcDbfs);
+        if (h->ultrasonicDb)
+            s += ", >= 22 kHz " + fmt ("%.1f dB", *h->ultrasonicDb);
+        s += "\n";
+    }
     return s;
 }
 
@@ -1163,7 +1281,9 @@ int runQuality (const CliOptions& o)
     }
     logSettings (log, params, o.render);
     QualityReport report;
-    if (! measureQuality (params.values, o.render.blockSize, report, error))
+    HygieneReport hygiene;
+    if (! measureQuality (params.values, o.render.blockSize, report, error, {}, o.render.protection)
+        || ! measureHygiene (params.values, o.rate, o.render.blockSize, hygiene, error, o.render.protection))
     {
         log.error (error);
         return kExitFailure;
@@ -1172,12 +1292,14 @@ int runQuality (const CliOptions& o)
     {
         json::Value v;
         v.set ("preset", params.presetDescription);
-        v.set ("quality", qualityToJson (report));
+        auto q = qualityToJson (report);
+        q.set ("hygiene", hygieneToJson (hygiene));
+        v.set ("quality", std::move (q));
         printJson (v);
     }
     else
     {
-        std::fputs (formatQuality (report).c_str(), stdout); // the result, printed even with --quiet
+        std::fputs (formatQuality (report, &hygiene).c_str(), stdout); // the result, printed even with --quiet
     }
     return kExitOk;
 }

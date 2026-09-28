@@ -122,6 +122,29 @@ GainTrackStats summariseGainTrack (const std::vector<double>& track, double rate
 /** Energy centroid (ms) of x[begin, begin + n) re `begin`. */
 double energyCentroidMs (const std::vector<float>& x, int begin, int n, double sampleRate);
 
+// ---- Signal hygiene (docs/11 E10) ------------------------------------------
+// FFT definitions (4-term Blackman-Harris window, sidelobes -92 dB), so the
+// floor of every reading is about -100 dB.
+
+/** The FFT bin (odd, so no fold of a harmonic lands on another harmonic) of
+    a test tone near freqHz for an n-point analysis: the tone is then exactly
+    bin * sampleRate / n. */
+int aliasToneBin (double freqHz, double sampleRate, int n) noexcept;
+
+/** Worst alias of a sine on FFT bin bin0 over x[0, n) (n a power of two):
+    the largest line in [20 Hz, bandHz] that is not within 4 bins of a
+    harmonic of the sine, dB re the fundamental (dBc). Every harmonic folds
+    back at a bin of its own (bin0 odd), so what is left is aliasing and
+    noise. */
+double worstAliasDbc (const float* x, int n, double sampleRate, int bin0, double bandHz = 20000.0);
+
+/** Share of x's power at and above fromHz (Welch, windowSize-point windows,
+    50 % overlap), dB re the total (DC excluded). */
+double powerShareAboveDb (const float* x, int n, double sampleRate, double fromHz, int windowSize = 8192);
+
+/** |mean| of x[0, n) in dBFS (-160 floor). */
+double dcDbfs (const float* x, int n);
+
 /** "pcm16", "pcm24", "pcm32", "float32", "float64". */
 const char* sampleFormatName (io::SampleFormat format) noexcept;
 

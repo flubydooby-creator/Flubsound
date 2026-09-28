@@ -4,10 +4,12 @@
 #include "flub/analysis/PeakMeters.h"
 #include "flub/common/Denormals.h"
 #include "flub/common/Math.h"
+#include "flub/dsp/Fft.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <sstream>
 #include <utility>
@@ -412,6 +414,87 @@ std::vector<double> toneGainTrack (const std::vector<float>& out, const std::vec
     for (int start = std::max (0, begin); start + len <= end; start += hop)
         gains.push_back (20.0 * std::log10 (std::max (1.0e-12, amplitude (out, start)) / std::max (1.0e-12, amplitude (in, start))));
     return gains;
+}
+
+// ---- signal hygiene (docs/11 E10) ----------------------------------------
+namespace
+{
+/** |X[k]|, k = 0..n/2, of x[0, n) under a 4-term Blackman-Harris window (sidelobes -92 dB). */
+std::vector<double> windowedMagnitudes (const float* x, int n)
+{
+    Fft fft;
+    fft.prepare (n);
+    std::vector<float> w (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = kTwoPi * i / n;
+        const double win = 0.35875 - 0.48829 * std::cos (t) + 0.14128 * std::cos (2.0 * t) - 0.01168 * std::cos (3.0 * t);
+        w[static_cast<size_t> (i)] = static_cast<float> (x[i] * win);
+    }
+    std::vector<std::complex<float>> bins (static_cast<size_t> (n / 2 + 1));
+    fft.forwardReal (w.data(), bins.data());
+    std::vector<double> m (bins.size());
+    for (size_t k = 0; k < bins.size(); ++k)
+        m[k] = std::abs (bins[k]);
+    return m;
+}
+
+bool isPowerOfTwo (int n) noexcept { return n >= 2 && (n & (n - 1)) == 0; }
+} // namespace
+
+int aliasToneBin (double freqHz, double sampleRate, int n) noexcept
+{
+    int bin = static_cast<int> (std::lround (freqHz / sampleRate * n));
+    if (bin % 2 == 0)
+        bin += 1;
+    return std::clamp (bin, 1, n / 2 - 1);
+}
+
+double worstAliasDbc (const float* x, int n, double sampleRate, int bin0, double bandHz)
+{
+    if (! isPowerOfTwo (n) || ! (sampleRate > 0.0) || bin0 < 1 || bin0 >= n / 2)
+        return 0.0;
+    const auto m = windowedMagnitudes (x, n);
+    const int lo = static_cast<int> (std::ceil (20.0 / sampleRate * n));
+    const int hi = std::min (n / 2, static_cast<int> (std::floor (bandHz / sampleRate * n)));
+    double worst = 0.0;
+    for (int b = std::max (1, lo); b <= hi; ++b)
+    {
+        const int r = b % bin0;
+        if (std::min (r, bin0 - r) <= 4) // the main lobe (+-2 bins) of a harmonic, and margin
+            continue;
+        worst = std::max (worst, m[static_cast<size_t> (b)]);
+    }
+    return 20.0 * std::log10 (std::max (1.0e-30, worst)) - 20.0 * std::log10 (std::max (1.0e-30, m[static_cast<size_t> (bin0)]));
+}
+
+double powerShareAboveDb (const float* x, int n, double sampleRate, double fromHz, int windowSize)
+{
+    if (! isPowerOfTwo (windowSize) || n < windowSize || ! (sampleRate > 0.0))
+        return 0.0;
+    const int first = static_cast<int> (std::ceil (fromHz / sampleRate * windowSize));
+    double total = 0.0, above = 0.0;
+    for (int start = 0; start + windowSize <= n; start += windowSize / 2)
+    {
+        const auto m = windowedMagnitudes (x + start, windowSize);
+        for (int k = 1; k < static_cast<int> (m.size()); ++k)
+        {
+            const double p = m[static_cast<size_t> (k)] * m[static_cast<size_t> (k)];
+            total += p;
+            above += k >= first ? p : 0.0;
+        }
+    }
+    return ratioDb (above, total);
+}
+
+double dcDbfs (const float* x, int n)
+{
+    if (n <= 0)
+        return kMinusInfDb;
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i)
+        sum += x[i];
+    return std::max (static_cast<double> (kMinusInfDb), 20.0 * std::log10 (std::max (1.0e-30, std::abs (sum) / n)));
 }
 
 double percentile (std::vector<double> v, double p)

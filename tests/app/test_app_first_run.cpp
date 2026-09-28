@@ -48,6 +48,13 @@ namespace
 constexpr double kFs = 48000.0;
 constexpr int kBlock = 512;
 
+/** A factory preset's id (its uuid, docs/11 E52) from its legacy id. */
+juce::String idOf (EngineController& c, const char* legacyId)
+{
+    const auto* info = c.getPresetManager().findById (legacyId);
+    return info != nullptr ? info->id : juce::String ("missing ") + legacyId;
+}
+
 EngineController::Options headlessOptions (const flubapptest::TempFolder& temp, bool restoreState, bool persist = false)
 {
     EngineController::Options o;
@@ -311,10 +318,10 @@ TEST_CASE ("App: fresh strips load their default preset - Signature on Music and
         REQUIRE (chat >= 0);
         REQUIRE (system >= 0);
 
-        CHECK (controller.getCurrentPresetId (music) == "factory:music-flubsound-signature");
-        CHECK (controller.getCurrentPresetId (system) == "factory:music-flubsound-signature");
-        CHECK (controller.getCurrentPresetId (chat) == "factory:music-voice-chat");
-        CHECK (controller.getCurrentPresetId (game) == "factory:gaming-competitive-fps");
+        CHECK (controller.getCurrentPresetId (music) == idOf (controller, "factory:music-flubsound-signature"));
+        CHECK (controller.getCurrentPresetId (system) == idOf (controller, "factory:music-flubsound-signature"));
+        CHECK (controller.getCurrentPresetId (chat) == idOf (controller, "factory:music-voice-chat"));
+        CHECK (controller.getCurrentPresetId (game) == "22e4bf40-b070-485a-8fd6-c4f6cfddeaad"); // Competitive FPS's uuid
         CHECK (! controller.isPresetModified (music));
         CHECK (! controller.isPresetModified (chat));
         CHECK (controller.isPresetModified (game)); // Competitive FPS with the first-run caps
@@ -360,9 +367,9 @@ TEST_CASE ("App: first-run defaults never overwrite saved strip state (E36 / E23
     }
     EngineController second (headlessOptions (temp, true, true));
     const int chat = second.findStrip ("Chat");
-    CHECK (second.getCurrentPresetId (chat) == "factory:music-podcast-voice");
+    CHECK (second.getCurrentPresetId (chat) == idOf (second, "factory:music-podcast-voice"));
     CHECK (second.getBoost (chat) == 0.77f);
-    CHECK (second.getCurrentPresetId (second.findStrip ("Music")) == "factory:music-flubsound-signature"); // saved on the first run
+    CHECK (second.getCurrentPresetId (second.findStrip ("Music")) == idOf (second, "factory:music-flubsound-signature")); // saved on the first run
     second.shutdown();
 }
 
@@ -371,7 +378,7 @@ TEST_CASE ("App: Voice Chat on the Chat strip brings speech at -35 and -12 LUFS 
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp, true));
     const int chat = controller.findStrip ("Chat");
-    REQUIRE (controller.getCurrentPresetId (chat) == "factory:music-voice-chat");
+    REQUIRE (controller.getCurrentPresetId (chat) == idOf (controller, "factory:music-voice-chat"));
 
     const auto speech = speechLike (30.0, 17);
     double ends[2] = {};
@@ -428,13 +435,16 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
 
     // Competitive FPS as shipped: before docs/11 E19's cue enhancer it failed
     // the same measurement (+9.8 LU; the caps were what passed it). The cue
-    // enhancer no longer lifts a stationary bed, so it passes too (+2.5 LU).
+    // enhancer no longer lifts a stationary bed, so it passed too (+2.53 LU),
+    // and E19's background-relative floor for Detail's upward compressor
+    // took it to +0.80 LU. The caps now only cost step/bed contrast (docs/11
+    // E36's Status line has the review).
     juce::String error;
     REQUIRE (controller.loadPreset ("factory:gaming-competitive-fps", game, error));
     const double shipped = lift (-60.0);
     std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
     CHECK_LE (shipped, 3.0);
-    CHECK_NEAR (shipped, 2.53, 0.3);
+    CHECK_NEAR (shipped, 0.80, 0.3);
 }
 
 // =============================================================================

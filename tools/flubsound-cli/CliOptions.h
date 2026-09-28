@@ -12,6 +12,7 @@
 #pragma once
 
 #include "flub/engine/Parameters.h"
+#include "flub/engine/Protection.h"
 #include "flub/io/WavFile.h"
 
 #include <optional>
@@ -55,6 +56,9 @@ struct RenderOptions
     std::optional<float> targetLufs;
     std::optional<float> ceilingDb;
     std::optional<param::LatencyProfileValue> profile;
+    // SafetyGovernor reach (--protection): a host setting of the chain, not
+    // a parameter (ProcessingChain::setProtectionStrength); Off like the app.
+    ProtectionStrength protection = ProtectionStrength::Off;
     io::SampleFormat format = io::SampleFormat::Float32;
     int blockSize = 512;
 };
@@ -71,6 +75,7 @@ struct CliOptions
     bool recursive = false;   // `batch --recursive`
     bool bands = false;       // `process` / `analyze --bands`: octave-band levels
     int jobs = 0;             // `batch --jobs` (0 = hardware concurrency)
+    double rate = 48000.0;    // `quality --rate`: sample rate of the hygiene family
     RenderOptions render;
 };
 
