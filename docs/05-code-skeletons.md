@@ -745,8 +745,9 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
         // true-peak limiter at the ceiling.                                [17]
         if (! dryLimiterRunning)
         {
-            dryLimiter.reset();                                                  // cold start: silent for its latency
-            dryLimiterRunning = true;
+            dryLimiter.reset();                                                  // cold start: silent for its latency,
+            dryLimiterRunning = true;                                            // so the crossfade waits that long
+            dryWarmup = bypassMix.getCurrent() > 0.0f ? 0 : dryLimiter.latencySamples();
         }
         for (int i = 0; i < n; ++i)
         {
@@ -757,7 +758,11 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
         dryLimiter.process (dry);                                                // @ max.ceiling, its latency is part of totalLatency
         for (int i = 0; i < n; ++i)
         {
-            const float b = bypassMix.next();                                    // 30 ms linear
+            float b = bypassMix.getCurrent();                                    // 30 ms linear, after the warm-up
+            if (dryWarmup > 0)
+                --dryWarmup;
+            else
+                b = bypassMix.next();
             for (int c = 0; c < 2; ++c)
             {
                 float* w = st.channel (c);
@@ -768,6 +773,7 @@ void ProcessingChain::process (const AudioBlock& io) noexcept
     else
     {
         dryLimiterRunning = false;                                               // only runs while bypass is engaged
+        dryWarmup = 0;
         dryMatchGain.skip (n);
     }
 
@@ -883,6 +889,8 @@ flowchart LR
 | Loudness-Matched Bypass | `bypass.matched` | off / on | on | toggle | In a bypass comparison the louder side is turned down to the other (never a raise, down to −20 dB): usually the processed side, from the first bypass until the bypass has been off for 10 s. The reference is true-peak limited at `max.ceiling` (decision 17). |
 | Bypass All | `bypass` | off / on | off | toggle | 30 ms crossfade to the latency-aligned dry reference. |
 | Latency Profile | `latency.profile` | Quality, Balanced, Low Latency | Balanced | choice (**structural**) | Sets the structural settings of §5.2. Takes effect only through `prepare()`. App state, like `bypass` and `bypass.matched`: `preset::applyPresetToStore` never writes it, and presets name a profile only as the `"suggestedLatencyProfile"` label (`PresetIO.h`). |
+| Automatic Preamp | `auto.preamp` | off / on | off | toggle | Takes the chain's predicted static boost (EQ, dynamic-EQ static gains, bass shelf, presence / air, saturation make-up, the surround fold's trim) minus the allowance off the signal after the dry reference and input meters; 20 ms ramp (docs/11 E11). |
+| Preamp Allowance | `auto.preampAllowance` | 0 … 12 | 1 | dB | The boost the automatic preamp leaves in. |
 | Module enables | `gate.on`, `eq.on`, `dyneq.on`, `bass.on`, `clarity.on`, `sat.on`, `spatial.on`, `virt.on`, `comp.on`, `max.on` | off / on | gate off, eq on, dyneq on, bass on, clarity on, sat off, spatial on, virt on, comp off, max on | toggle | `ModuleSlot::setActive()`: 20 ms latency-compensated crossfade. `gate.on` has an effect only in the Quality profile (the only one with the gate in the chain). `virt.on` has no slot: it chooses virtualiser vs downmix for 6/8-channel input, with a 20 ms crossfade between the two folds (decision 16). |
 
 | Protection loop (`Protection.h/.cpp`) | Constants in the code |
@@ -941,6 +949,11 @@ x · drive ─► [glue] 3-band 2:1 pre-compression ─► [clip] oversampled so
 | Auto Release | `max.autoRelease` | off / on | on | toggle | Fast release = release/5 for isolated peaks, blended to the slow release as a limiting run spans 25 → 50 ms. |
 | Loudness Target | `max.autoDrive` | off / on | off | toggle | Enables AutoDrive (§5.5). |
 | Target Loudness | `max.target` | −24 … −6 | −14 | LUFS | AutoDrive target. |
+| Clipper Crest Gate | `max.clipCrest` | 0 … 24 | 6 | dB | The clip threshold stays at least this far over the clipper input's 5 ms RMS (0 = off). 50 ms glide (docs/11 E05). |
+| Clipper Depth Limit | `max.clipMaxDb` | 0.5 … 24 | 3 | dB | No sample loses more than this to the clipper (24 = uncapped). 50 ms glide. |
+| Maximizer Style | `max.style` | Custom, Transparent, Punchy, Aggressive, Safe | Custom | choice | A named style sets `max.clip`, `max.clipKnee`, `max.clipCrest`, `max.clipMaxDb`, `max.release` and `max.autoRelease` in the effective values; Custom leaves the stored values. |
+| LF-First Limiting | `max.lfLimit` | 0 … 1 | 0 | % | The low band of the glue split is limited 3 dB under the ceiling before the bands are summed; runs the band stage while > 0. Music Boost raises it from 50 %. |
+| Bed Lift Budget | `max.bedLift` | 0 … 24 | 24 | dB | Programme far below the ceiling is lifted at most this much, the lift ahead of the maximizer included (24 = no budget; docs/11 E19). |
 
 Structural (chain-controlled via the latency profile, latched in `prepare()`): clip oversampling factor and quality, limiter look-ahead, true-peak detection.
 

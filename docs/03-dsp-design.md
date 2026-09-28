@@ -1582,7 +1582,7 @@ At module level NaN falls back to the default, values are clamped, and an unchan
 - **Gaming.**
   - Nothing in the gaming macro table engages or drives saturation, and `sat.on` defaults to off. Saturation therefore stays off in Gaming mode unless a preset or the user turns it on.
   - This is deliberate: added harmonics and peak rounding bring no benefit to positional cues.
-  - If it is enabled, the Low Latency profile runs it at 2× Low (16 samples).
+  - If it is enabled, the Low Latency profile runs it with the 16-sample rate-aware design (4× below 176.4 kHz, 2× Low from there; §6.4).
 
 ### 6.9 Tests that prove it (`tests/test_saturator.cpp`)
 
@@ -2650,7 +2650,7 @@ The strip limiter has no keys of its own. `LoudnessMaximizer` passes its paramet
 | (true-peak detection) | — | on | on in every profile | — | structural; off gives a sample-peak limiter with D = 0 and Kh = 0 |
 | (gain hold Kh) | — | 0 … 8 | 8 (7 at 0.5 ms, 44.1 kHz) | samples | derived at `prepare()`: `min(kTruePeakHold = 8, ⌊L/3⌋)` with true-peak detection, else 0; no latency |
 
-Bypass-reference limiter (`ProcessingChain::dryLimiter`, every host, only while global bypass is engaged): ceiling `max.ceiling`, 1 ms look-ahead (capped at chain latency − 20), 80 ms auto release, true peak on; its latency is taken out of the dry-path delay (§14.5).
+Bypass-reference limiter (`ProcessingChain::dryLimiter`, every host, only while global bypass is engaged): ceiling `max.ceiling`, 1 ms look-ahead (capped at chain latency − 20), 80 ms auto release, true peak on; its latency is taken out of the dry-path delay (§14.5). It starts cold when bypass engages (silent for its latency), so the bypass crossfade waits that latency before it moves; starting the crossfade at once put a step into the dry side (a click, found by docs/11 E53's soak).
 
 Master limiter (`MixEngine`, desktop app): ceiling −1 dBTP, capped by the device profile (−2 dBTP Bluetooth A2DP, −3 dBTP hands-free, section 14), 1 ms look-ahead (0.5 ms when every strip runs the Low Latency profile, chosen in `MixEngine::configure()`), 50 ms auto release, true peak on. Module sanitising: out-of-range values clamp; a non-finite value keeps the previous one.
 
@@ -3556,7 +3556,7 @@ Maximum effective values with Boost and all macros at 100 %:
         └── measured on the input (open loop)       SafetyGovernor ──► scale on governed macro     └─► ComparisonMatcher wet ─► trims (louder side down)
                                                     amounts (next block)
  global bypass reference: fold ─► dry delay (chain latency − limiter latency) ─► × dry trim ─► TruePeakLimiter @ max.ceiling ─► crossfade
-                          (the limiter runs only while bypass is engaged)
+                          (the limiter runs only while bypass is engaged; the crossfade waits its latency)
  desktop app: Σ strips (padded within sync groups) ─► master TruePeakLimiter (−1 dBTP, or the device cap) ─► device
 ```
 

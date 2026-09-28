@@ -366,7 +366,7 @@ TEST_CASE ("Compressor: with the relative upward floor a steady bed is not lifte
         const auto gain = [&] (double from, double to) {
             double po = 0.0, pi = 0.0;
             for (int c = 0; c < 2; ++c)
-                for (int i = static_cast<int> (from * kFs); i < static_cast<int> (to * kFs); ++i)
+                for (int i = static_cast<int> (from * kFs); i < std::min (static_cast<int> (to * kFs), n - lat); ++i)
                 {
                     const double o = buf.ch[static_cast<size_t> (c)][static_cast<size_t> (i + lat)];
                     const double x = src.ch[static_cast<size_t> (c)][static_cast<size_t> (i)];
