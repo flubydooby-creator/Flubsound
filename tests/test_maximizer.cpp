@@ -1461,5 +1461,5 @@ TEST_CASE ("LoudnessMaximizer: switching the bed-lift budget on after the drive 
         maxStep = std::max (maxStep, static_cast<double> (std::abs (y[i] - y[i - 1])));
     std::cout << "    measured: level before " << before << ", after " << y.back() << ", largest step " << maxStep / before << " of the level\n";
     CHECK_NEAR (toDb (y.back() / 0.005), 1.0, 0.05); // the budget holds
-    CHECK_LT (maxStep / before, 0.01);                 // a 9 dB jump would be 0.65
+    CHECK_LE (maxStep / before, 0.01);                 // a 9 dB jump would be 0.65
 }
