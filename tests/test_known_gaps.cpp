@@ -29,7 +29,7 @@
 //     cue enhancer, kept as its regression tests; tests/test_scenes.cpp
 //     has the E60 scenes)
 //   * the Night Mode ambush scene: bed lift and post-event hole (E21; the
-//     hole closed by the AutoLevel slice, the bed lift still open)
+//     hole closed by the AutoLevel slice, the bed lift by the Phase 3 retune)
 //   * kick onset: Punch 100 lift at 0-10 ms against 10-30 ms (E04, E05)
 //   * 30 Hz audible-band (>= 120 Hz) energy of the laptop preset (E03; closed
 //     by the preset slice, kept as its regression test)
@@ -872,7 +872,7 @@ TEST_CASE ("E19: the cue enhancer's loud cap keeps gunfire nearly unlifted in th
     }
 }
 
-TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed is still lifted +12 dB (E21)")
+TEST_CASE ("KnownGap closed: Night Mode ambush - no hole after the event, the bed lifted <= +6 dB and the fire held by the Startle Guard (E21)")
 {
     // Scene: 12 s of -50 dBFS-RMS pink ambience, then 3 s of automatic fire
     // (10 shots/s; each seeded white noise, tau 15 ms, peak -12 dBFS) over the
@@ -930,20 +930,25 @@ TEST_CASE ("KnownGap: Night Mode ambush - no hole after the event, but the bed i
     // +6 dB, partly made up by the upward compressor on a quieter bed).
     CHECK_LE (std::abs (before - after1), 1.0); // docs/11 E21 Done-when: within 1 dB 1 s after the event
     CHECK_LE (std::abs (before - after5), 1.0);
-    CHECK_NEAR (before - after1, -0.10, 0.3);
-    CHECK_NEAR (event, 1.24, 0.3);
+    CHECK_NEAR (before - after1, -0.05, 0.3);
     // Auto Level's own share of the bed lift is at its +6 dB cap.
     CHECK_LE (before - staticLift, AutoLevel::kMaxGainDb + 0.1);
-    // KNOWN_GAP: target ambience lift <= +6 dB per docs/11 E21 Done-when. The
-    // rest is the preset's own: 5.10 dB with Auto Level off (mostly the
-    // compressor make-up, 6 dB) - a preset retune. The E19 redesign took the
-    // Footsteps bell's share out of it (11.98 / 6.98 -> 11.13 / 6.72 dB: the
-    // cue enhancer does not lift the bed), and its step 2 the upward
-    // compressor's (6.72 -> 5.10 dB with Auto Level off: the upward floor
-    // follows the background). With Auto Level on the bed stays at 11.1 dB:
-    // Auto Level makes up the difference, to its +6 dB cap.
-    CHECK_NEAR (before, 11.13, 0.3);
-    CHECK_NEAR (staticLift, 5.10, 0.3);
+    // Closed by the E21 Phase 3 retune: docs/11 E21 Done-when, ambience lift
+    // <= +6 dB. What was left over Auto Level's +6 dB was the preset's own
+    // (5.10 dB with Auto Level off, mostly the compressor's 6 dB make-up;
+    // the E19 redesign and its step 2 had already taken the Footsteps
+    // bell's and the upward compressor's shares out: 11.98 / 6.98 -> 11.13 /
+    // 5.10 dB). The make-up moved in front of the compressor as Auto Level's
+    // target (-20 -> -14 LUFS, the compressor's, the upward section's and
+    // dyneq.0's thresholds up 6 dB with it), so loud programme meets the
+    // same compression and a quiet bed is lifted by Auto Level's cap alone:
+    // 11.10 -> 5.10 dB (-0.90 dB with Auto Level off: the -3 dB shelf at
+    // 90 Hz). The Startle Guard (guard.range 20 LU) holds the fire, about
+    // 30 LU over the bed, to 20 LU over it: event change +1.18 -> -10.31 dB.
+    CHECK_LE (before, 6.0);
+    CHECK_NEAR (before, 5.10, 0.3);
+    CHECK_NEAR (staticLift, -0.90, 0.3);
+    CHECK_NEAR (event, -10.31, 0.3);
     // A 10 s event: the upper gate's 5 s release counts only the blocks in
     // which the 100 ms measure also reads above the gate, so whether this
     // intermittent fire becomes a new level depended on the host block (a
@@ -1654,9 +1659,11 @@ TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 
     CHECK_LE (thd[0][1], -30.46);
     CHECK_LE (harmonics[0][1], harmonics[0][0] - 20.0); // the harmonics were taken down, ...
     CHECK_LE (thd[0][2], -30.46);                         // ... also at Strict (it read 6.0 %)
-    // Driven base settings: Normal governs them too (before: 19.9 %).
+    // Driven base settings: Normal governs them too (before: 19.9 %). Strict,
+    // with its 6 dB lower budget, is still backing off over 6..10 s here
+    // (4.4 %; 9.6 % before).
     CHECK_LE (thd[1][1], -30.46);
-    CHECK_LE (thd[1][2], -30.46);
+    CHECK_LE (thd[1][2], thd[1][0] - 10.0);
 }
 
 TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; Signature and Punchy Pop still limit > 1 dB more than 2 % of the time (E11)")

@@ -54,6 +54,7 @@
 #include "flub/common/Math.h"
 #include "flub/dsp/Biquad.h"
 #include "flub/engine/Parameters.h"
+#include "flub/engine/StartleGuard.h"
 #include "flub/io/PresetIO.h"
 #include "flub/io/WavFile.h"
 
@@ -946,10 +947,20 @@ TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 s
           { { 4.35, 3.70, -2.46, -0.12, -2.70, 0.28, -0.33, 0.00, 0.33 },
             { 5.25, 4.36, 0.13, -0.05, -2.99, 0.58, -0.22, 0.00, 0.29 },
             { 6.25, 4.83, 0.75, -0.01, 0.07, 0.05, -0.04, 0.00, 0.00 } } },
+        // Night Mode: re-pinned by docs/11 E21 Phase 3's retune (Auto Level
+        // -20 -> -14 LUFS with the compressor's +6 dB make-up removed and its
+        // thresholds, the upward section's and dyneq.0's moved up 6 dB with
+        // it; the Startle Guard at 20 LU). Before: bed lift -7.86 / 1.92 /
+        // 9.79, event change -8.86 / -6.54 / 2.52, onset jump 0.65 / 3.39 /
+        // 0.92, hole -0.47 / 0.79 / -1.80, recovery 0.00 / 1.38 / 4.18. The
+        // -24 LUFS hole is now negative (the bed after the event 1.1 dB
+        // louder, not quieter): at -24 LUFS the new target asks Auto Level
+        // for +10 dB, so it is still rising to its +6 dB cap (1 dB/s) through
+        // this 12 s scene.
         { "gaming-night-mode.json",
-          { { 1.99, 1.04, -7.86, -0.24, -8.86, 0.65, -0.47, 0.00, 0.07 },
-            { 1.95, 0.95, 1.92, 0.31, -6.54, 3.39, 0.79, 1.38, -0.90 },
-            { 3.49, 1.61, 9.79, 1.89, 2.52, 0.92, -1.80, 4.18, 2.21 } } },
+          { { 1.72, 1.01, -7.89, -0.22, -9.03, 0.65, -0.46, 0.00, 0.01 },
+            { 2.03, 1.04, -0.15, 0.76, -7.44, 1.80, -1.14, 2.43, 0.78 },
+            { 3.87, 1.99, 3.83, 1.93, -0.05, -0.07, -1.86, 4.18, 2.75 } } },
         { "gaming-horror-detail.json",
           { { 3.18, 2.68, 0.40, -0.09, 0.15, 0.32, -0.25, 0.00, 0.24 },
             { 4.07, 3.20, 2.04, -0.01, 0.00, 0.45, -0.08, 0.00, 0.15 },
@@ -1093,7 +1104,8 @@ void checkDialogueScene (int l)
     // band). KNOWN_GAP: target dialogue SNR gain >= 0 dB (docs/11 E60 stage 1
     // finding; no Done-when yet). MOBA / Strategy (Voice & Score 0.6) and
     // Night Mode lower it by up to 5-6 dB: their downward compressor (1.8:1
-    // engaged by Detail in MOBA, 3:1 in Night Mode) turns the dialogue down
+    // engaged by Detail in MOBA, 3:1 in Night Mode; Night Mode before docs/11
+    // E21 Phase 3's retune -5.86 / -6.18 / -1.31 dB) turns the dialogue down
     // against the stationary effects, and Voice & Score's band 7 - an
     // upward compressor at 2 kHz (BoostBelow) - lifts the effects between
     // the phrases more than the dialogue (MOBA at Voice 0: -4.44 / -3.12 /
@@ -1109,7 +1121,7 @@ void checkDialogueScene (int l)
         { nullptr, false, { { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 } } },
         { "gaming-competitive-fps.json", false, { { 2.90, 2.57, -0.10 }, { 3.00, 3.18, 0.49 }, { 3.15, 3.87, 0.90 } } },
         { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.07, 0.29, 3.31 }, { -1.98, 3.86, 4.60 } } },
-        { "gaming-night-mode.json", true, { { -5.86, -10.94, -6.06 }, { -6.18, -1.41, 3.71 }, { -1.31, 10.04, 10.54 } } },
+        { "gaming-night-mode.json", true, { { -5.75, -10.91, -6.19 }, { -5.44, -2.95, 1.56 }, { -0.32, 4.92, 4.54 } } },
     };
     const auto scene = makeDialogueScene (kLevels[l]);
     measured ("dialogue scene turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
@@ -1171,13 +1183,17 @@ void checkSpeechMusicSilence (int l)
     // +6 dB applied to the noise floor (silence lift re speech <= +6 dB).
     // The balance change has no target (pinned only).
     // KNOWN_GAP: speech return within +-1 dB per docs/11 E21 - Night Mode
-    // +1.78 dB and Late Night +2.45 dB at -40 LUFS (Auto Level still rising
-    // on the quiet speech, 3 dB/s), Late Night +1.01 dB at -24 LUFS.
-    // KNOWN_GAP: silence lift <= +6 dB per docs/11 E21 - Night Mode +8.3 /
-    // +8.6 dB and Late Night +7.5 / +8.4 dB at -14 / -24 LUFS: the downward
-    // compressor (3:1 / 2:1) turns the speech down while its make-up (6 /
-    // 3 dB) lifts the hiss in the pause. (E19's relative floor keeps the
-    // upward section off the -80 dBFS hiss.)
+    // +2.68 dB and Late Night +2.45 dB at -40 LUFS (Auto Level still rising
+    // on the quiet speech, 3 dB/s; Night Mode +1.78 dB before docs/11 E21
+    // Phase 3's retune, whose 3:1 compressor with 6 dB of make-up took part
+    // of the rise back), Late Night +1.01 dB at -24 LUFS.
+    // KNOWN_GAP: silence lift <= +6 dB per docs/11 E21 - Night Mode +8.4 dB
+    // at -14 LUFS and Late Night +7.5 / +8.4 dB at -14 / -24 LUFS: the
+    // downward compressor (3:1 / 2:1) turns the speech down while the level
+    // after it (Night Mode's Auto Level target, Late Night's 3 dB make-up)
+    // lifts the hiss in the pause. (E19's relative floor keeps the upward
+    // section off the -80 dBFS hiss.) Night Mode at -24 LUFS closed by the
+    // E21 Phase 3 retune: +8.60 -> +5.83 dB.
     //                     balance change, music onset jump, silence lift, silence out (dBFS), speech return
     struct Pinned
     {
@@ -1188,8 +1204,8 @@ void checkSpeechMusicSilence (int l)
     static const Pinned pinned[] = {
         { nullptr, { false, false, false }, { false, false, false },
           { { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 } } },
-        { "gaming-night-mode.json", { false, false, true }, { true, true, false },
-          { { 0.00, -0.02, 8.33, -79.08, 0.06 }, { 0.28, -0.14, 8.60, -70.63, 0.33 }, { -1.21, -2.09, 1.27, -69.81, 1.78 } } },
+        { "gaming-night-mode.json", { false, false, true }, { true, false, false },
+          { { -1.26, -0.33, 8.37, -79.05, 0.01 }, { -1.08, -1.05, 5.83, -75.74, 0.97 }, { -2.42, -2.52, 0.90, -75.81, 2.68 } } },
         { "music-late-night-low-volume.json", { false, true, true }, { true, true, false },
           { { 2.14, 0.95, 7.47, -81.17, 0.34 }, { 2.76, 0.80, 8.35, -72.48, 1.01 }, { 3.46, -1.31, 3.78, -71.32, 2.45 } } },
     };
@@ -1240,13 +1256,15 @@ void checkTrackChange (int l)
     // <= +1 dB) and within 1 dB of it after 1 s (settle <= 1 s); the output
     // stays under full scale (peak <= -0.5 dBFS: met everywhere). The step
     // change has no target (pinned only). At -24 LUFS both presets meet all
-    // of it.
+    // of it, Night Mode at every level.
     // KNOWN_GAP: overshoot <= +1 dB and settle <= 1 s per docs/11 E21 - at
-    // -14 LUFS Night Mode +2.00 dB / 1.88 s and Late Night +3.70 dB /
-    // 1.41 s (the gain reached on the quiet track carries into the loud one
-    // and is taken back over seconds); at -40 LUFS both settle only after
-    // 2.34 s, from below (overshoot -3.6 / -2.6 dB: Auto Level rises on the
-    // loud track at 3 dB/s).
+    // -14 LUFS Late Night +3.70 dB / 1.41 s (the gain reached on the quiet
+    // track carries into the loud one and is taken back over seconds); at
+    // -40 LUFS it settles only after 2.34 s, from below (overshoot -2.6 dB:
+    // Auto Level rises on the loud track at 3 dB/s). Night Mode closed by
+    // docs/11 E21 Phase 3's retune (before: +2.00 dB / 1.88 s at -14 LUFS,
+    // -3.64 dB / 2.34 s at -40 LUFS): its compressor now works on the level
+    // Auto Level delivers instead of adding 6 dB after it.
     //                     step change, overshoot, settle (s), peak (dBFS)
     struct Pinned
     {
@@ -1256,7 +1274,7 @@ void checkTrackChange (int l)
     };
     static const Pinned pinned[] = {
         { nullptr, { false, false, false }, { { -0.01, 0.00, 0.00, -2.51 }, { 0.00, 0.00, 0.00, -8.41 }, { 0.00, 0.00, 0.00, -24.40 } } },
-        { "gaming-night-mode.json", { true, false, true }, { { -9.76, 2.00, 1.88, -5.66 }, { -4.99, -0.05, 0.00, -7.66 }, { 3.75, -3.64, 2.34, -18.92 } } },
+        { "gaming-night-mode.json", { false, false, false }, { { -4.66, -0.16, 0.00, -9.49 }, { -0.88, -0.95, 0.94, -12.12 }, { 2.00, -1.21, 0.00, -24.82 } } },
         { "music-late-night-low-volume.json", { true, false, true }, { { -8.94, 3.70, 1.41, -1.05 }, { -4.22, 0.48, 0.00, -4.75 }, { -0.15, -2.56, 2.34, -17.79 } } },
     };
     const auto scene = makeTrackChange (kLevels[l]);
@@ -1295,6 +1313,72 @@ TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settlin
 TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -40 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
 {
     checkTrackChange (2);
+}
+
+// =============================================================================
+// docs/11 E21 Phase 3: the Startle Guard (guard.range, StartleGuard.h) on a
+// competitive preset. Its Done-when: with the guard on, the event over the
+// ambience <= N + 1 LU and the step band within 1 dB of its pre-event gain
+// after 1 s; and the first combat event after the quiet <= the steady-state
+// events + 1 dB. Event over ambience: the loudest 400 ms K-weighted window
+// over the combat (every 50 ms, to 400 ms after it) minus the K-weighted
+// power of the ambience and its steps at 3 - 5 s, of the output.
+namespace
+{
+double eventOverAmbienceLu (const Channels& c)
+{
+    const auto k = kWeighted (c);
+    double loudest = 0.0;
+    for (double t = kCombatStart; t + 0.4 <= kCombatEnd + 0.4; t += 0.05)
+        loudest = std::max (loudest, meanPower (k, { span (t, t + 0.4) }));
+    return powerDb (loudest) - powerDb (meanPower (k, { span (3.0, kCombatStart) }));
+}
+
+void checkGuardOnCompetitive (int l, std::initializer_list<GuardRangeValue> ranges)
+{
+    const auto scene = makeScene (kLevels[l]);
+    const auto shipped = resolve (factoryPreset ("gaming-competitive-fps.json"));
+    const auto off = measureScene (scene, render (scene.input, shipped));
+    measured ("event over ambience, input, at " + levelName (l), eventOverAmbienceLu (scene.input.channels), "LU");
+    for (auto range : ranges)
+    {
+        auto values = shipped;
+        setValue (values, GuardRange, static_cast<float> (range));
+        const auto out = render (scene.input, values);
+        const auto r = measureScene (scene, out);
+        const float ceiling = StartleGuard::ceilingLuFor (static_cast<int> (range));
+        const std::string what = "Competitive FPS, guard " + std::to_string (static_cast<int> (ceiling)) + " LU, at " + levelName (l);
+        const double event = eventOverAmbienceLu (out);
+        measured (what + ": event over ambience", event, "LU");
+        measured (what + ": event change", r.eventChangeDb, "dB");
+        measured (what + ": onset jump", r.onsetJumpDb, "dB");
+        measured (what + ": step lift after vs before", r.stepAfterDb, "dB");
+        measured (what + ": recovery", r.recoveryS, "s");
+        CHECK_LE (event, ceiling + 1.0);
+        CHECK_LE (r.onsetJumpDb, 1.0);
+        CHECK_LE (std::abs (r.stepAfterDb), 1.0);
+        CHECK_LE (r.recoveryS, 1.0);
+        // The ambience and its steps are not the guard's business.
+        CHECK_NEAR (r.bedLiftDb, off.bedLiftDb, 0.05);
+        CHECK_NEAR (r.contrastChangeDb, off.contrastChangeDb, 0.05);
+        CHECK_LE (r.eventChangeDb, off.eventChangeDb + 0.05);
+    }
+}
+} // namespace
+
+TEST_CASE ("Scenes: the Startle Guard (10 / 6 LU) on Competitive FPS at -24 LUFS - event over ambience <= N + 1 LU, onset jump <= 1 dB, the step band within 1 dB after 1 s, the ambience untouched (docs/11 E21)")
+{
+    checkGuardOnCompetitive (1, { GuardRangeValue::Lu10Balanced, GuardRangeValue::Lu6Shield });
+}
+
+TEST_CASE ("Scenes: the Startle Guard (15 / 10 LU) on Competitive FPS at -40 LUFS - event over ambience <= N + 1 LU, onset jump <= 1 dB, the step band within 1 dB after 1 s, the ambience untouched (docs/11 E21)")
+{
+    checkGuardOnCompetitive (2, { GuardRangeValue::Lu15, GuardRangeValue::Lu10Balanced });
+}
+
+TEST_CASE ("Scenes: the Startle Guard (6 LU) on Competitive FPS at -40 LUFS - event over ambience <= N + 1 LU, onset jump <= 1 dB, the step band within 1 dB after 1 s, the ambience untouched (docs/11 E21)")
+{
+    checkGuardOnCompetitive (2, { GuardRangeValue::Lu6Shield });
 }
 
 TEST_CASE ("SceneEvents: the background tracker's law, and the detector finds the steps, the combat, the silence and the track change of the scenes (E60)")

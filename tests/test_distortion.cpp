@@ -327,11 +327,16 @@ TEST_CASE ("Distortion: the readings do not depend on the host block size: a 55 
     }
 }
 
-TEST_CASE ("Distortion: an analysis window closes at the first block boundary at or after 25 ms, so it spans ceil(1200 / n) * n samples in n-sample blocks at 48 kHz")
+TEST_CASE ("Distortion: an analysis window closes at the first block boundary at or after 25 ms, so it spans ceil(1200 / n) * n samples in n-sample blocks at 48 kHz; the parallel window waits for the 10 ms grid")
 {
     // The documented window length (DistortionEstimator.h, docs §14.5): the
-    // stages add whole blocks, and the overshoot is not carried over.
-    for (const int n : { 1, 7, 600, 1024, 1199, 1200, 1201, 4096 })
+    // stages add whole blocks, and the overshoot is not carried over. The
+    // parallel-generator window (bass harmonics, air exciter) closes at the
+    // first boundary at or after 25 ms that lies on a 10 ms (480-sample) grid
+    // counted from reset(), or at the first one past 35 ms when the blocks
+    // miss the grid (docs/11 E06 Phase 3: the governor's harmonics loop reads
+    // it, and the chain ends its segments on that grid).
+    for (const int n : { 1, 7, 480, 600, 1024, 1199, 1200, 1201, 4096 })
     {
         DistortionWindow window;
         ParallelDistortionWindow parallel;
@@ -340,21 +345,38 @@ TEST_CASE ("Distortion: an analysis window closes at the first block boundary at
         REQUIRE (window.getLength() == 1200);
         REQUIRE (parallel.getLength() == 1200);
         const int expected = (1200 + n - 1) / n * n;
-        int counted = 0, closes = 0;
-        for (int blocks = 0; closes < 3; ++blocks)
+        int counted = 0, closes = 0, parallelCounted = 0, parallelCloses = 0;
+        long long total = 0;
+        for (int blocks = 0; closes < 3 || parallelCloses < 3; ++blocks)
         {
-            REQUIRE (blocks < 4 * 1200);
+            REQUIRE (blocks < 8 * 1200);
             counted += n;
+            parallelCounted += n;
+            total += n;
             float db = 0.0f;
-            const bool closed = window.advance (n, db);
-            CHECK (parallel.advance (n, db) == closed);
-            if (! closed)
-                continue;
-            CHECK (counted == expected);
-            counted = 0;
-            ++closes;
+            if (window.advance (n, db))
+            {
+                CHECK (counted == expected);
+                counted = 0;
+                ++closes;
+            }
+            const bool onGrid = total % 480 == 0;
+            const bool due = parallelCounted >= 1200 && (onGrid || parallelCounted >= 1680);
+            CHECK (parallel.advance (n, db) == due);
+            if (due)
+            {
+                parallelCounted = 0;
+                ++parallelCloses;
+            }
         }
     }
+    // 480-sample segments (the chain's grid): the parallel window closes every 30 ms.
+    ParallelDistortionWindow parallel;
+    parallel.prepare (kFs);
+    float db = 0.0f;
+    CHECK (! parallel.advance (480, db));
+    CHECK (! parallel.advance (480, db));
+    CHECK (parallel.advance (480, db));
 }
 
 TEST_CASE ("Distortion: the monitor power-sums the stages and smooths the meter in the power domain with tau = 300 ms")
@@ -783,7 +805,7 @@ TEST_CASE ("Distortion: the parallel-generator estimator counts only what neithe
         for (int i = 0; i < window.getLength(); ++i)
             window.channel (0).add (x[static_cast<size_t> (i % kN)], p[static_cast<size_t> (i % kN)], 0.0f);
         float db = 0.0f;
-        CHECK (window.advance (window.getLength(), db));
+        CHECK (window.advance (1440, db)); // 30 ms: on the 10 ms grid
         CHECK (db == kMinusInfDb);
     }
 

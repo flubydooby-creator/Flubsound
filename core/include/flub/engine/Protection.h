@@ -39,13 +39,58 @@
 //   next host block) spread Boost 100 + Loudness 100 by 0.25 LU over blocks
 //   64-4096 on kick-heavy programme; now 0.05 LU.
 //   Protection strength (ProtectionStrength, a host setting, not a preset
-//   value): Off (the default) never touches base values, as before; Normal
-//   also scales the base max.drive, sat.drive and bass.harmonics by the same
-//   scale (ProcessingChain::applyParameters); Strict does that and lets the
-//   scale fall to 0 instead of 0.3.
+//   value): Off (the default) never touches base values and runs the
+//   stepwise loop above, exactly as before; Normal also scales the base
+//   max.drive, sat.drive and bass.harmonics by the same scale
+//   (ProcessingChain::applyParameters) and runs the measured loop below;
+//   Strict does that with stricter budgets and lets the scale fall to 0
+//   instead of 0.3.
+//   Measured loop (Normal / Strict, docs/11 E06 Phase 3; updateMeasured()),
+//   on the same 10 ms ticks. The chain measures two spans with
+//   WeightedResidual (flub/dsp/WeightedResidual.h: the loudness-weighted,
+//   masking-limited residual of a span against its latency-aligned input):
+//   the saturator .. maximizer ("drive span") and the bass engine. Two
+//   scales, in dB (u = 20 log10 scale), each moved by PI loops on dB errors
+//   (> 0 = over the set point, kSetPointMarginDb inside the budget):
+//     * the drive scale (getScale(): the governed macro amounts and the base
+//       drives, as above) is the lowest of three loops - the limiter's GR
+//       (0.5 s average) as a slow trim (kTrimGain) around a feed-forward
+//       (DriveFeedForward: the drive at which the maximizer input's peaks
+//       of the last 3 s would hold the limiter at its budget, as a share of
+//       the drive at the full scale), the drive span's audible residual plus
+//       the bass engine's non-harmonic share (its protection riding the
+//       boost shelf, which the drive scale governs), and in Music the
+//       dynamics budget: the output's PLR (PlrMeter, ~3 s) may not fall
+//       under the budget, nor more than kPlrAllowanceDb under the input's
+//       own PLR (a steady tone cannot be given more);
+//     * the harmonics scale (getHarmonicsScale(), multiplied into
+//       bass.harmonics on top of the drive scale): the harmonics policy.
+//       The generator's harmonics are intended, so they never count against
+//       the drive; but harmonics added on top of a fundamental the output
+//       still carries are budgeted by what the programme leaves audible (a
+//       steady bass tone masks none of them; dense programme most): the bass
+//       engine's audible residual in the share its generator's own meter
+//       gives the harmonics. Small Speaker Mode's harmonics stand in for a
+//       removed fundamental: Normal leaves them alone, Strict governs them.
+//   The PI loops run on the error plus kApproachDb while over the set point
+//   (so they reach it), hold within kHoldBandDb under it, and recover (no
+//   proportional term, kRiseDbPerSec at most) further under; falls are
+//   limited to kFallDbPerSec (drive) / kHarmonicsFallDbPerSec. Probe
+//   memory: at the onset of a back-off a loop steps kProbeMarginDb under
+//   the level that went over and caps its recovery there for a hold that
+//   doubles (4 s .. 64 s) while back-offs keep starting at the same level,
+//   and it waits kVerifySeconds (the readings' lag) before backing off
+//   further unless the onset is far over: stages that switch in at a
+//   threshold (the maximizer's glue on a steady bass tone read 13 dB more
+//   residual per dB of drive) would otherwise be probed every few seconds.
+//   Budgets (budgetsFor(), provisional until the E60 listening panel):
+//   limiter GR -6 dB (Strict -4), audible residual -35 dB Music / -30 dB
+//   Gaming (Strict 6 dB lower), PLR 8 dB in Music (Strict 10), none in
+//   Gaming. The ~3 s averages of the GR and the stage THD+N above are still
+//   kept for the meters.
 //   getState() / getReason() say what the loop is doing and which budget
 //   made it back off (published on MeterBus with the scale and both
-//   averages).
+//   averages); the measured loop adds kReasonDynamics and kReasonHarmonics.
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -277,9 +322,6 @@ public:
     float getHarmonicsBlockDb() const noexcept { return harmonicsBlockDb; }
     /** Block harmonics reading smoothed in the power domain (tau = kMeterTauSeconds). */
     float getSmoothedHarmonicsDb() const noexcept { return harmonicsSmoothedDb; }
-    /** The bass harmonics generator's share alone, smoothed the same way
-        (the governor's harmonics loop, docs/11 E06 Phase 3). */
-    float getSmoothedBassHarmonicsDb() const noexcept { return bassSmoothedDb; }
 
 private:
     /** Advances a power-domain one-pole (tau = kMeterTauSeconds) by numSamples. */
@@ -288,7 +330,6 @@ private:
     double sr = 48000.0;
     float blockDb = -160.0f, smoothedDb = -160.0f, smoothedPow = 0.0f;
     float harmonicsBlockDb = -160.0f, harmonicsSmoothedDb = -160.0f, harmonicsSmoothedPow = 0.0f;
-    float bassSmoothedDb = -160.0f, bassSmoothedPow = 0.0f;
 };
 
 /** How far the SafetyGovernor reaches (see the header comment). */
@@ -343,7 +384,8 @@ private:
     std::array<float, DriveFeedForward::kTicks> peaks {};
     int pos = 0, count = 0;
     float tickPeak = 0.0f;
-    double pole = 0.0, residual = 1.0; // the follower's one-pole, and pole^samples since reset
+    double logPole = 0.0;       // ln of the follower's one-pole coefficient
+    std::int64_t samples = 0;   // since reset (the cold-start correction; an integer, so the reading does not depend on the blocks)
 };
 
 class SafetyGovernor
@@ -435,12 +477,12 @@ public:
     /** Advances the tick grid by numSamples and ticks once per 10 ms window
         closed, on these readings. distortionDb: the distortion of the
         nonlinear stages this block (see the header comment;
-        ProcessingChain::process). At Normal / Strict the measured loop
-        runs on them alone (no span residual, PLR or feed-forward). */
+        ProcessingChain::process). The stepwise loop at every strength;
+        the chain calls updateMeasured() at Normal / Strict. */
     void update (float limiterGrDb, float distortionDb, int numSamples) noexcept FLUB_NONBLOCKING;
     /** As update(), with the measured loop's readings (Off uses only
         limiterGrDb and distortionDb, as above). */
-    void update (const Readings& readings, int numSamples) noexcept FLUB_NONBLOCKING;
+    void updateMeasured (const Readings& readings, int numSamples) noexcept FLUB_NONBLOCKING;
     /** Selects the measured loop's budgets (Music or Gaming); any time on the
         audio thread. */
     void setMusicMode (bool music) noexcept FLUB_NONBLOCKING { musicMode = music; }

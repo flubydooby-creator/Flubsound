@@ -180,6 +180,7 @@ TEST_CASE ("RTSan: an allocation inside a nonblocking function stops the process
 // process(), and the monitor / governor updates ProcessingChain::process
 // calls every block.
 #include "flub/dsp/DistortionEstimator.h"
+#include "flub/dsp/WeightedResidual.h"
 #include "flub/engine/Protection.h"
 
 static_assert (std::is_same_v<decltype (&DistortionSums::add), void (DistortionSums::*) (float, float) noexcept FLUB_NONBLOCKING>);
@@ -203,6 +204,22 @@ static_assert (std::is_same_v<decltype (&SafetyGovernor::setStrength), void (Saf
 static_assert (std::is_same_v<decltype (&SafetyGovernor::restartTickGrid), void (SafetyGovernor::*)() noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&SafetyGovernor::samplesToNextTick), int (SafetyGovernor::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::setProtectionStrength), void (ProcessingChain::*) (ProtectionStrength) noexcept FLUB_NONBLOCKING>);
+// The measured loop at Normal / Strict (docs/11 E06 Phase 3,
+// tests/test_protection_measured.cpp): the governor's update and settings,
+// the feed-forward's and the PLR meter's per-tick work, and the span
+// analyser ProcessingChain::process feeds every segment.
+static_assert (std::is_same_v<decltype (&SafetyGovernor::updateMeasured), void (SafetyGovernor::*) (const SafetyGovernor::Readings&, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::setMusicMode), void (SafetyGovernor::*) (bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::setHarmonicsReplaceFundamental), void (SafetyGovernor::*) (bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DriveFeedForward::push), void (DriveFeedForward::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DriveFeedForward::driveForBudget), float (DriveFeedForward::*) (float, float) const noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<DriveFeedForward>);
+static_assert (hasNonblockingProcess<PlrMeter>);
+static_assert (std::is_same_v<decltype (&PlrMeter::tick), void (PlrMeter::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&PlrMeter::getPlrDb), float (PlrMeter::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<PlrMeter>);
+static_assert (std::is_same_v<decltype (&WeightedResidual::process), void (WeightedResidual::*) (const float*, const float*, int) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<WeightedResidual>);
 
 // Neural slot (tests/test_neural_slot.cpp): ProcessingChain::process runs the
 // slot's AsyncModelProcessor (process / reset asserted above) and publishes

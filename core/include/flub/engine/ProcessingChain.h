@@ -39,7 +39,13 @@
 // modules -> process -> telemetry (limiter GR, measured THD+N of saturator +
 // clipper; at Normal / Strict the maximizer's share is at least its
 // whole-stage residual, the limiter's gain modulation included, docs/11
-// E06 step 1) -> SafetyGovernor / AutoDrive updates for the next block.
+// E06 step 1) -> SafetyGovernor / AutoDrive updates for the next block. At
+// Normal / Strict the governor runs its measured loop (docs/11 E06 Phase 3,
+// Protection.h) on taps the chain takes around the slots: the bass engine's
+// and the saturator .. maximizer span's input (mid, delayed by the span's
+// latency) and output for two WeightedResidual analysers, the maximizer
+// input's peaks for the feed-forward, and the input's and output's PLR; its
+// harmonics scale multiplies bass.harmonics. At Off none of this runs.
 //
 // Bed-lift budget (max.bedLift, docs/11 E19 step 3; LoudnessMaximizer.h):
 // the chain measures the lift ahead of the maximizer as the background
@@ -454,6 +460,8 @@ private:
     DriveFeedForward feedForward;
     PlrMeter plrMeter, inputPlrMeter;
     float preMaxPeak = 0.0f, driveAtFullScale = 0.0f, lastHarmonicsResidualDb = kMinusInfDb;
+    double bassShareSmoothedPow = 0.0; // the bass harmonics' share, per-tick one-pole (kBassShareSmoothing)
+    static constexpr double kBassShareSmoothing = 0.967216; // exp (-10 ms / 300 ms)
     bool spanRunning = false;
     std::atomic<float> driveResidualDb { kMinusInfDb }, driveResidualFlatDb { kMinusInfDb }, harmonicsResidualDb { kMinusInfDb },
         outputPlrDb { PlrMeter::kNoReading },

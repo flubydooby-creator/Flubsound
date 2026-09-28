@@ -585,10 +585,10 @@ void ProcessingChain::applyParameters() noexcept
         plrMeter.reset();
         inputPlrMeter.reset();
         preMaxPeak = 0.0f;
+        bassShareSmoothedPow = 0.0;
         lastHarmonicsResidualDb = kMinusInfDb;
         spanRunning = true;
     }
-    governorHarmonicsScale.store (governor.getHarmonicsScale(), std::memory_order_relaxed);
     // Mode / format policies below write their overrides into e, so the
     // values published at the end (effectiveValue(), GUI ghost markers) are
     // the ones actually applied.
@@ -1224,6 +1224,11 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
         plrMeter.tick();
         inputPlrMeter.tick();
         preMaxPeak = 0.0f;
+        // The bass harmonics' share, smoothed per tick (300 ms): its window
+        // closes on this grid, so the reading does not depend on the host's blocks.
+        const float share = ! slots[SBass].isFullyBypassed() ? bass.getDistortionDb() : kMinusInfDb;
+        bassShareSmoothedPow = kBassShareSmoothing * bassShareSmoothedPow
+                               + (1.0 - kBassShareSmoothing) * (share > kMinusInfDb ? std::pow (10.0, 0.1 * static_cast<double> (share)) : 0.0);
     }
 }
 
@@ -1244,7 +1249,7 @@ SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, f
     if (bassSpan.hasReading())
     {
         const float flat = bassSpan.getPlainResidualDb(), audible = bassSpan.getWeightedDb();
-        const float harmonics = distortion.getSmoothedBassHarmonicsDb();
+        const float harmonics = bassShareSmoothedPow > 0.0 ? static_cast<float> (10.0 * std::log10 (bassShareSmoothedPow)) : kMinusInfDb;
         const double share = flat > kMinusInfDb && harmonics > kMinusInfDb ? std::min (1.0, std::pow (10.0, 0.1 * static_cast<double> (harmonics - flat))) : 0.0;
         if (share > 0.0)
             r.harmonicsResidualDb = audible + static_cast<float> (10.0 * std::log10 (share));
@@ -1416,7 +1421,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         if (appliedStrength == ProtectionStrength::Off)
             governor.update (grDb, stageDb, n);
         else
-            governor.update (governorReadings (grDb, stageDb), n);
+            governor.updateMeasured (governorReadings (grDb, stageDb), n);
         autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
         loudnessMatch.measureWet (st);
     }
@@ -1534,6 +1539,7 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     driveResidualDb.store (spanRunning ? driveSpan.getWeightedDb() : kMinusInfDb, rl);
     driveResidualFlatDb.store (spanRunning ? driveSpan.getPlainResidualDb() : kMinusInfDb, rl);
     harmonicsResidualDb.store (spanRunning ? lastHarmonicsResidualDb : kMinusInfDb, rl);
+    governorHarmonicsScale.store (governor.getHarmonicsScale(), rl);
     outputPlrDb.store (spanRunning ? plrMeter.getPlrDb() : PlrMeter::kNoReading, rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);

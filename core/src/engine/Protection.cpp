@@ -40,8 +40,8 @@ void DistortionMonitor::reset() noexcept FLUB_NONBLOCKING
 {
     blockDb = smoothedDb = kMinusInfDb;
     smoothedPow = 0.0f;
-    harmonicsBlockDb = harmonicsSmoothedDb = bassSmoothedDb = kMinusInfDb;
-    harmonicsSmoothedPow = bassSmoothedPow = 0.0f;
+    harmonicsBlockDb = harmonicsSmoothedDb = kMinusInfDb;
+    harmonicsSmoothedPow = 0.0f;
 }
 
 float DistortionMonitor::combineDb (float aDb, float bDb) noexcept FLUB_NONBLOCKING
@@ -74,7 +74,6 @@ float DistortionMonitor::updateHarmonics (float bassDb, float airDb, int numSamp
     // programme leaves exposed, docs/11 E06 Phase 3).
     harmonicsBlockDb = combineDb (bassDb, airDb);
     harmonicsSmoothedDb = smooth (harmonicsSmoothedPow, dbToPower (bassDb) + dbToPower (airDb), numSamples);
-    bassSmoothedDb = smooth (bassSmoothedPow, dbToPower (bassDb), numSamples);
     return harmonicsBlockDb;
 }
 
@@ -138,7 +137,7 @@ float DriveFeedForward::driveForBudget (float ceilingDb, float grBudgetDb) const
 void PlrMeter::prepare (double sampleRate, int numChannels)
 {
     loudness.prepare (sampleRate, numChannels, 3000.0f);
-    pole = static_cast<double> (onePoleCoeff (3000.0f, sampleRate));
+    logPole = std::log (static_cast<double> (onePoleCoeff (3000.0f, sampleRate)));
     reset();
 }
 
@@ -148,13 +147,13 @@ void PlrMeter::reset() noexcept FLUB_NONBLOCKING
     peaks.fill (0.0f);
     pos = count = 0;
     tickPeak = 0.0f;
-    residual = 1.0;
+    samples = 0;
 }
 
 void PlrMeter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
 {
     loudness.process (block);
-    residual *= std::pow (pole, static_cast<double> (block.numSamples));
+    samples += block.numSamples;
     for (int c = 0; c < block.numChannels; ++c)
         for (int i = 0; i < block.numSamples; ++i)
             tickPeak = std::max (tickPeak, std::abs (block.channel (c)[i]));
@@ -171,6 +170,7 @@ void PlrMeter::tick() noexcept FLUB_NONBLOCKING
 float PlrMeter::getPlrDb() const noexcept FLUB_NONBLOCKING
 {
     const float raw = loudness.getLufs();
+    const double residual = std::exp (logPole * static_cast<double> (samples));
     const float lufs = residual < 0.999 ? raw - static_cast<float> (10.0 * std::log10 (1.0 - residual)) : raw;
     if (count < 100 || ! (lufs > -50.0f))
         return kNoReading;
@@ -255,7 +255,7 @@ void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSampl
     }
 }
 
-void SafetyGovernor::update (const Readings& r, int numSamples) noexcept FLUB_NONBLOCKING
+void SafetyGovernor::updateMeasured (const Readings& r, int numSamples) noexcept FLUB_NONBLOCKING
 {
     pendingSamples += numSamples;
     while (pendingSamples >= tickSamples)

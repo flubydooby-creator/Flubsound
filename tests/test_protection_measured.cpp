@@ -233,7 +233,7 @@ TEST_CASE ("Protection: the measured loop settles on a steep synthetic plant wit
         SafetyGovernor::Readings r;
         const float u = gainToDb (std::max (g.getHarmonicsScale(), 1.0e-6f));
         r.harmonicsResidualDb = u - 12.0f + std::max (0.0f, 12.0f * (u + 10.0f));
-        g.update (r, 480);
+        g.updateMeasured (r, 480);
         trace.push_back (u);
     }
     const float settled = trace.back();
@@ -247,7 +247,7 @@ TEST_CASE ("Protection: the measured loop settles on a steep synthetic plant wit
     CHECK (g.getState() == SafetyGovernor::State::Holding);
     CHECK ((g.getReason() & SafetyGovernor::kReasonHarmonics) != 0u);
 
-    // Off: the same readings through update (Readings) tick the stepwise loop
+    // Off: the same readings through updateMeasured() tick the stepwise loop
     // on the GR and stage THD+N alone, exactly as update (gr, thd).
     SafetyGovernor a, b;
     a.prepare (kFs);
@@ -258,7 +258,7 @@ TEST_CASE ("Protection: the measured loop settles on a steep synthetic plant wit
         r.limiterGrDb = tick < 300 ? -9.0f : -2.0f;
         r.distortionDb = -25.0f;
         r.driveResidualDb = r.harmonicsResidualDb = 0.0f; // ignored at Off
-        a.update (r, 480);
+        a.updateMeasured (r, 480);
         b.update (r.limiterGrDb, r.distortionDb, 480);
         REQUIRE (a.getScale() == b.getScale());
     }
