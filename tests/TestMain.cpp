@@ -74,6 +74,39 @@ void operator delete[] (void* p, std::align_val_t) noexcept { alignedFree (p); }
 void operator delete (void* p, std::size_t, std::align_val_t) noexcept { alignedFree (p); }
 void operator delete[] (void* p, std::size_t, std::align_val_t) noexcept { alignedFree (p); }
 
+// The nothrow forms too: libstdc++'s std::get_temporary_buffer (stable_sort,
+// stable_partition, inplace_merge) allocates with new (nothrow) and frees
+// with the sized delete, so a sanitizer's own nothrow new would otherwise
+// pair with the free() above (ASan: alloc-dealloc-mismatch).
+void* operator new (std::size_t size, const std::nothrow_t&) noexcept
+{
+    try
+    {
+        return operator new (size);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+void* operator new[] (std::size_t size, const std::nothrow_t& tag) noexcept { return operator new (size, tag); }
+void* operator new (std::size_t size, std::align_val_t al, const std::nothrow_t&) noexcept
+{
+    try
+    {
+        return operator new (size, al);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+void* operator new[] (std::size_t size, std::align_val_t al, const std::nothrow_t& tag) noexcept { return operator new (size, al, tag); }
+void operator delete (void* p, const std::nothrow_t&) noexcept { std::free (p); }
+void operator delete[] (void* p, const std::nothrow_t&) noexcept { std::free (p); }
+void operator delete (void* p, std::align_val_t, const std::nothrow_t&) noexcept { alignedFree (p); }
+void operator delete[] (void* p, std::align_val_t, const std::nothrow_t&) noexcept { alignedFree (p); }
+
 // ---- runner -----------------------------------------------------------------
 int main (int argc, char** argv)
 {

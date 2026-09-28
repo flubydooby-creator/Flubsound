@@ -538,6 +538,7 @@ void AppSettings::setAutoProfileRules (const std::vector<AutoProfileRule>& rules
     }
     properties->setValue (Keys::autoProfileRules, &xml);
 }
+
 // ---- Device correction ---------------------------------------------------------------
 namespace
 {

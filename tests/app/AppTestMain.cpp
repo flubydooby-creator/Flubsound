@@ -116,6 +116,37 @@ void operator delete[] (void* p, std::align_val_t) noexcept { alignedRelease (p)
 void operator delete (void* p, std::size_t, std::align_val_t) noexcept { alignedRelease (p); }
 void operator delete[] (void* p, std::size_t, std::align_val_t) noexcept { alignedRelease (p); }
 
+// The nothrow forms too (libstdc++'s std::get_temporary_buffer uses them;
+// see tests/TestMain.cpp).
+void* operator new (std::size_t size, const std::nothrow_t&) noexcept
+{
+    try
+    {
+        return allocate (size);
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+void* operator new[] (std::size_t size, const std::nothrow_t& tag) noexcept { return operator new (size, tag); }
+void* operator new (std::size_t size, std::align_val_t al, const std::nothrow_t&) noexcept
+{
+    try
+    {
+        return alignedAllocate (size, static_cast<std::size_t> (al));
+    }
+    catch (...)
+    {
+        return nullptr;
+    }
+}
+void* operator new[] (std::size_t size, std::align_val_t al, const std::nothrow_t& tag) noexcept { return operator new (size, al, tag); }
+void operator delete (void* p, const std::nothrow_t&) noexcept { release (p); }
+void operator delete[] (void* p, const std::nothrow_t&) noexcept { release (p); }
+void operator delete (void* p, std::align_val_t, const std::nothrow_t&) noexcept { alignedRelease (p); }
+void operator delete[] (void* p, std::align_val_t, const std::nothrow_t&) noexcept { alignedRelease (p); }
+
 // ---- lock counting (Linux / glibc) --------------------------------------------
 #if FLUB_APP_TESTS_COUNT_LOCKS
 namespace
