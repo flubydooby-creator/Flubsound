@@ -80,6 +80,7 @@ struct SoakDetection
     double seconds = 0.0;
     std::string lastAction; // the automation action before it ("" if none)
     double lastActionAgeMs = 0.0;
+    bool bypassed = false;  // the global bypass was engaged (the output is the bypass reference)
 };
 
 struct SoakReport

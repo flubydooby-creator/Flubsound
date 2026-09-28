@@ -239,8 +239,9 @@ E53): the offline half of the soak, without devices.
     The latency profile never changes (it re-prepares the chain).
   * Watched: clicks, dropouts, NaN / Inf, DC steps on the stereo output
     (see `help analyze`, --glitches), each with the last automation action
-    before it; the output's peak; the wall time per block against its
-    real-time budget (--block, default 512, at --rate, default 48000).
+    before it and [bypassed] when the global bypass was engaged; the
+    output's peak; the wall time per block against its real-time budget
+    (--block, default 512, at --rate, default 48000).
 
 --seconds S / --minutes M: length (default 10 minutes). Exit code 0 if the
 output has no discontinuity, 1 if it has one (or the programme itself read

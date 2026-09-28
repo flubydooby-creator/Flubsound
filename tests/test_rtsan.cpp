@@ -19,6 +19,7 @@
 
 #include "TestFramework.h"
 
+#include "flub/analysis/CallbackTiming.h"
 #include "flub/analysis/Discontinuity.h"
 #include "flub/common/Realtime.h"
 #include "flub/dsp/BackgroundTracker.h"
@@ -105,6 +106,12 @@ static_assert (hasNonblockingReset<BackgroundTracker>);
 static_assert (std::is_same_v<decltype (&BackgroundTracker::update), float (BackgroundTracker::*) (float, float) noexcept FLUB_NONBLOCKING>);
 // The glitch detector (docs/11 E53) can watch a real-time stream.
 static_assert (std::is_same_v<decltype (&DiscontinuityDetector::process), void (DiscontinuityDetector::*) (const float* const*, int) noexcept FLUB_NONBLOCKING>);
+// The device callback's timing histograms (docs/11 E45): recorded once per
+// callback by the app's AudioEngineHost.
+static_assert (std::is_same_v<decltype (&CallbackTiming::record), void (CallbackTiming::*) (uint64_t, uint64_t, uint64_t) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&CallbackTiming::restartIntervals), void (CallbackTiming::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TimingHistogram::add), void (TimingHistogram::*) (uint64_t) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TimingHistogram::bucketFor), int (*) (uint64_t) noexcept FLUB_NONBLOCKING>);
 
 // Parameter setters called once per block by ProcessingChain::applyParameters
 // (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the

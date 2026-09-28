@@ -465,6 +465,10 @@ void LoudnessMaximizer::processSegment (const AudioBlock& seg, double& clipDiffE
                 peak = std::max (peak, std::abs (data[static_cast<size_t> (c)][i]));
             bedPeak = peak >= bedPeak ? std::min (peak, 1.0e6f) : peak + bedPeakRelease * (bedPeak - peak);
             const float drive = driveDbS.getCurrent();
+            // A budget switched on mid-stream starts its glide from the drive
+            // it replaces (the cap may be stale from an earlier release).
+            if (! bedCapActive)
+                bedCapDb = drive;
             const float excess = std::clamp (upstreamLiftDb + drive - params.bedLiftDb, 0.0f, kMaxBedTrimDb);
             const float spareDb = ceilingDb - gainToDb (bedPeak) - drive;
             bedQuiet = std::clamp (spareDb / kBedKneeDb, 0.0f, 1.0f);

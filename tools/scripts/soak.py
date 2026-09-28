@@ -25,6 +25,10 @@ Each row has its own seed (--seed adds to it), so a run is reproducible.
 A detection whose last action is in --known (default "bypass -> on", the
 open E53 finding: the dry path's true-peak limiter starts cold when the
 global bypass engages) is reported as known and does not fail the run.
+Detections made while the global bypass was engaged (the output is the
+bypass reference, not the processing) are counted per row: in the fuzz row
+the reference's true-peak limiter clicks when a large input.gain drives it
+far over the ceiling (docs/11 E53).
 
 Exit code 0 when no row found a discontinuity outside --known (and no
 programme self-check failed), 1 otherwise, 2 on usage / run errors.
@@ -53,6 +57,8 @@ def action_kind(text):
     """'eq.0.gain = -3.2 dB' -> 'eq.0.gain', 'bypass -> on' -> 'bypass -> on'."""
     if not text:
         return "(no action yet)"
+    if text == "bypass = on":  # the fuzz sets the bypass like any parameter
+        return "bypass -> on"
     if " -> " in text and text.split(" -> ")[0] in ("bypass", "mode"):
         return text
     return text.split(" = ")[0].split(" -> ")[0].split(" (")[0]
@@ -105,13 +111,14 @@ def main():
         unknown = sum(n for kind, n in by_kind.items() if kind not in known)
         listed = sum(by_kind.values())
         unknown += max(0, out["total"] - listed)  # beyond the detector's list: count as unknown
+        bypassed = sum(1 for d in r["detections"] if d.get("bypassed") and action_kind(d["lastAction"]) not in known)
         bad = unknown > 0 or inp["total"] > 0
         failed |= bad
         t = r["timing"]
         print(f"{r['name']:<12} {r['seconds'] / 60:6.1f} min  {r['actions']['total']:6d} actions  "
               f"click {out['click']:4d}  dropout {out['dropout']:3d}  non-finite {out['non-finite']:3d}  dc-step {out['dc-step']:3d}  "
               f"(set aside: {out['setAside']['kinks']} kinks, {out['setAside']['recurring']} recurring)  "
-              f"peak {r['outputPeakDbfs']} dBFS  {t['realtimeFactor']}x RT, max block {t['maxBlockMs']} ms  "
+              f"not known {unknown} ({bypassed} while bypassed)  peak {r['outputPeakDbfs']} dBFS  {t['realtimeFactor']}x RT, max block {t['maxBlockMs']} ms  "
               f"{'FAIL' if bad else 'ok'}")
         if inp["total"] > 0:
             print(f"    programme self-check failed: {inp}")

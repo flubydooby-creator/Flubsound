@@ -1428,3 +1428,38 @@ TEST_CASE ("LoudnessMaximizer: the bed-lift budget lifts quiet programme by at m
     CHECK_LE (peakAbs (y.data(), n), dbfs (-1.0));
     CHECK (m.getSafetyClipCount() == 0u);
 }
+
+TEST_CASE ("LoudnessMaximizer: switching the bed-lift budget on after the drive moved glides from that drive (no step from an old cap)")
+{
+    // Budget on at 3 dB drive, off (the cap releases up to 3 dB), drive 3 ->
+    // 12 dB without a budget, budget on again: the cap must start from the
+    // 12 dB it replaces and glide down, not jump to the 3 dB it last had.
+    LoudnessMaximizer m;
+    prepareMax (m, kFs, 1, 64);
+    const int seg = static_cast<int> (kFs * 0.5);
+    std::vector<float> x (static_cast<size_t> (seg), 0.005f), y;
+    auto p = maxParams (3.0f, -1.0f, 0.5f, 0.0f);
+    const auto run = [&] (float driveDb, float bedLiftDb) {
+        p.driveDb = driveDb;
+        p.bedLiftDb = bedLiftDb;
+        m.setParams (p);
+        std::vector<float> b (x);
+        for (int pos = 0; pos < seg; pos += 64)
+        {
+            float* ch[] = { b.data() + pos };
+            m.process (AudioBlock { ch, 1, std::min (64, seg - pos) });
+        }
+        y.insert (y.end(), b.begin(), b.end());
+    };
+    run (3.0f, 1.0f);
+    run (3.0f, 24.0f);
+    run (12.0f, 24.0f);
+    const float before = y.back();
+    run (12.0f, 1.0f);
+    double maxStep = 0.0;
+    for (size_t i = static_cast<size_t> (3 * seg); i < y.size(); ++i)
+        maxStep = std::max (maxStep, static_cast<double> (std::abs (y[i] - y[i - 1])));
+    std::cout << "    measured: level before " << before << ", after " << y.back() << ", largest step " << maxStep / before << " of the level\n";
+    CHECK_NEAR (toDb (y.back() / 0.005), 1.0, 0.05); // the budget holds
+    CHECK_LT (maxStep / before, 0.01);                 // a 9 dB jump would be 0.65
+}

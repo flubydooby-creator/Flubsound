@@ -175,3 +175,20 @@ jobs:
         with:
           name: screenshots
           path: screenshot-*.png
+      # An unsigned test package per OS: the app, the plug-in formats and
+      # TESTING.txt (tools/scripts/package-desktop.sh).
+      - name: Package test build
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Windows) label=windows ;;
+            macOS) label=macos ;;
+            *) label=linux ;;
+          esac
+          echo "FLUB_PACKAGE=Flubsound-$label" >> "$GITHUB_ENV"
+          bash tools/scripts/package-desktop.sh build dist "$label"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FLUB_PACKAGE }}
+          path: dist/
+          retention-days: 30

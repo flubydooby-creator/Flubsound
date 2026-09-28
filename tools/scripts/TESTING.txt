@@ -1,0 +1,60 @@
+Flubsound Pro - test build
+==========================
+
+This is an unsigned test build made by CI from the commit in VERSION.txt.
+It is for trying the app out, not a release. Start with your headset volume
+LOW: Flubsound can add gain (Boost, bass, the maximizer).
+
+Contents
+--------
+  Flubsound Pro(.exe / .app)   the desktop app (tray, 4 strips, presets)
+  Plug-ins/VST3                Flubsound FX plug-in for a DAW
+  Plug-ins/AU                  (macOS only) Audio Unit version
+  Plug-ins/Standalone          the plug-in as a small standalone app
+
+Opening an unsigned build
+-------------------------
+  Windows: SmartScreen says "Windows protected your PC" -> More info ->
+           Run anyway.
+  macOS:   right-click the app -> Open -> Open (first launch only). If macOS
+           says it is damaged, run in Terminal:
+               xattr -dr com.apple.quarantine "Flubsound Pro.app"
+  Linux:   tar -xzf Flubsound-linux.tar.gz; then run "./Flubsound Pro".
+           Needs PipeWire or PulseAudio, ALSA and X11 or XWayland.
+
+Getting sound into Flubsound
+----------------------------
+Flubsound processes other apps' audio and plays it on your headset.
+  1. Settings > Audio: pick your headset as the OUTPUT device.
+  2. Feed it audio, one of:
+     Windows 10 (2004+) / 11: per-app capture is automatic. Open the routing
+       panel and put your game / music / chat apps on a strip. Mute or turn
+       down those apps' direct output in Windows (Settings > Sound > Volume
+       mixer) so you do not hear them twice.
+     Any OS: install a virtual cable (VB-CABLE on Windows, BlackHole on
+       macOS), make it the system output, and pick its "Output" side as the
+       input device in Settings > Audio. Settings > Processing > "Input feeds
+       strip" chooses which strip gets it (Game by default).
+     Linux: the flubsound_game / _music / _chat / _system sinks (see
+       platform/linux in the repository) route apps per strip.
+  3. Choose a mode (Music / Gaming) and a preset per strip.
+
+Turtle Beach headsets
+---------------------
+Built-in profiles: Stealth, Recon, Atlas / Elite Atlas, Elite Pro, ROCCAT,
+PDP, and headsets on the Xbox Wireless adapter, plus a generic Turtle Beach
+fallback. A profile is picked from the OUTPUT device's name. To check that
+yours was recognised, look at the banner in the main window or at
+Settings > Audio, which shows "<your device>  -  Turtle Beach Stealth series"
+(or the matching series) and the safety ceiling. A profile caps the output
+level for the headset and may suggest a preset; if it says "generic device",
+tell us the exact device name Windows / macOS shows.
+
+Not in this build (needs hardware work first)
+---------------------------------------------
+  - Flubsound's own virtual sound devices (Windows driver, macOS audio
+    device): use per-app capture or a virtual cable instead.
+  - Real-device latency has not been measured; the readouts are estimates.
+  - The Windows and macOS builds pass their automated tests in CI but have
+    not yet been run by a person. Please report what you find: device
+    names, what worked, what did not, and screenshots.

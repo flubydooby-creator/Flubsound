@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstdint>
 
 namespace flub
 {
@@ -48,7 +49,7 @@ uint64_t TimingHistogram::bucketLowerNs (int bucket) noexcept
 uint64_t TimingHistogram::bucketUpperNs (int bucket) noexcept
 {
     if (bucket >= kNumBuckets - 1)
-        return kBaseNs << kOctaves;
+        return UINT64_MAX;
     return bucketLowerNs (std::max (bucket, 0) + 1);
 }
 
@@ -99,9 +100,9 @@ double TimingHistogram::Snapshot::percentileNs (double q) const noexcept
         if (below + inBucket >= rank)
         {
             const double lower = static_cast<double> (bucketLowerNs (b));
-            double upper = static_cast<double> (bucketUpperNs (b));
-            if (b == kNumBuckets - 1)
-                upper = std::max (upper, static_cast<double> (maxNs));
+            // The top bucket has no upper edge: up to the largest value.
+            const double upper = b == kNumBuckets - 1 ? std::max (lower, static_cast<double> (maxNs))
+                                                      : static_cast<double> (bucketUpperNs (b));
             const double value = lower + (upper - lower) * std::clamp ((rank - below) / inBucket, 0.0, 1.0);
             return std::min (value, static_cast<double> (maxNs));
         }

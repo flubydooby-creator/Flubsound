@@ -367,6 +367,7 @@ TEST_CASE ("Soak: 10 s of the chain under user automation (E53 CI soak): no drop
     {
         CHECK (d.lastAction == "bypass -> on");
         CHECK (d.lastActionAgeMs < 3.0);
+        CHECK (d.bypassed); // reported with the chain's state
         bypassClicks += d.lastAction == "bypass -> on" ? 1 : 0;
     }
     CHECK (static_cast<int64_t> (r.detections.size()) == r.outputTotal());
@@ -410,6 +411,7 @@ TEST_CASE ("Soak: a 1-sample skip, a 256-frame dropout and a NaN injected into t
     CHECK (r.output[static_cast<size_t> (DiscontinuityType::DcStep)] == 0);
     for (const auto& d : r.detections)
     {
+        CHECK (! d.bypassed);
         if (d.event.type == DiscontinuityType::Click)
             CHECK (std::abs (d.event.frame - skipAt) <= 4);
         if (d.event.type == DiscontinuityType::Dropout)
@@ -417,6 +419,10 @@ TEST_CASE ("Soak: a 1-sample skip, a 256-frame dropout and a NaN injected into t
         if (d.event.type == DiscontinuityType::NonFinite)
             CHECK (d.event.frame == nanAt && d.event.channel == 0);
     }
+    const auto injected = soakToJson (r);
+    REQUIRE (! injected["detections"].asArray().empty());
+    CHECK (injected["detections"].asArray().front()["bypassed"].isBool());
+    CHECK (! injected["detections"].asArray().front()["bypassed"].asBool (true));
 
     // The same run without the injections is clean, and its JSON says so.
     s.inject = {};

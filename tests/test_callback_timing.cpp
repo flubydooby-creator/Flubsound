@@ -40,8 +40,19 @@ TEST_CASE ("CallbackTiming: histogram buckets tile the range at 1/8 octave (a pe
     }
     CHECK (tiled);
     CHECK (narrow);
-    // The top bucket starts at ~4.3 s: any real callback fits below it.
+    // The top bucket starts at ~4.3 s (any real callback fits below it) and
+    // has no upper edge.
     CHECK (H::bucketLowerNs (H::kNumBuckets - 1) == H::kBaseNs << H::kOctaves);
+    CHECK (H::bucketFor ((H::kBaseNs << H::kOctaves) - 1) == H::kNumBuckets - 2);
+    CHECK (H::bucketUpperNs (H::kNumBuckets - 1) == UINT64_MAX);
+
+    // A 5 s stall lands there, and the percentile and window max stay the value.
+    TimingHistogram h;
+    const auto before = h.snapshot();
+    h.add (5000000000u);
+    const auto window = h.snapshot().since (before);
+    CHECK (window.maxNs == 5000000000u);
+    CHECK (window.percentileNs (1.0) == 5.0e9);
 }
 
 TEST_CASE ("CallbackTiming: mean, percentiles and max of a known distribution")

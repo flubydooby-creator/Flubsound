@@ -547,6 +547,7 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
     out.prepare (fs, 2, detectorSettings);
 
     std::vector<std::pair<int64_t, std::string>> actions; // (frame, description)
+    std::vector<std::pair<int64_t, bool>> bypassSpans;    // (frame, global bypass engaged from there)
     std::map<std::string, int64_t> kinds;
     int64_t nextAction = s.automation == SoakAutomation::Off ? total : automation.nextGap (fs);
     double peak = 0.0, blockMsSum = 0.0;
@@ -565,6 +566,10 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
             actions.emplace_back (pos, std::move (text));
             nextAction += automation.nextGap (fs);
         }
+        // Actions (a bypass switch, an A/B switch, a preset) land between blocks.
+        const bool bypassed = store->get (BypassAll) >= 0.5f;
+        if (bypassSpans.empty() || bypassSpans.back().second != bypassed)
+            bypassSpans.emplace_back (pos, bypassed);
         float* ch[] = { io.channel (0), io.channel (1) };
         programme.render (ch[0], ch[1], n);
         in.process (ch, n);
@@ -620,6 +625,8 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
             d.lastAction = std::prev (it)->second;
             d.lastActionAgeMs = 1000.0 * static_cast<double> (e.frame - std::prev (it)->first) / fs;
         }
+        const auto span = std::upper_bound (bypassSpans.begin(), bypassSpans.end(), e.frame, [] (int64_t f, const auto& b) { return f < b.first; });
+        d.bypassed = span != bypassSpans.begin() && std::prev (span)->second;
         report.detections.push_back (std::move (d));
     }
     report.outputPeakDbfs = peak > 0.0 ? toDb (peak) : -160.0f;
@@ -668,6 +675,7 @@ json::Value soakToJson (const SoakReport& r)
             e.set ("overDb", rounded (d.event.overDb, 2));
         e.set ("lastAction", d.lastAction.empty() ? json::Value() : json::Value (d.lastAction));
         e.set ("lastActionAgeMs", d.lastAction.empty() ? json::Value() : rounded (d.lastActionAgeMs, 1));
+        e.set ("bypassed", d.bypassed);
         list.push (std::move (e));
     }
     v.set ("detections", std::move (list));
@@ -721,6 +729,8 @@ std::string formatSoak (const SoakReport& r)
             std::snprintf (buf, sizeof (buf), "  after: %s (%.1f ms before)", d.lastAction.c_str(), d.lastActionAgeMs);
             s += buf;
         }
+        if (d.bypassed)
+            s += "  [bypassed]";
         s += "\n";
     }
     if (static_cast<int64_t> (r.detections.size()) < r.outputTotal())

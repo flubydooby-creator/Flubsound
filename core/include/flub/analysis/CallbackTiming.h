@@ -18,8 +18,8 @@
 //
 // Buckets are log-spaced, kSubBuckets per octave from kBaseNs (1.024 us;
 // bucket 0 holds everything below), so a percentile is within one bucket
-// (1/8 octave, 9 %) of the true value; the top bucket holds everything from
-// ~4.3 s up. Memory: 2 x 177 counters, fixed.
+// (1/8 octave, at most 12.5 %) of the true value; the top bucket holds
+// everything from 2^32 ns (~4.3 s) up. Memory: 2 x 178 counters, fixed.
 //
 // Threads: ONE writer (the audio thread: record()) and any number of readers
 // (snapshot(); restartIntervals() from any thread). Every counter is a
@@ -47,13 +47,14 @@ class TimingHistogram
 public:
     static constexpr int kSubBuckets = 8;       // per octave (3 bits)
     static constexpr int kOctaves = 22;         // 1.024 us .. ~4.3 s
-    static constexpr int kNumBuckets = 1 + kSubBuckets * kOctaves;
+    static constexpr int kNumBuckets = 2 + kSubBuckets * kOctaves; // below, the octaves, above
     static constexpr uint64_t kBaseNs = 1024;   // lower edge of bucket 1
 
-    /** The bucket a value falls in (0 = below kBaseNs, the last = from its lower edge up). */
+    /** The bucket a value falls in (0 = below kBaseNs, the last = from
+        kBaseNs << kOctaves up). */
     static int bucketFor (uint64_t ns) noexcept FLUB_NONBLOCKING;
     /** A bucket's lower edge (inclusive) and upper edge (exclusive; the last
-        bucket's nominal edge, kBaseNs << kOctaves). */
+        bucket has none: UINT64_MAX). */
     static uint64_t bucketLowerNs (int bucket) noexcept;
     static uint64_t bucketUpperNs (int bucket) noexcept;
 

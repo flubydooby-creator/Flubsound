@@ -4,6 +4,7 @@
 #include "platform/PlatformBridge.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -19,6 +20,31 @@ int sanitiseChannels (int channels) noexcept
 double samplesToMs (int samples, double sampleRate) noexcept
 {
     return sampleRate > 0.0 ? 1000.0 * static_cast<double> (samples) / sampleRate : 0.0;
+}
+
+// ALSA's 5.1 / 7.1 order is FL FR RL RR FC LFE [SL SR]; the engine's is FL FR
+// FC LFE [BL BR] SL SR. Entry c: the ALSA channel that carries engine channel
+// c (the same for 5.1, whose engine SL SR are ALSA's RL RR).
+constexpr std::array<int, 8> kAlsaSurroundOrder { 0, 1, 4, 5, 2, 3, 6, 7 };
+
+bool isAlsaDeviceType (const juce::String& typeName)
+{
+    return typeName == "ALSA" || typeName == "ALSA HW";
+}
+
+bool usesAlsaSurroundOrder (bool alsaDevice, int stripChannels) noexcept
+{
+    return alsaDevice && (stripChannels == 6 || stripChannels == 8);
+}
+
+// The capture fold's surround <-> stereo passthrough ramp: ProcessingChain's
+// kPassFadeMs.
+constexpr float kCaptureFoldRampMs = 400.0f;
+
+uint64_t steadyNowNs() noexcept
+{
+    return static_cast<uint64_t> (
+        std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 // ---- Loopback-pair table (docs/11 E51) ------------------------------------------
@@ -362,6 +388,7 @@ void AudioEngineHost::configureEngine (double sampleRate, int blockSize, bool fa
         else
         {
             slot.fifo.setConsumerFormat (currentSampleRate, currentBlockSize);
+            prepareCaptureFold (slot);
         }
     }
 
@@ -693,6 +720,7 @@ bool AudioEngineHost::startCaptureInSlot (CaptureSlot& slot, flub::platform::Pro
     // resampler only has to absorb clock drift. The slot is not live and its
     // producer is stopped: the FIFO can be (re)allocated.
     slot.fifo.prepare (slot.channels, currentSampleRate, currentSampleRate, currentBlockSize);
+    prepareCaptureFold (slot);
 
     DriftCompensatedFifo* fifo = &slot.fifo;
     const bool ok = capture.start (processId, true, currentSampleRate, slot.channels,
@@ -702,6 +730,68 @@ bool AudioEngineHost::startCaptureInSlot (CaptureSlot& slot, flub::platform::Pro
     if (! ok && error.empty())
         error = "Could not start the capture";
     return ok;
+}
+
+void AudioEngineHost::prepareCaptureFold (CaptureSlot& slot)
+{
+    // Message thread, slot not read by the audio thread (not live, or the
+    // device stopped). Only a surround FIFO can need the fold.
+    const int channels = slot.fifo.getNumChannels();
+    if (channels >= 6)
+    {
+        slot.foldScratch.setSize (channels, currentBlockSize);
+        slot.fold.prepare (currentSampleRate, 0.0f); // the strip's LFE level is set per block
+        slot.detector.prepare (currentSampleRate, channels);
+        slot.foldGain.reset (currentSampleRate, kCaptureFoldRampMs, flub::Bs775Fold::kMatrixGain); // the detector starts on surround
+    }
+    else
+    {
+        slot.foldScratch.setSize (0, 0);
+    }
+}
+
+void AudioEngineHost::pullCapture (CaptureSlot& slot, int strip, const flub::AudioBlock& block, bool addToBlock) noexcept
+{
+    const int fifoChannels = slot.fifo.getNumChannels();
+    const int n = block.numSamples;
+    if (block.numChannels != 2 || fifoChannels < 6 || slot.foldScratch.getNumChannels() != fifoChannels
+        || n > slot.foldScratch.getNumSamples())
+    {
+        slot.fifo.pull (block.ch.data(), block.numChannels, n, addToBlock);
+        return;
+    }
+
+    // A surround capture on a stereo strip (docs/11 E01): fold it as the
+    // chain folds its own surround input - the BS.775 matrix with the LFE
+    // low-passed at the strip's virt.lfe level, at the surround fold's -3 dB,
+    // or at unity when the content is FL / FR only (E27: the same choice as
+    // ProcessingChain's stereoFoldFor; both folds are the same matrix, so a
+    // gain ramp between them is exact) - instead of keeping only FL / FR.
+    const flub::AudioBlock scratch = slot.foldScratch.block (fifoChannels, n);
+    slot.fifo.pull (scratch.ch.data(), fifoChannels, n, false);
+    slot.detector.process (scratch);
+
+    auto& params = active->engine.params (strip);
+    const auto mode = static_cast<flub::param::InputModeValue> (std::lround (params.get (flub::param::VirtInputMode)));
+    const bool stereoFold = mode == flub::param::InputModeValue::ForceStereo
+                         || (mode != flub::param::InputModeValue::ForceSurround
+                             && (params.get (flub::param::VirtOwnHrtf) >= 0.5f
+                                 || slot.detector.getFold() == flub::ActiveChannelDetector::Fold::Stereo));
+    slot.foldGain.setTarget (stereoFold ? 1.0f : flub::Bs775Fold::kMatrixGain);
+    slot.fold.setLfeGain (flub::LfeFold::gainFor (params.get (flub::param::VirtLfeFold) >= 0.5f,
+                                                  params.get (flub::param::VirtLfeGainDb)));
+    slot.fold.process (scratch, 1.0f);
+
+    float* l = block.channel (0);
+    float* r = block.channel (1);
+    const float* fl = scratch.channel (0);
+    const float* fr = scratch.channel (1);
+    for (int k = 0; k < n; ++k)
+    {
+        const float g = slot.foldGain.next();
+        l[k] = (addToBlock ? l[k] : 0.0f) + g * fl[k];
+        r[k] = (addToBlock ? r[k] : 0.0f) + g * fr[k];
+    }
 }
 
 void AudioEngineHost::restartCapturesAtDeviceRate()
@@ -968,6 +1058,7 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
     beginPendingSwap();
 
     auto& current = *active;
+    const bool alsaOrder = alsaChannelOrder.load (std::memory_order_relaxed);
     applyPendingMixSettings (current);
     if (fading != nullptr)
         applyPendingMixSettings (*fading);
@@ -994,9 +1085,10 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
                 const int firstInput = deviceInputFirst[si].load (std::memory_order_relaxed);
                 if (inputs != nullptr && firstInput >= 0 && firstInput < numInputs)
                 {
+                    const bool permute = usesAlsaSurroundOrder (alsaOrder, channels);
                     for (int c = 0; c < channels; ++c)
                     {
-                        const int src = firstInput + c;
+                        const int src = firstInput + (permute ? kAlsaSurroundOrder[static_cast<size_t> (c)] : c);
                         if (src < numInputs && inputs[src] != nullptr)
                             std::memcpy (block.channel (c), inputs[src] + pos, sizeof (float) * static_cast<size_t> (n));
                         else
@@ -1010,7 +1102,7 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
                     // seq_cst: pairs with releaseSlot() / waitForAudioThreadToPass().
                     if (! slot.live.load (std::memory_order_seq_cst) || slot.strip.load (std::memory_order_relaxed) != s)
                         continue;
-                    slot.fifo.pull (block.ch.data(), channels, n, fed);
+                    pullCapture (slot, s, block, fed);
                     fed = true;
                 }
             }
@@ -1115,8 +1207,9 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
 
 void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,
                                                         float* const* outputChannelData, int numOutputChannels, int numSamples,
-                                                        const juce::AudioIODeviceCallbackContext&)
+                                                        const juce::AudioIODeviceCallbackContext& context)
 {
+    const uint64_t startNs = steadyNowNs();
     flub::ScopedNoDenormals noDenormals;
 
     // Promote the device thread once (MMCSS "Pro Audio", time constraint,
@@ -1154,6 +1247,17 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
                 a.store (false, std::memory_order_relaxed);
     }
 
+    // docs/11 E45: the interval runs on one clock only, so a backend that
+    // starts or stops giving host times begins a new run.
+    const bool fromHost = context.hostTimeNs != nullptr;
+    if (fromHost != lastStampFromHost)
+        callbackTiming.restartIntervals();
+    lastStampFromHost = fromHost;
+    const double rate = deviceSampleRate.load (std::memory_order_relaxed);
+    const auto periodNs = rate > 0.0 ? static_cast<uint64_t> (1.0e9 * static_cast<double> (numSamples) / rate) : uint64_t { 0 };
+    const uint64_t endNs = steadyNowNs();
+    callbackTiming.record (fromHost ? *context.hostTimeNs : startNs, endNs - startNs, periodNs);
+
     callbackCounter.fetch_add (1, std::memory_order_seq_cst);
 }
 
@@ -1187,6 +1291,11 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const double sampleRate = device->getCurrentSampleRate();
     const int blockSize = device->getCurrentBufferSizeSamples();
 
+    // Read by the callback, which has not started yet.
+    alsaChannelOrder.store (isAlsaDeviceType (device->getTypeName()), std::memory_order_relaxed);
+    deviceSampleRate.store (sampleRate, std::memory_order_relaxed);
+    callbackTiming.restartIntervals();
+
     // Must be visible before any async configure request is handled.
     callbackRunning.store (true, std::memory_order_release);
 
@@ -1217,6 +1326,7 @@ void AudioEngineHost::audioDeviceStopped()
 {
     engineReady.store (false, std::memory_order_release);
     callbackRunning.store (false, std::memory_order_release);
+    callbackTiming.restartIntervals();
     configurePending.store (false, std::memory_order_release);
 }
 
@@ -1444,6 +1554,16 @@ EngineStatus AudioEngineHost::getStatus() const
     }
     st.running = callbackRunning.load (std::memory_order_acquire) && engineReady.load (std::memory_order_acquire);
     st.callbacks = callbackCounter.load (std::memory_order_relaxed);
+    st.callbackTiming = callbackTiming.snapshot();
     return st;
+}
+
+std::array<int, flub::kMaxChannels> AudioEngineHost::deviceInputOrder (const juce::String& deviceTypeName, int stripChannels) noexcept
+{
+    std::array<int, flub::kMaxChannels> order {};
+    const bool permute = usesAlsaSurroundOrder (isAlsaDeviceType (deviceTypeName), stripChannels);
+    for (int c = 0; c < flub::kMaxChannels; ++c)
+        order[static_cast<size_t> (c)] = permute && c < stripChannels ? kAlsaSurroundOrder[static_cast<size_t> (c)] : c;
+    return order;
 }
 } // namespace flub::app

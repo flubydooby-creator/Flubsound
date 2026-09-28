@@ -94,9 +94,33 @@
 //     next successful device start.
 //   * getLatencyInfo().valid is false while no device runs (or the guard
 //     holds the output): show "--", never a stale number.
+//
+// DEVICE CHANNEL ORDER (docs/11 E27 step 4)
+//   The engine's 5.1 / 7.1 order is WAVEFORMATEXTENSIBLE's, FL FR FC LFE
+//   [BL BR] SL SR (the Linux flubsound_game sink is created in it, and JACK /
+//   PipeWire links its monitor ports in it). ALSA's own 5.1 / 7.1 order is
+//   FL FR RL RR FC LFE [SL SR], and a JUCE "ALSA" device (the default,
+//   pipewire or pulse PCM, which remap the sink by channel position) delivers
+//   it: read as it comes, the centre (dialogue) lands in the rear-left
+//   speaker and the rears in FC / LFE. So a 6- or 8-channel strip fed from
+//   an ALSA device is permuted into the engine's order while it is gathered
+//   (deviceInputOrder). The backend's channel map is not read yet: a raw
+//   hw: device whose driver uses another order (USB audio class) is permuted
+//   the same way.
+//
+// CALLBACK TIMING (docs/11 E45)
+//   Every device callback records its duration (steady clock, start to end)
+//   and its interval (the backend's host time when the context carries one,
+//   else the steady clock at its start) into a flub::CallbackTiming: lock-free
+//   histograms the message thread reads (getCallbackTiming(),
+//   EngineStatus::callbackTiming). A device start or stop starts a new run of
+//   intervals, so the gap is not counted as a late callback.
 #pragma once
 
 #include "DriftCompensatedFifo.h"
+#include "flub/analysis/CallbackTiming.h"
+#include "flub/dsp/ActiveChannelDetector.h"
+#include "flub/dsp/Bs775Fold.h"
 #include "flub/engine/MixEngine.h"
 #include "platform/PlatformServices.h"
 
@@ -174,6 +198,11 @@ struct EngineStatus
     int glitches = 0;              // xruns (when reported) + callbacks that overran their buffer
                                    // period (juce::AudioDeviceManager::getXRunCount); 0 if no device
     uint64_t callbacks = 0;
+    /** Every device callback's duration and interval since the host was
+        created (docs/11 E45; AudioEngineHost::getCallbackTiming). A reader
+        keeps its previous snapshot and takes since() for a window: p99.9 /
+        peak load (loadAt), overBudget, late. */
+    flub::CallbackTiming::Snapshot callbackTiming;
 };
 
 /** Offline source of strip audio (headless rendering, screenshots, tests). */
@@ -360,6 +389,13 @@ public:
     /** First strip fed by the device inputs, -1 if none. */
     int getDeviceInputStrip() const noexcept;
 
+    /** Where the engine's channel c of a `stripChannels`-channel strip comes
+        from, as an offset from the strip's first device input, for a device
+        of JUCE type `deviceTypeName` (see DEVICE CHANNEL ORDER): ALSA's order
+        for "ALSA" / "ALSA HW" 5.1 and 7.1 strips, the identity otherwise.
+        Pure. */
+    static std::array<int, flub::kMaxChannels> deviceInputOrder (const juce::String& deviceTypeName, int stripChannels) noexcept;
+
     /** Factory for per-process capture objects. Defaults to the platform
         implementation (platform_bridge); tests / alternative capture sources
         can inject their own. Message thread, before starting captures. */
@@ -418,6 +454,8 @@ public:
         LatencyInfo::totalMs. Message thread. */
     void setGraphQuantumMs (double ms) noexcept { graphQuantumMs = std::max (0.0, ms); }
     EngineStatus getStatus() const;
+    /** The device callback's timing histograms (see CALLBACK TIMING). Any thread. */
+    flub::CallbackTiming::Snapshot getCallbackTiming() const noexcept { return callbackTiming.snapshot(); }
     double getSampleRate() const noexcept { return currentSampleRate; }
     int getBlockSize() const noexcept { return currentBlockSize; }
 
@@ -446,6 +484,18 @@ private:
         juce::String restartError;
         bool quarantined = false;          // released while a callback was stalled (see waitForAudioThreadToPass)
         uint64_t quarantineCounter = 0;    // callbackCounter when it was released
+        // A 5.1 / 7.1 capture read by a stereo strip (moved there with
+        // setCaptureStrip, or the layout changed under it) is folded here as
+        // the chain folds its own 5.1 / 7.1 input (docs/11 E01, E27), not cut
+        // to FL / FR: the BS.775 matrix and LFE path, at the surround fold's
+        // -3 dB or, for FL / FR-only content (the detector, or the strip's
+        // virt.input / virt.ownHrtf), at unity, ramped over 400 ms. Sized for
+        // the FIFO's channels and the device block on the message thread
+        // while the slot is not live (prepareCaptureFold).
+        flub::AudioBuffer foldScratch;
+        flub::Bs775Fold fold;
+        flub::ActiveChannelDetector detector;
+        flub::LinearSmoothedValue foldGain;
     };
 
     /** One complete engine: the MixEngine plus the audio thread's working set
@@ -487,6 +537,8 @@ private:
     void releaseSlot (CaptureSlot& slot);
     bool isSlotQuarantined (CaptureSlot& slot) noexcept;
     bool startCaptureInSlot (CaptureSlot& slot, flub::platform::ProcessLoopbackCapture& capture, uint32_t processId, std::string& error);
+    void prepareCaptureFold (CaptureSlot& slot);
+    void pullCapture (CaptureSlot& slot, int strip, const flub::AudioBlock& block, bool addToBlock) noexcept;
     void applyDeviceStartSafety (juce::AudioIODevice* device);
     void setSafetyState (DeviceSafetyState next);
     void applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples, bool muted) noexcept;
@@ -519,6 +571,7 @@ private:
     int swapPos = 0, swapFadeInStart = 0, swapFadeOutStart = 0, swapOldEnd = 0, swapEnd = 0;
     juce::Thread::ThreadID promotedThread = nullptr;
     void* promotionHandle = nullptr;
+    bool lastStampFromHost = false; // the previous callback's interval clock (host time or steady clock)
 
     // ---- Cross-thread state ---------------------------------------------------------
     std::array<std::atomic<float>, kMaxStrips> stripGainDb {};
@@ -526,6 +579,9 @@ private:
     std::array<std::atomic<bool>, kMaxStrips> stripActive {};
     std::atomic<float> masterCeilingDb { -1.0f };
     std::array<std::atomic<int>, kMaxStrips> deviceInputFirst {};
+    std::atomic<bool> alsaChannelOrder { false }; // the running device delivers ALSA's order (DEVICE CHANNEL ORDER)
+    std::atomic<double> deviceSampleRate { 0.0 }; // the running device's rate, for the callback period
+    flub::CallbackTiming callbackTiming;          // written by the device callback only
     std::atomic<bool> engineReady { false }, callbackRunning { false };
     std::atomic<bool> configurePending { false }, notifyPending { false }, errorPending { false };
     std::atomic<bool> loopbackPair { false };  // loopback guard: the current pair loops (message -> audio thread)
