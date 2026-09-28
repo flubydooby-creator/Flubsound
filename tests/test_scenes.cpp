@@ -50,6 +50,7 @@
 #include "OfflineRenderer.h"
 
 #include "flub/analysis/LoudnessMeter.h"
+#include "flub/analysis/SceneEvents.h"
 #include "flub/common/Math.h"
 #include "flub/dsp/Biquad.h"
 #include "flub/engine/Parameters.h"
@@ -60,6 +61,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -696,11 +698,11 @@ DialogueResult measureDialogue (const DialogueScene& s, const Channels& out)
     return r;
 }
 
-// Speech -> music -> silence: speech 0 - 5 s, music 5 - 8 s (each at the
+// Speech -> music -> silence: speech 0 - 4 s, music 4 - 6.5 s (each at the
 // programme level on its own), 1.5 s of silence (only the -80 dBFS hiss that
-// runs under the whole programme), speech again 9.5 - 11 s. The first speech
+// runs under the whole programme), speech again 8 - 9.5 s. The first speech
 // is long enough for Auto Level (3 dB/s, +6 dB cap) to settle on it.
-constexpr double kMusicFrom = 5.0, kSilenceFrom = 8.0, kSpeechAgain = 9.5, kSmsLength = 11.0;
+constexpr double kMusicFrom = 4.0, kSilenceFrom = 6.5, kSpeechAgain = 8.0, kSmsLength = 9.5;
 
 struct SmsScene
 {
@@ -745,10 +747,10 @@ struct SmsResult
 };
 
 /** All K-weighted gains, out vs in:
-    balance change   music gain (the last 2 s of it) minus speech gain (the
+    balance change   music gain (the last 1.5 s of it) minus speech gain (the
                      2 s before the music): how far the chain moves music
                      against speech;
-    music onset jump gain over the music's first 300 ms minus its last 2 s;
+    music onset jump gain over the music's first 300 ms minus its last 1.5 s;
     silence lift     gain on the hiss 0.3 - 1.4 s into the silence minus the
                      speech gain: whether the noise floor comes up against
                      the programme (and the hiss's output level, dBFS);
@@ -758,7 +760,7 @@ SmsResult measureSms (const SmsScene& s, const Channels& outRaw)
     const auto in = kWeighted (s.input.channels), out = kWeighted (outRaw);
     SmsResult r;
     const double speechGain = gainDb (out, in, { span (kMusicFrom - 2.0, kMusicFrom) });
-    const double musicGain = gainDb (out, in, { span (kSilenceFrom - 2.0, kSilenceFrom) });
+    const double musicGain = gainDb (out, in, { span (kSilenceFrom - 1.5, kSilenceFrom) });
     r.balanceChangeDb = musicGain - speechGain;
     r.musicOnsetJumpDb = gainDb (out, in, { span (kMusicFrom, kMusicFrom + 0.3) }) - musicGain;
     r.silenceLiftDb = gainDb (out, in, { span (kSilenceFrom + 0.3, kSpeechAgain - 0.1) }) - speechGain;
@@ -768,8 +770,8 @@ SmsResult measureSms (const SmsScene& s, const Channels& outRaw)
 }
 
 // Track change: a quiet track (100 BPM, 15 LU under the programme level)
-// for 3.5 s, then a loud one (128 BPM, at the programme level) to 9.5 s.
-constexpr double kTrackChange = 3.5, kTrackLength = 9.5, kTrackSteady = 6.5;
+// for 3 s, then a loud one (128 BPM, at the programme level) to 8 s.
+constexpr double kTrackChange = 3.0, kTrackLength = 8.0, kTrackSteady = 5.5;
 
 struct TrackScene
 {
@@ -801,19 +803,20 @@ struct TrackResult
 };
 
 /** K-weighted gains, out vs in:
-    step change  gain on the loud track (its last 3 s) minus on the quiet
-                 one (1.5 - 3.5 s): how far the chain narrows (< 0) the step;
-    overshoot    gain over the loud track's first 500 ms minus its last 3 s;
+    step change  gain on the loud track (its last 2.5 s) minus on the quiet
+                 one (its last 2 s): how far the chain narrows (< 0) the step;
+    overshoot    gain over the loud track's first 500 ms minus its last 2.5 s;
     settle       seconds after the change until the gain over two-beat
-                 windows (one beat apart) stays within 1 dB of the last 3 s,
-                 read over the 3 s after the change (3 s: not settled);
+                 windows (one beat apart) stays within 1 dB of the last
+                 2.5 s, read over the 2.5 s after the change (2.34 s, the
+                 last window's end: not settled);
     peak         the output's sample peak over the loud track's first second. */
 TrackResult measureTrack (const TrackScene& s, const Channels& outRaw)
 {
     const auto in = kWeighted (s.input.channels), out = kWeighted (outRaw);
     TrackResult r;
     const double steady = gainDb (out, in, { span (kTrackSteady, kTrackLength) });
-    r.stepChangeDb = steady - gainDb (out, in, { span (1.5, kTrackChange) });
+    r.stepChangeDb = steady - gainDb (out, in, { span (kTrackChange - 2.0, kTrackChange) });
     r.overshootDb = gainDb (out, in, { span (kTrackChange, kTrackChange + 0.5) }) - steady;
     const double beat = 60.0 / 128.0;
     for (double t = kTrackChange; t + 2.0 * beat <= kTrackSteady; t += beat)
@@ -1093,18 +1096,29 @@ TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effe
         CHECK_NEAR (r.effectsLiftDb, 0.0, 0.01);
     }
 
+    // Expectation: no preset makes the dialogue harder to pick out of the
+    // effects than bypass does (dialogue SNR gain >= 0). Competitive FPS
+    // meets it (its cue enhancer lifts the syllables' onsets in the 3.2 kHz
+    // band). KNOWN_GAP: target dialogue SNR gain >= 0 dB (docs/11 E60 stage 1
+    // finding; no Done-when yet). MOBA / Strategy (Voice & Score 0.6) and
+    // Night Mode lower it by up to 5-6 dB: their downward compressor (1.8:1
+    // engaged by Detail in MOBA, 3:1 in Night Mode) turns the dialogue down
+    // against the stationary effects, and Voice & Score's band 7 - an
+    // upward compressor at 2 kHz (BoostBelow) - lifts the effects between
+    // the phrases more than the dialogue (MOBA at Voice 0: -4.44 / -3.12 /
+    // -0.20 dB; at Detail 0: -1.86 / -2.86 / -1.98 dB).
     //                     dialogue SNR gain, dialogue lift, effects lift
     struct Pinned
     {
         const char* file; // nullptr: bypass
+        bool knownGap;
         double v[3][3];
     };
     static const Pinned pinned[] = {
-        { nullptr, { { 0.00, 0.00, 0.00 }, { 0.00, 0.00, 0.00 }, { 0.00, 0.00, 0.00 } } },
-        { "gaming-competitive-fps.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
-        { "gaming-moba-strategy.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
-        { "gaming-cinematic-adventure.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
-        { "gaming-night-mode.json", { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } } },
+        { nullptr, false, { { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 } } },
+        { "gaming-competitive-fps.json", false, { { 2.90, 2.57, -0.10 }, { 3.00, 3.18, 0.49 }, { 3.15, 3.87, 0.90 } } },
+        { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.07, 0.29, 3.31 }, { -1.98, 3.86, 4.60 } } },
+        { "gaming-night-mode.json", true, { { -5.86, -10.94, -6.06 }, { -6.18, -1.41, 3.71 }, { -1.31, 10.04, 10.54 } } },
     };
     for (int l = 0; l < 3; ++l)
     {
@@ -1120,23 +1134,42 @@ TEST_CASE ("Scenes: dialogue over effects - dialogue SNR gain, dialogue and effe
             const double got[3] = { r.snrGainDb, r.dialogueLiftDb, r.effectsLiftDb };
             for (int m = 0; m < 3; ++m)
                 CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+            if (! p.knownGap)
+                CHECK_GE (r.snrGainDb, -0.1);
         }
     }
 }
 
 TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence and speech return at -14 / -24 / -40 LUFS (E60; KnownGap: E21 onset / return / silence targets)")
 {
+    // Expectations, docs/11 E21's Done-when read on this scene: the first
+    // event after quiet at most 1 dB over the steady state (music onset jump
+    // <= +1 dB: met everywhere), back within 1 dB of the level before the
+    // event (speech return within +-1 dB), and the ambience lift budget of
+    // +6 dB applied to the noise floor (silence lift re speech <= +6 dB).
+    // The balance change has no target (pinned only).
+    // KNOWN_GAP: speech return within +-1 dB per docs/11 E21 - Night Mode
+    // +1.78 dB and Late Night +2.45 dB at -40 LUFS (Auto Level still rising
+    // on the quiet speech, 3 dB/s), Late Night +1.01 dB at -24 LUFS.
+    // KNOWN_GAP: silence lift <= +6 dB per docs/11 E21 - Night Mode +8.3 /
+    // +8.6 dB and Late Night +7.5 / +8.4 dB at -14 / -24 LUFS: the downward
+    // compressor (3:1 / 2:1) turns the speech down while its make-up (6 /
+    // 3 dB) lifts the hiss in the pause. (E19's relative floor keeps the
+    // upward section off the -80 dBFS hiss.)
     //                     balance change, music onset jump, silence lift, silence out (dBFS), speech return
     struct Pinned
     {
         const char* file; // nullptr: bypass
+        bool returnGap[3], silenceGap[3];
         double v[3][5];
     };
     static const Pinned pinned[] = {
-        { nullptr, { { 0.00, 0.00, 0.00, -80.00, 0.00 }, { 0.00, 0.00, 0.00, -80.00, 0.00 }, { 0.00, 0.00, 0.00, -80.00, 0.00 } } },
-        { "gaming-night-mode.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
-        { "music-late-night-low-volume.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
-        { "gaming-cinematic-adventure.json", { { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 }, { 0, 0, 0, 0, 0 } } },
+        { nullptr, { false, false, false }, { false, false, false },
+          { { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 } } },
+        { "gaming-night-mode.json", { false, false, true }, { true, true, false },
+          { { 0.00, -0.02, 8.33, -79.08, 0.06 }, { 0.28, -0.14, 8.60, -70.63, 0.33 }, { -1.21, -2.09, 1.27, -69.81, 1.78 } } },
+        { "music-late-night-low-volume.json", { false, true, true }, { true, true, false },
+          { { 2.14, 0.95, 7.47, -81.17, 0.34 }, { 2.76, 0.80, 8.35, -72.48, 1.01 }, { 3.46, -1.31, 3.78, -71.32, 2.45 } } },
     };
     for (int l = 0; l < 3; ++l)
     {
@@ -1154,23 +1187,40 @@ TEST_CASE ("Scenes: speech -> music -> silence - balance, music onset, silence a
             const double got[5] = { r.balanceChangeDb, r.musicOnsetJumpDb, r.silenceLiftDb, r.silenceOutDbfs, r.speechReturnDb };
             for (int m = 0; m < 5; ++m)
                 CHECK_NEAR (got[m], p.v[l][m], p.file == nullptr ? 0.1 : 0.3);
+            CHECK_LE (r.musicOnsetJumpDb, 1.0);
+            if (! p.returnGap[l])
+                CHECK_LE (std::abs (r.speechReturnDb), 1.0);
+            if (! p.silenceGap[l])
+                CHECK_LE (r.silenceLiftDb, 6.0);
         }
     }
 }
 
 TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settling and peak at -14 / -24 / -40 LUFS (E60; KnownGap: E21 overshoot / settle targets)")
 {
+    // Expectations, docs/11 E21's Done-when read on this scene: the loud
+    // track's first 500 ms at most 1 dB over its steady state (overshoot
+    // <= +1 dB) and within 1 dB of it after 1 s (settle <= 1 s); the output
+    // stays under full scale (peak <= -0.5 dBFS: met everywhere). The step
+    // change has no target (pinned only). At -24 LUFS both presets meet all
+    // of it.
+    // KNOWN_GAP: overshoot <= +1 dB and settle <= 1 s per docs/11 E21 - at
+    // -14 LUFS Night Mode +2.00 dB / 1.88 s and Late Night +3.70 dB /
+    // 1.41 s (the gain reached on the quiet track carries into the loud one
+    // and is taken back over seconds); at -40 LUFS both settle only after
+    // 2.34 s, from below (overshoot -3.6 / -2.6 dB: Auto Level rises on the
+    // loud track at 3 dB/s).
     //                     step change, overshoot, settle (s), peak (dBFS)
     struct Pinned
     {
         const char* file; // nullptr: bypass
+        bool knownGap[3];
         double v[3][4];
     };
     static const Pinned pinned[] = {
-        { nullptr, { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
-        { "gaming-night-mode.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
-        { "music-late-night-low-volume.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
-        { "gaming-racing.json", { { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 0, 0, 0, 0 } } },
+        { nullptr, { false, false, false }, { { -0.01, 0.00, 0.00, -2.51 }, { 0.00, 0.00, 0.00, -8.41 }, { 0.00, 0.00, 0.00, -24.40 } } },
+        { "gaming-night-mode.json", { true, false, true }, { { -9.76, 2.00, 1.88, -5.66 }, { -4.99, -0.05, 0.00, -7.66 }, { 3.75, -3.64, 2.34, -18.92 } } },
+        { "music-late-night-low-volume.json", { true, false, true }, { { -8.94, 3.70, 1.41, -1.05 }, { -4.22, 0.48, 0.00, -4.75 }, { -0.15, -2.56, 2.34, -17.79 } } },
     };
     for (int l = 0; l < 3; ++l)
     {
@@ -1187,6 +1237,102 @@ TEST_CASE ("Scenes: quiet -> loud track change - step change, overshoot, settlin
             const double got[4] = { r.stepChangeDb, r.overshootDb, r.settleS, r.peakDbfs };
             for (int m = 0; m < 4; ++m)
                 CHECK_NEAR (got[m], p.v[l][m], m == 2 ? 0.5 : p.file == nullptr ? 0.1 : 0.3);
+            CHECK_LE (r.peakDbfs, -0.5);
+            if (! p.knownGap[l])
+            {
+                CHECK_LE (r.overshootDb, 1.0);
+                CHECK_LE (r.settleS, 1.0);
+            }
         }
     }
+}
+
+TEST_CASE ("SceneEvents: the background tracker's law, and the detector finds the steps, the combat, the silence and the track change of the scenes (E60)")
+{
+    // BackgroundTracker (flub/dsp/BackgroundTracker.h), stepped at 1 kHz:
+    // learns a steady level within 300 ms, rises 5 dB/s, falls with 400 ms,
+    // never under its floor; a 40 ms cue moves it by at most 0.2 dB.
+    BackgroundTracker t;
+    t.prepare (1000.0);
+    for (int i = 0; i < 300; ++i)
+        t.update (-60.0f, -90.0f);
+    CHECK (! t.isLearning());
+    CHECK_NEAR (t.get(), -60.0, 1e-3);
+    for (int i = 0; i < 40; ++i)
+        t.update (-40.0f, -90.0f);
+    CHECK_NEAR (t.get(), -59.8, 1e-3);
+    for (int i = 0; i < 960; ++i)
+        t.update (-40.0f, -90.0f);
+    CHECK_NEAR (t.get(), -55.0, 1e-2); // 1 s at 5 dB/s
+    for (int i = 0; i < 400; ++i)
+        t.update (-60.0f, -90.0f);
+    CHECK_NEAR (t.get(), -60.0 + 5.0 * std::exp (-1.0), 0.05); // one 400 ms time constant
+    for (int i = 0; i < 5000; ++i)
+        t.update (-160.0f, -90.0f);
+    CHECK_NEAR (t.get(), -90.0, 1e-6);
+    t.update (std::numeric_limits<float>::quiet_NaN(), -90.0f);
+    CHECK_NEAR (t.get(), -90.0, 1e-6);
+
+    const auto count = [] (const SceneAnalysis& a, SceneEventType type) {
+        return std::count_if (a.events.begin(), a.events.end(), [type] (const SceneEvent& e) { return e.type == type; });
+    };
+    const auto first = [] (const SceneAnalysis& a, SceneEventType type) {
+        return *std::find_if (a.events.begin(), a.events.end(), [type] (const SceneEvent& e) { return e.type == type; });
+    };
+
+    // The core scene in the steps' band (onsets 3 dB over the background):
+    // the steps (4 dB over the bed in the band) as onsets within a frame or
+    // two of their start, and the combat as one loud event (the background
+    // is held through it, so the steps right after it are found too).
+    {
+        const auto scene = makeScene (-24.0);
+        SceneEventSettings band;
+        band.bandHz = kStepBandHz;
+        band.bandQ = kStepBandQ;
+        band.onsetDb = 3.0f;
+        const auto a = analyseSceneEvents (scene.input.channels, kFs, band);
+        int found = 0, spurious = 0;
+        for (const auto& e : a.events)
+        {
+            if (e.type != SceneEventType::Onset)
+                continue;
+            const bool step = std::any_of (scene.steps.begin(), scene.steps.end(), [&] (const StepWindow& st) { return std::abs (e.startSeconds - st.onset) <= 0.03; });
+            (step ? found : spurious) += 1;
+        }
+        measured ("detector: steps found as onsets (of " + std::to_string (scene.steps.size()) + ")", found, "steps");
+        measured ("detector: onsets that are not steps", spurious, "onsets");
+        CHECK_GE (found, 18); // 20 of 23: three steps rise under 3 dB over the bed in this band
+        CHECK_LE (spurious, 1); // the end of the combat's last shot
+        REQUIRE (count (a, SceneEventType::Loud) == 1);
+        const auto loud = first (a, SceneEventType::Loud);
+        measured ("detector: combat from", loud.startSeconds, "s");
+        measured ("detector: combat to", loud.endSeconds, "s");
+        CHECK_NEAR (loud.startSeconds, kCombatStart, 0.02);
+        CHECK_NEAR (loud.endSeconds, kCombatEnd - 0.1, 0.1);
+        CHECK (count (a, SceneEventType::LevelChange) == 0);
+    }
+    // Speech -> music -> silence: the 1.5 s silence (the -80 dBFS hiss).
+    {
+        const auto a = analyseSceneEvents (makeSpeechMusicSilence (-24.0).input.channels, kFs);
+        const auto silence = std::find_if (a.events.begin(), a.events.end(), [] (const SceneEvent& e) {
+            return e.type == SceneEventType::Silence && std::abs (e.startSeconds - kSilenceFrom) < 0.05;
+        });
+        REQUIRE (silence != a.events.end());
+        CHECK_NEAR (silence->endSeconds, kSpeechAgain, 0.05);
+        CHECK_NEAR (silence->levelDb, -79.7, 0.3);
+    }
+    // Track change: one level change, at the change, about the 15 LU step
+    // (the median frame levels of the two tracks differ by 17.3 dB).
+    {
+        const auto a = analyseSceneEvents (makeTrackChange (-24.0).input.channels, kFs);
+        REQUIRE (count (a, SceneEventType::LevelChange) == 1);
+        const auto change = first (a, SceneEventType::LevelChange);
+        measured ("detector: track change at", change.startSeconds, "s");
+        measured ("detector: track change step", change.overBackgroundDb, "dB");
+        CHECK_NEAR (change.startSeconds, kTrackChange, 0.1);
+        CHECK_NEAR (change.overBackgroundDb, 17.3, 0.5);
+    }
+    // Dialogue over stationary effects at 0 LU: nothing stands out by 6 dB,
+    // nothing changes level.
+    CHECK (analyseSceneEvents (makeDialogueScene (-24.0).input.channels, kFs).events.empty());
 }

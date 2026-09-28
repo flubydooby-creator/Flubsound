@@ -38,7 +38,7 @@
 // Automatic preamp (docs/11 E11). The chain's static maximum boost is
 // predicted from the effective values (macros included, the governor's
 // scale not: the preamp follows what was asked for, not the governor's
-// reaction to it) on the exact digital responses of the level-independent
+// reaction to it; nor the GUI's momentary audition bypass) on the exact digital responses of the level-independent
 // stages that can raise the level: the parametric EQ (bands and output
 // gain), the dynamic EQ's static gains, the bass shelf (at its full boost,
 // with the subsonic high-pass), presence (at its full lift) and the air
@@ -50,7 +50,7 @@
 // The prediction uses headroom::predictMaxBoostWith (the 1/12-octave grid
 // and golden-section refinement of DeviceCorrection.h) with the programme
 // weighting, on the audio thread without allocation, whenever an input
-// changes, at most once per kHeadroomUpdateMs (a few tens of microseconds).
+// changes, at most once per kHeadroomUpdateMs (about 45 us for 25 sections).
 // preamp = -max(0, prediction - auto.preampAllowance), glided over 20 ms.
 // It is applied after the dry reference and the input meters: AutoLevel's
 // detector does not see it (AutoLevel would otherwise cancel it), bypass
@@ -330,8 +330,9 @@ private:
     void resetSignalState() noexcept;
     void foldToStereo (const AudioBlock& in) noexcept;
     /** Re-predicts the static boost when an input changed (at most once per
-        kHeadroomUpdateMs unless forced) and sets the preamp's target. */
-    void updateHeadroom (const float* e, bool surroundFold, bool force) noexcept FLUB_NONBLOCKING;
+        kHeadroomUpdateMs; the first time after prepare() at once, with the
+        preamp starting at its value) and sets the preamp's target. */
+    void updateHeadroom (const float* e, bool surroundFold) noexcept FLUB_NONBLOCKING;
     void prepareNeuralSlot (const ProcessSpec& stereo);
     bool inChain (int slot) const noexcept { return (slot != SGate || gateInChain) && (slot != SNeural || neuralInChain); }
 
@@ -377,7 +378,7 @@ private:
 
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
-    // from (enables = active modules, the ungoverned bass boost), the model.
+    // from (with the ungoverned bass boost), the model.
     static constexpr int kHeadroomKeySize = 97;
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};

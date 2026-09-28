@@ -15,7 +15,7 @@
 //   silence and noise floors are not lifted.
 //   upRelativeFloor (Gaming, docs/11 E19): the floor also follows the
 //   programme's background B - the detector level through a
-//   BackgroundTracker (flub/analysis/SceneEvents.h: rises <= 5 dB/s, falls
+//   BackgroundTracker (BackgroundTracker.h: rises <= 5 dB/s, falls
 //   with 400 ms, never under upFloorDb) - and the lift is further scaled by
 //   relTaper(x - B), 0 at 3 dB and 1 at 9 dB over B. A stationary bed (rain,
 //   wind, room tone, a held tone) is its own background and is not lifted;
@@ -29,9 +29,9 @@
 // Output: makeup (manual, or auto = -gDown at 0 dBFS / 2), dry/wet mix.
 #pragma once
 
+#include "BackgroundTracker.h"
 #include "Processor.h"
 #include "Svf.h"
-#include "flub/analysis/SceneEvents.h"
 #include "flub/common/DelayLine.h"
 #include "flub/common/SmoothedValue.h"
 

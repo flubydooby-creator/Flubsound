@@ -91,7 +91,8 @@ EngineController::EngineController (Options opts)
                                                     : std::make_unique<AppSettings> (options.settingsFile, options.persistSettings);
     host = std::make_unique<AudioEngineHost>(); // configures a nominal 48 kHz engine: strips exist from here on
     presets = std::make_unique<PresetManager>();
-    routing = std::make_unique<AppRouting> (*host, *settings);
+    settings->migratePresetReferences (presets->getLegacyIdAliases()); // docs/11 E52: one-time id -> uuid (settings schema 2)
+    routing =std::make_unique<AppRouting> (*host, *settings);
 
     host->onEngineConfigured = [this] { notify (Change::Engine); };
     host->onDeviceError = [this] (const juce::String& message)

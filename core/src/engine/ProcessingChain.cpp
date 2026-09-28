@@ -97,8 +97,7 @@ constexpr double kQualityMinRate = 32000.0;
 static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 
 // The parameters the static-boost prediction reads (docs/11 E11); a change
-// of any of them (or of the fold) re-runs it. Enable values are the modules'
-// active states (audition bypass included).
+// of any of them (or of the fold) re-runs it.
 constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, ClarityOn,
                                        ClarityPresence, ClarityPresenceFreq, ClarityAir, SaturationOn, SatMix, SatOutputDb,
                                        AutoPreampOn, AutoPreampAllowanceDb };
@@ -727,24 +726,24 @@ void ProcessingChain::applyParameters() noexcept
     slots[SMax].setActive (active (MaximizerOn));
 
     // ---- Automatic preamp (docs/11 E11): the prediction's inputs are the
-    // applied values with the modules' active states, and the bass boost
-    // the macros ask for before the governor scales it (a preamp that
-    // followed the governor would feed its loop) ----
-    std::copy (effective.begin(), effective.end(), headroomInput.begin());
-    float* h = headroomInput.data();
-    for (int id : { EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn })
-        h[id] = active (id) ? 1.0f : 0.0f;
+    // applied values, with the bass boost the macros ask for before the
+    // governor scales it (a preamp that followed the governor would feed
+    // its loop). A momentary audition bypass does not move it, so holding
+    // "listen without" a module plays exactly that module's own effect ----
+    const float* h = e;
     if (governorScale < 1.0f)
     {
         MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
-        h[BassBoostDb] = ungoverned[static_cast<size_t> (BassBoostDb)];
+        std::copy (effective.begin(), effective.end(), headroomInput.begin());
+        headroomInput[static_cast<size_t> (BassBoostDb)] = ungoverned[static_cast<size_t> (BassBoostDb)];
+        h = headroomInput.data();
     }
-    updateHeadroom (h, config.inputChannels > 2 && ! stereoFold, false);
+    updateHeadroom (h, config.inputChannels > 2 && ! stereoFold);
 
     publishEffective();
 }
 
-void ProcessingChain::updateHeadroom (const float* h, bool surroundFold, bool force) noexcept FLUB_NONBLOCKING
+void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
 {
     static_assert (kHeadroomKeySize == kHeadroomParamCount + 1);
     std::array<float, kHeadroomKeySize> key {};
@@ -760,7 +759,7 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold, bool fo
     key[k] = surroundFold ? 1.0f : 0.0f;
 
     const bool first = ! headroomKeyValid;
-    if (! first && (key == headroomKey || (headroomHoldoff > 0 && ! force)))
+    if (! first && (key == headroomKey || headroomHoldoff > 0))
         return;
     headroomKey = key;
     headroomKeyValid = true;

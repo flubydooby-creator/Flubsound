@@ -32,7 +32,26 @@ constexpr const char* routingMap = "routing.map";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
 constexpr const char* autoProfileRules = "autoProfile.rules";
 constexpr const char* deviceCorrections = "device.corrections";
+constexpr const char* schemaVersion = "settings.schemaVersion";
 } // namespace Keys
+
+// PropertiesFile's XML layout (juce_PropertiesFile.cpp PropertyFileConstants).
+constexpr const char* kFileTag = "PROPERTIES";
+constexpr const char* kValueTag = "VALUE";
+
+/** A schemaVersion value: a positive integer ("2"); 0 if it is not one. */
+int parseSchemaVersion (const juce::String& text)
+{
+    const auto t = text.trim();
+    return t.isNotEmpty() && t.length() <= 6 && t.containsOnly ("0123456789") ? t.getIntValue() : 0;
+}
+
+/** "<file>.corrupt-<yyyymmdd-hhmmss>" next to the file (never an existing one). */
+juce::File quarantineFileFor (const juce::File& file)
+{
+    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S");
+    return file.getSiblingFile (file.getFileName() + ".corrupt-" + stamp).getNonexistentSibling (false);
+}
 
 struct NamedKey
 {
@@ -147,17 +166,64 @@ AppSettings::AppSettings()
     // JUCE's default on Linux is ~/<folderName>; follow XDG instead
     // ($XDG_CONFIG_HOME or ~/.config), next to the user presets.
     const auto file = userDataFolder().getChildFile ("Flubsound Pro.settings");
-    properties = std::make_unique<juce::PropertiesFile> (file, defaultOptions());
    #else
-    properties = std::make_unique<juce::PropertiesFile> (defaultOptions());
+    const auto file = defaultOptions().getDefaultFile();
    #endif
+    open (file, defaultOptions());
 }
 
 AppSettings::AppSettings (const juce::File& file, bool persist)
 {
     auto options = defaultOptions();
     options.doNotSave = ! persist;
+    open (file, options);
+}
+
+void AppSettings::open (const juce::File& file, juce::PropertiesFile::Options options)
+{
+    const bool persist = ! options.doNotSave && file != juce::File();
+    if (persist && file.existsAsFile() && ! isValidSettingsFile (file))
+    {
+        // Quarantine, never overwrite: the next autosave would otherwise
+        // replace the damaged file with an empty one. Then the newest valid
+        // backup takes its place.
+        const auto quarantine = quarantineFileFor (file);
+        if (file.moveFileTo (quarantine))
+        {
+            recovery.quarantined = quarantine;
+            for (int i = 1; i <= kNumBackups; ++i)
+            {
+                const auto backup = getBackupFile (file, i);
+                if (isValidSettingsFile (backup) && backup.copyFileTo (file))
+                {
+                    recovery.restoredFromBackup = i;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            options.doNotSave = true; // cannot be moved aside: run on defaults, but never write over it
+        }
+    }
+
     properties = std::make_unique<juce::PropertiesFile> (file, options);
+
+    // One backup per start, of a file that loaded and differs from the newest
+    // backup (restarting without a change must not push out older backups).
+    // Best effort: a failed copy only costs a backup.
+    if (persist && ! options.doNotSave && file.existsAsFile() && properties->isValidFile() && isValidSettingsFile (file))
+    {
+        const auto newest = getBackupFile (file, 1);
+        if (! (newest.existsAsFile() && newest.hasIdenticalContentTo (file)))
+        {
+            getBackupFile (file, kNumBackups).deleteFile();
+            for (int i = kNumBackups - 1; i >= 1; --i)
+                if (const auto from = getBackupFile (file, i); from.existsAsFile())
+                    from.moveFileTo (getBackupFile (file, i + 1));
+            file.copyFileTo (newest);
+        }
+    }
 }
 
 AppSettings::~AppSettings()
@@ -173,6 +239,78 @@ void AppSettings::save()
 juce::String AppSettings::stripKey (const juce::String& stripName, const char* field)
 {
     return "strip." + stripName.removeCharacters (" .") + "." + field;
+}
+
+// ---- File integrity and schema -------------------------------------------------------
+int AppSettings::getSchemaVersion() const
+{
+    return properties->containsKey (Keys::schemaVersion) ? std::max (1, parseSchemaVersion (properties->getValue (Keys::schemaVersion))) : 1;
+}
+
+bool AppSettings::isValidSettingsFile (const juce::File& file)
+{
+    if (! file.existsAsFile() || file.getSize() == 0)
+        return false;
+    const auto doc = juce::parseXMLIfTagMatches (file, kFileTag);
+    if (doc == nullptr)
+        return false;
+    for (auto* e : doc->getChildWithTagNameIterator (kValueTag))
+        if (e->getStringAttribute ("name") == Keys::schemaVersion)
+            return parseSchemaVersion (e->getStringAttribute ("val")) > 0;
+    return true;
+}
+
+juce::File AppSettings::getBackupFile (const juce::File& settingsFile, int index)
+{
+    return settingsFile.getSiblingFile (settingsFile.getFileName() + ".bak" + juce::String (index));
+}
+
+int AppSettings::migratePresetReferences (const std::map<juce::String, juce::String>& aliases)
+{
+    if (getSchemaVersion() >= kSchemaVersion)
+        return 0;
+
+    const auto canonical = [&aliases] (const juce::String& id)
+    {
+        const auto it = aliases.find (id);
+        return it != aliases.end() ? it->second : id;
+    };
+
+    int changed = 0;
+    const auto keys = properties->getAllProperties().getAllKeys(); // a copy: the loop writes values
+    for (const auto& key : keys)
+    {
+        if (! (key.startsWith ("strip.") && key.endsWith (".preset")))
+            continue;
+        const auto id = properties->getValue (key);
+        if (const auto to = canonical (id); to != id)
+        {
+            properties->setValue (key, to);
+            ++changed;
+        }
+    }
+
+    // Rewritten as read (the RULE attributes), so a rule this build would
+    // drop as incomplete is kept for a later version to judge.
+    if (auto xml = properties->getXmlValue (Keys::autoProfileRules))
+    {
+        int changedRules = 0;
+        for (auto* e : xml->getChildWithTagNameIterator ("RULE"))
+        {
+            const auto id = e->getStringAttribute ("preset").trim();
+            if (const auto to = canonical (id); to != id)
+            {
+                e->setAttribute ("preset", to);
+                ++changedRules;
+            }
+        }
+        if (changedRules > 0)
+            properties->setValue (Keys::autoProfileRules, xml.get());
+        changed += changedRules;
+    }
+
+    properties->setValue (Keys::schemaVersion, kSchemaVersion);
+    return changed;
 }
 
 // ---- Audio device ------------------------------------------------------------------

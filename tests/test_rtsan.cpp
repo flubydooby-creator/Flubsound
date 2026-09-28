@@ -20,6 +20,7 @@
 #include "TestFramework.h"
 
 #include "flub/common/Realtime.h"
+#include "flub/dsp/BackgroundTracker.h"
 #include "flub/dsp/BassEngine.h"
 #include "flub/dsp/ClarityEnhancer.h"
 #include "flub/dsp/Compressor.h"
@@ -97,6 +98,10 @@ static_assert (hasNonblockingReset<StereoSpatializer>);
 static_assert (hasNonblockingReset<TruePeakLimiter>);
 static_assert (hasNonblockingReset<TransientShaper>);
 static_assert (hasNonblockingReset<AsyncModelProcessor>);
+// The Compressor's relative upward floor (docs/11 E19) steps its background
+// tracker per control tick.
+static_assert (hasNonblockingReset<BackgroundTracker>);
+static_assert (std::is_same_v<decltype (&BackgroundTracker::update), float (BackgroundTracker::*) (float, float) noexcept FLUB_NONBLOCKING>);
 
 // Parameter setters called once per block by ProcessingChain::applyParameters
 // (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the

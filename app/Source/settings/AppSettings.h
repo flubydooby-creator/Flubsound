@@ -17,6 +17,26 @@
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
 //
+// File integrity and schema (docs/11 E52 Phase B):
+// * "settings.schemaVersion" (kSchemaVersion): a file without it is schema 1.
+//   Schema 2 stores preset references (a strip's last preset, automatic
+//   profile rules) as canonical PresetManager ids, i.e. the preset's uuid, so
+//   a renamed preset file keeps its rules. The 1 -> 2 step needs the preset
+//   library, so it runs once through migratePresetReferences (called by
+//   EngineController with PresetManager::getLegacyIdAliases()); a newer
+//   schema is read as it is and never lowered.
+// * A file that does not parse (truncated, garbage, not a PROPERTIES
+//   document, a bad schemaVersion: isValidSettingsFile) is never overwritten:
+//   it is renamed to "<file>.corrupt-<yyyymmdd-hhmmss>" and the newest valid
+//   "<file>.bak1" .. ".bak3" is restored in its place (getRecovery()); with no
+//   valid backup the app starts from defaults. Without that, the next
+//   autosave replaced a damaged file with an empty one, which silently wiped
+//   routing, rules and hotkeys.
+// * Backups rotate once per start: a valid file that differs from .bak1 is
+//   copied to .bak1 (.bak1 -> .bak2 -> .bak3, the oldest dropped), so the
+//   backups are the last three distinct files that loaded.
+// Nothing of this runs with persist == false (nothing is ever written).
+//
 // Message thread only. Writes are debounced (saved ~2 s after a change) and
 // flushed by save() / on destruction.
 #pragma once
@@ -25,6 +45,7 @@
 
 #include <juce_data_structures/juce_data_structures.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -68,7 +89,7 @@ struct AutoProfileRule
 
     juce::String executable; // matched like AppRoute ("cs2.exe", "/usr/bin/foo"), or a macOS bundle id
     juce::String stripName;  // target strip ("Game", "Music", ...)
-    juce::String presetId;   // "factory:..." / "user:..."
+    juce::String presetId;   // a PresetManager id: the preset's uuid (docs/11 E52), "factory:..." / "user:..." without one
     Mode mode = Mode::Preset;
     bool restoreOnExit = false; // put the strip's previous preset back when the app leaves the foreground
 
@@ -103,6 +124,39 @@ public:
     juce::PropertiesFile& getPropertiesFile() noexcept { return *properties; }
     juce::File getFile() const { return properties->getFile(); }
     void save();
+
+    // ---- File integrity and schema (docs/11 E52, see the file comment) ----------------
+    static constexpr int kSchemaVersion = 2;
+    /** The file's schema: 1 when it has no "settings.schemaVersion". */
+    int getSchemaVersion() const;
+    /** True when the file loaded (or did not exist yet). */
+    bool isValidFile() const { return properties->isValidFile(); }
+    /** True if `file` parses as a settings file (a PROPERTIES document whose
+        schemaVersion, if present, is a positive integer). False for a missing
+        or empty file. */
+    static bool isValidSettingsFile (const juce::File& file);
+    /** "<settings file>.bak<index>", index 1 (newest) .. kNumBackups. */
+    static constexpr int kNumBackups = 3;
+    static juce::File getBackupFile (const juce::File& settingsFile, int index);
+
+    /** What opening the file found. A damaged file was moved to `quarantined`
+        and backup `restoredFromBackup` (1 .. 3; 0: none was valid, the
+        settings start from defaults) put in its place. For a notice in the UI. */
+    struct Recovery
+    {
+        juce::File quarantined;
+        int restoredFromBackup = 0;
+
+        bool wasDamaged() const { return quarantined != juce::File(); }
+    };
+    const Recovery& getRecovery() const noexcept { return recovery; }
+
+    /** The one-time schema 1 -> 2 step: every stored preset reference (each
+        strip's last preset, each automatic profile rule) found as a key of
+        `aliases` (legacy id -> canonical id) is replaced by its value; others
+        are kept (a deleted preset stays "missing"). Then records schema 2.
+        Does nothing for schema 2 or newer. Returns the references changed. */
+    int migratePresetReferences (const std::map<juce::String, juce::String>& aliases);
 
     // ---- Audio device ----------------------------------------------------------
     std::unique_ptr<juce::XmlElement> getDeviceState() const;
@@ -232,8 +286,10 @@ public:
 private:
     static juce::PropertiesFile::Options defaultOptions();
     static juce::String stripKey (const juce::String& stripName, const char* field);
+    void open (const juce::File& file, juce::PropertiesFile::Options options);
 
     std::unique_ptr<juce::PropertiesFile> properties;
+    Recovery recovery;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppSettings)
 };

@@ -14,6 +14,11 @@ constexpr double kPi = 3.14159265358979323846;
 // Loud frames closer together than this form one event (a burst of fire).
 constexpr double kLoudMergeMs = 150.0;
 
+// The background is held while a loud event runs (a burst of fire is not
+// ambience, and the steps right after it are measured against the bed), for
+// at most this long: a loud level that lasts becomes the programme's own.
+constexpr double kLoudHoldMs = 3000.0;
+
 // Frame powers are floored here before they are averaged or turned into dB,
 // so digital silence reads as a finite, very low level.
 constexpr double kPowerFloor = 1.0e-16; // -160 dB
@@ -109,22 +114,27 @@ SceneAnalysis analyseSceneEvents (const std::vector<std::vector<float>>& channel
         }
     }
     const double perFrame = static_cast<double> (frameLength) * static_cast<double> (channels.size());
+    const auto loudOver = [&] (float peakDb, float backgroundDb) { return peakDb >= backgroundDb + s.loudOverBackgroundDb || peakDb >= s.loudAbsoluteDb; };
+    const int maxOnset = framesOf (s.maxOnsetMs, frameMs), minSilence = framesOf (s.minSilenceMs, frameMs);
+    const int loudGap = framesOf (kLoudMergeMs, frameMs), loudHold = framesOf (kLoudHoldMs, frameMs);
     BackgroundTracker tracker;
     tracker.prepare (1.0 / a.frameSeconds);
     a.frames.resize (static_cast<size_t> (numFrames));
+    int loudRun = 0, sinceLoud = loudGap + 1;
     for (int f = 0; f < numFrames; ++f)
     {
         auto& fr = a.frames[static_cast<size_t> (f)];
         fr.levelDb = toDb (power[static_cast<size_t> (f)] / perFrame);
         fr.peakDb = toDb (peak[static_cast<size_t> (f)] * peak[static_cast<size_t> (f)]);
-        fr.backgroundDb = tracker.update (fr.levelDb, s.floorDb);
+        const bool loud = f > 0 && ! tracker.isLearning() && loudOver (fr.peakDb, tracker.get());
+        sinceLoud = loud ? 0 : sinceLoud + 1;
+        loudRun = sinceLoud <= loudGap ? loudRun + 1 : 0;
+        fr.backgroundDb = loud && loudRun <= loudHold ? tracker.get() : tracker.update (fr.levelDb, s.floorDb);
     }
 
     // ---- runs of frames: onsets, loud events, silences --------------------
     const auto time = [&] (int f) { return f * a.frameSeconds; };
-    const auto isLoud = [&] (const SceneFrame& fr) { return fr.peakDb >= fr.backgroundDb + s.loudOverBackgroundDb || fr.peakDb >= s.loudAbsoluteDb; };
-    const int maxOnset = framesOf (s.maxOnsetMs, frameMs), minSilence = framesOf (s.minSilenceMs, frameMs);
-    const int loudGap = framesOf (kLoudMergeMs, frameMs);
+    const auto isLoud = [&] (const SceneFrame& fr) { return loudOver (fr.peakDb, fr.backgroundDb); };
     for (int f = 0; f < numFrames;)
     {
         const auto& fr = a.frames[static_cast<size_t> (f)];

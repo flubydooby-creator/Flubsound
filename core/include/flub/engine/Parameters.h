@@ -217,7 +217,7 @@ constexpr int dyn (int band, DynField f) noexcept { return kDynBase + band * kDy
 enum class ModeValue : int { Music = 0, Gaming = 1 };
 enum class LatencyProfileValue : int { Quality = 0, Balanced = 1, LowLatency = 2 };
 enum class InputModeValue : int { Auto = 0, ForceSurround = 1, ForceStereo = 2 }; // VirtInputMode
-enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Safe };  // MaxStyle
+enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Safe }; // MaxStyle
 
 /** A named maximizer style (docs/11 E05 step 4): the values it gives the six
     maximizer controls it owns while it is selected. Custom owns none (the

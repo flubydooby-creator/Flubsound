@@ -104,7 +104,8 @@ Flubsound/
 │   │   │   ├── Saturator.h                 module: oversampled tape / tube / digital saturation, unity small-signal gain
 │   │   │   ├── StereoSpatializer.h         module: side-only width / focus / space (mono sum preserved exactly), L/R headphone crossfeed
 │   │   │   ├── HeadphoneVirtualizer.h      module: 5.1 / 7.1 → binaural (parametric renderer or HRIR convolution)
-│   │   │   ├── Compressor.h                module: look-ahead, channel-linked, downward + upward compressor
+│   │   │   ├── Compressor.h                module: look-ahead, channel-linked, downward + upward compressor (Gaming: upward floor follows the background, docs/11 E19)
+│   │   │   ├── BackgroundTracker.h         slow background estimate of a level (rises ≤ 5 dB/s, falls 400 ms, floored): the Compressor's relative floor, SceneEvents
 │   │   │   ├── TruePeakLimiter.h           module: look-ahead true-peak brickwall limiter (also the MixEngine master)
 │   │   │   ├── LoudnessMaximizer.h         module: drive → 3-band glue → oversampled soft clipper → TruePeakLimiter
 │   │   │   └── DeviceCorrection.h          output-device correction (docs/11 E15, MixEngine only): ≤ 16 RBJ sections per channel, crossfaded hand-off; headroom:: max-boost predictor and automatic preamp (E11)
@@ -112,7 +113,8 @@ Flubsound/
 │   │   │   ├── ChannelWeights.h            ITU-R BS.1770-4 channel weights for stereo / 5.1 / 7.1 (LFE excluded)
 │   │   │   ├── LoudnessMeter.h             BS.1770-4 / EBU R128: momentary, short-term, integrated, LRA
 │   │   │   ├── LoudnessFollower.h          cheap K-weighted running loudness for the control loops (default 3 s)
-│   │   │   └── PeakMeters.h                TruePeakMeter; LevelMeter (sample peak, 300 ms RMS, correlation)
+│   │   │   ├── PeakMeters.h                TruePeakMeter; LevelMeter (sample peak, 300 ms RMS, correlation)
+│   │   │   └── SceneEvents.h               offline scene-event detector (onsets, loud events, silences, level changes; docs/11 E60), for the CLI and the scene tests
 │   │   ├── engine/                         L2 engine: parameters, macros, protection, bypass, chain, mixer, telemetry
 │   │   │   ├── Parameters.h                stable parameter IDs, Info table, two-bank lock-free ParameterStore (A/B)
 │   │   │   ├── MacroMap.h                  Boost Intensity + 5 mode macros → effective values; "governed" entries
@@ -136,7 +138,8 @@ Flubsound/
 │   │       └── WavFile.h                   flub::io: dependency-free WAV reader/writer, TPDF dither for integer formats
 │   └── src/                                implementations, same area/name as the header
 │       ├── analysis/
-│       │   └── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
+│       │   ├── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
+│       │   └── SceneEvents.cpp             10 ms frames, background, event runs, median level changes
 │       ├── dsp/
 │       │   ├── BassEngine.cpp
 │       │   ├── ClarityEnhancer.cpp
@@ -225,7 +228,7 @@ Flubsound/
 │   ├── test_wav.cpp                        WAV reader/writer, including hostile input and UTF-8 (non-ASCII) paths
 │   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
 │   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 cue enhancer's gunfire check; metric meta-validation; render.stats vs a hand computation
-│   ├── test_scenes.cpp                     docs/11 E60 stage 1: seeded burst / quiet → combat / ambush programme at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned (ratchet), metric validation, E19's Done-when
+│   ├── test_scenes.cpp                     docs/11 E60 stage 1: seeded burst / quiet → combat / ambush programme at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned (ratchet), metric validation, E19's Done-when; dialogue over effects, speech → music → silence and a track change; the SceneEvents detector
 │   ├── golden/preset-render-baseline.json  baseline of tools/scripts/preset-render-diff.py (25 presets x 5 programmes, not read by flub_tests)
 │   ├── golden/parameter-defaults.json      every parameter default (test_presets_golden.cpp: a changed default needs a schema major and a migration)
 │   ├── golden/factory-presets.json         per factory preset: uuid, contentHash and the golden render (integrated LUFS, 1/3-octave bands)
@@ -363,7 +366,7 @@ Flubsound/
 **Header-only core components.** These have no `.cpp`:
 - all of `common/`;
 - `io/FilePath.h`;
-- `dsp/Processor.h`, `Svf.h`, `Biquad.h`, `Crossover.h`, `EnvelopeFollower.h`, `FirDesign.h`, `TruePeakDetector.h`;
+- `dsp/Processor.h`, `Svf.h`, `Biquad.h`, `Crossover.h`, `EnvelopeFollower.h`, `FirDesign.h`, `TruePeakDetector.h`, `BackgroundTracker.h`;
 - `analysis/ChannelWeights.h`, `LoudnessFollower.h`, `PeakMeters.h`;
 - `engine/MeterBus.h`.
 
@@ -429,7 +432,7 @@ The `include/flub/` sub-folders form a strict hierarchy. The `#include` graph wa
    0    io/FilePath.h, io/Json.h,         nothing from flub/ (WavFile.cpp: common/AudioBlock.h, io/FilePath.h)
         io/WavFile.h
    1    dsp/*                             common/*, dsp/*
-   2    analysis/*                        common/*, dsp/Biquad.h, dsp/EnvelopeFollower.h, dsp/TruePeakDetector.h, analysis/*
+   2    analysis/*                        common/*, dsp/Biquad.h, dsp/EnvelopeFollower.h, dsp/TruePeakDetector.h, dsp/BackgroundTracker.h, analysis/*
    3    engine/*                          common/*, dsp/*, analysis/*, engine/*,
                                           io/Json.h (engine/DeviceProfiles.h only; DeviceProfiles.cpp also io/FilePath.h),
                                           neural/* (engine/ProcessingChain.h only: the neural slot)
@@ -866,7 +869,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_distortion.cpp`: the measured THD+N (the per-block least-squares estimator against a Goertzel harmonic analysis, the saturator's and the clipper's in-stage readings and their independence of the host block size, the DistortionMonitor, and the SafetyGovernor acting on it as a unit and through the chain, including the clip-energy floor under the clipper's share), and the readings of the bass harmonics generator and the air exciter (a two-reference estimator against a harmonic analysis, -160 dB on linear settings, block-size independence, kept apart in the DistortionMonitor and out of the governor input);
   - `test_offline_render.cpp`: the CLI's render-and-write path (`OfflineRenderer` against the chain run directly, the `--target-lufs` loop, float32 / PCM24 / PCM16 export and its report) and `batch` (folder walk, parallel jobs, per-file results, a corrupt file), in folders it creates below the system temp path and removes;
   - `test_known_gaps.cpp`: the docs/11 E59 sound-quality metrics (`KnownGap:` cases pinned at today's values, `KnownGap closed:` cases for fixed defects), a meta-validation of every metric against injected artefacts, and the CLI's `render.stats` against a hand computation;
-  - `test_scenes.cpp`: the docs/11 E60 stage 1 game scenes (burst, quiet → combat, ambush) at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned as a ratchet, and the metrics' own validation;
+  - `test_scenes.cpp`: the docs/11 E60 stage 1 game scenes (burst, quiet → combat, ambush) at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned as a ratchet, and the metrics' own validation; the stage 1 remainder (dialogue over effects, speech → music → silence, a quiet → loud track change) through the presets each is for; the `SceneEvents` detector on those programmes;
   - `test_presets_schema.cpp` / `test_presets_golden.cpp`: the docs/11 E52 preset schema (versions, migration, uuid, contentHash, warnings, plug-in state recall) and the golden files in `tests/golden/` (every default, every factory preset's uuid, hash and, with `FLUB_GOLDEN_REFERENCE=1`, its render; `FLUB_GOLDEN_UPDATE=1` re-records);
   - `test_device_correction.cpp`: the docs/11 E15 output-device correction and its ParametricEQ.txt parser against an independent biquad reference, and the E11 headroom predictor;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;

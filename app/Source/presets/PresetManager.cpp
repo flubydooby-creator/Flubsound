@@ -29,6 +29,38 @@ bool lessByCategoryThenName (const PresetInfo& a, const PresetInfo& b)
         return c < 0;
     return a.name.compareNatural (b.name) < 0;
 }
+
+/** `root` with "uuid" set: replaced in place, or inserted after "version"
+    (after "format" if there is none, else first), every other member kept. */
+flub::json::Value withUuid (const flub::json::Value& root, const std::string& uuid)
+{
+    flub::json::Value::Object members = root.asObject();
+    const auto has = [&members] (const char* key)
+    { return std::find_if (members.begin(), members.end(), [key] (const auto& m) { return m.first == key; }); };
+    if (const auto it = has ("uuid"); it != members.end())
+    {
+        it->second = uuid;
+        return flub::json::Value (std::move (members));
+    }
+    auto at = has ("version");
+    if (at == members.end())
+        at = has ("format");
+    const auto pos = at == members.end() ? members.begin() : at + 1;
+    members.insert (pos, { "uuid", flub::json::Value (uuid) });
+    return flub::json::Value (std::move (members));
+}
+
+bool writeJsonFile (const juce::File& file, const flub::json::Value& root)
+{
+    const auto text = flub::json::write (root, 2);
+    return file.replaceWithText (juce::String::fromUTF8 (text.c_str()), false, false, "\n");
+}
+
+bool readJsonFile (const juce::File& file, flub::json::Value& root)
+{
+    std::string err;
+    return file.existsAsFile() && flub::json::parse (file.loadFileAsString().toStdString(), root, err) && root.isObject();
+}
 } // namespace
 
 PresetManager::PresetManager()
@@ -89,6 +121,7 @@ PresetInfo PresetManager::describe (const flub::preset::Preset& p)
     if (info.category.isEmpty())
         info.category = "General";
     info.suggestedLatencyProfile = p.suggestedLatencyProfile;
+    info.uuid = juce::String (p.uuid); // fromJson: valid and lower case, or empty
 
     const auto& modeInfo = layout()[static_cast<size_t> (Mode)];
     if (static_cast<size_t> (Mode) < p.values.size())
@@ -122,7 +155,8 @@ void PresetManager::scanFactory()
         auto info = describe (p);
         const juce::String original = FlubsoundPresetData::getNamedResourceOriginalFilename (resource);
         const juce::String stem = original.isNotEmpty() ? original.upToFirstOccurrenceOf (".", false, false) : juce::String (resource);
-        info.id = kFactoryPrefix + stem;
+        info.legacyId = kFactoryPrefix + stem;
+        info.id = info.uuid.isNotEmpty() ? info.uuid : info.legacyId;
         info.isFactory = true;
         info.resourceName = resource;
         if (info.name.isEmpty())
@@ -137,15 +171,28 @@ void PresetManager::scanUser()
     if (! userFolder.isDirectory())
         return;
 
-    for (const auto& file : userFolder.findChildFiles (juce::File::findFiles, false, "*.json"))
+    // By file name, so which of two files with the same uuid (a copy made
+    // outside the app) keeps it does not depend on the directory order.
+    auto files = userFolder.findChildFiles (juce::File::findFiles, false, "*.json");
+    std::sort (files.begin(), files.end(), [] (const juce::File& a, const juce::File& b) { return a.getFileName() < b.getFileName(); });
+    for (const auto& file : files)
     {
         flub::preset::Preset p;
         juce::String error;
         if (! parseJsonText (file.loadFileAsString().toStdString(), p, error))
-            continue; // not a preset (or damaged): ignore
+            continue; // not a preset (or damaged, or a newer major): ignore, never rewritten
 
         auto info = describe (p);
-        info.id = kUserPrefix + file.getFileName();
+        // A preset without a uuid (saved before docs/11 E52, or by hand), or
+        // with one another preset has, gets a new one, written into its file
+        // once so that it survives renames from here on.
+        if (info.uuid.isEmpty() || isUuidTaken (p.uuid))
+        {
+            const auto uuid = flub::preset::makeUuid();
+            info.uuid = writeUuid (file, uuid) ? juce::String (uuid) : juce::String();
+        }
+        info.legacyId = kUserPrefix + file.getFileName();
+        info.id = info.uuid.isNotEmpty() ? info.uuid : info.legacyId;
         info.isFactory = false;
         info.file = file;
         if (info.name.isEmpty())
@@ -192,10 +239,51 @@ juce::StringArray PresetManager::getCategories() const
 
 const PresetInfo* PresetManager::findById (const juce::String& id) const
 {
+    if (id.isEmpty())
+        return nullptr;
     for (const auto& p : presets)
         if (p.id == id)
             return &p;
+    for (const auto& p : presets)
+        if (p.legacyId == id)
+            return &p;
+    if (flub::preset::isValidUuid (id.toStdString()))
+        for (const auto& p : presets)
+            if (p.uuid.equalsIgnoreCase (id))
+                return &p;
     return nullptr;
+}
+
+std::map<juce::String, juce::String> PresetManager::getLegacyIdAliases() const
+{
+    std::map<juce::String, juce::String> aliases;
+    for (const auto& p : presets)
+        if (p.legacyId.isNotEmpty() && p.id != p.legacyId)
+            aliases[p.legacyId] = p.id;
+    return aliases;
+}
+
+bool PresetManager::isUuidTaken (const std::string& uuid, const juce::File& except) const
+{
+    const auto wanted = juce::String (uuid);
+    return std::any_of (presets.begin(), presets.end(),
+                        [&] (const PresetInfo& p) { return p.uuid.isNotEmpty() && p.uuid.equalsIgnoreCase (wanted) && (except == juce::File() || p.file != except); });
+}
+
+bool PresetManager::writeUuid (const juce::File& file, const std::string& uuid)
+{
+    flub::json::Value root;
+    return readJsonFile (file, root) && writeJsonFile (file, withUuid (root, uuid));
+}
+
+void PresetManager::reportWarnings (const PresetInfo& info, const flub::preset::Preset& p) const
+{
+    if (p.warnings.empty() || onPresetWarnings == nullptr)
+        return;
+    juce::StringArray warnings;
+    for (const auto& w : p.warnings)
+        warnings.add (juce::String::fromUTF8 (w.c_str()));
+    onPresetWarnings (info, warnings);
 }
 
 const PresetInfo* PresetManager::findByName (const juce::String& name) const
@@ -247,6 +335,7 @@ bool PresetManager::loadIntoBank (const PresetInfo& info, ParameterStore& store,
     // engine or, through the MixEngine padding, delays the other strips
     // (docs/11 E40). A profile the file carries is info.suggestedLatencyProfile.
     flub::preset::applyPresetToStore (p, store, bank);
+    reportWarnings (info, p);
     return true;
 }
 
@@ -292,7 +381,8 @@ void PresetManager::setCurrentPresetId (int strip, const juce::String& id, const
 {
     if (strip < 0 || strip >= kMaxStrips)
         return;
-    currentIds[static_cast<size_t> (strip)] = id;
+    const auto* info = findById (id);
+    currentIds[static_cast<size_t> (strip)] = info != nullptr ? info->id : id;
     if (store != nullptr)
         takeSnapshot (strip, *store);
 }
@@ -383,15 +473,70 @@ juce::String PresetManager::saveUserPreset (const juce::String& name, const juce
         return {};
     }
 
-    const auto text = flub::json::write (flub::preset::toJson (p, false), 2);
-    if (! file.replaceWithText (juce::String::fromUTF8 (text.c_str()), false, false, "\n"))
+    // Overwriting keeps the preset's identity (rules that play it keep
+    // working); a new file is a new preset.
+    const auto existing = std::find_if (presets.begin(), presets.end(), [&file] (const PresetInfo& i) { return ! i.isFactory && i.file == file; });
+    p.uuid = existing != presets.end() && existing->uuid.isNotEmpty() ? existing->uuid.toStdString() : flub::preset::makeUuid();
+
+    // Full state: every sound parameter, so the preset does not depend on
+    // today's defaults (app state stays out: p.unsetAppState).
+    if (! writeJsonFile (file, flub::preset::toJson (p, true)))
     {
         error = "Cannot write " + file.getFullPathName();
         return {};
     }
 
     refresh();
-    return kUserPrefix + file.getFileName();
+    const auto* saved = findById (juce::String (p.uuid));
+    return saved != nullptr ? saved->id : kUserPrefix + file.getFileName();
+}
+
+juce::String PresetManager::renameUserPreset (const PresetInfo& info, const juce::String& newName, juce::String& error)
+{
+    if (info.isFactory)
+    {
+        error = "Factory presets cannot be renamed";
+        return {};
+    }
+    if (newName.trim().isEmpty())
+    {
+        error = "Please enter a preset name";
+        return {};
+    }
+
+    flub::json::Value root;
+    if (! readJsonFile (info.file, root))
+    {
+        error = "Cannot read " + info.file.getFullPathName();
+        return {};
+    }
+    const auto target = userFolder.getChildFile (sanitiseFileName (newName) + kUserExtension);
+    if (target.existsAsFile() && target != info.file)
+    {
+        error = "A preset with this name already exists";
+        return {};
+    }
+
+    // The file as it is (version, params, uuid) with the new name; a file
+    // without a uuid (one that could not be written before) gets one now.
+    root.set ("name", newName.trim().toStdString());
+    const auto uuid = info.uuid.isNotEmpty() ? info.uuid.toStdString() : flub::preset::makeUuid();
+    if (! writeJsonFile (target, withUuid (root, uuid)))
+    {
+        error = "Cannot write " + target.getFullPathName();
+        return {};
+    }
+    if (target != info.file)
+        info.file.deleteFile();
+
+    const auto oldId = info.id; // `info` may point into the list refresh() rebuilds
+    refresh();
+    const auto* renamed = findById (juce::String (uuid));
+    const auto id = renamed != nullptr ? renamed->id : juce::String();
+    for (auto& current : currentIds)
+        if (current == oldId)
+            current = id;
+    return id;
 }
 
 bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::String& error)
@@ -406,6 +551,7 @@ bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::S
     const auto copy = *info;
     if (saveUserPreset (copy.name, copy.category, copy.description, store, error, true).isEmpty())
         return false;
+    // (the same file, so the same uuid and id)
     if (strip >= 0 && strip < kMaxStrips)
         takeSnapshot (strip, store);
     return true;
@@ -449,8 +595,21 @@ juce::String PresetManager::importPresetFile (const juce::File& source, juce::St
         error = "Cannot copy the preset into " + userFolder.getFullPathName();
         return {};
     }
+    // The copy is a preset of its own when its uuid is missing or taken (the
+    // same preset exported and imported again): a new uuid, so the two never
+    // share rules. Otherwise the file is kept byte for byte.
+    if (p.uuid.empty() || isUuidTaken (p.uuid))
+        writeUuid (target, flub::preset::makeUuid()); // failure: refresh() retries
+
     refresh();
-    return kUserPrefix + target.getFileName();
+    const auto imported = std::find_if (presets.begin(), presets.end(), [&target] (const PresetInfo& i) { return i.file == target; });
+    if (imported == presets.end())
+    {
+        error = "The imported preset could not be read back from " + target.getFullPathName();
+        return {};
+    }
+    reportWarnings (*imported, p);
+    return imported->id;
 }
 
 bool PresetManager::exportPreset (const PresetInfo& info, const juce::File& destination, juce::String& error) const

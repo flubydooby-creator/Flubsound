@@ -44,6 +44,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <utility>
 #include <vector>
 
 namespace flub
@@ -178,7 +179,7 @@ namespace headroom
                     fd = eval (d);
                 }
             }
-            return fc >= fd ? Prediction { fc, c } : Prediction { fd, d };
+            return fc >= fd ? std::pair { c, fc } : std::pair { d, fd }; // (log2 Hz, dB)
         };
 
         const double x0 = std::log2 (loHz), span = std::log2 (hiHz) - x0;
@@ -196,9 +197,9 @@ namespace headroom
                 best = { yCur, std::exp2 (xAt (i)) };
             if (! (yCur < yPrev || yCur < yNext || (yCur == yPrev && yCur == yNext)))
             {
-                const Prediction refined = goldenMax (xAt (i > 0 ? i - 1 : i), xAt (std::min (i + 1, steps)));
-                if (refined.maxBoostDb > best.maxBoostDb)
-                    best = { refined.maxBoostDb, std::exp2 (refined.atHz) }; // atHz held log2 Hz here
+                const auto [x, y] = goldenMax (xAt (i > 0 ? i - 1 : i), xAt (std::min (i + 1, steps)));
+                if (y > best.maxBoostDb)
+                    best = { y, std::exp2 (x) };
             }
             yPrev = yCur;
             yCur = yNext;
