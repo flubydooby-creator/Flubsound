@@ -10,6 +10,7 @@ AbxPanel::AbxPanel (EngineController& c, int s, bool isMatched, int64_t seed)
     : controller (c), strip (s), matched (isMatched), random (seed)
 {
     setTitle ("Blind test (A/B/X)");
+    setOpaque (true);
     setWantsKeyboardFocus (true);
 
     for (auto* b : { &playA, &playB, &playX })
@@ -147,7 +148,8 @@ void AbxPanel::mouseDown (const juce::MouseEvent&)
 
 void AbxPanel::paint (juce::Graphics& g)
 {
-    g.fillAll (Palette::background.withAlpha (0.82f));
+    // Opaque: the header's A/B buttons and trim line must not show through.
+    g.fillAll (Palette::background);
     Theme::drawPanel (g, card.toFloat());
 
     auto r = card.reduced (20, 16);

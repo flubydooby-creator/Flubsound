@@ -229,7 +229,7 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         controller.setActiveBank (Bank::B, focusStrip);
     }
     if (states.contains ("bypass"))
-        bypassAtSeconds = options.seconds * 0.6; // after the processed loudness was read
+        bypassAtSeconds = options.seconds * 0.8; // after the processed loudness was read (valid after 3 s)
     if (states.contains ("quick-controls"))
     {
         auto flyout = std::make_unique<ui::QuickControls> (controller);

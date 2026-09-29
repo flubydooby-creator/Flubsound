@@ -31,6 +31,7 @@
 #include "flub/engine/Parameters.h"
 #include "flub/engine/Protection.h"
 
+#include <algorithm>
 #include <iostream>
 
 using namespace flub::app;
@@ -105,8 +106,18 @@ TEST_CASE ("App UI: the Advanced view at 800 x 560 moves the routing panel into 
     for (auto* c : main.getAdvancedOnlyComponents())
         historyVisible += c->isVisible() ? 1 : 0;
     CHECK (historyVisible == 4); // analyser, rack, meters, loudness (no routing, no history)
-    CHECK (main.getRack().getHeight() >= 150);
-    CHECK (main.getLoudnessPanel().getWidth() >= 200);
+    // The geometry of docs/06 §3.3's table.
+    CHECK (main.getRack().getHeight() == 150);
+    CHECK (main.getLoudnessPanel().getWidth() == 220);
+    CHECK (main.getLoudnessPanel().getHeight() == 274);
+    CHECK (main.getRack().getWidth() == 546);
+    main.setSize (1093, 614);
+    CHECK (main.getLoudnessPanel().getWidth() == 251);
+    CHECK (main.getLoudnessPanel().getHeight() == 328);
+    CHECK (main.getRack().getWidth() == 808);
+    main.setSize (1280, 820);
+    CHECK (main.getLoudnessPanel().getHeight() == 398);
+    main.setSize (800, 560);
 
     main.setRoutingDrawerOpen (true);
     CHECK (main.getRoutingPanel().isVisible());

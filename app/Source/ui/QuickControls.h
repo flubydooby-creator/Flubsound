@@ -40,7 +40,7 @@ public:
 
     /** Shows a flyout next to `screenArea` (the tray icon); it closes when it
         loses focus. */
-    static void show (EngineController& controller, juce::Rectangle<int> screenArea, std::function<void()> onOpenWindow);
+    static void show (EngineController& controller, juce::Rectangle<int> screenArea, std::function<void()> openWindow);
 
     juce::Slider& getBoostSlider() noexcept { return boost; }
     juce::Button& getPreviousButton() noexcept { return previous; }

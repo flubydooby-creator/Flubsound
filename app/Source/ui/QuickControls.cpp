@@ -50,18 +50,18 @@ QuickControls::~QuickControls()
     binder.unbind (boost);
 }
 
-void QuickControls::show (EngineController& controller, juce::Rectangle<int> screenArea, std::function<void()> onOpenWindow)
+void QuickControls::show (EngineController& c, juce::Rectangle<int> screenArea, std::function<void()> openWindow)
 {
-    auto content = std::make_unique<QuickControls> (controller);
+    auto content = std::make_unique<QuickControls> (c);
     auto* raw = content.get();
     auto& box = juce::CallOutBox::launchAsynchronously (std::move (content), screenArea, nullptr);
     juce::Component::SafePointer<juce::CallOutBox> safeBox (&box);
-    raw->onOpenWindow = [safeBox, onOpenWindow]
+    raw->onOpenWindow = [safeBox, openWindow]
     {
         if (safeBox != nullptr)
             safeBox->dismiss();
-        if (onOpenWindow != nullptr)
-            onOpenWindow();
+        if (openWindow != nullptr)
+            openWindow();
     };
 }
 

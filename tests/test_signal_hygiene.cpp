@@ -40,6 +40,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -191,27 +192,40 @@ TEST_CASE ("Signal hygiene: Warmth 100 through the chain at 44.1 kHz - the 10 kH
     }
 }
 
-TEST_CASE ("Signal hygiene: extreme settings in Quality - 24 dB of drive and 0 dBFS at 9 dB, every type, <= -70 dBc at 44.1 / 48 / 96 / 192 kHz")
+namespace
 {
-    // docs/11 E10 Phase 2 (ADAA, and 8x up to 48 kHz). Before (4x / 2x without
-    // ADAA), 44.1 kHz: Tape 24 dB -28.2, Tube -38.0, Digital -35.6, Tape at
-    // 0 dBFS -45.9 dBc; 192 kHz: -46.1 / -75.0 / -59.8 / -94.4 dBc.
+/** Quality at `rates`: 24 dB of drive on -6 dBFS tones (every type) and 9 dB on 0 dBFS Tape. */
+void checkQualityExtremes (std::initializer_list<double> rates)
+{
     struct Row
     {
         SaturationType type;
         float drive, amplitude;
     };
-    for (const double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    for (const double fs : rates)
         for (const auto& r : { Row { SaturationType::Tape, 24.0f, 0.5f }, Row { SaturationType::Tube, 24.0f, 0.5f },
                                Row { SaturationType::Digital, 24.0f, 0.5f }, Row { SaturationType::Tape, 9.0f, 1.0f } })
         {
             const double worst = saturatorWorstAliasDbc (Oversampler::forProfile (Oversampler::Profile::Quality, fs), fs, r.type, r.drive, r.amplitude);
-            if (fs == 44100.0 || fs == 192000.0)
-                measured ("saturator alias, Quality, type " + std::to_string (static_cast<int> (r.type)) + ", " + std::to_string (static_cast<int> (r.drive)) + " dB, "
-                              + (r.amplitude < 1.0f ? "-6" : "0") + " dBFS at " + std::to_string (static_cast<int> (fs)) + " Hz",
-                          worst, "dBc");
+            measured ("saturator alias, Quality, type " + std::to_string (static_cast<int> (r.type)) + ", " + std::to_string (static_cast<int> (r.drive)) + " dB, "
+                          + (r.amplitude < 1.0f ? "-6" : "0") + " dBFS at " + std::to_string (static_cast<int> (fs)) + " Hz",
+                      worst, "dBc");
             CHECK_LE (worst, -70.0);
         }
+}
+} // namespace
+
+TEST_CASE ("Signal hygiene: extreme settings in Quality at 44.1 / 48 kHz (8x with ADAA) - 24 dB of drive and 0 dBFS at 9 dB, every type, <= -70 dBc")
+{
+    // docs/11 E10 Phase 2. Before (4x without ADAA), 44.1 kHz: Tape 24 dB
+    // -28.2, Tube -38.0, Digital -35.6, Tape at 0 dBFS -45.9 dBc.
+    checkQualityExtremes ({ 44100.0, 48000.0 });
+}
+
+TEST_CASE ("Signal hygiene: extreme settings in Quality at 96 / 192 kHz (4x / 2x with ADAA) - 24 dB of drive and 0 dBFS at 9 dB, every type, <= -70 dBc")
+{
+    // Before, 192 kHz: -46.1 / -75.0 / -59.8 / -94.4 dBc.
+    checkQualityExtremes ({ 96000.0, 192000.0 });
 }
 
 TEST_CASE ("Signal hygiene: extreme settings in Balanced / Low Latency - <= -70 dBc from 88.2 kHz, 0 dBFS at 9 dB <= -70 dBc at 44.1 kHz")

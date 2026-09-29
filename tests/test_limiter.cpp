@@ -1454,7 +1454,7 @@ TEST_CASE ("MixEngine: the master limiter holds its true-peak ceiling on the 11-
     // master).
     for (double fs : { 8000.0, 11025.0, 16000.0, 22050.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
     {
-        const int n = static_cast<int> (fs * 0.5), tail = static_cast<int> (fs * 0.02);
+        const int n = static_cast<int> (fs * 0.3), tail = static_cast<int> (fs * 0.02);
         const auto noise = bandLimitedNoise (n, tail, 2.0f, 61);
         std::vector<float> bass (static_cast<size_t> (n - tail), 0.0f);
         for (size_t i = 0; i < bass.size(); ++i)

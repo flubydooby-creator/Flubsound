@@ -495,7 +495,6 @@ juce::String HeaderBar::describeDeviceSafety (const DeviceSafetyState& safety)
 void HeaderBar::updateStatus()
 {
     trackProcessedDelta();
-    std::fprintf (stderr, "DBG updateStatus known=%d delta=%f enabled=%d\n", (int) processedDeltaKnown, (double) processedDeltaLu, (int) controller.isEnabled());
     if (const auto caption = getBypassCaption(); caption != bypassCaption)
         refresh();
     const auto li = controller.getLatencyInfo();
@@ -1041,7 +1040,7 @@ void HeaderBar::resized()
     logoArea = r.removeFromLeft (narrow ? 34 : (compact ? 136 : 160));
     r.removeFromLeft (narrow ? 8 : (compact ? 10 : 14));
 
-    modeArea = centred (r.removeFromLeft (narrow ? 132 : (compact ? 152 : 176)), 34);
+    modeArea = centred (r.removeFromLeft (compact ? 152 : 176), 34);
     {
         auto m = modeArea.reduced (2, 2);
         musicSegment->setBounds (m.removeFromLeft (m.getWidth() / 2));
@@ -1102,7 +1101,7 @@ void HeaderBar::resized()
 
     // Preset browser: right-aligned next to A/B, as wide as fits (prev / next
     // are hidden when narrow). The free space stays between the two clusters.
-    r.removeFromLeft (narrow ? 0 : (compact ? 10 : 12));
+    r.removeFromLeft (narrow ? 8 : (compact ? 10 : 12));
     presetArea = centreY (r);
     const int menuW = 32 + 4, arrowsW = 28 + 4 + 28 + 4;
     const bool showArrows = presetArea.getWidth() - menuW - arrowsW >= 180;

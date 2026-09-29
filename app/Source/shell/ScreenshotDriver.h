@@ -33,7 +33,9 @@
 //                   Impact 100 %) and plays loudness matched (docs/11 E37):
 //                   the trim reads under A / B
 //   abx             the blind A/B/X test over the window, three trials in
-//   bypass          the master Bypass on: "proc. +x LU" under it
+//   bypass          the master Bypass switched on at 80 % of the run (use
+//                   --seconds 5 or more: the output's short-term loudness
+//                   reads after 3 s): "proc. +x LU" under it
 //   routing-drawer  the routing panel's drawer open (narrow windows)
 //   governor-normal as governor, at protection strength Normal: the
 //                   PROTECTION readouts (residual, PLR, brightness)

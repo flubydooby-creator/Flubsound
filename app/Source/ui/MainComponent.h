@@ -53,7 +53,7 @@
 // reflows (HeaderBar::kNarrowWidth) and the routing panel leaves the row; it
 // opens as a drawer over the analyser from the header's overflow menu
 // (Escape or the same item closes it). Below 700 px of height the waveform
-// history is left out. The right column narrows to 200 px.
+// history is left out. The right column narrows to 220 px.
 //
 // Comparisons (docs/11 E37): the header's A/B is loudness matched
 // (BankComparison), the rack's ears too (ListenMatch, sharing the header's

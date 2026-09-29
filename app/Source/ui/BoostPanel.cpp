@@ -653,10 +653,11 @@ void BoostPanel::resized()
     {
         auto row = r.removeFromBottom (kGuardRowH);
         r.removeFromBottom (kGuardRowGap);
-        rangeCaption = row.removeFromLeft (juce::jmin (104, row.getWidth() / 5));
+        // The captions keep their text's width down to the 800 px window (docs/11 E39).
+        rangeCaption = row.removeFromLeft (juce::jmin (104, juce::jmax (98, row.getWidth() / 5)));
         rangeBox.setBounds (row.removeFromLeft (juce::jmin (160, row.getWidth() / 3)).reduced (0, 1));
         row.removeFromLeft (24);
-        smoothCaption = row.removeFromLeft (juce::jmin (88, row.getWidth() / 4));
+        smoothCaption = row.removeFromLeft (juce::jmin (88, juce::jmax (84, row.getWidth() / 4)));
         smoothSlider.setBounds (row.removeFromLeft (juce::jmin (240, row.getWidth())));
     }
     else

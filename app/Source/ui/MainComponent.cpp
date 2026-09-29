@@ -525,7 +525,7 @@ void MainComponent::resized()
         r.removeFromLeft (gap);
     }
 
-    auto right = r.removeFromRight (narrow ? juce::jlimit (200, 252, juce::roundToInt (w * 0.22)) : juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
+    auto right = r.removeFromRight (narrow ? juce::jlimit (220, 252, juce::roundToInt (w * 0.23)) : juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
     r.removeFromRight (gap);
     // The loudness panel's content has a fixed height (~420 px with its
     // PROTECTION section): on tall windows the level meters take the spare
