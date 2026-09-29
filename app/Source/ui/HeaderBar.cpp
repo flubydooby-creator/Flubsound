@@ -495,6 +495,7 @@ juce::String HeaderBar::describeDeviceSafety (const DeviceSafetyState& safety)
 void HeaderBar::updateStatus()
 {
     trackProcessedDelta();
+    std::fprintf (stderr, "DBG updateStatus known=%d delta=%f enabled=%d\n", (int) processedDeltaKnown, (double) processedDeltaLu, (int) controller.isEnabled());
     if (const auto caption = getBypassCaption(); caption != bypassCaption)
         refresh();
     const auto li = controller.getLatencyInfo();
