@@ -119,8 +119,11 @@ and sample rate.
     measured THD+N, the intended harmonics of the bass harmonics / air
     exciter, bass protection, the dynamic EQ mode bands, the SafetyGovernor's
     Boost scale, state and reasons (time shares, and scale / state / reasons
-    at the end: governor.end), and AutoLevel / AutoDrive, read from the
-    chain's meters once per block.
+    at the end: governor.end), at --protection normal / strict the measured
+    loop (governor.measured: harmonics and tonal scales, audible residuals,
+    output PLR, brightness, with their budgets), the Smoothness stage's cut
+    (smoothness), and AutoLevel / AutoDrive, read from the chain's meters
+    once per block.
   * --bands: octave-band levels (31.5 Hz .. 16 kHz, dBFS) of the input and
     the rendered output (inputBands / outputBands with --json).
 

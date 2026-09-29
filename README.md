@@ -109,6 +109,7 @@ Useful options:
 | `FLUB_ASIO_SDK_DIR` | empty | Windows app: Steinberg ASIO SDK root; enables the ASIO device type |
 | `FLUB_FACTORY_PRESET_DIR` | `presets/factory` | Folder whose `*.json` files the app embeds as factory presets |
 | `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | OFF | Windows app: lets the routing panel move apps between output devices through the undocumented `IAudioPolicyConfigFactory` API (see `docs/08` D7) |
+| `FLUB_WITH_PIPEWIRE` | ON | Linux app: build the native PipeWire node and registry linking when `pkg-config` finds libpipewire-0.3 (`libpipewire-0.3-dev`); without it the app falls back to `pw-dump` / `pw-link` (docs/11 E48) |
 
 ---
 

@@ -67,10 +67,11 @@ set(FLUB_APP_SOURCES
     Source/shell/TrayIcon.cpp
     Source/shell/HotkeyManager.cpp
     Source/shell/ScreenshotDriver.cpp
-    Source/ui/AbxPanel.cpp Source/ui/Comparison.cpp Source/ui/ParamHints.cpp Source/ui/QuickControls.cpp
+    Source/ui/AbxPanel.cpp
     Source/ui/AnalyzerFeed.cpp
     Source/ui/AnalyzerPanel.cpp
     Source/ui/BoostPanel.cpp
+    Source/ui/Comparison.cpp
     Source/ui/DeviceAdviceBanner.cpp
     Source/ui/EqCurveEditor.cpp
     Source/ui/FlubLookAndFeel.cpp
@@ -82,10 +83,13 @@ set(FLUB_APP_SOURCES
     Source/ui/ModuleCard.cpp
     Source/ui/ModuleRack.cpp
     Source/ui/NoticeBanners.cpp
-    Source/ui/ParamGrid.cpp
-    Source/ui/ParamKnob.cpp
     Source/ui/ParameterBinding.cpp
-    Source/ui/PresetAudition.cpp Source/ui/PresetBrowser.cpp
+    Source/ui/ParamGrid.cpp
+    Source/ui/ParamHints.cpp
+    Source/ui/ParamKnob.cpp
+    Source/ui/PresetAudition.cpp
+    Source/ui/PresetBrowser.cpp
+    Source/ui/QuickControls.cpp
     Source/ui/RoutingPanel.cpp
     Source/ui/SettingsDialog.cpp
     Source/ui/SimpleStatusPanel.cpp

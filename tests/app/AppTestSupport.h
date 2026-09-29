@@ -58,12 +58,17 @@ inline bool pumpMessagesUntil (const std::function<bool()>& done, int timeoutMs 
     return true;
 }
 
-/** A fresh, empty temporary folder that is deleted with this object. */
+/** A fresh, empty temporary folder that is deleted with this object. The
+    name carries a random part: two test processes running at once (a
+    50-run loop beside a full run) must never pick the same folder between
+    one's existence check and its createDirectory(), or one deletes the
+    other's files. */
 class TempFolder
 {
 public:
     TempFolder()
-        : folder (juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("flub_app_tests", {}, false))
+        : folder (juce::File::getSpecialLocation (juce::File::tempDirectory)
+                      .getNonexistentChildFile ("flub_app_tests_" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()), {}, false))
     {
         folder.createDirectory();
     }
