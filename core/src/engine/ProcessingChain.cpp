@@ -439,6 +439,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
     virtualizer.prepare ({ sr, maxB, config.inputChannels });
     fold.prepare (sr, LfeFold::gainFor (on (e, VirtLfeFold), e[VirtLfeGainDb]));
+    foldHeadroom.prepare (sr);
     inputDetector.prepare (sr, config.inputChannels);
 
     const ProcessSpec stereo { sr, maxB, 2 };
@@ -637,6 +638,8 @@ void ProcessingChain::resetSignalState() noexcept
     virtMix.setImmediate (virtMix.getTarget());
     passMix.setImmediate (passMix.getTarget());
     virtRan = foldRan = passStatsValid = false;
+    foldHeadroom.reset();
+    foldHeadroomRan = false;
     dryDelay.reset();
     dryLimiter.reset();
     dryLimiterRunning = false;
@@ -1264,24 +1267,41 @@ void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
         fold.process (b, overall);
         foldRan = true;
     };
+    // Fold headroom (docs/11 E28a) of the surround fold k D, like the
+    // virtualiser's of B: it starts from unity when k D comes back.
+    const auto startHeadroom = [this] {
+        if (! foldHeadroomRan)
+            foldHeadroom.reset();
+        foldHeadroomRan = true;
+    };
+    // The deepest headroom gain of the folds that ran, for the meters.
+    const auto noteHeadroom = [this] {
+        if (virtRan)
+            headroomBlockMinDb = std::min (headroomBlockMinDb, virtualizer.getHeadroomGainDb());
+        if (foldHeadroomRan)
+            headroomBlockMinDb = std::min (headroomBlockMinDb, foldHeadroom.getGainDb());
+    };
 
     if (! virtSmoothing && ! passSmoothing)
     {
         if (p0 > 0.5f)
         {
-            runFold (in, 1.0f); // stereo passthrough
-            virtRan = false;
+            runFold (in, 1.0f); // stereo passthrough (no headroom: exactly the 2-channel stream)
+            virtRan = foldHeadroomRan = false;
         }
         else if (v0 > 0.5f)
         {
             runVirtualizer (in);
-            foldRan = false;
+            foldRan = foldHeadroomRan = false;
         }
         else
         {
             runFold (in, k); // BS.775 downmix
+            startHeadroom();
+            foldHeadroom.process (in.channel (0), in.channel (1), in.numSamples);
             virtRan = false;
         }
+        noteHeadroom();
         passStatsValid = false;
         return;
     }
@@ -1299,8 +1319,16 @@ void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
     else
         virtRan = false;
 
-    // The surround fold S = (1 - w) k D + w B ramps linearly with virt.on (w,
-    // 20 ms). The stereo fold ramps linearly from S to D (p, 400 ms) and is
+    // The fold headroom's gain per sample for k D (the steady BS.775 path's
+    // law and peaks: |k D| = k |D|), in d's channel 2: the fold has read FC.
+    float* const headroom = d.channel (2);
+    startHeadroom();
+    for (int i = 0; i < n; ++i)
+        headroom[i] = foldHeadroom.next (k * std::max (std::abs (d.channel (0)[i]), std::abs (d.channel (1)[i])));
+    noteHeadroom();
+
+    // The surround fold S = (1 - w) h k D + w B ramps linearly with virt.on
+    // (w, 20 ms; h the fold headroom, 1 below 0 dBFS). The stereo fold ramps linearly from S to D (p, 400 ms) and is
     // power-compensated: g scales the mix so that its RMS follows
     // (1 - p) RMS_S + p RMS_D whatever the correlation of S and D (for
     // fully correlated folds g is 1: the plain linear ramp). A plain linear
@@ -1316,7 +1344,7 @@ void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
         for (int i = 0; i < n; ++i)
         {
             const float w = ramp.next();
-            const float a = (1.0f - w) * k, b = virtWeight ? w : 0.0f;
+            const float ka = (1.0f - w) * k, a = headroom[i] < 1.0f ? ka * headroom[i] : ka, b = virtWeight ? w : 0.0f;
             for (int ch = 0; ch < 2; ++ch)
             {
                 const double dv = d.channel (ch)[i];
@@ -1354,7 +1382,7 @@ void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
     {
         const float w = virtMix.next();
         const float p = std::clamp (passMix.next(), 0.0f, 1.0f);
-        const float a = (1.0f - w) * k, b = virtWeight ? w : 0.0f;
+        const float ka = (1.0f - w) * k, a = headroom[i] < 1.0f ? ka * headroom[i] : ka, b = virtWeight ? w : 0.0f;
         float g = 1.0f;
         if (passSmoothing)
         {
@@ -1952,6 +1980,11 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.activeChannelMask.store (inputDetector.getActiveMask(), rl);
     m.inputFold.store (config.inputChannels > 2 && passMix.getTarget() > 0.5f ? 1 : 0, rl);
     m.surroundConfirmed.store (inputDetector.isSurroundConfirmed(), rl);
+    // docs/11 E28a: the virtualiser's level-match make-up while it runs, and
+    // the deepest fold-headroom gain of the block (either fold).
+    m.virtMakeupDb.store (virtRan ? virtualizer.getMakeupDb() : 0.0f, rl);
+    m.foldHeadroomDb.store (headroomBlockMinDb, rl);
+    headroomBlockMinDb = 0.0f;
     m.safetyClipCount.store (maximizer.getSafetyClipCount(), rl);
 }
 } // namespace flub
