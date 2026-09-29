@@ -341,8 +341,13 @@ void BoostPanel::refreshWarmth()
 // =============================================================================
 void BoostPanel::refreshCapped()
 {
+    // The controller's answer as well as the chain's flag: a strip frozen by
+    // the idle freeze (docs/11 E45) runs no block, so its flag only follows
+    // once sound comes back; the flag alone keeps the chips through the
+    // glide out.
     const bool capped = mode == ModeValue::Gaming
-                        && controller.getChain (controller.getSelectedStrip()).meters().onboardCapActive.load (std::memory_order_relaxed);
+                        && (controller.isOnboardCapApplied()
+                            || controller.getChain (controller.getSelectedStrip()).meters().onboardCapActive.load (std::memory_order_relaxed));
     for (auto& chip : cappedChips)
         if (chip.isVisible() != capped)
             chip.setVisible (capped);

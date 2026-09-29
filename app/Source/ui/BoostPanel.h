@@ -33,8 +33,9 @@
 //           the classic tape Warmth) or TONE (the tone tilt alone, or the
 //           user's own saturator); a click switches Tape Grit on / off.
 // Capped    Gaming only, a CAPPED chip beside the Footsteps and Detail
-//           values while the output's headset enhancement cap applies
-//           (docs/11 E16, MeterBus::onboardCapActive: at most 30 % reach the
+//           values while the output's headset enhancement cap is on or
+//           still gliding out (docs/11 E16, EngineController::
+//           isOnboardCapApplied / MeterBus::onboardCapActive: at most 30 % reach the
 //           sound, the virtualiser is off; the knobs keep their values); a
 //           click offers to remove the cap (EngineController::
 //           setOnboardEnhancement).
