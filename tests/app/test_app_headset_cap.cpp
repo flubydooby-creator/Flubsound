@@ -117,7 +117,11 @@ TEST_CASE ("App: headset ceiling cap follows the output device to the master lim
         // Applied on the audio path: the limited output sits at the cap.
         const float peakDb = renderLoudPeakDb (controller, 1.0);
         CHECK_LE (peakDb, c.ceilingDb + 0.05f);
-        CHECK_GE (peakDb, c.ceilingDb - 0.6f);
+        // Within 0.7 dB under it: since docs/11 E05 (Phase 3 batch 2) the
+        // master limiter has the LF-safe envelope, whose period hold keeps
+        // the gain flat between the peaks, so the loudest sample of the
+        // second half sits about 0.62 dB under the cap (the bound was 0.6 dB).
+        CHECK_GE (peakDb, c.ceilingDb - 0.7f);
         CHECK_LE (controller.getMasterGainReductionDb(), -6.0f);
     }
 

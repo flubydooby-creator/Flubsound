@@ -44,7 +44,10 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         if (setup != nullptr)
             setup (static_cast<int> (i), *s->chain);
         s->chain->prepare ({ sr, maxBlockSize, s->config.inputChannels });
-        if (i < storesFrom.size() && storesFrom[i]->chain != nullptr) s->chain->adoptGovernorState (*storesFrom[i]->chain); // docs/11 E06 (2): strength + learned governor state
+        // docs/11 E06 (2): the replaced chain's protection strength and what
+        // its governor has learned (it may still be running: a seqlock read).
+        if (i < storesFrom.size() && storesFrom[i]->chain != nullptr)
+            s->chain->adoptGovernorState (*storesFrom[i]->chain);
         s->gain.reset (sr, 20.0f, s->config.muted ? 0.0f : dbToGain (s->config.gainDb));
         next.push_back (std::move (s));
     }

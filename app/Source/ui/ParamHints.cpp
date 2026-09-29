@@ -41,6 +41,7 @@ const std::map<juce::String, Hint>& table()
         { "latency.profile", { "Quality sounds best but adds delay; Low Latency responds fastest for games; Balanced sits in between." } },
         { "auto.preamp", { "Turns the input down by as much as your settings boost, so bass or EQ boosts do not push the limiter harder." } },
         { "auto.preampAllowance", { "How much boost the automatic preamp leaves in. More keeps the level up but lets the limiter work more." } },
+        { "auto.preampHot", { "On already loud masters, also takes back the leftover boost and loudness, so the limiter stays quiet." } },
 
         // ---- Module switches ----
         { "gate.on", { "Removes steady hiss and hum between sounds (only in the Quality latency profile)." } },
