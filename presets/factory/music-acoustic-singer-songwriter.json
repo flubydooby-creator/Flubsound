@@ -1,0 +1,41 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "uuid": "32669692-66d3-44dc-87ef-7bf0eb06d104",
+  "name": "Acoustic & Singer-Songwriter",
+  "category": "Music",
+  "author": "Flubsound (Flubes & Claude)",
+  "description": "For acoustic guitar, piano and voice: folk, singer-songwriter and unplugged recordings. Warmth at 35 % adds body to guitar and voice (about +1 dB at 125-250 Hz) with a trace of tube colour (well under 0.1 % distortion), a 10 kHz shelf keeps the strings' detail and air from dulling, and a gentle presence lift near 2.8 kHz helps a voice that is not already forward. A de-esser at 6.5 kHz catches sharp sibilance. Nothing is compressed or pushed louder, and light crossfeed makes it comfortable on headphones.",
+  "tags": ["acoustic", "singer-songwriter", "folk", "vocals", "warm", "headphones"],
+  "params": {
+    "boost": 0.2,
+    "macro.1": 0.1,
+    "macro.5": 0.35,
+    "clarity.presence": 0.2,
+    "clarity.presenceFreq": 2800,
+    "clarity.air": 0.15,
+    "spatial.crossfeed": 0.15,
+    "max.release": 150,
+    "eq.9.type": "High Shelf",
+    "eq.9.freq": 10000,
+    "eq.9.gain": 1,
+    "eq.9.q": 0.7,
+    "dyneq.2.on": true,
+    "dyneq.2.freq": 6500,
+    "dyneq.2.q": 2,
+    "dyneq.2.threshold": -20,
+    "dyneq.2.ratio": 3,
+    "dyneq.2.range": 3,
+    "dyneq.2.attack": 1,
+    "dyneq.2.release": 60
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [-0.5, 0.4, 0.8, 0.8, 0.1, -0.3, -0.1, -0.1, -0.5, -0.1], "toleranceDb": 1.0 },
+      "music": { "db": [0.0, 0.0, 0.2, 0.0, -0.2, -0.3, -0.2, 0.0, -0.5, -0.3], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 0.5, "music": 0.6, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.6,
+    "thdnMaxDb": -73
+  }
+}

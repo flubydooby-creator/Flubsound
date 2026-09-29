@@ -4,7 +4,7 @@
 #   Main.cpp, FlubsoundApplication.*  JUCEApplication, command line, lifetime
 #   shell/       MainWindow, tray icon, global hotkeys, headless screenshot driver
 #   diagnostics/ rotating log, crash reports, engine event monitor, the
-#                diagnostics zip (docs/11 E54)
+#                diagnostics zip, the notify-only update check (docs/11 E54)
 #   engine/      AudioEngineHost (device callback), DriftCompensatedFifo,
 #                EngineController (the facade the UI talks to), AppRouting,
 #                TestSignalGenerator (synthetic programme audio)
@@ -53,6 +53,7 @@ set(FLUB_APP_SOURCES
     Source/diagnostics/DiagnosticsBundle.cpp
     Source/diagnostics/DiagnosticsMonitor.cpp
     Source/diagnostics/DiagnosticsSession.cpp
+    Source/diagnostics/UpdateCheck.cpp
     Source/engine/AudioEngineHost.cpp
     Source/engine/DriftCompensatedFifo.cpp
     Source/engine/EngineController.cpp

@@ -465,8 +465,12 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     smoothReference.setSize (2, maxB);
     contour.prepare (stereo); // docs/11 E32: after the preamp, ahead of the slots; no latency
     warmthTilt.prepare (stereo); // docs/11 E14: ahead of the parametric EQ slot; no latency
+    // docs/11 E33: the per-ear stage, re-designed at this rate; latency only
+    // at the measured AfterMaximizer placement (its per-ear limiters).
+    personal.prepare (stereo, personalPlacement);
+    personalView.setSize (2, maxB);
 
-    totalLatency = 0;
+    totalLatency = personal.latencySamples();
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
             totalLatency += slots[static_cast<size_t> (s)].latencySamples();
@@ -587,6 +591,7 @@ void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexc
     governor.setStrength (previous.getProtectionStrength()); // before its first block: not yet on the audio thread
     setOnboardEnhancementCap (previous.getOnboardEnhancementCap()); // docs/11 E16, taken at once on the first block
     setSafeSpeakerBassCapDb (previous.getSafeSpeakerBassCapDb());   // docs/11 E51
+    personal.setProfileNow (previous.getPersonalProfile());         // docs/11 E33, at this chain's rate
     SafetyGovernor::Memory m;
     if (previous.governorMemory.read (m) && m.valid)
         governor.restoreMemory (m);
@@ -636,6 +641,7 @@ void ProcessingChain::resetSignalState() noexcept
     fold.reset();
     contour.reset();
     warmthTilt.reset();
+    personal.reset();
     virtMix.setImmediate (virtMix.getTarget());
     passMix.setImmediate (passMix.getTarget());
     virtRan = foldRan = passStatsValid = false;
@@ -1781,6 +1787,11 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
                             maximizer.setUpstreamLiftDb (preMaxBackground.get() - bedInBackground.get());
                     }
             }
+            // The per-ear stage (docs/11 E33) ahead of the compressor slot,
+            // the Startle Guard and the maximizer: their stereo-linked gains
+            // keep the difference between the ears that it sets.
+            if (s == SComp && personal.getPlacement() == PersonalPlacement::BeforeCompressor)
+                personal.process (st);
             // The Startle Guard (docs/11 E21) measures what enters the
             // compressor slot and turns down what leaves it, one slot
             // latency later: its look-ahead, without latency of its own.
@@ -1823,12 +1834,31 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         bedLiftHold = maximizer.getBedQuietWeight() < 0.999f ? static_cast<int> (kBedLiftHoldSeconds * config.sampleRate)
                                                              : std::max (0, bedLiftHold - n);
 
+    // The chain's own measures of its output read it with the per-ear stage
+    // undone (docs/11 E33, PersonalProfile.h): the listener's ear correction
+    // is neither distortion nor brightness the chain adds. Without a
+    // profile the inverse is the identity and the view equals st.
+    const bool personalFirst = personal.getPlacement() == PersonalPlacement::BeforeCompressor;
+    AudioBlock chainView = st;
+    if (personalFirst && (spanRunning || smoothProcessed))
+    {
+        chainView = personalView.block (2, n);
+        chainView.copyFrom (st);
+        personal.processInverse (chainView);
+    }
     if (spanRunning)
-        protectionTap (st, kNumSlots, contaminated); // the governor's drive span output and PLR (docs/11 E06)
+        protectionTap (chainView, kNumSlots, contaminated); // the governor's drive span output and PLR (docs/11 E06)
     // The Smoothness stage follows what the slots after it made of its
     // output (docs/11 E07 batch 2), before the output gain.
     if (smoothProcessed)
-        smoothness.processDownstream (st);
+        smoothness.processDownstream (chainView);
+    // The measured alternative placement (docs/11 E33): after the maximizer,
+    // with its own per-ear limiters at the maximizer's ceiling.
+    if (! personalFirst)
+    {
+        personal.setCeilingDb (e[MaxCeilingDb]);
+        personal.process (st);
+    }
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();

@@ -403,4 +403,13 @@ static_assert (std::is_same_v<decltype (&MixEngine::setChatMix), void (MixEngine
 static_assert (std::is_same_v<decltype (&HearingGuard::process), void (HearingGuard::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&HearingGuard::reset), void (HearingGuard::*)() noexcept FLUB_NONBLOCKING>);
 
+// The personal per-ear stage ProcessingChain::process runs ahead of the
+// compressor slot (or after the maximizer), its inverse for the chain's
+// measures and the per-block ceiling (docs/11 E33, tests/test_personal_profile.cpp).
+#include "flub/engine/PersonalProfile.h"
+static_assert (hasNonblockingProcess<PersonalEarStage>);
+static_assert (hasNonblockingReset<PersonalEarStage>);
+static_assert (std::is_same_v<decltype (&PersonalEarStage::processInverse), void (PersonalEarStage::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&PersonalEarStage::setCeilingDb), void (PersonalEarStage::*) (float) noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

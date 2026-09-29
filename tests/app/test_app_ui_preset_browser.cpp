@@ -124,7 +124,7 @@ TEST_CASE ("App UI: preset search ranks by words found, then field; filters by s
     EngineController c (headlessOptions (temp));
     c.getPresetManager().setUserPresetFolder (temp.file ("Presets"));
     const auto& all = c.getPresetManager().getPresets();
-    REQUIRE (all.size() == 25);
+    REQUIRE (all.size() == 30);
 
     Browser::Filter f;
     const Browser::Context none;
@@ -187,7 +187,7 @@ TEST_CASE ("App UI: preset search ranks by words found, then field; filters by s
 
     const auto tags = Browser::commonTags (all, 10);
     CHECK (tags.size() == 10);
-    CHECK (tags[0] == "headphones"); // 4 presets
+    CHECK (tags[0] == "headphones"); // 6 presets
     for (const auto& t : tags)
         CHECK (t == t.toLowerCase());
 
@@ -262,7 +262,7 @@ TEST_CASE ("App UI: a preview plays in the active bank only; Cancel restores it 
     {
         Browser browser (c, shared);
         CHECK (browser.isCurrentSoundSelected());
-        CHECK (browser.getShownPresets().size() == 25);
+        CHECK (browser.getShownPresets().size() == 30);
         const auto& club = preset (c, "Club Loud");
         REQUIRE (browser.selectPreset (club.id));
         CHECK (browser.getAudition().getPreviewId() == club.id);
@@ -509,7 +509,7 @@ TEST_CASE ("App UI: the browser shows a preset's description, tags, latency prof
 
     browser.setQuery ("typo");
     CHECK (browser.getShownPresets().size() == 1);
-    CHECK (browser.getStatusText().startsWith ("1 of 26 presets"));
+    CHECK (browser.getStatusText().startsWith ("1 of 31 presets"));
     browser.cancel();
 }
 

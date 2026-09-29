@@ -1,0 +1,42 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "uuid": "0b41a0b0-8871-4730-9b76-83a15affd302",
+  "name": "Rock & Metal",
+  "category": "Music",
+  "author": "Flubsound (Flubes & Claude)",
+  "description": "For rock, metal and punk: guitars and drums with bite, without mud or fizz. Low-mid boxiness around 250-500 Hz is trimmed by about 1 dB, the guitar and vocal bite around 2 kHz comes forward by about 1 dB, and a dynamic band near 5 kHz holds back cymbal and distortion fizz only when it gets loud. Kick and bass stay tight and centred below 100 Hz, Punch sharpens the drums' attack and light glue holds the mix together. It adds no loudness: rock and metal masters are loud already.",
+  "tags": ["rock", "metal", "punk", "guitars", "drums", "live-band"],
+  "params": {
+    "boost": 0.3,
+    "macro.1": 0.3,
+    "macro.3": 0.1,
+    "bass.boost": 1,
+    "bass.tighten": 0.25,
+    "bass.monoBelow": 100,
+    "clarity.demud": 0.25,
+    "max.glue": 0.2,
+    "eq.3.freq": 400,
+    "eq.3.gain": -1.5,
+    "eq.3.q": 0.9,
+    "eq.6.freq": 1800,
+    "eq.6.gain": 1.5,
+    "eq.6.q": 0.8,
+    "dyneq.2.on": true,
+    "dyneq.2.freq": 5000,
+    "dyneq.2.q": 1.4,
+    "dyneq.2.threshold": -30,
+    "dyneq.2.ratio": 2.5,
+    "dyneq.2.range": 3,
+    "dyneq.2.attack": 2
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [-0.2, 0.2, -0.4, -1.0, -0.7, 0.5, 1.0, -0.4, -0.5, 0.3], "toleranceDb": 1.0 },
+      "music": { "db": [-0.1, 0.0, 0.3, -0.2, -0.8, -0.4, 0.1, 0.4, 0.5, 0.9], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": -0.2, "music": -0.3, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.9,
+    "thdnMaxDb": -100
+  }
+}

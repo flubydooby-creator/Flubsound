@@ -1176,6 +1176,62 @@ TEST_CASE ("Factory presets: every preset carries a complete intent block (docs/
     CHECK (withIntent == static_cast<int> (files.size()));
 }
 
+TEST_CASE ("Factory presets: the genre presets keep the voicing their descriptions promise (docs/11 E14 step 3)")
+{
+    // What each genre preset is built on, checked on its effective values at
+    // the stored Boost / macros (governor scale 1); the sound itself is its
+    // intent block's (the cases above).
+    const auto effective = [] (const char* file, preset::Preset& p) {
+        std::string error;
+        std::vector<float> eff (static_cast<size_t> (kNumParams));
+        if (! preset::load ((fs::path (FLUB_PRESET_DIR) / file).string(), p, error))
+        {
+            reportFailure (__FILE__, __LINE__, std::string (file) + " does not load: " + error);
+            return eff;
+        }
+        MacroMap::apply (p.values.data(), eff.data(), 1.0f);
+        return eff;
+    };
+    const auto at = [] (const std::vector<float>& v, int id) { return v[static_cast<size_t> (id)]; };
+
+    // Orchestral & Film keeps the dynamics: no maximizer drive, clipper,
+    // glue, compressor or dynamic EQ (only the limiter), a small range-loss
+    // bound, and the Meier crossfeed for a headphone stage.
+    {
+        preset::Preset p;
+        const auto eff = effective ("music-orchestral-film.json", p);
+        CHECK (at (eff, MaxDriveDb) == 0.0f);
+        CHECK (at (eff, MaxClipAmount) == 0.0f);
+        CHECK (at (eff, MaxGlue) == 0.0f);
+        CHECK (at (eff, CompressorOn) < 0.5f);
+        CHECK (at (eff, DynEqOn) < 0.5f);
+        CHECK (at (eff, SpatialCrossfeed) > 0.0f);
+        CHECK (std::lround (at (eff, SpatialCrossfeedType)) == static_cast<int> (CrossfeedTypeValue::Meier));
+        REQUIRE (p.intent.has_value());
+        CHECK (p.intent->lraLossMaxLu.value_or (99.0) <= 1.0);
+    }
+    // Acoustic & Singer-Songwriter and R&B & Vocal: Warmth's tone tilt (not
+    // the Tape grit), with the Tube colour it picks for an untouched saturator.
+    for (const char* file : { "music-acoustic-singer-songwriter.json", "music-rnb-vocal.json" })
+    {
+        preset::Preset p;
+        const auto eff = effective (file, p);
+        CHECK (at (eff, WarmthTone) > 0.1f);
+        CHECK (at (eff, WarmthTapeGrit) < 0.5f);
+        CHECK (std::lround (at (eff, SatType)) == 1); // Tube
+    }
+    // None of the five adds fixed drive or raises the ceiling (the factory
+    // policy above), and none drives the maximizer from Boost or Loudness.
+    for (const char* file : { "music-rock-metal.json", "music-orchestral-film.json", "music-acoustic-singer-songwriter.json",
+                              "music-rnb-vocal.json", "music-electronic-ambient.json" })
+    {
+        preset::Preset p;
+        const auto eff = effective (file, p);
+        CHECK (at (eff, MaxDriveDb) == 0.0f);
+        CHECK (p.category == "Music");
+    }
+}
+
 
 // ---- Classical & Jazz on a hot master (docs/11 E14 Done-when, E11) ----------
 namespace

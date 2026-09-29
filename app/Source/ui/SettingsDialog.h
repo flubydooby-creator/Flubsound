@@ -51,6 +51,9 @@
 //               there are, and Export diagnostics, which saves one zip
 //               (system and device details, settings, logs, crash reports;
 //               no audio, personal paths and names redacted) for a report.
+//               Updates: the opt-in, notify-only update check (off by
+//               default; channel Stable / Beta, Check now, the last result
+//               and the link to a newer release's page; UpdateCheck.h).
 #pragma once
 
 #include "Theme.h"
@@ -171,6 +174,9 @@ public:
     /** "None", or "2 - the latest on 2026-09-29 14:02" for the crash reports
         in `logFolder`. */
     static juce::String describeCrashReports (const juce::File& logFolder);
+    /** The Diagnostics page's update line (docs/11 E54): "Off: ...", "Not
+        checked yet." or "Last check <time>: <result>". */
+    static juce::String describeUpdateCheck (const juce::PropertiesFile& settings);
 
     void paint (juce::Graphics& g) override;
     void resized() override;

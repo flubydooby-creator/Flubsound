@@ -66,4 +66,19 @@ else()
 endif()
 set_source_files_properties(${FLUB_APP_TEST_SOURCES} PROPERTIES COMPILE_OPTIONS "${FLUB_APP_TEST_WARNINGS}")
 
+# docs/11 E53: the plug-in's state round-trip (test_plugin_state.cpp) runs the
+# Flubsound FX processor itself, so its sources are compiled in when the
+# plug-in is built (JucePlugin_Name is the plug-in target's definition).
+if(FLUB_BUILD_PLUGIN)
+    set(FLUB_APP_TEST_PLUGIN_SOURCES
+        "${PROJECT_SOURCE_DIR}/plugin/Source/PluginProcessor.cpp"
+        "${PROJECT_SOURCE_DIR}/plugin/Source/PluginEditor.cpp")
+    target_sources(flub_app_tests PRIVATE ${FLUB_APP_TEST_PLUGIN_SOURCES})
+    target_include_directories(flub_app_tests PRIVATE "${PROJECT_SOURCE_DIR}/plugin/Source")
+    target_compile_definitions(flub_app_tests PRIVATE FLUB_APP_TESTS_HAVE_PLUGIN=1)
+    set_source_files_properties(${FLUB_APP_TEST_PLUGIN_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "${FLUB_APP_TEST_WARNINGS}"
+        COMPILE_DEFINITIONS "JucePlugin_Name=\"Flubsound FX\"")
+endif()
+
 add_test(NAME flub_app_tests COMMAND flub_app_tests)

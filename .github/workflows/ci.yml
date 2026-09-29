@@ -201,8 +201,16 @@ jobs:
           key: juce-${{ env.FLUB_JUCE_VERSION }}-${{ runner.os }}
       # Windows: the static C++ runtime (/MT), so the app, its installer and
       # the VST3 run on a PC without the Visual C++ Redistributable.
+      # Debug information in the optimised Release build (docs/11 E54): /Z7
+      # and a linked PDB (/DEBUG, with /OPT:REF /OPT:ICF kept) on Windows, -g
+      # elsewhere; the "Symbols" step below archives it (CMake prepends these
+      # variables to its default flags on the first configure).
       - name: Configure
         shell: bash
+        env:
+          CFLAGS: ${{ runner.os == 'Windows' && '/Z7' || '-g' }}
+          CXXFLAGS: ${{ runner.os == 'Windows' && '/Z7' || '-g' }}
+          LDFLAGS: ${{ runner.os == 'Windows' && '/DEBUG /OPT:REF /OPT:ICF' || '' }}
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_APP_TESTS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
@@ -228,6 +236,46 @@ jobs:
         with:
           name: screenshots
           path: screenshot-*.png
+      # docs/11 E54: the symbols of exactly this build, so a crash report or
+      # minidump from the test build can be symbolised (Windows: the PDBs,
+      # moved out of the artefact folders so the package does not carry them;
+      # macOS: a .dSYM per bundle from dsymutil; Linux: the debug information
+      # split into <binary>.debug, the binaries stripped of it and given a
+      # debug link). COMMIT.txt names the commit; the artifact is kept 90 days.
+      - name: Symbols
+        shell: bash
+        run: |
+          mkdir -p symbols
+          git rev-parse HEAD > symbols/COMMIT.txt
+          app="build/app/FlubsoundPro_artefacts/Release"
+          fx="build/plugin/FlubsoundFX_artefacts/Release"
+          case "${{ runner.os }}" in
+            Windows)
+              find "$app" "$fx" -name '*.pdb' -print0 | while IFS= read -r -d '' pdb; do mv "$pdb" symbols/; done
+              ;;
+            macOS)
+              for bundle in "$app/Flubsound Pro.app" "$fx"/*/*.vst3 "$fx"/*/*.component "$fx"/*/*.app; do
+                [ -d "$bundle" ] || continue
+                exe=$(find "$bundle/Contents/MacOS" -maxdepth 1 -type f | head -n 1)
+                dsymutil "$exe" -o "symbols/$(basename "$bundle").dSYM"
+              done
+              ;;
+            *)
+              for bin in "$app/Flubsound Pro" "$fx/Standalone/Flubsound FX" "$fx"/VST3/*.vst3/Contents/*/*.so; do
+                [ -f "$bin" ] || continue
+                debug="symbols/$(basename "$bin").debug"
+                objcopy --only-keep-debug "$bin" "$debug"
+                objcopy --strip-debug --add-gnu-debuglink="$debug" "$bin"
+              done
+              ;;
+          esac
+          ls -la symbols
+          [ "$(ls symbols | wc -l)" -ge 3 ] || { echo "::error::no symbol files were found"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Flubsound-symbols-${{ runner.os }}
+          path: symbols/
+          retention-days: 90
       # Inno Setup for the Windows installer (docs/11 E54); the runner image
       # may already have it.
       - name: Inno Setup (Windows)
@@ -260,11 +308,14 @@ jobs:
           retention-days: 30
       # docs/11 E53 step 3: pluginval (Tracktion's plug-in validator, latest
       # release) loads the Flubsound FX VST3 and runs its tests at strictness
-      # 5 in process: bus layouts, state save / restore, parameters,
-      # automation, processing at several rates and block sizes, the editor
-      # (Linux under Xvfb). Any failed test fails the job; it runs after the
-      # package upload, so the test build is kept either way.
-      - name: pluginval (VST3, strictness 5)
+      # 10 in process: bus layouts, state save / restore, parameters,
+      # automation, fuzzed parameter changes, processing at several rates and
+      # block sizes, the editor (Linux under Xvfb). Strictness 5 was green on
+      # all three OSes in run 36575196651. Any failed test fails the job; it
+      # runs after the package upload, so the test build is kept either way.
+      # The plug-in's state round-trip is also tested in the repository
+      # (tests/app/test_plugin_state.cpp, in "App tests").
+      - name: pluginval (VST3, strictness 10)
         shell: bash
         timeout-minutes: 20
         run: |
@@ -280,7 +331,7 @@ jobs:
           vst3="$PWD/build/plugin/FlubsoundFX_artefacts/Release/VST3/Flubsound FX.vst3"
           logs="$PWD/pluginval-logs"
           if [ "${{ runner.os }}" = Windows ]; then vst3=$(cygpath -w "$vst3"); logs=$(cygpath -w "$logs"); fi
-          run=("pluginval-bin/$exe" --strictness-level 5 --validate-in-process --timeout-ms 120000 --output-dir "$logs" --validate "$vst3")
+          run=("pluginval-bin/$exe" --strictness-level 10 --validate-in-process --timeout-ms 120000 --output-dir "$logs" --validate "$vst3")
           if [ "${{ runner.os }}" = Linux ]; then xvfb-run -a "${run[@]}"; else "${run[@]}"; fi
       - uses: actions/upload-artifact@v4
         if: failure()

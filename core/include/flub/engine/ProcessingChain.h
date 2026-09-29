@@ -37,6 +37,10 @@
 //                                      focus 0 when the virtualiser produced
 //                                      binaural output or the game renders
 //                                      its own HRTF, virt.ownHrtf)
+//    -> personal per-ear stage (docs/11 E33; PersonalProfile.h): the
+//       listener's per-ear gain, balance and 8-band EQ with its headroom
+//       reservation, from setPersonalProfile() (not a parameter); the
+//       identity, untouched, without a profile
 //    -> [slot] Compressor (look-ahead, up/down), with the Startle Guard
 //              (guard.range, docs/11 E21; StartleGuard.h) measuring its
 //              input and turning down its output: a fast, programme-relative
@@ -170,6 +174,7 @@
 #include "MeterBus.h"
 #include "ModuleSlot.h"
 #include "Parameters.h"
+#include "PersonalProfile.h"
 #include "Protection.h"
 #include "StartleGuard.h"
 #include "flub/analysis/LoudnessMeter.h"
@@ -380,6 +385,30 @@ public:
     /** The Warmth tilt (docs/11 E14; ToneTilt.h): its amount and level
         compensation as applied, for tests and diagnostics. */
     const ToneTilt& getWarmthTilt() const noexcept { return warmthTilt; }
+
+    // ---- Personal hearing profile (docs/11 E33; PersonalProfile.h) ------
+    /** The listener's per-ear profile. Not a parameter: preset loads, A/B
+        banks, the macros and the automatic profiles never touch it. On the
+        thread that prepares the chain (never concurrently with prepare()):
+        designs it and hands it to the audio thread wait-free, which
+        crossfades to it (DeviceCorrection::kCrossfadeMs). prepare()
+        re-designs it at the new rate; adoptGovernorState() carries it to a
+        swapped-in chain. False if the hand-over ring was full (the audio
+        thread has not run for several changes): retryPersonalProfile() (a
+        host timer), the next call or prepare() hands it over. */
+    bool setPersonalProfile (const PersonalProfile& profile) { return personal.setProfile (profile); }
+    bool retryPersonalProfile() { return personal.retryPending(); }
+    /** The profile last given (sanitised), its design and its headroom
+        reservation (dB <= 0); on the thread that sets it. */
+    const PersonalProfile& getPersonalProfile() const noexcept { return personal.getProfile(); }
+    const CorrectionCurve& getPersonalCurve() const noexcept { return personal.getCurve(); }
+    float getPersonalReservationDb() const noexcept { return personal.getReservationDb(); }
+    /** Structural, before prepare(): where the per-ear stage runs.
+        BeforeCompressor (the default) is the product's; AfterMaximizer is
+        the measured alternative (PersonalProfile.h), which adds its per-ear
+        limiters' latency. */
+    void setPersonalPlacement (PersonalPlacement placement) noexcept { personalPlacement = placement; }
+    PersonalPlacement getPersonalPlacement() const noexcept { return personal.getPlacement(); }
 
     /** Input samples with a magnitude above this (+24 dBFS) are corrupt and
         muted by the sanitiser (see the header comment). */
@@ -599,6 +628,11 @@ private:
     // model last counted it (moved in 0.25 dB steps, audio thread).
     ToneTilt warmthTilt;
     float warmthTrimModelDb = 0.0f;
+    // The personal per-ear stage (docs/11 E33) and, at BeforeCompressor, the
+    // output with it undone for the chain's own measures (personalView).
+    PersonalEarStage personal;
+    PersonalPlacement personalPlacement = PersonalPlacement::BeforeCompressor;
+    AudioBuffer personalView;
     std::atomic<float> listeningLevelDb { 0.0f };
     // The on-board enhancement cap (docs/11 E16): requested (any thread) and
     // as applied, 0..1 (audio thread); snapped to the request on the first

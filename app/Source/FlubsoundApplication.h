@@ -9,6 +9,8 @@
 //   3. MainWindow (content: ui::MainComponent), shown unless "start minimised"
 //   4. TrayIcon (enable, mode, boost, preset quick list, open, quit)
 //   5. HotkeyManager (system-wide shortcuts)
+//   6. the update check (docs/11 E54): only when the user switched it on;
+//      a newer release is announced once in the tray
 // Closing the window hides it to the tray when "close to tray" is on (on
 // Linux, where a tray host is not guaranteed, the window is minimised
 // instead); "Quit" in the tray or a system quit request ends the app.
@@ -33,6 +35,10 @@ class ScreenshotDriver;
 namespace diagnostics
 {
 class DiagnosticsSession;
+namespace update
+{
+class UpdateChecker;
+}
 }
 
 class FlubsoundApplication final : public juce::JUCEApplication
@@ -64,6 +70,7 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<TrayIcon> trayIcon;
     std::unique_ptr<HotkeyManager> hotkeys;
+    std::unique_ptr<diagnostics::update::UpdateChecker> updateCheck; // docs/11 E54: opt-in, notify-only
     std::unique_ptr<ScreenshotDriver> screenshot;
     bool screenshotMode = false;
 };

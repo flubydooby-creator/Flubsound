@@ -5,6 +5,7 @@
 #include "diagnostics/CrashHandler.h"
 #include "diagnostics/DiagnosticLog.h"
 #include "diagnostics/DiagnosticsBundle.h"
+#include "diagnostics/UpdateCheck.h"
 #include "platform/PlatformBridge.h"
 #include "presets/PresetManager.h"
 
@@ -1414,12 +1415,54 @@ public:
         exportButton.setTooltip ("Save one zip to attach to a report: versions, the audio device and its state, settings, logs and crash reports");
         exportButton.onClick = [this] { chooseAndExport(); };
         addAndMakeVisible (exportButton);
+
+        // docs/11 E54: the notify-only update check, off by default.
+        Style::set (updateToggle, "switch");
+        updateToggle.setTooltip ("Ask GitHub at start (at most once a day) whether a newer Flubsound release exists, and say so with a "
+                                 "link to its page. Nothing is downloaded or installed.");
+        updateToggle.onClick = [this]
+        {
+            auto& file = controller.getSettings().getPropertiesFile();
+            diagnostics::update::setEnabled (file, updateToggle.getToggleState());
+            if (updateToggle.getToggleState())
+                checkNow(); // switching it on is the moment to look
+            refresh();
+        };
+        addAndMakeVisible (updateToggle);
+        channelBox.addItem ("Stable releases", 1);
+        channelBox.addItem ("Beta: pre-releases too", 2);
+        channelBox.setTitle ("Update channel");
+        channelBox.onChange = [this]
+        {
+            diagnostics::update::setChannel (controller.getSettings().getPropertiesFile(), channelBox.getSelectedId() == 2
+                                                                                                ? diagnostics::update::Channel::Beta
+                                                                                                : diagnostics::update::Channel::Stable);
+        };
+        addAndMakeVisible (channelBox);
+        checkButton.setButtonText ("Check now");
+        checkButton.onClick = [this] { checkNow(); };
+        addAndMakeVisible (checkButton);
+        downloadLink.setButtonText ("Open the download page");
+        downloadLink.setFont (Theme::font (12.5f), false, juce::Justification::centredLeft);
+        addChildComponent (downloadLink);
         refresh();
     }
 
     void refresh()
     {
         crashText = describeCrashReports (diagnostics::logFolder());
+        const auto& file = controller.getSettings().getPropertiesFile();
+        const bool on = diagnostics::update::isEnabled (file);
+        updateToggle.setToggleState (on, juce::dontSendNotification);
+        channelBox.setSelectedId (diagnostics::update::getChannel (file) == diagnostics::update::Channel::Beta ? 2 : 1,
+                                  juce::dontSendNotification);
+        const bool checking = checker != nullptr && checker->isChecking();
+        checkButton.setEnabled (on && ! checking);
+        checkButton.setButtonText (checking ? "Checking..." : "Check now");
+        updateText = describeUpdateCheck (file);
+        const auto url = on ? diagnostics::update::getLastResultUrl (file) : juce::String();
+        downloadLink.setURL (juce::URL (url));
+        downloadLink.setVisible (url.isNotEmpty());
         repaint();
     }
 
@@ -1447,6 +1490,14 @@ public:
             g.setFont (Theme::font (11.5f));
             g.drawFittedText (status, statusArea, juce::Justification::topLeft, 3, 1.0f);
         }
+
+        drawSectionTitle (g, updatesTitle, "Updates");
+        g.setColour (Palette::text.withAlpha (0.88f));
+        g.setFont (Theme::font (12.5f));
+        g.drawText ("Channel", channelLine, juce::Justification::centredLeft, true);
+        g.setColour (Palette::muted);
+        g.setFont (Theme::font (12.0f));
+        g.drawFittedText (updateText, updateTextArea, juce::Justification::topLeft, 2, 1.0f);
     }
 
     void resized() override
@@ -1465,9 +1516,33 @@ public:
         exportButton.setBounds (r.removeFromTop (kRowHeight).withWidth (220).reduced (0, 2));
         r.removeFromTop (6);
         statusArea = r.removeFromTop (48);
+
+        r.removeFromTop (8);
+        updatesTitle = r.removeFromTop (22);
+        r.removeFromTop (8);
+        updateToggle.setBounds (r.removeFromTop (26).withWidth (juce::jmin (r.getWidth(), 420)));
+        r.removeFromTop (4);
+        channelLine = r.removeFromTop (kRowHeight);
+        channelBox.setBounds (channelLine.withTrimmedLeft (kCaptionWidth).withWidth (220).reduced (0, 3));
+        checkButton.setBounds (channelBox.getBounds().translated (232, 0).withWidth (120));
+        r.removeFromTop (6);
+        updateTextArea = r.removeFromTop (34);
+        downloadLink.setBounds (r.removeFromTop (24).withWidth (220));
     }
 
 private:
+    void checkNow()
+    {
+        if (checker == nullptr)
+        {
+            checker = std::make_unique<diagnostics::update::UpdateChecker> (controller.getSettings().getPropertiesFile(),
+                                                                             diagnostics::update::UpdateChecker::Options());
+            checker->onResult = [this] (const diagnostics::update::Result&) { refresh(); };
+        }
+        checker->checkNow();
+        refresh();
+    }
+
     void chooseAndExport()
     {
         const auto folder = juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
@@ -1498,6 +1573,14 @@ private:
     juce::String crashText, status;
     bool statusIsError = false;
     juce::Rectangle<int> titleArea, introArea, folderLine, crashLine, statusArea;
+    // Updates (docs/11 E54)
+    juce::ToggleButton updateToggle { "Check for updates (notify only)" };
+    juce::ComboBox channelBox;
+    juce::TextButton checkButton;
+    juce::HyperlinkButton downloadLink;
+    juce::String updateText;
+    juce::Rectangle<int> updatesTitle, channelLine, updateTextArea;
+    std::unique_ptr<diagnostics::update::UpdateChecker> checker; // "Check now"; destroyed (and cancelled) with the page
 };
 
 // =============================================================================
@@ -1769,6 +1852,17 @@ juce::String SettingsDialog::describeCrashReports (const juce::File& logFolder)
     if (reports.isEmpty())
         return "None";
     return juce::String (reports.size()) + "  -  the latest on " + reports.getFirst().getLastModificationTime().formatted ("%Y-%m-%d %H:%M");
+}
+
+juce::String SettingsDialog::describeUpdateCheck (const juce::PropertiesFile& settings)
+{
+    if (! diagnostics::update::isEnabled (settings))
+        return "Off: Flubsound does not look for updates.";
+    const auto when = diagnostics::update::getLastCheckTime (settings);
+    const auto text = diagnostics::update::getLastResultText (settings);
+    if (when == juce::Time() || text.isEmpty())
+        return "Not checked yet.";
+    return "Last check " + when.formatted ("%Y-%m-%d %H:%M") + ": " + text;
 }
 
 juce::String SettingsDialog::exportDiagnostics (EngineController& controller, const juce::File& logFolder, const juce::File& zipFile,

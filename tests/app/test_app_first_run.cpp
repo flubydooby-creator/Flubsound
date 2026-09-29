@@ -303,7 +303,7 @@ TEST_CASE ("App: loading any factory preset leaves the latency profile, bypass a
     EngineController controller (headlessOptions (temp, false));
     auto& host = controller.getHost();
     const auto factory = controller.getPresetManager().getFactoryPresets();
-    REQUIRE (factory.size() >= 25);
+    REQUIRE (factory.size() >= 30);
 
     for (const auto profile : { LatencyProfileValue::Quality, LatencyProfileValue::LowLatency })
     {

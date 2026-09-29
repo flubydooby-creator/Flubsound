@@ -1,6 +1,7 @@
 #include "FlubsoundApplication.h"
 
 #include "diagnostics/DiagnosticsSession.h"
+#include "diagnostics/UpdateCheck.h"
 #include "engine/EngineController.h"
 #include "platform/PlatformBridge.h"
 #include "shell/HotkeyManager.h"
@@ -121,6 +122,14 @@ void FlubsoundApplication::initialiseInteractive()
     for (const auto& failure : hotkeys->getFailures())
         printLine (true, "Flubsound: hotkey: " + failure);
 
+    // docs/11 E54: the notify-only update check; nothing runs while it is off.
+    updateCheck = diagnostics::update::startAtLaunch (controller->getSettings().getPropertiesFile(),
+                                                      [this] (const juce::String& title, const juce::String& message)
+                                                      {
+                                                          if (trayIcon != nullptr)
+                                                              trayIcon->notify (title, message);
+                                                      });
+
    #if ! JUCE_MAC
     // An enabled start-up entry follows this executable if the app was moved,
     // updated in a new folder or its AppImage renamed. (macOS registers the
@@ -210,6 +219,7 @@ bool FlubsoundApplication::initialiseScreenshot()
 void FlubsoundApplication::shutdown()
 {
     screenshot.reset();
+    updateCheck.reset(); // cancels a running request
 
     if (hotkeys != nullptr)
         hotkeys->unregisterAll();

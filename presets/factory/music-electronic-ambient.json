@@ -1,0 +1,35 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "uuid": "f6a6ed98-51f2-4073-ac53-5821cb2bd350",
+  "name": "Electronic & Ambient",
+  "category": "Music",
+  "author": "Flubsound (Flubes & Claude)",
+  "description": "For electronic music, from house and techno to ambient and downtempo. A deep sub-bass lift (about +2 dB at 31 Hz, adaptive with headroom protection, mono below 120 Hz) and a wider, more spacious stereo image above 250 Hz with a little decorrelated ambience; Mono Safety watches the correlation and pulls the width back if the image would collapse. The mids and highs are left as they are (within about 0.3 dB on pink noise), with a touch of air.",
+  "tags": ["electronic", "ambient", "techno", "house", "sub", "wide"],
+  "params": {
+    "boost": 0.3,
+    "macro.1": 0.1,
+    "macro.2": 0.35,
+    "bass.boost": 5,
+    "bass.freq": 50,
+    "bass.protect": -8,
+    "bass.monoBelow": 120,
+    "clarity.air": 0.12,
+    "spatial.width": 1.15,
+    "spatial.lowCut": 250,
+    "spatial.space": 0.2,
+    "spatial.minCorrelation": 0.15,
+    "max.glue": 0.2,
+    "bass.subsonicOrder": "12 dB/oct"
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [2.3, 1.4, 0.1, -0.3, -0.3, -0.3, -0.1, -0.1, -0.2, 0.0], "toleranceDb": 1.0 },
+      "music": { "db": [0.5, 0.4, 0.0, -0.5, -1.3, -1.3, -1.1, -0.8, -1.0, -0.9], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 0.5, "music": 1.5, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.8,
+    "thdnMaxDb": -100
+  }
+}
