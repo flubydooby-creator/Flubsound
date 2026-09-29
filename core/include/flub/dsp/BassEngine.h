@@ -1,6 +1,6 @@
 // Flubsound Pro - bass engine: adaptive boost + psychoacoustic harmonics.
 //
-// Signal flow (per block, zero latency, all IIR):
+// Signal flow (per block, all IIR; zero latency unless setLookaheadMs):
 //   1. Subsonic high-pass (Butterworth 24 dB/oct at subsonicHz, or 12 dB/oct
 //      with subsonicOrder 2; 0 = off) removes DC and inaudible rumble that
 //      would waste limiter headroom. The 2nd order keeps about half the group
@@ -29,6 +29,15 @@
 //      line under 55 Hz kicks, protection alone: 3.5-4.7 -> 0.0 dB of
 //      modulation, at a steadily lower boost); an isolated hit releases as
 //      before. Cap: <= 0.5 dB over it for any tone and shelf, as classic.
+//      Look-ahead (setLookaheadMs, meant for the Quality profile at 2 ms;
+//      the chain does not set it yet, docs/11 E02): the audio path from
+//      the classic detector on is delayed; the split detectors read the
+//      undelayed signal with a 1 ms attack and their withdrawals skip the
+//      5 ms gain smoothing, so an onset meets its withdrawal in place
+//      instead of 10 - 40 ms of overshoot (40 Hz at -6 dBFS into +12 dB,
+//      cap 0 dBFS: onset peak +4.0 -> -0.4 dBFS). With splitProtection
+//      off the engine only delays its output (up to the peak holds'
+//      bucket grid, which the delay shifts).
 //   4. Psychoacoustic bass ("missing fundamental"): the mid signal is band
 //      limited to [~25 Hz, harmonicsCutoff]; an amplitude-normalised
 //      Chebyshev waveshaper generates exact harmonics of a sinusoid:
@@ -65,8 +74,11 @@
 #include "TransientShaper.h"
 #include "flub/common/SmoothedValue.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <vector>
 
 namespace flub
 {
@@ -91,9 +103,14 @@ struct BassEngineParams
 class BassEngine final : public Processor
 {
 public:
+    /** Structural: call before prepare(). Look-ahead of the split-band
+        protection (docs/11 E02 (a), 0 .. 5 ms, default 0): the latency. */
+    void setLookaheadMs (float ms) noexcept { lookaheadMs = std::isfinite (ms) ? std::clamp (ms, 0.0f, 5.0f) : 0.0f; }
+
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+    int latencySamples() const noexcept override { return lookahead; }
     const char* name() const noexcept override { return "Bass Engine"; }
 
     void setParams (const BassEngineParams& p) noexcept FLUB_NONBLOCKING;
@@ -175,6 +192,7 @@ private:
     void clearAllStates() noexcept;
     float flushStates() noexcept;
     void controlTick() noexcept;
+    void splitDetect (const std::array<float, kMaxChannels>& x, int numCh, float lfPeak) noexcept;
     void processSegment (const AudioBlock& block, int numCh, int pos, int len) noexcept;
 
     ProcessSpec spec;
@@ -226,6 +244,14 @@ private:
     bool bellActive = false;
     TransientShaper::SvfGlide bell;
     std::array<SvfState, kMaxChannels> bellState {};
+
+    // 3c. Look-ahead (setLookaheadMs): the audio delay after the split
+    // detectors (planar, lookahead samples per channel) and the punch
+    // detector's own low-pass on the undelayed signal.
+    float lookaheadMs = 0.0f;
+    int lookahead = 0, lookaheadPos = 0;
+    std::vector<float> lookaheadBuf;
+    std::array<SvfState, kMaxChannels> lookaheadLpState {};
 
     // 4. Psychoacoustic harmonics (mid signal) + replace-fundamental high-pass.
     bool harmonicsActive = false;

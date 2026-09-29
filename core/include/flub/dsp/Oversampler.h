@@ -51,6 +51,12 @@
 // windowed sinc at a fractional centre), so the deviation stays aligned
 // with the exactly delayed dry path and the latency is unchanged.
 //
+// The maximizer's clipper has a table of its own (forClipper): the latency
+// of its fixed designs, with Low Latency below 88.2 kHz on the 16-sample
+// 4x design instead of 2x Low (24 dB of drive, crest gate off, 44.1 kHz:
+// -19.0 -> -42.0 dBc), no ADAA (its depth-capped curve has no closed-form
+// antiderivative).
+//
 // A minimum-phase / polyphase-IIR variant (lower latency, non-linear phase)
 // is the planned alternative for the "Competitive" latency profile.
 #pragma once
@@ -167,6 +173,12 @@ public:
         comment): the same latency in samples as the fixed 2x designs it
         replaced (Quality 32, Balanced / Low Latency 16) at every rate. */
     static Design forProfile (Profile profile, double sampleRate) noexcept;
+
+    /** The maximizer clipper's table (docs/11 E10): the latency of the
+        fixed designs it had (Quality / Balanced 4x High, 36 samples; Low
+        Latency 16), with Low Latency below 88.2 kHz running 4x (the
+        saturator's 16-sample design, without ADAA) instead of 2x Low. */
+    static Design forClipper (Profile profile, double sampleRate) noexcept;
 
     /** Allocates. factor must be 1, 2 or 4. */
     void prepare (int numChannels, int maxBlockSize, int factor, Quality quality = Quality::High);

@@ -107,11 +107,17 @@ struct MaximizerParams
 class LoudnessMaximizer final : public Processor
 {
 public:
-    /** Structural: call before prepare(). */
+    /** Structural: call before prepare(). A fixed half-band design, factor 1, 2 or 4. */
     void setClipOversampling (int factor, Oversampler::Quality q = Oversampler::Quality::High) noexcept
     {
-        clipOsFactor = factor;
-        clipOsQuality = q;
+        clipOsDesign = Oversampler::design (factor <= 1 ? 1 : (factor <= 2 ? 2 : 4), q);
+    }
+    /** Structural: an explicit design (factor 1, 2, 4 or 8, no ADAA:
+        Oversampler::forClipper, docs/11 E10). */
+    void setClipOversampling (const Oversampler::Design& design) noexcept
+    {
+        clipOsDesign = design;
+        clipOsDesign.adaa = false;
     }
     void setLookaheadMs (float ms) noexcept { lookaheadMs = ms; }
     void setTruePeakDetection (bool enabled) noexcept { truePeak = enabled; }
@@ -206,8 +212,7 @@ private:
     void processSegment (const AudioBlock& seg, double& clipDiffEnergy, double& clipInEnergy, float& glueMinGain,
                          float& lfMinGain) noexcept;
 
-    int clipOsFactor = 4;
-    Oversampler::Quality clipOsQuality = Oversampler::Quality::High;
+    Oversampler::Design clipOsDesign = Oversampler::design (4, Oversampler::Quality::High);
     float lookaheadMs = 1.5f;
     bool truePeak = true;
     LimiterEnvelope limiterEnvelope { true, true, true };

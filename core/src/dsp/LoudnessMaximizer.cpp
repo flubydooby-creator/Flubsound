@@ -281,11 +281,13 @@ void LoudnessMaximizer::prepare (const ProcessSpec& newSpec)
     spec.maxBlockSize = std::max (1, spec.maxBlockSize);
     const double fs = spec.sampleRate;
 
-    // Structural: clip oversampling (1, 2 or 4) is only read here. The dry
+    // Structural: clip oversampling (1, 2, 4 or 8) is only read here. The dry
     // path is delayed by the same round trip whether or not the clipper runs,
     // so the latency is constant.
-    osFactor = clipOsFactor <= 1 ? 1 : (clipOsFactor <= 2 ? 2 : 4);
-    oversampler.prepare (spec.numChannels, spec.maxBlockSize, osFactor, clipOsQuality);
+    auto design = clipOsDesign;
+    design.factor = design.factor <= 1 ? 1 : (design.factor <= 2 ? 2 : (design.factor <= 4 ? 4 : 8));
+    osFactor = design.factor;
+    oversampler.prepare (spec.numChannels, spec.maxBlockSize, design);
     dryDelay.prepare (spec.numChannels, oversampler.latencySamples());
     dryBuffer.setSize (spec.numChannels, spec.maxBlockSize);
     padBuffer.setSize (spec.numChannels, spec.maxBlockSize);

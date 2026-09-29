@@ -926,6 +926,9 @@ The bass engine delivers "more bass" without the three usual costs: limiter pump
   │          10 / 150 ms → w_sub (program hold); punch = the detector above with an
   │          8 ms hold → w_full; bell cut = hold(w_full − w_sub) ≤ shelf boost left at
   │          the bell; withdraw = w_sub
+  │        look-ahead L (setLookaheadMs, 0 by default): the split detectors (1 ms
+  │          attack) read x[n], the classic detector and everything after it x[n − L];
+  │          the split withdrawals then skip the 5 ms smoothing (releases keep it)
   │
   ├─ 3. Low shelf, Q 0.7 @ boostFrequency', gain = max(0, smooth_5ms(boost' − withdraw))
   │     (+ splitProtection: bell, Q 0.5 @ 0.8·sqrt(60 Hz · detector LP), −smooth_5ms(cut))
@@ -1100,7 +1103,7 @@ At module level NaN keeps the previous value and ±inf clamps. Unchanged paramet
 
 ### 4.6 Latency & CPU
 
-- **Latency: 0.** Test *BassEngine: zero latency - an impulse is not delayed* checks this.
+- **Latency: 0**, or the split protection's look-ahead when one is set (`setLookaheadMs`, structural, 0–5 ms; §4.9). Tests *BassEngine: zero latency - an impulse is not delayed* and *BassEngine: the look-ahead is the latency, ...* check this. The chain does not set one yet (see §4.9).
 - **CPU** (indicative):
 
 | Configuration | ns / stereo sample | % core |
@@ -1156,6 +1159,8 @@ Macro contributions (section 14 has the full tables):
   - *BassEngine: split-band protection - kicks above 60 Hz leave the sub boost, an isolated hit releases as before, and the cap holds for every shelf and tone (docs/11 E02 (a))*
   - *BassEngine: the 2nd-order subsonic filter keeps 28 Hz within 3 dB and halves the group delay at 40 Hz (docs/11 E02 subsonic slice)*
   - *BassEngine: switching split-band protection and the subsonic slope is click-free and every block size gives the same output (docs/11 E02)*
+  - *BassEngine: the split-protection look-ahead meets a sudden bass onset with its withdrawal - the maximizer's onset GR >= 2 dB lower (docs/11 E02 (a))*
+  - *BassEngine: the look-ahead is the latency, keeps the line steady and the cap, switches click-free and is block-size independent (docs/11 E02 (a))*
   - the chain rows in `tests/test_known_gaps.cpp` (*KnownGap: bass-line pumping ...*, *KnownGap: subsonic slice ...*)
 - **Harmonics telemetry** (`tests/test_distortion.cpp`, §14.5):
   - *Distortion: the bass harmonics generator's reading matches a harmonic analysis of the stage output within 0.05 dB (40 / 80 Hz, every character, with and without replacing the fundamental)* (measured < 0.001 dB)
@@ -1181,7 +1186,8 @@ Macro contributions (section 14 has the full tables):
   - a sub detector (LR4 low band at 85 Hz, overlapping the punch band so a tone near 60 Hz is not under-read) withdraws the shelf; what the classic prediction (8 ms hold) still exceeds is cut by a wide bell in the 60–150 Hz punch band, never more than the boost the shelf still gives there, so no frequency ends below flat;
   - both withdrawals have a **program-dependent release**: onsets are rises of 3 dB over the band level's recent valley; once they recur (≤ 1.2 s apart) a withdrawal is held for the recent onset spacing + 1/8 (the larger of the last two) and then released with 150 ms; an isolated hit is not held;
   - result: the line holds one gain (0.0 dB modulation), at a steadily lower boost where the kick itself sits in the sub band (mean line gain +2.6…+4.0 → −0.6…+1.5 dB at −12…−24 dBFS lines); with 100 Hz kicks the line stays at about the classic mean (+3.7 → +3.4 dB), since the punch band takes their excess;
-  - the cap holds within 0.5 dB for every tone and shelf (the classic reads 0.2 dB); Bass Head's whole engine still moves the line 1.2–1.9 dB, through Tighten ([11 E04](11-enhancement-report.md#e04)) and the harmonics generator ([11 E03](11-enhancement-report.md#e03)).
+  - the cap holds within 0.5 dB for every tone and shelf (the classic reads 0.2 dB); Bass Head's whole engine still moves the line 1.2–1.9 dB, through Tighten ([11 E04](11-enhancement-report.md#e04)) and the harmonics generator ([11 E03](11-enhancement-report.md#e03));
+  - **look-ahead** (`BassEngine::setLookaheadMs`, meant for the Quality profile at 2 ms): the audio path from the classic detector on is delayed; the split detectors read the undelayed signal with a 1 ms attack, and their withdrawals apply without the 5 ms gain smoothing (they are already ramped by the attack and lead the audio; releases keep it). The onset overshoot of §4.3.3 then goes: 40 Hz at −6 dBFS into +12 dB at 70 Hz, cap 0 dBFS, onset peak +3.9 (classic) / +4.0 (split) → −0.4 dBFS, and the deepest limiter gain reduction of the maximizer after it (Quality settings, drive 0, ceiling −1 dBTP) over the first 50 ms 4.58 / 4.72 → 0.69 dB; an explosion (45 Hz + low-passed noise, −6 dBFS) 1.43 → 0.00 dB. The line under kicks stays at 0.0 dB modulation (mean gain within 0.12 dB), the cap within 0.5 dB, switching is click-free and block-size independent. With `splitProtect` off it only delays the output (within −80 dBFS: the peak holds' bucket grid does not move with the delay, −93.9 dBFS measured). **Not in the chain yet:** 2 ms at 48 kHz raises Quality's total from 1352 to 1448 samples (1332 → 1420 at 44.1 kHz, 2616 → 2808 at 96 kHz, 5144 → 5528 at 192 kHz), which `tests/test_engine.cpp`, `tests/test_neural_slot.cpp` and [01 §5.1](01-architecture.md#51-algorithmic-latency-per-profile-48-khz-the-only-latency-sources-in-the-chain) pin; wiring it is one line in `ProcessingChain::prepare()` (`bass.setLookaheadMs (2.0f)` in the Quality case, 0 elsewhere) together with those numbers.
 - **Subsonic slope.** `bass.subsonicOrder` 12 dB/oct keeps about half the 4th order's group delay (40 Hz: HP4 at 25 Hz 8.2 ms, at 20 Hz 5.9 ms, HP2 at 20 Hz 3.3 ms) and costs 28 Hz 1.0 dB (HP4 at 30 Hz 4.4 dB); Bass Head, Club Loud, Warm Vinyl, Competitive FPS and Battle Royale use it at the 20 Hz default.
 
 ---
@@ -1573,7 +1579,7 @@ Harder drive (E10 Phase 2: ADAA everywhere, 8× in Quality below 88.2 kHz), the 
 | 96 kHz Quality / Balanced | −46.1 → −75.7 / −75.7 | −75.0 → −105.2 / −88.4 | −59.8 → −90.9 / −87.3 | −94.4 → −123.2 / −88.6 → −89.7 | −132.1 → −134.8 / −100.0 → −101.4 |
 | 192 kHz Quality / Balanced | −46.1 → −75.7 / −45.6 → −75.7 | −75.0 → −105.3 / −74.7 → −104.5 | −59.8 → −90.9 / −59.4 → −90.8 | −94.4 → −125.0 / −85.9 → −105.8 | −147.9 → −149.7 / −118.1 → −138.9 |
 
-(dBc, worst of the four tones; *Signal hygiene: extreme settings ...*). Quality meets ≤ −70 dBc at every rate and setting, Balanced / Low Latency from 88.2 kHz and at Warmth 100 and 0 dBFS everywhere. Still open, pinned in *Signal hygiene KnownGap: 24 dB of drive at 44.1 / 48 kHz ...*: 24 dB of drive in Balanced / Low Latency at 44.1 / 48 kHz (Tape −54.1 / −59.3, Tube −64.3, Digital −62.6 dBc; ≤ −60 dBc, Low Latency's target, is met by all but Tape), which needs 8× there too, at twice the curve's CPU.
+(dBc, worst of the four tones; *Signal hygiene: extreme settings ...*). Quality meets ≤ −70 dBc at every rate and setting, Balanced / Low Latency from 88.2 kHz and at Warmth 100 and 0 dBFS everywhere. Still open, pinned in *Signal hygiene KnownGap: 24 dB of drive at 44.1 / 48 kHz ...*: 24 dB of drive in Balanced / Low Latency at 44.1 / 48 kHz (Tape −54.1 / −59.3, Tube −64.3, Digital −62.6 dBc; ≤ −60 dBc, Low Latency's target, is met by all but Tape), which needs 8× there too, at twice the curve's CPU. Evaluated: 8× fits the same 16 samples (4 + 8 + 3 + 1: a 33-tap stage-1 decimator and the 9-tap third half-band) and meets every row, Tape / Tube / Digital at 24 dB −73.1 / −74.7 / −73.4 dBc (44.1 kHz), −73.1 / −79.4 / −79.2 dBc (48 kHz; *Saturator: an 8x design in Balanced / Low Latency's 16 samples ...*), but the saturator alone goes 15.4 → 29.1 ms per second of stereo audio at 44.1 kHz and the CLI's realtime factor with it at 9 dB 22.7 → 17.0× (Balanced) and 22.4 → 14.7× (Low Latency), past the ≤ 25 % budget of [11 E10](11-enhancement-report.md#e10); it is not in the table.
 
 Torture test: a 15 kHz sine at −6 dBFS, drive 12 dB, 48 kHz. The output is periodic in 16 samples, so every in-band component other than 15 kHz is an alias. The table gives the worst alias re the tone (re-measured on the delta-oversampled saturator):
 
@@ -3005,7 +3011,7 @@ After the maximizer the chain applies `output.gain`, a **trim of −24 … 0 dB*
 | Loudness Target | `max.autoDrive` | off/on | off | toggle | AutoDrive loop (section 14) |
 | Target Loudness | `max.target` | −24 … −6 | −14 | LUFS | AutoDrive target (gated output loudness) |
 | Output Gain | `output.gain` | −24 … 0 | 0 | dB | post-maximizer trim (chain) |
-| (clip oversampling) | `latency.profile` | 4× High / 4× High / 2× Low | Balanced: 4× High | — | structural; API accepts 1, 2, 4 (≤ 1 → 1, 2 → 2, ≥ 3 → 4) and High/Low |
+| (clip oversampling) | `latency.profile` | 4× High / 4× High / 4× rate-aware (2× Low from 88.2 kHz) | Balanced: 4× High | — | structural; `Oversampler::forClipper (profile, rate)`, or 1, 2, 4 (≤ 1 → 1, 2 → 2, ≥ 3 → 4) and High/Low; an explicit `Oversampler::Design` also takes 8 |
 
 Module sanitising: out-of-range values clamp; non-finite values keep the previous one.
 
@@ -3047,7 +3053,9 @@ Quality keeps its 2 ms look-ahead. [11 E05](11-enhancement-report.md#e05) step 3
 |---|---|---|---|---|---|
 | Quality | 4× High (36) + 2 ms | 36 + 108 = 144 | 36 + 116 = **152** | 36 + 212 = 248 | 36 + 404 = 440 |
 | Balanced | 4× High (36) + 1.5 ms | 36 + 86 = 122 | 36 + 92 = **128** | 36 + 164 = 200 | 36 + 308 = 344 |
-| Low Latency | 2× Low (16) + 0.5 ms | 16 + 42 = 58 | 16 + 44 = **60** | 16 + 68 = 84 | 16 + 116 = 132 |
+| Low Latency | 4× rate-aware (16), 2× Low (16) from 88.2 kHz, + 0.5 ms | 16 + 42 = 58 | 16 + 44 = **60** | 16 + 68 = 84 | 16 + 116 = 132 |
+
+**Clip oversampling per profile and rate** (`Oversampler::forClipper`, [11 E10](11-enhancement-report.md#e10)). A hard clip is close to a square wave, whose harmonics fall only 6 dB per octave; at 2× Low the ones above the 2× Nyquist fold straight back below 20 kHz. Low Latency therefore runs the saturator's 16-sample 4× design (§6.4, without ADAA) below 88.2 kHz, in the same latency. Worst in-band alias of −6 dBFS 1 / 5 / 7 / 10 kHz sines, maximizer alone with the crest gate off and the depth uncapped, 2× Low → table: 24 dB of drive −19.0 → −42.0 dBc (44.1 kHz) and −22.5 → −44.0 dBc (48 kHz), 12 dB −34.0 → −57.3 and −47.1 → −64.6 dBc; at the defaults (crest gate 6 dB) a steady tone is not clipped (−96.8 dBc either way). From 88.2 kHz 2× Low keeps 12 dB below −60 dBc and stays. Quality and Balanced keep 4× High (36 samples): 8× fits the same 36 samples (−52.7 / −82.8 dBc at 24 / 12 dB, 44.1 kHz) but costs 60 % more of the maximizer's CPU for settings off the defaults. The E10 rows at 24 dB of drive (≤ −70 dBc, Low Latency ≤ −60) stay open and are pinned (*LoudnessMaximizer KnownGap: the clipper at extreme settings ...*); ADAA would need the curve's antiderivative, which the depth cap's blend does not have in closed form. Cost in Low Latency: the maximizer alone 261 → 353 ns per stereo sample at 44.1 kHz (251 → 371 at 48 kHz); the CLI's realtime factor on pink noise, Low Latency defaults, 44.1 kHz, 40.8 → 34.9×.
 
 CPU (indicative, stereo, 12 dB drive). Re-measured after the glue-arming and limiter changes, in a pass where the `TruePeakMeter` reference read 76–78 ns (83–87 ns in §13.6), so compare rows within this table:
 
@@ -3060,6 +3068,7 @@ CPU (indicative, stereo, 12 dB drive). Re-measured after the glue-arming and lim
 | clip 0, glue 0 (limiter only) | 161–163 | 0.8 % |
 | 2× Low, clip 0.5, glue disarmed, 0.5 ms (Low Latency default) | 254–255 | 1.2 % |
 | 2× Low, clip 0.5, glue floor, 0.5 ms | 321–333 | 1.5–1.6 % |
+| 4× rate-aware (16 samples), clip 0.5, glue disarmed, 0.5 ms (Low Latency default since [11 E10](11-enhancement-report.md#e10); another pass, 2× Low read 251–261 in it) | 353–371 | 1.7–1.8 % |
 
 The 4× clipper costs about 205–225 ns, the glue splitter 35–80 ns while it runs, and the true-peak limiter about 160 ns. The crest gate and the LF-safe envelope ([11 E05](11-enhancement-report.md#e05) stage 1) were measured as whole-render time only (see the E05 status in docs/11).
 
@@ -3070,7 +3079,7 @@ The 4× clipper costs about 205–225 ns, the glue splitter 35–80 ns while it 
 | Boost Intensity | drive **+8 dB** (30–100 %, curve^1.2, governed); glue +0.3 (40–100 %); engages `max.on` from ≈ 26 % | drive **+6 dB** (30–100 %, curve^1.2, governed); engages `max.on` from ≈ 26 % |
 | Mode macro | **Loudness**: engages `max.on`; drive **+10 dB** (0–100 %, curve^1.3, governed); glue +0.5 (30–100 %) | — |
 | Max. effective drive at 100 % (governor scale 1) | 18 dB (+ base `max.drive`, clamped to 24) | 6 dB (+ base) |
-| Latency profile | Balanced (4× High, 1.5 ms) or Quality | Low Latency (2× Low, 0.5 ms), which the competitive presets suggest |
+| Latency profile | Balanced (4× High, 1.5 ms) or Quality | Low Latency (4× in 16 samples, 0.5 ms), which the competitive presets suggest |
 
 The governed drive contributions are what the SafetyGovernor takes back when the average limiter GR goes below −6 dB or the measured THD+N of the saturator and the clipper above −30 dB. AutoDrive can additionally *reduce* the effective drive towards a loudness target, but never below 0 dB (section 14).
 
@@ -3703,9 +3712,9 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 
 | Profile | Gate (STFT) | Saturator OS | Compressor LA | Clipper OS | Limiter LA | Total @ 48 kHz |
 |---|---|---|---|---|---|---|
-| Quality | in chain (1024) | 2× High (32) | 3 ms (144) | 4× High (36) | 2 ms + 20 (116) | 1352 smp ≈ 28.2 ms |
-| Balanced (default) | — | 2× Low (16) | 1 ms (48) | 4× High (36) | 1.5 ms + 20 (92) | 192 smp = 4.0 ms |
-| Low Latency | — | 2× Low (16) | 0.5 ms (24) | 2× Low (16) | 0.5 ms + 20 (44) | 100 smp ≈ 2.1 ms |
+| Quality | in chain (1024) | 8× ADAA (32; 4× from 88.2 kHz) | 3 ms (144) | 4× High (36) | 2 ms + 20 (116) | 1352 smp ≈ 28.2 ms |
+| Balanced (default) | — | 4× ADAA (16) | 1 ms (48) | 4× High (36) | 1.5 ms + 20 (92) | 192 smp = 4.0 ms |
+| Low Latency | — | 4× ADAA (16) | 0.5 ms (24) | 4× rate-aware (16) | 0.5 ms + 20 (44) | 100 smp ≈ 2.1 ms |
 
 ### 14.7 Parameters (global, macros, protection)
 
@@ -3951,7 +3960,7 @@ Latency is the sum of the slot latencies of the current profile. It is constant 
 | Saturator | 2× oversampler round trip | 32 (2× High) | 16 (2× Low) | 16 (2× Low) |
 | Stereo & Space | IIR | 0 | 0 | 0 |
 | Compressor | look-ahead | 144 (3 ms) | 48 (1 ms) | 24 (0.5 ms) |
-| Maximizer: clipper | oversampler round trip | 36 (4× High) | 36 (4× High) | 16 (2× Low) |
+| Maximizer: clipper | oversampler round trip | 36 (4× High) | 36 (4× High) | 16 (4× rate-aware below 88.2 kHz, §11.6) |
 | Maximizer: limiter | look-ahead + TP detector (20) | 96 + 20 = 116 | 72 + 20 = 92 | 24 + 20 = 44 |
 | **Strip total** | | **1352 = 28.17 ms** | **192 = 4.00 ms** | **100 = 2.08 ms** |
 
@@ -4004,7 +4013,7 @@ These are single-machine numbers for relative comparison, not a performance spec
 | Compressor, down + upward, any look-ahead | 22–23 | 0.11 % | §9.6 |
 | True-peak limiter, limiting (sample-peak mode, idle / limiting) | 150–168 (11.5 / 20.5–22) | 0.8 % (0.06 / 0.1 %) | §10.6 |
 | Maximizer, 4× High, clip on, glue disarmed (Balanced/Quality default) / glue armed | 367–386 / 422–431 | 1.8–1.9 / 2.0–2.1 % | §11.6 |
-| Maximizer, 2× Low, clip on, glue disarmed, 0.5 ms (Low Latency default) / glue armed | 254–255 / 321–333 | 1.2 / 1.5–1.6 % | §11.6 |
+| Maximizer, 2× Low, clip on, glue disarmed, 0.5 ms (Low Latency default before [11 E10](11-enhancement-report.md#e10)'s clipper table; now 4× in 16 samples, 353–371) / glue armed | 254–255 / 321–333 | 1.2 / 1.5–1.6 % | §11.6 |
 | Spectral noise gate, N 1024 (Quality) | 262–279 | 1.3 % | §12.6 |
 | LoudnessMeter / TruePeakMeter / LevelMeter | 8–9 / 83–87 / 8.5–9.3 | 0.04 / 0.4 / 0.04 % | §13.6 |
 
@@ -4030,7 +4039,7 @@ Stereo in and out unless noted; same conditions as §15.2. Global bypass is off 
 - About 200 ns per stereo sample is fixed overhead. The largest items are the 4× true-peak meter (≈ 85 ns), eight K-weighted measures (three `LoudnessFollower`s for AutoLevel, two for AutoDrive, the ComparisonMatcher's two windowed sums and one follower for input telemetry; the slow follower of each gate runs only while its gate is open. The counts changed with [11 E21](11-enhancement-report.md#e21) / E37, the timing was not re-measured; the Startle Guard adds one more, with its high-pass and cue-band bell, only while `guard.range` is on) and the latency-compensating dry delays.
 - At defaults the maximizer is the largest single module, because the clipper runs (clip share 0.5). Its glue splitter runs only while glue is armed (§11.3.2): in the Music boost row, not at defaults or in Gaming.
 - The heaviest realistic strip, full Music boost in the Quality profile with the gate on, stays under 7 % of one 2.1 GHz core. Four strips plus the master limiter stay well inside one core.
-- Profile differences come mainly from the clipper's oversampling (4× High vs 2× Low) and the gate.
+- Profile differences come mainly from the clipper's oversampling (4× High vs 2× Low; Low Latency runs 4× in 16 samples below 88.2 kHz since [11 E10](11-enhancement-report.md#e10)) and the gate.
 - The HRIR renderer is the only configuration whose cost grows without bound, linearly in the IR length. It is not used by any host yet (§8.9).
 
 **Headroom and roadmap.** Real-time safety depends on the worst block, not the average. The per-sample algorithms have bounded cost per block, apart from:

@@ -6,6 +6,7 @@
 #include "TestSignals.h"
 
 #include "flub/dsp/BassEngine.h"
+#include "flub/dsp/LoudnessMaximizer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1140,15 +1141,19 @@ struct LineResult
 
 /** The line's gain through `p` (the input's own track as reference): its
     peak-to-peak modulation over the kick period and its mean. */
-LineResult lineModulation (const BassEngineParams& p, double lineAmp, double kickHz = 55.0)
+LineResult lineModulation (const BassEngineParams& p, double lineAmp, double kickHz = 55.0, float lookaheadMs = 0.0f)
 {
     const int n = static_cast<int> (5.8 * kFs);
     const auto x = lineUnderKicks (lineAmp, kickHz, n);
     BassEngine be;
+    be.setLookaheadMs (lookaheadMs);
     prepareBass (be);
     be.setParams (p);
     const auto out = runStereo (be, x);
-    const auto in = lineLevelTrack (x, 3.5), got = lineLevelTrack (out.ch[0], 3.5);
+    // Latency-aligned with the input.
+    std::vector<float> aligned (out.ch[0].begin() + be.latencySamples(), out.ch[0].end());
+    aligned.resize (out.ch[0].size(), 0.0f);
+    const auto in = lineLevelTrack (x, 3.5), got = lineLevelTrack (aligned, 3.5);
     double lo = 1.0e9, hi = -1.0e9, sum = 0.0;
     for (size_t k = 0; k < in.size(); ++k)
     {
@@ -1390,4 +1395,271 @@ TEST_CASE ("BassEngine: switching split-band protection and the subsonic slope i
         refStep = std::max (refStep, static_cast<double> (std::abs (ref.ch[0][static_cast<size_t> (i)] - ref.ch[0][static_cast<size_t> (i - 1)])));
     }
     CHECK_LE (maxStep, 1.1 * refStep);
+}
+
+// =============================================================================
+// Split-band protection look-ahead (docs/11 E02 (a): Quality only, 2 ms)
+// =============================================================================
+namespace
+{
+struct OnsetResult
+{
+    double onsetPeakDb = 0.0, onsetGrDb = 0.0, laterGrDb = 0.0;
+};
+
+/** x (from 1 s on) through the bass engine at boost / corner / cap, then
+    the maximizer as the Quality profile runs it (2 ms look-ahead, true-peak
+    detection, drive 0, ceiling -1 dBTP): the bass output's peak and the
+    limiter's deepest gain reduction over the onset's first 50 ms, and its
+    deepest reduction over 200 - 400 ms. */
+OnsetResult onsetThroughMaximizer (const std::vector<float>& x, bool split, float lookaheadMs, float boostDb, float boostHz, float capDb)
+{
+    constexpr int block = 32;
+    const int n = static_cast<int> (x.size()), onset = ms (1000);
+    BassEngine be;
+    be.setLookaheadMs (lookaheadMs);
+    prepareBass (be, kFs, 2, block);
+    auto p = allOff();
+    p.boostDb = boostDb;
+    p.boostFrequency = boostHz;
+    p.protectThresholdDb = capDb;
+    p.subsonicHz = 20.0f;
+    p.subsonicOrder = 2;
+    p.splitProtection = split;
+    be.setParams (p);
+    be.reset();
+    LoudnessMaximizer mx;
+    mx.setLookaheadMs (2.0f);
+    mx.setTruePeakDetection (true);
+    mx.prepare ({ kFs, block, 2 });
+    mx.setParams (MaximizerParams {});
+    mx.reset();
+
+    Planar buf (2, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    OnsetResult r;
+    double peak = 0.0;
+    const int bassLatency = be.latencySamples(), latency = bassLatency + mx.latencySamples();
+    for (int pos = 0; pos + block <= n; pos += block)
+    {
+        const auto b = buf.block (pos, block);
+        be.process (b);
+        for (int i = 0; i < block; ++i)
+            if (const int t = pos + i - bassLatency - onset; t >= 0 && t < ms (50))
+                peak = std::max (peak, static_cast<double> (std::abs (buf.ch[0][static_cast<size_t> (pos + i)])));
+        mx.process (b);
+        const int newest = pos + block - 1 - latency - onset; // the latest input sample the limiter has seen
+        const double gr = -mx.getGainReductionDb();
+        if (newest >= 0 && newest < ms (50))
+            r.onsetGrDb = std::max (r.onsetGrDb, gr);
+        if (newest >= ms (200) && newest < ms (400))
+            r.laterGrDb = std::max (r.laterGrDb, gr);
+    }
+    r.onsetPeakDb = toDb (peak);
+    return r;
+}
+} // namespace
+
+TEST_CASE ("BassEngine: the split-protection look-ahead meets a sudden bass onset with its withdrawal - the maximizer's onset GR >= 2 dB lower (docs/11 E02 (a))")
+{
+    // docs/03 4.3.3's onset: a 40 Hz tone at -6 dBFS starts at 1 s into
+    // +12 dB at 70 Hz with the cap at 0 dBFS. The classic detector's 10 ms
+    // attack lets it peak at +3.7 .. +4 dBFS for 12 - 40 ms (docs/03 4.9);
+    // with the maximizer on that is limiter gain reduction. The split
+    // detectors with Quality's 2 ms look-ahead (1 ms attack, withdrawals
+    // not smoothed) have the boost withdrawn when the onset arrives.
+    // Classic / split alone / split with look-ahead: onset GR 4.58 / 4.72 /
+    // 0.69 dB, onset peak +3.89 / +3.98 / -0.36 dBFS.
+    const int n = ms (1500);
+    std::vector<float> tone (static_cast<size_t> (n), 0.0f);
+    for (int i = ms (1000); i < n; ++i)
+        tone[static_cast<size_t> (i)] = static_cast<float> (dbfs (-6.0) * std::sin (kTwoPi * 40.0 * (i - ms (1000)) / kFs));
+    const auto classic = onsetThroughMaximizer (tone, false, 0.0f, 12.0f, 70.0f, 0.0f);
+    const auto splitOnly = onsetThroughMaximizer (tone, true, 0.0f, 12.0f, 70.0f, 0.0f);
+    const auto ahead = onsetThroughMaximizer (tone, true, 2.0f, 12.0f, 70.0f, 0.0f);
+    const auto classicAhead = onsetThroughMaximizer (tone, false, 2.0f, 12.0f, 70.0f, 0.0f);
+    std::printf ("    measured 40 Hz onset, maximizer on: onset GR classic %.2f / split %.2f / split + 2 ms look-ahead %.2f dB "
+                 "(onset peak %+.2f / %+.2f / %+.2f dBFS); GR at 200 - 400 ms %.2f / %.2f / %.2f dB\n",
+                 classic.onsetGrDb, splitOnly.onsetGrDb, ahead.onsetGrDb, classic.onsetPeakDb, splitOnly.onsetPeakDb, ahead.onsetPeakDb,
+                 classic.laterGrDb, splitOnly.laterGrDb, ahead.laterGrDb);
+    CHECK_GE (classic.onsetGrDb, 3.0); // the stimulus does overshoot
+    CHECK_LE (ahead.onsetGrDb, classic.onsetGrDb - 2.0);
+    CHECK_LE (ahead.onsetPeakDb, 0.5); // the cap, within the protection's steady tolerance
+    CHECK_LE (ahead.laterGrDb, classic.laterGrDb);
+    // The classic protection ignores the look-ahead: its timing is kept.
+    CHECK_NEAR (classicAhead.onsetGrDb, classic.onsetGrDb, 0.05);
+    CHECK_NEAR (classicAhead.onsetPeakDb, classic.onsetPeakDb, 0.05);
+
+    // An explosion (as tests/test_scenes.cpp: 45 Hz + low-passed noise, tau
+    // 350 ms) at -6 dBFS, same settings: the noise's own peaks are not
+    // predictable from the level; classic 1.43 dB, split with look-ahead 0.
+    std::vector<float> boom (static_cast<size_t> (n), 0.0f);
+    {
+        auto rumble = whiteNoise (n, 1.0f, 9753);
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            const double a = std::exp (-kTwoPi * 150.0 / kFs);
+            double z = 0.0;
+            for (auto& v : rumble)
+                v = static_cast<float> (z = (1.0 - a) * v + a * z);
+        }
+        double power = 0.0;
+        for (float v : rumble)
+            power += static_cast<double> (v) * v;
+        const double rumbleRms = std::sqrt (power / n);
+        for (int i = ms (1000); i < n; ++i)
+        {
+            const double t = (i - ms (1000)) / kFs;
+            boom[static_cast<size_t> (i)] = static_cast<float> (dbfs (-6.0) * std::exp (-t / 0.35)
+                                                                * (0.7 * std::sin (kTwoPi * 45.0 * t) + 0.3 * rumble[static_cast<size_t> (i)] / rumbleRms));
+        }
+    }
+    const auto boomClassic = onsetThroughMaximizer (boom, false, 0.0f, 12.0f, 70.0f, 0.0f);
+    const auto boomAhead = onsetThroughMaximizer (boom, true, 2.0f, 12.0f, 70.0f, 0.0f);
+    std::printf ("    measured explosion onset, maximizer on: onset GR classic %.2f / split + look-ahead %.2f dB (onset peak %+.2f / %+.2f dBFS)\n",
+                 boomClassic.onsetGrDb, boomAhead.onsetGrDb, boomClassic.onsetPeakDb, boomAhead.onsetPeakDb);
+    CHECK_LE (boomAhead.onsetGrDb, boomClassic.onsetGrDb - 1.0);
+}
+
+TEST_CASE ("BassEngine: the look-ahead is the latency, keeps the line steady and the cap, switches click-free and is block-size independent (docs/11 E02 (a))")
+{
+    // Latency: 2 ms in samples at each rate; the default is 0.
+    for (const double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+    {
+        BassEngine be;
+        be.setLookaheadMs (2.0f);
+        prepareBass (be, fs);
+        CHECK (be.latencySamples() == static_cast<int> (std::lround (0.002 * fs)));
+    }
+
+    // With the split detectors off it only delays: the protection, mono,
+    // subsonic and shelf, 96 samples later, within -80 dBFS (-93.9 dBFS
+    // measured: the peak holds' bucket grid does not move with the delay,
+    // so a held peak can close a few samples earlier or later).
+    {
+        const int n = ms (1500);
+        auto x = whiteNoise (n, 0.3f, 77);
+        const auto lf = sine (45.0, kFs, n, 0.5f);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] += lf[i] * (i > static_cast<size_t> (ms (700)) ? 1.0f : 0.1f);
+        auto p = allOff();
+        p.boostDb = 9.0f;
+        p.boostFrequency = 60.0f;
+        p.protectThresholdDb = -12.0f;
+        p.monoBelowHz = 100.0f;
+        p.subsonicHz = 20.0f;
+        BassEngine plain, ahead;
+        ahead.setLookaheadMs (2.0f);
+        prepareBass (plain);
+        prepareBass (ahead);
+        plain.setParams (p);
+        ahead.setParams (p);
+        const auto a = runStereo (plain, x, whiteNoise (n, 0.3f, 78)), b = runStereo (ahead, x, whiteNoise (n, 0.3f, 78));
+        double diff = 0.0;
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i + 96 < n; ++i)
+                diff = std::max (diff, static_cast<double> (std::abs (a.ch[static_cast<size_t> (c)][static_cast<size_t> (i)]
+                                                                      - b.ch[static_cast<size_t> (c)][static_cast<size_t> (i + 96)])));
+        std::printf ("    measured look-ahead vs none, split off, 96 samples apart: largest difference %.1f dBFS\n", toDb (diff));
+        CHECK_LE (diff, 1.0e-4);
+        CHECK (plain.getProtectionDb() > 1.0f);
+    }
+
+    // The line under kicks stays as steady as without the look-ahead.
+    for (const double lineAmp : { 0.0625, 0.125, 0.25 })
+    {
+        auto p = bassHead();
+        p.tighten = 0.0f;
+        p.harmonicsAmount = 0.0f;
+        p.splitProtection = true;
+        const auto without = lineModulation (p, lineAmp), with = lineModulation (p, lineAmp, 55.0, 2.0f);
+        std::printf ("    measured 32 Hz line at %.1f dBFS, protection alone, split: %.2f dB modulation (mean %+.2f dB); with 2 ms look-ahead %.2f dB (mean %+.2f dB)\n",
+                     toDb (lineAmp), without.modulationDb, without.meanGainDb, with.modulationDb, with.meanGainDb);
+        CHECK_LE (with.modulationDb, 0.2);
+        CHECK_NEAR (with.meanGainDb, without.meanGainDb, 1.0);
+    }
+
+    // The cap for steady tones, as without the look-ahead.
+    const int settle = ms (500), measure = ms (400);
+    for (float boostHz : { 30.0f, 80.0f, 200.0f })
+        for (double f : { 30.0, 55.0, 80.0, 120.0 })
+            for (float rel : { -2.0f, 3.0f })
+            {
+                auto p = allOff();
+                p.boostDb = 15.0f;
+                p.boostFrequency = boostHz;
+                p.protectThresholdDb = -6.0f;
+                p.splitProtection = true;
+                BassEngine be;
+                be.setLookaheadMs (2.0f);
+                prepareBass (be);
+                be.setParams (p);
+                const double inDb = -6.0 + rel;
+                const auto out = runStereo (be, sine (f, kFs, settle + measure, dbfs (inDb)));
+                CHECK_LE (toDb (peakAbs (out.ch[0].data() + settle, measure)), std::max (-6.0, inDb) + 0.5);
+            }
+
+    // Split protection toggled every 300 ms under kicks: bit-identical for
+    // every block size, no step beyond the kicks' own.
+    const int n = ms (2400);
+    const auto x = lineUnderKicks (0.125, 55.0, n);
+    std::vector<Planar> outs;
+    for (int blockSize : { 480, 1, 37 })
+    {
+        auto p = bassHead();
+        BassEngine be;
+        be.setLookaheadMs (2.0f);
+        prepareBass (be);
+        be.setParams (p);
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        for (int pos = 0; pos < n;)
+        {
+            const int step = pos / ms (300), nextChange = (step + 1) * ms (300);
+            p.splitProtection = step % 2 == 1;
+            be.setParams (p);
+            const int len = std::min ({ blockSize, n - pos, nextChange - pos });
+            be.process (buf.block (pos, len));
+            pos += len;
+        }
+        CHECK (allFinite (buf, 4.0));
+        outs.push_back (clone (buf));
+    }
+    for (size_t k = 1; k < outs.size(); ++k)
+        CHECK (maxAbsDiff (outs[0], outs[k]) == 0.0);
+    BassEngine steady;
+    steady.setLookaheadMs (2.0f);
+    prepareBass (steady);
+    steady.setParams (bassHead());
+    const auto ref = runStereo (steady, x);
+    double maxStep = 0.0, refStep = 0.0;
+    for (int i = 1; i < n; ++i)
+    {
+        maxStep = std::max (maxStep, static_cast<double> (std::abs (outs[0].ch[0][static_cast<size_t> (i)] - outs[0].ch[0][static_cast<size_t> (i - 1)])));
+        refStep = std::max (refStep, static_cast<double> (std::abs (ref.ch[0][static_cast<size_t> (i)] - ref.ch[0][static_cast<size_t> (i - 1)])));
+    }
+    CHECK_LE (maxStep, 1.1 * refStep);
+
+    // Real-time safety with the delay line.
+    {
+        BassEngine be;
+        be.setLookaheadMs (2.0f);
+        prepareBass (be, kFs, 2, 512);
+        Planar buf (2, 512);
+        setChannel (buf, 0, sine (60.0, kFs, 512, 0.7f));
+        setChannel (buf, 1, whiteNoise (512, 0.5f, 3));
+        flubtest::AllocationGuard guard;
+        be.reset();
+        auto q = allOn();
+        for (int i = 0; i < 40; ++i)
+        {
+            q.splitProtection = i % 3 != 0;
+            q.boostDb = static_cast<float> (i % 16);
+            be.setParams (q);
+            be.process (buf.block (0, 1 + (i * 97) % 512).firstChannels (1 + i % 2));
+        }
+        CHECK (guard.allocations() == 0);
+    }
 }

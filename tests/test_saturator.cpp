@@ -6,12 +6,15 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "Analysis.h"
+
 #include "flub/common/Denormals.h"
 #include "flub/dsp/Saturator.h"
 
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -1194,5 +1197,51 @@ TEST_CASE ("Saturator ADAA: silence, quiet tails, NaN / Inf bursts and +24 dBFS 
             Planar quiet (2, 2 * 44100);
             processInBlocks (*sat, quiet, 256);
             CHECK_LE (peakOf (quiet, 2 * 44100 - 256, 2 * 44100), 0.0);
+        }
+}
+
+TEST_CASE ("Saturator: an 8x design in Balanced / Low Latency's 16 samples meets the 24 dB alias rows at 44.1 / 48 kHz, at twice the curve's CPU (docs/11 E10: evaluated, not in the table)")
+{
+    // The E10 rows Balanced / Low Latency miss (pinned in
+    // test_signal_hygiene.cpp: Tape 24 dB -54.1 / -59.3 dBc at 44.1 /
+    // 48 kHz, 4x with ADAA): 8x fits the same 16 samples (4 + 8 + 3 + 1:
+    // a 33-tap stage-1 decimator, the 9-tap third half-band) and meets
+    // them. Not adopted: it doubles the curve's cost (saturator alone,
+    // stereo, 44.1 kHz: 15.4 -> 29.1 ms per second of audio), and the CLI's
+    // realtime factor with the saturator at 9 dB falls 22.7 -> 17.0x
+    // (Balanced) and 22.4 -> 14.7x (Low Latency), past docs/11 E10's
+    // <= 25 % budget; the design is kept here, measured, for when it is.
+    constexpr int kN = 65536;
+    auto design = Oversampler::forProfile (Oversampler::Profile::Balanced, 44100.0);
+    design.factor = 8;
+    design.m1 = 8;
+    design.d3 = 2;
+    design.beta3 = 5.0;
+    for (const double fs : { 44100.0, 48000.0 })
+        for (const auto type : { SaturationType::Tape, SaturationType::Tube, SaturationType::Digital })
+        {
+            double worst = -200.0;
+            for (const double hz : { 1000.0, 5000.0, 7000.0, 10000.0 })
+            {
+                const int bin = cli::aliasToneBin (hz, fs, kN);
+                Saturator sat;
+                sat.setOversampling (design);
+                sat.prepare ({ fs, 512, 1 });
+                CHECK (sat.latencySamples() == 16);
+                SaturatorParams p;
+                p.type = type;
+                p.driveDb = 24.0f;
+                sat.setParams (p);
+                sat.reset();
+                const int n = static_cast<int> (fs / 4) + kN;
+                Planar buf (1, n);
+                const double f0 = bin * fs / kN;
+                for (int i = 0; i < n; ++i)
+                    buf.ch[0][static_cast<size_t> (i)] = static_cast<float> (0.5 * std::sin (kTwoPi * f0 * i / fs));
+                processInBlocks (sat, buf, 512);
+                worst = std::max (worst, cli::worstAliasDbc (buf.ch[0].data() + (n - kN), kN, fs, bin));
+            }
+            std::printf ("    measured saturator alias, 8x in 16 samples, type %d, 24 dB, %.0f Hz: %.1f dBc\n", static_cast<int> (type), fs, worst);
+            CHECK_LE (worst, -70.0);
         }
 }

@@ -1533,3 +1533,114 @@ TEST_CASE ("Chain: Boost's transient coupling adds at most 1 dB of Clarity attac
     }
     CHECK_NEAR (chain.effectiveValue (ClarityAttackDb), 2.0f * smoothstep (0.1f, 0.6f, 0.45f), 1e-5);
 }
+
+// =============================================================================
+// The clipper's rate-aware oversampling table (docs/11 E10)
+// =============================================================================
+namespace
+{
+/** Worst in-band alias (cli::worstAliasDbc) over -6 dBFS 1 / 5 / 7 / 10 kHz
+    sines through a mono maximizer with the clipper on `design`. */
+double clipperWorstAliasDbc (const Oversampler::Design& design, double fs, const MaximizerParams& p)
+{
+    constexpr int kN = 65536;
+    double worst = -200.0;
+    for (const double hz : { 1000.0, 5000.0, 7000.0, 10000.0 })
+    {
+        const int bin = cli::aliasToneBin (hz, fs, kN);
+        LoudnessMaximizer m;
+        m.setClipOversampling (design);
+        m.setLookaheadMs (0.5f);
+        m.prepare ({ fs, 512, 1 });
+        m.setParams (p);
+        m.reset();
+        const int n = static_cast<int> (fs / 2) + kN;
+        Planar buf (1, n);
+        const double f0 = bin * fs / kN;
+        for (int i = 0; i < n; ++i)
+            buf.ch[0][static_cast<size_t> (i)] = static_cast<float> (0.5 * std::sin (kTwoPi * f0 * i / fs));
+        processInBlocks (m, buf, 512);
+        worst = std::max (worst, cli::worstAliasDbc (buf.ch[0].data() + (n - kN), kN, fs, bin));
+    }
+    return worst;
+}
+
+/** The clipper at its extreme (crest gate off, depth uncapped), or at defaults. */
+MaximizerParams clipperAt (float driveDb, bool extreme)
+{
+    MaximizerParams p;
+    p.driveDb = driveDb;
+    if (extreme)
+    {
+        p.clipCrestDb = 0.0f;
+        p.clipMaxDepthDb = 24.0f;
+    }
+    return p;
+}
+} // namespace
+
+TEST_CASE ("LoudnessMaximizer: the clipper's rate-aware table keeps each profile's latency; Low Latency runs 4x below 88.2 kHz and its hard-clip aliases drop by 20 dB (docs/11 E10)")
+{
+    // Latency: the fixed designs' at every rate (Quality / Balanced 4x High,
+    // 36 samples; Low Latency 16), so no chain latency changes.
+    for (const double fs : { 8000.0, 16000.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+        for (const auto profile : { Oversampler::Profile::Quality, Oversampler::Profile::Balanced, Oversampler::Profile::LowLatency })
+        {
+            const auto design = Oversampler::forClipper (profile, fs);
+            Oversampler os;
+            os.prepare (2, 64, design);
+            const bool ll = profile == Oversampler::Profile::LowLatency;
+            CHECK (os.latencySamples() == (ll ? 16 : 36));
+            CHECK (design.factor == (ll && fs >= 88200.0 ? 2 : 4));
+            CHECK (! design.adaa);
+            if (! ll)
+                CHECK (design == Oversampler::design (4, Oversampler::Quality::High));
+        }
+
+    // Low Latency, 44.1 / 48 kHz. Before (2x Low): 24 dB of drive with the
+    // crest gate off and the depth uncapped -19.0 / -22.5 dBc, 12 dB -34.0 /
+    // -47.1 dBc; after -42.0 / -44.0 and -57.3 / -64.6 dBc (Balanced's 4x
+    // High reads -42.3 / -44.1 and -57.4 / -64.8). At the default crest
+    // gate a steady tone is not clipped: -96.8 / -84.8 dBc either way.
+    struct Row
+    {
+        double fs;
+        float drive;
+        double limitDbc;
+    };
+    for (const auto& r : { Row { 44100.0, 24.0f, -41.5 }, Row { 44100.0, 12.0f, -56.5 }, Row { 48000.0, 24.0f, -43.5 }, Row { 48000.0, 12.0f, -64.0 } })
+    {
+        const auto before = clipperWorstAliasDbc (Oversampler::design (2, Oversampler::Quality::Low), r.fs, clipperAt (r.drive, true));
+        const auto after = clipperWorstAliasDbc (Oversampler::forClipper (Oversampler::Profile::LowLatency, r.fs), r.fs, clipperAt (r.drive, true));
+        std::printf ("    measured clipper alias, Low Latency, %.0f Hz, %.0f dB of drive, crest off: 2x Low %.1f -> table %.1f dBc\n", r.fs, r.drive, before, after);
+        CHECK_LE (after, r.limitDbc);
+        CHECK_LE (after, before - 10.0);
+    }
+    const double defaults = clipperWorstAliasDbc (Oversampler::forClipper (Oversampler::Profile::LowLatency, 44100.0), 44100.0, clipperAt (12.0f, false));
+    std::printf ("    measured clipper alias, Low Latency, 44100 Hz, 12 dB of drive, defaults: %.1f dBc\n", defaults);
+    CHECK_LE (defaults, -90.0);
+}
+
+TEST_CASE ("LoudnessMaximizer KnownGap: the clipper at extreme settings (24 dB of drive, crest gate off, depth uncapped) still aliases above -70 / -60 dBc at 44.1 / 48 kHz (docs/11 E10)")
+{
+    // KNOWN_GAP: target <= -70 dBc (Quality / Balanced), <= -60 dBc (Low
+    // Latency) per docs/11 E10 at extreme settings. Pinned at today's value
+    // + 0.5 dB. A driven hard clip is close to a square wave; 8x in the same
+    // 36 samples reads -52.7 / -58.3 dBc for 60 % more of the maximizer's
+    // CPU (not adopted), and ADAA needs the curve's antiderivative, which
+    // the depth cap's blend does not have in closed form. The defaults (crest
+    // gate 6 dB, depth 3 dB) keep a steady tone below -84 dBc.
+    struct Row
+    {
+        Oversampler::Profile profile;
+        double fs, recordedDbc;
+    };
+    for (const auto& r : { Row { Oversampler::Profile::Balanced, 44100.0, -42.3 }, Row { Oversampler::Profile::Balanced, 48000.0, -44.1 },
+                           Row { Oversampler::Profile::LowLatency, 44100.0, -42.0 }, Row { Oversampler::Profile::LowLatency, 48000.0, -44.0 } })
+    {
+        const double worst = clipperWorstAliasDbc (Oversampler::forClipper (r.profile, r.fs), r.fs, clipperAt (24.0f, true));
+        std::printf ("    measured clipper alias KnownGap, %s, %.0f Hz: %.2f dBc\n", r.profile == Oversampler::Profile::Balanced ? "Quality / Balanced" : "Low Latency",
+                     r.fs, worst);
+        CHECK_LE (worst, r.recordedDbc + 0.5);
+    }
+}

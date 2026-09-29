@@ -44,7 +44,13 @@ ln -sf "$lib/Flubsound Pro" "$bin"
 # The menu entry starts the link by its full path (~/.local/bin is not on
 # every PATH), quoted as the desktop entry spec asks (a home folder may
 # contain spaces).
-sed -e "s|^Exec=.*|Exec=\"$bin\"|" "$here/flubsound-pro.desktop" > "$desktop"
+# (Written line by line, not with sed: a path with '&', '|' or '\' stays as it is.)
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        Exec=*) printf 'Exec="%s"\n' "$bin" ;;
+        *) printf '%s\n' "$line" ;;
+    esac
+done < "$here/flubsound-pro.desktop" > "$desktop"
 chmod 644 "$desktop"
 
 if [ -d "$here/Plug-ins/VST3/Flubsound FX.vst3" ]; then

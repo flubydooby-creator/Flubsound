@@ -92,8 +92,8 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 ### B3. Aliasing from nonlinear stages
 - **Symptom:** gritty, inharmonic "digital" distortion, most obvious on cymbals and at 44.1 kHz.
 - **Solution:**
-  - Clipper: 4× oversampling (2× in Low Latency).
-  - Saturation: 2× oversampling.
+  - Clipper: 4× oversampling (Low Latency: a shorter 16-sample 4× design, 2× from 88.2 kHz; `Oversampler::forClipper`).
+  - Saturation: 4× oversampling with first-order ADAA (8× in Quality below 88.2 kHz, 2× from 176.4 kHz; `Oversampler::forProfile`).
   - The air exciter band-limits its input to 3.5–7 kHz (24 dB/oct skirts) and uses polynomial order ≤ 3, so products of in-band content stay below 21 kHz without oversampling. Strong tones on the upper skirt (7.6–9 kHz) still leave small aliases (−25 to −44 dB at 44.1 kHz), and the chain disables air below 42 kHz sample rate.
   - The psychoacoustic bass waveshaper operates on content below ~250 Hz, so its harmonics are nowhere near Nyquist.
   - Antiderivative anti-aliasing (ADAA) is on the roadmap for a zero-latency clipper option.

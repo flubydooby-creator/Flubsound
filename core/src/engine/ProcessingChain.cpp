@@ -412,7 +412,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             gate.setFftSize (gateFftSizeFor (sr));
             saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::Quality, sr));
             compressor.setLookaheadMs (3.0f);
-            maximizer.setClipOversampling (4, Oversampler::Quality::High);
+            maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::Quality, sr));
             maximizer.setLookaheadMs (2.0f);
             maximizer.setTruePeakDetection (true);
             break;
@@ -420,7 +420,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             gateInChain = false;
             saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::LowLatency, sr));
             compressor.setLookaheadMs (0.5f);
-            maximizer.setClipOversampling (2, Oversampler::Quality::Low);
+            maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::LowLatency, sr));
             maximizer.setLookaheadMs (0.5f);
             maximizer.setTruePeakDetection (true);
             break;
@@ -429,7 +429,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             gateInChain = false;
             saturator.setOversampling (Oversampler::forProfile (Oversampler::Profile::Balanced, sr));
             compressor.setLookaheadMs (1.0f);
-            maximizer.setClipOversampling (4, Oversampler::Quality::High);
+            maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::Balanced, sr));
             maximizer.setLookaheadMs (1.5f);
             maximizer.setTruePeakDetection (true);
             break;

@@ -1,6 +1,6 @@
 // Flubsound Pro - bass engine: adaptive boost + psychoacoustic harmonics.
 //
-// Per sample, in this order (all IIR, zero latency):
+// Per sample, in this order (all IIR, zero latency unless a look-ahead is set):
 //
 //   1. Subsonic HP   : Butterworth 4th order (2 SVF sections) at subsonicHz.
 //   2. Mono bass     : stereo only. Per channel LR4 split at monoBelowHz;
@@ -21,6 +21,11 @@
 //                      punch prediction exceeds beyond that (at most the
 //                      shelf's boost at the bell), each through a
 //                      program-dependent hold (BandProtector::update).
+//                      Look-ahead L (setLookaheadMs, default 0): the
+//                      split detectors (1 ms attack) read x[n], everything
+//                      from the classic detector on reads x[n - L], and
+//                      the split withdrawals apply without the 5 ms
+//                      smoothing (their releases keep it).
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -117,6 +122,7 @@ constexpr double kBellCentre = 0.8;        // ... centred 0.8 x sqrt (60 Hz x de
 constexpr float kProgramMaxSpacingMs = 1200.0f; // onsets further apart are isolated
 constexpr float kProgramReleaseMs = 150.0f;     // after the hold, towards the raw withdrawal
 constexpr double kValleyRiseMs = 300.0;         // onset detector's valley: rise time constant
+constexpr float kLookaheadAttackMs = 1.0f;      // split detectors' attack with a look-ahead (setLookaheadMs)
 
 // 5. Tighten.
 constexpr float kTightenHz = 150.0f;
@@ -320,6 +326,13 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
         band->valleyCoeff = static_cast<float> (std::exp (-1.0 / (kValleyRiseMs * 0.001 * controlRate)));
     }
     splitXo = designLr4 (kSubDetectorHz, sr);
+    // Look-ahead: the split detectors' attack fits inside it, so a
+    // withdrawal is nearly complete when the onset reaches the shelf.
+    lookahead = static_cast<int> (std::lround (lookaheadMs * 0.001 * sr));
+    lookaheadBuf.assign (static_cast<size_t> (lookahead * spec.numChannels), 0.0f);
+    if (lookahead > 0)
+        for (auto* band : { &subProtect, &punchProtect })
+            band->env.prepare (sr, kLookaheadAttackMs, kDetectorReleaseMs);
     orderBlend.reset (sr, kBlendMs, params.subsonicOrder == 2 ? 1.0f : 0.0f);
 
     harmPreHp = SvfCoeffs::make (FilterType::HighPass, kHarmonicsLowHz, kButterworthQ2, 0.0, sr);
@@ -450,6 +463,7 @@ void BassEngine::updateTargets() noexcept
         // they withdraw a little more for a moment, never less.
         splitRunning = true;
         splitState.fill ({});
+        lookaheadLpState.fill ({});
         subProtect.reset (detectorEnv.get());
         punchProtect.reset (detectorEnv.get());
     }
@@ -577,6 +591,9 @@ void BassEngine::clearAllStates() noexcept
     detectorState.fill ({});
     splitState.fill ({});
     bellState.fill ({});
+    lookaheadLpState.fill ({});
+    std::fill (lookaheadBuf.begin(), lookaheadBuf.end(), 0.0f);
+    lookaheadPos = 0;
     subProtect.reset (0.0f);
     punchProtect.reset (0.0f);
     replaceState.fill ({});
@@ -599,7 +616,7 @@ float BassEngine::flushStates() noexcept
         sum += flushTiny (subsonic2State[ch]);
         for (auto& s : splitState[ch])
             sum += flushTiny (s);
-        sum += flushTiny (bellState[ch]);
+        sum += flushTiny (bellState[ch]) + flushTiny (lookaheadLpState[ch]);
         for (auto& s : monoState[ch])
             sum += flushTiny (s);
         for (auto& s : replaceState[ch])
@@ -697,6 +714,15 @@ void BassEngine::controlTick() noexcept
     // (While the boost itself falls, the smoothed gain may trail it by a
     // fraction of a dB; clamping it to the boost would put a kink in it.)
     shelfGainSmoothed.setTarget (boost - withdraw);
+    // With a look-ahead the split withdrawals are already ramped by their
+    // detectors' 1 ms attack and lead the audio: they apply at once (the
+    // shelf and bell still glide per sample across the control interval),
+    // so an onset meets them in place; only releases keep the 5 ms
+    // smoothing (40 Hz at -6 dBFS into +12 dB, cap 0 dBFS: onset peak
+    // +4.0 -> -0.4 dBFS; smoothed like the releases, about +1.6).
+    const bool leadWithdraw = lookahead > 0 && splitRunning && params.splitProtection;
+    if (leadWithdraw && boost - withdraw < shelfGainSmoothed.getCurrent())
+        shelfGainSmoothed.setImmediate (boost - withdraw);
     const float gainDb = std::max (0.0f, shelfGainSmoothed.next());
 
     // Telemetry: the withdrawal itself, smoothed like the gain. (boost - gainDb
@@ -707,6 +733,8 @@ void BassEngine::controlTick() noexcept
 
     // The punch band's bell (a cut of bellCut dB, smoothed like the shelf gain).
     bellCutSmoothed.setTarget (bellCut);
+    if (leadWithdraw && bellCut > bellCutSmoothed.getCurrent())
+        bellCutSmoothed.setImmediate (bellCut);
     const float cut = std::max (0.0f, bellCutSmoothed.next());
     if (cut != bellCutDb || (shelfMoved && cut != 0.0f))
     {
@@ -799,6 +827,24 @@ void BassEngine::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
         distortionDb.store (db, std::memory_order_relaxed);
 }
 
+void BassEngine::splitDetect (const std::array<float, kMaxChannels>& x, int numCh, float lfPeak) noexcept
+{
+    // Split-band detectors, linked like the classic one: sub = the LR4 low
+    // band at 85 Hz (overlapping the punch band, so a tone near 60 Hz is not
+    // under-read), punch = the classic detector's signal (lfPeak) with the
+    // shorter hold.
+    float subPeak = 0.0f;
+    for (int c = 0; c < numCh; ++c)
+    {
+        const size_t ch = static_cast<size_t> (c);
+        float lo = 0.0f, hi = 0.0f;
+        lr4Split (splitXo, splitState[ch], x[ch], lo, hi);
+        subPeak = std::max (subPeak, std::abs (lo));
+    }
+    subProtect.env.process (subProtect.hold.process (subPeak));
+    punchProtect.env.process (punchProtect.hold.process (lfPeak));
+}
+
 void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, int len) noexcept
 {
     const bool doMono = mono.active && numCh == 2;
@@ -860,6 +906,30 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
         }
 
         // 3. Protection detector (pre-boost, linked) + low shelf ---------------
+        if (lookahead > 0)
+        {
+            // Look-ahead: the split detectors read this sample, the rest of
+            // the engine (the classic detector too, so its timing is
+            // unchanged) the one `lookahead` samples earlier.
+            if (splitRunning)
+            {
+                float punchPeak = 0.0f;
+                for (int c = 0; c < numCh; ++c)
+                {
+                    const size_t ch = static_cast<size_t> (c);
+                    punchPeak = std::max (punchPeak, std::abs (svfTick (detectorLp, lookaheadLpState[ch], x[ch])));
+                }
+                splitDetect (x, numCh, punchPeak);
+            }
+            for (int c = 0; c < numCh; ++c)
+            {
+                float& slot = lookaheadBuf[static_cast<size_t> (c * lookahead + lookaheadPos)];
+                const float delayed = slot;
+                slot = x[static_cast<size_t> (c)];
+                x[static_cast<size_t> (c)] = delayed;
+            }
+            lookaheadPos = lookaheadPos + 1 == lookahead ? 0 : lookaheadPos + 1;
+        }
         float lfPeak = 0.0f;
         for (int c = 0; c < numCh; ++c)
         {
@@ -867,23 +937,8 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             lfPeak = std::max (lfPeak, std::abs (svfTick (detectorLp, detectorState[ch], x[ch])));
         }
         detectorEnv.process (detectorHold.process (lfPeak));
-        if (splitRunning)
-        {
-            // Split-band detectors, linked like the classic one: sub = the
-            // LR4 low band at 85 Hz (overlapping the punch band, so a tone
-            // near 60 Hz is not under-read), punch = the classic detector's
-            // signal with the shorter hold.
-            float subPeak = 0.0f;
-            for (int c = 0; c < numCh; ++c)
-            {
-                const size_t ch = static_cast<size_t> (c);
-                float lo = 0.0f, hi = 0.0f;
-                lr4Split (splitXo, splitState[ch], x[ch], lo, hi);
-                subPeak = std::max (subPeak, std::abs (lo));
-            }
-            subProtect.env.process (subProtect.hold.process (subPeak));
-            punchProtect.env.process (punchProtect.hold.process (lfPeak));
-        }
+        if (splitRunning && lookahead == 0)
+            splitDetect (x, numCh, lfPeak);
 
         if (shelfActive)
         {

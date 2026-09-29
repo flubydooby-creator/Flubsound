@@ -204,6 +204,29 @@ Oversampler::Design Oversampler::forProfile (Profile profile, double sampleRate)
     return d;
 }
 
+Oversampler::Design Oversampler::forClipper (Profile profile, double sampleRate) noexcept
+{
+    // A hard clip's harmonics fall only 6 dB per octave. At 2x Low (Low
+    // Latency's old design) those above the 2x Nyquist fold straight back
+    // into the audible band: 24 dB of drive with the crest gate off and the
+    // depth uncapped read -19.0 / -22.5 dBc at 44.1 / 48 kHz, 12 dB -34.0 /
+    // -47.1 dBc. The 16-sample 4x design gets -42.0 / -44.0 and -57.3 /
+    // -64.6 dBc, as Balanced's 4x High (36 samples). From 88.2 kHz 2x Low
+    // keeps 12 dB below -60 dBc and stays (4x there costs 46 % more).
+    // Quality and Balanced keep 4x High: 8x in the same 36 samples reaches
+    // -52.7 / -82.8 dBc at 44.1 kHz, for 60 % more of the maximizer's CPU,
+    // and the default crest gate keeps a steady tone out of the clipper
+    // anyway. The clipper's curve has no closed-form antiderivative with
+    // its depth cap, so there is no ADAA here.
+    if (profile != Profile::LowLatency)
+        return design (4, Quality::High);
+    if (sampleRate >= 88200.0)
+        return design (2, Quality::Low);
+    Design d = forProfile (Profile::LowLatency, sampleRate);
+    d.adaa = false;
+    return d;
+}
+
 void Oversampler::prepare (int numChannels, int maxBlockSize, int newFactor, Quality quality)
 {
     prepare (numChannels, maxBlockSize, design (newFactor, quality));
