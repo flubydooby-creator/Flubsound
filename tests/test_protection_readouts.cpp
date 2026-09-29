@@ -81,10 +81,10 @@ TEST_CASE ("Chain: at Normal a reset() keeps what the governor has learned (no s
         });
         learned = chain.meters().governorScale.load();
         chain.reset(); // a host's transport jump
-        afterReset = 1.0f;
+        afterReset = 0.0f; // the highest scale in the second after
         deepestAfter = 0.0f;
         feed (chain, pink, static_cast<int> (6.0 * kFs), 1.0, [&] (int) {
-            afterReset = std::max (afterReset == 1.0f ? 0.0f : afterReset, chain.meters().governorScale.load());
+            afterReset = std::max (afterReset, chain.meters().governorScale.load());
             deepestAfter = std::min (deepestAfter, chain.meters().maxGainReductionDb.load());
         });
     };
@@ -192,7 +192,9 @@ TEST_CASE ("Chain: MeterBus carries the measured loop's readouts - strength, har
                   << " dB, reasons 0x" << std::hex << reasons << std::dec << "\n";
         CHECK (m.governorStrength.load() == static_cast<int> (ProtectionStrength::Normal));
         CHECK (m.governorDriveResidualDb.load() > -160.0f);
-        CHECK (m.governorDriveResidualDb.load() == chain.getDriveResidualDb() || m.governorDriveResidualDb.load() >= chain.getDriveResidualDb());
+        // The drive loop's reading is the drive span power-summed with the
+        // bass engine's non-harmonic share: never under the span's own.
+        CHECK_GE (m.governorDriveResidualDb.load(), chain.getDriveResidualDb());
         CHECK (m.governorBassResidualDb.load() > -160.0f);
         CHECK (m.governorPlrDb.load() < MeterBus::governorNoReading);
         CHECK_NEAR (m.governorPlrDb.load(), chain.getOutputPlrDb(), 1.0e-6f);

@@ -29,6 +29,12 @@
 //   preset-browser  the preset browser open (docs/11 E40), searched for "late
 //                   night quiet" ("night quiet" in gaming mode), the best
 //                   match selected and previewing, loudness matched
+//   settings-audio, settings-processing
+//                   the PNG shows that page of the Settings dialog at --size
+//                   instead of the main window (Audio: with loopback, the
+//                   feedback-loop guard's muted pair, docs/11 E51;
+//                   Processing: the listening level with following the
+//                   system volume switched on, docs/11 E32)
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,
@@ -87,6 +93,7 @@ private:
     Options options;
     Completion onFinished;
     std::unique_ptr<TestSignalGenerator> generator;
+    std::unique_ptr<juce::Component> settingsView; // --state settings-*: what the PNG shows
     double startMs = 0.0, lastMs = 0.0, sampleRate = 48000.0;
     int64_t renderedSamples = 0;
     bool finished = false;

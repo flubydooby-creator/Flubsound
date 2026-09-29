@@ -8,6 +8,7 @@
 #include "AppTestSupport.h"
 
 #include "engine/EngineController.h"
+#include "shell/ScreenshotDriver.h"
 #include "ui/SettingsDialog.h"
 
 #include "flub/engine/Parameters.h"
@@ -162,4 +163,18 @@ TEST_CASE ("App settings: allowed loopback pairs round-trip, blank entries are d
     REQUIRE (pairs.size() == 2);
     CHECK ((pairs[0] == AppSettings::LoopbackPair { "CABLE Output", "CABLE Input" }));
     CHECK ((pairs[1] == AppSettings::LoopbackPair { "BlackHole 2ch", "BlackHole 2ch" }));
+}
+
+TEST_CASE ("App UI: the screenshot driver accepts --state settings-audio and settings-processing (E51 / E32)")
+{
+    ScreenshotDriver::Options o;
+    juce::String error;
+    CHECK (ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "loopback,settings-audio" }), o, error));
+    CHECK (o.states.contains ("settings-audio"));
+    ScreenshotDriver::Options p;
+    CHECK (ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-processing" }), p, error));
+    CHECK (p.states.contains ("settings-processing"));
+    ScreenshotDriver::Options q;
+    CHECK (! ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-hotkeys" }), q, error));
+    CHECK (error.contains ("settings-processing"));
 }

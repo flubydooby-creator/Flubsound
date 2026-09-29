@@ -286,9 +286,9 @@ public:
         (MixEngine::configureFrom, the crossfaded engine swap) - and what its
         SafetyGovernor has learned (SafetyGovernor::Memory, docs/11 E06 (2)),
         as published after previous's last block; `previous` may be running
-        on the audio thread. The governor applies it at its first tick if the
-        strength then is the same (Off: the stepwise scale; Normal / Strict:
-        the scales and the probe memory, held until the readings are back).
+        on the audio thread. The governor applies it at once (Off: the
+        stepwise scale; Normal / Strict: the scales and the probe memory,
+        held until the readings are back).
         reset() keeps it too at Normal / Strict (SafetyGovernor::restart). */
     void adoptGovernorState (const ProcessingChain& previous) noexcept;
 

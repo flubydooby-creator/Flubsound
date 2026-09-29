@@ -119,15 +119,14 @@ constexpr float kFeedForwardProgrammeDb = -70.0f; // a tick whose peak is below 
 
 float DriveFeedForward::meanReductionDb (float ceilingDb, float driveDb, int programmeTicks) const noexcept FLUB_NONBLOCKING
 {
-    // Chronological order (oldest first). The first pass only warms the
-    // envelope up on the window's last kWarmTicks (1.25 release time
-    // constants); the second accumulates. The
-    // product of the applied gains is taken in runs (their logs summed), so
-    // a log per tick is not needed and the product cannot underflow.
     // In units of the input before the drive: the ceiling k, the clipper's
     // threshold t, its crest gate and depth cap (a peak over the threshold
     // comes out at the threshold, but loses at most the depth: the soft
-    // knee is not modelled).
+    // knee is not modelled). The ticks in chronological order (oldest
+    // first): the first pass only warms the envelope up on the window's last
+    // kWarmTicks (1.25 release time constants), the second accumulates. The
+    // product of the applied gains is taken in runs (their logs summed), so
+    // a log per tick is not needed and the product cannot underflow.
     const double k = std::pow (10.0, static_cast<double> (ceilingDb - driveDb) / 20.0);
     const bool clipper = clipHeadroomDb < 100.0f;
     const double t = clipper ? k * std::pow (10.0, static_cast<double> (clipHeadroomDb) / 20.0) : 0.0;
@@ -164,9 +163,10 @@ float DriveFeedForward::meanReductionDb (float ceilingDb, float driveDb, int pro
 
 float DriveFeedForward::driveForBudget (float ceilingDb, float grBudgetDb) const noexcept FLUB_NONBLOCKING
 {
-    // The clipper (which takes part of the peaks first) is not modelled, so
-    // with it on the prediction reads deep and the governor's PI trim takes
-    // the rest.
+    // The glue and the LF-first limiter (which take part of the peaks
+    // before the limiter) are not modelled, so with them on the prediction
+    // reads deep: the governor's PI trim takes the rest, and its limiter
+    // loop yields while the limiter is idle.
     int n = 0;
     for (int i = 0; i < count; ++i)
         n += peaksDb[static_cast<size_t> (i)] > kFeedForwardProgrammeDb ? 1 : 0;

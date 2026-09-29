@@ -1,6 +1,7 @@
 #include "ScreenshotDriver.h"
 
 #include "ui/MainComponent.h"
+#include "ui/SettingsDialog.h"
 
 #include "flub/io/Json.h"
 #include "flub/io/PresetIO.h"
@@ -85,8 +86,9 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     const int stateIndex = args.indexOf ("--state");
     if (stateIndex >= 0)
     {
-        static const juce::StringArray known { "device-error", "loopback", "preset-warning", "recovery", "latency-prompt", "governor",
-                                                "preset-browser" };
+        static const juce::StringArray known { "device-error", "loopback",       "preset-warning",     "recovery",
+                                                "latency-prompt", "governor",   "preset-browser",     "settings-audio",
+                                                "settings-processing" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -222,6 +224,20 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         controller.getHost().setDeviceInputRouting (gameStrip, 0);
         controller.getHost().checkLoopbackPair ("CABLE Output (VB-Audio Virtual Cable)", "CABLE Input (VB-Audio Virtual Cable)");
     }
+    if (states.contains ("settings-audio") || states.contains ("settings-processing"))
+    {
+        const bool processing = states.contains ("settings-processing");
+        if (processing)
+            controller.setContourFollowsVolume (true); // the listening level live (docs/11 E32)
+        ui::HotkeyHooks hooks;
+        hooks.isSupported = [] { return false; };
+        hooks.getFailures = [] { return juce::StringArray(); };
+        hooks.reRegister = [] {};
+        auto dialog = std::make_unique<ui::SettingsDialog> (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+        dialog->setSize (options.width, options.height);
+        dialog->showPage (processing ? ui::SettingsDialog::Page::Processing : ui::SettingsDialog::Page::Audio);
+        settingsView = std::move (dialog);
+    }
     if (main == nullptr)
         return;
     if (states.contains ("recovery"))
@@ -301,7 +317,8 @@ void ScreenshotDriver::finish()
     finished = true;
     stopTimer();
 
-    const auto image = target.createComponentSnapshot (target.getLocalBounds(), true, options.scale);
+    auto& shown = settingsView != nullptr ? *settingsView : target;
+    const auto image = shown.createComponentSnapshot (shown.getLocalBounds(), true, options.scale);
     bool ok = false;
 
     if (image.isValid())

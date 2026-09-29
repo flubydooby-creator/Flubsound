@@ -577,7 +577,7 @@ void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexc
         governor.restoreMemory (m);
 }
 
-void ProcessingChain::GovernorMemoryBox::publish (const SafetyGovernor::Memory& m) noexcept
+void ProcessingChain::GovernorMemoryBox::publish (const SafetyGovernor::Memory& m) noexcept FLUB_NONBLOCKING
 {
     // A seqlock of relaxed words: odd while writing (audio thread only).
     std::array<uint32_t, kWords> w {};

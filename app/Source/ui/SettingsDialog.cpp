@@ -174,7 +174,7 @@ public:
         g.setFont (Theme::font (12.0f));
         g.setColour (Palette::text.withAlpha (0.85f));
         for (size_t i = 0; i < shownPairs.size() && i < pairRows.size(); ++i)
-            g.drawFittedText ("Allowed: \"" + shownPairs[i].input + "\" in, \"" + shownPairs[i].output + "\" out", pairRows[i].textArea,
+            g.drawFittedText ("Allowed: input \"" + shownPairs[i].input + "\", output \"" + shownPairs[i].output + "\"", pairRows[i].textArea,
                               juce::Justification::centredLeft, 1, 0.9f);
     }
 
@@ -544,8 +544,8 @@ public:
         addAndMakeVisible (autoReduceToggle);
         addAndMakeVisible (preampToggle);
         addAndMakeVisible (restoreButton);
-        for (auto* c : std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton })
-            addAndMakeVisible (c);
+        for (auto* control : std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton })
+            addAndMakeVisible (control);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,

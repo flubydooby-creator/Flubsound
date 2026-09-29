@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -302,6 +303,8 @@ TEST_CASE ("App: the listening level reaches the contour - a strip with contour.
     endpoint->set (true, -36.0f);
     c.pollEndpointVolume();
     const double quiet = tilt();
+    std::cerr << "    50 Hz re 1 kHz: at the reference " << atReference << " dB, 30 dB below it " << quiet << " dB; chain lift "
+              << c.getChain (music).getContourLiftAt50HzDb() << " dB, trim " << c.getChain (music).getContourTrimDb() << " dB\n";
     CHECK_NEAR (c.getChain (music).getContourLiftAt50HzDb(), 11.87, 0.6);
     CHECK_NEAR (quiet - atReference, 11.87, 1.0);
 
