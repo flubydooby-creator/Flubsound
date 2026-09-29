@@ -27,6 +27,17 @@
 // Layouts  Standard (the Advanced view's strip: one chip row) and Simple
 //           (docs/11 E39: the Simple view's centre piece, a larger dial and up
 //           to three wrapped chip rows).
+// Warmth    Music only, a chip beside the Warmth macro's value (docs/11
+//           E14): what Warmth does to the saturator now - TUBE (its
+//           override row chose the Tube saturator), TAPE (warmth.tapeGrit:
+//           the classic tape Warmth) or TONE (the tone tilt alone, or the
+//           user's own saturator); a click switches Tape Grit on / off.
+// Capped    Gaming only, a CAPPED chip beside the Footsteps and Detail
+//           values while the output's headset enhancement cap applies
+//           (docs/11 E16, MeterBus::onboardCapActive: at most 30 % reach the
+//           sound, the virtualiser is off; the knobs keep their values); a
+//           click offers to remove the cap (EngineController::
+//           setOnboardEnhancement).
 // Guards    Simple layout only, a row under the macros: Dynamic Range
 //           (guard.range, docs/11 E21: the Startle Guard's ceiling over the
 //           recent programme and the Gaming Tame band) and Smoothness
@@ -92,11 +103,13 @@ public:
         bool limiting = false;
     };
     static GovernorReadout describeGovernor (const MeterSnapshot& snapshot, flub::ProtectionStrength strength);
-    /** "-41 dB (budget -35 dB)" or "not measured" (Off, not settled). */
+    /** "-41 dB (budget -35 dB)" or "not measured yet (budget -35 dB)". */
     static juce::String describeProtectionLevel (float levelDb, float budgetDb);
-    /** "9.1 dB (at least 8 dB)", "... (no budget in this mode)" or "not measured". */
+    /** "9.1 dB (at least 8 dB)", "... (no budget in this mode)", or "not
+        measured yet" with the same budget text. */
     static juce::String describePlr (float plrDb, float budgetDb);
-    /** "presence +1.2 dB (budget +3), harsh ..., air ..." or "not measured". */
+    /** "presence +1.2 dB (budget +3), harsh ..., air ..." or "not measured
+        yet (budgets +3 / +3 / +4 dB)". */
     static juce::String describeBrightness (const MeterSnapshot& snapshot);
 
     struct ActiveStage
@@ -125,6 +138,22 @@ public:
     static constexpr float kChipHeight = 17.0f, kChipGap = 5.0f, kMoreWidth = 34.0f;
     static ChipLayout layoutChips (const std::vector<float>& chipWidths, const std::vector<juce::Rectangle<float>>& rows);
 
+    /** The Warmth chip (docs/11 E14): text, tooltip and whether Tape Grit
+        is on, from the selected strip's stored (`base`) and effective values
+        (WarmthColour). Pure; tested. */
+    struct WarmthReadout
+    {
+        juce::String text; // "TUBE", "TAPE", "TONE"
+        juce::String detail;
+        bool tapeGrit = false;
+    };
+    static WarmthReadout describeWarmth (const std::function<float (int)>& base, const std::function<float (int)>& effective);
+    /** Visible in Music mode only; bound to the selected strip's warmth.tapeGrit. */
+    juce::TextButton& getWarmthChip() noexcept { return warmthChip; }
+    /** The headset enhancement cap's chips (docs/11 E16): 0 Footsteps, 1
+        Detail; visible in Gaming mode while the selected strip's chain caps. */
+    juce::TextButton& getCappedChip (int index) noexcept { return cappedChips[static_cast<size_t> (index != 0)]; }
+
     /** Chips drawn by the last paint (the rest are counted as "+N"). */
     int getShownStageCount() const noexcept { return shownStages; }
     int getChipRowCount() const noexcept { return static_cast<int> (chipRows.size()); }
@@ -145,12 +174,17 @@ public:
 private:
     void showStrengthMenu();
     void refreshStages (const MeterSnapshot& snapshot);
+    void refreshWarmth();
+    void refreshCapped();
+    void showCappedMenu (juce::Component& chip);
 
     EngineController& controller;
     BoostDial dial;
     std::array<ParamKnob, 5> macros;
     juce::ComboBox rangeBox;
     juce::Slider smoothSlider;
+    juce::TextButton warmthChip; // under the Warmth macro (Music)
+    std::array<juce::TextButton, 2> cappedChips; // beside Footsteps and Detail (Gaming, docs/11 E16)
     ParameterBinder binder; // after the controls it binds
     flub::param::ModeValue mode = flub::param::ModeValue::Music;
     juce::Rectangle<int> dialArea, macroArea, headerArea, chipsArea, rangeCaption, smoothCaption;

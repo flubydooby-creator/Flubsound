@@ -58,8 +58,18 @@ DeviceAdviceBanner::DeviceAdviceBanner (EngineController& c) : controller (c)
         if (refresh() && getParentComponent() != nullptr)
             getParentComponent()->resized();
     };
+    // docs/11 E16: is the headset's own enhancement on? (asked once per endpoint)
+    enhancementOnButton.setTooltip ("The headset (or its app) applies Superhuman Hearing, its own EQ or surround: Flubsound caps "
+                                    "Footsteps and Detail at 30 % and turns its virtual surround off on this output, so the two "
+                                    "do not stack. Change it any time in Settings > Audio.");
+    enhancementOnButton.onClick = [this] { answerEnhancement (true); };
+    enhancementOffButton.setTooltip ("The headset plays flat: Flubsound's macros play in full on this output. Change it any time in "
+                                     "Settings > Audio.");
+    enhancementOffButton.onClick = [this] { answerEnhancement (false); };
     for (auto* b : { &presetButton, &detailsButton, &dismissButton })
         addAndMakeVisible (b);
+    for (auto* b : { &enhancementOnButton, &enhancementOffButton })
+        addChildComponent (b);
     setVisible (false);
 }
 
@@ -72,7 +82,9 @@ bool DeviceAdviceBanner::refresh()
     const bool bluetooth = connection == Connection::Bluetooth || connection == Connection::BluetoothHandsFree;
 
     deviceName = controller.getOutputDeviceName();
-    const bool want = deviceName.isNotEmpty() && (profile.isNotEmpty() || bluetooth) && ! adv.messages.empty()
+    const auto onboard = controller.getOnboardEnhancement();
+    askingEnhancement = onboard.offered && ! onboard.answered;
+    const bool want = deviceName.isNotEmpty() && (profile.isNotEmpty() || bluetooth) && (! adv.messages.empty() || askingEnhancement)
                       && deviceName != dismissedFor;
 
     headline = profile.isNotEmpty() ? profile : deviceName;
@@ -80,6 +92,10 @@ bool DeviceAdviceBanner::refresh()
         headline << kDot << ct;
     headline << kDot << "ceiling " << juce::String (adv.ceilingDbTp, 1) << " dBTP";
     advice = adv.messages.empty() ? juce::String() : juce::String::fromUTF8 (adv.messages.front().c_str());
+    if (askingEnhancement)
+        advice = "Is the headset's own enhancement on (Superhuman Hearing, on-board EQ or surround)?";
+    else if (onboard.on)
+        advice = "Headset enhancement is ON: Footsteps and Detail capped at 30 %, virtual surround off (Settings > Audio).";
 
     juce::String tip;
     for (const auto& m : adv.messages)
@@ -89,7 +105,8 @@ bool DeviceAdviceBanner::refresh()
 
     // Offer the suggested preset only when it exists and is not already loaded.
     suggestedPreset = juce::String::fromUTF8 (adv.suggestedPreset.c_str());
-    const bool offerPreset = suggestedPreset.isNotEmpty() && controller.getPresetManager().findByName (suggestedPreset) != nullptr
+    const bool offerPreset = ! askingEnhancement && suggestedPreset.isNotEmpty()
+                             && controller.getPresetManager().findByName (suggestedPreset) != nullptr
                              && controller.getCurrentPresetName() != suggestedPreset;
     presetButton.setVisible (offerPreset);
     if (offerPreset)
@@ -97,6 +114,8 @@ bool DeviceAdviceBanner::refresh()
         presetButton.setButtonText ("Use " + suggestedPreset);
         presetButton.setTooltip ("Load the preset suggested for this device into the selected strip");
     }
+    enhancementOnButton.setVisible (askingEnhancement);
+    enhancementOffButton.setVisible (askingEnhancement);
 
     const bool changed = want != showing;
     showing = want;
@@ -117,12 +136,26 @@ void DeviceAdviceBanner::applySuggestedPreset()
     refresh();
 }
 
+void DeviceAdviceBanner::answerEnhancement (bool on)
+{
+    controller.setOnboardEnhancement (on); // broadcasts Change::Device: the owner refreshes the banner too
+    if (refresh() && getParentComponent() != nullptr)
+        getParentComponent()->resized();
+}
+
 void DeviceAdviceBanner::resized()
 {
     auto r = getLocalBounds().reduced (6, 4);
     dismissButton.setBounds (r.removeFromRight (r.getHeight()));
     r.removeFromRight (6);
     detailsButton.setBounds (r.removeFromRight (74));
+    if (enhancementOnButton.isVisible())
+    {
+        r.removeFromRight (6);
+        enhancementOffButton.setBounds (r.removeFromRight (52));
+        r.removeFromRight (6);
+        enhancementOnButton.setBounds (r.removeFromRight (112));
+    }
     if (presetButton.isVisible())
     {
         r.removeFromRight (6);
@@ -148,7 +181,7 @@ void DeviceAdviceBanner::paint (juce::Graphics& g)
 
     // Text stops before the leftmost visible button.
     int textRight = dismissButton.getX();
-    for (auto* b : { &detailsButton, &presetButton })
+    for (auto* b : { &detailsButton, &presetButton, &enhancementOnButton, &enhancementOffButton })
         if (b->isVisible())
             textRight = juce::jmin (textRight, b->getX());
     r.setRight (textRight - 10);

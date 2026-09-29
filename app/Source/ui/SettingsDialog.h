@@ -6,7 +6,10 @@
 //               persisted by the EngineController automatically. Above it:
 //               the matched headset / device profile, its connection, the
 //               safety ceiling applied to the master limiter and all of its
-//               guidance (the page scrolls when that is long), and the
+//               guidance (the page scrolls when that is long), the
+//               output's "Headset enhancement (Superhuman Hearing / on-board
+//               EQ) is ON" switch (docs/11 E16: caps Footsteps / Detail and
+//               the virtualiser on every strip, stored per endpoint), and the
 //               feedback-loop guard (docs/11 E51): what it muted, "Allow
 //               this pair" for a deliberate cable monitor and the allowed
 //               pairs with Remove.
@@ -24,11 +27,13 @@
 //               device-input routing, per-app routing method, protection
 //               strength (docs/11 E06: Off / Normal / Strict, engine-wide),
 //               the selected strip's Automatic Preamp (docs/11 E11) with its
-//               live prediction, the listening level (docs/11 E32: the
+//               live prediction and its hot-programme switch
+//               (auto.preampHot), the listening level (docs/11 E32: the
 //               selected strip's loudness contour, following the system
 //               volume - off by default - and the reference volume with a
-//               "Use current volume" button and the live level), and the
-//               meter palette (standard / colour-blind safe).
+//               "Use current volume" button and the live level; the
+//               contour's curve at that level, read-only), and the meter
+//               palette (standard / colour-blind safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; each
 //               row shows its registration status (registered, in use,
@@ -50,6 +55,8 @@
 #include "Widgets.h"
 #include "engine/EngineController.h"
 #include "shell/HotkeyManager.h"
+
+#include "flub/dsp/LoudnessContour.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -125,6 +132,23 @@ public:
         volume read (or why it cannot be), the reference volume and the level
         the contour plays at relative to it; "Off: ..." while not following. */
     static juce::String describeListeningLevel (const EngineController::ListeningLevel& level);
+
+    /** The Processing page's contour curve (docs/11 E32, read-only): the lift
+        the selected strip's loudness contour aims at, at ISO 226's 29
+        one-third-octave frequencies (20 Hz .. 12.5 kHz), for its reference
+        loudness, its level (contour.level plus the listening level from the
+        system volume) and its cap: G (f) of LoudnessContour.h, which the
+        stage's four sections fit within about 1 dB. Flat while it is off. */
+    struct ContourCurve
+    {
+        bool on = false;
+        float levelDb = 0.0f; // the level designed for (LoudnessContour::effectiveLevelDb)
+        std::array<float, flub::iso226::kNumFrequencies> liftDb {};
+    };
+    static ContourCurve contourCurve (bool on, float referencePhon, float levelDb, float maxLiftDb);
+    /** "At -30.0 dB re the reference: +12.1 dB at 50 Hz ... ; level trim
+        -9.9 dB." or "Off: ..." (trimDb: the stage's applied trim). */
+    static juce::String describeContourCurve (const ContourCurve& curve, float trimDb);
 
     /** The Audio page's feedback-loop guard text (docs/11 E51): whether the
         output is muted for a loopback pair and which pair, or that the

@@ -232,6 +232,7 @@ Flubsound/
 │   │   ├── test_app_routing_doubling.cpp   docs/11 E47: the doubling guard (output endpoint lookup, held-back capture, the amber state)
 │   │   ├── test_app_routing_journal.cpp    docs/11 E47: the route journal, crashes at both points of a move, a real SIGKILL / TerminateProcess of a child
 │   │   ├── test_app_routing_tournament.cpp docs/11 E55: the process cache, Tournament mode for routing and automatic profiles
+│   │   ├── test_app_tournament.cpp docs/11 E55: Tournament mode in the app (anti-cheat switch-on, no foreground poll or process open, persistence, badge, tray)
 │   │   ├── test_app_ui_compare.cpp         docs/11 E37: per-bank A/B matching, module / virtualiser ears, the bypass line, the blind A/B/X test
 │   │   ├── test_app_ui_guards.cpp          docs/11 E21 / E07: Dynamic Range and Smoothness in the Simple view and on the rack's cards
 │   │   ├── test_app_ui_hints.cpp           docs/11 E39: a plain-language hint for every parameter key in both modes, as tooltips

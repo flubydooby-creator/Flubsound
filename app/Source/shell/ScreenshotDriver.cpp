@@ -89,7 +89,8 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     {
         static const juce::StringArray known { "device-error",   "loopback",       "preset-warning", "recovery",        "latency-prompt",
                                                 "governor",       "preset-browser", "settings-audio", "settings-processing", "ab-matched",
-                                                "abx",            "bypass",         "routing-drawer", "governor-normal", "quick-controls" };
+                                                "abx",            "bypass",         "routing-drawer", "governor-normal", "quick-controls",
+                                                "module-readings", "contour-curve", "onboard-cap" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -243,9 +244,27 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         controller.getHost().setDeviceInputRouting (gameStrip, 0);
         controller.getHost().checkLoopbackPair ("CABLE Output (VB-Audio Virtual Cable)", "CABLE Input (VB-Audio Virtual Cable)");
     }
-    if (states.contains ("settings-audio") || states.contains ("settings-processing"))
+    if (states.contains ("contour-curve"))
     {
-        const bool processing = states.contains ("settings-processing");
+        // The Processing page's contour curve and the preamp's hot-programme
+        // switch (docs/11 E32 / E11), on the selected strip.
+        auto& store = controller.getParams (focusStrip);
+        store.set (ContourOn, 1.0f);
+        store.set (ContourLevelDb, -30.0f);
+        store.set (AutoPreampOn, 1.0f);
+        store.set (AutoPreampHot, 1.0f);
+    }
+    if (states.contains ("onboard-cap"))
+    {
+        // docs/11 E16: a Turtle Beach headset whose own enhancement is on,
+        // answered as the device banner's "Yes" does: every strip capped.
+        if (options.simulatedDevice.isEmpty())
+            controller.simulateOutputDevice ("Headset Earphone (Stealth 700 Gen 2 MAX)", controller.getHost().getSampleRate(), 2);
+        controller.setOnboardEnhancement (true);
+    }
+    if (states.contains ("settings-audio") || states.contains ("settings-processing") || states.contains ("contour-curve"))
+    {
+        const bool processing = states.contains ("settings-processing") || states.contains ("contour-curve");
         if (processing)
             controller.setContourFollowsVolume (true); // the listening level live (docs/11 E32)
         ui::HotkeyHooks hooks;
@@ -256,6 +275,24 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         dialog->setSize (options.width, options.height);
         dialog->showPage (processing ? ui::SettingsDialog::Page::Processing : ui::SettingsDialog::Page::Audio);
         settingsView = std::move (dialog);
+    }
+    if (states.contains ("module-readings") && ! options.gamingMode)
+    {
+        // The controls and readings outside the generic grid (docs/11 E05 /
+        // E07 / E14): a named style with LF Limit, the Smoothness cut on a
+        // bright Boost, Warmth's Tube choice (the saturator Warmth's alone).
+        auto& store = controller.getParams (focusStrip);
+        controller.setBoost (1.0f, focusStrip);
+        store.set (Macro3, 1.0f); // Clarity
+        store.set (Macro5, 0.6f); // Warmth
+        store.set (SmoothAmount, 1.0f);
+        store.set (SaturationOn, 0.0f);
+        store.set (SatType, layout()[static_cast<size_t> (SatType)].defaultValue);
+        store.set (MaximizerOn, 1.0f);
+        store.set (MaxStyle, static_cast<float> (MaxStyleValue::Punchy));
+        store.set (MaxLfLimit, 0.5f);
+        if (main != nullptr)
+            main->getRack().scrollToCard ("sat"); // Saturation, Compressor and Maximizer in view from 1920 px
     }
     if (main == nullptr)
         return;

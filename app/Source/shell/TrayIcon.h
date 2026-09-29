@@ -4,8 +4,11 @@
 // docs/11 E39: Boost, the preset stepper, Bypass, open the window); a double
 // click opens the main window. Right click (any click on macOS): quick menu
 //   Enabled | Mode: Music / Gaming | Boost +10 % / -10 % | Presets > ... |
-//   Quick controls | Open Flubsound Pro | Quit
-// Mode, boost and presets act on the selected strip. The icon is drawn in
+//   Tournament mode | Tournament mode > automatic | Quick controls |
+//   Open Flubsound Pro | Quit
+// Mode, boost and presets act on the selected strip. Tournament mode
+// (docs/11 E55) is the user's switch; when it comes on by itself because an
+// anti-cheat service runs, a bubble says so once. The icon is drawn in
 // code: white equaliser bars on a fixed teal-to-blue gradient while enabled,
 // dimmed bars on grey while bypassed; the macOS template variant is the bars
 // alone.
@@ -41,6 +44,11 @@ public:
 
     static juce::Image createIconImage (bool enabled, bool asTemplate, int size = 64);
 
+    /** The quick menu's Tournament mode items (docs/11 E55): the switch
+        (ticked while active; named after the anti-cheat that holds it on)
+        and the automatic switch-on. */
+    static void addTournamentItems (juce::PopupMenu& menu, EngineController& controller);
+
 private:
     void engineControllerChanged (EngineController::Change change) override;
     juce::PopupMenu buildMenu();
@@ -51,6 +59,7 @@ private:
     bool iconShowsEnabled = false, iconValid = false;
     bool overloadNotified = false;   // bubble shown for the current overload
     uint64_t reductionsNotified = 0; // automatic profile steps already shown in a bubble
+    bool tournamentNotified = false; // bubble shown for the current automatic Tournament mode
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrayIcon)
 };

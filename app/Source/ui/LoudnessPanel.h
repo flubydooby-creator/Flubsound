@@ -4,12 +4,15 @@
 //             loudness range (LU), true-peak maximum, auto-level gain; what
 //             the strip does to loudness (docs/11 E38 / E11): the short-term
 //             in -> out difference (LU), the share of time the maximizer's
-//             limiter reduces gain by more than 1 dB (about the last 10 s)
-//             and the automatic preamp
+//             limiter reduces gain by more than 1 dB (about the last 10 s:
+//             "LIM", E11's "Limiter active x %", spelled out on hover) and
+//             the automatic preamp
 //   DYNAMICS  gain-reduction meters: compressor (with upward gain), limiter,
 //             multiband glue, bass protection, master safety limiter,
-//             distortion (measured THD+N of saturator and clipper vs. the
-//             SafetyGovernor's -30 dB budget) and the harmonics the bass
+//             distortion (measured THD+N of saturator and clipper; the
+//             SafetyGovernor's -30 dB budget marked at protection strength
+//             Off, the only strength that budgets it: Normal / Strict budget
+//             the audible residual under PROTECTION) and the harmonics the bass
 //             harmonics and air exciter add on purpose (not budgeted)
 //   PROTECTION the SafetyGovernor's measured loop at protection strength
 //             Normal / Strict (docs/11 E06 / E07): the audible (weighted)
@@ -59,6 +62,12 @@ public:
     /** How long the "limiter active" share averages over. */
     static constexpr float kLimiterActiveSeconds = 10.0f;
     static constexpr float kLimiterActiveThresholdDb = -1.0f;
+    /** The LIM readout's tooltip (docs/11 E11's "Limiter active x %"):
+        "Limiter active 12 % of the last 10 s ...". */
+    static juce::String describeLimiterActive (float share01);
+    /** Hover text of the readout under the pointer (the LIM readout; the
+        panel's own tooltip elsewhere). */
+    juce::String getTooltip() override;
 
     std::function<void()> onResetRequested;
 
@@ -89,6 +98,6 @@ private:
     Shown shown, painted;
     float sinceRepaint = 0.0f; // readouts refresh at <= 20 Hz
     bool protectionShown = false;
-    juce::Rectangle<float> integratedArea;
+    juce::Rectangle<float> integratedArea, limiterActiveArea;
 };
 } // namespace flub::app::ui

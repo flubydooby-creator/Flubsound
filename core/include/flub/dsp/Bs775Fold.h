@@ -31,6 +31,19 @@
 // peak goes through the same budget as every other channel sum (the fold's
 // -3 dB, AutoLevel and the maximizer's true-peak limiter).
 //
+// Fold headroom (FoldHeadroom, docs/11 E28a): correlated content on every
+// speaker adds up (full-scale correlated pink on all seven mains reaches
+// about +6.9 dBFS through the surround fold), so the chain holds the
+// surround fold's output at 0 dBFS with the same linked zero-latency peak
+// gain as the virtualiser's binaural output: when a sample would exceed
+// 0 dBFS the gain drops at once to exactly 0 dBFS / peak, holds for 10 ms
+// and recovers with a 150 ms one-pole. It never acts below 0 dBFS, so such
+// content is bit-identical. The stereo passthrough fold (overall 1) has none:
+// it stays exactly the 2-channel stream.
+//
+// The app's per-frame folds (the capture FIFO's and the test signal's own
+// BS.775 copies) take the LFE through LfeFold::next(), the same path.
+//
 // Real-time: no allocation, no locks; prepare() is the only non-RT call.
 #pragma once
 
@@ -118,6 +131,18 @@ public:
         store (state[1], s1);
     }
 
+    /** One sample: gain * LP(x), for the app's per-frame folds (the capture
+        FIFO and the test signal). The same filter and ramp as addTo(); the
+        state is flushed after each sample instead of each block. */
+    float next (float x) noexcept FLUB_NONBLOCKING
+    {
+        SvfState s0 = state[0], s1 = state[1];
+        const float y = svfTick (coeffs[1], s1, svfTick (coeffs[0], s0, x)) * gain.next();
+        store (state[0], s0);
+        store (state[1], s1);
+        return y;
+    }
+
     /** Advances the gain ramp by n samples without input. Stepped per sample
         (not skip()) so the value is the same for any block partition. */
     void skip (int n) noexcept FLUB_NONBLOCKING
@@ -140,6 +165,76 @@ private:
     std::array<SvfCoeffs, 2> coeffs {};
     std::array<SvfState, 2> state {};
     LinearSmoothedValue gain;
+};
+
+/** Fold headroom (docs/11 E28a, see the file comment): a linked
+    zero-latency peak gain that holds a stereo fold at or below 0 dBFS. The
+    law of HeadphoneVirtualizer's binaural output, for the chain's BS.775
+    fold. Per sample, so it is the same for any block partition. */
+class FoldHeadroom
+{
+public:
+    static constexpr float kCeiling = 1.0f; // 0 dBFS
+    static constexpr float kHoldMs = 10.0f;
+    static constexpr float kReleaseMs = 150.0f;
+
+    void prepare (double sampleRate) noexcept
+    {
+        holdSamples = msToSamples (kHoldMs, sampleRate);
+        release = static_cast<float> (1.0 - std::exp (-1.0 / (static_cast<double> (kReleaseMs) * 0.001 * sampleRate)));
+        reset();
+    }
+
+    void reset() noexcept FLUB_NONBLOCKING
+    {
+        gain = 1.0f;
+        hold = 0;
+    }
+
+    /** The gain for the next sample, whose peak over both channels before
+        the gain is `peak`: hold, then release; an over drops the gain at
+        once to exactly the ceiling (and restarts the hold). */
+    float next (float peak) noexcept FLUB_NONBLOCKING
+    {
+        if (hold > 0)
+        {
+            --hold;
+        }
+        else if (gain < 1.0f)
+        {
+            gain += (1.0f - gain) * release;
+            if (gain > 0.999999f)
+                gain = 1.0f;
+        }
+        if (peak * gain > kCeiling && std::isfinite (peak))
+        {
+            gain = kCeiling / peak;
+            hold = holdSamples;
+        }
+        return gain;
+    }
+
+    /** Applies it to l and r in place (n samples). Below 0 dBFS the samples
+        are not touched. */
+    void process (float* l, float* r, int n) noexcept FLUB_NONBLOCKING
+    {
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = next (std::max (std::abs (l[i]), std::abs (r[i])));
+            if (g < 1.0f)
+            {
+                l[i] *= g;
+                r[i] *= g;
+            }
+        }
+    }
+
+    float getGain() const noexcept { return gain; }
+    float getGainDb() const noexcept { return gainToDb (gain); }
+
+private:
+    float gain = 1.0f, release = 0.0f;
+    int hold = 0, holdSamples = 0;
 };
 
 /** The BS.775 matrix fold with the shared LFE path (see the file comment). */

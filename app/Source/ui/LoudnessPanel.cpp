@@ -135,6 +135,22 @@ juce::String LoudnessPanel::formatBrightness (const std::array<float, 3>& lift)
     return parts.joinIntoString (" ");
 }
 
+juce::String LoudnessPanel::describeLimiterActive (float share01)
+{
+    const int pct = juce::roundToInt (juce::jlimit (0.0f, 1.0f, std::isfinite (share01) ? share01 : 0.0f) * 100.0f);
+    return "Limiter active " + juce::String (pct) + " % of the last " + juce::String (juce::roundToInt (kLimiterActiveSeconds))
+           + " s: the share of time the maximizer's limiter takes more than " + juce::String (juce::roundToInt (-kLimiterActiveThresholdDb))
+           + " dB off. Above about 10 % it eats the enhancement; the automatic preamp (Settings > Processing) takes the boosts "
+             "back before it.";
+}
+
+juce::String LoudnessPanel::getTooltip()
+{
+    if (limiterActiveArea.contains (getMouseXYRelative().toFloat()))
+        return describeLimiterActive (shown.limiterActive);
+    return SettableTooltipClient::getTooltip();
+}
+
 juce::String LoudnessPanel::formatInOutDelta (float inLufs, float outLufs)
 {
     if (! std::isfinite (inLufs) || ! std::isfinite (outLufs) || inLufs <= -70.0f || outLufs <= -70.0f)
@@ -279,6 +295,7 @@ void LoudnessPanel::paint (juce::Graphics& g)
         const auto delta = formatInOutDelta (shown.active ? shown.inShortTerm : -160.0f, shown.shortTerm);
         item (row, colW * 1.25f, "IN>OUT", delta, delta == "--" ? Palette::faint : plain);
         const int limitPct = juce::roundToInt (shown.limiterActive * 100.0f);
+        limiterActiveArea = row.withWidth (colW * 0.85f);
         item (row, colW * 0.85f, "LIM", juce::String (limitPct) + "%", limitPct > 10 ? status.warn : plain);
         item (row, colW * 0.9f, "PRE", shown.preamp < -0.05f ? Theme::formatSignedDb (shown.preamp, 1) : juce::String ("off"),
               shown.preamp < -0.05f ? plain : Palette::faint);
@@ -294,7 +311,10 @@ void LoudnessPanel::paint (juce::Graphics& g)
     // Distortion: measured THD+N of saturator + clipper (floored by the
     // clip-energy ratio), against the Safety Governor's budget; harmonics:
     // what the bass harmonics and the air exciter add on purpose.
-    drawLevelRow (g, r.removeFromTop (rowH), "Distortion", shown.clip, flub::SafetyGovernor::kDistortionBudgetDb, status.warn.withAlpha (0.8f));
+    // Its budget is marked at Off only: Normal / Strict govern the audible
+    // residual (PROTECTION below) against the mode's budget instead.
+    drawLevelRow (g, r.removeFromTop (rowH), "Distortion", shown.clip, shown.strength == 0 ? flub::SafetyGovernor::kDistortionBudgetDb : -160.0f,
+                  status.warn.withAlpha (0.8f));
     drawLevelRow (g, r.removeFromTop (rowH), "Harmonics", shown.harmonics, -160.0f, accent.withAlpha (0.8f));
 
     // ---- Protection: the measured loop's readings (docs/11 E06 / E07) ----

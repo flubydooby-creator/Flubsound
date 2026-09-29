@@ -14,7 +14,10 @@
 //   names the governor's state and reason (end to end on a hot programme).
 // * docs/11 E38 slice / E11: active-now chips from effective values
 //   (subsonic at Boost 0, >= 3 chips at Boost 55), the in -> out loudness
-//   difference and the limiter-active share.
+//   difference and the limiter-active share ("Limiter active x %" on hover).
+// * docs/11 E06 (Phase 3 batch 3): at Normal / Strict the governor chip's
+//   tooltip quotes the budgets the chain publishes for its mode and
+//   strength, end to end on the Music and Game strips.
 // * The whole window: MainComponent shows the banner, the toast and the
 //   prompt from controller events and lays them out under the header.
 #include "AppTestSupport.h"
@@ -548,6 +551,58 @@ TEST_CASE ("App UI: on a hot programme at Boost 100 with the clipper off the Boo
     CHECK (panel.getGovernorReadout().text.startsWith ("Governor " + juce::String (juce::roundToInt (s.governorScale * 100.0f)) + "%"));
 }
 
+TEST_CASE ("App UI: at Normal / Strict the governor chip's tooltip quotes the budgets of the strip's mode and strength, not Off's (E06)")
+{
+    // What the snapshot carries is what the tooltip quotes.
+    MeterSnapshot s;
+    s.governorStrength = static_cast<int> (flub::ProtectionStrength::Strict);
+    s.governorGrDb = -2.0f;
+    s.governorGrBudgetDb = -4.0f;
+    s.governorDriveResidualDb = -38.0f;
+    s.governorResidualBudgetDb = -41.0f;
+    auto detail = ui::BoostPanel::describeGovernor (s, flub::ProtectionStrength::Strict).detail;
+    CHECK (detail.contains ("Limiter, 3 s average: -2.0 dB (budget -4 dB)"));
+    CHECK (detail.contains ("Audible distortion (weighted residual): -38 dB (budget -41 dB)"));
+    CHECK (! detail.contains ("THD+N")); // Off's -30 dB THD+N budget does not apply
+    s.governorDriveResidualDb = -160.0f;  // before the first reading: the budget all the same
+    CHECK (ui::BoostPanel::describeGovernor (s, flub::ProtectionStrength::Strict).detail.contains ("not measured yet (budget -41 dB)"));
+    s.governorStrength = 0;              // the chain ran at Off: its fixed budgets
+    detail = ui::BoostPanel::describeGovernor (s, flub::ProtectionStrength::Off).detail;
+    CHECK (detail.contains ("(budget -6 dB)"));
+    CHECK (detail.contains ("Distortion (THD+N), 3 s average"));
+
+    // End to end: the budgets each strip's chain publishes for its mode.
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    const int music = controller.findStrip ("Music"), game = controller.findStrip ("Game");
+    REQUIRE (music >= 0);
+    REQUIRE (game >= 0);
+    controller.setMode (ModeValue::Music, music);
+    controller.setMode (ModeValue::Gaming, game);
+    TestSignalGenerator source (controller.getHost().getSampleRate());
+    source.setProgramme (music, TestSignalGenerator::Programme::Music, -12.0f);
+    source.setProgramme (game, TestSignalGenerator::Programme::Music, -12.0f);
+    struct Row
+    {
+        flub::ProtectionStrength strength;
+        int strip;
+        const char *residual, *gr;
+    };
+    for (const auto& row : { Row { flub::ProtectionStrength::Normal, music, "(budget -35 dB)", "(budget -6 dB)" },
+                             Row { flub::ProtectionStrength::Normal, game, "(budget -30 dB)", "(budget -6 dB)" },
+                             Row { flub::ProtectionStrength::Strict, music, "(budget -41 dB)", "(budget -4 dB)" },
+                             Row { flub::ProtectionStrength::Strict, game, "(budget -36 dB)", "(budget -4 dB)" } })
+    {
+        controller.setProtectionStrength (row.strength);
+        render (controller, source, 0.1);
+        const auto readout = ui::BoostPanel::describeGovernor (snapshotOf (controller, row.strip), row.strength);
+        CHECK (readout.detail.contains (juce::String ("Audible distortion (weighted residual): ")));
+        CHECK (readout.detail.contains (row.residual));
+        CHECK (readout.detail.contains (juce::String ("dB ") + row.gr));
+        CHECK (readout.detail.contains (row.strength == flub::ProtectionStrength::Strict ? "Protection strength: Strict" : "Protection strength: Normal"));
+    }
+}
+
 // =============================================================================
 // E38 slice / E11: what the sound is doing
 // =============================================================================
@@ -634,6 +689,10 @@ TEST_CASE ("App UI: LoudnessPanel's in -> out difference and the limiter's activ
         panel.update (s, frame);
     }
     CHECK_NEAR (panel.getLimiterActiveShare(), 0.5, 0.06);
+    // "Limiter active x %" (E11) spelled out on hover over LIM.
+    CHECK (ui::LoudnessPanel::describeLimiterActive (0.123f).startsWith ("Limiter active 12 % of the last 10 s"));
+    CHECK (ui::LoudnessPanel::describeLimiterActive (0.123f).contains ("more than 1 dB"));
+    CHECK (ui::LoudnessPanel::describeLimiterActive (2.0f).startsWith ("Limiter active 100 %"));
 }
 
 // =============================================================================
@@ -701,6 +760,9 @@ TEST_CASE ("App UI: the screenshot driver's --state option parses the known stat
     CHECK (error.isEmpty());
     CHECK (o.states.size() == 2);
     CHECK (o.states.contains ("latency-prompt"));
+    ScreenshotDriver::Options readings; // Phase 3 batch 3: the controls outside the generic grid
+    CHECK (ScreenshotDriver::parseCommandLine ({ "--screenshot", "out.png", "--state", "module-readings,contour-curve" }, readings, error));
+    CHECK (readings.states.size() == 2);
     ScreenshotDriver::Options bad;
     CHECK (! ScreenshotDriver::parseCommandLine ({ "--screenshot", "out.png", "--state", "bogus" }, bad, error));
     CHECK (error.startsWith ("--state must be one or more of"));

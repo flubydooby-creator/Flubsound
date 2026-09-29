@@ -134,6 +134,9 @@ public:
     /** Ends a hold now (strip switch, engine reconfiguration). */
     void stopListening();
 
+    /** The note line under the key controls, as painted (tests). */
+    juce::String getNoteText() const { return noteText(); }
+
     /** Preferred width in the collapsed rack. */
     int getPreferredWidth() const;
 

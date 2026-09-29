@@ -76,6 +76,13 @@
 // Loopback     getAllowedLoopbackPairs() / setLoopbackPairAllowed(): the
 //   override   feedback-loop guard's per-pair override (docs/11 E51),
 //              persisted and applied to every device start.
+// Headset      getOnboardEnhancement() / setOnboardEnhancement(): "Headset
+//   enhance-   enhancement (Superhuman Hearing / on-board EQ) is ON" for the
+//   ment       output endpoint (docs/11 E16): stored per endpoint (its E51
+//              identity, the name as the fallback) and applied to every
+//              strip's chain (ProcessingChain::setOnboardEnhancementCap:
+//              Footsteps / Detail at most 30 %, the virtualiser off), on
+//              every output change and every engine the host builds.
 // Correction   getDeviceCorrection(): the output endpoint's headphone /
 //              speaker correction (docs/11 E15; import an AutoEQ / Equalizer
 //              APO ParametricEQ.txt with importDeviceCorrection, enable /
@@ -88,6 +95,13 @@
 //              AutoProfile.h). The controller polls the foreground app at
 //              2 Hz (pollForegroundApp) and loads / restores presets itself;
 //              isAutoProfileSupported(), describeAutoProfile() for the UI.
+// Tournament   getTournamentState() / setTournamentMode(): Tournament mode
+//   mode       (docs/11 E55) freezes per-app routing, holds automatic
+//              profiles and stops the foreground poll; it switches itself
+//              on while a known anti-cheat service runs
+//              (pollAntiCheatServices, every 10 s) unless
+//              setTournamentAuto (false). isTournamentActive() for any
+//              later OSD / hook.
 // Settings     getSettings() (tray / start-up / hotkeys ...).
 // Listening    addListener(); Listener::engineControllerChanged(Change) is
 //              called on the message thread for state the UI cannot poll
@@ -157,6 +171,16 @@ public:
         std::function<flub::platform::EndpointVolume (const std::string& deviceName)> endpointVolumeReader;
         /** Tests: run that background poll without an open device too. */
         bool pollEndpointVolumeHeadless = false;
+        /** docs/11 E55: the known anti-cheat services running now (Tournament
+            mode's automatic switch); empty = the platform's
+            (platform::AntiCheatServices::running). Tests inject a fake. */
+        std::function<std::vector<std::string>()> antiCheatServices;
+        /** docs/11 E16: the active output endpoints with their identities
+            (endpoint id, hardware id), which key the per-endpoint settings;
+            empty = the platform's (platform::AudioDeviceWatcher::listOutputs,
+            read on each output change) with an open device, none headless
+            (the name alone). Tests inject a fake. */
+        std::function<std::vector<flub::platform::OutputEndpointIdentity>()> outputEndpoints;
     };
 
     EngineController();
@@ -403,6 +427,32 @@ public:
         <app data>/Flubsound/device-profiles.json when present). */
     const flub::device::Database& getDeviceProfiles() const noexcept { return deviceProfiles; }
 
+    // ---- Headset enhancement cap (docs/11 E16) --------------------------------------------
+    /** "Headset enhancement (Superhuman Hearing / on-board EQ) is ON" for the
+        current output endpoint. */
+    struct OnboardEnhancementInfo
+    {
+        juce::String endpoint;  // the output it belongs to; empty while no output is open
+        bool offered = false;   // the matched profile's headset (or its software) has its own enhancement (Profile::onboardDsp)
+        bool answered = false;  // the user said on or off for this endpoint (the device banner asks until then)
+        bool on = false;        // the cap applies to every strip
+    };
+    OnboardEnhancementInfo getOnboardEnhancement() const;
+    /** The user's answer for the current output endpoint: stored with its
+        identity (AppSettings::setDeviceEndpoint: endpoint id, hardware id
+        and name, so a rename or a re-plug into another port keeps it) and
+        applied to every strip at once. While on, each chain glides Gaming
+        Footsteps and Detail to at most 30 % and holds its virtualiser off
+        (ProcessingChain::setOnboardEnhancementCap); presets and the
+        parameter values stay as they are. False (nothing stored) while no
+        output is open. Broadcasts Change::Device and Change::Settings. */
+    bool setOnboardEnhancement (bool on);
+    /** The cap every strip's chain was handed (the current endpoint's answer). */
+    bool isOnboardCapApplied() const noexcept { return onboardCapOn; }
+    /** The current output endpoint's identity (the platform's endpoint id and
+        hardware id where known, else the name alone). */
+    const flub::platform::OutputEndpointIdentity& getOutputIdentity() const noexcept { return outputIdentity; }
+
     // ---- Device correction (docs/11 E15) ------------------------------------------------
     /** What the current output endpoint's correction is and does. */
     struct DeviceCorrectionInfo
@@ -577,6 +627,38 @@ public:
         broadcasts Change::Preset and Change::Routing when it did. */
     void pollForegroundApp();
 
+    // ---- Tournament mode (docs/11 E55) ---------------------------------------------------------
+    struct TournamentState
+    {
+        bool active = false;               // in effect now
+        bool userChoice = false;           // the user's switch (persisted)
+        bool automatic = false;            // on only because an anti-cheat service runs
+        bool autoEnabled = true;           // the automatic switch-on is allowed (persisted)
+        std::vector<std::string> services; // known anti-cheat services running (last poll)
+    };
+    const TournamentState& getTournamentState() const noexcept { return tournament; }
+    /** While true: no session enumeration, no foreground poll, no automatic
+        profile switch (and no OSD or hook of a later feature). */
+    bool isTournamentActive() const noexcept { return tournament.active; }
+    /** The user's switch (persisted). Switching it off while an anti-cheat
+        service holds Tournament mode on turns it off until those services
+        stop. Broadcasts Change::Settings when the state changes. */
+    void setTournamentMode (bool on);
+    /** Allow the automatic switch-on (persisted, default on). */
+    void setTournamentAuto (bool automatic);
+    /** One line for the UI: "Tournament mode on: Vanguard is running",
+        "Tournament mode on", or "" while off. */
+    juce::String describeTournament() const;
+    /** "Vanguard" for "vgc", "BattlEye" for "BEService" ... (the name itself
+        when unknown). */
+    static juce::String antiCheatDisplayName (const std::string& serviceName);
+    /** Reads the running anti-cheat services (service manager only: no
+        process is opened). The timer calls it every 10 s; tests call it
+        directly. A service switches Tournament mode on at the first poll
+        that sees it; it goes off after kTournamentOffPolls polls without one. */
+    void pollAntiCheatServices();
+    static constexpr int kTournamentOffPolls = 2;
+
     // ---- Headless ------------------------------------------------------------------------------
     /** Runs audio through the engine without a device (screenshot mode). */
     void renderOffline (StripSignalSource& source, int numSamples);
@@ -597,6 +679,8 @@ private:
     void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
     void applyDeviceCorrection();
+    void updateOutputIdentity();
+    void applyOnboardCap();
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
     void applyProtectionStrength();
     void applyListeningLevel();
@@ -659,6 +743,9 @@ private:
     bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
     juce::String correctionEndpoint; // endpoint the applied device correction belongs to
     bool correctionCompare = false;
+    flub::platform::OutputEndpointIdentity outputIdentity; // docs/11 E16: what keys the per-endpoint settings
+    bool onboardCapOn = false;                             // the cap handed to every chain
+    std::unique_ptr<flub::platform::AudioDeviceWatcher> endpointLister; // lists the outputs' identities (never started)
 
     // Listening level (docs/11 E32): the last read, and the background poll.
     ListeningLevel listening;
@@ -704,6 +791,12 @@ private:
     std::optional<AutoProfileRestorePoint> autoRestorePoint;
     juce::String autoAppliedPresetId, autoProfileError;
     juce::StringArray recentForegroundApps;
+
+    // Tournament mode (docs/11 E55, message thread)
+    void applyTournament();
+    TournamentState tournament;
+    bool tournamentDismissed = false; // switched off by the user while services held it on
+    int tournamentQuietPolls = 0;     // polls without a service since one was seen
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };

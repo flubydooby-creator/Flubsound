@@ -130,6 +130,19 @@ public:
             refresh();
         };
         addAndMakeVisible (allowButton);
+
+        // docs/11 E16: the headset's own enhancement, per output endpoint (the
+        // device banner asks the same once for a headset that has one).
+        Style::set (enhancementToggle, "switch");
+        enhancementToggle.setTooltip ("On while the headset (or its app) applies Superhuman Hearing, its own EQ or surround: Flubsound "
+                                      "then caps Footsteps and Detail at 30 % and turns its virtual surround off on this output, so "
+                                      "the two do not stack. Stored for this output device.");
+        enhancementToggle.onClick = [this]
+        {
+            controller.setOnboardEnhancement (enhancementToggle.getToggleState());
+            refresh();
+        };
+        addAndMakeVisible (enhancementToggle);
         refresh();
     }
 
@@ -139,6 +152,9 @@ public:
         const auto guard = describeLoopbackGuard (controller);
         const auto pairs = controller.getAllowedLoopbackPairs();
         allowButton.setEnabled (loopbackPairToAllow (controller).input.isNotEmpty());
+        const auto onboard = controller.getOnboardEnhancement();
+        enhancementToggle.setEnabled (onboard.endpoint.isNotEmpty());
+        enhancementToggle.setToggleState (onboard.on, juce::dontSendNotification);
         if (text != deviceText || guard != guardText || pairs != shownPairs)
         {
             deviceText = text;
@@ -196,8 +212,10 @@ public:
         introArea = { kInset, 28, w, static_cast<int> (std::ceil (introLayout.getHeight())) };
 
         deviceLayout = layoutDeviceText (deviceText, w - 2 * kBoxPadX);
-        const int boxHeight = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (deviceLayout.getHeight())) + kBoxPadY + 2;
+        const int textH = static_cast<int> (std::ceil (deviceLayout.getHeight()));
+        const int boxHeight = kBoxPadY + 16 + 4 + textH + 6 + kToggleH + kBoxPadY + 2;
         deviceArea = { kInset, introArea.getBottom() + 8, w, boxHeight };
+        enhancementToggle.setBounds (kInset + kBoxPadX, deviceArea.getY() + kBoxPadY + 20 + textH + 6, w - 2 * kBoxPadX, kToggleH);
 
         // Guard box: caption, wrapped text, [Allow this pair], one row per allowed pair.
         {
@@ -232,7 +250,7 @@ public:
     }
 
 private:
-    static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8;
+    static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8, kToggleH = 26;
 
     struct PairRow
     {
@@ -293,6 +311,7 @@ private:
     juce::TextLayout introLayout, deviceLayout, guardLayout;
     juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea;
     juce::TextButton allowButton { "Allow this pair" };
+    juce::ToggleButton enhancementToggle { "Headset enhancement (Superhuman Hearing / on-board EQ) is ON" };
     std::vector<AppSettings::LoopbackPair> shownPairs;
     std::vector<PairRow> pairRows;
 };
@@ -432,6 +451,90 @@ private:
 // =============================================================================
 // Processing page
 // =============================================================================
+namespace
+{
+/** The loudness contour's target lift (docs/11 E32), read-only: 20 Hz ..
+    20 kHz on a log axis, -6 .. +18 dB, the 29 ISO 226 points joined. */
+class ContourCurveView : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    static constexpr float kMinDb = -6.0f, kMaxDb = 18.0f;
+
+    ContourCurveView()
+    {
+        setTitle ("Loudness contour curve");
+        setTooltip ("What the loudness contour adds now, relative to 1 kHz (ISO 226 equal loudness). Read-only: it follows the "
+                    "volume, the reference and the preset's Listening Level.");
+        setDescription (SettingsDialog::describeContourCurve (curve, 0.0f));
+    }
+
+    void setCurve (const SettingsDialog::ContourCurve& next)
+    {
+        if (next.on == curve.on && next.liftDb == curve.liftDb)
+            return;
+        curve = next;
+        setDescription (SettingsDialog::describeContourCurve (curve, 0.0f));
+        repaint();
+    }
+    const SettingsDialog::ContourCurve& getCurve() const noexcept { return curve; }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+        g.setColour (Palette::well);
+        g.fillRoundedRectangle (bounds, 6.0f);
+        g.setColour (Palette::border);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 6.0f, 1.0f);
+        const auto plot = bounds.reduced (30.0f, 10.0f).withTrimmedBottom (10.0f);
+        const auto xOf = [&plot] (double hz)
+        { return plot.getX() + plot.getWidth() * static_cast<float> (std::log10 (hz / 20.0) / std::log10 (1000.0)); };
+        const auto yOf = [&plot] (float db)
+        { return plot.getBottom() - plot.getHeight() * (juce::jlimit (kMinDb, kMaxDb, db) - kMinDb) / (kMaxDb - kMinDb); };
+
+        g.setFont (Theme::font (10.0f));
+        for (const float db : { 0.0f, 6.0f, 12.0f, 18.0f })
+        {
+            g.setColour (db == 0.0f ? Palette::muted.withAlpha (0.6f) : Palette::border);
+            g.fillRect (plot.getX(), yOf (db) - 0.5f, plot.getWidth(), 1.0f);
+            g.setColour (Palette::faint);
+            g.drawText (Theme::formatSignedDb (db, 0), juce::Rectangle<float> (bounds.getX() + 2.0f, yOf (db) - 7.0f, 26.0f, 14.0f),
+                        juce::Justification::centredRight, false);
+        }
+        for (const auto& [hz, text] : { std::pair { 50.0, "50" }, std::pair { 100.0, "100" }, std::pair { 1000.0, "1k" },
+                                        std::pair { 10000.0, "10k" } })
+        {
+            const float x = xOf (hz);
+            g.setColour (Palette::border);
+            g.fillRect (x - 0.5f, plot.getY(), 1.0f, plot.getHeight());
+            g.setColour (Palette::faint);
+            g.drawText (text, juce::Rectangle<float> (x - 20.0f, plot.getBottom() + 1.0f, 40.0f, 12.0f), juce::Justification::centred, false);
+        }
+
+        juce::Path path;
+        for (int i = 0; i < flub::iso226::kNumFrequencies; ++i)
+        {
+            const auto p = juce::Point<float> (xOf (flub::iso226::kFrequencies[static_cast<size_t> (i)]),
+                                               yOf (curve.liftDb[static_cast<size_t> (i)]));
+            if (i == 0)
+                path.startNewSubPath (p);
+            else
+                path.lineTo (p);
+        }
+        g.setColour (curve.on ? Theme::accent (*this) : Palette::faint);
+        g.strokePath (path, juce::PathStrokeType (curve.on ? 2.0f : 1.2f, juce::PathStrokeType::curved));
+        if (! curve.on)
+        {
+            g.setColour (Palette::faint);
+            g.setFont (Theme::font (11.5f));
+            g.drawText ("Contour off", plot.withTrimmedBottom (plot.getHeight() * 0.35f), juce::Justification::centred, false);
+        }
+    }
+
+private:
+    SettingsDialog::ContourCurve curve;
+};
+} // namespace
+
 class SettingsDialog::ProcessingPage : public juce::Component
 {
 public:
@@ -502,6 +605,11 @@ public:
         Style::set (preampToggle, "switch");
         binder.bindToggle (preampToggle, AutoPreampOn);
         preampToggle.setTitle ("Automatic preamp");
+        // Its hot-programme term (docs/11 E11, auto.preampHot): acts only
+        // with the automatic preamp on, so the switch is dimmed without it.
+        Style::set (preampHotToggle, "switch");
+        binder.bindToggle (preampHotToggle, AutoPreampHot);
+        preampHotToggle.setTitle ("Automatic preamp on hot programme");
 
         // Listening level (docs/11 E32): the contour is the preset's
         // (contour.on), following the system volume is the app's.
@@ -546,8 +654,10 @@ public:
             addAndMakeVisible (*box);
         addAndMakeVisible (autoReduceToggle);
         addAndMakeVisible (preampToggle);
+        addAndMakeVisible (preampHotToggle);
         addAndMakeVisible (restoreButton);
-        for (auto* control : std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton })
+        for (auto* control :
+             std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton, &contourView })
             addAndMakeVisible (control);
 
         form.section ("Latency");
@@ -577,6 +687,11 @@ public:
                   330);
         form.row ({}, preampToggle, describePreamp(), 520);
         preampRow = form.rows.size() - 1;
+        form.row ({}, preampHotToggle,
+                  "With the automatic preamp on: while the music's own peaks leave no room under the ceiling (a hot master), "
+                  "also takes back the preamp's 1 dB allowance and the maximizer's drive, so the limiter stays idle. Hot "
+                  "masters play a little quieter; music with room is unchanged. Saved with the preset; off by default.",
+                  520);
         form.section ("Listening level");
         form.row ({}, contourToggle,
                   "Adds the bass and treble the ear misses at low volume (ISO 226 equal loudness), more the further the volume is below "
@@ -587,8 +702,9 @@ public:
         form.row ("Reference volume", referenceSlider, {}, 330);
         form.row ({}, useVolumeButton, describeListeningLevel (controller.getListeningLevel()), 200);
         listeningRow = form.rows.size() - 1;
-        form.section ("Display");
-        form.row ("Meter colours", paletteBox, {}, 330);
+        // The contour's curve at that level sits under the form (resized).
+        displayForm.section ("Display");
+        displayForm.row ("Meter colours", paletteBox, {}, 330);
         refresh();
     }
 
@@ -617,6 +733,8 @@ public:
 
         protectionBox.setSelectedId (static_cast<int> (controller.getProtectionStrength()) + 1, juce::dontSendNotification);
         preampToggle.setButtonText ("Automatic preamp on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
+        preampHotToggle.setButtonText ("... also on hot programme (" + controller.getStripName (controller.getSelectedStrip()) + " strip)");
+        preampHotToggle.setEnabled (controller.getSelectedParams().get (AutoPreampOn) >= 0.5f);
         if (const auto text = describePreamp(); text != form.rows[preampRow].help)
         {
             form.rows[preampRow].help = text;
@@ -640,6 +758,18 @@ public:
                 resized();
                 repaint();
             }
+        {
+            // The contour's curve as the selected strip's chain designs it now.
+            const auto& chain = controller.getChain (controller.getSelectedStrip());
+            contourView.setCurve (contourCurve (chain.effectiveValue (ContourOn) >= 0.5f, chain.effectiveValue (ContourReferencePhon),
+                                                chain.effectiveValue (ContourLevelDb) + chain.getListeningLevelDb(),
+                                                chain.effectiveValue (ContourMaxLiftDb)));
+            if (const auto text = describeContourCurve (contourView.getCurve(), chain.getContourTrimDb()); text != contourText)
+            {
+                contourText = text;
+                repaint (contourTextArea);
+            }
+        }
 
         const auto li = controller.getLatencyInfo();
         const auto status = controller.getStatus();
@@ -670,6 +800,13 @@ public:
     void paint (juce::Graphics& g) override
     {
         form.paint (g);
+        g.setColour (Palette::text.withAlpha (0.88f));
+        g.setFont (Theme::font (13.0f));
+        g.drawText ("Contour now", contourCaption, juce::Justification::centredLeft, true);
+        g.setColour (Palette::faint.brighter (0.2f));
+        g.setFont (Theme::font (11.5f));
+        g.drawFittedText (contourText, contourTextArea, juce::Justification::topLeft, 2, 1.0f);
+        displayForm.paint (g);
         drawSectionTitle (g, latencyTitle, "Current latency");
         auto r = latencyArea.toFloat();
         g.setColour (Palette::well);
@@ -698,7 +835,12 @@ public:
         // and scrolls in the dialog when that is taller (one line per
         // capture stream).
         const auto r = getLocalBounds();
-        const int formBottom = form.layout (r);
+        const int listeningBottom = form.layout (r);
+        // The contour's curve (docs/11 E32) closes the Listening level section.
+        contourCaption = { r.getX(), listeningBottom, kCaptionWidth, kRowHeight };
+        contourView.setBounds (r.getX() + kCaptionWidth, listeningBottom + 2, juce::jmin (440, r.getWidth() - kCaptionWidth), 124);
+        contourTextArea = { contourView.getX(), contourView.getBottom() + 3, r.getWidth() - kCaptionWidth, 2 * kTextLine + 2 };
+        const int formBottom = displayForm.layout (r.withTop (contourTextArea.getBottom() + 14));
         latencyTitle = { r.getX(), formBottom + 14, r.getWidth(), 22 };
         latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), 4 * kTextLine + 16 };
         captureTitle = { r.getX(), latencyArea.getBottom() + 14, r.getWidth(), 22 };
@@ -745,7 +887,7 @@ private:
     std::function<void (MeterPalette)> onPaletteChanged;
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, protectionBox, paletteBox;
     juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
-    juce::ToggleButton preampToggle { "Automatic preamp" };
+    juce::ToggleButton preampToggle { "Automatic preamp" }, preampHotToggle { "... also on hot programme" };
     juce::ToggleButton contourToggle { "Loudness contour" }, followToggle { "Follow the system volume" };
     juce::Slider referenceSlider;
     juce::TextButton useVolumeButton { "Use current volume" };
@@ -753,8 +895,11 @@ private:
     ParameterBinder binder; // after the controls it binds
     size_t preampRow = 0, followRow = 0, listeningRow = 0;
     juce::TextButton restoreButton { "Restore" };
-    FormLayout form;
+    FormLayout form, displayForm; // Latency .. Listening level; Display (below the contour's curve)
     size_t reductionRow = 0; // the "Automatic change" row: its help is the live description
+    ContourCurveView contourView;
+    juce::String contourText;
+    juce::Rectangle<int> contourCaption, contourTextArea;
     static constexpr int kTextLine = 15; // line pitch of the 12 px text blocks
 
     juce::String latencyText, captureText;
@@ -1537,6 +1682,51 @@ juce::String SettingsDialog::describeListeningLevel (const EngineController::Lis
     if (level.referenceDb.has_value())
         t << ", reference " << Theme::formatSignedDb (*level.referenceDb) << " dB";
     return t << ": the contour plays " << Theme::formatSignedDb (level.levelDb) << " dB re the reference.";
+}
+
+SettingsDialog::ContourCurve SettingsDialog::contourCurve (bool on, float referencePhon, float levelDb, float maxLiftDb)
+{
+    // As LoudnessContour::design() targets it: the level clamped the same
+    // way, the lift capped at contour.maxLift.
+    ContourCurve curve;
+    curve.on = on;
+    if (! on)
+        return curve;
+    flub::LoudnessContourParams p;
+    p.enabled = true;
+    p.referencePhon = referencePhon;
+    p.levelDb = levelDb;
+    p.maxLiftDb = maxLiftDb;
+    curve.levelDb = flub::LoudnessContour::effectiveLevelDb (p);
+    const double reference = std::isfinite (referencePhon) ? std::clamp (static_cast<double> (referencePhon), 20.0, 100.0) : 80.0;
+    const double cap = std::isfinite (maxLiftDb) ? std::max (0.0, static_cast<double> (maxLiftDb)) : 0.0;
+    for (int i = 0; i < flub::iso226::kNumFrequencies; ++i)
+        curve.liftDb[static_cast<size_t> (i)] =
+            static_cast<float> (std::min (flub::iso226::relativeGainDb (i, reference, static_cast<double> (curve.levelDb)), cap));
+    return curve;
+}
+
+juce::String SettingsDialog::describeContourCurve (const ContourCurve& curve, float trimDb)
+{
+    if (! curve.on)
+        return "Off: switch the loudness contour on above to see what it adds at your listening level.";
+    // The lift at 50 Hz and the largest one above 1 kHz, the two ends a listener hears.
+    const auto& f = flub::iso226::kFrequencies;
+    size_t at50 = 0, treble = 0;
+    for (size_t i = 0; i < f.size(); ++i)
+    {
+        if (std::abs (f[i] - 50.0) < 1.0)
+            at50 = i;
+        if (f[i] > 1000.0 && (treble == 0 || curve.liftDb[i] > curve.liftDb[treble]))
+            treble = i;
+    }
+    const auto hz = [] (double v) { return v >= 1000.0 ? juce::String (v / 1000.0, 1) + " kHz" : juce::String (juce::roundToInt (v)) + " Hz"; };
+    juce::String t;
+    t << "At " << Theme::formatSignedDb (curve.levelDb) << " dB re the reference: " << Theme::formatSignedDb (curve.liftDb[at50]) << " dB at 50 Hz, "
+      << Theme::formatSignedDb (curve.liftDb[treble]) << " dB at " << hz (f[treble]);
+    if (trimDb < -0.05f)
+        t << "; level trim " << Theme::formatSignedDb (trimDb) << " dB (so the lift does not drive the limiter)";
+    return t << ".";
 }
 
 juce::String SettingsDialog::describeDeviceCorrection (const EngineController::DeviceCorrectionInfo& info)

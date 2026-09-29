@@ -33,6 +33,11 @@
 //   A device problem (docs/11 E51: a loopback pair holding the output at
 //   silence, or a device error) turns the bottom line into a DEVICE warning
 //   with the message in the tooltip; a click opens Settings.
+// * TOURNAMENT badge (docs/11 E55), shown while Tournament mode is on (the
+//   user's switch or an anti-cheat service): a pill after the strips from
+//   kTournamentPillWidth up, below it an amber shield on the logo mark's
+//   corner (the preset box keeps its room). Its tooltip says why and what
+//   is paused; a click offers to switch it off and the automatic switch-on.
 // * View: Simple <-> Advanced main window (docs/11 E39); the owner switches
 //   (onViewToggleRequested) and tells the header which view is shown.
 // * Narrow windows (< kNarrowWidth, docs/11 E39 reflow down to 800 px): the
@@ -117,6 +122,13 @@ public:
     juce::Button& getBankButton (flub::param::Bank bank) noexcept;
     juce::Button& getOverflowButton() noexcept { return overflowButton; }
     juce::ComboBox& getStripBox() noexcept { return stripBox; }
+    /** The TOURNAMENT badge (visible while Tournament mode is on, docs/11 E55);
+        a pill from this width up, a shield on the logo below it. */
+    static constexpr int kTournamentPillWidth = 1400;
+    /** The TOURNAMENT badge (visible while Tournament mode is on, docs/11 E55). */
+    juce::Button& getTournamentBadge() noexcept;
+    /** Its tooltip: why it is on and what is paused. */
+    static juce::String describeTournamentBadge (const juce::String& line);
     /** The view button: switch between the Simple and the Advanced view. */
     std::function<void()> onViewToggleRequested;
     /** The view shown (the button offers the other one). */
@@ -172,11 +184,14 @@ public:
 private:
     class ModeSegment;
     class PopupButton;
+    class TournamentBadge;
 
     void showPresetMenu();
     void showBypassMenu();
     void showCompareMenu (juce::Component& target);
     void showOverflowMenu();
+    void showTournamentMenu();
+    void updateTournamentBadge();
     void trackProcessedDelta();
     void saveAs();
     void renamePreset (const PresetInfo& preset);
@@ -200,6 +215,7 @@ private:
     IconButton overflowButton { "More", Icons::more(), IconButton::Style::Framed };
     IconButton copyAB { "Copy to the other bank", Icons::copy(), IconButton::Style::Framed };
     std::unique_ptr<PopupButton> bypassButton;
+    std::unique_ptr<TournamentBadge> tournamentBadge;
     IconButton settingsButton { "Settings", Icons::gear(), IconButton::Style::Framed };
     IconButton viewButton { "Advanced view", Icons::expand(), IconButton::Style::Framed };
     std::unique_ptr<juce::FileChooser> fileChooser;
@@ -214,7 +230,7 @@ private:
     bool compact = false, narrow = false, presetModified = false, wideReadout = false;
     float processedDeltaLu = 0.0f;
     bool processedDeltaKnown = false;
-    juce::String abCaption, bypassCaption;
+    juce::String abCaption, bypassCaption, tournamentLine;
     std::vector<bool> stripActive;
     float thumbPos = 0.0f, thumbTarget = 0.0f; // 0 = Music, 1 = Gaming
 };

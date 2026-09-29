@@ -26,6 +26,7 @@ constexpr int kTimerHz = 2;                      // also the overload watchdog's
 constexpr int kPersistEveryTicks = 5 * kTimerHz; // strip state autosave: every 5 s
 constexpr int kRescanEveryTicks = 5 * kTimerHz;  // missing preferred output: rescan every 5 s
                                                  // (ALSA probes every PCM device; too slow for every tick)
+constexpr int kAntiCheatPollTicks = 10 * kTimerHz; // docs/11 E55: anti-cheat services, every 10 s
 
 constexpr const char* kStateFormat = "flubsound-strip-state";
 constexpr int kMaxRecentForegroundApps = 8;
@@ -226,6 +227,7 @@ EngineController::EngineController (Options opts)
     {
         applyProtectionStrength(); // the new engine's chains start at Off
         applyListeningLevel();     // ... and at a 0 dB listening level
+        applyOnboardCap();         // ... and without the headset enhancement cap (docs/11 E16)
         notify (Change::Engine);
     };
     host->onDeviceError = [this] (const juce::String& message)
@@ -286,6 +288,13 @@ EngineController::EngineController (Options opts)
         trackPreferredOutput (false);
         updateDeviceProfile();
     }
+
+    // Tournament mode (docs/11 E55) before routing starts: a frozen router
+    // makes no first pass.
+    tournament.userChoice = settings->getTournamentMode();
+    tournament.autoEnabled = settings->getTournamentAuto();
+    applyTournament();
+    pollAntiCheatServices();
 
     if (options.enableAppRouting)
         routing->start();
@@ -1039,6 +1048,8 @@ void EngineController::updateDeviceProfile()
         currentOutputName = {};
         host->setMasterCeilingDb (-1.0f);
         applyDeviceCorrection();
+        updateOutputIdentity(); // no output: no headset cap (docs/11 E16)
+        applyOnboardCap();
         return;
     }
     applyDeviceProfile (getDeviceManager().getAudioDeviceSetup().outputDeviceName, device->getCurrentSampleRate(),
@@ -1087,6 +1098,11 @@ void EngineController::applyDeviceProfile (const juce::String& outputName, doubl
     // The endpoint's own correction curve (never from the family-level
     // profile match above: a family name says nothing about one unit).
     applyDeviceCorrection();
+
+    // The endpoint's headset enhancement answer (docs/11 E16), applied or
+    // removed with every output change.
+    updateOutputIdentity();
+    applyOnboardCap();
 }
 
 // =============================================================================
@@ -1212,6 +1228,91 @@ void EngineController::removeDeviceCorrection()
     correctionCompare = false;
     applyDeviceCorrection();
     notify (Change::Settings);
+}
+
+// =============================================================================
+// Headset enhancement cap (docs/11 E16)
+// =============================================================================
+void EngineController::updateOutputIdentity()
+{
+    // The output's identity (docs/11 E51) keys its settings: the endpoint
+    // JUCE's device name names, JUCE's duplicate numbering undone, as the
+    // host's output selection matches them. A blocking list (COM calls on
+    // Windows), once per output change, on the message thread.
+    outputIdentity = {};
+    onboardCapOn = false;
+    if (currentOutputName.isEmpty())
+        return;
+    outputIdentity.name = currentOutputName.toStdString();
+
+    std::vector<flub::platform::OutputEndpointIdentity> endpoints;
+    if (options.outputEndpoints)
+        endpoints = options.outputEndpoints();
+    else if (options.openAudioDevice)
+    {
+        if (endpointLister == nullptr)
+            endpointLister = flub::platform::AudioDeviceWatcher::create();
+        if (endpointLister->isSupported())
+            endpoints = endpointLister->listOutputs();
+    }
+    std::vector<flub::platform::AppAudioRouter::OutputEndpoint> plain;
+    plain.reserve (endpoints.size());
+    for (const auto& e : endpoints)
+        plain.push_back ({ e.id, e.name });
+    if (const auto id = flub::platform::AppAudioRouter::matchOutputDeviceName (plain, outputIdentity.name); ! id.empty())
+        for (const auto& e : endpoints)
+            if (e.id == id)
+            {
+                outputIdentity.id = e.id;
+                outputIdentity.hardwareId = e.hardwareId;
+                outputIdentity.transport = e.transport;
+                outputIdentity.formFactor = e.formFactor;
+            }
+
+    if (const auto entry = settings->findDeviceEndpoint (outputIdentity))
+        onboardCapOn = entry->onboardEnhancement;
+}
+
+void EngineController::applyOnboardCap()
+{
+    // One relaxed atomic per chain (ProcessingChain::setOnboardEnhancementCap):
+    // the newest engine's chains, which glide it in or out over 250 ms; a
+    // swapped-in engine inherits it (adoptGovernorState), a rebuilt one gets
+    // it here (onEngineConfigured and the timer).
+    for (int s = 0; s < getNumStrips(); ++s)
+        if (auto& chain = getChain (s); chain.getOnboardEnhancementCap() != onboardCapOn)
+            chain.setOnboardEnhancementCap (onboardCapOn);
+}
+
+EngineController::OnboardEnhancementInfo EngineController::getOnboardEnhancement() const
+{
+    OnboardEnhancementInfo info;
+    if (currentOutputName.isEmpty())
+        return info;
+    info.endpoint = currentOutputName;
+    info.offered = deviceMatch.profile != nullptr && deviceMatch.profile->onboardDsp;
+    info.answered = settings->findDeviceEndpoint (outputIdentity).has_value();
+    info.on = onboardCapOn;
+    return info;
+}
+
+bool EngineController::setOnboardEnhancement (bool on)
+{
+    if (currentOutputName.isEmpty())
+        return false;
+    DeviceEndpointEntry entry;
+    if (const auto stored = settings->findDeviceEndpoint (outputIdentity))
+        entry = *stored; // keeps what else is stored for the endpoint
+    entry.endpointId = juce::String (outputIdentity.id);
+    entry.hardwareId = juce::String (outputIdentity.hardwareId);
+    entry.name = currentOutputName;
+    entry.onboardEnhancement = on;
+    settings->setDeviceEndpoint (entry);
+    onboardCapOn = on;
+    applyOnboardCap();
+    notify (Change::Device); // the device banner and the macro chips
+    notify (Change::Settings);
+    return true;
 }
 
 void EngineController::trackPreferredOutput (bool rescan)
@@ -1490,10 +1591,14 @@ void EngineController::timerCallback()
     updateOverloadWatchdog (host->getStatus());
     applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
     applyListeningLevel();
-    pollForegroundApp();
+    applyOnboardCap();
+    if (! tournament.active) // docs/11 E55: no foreground poll in Tournament mode
+        pollForegroundApp();
 
     if (++timerTicks % kPersistEveryTicks == 0)
         persistStripStates (false);
+    if (timerTicks % kAntiCheatPollTicks == 0)
+        pollAntiCheatServices();
 
     // While the preferred output (e.g. a headset) is missing, look for it.
     if (preferredMissing && options.openAudioDevice && timerTicks % kRescanEveryTicks == 0)
@@ -1733,7 +1838,7 @@ juce::String EngineController::describeAutoProfile() const
 
 void EngineController::pollForegroundApp()
 {
-    if (! isAutoProfileSupported() || ! autoProfiles.isEnabled())
+    if (! isAutoProfileSupported() || ! autoProfiles.isEnabled() || tournament.active)
         return;
 
     // A preset changed on the rule's strip outside loadPreset() & co. (e.g.
@@ -1770,6 +1875,89 @@ void EngineController::pollForegroundApp()
     }
 
     applyAutoProfileActions (autoProfiles.update (sample));
+}
+
+// =============================================================================
+// Tournament mode (docs/11 E55)
+// =============================================================================
+void EngineController::setTournamentMode (bool on)
+{
+    settings->setTournamentMode (on);
+    tournament.userChoice = on;
+    // Off while services hold it on: off until they stop (and start again).
+    tournamentDismissed = ! on && tournament.autoEnabled && ! tournament.services.empty();
+    applyTournament();
+}
+
+void EngineController::setTournamentAuto (bool automatic)
+{
+    settings->setTournamentAuto (automatic);
+    tournament.autoEnabled = automatic;
+    tournamentDismissed = false;
+    applyTournament();
+}
+
+juce::String EngineController::antiCheatDisplayName (const std::string& serviceName)
+{
+    const auto name = juce::String::fromUTF8 (serviceName.c_str());
+    if (name.equalsIgnoreCase ("vgc"))
+        return "Vanguard";
+    if (name.equalsIgnoreCase ("BEService"))
+        return "BattlEye";
+    if (name.startsWithIgnoreCase ("EasyAntiCheat"))
+        return "Easy Anti-Cheat";
+    if (name.equalsIgnoreCase ("FACEITService"))
+        return "FACEIT";
+    if (name.startsWithIgnoreCase ("ESEA"))
+        return "ESEA";
+    return name;
+}
+
+juce::String EngineController::describeTournament() const
+{
+    if (! tournament.active)
+        return {};
+    if (! tournament.automatic)
+        return "Tournament mode on";
+    juce::StringArray names;
+    for (const auto& service : tournament.services)
+        names.addIfNotAlreadyThere (antiCheatDisplayName (service));
+    return "Tournament mode on: " + names.joinIntoString (", ") + (names.size() == 1 ? " is" : " are") + " running";
+}
+
+void EngineController::pollAntiCheatServices()
+{
+    auto running = options.antiCheatServices ? options.antiCheatServices() : flub::platform::AntiCheatServices::running();
+    if (running.empty())
+    {
+        // A service restarting (an update between matches) does not flap the mode.
+        if (tournament.services.empty() || ++tournamentQuietPolls < kTournamentOffPolls)
+            return;
+        tournament.services.clear();
+        tournamentDismissed = false; // the next service start switches it on again
+    }
+    else
+    {
+        tournamentQuietPolls = 0;
+        if (running == tournament.services)
+            return;
+        tournament.services = std::move (running);
+    }
+    applyTournament();
+}
+
+void EngineController::applyTournament()
+{
+    const bool held = tournament.autoEnabled && ! tournament.services.empty() && ! tournamentDismissed;
+    const bool active = tournament.userChoice || held;
+    tournament.automatic = active && ! tournament.userChoice;
+    if (active != tournament.active)
+    {
+        tournament.active = active;
+        routing->setTournamentMode (active);    // no enumeration, move or new capture
+        autoProfiles.setTournamentMode (active); // the active rule stays, nothing switches
+    }
+    notify (Change::Settings);
 }
 
 void EngineController::applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions)

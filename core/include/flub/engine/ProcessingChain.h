@@ -654,12 +654,18 @@ private:
     // on (1 - p) RMS_S + p RMS_D (block statistics pass*, see foldToStereo).
     // Paths whose weight is zero for a whole block are not run; one that
     // starts again is reset first (virtRan / foldRan).
+    // foldHeadroom (docs/11 E28a) holds k D at or below 0 dBFS, as the
+    // virtualiser holds B; it runs while k D is computed (reset when it
+    // starts again, foldHeadroomRan). The deepest headroom gain of either
+    // fold since the last publishMeters() is headroomBlockMinDb.
     Bs775Fold fold;
+    FoldHeadroom foldHeadroom;
     ActiveChannelDetector inputDetector;
     LinearSmoothedValue virtMix, passMix;
     AudioBuffer foldScratch;
     double passSs = 0.0, passDd = 0.0, passSd = 0.0; // mean S^2, D^2, S D (both channels)
-    bool virtRan = false, foldRan = false, passStatsValid = false;
+    float headroomBlockMinDb = 0.0f;
+    bool virtRan = false, foldRan = false, foldHeadroomRan = false, passStatsValid = false;
     std::atomic<bool> redetectRequest { false };
 
     // Global bypass dry path (post input stage, stereo): delayed by

@@ -11,6 +11,7 @@ TrayIcon::TrayIcon (EngineController& c, Callbacks cb)
 {
     controller.addListener (this);
     updateIcon();
+    engineControllerChanged (EngineController::Change::Settings); // Tournament mode switched on at start
 }
 
 TrayIcon::~TrayIcon()
@@ -64,6 +65,17 @@ void TrayIcon::engineControllerChanged (EngineController::Change change)
 {
     if (change == EngineController::Change::MasterEnable)
         updateIcon();
+
+    // docs/11 E55: one bubble when an anti-cheat service switches Tournament
+    // mode on (the header badge shows it until it ends).
+    if (change == EngineController::Change::Settings)
+    {
+        const bool automatic = controller.getTournamentState().automatic;
+        if (automatic && ! tournamentNotified)
+            notify ("Flubsound Pro - Tournament mode",
+                    controller.describeTournament() + ". App routing and automatic profiles are paused until it stops.");
+        tournamentNotified = automatic;
+    }
 
     // One bubble when a CPU overload starts (the watchdog broadcasts
     // Change::Device on both edges); the header readout shows it until it ends.
@@ -148,6 +160,9 @@ juce::PopupMenu TrayIcon::buildMenu()
     menu.addSubMenu ("Presets", presetMenu);
     menu.addSeparator();
 
+    addTournamentItems (menu, controller);
+    menu.addSeparator();
+
     menu.addItem ("Quick controls...", [this] { showQuickControls(); });
     menu.addItem ("Open Flubsound Pro", [this]
                   {
@@ -160,6 +175,17 @@ juce::PopupMenu TrayIcon::buildMenu()
                           callbacks.quit();
                   });
     return menu;
+}
+
+void TrayIcon::addTournamentItems (juce::PopupMenu& menu, EngineController& controller)
+{
+    // Freezes app routing and automatic profiles while anti-cheat games run.
+    const auto& tournament = controller.getTournamentState();
+    auto* c = &controller;
+    menu.addItem (tournament.automatic ? controller.describeTournament() : juce::String ("Tournament mode"), true, tournament.active,
+                  [c] { c->setTournamentMode (! c->isTournamentActive()); });
+    menu.addItem ("Tournament mode when an anti-cheat runs", true, tournament.autoEnabled,
+                  [c] { c->setTournamentAuto (! c->getTournamentState().autoEnabled); });
 }
 
 void TrayIcon::mouseDown (const juce::MouseEvent& e)

@@ -1,6 +1,7 @@
 #include "BoostPanel.h"
 
 #include "FlubLookAndFeel.h"
+#include "ModuleCard.h"
 #include "ParamHints.h"
 #include "Theme.h"
 
@@ -24,18 +25,23 @@ juce::String percent (float v01)
 // =============================================================================
 // Protection readouts (docs/11 E06 / E07)
 // =============================================================================
+// The budget is quoted before the first reading too: it is the mode's and
+// the strength's from the chain's first block (docs/11 E06).
 juce::String BoostPanel::describeProtectionLevel (float levelDb, float budgetDb)
 {
+    const auto budget = " (budget " + juce::String (juce::roundToInt (budgetDb)) + " dB)";
     if (! std::isfinite (levelDb) || levelDb <= -150.0f)
-        return "not measured";
-    return juce::String (juce::roundToInt (levelDb)) + " dB (budget " + juce::String (juce::roundToInt (budgetDb)) + " dB)";
+        return "not measured yet" + budget;
+    return juce::String (juce::roundToInt (levelDb)) + " dB" + budget;
 }
 
 juce::String BoostPanel::describePlr (float plrDb, float budgetDb)
 {
+    juce::String t;
     if (! std::isfinite (plrDb) || plrDb >= flub::MeterBus::governorNoReading * 0.5f)
-        return "not measured";
-    juce::String t = juce::String (plrDb, 1) + " dB";
+        t = "not measured yet";
+    else
+        t = juce::String (plrDb, 1) + " dB";
     if (std::isfinite (budgetDb) && budgetDb > 0.0f)
         t << " (at least " << juce::String (budgetDb, 0) << " dB)";
     else
@@ -51,7 +57,8 @@ juce::String BoostPanel::describeBrightness (const MeterSnapshot& s)
     {
         const float lift = s.tonalLiftDb[b];
         if (! std::isfinite (lift) || lift <= -150.0f)
-            return "not measured";
+            return "not measured yet (budgets " + Theme::formatSignedDb (s.tonalBudgetDb[0], 0) + " / " + Theme::formatSignedDb (s.tonalBudgetDb[1], 0)
+                   + " / " + Theme::formatSignedDb (s.tonalBudgetDb[2], 0) + " dB)";
         parts.add (juce::String (names[b]) + " " + Theme::formatSignedDb (lift, 1) + " dB (budget " + Theme::formatSignedDb (s.tonalBudgetDb[b], 0) + ")");
     }
     return parts.joinIntoString (", ");
@@ -203,6 +210,24 @@ BoostPanel::BoostPanel (EngineController& c)
                              "source's own. 0 % (off) by default.");
     binder.bindSlider (smoothSlider, SmoothAmount);
     addChildComponent (smoothSlider);
+    // The Warmth chip (Music; see the header): a click switches Tape Grit.
+    Style::set (warmthChip, "chip");
+    warmthChip.setTitle ("Warmth colour");
+    binder.bindToggle (warmthChip, WarmthTapeGrit);
+    addChildComponent (warmthChip);
+    // The headset enhancement cap's chips (Gaming; see the header).
+    for (auto& chip : cappedChips)
+    {
+        Style::set (chip, "chip");
+        chip.setToggleState (true, juce::dontSendNotification); // tinted: a state, not an option
+        chip.setTitle ("Capped by the headset enhancement setting");
+        chip.setTooltip ("Capped at 30 %: this output's own enhancement (Superhuman Hearing / on-board EQ) is ON, so this macro "
+                         "reaches the sound at most at 30 % and Flubsound's virtual surround is off. The knob keeps its value. "
+                         "Click to change it (also in Settings > Audio).");
+        chip.setClickingTogglesState (false);
+        chip.onClick = [this, &chip] { showCappedMenu (chip); };
+        addChildComponent (chip);
+    }
 
     governor = describeGovernor ({}, controller.getProtectionStrength());
     setMode (ModeValue::Music);
@@ -220,6 +245,9 @@ void BoostPanel::setMode (ModeValue newMode)
         // The plain-language hint of the macro in this mode (docs/11 E39).
         macros[i].slider.setTooltip (ParamHints::get (Macro1 + static_cast<int> (i), mode));
     }
+    warmthChip.setVisible (mode == ModeValue::Music);
+    refreshWarmth();
+    refreshCapped();
     repaint();
 }
 
@@ -242,6 +270,7 @@ void BoostPanel::setGovernorScale (float scale)
 
 void BoostPanel::update (const MeterSnapshot& snapshot)
 {
+    refreshCapped();
     dial.setGovernorScale (snapshot.governorScale);
     auto next = describeGovernor (snapshot, controller.getProtectionStrength());
     if (next.text != governor.text || next.detail != governor.detail)
@@ -257,7 +286,81 @@ void BoostPanel::update (const MeterSnapshot& snapshot)
     {
         framesSinceStages = 0;
         refreshStages (snapshot);
+        refreshWarmth();
     }
+}
+
+// =============================================================================
+// Warmth chip (docs/11 E14)
+// =============================================================================
+BoostPanel::WarmthReadout BoostPanel::describeWarmth (const std::function<float (int)>& base, const std::function<float (int)>& effective)
+{
+    WarmthReadout r;
+    const auto colour = WarmthColour::of (base, effective);
+    r.tapeGrit = base (WarmthTapeGrit) >= 0.5f;
+    constexpr const char* kClick = "\nClick to switch Tape Grit (the classic tape Warmth) on or off for this strip.";
+    switch (colour.kind)
+    {
+        case WarmthColour::Kind::Tube:
+            r.text = "TUBE";
+            r.detail = colour.detail;
+            break;
+        case WarmthColour::Kind::TapeGrit:
+            r.text = "TAPE";
+            r.detail = colour.detail;
+            break;
+        case WarmthColour::Kind::None:
+            r.text = r.tapeGrit ? "TAPE" : "TONE";
+            r.detail = r.tapeGrit ? "Tape Grit is on: raise Warmth for the classic tape saturation with extra bass and harmonics."
+                                  : "Warmth is a tone control: more body around 200 Hz and a softer top (up to +3.5 / -3 dB at "
+                                    "100 %), level matched; with the saturator off it also chooses the gentle Tube colour.";
+            if (! r.tapeGrit && base (SaturationOn) >= 0.5f)
+                r.detail << " The saturator is on, so it keeps the type you chose.";
+            break;
+    }
+    r.detail << kClick;
+    return r;
+}
+
+void BoostPanel::refreshWarmth()
+{
+    if (mode != ModeValue::Music)
+        return;
+    const int strip = controller.getSelectedStrip();
+    auto& store = controller.getParams (strip);
+    auto& chain = controller.getChain (strip);
+    const auto w = describeWarmth ([&store] (int id) { return store.get (id); }, [&chain] (int id) { return chain.effectiveValue (id); });
+    if (w.text != warmthChip.getButtonText())
+        warmthChip.setButtonText (w.text);
+    warmthChip.setTooltip (w.detail);
+    warmthChip.setDescription (w.text + ". " + w.detail);
+}
+
+// =============================================================================
+// Headset enhancement cap chips (docs/11 E16)
+// =============================================================================
+void BoostPanel::refreshCapped()
+{
+    const bool capped = mode == ModeValue::Gaming
+                        && controller.getChain (controller.getSelectedStrip()).meters().onboardCapActive.load (std::memory_order_relaxed);
+    for (auto& chip : cappedChips)
+        if (chip.isVisible() != capped)
+            chip.setVisible (capped);
+}
+
+void BoostPanel::showCappedMenu (juce::Component& chip)
+{
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("Headset enhancement is ON for " + controller.getOutputDeviceName());
+    menu.addItem (1, "Remove the cap: the headset plays flat");
+    menu.addItem (2, "Keep Footsteps and Detail at most 30 %");
+    juce::Component::SafePointer<BoostPanel> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&chip),
+                        [safe] (int result)
+                        {
+                            if (safe != nullptr && result == 1)
+                                safe->controller.setOnboardEnhancement (false);
+                        });
 }
 
 void BoostPanel::refreshStages (const MeterSnapshot& snapshot)
@@ -675,6 +778,28 @@ void BoostPanel::resized()
     {
         auto cell = r.removeFromLeft (cellW);
         macros[static_cast<size_t> (i)].setBounds (cell.withSizeKeepingCentre (knobW, knobH));
+    }
+
+    // The Warmth chip beside the Warmth knob's value (bottom right, clear of
+    // the value text and the dial's arc), out into the cell's margin.
+    {
+        constexpr int kChipH = 17, kValueHalfW = 17;
+        const auto knob = macros[4].getBounds();
+        const int x = knob.getCentreX() + kValueHalfW;
+        const int w = juce::jmin (40, knob.getCentreX() + cellW / 2 - x - 1);
+        warmthChip.setBounds (x, knob.getBottom() - kChipH - 1, w, kChipH);
+    }
+
+    // The CAPPED chips beside the Footsteps and Detail values, placed like
+    // the Warmth chip; "CAP" where the cell's margin is narrow.
+    for (size_t i = 0; i < cappedChips.size(); ++i)
+    {
+        constexpr int kChipH = 17, kValueHalfW = 17;
+        const auto knob = macros[i == 0 ? 0 : 3].getBounds();
+        const int x = knob.getCentreX() + kValueHalfW;
+        const int w = juce::jmin (60, knob.getCentreX() + cellW / 2 - x - 1);
+        cappedChips[i].setButtonText (w >= 56 ? "CAPPED" : "CAP");
+        cappedChips[i].setBounds (x, knob.getBottom() - kChipH - 1, juce::jmax (30, w), kChipH);
     }
 }
 } // namespace flub::app::ui

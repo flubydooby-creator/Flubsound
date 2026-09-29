@@ -12,10 +12,12 @@
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
 // preset on a strip), the device corrections (one per output endpoint,
-// docs/11 E15), the UI scale and theme, the main window's view (Simple /
+// docs/11 E15), the per-endpoint headset enhancement switch (docs/11 E16),
+// the UI scale and theme, the main window's view (Simple /
 // Advanced, docs/11 E39), the window position, the loudness contour's
-// system-volume follow and reference volume (docs/11 E32) and the loopback
-// pairs the feedback-loop guard allows (docs/11 E51).
+// system-volume follow and reference volume (docs/11 E32), the loopback
+// pairs the feedback-loop guard allows (docs/11 E51) and Tournament mode
+// (docs/11 E55).
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -110,6 +112,26 @@ struct DeviceCorrectionEntry
     juce::String curveText; // APO / AutoEQ ParametricEQ syntax
 
     bool operator== (const DeviceCorrectionEntry&) const = default;
+};
+
+/** The user's settings for one output endpoint that are not a correction
+    curve (docs/11 E16). Keyed by the endpoint's identity (docs/11 E51: the
+    OS's endpoint id and the hardware id, with the name as the fallback), so
+    an entry follows its device through a rename, a re-plug into another USB
+    port ("Headset Earphone (2- Stealth 700 Gen 2)") and platforms without
+    ids (the name alone, without Windows' instance number). */
+struct DeviceEndpointEntry
+{
+    juce::String endpointId; // platform::OutputEndpointIdentity::id; empty when unknown
+    juce::String hardwareId; // platform::OutputEndpointIdentity::hardwareId; empty when unknown
+    juce::String name;       // the output device name it was last stored under
+    bool onboardEnhancement = false; // "Headset enhancement is ON": the on-board DSP cap (EngineController)
+
+    flub::platform::OutputEndpointIdentity identity() const
+    {
+        return { endpointId.toStdString(), name.toStdString(), hardwareId.toStdString() };
+    }
+    bool operator== (const DeviceEndpointEntry&) const = default;
 };
 
 class AppSettings
@@ -318,6 +340,18 @@ public:
     void setDeviceCorrection (const DeviceCorrectionEntry& entry);
     void removeDeviceCorrection (const juce::String& endpoint);
 
+    // ---- Per-endpoint settings (docs/11 E16) --------------------------------------------
+    std::vector<DeviceEndpointEntry> getDeviceEndpoints() const;
+    /** The entry stored for `endpoint`: the best match (platform::
+        AudioDeviceWatcher::findEndpoint: the same endpoint id, else the same
+        hardware id and name without the instance number, else that name);
+        nullopt if none. */
+    std::optional<DeviceEndpointEntry> findDeviceEndpoint (const flub::platform::OutputEndpointIdentity& endpoint) const;
+    /** Stores `entry` in place of the entry that matches it (which then
+        takes entry's id, hardware id and name), else adds it. Ignored
+        without a name and an id. */
+    void setDeviceEndpoint (const DeviceEndpointEntry& entry);
+
     // ---- Loudness contour and the system volume (docs/11 E32) ---------------------------
     /** Settings > Processing > "Follow the system volume" (default off): the
         app reads the output endpoint's OS volume a few times a second and the
@@ -344,6 +378,18 @@ public:
     };
     std::vector<LoopbackPair> getAllowedLoopbackPairs() const;
     void setAllowedLoopbackPairs (const std::vector<LoopbackPair>& pairs);
+
+    // ---- Tournament mode (docs/11 E55) ---------------------------------------------------
+    /** The user's switch (tray, header badge; default off). While Tournament
+        mode is on, per-app routing is frozen, automatic profiles hold and the
+        foreground application is not polled (EngineController). */
+    bool getTournamentMode() const;
+    void setTournamentMode (bool on);
+    /** Switch Tournament mode on by itself while a known anti-cheat service
+        runs (platform::AntiCheatServices; default on); the user's switch
+        applies again once the services stop. */
+    bool getTournamentAuto() const;
+    void setTournamentAuto (bool automatic);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

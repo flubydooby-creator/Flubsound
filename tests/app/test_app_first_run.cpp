@@ -38,6 +38,7 @@
 #include <iostream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace flub::app;
@@ -193,6 +194,103 @@ std::vector<float> atLoudness (std::vector<float> x, double lufs)
 }
 
 bool writeText (const juce::File& file, const juce::String& text) { return file.replaceWithText (text, false, false, "\n"); }
+
+// ---- docs/11 E59's burst scene (tests/test_known_gaps.cpp makeBurstScene) ----
+using Window = std::pair<int, int>;
+
+double meanPower (const std::vector<float>& x, const std::vector<Window>& windows)
+{
+    double acc = 0.0;
+    int64_t n = 0;
+    for (const auto& w : windows)
+        for (int i = w.first; i < w.second; ++i)
+        {
+            acc += static_cast<double> (x[static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+            ++n;
+        }
+    return n > 0 ? acc / static_cast<double> (n) : 0.0;
+}
+
+double powerDb (double p) { return 10.0 * std::log10 (std::max (1.0e-30, p)); }
+
+/** RBJ band-pass (0 dB peak), run in double. */
+std::vector<float> bandPass (const std::vector<float>& x, double f0, double q)
+{
+    const double w0 = flub::kTwoPi * f0 / kFs, alpha = std::sin (w0) / (2.0 * q), a0 = 1.0 + alpha;
+    const double b0 = alpha / a0, b2 = -alpha / a0, a1 = -2.0 * std::cos (w0) / a0, a2 = (1.0 - alpha) / a0;
+    std::vector<float> y (x.size());
+    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double in = x[i];
+        const double out = b0 * in + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = in;
+        y2 = y1;
+        y1 = out;
+        y[i] = static_cast<float> (out);
+    }
+    return y;
+}
+
+int samplesOf (double seconds) { return static_cast<int> (std::lround (seconds * kFs)); }
+
+/** 18 Hann-shaped 3.2 kHz noise steps (six each of 20 / 40 / 80 ms, one
+    every 400 ms from 1 s) 6 dB under a pink bed, the scene at `lufs`
+    integrated; the E59 slice's makeBurstScene without its 1 s steady burst. */
+struct BurstScene
+{
+    std::vector<float> input;
+    std::vector<Window> bursts[3], bed; // bed: 200 .. 400 ms after each onset
+};
+
+BurstScene makeBurstScene (double lufs)
+{
+    const int n = samplesOf (1.0 + 18 * 0.4 + 0.6);
+    BurstScene s;
+    s.input = flubtest::pinkNoise (n, 0.05f, 777);
+    const auto band = bandPass (flubtest::whiteNoise (n, 1.0f, 4242), 3200.0, 1.0);
+    const double g = 0.025 / flubtest::rms (band.data(), n) / std::sqrt (3.0 / 8.0);
+    const int durations[3] = { samplesOf (0.020), samplesOf (0.040), samplesOf (0.080) };
+    for (int k = 0; k < 18; ++k)
+    {
+        const int onset = samplesOf (1.0 + 0.4 * k), len = durations[k / 6];
+        for (int i = 0; i < len; ++i)
+            s.input[static_cast<size_t> (onset + i)] +=
+                static_cast<float> (g * (0.5 - 0.5 * std::cos (flub::kTwoPi * i / len)) * band[static_cast<size_t> (onset + i)]);
+        s.bursts[k / 6].push_back ({ onset, onset + len });
+        s.bed.push_back ({ onset + samplesOf (0.2), onset + samplesOf (0.4) });
+    }
+    s.input = atLoudness (std::move (s.input), lufs);
+    return s;
+}
+
+struct Contrast
+{
+    double changeDb[3] = {}; // (step / bed in the 3.2 kHz band) out minus in, per step length
+    double bedLiftDb = 0.0;  // full-band bed power, out vs in
+};
+
+/** docs/11 E59's step/bed contrast of the scene played on `strip` (the
+    mid of the master output against the input). */
+Contrast measureContrast (EngineController& controller, int strip, const BurstScene& s)
+{
+    controller.getHost().reconfigure(); // a fresh engine
+    const auto out = renderThroughEngine (controller, strip, s.input, s.input);
+    std::vector<float> mid (out.left.size());
+    for (size_t i = 0; i < mid.size(); ++i)
+        mid[i] = 0.5f * (out.left[i] + out.right[i]);
+    const auto inBand = bandPass (s.input, 3200.0, 1.0), outBand = bandPass (mid, 3200.0, 1.0);
+    const double inBed = meanPower (inBand, s.bed), outBed = meanPower (outBand, s.bed);
+    Contrast c;
+    for (int d = 0; d < 3; ++d)
+    {
+        const double inStep = meanPower (inBand, s.bursts[d]) - inBed, outStep = meanPower (outBand, s.bursts[d]) - outBed;
+        c.changeDb[d] = (powerDb (outStep) - powerDb (outBed)) - (powerDb (inStep) - powerDb (inBed));
+    }
+    c.bedLiftDb = powerDb (meanPower (mid, s.bed)) - powerDb (meanPower (s.input, s.bed));
+    return c;
+}
 } // namespace
 
 // =============================================================================
@@ -445,6 +543,28 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
     std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
     CHECK_LE (shipped, 3.0);
     CHECK_NEAR (shipped, 0.80, 0.3);
+}
+
+TEST_CASE ("App: First Run - Game keeps Competitive FPS's step/bed contrast on the E59 burst scene (E36)")
+{
+    // docs/11 E36's review: with Footsteps capped at 30 % the first-run Game
+    // default kept only +1.59 .. +2.24 dB of step/bed contrast; the Boost
+    // cap alone keeps Competitive FPS's cue lift for the same quiet beds.
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp, true));
+    const int game = controller.findStrip ("Game");
+    REQUIRE (game >= 0);
+    auto& g = controller.getParams (game);
+    CHECK (g.get (Macro1) == 0.8f); // Footsteps and Detail as Competitive FPS ships them
+    CHECK (g.get (Macro4) == 0.3f);
+
+    const auto scene = makeBurstScene (-24.0);
+    const auto c = measureContrast (controller, game, scene);
+    std::cerr << "    measured First Run - Game at -24 LUFS: contrast change 20 / 40 / 80 ms " << c.changeDb[0] << " / " << c.changeDb[1] << " / "
+              << c.changeDb[2] << " dB, bed " << c.bedLiftDb << " dB\n";
+    for (const double change : c.changeDb)
+        CHECK_GE (change, 3.0); // the capped default: +1.59 .. +2.24 dB
+    CHECK_LE (c.bedLiftDb, 1.0);
 }
 
 // =============================================================================

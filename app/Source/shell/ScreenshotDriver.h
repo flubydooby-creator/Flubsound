@@ -46,6 +46,22 @@
 //                   feedback-loop guard's muted pair, docs/11 E51;
 //                   Processing: the listening level with following the
 //                   system volume switched on, docs/11 E32)
+//   module-readings the rack's controls and readings outside the generic
+//                   grid (Music): Maximizer on with style Punchy and LF Limit
+//                   50 % (E05), Boost and Clarity 100 % with Smoothness
+//                   100 % (the cut, E07), Warmth 60 % with the saturator
+//                   Warmth's alone (Tube chosen, E14); the rack scrolled to
+//                   the Saturation card (--seconds 4 or more). The test
+//                   programme is too dark for the Smoothness stage to cut,
+//                   so the Clarity card's cut note is tested, not shown
+//   contour-curve   settings-processing with the loudness contour on at
+//                   -30 dB (its curve, E32) and the automatic preamp with
+//                   its hot-programme switch on (E11)
+//   onboard-cap     "Headset enhancement is ON" answered for a Turtle Beach
+//                   headset (docs/11 E16; --device, else "Headset Earphone
+//                   (Stealth 700 Gen 2 MAX)"): the CAPPED chips on Footsteps
+//                   and Detail (--mode gaming), the switch on with
+//                   settings-audio
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,

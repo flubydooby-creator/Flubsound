@@ -39,9 +39,12 @@ constexpr const char* routingMap = "routing.map";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
 constexpr const char* autoProfileRules = "autoProfile.rules";
 constexpr const char* deviceCorrections = "device.corrections";
+constexpr const char* deviceEndpoints = "device.endpoints";
 constexpr const char* contourFollowVolume = "contour.followVolume";
 constexpr const char* contourReferenceVolume = "contour.referenceVolumeDb";
 constexpr const char* allowedLoopbackPairs = "device.allowedLoopbackPairs";
+constexpr const char* tournamentMode = "tournament.mode";
+constexpr const char* tournamentAuto = "tournament.auto";
 constexpr const char* schemaVersion = "settings.schemaVersion";
 } // namespace Keys
 
@@ -819,6 +822,68 @@ void AppSettings::removeDeviceCorrection (const juce::String& endpoint)
     storeDeviceCorrections (*properties, entries);
 }
 
+// ---- Per-endpoint settings (docs/11 E16) -----------------------------------------------
+std::vector<DeviceEndpointEntry> AppSettings::getDeviceEndpoints() const
+{
+    std::vector<DeviceEndpointEntry> entries;
+    if (auto xml = properties->getXmlValue (Keys::deviceEndpoints))
+    {
+        for (auto* e : xml->getChildWithTagNameIterator ("ENDPOINT"))
+        {
+            DeviceEndpointEntry entry;
+            entry.endpointId = e->getStringAttribute ("id");
+            entry.hardwareId = e->getStringAttribute ("hardwareId");
+            entry.name = e->getStringAttribute ("name");
+            entry.onboardEnhancement = e->getBoolAttribute ("onboardEnhancement", false);
+            if (entry.endpointId.isNotEmpty() || entry.name.isNotEmpty())
+                entries.push_back (entry);
+        }
+    }
+    return entries;
+}
+
+namespace
+{
+int findEndpointEntry (const std::vector<DeviceEndpointEntry>& entries, const flub::platform::OutputEndpointIdentity& endpoint)
+{
+    std::vector<flub::platform::OutputEndpointIdentity> stored;
+    stored.reserve (entries.size());
+    for (const auto& e : entries)
+        stored.push_back (e.identity());
+    return flub::platform::AudioDeviceWatcher::findEndpoint (stored, endpoint);
+}
+} // namespace
+
+std::optional<DeviceEndpointEntry> AppSettings::findDeviceEndpoint (const flub::platform::OutputEndpointIdentity& endpoint) const
+{
+    const auto entries = getDeviceEndpoints();
+    if (const int found = findEndpointEntry (entries, endpoint); found >= 0)
+        return entries[static_cast<size_t> (found)];
+    return std::nullopt;
+}
+
+void AppSettings::setDeviceEndpoint (const DeviceEndpointEntry& entry)
+{
+    if (entry.endpointId.isEmpty() && entry.name.isEmpty())
+        return;
+    auto entries = getDeviceEndpoints();
+    if (const int found = findEndpointEntry (entries, entry.identity()); found >= 0)
+        entries[static_cast<size_t> (found)] = entry;
+    else
+        entries.push_back (entry);
+
+    juce::XmlElement xml ("ENDPOINTS");
+    for (const auto& e : entries)
+    {
+        auto* child = xml.createNewChildElement ("ENDPOINT");
+        child->setAttribute ("id", e.endpointId);
+        child->setAttribute ("hardwareId", e.hardwareId);
+        child->setAttribute ("name", e.name);
+        child->setAttribute ("onboardEnhancement", e.onboardEnhancement);
+    }
+    properties->setValue (Keys::deviceEndpoints, &xml);
+}
+
 bool AppSettings::getContourFollowsVolume() const { return properties->getBoolValue (Keys::contourFollowVolume, false); }
 void AppSettings::setContourFollowsVolume (bool follow) { properties->setValue (Keys::contourFollowVolume, follow); }
 
@@ -864,4 +929,9 @@ void AppSettings::setAllowedLoopbackPairs (const std::vector<LoopbackPair>& pair
     }
     properties->setValue (Keys::allowedLoopbackPairs, &xml);
 }
+
+bool AppSettings::getTournamentMode() const { return properties->getBoolValue (Keys::tournamentMode, false); }
+void AppSettings::setTournamentMode (bool on) { properties->setValue (Keys::tournamentMode, on); }
+bool AppSettings::getTournamentAuto() const { return properties->getBoolValue (Keys::tournamentAuto, true); }
+void AppSettings::setTournamentAuto (bool automatic) { properties->setValue (Keys::tournamentAuto, automatic); }
 } // namespace flub::app

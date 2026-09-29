@@ -91,6 +91,53 @@ public:
 };
 
 // =============================================================================
+// TOURNAMENT badge (docs/11 E55): an amber pill; a shield alone when narrow.
+// =============================================================================
+class HeaderBar::TournamentBadge : public juce::Button
+{
+public:
+    TournamentBadge() : juce::Button ("TOURNAMENT")
+    {
+        setTitle ("Tournament mode");
+        setMouseClickGrabsKeyboardFocus (false);
+    }
+
+    bool shieldOnly = false;
+
+    void paintButton (juce::Graphics& g, bool isHighlighted, bool) override
+    {
+        const auto colour = isHighlighted ? Palette::amber.brighter (0.15f) : Palette::amber;
+        if (shieldOnly)
+        {
+            // An amber disc with a shield, ringed in the panel colour so it
+            // reads over the logo mark.
+            const auto disc = getLocalBounds().toFloat().reduced (1.0f);
+            g.setColour (Palette::panel);
+            g.fillEllipse (disc);
+            g.setColour (colour);
+            g.fillEllipse (disc.reduced (1.5f));
+            const auto s = disc.withSizeKeepingCentre (disc.getWidth() * 0.44f, disc.getHeight() * 0.52f);
+            juce::Path shield;
+            shield.startNewSubPath (s.getCentreX(), s.getY());
+            shield.lineTo (s.getRight(), s.getY() + s.getHeight() * 0.2f);
+            shield.quadraticTo (s.getRight(), s.getY() + s.getHeight() * 0.72f, s.getCentreX(), s.getBottom());
+            shield.quadraticTo (s.getX(), s.getY() + s.getHeight() * 0.72f, s.getX(), s.getY() + s.getHeight() * 0.2f);
+            shield.closeSubPath();
+            g.setColour (Palette::background);
+            g.fillPath (shield);
+            return;
+        }
+        const auto r = getLocalBounds().toFloat().reduced (1.0f, 5.0f);
+        g.setColour (colour.withAlpha (isHighlighted ? 0.26f : 0.16f));
+        g.fillRoundedRectangle (r, r.getHeight() * 0.5f);
+        g.setColour (colour);
+        g.drawRoundedRectangle (r.reduced (0.5f), r.getHeight() * 0.5f, 1.2f);
+        g.setFont (Theme::font (10.0f, true));
+        g.drawText (getButtonText(), r, juce::Justification::centred, false);
+    }
+};
+
+// =============================================================================
 HeaderBar::HeaderBar (EngineController& c)
     : controller (c)
 {
@@ -184,6 +231,11 @@ HeaderBar::HeaderBar (EngineController& c)
     bypassButton->onClick = [this] { controller.toggleEnabled(); };
     bypassButton->onPopupMenu = [this] { showBypassMenu(); };
     addAndMakeVisible (*bypassButton);
+
+    // ---- Tournament mode (docs/11 E55) ----
+    tournamentBadge = std::make_unique<TournamentBadge>();
+    tournamentBadge->onClick = [this] { showTournamentMenu(); };
+    addChildComponent (*tournamentBadge);
 
     // ---- Settings ----
     settingsButton.setTooltip ("Audio device, latency, hotkeys and start-up settings");
@@ -492,9 +544,58 @@ juce::String HeaderBar::describeDeviceSafety (const DeviceSafetyState& safety)
     return t + " Click to open Settings.";
 }
 
+juce::Button& HeaderBar::getTournamentBadge() noexcept
+{
+    return *tournamentBadge;
+}
+
+juce::String HeaderBar::describeTournamentBadge (const juce::String& line)
+{
+    return line + ".\nApp routing is frozen, automatic profiles hold and the foreground application is not checked, "
+                  "so Flubsound touches no game process. Click to switch it off.";
+}
+
+void HeaderBar::updateTournamentBadge()
+{
+    const auto line = controller.describeTournament();
+    if (line == tournamentLine && tournamentBadge->isVisible() == line.isNotEmpty())
+        return;
+    tournamentLine = line;
+    tournamentBadge->setTooltip (line.isNotEmpty() ? describeTournamentBadge (line) : juce::String());
+    tournamentBadge->setDescription (line);
+    if (tournamentBadge->isVisible() != line.isNotEmpty())
+    {
+        tournamentBadge->setVisible (line.isNotEmpty());
+        resized();
+    }
+}
+
+void HeaderBar::showTournamentMenu()
+{
+    const auto& state = controller.getTournamentState();
+    juce::PopupMenu menu;
+    menu.addSectionHeader (state.active ? controller.describeTournament() : juce::String ("Tournament mode off"));
+    menu.addItem (1, state.active ? "Switch Tournament mode off" : "Switch Tournament mode on");
+    menu.addItem (2, "Switch on when an anti-cheat runs", true, state.autoEnabled);
+    juce::Component::SafePointer<HeaderBar> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (tournamentBadge.get()),
+                        [safe] (int result)
+                        {
+                            if (safe == nullptr)
+                                return;
+                            auto& ctl = safe->controller;
+                            if (result == 1)
+                                ctl.setTournamentMode (! ctl.isTournamentActive());
+                            else if (result == 2)
+                                ctl.setTournamentAuto (! ctl.getTournamentState().autoEnabled);
+                            safe->updateTournamentBadge();
+                        });
+}
+
 void HeaderBar::updateStatus()
 {
     trackProcessedDelta();
+    updateTournamentBadge();
     if (const auto caption = getBypassCaption(); caption != bypassCaption)
         refresh();
     const auto li = controller.getLatencyInfo();
@@ -1063,6 +1164,23 @@ void HeaderBar::resized()
         auto s = stripArea.reduced (2, 2);
         for (auto& b : stripButtons)
             b->setBounds (s.removeFromLeft (stripW));
+    }
+    // TOURNAMENT (docs/11 E55): a pill after the strips where the preset box
+    // keeps its room, else a shield on the logo mark's corner.
+    if (tournamentBadge->isVisible())
+    {
+        tournamentBadge->shieldOnly = w < kTournamentPillWidth;
+        if (tournamentBadge->shieldOnly)
+        {
+            const int mark = juce::jmin (30, logoArea.getHeight() - 16); // as paint() draws it
+            const juce::Point<int> corner (logoArea.getX() + mark, logoArea.getCentreY() + mark / 2);
+            tournamentBadge->setBounds (juce::Rectangle<int> (18, 18).withCentre (corner - juce::Point<int> (3, 3)));
+        }
+        else
+        {
+            r.removeFromLeft (10);
+            tournamentBadge->setBounds (centred (r.removeFromLeft (100), 34));
+        }
     }
 
     // Right side, from the right edge.
