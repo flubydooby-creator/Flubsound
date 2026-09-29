@@ -3963,6 +3963,44 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 
 **Known limitations.** The deviation from E14's numbers is on purpose: E14 asked for a +1.5 / −1.5 dB low / high shelf pair; the owner heard nothing at the old mapping, so the tilt is about twice that (+3.5 / −2.5 dB on pink at 100 %), and its low section is a body bell (above). No listening panel yet ([11 E14](11-enhancement-report.md#e14) step 4). With `auto.preamp` on, Warmth still costs level on programme whose trim is small (the preamp's headroom for the bell, above). The app shows no indication that Warmth chose Tube, and no control for `warmth.tapeGrit` beyond the generic parameter list. A user preset that raised Warmth now gets the new Warmth unless it sets `warmth.tapeGrit` (a macro-map change cannot be shimmed, [11 T5](11-enhancement-report.md)).
 
+### 14.14 Chat sidechain and ChatMix (mix bus, desktop app)
+
+Sources: [`core/include/flub/dsp/VoiceActivity.h`](../core/include/flub/dsp/VoiceActivity.h), [`core/include/flub/dsp/ChatDucker.h`](../core/include/flub/dsp/ChatDucker.h), [`core/src/engine/MixEngine.cpp`](../core/src/engine/MixEngine.cpp) ([11 E22](11-enhancement-report.md#e22)).
+
+**Purpose.** A teammate's callout on the Chat strip is masked by the game in the 1 – 4 kHz band that carries speech, and the one master limiter over the sum turns the chat down with every explosion. The mix bus now lets the Chat strip steer the others. These are host settings on `MixEngine`, not parameters: no preset, A/B bank or strip state carries them, and the parameter layout is unchanged.
+
+**Roles.** Strips take a role from their name at `configure()`: `Game`, `Music`, `Chat` (case-insensitive, the names of the app's default layout); any other name has none (`MixEngine::getStripRole`).
+
+**Voice activity** (`VoiceActivity`, on the Chat strip's input before its chain, mono sum, 10 ms frames): the 300 – 3400 Hz band's mean square (2nd-order SVF high-pass and low-pass), that band's share of the whole frame (≥ 0.5), the flatness of six constant-Q band-passes across it (geometric over arithmetic mean, < 0.55: pink noise reads 1, white noise about 0.75), and a level floor (−70 dBFS). Such a frame is *voiced*. A *syllable boundary* is a frame 9 dB under the band's voiced maximum of the last 300 ms. A voiced frame within 600 ms of a boundary is speech; the detector is active until 600 ms after the last speech frame, so the pauses between words and phrases do not release the duck. It answers about one syllable after a talker starts (speech from silence at 1.0 s, duck in from 1.13 s). It runs whenever there is a Chat strip (a strip nobody feeds is silence), and publishes its verdict (`MixEngine::isChatVoiceActive`, any thread). Sustained or legato music, a mix with drums and bass, and noise do not look like syllables; staccato solo instruments in the voice band and singing do.
+
+**Duck** (`ChatDucker`, `MixEngine::setChatDuck (on, depth)`, off by default, depth 3 – 6 dB, default 4.5). On the output of each Game and Music strip (after its chain, padding and idle-freeze wake fade, before the strip gain), gliding in with 30 ms and out with 300 ms while the detector is active:
+
+| Section | Game strip | Music strip |
+|---|---|---|
+| Dip | SVF bells 1.2 kHz Q 1.2 −depth, 2.1 kHz Q 3 −0.8 depth, 3 kHz Q 1.4 +0.3 depth: at 3 / 6 dB −2.5 / −5.1 dB at 1 kHz, at least −2.5 / −5.0 dB over 1.25 – 2.2 kHz, −1.5 / −3.0 dB at 2.4 kHz, and within ±0.5 dB over 2.8 – 6 kHz (the Gaming cue-detail band, mode band 4 at 3.2 kHz) and below 370 Hz (the footstep body band, 260 Hz) | one SVF bell 2 kHz Q 0.7 −depth (about −depth / 2 at 1 and 4 kHz) |
+| Voice & Score lift | taken back: the Game chain's Gaming mode band 7 (the Voice macro's BoostBelow bell at 2 kHz, Q 0.7) as its `MeterBus::dynEqGainDb[7]` reports it for the block, by the exact inverse bell (an SVF bell of −g inverts one of +g at the same frequency and Q), scaled by the duck | — |
+| Ceiling | strip-priority master protection: the strip's peaks held 3 dB × the duck under the master ceiling by a zero-latency, stereo-linked sample-peak limiter (instant attack, 20 ms hold, 150 ms release). Without look-ahead the first half-cycle over the ceiling is flattened (an explosion's leading edge); intersample peaks stay the master limiter's | — |
+
+At duck 0 with the limiter released a strip's duck idles and does not touch the signal (bit-exact); the next start begins from cleared filters. The lift cancel sits after the chain, one block after the chain's own dynamics, so it removes the lift as applied to within those modules' gain changes (they are slow next to it); it does not change what the chain's protection loops measure. The chain itself is not signalled (the chain-side flag [11 E22](11-enhancement-report.md#e22)'s Approach describes would need a `ProcessingChain` hook).
+
+**ChatMix** (`MixEngine::setChatMix (balance)`, −1 Game … +1 Chat, 0 by default): complementary gains, Game `1 − max (0, b)` and Chat `1 + min (0, b)` in amplitude: both 0 dB at the centre, the side the balance moves towards stays at 0 dB, the other falls to silence at the end. Each glides linearly over 50 ms (`kChatMixRampMs`) on top of the strip gain; the product is applied as one per-block ramp.
+
+**Engine swap and idle freeze.** `configureFrom()` carries the duck setting, its depth and ChatMix, and an active talker: the new detector starts active (its hangover running) and the new ducks at the old one's amount (`getChatDuckAmount`, a relaxed atomic of the running engine). `configure()` keeps the settings and restarts the detector. A frozen Game or Music strip's duck keeps gliding (`ChatDucker::skip`), so it wakes with the dip already where it should be.
+
+**Latency and CPU.** No latency (`getLatencySamples()` unchanged with the duck on). The detector costs 8 SVF sections per sample on the Chat strip; each ducking strip 4 (Game) or 1 (Music) sections per channel plus the peak limiter while the duck is in.
+
+**Tests that prove it** (`tests/test_mix_engine_sidechain.cpp`, all with the strips' chains bypassed unless noted):
+- the dip's shape at 3 / 4.5 / 6 dB (the rows in the table), and the lift cancel's frequency = `ProcessingChain::modeBandFrequency (Gaming, 7)`;
+- *VoiceActivity: finds speech*: the E60 formant speech at −20 and −35 LUFS, 86 % of its syllable frames held (the misses: the first syllable of each phrase after silence, and frames it does not call voiced); *false-positive duty < 5 % on 10 s of music*: 0 % on the E60 drum music at −14 LUFS, a pad-and-legato-lead at −18 and −40 LUFS and pink noise;
+- *the Game and Music 1 – 4 kHz dip only while speech is active*: speech from 1.0 s on Chat, tones on Game (260 Hz, 1.25 kHz, 3.2 kHz) and Music (2 kHz), depth 4.5 dB: the output bit-identical to the duck off until the duck starts (1.13 s) and again once it has released; where it is fully in, Game 1.25 kHz −4.62 dB and Music 2 kHz −4.50 dB, while 260 Hz and 3.2 kHz move at most 0.32 dB; no 100 ms window dips while no speech is held; no click; latency unchanged; no allocation in `process()`;
+- *off: bit-identical to an engine without a Chat strip; on with no voice untouched* (music on the Chat strip);
+- *−1 dBTP explosions on Game change the Chat short-term level < 0.5 dB*: explosions limited to a −1 dBFS peak every 2 s under speech at −20 LUFS (the Voice Chat level, [11 E23](11-enhancement-report.md#e23)), the chat through the master limiter's gain against the chat alone: 0.20 dB duck off → 0.02 dB duck on (the Game ceiling at −2.6 dB at its deepest); a loud teammate at −14 LUFS 1.02 → 0.82 dB (not held under 0.5 dB, see below);
+- *the Game chain's Voice & Score lift is taken back*: the cancel section inverts a +4 dB lift within 0.01 dB; a Gaming Game chain with Voice & Score 100 on a −50 dBFS 2 kHz tone lifts 4.00 dB and the duck cancels −4.00 dB while chat talks, nothing before;
+- *ChatMix*: the measured gains equal the law within 0.002 at −1 … +1 and Game (b) = Chat (−b); the centre, and a return to it, bit-identical to an engine that never set it; a sweep with a new balance every block and a jump from +1 to −1: no click, at most 0.54 % of the tone's level per block;
+- *engine swap* (settings, the active talker and the duck amount carried) and *idle freeze* (a frozen Game strip wakes with the duck in).
+
+**Known limitations.** With the Game 3 dB down a loud Chat still overshoots the master: at −14 LUFS the chat still loses 0.82 dB short-term; a sub-limiter that takes the master's gain reduction from the Game strip alone is not built. The detector's first syllable after silence is not ducked, and singing or a staccato instrument on the Chat strip ducks the game. No play test against Sonar ChatMix or with real Discord captures yet; the app's ChatMix control and duck setting are [11 E22](11-enhancement-report.md#e22)'s app unit.
+
 ---
 
 ## 15. Chain-level CPU and latency summary

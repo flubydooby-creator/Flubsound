@@ -29,5 +29,15 @@
     "comp.autoRelease": true,
     "comp.makeup": 1.5,
     "max.glue": 0.25
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [1.8, 1.0, 0.0, -0.4, -0.4, -0.2, 0.2, 0.4, -0.1, -0.4], "toleranceDb": 1.0 },
+      "music": { "db": [-0.1, 0.0, 0.6, 0.3, -1.1, -1.0, -0.5, 0.4, -0.3, -0.9], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 1.6, "music": 3.4, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 1.3,
+    "thdnMaxDb": -100,
+    "stepBedContrastDb": { "value": 0.7, "toleranceDb": 1.0 }
   }
 }

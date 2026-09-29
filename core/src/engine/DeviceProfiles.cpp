@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -112,6 +113,20 @@ Connection detectConnection (const std::string& endpointName, double sampleRate,
     return Connection::Unknown;
 }
 
+float splAtFullScale (const Sensitivity& s, float sourceVrmsAtFullScale) noexcept
+{
+    if (std::isfinite (s.dbSplAtFullScale))
+        return s.dbSplAtFullScale;
+    if (std::isfinite (s.dbSplPerMw) && std::isfinite (s.impedanceOhm) && s.impedanceOhm > 0.0f
+        && std::isfinite (sourceVrmsAtFullScale) && sourceVrmsAtFullScale > 0.0f)
+    {
+        const double milliwatts = 1000.0 * static_cast<double> (sourceVrmsAtFullScale) * static_cast<double> (sourceVrmsAtFullScale)
+                                  / static_cast<double> (s.impedanceOhm);
+        return static_cast<float> (static_cast<double> (s.dbSplPerMw) + 10.0 * std::log10 (milliwatts));
+    }
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
 bool Database::load (const json::Value& root, std::string& error)
 {
     if (root["format"].asString() != "flubsound-device-profiles")
@@ -161,6 +176,19 @@ bool Database::load (const json::Value& root, std::string& error)
             if (t.isString())
                 p.notes.push_back (t.asString());
         p.labVerified = v["labVerified"].asBool (false);
+        // docs/11 E32 (c): anything but a number in range is "not known".
+        if (const auto& sv = v["sensitivity"]; sv.isObject())
+        {
+            const auto figure = [&sv] (const char* key, double lo, double hi) {
+                const auto& f = sv[key];
+                return f.isNumber() && f.asNumber() >= lo && f.asNumber() <= hi ? static_cast<float> (f.asNumber())
+                                                                                  : std::numeric_limits<float>::quiet_NaN();
+            };
+            p.sensitivity.dbSplAtFullScale = figure ("dbSplAtFullScale", 60.0, 150.0);
+            p.sensitivity.dbSplPerMw = figure ("dbSplPerMw", 60.0, 140.0);
+            p.sensitivity.impedanceOhm = figure ("impedanceOhm", 1.0, 100000.0);
+            p.sensitivity.source = sv["source"].asString();
+        }
 
         if (p.id.empty() || p.matchAny.empty())
         {

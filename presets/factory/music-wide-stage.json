@@ -18,5 +18,14 @@
     "spatial.lowCut": 220,
     "spatial.space": 0.2,
     "spatial.minCorrelation": 0.15
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [-0.8, -0.1, -0.2, -0.2, -0.2, -0.1, 0.0, 0.0, 0.0, 0.2], "toleranceDb": 1.0 },
+      "music": { "db": [-0.1, -0.1, 0.0, -0.1, -0.2, -0.2, 0.0, 0.5, 0.3, 0.3], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 0.2, "music": 0.3, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.7,
+    "thdnMaxDb": -100
   }
 }

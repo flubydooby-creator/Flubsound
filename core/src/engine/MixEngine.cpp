@@ -3,6 +3,7 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace flub
@@ -20,7 +21,23 @@ void MixEngine::configureFrom (const MixEngine& previous, const std::vector<Stri
     correction.setSettingsNow (previous.correction.getSettings()); // prepared at the new rate in build()
     idleFreeze = previous.idleFreeze; // docs/11 E45; the new strips start awake
     idleHoldSeconds = previous.idleHoldSeconds;
+    hearing.carryFrom (previous.hearing); // docs/11 E32 (c): its settings, dose and cap gain
+    // docs/11 E22: the chat settings, and an active talker with the duck
+    // where it stands (`previous` may be running: its atomics only).
+    chatDuck = previous.chatDuck;
+    chatDuckDepthDb = previous.chatDuckDepthDb;
+    chatMix = previous.chatMix;
     build (configs, sr, maxBlockSize, previous.strips, setup);
+    if (chatStrip >= 0 && previous.isChatVoiceActive())
+        voice.seedActive();
+    if (chatDuck)
+    {
+        const float carried = previous.getChatDuckAmount();
+        for (auto& s : strips)
+            if (s->role == StripRole::Game || s->role == StripRole::Music)
+                s->ducker.reset (carried);
+        duckAmount.store (carried, std::memory_order_relaxed);
+    }
 }
 
 void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int maxBlockSize,
@@ -55,9 +72,19 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         s->preRollLength = std::max (1, static_cast<int> (std::lround (kIdlePreRollMs * 0.001 * sr)));
         s->preRoll.setSize (s->config.inputChannels, s->preRollLength);
         s->wakeScratch.setSize (s->config.inputChannels, s->preRollLength);
+        // docs/11 E22: the strip's role, its duck and its ChatMix gain.
+        s->role = roleForName (s->config.name);
+        s->ducker.prepare (sr, s->role == StripRole::Game ? ChatDucker::Shape::Game : ChatDucker::Shape::Music);
+        s->mixGain.reset (sr, kChatMixRampMs, chatMixGain (chatMix, s->role));
         next.push_back (std::move (s));
     }
     strips = std::move (next);
+    chatStrip = -1;
+    for (size_t i = 0; i < strips.size() && chatStrip < 0; ++i)
+        if (strips[i]->role == StripRole::Chat)
+            chatStrip = static_cast<int> (i);
+    voice.prepare (sr);
+    duckAmount.store (0.0f, std::memory_order_relaxed);
 
     // Padding within sync groups only (docs/11 E40 part 3 / E42a): a strip
     // is delayed to the slowest chain of its group; one in no group is not.
@@ -98,6 +125,7 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     // unchanged.
     master.setEnvelope ({ true, true, true });
     master.prepare ({ sr, maxBlockSize, 2 });
+    hearing.prepare (sr); // docs/11 E32 (c): keeps its settings, the dose and the cap's gain
     LimiterParams lp;
     lp.ceilingDb = -1.0f;
     lp.releaseMs = 50.0f;
@@ -126,6 +154,60 @@ void MixEngine::setMasterCeilingDb (float db) noexcept
     auto lp = master.getParams();
     lp.ceilingDb = db;
     master.setParams (lp);
+}
+
+MixEngine::StripRole MixEngine::roleForName (const std::string& name) noexcept
+{
+    const auto is = [&name] (const char* role) {
+        size_t i = 0;
+        for (; role[i] != '\0'; ++i)
+            if (i >= name.size() || std::tolower (static_cast<unsigned char> (name[i])) != role[i])
+                return false;
+        return i == name.size();
+    };
+    if (is ("game"))
+        return StripRole::Game;
+    if (is ("music"))
+        return StripRole::Music;
+    if (is ("chat"))
+        return StripRole::Chat;
+    return StripRole::Other;
+}
+
+MixEngine::StripRole MixEngine::getStripRole (int strip) const noexcept
+{
+    return strip >= 0 && strip < getNumStrips() ? strips[static_cast<size_t> (strip)]->role : StripRole::Other;
+}
+
+float MixEngine::chatMixGain (float balance, StripRole role) noexcept
+{
+    const float b = std::clamp (balance, -1.0f, 1.0f);
+    if (role == StripRole::Game)
+        return 1.0f - std::max (0.0f, b);
+    if (role == StripRole::Chat)
+        return 1.0f + std::min (0.0f, b);
+    return 1.0f;
+}
+
+void MixEngine::setChatDuck (bool enabled, float depthDb) noexcept FLUB_NONBLOCKING
+{
+    chatDuck = enabled;
+    chatDuckDepthDb = std::isfinite (depthDb) ? std::clamp (depthDb, ChatDucker::kMinDepthDb, ChatDucker::kMaxDepthDb) : ChatDucker::kDefaultDepthDb;
+}
+
+void MixEngine::setChatMix (float balance) noexcept FLUB_NONBLOCKING
+{
+    chatMix = std::isfinite (balance) ? std::clamp (balance, -1.0f, 1.0f) : 0.0f;
+    for (auto& s : strips)
+        s->mixGain.setTarget (chatMixGain (chatMix, s->role));
+}
+
+const ChatDucker* MixEngine::getChatDucker (int strip) const noexcept
+{
+    if (strip < 0 || strip >= getNumStrips())
+        return nullptr;
+    const auto& s = *strips[static_cast<size_t> (strip)];
+    return s.role == StripRole::Game || s.role == StripRole::Music ? &s.ducker : nullptr;
 }
 
 namespace
@@ -178,6 +260,20 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
     mix.clear();
     const float floor = dbToGain (kIdleFloorDb);
 
+    // Chat sidechain (docs/11 E22): the Chat strip's input, before its chain
+    // (which processes in place) and before any strip it ducks.
+    if (chatStrip >= 0)
+    {
+        const AudioBlock* chatIn = inputs != nullptr ? inputs[chatStrip] : nullptr;
+        if (chatIn != nullptr && chatIn->numChannels >= strips[static_cast<size_t> (chatStrip)]->config.inputChannels)
+            voice.process (chatIn->firstChannels (2).subBlock (0, n));
+        else
+            voice.processSilence (n);
+    }
+    const bool voiceActive = chatDuck && voice.isActive();
+    const float masterCeilingDb = master.getParams().ceilingDb;
+    float duckNow = 0.0f;
+
     for (size_t i = 0; i < strips.size(); ++i)
     {
         auto& s = *strips[i];
@@ -206,6 +302,12 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
                 s.preRollPos = static_cast<int> ((s.preRollPos + n) % s.preRollLength);
                 s.preRollFill = std::min (s.preRollLength, s.preRollFill + n);
                 s.gain.skip (n);
+                s.mixGain.skip (n);
+                if (s.role == StripRole::Game || s.role == StripRole::Music)
+                {
+                    s.ducker.skip (n, voiceActive);
+                    duckNow = std::max (duckNow, s.ducker.getAmount());
+                }
                 s.frozenBlocks.fetch_add (1, std::memory_order_relaxed);
                 continue;
             }
@@ -244,8 +346,29 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
             }
         }
 
-        const float g0 = s.gain.getCurrent();
-        const float g1 = s.gain.skip (n);
+        // The voice-keyed duck (docs/11 E22), after the idle decision (it
+        // judges the strip's own output) and before the strip gain. Off,
+        // or idle with no voice, it does not touch the signal.
+        if (s.role == StripRole::Game || s.role == StripRole::Music)
+        {
+            ChatDucker::Control dc;
+            dc.voiceActive = voiceActive;
+            dc.depthDb = chatDuckDepthDb;
+            dc.ceilingDb = masterCeilingDb;
+            // The Game chain's Voice & Score lift (Gaming mode band 7, as
+            // its MeterBus published it for this block).
+            if (s.role == StripRole::Game && (voiceActive || ! s.ducker.isIdle())
+                && std::lround (s.chain->effectiveValue (param::Mode)) == static_cast<long> (param::ModeValue::Gaming))
+                dc.liftDb = std::max (0.0f, s.chain->meters().dynEqGainDb[static_cast<size_t> (ProcessingChain::kFirstModeBand + 3)].load (
+                                                std::memory_order_relaxed));
+            s.ducker.process (st, dc);
+            duckNow = std::max (duckNow, s.ducker.getAmount());
+        }
+
+        // The strip gain and ChatMix's gain (1 unless it moved: then the
+        // product glides linearly across the block).
+        const float g0 = s.gain.getCurrent() * s.mixGain.getCurrent();
+        const float g1 = s.gain.skip (n) * s.mixGain.skip (n);
         const float step = (g1 - g0) / static_cast<float> (n);
         for (int c = 0; c < 2; ++c)
         {
@@ -257,8 +380,11 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
         }
     }
 
+    duckAmount.store (duckNow, std::memory_order_relaxed);
+
     correction.process (mix);
     master.process (mix);
+    hearing.process (mix); // docs/11 E32 (c): the level estimate and the optional cap
     out.firstChannels (2).subBlock (0, n).copyFrom (mix);
     for (int c = 2; c < out.numChannels; ++c)
         std::fill (out.channel (c), out.channel (c) + n, 0.0f);

@@ -26,5 +26,14 @@
     "eq.9.freq": 14000,
     "eq.9.gain": -1,
     "eq.9.q": 0.7
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [1.6, 1.4, 0.5, 0.0, -0.2, -0.3, 0.0, 0.2, 0.0, -0.6], "toleranceDb": 1.0 },
+      "music": { "db": [0.5, 0.4, 0.2, -0.3, -1.1, -1.2, -0.9, -0.5, -0.9, -1.6], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 0.3, "music": 1.4, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.7,
+    "thdnMaxDb": -100
   }
 }

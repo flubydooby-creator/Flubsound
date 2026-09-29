@@ -53,6 +53,8 @@ constexpr float kCueTopLoDb = -6.0f;          // absolute roll-off of the band p
 constexpr float kCueTopHiDb = -1.0f;          // ... none left at this
 constexpr double kCueCapDownMs = 0.5;         // the cap withdraws the lift this fast ...
 constexpr double kCueCapUpMs = 20.0;          // ... and gives it back this fast
+constexpr double kCueFluxRiseMs = 15.0;       // onset flux: the gate's start to its top within this, ...
+constexpr double kCueFluxArmMs = 30.0;        // ... counted from a start after this long under it
 
 // Recursive states below this are flushed so silence cannot leave subnormals
 // circulating (the host also sets FTZ/DAZ, this is a cheap second line).
@@ -234,6 +236,11 @@ const DynEqBandParams& DynamicEq::getBand (int index) const noexcept
     return targets[static_cast<size_t> (index)];
 }
 
+void DynamicEq::setReferenceOffsetDb (float db) noexcept FLUB_NONBLOCKING
+{
+    referenceOffsetDb = std::isfinite (db) ? db : 0.0f;
+}
+
 float DynamicEq::getBandGainDb (int index) const noexcept
 {
     if (index < 0 || index >= kMaxBands)
@@ -258,6 +265,9 @@ void DynamicEq::clearBandState (BandState& band) noexcept
     band.cueHeld = 0.0f;
     band.cueHoldCountdown = 0;
     band.cueCap = 1.0f;
+    band.cueRiseTicks = 0;
+    band.cueQuietTicks = 0;
+    band.cueOnset = false;
 }
 
 void DynamicEq::activateBand (int index, bool fadeIn) noexcept
@@ -352,6 +362,8 @@ void DynamicEq::updateDetector (BandState& band) const noexcept
     band.cueLearnCoeff = 1.0f - perTick (kCueLearnFollowMs);
     band.cueCapDownCoeff = perTick (kCueCapDownMs);
     band.cueCapUpCoeff = perTick (kCueCapUpMs);
+    band.cueFluxTicks = std::max (1, static_cast<int> (std::lround (kCueFluxRiseMs * 0.001 * controlRate)));
+    band.cueArmTicks = std::max (1, static_cast<int> (std::lround (kCueFluxArmMs * 0.001 * controlRate)));
 }
 
 void DynamicEq::updateEq (BandState& band, float totalDb, bool glide) const noexcept
@@ -374,7 +386,7 @@ void DynamicEq::updateEq (BandState& band, float totalDb, bool glide) const noex
 }
 
 //==============================================================================
-float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb) const noexcept
+float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb, bool onsetFlux) const noexcept
 {
     // Linked mean square of the last control interval, smoothed.
     float energy = 0.0f;
@@ -389,11 +401,17 @@ float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb
         band.cuePower = 0.0f;
     const float levelDb = powerToDb (band.cuePower);
 
+    // The background and the loud cap work on the level before the upstream
+    // gain (docs/11 E19 step 4; exact, as the gain is broadband): refLevelDb.
+    // The hiss floor is the band's, so in those terms it moves the other way.
+    const float refLevelDb = levelDb - referenceOffsetDb;
+    const float refFloorDb = noiseFloorDb - referenceOffsetDb;
+
     // Background: slow rise, 400 ms fall, never below the hiss floor.
     float& bg = band.cueBackgroundDb;
     if (! band.cueBackgroundValid)
     {
-        bg = levelDb;
+        bg = refLevelDb;
         band.cueBackgroundValid = true;
         band.cueLearnCountdown = band.cueLearnTicks;
     }
@@ -403,16 +421,42 @@ float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb
         // level itself starts from rest, so the background follows it
         // quickly instead of creeping up at 5 dB/s under a lifted bed.
         --band.cueLearnCountdown;
-        bg += (levelDb - bg) * band.cueLearnCoeff;
+        bg += (refLevelDb - bg) * band.cueLearnCoeff;
     }
-    else if (levelDb > bg)
-        bg += std::min (levelDb - bg, band.cueRiseDbPerTick);
+    else if (refLevelDb > bg)
+        bg += std::min (refLevelDb - bg, band.cueRiseDbPerTick);
     else
-        bg += (levelDb - bg) * band.cueFallCoeff;
-    bg = std::max (bg, noiseFloorDb);
+        bg += (refLevelDb - bg) * band.cueFallCoeff;
+    bg = std::max (bg, refFloorDb);
 
     // Onset: how far the level stands out of the background, held for 30 ms.
-    const float onset = rangeDb * ramp (levelDb - bg, kCueGateLoDb, kCueGateHiDb) * ramp (levelDb, noiseFloorDb, noiseFloorDb + kFloorTaperDb);
+    const float overDb = refLevelDb - bg;
+    float gate = ramp (overDb, kCueGateLoDb, kCueGateHiDb);
+    if (onsetFlux)
+    {
+        // Onset flux (see the header): the rise is timed from the gate's
+        // start, crossed after the level sat under it for cueArmTicks (a dip
+        // of a noisy swell or of a step does not restart it); an event that
+        // took longer than cueFluxTicks to reach the gate's top is a swell.
+        if (overDb < kCueGateLoDb)
+        {
+            if (++band.cueQuietTicks >= band.cueArmTicks)
+            {
+                band.cueQuietTicks = band.cueArmTicks;
+                band.cueRiseTicks = 0;
+                band.cueOnset = false;
+            }
+        }
+        else
+            band.cueQuietTicks = 0;
+        if (overDb >= kCueGateLoDb || band.cueRiseTicks > 0)
+            band.cueRiseTicks = std::min (band.cueRiseTicks + 1, band.cueFluxTicks + 1);
+        if (overDb >= kCueGateHiDb && band.cueRiseTicks <= band.cueFluxTicks)
+            band.cueOnset = true;
+        if (! band.cueOnset && band.cueRiseTicks > band.cueFluxTicks)
+            gate = 0.0f;
+    }
+    const float onset = rangeDb * gate * ramp (levelDb, noiseFloorDb, noiseFloorDb + kFloorTaperDb);
     if (onset >= band.cueHeld)
     {
         band.cueHeld = onset;
@@ -424,9 +468,10 @@ float DynamicEq::cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb
         band.cueHeld = onset;
 
     // Loud cap on the band's peak (instant attack): relative to the
-    // background (or -55 dBFS, if higher), and absolute near full scale.
+    // background (or -55 dBFS before the upstream gain, if higher), and
+    // absolute near full scale.
     const float peakDb = gainToDb (band.env);
-    const float capTarget = (1.0f - ramp (peakDb - std::max (bg, kCueCapReferenceDb), kCueCapLoDb, kCueCapHiDb))
+    const float capTarget = (1.0f - ramp ((peakDb - referenceOffsetDb) - std::max (bg, kCueCapReferenceDb), kCueCapLoDb, kCueCapHiDb))
                             * (1.0f - ramp (peakDb, kCueTopLoDb, kCueTopHiDb));
     const float c = capTarget < band.cueCap ? band.cueCapDownCoeff : band.cueCapUpCoeff;
     band.cueCap = capTarget + c * (band.cueCap - capTarget);
@@ -488,7 +533,7 @@ void DynamicEq::controlTick (int index) noexcept
 
     // ---- gain computer + attack/release smoothing ---------------------------
     const bool cue = band.mode == DynEqMode::CueLift;
-    const float targetDb = cue ? cueTargetDb (band, rangeDb, noiseFloorDb)
+    const float targetDb = cue ? cueTargetDb (band, rangeDb, noiseFloorDb, t.cueOnsetFlux)
                                : computeDynamicGainDb (band.mode, levelDb, thresholdDb, ratio, rangeDb, noiseFloorDb);
     float dynDb = band.dynGain.process (targetDb);
     if (std::abs (dynDb - targetDb) < 1.0e-5f)
@@ -550,6 +595,9 @@ void DynamicEq::controlTick (int index) noexcept
             band.cueHeld = 0.0f;
             band.cueHoldCountdown = 0;
             band.cueCap = 1.0f;
+            band.cueRiseTicks = 0;
+            band.cueQuietTicks = 0;
+            band.cueOnset = false;
             updateDetector (band);
         }
     }

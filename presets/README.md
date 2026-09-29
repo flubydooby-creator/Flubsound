@@ -151,6 +151,7 @@ These are per-strip chain figures. The desktop app adds 1.4 ms for its master li
 * **`contentHash`** is written on save: 16 hex digits of a hash of every sound parameter's value (app state excluded). It identifies the sound, not the file, and is not a checksum; a mismatch on load only means the file was edited or the parameter table grew since.
 * **Mode:** Music presets leave `mode` out (Music is the default), and Gaming presets set `"mode": "Gaming"`.
 * **App state is not part of a preset:** `bypass`, `bypass.matched` and `latency.profile` belong to the application. Loading a preset never changes them. Name the profile a preset is made for with the optional top-level `"suggestedLatencyProfile"` label (`"Quality"`, `"Balanced"` or `"Low Latency"`); it is metadata, never applied on load. A `latency.profile` in `params` (older files) is read as that suggestion.
+* **`intent`** (optional): what the preset is meant to do to the sound, as bounds on measured renders (see *Intent blocks* below). Every factory preset has one; the engine never reads it, it is not part of `contentHash`, and a user preset needs none. An invalid block is dropped with a warning (the preset still loads); unknown fields in it are skipped with a warning.
 
 ### Adding a factory preset (contributors)
 
@@ -197,6 +198,7 @@ The test enforces all of the following:
   * no safety clips occur and the output is not silent.
 * **Stress render:** the same programme in the same profiles, with Boost Intensity and all macros at 100 %, for the first 2 s (before the SafetyGovernor reacts). The output must be finite, sample peaks must stay at or below the ceiling, the true peak within the same 0.15 dB, and the safety clamp must not engage.
 * **Cross-references:** every preset that a device profile suggests exists.
+* **Intent:** every preset carries a complete `intent` block, and one case per preset (`./build/tests/flub_tests "Factory presets: intent"`) renders it and checks every bound in it (see *Intent blocks*).
 * **Golden** (`./build/tests/flub_tests Golden`, `tests/golden/`): every parameter default matches `parameter-defaults.json`, and every factory preset keeps its uuid and `contentHash` (`factory-presets.json`). With `FLUB_GOLDEN_REFERENCE=1` on the reference platform (Linux x86-64, gcc Release; CI's core job, gcc leg) every factory preset is also rendered (3 s of pink noise and 55 Hz kicks, Balanced) and its integrated LUFS and 1/3-octave band levels must stay within 0.05 dB of the recorded golden render. For an intended change, re-record with `FLUB_GOLDEN_UPDATE=1 ./build/tests/flub_tests Golden` on the reference platform and name the change.
 
 ### Changing how a preset sounds (contributors)
@@ -208,5 +210,50 @@ python3 tools/scripts/preset-render-diff.py --cli build/tools/flubsound-cli/flub
 ```
 
 It renders all 25 presets, each in the latency profile it suggests, on five pinned programmes (a drum programme, a quiet game bed with footsteps, a 2 kHz tone under kicks, an ambush scene, a 7.1 bed with an LFE tone) and compares the output loudness, octave bands, 1 s level profile, pumping index and the CLI's render statistics with `tests/golden/preset-render-baseline.json`, listing every value that moved by more than 0.1 dB. The committed baseline comes from a gcc Release build on Linux x86-64; on another compiler, record your own on the base commit first (`--baseline /tmp/before.json --update`). Re-record the committed baseline with `--update` in the change that moves the sound on purpose.
+
+A change that moves a factory preset's sound on purpose also updates that preset's intent block (see *Intent blocks* below); one that moves it by accident fails there.
+
+### Intent blocks
+
+Each factory preset states its intent in a top-level `"intent"` object, written after `"params"` ([docs/11 E14](../docs/11-enhancement-report.md#e14) step 2). The render tests above prove a preset is safe; the intent block says what it does, as bounds on measured renders, so a preset whose sound drifts away from its description fails a test, while the block leaves room for platform differences and small tuning. Example (Night Mode Gaming):
+
+```json
+  "intent": {
+    "tone": {
+      "pink": { "db": [-7.4, -5.0, -1.9, -0.5, -0.1, 0.2, 0.4, 0.5, 0.3, 0.2], "toleranceDb": 1.0 },
+      "music": { "db": [-3.1, -2.8, -1.1, 1.4, 3.2, 3.3, 3.8, 5.0, 4.1, 3.4], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": -5.0, "music": -3.3, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 5.2,
+    "thdnMaxDb": -100,
+    "stepBedContrastDb": { "value": 2.4, "toleranceDb": 1.0 }
+  }
+```
+
+`tests/test_factory_presets.cpp` renders each preset with the CLI's offline renderer (primed, latency compensated, 512-sample blocks, protection strength Off) in the profile it suggests (Balanced when it names none), as `preset-render-diff.py` does, on three programmes built sample for sample like that script's (the stereo programmes go through a stereo chain, the 7.1 preset included):
+
+| Programme | What it is | Used for |
+|---|---|---|
+| pink | the `flubsound-cli quality` pink: Kellet pink, seed 5959, −18 dBFS RMS, the same on both channels, 4 s; measured over 1–4 s | `tone.pink`, `loudnessOffsetLu.pink` |
+| music | the render diff's *music* programme (kicks, hats, a 55 Hz bass, a 440 / 660 Hz pad; −21.4 LUFS) for 6 s, continued for 6 s more at −8 dB (6–9 s) and −4 dB (9–12 s) with 10 ms ramps (loudness range 6.7 LU) | its first 6 s: `tone.music`, `loudnessOffsetLu.music`; all 12 s: `lraLossMaxLu`, `thdnMaxDb` |
+| game | the render diff's *game-quiet* programme: a −50 dBFS-RMS pink bed with a 40 ms 3.2 kHz step every 400 ms; Gaming presets only | `stepBedContrastDb` |
+
+| Field | Metric | Check |
+|---|---|---|
+| `tone.pink.db`, `tone.music.db` | ten octave bands, 31.5 Hz … 16 kHz (`octaveBands` of (L + R) / 2): each band's level change re the input **minus the integrated-loudness change**, so a pure gain reads 0 everywhere and the numbers describe the tonal shape. `null`: not asserted (the music has nothing in a band 40 dB under its loudest; none of today's presets needs it) | each band within `toleranceDb` |
+| `loudnessOffsetLu` | integrated loudness out minus in, per programme | within `toleranceLu` |
+| `lraLossMaxLu` | loudness range (EBU Tech 3342) of the input minus that of the output, on the 12 s music | at most this |
+| `thdnMaxDb` | the highest measured THD+N of the saturator and clipper (`render.stats` `distortion.thdnMaxDb`) on the 12 s music; −160 dB when neither acts | at most this |
+| `stepBedContrastDb` | in the 3.2 kHz band (RBJ band-pass, Q 1, of the mid): (step power above the bed / bed power) out minus in; steps are the 40 ms steps, the bed 200–360 ms after each onset | within `toleranceDb`; Gaming presets only, and required there |
+
+Tolerances. The factory blocks were written from the renders measured after Phase 3 batch 3's retune (Late Night Low Volume and Podcast & Voice included) with the same defaults for every preset: tone ±1 dB on pink and ±1.5 dB on music (music drives the level-dependent stages harder), loudness ±1 LU, `lraLossMaxLu` the measured loss + 0.5 LU, `thdnMaxDb` the measured value + 3 dB (−100 dB where nothing distorts), contrast ±1 dB. They are wide enough for compiler and CPU differences (a few hundredths of a dB) and small tuning, and narrow enough that re-voicing a band, the loudness or the dynamics by more than about 1 dB fails. They are intent, not a regression pin: the golden renders and `preset-render-diff.py` keep the 0.05–0.1 dB watch. Measured values sit at the centre of each tolerance (rounded to 0.1).
+
+**When a preset is re-voiced on purpose**, update its block in the same change and name the move:
+
+1. Build and run `FLUB_INTENT_PRINT=1 ./build/tests/flub_tests "Factory presets: intent - Music - Bass Head"` (the case name is `Factory presets: intent - <category> - <name>`; leave the name out to print every preset). It prints the measured block in the file's format with the default tolerances, and the loudness range before → after and the THD+N it came from.
+2. Replace the preset's `"intent"` object with it, unless you keep a wider tolerance on purpose; then say why in the change.
+3. Attach the old and new block to the change with the render diff: a moved band, loudness, range or contrast must be the one the re-voicing meant. A tolerance is widened only for a metric that genuinely varies (say which, and by how much across the three latency profiles or two compilers), never to make an unintended move pass.
+
+A new preset gets its block the same way (the case exists as soon as the file does; it fails until the block is in).
 
 The known sound-quality gaps that the planned retunes address (the Night Mode post-event hole, the Punch kick onset, pumping, 60 Hz THD+N, the 7.1 LFE, the 3.2 kHz lift at Bluetooth hands-free rates) are pinned by the `KnownGap:` tests in `tests/test_known_gaps.cpp` at today's values: `./build/tests/flub_tests KnownGap` prints every metric. The gaming presets are also judged on the docs/11 E60 scenes (a footstep burst scene, quiet → combat and an ambush, at −14 / −24 / −40 LUFS) in `tests/test_scenes.cpp`, which pins nine metrics per preset: `./build/tests/flub_tests Scenes:`. A change that closes a gap updates its expectation to the target named there, as the footstep cue enhancer did for short bursts out of silence and step/bed contrast (docs/11 E19), the Laptop Speakers subsonic fix for the 30 Hz audible band (`KnownGap closed:`, now checked against its ≥ −15.8 dB target) and the 3 dB positional-focus cap did for the focus ILD (≤ 3 dB added at 3 kHz).

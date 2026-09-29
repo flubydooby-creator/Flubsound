@@ -1672,6 +1672,11 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         autoLevel.processUnmeasured (in);
     else
         autoLevel.process (in);
+    // The cue enhancer's and the upward compressor's backgrounds (docs/11
+    // E19 step 4) are kept in the terms of the level before AutoLevel's gain
+    // (0 dB while it is off: nothing changes).
+    dynEq.setReferenceOffsetDb (autoLevel.getGainDb());
+    compressor.setReferenceOffsetDb (autoLevel.getGainDb());
 
     // ---- 2. Fold to stereo ----
     inputDetector.process (in);

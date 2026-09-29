@@ -53,6 +53,8 @@
 #include "flub/analysis/SceneEvents.h"
 #include "flub/common/Math.h"
 #include "flub/dsp/Biquad.h"
+#include "flub/dsp/Compressor.h"
+#include "flub/dsp/DynamicEq.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/StartleGuard.h"
 #include "flub/io/PresetIO.h"
@@ -1497,4 +1499,319 @@ TEST_CASE ("SceneEvents: the background tracker's law, and the detector finds th
     // Dialogue over stationary effects at 0 LU: nothing stands out by 6 dB,
     // nothing changes level.
     CHECK (analyseSceneEvents (makeDialogueScene (-24.0).input.channels, kFs).events.empty());
+}
+
+// =============================================================================
+// docs/11 E19 step 4: the cue enhancer (DynamicEq's CueLift bands) and the
+// upward compressor's relative floor keep their backgrounds, and the cue
+// enhancer its loud cap, in the terms of the level before Auto Level's gain
+// (setReferenceOffsetDb, which ProcessingChain::process hands over every
+// block), and the cue gate's optional onset-flux key.
+namespace
+{
+constexpr int kBlock = 512;
+
+/** The first 5 s of the core scene (the bed and the steps, before the combat). */
+Channels quietPart (const Scene& s)
+{
+    Channels c = s.input.channels;
+    for (auto& ch : c)
+        ch.resize (static_cast<size_t> (samplesOf (kCombatStart)));
+    return c;
+}
+
+/** Cue SNR gain (see the header) over the quiet part's steps from 1.5 s. */
+double cueSnrGainDb (const Scene& s, const Channels& in, const Channels& out)
+{
+    const auto quiet = stepsBetween (s, 1.5, kCombatStart);
+    const auto qs = stepWindows (quiet), qb = bedWindows (quiet);
+    const auto inBand = bandPass (in), outBand = bandPass (out);
+    const double inStep = meanPower (inBand, qs) - meanPower (inBand, qb), outStep = meanPower (outBand, qs) - meanPower (outBand, qb);
+    const double inRest = meanPower (in, qb) - meanPower (inBand, qb), outRest = meanPower (out, qb) - meanPower (outBand, qb);
+    return (powerDb (outStep) - powerDb (outRest)) - (powerDb (inStep) - powerDb (inRest));
+}
+
+/** Gaming mode's Footsteps bands at 100 % (ProcessingChain configureModeBands). */
+void prepareCueBands (DynamicEq& d, bool onsetFlux)
+{
+    d.prepare (ProcessSpec { kFs, kBlock, 2 });
+    DynEqBandParams p;
+    p.enabled = true;
+    p.mode = DynEqMode::CueLift;
+    p.frequency = 3200.0f;
+    p.q = 0.9f;
+    p.rangeDb = 7.0f;
+    p.attackMs = 1.0f;
+    p.releaseMs = 40.0f;
+    p.noiseFloorDb = -75.0f;
+    p.cueOnsetFlux = onsetFlux;
+    d.setBand (4, p);
+    p.frequency = 260.0f;
+    p.q = 1.2f;
+    p.rangeDb = 3.0f;
+    p.attackMs = 2.0f;
+    p.releaseMs = 60.0f;
+    d.setBand (5, p);
+    d.reset();
+}
+
+/** Runs `m` over `in` times an upstream gain of `stepDb` from `stepAt`
+    seconds on (block-aligned, as Auto Level's per-block gain), handing the
+    gain over with setReferenceOffsetDb if `handOver`. `perBlock` is called
+    after each block with its start time. */
+template <class Module, class PerBlock>
+Channels runUpstream (Module& m, const Channels& in, double stepAt, double stepDb, bool handOver, PerBlock perBlock)
+{
+    const int n = static_cast<int> (in[0].size());
+    Planar buf (2, n);
+    buf.ch[0] = in[0];
+    buf.ch[1] = in[1];
+    buf.rebind();
+    const float g = static_cast<float> (std::pow (10.0, stepDb / 20.0));
+    for (int pos = 0; pos < n; pos += kBlock)
+    {
+        const int len = std::min (kBlock, n - pos);
+        const bool after = pos >= samplesOf (stepAt);
+        if (after)
+            for (auto& ch : buf.ch)
+                for (int i = pos; i < pos + len; ++i)
+                    ch[static_cast<size_t> (i)] *= g;
+        m.setReferenceOffsetDb (handOver && after ? static_cast<float> (stepDb) : 0.0f);
+        m.process (buf.block (pos, len));
+        perBlock (pos / kFs);
+    }
+    return buf.ch;
+}
+
+/** Band power (3.2 kHz) of `out` over windows, minus `gainDb`, re `ref`'s. */
+double bandDeviationDb (const Channels& out, double gainDb, const Channels& ref, const std::vector<Window>& w)
+{
+    return powerDb (meanPower (bandPass (out), w)) - gainDb - powerDb (meanPower (bandPass (ref), w));
+}
+} // namespace
+
+TEST_CASE ("Scenes: an upstream gain step does not move the cue enhancer when it is handed over - the steps keep their lift and the bed stays unlifted (docs/11 E19 step 4)")
+{
+    // The quiet part of the core scene at -40 LUFS through the Footsteps 100
+    // bands alone, with a +10 / -10 dB broadband gain from 2 s on (an
+    // upstream gain move far faster than Auto Level's 3 / 4 dB/s, so the
+    // difference shows). Deviation = the steps' / the bed's 3.2 kHz band
+    // power over the second after the move, minus the gain, re the same
+    // bands without it. Handed over (the background and the loud cap in the
+    // terms of the level before the gain) it stays within 0.05 dB; not
+    // handed over, +10 dB reads as the bed rising out of its background
+    // (the background climbs at 5 dB/s, so the bed is lifted for about 2 s)
+    // and -10 dB sinks the steps under it (they lose their lift until the
+    // background has fallen, 400 ms time constant).
+    const auto scene = makeScene (-40.0);
+    const auto in = quietPart (scene);
+    const auto after = stepsBetween (scene, 2.0, 3.0);
+    const auto none = [] (double) {};
+    DynamicEq ref;
+    prepareCueBands (ref, false);
+    const auto plain = runUpstream (ref, in, 2.0, 0.0, false, none);
+    for (const double stepDb : { 10.0, -10.0 })
+    {
+        DynamicEq a, b;
+        prepareCueBands (a, false);
+        prepareCueBands (b, false);
+        const auto handed = runUpstream (a, in, 2.0, stepDb, true, none);
+        const auto notHanded = runUpstream (b, in, 2.0, stepDb, false, none);
+        const std::string what = std::string (stepDb > 0.0 ? "+10" : "-10") + " dB upstream at 2 s, ";
+        const double hStep = bandDeviationDb (handed, stepDb, plain, stepWindows (after));
+        const double hBed = bandDeviationDb (handed, stepDb, plain, bedWindows (after));
+        const double nStep = bandDeviationDb (notHanded, stepDb, plain, stepWindows (after));
+        const double nBed = bandDeviationDb (notHanded, stepDb, plain, bedWindows (after));
+        measured (what + "handed over: step deviation", hStep, "dB");
+        measured (what + "handed over: bed deviation", hBed, "dB");
+        measured (what + "not handed over: step deviation", nStep, "dB");
+        measured (what + "not handed over: bed deviation", nBed, "dB");
+        CHECK_LE (std::abs (hStep), 0.05);
+        CHECK_LE (std::abs (hBed), 0.05);
+        if (stepDb > 0.0)
+            CHECK_GE (nBed, 1.0);
+        else
+            CHECK_LE (nStep, -1.0);
+    }
+}
+
+TEST_CASE ("Scenes: an upstream gain step does not move the upward compressor's relative floor when it is handed over (docs/11 E19 step 4)")
+{
+    // A -50 dBFS pink bed through the upward section alone (relative floor,
+    // threshold -20 dB, 3:1, up to 6 dB, no downward section), +10 dB
+    // broadband from 2 s on. Handed over, the background moves with the gain
+    // and the bed stays unlifted; not handed over it reads as 10 dB out of
+    // its background and gets the upward lift until the background catches up.
+    const int n = samplesOf (4.0);
+    const auto bed = highPass (pinkNoise (n, std::pow (10.0f, -50.0f / 20.0f), 1357), 40.0);
+    const Channels in { bed, bed };
+    CompressorParams p;
+    p.thresholdDb = 0.0f;
+    p.ratio = 1.0f;
+    p.upThresholdDb = -20.0f;
+    p.upRatio = 3.0f;
+    p.upMaxGainDb = 6.0f;
+    p.upRelativeFloor = true;
+    const auto run = [&] (double stepDb, bool handOver, double& maxUpDb) {
+        Compressor c;
+        c.setParams (p);
+        c.prepare (ProcessSpec { kFs, kBlock, 2 });
+        maxUpDb = 0.0;
+        const auto out = runUpstream (c, in, 2.0, stepDb, handOver, [&] (double t) {
+            if (t >= 2.0)
+                maxUpDb = std::max (maxUpDb, static_cast<double> (c.getUpwardGainDb()));
+        });
+        return out;
+    };
+    double plainUp = 0.0, handedUp = 0.0, notHandedUp = 0.0;
+    const auto plain = run (0.0, false, plainUp);
+    const auto handed = run (10.0, true, handedUp);
+    const auto notHanded = run (10.0, false, notHandedUp);
+    const std::vector<Window> w { span (2.05, 3.0) }; // after the 2 ms look-ahead
+    const double hBed = powerDb (meanPower (handed, w)) - 10.0 - powerDb (meanPower (plain, w));
+    const double nBed = powerDb (meanPower (notHanded, w)) - 10.0 - powerDb (meanPower (plain, w));
+    measured ("upward lift, no gain step: largest after 2 s", plainUp, "dB");
+    measured ("+10 dB upstream at 2 s, handed over: largest upward lift", handedUp, "dB");
+    measured ("+10 dB upstream at 2 s, handed over: bed deviation", hBed, "dB");
+    measured ("+10 dB upstream at 2 s, not handed over: largest upward lift", notHandedUp, "dB");
+    measured ("+10 dB upstream at 2 s, not handed over: bed deviation", nBed, "dB");
+    CHECK_NEAR (handedUp, plainUp, 0.1);
+    CHECK_LE (std::abs (hBed), 0.05);
+    CHECK_GE (notHandedUp, plainUp + 2.0);
+    CHECK_GE (nBed, 1.0);
+}
+
+namespace
+{
+// The cue enhancer's own lift in a preset: the cue SNR gain over the quiet
+// part of the core scene (steps 1.5 - 5 s) as shipped minus with Footsteps
+// 0, so the rest of the chain cancels (Night Mode's 3:1 compressor squeezes
+// the steps of the loud programme: its whole cue SNR gain is 1.73 / 2.03 /
+// 3.87 dB, 1.73 / 2.66 / 4.21 dB with Auto Level off). docs/11 E19
+// Done-when: within +-1 dB across -14 / -24 / -40 LUFS, as for the module
+// (the matrix above), with Auto Level's gain handed over.
+void checkOwnLiftAcrossLevels (const char* name, const char* file, bool firstRunWithAutoLevel, const double (&pinnedDb)[3])
+{
+    double lift[3] = {};
+    for (int l = 0; l < 3; ++l)
+    {
+        const auto scene = makeScene (kLevels[l]);
+        const auto in = quietPart (scene);
+        auto shipped = resolve (factoryPreset (file));
+        if (firstRunWithAutoLevel)
+        {
+            setValue (shipped, BoostIntensity, std::min (shipped[static_cast<size_t> (BoostIntensity)], 0.20f));
+            setValue (shipped, AutoLevelOn, 1.0f);
+            setValue (shipped, AutoLevelTargetLufs, -14.0f);
+        }
+        auto without = shipped;
+        setValue (without, Macro1, 0.0f);
+        lift[l] = cueSnrGainDb (scene, in, render (fileOf (in), shipped)) - cueSnrGainDb (scene, in, render (fileOf (in), without));
+        measured (std::string (name) + ": cue enhancer's own lift at " + levelName (l), lift[l], "dB");
+        CHECK_NEAR (lift[l], pinnedDb[l], 0.3);
+    }
+    for (int l = 1; l < 3; ++l)
+        CHECK_NEAR (lift[l], lift[0], 1.0);
+}
+} // namespace
+
+TEST_CASE ("Scenes: the cue enhancer's own lift is the same at -14 / -24 / -40 LUFS in Night Mode, with Auto Level's gain handed over (docs/11 E19 step 4)")
+{
+    // Before the hand-over (Auto Level's gain seen by the backgrounds): 2.08 / 2.11 / 2.37 dB.
+    checkOwnLiftAcrossLevels ("Night Mode", "gaming-night-mode.json", false, { 2.08, 2.08, 2.33 });
+}
+
+TEST_CASE ("Scenes: the cue enhancer's own lift is the same at -14 / -24 / -40 LUFS in First Run - Game with Auto Level on, with its gain handed over (docs/11 E19 step 4)")
+{
+    // "First Run - Game" is the app's Game strip default (Competitive FPS,
+    // Boost capped at 0.20, EngineController.cpp). It has no Auto Level (4.89
+    // / 4.97 / 5.06 dB, bit-identical), so here it runs with Auto Level on at
+    // -14 LUFS. Before the hand-over: 4.90 / 5.14 / 5.21 dB.
+    checkOwnLiftAcrossLevels ("First Run - Game, Auto Level on", "gaming-competitive-fps.json", true, { 4.91, 5.08, 5.14 });
+}
+
+TEST_CASE ("Scenes: the cue gate's onset-flux key - a slow swell out of the bed is not lifted, the steps keep their lift (docs/11 E19)")
+{
+    // cueOnsetFlux (DynamicEq.h; off by default, and in every preset): an
+    // event must climb from 2 to 4.5 dB over the background within 15 ms of
+    // crossing 2 dB after 30 ms under it. The Footsteps 100 bands alone.
+    // Swell: 3.2 kHz band noise in a -45 dBFS pink bed (the core scene's,
+    // without steps), from 30 dB under the bed's band power up to 10 dB over
+    // it at 20 dB/s from 1 s, then held: its lift = the 3.2 kHz band power
+    // over 2.5 - 4.5 s (10 dB out of the bed and more), out vs in, and the
+    // largest applied gain from 1 s. Steps: the quiet part of the core scene
+    // (cue SNR gain) at -14 / -24 / -40 LUFS, and 20 / 40 / 80 ms bursts of
+    // the same band noise at -60 dBFS out of digital silence (lift = band
+    // power over the bursts, out vs in).
+    const int n = samplesOf (4.5);
+    const float bedRms = std::pow (10.0f, -45.0f / 20.0f);
+    Channels swell { highPass (pinkNoise (n, bedRms, 1357), 40.0), highPass (pinkNoise (n, bedRms, 2468), 40.0) };
+    const double bedBand = std::sqrt (meanPower (bandPass (swell), { span (0.5, 1.0) }));
+    const auto band = bandPass (whiteNoise (n, 1.0f, 777), kStepBandHz, kStepBandQ);
+    const double bandRms = rms (band.data(), n);
+    for (int i = samplesOf (1.0); i < n; ++i)
+    {
+        const double db = std::min (-30.0 + 20.0 * (i / kFs - 1.0), 10.0);
+        const double v = bedBand / bandRms * std::pow (10.0, db / 20.0) * band[static_cast<size_t> (i)];
+        swell[0][static_cast<size_t> (i)] += static_cast<float> (v);
+        swell[1][static_cast<size_t> (i)] += static_cast<float> (v);
+    }
+    Channels bursts (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    std::vector<Window> burstWindows[3];
+    const double burstGain = std::pow (10.0, -60.0 / 20.0) / bandRms / std::sqrt (3.0 / 8.0);
+    for (int k = 0; k < 9; ++k)
+    {
+        const int onset = samplesOf (0.5 + 0.4 * k), len = samplesOf (k % 3 == 0 ? 0.02 : k % 3 == 1 ? 0.04 : 0.08);
+        for (int i = 0; i < len; ++i)
+        {
+            const float v = static_cast<float> (burstGain * (0.5 - 0.5 * std::cos (kTwoPi * i / len)) * band[static_cast<size_t> (onset + i)]);
+            bursts[0][static_cast<size_t> (onset + i)] = v;
+            bursts[1][static_cast<size_t> (onset + i)] = v;
+        }
+        burstWindows[k % 3].push_back ({ onset, onset + len });
+    }
+
+    const auto none = [] (double) {};
+    double swellLift[2] = {}, maxGain[2] = {}, snr[2][3] = {}, burstLift[2][3] = {};
+    for (int flux = 0; flux < 2; ++flux)
+    {
+        DynamicEq d;
+        prepareCueBands (d, flux == 1);
+        const auto out = runUpstream (d, swell, 0.0, 0.0, false, [&] (double t) {
+            if (t >= 1.0)
+                maxGain[flux] = std::max (maxGain[flux], static_cast<double> (d.getBandGainDb (4)));
+        });
+        swellLift[flux] = bandDeviationDb (out, 0.0, swell, { span (2.5, 4.5) });
+        for (int l = 0; l < 3; ++l)
+        {
+            const auto scene = makeScene (kLevels[l]);
+            const auto in = quietPart (scene);
+            DynamicEq e;
+            prepareCueBands (e, flux == 1);
+            snr[flux][l] = cueSnrGainDb (scene, in, runUpstream (e, in, 0.0, 0.0, false, none));
+        }
+        DynamicEq b;
+        prepareCueBands (b, flux == 1);
+        const auto burstOut = runUpstream (b, bursts, 0.0, 0.0, false, none);
+        for (int d3 = 0; d3 < 3; ++d3)
+            burstLift[flux][d3] = bandDeviationDb (burstOut, 0.0, bursts, burstWindows[d3]);
+    }
+    const char* gate[2] = { "gate on level only", "onset flux" };
+    for (int flux = 0; flux < 2; ++flux)
+    {
+        measured (std::string ("20 dB/s swell out of the bed, 3.2 kHz lift over 2.5 - 4.5 s: ") + gate[flux], swellLift[flux], "dB");
+        measured (std::string ("20 dB/s swell out of the bed, largest applied 3.2 kHz gain: ") + gate[flux], maxGain[flux], "dB");
+        for (int l = 0; l < 3; ++l)
+            measured ("steps under the bed at " + levelName (l) + ", cue SNR gain: " + gate[flux], snr[flux][l], "dB");
+        measured (std::string ("-60 dBFS bursts out of silence, lift 20 / 40 / 80 ms: ") + gate[flux] + ", 20 ms", burstLift[flux][0], "dB");
+        measured (std::string ("-60 dBFS bursts out of silence, lift 20 / 40 / 80 ms: ") + gate[flux] + ", 40 ms", burstLift[flux][1], "dB");
+        measured (std::string ("-60 dBFS bursts out of silence, lift 20 / 40 / 80 ms: ") + gate[flux] + ", 80 ms", burstLift[flux][2], "dB");
+    }
+    CHECK_GE (swellLift[0], 2.0);
+    CHECK_LE (swellLift[1], 0.4);
+    CHECK_LE (maxGain[1], 2.5); // the first 15 ms of a rise get the ordinary gate's lift
+    for (int l = 0; l < 3; ++l)
+        CHECK_NEAR (snr[1][l], snr[0][l], 0.2);
+    for (int d3 = 0; d3 < 3; ++d3)
+        CHECK_NEAR (burstLift[1][d3], burstLift[0][d3], 0.1);
 }

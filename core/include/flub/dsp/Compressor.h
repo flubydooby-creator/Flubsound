@@ -20,6 +20,10 @@
 //   relTaper(x - B), 0 at 3 dB and 1 at 9 dB over B. A stationary bed (rain,
 //   wind, room tone, a held tone) is its own background and is not lifted;
 //   quiet sounds that rise out of it are. Switching it glides over 20 ms.
+//   The tracker works on the level before the broadband gain the chain
+//   applies upstream (AutoLevel's, setReferenceOffsetDb; docs/11 E19 step
+//   4), so that gain's slow moves shift B with the programme; the curve
+//   itself reads the level as it is. 0 dB (the default) changes nothing.
 // Total gain g = gDown + gUp, smoothed by GainSmoother (attack/release).
 //   autoRelease: release time scales from releaseMs/4 (short transient
 //   reduction) to releaseMs (sustained reduction > 100 ms) - program
@@ -83,6 +87,11 @@ public:
         curve out of silence) unless backgroundDb is given. */
     static float computeGainDb (const CompressorParams& p, float levelDb) noexcept;
     static float computeGainDb (const CompressorParams& p, float levelDb, float backgroundDb) noexcept;
+
+    /** The broadband gain (dB) applied upstream of this module that the
+        upward section's background must not see (AutoLevel's; docs/11 E19
+        step 4, see above). Called once per block; non-finite reads 0. */
+    void setReferenceOffsetDb (float db) noexcept FLUB_NONBLOCKING;
 
     /** Most negative (down) / most positive (up) gain applied in the last block. */
     float getGainReductionDb() const noexcept { return grDb.load (std::memory_order_relaxed); }
@@ -150,6 +159,7 @@ private:
     // upRelativeFloor on finds it current).
     BackgroundTracker background;
     float backgroundDb = kMinusInfDb;
+    float referenceOffsetDb = 0.0f; // upstream gain the tracker does not see (setReferenceOffsetDb)
 
     // Gain smoothing (dB) and program-dependent release. The state and the
     // coefficients are double: a float one-pole with c ~ 1 - 1e-5 stalls

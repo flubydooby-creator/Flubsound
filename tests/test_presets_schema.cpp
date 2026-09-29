@@ -296,6 +296,114 @@ TEST_CASE ("Preset identity: contentHash follows the sound values only")
     CHECK (preset::contentHash (negativeZero) == h);
 }
 
+TEST_CASE ("Preset intent: a valid block is read, written back unchanged, and is not part of contentHash (docs/11 E14 step 2)")
+{
+    const char* text = R"({ "format": "flubsound-preset", "version": 1, "params": { "boost": 0.4 },
+        "intent": {
+          "tone": {
+            "pink": { "db": [1.2, 1.6, 1.1, 0.6, 0.0, -0.7, -0.5, -0.2, -0.2, -0.1], "toleranceDb": 1.0 },
+            "music": { "db": [null, 0.4, 0.3, -0.3, -1.1, -1.4, -1.3, -1.4, null, -1.4], "toleranceDb": 1.5 }
+          },
+          "loudnessOffsetLu": { "pink": 0.3, "music": 1.6, "toleranceLu": 0.5 },
+          "lraLossMaxLu": 0.7,
+          "thdnMaxDb": -100,
+          "stepBedContrastDb": { "value": 3.2, "toleranceDb": 0.8 }
+        } })";
+    const auto p = loadOk (text);
+    CHECK (p.warnings.empty());
+    REQUIRE (p.intent.has_value());
+    const auto& i = *p.intent;
+    REQUIRE (i.tonePink.has_value());
+    REQUIRE (i.toneMusic.has_value());
+    CHECK (i.tonePink->db[1] == 1.6);
+    CHECK (i.tonePink->toleranceDb == 1.0);
+    CHECK (! i.toneMusic->db[0].has_value());
+    CHECK (! i.toneMusic->db[8].has_value());
+    CHECK (i.toneMusic->db[9] == -1.4);
+    CHECK (i.toneMusic->toleranceDb == 1.5);
+    CHECK (i.loudnessOffsetPinkLu == 0.3);
+    CHECK (i.loudnessOffsetMusicLu == 1.6);
+    CHECK (i.loudnessToleranceLu == 0.5);
+    CHECK (i.lraLossMaxLu == 0.7);
+    CHECK (i.thdnMaxDb == -100.0);
+    CHECK (i.stepBedContrastDb == 3.2);
+    CHECK (i.stepBedToleranceDb == 0.8);
+
+    // Written back as read (sparse and full), and read again the same.
+    const auto original = json::write (parseJson (text)["intent"]);
+    for (const bool full : { false, true })
+    {
+        const auto saved = preset::toJson (p, full);
+        CHECK (json::write (saved["intent"]) == original);
+        const auto back = loadOk (json::write (saved));
+        CHECK (back.warnings.empty());
+        REQUIRE (back.intent.has_value());
+        CHECK (json::write (preset::intentToJson (*back.intent)) == original);
+    }
+
+    // Not part of the sound: the hash and every value are those of the same preset without it.
+    const auto bare = loadOk (R"({ "format": "flubsound-preset", "version": 1, "params": { "boost": 0.4 } })");
+    CHECK (! bare.intent.has_value());
+    CHECK (preset::contentHash (p) == preset::contentHash (bare));
+    CHECK (p.values == bare.values);
+    CHECK (preset::toJson (bare)["intent"].isNull());
+
+    // Every member is optional; defaults for the tolerances.
+    const auto partial = loadOk (R"({ "format": "flubsound-preset", "intent": { "thdnMaxDb": -40, "loudnessOffsetLu": { "music": -2 } } })");
+    CHECK (partial.warnings.empty());
+    REQUIRE (partial.intent.has_value());
+    CHECK (! partial.intent->tonePink.has_value());
+    CHECK (! partial.intent->loudnessOffsetPinkLu.has_value());
+    CHECK (partial.intent->loudnessOffsetMusicLu == -2.0);
+    CHECK (partial.intent->loudnessToleranceLu == 1.0);
+    CHECK (! partial.intent->stepBedContrastDb.has_value());
+}
+
+TEST_CASE ("Preset intent: an invalid block is dropped with a warning and the preset still loads; unknown fields are reported")
+{
+    auto withIntent = [] (const std::string& intent) {
+        return loadOk (R"({ "format": "flubsound-preset", "version": 2, "params": { "boost": 0.5 }, "intent": )" + intent + " }");
+    };
+    const struct
+    {
+        const char* intent;
+        const char* warning;
+    } bad[] = {
+        { R"([1, 2])", R"(invalid "intent" ignored: "intent" must be an object)" },
+        { R"({ "tone": { "pink": { "db": [1, 2, 3] } } })",
+          R"(invalid "intent" ignored: intent.tone.pink must be an object with "db": an array of 10 octave-band values (31.5 Hz .. 16 kHz, null = not asserted))" },
+        { R"({ "tone": { "music": { "db": [0, 0, 0, 0, "x", 0, 0, 0, 0, 0] } } })",
+          R"(invalid "intent" ignored: intent.tone.music.db[4] must be a number in [-40, 40])" },
+        { R"({ "tone": { "pink": { "db": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "toleranceDb": 0 } } })",
+          R"(invalid "intent" ignored: intent.tone.pink.toleranceDb must be a number in (0, 20])" },
+        { R"({ "loudnessOffsetLu": { "pink": 99 } })", R"(invalid "intent" ignored: intent.loudnessOffsetLu.pink must be a number in [-60, 60])" },
+        { R"({ "lraLossMaxLu": "small" })", R"(invalid "intent" ignored: intent.lraLossMaxLu must be a number in [-40, 40])" },
+        { R"({ "thdnMaxDb": 3 })", R"(invalid "intent" ignored: intent.thdnMaxDb must be a number in [-200, 0])" },
+        { R"({ "stepBedContrastDb": 2.5 })", R"(invalid "intent" ignored: intent.stepBedContrastDb must be an object with "value")" },
+        { R"({ "stepBedContrastDb": { "value": 2.5, "toleranceDb": -1 } })",
+          R"(invalid "intent" ignored: intent.stepBedContrastDb.toleranceDb must be a number in (0, 20])" },
+    };
+    for (const auto& b : bad)
+    {
+        const auto p = withIntent (b.intent);
+        CHECK (! p.intent.has_value());
+        CHECK (hasWarning (p, b.warning));
+        CHECK (p.warnings.size() == 1);
+        CHECK (value (p, BoostIntensity) == 0.5f); // the preset itself loads
+        CHECK (preset::toJson (p)["intent"].isNull());
+    }
+
+    // Unknown members (a newer minor's fields) are skipped with a warning; the rest is kept.
+    const auto p = withIntent (R"({ "thdnMaxDb": -50, "sparkle": 1, "tone": { "pink": { "db": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], "tilt": 2 }, "air": {} } })");
+    REQUIRE (p.intent.has_value());
+    CHECK (p.intent->thdnMaxDb == -50.0);
+    CHECK (p.intent->tonePink.has_value());
+    CHECK (hasWarning (p, R"(unknown intent field "sparkle" ignored)"));
+    CHECK (hasWarning (p, R"(unknown intent.tone.pink field "tilt" ignored)"));
+    CHECK (hasWarning (p, R"(unknown intent.tone field "air" ignored)"));
+    CHECK (p.warnings.size() == 3);
+}
+
 TEST_CASE ("Plug-in state recall: a parameter absent from saved state takes its default, not its previous value")
 {
     // Older state: carries boost and max.drive only (as if everything else

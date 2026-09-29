@@ -40,6 +40,29 @@
 // (or over -55 dBFS, if that is higher), and -6..-1 dBFS absolute - so
 // gunfire and explosions are not lifted.
 //
+// Upstream gain (docs/11 E19 step 4): the chain runs AutoLevel ahead of this
+// module and hands its gain over every block (setReferenceOffsetDb). The
+// background and the loud cap's relative term are kept in the terms of the
+// level BEFORE that gain (level - offset), so AutoLevel's slow moves shift
+// them with the programme instead of reading as the programme rising out of,
+// or sinking into, its own background. The hiss floor stays where it is in
+// the band (the background never sits under noiseFloorDb there), and the
+// gain computer's floor taper and the absolute roll-off read the level as it
+// is. An offset of 0 dB (the default; AutoLevel off) changes nothing.
+//
+// Onset flux (optional, DynEqBandParams::cueOnsetFlux; off by default): the
+// gate also asks HOW FAST the level rose out of the background - a per-band
+// flux. An event is lifted only if the level went from the gate's start
+// (2 dB over the background) to its top (4.5 dB over it) within 15 ms (a
+// rise of at least about 170 dB/s; a 20-80 ms step takes 2-6 ms). The rise
+// is timed from a start crossed after the level sat under it for 30 ms, so
+// the dips of a noisy band (a step's own, or a swell's) neither restart the
+// timer nor end the event, which stays an onset until the level has been
+// back under the start for 30 ms. A slow swell (a gust, an approaching engine)
+// that climbs out of its background more slowly than that is not lifted;
+// during those first 15 ms it gets the ordinary gate's lift (so a real
+// onset loses nothing), then none.
+//
 // The chain's mode policy drives bands 4-7 (ProcessingChain::configureModeBands):
 // Gaming: footstep detail (CueLift bell 3.2 kHz) and footstep body (CueLift
 // bell 260 Hz), explosion anti-masking (off in the mode policy since docs/11
@@ -83,6 +106,7 @@ struct DynEqBandParams
     float attackMs = 5.0f;               // 0.1 .. 200
     float releaseMs = 80.0f;             // 5 .. 2000
     float noiseFloorDb = -70.0f;         // BoostBelow: no lift below this level
+    bool cueOnsetFlux = false;           // CueLift: the gate is also keyed on onset flux (see above)
 
     bool operator== (const DynEqBandParams&) const = default;
 };
@@ -105,6 +129,11 @@ public:
     /** Currently applied total gain of a band in dB (static + dynamic), for the
         GUI. Written by the audio thread (relaxed atomic), read by any thread. */
     float getBandGainDb (int index) const noexcept;
+
+    /** The broadband gain (dB) applied upstream of this module that the
+        CueLift backgrounds and loud cap must not see (AutoLevel's; docs/11
+        E19 step 4, see above). Called once per block; non-finite reads 0. */
+    void setReferenceOffsetDb (float db) noexcept FLUB_NONBLOCKING;
 
 private:
     // ---- implementation-defined below this line (owned by the .cpp author) ----
@@ -163,6 +192,11 @@ private:
         int cueHoldTicks = 1, cueHoldCountdown = 0;
         float cueCap = 1.0f;                  // loud-cap factor, smoothed
         float cueCapDownCoeff = 0.0f, cueCapUpCoeff = 0.0f;
+        // Onset flux (cueOnsetFlux): ticks since the rise started and the
+        // limit, ticks the level has sat under the gate's start and how many
+        // re-arm the timer, and whether this event rose fast enough.
+        int cueRiseTicks = 0, cueFluxTicks = 1, cueQuietTicks = 0, cueArmTicks = 1;
+        bool cueOnset = false;
     };
 
     void activateBand (int index, bool fadeIn) noexcept;
@@ -170,12 +204,13 @@ private:
     void updateEq (BandState& band, float totalDb, bool glide) const noexcept;
     static void clearBandState (BandState& band) noexcept;
     void controlTick (int index) noexcept;
-    float cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb) const noexcept;
+    float cueTargetDb (BandState& band, float rangeDb, float noiseFloorDb, bool onsetFlux) const noexcept;
 
     ProcessSpec spec;
     double controlRate = 48000.0 / kControlInterval;
     int controlCountdown = kControlInterval;
     int lastNumChannels = 0; // channels in the previous block (states of absent channels go stale)
+    float referenceOffsetDb = 0.0f; // upstream gain the CueLift backgrounds do not see (setReferenceOffsetDb)
     std::array<DynEqBandParams, kMaxBands> targets {};
     std::array<BandState, kMaxBands> bands {};
     std::array<SvfCoeffs, kControlInterval> rampScratch {}; // per-sample EQ coefficients while gliding

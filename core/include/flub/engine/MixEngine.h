@@ -14,7 +14,7 @@
 // otherwise (24 / 48 samples + the 20-sample detector at 48 kHz).
 //
 //   strip 0 (Game, 7.1) --chain--> pad --+
-//   strip 1 (Music, 2)  --chain--> pad --+--> sum -> device correction -> master limiter -> out
+//   strip 1 (Music, 2)  --chain--> pad --+--> sum -> device correction -> master limiter -> hearing guard -> out
 //   strip 2 (Chat, 2)   --chain--> pad --+
 //   (pad = slowest chain in the strip's sync group - own chain; 0 alone)
 //
@@ -56,6 +56,36 @@
 // the value it had at the freeze. tests/test_idle_freeze.cpp has the
 // numbers.
 //
+// Chat sidechain (docs/11 E22; host settings, not parameters, so no preset
+// or A/B bank carries them). Strips take a role from their name: "Game",
+// "Music", "Chat" (case-insensitive, as the app's default layout names
+// them; any other name has none). VoiceActivity listens to the Chat strip's
+// input (before its chain; a strip nobody feeds is silence) whenever there
+// is a Chat strip. With the chat duck on (setChatDuck, off by default) its
+// verdict drives a ChatDucker on the output of every Game and Music strip
+// (after chain, pad and wake fade; before the strip gain): a 3 - 6 dB dip
+// at 1 - 4 kHz that leaves the Game strip's footstep band alone, the Game
+// chain's 2 kHz Voice & Score lift taken back, and the Game strip's peaks
+// held 3 dB under the master ceiling (strip-priority master protection), all
+// gliding in over 30 ms and out over 300 ms (ChatDucker.h). ChatMix
+// (setChatMix) is one balance between Game and Chat with
+// complementary gains: the side it moves away from keeps 0 dB, the other
+// falls to (1 - |balance|) in amplitude (muted at the end), both 0 dB at
+// the centre, each gliding over kChatMixRampMs on top of the strip gain.
+// Both add no latency. Off (the default, and ChatMix at the centre) the
+// strips' outputs are untouched, bit for bit. configureFrom() carries the
+// settings and an active talker (the new duck starts where the old one
+// stands); configure() keeps the settings and restarts the detector.
+//
+// Hearing guard (docs/11 E32 (c), HearingGuard.h): after the master limiter,
+// the listening-level estimate (A-weighted level + endpoint volume +
+// sensitivity), the dose against 80 dB(A) for 40 h a week and the optional
+// listening-level cap (a slow gain <= 1, no latency). The host hands it the
+// sensitivity (none by default: off), the endpoint volume, the cap and the
+// day's dose through getHearingGuard()'s setters; configure() keeps them,
+// configureFrom() carries them with the dose and the cap's gain. Off, or
+// with the level under the cap, the output is untouched, bit for bit.
+//
 // Threading: configure() is non-RT (allocates, prepares chains). process() is
 // the device callback. Profile/preset changes only touch ParameterStores.
 // configureFrom() builds a second engine beside a running one (sharing its
@@ -64,8 +94,11 @@
 
 #include "ProcessingChain.h"
 #include "flub/common/Realtime.h"
+#include "flub/dsp/ChatDucker.h"
 #include "flub/dsp/DeviceCorrection.h"
 #include "flub/dsp/TruePeakLimiter.h"
+#include "flub/dsp/VoiceActivity.h"
+#include "flub/engine/HearingGuard.h"
 
 #include <atomic>
 #include <cstdint>
@@ -144,6 +177,41 @@ public:
     /** Blocks the strip spent frozen since configure() (any thread, relaxed). */
     uint64_t getStripFrozenBlocks (int strip) const noexcept;
 
+    // ---- Chat sidechain and ChatMix (docs/11 E22, see above) ----
+    enum class StripRole
+    {
+        Other,
+        Game,
+        Music,
+        Chat
+    };
+    /** The role strip `strip` took from its name at configure(). */
+    StripRole getStripRole (int strip) const noexcept;
+    static StripRole roleForName (const std::string& name) noexcept;
+    static constexpr float kChatMixRampMs = 50.0f;
+    /** ChatMix's gain (linear) for a strip of `role` at `balance` (-1 Game
+        .. +1 Chat): Game 1 - max (0, balance), Chat 1 + min (0, balance),
+        any other role 1. */
+    static float chatMixGain (float balance, StripRole role) noexcept;
+    /** The voice-keyed duck on (depth clamped to 3 - 6 dB) or off (the
+        default); it glides out if it was ducking. Same thread rule as the
+        setters above. */
+    void setChatDuck (bool enabled, float depthDb = ChatDucker::kDefaultDepthDb) noexcept FLUB_NONBLOCKING;
+    bool getChatDuck() const noexcept { return chatDuck; }
+    float getChatDuckDepthDb() const noexcept { return chatDuckDepthDb; }
+    /** ChatMix balance, clamped to -1 .. +1; 0 (the default) is the centre.
+        Same thread rule as the setters above. */
+    void setChatMix (float balance) noexcept FLUB_NONBLOCKING;
+    float getChatMix() const noexcept { return chatMix; }
+    /** VoiceActivity's verdict on the Chat strip (false without one). Any thread (relaxed). */
+    bool isChatVoiceActive() const noexcept { return voice.isActivePublished(); }
+    /** How far the duck is in, 0..1 (the Game and Music strips share it). Any thread (relaxed). */
+    float getChatDuckAmount() const noexcept { return duckAmount.load (std::memory_order_relaxed); }
+    /** Strip `strip`'s duck (nullptr unless it is a Game or Music strip), for
+        tests and diagnostics on the audio thread or between process() calls. */
+    const ChatDucker* getChatDucker (int strip) const noexcept;
+    const VoiceActivity& getVoiceActivity() const noexcept { return voice; }
+
     /** RT. inputs[i] feeds strip i (channel count per its config, may be
         modified in place); out is stereo. Strips with no input pass nullptr. */
     void process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept FLUB_NONBLOCKING;
@@ -169,6 +237,11 @@ public:
         use setSettingsNow() only on an engine that is not yet running. */
     DeviceCorrection& getDeviceCorrection() noexcept { return correction; }
     const DeviceCorrection& getDeviceCorrection() const noexcept { return correction; }
+
+    /** The listening-level estimate and cap on the output (docs/11 E32 (c)).
+        Its setters and meters() are for any thread; see HearingGuard.h. */
+    HearingGuard& getHearingGuard() noexcept { return hearing; }
+    const HearingGuard& getHearingGuard() const noexcept { return hearing; }
 
     /** Any chain that needs a structural re-prepare (host polls this). A
         latency-profile change is structural, so re-configuring also
@@ -196,6 +269,11 @@ private:
         bool frozen = false;
         std::atomic<bool> frozenFlag { false };
         std::atomic<uint64_t> frozenBlocks { 0 };
+
+        // Chat sidechain and ChatMix (docs/11 E22).
+        StripRole role = StripRole::Other;
+        ChatDucker ducker;                // Game and Music strips
+        LinearSmoothedValue mixGain;      // ChatMix, on top of `gain`
     };
 
     /** Idle freeze: the pre-roll through the chain and the pad, then the fade. */
@@ -208,10 +286,18 @@ private:
     std::vector<std::unique_ptr<Strip>> strips;
     DeviceCorrection correction;
     TruePeakLimiter master;
+    HearingGuard hearing; // docs/11 E32 (c), after the master limiter
     AudioBuffer mixBuffer;
     double sampleRate = 48000.0;
     int maxBlock = 512, maxStripLatency = 0;
     bool idleFreeze = true;
     double idleHoldSeconds = kIdleHoldSeconds;
+
+    // Chat sidechain and ChatMix (docs/11 E22).
+    VoiceActivity voice;
+    int chatStrip = -1;
+    bool chatDuck = false;
+    float chatDuckDepthDb = ChatDucker::kDefaultDepthDb, chatMix = 0.0f;
+    std::atomic<float> duckAmount { 0.0f };
 };
 } // namespace flub

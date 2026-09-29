@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <random>
 #include <sstream>
@@ -158,7 +159,197 @@ float clampReported (const Info& info, float f, std::vector<std::string>& warnin
                             + "]: clamped to " + numberText (static_cast<double> (clamped)));
     return clamped;
 }
+
+// ---- intent (docs/11 E14 step 2) --------------------------------------------
+
+/** A finite number in [lo, hi] at `v`, or a message naming `what`. */
+bool readBounded (const json::Value& v, double lo, double hi, const std::string& what, double& out, std::string& error)
+{
+    if (! v.isNumber() || ! std::isfinite (v.asNumber()) || v.asNumber() < lo || v.asNumber() > hi)
+    {
+        error = what + " must be a number in [" + numberText (lo) + ", " + numberText (hi) + "]";
+        return false;
+    }
+    out = v.asNumber();
+    return true;
+}
+
+/** A tolerance: a number in (0, 20]. */
+bool readTolerance (const json::Value& v, const std::string& what, double& out, std::string& error)
+{
+    if (! readBounded (v, 0.0, 20.0, what, out, error) || out <= 0.0)
+    {
+        error = what + " must be a number in (0, 20]";
+        return false;
+    }
+    return true;
+}
+
+/** Warns about members of `v` not in `known` (forward compatible: skipped). */
+void warnUnknownMembers (const json::Value& v, std::initializer_list<const char*> known, const std::string& where,
+                         std::vector<std::string>& warnings)
+{
+    for (const auto& [key, value] : v.asObject())
+        if (std::none_of (known.begin(), known.end(), [&key] (const char* k) { return key == k; }))
+            warnings.push_back ("unknown " + where + " field \"" + key + "\" ignored");
+}
+
+bool readTone (const json::Value& v, const std::string& what, IntentTone& out, std::string& error, std::vector<std::string>& warnings)
+{
+    const auto& bands = v["db"];
+    if (! v.isObject() || ! bands.isArray() || bands.asArray().size() != kIntentBandsHz.size())
+    {
+        error = what + " must be an object with \"db\": an array of " + std::to_string (kIntentBandsHz.size())
+                + " octave-band values (31.5 Hz .. 16 kHz, null = not asserted)";
+        return false;
+    }
+    for (size_t b = 0; b < kIntentBandsHz.size(); ++b)
+    {
+        const auto& x = bands.asArray()[b];
+        double db = 0.0;
+        if (x.isNull())
+            out.db[b].reset();
+        else if (readBounded (x, -40.0, 40.0, what + ".db[" + std::to_string (b) + "]", db, error))
+            out.db[b] = db;
+        else
+            return false;
+    }
+    if (! v["toleranceDb"].isNull() && ! readTolerance (v["toleranceDb"], what + ".toleranceDb", out.toleranceDb, error))
+        return false;
+    warnUnknownMembers (v, { "db", "toleranceDb" }, what, warnings);
+    return true;
+}
+
+json::Value toneToJson (const IntentTone& tone)
+{
+    json::Value bands { json::Value::Array {} };
+    for (const auto& db : tone.db)
+        bands.push (db ? json::Value (*db) : json::Value());
+    json::Value o;
+    o.set ("db", std::move (bands));
+    o.set ("toleranceDb", tone.toleranceDb);
+    return o;
+}
 } // namespace
+
+bool intentFromJson (const json::Value& v, Intent& out, std::string& error, std::vector<std::string>& warnings)
+{
+    Intent intent;
+    if (! v.isObject())
+    {
+        error = "\"intent\" must be an object";
+        return false;
+    }
+    if (const auto& tone = v["tone"]; ! tone.isNull())
+    {
+        if (! tone.isObject())
+        {
+            error = "intent.tone must be an object";
+            return false;
+        }
+        for (const auto* name : { "pink", "music" })
+        {
+            if (tone[name].isNull())
+                continue;
+            IntentTone t;
+            if (! readTone (tone[name], std::string ("intent.tone.") + name, t, error, warnings))
+                return false;
+            (std::string (name) == "pink" ? intent.tonePink : intent.toneMusic) = t;
+        }
+        warnUnknownMembers (tone, { "pink", "music" }, "intent.tone", warnings);
+    }
+    if (const auto& loudness = v["loudnessOffsetLu"]; ! loudness.isNull())
+    {
+        if (! loudness.isObject())
+        {
+            error = "intent.loudnessOffsetLu must be an object";
+            return false;
+        }
+        double x = 0.0;
+        if (! loudness["pink"].isNull())
+        {
+            if (! readBounded (loudness["pink"], -60.0, 60.0, "intent.loudnessOffsetLu.pink", x, error))
+                return false;
+            intent.loudnessOffsetPinkLu = x;
+        }
+        if (! loudness["music"].isNull())
+        {
+            if (! readBounded (loudness["music"], -60.0, 60.0, "intent.loudnessOffsetLu.music", x, error))
+                return false;
+            intent.loudnessOffsetMusicLu = x;
+        }
+        if (! loudness["toleranceLu"].isNull()
+            && ! readTolerance (loudness["toleranceLu"], "intent.loudnessOffsetLu.toleranceLu", intent.loudnessToleranceLu, error))
+            return false;
+        warnUnknownMembers (loudness, { "pink", "music", "toleranceLu" }, "intent.loudnessOffsetLu", warnings);
+    }
+    double x = 0.0;
+    if (! v["lraLossMaxLu"].isNull())
+    {
+        if (! readBounded (v["lraLossMaxLu"], -40.0, 40.0, "intent.lraLossMaxLu", x, error))
+            return false;
+        intent.lraLossMaxLu = x;
+    }
+    if (! v["thdnMaxDb"].isNull())
+    {
+        if (! readBounded (v["thdnMaxDb"], -200.0, 0.0, "intent.thdnMaxDb", x, error))
+            return false;
+        intent.thdnMaxDb = x;
+    }
+    if (const auto& contrast = v["stepBedContrastDb"]; ! contrast.isNull())
+    {
+        if (! contrast.isObject() || ! readBounded (contrast["value"], -60.0, 60.0, "intent.stepBedContrastDb.value", x, error))
+        {
+            if (! contrast.isObject())
+                error = "intent.stepBedContrastDb must be an object with \"value\"";
+            return false;
+        }
+        intent.stepBedContrastDb = x;
+        if (! contrast["toleranceDb"].isNull()
+            && ! readTolerance (contrast["toleranceDb"], "intent.stepBedContrastDb.toleranceDb", intent.stepBedToleranceDb, error))
+            return false;
+        warnUnknownMembers (contrast, { "value", "toleranceDb" }, "intent.stepBedContrastDb", warnings);
+    }
+    warnUnknownMembers (v, { "tone", "loudnessOffsetLu", "lraLossMaxLu", "thdnMaxDb", "stepBedContrastDb" }, "intent", warnings);
+    out = intent;
+    return true;
+}
+
+json::Value intentToJson (const Intent& intent)
+{
+    json::Value o { json::Value::Object {} };
+    if (intent.tonePink || intent.toneMusic)
+    {
+        json::Value tone;
+        if (intent.tonePink)
+            tone.set ("pink", toneToJson (*intent.tonePink));
+        if (intent.toneMusic)
+            tone.set ("music", toneToJson (*intent.toneMusic));
+        o.set ("tone", std::move (tone));
+    }
+    if (intent.loudnessOffsetPinkLu || intent.loudnessOffsetMusicLu)
+    {
+        json::Value loudness;
+        if (intent.loudnessOffsetPinkLu)
+            loudness.set ("pink", *intent.loudnessOffsetPinkLu);
+        if (intent.loudnessOffsetMusicLu)
+            loudness.set ("music", *intent.loudnessOffsetMusicLu);
+        loudness.set ("toleranceLu", intent.loudnessToleranceLu);
+        o.set ("loudnessOffsetLu", std::move (loudness));
+    }
+    if (intent.lraLossMaxLu)
+        o.set ("lraLossMaxLu", *intent.lraLossMaxLu);
+    if (intent.thdnMaxDb)
+        o.set ("thdnMaxDb", *intent.thdnMaxDb);
+    if (intent.stepBedContrastDb)
+    {
+        json::Value contrast;
+        contrast.set ("value", *intent.stepBedContrastDb);
+        contrast.set ("toleranceDb", intent.stepBedToleranceDb);
+        o.set ("stepBedContrastDb", std::move (contrast));
+    }
+    return o;
+}
 
 std::string toString (SchemaVersion v)
 {
@@ -396,6 +587,15 @@ bool fromJson (const json::Value& v, Preset& out, std::string& error)
     }
     if (root["contentHash"].isString())
         out.savedContentHash = root["contentHash"].asString();
+    if (const auto& intent = root["intent"]; ! intent.isNull())
+    {
+        Intent parsed;
+        std::string why;
+        if (intentFromJson (intent, parsed, why, out.warnings))
+            out.intent = parsed;
+        else
+            out.warnings.push_back ("invalid \"intent\" ignored: " + why);
+    }
 
     const auto& t = layout();
     const auto& profileInfo = t[static_cast<size_t> (LatencyProfile)];
@@ -524,6 +724,8 @@ json::Value toJson (const Preset& p, bool full)
         }
     }
     root.set ("params", std::move (params));
+    if (p.intent)
+        root.set ("intent", intentToJson (*p.intent));
     return root;
 }
 

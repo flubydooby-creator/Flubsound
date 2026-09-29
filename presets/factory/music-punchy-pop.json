@@ -18,5 +18,14 @@
     "bass.monoBelow": 90,
     "max.glue": 0.25,
     "eq.3.gain": -1
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [1.0, 0.9, -0.3, -1.0, -0.6, -0.2, 0.1, 0.1, 0.1, 0.2], "toleranceDb": 1.0 },
+      "music": { "db": [0.0, 0.1, 0.4, -0.2, -0.9, -0.7, -0.3, 0.6, 0.4, 0.3], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 1.4, "music": 2.0, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 1.2,
+    "thdnMaxDb": -100
   }
 }

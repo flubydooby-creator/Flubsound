@@ -25,5 +25,14 @@
     "max.autoDrive": true,
     "max.target": -9,
     "eq.3.gain": -1
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [1.5, 0.8, -0.6, -1.2, -0.9, -0.4, 0.0, 0.3, 0.1, 0.2], "toleranceDb": 1.0 },
+      "music": { "db": [0.3, 0.1, 0.4, 0.3, -1.2, -1.1, -0.7, 0.2, -0.2, -0.3], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 6.2, "music": 7.4, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.9,
+    "thdnMaxDb": -100
   }
 }

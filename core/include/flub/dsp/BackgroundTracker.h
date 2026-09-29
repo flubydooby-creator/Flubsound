@@ -11,7 +11,12 @@
 //
 // The law is the one the DynamicEq CueLift band tracks its band with. The
 // Compressor's relative upward floor steps one at control rate, and
-// analyseSceneEvents (flub/analysis/SceneEvents.h) one per 10 ms frame.
+// analyseSceneEvents (flub/analysis/SceneEvents.h) one per 10 ms frame. The
+// law is not shift-free in time: a broadband gain that moves (AutoLevel's)
+// would read as the level rising out of, or sinking into, its background,
+// so the Compressor's tracker and the CueLift background (the same law),
+// which sit after AutoLevel, run on the level before that gain, with the
+// floor moved the other way (docs/11 E19 step 4, setReferenceOffsetDb).
 #pragma once
 
 #include "flub/common/Math.h"

@@ -39,5 +39,15 @@
     "dyneq.0.range": 2.1,
     "dyneq.0.attack": 10,
     "dyneq.0.release": 250
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [-7.4, -5.0, -1.9, -0.5, -0.1, 0.2, 0.4, 0.5, 0.3, 0.2], "toleranceDb": 1.0 },
+      "music": { "db": [-3.1, -2.8, -1.1, 1.4, 3.2, 3.3, 3.8, 5.0, 4.1, 3.4], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": -5.0, "music": -3.3, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 5.2,
+    "thdnMaxDb": -100,
+    "stepBedContrastDb": { "value": 2.4, "toleranceDb": 1.0 }
   }
 }

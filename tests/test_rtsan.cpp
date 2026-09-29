@@ -374,4 +374,30 @@ static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callba
 // glide runs inside process(); tests/test_onboard_cap.cpp drives it.
 static_assert (std::is_same_v<decltype (&ProcessingChain::setOnboardEnhancementCap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
 
+// Auto Level's gain, handed to the cue enhancer and the upward compressor by
+// ProcessingChain::process every block (docs/11 E19 step 4, tests/test_scenes.cpp).
+static_assert (std::is_same_v<decltype (&DynamicEq::setReferenceOffsetDb), void (DynamicEq::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&Compressor::setReferenceOffsetDb), void (Compressor::*) (float) noexcept FLUB_NONBLOCKING>);
+
+// The chat sidechain and ChatMix (docs/11 E22): the Chat strip's voice
+// detector and the Game / Music ducks run inside MixEngine::process; the
+// host's setters run between blocks (tests/test_mix_engine_sidechain.cpp).
+#include "flub/dsp/ChatDucker.h"
+#include "flub/dsp/VoiceActivity.h"
+static_assert (std::is_same_v<decltype (&VoiceActivity::process), void (VoiceActivity::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&VoiceActivity::processSilence), void (VoiceActivity::*) (int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&VoiceActivity::reset), void (VoiceActivity::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&VoiceActivity::seedActive), void (VoiceActivity::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ChatDucker::process), void (ChatDucker::*) (const AudioBlock&, const ChatDucker::Control&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ChatDucker::skip), void (ChatDucker::*) (int, bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ChatDucker::reset), void (ChatDucker::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&MixEngine::setChatDuck), void (MixEngine::*) (bool, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&MixEngine::setChatMix), void (MixEngine::*) (float) noexcept FLUB_NONBLOCKING>);
+
+// The listening-level estimate and cap (docs/11 E32 (c)) after MixEngine's
+// master limiter; the host's setters are relaxed atomics (tests/test_hearing_guard.cpp).
+#include "flub/engine/HearingGuard.h"
+static_assert (std::is_same_v<decltype (&HearingGuard::process), void (HearingGuard::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&HearingGuard::reset), void (HearingGuard::*)() noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

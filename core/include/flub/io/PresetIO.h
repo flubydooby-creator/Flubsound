@@ -64,11 +64,18 @@
 // * Plug-in / host state (resolveSavedState): every parameter the saved state
 //   does not carry takes its DEFAULT on load, never the value it had before
 //   (docs/11 E52 Phase A: deterministic DAW recall).
+// * "intent" (optional, docs/11 E14 step 2): what the preset is meant to do
+//   to the sound, as measurable bounds that tests/test_factory_presets.cpp
+//   asserts through the offline renderer (see Intent below). The engine
+//   ignores it and it is not part of contentHash; fromJson validates it
+//   (an invalid block is dropped with a warning, the preset still loads)
+//   and toJson writes it back unchanged.
 #pragma once
 
 #include "flub/engine/Parameters.h"
 #include "flub/io/Json.h"
 
+#include <array>
 #include <optional>
 #include <string>
 #include <utility>
@@ -99,6 +106,52 @@ std::string toString (SchemaVersion v);
     False for anything else (negative, not major.minor, wrong type). */
 bool parseSchemaVersion (const json::Value& version, SchemaVersion& out);
 
+/** A preset's measurable intent (docs/11 E14 step 2), in the file:
+      "intent": {
+        "tone": { "pink":  { "db": [10 numbers or null], "toleranceDb": 1 },
+                  "music": { "db": [...], "toleranceDb": 1.5 } },
+        "loudnessOffsetLu": { "pink": -2.1, "music": 0.4, "toleranceLu": 1 },
+        "lraLossMaxLu": 0.5,
+        "thdnMaxDb": -40,
+        "stepBedContrastDb": { "value": 2.5, "toleranceDb": 1 }
+      }
+    Every member is optional. The programmes, render settings and metric
+    definitions live in tests/test_factory_presets.cpp (presets/README.md,
+    "Intent blocks"): `tone` is each octave band's level change re bypass
+    (kIntentBandsHz) minus the programme's integrated-loudness change, null
+    for a band that is not asserted; `loudnessOffsetLu` the integrated-
+    loudness change; `lraLossMaxLu` the most loudness range the preset may
+    take off the dynamic music programme; `thdnMaxDb` the highest measured
+    THD+N (render.stats) on it; `stepBedContrastDb` the change of the
+    footstep / bed contrast in the 3.2 kHz band on the quiet game scene. */
+inline constexpr std::array<double, 10> kIntentBandsHz { 31.5, 63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0 };
+
+// Doubles, so a block read and written back keeps the file's numbers.
+struct IntentTone
+{
+    std::array<std::optional<double>, kIntentBandsHz.size()> db {}; // re bypass, loudness change removed
+    double toleranceDb = 1.0;
+};
+
+struct Intent
+{
+    std::optional<IntentTone> tonePink, toneMusic;
+    std::optional<double> loudnessOffsetPinkLu, loudnessOffsetMusicLu;
+    double loudnessToleranceLu = 1.0;
+    std::optional<double> lraLossMaxLu;
+    std::optional<double> thdnMaxDb;
+    std::optional<double> stepBedContrastDb;
+    double stepBedToleranceDb = 1.0;
+};
+
+/** Reads and validates an "intent" object. False with a message (the block
+    is then ignored) when a member has the wrong type or an implausible value
+    (tone bands |x| <= 40 dB, offsets |x| <= 60 LU, tolerances in (0, 20],
+    lraLossMaxLu |x| <= 40 LU, thdnMaxDb in [-200, 0] dB); unknown members
+    are reported in `warnings` and skipped. */
+bool intentFromJson (const json::Value& v, Intent& out, std::string& error, std::vector<std::string>& warnings);
+json::Value intentToJson (const Intent& intent);
+
 struct Preset
 {
     std::string name, category, author, description;
@@ -121,6 +174,10 @@ struct Preset
 
     /** fromJson: the schema version the file was written in (before migration). */
     SchemaVersion loadedVersion = kSchemaVersion;
+
+    /** The file's "intent" block, when it has a valid one (not part of the
+        sound: contentHash ignores it, the engine never reads it). */
+    std::optional<Intent> intent;
 
     /** fromJson: what was ignored or changed while reading (unknown keys,
         clamped values, unknown labels, a newer minor version), one sentence

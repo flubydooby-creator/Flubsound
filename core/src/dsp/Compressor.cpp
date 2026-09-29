@@ -334,6 +334,11 @@ void Compressor::reset() noexcept FLUB_NONBLOCKING
     bgDb.store (backgroundDb, std::memory_order_relaxed);
 }
 
+void Compressor::setReferenceOffsetDb (float db) noexcept FLUB_NONBLOCKING
+{
+    referenceOffsetDb = std::isfinite (db) ? db : 0.0f;
+}
+
 int Compressor::latencySamples() const noexcept
 {
     return latency;
@@ -532,10 +537,12 @@ void Compressor::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
         }
         // The background of the held level, at control rate on the global
         // phase (block-size independent). It only moves the curve while the
-        // relative floor is (partly) on.
+        // relative floor is (partly) on. The tracker runs on the level before
+        // the upstream gain (its floor, upFloorDb here, moves the other way)
+        // and B is read back in this level's terms.
         if ((tick & (kBackgroundInterval - 1u)) == 0u)
         {
-            const float b = background.update (levelDb, curve.upFloorDb);
+            const float b = background.update (levelDb - referenceOffsetDb, curve.upFloorDb - referenceOffsetDb) + referenceOffsetDb;
             if (b != backgroundDb)
             {
                 backgroundDb = b;

@@ -112,4 +112,26 @@ struct AnalyzerTaps
     SpscRing<float> pre { kCapacity };
     SpscRing<float> post { kCapacity };
 };
+
+// Listening level (docs/11 E32 (c)): HearingGuard's readings for the mix
+// output as a whole (MixEngine::getHearingGuard().meters(), not a strip's
+// bus). Estimates, the louder ear's, in dB(A) SPL; kUnknown while the
+// sensitivity is unknown. Doses are fractions of the weekly allowance (80
+// dB(A) for 40 h). Written once per block by the audio thread.
+struct HearingMeters
+{
+    static constexpr float kUnknown = -1000.0f;
+
+    std::atomic<bool> known { false };
+    std::atomic<float> levelDbA { kUnknown };      // 125 ms ("Fast")
+    std::atomic<float> leq5sDbA { kUnknown };      // the cap's window
+    std::atomic<float> sessionLeqDbA { kUnknown }; // since prepare()
+    // sessionDose: monotonic since the guard was first prepared (carried
+    // across engine swaps); doseToday: the host's baseline + the session
+    // dose since the baseline was set.
+    std::atomic<double> sessionDose { 0.0 }, doseToday { 0.0 };
+    std::atomic<float> capGainDb { 0.0f };          // <= 0
+    std::atomic<bool> capActive { false };          // the cap's gain is below 1
+    std::atomic<uint64_t> capSteps { 0 };           // chunks the budget forced a step in
+};
 } // namespace flub

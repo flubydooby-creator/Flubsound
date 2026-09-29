@@ -17,5 +17,15 @@
     "spatial.on": false,
     "virt.on": false,
     "max.clip": 0
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "toleranceDb": 1.0 },
+      "music": { "db": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 0.0, "music": 0.0, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.5,
+    "thdnMaxDb": -100,
+    "stepBedContrastDb": { "value": 0.0, "toleranceDb": 1.0 }
   }
 }

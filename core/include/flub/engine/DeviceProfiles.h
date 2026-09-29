@@ -26,6 +26,7 @@
 #include "flub/io/Json.h"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,28 @@ constexpr double kHandsFreeMaxRate = 32000.0;
 
 const char* toString (Connection c) noexcept;
 Connection connectionFromString (const std::string& s) noexcept;
+
+/** A headset's sensitivity, for HearingGuard's listening-level estimate
+    (docs/11 E32 (c)). Either the level a 0 dBFS sine plays at full endpoint
+    volume (what a USB or wireless headset's own DAC and amplifier give; a
+    coupler measurement), or a passive driver's dB SPL / mW with its
+    impedance, which needs the source's output voltage as well
+    (splAtFullScale). NaN = not known, the default: the guard is then off.
+    JSON: "sensitivity": {"dbSplAtFullScale": 108} or {"dbSplPerMw": 104,
+    "impedanceOhm": 32}, with an optional "source" ("manufacturer", "lab"). */
+struct Sensitivity
+{
+    float dbSplAtFullScale = std::numeric_limits<float>::quiet_NaN();
+    float dbSplPerMw = std::numeric_limits<float>::quiet_NaN();
+    float impedanceOhm = std::numeric_limits<float>::quiet_NaN();
+    std::string source;
+};
+
+/** dB SPL of a 0 dBFS sine at full endpoint volume, NaN when unknown:
+    dbSplAtFullScale when given, else dbSplPerMw + 10 log10 (1000 V^2 / Z)
+    with V = sourceVrmsAtFullScale (the output's RMS voltage for a 0 dBFS
+    sine at full volume; NaN = not known, and then neither is the level). */
+float splAtFullScale (const Sensitivity& s, float sourceVrmsAtFullScale = std::numeric_limits<float>::quiet_NaN()) noexcept;
 
 struct Profile
 {
@@ -70,6 +93,7 @@ struct Profile
     bool mayExposeGameChat = false;     // may present separate Game and Chat endpoints
     std::string musicPreset, gamingPreset;
     std::vector<std::string> notes;
+    Sensitivity sensitivity;            // docs/11 E32 (c); unknown unless the file gives one
     bool labVerified = false;           // validated on real hardware in the device lab
 };
 

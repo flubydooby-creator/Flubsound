@@ -31,5 +31,14 @@
     "eq.8.type": "High Cut",
     "eq.8.freq": 10000,
     "eq.8.slope": "12 dB/oct"
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [-1.3, 1.3, 1.3, 1.3, 1.5, 1.2, 1.0, 0.8, -0.5, -6.5], "toleranceDb": 1.0 },
+      "music": { "db": [0.0, 0.2, -0.2, 0.1, 0.4, 0.4, 0.3, -0.2, -2.1, -9.4], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": -1.2, "music": 0.6, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 1.1,
+    "thdnMaxDb": -31
   }
 }
