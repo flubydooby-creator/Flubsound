@@ -9,6 +9,7 @@ add_test(NAME flub_tests COMMAND flub_tests)
 # Factory presets are validated by tests/test_factory_presets.cpp.
 target_compile_definitions(flub_tests PRIVATE FLUB_PRESET_DIR="${PROJECT_SOURCE_DIR}/presets/factory")
 target_compile_definitions(flub_tests PRIVATE FLUB_DEVICE_PROFILES="${PROJECT_SOURCE_DIR}/presets/devices/device-profiles.json")
+target_compile_definitions(flub_tests PRIVATE FLUB_ENDPOINT_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/data/endpoint-names-corpus.txt")
 
 # platform/windows/driver/FlubVirtualAudioShared.h (driver <-> engine ABI) is
 # plain C that needs no Windows headers outside kernel mode:

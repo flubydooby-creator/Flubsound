@@ -249,6 +249,16 @@ std::vector<Info> buildLayout()
     // every preset and state saved before it sounds as it did.
     set (AutoPreampHot, v5 (toggle ("auto.preampHot", "Preamp: Hot Programme", "Global", false)));
 
+    // ---- Stereo addition (layout version 6, docs/11 E12 Phase A) --------------------------------
+    auto v6 = [] (Info i) {
+        i.sinceVersion = 6;
+        return i;
+    };
+    // The headphone crossfeed model (StereoSpatializer.h). Bs2b, the model
+    // the chain ran before the key existed, is the default, so every preset
+    // and state saved before it sounds as it did.
+    set (SpatialCrossfeedType, v6 (choice ("spatial.crossfeedType", "Crossfeed Type", "Stereo", { "Bs2b", "Meier", "Mono-safe" }, 0)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

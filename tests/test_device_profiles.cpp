@@ -4,6 +4,9 @@
 #include "flub/engine/DeviceProfiles.h"
 
 #include <algorithm>
+#include <fstream>
+#include <string>
+#include <vector>
 
 using namespace flub::device;
 
@@ -193,8 +196,130 @@ TEST_CASE ("DeviceProfiles: the embedded database is identical to presets/device
         CHECK (a.id == b.id);
         CHECK (a.matchAny == b.matchAny);
         CHECK (a.exclude == b.exclude);
+        CHECK (a.generic == b.generic);
+        CHECK (a.vendorWords == b.vendorWords);
         CHECK (a.notes == b.notes);
         CHECK (a.specificity == b.specificity);
         CHECK (a.gamingPreset == b.gamingPreset);
     }
+    CHECK (builtIn.headsetWords() == shipped.headsetWords());
+    CHECK (builtIn.speakerWords() == shipped.speakerWords());
+    CHECK (builtIn.otherVendorWords() == shipped.otherVendorWords());
+}
+
+namespace
+{
+struct CorpusEntry
+{
+    std::string kind, expectedId, endpoint;
+};
+
+std::string trimmed (const std::string& s)
+{
+    const auto b = s.find_first_not_of (" \t\r");
+    const auto e = s.find_last_not_of (" \t\r");
+    return b == std::string::npos ? std::string() : s.substr (b, e - b + 1);
+}
+
+/** tests/data/endpoint-names-corpus.txt: "kind | expected id | endpoint name". */
+std::vector<CorpusEntry> loadCorpus()
+{
+    std::vector<CorpusEntry> out;
+#ifdef FLUB_ENDPOINT_CORPUS
+    std::ifstream f (FLUB_ENDPOINT_CORPUS);
+    std::string line;
+    while (std::getline (f, line))
+    {
+        line = trimmed (line);
+        if (line.empty() || line[0] == '#')
+            continue;
+        const auto a = line.find ('|');
+        const auto b = a == std::string::npos ? a : line.find ('|', a + 1);
+        if (b == std::string::npos)
+            continue;
+        out.push_back ({ trimmed (line.substr (0, a)), trimmed (line.substr (a + 1, b - a - 1)), trimmed (line.substr (b + 1)) });
+    }
+#endif
+    return out;
+}
+} // namespace
+
+TEST_CASE ("DeviceProfiles: endpoint-name corpus - no false positives, >= 95 % correct families, every Turtle Beach string right (docs/11 E16)")
+{
+    const auto& db = shippedDatabase();
+    const auto corpus = loadCorpus();
+    REQUIRE (corpus.size() >= 100);
+    int headsets = 0, correct = 0, nonHeadsets = 0, falsePositives = 0, turtleBeachWrong = 0;
+    for (const auto& c : corpus)
+    {
+        const auto m = db.match (c.endpoint, 48000.0, 2);
+        const std::string got = m.profile != nullptr ? m.profile->id : "-";
+        if (c.kind == "headset")
+        {
+            ++headsets;
+            correct += got == c.expectedId ? 1 : 0;
+            if (got != c.expectedId && c.expectedId.rfind ("turtle-beach", 0) == 0)
+                ++turtleBeachWrong;
+        }
+        else
+        {
+            CHECK (c.expectedId == "-");
+            nonHeadsets += c.kind == "nonheadset" ? 1 : 0;
+            falsePositives += got != "-" ? 1 : 0;
+        }
+        if (got != c.expectedId)
+            std::cerr << "    corpus: '" << c.endpoint << "' matched " << got << ", expected " << c.expectedId << "\n";
+    }
+    CHECK (nonHeadsets >= 30);
+    CHECK (falsePositives == 0);
+    REQUIRE (headsets > 0);
+    CHECK (correct >= (95 * headsets + 99) / 100);
+    CHECK (turtleBeachWrong == 0);
+    std::cout << "    corpus: " << correct << " / " << headsets << " headset strings in the right family, " << falsePositives << " false positives on "
+              << corpus.size() - static_cast<size_t> (headsets) << " others (" << nonHeadsets << " not headsets)\n";
+}
+
+TEST_CASE ("DeviceProfiles: generic tokens need a vendor or headset word and no speaker or other-vendor word (docs/11 E16)")
+{
+    const auto& db = shippedDatabase();
+    // The file's word classes load normalised.
+    CHECK (std::find (db.headsetWords().begin(), db.headsetWords().end(), "headphones") != db.headsetWords().end());
+    CHECK (std::find (db.speakerWords().begin(), db.speakerWords().end(), "hdmi") != db.speakerWords().end());
+    CHECK (std::find (db.otherVendorWords().begin(), db.otherVendorWords().end(), "jabra") != db.otherVendorWords().end());
+    // The single ordinary words the docs name are flagged generic.
+    for (const char* id : { "turtle-beach-stealth", "turtle-beach-recon", "turtle-beach-atlas", "turtle-beach-pdp", "turtle-beach-elite-pro" })
+    {
+        const auto it = std::find_if (db.profiles().begin(), db.profiles().end(), [id] (const Profile& p) { return p.id == id; });
+        REQUIRE (it != db.profiles().end());
+        CHECK (! it->generic.empty());
+        for (const auto& g : it->generic)
+            CHECK (std::find (it->matchAny.begin(), it->matchAny.end(), g) != it->matchAny.end());
+    }
+    CHECK (idOf (db.match ("Atlas", 48000.0, 2)) == "(generic)");                        // alone: no
+    CHECK (idOf (db.match ("Headphones (Atlas)", 48000.0, 2)) == "turtle-beach-atlas");  // headset word
+    CHECK (idOf (db.match ("Turtle Beach Atlas", 48000.0, 2)) == "turtle-beach-atlas");  // vendor word
+    CHECK (idOf (db.match ("Atlas Speaker", 48000.0, 2)) == "(generic)");                // speaker word
+    CHECK (idOf (db.match ("Headphones (Atlas) HDMI", 48000.0, 2)) == "(generic)");      // speaker word beats headset word
+    CHECK (idOf (db.match ("Headphones (Jabra Elite Pro)", 48000.0, 2)) == "(generic)"); // another vendor
+    CHECK (idOf (db.match ("Turtle Beach Elite Pro for Sony", 48000.0, 2)) == "turtle-beach-elite-pro"); // own vendor beats it
+    // A specific (non-generic) token needs nothing beside it; specificity scoring is unchanged.
+    CHECK (idOf (db.match ("Stealth 700 Gen 2", 48000.0, 2)) == "turtle-beach-stealth");
+    CHECK (idOf (db.match ("Speakers (Turtle Beach Stealth Pro)", 48000.0, 2)) == "turtle-beach-stealth");
+
+    // A user file: string tokens and {token, generic} objects; malformed ones are skipped.
+    Database user;
+    std::string err;
+    flub::json::Value v;
+    REQUIRE (flub::json::parse (R"({"format":"flubsound-device-profiles","version":1,"headsetWords":["headset"],"speakerWords":["Speaker"],
+        "profiles":[{"id":"probe","matchAny":["Probe X", {"token":"Probe","generic":true}, {"generic":true}, 7],"vendorWords":["ACME"]}]})",
+                                v, err));
+    REQUIRE (user.load (v, err));
+    REQUIRE (user.profiles().size() == 1);
+    CHECK (user.profiles()[0].matchAny == std::vector<std::string> ({ "probe x", "probe" }));
+    CHECK (user.profiles()[0].generic == std::vector<std::string> ({ "probe" }));
+    CHECK (idOf (user.match ("Probe X", 48000.0, 2)) == "probe");
+    CHECK (idOf (user.match ("Probe", 48000.0, 2)) == "(generic)");
+    CHECK (idOf (user.match ("ACME Probe", 48000.0, 2)) == "probe");
+    CHECK (idOf (user.match ("Probe Headset", 48000.0, 2)) == "probe");
+    CHECK (idOf (user.match ("Probe Headset Speaker", 48000.0, 2)) == "(generic)");
 }

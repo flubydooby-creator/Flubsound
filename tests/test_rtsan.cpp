@@ -356,4 +356,8 @@ static_assert (std::is_same_v<decltype (&flub::platform::pipewire::CycleRunner::
 static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callback::nodeProcess),
                               void (flub::platform::NativeAudioNode::Callback::*) (const float* const*, int, float* const*, int, int) noexcept FLUB_NONBLOCKING>);
 
+// The on-board enhancement cap (docs/11 E16): one atomic, any thread; the
+// glide runs inside process(); tests/test_onboard_cap.cpp drives it.
+static_assert (std::is_same_v<decltype (&ProcessingChain::setOnboardEnhancementCap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

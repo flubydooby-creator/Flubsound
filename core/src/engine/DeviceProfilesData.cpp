@@ -9,7 +9,10 @@ const char* builtInProfilesJson() noexcept
     return R"FLUBJSON({
   "format": "flubsound-device-profiles",
   "version": 1,
-  "about": "Output-device profiles. Matching only adds device-aware advice and safety caps; every standard output device works without a profile. Tokens match whole words in the endpoint name, case-insensitively. labVerified=false means the entry is based on the product family's documented connection types and features and still has to be confirmed in the device lab. Flubsound is not affiliated with or endorsed by the vendors named here.",
+  "about": "Output-device profiles. Matching only adds device-aware advice and safety caps; every standard output device works without a profile. Tokens match whole words in the endpoint name, case-insensitively. labVerified=false means the entry is based on the product family's documented connection types and features and still has to be confirmed in the device lab. Flubsound is not affiliated with or endorsed by the vendors named here. A matchAny entry written as {\"token\": ..., \"generic\": true} is an ordinary word (atlas, stealth, recon, pdp, elite pro) that counts only next to one of the profile's vendorWords or one of the headsetWords, and never next to one of the speakerWords or otherVendorWords (a vendor word of the profile overrides otherVendorWords, not speakerWords).",
+  "headsetWords": ["headset", "headsets", "headphone", "headphones", "earphone", "earphones", "earbud", "earbuds", "hands free", "handsfree", "transmitter", "dongle"],
+  "speakerWords": ["speaker", "ceiling", "soundbar", "sound bar", "subwoofer", "monitor", "monitors", "tv", "television", "hdmi", "displayport", "projector"],
+  "otherVendorWords": ["jabra", "razer", "logitech", "logi", "steelseries", "arctis", "hyperx", "corsair", "sony", "bose", "sennheiser", "epos", "beyerdynamic", "audio technica", "akg", "apple", "airpods", "beats", "samsung", "jbl", "skullcandy", "astro", "plantronics", "poly", "anker", "soundcore", "audeze", "hifiman", "creative", "sound blaster", "asus", "rog", "msi", "lenovo", "dell", "alienware", "hp", "nzxt", "cooler master", "shure", "rode", "focusrite", "atlas sound", "lg", "philips", "yamaha", "denon", "sonos", "klipsch", "edifier", "bang olufsen"],
   "profiles": [
     {
       "id": "turtle-beach-generic",
@@ -34,7 +37,8 @@ const char* builtInProfilesJson() noexcept
       "vendor": "Turtle Beach",
       "family": "Stealth",
       "displayName": "Turtle Beach Stealth series",
-      "matchAny": ["stealth pro", "stealth 700", "stealth 600", "stealth 500", "stealth 400", "stealth 350", "stealth 300", "stealth"],
+      "matchAny": ["stealth pro", "stealth 700", "stealth 600", "stealth 500", "stealth 400", "stealth 350", "stealth 300", "stealth 700x", "stealth 700p", "stealth 600x", "stealth 600p", "stealth 500x", "stealth 500p", "stealth 450", "stealth 420x", "stealth 350vr", "stealth 300x", "stealth 300p", {"token": "stealth", "generic": true}],
+      "vendorWords": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
       "exclude": ["razer", "blade stealth"],
       "specificity": 2,
       "typicalConnection": "usb",
@@ -54,7 +58,8 @@ const char* builtInProfilesJson() noexcept
       "vendor": "Turtle Beach",
       "family": "Recon",
       "displayName": "Turtle Beach Recon series",
-      "matchAny": ["recon spark", "recon 500", "recon 200", "recon 70", "recon 50", "recon"],
+      "matchAny": ["recon spark", "recon 500", "recon 200", "recon 70", "recon 50", {"token": "recon", "generic": true}],
+      "vendorWords": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
       "specificity": 2,
       "typicalConnection": "analog",
       "onboardDsp": false,
@@ -72,7 +77,8 @@ const char* builtInProfilesJson() noexcept
       "vendor": "Turtle Beach",
       "family": "Atlas",
       "displayName": "Turtle Beach Atlas / Elite Atlas series",
-      "matchAny": ["elite atlas aero", "elite atlas", "atlas three", "atlas one", "atlas air", "atlas"],
+      "matchAny": ["elite atlas aero", "elite atlas", "atlas three", "atlas one", "atlas air", {"token": "atlas", "generic": true}],
+      "vendorWords": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
       "specificity": 2,
       "typicalConnection": "usb",
       "onboardDsp": true,
@@ -90,7 +96,8 @@ const char* builtInProfilesJson() noexcept
       "vendor": "Turtle Beach",
       "family": "Elite Pro",
       "displayName": "Turtle Beach Elite Pro series",
-      "matchAny": ["elite pro 2", "elite pro"],
+      "matchAny": [{"token": "elite pro 2", "generic": true}, {"token": "elite pro", "generic": true}, "superamp", "tactical audio controller"],
+      "vendorWords": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
       "specificity": 2,
       "typicalConnection": "analog",
       "onboardDsp": true,
@@ -109,6 +116,7 @@ const char* builtInProfilesJson() noexcept
       "family": "ROCCAT headsets",
       "displayName": "ROCCAT headset",
       "matchAny": ["roccat", "syn pro air", "syn max air", "syn buds", "elo 7 1", "elo x"],
+      "vendorWords": ["roccat", "turtle beach", "turtlebeach"],
       "specificity": 2,
       "typicalConnection": "usb",
       "onboardDsp": true,
@@ -126,7 +134,8 @@ const char* builtInProfilesJson() noexcept
       "vendor": "Turtle Beach (PDP)",
       "family": "PDP",
       "displayName": "PDP headset (Turtle Beach)",
-      "matchAny": ["pdp", "airlite", "victrix", "lvl50", "lvl40", "lvl30"],
+      "matchAny": [{"token": "pdp", "generic": true}, "airlite", "victrix", "lvl50", "lvl40", "lvl30"],
+      "vendorWords": ["turtle beach", "turtlebeach"],
       "specificity": 2,
       "typicalConnection": "analog",
       "onboardDsp": false,
@@ -154,6 +163,42 @@ const char* builtInProfilesJson() noexcept
       "gamingPreset": "Competitive FPS",
       "notes": [
         "Xbox-licensed headsets (including Turtle Beach Xbox models) connected to a PC through the Xbox Wireless adapter appear as a normal output device. If Windows Sonic or Dolby Atmos for Headphones is enabled on that output, turn it off while Flubsound's virtualizer is used."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "xbox-controller-headset",
+      "vendor": "Various (Xbox controller)",
+      "family": "Xbox controller",
+      "displayName": "Headset plugged into an Xbox controller",
+      "matchAny": ["xbox controller", "xbox wireless controller"],
+      "specificity": 2,
+      "typicalConnection": "usb",
+      "onboardDsp": false,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "A headset in the controller's 3.5 mm jack plays through the controller, which the computer sees over its USB cable or the Xbox Wireless adapter (not over the controller's Bluetooth link). If the headset has its own sound modes, keep them neutral."
+      ],
+      "labVerified": false
+    },
+    {
+      "id": "turtle-beach-controller",
+      "vendor": "Turtle Beach",
+      "family": "Turtle Beach controllers",
+      "displayName": "Headset on a Turtle Beach controller",
+      "matchAny": ["recon controller", "recon cloud", "stealth ultra"],
+      "specificity": 2,
+      "typicalConnection": "usb",
+      "onboardDsp": true,
+      "onboardVirtualSurround": false,
+      "mayExposeGameChat": false,
+      "musicPreset": "Flubsound Signature",
+      "gamingPreset": "Competitive FPS",
+      "notes": [
+        "Turtle Beach controllers can apply Superhuman Hearing and EQ presets to the headset in their jack. Set them to the flat / default mode while Flubsound's Gaming mode is active (or turn Flubsound's Footsteps and Detail macros down instead)."
       ],
       "labVerified": false
     }

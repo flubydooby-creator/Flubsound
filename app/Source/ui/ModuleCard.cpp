@@ -4,6 +4,8 @@
 #include "ParamHints.h"
 #include "Theme.h"
 
+#include <cmath>
+
 namespace flub::app::ui
 {
 using namespace flub::param;
@@ -46,8 +48,12 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
              B::None,
              { { ClarityPresence, "Presence" }, { ClarityAir, "Air" }, { ClarityDeMud, "De-Mud" }, { ClarityAttackDb, "Attack" },
                { SmoothAmount, "Smooth", false, true } });
-        add ("sat", "Saturation", "Saturation", "Oversampled tape / tube / digital saturation", SaturationOn, B::None,
-             { { SatType, "Type" }, { SatDriveDb, "Drive" }, { SatMix, "Mix" }, { SatOutputDb, "Output" } });
+        // Tape Grit (warmth.tapeGrit, docs/11 E14) chooses what the Music
+        // Warmth macro does to this stage, with the saturator off too.
+        add ("sat", "Saturation", "Saturation", "Oversampled tape / tube / digital saturation; Tape Grit is the classic Warmth",
+             SaturationOn, B::None,
+             { { SatType, "Type" }, { SatDriveDb, "Drive" }, { SatMix, "Mix" }, { SatOutputDb, "Output" },
+               { WarmthTapeGrit, "Tape Grit", false, true } });
         add ("spatial", "Stereo & Space", "Stereo", "Width, positional focus, space and crossfeed with mono safety", SpatialOn, B::None,
              { { SpatialWidth, "Width" }, { SpatialFocus, "Focus" }, { SpatialSpace, "Space" }, { SpatialCrossfeed, "Crossfeed" } });
         add ("virt", "Headphone Virtualizer", "Virtualizer", "Binaural rendering of 5.1 / 7.1 game audio", VirtualizerOn, B::None,
@@ -60,11 +66,46 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
                { CompReleaseMs, "Release" },
                { CompMakeupDb, "Makeup" },
                { GuardRange, "Dyn. Range", false, true } });
-        add ("max", "Loudness Maximizer", "Maximizer", "Glue, soft clipper and true-peak limiter", MaximizerOn, B::None,
-             { { MaxDriveDb, "Drive" }, { MaxCeilingDb, "Ceiling" }, { MaxClipAmount, "Clipper" }, { MaxGlue, "Glue" }, { MaxReleaseMs, "Release" } });
+        // Style (max.style) and LF-first limiting (max.lfLimit), docs/11 E05:
+        // a named style sets the clipper and the release (published as
+        // effective values), so those two knobs dim under it.
+        add ("max", "Loudness Maximizer", "Maximizer", "Glue, soft clipper and true-peak limiter; a style sets the clipper and release",
+             MaximizerOn, B::None,
+             { { MaxDriveDb, "Drive" },
+               { MaxCeilingDb, "Ceiling" },
+               { MaxStyle, "Style" },
+               { MaxClipAmount, "Clipper", false, false, true },
+               { MaxGlue, "Glue" },
+               { MaxReleaseMs, "Release", false, false, true },
+               { MaxLfLimit, "LF Limit" } });
         return m;
     }();
     return modules;
+}
+
+WarmthColour WarmthColour::of (const std::function<float (int)>& base, const std::function<float (int)>& effective)
+{
+    WarmthColour w;
+    if (static_cast<int> (std::lround (base (Mode))) != static_cast<int> (ModeValue::Music) || base (Macro5) <= 0.0f)
+        return w;
+    if (base (WarmthTapeGrit) >= 0.5f)
+    {
+        w.kind = Kind::TapeGrit;
+        w.pill = "TAPE";
+        w.detail = "Tape Grit is on: Warmth is the classic tape saturation with extra bass and harmonics, not the tone tilt.";
+        return w;
+    }
+    // MacroMap's override row: Tube while the saturator is Warmth's alone.
+    constexpr long kTube = 1; // sat.type: Tape, Tube, Digital
+    const auto& type = layout()[static_cast<size_t> (SatType)];
+    if (base (SaturationOn) < 0.5f && base (SatType) == type.defaultValue && std::lround (effective (SatType)) == kTube)
+    {
+        w.kind = Kind::Tube;
+        w.pill = "TUBE";
+        w.detail = "Warmth chose the Tube saturator for a gentle, mostly 2nd-order colour (the saturator is Warmth's alone; "
+                   "switch it on and pick a type to choose your own).";
+    }
+    return w;
 }
 
 // =============================================================================
@@ -214,22 +255,34 @@ void ModuleCard::setBand (int newBand)
 
 void ModuleCard::setState (const State& newState)
 {
+    // The Smoothness cut repaints the note at 0.1 dB steps.
     const bool changed = newState.baseOn != state.baseOn || newState.effectiveOn != state.effectiveOn
                          || newState.gateInactiveProfile != state.gateInactiveProfile
-                         || newState.virtualizerNeedsSurround != state.virtualizerNeedsSurround;
+                         || newState.virtualizerNeedsSurround != state.virtualizerNeedsSurround
+                         || std::abs (newState.smoothnessCutDb - state.smoothnessCutDb) >= 0.1f || newState.maxStyle != state.maxStyle
+                         || newState.tubeByWarmth != state.tubeByWarmth;
     state = newState;
     if (! changed && hasState)
         return;
     hasState = true;
 
     // Controls of the module's own parameters dim while it is off; a key
-    // that acts on its own (Key::independent) does not.
+    // that acts on its own (Key::independent) does not; one a named style
+    // sets (Key::setByStyle) dims while that style is chosen.
     for (size_t i = 0; i < keyControls.size() && i < descriptor.keys.size(); ++i)
-        keyControls[i]->setAlpha (state.effectiveOn || descriptor.keys[i].independent ? 1.0f : 0.42f);
+        keyControls[i]->setAlpha (keyDimmed (i) ? 0.42f : 1.0f);
     // The ear works whenever the module is heard, also when only a macro
     // engages it (the engine's audition bypass overrides the macros).
     listenButton.setEnabled (state.effectiveOn);
     repaint();
+}
+
+bool ModuleCard::keyDimmed (size_t keyIndex) const
+{
+    const auto& key = descriptor.keys[keyIndex];
+    if (key.setByStyle && state.maxStyle.isNotEmpty())
+        return true;
+    return ! (state.effectiveOn || key.independent);
 }
 
 // =============================================================================
@@ -313,6 +366,13 @@ juce::String ModuleCard::noteText() const
         return "Active only in the Quality latency profile";
     if (descriptor.id == "virt" && state.virtualizerNeedsSurround)
         return "Active for 5.1 / 7.1 sources (Game strip)";
+    // What the module does now, where it has a reading (docs/11 E07 / E05 / E14).
+    if (descriptor.id == "clarity" && state.smoothnessCutDb <= -0.05f)
+        return "Smoothness cut " + Theme::formatSignedDb (state.smoothnessCutDb, 1) + " dB (5 - 10 kHz)";
+    if (descriptor.id == "max" && state.maxStyle.isNotEmpty())
+        return "Style " + state.maxStyle + " sets Clipper and Release";
+    if (descriptor.id == "sat" && state.tubeByWarmth)
+        return "Tube chosen by Warmth";
     if (state.effectiveOn && ! state.baseOn)
         return "Engaged by Boost Intensity / macros";
     if (descriptor.id == "eq")

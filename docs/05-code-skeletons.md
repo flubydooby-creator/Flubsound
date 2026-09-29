@@ -1801,7 +1801,8 @@ L' = L3 − (1 − n0)·LP(L3) + g·z^−D·LP(R3), R' likewise   Bs2b / Meier c
 | Width Low Cut | `spatial.lowCut` | 60 … 500 | 180 | Hz | Shelf turnover: the low end never gets wider. 50 ms one-pole on ln(Hz). |
 | Positional Focus | `spatial.focus` | 0 … 1 | 0 | % | +0 … 3 dB bell on S at 3 kHz, Q 0.5 (lateral cue emphasis; at 100 % a source 6 dB to one side gains 2.9 dB of ILD, docs/11 E24). Off at sample rates ≤ 32 kHz (Bluetooth hands-free links). A polarity guard bounds the lift, so a hard-panned source stays hard-panned. M is untouched. |
 | Space | `spatial.space` | 0 … 1 | 0 | % | Adds decorrelated ambience from HP(M) into S (gain 0.5 · space). Cancels in mono. |
-| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Bs2b L/R crossfeed with a 0.27 ms interaural delay and flat L+R power (`SpatializerParams::crossfeedType`: Bs2b, Meier or the Mono-safe side shelf; no parameter key selects the type yet). **Forced to 0 in Gaming mode** and with binaural input. |
+| Headphone Crossfeed | `spatial.crossfeed` | 0 … 1 | 0 | % | Bs2b L/R crossfeed with a 0.27 ms interaural delay and flat L+R power (`spatial.crossfeedType` selects Bs2b, Meier or the Mono-safe side shelf; Bs2b by default). **Forced to 0 in Gaming mode** and with binaural input. |
+| Crossfeed Type | `spatial.crossfeedType` | Bs2b / Meier / Mono-safe | Bs2b | choice | Crossfeed model: Bs2b 700 Hz / 4.5 dB, Meier 650 Hz / 9.5 dB (0.27 ms ITD, flat L+R power), Mono-safe side shelf (no delay, mono sum exact). A change cross-fades (20 ms). Layout version 6 (docs/11 E12). |
 | Mono Safety | `spatial.monoSafety` | off / on | on | toggle | Pulls widths > 1 back towards 1 while the output correlation is below the minimum. |
 | Min Correlation | `spatial.minCorrelation` | −1 … 1 | 0 | – | Target for the mono safety. |
 

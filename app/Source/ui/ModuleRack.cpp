@@ -113,6 +113,18 @@ void ModuleRack::updateFromEngine()
         resized();
     }
 
+    // The cards' readings (docs/11 E07 / E05 / E14): the Smoothness cut, the
+    // named maximizer style, the Tube colour Warmth chose.
+    const float smoothCut = chain.getSmoothnessCutDb();
+    juce::String style;
+    if (const int styleIndex = static_cast<int> (std::lround (store.get (MaxStyle))); styleIndex != static_cast<int> (MaxStyleValue::Custom))
+    {
+        const auto& choices = layout()[static_cast<size_t> (MaxStyle)].choices;
+        style = juce::String (choices[static_cast<size_t> (juce::jlimit (0, static_cast<int> (choices.size()) - 1, styleIndex))]);
+    }
+    const bool tube = WarmthColour::of ([&store] (int id) { return store.get (id); }, [&chain] (int id) { return chain.effectiveValue (id); }).kind
+                      == WarmthColour::Kind::Tube;
+
     for (auto& card : cards)
     {
         const int enableId = card->getDescriptor().enableId;
@@ -121,6 +133,9 @@ void ModuleRack::updateFromEngine()
         s.effectiveOn = chain.effectiveValue (enableId) >= 0.5f;
         s.gateInactiveProfile = ! quality;
         s.virtualizerNeedsSurround = ! surround;
+        s.smoothnessCutDb = std::isfinite (smoothCut) ? juce::jmin (0.0f, smoothCut) : 0.0f;
+        s.maxStyle = style;
+        s.tubeByWarmth = tube;
         card->setState (s);
     }
 }
@@ -130,6 +145,13 @@ void ModuleRack::releaseListening()
     for (auto& card : cards)
         card->stopListening();
     listenMatch.reset(); // the session's trim goes with it
+}
+
+void ModuleRack::scrollToCard (const juce::String& id)
+{
+    for (auto* card : order)
+        if (card->getDescriptor().id == id)
+            viewport.setViewPosition (juce::jlimit (0, juce::jmax (0, content.getWidth() - viewport.getWidth()), card->getX() - 10), 0);
 }
 
 void ModuleRack::setSelectedEqBand (int band)

@@ -207,6 +207,9 @@ enum Id : int
     // Automatic preamp addition (docs/11 E11 Phase 3 batch 2; ProcessingChain.h)
     AutoPreampHot,     // Toggle: with auto.preamp, also take back the allowance and the maximizer's drive while the input's peaks leave no room under the ceiling
 
+    // Stereo addition (docs/11 E12 Phase A; StereoSpatializer.h)
+    SpatialCrossfeedType, // Choice: the headphone crossfeed model, CrossfeedTypeValue (Bs2b by default)
+
     kNumScalarParams
 };
 
@@ -247,6 +250,10 @@ enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Sa
     Off = no guard and no Tame (the default). */
 enum class GuardRangeValue : int { Off = 0, Lu20, Lu15, Lu10Balanced, Lu6Shield };
 enum class SubsonicOrderValue : int { Slope12 = 0, Slope24 = 1 }; // BassSubsonicOrder: 2nd / 4th order
+/** SpatialCrossfeedType, in flub::CrossfeedType's order: the bs2b and Meier
+    L/R crossfeeds (interaural delay, flat L+R power) and the Mono-safe side
+    shelf (no delay, mono sum exact). */
+enum class CrossfeedTypeValue : int { Bs2b = 0, Meier, MonoSafe };
 
 /** A named maximizer style (docs/11 E05 step 4): the values it gives the six
     maximizer controls it owns while it is selected. Custom owns none (the

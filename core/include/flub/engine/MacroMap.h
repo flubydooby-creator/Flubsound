@@ -83,9 +83,18 @@ public:
     static std::span<const MacroOverride> overrides (const float* base) noexcept;
     static const char* macroName (param::ModeValue mode, int macroIndex) noexcept; // 0..4
 
+    /** The on-board enhancement cap (docs/11 E16): the most of Gaming
+        Footsteps and Detail that reaches the chain while it is fully on. */
+    static constexpr float kOnboardCapMacroLimit = 0.30f;
+
     /** effective[] <- base[] with all macro contributions applied and clamped.
-        Both arrays have param::kNumParams entries. RT-safe. */
-    static void apply (const float* base, float* effective, float governorScale) noexcept;
+        Both arrays have param::kNumParams entries. RT-safe.
+        onboardCap (docs/11 E16, ProcessingChain::setOnboardEnhancementCap),
+        0..1 as it glides: above 0 the Gaming Footsteps (M1) and Detail (M4)
+        inputs, and their effective values, are clamped to a limit that
+        moves from 1 to kOnboardCapMacroLimit at 1, and virt.on is held off
+        in either mode; base[] is never changed. 0 is bit-identical to no cap. */
+    static void apply (const float* base, float* effective, float governorScale, float onboardCap = 0.0f) noexcept;
 
     /** True when a macro source that can raise paramId in the current mode is
         above zero, even if it has not reached its entry's start point yet

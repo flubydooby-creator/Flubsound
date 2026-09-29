@@ -2,6 +2,7 @@
 
 #include "flub/common/Math.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 
@@ -187,7 +188,7 @@ bool MacroMap::isArmed (const float* base, int paramId) noexcept
     return false;
 }
 
-void MacroMap::apply (const float* base, float* effective, float governorScale) noexcept
+void MacroMap::apply (const float* base, float* effective, float governorScale, float onboardCap) noexcept
 {
     for (int i = 0; i < kNumParams; ++i)
         effective[i] = base[i];
@@ -196,10 +197,23 @@ void MacroMap::apply (const float* base, float* effective, float governorScale) 
     const auto& info = layout();
     const std::span<const MacroEntry> sets[] = { table (mode), warmthRows (base) };
 
+    // The on-board enhancement cap (docs/11 E16): Footsteps and Detail are
+    // clamped as inputs, so every row they drive and the mode bands that read
+    // their effective values (ProcessingChain configureModeBands) see the
+    // capped amount; the limit glides with onboardCap, exactly 0.30 at 1.
+    const bool capped = onboardCap > 0.0f;
+    const bool capMacros = capped && mode == ModeValue::Gaming;
+    const float limit = onboardCap >= 1.0f ? kOnboardCapMacroLimit : 1.0f - onboardCap * (1.0f - kOnboardCapMacroLimit);
+    if (capMacros)
+        for (int id : { Macro1, Macro4 })
+            effective[id] = std::min (base[id], limit);
+
     for (const auto rows : sets)
         for (const auto& e : rows)
         {
-            const float v = sourceValue (base, e.source);
+            float v = sourceValue (base, e.source);
+            if (capMacros && (e.source == MacroSource::M1 || e.source == MacroSource::M4))
+                v = std::min (v, limit);
             if (v <= 0.0f)
                 continue;
             float c = smoothstep (e.start, e.end, v);
@@ -220,5 +234,9 @@ void MacroMap::apply (const float* base, float* effective, float governorScale) 
     for (const auto rows : sets)
         for (const auto& e : rows)
             effective[e.paramId] = info[static_cast<size_t> (e.paramId)].clamp (effective[e.paramId]);
+
+    // The headset renders its own virtual surround: no second head model.
+    if (capped)
+        effective[VirtualizerOn] = 0.0f;
 }
 } // namespace flub

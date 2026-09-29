@@ -15,7 +15,8 @@
 //
 // Profiles live in presets/devices/device-profiles.json (versioned, vendor
 // neutral format). Matching is by case-insensitive tokens in the endpoint
-// name; the connection type comes from the platform layer when it can tell
+// name (ordinary words only with a vendor or headset word, docs/11 E16:
+// Database::match); the connection type comes from the platform layer when it can tell
 // (Windows: the endpoint's device enumerator; macOS: the Core Audio transport
 // type; Linux reports Unknown - PipeWire's device.bus is not queried) and
 // otherwise from name/format heuristics (detectConnection()). Pure C++, no
@@ -55,6 +56,11 @@ struct Profile
     std::string displayName; // "Turtle Beach Stealth series"
     std::vector<std::string> matchAny; // normalised tokens; any one matching selects the profile
     std::vector<std::string> exclude;  // tokens that veto the profile
+    // docs/11 E16: the matchAny tokens flagged "generic" (ordinary words such
+    // as "atlas", "stealth", "recon", "pdp"), which count only next to one of
+    // vendorWords or a headset-class word (Database::match).
+    std::vector<std::string> generic;
+    std::vector<std::string> vendorWords; // normalised: "turtle beach", ...
     int specificity = 1;                // higher wins (family > vendor-generic)
 
     Connection typicalConnection = Connection::Unknown;
@@ -110,11 +116,25 @@ public:
 
     const std::vector<Profile>& profiles() const noexcept { return entries; }
 
+    /** The highest-scoring profile (specificity * 1000 + the longest
+        counted token), or none. A generic token (docs/11 E16) counts only
+        when the name also holds one of the profile's vendorWords or one of
+        the headset-class words, holds none of the speaker-class words
+        (speaker, ceiling, soundbar, monitor, TV, HDMI, ...), and holds none
+        of the other vendors' words unless it holds the profile's own:
+        "Atlas Sound Ceiling Speaker" and "Headphones (Jabra Elite Pro)" match
+        nothing, "Headphones (Atlas)" and "Turtle Beach Stealth" do. */
     Match match (const std::string& endpointName, double sampleRate, int outputChannels,
                  Connection platformHint = Connection::Unknown) const;
 
+    /** The file's headsetWords / speakerWords / otherVendorWords, normalised. */
+    const std::vector<std::string>& headsetWords() const noexcept { return headsetClass; }
+    const std::vector<std::string>& speakerWords() const noexcept { return speakerClass; }
+    const std::vector<std::string>& otherVendorWords() const noexcept { return otherVendors; }
+
 private:
     std::vector<Profile> entries;
+    std::vector<std::string> headsetClass, speakerClass, otherVendors;
 };
 
 /** Connection- and profile-specific safety caps and guidance. gamingMode

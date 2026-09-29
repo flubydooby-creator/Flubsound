@@ -19,7 +19,9 @@
 // button returns to the row of cards.
 //
 // All cards share one ParameterBinder bound to the selected strip's store;
-// updateFromEngine() feeds them the post-macro "effective" module states. The
+// updateFromEngine() feeds them the post-macro "effective" module states and
+// their readings (the Smoothness cut, the named maximizer style, the Tube
+// colour Warmth chose: docs/11 E07 / E05 / E14). The
 // cards' ears (hold-to-bypass A/B) go to EngineController::setAuditionBypass,
 // loudness matched by a ListenMatch (docs/11 E37) once the owner has given
 // the rack an estimator (setEstimatorProvider).
@@ -65,6 +67,10 @@ public:
     /** The loudness estimator the ear's match uses (shared with the header). */
     void setEstimatorProvider (EstimatorProvider provider) { estimatorProvider = std::move (provider); }
     ListenMatch& getListenMatch() noexcept { return listenMatch; }
+
+    /** Scrolls the row so the card with ModuleDescriptor::id `id` starts at
+        the left edge (as far as the row allows; screenshots). */
+    void scrollToCard (const juce::String& id);
 
     /** Keeps the EQ card on the band selected in the curve editor. */
     void setSelectedEqBand (int band);

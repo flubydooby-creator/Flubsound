@@ -120,6 +120,7 @@ const std::map<juce::String, Hint>& table()
         { "spatial.focus", { "Sharpens where sounds come from, left to right, so positions are easier to pinpoint." } },
         { "spatial.space", { "Adds a sense of room around the sound, like speakers in a real space." } },
         { "spatial.crossfeed", { "Lets a little of each side reach the other ear, like speakers: less tiring on headphones." } },
+        { "spatial.crossfeedType", { "Bs2b sounds like speakers in front; Meier is subtler; Mono-safe only narrows the bass and stays exact in mono." } },
         { "spatial.monoSafety", { "Pulls the width back when it would make parts cancel out in mono or on one speaker." } },
         { "spatial.minCorrelation", { "How far mono safety lets the sides differ before it steps in. Lower allows a wider image." } },
 

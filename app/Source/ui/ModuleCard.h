@@ -1,8 +1,10 @@
 // Flubsound Pro - one processing module in the rack.
 //
 //   [power]  Module name   [AUTO]          [ear] [expand]
-//     knob   knob   knob   knob            (3-5 key controls)
-//   note / hint line
+//     knob   knob   knob   knob            (3-7 key controls)
+//   note / hint line: what the module does now where it has a reading
+//     (Clarity: the Smoothness cut; Maximizer: the named style that sets
+//     Clipper and Release; Saturation: Tube chosen by Warmth), else a hint
 //
 // * power      the module's enable parameter (bypass is a click-free,
 //              latency-compensated crossfade in the engine)
@@ -51,6 +53,10 @@ struct ModuleDescriptor
             the Clarity card, Dynamic Range on the Compressor card), so the
             control is not dimmed with the module. */
         bool independent = false;
+        /** A named maximizer style (max.style other than Custom) sets this
+            key's effective value; the knob keeps the stored one, which
+            returns under Custom, so it dims while a style is chosen. */
+        bool setByStyle = false;
     };
 
     juce::String id, name, group, blurb;
@@ -63,6 +69,26 @@ struct ModuleDescriptor
         the stereo modules. The rack shows them by relevance
         (ModuleRack::relevanceOrder, docs/11 E39). */
     static const std::vector<ModuleDescriptor>& all();
+};
+
+/** What the Music Warmth macro does to the saturator now (docs/11 E14): the
+    classic Tape grit (warmth.tapeGrit), or the Tube colour its override row
+    chooses while the saturator is Warmth's alone (MacroMap: Music, Warmth
+    above 0, sat.on off and sat.type at its default in the base values).
+    `base` returns a stored value, `effective` the chain's effective one. */
+struct WarmthColour
+{
+    enum class Kind
+    {
+        None,    // Gaming, Warmth at 0, or the user's own saturator
+        Tube,    // the Tube colour, chosen by Warmth
+        TapeGrit // the v1 Warmth: tape drive, bass and harmonics
+    };
+    Kind kind = Kind::None;
+    juce::String pill;   // "TUBE", "TAPE" (empty for None)
+    juce::String detail; // one tooltip sentence
+
+    static WarmthColour of (const std::function<float (int)>& base, const std::function<float (int)>& effective);
 };
 
 class ModuleCard : public juce::Component, private juce::Timer
@@ -79,6 +105,14 @@ public:
         bool baseOn = false, effectiveOn = false;
         bool gateInactiveProfile = false;   // Noise Gate: latency profile is not "Quality"
         bool virtualizerNeedsSurround = false;
+        /** Clarity card: the Smoothness stage's cut now (dB <= 0; docs/11 E07,
+            ProcessingChain::getSmoothnessCutDb). */
+        float smoothnessCutDb = 0.0f;
+        /** Maximizer card: the chosen named style ("Punchy"; empty for Custom,
+            docs/11 E05). */
+        juce::String maxStyle;
+        /** Saturation card: Warmth chose the Tube saturator (docs/11 E14). */
+        bool tubeByWarmth = false;
     };
     void setState (const State& state);
 
@@ -115,6 +149,7 @@ private:
     void startListening();
     void timerCallback() override;
     juce::String noteText() const;
+    bool keyDimmed (size_t keyIndex) const;
 
     ModuleDescriptor descriptor;
     ParameterBinder& binder;

@@ -333,6 +333,20 @@ public:
     }
     float getListeningLevelDb() const noexcept { return listeningLevelDb.load (std::memory_order_relaxed); }
 
+    /** "Headset enhancement is ON" (docs/11 E16): the output device applies
+        its own enhancement (Superhuman Hearing, on-board EQ or virtual
+        surround). While on, Gaming Footsteps and Detail reach the chain at
+        most at 30 % (MacroMap::kOnboardCapMacroLimit) and the virtualiser is
+        held off (MacroMap::apply); the store and preset values are
+        untouched. A host setting per output device, not a parameter: any
+        thread (one atomic), glides in and out over kOnboardCapGlideMs from
+        the next process() (at once at prepare(), and on a chain's first
+        block). adoptGovernorState() carries it to a swapped-in chain.
+        MeterBus::onboardCapActive reads true while any of it applies. */
+    void setOnboardEnhancementCap (bool on) noexcept FLUB_NONBLOCKING { onboardCapRequest.store (on, std::memory_order_relaxed); }
+    bool getOnboardEnhancementCap() const noexcept { return onboardCapRequest.load (std::memory_order_relaxed); }
+    static constexpr float kOnboardCapGlideMs = 250.0f;
+
     /** The loudness contour as applied (docs/11 E32): its lift at 50 Hz
         (without the trim) and its headroom trim (dB <= 0). 0 while off. Any thread. */
     float getContourLiftAt50HzDb() const noexcept { return contour.getAppliedLiftAt50HzDb(); }
@@ -564,6 +578,12 @@ private:
     ToneTilt warmthTilt;
     float warmthTrimModelDb = 0.0f;
     std::atomic<float> listeningLevelDb { 0.0f };
+    // The on-board enhancement cap (docs/11 E16): requested (any thread) and
+    // as applied, 0..1 (audio thread); snapped to the request on the first
+    // block after prepare().
+    std::atomic<bool> onboardCapRequest { false };
+    float onboardCap = 0.0f;
+    bool onboardCapSnap = true;
     bool contourLfArmed = false; // the contour arms the maximizer's LF-first limiter (audio thread)
     // Boost's transient coupling (docs/11 E05 step 6, audio thread): the
     // limiter's programme GR, the GR of its transients over it (dB >= 0),

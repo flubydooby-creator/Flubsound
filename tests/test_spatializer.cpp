@@ -3,9 +3,14 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/common/Denormals.h"
 #include "flub/dsp/Fft.h"
 #include "flub/dsp/StereoSpatializer.h"
 #include "flub/dsp/Svf.h"
+#include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
+#include "flub/io/Json.h"
+#include "flub/io/PresetIO.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1605,4 +1610,200 @@ TEST_CASE ("StereoSpatializer (E12): crossfeed type changes, crossfeed toggles a
     b.width = 2.0f;
     check (a, b, 1000.0);
     check (b, a, 1000.0);
+}
+
+// ---- docs/11 E12 Phase A: the spatial.crossfeedType key (layout version 6) ----
+//
+// The same Done-when rows as above, through the chain and its parameter
+// store: every module but Stereo & Space off, Music mode.
+
+namespace
+{
+/** A chain with only Stereo & Space on, crossfeed at `amount` of `type`. */
+void crossfeedOnly (param::ParameterStore& s, float amount, param::CrossfeedTypeValue type)
+{
+    using namespace flub::param;
+    for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, VirtualizerOn, CompressorOn, MaximizerOn })
+        s.set (id, 0.0f);
+    s.set (SpatialOn, 1.0f);
+    s.set (SpatialMonoSafety, 0.0f);
+    s.set (SpatialCrossfeed, amount);
+    s.set (SpatialCrossfeedType, static_cast<float> (type));
+}
+
+/** Renders buf through a chain on s (48 kHz), `block` samples at a time. */
+void renderChain (param::ParameterStore& s, Planar& buf, int block = 480)
+{
+    ScopedNoDenormals noDenormals;
+    ProcessingChain chain (s);
+    chain.prepare ({ kFs, 512, 2 });
+    const int n = buf.numSamples();
+    for (int pos = 0; pos < n; pos += block)
+        chain.process (buf.block (pos, std::min (block, n - pos)));
+}
+
+constexpr param::CrossfeedTypeValue kTypes[] = { param::CrossfeedTypeValue::Bs2b, param::CrossfeedTypeValue::Meier, param::CrossfeedTypeValue::MonoSafe };
+} // namespace
+
+TEST_CASE ("Parameters (E12): spatial.crossfeedType - layout version 6, a Choice Bs2b / Meier / Mono-safe, Bs2b by default; a preset without the key loads Bs2b")
+{
+    using namespace flub::param;
+    REQUIRE (findByKey ("spatial.crossfeedType") == SpatialCrossfeedType);
+    const auto& info = layout()[static_cast<size_t> (SpatialCrossfeedType)];
+    CHECK (info.sinceVersion == 6);
+    CHECK (info.unit == Unit::Choice);
+    CHECK ((info.choices == std::vector<std::string> { "Bs2b", "Meier", "Mono-safe" }));
+    CHECK (info.defaultValue == static_cast<float> (CrossfeedTypeValue::Bs2b));
+    CHECK (info.group == "Stereo");
+    CHECK (! info.structural);
+    // The value order is CrossfeedType's (the chain casts one to the other).
+    CHECK (static_cast<int> (CrossfeedTypeValue::Meier) == static_cast<int> (CrossfeedType::Meier));
+    CHECK (static_cast<int> (CrossfeedTypeValue::MonoSafe) == static_cast<int> (CrossfeedType::MonoSafe));
+
+    // A preset saved before the key (crossfeed set, no type) loads Bs2b, the
+    // model the chain ran then; one that names a type keeps it (by label).
+    const auto load = [] (const std::string& text) {
+        json::Value v;
+        std::string error;
+        REQUIRE (json::parse (text, v, error));
+        preset::Preset pr;
+        REQUIRE (preset::fromJson (v, pr, error));
+        ParameterStore store;
+        store.set (SpatialCrossfeedType, 2.0f); // whatever was loaded before
+        preset::applyPresetToStore (pr, store, Bank::A);
+        return store.get (SpatialCrossfeedType);
+    };
+    CHECK (load (R"({ "format": "flubsound-preset", "version": 2, "name": "old", "params": { "spatial.crossfeed": 0.3 } })") == 0.0f);
+    CHECK (load (R"({ "format": "flubsound-preset", "version": 2, "name": "meier", "params": { "spatial.crossfeedType": "Meier" } })") == 1.0f);
+    CHECK (load (R"({ "format": "flubsound-preset", "version": 2, "name": "mono", "params": { "spatial.crossfeedType": "Mono-safe" } })") == 2.0f);
+    // Saved by label, and read back.
+    ParameterStore store;
+    store.set (SpatialCrossfeedType, 1.0f);
+    const auto saved = preset::toJson (preset::captureFromStore (store, Bank::A), true);
+    CHECK (saved["params"]["spatial.crossfeedType"].asString() == "Meier");
+}
+
+TEST_CASE ("Chain (E12): spatial.crossfeedType - ITD 0.22-0.30 ms and feed 4.5 / 9.5 dB with L+R flat within 0.5 dB (Bs2b, Meier); Mono-safe: no delay, the mono sum exact")
+{
+    using namespace flub::param;
+    const int n = static_cast<int> (kFs / 2);
+    for (const auto type : kTypes)
+    {
+        const bool monoSafe = type == CrossfeedTypeValue::MonoSafe;
+        ParameterStore s;
+        crossfeedOnly (s, 1.0f, type);
+
+        // ITD: hard-left white noise.
+        Planar noise = stereo (whiteNoise (n, 0.25f, 211u), std::vector<float> (static_cast<size_t> (n), 0.0f));
+        renderChain (s, noise);
+        const double itd = crossCorrelationLagMs (noise, n / 4, kFs);
+
+        // Feed level at 50 Hz and hard-panned L+R power, octaves 31.5 Hz - 16 kHz.
+        double feedDb = 0.0, lo = 1.0e9, hi = -1.0e9;
+        for (double f = 31.25; f < 17000.0; f *= 2.0)
+        {
+            const auto x = sine (f, kFs, n, 0.25f);
+            Planar b = stereo (x, std::vector<float> (x.size(), 0.0f));
+            renderChain (s, b);
+            const double nearA = toneAmplitude (b.ch[0].data() + n / 2, n / 2, f, kFs) / 0.25;
+            const double farA = toneAmplitude (b.ch[1].data() + n / 2, n / 2, f, kFs) / 0.25;
+            const double power = 10.0 * std::log10 (nearA * nearA + farA * farA);
+            lo = std::min (lo, power);
+            hi = std::max (hi, power);
+            if (f < 40.0)
+            {
+                const auto y = sine (50.0, kFs, n, 0.25f);
+                Planar b50 = stereo (y, std::vector<float> (y.size(), 0.0f));
+                renderChain (s, b50);
+                feedDb = toDb (toneAmplitude (b50.ch[0].data() + n / 2, n / 2, 50.0, kFs) / toneAmplitude (b50.ch[1].data() + n / 2, n / 2, 50.0, kFs));
+            }
+        }
+
+        // Mono sum: uncorrelated stereo noise against the same chain with crossfeed 0.
+        const auto l = whiteNoise (n, 0.25f, 5u), r = darkNoise (n, 0.25f, 6u);
+        ParameterStore dry;
+        crossfeedOnly (dry, 0.0f, type);
+        Planar wet = stereo (l, r), ref = stereo (l, r);
+        renderChain (s, wet);
+        renderChain (dry, ref);
+        const double monoErr = maxMonoSumError (ref, wet);
+
+        std::printf ("    measured chain crossfeed type %d: ITD %.4f ms, feed at 50 Hz %.2f dB, hard-panned L+R %.3f .. %.3f dB, mono-sum error %.3g\n",
+                     static_cast<int> (type), itd, feedDb, lo, hi, monoErr);
+        if (monoSafe)
+        {
+            CHECK_LE (std::abs (itd), 0.05);
+            CHECK_LE (monoErr, 1.0e-6); // float rounding of M + S / M - S
+        }
+        else
+        {
+            CHECK_GE (itd, 0.22);
+            CHECK_LE (itd, 0.30);
+            CHECK_NEAR (feedDb, type == CrossfeedTypeValue::Meier ? 9.5 : 4.5, 0.2);
+            CHECK_LE (hi - lo, 0.5);
+            CHECK_LE (std::max (std::abs (lo), std::abs (hi)), 0.5);
+            CHECK_GE (monoErr, 1.0e-3); // a real L/R crossfeed: the mono sum is not preserved
+        }
+    }
+}
+
+TEST_CASE ("Chain (E12): changing spatial.crossfeedType while playing is click-free, and the key does nothing with the crossfeed at 0 or in Gaming")
+{
+    using namespace flub::param;
+    // A panned sine (R = L / 4) at its peak when the key changes: no
+    // curvature spike above the steady renders' own (as in "crossfeed type
+    // changes ... are click-free" above, here through the store).
+    const int n = 24000, change = 12000;
+    const double freq = 300.0;
+    const auto x = sine (freq, kFs, n, 0.25f, 0.5 * kPi - kTwoPi * freq * change / kFs);
+    const auto render = [&] (CrossfeedTypeValue first, CrossfeedTypeValue second) {
+        ParameterStore s;
+        crossfeedOnly (s, 1.0f, first);
+        ScopedNoDenormals noDenormals;
+        ProcessingChain chain (s);
+        chain.prepare ({ kFs, 512, 2 });
+        Planar buf = stereo (x, scaled (x, 0.25f));
+        for (int pos = 0; pos < n; pos += 480)
+        {
+            if (pos == change)
+                s.set (SpatialCrossfeedType, static_cast<float> (second));
+            chain.process (buf.block (pos, 480));
+        }
+        return buf;
+    };
+    double worst = 0.0;
+    for (const auto a : kTypes)
+        for (const auto b : kTypes)
+        {
+            if (a == b)
+                continue;
+            const Planar steadyFrom = render (a, a), steadyTo = render (b, b), jump = render (a, b);
+            for (size_t c = 0; c < 2; ++c)
+            {
+                const double bound = std::max (maxCurvature (steadyFrom.ch[c], 6000, 6000), maxCurvature (steadyTo.ch[c], 18000, 6000));
+                const double got = maxCurvature (jump.ch[c], change - 100, 9600);
+                worst = std::max (worst, got / bound);
+                CHECK_LE (got, 2.0 * bound);
+            }
+        }
+    std::printf ("    measured chain crossfeed type switches: largest curvature %.3f x the steady renders' (limit 2)\n", worst);
+
+    // Crossfeed 0 (every factory preset but four), or Gaming mode (crossfeed
+    // forced off): the type changes nothing, bit for bit.
+    const auto l = whiteNoise (n, 0.25f, 7u), r = darkNoise (n, 0.25f, 8u);
+    for (const bool gaming : { false, true })
+    {
+        std::vector<Planar> outs;
+        for (const auto type : kTypes)
+        {
+            ParameterStore s;
+            crossfeedOnly (s, gaming ? 1.0f : 0.0f, type);
+            s.set (Mode, static_cast<float> (gaming ? ModeValue::Gaming : ModeValue::Music));
+            Planar buf = stereo (l, r);
+            renderChain (s, buf);
+            outs.push_back (buf);
+        }
+        CHECK (identical (outs[0], outs[1]));
+        CHECK (identical (outs[0], outs[2]));
+    }
 }

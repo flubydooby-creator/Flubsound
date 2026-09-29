@@ -397,7 +397,9 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
     store.snapshot (base.data());
     baseAtPrepare = base;
-    MacroMap::apply (base.data(), effective.data(), 1.0f);
+    onboardCap = onboardCapRequest.load (std::memory_order_relaxed) ? 1.0f : 0.0f; // docs/11 E16: nothing heard yet, no glide
+    onboardCapSnap = true;
+    MacroMap::apply (base.data(), effective.data(), 1.0f, onboardCap);
     publishEffective();
     const float* e = effective.data();
 
@@ -582,6 +584,7 @@ void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexc
     // engine a little later (the app's onEngineConfigured is asynchronous).
     setProtectionStrength (previous.getProtectionStrength());
     governor.setStrength (previous.getProtectionStrength()); // before its first block: not yet on the audio thread
+    setOnboardEnhancementCap (previous.getOnboardEnhancementCap()); // docs/11 E16, taken at once on the first block
     SafetyGovernor::Memory m;
     if (previous.governorMemory.read (m) && m.valid)
         governor.restoreMemory (m);
@@ -685,7 +688,7 @@ void ProcessingChain::applyParameters() noexcept
             governedBase[static_cast<size_t> (id)] *= governorScale;
         governed = governedBase.data();
     }
-    MacroMap::apply (governed, effective.data(), governorScale);
+    MacroMap::apply (governed, effective.data(), governorScale, onboardCap);
     float* e = effective.data();
     // The measured loop (Normal / Strict, docs/11 E06 Phase 3): its own
     // scale on the bass harmonics, the budgets of the mode, Small Speaker
@@ -704,7 +707,7 @@ void ProcessingChain::applyParameters() noexcept
         std::copy (base.begin(), base.end(), quarterBase.begin());
         for (int id : { MaxDriveDb, SatDriveDb, BassHarmonics })
             quarterBase[static_cast<size_t> (id)] *= 0.25f;
-        MacroMap::apply (quarterBase.data(), quarterScale.data(), 0.25f);
+        MacroMap::apply (quarterBase.data(), quarterScale.data(), 0.25f, onboardCap);
         driveAtFullScale = 4.0f * quarterScale[static_cast<size_t> (MaxDriveDb)];
     }
     if (strength == ProtectionStrength::Off)
@@ -906,6 +909,9 @@ void ProcessingChain::applyParameters() noexcept
     wp.positionalFocus = e[SpatialFocus];
     wp.space = e[SpatialSpace];
     wp.crossfeed = e[SpatialCrossfeed];
+    // CrossfeedTypeValue is in CrossfeedType's order; a type change fades
+    // the crossfeed in the spatializer (the old model out, the new one in).
+    wp.crossfeedType = static_cast<CrossfeedType> (std::clamp (idx (e, SpatialCrossfeedType), 0, static_cast<int> (CrossfeedTypeValue::MonoSafe)));
     wp.autoMonoSafety = on (e, SpatialMonoSafety);
     wp.minCorrelation = e[SpatialMinCorrelation];
     spatial.setParams (wp);
@@ -1011,7 +1017,7 @@ void ProcessingChain::applyParameters() noexcept
     const float* h = e;
     if (governorScale < 1.0f || tonalScale < 1.0f)
     {
-        MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
+        MacroMap::apply (base.data(), ungoverned.data(), 1.0f, onboardCap);
         std::copy (effective.begin(), effective.end(), headroomInput.begin());
         for (int id : { BassBoostDb, ClarityPresence, ClarityAir })
             headroomInput[static_cast<size_t> (id)] = ungoverned[static_cast<size_t> (id)];
@@ -1612,6 +1618,18 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         outLoudness.resetIntegrated();
         outTruePeak.reset();
     }
+    // The on-board enhancement cap (docs/11 E16) glides like a macro knob
+    // turned over kOnboardCapGlideMs (the modules smooth what it moves).
+    const float capTarget = onboardCapRequest.load (std::memory_order_relaxed) ? 1.0f : 0.0f;
+    if (onboardCapSnap)
+        onboardCap = capTarget;
+    else if (onboardCap != capTarget)
+    {
+        const float step = static_cast<float> (n / (0.001 * kOnboardCapGlideMs * config.sampleRate));
+        onboardCap = capTarget > onboardCap ? std::min (capTarget, onboardCap + step) : std::max (capTarget, onboardCap - step);
+    }
+    onboardCapSnap = false;
+    meterBus.onboardCapActive.store (onboardCap > 0.0f, std::memory_order_relaxed);
     applyParameters();
     headroomHoldoff = std::max (0, headroomHoldoff - n);
     const float* e = effective.data();

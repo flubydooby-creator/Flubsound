@@ -92,6 +92,11 @@ struct MeterBus
 
     /** GUI -> audio: request integrated loudness / TP-hold reset. */
     std::atomic<bool> resetLoudnessRequest { false };
+
+    // The on-board enhancement cap (docs/11 E16, ProcessingChain::
+    // setOnboardEnhancementCap): true while it caps Footsteps / Detail and
+    // holds the virtualiser off, including its glide in and out.
+    std::atomic<bool> onboardCapActive { false };
 };
 
 struct AnalyzerTaps

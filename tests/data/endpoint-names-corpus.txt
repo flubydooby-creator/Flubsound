@@ -1,0 +1,164 @@
+# Endpoint-name regression corpus for device::Database::match (docs/11 E16),
+# read by tests/test_device_profiles.cpp.
+#
+# One entry per line: kind | expected profile id ("-" = no profile) | endpoint name
+#   headset       a headset of a family the database knows: the expected family
+#   other-headset a headset (or earbuds) of a vendor without a profile: no match
+#   nonheadset    speakers, monitors, TVs, virtual devices: no match
+#
+# Names as the platforms report them: Windows endpoint names ("<form factor>
+# (<device>)", with the "2- " prefix Windows adds after a re-plug), macOS
+# device names, PipeWire / ALSA node names and descriptions. The owner's
+# Windows 11 Turtle Beach strings come first. Blank lines and # comments are ignored.
+
+# ---- Turtle Beach Stealth (the owner's headsets on Windows 11 first) ----
+headset | turtle-beach-stealth | Headphones (Turtle Beach Stealth 700 Gen 2 MAX)
+headset | turtle-beach-stealth | Headset Earphone (2- Stealth 700 Gen 2)
+headset | turtle-beach-stealth | Headphones (Stealth 700 Gen 2 MAX)
+headset | turtle-beach-stealth | Headset Earphone (Stealth 700 Gen 2 MAX Game)
+headset | turtle-beach-stealth | Headset Earphone (Stealth 700 Gen 2 MAX Chat)
+headset | turtle-beach-stealth | Headset (Stealth 700 Gen 2 MAX Hands-Free AG Audio)
+headset | turtle-beach-stealth | Speakers (Turtle Beach Stealth Pro)
+headset | turtle-beach-stealth | Speakers (2- Stealth Pro Xbox)
+headset | turtle-beach-stealth | Stealth Pro
+headset | turtle-beach-stealth | Headset Earphone (Stealth 600 Gen 3)
+headset | turtle-beach-stealth | Headset (Stealth 600 Gen 3 Hands-Free AG Audio)
+headset | turtle-beach-stealth | Headset Earphone (Stealth 600 Gen 2 MAX for Xbox)
+headset | turtle-beach-stealth | Speakers (Stealth 600X Gen 2 USB Transmitter)
+headset | turtle-beach-stealth | Headphones (Stealth 700P Gen 2)
+headset | turtle-beach-stealth | Headphones (3- Stealth 500)
+headset | turtle-beach-stealth | Headphones (Stealth 500P)
+headset | turtle-beach-stealth | Speakers (Stealth 300)
+headset | turtle-beach-stealth | Headset Earphone (Stealth 450)
+headset | turtle-beach-stealth | Speakers (Stealth 350VR)
+headset | turtle-beach-stealth | Headphones (Stealth 420X)
+headset | turtle-beach-stealth | Headset (Turtle Beach Stealth)
+headset | turtle-beach-stealth | Headphones (Stealth)
+headset | turtle-beach-stealth | Stealth 700 Gen 2 MAX
+headset | turtle-beach-stealth | Stealth 600 Gen 2 MAX Analog Stereo
+headset | turtle-beach-stealth | alsa_output.usb-Turtle_Beach_Stealth_700_Gen_2_MAX-00.analog-stereo
+headset | turtle-beach-stealth | Stealth Pro (bluez_output.AA_BB_CC_DD_EE_FF.a2dp-sink)
+
+# ---- Turtle Beach Recon ----
+headset | turtle-beach-recon | Headphones (Recon 200 Gen 2)
+headset | turtle-beach-recon | Speakers (Recon 500)
+headset | turtle-beach-recon | Headset Earphone (Recon 70)
+headset | turtle-beach-recon | Headphones (Recon 50)
+headset | turtle-beach-recon | Recon Spark
+headset | turtle-beach-recon | Headset (Turtle Beach Recon)
+headset | turtle-beach-recon | Headphones (Recon)
+
+# ---- Turtle Beach Atlas ----
+headset | turtle-beach-atlas | Turtle Beach Elite Atlas Aero
+headset | turtle-beach-atlas | Headphones (Elite Atlas Aero)
+headset | turtle-beach-atlas | Headset Earphone (Atlas Air)
+headset | turtle-beach-atlas | Speakers (Atlas Three)
+headset | turtle-beach-atlas | Headphones (Atlas One)
+headset | turtle-beach-atlas | Headphones (Atlas)
+headset | turtle-beach-atlas | Speakers (Turtle Beach Atlas)
+
+# ---- Turtle Beach Elite Pro ----
+headset | turtle-beach-elite-pro | Speakers (Elite Pro 2 + SuperAmp)
+headset | turtle-beach-elite-pro | Headset Earphone (Turtle Beach Elite Pro 2)
+headset | turtle-beach-elite-pro | Headphones (Elite Pro)
+headset | turtle-beach-elite-pro | Speakers (Elite Pro - Tactical Audio Controller)
+
+# ---- Turtle Beach, family unknown ----
+headset | turtle-beach-generic | Speakers (Turtle Beach Ear Force Z60)
+headset | turtle-beach-generic | Headset (Turtle Beach USB Audio)
+headset | turtle-beach-generic | Voyetra Turtle Beach USB Audio
+headset | turtle-beach-generic | Headphones (TurtleBeach Headset)
+headset | turtle-beach-generic | Speakers (Ear Force XO Seven)
+
+# ---- Turtle Beach controllers (headset in the controller's jack) ----
+headset | turtle-beach-controller | Headset Earphone (Recon Controller)
+headset | turtle-beach-controller | Headset Earphone (Turtle Beach Recon Cloud)
+headset | turtle-beach-controller | Headphones (Stealth Ultra)
+
+# ---- ROCCAT (a Turtle Beach brand) ----
+headset | turtle-beach-roccat | ROCCAT Syn Pro Air
+headset | turtle-beach-roccat | Headphones (Syn Max Air)
+headset | turtle-beach-roccat | Headset Earphone (ROCCAT Elo 7.1 Air)
+headset | turtle-beach-roccat | Speakers (Elo X Stereo)
+headset | turtle-beach-roccat | Headphones (Syn Buds Core)
+
+# ---- PDP (a Turtle Beach brand) ----
+headset | turtle-beach-pdp | Headphones (PDP Airlite Pro Wireless)
+headset | turtle-beach-pdp | Speakers (Victrix Gambit Headset)
+headset | turtle-beach-pdp | Headset (LVL50 Wireless)
+headset | turtle-beach-pdp | Headphones (LVL40 Wired)
+headset | turtle-beach-pdp | Headset Earphone (PDP Wired Headset)
+headset | turtle-beach-pdp | Headset Earphone (Airlite)
+
+# ---- Xbox Wireless adapter and Xbox controllers ----
+headset | xbox-wireless-headset | Headset Earphone (Xbox Wireless Headset)
+headset | xbox-wireless-headset | Speakers (Xbox Wireless Adapter)
+headset | xbox-wireless-headset | Headphones (Xbox Wireless Adapter for Windows)
+headset | xbox-controller-headset | Headset Earphone (Xbox Controller)
+headset | xbox-controller-headset | Headset Earphone (2- Xbox Controller)
+headset | xbox-controller-headset | Headset Earphone (Xbox Wireless Controller)
+
+# ---- Other vendors' headsets: no Turtle Beach family ----
+other-headset | - | Headphones (Jabra Elite Pro)
+other-headset | - | Headphones (Jabra Elite 85t)
+other-headset | - | Headset Earphone (Razer BlackShark V2 Pro)
+other-headset | - | Headphones (Razer Barracuda X)
+other-headset | - | Headphones (Razer Kaira Pro for Xbox)
+other-headset | - | Speakers (Logitech G Pro X Wireless)
+other-headset | - | Headphones (SteelSeries Arctis Nova Pro Wireless)
+other-headset | - | Headset Earphone (HyperX Cloud Alpha Wireless)
+other-headset | - | Speakers (Corsair HS80 RGB Wireless)
+other-headset | - | Headphones (WH-1000XM5)
+other-headset | - | Headphones (Bose QC35 II)
+other-headset | - | Headphones (Sennheiser HD 450BT)
+other-headset | - | Headset (EPOS H6PRO)
+other-headset | - | AirPods Pro
+other-headset | - | Headphones (Galaxy Buds2 Pro)
+other-headset | - | Headphones (Astro A50)
+other-headset | - | Headphones (Poly Voyager Focus 2)
+other-headset | - | Headphones (Victrixx)
+other-headset | - | Headphones (Wireless Headset)
+
+# ---- Not headsets ----
+nonheadset | - | Atlas Sound Ceiling Speaker
+nonheadset | - | Speakers (Atlas Sound DPA-Series)
+nonheadset | - | Speakers (Atlas Portable Speaker)
+nonheadset | - | Atlas Soundbar
+nonheadset | - | Atlas Monitor (HDMI)
+nonheadset | - | Atlas Home Theater Receiver
+nonheadset | - | Stealth Soundbar
+nonheadset | - | Stealth TV (HDMI)
+nonheadset | - | Stealth 4K Projector
+nonheadset | - | Stealth Cam Audio
+nonheadset | - | Stealthy Mic
+nonheadset | - | Razer Blade Stealth Speakers
+nonheadset | - | Recon Ceiling Speaker
+nonheadset | - | Recon Surround Sound System
+nonheadset | - | Reconnect Audio
+nonheadset | - | PDP Monitor Speaker
+nonheadset | - | PDP Guitar Controller Audio
+nonheadset | - | Elite Pro Soundbar
+nonheadset | - | Elite Speakers
+nonheadset | - | Airliner Lounge Speakers
+nonheadset | - | Speakers (Realtek(R) Audio)
+nonheadset | - | Speakers (Realtek High Definition Audio)
+nonheadset | - | Realtek Digital Output (Realtek(R) Audio)
+nonheadset | - | Digital Audio (S/PDIF) (High Definition Audio Device)
+nonheadset | - | LG TV SSCR2 (NVIDIA High Definition Audio)
+nonheadset | - | Samsung Q70 Series (NVIDIA High Definition Audio)
+nonheadset | - | DELL U2723QE (NVIDIA High Definition Audio)
+nonheadset | - | LG ULTRAGEAR (NVIDIA High Definition Audio)
+nonheadset | - | HDMI / DisplayPort Audio
+nonheadset | - | Speakers (Logitech Z623)
+nonheadset | - | Speakers (Bose SoundLink Flex)
+nonheadset | - | Speakers (JBL Flip 6)
+nonheadset | - | Samsung Soundbar Q990B
+nonheadset | - | Speakers (Steam Streaming Speakers)
+nonheadset | - | CABLE Input (VB-Audio Virtual Cable)
+nonheadset | - | Voicemeeter Input (VB-Audio Voicemeeter VAIO)
+nonheadset | - | Speakers (USB Audio Device)
+nonheadset | - | Speakers (Focusrite USB Audio)
+nonheadset | - | MacBook Pro Speakers
+nonheadset | - | Built-in Output
+nonheadset | - | Built-in Audio Analog Stereo
+nonheadset | - | alsa_output.pci-0000_00_1f.3.analog-stereo

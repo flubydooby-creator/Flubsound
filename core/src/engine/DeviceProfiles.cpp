@@ -63,6 +63,21 @@ bool containsToken (const std::string& haystack, const std::string& token)
     const std::string h = " " + haystack + " ";
     return h.find (" " + token + " ") != std::string::npos;
 }
+
+bool containsAny (const std::string& haystack, const std::vector<std::string>& tokens)
+{
+    return std::any_of (tokens.begin(), tokens.end(), [&] (const std::string& t) { return containsToken (haystack, t); });
+}
+
+/** The strings of a JSON array, normalised; empty ones and non-strings left out. */
+std::vector<std::string> normalisedWords (const json::Value& array)
+{
+    std::vector<std::string> out;
+    for (const auto& t : array.asArray())
+        if (std::string w = normalise (t.asString()); ! w.empty())
+            out.push_back (std::move (w));
+    return out;
+}
 } // namespace
 
 Connection detectConnection (const std::string& endpointName, double sampleRate, int outputChannels, Connection platformHint)
@@ -118,12 +133,18 @@ bool Database::load (const json::Value& root, std::string& error)
         p.vendor = v["vendor"].asString();
         p.family = v["family"].asString();
         p.displayName = v["displayName"].asString();
+        // A token is a string, or {"token": ..., "generic": true} (docs/11 E16).
         for (const auto& t : v["matchAny"].asArray())
-            if (t.isString())
-                p.matchAny.push_back (normalise (t.asString()));
-        for (const auto& t : v["exclude"].asArray())
-            if (t.isString())
-                p.exclude.push_back (normalise (t.asString()));
+        {
+            const std::string token = normalise (t.isObject() ? t["token"].asString() : t.asString());
+            if (token.empty())
+                continue;
+            p.matchAny.push_back (token);
+            if (t.isObject() && t["generic"].asBool (false))
+                p.generic.push_back (token);
+        }
+        p.exclude = normalisedWords (v["exclude"]);
+        p.vendorWords = normalisedWords (v["vendorWords"]);
         // Clamped before the casts (a user file may hold any number; found by
         // tests/fuzz/fuzz_state): out-of-range double -> int / float is UB, and
         // match() scores specificity * 1000 in an int. Shipped values are 1..3
@@ -149,6 +170,9 @@ bool Database::load (const json::Value& root, std::string& error)
         loaded.push_back (std::move (p));
     }
     entries = std::move (loaded);
+    headsetClass = normalisedWords (root["headsetWords"]);
+    speakerClass = normalisedWords (root["speakerWords"]);
+    otherVendors = normalisedWords (root["otherVendorWords"]);
     return true;
 }
 
@@ -182,13 +206,23 @@ Match Database::match (const std::string& endpointName, double sampleRate, int o
     best.connection = detectConnection (endpointName, sampleRate, outputChannels, platformHint);
     const std::string n = normalise (endpointName);
 
+    // Generic tokens (docs/11 E16): an ordinary word ("atlas", "stealth")
+    // needs a vendor or headset-class word beside it and no speaker-class
+    // word ("Atlas Sound Ceiling Speaker"); another vendor's name vetoes it
+    // unless the profile's own vendor is named too ("Jabra Elite Pro").
+    const bool headsetWord = containsAny (n, headsetClass);
+    const bool speakerWord = containsAny (n, speakerClass);
+    const bool otherVendor = containsAny (n, otherVendors);
+
     for (const auto& p : entries)
     {
-        if (std::any_of (p.exclude.begin(), p.exclude.end(), [&] (const std::string& t) { return containsToken (n, t); }))
+        if (containsAny (n, p.exclude))
             continue;
+        const bool ownVendor = containsAny (n, p.vendorWords);
+        const bool genericCounts = ! speakerWord && (ownVendor || (headsetWord && ! otherVendor));
         int longest = 0;
         for (const auto& t : p.matchAny)
-            if (containsToken (n, t))
+            if (containsToken (n, t) && (genericCounts || std::find (p.generic.begin(), p.generic.end(), t) == p.generic.end()))
                 longest = std::max (longest, static_cast<int> (t.size()));
         if (longest == 0)
             continue;
