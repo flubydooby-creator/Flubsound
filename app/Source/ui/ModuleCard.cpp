@@ -1,6 +1,7 @@
 #include "ModuleCard.h"
 
 #include "EqCurveEditor.h"
+#include "ParamHints.h"
 #include "Theme.h"
 
 namespace flub::app::ui
@@ -76,7 +77,8 @@ ModuleCard::ModuleCard (const ModuleDescriptor& d, ParameterBinder& b)
     setDescription (descriptor.blurb);
 
     Style::set (power, "power");
-    Style::describe (power, descriptor.name + " on / off", "Switch " + descriptor.name + " on or off (click-free)");
+    Style::describe (power, descriptor.name + " on / off",
+                     ParamHints::get (descriptor.enableId, ModeValue::Music) + " Click to switch it on or off (click-free).");
     binder.bindToggle (power, descriptor.enableId);
     addAndMakeVisible (power);
 
@@ -171,8 +173,10 @@ void ModuleCard::bindKeys()
         const auto& key = descriptor.keys[i];
         const int id = resolve (key);
         auto* c = keyControls[i].get();
-        const auto tip = juce::String (ParamFormat::info (id).name)
-                         + (key.independent ? " (works with " + descriptor.name + " switched off too)" : juce::String());
+        // The plain-language hint (docs/11 E39); the module cards hold no
+        // mode-dependent keys, so the Music text is the one for both modes.
+        const auto tip = ParamHints::tooltip (id, ModeValue::Music)
+                         + (key.independent ? " Works with " + descriptor.name + " switched off too." : juce::String());
         if (auto* knob = dynamic_cast<ParamKnob*> (c))
         {
             binder.bindSlider (knob->slider, id);
@@ -186,6 +190,7 @@ void ModuleCard::bindKeys()
         else if (auto* toggle = dynamic_cast<juce::ToggleButton*> (c))
         {
             toggle->setTitle (juce::String (ParamFormat::info (id).name));
+            toggle->setTooltip (tip);
             binder.bindToggle (*toggle, id);
         }
     }

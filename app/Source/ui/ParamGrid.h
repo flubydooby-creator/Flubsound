@@ -7,7 +7,7 @@
 //   the band prefix removed from the captions. The layout flows left to
 //   right and wraps; getHeightForWidth() lets a Viewport size it.
 // Controls are bound through the owner's ParameterBinder (and unbound again
-// when the grid is destroyed).
+// when the grid is destroyed); each has its ParamHints tooltip (docs/11 E39).
 #pragma once
 
 #include "ParamKnob.h"

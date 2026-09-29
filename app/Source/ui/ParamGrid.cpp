@@ -1,5 +1,6 @@
 #include "ParamGrid.h"
 
+#include "ParamHints.h"
 #include "Theme.h"
 #include "Widgets.h"
 
@@ -55,6 +56,9 @@ std::vector<int> ParamGrid::idsForGroup (const juce::String& group)
 ParamGrid::ParamGrid (ParameterBinder& b, const std::vector<int>& paramIds)
     : binder (b)
 {
+    // Tooltips: the plain-language hint of each parameter (docs/11 E39), in the strip's mode.
+    const auto* store = binder.getStore();
+    const auto mode = store != nullptr && store->get (flub::param::Mode) >= 0.5f ? flub::param::ModeValue::Gaming : flub::param::ModeValue::Music;
     for (const int id : paramIds)
     {
         const auto& info = ParamFormat::info (id);
@@ -79,6 +83,7 @@ ParamGrid::ParamGrid (ParameterBinder& b, const std::vector<int>& paramIds)
             Style::set (*t, "switch");
             t->setTitle (juce::String (info.name));
             binder.bindToggle (*t, id);
+            t->setTooltip (ParamHints::tooltip (id, mode));
             cell.width = juce::jlimit (96, 190, static_cast<int> (juce::GlyphArrangement::getStringWidth (Theme::font (13.0f), label)) + 52);
             cell.control = std::move (t);
         }
@@ -87,6 +92,7 @@ ParamGrid::ParamGrid (ParameterBinder& b, const std::vector<int>& paramIds)
             auto c = std::make_unique<juce::ComboBox>();
             c->setTitle (juce::String (info.name));
             binder.bindChoice (*c, id);
+            c->setTooltip (ParamHints::tooltip (id, mode));
             cell.caption = label;
             cell.width = 126;
             cell.control = std::move (c);
@@ -95,6 +101,7 @@ ParamGrid::ParamGrid (ParameterBinder& b, const std::vector<int>& paramIds)
         {
             auto k = std::make_unique<ParamKnob> (label, ParamKnob::Size::Small);
             binder.bindSlider (k->slider, id);
+            k->slider.setTooltip (ParamHints::tooltip (id, mode));
             cell.width = 80;
             cell.control = std::move (k);
         }

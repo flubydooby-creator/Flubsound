@@ -1,6 +1,7 @@
 #include "BoostPanel.h"
 
 #include "FlubLookAndFeel.h"
+#include "ParamHints.h"
 #include "Theme.h"
 
 #include <algorithm>
@@ -17,21 +18,6 @@ const juce::String kDot { juce::CharPointer_UTF8 (" \xc2\xb7 ") };
 juce::String percent (float v01)
 {
     return juce::String (juce::roundToInt (v01 * 100.0f)) + "%";
-}
-
-const char* macroTip (ModeValue mode, int index)
-{
-    static const char* music[] = { "Punch: transient attack and impact", "Width: stereo width and a sense of space",
-                                   "Clarity: presence, air and de-mud (with dynamic de-harsh)",
-                                   "Loudness: maximizer drive and multiband glue (safety governed)",
-                                   "Warmth: tape saturation and harmonic bass (safety governed)" };
-    static const char* gaming[] = { "Footsteps: lifts cues (steps, reloads) as they rise out of the ambience",
-                                    "Positional: sharpens left / right / front / back placement",
-                                    "Impact: weight for explosions and gunshots (safety governed)",
-                                    "Detail: brings up quiet ambience and distant cues (upward compression)",
-                                    "Voice & Score: dialogue, comms and music intelligibility" };
-    index = juce::jlimit (0, 4, index);
-    return mode == ModeValue::Gaming ? gaming[index] : music[index];
 }
 } // namespace
 
@@ -189,12 +175,14 @@ BoostPanel::BoostPanel (EngineController& c)
 void BoostPanel::setMode (ModeValue newMode)
 {
     mode = newMode;
+    dial.setTooltip (ParamHints::tooltip (BoostIntensity, mode));
     for (size_t i = 0; i < macros.size(); ++i)
     {
         const auto name = EngineController::getMacroName (mode, static_cast<int> (i));
         macros[i].setLabel (name);
         macros[i].slider.setTitle (name);
-        macros[i].slider.setTooltip (macroTip (mode, static_cast<int> (i)));
+        // The plain-language hint of the macro in this mode (docs/11 E39).
+        macros[i].slider.setTooltip (ParamHints::get (Macro1 + static_cast<int> (i), mode));
     }
     repaint();
 }
