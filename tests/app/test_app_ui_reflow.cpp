@@ -198,12 +198,15 @@ TEST_CASE ("App UI: the tray flyout's Boost, preset stepper, Bypass and open but
     CHECK (std::abs (controller.getBoost() - 0.8f) < 1.0e-4f);
     CHECK (flyout.getBoostSlider().getTooltip().startsWith ("Boost Intensity: "));
 
-    const auto before = controller.getCurrentPresetId();
+    const auto start = controller.getCurrentPresetId();
     flyout.getNextButton().triggerClick();
-    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getCurrentPresetId() != before; }, 2000));
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getCurrentPresetId() != start; }, 2000));
+    const auto first = controller.getCurrentPresetId();
     CHECK (flyout.getPresetText().startsWith (controller.getCurrentPresetName()));
+    flyout.getNextButton().triggerClick();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getCurrentPresetId() != first; }, 2000));
     flyout.getPreviousButton().triggerClick();
-    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getCurrentPresetId() == before; }, 2000));
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getCurrentPresetId() == first; }, 2000));
 
     flyout.getBypassButton().triggerClick();
     REQUIRE (flubapptest::pumpMessagesUntil ([&] { return ! controller.isEnabled(); }, 2000));
@@ -255,7 +258,7 @@ TEST_CASE ("App UI: the protection readouts quote the budgets the chain runs wit
     CHECK (ui::LoudnessPanel::formatPlr (9.14f, 8.0f) == "9.1 / 8");
     CHECK (ui::LoudnessPanel::formatPlr (9.14f, 0.0f) == "9.1");
     CHECK (ui::LoudnessPanel::formatPlr (flub::MeterBus::governorNoReading, 8.0f) == "--");
-    CHECK (ui::LoudnessPanel::formatBrightness ({ 1.2f, -0.4f, 0.0f }) == "+1.2 -0.4 +0.0");
+    CHECK (ui::LoudnessPanel::formatBrightness ({ 1.2f, -0.4f, 0.0f }) == "+1.2 -0.4 0.0");
     CHECK (ui::LoudnessPanel::formatBrightness ({ -160.0f, 0.0f, 0.0f }) == "--");
 
     // End to end: Club Loud at Boost 100 and protection Normal, 4 s of music.

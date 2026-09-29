@@ -33,6 +33,10 @@
 //   * kick onset: Punch 100 lift at 0-10 ms against 10-30 ms, Tighten 0.5's
 //     change of the first 10 ms (closed by E04 step 2), onset against body
 //     at Boost 80 / 100 (E04, E05)
+//   * bass-line pumping: a 32 Hz line under 55 Hz kicks through Bass Head,
+//     as shipped and with split-band protection (E02 (a)); the subsonic
+//     slice: Bass Head's 40 Hz group delay, the gaming presets' subsonic
+//     cost at 28 Hz (E02)
 //   * 30 Hz audible-band (>= 120 Hz) energy of the laptop preset (E03; closed
 //     by the preset slice, kept as its regression test)
 //   * 3 kHz ILD added by Positional Focus (E24; closed by its 3 dB cap)
@@ -1221,6 +1225,154 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     CHECK_GE (b0 - b1, 0.0);
     CHECK_NEAR (c0 - c1, 0.23, 0.3);
     CHECK_GE (c0 - c1, 0.0);
+}
+
+namespace
+{
+/** 55 Hz kicks (peak 0.5, tau 100 ms, 350 ms) every 0.5 + 1/128 s under a
+    32 Hz line: the line turns a quarter cycle per kick period, so averaging
+    four periods cancels the kicks' own 32 Hz content (lineGainSpreadDb). */
+constexpr double kLineKickPeriod = 0.5 + 1.0 / 128.0;
+
+std::vector<float> lineUnderKicks (double lineAmp, int n)
+{
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t, kLineKickPeriod);
+        const double kick = beat < 0.35 ? 0.5 * std::exp (-beat / 0.1) * std::sin (kTwoPi * 55.0 * beat) : 0.0;
+        x[static_cast<size_t> (i)] = static_cast<float> (lineAmp * std::sin (kTwoPi * 32.0 * t) + kick);
+    }
+    return x;
+}
+
+/** The 32 Hz line's level over one kick period (every 0.5 ms, dB): demodulated
+    at 32 Hz, averaged over one line cycle and four kick periods from `from`. */
+std::vector<double> lineLevelTrack (const std::vector<float>& y, double from)
+{
+    const int period = static_cast<int> (std::lround (kLineKickPeriod * kFs)), cycle = static_cast<int> (std::lround (kFs / 32.0));
+    const int s0 = samplesOf (from);
+    std::vector<double> re (y.size()), im (y.size());
+    double accRe = 0.0, accIm = 0.0;
+    for (size_t i = 0; i < y.size(); ++i)
+    {
+        const double a = kTwoPi * 32.0 * static_cast<double> (i) / kFs;
+        accRe += y[i] * std::cos (a);
+        accIm -= y[i] * std::sin (a);
+        if (i >= static_cast<size_t> (cycle))
+        {
+            const size_t j = i - static_cast<size_t> (cycle);
+            const double b = kTwoPi * 32.0 * static_cast<double> (j) / kFs;
+            accRe -= y[j] * std::cos (b);
+            accIm += y[j] * std::sin (b);
+        }
+        re[i] = accRe;
+        im[i] = accIm;
+    }
+    std::vector<double> track;
+    for (int tau = 0; tau < period; tau += 24)
+    {
+        double r = 0.0, q = 0.0;
+        for (int k = 0; k < 4; ++k)
+        {
+            r += re[static_cast<size_t> (s0 + k * period + tau)];
+            q += im[static_cast<size_t> (s0 + k * period + tau)];
+        }
+        track.push_back (20.0 * std::log10 (std::max (1.0e-12, std::hypot (r, q))));
+    }
+    return track;
+}
+
+/** Peak-to-peak (dB) of the line's gain (out track - in track) over the kick period. */
+double lineGainSpreadDb (const std::vector<float>& in, const std::vector<float>& out)
+{
+    const auto a = lineLevelTrack (in, 3.5), b = lineLevelTrack (out, 3.5);
+    double lo = 1.0e9, hi = -1.0e9;
+    for (size_t k = 0; k < a.size(); ++k)
+    {
+        lo = std::min (lo, b[k] - a[k]);
+        hi = std::max (hi, b[k] - a[k]);
+    }
+    return hi - lo;
+}
+
+/** Complex gain of the rendered left channel at f over 2..3 s for a sine at `amp`. */
+std::pair<double, double> toneResponse (const std::vector<float>& values, double f, double amp)
+{
+    const auto x = sine (f, kFs, samplesOf (3.0), static_cast<float> (amp));
+    const auto y = render (stereoOf (x), values)[0];
+    double yr = 0.0, yi = 0.0, xr = 0.0, xi = 0.0;
+    for (int i = samplesOf (2.0); i < samplesOf (3.0); ++i)
+    {
+        const double c = std::cos (kTwoPi * f * i / kFs), s = std::sin (kTwoPi * f * i / kFs);
+        yr += y[static_cast<size_t> (i)] * c;
+        yi -= y[static_cast<size_t> (i)] * s;
+        xr += x[static_cast<size_t> (i)] * c;
+        xi -= x[static_cast<size_t> (i)] * s;
+    }
+    return { 20.0 * std::log10 (std::hypot (yr, yi) / std::hypot (xr, xi)), std::atan2 (yi, yr) - std::atan2 (xi, xr) };
+}
+} // namespace
+
+TEST_CASE ("KnownGap: bass-line pumping - a 32 Hz line under 55 Hz kicks through Bass Head moves with the kicks; split-band protection holds it (E02 (a))")
+{
+    // A 32 Hz line at -18 dBFS under 55 Hz kicks at -6 dBFS (~500 ms):
+    // the peak-to-peak of the line's gain over the kick period, Bass Head as
+    // shipped and with bass.splitProtect (docs/11 E02 (a), off by default:
+    // turning it on in a factory preset is a voicing decision).
+    const int n = samplesOf (5.8);
+    const auto x = lineUnderKicks (0.125, n);
+    auto shipped = resolve (factoryPreset ("music-bass-head.json"));
+    auto split = shipped;
+    setValue (split, BassSplitProtect, 1.0f);
+    const double asShipped = lineGainSpreadDb (x, render (stereoOf (x), shipped)[0]);
+    const double withSplit = lineGainSpreadDb (x, render (stereoOf (x), split)[0]);
+    measured ("Bass Head 32 Hz line modulation under 55 Hz kicks, as shipped", asShipped, "dB");
+    measured ("Bass Head 32 Hz line modulation under 55 Hz kicks, bass.splitProtect on", withSplit, "dB");
+    // KNOWN_GAP: target <= 1 dB per docs/11 E02 (Bass Head settings). The
+    // bass engine's protection alone goes 3.7 -> 0.0 dB with the split
+    // (test_bass_engine.cpp) and Bass Head's whole engine 3.4 -> 1.8 dB; what
+    // is left comes from Tighten (E04) and the harmonics generator (E03),
+    // about 1 dB each, and from the chain after them (Punch's transient
+    // shaper, the glue and the maximizer at Boost 45 %).
+    CHECK_NEAR (asShipped, 5.07, 0.3);
+    CHECK_NEAR (withSplit, 2.95, 0.3);
+    CHECK_LE (withSplit, asShipped - 1.0);
+}
+
+TEST_CASE ("KnownGap: subsonic slice - Bass Head's 40 Hz group delay, and the gaming presets lose <= 3 dB at 28 Hz to their subsonic filter (E02)")
+{
+    // Group delay at 40 Hz from the phase of 39 / 41 Hz sines at -40 dBFS
+    // (rendered latency-compensated, so the chain's own latency is not in
+    // it). Before the slice Bass Head ran a 4th-order subsonic at 25 Hz:
+    // 18.68 ms; with the 2nd order at the 20 Hz default 13.82 ms. KNOWN_GAP:
+    // target <= 11 ms per docs/11 E02: the rest is the mono-bass LR4 at
+    // 110 Hz (4.6 ms) and the glue split's LR4 at 120 Hz (Boost 45 %), which
+    // only a shared crossover (E02 (b)) or arming the split with glue alone
+    // (E05's open decision) would remove.
+    const auto head = resolve (factoryPreset ("music-bass-head.json"));
+    const auto [g39, p39] = toneResponse (head, 39.0, 0.01);
+    const auto [g41, p41] = toneResponse (head, 41.0, 0.01);
+    const double gd = -std::remainder (p41 - p39, kTwoPi) / (kTwoPi * 2.0) * 1000.0;
+    measured ("Bass Head 40 Hz group delay", gd, "ms");
+    CHECK_NEAR (gd, 13.82, 0.3);
+    (void) g39;
+    (void) g41;
+
+    // 28 Hz: what the subsonic filter itself costs (the preset against the
+    // same preset with bass.subsonic 0; their EQ is not the filter's).
+    // Closed by the slice: 4th order at 28 / 30 Hz -3.0 / -4.4 dB -> 2nd
+    // order at 20 Hz -1.0 dB (docs/11 E02: within 3 dB).
+    for (const char* file : { "gaming-battle-royale.json", "gaming-competitive-fps.json" })
+    {
+        const auto preset = resolve (factoryPreset (file));
+        auto noSubsonic = preset;
+        setValue (noSubsonic, BassSubsonic, 0.0f);
+        const double cost = toneResponse (preset, 28.0, 0.01).first - toneResponse (noSubsonic, 28.0, 0.01).first;
+        measured (std::string (file) + " subsonic cost at 28 Hz", cost, "dB");
+        CHECK_GE (cost, -3.0);
+        CHECK_NEAR (cost, -1.0, 0.3);
+    }
 }
 
 TEST_CASE ("KnownGap closed: 30 Hz audible-band energy - the laptop preset keeps the harmonics of a 30 Hz tone (E03)")

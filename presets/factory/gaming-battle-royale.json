@@ -16,7 +16,7 @@
     "macro.3": 0.25,
     "macro.4": 0.45,
     "macro.5": 0.1,
-    "bass.subsonic": 28,
+    "bass.subsonicOrder": "12 dB/oct",
     "comp.threshold": -14,
     "comp.ratio": 1.5,
     "comp.knee": 8,

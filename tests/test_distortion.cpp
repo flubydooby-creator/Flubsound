@@ -496,6 +496,9 @@ TEST_CASE ("Distortion: through the chain, base saturation alone trips the gover
         store.set (SatType, static_cast<float> (SaturationType::Tape));
         store.set (SatDriveDb, st.baseDriveDb);
         store.set (Macro5, st.warmth);
+        // The governed Warmth contributions this case scales are the v1 rows
+        // (Tape drive +9 dB), which Warmth keeps under Tape Grit (docs/11 E14).
+        store.set (WarmthTapeGrit, 1.0f);
         std::vector<float> baseBefore (static_cast<size_t> (kNumParams)), baseAfter (static_cast<size_t> (kNumParams));
         store.snapshot (baseBefore.data());
 

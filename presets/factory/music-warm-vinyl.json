@@ -16,7 +16,7 @@
     "bass.boost": 1.5,
     "bass.freq": 90,
     "bass.monoBelow": 150,
-    "bass.subsonic": 25,
+    "bass.subsonicOrder": "12 dB/oct",
     "clarity.attack": -1,
     "sat.drive": 2,
     "sat.mix": 0.7,

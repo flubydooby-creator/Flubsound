@@ -13,9 +13,9 @@
 //   * the strip's own meters (Phase 2, "refined"): while a bank plays, its
 //     gain on the real programme is short-term out minus in (with the input
 //     gain and Auto Level taken off again, as the estimates see the input),
-//     once the bank has played unchanged for kLiveSettleSeconds. When both
-//     banks have such a reading at about the same level, they replace the
-//     estimates.
+//     averaged over every poll once the bank has played unchanged for
+//     kLiveSettleSeconds. When both banks have such a reading at about the
+//     same level, they replace the estimates.
 //
 // BankComparison: per strip, the gain of bank A and of bank B. A flip (the
 // header's A/B, or any setActiveBank / toggleAB the poll notices) applies
@@ -129,8 +129,10 @@ private:
     struct Live
     {
         uint64_t key = 0;
-        float gainLu = 0.0f;
-        float levelLufs = 0.0f;
+        float gainLu = 0.0f;    // mean over the readings
+        float levelLufs = 0.0f; // mean programme level over them
+        double gainSum = 0.0, levelSum = 0.0;
+        int readings = 0;
         bool valid = false;
     };
     struct StripState
@@ -212,6 +214,7 @@ private:
     bool enabled = true, held = false, active = false;
     int strip = -1, moduleId = -1;
     double releasedAt = 0.0;
+    float preparedLevel = PresetLoudnessEstimator::kDefaultLevelLufs, sessionLevel = PresetLoudnessEstimator::kDefaultLevelLufs;
     float appliedTrim = 0.0f;
     std::optional<float> gap;
 

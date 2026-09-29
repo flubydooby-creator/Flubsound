@@ -193,12 +193,14 @@ Stage 2's round trip is 2d₂ samples at the 2× rate, which is d₂ base-rate s
 
 **Rate-aware designs** ([11 E10](11-enhancement-report.md#e10) step 3; `Oversampler::Design`, `Oversampler::forProfile()`, used by the saturator, §6.4). A half-band's transition band is centred on the base Nyquist: at 44.1 kHz the 5th harmonic of a 5 kHz tone (25 kHz) folds to 19.1 kHz almost unattenuated, and at 2× every harmonic above the 2× Nyquist folds inside the oversampled domain. `Design` therefore also allows a stage-1 downsampler that is a general Kaiser-windowed-sinc low-pass (`DecimatorStage`, 4m + 1 taps at the 2× rate, delay m base samples, −6 dB point `cutoff1` × the 2× rate), so the transition can end near the image of 20 kHz. The round trip is then `d₁ + m₁` (2×) or `d₁ + m₁ + d₂` (4×). `forProfile()` keeps the latency the fixed 2× designs had, so no chain latency changes:
 
-| Profile | Below 176.4 kHz | 176.4 kHz and above |
-|---|---|---|
-| Quality | 4×: up d₁ = 8 (β 8), stage 2 d₂ = 6 (β 9), decimator m₁ = 18 (73 taps, cutoff 0.23, β 9) → 8 + 18 + 6 = **32** | 2× High, **32** |
-| Balanced, Low Latency | 4×: d₁ = 4 (β 6), d₂ = 3 (β 7), m₁ = 9 (37 taps, cutoff 0.19, β 7) → 4 + 9 + 3 = **16** | 2× Low, **16** |
+**8× and ADAA** ([11 E10](11-enhancement-report.md#e10) Phase 2). A hard-driven curve is close to a square wave, whose harmonics fall only 6 dB per octave: at 24 dB of drive the 17th / 19th harmonics of 10 kHz fold straight into the audible band at 4× (−28 dBc at 44.1 kHz). `Design` therefore also has factor 8 (a third half-band, d₃ = 2: 9 taps, `d₃/2` = 1 base sample; at 8× it only has to reject what would fold onto 0–20 kHz, so its transition runs from 20 kHz to the image band) and `adaa`, for curves evaluated with first-order antiderivative anti-aliasing (§6.4). ADAA1 is the curve followed by a one-sample box filter, whose sinc response nulls every multiple of the oversampled rate, i.e. exactly where the harmonics that fold near 0 Hz come from; it delays the curve by half an oversampled sample, which the stage-1 decimator takes back: with `adaa` its taps are centred `1/factor` of a 2×-rate sample early (a Kaiser-windowed sinc at a fractional centre, the window moved with it), so the deviation stays aligned with the exactly delayed dry path and the latency does not change. `forProfile()` keeps the latency the fixed 2× designs had, so no chain latency changes, and every row runs the ADAA curves:
 
-The decimator's passband ends below 20 kHz (−6 dB at 20.3 / 16.8 kHz for 44.1 kHz), which only the generated harmonics pass (delta oversampling); the programme keeps its top octave. Its cost is `4m + 1` multiply-adds per base-rate output (no symmetry or polyphase saving yet): with Warmth 100 a render takes 16 % (Balanced) to 29 % (Quality) longer at 48 kHz and 22–30 % at 96 kHz (CLI, 20 s of pink noise), a realtime-factor drop of 14–23 %.
+| Profile | Below 88.2 kHz | 88.2 and 96 kHz | 176.4 kHz and above |
+|---|---|---|---|
+| Quality | 8×: up d₁ = 8 (β 8), stage 2 d₂ = 5 (β 9), stage 3 d₃ = 2 (β 5), decimator m₁ = 18 (73 taps, cutoff 0.23, β 9) → 8 + 18 + 5 + 1 = **32** | 4×: d₂ = 6, otherwise as 8× → 8 + 18 + 6 = **32** | 2×: d₁ = 16 (β 9), decimator m₁ = 16 (cutoff 0.25, β 9) → **32** |
+| Balanced, Low Latency | 4×: d₁ = 4 (β 6), d₂ = 3 (β 7), m₁ = 9 (37 taps, cutoff 0.19, β 7) → 4 + 9 + 3 = **16** | as below 88.2 kHz, **16** | 2×: d₁ = 8 (β 6), decimator m₁ = 8 (cutoff 0.22, β 7) → **16** |
+
+8× is used only in Quality: it doubles the curve's cost at the rates where most listening happens, and 4× with ADAA already keeps Warmth 100 and a 0 dBFS tone at 9 dB below −70 dBc there (§6.4). The decimator's passband ends below 20 kHz (−6 dB at 20.3 / 16.8 kHz for 44.1 kHz), which only the generated harmonics pass (delta oversampling); the programme keeps its top octave. Its cost is `4m + 1` multiply-adds per base-rate output; every FIR sums its products in four interleaved partial sums, which lets the compiler vectorise them (a single running sum is one serial add chain it may not reorder). Realtime factor of a CLI render (20 s of pink noise, 48 kHz, saturator on at 9 dB), against the 4× designs without ADAA: Balanced / Low Latency +4 % (the vectorised FIRs pay for ADAA), Quality −12 % (8×; Warmth 100, which now drives Tube at up to 0.9 dB, −17 %). E10 step 3 had cost 14 % (Balanced) / 22 % (Quality), so Quality is now about 31 % slower than before E10 with the saturator on, Balanced about 11 %.
 
 **Filter performance.** The table below was computed from the actual tap design. "Image" is the level of the spectral image re unity gain (the worst value over the range, which is at its top edge). For the upsampler this is the image; for the downsampler it is the alias rejection of the same filter. The frequency axis is in base-rate `f/fs`: 0.375 = 18 kHz, 0.417 = 20 kHz at 48 kHz, and 0.4535 = 20 kHz at 44.1 kHz.
 
@@ -214,7 +216,7 @@ The decimator's passband ends below 20 kHz (−6 dB at 20.3 / 16.8 kHz for 44.1 
 - Test *Oversampler: round trip reproduces the input delayed by the reported latency* asserts a round-trip SNR of ≥ 80 dB (High) and ≥ 45 dB (Low) for a 997 Hz sine at exactly the reported latency.
 
 **Cost.**
-- The loops do not exploit tap symmetry: 2d multiply-adds per base-rate sample for the interpolated upsampler phase, and 2d per base-rate output of the downsampler.
+- The loops do not exploit tap symmetry: 2d multiply-adds per base-rate sample for the interpolated upsampler phase, and 2d per base-rate output of the downsampler, summed in four interleaved partial sums (see above).
 - `upsample()` returns a view on internal buffers, allocated in `prepare()` for `factor × maxBlockSize` samples. It clamps a block longer than `maxBlockSize`, and callers never exceed it.
 - A minimum-phase / polyphase-IIR variant with lower latency and non-linear phase is noted in the header as the planned alternative. It is **roadmap**, not implemented.
 
@@ -348,14 +350,14 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
     ─► loudness contour (contour.on, off by default): the ISO 226 lift for the playback level ≤ contour.maxLift, and its own
                      trim ≤ 0 dB: −max(0, programme-weighted lift − 3 dB) (§14.12)
     ─► [gate]        attenuation only (≤ 40 dB); in the chain only in the Quality latency profile
+    ─► Warmth tilt   (warmth.tone, 0 by default; the Music Warmth macro): body bell 200 Hz up to +3.5 dB, high shelf
+                     7 kHz down to −3.0 dB, and a trim that takes the tilt's measured loudness change back (§14.13)
     ─► [EQ]          ±24 dB per band, output −24..+12 dB
     ─► [DynEQ]       static ±12 dB + dynamic up to ±24 dB per band (range), noise-floor tapered
     ─► [Bass]        low shelf 0..+15 dB, withdrawn to keep predicted LF peak ≤ bass.protect;
                      harmonics mix ≤ ×2 of the generated harmonics; subsonic HP removes DC/rumble
     ─► [Clarity]     transient gain ±12 (attack) ±12 (sustain) dB; presence ≤ +6 dB; de-mud ≤ −4 dB;
                      air: harmonics at ≤ −12 dB re band + ≤ +2 dB shelf
-    ─► Warmth tilt   (warmth.tone, 0 by default; the Music Warmth macro): low shelf 300 Hz up to +3.8 dB, high shelf
-                     7 kHz down to −2.8 dB, and a trim that takes the tilt's measured loudness change back (§14.13)
     ─► [Saturation]  unity small-signal; loud peaks reduced (≈ 1/g); wet output ±12 dB
     ─► [Smoothness]  attenuation only: the sibilant band down by ≤ 9 dB while it is hotter than before the
                      enhancement (smooth.amount, off by default; §14.5)
@@ -381,6 +383,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 | Surround fold-down | LFE at `virt.lfe` (default +10 dB since preset schema 3; +6 dB before) re one main channel; above +6 dB it arms the maximizer's LF-first limiter (§8.2) | 0.7071 × (sum of BS.775 contributions) in the surround fold; unity in the stereo passthrough fold | fixed matrix (`Bs775Fold`); the LFE through the same `LfeFold` in every fold, `virt.lfeFold` off drops it (the v1 downmix bit for bit); toggling `virt.on` (surround inputs only) crossfades virtualiser ↔ downmix over 20 ms (`virtMix`), the input-channel detector's surround ↔ stereo passthrough switch over 400 ms (`passMix`); a fold that starts again starts from reset state | `ProcessingChain.cpp`, `dsp/Bs775Fold.h` |
 | Automatic preamp (`auto.preamp`, off by default) | — (0 dB maximum) | the chain's predicted static boost − `auto.preampAllowance` (default 1 dB) | predicted on the audio thread from the effective values (§14.11), programme-weighted; 20 ms linear ramp; after the dry reference and the input meters, so AutoLevel and the bypass reference do not see it | `ProcessingChain.cpp` |
 | Loudness contour (`contour.on`, off by default) | the ISO 226:2023 lift for the playback level below the reference, ≤ `contour.maxLift` (18 dB): +12.1 dB at 50 Hz, +4.4 dB at 12.5 kHz 30 dB down | −1.2 dB at 2–5 kHz (the contour), and its trim: −max(0, programme-weighted lift − 3 dB) | glides at ≤ 60 dB/s; the trim keeps what the lift leaves in at 3 dB (× the governor's scale at Normal / Strict), which the automatic preamp's model also counts (§14.12) | `LoudnessContour.*` |
+| Warmth tilt (`warmth.tone`, 0 by default; the Music Warmth macro) | +3.5 dB × amount on the body bell (200 Hz, Q 0.7: half of it at 100 and 400 Hz) | −3.0 dB × amount on the high shelf (7 kHz corner), and a trim of −amount × the full tilt's K-weighted loudness change on its input (about 0 dB on pink noise, −0.7 dB on the drum-and-bass programme at 100 %) | glides 0 → 1 in 200 ms; loudness within 0.3 LU of Warmth 0 (§14.13); the automatic preamp counts the sections and the measured trim | `ToneTilt.*` |
 | Parametric EQ | +24 dB per band, +12 dB output (store range) | −24 dB per band, −24 dB output, cuts | user only; no macro touches it | §2 |
 | Dynamic EQ | `staticGain` + dynamic, `range` ≤ 24 dB | the same | `BoostBelow` fades out over the 10 dB above `noiseFloor`; mode bands scale with macros | §3 |
 | Bass shelf | +15 dB (+ macros, clamped to 15) | never cuts | **predictive protection**: withdrawn by `softKnee(L + boost − protect)` | §4 |
@@ -388,7 +391,6 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 | Clarity shaper | up to +12 dB on onsets (attack) / tails (sustain) | the same, as cuts | level-independent indicators; 1 ms gain smoothing | §5 |
 | Presence / de-mud | +6 dB × presence | −4 dB × deMud | inverse-level computer with −80 dB RMS taper / relative threshold with −70 dB RMS gate | §5 |
 | Air | 2nd/3rd harmonics at ≤ −12 dB re the 3.5–7 kHz band; +2 dB shelf at 10 kHz | — | envelope-normalised; disabled below 42 kHz | §5 |
-| Warmth tilt (`warmth.tone`, 0 by default; the Music Warmth macro) | +3.8 dB × amount on the low shelf (300 Hz corner) | −2.8 dB × amount on the high shelf (7 kHz corner), and a trim of −amount × the full tilt's K-weighted loudness change on the programme (−0.2 dB on pink noise, −3.2 dB on the bass-heavy drum programme at 100 %) | glides 0 → 1 in 200 ms; loudness within 0.3 LU of Warmth 0 (§14.13); the automatic preamp counts the shelves, not the trim | `ToneTilt.*` |
 | Saturation | wet make-up up to +12 dB (`sat.output`) | loud peaks (curve), −12 dB make-up | unity small-signal; see §6.3 for level behaviour | §6 |
 | Startle Guard (`guard.range`, off by default) | — (0 dB maximum) | a loud event down to its ceiling over the recent programme (20 / 15 / 10 / 6 LU) | measures the compressor slot's input, applies to its output (the slot latency is its look-ahead); held 150 ms, released with 200 ms (§14.5, [11 E21](11-enhancement-report.md#e21)) | `StartleGuard.*` |
 | Maximizer | drive up to +24 dB (+ governed macros) | limiter / clipper / glue reduction | **true-peak ceiling**, SafetyGovernor, AutoDrive (reduce only); the glue splitter is only in the path while glue is armed (§1.4) | section 11 |
@@ -912,6 +914,7 @@ The bass engine delivers "more bass" without the three usual costs: limiter pump
  x_c (all channels, per sample)
   │
   ├─ 1. Subsonic HP4 (Butterworth, Q 1.3066 / 0.5412) @ subsonicHz            [parked stage, park 5 Hz]
+  │        or HP2 (Q 0.7071) with subsonicOrder 2: both run, a 20 ms crossfade switches
   ├─ 2. Mono bass (exactly 2 channels): LR4 split @ monoBelowHz               [parked stage, park 10 Hz]
   │        out_L = (low_L + low_R)/2 + high_L,   out_R = (low_L + low_R)/2 + high_R
   │
@@ -919,8 +922,13 @@ The bass engine delivers "more bass" without the three usual costs: limiter pump
   │          LP2 (Q 0.7071) @ max(150 Hz, 1.5·boostFrequency') → max_c|·| (linked)
   │          → 25 ms peak hold → EnvelopeFollower 10 ms / 150 ms → L (dBFS peak)
   │          control rate: withdraw = clamp(softKnee(L + boost' − protect'), 0, boost')
+  │        splitProtection (docs/11 E02 (a)): sub = LR4 low @ 85 Hz → 25 ms hold →
+  │          10 / 150 ms → w_sub (program hold); punch = the detector above with an
+  │          8 ms hold → w_full; bell cut = hold(w_full − w_sub) ≤ shelf boost left at
+  │          the bell; withdraw = w_sub
   │
   ├─ 3. Low shelf, Q 0.7 @ boostFrequency', gain = max(0, smooth_5ms(boost' − withdraw))
+  │     (+ splitProtection: bell, Q 0.5 @ 0.8·sqrt(60 Hz · detector LP), −smooth_5ms(cut))
   │
   ├──────► 4. harmonics source: mid = mean_c(x_c)
   │          → HP2 25 Hz → LP4 @ cutoff' → peak hold 25 ms → env (0.5 ms / 50 ms)
@@ -1072,6 +1080,8 @@ The implementer measured a high-frequency (> 3 kHz) residual of at most about �
 | Tighten | `bass.tighten` | 0 … 1 | 0 | % | low-band sustain 0 … −12 dB (parked stage below 150 Hz) |
 | Mono Bass Below | `bass.monoBelow` | 0 … 250 | 0 (off) | Hz | LR4 mono-bass corner; values in (0, 40) clamp to 40 Hz |
 | Subsonic Filter | `bass.subsonic` | 0 … 40 | 20 | Hz | HP4 corner; 0 = off, values in (0, 10) clamp to 10 Hz |
+| Subsonic Slope | `bass.subsonicOrder` | 12 dB/oct, 24 dB/oct | 24 dB/oct | choice | the subsonic's order (2nd / 4th); 20 ms crossfade ([11 E02](11-enhancement-report.md#e02), layout version 5) |
+| Split-Band Protection | `bass.splitProtect` | off/on | off | toggle | sub / punch detectors with a program-dependent release (§4.9; [11 E02](11-enhancement-report.md#e02) (a), layout version 5) |
 
 At module level NaN keeps the previous value and ±inf clamps. Unchanged parameters return early.
 
@@ -1085,6 +1095,8 @@ At module level NaN keeps the previous value and ±inf clamps. Unchanged paramet
 | harmonics mix | 20 ms linear ramp per sample |
 | tighten amount | the embedded shaper's 20 ms parameter smoothing and 1 ms gain smoothing (0.5 ms while a cut the onset gate lifts returns, §5.3.1) |
 | stage on/off | parked-stage sequence (§4.3.6); module bypass via `ModuleSlot` (20 ms) |
+| subsonic slope | 20 ms linear crossfade between the 4th- and 2nd-order outputs (both always run while the stage is on) |
+| split-band protection on / off | the split detectors start from the classic detector's level; shelf gain and bell glide (5 ms) |
 
 ### 4.6 Latency & CPU
 
@@ -1096,7 +1108,7 @@ At module level NaN keeps the previous value and ±inf clamps. Unchanged paramet
 | defaults (only the 20 Hz subsonic HP active) | 24 | 0.12 % |
 | all stages on (boost 9 dB, harmonics 0.5, replace, tighten 0.5, mono 120 Hz) | 165 | 0.79 % |
 
-The harmonics telemetry (§4.3.4) is within run-to-run noise at this setting: 160–169 before, 162–171 ns after, in a same-session comparison.
+The harmonics telemetry (§4.3.4) is within run-to-run noise at this setting: 160–169 before, 162–171 ns after, in a same-session comparison. So is the 2nd-order subsonic section that runs beside the 4th since [11 E02](11-enhancement-report.md#e02) (defaults 46 → 31 ns, all on 211 → 210 ns, best of three on a busy machine); the split-band detectors add an LR4 split per channel while `bass.splitProtect` is on.
 
 ### 4.7 Gaming vs Music usage
 
@@ -1105,7 +1117,7 @@ Macro contributions (section 14 has the full tables):
 - **Music.**
   - **Boost Intensity:** boost +5 dB over 20–80 % and harmonics +0.30 over 35–90 %, both governed.
   - **Punch:** no longer drives tighten (docs/11 E04: tighten 0.5 took 2 dB off a kick's first 10 ms; since E04 step 2 it takes 0.2 dB, §4.3.5).
-  - **Warmth:** no bass rows since [11 E14](11-enhancement-report.md#e14)'s remap: its low end is the Warmth tilt's low shelf (+3.8 dB at 100 %, level compensated, §14.13). With `warmth.tapeGrit` on (Lo-Fi Chill, Warm Vinyl) it keeps the v1 rows: engages Bass; harmonics +0.20 over 40–100 % and boost +2 dB over 30–100 %, both governed.
+  - **Warmth:** no bass rows since [11 E14](11-enhancement-report.md#e14)'s remap: its low end is the Warmth tilt's body bell (+3.5 dB at 200 Hz at 100 %, level compensated, §14.13), which lifts the upper bass and low mids rather than the sub-bass. With `warmth.tapeGrit` on (Lo-Fi Chill, Warm Vinyl) it keeps the v1 rows: engages Bass; harmonics +0.20 over 40–100 % and boost +2 dB over 30–100 %, both governed.
   - Boost Intensity also scales the de-boom dynamic-EQ band (120 Hz, §3.4), which holds boomy passages in check while the shelf boosts.
 - **Gaming.**
   - **Boost Intensity:** boost +3 dB over 30–90 %, governed.
@@ -1139,6 +1151,12 @@ Macro contributions (section 14 has the full tables):
   - *BassEngine (review): switching everything off lands on a bit-exact pass-through*
   - *BassEngine (review): every block size gives bit-identical output*
   - *BassEngine (review): steady bass through protection, tighten, mono and subsonic stays clean*
+- **Split-band protection and the subsonic slope** ([11 E02](11-enhancement-report.md#e02)):
+  - *BassEngine: split-band protection holds a 32 Hz line steady under 55 Hz kicks at Bass Head's settings (docs/11 E02 (a))*
+  - *BassEngine: split-band protection - kicks above 60 Hz leave the sub boost, an isolated hit releases as before, and the cap holds for every shelf and tone (docs/11 E02 (a))*
+  - *BassEngine: the 2nd-order subsonic filter keeps 28 Hz within 3 dB and halves the group delay at 40 Hz (docs/11 E02 subsonic slice)*
+  - *BassEngine: switching split-band protection and the subsonic slope is click-free and every block size gives the same output (docs/11 E02)*
+  - the chain rows in `tests/test_known_gaps.cpp` (*KnownGap: bass-line pumping ...*, *KnownGap: subsonic slice ...*)
 - **Harmonics telemetry** (`tests/test_distortion.cpp`, §14.5):
   - *Distortion: the bass harmonics generator's reading matches a harmonic analysis of the stage output within 0.05 dB (40 / 80 Hz, every character, with and without replacing the fundamental)* (measured < 0.001 dB)
   - *Distortion: linear settings of the bass engine and the clarity enhancer read -160 dB: harmonics / air off with every other stage engaged, after switching them off, and on silence*
@@ -1159,6 +1177,12 @@ Macro contributions (section 14 has the full tables):
 - **Peak holds delay decay detection.** Holds delay the *start* of decay detection by about 25–33 ms: protection release, harmonics envelope and the tighten shaper. Attacks remain instant.
 - **Mono bass requires exactly 2 channels.** If a 2-channel spec receives a 1-channel block, the mono stage pauses for that block, and it can resume with a small discontinuity. That only happens when a host changes the channel count mid-stream.
 - **Disengaging a parked stage is deliberately gradual.** It takes about 100–150 ms: the glide to the park frequency, then the 20 ms crossfade.
+- **Split-band protection** (`bass.splitProtect`, off by default; [11 E02](11-enhancement-report.md#e02) (a)). The classic detector withdraws the whole shelf for any LF peak and releases it within 150 ms, so a sustained bass line moves with every kick: a 32 Hz line under 55 Hz kicks at Bass Head's settings, protection alone, 3.5–4.7 dB peak to peak. With the split:
+  - a sub detector (LR4 low band at 85 Hz, overlapping the punch band so a tone near 60 Hz is not under-read) withdraws the shelf; what the classic prediction (8 ms hold) still exceeds is cut by a wide bell in the 60–150 Hz punch band, never more than the boost the shelf still gives there, so no frequency ends below flat;
+  - both withdrawals have a **program-dependent release**: onsets are rises of 3 dB over the band level's recent valley; once they recur (≤ 1.2 s apart) a withdrawal is held for the recent onset spacing + 1/8 (the larger of the last two) and then released with 150 ms; an isolated hit is not held;
+  - result: the line holds one gain (0.0 dB modulation), at a steadily lower boost where the kick itself sits in the sub band (mean line gain +2.6…+4.0 → −0.6…+1.5 dB at −12…−24 dBFS lines); with 100 Hz kicks the line stays at about the classic mean (+3.7 → +3.4 dB), since the punch band takes their excess;
+  - the cap holds within 0.5 dB for every tone and shelf (the classic reads 0.2 dB); Bass Head's whole engine still moves the line 1.2–1.9 dB, through Tighten ([11 E04](11-enhancement-report.md#e04)) and the harmonics generator ([11 E03](11-enhancement-report.md#e03)).
+- **Subsonic slope.** `bass.subsonicOrder` 12 dB/oct keeps about half the 4th order's group delay (40 Hz: HP4 at 25 Hz 8.2 ms, at 20 Hz 5.9 ms, HP2 at 20 Hz 3.3 ms) and costs 28 Hz 1.0 dB (HP4 at 30 Hz 4.4 dB); Bass Head, Club Loud, Warm Vinyl, Competitive FPS and Battle Royale use it at the 20 Hz default.
 
 ---
 
@@ -1520,12 +1544,14 @@ Tape and Digital show no even harmonics: H2 is below −170 dBc.
 
 | Profile (`latency.profile`) | Saturator oversampling (`Oversampler::forProfile()`, §0.6) | Latency |
 |---|---|---|
-| Quality | 4× with the 32-sample rate-aware design below 176.4 kHz, 2× High from 176.4 kHz | 32 samples (0.67 ms at 48 kHz) |
-| Balanced (default) | 4× with the 16-sample rate-aware design below 176.4 kHz, 2× Low from 176.4 kHz | 16 samples (0.33 ms) |
+| Quality | 8× below 88.2 kHz, 4× to 176.4 kHz, 2× from there; ADAA curves | 32 samples (0.67 ms at 48 kHz) |
+| Balanced (default) | 4× below 176.4 kHz, 2× from there; ADAA curves | 16 samples (0.33 ms) |
 | Low Latency | as Balanced | 16 samples (0.33 ms) |
-| API (`setOversampling()` before `prepare()`; constructor default 2× High) | 1×, 2× or 4×, High or Low, or an explicit `Oversampler::Design`. Factors other than 1/2/4 are sanitised in `prepare()`: ≥ 4 → 4, ≥ 2 → 2, else 1. | 0 / 32 / 36 (High), 16 / 19 (Low) |
+| API (`setOversampling()` before `prepare()`; constructor default 2× High) | 1×, 2× or 4×, High or Low (other factors are sanitised: ≥ 4 → 4, ≥ 2 → 2, else 1), or an explicit `Oversampler::Design` (factor 1, 2, 4 or 8; `adaa` needs a stage-1 decimator) | 0 / 32 / 36 (High), 16 / 19 (Low) |
 
-Before [11 E10](11-enhancement-report.md#e10) step 3 the chain ran the saturator at 2× High (Quality) and 2× Low (Balanced, Low Latency) at every rate. Worst in-band alias (20 Hz–20 kHz, `worstAliasDbc`, `tools/flubsound-cli/Analysis.h`) of −6 dBFS 1 / 5 / 7 / 10 kHz sines through Tape at 9 dB (Warmth 100), before → after:
+**ADAA** ([11 E10](11-enhancement-report.md#e10) Phase 2; `adaaLoop` in `Saturator.cpp`). With `u = g·x` and the curve φ (tanh, the tube curve, the digital clip), each oversampled output is the mean of the curve over the step from the previous input to the current one, from closed-form antiderivatives: `ln cosh u` (Tape), `(ln (cosh u + b sinh u) − b·u) / (1 − b²)` (Tube, b = tanh 0.2), `u²/2 − u⁴/27` below the knee and `|u| − 9/16` above it (Digital). Only the deviation is needed (delta oversampling), so the code differentiates Ψ(u) = Φ(u) − u²/2 in double, with forms whose error stays proportional to u² (`log1p (2 sinh² (u/2))`) and Taylor series below |u| = 0.5 (Tape) / 0.35 (Tube), so quiet signals stay exact; below a step of 1e−6 the midpoint value is used. The linear part of ADAA is the midpoint of consecutive inputs, which is the deviation's and the THD+N telemetry's reference, and the decimator takes the half sample back (§0.6): at 12 dB of drive the output's 1 / 5 kHz fundamental and 3rd harmonic match the plain curve's within 0.15 dB and 0.005 rad (a deviation half a sample late would turn the 5 kHz fundamental by 0.16 rad at 4×), and THD+N telemetry reads the same within 0.3 dB. What is left is ADAA1's own error, the curve evaluated on a straight path between samples: −0.04 dB on a 5 kHz fundamental at 4× and 12 dB of drive, four times less at 8×.
+
+Before [11 E10](11-enhancement-report.md#e10) step 3 the chain ran the saturator at 2× High (Quality) and 2× Low (Balanced, Low Latency) at every rate. Worst in-band alias (20 Hz–20 kHz, `worstAliasDbc`, `tools/flubsound-cli/Analysis.h`) of −6 dBFS 1 / 5 / 7 / 10 kHz sines through Tape at 9 dB (the v1 Warmth 100), before → after step 3 (Phase 2's 8× and ADAA below):
 
 | Rate | Quality | Balanced / Low Latency |
 |---|---|---|
@@ -1534,7 +1560,20 @@ Before [11 E10](11-enhancement-report.md#e10) step 3 the chain ran the saturator
 | 96 kHz | −83.1 → −132.1 dBc | −83.1 → −100.0 dBc |
 | 192 kHz | −148.9 (unchanged) | −118.1 (unchanged) |
 
-Through the whole chain (Music, Warmth 100, `flubsound-cli quality --macro warmth=100 --rate R`): 44.1 kHz −36.6 → −91.0 (Quality), −36.6 → −74.7 dBc (Balanced, Low Latency); 48 kHz −46.9 → −96.5, −46.7 → −79.9 dBc (tests in `tests/test_signal_hygiene.cpp`; the nightly rows in `tests/quality_targets.json`). Harder drive is still a gap: at 44.1 kHz with the 16-sample design, Tape at 24 dB −15.0 → −28.0 dBc, Digital at 24 dB −18.5 → −35.5 dBc, a 0 dBFS sine at 9 dB −21.6 → −45.8 dBc (pinned in *Signal hygiene KnownGap: 24 dB drive and full-scale tones ...*): the harmonics that fold inside the 4× domain need 8× or ADAA.
+Through the whole chain (Music, Warmth 100, `flubsound-cli quality --macro warmth=100 --rate R`): 44.1 kHz −36.6 → −91.0 (Quality), −36.6 → −74.7 dBc (Balanced, Low Latency); 48 kHz −46.9 → −96.5, −46.7 → −79.9 dBc (tests in `tests/test_signal_hygiene.cpp`; the nightly rows in `tests/quality_targets.json`).
+
+Harder drive (E10 Phase 2: ADAA everywhere, 8× in Quality below 88.2 kHz), the saturator alone, before (step 3's designs) → after:
+
+| Rate, profile | Tape 24 dB | Tube 24 dB | Digital 24 dB | Tape 9 dB, 0 dBFS | Tape 9 dB, −6 dBFS |
+|---|---|---|---|---|---|
+| 44.1 kHz Quality | −28.2 → −73.0 | −38.0 → −87.6 | −35.6 → −83.9 | −45.9 → −92.5 | −78.5 → −106.0 |
+| 44.1 kHz Balanced / Low Latency | −28.0 → −54.1 | −37.9 → −64.3 | −35.5 → −62.6 | −45.8 → −73.2 | −74.2 → −75.3 |
+| 48 kHz Quality | −25.4 → −76.1 | −41.7 → −91.8 | −40.5 → −87.7 | −46.1 → −93.4 | −83.2 → −100.6 |
+| 48 kHz Balanced / Low Latency | −25.1 → −59.3 | −41.5 → −71.5 | −40.3 → −72.4 | −46.0 → −75.5 | −78.0 → −79.2 |
+| 96 kHz Quality / Balanced | −46.1 → −75.7 / −75.7 | −75.0 → −105.2 / −88.4 | −59.8 → −90.9 / −87.3 | −94.4 → −123.2 / −88.6 → −89.7 | −132.1 → −134.8 / −100.0 → −101.4 |
+| 192 kHz Quality / Balanced | −46.1 → −75.7 / −45.6 → −75.7 | −75.0 → −105.3 / −74.7 → −104.5 | −59.8 → −90.9 / −59.4 → −90.8 | −94.4 → −125.0 / −85.9 → −105.8 | −147.9 → −149.7 / −118.1 → −138.9 |
+
+(dBc, worst of the four tones; *Signal hygiene: extreme settings ...*). Quality meets ≤ −70 dBc at every rate and setting, Balanced / Low Latency from 88.2 kHz and at Warmth 100 and 0 dBFS everywhere. Still open, pinned in *Signal hygiene KnownGap: 24 dB of drive at 44.1 / 48 kHz ...*: 24 dB of drive in Balanced / Low Latency at 44.1 / 48 kHz (Tape −54.1 / −59.3, Tube −64.3, Digital −62.6 dBc; ≤ −60 dBc, Low Latency's target, is met by all but Tape), which needs 8× there too, at twice the curve's CPU.
 
 Torture test: a 15 kHz sine at −6 dBFS, drive 12 dB, 48 kHz. The output is periodic in 16 samples, so every in-band component other than 15 kHz is an alias. The table gives the worst alias re the tone (re-measured on the delta-oversampled saturator):
 
@@ -1546,8 +1585,7 @@ Torture test: a 15 kHz sine at −6 dBFS, drive 12 dB, 48 kHz. The output is per
 
 - The Tape figures are the worst because its +6 dB pre-emphasis drives a 15 kHz tone 6 dB harder into the tanh.
 - At 2× the dominant alias is the 5th harmonic (75 kHz) folding to 21 kHz.
-- Programme material has far less energy at 15 kHz than this test. Heavy saturation of loud HF content still aliases at the chain's settings (the 16-sample design's short stages are the limit here).
-- **Antiderivative anti-aliasing (ADAA) is roadmap** (`docs/08-pitfalls-and-solutions.md` B3).
+- Programme material has far less energy at 15 kHz than this test. The table predates ADAA; with the chain's ADAA designs heavy saturation of loud HF content aliases much less (the harder-drive table above).
 
 ### 6.5 Parameters
 
@@ -1576,7 +1614,7 @@ At module level NaN falls back to the default, values are clamped, and an unchan
 
 ### 6.7 Latency & CPU
 
-- **Latency** equals the oversampler's round trip (§0.6): 0 / 32 / 36 samples (1× / 2× High / 4× High) and 16 / 19 samples (2× Low / 4× Low).
+- **Latency** equals the oversampler's round trip (§0.6): 0 / 32 / 36 samples (1× / 2× High / 4× High) and 16 / 19 samples (2× Low / 4× Low); the chain's rate-aware designs (4× / 8×, §6.4) keep 32 / 16.
   - It is structural: `setOversampling()` takes effect at the next `prepare()`.
   - The dry path is delayed by the same L.
   - Test *Saturator: latencySamples() is exact - a low-level impulse appears L samples later* checks this.
@@ -1592,13 +1630,13 @@ At module level NaN falls back to the default, values are clamped, and an unchan
 ### 6.8 Gaming vs Music usage
 
 - **Music.**
-  - **Warmth** engages Saturation (`sat.on`) once the macro exceeds about 1 %: the toggle contribution is `smoothstep(0, 0.02, v)` and a toggle reads as on at ≥ 0.5. It adds drive +0.9 dB (governed) and, while the saturator is Warmth's alone (`sat.on` off and `sat.type` at its default in the base values), selects Tube (an override row, §14.1): a gentle, mostly 2nd-order colour. A −6 dBFS 1 kHz sine through the Music chain (maximizer off) reads 0.08 / 0.30 % THD+N at Warmth 50 / 100, H2 −63.0 / −51.1 dBc over H3 −70.7 / −58.3 dBc, worst inharmonic −110 dBc (v1: Tape +9 dB, 2.99 % at Warmth 50 with H3 −30.5 dBc and no H2). The audible warmth is the tilt ahead of the saturator (§14.13). With `warmth.tapeGrit` on, Warmth adds Tape-type drive +9 dB (governed) as in v1: the grit Lo-Fi Chill and Warm Vinyl are voiced on.
+  - **Warmth** engages Saturation (`sat.on`) once the macro exceeds about 1 %: the toggle contribution is `smoothstep(0, 0.02, v)` and a toggle reads as on at ≥ 0.5. It adds drive +0.9 dB (governed) and, while the saturator is Warmth's alone (`sat.on` off and `sat.type` at its default in the base values), selects Tube (an override row, §14.1): a gentle, mostly 2nd-order colour. A −6 dBFS 1 kHz sine through the Music chain (maximizer off) reads 0.08 / 0.30 % THD+N at Warmth 50 / 100, H2 −63.0 / −51.1 dBc over H3 −70.7 / −58.3 dBc, worst inharmonic −108 dBc (v1: Tape +9 dB, 2.99 % at Warmth 50 with H3 −30.5 dBc and no H2). The audible warmth is the tilt ahead of the modules (§14.13). With `warmth.tapeGrit` on, Warmth adds Tape-type drive +9 dB (governed) as in v1: the grit Lo-Fi Chill and Warm Vinyl are voiced on.
   - **Boost Intensity** adds drive +4 dB over 60–100 % (governed).
   - The SafetyGovernor can take this drive back when the maximizer limits too hard or the measured THD+N of the saturator and the clipper together exceeds −30 dB (§14.5).
 - **Gaming.**
   - Nothing in the gaming macro table engages or drives saturation, and `sat.on` defaults to off. Saturation therefore stays off in Gaming mode unless a preset or the user turns it on.
   - This is deliberate: added harmonics and peak rounding bring no benefit to positional cues.
-  - If it is enabled, the Low Latency profile runs it with the 16-sample rate-aware design (4× below 176.4 kHz, 2× Low from there; §6.4).
+  - If it is enabled, the Low Latency profile runs it with the 16-sample rate-aware design (4× with ADAA below 176.4 kHz, 2× with ADAA from there; §6.4).
 
 ### 6.9 Tests that prove it (`tests/test_saturator.cpp`)
 
@@ -1624,6 +1662,12 @@ At module level NaN falls back to the default, values are clamped, and an unchan
   - *Saturator: robust to silence, DC, full-scale noise, impulses and extreme parameters at every rate*
   - *Saturator: channels are independent; fewer channels than prepared is fine*
   - *Saturator: output is independent of the host block size*
+- **ADAA and 8× (the chain's designs, [11 E10](11-enhancement-report.md#e10) Phase 2):**
+  - *Saturator ADAA: the chain's designs keep unity small-signal gain and an exact latency at every rate*
+  - *Saturator ADAA: the deviation stays aligned with the dry path - at 1 / 5 kHz and 12 dB the output's fundamental and 3rd harmonic match the plain curve's, and so does the THD+N telemetry*
+  - *Saturator ADAA: parameter and type changes are click-free and every host block size gives the same output (4x and 8x)*
+  - *Saturator ADAA: silence, quiet tails, NaN / Inf bursts and +24 dBFS input stay finite and recover (4x and 8x)*
+  - the alias rows in `tests/test_signal_hygiene.cpp` (§6.4)
 - **Review regressions:**
   - *Saturator (review): no subnormal crawl in the tape emphasis after the input stops (FTZ off)*
   - *Saturator (review): recovers from a NaN / Inf input burst*
@@ -1633,7 +1677,8 @@ At module level NaN falls back to the default, values are clamped, and an unchan
 
 ### 6.10 Known limitations
 
-- **Aliasing at the chain's 2× setting.** Heavy saturation of loud HF content aliases (table in §6.4). ADAA is roadmap. The 4× modes are available through the API but are not used by any latency profile.
+- **Aliasing at 24 dB of drive in Balanced / Low Latency at 44.1 / 48 kHz** stays above −70 dBc (−54 to −72 dBc, §6.4): 4× with ADAA is the limit there, 8× (Quality's design) meets it at twice the curve's CPU.
+- **Ultrasonic harmonics at 88.2 kHz and above are not band-limited at 22 kHz.** A steep linear-phase low-pass on the deviation would need about 100 samples at 192 kHz; a minimum-phase one would turn the deviation against the dry path. The multitone's share above 22 kHz at 192 kHz: −47 dB at 24 dB of drive, −68 dB at 9 dB.
 - **Loud material gets quieter as drive rises.** There is no automatic make-up (§6.3).
 - **The head bump is a simplified model** (constant-Q peak, no dip).
 - **Tube curve rounding.** The Tube curve can be non-monotonic by one float ulp (about 6e-8) next to its positive asymptote. This comes from rounding in `T/(1 + tT)` and is inaudible.
@@ -3523,7 +3568,7 @@ Every entry from `kMusicTable` / `kGamingTable` (amount at 100 %, active window,
 | **Width** | Stereo on; width +0.6 (0–100 %); space +0.35 (40–100 %) | — |
 | **Clarity** | Clarity on; presence +0.8 (0–100 %); air +0.7 (20–100 %); de-mud +0.5 (0–70 %); Dynamic EQ on | Band 4: **de-harsh** bell 3.5 kHz, Q 1.2, *cut above* −22 dBFS, 3:1, range 3 dB × Clarity, 2 / 80 ms. Band 5: **air** high shelf 12 kHz, Q 0.7, *boost below* −45 dBFS, 2:1, range 3 dB × Clarity, 10 / 200 ms |
 | **Loudness** | Maximizer on; drive +10 dB\* (0–100 %, curve^1.3); glue +0.5 (30–100 %) | — |
-| **Warmth** | Warmth tilt `warmth.tone` +1 (0–100 %: +2.9 dB at 200 Hz, −2.6 dB at 10 kHz on pink noise at 100 %, level compensated, §14.13); Saturation on; saturation drive +0.9 dB\* (0–100 %); `sat.type` Tube while `sat.on` is off and `sat.type` at its default in the base values (override row). With `warmth.tapeGrit` on, the v1 rows instead: Saturation on; saturation drive +9 dB\* (0–100 %); harmonic bass +0.2\* (40–100 %); bass boost +2 dB\* (30–100 %); Bass on; no tilt | — |
+| **Warmth** | Warmth tilt `warmth.tone` +1 (0–100 %: +3.5 dB at 200 Hz, −2.5 dB at 10 kHz on pink noise at 100 %, level compensated, §14.13); Saturation on; saturation drive +0.9 dB\* (0–100 %); `sat.type` Tube while `sat.on` is off and `sat.type` at its default in the base values (override row). With `warmth.tapeGrit` on, the v1 rows instead: Saturation on; saturation drive +9 dB\* (0–100 %); harmonic bass +0.2\* (40–100 %); bass boost +2 dB\* (30–100 %); Bass on; no tilt | — |
 
 - **Always-on Music companion.** Band 6 is a **de-boom** bell at 120 Hz, Q 1.0, *cut above* −14 dBFS, 2.5:1, with range 4 dB × Boost Intensity (10 / 150 ms). When the bass is boosted, boomy passages are held in check dynamically. Band 7 is unused in Music: a 1 kHz bell with range 0, so idle.
 - **Floor.** All Music mode bands use a −80 dBFS noise floor.
@@ -3675,7 +3720,7 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 | Auto Level Target | `autolevel.target` | −30 … −10 | −18 | LUFS | AutoLevel target |
 | Dynamic Range | `guard.range` | Off, 20 LU, 15 LU, 10 LU (Balanced), 6 LU (Shield) | Off | choice | the Startle Guard's ceiling over the recent programme and the Gaming Tame band (§14.5, §3.7); layout version 4 |
 | Smoothness | `smooth.amount` | 0 … 1 | 0 | % | the post-enhancement de-esser takes back that share of the sibilance the chain added (§14.5); 0 = bypassed; layout version 4 |
-| Warmth Tone | `warmth.tone` | 0 … 1 | 0 | % | the level-compensated Warmth tilt ahead of the saturator (§14.13); the Music Warmth macro adds up to 1; 0 = idle (bit-exact); layout version 5 |
+| Warmth Tone | `warmth.tone` | 0 … 1 | 0 | % | the level-compensated Warmth tilt ahead of the modules (§14.13); the Music Warmth macro adds up to 1; 0 = idle (bit-exact); layout version 5 |
 | Warmth: Tape Grit | `warmth.tapeGrit` | off/on | off | toggle | the Music Warmth macro drives Tape saturation and bass as in v1 instead of the tilt and Tube (§14.3); Lo-Fi Chill and Warm Vinyl; layout version 5 |
 | Loudness-Matched Bypass | `bypass.matched` | off/on | on | toggle | in a bypass comparison the louder side (usually the processed one) is turned down to the other |
 | Bypass All | `bypass` | off/on | off | toggle | global bypass (30 ms crossfade) |
@@ -3731,7 +3776,7 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
   - *Distortion: the readings do not depend on the host block size: a 55 Hz tone through the saturator and the clipper reads the same in 32- and 4096-sample blocks* (0.3 sine, tape 12 dB / maximizer 12 dB drive, blocks 4096, 1024, 128, 64 and 32: within 0.2 dB of the 4096-sample reading, measured < 0.05 dB; with a per-block estimate the saturator read 4, 9 and 14 dB low at 128, 64 and 32)
   - *Distortion: the monitor power-sums the stages and smooths the meter in the power domain with tau = 300 ms* (a step reaches 1 − 1/e of its power after 0.3 s, ±0.02 dB, for 480- and 64-sample blocks)
   - *Distortion: the SafetyGovernor backs off when the measured THD+N of a real stage exceeds the -30 dB budget, and not when it stays under* (the saturator's own reading on a sine, 3–6 dB over the budget: scale at the 0.3 floor after 10 s; 3–6 dB under it: scale 1 throughout)
-  - *Distortion: through the chain, base saturation alone trips the governor on measured THD+N (the clip-energy proxy stays silent) and only the governed Warmth contributions are scaled* (maximizer off, so GR 0 dB and clip energy −160 dB every block; base tape drive 12 dB + Warmth 100 % on hot programme: `MeterBus::distortionDb` peaks ≥ 6 dB over the budget, the scale ends ≤ 0.35, every block's effective `sat.drive` = base + 9 dB × the previous block's scale within 1e−4, the store is unchanged; Warmth 30 % on quiet programme: measurable THD+N ≥ 3 dB under the budget, scale exactly 1)
+  - *Distortion: through the chain, base saturation alone trips the governor on measured THD+N (the clip-energy proxy stays silent) and only the governed Warmth contributions are scaled* (maximizer off, so GR 0 dB and clip energy −160 dB every block; base tape drive 12 dB + Warmth 100 % with `warmth.tapeGrit` on, so Warmth adds the v1 rows' governed +9 dB tape drive ([11 E14](11-enhancement-report.md#e14)), on hot programme: `MeterBus::distortionDb` peaks ≥ 6 dB over the budget, the scale ends ≤ 0.35, every block's effective `sat.drive` = base + 9 dB × the previous block's scale within 1e−4, the store is unchanged; Warmth 30 % on quiet programme: measurable THD+N ≥ 3 dB under the budget, scale exactly 1)
   - *Distortion: through the chain, the clipper's share of the governor input is floored at its clip energy ratio, so clipping backs the scale off at least as far as the proxy alone did* (the maximizer alone with the clipper at its maximum share on a 750 Hz sine at 0.94, 8 s, Boost 0 so the scale changes no audio: the clip energy averages ≥ 1 dB over the budget (−27.8 dB) and the THD+N ≥ 0.5 dB under it (−31.1 dB); in every block the chain's scale is at most that of a SafetyGovernor fed the published GR and per-block clip energy, plus 0.004 for the one-window delay, and both reach ≤ 0.6; with the floor removed the chain's scale stays at 1, 0.7 above the mirror's)
   - *Distortion: measuring in the saturator and the clipper, the monitor and the governor update are allocation-free* (`tests/test_rtsan.cpp` checks the `FLUB_NONBLOCKING` annotations of the estimator, `DistortionMonitor::update` / `reset` and `SafetyGovernor::update` / `reset`)
 - **ComparisonMatcher as a unit:**
@@ -3832,9 +3877,9 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 
 [11 E11](11-enhancement-report.md#e11). `auto.preamp` (off by default, so every older preset is unchanged) and `auto.preampAllowance` (1 dB).
 
-**Model** (`ProcessingChain::StaticBoostModel`, `buildStaticBoostModel()`). The level-independent stages that can raise the level, from the effective values (macros and module enables included; the GUI's momentary audition bypass is not, so "listen without" a module plays exactly that module's effect): the parametric EQ's bands and output gain (the same SVF designs as `ParametricEq`), the dynamic EQ's user static gains, the bass shelf at its full boost (Q 0.7, ≤ 15 dB) with the subsonic high-pass, presence at its full lift (bell Q 0.8, 6 dB × presence) and the air shelf (10 kHz, 2 dB × air), the Warmth tilt's two shelves (§14.13; not its trim, which follows the programme: about 0 dB on pink noise), the saturator's small-signal gain 1 − mix + mix · 10^(`sat.output`/20), and the surround folds' −3.01 dB trim. The bass boost is taken before the SafetyGovernor scales it: a preamp that followed the governor would feed its loop. Not modelled: the dynamic-EQ ranges and mode bands, the transient shaper, the de-mud cut (level-dependent, and they withdraw on loud material), harmonics (bass, air, saturation), the crossfeed's low-frequency sum on centred content, the compressor's make-up (it follows its own gain reduction) and the maximizer's drive (loudness on purpose). Each section's |H|² is evaluated in closed form at s = jΩ (`responseDb`), one `tan` per frequency.
+**Model** (`ProcessingChain::StaticBoostModel`, `buildStaticBoostModel()`). The level-independent stages that can raise the level, from the effective values (macros and module enables included; the GUI's momentary audition bypass is not, so "listen without" a module plays exactly that module's effect): the parametric EQ's bands and output gain (the same SVF designs as `ParametricEq`), the dynamic EQ's user static gains, the bass shelf at its full boost (Q 0.7, ≤ 15 dB) with the subsonic high-pass, presence at its full lift (bell Q 0.8, 6 dB × presence) and the air shelf (10 kHz, 2 dB × air), the Warmth tilt's two sections and its trim at the target amount (§14.13: −amount × its measured loudness change, followed in 0.25 dB steps, so a trim that already takes the lift back is not taken back twice), the saturator's small-signal gain 1 − mix + mix · 10^(`sat.output`/20), and the surround folds' −3.01 dB trim. The bass boost is taken before the SafetyGovernor scales it: a preamp that followed the governor would feed its loop. Not modelled: the dynamic-EQ ranges and mode bands, the transient shaper, the de-mud cut (level-dependent, and they withdraw on loud material), harmonics (bass, air, saturation), the crossfeed's low-frequency sum on centred content, the compressor's make-up (it follows its own gain reduction) and the maximizer's drive (loudness on purpose). Each section's |H|² is evaluated in closed form at s = jΩ (`responseDb`), one `tan` per frequency.
 
-**Prediction and preamp.** `headroom::predictMaxBoostWith` over 20 Hz – min(20 kHz, 0.49 fs) with the Programme weighting (§14.10); preamp = −max(0, prediction − allowance), through a 20 ms linear ramp. It runs on the audio thread inside `applyParameters()` when one of its 97 inputs or the fold changes, at most once per 10 ms, without allocation (about 45 µs for 25 sections on the §15.2 machine: under 0.5 % of a core while a parameter moves, nothing while none does); the first block after `prepare()` starts the preamp at its value. `getPredictedBoostDb()`, `getPredictedBoostHz()` and `getAutoPreampDb()` publish it (any thread). The prediction runs with the preamp off too.
+**Prediction and preamp.** `headroom::predictMaxBoostWith` over 20 Hz – min(20 kHz, 0.49 fs) with the Programme weighting (§14.10); preamp = −max(0, prediction − allowance), through a 20 ms linear ramp. It runs on the audio thread inside `applyParameters()` when one of its 98 inputs (the Warmth trim among them) or the fold changes, at most once per 10 ms, without allocation (about 45 µs for 25 sections on the §15.2 machine: under 0.5 % of a core while a parameter moves, nothing while none does); the first block after `prepare()` starts the preamp at its value. `getPredictedBoostDb()`, `getPredictedBoostHz()` and `getAutoPreampDb()` publish it (any thread). The prediction runs with the preamp off too.
 
 **Placement.** After the dry reference, the input meters and the analyser's pre tap, before the gate: AutoLevel measures ahead of it (applied before AutoLevel's detector, AutoLevel would cancel it), bypass compares against the unprocessed signal, and every module sees the lowered level. Unity is not applied at all (bit-exact with the preamp off or at 0 dB).
 
@@ -3862,21 +3907,25 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 
 ### 14.13 Warmth tilt (chain)
 
-[11 E14](11-enhancement-report.md#e14)'s Warmth remap, after the owner's first test on a headset ("Warmth 0 → 100 seems to do nothing"): v1 Warmth was Tape drive +9 dB (about 3 % odd-order THD at mid-knob: grit, not warmth), bass +2 dB and a little bass harmonics, and no change of tone. Warmth now *is* a change of tone. `ToneTilt` (`dsp/ToneTilt.h`) sits between the Clarity and Saturation slots: after the tonal modules, ahead of the saturator (so the Tube colour works on the warmed signal), and outside the SafetyGovernor's bass and drive spans. Parameters (layout version 5, both 0 / off by default, so every preset that leaves Warmth at 0 is bit-identical): `warmth.tone` (0 … 1; the Music Warmth macro adds up to 1, ungoverned like the other tonal rows) and `warmth.tapeGrit` (§14.3).
+[11 E14](11-enhancement-report.md#e14)'s Warmth remap, after the owner's first test on a headset ("Warmth 0 → 100 seems to do nothing"): v1 Warmth was Tape drive +9 dB (about 3 % odd-order THD at mid-knob: grit, not warmth), bass +2 dB and a little bass harmonics, and no change of tone on broadband programme (pink noise: +0.4 dB at 63 Hz, −0.5 dB elsewhere). Warmth now *is* a change of tone. `ToneTilt` (`dsp/ToneTilt.h`) runs ahead of the module slots: after the preamp, the loudness contour, the gate and the neural slot, before the parametric EQ and every stage the SafetyGovernor scales or taps. Parameters (layout version 5, both 0 / off by default, so every preset that leaves Warmth at 0 is bit-identical): `warmth.tone` (0 … 1; the Music Warmth macro adds up to 1 through the macros' smoothstep, so the knob at 25 / 50 / 75 % gives 16 / 50 / 84 % of the effect, ungoverned like the other tonal rows) and `warmth.tapeGrit` (§14.3).
 
-**Tilt.** Two SVF shelves: low shelf 300 Hz, Q 0.707, +3.8 dB × amount; high shelf 7 kHz, Q 0.707, −2.8 dB × amount. A shelf has half its gain at its corner, so 200 Hz and below get most of the lift, 10 kHz and above most of the cut, and the mids stay put. In plain words: more body and roundness in the low end and low mids, softer cymbals, hiss and sibilance, at the same loudness. Pink noise through the Music chain re Warmth 0 (third-octave bands, compensation included): Warmth 50 +1.46 / −0.09 / −1.30 dB and Warmth 100 +2.92 / −0.19 / −2.59 dB at 200 Hz / 1 kHz / 10 kHz.
+**Tilt.** Two SVF sections: a body bell at 200 Hz, Q 0.7, +3.5 dB × amount (half of it at 100 and 400 Hz, +0.5 dB at 50 Hz, +0.3 dB at 1 kHz) and a high shelf at 7 kHz, Q 0.707, −3.0 dB × amount (−1.5 dB at 7 kHz, −2.6 dB at 10 kHz). In plain words: more body in the upper bass and low mids (kick body, the bass line's upper partials, the chest of a voice), softer cymbals, hiss and sibilance, the sub-bass and the vocal range left where they were, at the same loudness. Pink noise through the Music chain re Warmth 0 (third-octave bands, compensation included, 48 kHz): Warmth 50 +1.75 / +0.17 / −1.25 dB and Warmth 100 +3.50 / +0.34 / −2.49 dB at 200 Hz / 1 kHz / 10 kHz (44.1 kHz within 0.05 dB; 96 kHz +3.88 / +0.71 / −2.01 dB, where pink noise's ultrasonic energy under the high shelf moves the trim; identical in all three latency profiles).
 
-**Level compensation.** The tilt's loudness change depends on the programme: +0.2 LU on pink noise but +3.15 LU on the bass-heavy drum programme (55 Hz bass line, chirp kicks) at 100 %, so no fixed trim holds both within 0.3 LU. The stage measures it, open loop: the K-weighted (BS.1770) mean square of its *input* and of its input through the full tilt (amount 1), both channels summed, one-pole over 3 s (a running mean for the first 3 s after a start, so it settles in a few hundred ms; chunks below −80 dB are skipped). L1 = their ratio in dB, clamped to [−2.8, +3.8] dB; the trim at amount a is −a · L1 (the loudness change is linear in a within 0.05 dB). It never reads its own output, so nothing it does feeds back; it moves with the programme's spectral balance over seconds and follows the amount at once, so turning Warmth changes tone, not level. Integrated loudness re Warmth 0 (5 s renders): pink −0.14 / −0.03 LU, drum programme −0.07 / −0.04 LU at Warmth 50 / 100 (trim −0.10 / −0.21 and −1.58 / −3.16 dB); over 2 – 6 s of the drum programme (kicks every 500 ms) the trim moves 0.04 dB. Unlike a closed loop on `DistortionEstimator` (which E14 rules out), the tone never pumps: the shelves are fixed for a given amount, only the broadband trim follows the programme, slowly.
+**Why a bell, not a low shelf (verifier's retune).** The first version used a low shelf at 300 Hz (+3.8 dB). A shelf lifts the 40–80 Hz energy that carries most of the K-weighted loudness of bass-heavy music, so the level compensation took everything above the bass back down: on a synthetic mix (kick, bass line, chords, voice) at Warmth 100 the 250 Hz octave ended 0.6 dB *lower* than at Warmth 0, 1 – 4 kHz 3 dB lower and 12.5 kHz 5.7 dB lower, the sub-bass +0.8 dB: "quieter and duller", not "warmer". With the bell the same mix reads −0.4 / +1.0 / +1.9 dB at 63 / 125 / 250 Hz, −0.1 dB at 500 Hz, −0.9 to −1.4 dB over 1 – 4 kHz and −3.1 / −4.0 dB at 8 / 12.5 kHz: the body goes up, the vocal range barely moves, the top softens. The trim is smaller on bass-heavy programme (−0.7 dB on the drum-and-bass programme and −1.3 dB on the mix, against −3.2 / −3.0 dB with the shelf), so the tilt also moves less with the programme.
 
-**Saturation.** Warmth's saturation is now a gentle, mostly 2nd-order colour: +0.9 dB drive (governed; the depth blend `smoothstep(0, 6 dB, drive)` keeps it light) and Tube while `sat.type` is at its default (§6.8, §14.1); a saturator the user or preset switched on keeps its type and gets the +0.9 dB. On a −6 dBFS 1 kHz sine, maximizer off: THD+N 0.08 / 0.30 %, H2 −63.0 / −51.1 dBc, H3 −70.7 / −58.3 dBc, worst inharmonic −119.6 / −113.6 dBc at 44.1 kHz and −116.1 / −110.2 dBc at 48 kHz (Warmth 50 / 100). The drive range shrank from 9 to 0.9 dB (E14 asked for 10–15 dB less, which would be below 0 dB; the drive-dependent depth blend makes 0.9 dB the equivalent). The v1 bass boost and harmonics are gone: the low shelf already lifts the bass 3.8 dB, and +2 dB more at 70 Hz would add boom and limiter work without adding warmth.
+**Level compensation.** The tilt's loudness change depends on the programme (about 0 LU on pink noise, +0.7 LU on the drum-and-bass programme, +1.3 LU on the mix at 100 %), so no fixed trim holds within 0.3 LU. The stage measures it, open loop: the K-weighted (BS.1770) mean square of its *input* and of its input through the full tilt (amount 1), both channels summed, one-pole over 3 s (a running mean for the first 3 s after a start, so it settles in a few hundred ms; chunks below −80 dB are skipped). L1 = their ratio in dB, clamped to [−3.0, +3.5] dB; the trim at amount a is −a · L1. It never reads its own output, and nothing the SafetyGovernor scales runs ahead of it, so nothing downstream feeds back into it; it moves with the programme's spectral balance over seconds and follows the amount at once, so turning Warmth changes tone, not level. Integrated loudness re Warmth 0 (5 s renders, every rate and latency profile): pink −0.11 / −0.02 LU, drum programme −0.04 / −0.05 LU, the mix −0.05 / +0.01 LU at Warmth 50 / 100 (Done-when ≤ 0.3 LU); over 2 – 6 s of the drum programme (kicks every 500 ms) the trim moves 0.04 dB. The tone never pumps: the sections are fixed for a given amount; only the broadband trim follows the programme, slowly. Placement: between the Clarity and Saturation slots (the first version) the bell also lifted the bass engine's generated harmonics and the governed stages ahead of it moved the measure; ahead of the modules neither happens.
 
-**Tape grit.** With `warmth.tapeGrit` on, Warmth is v1 row for row (Tape drive +9 dB, bass +2 dB, harmonics +0.2, no tilt, no override); Lo-Fi Chill and Warm Vinyl set it, so they sound as before (their effective values are bit-identical, and Warm Vinyl's "raise Warmth for more tape drive" still holds).
+**Saturation.** Warmth's saturation is a gentle, mostly 2nd-order colour: +0.9 dB drive (governed; the depth blend `smoothstep(0, 6 dB, drive)` keeps it light) and Tube while `sat.type` is at its default (§6.8, §14.1); a saturator the user or preset switched on keeps its type and gets the +0.9 dB. On a −6 dBFS 1 kHz sine, maximizer off or on: THD+N 0.08 / 0.30 %, H2 −63.0 / −51.1 dBc, H3 −70.7 / −58.3 dBc (Warmth 50 / 100; the same within 0.1 dB at 44.1, 48 and 96 kHz), worst inharmonic −117.8 / −111.9 dBc at 44.1 kHz and −114.4 / −108.5 dBc at 48 kHz. The drive range shrank from 9 to 0.9 dB (E14 asked for 10–15 dB less, which would be below 0 dB; the drive-dependent depth blend makes 0.9 dB the equivalent). The v1 bass boost and harmonics are gone: the body bell does the warming, and more at 70 Hz would add boom and limiter work, not warmth.
 
-**Glide and off.** The amount moves at most 5 per second (0 → 1 in 200 ms); coefficients and trim are recomputed every 32 samples and interpolated sample by sample. A sweep 0 → 100 → 0 over 2 s on 50 + 300 Hz tones: consecutive 20 ms periods differ by ≤ 0.01 dB and nothing above 2 kHz exceeds −95 dB re the tones. At amount 0 the shelves are the identity and the trim 0 dB; once the amount has glided there the stage idles and does not touch the signal (bit-exact), and a new start begins from cleared filters and a fresh measure. The first `setParams()` after `prepare()` applies without a glide. The automatic preamp's model counts the two shelves at the effective amount (+3.76 dB at 60 Hz re 1 kHz at Warmth 100), not the trim.
+**Tape grit.** With `warmth.tapeGrit` on, Warmth is v1 row for row (Tape drive +9 dB, bass +2 dB, harmonics +0.2, no tilt, no override); Lo-Fi Chill and Warm Vinyl set it, so they sound as before (their effective values are bit-identical, renders bit-exact, and Warm Vinyl's "raise Warmth for more tape drive" still holds).
 
-**Tests that prove it** (`tests/test_warmth.cpp`): the parameters (layout version 5, off); MacroMap (the tone set, the Tube override and a chosen type kept, governed drive, the v1 set with `warmth.tapeGrit`, Gaming's Voice & Score untouched with or without it); Lo-Fi Chill and Warm Vinyl bit-identical to the v1 Warmth; the v1 set's governed drive through the chain; the −6 dBFS 1 kHz sine (THD+N ≤ 0.5 %, H2 > H3, no inharmonic above −80 dBc at 44.1 / 48 kHz); the pink transfer (+3.0 / −2.5 dB × Warmth ± 0.3 dB, 1 kHz within 0.3 dB); loudness 0 ↔ 50 / 100 within 0.3 LU on pink and the drum programme; the trim's stability and the preamp model; the click-free sweep; bit-exact at 0 and after a trip to 100.
+**Glide and off.** The amount moves at most 5 per second (0 → 1 in 200 ms); coefficients and trim are recomputed every 32 samples and interpolated sample by sample. A sweep 0 → 100 → 0 over 2 s on 50 + 300 Hz tones: consecutive 20 ms periods differ by ≤ 0.01 dB and nothing above 2 kHz exceeds −95 dB re the tones; a step 0 → 100 or 100 → 0 in one block (64 or 512 samples) on 60 + 400 Hz tones keeps the largest second difference at that of the held settings and everything above 3 kHz under −100 dBFS. At amount 0 the sections are the identity and the trim 0 dB; once the amount has glided there the stage idles and does not touch the signal (bit-exact), and a new start begins from cleared filters and a fresh measure. The first `setParams()` after `prepare()` applies without a glide. Held settings render bit-identically at host blocks of 64, 512, 4096 and ragged sizes (1 sample: within −300 dB).
 
-**Known limitations.** The deviation from E14's numbers is on purpose: E14 asked for +1.5 / −1.5 dB, the owner heard nothing on a headset at the old mapping, so the tilt is about twice that (+2.9 / −2.6 dB on pink at 100 %). No listening panel yet ([11 E14](11-enhancement-report.md#e14) step 4). The app shows no indication that Warmth chose Tube, and no control for `warmth.tapeGrit` beyond the generic parameter list. A user preset that raised Warmth now gets the new Warmth unless it sets `warmth.tapeGrit` (a macro-map change cannot be shimmed, [11 T5](11-enhancement-report.md)).
+**Automatic preamp.** Its model (§14.11) counts the two sections at the effective amount (+3.2 dB at 200 Hz re 1 kHz at Warmth 100) and the trim at the target amount, −amount × the measured L1, followed in 0.25 dB steps. Counting the sections alone took the trim's work twice: with `auto.preamp` on, Warmth 100 read −2.8 LU on every programme. Now the preamp takes back only what the trim leaves (the drum programme: −1.6 LU, preamp −1.6 dB; pink noise, where the trim is 0: −2.8 LU, the preamp's intended headroom for a +3.5 dB bell).
+
+**Tests that prove it** (`tests/test_warmth.cpp`): the parameters (layout version 5, off); MacroMap (the tone set, the Tube override and a chosen type kept, governed drive, the v1 set with `warmth.tapeGrit`, Gaming's Voice & Score untouched with or without it); Lo-Fi Chill and Warm Vinyl bit-identical to the v1 Warmth; the v1 set's governed drive through the chain; the −6 dBFS 1 kHz sine (THD+N ≤ 0.5 %, H2 > H3, no inharmonic above −80 dBc at 44.1 / 48 kHz); the pink transfer (+3.5 / −2.5 dB × Warmth ± 0.3 dB, 1 kHz +0.35 × Warmth ± 0.2 dB); loudness 0 ↔ 50 / 100 within 0.3 LU on pink and the drum programme; the trim's stability and the preamp model's sections; the preamp counting the trim; the click-free sweep; bit-exact at 0 and after a trip to 100.
+
+**Known limitations.** The deviation from E14's numbers is on purpose: E14 asked for a +1.5 / −1.5 dB low / high shelf pair; the owner heard nothing at the old mapping, so the tilt is about twice that (+3.5 / −2.5 dB on pink at 100 %), and its low section is a body bell (above). No listening panel yet ([11 E14](11-enhancement-report.md#e14) step 4). With `auto.preamp` on, Warmth still costs level on programme whose trim is small (the preamp's headroom for the bell, above). The app shows no indication that Warmth chose Tube, and no control for `warmth.tapeGrit` beyond the generic parameter list. A user preset that raised Warmth now gets the new Warmth unless it sets `warmth.tapeGrit` (a macro-map change cannot be shimmed, [11 T5](11-enhancement-report.md)).
 
 ---
 

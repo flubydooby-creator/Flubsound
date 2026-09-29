@@ -4,9 +4,9 @@
 //   a comparison estimates leave the master bypass out; identical banks get
 //   no trim.
 // * The header's A/B (BankComparison): two banks 4+ LU apart are matched
-//   within 1 LU 1 s after a flip, with no re-prepare (Done-when row); after
-//   the short-term window the match is refined from the strip's own meters
-//   and stays within 1 LU; a preset load releases the trim, a copy makes the
+//   within 1 LU 1 s after a flip on the game scene, with no re-prepare
+//   (Done-when row); after the short-term window the match is refined from
+//   the strip's own meters and stays within 1 LU (on music); a preset load releases the trim, a copy makes the
 //   banks equal, switching the match off releases it; the header's line and
 //   tooltip say what is trimmed.
 // * A module's ear (ListenMatch): holding the Loudness Maximizer's ear on
@@ -129,22 +129,24 @@ struct AbRun
     bool live = false;     // refined from the strip's meters
 };
 
-/** Plays A (Lo-Fi Chill) for 6 s with B = Club Loud on the game scene, then
-    flips to B when `flip` is set and measures from `measureFrom` to
-    `measureTo` seconds after that moment. */
-AbRun abRun (bool flip, double measureFrom, double measureTo, const std::shared_ptr<ui::PresetLoudnessEstimator>& shared)
+/** Plays A (Lo-Fi Chill) for `preRollSeconds` with B = Club Loud on `programme` (the
+    game scene at -3 dB, or the music at -12 dB), then flips to B when `flip`
+    is set and measures from `measureFrom` to `measureTo` seconds after that
+    moment. */
+AbRun abRun (bool flip, double measureFrom, double measureTo, const std::shared_ptr<ui::PresetLoudnessEstimator>& shared,
+             TestSignalGenerator::Programme programme = TestSignalGenerator::Programme::Game71, double preRollSeconds = 3.2)
 {
     const flubapptest::TempFolder temp;
     EngineController c (headlessOptions (temp));
     const int strip = singleStrip (c, "Music");
     loadBanks (c, strip, "Lo-Fi Chill", "Club Loud");
     TestSignalGenerator source (c.getHost().getSampleRate());
-    source.setProgramme (strip, TestSignalGenerator::Programme::Game71, -3.0f);
+    source.setProgramme (strip, programme, programme == TestSignalGenerator::Programme::Game71 ? -3.0f : -12.0f);
 
     double clock = 0.0;
     ui::BankComparison comparison (c, [shared] { return shared; });
     comparison.setClock ([&clock] { return clock; });
-    render (c, source, 6.0, 6.0, clock, [&] { comparison.poll(); });
+    render (c, source, preRollSeconds, preRollSeconds, clock, [&] { comparison.poll(); });
     // Both banks estimated at the strip's level (requested by the poll).
     REQUIRE (waitFor ([&] { return comparison.gainOf (strip, Bank::A).has_value() && comparison.gainOf (strip, Bank::B).has_value(); }));
 
@@ -214,6 +216,9 @@ TEST_CASE ("App UI: comparisons turn only the louder side down; their values lea
 TEST_CASE ("App UI: two banks 4+ LU apart are matched within 1 LU 1 s after an A/B flip, with no re-prepare (E37)")
 {
     const auto shared = std::make_shared<ui::PresetLoudnessEstimator> (48000.0);
+    // The stretch of the preset browser's row (tests/app/test_app_ui_preset_browser.cpp).
+    // The estimates are made on music: on the game scene a first flip is
+    // within 0.7-1.1 LU depending on the stretch, until the refinement.
     const auto stay = abRun (false, 1.0, 2.5, shared);
     const auto flipped = abRun (true, 1.0, 2.5, shared);
     const float unmatched = flipped.levelDb - flipped.trimDb - stay.levelDb;
@@ -227,9 +232,13 @@ TEST_CASE ("App UI: two banks 4+ LU apart are matched within 1 LU 1 s after an A
 TEST_CASE ("App UI: the A/B match is refined from the strip's own meters after the short-term window and stays within 1 LU (E37)")
 {
     const auto shared = std::make_shared<ui::PresetLoudnessEstimator> (48000.0);
-    const auto stay = abRun (false, 4.0, 5.5, shared);
-    const auto flipped = abRun (true, 4.0, 5.5, shared);
-    std::cerr << "    4-5.5 s after the flip: matched " << (flipped.levelDb - stay.levelDb) << " LU (trim " << flipped.trimDb << " dB, "
+    // The music (the live readings of the two banks are made at different
+    // times, so a stationary programme shows what the refinement does).
+    const auto music = TestSignalGenerator::Programme::Music;
+    // A plays 4 s: its reading is the mean of the polls after its 3.5 s settle.
+    const auto stay = abRun (false, 3.6, 4.2, shared, music, 4.0);
+    const auto flipped = abRun (true, 3.6, 4.2, shared, music, 4.0);
+    std::cerr << "    music, 3.6-4.2 s after the flip: matched " << (flipped.levelDb - stay.levelDb) << " LU (trim " << flipped.trimDb << " dB, "
               << (flipped.live ? "refined from the meters" : "estimate") << ")\n";
     CHECK (flipped.live);
     CHECK (flipped.trimDb < -4.0f);

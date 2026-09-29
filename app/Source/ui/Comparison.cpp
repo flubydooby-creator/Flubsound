@@ -185,7 +185,8 @@ void BankComparison::poll()
         const auto variant = variantFor (controller, s);
         for (const auto b : { Bank::A, Bank::B })
         {
-            const auto k = PresetLoudnessEstimator::keyOf (values[index (b)], st.levelLufs, variant);
+            // The values' own key (not the level's): a level that moves does not change a bank.
+            const auto k = PresetLoudnessEstimator::keyOf (values[index (b)], PresetLoudnessEstimator::kDefaultLevelLufs, variant);
             if (k != st.key[index (b)])
             {
                 st.key[index (b)] = k;
@@ -243,14 +244,23 @@ void BankComparison::poll()
             auto& meters = controller.getChain (s).meters();
             const float in = meters.inShortTermLufs.load (std::memory_order_relaxed);
             const float out = meters.shortTermLufs.load (std::memory_order_relaxed);
-            if (std::isfinite (out) && out > -70.0f)
+            if (std::isfinite (out) && out > -70.0f && std::isfinite (in))
             {
-                // Out minus the programme's own level (the estimates' input).
+                // Out minus the programme's own level (the estimates' input),
+                // averaged over the readings since the bank settled, so a
+                // single loud or quiet stretch of the programme weighs less.
                 auto& live = st.liveGain[p];
-                live.key = st.key[p];
-                live.gainLu = out - *level;
-                live.levelLufs = *level;
-                live.valid = std::isfinite (in);
+                if (! live.valid || live.key != st.key[p])
+                {
+                    live = {};
+                    live.key = st.key[p];
+                }
+                ++live.readings;
+                live.gainSum += static_cast<double> (out - *level);
+                live.levelSum += static_cast<double> (*level);
+                live.gainLu = static_cast<float> (live.gainSum / live.readings);
+                live.levelLufs = static_cast<float> (live.levelSum / live.readings);
+                live.valid = true;
             }
         }
 
@@ -478,9 +488,9 @@ void ListenMatch::prepare (int s, int enableParamId)
     {
         auto& store = controller.getParams (s);
         const auto values = comparisonValues (store, store.getActiveBank());
-        const float level = programmeLevel (controller, s).value_or (PresetLoudnessEstimator::kDefaultLevelLufs);
-        est->request (values, level, true, variantFor (controller, s));
-        est->request (values, level, true, variantFor (controller, s, enableParamId));
+        preparedLevel = programmeLevel (controller, s).value_or (PresetLoudnessEstimator::kDefaultLevelLufs);
+        est->request (values, preparedLevel, true, variantFor (controller, s));
+        est->request (values, preparedLevel, true, variantFor (controller, s, enableParamId));
     }
 }
 
@@ -492,11 +502,27 @@ void ListenMatch::listen (int s, int enableParamId, bool isHeld)
     {
         if (active && (s != strip || enableParamId != moduleId))
             reset(); // another module (or strip): a new session
+        const bool sameSession = active && s == strip && enableParamId == moduleId;
         strip = s;
         moduleId = enableParamId;
         active = true;
         held = true;
-        prepare (s, enableParamId);
+        // The level of the session is the one at its first hold (or at the
+        // hover before it): the estimates stay put while the programme moves.
+        if (! sameSession)
+        {
+            const float hovered = preparedLevel;
+            prepare (s, enableParamId);
+            if (auto est = estimator(); est != nullptr)
+            {
+                auto& store = controller.getParams (s);
+                const auto values = comparisonValues (store, store.getActiveBank());
+                if (est->find (values, hovered, variantFor (controller, s)).has_value()
+                    && est->find (values, hovered, variantFor (controller, s, enableParamId)).has_value())
+                    preparedLevel = hovered;
+            }
+            sessionLevel = preparedLevel;
+        }
     }
     else
     {
@@ -519,7 +545,7 @@ void ListenMatch::update()
         return;
     auto& store = controller.getParams (strip);
     const auto values = comparisonValues (store, store.getActiveBank());
-    const float level = programmeLevel (controller, strip).value_or (PresetLoudnessEstimator::kDefaultLevelLufs);
+    const float level = sessionLevel;
     const auto with = est->find (values, level, variantFor (controller, strip));
     const auto without = est->find (values, level, variantFor (controller, strip, moduleId));
     if (! with.has_value() || ! without.has_value())

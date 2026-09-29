@@ -164,7 +164,9 @@ TEST_CASE ("Warmth: the new parameters are appended in layout version 5, off by 
     }
     CHECK (findByKey ("warmth.tone") == WarmthTone);
     CHECK (findByKey ("warmth.tapeGrit") == WarmthTapeGrit);
-    CHECK (WarmthTapeGrit == kNumScalarParams - 1);
+    // Appended after the version 4 block (other version 5 parameters may follow).
+    CHECK (WarmthTone == ContourMaxLiftDb + 1);
+    CHECK (WarmthTapeGrit == WarmthTone + 1);
 }
 
 TEST_CASE ("Warmth: MacroMap - Music Warmth drives the tilt and a gentle Tube colour; tapeGrit is the v1 rows; Gaming's Voice & Score is untouched")

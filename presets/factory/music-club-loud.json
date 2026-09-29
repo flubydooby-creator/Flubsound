@@ -18,7 +18,7 @@
     "bass.harmonics": 0.1,
     "bass.tighten": 0.2,
     "bass.monoBelow": 100,
-    "bass.subsonic": 28,
+    "bass.subsonicOrder": "12 dB/oct",
     "clarity.presence": 0.1,
     "clarity.demud": 0.2,
     "max.glue": 0.4,

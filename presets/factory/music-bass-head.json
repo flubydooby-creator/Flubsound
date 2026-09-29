@@ -20,7 +20,7 @@
     "bass.character": 0.35,
     "bass.tighten": 0.1,
     "bass.monoBelow": 110,
-    "bass.subsonic": 25,
+    "bass.subsonicOrder": "12 dB/oct",
     "clarity.demud": 0.2,
     "max.glue": 0.3,
     "eq.3.gain": -1.5,
