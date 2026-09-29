@@ -96,7 +96,9 @@
 //   presence 2-5 kHz, harsh 5-10 kHz and air 10-16 kHz lifts over the
 //   200 Hz - 1 kHz lift, output against the dynamic EQ's input); the loop
 //   (a PI as above at kTonalGain, set point kTonalMarginDb inside the
-//   budget, falls at most kTonalFallDbPerSec) takes the scale down while
+//   budget, holding within kTonalHoldBandDb under it, falls at most
+//   kTonalFallDbPerSec; readings averaged over about 1 s, so it settles in
+//   about 6 s) takes the scale down while
 //   any band's lift is over its budget, whatever made it bright, and lets
 //   it recover when all are comfortably under. Budgets: presence / harsh /
 //   air +3 / +3 / +4 dB in Music, +2 / +2 / +3 dB in Gaming (its Done-when:
@@ -487,8 +489,9 @@ public:
     /** The tonal-balance rule (docs/11 E07): PI gain (a slow loop: its
         readings average over TonalBalanceMeter::kAverageSeconds), set
         point under the budget, fall limit of its u. */
-    static constexpr float kTonalGain = 0.2f;
+    static constexpr float kTonalGain = 0.5f;
     static constexpr float kTonalMarginDb = 0.5f;
+    static constexpr float kTonalHoldBandDb = 1.0f; // narrower than the drive's: a darker programme gets its lifts back
     static constexpr float kTonalFallDbPerSec = 3.0f;
 
     void prepare (double sampleRate) noexcept;
@@ -547,8 +550,9 @@ private:
         /** Advances by one tick on error e (dB, > 0 = over its set point) and
             returns the candidate u (<= 0). offsetDb shifts the loop (the
             feed-forward); gain scales its PI gains (a trim around a
-            feed-forward runs at kTrimGain). */
-        float step (float e, float dt, float offsetDb, float gain = 1.0f) noexcept FLUB_NONBLOCKING;
+            feed-forward runs at kTrimGain); holdBandDb is the band under
+            the set point where it holds. */
+        float step (float e, float dt, float offsetDb, float gain = 1.0f, float holdBandDb = kHoldBandDb) noexcept FLUB_NONBLOCKING;
         /** Anti-windup (a loop that asked for less than was applied starts
             the next tick from what was applied) and the probe memory: at the
             onset of a back-off, recovery is capped kProbeMarginDb under the

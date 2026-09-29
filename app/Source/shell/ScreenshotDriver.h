@@ -26,6 +26,9 @@
 //   governor        Boost 100 %, Loudness / Impact 100 %, maximizer drive
 //                   12 dB, protection Strict: the governor backs off (use
 //                   --seconds 8 so its 3 s averages settle)
+//   preset-browser  the preset browser open (docs/11 E40), searched for "late
+//                   night quiet" ("night quiet" in gaming mode), the best
+//                   match selected and previewing, loudness matched
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,

@@ -27,6 +27,10 @@ constexpr const char* windowState = "ui.windowState";
 constexpr const char* uiScale = "ui.scalePercent";
 constexpr const char* uiTheme = "ui.theme";
 constexpr const char* uiView = "ui.view";
+constexpr const char* presetFavourites = "presets.favourites";
+constexpr const char* presetRecent = "presets.recent";
+constexpr const char* presetPreview = "presets.preview";
+constexpr const char* presetPreviewMatched = "presets.previewMatched";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
@@ -576,6 +580,59 @@ AppSettings::MainView AppSettings::getMainView() const
 }
 
 void AppSettings::setMainView (MainView view) { properties->setValue (Keys::uiView, view == MainView::Advanced ? "advanced" : "simple"); }
+
+// ---- Preset browser ------------------------------------------------------------------------------------
+// Lists of preset ids, comma separated (a uuid or a legacy id never holds a comma).
+namespace
+{
+juce::StringArray readIdList (const juce::PropertiesFile& file, const char* key)
+{
+    auto ids = juce::StringArray::fromTokens (file.getValue (key), ",", {});
+    ids.trim();
+    ids.removeEmptyStrings();
+    ids.removeDuplicates (false);
+    return ids;
+}
+} // namespace
+
+juce::StringArray AppSettings::getFavouritePresets() const { return readIdList (*properties, Keys::presetFavourites); }
+bool AppSettings::isFavouritePreset (const juce::String& presetId) const { return presetId.isNotEmpty() && getFavouritePresets().contains (presetId); }
+
+void AppSettings::setFavouritePreset (const juce::String& presetId, bool favourite)
+{
+    const auto id = presetId.trim();
+    if (id.isEmpty() || id.containsChar (','))
+        return;
+    auto ids = getFavouritePresets();
+    ids.removeString (id);
+    if (favourite)
+        ids.add (id);
+    properties->setValue (Keys::presetFavourites, ids.joinIntoString (","));
+}
+
+juce::StringArray AppSettings::getRecentPresets() const
+{
+    auto ids = readIdList (*properties, Keys::presetRecent);
+    ids.removeRange (kMaxRecentPresets, ids.size());
+    return ids;
+}
+
+void AppSettings::addRecentPreset (const juce::String& presetId)
+{
+    const auto id = presetId.trim();
+    if (id.isEmpty() || id.containsChar (','))
+        return;
+    auto ids = getRecentPresets();
+    ids.removeString (id);
+    ids.insert (0, id);
+    ids.removeRange (kMaxRecentPresets, ids.size());
+    properties->setValue (Keys::presetRecent, ids.joinIntoString (","));
+}
+
+bool AppSettings::getPresetPreview() const { return properties->getBoolValue (Keys::presetPreview, true); }
+void AppSettings::setPresetPreview (bool preview) { properties->setValue (Keys::presetPreview, preview); }
+bool AppSettings::getPresetPreviewMatched() const { return properties->getBoolValue (Keys::presetPreviewMatched, true); }
+void AppSettings::setPresetPreviewMatched (bool matched) { properties->setValue (Keys::presetPreviewMatched, matched); }
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
 void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 

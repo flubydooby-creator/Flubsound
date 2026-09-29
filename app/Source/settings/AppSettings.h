@@ -253,6 +253,25 @@ public:
     MainView getMainView() const;
     void setMainView (MainView view);
 
+    // ---- Preset browser (docs/11 E40) --------------------------------------------------
+    /** Favourite presets by id (the uuid, PresetManager), in the order they
+        were marked. An id that no longer names a preset is kept (a user
+        preset folder on a disconnected drive) and simply not shown. */
+    juce::StringArray getFavouritePresets() const;
+    bool isFavouritePreset (const juce::String& presetId) const;
+    void setFavouritePreset (const juce::String& presetId, bool favourite);
+    /** Presets the user picked (header or browser), newest first, at most
+        kMaxRecentPresets; picking one again moves it to the front. */
+    static constexpr int kMaxRecentPresets = 8;
+    juce::StringArray getRecentPresets() const;
+    void addRecentPreset (const juce::String& presetId);
+    /** The browser's switches: play the selected preset while browsing
+        (default on) and match its loudness to the current sound (default on). */
+    bool getPresetPreview() const;
+    void setPresetPreview (bool preview);
+    bool getPresetPreviewMatched() const;
+    void setPresetPreviewMatched (bool matched);
+
     /** The output device the user chose (e.g. a USB headset); restored when it
         reappears after being unplugged / powered off. */
     juce::String getPreferredOutputDevice() const;

@@ -2575,4 +2575,512 @@ TEST_CASE ("Platform: the Linux router links the sink monitors with pw-link, re-
     CHECK (status.empty());
 }
 
+// ---------------------------------------------------------------------------
+// docs/11 E44: real-time scheduling of the audio thread - no allocation when
+// the device thread promotes itself, and RealtimeKit asked from another
+// thread (a mock rtkit on a private dbus-daemon standing in for the system
+// bus).
+// ---------------------------------------------------------------------------
+TEST_CASE ("Platform: promoteAudioThread allocates nothing, and a thread's scheduling is read back by its kernel thread id (E44)")
+{
+    CHECK (RealtimeScheduling::currentThreadId() == static_cast<uint64_t> (::syscall (SYS_gettid)));
+    CHECK (! RealtimeScheduling::queryThread (0).known);
+    CHECK (! RealtimeScheduling::queryThread (uint64_t { 1 } << 40).known);
+
+    int64_t allocations = -1;
+    bool readBack = false, restored = false;
+    std::thread worker (
+        [&]
+        {
+            const uint64_t self = RealtimeScheduling::currentThreadId();
+            const auto before = RealtimeScheduling::queryThread (self);
+            // The first device callback's promotion: the saved policy lives in
+            // the thread's own storage, nothing is allocated.
+            void* handle = nullptr;
+            {
+                flubtest::AllocationGuard guard;
+                handle = SystemTuning::promoteAudioThread();
+                allocations = guard.allocations();
+            }
+            const auto during = RealtimeScheduling::queryThread (self);
+            // Without RT rights (CI) the thread stays SCHED_OTHER; with them it
+            // runs FIFO 20 (or at the user's lower rtprio limit).
+            readBack = before.known && ! before.realtime && before.policy == "OTHER" && before.priority == 0 && during.known
+                       && (handle != nullptr ? during.realtime && during.policy == "FIFO" && during.priority >= 1 && during.priority <= 20
+                                             : ! during.realtime);
+            SystemTuning::revertAudioThread (handle);
+            restored = ! RealtimeScheduling::queryThread (self).realtime;
+        });
+    worker.join();
+    CHECK (allocations == 0);
+    CHECK (readBack);
+    CHECK (restored);
+}
+
+namespace
+{
+/** A private connection to the bus at 'address' (nullptr on failure). */
+dbus::Connection* connectToBus (const dbus::Api& api, const std::string& address)
+{
+    dbus::Error error;
+    api.errorInit (&error);
+    dbus::Connection* connection = api.connectionOpenPrivate (address.c_str(), &error);
+    if (connection != nullptr && api.busRegister (connection, &error) == 0)
+    {
+        api.connectionClose (connection);
+        api.connectionUnref (connection);
+        connection = nullptr;
+    }
+    api.errorFree (&error);
+    return connection;
+}
+
+/** The "Max realtime timeout" hard limit in /proc/<pid>/limits, in us; -1 =
+    unlimited or unreadable. */
+int64_t rttimeHardLimit (uint32_t pid)
+{
+    std::ifstream limits ("/proc/" + std::to_string (pid) + "/limits");
+    for (std::string line; std::getline (limits, line);)
+        if (line.rfind ("Max realtime timeout", 0) == 0)
+        {
+            std::istringstream fields (line.substr (std::strlen ("Max realtime timeout")));
+            std::string soft, hard;
+            fields >> soft >> hard;
+            return hard == "unlimited" || hard.empty() ? -1 : std::stoll (hard);
+        }
+    return -1;
+}
+
+/** In-process stand-in for rtkit-daemon: owns org.freedesktop.RealtimeKit1 on
+    the private bus, answers the MaxRealtimePriority / RTTimeUSecMax
+    properties and checks MakeThreadRealtime the way rtkit does: the caller's
+    pid from the bus, the thread among that process's tasks, the priority at
+    most MaxRealtimePriority and the process's RLIMIT_RTTIME hard limit at
+    most RTTimeUSecMax (read from /proc/<pid>/limits, as rtkit reads it).
+    Served by its own thread; the test reads what it recorded under its
+    mutex. */
+class MockRtkit
+{
+public:
+    struct Call
+    {
+        std::string member;     // "Get:<property>" or "MakeThreadRealtime"
+        uint64_t thread = 0;    // MakeThreadRealtime
+        uint32_t priority = 0;  // MakeThreadRealtime
+        uint32_t pid = 0;       // the caller's process (MakeThreadRealtime)
+        int64_t rttimeHard = 0; // its RLIMIT_RTTIME hard limit at the call; -1 = unlimited
+        bool threadInProcess = false;
+    };
+
+    MockRtkit (const std::string& address, bool withPropertiesIn, int32_t maxPriorityIn, int64_t rttimeMaxIn)
+        : withProperties (withPropertiesIn), maxPriority (maxPriorityIn), rttimeMax (rttimeMaxIn)
+    {
+        if (api == nullptr || ! extra.ok || (connection = connectToBus (*api, address)) == nullptr)
+            return;
+        dbus::Error error;
+        api->errorInit (&error);
+        const int reply = extra.requestName (connection, rtkit::kService, 4 /* DO_NOT_QUEUE */, &error);
+        api->errorFree (&error);
+        if (reply != 1 /* PRIMARY_OWNER */)
+            return;
+        if (api->connectionGetUnixFd (connection, &busFd) == 0 || ::pipe2 (wakePipe, O_CLOEXEC | O_NONBLOCK) != 0)
+            return;
+        running = true;
+        thread = std::thread ([this] { serve(); });
+        // Its first messages (NameAcquired) handled, it waits in poll(): a
+        // child forked from here on finds no libdbus lock held by it.
+        waitUntil ([this] { return idle.load(); });
+    }
+
+    ~MockRtkit()
+    {
+        running = false;
+        if (thread.joinable())
+        {
+            const char byte = 0;
+            [[maybe_unused]] const auto written = ::write (wakePipe[1], &byte, 1);
+            thread.join();
+        }
+        disconnect (*api, connection);
+        for (const int fd : wakePipe)
+            if (fd >= 0)
+                ::close (fd);
+    }
+
+    bool ok() const { return thread.joinable(); }
+
+    /** MakeThreadRealtime answers org.freedesktop.DBus.Error.AccessDenied,
+        as rtkit does over its burst limit or for another user's thread. */
+    void refuseAll()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        refusing = true;
+    }
+
+    std::vector<Call> calls()
+    {
+        std::lock_guard<std::mutex> guard (mutex);
+        return recorded;
+    }
+
+private:
+    void serve()
+    {
+        pollfd fds[2] = { { busFd, POLLIN, 0 }, { wakePipe[0], POLLIN, 0 } };
+        while (running && api->connectionReadWrite (connection, 0) != 0)
+        {
+            while (dbus::Message* message = api->connectionPopMessage (connection))
+            {
+                const dbus::MessageRef owner (message);
+                if (api->messageGetType (message) == 1 /* method call */)
+                    handleCall (message);
+            }
+            if (api->connectionGetDispatchStatus (connection) == dbus::kDispatchDataRemains)
+                continue;
+            fds[0].events = static_cast<short> (POLLIN | (api->connectionHasMessagesToSend (connection) != 0 ? POLLOUT : 0));
+            idle = true;
+            ::poll (fds, 2, -1);
+            char buffer[16];
+            while (::read (wakePipe[0], buffer, sizeof (buffer)) > 0) {}
+        }
+    }
+
+    void send (dbus::Message* message)
+    {
+        api->connectionSend (connection, message, nullptr);
+        api->connectionFlush (connection);
+    }
+
+    void replyError (dbus::Message* call, const char* name, const char* text)
+    {
+        dbus::MessageRef reply (extra.newError (call, name, text));
+        send (reply.get());
+    }
+
+    /** The caller's pid, asked of the bus (GetConnectionUnixProcessID). */
+    uint32_t callerPid (const std::string& sender)
+    {
+        dbus::MessageRef request (api->messageNewMethodCall ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                                              "GetConnectionUnixProcessID"));
+        dbus::Iter args;
+        api->iterInitAppend (request.get(), &args);
+        dbus::appendBasic (*api, &args, dbus::kTypeString, sender);
+        dbus::Error error;
+        api->errorInit (&error);
+        dbus::MessageRef reply (api->sendWithReplyAndBlock (connection, request.get(), 5000, &error));
+        api->errorFree (&error);
+        uint32_t pid = 0;
+        dbus::Iter result;
+        if (reply != nullptr && api->iterInit (reply.get(), &result) != 0 && api->iterGetArgType (&result) == dbus::kTypeUInt32)
+            api->iterGetBasic (&result, &pid);
+        return pid;
+    }
+
+    void handleCall (dbus::Message* call)
+    {
+        const std::string interfaceName = dbus::str (api->messageGetInterface (call));
+        const std::string member = dbus::str (api->messageGetMember (call));
+        dbus::Iter args;
+        api->iterInit (call, &args);
+
+        if (interfaceName == "org.freedesktop.DBus.Properties" && member == "Get")
+        {
+            std::string iface, property;
+            dbus::readString (*api, &args, iface);
+            api->iterNext (&args);
+            dbus::readString (*api, &args, property);
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                recorded.push_back ({ "Get:" + property });
+            }
+            // rtkit before 0.11 has no properties at all.
+            if (! withProperties)
+                return replyError (call, "org.freedesktop.DBus.Error.UnknownMethod", "No such method 'Get'");
+            dbus::MessageRef reply (extra.newMethodReturn (call));
+            dbus::Iter out, variant;
+            api->iterInitAppend (reply.get(), &out);
+            if (iface == rtkit::kInterface && property == "MaxRealtimePriority")
+            {
+                api->iterOpenContainer (&out, dbus::kTypeVariant, "i", &variant);
+                api->iterAppendBasic (&variant, 'i', &maxPriority);
+            }
+            else if (iface == rtkit::kInterface && property == "RTTimeUSecMax")
+            {
+                api->iterOpenContainer (&out, dbus::kTypeVariant, "x", &variant);
+                api->iterAppendBasic (&variant, 'x', &rttimeMax);
+            }
+            else
+                return replyError (call, "org.freedesktop.DBus.Error.InvalidArgs", "No such property");
+            api->iterCloseContainer (&out, &variant);
+            return send (reply.get());
+        }
+
+        if (interfaceName == rtkit::kInterface && member == "MakeThreadRealtime")
+        {
+            Call made;
+            made.member = member;
+            if (api->iterGetArgType (&args) == 't')
+                api->iterGetBasic (&args, &made.thread);
+            api->iterNext (&args);
+            if (api->iterGetArgType (&args) == dbus::kTypeUInt32)
+                api->iterGetBasic (&args, &made.priority);
+            made.pid = callerPid (dbus::str (api->messageGetSender (call)));
+            made.rttimeHard = rttimeHardLimit (made.pid);
+            struct stat info {};
+            made.threadInProcess = made.pid != 0
+                                   && ::stat (("/proc/" + std::to_string (made.pid) + "/task/" + std::to_string (made.thread)).c_str(), &info) == 0;
+            bool refuse = false;
+            {
+                std::lock_guard<std::mutex> guard (mutex);
+                recorded.push_back (made);
+                refuse = refusing;
+            }
+            const int32_t limit = withProperties ? maxPriority : 20;
+            const int64_t rttimeLimit = withProperties ? rttimeMax : 200000;
+            if (refuse || ! made.threadInProcess || made.priority < 1 || made.priority > static_cast<uint32_t> (limit)
+                || made.rttimeHard < 0 || made.rttimeHard > rttimeLimit)
+                return replyError (call, "org.freedesktop.DBus.Error.AccessDenied", "Operation not permitted");
+            dbus::MessageRef reply (extra.newMethodReturn (call));
+            return send (reply.get());
+        }
+
+        replyError (call, "org.freedesktop.DBus.Error.UnknownMethod", "unknown method");
+    }
+
+    const dbus::Api* api = dbus::Api::get();
+    MockDBusApi extra { *dbus::Api::get() };
+    dbus::Connection* connection = nullptr;
+    const bool withProperties;
+    int32_t maxPriority;
+    int64_t rttimeMax;
+    int busFd = -1;
+    int wakePipe[2] = { -1, -1 };
+    std::atomic<bool> running { false }, idle { false };
+    std::thread thread;
+    std::mutex mutex;
+    std::vector<Call> recorded;
+    bool refusing = false;
+};
+
+/** What a RealtimeKit request made in a child process came to. */
+struct ChildRequest
+{
+    bool ran = false;
+    RealtimeKitResult result;
+    uint64_t thread = 0;
+    uint32_t pid = 0;
+    int64_t rttimeSoft = -2, rttimeHard = -2; // the child's RLIMIT_RTTIME afterwards; -1 = unlimited
+};
+
+/** Runs requestRealtimeKit (for the child's own thread) in a forked child:
+    it lowers the process's RLIMIT_RTTIME, which must not stay lowered in
+    the test binary. The child is single-threaded and only talks to the bus;
+    the mock rtkit's thread sits in poll() while it runs. */
+ChildRequest requestInChild (int wantedPriority)
+{
+    ChildRequest out;
+    int fds[2] = { -1, -1 };
+    if (::pipe2 (fds, O_CLOEXEC) != 0)
+        return out;
+    const pid_t child = ::fork();
+    if (child == 0)
+    {
+        ::close (fds[0]);
+        const uint64_t self = RealtimeScheduling::currentThreadId();
+        const auto result = RealtimeScheduling::requestRealtimeKit (self, wantedPriority);
+        rlimit limit {};
+        ::getrlimit (RLIMIT_RTTIME, &limit);
+        const auto asUsec = [] (rlim_t v) { return v == RLIM_INFINITY ? int64_t { -1 } : static_cast<int64_t> (v); };
+        std::ostringstream text;
+        text << static_cast<int> (result.outcome) << ' ' << result.priority << ' ' << result.rttimeUsec << ' ' << self << ' '
+             << asUsec (limit.rlim_cur) << ' ' << asUsec (limit.rlim_max) << ' ' << result.message;
+        const std::string line = text.str();
+        [[maybe_unused]] const auto written = ::write (fds[1], line.data(), line.size());
+        ::_exit (0);
+    }
+    ::close (fds[1]);
+    if (child < 0)
+    {
+        ::close (fds[0]);
+        return out;
+    }
+    std::string line;
+    pollfd readable { fds[0], POLLIN, 0 };
+    const auto deadline = std::chrono::steady_clock::now() + kHangGuard;
+    for (;;)
+    {
+        if (std::chrono::steady_clock::now() > deadline)
+        {
+            ::kill (child, SIGKILL);
+            break;
+        }
+        if (::poll (&readable, 1, 100) <= 0)
+            continue;
+        char buffer[512];
+        const ssize_t n = ::read (fds[0], buffer, sizeof (buffer));
+        if (n <= 0)
+            break;
+        line.append (buffer, static_cast<size_t> (n));
+    }
+    ::close (fds[0]);
+    int status = 0;
+    ::waitpid (child, &status, 0);
+    std::istringstream fields (line);
+    int outcome = -1;
+    if (! (fields >> outcome >> out.result.priority >> out.result.rttimeUsec >> out.thread >> out.rttimeSoft >> out.rttimeHard))
+        return out;
+    out.result.outcome = static_cast<RealtimeKitResult::Outcome> (outcome);
+    std::getline (fields >> std::ws, out.result.message);
+    out.pid = static_cast<uint32_t> (child);
+    out.ran = WIFEXITED (status) && WEXITSTATUS (status) == 0;
+    return out;
+}
+} // namespace
+
+TEST_CASE ("Platform: RealtimeKit is asked for the audio thread at <= MaxRealtimePriority, after RLIMIT_RTTIME is lowered to RTTimeUSecMax (E44)")
+{
+    PrivateSessionBus bus;
+    if (skipWithoutDBus (bus))
+        return;
+    ScopedEnv systemBus ("DBUS_SYSTEM_BUS_ADDRESS", bus.address.c_str());
+    using Outcome = RealtimeKitResult::Outcome;
+
+    {
+        // rtkit 0.11+: priority 20 asked, capped at its maximum of 15;
+        // RLIMIT_RTTIME (unlimited in a test process) lowered to its 150 ms.
+        MockRtkit rtkitd (bus.address, true, 15, 150000);
+        REQUIRE (rtkitd.ok());
+        const auto request = requestInChild (20);
+        REQUIRE (request.ran);
+        CHECK (request.result.outcome == Outcome::Granted);
+        CHECK (request.result.message.empty());
+        CHECK (request.result.priority == 15);
+        CHECK (request.result.rttimeUsec == 150000);
+        CHECK (request.rttimeHard == 150000);
+        CHECK (request.rttimeSoft >= 0);
+        CHECK (request.rttimeSoft <= 150000);
+
+        const auto calls = rtkitd.calls();
+        REQUIRE (calls.size() == 3);
+        CHECK (calls[0].member == "Get:MaxRealtimePriority");
+        CHECK (calls[1].member == "Get:RTTimeUSecMax");
+        CHECK (calls[2].member == "MakeThreadRealtime");
+        CHECK (calls[2].thread == request.thread);
+        CHECK (calls[2].pid == request.pid);
+        CHECK (calls[2].threadInProcess);
+        CHECK (calls[2].priority == 15);
+        // The precondition held when rtkit looked, not only afterwards.
+        CHECK (calls[2].rttimeHard == 150000);
+    }
+
+    {
+        // Asking for less than the maximum asks for exactly that.
+        MockRtkit rtkitd (bus.address, true, 15, 150000);
+        REQUIRE (rtkitd.ok());
+        const auto request = requestInChild (5);
+        CHECK (request.result.outcome == Outcome::Granted);
+        CHECK (request.result.priority == 5);
+    }
+
+    {
+        // rtkit older than 0.11: no properties, its defaults (20, 200 ms).
+        MockRtkit rtkitd (bus.address, false, 0, 0);
+        REQUIRE (rtkitd.ok());
+        const auto request = requestInChild (20);
+        CHECK (request.result.outcome == Outcome::Granted);
+        CHECK (request.result.priority == 20);
+        CHECK (request.rttimeHard == 200000);
+        const auto calls = rtkitd.calls();
+        REQUIRE (! calls.empty());
+        CHECK (calls.back().member == "MakeThreadRealtime");
+        CHECK (calls.back().rttimeHard == 200000);
+    }
+
+    {
+        // rtkit refuses (its burst limit, or policy): Refused, and why.
+        MockRtkit rtkitd (bus.address, true, 20, 200000);
+        REQUIRE (rtkitd.ok());
+        rtkitd.refuseAll();
+        const auto request = requestInChild (20);
+        CHECK (request.result.outcome == Outcome::Refused);
+        CHECK (request.result.message.find ("RealtimeKit refused real-time priority 20") != std::string::npos);
+        CHECK (request.result.message.find ("Operation not permitted") != std::string::npos);
+    }
+
+    // No rtkit on the bus: Unavailable before any limit is touched (so this
+    // runs in the test process itself).
+    rlimit before {};
+    ::getrlimit (RLIMIT_RTTIME, &before);
+    auto missing = RealtimeScheduling::requestRealtimeKit (RealtimeScheduling::currentThreadId(), 20);
+    CHECK (missing.outcome == Outcome::Unavailable);
+    CHECK (missing.message.find ("RealtimeKit is not running") != std::string::npos);
+    rlimit after {};
+    ::getrlimit (RLIMIT_RTTIME, &after);
+    CHECK (after.rlim_max == before.rlim_max);
+    CHECK (after.rlim_cur == before.rlim_cur);
+
+    // No system bus at all.
+    {
+        ScopedEnv noBus ("DBUS_SYSTEM_BUS_ADDRESS", ("unix:path=" + bus.dir.path + "/no-such-socket").c_str());
+        const auto unreachable = RealtimeScheduling::requestRealtimeKit (RealtimeScheduling::currentThreadId(), 20);
+        CHECK (unreachable.outcome == Outcome::Unavailable);
+        CHECK (unreachable.message.find ("system D-Bus is not reachable") != std::string::npos);
+    }
+    CHECK (RealtimeScheduling::requestRealtimeKit (0, 20).outcome == Outcome::Unavailable);
+}
+
+// ---------------------------------------------------------------------------
+// docs/11 E27 step 4: the ALSA capture channel map of a card PCM.
+// ---------------------------------------------------------------------------
+TEST_CASE ("Platform: ALSA channel maps - card PCM names, JUCE's device names and chmap positions (E27)")
+{
+    std::string card;
+    int device = -1, subdevice = -1;
+    CHECK (alsa::parseHwName ("hw:CARD=PCH,DEV=3", card, device, subdevice));
+    CHECK ((card == "PCH" && device == 3 && subdevice == -1));
+    CHECK (alsa::parseHwName ("hw:1,0,2", card, device, subdevice));
+    CHECK ((card == "1" && device == 0 && subdevice == 2));
+    CHECK (alsa::parseHwName ("hw:CARD=Generic", card, device, subdevice));
+    CHECK ((card == "Generic" && device == 0 && subdevice == -1));
+    CHECK (! alsa::parseHwName ("hw:CARD=PCH,DEV=x", card, device, subdevice));
+    for (const char* plugin : { "default", "pipewire", "pulse", "plughw:0,0", "surround71:CARD=PCH,DEV=0", "hw:" })
+        CHECK (! alsa::parseHwName (plugin, card, device, subdevice));
+
+    CHECK (alsa::hintDeviceName ("hw:CARD=PCH,DEV=0", "HDA Intel PCH, ALC892 Analog\nDirect hardware device without any conversions")
+           == "HDA Intel PCH, ALC892 Analog; Direct hardware device without any conversions");
+    CHECK (alsa::hintDeviceName ("pipewire", "") == "pipewire");
+
+    // snd_pcm_chmap_query_t lists as libasound returns them: a USB audio
+    // class capture PCM reporting its 7.1 channels in WAVE order and a stereo
+    // map, then one whose positions are all unknown.
+    using P = SpeakerPosition;
+    const auto query = [] (int type, std::vector<unsigned int> positions)
+    {
+        std::vector<unsigned int> words { static_cast<unsigned int> (type), static_cast<unsigned int> (positions.size()) };
+        words.insert (words.end(), positions.begin(), positions.end());
+        return words;
+    };
+    auto wave71 = query (1 /* FIXED */, { 3, 4, 7, 8, 5, 6, 9, 10 });
+    auto stereo = query (2 /* VAR */, { 3, 4 });
+    auto unknown6 = query (1, { 0, 0, 0, 0, 1, 2 });
+    const alsa::ChmapQuery* maps[] = { reinterpret_cast<const alsa::ChmapQuery*> (wave71.data()),
+                                       reinterpret_cast<const alsa::ChmapQuery*> (stereo.data()),
+                                       reinterpret_cast<const alsa::ChmapQuery*> (unknown6.data()), nullptr };
+    CHECK ((alsa::positionsFromChmaps (maps, 8) == std::vector<P> { P::FL, P::FR, P::FC, P::LFE, P::RL, P::RR, P::SL, P::SR }));
+    CHECK ((alsa::positionsFromChmaps (maps, 2) == std::vector<P> { P::FL, P::FR }));
+    CHECK (alsa::positionsFromChmaps (maps, 6).empty()); // nothing known
+    CHECK (alsa::positionsFromChmaps (maps, 4).empty()); // no map for 4
+    CHECK (alsa::positionsFromChmaps (nullptr, 8).empty());
+    auto alsa71 = query (1, { 3, 4, 5, 6, 7, 8, 9, 10 });
+    const alsa::ChmapQuery* alsaMaps[] = { reinterpret_cast<const alsa::ChmapQuery*> (alsa71.data()), nullptr };
+    CHECK ((alsa::positionsFromChmaps (alsaMaps, 8) == std::vector<P> { P::FL, P::FR, P::RL, P::RR, P::FC, P::LFE, P::SL, P::SR }));
+
+    // Only JUCE ALSA devices on a sound card have a map here; this machine's
+    // cards (if any) have no device of these names.
+    CHECK (AudioChannelMaps::queryInputPositions ("JACK", "Flubsound Game", 8).empty());
+    CHECK (AudioChannelMaps::queryInputPositions ("ALSA", "Flubsound test: no such device", 8).empty());
+    CHECK (AudioChannelMaps::queryInputPositions ("ALSA HW", "Flubsound test: no such card, no such PCM", 8).empty());
+    CHECK (AudioChannelMaps::queryInputPositions ("ALSA", "", 8).empty());
+}
+
 #endif // __linux__

@@ -7,10 +7,14 @@
 //   of the whole UI follows the mode (teal = Music, magenta = Gaming).
 // * Strip selector: which strip (per-app profile) the UI edits; a dot shows
 //   strips that currently receive audio.
-// * Preset browser: combo box grouped by factory / user category, previous
-//   / next, and a menu with save, save as, rename, delete, import, export,
-//   reveal folder, reset and "Export / batch process audio files..." (the
-//   ExportDialog: render audio files with these settings).
+// * Presets: the preset box names the strip's preset; a click on it (or
+//   Space / Enter) opens the preset browser (PresetBrowser: search, filters,
+//   favourites, preview, docs/11 E40) over the window; the arrow keys and
+//   previous / next step through the list; a menu with browse, save, save
+//   as, rename, delete, import, export, reveal folder, reset and "Export /
+//   batch process audio files..." (the ExportDialog: render audio files with
+//   these settings). A preset picked here or in the browser is recorded as
+//   recent (AppSettings::addRecentPreset).
 // * A/B: active bank of the selected strip + copy to the other bank.
 // * Bypass: master enable (every strip); it is loudness matched while the
 //   "Loudness-matched bypass" parameter is on (right-click to change).
@@ -27,6 +31,7 @@
 // Message thread only; refresh() pulls everything from the controller.
 #pragma once
 
+#include "PresetBrowser.h"
 #include "SettingsDialog.h"
 #include "Widgets.h"
 #include "engine/EngineController.h"
@@ -39,6 +44,21 @@
 
 namespace flub::app::ui
 {
+/** The header's preset box: its pop-up is the preset browser (onBrowse);
+    without a handler, the plain list. */
+class PresetBox final : public juce::ComboBox
+{
+public:
+    std::function<void()> onBrowse;
+    void showPopup() override
+    {
+        if (onBrowse != nullptr)
+            onBrowse();
+        else
+            juce::ComboBox::showPopup();
+    }
+};
+
 class HeaderBar : public juce::Component, public juce::SettableTooltipClient
 {
 public:
@@ -64,6 +84,15 @@ public:
     juce::Button& getViewButton() noexcept { return viewButton; }
     /** Preset menu > "Export / batch process audio files..." (ExportDialog). */
     std::function<void()> onExportRequested;
+
+    /** Opens the preset browser over the parent (the main window's content),
+        under the header; does nothing while it is open. */
+    void showPresetBrowser();
+    /** Closes it (a preview that was not loaded is cancelled). */
+    void closePresetBrowser();
+    /** The open browser, or nullptr. */
+    PresetBrowser* getPresetBrowser() noexcept { return browserOverlay != nullptr ? &browserOverlay->getBrowser() : nullptr; }
+    PresetBox& getPresetBox() noexcept { return presetBox; }
 
     /** The bottom line of the latency / CPU readout. */
     struct CpuReadout
@@ -119,7 +148,7 @@ private:
 
     std::unique_ptr<ModeSegment> musicSegment, gamingSegment;
     std::vector<std::unique_ptr<juce::TextButton>> stripButtons;
-    juce::ComboBox presetBox;
+    PresetBox presetBox;
     IconButton prevPreset { "Previous preset", Icons::chevronLeft(), IconButton::Style::Framed };
     IconButton nextPreset { "Next preset", Icons::chevronRight(), IconButton::Style::Framed };
     IconButton presetMenu { "Preset actions", Icons::more(), IconButton::Style::Framed };
@@ -129,6 +158,8 @@ private:
     IconButton settingsButton { "Settings", Icons::gear(), IconButton::Style::Framed };
     IconButton viewButton { "Advanced view", Icons::expand(), IconButton::Style::Framed };
     std::unique_ptr<juce::FileChooser> fileChooser;
+    std::unique_ptr<PresetBrowserOverlay> browserOverlay;
+    std::shared_ptr<PresetLoudnessEstimator> loudnessEstimator; // kept between openings: its estimates are cached
 
     std::vector<juce::String> presetIds; // combo item id - 1 -> preset id
     juce::Rectangle<int> logoArea, modeArea, stripArea, presetArea, abArea, readoutArea;

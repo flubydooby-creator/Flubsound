@@ -85,7 +85,8 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     const int stateIndex = args.indexOf ("--state");
     if (stateIndex >= 0)
     {
-        static const juce::StringArray known { "device-error", "loopback", "preset-warning", "recovery", "latency-prompt", "governor" };
+        static const juce::StringArray known { "device-error", "loopback", "preset-warning", "recovery", "latency-prompt", "governor",
+                                                "preset-browser" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -230,6 +231,19 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
                                                                                     + ".corrupt-20260928-091500");
         recovery.restoredFromBackup = 1;
         main->getNoticeBar().post (ui::NoticeBar::recoveryNotice (recovery));
+    }
+    if (states.contains ("preset-browser"))
+    {
+        // The browser searched for a late-night preset, the best match
+        // selected and previewing (loudness matched against the scene's preset).
+        main->getHeader().showPresetBrowser();
+        if (auto* browser = main->getHeader().getPresetBrowser())
+        {
+            browser->setQuery (options.gamingMode ? "night quiet" : "late night quiet");
+            const auto shown = browser->getShownPresets();
+            if (! shown.empty())
+                browser->selectPreset (shown.front()->id);
+        }
     }
     if (states.contains ("preset-warning"))
     {

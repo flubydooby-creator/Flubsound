@@ -108,7 +108,8 @@ HeaderBar::HeaderBar (EngineController& c)
 
     // ---- Presets ----
     presetBox.setTitle ("Preset");
-    presetBox.setTooltip ("Preset of the selected strip");
+    presetBox.setTooltip ("Preset of the selected strip: click to search, filter and preview presets");
+    presetBox.onBrowse = [this] { showPresetBrowser(); };
     presetBox.setTextWhenNothingSelected ("Default settings");
     presetBox.setTextWhenNoChoicesAvailable ("No presets installed");
     presetBox.onChange = [this]
@@ -117,17 +118,28 @@ HeaderBar::HeaderBar (EngineController& c)
         if (item <= 0 || item > static_cast<int> (presetIds.size()))
             return;
         juce::String error;
-        if (! controller.loadPreset (presetIds[static_cast<size_t> (item - 1)], -1, error))
+        const auto id = presetIds[static_cast<size_t> (item - 1)];
+        if (! controller.loadPreset (id, -1, error))
             showError ("Could not load the preset", error);
+        else
+            controller.getSettings().addRecentPreset (id);
     };
     addAndMakeVisible (presetBox);
 
-    prevPreset.onClick = [this] { controller.previousPreset(); };
-    nextPreset.onClick = [this] { controller.nextPreset(); };
+    prevPreset.onClick = [this]
+    {
+        if (controller.previousPreset())
+            controller.getSettings().addRecentPreset (controller.getCurrentPresetId());
+    };
+    nextPreset.onClick = [this]
+    {
+        if (controller.nextPreset())
+            controller.getSettings().addRecentPreset (controller.getCurrentPresetId());
+    };
     presetMenu.onClick = [this] { showPresetMenu(); };
     prevPreset.setTooltip ("Previous preset");
     nextPreset.setTooltip ("Next preset");
-    presetMenu.setTooltip ("Save, rename, delete, import or export presets");
+    presetMenu.setTooltip ("Browse, save, rename, delete, import or export presets");
     addAndMakeVisible (prevPreset);
     addAndMakeVisible (nextPreset);
     addAndMakeVisible (presetMenu);
@@ -479,6 +491,8 @@ void HeaderBar::showPresetMenu()
 
     juce::PopupMenu menu;
     menu.addSectionHeader (current != nullptr ? current->name : juce::String ("No preset loaded"));
+    menu.addItem (10, "Browse presets...");
+    menu.addSeparator();
     menu.addItem (1, "Save", isUser && presetModified);
     menu.addItem (2, "Save as...");
     menu.addItem (3, "Rename...", isUser);
@@ -528,9 +542,43 @@ void HeaderBar::showPresetMenu()
                                     if (self.onExportRequested)
                                         self.onExportRequested();
                                     break;
+                                case 10: self.showPresetBrowser(); break;
                                 default: break;
                             }
                         });
+}
+
+void HeaderBar::showPresetBrowser()
+{
+    auto* parent = getParentComponent();
+    if (browserOverlay != nullptr || parent == nullptr)
+        return;
+    // One estimator per engine rate; its estimates are kept between openings.
+    const double rate = controller.getHost().getSampleRate() > 0.0 ? controller.getHost().getSampleRate() : 48000.0;
+    if (loudnessEstimator == nullptr || loudnessEstimator->getSampleRate() != rate)
+        loudnessEstimator = std::make_shared<PresetLoudnessEstimator> (rate);
+
+    browserOverlay = std::make_unique<PresetBrowserOverlay> (controller, loudnessEstimator, getBottom());
+    juce::Component::SafePointer<HeaderBar> safe (this);
+    // Closed asynchronously: onClose runs inside the browser's own button and key handlers.
+    browserOverlay->onClose = [safe]
+    {
+        juce::MessageManager::callAsync ([safe]
+                                         {
+                                             if (safe != nullptr)
+                                                 safe->closePresetBrowser();
+                                         });
+    };
+    parent->addAndMakeVisible (*browserOverlay);
+    browserOverlay->setBounds (parent->getLocalBounds());
+    browserOverlay->toFront (false);
+    browserOverlay->getBrowser().getSearchBox().grabKeyboardFocus();
+}
+
+void HeaderBar::closePresetBrowser()
+{
+    browserOverlay.reset();
+    refresh();
 }
 
 void HeaderBar::saveAs()

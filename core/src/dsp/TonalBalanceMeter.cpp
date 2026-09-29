@@ -8,13 +8,15 @@ namespace flub
 void TonalBalanceMeter::prepare (double sampleRate)
 {
     sr = sampleRate;
-    constexpr double butterworth = 0.70710678118654752;
     for (int b = 0; b < kNumBands; ++b)
     {
         const auto i = static_cast<size_t> (b);
         measured[i] = kHighHz[i] <= 0.45 * sr;
-        highPass[i] = SvfCoeffs::make (FilterType::HighPass, kLowHz[i], butterworth, 0.0, sr);
-        lowPass[i] = SvfCoeffs::make (FilterType::LowPass, std::min (kHighHz[i], 0.45 * sr), butterworth, 0.0, sr);
+        for (int s = 0; s < 2; ++s)
+        {
+            highPass[i][static_cast<size_t> (s)] = SvfCoeffs::make (FilterType::HighPass, kLowHz[i], butterworthQ (2, s), 0.0, sr);
+            lowPass[i][static_cast<size_t> (s)] = SvfCoeffs::make (FilterType::LowPass, std::min (kHighHz[i], 0.45 * sr), butterworthQ (2, s), 0.0, sr);
+        }
     }
     minSamples = static_cast<std::int64_t> (kMinSeconds * sr);
     reset();
@@ -42,8 +44,8 @@ void TonalBalanceMeter::accumulate (const AudioBlock& block, Side& side) noexcep
         const auto bi = static_cast<size_t> (b);
         if (! measured[bi])
             continue;
-        const SvfCoeffs& hp = highPass[bi];
-        const SvfCoeffs& lp = lowPass[bi];
+        const auto& hp = highPass[bi];
+        const auto& lp = lowPass[bi];
         double sum = 0.0;
         for (int c = 0; c < nch; ++c)
         {
@@ -51,7 +53,8 @@ void TonalBalanceMeter::accumulate (const AudioBlock& block, Side& side) noexcep
             const float* x = block.channel (c);
             for (int i = 0; i < block.numSamples; ++i)
             {
-                const float y = svfTick (lp, st[1], svfTick (hp, st[0], x[i]));
+                const float h = svfTick (hp[1], st[1], svfTick (hp[0], st[0], x[i]));
+                const float y = svfTick (lp[1], st[3], svfTick (lp[0], st[2], h));
                 sum += static_cast<double> (y) * y;
             }
         }

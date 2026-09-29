@@ -113,7 +113,7 @@ flowchart TB
 
 | Thread | Priority | Runs | Must not |
 |---|---|---|---|
-| **Audio callback** (device) | Real-time (MMCSS "Pro Audio" / time-constraint / SCHED_FIFO) | `MixEngine::process` → strips → master limiter (two engines, crossfaded, during an engine swap); reads the parameter snapshot; writes meters | Allocate, lock, log, do I/O, or wait |
+| **Audio callback** (device) | Real-time (MMCSS "Pro Audio" / time-constraint / SCHED_FIFO, on Linux else RealtimeKit's SCHED_RR, asked by the message thread) | `MixEngine::process` → strips → master limiter (two engines, crossfaded, during an engine swap); reads the parameter snapshot; writes meters | Allocate, lock, log, do I/O, or wait |
 | **Capture threads** (Windows process loopback, one per captured app) | MMCSS "Pro Audio" (falls back to "Audio") | Pull OS capture packets and push frames into a `DriftCompensatedFifo` | Allocate or lock (after start) |
 | **Message thread** (JUCE) | Normal | UI (meters and analyser once per display frame via `VBlankAttachment`), parameter-control refresh at 30 Hz, reconfiguration poll at 5 Hz, controller housekeeping at 2 Hz (CPU-overload watchdog poll, foreground-application poll for automatic profiles, state autosave every 5 s, preferred-output rescan), preset I/O, tray, hotkeys | Block for long |
 | **Worker threads** | Low | App routing worker ("Flubsound routing": session enumeration and endpoint moves, every 2 s while routes exist); `flubsound-cli batch --jobs N` (one chain per job). Roadmap: HRIR loading/resampling, inference | Touch audio-thread objects directly |

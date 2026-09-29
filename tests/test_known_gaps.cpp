@@ -44,6 +44,11 @@
 //     by E06 Phase 3's measured loop)
 //   * hot master (-9.2 LUFS, -0.35 dBTP): limiter time > 1 dB and clip energy
 //     of Signature and Punchy Pop with and without the automatic preamp (E11)
+//   * high-frequency harshness (E07): sibilance over voice of a sung-vocal
+//     stand-in at Music Boost 100 + Clarity 100 with and without Smoothness;
+//     the Gaming full stack's 2-5 kHz tilt at protection strength Off and
+//     Normal (closed at Normal by the tonal-balance rule); presence at -45
+//     against -12 dBFS
 //
 // Every test prints its measured values ("    measured ...") so a tuning
 // session reads the numbers from one run of `flub_tests KnownGap`. The last
@@ -59,6 +64,8 @@
 
 #include "flub/common/Denormals.h"
 #include "flub/common/Math.h"
+#include "flub/dsp/Fft.h"
+#include "flub/dsp/Svf.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
 #include "flub/engine/Protection.h"
@@ -70,6 +77,7 @@
 #include <cstdio>
 #include <initializer_list>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <utility>
@@ -1740,4 +1748,264 @@ TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 
         // their maximizer drive (Boost), which is loudness on purpose, and
         // the 1 dB allowance.
     }
+}
+
+// =============================================================================
+// High-frequency harshness (docs/11 E07): the Smoothness stage and the
+// tonal-balance rule
+// =============================================================================
+namespace
+{
+/** Band power (Hann-windowed 4096-point FFT, bins in [lo, hi)) of x[begin, begin + n), n <= 4096. */
+double fftBandPower (const std::vector<float>& x, int begin, int n, double lo, double hi)
+{
+    constexpr int kN = 4096;
+    static Fft fft;
+    if (fft.getSize() != kN)
+        fft.prepare (kN);
+    std::vector<float> frame (kN, 0.0f);
+    for (int i = 0; i < n; ++i)
+        frame[static_cast<size_t> (i)] = x[static_cast<size_t> (begin + i)] * static_cast<float> (0.5 - 0.5 * std::cos (kTwoPi * i / n));
+    std::vector<Fft::Complex> bins (kN / 2 + 1);
+    fft.forwardReal (frame.data(), bins.data());
+    double sum = 0.0;
+    for (int k = 0; k <= kN / 2; ++k)
+        if (const double f = k * kFs / kN; f >= lo && f < hi)
+            sum += std::norm (bins[static_cast<size_t> (k)]);
+    return sum;
+}
+
+/** The report's sung-vocal stand-in (docs/11 E07): a 180 Hz "vowel" (22
+    harmonics at 1/k, 5 Hz vibrato) at -18 dBFS RMS, and a 120 ms Hann-gated
+    "s" (white noise band-limited to 5 - 10 kHz by 4th-order Butterworths,
+    -24 dBFS RMS) every 500 ms from 250 ms on, the vowel ducked by 80 %
+    under it. 3 s, `gainDb` over those levels. */
+struct VocalScene
+{
+    io::AudioFileData input;
+    std::vector<int> onsets;
+};
+
+VocalScene vocalScene (float gainDb)
+{
+    constexpr double seconds = 3.0;
+    const int n = samplesOf (seconds);
+    std::vector<double> vowel (static_cast<size_t> (n));
+    double phase = 0.0, power = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        phase += kTwoPi * 180.0 * (1.0 + 0.01 * std::sin (kTwoPi * 5.0 * i / kFs)) / kFs;
+        double v = 0.0;
+        for (int k = 1; k <= 22; ++k)
+            v += std::sin (k * phase) / k;
+        vowel[static_cast<size_t> (i)] = v;
+        power += v * v;
+    }
+    auto s = whiteNoise (n, 1.0f, 99);
+    for (int stage = 0; stage < 2; ++stage)
+        for (const auto type : { FilterType::HighPass, FilterType::LowPass })
+        {
+            SvfFilter f;
+            f.set (type, type == FilterType::HighPass ? 5000.0 : 10000.0, butterworthQ (2, stage), 0.0, kFs);
+            for (auto& v : s)
+                v = f.processSample (0, v);
+        }
+    const double vowelGain = std::pow (10.0, -18.0 / 20.0) / std::sqrt (power / n);
+    const double sGain = std::pow (10.0, -24.0 / 20.0) / rms (s.data(), n);
+    std::vector<double> gate (static_cast<size_t> (n), 0.0);
+    VocalScene scene;
+    const int len = samplesOf (0.12);
+    for (double t = 0.25; t + 0.3 < seconds; t += 0.5)
+    {
+        const int a = samplesOf (t);
+        scene.onsets.push_back (a);
+        for (int i = 0; i < len; ++i)
+            gate[static_cast<size_t> (a + i)] = 0.5 - 0.5 * std::cos (kTwoPi * i / len);
+    }
+    const double g = std::pow (10.0, gainDb / 20.0);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = static_cast<float> (g * (vowelGain * vowel[i] * (1.0 - 0.8 * gate[i]) + sGain * s[i] * gate[i]));
+    scene.input = stereoOf (x);
+    return scene;
+}
+
+/** Sibilance (5 - 10 kHz, 30..90 ms into each "s") over voice (150 Hz -
+    2 kHz, 200..260 ms after each onset) of the left channel, dB; the first
+    "s" is skipped (the report's measure, enh-clarity/t1b). */
+double sibilanceOverVoiceDb (const std::vector<float>& y, const std::vector<int>& onsets)
+{
+    double s = 0.0, v = 0.0;
+    for (size_t k = 1; k < onsets.size(); ++k)
+    {
+        s += fftBandPower (y, onsets[k] + samplesOf (0.03), samplesOf (0.06), 5000.0, 10000.0);
+        v += fftBandPower (y, onsets[k] + samplesOf (0.2), samplesOf (0.06), 150.0, 2000.0);
+    }
+    return powerDb (s) - powerDb (v);
+}
+
+/** Mean band power over consecutive 4096-sample frames of [begin, end). */
+double fftBandPowerOver (const std::vector<float>& x, int begin, int end, double lo, double hi)
+{
+    double sum = 0.0;
+    int frames = 0;
+    for (int p = begin; p + 4096 <= end; p += 4096, ++frames)
+        sum += fftBandPower (x, p, 4096, lo, hi);
+    return frames > 0 ? sum / frames : 0.0;
+}
+} // namespace
+
+TEST_CASE ("KnownGap: sibilance over voice - a sung vocal at Music Boost 100 + Clarity 100 rises +2.6 dB; Smoothness 100 takes back what the enhancement adds, the maximizer's level dependence stays (E07)")
+{
+    // Change of sibilance / voice against the input (bypass), at 0 and +8 dB
+    // input. Smoothness (smooth.amount, SmoothnessGuard.h) sits after the
+    // saturator and before the compressor and the maximizer, and takes the
+    // sibilant band back to its balance at the dynamic EQ's input.
+    struct Setting
+    {
+        const char* name;
+        float boost, clarity, smooth, gainDb;
+    };
+    const Setting settings[] = {
+        { "Boost 100 + Clarity 100, Smoothness 0, 0 dB", 100.0f, 100.0f, 0.0f, 0.0f },
+        { "Boost 100 + Clarity 100, Smoothness 100, 0 dB", 100.0f, 100.0f, 1.0f, 0.0f },
+        { "Boost 100 + Clarity 100, Smoothness 0, +8 dB", 100.0f, 100.0f, 0.0f, 8.0f },
+        { "Boost 100 + Clarity 100, Smoothness 100, +8 dB", 100.0f, 100.0f, 1.0f, 8.0f },
+        { "Boost 70 + Clarity 70, Smoothness 100, 0 dB", 70.0f, 70.0f, 1.0f, 0.0f },
+        { "Clarity 100, Smoothness 100, 0 dB", 0.0f, 100.0f, 1.0f, 0.0f },
+        { "Boost 100 + Clarity 100, Smoothness 100, -10 dB", 100.0f, 100.0f, 1.0f, -10.0f },
+    };
+    double change[std::size (settings)] = {};
+    for (size_t k = 0; k < std::size (settings); ++k)
+    {
+        const auto& s = settings[k];
+        const auto scene = vocalScene (s.gainDb);
+        RenderOptions o = boosted (ModeValue::Music, s.boost);
+        o.macros.push_back ({ "3", s.clarity });
+        auto values = resolve (o);
+        setValue (values, SmoothAmount, s.smooth);
+        const auto out = render (scene.input, values);
+        change[k] = sibilanceOverVoiceDb (out[0], scene.onsets) - sibilanceOverVoiceDb (scene.input.channels[0], scene.onsets);
+        measured (std::string ("sibilance / voice change, ") + s.name, change[k], "dB");
+    }
+    // Smoothness 0 is the chain before E07, bit for bit.
+    CHECK_NEAR (change[0], 2.64, 0.1);
+    CHECK_NEAR (change[2], 3.61, 0.1);
+    // The enhancement's own share is taken back: Clarity 100 alone (no
+    // maximizer) and Boost 100 + Clarity 100 at -10 dB (the maximizer idle).
+    CHECK_LE (change[5], 0.5);
+    CHECK_LE (change[6], 0.5);
+    // KNOWN_GAP: target <= +0.5 dB at 0 dB input and <= +1 dB at +8 dB per
+    // docs/11 E07 Done-when. What is left at Boost 100 is the maximizer
+    // after the stage: it ducks the loud vowels more than the quieter "s"
+    // (the voice in the vowel frames loses 0.6 dB against the voice under
+    // the "s"), which a stage ahead of it cannot see. Boost 70 + Clarity 70
+    // (the fatigue session's setting) is at the 0 dB row's target (+0.50).
+    CHECK_NEAR (change[1], 1.16, 0.1);
+    CHECK_NEAR (change[3], 2.00, 0.1);
+    CHECK_LE (change[4], 0.55);
+}
+
+TEST_CASE ("KnownGap closed at protection strength Normal: Gaming full stack on -30 dBFS pink - 2-5 kHz lift minus 200 Hz-1 kHz lift <= +2 dB (+4.1 dB at Off) (E07)")
+{
+    // Gaming, Boost 100 and every macro at 100, -30 dBFS pink, 10 s; the
+    // tilt over 7..10 s (the tonal-balance rule averages over ~1 s and
+    // settles in about 6 s). Off (the default) has no tonal rule: its tilt
+    // is the chain before E07. (Strict: tests/test_protection_tonal.cpp.)
+    const auto input = stereoOf (pinkNoise (samplesOf (10.0), std::pow (10.0f, -30.0f / 20.0f), 2024));
+    RenderOptions o = boosted (ModeValue::Gaming, 100.0f);
+    for (const char* m : { "1", "2", "3", "4", "5" })
+        o.macros.push_back ({ m, 100.0f });
+    const auto values = resolve (o);
+    double tilt[2] = {}, harsh[2] = {};
+    for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal })
+    {
+        const auto out = renderAtStrength (input, values, s);
+        const int a = samplesOf (7.0), b = samplesOf (10.0);
+        const auto lift = [&] (double lo, double hi) {
+            return powerDb (fftBandPowerOver (out[0], a, b, lo, hi)) - powerDb (fftBandPowerOver (input.channels[0], a, b, lo, hi));
+        };
+        const auto k = static_cast<size_t> (s);
+        tilt[k] = lift (2000.0, 5000.0) - lift (200.0, 1000.0);
+        harsh[k] = lift (5000.0, 10000.0) - lift (200.0, 1000.0);
+        measured ("Gaming full stack, strength " + std::to_string (static_cast<int> (s)) + ": 2-5 kHz minus 200 Hz-1 kHz lift", tilt[k], "dB");
+        measured ("Gaming full stack, strength " + std::to_string (static_cast<int> (s)) + ": 5-10 kHz minus 200 Hz-1 kHz lift", harsh[k], "dB");
+    }
+    // KNOWN_GAP at Off (the default): target <= +2 dB per docs/11 E07
+    // Done-when; the rule runs at protection strength Normal / Strict.
+    CHECK_NEAR (tilt[0], 4.06, 0.2);
+    // The Done-when row at Normal.
+    CHECK_LE (tilt[1], 2.0);
+    CHECK_LE (harsh[1], 2.0);
+}
+
+TEST_CASE ("KnownGap: presence against programme level - pink at -45 and -12 dBFS: clarity.presence 1 lifts 5.2 dB more at -45; Music Boost 100 + Clarity 100 at protection strength Normal within 3.2 dB (6.7 at Off) (E07)")
+{
+    // 2.5-4 kHz lift of pink. (a) clarity.presence 1 as a base value,
+    // maximizer off (the report's measure), 3 s, over 1..3 s: the Clarity
+    // presence's inverse-level law (ClarityEnhancer.cpp presenceGainDb,
+    // kPresenceThresholdDb); the tonal-balance rule never scales base values
+    // (tests/test_protection_tonal.cpp). (b) Music Boost 100 + Clarity 100,
+    // the lift over the 200 Hz - 1 kHz lift, 10 s, over 7..10 s, where the
+    // rule scales the macros' presence at Normal.
+    const auto pink = pinkNoise (samplesOf (10.0), 1.0f, 55);
+    auto base = resolve (RenderOptions {});
+    setValue (base, MaximizerOn, 0.0f);
+    setValue (base, ClarityPresence, 1.0f);
+    RenderOptions o = boosted (ModeValue::Music, 100.0f);
+    o.macros.push_back ({ "3", 100.0f });
+    const auto macros = resolve (o);
+    const auto lift = [&pink] (const std::vector<float>& values, ProtectionStrength s, float levelDb, double seconds, bool relative) {
+        const int n = samplesOf (seconds), a = samplesOf (seconds - 3.0 + (seconds < 5.0 ? 1.0 : 0.0));
+        std::vector<float> x (pink.begin(), pink.begin() + n);
+        for (auto& v : x)
+            v *= std::pow (10.0f, levelDb / 20.0f);
+        const auto out = renderAtStrength (stereoOf (x), values, s);
+        const auto band = [&] (double lo, double hi) {
+            return powerDb (fftBandPowerOver (out[0], a, n, lo, hi)) - powerDb (fftBandPowerOver (x, a, n, lo, hi));
+        };
+        return band (2500.0, 4000.0) - (relative ? band (200.0, 1000.0) : 0.0);
+    };
+    const double baseSpread = lift (base, ProtectionStrength::Off, -45.0f, 3.0, false) - lift (base, ProtectionStrength::Off, -12.0f, 3.0, false);
+    const double off = lift (macros, ProtectionStrength::Off, -45.0f, 3.0, true) - lift (macros, ProtectionStrength::Off, -12.0f, 3.0, true);
+    const double normal = lift (macros, ProtectionStrength::Normal, -45.0f, 10.0, true) - lift (macros, ProtectionStrength::Normal, -12.0f, 10.0, true);
+    measured ("clarity.presence 1: 2.5-4 kHz lift at -45 minus at -12 dBFS", baseSpread, "dB");
+    measured ("Music Boost 100 + Clarity 100, Off: relative presence lift at -45 minus at -12 dBFS", off, "dB");
+    measured ("Music Boost 100 + Clarity 100, Normal: relative presence lift at -45 minus at -12 dBFS", normal, "dB");
+    // KNOWN_GAP: target within 1.5 dB per docs/11 E07 Done-when; needs the
+    // level-relative presence (approach step 3, ClarityEnhancer.cpp). The
+    // tonal-balance rule at Normal takes the quiet programme's lift down to
+    // its budget.
+    CHECK_NEAR (baseSpread, 5.2, 0.2);
+    CHECK_NEAR (off, 6.67, 0.3);
+    CHECK_NEAR (normal, 3.2, 0.3);
+    CHECK_LE (normal, off - 2.5);
+}
+
+TEST_CASE ("E07: the footstep cue lift survives Smoothness 100 and the tonal-balance rule - Gaming Footsteps 100 + Boost 100 steps under a bed at protection strength Normal (risk P4)")
+{
+    // The E19 burst scene at -24 LUFS; the cue enhancer's bands are never
+    // scaled by the rule and sit ahead of the Smoothness stage's reference,
+    // Boost's presence is. Lift of the steps in the 3.2 kHz band, out vs in.
+    const auto scene = makeBurstScene (-24.0);
+    RenderOptions o = boosted (ModeValue::Gaming, 100.0f);
+    o.macros.push_back ({ "footsteps", 100.0f });
+    const auto values = resolve (o);
+    auto smooth = values;
+    setValue (smooth, SmoothAmount, 1.0f);
+    const auto lifts = [&scene] (const std::vector<float>& v, ProtectionStrength s) {
+        const auto out = renderAtStrength (scene.input, v, s);
+        const auto inBand = bandPass (midOf (scene.input.channels), 3200.0, 1.0);
+        const auto outBand = bandPass (midOf (out), 3200.0, 1.0);
+        const double inBed = meanPower (inBand, scene.bed), outBed = meanPower (outBand, scene.bed);
+        double lift = 0.0;
+        for (int d = 0; d < 3; ++d)
+            lift += (powerDb (meanPower (outBand, scene.bursts[d]) - outBed) - powerDb (meanPower (inBand, scene.bursts[d]) - inBed)) / 3.0;
+        return lift;
+    };
+    const double off = lifts (values, ProtectionStrength::Off);
+    const double guarded = lifts (smooth, ProtectionStrength::Normal);
+    measured ("Footsteps 100 + Boost 100, Off, Smoothness 0: mean step lift", off, "dB");
+    measured ("Footsteps 100 + Boost 100, Normal, Smoothness 100: mean step lift", guarded, "dB");
+    CHECK (guarded >= off - 1.0);
 }

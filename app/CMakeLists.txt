@@ -77,6 +77,7 @@ set(FLUB_APP_SOURCES
     Source/ui/ParamGrid.cpp
     Source/ui/ParamKnob.cpp
     Source/ui/ParameterBinding.cpp
+    Source/ui/PresetAudition.cpp Source/ui/PresetBrowser.cpp
     Source/ui/RoutingPanel.cpp
     Source/ui/SettingsDialog.cpp
     Source/ui/SimpleStatusPanel.cpp

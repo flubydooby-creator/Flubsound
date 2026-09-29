@@ -339,9 +339,44 @@ policy with the flag kept set, which is harmless for `SCHED_OTHER`. Ways to gran
 
 - the distribution's `audio` or `realtime` group with `rtprio` limits
   (`/etc/security/limits.d/`), or
-- RealtimeKit over D-Bus (`org.freedesktop.RealtimeKit1.MakeThreadRealtime`).
-  This is not wired up yet; the run-time libdbus-1 loading used for Wayland
-  hotkeys could carry it without a link dependency.
+- RealtimeKit over D-Bus (`org.freedesktop.RealtimeKit1`, the `rtkit`
+  package; most desktops run it for PipeWire). When the callback's own
+  attempt leaves the thread at `SCHED_OTHER`, the engine host asks rtkit
+  from the message thread (docs/11 E44): the first callback on each new
+  device thread records its kernel thread id (no allocation: the saved
+  policy is thread-local), and the host's 5 Hz timer reads that thread's
+  policy (`RealtimeScheduling::queryThread`) and calls
+  `RealtimeScheduling::requestRealtimeKit` once. That opens a private
+  connection to the system bus (`$DBUS_SYSTEM_BUS_ADDRESS`, else
+  `/var/run/dbus/system_bus_socket`) through the libdbus-1 the Wayland
+  hotkeys load at run time, reads rtkit's `MaxRealtimePriority` and
+  `RTTimeUSecMax` (rtkit older than 0.11 has neither: its defaults 20 and
+  200 ms are used), lowers the process's `RLIMIT_RTTIME` soft and hard
+  limits to `RTTimeUSecMax` (rtkit refuses a process above it), and asks
+  `MakeThreadRealtime (tid, min (20, MaxRealtimePriority))`; rtkit sets
+  `SCHED_RR | SCHED_RESET_ON_FORK`. From then on a real-time thread of the
+  process that runs `RTTimeUSecMax` without blocking gets `SIGXCPU` /
+  `SIGKILL`, rtkit's watchdog; the audio thread blocks every period. Each
+  call waits at most 1 s. rtkit is asked only for a device the host opened
+  itself, never for the message thread.
+
+The outcome is `EngineStatus::audioThread` (`EngineController::getStatus()`;
+no panel shows it yet): "real-time (RR 20 via rtkit)", "real-time (FIFO 83,
+the audio server's thread)", or "NOT real-time: <reason>; <fix>" (install
+rtkit, an `rtprio` limit, or the JACK device type). Not yet: the Realtime
+portal (`org.freedesktop.portal.Realtime`) for Flatpak, and runs on real
+desktops (tested against a mock rtkit only).
+
+Tests: `Platform: promoteAudioThread allocates nothing …` (the saved
+policy, and the thread's policy read back by its id) and `Platform:
+RealtimeKit is asked for the audio thread …` in `tests/test_platform_linux.cpp`
+run against a mock rtkit on a private `dbus-daemon` that checks what rtkit
+checks (the caller's pid from the bus, the thread among its tasks, the
+priority, the `RLIMIT_RTTIME` hard limit in `/proc/<pid>/limits` at the
+call): the call sequence, the cap at a lower maximum, old rtkit, a refusal,
+no rtkit and no bus. The requests run in a forked child, so the test binary
+keeps its limits. `tests/app/test_app_host_realtime.cpp` covers the host's
+side with a stand-in scheduler.
 
 When the engine runs as a JACK or PipeWire client (JUCE's JACK backend on
 `pipewire-jack`), the server calls the process callback on its own RT thread,
@@ -423,6 +458,19 @@ routing worker (`AppRouting`, every 2 s), works as follows:
   (no PipeWire, for example classic PulseAudio), it suggests choosing a
   sink's monitor as the input device.
 
+The links keep the sink's own port order, as JUCE's own JACK connections
+do. The engine reads which speaker each of its inputs carries from the
+input's channel names (the monitor ports `monitor_FL` … `monitor_SR` when
+the chosen JACK input device is a Flubsound sink) and puts a 2.0 / 5.1 /
+7.1 strip into its own order, so a sink made with another channel map still
+reaches the right virtual speakers (docs/11 E27). A JUCE ALSA device on a
+sound card (`hw:`) is read from the card's capture channel map instead
+(`AudioChannelMaps::queryInputPositions`: `snd_pcm_query_chmaps_from_hw`,
+libasound loaded at run time, the device found by the name JUCE lists it
+under). ALSA plug-in devices (`default`, `pipewire`, `pulse`) report no
+map; they deliver ALSA's own 5.1 / 7.1 order, FL FR RL RR FC LFE SL SR,
+which the engine permutes back.
+
 JUCE's JACK device gives the engine as many inputs as the chosen *input
 device* (a JACK client) has output ports. Choosing "Flubsound Game" gives 8,
 enough for the Game strip only. Feeding four strips from one device needs an
@@ -440,7 +488,11 @@ MIDI ports, another process's JACK client, limits and the problem texts.
 router against fake `pw-dump` / `pw-link` scripts on `PATH`: nine links
 made, a confirming pass with no changes, no `pw-dump` before the re-check
 interval, the unlinking on a map change and on device input off, and the
-message when the tools are missing.
+message when the tools are missing. `Platform: ALSA channel maps …` covers
+the card PCM names, JUCE's device names and the chmap positions (no sound
+card is needed; a real card's map has not been read yet), and
+`tests/app/test_app_host_io.cpp` the round-trip channel check with fake
+JACK and ALSA devices whose channel names or maps come in several orders.
 
 ## Headset profiles on Linux
 
@@ -463,5 +515,5 @@ detect Bluetooth and hands-free outputs from the device name and format
 - The Low Latency quantum request (`128/48000`, locked) on a profile change,
   which needs the device to re-open after the variables change. Links through
   libpipewire registry events instead of polling `pw-dump`.
-- RealtimeKit for the audio thread, and the output's `device.bus` for
-  headset connection detection.
+- The output's `device.bus` for headset connection detection, and the
+  Realtime portal for the audio thread under Flatpak.

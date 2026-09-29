@@ -242,7 +242,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 
 ### D9. Linux diversity
 - **Symptom:** high latency or xruns.
-- **Solution:** document the PipeWire quantum (`platform/linux/README.md`: `pw-metadata -n settings 0 clock.force-quantum 256`), prefer the JACK / PipeWire-JACK device type (the server then calls the engine on its own real-time thread), and otherwise promote the audio thread to best-effort `SCHED_FIFO` 20 (or the user's `RLIMIT_RTPRIO`). Roadmap: RealtimeKit over D-Bus, setting `node.latency` for Flubsound's own nodes, and portals / libpipewire for Flatpak.
+- **Solution:** document the PipeWire quantum (`platform/linux/README.md`: `pw-metadata -n settings 0 clock.force-quantum 256`), prefer the JACK / PipeWire-JACK device type (the server then calls the engine on its own real-time thread), and otherwise promote the audio thread to best-effort `SCHED_FIFO` 20 (or the user's `RLIMIT_RTPRIO`), else ask RealtimeKit over the system D-Bus from the message thread (SCHED_RR at up to its MaxRealtimePriority; [11 E44](11-enhancement-report.md#e44), tested against a mock rtkit only). Roadmap: setting `node.latency` for Flubsound's own nodes, and portals / libpipewire for Flatpak.
 
 ### D10. ASIO specifics
 - ASIO drivers are often single-client. When ASIO is the output, Flubsound is that client and every application must route through Flubsound's virtual endpoints. A UI note that says so is roadmap; ASIO itself is only built when `FLUB_ASIO_SDK_DIR` is set.

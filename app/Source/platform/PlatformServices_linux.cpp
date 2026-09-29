@@ -3977,7 +3977,13 @@ void SystemTuning::revertAudioThread (void* handle)
 //==============================================================================
 uint64_t RealtimeScheduling::currentThreadId() noexcept FLUB_NONBLOCKING
 {
+    // glibc's gettid() wrapper (2.30+): RealtimeSanitizer flags the generic
+    // syscall() entry point, not this one.
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 30))
+    return static_cast<uint64_t> (::gettid());
+#else
     return static_cast<uint64_t> (::syscall (SYS_gettid));
+#endif
 }
 
 ThreadScheduling RealtimeScheduling::queryThread (uint64_t threadId)

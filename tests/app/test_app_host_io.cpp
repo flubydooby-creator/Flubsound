@@ -10,6 +10,10 @@
 //     chain folds (BS.775, the LFE at virt.lfe), not cut to FL / FR.
 //   * docs/11 E45: the callback's duration / interval histograms, with host
 //     timestamps from the callback context so the intervals are exact.
+//   * docs/11 E27 step 4 remainder: the round-trip channel check. Device
+//     channel maps from the backend (an injected ALSA chmap) and from the
+//     channel names (PipeWire-JACK ports), in several orders; every speaker
+//     must reach its own engine channel.
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
@@ -37,16 +41,16 @@ constexpr double kPi = 3.14159265358979323846;
 class FakeAudioDevice final : public juce::AudioIODevice
 {
 public:
-    explicit FakeAudioDevice (const juce::String& deviceType) : juce::AudioIODevice ("Fake 7.1", deviceType) {}
+    /** 'inputNames' empty: "In 1" ... "In 8" (no speaker positions). */
+    explicit FakeAudioDevice (const juce::String& deviceType, juce::StringArray inputNames = {})
+        : juce::AudioIODevice ("Fake 7.1", deviceType), names (std::move (inputNames))
+    {
+        for (int i = names.size(); i < kInputs; ++i)
+            names.add ("In " + juce::String (i + 1));
+    }
 
     juce::StringArray getOutputChannelNames() override { return { "Left", "Right" }; }
-    juce::StringArray getInputChannelNames() override
-    {
-        juce::StringArray names;
-        for (int i = 0; i < kInputs; ++i)
-            names.add ("In " + juce::String (i + 1));
-        return names;
-    }
+    juce::StringArray getInputChannelNames() override { return names; }
     juce::Array<double> getAvailableSampleRates() override { return { kRate }; }
     juce::Array<int> getAvailableBufferSizes() override { return { kBlock }; }
     int getDefaultBufferSize() override { return kBlock; }
@@ -64,6 +68,9 @@ public:
     juce::BigInteger getActiveInputChannels() const override { return juce::BigInteger ((1 << kInputs) - 1); }
     int getOutputLatencyInSamples() override { return kBlock; }
     int getInputLatencyInSamples() override { return kBlock; }
+
+private:
+    juce::StringArray names;
 };
 
 /** Drives the host's callback block by block on this thread. */
@@ -358,4 +365,171 @@ TEST_CASE ("App: the device callback's duration and interval histograms, from ho
     CHECK (after.callbacks == 3);
     CHECK (after.late == 0);
     CHECK (after.interval.count() == 1); // steady clock, callback 2 -> 3
+}
+
+namespace
+{
+using flub::platform::SpeakerPosition;
+
+/** The engine channel of each speaker position in a 7.1 strip. */
+int engineChannelOf (SpeakerPosition p)
+{
+    switch (p)
+    {
+        case SpeakerPosition::FL:  return 0;
+        case SpeakerPosition::FR:  return 1;
+        case SpeakerPosition::FC:  return 2;
+        case SpeakerPosition::LFE: return 3;
+        case SpeakerPosition::RL:  return 4;
+        case SpeakerPosition::RR:  return 5;
+        case SpeakerPosition::SL:  return 6;
+        case SpeakerPosition::SR:  return 7;
+        case SpeakerPosition::Unknown: break;
+    }
+    return -1;
+}
+
+/** The round-trip channel check: a -20 dBFS 1 kHz tone on one device input
+    at a time, the speaker it carries named by `carried`; the Game chain's
+    ActiveChannelDetector names the engine channel it reached. Returns how
+    many of the 8 reached their speaker's engine channel. */
+int roundTrip (FakeAudioDevice& device, const std::array<SpeakerPosition, kInputs>& carried, AudioEngineHost::ChannelMapQuery query,
+               InputChannelMap expectedSource)
+{
+    AudioEngineHost host;
+    host.setChannelMapQuery (std::move (query));
+    host.setDeviceInputRouting (0, 0);
+    DeviceDriver driver;
+    int identified = 0;
+    for (int k = 0; k < kInputs; ++k)
+    {
+        host.audioDeviceStopped();
+        host.audioDeviceAboutToStart (&device);
+        CHECK (host.getStatus().inputChannelMap == expectedSource);
+        int64_t frame = 0;
+        for (int b = 0; b < 20; ++b)
+        {
+            for (int c = 0; c < kInputs; ++c)
+                for (int i = 0; i < kBlock; ++i)
+                    driver.in[static_cast<size_t> (c)][static_cast<size_t> (i)] =
+                        c == k ? 0.1f * static_cast<float> (std::sin (2.0 * kPi * 1000.0 * static_cast<double> (frame + i) / kRate)) : 0.0f;
+            frame += kBlock;
+            driver.run (host);
+        }
+        const uint32_t mask = host.getMixEngine().chain (0).meters().activeChannelMask.load();
+        const int expected = engineChannelOf (carried[static_cast<size_t> (k)]);
+        if (mask != (1u << expected))
+            std::cout << "    " << device.getTypeName() << " device input " << k << " reached engine mask 0x" << std::hex << mask << std::dec
+                      << ", expected channel " << expected << "\n";
+        identified += mask == (1u << expected) ? 1 : 0;
+    }
+    return identified;
+}
+} // namespace
+
+TEST_CASE ("App: round-trip channel check - the backend's channel map or the channel names put every speaker in its engine channel (E27)")
+{
+    using P = SpeakerPosition;
+    constexpr std::array<P, kInputs> alsaOrder { P::FL, P::FR, P::RL, P::RR, P::FC, P::LFE, P::SL, P::SR };
+    constexpr std::array<P, kInputs> waveOrder { P::FL, P::FR, P::FC, P::LFE, P::RL, P::RR, P::SL, P::SR };
+    constexpr std::array<P, kInputs> scrambled { P::SR, P::LFE, P::FL, P::RR, P::SL, P::FC, P::RL, P::FR };
+    const auto names = [] (const char* prefix, const std::array<P, kInputs>& order)
+    {
+        static const char* const shortNames[] = { "?", "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" };
+        juce::StringArray result;
+        for (const auto p : order)
+            result.add (juce::String (prefix) + shortNames[static_cast<int> (p)]);
+        return result;
+    };
+    const auto mapOf = [] (const std::array<P, kInputs>& order)
+    {
+        return [order] (const juce::String&, const juce::String&, int channels)
+        { return channels == kInputs ? std::vector<P> (order.begin(), order.end()) : std::vector<P>(); };
+    };
+    const AudioEngineHost::ChannelMapQuery none = [] (const juce::String&, const juce::String&, int) { return std::vector<P>(); };
+
+    // PipeWire-JACK: the device's channels are the ports of the client chosen
+    // as input, e.g. the Flubsound Game sink's monitor ports. In the sink's
+    // own (engine) order, in ALSA's order (a sink made with ALSA's 7.1 map),
+    // scrambled. Before (identity for JACK): 8, 4 and 0 of 8 identified.
+    FakeAudioDevice jackWave ("JACK", names ("Flubsound Game:monitor_", waveOrder));
+    FakeAudioDevice jackAlsa ("JACK", names ("Flubsound Game:monitor_", alsaOrder));
+    FakeAudioDevice jackScrambled ("JACK", names ("capture_", scrambled));
+    CHECK (roundTrip (jackWave, waveOrder, none, InputChannelMap::ChannelNames) == kInputs);
+    CHECK (roundTrip (jackAlsa, alsaOrder, none, InputChannelMap::ChannelNames) == kInputs);
+    CHECK (roundTrip (jackScrambled, scrambled, none, InputChannelMap::ChannelNames) == kInputs);
+
+    // ALSA card PCMs report their capture map (chmap). A USB audio class
+    // device in WAVE order was permuted as if it delivered ALSA's order
+    // before (4 of 8); now the map is followed. ALSA's order from a map and
+    // a scrambled map come out right too.
+    FakeAudioDevice hw ("ALSA HW"), pcm ("ALSA");
+    CHECK (roundTrip (hw, waveOrder, mapOf (waveOrder), InputChannelMap::Backend) == kInputs);
+    CHECK (roundTrip (pcm, alsaOrder, mapOf (alsaOrder), InputChannelMap::Backend) == kInputs);
+    CHECK (roundTrip (hw, scrambled, mapOf (scrambled), InputChannelMap::Backend) == kInputs);
+    // A map wins over names that say otherwise.
+    FakeAudioDevice hwNamed ("ALSA HW", names ("", alsaOrder));
+    CHECK (roundTrip (hwNamed, waveOrder, mapOf (waveOrder), InputChannelMap::Backend) == kInputs);
+
+    // No map and no names (plug-in PCMs: default, pipewire, pulse): ALSA's
+    // default order, as before.
+    CHECK (roundTrip (pcm, alsaOrder, none, InputChannelMap::None) == kInputs);
+    CHECK (roundTrip (pcm, alsaOrder, nullptr, InputChannelMap::None) == kInputs);
+
+    // The query gets the device's type, name and channel count.
+    juce::String askedType, askedName;
+    int askedChannels = 0;
+    AudioEngineHost host;
+    host.setChannelMapQuery ([&] (const juce::String& type, const juce::String& name, int channels)
+                             {
+                                 askedType = type;
+                                 askedName = name;
+                                 askedChannels = channels;
+                                 return std::vector<P>();
+                             });
+    host.audioDeviceAboutToStart (&hw);
+    CHECK (askedType == "ALSA HW");
+    CHECK (askedName == "Fake 7.1");
+    CHECK (askedChannels == kInputs);
+    host.audioDeviceStopped();
+}
+
+TEST_CASE ("App: speaker positions from channel names, and the engine order from positions (E27)")
+{
+    using P = SpeakerPosition;
+    CHECK (AudioEngineHost::positionFromChannelName ("Flubsound Game:monitor_FL") == P::FL);
+    CHECK (AudioEngineHost::positionFromChannelName ("capture_LFE") == P::LFE);
+    CHECK (AudioEngineHost::positionFromChannelName ("playback_RR") == P::RR);
+    CHECK (AudioEngineHost::positionFromChannelName ("BL") == P::RL);
+    CHECK (AudioEngineHost::positionFromChannelName ("front-center") == P::FC);
+    CHECK (AudioEngineHost::positionFromChannelName ("Side Right") == P::SR);
+    CHECK (AudioEngineHost::positionFromChannelName ("rear_left") == P::RL);
+    CHECK (AudioEngineHost::positionFromChannelName ("Center") == P::FC);
+    for (const char* name : { "channel 1", "In 3", "in_3", "system:capture_1", "monitor_AUX0", "MONO", "", "Left" })
+        CHECK (AudioEngineHost::positionFromChannelName (name) == P::Unknown);
+
+    std::array<int, flub::kMaxChannels> order {};
+    const P fiveOneRear[] = { P::FL, P::FR, P::RL, P::RR, P::FC, P::LFE };
+    REQUIRE (AudioEngineHost::orderFromPositions (fiveOneRear, 6, order));
+    CHECK ((order[0] == 0 && order[1] == 1 && order[2] == 4 && order[3] == 5 && order[4] == 2 && order[5] == 3));
+    // The same as the fixed ALSA order the host used before for 5.1.
+    const auto fixed = AudioEngineHost::deviceInputOrder ("ALSA", 6);
+    CHECK (std::equal (fixed.begin(), fixed.begin() + 6, order.begin()));
+    const P fiveOneSide[] = { P::FL, P::FR, P::FC, P::LFE, P::SL, P::SR };
+    REQUIRE (AudioEngineHost::orderFromPositions (fiveOneSide, 6, order));
+    CHECK ((order[0] == 0 && order[4] == 4 && order[5] == 5));
+    const P swapped[] = { P::FR, P::FL };
+    REQUIRE (AudioEngineHost::orderFromPositions (swapped, 2, order));
+    CHECK ((order[0] == 1 && order[1] == 0));
+
+    // Not the engine's layout: no order (the fallback applies).
+    const P ambiguous[] = { P::FL, P::FR, P::FC, P::LFE, P::SL, P::RL };        // two left surrounds
+    const P repeated[] = { P::FL, P::FL };
+    const P partial[] = { P::FL, P::FR, P::FC, P::LFE, P::Unknown, P::RR, P::SL, P::SR };
+    const P quad[] = { P::FL, P::FR, P::RL, P::RR };
+    CHECK (! AudioEngineHost::orderFromPositions (ambiguous, 6, order));
+    CHECK (! AudioEngineHost::orderFromPositions (repeated, 2, order));
+    CHECK (! AudioEngineHost::orderFromPositions (partial, 8, order));
+    CHECK (! AudioEngineHost::orderFromPositions (quad, 4, order));
+    CHECK (! AudioEngineHost::orderFromPositions (nullptr, 2, order));
 }

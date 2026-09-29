@@ -9,8 +9,9 @@
 // parametric EQ is part of the reference and never counts as a lift) and of
 // the chain's output:
 //
-//   Bands (4th order: a 2nd-order Butterworth high-pass at the lower edge
-//   and a low-pass at the upper): mids 200 Hz - 1 kHz, presence 2 - 5 kHz,
+//   Bands (8th order: a 4th-order Butterworth high-pass at the lower edge
+//   and a low-pass at the upper, so a presence bell's skirt does not read
+//   in the next band): mids 200 Hz - 1 kHz, presence 2 - 5 kHz,
 //   harsh 5 - 10 kHz, air 10 - 16 kHz (the air band only where 16 kHz is
 //   under 0.45 fs). Both signals stereo, squares summed over the channels.
 //   The chain accumulates both sides per sample and closes a window on the
@@ -24,7 +25,9 @@
 //   Valid (hasReading()) after kMinSeconds of averaged programme; a band
 //   whose reference is kBandRangeDb under the mids' reads no lift (noise).
 //
-// RT-safe: process*() and tick() neither allocate nor lock.
+// Cost: 16 SVF sections per sample and channel on each side, only at
+// protection strength Normal / Strict. RT-safe: process*() and tick()
+// neither allocate nor lock.
 #pragma once
 
 #include "Svf.h"
@@ -43,7 +46,7 @@ public:
     enum Band : int { Mids = 0, Presence, Harsh, Air, kNumBands };
     static constexpr std::array<double, kNumBands> kLowHz { 200.0, 2000.0, 5000.0, 10000.0 };
     static constexpr std::array<double, kNumBands> kHighHz { 1000.0, 5000.0, 10000.0, 16000.0 };
-    static constexpr double kAverageSeconds = 1.5;
+    static constexpr double kAverageSeconds = 1.0;
     static constexpr double kMinSeconds = 0.5;
     static constexpr double kSilencePower = 1.0e-9; // reference mids under -90 dB
     static constexpr float kBandRangeDb = 60.0f;
@@ -71,13 +74,13 @@ public:
 private:
     struct Side
     {
-        std::array<std::array<std::array<SvfState, 2>, kMaxChannels>, kNumBands> states {}; // [band][channel][hp, lp]
+        std::array<std::array<std::array<SvfState, 4>, 2>, kNumBands> states {}; // [band][channel][hp, hp, lp, lp]
         std::array<double, kNumBands> window {}, average {};
     };
     void accumulate (const AudioBlock& block, Side& side) noexcept FLUB_NONBLOCKING;
 
     double sr = 48000.0;
-    std::array<SvfCoeffs, kNumBands> highPass {}, lowPass {};
+    std::array<std::array<SvfCoeffs, 2>, kNumBands> highPass {}, lowPass {}; // two Butterworth sections each
     std::array<bool, kNumBands> measured {};
     Side reference, output;
     std::int64_t windowSamples = 0, averagedSamples = 0, minSamples = 24000;

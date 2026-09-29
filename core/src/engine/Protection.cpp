@@ -278,13 +278,13 @@ void SafetyGovernor::updateMeasured (const Readings& r, int numSamples) noexcept
     }
 }
 
-float SafetyGovernor::Loop::step (float e, float dt, float offsetDb, float gain) noexcept FLUB_NONBLOCKING
+float SafetyGovernor::Loop::step (float e, float dt, float offsetDb, float gain, float holdBandDb) noexcept FLUB_NONBLOCKING
 {
     // A reading far from its set point (or none, -160 dB) is taken as 12 dB
     // off, so a loop that was idle does not kick when a reading appears.
     constexpr float kMaxErrorDb = 12.0f;
     lastError = std::clamp (e, -kMaxErrorDb, kMaxErrorDb);
-    // Over the set point: PI. Within kHoldBandDb under it: hold. Further
+    // Over the set point: PI. Within holdBandDb (kHoldBandDb) under it: hold. Further
     // under: the integral recovers (no proportional term, so the scale does
     // not jump up when the reading drops). The band keeps the loop off the
     // edge of stages that switch in at a threshold (the maximizer's glue on
@@ -306,9 +306,9 @@ float SafetyGovernor::Loop::step (float e, float dt, float offsetDb, float gain)
         integral -= gain * kIntGain * (lastError + kApproachDb) * dt;
         p = gain * kPropGain * lastError;
     }
-    else if (lastError < -kHoldBandDb)
+    else if (lastError < -holdBandDb)
     {
-        integral -= gain * kIntGain * (lastError + kHoldBandDb) * dt;
+        integral -= gain * kIntGain * (lastError + holdBandDb) * dt;
     }
     integral = std::clamp (integral, -120.0f, cap - offsetDb);
     return std::min (cap, offsetDb + integral - p);
@@ -407,13 +407,14 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     harmonicsScale = harmonicsDb <= kFloorDb ? 0.0f : dbToGain (harmonicsDb);
 
     // Tonal-balance rule (docs/11 E07): the highest band's lift over its
-    // set point; no reading (a pause, the first 0.5 s) holds the scale.
+    // set point. The meter's readings hold through pauses; before its first
+    // reading (0.5 s of programme) the loop sees nothing over budget.
     float eTonal = -12.0f;
-    for (const auto [lift, budget] : { std::pair { r.presenceLiftDb, b.presenceDb }, std::pair { r.harshLiftDb, b.harshDb },
+    for (const auto& [lift, budget] : { std::pair { r.presenceLiftDb, b.presenceDb }, std::pair { r.harshLiftDb, b.harshDb },
                                        std::pair { r.airLiftDb, b.airDb } })
         if (lift > kMinusInfDb)
             eTonal = std::max (eTonal, lift - (budget - kTonalMarginDb));
-    const float uTonal = std::max (kFloorDb, tonalLoop.step (eTonal, dt, 0.0f, kTonalGain));
+    const float uTonal = std::max (kFloorDb, tonalLoop.step (eTonal, dt, 0.0f, kTonalGain, kTonalHoldBandDb));
     const float tonalBefore = tonalDb;
     tonalDb = std::clamp (uTonal, tonalDb - kTonalFallDbPerSec * dt, tonalDb + kRiseDbPerSec * dt);
     tonalLoop.track (uTonal, tonalDb, dt);

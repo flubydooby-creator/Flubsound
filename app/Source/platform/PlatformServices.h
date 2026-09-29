@@ -27,7 +27,10 @@
 //             over D-Bus (libdbus-1 loaded at run time; isSupported() ==
 //             false without the portal). Callbacks come from the service's
 //             own event thread. No per-process capture: apps are routed into
-//             the null sinks.
+//             the null sinks. Real-time audio thread through RealtimeKit on
+//             the system bus (same run-time libdbus-1) when the thread's own
+//             SCHED_FIFO attempt is refused; ALSA card capture channel maps
+//             through libasound, also loaded at run time.
 //
 // Foreground application (ForegroundApp, for automatic profile switching):
 // Windows GetForegroundWindow + QueryFullProcessImageNameW; macOS

@@ -403,9 +403,10 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     slots[SBass].prepare (bass, stereo, 20.0f, on (e, BassOn));
     slots[SClarity].prepare (clarity, stereo, 20.0f, on (e, ClarityOn));
     slots[SSat].prepare (saturator, stereo, 20.0f, on (e, SaturationOn));
-    // The Smoothness stage (docs/11 E07) measures against the bass engine's
+    // The Smoothness stage (docs/11 E07) measures against the dynamic EQ's
     // input, delayed by the slots in between.
-    smoothness.setReferenceDelay (slots[SBass].latencySamples() + slots[SClarity].latencySamples() + slots[SSat].latencySamples());
+    smoothness.setReferenceDelay (slots[SDynEq].latencySamples() + slots[SBass].latencySamples() + slots[SClarity].latencySamples()
+                                  + slots[SSat].latencySamples());
     slots[SSmooth].prepare (smoothness, stereo, 20.0f, e[SmoothAmount] > 0.0f);
     smoothReference.setSize (2, maxB);
     slots[SSpatial].prepare (spatial, stereo, 20.0f, on (e, SpatialOn));
@@ -1403,10 +1404,10 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
             }
             if (spanRunning && (s == SDynEq || s == SBass || s == SClarity || s == SSat || s == SMax))
                 protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06), tonal reference (E07)
-            // The Smoothness stage's reference (docs/11 E07): the bass
-            // engine's input, while the stage runs.
+            // The Smoothness stage's reference (docs/11 E07): the dynamic
+            // EQ's input, while the stage runs.
             const bool smoothRunning = slots[SSmooth].isActive() || ! slots[SSmooth].isFullyBypassed();
-            if (s == SBass && smoothRunning)
+            if (s == SDynEq && smoothRunning)
                 smoothReference.block (2, n).copyFrom (st);
             if (s == SSmooth && smoothRunning)
                 smoothness.setReference (smoothReference.block (2, n));

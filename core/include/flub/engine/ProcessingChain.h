@@ -21,8 +21,8 @@
 //    -> [slot] ClarityEnhancer
 //    -> [slot] Saturator (oversampled)
 //    -> [slot] Smoothness (SmoothnessGuard, docs/11 E07; smooth.amount, off
-//              by default): a de-esser that takes back what the stages
-//              since the bass engine's input added to the sibilant band,
+//              by default): a de-esser that takes back what the slots
+//              since the dynamic EQ's input added to the sibilant band,
 //              against that input (the reference, delayed by the slots in
 //              between); zero latency
 //    -> [slot] StereoSpatializer      (forced width 1 / space 0 / crossfeed 0 /
@@ -499,7 +499,7 @@ private:
     // The tonal-balance rule's meter (docs/11 E07): the dynamic EQ's input against the output.
     TonalBalanceMeter tonalMeter;
     std::array<std::atomic<float>, TonalBalanceMeter::kNumBands> tonalLiftDb {};
-    // The Smoothness stage's reference: the bass engine's input, copied
+    // The Smoothness stage's reference: the dynamic EQ's input, copied
     // while the stage runs (it delays it by the slots in between).
     AudioBuffer smoothReference;
     std::atomic<float> smoothnessCutDb { 0.0f };
