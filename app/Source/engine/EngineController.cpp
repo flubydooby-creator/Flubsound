@@ -1379,6 +1379,23 @@ void EngineController::updateOverloadWatchdog (const EngineStatus& status)
     sample.running = status.deviceOpen && status.running;
     sample.load = status.cpuLoad;
     sample.glitchCount = status.deviceOpen ? static_cast<int64_t> (status.glitches) : -1;
+    // docs/11 E45: the peak callback of this poll's window, and the callback
+    // timing's counts. Late callbacks (gaps in the host's timestamps) only
+    // for a device that counts no xruns itself: one that does counts the
+    // same stalls. A timing whose count went backwards belongs to a new host.
+    const auto& timing = status.callbackTiming;
+    if (timing.callbacks < lastCallbackTiming.callbacks)
+        lastCallbackTiming = {};
+    const auto window = timing.since (lastCallbackTiming);
+    lastCallbackTiming = timing;
+    if (window.callbacks > 0)
+        sample.peakLoad = window.loadAt (0.999);
+    if (timing.callbacks > 0)
+    {
+        sample.overBudget = static_cast<int64_t> (timing.overBudget);
+        if (status.xruns < 0)
+            sample.late = static_cast<int64_t> (timing.late);
+    }
 
     // The header's CPU readout turns into an overload warning (docs/01 §7).
     bool changed = overloadWatchdog.update (sample) != OverloadWatchdog::Event::None;

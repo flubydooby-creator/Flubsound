@@ -119,6 +119,12 @@ static_assert (std::is_same_v<decltype (&CallbackTiming::record), void (Callback
 static_assert (std::is_same_v<decltype (&CallbackTiming::restartIntervals), void (CallbackTiming::*)() noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TimingHistogram::add), void (TimingHistogram::*) (uint64_t) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TimingHistogram::bucketFor), int (*) (uint64_t) noexcept FLUB_NONBLOCKING>);
+// MixEngine's idle freeze (docs/11 E45): its switches, set between process()
+// calls on the audio thread (the freeze and wake themselves run inside
+// MixEngine::process, asserted above; tests/test_idle_freeze.cpp checks that
+// they allocate nothing).
+static_assert (std::is_same_v<decltype (&MixEngine::setIdleFreeze), void (MixEngine::*) (bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&MixEngine::setIdleHoldSeconds), void (MixEngine::*) (double) noexcept FLUB_NONBLOCKING>);
 
 // Parameter setters called once per block by ProcessingChain::applyParameters
 // (TruePeakLimiter::setParams also by MixEngine::setMasterCeilingDb, which the

@@ -329,16 +329,20 @@ public:
         Change::Device is broadcast whenever it changes. */
     DeviceSafetyState getDeviceSafetyState() const { return host->getDeviceSafetyState(); }
 
-    /** CPU-overload watchdog (OverloadWatchdog): sustained load >= 90 % or a
-        burst of xruns / overrunning callbacks. The header shows it and the
+    /** CPU-overload watchdog (OverloadWatchdog): sustained load >= 90 % (the
+        higher of the average and the p99.9 callback of each poll's window,
+        docs/11 E45) or a burst of xruns / overrunning or late callbacks. The header shows it and the
         episodes are counted for the session. By default that is all; with
         the opt-in setting (AppSettings::getReduceLoadOnOverload) a lasting
         overload also steps the latency profile down (AutoLoadReducer,
         docs/01-architecture.md §7). */
     const OverloadWatchdog::State& getOverloadState() const noexcept { return overloadWatchdog.getState(); }
     /** One watchdog poll. The controller's timer calls it at 2 Hz with
-        getStatus(); tests feed statuses directly. Broadcasts Change::Device
-        when an overload starts or ends and when it stepped the profile down. */
+        getStatus(); tests feed statuses directly. The window of
+        status.callbackTiming since the previous poll gives the peak (p99.9)
+        load, and its overBudget / late counts the glitches no counter
+        reports. Broadcasts Change::Device when an overload starts or ends and
+        when it stepped the profile down. */
     void updateOverloadWatchdog (const EngineStatus& status);
 
     // ---- Latency profile / automatic overload response ---------------------------------
@@ -763,6 +767,7 @@ private:
     PreviewInProgress preview;
 
     OverloadWatchdog overloadWatchdog;
+    flub::CallbackTiming::Snapshot lastCallbackTiming; // the previous poll's (docs/11 E45)
     AutoLoadReducer loadReducer;
     flub::ProtectionStrength protectionStrength = flub::ProtectionStrength::Off;
 

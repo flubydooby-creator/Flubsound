@@ -150,8 +150,10 @@ public:
     struct CpuReadout
     {
         juce::String caption;  // "CPU", "OVERLOAD" or "DEVICE" (hidden when compact)
-        juce::String value;    // "42%", "42% . 3 xr" (middle dot; device xruns), "offline"
-        bool warn = false;     // amber: load above 70 %
+        juce::String value;    // "42%", "42% pk 97%" (docs/11 E45: the p99.9 callback of the
+                               // last poll), "42% pk 97% . 3 xr" (middle dot; device xruns), "offline"
+        juce::String compactValue; // value without the peak: the compact header, or a value too wide
+        bool warn = false;     // amber: load above 70 %, or a peak at 90 % or more
         bool overload = false; // hot: sustained overload (OverloadWatchdog)
     };
     /** A device safety state other than None (DeviceSafetyState) takes the
@@ -168,8 +170,8 @@ public:
     /** The device warning's tooltip line; empty for Kind::None. */
     static juce::String describeDeviceSafety (const DeviceSafetyState& safety);
 
-    /** The CPU part of the readout's tooltip: load, device xruns, and the
-        overload warning with the recommended action or the session count;
+    /** The CPU part of the readout's tooltip: load, the peak callback
+        (docs/11 E45), device xruns, and the overload warning with the recommended action or the session count;
         then what the automatic overload response changed, if anything
         (EngineController::describeLoadReduction). */
     static juce::String describeCpu (const EngineStatus& status, const OverloadWatchdog::State& overload,

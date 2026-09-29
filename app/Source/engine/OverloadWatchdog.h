@@ -11,6 +11,17 @@
 //   Overloaded --(exitPolls consecutive calm polls: load < exitLoad and
 //                 no new glitch)--> Normal
 //
+// Peak callbacks (docs/11 E45). The load a poll is judged by is the higher of
+// the average and, when the host times its callbacks (flub::CallbackTiming),
+// the p99.9 callback duration of the poll's window over the period: a 2 Hz
+// average hides callbacks 3-9x the mean, and one that uses 90 % of its
+// period is a callback away from a dropout. The timing also counts glitches
+// that no counter reports: callbacks longer than their period (only while
+// the device reports no glitch count at all, glitchCount = -1: JUCE's own
+// count holds the same callbacks) and late callbacks, discontinuities in the
+// host's timestamps (the controller passes those only for a device that
+// counts no xruns itself, which would count the same stalls).
+//
 // Hysteresis in level (0.9 in, 0.75 out) and in time (2 s in, 5 s out at
 // 2 Hz) keeps a load hovering around the threshold from flapping between the
 // two states. A poll without a running device clears the state (and re-bases
@@ -50,6 +61,13 @@ public:
         bool running = false;     // device open and callback attached
         double load = 0.0;        // 0..1, the callback's CPU load
         int64_t glitchCount = -1; // cumulative glitch counter, -1 = not reported
+        /** The p99.9 callback duration of this poll's window over the period
+            (CallbackTiming::Snapshot::loadAt (0.999) of since()); < 0 = not
+            measured. Not clamped at 1: a callback can overrun. */
+        double peakLoad = -1.0;
+        /** Cumulative callback timing counts (CallbackTiming overBudget and
+            late); -1 = not measured / not to be counted (see above). */
+        int64_t overBudget = -1, late = -1;
     };
 
     enum class Event
@@ -65,7 +83,8 @@ public:
         uint64_t episodes = 0;        // overloads started this session
         uint64_t glitches = 0;        // glitches seen this session (sum of counter increments)
         uint64_t episodeGlitches = 0; // glitches during the current / last overload
-        double lastLoad = 0.0;        // load of the latest poll
+        double lastLoad = 0.0;        // load of the latest poll (the higher of the average and the peak)
+        double lastPeakLoad = -1.0;   // p99.9 callback of the latest poll's window; < 0 = not measured
         double peakLoad = 0.0;        // highest load of the current / last overload
         int hotStreak = 0, calmStreak = 0;
     };
@@ -90,7 +109,8 @@ public:
     {
         if (! s.running)
         {
-            baseline = -1;
+            baseline = overBudgetBaseline = lateBaseline = -1;
+            state.lastPeakLoad = -1.0;
             clearWindow();
             state.hotStreak = state.calmStreak = 0;
             state.lastLoad = 0.0;
@@ -102,17 +122,15 @@ public:
 
         // New glitches since the previous poll. A counter that went backwards
         // was restarted with the device: everything it shows now is new.
-        int64_t fresh = 0;
-        if (s.glitchCount >= 0)
-        {
-            if (baseline >= 0)
-                fresh = s.glitchCount >= baseline ? s.glitchCount - baseline : s.glitchCount;
-            baseline = s.glitchCount;
-        }
+        int64_t fresh = freshSince (s.glitchCount, baseline);
+        // The callback timing's own counts (docs/11 E45, see above).
+        fresh += freshSince (s.glitchCount < 0 ? s.overBudget : -1, overBudgetBaseline);
+        fresh += freshSince (s.late, lateBaseline);
         state.glitches += static_cast<uint64_t> (fresh);
         pushWindow (fresh);
 
-        const double load = std::clamp (s.load, 0.0, 1.0);
+        state.lastPeakLoad = s.peakLoad >= 0.0 ? s.peakLoad : -1.0;
+        const double load = std::clamp (std::max (s.load, s.peakLoad), 0.0, 1.0);
         state.lastLoad = load;
         const bool hot = load >= config.enterLoad;
         const bool calm = load < config.exitLoad && fresh == 0;
@@ -149,11 +167,27 @@ public:
     void reset() noexcept
     {
         state = {};
-        baseline = -1;
+        baseline = overBudgetBaseline = lateBaseline = -1;
         clearWindow();
     }
 
 private:
+    /** New counts of a cumulative counter since its previous reading (none
+        for the first reading or a counter that is not reported, < 0). A
+        counter that went backwards was restarted: everything it shows now is
+        new. */
+    static int64_t freshSince (int64_t count, int64_t& previous) noexcept
+    {
+        if (count < 0)
+        {
+            previous = -1;
+            return 0;
+        }
+        const int64_t fresh = previous < 0 ? 0 : (count >= previous ? count - previous : count);
+        previous = count;
+        return fresh;
+    }
+
     static Config sanitise (Config c) noexcept
     {
         c.enterPolls = std::max (1, c.enterPolls);
@@ -182,7 +216,7 @@ private:
 
     Config config;
     State state;
-    int64_t baseline = -1;
+    int64_t baseline = -1, overBudgetBaseline = -1, lateBaseline = -1;
     std::array<int64_t, kMaxWindowPolls> window {};
     int64_t windowSum = 0;
     size_t windowPos = 0;

@@ -123,8 +123,8 @@
 //   (ProcessingChain::adoptGovernorState), at Off too.
 //
 // GatedLoudness (AutoLevel and AutoDrive):
-//   A 3 s K-weighted "slow" loudness that is only advanced while programme is
-//   present. The gate is open when the block is not (near) digital silence
+//   A K-weighted "slow" loudness (3 s; AutoLevel's 15 s) that is only
+//   advanced while programme is present. The gate is open when the block is not (near) digital silence
 //   (RMS above -70 dBFS), a fast 100 ms follower reads above -50 LUFS, and it
 //   is no more than 20 LU below the slow measure (the EBU R128 idea of
 //   absolute + relative gating). Pauses, track gaps and fade-outs therefore
@@ -136,31 +136,49 @@
 //   count, an open gate clears it) the slow measure restarts and acquires
 //   the new level.
 //   The slow one-pole starts from zero after every reset and restart, so it
-//   reads 10 log10(1 - exp(-t / 3 s)) dB low after t seconds of open gate
-//   (8 dB at 0.5 s, 3 dB at 2 s). getLufs() adds that bias back: the reading
-//   is the exponentially weighted mean over the open-gate time so far,
-//   unbiased from the first block on.
+//   reads 10 log10(1 - exp(-t / tau)) dB low after t seconds of open gate
+//   (with tau = 3 s: 8 dB at 0.5 s, 3 dB at 2 s). getLufs() adds that bias
+//   back: the reading is the exponentially weighted mean over the open-gate
+//   time so far, unbiased from the first block on.
 //
 // AutoLevel (LUFS input levelling / loudness normalisation):
-//   GatedLoudness on the input with its upper gate on (below); gain =
-//   target - measured, limited to -12..+6 dB (a quiet bed is lifted at most
-//   6 dB), slew-limited to +1 dB/s (up) and -4 dB/s (down), adapted only
+//   GatedLoudness on the input with its upper gate on (below) and a 15 s
+//   slow measure (kMeasureMs; docs/11 E21's time constants: a 3 s measure
+//   followed each 1-3 s burst of a fight and the bars of a song, 3-4.6 dB
+//   down and back, and AutoDrive's is 3 s, so the two are now 5x apart);
+//   gain = target - measured, limited to -12..+6 dB (a quiet bed is lifted at
+//   most 6 dB), slew-limited to +1 dB/s (up) and -4 dB/s (down), adapted only
 //   while the measure is advanced: frozen in silence, pauses and fade-outs,
 //   while programme is kept out by the relative gate, and during loud events
 //   the upper gate holds. For 2 s after such a freeze of programme the
 //   upward slew is 3 dB/s, so what a long event took away comes back fast.
-//   Applied as a per-block linear ramp (click-free).
-//   Upper gate (docs/11 E21): a 400 ms K-weighted momentary loudness runs
-//   beside the slow measure; while it reads more than 8 LU above the slow
-//   measure, the block is left out of the slow measure and the gain holds, so
-//   an explosion or a burst of gunfire neither pulls the gain down nor leaves
-//   a hole in the ambience after it. Programme that stays that loud is a new
-//   level, not an event: after 5 s of it (counted while the 100 ms follower
-//   also reads above the gate, so the 400 ms measure's decay after an event
-//   does not count) the slow measure restarts on it.
+//   A reversal of the gain's direction waits until the desired gain is
+//   kReversalDb past it (no hunting on bursts and bars); after a restart of
+//   the measure the gain holds for kRestartSettleSeconds of programme (the
+//   first reading is the mean of a beat or a phrase), and a pause of
+//   kGapSeconds while it holds restarts the measure again (a short track
+//   that ended just after it was taken as the new level). Applied as a
+//   per-block linear ramp (click-free).
+//   Upper gate (docs/11 E21): a 400 ms K-weighted momentary loudness and a
+//   10 ms one run beside the slow measure; while the first reads more than
+//   8 LU or the second more than 14 LU above the slow measure (and for
+//   300 ms after), the block is left out of the slow measure and the gain
+//   holds, so an explosion or a burst of gunfire neither pulls the gain down
+//   nor leaves a hole in the ambience after it. The 10 ms detector catches a
+//   burst in the block of its first shot: the 400 ms one let the first
+//   200-300 ms in, which lifted the measure until the rest of the burst was
+//   admitted too. Nothing is judged before 0.5 s of programme is measured.
+//   Programme that stays that loud is a new level, not an event: after 5 s
+//   of it (counted while the 100 ms follower also reads above the gate, so
+//   the 400 ms measure's decay after an event does not count) the slow
+//   measure restarts on it. Drop rule: a 3 s measure of the admitted
+//   programme 6 LU or more under the slow one for 3 s restarts it too, so the
+//   long measure follows a quieter programme as fast as the 3 s one did.
 //
 // AutoDrive (maximizer loudness target):
-//   GatedLoudness on the post-chain output; a slow integrating loop (0.5 LU
+//   GatedLoudness on the post-chain output (3 s: 5x faster than AutoLevel's
+//   measure, so with both on AutoDrive follows AutoLevel's slow moves instead
+//   of meeting them half-way); a slow integrating loop (0.5 LU
 //   dead band, <= 2 dB/s) produces a drive REDUCTION in [-requested drive, 0]
 //   dB (never past 0 dB of drive, so recovery is immediate). It can
 //   stop over-limiting but can never make things louder than the user/macros
@@ -217,6 +235,16 @@ public:
     static constexpr float kFastMs = 10.0f;
     static constexpr float kFastGateLu = 14.0f;
     static constexpr float kEventHoldMs = 300.0f;
+    /** The upper gate judges nothing until the slow measure has read this
+        much programme since its last (re)start. */
+    static constexpr double kUpperMinMeasureSeconds = 0.5;
+    /** The drop rule (upper gate on): a kShortTermMs measure of the admitted
+        programme more than kDropRestartLu under the slow measure for
+        kDropRestartSeconds of programme restarts the slow measure, so a
+        long slow measure still follows a quieter programme. */
+    static constexpr float kShortTermMs = 3000.0f;
+    static constexpr float kDropRestartLu = 6.0f;
+    static constexpr double kDropRestartSeconds = 3.0;
 
     /** Turns the upper gate on or off; call before prepare(). */
     void setUpperGate (bool on) noexcept { upperGate = on; }
@@ -231,8 +259,12 @@ public:
         slow.prepare (sampleRate, numChannels, slowTimeMs);
         upper.prepare (sampleRate, numChannels, kUpperMomentaryMs);
         fast.prepare (sampleRate, numChannels, kFastMs);
+        shortTerm.prepare (sampleRate, numChannels, kShortTermMs);
         eventHoldSamples = static_cast<std::int64_t> (0.001 * kEventHoldMs * sampleRate);
+        upperMinSamples = static_cast<std::int64_t> (kUpperMinMeasureSeconds * sampleRate);
+        dropReleaseSamples = static_cast<std::int64_t> (kDropRestartSeconds * sampleRate);
         slowPole = static_cast<double> (onePoleCoeff (slowTimeMs, sampleRate));
+        shortPole = static_cast<double> (onePoleCoeff (kShortTermMs, sampleRate));
         releaseSamples = static_cast<std::int64_t> (kRelativeReleaseSeconds * sampleRate);
         upperReleaseSamples = static_cast<std::int64_t> (kUpperReleaseSeconds * sampleRate);
         reset();
@@ -273,7 +305,8 @@ public:
         // Upper gate: a loud event is held out of the slow measure (from the
         // block its onset is in, and for kEventHoldMs after it); one that
         // lasts kUpperReleaseSeconds is a new level and restarts it.
-        const bool event = upperGate && gateOpen && s > -60.0f && (upper.getLufs() > s + kUpperGateLu || fast.getLufs() > s + kFastGateLu);
+        const bool event = upperGate && gateOpen && s > -60.0f && openSamples >= upperMinSamples
+                           && (upper.getLufs() > s + kUpperGateLu || fast.getLufs() > s + kFastGateLu);
         if (event)
             eventHoldLeft = eventHoldSamples;
         else
@@ -307,6 +340,21 @@ public:
                 const double residual = std::pow (slowPole, static_cast<double> (openSamples));
                 biasDb = residual > 1.0e-7 ? static_cast<float> (-10.0 * std::log10 (1.0 - residual)) : 0.0f;
             }
+            if (upperGate)
+            {
+                // The drop rule: the short-term measure of the same admitted
+                // programme (corrected for its cold start the same way).
+                shortTerm.process (block);
+                const double residual = std::pow (shortPole, static_cast<double> (openSamples));
+                const float st = residual < 0.5 ? shortTerm.getLufs() - static_cast<float> (10.0 * std::log10 (1.0 - residual)) : kMinusInfDb;
+                const float sNow = getLufs();
+                if (st > kMinusInfDb && sNow > -60.0f && st < sNow - kDropRestartLu)
+                    droppedSamples += block.numSamples;
+                else
+                    droppedSamples = 0;
+                if (droppedSamples >= dropReleaseSamples)
+                    restartSlow();
+            }
         }
         else if (programme && ! gateOpen)
         {
@@ -339,6 +387,8 @@ public:
     /** Counts the restarts of the slow measure (a new level, a quieter
         programme) since the last reset(). */
     std::uint32_t restartCount() const noexcept { return restarts; }
+    /** Restarts the slow measure: it acquires the next programme afresh. */
+    void restart() noexcept FLUB_NONBLOCKING { restartSlow(); }
 
 private:
     void restartSlow() noexcept
@@ -347,15 +397,17 @@ private:
         openSamples = 0;
         relativeGatedSamples = 0;
         upperHeldSamples = 0;
+        droppedSamples = 0;
+        shortTerm.reset();
         biasDb = 1.0f; // any value > 0: recomputed on the next open block
         ++restarts;
     }
 
-    LoudnessFollower momentary, slow, upper, fast;
+    LoudnessFollower momentary, slow, upper, fast, shortTerm;
     int channels = 2;
-    double slowPole = 0.0;
-    std::int64_t releaseSamples = 144000, upperReleaseSamples = 240000, eventHoldSamples = 14400;
-    std::int64_t openSamples = 0, relativeGatedSamples = 0, upperHeldSamples = 0, eventHoldLeft = 0;
+    double slowPole = 0.0, shortPole = 0.0;
+    std::int64_t releaseSamples = 144000, upperReleaseSamples = 240000, eventHoldSamples = 14400, dropReleaseSamples = 144000, upperMinSamples = 24000;
+    std::int64_t openSamples = 0, relativeGatedSamples = 0, upperHeldSamples = 0, eventHoldLeft = 0, droppedSamples = 0;
     std::uint32_t restarts = 0;
     float biasDb = 0.0f, slowTimeMs = kSlowTimeMs;
     bool upperGate = false, gateOpen = false, held = false, programme = false;
@@ -752,6 +804,9 @@ private:
 class AutoLevel
 {
 public:
+    /** The slow measure's time constant (docs/11 E21 time constants; was
+        GatedLoudness::kSlowTimeMs, 3 s, which AutoDrive keeps: 5x apart). */
+    static constexpr float kMeasureMs = 15000.0f;
     static constexpr float kMaxGainDb = 6.0f;   // upward cap (docs/11 E21; was +12)
     static constexpr float kMinGainDb = -12.0f;
     static constexpr float kUpDbPerSec = 1.0f;
@@ -760,7 +815,13 @@ public:
     static constexpr double kRecoverySeconds = 2.0;
     /** After a restart of its measure (a new level) the gain holds until the
         measure has read this much programme (docs/11 E21 time constants). */
-    static constexpr double kRestartSettleSeconds = 1.0;
+    static constexpr double kRestartSettleSeconds = 3.0;
+    /** A reversal of the gain's direction waits until the desired gain is
+        this far past it (hysteresis against hunting on bursts and bars). */
+    static constexpr float kReversalDb = 1.0f;
+    /** A pause this long while the gain is still settling on a new level
+        restarts the measure again (a track gap after a short loud track). */
+    static constexpr double kGapSeconds = 2.0;
 
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;
@@ -782,8 +843,10 @@ private:
     GatedLoudness follower;
     double sr = 48000.0, recoveryLeft = 0.0;
     std::int64_t settleSamples = 48000;
+    std::int64_t gapSamples = 96000, pauseSamples = 0;
     std::uint32_t restartsSeen = 0;
     float target = -18.0f, gainDb = 0.0f, lastLinear = 1.0f;
+    int direction = 0; // the gain's last move: +1 up, -1 down, 0 none since a (re)start
     bool enabled = false, frozen = false, settling = false;
 };
 

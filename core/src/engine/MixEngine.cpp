@@ -282,12 +282,12 @@ int MixEngine::getStripPaddingSamples (int strip) const noexcept
     return strip >= 0 && strip < getNumStrips() ? strips[static_cast<size_t> (strip)]->padSamples : 0;
 }
 
-int64_t MixEngine::idleHoldFor (const Strip& s) const noexcept
+int64_t MixEngine::idleHoldFor (const Strip& s) const noexcept FLUB_NONBLOCKING
 {
     return static_cast<int64_t> (std::ceil (idleHoldSeconds * sampleRate)) + s.chain->getLatencySamples() + s.padSamples;
 }
 
-void MixEngine::setIdleHoldSeconds (double seconds) noexcept
+void MixEngine::setIdleHoldSeconds (double seconds) noexcept FLUB_NONBLOCKING
 {
     idleHoldSeconds = std::max (0.0, seconds);
     for (auto& s : strips)

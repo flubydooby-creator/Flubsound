@@ -15,6 +15,7 @@
 #include "flub/dsp/Biquad.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
+#include "flub/engine/Protection.h"
 #include "flub/engine/StartleGuard.h"
 
 #include <algorithm>
@@ -115,6 +116,7 @@ struct GuardRun
     Channels out;
     std::vector<float> gainDb; // per block (the guard's gain at its end)
     std::vector<float> referenceLufs;
+    std::vector<char> sustained; // per block, isSustained() at its end
 };
 
 /** The guard alone, as the chain runs it: measure() on the signal, apply()
@@ -162,6 +164,7 @@ GuardRun runGuard (const Channels& in, Ceiling ceilingAt)
             }
         r.gainDb.push_back (g.getGainDb());
         r.referenceLufs.push_back (g.getReferenceLufs());
+        r.sustained.push_back (g.isSustained() ? 1 : 0);
     }
     return r;
 }
@@ -317,6 +320,126 @@ TEST_CASE ("StartleGuard: programme that stays loud becomes the new level after 
     CHECK_GE (referenceAt (r, 15.9) - referenceAt (r, 3.9), 13.0f);
     CHECK_NEAR (referenceAt (r, 21.5) - referenceAt (r, 15.9), -25.0f, 2.0f);
     CHECK_GE (gainAt (r, 21.5), -0.01f);
+}
+
+namespace
+{
+/** Stereo music-like programme (as tests/test_scenes.cpp's E60 music, at
+    120 bpm): a kick on every beat, a snare on 2 and 4, hats on the eighths,
+    a bass note and a three-note pad per bar. */
+Channels makeMusic (double seconds, uint32_t seed)
+{
+    const int n = samplesOf (seconds);
+    Channels m (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    const auto noise = whiteNoise (n, 1.0f, seed);
+    std::vector<float> snareNoise (noise), hatNoise (noise);
+    for (auto* x : { &snareNoise, &hatNoise })
+    {
+        // Two one-pole high-passes at 1 kHz (snare) / 7 kHz (hats).
+        const double a = std::exp (-kTwoPi * (x == &snareNoise ? 1000.0 : 7000.0) / kFs);
+        for (int stage = 0; stage < 2; ++stage)
+        {
+            double lp = 0.0;
+            for (auto& v : *x)
+            {
+                lp = (1.0 - a) * v + a * lp;
+                v = static_cast<float> (v - lp);
+            }
+        }
+    }
+    const double beat = 0.5;
+    static const double roots[4] = { 55.0, 43.65, 65.41, 49.0 };
+    static const double chords[4][3] = { { 220.0, 261.63, 329.63 }, { 174.61, 220.0, 261.63 }, { 261.63, 329.63, 392.0 }, { 196.0, 246.94, 293.66 } };
+    for (int b = 0; b * beat < seconds; ++b)
+    {
+        const int onset = samplesOf (b * beat), bar = (b / 4) % 4;
+        const int len = std::min (samplesOf (beat), n - onset);
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = i / kFs, tb = b * beat + t;
+            double mono = 0.9 * std::exp (-t / 0.12) * std::sin (kTwoPi * (45.0 * t + 0.3 * (1.0 - std::exp (-t / 0.03))));
+            if (b % 2 == 1)
+                mono += 0.45 * std::exp (-t / 0.08) * snareNoise[static_cast<size_t> (onset + i)];
+            mono += 0.35 * std::exp (-t / 0.3) * (std::sin (kTwoPi * roots[bar] * tb) + 0.3 * std::sin (kTwoPi * 2.0 * roots[bar] * tb));
+            const int half = i % samplesOf (beat / 2);
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                double pad = 0.0;
+                for (double f : chords[bar])
+                    for (int h = 1; h <= 4; ++h)
+                        pad += std::sin (kTwoPi * f * h * (ch == 0 ? 0.997 : 1.003) * tb) / h;
+                const double hat = 0.12 * (ch == 0 ? 0.8 : 1.2) * std::exp (-half / (0.02 * kFs)) * hatNoise[static_cast<size_t> (onset + i)];
+                m[static_cast<size_t> (ch)][static_cast<size_t> (onset + i)] += static_cast<float> (mono + 0.05 * pad + hat);
+            }
+        }
+    }
+    return m;
+}
+
+/** The largest swing back of a trace in [from, to) blocks: the largest rise
+    followed by a fall (or a fall followed by a rise), each counted as the
+    smaller of the two (as tests/test_soak_levels.cpp reads its levellers). */
+double largestSwingBack (const std::vector<float>& v, size_t from, size_t to)
+{
+    double worst = 0.0;
+    for (size_t i = from; i < to; ++i)
+    {
+        double preMin = v[i], preMax = v[i], sufMin = v[i], sufMax = v[i];
+        for (size_t k = from; k < i; ++k)
+        {
+            preMin = std::min (preMin, static_cast<double> (v[k]));
+            preMax = std::max (preMax, static_cast<double> (v[k]));
+        }
+        for (size_t k = i + 1; k < to; ++k)
+        {
+            sufMin = std::min (sufMin, static_cast<double> (v[k]));
+            sufMax = std::max (sufMax, static_cast<double> (v[k]));
+        }
+        worst = std::max ({ worst, std::min (v[i] - preMin, v[i] - sufMin), std::min (preMax - v[i], sufMax - v[i]) });
+    }
+    return worst;
+}
+} // namespace
+
+TEST_CASE ("StartleGuard: music that stays over the ceiling is guarded on its loudness, not modulated at its beats, until it is the new level (docs/11 E21 sustained detector)")
+{
+    // -40 dBFS ambience for 4 s, then music 15 LU louder (K-weighted) for
+    // 10 s, at ceiling 10 LU: the music is over the ceiling until the 5 s
+    // new-level rule admits it.
+    auto scene = pinkBed (14.0, -40.0);
+    auto music = makeMusic (10.0, 4711);
+    const double bed = meanPower (kWeighted (scene), 0.5, 4.0), m = meanPower (kWeighted (music), 0.0, 10.0);
+    const double g = std::sqrt (bed / m * std::pow (10.0, 1.5));
+    for (size_t c = 0; c < 2; ++c)
+        for (size_t i = 0; i < music[c].size(); ++i)
+            scene[c][static_cast<size_t> (samplesOf (4.0)) + i] += static_cast<float> (g * music[c][i]);
+    const auto r = runGuard (scene, 10.0f);
+    const auto block = [] (double t) { return static_cast<size_t> (samplesOf (t) / kBlock); };
+    // 1.5-4.5 s into the music: over the ceiling, before the new level.
+    const double swing = largestSwingBack (r.gainDb, block (5.5), block (8.5));
+    float gainMin = 0.0f, gainMax = -100.0f;
+    int sustainedBlocks = 0;
+    for (size_t b = block (5.5); b < block (8.5); ++b)
+    {
+        gainMin = std::min (gainMin, r.gainDb[b]);
+        gainMax = std::max (gainMax, r.gainDb[b]);
+        sustainedBlocks += r.sustained[b];
+    }
+    const auto k = kWeighted (r.out);
+    const double over = loudestMomentaryDb (k, 5.5, 8.5) - powerDb (meanPower (k, 0.5, 4.0));
+    measured ("music 1.5-4.5 s into it: largest guard gain swing back", swing, "dB");
+    measured ("music 1.5-4.5 s into it: guard gain from", gainMin, "dB");
+    measured ("music 1.5-4.5 s into it: guard gain to", gainMax, "dB");
+    measured ("music 1.5-4.5 s into it: sustained blocks (of " + std::to_string (block (8.5) - block (5.5)) + ")", sustainedBlocks, "blocks");
+    measured ("music 1.5-4.5 s into it: loudest momentary over the ambience", over, "LU");
+    measured ("gain 12 s into it", gainAt (r, 13.9), "dB");
+    // Before the sustained detector the gain followed every beat (the 1 ms
+    // detector, a 200 ms release): swing back 4.88 dB, -5.16 .. -0.24 dB.
+    CHECK (sustainedBlocks == static_cast<int> (block (8.5) - block (5.5)));
+    CHECK_LE (swing, 1.0);
+    CHECK_LE (gainMax, -1.0f);         // still guarded: turned down, not let through
+    CHECK_LE (over, 10.0 + 3.0);       // about the ceiling (loudest 400 ms window, beats included)
+    CHECK_GE (gainAt (r, 13.9), -0.1f); // released once it is the programme (the 5 s rule)
 }
 
 TEST_CASE ("StartleGuard: switching it off during an event releases the gain smoothly and then idles; hidden blocks hold it")
@@ -498,4 +621,95 @@ TEST_CASE ("Tame (docs/11 E20 via E21): the Dynamic Range control keys the Gamin
         if (range == GuardRangeValue::Lu10Balanced)
             CHECK_LE (std::abs (stepChange), 1.0);
     }
+}
+
+// =============================================================================
+// Auto Level's time constants (docs/11 E21): the upper gate's 10 ms detector,
+// the 15 s measure and AutoDrive 5x faster
+// =============================================================================
+TEST_CASE ("AutoLevel: a burst of fire about 10 LU over the ambience is held out of the measure from its first shot, so the gain does not follow the fight down (docs/11 E21)")
+{
+    // 10 s of -40 dBFS pink ambience, then three 1.5 s bursts of fire (peak
+    // 24 dB over the ambience's RMS: about 10 LU over it on 400 ms) 2.5 s
+    // apart, then 4 s of ambience; target 10 dB over the ambience's
+    // loudness, so the gain sits at its +6 dB cap before the fight.
+    auto scene = pinkBed (21.5, -40.0);
+    for (double t : { 10.0, 12.5, 15.0 })
+        addFire (scene, t, 1.5, std::pow (10.0, (-40.0 + 24.0) / 20.0), static_cast<uint32_t> (t * 100.0));
+    AutoLevel al;
+    al.prepare (kFs, 2);
+    al.setEnabled (true);
+    al.setTargetLufs (static_cast<float> (powerDb (meanPower (kWeighted (scene), 1.0, 10.0)) - 0.691 + 10.0));
+    Planar io (2, kBlock);
+    float before = 0.0f, lowest = 100.0f, after = 0.0f;
+    for (int pos = 0; pos + kBlock <= static_cast<int> (scene[0].size()); pos += kBlock)
+    {
+        for (int c = 0; c < 2; ++c)
+            std::copy (scene[static_cast<size_t> (c)].begin() + pos, scene[static_cast<size_t> (c)].begin() + pos + kBlock, io.ch[static_cast<size_t> (c)].begin());
+        al.process (io.block());
+        const double t = (pos + kBlock) / kFs;
+        if (t <= 10.0)
+            before = al.getGainDb();
+        else
+            lowest = std::min (lowest, al.getGainDb());
+        after = al.getGainDb();
+    }
+    measured ("Auto Level gain before the fight", before, "dB");
+    measured ("Auto Level gain, lowest in and after the fight", lowest, "dB");
+    measured ("Auto Level gain 4 s after the fight", after, "dB");
+    // Before the 10 ms detector the 400 ms gate let each burst's first
+    // 200-300 ms into the measure, which then admitted the rest: the gain
+    // fell 6.00 -> 3.3 dB within 1.5 s of the first burst (tests/
+    // test_soak_levels.cpp's quiet-combat rows: Night Mode 2.85 -> 1.75 dB).
+    CHECK_NEAR (before, AutoLevel::kMaxGainDb, 0.01);
+    CHECK_GE (lowest, before - 0.1f);
+    CHECK_NEAR (after, before, 0.1);
+}
+
+namespace
+{
+/** Auto Level and the maximizer's Loudness Target (AutoDrive) both on, over
+    `in` in kBlock blocks; returns their summed gain (what a listener hears as
+    one level) per block. */
+std::vector<float> levellersBothOn (const Channels& in)
+{
+    ParameterStore store;
+    store.set (AutoLevelOn, 1.0f);
+    store.set (AutoLevelTargetLufs, -20.0f);
+    store.set (MaximizerOn, 1.0f);
+    store.set (MaxDriveDb, 9.0f);
+    store.set (MaxAutoDrive, 1.0f);
+    store.set (MaxTargetLufs, -14.0f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, kBlock, 2 });
+    Planar io (2, kBlock);
+    std::vector<float> trace;
+    for (int pos = 0; pos + kBlock <= static_cast<int> (in[0].size()); pos += kBlock)
+    {
+        for (int c = 0; c < 2; ++c)
+            std::copy (in[static_cast<size_t> (c)].begin() + pos, in[static_cast<size_t> (c)].begin() + pos + kBlock, io.ch[static_cast<size_t> (c)].begin());
+        chain.process (io.block());
+        trace.push_back (chain.meters().autoLevelGainDb.load() + chain.meters().autoDriveDb.load());
+    }
+    return trace;
+}
+} // namespace
+
+TEST_CASE ("AutoLevel and AutoDrive: their time constants are 5x apart, and with both on a 6 LU step of music is levelled without a swing back over 1 dB (docs/11 E21)")
+{
+    static_assert (AutoLevel::kMeasureMs >= 5.0f * GatedLoudness::kSlowTimeMs, "docs/11 E21: AutoLevel / AutoDrive time constants separated >= 5x");
+    // Music at -32 LUFS-ish for 15 s, then 6 dB louder (under Auto Level's
+    // 8 LU upper gate, so it is levelled, not held) for 25 s.
+    auto music = makeMusic (40.0, 99);
+    for (auto& ch : music)
+        for (size_t i = 0; i < ch.size(); ++i)
+            ch[i] *= static_cast<float> (std::pow (10.0, (i >= static_cast<size_t> (samplesOf (15.0)) ? -20.0 : -26.0) / 20.0));
+    const auto trace = levellersBothOn (music);
+    const auto block = [] (double t) { return static_cast<size_t> (samplesOf (t) / kBlock); };
+    const double swing = largestSwingBack (trace, block (1.0), trace.size());
+    measured ("levellers' summed gain before the step", trace[block (14.9)], "dB");
+    measured ("levellers' summed gain 25 s after it", trace.back(), "dB");
+    measured ("largest swing back of the summed gain", swing, "dB");
+    CHECK_LE (swing, 1.0);
+    CHECK_LE (trace.back(), trace[block (14.9)] - 3.0f); // the louder music is levelled
 }

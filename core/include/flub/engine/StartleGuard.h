@@ -49,9 +49,17 @@
 //              event: at most 400 ms for the momentary to forget it, then
 //              the release). The gain falls to a lower target with a one-pole
 //              attack of a third of the look-ahead (at least kMinAttackMs).
-//              Programme that stays over the ceiling (loud music) is
-//              gain-modulated at its transients (the 1 ms detector) until it
-//              becomes the new level.
+//   sustained  programme that has stayed over the reference's event gate for
+//              kSustainedMs (loud music, a long fight) and is still within
+//              kSustainedMarginDb of the ceiling is guarded on its loudness
+//              alone (the momentary term: its transients are its own, not
+//              events over it) and released with kSustainedReleaseMs, so it
+//              is turned down smoothly instead of being modulated at its
+//              beats until it becomes the new level. The fast release comes
+//              back as soon as the momentary loudness falls kSustainedMarginDb
+//              under the ceiling or its target rises kSustainedExitDb over
+//              the gain (the fight ends, or a louder event in it has passed),
+//              so the end of a burst of fire is released as before.
 //   look-ahead none of its own: the chain measures the signal ahead of the
 //              compressor slot and applies the gains to what leaves it (the
 //              slot's latency, 0.5 / 1 / 3 ms, is spent anyway, bypassed or
@@ -94,6 +102,8 @@ public:
     static constexpr float kReferenceMs = 3000.0f, kMinReferenceMs = 100.0f, kSilenceLufs = -70.0f;
     static constexpr float kEventGateLu = 6.0f, kEventHoldMs = 300.0f, kNewLevelSeconds = 5.0f;
     static constexpr float kQuietRestartLu = 20.0f, kQuietRestartSeconds = 3.0f;
+    /** The sustained detector (docs/11 E21, see the header comment). */
+    static constexpr float kSustainedMs = 1000.0f, kSustainedMarginDb = 3.0f, kSustainedExitDb = 5.0f, kSustainedReleaseMs = 4000.0f;
     /** Tame (docs/11 E20): band 6's range at full Tame, its threshold over the
         reference, and the highest threshold (the band's fixed one before). */
     static constexpr float kTameMaxRangeDb = 18.0f, kTameRatio = 4.0f, kTameOverReferenceDb = 6.0f, kTameMaxThresholdDb = -22.0f;
@@ -132,6 +142,9 @@ public:
     float getReferenceLufs() const noexcept;
     /** True while the guard measures or its gain is still below unity. */
     bool isRunning() const noexcept { return running; }
+    /** True while the programme is sustained over the reference (see
+        kSustainedMs): its transients are not guarded one by one. */
+    bool isSustained() const noexcept { return sustained; }
 
 private:
     void restartReference() noexcept;
@@ -139,7 +152,7 @@ private:
     double sr = 48000.0;
     int maxBlock = 0;
     float ceilingLu = 0.0f, levelOffsetDb = 0.0f;
-    bool running = false, gainIdle = true;
+    bool running = false, gainIdle = true, sustained = false;
 
     BiquadCoeffs hpCoeffs, dipCoeffs, k1Coeffs, k2Coeffs;
     std::array<BiquadState, 2> hpState {}, dipState {}, k1State {}, k2State {};
@@ -158,7 +171,9 @@ private:
     double minFill = 0.0, silencePower = 0.0, eventGateFactor = 1.0, quietFactor = 1.0;
     int eventHoldSamples = 14400, newLevelSamples = 240000, quietRestartSamples = 144000, holdSamples = 7200;
     int eventHoldLeft = 0, eventRun = 0, quietRun = 0, holdLeft = 0;
-    float attackCoeff = 0.0f, releaseCoeff = 0.0f;
+    int sustainedSamples = 48000;
+    double sustainedMarginFactor = 0.5;
+    float attackCoeff = 0.0f, releaseCoeff = 0.0f, sustainedReleaseCoeff = 0.0f;
     float heldTargetDb = 0.0f, gainDb = 0.0f, lastLinear = 1.0f;
     std::atomic<float> blockGainDb { 0.0f };
 };

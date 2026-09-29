@@ -464,9 +464,19 @@ HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, c
     r.overload = overload.overloaded;
     r.warn = status.cpuLoad > 0.7;
     r.caption = r.overload ? "OVERLOAD" : "CPU";
-    r.value = juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%";
+    r.value = r.compactValue = juce::String (juce::roundToInt (status.cpuLoad * 100.0)) + "%";
+    // docs/11 E45: the slowest callbacks of the last poll, which the average hides.
+    if (overload.lastPeakLoad >= 0.0)
+    {
+        r.value << " pk " << juce::roundToInt (overload.lastPeakLoad * 100.0) << "%";
+        r.warn = r.warn || overload.lastPeakLoad >= 0.9;
+    }
     if (status.xruns >= 0) // only devices that report xruns themselves
-        r.value << kDot << status.xruns << " xr";
+    {
+        const auto xr = kDot + juce::String (status.xruns) + " xr";
+        r.value << xr;
+        r.compactValue << xr;
+    }
     return r;
 }
 
@@ -478,11 +488,14 @@ juce::String HeaderBar::describeCpu (const EngineStatus& status, const OverloadW
 
     juce::String t;
     t << "CPU: " << juce::roundToInt (status.cpuLoad * 100.0) << " % of the audio callback's time budget";
+    if (overload.lastPeakLoad >= 0.0)
+        t << "; peak " << juce::roundToInt (overload.lastPeakLoad * 100.0)
+          << " % (the slowest 0.1 % of the callbacks in the last half second)";
     if (status.xruns >= 0)
         t << "; " << status.xruns << (status.xruns == 1 ? " xrun" : " xruns") << " reported by the device since it started";
     if (overload.overloaded)
     {
-        t << "\nOverload: the audio callback is running out of time (sustained load of 90 % or more, or repeated dropouts; peak "
+        t << "\nOverload: the audio callback is running out of time (sustained load or peak callbacks of 90 % or more, or repeated dropouts; peak "
           << juce::roundToInt (overload.peakLoad * 100.0) << " %, " << static_cast<juce::int64> (overload.episodeGlitches)
           << " dropouts). Try the Low Latency profile (Settings > Processing), which is also the cheapest, or a larger buffer "
              "(Settings > Audio).";
@@ -1095,7 +1108,11 @@ void HeaderBar::paint (juce::Graphics& g)
         g.setColour (cpu.overload ? hot : (cpu.warn ? Palette::amber : Palette::muted));
         auto value = cpu.value;
         if (compact && cpu.caption != "DEVICE")
-            value = (cpu.overload ? "! " : "CPU ") + value;
+            value = (cpu.overload ? "! " : "CPU ") + cpu.compactValue;
+        else if (! compact
+                 && juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), value)
+                        > row2.getWidth() - juce::GlyphArrangement::getStringWidth (Theme::caption (11.0f), cpu.caption) - 6.0f)
+            value = cpu.compactValue; // "OVERLOAD" with a three-digit peak: the tooltip has it
         g.drawText (value, row2, juce::Justification::centredRight, false);
     }
 }

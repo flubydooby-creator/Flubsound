@@ -77,6 +77,9 @@ void StartleGuard::prepare (double sampleRate, int maxBlockSize, int lookaheadSa
     quietRestartSamples = msToSamples (1000.0f * kQuietRestartSeconds, sr);
     attackCoeff = onePoleCoeff (std::max (kMinAttackMs, static_cast<float> (1000.0 * lookaheadSamples / (3.0 * sr))), sr);
     releaseCoeff = onePoleCoeff (kReleaseMs, sr);
+    sustainedSamples = msToSamples (kSustainedMs, sr);
+    sustainedMarginFactor = std::pow (10.0, -0.1 * static_cast<double> (kSustainedMarginDb));
+    sustainedReleaseCoeff = onePoleCoeff (kSustainedReleaseMs, sr);
     holdSamples = msToSamples (kHoldMs, sr);
     reset();
 }
@@ -96,6 +99,7 @@ void StartleGuard::reset() noexcept FLUB_NONBLOCKING
     stepsSum = partialSum = 0.0;
     partialLength = stepCount = stepPos = 0;
     fastMs = 0.0;
+    sustained = false;
     restartReference();
     holdLeft = 0;
     heldTargetDb = gainDb = 0.0f;
@@ -219,17 +223,33 @@ void StartleGuard::measure (const AudioBlock& block, bool unmeasured) noexcept F
             quietRun = 0;
         }
 
-        float target = 0.0f;
+        // Sustained: over the event gate (with gaps under kEventHoldMs) for
+        // kSustainedMs, and still at the ceiling; it ends as soon as the
+        // momentary loudness falls kSustainedMarginDb under the ceiling, so
+        // the end of a burst of fire is released as fast as before.
+        const double cap = reference * ceilingFactor;
+        float target = 0.0f, loudnessTarget = 0.0f;
         if (on && valid)
         {
-            const double cap = reference * ceilingFactor;
             if (detector > cap)
                 target = static_cast<float> (10.0 * std::log10 (cap / detector));
+            if (momentaryMs > cap)
+                loudnessTarget = static_cast<float> (10.0 * std::log10 (cap / momentaryMs));
         }
+        sustained = on && valid && eventRun >= sustainedSamples && momentaryMs > cap * sustainedMarginFactor
+                    && loudnessTarget - heldTargetDb < kSustainedExitDb;
+        if (sustained)
+            target = loudnessTarget; // guarded on its loudness: its transients are its own
         if (target <= heldTargetDb)
         {
             heldTargetDb = target;
-            holdLeft = holdSamples;
+            holdLeft = sustained ? 0 : holdSamples;
+        }
+        else if (sustained)
+        {
+            // The release is slowed to kSustainedReleaseMs (no hold after it).
+            holdLeft = 0;
+            heldTargetDb = target + sustainedReleaseCoeff * (heldTargetDb - target);
         }
         else if (holdLeft > 0)
         {

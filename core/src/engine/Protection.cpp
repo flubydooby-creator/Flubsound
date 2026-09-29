@@ -5,7 +5,6 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
-#include <cstdlib> // PROBE
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -694,9 +693,10 @@ void AutoLevel::prepare (double sampleRate, int numChannels)
 {
     sr = sampleRate;
     follower.setUpperGate (true);
-    if (const char* e = std::getenv ("FLUB_AL_TAU")) follower.setSlowTimeMs (static_cast<float> (std::atof (e))); // PROBE
+    follower.setSlowTimeMs (kMeasureMs);
     follower.prepare (sampleRate, numChannels);
     settleSamples = static_cast<std::int64_t> (kRestartSettleSeconds * sampleRate);
+    gapSamples = static_cast<std::int64_t> (kGapSeconds * sampleRate);
     reset();
 }
 
@@ -707,6 +707,8 @@ void AutoLevel::reset() noexcept
     lastLinear = 1.0f;
     recoveryLeft = 0.0;
     restartsSeen = 0;
+    pauseSamples = 0;
+    direction = 0;
     frozen = settling = false;
 }
 
@@ -723,7 +725,15 @@ void AutoLevel::processUnmeasured (const AudioBlock& block) noexcept FLUB_NONBLO
 void AutoLevel::run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLOCKING
 {
     if (measure)
+    {
         follower.process (block); // measured BEFORE our gain: open-loop, unconditionally stable
+        pauseSamples = follower.hasProgramme() ? 0 : pauseSamples + block.numSamples;
+        // A new level measured for less than the settle time is not carried
+        // over a pause (a track that ended just after it was taken as the
+        // level): the next programme starts the measure afresh.
+        if (settling && pauseSamples >= gapSamples && follower.measuredSamples() > 0)
+            follower.restart();
+    }
     const double dt = block.numSamples / sr;
     if (follower.restartCount() != restartsSeen)
     {
@@ -732,6 +742,7 @@ void AutoLevel::run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLO
         // of it instead of following that and coming back.
         restartsSeen = follower.restartCount();
         settling = true;
+        direction = 0;
     }
     if (settling && follower.measuredSamples() >= settleSamples)
         settling = false;
@@ -756,8 +767,12 @@ void AutoLevel::run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLO
                 recoveryLeft = kRecoverySeconds;
             }
             const float up = recoveryLeft > 0.0 ? kRecoveryUpDbPerSec : kUpDbPerSec;
-            const float desired = std::clamp (target - follower.getLufs(), kMinGainDb, kMaxGainDb);
+            float desired = std::clamp (target - follower.getLufs(), kMinGainDb, kMaxGainDb);
+            if ((direction < 0 && desired > gainDb && desired - gainDb <= kReversalDb) || (direction > 0 && desired < gainDb && gainDb - desired <= kReversalDb))
+                desired = gainDb; // a small reversal: hold
+            const float before = gainDb;
             gainDb = slew (gainDb, desired, up, kDownDbPerSec, dt);
+            direction = gainDb > before ? 1 : gainDb < before ? -1 : direction;
             recoveryLeft = std::max (0.0, recoveryLeft - dt);
         }
         else if (follower.hasProgramme())
