@@ -136,7 +136,7 @@ void StartleGuard::measure (const AudioBlock& block, bool unmeasured) noexcept F
     {
         // Off and released: idle (the audio untouched, nothing measured). The
         // next switch-on starts from a fresh reference.
-        running = false;
+        running = sustained = false;
         gainDb = heldTargetDb = 0.0f;
         blockGainDb.store (0.0f, std::memory_order_relaxed);
         return;
@@ -225,8 +225,9 @@ void StartleGuard::measure (const AudioBlock& block, bool unmeasured) noexcept F
 
         // Sustained: over the event gate (with gaps under kEventHoldMs) for
         // kSustainedMs, and still at the ceiling; it ends as soon as the
-        // momentary loudness falls kSustainedMarginDb under the ceiling, so
-        // the end of a burst of fire is released as fast as before.
+        // momentary loudness falls kSustainedMarginDb under the ceiling or
+        // its target rises kSustainedExitDb over the gain, so the end of a
+        // burst of fire (or of an explosion in it) is released as before.
         const double cap = reference * ceilingFactor;
         float target = 0.0f, loudnessTarget = 0.0f;
         if (on && valid)

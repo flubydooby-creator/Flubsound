@@ -280,6 +280,7 @@ static_assert (std::is_same_v<decltype (&ComparisonMatcher::measureWet), void (C
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::update), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::updateUnmeasured), void (ComparisonMatcher::*) (bool, bool, int) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&AutoLevel::processUnmeasured), void (AutoLevel::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&GatedLoudness::restart), void (GatedLoudness::*)() noexcept FLUB_NONBLOCKING>); // AutoLevel's gap rule (docs/11 E21)
 static_assert (std::is_same_v<decltype (&ComparisonMatcher::applyWetTrim), void (ComparisonMatcher::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 // The Startle Guard ProcessingChain::process runs around the compressor slot
 // (tests/test_dynamics_guard.cpp, docs/11 E21) and its per-block settings.

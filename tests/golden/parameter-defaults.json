@@ -110,6 +110,7 @@
     "bass.subsonicOrder": 1,
     "bass.splitProtect": 0,
     "auto.preampHot": 0,
+    "spatial.crossfeedType": 0,
     "eq.0.on": 1,
     "eq.0.type": 0,
     "eq.0.freq": 32,

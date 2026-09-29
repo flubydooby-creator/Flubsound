@@ -675,7 +675,7 @@ std::vector<float> levellersBothOn (const Channels& in)
 {
     ParameterStore store;
     store.set (AutoLevelOn, 1.0f);
-    store.set (AutoLevelTargetLufs, -20.0f);
+    store.set (AutoLevelTargetLufs, -22.0f);
     store.set (MaximizerOn, 1.0f);
     store.set (MaxDriveDb, 9.0f);
     store.set (MaxAutoDrive, 1.0f);
@@ -698,18 +698,23 @@ std::vector<float> levellersBothOn (const Channels& in)
 TEST_CASE ("AutoLevel and AutoDrive: their time constants are 5x apart, and with both on a 6 LU step of music is levelled without a swing back over 1 dB (docs/11 E21)")
 {
     static_assert (AutoLevel::kMeasureMs >= 5.0f * GatedLoudness::kSlowTimeMs, "docs/11 E21: AutoLevel / AutoDrive time constants separated >= 5x");
-    // Music at -32 LUFS-ish for 15 s, then 6 dB louder (under Auto Level's
-    // 8 LU upper gate, so it is levelled, not held) for 25 s.
-    auto music = makeMusic (40.0, 99);
+    // Music at -26 LUFS for 10 s, then 6 dB louder (under Auto Level's 8 LU
+    // upper gate, so it is levelled, not held) for 15 s; Auto Level's target
+    // -22 LUFS, the maximizer's drive 9 dB and its Loudness Target -14 LUFS.
+    auto music = makeMusic (25.0, 99);
+    const double lufs = powerDb (meanPower (kWeighted (music), 0.0, 25.0)) + 10.0 * std::log10 (2.0) - 0.691;
     for (auto& ch : music)
         for (size_t i = 0; i < ch.size(); ++i)
-            ch[i] *= static_cast<float> (std::pow (10.0, (i >= static_cast<size_t> (samplesOf (15.0)) ? -20.0 : -26.0) / 20.0));
+            ch[i] *= static_cast<float> (std::pow (10.0, ((i >= static_cast<size_t> (samplesOf (10.0)) ? -20.0 : -26.0) - lufs) / 20.0));
     const auto trace = levellersBothOn (music);
     const auto block = [] (double t) { return static_cast<size_t> (samplesOf (t) / kBlock); };
-    const double swing = largestSwingBack (trace, block (1.0), trace.size());
-    measured ("levellers' summed gain before the step", trace[block (14.9)], "dB");
-    measured ("levellers' summed gain 25 s after it", trace.back(), "dB");
+    // From the step on (before it Auto Level rises from its cold start): the
+    // two move in the same direction, AutoDrive's 3 s loop following Auto
+    // Level's 15 s one.
+    const double swing = largestSwingBack (trace, block (10.0), trace.size());
+    measured ("levellers' summed gain before the step", trace[block (9.9)], "dB");
+    measured ("levellers' summed gain 15 s after it", trace.back(), "dB");
     measured ("largest swing back of the summed gain", swing, "dB");
     CHECK_LE (swing, 1.0);
-    CHECK_LE (trace.back(), trace[block (14.9)] - 3.0f); // the louder music is levelled
+    CHECK_LE (trace.back(), trace[block (9.9)] - 3.0f); // the louder music is levelled
 }

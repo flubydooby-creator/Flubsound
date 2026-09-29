@@ -216,13 +216,17 @@ TEST_CASE ("App UI: comparisons turn only the louder side down; their values lea
 TEST_CASE ("App UI: two banks 4+ LU apart are matched within 1 LU 1 s after an A/B flip, with no re-prepare (E37)")
 {
     const auto shared = std::make_shared<ui::PresetLoudnessEstimator> (48000.0);
-    // The stretch of the preset browser's row (tests/app/test_app_ui_preset_browser.cpp).
-    // The estimates are made on music: on the game scene a first flip is
-    // within 0.7-1.1 LU depending on the stretch, until the refinement.
-    const auto stay = abRun (false, 1.0, 2.5, shared);
-    const auto flipped = abRun (true, 1.0, 2.5, shared);
+    // The stretch of the preset browser's row (tests/app/test_app_ui_preset_browser.cpp),
+    // on the music: the estimates are made on music. (On the game scene a
+    // first flip was within 0.7-1.1 LU depending on the stretch, until the
+    // refinement; since docs/11 E01's app copies, Phase 3 batch 3, the test
+    // signal's stereo downmix of that scene folds the LFE at +10 dB, about
+    // 10 LU louder and LF-heavy, and the music-based estimates leave 1.3-1.7
+    // LU there.)
+    const auto stay = abRun (false, 1.0, 2.5, shared, TestSignalGenerator::Programme::Music);
+    const auto flipped = abRun (true, 1.0, 2.5, shared, TestSignalGenerator::Programme::Music);
     const float unmatched = flipped.levelDb - flipped.trimDb - stay.levelDb;
-    std::cerr << "    A Lo-Fi Chill -> B Club Loud on the game scene, 1-2.5 s after the flip: unmatched " << unmatched << " LU, matched "
+    std::cerr << "    A Lo-Fi Chill -> B Club Loud on the music, 1-2.5 s after the flip: unmatched " << unmatched << " LU, matched "
               << (flipped.levelDb - stay.levelDb) << " LU (trim " << flipped.trimDb << " dB)\n";
     CHECK (unmatched > 4.0f);
     CHECK (flipped.trimDb < -4.0f);

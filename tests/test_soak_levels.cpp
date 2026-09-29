@@ -9,9 +9,10 @@
 // with FLUB_SOAK=1 in the environment (`ctest -C Soak` runs it, see
 // tests/CMakeLists.txt; or `FLUB_SOAK=1 flub_tests "Soak levels (slow"`);
 // by default it reports that it was skipped. Its first 20 s are the smoke
-// cases, one per preset, which run by default. Levels are BS.1770 loudness
-// (K-weighted, gated) of both channels. Every test prints its values
-// ("    measured ...").
+// cases, one per preset, which run by default. Then docs/11 E21's first
+// combat event after 10 s of quiet (Night Mode Gaming, and Competitive FPS
+// with the Startle Guard on). Levels are BS.1770 loudness (K-weighted,
+// gated) of both channels. Every test prints its values ("    measured ...").
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -666,20 +667,22 @@ struct SoakPreset
     double programmeGapDb, combatGapDb; // 0: met (<= 1 dB)
 };
 
-// KNOWN_GAP: no leveller oscillation above 1 dB per docs/11 E21 - over the
-// 10 minutes Auto Level (the one leveller of the three levelled presets;
-// Competitive FPS has none) swings back 3.46 / 4.61 / 4.61 dB in combat
-// (Night Mode / Late Night / Podcast & Voice: it follows each 1-3 s burst of
-// fire down by about 3 dB and back up at 1 dB/s; the bursts, about 10 LU
-// over the ambience, do not keep the upper gate's 8 LU over its 3 s measure
-// closed) and 1.65 dB on music (it rides the bars of a loud track after a
-// quiet one with its 3 s measure). The same for every target: Auto Level
-// measures the input, so the presets' tuning does not move it; its time
-// constants are docs/11 E21's next unit. The first 20 s (the smoke cases)
-// meet it.
-const SoakPreset kSoakPresets[] = { { "gaming-night-mode.json", 1.65, 3.46 },
-                                    { "music-late-night-low-volume.json", 1.65, 4.61 },
-                                    { "music-podcast-voice.json", 1.65, 4.61 },
+// KNOWN_GAP: no leveller oscillation above 1 dB per docs/11 E21 - met on
+// programme since docs/11 E21's time-constant unit (Auto Level's 15 s
+// measure, its 10 ms upper-gate detector, the reversal hysteresis, the settle
+// after a new level and the drop rule; before, with a 3 s measure: 1.65 dB
+// on music in all three, the bars of a loud track after a quiet one), and
+// near it in combat: 1.05 / 1.08 / 1.05 dB (Night Mode / Late Night /
+// Podcast & Voice; before 3.46 / 4.61 / 4.61 dB, when the 400 ms upper gate
+// let each 1-3 s burst of fire in and the gain followed it down 3 dB and
+// back). What is left is Auto Level following the 15 s loudness of a long
+// fight whose fire is only 4-8 LU over a loud ambience (-21 LUFS: the fire
+// is capped at -7 dBFS there, so it is programme, not an event): about 1.1 dB
+// over 20 s. Competitive FPS has no leveller (0 dB). The first 20 s (the
+// smoke cases) meet it.
+const SoakPreset kSoakPresets[] = { { "gaming-night-mode.json", 0.0, 1.05 },
+                                    { "music-late-night-low-volume.json", 0.0, 1.08 },
+                                    { "music-podcast-voice.json", 0.0, 1.05 },
                                     { "gaming-competitive-fps.json", 0.0, 0.0 } };
 
 /** docs/11 E21 Done-when: no leveller oscillation above 1 dB; a known gap
@@ -836,7 +839,7 @@ TEST_CASE ("Soak levels smoke: the mixed programme's first 20 s through Competit
     checkSoak (kSoakPresets[3], 20.0, false);
 }
 
-TEST_CASE ("Soak levels (slow, FLUB_SOAK=1): 10 minutes of mixed programme through the four leveller presets, no leveller oscillation above 1 dB (docs/11 E21; KnownGap: Auto Level in combat and on music)")
+TEST_CASE ("Soak levels (slow, FLUB_SOAK=1): 10 minutes of mixed programme through the four leveller presets, no leveller oscillation above 1 dB (docs/11 E21; KnownGap: Auto Level in combat, 1.05-1.08 dB)")
 {
     const char* on = std::getenv ("FLUB_SOAK");
     if (on == nullptr || std::string (on) != "1")
@@ -1042,22 +1045,44 @@ void checkQuietCombat (const char* file, GuardRangeValue guard, double lufs, dou
 }
 } // namespace
 
-TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 10 LU, -14 / -24 / -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 10 LU, -14 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
 {
-    for (double lufs : { -14.0, -24.0, -40.0 })
-        checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu10Balanced, lufs);
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu10Balanced, -14.0);
 }
 
-TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 6 LU, -14 / -24 / -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 10 LU, -24 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
 {
-    for (double lufs : { -14.0, -24.0, -40.0 })
-        checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu6Shield, lufs);
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu10Balanced, -24.0);
 }
 
-TEST_CASE ("First combat after 10 s of quiet: Night Mode Gaming at -14 / -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 10 LU, -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
 {
-    for (double lufs : { -14.0, -40.0 })
-        checkQuietCombat ("gaming-night-mode.json", GuardRangeValue::Off, lufs);
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu10Balanced, -40.0);
+}
+
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 6 LU, -14 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+{
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu6Shield, -14.0);
+}
+
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 6 LU, -24 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+{
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu6Shield, -24.0);
+}
+
+TEST_CASE ("First combat after 10 s of quiet: Competitive FPS with the Startle Guard at 6 LU, -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+{
+    checkQuietCombat ("gaming-competitive-fps.json", GuardRangeValue::Lu6Shield, -40.0);
+}
+
+TEST_CASE ("First combat after 10 s of quiet: Night Mode Gaming at -14 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+{
+    checkQuietCombat ("gaming-night-mode.json", GuardRangeValue::Off, -14.0);
+}
+
+TEST_CASE ("First combat after 10 s of quiet: Night Mode Gaming at -40 LUFS - the first event at most the steady state + 1 dB, the step band within 1 dB after 1 s (docs/11 E21)")
+{
+    checkQuietCombat ("gaming-night-mode.json", GuardRangeValue::Off, -40.0);
 }
 
 TEST_CASE ("First combat after 10 s of quiet: Night Mode Gaming at -24 LUFS (docs/11 E21; KnownGap: the compressor's 3 ms attack lets the first shot through 1.7 dB louder)")
@@ -1068,7 +1093,7 @@ TEST_CASE ("First combat after 10 s of quiet: Night Mode Gaming at -24 LUFS (doc
     // 1.75 dB left is the preset's downward compressor (3:1, 3 ms attack,
     // 250 ms auto release: after the quiet it lets a shot's first
     // milliseconds through, in the fight it is still down from the last
-    // shot); with comp.attack 1 ms it reads 0.52 dB (-14 / -40 LUFS 0.38 /
+    // shot); with comp.attack 1 ms it reads 0.52 dB (-14 / -40 LUFS 0.18 /
     // 0.18 dB), a re-voicing left to the owner.
     checkQuietCombat ("gaming-night-mode.json", GuardRangeValue::Off, -24.0, 1.75);
 }

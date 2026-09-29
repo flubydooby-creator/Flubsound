@@ -956,11 +956,16 @@ TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 s
         // -24 LUFS hole is now negative (the bed after the event 1.1 dB
         // louder, not quieter): at -24 LUFS the new target asks Auto Level
         // for +10 dB, so it is still rising to its +6 dB cap (1 dB/s) through
-        // this 12 s scene.
+        // this 12 s scene. Re-pinned by docs/11 E21's time constants (Phase 3
+        // batch 3: Auto Level's 15 s measure, its 10 ms onset gate and 300 ms
+        // hold; the Startle Guard's sustained detector): event change -9.03 /
+        // -7.44 / -0.05 -> -8.97 / -7.12 / -0.29, onset jump 0.65 / 1.80 /
+        // -0.07 -> 0.57 / 1.20 / 0.28, step lift after at -24 LUFS 0.78 ->
+        // 1.05 dB, the rest within 0.05 dB.
         { "gaming-night-mode.json",
-          { { 1.72, 1.01, -7.89, -0.22, -9.03, 0.65, -0.46, 0.00, 0.01 },
-            { 2.03, 1.04, -0.15, 0.76, -7.44, 1.80, -1.14, 2.43, 0.78 },
-            { 3.87, 1.99, 3.83, 1.93, -0.05, -0.07, -1.86, 4.18, 2.75 } } },
+          { { 1.73, 1.02, -7.90, -0.20, -8.97, 0.57, -0.43, 0.00, 0.01 },
+            { 2.03, 1.04, -0.15, 0.76, -7.12, 1.20, -1.19, 2.43, 1.05 },
+            { 3.87, 1.99, 3.83, 1.93, -0.29, 0.28, -1.86, 4.18, 2.77 } } },
         { "gaming-horror-detail.json",
           { { 3.18, 2.68, 0.40, -0.09, 0.15, 0.32, -0.25, 0.00, 0.24 },
             { 4.07, 3.20, 2.04, -0.01, 0.00, 0.45, -0.08, 0.00, 0.15 },
@@ -989,10 +994,16 @@ TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 s
           { { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
             { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
             { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 } } },
+        // Late Night: re-pinned by docs/11 E21 (Phase 3 batch 3): its retune
+        // for -20 LUFS (Auto Level -26 LUFS, 10:1 compressor with +11.8 dB
+        // make-up, a stronger upward section) and the Auto Level time
+        // constants. A leveller now: the -40 LUFS bed is brought up to the
+        // target (+7.30 -> +22.56 dB), the -24 LUFS onset jump 6.03 -> 1.76 dB,
+        // hole 1.86 -> -0.89 dB, recovery 4.18 -> 2.43 s.
         { "music-late-night-low-volume.json",
-          { { -0.33, -0.22, -8.80, -0.12, -9.63, 1.08, -0.03, 0.00, -0.20 },
-            { -0.41, -0.33, 0.84, 0.71, -5.23, 6.03, 1.86, 4.18, -1.85 },
-            { 0.14, -0.31, 7.30, 2.15, 4.11, 3.15, -1.68, 4.18, 2.31 } } },
+          { { -0.02, -0.11, -5.91, 0.42, -6.34, 0.42, -0.30, 0.00, -0.04 },
+            { -0.02, -0.16, 4.45, -0.15, -4.53, 1.76, -0.89, 2.43, -0.06 },
+            { 0.33, -0.13, 22.56, 0.12, 6.79, 2.56, 0.07, 1.03, -1.37 } } },
     };
     for (int l = 0; l < 3; ++l)
     {
@@ -1125,7 +1136,9 @@ void checkDialogueScene (int l)
         { nullptr, false, { { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 } } },
         { "gaming-competitive-fps.json", false, { { 2.90, 2.57, -0.10 }, { 3.00, 3.18, 0.49 }, { 3.15, 3.87, 0.90 } } },
         { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.07, 0.29, 3.31 }, { -1.98, 3.86, 4.60 } } },
-        { "gaming-night-mode.json", true, { { -5.75, -10.91, -6.19 }, { -5.44, -2.95, 1.56 }, { -0.32, 4.92, 4.54 } } },
+        // Night Mode at -14 LUFS re-pinned by docs/11 E21's time constants
+        // (Phase 3 batch 3): -5.75 / -10.91 / -6.19 -> -5.30 / -10.64 / -6.29.
+        { "gaming-night-mode.json", true, { { -5.30, -10.64, -6.29 }, { -5.44, -2.95, 1.56 }, { -0.32, 4.92, 4.54 } } },
     };
     const auto scene = makeDialogueScene (kLevels[l]);
     measured ("dialogue scene turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
@@ -1187,17 +1200,22 @@ void checkSpeechMusicSilence (int l)
     // +6 dB applied to the noise floor (silence lift re speech <= +6 dB).
     // The balance change has no target (pinned only).
     // KNOWN_GAP: speech return within +-1 dB per docs/11 E21 - Night Mode
-    // +2.68 dB and Late Night +2.45 dB at -40 LUFS (Auto Level still rising
+    // +2.68 dB and Late Night +2.79 dB at -40 LUFS (Auto Level still rising
     // on the quiet speech, 3 dB/s; Night Mode +1.78 dB before docs/11 E21
     // Phase 3's retune, whose 3:1 compressor with 6 dB of make-up took part
-    // of the rise back), Late Night +1.01 dB at -24 LUFS.
-    // KNOWN_GAP: silence lift <= +6 dB per docs/11 E21 - Night Mode +8.4 dB
-    // at -14 LUFS and Late Night +7.5 / +8.4 dB at -14 / -24 LUFS: the
-    // downward compressor (3:1 / 2:1) turns the speech down while the level
-    // after it (Night Mode's Auto Level target, Late Night's 3 dB make-up)
-    // lifts the hiss in the pause. (E19's relative floor keeps the upward
-    // section off the -80 dBFS hiss.) Night Mode at -24 LUFS closed by the
-    // E21 Phase 3 retune: +8.60 -> +5.83 dB.
+    // of the rise back; Late Night +2.45 dB before its Phase 3 batch 3
+    // retune, whose stronger upward section lifts the returning speech
+    // more). Late Night at -24 LUFS closed by that retune: +1.01 -> +0.02 dB.
+    // KNOWN_GAP: silence lift <= +6 dB per docs/11 E21 - Night Mode +8.1 dB
+    // at -14 LUFS and Late Night +6.5 dB at -24 LUFS: the downward
+    // compressor turns the speech down while the level after it (Night
+    // Mode's Auto Level target, Late Night's make-up) lifts the hiss in the
+    // pause. (E19's relative floor keeps the upward section off the -80 dBFS
+    // hiss.) Night Mode at -24 LUFS closed by the E21 Phase 3 retune: +8.60
+    // -> +5.83 dB; Late Night at -14 LUFS by its batch 3 retune and the Auto
+    // Level time constants: +7.47 -> +5.81 dB (before: +7.47 / +8.35 dB at
+    // -14 / -24 LUFS). Night Mode at -14 LUFS moved with those time
+    // constants: silence lift 8.37 -> 8.12 dB, speech return 0.01 -> 0.11 dB.
     //                     balance change, music onset jump, silence lift, silence out (dBFS), speech return
     struct Pinned
     {
@@ -1209,9 +1227,9 @@ void checkSpeechMusicSilence (int l)
         { nullptr, { false, false, false }, { false, false, false },
           { { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 } } },
         { "gaming-night-mode.json", { false, false, true }, { true, false, false },
-          { { -1.26, -0.33, 8.37, -79.05, 0.01 }, { -1.08, -1.05, 5.83, -75.74, 0.97 }, { -2.42, -2.52, 0.90, -75.81, 2.68 } } },
-        { "music-late-night-low-volume.json", { false, true, true }, { true, true, false },
-          { { 2.14, 0.95, 7.47, -81.17, 0.34 }, { 2.76, 0.80, 8.35, -72.48, 1.01 }, { 3.46, -1.31, 3.78, -71.32, 2.45 } } },
+          { { -1.42, -0.13, 8.12, -79.35, 0.11 }, { -1.08, -1.05, 5.83, -75.74, 0.97 }, { -2.42, -2.52, 0.90, -75.81, 2.68 } } },
+        { "music-late-night-low-volume.json", { false, false, true }, { false, true, false },
+          { { 1.25, 0.35, 5.81, -79.22, -0.48 }, { 1.76, 0.08, 6.53, -70.42, 0.02 }, { 7.86, -5.96, 2.91, -62.34, 2.79 } } },
     };
     const auto scene = makeSpeechMusicSilence (kLevels[l]);
     measured ("speech -> music -> silence turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
@@ -1259,16 +1277,22 @@ void checkTrackChange (int l)
     // track's first 500 ms at most 1 dB over its steady state (overshoot
     // <= +1 dB) and within 1 dB of it after 1 s (settle <= 1 s); the output
     // stays under full scale (peak <= -0.5 dBFS: met everywhere). The step
-    // change has no target (pinned only). At -24 LUFS both presets meet all
-    // of it, Night Mode at every level.
-    // KNOWN_GAP: overshoot <= +1 dB and settle <= 1 s per docs/11 E21 - at
-    // -14 LUFS Late Night +3.70 dB / 1.41 s (the gain reached on the quiet
-    // track carries into the loud one and is taken back over seconds); at
-    // -40 LUFS it settles only after 2.34 s, from below (overshoot -2.6 dB:
-    // Auto Level rises on the loud track at 3 dB/s). Night Mode closed by
-    // docs/11 E21 Phase 3's retune (before: +2.00 dB / 1.88 s at -14 LUFS,
-    // -3.64 dB / 2.34 s at -40 LUFS): its compressor now works on the level
-    // Auto Level delivers instead of adding 6 dB after it.
+    // change has no target (pinned only). Night Mode meets all of it at
+    // every level, Late Night at -14 and -40 LUFS.
+    // KNOWN_GAP: overshoot <= +1 dB and settle <= 1 s per docs/11 E21 - Late
+    // Night at -24 LUFS settles after 1.88 s (0 s before docs/11 E21's time
+    // constants, Phase 3 batch 3: Auto Level's upper gate now holds the whole
+    // loud track out of its measure, so the compressor takes the 15 LU step;
+    // the 3 s measure's leak used to take part of it). Late Night's retune
+    // (Phase 3 batch 3) closed -14 LUFS (+3.70 dB / 1.41 s -> +0.98 dB / 0 s;
+    // flagged all the same, 0.02 dB under the limit, so that a compiler's
+    // rounding cannot fail it) and -40 LUFS (-2.56 dB / 2.34 s -> +0.91 dB /
+    // 0 s). Night Mode closed by docs/11 E21 Phase 3's retune (before: +2.00
+    // dB / 1.88 s at -14 LUFS, -3.64 dB / 2.34 s at -40 LUFS): its
+    // compressor now works on the level Auto Level delivers instead of
+    // adding 6 dB after it; the time constants moved its step change -4.66 /
+    // -0.88 -> -5.39 / -2.32 dB and overshoot -0.16 / -0.95 -> +0.45 / +0.36
+    // dB at -14 / -24 LUFS (settle 0.94 -> 0 s at -24).
     //                     step change, overshoot, settle (s), peak (dBFS)
     struct Pinned
     {
@@ -1278,8 +1302,8 @@ void checkTrackChange (int l)
     };
     static const Pinned pinned[] = {
         { nullptr, { false, false, false }, { { -0.01, 0.00, 0.00, -2.51 }, { 0.00, 0.00, 0.00, -8.41 }, { 0.00, 0.00, 0.00, -24.40 } } },
-        { "gaming-night-mode.json", { false, false, false }, { { -4.66, -0.16, 0.00, -9.49 }, { -0.88, -0.95, 0.94, -12.12 }, { 2.00, -1.21, 0.00, -24.82 } } },
-        { "music-late-night-low-volume.json", { true, false, true }, { { -8.94, 3.70, 1.41, -1.05 }, { -4.22, 0.48, 0.00, -4.75 }, { -0.15, -2.56, 2.34, -17.79 } } },
+        { "gaming-night-mode.json", { false, false, false }, { { -5.39, 0.45, 0.00, -9.50 }, { -2.32, 0.36, 0.00, -12.14 }, { 2.00, -1.21, 0.00, -24.82 } } },
+        { "music-late-night-low-volume.json", { true, true, false }, { { -14.83, 0.98, 0.00, -2.20 }, { -15.79, 0.81, 1.88, -2.89 }, { -1.26, 0.91, 0.00, -2.52 } } },
     };
     const auto scene = makeTrackChange (kLevels[l]);
     measured ("track change turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");

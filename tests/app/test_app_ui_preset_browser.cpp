@@ -428,9 +428,13 @@ TEST_CASE ("App UI: the browser shows a preset's description, tags, latency prof
 // =============================================================================
 // Loudness matching (docs/11 E37)
 // =============================================================================
-// The game scene is not stationary (bursts, explosions), so a flip is judged
-// against a run that did not flip, over the same stretch of the same
-// (deterministic) programme, each run on a fresh engine.
+// A flip is judged against a run that did not flip, over the same stretch of
+// the same (deterministic) programme, each run on a fresh engine. The
+// programme is the test signal's music at -12 dB (about -26 LUFS in): since
+// docs/11 E01's app copies (Phase 3 batch 3) the test signal's stereo
+// downmix of its 7.1 game scene folds the LFE at +10 dB as the chain does,
+// which plays that scene about 10 LU louder and LF-heavy on a stereo strip,
+// where the estimates, made on music, then leave 1.3-2.9 LU.
 namespace
 {
 struct FlipRun
@@ -440,7 +444,7 @@ struct FlipRun
     float inputLufs = 0.0f;   // the level the estimates were made at
 };
 
-/** Plays `first` for preRollSeconds on the Music strip (the game scene), then opens the
+/** Plays `first` for preRollSeconds on the Music strip (the music), then opens the
     browser and runs `flip` (which may select rows) and measures the output
     from 1 s to 2.5 s after it; `second`, when given, is run after another
     1.5 s and measured the same way instead. */
@@ -460,7 +464,7 @@ FlipRun flipRun (const char* first, const std::shared_ptr<ui::PresetLoudnessEsti
     juce::String error;
     REQUIRE (c.loadPreset (preset (c, first), music, error));
     TestSignalGenerator source (c.getHost().getSampleRate());
-    source.setProgramme (music, TestSignalGenerator::Programme::Game71, -3.0f);
+    source.setProgramme (music, TestSignalGenerator::Programme::Music, -12.0f);
     renderAndMeasure (c, source, preRollSeconds, preRollSeconds); // the input's 3 s loudness follower settles
 
     Browser browser (c, shared);
@@ -494,7 +498,7 @@ FlipRun flipRun (const char* first, const std::shared_ptr<ui::PresetLoudnessEsti
 TEST_CASE ("App UI: a louder preview is matched within 1 LU of the current sound 1 s after the flip (E37/E40)")
 {
     // Lo-Fi Chill and Club Loud: 4.5 LU apart on the estimator's music at
-    // -13 LUFS; on the game scene at about -24 LUFS the gap is larger (Club
+    // -13 LUFS; on the music at about -26 LUFS the gap is larger (Club
     // Loud's maximizer lifts a quiet input).
     const auto shared = std::make_shared<ui::PresetLoudnessEstimator> (48000.0);
     const auto stay = [] (Browser&, EngineController&) {};
@@ -506,7 +510,7 @@ TEST_CASE ("App UI: a louder preview is matched within 1 LU of the current sound
     // Unmatched: the same run without the trim, which is a plain gain after
     // the chain (the master limiter does not act at this level).
     const float unmatched = matched.levelDb - matched.trimDb - current.levelDb;
-    std::cerr << "    Lo-Fi Chill -> Club Loud on the game scene (input " << matched.inputLufs << " LUFS), 1-2.5 s after the flip: unmatched "
+    std::cerr << "    Lo-Fi Chill -> Club Loud on the music (input " << matched.inputLufs << " LUFS), 1-2.5 s after the flip: unmatched "
               << unmatched << " LU, matched " << (matched.levelDb - current.levelDb) << " LU (trim " << matched.trimDb << " dB)\n";
     CHECK (matched.inputLufs < -20.0f);
     CHECK (matched.inputLufs > -28.0f);
@@ -548,7 +552,8 @@ TEST_CASE ("App UI: going back from a quieter preview turns the louder current s
     CHECK (unmatchedGap > 5.0f);
     // A first return is matched from the estimates alone (the live probes
     // that would refine it are core work, docs/11 E37 Phase 3): most of the
-    // gap, not all of it, on this stretch of the game scene.
+    // gap, not all of it (on the game scene before docs/11 E01's app copies:
+    // within 2 LU; on the music now within 0.2 LU).
     CHECK (std::abs (matchedGap) <= 2.0f);
 }
 

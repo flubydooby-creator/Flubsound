@@ -205,7 +205,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
   - "DriftFifo: +-200 and +-2000 ppm drift, 10 ms and 441-frame packets, 128 and 512 blocks: settles clean": for every combination, after the loop settles, no underruns, overflows or dropped frames, the fill stays within ±1 ms of the target, the learned correction equals the true drift within 5 ppm, the output never steps more than a clean sine (no skipped or repeated frames), and `push()` / `pull()` never allocate;
   - "DriftFifo: a capture stall is one counted underrun, then the stream recovers" (200 ms stall: exactly one underrun, click-free fade-out and fade-in, the learned drift survives the re-prime);
   - "DriftFifo: a device stall drops the oldest audio (counted overflow), then the stream recovers" (300 ms and 1.5 s stalls: one counted overflow, the stalled audio dropped, back at the target fill);
-  - "DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (LFE dropped, -3 dB)" and "DriftFifo: a mono capture is duplicated to both channels of a stereo FIFO".
+  - "DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (-3 dB, the LFE at virt.lfe's default)" and "DriftFifo: a mono capture is duplicated to both channels of a stereo FIFO".
 
   Not covered: real devices and long runs. The soak test (Phase 1, items 1.1 and 1.10) and driver clock slaving (design) remain.
 
