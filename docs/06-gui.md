@@ -329,7 +329,7 @@ This is the **Advanced** view (the Simple view is §3.5). The proportions follow
 | Output history | bottom, `clamp (C / 8, 76, 128)` px (integer division); left out while the window is under 700 px high |
 | Routing panel | left, `clamp (round (0.17 · W), 228, 300)` px wide; under 1100 px of width a drawer instead (below) |
 | Right column | right, `clamp (round (0.19 · W), 252, 320)` px wide; under 1100 px `clamp (round (0.22 · W), 200, 252)` |
-| Level meters | top of right column, `clamp (max (round (0.40 · H), H − 440 − 10), 196, 560)` px. The loudness panel's content is about 380 px, so tall windows give the spare height to the meters |
+| Level meters | top of right column, `clamp (max (round (0.36 · H), H − 480 − 10), 196, 560)` px. The loudness panel's content is about 420 px with its PROTECTION section (§6.7), so tall windows give the spare height to the meters |
 | Loudness panel | rest of the right column |
 | Boost panel | top of the centre column, `clamp (round (0.27 · H), 150, 212)` px |
 | Module rack | bottom of the centre column: `clamp (round (0.36 · R), 150, 200)` px, or `round (0.64 · R)` while a card is expanded |
@@ -339,11 +339,11 @@ The same rules, computed at the sizes used in this document:
 
 | Geometry (px) | routing w | centre w | right w | history h | levels h | loudness h | boost h | analyser h | rack h |
 |---|---|---|---|---|---|---|---|---|---|
-| 1280 × 820 (default) | 228 | 756 | 252 | 92 | 255 | 373 | 172 | 282 | 164 |
-| 1440 × 900 | 245 | 877 | 274 | 102 | 298 | 400 | 191 | 314 | 183 |
-| 1440 × 900 + banner | 245 | 877 | 274 | 97 | 268 | 391 | 181 | 296 | 172 |
+| 1280 × 820 (default) | 228 | 756 | 252 | 92 | 230 | 398 | 172 | 282 | 164 |
+| 1440 × 900 | 245 | 877 | 274 | 102 | 255 | 443 | 191 | 314 | 183 |
+| 1440 × 900 + banner | 245 | 877 | 274 | 97 | 241 | 418 | 181 | 296 | 172 |
 | 1100 × 700 + banner | 228 | 576 | 252 | 76 | 196 | 284 | 150 | 170 | 150 |
-| 1093 × 614 (a 1366 × 768 laptop at 125 %) | drawer | 819 | 240 | — | 214 | 310 | 150 | 214 | 150 |
+| 1093 × 614 (a 1366 × 768 laptop at 125 %) | drawer | 819 | 240 | — | 196 | 328 | 150 | 214 | 150 |
 | 800 × 560 (minimum) | drawer | 566 | 200 | — | 196 | 274 | 150 | 160 | 150 |
 
 At 1440 × 900 an expanded module card takes 324 px, leaving the analyser 173 px.

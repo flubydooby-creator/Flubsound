@@ -527,11 +527,11 @@ void MainComponent::resized()
 
     auto right = r.removeFromRight (narrow ? juce::jlimit (200, 252, juce::roundToInt (w * 0.22)) : juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
     r.removeFromRight (gap);
-    // The loudness panel's content has a fixed height (~380 px): on tall
-    // windows the level meters take the spare height instead of leaving the
-    // loudness panel half empty.
-    constexpr int kLoudnessNeeds = 440;
-    const int levelsH = juce::jlimit (196, 560, juce::jmax (juce::roundToInt (right.getHeight() * 0.40), right.getHeight() - kLoudnessNeeds - gap));
+    // The loudness panel's content has a fixed height (~420 px with its
+    // PROTECTION section): on tall windows the level meters take the spare
+    // height instead of leaving the loudness panel half empty.
+    constexpr int kLoudnessNeeds = 480;
+    const int levelsH = juce::jlimit (196, 560, juce::jmax (juce::roundToInt (right.getHeight() * 0.36), right.getHeight() - kLoudnessNeeds - gap));
     levels.setBounds (right.removeFromTop (levelsH));
     right.removeFromTop (gap);
     loudness.setBounds (right);
