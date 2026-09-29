@@ -39,7 +39,7 @@ The maximizer's 3-band **glue** only runs while it is *armed*: the preset sets `
 
 These are per-strip chain figures. The desktop app adds 1.4 ms for its master limiter after the strip sum (see `docs/01-architecture.md` §5). The spectral noise gate (used by *Podcast & Voice*) runs only in Quality; in the other profiles the rest of such a preset still applies.
 
-**Fresh strips** (the desktop app, a strip with no saved state: [docs/11 E36](../docs/11-enhancement-report.md#e36)) start from a factory preset instead of the parameter defaults at Boost 0: *Flubsound Signature* on Music and System, *Voice Chat* on Chat, and on Game *First Run – Game*, which is *Competitive FPS* with Boost 20 %, Footsteps 30 % and Detail 15 % (shown as a modified *Competitive FPS*). As shipped, *Competitive FPS* lifts −50 / −60 dBFS pink beds by +4.9 / +9.7 LU; the capped version by +2.7 / +2.6 LU, with step/bed contrast changes of +0.06 to +0.49 dB on the E59 burst scenes. None of them sets a latency profile, and saved strip state is never overwritten.
+**Fresh strips** (the desktop app, a strip with no saved state: [docs/11 E36](../docs/11-enhancement-report.md#e36)) start from a factory preset instead of the parameter defaults at Boost 0: *Flubsound Signature* on Music and System, *Voice Chat* on Chat, and on Game *First Run – Game*, which is *Competitive FPS* with Boost 20 % (shown as a modified *Competitive FPS*), below the 25 % where Boost switches the maximizer on. It lifts −50 / −60 dBFS pink beds by +0.50 / +0.48 LU and raises the step/bed contrast of the E59 burst scenes by +1.4 to +5.6 dB. None of them sets a latency profile, and saved strip state is never overwritten.
 
 ---
 

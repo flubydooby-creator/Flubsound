@@ -35,15 +35,16 @@ constexpr int kMaxRecentForegroundApps = 8;
 constexpr const char* kFirstRunMusicPreset = "factory:music-flubsound-signature"; // Music, System, other stereo strips
 constexpr const char* kFirstRunChatPreset = "factory:music-voice-chat";           // Chat (docs/11 E23)
 constexpr const char* kFirstRunGamePreset = "factory:gaming-competitive-fps";     // Game / surround strips, capped:
-// "First Run - Game" = Competitive FPS with these caps. Measured with the
-// docs/11 E59 slice's definitions (tests/test_known_gaps.cpp): -50 / -60
-// dBFS pink beds +2.70 / +2.62 LU (Competitive FPS +4.92 / +9.69), step/bed
-// contrast change +0.06 .. +0.49 dB on the 20 / 40 / 80 ms burst scenes at
-// -14 / -24 / -40 / -50 LUFS (Competitive FPS -1.67 .. +0.83). Detail at the
-// E36 cap of 30 % leaves the beds at +3.55 / +3.87 LU, so it is 15 %.
-constexpr float kFirstRunGameBoost = 0.20f;     // below 0.25: Boost adds no maximizer drive
-constexpr float kFirstRunGameFootsteps = 0.30f; // Macro 1 (the E16 on-board-processing cap)
-constexpr float kFirstRunGameDetail = 0.15f;    // Macro 4
+// "First Run - Game" = Competitive FPS with Boost capped. Measured through
+// the app's 8-channel Game strip with the docs/11 E59 slice's definitions
+// (tests/app/test_app_first_run.cpp): -50 / -60 dBFS pink beds +0.50 / +0.48
+// LU (Competitive FPS as shipped +0.81 at -60), step/bed contrast change
+// +1.37 .. +1.50 / +4.79 .. +5.03 / +5.22 .. +5.60 dB on the 20 / 40 / 80 ms
+// burst scenes at -14 / -24 / -40 / -50 LUFS. docs/11 E36's review dropped
+// the earlier Footsteps 30 % / Detail 15 % caps: since E19 they no longer
+// held the beds down (+0.49 / +0.47 LU with them) and cost about 3 dB of
+// that contrast (-1.68 .. -1.58 / +2.28 .. +2.46 / +2.42 .. +2.70 dB).
+constexpr float kFirstRunGameBoost = 0.20f; // below 0.25: Boost adds no maximizer drive
 
 // Night listening (docs/11 E56 / E21): the latch copies these parameters from
 // the Night Mode Gaming factory preset; kNightFallback are its values (the
@@ -786,9 +787,9 @@ bool EngineController::loadFirstRunDefault (int strip)
     // Music and System (and any other stereo strip): Flubsound Signature.
     // Chat: Voice Chat, not Signature, whose Boost 0.35 would switch the
     // maximizer on for voice (docs/11 E23). Game (and any surround strip):
-    // "First Run - Game", Competitive FPS capped (see kFirstRunGame*), since
-    // Competitive FPS as shipped lifts quiet beds by +5 / +10 LU and cuts
-    // step/bed contrast. None of them sets a latency profile: the strips keep
+    // "First Run - Game", Competitive FPS with Boost capped at
+    // kFirstRunGameBoost, since its 0.35 switches the maximizer on (0.25 and
+    // up). None of them sets a latency profile: the strips keep
     // the default (Balanced), and a preset never changes it anyway (E40).
     const auto name = getStripName (strip);
     const bool game = getStripChannels (strip) > 2 || name.equalsIgnoreCase ("Game");
@@ -809,10 +810,7 @@ bool EngineController::loadFirstRunDefault (int strip)
     if (game)
     {
         // After the preset's snapshot: the strip shows Competitive FPS as modified.
-        const auto cap = [&store] (int id, float maxValue) { store.set (Bank::A, id, std::min (store.get (Bank::A, id), maxValue)); };
-        cap (BoostIntensity, kFirstRunGameBoost);
-        cap (Macro1, kFirstRunGameFootsteps);
-        cap (Macro4, kFirstRunGameDetail);
+        store.set (Bank::A, BoostIntensity, std::min (store.get (Bank::A, BoostIntensity), kFirstRunGameBoost));
     }
     PresetManager::copyAToB (store); // A/B start equal
     settings->setLastPreset (name, preset.id);
@@ -1302,9 +1300,11 @@ bool EngineController::setOnboardEnhancement (bool on)
         return false;
     DeviceEndpointEntry entry;
     if (const auto stored = settings->findDeviceEndpoint (outputIdentity))
-        entry = *stored; // keeps what else is stored for the endpoint
-    entry.endpointId = juce::String (outputIdentity.id);
-    entry.hardwareId = juce::String (outputIdentity.hardwareId);
+        entry = *stored; // keeps what else is stored for the endpoint, and ids this read lacks
+    if (! outputIdentity.id.empty())
+        entry.endpointId = juce::String (outputIdentity.id);
+    if (! outputIdentity.hardwareId.empty())
+        entry.hardwareId = juce::String (outputIdentity.hardwareId);
     entry.name = currentOutputName;
     entry.onboardEnhancement = on;
     settings->setDeviceEndpoint (entry);

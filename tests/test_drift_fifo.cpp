@@ -266,7 +266,7 @@ TEST_CASE ("DriftFifo: a device stall drops the oldest audio (counted overflow),
     CHECK_NEAR (full.atEnd.fillMs, targetMs, 1.0);
 }
 
-TEST_CASE ("DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (LFE dropped, -3 dB)")
+TEST_CASE ("DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.775 (-3 dB, the LFE at virt.lfe's default)")
 {
     // One tone per source channel (FL FR FC LFE BL BR SL SR), each a whole
     // number of periods in the 0.25 s analysis window. The window is short so
@@ -296,10 +296,16 @@ TEST_CASE ("DriftFifo: 7.1 capture into a stereo FIFO is downmixed per ITU-R BS.
     CHECK_NEAR (amp (1, 1300.0), other, 0.01); // BR -> R
     CHECK_NEAR (amp (0, 1500.0), other, 0.01); // SL -> L
     CHECK_NEAR (amp (1, 1700.0), other, 0.01); // SR -> R
-    for (double hz : { 700.0, 1300.0, 1700.0, 100.0 }) // right-only sources and LFE stay out of L
+    for (double hz : { 700.0, 1300.0, 1700.0 }) // right-only sources stay out of L
         CHECK_LE (amp (0, hz), 0.01);
-    for (double hz : { 500.0, 1100.0, 1500.0, 100.0 }) // left-only sources and LFE stay out of R
+    for (double hz : { 500.0, 1100.0, 1500.0 }) // left-only sources stay out of R
         CHECK_LE (amp (1, hz), 0.01);
+    // The LFE (docs/11 E01, dropped before): both sides, +10 dB re FL (the
+    // default virt.lfe) through the 120 Hz 4th-order Butterworth (-0.91 dB
+    // at 100 Hz). tests/app/test_app_lfe_fold.cpp compares it with the chain.
+    const double lfe = front * 3.16227766 / std::sqrt (1.0 + std::pow (100.0 / 120.0, 8.0));
+    CHECK_NEAR (amp (0, 100.0), lfe, 0.02);
+    CHECK_NEAR (amp (1, 100.0), lfe, 0.02);
 }
 
 TEST_CASE ("DriftFifo: a mono capture is duplicated to both channels of a stereo FIFO")

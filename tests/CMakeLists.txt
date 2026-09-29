@@ -35,6 +35,7 @@ target_sources(flub_tests PRIVATE
     "${FLUB_CLI_DIR}/Analysis.cpp"
     "${FLUB_CLI_DIR}/CliOptions.cpp"
     "${FLUB_CLI_DIR}/Commands.cpp"
+    "${FLUB_CLI_DIR}/Demo.cpp"
     "${FLUB_CLI_DIR}/FactoryPresets.cpp"
     "${FLUB_CLI_DIR}/LatencyProbeCommand.cpp"
     "${FLUB_CLI_DIR}/OfflineRenderer.cpp"

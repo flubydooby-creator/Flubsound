@@ -137,6 +137,13 @@ public:
         s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
         s.autoLevelMaxDb = first ? level : std::max (s.autoLevelMaxDb, level);
         s.autoDriveMaxDb = std::min (s.autoDriveMaxDb, m.autoDriveDb.load (rl));
+
+        const float makeup = m.virtMakeupDb.load (rl), headroom = m.foldHeadroomDb.load (rl); // docs/11 E28a
+        s.virtMakeupMinDb = first ? makeup : std::min (s.virtMakeupMinDb, makeup);
+        s.virtMakeupMaxDb = first ? makeup : std::max (s.virtMakeupMaxDb, makeup);
+        s.virtMakeupEndDb = makeup;
+        s.foldHeadroomMaxDb = std::min (s.foldHeadroomMaxDb, headroom);
+        headroomActive += headroom < -0.1f ? w : 0.0;
     }
 
     RenderStats finish() const noexcept
@@ -168,6 +175,7 @@ public:
         r.governorHarmonicsReasonPercent = percent (harmonicsReason);
         r.governorTonalReasonPercent = percent (tonalReason);
         r.smoothnessActivePercent = percent (smoothActive);
+        r.foldHeadroomActivePercent = percent (headroomActive);
         r.governorDriveResidualMeanDb = residualPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (residualPower / residualFrames))) : kMinusInfDb;
         return r;
     }
@@ -179,7 +187,7 @@ private:
     double total = 0.0, grSum = 0.0, over1 = 0.0, over3 = 0.0, glueSum = 0.0, clipActive = 0.0, thdPower = 0.0, compSum = 0.0;
     double scaleSum = 0.0, backoff = 0.0, harmPower = 0.0, limiterReason = 0.0, distortionReason = 0.0;
     double dynamicsReason = 0.0, harmonicsReason = 0.0, tonalReason = 0.0, residualPower = 0.0, residualFrames = 0.0;
-    double smoothActive = 0.0;
+    double smoothActive = 0.0, headroomActive = 0.0;
     std::array<double, 4> stateFrames {};
     std::array<double, 4> bandSum {};
 };

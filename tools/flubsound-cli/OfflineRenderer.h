@@ -152,6 +152,12 @@ struct RenderStats
     // deepest cut of the 5 - 10 kHz band (dB <= 0), and the frames it cut
     // more than 0.5 dB.
     float smoothnessCutMaxDb = 0.0f, smoothnessActivePercent = 0.0f;
+    // Surround folds (docs/11 E28a; MeterBus::virtMakeupDb / foldHeadroomDb,
+    // 5.1 / 7.1 input only): the virtualiser's level-match make-up (lowest,
+    // highest and at the end, dB; 0 while it does not run) and the deepest
+    // fold-headroom gain (dB <= 0) with the frames it held more than 0.1 dB.
+    float virtMakeupMinDb = 0.0f, virtMakeupMaxDb = 0.0f, virtMakeupEndDb = 0.0f;
+    float foldHeadroomMaxDb = 0.0f, foldHeadroomActivePercent = 0.0f;
 };
 
 struct RenderResult

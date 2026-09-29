@@ -24,6 +24,7 @@
 #include "flub/common/Realtime.h"
 #include "flub/dsp/BackgroundTracker.h"
 #include "flub/dsp/BassEngine.h"
+#include "flub/dsp/Bs775Fold.h"
 #include "flub/dsp/ClarityEnhancer.h"
 #include "flub/dsp/Compressor.h"
 #include "flub/dsp/DeviceCorrection.h"
@@ -104,6 +105,12 @@ static_assert (hasNonblockingReset<AsyncModelProcessor>);
 // tracker per control tick.
 static_assert (hasNonblockingReset<BackgroundTracker>);
 static_assert (std::is_same_v<decltype (&BackgroundTracker::update), float (BackgroundTracker::*) (float, float) noexcept FLUB_NONBLOCKING>);
+// The chain's fold headroom (docs/11 E28a) and the per-frame LFE path of
+// the app's capture FIFO and test signal (docs/11 E01).
+static_assert (hasNonblockingReset<FoldHeadroom>);
+static_assert (std::is_same_v<decltype (&FoldHeadroom::next), float (FoldHeadroom::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&FoldHeadroom::process), void (FoldHeadroom::*) (float*, float*, int) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LfeFold::next), float (LfeFold::*) (float) noexcept FLUB_NONBLOCKING>);
 // The glitch detector (docs/11 E53) can watch a real-time stream.
 static_assert (std::is_same_v<decltype (&DiscontinuityDetector::process), void (DiscontinuityDetector::*) (const float* const*, int) noexcept FLUB_NONBLOCKING>);
 // The device callback's timing histograms (docs/11 E45): recorded once per

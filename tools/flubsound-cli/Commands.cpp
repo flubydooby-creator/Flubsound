@@ -352,6 +352,18 @@ json::Value governorMeasuredToJson (const RenderStats& st)
     return v;
 }
 
+/** The surround folds' gains (docs/11 E28a): the virtualiser's make-up and the fold headroom. */
+json::Value foldStatsToJson (const RenderStats& st)
+{
+    json::Value fold;
+    fold.set ("virtMakeupMinDb", statValue (st.virtMakeupMinDb));
+    fold.set ("virtMakeupMaxDb", statValue (st.virtMakeupMaxDb));
+    fold.set ("virtMakeupEndDb", statValue (st.virtMakeupEndDb));
+    fold.set ("headroomMaxDb", statValue (st.foldHeadroomMaxDb));
+    fold.set ("headroomActivePercent", statValue (st.foldHeadroomActivePercent));
+    return fold;
+}
+
 json::Value renderStatsToJson (const RenderStats& st)
 {
     json::Value limiter;
@@ -441,6 +453,7 @@ json::Value renderStatsToJson (const RenderStats& st)
     v.set ("governor", std::move (governor));
     v.set ("smoothness", std::move (smoothness));
     v.set ("leveller", std::move (leveller));
+    v.set ("fold", foldStatsToJson (st)); // docs/11 E28a
     return v;
 }
 

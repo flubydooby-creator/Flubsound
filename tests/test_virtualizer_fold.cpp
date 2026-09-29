@@ -2,14 +2,24 @@
 // input-channel detector (ActiveChannelDetector, docs/11 E27), as modules.
 // The chain-level behaviour (crossfades, overrides, presets) is in
 // tests/test_engine.cpp; the 7.1 LFE and 8-channel stereo metrics in
-// tests/test_known_gaps.cpp.
+// tests/test_known_gaps.cpp. The BS.775 fold's headroom in the chain and the
+// surround folds' gains on MeterBus and in render.stats (docs/11 E28a) are
+// at the end.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "Commands.h"
+#include "OfflineRenderer.h"
+
+#include "flub/analysis/LoudnessMeter.h"
+#include "flub/common/Denormals.h"
 #include "flub/common/Math.h"
 #include "flub/dsp/ActiveChannelDetector.h"
 #include "flub/dsp/Bs775Fold.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
+#include "flub/dsp/TruePeakDetector.h"
+#include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
 
 #include <algorithm>
 #include <array>
@@ -313,3 +323,341 @@ TEST_CASE ("ActiveChannelDetector: -45 dB ambience keeps the surround fold, the 
         CHECK (d.getActiveMask() == (1u << kLfe));
     }
 }
+
+//==============================================================================
+// Fold headroom of the BS.775 downmix (virt off) and the fold gains on
+// MeterBus / in render.stats (docs/11 E28a remainder).
+namespace
+{
+using namespace flub::param;
+
+/** Pink noise with a 0 dBFS sample peak, the same on every main speaker
+    (full-scale correlated, docs/11 E28a Done-when); LFE silent. */
+Planar fullScaleCorrelated (int channels, int n, float peak = 1.0f)
+{
+    auto x = pinkNoise (n, 0.2f, 4242u);
+    const double scale = peak / peakAbs (x.data(), n);
+    for (auto& v : x)
+        v = static_cast<float> (v * scale);
+    Planar p (channels, n);
+    for (int c = 0; c < channels; ++c)
+        if (c != kLfe)
+            std::copy (x.begin(), x.end(), p.ch[static_cast<size_t> (c)].begin());
+    return p;
+}
+
+/** A chain with every module off (the fold alone reaches the output). */
+struct FoldChain
+{
+    ParameterStore store;
+    ProcessingChain chain { store };
+
+    FoldChain (int channels, bool virt)
+    {
+        for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, CompressorOn, MaximizerOn })
+            store.set (id, 0.0f);
+        store.set (VirtualizerOn, virt ? 1.0f : 0.0f);
+        chain.prepare ({ kFs, 512, channels });
+    }
+
+    /** Runs buf in blocks; after each block, `watch (end position)`. */
+    template <typename Watch>
+    void run (Planar& buf, int block, Watch&& watch)
+    {
+        ScopedNoDenormals noDenormals;
+        const int n = buf.numSamples();
+        for (int pos = 0; pos < n; pos += block)
+        {
+            chain.process (buf.block (pos, std::min (block, n - pos)));
+            watch (std::min (n, pos + block));
+        }
+    }
+    void run (Planar& buf, int block = 512)
+    {
+        run (buf, block, [] (int) {});
+    }
+};
+
+/** K-weighted power of channels 0 and 1 from `from` on (dB; the integrated
+    loudness of stationary content + 0.691). */
+double kPowerDb (const Planar& buf, int from)
+{
+    const auto s1 = LoudnessMeter::kWeightingStage1 (kFs), s2 = LoudnessMeter::kWeightingStage2 (kFs);
+    double e = 0.0;
+    const int n = buf.numSamples();
+    for (size_t c = 0; c < 2; ++c)
+    {
+        BiquadState a, b;
+        for (int i = 0; i < n; ++i)
+        {
+            const double y = biquadTick (s2, b, biquadTick (s1, a, static_cast<double> (buf.ch[c][static_cast<size_t> (i)])));
+            if (i >= from)
+                e += y * y;
+        }
+    }
+    return 10.0 * std::log10 (std::max (1.0e-30, e / (n - from)));
+}
+
+bool allFiniteIn (const Planar& buf)
+{
+    for (const auto& c : buf.ch)
+        for (float v : c)
+            if (! std::isfinite (v))
+                return false;
+    return true;
+}
+
+double largestStepIn (const std::vector<float>& y, int from, int to)
+{
+    double m = 0.0;
+    for (int i = std::max (1, from); i < to; ++i)
+        m = std::max (m, static_cast<double> (std::abs (y[static_cast<size_t> (i)] - y[static_cast<size_t> (i - 1)])));
+    return m;
+}
+
+std::vector<float> defaultValues()
+{
+    std::vector<float> v;
+    for (const auto& info : layout())
+        v.push_back (info.defaultValue);
+    return v;
+}
+} // namespace
+
+TEST_CASE ("FoldHeadroom: an over drops the gain at once to exactly 0 dBFS, holds 10 ms, releases over 150 ms; below 0 dBFS it is the identity (docs/11 E28a)")
+{
+    FoldHeadroom h;
+    h.prepare (kFs);
+    const int n = 60000, over = 1000;
+    std::vector<float> l (static_cast<size_t> (n), 0.5f), r (static_cast<size_t> (n), -0.25f);
+    l[static_cast<size_t> (over)] = 2.0f; // a +6 dBFS sample
+    const auto l0 = l, r0 = r;
+    for (int pos = 0; pos < n; pos += 333) // any partition
+        h.process (l.data() + pos, r.data() + pos, std::min (333, n - pos));
+    for (int i = 0; i < over; ++i)
+        CHECK (l[static_cast<size_t> (i)] == l0[static_cast<size_t> (i)]); // bit-identical below 0 dBFS
+    CHECK (l[static_cast<size_t> (over)] == 1.0f);                         // exactly the ceiling
+    CHECK (r[static_cast<size_t> (over)] == -0.125f);                      // linked
+    const int hold = msToSamples (FoldHeadroom::kHoldMs, kFs);
+    CHECK (l[static_cast<size_t> (over + hold)] == 0.25f); // held at 0.5 for 10 ms
+    // Then the one-pole release: 1 - 0.5 e^(-t / 150 ms).
+    const int t = msToSamples (FoldHeadroom::kReleaseMs, kFs);
+    CHECK_NEAR (l[static_cast<size_t> (over + hold + t)] / 0.5, 1.0 - 0.5 * std::exp (-1.0), 2e-3);
+    CHECK_NEAR (h.getGainDb(), 0.0, 0.01); // 1.2 s later: recovered
+    h.reset();
+    CHECK (h.getGain() == 1.0f);
+}
+
+TEST_CASE ("Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale correlated 5.1 / 7.1 at 0 dBFS before the limiter; below 0 dBFS it is untouched")
+{
+    // Done-when: the pre-limiter peak of full-scale correlated 7.1 with virt
+    // off <= +1 dBFS (was +6.88: 0.7071 (1 + 3 x 0.7071) on 7.1, 0.7071
+    // (1 + 2 x 0.7071) = +4.65 dBFS on 5.1). Every module off, so the chain's
+    // output is its fold; its peaks after the first 0.5 s. The sample peak is
+    // the Done-when; the true peak (no look-ahead, like the virtualiser's)
+    // is pinned, the maximizer's true-peak limiter takes the rest when on.
+    const int n = static_cast<int> (2.0 * kFs), from = static_cast<int> (0.5 * kFs);
+    for (auto [channels, before] : { std::pair { 6, 4.65 }, std::pair { 8, 6.88 } })
+    {
+        const Planar in = fullScaleCorrelated (channels, n);
+        Planar raw = in;
+        Bs775Fold fold;
+        fold.prepare (kFs, 0.0f);
+        fold.process (raw.block (0, n), Bs775Fold::kMatrixGain);
+        const double rawPeak = std::max (peakAbs (raw.ch[0].data(), n), peakAbs (raw.ch[1].data(), n));
+
+        FoldChain fc (channels, false);
+        Planar out = in;
+        float deepest = 0.0f, makeup = 0.0f;
+        fc.run (out, 512, [&] (int) {
+            deepest = std::min (deepest, fc.chain.meters().foldHeadroomDb.load());
+            makeup = std::max (makeup, std::abs (fc.chain.meters().virtMakeupDb.load()));
+        });
+        double peak = 0.0, truePeak = 0.0;
+        TruePeakDetector tp;
+        tp.prepare (2);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < n; ++i)
+            {
+                const float y = out.ch[static_cast<size_t> (c)][static_cast<size_t> (i)];
+                const float t = tp.processSample (c, y);
+                if (i >= from)
+                {
+                    peak = std::max (peak, static_cast<double> (std::abs (y)));
+                    truePeak = std::max (truePeak, static_cast<double> (std::abs (t)));
+                }
+            }
+        std::cout << "    measured full-scale correlated " << channels << " ch, virt off: pre-limiter peak " << toDb (rawPeak) << " -> "
+                  << toDb (peak) << " dBFS, true peak " << toDb (truePeak) << " dBTP, deepest fold headroom " << deepest << " dB\n";
+        CHECK_NEAR (toDb (rawPeak), before, 0.05);
+        CHECK_LE (peak, 1.0 + 1e-6);
+        CHECK_LE (toDb (truePeak), 1.5);
+        CHECK_LE (deepest, -(before - 1.0)); // the meter shows the headroom gain
+        CHECK (makeup == 0.0f);              // the virtualiser does not run
+    }
+
+    // Below 0 dBFS (a -6 dBFS peak on every speaker: the fold peaks at
+    // +0.9 dBFS without the headroom on 7.1, so -8 dBFS here): the headroom
+    // never moves and the output is the fold of the input, bit for bit.
+    const Planar in = fullScaleCorrelated (8, n, 0.35f);
+    Planar ref = in;
+    Bs775Fold fold;
+    fold.prepare (kFs, LfeFold::gainFor (true, layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue));
+    fold.process (ref.block (0, n), Bs775Fold::kMatrixGain);
+    FoldChain fc (8, false);
+    Planar out = in;
+    float deepest = 0.0f;
+    fc.run (out, 512, [&] (int) { deepest = std::min (deepest, fc.chain.meters().foldHeadroomDb.load()); });
+    CHECK (deepest == 0.0f);
+    const int latency = fc.chain.getLatencySamples();
+    double err = 0.0;
+    for (size_t c = 0; c < 2; ++c)
+        for (int i = 0; i + latency < n; ++i)
+            err = std::max (err, static_cast<double> (std::abs (out.ch[c][static_cast<size_t> (i + latency)] - ref.ch[c][static_cast<size_t> (i)])));
+    std::cout << "    measured below 0 dBFS: largest difference to the plain fold " << err << "\n";
+    CHECK (err == 0.0);
+}
+
+TEST_CASE ("Chain (docs/11 E28a): on full-scale correlated 5.1 / 7.1 overs, virt on vs off 3.8 / 5.6 -> 2.1 / 2.2 LU")
+{
+    // The unit's Done-when asks for 1 LU on those overs; not met. Every module
+    // off, K-weighted power over 3..6 s (the level match averages 3 s).
+    // Before: the BS.775 fold passed its overs unlimited, the virtualiser
+    // held its own at 0 dBFS. Now both hold 0 dBFS by the same law, but at
+    // the same loudness (the level match) the binaural render peaks 3.1-3.2
+    // dB higher than the downmix (+10.05 / +7.76 against +6.88 / +4.65 dBFS),
+    // so the same ceiling takes about 2 LU more from it. Closing that needs a
+    // loudness-linked law across both folds (docs/11 E28, open).
+    const int n = static_cast<int> (6.0 * kFs), from = static_cast<int> (3.0 * kFs);
+    for (const int channels : { 6, 8 })
+    {
+        const Planar in = fullScaleCorrelated (channels, n);
+        Planar raw = in;
+        Bs775Fold fold;
+        fold.prepare (kFs, 0.0f);
+        fold.process (raw.block (0, n), Bs775Fold::kMatrixGain);
+        double level[2] {};
+        for (bool virt : { false, true })
+        {
+            FoldChain fc (channels, virt);
+            Planar out = in;
+            fc.run (out);
+            level[virt ? 1 : 0] = kPowerDb (out, from);
+        }
+        const double before = level[1] - kPowerDb (raw, from), after = level[1] - level[0];
+        std::cout << "    measured full-scale correlated " << channels << " ch: virt on - off " << before << " -> " << after << " LU\n";
+        CHECK_NEAR (before, channels == 8 ? -5.60 : -3.76, 0.3);
+        CHECK_NEAR (after, channels == 8 ? -2.21 : -2.13, 0.3);
+    }
+}
+
+TEST_CASE ("Chain (docs/11 E28a): virt on / off and the stereo passthrough crossfade without a click while the fold headroom holds overs")
+{
+    // A 200 Hz sine at 0 dBFS on every main speaker (the folds reach +6.9 /
+    // +10 dBFS before their headroom), 7.1, every module off. virt.on off at
+    // 1 s and on at 2 s (20 ms crossfades); then virt off with virt.input
+    // Force Stereo at 1 s and Force Surround at 2 s (400 ms). The largest
+    // sample step around each switch stays within 1.25x the steady maximum of
+    // the louder side (before: the crossfades mixed the fold at unity, so the
+    // step was set by the unlimited +6.9 dBFS downmix).
+    const int n = static_cast<int> (3.0 * kFs), off = static_cast<int> (1.0 * kFs), on = static_cast<int> (2.0 * kFs);
+    for (bool passCase : { false, true })
+    {
+        Planar buf (8, n);
+        const auto x = sine (200.0, kFs, n, 1.0f);
+        for (int c = 0; c < 8; ++c)
+            if (c != kLfe)
+                std::copy (x.begin(), x.end(), buf.ch[static_cast<size_t> (c)].begin());
+        FoldChain fc (8, ! passCase);
+        fc.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        fc.run (buf, 128, [&] (int end) {
+            if (end == off)
+            {
+                if (passCase)
+                    fc.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceStereo));
+                else
+                    fc.store.set (VirtualizerOn, 0.0f);
+            }
+            if (end == on)
+            {
+                if (passCase)
+                    fc.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+                else
+                    fc.store.set (VirtualizerOn, 1.0f);
+            }
+        });
+        CHECK (allFiniteIn (buf));
+        const int latency = fc.chain.getLatencySamples(), span = passCase ? 24000 : 9600;
+        for (size_t e = 0; e < 2; ++e)
+        {
+            const auto& y = buf.ch[e];
+            const double steadyA = largestStepIn (y, off + latency - 9600, off + latency), steadyB = largestStepIn (y, on + latency - 9600, on + latency);
+            const double atOff = largestStepIn (y, off + latency, off + latency + span), atOn = largestStepIn (y, on + latency, on + latency + span);
+            std::cout << "    measured " << (passCase ? "passthrough" : "virt") << " ear " << e << ": steady steps " << steadyA << " / " << steadyB
+                      << ", at the switches " << atOff << " / " << atOn << "\n";
+            CHECK_LE (atOff, 1.25 * std::max (steadyA, steadyB));
+            CHECK_LE (atOn, 1.25 * std::max (steadyA, steadyB));
+        }
+        if (! passCase)
+        {
+            // Both folds held at 0 dBFS: no over anywhere after the first period.
+            CHECK_LE (peakAbs (buf.ch[0].data() + 480, n - 480), 1.0 + 1e-6);
+            CHECK_LE (peakAbs (buf.ch[1].data() + 480, n - 480), 1.0 + 1e-6);
+        }
+    }
+}
+
+TEST_CASE ("CLI render.stats (docs/11 E28a): fold.virtMakeup* and fold.headroom* - the virtualiser's make-up and the fold headroom")
+{
+    // Full-scale correlated 7.1, every module off: virt off holds the BS.775
+    // fold's overs, virt on the binaural render's (and learns a make-up
+    // around the 7.1 diffuse-field gain, -4.03 dB); a stereo file has neither.
+    const int n = static_cast<int> (3.0 * kFs);
+    const Planar in = fullScaleCorrelated (8, n);
+    io::AudioFileData file;
+    file.sampleRate = kFs;
+    file.numChannels = 8;
+    file.channels = in.ch;
+    auto values = defaultValues();
+    for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, CompressorOn, MaximizerOn })
+        values[static_cast<size_t> (id)] = 0.0f;
+    const auto render = [&] (const io::AudioFileData& f, bool virt) {
+        auto v = values;
+        v[static_cast<size_t> (VirtualizerOn)] = virt ? 1.0f : 0.0f;
+        cli::RenderSettings settings;
+        cli::RenderResult rr;
+        std::string error;
+        REQUIRE (cli::renderFile (f, v, settings, rr, error));
+        return cli::renderStatsToJson (rr.stats);
+    };
+    for (bool virt : { false, true })
+    {
+        const auto st = render (file, virt);
+        const auto& fold = st["fold"];
+        std::cout << "    measured 7.1 virt " << (virt ? "on" : "off") << ": headroom deepest " << fold["headroomMaxDb"].asNumber() << " dB, active "
+                  << fold["headroomActivePercent"].asNumber() << " %, make-up " << fold["virtMakeupMinDb"].asNumber() << " .. "
+                  << fold["virtMakeupMaxDb"].asNumber() << " dB (end " << fold["virtMakeupEndDb"].asNumber() << ")\n";
+        CHECK_LE (fold["headroomMaxDb"].asNumber(), -3.0);
+        CHECK_GE (fold["headroomActivePercent"].asNumber(), 50.0);
+        if (virt)
+        {
+            CHECK_NEAR (fold["virtMakeupMinDb"].asNumber(), -4.03, 0.1); // it starts at the diffuse-field gain
+            CHECK_GE (fold["virtMakeupMaxDb"].asNumber(), fold["virtMakeupEndDb"].asNumber());
+            CHECK_LE (std::abs (fold["virtMakeupEndDb"].asNumber() + 4.03), 4.0 + 0.01); // within the servo's +-4 dB
+            CHECK (fold["virtMakeupEndDb"].asNumber() > -4.0);                           // correlated content: more than the diffuse gain
+        }
+        else
+        {
+            for (const char* key : { "virtMakeupMinDb", "virtMakeupMaxDb", "virtMakeupEndDb" })
+                CHECK (fold[key].asNumber (1.0) == 0.0);
+        }
+    }
+    io::AudioFileData stereo;
+    stereo.sampleRate = kFs;
+    stereo.numChannels = 2;
+    stereo.channels = { in.ch[0], in.ch[1] };
+    const auto st = render (stereo, true);
+    for (const char* key : { "virtMakeupMinDb", "virtMakeupMaxDb", "virtMakeupEndDb", "headroomMaxDb", "headroomActivePercent" })
+        CHECK (st["fold"][key].asNumber (1.0) == 0.0);
+}
+

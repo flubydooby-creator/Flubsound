@@ -12,16 +12,16 @@
 //   user data folder, whose name the test runner makes non-ASCII.
 // * docs/11 E36 / E23: a strip with no saved state starts from a default
 //   preset - Signature (Music, System), Voice Chat (Chat), "First Run - Game"
-//   (Competitive FPS capped) - and saved state is never overwritten. The
+//   (Competitive FPS with Boost capped) - and saved state is never overwritten. The
 //   defaults are checked where they are heard: rendered through the app's
 //   engine (AudioEngineHost::renderOffline -> MixEngine -> master limiter).
 //     - Voice Chat (E23 Done-when): speech at -35 and -12 LUFS ends within
 //       3 LU short-term, no maximizer drive, ceiling held.
 //     - First Run - Game (E36 Done-when): -50 / -60 dBFS pink beds lifted by
-//       at most +3 LU, and FL / FR-only content in the 8-channel Game strip
-//       switches to the stereo passthrough fold (E27).
-//   The step/bed contrast numbers of the Game default use the E59 slice's
-//   burst scenes and are recorded in EngineController.cpp.
+//       at most +3 LU, FL / FR-only content in the 8-channel Game strip
+//       switches to the stereo passthrough fold (E27), and the step/bed
+//       contrast of the E59 slice's burst scene rises (EngineController.cpp
+//       records the numbers at every level).
 #include "AppTestSupport.h"
 #include "TestSignals.h"
 
@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -422,7 +423,7 @@ TEST_CASE ("App: fresh strips load their default preset - Signature on Music and
         CHECK (controller.getCurrentPresetId (game) == "22e4bf40-b070-485a-8fd6-c4f6cfddeaad"); // Competitive FPS's uuid
         CHECK (! controller.isPresetModified (music));
         CHECK (! controller.isPresetModified (chat));
-        CHECK (controller.isPresetModified (game)); // Competitive FPS with the first-run caps
+        CHECK (controller.isPresetModified (game)); // Competitive FPS with the first-run Boost cap
         CHECK (controller.getMode (game) == ModeValue::Gaming);
         CHECK (controller.getMode (chat) == ModeValue::Music);
 
@@ -430,8 +431,8 @@ TEST_CASE ("App: fresh strips load their default preset - Signature on Music and
         for (const auto bank : { Bank::A, Bank::B }) // A/B start equal
         {
             CHECK (g.get (bank, BoostIntensity) < 0.25f); // Boost adds no maximizer drive below 0.25
-            CHECK (g.get (bank, Macro1) <= 0.30f);          // Footsteps
-            CHECK (g.get (bank, Macro4) <= 0.30f);          // Detail
+            CHECK (g.get (bank, Macro1) == 0.8f);           // Footsteps and Detail as shipped (docs/11 E36's review)
+            CHECK (g.get (bank, Macro4) == 0.3f);
             CHECK (g.get (bank, VirtInputMode) == static_cast<float> (static_cast<int> (InputModeValue::Auto))); // E27 fold follows the input
         }
         CHECK (g.get (Bank::A, Macro2) == 0.55f); // the rest is Competitive FPS
@@ -524,19 +525,22 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
         return integratedLufs (out.left, out.right, from) - integratedLufs (l, r, from);
     };
 
+    // With the Footsteps / Detail caps it dropped (docs/11 E36's review):
+    // +0.495 / +0.471 LU; without them +0.504 / +0.479 LU.
     for (const double bed : { -50.0, -60.0 })
     {
         const double lu = lift (bed);
         std::cerr << "    measured First Run - Game: " << bed << " dBFS pink bed lifted " << lu << " LU\n";
         CHECK_LE (lu, 3.0); // docs/11 E36 Done-when
+        CHECK_LE (lu, 1.0);
     }
 
     // Competitive FPS as shipped: before docs/11 E19's cue enhancer it failed
     // the same measurement (+9.8 LU; the caps were what passed it). The cue
     // enhancer no longer lifts a stationary bed, so it passed too (+2.53 LU),
     // and E19's background-relative floor for Detail's upward compressor
-    // took it to +0.80 LU. The caps now only cost step/bed contrast (docs/11
-    // E36's Status line has the review).
+    // took it to +0.80 LU. From then on the Footsteps / Detail caps only cost
+    // step/bed contrast, so docs/11 E36's review dropped them (the next test).
     juce::String error;
     REQUIRE (controller.loadPreset ("factory:gaming-competitive-fps", game, error));
     const double shipped = lift (-60.0);
@@ -547,9 +551,11 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
 
 TEST_CASE ("App: First Run - Game keeps Competitive FPS's step/bed contrast on the E59 burst scene (E36)")
 {
-    // docs/11 E36's review: with Footsteps capped at 30 % the first-run Game
-    // default kept only +1.59 .. +2.24 dB of step/bed contrast; the Boost
-    // cap alone keeps Competitive FPS's cue lift for the same quiet beds.
+    // docs/11 E36's review: with Footsteps at 30 % and Detail at 15 % the
+    // first-run Game default changed the contrast by -1.57 / +2.34 / +2.48 dB
+    // (20 / 40 / 80 ms steps at -24 LUFS; bed -1.63 dB); the Boost cap alone
+    // keeps Competitive FPS's cue lift: +1.46 / +4.86 / +5.27 dB (bed
+    // -1.55 dB), and the pink beds of the test above move by +0.01 LU or less.
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp, true));
     const int game = controller.findStrip ("Game");
@@ -562,9 +568,10 @@ TEST_CASE ("App: First Run - Game keeps Competitive FPS's step/bed contrast on t
     const auto c = measureContrast (controller, game, scene);
     std::cerr << "    measured First Run - Game at -24 LUFS: contrast change 20 / 40 / 80 ms " << c.changeDb[0] << " / " << c.changeDb[1] << " / "
               << c.changeDb[2] << " dB, bed " << c.bedLiftDb << " dB\n";
-    for (const double change : c.changeDb)
-        CHECK_GE (change, 3.0); // the capped default: +1.59 .. +2.24 dB
-    CHECK_LE (c.bedLiftDb, 1.0);
+    CHECK_GE (c.changeDb[0], 1.0); // capped: -1.57 dB
+    CHECK_GE (c.changeDb[1], 4.0); // capped: +2.34 dB
+    CHECK_GE (c.changeDb[2], 4.0); // capped: +2.48 dB
+    CHECK_LE (c.bedLiftDb, 0.0);
 }
 
 // =============================================================================

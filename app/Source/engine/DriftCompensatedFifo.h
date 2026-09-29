@@ -73,6 +73,7 @@
 #include "flub/common/AudioBlock.h"
 #include "flub/common/Realtime.h"
 #include "flub/common/SpscRing.h"
+#include "flub/dsp/Bs775Fold.h"
 
 #include <array>
 #include <atomic>
@@ -196,6 +197,7 @@ private:
 
     // Producer side
     std::vector<float> producerScratch;
+    flub::LfeFold lfeFold; // the surround downmix's LFE path (docs/11 E01, at virt.lfe's default)
     std::atomic<float> burstEstimate { 0.0f };  // decaying peak of push sizes (frames)
     std::atomic<uint64_t> framesPushed { 0 }, ringFullDrops { 0 }, corruptSamples { 0 };
 

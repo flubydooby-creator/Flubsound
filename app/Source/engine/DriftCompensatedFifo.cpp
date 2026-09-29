@@ -98,6 +98,11 @@ void DriftCompensatedFifo::prepare (int numChannels, double producerSampleRate, 
     const auto capacityFrames = static_cast<size_t> (std::max (8192.0, std::ceil (producerRate * seconds)));
     ring.allocate (capacityFrames * static_cast<size_t> (channels));
     producerScratch.assign (static_cast<size_t> (kChunkFrames) * static_cast<size_t> (channels), 0.0f);
+    // The surround downmix folds the LFE as the chain does (docs/11 E01), at
+    // virt.lfe's default: this FIFO does not know its strip. The host folds
+    // an 8-channel capture itself, at the strip's own level.
+    const auto& lfeLevel = param::layout()[static_cast<size_t> (param::VirtLfeGainDb)];
+    lfeFold.prepare (producerRate, LfeFold::gainFor (true, lfeLevel.defaultValue));
 
     burstEstimate.store (0.0f, std::memory_order_relaxed);
     framesPushed.store (0, std::memory_order_relaxed);
@@ -175,11 +180,13 @@ int DriftCompensatedFifo::convertChunk (const float* src, int numFrames, int src
         }
         else if (channels == 2 && srcChannels >= 3)
         {
-            // ITU-R BS.775 downmix, LFE dropped, -3 dB overall (same policy as
-            // the chain). Order: FL FR FC LFE [BL BR] [SL SR].
+            // ITU-R BS.775 downmix, -3 dB overall, the LFE through the
+            // chain's LfeFold (Bs775Fold.h, docs/11 E01; the same law as the
+            // chain). Order: FL FR FC LFE [BL BR] [SL SR].
             const float centre = kMinus3dB * clean (s[2]);
-            float l = clean (s[0]) + centre;
-            float r = clean (s[1]) + centre;
+            const float lfe = sch > 3 ? lfeFold.next (clean (s[3])) : 0.0f;
+            float l = clean (s[0]) + lfe + centre;
+            float r = clean (s[1]) + lfe + centre;
             for (size_t p = 4; p + 1 < sch; p += 2)
             {
                 l += kMinus3dB * clean (s[p]);

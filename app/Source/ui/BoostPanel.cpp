@@ -352,7 +352,7 @@ void BoostPanel::showCappedMenu (juce::Component& chip)
 {
     juce::PopupMenu menu;
     menu.addSectionHeader ("Headset enhancement is ON for " + controller.getOutputDeviceName());
-    menu.addItem (1, "Remove the cap: the headset plays flat");
+    menu.addItem (1, "The headset's enhancement is off: remove the cap");
     menu.addItem (2, "Keep Footsteps and Detail at most 30 %");
     juce::Component::SafePointer<BoostPanel> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&chip),
@@ -792,13 +792,14 @@ void BoostPanel::resized()
 
     // The CAPPED chips beside the Footsteps and Detail values, placed like
     // the Warmth chip; "CAP" where the cell's margin is narrow.
+    const int cappedW = juce::roundToInt (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f, true), "CAPPED") * 0.9f) + 12;
     for (size_t i = 0; i < cappedChips.size(); ++i)
     {
         constexpr int kChipH = 17, kValueHalfW = 17;
         const auto knob = macros[i == 0 ? 0 : 3].getBounds();
         const int x = knob.getCentreX() + kValueHalfW;
-        const int w = juce::jmin (60, knob.getCentreX() + cellW / 2 - x - 1);
-        cappedChips[i].setButtonText (w >= 56 ? "CAPPED" : "CAP");
+        const int w = juce::jmin (cappedW + 4, knob.getCentreX() + cellW / 2 - x - 1);
+        cappedChips[i].setButtonText (w >= cappedW ? "CAPPED" : "CAP");
         cappedChips[i].setBounds (x, knob.getBottom() - kChipH - 1, juce::jmax (30, w), kChipH);
     }
 }

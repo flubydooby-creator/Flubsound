@@ -5,6 +5,7 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <cstdlib> // PROBE
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -693,7 +694,9 @@ void AutoLevel::prepare (double sampleRate, int numChannels)
 {
     sr = sampleRate;
     follower.setUpperGate (true);
+    if (const char* e = std::getenv ("FLUB_AL_TAU")) follower.setSlowTimeMs (static_cast<float> (std::atof (e))); // PROBE
     follower.prepare (sampleRate, numChannels);
+    settleSamples = static_cast<std::int64_t> (kRestartSettleSeconds * sampleRate);
     reset();
 }
 
@@ -703,7 +706,8 @@ void AutoLevel::reset() noexcept
     gainDb = 0.0f;
     lastLinear = 1.0f;
     recoveryLeft = 0.0;
-    frozen = false;
+    restartsSeen = 0;
+    frozen = settling = false;
 }
 
 void AutoLevel::process (const AudioBlock& block) noexcept FLUB_NONBLOCKING
@@ -721,12 +725,26 @@ void AutoLevel::run (const AudioBlock& block, bool measure) noexcept FLUB_NONBLO
     if (measure)
         follower.process (block); // measured BEFORE our gain: open-loop, unconditionally stable
     const double dt = block.numSamples / sr;
+    if (follower.restartCount() != restartsSeen)
+    {
+        // The measure restarted on a new level: its first reading is the mean
+        // of a beat or a phrase, so the gain waits for kRestartSettleSeconds
+        // of it instead of following that and coming back.
+        restartsSeen = follower.restartCount();
+        settling = true;
+    }
+    if (settling && follower.measuredSamples() >= settleSamples)
+        settling = false;
 
     if (enabled)
     {
         if (! measure)
         {
             // Hidden from the loop (docs/11 E10): the gain holds, as in a pause.
+        }
+        else if (follower.isActive() && settling)
+        {
+            frozen = true; // the gain holds; it catches up at the recovery rate
         }
         else if (follower.isActive()) // frozen during silence, pauses, fade-outs and loud events
         {

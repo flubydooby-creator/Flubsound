@@ -53,6 +53,19 @@ jobs:
         run: |
           ./build/tools/flubsound-cli/flubsound-cli params > /dev/null
           ./build/tools/flubsound-cli/flubsound-cli presets
+      # The by-ear demo pack (`flubsound-cli demo`, docs/04 §10): a
+      # loudness-matched before / after WAV pair per macro, Boost step and
+      # module switch, with index.txt; 8 s programmes, 16-bit (about 70 MB,
+      # a few seconds to render).
+      - name: Demo pack (Linux)
+        if: matrix.compiler == 'gcc'
+        run: ./build/tools/flubsound-cli/flubsound-cli demo --out Flubsound-demo-pack --seconds 8 --format pcm16 --quiet
+      - uses: actions/upload-artifact@v4
+        if: matrix.compiler == 'gcc'
+        with:
+          name: Flubsound-demo-pack
+          path: Flubsound-demo-pack
+          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # Address + UndefinedBehavior sanitizers over the full test suite.

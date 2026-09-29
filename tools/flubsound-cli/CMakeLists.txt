@@ -16,6 +16,8 @@ set(FLUB_CLI_SOURCES
     CliOptions.h
     Commands.cpp
     Commands.h
+    Demo.cpp
+    Demo.h
     FactoryPresets.cpp
     FactoryPresets.h
     LatencyProbeCommand.cpp

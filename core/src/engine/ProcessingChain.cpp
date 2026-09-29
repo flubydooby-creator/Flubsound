@@ -640,6 +640,7 @@ void ProcessingChain::resetSignalState() noexcept
     virtRan = foldRan = passStatsValid = false;
     foldHeadroom.reset();
     foldHeadroomRan = false;
+    headroomBlockMinDb = 0.0f;
     dryDelay.reset();
     dryLimiter.reset();
     dryLimiterRunning = false;
@@ -1328,10 +1329,11 @@ void ProcessingChain::foldToStereo (const AudioBlock& in) noexcept
     noteHeadroom();
 
     // The surround fold S = (1 - w) h k D + w B ramps linearly with virt.on
-    // (w, 20 ms; h the fold headroom, 1 below 0 dBFS). The stereo fold ramps linearly from S to D (p, 400 ms) and is
-    // power-compensated: g scales the mix so that its RMS follows
-    // (1 - p) RMS_S + p RMS_D whatever the correlation of S and D (for
-    // fully correlated folds g is 1: the plain linear ramp). A plain linear
+    // (w, 20 ms; h the fold headroom, 1 below 0 dBFS). The stereo fold ramps
+    // linearly from S to D (p, 400 ms) and is power-compensated: g scales
+    // the mix so that its RMS follows (1 - p) RMS_S + p RMS_D whatever the
+    // correlation of S and D (for fully correlated folds g is 1: the plain
+    // linear ramp). A plain linear
     // ramp dips by up to 3 dB mid-fade where they are uncorrelated (the
     // binaural render's highs), an equal-power one swells by up to 3 dB where
     // they are correlated (its lows: +3.4 dB on centred pink noise). The

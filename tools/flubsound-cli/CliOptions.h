@@ -32,6 +32,7 @@ enum class Command
     Soak,
     Params,
     Presets,
+    Demo,
     Help,
     Version
 };
@@ -87,6 +88,10 @@ struct CliOptions
     uint32_t seed = 1;
     std::string automation = "user"; // off | user | all
     double intervalMs = 250.0;
+    // `demo` (Demo.h): --seconds (built-in programme length), and whether
+    // --format was given (the pack defaults to pcm24, not f32)
+    double demoSeconds = 10.0;
+    bool demoFormatSet = false;
     RenderOptions render;
 };
 

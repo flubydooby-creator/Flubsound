@@ -26,6 +26,7 @@
 #include "flub/engine/MeterBus.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
+#include "flub/engine/Protection.h"
 #include "flub/io/PresetIO.h"
 
 #include <algorithm>
@@ -35,6 +36,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace flub;
@@ -844,4 +846,301 @@ TEST_CASE ("Soak levels (slow, FLUB_SOAK=1): 10 minutes of mixed programme throu
     }
     for (const auto& p : kSoakPresets)
         checkSoak (p, 600.0, true);
+}
+
+// =============================================================================
+// The first combat event after 10 s of quiet (docs/11 E21 Done-when: at most
+// the steady-state events + 1 dB; the step band within 1 dB 1 s after it)
+// =============================================================================
+namespace
+{
+using Window = std::pair<int, int>; // [begin, end) in samples
+
+double powerDb (double p) { return 10.0 * std::log10 (std::max (1.0e-30, p)); }
+
+double meanPower (const Channels& c, const std::vector<Window>& w)
+{
+    double acc = 0.0;
+    int64_t n = 0;
+    for (const auto& ch : c)
+        for (const auto& [from, to] : w)
+            for (int i = from; i < std::min (to, static_cast<int> (ch.size())); ++i)
+            {
+                acc += static_cast<double> (ch[static_cast<size_t> (i)]) * ch[static_cast<size_t> (i)];
+                ++n;
+            }
+    return n > 0 ? acc / static_cast<double> (n) : 0.0;
+}
+
+/** RBJ band-pass (0 dB peak) at 3.2 kHz, Q 1 (the steps' band), in double. */
+std::vector<float> stepBand (const std::vector<float>& x)
+{
+    const double w0 = kTwoPi * 3200.0 / kFs, alpha = std::sin (w0) / 2.0, a0 = 1.0 + alpha;
+    const double b0 = alpha / a0, b2 = -alpha / a0, a1 = -2.0 * std::cos (w0) / a0, a2 = (1.0 - alpha) / a0;
+    std::vector<float> y (x.size());
+    double x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double in = x[i], out = b0 * in + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1;
+        x1 = in;
+        y2 = y1;
+        y1 = out;
+        y[i] = static_cast<float> (out);
+    }
+    return y;
+}
+
+Channels stepBand (const Channels& c) { return { stepBand (c[0]), stepBand (c[1]) }; }
+
+/** 10 s of a pink ambience with footsteps (3.2 kHz band noise, Hann,
+    20-50 ms, one every 350 ms, 6 dB under the ambience's RMS: the E60
+    scene's), then a fight: three 1.5 s bursts of automatic fire (10 shots/s,
+    white noise, tau 15 ms, peak 24 dB over the ambience's RMS, the whole
+    fight turned down where it would pass -1 dBFS) at 10, 12.5 and 15 s,
+    then the ambience and the steps again until 20 s. The ambience and the
+    steps measure `lufs` integrated. */
+struct QuietCombat
+{
+    Channels input;
+    Window firstShot;
+    std::vector<Window> steadyShots, stepsBefore, bedsBefore, stepsAfter, bedsAfter;
+};
+
+constexpr double kQuietSeconds = 10.0, kFightEnd = 16.5, kQuietCombatLength = 20.0;
+
+QuietCombat makeQuietCombat (double lufs)
+{
+    const int n = samplesOf (kQuietCombatLength);
+    Channels c = pinkAmbience (n, 1357);
+    const auto band = stepBand (whiteNoise (n, 1.0f, 4242));
+    const double bedRms0 = std::sqrt (0.5 * (std::pow (rms (c[0].data(), n), 2.0) + std::pow (rms (c[1].data(), n), 2.0)));
+    const double stepGain = bedRms0 * std::pow (10.0, -6.0 / 20.0) / rms (band.data(), n) / std::sqrt (3.0 / 8.0);
+    const double durations[4] = { 0.020, 0.030, 0.040, 0.050 };
+    QuietCombat s;
+    int k = 0;
+    for (double t = 0.2; t + 0.4 < kQuietCombatLength; t += 0.35, ++k)
+    {
+        if (t > kQuietSeconds - 0.35 && t < kFightEnd + 0.1)
+            continue;
+        const int onset = samplesOf (t), len = samplesOf (durations[k % 4]);
+        for (int i = 0; i < len; ++i)
+        {
+            const double v = stepGain * (0.5 - 0.5 * std::cos (kTwoPi * i / len)) * band[static_cast<size_t> (onset + i)];
+            c[0][static_cast<size_t> (onset + i)] += static_cast<float> ((k % 2 == 0 ? 1.22 : 0.71) * v);
+            c[1][static_cast<size_t> (onset + i)] += static_cast<float> ((k % 2 == 0 ? 0.71 : 1.22) * v);
+        }
+        const Window step { onset, onset + len }, bed { onset + samplesOf (0.15), onset + samplesOf (0.33) };
+        if (t >= 7.0 && t < kQuietSeconds)
+        {
+            s.stepsBefore.push_back (step);
+            s.bedsBefore.push_back (bed);
+        }
+        else if (t >= kFightEnd + 1.0 && t < kFightEnd + 2.0)
+        {
+            s.stepsAfter.push_back (step);
+            s.bedsAfter.push_back (bed);
+        }
+    }
+    const double g = std::pow (10.0, (lufs - integratedOf (c)) / 20.0);
+    for (auto& ch : c)
+        for (auto& v : ch)
+            v = static_cast<float> (v * g);
+
+    Channels fight (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    FastRandom rng (8642);
+    const double shotPeak = bedRms0 * g * std::pow (10.0, 24.0 / 20.0);
+    for (double burst : { kQuietSeconds, kQuietSeconds + 2.5, kQuietSeconds + 5.0 })
+        for (int shot = 0; shot < 15; ++shot)
+        {
+            const double t = burst + 0.1 * shot;
+            const int onset = samplesOf (t);
+            for (int i = 0; i < samplesOf (0.1); ++i)
+            {
+                const double env = shotPeak * std::exp (-i / (0.015 * kFs));
+                fight[0][static_cast<size_t> (onset + i)] += static_cast<float> (env * rng.nextBipolar());
+                fight[1][static_cast<size_t> (onset + i)] += static_cast<float> (env * rng.nextBipolar());
+            }
+            const Window w { onset, onset + samplesOf (0.03) };
+            if (t == kQuietSeconds)
+                s.firstShot = w;
+            else if (burst == kQuietSeconds + 5.0)
+                s.steadyShots.push_back (w);
+        }
+    const double limit = std::pow (10.0, -1.0 / 20.0);
+    double scale = 1.0;
+    for (int pass = 0; pass < 32; ++pass)
+    {
+        double peak = 0.0;
+        for (size_t ch = 0; ch < 2; ++ch)
+            for (size_t i = 0; i < c[ch].size(); ++i)
+                peak = std::max (peak, std::abs (c[ch][i] + scale * fight[ch][i]));
+        if (peak <= limit)
+            break;
+        scale *= 0.97 * limit / peak;
+    }
+    for (size_t ch = 0; ch < 2; ++ch)
+        for (size_t i = 0; i < c[ch].size(); ++i)
+            c[ch][i] = static_cast<float> (c[ch][i] + scale * fight[ch][i]);
+    s.input = std::move (c);
+    return s;
+}
+
+struct QuietCombatResult
+{
+    double onsetJumpDb = 0.0, stepAfterDb = 0.0, firstDb = 0.0, steadyDb = 0.0;
+};
+
+/** First shot's gain (out vs in power, its first 30 ms) minus the steady
+    state's (every shot of the third burst), and the steps' cue-band gain
+    1-2 s after the fight minus 3 s before it. */
+QuietCombatResult quietCombat (const std::vector<float>& values, double lufs, const std::string& what)
+{
+    const auto s = makeQuietCombat (lufs);
+    const auto out = render (s.input, values);
+    const auto gain = [] (const Channels& o, const Channels& i, const std::vector<Window>& w) { return powerDb (meanPower (o, w)) - powerDb (meanPower (i, w)); };
+    QuietCombatResult r;
+    r.firstDb = gain (out, s.input, { s.firstShot });
+    r.steadyDb = gain (out, s.input, s.steadyShots);
+    r.onsetJumpDb = r.firstDb - r.steadyDb;
+    const auto inBand = stepBand (s.input), outBand = stepBand (out);
+    const auto stepLift = [&] (const std::vector<Window>& steps, const std::vector<Window>& beds) {
+        const double in = meanPower (inBand, steps) - meanPower (inBand, beds), o = meanPower (outBand, steps) - meanPower (outBand, beds);
+        return powerDb (o) - powerDb (in);
+    };
+    r.stepAfterDb = stepLift (s.stepsAfter, s.bedsAfter) - stepLift (s.stepsBefore, s.bedsBefore);
+    const std::string tag = what + " at " + std::to_string (static_cast<int> (lufs)) + " LUFS";
+    measured (tag + ": first shot after 10 s of quiet, gain", r.firstDb, "dB");
+    measured (tag + ": steady-state shots, gain", r.steadyDb, "dB");
+    measured (tag + ": first combat event over the steady state", r.onsetJumpDb, "dB");
+    measured (tag + ": step band 1-2 s after the fight vs before", r.stepAfterDb, "dB");
+    return r;
+}
+} // namespace
+
+TEST_CASE ("PROBE quiet combat")
+{
+    for (const char* f : { "gaming-night-mode.json", "music-late-night-low-volume.json", "music-podcast-voice.json", "gaming-competitive-fps.json" })
+        for (double l : { -14.0, -24.0, -40.0 })
+        {
+            auto v = factoryValues (f);
+            if (std::string (f) == "gaming-competitive-fps.json")
+            {
+                for (auto g : { GuardRangeValue::Lu10Balanced, GuardRangeValue::Lu6Shield })
+                {
+                    v[static_cast<size_t> (GuardRange)] = static_cast<float> (g);
+                    quietCombat (v, l, std::string (f) + " guard " + std::to_string (static_cast<int> (g)));
+                }
+            }
+            else
+                quietCombat (v, l, f);
+        }
+    if (std::getenv ("PROBE_DECOMP"))
+        for (const char* f : { "gaming-night-mode.json", "music-late-night-low-volume.json" })
+            for (int k = 0; k < 10; ++k)
+            {
+                if (k >= 4)
+                {
+                    auto v = factoryValues (f);
+                    const int ids[] = { Macro1, Macro2, Macro3, Macro4, GuardRange, Mode };
+                    v[static_cast<size_t> (ids[k - 4])] = 0.0f;
+                    quietCombat (v, -24.0, std::string (f) + " zero " + std::to_string (k - 4));
+                    continue;
+                }
+                auto v = factoryValues (f);
+                const char* what[] = { "comp off", "dyneq off", "max off", "autolevel off" };
+                if (k == 0)
+                {
+                    v[static_cast<size_t> (CompressorOn)] = 0.0f;
+                    v[static_cast<size_t> (Macro4)] = 0.0f;
+                }
+                if (k == 1)
+                {
+                    v[static_cast<size_t> (CompAttackMs)] = static_cast<float> (std::atof (std::getenv ("PROBE_ATK")));
+                    quietCombat (v, -14.0, std::string (f) + " atk");
+                    quietCombat (v, -40.0, std::string (f) + " atk");
+                    quietCombat (v, -24.0, std::string (f) + " atk");
+                    continue;
+                }
+                if (k == 1) v[static_cast<size_t> (DynEqOn)] = 0.0f;
+                if (k == 2) v[static_cast<size_t> (MaximizerOn)] = 0.0f;
+                if (k == 3)
+                {
+                    v[static_cast<size_t> (AutoLevelOn)] = 0.0f;
+                    v[static_cast<size_t> (CompressorOn)] = 0.0f;
+                    v[static_cast<size_t> (MaximizerOn)] = 0.0f;
+                    v[static_cast<size_t> (DynEqOn)] = 0.0f;
+                    v[static_cast<size_t> (GuardRange)] = 0.0f;
+                    for (int id : { Macro1, Macro2, Macro3, Macro4, Macro5, BoostIntensity })
+                        v[static_cast<size_t> (id)] = 0.0f;
+                }
+                quietCombat (v, -24.0, std::string (f) + " " + what[k]);
+            }
+}
+
+TEST_CASE ("PROBE trace")
+{
+    const char* f = std::getenv ("PROBE_FILE");
+    const double from = std::atof (std::getenv ("PROBE_FROM")), to = std::atof (std::getenv ("PROBE_TO"));
+    auto values = factoryValues (f);
+    if (values[static_cast<size_t> (GuardRange)] == 0.0f)
+        values[static_cast<size_t> (GuardRange)] = static_cast<float> (GuardRangeValue::Lu10Balanced);
+    if (const char* qc = std::getenv ("PROBE_QC"))
+    {
+        values = factoryValues (f);
+        auto sc = makeQuietCombat (std::atof (qc));
+        if (std::getenv ("PROBE_AL"))
+        {
+            AutoLevel al;
+            al.prepare (kFs, 2);
+            al.setEnabled (true);
+            al.setTargetLufs (-14.0f);
+            GatedLoudness up;
+            up.setUpperGate (true);
+            up.prepare (kFs, 2);
+            LoudnessFollower f400, f100;
+            f400.prepare (kFs, 2, 400.0f);
+            f100.prepare (kFs, 2, 100.0f);
+            for (int pos = 0; pos + 480 <= static_cast<int> (sc.input[0].size()); pos += 480)
+            {
+                float* ptrs[2] = { sc.input[0].data() + pos, sc.input[1].data() + pos };
+                AudioBlock blk (ptrs, 2, 480);
+                up.process (blk);
+                f400.process (blk);
+                f100.process (blk);
+                al.process (blk);
+                const double t = pos / kFs;
+                if (t >= from && t < to)
+                    std::printf ("%7.2f gain %6.2f held %d slow %7.2f up400 %7.2f m100 %7.2f\n", t, static_cast<double> (al.getGainDb()), up.isHeld() ? 1 : 0,
+                                 static_cast<double> (up.getLufs()), static_cast<double> (f400.getLufs()), static_cast<double> (f100.getLufs()));
+            }
+            return;
+        }
+        Stream st (values);
+        Stream::Trace tr;
+        st.process (sc.input, tr);
+        for (size_t b = static_cast<size_t> (from * kFs / kBlock); b < std::min (tr.levelDb.size(), static_cast<size_t> (to * kFs / kBlock)); ++b)
+            std::printf ("%8.3f %7.2f %7.2f %7.2f\n", static_cast<double> (b) * kBlock / kFs, static_cast<double> (tr.levelDb[b]),
+                         static_cast<double> (tr.guardDb[b]), static_cast<double> (tr.guardReferenceLufs[b]));
+        return;
+    }
+    Stream stream (values);
+    Stream::Trace trace;
+    double t = 0.0;
+    for (const auto& s : mixedProgramme (to, kProgrammeSeed))
+    {
+        auto c = makeSegment (s);
+        const size_t first = trace.levelDb.size();
+        stream.process (c, trace);
+        if (t + s.seconds >= from)
+            for (size_t b = first; b < trace.levelDb.size(); b += 4)
+                std::printf ("%8.3f %s %7.2f %7.2f %7.2f\n", static_cast<double> (b) * kBlock / kFs, nameOf (s.kind), static_cast<double> (trace.levelDb[b]),
+                             static_cast<double> (trace.guardDb[b]), static_cast<double> (trace.guardReferenceLufs[b]));
+        t += s.seconds;
+    }
+}
+
+TEST_CASE ("PROBE soak one")
+{
+    soak (std::getenv ("PROBE_FILE"), mixedProgramme (600.0, kProgrammeSeed), std::getenv ("PROBE_V") != nullptr);
 }

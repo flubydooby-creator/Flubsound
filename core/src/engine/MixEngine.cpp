@@ -3,6 +3,7 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace flub
 {
@@ -17,6 +18,8 @@ void MixEngine::configureFrom (const MixEngine& previous, const std::vector<Stri
                                const ChainSetup& setup)
 {
     correction.setSettingsNow (previous.correction.getSettings()); // prepared at the new rate in build()
+    idleFreeze = previous.idleFreeze; // docs/11 E45; the new strips start awake
+    idleHoldSeconds = previous.idleHoldSeconds;
     build (configs, sr, maxBlockSize, previous.strips, setup);
 }
 
@@ -49,6 +52,9 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         if (i < storesFrom.size() && storesFrom[i]->chain != nullptr)
             s->chain->adoptGovernorState (*storesFrom[i]->chain);
         s->gain.reset (sr, 20.0f, s->config.muted ? 0.0f : dbToGain (s->config.gainDb));
+        s->preRollLength = std::max (1, static_cast<int> (std::lround (kIdlePreRollMs * 0.001 * sr)));
+        s->preRoll.setSize (s->config.inputChannels, s->preRollLength);
+        s->wakeScratch.setSize (s->config.inputChannels, s->preRollLength);
         next.push_back (std::move (s));
     }
     strips = std::move (next);
@@ -66,6 +72,11 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         s->padSamples = groupLatency - s->chain->getLatencySamples();
         s->pad.prepare (2, s->padSamples);
         maxStripLatency = std::max (maxStripLatency, groupLatency);
+        // Idle freeze (docs/11 E45): the hold outlasts the strip's longest
+        // tail; the wake's fade never reaches past its latency.
+        s->holdSamples = idleHoldFor (*s);
+        s->fadeLength = std::min (static_cast<int> (std::lround (kIdleFadeMs * 0.001 * sr)), groupLatency);
+        s->fadePos = s->fadeLength;
     }
 
     // Master safety limiter: only engages when the summed strips overshoot.
@@ -117,11 +128,55 @@ void MixEngine::setMasterCeilingDb (float db) noexcept
     master.setParams (lp);
 }
 
+namespace
+{
+/** True when every sample of `b` is below `floor` in magnitude (a NaN is not). */
+bool isBelowFloor (const AudioBlock& b, float floor) noexcept
+{
+    for (int c = 0; c < b.numChannels; ++c)
+    {
+        const float* x = b.channel (c);
+        for (int k = 0; k < b.numSamples; ++k)
+            if (! (std::abs (x[k]) < floor))
+                return false;
+    }
+    return true;
+}
+} // namespace
+
+void MixEngine::wake (Strip& s) noexcept FLUB_NONBLOCKING
+{
+    // The pre-roll (the input's last samples while frozen, all below the
+    // floor) in time order through the chain and the pad; what they give out
+    // belongs to blocks already played as zeros and is dropped.
+    const int fill = s.preRollFill;
+    const AudioBlock roll = s.wakeScratch.block (s.config.inputChannels, fill);
+    const int start = (s.preRollPos - fill + s.preRollLength) % s.preRollLength;
+    for (int c = 0; c < roll.numChannels; ++c)
+    {
+        const float* src = s.preRoll.block().channel (c);
+        float* dst = roll.channel (c);
+        for (int k = 0; k < fill; ++k)
+            dst[k] = src[(start + k) % s.preRollLength];
+    }
+    for (int pos = 0; pos < fill; pos += maxBlock)
+    {
+        const AudioBlock part = roll.subBlock (pos, std::min (maxBlock, fill - pos));
+        s.chain->process (part);
+        s.pad.process (part.firstChannels (2));
+    }
+    s.frozen = false;
+    s.frozenFlag.store (false, std::memory_order_relaxed);
+    s.silentSamples = s.quietSamples = 0;
+    s.fadePos = 0;
+}
+
 void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out) noexcept FLUB_NONBLOCKING
 {
     const int n = std::min (out.numSamples, maxBlock);
     const AudioBlock mix = mixBuffer.block (2, n);
     mix.clear();
+    const float floor = dbToGain (kIdleFloorDb);
 
     for (size_t i = 0; i < strips.size(); ++i)
     {
@@ -131,9 +186,63 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
             continue;
 
         const AudioBlock io = in->firstChannels (s.config.inputChannels).subBlock (0, n);
+        // Idle freeze (docs/11 E45): a frozen strip only watches its input.
+        const bool silent = idleFreeze && isBelowFloor (io, floor);
+        if (s.frozen)
+        {
+            if (silent)
+            {
+                for (int c = 0; c < io.numChannels; ++c)
+                {
+                    const float* src = io.channel (c);
+                    float* ring = s.preRoll.block().channel (c);
+                    int pos = s.preRollPos;
+                    for (int k = 0; k < n; ++k)
+                    {
+                        ring[pos] = src[k];
+                        pos = pos + 1 == s.preRollLength ? 0 : pos + 1;
+                    }
+                }
+                s.preRollPos = static_cast<int> ((s.preRollPos + n) % s.preRollLength);
+                s.preRollFill = std::min (s.preRollLength, s.preRollFill + n);
+                s.gain.skip (n);
+                s.frozenBlocks.fetch_add (1, std::memory_order_relaxed);
+                continue;
+            }
+            wake (s);
+        }
+
         s.chain->process (io);
         const AudioBlock st = io.firstChannels (2);
         s.pad.process (st);
+
+        if (s.fadePos < s.fadeLength)
+        {
+            // The wake's fade-in (raised cosine over fadeLength samples).
+            const int len = std::min (n, s.fadeLength - s.fadePos);
+            const double w = kPi / static_cast<double> (s.fadeLength);
+            for (int k = 0; k < len; ++k)
+            {
+                const float g = static_cast<float> (0.5 - 0.5 * std::cos (w * static_cast<double> (s.fadePos + k)));
+                st.channel (0)[k] *= g;
+                st.channel (1)[k] *= g;
+            }
+            s.fadePos += len;
+        }
+
+        if (idleFreeze)
+        {
+            s.silentSamples = silent ? s.silentSamples + n : 0;
+            s.quietSamples = isBelowFloor (st, floor) ? s.quietSamples + n : 0;
+            if (s.silentSamples >= s.holdSamples && s.quietSamples >= s.holdSamples)
+            {
+                // Its output is already zero to within the floor: from the
+                // next block on it adds nothing (latency-aligned zeros).
+                s.frozen = true;
+                s.frozenFlag.store (true, std::memory_order_relaxed);
+                s.preRollPos = s.preRollFill = 0;
+            }
+        }
 
         const float g0 = s.gain.getCurrent();
         const float g1 = s.gain.skip (n);
@@ -171,6 +280,28 @@ int MixEngine::getStripLatencySamples (int strip) const noexcept
 int MixEngine::getStripPaddingSamples (int strip) const noexcept
 {
     return strip >= 0 && strip < getNumStrips() ? strips[static_cast<size_t> (strip)]->padSamples : 0;
+}
+
+int64_t MixEngine::idleHoldFor (const Strip& s) const noexcept
+{
+    return static_cast<int64_t> (std::ceil (idleHoldSeconds * sampleRate)) + s.chain->getLatencySamples() + s.padSamples;
+}
+
+void MixEngine::setIdleHoldSeconds (double seconds) noexcept
+{
+    idleHoldSeconds = std::max (0.0, seconds);
+    for (auto& s : strips)
+        s->holdSamples = idleHoldFor (*s);
+}
+
+bool MixEngine::isStripFrozen (int strip) const noexcept
+{
+    return strip >= 0 && strip < getNumStrips() && strips[static_cast<size_t> (strip)]->frozenFlag.load (std::memory_order_relaxed);
+}
+
+uint64_t MixEngine::getStripFrozenBlocks (int strip) const noexcept
+{
+    return strip >= 0 && strip < getNumStrips() ? strips[static_cast<size_t> (strip)]->frozenBlocks.load (std::memory_order_relaxed) : 0;
 }
 
 bool MixEngine::needsReprepare() const noexcept

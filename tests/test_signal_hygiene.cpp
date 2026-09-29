@@ -368,13 +368,13 @@ TEST_CASE ("Signal hygiene: DriftCompensatedFifo::push mutes and counts NaN / In
             {
                 // Same-layout pushes are scanned; a surround push is sanitised
                 // per source sample before the downmix (the LFE, channel 3 of
-                // 7.1, is dropped by the downmix and never read).
+                // 7.1, is folded since docs/11 E01, so it is read and counted).
                 const int bad[] = { 10 * srcChannels, 11 * srcChannels + 1, 200 * srcChannels };
                 const float values[] = { nan, -inf, 1.0e30f };
                 for (int j = 0; j < 3; ++j)
                     inter[static_cast<size_t> (bad[j])] = corrupt ? values[j] : 0.0f;
                 if (srcChannels == 8)
-                    inter[static_cast<size_t> (300 * srcChannels + 3)] = corrupt ? nan : 0.0f; // LFE: not read, not counted
+                    inter[static_cast<size_t> (300 * srcChannels + 3)] = corrupt ? nan : 0.0f; // LFE: muted and counted
             }
             fifo.push (inter.data(), packet, srcChannels);
             for (; pulled + block <= (k + 1) * packet; pulled += block)
@@ -393,7 +393,7 @@ TEST_CASE ("Signal hygiene: DriftCompensatedFifo::push mutes and counts NaN / In
         uint64_t bad = 0, none = 0;
         const auto corrupted = run (srcChannels, true, bad);
         const auto clean = run (srcChannels, false, none);
-        CHECK (bad == 3u);
+        CHECK (bad == (srcChannels == 8 ? 4u : 3u));
         CHECK (none == 0u);
         REQUIRE (corrupted.size() == clean.size());
         bool identical = true, finite = true;

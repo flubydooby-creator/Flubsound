@@ -129,7 +129,11 @@ struct DeviceEndpointEntry
 
     flub::platform::OutputEndpointIdentity identity() const
     {
-        return { endpointId.toStdString(), name.toStdString(), hardwareId.toStdString() };
+        flub::platform::OutputEndpointIdentity e;
+        e.id = endpointId.toStdString();
+        e.name = name.toStdString();
+        e.hardwareId = hardwareId.toStdString();
+        return e;
     }
     bool operator== (const DeviceEndpointEntry&) const = default;
 };

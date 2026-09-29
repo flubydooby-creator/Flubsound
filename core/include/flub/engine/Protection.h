@@ -210,17 +210,29 @@ public:
     static constexpr float kUpperMomentaryMs = 400.0f;
     static constexpr float kUpperGateLu = 8.0f;
     static constexpr double kUpperReleaseSeconds = 5.0;
+    /** The upper gate's onset detector (docs/11 E21 time constants): a 10 ms
+        K-weighted follower more than kFastGateLu over the slow measure is an
+        event from its first block, and an event holds for kEventHoldMs after
+        its detectors fall back under their gates. */
+    static constexpr float kFastMs = 10.0f;
+    static constexpr float kFastGateLu = 14.0f;
+    static constexpr float kEventHoldMs = 300.0f;
 
     /** Turns the upper gate on or off; call before prepare(). */
     void setUpperGate (bool on) noexcept { upperGate = on; }
+
+    /** The slow measure's time constant (default kSlowTimeMs); call before prepare(). */
+    void setSlowTimeMs (float ms) noexcept { slowTimeMs = ms; }
 
     void prepare (double sampleRate, int numChannels)
     {
         channels = numChannels;
         momentary.prepare (sampleRate, numChannels, 100.0f);
-        slow.prepare (sampleRate, numChannels, kSlowTimeMs);
+        slow.prepare (sampleRate, numChannels, slowTimeMs);
         upper.prepare (sampleRate, numChannels, kUpperMomentaryMs);
-        slowPole = static_cast<double> (onePoleCoeff (kSlowTimeMs, sampleRate));
+        fast.prepare (sampleRate, numChannels, kFastMs);
+        eventHoldSamples = static_cast<std::int64_t> (0.001 * kEventHoldMs * sampleRate);
+        slowPole = static_cast<double> (onePoleCoeff (slowTimeMs, sampleRate));
         releaseSamples = static_cast<std::int64_t> (kRelativeReleaseSeconds * sampleRate);
         upperReleaseSamples = static_cast<std::int64_t> (kUpperReleaseSeconds * sampleRate);
         reset();
@@ -230,7 +242,10 @@ public:
     {
         momentary.reset();
         upper.reset();
+        fast.reset();
         restartSlow();
+        eventHoldLeft = 0;
+        restarts = 0;
         gateOpen = held = programme = false;
     }
 
@@ -246,15 +261,24 @@ public:
 
         momentary.process (block);
         if (upperGate)
+        {
             upper.process (block);
+            fast.process (block);
+        }
         const float m = momentary.getLufs();
         programme = ! silent && m > -50.0f;
         const float s = getLufs();
         gateOpen = programme && (! (s > -60.0f) || m > s - 20.0f);
 
-        // Upper gate: a loud event is held out of the slow measure; one that
+        // Upper gate: a loud event is held out of the slow measure (from the
+        // block its onset is in, and for kEventHoldMs after it); one that
         // lasts kUpperReleaseSeconds is a new level and restarts it.
-        held = upperGate && gateOpen && s > -60.0f && upper.getLufs() > s + kUpperGateLu;
+        const bool event = upperGate && gateOpen && s > -60.0f && (upper.getLufs() > s + kUpperGateLu || fast.getLufs() > s + kFastGateLu);
+        if (event)
+            eventHoldLeft = eventHoldSamples;
+        else
+            eventHoldLeft = std::max<std::int64_t> (0, eventHoldLeft - block.numSamples);
+        held = upperGate && gateOpen && s > -60.0f && (event || eventHoldLeft > 0);
         if (held)
         {
             if (m > s + kUpperGateLu)
@@ -262,6 +286,7 @@ public:
             if (upperHeldSamples >= upperReleaseSamples)
             {
                 restartSlow();
+                eventHoldLeft = 0;
                 held = false;
             }
         }
@@ -308,6 +333,12 @@ public:
     /** True when the last block was programme (not silence, above the
         absolute gate), whether or not it was admitted. */
     bool hasProgramme() const noexcept { return programme; }
+    /** Samples of programme the slow measure has read since its last
+        reset or restart. */
+    std::int64_t measuredSamples() const noexcept { return openSamples; }
+    /** Counts the restarts of the slow measure (a new level, a quieter
+        programme) since the last reset(). */
+    std::uint32_t restartCount() const noexcept { return restarts; }
 
 private:
     void restartSlow() noexcept
@@ -317,14 +348,16 @@ private:
         relativeGatedSamples = 0;
         upperHeldSamples = 0;
         biasDb = 1.0f; // any value > 0: recomputed on the next open block
+        ++restarts;
     }
 
-    LoudnessFollower momentary, slow, upper;
+    LoudnessFollower momentary, slow, upper, fast;
     int channels = 2;
     double slowPole = 0.0;
-    std::int64_t releaseSamples = 144000, upperReleaseSamples = 240000;
-    std::int64_t openSamples = 0, relativeGatedSamples = 0, upperHeldSamples = 0;
-    float biasDb = 0.0f;
+    std::int64_t releaseSamples = 144000, upperReleaseSamples = 240000, eventHoldSamples = 14400;
+    std::int64_t openSamples = 0, relativeGatedSamples = 0, upperHeldSamples = 0, eventHoldLeft = 0;
+    std::uint32_t restarts = 0;
+    float biasDb = 0.0f, slowTimeMs = kSlowTimeMs;
     bool upperGate = false, gateOpen = false, held = false, programme = false;
 };
 
@@ -725,6 +758,9 @@ public:
     static constexpr float kDownDbPerSec = 4.0f;
     static constexpr float kRecoveryUpDbPerSec = 3.0f; // for kRecoverySeconds after a freeze
     static constexpr double kRecoverySeconds = 2.0;
+    /** After a restart of its measure (a new level) the gain holds until the
+        measure has read this much programme (docs/11 E21 time constants). */
+    static constexpr double kRestartSettleSeconds = 1.0;
 
     void prepare (double sampleRate, int numChannels);
     void reset() noexcept;
@@ -745,8 +781,10 @@ private:
 
     GatedLoudness follower;
     double sr = 48000.0, recoveryLeft = 0.0;
+    std::int64_t settleSamples = 48000;
+    std::uint32_t restartsSeen = 0;
     float target = -18.0f, gainDb = 0.0f, lastLinear = 1.0f;
-    bool enabled = false, frozen = false;
+    bool enabled = false, frozen = false, settling = false;
 };
 
 class AutoDrive

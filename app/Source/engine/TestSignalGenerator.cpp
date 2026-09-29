@@ -1,6 +1,8 @@
 #include "TestSignalGenerator.h"
 
 #include "flub/common/Math.h"
+#include "flub/dsp/Bs775Fold.h"
+#include "flub/engine/Parameters.h"
 
 #include <cmath>
 
@@ -240,6 +242,24 @@ public:
         formant[2].set (2500.0, 6.0, fs);
         panGains (-60.0, gunGains);
         panGains (125.0, boomGains);
+        // The stereo downmix's LFE path: the chain's LfeFold at virt.lfe's
+        // default (docs/11 E01).
+        const auto& lfeLevel = flub::param::layout()[static_cast<size_t> (flub::param::VirtLfeGainDb)];
+        lfe.prepare (fs, flub::LfeFold::gainFor (true, lfeLevel.defaultValue));
+    }
+
+    /** ITU-R BS.775 downmix of a rendered frame for stereo strips, -3 dB
+        overall, the LFE folded by the chain's law (Bs775Fold.h). */
+    void downmix (float* frame) noexcept
+    {
+        constexpr float k = flub::Bs775Fold::kMatrixGain;
+        const float low = lfe.next (frame[3]);
+        const float l = k * (frame[0] + low + k * frame[2] + k * frame[4] + k * frame[6]);
+        const float r = k * (frame[1] + low + k * frame[2] + k * frame[5] + k * frame[7]);
+        for (int c = 0; c < 8; ++c)
+            frame[c] = 0.0f;
+        frame[0] = l;
+        frame[1] = r;
     }
 
     void render (float* frame) noexcept
@@ -327,6 +347,7 @@ private:
     BandPass formant[3];
     SawOscillator voiceOsc;
     std::array<float, 8> stepGains {}, gunGains {}, boomGains {};
+    flub::LfeFold lfe;
 };
 
 // =============================================================================
@@ -364,7 +385,6 @@ bool TestSignalGenerator::renderStrip (int strip, const flub::AudioBlock& block)
 
     const int channels = block.numChannels;
     std::array<float, 8> frame {};
-    constexpr float k = 0.70710678f;
 
     for (int i = 0; i < block.numSamples; ++i)
     {
@@ -377,14 +397,7 @@ bool TestSignalGenerator::renderStrip (int strip, const flub::AudioBlock& block)
         {
             s.game->render (frame.data());
             if (channels < 8)
-            {
-                // ITU-R BS.775 downmix for stereo strips (LFE dropped).
-                const float l = k * (frame[0] + k * frame[2] + k * frame[4] + k * frame[6]);
-                const float r = k * (frame[1] + k * frame[2] + k * frame[5] + k * frame[7]);
-                frame.fill (0.0f);
-                frame[0] = l;
-                frame[1] = r;
-            }
+                s.game->downmix (frame.data()); // stereo strips
         }
 
         for (int c = 0; c < channels; ++c)

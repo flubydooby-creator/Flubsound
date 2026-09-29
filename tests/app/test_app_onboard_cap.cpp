@@ -23,6 +23,7 @@
 #include "flub/engine/MacroMap.h"
 
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -61,7 +62,12 @@ EngineController::Options headlessOptions (const flubapptest::TempFolder& temp, 
 
 flub::platform::OutputEndpointIdentity endpoint (const char* id, const char* name, const char* hardwareId)
 {
-    return { id, name, hardwareId };
+    flub::platform::OutputEndpointIdentity e;
+    e.id = id;
+    e.name = name;
+    e.hardwareId = hardwareId;
+    e.transport = flub::platform::EndpointTransport::Usb;
+    return e;
 }
 
 /** Quiet noise on every channel of one strip. */
@@ -321,7 +327,7 @@ TEST_CASE ("App: headset enhancement (E16): the device banner asks until answere
     {
         const auto& chip = panel.getCappedChip (i);
         CHECK (chip.isVisible());
-        CHECK (chip.getButtonText() == "CAPPED");
+        CHECK (chip.getButtonText().startsWith ("CAP")); // "CAPPED", or "CAP" in a narrow cell
         CHECK (panel.getLocalBounds().contains (chip.getBounds()));
     }
     CHECK (panel.getCappedChip (0).getX() < panel.getCappedChip (1).getX()); // Footsteps (macro 1) left of Detail (macro 4)

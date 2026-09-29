@@ -10,6 +10,7 @@
 //   flubsound-cli soak    [chain options] [--minutes M] [--seed N] [--json]
 //   flubsound-cli params  [--json]
 //   flubsound-cli presets [--dir <dir>] [--json]
+//   flubsound-cli demo    [--input file.wav] [--out <dir>]   (Demo.cpp)
 //
 // Exit codes: 0 success, 1 processing / I/O failure (for batch: at least one
 // file failed), 2 usage error (bad option, unknown preset or parameter).
@@ -19,6 +20,7 @@
 
 #include "CliOptions.h"
 #include "Commands.h"
+#include "Demo.h"
 #include "LatencyProbeCommand.h"
 #include "Utf8Windows.h"
 
@@ -51,6 +53,8 @@ Usage:
   flubsound-cli soak    [preset / mode / macro / --set options] [--minutes M] [--json]
   flubsound-cli params  [--json]
   flubsound-cli presets [--dir <dir>] [--json]
+  flubsound-cli demo    [--input file.wav] [--out <dir>] [--seconds S] [--jobs N]
+                                      by-ear before / after pairs (`help demo`)
   flubsound-cli latency-probe generate|analyze ...   loopback latency (`latency-probe --help`)
   flubsound-cli help <command>        detailed help for one command
   flubsound-cli --version
@@ -276,6 +280,39 @@ presets/factory next to the executable or up to four parent folders above it,
 (exact name, file name, then a unique loose prefix / substring match).
 )";
 
+const char* const kDemoHelp = R"(flubsound-cli demo [--input file.wav] [--out <dir>] [--seconds S] [--jobs N] [--format f32|pcm24|pcm16]
+
+Renders the by-ear demo pack: before / after WAV pairs through the Flubsound
+processing chain, one pair per feature, and index.txt, which says per pair
+how both sides were set (`process --set` options), what changed in numbers
+and what to listen for.
+
+  Pairs: every macro of both modes 0 -> 100 % (Music: Punch, Width, Clarity,
+  Loudness, Warmth; Gaming: Footsteps, Positional, Impact, Detail, Voice &
+  Score), Boost 0 -> 50 and 0 -> 100 in both modes, Smoothness, headphone
+  crossfeed, the headphone virtualiser (on a 7.1 scene), the loudness contour,
+  Startle Guard, Night and the four maximizer styles.
+
+  * Programmes: built-in synthetic music, speech and a game scene (steps,
+    gunshots, explosions, a voice line; a 7.1 version for the virtualiser),
+    --seconds long (default 10, 0.5..120). --input uses your own file for
+    every pair instead (the virtualiser pair keeps the 7.1 scene unless your
+    file is 5.1 / 7.1).
+  * Loudness-matched: only the louder file of a pair is turned down to the
+    quieter's integrated loudness. The level features (Loudness macro,
+    Startle Guard, Night) are left unmatched and the index says so.
+  * Numbers: each written file is measured as `analyze --bands` reads it;
+    "Band delta" is after minus before per octave band.
+  * --out / -o: the pack folder (default ./flubsound-demo, created if
+    needed; existing pack files are replaced). --format: default pcm24
+    (TPDF dithered). --jobs: parallel renders (default: CPU cores). The same
+    options give the same files, whatever --jobs is.
+
+Examples:
+  flubsound-cli demo
+  flubsound-cli demo --input "My Song.wav" --out my-song-demo
+)";
+
 void printHelp (const std::string& topic, std::FILE* stream)
 {
     std::string t = topic;
@@ -295,6 +332,8 @@ void printHelp (const std::string& topic, std::FILE* stream)
         text = kParamsHelp;
     else if (t == "presets")
         text = kPresetsHelp;
+    else if (t == "demo")
+        text = kDemoHelp;
     std::fputs (text, stream);
 }
 
@@ -358,6 +397,7 @@ int main (int argc, char** argv)
             case Command::Soak: return runSoak (options);
             case Command::Params: return runParams (options);
             case Command::Presets: return runPresets (options);
+            case Command::Demo: return runDemo (options);
             case Command::None: break;
         }
     }

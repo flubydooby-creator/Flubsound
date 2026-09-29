@@ -105,6 +105,7 @@ enum CommandMask : unsigned
     kPresets = 1u << 4,
     kQuality = 1u << 5,
     kSoak = 1u << 6,
+    kDemo = 1u << 7,
     kRender = kProcess | kBatch,
     kChain = kRender | kQuality | kSoak, // options that choose the chain's settings
     kAll = kProcess | kBatch | kAnalyze | kParams | kPresets | kQuality | kSoak
@@ -155,10 +156,11 @@ struct OptionSpec
 };
 
 constexpr OptionSpec kOptions[] = {
-    { Opt::Input, "--input", "-i", true, false, kProcess | kBatch | kAnalyze },
-    { Opt::Output, "--output", "-o", true, false, kRender },
+    { Opt::Input, "--input", "-i", true, false, kProcess | kBatch | kAnalyze | kDemo },
+    { Opt::Output, "--output", "-o", true, false, kRender | kDemo },
+    { Opt::Output, "--out", nullptr, true, false, kDemo }, // `demo --out <dir>`
     { Opt::Preset, "--preset", "-p", true, false, kChain },
-    { Opt::PresetDir, "--preset-dir", nullptr, true, false, kChain },
+    { Opt::PresetDir, "--preset-dir", nullptr, true, false, kChain | kDemo },
     { Opt::Mode, "--mode", "-m", true, false, kChain },
     { Opt::Boost, "--boost", "-b", true, false, kChain },
     { Opt::Macro, "--macro", nullptr, true, true, kChain },
@@ -168,22 +170,22 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Profile, "--profile", nullptr, true, false, kChain },
     { Opt::Protection, "--protection", nullptr, true, false, kChain },
     { Opt::Rate, "--rate", nullptr, true, false, kQuality | kSoak },
-    { Opt::Format, "--format", "-f", true, false, kRender },
-    { Opt::Block, "--block", nullptr, true, false, kChain },
-    { Opt::Jobs, "--jobs", "-j", true, false, kBatch },
+    { Opt::Format, "--format", "-f", true, false, kRender | kDemo },
+    { Opt::Block, "--block", nullptr, true, false, kChain | kDemo },
+    { Opt::Jobs, "--jobs", "-j", true, false, kBatch | kDemo },
     { Opt::Recursive, "--recursive", "-r", false, false, kBatch },
     { Opt::Bands, "--bands", nullptr, false, false, kProcess | kAnalyze },
     { Opt::Events, "--events", nullptr, false, false, kAnalyze },
     { Opt::EventBand, "--event-band", nullptr, true, false, kAnalyze },
     { Opt::Glitches, "--glitches", nullptr, false, false, kAnalyze },
-    { Opt::Seconds, "--seconds", nullptr, true, false, kSoak },
+    { Opt::Seconds, "--seconds", nullptr, true, false, kSoak | kDemo },
     { Opt::Minutes, "--minutes", nullptr, true, false, kSoak },
     { Opt::Seed, "--seed", nullptr, true, false, kSoak },
     { Opt::Automation, "--automation", nullptr, true, false, kSoak },
     { Opt::Interval, "--interval", nullptr, true, false, kSoak },
     { Opt::Json, "--json", nullptr, false, false, kAll },
     { Opt::Dir, "--dir", "-d", true, false, kPresets },
-    { Opt::Quiet, "--quiet", "-q", false, false, kChain },
+    { Opt::Quiet, "--quiet", "-q", false, false, kChain | kDemo },
     { Opt::Help, "--help", "-h", false, false, kAll },
 };
 
@@ -206,6 +208,7 @@ unsigned maskFor (Command c) noexcept
         case Command::Presets: return kPresets;
         case Command::Quality: return kQuality;
         case Command::Soak: return kSoak;
+        case Command::Demo: return kDemo;
         case Command::None:
         case Command::Help:
         case Command::Version: break;
@@ -230,6 +233,8 @@ Command commandFromName (const std::string& name)
         return Command::Params;
     if (n == "presets")
         return Command::Presets;
+    if (n == "demo")
+        return Command::Demo;
     if (n == "help" || n == "--help" || n == "-h")
         return Command::Help;
     if (n == "version" || n == "--version" || n == "-v")
@@ -382,6 +387,7 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
                 error = "--format expects f32, pcm24 or pcm16, got '" + value + "'";
                 return false;
             }
+            o.demoFormatSet = true;
             return true;
         }
 
@@ -448,6 +454,16 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
         {
             double d = 0.0;
             const double scale = spec.id == Opt::Minutes ? 60.0 : 1.0;
+            if (o.command == Command::Demo) // the length of each built-in demo programme
+            {
+                if (! parseNumber (v, d) || d < 0.5 || d > 120.0)
+                {
+                    error = "--seconds expects a programme length from 0.5 to 120 s, got '" + value + "'";
+                    return false;
+                }
+                o.demoSeconds = d;
+                return true;
+            }
             if (! parseNumber (v, d) || d * scale < 0.1 || d * scale > 7.0 * 24.0 * 3600.0)
             {
                 error = std::string (spec.longName) + " expects a duration from 0.1 s to 7 days, got '" + value + "'";
@@ -722,7 +738,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
     out.command = commandFromName (args[0]);
     if (out.command == Command::None)
     {
-        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, quality, soak, params, presets, help)";
+        error = "unknown command '" + args[0] + "' (commands: process, batch, analyze, quality, soak, params, presets, demo, help)";
         return false;
     }
     if (out.command == Command::Help)
@@ -810,8 +826,8 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
     // Friendly positional form: `analyze song.wav`, `process in.wav out.wav`.
     for (const auto& p : positional)
     {
-        const bool takesOutput = (mask & kRender) != 0;
-        if (out.input.empty() && (mask & (kRender | kAnalyze)) != 0)
+        const bool takesOutput = (mask & (kRender | kDemo)) != 0;
+        if (out.input.empty() && (mask & (kRender | kAnalyze | kDemo)) != 0)
             out.input = p;
         else if (out.output.empty() && takesOutput)
             out.output = p;
@@ -844,6 +860,7 @@ bool parseCommandLine (const std::vector<std::string>& args, CliOptions& out, st
         case Command::Soak:
         case Command::Params:
         case Command::Presets:
+        case Command::Demo:
         case Command::None:
         case Command::Help:
         case Command::Version: break;

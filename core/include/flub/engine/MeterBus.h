@@ -97,6 +97,12 @@ struct MeterBus
     // setOnboardEnhancementCap): true while it caps Footsteps / Detail and
     // holds the virtualiser off, including its glide in and out.
     std::atomic<bool> onboardCapActive { false };
+
+    // Surround folds (docs/11 E28a): the virtualiser's level-match make-up
+    // (dB, 0 while it does not run) and the deepest fold-headroom gain of
+    // the block (dB <= 0: the virtualiser's or the BS.775 fold's, whichever
+    // ran; 0 on a stereo strip or below 0 dBFS).
+    std::atomic<float> virtMakeupDb { 0.0f }, foldHeadroomDb { 0.0f };
 };
 
 struct AnalyzerTaps
