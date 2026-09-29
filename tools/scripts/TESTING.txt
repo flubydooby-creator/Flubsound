@@ -14,15 +14,34 @@ Contents
   Plug-ins/AU                  (macOS only) Audio Unit version
   Plug-ins/Standalone          the plug-in as a small standalone app
 
+Installing
+----------
+  Windows: two ways, both in the Flubsound-windows download:
+           - FlubsoundPro-Setup-<version>.exe installs the app into
+             Program Files, the VST3 plug-in into
+             C:\Program Files\Common Files\VST3, a Start menu entry and an
+             uninstaller (Settings > Apps > Flubsound Pro > Uninstall; your
+             settings and presets in %APPDATA%\Flubsound are kept).
+           - or run "Flubsound Pro.exe" straight from the Flubsound-windows
+             folder, nothing installed.
+  macOS:   open Flubsound-macos.dmg and drag Flubsound Pro onto
+           Applications (Flubsound-macos.zip has the same files). Plug-ins:
+           copy Plug-ins/VST3/Flubsound FX.vst3 to
+           ~/Library/Audio/Plug-Ins/VST3 and Plug-ins/AU/Flubsound FX.component
+           to ~/Library/Audio/Plug-Ins/Components.
+  Linux:   tar -xzf Flubsound-linux.tar.gz; cd Flubsound-linux; then either
+           run "./Flubsound Pro", or ./install.sh to install it for your user
+           (a menu entry, ~/.local/bin/flubsound-pro, the VST3 in ~/.vst3;
+           ./install.sh --uninstall removes it). Needs PipeWire or
+           PulseAudio, ALSA and X11 or XWayland.
+
 Opening an unsigned build
 -------------------------
-  Windows: SmartScreen says "Windows protected your PC" -> More info ->
-           Run anyway.
+  Windows: SmartScreen says "Windows protected your PC" (for the installer
+           and the app) -> More info -> Run anyway.
   macOS:   right-click the app -> Open -> Open (first launch only). If macOS
            says it is damaged, run in Terminal:
-               xattr -dr com.apple.quarantine "Flubsound Pro.app"
-  Linux:   tar -xzf Flubsound-linux.tar.gz; then run "./Flubsound Pro".
-           Needs PipeWire or PulseAudio, ALSA and X11 or XWayland.
+               xattr -dr com.apple.quarantine "/Applications/Flubsound Pro.app"
 
 Getting sound into Flubsound
 ----------------------------
@@ -51,6 +70,18 @@ Settings > Audio, which shows "<your device>  -  Turtle Beach Stealth series"
 (or the matching series) and the safety ceiling. A profile caps the output
 level for the headset and may suggest a preset; if it says "generic device",
 tell us the exact device name Windows / macOS shows.
+
+Reporting a problem
+-------------------
+Flubsound keeps a log (device changes, errors, glitches and overloads; no
+audio) and writes a crash report if it crashes. Settings > Diagnostics >
+Export diagnostics saves both, with your settings and device details, as one
+zip: attach it to your report. Your home folder, login and computer name are
+replaced in it. Settings > Diagnostics also shows the Logs folder (next to
+your user presets) and opens it:
+  Windows: %APPDATA%\Flubsound\Logs
+  macOS:   ~/Library/Flubsound/Logs
+  Linux:   ~/.config/Flubsound/Logs
 
 Not in this build (needs hardware work first)
 ---------------------------------------------

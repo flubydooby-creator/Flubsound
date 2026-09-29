@@ -1,0 +1,66 @@
+name: Nightly
+
+# Long runs that do not fit in the per-commit CI (.github/workflows/ci.yml).
+# Scheduled runs use the default branch; "Run workflow" starts one by hand.
+on:
+  schedule:
+    - cron: "23 2 * * *" # 02:23 UTC every day
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Fuzzing time per target, in seconds"
+        default: "3600"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # docs/11 E53 step 1: the four libFuzzer targets of tests/fuzz (JSON,
+  # preset load + migration, saved strip / plug-in state and device profiles,
+  # ParametricEQ text) for 1 h each, in parallel, under ASan + UBSan. The
+  # corpus each target grows is kept in the Actions cache and seeds the next
+  # night, so coverage accumulates. A crash, sanitizer report or failed
+  # round-trip check fails the run and uploads the input; reproduce it with
+  # `build/tests/fuzz/<target> <file>` (tests/fuzz/run-fuzzers.sh).
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Clang 20 + libFuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-20 libclang-rt-20-dev
+      - name: Configure
+        env:
+          CC: clang-20
+          CXX: clang++-20
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_WARNINGS_AS_ERRORS=ON
+          -DFLUB_BUILD_FUZZERS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build --parallel --target fuzz_json fuzz_preset fuzz_state fuzz_eqtext
+      - name: Restore the corpus of earlier nights
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz-work/corpus-*
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Fuzz
+        run: tests/fuzz/run-fuzzers.sh build "${{ github.event.inputs.seconds || '3600' }}" fuzz-work
+      - name: Save the corpus
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz-work/corpus-*
+          key: fuzz-corpus-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: nightly-fuzz-findings
+          path: |
+            fuzz-work/*-crash-*
+            fuzz-work/*.log
+          retention-days: 30

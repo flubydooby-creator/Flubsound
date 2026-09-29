@@ -227,6 +227,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 ### D6. Driver signing & security features
 - **Symptom:** "driver blocked", or the install fails with Secure Boot / HVCI / Smart App Control.
 - **Solution:** EV code-signing certificate, Microsoft attestation signing via Partner Center (WHQL later for broad OEM trust), HVCI-compatible driver code (no executable pool allocations, no writable+executable sections), and installer checks with clear messages.
+- **Today:** there is no driver yet, and nothing is signed. CI builds an unsigned Inno Setup installer for the test builds (`installer/windows/FlubsoundPro.iss`, [11 E54](11-enhancement-report.md#e54)): the app into Program Files, the VST3 into `Common Files\VST3`, a Start menu entry and an uninstaller, so SmartScreen warns on the installer and on the app ("More info → Run anyway"). The app and the plug-in are linked with the static C++ runtime, so no Visual C++ Redistributable is needed.
 
 ### D7. Undocumented per-app routing API
 - **Symptom:** per-app assignment silently stops working after a Windows update.
@@ -239,6 +240,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
   - The HAL plug-in is installed by a signed, notarised `.pkg` into `/Library/Audio/Plug-Ins/HAL`, followed by a `coreaudiod` restart.
   - Universal binaries (arm64 + x86_64).
   - Process taps require macOS 14.2+; older systems fall back to the virtual device with manual routing.
+- **Today:** CI makes an unsigned, not notarised `.dmg` (and the same files as a `.zip`) with an Applications link to drag the app onto (`installer/macos/make-dmg.sh`, [11 E54](11-enhancement-report.md#e54)); Gatekeeper asks on the first start (right-click → Open). The ad-hoc signature changes with every build, so a TCC grant (microphone) is asked for again after each update until Developer ID signing exists.
 
 ### D9. Linux diversity
 - **Symptom:** high latency or xruns.
@@ -259,6 +261,7 @@ Engineering-process, product and safety pitfalls (E, F) follow the platform sect
 | Zipper noise | All continuous parameters are smoothed. Discrete changes (filter type, bypass) crossfade. Coefficients are updated at a 16-sample control rate using modulation-safe SVFs. |
 | Block-size dependence | Every module is tested for identical output with 1, 7, 64 and 512-sample blocks (control counters carry across blocks). |
 | Preset breakage between versions | String keys, versioned files, unknown keys ignored, missing keys defaulted, choices stored as labels. |
+| Field problems that cannot be diagnosed | A rotating log in the user data folder (`Logs/flubsound.log`, 512 KB × 3; no audio, home folder / login / computer names redacted), fed from the message thread only: a 2 Hz poll of the counters the audio thread already keeps in atomics (glitches, safety clips, NaN / Inf drops, overloads) and the device's opens, changes and errors; nothing logs on the audio thread. A crash writes a report into the same folder (POSIX signal handlers on an alternate stack that only use async-signal-safe calls; on Windows an unhandled-exception filter with a minidump); *Settings › Diagnostics › Export diagnostics* zips it all for a report ([11 E54](11-enhancement-report.md#e54), `app/Source/diagnostics/`). |
 | Flaky "golden file" audio tests | Property-based assertions instead: response matches the analytic curve, mono sum is preserved, ceiling holds, latency is exact, output is finite. Golden renders are planned only for regression diffs with tolerances (`07-roadmap.md` §7). |
 
 ---

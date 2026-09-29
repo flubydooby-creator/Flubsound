@@ -500,7 +500,9 @@ void writeReport (int sig, const siginfo_t* info) noexcept
         if (info != nullptr)
             w.str (", code ").sdec (info->si_code);
         w.str ("\n");
-        if (info != nullptr && sig != SIGABRT)
+        if (info != nullptr && (info->si_code == SI_USER || info->si_code <= 0))
+            w.str ("Sent by: process ").dec (static_cast<unsigned long long> (info->si_pid)).str (" (kill / raise)\n");
+        else if (info != nullptr)
             w.str ("Fault address: ").address (info->si_addr).str ("\n");
         w.str ("Time: ").dec (now).str (" (Unix time, UTC)\n");
         w.str ("Process: ").dec (pid).str ("\n");

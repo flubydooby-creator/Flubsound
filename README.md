@@ -22,6 +22,20 @@
 
 ---
 
+## Installing a test build
+
+Every CI run of the `app` job uploads an unsigned test build per OS (Actions → the run → Artifacts). Start with the headset volume low. `TESTING.txt` inside each package has the details.
+
+| Artifact | What is in it | How to install |
+|---|---|---|
+| `Flubsound-windows` | `FlubsoundPro-Setup-<version>.exe` and the plain `Flubsound-windows` folder | Run the installer: the app goes into Program Files, the Flubsound FX VST3 into `C:\Program Files\Common Files\VST3`, with a Start menu entry and an uninstaller (Settings › Apps). Or start `Flubsound Pro.exe` from the folder. SmartScreen warns (More info → Run anyway) |
+| `Flubsound-macos` | `Flubsound-macos.dmg` and `Flubsound-macos.zip` (the same files) | Open the `.dmg` and drag Flubsound Pro onto Applications; copy the plug-ins from `Plug-ins/` to `~/Library/Audio/Plug-Ins/VST3` and `/Components`. First start: right-click → Open |
+| `Flubsound-linux` | `Flubsound-linux.tar.gz` | Unpack, then run `./Flubsound Pro`, or `./install.sh` for a menu entry, `~/.local/bin/flubsound-pro` and the VST3 in `~/.vst3` (`./install.sh --uninstall` removes them) |
+
+To report a problem, use *Settings › Diagnostics › Export diagnostics*: one zip with the log (device changes, errors, glitch and overload counts; no audio), any crash reports, the settings and the device details, with your home folder, login and computer name replaced.
+
+---
+
 ## Documentation (the nine design deliverables)
 
 | # | Document |
@@ -129,6 +143,7 @@ app/         JUCE desktop app — engine host, GUI, tray, hotkeys, platform serv
 plugin/      VST3 / AU / Standalone wrapper around the same ProcessingChain
 tools/       flubsound-cli — batch processing, export, loudness analysis; scripts/ (device-profile embedding, preset render diff, quality report)
 platform/    virtual-device designs & scripts (Windows WaveRT driver design, macOS HAL design, Linux PipeWire sinks)
+installer/   test-build packaging: Windows Inno Setup script, macOS .dmg script, Linux menu entry and install.sh
 presets/     factory presets (JSON) — Music, Gaming, Device
 docs/        the design deliverables
 ```

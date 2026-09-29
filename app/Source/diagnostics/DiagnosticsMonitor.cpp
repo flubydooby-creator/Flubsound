@@ -123,24 +123,8 @@ juce::StringArray EventLogBuilder::update (const EngineSnapshot& now, juce::uint
         return lines;
     }
 
-    // Device events at once. A pending counter line goes first, so the
-    // counts stay with the device they happened on.
-    if (! sameDevice (previous, now))
-    {
-        if (pending.any())
-            lines.addArray (flush (nowMs));
-        if (! now.deviceOpen)
-            lines.add ("Audio device closed");
-        else
-            lines.add (juce::String (previous.deviceOpen ? "Audio device changed: " : "Audio device opened: ") + describeDevice (now));
-    }
-    if (now.deviceError != previous.deviceError)
-        lines.add (now.deviceError.isNotEmpty() ? "Audio device error: " + now.deviceError : juce::String ("Audio device error cleared"));
-    if (now.overloaded != previous.overloaded)
-        lines.add (now.overloaded ? "CPU overload started (episode " + juce::String (static_cast<juce::int64> (now.overloadEpisodes)) + " this session)"
-                                  : juce::String ("CPU overload ended"));
-
-    // Counters: sum what grew; a changed strip list starts a new baseline.
+    // Counters: sum what grew since the previous poll. A changed strip list
+    // (new engine) writes what is pending and starts a new baseline.
     if (! pending.any())
         pendingSinceMs = nowMs;
     pending.glitches += grown (static_cast<uint64_t> (juce::jmax (0, previous.glitches)), static_cast<uint64_t> (juce::jmax (0, now.glitches)));
@@ -156,12 +140,28 @@ juce::StringArray EventLogBuilder::update (const EngineSnapshot& now, juce::uint
     }
     else
     {
-        if (pending.any())
-            lines.addArray (flush (nowMs));
+        lines.addArray (flush (nowMs));
         pending.strips.assign (now.strips.size(), {});
         for (size_t i = 0; i < now.strips.size(); ++i)
             pending.strips[i].name = now.strips[i].name;
     }
+
+    // Device events at once, after the counts of the device they happened on.
+    if (! sameDevice (previous, now))
+    {
+        lines.addArray (flush (nowMs));
+        if (! now.deviceOpen)
+            lines.add ("Audio device closed");
+        else
+            lines.add (juce::String (previous.deviceOpen ? "Audio device changed: " : "Audio device opened: ") + describeDevice (now));
+    }
+    if (now.deviceError != previous.deviceError)
+        lines.add (now.deviceError.isNotEmpty() ? "Audio device error: " + now.deviceError : juce::String ("Audio device error cleared"));
+    if (now.overloaded != previous.overloaded)
+        lines.add (now.overloaded ? "CPU overload started (episode " + juce::String (static_cast<juce::int64> (now.overloadEpisodes)) + " this session)"
+                                  : juce::String ("CPU overload ended"));
+
+    // The first counts at once, later ones at most once per interval.
     if (pending.any() && (! counterLineWritten || nowMs - lastCounterLineMs >= interval))
         lines.addArray (flush (nowMs));
 

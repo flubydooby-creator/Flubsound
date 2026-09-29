@@ -22,7 +22,7 @@
 #include "engine/EngineController.h"
 #include "ui/SettingsDialog.h"
 
-#include <csignal>
+#include <cstdint>
 #include <stdexcept>
 
 #if ! JUCE_WINDOWS
@@ -164,12 +164,11 @@ TEST_CASE ("App diagnostics: engine events are logged at once, glitch and safety
     s.overloaded = false;
     s.inputName = "CABLE Output";
     lines = builder.update (s, 13000);
-    REQUIRE (lines.size() == 3);
-    CHECK (lines[0].startsWith ("Audio device changed: ALSA / Headphones, in: CABLE Output"));
-    CHECK (lines[1] == "CPU overload ended");
-    CHECK (lines[2].endsWith ("s: 2 glitches (xruns or late callbacks)"));
+    CHECK (lines
+           == juce::StringArray ({ "Last 2 s: 2 glitches (xruns or late callbacks)",
+                                   "Audio device changed: ALSA / Headphones, in: CABLE Output, 48000 Hz, 256 samples", "CPU overload ended" }));
     s.glitches = 1;
-    CHECK (builder.update (s, 30000) == juce::StringArray { "Last 1 s: 1 glitch (xrun or late callback)" });
+    CHECK (builder.update (s, 30000) == juce::StringArray { "Last 17 s: 1 glitch (xrun or late callback)" });
     s.strips[0].safetyClips = 7; // 2 -> 7
     s.deviceOpen = false;
     lines = builder.update (s, 30500);
@@ -211,7 +210,10 @@ TEST_CASE ("App diagnostics: a crash writes a report with the signal, the stack 
             // Only async-signal-safe calls before the crash (the parent has threads).
             diagnostics::crash::arm();
             if (how == 0)
-                std::raise (SIGSEGV);
+            {
+                volatile uintptr_t address = 0x10;
+                *reinterpret_cast<volatile int*> (address) = 1; // a real invalid write
+            }
             try
             {
                 throw std::runtime_error ("diagnostics test");
@@ -232,8 +234,8 @@ TEST_CASE ("App diagnostics: a crash writes a report with the signal, the stack 
     REQUIRE (reports.size() == 1);
     auto text = reports[0].loadFileAsString();
     CHECK (text.startsWith ("Flubsound Pro crash report\n\nFlubsound Pro test header\nOS: test\n"));
-    CHECK (text.contains ("Signal: 11 SIGSEGV") || text.contains ("SIGSEGV (invalid memory access)"));
-    CHECK (text.contains ("Fault address: 0x"));
+    CHECK (text.contains ("SIGSEGV (invalid memory access)") || text.contains ("SIGBUS (bus error)"));
+    CHECK (text.contains ("Fault address: 0x0000000000000010\n"));
     CHECK (text.contains ("Stack of the crashing thread (innermost first):\n"));
     CHECK (text.contains ("flub_app_tests")); // backtrace_symbols_fd names the module
    #if JUCE_LINUX
@@ -248,6 +250,7 @@ TEST_CASE ("App diagnostics: a crash writes a report with the signal, the stack 
     text = reports[0].loadFileAsString();
     CHECK (text.contains ("SIGABRT (abort)"));
     CHECK (text.contains ("Reason: uncaught exception: diagnostics test"));
+    CHECK (text.contains ("Sent by: process ")); // abort() raises the signal itself
     CHECK (! text.contains ("Fault address"));
     std::cerr << "    " << reports.size() << " reports, the last " << text.length() << " characters\n";
 
@@ -360,7 +363,16 @@ TEST_CASE ("App diagnostics: Settings > Diagnostics exports one zip with system 
     ui::SettingsDialog settings (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
     settings.setSize (ui::SettingsDialog::kMinWidth, ui::SettingsDialog::kMinHeight);
     settings.showPage (ui::SettingsDialog::Page::Diagnostics);
-    juce::Image image (juce::Image::ARGB, 200, 200, true);
-    juce::Graphics g (image);
-    settings.paintEntireComponent (g, false);
+    const auto image = settings.createComponentSnapshot (settings.getLocalBounds(), true, 1.0f);
+    CHECK (image.isValid());
+    // FLUB_APP_TEST_SNAPSHOT_DIR=<dir>: also write the page as a PNG to look at.
+    if (const auto dir = juce::SystemStats::getEnvironmentVariable ("FLUB_APP_TEST_SNAPSHOT_DIR", {}); dir.isNotEmpty())
+    {
+        const auto file = juce::File::getCurrentWorkingDirectory().getChildFile (dir).getChildFile ("settings-diagnostics.png");
+        file.getParentDirectory().createDirectory();
+        file.deleteFile();
+        juce::FileOutputStream out (file);
+        juce::PNGImageFormat png;
+        CHECK (out.openedOk() && png.writeImageToStream (image, out));
+    }
 }
