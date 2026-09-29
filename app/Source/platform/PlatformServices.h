@@ -709,4 +709,206 @@ public:
 
 inline std::unique_ptr<NativeAudioNode> NativeAudioNode::create() { return std::make_unique<UnsupportedNativeAudioNode>(); }
 #endif
+
+// ---------------------------------------------------------------------------
+/** docs/11 E51: what an output endpoint is physically (Windows
+    PKEY_AudioEndpoint_FormFactor). The device selection plays the safe
+    speaker profile on an unplanned fallback to anything but headphones. */
+enum class EndpointFormFactor : uint8_t
+{
+    Unknown = 0,
+    Speakers,
+    Headphones,
+    Headset,
+    LineLevel,
+    Digital, // S/PDIF
+    Hdmi,    // display audio
+    Other
+};
+
+/** docs/11 E51: one active output endpoint with what identifies it again
+    after it went away and came back. */
+struct OutputEndpointIdentity
+{
+    std::string id;         // the OS's endpoint id (Windows: the IMMDevice id). Stable while the device stays on its
+                            // port and across renames; a USB device without a serial number gets a new one on another port
+    std::string name;       // its friendly name ("Speakers (2- Stealth 700 Gen 2)"), as JUCE's WASAPI type names it
+    std::string hardwareId; // bus, vendor and product ("USB\\VID_10F5&PID_0210&MI_00"): the same on every port; empty when unknown
+    EndpointTransport transport = EndpointTransport::Unknown;
+    EndpointFormFactor formFactor = EndpointFormFactor::Unknown;
+    bool isDefault = false; // the system default (console) output
+
+    bool operator== (const OutputEndpointIdentity&) const = default;
+};
+
+/** docs/11 E51: a change of the audio devices or of the power state. */
+struct AudioDeviceEvent
+{
+    enum class Kind : uint8_t
+    {
+        DefaultOutputChanged, // the system default (console) output is now endpointId (empty: there is none)
+        DeviceAdded,
+        DeviceRemoved,
+        DeviceStateChanged,   // enabled, disabled, unplugged, plugged in (IMMNotificationClient::OnDeviceStateChanged)
+        Suspending,           // the system goes to sleep
+        Resumed               // the system woke up (the audio devices may take a moment to come back)
+    };
+
+    Kind kind = Kind::DeviceAdded;
+    std::string endpointId; // the endpoint concerned; empty for power events
+
+    bool operator== (const AudioDeviceEvent&) const = default;
+};
+
+/** docs/11 E51: event-driven device handling. The host lists the output
+    endpoints with their identities (to recognise its chosen output after a
+    re-plug, a rename or another USB port) and hears about hot-plug, default
+    device and sleep / resume changes the moment they happen, instead of
+    polling.
+      Windows : IMMDeviceEnumerator (active render endpoints, the default
+                first, JUCE's WASAPI order), PKEY_AudioEndpoint_FormFactor,
+                PKEY_Device_EnumeratorName, the adapter's device path through
+                IDeviceTopology (vendor / product ids); events through
+                IMMNotificationClient (eRender only) and
+                PowerRegisterSuspendResumeNotification (powrprof.dll, loaded at
+                run time).
+      others  : isSupported() == false, listOutputs() empty, start() false:
+                JUCE's own device-list notifications and the name-based
+                selection remain. */
+class AudioDeviceWatcher
+{
+public:
+    using Listener = std::function<void (const AudioDeviceEvent&)>;
+
+    virtual ~AudioDeviceWatcher() = default;
+    virtual bool isSupported() const = 0;
+
+    /** The active output endpoints, the system default first, then in the
+        OS's enumeration order. Blocking (COM calls, a few ms): the message
+        thread on a device event or a device start, never per block and never
+        from the listener. */
+    virtual std::vector<OutputEndpointIdentity> listOutputs() = 0;
+
+    /** Starts delivering events on the OS's notification threads. The
+        listener must only queue the event and return: no blocking, no call
+        back into the watcher or the OS audio APIs, no destruction of the
+        watcher. false when nothing can be watched. Idempotent. */
+    virtual bool start (Listener listener) = 0;
+
+    /** Stops the events; when it returns no listener call is running or
+        follows. Idempotent; the destructor calls it. */
+    virtual void stop() = 0;
+
+    // ---- Identity helpers (pure; PlatformServices_common.cpp) ------------------
+    /** How a remembered endpoint matches a present one. */
+    enum class Match : uint8_t
+    {
+        None,
+        Exact,    // the same endpoint id (also after a rename)
+        Hardware, // the same vendor / product and the same name without Windows' instance number: re-plugged elsewhere
+        Name      // the same name without the instance number (no hardware id on one side)
+    };
+
+    /** The friendly name without Windows' instance number, which a second
+        instance of the same USB device gets (on another port): "Speakers
+        (2- Stealth 700 Gen 2)" -> "Speakers (Stealth 700 Gen 2)", and without
+        JUCE's " (2)" duplicate number at the end. Case is kept. */
+    static std::string withoutInstanceNumber (const std::string& friendlyName);
+
+    /** remembered = what was saved (its id, name and hardware id; any may be
+        empty); candidate = a present endpoint. Names compare ignoring case.
+        Different non-empty hardware ids never match. */
+    static Match matchIdentity (const OutputEndpointIdentity& remembered, const OutputEndpointIdentity& candidate);
+
+    /** The index of the best match in `endpoints` (Exact over Hardware over
+        Name; the first of equals), -1 for none; `how` receives the match. */
+    static int findEndpoint (const std::vector<OutputEndpointIdentity>& endpoints, const OutputEndpointIdentity& remembered,
+                             Match* how = nullptr);
+
+    /** "USB\VID_10F5&PID_0210&MI_00" from an adapter's device path or
+        instance id ("{2}.\\?\usb#vid_10f5&pid_0210&mi_00#7&2b8e&0&0000#{...}",
+        "USB\VID_10F5&PID_0210&MI_00\7&2B8E..."), or "BTHENUM\<address>" style
+        for Bluetooth (the address is stable); empty when it names no vendor /
+        product. Upper case. */
+    static std::string hardwareIdFromDevicePath (const std::string& devicePath);
+
+    static std::unique_ptr<AudioDeviceWatcher> create();
+};
+
+// ---------------------------------------------------------------------------
+/** docs/11 E55: what the session enumeration needs to know about a process,
+    looked up once per process instead of once per pass. A game's process is
+    then opened (OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION) once for its
+    whole life, not every 2 s: anti-cheat drivers log handles to game
+    processes, and the open is needless work anyway.
+    Keyed by process id plus the session's instance identifier
+    (IAudioSessionControl2::GetSessionInstanceIdentifier, which names the
+    process and its session): a known key is served from the cache without
+    touching the process. A known pid with an unknown key (a new session, or
+    a new process that reuses the id) opens the process once and compares
+    its creation time: the same process keeps its entry, a new one is
+    resolved again. An entry whose pid had no session in a whole pass is
+    dropped (endPass). Not thread-safe (the router's enumeration). */
+class ProcessInfoCache
+{
+public:
+    struct Info
+    {
+        std::string executablePath; // absolute path of the image; empty when it could not be read
+        std::string executableName; // file name
+        std::string description;    // the file's FileDescription (the mixer's name for an app without a session name); empty = none
+        uint64_t startTime = 0;     // creation time (Windows FILETIME); 0 = unknown
+
+        bool operator== (const Info&) const = default;
+    };
+
+    /** Opens the process once and reads its image path and creation time
+        (false: it could not be opened). */
+    using ProcessQuery = std::function<bool (uint32_t processId, std::string& executablePath, uint64_t& startTime)>;
+    /** Reads the image file's description (file IO, no process handle). */
+    using DescriptionQuery = std::function<std::string (const std::string& executablePath)>;
+
+    ProcessInfoCache (ProcessQuery processQuery, DescriptionQuery descriptionQuery);
+
+    /** Starts an enumeration pass. */
+    void beginPass();
+    /** The process behind a session seen in this pass (sessionKey: its
+        instance identifier; empty = unknown, which opens the process on every
+        pass). */
+    const Info& lookup (uint32_t processId, const std::string& sessionKey);
+    /** Ends the pass: drops every process that had no session in it. */
+    void endPass();
+
+    /** Process opens (ProcessQuery calls) so far. */
+    uint64_t getProcessOpens() const noexcept { return processOpens; }
+    size_t size() const noexcept { return entries.size(); }
+
+private:
+    struct Entry
+    {
+        Info info;
+        std::vector<std::string> sessionKeys; // instance identifiers already seen for this process
+        bool seen = false;                    // in the current pass
+    };
+
+    Info resolve (uint32_t processId, const std::string& path, uint64_t startTime);
+
+    ProcessQuery processQuery;
+    DescriptionQuery descriptionQuery;
+    std::vector<std::pair<uint32_t, Entry>> entries;
+    uint64_t processOpens = 0;
+    Info empty;
+};
+
+/** docs/11 E55: anti-cheat services whose presence can switch Tournament
+    mode on by itself. Windows: the services control manager (vgc for
+    Vanguard, BEService for BattlEye, EasyAntiCheat / EasyAntiCheat_EOS,
+    FACEITService, ESEADriver2); a service counts while it runs. Elsewhere:
+    none. Blocking (SCM queries, well under 10 ms): message thread, at most
+    every few seconds. */
+struct AntiCheatServices
+{
+    /** The service names that run now (from the list above). */
+    static std::vector<std::string> running();
+};
 } // namespace flub::platform

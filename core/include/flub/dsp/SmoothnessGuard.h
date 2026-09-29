@@ -46,6 +46,31 @@
 //   response; G >= kMinGainDb, which reaches about 10 dB, hence kMaxCutDb);
 //   the control tick interpolates it.
 //   Linked over the channels: the image does not move.
+//   After the stage (docs/11 E07 batch 2): the spatializer, the compressor
+//   and the maximizer still follow, and a limiter ducks a loud vowel more
+//   than the quieter "s" beside it (sibilance over voice +0.6 dB at Music
+//   Boost 100 + Clarity 100); the upward compressor and the inverse-level
+//   lifts ahead of the stage lift the body under an "s" more than the
+//   vowel. A stage that compares with the body under the "s" cannot see
+//   either. So when the chain hands it its output (processDownstream(), the
+//   same samples after the slots that follow, before the output gain) the
+//   "s" is held to the programme's body lift at the output instead:
+//     lift_h = 10 log10 (P_h / R_h)          the sibilant band's lift here
+//     g_down = 10 log10 (Q_out / Q_stage)    what the slots after the stage do
+//                                            to that band now (the stage's
+//                                            output, delayed by their latency,
+//                                            against the chain's output;
+//                                            kDetectorMs one-poles)
+//     lift_b = 10 log10 (O_b / R_b,long)     the body's lift at the output
+//                                            over kBodyLongMs (power weighted,
+//                                            so the loud vowels set it)
+//     excess = min (ratio_x - threshold, lift_h + g_down - lift_b)
+//   So an "s" leaves the chain lifted as much as the voice around it, what
+//   the maximizer does to either included; with nothing before or after the
+//   stage that depends on level both rules agree. g_down is measured up to
+//   the end of the previous segment (the chain's segments end on its 10 ms
+//   grid). Without an output (the stage on its own), or while either
+//   long-term body is under -100 dB, the rule above applies.
 //   Music: threshold 0 dB, maxCut 9 dB. Gaming gets a light guard
 //   (docs/11 E07, risk P4: a gunshot or a step keeps its edge): threshold
 //   +3 dB, maxCut 6 dB. Below kMinSampleRate (hands-free links) the band has
@@ -64,7 +89,9 @@
 #include "flub/common/DelayLine.h"
 #include "flub/common/SmoothedValue.h"
 
+#include <algorithm>
 #include <array>
+#include <vector>
 
 namespace flub
 {
@@ -88,10 +115,15 @@ public:
     static constexpr int kTableSize = 19; // 0 .. kMaxCutDb
     static_assert (static_cast<int> (kMaxCutDb / kTableStepDb) + 1 == kTableSize);
     static constexpr int kControlInterval = 16;
+    static constexpr float kBodyLongMs = 300.0f;      // the output body's lift (the programme around an "s")
+    static constexpr float kDownstreamRangeDb = 30.0f; // |g_down| clamp
 
     /** Non-RT, before prepare(): the delay that aligns the reference with
         the stage's input (the latency of the slots in between). */
     void setReferenceDelay (int samples) noexcept { referenceDelay = samples; }
+    /** Non-RT, before prepare(): the latency of the slots between the stage
+        and the output processDownstream() sees. */
+    void setDownstreamDelay (int samples) noexcept { downstreamDelay = std::max (0, samples); }
 
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
@@ -104,6 +136,15 @@ public:
         processed without one is measured against silence (no cut). */
     void setReference (const AudioBlock& ref) noexcept FLUB_NONBLOCKING { reference = ref; hasReference = true; }
 
+    /** The chain's output for the samples the last process() call
+        processed (the same count, before the output gain; stereo): what the
+        slots after the stage made of them (see the header comment). Call it
+        once after every process(), or never. */
+    void processDownstream (const AudioBlock& out) noexcept FLUB_NONBLOCKING;
+    /** g_down (dB): what the slots after the stage do to the sibilant band
+        now; 0 without an output or a band to measure. */
+    float getDownstreamGainDb() const noexcept { return downstreamGainDb; }
+
     /** Deepest band cut applied during the last process() (dB <= 0: how
         far the 5 - 10 kHz band was lowered). */
     float getCutDb() const noexcept { return blockCutDb; }
@@ -115,7 +156,7 @@ private:
     void controlTick() noexcept FLUB_NONBLOCKING;
 
     double sr = 48000.0;
-    int referenceDelay = 0;
+    int referenceDelay = 0, downstreamDelay = 0;
     bool enabledForRate = true;
     SmoothnessParams params;
     SvfCoeffs band, bodyHp, bodyLp;
@@ -127,6 +168,17 @@ private:
     bool hasReference = false;
     double powerCoeff = 0.0; // 1 - one-pole coefficient of the detectors
     double pBand = 0.0, pBody = 0.0, rBandPow = 0.0, rBodyPow = 0.0;
+    // The output side (processDownstream): the stage's own output band,
+    // its power per sample kept for the downstream latency, and the
+    // chain's output band and body.
+    std::array<SvfState, kMaxChannels> yBand {}, oBand {};
+    std::array<std::array<SvfState, 2>, kMaxChannels> oBody {};
+    std::vector<float> stagePower; // ring: the stage output's band power per sample
+    int stageWrite = 0, lastBlock = 0;
+    bool hasDownstream = false;
+    double longCoeff = 0.0; // 1 - one-pole coefficient over kBodyLongMs
+    double qStage = 0.0, qOut = 0.0, oBodyLong = 0.0, rBodyLong = 0.0;
+    float downstreamGainDb = 0.0f;
     OnePoleSmoother amount;    // control rate
     GainSmoother cut;          // dB, control rate
     std::array<float, kTableSize> gainTable {};           // G per band cut (prepare)

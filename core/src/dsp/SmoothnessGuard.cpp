@@ -51,7 +51,9 @@ void SmoothnessGuard::prepare (const ProcessSpec& spec)
     }
     gainTable[0] = 1.0f;
     refDelay.prepare (spec.numChannels, referenceDelay);
+    stagePower.assign (static_cast<size_t> (std::max (1, spec.maxBlockSize) + downstreamDelay + 1), 0.0f);
     powerCoeff = 1.0 - static_cast<double> (onePoleCoeff (kDetectorMs, sr));
+    longCoeff = 1.0 - static_cast<double> (onePoleCoeff (kBodyLongMs, sr));
     const double controlRate = sr / kControlInterval;
     amount.reset (controlRate, kParamSmoothMs, params.amount);
     cut.prepare (controlRate, kAttackMs, kReleaseMs, false);
@@ -60,15 +62,20 @@ void SmoothnessGuard::prepare (const ProcessSpec& spec)
 
 void SmoothnessGuard::reset() noexcept FLUB_NONBLOCKING
 {
-    for (auto* states : { &xBand, &rBand })
+    for (auto* states : { &xBand, &rBand, &yBand, &oBand })
         for (auto& s : *states)
             s.reset();
-    for (auto* states : { &xBody, &rBody })
+    for (auto* states : { &xBody, &rBody, &oBody })
         for (auto& channel : *states)
             for (auto& s : channel)
                 s.reset();
     refDelay.reset();
     pBand = pBody = rBandPow = rBodyPow = 0.0;
+    std::fill (stagePower.begin(), stagePower.end(), 0.0f);
+    stageWrite = lastBlock = 0;
+    hasDownstream = false;
+    qStage = qOut = oBodyLong = rBodyLong = 0.0;
+    downstreamGainDb = 0.0f;
     amount.setImmediate (amount.getTarget());
     cut.reset (0.0f);
     gainStart = gain = 1.0f;
@@ -105,7 +112,15 @@ void SmoothnessGuard::controlTick() noexcept FLUB_NONBLOCKING
         const float ratioR = static_cast<float> (10.0 * std::log10 ((rBandPow + tiny) / (rBodyPow + tiny)));
         const float threshold = params.gaming ? kGamingThresholdDb : kThresholdDb;
         const float maxCut = params.gaming ? kGamingMaxCutDb : kMaxCutDb;
-        targetDb = -std::min (maxCut, a * std::max (0.0f, ratioX - std::max (ratioR, threshold)));
+        float excess = ratioX - std::max (ratioR, threshold);
+        if (hasDownstream && oBodyLong > kSilencePower && rBodyLong > kSilencePower)
+        {
+            // Held to the programme's body lift at the output (header comment).
+            const float liftH = static_cast<float> (10.0 * std::log10 ((pBand + tiny) / (rBandPow + tiny)));
+            const float liftB = static_cast<float> (10.0 * std::log10 (oBodyLong / rBodyLong));
+            excess = std::min (ratioX - threshold, liftH + downstreamGainDb - liftB);
+        }
+        targetDb = -std::min (maxCut, a * std::max (0.0f, excess));
     }
     cutDb = cut.process (targetDb);
     if (targetDb == 0.0f && cutDb > -kSettledDb)
@@ -146,11 +161,12 @@ void SmoothnessGuard::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
             refDelay.advance();
         rBandPow += powerCoeff * (rh - rBandPow);
         rBodyPow += powerCoeff * (rb - rBodyPow);
+        rBodyLong += longCoeff * (rb - rBodyLong);
 
         // Input: detectors, and the cut on its sibilant band (the same band-pass).
         gain = gainStart + gainStep * static_cast<float> (controlPhase + 1);
         const float g1 = gain - 1.0f;
-        double xh = 0.0, xb = 0.0;
+        double xh = 0.0, xb = 0.0, yh = 0.0;
         for (int c = 0; c < nch; ++c)
         {
             float* d = block.channel (c);
@@ -163,9 +179,15 @@ void SmoothnessGuard::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
             xb += static_cast<double> (b) * b;
             if (g1 != 0.0f)
                 d[i] += g1 * h;
+            float w1 = 0.0f, w2 = 0.0f;
+            svfTickRaw (band, yBand[static_cast<size_t> (c)], d[i], w1, w2);
+            yh += static_cast<double> (bandK * w1) * (bandK * w1);
         }
         pBand += powerCoeff * (xh - pBand);
         pBody += powerCoeff * (xb - pBody);
+        stagePower[static_cast<size_t> (stageWrite)] = static_cast<float> (yh);
+        if (++stageWrite == static_cast<int> (stagePower.size()))
+            stageWrite = 0;
         deepest = std::min (deepest, cutDb);
 
         ++controlPhase;
@@ -177,5 +199,45 @@ void SmoothnessGuard::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         }
     }
     blockCutDb = deepest;
+    lastBlock = n;
+}
+
+void SmoothnessGuard::processDownstream (const AudioBlock& out) noexcept FLUB_NONBLOCKING
+{
+    const int size = static_cast<int> (stagePower.size());
+    const int n = std::min ({ out.numSamples, lastBlock, size - 1 - downstreamDelay });
+    const int nch = std::min (out.numChannels, 2);
+    lastBlock = 0;
+    if (n <= 0 || nch <= 0 || ! enabledForRate)
+        return;
+    // The stage's output for these samples was written in the last
+    // process(); the output's sample i is its sample i - downstreamDelay.
+    int read = stageWrite - n - downstreamDelay;
+    while (read < 0)
+        read += size;
+    for (int i = 0; i < n; ++i)
+    {
+        double oh = 0.0, ob = 0.0;
+        for (int c = 0; c < nch; ++c)
+        {
+            const float x = out.channel (c)[i];
+            float v1 = 0.0f, v2 = 0.0f;
+            svfTickRaw (band, oBand[static_cast<size_t> (c)], x, v1, v2);
+            const float h = bandK * v1;
+            auto& ob2 = oBody[static_cast<size_t> (c)];
+            const float b = svfTick (bodyLp, ob2[1], svfTick (bodyHp, ob2[0], x));
+            oh += static_cast<double> (h) * h;
+            ob += static_cast<double> (b) * b;
+        }
+        qStage += powerCoeff * (static_cast<double> (stagePower[static_cast<size_t> (read)]) - qStage);
+        qOut += powerCoeff * (oh - qOut);
+        oBodyLong += longCoeff * (ob - oBodyLong);
+        if (++read == size)
+            read = 0;
+    }
+    hasDownstream = true;
+    downstreamGainDb = qStage > kSilencePower && qOut > kSilencePower
+                           ? std::clamp (static_cast<float> (10.0 * std::log10 (qOut / qStage)), -kDownstreamRangeDb, kDownstreamRangeDb)
+                           : 0.0f;
 }
 } // namespace flub

@@ -452,6 +452,8 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     // input, delayed by the slots in between.
     smoothness.setReferenceDelay (slots[SDynEq].latencySamples() + slots[SBass].latencySamples() + slots[SClarity].latencySamples()
                                   + slots[SSat].latencySamples());
+    // ... and follows the chain's output, one slot latency per slot after it.
+    smoothness.setDownstreamDelay (slots[SSpatial].latencySamples() + slots[SComp].latencySamples() + slots[SMax].latencySamples());
     slots[SSmooth].prepare (smoothness, stereo, 20.0f, e[SmoothAmount] > 0.0f);
     smoothReference.setSize (2, maxB);
     slots[SSpatial].prepare (spatial, stereo, 20.0f, on (e, SpatialOn));
@@ -1602,6 +1604,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     }
     // The loudness contour (docs/11 E32): untouched while it idles.
     contour.process (st);
+    bool smoothProcessed = false;
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
         {
@@ -1644,7 +1647,10 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
             if (s == SDynEq && smoothRunning)
                 smoothReference.block (2, n).copyFrom (st);
             if (s == SSmooth && smoothRunning)
+            {
                 smoothness.setReference (smoothReference.block (2, n));
+                smoothProcessed = true;
+            }
             slots[static_cast<size_t> (s)].process (st);
             if (s == SComp)
                 startleGuard.apply (st);
@@ -1662,6 +1668,10 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
 
     if (spanRunning)
         protectionTap (st, kNumSlots, contaminated); // the governor's drive span output and PLR (docs/11 E06)
+    // The Smoothness stage follows what the slots after it made of its
+    // output (docs/11 E07 batch 2), before the output gain.
+    if (smoothProcessed)
+        smoothness.processDownstream (st);
 
     // ---- 5. Output gain ----
     const float o0 = outputGain.getCurrent();
