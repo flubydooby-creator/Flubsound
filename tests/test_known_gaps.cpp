@@ -54,7 +54,9 @@
 //     stand-in at Music Boost 100 + Clarity 100 with and without Smoothness;
 //     the Gaming full stack's 2-5 kHz tilt at protection strength Off and
 //     Normal (closed at Normal by the tonal-balance rule); presence at -45
-//     against -12 dBFS
+//     against -12 dBFS (closed by clarity.presenceMode Relative, E07 step
+//     3; Absolute, the default, pinned), and E59's presence-invariance row
+//     over 30 dB
 //
 // Every test prints its measured values ("    measured ...") so a tuning
 // session reads the numbers from one run of `flub_tests KnownGap`. The last
@@ -2361,7 +2363,7 @@ TEST_CASE ("KnownGap closed at protection strength Normal: Gaming full stack on 
     CHECK_LE (harsh[1], 2.0);
 }
 
-TEST_CASE ("KnownGap: presence against programme level - pink at -45 and -12 dBFS: clarity.presence 1 lifts 5.2 dB more at -45; Music Boost 100 + Clarity 100 at protection strength Normal within 3.2 dB (6.7 at Off) (E07)")
+TEST_CASE ("KnownGap: presence against programme level, clarity.presenceMode Absolute (the default) - pink at -45 and -12 dBFS: clarity.presence 1 lifts 5.2 dB more at -45; Music Boost 100 + Clarity 100 at protection strength Normal within 3.2 dB (6.7 at Off) (E07)")
 {
     // 2.5-4 kHz lift of pink. (a) clarity.presence 1 as a base value,
     // maximizer off (the report's measure), 3 s, over 1..3 s: the Clarity
@@ -2394,14 +2396,105 @@ TEST_CASE ("KnownGap: presence against programme level - pink at -45 and -12 dBF
     measured ("clarity.presence 1: 2.5-4 kHz lift at -45 minus at -12 dBFS", baseSpread, "dB");
     measured ("Music Boost 100 + Clarity 100, Off: relative presence lift at -45 minus at -12 dBFS", off, "dB");
     measured ("Music Boost 100 + Clarity 100, Normal: relative presence lift at -45 minus at -12 dBFS", normal, "dB");
-    // KNOWN_GAP: target within 1.5 dB per docs/11 E07 Done-when; needs the
-    // level-relative presence (approach step 3, ClarityEnhancer.cpp). The
-    // tonal-balance rule at Normal takes the quiet programme's lift down to
-    // its budget.
+    // KNOWN_GAP in Absolute, the default: target within 1.5 dB per docs/11
+    // E07 Done-when, met by clarity.presenceMode Relative (approach step 3;
+    // the next case). Making Relative the default re-voices every preset
+    // that lifts presence: an owner decision. The tonal-balance rule at
+    // Normal takes the quiet programme's lift down to its budget.
     CHECK_NEAR (baseSpread, 5.2, 0.2);
     CHECK_NEAR (off, 6.67, 0.3);
     CHECK_NEAR (normal, 3.2, 0.3);
     CHECK_LE (normal, off - 2.5);
+}
+
+namespace
+{
+/** docs/11 E07 / E59 presence invariance: the 2.5 - 4 kHz lift of pink at
+    `quietDb` minus at `loudDb` (dBFS RMS), over the lift of 200 Hz - 1 kHz
+    when `relative`; `seconds` of programme, read over its last 2 s (3 s
+    once the tonal rule runs, which settles in about 6 s). */
+double presenceSpreadDb (const std::vector<float>& values, ProtectionStrength s, float quietDb, float loudDb, double seconds, bool relative)
+{
+    static const auto pink = pinkNoise (samplesOf (10.0), 1.0f, 55);
+    const auto lift = [&] (float levelDb) {
+        const int n = samplesOf (seconds), a = samplesOf (seconds - (seconds < 5.0 ? 2.0 : 3.0));
+        std::vector<float> x (pink.begin(), pink.begin() + n);
+        for (auto& v : x)
+            v *= std::pow (10.0f, levelDb / 20.0f);
+        const auto out = renderAtStrength (stereoOf (x), values, s);
+        const auto band = [&] (double lo, double hi) {
+            return powerDb (fftBandPowerOver (out[0], a, n, lo, hi)) - powerDb (fftBandPowerOver (x, a, n, lo, hi));
+        };
+        return band (2500.0, 4000.0) - (relative ? band (200.0, 1000.0) : 0.0);
+    };
+    return lift (quietDb) - lift (loudDb);
+}
+
+std::vector<float> relativePresence (std::vector<float> values)
+{
+    setValue (values, ClarityPresenceMode, static_cast<float> (PresenceModeValue::Relative));
+    return values;
+}
+} // namespace
+
+TEST_CASE ("KnownGap closed with clarity.presenceMode Relative: presence against programme level - pink at -45 and -12 dBFS within 1.5 dB for clarity.presence 1 and for Music Boost 100 + Clarity 100 at protection strength Normal (E07 step 3)")
+{
+    // The Done-when rows of docs/11 E07 on the previous case's stimuli, with
+    // the presence read against the programme's own 200 Hz - 1 kHz body
+    // (ClarityEnhancer.cpp). (a) clarity.presence 1 as a base value,
+    // maximizer off, 3 s. (b) Music Boost 100 + Clarity 100, relative to the
+    // 200 Hz - 1 kHz lift, 10 s at Normal (Off for reference, 3 s).
+    auto base = resolve (RenderOptions {});
+    setValue (base, MaximizerOn, 0.0f);
+    setValue (base, ClarityPresence, 1.0f);
+    RenderOptions o = boosted (ModeValue::Music, 100.0f);
+    o.macros.push_back ({ "3", 100.0f });
+    const auto macros = relativePresence (resolve (o));
+    const double baseSpread = presenceSpreadDb (relativePresence (base), ProtectionStrength::Off, -45.0f, -12.0f, 3.0, false);
+    const double off = presenceSpreadDb (macros, ProtectionStrength::Off, -45.0f, -12.0f, 3.0, true);
+    const double normal = presenceSpreadDb (macros, ProtectionStrength::Normal, -45.0f, -12.0f, 10.0, true);
+    measured ("Relative, clarity.presence 1: 2.5-4 kHz lift at -45 minus at -12 dBFS", baseSpread, "dB");
+    measured ("Relative, Music Boost 100 + Clarity 100, Off: relative presence lift at -45 minus at -12 dBFS", off, "dB");
+    measured ("Relative, Music Boost 100 + Clarity 100, Normal: relative presence lift at -45 minus at -12 dBFS", normal, "dB");
+    // The Done-when rows (Absolute: 5.2 and 3.2 dB, the previous case).
+    CHECK_LE (std::abs (baseSpread), 1.5);
+    CHECK_LE (std::abs (normal), 1.5);
+    CHECK_LE (std::abs (off), std::abs (normal) + 1.0);
+}
+
+TEST_CASE ("Quality metric (E59): presence invariance over 30 dB - the 2.5-4 kHz lift over the 200 Hz - 1 kHz lift at -45 against -15 dBFS pink, Absolute against Relative presence, Music Boost 50 and Gaming Boost 100 + Voice & Score 100")
+{
+    // docs/11 E59's presence-invariance row: how much more a setting lifts
+    // the presence of quiet programme than of loud (0 = invariant). 3 s of
+    // pink, read over the last 2 s, protection strength Off (the default).
+    // The Absolute rows are pinned (the E07 KnownGap: the presence law's
+    // fixed threshold); the Relative rows are held to E07's 1.5 dB.
+    struct Setting
+    {
+        const char* name;
+        ModeValue mode;
+        float boost;
+        const char* macro;
+    };
+    const Setting settings[] = { { "Music Boost 50", ModeValue::Music, 50.0f, nullptr },
+                                 { "Gaming Boost 100 + Voice & Score 100", ModeValue::Gaming, 100.0f, "5" } };
+    double spread[2][2] = {};
+    for (size_t k = 0; k < std::size (settings); ++k)
+    {
+        RenderOptions o = boosted (settings[k].mode, settings[k].boost);
+        if (settings[k].macro != nullptr)
+            o.macros.push_back ({ settings[k].macro, 100.0f });
+        const auto values = resolve (o);
+        spread[k][0] = presenceSpreadDb (values, ProtectionStrength::Off, -45.0f, -15.0f, 3.0, true);
+        spread[k][1] = presenceSpreadDb (relativePresence (values), ProtectionStrength::Off, -45.0f, -15.0f, 3.0, true);
+        measured (std::string ("presence invariance, ") + settings[k].name + ", Absolute", spread[k][0], "dB");
+        measured (std::string ("presence invariance, ") + settings[k].name + ", Relative", spread[k][1], "dB");
+    }
+    for (size_t k = 0; k < std::size (settings); ++k)
+    {
+        CHECK_LE (std::abs (spread[k][1]), 1.5);
+        CHECK_GE (spread[k][0], spread[k][1] + 1.0);
+    }
 }
 
 TEST_CASE ("E07: the footstep cue lift survives Smoothness 100 and the tonal-balance rule - Gaming Footsteps 100 + Boost 100 steps under a bed at protection strength Normal (risk P4)")
