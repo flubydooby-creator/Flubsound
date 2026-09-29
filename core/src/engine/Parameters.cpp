@@ -246,6 +246,13 @@ std::vector<Info> buildLayout()
     set (BassSubsonicOrder, since5 (choice ("bass.subsonicOrder", "Subsonic Slope", "Bass", { "12 dB/oct", "24 dB/oct" }, 1)));
     set (BassSplitProtect, since5 (toggle ("bass.splitProtect", "Split-Band Protection", "Bass", false)));
 
+    // ---- Automatic preamp addition (layout version 5, docs/11 E11) -----------------------------
+    // With auto.preamp on, programme whose peaks already reach the ceiling
+    // (a hot master) also loses the allowance and the maximizer's drive
+    // instead of being limited (ProcessingChain.h). Off by default, so
+    // every preset and state saved before it sounds as it did.
+    set (AutoPreampHot, since5 (toggle ("auto.preampHot", "Preamp: Hot Programme", "Global", false)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

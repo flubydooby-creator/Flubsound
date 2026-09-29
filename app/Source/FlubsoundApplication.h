@@ -1,6 +1,9 @@
 // Flubsound Pro - the JUCEApplication: lifetime of every top-level object.
 //
 // Normal start-up:
+//   0. DiagnosticsSession (docs/11 E54): the rotating log in
+//      <user data>/Logs becomes juce::Logger's current logger and the crash
+//      handler is armed; engine events are logged once the controller exists
 //   1. SystemTuning::disablePowerThrottling() (Windows EcoQoS opt-out)
 //   2. EngineController (settings, device, engine, presets, routing)
 //   3. MainWindow (content: ui::MainComponent), shown unless "start minimised"
@@ -13,7 +16,7 @@
 // Headless mode: --screenshot <out.png> [--mode music|gaming] [--size WxH]
 // [--seconds S] [--scale F] [--device "output device name"] (see
 // shell/ScreenshotDriver.h). No device, no tray, no hotkeys, no settings are
-// written.
+// written, nothing is logged and no crash handler is installed.
 #pragma once
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -27,6 +30,10 @@ class MainWindow;
 class TrayIcon;
 class HotkeyManager;
 class ScreenshotDriver;
+namespace diagnostics
+{
+class DiagnosticsSession;
+}
 
 class FlubsoundApplication final : public juce::JUCEApplication
 {
@@ -51,6 +58,7 @@ private:
     bool initialiseScreenshot();
     void closeButtonPressed();
 
+    std::unique_ptr<diagnostics::DiagnosticsSession> diagnosticsSession; // first in, last out
     std::unique_ptr<juce::LookAndFeel_V4> lookAndFeel;
     std::unique_ptr<EngineController> controller;
     std::unique_ptr<MainWindow> mainWindow;

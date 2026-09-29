@@ -438,6 +438,14 @@ void AppRouting::stripLayoutChanged()
     refresh();
 }
 
+void AppRouting::setTournamentMode (bool shouldFreeze)
+{
+    if (tournament == shouldFreeze)
+        return;
+    tournament = shouldFreeze;
+    publishConfig(); // a new generation: a pass that was running when it froze is discarded
+}
+
 void AppRouting::refresh()
 {
     if (isStarted && ! isShutDown && isThreadRunning())
@@ -457,6 +465,7 @@ void AppRouting::publishConfig()
     c.active = isStarted && ! isShutDown && (liveUpdates || (! routes.empty() && c.method != Method::Disabled) || ! captures.empty());
     c.routes = routes;
     c.outputDevice = currentOutputDevice();
+    c.frozen = tournament;
     for (const auto& strip : host.getStripLayout())
     {
         const juce::String name (strip.name);
@@ -468,7 +477,7 @@ void AppRouting::publishConfig()
     // without the lock is safe. A pass computed from an older generation is
     // discarded (handleAsyncUpdate), so make sure a fresh one follows.
     const bool changed = c.method != config.method || ! sameRoutes (c.routes, config.routes) || c.stripNames != config.stripNames
-                         || c.stripEndpoints != config.stripEndpoints || c.outputDevice != config.outputDevice;
+                         || c.stripEndpoints != config.stripEndpoints || c.outputDevice != config.outputDevice || c.frozen != config.frozen;
     if (changed)
         ++configGeneration;
     c.generation = configGeneration;
@@ -538,6 +547,13 @@ void AppRouting::run()
         {
             const juce::ScopedLock sl (lock);
             c = config;
+        }
+
+        // Tournament mode (docs/11 E55): nothing is enumerated, moved or linked.
+        if (c.frozen)
+        {
+            wait (kRefreshIntervalMs);
+            continue;
         }
 
         // Also runs while endpoints we moved are outstanding (or apps that

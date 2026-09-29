@@ -93,13 +93,15 @@ juce::String DeviceErrorBanner::headlineFor (const DeviceSafetyState& state)
         case DeviceSafetyState::Kind::DeviceError: return state.outputMuted ? "Output muted: audio device error" : "Audio device error";
         case DeviceSafetyState::Kind::None: break;
     }
+    if (state.outputFallback)
+        return state.safeSpeakerProfile ? "Output fallback: safe speaker profile" : "Output fallback";
     return {};
 }
 
 juce::String DeviceErrorBanner::messageFor (const DeviceSafetyState& state)
 {
     if (state.kind == DeviceSafetyState::Kind::None)
-        return {};
+        return state.outputFallback ? state.fallbackMessage : juce::String();
     // The host's loopback text starts with what the headline already says.
     if (const juce::String prefix ("Output muted: "); state.kind == DeviceSafetyState::Kind::LoopbackPair && state.message.startsWith (prefix))
         return state.message.substring (prefix.length());
@@ -112,7 +114,8 @@ juce::String DeviceErrorBanner::messageFor (const DeviceSafetyState& state)
 bool DeviceErrorBanner::refresh()
 {
     const auto state = controller.getDeviceSafetyState();
-    const bool want = state.kind != DeviceSafetyState::Kind::None;
+    const bool want = state.kind != DeviceSafetyState::Kind::None || state.outputFallback;
+    warnOnly = state.kind == DeviceSafetyState::Kind::None; // a fallback that plays: amber, not the hot error colour
     headline = headlineFor (state);
     message = messageFor (state);
     if (! want)
@@ -152,7 +155,8 @@ void DeviceErrorBanner::resized()
 
 void DeviceErrorBanner::paint (juce::Graphics& g)
 {
-    const auto accent = Theme::statusColours (*this).hot;
+    const auto colours = Theme::statusColours (*this);
+    const auto accent = warnOnly ? colours.warn : colours.hot;
     drawBannerBody (g, getLocalBounds().toFloat().reduced (0.5f), accent);
 
     auto r = getLocalBounds().reduced (10, 0);

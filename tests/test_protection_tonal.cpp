@@ -5,15 +5,18 @@
 //     keeps its reference's balance; it takes an "s" the enhancement made
 //     hotter back to the reference's balance at any level, leaves vowels and
 //     dense programme alone, caps Gaming's light guard, and does not depend
-//     on the host's block size;
+//     on the host's block size; handed the chain's output it also takes
+//     back what a limiter after it adds to an "s" against the vowels
+//     (batch 2);
 //   * the meter reads no lift for a copy, a broadband gain or a pause, and
 //     a presence bell's lift where an FFT of the same signals puts it;
 //   * the rule takes its scale down while a band's lift is over its budget,
 //     reports it, lets it recover, and leaves the drive scale and Off alone;
 //   * through the chain: Smoothness 0 and protection strength Off are
 //     bit-exact against a chain that never had them, the slot adds no
-//     latency, and at Normal the scale reaches the presence and air macros
-//     and the Gaming voice band, but not base values.
+//     latency, its cut is on the meter bus, and at Normal the scale
+//     reaches the presence and air macros and the Gaming voice band, but not
+//     base values.
 // The Done-when metrics through the CLI renderer are KnownGap cases in
 // tests/test_known_gaps.cpp.
 #include "TestFramework.h"
@@ -261,6 +264,64 @@ TEST_CASE ("Smoothness: dense programme keeps a 2 dB brightening; Gaming's light
     CHECK (a == smooth (hot, v.x, { 1.0f, false }, 0));
 }
 
+TEST_CASE ("Smoothness: handed the chain's output, it holds an \"s\" to the voice's lift there - a limiter after it that ducks the loud vowels 1.5 dB more than the \"s\" is taken back too")
+{
+    // The chain after the stage, modelled: a 48-sample delay (the slots'
+    // latency) and a gain that ducks the vowels 2 dB and each "s" 0.5 dB
+    // (a limiter on the loud vowels, released under the quieter "s",
+    // following the vowel's own envelope).
+    constexpr int kDelay = 48;
+    const auto v = vocal (4.0);
+    const auto lifted = filtered (v.x, FilterType::HighShelf, 4000.0, 0.7, 6.0);
+    const int n = static_cast<int> (v.x.size());
+    std::vector<float> duck (v.x.size(), dbToGain (-2.0f));
+    for (const int a : v.onsets)
+        for (int i = 0, len = samplesOf (0.12); i < len && a + i < n; ++i)
+            duck[static_cast<size_t> (a + i)] = dbToGain (-2.0f + 1.5f * static_cast<float> (0.5 - 0.5 * std::cos (kTwoPi * i / len)));
+    const auto downstream = [&] (const std::vector<float>& stageOut, int i) {
+        return i >= kDelay ? duck[static_cast<size_t> (i)] * stageOut[static_cast<size_t> (i - kDelay)] : 0.0f;
+    };
+    const auto run = [&] (bool handOutput, int block) {
+        SmoothnessGuard g;
+        g.setParams ({ 1.0f, false });
+        g.setDownstreamDelay (kDelay);
+        g.prepare ({ kFs, 4096, 2 });
+        std::vector<float> l (lifted), r (lifted), rl (v.x), rr (v.x), ol (v.x.size()), orr (v.x.size());
+        for (int p = 0; p < n; p += block)
+        {
+            const int m = std::min (block, n - p);
+            float* io[2] = { l.data() + p, r.data() + p };
+            float* ref[2] = { rl.data() + p, rr.data() + p };
+            g.setReference (AudioBlock (ref, 2, m));
+            g.process (AudioBlock (io, 2, m));
+            for (int i = p; i < p + m; ++i)
+            {
+                ol[static_cast<size_t> (i)] = downstream (l, i);
+                orr[static_cast<size_t> (i)] = downstream (r, i);
+            }
+            float* out[2] = { ol.data() + p, orr.data() + p };
+            if (handOutput)
+                g.processDownstream (AudioBlock (out, 2, m));
+        }
+        return ol;
+    };
+    // The input to compare with: the bypass through the same delay (the
+    // metric's windows are 60 ms long; the 1 ms offset does not matter).
+    const double ref = sibilanceOverVoiceDb (v.x, v.onsets);
+    const double duckOnly = sibilanceOverVoiceDb (run (false, 480), v.onsets) - ref;
+    const double coupled = sibilanceOverVoiceDb (run (true, 480), v.onsets) - ref;
+    std::printf ("    measured 6 dB shelf, vowels ducked 1.5 dB more than the \"s\" after the stage: sibilance / voice %+.2f dB without the output, %+.2f dB with it\n",
+                 duckOnly, coupled);
+    // The stage alone cannot see the ducking; handed the output it takes
+    // back all but what its detectors lag behind the duck's Hann ramps (the
+    // stage without any duck leaves +0.15 dB, its bell against the flat band).
+    CHECK (duckOnly >= 1.5);
+    CHECK (coupled <= duckOnly - 1.0);
+    CHECK (std::abs (coupled) <= 0.6);
+    // The segment length only moves when g_down is read (the chain's 10 ms grid).
+    CHECK (std::abs (sibilanceOverVoiceDb (run (true, 64), v.onsets) - ref - coupled) <= 0.15);
+}
+
 TEST_CASE ("Smoothness: the cut is sized for the 5 - 10 kHz band (G per band cut is monotonic, 1 at 0 dB), and below 20 kHz sample rate the stage does nothing")
 {
     SmoothnessGuard g;
@@ -446,10 +507,13 @@ TEST_CASE ("Chain: Smoothness 0 is bit-exact, the slot adds no latency, and swit
     const auto ya = runChain (a, v.x), yb = runChain (b, v.x);
     CHECK (ya == yb);
     CHECK (b.getSmoothnessCutDb() == 0.0f);
+    CHECK (b.meters().smoothnessCutDb.load() == 0.0f);
 
     // On and off mid-programme: the slot's 20 ms crossfade and the stage's
     // smoothed amount; no sample-to-sample step beyond the programme's own.
+    // The cut is on the meter bus while the stage runs (MeterBus::smoothnessCutDb).
     std::vector<float> l (v.x), r (v.x);
+    float deepestOnBus = 0.0f;
     for (size_t p = 0; p < v.x.size(); p += 512)
     {
         if (p == 48 * 512 || p == 150 * 512)
@@ -457,7 +521,9 @@ TEST_CASE ("Chain: Smoothness 0 is bit-exact, the slot adds no latency, and swit
         const int n = static_cast<int> (std::min<size_t> (512, v.x.size() - p));
         float* ch[2] = { l.data() + p, r.data() + p };
         b.process (AudioBlock (ch, 2, n));
+        deepestOnBus = std::min (deepestOnBus, b.meters().smoothnessCutDb.load());
     }
+    CHECK (deepestOnBus < -0.5f);
     float maxStep = 0.0f, maxStepRef = 0.0f;
     for (size_t i = 1; i < l.size(); ++i)
     {

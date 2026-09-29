@@ -95,6 +95,44 @@
 //   * getLatencyInfo().valid is false while no device runs (or the guard
 //     holds the output): show "--", never a stale number.
 //
+// DEVICE SELECTION AND RECOVERY (docs/11 E51)
+//   * Explicit selection: openDevice() opens the saved device without JUCE's
+//     selectDefaultDeviceOnFailure. When the saved output is missing (or
+//     fails to open, e.g. held in exclusive mode by another program), or JUCE
+//     itself fell back after a hot-unplug, the host picks the output
+//     (selectOutput): the chosen one, else the chosen one recognised under
+//     another name or id (the same vendor / product and name without
+//     Windows' "2- " instance number: a USB dongle re-plugged into another
+//     port; the same endpoint id: a renamed device), else the system default
+//     unless it is virtual (a cable, Voicemeeter, BlackHole, a Flubsound
+//     endpoint) or the loopback partner of the input, else the first such
+//     safe output, else none: the current device stays and the loopback
+//     guard keeps it silent. With no choice saved it follows the system
+//     default the same way. The choice is JUCE's explicit setup (what the
+//     user picked in Settings > Audio, never a fallback) plus its identity
+//     (platform::OutputEndpointIdentity: endpoint id and hardware id), which
+//     createDeviceStateXml() adds to the saved device state.
+//   * Events: platform::AudioDeviceWatcher reports hot-plug (device added,
+//     removed, state changed, default output changed) and sleep / resume as
+//     they happen (Windows: IMMNotificationClient and the power
+//     notification); JUCE's own device-list change runs the selection too.
+//     Every event re-selects at once and again kReselectSettleMs later (JUCE's
+//     device list may lag behind the OS), so the chosen output is re-opened
+//     as soon as it is back.
+//   * Recovery: after a resume or a device error the host waits settleMs,
+//     then re-opens the output unless callbacks have been running since;
+//     an output that failed to open is skipped and retried with backoff
+//     (firstRetryMs doubling to maxRetryMs, maxAttempts tries, then the
+//     device error banner stays; the next device event tries again).
+//   * Safe speaker profile: while an unplanned fallback plays to anything
+//     not known to be headphones or a headset, every strip's virtualiser and
+//     bass engine are bypassed (ProcessingChain::setAuditionBypass: the
+//     modules' click-free bypass fades, nothing stored) and the output is
+//     trimmed by kSafeSpeakerTrimDb (ramped over kTrimRampMs), so headphone
+//     voicing never reaches laptop speakers at full level. It ends when the
+//     chosen output plays again or the user chooses the fallback device.
+//     DeviceSafetyState::outputFallback tells the banner.
+//
 // DEVICE CHANNEL ORDER (docs/11 E27 step 4)
 //   The engine's 5.1 / 7.1 order is WAVEFORMATEXTENSIBLE's, FL FR FC LFE
 //   [BL BR] SL SR (the Linux flubsound_game sink is created in it, and JACK /
@@ -202,6 +240,13 @@ struct DeviceSafetyState
     juce::String inputDeviceName, outputDeviceName;  // the pair (LoopbackPair) or the device (DeviceError)
     bool outputMuted = false;                         // the loopback guard holds the output at silence
     uint32_t generation = 0;                          // increments on every change
+
+    // docs/11 E51 (DEVICE SELECTION): the chosen output is missing (or failed
+    // to open) and another device plays instead. Independent of `kind`.
+    bool outputFallback = false;
+    bool safeSpeakerProfile = false;                  // the safe speaker profile is on (see DEVICE SELECTION)
+    juce::String chosenOutputName, fallbackOutputName; // what the user chose, and what plays
+    juce::String fallbackMessage;                     // banner text, empty without a fallback
 };
 
 /** Is the device callback's thread real-time? (docs/11 E44, REAL-TIME
@@ -278,7 +323,10 @@ public:
     virtual bool renderStrip (int strip, const flub::AudioBlock& block) = 0;
 };
 
-class AudioEngineHost final : public juce::AudioIODeviceCallback, private juce::AsyncUpdater, private juce::Timer
+class AudioEngineHost final : public juce::AudioIODeviceCallback,
+                              private juce::AsyncUpdater,
+                              private juce::Timer,
+                              private juce::ChangeListener
 {
 public:
     static constexpr int kMaxCaptures = 16;
@@ -398,6 +446,93 @@ public:
     {
         return loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
     }
+
+    // =========================================================================
+    // Output selection and recovery (message thread; see DEVICE SELECTION)
+    // =========================================================================
+    /** The output the user chose and what recognises it again. */
+    struct OutputChoice
+    {
+        juce::String deviceName;             // the output device name it was chosen under
+        juce::String endpointId, hardwareId; // its platform::OutputEndpointIdentity; empty when unknown
+
+        bool operator== (const OutputChoice&) const = default;
+    };
+
+    enum class OutputReason : uint8_t
+    {
+        None,
+        Chosen,        // the chosen output, under its own name
+        Recognised,    // the chosen output under another name (another port, a rename)
+        SystemDefault, // the system default (the chosen one is missing, or none was chosen)
+        FirstSafe,     // the default is virtual or loops: the first output that is neither
+        NoSafeOutput   // nothing safe: the current device stays (the guard keeps a loop silent)
+    };
+
+    struct OutputSelection
+    {
+        juce::String deviceName;             // the output to play to; empty for NoSafeOutput
+        OutputReason reason = OutputReason::None;
+        bool fallback = false;               // an output was chosen and another plays instead
+        bool safeSpeakerProfile = false;     // fallback to a device not known to be headphones / a headset
+        bool chosenUnavailable = false;      // the chosen output is there but failed to open (e.g. busy in exclusive mode)
+
+        bool operator== (const OutputSelection&) const = default;
+    };
+
+    /** Which output to open (DEVICE SELECTION). `outputs`: the device type's
+        output names in its order; `defaultIndex`: the system default among
+        them (-1 unknown); `endpoints`: the platform's identities (matched to
+        the names like AppAudioRouter::matchOutputDeviceName; empty = names
+        only); `unavailable`: outputs that just failed to open. Pure. */
+    static OutputSelection selectOutput (const OutputChoice& chosen, const juce::StringArray& outputs, int defaultIndex,
+                                         const std::vector<flub::platform::OutputEndpointIdentity>& endpoints,
+                                         const juce::String& inputDeviceName, bool inputFeedsStrip,
+                                         const juce::StringArray& unavailable = {});
+
+    /** A virtual output (cable, Voicemeeter, BlackHole, Soundflower, a
+        Flubsound endpoint, or the platform says so): never a fallback. Pure. */
+    static bool isVirtualOutput (const juce::String& name, const flub::platform::OutputEndpointIdentity* identity = nullptr);
+
+    const OutputChoice& getChosenOutput() const noexcept { return chosen; }
+    const OutputSelection& getOutputSelection() const noexcept { return selection; }
+    bool isSafeSpeakerProfileActive() const noexcept { return safeProfileActive; }
+    static constexpr float kSafeSpeakerTrimDb = -6.0f;
+    static constexpr double kTrimRampMs = 50.0;
+
+    /** JUCE's device state (AudioDeviceManager::createStateXml) plus the
+        chosen output's identity (flubOutputEndpointId, flubOutputHardwareId),
+        which openDevice() reads back. nullptr while nothing was chosen, like
+        createStateXml. */
+    std::unique_ptr<juce::XmlElement> createDeviceStateXml() const;
+
+    /** Device and power events. Default: the platform's
+        (platform::AudioDeviceWatcher), created and started by openDevice();
+        tests inject a fake before openDevice(). nullptr = none. */
+    void setDeviceWatcher (std::unique_ptr<flub::platform::AudioDeviceWatcher> watcher);
+    /** Queues an event and handles it on the message thread (any thread: the
+        watcher's listener). */
+    void postDeviceEvent (const flub::platform::AudioDeviceEvent& event);
+
+    struct RecoveryTiming
+    {
+        int settleMs = 1500;     // after a resume or a device error, before checking the device
+        int firstRetryMs = 1000; // first retry of an output that failed to open; doubles ...
+        int maxRetryMs = 16000;  // ... up to this
+        int maxAttempts = 8;     // then the device error stays until the next device event
+    };
+    void setRecoveryTiming (const RecoveryTiming& timing) { recoveryTiming = timing; }
+
+    /** Runs the selection now and opens its output when it differs from the
+        current one (message thread; also runs on every device change, device
+        event and recovery step, after openDevice()). */
+    void reselectOutput();
+    /** One recovery step when one is due (the timer calls it; public for tests). */
+    void serviceDeviceRecovery();
+    bool isRecoveryPending() const noexcept { return recoveryPending; }
+    int getRecoveryAttempts() const noexcept { return recoveryAttempts; }
+    /** Device events handled so far (message thread). */
+    uint32_t getDeviceEventsHandled() const noexcept { return deviceEventsHandled; }
 
     // =========================================================================
     // Strip mix controls (any thread; applied click-free on the audio thread)
@@ -654,7 +789,15 @@ private:
     void applyDeviceStartSafety (juce::AudioIODevice* device);
     void setSafetyState (DeviceSafetyState next);
     void applyGuardToOutput (float* const* outputs, int numOutputs, int numSamples, bool muted) noexcept;
+    void applyOutputTrim (float* const* outputs, int numOutputs, int numSamples) noexcept;
     bool deviceInputFeedsStrip() const noexcept;
+    void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    void handleDeviceEvents();
+    void noteExplicitOutput();
+    std::vector<flub::platform::OutputEndpointIdentity> listEndpoints();
+    void applySafeSpeakerProfile (bool on);
+    void updateFallbackState();
+    void scheduleRecovery (const juce::String& reason, int delayMs, bool checkHealth);
 
     juce::AudioDeviceManager deviceManager;
     std::vector<flub::StripConfig> layout;
@@ -708,6 +851,9 @@ private:
     std::atomic<bool> loopbackPair { false };  // loopback guard: the current pair loops (message -> audio thread)
     std::atomic<bool> safetyNotifyPending { false };
     float guardGain = 1.0f;                    // audio thread (or message thread before the callback starts)
+    std::atomic<float> outputTrimTarget { 1.0f }; // safe speaker profile trim (linear), message -> audio thread
+    float outputTrimGain = 1.0f;                  // audio thread: the trim as applied (ramps to the target)
+    std::atomic<bool> deviceEventsPending { false };
     std::atomic<uint64_t> callbackCounter { 0 };
     std::atomic<uint32_t> structureGeneration { 0 };
     std::array<CaptureSlot, kMaxCaptures> captureSlots;
@@ -745,6 +891,30 @@ private:
     uint32_t realtimeGenerationSeen = 0;
     uint64_t realtimeThreadId = 0; // the thread audioThreadRealtime describes
     AudioThreadRealtime audioThreadRealtime;
+
+    // Device selection and recovery (DEVICE SELECTION)
+    std::unique_ptr<flub::platform::AudioDeviceWatcher> deviceWatcher;
+    bool deviceWatcherInjected = false, deviceWatcherStarted = false;
+    bool managingDevice = false;  // openDevice() ran: selection and recovery manage the device
+    bool selecting = false;       // inside reselectOutput (its own device changes)
+    OutputChoice chosen;
+    OutputSelection selection;
+    juce::String lastExplicitOutput; // JUCE's explicit output as last seen: a change is the user's choice
+    std::vector<flub::platform::OutputEndpointIdentity> endpointCache;
+    juce::StringArray unavailableOutputs; // failed to open; skipped until the next retry or device event
+    juce::CriticalSection eventLock;
+    std::vector<flub::platform::AudioDeviceEvent> pendingEvents; // guarded by eventLock
+    uint32_t deviceEventsHandled = 0;
+    RecoveryTiming recoveryTiming;
+    bool recoveryPending = false, recoveryCheckHealth = false, suspended = false;
+    juce::uint32 recoveryDueMs = 0;
+    int recoveryAttempts = 0;
+    uint64_t recoveryCallbackMark = 0;
+    juce::String recoveryReason;
+    bool safeProfileActive = false;
+    bool reselectPending = false;       // a device event's second look, once the device type caught up
+    juce::uint32 reselectDueMs = 0;
+    static constexpr juce::uint32 kReselectSettleMs = 500;
 
     void readDeviceChannelMap (juce::AudioIODevice& device);
     std::array<int, flub::kMaxChannels> stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept;

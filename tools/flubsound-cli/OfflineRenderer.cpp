@@ -129,6 +129,9 @@ public:
             s.tonalLiftEndDb[b] = lift;
             s.tonalBudgetDb[b] = m.tonalBudgetDb[b].load (rl);
         }
+        const float smoothCut = m.smoothnessCutDb.load (rl);
+        s.smoothnessCutMaxDb = std::min (s.smoothnessCutMaxDb, smoothCut);
+        smoothActive += smoothCut < -0.5f ? w : 0.0;
 
         const float level = m.autoLevelGainDb.load (rl);
         s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
@@ -164,6 +167,7 @@ public:
         r.governorDynamicsReasonPercent = percent (dynamicsReason);
         r.governorHarmonicsReasonPercent = percent (harmonicsReason);
         r.governorTonalReasonPercent = percent (tonalReason);
+        r.smoothnessActivePercent = percent (smoothActive);
         r.governorDriveResidualMeanDb = residualPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (residualPower / residualFrames))) : kMinusInfDb;
         return r;
     }
@@ -175,6 +179,7 @@ private:
     double total = 0.0, grSum = 0.0, over1 = 0.0, over3 = 0.0, glueSum = 0.0, clipActive = 0.0, thdPower = 0.0, compSum = 0.0;
     double scaleSum = 0.0, backoff = 0.0, harmPower = 0.0, limiterReason = 0.0, distortionReason = 0.0;
     double dynamicsReason = 0.0, harmonicsReason = 0.0, tonalReason = 0.0, residualPower = 0.0, residualFrames = 0.0;
+    double smoothActive = 0.0;
     std::array<double, 4> stateFrames {};
     std::array<double, 4> bandSum {};
 };

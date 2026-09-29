@@ -8,7 +8,7 @@
 //
 //   capture thread --push()--> SpscRing (interleaved) --pull()--> audio thread
 //                                                    |
-//                          cubic Hermite fractional resampler, ratio =
+//                          band-limited fractional resampler (Kernel), ratio =
 //                          nominal (producerRate / consumerRate) * (1 + c)
 //                                                    |
 //               PI controller: c = Kp * e + Ki * integral(e),
@@ -49,8 +49,21 @@
 //   pull() / restart()    consumer thread, RT-safe
 //   getStats()            any thread (relaxed atomics)
 //
-// Large nominal ratios (e.g. 96 kHz capture into a 48 kHz device) work but
-// the Hermite interpolator does not band-limit; the host therefore requests
+// Resampler (docs/11 E50 Phase A): a polyphase Kaiser-windowed sinc
+// (Kernel: kTaps taps, kPhases phases, linear interpolation between adjacent
+// phases), the same for every FIFO. Its passband is flat within 0.001 dB to
+// 20 kHz at 48 kHz at every fractional phase and its images sit >= 100 dB
+// down; the 4-point Catmull-Rom interpolator it replaces lost up to 8.4 dB at
+// 20 kHz (phase 0.5) and, with a nominal ratio of 1, either held a random,
+// session-dependent top-octave shelf or swept it slowly with the drift. The
+// kernel delays the stream by fixedDelayFrames() (reported in
+// Stats::resamplerDelayMs and the host's LatencyInfo::captureBufferMs). The
+// kernel's history is kept apart from the ring, so the ring's fill target
+// (and with it the drift loop's set-point) is unchanged.
+//
+// Large nominal ratios (e.g. 96 kHz capture into a 48 kHz device) work, but
+// the kernel's cutoff sits at the producer's Nyquist frequency, so a
+// downward ratio is not band-limited to the consumer's; the host therefore requests
 // captures at the device rate so the nominal ratio is 1, and when the device
 // rate changes it restarts every running capture at the new rate (with a
 // fresh prepare()) instead of calling setConsumerFormat() with a new rate
@@ -58,6 +71,7 @@
 #pragma once
 
 #include "flub/common/AudioBlock.h"
+#include "flub/common/Realtime.h"
 #include "flub/common/SpscRing.h"
 
 #include <array>
@@ -80,8 +94,49 @@ public:
         float fillMs = 0.0f;            // smoothed fill level
         float targetMs = 0.0f;          // current target fill level
         float correctionPpm = 0.0f;     // PI controller output (+ = consuming faster)
+        float resamplerDelayMs = 0.0f;  // the resampler's fixed delay (fixedDelayFrames at the producer rate)
         bool streaming = false;         // false while priming / after an underrun
     };
+
+    /** docs/11 E50 Phase A: the fractional-delay kernel. Row p of the table
+        (0 <= p <= kPhases) holds the kTaps coefficients for the fraction
+        p / kPhases: a Kaiser-windowed sinc (cutoff at the producer's
+        Nyquist frequency, beta kBeta) centred between window[kTaps/2 - 1]
+        (fraction 0) and window[kTaps/2] (fraction 1), each row normalised to
+        a DC gain of 1. Fraction 0 is the identity. */
+    struct Kernel
+    {
+        static constexpr int kTaps = 48;
+        static constexpr int kPhases = 512;
+        static constexpr double kBeta = 11.0;
+
+        /** The (kPhases + 1) x kTaps table, built on first use (thread-safe;
+            prepare() builds it, never the audio thread). */
+        static const float* table();
+
+        /** The coefficients for `fraction` in [0, 1), linearly interpolated
+            between the two nearest rows of `rows` (table()). RT-safe. */
+        static void coefficients (const float* rows, float fraction, float* out) noexcept FLUB_NONBLOCKING;
+
+        /** One output from kTaps input frames of one channel (oldest first):
+            the sum of window[k] * coefficients[k]. RT-safe. */
+        static float apply (const float* window, const float* coefficients) noexcept FLUB_NONBLOCKING
+        {
+            // Eight independent partial sums: the compiler can keep them in
+            // vector registers (a single running sum would force the
+            // additions into sequence).
+            static_assert (kTaps % 8 == 0);
+            std::array<float, 8> acc {};
+            for (int k = 0; k < kTaps; k += 8)
+                for (int j = 0; j < 8; ++j)
+                    acc[static_cast<size_t> (j)] += window[k + j] * coefficients[k + j];
+            return ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7]));
+        }
+    };
+
+    /** The resampler's delay in producer frames: kTaps / 2 - fraction, i.e.
+        this value +-0.5 frame. */
+    static constexpr double fixedDelayFrames() noexcept { return Kernel::kTaps / 2 - 0.5; }
 
     DriftCompensatedFifo() = default;
 
@@ -148,7 +203,13 @@ private:
     double consumerRate = 48000.0, nominalRatio = 1.0;
     int consumerBlock = 512, fadeLength = 240;
     std::vector<float> staging; // interleaved frames popped for one block
-    std::array<std::array<float, 4>, kMaxChannels> history {};
+    // The last Kernel::kTaps frames of each channel, written twice (at i and
+    // i + kTaps) so that [historyPos, historyPos + kTaps) is always the
+    // window, oldest first.
+    std::array<std::array<float, 2 * Kernel::kTaps>, kMaxChannels> history {};
+    std::array<float, Kernel::kTaps> kernelScratch {}; // the coefficients of the current output frame
+    const float* kernelRows = nullptr;                  // Kernel::table(), fetched by prepare()
+    int historyPos = 0;
     std::array<float, kMaxChannels> lastOut {};
     uint64_t phase = 0;         // 32.32 fixed-point position inside the window
     double smoothedFill = 0.0, integral = 0.0;

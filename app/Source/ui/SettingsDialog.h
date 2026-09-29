@@ -39,6 +39,11 @@
 //               (Follow system or 75 - 200 %) and theme (standard / high
 //               contrast), both applied app-wide at once and persisted, file
 //               locations, version.
+//   Diagnostics the diagnostic log and crash reports (docs/11 E54): where
+//               they are (Show opens the folder), how many crash reports
+//               there are, and Export diagnostics, which saves one zip
+//               (system and device details, settings, logs, crash reports;
+//               no audio, personal paths and names redacted) for a report.
 #pragma once
 
 #include "Theme.h"
@@ -75,7 +80,8 @@ public:
         Correction,
         Processing,
         Hotkeys,
-        General
+        General,
+        Diagnostics
     };
 
     /** Smallest window size at which every page fits (the Processing page's
@@ -129,6 +135,17 @@ public:
         pair that is not allowed yet; empty names when there is none. */
     static AppSettings::LoopbackPair loopbackPairToAllow (EngineController& controller);
 
+    /** The Diagnostics page's export (docs/11 E54): writes the diagnostics
+        zip for this controller, with the logs and crash reports of
+        `logFolder`, to `zipFile`. `listDevices` adds every device type's
+        device names (this may scan the devices). Returns an empty string on
+        success, else the error. */
+    static juce::String exportDiagnostics (EngineController& controller, const juce::File& logFolder, const juce::File& zipFile,
+                                           bool listDevices = true);
+    /** "None", or "2 - the latest on 2026-09-29 14:02" for the crash reports
+        in `logFolder`. */
+    static juce::String describeCrashReports (const juce::File& logFolder);
+
     void paint (juce::Graphics& g) override;
     void resized() override;
 
@@ -138,11 +155,12 @@ private:
     class ProcessingPage;
     class HotkeysPage;
     class GeneralPage;
+    class DiagnosticsPage;
 
     void timerCallback() override;
 
     EngineController& controller;
-    std::array<juce::TextButton, 5> navButtons;
+    std::array<juce::TextButton, 6> navButtons;
     std::unique_ptr<AudioPage> audioPage;
     juce::Viewport audioView; // the Audio page scrolls when the guidance is long
     std::unique_ptr<CorrectionPage> correctionPage;
@@ -150,6 +168,7 @@ private:
     juce::Viewport processingView; // ... and the Processing page when there are many capture streams
     std::unique_ptr<HotkeysPage> hotkeysPage;
     std::unique_ptr<GeneralPage> generalPage;
+    std::unique_ptr<DiagnosticsPage> diagnosticsPage;
     Page current = Page::Audio;
     juce::Rectangle<int> navArea, pageArea;
 };

@@ -148,6 +148,10 @@ struct RenderStats
     // 200 Hz - 1 kHz lift (dB; -160 = none), highest and at the end, and the budgets.
     std::array<float, 3> tonalLiftMaxDb { -160.0f, -160.0f, -160.0f }, tonalLiftEndDb { -160.0f, -160.0f, -160.0f };
     std::array<float, 3> tonalBudgetDb { 3.0f, 3.0f, 4.0f };
+    // The Smoothness stage (docs/11 E07; MeterBus::smoothnessCutDb): its
+    // deepest cut of the 5 - 10 kHz band (dB <= 0), and the frames it cut
+    // more than 0.5 dB.
+    float smoothnessCutMaxDb = 0.0f, smoothnessActivePercent = 0.0f;
 };
 
 struct RenderResult

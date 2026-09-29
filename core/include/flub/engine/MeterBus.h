@@ -70,6 +70,9 @@ struct MeterBus
     // otherwise. The budgets are SafetyGovernor::Budgets' presence / harsh / air.
     std::array<std::atomic<float>, 3> tonalLiftDb { { { -160.0f }, { -160.0f }, { -160.0f } } };
     std::array<std::atomic<float>, 3> tonalBudgetDb { { { 3.0f }, { 3.0f }, { 4.0f } } };
+    // The Smoothness stage (docs/11 E07, SmoothnessGuard): its deepest cut
+    // of the 5 - 10 kHz band over the last block (dB <= 0; 0 while it idles).
+    std::atomic<float> smoothnessCutDb { 0.0f };
     std::atomic<float> autoLevelGainDb { 0.0f };
     std::atomic<float> autoDriveDb { 0.0f };
 

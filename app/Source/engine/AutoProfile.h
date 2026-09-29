@@ -30,6 +30,10 @@
 //     (cancelStrip) cancels it: nothing is restored later, and the rule is
 //     not applied again until another application (or none) has been
 //     stable in the foreground.
+//   * Tournament mode (docs/11 E55) holds everything: samples are ignored,
+//     the active rule stays applied (the sound does not change mid-match)
+//     and nothing is applied or ended until it is switched off; the caller
+//     stops polling the foreground meanwhile (isTournamentMode).
 //   * Rules edited while one is active: the active rule stays if an identical
 //     rule is still in the list, otherwise it ends WITHOUT restoring (the
 //     strip keeps what it plays). Switching the feature off does the same.
@@ -150,6 +154,17 @@ public:
         return actions;
     }
 
+    /** Tournament mode (docs/11 E55): holds the current state and ignores
+        samples until switched off; the stability count starts over then. No
+        actions either way. */
+    void setTournamentMode (bool shouldHold) noexcept
+    {
+        tournament = shouldHold;
+        candidate = kUnknown;
+        candidatePolls = 0;
+    }
+    bool isTournamentMode() const noexcept { return tournament; }
+
     /** A preset was chosen by hand on this strip: an active rule for it is
         cancelled (no restore) and not re-applied while its app stays in front.
         Returns true if a rule was cancelled. */
@@ -168,7 +183,7 @@ public:
     std::vector<Action> update (const Sample& s)
     {
         std::vector<Action> actions;
-        if (! enabled || ! s.valid || s.isThisProcess)
+        if (! enabled || tournament || ! s.valid || s.isThisProcess)
             return actions; // hold
 
         const int target = findRule (s);
@@ -212,6 +227,7 @@ private:
     Config config;
     std::vector<AutoProfileRule> rules;
     bool enabled = true;
+    bool tournament = false; // docs/11 E55: hold everything
     int active = -1;     // index into rules, -1 = none
     int suppressed = -1; // rule cancelled by hand while its app stays in front
     int candidate = kUnknown;

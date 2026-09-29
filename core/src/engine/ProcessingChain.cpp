@@ -452,13 +452,14 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     // input, delayed by the slots in between.
     smoothness.setReferenceDelay (slots[SDynEq].latencySamples() + slots[SBass].latencySamples() + slots[SClarity].latencySamples()
                                   + slots[SSat].latencySamples());
-    // ... and follows the chain's output, one slot latency per slot after it.
-    smoothness.setDownstreamDelay (slots[SSpatial].latencySamples() + slots[SComp].latencySamples() + slots[SMax].latencySamples());
-    slots[SSmooth].prepare (smoothness, stereo, 20.0f, e[SmoothAmount] > 0.0f);
-    smoothReference.setSize (2, maxB);
     slots[SSpatial].prepare (spatial, stereo, 20.0f, on (e, SpatialOn));
     slots[SComp].prepare (compressor, stereo, 20.0f, on (e, CompressorOn));
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
+    // ... and follows the chain's output, delayed by the slots after it
+    // (prepared first for their latencies).
+    smoothness.setDownstreamDelay (slots[SSpatial].latencySamples() + slots[SComp].latencySamples() + slots[SMax].latencySamples());
+    slots[SSmooth].prepare (smoothness, stereo, 20.0f, e[SmoothAmount] > 0.0f);
+    smoothReference.setSize (2, maxB);
     contour.prepare (stereo); // docs/11 E32: after the preamp, ahead of the slots; no latency
     warmthTilt.prepare (stereo); // docs/11 E14: ahead of the parametric EQ slot; no latency
 
@@ -495,6 +496,11 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     preampGain.reset (sr, 20.0f, 1.0f);
     headroomKeyValid = false;
     headroomHoldoff = 0;
+    // The hot-programme peak (auto.preampHot) is held again from the first
+    // block; a reset() keeps it, like the governor's learned state.
+    hotPeakDb = kMinusInfDb;
+    hotPreampDb = 0.0f;
+    hotHoldLeft = 0;
     warmthTrimModelDb = 0.0f;
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
     bypassMix.reset (sr, 30.0f, on (e, BypassAll) ? 1.0f : 0.0f);
@@ -1070,10 +1076,66 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     const float preamp = on (h, AutoPreampOn) ? headroom::preampDb (p, h[AutoPreampAllowanceDb]) : 0.0f;
     predictedBoostDb.store (static_cast<float> (p.maxBoostDb), std::memory_order_relaxed);
     predictedBoostHz.store (static_cast<float> (p.atHz), std::memory_order_relaxed);
-    autoPreampDb.store (preamp, std::memory_order_relaxed);
-    preampGain.setTarget (dbToGain (preamp));
+    staticPreampDb = preamp;
+    staticGainDb = static_cast<float> (p.maxBoostDb) + preamp; // what the allowance leaves in (hot programme)
+    autoPreampDb.store (preamp + hotPreampDb, std::memory_order_relaxed);
+    preampGain.setTarget (dbToGain (preamp + hotPreampDb));
     if (first)
         preampGain.setImmediate (preampGain.getTarget());
+}
+
+void ProcessingChain::updateHotPreamp (const AudioBlock& st, bool contaminated) noexcept FLUB_NONBLOCKING
+{
+    // Hot programme (auto.preampHot, docs/11 E11; see the header comment).
+    const float* e = effective.data();
+    if (! (on (e, AutoPreampOn) && on (e, AutoPreampHot)))
+    {
+        if (hotPreampDb != 0.0f || hotPeakDb > kMinusInfDb)
+        {
+            hotPreampDb = 0.0f;
+            hotPeakDb = kMinusInfDb;
+            hotHoldLeft = 0;
+            autoPreampDb.store (staticPreampDb, std::memory_order_relaxed);
+            preampGain.setTarget (dbToGain (staticPreampDb));
+        }
+        return;
+    }
+    const int n = st.numSamples;
+    if (! contaminated)
+    {
+        float peak = 0.0f;
+        for (int c = 0; c < st.numChannels; ++c)
+        {
+            const float* x = st.channel (c);
+            for (int i = 0; i < n; ++i)
+                peak = std::max (peak, std::abs (x[i]));
+        }
+        const float peakDb = peak > 0.0f ? std::max (kMinusInfDb, gainToDb (peak)) : kMinusInfDb;
+        if (peakDb >= hotPeakDb)
+        {
+            hotPeakDb = peakDb;
+            hotHoldLeft = static_cast<int> (kHotHoldSeconds * config.sampleRate);
+        }
+        else if (hotHoldLeft > 0)
+        {
+            hotHoldLeft = std::max (0, hotHoldLeft - n);
+        }
+        else
+        {
+            hotPeakDb = std::max (peakDb, hotPeakDb - kHotReleaseDbPerSecond * static_cast<float> (n / config.sampleRate));
+        }
+    }
+    const bool maxOn = on (e, MaximizerOn);
+    const float attack = on (e, ClarityOn) ? 0.5f * std::max (0.0f, e[ClarityAttackDb]) : 0.0f; // the transient shaper's lift of an onset
+    const float gain = staticGainDb + attack + (maxOn ? e[MaxDriveDb] : 0.0f);
+    const float ceiling = maxOn ? e[MaxCeilingDb] : 0.0f;
+    const float hot = hotPeakDb > kMinusInfDb ? -std::clamp (hotPeakDb + gain - ceiling, 0.0f, std::max (0.0f, gain)) : 0.0f;
+    if (hot != hotPreampDb)
+    {
+        hotPreampDb = hot;
+        autoPreampDb.store (staticPreampDb + hot, std::memory_order_relaxed);
+        preampGain.setTarget (dbToGain (staticPreampDb + hot));
+    }
 }
 
 double ProcessingChain::StaticBoostModel::responseDb (double freqHz) const noexcept FLUB_NONBLOCKING
@@ -1597,6 +1659,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     analyzerTaps.pre.push (tapScratch.data(), static_cast<size_t> (n));
 
     // ---- 4. Automatic preamp (docs/11 E11; unity and untouched while off), module slots ----
+    updateHotPreamp (st, contaminated);
     if (preampGain.isSmoothing() || preampGain.getCurrent() != 1.0f)
     {
         const float p0 = preampGain.getCurrent();
@@ -1864,6 +1927,7 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     for (int b = TonalBalanceMeter::Presence; b < TonalBalanceMeter::kNumBands; ++b)
         tonalLiftDb[static_cast<size_t> (b)].store (spanRunning ? tonalMeter.getLiftDb (b) : TonalBalanceMeter::kNoReading, rl);
     smoothnessCutDb.store (r.smoothCutDb, rl);
+    m.smoothnessCutDb.store (r.smoothCutDb, rl);
     outputPlrDb.store (spanRunning ? plrMeter.getPlrDb() : PlrMeter::kNoReading, rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);

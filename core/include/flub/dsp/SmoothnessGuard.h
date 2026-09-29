@@ -48,8 +48,8 @@
 //   Linked over the channels: the image does not move.
 //   After the stage (docs/11 E07 batch 2): the spatializer, the compressor
 //   and the maximizer still follow, and a limiter ducks a loud vowel more
-//   than the quieter "s" beside it (sibilance over voice +0.6 dB at Music
-//   Boost 100 + Clarity 100); the upward compressor and the inverse-level
+//   than the quieter "s" beside it (0.6 dB more at Music Boost 100 +
+//   Clarity 100); the upward compressor and the inverse-level
 //   lifts ahead of the stage lift the body under an "s" more than the
 //   vowel. A stage that compares with the body under the "s" cannot see
 //   either. So when the chain hands it its output (processDownstream(), the
@@ -79,8 +79,10 @@
 //   at 0 dB the output is the input, bit for bit (the chain also bypasses
 //   the slot then).
 //
-// Zero latency, RT-safe: process() and the setters neither allocate nor
-// lock; prepare() allocates the reference delay.
+// Zero latency, RT-safe: process(), processDownstream() and the setters
+// neither allocate nor lock; prepare() allocates the reference delay and
+// the ring that keeps the stage's output band power for the downstream
+// latency.
 #pragma once
 
 #include "EnvelopeFollower.h"

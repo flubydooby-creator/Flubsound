@@ -14,9 +14,12 @@
 //   avrt      AvSetMmThreadCharacteristicsW / AvSetMmThreadPriority (MMCSS)
 //   mmdevapi  ActivateAudioInterfaceAsync (MSVC: Mmdevapi.lib, MinGW: -lmmdevapi)
 //   advapi32  RegCreateKeyExW / RegSetValueExW / RegDeleteValueW (start with Windows)
+//             and OpenSCManagerW / QueryServiceStatus (docs/11 E55: anti-cheat services)
 // NOT needed: uuid (every IID comes from __uuidof or a local GUID constant) and
 // runtimeobject/combase (the optional WinRT entry points of the undocumented
-// routing adapter are resolved at run time from combase.dll).
+// routing adapter are resolved at run time from combase.dll) and powrprof
+// (PowerRegisterSuspendResumeNotification, Windows 8+, is resolved at run
+// time from powrprof.dll).
 //
 //   CMake:  target_link_libraries (<app> PRIVATE ole32 user32 shell32 shlwapi version avrt mmdevapi advapi32)
 //   MSVC additionally picks them up from the #pragma comment(lib) lines below.
@@ -31,6 +34,10 @@
 //   SystemTuning    : promote/revert must be called on the thread concerned.
 //   AutoStart       : any thread (registry calls only; message thread in the app).
 //   ForegroundApp   : one thread (the message thread in the app); user32 only.
+//   AudioDeviceWatcher : listOutputs / start / stop on one thread (the message
+//                     thread in the app); events arrive on MMDevAPI's
+//                     notification thread and the system's power callback
+//                     thread.
 #if defined(_WIN32)
 
 #include "PlatformServices.h"
@@ -50,6 +57,8 @@
 #include <shlwapi.h>
 #include <mmreg.h>
 #include <mmdeviceapi.h>
+#include <devicetopology.h>
+#include <winsvc.h>
 #include <endpointvolume.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
@@ -75,6 +84,9 @@
 #include <cwctype>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -432,18 +444,6 @@ std::wstring processImagePath (DWORD processId)
 
     path.resize (size);
     return path;
-}
-
-/** docs/11 E47: the process's creation time (FILETIME, 100 ns since 1601),
-    which tells a reused process id from the process the route journal
-    recorded; 0 when the process cannot be opened. */
-uint64_t processCreationTime (DWORD processId)
-{
-    ScopedHandle process (OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
-    FILETIME created {}, exited {}, kernel {}, user {};
-    if (process.handle == nullptr || ! GetProcessTimes (process.handle, &created, &exited, &kernel, &user))
-        return 0;
-    return (static_cast<uint64_t> (created.dwHighDateTime) << 32) | created.dwLowDateTime;
 }
 
 std::wstring fileNameOf (const std::wstring& path)
@@ -1087,6 +1087,32 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
 class WinAppAudioRouter final : public AppAudioRouter
 {
 public:
+    // docs/11 E55: each process is opened once while its sessions last
+    // (ProcessInfoCache), not on every 2 s pass: one OpenProcess reads both
+    // the image path and the creation time.
+    WinAppAudioRouter()
+        : processCache (
+              [] (uint32_t processId, std::string& path, uint64_t& startTime)
+              {
+                  ScopedHandle process (OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD> (processId)));
+                  if (process.handle == nullptr)
+                      return false;
+                  std::wstring image (32768, L'\0');
+                  auto size = static_cast<DWORD> (image.size());
+                  if (QueryFullProcessImageNameW (process.handle, 0, image.data(), &size))
+                  {
+                      image.resize (size);
+                      path = toUtf8 (image);
+                  }
+                  FILETIME created {}, exited {}, kernel {}, user {};
+                  if (GetProcessTimes (process.handle, &created, &exited, &kernel, &user))
+                      startTime = (static_cast<uint64_t> (created.dwHighDateTime) << 32) | created.dwLowDateTime;
+                  return true;
+              },
+              [] (const std::string& path) { return toUtf8 (fileDescription (toWide (path))); })
+    {
+    }
+
     bool isSupported() const override { return canList() && canMoveEndpoint(); }
     bool canList() const override { return true; }
 
@@ -1129,6 +1155,7 @@ public:
 
         const DWORD ownProcessId = GetCurrentProcessId();
         std::map<DWORD, size_t> indexByProcess;
+        processCache.beginPass();
 
         for (UINT d = 0; d < deviceCount; ++d)
         {
@@ -1190,21 +1217,31 @@ public:
                 if (active)
                     info.activeEndpointIds.push_back (deviceIdUtf8);
 
-                const auto imagePath = processImagePath (processId);
-                info.executablePath = toUtf8 (imagePath);
-                info.processStartTime = processCreationTime (processId);
-                info.executableName = toUtf8 (fileNameOf (imagePath));
+                // The session's instance identifier names the process and
+                // this session: a known one is served without opening the
+                // process (docs/11 E55).
+                std::string sessionKey;
+                {
+                    CoTaskString instance;
+                    if (SUCCEEDED (control2->GetSessionInstanceIdentifier (&instance.text)) && instance.text != nullptr)
+                        sessionKey = toUtf8 (instance.text);
+                }
+                const auto& process = processCache.lookup (info.processId, sessionKey);
+                info.executablePath = process.executablePath;
+                info.processStartTime = process.startTime;
+                info.executableName = process.executableName;
                 info.displayName = sessionDisplayName (control.get());
                 if (info.displayName.empty())
-                    info.displayName = toUtf8 (fileDescription (imagePath));
+                    info.displayName = process.description;
                 if (info.displayName.empty())
-                    info.displayName = toUtf8 (withoutExtension (fileNameOf (imagePath)));
+                    info.displayName = toUtf8 (withoutExtension (fileNameOf (toWide (process.executableName))));
 
                 indexByProcess.emplace (processId, sessions.size());
                 sessions.push_back (std::move (info));
             }
         }
 
+        processCache.endPass();
         return sessions;
     }
 
@@ -1301,6 +1338,8 @@ public:
     }
 
 private:
+    ProcessInfoCache processCache; // enumerateSessions only (the routing worker's thread)
+
     static std::string sessionDisplayName (IAudioSessionControl* control)
     {
         CoTaskString name;
@@ -2285,11 +2324,335 @@ void SystemTuning::revertAudioThread (void* handle)
 }
 
 //==============================================================================
+// AudioDeviceWatcher (docs/11 E51)
+//==============================================================================
+namespace
+{
+EndpointFormFactor formFactorFrom (UINT value) noexcept
+{
+    switch (value) // the EndpointFormFactor enumeration of mmdeviceapi.h
+    {
+        case 1: return EndpointFormFactor::Speakers;
+        case 2: return EndpointFormFactor::LineLevel;
+        case 3: return EndpointFormFactor::Headphones;
+        case 5: return EndpointFormFactor::Headset;
+        case 8: return EndpointFormFactor::Digital;
+        case kFormFactorDigitalAudioDisplayDevice: return EndpointFormFactor::Hdmi;
+        case 10: return EndpointFormFactor::Unknown;
+        default: return EndpointFormFactor::Other;
+    }
+}
+
+/** IPart::GetTopologyObject; MinGW-w64's devicetopology.h misspells it
+    GetTopologyObjects (the same vtable slot). */
+template <typename Part>
+HRESULT partTopologyObject (Part* part, IDeviceTopology** topology)
+{
+    if constexpr (requires { part->GetTopologyObject (topology); })
+        return part->GetTopologyObject (topology);
+    else
+        return part->GetTopologyObjects (topology);
+}
+
+/** The device id of the audio adapter an endpoint belongs to (the part the
+    endpoint's connector is connected to), e.g.
+    "{2}.\\?\usb#vid_10f5&pid_0210&mi_00#7&2b8e...&0&0000#{6994ad04-...}\global".
+    Empty for endpoints without a connected adapter (some virtual devices). */
+std::wstring adapterDeviceId (IMMDevice* device)
+{
+    ComPtr<IDeviceTopology> topology;
+    if (device == nullptr || FAILED (device->Activate (__uuidof (IDeviceTopology), CLSCTX_ALL, nullptr, topology.putVoid())))
+        return {};
+    ComPtr<IConnector> connector, connectedTo;
+    ComPtr<IPart> part;
+    ComPtr<IDeviceTopology> adapter;
+    if (FAILED (topology->GetConnector (0, connector.put())) || FAILED (connector->GetConnectedTo (connectedTo.put()))
+        || FAILED (connectedTo->QueryInterface (__uuidof (IPart), part.putVoid())) || FAILED (partTopologyObject (part.get(), adapter.put())))
+        return {};
+    CoTaskString id;
+    if (FAILED (adapter->GetDeviceId (&id.text)) || id.text == nullptr)
+        return {};
+    return id.text;
+}
+
+/** Shared between the watcher and the OS callbacks: the listener, called
+    under the mutex, so stop() knows no call runs once it holds it. */
+struct DeviceEventSink
+{
+    std::mutex mutex;
+    AudioDeviceWatcher::Listener listener;
+
+    void post (AudioDeviceEvent::Kind kind, LPCWSTR endpointId)
+    {
+        AudioDeviceEvent event;
+        event.kind = kind;
+        if (endpointId != nullptr)
+            event.endpointId = toUtf8 (endpointId);
+        const std::lock_guard<std::mutex> guard (mutex);
+        if (listener)
+            listener (event);
+    }
+};
+
+/** IMMNotificationClient with manual reference counting (no WRL / ATL).
+    MMDevAPI calls it on its own notification thread. */
+class EndpointNotificationClient final : public IMMNotificationClient
+{
+public:
+    explicit EndpointNotificationClient (std::shared_ptr<DeviceEventSink> s) : sink (std::move (s)) {}
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+
+    ULONG STDMETHODCALLTYPE Release() override
+    {
+        const ULONG left = --references;
+        if (left == 0)
+            delete this;
+        return left;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface (REFIID iid, void** object) override
+    {
+        if (object == nullptr)
+            return E_POINTER;
+        if (iid == __uuidof (IUnknown) || iid == __uuidof (IMMNotificationClient))
+        {
+            *object = static_cast<IMMNotificationClient*> (this);
+            AddRef();
+            return S_OK;
+        }
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged (LPCWSTR id, DWORD) override
+    {
+        sink->post (AudioDeviceEvent::Kind::DeviceStateChanged, id);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded (LPCWSTR id) override
+    {
+        sink->post (AudioDeviceEvent::Kind::DeviceAdded, id);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved (LPCWSTR id) override
+    {
+        sink->post (AudioDeviceEvent::Kind::DeviceRemoved, id);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged (EDataFlow flow, ERole role, LPCWSTR id) override
+    {
+        if (flow == eRender && role == eConsole)
+            sink->post (AudioDeviceEvent::Kind::DefaultOutputChanged, id);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged (LPCWSTR id, const PROPERTYKEY key) override
+    {
+        // A rename changes the name JUCE lists the device under.
+        if (key.fmtid == kDeviceFriendlyNameKey.fmtid && key.pid == kDeviceFriendlyNameKey.pid)
+            sink->post (AudioDeviceEvent::Kind::DeviceStateChanged, id);
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> references { 1 };
+    std::shared_ptr<DeviceEventSink> sink;
+};
+
+// PowerRegisterSuspendResumeNotification (powrprof.dll, Windows 8+), resolved
+// at run time; the parameter block mirrors DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS.
+using PowerCallbackFn = ULONG (CALLBACK*) (PVOID context, ULONG type, PVOID setting);
+struct PowerSubscribeParameters
+{
+    PowerCallbackFn callback;
+    PVOID context;
+};
+using PowerRegisterFn = DWORD (WINAPI*) (DWORD flags, HANDLE recipient, void** registration);
+using PowerUnregisterFn = DWORD (WINAPI*) (void* registration);
+constexpr DWORD kDeviceNotifyCallback = 2;    // DEVICE_NOTIFY_CALLBACK
+constexpr ULONG kPbtSuspend = 0x4;            // PBT_APMSUSPEND
+constexpr ULONG kPbtResumeSuspend = 0x7;      // PBT_APMRESUMESUSPEND (a user is present)
+constexpr ULONG kPbtResumeAutomatic = 0x12;   // PBT_APMRESUMEAUTOMATIC (every resume)
+
+class WinAudioDeviceWatcher final : public AudioDeviceWatcher
+{
+public:
+    ~WinAudioDeviceWatcher() override { stop(); }
+
+    bool isSupported() const override { return true; }
+
+    std::vector<OutputEndpointIdentity> listOutputs() override
+    {
+        std::vector<OutputEndpointIdentity> outputs;
+        const ScopedComInit com;
+        if (! com.isUsable())
+            return outputs;
+        std::string error;
+        auto enumerator = createDeviceEnumerator (error);
+        if (! enumerator)
+            return outputs;
+
+        std::wstring defaultId;
+        {
+            ComPtr<IMMDevice> device;
+            if (SUCCEEDED (enumerator->GetDefaultAudioEndpoint (eRender, eConsole, device.put())))
+                defaultId = endpointId (device.get());
+        }
+
+        ComPtr<IMMDeviceCollection> devices;
+        UINT count = 0;
+        if (FAILED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put())) || FAILED (devices->GetCount (&count)))
+            return outputs;
+
+        // The order of listOutputEndpoints() and JUCE's WASAPI device list:
+        // the default first, then enumeration order.
+        for (UINT i = 0; i < count; ++i)
+        {
+            ComPtr<IMMDevice> device;
+            if (FAILED (devices->Item (i, device.put())))
+                continue;
+            const auto id = endpointId (device.get());
+            if (id.empty())
+                continue;
+
+            OutputEndpointIdentity identity;
+            identity.id = toUtf8 (id);
+            identity.name = toUtf8 (endpointFriendlyName (device.get()));
+            identity.isDefault = ! defaultId.empty() && id == defaultId;
+            ComPtr<IPropertyStore> store;
+            if (SUCCEEDED (device->OpenPropertyStore (STGM_READ, store.put())))
+            {
+                const UINT formFactor = readUIntProperty (store.get(), kEndpointFormFactorKey, 10);
+                identity.formFactor = formFactorFrom (formFactor);
+                identity.transport = transportFromEnumerator (readStringProperty (store.get(), kDeviceEnumeratorNameKey), formFactor);
+            }
+            identity.hardwareId = hardwareIdFromDevicePath (toUtf8 (adapterDeviceId (device.get())));
+
+            if (identity.isDefault)
+                outputs.insert (outputs.begin(), std::move (identity));
+            else
+                outputs.push_back (std::move (identity));
+        }
+        return outputs;
+    }
+
+    bool start (Listener listener) override
+    {
+        {
+            const std::lock_guard<std::mutex> guard (sink->mutex);
+            sink->listener = std::move (listener);
+        }
+        if (client != nullptr || powerRegistration != nullptr)
+            return true;
+
+        // COM stays initialised on this thread while the enumerator is
+        // registered (Unregister must be called on it too, from stop()).
+        eventCom.emplace();
+        std::string error;
+        if (eventCom->isUsable())
+            eventEnumerator = createDeviceEnumerator (error);
+        if (eventEnumerator)
+        {
+            client = new EndpointNotificationClient (sink);
+            if (FAILED (eventEnumerator->RegisterEndpointNotificationCallback (client)))
+            {
+                client->Release();
+                client = nullptr;
+            }
+        }
+
+        powrprof = LoadLibraryW (L"powrprof.dll");
+        if (auto registerFn = loadFunction<PowerRegisterFn> (powrprof, "PowerRegisterSuspendResumeNotification"))
+        {
+            powerParameters.callback = &WinAudioDeviceWatcher::powerCallback;
+            powerParameters.context = sink.get();
+            if (registerFn (kDeviceNotifyCallback, static_cast<HANDLE> (&powerParameters), &powerRegistration) != ERROR_SUCCESS)
+                powerRegistration = nullptr;
+        }
+        return client != nullptr || powerRegistration != nullptr;
+    }
+
+    void stop() override
+    {
+        if (powerRegistration != nullptr)
+        {
+            if (auto unregisterFn = loadFunction<PowerUnregisterFn> (powrprof, "PowerUnregisterSuspendResumeNotification"))
+                unregisterFn (powerRegistration);
+            powerRegistration = nullptr;
+        }
+        if (powrprof != nullptr)
+        {
+            FreeLibrary (powrprof);
+            powrprof = nullptr;
+        }
+        if (client != nullptr)
+        {
+            if (eventEnumerator)
+                eventEnumerator->UnregisterEndpointNotificationCallback (client);
+            client->Release();
+            client = nullptr;
+        }
+        eventEnumerator.reset();
+        eventCom.reset();
+        // Waits for a call in progress; none follows.
+        const std::lock_guard<std::mutex> guard (sink->mutex);
+        sink->listener = nullptr;
+    }
+
+private:
+    static ULONG CALLBACK powerCallback (PVOID context, ULONG type, PVOID)
+    {
+        auto* target = static_cast<DeviceEventSink*> (context);
+        if (target == nullptr)
+            return ERROR_SUCCESS;
+        if (type == kPbtSuspend)
+            target->post (AudioDeviceEvent::Kind::Suspending, nullptr);
+        else if (type == kPbtResumeAutomatic || type == kPbtResumeSuspend)
+            target->post (AudioDeviceEvent::Kind::Resumed, nullptr); // both may come: the host handles a repeat
+        return ERROR_SUCCESS;
+    }
+
+    std::shared_ptr<DeviceEventSink> sink = std::make_shared<DeviceEventSink>();
+    std::optional<ScopedComInit> eventCom; // while registered
+    ComPtr<IMMDeviceEnumerator> eventEnumerator;
+    EndpointNotificationClient* client = nullptr;
+    HMODULE powrprof = nullptr;
+    PowerSubscribeParameters powerParameters {};
+    void* powerRegistration = nullptr;
+};
+} // namespace
+
+std::vector<std::string> AntiCheatServices::running()
+{
+    std::vector<std::string> names;
+    SC_HANDLE manager = OpenSCManagerW (nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (manager == nullptr)
+        return names;
+    for (const wchar_t* service : { L"vgc", L"BEService", L"EasyAntiCheat", L"EasyAntiCheat_EOS", L"FACEITService", L"ESEADriver2" })
+    {
+        if (SC_HANDLE handle = OpenServiceW (manager, service, SERVICE_QUERY_STATUS))
+        {
+            SERVICE_STATUS status {};
+            if (QueryServiceStatus (handle, &status) && status.dwCurrentState == SERVICE_RUNNING)
+                names.push_back (toUtf8 (service));
+            CloseServiceHandle (handle);
+        }
+    }
+    CloseServiceHandle (manager);
+    return names;
+}
+
+//==============================================================================
 std::unique_ptr<GlobalHotkeys> GlobalHotkeys::create() { return std::make_unique<WinGlobalHotkeys>(); }
 std::unique_ptr<AppAudioRouter> AppAudioRouter::create() { return std::make_unique<WinAppAudioRouter>(); }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<WinProcessLoopbackCapture>(); }
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<WinAutoStart>(); }
 std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<WinForegroundApp>(); }
+std::unique_ptr<AudioDeviceWatcher> AudioDeviceWatcher::create() { return std::make_unique<WinAudioDeviceWatcher>(); }
 } // namespace flub::platform
 
 #endif // _WIN32

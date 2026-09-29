@@ -1,5 +1,6 @@
 #include "FlubsoundApplication.h"
 
+#include "diagnostics/DiagnosticsSession.h"
 #include "engine/EngineController.h"
 #include "platform/PlatformBridge.h"
 #include "shell/HotkeyManager.h"
@@ -51,6 +52,9 @@ void printLine (bool toStdErr, const juce::String& text)
 {
     std::fprintf (toStdErr ? stderr : stdout, "%s\n", text.toRawUTF8());
     std::fflush (toStdErr ? stderr : stdout);
+    // Problems also go to the diagnostic log (interactive mode only).
+    if (toStdErr && juce::Logger::getCurrentLogger() != nullptr)
+        juce::Logger::writeToLog (text);
 }
 } // namespace
 
@@ -84,12 +88,16 @@ void FlubsoundApplication::initialise (const juce::String&)
 
 void FlubsoundApplication::initialiseInteractive()
 {
+    // First, so a crash during start-up is reported (docs/11 E54).
+    diagnosticsSession = std::make_unique<diagnostics::DiagnosticsSession>();
+
     // Keep the audio / capture threads off efficiency cores (Windows EcoQoS).
     platform_bridge::disablePowerThrottling();
 
     controller = std::make_unique<EngineController>();
     if (controller->getLastDeviceError().isNotEmpty())
-        printLine (true, "Flubsound: audio device: " + controller->getLastDeviceError());
+        std::fprintf (stderr, "Flubsound: audio device: %s\n", controller->getLastDeviceError().toRawUTF8()); // the log gets it from the monitor
+    diagnosticsSession->attach (*controller);
 
     // Settings > General > UI scale and theme, before any window exists (the
     // saved window position is in the scaled coordinates).
@@ -212,12 +220,15 @@ void FlubsoundApplication::shutdown()
         mainWindow->saveWindowState();
     mainWindow.reset();
 
+    if (diagnosticsSession != nullptr)
+        diagnosticsSession->detach();
     if (controller != nullptr)
         controller->shutdown();
     controller.reset();
 
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
     lookAndFeel.reset();
+    diagnosticsSession.reset(); // the "stopped" line; disarms the crash handler
 }
 
 void FlubsoundApplication::systemRequestedQuit()

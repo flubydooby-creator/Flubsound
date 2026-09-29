@@ -56,6 +56,13 @@
 // one stops); the app is reported (AppState::doublingBlocked, amber in the
 // routing panel) with the fix: set its output to another device
 // (getSpareEndpoints), where the capture still reaches it.
+//
+// Tournament mode (docs/11 E55). setTournamentMode (true) freezes routing:
+// the worker stops enumerating sessions (no process is opened, no audio
+// session is touched), makes no endpoint move and starts or stops no
+// capture; the app list and the running captures stay as they were. Leaving
+// it runs a pass at once. The router itself opens each process once while
+// its sessions last (platform::ProcessInfoCache).
 #pragma once
 
 #include "platform/PlatformServices.h"
@@ -229,6 +236,11 @@ public:
         Default: the host's device manager (the current device's output). */
     void setOutputDeviceSource (std::function<juce::String()> source);
 
+    // ---- Tournament mode (docs/11 E55) ------------------------------------------
+    /** Freezes routing (see the header comment); not persisted here. */
+    void setTournamentMode (bool shouldFreeze);
+    bool isTournamentMode() const noexcept { return tournament; }
+
     /** The route journal's file (next to the settings file). */
     const juce::File& getJournalFile() const noexcept { return journal.getFile(); }
 
@@ -244,7 +256,8 @@ private:
         std::vector<AppRoute> routes;
         std::vector<juce::String> stripNames, stripEndpoints;
         juce::String outputDevice; // the output device's name (doubling guard)
-        uint64_t generation = 0;   // bumped when routes, method, strips or the output device change
+        bool frozen = false;       // tournament mode: no pass at all
+        uint64_t generation = 0;   // bumped when routes, method, strips, the output device or tournament mode change
     };
 
     void run() override;
@@ -261,7 +274,7 @@ private:
     AudioEngineHost& host;
     AppSettings& settings;
     std::unique_ptr<flub::platform::AppAudioRouter> router;
-    bool captureSupported = false, liveUpdates = false, isStarted = false, isShutDown = false;
+    bool captureSupported = false, liveUpdates = false, isStarted = false, isShutDown = false, tournament = false;
     Method method = Method::Automatic;
     std::vector<AppRoute> routes;
 

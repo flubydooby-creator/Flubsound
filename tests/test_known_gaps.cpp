@@ -2044,7 +2044,7 @@ TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 
     CHECK_LE (r.thd[1], kAllMacrosOffThdDb[1] - 10.0);
 }
 
-TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; Signature and Punchy Pop still limit > 1 dB more than 2 % of the time (E11)")
+TEST_CASE ("KnownGap closed: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; with auto.preampHot also the allowance, the drive and half the Punch attack: Signature and Punchy Pop limit > 1 dB <= 2 % of the time (E11)")
 {
     // A hot master: -20 dBFS-RMS pink noise with 55 Hz kicks (-6 dBFS peak)
     // every 500 ms, through the maximizer alone at 10 dB drive, full clipper
@@ -2084,11 +2084,14 @@ TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 
     for (const auto& row : rows)
     {
         auto values = resolve (factoryPreset (row.file));
-        RenderResult off, on;
+        RenderResult off, on, hotOn;
         std::string error;
         REQUIRE (renderFile (hot, values, RenderSettings {}, off, error));
         setValue (values, AutoPreampOn, 1.0f);
         REQUIRE (renderFile (hot, values, RenderSettings {}, on, error));
+        auto hotValues = values;
+        setValue (hotValues, AutoPreampHot, 1.0f);
+        REQUIRE (renderFile (hot, hotValues, RenderSettings {}, hotOn, error));
         const std::string name = std::string (row.file).substr (6, std::string (row.file).size() - 11);
         {
             // The prediction and the preamp behind the "on" render.
@@ -2111,16 +2114,23 @@ TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 
         measured (name + " clip energy max, preamp on", on.stats.clipEnergyMaxDb, "dB");
         measured (name + " integrated loudness, preamp off", off.outputReport.integratedLufs, "LUFS");
         measured (name + " integrated loudness, preamp on", on.outputReport.integratedLufs, "LUFS");
+        measured (name + " limiter > 1 dB, preamp on + hot programme", hotOn.stats.limiterOver1DbPercent, "%");
+        measured (name + " limiter mean GR, preamp on + hot programme", hotOn.stats.limiterGrMeanDb, "dB");
+        measured (name + " integrated loudness, preamp on + hot programme", hotOn.outputReport.integratedLufs, "LUFS");
         CHECK_NEAR (off.stats.limiterOver1DbPercent, row.over1Off, 0.5);
         CHECK_NEAR (on.stats.limiterOver1DbPercent, row.over1On, 0.5);
         CHECK_NEAR (off.stats.clipEnergyMaxDb, row.clipOff, 0.5);
         CHECK_NEAR (on.stats.clipEnergyMaxDb, row.clipOn, 0.5);
         CHECK_LE (on.stats.limiterOver1DbPercent, off.stats.limiterOver1DbPercent);
         CHECK_LE (on.stats.clipEnergyMaxDb, off.stats.clipEnergyMaxDb);
-        // KNOWN_GAP: target limiter active (> 1 dB) <= 2 % on a hot master for
-        // Signature and Punchy Pop per docs/11 E11 Done-when. The rest is
-        // their maximizer drive (Boost), which is loudness on purpose, and
-        // the 1 dB allowance.
+        // The docs/11 E11 Done-when row: limiter active (> 1 dB) <= 2 % on a
+        // hot master for Signature and Punchy Pop. auto.preamp alone leaves
+        // their maximizer drive (Boost, loudness on purpose), the 1 dB
+        // allowance and Punch's onset lift; auto.preampHot takes them back
+        // while the input's peaks reach the ceiling (ProcessingChain.h),
+        // at the cost of that loudness.
+        CHECK_LE (hotOn.stats.limiterOver1DbPercent, 2.0);
+        CHECK_LE (hotOn.outputReport.integratedLufs, on.outputReport.integratedLufs);
     }
 }
 
@@ -2229,12 +2239,15 @@ double fftBandPowerOver (const std::vector<float>& x, int begin, int end, double
 }
 } // namespace
 
-TEST_CASE ("KnownGap: sibilance over voice - a sung vocal at Music Boost 100 + Clarity 100 rises +2.6 dB; Smoothness 100 takes back what the enhancement adds, the maximizer's level dependence stays (E07)")
+TEST_CASE ("KnownGap closed: sibilance over voice - a sung vocal at Music Boost 100 + Clarity 100 rises +2.6 dB; Smoothness 100 holds it to <= +0.5 dB (<= +1 dB at +8 dB input), the maximizer after the stage included (E07)")
 {
     // Change of sibilance / voice against the input (bypass), at 0 and +8 dB
     // input. Smoothness (smooth.amount, SmoothnessGuard.h) sits after the
-    // saturator and before the compressor and the maximizer, and takes the
-    // sibilant band back to its balance at the dynamic EQ's input.
+    // saturator and before the compressor and the maximizer, and holds each
+    // "s" to the lift of the voice around it at the chain's output (the
+    // maximizer's ducking of the loud vowels included; before Phase 3
+    // batch 2 it took the band back to the balance under the "s" at the
+    // dynamic EQ's input: +1.16 / +2.00 dB at Boost 100 + Clarity 100).
     struct Setting
     {
         const char* name;
@@ -2269,15 +2282,14 @@ TEST_CASE ("KnownGap: sibilance over voice - a sung vocal at Music Boost 100 + C
     // maximizer) and Boost 100 + Clarity 100 at -10 dB (the maximizer idle).
     CHECK_LE (change[5], 0.5);
     CHECK_LE (change[6], 0.5);
-    // KNOWN_GAP: target <= +0.5 dB at 0 dB input and <= +1 dB at +8 dB per
-    // docs/11 E07 Done-when. What is left at Boost 100 is the maximizer
-    // after the stage: it ducks the loud vowels more than the quieter "s"
-    // (the voice in the vowel frames loses 0.6 dB against the voice under
-    // the "s"), which a stage ahead of it cannot see. Boost 70 + Clarity 70
-    // (the fatigue session's setting) is at the 0 dB row's target (+0.50).
-    CHECK_NEAR (change[1], 1.16, 0.1);
-    CHECK_NEAR (change[3], 2.00, 0.1);
-    CHECK_LE (change[4], 0.55);
+    // The docs/11 E07 Done-when rows: <= +0.5 dB at 0 dB input and <= +1 dB
+    // at +8 dB. The maximizer ducks the loud vowels 0.6 dB more than the
+    // quieter "s" (the voice in the vowel frames against the voice under
+    // the "s"); the stage reads that at the output. Boost 70 + Clarity 70 is
+    // the fatigue session's setting.
+    CHECK_LE (change[1], 0.5);
+    CHECK_LE (change[3], 1.0);
+    CHECK_LE (change[4], 0.5);
 }
 
 TEST_CASE ("KnownGap closed at protection strength Normal: Gaming full stack on -30 dBFS pink - 2-5 kHz lift minus 200 Hz-1 kHz lift <= +2 dB (+4.1 dB at Off) (E07)")

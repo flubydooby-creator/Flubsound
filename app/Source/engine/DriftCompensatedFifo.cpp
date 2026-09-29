@@ -21,7 +21,68 @@ inline bool isSane (float v) noexcept
 {
     return std::abs (v) <= kSanitiseLimit;
 }
+
+/** Modified Bessel function of the first kind, order 0 (Kaiser window). */
+double besselI0 (double x) noexcept
+{
+    double sum = 1.0, term = 1.0;
+    const double q = 0.25 * x * x;
+    for (int k = 1; k < 64 && term > 1.0e-17 * sum; ++k)
+    {
+        term *= q / (static_cast<double> (k) * static_cast<double> (k));
+        sum += term;
+    }
+    return sum;
+}
+
+std::vector<float> buildKernelTable()
+{
+    using K = DriftCompensatedFifo::Kernel;
+    constexpr double half = 0.5 * K::kTaps;
+    const double norm = 1.0 / besselI0 (K::kBeta);
+    std::vector<float> table (static_cast<size_t> ((K::kPhases + 1) * K::kTaps));
+    std::vector<double> row (static_cast<size_t> (K::kTaps));
+    for (int p = 0; p <= K::kPhases; ++p)
+    {
+        const double fraction = static_cast<double> (p) / K::kPhases;
+        double sum = 0.0;
+        for (int k = 0; k < K::kTaps; ++k)
+        {
+            // Distance of tap k from the output position (between taps
+            // kTaps/2 - 1 and kTaps/2, `fraction` of the way).
+            const double x = static_cast<double> (k) - (half - 1.0) - fraction;
+            const double sinc = std::abs (x) < 1.0e-12 ? 1.0 : std::sin (flub::kPi * x) / (flub::kPi * x);
+            const double r = x / half;
+            const double window = std::abs (r) >= 1.0 ? 0.0 : besselI0 (K::kBeta * std::sqrt (1.0 - r * r)) * norm;
+            row[static_cast<size_t> (k)] = sinc * window;
+            sum += row[static_cast<size_t> (k)];
+        }
+        for (int k = 0; k < K::kTaps; ++k)
+            table[static_cast<size_t> (p * K::kTaps + k)] = static_cast<float> (row[static_cast<size_t> (k)] / sum);
+    }
+    return table;
+}
 } // namespace
+
+// =============================================================================
+// Kernel (docs/11 E50 Phase A)
+// =============================================================================
+const float* DriftCompensatedFifo::Kernel::table()
+{
+    static const std::vector<float> t = buildKernelTable();
+    return t.data();
+}
+
+void DriftCompensatedFifo::Kernel::coefficients (const float* rows, float fraction, float* out) noexcept FLUB_NONBLOCKING
+{
+    const float position = std::clamp (fraction, 0.0f, 1.0f) * static_cast<float> (kPhases);
+    const int p = std::min (static_cast<int> (position), kPhases - 1);
+    const float mix = position - static_cast<float> (p);
+    const float* a = rows + static_cast<size_t> (p) * kTaps;
+    const float* b = a + kTaps;
+    for (int k = 0; k < kTaps; ++k)
+        out[k] = a[k] + mix * (b[k] - a[k]);
+}
 
 // =============================================================================
 // Setup (non-RT)
@@ -31,6 +92,7 @@ void DriftCompensatedFifo::prepare (int numChannels, double producerSampleRate, 
 {
     channels = std::clamp (numChannels, 1, kMaxChannels);
     producerRate = producerSampleRate > 0.0 ? producerSampleRate : 48000.0;
+    kernelRows = Kernel::table(); // built here, off the audio thread
 
     const double seconds = std::max (0.1, bufferSeconds);
     const auto capacityFrames = static_cast<size_t> (std::max (8192.0, std::ceil (producerRate * seconds)));
@@ -70,6 +132,7 @@ void DriftCompensatedFifo::setConsumerFormat (double consumerSampleRate, int con
     phase = 0;
     for (auto& h : history)
         h.fill (0.0f);
+    historyPos = 0;
     lastOut.fill (0.0f);
     smoothedFill = 0.0;
     integral = 0.0;
@@ -213,6 +276,7 @@ void DriftCompensatedFifo::startStreaming (double fillFrames) noexcept
     phase = 0;
     for (auto& h : history)
         h.fill (0.0f);
+    historyPos = 0;
     fadeInRemaining = fadeLength;
     streamingStat.store (true, std::memory_order_relaxed);
 }
@@ -371,7 +435,7 @@ bool DriftCompensatedFifo::pull (float* const* dest, int numDestChannels, int nu
 
     ring.pop (staging.data(), needed * ch);
 
-    // ---- 5. Cubic Hermite (Catmull-Rom) interpolation -----------------------
+    // ---- 5. Band-limited interpolation (Kernel, docs/11 E50) ----------------
     const float* in = staging.data();
     size_t consumed = 0;
     const int fifoChannels = channels;
@@ -387,13 +451,11 @@ bool DriftCompensatedFifo::pull (float* const* dest, int numDestChannels, int nu
             --fadeInRemaining;
         }
 
+        Kernel::coefficients (kernelRows, t, kernelScratch.data());
         for (int c = 0; c < fifoChannels; ++c)
         {
-            const auto& h = history[static_cast<size_t> (c)];
-            const float c1 = 0.5f * (h[2] - h[0]);
-            const float c2 = h[0] - 2.5f * h[1] + 2.0f * h[2] - 0.5f * h[3];
-            const float c3 = 0.5f * (h[3] - h[0]) + 1.5f * (h[1] - h[2]);
-            const float y = (((c3 * t + c2) * t + c1) * t + h[1]) * gain;
+            const float* window = history[static_cast<size_t> (c)].data() + historyPos;
+            const float y = Kernel::apply (window, kernelScratch.data()) * gain;
             lastOut[static_cast<size_t> (c)] = y;
 
             if (c < numDestChannels && dest[c] != nullptr)
@@ -410,14 +472,14 @@ bool DriftCompensatedFifo::pull (float* const* dest, int numDestChannels, int nu
         {
             phase -= kPhaseOne;
             const float* frame = in + consumed * ch;
+            const auto at = static_cast<size_t> (historyPos);
             for (size_t c = 0; c < ch; ++c)
             {
                 auto& h = history[c];
-                h[0] = h[1];
-                h[1] = h[2];
-                h[2] = h[3];
-                h[3] = frame[c];
+                h[at] = frame[c];
+                h[at + static_cast<size_t> (Kernel::kTaps)] = frame[c];
             }
+            historyPos = historyPos + 1 == Kernel::kTaps ? 0 : historyPos + 1;
             ++consumed;
         }
     }
@@ -441,6 +503,7 @@ DriftCompensatedFifo::Stats DriftCompensatedFifo::getStats() const noexcept
     s.fillMs = fillMsStat.load (std::memory_order_relaxed);
     s.targetMs = targetMsStat.load (std::memory_order_relaxed);
     s.correctionPpm = correctionPpmStat.load (std::memory_order_relaxed);
+    s.resamplerDelayMs = static_cast<float> (1000.0 * fixedDelayFrames() / producerRate);
     s.streaming = streamingStat.load (std::memory_order_relaxed);
     return s;
 }

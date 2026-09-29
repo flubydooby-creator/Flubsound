@@ -312,9 +312,9 @@ static_assert (std::is_same_v<decltype (&LfeFold::clearState), void (LfeFold::*)
 static_assert (hasNonblockingReset<LfeFold>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::redetectInputChannels), void (ProcessingChain::*)() noexcept FLUB_NONBLOCKING>);
 
-// The Smoothness stage (its slot, the reference the chain hands it every
-// segment) and the tonal-balance rule's meter, fed and ticked by
-// ProcessingChain::process at protection strength Normal / Strict
+// The Smoothness stage (its slot, the reference and the output the chain
+// hands it every segment) and the tonal-balance rule's meter, fed and ticked
+// by ProcessingChain::process at protection strength Normal / Strict
 // (docs/11 E07, tests/test_protection_tonal.cpp).
 #include "flub/dsp/SmoothnessGuard.h"
 #include "flub/dsp/TonalBalanceMeter.h"
@@ -323,6 +323,7 @@ static_assert (hasNonblockingProcess<SmoothnessGuard>);
 static_assert (hasNonblockingReset<SmoothnessGuard>);
 static_assert (hasNonblockingSetParams<SmoothnessGuard, SmoothnessParams>);
 static_assert (std::is_same_v<decltype (&SmoothnessGuard::setReference), void (SmoothnessGuard::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SmoothnessGuard::processDownstream), void (SmoothnessGuard::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::processReference), void (TonalBalanceMeter::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::processOutput), void (TonalBalanceMeter::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::tick), void (TonalBalanceMeter::*)() noexcept FLUB_NONBLOCKING>);

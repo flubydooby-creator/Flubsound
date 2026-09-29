@@ -9,6 +9,10 @@
 //                    system's own sound / routing settings). Shown while the
 //                    state is not None; it cannot be dismissed, because the
 //                    output is silent or gone until the problem is fixed.
+//                    Also, in amber, while the chosen output is missing and
+//                    another plays (docs/11 E51 outputFallback: which device,
+//                    and the safe speaker profile when it is on); it goes
+//                    when the chosen output is back.
 // NoticeBar          one line of notices, the newest on top of a short queue
 //                    (a notice with the same key replaces the older one):
 //                    * preset reader warnings (docs/11 E52: unknown keys,
@@ -46,7 +50,8 @@ public:
     bool shouldShow() const noexcept { return showing; }
 
     /** The bold part of the banner for a state ("Output muted: feedback
-        loop", "Audio device error"); empty for Kind::None. */
+        loop", "Audio device error", "Output fallback"); empty for Kind::None
+        without a fallback. */
     static juce::String headlineFor (const DeviceSafetyState& state);
     /** The message: the host's text, or a fallback when it has none. */
     static juce::String messageFor (const DeviceSafetyState& state);
@@ -73,7 +78,7 @@ private:
     EngineController& controller;
     juce::TextButton retryButton { "Retry" }, chooseButton { "Choose output" }, soundButton { "Sound settings" };
     juce::String headline, message, retryError;
-    bool showing = false;
+    bool showing = false, warnOnly = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceErrorBanner)
 };

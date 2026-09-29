@@ -2,6 +2,9 @@
 
 #include "FlubLookAndFeel.h"
 #include "ParameterBinding.h"
+#include "diagnostics/CrashHandler.h"
+#include "diagnostics/DiagnosticLog.h"
+#include "diagnostics/DiagnosticsBundle.h"
 #include "platform/PlatformBridge.h"
 #include "presets/PresetManager.h"
 
@@ -1230,6 +1233,114 @@ private:
 };
 
 // =============================================================================
+// Diagnostics page (docs/11 E54)
+// =============================================================================
+class SettingsDialog::DiagnosticsPage : public juce::Component
+{
+public:
+    explicit DiagnosticsPage (EngineController& c)
+        : controller (c)
+    {
+        revealLogs.setText ("Show");
+        revealLogs.onClick = []
+        {
+            const auto folder = diagnostics::logFolder();
+            folder.createDirectory();
+            folder.revealToUser();
+        };
+        addAndMakeVisible (revealLogs);
+
+        exportButton.setButtonText ("Export diagnostics...");
+        exportButton.setTooltip ("Save one zip to attach to a report: versions, the audio device and its state, settings, logs and crash reports");
+        exportButton.onClick = [this] { chooseAndExport(); };
+        addAndMakeVisible (exportButton);
+        refresh();
+    }
+
+    void refresh()
+    {
+        crashText = describeCrashReports (diagnostics::logFolder());
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        drawSectionTitle (g, titleArea, "Diagnostics");
+        g.setColour (Palette::faint.brighter (0.2f));
+        g.setFont (Theme::font (12.0f));
+        g.drawFittedText ("Flubsound keeps a log of device changes, errors, glitches and overloads, and writes a crash report if it "
+                          "crashes. They stay on this computer and contain no audio. To report a problem, export them and attach the zip.",
+                          introArea, juce::Justification::topLeft, 3, 1.0f);
+        g.setFont (Theme::font (12.5f));
+        auto line = [&g] (juce::Rectangle<int> area, const juce::String& caption, const juce::String& value)
+        {
+            g.setColour (Palette::text.withAlpha (0.88f));
+            g.drawText (caption, area.removeFromLeft (kCaptionWidth), juce::Justification::centredLeft, true);
+            g.setColour (Palette::muted);
+            g.drawFittedText (value, area, juce::Justification::centredLeft, 1, 0.7f);
+        };
+        line (folderLine, "Log folder", diagnostics::logFolder().getFullPathName());
+        line (crashLine, "Crash reports", crashText);
+        if (status.isNotEmpty())
+        {
+            g.setColour (statusIsError ? Palette::amber : Palette::muted);
+            g.setFont (Theme::font (11.5f));
+            g.drawFittedText (status, statusArea, juce::Justification::topLeft, 3, 1.0f);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        titleArea = r.removeFromTop (22);
+        r.removeFromTop (10);
+        introArea = r.removeFromTop (50);
+        r.removeFromTop (6);
+        folderLine = r.removeFromTop (kRowHeight);
+        revealLogs.setBounds (folderLine.removeFromRight (70).reduced (0, 2));
+        folderLine.removeFromRight (8);
+        r.removeFromTop (4);
+        crashLine = r.removeFromTop (kRowHeight);
+        r.removeFromTop (14);
+        exportButton.setBounds (r.removeFromTop (kRowHeight).withWidth (220).reduced (0, 2));
+        r.removeFromTop (6);
+        statusArea = r.removeFromTop (48);
+    }
+
+private:
+    void chooseAndExport()
+    {
+        const auto folder = juce::File::getSpecialLocation (juce::File::userDesktopDirectory);
+        chooser = std::make_unique<juce::FileChooser> ("Save diagnostics", folder.getChildFile (diagnostics::defaultBundleName()), "*.zip");
+        juce::Component::SafePointer<DiagnosticsPage> safe (this);
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [safe] (const juce::FileChooser& fc)
+                              {
+                                  if (safe == nullptr || fc.getResult() == juce::File())
+                                      return;
+                                  auto target = fc.getResult();
+                                  if (! target.hasFileExtension ("zip"))
+                                      target = target.withFileExtension ("zip");
+                                  const auto error = exportDiagnostics (safe->controller, diagnostics::logFolder(), target);
+                                  safe->statusIsError = error.isNotEmpty();
+                                  safe->status = error.isNotEmpty() ? error : "Saved " + target.getFullPathName();
+                                  if (error.isEmpty())
+                                      target.revealToUser();
+                                  safe->refresh();
+                              });
+    }
+
+    EngineController& controller;
+    IconButton revealLogs { "Show the log folder", Icons::external(), IconButton::Style::Framed };
+    juce::TextButton exportButton;
+    std::unique_ptr<juce::FileChooser> chooser;
+    juce::String crashText, status;
+    bool statusIsError = false;
+    juce::Rectangle<int> titleArea, introArea, folderLine, crashLine, statusArea;
+};
+
+// =============================================================================
 // SettingsDialog
 // =============================================================================
 SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::function<void (MeterPalette)> onPalette, MeterPalette palette)
@@ -1237,7 +1348,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
 {
     setTitle ("Flubsound settings");
 
-    static const char* names[] = { "Audio", "Correction", "Processing", "Hotkeys", "General" };
+    static const char* names[] = { "Audio", "Correction", "Processing", "Hotkeys", "General", "Diagnostics" };
     for (size_t i = 0; i < navButtons.size(); ++i)
     {
         auto& b = navButtons[i];
@@ -1254,6 +1365,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     processingPage = std::make_unique<ProcessingPage> (controller, std::move (onPalette), palette);
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
+    diagnosticsPage = std::make_unique<DiagnosticsPage> (controller);
     audioView.setViewedComponent (audioPage.get(), false);
     processingView.setViewedComponent (processingPage.get(), false);
     for (auto* view : { &audioView, &processingView })
@@ -1265,6 +1377,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     addChildComponent (*correctionPage);
     addChildComponent (*hotkeysPage);
     addChildComponent (*generalPage);
+    addChildComponent (*diagnosticsPage);
 
     showPage (Page::Audio);
     setSize (780, 600);
@@ -1445,6 +1558,34 @@ juce::String SettingsDialog::describeDeviceCorrection (const EngineController::D
     return s;
 }
 
+juce::String SettingsDialog::describeCrashReports (const juce::File& logFolder)
+{
+    const auto reports = diagnostics::crash::findReports (logFolder);
+    if (reports.isEmpty())
+        return "None";
+    return juce::String (reports.size()) + "  -  the latest on " + reports.getFirst().getLastModificationTime().formatted ("%Y-%m-%d %H:%M");
+}
+
+juce::String SettingsDialog::exportDiagnostics (EngineController& controller, const juce::File& logFolder, const juce::File& zipFile,
+                                                bool listDevices)
+{
+    diagnostics::BundleSources sources;
+    sources.systemReport = diagnostics::describeEngine (controller, listDevices);
+    sources.systemReport << "\nOutput device profile:\n" << describeOutputDevice (controller) << "\n";
+    if (const auto streams = describeCaptureStreams (controller.getCaptureStreams()); streams.isNotEmpty())
+        sources.systemReport << "\nPer-app capture streams:\n" << streams << "\n";
+    sources.systemReport << "\nLoopback guard: " << describeLoopbackGuard (controller) << "\n";
+
+    const auto settingsFile = controller.getSettings().getFile();
+    sources.settingsFiles.add (settingsFile);
+    sources.settingsFiles.add (settingsFile.getSiblingFile ("route-journal.json"));
+    auto logs = logFolder.findChildFiles (juce::File::findFiles, false, "*.log");
+    logs.sort();
+    sources.logFiles = logs;
+    sources.crashFolder = logFolder;
+    return diagnostics::writeBundle (sources, zipFile);
+}
+
 void SettingsDialog::showPage (Page page)
 {
     current = page;
@@ -1455,6 +1596,7 @@ void SettingsDialog::showPage (Page page)
     processingView.setVisible (page == Page::Processing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
+    diagnosticsPage->setVisible (page == Page::Diagnostics);
     if (page == Page::Processing)
         processingPage->refresh();
     if (page == Page::Correction)
@@ -1463,6 +1605,8 @@ void SettingsDialog::showPage (Page page)
         hotkeysPage->refresh();
     if (page == Page::General)
         generalPage->refresh();
+    if (page == Page::Diagnostics)
+        diagnosticsPage->refresh();
     repaint();
 }
 
@@ -1516,5 +1660,6 @@ void SettingsDialog::resized()
     correctionPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);
+    diagnosticsPage->setBounds (pageArea);
 }
 } // namespace flub::app::ui

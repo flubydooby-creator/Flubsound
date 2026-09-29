@@ -204,6 +204,9 @@ enum Id : int
     BassSubsonicOrder, // Choice: the subsonic filter's slope, SubsonicOrderValue (12 dB/oct halves its group delay)
     BassSplitProtect,  // Toggle: split-band headroom protection with a program-dependent release
 
+    // Automatic preamp addition (docs/11 E11 Phase 3 batch 2; ProcessingChain.h)
+    AutoPreampHot,     // Toggle: with auto.preamp, also take back the allowance and the maximizer's drive while the input's peaks leave no room under the ceiling
+
     kNumScalarParams
 };
 

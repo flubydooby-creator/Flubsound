@@ -867,7 +867,7 @@ void EngineController::persistDeviceState()
 {
     // createStateXml() is null while the manager is on an implicit default
     // device: keep whatever was saved before in that case.
-    if (auto xml = getDeviceManager().createStateXml())
+    if (auto xml = host->createDeviceStateXml())
         settings->setDeviceState (xml.get());
 }
 

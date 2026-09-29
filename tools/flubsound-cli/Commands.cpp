@@ -419,6 +419,10 @@ json::Value renderStatsToJson (const RenderStats& st)
     governor.set ("end", std::move (end));
     governor.set ("measured", governorMeasuredToJson (st)); // docs/11 E06 batch 2
 
+    json::Value smoothness; // docs/11 E07
+    smoothness.set ("cutMaxDb", statValue (st.smoothnessCutMaxDb));
+    smoothness.set ("activePercent", statValue (st.smoothnessActivePercent));
+
     json::Value leveller;
     leveller.set ("autoLevelMinDb", statValue (st.autoLevelMinDb));
     leveller.set ("autoLevelMaxDb", statValue (st.autoLevelMaxDb));
@@ -435,6 +439,7 @@ json::Value renderStatsToJson (const RenderStats& st)
     v.set ("bassProtectionMaxDb", statValue (st.bassProtectionMaxDb));
     v.set ("modeBands", std::move (bands));
     v.set ("governor", std::move (governor));
+    v.set ("smoothness", std::move (smoothness));
     v.set ("leveller", std::move (leveller));
     return v;
 }

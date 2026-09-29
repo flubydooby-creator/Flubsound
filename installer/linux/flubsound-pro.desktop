@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Flubsound Pro
+GenericName=Audio Enhancer
+Comment=Real-time sound enhancement for music and games
+Exec=flubsound-pro
+Icon=audio-card
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=equalizer;eq;bass;audio;sound;headset;gaming;music;
+StartupNotify=true

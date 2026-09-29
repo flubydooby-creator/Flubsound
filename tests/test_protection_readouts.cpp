@@ -7,7 +7,8 @@
 //     strip's protection strength and learned state to the new engine;
 //   * MeterBus, render.stats and `flubsound-cli quality` carry the measured
 //     loop's scales, audible residuals, PLR, brightness, budgets and the
-//     kReasonDynamics / kReasonHarmonics bits.
+//     kReasonDynamics / kReasonHarmonics bits; render.stats the Smoothness
+//     stage's cut (docs/11 E07 batch 2).
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -293,4 +295,47 @@ TEST_CASE ("CLI: render.stats and `quality` carry the measured loop's readouts (
     const auto qj = qualityToJson (q);
     CHECK (qj["loudness"]["pinkGovernor"]["measured"]["strength"].asString() == "normal");
     CHECK (formatQuality (q).find ("Governor: on the pink") != std::string::npos);
+}
+
+TEST_CASE ("CLI: render.stats carries the Smoothness stage's cut (smoothness.cutMaxDb, activePercent), 0 while it idles (E07)")
+{
+    using namespace flub::cli;
+    // A 180 Hz "vowel" ducked under a differentiated-noise "s" (+6 dB/oct)
+    // every 500 ms, at Music Boost 100 + Clarity 100.
+    const int n = static_cast<int> (2.0 * kFs);
+    const auto noise = whiteNoise (n, 0.25f, 7);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t, 0.5);
+        const double gate = beat < 0.12 ? 0.5 - 0.5 * std::cos (2.0 * kPi * beat / 0.12) : 0.0;
+        const double s = i > 0 ? noise[static_cast<size_t> (i)] - noise[static_cast<size_t> (i - 1)] : 0.0;
+        x[static_cast<size_t> (i)] = static_cast<float> (0.1 * std::sin (2.0 * kPi * 180.0 * t) * (1.0 - 0.8 * gate) + s * gate);
+    }
+    std::vector<float> values (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        values[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+    values[static_cast<size_t> (Mode)] = static_cast<float> (ModeValue::Music);
+    values[static_cast<size_t> (BoostIntensity)] = 1.0f;
+    values[static_cast<size_t> (Macro3)] = 1.0f;
+    const auto render = [&x] (const std::vector<float>& v) {
+        io::AudioFileData d;
+        d.sampleRate = kFs;
+        d.numChannels = 2;
+        d.channels = { x, x };
+        RenderResult rr;
+        std::string error;
+        REQUIRE (renderFile (d, v, RenderSettings {}, rr, error));
+        return renderStatsToJson (rr.stats);
+    };
+    const auto idle = render (values);
+    CHECK (idle["smoothness"]["cutMaxDb"].asNumber() == 0.0);
+    CHECK (idle["smoothness"]["activePercent"].asNumber() == 0.0);
+    values[static_cast<size_t> (SmoothAmount)] = 1.0f;
+    const auto on = render (values);
+    std::printf ("    measured Smoothness 100: render.stats cutMaxDb %.2f dB, activePercent %.1f %%\n", on["smoothness"]["cutMaxDb"].asNumber(),
+                 on["smoothness"]["activePercent"].asNumber());
+    CHECK (on["smoothness"]["cutMaxDb"].asNumber() < -1.0);
+    CHECK (on["smoothness"]["activePercent"].asNumber() > 5.0);
+    CHECK (on["smoothness"]["activePercent"].asNumber() < 50.0);
 }

@@ -107,6 +107,24 @@
 // compares against the unprocessed signal, and every module - EQ first -
 // sees the lowered level, so a boosted chain reaches the maximizer with the
 // headroom its boosts use instead of driving the limiter.
+// Hot programme (auto.preampHot, docs/11 E11 Phase 3 batch 2; only with
+// auto.preamp). On a hot master (peaks at -0.3 dBTP) what the allowance
+// leaves in, the maximizer's drive (Boost's loudness) and the transient
+// shaper's onset lift (Punch) have no room under the ceiling and only drive
+// the limiter. The chain then holds the sample peak of what the preamp gets
+// (per segment, the sanitiser's muted blocks left out; a new peak at once,
+// held kHotHoldSeconds, then released at kHotReleaseDbPerSecond) and lowers
+// the preamp further by
+//   hot  = -clamp (peak + gain - ceiling, 0, max (0, gain))
+//   gain = prediction + preamp (what the allowance leaves) + the applied
+//          max.drive (the maximizer on; else 0, with a 0 dBFS ceiling)
+//          + 0.5 x the applied clarity.attack (>= 0, Clarity on)
+// so the held peak reaches the maximizer at its ceiling at most, and
+// programme with room keeps all of it, bit for bit. The half attack is a
+// tuned share (an onset rarely gets the whole attack gain; the whole one
+// cost Punchy Pop another 1.3 LU on a hot master). The limiter still
+// catches the first peak of a louder passage (no look-ahead).
+// getAutoPreampDb() includes it.
 //
 // Input sanitiser (docs/11 E10 Phase 1), before anything else sees the block:
 //   * a NaN / Inf anywhere drops the whole block (silence out) and resets the
@@ -529,6 +547,13 @@ private:
     StaticBoostModel headroomModel;
     LinearSmoothedValue preampGain;
     std::atomic<float> predictedBoostDb { 0.0f }, predictedBoostHz { 1000.0f }, autoPreampDb { 0.0f };
+    // Hot programme (auto.preampHot): the static preamp and what it leaves
+    // in, the held input peak, and the extra preamp (dB <= 0).
+    static constexpr float kHotHoldSeconds = 2.0f, kHotReleaseDbPerSecond = 1.0f;
+    float staticPreampDb = 0.0f, staticGainDb = 0.0f;
+    float hotPeakDb = kMinusInfDb, hotPreampDb = 0.0f;
+    int hotHoldLeft = 0;
+    void updateHotPreamp (const AudioBlock& st, bool contaminated) noexcept FLUB_NONBLOCKING;
     AutoLevel autoLevel;
     StartleGuard startleGuard;
     // The loudness contour (docs/11 E32) and the host's listening level.

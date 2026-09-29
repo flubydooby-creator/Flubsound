@@ -75,6 +75,65 @@ uint64_t steadyNowNs() noexcept
         std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// ---- Device selection (docs/11 E51) ---------------------------------------------
+/** The output device a JUCE DEVICESETUP element names. */
+juce::String outputNameIn (const juce::XmlElement& xml)
+{
+    const auto both = xml.getStringAttribute ("audioDeviceName");
+    return both.isNotEmpty() ? both : xml.getStringAttribute ("audioOutputDeviceName");
+}
+
+/** Fills the endpoint id and hardware id of the endpoint `choice.deviceName`
+    names in `endpoints` (JUCE's duplicate numbering undone); unchanged when
+    none matches. */
+void rememberIdentity (flub::app::AudioEngineHost::OutputChoice& choice, const std::vector<flub::platform::OutputEndpointIdentity>& endpoints)
+{
+    std::vector<flub::platform::AppAudioRouter::OutputEndpoint> plain;
+    plain.reserve (endpoints.size());
+    for (const auto& e : endpoints)
+        plain.push_back ({ e.id, e.name });
+    const auto id = flub::platform::AppAudioRouter::matchOutputDeviceName (plain, choice.deviceName.toStdString());
+    for (const auto& e : endpoints)
+        if (! id.empty() && e.id == id)
+        {
+            choice.endpointId = juce::String (e.id);
+            choice.hardwareId = juce::String (e.hardwareId);
+        }
+}
+
+/** The saved setup's input device, channels, rate and block size (as
+    AudioDeviceManager::initialiseFromXML reads them), for a device opened
+    by the selection while none is open: JUCE keeps no setup of a device
+    that failed to open. The output name is the selection's. */
+void applySavedSetup (const juce::XmlElement& xml, juce::AudioDeviceManager::AudioDeviceSetup& setup)
+{
+    const auto both = xml.getStringAttribute ("audioDeviceName");
+    if (setup.inputDeviceName.isEmpty())
+        setup.inputDeviceName = both.isNotEmpty() ? both : xml.getStringAttribute ("audioInputDeviceName");
+    setup.bufferSize = xml.getIntAttribute ("audioDeviceBufferSize", setup.bufferSize);
+    setup.sampleRate = xml.getDoubleAttribute ("audioDeviceRate", setup.sampleRate);
+    if (xml.hasAttribute ("audioDeviceInChans"))
+    {
+        setup.inputChannels.parseString (xml.getStringAttribute ("audioDeviceInChans"), 2);
+        setup.useDefaultInputChannels = false;
+    }
+    if (xml.hasAttribute ("audioDeviceOutChans"))
+    {
+        setup.outputChannels.parseString (xml.getStringAttribute ("audioDeviceOutChans"), 2);
+        setup.useDefaultOutputChannels = false;
+    }
+}
+
+/** A name that says headphones or a headset (no platform form factor known). */
+bool soundsLikeHeadphones (const juce::String& name)
+{
+    const auto lower = name.toLowerCase();
+    for (const auto* t : { "headphone", "headset", "earphone", "earbud", "casque", "kopfh" })
+        if (lower.contains (t))
+            return true;
+    return false;
+}
+
 // ---- Loopback-pair table (docs/11 E51) ------------------------------------------
 // Device names as the OS reports them, e.g. WASAPI friendly names
 // "CABLE Output (VB-Audio Virtual Cable)". Matching is on exact partner
@@ -173,6 +232,30 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     JUCE_ASSERT_MESSAGE_THREAD
     closeDevice();
 
+    // The chosen output and its identity (DEVICE SELECTION); settings from
+    // before docs/11 E51 carry the name only, and the identity is filled in
+    // once the device is seen.
+    chosen = {};
+    if (savedState != nullptr && savedState->hasTagName ("DEVICESETUP"))
+    {
+        chosen.deviceName = outputNameIn (*savedState);
+        chosen.endpointId = savedState->getStringAttribute ("flubOutputEndpointId");
+        chosen.hardwareId = savedState->getStringAttribute ("flubOutputHardwareId");
+    }
+    lastExplicitOutput = chosen.deviceName;
+    selection = {};
+    unavailableOutputs.clear();
+    recoveryPending = recoveryCheckHealth = suspended = false;
+    recoveryAttempts = 0;
+    managingDevice = true;
+
+#if FLUB_HAS_PLATFORM_SERVICES
+    if (deviceWatcher == nullptr && ! deviceWatcherInjected)
+        deviceWatcher = flub::platform::AudioDeviceWatcher::create();
+#endif
+    if (deviceWatcher != nullptr && ! deviceWatcherStarted)
+        deviceWatcherStarted = deviceWatcher->start ([this] (const flub::platform::AudioDeviceEvent& e) { postDeviceEvent (e); });
+
    #if JUCE_WINDOWS
     // Nothing saved (first run, or the user never changed the device): prefer
     // JUCE's IAudioClient3 low-latency shared mode to the default "Windows
@@ -194,15 +277,26 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     }
    #endif
 
-    auto error = deviceManager.initialise (maxInputChannels, maxOutputChannels, savedState, true);
+    // Explicit selection: never JUCE's selectDefaultDeviceOnFailure, whose
+    // default may be the input's loopback partner (the cable setup's system
+    // default IS CABLE Input). reselectOutput() picks instead.
+    auto error = deviceManager.initialise (maxInputChannels, maxOutputChannels, savedState, false);
 
    #if JUCE_WINDOWS
     if (fallbackType.isNotEmpty() && (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr))
     {
         deviceManager.setCurrentAudioDeviceType (fallbackType, false);
-        error = deviceManager.initialise (maxInputChannels, maxOutputChannels, nullptr, true);
+        error = deviceManager.initialise (maxInputChannels, maxOutputChannels, nullptr, false);
     }
    #endif
+
+    deviceManager.addChangeListener (this);
+    noteExplicitOutput();
+    reselectOutput();
+    if (deviceManager.getCurrentAudioDevice() != nullptr)
+        error = {};
+    else if (error.isEmpty() && selection.reason == OutputReason::NoSafeOutput && chosen.deviceName.isNotEmpty())
+        error = "\"" + chosen.deviceName + "\" is not available and no other output is safe to use";
 
     // Attaching triggers audioDeviceAboutToStart -> configureEngine for the
     // device's real sample rate / block size.
@@ -228,6 +322,27 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
 void AudioEngineHost::closeDevice()
 {
     JUCE_ASSERT_MESSAGE_THREAD
+    if (managingDevice)
+    {
+        deviceManager.removeChangeListener (this);
+        managingDevice = false;
+    }
+    if (deviceWatcher != nullptr && deviceWatcherStarted)
+    {
+        deviceWatcher->stop();
+        deviceWatcherStarted = false;
+    }
+    {
+        const juce::ScopedLock sl (eventLock);
+        pendingEvents.clear();
+    }
+    recoveryPending = reselectPending = false;
+    applySafeSpeakerProfile (false);
+    const bool hadFallback = selection.fallback;
+    selection = {};
+    if (hadFallback)
+        updateFallbackState();
+
     if (callbackAttached)
     {
         deviceManager.removeAudioCallback (this);
@@ -471,6 +586,10 @@ void AudioEngineHost::afterStructureChange()
 
     structureGeneration.fetch_add (1, std::memory_order_acq_rel);
 
+    // New chains start without the safe speaker profile's bypasses.
+    if (safeProfileActive)
+        applySafeSpeakerProfile (true);
+
     // Listeners are notified asynchronously: this may run inside JUCE's
     // audioDeviceAboutToStart (under the device manager's callback lock).
     notifyPending.store (true, std::memory_order_release);
@@ -522,6 +641,18 @@ void AudioEngineHost::timerCallback()
 
     // A new device thread: its real-time status, RealtimeKit if needed.
     serviceAudioThreadRealtime();
+
+    // docs/11 E51: a recovery step or a re-selection when one is due; the
+    // safe speaker profile's bypasses held (an audition release may have
+    // cleared one).
+    serviceDeviceRecovery();
+    if (reselectPending && static_cast<int32_t> (juce::Time::getMillisecondCounter() - reselectDueMs) >= 0)
+    {
+        reselectPending = false;
+        reselectOutput();
+    }
+    if (safeProfileActive)
+        applySafeSpeakerProfile (true);
 }
 
 void AudioEngineHost::handleAsyncUpdate()
@@ -563,7 +694,13 @@ void AudioEngineHost::handleAsyncUpdate()
         }
         if (onDeviceError != nullptr)
             onDeviceError (message);
+        // docs/11 E51: re-open the output unless callbacks keep running.
+        if (managingDevice)
+            scheduleRecovery (message, recoveryTiming.settleMs, true);
     }
+
+    if (deviceEventsPending.exchange (false, std::memory_order_acq_rel))
+        handleDeviceEvents();
 
     if (notifyPending.exchange (false, std::memory_order_acq_rel) && onEngineConfigured != nullptr)
         onEngineConfigured();
@@ -1278,6 +1415,7 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
         processBlock (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, nullptr);
         if (guarded || guardGain < 1.0f)
             applyGuardToOutput (outputChannelData, numOutputChannels, numSamples, guarded);
+        applyOutputTrim (outputChannelData, numOutputChannels, numSamples);
     }
     else
     {
@@ -1329,6 +1467,27 @@ void AudioEngineHost::applyGuardToOutput (float* const* outputs, int numOutputs,
                 outputs[c][k] *= g;
     }
     guardGain = g;
+}
+
+void AudioEngineHost::applyOutputTrim (float* const* outputs, int numOutputs, int numSamples) noexcept
+{
+    // docs/11 E51: the safe speaker profile's trim, a linear ramp of at most
+    // kTrimRampMs towards the target (1 = off, nothing to do).
+    const float target = outputTrimTarget.load (std::memory_order_relaxed);
+    float g = outputTrimGain;
+    if (g == 1.0f && target == 1.0f)
+        return;
+    const double rate = deviceSampleRate.load (std::memory_order_relaxed);
+    const float step = static_cast<float> (1.0 / std::max (1.0, kTrimRampMs * 0.001 * (rate > 0.0 ? rate : 48000.0)));
+    for (int k = 0; k < numSamples; ++k)
+    {
+        if (g != target)
+            g = target > g ? std::min (target, g + step) : std::max (target, g - step);
+        for (int c = 0; c < numOutputs; ++c)
+            if (outputs[c] != nullptr)
+                outputs[c][k] *= g;
+    }
+    outputTrimGain = g;
 }
 
 void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
@@ -1523,8 +1682,32 @@ void AudioEngineHost::applyDeviceStartSafety (juce::AudioIODevice* device)
 
 void AudioEngineHost::setSafetyState (DeviceSafetyState next)
 {
+    // The fallback part always describes the current selection (DEVICE SELECTION).
+    next.outputFallback = managingDevice && selection.fallback;
+    next.safeSpeakerProfile = next.outputFallback && safeProfileActive;
+    next.chosenOutputName = next.outputFallback ? chosen.deviceName : juce::String();
+    next.fallbackOutputName = next.outputFallback ? selection.deviceName : juce::String();
+    next.fallbackMessage = {};
+    if (next.outputFallback)
+    {
+        auto& m = next.fallbackMessage;
+        m << "\"" << chosen.deviceName << "\" "
+          << (selection.chosenUnavailable ? "could not be opened (another program may use it in exclusive mode)" : "is not connected");
+        if (selection.deviceName.isEmpty())
+            m << ", and no other output is safe to use.";
+        else
+            m << ": playing on \"" << selection.deviceName << "\"";
+        if (next.safeSpeakerProfile)
+            m << " with the safe speaker profile (virtualiser and bass engine off, " << juce::String (kSafeSpeakerTrimDb, 0) << " dB)";
+        if (selection.deviceName.isNotEmpty())
+            m << ". Flubsound switches back when it is available again.";
+    }
+
     if (next.kind == safety.kind && next.message == safety.message && next.inputDeviceName == safety.inputDeviceName
-        && next.outputDeviceName == safety.outputDeviceName && next.outputMuted == safety.outputMuted)
+        && next.outputDeviceName == safety.outputDeviceName && next.outputMuted == safety.outputMuted
+        && next.outputFallback == safety.outputFallback && next.safeSpeakerProfile == safety.safeSpeakerProfile
+        && next.chosenOutputName == safety.chosenOutputName && next.fallbackOutputName == safety.fallbackOutputName
+        && next.fallbackMessage == safety.fallbackMessage)
         return;
     next.generation = safety.generation + 1;
     safety = std::move (next);
@@ -1532,6 +1715,392 @@ void AudioEngineHost::setSafetyState (DeviceSafetyState next)
     // audioDeviceAboutToStart (under the device manager's callback lock).
     safetyNotifyPending.store (true, std::memory_order_release);
     triggerAsyncUpdate();
+}
+
+// =============================================================================
+// Output selection and recovery (docs/11 E51)
+// =============================================================================
+bool AudioEngineHost::isVirtualOutput (const juce::String& name, const flub::platform::OutputEndpointIdentity* identity)
+{
+    if (identity != nullptr && identity->transport == flub::platform::EndpointTransport::Virtual)
+        return true;
+    return hasVirtualDeviceToken (name.toLowerCase());
+}
+
+AudioEngineHost::OutputSelection AudioEngineHost::selectOutput (const OutputChoice& choice, const juce::StringArray& outputs,
+                                                                int defaultIndex,
+                                                                const std::vector<flub::platform::OutputEndpointIdentity>& endpoints,
+                                                                const juce::String& inputDeviceName, bool inputFeedsStrip,
+                                                                const juce::StringArray& unavailable)
+{
+    using flub::platform::AudioDeviceWatcher;
+    using flub::platform::EndpointFormFactor;
+
+    // Each output with its platform identity, matched by name like the
+    // doubling guard (JUCE numbers duplicate names " (2)"); names only when
+    // the platform lists nothing.
+    std::vector<flub::platform::AppAudioRouter::OutputEndpoint> plain;
+    plain.reserve (endpoints.size());
+    for (const auto& e : endpoints)
+        plain.push_back ({ e.id, e.name });
+    std::vector<flub::platform::OutputEndpointIdentity> present;
+    present.reserve (static_cast<size_t> (outputs.size()));
+    for (const auto& name : outputs)
+    {
+        flub::platform::OutputEndpointIdentity identity;
+        const auto id = flub::platform::AppAudioRouter::matchOutputDeviceName (plain, name.toStdString());
+        for (const auto& e : endpoints)
+            if (! id.empty() && e.id == id)
+                identity = e;
+        identity.name = name.toStdString(); // what the selection opens
+        present.push_back (std::move (identity));
+    }
+
+    const auto usable = [&] (int i) { return ! unavailable.contains (outputs[i]); };
+    const auto pick = [&] (int i, OutputReason reason)
+    {
+        OutputSelection s;
+        s.deviceName = outputs[i];
+        s.reason = reason;
+        return s;
+    };
+
+    const bool hasChoice = choice.deviceName.isNotEmpty() || choice.endpointId.isNotEmpty();
+    bool chosenUnavailable = false;
+    if (hasChoice)
+    {
+        // 1) The same endpoint (also renamed), 2) the same name unless the
+        // hardware says it is another device, 3) recognised elsewhere.
+        const auto wantedId = choice.endpointId.toStdString(), wantedHardware = choice.hardwareId.toStdString();
+        for (int i = 0; i < outputs.size(); ++i)
+            if (! wantedId.empty() && present[static_cast<size_t> (i)].id == wantedId)
+            {
+                if (usable (i))
+                    return pick (i, outputs[i] == choice.deviceName ? OutputReason::Chosen : OutputReason::Recognised);
+                chosenUnavailable = true;
+            }
+        for (int i = 0; i < outputs.size(); ++i)
+        {
+            const auto& hw = present[static_cast<size_t> (i)].hardwareId;
+            if (outputs[i] == choice.deviceName && (wantedHardware.empty() || hw.empty() || juce::String (hw).equalsIgnoreCase (choice.hardwareId)))
+            {
+                if (usable (i))
+                    return pick (i, OutputReason::Chosen);
+                chosenUnavailable = true;
+            }
+        }
+        flub::platform::OutputEndpointIdentity remembered;
+        remembered.id = wantedId;
+        remembered.name = choice.deviceName.toStdString();
+        remembered.hardwareId = wantedHardware;
+        std::vector<flub::platform::OutputEndpointIdentity> candidates;
+        std::vector<int> indices;
+        for (int i = 0; i < outputs.size(); ++i)
+            if (usable (i))
+            {
+                candidates.push_back (present[static_cast<size_t> (i)]);
+                indices.push_back (i);
+            }
+        AudioDeviceWatcher::Match how = AudioDeviceWatcher::Match::None;
+        if (const int found = AudioDeviceWatcher::findEndpoint (candidates, remembered, &how); found >= 0)
+            return pick (indices[static_cast<size_t> (found)], OutputReason::Recognised);
+    }
+
+    // Fallback: the system default unless it is virtual or loops, else the
+    // first output that is neither.
+    const auto safe = [&] (int i)
+    {
+        return usable (i) && ! isVirtualOutput (outputs[i], &present[static_cast<size_t> (i)])
+               && ! (inputFeedsStrip && isLoopbackPair (inputDeviceName, outputs[i]));
+    };
+    OutputSelection s;
+    s.reason = OutputReason::NoSafeOutput;
+    if (defaultIndex >= 0 && defaultIndex < outputs.size() && safe (defaultIndex))
+        s = pick (defaultIndex, OutputReason::SystemDefault);
+    else
+        for (int i = 0; i < outputs.size(); ++i)
+            if (safe (i))
+            {
+                s = pick (i, OutputReason::FirstSafe);
+                break;
+            }
+
+    s.fallback = hasChoice;
+    s.chosenUnavailable = hasChoice && chosenUnavailable;
+    if (s.fallback && s.deviceName.isNotEmpty())
+    {
+        const auto form = present[static_cast<size_t> (outputs.indexOf (s.deviceName))].formFactor;
+        const bool headphones = form == EndpointFormFactor::Headphones || form == EndpointFormFactor::Headset
+                                || (form == EndpointFormFactor::Unknown && soundsLikeHeadphones (s.deviceName));
+        s.safeSpeakerProfile = ! headphones;
+    }
+    return s;
+}
+
+std::unique_ptr<juce::XmlElement> AudioEngineHost::createDeviceStateXml() const
+{
+    auto xml = deviceManager.createStateXml();
+    if (xml != nullptr && chosen.deviceName.isNotEmpty() && outputNameIn (*xml) == chosen.deviceName)
+    {
+        if (chosen.endpointId.isNotEmpty())
+            xml->setAttribute ("flubOutputEndpointId", chosen.endpointId);
+        if (chosen.hardwareId.isNotEmpty())
+            xml->setAttribute ("flubOutputHardwareId", chosen.hardwareId);
+    }
+    return xml;
+}
+
+void AudioEngineHost::setDeviceWatcher (std::unique_ptr<flub::platform::AudioDeviceWatcher> watcher)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (deviceWatcher != nullptr && deviceWatcherStarted)
+        deviceWatcher->stop();
+    deviceWatcherStarted = false;
+    deviceWatcher = std::move (watcher);
+    deviceWatcherInjected = true;
+    if (managingDevice && deviceWatcher != nullptr)
+        deviceWatcherStarted = deviceWatcher->start ([this] (const flub::platform::AudioDeviceEvent& e) { postDeviceEvent (e); });
+}
+
+void AudioEngineHost::postDeviceEvent (const flub::platform::AudioDeviceEvent& event)
+{
+    {
+        const juce::ScopedLock sl (eventLock);
+        pendingEvents.push_back (event);
+    }
+    deviceEventsPending.store (true, std::memory_order_release);
+    triggerAsyncUpdate();
+}
+
+void AudioEngineHost::handleDeviceEvents()
+{
+    std::vector<flub::platform::AudioDeviceEvent> events;
+    {
+        const juce::ScopedLock sl (eventLock);
+        events.swap (pendingEvents);
+    }
+    if (! managingDevice)
+        return;
+
+    bool devicesChanged = false;
+    for (const auto& e : events)
+    {
+        ++deviceEventsHandled;
+        switch (e.kind)
+        {
+            case flub::platform::AudioDeviceEvent::Kind::Suspending:
+                suspended = true;
+                break;
+            case flub::platform::AudioDeviceEvent::Kind::Resumed:
+                // The devices may take a moment to come back: check after
+                // settleMs whether callbacks run, re-open if not (a repeated
+                // resume notification only moves the check).
+                suspended = false;
+                scheduleRecovery ("the system resumed from sleep", recoveryTiming.settleMs, true);
+                break;
+            case flub::platform::AudioDeviceEvent::Kind::DefaultOutputChanged:
+            case flub::platform::AudioDeviceEvent::Kind::DeviceAdded:
+            case flub::platform::AudioDeviceEvent::Kind::DeviceRemoved:
+            case flub::platform::AudioDeviceEvent::Kind::DeviceStateChanged:
+                devicesChanged = true;
+                break;
+        }
+    }
+
+    // Devices come and go during sleep; the resume check re-selects.
+    if (devicesChanged && ! suspended)
+    {
+        unavailableOutputs.clear(); // a device event is worth another try
+        // JUCE's WASAPI types watch the endpoints themselves and announce a
+        // changed list through the device manager (whose change message
+        // re-selects); a rescan here first would make them miss the change
+        // (they compare against their last scan). Other types are rescanned
+        // here, and the manager's listeners told when the list changed.
+        if (auto* type = deviceManager.getCurrentDeviceTypeObject(); type != nullptr && ! type->getTypeName().startsWith ("Windows Audio"))
+        {
+            const auto listed = [type] { return type->getDeviceNames (false).joinIntoString ("\n") + "\n\n" + type->getDeviceNames (true).joinIntoString ("\n"); };
+            const auto before = listed();
+            type->scanForDevices();
+            if (listed() != before)
+                deviceManager.sendChangeMessage();
+        }
+        reselectOutput();
+        // Once more after the device type has caught up with the OS.
+        reselectPending = true;
+        reselectDueMs = juce::Time::getMillisecondCounter() + kReselectSettleMs;
+    }
+}
+
+void AudioEngineHost::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // The device manager changed: a device came or went (JUCE may have
+    // fallen back by itself), the user chose another device, or the rate /
+    // block size changed.
+    if (! managingDevice || selecting)
+        return;
+    noteExplicitOutput();
+    reselectOutput();
+}
+
+std::vector<flub::platform::OutputEndpointIdentity> AudioEngineHost::listEndpoints()
+{
+    return deviceWatcher != nullptr ? deviceWatcher->listOutputs() : std::vector<flub::platform::OutputEndpointIdentity> {};
+}
+
+void AudioEngineHost::noteExplicitOutput()
+{
+    // JUCE's explicit setup is what the user chose (Settings > Audio, or the
+    // saved state): its own fallback and the host's never change it.
+    const auto xml = deviceManager.createStateXml();
+    const auto explicitOutput = xml != nullptr ? outputNameIn (*xml) : juce::String();
+    if (explicitOutput == lastExplicitOutput)
+        return;
+    lastExplicitOutput = explicitOutput;
+    if (explicitOutput.isEmpty() || explicitOutput == chosen.deviceName)
+        return;
+
+    // A new choice: remember the identity of the endpoint it names now.
+    endpointCache = listEndpoints();
+    chosen = { explicitOutput, {}, {} };
+    rememberIdentity (chosen, endpointCache);
+}
+
+void AudioEngineHost::reselectOutput()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (! managingDevice || selecting)
+        return;
+    auto* type = deviceManager.getCurrentDeviceTypeObject();
+    if (type == nullptr)
+        return;
+    const juce::ScopedValueSetter<bool> busy (selecting, true);
+
+    endpointCache = listEndpoints();
+    const auto outputs = type->getDeviceNames (false);
+    const auto inputs = type->getDeviceNames (true);
+
+    // An output that fails to open is skipped and the next candidate tried.
+    OutputSelection next;
+    for (int attempt = 0; attempt <= outputs.size(); ++attempt)
+    {
+        const auto setup = deviceManager.getAudioDeviceSetup();
+        auto* device = deviceManager.getCurrentAudioDevice();
+        next = selectOutput (chosen, outputs, type->getDefaultDeviceIndex (false), endpointCache, setup.inputDeviceName,
+                             deviceInputFeedsStrip(), unavailableOutputs);
+        if (next.deviceName.isEmpty() || (device != nullptr && setup.outputDeviceName == next.deviceName))
+            break;
+
+        auto target = setup;
+        if (device == nullptr)
+            if (const auto xml = deviceManager.createStateXml())
+                applySavedSetup (*xml, target);
+        target.outputDeviceName = next.deviceName;
+        if (target.inputDeviceName.isNotEmpty() && ! inputs.contains (target.inputDeviceName))
+            target.inputDeviceName = inputs[type->getDefaultDeviceIndex (true)]; // "" when there is no input
+        // Not "chosen": JUCE's explicit setup keeps what the user chose.
+        const auto error = deviceManager.setAudioDeviceSetup (target, false);
+        if (error.isEmpty() && deviceManager.getCurrentAudioDevice() != nullptr)
+            break;
+
+        unavailableOutputs.addIfNotAlreadyThere (next.deviceName);
+        scheduleRecovery ("\"" + next.deviceName + "\" could not be opened: " + error, recoveryTiming.firstRetryMs, false);
+    }
+
+    // The chosen output from settings older than its identity: fill it in.
+    if (next.reason == OutputReason::Chosen && chosen.endpointId.isEmpty())
+        rememberIdentity (chosen, endpointCache);
+
+    selection = next;
+    applySafeSpeakerProfile (selection.safeSpeakerProfile);
+    updateFallbackState();
+}
+
+void AudioEngineHost::scheduleRecovery (const juce::String& reason, int delayMs, bool checkHealth)
+{
+    // A check `delayMs` from now: with checkHealth the device must have run
+    // callbacks since, otherwise it is re-opened; outputs that failed to open
+    // are tried again in any case. A pending check keeps the earlier time
+    // unless this one is due sooner.
+    const auto due = juce::Time::getMillisecondCounter() + static_cast<juce::uint32> (std::max (0, delayMs));
+    if (! recoveryPending || static_cast<int32_t> (due - recoveryDueMs) < 0 || checkHealth)
+        recoveryDueMs = due;
+    if (checkHealth)
+        recoveryCallbackMark = callbackCounter.load (std::memory_order_acquire);
+    recoveryCheckHealth = recoveryCheckHealth || checkHealth;
+    recoveryPending = true;
+    recoveryReason = reason;
+}
+
+void AudioEngineHost::serviceDeviceRecovery()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (! recoveryPending || ! managingDevice || suspended)
+        return;
+    const auto now = juce::Time::getMillisecondCounter();
+    if (static_cast<int32_t> (now - recoveryDueMs) < 0)
+        return;
+
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const bool running = device != nullptr && callbackCounter.load (std::memory_order_acquire) != recoveryCallbackMark;
+    if ((running || ! recoveryCheckHealth) && unavailableOutputs.isEmpty() && device != nullptr)
+    {
+        // Callbacks ran since the event (or there was nothing to check) and
+        // no output waits for a retry: recovered.
+        recoveryPending = recoveryCheckHealth = false;
+        recoveryAttempts = 0;
+        if (running)
+            clearDeviceError();
+        return;
+    }
+
+    if (recoveryAttempts >= recoveryTiming.maxAttempts)
+    {
+        // Given up until the next device event (or Retry).
+        recoveryPending = recoveryCheckHealth = false;
+        if (device == nullptr || ! running)
+        {
+            DeviceSafetyState next = safety;
+            if (next.kind != DeviceSafetyState::Kind::LoopbackPair)
+            {
+                next.kind = DeviceSafetyState::Kind::DeviceError;
+                next.message = "The audio device did not come back (" + recoveryReason + "). Retry, or choose another output device.";
+                setSafetyState (next);
+            }
+        }
+        return;
+    }
+
+    ++recoveryAttempts;
+    unavailableOutputs.clear();
+    if (device != nullptr && recoveryCheckHealth && ! running)
+        deviceManager.closeAudioDevice(); // stalled (a device that did not survive sleep): open it again
+    reselectOutput();
+
+    // Check again after the backoff delay.
+    const int delay = std::min (recoveryTiming.maxRetryMs, recoveryTiming.firstRetryMs << std::min (recoveryAttempts - 1, 16));
+    recoveryPending = true;
+    recoveryCheckHealth = true;
+    recoveryCallbackMark = callbackCounter.load (std::memory_order_acquire);
+    recoveryDueMs = juce::Time::getMillisecondCounter() + static_cast<juce::uint32> (std::max (0, delay));
+}
+
+void AudioEngineHost::applySafeSpeakerProfile (bool on)
+{
+    if (! on && ! safeProfileActive)
+        return;
+    safeProfileActive = on;
+    outputTrimTarget.store (on ? juce::Decibels::decibelsToGain (kSafeSpeakerTrimDb) : 1.0f, std::memory_order_relaxed);
+    auto& engine = latest->engine;
+    for (int s = 0; s < engine.getNumStrips(); ++s)
+    {
+        engine.chain (s).setAuditionBypass (flub::param::VirtualizerOn, on);
+        engine.chain (s).setAuditionBypass (flub::param::BassOn, on);
+    }
+}
+
+void AudioEngineHost::updateFallbackState()
+{
+    setSafetyState (safety);
 }
 
 // =============================================================================
@@ -1574,7 +2143,11 @@ LatencyInfo AudioEngineHost::getLatencyInfo() const
 
     for (const auto& slot : captureSlots)
         if (slot.capture != nullptr)
-            info.captureBufferMs = std::max (info.captureBufferMs, static_cast<double> (slot.fifo.getStats().targetMs));
+        {
+            // The FIFO's fill target plus its resampler's fixed delay (docs/11 E50).
+            const auto stats = slot.fifo.getStats();
+            info.captureBufferMs = std::max (info.captureBufferMs, static_cast<double> (stats.targetMs + stats.resamplerDelayMs));
+        }
 
     info.totalMs = info.deviceInputMs + info.deviceOutputMs + info.engineMs + info.graphQuantumMs;
     return info;
