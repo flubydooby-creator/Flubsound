@@ -9,7 +9,10 @@
 
 #include "Analysis.h"
 
+#include "flub/common/Math.h"
 #include "flub/dsp/LoudnessMaximizer.h"
+#include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1462,4 +1465,71 @@ TEST_CASE ("LoudnessMaximizer: switching the bed-lift budget on after the drive 
     std::cout << "    measured: level before " << before << ", after " << y.back() << ", largest step " << maxStep / before << " of the level\n";
     CHECK_NEAR (toDb (y.back() / 0.005), 1.0, 0.05); // the budget holds
     CHECK_LE (maxStep / before, 0.01);                 // a 9 dB jump would be 0.65
+}
+
+TEST_CASE ("Chain: Boost's transient coupling adds at most 1 dB of Clarity attack on kicks above Boost 50 % in Music, nothing on a steady tone, in Gaming or below 50 %, and restarts on reset (docs/11 E05 step 6)")
+{
+    using namespace flub::param;
+    const int n = static_cast<int> (4.0 * kFs);
+    std::vector<float> kicks (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double beat = std::fmod (i / kFs, 0.5);
+        kicks[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-beat * 10.0) * std::sin (kTwoPi * 55.0 * beat)
+                                                            + 0.05 * std::sin (kTwoPi * 2000.0 * i / kFs));
+    }
+    const auto tone = sine (60.0, kFs, n, 0.5f);
+    // The attack the coupling adds after 4 s: the effective clarity.attack
+    // minus Boost's own row (+2 dB from 60 %, both modes).
+    const auto coupled = [&] (ModeValue mode, float boost, const std::vector<float>& x, bool resetAfter) {
+        ParameterStore store;
+        store.set (Mode, static_cast<float> (mode));
+        store.set (BoostIntensity, boost);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        std::vector<float> l (512), r (512);
+        for (int p = 0; p < n; p += 512)
+        {
+            std::copy_n (x.begin() + p, 512, l.begin());
+            std::copy_n (x.begin() + p, 512, r.begin());
+            float* ch[2] = { l.data(), r.data() };
+            chain.process (AudioBlock (ch, 2, 512));
+        }
+        if (resetAfter)
+        {
+            chain.reset();
+            std::fill (l.begin(), l.end(), 0.0f);
+            std::fill (r.begin(), r.end(), 0.0f);
+            float* ch[2] = { l.data(), r.data() };
+            chain.process (AudioBlock (ch, 2, 64));
+        }
+        return static_cast<double> (chain.effectiveValue (ClarityAttackDb) - 2.0f); // Boost's row is full from 60 % (Music) / 70 % (Gaming)
+    };
+    const double music100 = coupled (ModeValue::Music, 1.0f, kicks, false);
+    const double music80 = coupled (ModeValue::Music, 0.8f, kicks, false);
+    const double steady = coupled (ModeValue::Music, 1.0f, tone, false);
+    const double gaming = coupled (ModeValue::Gaming, 1.0f, kicks, false);
+    const double afterReset = coupled (ModeValue::Music, 1.0f, kicks, true);
+    std::printf ("    measured coupled attack: Music Boost 100 / 80 kicks %.2f / %.2f dB, steady 60 Hz %.2f dB, Gaming %.2f dB, after reset %.2f dB\n",
+                 music100, music80, steady, gaming, afterReset);
+    CHECK_GE (music100, 0.5);
+    CHECK_LE (music100, 1.0 + 1e-6);
+    CHECK_GE (music80, 0.1);
+    CHECK_LE (music80, music100 + 1e-6);
+    CHECK_LE (std::abs (steady), 0.1);
+    CHECK (gaming == 0.0);
+    CHECK (afterReset == 0.0);
+    // Below Boost 50 % nothing: the effective attack is Boost's row alone.
+    ParameterStore store;
+    store.set (Mode, 0.0f);
+    store.set (BoostIntensity, 0.45f);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 512, 2 });
+    std::vector<float> l (kicks.begin(), kicks.end()), r = l;
+    for (int p = 0; p + 512 <= n; p += 512)
+    {
+        float* ch[2] = { l.data() + p, r.data() + p };
+        chain.process (AudioBlock (ch, 2, 512));
+    }
+    CHECK_NEAR (chain.effectiveValue (ClarityAttackDb), 2.0f * smoothstep (0.1f, 0.6f, 0.45f), 1e-5);
 }

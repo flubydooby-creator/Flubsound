@@ -56,8 +56,10 @@
 //       drives, as above) is the lowest of three loops - the limiter's GR
 //       (0.5 s average) as a slow trim (kTrimGain) around a feed-forward
 //       (DriveFeedForward: the drive at which the maximizer input's peaks
-//       of the last 3 s would hold the limiter at its budget, as a share of
-//       the drive at the full scale), the drive span's audible residual plus
+//       of the last 3 s, through a model of its clipper and of the
+//       limiter's programme envelope, would hold the limiter at the loop's
+//       set point, as a share of the drive at the full scale; from 80 ms of
+//       programme on), the drive span's audible residual plus
 //       the bass engine's non-harmonic share (its protection riding the
 //       boost shelf, which the drive scale governs), and in Music the
 //       dynamics budget: the output's PLR (PlrMeter, ~3 s) may not fall
@@ -75,7 +77,10 @@
 //   The PI loops run on the error plus kApproachDb while over the set point
 //   (so they reach it), hold within kHoldBandDb under it, and recover (no
 //   proportional term, kRiseDbPerSec at most) further under; falls are
-//   limited to kFallDbPerSec (drive) / kHarmonicsFallDbPerSec. Probe
+//   limited to kFallDbPerSec (drive) / kHarmonicsFallDbPerSec, and while
+//   the maximizer's limiter holds reduction the drive's fall is tied to its
+//   programme envelope's release instead (kSagAllowanceDb: the output does
+//   not dip under its settled level while the limiter lets go). Probe
 //   memory: at the onset of a back-off a loop steps kProbeMarginDb under
 //   the level that went over and caps its recovery there for a hold that
 //   doubles (4 s .. 64 s) while back-offs keep starting at the same level,
@@ -107,7 +112,15 @@
 //   getState() / getReason() say what the loop is doing and which budget
 //   made it back off (published on MeterBus with the scale and both
 //   averages); the measured loop adds kReasonDynamics, kReasonHarmonics and
-//   kReasonTonal.
+//   kReasonTonal, and the chain publishes its scales, readings and budgets
+//   (MeterBus::governor*, tonalLiftDb).
+//   Learned state (docs/11 E06 (2); Memory): the scales and the loops' probe
+//   memory. At Normal / Strict restart() - a chain's reset(), e.g. a host's
+//   transport jump - keeps it: the scales hold until the readings are back
+//   and the loop restarts from them, instead of replaying the over-driven
+//   start and the back-off. A chain that replaces a running one (the
+//   crossfaded engine swap) takes it over with the strength
+//   (ProcessingChain::adoptGovernorState), at Off too.
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -370,6 +383,7 @@ public:
         LimiterEnvelope::programEnvelope: attack 150 ms, release 800 ms,
         one-pole in the linear gain), which the prediction models. */
     static constexpr float kProgramAttackSeconds = 0.15f, kProgramReleaseSeconds = 0.8f;
+    static constexpr int kWarmTicks = 100; // the model's envelope warms up on the window's last second
 
     void reset() noexcept FLUB_NONBLOCKING;
     /** One tick's peak of the maximizer input (linear, before the drive). */
@@ -387,7 +401,7 @@ public:
         reduction over the programme ticks equals -grBudgetDb: per tick the
         gain its peak needs, min (1, ceiling / (peak x drive)), through the
         programme envelope (the deeper of the two, as the limiter applies
-        it; the envelope run over the window twice, so it starts warm),
+        it; the envelope warmed up on the window's last second first),
         after the clipper (setClipper) has taken its share of the peak.
         Batch 1 took the mean of max (0, peak + drive - ceiling), which the
         envelope's hold made read about 3 dB shallow on pink noise with the
@@ -499,9 +513,9 @@ public:
         float plrDb = PlrMeter::kNoReading;       // output PLR over ~3 s
         float inputPlrDb = PlrMeter::kNoReading;  // the span input's PLR over ~3 s
         float feedForwardScale = 1.0f;            // drive scale the pre-maximizer peaks predict for the GR budget
-        float programmeLufs = -160.0f;            // the chain input's ~3 s loudness (the quiet hold; -160: none)
         bool feedForwardValid = true;             // false while the feed-forward has too little programme to predict
-        float driveAtFullScaleDb = 0.0f;          // the maximizer drive at scale 1 (dB; 0 = none, no release tie)
+        float driveAtFullScaleDb = 0.0f;          // the maximizer drive at scale 1 before max.drive's clamp (dB; 0 = none, no release tie)
+        float driveMaxDb = 24.0f;                 // that clamp: the drive applied is min (driveMaxDb, scale x driveAtFullScaleDb)
         // The chain's net tonal lifts over its 200 Hz - 1 kHz lift (TonalBalanceMeter; -160: no reading).
         float presenceLiftDb = -160.0f, harshLiftDb = -160.0f, airLiftDb = -160.0f;
     };
@@ -522,6 +536,7 @@ public:
     static constexpr float kHarmonicsFallDbPerSec = 12.0f;  // harmonics scale
     static constexpr float kRiseDbPerSec = 1.0f;
     static constexpr float kGrAverageSeconds = 0.5f;
+    static constexpr float kLimiterIdleDb = 1.0f;  // GR (0.5 s average) shallower than this: the limiter loop holds nothing down
     static constexpr float kFloorDb = -60.0f;      // u at which a floor-0 scale is taken as 0
     /** The tonal-balance rule (docs/11 E07): PI gain (a slow loop: its
         readings average over TonalBalanceMeter::kAverageSeconds), set
@@ -537,14 +552,19 @@ public:
         the reduction it has built, so a drive that falls faster than it
         releases takes the output down by the difference until it has (the
         batch 1 loop, 6 dB/s of scale, dipped 4.3 dB for about a second).
-        The governor models the envelope from the limiter's window GR and
-        lets the drive (in dB of drive, not of scale) fall by what the
-        envelope's attack has not yet taken (free: the limiter is still
-        building that reduction) plus what keeps the modelled dip - the
-        drive falls the envelope has not released - under
-        kSagAllowanceDb. While the limiter holds less than that, or the
-        audible residual is over its budget (distortion goes first), the
-        drive falls at kFallDbPerSec as before. */
+        The governor models the envelope from the limiter's window GR and,
+        while the output is limiter-bound (the limiter loop is the lowest,
+        or the envelope holds more than that loop's set point: a drive fall
+        is then absorbed by the limiter, so any lag is a dip), lets the
+        drive (in dB of drive, not of scale) fall by what the envelope's
+        attack has not yet taken (free: the limiter is still building that
+        reduction; counted while the modelled envelope deepens by more than
+        kAttackingDbPerTick) plus what keeps the modelled dip - the drive
+        falls the envelope has not released - under kSagAllowanceDb. While
+        the limiter holds less than that, when another loop backs off below
+        a lightly limited output (its fall is meant to lower the level), or
+        when the audible residual is kProbeErrorDb or more over its set
+        point, the drive falls at kFallDbPerSec as before. */
     static constexpr float kSagAllowanceDb = 0.5f;
     static constexpr float kProgramAttackSeconds = DriveFeedForward::kProgramAttackSeconds;
     static constexpr float kProgramReleaseSeconds = DriveFeedForward::kProgramReleaseSeconds;
@@ -554,15 +574,6 @@ public:
         restarts from them (bumpless); at most this long of programme, so
         a reading that never comes does not hold it for good. */
     static constexpr float kRestartHoldSeconds = 3.0f;
-    /** Quiet hold (docs/11 E06 batch 2; with a dynamics budget, i.e. Music):
-        the drive does not recover while the programme is more than
-        kQuietHoldLu quieter than it was at the last back-off, for up to
-        kQuietHoldSeconds of such programme. A loop that recovered in every
-        quiet passage and backed off again in every loud one rode the
-        sections like a slow AGC: on 3 minutes of mastered music (LRA 8.5 LU)
-        Boost 100 + Loudness 100 left 3.95 LU. */
-    static constexpr float kQuietHoldLu = 2.0f;
-    static constexpr float kQuietHoldSeconds = 20.0f;
 
     /** What the loop has learned (docs/11 E06 (2)): the scales it applies and
         each measured loop's probe memory. Kept across restart() at Normal /
@@ -696,9 +707,7 @@ private:
     // Release tie: the modelled programme envelope's depth and the drive
     // falls it has not yet released (dB >= 0), per-tick one-pole coefficients.
     float programDepthDb = 0.0f, sagLagDb = 0.0f, programAttack = 0.0f, programRelease = 0.0f;
-    // Quiet hold: the programme loudness at the last back-off, and how long
-    // the programme has been quieter than that since.
-    float backoffLufs = -160.0f, quietSeconds = 0.0f;
+    static constexpr float kAttackingDbPerTick = 0.1f; // the modelled envelope deepening this fast is still attacking
     // Learned state taken over (restoreMemory), and the measured loop's hold
     // after it (restartHoldLeft: seconds of programme left).
     Memory pending;

@@ -24,6 +24,12 @@
 // Layouts  Standard (the Advanced view's strip: one chip row) and Simple
 //           (docs/11 E39: the Simple view's centre piece, a larger dial and up
 //           to three wrapped chip rows).
+// Guards    Simple layout only, a row under the macros: Dynamic Range
+//           (guard.range, docs/11 E21: the Startle Guard's ceiling over the
+//           recent programme and the Gaming Tame band) and Smoothness
+//           (smooth.amount, docs/11 E07: takes back the sibilance the chain
+//           added). The Advanced view has them on the Compressor and Clarity
+//           cards of the module rack.
 // All controls are bound to the selected strip's ParameterStore.
 #pragma once
 
@@ -113,6 +119,10 @@ public:
     /** Chips drawn by the last paint (the rest are counted as "+N"). */
     int getShownStageCount() const noexcept { return shownStages; }
     int getChipRowCount() const noexcept { return static_cast<int> (chipRows.size()); }
+    /** The Simple layout's Dynamic Range and Smoothness controls (hidden in
+        the Standard layout and when the panel is too short for their row). */
+    juce::ComboBox& getDynamicRangeBox() noexcept { return rangeBox; }
+    juce::Slider& getSmoothnessSlider() noexcept { return smoothSlider; }
     juce::Rectangle<int> getDialBounds() const { return dial.getBounds(); }
 
     const GovernorReadout& getGovernorReadout() const noexcept { return governor; }
@@ -130,9 +140,11 @@ private:
     EngineController& controller;
     BoostDial dial;
     std::array<ParamKnob, 5> macros;
-    ParameterBinder binder;
+    juce::ComboBox rangeBox;
+    juce::Slider smoothSlider;
+    ParameterBinder binder; // after the controls it binds
     flub::param::ModeValue mode = flub::param::ModeValue::Music;
-    juce::Rectangle<int> dialArea, macroArea, headerArea, chipsArea;
+    juce::Rectangle<int> dialArea, macroArea, headerArea, chipsArea, rangeCaption, smoothCaption;
     std::vector<juce::Rectangle<float>> chipRows; // inside chipsArea, right of the ACTIVE caption
     Layout panelLayout = Layout::Standard;
     juce::Rectangle<float> governorChip;

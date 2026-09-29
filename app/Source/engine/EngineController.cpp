@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace flub::app
 {
@@ -41,6 +43,18 @@ constexpr const char* kFirstRunGamePreset = "factory:gaming-competitive-fps";   
 constexpr float kFirstRunGameBoost = 0.20f;     // below 0.25: Boost adds no maximizer drive
 constexpr float kFirstRunGameFootsteps = 0.30f; // Macro 1 (the E16 on-board-processing cap)
 constexpr float kFirstRunGameDetail = 0.15f;    // Macro 4
+
+// Night listening (docs/11 E56 / E21): the latch copies these parameters from
+// the Night Mode Gaming factory preset; kNightFallback are its values (the
+// E21 Phase 3 retune) for a library without it (tests pin the two together).
+constexpr const char* kNightPreset = "factory:gaming-night-mode";
+constexpr std::pair<int, float> kNightFallback[] = {
+    { AutoLevelOn, 1.0f },     { AutoLevelTargetLufs, -14.0f },   { GuardRange, static_cast<float> (GuardRangeValue::Lu20) },
+    { CompressorOn, 1.0f },    { CompThresholdDb, -18.0f },       { CompRatio, 3.0f },
+    { CompKneeDb, 10.0f },     { CompAttackMs, 3.0f },            { CompReleaseMs, 250.0f },
+    { CompAutoRelease, 1.0f }, { CompMakeupDb, 0.0f },            { CompUpThresholdDb, -32.0f },
+    { CompUpRatio, 2.5f },     { CompUpMaxGainDb, 6.0f },         { CompUpFloorDb, -62.0f },
+};
 
 // ChatMix (docs/11 E56): the strips it balances.
 constexpr const char* kChatMixGameStrip = "Game";
@@ -83,14 +97,23 @@ ProtectionStrength protectionStrengthFromName (const juce::String& name)
     return ProtectionStrength::Off;
 }
 
-juce::String stripStateToJson (const ParameterStore& store)
+/** The strip state; `substitute` (param::kNumParams values), when given,
+    is saved as bank `substituteBank` instead of what the store holds. */
+juce::String stripStateToJson (const ParameterStore& store, const std::vector<float>* substitute = nullptr, Bank substituteBank = Bank::A)
 {
+    const auto bankJson = [&] (Bank bank)
+    {
+        auto p = flub::preset::captureFromStore (store, bank);
+        if (substitute != nullptr && bank == substituteBank && substitute->size() == p.values.size())
+            p.values = *substitute;
+        return flub::preset::toJson (p, false);
+    };
     flub::json::Value root;
     root.set ("format", kStateFormat);
     root.set ("version", 1);
     root.set ("activeBank", store.getActiveBank() == Bank::A ? "A" : "B");
-    root.set ("A", flub::preset::toJson (flub::preset::captureFromStore (store, Bank::A), false));
-    root.set ("B", flub::preset::toJson (flub::preset::captureFromStore (store, Bank::B), false));
+    root.set ("A", bankJson (Bank::A));
+    root.set ("B", bankJson (Bank::B));
     return juce::String::fromUTF8 (flub::json::write (root, 0).c_str());
 }
 
@@ -119,6 +142,70 @@ bool stripStateFromJson (const juce::String& text, ParameterStore& store)
 } // namespace
 
 // =============================================================================
+/** Reads the output endpoint's volume every kEndpointVolumePollMs off the
+    message thread (a pactl child on Linux takes milliseconds) and hands the
+    latest reading over; `onReading` is called on this thread after each read
+    (the controller's triggerAsyncUpdate, which is thread-safe). */
+class EngineController::EndpointVolumePoller final : private juce::Thread
+{
+public:
+    using Reader = std::function<flub::platform::EndpointVolume (const std::string&)>;
+
+    EndpointVolumePoller (Reader r, std::function<void()> ready, const juce::String& device)
+        : juce::Thread ("Flubsound endpoint volume"), reader (std::move (r)), onReading (std::move (ready)), deviceName (device.toStdString())
+    {
+        startThread (juce::Thread::Priority::low);
+    }
+
+    ~EndpointVolumePoller() override { stopThread (4000); }
+
+    void setDevice (const juce::String& device)
+    {
+        const std::scoped_lock hold (lock);
+        deviceName = device.toStdString();
+    }
+
+    /** The newest reading and the device it is of, once. */
+    std::optional<std::pair<flub::platform::EndpointVolume, juce::String>> take()
+    {
+        const std::scoped_lock hold (lock);
+        if (! fresh)
+            return std::nullopt;
+        fresh = false;
+        return std::make_pair (latest, juce::String (latestDevice));
+    }
+
+private:
+    void run() override
+    {
+        while (! threadShouldExit())
+        {
+            std::string device;
+            {
+                const std::scoped_lock hold (lock);
+                device = deviceName;
+            }
+            auto reading = reader (device);
+            {
+                const std::scoped_lock hold (lock);
+                latest = std::move (reading);
+                latestDevice = device;
+                fresh = true;
+            }
+            onReading();
+            wait (kEndpointVolumePollMs);
+        }
+    }
+
+    const Reader reader;
+    const std::function<void()> onReading;
+    std::mutex lock;
+    std::string deviceName, latestDevice;
+    flub::platform::EndpointVolume latest;
+    bool fresh = false;
+};
+
+// =============================================================================
 EngineController::EngineController()
     : EngineController (Options {})
 {
@@ -138,6 +225,7 @@ EngineController::EngineController (Options opts)
     host->onEngineConfigured = [this]
     {
         applyProtectionStrength(); // the new engine's chains start at Off
+        applyListeningLevel();     // ... and at a 0 dB listening level
         notify (Change::Engine);
     };
     host->onDeviceError = [this] (const juce::String& message)
@@ -157,6 +245,7 @@ EngineController::EngineController (Options opts)
         pendingPresetWarnings.push_back ({ preset.name, warnings });
         // A load announces them itself (Change::Preset right after); an
         // import reports them after its list change: announce those once.
+        announcePresetWarnings = true;
         triggerAsyncUpdate();
     };
     routing->onChanged = [this] { notify (Change::Routing); };
@@ -179,6 +268,7 @@ EngineController::EngineController (Options opts)
         persistedVersions[static_cast<size_t> (i)] = getParams (i).version();
     }
     applyProtectionStrength();
+    applyListeningLevel();
 
     loadDeviceProfiles();
     preferredOutputName = settings->getPreferredOutputDevice();
@@ -186,6 +276,7 @@ EngineController::EngineController (Options opts)
     // Before the device opens: PipeWire reads the request when the stream opens.
     requestGraphQuantum (getLatencyProfile(), false);
 
+    applyAllowedLoopbackPairs(); // before the device starts: its first check sees them
     if (options.openAudioDevice)
     {
         const auto savedState = settings->getDeviceState();
@@ -204,6 +295,7 @@ EngineController::EngineController (Options opts)
     autoProfiles.setEnabled (settings->getAutoProfilesEnabled());
     autoProfiles.setRules (settings->getAutoProfileRules());
 
+    updateEndpointVolumePoller(); // docs/11 E32: while the contour follows the volume
     startTimerHz (kTimerHz);
 }
 
@@ -219,6 +311,7 @@ void EngineController::shutdown()
     isShutDown = true;
 
     stopTimer();
+    volumePoller.reset(); // before its async updates are cancelled
     cancelPendingUpdate();
     routing->shutdown();
 
@@ -701,10 +794,45 @@ void EngineController::persistStripStates (bool force)
         auto& persisted = persistedVersions[static_cast<size_t> (i)];
         if (force || version != persisted)
         {
-            settings->setStripState (getStripName (i), stripStateToJson (store));
+            settings->setStripState (getStripName (i), getPersistedStripState (i));
             persisted = version;
         }
     }
+}
+
+juce::String EngineController::getPersistedStripState (int strip)
+{
+    const auto& store = getParams (strip);
+    if (preview.strip != strip)
+        return stripStateToJson (store);
+
+    // A preview plays (docs/11 E40): save the bank as the preview's end will
+    // leave it (PresetAudition::cancel), never the previewed sound.
+    std::vector<float> values (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+    {
+        const auto k = static_cast<size_t> (i);
+        values[k] = store.get (preview.bank, i);
+        if (! flub::preset::isAppState (i) && values[k] == preview.written[k] && preview.written[k] != preview.original[k])
+            values[k] = preview.original[k];
+    }
+    return stripStateToJson (store, &values, preview.bank);
+}
+
+void EngineController::setPreviewInProgress (int strip, Bank bank, std::vector<float> original, std::vector<float> written)
+{
+    const auto n = static_cast<size_t> (kNumParams);
+    if (strip < 0 || strip >= getNumStrips() || original.size() != n || written.size() != n)
+    {
+        clearPreviewInProgress();
+        return;
+    }
+    preview = { strip, bank, std::move (original), std::move (written) };
+}
+
+void EngineController::clearPreviewInProgress()
+{
+    preview = {};
 }
 
 void EngineController::persistDeviceState()
@@ -904,6 +1032,8 @@ void EngineController::applyDeviceProfile (const juce::String& outputName, doubl
 {
     using flub::device::Connection;
     currentOutputName = outputName;
+    if (volumePoller != nullptr)
+        volumePoller->setDevice (currentOutputName); // docs/11 E32: the volume of the new output
 
     // The OS knows the real transport (USB vs Bluetooth vs hands-free) where
     // it can; name / format heuristics cover the rest.
@@ -1331,6 +1461,7 @@ void EngineController::timerCallback()
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     updateOverloadWatchdog (host->getStatus());
     applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
+    applyListeningLevel();
     pollForegroundApp();
 
     if (++timerTicks % kPersistEveryTicks == 0)
@@ -1351,8 +1482,146 @@ void EngineController::timerCallback()
 
 void EngineController::handleAsyncUpdate()
 {
-    if (! pendingPresetWarnings.empty())
+    if (volumePoller != nullptr)
+        if (auto reading = volumePoller->take())
+            applyEndpointVolume (reading->first, reading->second);
+    if (std::exchange (announcePresetWarnings, false) && ! pendingPresetWarnings.empty())
         notify (Change::Preset);
+}
+
+// =============================================================================
+// Listening level: the loudness contour follows the system volume (docs/11 E32)
+// =============================================================================
+flub::platform::EndpointVolume EngineController::readEndpointVolume (const juce::String& device) const
+{
+    if (options.endpointVolumeReader)
+        return options.endpointVolumeReader (device.toStdString());
+    return flub::platform::AudioEndpoints::queryOutputVolume (device.toStdString());
+}
+
+void EngineController::updateEndpointVolumePoller()
+{
+    const bool wanted = (options.openAudioDevice || options.pollEndpointVolumeHeadless) && ! isShutDown && settings->getContourFollowsVolume();
+    if (! wanted)
+    {
+        volumePoller.reset();
+        return;
+    }
+    if (volumePoller == nullptr)
+    {
+        auto reader = options.endpointVolumeReader ? options.endpointVolumeReader
+                                                    : [] (const std::string& device) { return flub::platform::AudioEndpoints::queryOutputVolume (device); };
+        volumePoller = std::make_unique<EndpointVolumePoller> (std::move (reader), [this] { triggerAsyncUpdate(); }, currentOutputName);
+    }
+}
+
+void EngineController::pollEndpointVolume()
+{
+    applyEndpointVolume (readEndpointVolume (currentOutputName), currentOutputName);
+}
+
+void EngineController::applyEndpointVolume (const flub::platform::EndpointVolume& volume, const juce::String& device)
+{
+    if (device != listening.device)
+    {
+        // Another output: the last one's volume says nothing about it.
+        listening.device = device;
+        listeningHasRead = false;
+    }
+    listening.known = volume.known;
+    listening.muted = volume.known && volume.muted;
+    listening.error = volume.known ? juce::String() : juce::String (volume.error);
+    if (volume.known)
+    {
+        listening.volumeDb = volume.volumeDb;
+        listeningHasRead = true;
+        // Following without a reference yet: this volume becomes it, so
+        // nothing changes until the volume moves.
+        if (settings->getContourFollowsVolume() && ! settings->getContourReferenceVolumeDb().has_value())
+            settings->setContourReferenceVolumeDb (volume.volumeDb);
+    }
+    applyListeningLevel();
+}
+
+void EngineController::applyListeningLevel()
+{
+    listening.following = settings->getContourFollowsVolume();
+    listening.referenceDb = settings->getContourReferenceVolumeDb();
+    // A failed read holds the last volume of the same output (a muted one
+    // reads its volume as usual); nothing read yet: the parameter alone.
+    listening.levelDb = listening.following && listening.referenceDb.has_value() && listeningHasRead
+                            ? listening.volumeDb - *listening.referenceDb
+                            : 0.0f;
+    for (int s = 0; s < getNumStrips(); ++s)
+        if (auto& chain = getChain (s); chain.getListeningLevelDb() != listening.levelDb)
+            chain.setListeningLevelDb (listening.levelDb);
+}
+
+EngineController::ListeningLevel EngineController::getListeningLevel() const
+{
+    auto l = listening;
+    l.following = settings->getContourFollowsVolume();
+    l.referenceDb = settings->getContourReferenceVolumeDb();
+    return l;
+}
+
+void EngineController::setContourFollowsVolume (bool follow)
+{
+    settings->setContourFollowsVolume (follow);
+    if (follow)
+        pollEndpointVolume(); // now: sets the reference if there is none, and the level
+    else
+        listeningHasRead = false;
+    updateEndpointVolumePoller();
+    applyListeningLevel();
+    notify (Change::Settings);
+}
+
+void EngineController::setContourReferenceVolumeDb (float volumeDb)
+{
+    if (! std::isfinite (volumeDb))
+        return;
+    settings->setContourReferenceVolumeDb (volumeDb);
+    applyListeningLevel();
+    notify (Change::Settings);
+}
+
+bool EngineController::useCurrentVolumeAsReference()
+{
+    const auto volume = readEndpointVolume (currentOutputName);
+    applyEndpointVolume (volume, currentOutputName);
+    if (! volume.known)
+        return false;
+    setContourReferenceVolumeDb (volume.volumeDb);
+    return true;
+}
+
+// =============================================================================
+// Feedback-loop guard override (docs/11 E51)
+// =============================================================================
+void EngineController::applyAllowedLoopbackPairs()
+{
+    // clear / allow each re-check the current pair; the last call leaves the
+    // guard as the whole list decides.
+    host->clearAllowedLoopbackPairs();
+    for (const auto& pair : settings->getAllowedLoopbackPairs())
+        host->allowLoopbackPair (pair.input, pair.output);
+}
+
+void EngineController::setLoopbackPairAllowed (const juce::String& inputDeviceName, const juce::String& outputDeviceName, bool allowed)
+{
+    const auto input = inputDeviceName.trim(), output = outputDeviceName.trim();
+    if (input.isEmpty() || output.isEmpty())
+        return;
+    auto pairs = settings->getAllowedLoopbackPairs();
+    pairs.erase (std::remove_if (pairs.begin(), pairs.end(),
+                                 [&] (const auto& p) { return p.input.equalsIgnoreCase (input) && p.output.equalsIgnoreCase (output); }),
+                 pairs.end());
+    if (allowed)
+        pairs.push_back ({ input, output });
+    settings->setAllowedLoopbackPairs (pairs);
+    applyAllowedLoopbackPairs(); // the host broadcasts a banner change itself (Change::Device)
+    notify (Change::Settings);
 }
 
 void EngineController::renderOffline (StripSignalSource& source, int numSamples)
@@ -1681,22 +1950,31 @@ void EngineController::setNight (int strip, bool on)
     if (on)
     {
         // The dynamics of the Night Mode Gaming factory preset.
-        engageLatch (s, latch,
-                     { { AutoLevelOn, 1.0f },
-                       { AutoLevelTargetLufs, -20.0f },
-                       { CompressorOn, 1.0f },
-                       { CompThresholdDb, -24.0f },
-                       { CompRatio, 3.0f },
-                       { CompMakeupDb, 6.0f },
-                       { CompUpThresholdDb, -38.0f },
-                       { CompUpRatio, 2.5f },
-                       { CompUpMaxGainDb, 6.0f } });
+        std::vector<Override> overrides;
+        for (const auto& [id, value] : getNightOverrides())
+            overrides.push_back ({ id, value });
+        engageLatch (s, latch, std::move (overrides));
     }
     else
     {
         releaseLatch (s, latch, true);
     }
     notify (Change::Parameters);
+}
+
+std::vector<std::pair<int, float>> EngineController::getNightOverrides() const
+{
+    // Read from the factory preset, so the latch follows its tuning (docs/11
+    // E21 retuned it: Auto Level -20 -> -14 LUFS, the compressor's make-up
+    // gone and its thresholds up 6 dB, the Startle Guard at 20 LU).
+    std::vector<std::pair<int, float>> overrides (std::begin (kNightFallback), std::end (kNightFallback));
+    flub::preset::Preset preset;
+    juce::String error;
+    if (const auto* info = presets->findById (kNightPreset);
+        info != nullptr && presets->readPreset (*info, preset, error) && preset.values.size() == static_cast<size_t> (kNumParams))
+        for (auto& [id, value] : overrides)
+            value = preset.values[static_cast<size_t> (id)];
+    return overrides;
 }
 
 bool EngineController::isNight (int strip) const noexcept

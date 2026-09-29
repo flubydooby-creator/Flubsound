@@ -13,7 +13,9 @@
 // (executable -> strip), the automatic profile rules (foreground app ->
 // preset on a strip), the device corrections (one per output endpoint,
 // docs/11 E15), the UI scale and theme, the main window's view (Simple /
-// Advanced, docs/11 E39) and the window position.
+// Advanced, docs/11 E39), the window position, the loudness contour's
+// system-volume follow and reference volume (docs/11 E32) and the loopback
+// pairs the feedback-loop guard allows (docs/11 E51).
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -309,6 +311,33 @@ public:
     /** Adds or replaces the entry for entry.endpoint (ignored if the key is empty). */
     void setDeviceCorrection (const DeviceCorrectionEntry& entry);
     void removeDeviceCorrection (const juce::String& endpoint);
+
+    // ---- Loudness contour and the system volume (docs/11 E32) ---------------------------
+    /** Settings > Processing > "Follow the system volume" (default off): the
+        app reads the output endpoint's OS volume a few times a second and the
+        loudness contour (contour.on, per preset) follows it, relative to the
+        reference volume below (EngineController::pollEndpointVolume). Off:
+        the contour follows its contour.level parameter alone. */
+    bool getContourFollowsVolume() const;
+    void setContourFollowsVolume (bool follow);
+    /** "This is my reference volume": the OS volume (dB) at which the strips
+        sound as their presets intend; below it the contour lifts the bass.
+        nullopt until the user (or switching the follow on) sets one. */
+    std::optional<float> getContourReferenceVolumeDb() const;
+    void setContourReferenceVolumeDb (float volumeDb);
+
+    // ---- Feedback-loop guard override (docs/11 E51) ----------------------------------------
+    /** Input / output device pairs the user allowed although they look like a
+        loopback pair (a deliberate cable monitor): the guard does not mute
+        them (AudioEngineHost::allowLoopbackPair). Names compare ignoring case;
+        empty names are dropped. */
+    struct LoopbackPair
+    {
+        juce::String input, output;
+        bool operator== (const LoopbackPair&) const = default;
+    };
+    std::vector<LoopbackPair> getAllowedLoopbackPairs() const;
+    void setAllowedLoopbackPairs (const std::vector<LoopbackPair>& pairs);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

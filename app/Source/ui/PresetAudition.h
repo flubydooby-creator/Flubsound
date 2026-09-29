@@ -12,7 +12,10 @@
 // the preview wrote (a hotkey that moved Boost during the preview keeps its
 // change), and never touches the other bank, so B is bit-identical
 // throughout. commit() loads the preset through EngineController::loadPreset
-// (current preset, last preset, reader warnings, latency prompt). The preview
+// (current preset, last preset, reader warnings, latency prompt). While a
+// preview plays, the controller's strip-state autosave stores the bank as
+// cancel() would leave it (EngineController::setPreviewInProgress), so a
+// crash during a preview never saves the previewed sound. The preview
 // reads the preset itself, so its reader warnings are shown by the browser,
 // not queued as a toast on every row.
 //

@@ -6,7 +6,10 @@
 //               persisted by the EngineController automatically. Above it:
 //               the matched headset / device profile, its connection, the
 //               safety ceiling applied to the master limiter and all of its
-//               guidance (the page scrolls when that is long).
+//               guidance (the page scrolls when that is long), and the
+//               feedback-loop guard (docs/11 E51): what it muted, "Allow
+//               this pair" for a deliberate cable monitor and the allowed
+//               pairs with Remove.
 //   Correction  the output device's headphone / speaker correction (docs/11
 //               E15): import an AutoEQ or Equalizer APO / Peace
 //               ParametricEQ.txt, switch it on / off, hold a level-fair
@@ -21,8 +24,11 @@
 //               device-input routing, per-app routing method, protection
 //               strength (docs/11 E06: Off / Normal / Strict, engine-wide),
 //               the selected strip's Automatic Preamp (docs/11 E11) with its
-//               live prediction, and the meter palette (standard /
-//               colour-blind safe).
+//               live prediction, the listening level (docs/11 E32: the
+//               selected strip's loudness contour, following the system
+//               volume - off by default - and the reference volume with a
+//               "Use current volume" button and the live level), and the
+//               meter palette (standard / colour-blind safe).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; each
 //               row shows its registration status (registered, in use,
@@ -108,6 +114,20 @@ public:
         preamp -5.7 dB (max boost +5.7 dB at 3.7 kHz)", "... off", or that the
         output has no correction / no output is open. */
     static juce::String describeDeviceCorrection (const EngineController::DeviceCorrectionInfo& info);
+
+    /** The Processing page's listening-level line (docs/11 E32): the system
+        volume read (or why it cannot be), the reference volume and the level
+        the contour plays at relative to it; "Off: ..." while not following. */
+    static juce::String describeListeningLevel (const EngineController::ListeningLevel& level);
+
+    /** The Audio page's feedback-loop guard text (docs/11 E51): whether the
+        output is muted for a loopback pair and which pair, or that the
+        current pair is allowed, or what the guard does. */
+    static juce::String describeLoopbackGuard (EngineController& controller);
+    /** The input / output pair "Allow this pair" would allow: the pair the
+        guard muted, else the current devices when they look like a loopback
+        pair that is not allowed yet; empty names when there is none. */
+    static AppSettings::LoopbackPair loopbackPairToAllow (EngineController& controller);
 
     void paint (juce::Graphics& g) override;
     void resized() override;

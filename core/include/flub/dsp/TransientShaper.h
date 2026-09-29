@@ -173,6 +173,6 @@ private:
     EnvelopeFollower sustainSlow, sustainFast;        // 1 ms attack, 400 / 40 ms release
     OnePoleSmoother attackAmount, sustainAmount;      // smoothed attackDb / sustainDb
     float gainCoeff = 0.0f, gainDbState = 0.0f;       // ~1 ms gain smoothing (dB domain)
-    float gatedReturnCoeff = 0.0f;                    // 0.2 ms: a gated sustain cut returning
+    float gatedReturnCoeff = 0.0f;                    // 0.5 ms: a gated sustain cut returning
 };
 } // namespace flub

@@ -2,6 +2,7 @@
 #include "UserDataFolder.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace flub::app
 {
@@ -37,6 +38,9 @@ constexpr const char* routingMap = "routing.map";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
 constexpr const char* autoProfileRules = "autoProfile.rules";
 constexpr const char* deviceCorrections = "device.corrections";
+constexpr const char* contourFollowVolume = "contour.followVolume";
+constexpr const char* contourReferenceVolume = "contour.referenceVolumeDb";
+constexpr const char* allowedLoopbackPairs = "device.allowedLoopbackPairs";
 constexpr const char* schemaVersion = "settings.schemaVersion";
 } // namespace Keys
 
@@ -810,5 +814,51 @@ void AppSettings::removeDeviceCorrection (const juce::String& endpoint)
     auto entries = getDeviceCorrections();
     entries.erase (std::remove_if (entries.begin(), entries.end(), [&endpoint] (const auto& e) { return e.endpoint == endpoint; }), entries.end());
     storeDeviceCorrections (*properties, entries);
+}
+
+bool AppSettings::getContourFollowsVolume() const { return properties->getBoolValue (Keys::contourFollowVolume, false); }
+void AppSettings::setContourFollowsVolume (bool follow) { properties->setValue (Keys::contourFollowVolume, follow); }
+
+std::optional<float> AppSettings::getContourReferenceVolumeDb() const
+{
+    if (! properties->containsKey (Keys::contourReferenceVolume))
+        return std::nullopt;
+    const auto db = static_cast<float> (properties->getDoubleValue (Keys::contourReferenceVolume, 0.0));
+    return std::isfinite (db) ? std::optional<float> (std::clamp (db, flub::platform::EndpointVolume::kSilentDb, 24.0f)) : std::nullopt;
+}
+
+void AppSettings::setContourReferenceVolumeDb (float volumeDb)
+{
+    if (std::isfinite (volumeDb))
+        properties->setValue (Keys::contourReferenceVolume, std::clamp (volumeDb, flub::platform::EndpointVolume::kSilentDb, 24.0f));
+}
+
+std::vector<AppSettings::LoopbackPair> AppSettings::getAllowedLoopbackPairs() const
+{
+    std::vector<LoopbackPair> pairs;
+    if (auto xml = properties->getXmlValue (Keys::allowedLoopbackPairs))
+    {
+        for (auto* e : xml->getChildWithTagNameIterator ("PAIR"))
+        {
+            LoopbackPair p { e->getStringAttribute ("input").trim(), e->getStringAttribute ("output").trim() };
+            if (p.input.isNotEmpty() && p.output.isNotEmpty())
+                pairs.push_back (p);
+        }
+    }
+    return pairs;
+}
+
+void AppSettings::setAllowedLoopbackPairs (const std::vector<LoopbackPair>& pairs)
+{
+    juce::XmlElement xml ("LOOPBACKPAIRS");
+    for (const auto& p : pairs)
+    {
+        if (p.input.trim().isEmpty() || p.output.trim().isEmpty())
+            continue;
+        auto* e = xml.createNewChildElement ("PAIR");
+        e->setAttribute ("input", p.input.trim());
+        e->setAttribute ("output", p.output.trim());
+    }
+    properties->setValue (Keys::allowedLoopbackPairs, &xml);
 }
 } // namespace flub::app

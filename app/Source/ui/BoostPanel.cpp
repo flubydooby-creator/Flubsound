@@ -168,6 +168,20 @@ BoostPanel::BoostPanel (EngineController& c)
         addAndMakeVisible (knob);
         binder.bindSlider (knob.slider, Macro1 + static_cast<int> (i));
     }
+    // Dynamic Range and Smoothness (Simple layout; see the header).
+    rangeBox.setTitle ("Dynamic Range");
+    rangeBox.setTooltip ("Dynamic Range: holds sudden loud sounds - an explosion, gunfire, a loud scene cut - to this much over the "
+                         "level just before them, so a quiet scene stays audible and nothing startles. Off by default.");
+    binder.bindChoice (rangeBox, GuardRange);
+    addChildComponent (rangeBox);
+    smoothSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+    smoothSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 48, 20);
+    smoothSlider.setTitle ("Smoothness");
+    smoothSlider.setTooltip ("Smoothness: takes back the sharp \"s\" and harsh top end that Boost and the macros add, never the "
+                             "source's own. 0 % (off) by default.");
+    binder.bindSlider (smoothSlider, SmoothAmount);
+    addChildComponent (smoothSlider);
+
     governor = describeGovernor ({}, controller.getProtectionStrength());
     setMode (ModeValue::Music);
 }
@@ -506,6 +520,12 @@ void BoostPanel::paint (juce::Graphics& g)
         }
     }
 
+    if (rangeBox.isVisible())
+    {
+        Theme::drawCaption (g, "DYNAMIC RANGE", rangeCaption.toFloat(), Palette::faint);
+        Theme::drawCaption (g, "SMOOTHNESS", smoothCaption.toFloat(), Palette::faint);
+    }
+
     // Divider between the dial and the macros.
     g.setColour (Palette::border);
     g.fillRect (static_cast<float> (macroArea.getX()) - 12.0f, static_cast<float> (macroArea.getY()) + 8.0f, 1.0f,
@@ -563,7 +583,12 @@ void BoostPanel::resized()
     // it: one 20 px row (Standard), or up to three (Simple).
     // A Simple row more only while the knobs keep about 118 px.
     constexpr int kRowH = 20;
-    const int rowsWanted = simple ? juce::jlimit (1, 3, (r.getHeight() - 118) / (kRowH + 2)) : 1;
+    // The Simple layout's Dynamic Range / Smoothness row (above the chips)
+    // while the knobs keep about 118 px and one chip row fits too.
+    constexpr int kGuardRowH = 24, kGuardRowGap = 8;
+    const bool guardRow = simple && r.getHeight() >= 118 + kGuardRowH + kGuardRowGap + kRowH + 6;
+    const int guardSpace = guardRow ? kGuardRowH + kGuardRowGap : 0;
+    const int rowsWanted = simple ? juce::jlimit (1, 3, (r.getHeight() - 118 - guardSpace) / (kRowH + 2)) : 1;
     chipsArea = r.getHeight() >= 104 ? r.removeFromBottom (rowsWanted * kRowH + (rowsWanted - 1) * 2) : juce::Rectangle<int>();
     chipRows.clear();
     if (! chipsArea.isEmpty())
@@ -577,6 +602,22 @@ void BoostPanel::resized()
     }
     if (simple && ! chipsArea.isEmpty())
         r.removeFromBottom (6);
+    rangeBox.setVisible (guardRow);
+    smoothSlider.setVisible (guardRow);
+    if (guardRow)
+    {
+        auto row = r.removeFromBottom (kGuardRowH);
+        r.removeFromBottom (kGuardRowGap);
+        rangeCaption = row.removeFromLeft (juce::jmin (104, row.getWidth() / 5));
+        rangeBox.setBounds (row.removeFromLeft (juce::jmin (160, row.getWidth() / 3)).reduced (0, 1));
+        row.removeFromLeft (24);
+        smoothCaption = row.removeFromLeft (juce::jmin (88, row.getWidth() / 4));
+        smoothSlider.setBounds (row.removeFromLeft (juce::jmin (240, row.getWidth())));
+    }
+    else
+    {
+        rangeCaption = smoothCaption = {};
+    }
 
     // Macros: evenly spaced (at most 170 px apart, centred), smaller than the dial.
     const int n = static_cast<int> (macros.size());

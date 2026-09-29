@@ -5,7 +5,6 @@
 //     Off it starts again from 1 as before;
 //   * the crossfaded engine swap (MixEngine::configureFrom) hands each
 //     strip's protection strength and learned state to the new engine;
-//   * the quiet hold keeps the drive through quieter passages in Music;
 //   * MeterBus, render.stats and `flubsound-cli quality` carry the measured
 //     loop's scales, audible residuals, PLR, brightness, budgets and the
 //     kReasonDynamics / kReasonHarmonics bits.
@@ -169,42 +168,6 @@ TEST_CASE ("MixEngine: the crossfaded engine swap hands each strip's protection 
     run (offNext, 0.02);
     CHECK_LE (offLearned, 0.9f);
     CHECK_NEAR (offNext.chain (0).meters().governorScale.load(), offLearned, 0.01f);
-}
-
-TEST_CASE ("Protection: the quiet hold keeps the drive through a quieter section in Music and lets it recover after kQuietHoldSeconds; Gaming recovers as before (E06)")
-{
-    // A plant for the dynamics loop: the output PLR falls 0.5 dB per dB of
-    // scale over 0 dB... it is over its budget in the loud section (programme
-    // at -10 LUFS) and far under it in the quiet one (-20 LUFS).
-    const auto run = [] (bool music, int quietTicks, float& atEndOfLoud, float& endOfQuiet) {
-        SafetyGovernor g;
-        g.prepare (kFs);
-        g.setStrength (ProtectionStrength::Normal);
-        g.setMusicMode (music);
-        for (int tick = 0; tick < 600 + quietTicks; ++tick)
-        {
-            const bool loud = tick < 600;
-            const float u = scaleDb (g.getScale());
-            SafetyGovernor::Readings r;
-            r.inputPlrDb = 14.0f;
-            r.plrDb = loud ? 12.0f + 1.0f * u : 13.0f; // loud: 8 dB needs u <= -3.5
-            r.limiterGrDb = loud ? std::min (0.0f, -9.0f - 1.5f * u) : 0.0f;
-            r.programmeLufs = loud ? -10.0f : -20.0f;
-            g.updateMeasured (r, 480);
-            if (tick == 599)
-                atEndOfLoud = scaleDb (g.getScale());
-        }
-        endOfQuiet = scaleDb (g.getScale());
-    };
-    float loudEnd = 0.0f, quietEnd = 0.0f;
-    run (true, 1000, loudEnd, quietEnd); // 10 s of quieter programme
-    std::cout << "    measured quiet hold (Music): scale " << loudEnd << " dB after the loud section, " << quietEnd << " dB after 10 s of quieter programme\n";
-    CHECK_LE (loudEnd, -3.0f);
-    CHECK_NEAR (quietEnd, loudEnd, 0.05f); // held
-    run (true, 3000, loudEnd, quietEnd);  // 30 s: past kQuietHoldSeconds
-    CHECK_GE (quietEnd, loudEnd + 3.0f);   // recovering
-    run (false, 1000, loudEnd, quietEnd); // Gaming: no dynamics budget, no hold
-    CHECK_GE (quietEnd, loudEnd + 3.0f);
 }
 
 TEST_CASE ("Chain: MeterBus carries the measured loop's readouts - strength, harmonics and tonal scales, audible residuals, PLR, brightness, budgets and the kReasonDynamics / kReasonHarmonics bits; Off reads 'none' (E06)")

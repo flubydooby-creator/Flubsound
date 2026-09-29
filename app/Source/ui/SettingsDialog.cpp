@@ -117,14 +117,31 @@ public:
         selector->setItemHeight (26);
         addAndMakeVisible (*selector);
         deviceText = describeOutputDevice (controller);
+
+        // Feedback-loop guard override (docs/11 E51).
+        allowButton.setTooltip ("Let this input / output pair play although it looks like a feedback loop, e.g. a cable you monitor on purpose");
+        allowButton.onClick = [this]
+        {
+            const auto pair = loopbackPairToAllow (controller);
+            controller.setLoopbackPairAllowed (pair.input, pair.output, true);
+            refresh();
+        };
+        addAndMakeVisible (allowButton);
+        refresh();
     }
 
     void refresh()
     {
         const auto text = describeOutputDevice (controller);
-        if (text != deviceText)
+        const auto guard = describeLoopbackGuard (controller);
+        const auto pairs = controller.getAllowedLoopbackPairs();
+        allowButton.setEnabled (loopbackPairToAllow (controller).input.isNotEmpty());
+        if (text != deviceText || guard != guardText || pairs != shownPairs)
         {
             deviceText = text;
+            guardText = guard;
+            if (pairs != shownPairs)
+                rebuildPairRows (pairs);
             resized();
             repaint();
         }
@@ -145,6 +162,20 @@ public:
         Theme::drawCaption (g, "OUTPUT DEVICE PROFILE", inner.removeFromTop (16).toFloat(), Palette::faint);
         inner.removeFromTop (4);
         deviceLayout.draw (g, inner.toFloat());
+
+        // Feedback-loop guard: its state, "Allow this pair" and the allowed pairs.
+        box = guardArea.toFloat();
+        g.setColour (Palette::well);
+        g.fillRoundedRectangle (box, 6.0f);
+        g.setColour (Palette::border);
+        g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
+        Theme::drawCaption (g, "FEEDBACK-LOOP GUARD", guardArea.reduced (kBoxPadX, kBoxPadY).removeFromTop (16).toFloat(), Palette::faint);
+        guardLayout.draw (g, guardTextArea.toFloat());
+        g.setFont (Theme::font (12.0f));
+        g.setColour (Palette::text.withAlpha (0.85f));
+        for (size_t i = 0; i < shownPairs.size() && i < pairRows.size(); ++i)
+            g.drawFittedText ("Allowed: \"" + shownPairs[i].input + "\" in, \"" + shownPairs[i].output + "\" out", pairRows[i].textArea,
+                              juce::Justification::centredLeft, 1, 0.9f);
     }
 
     void resized() override
@@ -165,7 +196,28 @@ public:
         const int boxHeight = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (deviceLayout.getHeight())) + kBoxPadY + 2;
         deviceArea = { kInset, introArea.getBottom() + 8, w, boxHeight };
 
-        selector->setBounds (0, deviceArea.getBottom() + 10, getWidth(), juce::jmax (1, selector->getHeight()));
+        // Guard box: caption, wrapped text, [Allow this pair], one row per allowed pair.
+        {
+            juce::AttributedString t;
+            t.setWordWrap (juce::AttributedString::byWord);
+            t.append (guardText, Theme::font (12.0f), Palette::text.withAlpha (0.85f));
+            const int textW = w - 2 * kBoxPadX;
+            guardLayout.createLayout (t, static_cast<float> (juce::jmax (80, textW)));
+            int y = deviceArea.getBottom() + 8 + kBoxPadY + 20;
+            guardTextArea = { kInset + kBoxPadX, y, textW, static_cast<int> (std::ceil (guardLayout.getHeight())) };
+            y = guardTextArea.getBottom() + 6;
+            allowButton.setBounds (kInset + kBoxPadX, y, 150, 26);
+            y += 30;
+            for (auto& row : pairRows)
+            {
+                row.remove->setBounds (kInset + w - kBoxPadX - 80, y, 80, 24);
+                row.textArea = { kInset + kBoxPadX, y, juce::jmax (40, textW - 88), 24 };
+                y += 28;
+            }
+            guardArea = { kInset, deviceArea.getBottom() + 8, w, y - deviceArea.getBottom() - 8 + kBoxPadY - 4 };
+        }
+
+        selector->setBounds (0, guardArea.getBottom() + 10, getWidth(), juce::jmax (1, selector->getHeight()));
         fitHeight();
     }
 
@@ -178,6 +230,31 @@ public:
 
 private:
     static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8;
+
+    struct PairRow
+    {
+        std::unique_ptr<juce::TextButton> remove;
+        juce::Rectangle<int> textArea;
+    };
+
+    void rebuildPairRows (const std::vector<AppSettings::LoopbackPair>& pairs)
+    {
+        shownPairs = pairs;
+        pairRows.clear();
+        for (const auto& pair : pairs)
+        {
+            PairRow row;
+            row.remove = std::make_unique<juce::TextButton> ("Remove");
+            row.remove->setTooltip ("Mute this pair again when it would feed the output back into the input");
+            row.remove->onClick = [this, pair]
+            {
+                controller.setLoopbackPairAllowed (pair.input, pair.output, false);
+                refresh();
+            };
+            addAndMakeVisible (*row.remove);
+            pairRows.push_back (std::move (row));
+        }
+    }
 
     void fitHeight()
     {
@@ -209,9 +286,12 @@ private:
 
     EngineController& controller;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
-    juce::String deviceText;
-    juce::TextLayout introLayout, deviceLayout;
-    juce::Rectangle<int> titleArea, introArea, deviceArea;
+    juce::String deviceText, guardText;
+    juce::TextLayout introLayout, deviceLayout, guardLayout;
+    juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea;
+    juce::TextButton allowButton { "Allow this pair" };
+    std::vector<AppSettings::LoopbackPair> shownPairs;
+    std::vector<PairRow> pairRows;
 };
 
 // =============================================================================
@@ -420,6 +500,35 @@ public:
         binder.bindToggle (preampToggle, AutoPreampOn);
         preampToggle.setTitle ("Automatic preamp");
 
+        // Listening level (docs/11 E32): the contour is the preset's
+        // (contour.on), following the system volume is the app's.
+        Style::set (contourToggle, "switch");
+        binder.bindToggle (contourToggle, ContourOn);
+        contourToggle.setTitle ("Loudness contour");
+        Style::set (followToggle, "switch");
+        followToggle.setTitle ("Follow the system volume");
+        followToggle.onClick = [this]
+        {
+            controller.setContourFollowsVolume (followToggle.getToggleState());
+            refresh();
+        };
+        referenceSlider.setSliderStyle (juce::Slider::LinearHorizontal);
+        referenceSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 72, 22);
+        referenceSlider.setRange (kMinReferenceDb, kMaxReferenceDb, 0.5);
+        referenceSlider.setTextValueSuffix (" dB");
+        referenceSlider.setTitle ("Reference volume");
+        referenceSlider.onValueChange = [this]
+        {
+            if (! refreshing)
+                controller.setContourReferenceVolumeDb (static_cast<float> (referenceSlider.getValue()));
+        };
+        useVolumeButton.setTooltip ("Make the system volume you have now the volume at which the strips sound as their presets intend");
+        useVolumeButton.onClick = [this]
+        {
+            controller.useCurrentVolumeAsReference();
+            refresh();
+        };
+
         paletteBox.addItem ("Standard (green / amber / red)", 1);
         paletteBox.addItem ("Colour-blind safe (blue / yellow / vermillion)", 2);
         paletteBox.setSelectedId (palette == MeterPalette::ColourBlindSafe ? 2 : 1, juce::dontSendNotification);
@@ -435,6 +544,8 @@ public:
         addAndMakeVisible (autoReduceToggle);
         addAndMakeVisible (preampToggle);
         addAndMakeVisible (restoreButton);
+        for (auto* c : std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton })
+            addAndMakeVisible (c);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,
@@ -463,6 +574,16 @@ public:
                   330);
         form.row ({}, preampToggle, describePreamp(), 520);
         preampRow = form.rows.size() - 1;
+        form.section ("Listening level");
+        form.row ({}, contourToggle,
+                  "Adds the bass and treble the ear misses at low volume (ISO 226 equal loudness), more the further the volume is below "
+                  "the reference. Saved with the preset; off by default.",
+                  520);
+        form.row ({}, followToggle, describeFollow(), 520);
+        followRow = form.rows.size() - 1;
+        form.row ("Reference volume", referenceSlider, {}, 330);
+        form.row ({}, useVolumeButton, describeListeningLevel (controller.getListeningLevel()), 200);
+        listeningRow = form.rows.size() - 1;
         form.section ("Display");
         form.row ("Meter colours", paletteBox, {}, 330);
         refresh();
@@ -499,6 +620,23 @@ public:
             resized();
             repaint();
         }
+
+        const auto level = controller.getListeningLevel();
+        contourToggle.setButtonText ("Loudness contour on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
+        followToggle.setToggleState (level.following, juce::dontSendNotification);
+        {
+            const juce::ScopedValueSetter<bool> guard (refreshing, true);
+            referenceSlider.setValue (level.referenceDb.value_or (0.0f), juce::dontSendNotification);
+        }
+        referenceSlider.setEnabled (level.following);
+        useVolumeButton.setEnabled (level.following);
+        for (auto [row, text] : { std::pair { followRow, describeFollow() }, std::pair { listeningRow, describeListeningLevel (level) } })
+            if (text != form.rows[row].help)
+            {
+                form.rows[row].help = text;
+                resized();
+                repaint();
+            }
 
         const auto li = controller.getLatencyInfo();
         const auto status = controller.getStatus();
@@ -572,6 +710,15 @@ public:
     }
 
 private:
+    static constexpr double kMinReferenceDb = -60.0, kMaxReferenceDb = 12.0;
+
+    juce::String describeFollow() const
+    {
+        return "Off (default): the contour follows the preset alone. On: Flubsound reads the output device's volume a few times a second; "
+               "turning it down below the reference volume adds the contour. Many USB and wireless headsets have a volume dial the "
+               "system cannot see.";
+    }
+
     juce::String describeReduction() const
     {
         const auto text = controller.describeLoadReduction();
@@ -596,8 +743,12 @@ private:
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, protectionBox, paletteBox;
     juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
     juce::ToggleButton preampToggle { "Automatic preamp" };
+    juce::ToggleButton contourToggle { "Loudness contour" }, followToggle { "Follow the system volume" };
+    juce::Slider referenceSlider;
+    juce::TextButton useVolumeButton { "Use current volume" };
+    bool refreshing = false;
     ParameterBinder binder; // after the controls it binds
-    size_t preampRow = 0;
+    size_t preampRow = 0, followRow = 0, listeningRow = 0;
     juce::TextButton restoreButton { "Restore" };
     FormLayout form;
     size_t reductionRow = 0; // the "Automatic change" row: its help is the live description
@@ -1226,6 +1377,53 @@ juce::String SettingsDialog::describeCpuLine (const EngineStatus& status, const 
     else
         t << static_cast<juce::int64> (overload.episodes) << (overload.episodes == 1 ? " overload" : " overloads") << " this session";
     return t;
+}
+
+AppSettings::LoopbackPair SettingsDialog::loopbackPairToAllow (EngineController& controller)
+{
+    const auto state = controller.getDeviceSafetyState();
+    if (state.kind == DeviceSafetyState::Kind::LoopbackPair)
+        return { state.inputDeviceName, state.outputDeviceName };
+    const auto setup = controller.getDeviceManager().getAudioDeviceSetup();
+    if (setup.inputDeviceName.isEmpty() || setup.outputDeviceName.isEmpty() || ! AudioEngineHost::isLoopbackPair (setup.inputDeviceName, setup.outputDeviceName))
+        return {};
+    for (const auto& p : controller.getAllowedLoopbackPairs())
+        if (p.input.equalsIgnoreCase (setup.inputDeviceName) && p.output.equalsIgnoreCase (setup.outputDeviceName))
+            return {};
+    return { setup.inputDeviceName, setup.outputDeviceName };
+}
+
+juce::String SettingsDialog::describeLoopbackGuard (EngineController& controller)
+{
+    const auto state = controller.getDeviceSafetyState();
+    if (state.kind == DeviceSafetyState::Kind::LoopbackPair)
+        return "Output muted: \"" + state.outputDeviceName + "\" plays back into the input \"" + state.inputDeviceName
+               + "\" (a feedback loop). Choose another output below, or allow the pair if you route it on purpose.";
+    const auto setup = controller.getDeviceManager().getAudioDeviceSetup();
+    if (setup.inputDeviceName.isNotEmpty() && setup.outputDeviceName.isNotEmpty()
+        && AudioEngineHost::isLoopbackPair (setup.inputDeviceName, setup.outputDeviceName))
+    {
+        for (const auto& p : controller.getAllowedLoopbackPairs())
+            if (p.input.equalsIgnoreCase (setup.inputDeviceName) && p.output.equalsIgnoreCase (setup.outputDeviceName))
+                return "The current pair looks like a feedback loop and is allowed: Flubsound plays it.";
+        return "The current input and output look like the two ends of one cable. The output is muted if the input feeds a strip.";
+    }
+    return "Flubsound mutes the output when it would play back into the input it processes (the two ends of a virtual cable, "
+           "a sink and its monitor), e.g. after a wireless headset disconnects. Pairs you allow play anyway.";
+}
+
+juce::String SettingsDialog::describeListeningLevel (const EngineController::ListeningLevel& level)
+{
+    if (! level.following)
+        return "Off: the contour follows the preset's Listening Level alone.";
+    juce::String t;
+    if (level.known)
+        t << "System volume now " << Theme::formatSignedDb (level.volumeDb) << " dB" << (level.muted ? " (muted)" : "");
+    else
+        t << "The system volume cannot be read" << (level.error.isNotEmpty() ? " (" + level.error + ")" : juce::String());
+    if (level.referenceDb.has_value())
+        t << ", reference " << Theme::formatSignedDb (*level.referenceDb) << " dB";
+    return t << ": the contour plays " << Theme::formatSignedDb (level.levelDb) << " dB re the reference.";
 }
 
 juce::String SettingsDialog::describeDeviceCorrection (const EngineController::DeviceCorrectionInfo& info)

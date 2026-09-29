@@ -474,7 +474,7 @@ TEST_CASE ("App: Night latches the Night Mode dynamics on the hotkey strip, Bypa
     for (const auto bank : { Bank::A, Bank::B })
     {
         CHECK (store.get (bank, AutoLevelOn) == 1.0f);
-        CHECK (store.get (bank, AutoLevelTargetLufs) == -20.0f);
+        CHECK (store.get (bank, AutoLevelTargetLufs) == -14.0f); // Night Mode Gaming since docs/11 E21 Phase 3
         CHECK (store.get (bank, CompRatio) == 3.0f);
     }
     for (int s = 0; s < controller.getNumStrips(); ++s)

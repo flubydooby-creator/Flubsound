@@ -57,11 +57,12 @@ constexpr float kFastReleaseMs = 40.0f;
 
 constexpr float kGainSmoothMs = 1.0f;
 // Gated sustain: a cut the onset gate lifts returns this fast, so a kick
-// arriving while the previous decay's cut is still in place loses only its
-// first fraction of a millisecond (with 1 ms: -1.3 dB over its first 4 ms).
-// The gain multiplies the low band only (Tighten), and the step lands on the
-// onset that masks it.
-constexpr float kGatedReturnMs = 0.2f;
+// arriving while the previous decay's cut is still in place keeps its first
+// milliseconds (Tighten 0.5 on kicks, first 10 ms: -0.62 dB with the 1 ms
+// smoothing, -0.31 dB with this; 0.2 ms reached -0.13 dB but its sidebands
+// broke the -80 dBFS click bound of tests/test_bass_engine.cpp's feature
+// toggling). Tighten applies the gain to its low band only.
+constexpr float kGatedReturnMs = 0.5f;
 constexpr float kParamSmoothMs = 20.0f;
 constexpr float kMaxDb = 12.0f;
 
@@ -160,6 +161,7 @@ float TransientShaper::computeGain (float linkedAbs) noexcept
 
     // ~1 ms smoothing of the gain in dB (symmetric, so the envelope shape is
     // not skewed), landing exactly on the target so neutral returns 1.0f.
+    // (a gated sustain cut returns faster, see kGatedReturnMs).
     const float coeff = sustainGated && targetDb > gainDbState ? gatedReturnCoeff : gainCoeff;
     gainDbState = targetDb + coeff * (gainDbState - targetDb);
     if (std::abs (gainDbState - targetDb) < 1.0e-6f)

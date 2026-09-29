@@ -46,6 +46,10 @@ struct ModuleDescriptor
         int id = -1; // parameter id, or a band field for banded modules
         juce::String label;
         bool banded = false;
+        /** Acts whether the module is on or not (its own stage: Smoothness on
+            the Clarity card, Dynamic Range on the Compressor card), so the
+            control is not dimmed with the module. */
+        bool independent = false;
     };
 
     juce::String id, name, group, blurb;
@@ -101,6 +105,8 @@ public:
 private:
     int numBands() const noexcept;
     int resolve (const ModuleDescriptor::Key& key) const noexcept;
+    /** Relative width of key `keyIndex`'s cell (a choice box is wider). */
+    float cellWeight (size_t keyIndex) const;
     void bindKeys();
     void startListening();
     void timerCallback() override;

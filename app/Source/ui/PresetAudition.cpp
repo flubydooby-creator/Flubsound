@@ -325,6 +325,9 @@ void PresetAudition::write (const std::vector<float>& values)
             store.set (bank, i, values[k]);
         written[k] = store.get (bank, i); // as stored (clamped), so cancel() recognises it
     }
+    // The strip-state autosave keeps saving the sound before the preview
+    // (docs/11 E40): a crash now must not make the preview the saved state.
+    controller.setPreviewInProgress (strip, bank, original, written);
 }
 
 void PresetAudition::setTrimDb (float db)
@@ -365,6 +368,7 @@ void PresetAudition::cancel()
                 store.set (bank, i, original[k]);
         }
     }
+    controller.clearPreviewInProgress();
     strip = -1;
     previewId = {};
 }
@@ -379,6 +383,8 @@ bool PresetAudition::commit (const PresetInfo& preset, juce::String& error)
 void PresetAudition::abandon()
 {
     releaseTrim();
+    if (isActive())
+        controller.clearPreviewInProgress();
     strip = -1;
     previewId = {};
 }

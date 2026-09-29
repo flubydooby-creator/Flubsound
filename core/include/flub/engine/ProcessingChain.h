@@ -52,13 +52,17 @@
 // Protection.h) on taps the chain takes around the slots: the bass engine's
 // and the saturator .. maximizer span's input (mid, delayed by the span's
 // latency) and output for two WeightedResidual analysers, the maximizer
-// input's peaks for the feed-forward, and the input's and output's PLR; its
+// input's peaks and RMS per tick for the feed-forward (with the clipper's
+// settings), the limiter's window GR for the release tie, and the input's
+// and output's PLR; its
 // harmonics scale multiplies bass.harmonics. The tonal-balance rule (docs/11
 // E07) compares the dynamic EQ's input with the chain's output
 // (TonalBalanceMeter) and its scale multiplies what the macros add to
 // clarity.presence and clarity.air and the ranges of the Gaming Voice & Score
 // band and the Music air band (the automatic preamp still sees the unscaled
-// values). At Off none of this runs.
+// values). At Off none of this runs. The governor's readouts go to MeterBus
+// once per host block (governor*, tonalLiftDb), and its learned state to a
+// seqlock a replacing chain reads (adoptGovernorState, docs/11 E06 (2)).
 //
 // Bed-lift budget (max.bedLift, docs/11 E19 step 3; LoudnessMaximizer.h):
 // the chain measures the lift ahead of the maximizer as the background
@@ -552,6 +556,7 @@ private:
     std::vector<float> bassSpanInput, driveSpanInput, spanOutput; // maxBlockSize each
     DriveFeedForward feedForward;
     PlrMeter plrMeter, inputPlrMeter;
+    std::vector<float> quarterBase, quarterScale; // kNumParams each (ctor): the drive per unit of scale (applyParameters)
     float preMaxPeak = 0.0f, driveAtFullScale = 0.0f, lastHarmonicsResidualDb = kMinusInfDb, lastDriveLoopResidualDb = kMinusInfDb;
     std::array<double, 2> preMaxEnergy {}; // the tick's sum of squares per channel, and its length
     int preMaxSamples = 0;

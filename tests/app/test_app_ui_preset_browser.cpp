@@ -341,6 +341,52 @@ TEST_CASE ("App UI: a preview plays in the active bank only; Cancel restores it 
     }
 }
 
+TEST_CASE ("App UI: a crash during a preview cannot save the previewed sound - the autosave keeps the strip as Cancel would leave it (E40)")
+{
+    const flubapptest::TempFolder temp;
+    auto options = headlessOptions (temp);
+    options.persistSettings = true;
+    EngineController c (options);
+    const int music = c.findStrip ("Music");
+    REQUIRE (music >= 0);
+    juce::String error;
+    REQUIRE (c.loadPreset (preset (c, "Flubsound Signature"), music, error));
+    auto& store = c.getParams (music);
+    store.set (Bank::B, BoostIntensity, 0.2f);
+    const auto saved = c.getPersistedStripState (music);
+
+    ui::PresetAudition audition (c);
+    audition.begin (music);
+    REQUIRE (audition.preview (preset (c, "Club Loud"), error));
+    REQUIRE (bankValues (store, Bank::A) != audition.getOriginalValues()); // Club Loud plays
+    CHECK (c.getPersistedStripState (music) == saved);
+
+    // The periodic autosave and a save on the way down both write the sound
+    // before the preview; the file on disk has it (read as a restart would).
+    c.saveState();
+    CHECK (c.getSettings().getStripState ("Music") == saved);
+    CHECK (AppSettings (temp.file ("settings.xml"), false).getStripState ("Music") == saved);
+
+    // A value someone else moved meanwhile is saved as it is, like Cancel keeps it.
+    REQUIRE (audition.preview (preset (c, "Bass Head"), error));
+    store.set (Bank::A, BoostIntensity, 0.91f);
+    const auto during = c.getPersistedStripState (music);
+    CHECK (during != saved);
+    audition.cancel();
+    CHECK (c.getPersistedStripState (music) == during);
+    CHECK (store.get (Bank::A, BoostIntensity) == 0.91f);
+
+    // After the session the autosave writes the store again: a load is saved.
+    REQUIRE (audition.preview (preset (c, "Warm Vinyl"), error));
+    REQUIRE (audition.commit (preset (c, "Warm Vinyl"), error));
+    c.saveState();
+    flub::preset::Preset warm;
+    REQUIRE (c.getPresetManager().readPreset (preset (c, "Warm Vinyl"), warm, error));
+    CHECK (store.get (Bank::A, MaxDriveDb) == warm.values[static_cast<size_t> (MaxDriveDb)]);
+    CHECK (c.getSettings().getStripState ("Music") == c.getPersistedStripState (music));
+    CHECK (c.getSettings().getStripState ("Music") != saved);
+}
+
 TEST_CASE ("App UI: the browser shows a preset's description, tags, latency profile and reader warnings (E40)")
 {
     const flubapptest::TempFolder temp;

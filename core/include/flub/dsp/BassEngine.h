@@ -25,10 +25,11 @@
 //      to all channels. With replaceFundamental (small speakers / laptops)
 //      the original content below the cutoff is high-passed away, reclaiming
 //      headroom the transducer cannot use anyway.
-//   5. Tighten: TransientShaper on the LR4 low band (< 150 Hz) with negative
-//      sustain = shorter, drier bass decay ("punchy" rather than "boomy"),
-//      gated by the attack indicator: the first 20-40 ms of a note keep
-//      their level (docs/11 E04 step 2).
+//   5. Tighten: TransientShaper detecting the LR4 low band (< 150 Hz) with
+//      negative sustain = shorter, drier bass decay ("punchy" rather than
+//      "boomy"), gated by the onset so the first 30-50 ms of a note keep
+//      their level, applied as a one-pole low shelf (unity = the input
+//      itself; docs/11 E04 step 2).
 //
 // Telemetry: getDistortionDb() = the share of the generated harmonics in the
 // stage output over the last completed 25 ms analysis window

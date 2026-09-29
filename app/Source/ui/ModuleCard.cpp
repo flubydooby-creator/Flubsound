@@ -41,16 +41,24 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
                { DynFieldRatio, "Ratio", true } });
         add ("bass", "Bass Engine", "Bass", "Bass boost, psychoacoustic harmonics and headroom protection", BassOn, B::None,
              { { BassBoostDb, "Boost" }, { BassBoostFreq, "Freq" }, { BassHarmonics, "Harmonics" }, { BassTighten, "Tighten" }, { BassProtectDb, "Protect" } });
-        add ("clarity", "Clarity", "Clarity", "Presence, air, de-mud and transient shaping", ClarityOn, B::None,
-             { { ClarityPresence, "Presence" }, { ClarityAir, "Air" }, { ClarityDeMud, "De-Mud" }, { ClarityAttackDb, "Attack" } });
+        add ("clarity", "Clarity", "Clarity", "Presence, air, de-mud and transient shaping; Smoothness takes back added sibilance", ClarityOn,
+             B::None,
+             { { ClarityPresence, "Presence" }, { ClarityAir, "Air" }, { ClarityDeMud, "De-Mud" }, { ClarityAttackDb, "Attack" },
+               { SmoothAmount, "Smooth", false, true } });
         add ("sat", "Saturation", "Saturation", "Oversampled tape / tube / digital saturation", SaturationOn, B::None,
              { { SatType, "Type" }, { SatDriveDb, "Drive" }, { SatMix, "Mix" }, { SatOutputDb, "Output" } });
         add ("spatial", "Stereo & Space", "Stereo", "Width, positional focus, space and crossfeed with mono safety", SpatialOn, B::None,
              { { SpatialWidth, "Width" }, { SpatialFocus, "Focus" }, { SpatialSpace, "Space" }, { SpatialCrossfeed, "Crossfeed" } });
         add ("virt", "Headphone Virtualizer", "Virtualizer", "Binaural rendering of 5.1 / 7.1 game audio", VirtualizerOn, B::None,
              { { VirtRoom, "Room" }, { VirtHeadRadius, "Head" }, { VirtLfeGainDb, "LFE" } });
-        add ("comp", "Compressor", "Compressor", "Look-ahead downward + upward compression", CompressorOn, B::None,
-             { { CompThresholdDb, "Threshold" }, { CompRatio, "Ratio" }, { CompAttackMs, "Attack" }, { CompReleaseMs, "Release" }, { CompMakeupDb, "Makeup" } });
+        add ("comp", "Compressor", "Compressor", "Look-ahead downward + upward compression; Dynamic Range holds sudden loud events",
+             CompressorOn, B::None,
+             { { CompThresholdDb, "Threshold" },
+               { CompRatio, "Ratio" },
+               { CompAttackMs, "Attack" },
+               { CompReleaseMs, "Release" },
+               { CompMakeupDb, "Makeup" },
+               { GuardRange, "Dyn. Range", false, true } });
         add ("max", "Loudness Maximizer", "Maximizer", "Glue, soft clipper and true-peak limiter", MaximizerOn, B::None,
              { { MaxDriveDb, "Drive" }, { MaxCeilingDb, "Ceiling" }, { MaxClipAmount, "Clipper" }, { MaxGlue, "Glue" }, { MaxReleaseMs, "Release" } });
         return m;
@@ -163,15 +171,17 @@ void ModuleCard::bindKeys()
         const auto& key = descriptor.keys[i];
         const int id = resolve (key);
         auto* c = keyControls[i].get();
+        const auto tip = juce::String (ParamFormat::info (id).name)
+                         + (key.independent ? " (works with " + descriptor.name + " switched off too)" : juce::String());
         if (auto* knob = dynamic_cast<ParamKnob*> (c))
         {
             binder.bindSlider (knob->slider, id);
-            knob->slider.setTooltip (juce::String (ParamFormat::info (id).name));
+            knob->slider.setTooltip (tip);
         }
         else if (auto* combo = dynamic_cast<juce::ComboBox*> (c))
         {
             binder.bindChoice (*combo, id);
-            combo->setTooltip (juce::String (ParamFormat::info (id).name));
+            combo->setTooltip (tip);
         }
         else if (auto* toggle = dynamic_cast<juce::ToggleButton*> (c))
         {
@@ -203,7 +213,10 @@ void ModuleCard::setState (const State& newState)
         return;
     hasState = true;
 
-    keyHolder.setAlpha (state.effectiveOn ? 1.0f : 0.42f);
+    // Controls of the module's own parameters dim while it is off; a key
+    // that acts on its own (Key::independent) does not.
+    for (size_t i = 0; i < keyControls.size() && i < descriptor.keys.size(); ++i)
+        keyControls[i]->setAlpha (state.effectiveOn || descriptor.keys[i].independent ? 1.0f : 0.42f);
     // The ear works whenever the module is heard, also when only a macro
     // engages it (the engine's audition bypass overrides the macros).
     listenButton.setEnabled (state.effectiveOn);
@@ -271,9 +284,18 @@ void ModuleCard::setExpanded (bool shouldExpand)
     repaint();
 }
 
+float ModuleCard::cellWeight (size_t keyIndex) const
+{
+    // A choice box needs room for its longest item ("10 LU (Balanced)").
+    return keyIndex < keyControls.size() && dynamic_cast<juce::ComboBox*> (keyControls[keyIndex].get()) != nullptr ? 1.6f : 1.0f;
+}
+
 int ModuleCard::getPreferredWidth() const
 {
-    return juce::jmax (220, static_cast<int> (descriptor.keys.size()) * 72 + 28);
+    float cells = 0.0f;
+    for (size_t i = 0; i < descriptor.keys.size(); ++i)
+        cells += cellWeight (i);
+    return juce::jmax (220, juce::roundToInt (cells * 72.0f) + 28);
 }
 
 juce::String ModuleCard::noteText() const
@@ -410,14 +432,21 @@ void ModuleCard::resized()
     if (n == 0)
         return;
     auto cells = keyHolder.getLocalBounds();
-    const int cellW = cells.getWidth() / n;
+    float weights = 0.0f;
+    for (size_t i = 0; i < keyControls.size(); ++i)
+        weights += cellWeight (i);
+    const float unitW = static_cast<float> (cells.getWidth()) / weights;
     const int knobH = juce::jmin (cells.getHeight(), 96);
     for (int i = 0; i < n; ++i)
     {
+        const auto k = static_cast<size_t> (i);
+        const int cellW = i + 1 == n ? cells.getWidth() : juce::roundToInt (unitW * cellWeight (k));
         auto cell = cells.removeFromLeft (cellW);
-        auto* c = keyControls[static_cast<size_t> (i)].get();
+        auto* c = keyControls[k].get();
         if (dynamic_cast<ParamKnob*> (c) != nullptr)
             c->setBounds (cell.withSizeKeepingCentre (juce::jmin (cellW, 76), knobH));
+        else if (dynamic_cast<juce::ComboBox*> (c) != nullptr)
+            c->setBounds (cell.withSizeKeepingCentre (juce::jmin (cellW - 6, 128), 24).translated (0, 2));
         else
             c->setBounds (cell.withSizeKeepingCentre (juce::jmin (cellW - 6, 84), 24).translated (0, 2));
     }

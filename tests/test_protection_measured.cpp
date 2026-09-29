@@ -188,18 +188,18 @@ TEST_CASE ("Protection: the feed-forward finds the drive that holds the limiter 
     ff.push (minus10);
     CHECK (ff.hasReading());
     // Every tick's peak at -10 dBFS, ceiling -1: the limiter holds p + D + 1
-    // dB whatever its envelope, 6 dB at D = 15.
-    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.01f);
+    // dB whatever its envelope, 6 dB at D = 15 (the bisection's step: 0.015 dB).
+    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.02f);
     // The clipper ahead of it (headroom 0.3 dB, no crest gate, depth 3 dB)
     // takes 3 dB off each peak first: D = 18. A crest gate of 6 dB over
     // ticks whose RMS equals their peak leaves them unclipped: 15 again.
     ff.setClipper (0.3f, 0.0f, 3.0f);
-    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 18.0f, 0.01f);
+    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 18.0f, 0.02f);
     ff.reset();
     ff.setClipper (0.3f, 6.0f, 3.0f);
     for (int i = 0; i < 300; ++i)
         ff.pushTick (minus10, minus10);
-    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.01f);
+    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.02f);
     ff.setClipper (std::numeric_limits<float>::infinity(), 0.0f, 24.0f); // no clipper
     // Ticks alternating between -10 and -16 dBFS: the mean of the peaks'
     // excess, max (0, p + D + 1), is 6 dB at D = 18 (batch 1's prediction),

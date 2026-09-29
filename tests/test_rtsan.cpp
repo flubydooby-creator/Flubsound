@@ -136,6 +136,7 @@ static_assert (std::is_same_v<decltype (&ParametricEq::setBand), void (Parametri
 static_assert (std::is_same_v<decltype (&ParametricEq::setOutputGainDb), void (ParametricEq::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TransientShaper::setAttackDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TransientShaper::setSustainDb), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TransientShaper::setSustainGatedByAttack), void (TransientShaper::*) (bool) noexcept FLUB_NONBLOCKING>);
 // The automatic preamp's static-boost prediction (docs/11 E11), run by
 // ProcessingChain::applyParameters when its inputs change.
 static_assert (std::is_same_v<decltype (&ProcessingChain::buildStaticBoostModel),
@@ -214,6 +215,16 @@ static_assert (std::is_same_v<decltype (&SafetyGovernor::setHarmonicsReplaceFund
 static_assert (std::is_same_v<decltype (&DriveFeedForward::push), void (DriveFeedForward::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&DriveFeedForward::driveForBudget), float (DriveFeedForward::*) (float, float) const noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<DriveFeedForward>);
+// docs/11 E06 batch 2: the feed-forward's clipper model and tick RMS, its
+// reading check, and the governor's learned state (restart() is what the
+// chain's reset() calls; restoreMemory() at the next tick; the chain
+// publishes getMemory() every block).
+static_assert (std::is_same_v<decltype (&DriveFeedForward::pushTick), void (DriveFeedForward::*) (float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DriveFeedForward::setClipper), void (DriveFeedForward::*) (float, float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DriveFeedForward::hasReading), bool (DriveFeedForward::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::restart), void (SafetyGovernor::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::getMemory), SafetyGovernor::Memory (SafetyGovernor::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&SafetyGovernor::restoreMemory), void (SafetyGovernor::*) (const SafetyGovernor::Memory&) noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingProcess<PlrMeter>);
 static_assert (std::is_same_v<decltype (&PlrMeter::tick), void (PlrMeter::*)() noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&PlrMeter::getPlrDb), float (PlrMeter::*)() const noexcept FLUB_NONBLOCKING>);

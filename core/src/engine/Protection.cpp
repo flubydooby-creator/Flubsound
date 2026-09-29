@@ -119,7 +119,9 @@ constexpr float kFeedForwardProgrammeDb = -70.0f; // a tick whose peak is below 
 
 float DriveFeedForward::meanReductionDb (float ceilingDb, float driveDb, int programmeTicks) const noexcept FLUB_NONBLOCKING
 {
-    // Chronological order (oldest first); the second pass accumulates. The
+    // Chronological order (oldest first). The first pass only warms the
+    // envelope up on the window's last kWarmTicks (1.25 release time
+    // constants); the second accumulates. The
     // product of the applied gains is taken in runs (their logs summed), so
     // a log per tick is not needed and the product cannot underflow.
     // In units of the input before the drive: the ceiling k, the clipper's
@@ -134,7 +136,7 @@ float DriveFeedForward::meanReductionDb (float ceilingDb, float driveDb, int pro
     const int first = count == kTicks ? pos : 0;
     double env = 1.0, logSum = 0.0, product = 1.0;
     for (int pass = 0; pass < 2; ++pass)
-        for (int j = 0; j < count; ++j)
+        for (int j = pass == 0 ? std::max (0, count - kWarmTicks) : 0; j < count; ++j)
         {
             const auto i = static_cast<size_t> ((first + j) % kTicks);
             double peak = static_cast<double> (peaks[i]);
@@ -174,7 +176,7 @@ float DriveFeedForward::driveForBudget (float ceilingDb, float grBudgetDb) const
     float lo = -48.0f, hi = 72.0f;
     if (meanReductionDb (ceilingDb, hi, n) < target)
         return std::numeric_limits<float>::infinity();
-    for (int it = 0; it < 16; ++it)
+    for (int it = 0; it < 13; ++it) // 120 dB / 2^13: 0.015 dB
     {
         const float mid = 0.5f * (lo + hi);
         (meanReductionDb (ceilingDb, mid, n) < target ? lo : hi) = mid;
@@ -268,8 +270,6 @@ void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
     harmonicsScale = tonalScale = 1.0f;
     grLoop = residualLoop = plrLoop = harmonicsLoop = tonalLoop = {};
     programDepthDb = sagLagDb = 0.0f;
-    backoffLufs = kMinusInfDb;
-    quietSeconds = 0.0f;
     pending = {};
     pendingProbes = {};
     restartHold = false;
@@ -495,9 +495,17 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     // Release tie: the limiter's programme envelope, modelled on the
     // window's deepest GR (one-pole in the linear gain, as in the limiter).
     const float windowDepthDb = std::max (0.0f, -r.limiterGrDb);
+    float roomDb = 0.0f;
     {
         const float p = dbToGain (-programDepthDb), w = dbToGain (-windowDepthDb);
+        const float depthBefore = programDepthDb;
         programDepthDb = std::max (0.0f, -gainToDb (w + (w < p ? programAttack : programRelease) * (p - w)));
+        // The attack's room: how far the window's GR is under the envelope
+        // while the envelope is still attacking (deepening by more than
+        // kAttackingDbPerTick); in steady limiting the window's deepest peak
+        // always reads a little under it, and that is no room.
+        if (programDepthDb - depthBefore > kAttackingDbPerTick)
+            roomDb = std::max (0.0f, windowDepthDb - programDepthDb);
         // The dip releases as the envelope does, at 8.686 (10^(L/20) - 1) / tau dB/s
         // at a dip of L dB, and cannot exceed the reduction the envelope holds.
         constexpr float kDbPerNeper = 8.685889638f;
@@ -556,51 +564,37 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     // by any drive.)
     const float plrSetPoint = plrBudget ? std::min (b.plrDb + kPlrMarginDb, r.inputPlrDb - kPlrAllowanceDb) : 0.0f;
     const float ePlr = plrBudget ? plrSetPoint - r.plrDb : -12.0f;
-    const float uGr = grLoop.step (eGr, dt, ffDb, kTrimGain);
+    float uGr = grLoop.step (eGr, dt, ffDb, kTrimGain);
+    // The feed-forward is an upper bound on the limiter's GR (stages ahead
+    // of it - the glue, the LF-first limiter - take peaks it does not
+    // model): while the limiter is all but idle it holds nothing down.
+    if (grFastDb > -kLimiterIdleDb)
+        uGr = std::max (uGr, driveDb + kRiseDbPerSec * dt);
     const float uResidual = residualLoop.step (eResidual, dt, 0.0f);
     const float uPlr = plrLoop.step (ePlr, dt, 0.0f);
     const float target = std::max (floorDb, std::min ({ uGr, uResidual, uPlr }));
     const float before = driveDb;
-    // Fall limit. Release tie (see kSagAllowanceDb): while the limiter's
-    // programme envelope holds more than the allowance, the drive may fall
-    // (in dB of drive) by what the envelope's attack has not yet taken plus
-    // what keeps the modelled dip under the allowance - unless the audible
-    // residual is over its budget, where the faster of the two applies.
+    // Fall limit. Release tie (see kSagAllowanceDb): while the output is
+    // limiter-bound and the limiter's programme envelope holds more than the
+    // allowance, the drive may fall (in dB of drive) by what the envelope's
+    // attack has not yet taken plus what keeps the modelled dip under the
+    // allowance - unless the audible residual is far over its set point,
+    // where the faster of the two applies.
     float fallFloor = driveDb - kFallDbPerSec * dt;
-    const float roomDb = std::max (0.0f, windowDepthDb - programDepthDb);
-    const bool tie = r.driveAtFullScaleDb > 0.0f && programDepthDb + roomDb > kSagAllowanceDb;
+    const bool limiterBound = uGr <= std::min (uResidual, uPlr) || programDepthDb > -(b.grDb + kSetPointMarginDb);
+    const bool tie = r.driveAtFullScaleDb > 0.0f && programDepthDb + roomDb > kSagAllowanceDb && limiterBound;
     if (tie)
     {
-        const float driveNow = r.driveAtFullScaleDb * dbToGain (driveDb);
+        const float driveNow = std::min (r.driveMaxDb, r.driveAtFullScaleDb * dbToGain (driveDb));
         const float allowed = roomDb + std::max (0.0f, kSagAllowanceDb - sagLagDb);
         const float tieFloor = driveNow - allowed > 0.0f ? gainToDb ((driveNow - allowed) / r.driveAtFullScaleDb) : kFloorDb;
         fallFloor = eResidual > kProbeErrorDb ? std::min (fallFloor, tieFloor) : tieFloor;
     }
     driveDb = std::clamp (target, std::min (driveDb, fallFloor), driveDb + kRiseDbPerSec * dt);
-    // Quiet hold (see kQuietHoldLu): with a dynamics budget, the level of
-    // the programme that made the drive fall is remembered, and the drive
-    // does not rise again while the programme stays well under it.
-    if (b.plrDb > 0.0f)
-    {
-        const bool programme = r.programmeLufs > -70.0f;
-        if (driveDb < before - 1.0e-4f && programme)
-        {
-            backoffLufs = r.programmeLufs;
-            quietSeconds = 0.0f;
-        }
-        else if (driveDb > before && programme && r.programmeLufs < backoffLufs - kQuietHoldLu && quietSeconds < kQuietHoldSeconds)
-        {
-            quietSeconds += dt;
-            driveDb = before;
-            // No windup: the loops continue from what is applied.
-            for (Loop* l : { &grLoop, &residualLoop, &plrLoop })
-                l->integral = std::min (l->integral, driveDb - (l == &grLoop ? ffDb : 0.0f));
-        }
-    }
     if (tie && driveDb < before)
     {
         // What the drive fell beyond the attack's room is a dip until released.
-        const float fellDb = r.driveAtFullScaleDb * (dbToGain (before) - dbToGain (driveDb));
+        const float fellDb = std::min (r.driveMaxDb, r.driveAtFullScaleDb * dbToGain (before)) - std::min (r.driveMaxDb, r.driveAtFullScaleDb * dbToGain (driveDb));
         sagLagDb = std::min (programDepthDb, sagLagDb + std::max (0.0f, fellDb - roomDb));
     }
     grLoop.track (uGr, driveDb, dt);

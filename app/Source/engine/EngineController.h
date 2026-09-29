@@ -63,6 +63,17 @@
 // Protection   getProtectionStrength() / setProtectionStrength(): how far the
 //              SafetyGovernor reaches (docs/11 E06; persisted, every strip,
 //              re-applied to every engine the host builds).
+// Listening    the loudness contour follows the OS output volume (docs/11
+//   level      E32): setContourFollowsVolume() (Settings > Processing, off by
+//              default) reads the output endpoint's volume a few times a
+//              second off the audio thread and hands every strip's chain
+//              the volume minus the reference volume
+//              (setContourReferenceVolumeDb / useCurrentVolumeAsReference;
+//              ProcessingChain::setListeningLevelDb). getListeningLevel()
+//              for the UI. The contour itself is contour.on, per preset.
+// Loopback     getAllowedLoopbackPairs() / setLoopbackPairAllowed(): the
+//   override   feedback-loop guard's per-pair override (docs/11 E51),
+//              persisted and applied to every device start.
 // Correction   getDeviceCorrection(): the output endpoint's headphone /
 //              speaker correction (docs/11 E15; import an AutoEQ / Equalizer
 //              APO ParametricEQ.txt with importDeviceCorrection, enable /
@@ -98,6 +109,8 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace flub::app
@@ -134,6 +147,14 @@ public:
             the platform's (platform_bridge::createForegroundApp). Tests inject
             a fake; a factory returning nullptr turns the feature off. */
         std::function<std::unique_ptr<flub::platform::ForegroundApp>()> foregroundAppFactory;
+        /** Reads the output endpoint's OS volume for the loudness contour
+            (docs/11 E32); empty = the platform's
+            (platform::AudioEndpoints::queryOutputVolume). Tests inject a
+            fake. With an open device a background thread calls it while the
+            contour follows the volume; headless, only pollEndpointVolume(). */
+        std::function<flub::platform::EndpointVolume (const std::string& deviceName)> endpointVolumeReader;
+        /** Tests: run that background poll without an open device too. */
+        bool pollEndpointVolumeHeadless = false;
     };
 
     EngineController();
@@ -422,12 +443,16 @@ public:
         on the strip ends it without restoring. */
     bool setFocus (int strip, bool on);
     bool isFocused (int strip) const noexcept;
-    /** Night listening: a latched override of the strip's dynamics, the Night
-        Mode Gaming preset's: Auto Level on at -20 LUFS, compressor 3:1 at
-        -24 dB (+6 dB makeup) with 6 dB of upward compression below -38 dB.
-        Switched off, released like Focus. */
+    /** Night listening: a latched override of the strip's dynamics with the
+        Night Mode Gaming factory preset's values (docs/11 E21, read from the
+        preset: Auto Level at -14 LUFS, Dynamic Range 20 LU - the Startle
+        Guard and, in Gaming mode, the Tame band - and its compressor: 3:1 at
+        -18 dB without makeup, upward 2.5:1 below -32 dB up to +6 dB, floor
+        -62 dB). Switched off, released like Focus. */
     void setNight (int strip, bool on);
     bool isNight (int strip) const noexcept;
+    /** The parameters the Night latch sets, with their values. */
+    std::vector<std::pair<int, float>> getNightOverrides() const;
 
     /** ChatMix: one balance between the Game and the Chat strip, -1 (towards
         Game) .. +1 (towards Chat). It moves the two strips' gains in opposite
@@ -440,6 +465,59 @@ public:
     float getChatMix() const noexcept { return chatMix; }
     /** "Game -2.4 dB, Chat +2.4 dB", or "centred". */
     juce::String describeChatMix() const;
+
+    // ---- Listening level: the contour follows the system volume (docs/11 E32) -------------------
+    struct ListeningLevel
+    {
+        bool following = false;         // Settings > Processing switch (persisted, default off)
+        bool known = false;             // the last read of the endpoint volume succeeded
+        bool muted = false;             // the endpoint is muted (the level is held)
+        float volumeDb = 0.0f;          // the endpoint's OS volume (dB), when known
+        std::optional<float> referenceDb; // the user's reference volume (dB)
+        float levelDb = 0.0f;           // what the chains get: volume - reference (0 while not following)
+        juce::String device;            // the output endpoint read
+        juce::String error;             // why the read failed
+    };
+    ListeningLevel getListeningLevel() const;
+    /** Turns following on / off (persisted). On without a reference volume
+        takes the current volume as the reference (read now), so switching it
+        on changes nothing until the volume moves. Off hands every chain 0 dB.
+        Broadcasts Change::Settings. */
+    void setContourFollowsVolume (bool follow);
+    bool getContourFollowsVolume() const { return settings->getContourFollowsVolume(); }
+    /** Sets the reference volume (dB, persisted). Broadcasts Change::Settings. */
+    void setContourReferenceVolumeDb (float volumeDb);
+    /** "This is my reference volume": the volume read now. False (nothing
+        changed) when it cannot be read. */
+    bool useCurrentVolumeAsReference();
+    /** One read of the output endpoint's volume, applied to every chain. The
+        background poll does the same off the message thread; tests call it
+        directly. Message thread. */
+    void pollEndpointVolume();
+    /** How often the background poll reads the volume. */
+    static constexpr int kEndpointVolumePollMs = 250;
+
+    // ---- Feedback-loop guard override (docs/11 E51) ------------------------------------------
+    /** The pairs the guard lets through (AppSettings::getAllowedLoopbackPairs). */
+    std::vector<AppSettings::LoopbackPair> getAllowedLoopbackPairs() const { return settings->getAllowedLoopbackPairs(); }
+    /** Allows (or stops allowing) one input / output pair, persisted and
+        applied at once: the current pair is checked again, so allowing the
+        pair that tripped the guard lets the output play. Broadcasts
+        Change::Device (the banner) and Change::Settings. */
+    void setLoopbackPairAllowed (const juce::String& inputDeviceName, const juce::String& outputDeviceName, bool allowed);
+
+    // ---- Preset preview (docs/11 E40) ----------------------------------------------------------
+    /** A preset preview plays in a strip's active bank (ui::PresetAudition).
+        While one is registered, the strip-state autosave stores `bank` as it
+        will be once the preview ends: every value that still holds what the
+        preview wrote (`written`) as the value before it (`original`), so a
+        crash during a preview never saves the previewed sound. Values
+        changed meanwhile (a hotkey, the other bank) are saved as they are.
+        Both vectors have param::kNumParams values. */
+    void setPreviewInProgress (int strip, flub::param::Bank bank, std::vector<float> original, std::vector<float> written);
+    void clearPreviewInProgress();
+    /** The strip-state JSON the autosave writes for `strip` now (tests). */
+    juce::String getPersistedStripState (int strip);
 
     // ---- Settings / routing ------------------------------------------------------------------
     AppSettings& getSettings() noexcept { return *settings; }
@@ -500,6 +578,11 @@ private:
     void applyDeviceCorrection();
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
     void applyProtectionStrength();
+    void applyListeningLevel();
+    void applyEndpointVolume (const flub::platform::EndpointVolume& volume, const juce::String& device);
+    void applyAllowedLoopbackPairs();
+    void updateEndpointVolumePoller();
+    flub::platform::EndpointVolume readEndpointVolume (const juce::String& device) const;
     /** Exports the profile's PipeWire quantum request (a device session on
         Linux only); with `reopen`, re-opens a JACK / ALSA device when the
         request changed. */
@@ -556,11 +639,27 @@ private:
     juce::String correctionEndpoint; // endpoint the applied device correction belongs to
     bool correctionCompare = false;
 
+    // Listening level (docs/11 E32): the last read, and the background poll.
+    ListeningLevel listening;
+    bool listeningHasRead = false; // a successful read for listening.device since following / the device changed
+    class EndpointVolumePoller;
+    std::unique_ptr<EndpointVolumePoller> volumePoller;
+
+    // A preset preview's autosave substitute (docs/11 E40).
+    struct PreviewInProgress
+    {
+        int strip = -1;
+        flub::param::Bank bank = flub::param::Bank::A;
+        std::vector<float> original, written;
+    };
+    PreviewInProgress preview;
+
     OverloadWatchdog overloadWatchdog;
     AutoLoadReducer loadReducer;
     flub::ProtectionStrength protectionStrength = flub::ProtectionStrength::Off;
 
     std::vector<PresetWarnings> pendingPresetWarnings;
+    bool announcePresetWarnings = false; // an import's warnings wait for handleAsyncUpdate
     std::optional<LatencySuggestion> pendingLatencySuggestion;
 
     // Hotkey-driven state (docs/11 E56), per session.

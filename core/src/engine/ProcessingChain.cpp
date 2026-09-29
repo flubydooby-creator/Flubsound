@@ -275,6 +275,8 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
     baseAtPrepare.assign (static_cast<size_t> (kNumParams), 0.0f);
     headroomInput.assign (static_cast<size_t> (kNumParams), 0.0f);
     ungoverned.assign (static_cast<size_t> (kNumParams), 0.0f);
+    quarterBase.assign (static_cast<size_t> (kNumParams), 0.0f);
+    quarterScale.assign (static_cast<size_t> (kNumParams), 0.0f);
     publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
     for (auto& lift : tonalLiftDb)
         lift.store (TonalBalanceMeter::kNoReading, std::memory_order_relaxed);
@@ -682,9 +684,17 @@ void ProcessingChain::applyParameters() noexcept
         e[BassHarmonics] *= governor.getHarmonicsScale();
         governor.setMusicMode (static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Music);
         governor.setHarmonicsReplaceFundamental (on (e, BassReplaceFundamental));
-        if (governorScale < 1.0f)
-            MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
-        driveAtFullScale = governorScale < 1.0f ? ungoverned[static_cast<size_t> (MaxDriveDb)] : e[MaxDriveDb];
+        // The maximizer drive per unit of scale (docs/11 E06 batch 2): the
+        // base drive and every governed contribution scale with it, but
+        // their sum is clamped at max.drive's maximum, so the drive at the
+        // full scale understated it (Gaming Boost 100 on a 24 dB base: 30 dB,
+        // clamped to 24; the feed-forward's share read 3 dB high). At a
+        // quarter of the scale the sum is under the clamp.
+        std::copy (base.begin(), base.end(), quarterBase.begin());
+        for (int id : { MaxDriveDb, SatDriveDb, BassHarmonics })
+            quarterBase[static_cast<size_t> (id)] *= 0.25f;
+        MacroMap::apply (quarterBase.data(), quarterScale.data(), 0.25f);
+        driveAtFullScale = 4.0f * quarterScale[static_cast<size_t> (MaxDriveDb)];
     }
     if (strength == ProtectionStrength::Off)
     {
@@ -1473,9 +1483,9 @@ SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, f
         if (std::isfinite (allowed))
             r.feedForwardScale = std::clamp (allowed / driveAtFullScale, 0.0f, 1.0f);
     }
-    r.programmeLufs = inLoudness.getLufs(); // the quiet hold (docs/11 E06 batch 2)
     r.feedForwardValid = ! (driveAtFullScale > 0.0f) || feedForward.hasReading(); // nothing to predict counts as read
     r.driveAtFullScaleDb = std::max (0.0f, driveAtFullScale); // the release tie's unit (docs/11 E06 batch 2)
+    r.driveMaxDb = layout()[static_cast<size_t> (MaxDriveDb)].maxValue;
     return r;
 }
 
@@ -1621,7 +1631,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     st.applyGainRamp (o0, outputGain.skip (n));
 
     // ---- 6. Control loops for the next block ----
-    const bool closesTick = governor.samplesToNextTick() <= n; // segments end on the governor's 10 ms grid
+    const bool couplingTick = governor.samplesToNextTick() <= n; // segments end on the governor's 10 ms grid
     const bool maxActive = ! slots[SMax].isFullyBypassed();
     const bool satActive = ! slots[SSat].isFullyBypassed();
     const float satDistortionDb = satActive ? saturator.getDistortionDb() : kMinusInfDb;
@@ -1665,7 +1675,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         loudnessMatch.measureWet (st);
     }
 
-    if (closesTick && ! contaminated)
+    if (couplingTick && ! contaminated)
         updateAttackCoupling (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, maxActive);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----

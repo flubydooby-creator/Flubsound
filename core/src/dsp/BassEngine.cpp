@@ -23,7 +23,7 @@
 //                      (the linear branch) and the harmonics
 //                      (ParallelDistortion.h).
 //   5. Tighten       : LR4 split at 150 Hz, TransientShaper (sustain =
-//                      -12 dB * tighten, gated by its attack indicator so it
+//                      -12 dB * tighten, gated by the onset so it
 //                      never cuts an onset) detecting max_c |low_c|; its
 //                      gain g is applied as a dynamic low shelf, out_c = x_c
 //                      + (g - 1) LP1_150Hz (x_c) (docs/11 E04 step 2). The

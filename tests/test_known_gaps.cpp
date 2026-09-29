@@ -30,7 +30,9 @@
 //     has the E60 scenes)
 //   * the Night Mode ambush scene: bed lift and post-event hole (E21; the
 //     hole closed by the AutoLevel slice, the bed lift by the Phase 3 retune)
-//   * kick onset: Punch 100 lift at 0-10 ms against 10-30 ms (E04, E05)
+//   * kick onset: Punch 100 lift at 0-10 ms against 10-30 ms, Tighten 0.5's
+//     change of the first 10 ms (closed by E04 step 2), onset against body
+//     at Boost 80 / 100 (E04, E05)
 //   * 30 Hz audible-band (>= 120 Hz) energy of the laptop preset (E03; closed
 //     by the preset slice, kept as its regression test)
 //   * 3 kHz ILD added by Positional Focus (E24; closed by its 3 dB cap)
@@ -1196,16 +1198,16 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     CHECK_NEAR (p0 - p1, 0.68, 0.3);
     CHECK_GE (p0, p1); // the onset no longer gets less than the body
     // docs/11 E04 Done-when, Tighten 0.5: 0-10 ms change >= -0.5 dB - met by
-    // step 2: the lift -2.04 -> -0.71 dB, i.e. -1.69 -> -0.36 dB re Tighten 0
+    // step 2: the lift -2.04 -> -0.55 dB, i.e. -1.69 -> -0.20 dB re Tighten 0
     // (whose chain, the 20 Hz subsonic filter, reads -0.35 dB). Two causes:
     // the sustain cut still read the previous kick's decay through the new
-    // one's first 2-3 ms (-0.8 dB; now gated by the attack indicator), and
-    // the output was the 150 Hz LR4 split's band sum, an all-pass whose
-    // ~3 ms of group delay under 100 Hz took 1.5 dB off the first 10 ms at
-    // any Tighten > 0 (now x + (g - 1) LP1 (x): exactly x at unity gain).
-    // The tail is still cut (60-150 / 150-300 ms -1.79 / -4.98 -> -1.44 /
-    // -4.76 dB re Tighten 0, CLI).
-    CHECK_NEAR (t0, -0.71, 0.3);
+    // one's first 2-3 ms (now gated by the onset, and a cut the gate lifts
+    // returns in 0.5 ms), and the output was the 150 Hz LR4 split's band
+    // sum, an all-pass whose ~3 ms of group delay under 100 Hz took 1.5 dB
+    // off the first 10 ms at any Tighten > 0 (now x + (g - 1) LP1 (x):
+    // exactly x at unity gain). The tail is still cut (60-150 / 150-300 ms
+    // -1.79 / -4.98 -> -1.65 / -5.11 dB re Tighten 0, CLI).
+    CHECK_NEAR (t0, -0.55, 0.3);
     CHECK_GE (t0 - n0, -0.5);
     CHECK_NEAR (t1 - n1, 0.0, 0.3);
     // docs/11 E05 Done-when, Boost 100 kick onset / body >= 0 dB: stage 1
@@ -1743,11 +1745,11 @@ TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 
     // longer widens this uncorrelated pink noise (the width polarity guard
     // caps S at M), so the mono safety's pull, which the restart clears,
     // no longer shapes the output (799.8 ms with the guard disabled).
-    // Re-based by docs/11 E04 step 2, 441.0 -> 510.4 ms (the 1e30 spikes
-    // 7.2 -> 3.9 ms): Signature's Tighten 0.1 is gated by its attack
-    // indicator, which reads the restarted programme as an onset, and is
-    // applied through a one-pole shelf whose state restarts with it.
-    CHECK_NEAR (burst.spanMs, 510.4, 20.0);
+    // Re-based by docs/11 E04 step 2, 441.0 -> 510.1 ms (the 1e30 spikes
+    // 7.2 -> 3.9 ms): Signature's Tighten 0.1 is gated by the onset, which
+    // reads the restarted programme as one, and is applied through a
+    // one-pole shelf whose state restarts with it.
+    CHECK_NEAR (burst.spanMs, 510.1, 20.0);
     CHECK_LE (burst.worstChangeDb, 0.3);
 }
 
@@ -1924,8 +1926,8 @@ TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 
     // 7.47 % / -44.37 / -53.05 dB -> the values below, Punchy Pop 49.33 /
     // 6.93 % / -36.47 / -48.75 dB -> the values below.
     const Row rows[] = {
-        { "music-flubsound-signature.json", 18.93, 6.93, -41.81, -51.18 },
-        { "music-punchy-pop.json", 50.40, 7.47, -38.85, -55.37 },
+        { "music-flubsound-signature.json", 18.93, 6.93, -41.53, -50.78 },
+        { "music-punchy-pop.json", 50.13, 7.47, -38.65, -54.87 },
     };
     for (const auto& row : rows)
     {
