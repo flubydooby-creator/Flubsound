@@ -304,7 +304,7 @@ static_assert (std::is_same_v<decltype (&ProcessingChain::redetectInputChannels)
 // The Smoothness stage (its slot, the reference the chain hands it every
 // segment) and the tonal-balance rule's meter, fed and ticked by
 // ProcessingChain::process at protection strength Normal / Strict
-// (docs/11 E07, tests/test_smoothness.cpp).
+// (docs/11 E07, tests/test_protection_tonal.cpp).
 #include "flub/dsp/SmoothnessGuard.h"
 #include "flub/dsp/TonalBalanceMeter.h"
 
@@ -317,7 +317,6 @@ static_assert (std::is_same_v<decltype (&TonalBalanceMeter::processOutput), void
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::tick), void (TonalBalanceMeter::*)() noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::getLiftDb), float (TonalBalanceMeter::*) (int) const noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<TonalBalanceMeter>);
-
 
 // The device callback's kernel thread id, recorded on the first callback of
 // each new device thread for the message thread's RealtimeKit request

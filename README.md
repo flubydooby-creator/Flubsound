@@ -89,6 +89,7 @@ Useful options:
 | `FLUB_BUILD_APP_TESTS` | ON | With `FLUB_BUILD_APP`: also build `flub_app_tests` (`tests/app/`), the app-level tests of the device callback, headset ceiling cap, meters and per-app routing |
 | `FLUB_SANITIZE` | OFF | AddressSanitizer + UndefinedBehaviorSanitizer (GCC / Clang only) |
 | `FLUB_RTSAN` | OFF | Clang RealtimeSanitizer (Clang ≥ 20 required, else configure fails): the audio entry points (`ProcessingChain::process`, `MixEngine::process`, every `Processor::process` and `Processor::reset` override, the module setters the audio thread calls) become `[[clang::nonblocking]]` and abort on allocation, locks or blocking calls. CI job `rtsan` runs the full test suite this way |
+| `FLUB_BUILD_FUZZERS` | OFF | libFuzzer targets in `tests/fuzz` (Clang with libFuzzer only; not with `FLUB_RTSAN`): the JSON parser, preset load and migration, saved strip / plug-in state and device profiles, ParametricEQ text; run them with `tests/fuzz/run-fuzzers.sh <build> <seconds>`. CI job `fuzz` runs each for 30 s |
 | `FLUB_WARNINGS_AS_ERRORS` | OFF | `-Werror` / `/WX` (CI uses it for the Linux core builds) |
 | `FLUB_JUCE_VERSION` | `9.0.2` | JUCE git tag fetched for the app / plug-in |
 | `FLUB_ASIO_SDK_DIR` | empty | Windows app: Steinberg ASIO SDK root; enables the ASIO device type |

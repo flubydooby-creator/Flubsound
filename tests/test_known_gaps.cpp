@@ -1013,55 +1013,53 @@ TEST_CASE ("E19: the cue enhancer's loud cap keeps gunfire nearly unlifted in th
     }
 }
 
+namespace
+{
+// The Night Mode ambush scene (docs/11 E21): 12 s of -50 dBFS-RMS pink
+// ambience, then `fireSeconds` of automatic fire (10 shots/s; each seeded
+// white noise, tau 15 ms, peak -12 dBFS) over the ambience, then 8 s of
+// ambience alone. Levels are full-band power of both channels, out vs in.
+// This is the re-baselined, pinned scene docs/11 E21 asks for (its +16.6 dB
+// lift and 6.6 dB hole predate d096a4d and used another event).
+io::AudioFileData nightAmbushScene (double fireSeconds)
+{
+    const int n = samplesOf (12.0 + fireSeconds + 8.0);
+    auto x = pinkNoise (n, std::pow (10.0f, -50.0f / 20.0f), 1357);
+    FastRandom rng (2468);
+    for (int shot = 0; shot < static_cast<int> (std::lround (fireSeconds * 10.0)); ++shot)
+    {
+        const int onset = samplesOf (12.0 + 0.1 * shot);
+        for (int i = 0; i < samplesOf (0.1); ++i)
+            x[static_cast<size_t> (onset + i)] += static_cast<float> (0.25 * std::exp (-i / (0.015 * kFs)) * rng.nextBipolar());
+    }
+    return stereoOf (x);
+}
+
+double nightAmbushLiftDb (const io::AudioFileData& input, const Channels& out, double from, double to)
+{
+    const std::vector<Window> w { { samplesOf (from), samplesOf (to) } };
+    return powerDb (meanPower (out, w)) - powerDb (meanPower (input.channels, w));
+}
+
+// Night Mode's bed lift before the event as shipped (pinned below): the
+// Auto Level case compares with it without rendering it again.
+constexpr double kNightBedLiftDb = 5.10;
+} // namespace
+
 TEST_CASE ("KnownGap closed: Night Mode ambush - no hole after the event, the bed lifted <= +6 dB and the fire held by the Startle Guard (E21)")
 {
-    // Scene: 12 s of -50 dBFS-RMS pink ambience, then 3 s of automatic fire
-    // (10 shots/s; each seeded white noise, tau 15 ms, peak -12 dBFS) over the
-    // ambience, then 8 s of ambience alone. Levels are full-band power of both
-    // channels, out vs in: bed before (8..12 s), event (12..15 s), bed 1..2 s
-    // after the event (16..17 s) and 5..7.5 s after it (20..22.5 s). This is
-    // the re-baselined, pinned scene docs/11 E21 asks for (its +16.6 dB lift
-    // and 6.6 dB hole predate d096a4d and used another event). The same
-    // scene with 10 s of fire (22..30 s after it) checks a long event.
-    auto scene = [] (double fireSeconds) {
-        const int n = samplesOf (12.0 + fireSeconds + 8.0);
-        auto x = pinkNoise (n, std::pow (10.0f, -50.0f / 20.0f), 1357);
-        FastRandom rng (2468);
-        for (int shot = 0; shot < static_cast<int> (std::lround (fireSeconds * 10.0)); ++shot)
-        {
-            const int onset = samplesOf (12.0 + 0.1 * shot);
-            for (int i = 0; i < samplesOf (0.1); ++i)
-                x[static_cast<size_t> (onset + i)] += static_cast<float> (0.25 * std::exp (-i / (0.015 * kFs)) * rng.nextBipolar());
-        }
-        return stereoOf (x);
-    };
-    const auto shipped = resolve (factoryPreset ("gaming-night-mode.json"));
-    auto noAutoLevel = shipped;
-    setValue (noAutoLevel, AutoLevelOn, 0.0f);
-    auto lift = [] (const io::AudioFileData& input, const Channels& out, double from, double to) {
-        const std::vector<Window> w { { samplesOf (from), samplesOf (to) } };
-        return powerDb (meanPower (out, w)) - powerDb (meanPower (input.channels, w));
-    };
-
-    const auto input = scene (3.0);
-    const auto out = render (input, shipped);
-    const double before = lift (input, out, 8.0, 12.0), event = lift (input, out, 12.0, 15.0);
-    const double after1 = lift (input, out, 16.0, 17.0), after5 = lift (input, out, 20.0, 22.5);
-    const double staticLift = lift (input, render (input, noAutoLevel), 8.0, 12.0);
+    // 3 s of fire; bed before (8..12 s), event (12..15 s), bed 1..2 s after
+    // the event (16..17 s) and 5..7.5 s after it (20..22.5 s).
+    const auto input = nightAmbushScene (3.0);
+    const auto out = render (input, resolve (factoryPreset ("gaming-night-mode.json")));
+    const double before = nightAmbushLiftDb (input, out, 8.0, 12.0), event = nightAmbushLiftDb (input, out, 12.0, 15.0);
+    const double after1 = nightAmbushLiftDb (input, out, 16.0, 17.0), after5 = nightAmbushLiftDb (input, out, 20.0, 22.5);
     measured ("Night Mode bed lift before the event", before, "dB");
     measured ("Night Mode event change", event, "dB");
     measured ("Night Mode bed lift 1-2 s after", after1, "dB");
     measured ("Night Mode bed lift 5-7.5 s after", after5, "dB");
     measured ("Night Mode hole 1-2 s after", before - after1, "dB");
     measured ("Night Mode hole 5-7.5 s after", before - after5, "dB");
-    measured ("Night Mode bed lift with Auto Level off", staticLift, "dB");
-
-    const auto longInput = scene (10.0);
-    const auto longOut = render (longInput, shipped);
-    const double longHole1 = lift (longInput, longOut, 8.0, 12.0) - lift (longInput, longOut, 23.0, 24.0);
-    const double longHole5 = lift (longInput, longOut, 8.0, 12.0) - lift (longInput, longOut, 27.0, 29.5);
-    measured ("Night Mode hole 1-2 s after a 10 s event", longHole1, "dB");
-    measured ("Night Mode hole 5-7.5 s after a 10 s event", longHole5, "dB");
 
     // E21 slice (AutoLevel: upper gate, +6 dB cap, 3 dB/s recovery). Before
     // it: bed before 15.77 dB, hole 5.23 dB (1-2 s) / 2.36 dB (5-7.5 s),
@@ -1072,8 +1070,6 @@ TEST_CASE ("KnownGap closed: Night Mode ambush - no hole after the event, the be
     CHECK_LE (std::abs (before - after1), 1.0); // docs/11 E21 Done-when: within 1 dB 1 s after the event
     CHECK_LE (std::abs (before - after5), 1.0);
     CHECK_NEAR (before - after1, -0.05, 0.3);
-    // Auto Level's own share of the bed lift is at its +6 dB cap.
-    CHECK_LE (before - staticLift, AutoLevel::kMaxGainDb + 0.1);
     // Closed by the E21 Phase 3 retune: docs/11 E21 Done-when, ambience lift
     // <= +6 dB. What was left over Auto Level's +6 dB was the preset's own
     // (5.10 dB with Auto Level off, mostly the compressor's 6 dB make-up;
@@ -1083,13 +1079,38 @@ TEST_CASE ("KnownGap closed: Night Mode ambush - no hole after the event, the be
     // target (-20 -> -14 LUFS, the compressor's, the upward section's and
     // dyneq.0's thresholds up 6 dB with it), so loud programme meets the
     // same compression and a quiet bed is lifted by Auto Level's cap alone:
-    // 11.10 -> 5.10 dB (-0.90 dB with Auto Level off: the -3 dB shelf at
-    // 90 Hz). The Startle Guard (guard.range 20 LU) holds the fire, about
-    // 30 LU over the bed, to 20 LU over it: event change +1.18 -> -10.31 dB.
+    // 11.10 -> 5.10 dB (the next case: -0.90 dB with Auto Level off, the
+    // -3 dB shelf at 90 Hz). The Startle Guard (guard.range 20 LU) holds the
+    // fire, about 30 LU over the bed, to 20 LU over it: event change
+    // +1.18 -> -10.31 dB.
     CHECK_LE (before, 6.0);
-    CHECK_NEAR (before, 5.10, 0.3);
-    CHECK_NEAR (staticLift, -0.90, 0.3);
+    CHECK_NEAR (before, kNightBedLiftDb, 0.3);
     CHECK_NEAR (event, -10.31, 0.3);
+}
+
+TEST_CASE ("KnownGap closed: Night Mode ambush - with Auto Level off the preset itself leaves the bed where it was, so the lift is Auto Level's +6 dB cap alone (E21)")
+{
+    // The scene of the case above, Auto Level off: the bed lift before the
+    // event (8..12 s) is the preset's own (split out of that case to keep
+    // each case under 2 s).
+    const auto input = nightAmbushScene (3.0);
+    auto noAutoLevel = resolve (factoryPreset ("gaming-night-mode.json"));
+    setValue (noAutoLevel, AutoLevelOn, 0.0f);
+    const double staticLift = nightAmbushLiftDb (input, render (input, noAutoLevel), 8.0, 12.0);
+    measured ("Night Mode bed lift with Auto Level off", staticLift, "dB");
+    // Auto Level's own share of the bed lift is at its +6 dB cap.
+    CHECK_LE (kNightBedLiftDb - staticLift, AutoLevel::kMaxGainDb + 0.1);
+    CHECK_NEAR (staticLift, -0.90, 0.3);
+}
+
+TEST_CASE ("KnownGap: Night Mode ambush, 10 s of fire - no hole after it at any block size (E21; no Done-when for long events)")
+{
+    const auto longInput = nightAmbushScene (10.0);
+    const auto longOut = render (longInput, resolve (factoryPreset ("gaming-night-mode.json")));
+    const double longHole1 = nightAmbushLiftDb (longInput, longOut, 8.0, 12.0) - nightAmbushLiftDb (longInput, longOut, 23.0, 24.0);
+    const double longHole5 = nightAmbushLiftDb (longInput, longOut, 8.0, 12.0) - nightAmbushLiftDb (longInput, longOut, 27.0, 29.5);
+    measured ("Night Mode hole 1-2 s after a 10 s event", longHole1, "dB");
+    measured ("Night Mode hole 5-7.5 s after a 10 s event", longHole5, "dB");
     // A 10 s event: the upper gate's 5 s release counts only the blocks in
     // which the 100 ms measure also reads above the gate, so whether this
     // intermittent fire becomes a new level depended on the host block (a
@@ -1750,16 +1771,24 @@ TEST_CASE ("KnownGap closed: DC after the maximizer - an asymmetric 100 + 200 Hz
     }
 }
 
-TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 3 % at protection strength Normal, unchanged at Off; with and without driven base settings (E06)")
+namespace
 {
-    // -12 dBFS 50 Hz, Music, Boost 100 and macros 1-5 at 100 %, THD+N over
-    // 6..10 s. Off governs the macro amounts only (as before E06), with the
-    // stepwise loop; Normal also scales the base max.drive, sat.drive and
-    // bass.harmonics, and since docs/11 E06 Phase 3 runs the measured loop
-    // (the audible residuals of the bass engine and of the saturator ..
-    // maximizer span, a harmonics scale of its own, PLR, feed-forward);
-    // Strict does that with stricter budgets and a floor of 0. Scene b adds
-    // driven base settings (max.drive 12, Tape saturation at 12 dB).
+// -12 dBFS 50 Hz, Music, Boost 100 and macros 1-5 at 100 %, THD+N over
+// 6..10 s, at one protection strength: scene 0 as it is, scene 1 with
+// driven base settings (max.drive 12, Tape saturation at 12 dB). Off
+// governs the macro amounts only (as before E06), with the stepwise loop;
+// Normal also scales the base max.drive, sat.drive and bass.harmonics, and
+// since docs/11 E06 Phase 3 runs the measured loop (the audible residuals
+// of the bass engine and of the saturator .. maximizer span, a harmonics
+// scale of its own, PLR, feed-forward); Strict does that with stricter
+// budgets and a floor of 0. One case per strength keeps each under 2 s.
+struct AllMacros50Hz
+{
+    double thd[2] {}, harmonics[2] {};
+};
+
+AllMacros50Hz allMusicMacros50Hz (ProtectionStrength s)
+{
     const auto input = stereoOf (sine (50.0, kFs, samplesOf (10.0), std::pow (10.0f, -12.0f / 20.0f)));
     RenderOptions o = boosted (ModeValue::Music, 100.0f);
     for (const char* m : { "1", "2", "3", "4", "5" })
@@ -1769,42 +1798,63 @@ TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 
     setValue (driven, MaxDriveDb, 12.0f);
     setValue (driven, SaturationOn, 1.0f);
     setValue (driven, SatDriveDb, 12.0f);
-    double thd[2][3] = {}, harmonics[2][3] = {};
+    AllMacros50Hz r;
     for (int scene = 0; scene < 2; ++scene)
-        for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal, ProtectionStrength::Strict })
-        {
-            GovernorReading gr;
-            const auto out = renderAtStrength (input, scene == 0 ? macros : driven, s, &gr);
-            const auto k = static_cast<size_t> (s);
-            thd[scene][k] = thdPlusNoiseDb (out[0], samplesOf (6.0), samplesOf (4.0), 50.0);
-            harmonics[scene][k] = gr.harmonicsDb;
-            const std::string tag = std::string (scene == 0 ? "all Music macros 100" : "... with max.drive 12 + sat.drive 12")
-                                    + ", strength " + std::to_string (static_cast<int> (s));
-            measured (tag + ": 50 Hz THD+N", thd[scene][k], "dB");
-            measured (tag + ": 50 Hz THD+N (percent)", 100.0 * std::pow (10.0, thd[scene][k] / 20.0), "%");
-            measured (tag + ": governor scale at 10 s", gr.scale, "");
-            measured (tag + ": governor THD+N input (3 s average)", gr.distortionDb, "dB");
-            measured (tag + ": bass harmonics + air exciter share", gr.harmonicsDb, "dB");
-        }
-    // Off is the behaviour before E06 (the CLI measures 20.3 % on scene a),
+    {
+        GovernorReading gr;
+        const auto out = renderAtStrength (input, scene == 0 ? macros : driven, s, &gr);
+        const auto k = static_cast<size_t> (scene);
+        r.thd[k] = thdPlusNoiseDb (out[0], samplesOf (6.0), samplesOf (4.0), 50.0);
+        r.harmonics[k] = gr.harmonicsDb;
+        const std::string tag = std::string (scene == 0 ? "all Music macros 100" : "... with max.drive 12 + sat.drive 12")
+                                + ", strength " + std::to_string (static_cast<int> (s));
+        measured (tag + ": 50 Hz THD+N", r.thd[k], "dB");
+        measured (tag + ": 50 Hz THD+N (percent)", 100.0 * std::pow (10.0, r.thd[k] / 20.0), "%");
+        measured (tag + ": governor scale at 10 s", gr.scale, "");
+        measured (tag + ": governor THD+N input (3 s average)", gr.distortionDb, "dB");
+        measured (tag + ": bass harmonics + air exciter share", gr.harmonicsDb, "dB");
+    }
+    return r;
+}
+
+// At Off, as pinned below: THD+N of the two scenes and the bass harmonics +
+// air exciter share of scene 0 (the Normal and Strict cases compare with them).
+constexpr double kAllMacrosOffThdDb[2] = { -13.85, -12.96 }, kAllMacrosOffHarmonicsDb = -13.58;
+} // namespace
+
+TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N unchanged at protection strength Off, with and without driven base settings (E06)")
+{
+    const auto r = allMusicMacros50Hz (ProtectionStrength::Off);
+    // Off is the behaviour before E06 (the CLI measures 20.3 % on scene 0),
     // bit for bit: the measured loop and its analysers do not run at Off.
     // (Re-based for docs/11 E04 and E05 step 5 in Phase 2; unchanged by Phase 3.)
-    CHECK_NEAR (thd[0][0], -13.85, 0.3);
-    CHECK_NEAR (thd[1][0], -12.96, 0.3);
+    CHECK_NEAR (r.thd[0], kAllMacrosOffThdDb[0], 0.3);
+    CHECK_NEAR (r.thd[1], kAllMacrosOffThdDb[1], 0.3);
+    CHECK_NEAR (r.harmonics[0], kAllMacrosOffHarmonicsDb, 0.3);
+}
+
+TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 3 % at protection strength Normal, with and without driven base settings (E06)")
+{
+    const auto r = allMusicMacros50Hz (ProtectionStrength::Normal);
     // The Done-when row: <= 3 % (-30.46 dB) at Normal. Before Phase 3 Normal
     // read 20.0 % (-13.96 dB): the bass harmonics generator's intended
     // harmonics (-13.6 dB of the output) at the 0.3 floor, which no budget
     // counted. Now the harmonics are budgeted on their own scale by what the
     // programme leaves audible (a steady tone masks none of them), and the
     // drive span's residual (saturator, glue, limiter) on the drive scale.
-    CHECK_LE (thd[0][1], -30.46);
-    CHECK_LE (harmonics[0][1], harmonics[0][0] - 20.0); // the harmonics were taken down, ...
-    CHECK_LE (thd[0][2], -30.46);                         // ... also at Strict (it read 6.0 %)
-    // Driven base settings: Normal governs them too (before: 19.9 %). Strict,
-    // with its 6 dB lower budget, is still backing off over 6..10 s here
-    // (4.4 %; 9.6 % before).
-    CHECK_LE (thd[1][1], -30.46);
-    CHECK_LE (thd[1][2], thd[1][0] - 10.0);
+    CHECK_LE (r.thd[0], -30.46);
+    CHECK_LE (r.harmonics[0], kAllMacrosOffHarmonicsDb - 20.0); // the harmonics were taken down
+    // Driven base settings: Normal governs them too (before: 19.9 %).
+    CHECK_LE (r.thd[1], -30.46);
+}
+
+TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 3 % at protection strength Strict; with driven base settings 10 dB under Off (E06)")
+{
+    const auto r = allMusicMacros50Hz (ProtectionStrength::Strict);
+    CHECK_LE (r.thd[0], -30.46); // it read 6.0 % before Phase 3
+    // Strict, with its 6 dB lower budget, is still backing off over 6..10 s
+    // on the driven scene (4.4 %; 9.6 % before).
+    CHECK_LE (r.thd[1], kAllMacrosOffThdDb[1] - 10.0);
 }
 
 TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; Signature and Punchy Pop still limit > 1 dB more than 2 % of the time (E11)")
