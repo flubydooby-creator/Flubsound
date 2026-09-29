@@ -210,6 +210,9 @@ enum Id : int
     // Stereo addition (docs/11 E12 Phase A; StereoSpatializer.h)
     SpatialCrossfeedType, // Choice: the headphone crossfeed model, CrossfeedTypeValue (Bs2b by default)
 
+    // Clarity addition (docs/11 E07 step 3; ClarityEnhancer.h)
+    ClarityPresenceMode, // Choice: PresenceModeValue, what the dynamic presence reads its band against (Absolute by default)
+
     kNumScalarParams
 };
 
@@ -254,6 +257,9 @@ enum class SubsonicOrderValue : int { Slope12 = 0, Slope24 = 1 }; // BassSubsoni
     L/R crossfeeds (interaural delay, flat L+R power) and the Mono-safe side
     shelf (no delay, mono sum exact). */
 enum class CrossfeedTypeValue : int { Bs2b = 0, Meier, MonoSafe };
+/** ClarityPresenceMode, in flub::PresenceMode's order: the presence band's
+    level against a fixed threshold, or against the programme's own body. */
+enum class PresenceModeValue : int { Absolute = 0, Relative };
 
 /** A named maximizer style (docs/11 E05 step 4): the values it gives the six
     maximizer controls it owns while it is selected. Custom owns none (the

@@ -36,6 +36,10 @@
 //   uuid (saveCurrent, Save As over the same name); renameUserPreset keeps
 //   it. User presets are written with every sound parameter (full state), so
 //   a later change of a default cannot re-voice them.
+// * The audition bank (docs/11 E40): while the preset browser previews a
+//   preset in a strip's active bank, a save of that store takes the bank as
+//   the preview's end will leave it (setAuditionFilter, installed by
+//   EngineController), never the previewed sound.
 // * Import keeps the file's uuid unless another preset has it (a preset
 //   exported and imported again on the same machine), then assigns one.
 // * Warnings (unknown keys, clamped values, a newer minor version:
@@ -142,6 +146,17 @@ public:
     /** Overwrites the strip's current preset if it is a user preset. */
     bool saveCurrent (int strip, const flub::param::ParameterStore& store, juce::String& error);
 
+    /** The audition bank (docs/11 E40): given a store and a bank, fills
+        `values` (param::kNumParams) with what a save must take and returns
+        true while a preview plays in that bank; false: save the bank as it
+        is. The saves above (and setCurrentPresetIdSaved) go through it. */
+    using AuditionFilter = std::function<bool (const flub::param::ParameterStore& store, flub::param::Bank bank, std::vector<float>& values)>;
+    void setAuditionFilter (AuditionFilter filter) { auditionFilter = std::move (filter); }
+    /** The store's active bank as a save takes it (through the audition filter). */
+    std::vector<float> savedValues (const flub::param::ParameterStore& store) const;
+    /** setCurrentPresetId after a save: the saved values (savedValues) count as unmodified. */
+    void setCurrentPresetIdSaved (int strip, const juce::String& id, const flub::param::ParameterStore& store);
+
     /** Renames a user preset (its name and file name); its uuid, and so its
         id, rules and strips that use it, stay. Returns the id (empty on failure). */
     juce::String renameUserPreset (const PresetInfo& info, const juce::String& newName, juce::String& error);
@@ -186,6 +201,7 @@ private:
     void reportWarnings (const PresetInfo& info, const flub::preset::Preset& p) const;
 
     void takeSnapshot (int strip, const flub::param::ParameterStore& store);
+    void takeSnapshot (int strip, const flub::param::ParameterStore& store, const std::vector<float>& values);
     /** False for parameters that live in the store but are application state,
         not part of a preset's sound (Bypass All, latency profile,
         loudness-matched bypass). */
@@ -205,5 +221,6 @@ private:
     std::vector<PresetInfo> presets;
     std::array<juce::String, kMaxStrips> currentIds;
     std::array<Snapshot, kMaxStrips> snapshots;
+    AuditionFilter auditionFilter; // docs/11 E40
 };
 } // namespace flub::app

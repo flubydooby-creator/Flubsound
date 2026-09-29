@@ -106,11 +106,22 @@ struct AutoProfileRule
     the settings file stays readable and a curve survives format changes. */
 struct DeviceCorrectionEntry
 {
-    juce::String endpoint;  // output endpoint key (EngineController: the output device name)
+    juce::String endpoint;  // the output device name it was last stored under (the key before docs/11 E51)
     juce::String name;      // what the user imported, e.g. "HD 600 ParametricEQ.txt"
     bool enabled = true;
     juce::String curveText; // APO / AutoEQ ParametricEQ syntax
+    // docs/11 E51: the endpoint's identity, as DeviceEndpointEntry; empty
+    // when unknown (files from before E51 carry the name only).
+    juce::String endpointId, hardwareId;
 
+    flub::platform::OutputEndpointIdentity identity() const
+    {
+        flub::platform::OutputEndpointIdentity e;
+        e.id = endpointId.toStdString();
+        e.name = endpoint.toStdString();
+        e.hardwareId = hardwareId.toStdString();
+        return e;
+    }
     bool operator== (const DeviceCorrectionEntry&) const = default;
 };
 
@@ -310,6 +321,15 @@ public:
         reappears after being unplugged / powered off. */
     juce::String getPreferredOutputDevice() const;
     void setPreferredOutputDevice (const juce::String& name);
+    /** The same with its identity (docs/11 E51: endpoint id, hardware id;
+        empty in settings from before E51, which stored the name only).
+        onboardEnhancement is not used. */
+    DeviceEndpointEntry getPreferredOutput() const;
+    void setPreferredOutput (const DeviceEndpointEntry& output);
+    /** Settings > Audio > "Follow the system default output" (default off;
+        docs/11 E51, AudioEngineHost::setFollowSystemDefault). */
+    bool getFollowSystemDefaultOutput() const;
+    void setFollowSystemDefaultOutput (bool follow);
 
     // ---- App routing -------------------------------------------------------------------
     enum class RoutingMethod { Automatic, EndpointRouting, ProcessCapture, Disabled };
@@ -338,11 +358,19 @@ public:
     /** Every stored correction, one per endpoint. Never part of a preset, a
         strip state or an automatic profile. */
     std::vector<DeviceCorrectionEntry> getDeviceCorrections() const;
-    /** The endpoint's correction (exact, case-sensitive key); nullopt if none. */
-    std::optional<DeviceCorrectionEntry> getDeviceCorrection (const juce::String& endpoint) const;
-    /** Adds or replaces the entry for entry.endpoint (ignored if the key is empty). */
+    /** The endpoint's correction, found by its identity like
+        findDeviceEndpoint (docs/11 E51: the same endpoint id, else the same
+        hardware id and name without Windows' instance number, else that
+        name; entries from before E51 carry the name only); nullopt if none. */
+    std::optional<DeviceCorrectionEntry> findDeviceCorrection (const flub::platform::OutputEndpointIdentity& endpoint) const;
+    /** findDeviceCorrection by an output device name alone. */
+    std::optional<DeviceCorrectionEntry> getDeviceCorrection (const juce::String& endpointName) const;
+    /** Stores `entry` in place of the entry that matches its identity (which
+        then takes entry's ids and name), else adds it. Ignored without a
+        name and an id. */
     void setDeviceCorrection (const DeviceCorrectionEntry& entry);
-    void removeDeviceCorrection (const juce::String& endpoint);
+    /** Removes the entry that matches `endpoint` (as findDeviceCorrection). */
+    void removeDeviceCorrection (const flub::platform::OutputEndpointIdentity& endpoint);
 
     // ---- Per-endpoint settings (docs/11 E16) --------------------------------------------
     std::vector<DeviceEndpointEntry> getDeviceEndpoints() const;
@@ -394,6 +422,14 @@ public:
         applies again once the services stop. */
     bool getTournamentAuto() const;
     void setTournamentAuto (bool automatic);
+
+    // ---- Voice chat (docs/11 E22) ------------------------------------------------------
+    /** "Duck game under voice chat" (default off) and its depth in dB
+        (3 - 6, default 4.5): EngineController::setChatDuck. */
+    bool getChatDuck() const;
+    void setChatDuck (bool on);
+    float getChatDuckDepthDb() const;
+    void setChatDuckDepthDb (float depthDb);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

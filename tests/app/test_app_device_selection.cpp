@@ -291,7 +291,8 @@ bool profileBypasses (AudioEngineHost& host)
 {
     auto& engine = host.getMixEngine();
     for (int s = 0; s < engine.getNumStrips(); ++s)
-        if (! engine.chain (s).isAuditionBypassed (flub::param::VirtualizerOn) || ! engine.chain (s).isAuditionBypassed (flub::param::BassOn))
+        if (! engine.chain (s).isAuditionBypassed (flub::param::VirtualizerOn) || engine.chain (s).isAuditionBypassed (flub::param::BassOn)
+            || engine.chain (s).getSafeSpeakerBassCapDb() != AudioEngineHost::kSafeSpeakerBassCapDb) // bass capped, not bypassed
             return false;
     return true;
 }

@@ -387,6 +387,94 @@ TEST_CASE ("App UI: a crash during a preview cannot save the previewed sound - t
     CHECK (c.getSettings().getStripState ("Music") != saved);
 }
 
+TEST_CASE ("App UI: the preview is a never-saved audition bank - a preset save or an A/B copy during it takes the pre-preview sound, B stays bit-identical (E40)")
+{
+    const flubapptest::TempFolder temp;
+    EngineController c (headlessOptions (temp));
+    c.getPresetManager().setUserPresetFolder (temp.file ("Presets"));
+    const int music = c.findStrip ("Music");
+    REQUIRE (music >= 0);
+    c.setSelectedStrip (music);
+    juce::String error;
+    REQUIRE (c.loadPreset (preset (c, "Flubsound Signature"), music, error));
+    auto& store = c.getParams (music);
+    store.copyBank (Bank::A, Bank::B);
+    store.set (Bank::B, BoostIntensity, 0.2f);
+    const auto aBefore = bankValues (store, Bank::A), bBefore = bankValues (store, Bank::B);
+    const auto persistedBefore = c.getPersistedStripState (music);
+    const auto shared = std::make_shared<ui::PresetLoudnessEstimator> (c.getHost().getSampleRate());
+    const auto soundOf = [] (const std::vector<float>& values)
+    {
+        auto v = values;
+        for (int i = 0; i < kNumParams; ++i)
+            if (flub::preset::isAppState (i))
+                v[static_cast<size_t> (i)] = 0.0f;
+        return v;
+    };
+    const auto savedSound = [&] (const char* name)
+    {
+        flub::preset::Preset p;
+        juce::String readError;
+        REQUIRE (c.getPresetManager().readPreset (preset (c, name), p, readError));
+        return soundOf (p.values);
+    };
+
+    Browser browser (c, shared);
+    const auto& club = preset (c, "Club Loud");
+    REQUIRE (browser.selectPreset (club.id));
+    REQUIRE (soundOf (bankValues (store, Bank::A)) != soundOf (aBefore)); // Club Loud plays
+
+    // Save As during the preview: the file holds the sound before it; the
+    // preview plays on (the saved preset is now the session's start) and B
+    // is untouched.
+    const auto id = c.saveUserPreset ("Before The Preview", "Mine", "", music, error);
+    REQUIRE (id.isNotEmpty());
+    CHECK (savedSound ("Before The Preview") == soundOf (aBefore));
+    CHECK (browser.getAudition().isActive());
+    CHECK (browser.getAudition().getPreviewId() == club.id);
+    CHECK (browser.getAudition().getPresetIdAtBegin() == id);
+    CHECK (c.getCurrentPresetId (music) == id);
+    CHECK (c.isPresetModified (music)); // Club Loud plays over the saved sound
+    CHECK (bankValues (store, Bank::B) == bBefore);
+    CHECK (c.getPersistedStripState (music) == persistedBefore); // the autosave, as before the preview
+    {
+        std::vector<float> values;
+        CHECK (c.getSavedBankValues (music, Bank::A, values));
+        CHECK (values == aBefore);
+    }
+
+    // Save (overwrite the current user preset, the header's Save) during another preview.
+    REQUIRE (browser.selectPreset (preset (c, "Bass Head").id));
+    REQUIRE (c.getPresetManager().saveCurrent (music, store, error));
+    CHECK (savedSound ("Before The Preview") == soundOf (aBefore));
+
+    // The A/B copy during the preview copies the sound before it.
+    c.copyActiveToOtherBank (music);
+    CHECK (bankValues (store, Bank::B) == aBefore);
+    CHECK (soundOf (bankValues (store, Bank::A)) != soundOf (aBefore)); // the preview still plays
+
+    // Cancel: A back bit for bit, the saved preset unmodified, B as the copy left it.
+    browser.cancel();
+    CHECK (bankValues (store, Bank::A) == aBefore);
+    CHECK (bankValues (store, Bank::B) == aBefore);
+    CHECK (! c.isPresetModified (music));
+    CHECK (c.getCurrentPresetId (music) == id);
+
+    // Without a save or copy, a preview and its cancel leave B bit-identical
+    // (the done-when row; the browser has no hover audition, Cancel stands for mouse-out).
+    store.set (Bank::B, BoostIntensity, 0.3f);
+    const auto bNow = bankValues (store, Bank::B);
+    {
+        Browser again (c, shared);
+        REQUIRE (again.selectPreset (preset (c, "Warm Vinyl").id));
+        REQUIRE (again.selectPreset (preset (c, "Lo-Fi Chill").id));
+        CHECK (bankValues (store, Bank::B) == bNow);
+        again.cancel();
+    }
+    CHECK (bankValues (store, Bank::A) == aBefore);
+    CHECK (bankValues (store, Bank::B) == bNow);
+}
+
 TEST_CASE ("App UI: the browser shows a preset's description, tags, latency profile and reader warnings (E40)")
 {
     const flubapptest::TempFolder temp;

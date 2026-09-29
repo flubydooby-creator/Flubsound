@@ -14,9 +14,10 @@
 //             plays at full endpoint volume). The louder ear counts.
 //             A-weighting: IEC 61672-1's analog A curve as two bilinear
 //             high-pass sections (20.6 Hz double, 107.7 / 737.9 Hz) and a
-//             matched-z double pole at 12.2 kHz, normalised to 0 dB at 1 kHz
-//             (within 0.05 dB of the curve from 20 Hz to 4 kHz and within
-//             0.6 dB up to 12.5 kHz at 44.1 / 48 kHz; tests/test_hearing_guard.cpp).
+//             matched-z double pole at 12.2 kHz with a fitted double zero,
+//             normalised to 0 dB at 1 kHz (within 0.03 dB of the curve from
+//             20 Hz to 4 kHz and within 0.07 dB up to 12.5 kHz at 44.1 / 48
+//             kHz; tests/test_hearing_guard.cpp).
 //   readings  the level now (125 ms, "Fast"), the Leq over the last 5 s, the
 //             session Leq (since prepare()) and the dose.
 //   dose      equal-energy (3 dB exchange) against the WHO / ITU-T H.870

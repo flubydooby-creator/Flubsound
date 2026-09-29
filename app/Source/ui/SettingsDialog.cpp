@@ -143,6 +143,18 @@ public:
             refresh();
         };
         addAndMakeVisible (enhancementToggle);
+
+        // docs/11 E51: follow the system default output instead of the chosen one.
+        Style::set (followDefaultToggle, "switch");
+        followDefaultToggle.setTooltip ("Play on whatever output the system uses as its default, and switch when it changes (never onto "
+                                        "a virtual cable or a feedback loop). Off: the output chosen below. Choosing another output below turns "
+                                        "this off.");
+        followDefaultToggle.onClick = [this]
+        {
+            controller.setFollowSystemDefaultOutput (followDefaultToggle.getToggleState());
+            refresh();
+        };
+        addAndMakeVisible (followDefaultToggle);
         refresh();
     }
 
@@ -155,6 +167,7 @@ public:
         const auto onboard = controller.getOnboardEnhancement();
         enhancementToggle.setEnabled (onboard.endpoint.isNotEmpty());
         enhancementToggle.setToggleState (onboard.on, juce::dontSendNotification);
+        followDefaultToggle.setToggleState (controller.getFollowSystemDefaultOutput(), juce::dontSendNotification);
         if (text != deviceText || guard != guardText || pairs != shownPairs)
         {
             deviceText = text;
@@ -238,7 +251,8 @@ public:
             guardArea = { kInset, deviceArea.getBottom() + 8, w, y - deviceArea.getBottom() - 8 + kBoxPadY - 4 };
         }
 
-        selector->setBounds (0, guardArea.getBottom() + 10, getWidth(), juce::jmax (1, selector->getHeight()));
+        followDefaultToggle.setBounds (kInset, guardArea.getBottom() + 10, w, kToggleH);
+        selector->setBounds (0, followDefaultToggle.getBottom() + 6, getWidth(), juce::jmax (1, selector->getHeight()));
         fitHeight();
     }
 
@@ -312,6 +326,7 @@ private:
     juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea;
     juce::TextButton allowButton { "Allow this pair" };
     juce::ToggleButton enhancementToggle { "Headset enhancement (Superhuman Hearing / on-board EQ) is ON" };
+    juce::ToggleButton followDefaultToggle { "Follow the system default output" };
     std::vector<AppSettings::LoopbackPair> shownPairs;
     std::vector<PairRow> pairRows;
 };

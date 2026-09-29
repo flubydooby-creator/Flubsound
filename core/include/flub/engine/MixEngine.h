@@ -194,15 +194,18 @@ public:
         any other role 1. */
     static float chatMixGain (float balance, StripRole role) noexcept;
     /** The voice-keyed duck on (depth clamped to 3 - 6 dB) or off (the
-        default); it glides out if it was ducking. Same thread rule as the
-        setters above. */
+        default); it glides out if it was ducking. ANY THREAD (unlike the
+        setters above): a request in relaxed atomics that the audio thread
+        takes at the start of the next process(); an engine configured
+        later starts with it (the app's controller sets it on the host's
+        newest engine, and every engine built after copies it). */
     void setChatDuck (bool enabled, float depthDb = ChatDucker::kDefaultDepthDb) noexcept FLUB_NONBLOCKING;
-    bool getChatDuck() const noexcept { return chatDuck; }
-    float getChatDuckDepthDb() const noexcept { return chatDuckDepthDb; }
+    bool getChatDuck() const noexcept { return requestedDuck.load (std::memory_order_relaxed); }
+    float getChatDuckDepthDb() const noexcept { return requestedDuckDepthDb.load (std::memory_order_relaxed); }
     /** ChatMix balance, clamped to -1 .. +1; 0 (the default) is the centre.
-        Same thread rule as the setters above. */
+        Any thread, as setChatDuck. */
     void setChatMix (float balance) noexcept FLUB_NONBLOCKING;
-    float getChatMix() const noexcept { return chatMix; }
+    float getChatMix() const noexcept { return requestedChatMix.load (std::memory_order_relaxed); }
     /** VoiceActivity's verdict on the Chat strip (false without one). Any thread (relaxed). */
     bool isChatVoiceActive() const noexcept { return voice.isActivePublished(); }
     /** How far the duck is in, 0..1 (the Game and Music strips share it). Any thread (relaxed). */
@@ -296,8 +299,13 @@ private:
     // Chat sidechain and ChatMix (docs/11 E22).
     VoiceActivity voice;
     int chatStrip = -1;
-    bool chatDuck = false;
+    bool chatDuck = false; // as the audio thread runs them (applyChatRequests)
     float chatDuckDepthDb = ChatDucker::kDefaultDepthDb, chatMix = 0.0f;
+    std::atomic<bool> requestedDuck { false }; // setChatDuck / setChatMix, from any thread
+    std::atomic<float> requestedDuckDepthDb { ChatDucker::kDefaultDepthDb }, requestedChatMix { 0.0f };
     std::atomic<float> duckAmount { 0.0f };
+
+    /** Audio thread (process()) or configure: takes the requested chat settings. */
+    void applyChatRequests() noexcept FLUB_NONBLOCKING;
 };
 } // namespace flub

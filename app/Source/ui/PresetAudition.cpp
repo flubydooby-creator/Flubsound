@@ -464,7 +464,7 @@ void PresetAudition::setTrimDb (float db)
     auto& host = controller.getHost();
     const float current = host.getStripGainDb (strip);
     if (current != appliedGainDb)
-        baseGainDb = current; // the strip gain moved (user gain, ChatMix): the trim follows it
+        baseGainDb = current; // the strip gain moved (user gain, another trim): the trim follows it
     trimDb = std::clamp (db, -kMaxTrimDb, 0.0f);
     host.setStripGainDb (strip, baseGainDb + trimDb);
     appliedGainDb = host.getStripGainDb (strip);
@@ -505,6 +505,22 @@ bool PresetAudition::commit (const PresetInfo& preset, juce::String& error)
     const int s = isActive() ? strip : controller.getSelectedStrip();
     abandon();
     return controller.loadPreset (preset, s, error);
+}
+
+bool PresetAudition::presetChanged()
+{
+    if (! isActive())
+        return false;
+    const auto current = controller.getCurrentPresetId (strip);
+    if (current == presetIdAtBegin)
+        return true;
+    if (current.isNotEmpty() && current == controller.getPreviewSavedPresetId (strip))
+    {
+        presetIdAtBegin = current; // the pre-preview sound, saved as `current`
+        return true;
+    }
+    abandon();
+    return false;
 }
 
 void PresetAudition::abandon()

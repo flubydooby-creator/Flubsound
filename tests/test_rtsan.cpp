@@ -373,6 +373,9 @@ static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callba
 // The on-board enhancement cap (docs/11 E16): one atomic, any thread; the
 // glide runs inside process(); tests/test_onboard_cap.cpp drives it.
 static_assert (std::is_same_v<decltype (&ProcessingChain::setOnboardEnhancementCap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
+// The safe speaker profile's bass cap (docs/11 E51): one atomic, any thread;
+// process() applies it; tests/test_safe_speaker_cap.cpp drives it.
+static_assert (std::is_same_v<decltype (&ProcessingChain::setSafeSpeakerBassCapDb), void (ProcessingChain::*) (float) noexcept FLUB_NONBLOCKING>);
 
 // Auto Level's gain, handed to the cue enhancer and the upward compressor by
 // ProcessingChain::process every block (docs/11 E19 step 4, tests/test_scenes.cpp).

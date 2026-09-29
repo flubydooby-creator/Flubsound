@@ -107,8 +107,11 @@
 //     unless it is virtual (a cable, Voicemeeter, BlackHole, a Flubsound
 //     endpoint) or the loopback partner of the input, else the first such
 //     safe output, else none: the current device stays and the loopback
-//     guard keeps it silent. With no choice saved it follows the system
-//     default the same way. The choice is JUCE's explicit setup (what the
+//     guard keeps it silent. With no choice saved, or while the user asks
+//     to follow the system default (setFollowSystemDefault, Settings >
+//     Audio), it follows the system default the same way: no fallback, no
+//     safe profile; picking an output in Settings > Audio ends following
+//     (onFollowSystemDefaultChanged). The choice is JUCE's explicit setup (what the
 //     user picked in Settings > Audio, never a fallback) plus its identity
 //     (platform::OutputEndpointIdentity: endpoint id and hardware id), which
 //     createDeviceStateXml() adds to the saved device state.
@@ -125,11 +128,14 @@
 //     (firstRetryMs doubling to maxRetryMs, maxAttempts tries, then the
 //     device error banner stays; the next device event tries again).
 //   * Safe speaker profile: while an unplanned fallback plays to anything
-//     not known to be headphones or a headset, every strip's virtualiser and
-//     bass engine are bypassed (ProcessingChain::setAuditionBypass: the
-//     modules' click-free bypass fades, nothing stored) and the output is
-//     trimmed by kSafeSpeakerTrimDb (ramped over kTrimRampMs), so headphone
-//     voicing never reaches laptop speakers at full level. It ends when the
+//     not known to be headphones or a headset, every strip's virtualiser is
+//     bypassed (ProcessingChain::setAuditionBypass: its click-free bypass
+//     fade, nothing stored), its bass lift (the bass engine's boost and the
+//     preset's EQ low shelves and low bells together) is capped at
+//     kSafeSpeakerBassCapDb (ProcessingChain::setSafeSpeakerBassCapDb; the
+//     bass engine keeps running) and the output is trimmed by
+//     kSafeSpeakerTrimDb (ramped over kTrimRampMs), so headphone voicing
+//     never reaches laptop speakers at full level. It ends when the
 //     chosen output plays again or the user chooses the fallback device.
 //     DeviceSafetyState::outputFallback tells the banner.
 //
@@ -498,7 +504,19 @@ public:
     const OutputSelection& getOutputSelection() const noexcept { return selection; }
     bool isSafeSpeakerProfileActive() const noexcept { return safeProfileActive; }
     static constexpr float kSafeSpeakerTrimDb = -6.0f;
+    static constexpr float kSafeSpeakerBassCapDb = 3.0f;
     static constexpr double kTrimRampMs = 50.0;
+
+    /** "Follow the system default output" (Settings > Audio): the output
+        is the system default (never a virtual or looping one, see
+        selectOutput) whatever was chosen; the choice is kept for when
+        following ends. Message thread; before openDevice() it only sets the
+        mode, afterwards it re-selects at once. Picking an output in Settings
+        > Audio while following ends following and calls
+        onFollowSystemDefaultChanged (message thread). */
+    void setFollowSystemDefault (bool follow);
+    bool getFollowSystemDefault() const noexcept { return followDefault; }
+    std::function<void()> onFollowSystemDefaultChanged;
 
     /** JUCE's device state (AudioDeviceManager::createStateXml) plus the
         chosen output's identity (flubOutputEndpointId, flubOutputHardwareId),
@@ -899,6 +917,7 @@ private:
     bool selecting = false;       // inside reselectOutput (its own device changes)
     OutputChoice chosen;
     OutputSelection selection;
+    bool followDefault = false;   // setFollowSystemDefault
     juce::String lastExplicitOutput; // JUCE's explicit output as last seen: a change is the user's choice
     std::vector<flub::platform::OutputEndpointIdentity> endpointCache;
     juce::StringArray unavailableOutputs; // failed to open; skipped until the next retry or device event

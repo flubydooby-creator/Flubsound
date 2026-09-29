@@ -15,6 +15,22 @@
 //      faded out towards the -80 dB RMS noise floor so hiss is never lifted.
 //      GainSmoother 5 ms (boost withdrawing) / 100 ms. EQ: bell Q 0.8 at
 //      presence * boost.
+//      presenceMode Relative (docs/11 E07 step 3): L is read against the
+//      programme's own body instead of the fixed -18 dB: body = HP2 200 Hz
+//      -> LP2 1 kHz (Butterworth), linked mean square (20 ms); balance
+//      B = max (slow balance, fast balance), the slow one the band's and
+//      the body's mean squares through 1 s one-poles (at control rate), the
+//      fast one the 20 ms detectors'; boost = clamp ((kPresenceRelativeDb -
+//      B) / 4, 0, 6 dB), the same noise-floor taper on L. Both followers
+//      scale with the programme, so the lift does not depend on its level;
+//      the fast balance withdraws the lift at once when the band jumps over
+//      the body (a cymbal, an "s"), as the absolute law does on a loud band.
+//      The body and the slow followers run only while Relative is
+//      selected or still mixed in; they need kBalanceWarmMs to be valid.
+//      A switch between the modes crossfades the two laws' targets over
+//      20 ms (after the warm-up, during which the old law stays in charge);
+//      after a reset or with the stage coming on in Relative, the lift
+//      starts from 0 once the followers are valid.
 //   4. Air exciter, per channel: h = HP4 3.5 kHz (x), b = LP4 7 kHz (h)
 //      (Butterworth). Envelopes E(.) = 7.5 ms peak hold -> 40 ms release;
 //      env = smooth_0.5ms (max (E(|b|), -3 dB * E(|h|))); xn = clamp (b / env,
@@ -81,6 +97,13 @@ constexpr float kPresenceSlope = 0.25f;        // dB of boost per dB below thres
 constexpr float kPresenceFloorDb = -80.0f;     // no lift at / below the noise floor
 constexpr float kPresenceAttackMs = 5.0f;
 constexpr float kPresenceReleaseMs = 100.0f;
+// Relative presence (docs/11 E07 step 3). The threshold is set so that pink
+// noise gets the lift the absolute law gives it at the chain's nominal
+// level (-18 dBFS RMS, AutoLevel's default target): +1.9 dB at presence 1.
+constexpr double kBodyLowHz = 200.0, kBodyHighHz = 1000.0;
+constexpr float kPresenceRelativeDb = 9.6f;  // balance (band over body, dB) at which the boost is gone
+constexpr float kBalanceMs = 1000.0f;        // slow followers
+constexpr float kBalanceWarmMs = 60.0f;      // 3 x the fast detectors' time constant
 
 // 4. Air.
 constexpr double kAirLowHz = 3500.0;
@@ -112,6 +135,7 @@ ClarityParams sanitise (const ClarityParams& in, const ClarityParams& prev) noex
     p.presenceFrequency = clampOr (in.presenceFrequency, 1000.0f, 6000.0f, prev.presenceFrequency);
     p.air = clampOr (in.air, 0.0f, 1.0f, prev.air);
     p.deMud = clampOr (in.deMud, 0.0f, 1.0f, prev.deMud);
+    p.presenceMode = in.presenceMode == PresenceMode::Relative ? PresenceMode::Relative : PresenceMode::Absolute;
     return p;
 }
 
@@ -139,6 +163,15 @@ float deMudGainDb (float bandDb, float broadDb) noexcept
 float presenceGainDb (float bandDb) noexcept
 {
     const float boost = std::clamp ((kPresenceThresholdDb - bandDb) * kPresenceSlope, 0.0f, kPresenceMaxDb);
+    const float taper = std::clamp ((bandDb - kPresenceFloorDb) / kTaperDb, 0.0f, 1.0f);
+    return boost * taper;
+}
+
+/** Relative presence gain computer (dB, >= 0): the band's balance over the
+    body instead of its level; the same noise-floor taper on the band. */
+float relativeGainDb (float bandDb, float balanceDb) noexcept
+{
+    const float boost = std::clamp ((kPresenceRelativeDb - balanceDb) * kPresenceSlope, 0.0f, kPresenceMaxDb);
     const float taper = std::clamp ((bandDb - kPresenceFloorDb) / kTaperDb, 0.0f, 1.0f);
     return boost * taper;
 }
@@ -188,6 +221,9 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
     deMud.detector = SvfCoeffs::make (FilterType::BandPass, kDeMudHz, kDeMudQ, 0.0, sr);
     deMud.gain.prepare (controlRate, kDeMudAttackMs, kDeMudReleaseMs, false);
     presence.gain.prepare (controlRate, kPresenceAttackMs, kPresenceReleaseMs, false);
+    bodyFilters[0] = SvfCoeffs::make (FilterType::HighPass, kBodyLowHz, butterworthQ (1, 0), 0.0, sr);
+    bodyFilters[1] = SvfCoeffs::make (FilterType::LowPass, kBodyHighHz, butterworthQ (1, 0), 0.0, sr);
+    balanceCoeff = onePoleCoeff (kBalanceMs, controlRate);
 
     airFilters[0] = SvfCoeffs::make (FilterType::HighPass, kAirLowHz, butterworthQ (2, 0), 0.0, sr);
     airFilters[1] = SvfCoeffs::make (FilterType::HighPass, kAirLowHz, butterworthQ (2, 1), 0.0, sr);
@@ -231,6 +267,10 @@ void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
     };
     resetBell (deMud, params.deMud, kDeMudHz, kDeMudQ);
     resetBell (presence, params.presence, presenceHz, kPresenceQ);
+    balance.running = false;
+    balance.mix.reset (controlRate, kParamSmoothMs, 0.0f);
+    if (presence.active && params.presenceMode == PresenceMode::Relative)
+        startBalance (true);
 
     airActive = params.air > 0.0f;
     airAmount.reset (controlRate, kParamSmoothMs, params.air);
@@ -260,7 +300,13 @@ void ClarityEnhancer::setParams (const ClarityParams& newParams) noexcept FLUB_N
     deMud.amount.setTarget (p.deMud);
 
     if (p.presence > 0.0f && ! presence.active)
+    {
         activateBell (presence, presenceHz, kPresenceQ);
+        balance.running = false;
+        balance.mix.setImmediate (0.0f);
+        if (p.presenceMode == PresenceMode::Relative)
+            startBalance (true);
+    }
     presence.amount.setTarget (p.presence);
 
     if (p.air > 0.0f && ! airActive)
@@ -280,6 +326,30 @@ void ClarityEnhancer::activateBell (DynamicBell& bell, double hz, double q) noex
     bell.detectorState.fill ({});
     bell.eqState.fill ({});
     bell.eq.setImmediate (SvfCoeffs::make (FilterType::Bell, hz, q, 0.0, spec.sampleRate));
+}
+
+void ClarityEnhancer::startBalance (bool fromNothing) noexcept
+{
+    // The followers start empty and are valid after the warm-up. Coming
+    // from nothing (a reset, the stage coming on) the relative law is in
+    // charge at once and asks for no lift until then; switched from a
+    // running absolute law, that law stays in charge through the warm-up.
+    balance.running = true;
+    balance.fromNothing = fromNothing;
+    balance.warmTicks = std::max (1, static_cast<int> (std::ceil (kBalanceWarmMs * 0.001 * controlRate)));
+    balance.bodyMs = balance.slowBandMs = balance.slowBodyMs = 0.0f;
+    balance.bodyState.fill ({});
+    if (fromNothing)
+        balance.mix.setImmediate (1.0f);
+}
+
+float ClarityEnhancer::relativePresenceDb() const noexcept
+{
+    if (balance.warmTicks > 0)
+        return 0.0f;
+    const float slow = powerToDb (balance.slowBandMs) - powerToDb (balance.slowBodyMs);
+    const float fast = powerToDb (presence.bandMs) - powerToDb (balance.bodyMs);
+    return relativeGainDb (powerToDb (presence.bandMs), std::max (slow, fast));
 }
 
 void ClarityEnhancer::activateAir() noexcept
@@ -307,6 +377,8 @@ void ClarityEnhancer::clearAllStates() noexcept
         bell->detectorState.fill ({});
         bell->eqState.fill ({});
     }
+    if (balance.running)
+        startBalance (balance.fromNothing);
     for (auto& ch : airChannels)
     {
         ch.filters.fill ({});
@@ -330,6 +402,13 @@ float ClarityEnhancer::flushStates() noexcept
             const size_t ch = static_cast<size_t> (c);
             sum += flushTiny (bell->detectorState[ch]) + flushTiny (bell->eqState[ch]);
         }
+    }
+    if (presence.active && balance.running)
+    {
+        sum += flushTiny (balance.bodyMs) + flushTiny (balance.slowBandMs) + flushTiny (balance.slowBodyMs);
+        for (int c = 0; c < spec.numChannels; ++c)
+            for (auto& s : balance.bodyState[static_cast<size_t> (c)])
+                sum += flushTiny (s);
     }
     if (airActive)
     {
@@ -363,6 +442,36 @@ void ClarityEnhancer::updateBell (DynamicBell& bell, float gainDb, double hz, do
         bell.active = false;
 }
 
+float ClarityEnhancer::updateBalance() noexcept
+{
+    // Relative presence (docs/11 E07 step 3): the slow followers, and the
+    // mix between the two laws (see the header comment).
+    const bool relative = params.presenceMode == PresenceMode::Relative;
+    if (relative && ! balance.running)
+        startBalance (false);
+    if (balance.running)
+    {
+        if (balance.warmTicks > 0)
+        {
+            if (--balance.warmTicks == 0)
+            {
+                balance.slowBandMs = presence.bandMs;
+                balance.slowBodyMs = balance.bodyMs;
+            }
+        }
+        else
+        {
+            balance.slowBandMs = presence.bandMs + balanceCoeff * (balance.slowBandMs - presence.bandMs);
+            balance.slowBodyMs = balance.bodyMs + balanceCoeff * (balance.slowBodyMs - balance.bodyMs);
+        }
+    }
+    balance.mix.setTarget (relative && (balance.warmTicks == 0 || balance.fromNothing) ? 1.0f : 0.0f);
+    const float mix = balance.mix.next();
+    if (! relative && mix == 0.0f)
+        balance.running = false;
+    return mix;
+}
+
 void ClarityEnhancer::controlTick() noexcept
 {
     const double sr = spec.sampleRate;
@@ -385,8 +494,15 @@ void ClarityEnhancer::controlTick() noexcept
     if (presence.active)
     {
         const float amount = presence.amount.next();
-        const float target = presenceGainDb (powerToDb (presence.bandMs));
+        float target = presenceGainDb (powerToDb (presence.bandMs));
+        if (const float mix = updateBalance(); mix > 0.0f)
+            target += mix * (relativePresenceDb() - target);
         updateBell (presence, amount * settle (presence.gain, target), presenceHz, kPresenceQ, presenceMoved);
+        if (! presence.active)
+        {
+            balance.running = false;
+            balance.mix.setImmediate (0.0f);
+        }
     }
 
     if (airActive)
@@ -441,7 +557,11 @@ void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         if (deMud.active)
             processBell (deMud, block, numCh, pos, len, phase, true);
         if (presence.active)
+        {
+            if (balance.running)
+                processBody (block, numCh, pos, len);
             processBell (presence, block, numCh, pos, len, phase, false);
+        }
         if (airActive)
             processAir (block, numCh, pos, len, phase);
 
@@ -499,6 +619,29 @@ void ClarityEnhancer::processBell (DynamicBell& bell, const AudioBlock& block, i
     // The EQ runs whenever the stage is active (also at 0 dB, where it is an
     // exact identity) so its state is always current when the gain moves.
     applyGlide (bell.eq, bell.eqState, block, numCh, pos, len, phase);
+}
+
+void ClarityEnhancer::processBody (const AudioBlock& block, int numCh, int pos, int len) noexcept
+{
+    // Relative presence's body (docs/11 E07 step 3), on the stage's input
+    // as the band's detector: linked mean square of HP2 200 Hz -> LP2 1 kHz.
+    const size_t n = static_cast<size_t> (len);
+    std::fill_n (scratchB.begin(), n, 0.0f);
+    for (int c = 0; c < numCh; ++c)
+    {
+        auto& st = balance.bodyState[static_cast<size_t> (c)];
+        SvfState hp = st[0], lp = st[1];
+        const float* x = block.channel (c) + pos;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const float b = svfTick (bodyFilters[1], lp, svfTick (bodyFilters[0], hp, x[i]));
+            scratchB[i] = std::max (scratchB[i], b * b);
+        }
+        st[0] = hp;
+        st[1] = lp;
+    }
+    for (size_t i = 0; i < n; ++i)
+        balance.bodyMs = scratchB[i] + msCoeff * (balance.bodyMs - scratchB[i]);
 }
 
 void ClarityEnhancer::processAir (const AudioBlock& block, int numCh, int pos, int len, int phase) noexcept

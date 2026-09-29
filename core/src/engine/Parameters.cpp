@@ -259,6 +259,18 @@ std::vector<Info> buildLayout()
     // and state saved before it sounds as it did.
     set (SpatialCrossfeedType, v6 (choice ("spatial.crossfeedType", "Crossfeed Type", "Stereo", { "Bs2b", "Meier", "Mono-safe" }, 0)));
 
+    // ---- Clarity addition (layout version 7, docs/11 E07 step 3) --------------------------------
+    auto v7 = [] (Info i) {
+        i.sinceVersion = 7;
+        return i;
+    };
+    // What the dynamic presence reads its band against (ClarityEnhancer.h):
+    // a fixed level (Absolute, the law before the key existed and the
+    // default, so every preset and state saved before it sounds as it did)
+    // or the programme's own 200 Hz - 1 kHz body (Relative: the same lift
+    // at any playback or mastering level).
+    set (ClarityPresenceMode, v7 (choice ("clarity.presenceMode", "Presence Mode", "Clarity", { "Absolute", "Relative" }, 0)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

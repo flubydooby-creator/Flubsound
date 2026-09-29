@@ -7,7 +7,11 @@
 //   3. Dynamic presence: bell at presenceFrequency (default 3.2 kHz, Q 0.8),
 //      BoostBelow-style (inverse level): up to +6 dB * presence when the
 //      band is quiet, withdrawn as it gets loud -> intelligibility without
-//      harshness on loud passages.
+//      harshness on loud passages. presenceMode Absolute (the default)
+//      reads the band's level against a fixed -18 dB RMS; Relative
+//      (docs/11 E07 step 3) reads it against the programme's own 200 Hz -
+//      1 kHz body, so the lift does not depend on the playback or
+//      mastering level, only on how bright the programme is.
 //   4. Air exciter: band 3.5 - 7 kHz (24 dB/oct each side) -> envelope-
 //      normalised polynomial of order <= 3 (2nd + 3rd harmonics) -> high-
 //      pass 7 kHz -> mixed in at up to -12 dB * air, plus a +2 dB * air high
@@ -39,6 +43,13 @@
 
 namespace flub
 {
+/** How the dynamic presence reads its band (docs/11 E07 step 3). */
+enum class PresenceMode : int
+{
+    Absolute = 0, // band level against a fixed threshold (the law before E07 step 3)
+    Relative = 1  // band level against the programme's 200 Hz - 1 kHz body
+};
+
 struct ClarityParams
 {
     float attackDb = 0.0f;            // -12 .. +12
@@ -47,6 +58,7 @@ struct ClarityParams
     float presenceFrequency = 3200.0f;// 1000 .. 6000 Hz
     float air = 0.0f;                 // 0 .. 1
     float deMud = 0.0f;               // 0 .. 1
+    PresenceMode presenceMode = PresenceMode::Absolute;
 
     bool operator== (const ClarityParams&) const = default;
 };
@@ -96,7 +108,25 @@ private:
         float bandRelease = 0.0f, highRelease = 0.0f, env = 0.0f;
     };
 
+    /** Relative presence (docs/11 E07 step 3): the body band's detector,
+        its fast mean square and the slow balance followers of the presence
+        band and the body; running while Relative is selected or still
+        mixed in. */
+    struct PresenceBalance
+    {
+        bool running = false, fromNothing = false;
+        int warmTicks = 0;                    // control ticks until the followers are valid
+        OnePoleSmoother mix;                  // 0 = Absolute law .. 1 = Relative law, control rate
+        float bodyMs = 0.0f;                  // fast (20 ms) linked mean square of the body
+        float slowBandMs = 0.0f, slowBodyMs = 0.0f;
+        std::array<std::array<SvfState, 2>, kMaxChannels> bodyState {};
+    };
+
     void activateBell (DynamicBell& bell, double hz, double q) noexcept;
+    void startBalance (bool fromNothing) noexcept;
+    float updateBalance() noexcept;
+    float relativePresenceDb() const noexcept;
+    void processBody (const AudioBlock& block, int numCh, int pos, int len) noexcept;
     void updateBell (DynamicBell& bell, float gainDb, double hz, double q, bool moved) noexcept;
     void activateAir() noexcept;
     void processBell (DynamicBell& bell, const AudioBlock& block, int numCh, int pos, int len, int phase, bool trackBroadband) noexcept;
@@ -121,6 +151,9 @@ private:
     DynamicBell deMud, presence;
     OnePoleSmoother logPresenceHz;
     float presenceHz = 3200.0f;
+    PresenceBalance balance;
+    std::array<SvfCoeffs, 2> bodyFilters {}; // HP2 200 Hz, LP2 1 kHz
+    float balanceCoeff = 0.0f;               // slow followers' one-pole per control tick
 
     // 4. Air exciter + high shelf.
     bool airActive = false;

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -252,6 +253,14 @@ EngineController::EngineController (Options opts)
         triggerAsyncUpdate();
     };
     routing->onChanged = [this] { notify (Change::Routing); };
+    // docs/11 E40: a save of a strip whose preview plays takes the bank as the preview's end leaves it.
+    presets->setAuditionFilter ([this] (const ParameterStore& store, Bank bank, std::vector<float>& values)
+                                {
+                                    for (int s = 0; s < getNumStrips(); ++s)
+                                        if (&getParams (s) == &store)
+                                            return getSavedBankValues (s, bank, values);
+                                    return false;
+                                });
 
     for (int i = 0; i < getNumStrips(); ++i)
     {
@@ -260,6 +269,8 @@ EngineController::EngineController (Options opts)
         applyStripGain (i);
         host->setStripMuted (i, settings->getStripMuted (name));
     }
+    // docs/11 E22: the chat duck (every engine built later copies it).
+    host->getMixEngine().setChatDuck (settings->getChatDuck(), settings->getChatDuckDepthDb());
 
     selectedStrip = std::clamp (settings->getSelectedStrip(), 0, std::max (0, getNumStrips() - 1));
     enabled = settings->getMasterEnabled();
@@ -274,7 +285,15 @@ EngineController::EngineController (Options opts)
     applyListeningLevel();
 
     loadDeviceProfiles();
-    preferredOutputName = settings->getPreferredOutputDevice();
+    preferredOutput = settings->getPreferredOutput();
+    // docs/11 E51: "Follow the system default output", before the device opens;
+    // picking an output in Settings > Audio ends it (the host says so).
+    host->setFollowSystemDefault (settings->getFollowSystemDefaultOutput());
+    host->onFollowSystemDefaultChanged = [this]
+    {
+        settings->setFollowSystemDefaultOutput (host->getFollowSystemDefault());
+        notify (Change::Settings);
+    };
 
     // Before the device opens: PipeWire reads the request when the stream opens.
     requestGraphQuantum (getLatencyProfile(), false);
@@ -435,7 +454,7 @@ float EngineController::getStripGainDb (int strip) const noexcept
 
 void EngineController::applyStripGain (int strip)
 {
-    host->setStripGainDb (strip, userGainDb[static_cast<size_t> (strip)] + chatMixOffsetDb (strip) + getTotalComparisonTrimDb (strip));
+    host->setStripGainDb (strip, userGainDb[static_cast<size_t> (strip)] + getTotalComparisonTrimDb (strip));
 }
 
 void EngineController::setComparisonTrimDb (int strip, float db, ComparisonSlot slot)
@@ -645,7 +664,11 @@ juce::String EngineController::saveUserPreset (const juce::String& name, const j
     const auto id = presets->saveUserPreset (name, category, description, store, error, true);
     if (id.isNotEmpty())
     {
-        presets->setCurrentPresetId (s, id, &store);
+        // docs/11 E40: the saved sound (the pre-preview one while a preview
+        // plays) is the one that counts as unmodified.
+        presets->setCurrentPresetIdSaved (s, id, store);
+        if (isPreviewInProgress (s))
+            preview.savedPresetId = id;
         settings->setLastPreset (getStripName (s), id);
         presetChangedByUser (s);
         notify (Change::Preset);
@@ -727,7 +750,21 @@ void EngineController::toggleAB (int strip)
 
 void EngineController::copyActiveToOtherBank (int strip)
 {
-    PresetManager::copyActiveToOther (getParams (resolveStrip (strip)));
+    const int s = resolveStrip (strip);
+    auto& store = getParams (s);
+    const auto active = store.getActiveBank();
+    // docs/11 E40: during a preview the copy takes the bank as the preview's
+    // end will leave it (the audition bank is never copied).
+    std::vector<float> values;
+    const bool audition = getSavedBankValues (s, active, values);
+    PresetManager::copyActiveToOther (store);
+    if (audition)
+    {
+        const auto other = active == Bank::A ? Bank::B : Bank::A;
+        for (int i = 0; i < kNumParams; ++i)
+            if (store.get (other, i) != values[static_cast<size_t> (i)])
+                store.set (other, i, values[static_cast<size_t> (i)]);
+    }
     notify (Change::Parameters);
 }
 
@@ -838,20 +875,33 @@ void EngineController::persistStripStates (bool force)
 juce::String EngineController::getPersistedStripState (int strip)
 {
     const auto& store = getParams (strip);
-    if (preview.strip != strip)
-        return stripStateToJson (store);
-
     // A preview plays (docs/11 E40): save the bank as the preview's end will
     // leave it (PresetAudition::cancel), never the previewed sound.
-    std::vector<float> values (static_cast<size_t> (kNumParams));
+    std::vector<float> values;
+    if (! getSavedBankValues (strip, preview.bank, values))
+        return stripStateToJson (store);
+    return stripStateToJson (store, &values, preview.bank);
+}
+
+bool EngineController::getSavedBankValues (int strip, Bank bank, std::vector<float>& values) const
+{
+    if (strip < 0 || strip >= getNumStrips())
+        return false;
+    const auto& store = host->getMixEngine().params (strip);
+    values.resize (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        values[static_cast<size_t> (i)] = store.get (bank, i);
+    if (preview.strip != strip || preview.bank != bank)
+        return false;
+    // Every value that still holds what the preview wrote is the value
+    // before it; one someone else moved meanwhile (a hotkey) stays as it is.
     for (int i = 0; i < kNumParams; ++i)
     {
         const auto k = static_cast<size_t> (i);
-        values[k] = store.get (preview.bank, i);
         if (! flub::preset::isAppState (i) && values[k] == preview.written[k] && preview.written[k] != preview.original[k])
             values[k] = preview.original[k];
     }
-    return stripStateToJson (store, &values, preview.bank);
+    return true;
 }
 
 void EngineController::setPreviewInProgress (int strip, Bank bank, std::vector<float> original, std::vector<float> written)
@@ -862,7 +912,8 @@ void EngineController::setPreviewInProgress (int strip, Bank bank, std::vector<f
         clearPreviewInProgress();
         return;
     }
-    preview = { strip, bank, std::move (original), std::move (written) };
+    auto savedPresetId = preview.strip == strip ? preview.savedPresetId : juce::String();
+    preview = { strip, bank, std::move (original), std::move (written), std::move (savedPresetId) };
 }
 
 void EngineController::clearPreviewInProgress()
@@ -1045,8 +1096,8 @@ void EngineController::updateDeviceProfile()
         deviceAdvice = {};
         currentOutputName = {};
         host->setMasterCeilingDb (-1.0f);
-        applyDeviceCorrection();
         updateOutputIdentity(); // no output: no headset cap (docs/11 E16)
+        applyDeviceCorrection();
         applyOnboardCap();
         return;
     }
@@ -1093,13 +1144,16 @@ void EngineController::applyDeviceProfile (const juce::String& outputName, doubl
     // presets keep their own ceilings, the cap only ever lowers the output.
     host->setMasterCeilingDb (deviceAdvice.ceilingDbTp);
 
+    // The output's identity (docs/11 E51), which keys the per-endpoint
+    // settings below.
+    updateOutputIdentity();
+
     // The endpoint's own correction curve (never from the family-level
     // profile match above: a family name says nothing about one unit).
     applyDeviceCorrection();
 
     // The endpoint's headset enhancement answer (docs/11 E16), applied or
     // removed with every output change.
-    updateOutputIdentity();
     applyOnboardCap();
 }
 
@@ -1116,24 +1170,47 @@ void EngineController::applyDeviceCorrection()
 
     // No stored (or no readable) curve: the default settings, a flat unity stage.
     flub::DeviceCorrectionSettings next;
-    if (correctionEndpoint.isNotEmpty())
-        if (const auto entry = settings->getDeviceCorrection (correctionEndpoint))
-            if (flub::CorrectionCurve curve; flub::eqtext::parse (entry->curveText.toStdString(), curve).ok)
-            {
-                next.curve = curve;
-                next.enabled = entry->enabled;
-                next.compare = correctionCompare && entry->enabled;
-            }
+    const auto entry = correctionEndpoint.isNotEmpty() ? findDeviceCorrectionEntry() : std::nullopt;
+    // An entry from before docs/11 E51 (the name only) gains the output's ids
+    // the first time it is seen with them.
+    if (entry && entry->endpointId.isEmpty() && entry->hardwareId.isEmpty() && (! outputIdentity.id.empty() || ! outputIdentity.hardwareId.empty()))
+        storeDeviceCorrectionEntry (*entry);
+    if (flub::CorrectionCurve curve; entry && flub::eqtext::parse (entry->curveText.toStdString(), curve).ok)
+    {
+        next.curve = curve;
+        next.enabled = entry->enabled;
+        next.compare = correctionCompare && entry->enabled;
+    }
 
     if (! (next == host->getDeviceCorrection()))
         host->setDeviceCorrection (next);
+}
+
+std::optional<DeviceCorrectionEntry> EngineController::findDeviceCorrectionEntry() const
+{
+    // By the output's identity (docs/11 E51): the curve follows its headset
+    // through a re-plug into another USB port ("2- ") and a rename; entries
+    // from before E51 are keyed by the name alone and still match it.
+    return currentOutputName.isNotEmpty() ? settings->findDeviceCorrection (outputIdentity) : std::nullopt;
+}
+
+void EngineController::storeDeviceCorrectionEntry (DeviceCorrectionEntry entry)
+{
+    // Stored under the output's current identity: an entry found by name
+    // (from before E51) or by hardware id gains the ids it lacked.
+    entry.endpoint = currentOutputName;
+    if (! outputIdentity.id.empty())
+        entry.endpointId = juce::String (outputIdentity.id);
+    if (! outputIdentity.hardwareId.empty())
+        entry.hardwareId = juce::String (outputIdentity.hardwareId);
+    settings->setDeviceCorrection (entry);
 }
 
 EngineController::DeviceCorrectionInfo EngineController::getDeviceCorrection() const
 {
     DeviceCorrectionInfo info;
     info.endpoint = currentOutputName;
-    if (const auto entry = currentOutputName.isNotEmpty() ? settings->getDeviceCorrection (currentOutputName) : std::nullopt)
+    if (const auto entry = findDeviceCorrectionEntry())
     {
         const auto& applied = host->getDeviceCorrection();
         info.hasCurve = true;
@@ -1187,11 +1264,10 @@ bool EngineController::importDeviceCorrectionText (const juce::String& text, con
             warnings->add (juce::String::fromUTF8 (w.c_str()));
 
     DeviceCorrectionEntry entry;
-    entry.endpoint = currentOutputName;
     entry.name = name;
     entry.enabled = true;
     entry.curveText = juce::String::fromUTF8 (flub::eqtext::format (curve).c_str());
-    settings->setDeviceCorrection (entry);
+    storeDeviceCorrectionEntry (entry);
     correctionCompare = false;
     applyDeviceCorrection();
     notify (Change::Settings);
@@ -1200,11 +1276,11 @@ bool EngineController::importDeviceCorrectionText (const juce::String& text, con
 
 void EngineController::setDeviceCorrectionEnabled (bool shouldBeEnabled)
 {
-    auto entry = currentOutputName.isNotEmpty() ? settings->getDeviceCorrection (currentOutputName) : std::nullopt;
+    auto entry = findDeviceCorrectionEntry();
     if (! entry || entry->enabled == shouldBeEnabled)
         return;
     entry->enabled = shouldBeEnabled;
-    settings->setDeviceCorrection (*entry);
+    storeDeviceCorrectionEntry (*entry);
     applyDeviceCorrection();
     notify (Change::Settings);
 }
@@ -1220,9 +1296,9 @@ void EngineController::setDeviceCorrectionCompare (bool comparing)
 
 void EngineController::removeDeviceCorrection()
 {
-    if (currentOutputName.isEmpty() || ! settings->getDeviceCorrection (currentOutputName))
+    if (! findDeviceCorrectionEntry())
         return;
-    settings->removeDeviceCorrection (currentOutputName);
+    settings->removeDeviceCorrection (outputIdentity);
     correctionCompare = false;
     applyDeviceCorrection();
     notify (Change::Settings);
@@ -1317,59 +1393,55 @@ bool EngineController::setOnboardEnhancement (bool on)
 
 void EngineController::trackPreferredOutput (bool rescan)
 {
-    if (restoringPreferred || ! options.openAudioDevice)
+    if (! options.openAudioDevice)
         return;
 
-    auto& dm = getDeviceManager();
-    const auto current = dm.getAudioDeviceSetup().outputDeviceName;
-    if (preferredOutputName.isEmpty())
+    // docs/11 E51: the host selects the output by the chosen endpoint's
+    // identity (the same endpoint id, else the same vendor / product and name
+    // without Windows' "2- ", else that name) and switches back to it by
+    // itself; the name alone never matched a headset re-plugged into another
+    // USB port. The tracker stores that choice with its identity (settings
+    // from before E51 have the name only; the host fills the ids in once it
+    // sees the device).
+    const auto& choice = host->getChosenOutput();
+    if (choice.deviceName.isNotEmpty())
     {
-        if (current.isNotEmpty())
+        DeviceEndpointEntry next;
+        next.name = choice.deviceName;
+        next.endpointId = choice.endpointId;
+        next.hardwareId = choice.hardwareId;
+        if (! (next == preferredOutput))
         {
-            preferredOutputName = current;
-            settings->setPreferredOutputDevice (current);
+            preferredOutput = next;
+            settings->setPreferredOutput (next);
         }
-        return;
-    }
-    if (current == preferredOutputName)
-    {
-        preferredMissing = false;
-        return;
     }
 
-    auto* type = dm.getCurrentDeviceTypeObject();
-    if (type == nullptr)
+    // While the chosen output is missing, device types that report no
+    // hot-plug (ALSA, and every type on Linux and macOS, which have no
+    // AudioDeviceWatcher) are rescanned and the host looks again. JUCE's
+    // WASAPI types watch the endpoints themselves: a rescan here would make
+    // them miss the change (as in AudioEngineHost::handleDeviceEvents).
+    if (! rescan || ! host->getOutputSelection().fallback)
         return;
-    if (rescan)
-        type->scanForDevices(); // some backends (e.g. ALSA) do not report hot-plugs themselves
+    if (auto* type = getDeviceManager().getCurrentDeviceTypeObject(); type != nullptr && ! type->getTypeName().startsWith ("Windows Audio"))
+        type->scanForDevices();
+    host->reselectOutput();
+}
 
-    if (! type->getDeviceNames (false).contains (preferredOutputName))
-    {
-        // The preferred device (e.g. a USB / wireless headset) is gone and JUCE
-        // fell back to another output: keep waiting for it to return.
-        preferredMissing = true;
+void EngineController::setFollowSystemDefaultOutput (bool follow)
+{
+    if (settings->getFollowSystemDefaultOutput() == follow && host->getFollowSystemDefault() == follow)
         return;
-    }
-
-    if (preferredMissing)
+    settings->setFollowSystemDefaultOutput (follow);
+    host->setFollowSystemDefault (follow);
+    if (options.openAudioDevice)
     {
-        // It is back: switch to it again.
-        auto setup = dm.getAudioDeviceSetup();
-        setup.outputDeviceName = preferredOutputName;
-        restoringPreferred = true;
-        const auto error = dm.setAudioDeviceSetup (setup, true);
-        restoringPreferred = false;
-        preferredMissing = ! error.isEmpty();
-        if (error.isNotEmpty())
-            lastDeviceError = error;
+        trackPreferredOutput (false);
+        updateDeviceProfile();
     }
-    else
-    {
-        // Both devices exist and the user picked a different one: that is the
-        // new preference.
-        preferredOutputName = current;
-        settings->setPreferredOutputDevice (current);
-    }
+    notify (Change::Device);
+    notify (Change::Settings);
 }
 
 // =============================================================================
@@ -1617,8 +1689,8 @@ void EngineController::timerCallback()
     if (timerTicks % kAntiCheatPollTicks == 0)
         pollAntiCheatServices();
 
-    // While the preferred output (e.g. a headset) is missing, look for it.
-    if (preferredMissing && options.openAudioDevice && timerTicks % kRescanEveryTicks == 0)
+    // While the chosen output (e.g. a headset) is missing, look for it (docs/11 E51).
+    if (options.openAudioDevice && host->getOutputSelection().fallback && timerTicks % kRescanEveryTicks == 0)
     {
         const auto before = getDeviceManager().getAudioDeviceSetup().outputDeviceName;
         trackPreferredOutput (true);
@@ -2215,40 +2287,72 @@ bool EngineController::isNight (int strip) const noexcept
     return strip >= 0 && strip < AudioEngineHost::kMaxStrips && nightLatches[static_cast<size_t> (strip)].on;
 }
 
-float EngineController::chatMixOffsetDb (int strip) const
+bool EngineController::hasChatMix() const
 {
-    const auto name = getStripName (strip);
-    if (name.equalsIgnoreCase (kChatMixGameStrip))
-        return -chatMix * kChatMixRangeDb;
-    if (name.equalsIgnoreCase (kChatMixChatStrip))
-        return chatMix * kChatMixRangeDb;
-    return 0.0f;
+    return findStrip (kChatMixGameStrip) >= 0 && findStrip (kChatMixChatStrip) >= 0;
 }
 
 bool EngineController::setChatMix (float balance)
 {
-    const int game = findStrip (kChatMixGameStrip), chat = findStrip (kChatMixChatStrip);
-    if (game < 0 || chat < 0)
-        return false;
-    // Whole 10 % steps, so repeated nudges land on round values and 0 exactly.
-    const float next = std::round (std::clamp (balance, -1.0f, 1.0f) * 10.0f) / 10.0f;
-    if (next == chatMix)
-        return true;
-    chatMix = next;
-    applyStripGain (game);
-    applyStripGain (chat);
-    notify (Change::Parameters);
-    return true;
+    // Whole 10 % steps, so repeated nudges land on round values and 0 exactly;
+    // centred (and nothing to balance) without a Game and a Chat strip.
+    const bool possible = hasChatMix();
+    const float next = possible && std::isfinite (balance) ? std::round (std::clamp (balance, -1.0f, 1.0f) * 10.0f) / 10.0f : 0.0f;
+    if (next != chatMix)
+    {
+        chatMix = next;
+        host->getMixEngine().setChatMix (chatMix); // docs/11 E22: the complementary gains, gliding over 50 ms
+        notify (Change::Parameters);
+    }
+    return possible;
+}
+
+float EngineController::getChatMixGainDb (int strip) const
+{
+    const auto name = getStripName (strip);
+    const auto role = name.equalsIgnoreCase (kChatMixGameStrip)   ? flub::MixEngine::StripRole::Game
+                      : name.equalsIgnoreCase (kChatMixChatStrip) ? flub::MixEngine::StripRole::Chat
+                                                                  : flub::MixEngine::StripRole::Other;
+    const float gain = flub::MixEngine::chatMixGain (chatMix, role);
+    return gain > 0.0f ? juce::Decibels::gainToDecibels (gain, -1000.0f) : -std::numeric_limits<float>::infinity();
 }
 
 juce::String EngineController::describeChatMix() const
 {
     if (chatMix == 0.0f)
         return "centred";
-    const auto db = [] (float v) { return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB"; };
-    return juce::String (kChatMixGameStrip) + " " + db (-chatMix * kChatMixRangeDb) + ", " + kChatMixChatStrip + " "
-           + db (chatMix * kChatMixRangeDb);
+    const auto db = [] (float v)
+    {
+        if (! std::isfinite (v))
+            return juce::String ("muted");
+        return (v < -0.05f ? juce::String (v, 1) : juce::String ("0")) + " dB";
+    };
+    return juce::String (kChatMixGameStrip) + " " + db (getChatMixGainDb (findStrip (kChatMixGameStrip))) + ", " + kChatMixChatStrip + " "
+           + db (getChatMixGainDb (findStrip (kChatMixChatStrip)));
 }
+
+void EngineController::setChatDuck (bool on, float depthDb)
+{
+    const float depth = std::isfinite (depthDb) ? std::clamp (depthDb, kMinChatDuckDepthDb, kMaxChatDuckDepthDb) : kDefaultChatDuckDepthDb;
+    if (on == getChatDuck() && depth == getChatDuckDepthDb())
+        return;
+    settings->setChatDuck (on);
+    settings->setChatDuckDepthDb (depth);
+    host->getMixEngine().setChatDuck (on, depth);
+    notify (Change::Settings);
+}
+
+bool EngineController::getChatDuck() const { return settings->getChatDuck(); }
+
+float EngineController::getChatDuckDepthDb() const
+{
+    const float depth = settings->getChatDuckDepthDb();
+    return std::isfinite (depth) ? std::clamp (depth, kMinChatDuckDepthDb, kMaxChatDuckDepthDb) : kDefaultChatDuckDepthDb;
+}
+
+bool EngineController::isChatVoiceActive() const noexcept { return host->getMixEngine().isChatVoiceActive(); }
+
+float EngineController::getChatDuckAmount() const noexcept { return host->getMixEngine().getChatDuckAmount(); }
 
 void EngineController::presetChangedByUser (int strip)
 {

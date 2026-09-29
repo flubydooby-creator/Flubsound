@@ -9,6 +9,10 @@
 //   tooltip; a routing or capture error shows its text in the tooltip and as
 //   an entry of the chip's menu. Clicking a row selects the strip for
 //   editing (same as the header's strip selector).
+// The Chat strip's row (docs/11 E22) adds a voice-chat line: the ChatMix
+// balance (EngineController::setChatMix, as the tray flyout and the ChatMix
+// hotkeys), a dot that lights while the strip carries speech, the "Duck game
+// under voice chat" switch and its depth (3 - 6 dB, persisted).
 // Footer: "Assign app to strip..." (running audio sessions from AppRouting,
 // or a typed executable name) for the selected strip and "System sound
 // settings" (the OS's per-app audio device page).
@@ -104,6 +108,14 @@ public:
     bool isShowingDoubling() const noexcept { return doubling; }
     /** Screen-reader description of a strip row (its apps and their states). */
     juce::String getStripDescription (int strip) const;
+    /** The Chat row's controls (docs/11 E22); nullptr without a Chat strip. */
+    juce::Slider* getChatMixSlider();
+    juce::Button* getChatDuckButton();
+    juce::Slider* getChatDuckDepthSlider();
+    /** The Chat row's voice dot is lit (updateMeters polls it). */
+    bool isVoiceDotLit() const;
+    /** Re-reads ChatMix and the duck setting into the Chat row. */
+    void refreshChat();
 
 private:
     class StripRow;
@@ -115,6 +127,7 @@ private:
     void showDoublingFix();
     void showAddAutoProfileDialog();
     juce::TextLayout layoutNotice (int width) const;
+    StripRow* findChatRow() const;
 
     EngineController& controller;
     juce::Component rowHolder;

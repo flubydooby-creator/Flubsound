@@ -34,6 +34,9 @@ constexpr const char* presetPreview = "presets.preview";
 constexpr const char* presetPreviewMatched = "presets.previewMatched";
 constexpr const char* comparisonMatched = "compare.matched";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
+constexpr const char* preferredOutputId = "device.preferredOutputId";
+constexpr const char* preferredOutputHardwareId = "device.preferredOutputHardwareId";
+constexpr const char* followSystemDefault = "device.followSystemDefault";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
@@ -45,6 +48,8 @@ constexpr const char* contourReferenceVolume = "contour.referenceVolumeDb";
 constexpr const char* allowedLoopbackPairs = "device.allowedLoopbackPairs";
 constexpr const char* tournamentMode = "tournament.mode";
 constexpr const char* tournamentAuto = "tournament.auto";
+constexpr const char* chatDuck = "chat.duck";
+constexpr const char* chatDuckDepth = "chat.duckDepthDb";
 constexpr const char* schemaVersion = "settings.schemaVersion";
 } // namespace Keys
 
@@ -646,6 +651,25 @@ void AppSettings::setComparisonMatched (bool matched) { properties->setValue (Ke
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
 void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 
+DeviceEndpointEntry AppSettings::getPreferredOutput() const
+{
+    DeviceEndpointEntry e;
+    e.name = properties->getValue (Keys::preferredOutputDevice);
+    e.endpointId = properties->getValue (Keys::preferredOutputId);
+    e.hardwareId = properties->getValue (Keys::preferredOutputHardwareId);
+    return e;
+}
+
+void AppSettings::setPreferredOutput (const DeviceEndpointEntry& output)
+{
+    properties->setValue (Keys::preferredOutputDevice, output.name);
+    properties->setValue (Keys::preferredOutputId, output.endpointId);
+    properties->setValue (Keys::preferredOutputHardwareId, output.hardwareId);
+}
+
+bool AppSettings::getFollowSystemDefaultOutput() const { return properties->getBoolValue (Keys::followSystemDefault, false); }
+void AppSettings::setFollowSystemDefaultOutput (bool follow) { properties->setValue (Keys::followSystemDefault, follow); }
+
 // ---- App routing ----------------------------------------------------------------------------------------
 AppSettings::RoutingMethod AppSettings::getRoutingMethod() const
 {
@@ -765,12 +789,23 @@ void storeDeviceCorrections (juce::PropertiesFile& properties, const std::vector
     for (const auto& e : entries)
     {
         auto* child = xml.createNewChildElement ("ENDPOINT");
-        child->setAttribute ("id", e.endpoint);
+        child->setAttribute ("id", e.endpoint); // the name: what files before docs/11 E51 keyed by
+        child->setAttribute ("endpointId", e.endpointId);
+        child->setAttribute ("hardwareId", e.hardwareId);
         child->setAttribute ("name", e.name);
         child->setAttribute ("enabled", e.enabled);
         child->addTextElement (e.curveText);
     }
     properties.setValue (Keys::deviceCorrections, &xml);
+}
+
+int findCorrectionEntry (const std::vector<DeviceCorrectionEntry>& entries, const flub::platform::OutputEndpointIdentity& endpoint)
+{
+    std::vector<flub::platform::OutputEndpointIdentity> stored;
+    stored.reserve (entries.size());
+    for (const auto& e : entries)
+        stored.push_back (e.identity());
+    return flub::platform::AudioDeviceWatcher::findEndpoint (stored, endpoint);
 }
 } // namespace
 
@@ -783,43 +818,54 @@ std::vector<DeviceCorrectionEntry> AppSettings::getDeviceCorrections() const
         {
             DeviceCorrectionEntry entry;
             entry.endpoint = e->getStringAttribute ("id");
+            entry.endpointId = e->getStringAttribute ("endpointId");
+            entry.hardwareId = e->getStringAttribute ("hardwareId");
             entry.name = e->getStringAttribute ("name");
             entry.enabled = e->getBoolAttribute ("enabled", true);
             entry.curveText = e->getAllSubText();
-            if (entry.endpoint.isNotEmpty())
+            if (entry.endpoint.isNotEmpty() || entry.endpointId.isNotEmpty())
                 entries.push_back (entry);
         }
     }
     return entries;
 }
 
-std::optional<DeviceCorrectionEntry> AppSettings::getDeviceCorrection (const juce::String& endpoint) const
+std::optional<DeviceCorrectionEntry> AppSettings::findDeviceCorrection (const flub::platform::OutputEndpointIdentity& endpoint) const
 {
-    for (auto& e : getDeviceCorrections())
-        if (e.endpoint == endpoint)
-            return e;
+    const auto entries = getDeviceCorrections();
+    if (const int found = findCorrectionEntry (entries, endpoint); found >= 0)
+        return entries[static_cast<size_t> (found)];
     return std::nullopt;
+}
+
+std::optional<DeviceCorrectionEntry> AppSettings::getDeviceCorrection (const juce::String& endpointName) const
+{
+    flub::platform::OutputEndpointIdentity endpoint;
+    endpoint.name = endpointName.toStdString();
+    return findDeviceCorrection (endpoint);
 }
 
 void AppSettings::setDeviceCorrection (const DeviceCorrectionEntry& entry)
 {
-    if (entry.endpoint.isEmpty())
+    if (entry.endpoint.isEmpty() && entry.endpointId.isEmpty())
         return;
     auto entries = getDeviceCorrections();
-    const auto it = std::find_if (entries.begin(), entries.end(), [&entry] (const auto& e) { return e.endpoint == entry.endpoint; });
-    if (it != entries.end())
-        *it = entry;
+    if (const int found = findCorrectionEntry (entries, entry.identity()); found >= 0)
+        entries[static_cast<size_t> (found)] = entry;
     else
         entries.push_back (entry);
 
     storeDeviceCorrections (*properties, entries);
 }
 
-void AppSettings::removeDeviceCorrection (const juce::String& endpoint)
+void AppSettings::removeDeviceCorrection (const flub::platform::OutputEndpointIdentity& endpoint)
 {
     auto entries = getDeviceCorrections();
-    entries.erase (std::remove_if (entries.begin(), entries.end(), [&endpoint] (const auto& e) { return e.endpoint == endpoint; }), entries.end());
-    storeDeviceCorrections (*properties, entries);
+    if (const int found = findCorrectionEntry (entries, endpoint); found >= 0)
+    {
+        entries.erase (entries.begin() + found);
+        storeDeviceCorrections (*properties, entries);
+    }
 }
 
 // ---- Per-endpoint settings (docs/11 E16) -----------------------------------------------
@@ -934,4 +980,13 @@ bool AppSettings::getTournamentMode() const { return properties->getBoolValue (K
 void AppSettings::setTournamentMode (bool on) { properties->setValue (Keys::tournamentMode, on); }
 bool AppSettings::getTournamentAuto() const { return properties->getBoolValue (Keys::tournamentAuto, true); }
 void AppSettings::setTournamentAuto (bool automatic) { properties->setValue (Keys::tournamentAuto, automatic); }
+
+bool AppSettings::getChatDuck() const { return properties->getBoolValue (Keys::chatDuck, false); }
+void AppSettings::setChatDuck (bool on) { properties->setValue (Keys::chatDuck, on); }
+float AppSettings::getChatDuckDepthDb() const
+{
+    const auto depth = static_cast<float> (properties->getDoubleValue (Keys::chatDuckDepth, 4.5));
+    return std::isfinite (depth) ? std::clamp (depth, 3.0f, 6.0f) : 4.5f;
+}
+void AppSettings::setChatDuckDepthDb (float depthDb) { properties->setValue (Keys::chatDuckDepth, depthDb); }
 } // namespace flub::app

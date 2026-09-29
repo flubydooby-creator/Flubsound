@@ -86,10 +86,75 @@ public:
             refreshState();
         };
         addAndMakeVisible (mute);
+
+        // The Chat strip's voice-chat line (docs/11 E22): ChatMix, the duck
+        // switch and its depth, and the voice dot.
+        isChat = name.equalsIgnoreCase ("Chat");
+        if (isChat)
+        {
+            chatMix.setSliderStyle (juce::Slider::LinearHorizontal);
+            chatMix.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+            chatMix.setRange (-1.0, 1.0, 0.1);
+            chatMix.setDoubleClickReturnValue (true, 0.0);
+            chatMix.onValueChange = [this]
+            {
+                panel.controller.setChatMix (static_cast<float> (chatMix.getValue()));
+                refreshChat();
+            };
+            addAndMakeVisible (chatMix);
+
+            Style::set (duck, "switch");
+            duck.setButtonText (kDuckText);
+            duck.onClick = [this] { panel.controller.setChatDuck (duck.getToggleState()); refreshChat(); };
+            addAndMakeVisible (duck);
+
+            duckDepth.setSliderStyle (juce::Slider::LinearHorizontal);
+            duckDepth.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 20);
+            duckDepth.setRange (EngineController::kMinChatDuckDepthDb, EngineController::kMaxChatDuckDepthDb, 0.5);
+            duckDepth.setDoubleClickReturnValue (true, EngineController::kDefaultChatDuckDepthDb);
+            duckDepth.textFromValueFunction = [] (double v) { return juce::String (v, 1) + " dB"; };
+            duckDepth.valueFromTextFunction = [] (const juce::String& t) { return t.retainCharacters ("0123456789.").getDoubleValue(); };
+            duckDepth.onValueChange = [this]
+            {
+                panel.controller.setChatDuck (panel.controller.getChatDuck(), static_cast<float> (duckDepth.getValue()));
+                refreshChat();
+            };
+            Style::describe (duckDepth, "Duck depth", "How far the game and music dip at 1 - 4 kHz while a teammate talks (3 - 6 dB; double-click: 4.5 dB)");
+            addAndMakeVisible (duckDepth);
+            refreshChat();
+        }
         refreshState();
     }
 
     int getStrip() const noexcept { return strip; }
+    bool isChatRow() const noexcept { return isChat; }
+    juce::Slider& getChatMixSlider() noexcept { return chatMix; }
+    juce::Button& getDuckButton() noexcept { return duck; }
+    juce::Slider& getDuckDepthSlider() noexcept { return duckDepth; }
+    bool isVoiceLit() const noexcept { return voiceLit; }
+
+    /** The Chat line from the controller (a hotkey moved ChatMix, a setting changed). */
+    void refreshChat()
+    {
+        if (! isChat)
+            return;
+        auto& ctrl = panel.controller;
+        const bool possible = ctrl.hasChatMix();
+        if (! chatMix.isMouseButtonDown())
+            chatMix.setValue (ctrl.getChatMix(), juce::dontSendNotification);
+        chatMix.setEnabled (possible);
+        Style::describe (chatMix, "ChatMix",
+                         possible ? "Balance between the Game and the Chat strip: " + ctrl.describeChatMix() + " (double-click: centre)"
+                                  : juce::String ("ChatMix needs a Game and a Chat strip"));
+        duck.setToggleState (ctrl.getChatDuck(), juce::dontSendNotification);
+        Style::describe (duck, "Duck game under voice chat",
+                         "While a teammate talks on this strip, the Game and Music strips dip at 1 - 4 kHz so the voice stays clear "
+                         "(footsteps untouched)");
+        if (! duckDepth.isMouseButtonDown())
+            duckDepth.setValue (ctrl.getChatDuckDepthDb(), juce::dontSendNotification);
+        duckDepth.setEnabled (ctrl.getChatDuck());
+        repaint (voiceArea.expanded (4));
+    }
 
     void setSelected (bool shouldBeSelected)
     {
@@ -157,11 +222,23 @@ public:
         }
         if (changed)
             repaint (meterArea.expanded (2));
+
+        if (isChat)
+        {
+            const bool lit = ctrl.hasChatMix() && ctrl.isChatVoiceActive();
+            if (lit != voiceLit)
+            {
+                voiceLit = lit;
+                repaint (voiceArea.expanded (4));
+            }
+            if (! chatMix.isMouseButtonDown() && std::abs (chatMix.getValue() - static_cast<double> (ctrl.getChatMix())) > 0.01)
+                refreshChat(); // the ChatMix hotkeys
+        }
     }
 
     int getPreferredHeight (int width) const
     {
-        return 80 + chipLines (width) * 22;
+        return 80 + chipLines (width) * 22 + (isChat ? kChatLinesHeight + (chatOnTwoLines (width - 20) ? 26 : 0) : 0);
     }
 
     void paint (juce::Graphics& g) override
@@ -190,6 +267,34 @@ public:
         const auto badge = channelBadge (channels);
         const float bw = juce::GlyphArrangement::getStringWidth (Theme::caption (9.0f), badge) + 12.0f;
         Theme::drawPill (g, title.removeFromLeft (bw).withSizeKeepingCentre (bw, 15.0f), badge, channels > 2 ? Palette::magenta : Palette::muted);
+
+        // The voice dot (Chat row): lit with a halo while the strip carries
+        // speech, a ring otherwise (shape as well as colour).
+        if (isChat)
+        {
+            auto v = voiceArea.toFloat();
+            const auto led = v.removeFromLeft (10.0f).withSizeKeepingCentre (8.0f, 8.0f);
+            if (voiceLit)
+            {
+                g.setColour (accent.withAlpha (0.25f));
+                g.fillEllipse (led.expanded (3.0f));
+                g.setColour (accent);
+                g.fillEllipse (led);
+            }
+            else
+            {
+                g.setColour (Palette::borderStrong);
+                g.drawEllipse (led.reduced (0.5f), 1.3f);
+            }
+            if (v.getWidth() > 30.0f)
+            {
+                g.setColour (voiceLit ? Palette::text : Palette::muted);
+                g.setFont (Theme::font (11.0f));
+                g.drawText (voiceLit ? "Voice" : "Quiet", v.withTrimmedLeft (4.0f), juce::Justification::centredLeft, false);
+            }
+            Theme::drawCaption (g, "GAME", gameCaption.toFloat());
+            Theme::drawCaption (g, "CHAT", chatCaption.toFloat());
+        }
 
         // Gain value
         g.setColour (Palette::muted);
@@ -264,6 +369,36 @@ public:
         r.removeFromTop (3);
         meterArea = r.removeFromTop (8).withTrimmedRight (62);
         r.removeFromTop (6);
+        if (isChat)
+        {
+            // ChatMix and the voice dot (with its word where there is room);
+            // the duck switch and its depth (on two lines in a narrow column).
+            const bool twoLines = chatOnTwoLines (r.getWidth());
+            auto line = r.removeFromTop (22);
+            gameCaption = line.removeFromLeft (38);
+            voiceArea = line.removeFromRight (twoLines ? 14 : 56);
+            line.removeFromRight (4);
+            chatCaption = line.removeFromRight (34);
+            chatMix.setBounds (line);
+            r.removeFromTop (4);
+            line = r.removeFromTop (24);
+            const bool fullText = juce::GlyphArrangement::getStringWidth (Theme::font (13.0f), kDuckText) + 40.0f
+                                  <= static_cast<float> (twoLines ? line.getWidth() : kDuckWidth);
+            duck.setButtonText (fullText ? kDuckText : "Duck game under chat");
+            if (twoLines)
+            {
+                duck.setBounds (line);
+                r.removeFromTop (2);
+                line = r.removeFromTop (24);
+            }
+            else
+            {
+                duck.setBounds (line.removeFromLeft (kDuckWidth));
+                line.removeFromLeft (8);
+            }
+            duckDepth.setBounds (line);
+            r.removeFromTop (6);
+        }
         chipsArea = r;
         layoutChips();
     }
@@ -406,6 +541,16 @@ private:
     std::vector<juce::Rectangle<int>> chipBounds;
     int hiddenChips = 0;
     juce::Rectangle<int> ledArea, titleArea, gainTextArea, meterArea, chipsArea, moreArea;
+
+    // The Chat row's voice-chat line (docs/11 E22).
+    static constexpr int kChatLinesHeight = 22 + 4 + 24 + 6, kDuckWidth = 220;
+    static constexpr const char* kDuckText = "Duck game under voice chat";
+    /** The duck's depth goes under the switch below this row width. */
+    static bool chatOnTwoLines (int innerWidth) noexcept { return innerWidth < kDuckWidth + 8 + 140; }
+    bool isChat = false, voiceLit = false;
+    juce::Slider chatMix, duckDepth;
+    juce::ToggleButton duck;
+    juce::Rectangle<int> gameCaption, chatCaption, voiceArea;
 };
 
 // =============================================================================
@@ -828,6 +973,44 @@ void RoutingPanel::refreshRouting()
                                                         : "Not available on this system");
     resized();
     repaint();
+}
+
+RoutingPanel::StripRow* RoutingPanel::findChatRow() const
+{
+    for (const auto& r : rows)
+        if (r->isChatRow())
+            return r.get();
+    return nullptr;
+}
+
+juce::Slider* RoutingPanel::getChatMixSlider()
+{
+    auto* row = findChatRow();
+    return row != nullptr ? &row->getChatMixSlider() : nullptr;
+}
+
+juce::Button* RoutingPanel::getChatDuckButton()
+{
+    auto* row = findChatRow();
+    return row != nullptr ? &row->getDuckButton() : nullptr;
+}
+
+juce::Slider* RoutingPanel::getChatDuckDepthSlider()
+{
+    auto* row = findChatRow();
+    return row != nullptr ? &row->getDuckDepthSlider() : nullptr;
+}
+
+bool RoutingPanel::isVoiceDotLit() const
+{
+    const auto* row = findChatRow();
+    return row != nullptr && row->isVoiceLit();
+}
+
+void RoutingPanel::refreshChat()
+{
+    if (auto* row = findChatRow())
+        row->refreshChat();
 }
 
 void RoutingPanel::updateMeters (double dtSeconds)

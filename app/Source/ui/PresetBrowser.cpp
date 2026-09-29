@@ -898,8 +898,8 @@ void PresetBrowser::engineControllerChanged (EngineController::Change change)
         case EngineController::Change::Preset:
             // Someone else loaded a preset into the strip (an automatic
             // profile, a hotkey): it stays; the preview ends without restoring.
-            if (audition.isActive() && controller.getCurrentPresetId (audition.getStrip()) != audition.getPresetIdAtBegin())
-                audition.abandon();
+            // A save of the pre-preview sound (docs/11 E40) keeps it going.
+            audition.presetChanged();
             reloadPresets();
             applyFilter();
             break;

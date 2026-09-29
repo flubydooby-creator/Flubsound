@@ -1698,7 +1698,8 @@ void AudioEngineHost::setSafetyState (DeviceSafetyState next)
         else
             m << ": playing on \"" << selection.deviceName << "\"";
         if (next.safeSpeakerProfile)
-            m << " with the safe speaker profile (virtualiser and bass engine off, " << juce::String (kSafeSpeakerTrimDb, 0) << " dB)";
+            m << " with the safe speaker profile (virtualiser off, bass at most +" << juce::String (kSafeSpeakerBassCapDb, 0) << " dB, "
+              << juce::String (kSafeSpeakerTrimDb, 0) << " dB)";
         if (selection.deviceName.isNotEmpty())
             m << ". Flubsound switches back when it is available again.";
     }
@@ -1956,13 +1957,33 @@ void AudioEngineHost::noteExplicitOutput()
     if (explicitOutput == lastExplicitOutput)
         return;
     lastExplicitOutput = explicitOutput;
-    if (explicitOutput.isEmpty() || explicitOutput == chosen.deviceName)
+    if (explicitOutput.isEmpty())
+        return;
+    // Picking an output while following the default: that output from now on.
+    const bool endsFollowing = followDefault && explicitOutput != selection.deviceName;
+    if (endsFollowing)
+    {
+        followDefault = false;
+        if (onFollowSystemDefaultChanged)
+            onFollowSystemDefaultChanged();
+    }
+    if (explicitOutput == chosen.deviceName)
         return;
 
     // A new choice: remember the identity of the endpoint it names now.
     endpointCache = listEndpoints();
     chosen = { explicitOutput, {}, {} };
     rememberIdentity (chosen, endpointCache);
+}
+
+void AudioEngineHost::setFollowSystemDefault (bool follow)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (followDefault == follow)
+        return;
+    followDefault = follow;
+    unavailableOutputs.clear();
+    reselectOutput(); // nothing before openDevice()
 }
 
 void AudioEngineHost::reselectOutput()
@@ -1985,8 +2006,9 @@ void AudioEngineHost::reselectOutput()
     {
         const auto setup = deviceManager.getAudioDeviceSetup();
         auto* device = deviceManager.getCurrentAudioDevice();
-        next = selectOutput (chosen, outputs, type->getDefaultDeviceIndex (false), endpointCache, setup.inputDeviceName,
-                             deviceInputFeedsStrip(), unavailableOutputs);
+        // Following the system default: as if nothing were chosen (the choice is kept).
+        next = selectOutput (followDefault ? OutputChoice {} : chosen, outputs, type->getDefaultDeviceIndex (false), endpointCache,
+                             setup.inputDeviceName, deviceInputFeedsStrip(), unavailableOutputs);
         if (next.deviceName.isEmpty() || (device != nullptr && setup.outputDeviceName == next.deviceName))
             break;
 
@@ -2094,7 +2116,8 @@ void AudioEngineHost::applySafeSpeakerProfile (bool on)
     for (int s = 0; s < engine.getNumStrips(); ++s)
     {
         engine.chain (s).setAuditionBypass (flub::param::VirtualizerOn, on);
-        engine.chain (s).setAuditionBypass (flub::param::BassOn, on);
+        // Bass capped, not bypassed: the bass engine's boost and the preset's EQ low lift together.
+        engine.chain (s).setSafeSpeakerBassCapDb (on ? kSafeSpeakerBassCapDb : flub::ProcessingChain::kNoBassCap);
     }
 }
 

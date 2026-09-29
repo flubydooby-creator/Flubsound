@@ -12,9 +12,19 @@
 //     headset disappears, JUCE falls back to the default output "CABLE
 //     Input" while the input is "CABLE Output"), and no stale latency readout.
 //   * docs/11 E42a: per-strip latency readout (own / padding / output).
+//   * docs/11 E51 remainder: the safe speaker profile caps the bass lift at
+//     +3 dB instead of bypassing the bass engine (fallback to speakers,
+//     measured against the headset render); "Follow the system default
+//     output" (host: honoured, ended by picking an output; EngineController:
+//     persisted and applied); the device correction keyed by the endpoint's
+//     identity (a curve saved on "Headset Earphone (Stealth 700 Gen 2)" is
+//     applied after a re-plug as "(2- Stealth 700 Gen 2)"; files from
+//     before E51, keyed by the name, still load); the preferred output
+//     stored with its identity.
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
+#include "engine/EngineController.h"
 
 #include "flub/engine/Parameters.h"
 
@@ -125,6 +135,7 @@ struct BlockRunner
     double rate = 48000.0;
     bool feedback = false; // input = previous output (a closed loop) + the sine
     std::function<void()> beforeBlock;
+    std::function<float (int64_t)> source; // the input at a sample index instead of the 220 Hz sine
 
     template <typename Callback>
     void run (int numBlocks, Callback&& callback)
@@ -138,8 +149,9 @@ struct BlockRunner
                 for (size_t c = 0; c < 2; ++c)
                     for (int i = 0; i < kBlock; ++i)
                     {
-                        const float sine = 0.25f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 220.0
-                                                                                 * static_cast<double> (sample + i) / rate));
+                        const float sine = source != nullptr ? source (sample + i)
+                                                             : 0.25f * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 220.0
+                                                                                                     * static_cast<double> (sample + i) / rate));
                         in[c][static_cast<size_t> (i)] = sine + (feedback ? out[c][static_cast<size_t> (i)] : 0.0f);
                     }
                 sample += kBlock;
@@ -663,4 +675,384 @@ TEST_CASE ("App: per-strip latency readout shows each strip's own latency and th
     info = host.getLatencyInfo();
     CHECK (std::abs (info.totalMs - withoutQuantum - 21.3) < 1.0e-9);
     CHECK (info.graphQuantumMs == 21.3);
+}
+
+// =============================================================================
+// docs/11 E51 remainder: safe-profile bass cap, follow the system default,
+// the correction and the preferred output keyed by the endpoint's identity
+// =============================================================================
+namespace
+{
+const juce::String kStealth ("Headset Earphone (Stealth 700 Gen 2)");
+const juce::String kStealthPort2 ("Headset Earphone (2- Stealth 700 Gen 2)"); // Windows' instance number: another USB port
+const juce::String kRealtekSpeakers ("Speakers (Realtek(R) Audio)");
+const juce::String kLineIn ("Line In (Realtek(R) Audio)");
+constexpr const char* kStealthHardware = "USB\\VID_10F5&PID_0210&MI_00";
+constexpr float kToneAmp = 0.003f; // -50 dBFS per tone: under the bass engine's protection with 19 dB of lift
+constexpr int kMeasureBlocks = 150; // 0.8 s at 48 kHz: 32 cycles of 40 Hz, 800 of 1 kHz
+
+/** Level of `freq` in the last kMeasureBlocks of `x`, dB re kToneAmp. */
+double toneDb (const std::vector<float>& x, double freq)
+{
+    const size_t n = static_cast<size_t> (kMeasureBlocks * kBlock), from = x.size() - n;
+    double re = 0.0, im = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double a = 2.0 * juce::MathConstants<double>::pi * freq * static_cast<double> (i) / 48000.0;
+        re += static_cast<double> (x[from + i]) * std::cos (a);
+        im -= static_cast<double> (x[from + i]) * std::sin (a);
+    }
+    return 20.0 * std::log10 (std::max (1.0e-12, 2.0 * std::sqrt (re * re + im * im) / static_cast<double> (n) / kToneAmp));
+}
+
+/** The Music strip voiced for the headset: bass.boost +9 dB at 70 Hz, an EQ
+    low shelf +6 dB at 100 Hz and a +4 dB bell at 60 Hz (19 dB of bass lift);
+    everything else that could shape the two tones off. */
+void voiceForHeadset (flub::param::ParameterStore& p)
+{
+    using namespace flub::param;
+    p.set (Mode, static_cast<float> (ModeValue::Music));
+    p.set (BoostIntensity, 0.0f);
+    for (int id : { Macro1, Macro2, Macro3, Macro4, Macro5 })
+        p.set (id, 0.0f);
+    for (int id : { AutoLevelOn, AutoPreampOn, GateOn, DynEqOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+        p.set (id, 0.0f);
+    p.set (EqOn, 1.0f);
+    p.set (BassOn, 1.0f);
+    p.set (BassBoostDb, 9.0f);
+    p.set (BassBoostFreq, 70.0f);
+    p.set (eq (1, EqFieldOn), 1.0f);
+    p.set (eq (1, EqFieldType), 1.0f); // Low Shelf
+    p.set (eq (1, EqFieldFreq), 100.0f);
+    p.set (eq (1, EqFieldGain), 6.0f);
+    p.set (eq (2, EqFieldOn), 1.0f);
+    p.set (eq (2, EqFieldType), 0.0f); // Bell
+    p.set (eq (2, EqFieldFreq), 60.0f);
+    p.set (eq (2, EqFieldGain), 4.0f);
+    p.set (eq (2, EqFieldQ), 0.7f);
+}
+
+flub::platform::OutputEndpointIdentity usbEndpoint (const char* id, const juce::String& name, const char* hardwareId)
+{
+    flub::platform::OutputEndpointIdentity e;
+    e.id = id;
+    e.name = name.toStdString();
+    e.hardwareId = hardwareId;
+    e.transport = flub::platform::EndpointTransport::Usb;
+    return e;
+}
+
+constexpr const char* kStealthCurve = "Preamp: -4.0 dB\n"
+                                      "Filter 1: ON LSC Fc 105 Hz Gain 3.5 dB Q 0.70\n"
+                                      "Filter 2: ON PK Fc 2600 Hz Gain -2.0 dB Q 2.00\n";
+} // namespace
+
+TEST_CASE ("App: E51 fallback to speakers caps the bass at +3 dB re the flat mids instead of switching the bass engine off")
+{
+    AudioEngineHost host;
+    auto backendOwner = std::make_unique<FakeBackend>();
+    auto* backend = backendOwner.get();
+    backend->outputs = { kStealth, kRealtekSpeakers };
+    backend->inputs = { kLineIn };
+    backend->defaultOutput = 1;
+    host.getDeviceManager().addAudioDeviceType (std::move (backendOwner));
+    host.setDeviceInputRouting (1, 0);
+    voiceForHeadset (host.getMixEngine().params (1));
+
+    juce::XmlElement saved ("DEVICESETUP");
+    saved.setAttribute ("deviceType", "FakeBackend");
+    saved.setAttribute ("audioOutputDeviceName", kStealth);
+    saved.setAttribute ("audioInputDeviceName", kLineIn);
+    REQUIRE (host.openDevice (&saved, 2, 2).isEmpty());
+    const auto currentDevice = [&host] { return dynamic_cast<FakeBackendDevice*> (host.getDeviceManager().getCurrentAudioDevice()); };
+    REQUIRE (currentDevice() != nullptr);
+    CHECK (currentDevice()->getName() == kStealth);
+
+    BlockRunner audio;
+    audio.source = [] (int64_t i)
+    {
+        const double t = static_cast<double> (i) / 48000.0;
+        return kToneAmp * static_cast<float> (std::sin (2.0 * juce::MathConstants<double>::pi * 40.0 * t)
+                                              + std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * t));
+    };
+    const auto bassLiftDb = [&]
+    {
+        audio.recorded = {};
+        audio.run (100 + kMeasureBlocks, [&] (const float* const* ins, float* const* outs) { currentDevice()->process (ins, outs); });
+        return toneDb (audio.recorded[0], 40.0) - toneDb (audio.recorded[0], 1000.0);
+    };
+    const double headset = bassLiftDb();
+    const double headsetMid = toneDb (audio.recorded[0], 1000.0);
+
+    // The dongle is unplugged: the speakers with the safe speaker profile.
+    backend->outputs = { kRealtekSpeakers };
+    backend->defaultOutput = 0;
+    backend->devicesChanged();
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return host.isSafeSpeakerProfileActive(); }, 2000)); // JUCE's own fallback, then the host's selection
+    CHECK (currentDevice() != nullptr && currentDevice()->getName() == kRealtekSpeakers);
+    REQUIRE (host.isSafeSpeakerProfileActive());
+    auto& chain = host.getMixEngine().chain (1);
+    CHECK (chain.getSafeSpeakerBassCapDb() == AudioEngineHost::kSafeSpeakerBassCapDb);
+    CHECK (! chain.isAuditionBypassed (flub::param::BassOn)); // capped, not bypassed
+    CHECK (chain.isAuditionBypassed (flub::param::VirtualizerOn));
+    CHECK (host.getDeviceSafetyState().fallbackMessage.contains ("bass at most +3 dB"));
+    const double fallback = bassLiftDb();
+    const double fallbackMid = toneDb (audio.recorded[0], 1000.0);
+    CHECK (chain.effectiveValue (flub::param::BassOn) == 1.0f);
+    CHECK (std::abs (chain.effectiveValue (flub::param::BassBoostDb) - 9.0f * 3.0f / 19.0f) < 1.0e-3f);
+    CHECK (host.getMixEngine().params (1).get (flub::param::BassBoostDb) == 9.0f); // the preset is untouched
+
+    // Before this change the profile bypassed the bass engine and left the
+    // preset's EQ lift in place (the same state, set by hand).
+    for (int s = 0; s < host.getMixEngine().getNumStrips(); ++s)
+    {
+        host.getMixEngine().chain (s).setSafeSpeakerBassCapDb (flub::ProcessingChain::kNoBassCap);
+        host.getMixEngine().chain (s).setAuditionBypass (flub::param::BassOn, true);
+    }
+    const double bypassed = bassLiftDb();
+    for (int s = 0; s < host.getMixEngine().getNumStrips(); ++s)
+    {
+        host.getMixEngine().chain (s).setAuditionBypass (flub::param::BassOn, false);
+        host.getMixEngine().chain (s).setSafeSpeakerBassCapDb (AudioEngineHost::kSafeSpeakerBassCapDb);
+    }
+
+    std::cerr << "    bass lift at 40 Hz re 1 kHz: headset " << headset << " dB; fallback to speakers " << fallback << " dB (1 kHz "
+              << (fallbackMid - headsetMid) << " dB: the trim); with the bass engine bypassed instead " << bypassed << " dB\n";
+    CHECK (headset > 15.0);
+    CHECK (fallback <= 3.05);
+    CHECK (fallback > 2.0);
+    CHECK (std::abs (fallbackMid - headsetMid - static_cast<double> (AudioEngineHost::kSafeSpeakerTrimDb)) < 0.3);
+    CHECK (bypassed > 6.0); // the old profile: the EQ shelf and bell stayed
+
+    // The headset returns: the full voicing again.
+    backend->outputs = { kStealth, kRealtekSpeakers };
+    backend->devicesChanged();
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return ! host.isSafeSpeakerProfileActive(); }, 2000));
+    CHECK (currentDevice() != nullptr && currentDevice()->getName() == kStealth);
+    CHECK (host.getMixEngine().chain (1).getSafeSpeakerBassCapDb() == flub::ProcessingChain::kNoBassCap);
+    CHECK (std::abs (bassLiftDb() - headset) < 0.2);
+    host.closeDevice();
+}
+
+TEST_CASE ("App: E51 'Follow the system default output' plays the default whatever was chosen; picking an output ends it")
+{
+    AudioEngineHost host;
+    auto backendOwner = std::make_unique<FakeBackend>();
+    auto* backend = backendOwner.get();
+    const juce::String cableIn ("CABLE Input (VB-Audio Virtual Cable)");
+    const juce::String headphones ("Headphones (Realtek(R) Audio)");
+    backend->outputs = { kStealth, kRealtekSpeakers, cableIn, headphones };
+    backend->inputs = { kLineIn };
+    backend->defaultOutput = 1;
+    host.getDeviceManager().addAudioDeviceType (std::move (backendOwner));
+    int endedCalls = 0;
+    host.onFollowSystemDefaultChanged = [&] { ++endedCalls; };
+
+    juce::XmlElement saved ("DEVICESETUP");
+    saved.setAttribute ("deviceType", "FakeBackend");
+    saved.setAttribute ("audioOutputDeviceName", kStealth);
+    saved.setAttribute ("audioInputDeviceName", kLineIn);
+    host.setFollowSystemDefault (true); // before the device opens, as EngineController does
+    REQUIRE (host.openDevice (&saved, 2, 2).isEmpty());
+    const auto output = [&host]
+    {
+        auto* d = host.getDeviceManager().getCurrentAudioDevice();
+        return d != nullptr ? d->getName() : juce::String();
+    };
+    CHECK (output() == kRealtekSpeakers);
+    CHECK (host.getChosenOutput().deviceName == kStealth); // the choice is kept
+    CHECK (! host.getOutputSelection().fallback);          // following is no fallback: no banner ...
+    CHECK (! host.isSafeSpeakerProfileActive());           // ... and no safe speaker profile
+    CHECK (host.getOutputSelection().reason == AudioEngineHost::OutputReason::SystemDefault);
+
+    // The default moves to the headset: followed; to the cable: not followed.
+    backend->defaultOutput = 0;
+    host.reselectOutput();
+    CHECK (output() == kStealth);
+    backend->defaultOutput = 2;
+    host.reselectOutput();
+    CHECK (output() == kStealth);
+    CHECK (host.getOutputSelection().reason == AudioEngineHost::OutputReason::FirstSafe);
+
+    // Off: back to the choice; on again: the default.
+    backend->defaultOutput = 1;
+    host.setFollowSystemDefault (false);
+    CHECK (output() == kStealth);
+    host.setFollowSystemDefault (true);
+    CHECK (output() == kRealtekSpeakers);
+    CHECK (endedCalls == 0);
+
+    // Picking another output in Settings > Audio: that output from now on.
+    auto setup = host.getDeviceManager().getAudioDeviceSetup();
+    setup.outputDeviceName = headphones;
+    REQUIRE (host.getDeviceManager().setAudioDeviceSetup (setup, true).isEmpty());
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return ! host.getFollowSystemDefault(); }, 2000));
+    CHECK (endedCalls == 1);
+    CHECK (output() == headphones);
+    CHECK (host.getChosenOutput().deviceName == headphones);
+    host.reselectOutput();
+    CHECK (output() == headphones); // a choice is not moved by the default
+    host.closeDevice();
+}
+
+TEST_CASE ("App: E51 the follow-default setting persists and reaches the host; the preferred output keeps its identity")
+{
+    const flubapptest::TempFolder temp;
+    const auto options = [&temp]
+    {
+        EngineController::Options o;
+        o.openAudioDevice = false;
+        o.restoreState = false;
+        o.enableAppRouting = false;
+        o.settingsFile = temp.file ("settings.xml");
+        o.persistSettings = true;
+        return o;
+    };
+    {
+        EngineController controller (options());
+        CHECK (! controller.getFollowSystemDefaultOutput());
+        CHECK (! controller.getHost().getFollowSystemDefault());
+        controller.setFollowSystemDefaultOutput (true);
+        CHECK (controller.getFollowSystemDefaultOutput());
+        CHECK (controller.getHost().getFollowSystemDefault());
+
+        // The host ends following (an output picked in Settings > Audio): stored.
+        controller.getHost().setFollowSystemDefault (false);
+        REQUIRE (controller.getHost().onFollowSystemDefaultChanged != nullptr);
+        controller.getHost().onFollowSystemDefaultChanged();
+        CHECK (! controller.getFollowSystemDefaultOutput());
+        controller.setFollowSystemDefaultOutput (true);
+
+        // The preferred output with its identity; a name from before E51 reads back alone.
+        DeviceEndpointEntry preferred;
+        preferred.name = kStealth;
+        preferred.endpointId = "{0.0.0.00000000}.{port1}";
+        preferred.hardwareId = kStealthHardware;
+        controller.getSettings().setPreferredOutput (preferred);
+        controller.shutdown();
+    }
+    {
+        EngineController controller (options());
+        CHECK (controller.getFollowSystemDefaultOutput());
+        CHECK (controller.getHost().getFollowSystemDefault()); // applied before the device would open
+        const auto preferred = controller.getSettings().getPreferredOutput();
+        CHECK (preferred.name == kStealth);
+        CHECK (preferred.endpointId == "{0.0.0.00000000}.{port1}");
+        CHECK (preferred.hardwareId == juce::String (kStealthHardware));
+        controller.getSettings().setPreferredOutputDevice ("Headphones (Old Name Only)");
+        controller.getSettings().setPreferredOutput ({ {}, {}, "Headphones (Old Name Only)", false });
+        CHECK (controller.getSettings().getPreferredOutput().endpointId.isEmpty());
+        CHECK (controller.getSettings().getPreferredOutputDevice() == "Headphones (Old Name Only)");
+        controller.shutdown();
+    }
+}
+
+TEST_CASE ("App: E51 a correction saved on 'Headset Earphone (Stealth 700 Gen 2)' is applied after a re-plug as '(2- Stealth 700 Gen 2)'")
+{
+    const flubapptest::TempFolder temp;
+    auto endpoints = std::make_shared<std::vector<flub::platform::OutputEndpointIdentity>>();
+    *endpoints = { usbEndpoint ("{0.0.0.00000000}.{port1}", kStealth, kStealthHardware),
+                   usbEndpoint ("{0.0.0.00000000}.{spk}", kRealtekSpeakers, "HDAUDIO\\FUNC_01&VEN_10EC&DEV_0897") };
+    EngineController::Options o;
+    o.openAudioDevice = false;
+    o.restoreState = false;
+    o.enableAppRouting = false;
+    o.settingsFile = temp.file ("settings.xml");
+    o.persistSettings = false;
+    o.outputEndpoints = [endpoints] { return *endpoints; };
+    EngineController controller (o);
+    auto& host = controller.getHost();
+
+    controller.simulateOutputDevice (kStealth, 48000.0, 2);
+    juce::String error;
+    REQUIRE (controller.importDeviceCorrectionText (kStealthCurve, "Stealth 700 Gen 2 ParametricEQ.txt", error));
+    const auto stored = controller.getSettings().getDeviceCorrections();
+    REQUIRE (stored.size() == 1);
+    CHECK (stored[0].endpoint == kStealth);
+    CHECK (stored[0].endpointId == "{0.0.0.00000000}.{port1}");
+    CHECK (stored[0].hardwareId == juce::String (kStealthHardware));
+    const auto applied = host.getDeviceCorrection();
+    CHECK (applied.curve.numFilters == 2);
+
+    // Unplugged: the speakers have no correction (flat).
+    *endpoints = { usbEndpoint ("{0.0.0.00000000}.{spk}", kRealtekSpeakers, "HDAUDIO\\FUNC_01&VEN_10EC&DEV_0897") };
+    controller.simulateOutputDevice (kRealtekSpeakers, 48000.0, 2);
+    CHECK (! controller.getDeviceCorrection().hasCurve);
+    CHECK (host.getDeviceCorrection().curve.isEmpty());
+
+    // Re-plugged into another USB port: a new endpoint id and "2- ". Before
+    // E51's key the name did not match and the headset played uncorrected.
+    endpoints->push_back (usbEndpoint ("{0.0.0.00000000}.{port2}", kStealthPort2, kStealthHardware));
+    controller.simulateOutputDevice (kStealthPort2, 48000.0, 2);
+    auto info = controller.getDeviceCorrection();
+    CHECK (info.hasCurve);
+    CHECK (info.name == "Stealth 700 Gen 2 ParametricEQ.txt");
+    CHECK (host.getDeviceCorrection() == applied);
+    // Switching it off there changes the one entry (now under the new port's id).
+    controller.setDeviceCorrectionEnabled (false);
+    auto after = controller.getSettings().getDeviceCorrections();
+    REQUIRE (after.size() == 1);
+    CHECK (! after[0].enabled);
+    CHECK (after[0].endpointId == "{0.0.0.00000000}.{port2}");
+    controller.setDeviceCorrectionEnabled (true);
+
+    // Another model under the headset's name (another vendor / product) is not the headset.
+    *endpoints = { usbEndpoint ("{0.0.0.00000000}.{other}", kStealth, "USB\\VID_1038&PID_12AD") };
+    controller.simulateOutputDevice (kStealth, 48000.0, 2);
+    CHECK (! controller.getDeviceCorrection().hasCurve);
+    CHECK (host.getDeviceCorrection().curve.isEmpty());
+
+    // Without platform ids (Linux, macOS): the name without the instance number.
+    endpoints->clear();
+    controller.simulateOutputDevice ("Headset Earphone (3- Stealth 700 Gen 2)", 48000.0, 2);
+    CHECK (controller.getDeviceCorrection().hasCurve);
+    controller.removeDeviceCorrection();
+    CHECK (controller.getSettings().getDeviceCorrections().empty());
+}
+
+TEST_CASE ("App: E51 device corrections saved before endpoint ids (keyed by the name) load, apply after a re-plug and gain the ids")
+{
+    const flubapptest::TempFolder temp;
+    const auto file = temp.file ("settings.xml");
+    {
+        // The file as batch 3 and earlier wrote it: <ENDPOINT id="<device name>">.
+        juce::PropertiesFile::Options po;
+        po.storageFormat = juce::PropertiesFile::storeAsXML;
+        po.millisecondsBeforeSaving = -1;
+        juce::PropertiesFile legacy (file, po);
+        juce::XmlElement xml ("CORRECTIONS");
+        auto* e = xml.createNewChildElement ("ENDPOINT");
+        e->setAttribute ("id", kStealth);
+        e->setAttribute ("name", "old.txt");
+        e->setAttribute ("enabled", true);
+        e->addTextElement (kStealthCurve);
+        legacy.setValue ("device.corrections", &xml);
+        REQUIRE (legacy.save());
+    }
+    auto endpoints = std::make_shared<std::vector<flub::platform::OutputEndpointIdentity>>();
+    *endpoints = { usbEndpoint ("{0.0.0.00000000}.{port2}", kStealthPort2, kStealthHardware) };
+    EngineController::Options o;
+    o.openAudioDevice = false;
+    o.restoreState = false;
+    o.enableAppRouting = false;
+    o.settingsFile = file;
+    o.persistSettings = false;
+    o.outputEndpoints = [endpoints] { return *endpoints; };
+    EngineController controller (o);
+
+    auto entries = controller.getSettings().getDeviceCorrections();
+    REQUIRE (entries.size() == 1);
+    CHECK (entries[0].endpoint == kStealth);
+    CHECK (entries[0].endpointId.isEmpty());
+
+    controller.simulateOutputDevice (kStealthPort2, 48000.0, 2);
+    const auto info = controller.getDeviceCorrection();
+    CHECK (info.hasCurve);
+    CHECK (info.name == "old.txt");
+    CHECK (controller.getHost().getDeviceCorrection().curve.numFilters == 2);
+    entries = controller.getSettings().getDeviceCorrections();
+    REQUIRE (entries.size() == 1);
+    CHECK (entries[0].endpointId == "{0.0.0.00000000}.{port2}"); // migrated in place, not duplicated
+    CHECK (entries[0].hardwareId == juce::String (kStealthHardware));
+    CHECK (entries[0].curveText.trim() == juce::String (kStealthCurve).trim());
 }

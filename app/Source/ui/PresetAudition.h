@@ -15,7 +15,12 @@
 // (current preset, last preset, reader warnings, latency prompt). While a
 // preview plays, the controller's strip-state autosave stores the bank as
 // cancel() would leave it (EngineController::setPreviewInProgress), so a
-// crash during a preview never saves the previewed sound. The preview
+// crash during a preview never saves the previewed sound. That registration
+// makes the previewed values an audition bank that is never saved or
+// copied: a user-preset save (Save As, Save) or an A/B copy during a preview
+// takes the bank as cancel() will leave it (EngineController::
+// getSavedBankValues), and a save does not end the session (presetChanged:
+// the saved preset becomes the session's start). The preview
 // reads the preset itself, so its reader warnings are shown by the browser,
 // not queued as a toast on every row.
 //
@@ -199,8 +204,16 @@ public:
     /** Ends the session without restoring any value (someone else loaded a
         preset into the strip); only the trim is removed. */
     void abandon();
-    /** The strip's current preset id when the session began. */
+    /** The strip's current preset id when the session began (or the preset
+        the pre-preview sound was saved as since). */
     const juce::String& getPresetIdAtBegin() const noexcept { return presetIdAtBegin; }
+    /** The strip's current preset changed (Change::Preset). A save of the
+        pre-preview sound during the preview (EngineController::
+        getPreviewSavedPresetId) becomes the session's start and the preview
+        plays on; anything else (a load by a hotkey or an automatic profile)
+        ends the session without restoring (abandon). True while the session
+        goes on. */
+    bool presetChanged();
 
 private:
     void write (const std::vector<float>& values);

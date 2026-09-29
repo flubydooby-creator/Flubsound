@@ -424,6 +424,34 @@ void PresetManager::takeSnapshot (int strip, const ParameterStore& store)
     snap.modified = false;
 }
 
+void PresetManager::takeSnapshot (int strip, const ParameterStore& store, const std::vector<float>& values)
+{
+    takeSnapshot (strip, store);
+    auto& snap = snapshots[static_cast<size_t> (strip)];
+    if (values.size() != snap.values.size() || values == snap.values)
+        return;
+    snap.values = values;
+    snap.checkedStore = nullptr; // the store differs from it: compare at the next isModified()
+}
+
+std::vector<float> PresetManager::savedValues (const ParameterStore& store) const
+{
+    std::vector<float> values (static_cast<size_t> (kNumParams));
+    if (auditionFilter == nullptr || ! auditionFilter (store, store.getActiveBank(), values) || values.size() != static_cast<size_t> (kNumParams))
+    {
+        values.resize (static_cast<size_t> (kNumParams));
+        store.snapshot (values.data());
+    }
+    return values;
+}
+
+void PresetManager::setCurrentPresetIdSaved (int strip, const juce::String& id, const ParameterStore& store)
+{
+    setCurrentPresetId (strip, id);
+    if (strip >= 0 && strip < kMaxStrips)
+        takeSnapshot (strip, store, savedValues (store));
+}
+
 bool PresetManager::isPresetSound (int paramId) noexcept
 {
     return paramId != BypassAll && paramId != LatencyProfile && paramId != LoudnessMatchBypass;
@@ -478,6 +506,7 @@ juce::String PresetManager::saveUserPreset (const juce::String& name, const juce
     }
 
     auto p = flub::preset::captureFromStore (store, store.getActiveBank());
+    p.values = savedValues (store); // docs/11 E40: never the audition bank's previewed sound
     p.name = name.trim().toStdString();
     p.category = (category.trim().isNotEmpty() ? category.trim() : juce::String ("User")).toStdString();
     p.author = "User";
@@ -580,7 +609,7 @@ bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::S
         return false;
     // (the same file, so the same uuid and id)
     if (strip >= 0 && strip < kMaxStrips)
-        takeSnapshot (strip, store);
+        takeSnapshot (strip, store, savedValues (store));
     return true;
 }
 

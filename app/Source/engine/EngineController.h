@@ -34,7 +34,9 @@
 //              getMasterGainReductionDb() = master safety limiter.
 // Hotkeys      getHotkeyStrip() (the strip hotkeys act on, never the GUI
 //              selection), setFocus() / setNight() latched overrides,
-//              setChatMix() Game <-> Chat balance (docs/11 E56).
+//              setChatMix() Game <-> Chat balance (docs/11 E56, E22).
+// Chat         setChatMix() (MixEngine's complementary balance), setChatDuck()
+//              (the voice-keyed duck, persisted), isChatVoiceActive() (docs/11 E22).
 // Mode/Boost   getMode/setMode/toggleMode, getBoost/setBoost/nudgeBoost
 //              (strip = -1 means the selected strip). Macro labels:
 //              getMacroName(mode, 0..4).
@@ -76,6 +78,12 @@
 // Loopback     getAllowedLoopbackPairs() / setLoopbackPairAllowed(): the
 //   override   feedback-loop guard's per-pair override (docs/11 E51),
 //              persisted and applied to every device start.
+// Output       getFollowSystemDefaultOutput() / setFollowSystemDefault-
+//   choice     Output(): Settings > Audio's "Follow the system default
+//              output" (docs/11 E51, AudioEngineHost::setFollowSystemDefault),
+//              persisted; the chosen output is otherwise tracked by its
+//              endpoint identity (trackPreferredOutput mirrors the host's
+//              choice; the host re-selects it).
 // Headset      getOnboardEnhancement() / setOnboardEnhancement(): "Headset
 //   enhance-   enhancement (Superhuman Hearing / on-board EQ) is ON" for the
 //   ment       output endpoint (docs/11 E16): stored per endpoint (its E51
@@ -216,8 +224,9 @@ public:
     void setAuditionBypass (int strip, int enableParamId, bool bypassed);
 
     bool isStripActive (int strip) const noexcept { return host->isStripActive (strip); }
-    /** The user's strip gain (persisted). The engine plays it plus the ChatMix
-        offset of Game and Chat (see setChatMix). */
+    /** The user's strip gain (persisted). The engine plays it (plus a
+        comparison trim); ChatMix is a separate gain in the MixEngine (see
+        setChatMix), so it never moves this value. */
     void setStripGainDb (int strip, float gainDb);
     float getStripGainDb (int strip) const noexcept;
     /** A loudness-matched comparison's trim (docs/11 E37): the matched A/B,
@@ -529,17 +538,39 @@ public:
     /** The parameters the Night latch sets, with their values. */
     std::vector<std::pair<int, float>> getNightOverrides() const;
 
-    /** ChatMix: one balance between the Game and the Chat strip, -1 (towards
-        Game) .. +1 (towards Chat). It moves the two strips' gains in opposite
-        directions, up to +-kChatMixRangeDb at the ends, on top of the user's
-        strip gains; no other strip changes. Per session. Returns false (and
-        changes nothing) when there is no Game or no Chat strip. */
-    static constexpr float kChatMixRangeDb = 6.0f;
+    /** ChatMix (docs/11 E22, E56): one balance between the Game and the Chat
+        strip, -1 (towards Game) .. +1 (towards Chat), in whole 10 % steps.
+        MixEngine::setChatMix plays it as complementary gains on top of the
+        strip gains: the side it moves towards stays at 0 dB, the other falls
+        (to silence at the end); both 0 dB at the centre; no other strip
+        changes, and the user's strip gains (getStripGainDb) never move.
+        The tray flyout, the Chat strip's row and the ChatMix hotkeys all
+        call this. Per session (a new layout centres it). Returns false when
+        there is no Game or no Chat strip (the balance is then centred). */
     bool setChatMix (float balance);
     bool nudgeChatMix (float delta) { return setChatMix (chatMix + delta); }
     float getChatMix() const noexcept { return chatMix; }
-    /** "Game -2.4 dB, Chat +2.4 dB", or "centred". */
+    bool hasChatMix() const;
+    /** The balance's gain on `strip` in dB (0 for any strip but Game and
+        Chat; -inf when muted at an end). */
+    float getChatMixGainDb (int strip) const;
+    /** "Game -1.9 dB, Chat 0 dB", "Game muted, Chat 0 dB", or "centred". */
     juce::String describeChatMix() const;
+
+    /** "Duck game under voice chat" (docs/11 E22, persisted; off by
+        default): while the Chat strip carries speech the Game and Music
+        strips dip 1 - 4 kHz by `depthDb` (3 - 6 dB, default 4.5), the
+        footstep band kept (MixEngine::setChatDuck). Broadcasts
+        Change::Settings. */
+    static constexpr float kDefaultChatDuckDepthDb = 4.5f, kMinChatDuckDepthDb = 3.0f, kMaxChatDuckDepthDb = 6.0f;
+    void setChatDuck (bool on, float depthDb);
+    void setChatDuck (bool on) { setChatDuck (on, getChatDuckDepthDb()); }
+    bool getChatDuck() const;
+    float getChatDuckDepthDb() const;
+    /** The Chat strip's voice activity (MixEngine::isChatVoiceActive; false
+        without a Chat strip) and how far the duck is in (0..1). Any thread. */
+    bool isChatVoiceActive() const noexcept;
+    float getChatDuckAmount() const noexcept;
 
     // ---- Listening level: the contour follows the system volume (docs/11 E32) -------------------
     struct ListeningLevel
@@ -581,6 +612,15 @@ public:
         Change::Device (the banner) and Change::Settings. */
     void setLoopbackPairAllowed (const juce::String& inputDeviceName, const juce::String& outputDeviceName, bool allowed);
 
+    // ---- Output choice (docs/11 E51) ------------------------------------------------------
+    /** Settings > Audio > "Follow the system default output" (default off):
+        the output follows the system default (never into a virtual or
+        looping output) instead of the chosen one. Persisted and applied at
+        once; picking an output in Settings > Audio turns it off again.
+        Broadcasts Change::Device and Change::Settings. */
+    bool getFollowSystemDefaultOutput() const { return settings->getFollowSystemDefaultOutput(); }
+    void setFollowSystemDefaultOutput (bool follow);
+
     // ---- Preset preview (docs/11 E40) ----------------------------------------------------------
     /** A preset preview plays in a strip's active bank (ui::PresetAudition).
         While one is registered, the strip-state autosave stores `bank` as it
@@ -593,6 +633,19 @@ public:
     void clearPreviewInProgress();
     /** The strip-state JSON the autosave writes for `strip` now (tests). */
     juce::String getPersistedStripState (int strip);
+    /** The audition bank (docs/11 E40): what the preview writes plays in the
+        active bank's slots, but every path that SAVES or COPIES a bank (the
+        autosave above, saveUserPreset, PresetManager::saveCurrent,
+        copyActiveToOtherBank) takes the bank as the preview's end will leave
+        it, so the previewed sound is never saved. `values` gets `bank` of
+        `strip` so (param::kNumParams values); false (and `values` the bank
+        as it is) while no preview plays in that bank. */
+    bool getSavedBankValues (int strip, flub::param::Bank bank, std::vector<float>& values) const;
+    bool isPreviewInProgress (int strip) const noexcept { return strip >= 0 && preview.strip == strip; }
+    /** The id of a preset saved on `strip` (saveUserPreset) during the
+        current preview: the pre-preview sound, which the preview session
+        then treats as its start (PresetAudition::presetChanged). */
+    juce::String getPreviewSavedPresetId (int strip) const { return isPreviewInProgress (strip) ? preview.savedPresetId : juce::String(); }
 
     // ---- Settings / routing ------------------------------------------------------------------
     AppSettings& getSettings() noexcept { return *settings; }
@@ -683,6 +736,8 @@ private:
     void applyDeviceProfile (const juce::String& outputName, double sampleRate, int outputChannels);
     void trackPreferredOutput (bool rescan);
     void applyDeviceCorrection();
+    std::optional<DeviceCorrectionEntry> findDeviceCorrectionEntry() const;
+    void storeDeviceCorrectionEntry (DeviceCorrectionEntry entry);
     void updateOutputIdentity();
     void applyOnboardCap();
     void applyLatencyProfile (flub::param::LatencyProfileValue profile);
@@ -722,7 +777,6 @@ private:
     void releaseAllLatches (bool restore);
     void forgetLatches (int strip);
     void applyStripGain (int strip);
-    float chatMixOffsetDb (int strip) const;
 
     Options options;
     std::unique_ptr<AppSettings> settings;
@@ -739,11 +793,11 @@ private:
     flub::device::Database deviceProfiles;
     flub::device::Match deviceMatch;
     flub::device::Advice deviceAdvice;
-    juce::String currentOutputName, preferredOutputName;
+    juce::String currentOutputName;
+    DeviceEndpointEntry preferredOutput; // docs/11 E51: the host's choice as last stored
     juce::String simulatedOutputName; // headless only, see simulateOutputDevice()
     double simulatedSampleRate = 48000.0;
     int simulatedOutputChannels = 2;
-    bool preferredMissing = false, restoringPreferred = false;
     bool adviceForGaming = false; // mode deviceAdvice was computed for (see notify())
     juce::String correctionEndpoint; // endpoint the applied device correction belongs to
     bool correctionCompare = false;
@@ -763,6 +817,7 @@ private:
         int strip = -1;
         flub::param::Bank bank = flub::param::Bank::A;
         std::vector<float> original, written;
+        juce::String savedPresetId; // saved during the preview (the pre-preview sound)
     };
     PreviewInProgress preview;
 

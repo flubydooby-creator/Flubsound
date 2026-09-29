@@ -6,6 +6,7 @@
 //   | BOOST  [==========o-------]  55 %    |
 //   | [<]      Flubsound Signature     [>] |
 //   | [ Bypass ]                           |
+//   | GAME [=====o=====] CHAT  (o) voice   |
 //   +--------------------------------------+
 //
 // Opened by a left click on the tray icon (TrayIcon; a double click opens
@@ -15,6 +16,11 @@
 // Boost through the strip's ParameterStore (bound, click-free), the preset
 // stepper through EngineController::previousPreset / nextPreset, Bypass
 // through setEnabled. Message thread only.
+// ChatMix (docs/11 E22): one balance between the Game and the Chat strip
+// (EngineController::setChatMix, the same the ChatMix hotkeys and the Chat
+// strip's row move; double-click: centre), with a dot that lights while the
+// Chat strip carries speech (EngineController::isChatVoiceActive, polled at
+// kVoicePollHz). Greyed out without a Game and a Chat strip.
 #pragma once
 
 #include "ParameterBinding.h"
@@ -27,10 +33,11 @@
 
 namespace flub::app::ui
 {
-class QuickControls final : public juce::Component, private EngineController::Listener
+class QuickControls final : public juce::Component, private EngineController::Listener, private juce::Timer
 {
 public:
-    static constexpr int kWidth = 330, kHeight = 176;
+    static constexpr int kWidth = 330, kHeight = 216;
+    static constexpr int kVoicePollHz = 15;
 
     explicit QuickControls (EngineController& controller);
     ~QuickControls() override;
@@ -47,6 +54,11 @@ public:
     juce::Button& getNextButton() noexcept { return next; }
     juce::Button& getBypassButton() noexcept { return bypass; }
     juce::Button& getOpenButton() noexcept { return open; }
+    juce::Slider& getChatMixSlider() noexcept { return chatMix; }
+    /** The voice dot is lit (the Chat strip carries speech). */
+    bool isVoiceDotLit() const noexcept { return voiceLit; }
+    /** Reads the voice activity now (the timer does, kVoicePollHz). */
+    void pollVoice();
     juce::String getPresetText() const { return presetName; }
 
     void refresh();
@@ -55,6 +67,7 @@ public:
 
 private:
     void engineControllerChanged (EngineController::Change change) override;
+    void timerCallback() override { pollVoice(); }
 
     EngineController& controller;
     juce::Slider boost;
@@ -62,8 +75,10 @@ private:
     IconButton next { "Next preset", Icons::chevronRight(), IconButton::Style::Framed };
     juce::TextButton bypass { "Bypass" };
     IconButton open { "Open Flubsound Pro", Icons::external(), IconButton::Style::Framed };
+    juce::Slider chatMix;
+    bool voiceLit = false;
     ParameterBinder binder; // after the slider it binds
     juce::String presetName;
-    juce::Rectangle<int> titleArea, presetArea, boostCaption;
+    juce::Rectangle<int> titleArea, presetArea, boostCaption, gameCaption, chatCaption, voiceArea;
 };
 } // namespace flub::app::ui

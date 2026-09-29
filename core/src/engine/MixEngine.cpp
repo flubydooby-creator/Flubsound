@@ -24,9 +24,9 @@ void MixEngine::configureFrom (const MixEngine& previous, const std::vector<Stri
     hearing.carryFrom (previous.hearing); // docs/11 E32 (c): its settings, dose and cap gain
     // docs/11 E22: the chat settings, and an active talker with the duck
     // where it stands (`previous` may be running: its atomics only).
-    chatDuck = previous.chatDuck;
-    chatDuckDepthDb = previous.chatDuckDepthDb;
-    chatMix = previous.chatMix;
+    requestedDuck.store (previous.getChatDuck(), std::memory_order_relaxed);
+    requestedDuckDepthDb.store (previous.getChatDuckDepthDb(), std::memory_order_relaxed);
+    requestedChatMix.store (previous.getChatMix(), std::memory_order_relaxed);
     build (configs, sr, maxBlockSize, previous.strips, setup);
     if (chatStrip >= 0 && previous.isChatVoiceActive())
         voice.seedActive();
@@ -50,6 +50,9 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     // (configureFrom): only its store pointers are copied, so it is untouched
     // until `strips` is replaced below.
     std::vector<std::unique_ptr<Strip>> next;
+    chatDuck = requestedDuck.load (std::memory_order_relaxed); // docs/11 E22: a new engine starts on the requests
+    chatDuckDepthDb = requestedDuckDepthDb.load (std::memory_order_relaxed);
+    chatMix = requestedChatMix.load (std::memory_order_relaxed);
     const size_t count = std::min (configs.size(), static_cast<size_t> (kMaxStrips));
     for (size_t i = 0; i < count; ++i)
     {
@@ -191,15 +194,28 @@ float MixEngine::chatMixGain (float balance, StripRole role) noexcept
 
 void MixEngine::setChatDuck (bool enabled, float depthDb) noexcept FLUB_NONBLOCKING
 {
-    chatDuck = enabled;
-    chatDuckDepthDb = std::isfinite (depthDb) ? std::clamp (depthDb, ChatDucker::kMinDepthDb, ChatDucker::kMaxDepthDb) : ChatDucker::kDefaultDepthDb;
+    requestedDuckDepthDb.store (std::isfinite (depthDb) ? std::clamp (depthDb, ChatDucker::kMinDepthDb, ChatDucker::kMaxDepthDb)
+                                                        : ChatDucker::kDefaultDepthDb,
+                                std::memory_order_relaxed);
+    requestedDuck.store (enabled, std::memory_order_relaxed);
 }
 
 void MixEngine::setChatMix (float balance) noexcept FLUB_NONBLOCKING
 {
-    chatMix = std::isfinite (balance) ? std::clamp (balance, -1.0f, 1.0f) : 0.0f;
-    for (auto& s : strips)
-        s->mixGain.setTarget (chatMixGain (chatMix, s->role));
+    requestedChatMix.store (std::isfinite (balance) ? std::clamp (balance, -1.0f, 1.0f) : 0.0f, std::memory_order_relaxed);
+}
+
+void MixEngine::applyChatRequests() noexcept FLUB_NONBLOCKING
+{
+    chatDuck = requestedDuck.load (std::memory_order_relaxed);
+    chatDuckDepthDb = requestedDuckDepthDb.load (std::memory_order_relaxed);
+    const float balance = requestedChatMix.load (std::memory_order_relaxed);
+    if (balance != chatMix)
+    {
+        chatMix = balance;
+        for (auto& s : strips)
+            s->mixGain.setTarget (chatMixGain (chatMix, s->role));
+    }
 }
 
 const ChatDucker* MixEngine::getChatDucker (int strip) const noexcept
@@ -259,6 +275,7 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
     const AudioBlock mix = mixBuffer.block (2, n);
     mix.clear();
     const float floor = dbToGain (kIdleFloorDb);
+    applyChatRequests(); // docs/11 E22: setChatDuck / setChatMix from any thread
 
     // Chat sidechain (docs/11 E22): the Chat strip's input, before its chain
     // (which processes in place) and before any strip it ducks.

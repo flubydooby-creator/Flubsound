@@ -105,6 +105,7 @@ const std::map<juce::String, Hint>& table()
         { "clarity.sustain", { "More (or less) of the ring after each hit: raise for fuller, lower for drier and tighter." } },
         { "clarity.presence", { "Brings voices and lead instruments forward. Too much sounds forward or shouty." } },
         { "clarity.presenceFreq", { "Where the presence lift sits: lower for body in voices, higher for bite and definition." } },
+        { "clarity.presenceMode", { "Relative gives quiet and loud recordings the same presence, judged by how bright each one already is. Absolute adds more on quiet ones." } },
         { "clarity.air", { "Sparkle and openness on top. Too much can make cymbals and 's' sounds sharp." } },
         { "clarity.demud", { "Clears the boxy, muddy low mids that make a mix sound congested." } },
 

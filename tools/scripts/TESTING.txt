@@ -71,6 +71,15 @@ Settings > Audio, which shows "<your device>  -  Turtle Beach Stealth series"
 level for the headset and may suggest a preset; if it says "generic device",
 tell us the exact device name Windows / macOS shows.
 
+Unplug the USB dongle while something plays: Flubsound moves to your
+speakers at -6 dB with its virtual surround off and bass at most +3 dB (a
+banner says so), and moves back when you plug it in again, also into another
+USB port, where Windows names it e.g. "Headset Earphone (2- Stealth 700 Gen
+2)". A headphone correction you imported (Settings > Correction) stays with
+the headset. Settings > Audio > "Follow the system default output" plays on
+whatever Windows uses as its default instead. Please tell us if any of this
+does not happen.
+
 Reporting a problem
 -------------------
 Flubsound keeps a log (device changes, errors, glitches and overloads; no

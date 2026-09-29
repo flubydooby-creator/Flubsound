@@ -10,6 +10,9 @@
 #include "flub/engine/MixEngine.h"
 #include "flub/io/Json.h"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <limits>

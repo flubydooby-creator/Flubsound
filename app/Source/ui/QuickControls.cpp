@@ -39,13 +39,28 @@ QuickControls::QuickControls (EngineController& c)
     };
     addAndMakeVisible (open);
 
+    // ChatMix (docs/11 E22): the controller's balance, in its 10 % steps.
+    chatMix.setSliderStyle (juce::Slider::LinearHorizontal);
+    chatMix.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
+    chatMix.setRange (-1.0, 1.0, 0.1);
+    chatMix.setDoubleClickReturnValue (true, 0.0);
+    chatMix.onValueChange = [this]
+    {
+        controller.setChatMix (static_cast<float> (chatMix.getValue()));
+        refresh();
+    };
+    addAndMakeVisible (chatMix);
+
     controller.addListener (this);
     refresh();
+    pollVoice();
+    startTimerHz (kVoicePollHz);
     setSize (kWidth, kHeight);
 }
 
 QuickControls::~QuickControls()
 {
+    stopTimer();
     controller.removeListener (this);
     binder.unbind (boost);
 }
@@ -68,8 +83,18 @@ void QuickControls::show (EngineController& c, juce::Rectangle<int> screenArea, 
 void QuickControls::engineControllerChanged (EngineController::Change change)
 {
     using Change = EngineController::Change;
-    if (change == Change::Preset || change == Change::MasterEnable || change == Change::SelectedStrip || change == Change::Parameters)
+    if (change == Change::Preset || change == Change::MasterEnable || change == Change::SelectedStrip || change == Change::Parameters
+        || change == Change::Engine)
         refresh();
+}
+
+void QuickControls::pollVoice()
+{
+    const bool lit = controller.hasChatMix() && controller.isChatVoiceActive();
+    if (lit == voiceLit)
+        return;
+    voiceLit = lit;
+    repaint (voiceArea.expanded (2));
 }
 
 void QuickControls::refresh()
@@ -87,6 +112,14 @@ void QuickControls::refresh()
     const bool hasPresets = ! controller.getPresetManager().getPresets().empty();
     previous.setEnabled (hasPresets);
     next.setEnabled (hasPresets);
+
+    const bool chat = controller.hasChatMix();
+    if (! chatMix.isMouseButtonDown())
+        chatMix.setValue (controller.getChatMix(), juce::dontSendNotification);
+    chatMix.setEnabled (chat);
+    Style::describe (chatMix, "ChatMix",
+                     chat ? "Balance between the Game and the Chat strip: " + controller.describeChatMix() + " (double-click: centre)"
+                          : juce::String ("ChatMix needs a Game and a Chat strip"));
     repaint();
 }
 
@@ -107,6 +140,29 @@ void QuickControls::paint (juce::Graphics& g)
     g.setColour (Palette::text);
     g.setFont (Theme::font (13.0f));
     g.drawText (presetName, presetArea.reduced (8, 0), juce::Justification::centred, true);
+
+    // ChatMix captions and the voice dot (lit: accent with a halo, like a
+    // strip's activity LED; idle: a ring, so it never relies on colour).
+    Theme::drawCaption (g, "GAME", gameCaption.toFloat());
+    Theme::drawCaption (g, "CHAT", chatCaption.toFloat());
+    const auto accent = Theme::accent (*this);
+    auto dot = voiceArea.toFloat();
+    const auto led = dot.removeFromLeft (10.0f).withSizeKeepingCentre (8.0f, 8.0f);
+    if (voiceLit)
+    {
+        g.setColour (accent.withAlpha (0.25f));
+        g.fillEllipse (led.expanded (3.0f));
+        g.setColour (accent);
+        g.fillEllipse (led);
+    }
+    else
+    {
+        g.setColour (Palette::borderStrong);
+        g.drawEllipse (led.reduced (0.5f), 1.3f);
+    }
+    g.setColour (voiceLit ? Palette::text : Palette::muted);
+    g.setFont (Theme::font (11.5f));
+    g.drawText (voiceLit ? "Voice" : "Quiet", dot.withTrimmedLeft (5.0f), juce::Justification::centredLeft, false);
 }
 
 void QuickControls::resized()
@@ -131,5 +187,13 @@ void QuickControls::resized()
     r.removeFromTop (10);
 
     bypass.setBounds (r.removeFromTop (30).withWidth (110));
+    r.removeFromTop (10);
+
+    row = r.removeFromTop (30);
+    gameCaption = row.removeFromLeft (40);
+    voiceArea = row.removeFromRight (58);
+    row.removeFromRight (6);
+    chatCaption = row.removeFromRight (36);
+    chatMix.setBounds (row);
 }
 } // namespace flub::app::ui

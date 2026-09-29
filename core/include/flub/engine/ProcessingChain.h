@@ -198,10 +198,12 @@
 #include "flub/neural/AsyncModelProcessor.h"
 #include "flub/neural/Eligibility.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <vector>
@@ -346,6 +348,26 @@ public:
     void setOnboardEnhancementCap (bool on) noexcept FLUB_NONBLOCKING { onboardCapRequest.store (on, std::memory_order_relaxed); }
     bool getOnboardEnhancementCap() const noexcept { return onboardCapRequest.load (std::memory_order_relaxed); }
     static constexpr float kOnboardCapGlideMs = 250.0f;
+
+    /** The safe speaker profile's bass cap (docs/11 E51): while the host
+        plays an unplanned fallback to speakers, the bass lift - the bass
+        engine's boost plus the parametric EQ's positive low shelves and
+        its positive bells at or below kSafeSpeakerBassBandHz - is scaled
+        down together so that its sum stays within capDb (their total lift
+        towards DC). The bass engine keeps running (subsonic, mono bass,
+        Tighten, harmonics); nothing under the cap moves; the store and
+        presets are untouched, and effectiveValue() shows the capped gains.
+        +inf (the default) or anything not finite = no cap; negative values
+        count as 0. A host setting, not a parameter: any thread (one
+        atomic), taken by the next process(); the modules smooth the gain
+        change (click-free). adoptGovernorState() carries it. */
+    void setSafeSpeakerBassCapDb (float capDb) noexcept FLUB_NONBLOCKING
+    {
+        safeSpeakerBassCapDb.store (std::isfinite (capDb) ? std::max (0.0f, capDb) : kNoBassCap, std::memory_order_relaxed);
+    }
+    float getSafeSpeakerBassCapDb() const noexcept { return safeSpeakerBassCapDb.load (std::memory_order_relaxed); }
+    static constexpr float kNoBassCap = std::numeric_limits<float>::infinity();
+    static constexpr float kSafeSpeakerBassBandHz = 150.0f;
 
     /** The loudness contour as applied (docs/11 E32): its lift at 50 Hz
         (without the trim) and its headroom trim (dB <= 0). 0 while off. Any thread. */
@@ -584,6 +606,9 @@ private:
     std::atomic<bool> onboardCapRequest { false };
     float onboardCap = 0.0f;
     bool onboardCapSnap = true;
+    // The safe speaker profile's bass cap (docs/11 E51), dB; kNoBassCap = none.
+    std::atomic<float> safeSpeakerBassCapDb { kNoBassCap };
+    void applySafeSpeakerBassCap (float* e) const noexcept FLUB_NONBLOCKING;
     bool contourLfArmed = false; // the contour arms the maximizer's LF-first limiter (audio thread)
     // Boost's transient coupling (docs/11 E05 step 6, audio thread): the
     // limiter's programme GR, the GR of its transients over it (dB >= 0),

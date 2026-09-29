@@ -12,6 +12,7 @@
 #include "settings/AppSettings.h"
 #include "shell/HotkeyManager.h"
 
+#include <cmath>
 #include <map>
 #include <memory>
 #include <set>
@@ -398,7 +399,7 @@ TEST_CASE ("App: Focus latches Footsteps at 100 % on the hotkey strip and puts t
     CHECK (feedback == "Game: Focus needs Gaming mode");
 }
 
-TEST_CASE ("App: ChatMix moves only the Game and Chat gains, in opposite directions, on top of the user's gains (E56)")
+TEST_CASE ("App: the ChatMix hotkeys move the MixEngine balance, Game and Chat oppositely only, never a strip gain (E56, E22)")
 {
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
@@ -412,48 +413,55 @@ TEST_CASE ("App: ChatMix moves only the Game and Chat gains, in opposite directi
     std::vector<float> before;
     for (int s = 0; s < controller.getNumStrips(); ++s)
         before.push_back (host.getStripGainDb (s));
+    const auto gainsUnchanged = [&]
+    {
+        for (int s = 0; s < controller.getNumStrips(); ++s)
+            if (host.getStripGainDb (s) != before[static_cast<size_t> (s)])
+                return false;
+        return true;
+    };
 
+    // One press towards Chat: the engine's balance (the tray flyout's and the
+    // Chat row's too), Game 1 - 0.2 in amplitude, Chat and every other strip 0 dB.
     manager.perform (HotkeyAction::ChatMixToChat);
     CHECK (controller.getChatMix() == 0.2f);
-    const float step = 0.2f * EngineController::kChatMixRangeDb;
+    CHECK (host.getMixEngine().getChatMix() == 0.2f);
+    CHECK_NEAR (controller.getChatMixGainDb (game), 20.0 * std::log10 (0.8), 1.0e-4);
     for (int s = 0; s < controller.getNumStrips(); ++s)
-    {
-        const float delta = host.getStripGainDb (s) - before[static_cast<size_t> (s)];
-        if (s == game)
-            CHECK_NEAR (delta, -step, 1.0e-4);
-        else if (s == chat)
-            CHECK_NEAR (delta, step, 1.0e-4);
-        else
-            CHECK (delta == 0.0f);
-    }
-    CHECK (feedback == "ChatMix Game -1.2 dB, Chat +1.2 dB");
-    CHECK (controller.getStripGainDb (game) == -2.0f); // the user's gain (fader, settings) is unchanged
+        if (s != game)
+            CHECK (controller.getChatMixGainDb (s) == 0.0f);
+    CHECK (feedback == "ChatMix Game -1.9 dB, Chat 0 dB");
+    CHECK (gainsUnchanged()); // the strip gains (fader, settings, the host) never move
+    CHECK (controller.getStripGainDb (game) == -2.0f);
     CHECK (controller.getSettings().getStripGainDb ("Game") == -2.0f);
 
-    // The user's gain still works while mixed; the offset stays on top.
+    // The user's gain still works while mixed.
     controller.setStripGainDb (game, -4.0f);
-    CHECK_NEAR (host.getStripGainDb (game), -4.0f - step, 1.0e-4);
+    CHECK (host.getStripGainDb (game) == -4.0f);
+    before[static_cast<size_t> (game)] = -4.0f;
 
-    // To the end and back past the centre; it stops at the ends.
+    // To the end (Game muted) and back past the centre; it stops at the ends.
     for (int i = 0; i < 10; ++i)
         manager.perform (HotkeyAction::ChatMixToChat);
     CHECK (controller.getChatMix() == 1.0f);
-    CHECK_NEAR (host.getStripGainDb (chat), before[static_cast<size_t> (chat)] + EngineController::kChatMixRangeDb, 1.0e-4);
+    CHECK (feedback == "ChatMix Game muted, Chat 0 dB");
     for (int i = 0; i < 6; ++i)
         manager.perform (HotkeyAction::ChatMixToGame);
     CHECK (controller.getChatMix() < 0.0f);
-    CHECK (host.getStripGainDb (game) > -4.0f); // towards Game: Game up, Chat down
-    CHECK (host.getStripGainDb (chat) < before[static_cast<size_t> (chat)]);
+    CHECK (controller.getChatMixGainDb (game) == 0.0f); // towards Game: Chat down, Game stays
+    CHECK (controller.getChatMixGainDb (chat) < 0.0f);
+    CHECK (host.getMixEngine().getChatMix() == controller.getChatMix());
+    CHECK (gainsUnchanged());
     controller.setChatMix (0.0f);
     CHECK (controller.describeChatMix() == "centred");
-    CHECK (host.getStripGainDb (game) == -4.0f);
-    CHECK (host.getStripGainDb (chat) == before[static_cast<size_t> (chat)]);
+    CHECK (host.getMixEngine().getChatMix() == 0.0f);
 
     // No Chat strip: nothing to balance.
     controller.setStripLayout ({ { "Game", 8 }, { "Music", 2 } });
     manager.perform (HotkeyAction::ChatMixToChat);
     CHECK (feedback == "ChatMix needs a Game and a Chat strip");
     CHECK (controller.getChatMix() == 0.0f);
+    CHECK (host.getMixEngine().getChatMix() == 0.0f);
 }
 
 TEST_CASE ("App: Night latches the Night Mode dynamics on the hotkey strip, Bypass bypasses that strip only (E56)")

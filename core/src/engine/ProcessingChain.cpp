@@ -586,6 +586,7 @@ void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexc
     setProtectionStrength (previous.getProtectionStrength());
     governor.setStrength (previous.getProtectionStrength()); // before its first block: not yet on the audio thread
     setOnboardEnhancementCap (previous.getOnboardEnhancementCap()); // docs/11 E16, taken at once on the first block
+    setSafeSpeakerBassCapDb (previous.getSafeSpeakerBassCapDb());   // docs/11 E51
     SafetyGovernor::Memory m;
     if (previous.governorMemory.read (m) && m.valid)
         governor.restoreMemory (m);
@@ -745,6 +746,9 @@ void ProcessingChain::applyParameters() noexcept
             const float b = base[static_cast<size_t> (id)];
             e[id] = b + std::max (0.0f, e[id] - b) * tonalScale;
         }
+    // The safe speaker profile's bass cap (docs/11 E51), on what the macros
+    // and the governor left.
+    applySafeSpeakerBassCap (e);
     // Mode / format policies below write their overrides into e, so the
     // values published at the end (effectiveValue(), GUI ghost markers) are
     // the ones actually applied.
@@ -866,6 +870,10 @@ void ProcessingChain::applyParameters() noexcept
     cp.sustainDb = e[ClaritySustainDb];
     cp.presence = e[ClarityPresence];
     cp.presenceFrequency = e[ClarityPresenceFreq];
+    // docs/11 E07 step 3: the band against a fixed level or against the
+    // programme's body (the module crossfades the two laws).
+    cp.presenceMode = idx (e, ClarityPresenceMode) == static_cast<int> (PresenceModeValue::Relative) ? PresenceMode::Relative
+                                                                                                    : PresenceMode::Absolute;
     // The air exciter is alias-free only because its <= 3rd-order products of
     // <= 7 kHz content stay below 21 kHz. Headsets running at low rates (USB
     // 32 kHz modes, Bluetooth hands-free at 16 / 8 kHz) would fold them back,
@@ -1025,6 +1033,7 @@ void ProcessingChain::applyParameters() noexcept
         std::copy (effective.begin(), effective.end(), headroomInput.begin());
         for (int id : { BassBoostDb, ClarityPresence, ClarityAir })
             headroomInput[static_cast<size_t> (id)] = ungoverned[static_cast<size_t> (id)];
+        applySafeSpeakerBassCap (headroomInput.data()); // docs/11 E51: the macros' boost, capped as applied
         if (config.sampleRate < 42000.0)
             headroomInput[static_cast<size_t> (ClarityAir)] = 0.0f; // as applied (see Clarity)
         h = headroomInput.data();
@@ -1032,6 +1041,38 @@ void ProcessingChain::applyParameters() noexcept
     updateHeadroom (h, config.inputChannels > 2 && ! stereoFold);
 
     publishEffective();
+}
+
+void ProcessingChain::applySafeSpeakerBassCap (float* e) const noexcept FLUB_NONBLOCKING
+{
+    // docs/11 E51: the bass lift towards DC - the bass engine's shelf plus the
+    // parametric EQ's positive low shelves and low bells - scaled down
+    // together to the cap; within the cap nothing moves.
+    const float cap = safeSpeakerBassCapDb.load (std::memory_order_relaxed);
+    if (! (cap < kNoBassCap))
+        return;
+    const bool bassOn = on (e, BassOn), eqOn = on (e, EqOn);
+    const auto lowLift = [e] (int b)
+    {
+        if (! on (e, eq (b, EqFieldOn)) || e[eq (b, EqFieldGain)] <= 0.0f)
+            return false;
+        const auto type = static_cast<EqBandType> (idx (e, eq (b, EqFieldType)));
+        return type == EqBandType::LowShelf || (type == EqBandType::Bell && e[eq (b, EqFieldFreq)] <= kSafeSpeakerBassBandHz);
+    };
+    float total = bassOn ? std::max (0.0f, e[BassBoostDb]) : 0.0f;
+    if (eqOn)
+        for (int b = 0; b < kEqBands; ++b)
+            if (lowLift (b))
+                total += e[eq (b, EqFieldGain)];
+    if (total <= cap)
+        return;
+    const float scale = cap / total;
+    if (bassOn && e[BassBoostDb] > 0.0f)
+        e[BassBoostDb] *= scale;
+    if (eqOn)
+        for (int b = 0; b < kEqBands; ++b)
+            if (lowLift (b))
+                e[eq (b, EqFieldGain)] *= scale;
 }
 
 void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
