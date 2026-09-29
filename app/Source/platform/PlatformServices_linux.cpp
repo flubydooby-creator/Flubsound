@@ -46,6 +46,7 @@
 #include <sched.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -3442,17 +3443,437 @@ public:
 };
 
 //==============================================================================
-/** Saved scheduling state, owned by the handle promoteAudioThread returns. */
+/** Saved scheduling state behind the handle promoteAudioThread returns. One
+    per thread in the thread's own storage (static TLS of the executable, set
+    up when the thread is created), so promoting the device thread on its
+    first callback allocates nothing (docs/11 E44). */
 struct SavedSchedulingPolicy
 {
     int policy = SCHED_OTHER;
     sched_param param {};
 };
 
+thread_local SavedSchedulingPolicy savedSchedulingPolicy;
+
 /** Same ceiling rtkit grants by default and that PipeWire's data thread runs
     at under rtkit, so a promoted Flubsound thread never out-ranks the sound
     server it feeds. */
 constexpr int kPreferredFifoPriority = 20;
+
+//==============================================================================
+// RealtimeKit (docs/11 E44)
+//==============================================================================
+/*  org.freedesktop.RealtimeKit1, object /org/freedesktop/RealtimeKit1, on
+    the SYSTEM bus:
+      MakeThreadRealtime (t thread, u priority)
+      properties MaxRealtimePriority (i) and RTTimeUSecMax (x), rtkit 0.11+
+    rtkit takes the process from the caller's bus credentials and checks
+    that the thread belongs to it, that the priority is at most
+    MaxRealtimePriority and that the process's RLIMIT_RTTIME hard limit is at
+    most RTTimeUSecMax; it also rate-limits bursts of requests per user. It
+    then sets SCHED_RR | SCHED_RESET_ON_FORK itself, so the call can come
+    from any thread of the process: the app's message thread asks for the
+    audio thread it saw in the device callback. rtkit without the properties
+    (older than 0.11) runs with its defaults, used here then. One private
+    connection per request (a device start), closed again at once. */
+namespace rtkit
+{
+constexpr const char* kService = "org.freedesktop.RealtimeKit1";
+constexpr const char* kObjectPath = "/org/freedesktop/RealtimeKit1";
+constexpr const char* kInterface = "org.freedesktop.RealtimeKit1";
+constexpr int kTimeoutMs = 1000;
+constexpr int kDefaultMaxPriority = 20;        // rtkit-daemon --max-realtime-priority
+constexpr int64_t kDefaultRttimeUsec = 200000; // rtkit-daemon --rttime-usec-max
+
+/** $DBUS_SYSTEM_BUS_ADDRESS, else the standard system bus socket. */
+std::string systemBusAddress()
+{
+    if (const char* address = std::getenv ("DBUS_SYSTEM_BUS_ADDRESS"); address != nullptr && *address != '\0')
+        return address;
+    return "unix:path=/var/run/dbus/system_bus_socket";
+}
+
+/** The bus answers for a name nobody owns (and that it cannot activate). */
+bool isNoService (const std::string& errorName)
+{
+    return errorName == "org.freedesktop.DBus.Error.ServiceUnknown" || errorName == "org.freedesktop.DBus.Error.NameHasNoOwner";
+}
+
+/** Sends 'call' and waits for the reply; nullptr with 'errorName' /
+    'errorText' set on an error reply or a timeout. */
+dbus::MessageRef call (const dbus::Api& api, dbus::Connection* connection, dbus::Message* message, std::string& errorName, std::string& errorText)
+{
+    dbus::Error error;
+    api.errorInit (&error);
+    dbus::MessageRef reply (api.sendWithReplyAndBlock (connection, message, kTimeoutMs, &error));
+    errorName = dbus::str (error.name);
+    errorText = dbus::str (error.message);
+    api.errorFree (&error);
+    return reply;
+}
+
+/** Reads one integer property ('i' or 'x') of RealtimeKit1. false with the
+    error name when the call failed, false with none when the property is
+    not an integer. */
+bool integerProperty (const dbus::Api& api, dbus::Connection* connection, const char* name, int64_t& value, std::string& errorName)
+{
+    errorName.clear();
+    const dbus::MessageRef request (api.messageNewMethodCall (kService, kObjectPath, "org.freedesktop.DBus.Properties", "Get"));
+    if (request == nullptr)
+        return false;
+    dbus::Iter args;
+    api.iterInitAppend (request.get(), &args);
+    if (! dbus::appendBasic (api, &args, dbus::kTypeString, kInterface) || ! dbus::appendBasic (api, &args, dbus::kTypeString, name))
+        return false;
+    std::string errorText;
+    const auto reply = call (api, connection, request.get(), errorName, errorText);
+    dbus::Iter result, variant;
+    if (reply == nullptr || api.iterInit (reply.get(), &result) == 0 || api.iterGetArgType (&result) != dbus::kTypeVariant)
+        return false;
+    api.iterRecurse (&result, &variant);
+    if (const int type = api.iterGetArgType (&variant); type == 'i')
+    {
+        int32_t v = 0;
+        api.iterGetBasic (&variant, &v);
+        value = v;
+        return true;
+    }
+    else if (type == 'x')
+    {
+        int64_t v = 0;
+        api.iterGetBasic (&variant, &v);
+        value = v;
+        return true;
+    }
+    return false;
+}
+
+/** Lowers this process's RLIMIT_RTTIME to at most 'maxUsec' (soft and hard),
+    which rtkit requires; a limit already within it is kept. 'inForce' is
+    the hard limit afterwards. */
+bool limitRttime (int64_t maxUsec, int64_t& inForce, std::string& error)
+{
+    rlimit limit {};
+    if (::getrlimit (RLIMIT_RTTIME, &limit) != 0)
+    {
+        error = "RLIMIT_RTTIME could not be read";
+        return false;
+    }
+    const auto ceiling = static_cast<rlim_t> (std::max<int64_t> (maxUsec, 1));
+    if (limit.rlim_max != RLIM_INFINITY && limit.rlim_max <= ceiling)
+    {
+        inForce = static_cast<int64_t> (limit.rlim_max);
+        return true;
+    }
+    limit.rlim_max = ceiling;
+    limit.rlim_cur = std::min (limit.rlim_cur, ceiling); // RLIM_INFINITY is the largest value
+    if (::setrlimit (RLIMIT_RTTIME, &limit) != 0)
+    {
+        error = "RLIMIT_RTTIME could not be lowered to " + std::to_string (maxUsec) + " us, which RealtimeKit requires";
+        return false;
+    }
+    inForce = static_cast<int64_t> (ceiling);
+    return true;
+}
+
+const char* policyName (int policy)
+{
+    switch (policy & ~SCHED_RESET_ON_FORK)
+    {
+        case SCHED_FIFO:  return "FIFO";
+        case SCHED_RR:    return "RR";
+        case SCHED_OTHER: return "OTHER";
+        case SCHED_BATCH: return "BATCH";
+        case SCHED_IDLE:  return "IDLE";
+        default:          return "other";
+    }
+}
+} // namespace rtkit
+
+//==============================================================================
+// ALSA channel maps (docs/11 E27 step 4)
+//==============================================================================
+/*  A JUCE ALSA device is known by its name only; the PCM behind it is found
+    the way JUCE lists it: "ALSA" devices by snd_device_name_hint (name = the
+    hint's DESC with line breaks as "; ", else its NAME), "ALSA HW" devices
+    by card and PCM ("<card name>, <pcm name>", plus " {<subdevice name>}"
+    when the PCM has several subdevices). Only a card PCM (hw:) has a map to
+    read without opening it: snd_pcm_query_chmaps_from_hw asks the driver
+    through the card's control device. Plug-in PCMs (default, pipewire,
+    pulse, surround71, ...) report nothing here; they deliver ALSA's default
+    order, which the engine host assumes for them.
+
+    libasound.so.2 is loaded at run time and declared here from its stable
+    C ABI (the JUCE ALSA backend links it anyway; the declarations avoid a
+    header dependency): snd_pcm_chmap_query_t is { int type;
+    snd_pcm_chmap_t map; } with snd_pcm_chmap_t { unsigned int channels;
+    unsigned int pos[]; }, and the positions are enum snd_pcm_chmap_position
+    (UNKNOWN 0, NA 1, MONO 2, FL 3, FR 4, RL 5, RR 6, FC 7, LFE 8, SL 9,
+    SR 10, ...). */
+namespace alsa
+{
+struct Ctl;
+struct CardInfo;
+struct PcmInfo;
+struct ChmapQuery
+{
+    int type = 0;
+    unsigned int channels = 0; // followed by 'channels' positions
+};
+
+constexpr int kStreamCapture = 1; // SND_PCM_STREAM_CAPTURE
+constexpr int kCtlNonblock = 1;   // SND_CTL_NONBLOCK
+
+inline const unsigned int* positionsOf (const ChmapQuery& query) { return &query.channels + 1; }
+
+struct Api
+{
+    void* lib = nullptr;
+    int (*deviceNameHint) (int, const char*, void***) = nullptr;
+    char* (*deviceNameGetHint) (const void*, const char*) = nullptr;
+    int (*deviceNameFreeHint) (void**) = nullptr;
+    int (*cardGetIndex) (const char*) = nullptr;
+    int (*cardNext) (int*) = nullptr;
+    int (*ctlOpen) (Ctl**, const char*, int) = nullptr;
+    int (*ctlClose) (Ctl*) = nullptr;
+    int (*cardInfoMalloc) (CardInfo**) = nullptr;
+    void (*cardInfoFree) (CardInfo*) = nullptr;
+    int (*ctlCardInfo) (Ctl*, CardInfo*) = nullptr;
+    const char* (*cardInfoGetId) (const CardInfo*) = nullptr;
+    const char* (*cardInfoGetName) (const CardInfo*) = nullptr;
+    int (*ctlPcmNextDevice) (Ctl*, int*) = nullptr;
+    int (*pcmInfoMalloc) (PcmInfo**) = nullptr;
+    void (*pcmInfoFree) (PcmInfo*) = nullptr;
+    void (*pcmInfoSetDevice) (PcmInfo*, unsigned int) = nullptr;
+    void (*pcmInfoSetSubdevice) (PcmInfo*, unsigned int) = nullptr;
+    void (*pcmInfoSetStream) (PcmInfo*, int) = nullptr;
+    int (*ctlPcmInfo) (Ctl*, PcmInfo*) = nullptr;
+    const char* (*pcmInfoGetName) (const PcmInfo*) = nullptr;
+    unsigned int (*pcmInfoGetSubdevicesCount) (const PcmInfo*) = nullptr;
+    const char* (*pcmInfoGetSubdeviceName) (const PcmInfo*) = nullptr;
+    ChmapQuery** (*queryChmapsFromHw) (int, int, int, int) = nullptr;
+    void (*freeChmaps) (ChmapQuery**) = nullptr;
+
+    static const Api* get()
+    {
+        static const Api api = []
+        {
+            Api a;
+            a.lib = ::dlopen ("libasound.so.2", RTLD_NOW | RTLD_LOCAL);
+            if (a.lib == nullptr)
+                return a;
+            const auto sym = [&a] (auto& fn, const char* name) { fn = reinterpret_cast<std::remove_reference_t<decltype (fn)>> (::dlsym (a.lib, name)); return fn != nullptr; };
+            const bool ok = sym (a.deviceNameHint, "snd_device_name_hint") && sym (a.deviceNameGetHint, "snd_device_name_get_hint")
+                            && sym (a.deviceNameFreeHint, "snd_device_name_free_hint") && sym (a.cardGetIndex, "snd_card_get_index")
+                            && sym (a.cardNext, "snd_card_next") && sym (a.ctlOpen, "snd_ctl_open") && sym (a.ctlClose, "snd_ctl_close")
+                            && sym (a.cardInfoMalloc, "snd_ctl_card_info_malloc") && sym (a.cardInfoFree, "snd_ctl_card_info_free")
+                            && sym (a.ctlCardInfo, "snd_ctl_card_info") && sym (a.cardInfoGetId, "snd_ctl_card_info_get_id")
+                            && sym (a.cardInfoGetName, "snd_ctl_card_info_get_name") && sym (a.ctlPcmNextDevice, "snd_ctl_pcm_next_device")
+                            && sym (a.pcmInfoMalloc, "snd_pcm_info_malloc") && sym (a.pcmInfoFree, "snd_pcm_info_free")
+                            && sym (a.pcmInfoSetDevice, "snd_pcm_info_set_device") && sym (a.pcmInfoSetSubdevice, "snd_pcm_info_set_subdevice")
+                            && sym (a.pcmInfoSetStream, "snd_pcm_info_set_stream") && sym (a.ctlPcmInfo, "snd_ctl_pcm_info")
+                            && sym (a.pcmInfoGetName, "snd_pcm_info_get_name")
+                            && sym (a.pcmInfoGetSubdevicesCount, "snd_pcm_info_get_subdevices_count")
+                            && sym (a.pcmInfoGetSubdeviceName, "snd_pcm_info_get_subdevice_name")
+                            && sym (a.queryChmapsFromHw, "snd_pcm_query_chmaps_from_hw") && sym (a.freeChmaps, "snd_pcm_free_chmaps");
+            if (! ok)
+            {
+                ::dlclose (a.lib);
+                a = Api();
+            }
+            return a;
+        }();
+        return api.lib != nullptr ? &api : nullptr;
+    }
+};
+
+/** A card PCM: card index, device, subdevice (-1 = any). */
+struct HwAddress
+{
+    int card = -1;
+    int device = -1;
+    int subdevice = -1;
+    bool operator== (const HwAddress&) const = default;
+};
+
+/** The card and device of a hw PCM name, "hw:CARD=PCH,DEV=3" (as hints
+    give it) or "hw:0,3[,1]" (as the ALSA HW list does); the card as written
+    (an index or a card id) for snd_card_get_index. false for any other PCM. */
+bool parseHwName (const std::string& name, std::string& card, int& device, int& subdevice)
+{
+    if (name.rfind ("hw:", 0) != 0)
+        return false;
+    card.clear();
+    device = 0; // ALSA's default when DEV is left out
+    subdevice = -1;
+    std::vector<std::string> fields;
+    std::string field;
+    for (const char c : name.substr (3) + ",")
+    {
+        if (c != ',')
+            field += c;
+        else
+        {
+            fields.push_back (field);
+            field.clear();
+        }
+    }
+    const auto toInt = [] (const std::string& text, int& out)
+    {
+        if (text.empty() || text.size() > 4 || ! std::all_of (text.begin(), text.end(), [] (char ch) { return ch >= '0' && ch <= '9'; }))
+            return false;
+        out = std::stoi (text);
+        return true;
+    };
+    for (size_t i = 0; i < fields.size(); ++i)
+    {
+        const auto& f = fields[i];
+        const auto eq = f.find ('=');
+        const std::string key = eq == std::string::npos ? std::string() : f.substr (0, eq);
+        const std::string value = eq == std::string::npos ? f : f.substr (eq + 1);
+        if (key == "CARD" || (key.empty() && i == 0))
+            card = value;
+        else if ((key == "DEV" || (key.empty() && i == 1)) && ! toInt (value, device))
+            return false;
+        else if ((key == "SUBDEV" || (key.empty() && i == 2)) && ! toInt (value, subdevice))
+            return false;
+    }
+    return ! card.empty();
+}
+
+/** The name JUCE's "ALSA" list shows for a hint: DESC with its line breaks as
+    "; ", else NAME. */
+std::string hintDeviceName (const std::string& hintName, const std::string& description)
+{
+    if (description.empty())
+        return hintName;
+    std::string name;
+    for (const char c : description)
+        name += c == '\n' ? std::string ("; ") : std::string (1, c);
+    return name;
+}
+
+SpeakerPosition speakerPosition (unsigned int chmapPosition)
+{
+    switch (chmapPosition)
+    {
+        case 3:  return SpeakerPosition::FL;
+        case 4:  return SpeakerPosition::FR;
+        case 5:  return SpeakerPosition::RL;
+        case 6:  return SpeakerPosition::RR;
+        case 7:  return SpeakerPosition::FC;
+        case 8:  return SpeakerPosition::LFE;
+        case 9:  return SpeakerPosition::SL;
+        case 10: return SpeakerPosition::SR;
+        default: return SpeakerPosition::Unknown;
+    }
+}
+
+/** The positions of the first map for 'channels' channels in a
+    snd_pcm_query_chmaps* list (nullptr-terminated); empty when there is
+    none or it names no position the engine knows. */
+std::vector<SpeakerPosition> positionsFromChmaps (const ChmapQuery* const* maps, int channels)
+{
+    if (maps == nullptr || channels <= 0)
+        return {};
+    for (; *maps != nullptr; ++maps)
+    {
+        const ChmapQuery& query = **maps;
+        if (static_cast<int> (query.channels) != channels)
+            continue;
+        std::vector<SpeakerPosition> positions (static_cast<size_t> (channels));
+        bool any = false;
+        for (int c = 0; c < channels; ++c)
+        {
+            positions[static_cast<size_t> (c)] = speakerPosition (positionsOf (query)[c]);
+            any = any || positions[static_cast<size_t> (c)] != SpeakerPosition::Unknown;
+        }
+        return any ? positions : std::vector<SpeakerPosition>();
+    }
+    return {};
+}
+
+/** The card PCM behind a JUCE "ALSA" device name (from the PCM hints). */
+bool findHintAddress (const Api& api, const std::string& deviceName, HwAddress& address)
+{
+    void** hints = nullptr;
+    if (api.deviceNameHint (-1, "pcm", &hints) != 0 || hints == nullptr)
+        return false;
+    const auto hint = [&api] (const void* h, const char* id)
+    {
+        char* text = api.deviceNameGetHint (h, id);
+        std::string value = text != nullptr ? text : "";
+        ::free (text);
+        return value;
+    };
+    int matches = 0;
+    for (void** h = hints; *h != nullptr; ++h)
+    {
+        const std::string name = hint (*h, "NAME");
+        if (name.empty() || hintDeviceName (name, hint (*h, "DESC")) != deviceName)
+            continue;
+        ++matches;
+        std::string card;
+        HwAddress found;
+        if (parseHwName (name, card, found.device, found.subdevice) && (found.card = api.cardGetIndex (card.c_str())) >= 0)
+            address = found;
+        else
+            address = {};
+    }
+    api.deviceNameFreeHint (hints);
+    return matches == 1 && address.card >= 0; // a duplicated name is ambiguous
+}
+
+/** The card PCM behind a JUCE "ALSA HW" device name (from the cards). */
+bool findCardAddress (const Api& api, const std::string& deviceName, HwAddress& address)
+{
+    CardInfo* cardInfo = nullptr;
+    PcmInfo* pcmInfo = nullptr;
+    if (api.cardInfoMalloc (&cardInfo) != 0 || api.pcmInfoMalloc (&pcmInfo) != 0)
+    {
+        if (cardInfo != nullptr)
+            api.cardInfoFree (cardInfo);
+        return false;
+    }
+    int matches = 0;
+    for (int card = -1; api.cardNext (&card) == 0 && card >= 0;)
+    {
+        Ctl* ctl = nullptr;
+        if (api.ctlOpen (&ctl, ("hw:" + std::to_string (card)).c_str(), kCtlNonblock) < 0)
+            continue;
+        if (api.ctlCardInfo (ctl, cardInfo) >= 0)
+        {
+            std::string cardName = dbus::str (api.cardInfoGetName (cardInfo));
+            if (cardName.empty())
+                cardName = dbus::str (api.cardInfoGetId (cardInfo));
+            for (int device = -1; api.ctlPcmNextDevice (ctl, &device) >= 0 && device >= 0;)
+            {
+                api.pcmInfoSetDevice (pcmInfo, static_cast<unsigned int> (device));
+                for (unsigned int sub = 0, subs = 1; sub < subs; ++sub)
+                {
+                    api.pcmInfoSetSubdevice (pcmInfo, sub);
+                    api.pcmInfoSetStream (pcmInfo, kStreamCapture);
+                    if (api.ctlPcmInfo (ctl, pcmInfo) < 0)
+                        break;
+                    subs = std::max (1u, api.pcmInfoGetSubdevicesCount (pcmInfo));
+                    std::string name = cardName + ", " + dbus::str (api.pcmInfoGetName (pcmInfo));
+                    if (subs > 1)
+                        name += " {" + dbus::str (api.pcmInfoGetSubdeviceName (pcmInfo)) + "}";
+                    if (name == deviceName)
+                    {
+                        ++matches;
+                        address = { card, device, subs > 1 ? static_cast<int> (sub) : -1 };
+                    }
+                }
+            }
+        }
+        api.ctlClose (ctl);
+    }
+    api.pcmInfoFree (pcmInfo);
+    api.cardInfoFree (cardInfo);
+    return matches == 1;
+}
+} // namespace alsa
 } // namespace
 
 // ============================================================================
@@ -3483,9 +3904,10 @@ void* SystemTuning::promoteAudioThread()
         RLIMIT_RTPRIO allowance (e.g. "@audio - rtprio 95" in limits.conf, the
         'realtime' group, or CAP_SYS_NICE); otherwise it fails with EPERM and
         we silently stay at SCHED_OTHER. Desktop sessions without such limits
-        would need RealtimeKit (org.freedesktop.RealtimeKit1.MakeThreadRealtime
-        over the system D-Bus) - not wired up here to avoid a D-Bus dependency;
-        when Flubsound runs as a JACK / PipeWire client the server already
+        get RealtimeKit instead: the engine host asks it from the message
+        thread for the thread id it saw here (RealtimeScheduling, docs/11
+        E44), because a D-Bus round trip cannot run on the audio thread.
+        When Flubsound runs as a JACK / PipeWire client the server already
         calls our process callback on its own real-time thread.
 
         SCHED_RESET_ON_FORK keeps children (e.g. pactl started via popen) from
@@ -3504,7 +3926,7 @@ void* SystemTuning::promoteAudioThread()
     if (basePolicy == SCHED_FIFO || basePolicy == SCHED_RR)
         return nullptr;
 
-    auto saved = std::make_unique<SavedSchedulingPolicy>();
+    SavedSchedulingPolicy* const saved = &savedSchedulingPolicy;
     saved->policy = currentPolicy;
     saved->param = currentParam;
 
@@ -3531,7 +3953,7 @@ void* SystemTuning::promoteAudioThread()
             promoted = tryPriority (static_cast<int> (limit.rlim_cur));
     }
 
-    return promoted ? saved.release() : nullptr;
+    return promoted ? saved : nullptr;
 }
 
 void SystemTuning::revertAudioThread (void* handle)
@@ -3539,7 +3961,7 @@ void SystemTuning::revertAudioThread (void* handle)
     if (handle == nullptr)
         return;
 
-    const std::unique_ptr<SavedSchedulingPolicy> saved (static_cast<SavedSchedulingPolicy*> (handle));
+    const auto* saved = static_cast<const SavedSchedulingPolicy*> (handle);
     const pthread_t self = ::pthread_self();
 
     // Exact restore first. Without CAP_SYS_NICE the kernel refuses to CLEAR
@@ -3548,6 +3970,149 @@ void SystemTuning::revertAudioThread (void* handle)
     // the flag is harmless for a normal-policy thread, so retry with it.
     if (::pthread_setschedparam (self, saved->policy, &saved->param) != 0)
         ::pthread_setschedparam (self, saved->policy | SCHED_RESET_ON_FORK, &saved->param);
+}
+
+//==============================================================================
+// RealtimeScheduling (docs/11 E44)
+//==============================================================================
+uint64_t RealtimeScheduling::currentThreadId() noexcept FLUB_NONBLOCKING
+{
+    return static_cast<uint64_t> (::syscall (SYS_gettid));
+}
+
+ThreadScheduling RealtimeScheduling::queryThread (uint64_t threadId)
+{
+    ThreadScheduling result;
+    if (threadId == 0 || threadId > static_cast<uint64_t> (std::numeric_limits<pid_t>::max()))
+        return result;
+    const auto tid = static_cast<pid_t> (threadId);
+    const int policy = ::sched_getscheduler (tid);
+    sched_param param {};
+    if (policy < 0 || ::sched_getparam (tid, &param) != 0)
+        return result;
+    const int base = policy & ~SCHED_RESET_ON_FORK;
+    result.known = true;
+    result.realtime = base == SCHED_FIFO || base == SCHED_RR;
+    result.priority = result.realtime ? param.sched_priority : 0;
+    result.policy = rtkit::policyName (policy);
+    return result;
+}
+
+RealtimeKitResult RealtimeScheduling::requestRealtimeKit (uint64_t threadId, int wantedPriority)
+{
+    using Outcome = RealtimeKitResult::Outcome;
+    RealtimeKitResult result;
+    const auto* api = dbus::Api::get();
+    if (api == nullptr)
+    {
+        result.message = "libdbus-1 is not installed, so RealtimeKit cannot be asked";
+        return result;
+    }
+    if (threadId == 0)
+    {
+        result.message = "no audio thread to promote";
+        return result;
+    }
+
+    const std::string address = rtkit::systemBusAddress();
+    dbus::Error error;
+    api->errorInit (&error);
+    dbus::Connection* connection = api->connectionOpenPrivate (address.c_str(), &error);
+    if (connection != nullptr)
+    {
+        api->connectionSetExitOnDisconnect (connection, 0);
+        if (api->busRegister (connection, &error) == 0)
+        {
+            api->connectionClose (connection);
+            api->connectionUnref (connection);
+            connection = nullptr;
+        }
+    }
+    const std::string connectError = dbus::str (error.message);
+    api->errorFree (&error);
+    if (connection == nullptr)
+    {
+        result.message = "the system D-Bus is not reachable, so RealtimeKit cannot be asked" + (connectError.empty() ? std::string() : " (" + connectError + ")");
+        return result;
+    }
+    struct Closer
+    {
+        const dbus::Api& library;
+        dbus::Connection* open;
+        ~Closer()
+        {
+            library.connectionClose (open);
+            library.connectionUnref (open);
+        }
+    } closer { *api, connection };
+
+    // The limits rtkit enforces; its defaults when it has no properties.
+    int64_t maxPriority = rtkit::kDefaultMaxPriority, rttimeMax = rtkit::kDefaultRttimeUsec;
+    std::string errorName;
+    if (! rtkit::integerProperty (*api, connection, "MaxRealtimePriority", maxPriority, errorName) && rtkit::isNoService (errorName))
+    {
+        result.message = "RealtimeKit is not running (install the rtkit package)";
+        return result;
+    }
+    rtkit::integerProperty (*api, connection, "RTTimeUSecMax", rttimeMax, errorName);
+
+    result.priority = static_cast<int> (std::clamp<int64_t> (std::min<int64_t> (wantedPriority, maxPriority), 1, 99));
+    std::string limitError;
+    if (! rtkit::limitRttime (rttimeMax, result.rttimeUsec, limitError))
+    {
+        result.outcome = Outcome::Refused;
+        result.message = limitError;
+        return result;
+    }
+
+    const dbus::MessageRef request (api->messageNewMethodCall (rtkit::kService, rtkit::kObjectPath, rtkit::kInterface, "MakeThreadRealtime"));
+    if (request == nullptr)
+    {
+        result.message = "out of memory";
+        return result;
+    }
+    dbus::Iter args;
+    api->iterInitAppend (request.get(), &args);
+    const auto priority = static_cast<uint32_t> (result.priority);
+    if (api->iterAppendBasic (&args, 't', &threadId) == 0 || api->iterAppendBasic (&args, dbus::kTypeUInt32, &priority) == 0)
+    {
+        result.message = "out of memory";
+        return result;
+    }
+    std::string errorText;
+    if (rtkit::call (*api, connection, request.get(), errorName, errorText) != nullptr)
+    {
+        result.outcome = Outcome::Granted;
+        return result;
+    }
+    if (rtkit::isNoService (errorName))
+    {
+        result.message = "RealtimeKit is not running (install the rtkit package)";
+        return result;
+    }
+    result.outcome = Outcome::Refused;
+    result.message = "RealtimeKit refused real-time priority " + std::to_string (result.priority) + " ("
+                     + (errorText.empty() ? errorName : errorText) + ")";
+    return result;
+}
+
+//==============================================================================
+// AudioChannelMaps (docs/11 E27 step 4)
+//==============================================================================
+std::vector<SpeakerPosition> AudioChannelMaps::queryInputPositions (const std::string& deviceTypeName, const std::string& deviceName, int channels)
+{
+    const bool alsaPcm = deviceTypeName == "ALSA", alsaHw = deviceTypeName == "ALSA HW";
+    const auto* api = alsa::Api::get();
+    if ((! alsaPcm && ! alsaHw) || api == nullptr || deviceName.empty() || channels <= 0)
+        return {};
+    alsa::HwAddress address;
+    if (! (alsaHw ? alsa::findCardAddress (*api, deviceName, address) : alsa::findHintAddress (*api, deviceName, address)))
+        return {};
+    alsa::ChmapQuery** maps = api->queryChmapsFromHw (address.card, address.device, address.subdevice, alsa::kStreamCapture);
+    auto positions = alsa::positionsFromChmaps (maps, channels);
+    if (maps != nullptr)
+        api->freeChmaps (maps);
+    return positions;
 }
 
 //==============================================================================

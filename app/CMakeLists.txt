@@ -79,6 +79,7 @@ set(FLUB_APP_SOURCES
     Source/ui/ParameterBinding.cpp
     Source/ui/RoutingPanel.cpp
     Source/ui/SettingsDialog.cpp
+    Source/ui/SimpleStatusPanel.cpp
     Source/ui/SpectrumAnalyzer.cpp
     Source/ui/Theme.cpp
     Source/ui/WaveformHistory.cpp

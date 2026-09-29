@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace flub
 {
@@ -205,9 +206,9 @@ void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
     reason = 0;
     pendingSamples = 0;
     measuredRunning = false;
-    grFastDb = driveDb = harmonicsDb = 0.0f;
-    harmonicsScale = 1.0f;
-    grLoop = residualLoop = plrLoop = harmonicsLoop = {};
+    grFastDb = driveDb = harmonicsDb = tonalDb = 0.0f;
+    harmonicsScale = tonalScale = 1.0f;
+    grLoop = residualLoop = plrLoop = harmonicsLoop = tonalLoop = {};
 }
 
 void SafetyGovernor::setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING
@@ -217,10 +218,10 @@ void SafetyGovernor::setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKIN
     if (s != strength)
     {
         // The measured loop (re)starts from the scales as they are; Off has
-        // no harmonics scale.
+        // no harmonics or tonal scale.
         measuredRunning = false;
         if (s == ProtectionStrength::Off)
-            harmonicsScale = 1.0f;
+            harmonicsScale = tonalScale = 1.0f;
     }
     strength = s;
 }
@@ -236,11 +237,20 @@ SafetyGovernor::Budgets SafetyGovernor::budgetsFor (ProtectionStrength s, bool m
     b.grDb = kGrBudgetDb;
     b.residualDb = music ? -35.0f : -30.0f;
     b.plrDb = music ? 8.0f : 0.0f;
+    // Tonal balance (docs/11 E07): Gaming's presence budget is its Done-when
+    // (2-5 kHz lift minus 200 Hz - 1 kHz lift <= +2 dB); Music may be a
+    // little brighter, air more than the bands where harshness lives.
+    b.presenceDb = music ? 3.0f : 2.0f;
+    b.harshDb = music ? 3.0f : 2.0f;
+    b.airDb = music ? 4.0f : 3.0f;
     if (s == ProtectionStrength::Strict)
     {
         b.grDb += 2.0f;
         b.residualDb -= 6.0f;
         b.plrDb = music ? 10.0f : 0.0f;
+        b.presenceDb -= 1.5f;
+        b.harshDb -= 1.5f;
+        b.airDb -= 1.5f;
     }
     return b;
 }
@@ -349,12 +359,15 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
         // Start from the scales as they are (bumpless).
         driveDb = scale > 0.0f ? std::max (kFloorDb, gainToDb (scale)) : kFloorDb;
         harmonicsDb = harmonicsScale > 0.0f ? std::max (kFloorDb, gainToDb (harmonicsScale)) : kFloorDb;
-        grLoop = residualLoop = plrLoop = harmonicsLoop = {};
+        tonalDb = tonalScale > 0.0f ? std::max (kFloorDb, gainToDb (tonalScale)) : kFloorDb;
+        grLoop = residualLoop = plrLoop = harmonicsLoop = tonalLoop = {};
         grLoop.integral = driveDb - ffDb;
         residualLoop.integral = plrLoop.integral = driveDb;
         harmonicsLoop.integral = harmonicsDb;
+        tonalLoop.integral = tonalDb;
         grLoop.lastApplied = residualLoop.lastApplied = plrLoop.lastApplied = driveDb;
         harmonicsLoop.lastApplied = harmonicsDb;
+        tonalLoop.lastApplied = tonalDb;
         measuredRunning = true;
     }
 
@@ -393,21 +406,39 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     harmonicsLoop.track (uHarmonics, harmonicsDb, dt);
     harmonicsScale = harmonicsDb <= kFloorDb ? 0.0f : dbToGain (harmonicsDb);
 
+    // Tonal-balance rule (docs/11 E07): the highest band's lift over its
+    // set point; no reading (a pause, the first 0.5 s) holds the scale.
+    float eTonal = -12.0f;
+    for (const auto [lift, budget] : { std::pair { r.presenceLiftDb, b.presenceDb }, std::pair { r.harshLiftDb, b.harshDb },
+                                       std::pair { r.airLiftDb, b.airDb } })
+        if (lift > kMinusInfDb)
+            eTonal = std::max (eTonal, lift - (budget - kTonalMarginDb));
+    const float uTonal = std::max (kFloorDb, tonalLoop.step (eTonal, dt, 0.0f, kTonalGain));
+    const float tonalBefore = tonalDb;
+    tonalDb = std::clamp (uTonal, tonalDb - kTonalFallDbPerSec * dt, tonalDb + kRiseDbPerSec * dt);
+    tonalLoop.track (uTonal, tonalDb, dt);
+    tonalScale = tonalDb <= kFloorDb ? 0.0f : dbToGain (tonalDb);
+
     // State and reasons, as the Off loop reports them.
     constexpr float kStep = 1.0e-4f;
     const bool driveFell = driveDb < before - kStep, harmonicsFell = harmonicsDb < harmonicsBefore - kStep;
+    const bool tonalFell = tonalDb < tonalBefore - kStep;
     const bool driveOver = eGr > 0.0f || eResidual > 0.0f || (plrBudget && ePlr > 0.0f);
     const bool harmonicsOver = harmonicsGoverned && eHarmonics > 0.0f;
+    const bool tonalOver = eTonal > 0.0f;
     const bool atFloor = driveDb <= floorDb + kStep, harmonicsAtFloor = harmonicsDb <= kFloorDb + kStep;
-    if (driveFell || harmonicsFell || (driveOver && atFloor) || (harmonicsOver && harmonicsAtFloor))
+    const bool tonalAtFloor = tonalDb <= kFloorDb + kStep;
+    if (driveFell || harmonicsFell || tonalFell || (driveOver && atFloor) || (harmonicsOver && harmonicsAtFloor)
+        || (tonalOver && tonalAtFloor))
     {
         reason |= (eGr > 0.0f ? kReasonLimiter : 0u) | (eResidual > 0.0f ? kReasonDistortion : 0u)
-                  | (plrBudget && ePlr > 0.0f ? kReasonDynamics : 0u) | (harmonicsOver ? kReasonHarmonics : 0u);
+                  | (plrBudget && ePlr > 0.0f ? kReasonDynamics : 0u) | (harmonicsOver ? kReasonHarmonics : 0u)
+                  | (tonalOver ? kReasonTonal : 0u);
         state = State::BackingOff;
     }
-    else if (driveDb >= -kStep && harmonicsDb >= -kStep)
+    else if (driveDb >= -kStep && harmonicsDb >= -kStep && tonalDb >= -kStep)
         state = State::Idle;
-    else if (driveDb > before + kStep || harmonicsDb > harmonicsBefore + kStep)
+    else if (driveDb > before + kStep || harmonicsDb > harmonicsBefore + kStep || tonalDb > tonalBefore + kStep)
         state = State::Recovering;
     else
         state = State::Holding;

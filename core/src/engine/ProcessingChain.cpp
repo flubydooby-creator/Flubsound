@@ -145,8 +145,11 @@ int gateFftSizeFor (double sampleRate) noexcept
 
 /** tame / tameThresholdDb: the Gaming anti-masking band's depth (0..1) and
     threshold, keyed to the Dynamic Range control (docs/11 E20 / E21,
-    StartleGuard.h). */
-void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate, float tame, float tameThresholdDb) noexcept
+    StartleGuard.h). tonalScale: the governor's tonal-balance scale (docs/11
+    E07) on the macros' ungoverned lifts here, the Gaming Voice & Score band
+    and the Music air band (1 at protection strength Off). */
+void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate, float tame, float tameThresholdDb,
+                         float tonalScale) noexcept
 {
     const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
     if (mode == ModeValue::Gaming)
@@ -166,7 +169,7 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double 
         dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, tameThresholdDb,
                                   tame > 0.0f ? StartleGuard::kTameRatio : 3.0f, tame * StartleGuard::kTameMaxRangeDb, 10.0f, 250.0f, -80.0f));
         // Voice comms / dialogue / score intelligibility.
-        dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice, 5.0f, 150.0f, -70.0f));
+        dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice * tonalScale, 5.0f, 150.0f, -70.0f));
     }
     else
     {
@@ -174,7 +177,7 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double 
         const float boost = e[BoostIntensity];
         // Presence/air boosts are paired with a dynamic de-harsh band.
         dyn.setBand (4, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[0], 1.2f, -22.0f, 3.0f, 3.0f * clarity, 2.0f, 80.0f, -80.0f));
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, hz[1], 0.7f, -45.0f, 2.0f, 3.0f * clarity, 10.0f, 200.0f, -80.0f));
+        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, hz[1], 0.7f, -45.0f, 2.0f, 3.0f * clarity * tonalScale, 10.0f, 200.0f, -80.0f));
         // Bass boost is paired with a dynamic de-boom band.
         dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[2], 1.0f, -14.0f, 2.5f, 4.0f * boost, 10.0f, 150.0f, -80.0f));
         dyn.setBand (7, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[3], 1.0f, 0.0f, 1.0f, 0.0f, 5.0f, 80.0f, -80.0f));
@@ -230,6 +233,8 @@ ProcessingChain::ProcessingChain (ParameterStore& s) : store (s)
     headroomInput.assign (static_cast<size_t> (kNumParams), 0.0f);
     ungoverned.assign (static_cast<size_t> (kNumParams), 0.0f);
     publishedEffective = std::make_unique<std::atomic<float>[]> (static_cast<size_t> (kNumParams));
+    for (auto& lift : tonalLiftDb)
+        lift.store (TonalBalanceMeter::kNoReading, std::memory_order_relaxed);
     store.snapshot (base.data());
     MacroMap::apply (base.data(), effective.data(), 1.0f);
     publishEffective();
@@ -398,6 +403,11 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     slots[SBass].prepare (bass, stereo, 20.0f, on (e, BassOn));
     slots[SClarity].prepare (clarity, stereo, 20.0f, on (e, ClarityOn));
     slots[SSat].prepare (saturator, stereo, 20.0f, on (e, SaturationOn));
+    // The Smoothness stage (docs/11 E07) measures against the bass engine's
+    // input, delayed by the slots in between.
+    smoothness.setReferenceDelay (slots[SBass].latencySamples() + slots[SClarity].latencySamples() + slots[SSat].latencySamples());
+    slots[SSmooth].prepare (smoothness, stereo, 20.0f, e[SmoothAmount] > 0.0f);
+    smoothReference.setSize (2, maxB);
     slots[SSpatial].prepare (spatial, stereo, 20.0f, on (e, SpatialOn));
     slots[SComp].prepare (compressor, stereo, 20.0f, on (e, CompressorOn));
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
@@ -462,6 +472,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
         spanOutput.assign (static_cast<size_t> (maxB), 0.0f);
         plrMeter.prepare (sr, 2);
         inputPlrMeter.prepare (sr, 2);
+        tonalMeter.prepare (sr); // the tonal-balance rule (docs/11 E07)
     }
     loudnessMatch.prepare (sr, 2);
 
@@ -587,8 +598,19 @@ void ProcessingChain::applyParameters() noexcept
         preMaxPeak = 0.0f;
         bassShareSmoothedPow = 0.0;
         lastHarmonicsResidualDb = kMinusInfDb;
+        tonalMeter.reset();
         spanRunning = true;
     }
+    // The tonal-balance rule (docs/11 E07): its scale on what the macros add
+    // to presence and air (never on base values: the preset's or the user's
+    // own presence stays). The voice and air mode bands follow below.
+    const float tonalScale = strength != ProtectionStrength::Off ? governor.getTonalScale() : 1.0f;
+    if (tonalScale < 1.0f)
+        for (int id : { ClarityPresence, ClarityAir })
+        {
+            const float b = base[static_cast<size_t> (id)];
+            e[id] = b + std::max (0.0f, e[id] - b) * tonalScale;
+        }
     // Mode / format policies below write their overrides into e, so the
     // values published at the end (effectiveValue(), GUI ghost markers) are
     // the ones actually applied.
@@ -679,7 +701,7 @@ void ProcessingChain::applyParameters() noexcept
     float tameThresholdDb = StartleGuard::kTameMaxThresholdDb;
     if (tame > 0.0f && startleGuard.getReferenceLufs() > -60.0f)
         tameThresholdDb = std::min (tameThresholdDb, startleGuard.getReferenceLufs() + StartleGuard::kTameOverReferenceDb);
-    configureModeBands (dynEq, mode, e, config.sampleRate, tame, tameThresholdDb);
+    configureModeBands (dynEq, mode, e, config.sampleRate, tame, tameThresholdDb, tonalScale);
     slots[SDynEq].setActive (active (DynEqOn));
 
     // ---- Bass ----
@@ -722,6 +744,10 @@ void ProcessingChain::applyParameters() noexcept
     sp.outputDb = e[SatOutputDb];
     saturator.setParams (sp);
     slots[SSat].setActive (active (SaturationOn));
+
+    // ---- Smoothness (docs/11 E07; SmoothnessGuard.h): Gaming gets the light guard ----
+    smoothness.setParams ({ e[SmoothAmount], mode == ModeValue::Gaming });
+    slots[SSmooth].setActive (e[SmoothAmount] > 0.0f);
 
     // ---- Stereo & space (mode / binaural policy) ----
     if (mode == ModeValue::Gaming)
@@ -822,12 +848,17 @@ void ProcessingChain::applyParameters() noexcept
     // governor scales it (a preamp that followed the governor would feed
     // its loop). A momentary audition bypass does not move it, so holding
     // "listen without" a module plays exactly that module's own effect ----
+    // The same holds for the tonal-balance rule's scale on presence and air
+    // (docs/11 E07): the preamp sees what the macros ask for.
     const float* h = e;
-    if (governorScale < 1.0f)
+    if (governorScale < 1.0f || tonalScale < 1.0f)
     {
         MacroMap::apply (base.data(), ungoverned.data(), 1.0f);
         std::copy (effective.begin(), effective.end(), headroomInput.begin());
-        headroomInput[static_cast<size_t> (BassBoostDb)] = ungoverned[static_cast<size_t> (BassBoostDb)];
+        for (int id : { BassBoostDb, ClarityPresence, ClarityAir })
+            headroomInput[static_cast<size_t> (id)] = ungoverned[static_cast<size_t> (id)];
+        if (config.sampleRate < 42000.0)
+            headroomInput[static_cast<size_t> (ClarityAir)] = 0.0f; // as applied (see Clarity)
         h = headroomInput.data();
     }
     updateHeadroom (h, config.inputChannels > 2 && ! stereoFold);
@@ -1155,6 +1186,8 @@ void ProcessingChain::accumulateReadings() noexcept
     // keep the host block's extremes, so the meters read as they did before
     // the block was split (the clip energy ratio over the whole block).
     auto& r = blockReadings;
+    if (! slots[SSmooth].isFullyBypassed())
+        r.smoothCutDb = std::min (r.smoothCutDb, smoothness.getCutDb());
     if (! slots[SComp].isFullyBypassed())
     {
         r.compGrDb = std::min (r.compGrDb, compressor.getGainReductionDb());
@@ -1186,6 +1219,11 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
     };
     switch (slot)
     {
+        case SDynEq:
+            // The tonal-balance rule's reference (docs/11 E07).
+            if (! contaminated)
+                tonalMeter.processReference (st);
+            return;
         case SBass:
             // The bass span's input (and the input's PLR).
             mid (bassSpanInput);
@@ -1217,12 +1255,14 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
         mid (spanOutput);
         driveSpan.process (driveSpanInput.data(), spanOutput.data(), n);
         plrMeter.process (st);
+        tonalMeter.processOutput (st);
     }
     if (governor.samplesToNextTick() == n)
     {
         feedForward.push (preMaxPeak);
         plrMeter.tick();
         inputPlrMeter.tick();
+        tonalMeter.tick();
         preMaxPeak = 0.0f;
         // The bass harmonics' share, smoothed per tick (300 ms): its window
         // closes on this grid, so the reading does not depend on the host's blocks.
@@ -1259,6 +1299,9 @@ SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, f
     lastHarmonicsResidualDb = r.harmonicsResidualDb;
     r.plrDb = plrMeter.getPlrDb();
     r.inputPlrDb = inputPlrMeter.getPlrDb();
+    r.presenceLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Presence);
+    r.harshLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Harsh);
+    r.airLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Air);
     // Feed-forward: the drive the pre-maximizer peaks allow within the GR
     // budget, as a share of the drive at the full scale.
     const float allowed = feedForward.driveForBudget (effective[static_cast<size_t> (MaxCeilingDb)],
@@ -1358,8 +1401,15 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
                 startleGuard.setLevelOffsetDb (autoLevel.getGainDb());
                 startleGuard.measure (st, contaminated);
             }
-            if (spanRunning && (s == SBass || s == SClarity || s == SSat || s == SMax))
-                protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06)
+            if (spanRunning && (s == SDynEq || s == SBass || s == SClarity || s == SSat || s == SMax))
+                protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06), tonal reference (E07)
+            // The Smoothness stage's reference (docs/11 E07): the bass
+            // engine's input, while the stage runs.
+            const bool smoothRunning = slots[SSmooth].isActive() || ! slots[SSmooth].isFullyBypassed();
+            if (s == SBass && smoothRunning)
+                smoothReference.block (2, n).copyFrom (st);
+            if (s == SSmooth && smoothRunning)
+                smoothness.setReference (smoothReference.block (2, n));
             slots[static_cast<size_t> (s)].process (st);
             if (s == SComp)
                 startleGuard.apply (st);
@@ -1540,6 +1590,10 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     driveResidualFlatDb.store (spanRunning ? driveSpan.getPlainResidualDb() : kMinusInfDb, rl);
     harmonicsResidualDb.store (spanRunning ? lastHarmonicsResidualDb : kMinusInfDb, rl);
     governorHarmonicsScale.store (governor.getHarmonicsScale(), rl);
+    governorTonalScale.store (governor.getTonalScale(), rl);
+    for (int b = TonalBalanceMeter::Presence; b < TonalBalanceMeter::kNumBands; ++b)
+        tonalLiftDb[static_cast<size_t> (b)].store (spanRunning ? tonalMeter.getLiftDb (b) : TonalBalanceMeter::kNoReading, rl);
+    smoothnessCutDb.store (r.smoothCutDb, rl);
     outputPlrDb.store (spanRunning ? plrMeter.getPlrDb() : PlrMeter::kNoReading, rl);
     m.autoLevelGainDb.store (autoLevel.getGainDb(), rl);
     m.autoDriveDb.store (autoDrive.getReductionDb(), rl);

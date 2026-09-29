@@ -20,6 +20,11 @@
 //    -> [slot] BassEngine
 //    -> [slot] ClarityEnhancer
 //    -> [slot] Saturator (oversampled)
+//    -> [slot] Smoothness (SmoothnessGuard, docs/11 E07; smooth.amount, off
+//              by default): a de-esser that takes back what the stages
+//              since the bass engine's input added to the sibilant band,
+//              against that input (the reference, delayed by the slots in
+//              between); zero latency
 //    -> [slot] StereoSpatializer      (forced width 1 / space 0 / crossfeed 0 /
 //                                      focus 0 when the virtualiser produced
 //                                      binaural output or the game renders
@@ -45,7 +50,12 @@
 // and the saturator .. maximizer span's input (mid, delayed by the span's
 // latency) and output for two WeightedResidual analysers, the maximizer
 // input's peaks for the feed-forward, and the input's and output's PLR; its
-// harmonics scale multiplies bass.harmonics. At Off none of this runs.
+// harmonics scale multiplies bass.harmonics. The tonal-balance rule (docs/11
+// E07) compares the dynamic EQ's input with the chain's output
+// (TonalBalanceMeter) and its scale multiplies what the macros add to
+// clarity.presence and clarity.air and the ranges of the Gaming Voice & Score
+// band and the Music air band (the automatic preamp still sees the unscaled
+// values). At Off none of this runs.
 //
 // Bed-lift budget (max.bedLift, docs/11 E19 step 3; LoudnessMaximizer.h):
 // the chain measures the lift ahead of the maximizer as the background
@@ -143,8 +153,10 @@
 #include "flub/dsp/LoudnessMaximizer.h"
 #include "flub/dsp/ParametricEq.h"
 #include "flub/dsp/Saturator.h"
+#include "flub/dsp/SmoothnessGuard.h"
 #include "flub/dsp/SpectralNoiseGate.h"
 #include "flub/dsp/StereoSpatializer.h"
+#include "flub/dsp/TonalBalanceMeter.h"
 #include "flub/dsp/WeightedResidual.h"
 #include "flub/neural/AsyncModelProcessor.h"
 #include "flub/neural/Eligibility.h"
@@ -342,6 +354,22 @@ public:
     float getOutputPlrDb() const noexcept { return outputPlrDb.load (std::memory_order_relaxed); }
     /** The governor's extra scale on the bass harmonics (1 at Off). */
     float getGovernorHarmonicsScale() const noexcept { return governorHarmonicsScale.load (std::memory_order_relaxed); }
+    /** The governor's scale on the macros' tonal lifts (docs/11 E07; 1 at Off). */
+    float getGovernorTonalScale() const noexcept { return governorTonalScale.load (std::memory_order_relaxed); }
+    /** The chain's net tonal lift of TonalBalanceMeter band `band`
+        (Presence, Harsh, Air) over its 200 Hz - 1 kHz lift, dB: the
+        brightness the chain adds (docs/11 E07). TonalBalanceMeter::kNoReading
+        while Off or not yet measured. */
+    float getTonalLiftDb (int band) const noexcept
+    {
+        return band > TonalBalanceMeter::Mids && band < TonalBalanceMeter::kNumBands
+                   ? tonalLiftDb[static_cast<size_t> (band)].load (std::memory_order_relaxed)
+                   : TonalBalanceMeter::kNoReading;
+    }
+
+    /** The Smoothness stage's deepest cut in the last block (dB <= 0; 0
+        while smooth.amount is 0 and the slot is bypassed). Any thread. */
+    float getSmoothnessCutDb() const noexcept { return smoothnessCutDb.load (std::memory_order_relaxed); }
 
     /** The Startle Guard's deepest gain in the last block (dB <= 0; 0 while
         guard.range is Off and released). Any thread. */
@@ -373,9 +401,10 @@ private:
     /** Folds one segment's module readings into blockReadings. */
     void accumulateReadings() noexcept;
     /** Governor taps at Normal / Strict (docs/11 E06 Phase 3), before slot
-        `slot` processes: the bass span's input (SBass) and output (SClarity),
-        the drive span's input (SSat), the maximizer's input peak (SMax);
-        with kNumSlots, the drive span's output after the last slot. */
+        `slot` processes: the tonal meter's reference (SDynEq, docs/11 E07),
+        the bass span's input (SBass) and output (SClarity), the drive span's
+        input (SSat), the maximizer's input peak (SMax); with kNumSlots, the
+        drive span's and the tonal meter's output after the last slot. */
     void protectionTap (const AudioBlock& st, int slot, bool contaminated) noexcept FLUB_NONBLOCKING;
     /** The measured loop's readings for the governor's next tick. */
     SafetyGovernor::Readings governorReadings (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
@@ -408,6 +437,7 @@ private:
     BassEngine bass;
     ClarityEnhancer clarity;
     Saturator saturator;
+    SmoothnessGuard smoothness;
     StereoSpatializer spatial;
     Compressor compressor;
     LoudnessMaximizer maximizer;
@@ -420,7 +450,7 @@ private:
     std::unique_ptr<AsyncModelProcessor> pendingNeural; // setNeuralModel() until the next prepare()
     ModelContext neuralContext = ModelContext::Realtime, pendingContext = ModelContext::Realtime;
 
-    enum SlotIndex { SGate, SNeural, SEq, SDynEq, SBass, SClarity, SSat, SSpatial, SComp, SMax, kNumSlots };
+    enum SlotIndex { SGate, SNeural, SEq, SDynEq, SBass, SClarity, SSat, SSmooth, SSpatial, SComp, SMax, kNumSlots };
     std::array<ModuleSlot, kNumSlots> slots;
     bool gateInChain = false, neuralInChain = false;
     std::atomic<bool> neuralChangePending { false }, neuralBypass { false };
@@ -465,12 +495,19 @@ private:
     bool spanRunning = false;
     std::atomic<float> driveResidualDb { kMinusInfDb }, driveResidualFlatDb { kMinusInfDb }, harmonicsResidualDb { kMinusInfDb },
         outputPlrDb { PlrMeter::kNoReading },
-        governorHarmonicsScale { 1.0f };
+        governorHarmonicsScale { 1.0f }, governorTonalScale { 1.0f };
+    // The tonal-balance rule's meter (docs/11 E07): the dynamic EQ's input against the output.
+    TonalBalanceMeter tonalMeter;
+    std::array<std::atomic<float>, TonalBalanceMeter::kNumBands> tonalLiftDb {};
+    // The Smoothness stage's reference: the bass engine's input, copied
+    // while the stage runs (it delays it by the slots in between).
+    AudioBuffer smoothReference;
+    std::atomic<float> smoothnessCutDb { 0.0f };
     uint64_t corruptSamples = 0, droppedBlocks = 0; // input sanitiser, since prepare()
     // The host block's module-meter extremes over its segments (process()).
     struct BlockReadings
     {
-        float compGrDb = 0.0f, compUpDb = 0.0f, maxGrDb = 0.0f, glueGrDb = 0.0f;
+        float compGrDb = 0.0f, compUpDb = 0.0f, maxGrDb = 0.0f, glueGrDb = 0.0f, smoothCutDb = 0.0f;
         double clipRemoved = 0.0, clipInput = 0.0; // the clipper's energies (LoudnessMaximizer)
     };
     BlockReadings blockReadings;

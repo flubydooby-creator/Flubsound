@@ -12,7 +12,8 @@
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
 // preset on a strip), the device corrections (one per output endpoint,
-// docs/11 E15), the UI scale and theme, and the window position.
+// docs/11 E15), the UI scale and theme, the main window's view (Simple /
+// Advanced, docs/11 E39) and the window position.
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -244,6 +245,13 @@ public:
     /** Settings > General > Theme: the high-contrast theme (default off). */
     bool getHighContrast() const;
     void setHighContrast (bool highContrast);
+    /** The main window's view (docs/11 E39): Simple (the default: mode,
+        preset, Boost, the five macros, what is active now, the headset and one
+        loudness meter) or Advanced (the full window with routing, analyser, EQ
+        and module rack). The last choice is kept. */
+    enum class MainView { Simple, Advanced };
+    MainView getMainView() const;
+    void setMainView (MainView view);
 
     /** The output device the user chose (e.g. a USB headset); restored when it
         reappears after being unplugged / powered off. */

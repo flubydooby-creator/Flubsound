@@ -15,7 +15,7 @@
 |---|---|
 | [1](#1-status-at-a-glance) | Status at a glance |
 | [2](#2-design-language) | Design language: palette, accent, meters, typography, spacing, controls, accessibility |
-| [3](#3-window-and-layout) | Window, annotated wireframe, layout rules, screenshots |
+| [3](#3-window-and-layout) | Window, annotated wireframe, layout rules, screenshots, Simple view |
 | [4](#4-component-hierarchy) | Component hierarchy and wiring |
 | [5](#5-threading-and-update-model) | Threading and update model |
 | [6](#6-key-components) | Key components, one by one |
@@ -34,7 +34,8 @@
 
 | Area | Status | Code |
 |---|---|---|
-| Main window, layout and every panel in §6 | Implemented. The data side of the analyser, level meters, loudness panel and waveform history is tested by `flub_app_tests` (`tests/app/test_app_meters.cpp`, §6.4–§6.8); painting and layout are checked by the CI screenshots only | `ui/*`, `shell/MainWindow.*` |
+| Main window, layout and every panel in §6 | Implemented. The data side of the analyser, level meters, loudness panel and waveform history is tested by `flub_app_tests` (`tests/app/test_app_meters.cpp`, §6.4–§6.8); painting is checked by the CI screenshots only, and the layout by those and by the containment test of §3.5 (both views, 1100 × 700 to 2560 × 1440) | `ui/*`, `shell/MainWindow.*` |
+| Simple view ([11 E39](11-enhancement-report.md#e39)) | Implemented (§3.5): the default view for a new user, the last choice kept; mode, strip, preset, A/B, Bypass, the Boost dial, the five macros, up to three rows of active-now chips, the headset status and one loudness meter; the full window one click away. Views, persistence, the layout at 1100 × 700 to 2560 × 1440 and the chip wrapping are tested by `tests/app/test_app_ui_simple_view.cpp` | `ui/MainComponent.*`, `ui/SimpleStatusPanel.*`, `ui/BoostPanel.*`, `ui/HeaderBar.*` |
 | Design system: tokens, look-and-feel, vector icons | Implemented | `ui/Theme.*`, `ui/FlubLookAndFeel.*`, `ui/Widgets.*` |
 | Colour-blind safe meter palette | Implemented. It covers the level meters, clip LEDs and strip mini meters, plus the status colours of the loudness panel (gain reduction, clipper, TP, correlation), the muted-strip icon and the app-chip error badge. A few amber/green indicators stay fixed (§2.8) | `ui/Theme.*`, `ui/SettingsDialog.*` |
 | Headset / output-device advice banner | Implemented | `ui/DeviceAdviceBanner.*` |
@@ -269,7 +270,8 @@ The drag sensitivity is 220 px for full travel, and velocity mode is off. Clicki
 
 - native title bar, resizable;
 - **minimum 1100 × 700**, default 1280 × 820, centred on first start;
-- position and size saved in `AppSettings` when the window is closed and at shutdown.
+- position and size saved in `AppSettings` when the window is closed and at shutdown;
+- two views of the same window: **Simple** (§3.5, the default until the user picks one) and **Advanced** (§3.2–§3.4, every panel). The header's view button switches them and the choice is kept (`ui.view`, §12). Both views share the minimum size.
 
 The close button is handled by the application: it either closes to the tray or quits (§7.1). For headless screenshots, `setExactContentSize()` lifts the minimum.
 
@@ -277,13 +279,13 @@ The content is `ui::MainComponent`: opaque, 1280 × 820 initially, keyboard-focu
 
 ### 3.2 Annotated wireframe
 
-The proportions follow the 1440 × 900 screenshots in §3.4; exact sizes are in §3.3.
+This is the **Advanced** view (the Simple view is §3.5). The proportions follow the 1440 × 900 screenshots in §3.4; exact sizes are in §3.3.
 
 ```
 +------------------------------------------------------------------------------------------------+ y 0
 | HEADERBAR  56 px                                                                               |
 | [logo Flubsound Pro] [Music|Gaming] [Game|Music|Chat|System]  [<][preset      v][>][...]       |
-|                                               [A|B][copy] [Bypass] LATENCY 5.4 ms [gear]       |
+|                                        [A|B][copy] [Bypass] LATENCY 5.4 ms [view][gear]        |
 +------------------------------------------------------------------------------------------------+ y 56
 | DEVICE ERROR BANNER  34 px + 10 px gap (only while the output is muted or the device failed)  |
 | [!] Audio device error  message...                  [Retry][Choose output][Sound settings]     |
@@ -349,7 +351,7 @@ At 1440 × 900 an expanded module card takes 324 px, leaving the analyser 173 px
   - strip buttons 54 px instead of 60;
   - the LATENCY / CPU captions are hidden.
 
-  The preset ‹ › arrows are hidden whenever the preset area minus the menu and arrow widths is under 180 px. The preset combo is at most 300 px wide (250 compact).
+  The view button ([11 E39](11-enhancement-report.md#e39), 34 px plus a 4 px gap, left of the gear) is shown at every width and takes that much from the preset area. The preset ‹ › arrows are hidden whenever the preset area minus the menu and arrow widths is under 180 px. The preset combo is at most 300 px wide (250 compact).
 - **Routing panel.** If the red *No apps are being processed* notice (§6.10) does not fit above the strip rows at full length, it collapses to one line, *"No apps are being processed - why?"* (*"No apps processed - why?"* when that does not fit either). The full text is in its tooltip, and clicking opens it in an alert.
 - **Level meters.** Scale labels are skipped when they would be closer than 11.5 px; grid lines are always drawn. Each numeric readout is only drawn if at least 30 px remain.
 - **Module rack.** Cards keep their preferred width, `max (220, keys · 72 + 28)` px, and scroll horizontally with a 10 px scrollbar and 36 px edge fades. The ten cards need 3,394 px, so on practical window sizes the rack always scrolls. Only when everything fits is the spare width spread over the cards.
@@ -396,6 +398,55 @@ All four images are real renders of the app by the headless driver (§11). No au
 - The IN PEAK readout is dropped, and the −3 dB meter label is skipped.
 - The analyser legend is hidden, and the rack shows two cards with its scrollbar.
 
+### 3.5 Simple view
+
+[11 E39](11-enhancement-report.md#e39): a reduced main window for listeners who do not want the engineer's rack. It is the view a new user sees; after that the last choice is kept (`AppSettings::getMainView`, key `ui.view`: anything but `advanced`, including no value, is Simple). The header, the banners and every control in them are the same as in the Advanced view; below them `MainComponent::layoutSimple` shows two parts and hides the routing panel, analyser, module rack, level meters, loudness panel and output history (`MainComponent::getAdvancedOnlyComponents`).
+
+```
++------------------------------------------------------------------------------------------------+
+| HEADERBAR: mode, strips, preset, A/B, Bypass, latency / CPU, [view: Advanced], settings        |
++------------------------------------------------------------------------------------------------+
+| banners (device error, device advice, notice bar), as in the Advanced view                     |
+|        +--------------------------------------------------------------------------------+      |
+|        | BOOST INTENSITY            MUSIC MACROS                     [Safety governor OK] |      |
+|        |    ( 55 )     |   (o)     (o)     (o)     (o)     (o)                           |      |
+|        |   dial        |  Punch  Width  Clarity  Loudness  Warmth                        |      |
+|        |   <= 280 px   |  ACTIVE [EQ 1 band] [Subsonic 20 Hz] [Bass +5.6 dB @ 60 Hz] ... |      |
+|        |               |         [Presence 45%] [Air 29%] ...    (up to three rows)      |      |
+|        +------------------------------------------+-------------------------------------+      |
+|        | OUTPUT                                   | LOUDNESS                            |      |
+|        | [ear] Turtle Beach Stealth series        | -12.2 LUFS short-term               |      |
+|        | device . connection . ceiling -1.0 dBTP  | [==========|=====        ]          |      |
+|        | No headphone correction                  | 2.9 LU louder than the input        |      |
+|        |          [Headphone correction...][Output...]                                  |      |
+|        +------------------------------------------+-------------------------------------+      |
+|        | Spectrum and EQ, routing, the module rack ... in the Advanced view. [Advanced view]    |
++------------------------------------------------------------------------------------------------+
+```
+
+| Region | Rule |
+|---|---|
+| Content width | the area under the banners inside the 12 px margins, at most 1180 px wide, centred |
+| Status row (`SimpleStatusPanel`) | `clamp (round (0.40 · C), 200, 260)` px: the two cards over a 34 px footer and a 10 px gap; the OUTPUT card takes 56 % of the width |
+| Boost panel (Simple layout) | `clamp (C − status − 10, 150, 380)` px, above the status row; spare height is split above and below the pair |
+| Boost dial | as tall as the panel allows, 104–280 px (Advanced: 104–196) |
+| Macro knobs | at most 124 × 156 px in cells at most 170 px apart (Advanced: 96 × 124) |
+| Active-now chips | up to three 20 px rows (one row more while the knobs keep about 118 px), wrapped (`BoostPanel::layoutChips`); the last row keeps 34 px free for the *+N* of what does not fit (Advanced: one row) |
+
+- **OUTPUT** is the headset status (`SimpleStatusPanel::describeOutput`): the matched profile, or the device name as a *generic output, no headset profile*, then the connection, the safety ceiling the master limiter applies and the device correction ([11 E15](11-enhancement-report.md#e15): *Headphone correction: HD 600.txt (on)* or *No headphone correction*). A device problem (§6.2a) prefixes *Output muted: feedback loop* / *Audio device error* in the hot status colour. The first advice message is shown only while the advice banner is not (dismissed, or no profile). **Headphone correction…** and **Output…** open Settings on the Correction and Audio pages.
+- **LOUDNESS** is the one loudness meter: the selected strip's output short-term loudness as a number and a bar from −36 to 0 LUFS (accent), the input's as a marker, and in words what the strip does to it (`SimpleStatusPanel::describeLoudnessChange`: *2.9 LU louder than the input*, *… quieter …*, *About as loud as the input* within 0.5 LU, *No audio on this strip right now*). Repainted at ≤ 10 Hz.
+- **Frame loop.** The analyser taps are still drained, but the Simple view skips the analyser's FFTs, the EQ editor and the rack's engine poll; the rack is refreshed once when the Advanced view comes back.
+- **Switching.** The header's view button (expand arrows: *Advanced view*; collapse arrows: *Simple view*) and the footer's **Advanced view** button; an expanded module card is collapsed first. Focus that was on the button moves to the header's view button.
+- **Checked.** `tests/app/test_app_ui_simple_view.cpp`: in both views at 1100 × 700 (also with the advice banner and a notice), 1280 × 820, 1920 × 1080 and 2560 × 1440 every visible child lies inside its parent (a `Viewport`'s content excepted), and in the Simple view the header, the Boost dial (≥ 104 px), all five macros, the status row and the Advanced view button are shown without overlap; Signature at Boost 55 shows all 11 active-now chips where the Advanced view's single row shows 3 and *+8*.
+
+Headless renders (`--view simple`, §11) were inspected at 1280 × 820 at 100 % and 150 % UI scale and in the high-contrast theme, and at 1100 × 700 with the advice banner and a notice:
+
+![Simple view in Music mode with a Turtle Beach Stealth headset at 1280 × 820](images/app-simple-view.png)
+
+*`--screenshot app-simple-view.png --mode music --size 1280x820 --view simple --device "Headphones (Stealth 700 Gen 2 MAX)"`.*
+
+Not yet part of it ([11 E39](11-enhancement-report.md#e39) remainder): per-parameter "what you will hear" hints, a relevance-ordered rack without the gate card outside Quality, a reflow below 1100 px and a lower minimum size, and a compact tray flyout.
+
 ---
 
 ## 4. Component hierarchy
@@ -412,6 +463,7 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 │     │  ├─ IconButton ‹  ComboBox preset  IconButton ›  IconButton … (preset actions)
 │     │  ├─ TextButton A | B ("tab") + IconButton copy
 │     │  ├─ PopupButton Bypass ("warning"; right-click = options)
+│     │  ├─ IconButton view (Simple ↔ Advanced)
 │     │  └─ IconButton settings (gear)
 │     ├─ DeviceErrorBanner                  ui/NoticeBanners.*        only while the output is muted / failed
 │     │  └─ TextButton "Retry", "Choose output", "Sound settings"
@@ -419,14 +471,14 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 │     │  └─ TextButton "Use <preset>", "Details", "×"
 │     ├─ NoticeBar                          ui/NoticeBanners.*        only while a notice waits
 │     │  └─ TextButton action (optional), "×"
-│     ├─ RoutingPanel                       ui/RoutingPanel.*
+│     ├─ RoutingPanel                       ui/RoutingPanel.*         Advanced view only (like the analyser, rack, meters, history)
 │     │  ├─ Viewport → StripRow ×N          LED, name, channel badge, mute IconButton, gain Slider,
 │     │  │                                   mini meter, application chips
 │     │  ├─ IconButton "Assign app to strip..."
 │     │  └─ IconButton "System sound settings"
 │     ├─ BoostPanel                         ui/BoostPanel.*           owns a ParameterBinder
 │     │  ├─ BoostDial (juce::Slider)
-│     │  └─ ParamKnob ×5 (Large)            ui/ParamKnob.*
+│     │  └─ ParamKnob ×5 (Large)            ui/ParamKnob.*        Standard or Simple layout
 │     ├─ AnalyzerPanel                      ui/AnalyzerPanel.*
 │     │  ├─ SpectrumAnalyzer                ui/SpectrumAnalyzer.*
 │     │  ├─ EqCurveEditor (same bounds, on top)  ui/EqCurveEditor.*
@@ -439,6 +491,8 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 │     ├─ LevelMeters                        ui/LevelMeters.*
 │     ├─ LoudnessPanel                      ui/LoudnessPanel.*
 │     ├─ WaveformHistory                    ui/WaveformHistory.*
+│     ├─ SimpleStatusPanel                  ui/SimpleStatusPanel.*    Simple view only
+│     │  └─ TextButton "Headphone correction...", "Output...", "Advanced view"
 │     ├─ TooltipWindow (650 ms; not created with --screenshot)
 │     ├─ AnalyzerFeed   (non-visual)        ui/AnalyzerFeed.*
 │     └─ MeterSnapshot  (non-visual)        ui/MeterSnapshot.*
@@ -457,7 +511,7 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 - [`ui/Widgets.*`](../app/Source/ui/Widgets.h): icons, `IconButton`, `Style::set` / `Style::describe`.
 - [`ui/ParameterBinding.*`](../app/Source/ui/ParameterBinding.h): `ParamFormat` and `ParameterBinder`.
 
-**Coupling.** Only nine UI classes take an `EngineController&`: `MainComponent`, `HeaderBar`, `DeviceAdviceBanner`, `DeviceErrorBanner`, `RoutingPanel`, `BoostPanel`, `ModuleRack`, `SettingsDialog` and `ExportDialog`. All other components (the `NoticeBar` included) work from a `ParameterStore*` provider, a `ProcessingChain*` provider, a `MeterSnapshot`, or raw sample blocks. This split is the basis of the plug-in editor plan (§10).
+**Coupling.** Only ten UI classes take an `EngineController&`: `MainComponent`, `HeaderBar`, `DeviceAdviceBanner`, `DeviceErrorBanner`, `RoutingPanel`, `BoostPanel`, `ModuleRack`, `SimpleStatusPanel`, `SettingsDialog` and `ExportDialog`. All other components (the `NoticeBar` included) work from a `ParameterStore*` provider, a `ProcessingChain*` provider, a `MeterSnapshot`, or raw sample blocks. This split is the basis of the plug-in editor plan (§10).
 
 **Wiring in `MainComponent`**
 
@@ -470,7 +524,9 @@ FlubsoundApplication                        app/Source/FlubsoundApplication.*
 | `analyzer.getEqEditor().onBandSelected` ↔ `rack.onEqBandSelected` | curve node selection and the EQ card's band selector stay in sync |
 | `analyzer.onOptionsChanged` | save `ui.analyzer` |
 | `AnalyzerFeed` sink | pre → `SpectrumAnalyzer::push (false, …)`; post → `SpectrumAnalyzer::push (true, …)` and `WaveformHistory::push` |
-| `keyPressed (Esc)` | collapse an expanded module card |
+| `header.onViewToggleRequested`, `simple.onAdvancedRequested` | `setView()`: Simple ↔ Advanced (§3.5), saved as `ui.view` |
+| `simple.onOutputSettingsRequested`, `simple.onCorrectionRequested` | `openSettings()` on the Audio / Correction page |
+| `keyPressed (Esc)` | collapse an expanded module card (Advanced view) |
 
 ---
 
@@ -541,8 +597,10 @@ flowchart LR
    - `eqEditor.refresh()` and `setDynamicEqState (snapshot.dynEqGainDb, mode)`;
    - `history.setLoudness (shortTermLufs)` and `advance()`;
    - `levels.update`, `loudness.update`;
-   - `boost.setGovernorScale`, `routing.updateMeters (dt)`, `header.animate (dt)`.
-9. Every 4th frame `rack.updateFromEngine()`; every 15th frame `header.updateStatus()`.
+   - `boost.update (snapshot)` (governor chip, and the active-now chips every 15 frames), in the Simple view `simple.update (snapshot, dt)`, `routing.updateMeters (dt)`, `header.animate (dt)`.
+
+   The Simple view (§3.5) skips the analyser and the EQ editor.
+9. Every 4th frame `rack.updateFromEngine()` (Advanced view only); every 15th frame `header.updateStatus()`.
 
 `paint()` never analyses anything. Every view prepares its paths or images in its advance/update step and repaints only the region that changed.
 
@@ -633,7 +691,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 
 ### 6.1 `HeaderBar` — mode, strip, presets, A/B, bypass, status
 
-`ui/HeaderBar.*`, 56 px. From the left: logo + wordmark · mode switch · strip selector · (free space) · preset browser · A/B + copy · Bypass · latency/CPU · settings.
+`ui/HeaderBar.*`, 56 px. From the left: logo + wordmark · mode switch · strip selector · (free space) · preset browser · A/B + copy · Bypass · latency/CPU · view · settings.
 
 | Element | Reads | Writes | Interaction |
 |---|---|---|---|
@@ -644,6 +702,7 @@ Each component below lists its purpose, what it reads and writes, its update rat
 | **A / B + copy** | `getActiveBank()` | `setActiveBank()`, `copyActiveToOtherBank()` | Switching is one atomic bank flip; continuous parameters glide, so it is click-free. The copy tooltip reads "Copy A to B" or "Copy B to A" |
 | **Bypass** | `isEnabled()`, `bypass.matched` of the selected strip | `toggleEnabled()` → `bypass` on **every strip, both banks** | "warning" style, label *Bypass* / *Bypassed*. **Right-click** shows a menu with **Loudness-matched bypass**, an application-wide setting written to `bypass.matched` on every strip and both banks |
 | **Latency / CPU** | `getLatencyInfo()`, `getStatus()`, `getOverloadState()`, `getCaptureStreams()`, `getDeviceSafetyState()` | click: `onSettingsRequested` | Top line `totalMs + captureBufferMs` with one decimal (`HeaderBar::formatLatencyReadout`), prefixed `~` while it is an estimate (`LatencyInfo::estimated`: driver-reported device latency, no Bluetooth codec or OS mixer delay; always today), or `--` when no audible path runs (no device, or the loopback guard holds the output). Bottom line: CPU %, amber above 70 %, or `offline` (the caption then reads DEVICE). A device problem ([11 E51](11-enhancement-report.md#e51), `DeviceSafetyState`) takes the bottom line over in the *hot* colour: DEVICE `muted` (the output is the loopback partner of a strip's input and is held at silence) or DEVICE `error`; the tooltip then starts with the host's message and "Click to open Settings.", and a click on the readout opens Settings. When the device reports xruns (`juce::AudioIODevice::getXRunCount() >= 0`) the count follows the CPU %, `42% · 3 xr`, and the readout widens by 34 px. A sustained overload (below) turns the line bold in the *hot* status colour with the caption OVERLOAD (compact: a `!` prefix). Hover shows the breakdown "device in + engine + device out (+ audio graph) (+ app capture) = total", marked *estimated* with what the estimate leaves out, then one line per strip with its latency in the engine and, for a strip padded to a slower strip of its sync group (none by default), its own latency plus the sync padding (`HeaderBar::describeLatency`, from `LatencyInfo::strips`, which are the MixEngine's own per-strip figures), the CPU load and xruns, the overload warning with the recommended action or the session's overload count, what the automatic overload response changed (if it did; `EngineController::describeLoadReduction()`), one line per per-app capture stream (§6.11) and the output-device profile |
+| **View** | the shown view (`setSimpleView`) | `onViewToggleRequested` → `MainComponent::setView` | Framed icon button left of the gear: expand arrows, title *Advanced view*, in the Simple view; collapse arrows, *Simple view*, in the Advanced view (§3.5) |
 | **Settings** | — | opens `SettingsDialog` | gear button |
 
 - **"Modified" semantics.** `PresetManager::isModified()` compares the active bank's values with a snapshot taken when the preset was loaded or saved, so reverting an edit clears the dot. The comparison runs only after `store.version()` changed.
@@ -713,7 +772,8 @@ Each component below lists its purpose, what it reads and writes, its update rat
   A thin **inner arc** shows the share actually applied: `value × governorScale`. It is amber while `governorScale < 0.985`, and 55 % text colour otherwise. `governorScale` comes from `MeterBus::governorScale` every frame. The Safety Governor floor is 0.3 (`kMinScale` in `core/src/engine/Protection.cpp`; documented in `core/include/flub/engine/Protection.h`).
 - **Governor chip** (right end of the panel's caption row, [11 E06](11-enhancement-report.md#e06)): green *Safety governor OK*, or amber *Governor NN% · limiter* / *distortion* / *limiter + distortion* while it backs off (the `SafetyGovernor::kReason*` bits on the `MeterBus`), *· holding* or *· recovering* (`BoostPanel::describeGovernor`). The tooltip gives what it does, the ~3 s limiter and distortion averages against their −6 / −30 dB budgets and the protection strength; a click on the chip chooses the strength (Off / Normal / Strict, `EngineController::setProtectionStrength`, also in Settings › Processing).
 - **Active now** (bottom of the macro column, [11 E38](11-enhancement-report.md#e38) slice): chips for the stages that change the sound right now, from the selected chain's effective values (after the macros and the governor) and its meters, in signal order: auto level, automatic preamp, noise gate, EQ bands, the dynamic EQ band acting most, subsonic high-pass, bass shelf (*Bass +3.1 dB @ 70 Hz*), harmonics, tighten, mono bass, presence, air, de-mud, transient attack / sustain, saturation, width, focus, space, crossfeed, the virtualiser (surround input it renders), compressor, maximizer drive and the limiter while it reduces gain by more than 0.5 dB (`BoostPanel::describeActiveStages`). What does not fit is counted (*+3*); the tooltip lists every chip with a line on what it is. Recomputed every 15 frames. Music at Boost 0 shows the subsonic high-pass; Boost 55 on Signature shows at least three chips (tested).
-- **Five macro knobs** (`ParamKnob`, Large; cells at most 170 px apart; knob at most 96 × 124 px). Captions come from `flub::MacroMap::macroName()` and change with the mode, together with titles and tooltips.
+- **Layouts** ([11 E39](11-enhancement-report.md#e39)). `setLayout (Standard)` in the Advanced view, as described here; `Simple` in the Simple view (§3.5): a dial up to 280 px, knobs up to 124 × 156 px and up to three wrapped chip rows (`BoostPanel::layoutChips`, pure and tested: a chip that does not fit moves to the next row; on the last row every chip but the last keeps 34 px for the *+N*).
+- **Five macro knobs** (`ParamKnob`, Large; cells at most 170 px apart; knob at most 96 × 124 px, 124 × 156 in the Simple layout). Captions come from `flub::MacroMap::macroName()` and change with the mode, together with titles and tooltips.
 - **Rates.** Dial and macros refresh through the binder at 30 Hz. The governor updates every frame; the header strip repaints only when the chip's text changes.
 
 | Key | Range / default | Music macro — tooltip | Gaming macro — tooltip |
@@ -1117,7 +1177,7 @@ Row heights adapt between 14 and 22 px. When the full layout does not fit (a sho
 | Focus (footsteps) | **Ctrl+Alt+S** | `setFocus (hotkey strip, on / off)`: latched Footsteps override, Macro 1 at 100 % on both banks through the smoothed parameter path; off puts the replaced value back (a value changed meanwhile stays); Gaming mode only; a preset load ends it | "Game: Focus on (Footsteps 100%)" / "Game: Focus off" / "Game: Focus needs Gaming mode" |
 | ChatMix: more chat | **Ctrl+Alt+PageUp** | `nudgeChatMix (+0.2)`: one balance, −1 … +1, moving the Game and Chat strip gains in opposite directions (±6 dB at the ends) on top of the user's strip gains; no other strip changes | "ChatMix Game -1.2 dB, Chat +1.2 dB" / "ChatMix needs a Game and a Chat strip" |
 | ChatMix: more game | **Ctrl+Alt+PageDown** | `nudgeChatMix (−0.2)` | same |
-| Night listening | **Ctrl+Alt+N** | `setNight (hotkey strip, on / off)`: latched override with the Night Mode Gaming preset's dynamics (Auto Level −20 LUFS, compressor 3:1 at −24 dB with +6 dB makeup, upward 2.5:1 below −38 dB up to +6 dB), released like Focus | "Game: Night listening on" / "… off" |
+| Night listening | **Ctrl+Alt+N** | `setNight (hotkey strip, on / off)`: latched override with the dynamics the Night Mode Gaming preset had before [11 E21](11-enhancement-report.md#e21) Phase 3 (Auto Level −20 LUFS, compressor 3:1 at −24 dB with +6 dB makeup, upward 2.5:1 below −38 dB up to +6 dB; the preset now uses −14 LUFS without makeup and the Startle Guard), released like Focus | "Game: Night listening on" / "… off" |
 | Bypass hotkey strip | **Ctrl+Alt+B** | `setStripBypassed (hotkey strip, …)`: bypass of that strip only, on top of the master enable (loudness matched when `bypass.matched` is on) | "Game: bypassed (loudness matched)" / "Game: processing" |
 
 - **Hotkey strip** ([11 E56](11-enhancement-report.md#e56)). Strip actions go to `EngineController::getHotkeyStrip()`: the strip of the active automatic profile (§8.1), else the one chosen in Settings › Hotkeys (*Hotkeys act on*, `AppSettings::getHotkeyStripName()`, default Game; a name the layout lacks falls back to the first strip). Never the strip selected in the window, so Boost+ mid-match cannot land on Music because Music was clicked last. Focus, Night, the strip bypass and ChatMix are per session: shutdown releases the latches before the strip state is saved, and a layout change resets all four.
@@ -1269,6 +1329,7 @@ pluginval in CI is part of the same roadmap item.
 ```
 FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds S] [--scale F]
              [--theme standard|high-contrast] [--device "output device name"] [--state name[,name...]]
+             [--view advanced|simple]
 ```
 
 | Option | Default | Validation | Effect |
@@ -1280,6 +1341,7 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
 | `--scale F` | `1` | clamped 0.5–4 | Snapshot scale, e.g. 2 for a HiDPI check or 1.5 for the 150 % UI scale. It is also applied as the UI scale (`Theme::applyUiScale`, clamped to 75–200 %); `--size` stays in logical pixels, so the image is `--size` × F, exactly what the window shows at that UI scale |
 | `--theme standard\|high-contrast` | `standard` | anything else is an error | Palette (§2.1), applied before the window is created (parsed in `FlubsoundApplication.cpp`) |
 | `--device "name"` | none | must be followed by a name | `EngineController::simulateOutputDevice (name, engine rate, 2 channels)`. The device-profile match, advice banner and master-ceiling cap then behave as if that output were open. It never overrides a real device |
+| `--view advanced\|simple` | `advanced` | anything else is an error | The main window's view (§3.5), set without saving it. The default is the full window every earlier screenshot shows; the app's own default, without a saved choice, is Simple |
 | `--state a,b` | none | one or more of the names below, comma separated; anything else is an error | UI states that need a real device or a real mistake, reached through the same code paths where they can: `device-error` (`AudioEngineHost::audioDeviceError`: the error banner), `loopback` (the device input feeds the Game strip and `checkLoopbackPair` is given CABLE Output / CABLE Input: the muted banner), `preset-warning` (a preset with a typo'd key and an out-of-range value, read by `flub::preset::fromJson`, as the notice bar shows its warnings), `recovery` (the notice for a settings file restored from `.bak1`), `latency-prompt` (Audiophile Subtle, or Competitive FPS in gaming mode, loaded on Balanced), `governor` (Boost 100 %, Loudness / Impact 100 %, maximizer drive 12 dB, protection Strict; use `--seconds 8` so the governor's 3 s averages settle). Without `--state` the notice bar starts empty |
 
 - **Exit codes:** 0 success, 1 the PNG could not be written, 2 bad arguments.
@@ -1306,6 +1368,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Meter palette | `ui.meterPalette` (0 standard, 1 colour-blind) | 0 |
 | UI scale | `ui.scalePercent` (0 follow the system, else 75–200) | 0 |
 | Theme | `ui.theme` (`standard` / `high-contrast`) | standard |
+| Main window view ([11 E39](11-enhancement-report.md#e39)) | `ui.view` (`simple` / `advanced`; anything else reads as simple) | simple |
 | Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range"`; range clamped 6–24 | `"1,1,1,1,12"` |
 | Window position and size | `DocumentWindow::getWindowStateAsString()` | centred 1280 × 820 |
 | Selected strip, master enable | `AppSettings` | 0 (Game), enabled |

@@ -1,7 +1,7 @@
 // Flubsound Pro - the header bar.
 //
 //   [logo Flubsound Pro] [Music | Gaming] [Game Music Chat System]
-//        [< preset v >][...]  [A|B][copy]  [Bypass]  latency / CPU  [gear]
+//        [< preset v >][...]  [A|B][copy]  [Bypass]  latency / CPU  [view][gear]
 //
 // * Mode switch: segmented control with a sliding accent thumb; the accent
 //   of the whole UI follows the mode (teal = Music, magenta = Gaming).
@@ -22,6 +22,8 @@
 //   A device problem (docs/11 E51: a loopback pair holding the output at
 //   silence, or a device error) turns the bottom line into a DEVICE warning
 //   with the message in the tooltip; a click opens Settings.
+// * View: Simple <-> Advanced main window (docs/11 E39); the owner switches
+//   (onViewToggleRequested) and tells the header which view is shown.
 // Message thread only; refresh() pulls everything from the controller.
 #pragma once
 
@@ -55,6 +57,11 @@ public:
     void animate (double dtSeconds);
 
     std::function<void()> onSettingsRequested;
+    /** The view button: switch between the Simple and the Advanced view. */
+    std::function<void()> onViewToggleRequested;
+    /** The view shown (the button offers the other one). */
+    void setSimpleView (bool simple);
+    juce::Button& getViewButton() noexcept { return viewButton; }
     /** Preset menu > "Export / batch process audio files..." (ExportDialog). */
     std::function<void()> onExportRequested;
 
@@ -120,6 +127,7 @@ private:
     IconButton copyAB { "Copy to the other bank", Icons::copy(), IconButton::Style::Framed };
     std::unique_ptr<PopupButton> bypassButton;
     IconButton settingsButton { "Settings", Icons::gear(), IconButton::Style::Framed };
+    IconButton viewButton { "Advanced view", Icons::expand(), IconButton::Style::Framed };
     std::unique_ptr<juce::FileChooser> fileChooser;
 
     std::vector<juce::String> presetIds; // combo item id - 1 -> preset id

@@ -37,6 +37,34 @@ bool usesAlsaSurroundOrder (bool alsaDevice, int stripChannels) noexcept
     return alsaDevice && (stripChannels == 6 || stripChannels == 8);
 }
 
+// The calling thread's kernel thread id (REAL-TIME AUDIO THREAD); 0 where
+// the platform has none.
+uint64_t osThreadId() noexcept
+{
+#if FLUB_HAS_PLATFORM_SERVICES
+    return flub::platform::RealtimeScheduling::currentThreadId();
+#else
+    return 0;
+#endif
+}
+
+// What the audio thread's own promotion is called on this system.
+const char* ownPromotionName() noexcept
+{
+#if defined(_WIN32)
+    return "MMCSS Pro Audio";
+#elif defined(__APPLE__)
+    return "time constraint";
+#else
+    return "FIFO";
+#endif
+}
+
+constexpr const char* kRealtimeFix =
+    "install and start RealtimeKit (the rtkit package), or give your user a real-time limit "
+    "(the audio or realtime group with an rtprio limit in /etc/security/limits.d), or use the JACK device type "
+    "(PipeWire's JACK runs the callback on its own real-time thread)";
+
 // The capture fold's surround <-> stereo passthrough ramp: ProcessingChain's
 // kPassFadeMs.
 constexpr float kCaptureFoldRampMs = 400.0f;
@@ -115,6 +143,14 @@ AudioEngineHost::AudioEngineHost()
     // Strips and parameter stores must exist before anything else (UI, preset
     // restore) touches the engine, so configure once for a nominal format.
     configureEngine (currentSampleRate, currentBlockSize, false);
+
+#if FLUB_HAS_PLATFORM_SERVICES
+    realtimeHooks.query = [] (uint64_t threadId) { return flub::platform::RealtimeScheduling::queryThread (threadId); };
+    realtimeHooks.request = [] (uint64_t threadId, int priority)
+    { return flub::platform::RealtimeScheduling::requestRealtimeKit (threadId, priority); };
+    channelMapQuery = [] (const juce::String& type, const juce::String& name, int channels)
+    { return flub::platform::AudioChannelMaps::queryInputPositions (type.toStdString(), name.toStdString(), channels); };
+#endif
 
     // Structural parameter changes (latency profile) are picked up here, and
     // engines retired by a swap are destroyed.
@@ -483,6 +519,9 @@ void AudioEngineHost::timerCallback()
     // A capture restart at a new device rate that failed is retried at 1 Hz.
     if (captureRestartNeeded && juce::Time::getMillisecondCounter() - lastCaptureRestartMs >= 1000)
         restartCapturesAtDeviceRate();
+
+    // A new device thread: its real-time status, RealtimeKit if needed.
+    serviceAudioThreadRealtime();
 }
 
 void AudioEngineHost::handleAsyncUpdate()
@@ -1085,10 +1124,10 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
                 const int firstInput = deviceInputFirst[si].load (std::memory_order_relaxed);
                 if (inputs != nullptr && firstInput >= 0 && firstInput < numInputs)
                 {
-                    const bool permute = usesAlsaSurroundOrder (alsaOrder, channels);
+                    const auto order = stripInputOrder (firstInput, channels, alsaOrder);
                     for (int c = 0; c < channels; ++c)
                     {
-                        const int src = firstInput + (permute ? kAlsaSurroundOrder[static_cast<size_t> (c)] : c);
+                        const int src = firstInput + order[static_cast<size_t> (c)];
                         if (src < numInputs && inputs[src] != nullptr)
                             std::memcpy (block.channel (c), inputs[src] + pos, sizeof (float) * static_cast<size_t> (n));
                         else
@@ -1222,6 +1261,12 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     {
         promotionHandle = platform_bridge::promoteAudioThread();
         promotedThread = thisThread;
+        // docs/11 E44: which kernel thread this is, for the message thread
+        // (serviceAudioThreadRealtime), which reads its scheduling and asks
+        // RealtimeKit when the promotion above was not allowed.
+        audioThreadId.store (osThreadId(), std::memory_order_relaxed);
+        audioThreadPromoted.store (promotionHandle != nullptr, std::memory_order_relaxed);
+        audioThreadGeneration.fetch_add (1, std::memory_order_release);
     }
 
     const bool ready = engineReady.load (std::memory_order_acquire);
@@ -1293,6 +1338,7 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
     // Read by the callback, which has not started yet.
     alsaChannelOrder.store (isAlsaDeviceType (device->getTypeName()), std::memory_order_relaxed);
+    readDeviceChannelMap (*device);
     deviceSampleRate.store (sampleRate, std::memory_order_relaxed);
     callbackTiming.restartIntervals();
 
@@ -1326,6 +1372,9 @@ void AudioEngineHost::audioDeviceStopped()
 {
     engineReady.store (false, std::memory_order_release);
     callbackRunning.store (false, std::memory_order_release);
+    // No callback runs now. The next device's thread is checked again even if
+    // it reuses this one's pthread id (a new kernel thread may).
+    promotedThread = nullptr;
     callbackTiming.restartIntervals();
     configurePending.store (false, std::memory_order_release);
 }
@@ -1555,6 +1604,8 @@ EngineStatus AudioEngineHost::getStatus() const
     st.running = callbackRunning.load (std::memory_order_acquire) && engineReady.load (std::memory_order_acquire);
     st.callbacks = callbackCounter.load (std::memory_order_relaxed);
     st.callbackTiming = callbackTiming.snapshot();
+    st.audioThread = audioThreadRealtime;
+    st.inputChannelMap = st.deviceOpen || callbackRunning.load (std::memory_order_acquire) ? inputChannelMap : InputChannelMap::None;
     return st;
 }
 
@@ -1565,5 +1616,253 @@ std::array<int, flub::kMaxChannels> AudioEngineHost::deviceInputOrder (const juc
     for (int c = 0; c < flub::kMaxChannels; ++c)
         order[static_cast<size_t> (c)] = permute && c < stripChannels ? kAlsaSurroundOrder[static_cast<size_t> (c)] : c;
     return order;
+}
+
+// =============================================================================
+// Device channel order (docs/11 E27 step 4)
+// =============================================================================
+bool AudioEngineHost::orderFromPositions (const flub::platform::SpeakerPosition* positions, int stripChannels,
+                                          std::array<int, flub::kMaxChannels>& order) noexcept
+{
+    using P = flub::platform::SpeakerPosition;
+    // The engine's layouts; a slot may accept two positions (5.1's surround
+    // pair is side or rear, depending on who named it).
+    struct Slot
+    {
+        P a, b;
+    };
+    static constexpr Slot kStereo[] = { { P::FL, P::FL }, { P::FR, P::FR } };
+    static constexpr Slot kFiveOne[] = { { P::FL, P::FL }, { P::FR, P::FR }, { P::FC, P::FC }, { P::LFE, P::LFE }, { P::SL, P::RL }, { P::SR, P::RR } };
+    static constexpr Slot kSevenOne[] = { { P::FL, P::FL }, { P::FR, P::FR }, { P::FC, P::FC }, { P::LFE, P::LFE },
+                                          { P::RL, P::RL }, { P::RR, P::RR }, { P::SL, P::SL }, { P::SR, P::SR } };
+    const Slot* layout = stripChannels == 2 ? kStereo : stripChannels == 6 ? kFiveOne : stripChannels == 8 ? kSevenOne : nullptr;
+    if (positions == nullptr || layout == nullptr)
+        return false;
+
+    std::array<int, flub::kMaxChannels> result {};
+    for (int c = 0; c < flub::kMaxChannels; ++c)
+        result[static_cast<size_t> (c)] = c;
+    uint32_t used = 0;
+    for (int c = 0; c < stripChannels; ++c)
+    {
+        const Slot slot = layout[c];
+        int found = -1;
+        for (int d = 0; d < stripChannels; ++d)
+        {
+            if (positions[d] == P::Unknown || (positions[d] != slot.a && positions[d] != slot.b))
+                continue;
+            if (found >= 0)
+                return false; // two channels claim the slot
+            found = d;
+        }
+        if (found < 0 || (used & (1u << found)) != 0)
+            return false;
+        used |= 1u << found;
+        result[static_cast<size_t> (c)] = found;
+    }
+    order = result;
+    return true;
+}
+
+flub::platform::SpeakerPosition AudioEngineHost::positionFromChannelName (const juce::String& name)
+{
+    using P = flub::platform::SpeakerPosition;
+    auto token = name.fromLastOccurrenceOf (":", false, false).trim().toLowerCase();
+    for (const char* prefix : { "monitor_", "capture_", "playback_", "input_", "output_" })
+        if (token.startsWith (prefix))
+        {
+            token = token.substring (static_cast<int> (std::strlen (prefix)));
+            break;
+        }
+    token = token.replaceCharacter ('-', '_').replaceCharacter (' ', '_');
+
+    struct Name
+    {
+        const char* text;
+        P position;
+    };
+    static constexpr Name kNames[] = {
+        { "fl", P::FL },           { "front_left", P::FL },    { "fr", P::FR },          { "front_right", P::FR },
+        { "fc", P::FC },           { "front_center", P::FC },  { "front_centre", P::FC }, { "center", P::FC },
+        { "centre", P::FC },       { "lfe", P::LFE },          { "rl", P::RL },          { "rear_left", P::RL },
+        { "bl", P::RL },           { "back_left", P::RL },     { "rr", P::RR },          { "rear_right", P::RR },
+        { "br", P::RR },           { "back_right", P::RR },    { "sl", P::SL },          { "side_left", P::SL },
+        { "sr", P::SR },           { "side_right", P::SR },
+    };
+    for (const auto& n : kNames)
+        if (token == n.text)
+            return n.position;
+    return P::Unknown;
+}
+
+void AudioEngineHost::readDeviceChannelMap (juce::AudioIODevice& device)
+{
+    // Positions of all the device's input channels up to the last active one,
+    // then those of the active ones: the callback receives only those.
+    const auto activeInputs = device.getActiveInputChannels();
+    const int total = std::max (0, activeInputs.getHighestBit() + 1);
+    std::vector<flub::platform::SpeakerPosition> positions (static_cast<size_t> (total), flub::platform::SpeakerPosition::Unknown);
+    const auto anyKnown = [] (const std::vector<flub::platform::SpeakerPosition>& p)
+    { return std::any_of (p.begin(), p.end(), [] (auto v) { return v != flub::platform::SpeakerPosition::Unknown; }); };
+
+    inputChannelMap = InputChannelMap::None;
+    if (channelMapQuery != nullptr && total > 0)
+    {
+        // A JUCE device is named after its output when it has one: the input's
+        // own name is in the device manager's setup (message thread).
+        juce::String inputName;
+        if (juce::MessageManager::existsAndIsCurrentThread() && deviceManager.getCurrentAudioDevice() == &device)
+            inputName = deviceManager.getAudioDeviceSetup().inputDeviceName;
+        if (inputName.isEmpty())
+            inputName = device.getName();
+        auto backend = channelMapQuery (device.getTypeName(), inputName, total);
+        if (static_cast<int> (backend.size()) == total && anyKnown (backend))
+        {
+            positions = std::move (backend);
+            inputChannelMap = InputChannelMap::Backend;
+        }
+    }
+    if (inputChannelMap == InputChannelMap::None)
+    {
+        const auto names = device.getInputChannelNames();
+        for (int i = 0; i < total && i < names.size(); ++i)
+            positions[static_cast<size_t> (i)] = positionFromChannelName (names[i]);
+        if (anyKnown (positions))
+            inputChannelMap = InputChannelMap::ChannelNames;
+    }
+
+    int k = 0;
+    for (int i = 0; i < total && k < kMaxDeviceInputs; ++i)
+        if (activeInputs[i])
+            deviceInputPositions[static_cast<size_t> (k++)].store (static_cast<uint8_t> (positions[static_cast<size_t> (i)]), std::memory_order_relaxed);
+    for (; k < kMaxDeviceInputs; ++k)
+        deviceInputPositions[static_cast<size_t> (k)].store (0, std::memory_order_relaxed);
+}
+
+std::array<int, flub::kMaxChannels> AudioEngineHost::stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept
+{
+    std::array<flub::platform::SpeakerPosition, flub::kMaxChannels> positions {};
+    const int channels = std::min (stripChannels, flub::kMaxChannels);
+    for (int c = 0; c < channels; ++c)
+        if (const int d = firstInput + c; d >= 0 && d < kMaxDeviceInputs)
+            positions[static_cast<size_t> (c)] = static_cast<flub::platform::SpeakerPosition> (deviceInputPositions[static_cast<size_t> (d)].load (std::memory_order_relaxed));
+
+    std::array<int, flub::kMaxChannels> order {};
+    if (orderFromPositions (positions.data(), channels, order))
+        return order;
+    const bool permute = usesAlsaSurroundOrder (alsaOrder, channels);
+    for (int c = 0; c < flub::kMaxChannels; ++c)
+        order[static_cast<size_t> (c)] = permute && c < channels ? kAlsaSurroundOrder[static_cast<size_t> (c)] : c;
+    return order;
+}
+
+// =============================================================================
+// Real-time audio thread (docs/11 E44)
+// =============================================================================
+juce::String AudioThreadRealtime::describe() const
+{
+    switch (state)
+    {
+        case State::RealTime:
+        {
+            juce::String text = "real-time (" + (policy.isNotEmpty() ? policy : juce::String ("yes"));
+            if (priority > 0)
+                text << " " << priority;
+            if (via == Via::RealtimeKit)
+                text << " via rtkit";
+            else if (via == Via::Backend)
+                text << ", the audio server's thread";
+            return text + ")";
+        }
+        case State::NotRealTime:
+            return "NOT real-time: " + detail;
+        case State::Unknown:
+            break;
+    }
+    return "real-time status unknown";
+}
+
+void AudioEngineHost::setRealtimeHooks (RealtimeHooks hooks)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    realtimeHooks = std::move (hooks);
+    realtimeHooksInjected = true;
+}
+
+void AudioEngineHost::serviceAudioThreadRealtime()
+{
+    using State = AudioThreadRealtime::State;
+    using Via = AudioThreadRealtime::Via;
+    const uint32_t generation = audioThreadGeneration.load (std::memory_order_acquire);
+    if (generation == realtimeGenerationSeen)
+        return;
+    realtimeGenerationSeen = generation;
+    const uint64_t threadId = audioThreadId.load (std::memory_order_relaxed);
+    const bool promoted = audioThreadPromoted.load (std::memory_order_relaxed);
+
+    AudioThreadRealtime next;
+    next.rtkitRequests = audioThreadRealtime.rtkitRequests;
+    const auto previousVia = threadId == realtimeThreadId ? audioThreadRealtime.via : Via::None;
+    realtimeThreadId = threadId;
+
+    const auto realTime = [&next] (Via via, const flub::platform::ThreadScheduling& s)
+    {
+        next.state = State::RealTime;
+        next.via = via;
+        next.policy = s.policy;
+        next.priority = s.priority;
+    };
+
+    if (threadId == 0 || realtimeHooks.query == nullptr)
+    {
+        // No thread ids here (Windows, macOS): only the callback's own
+        // promotion is known.
+        if (promoted)
+        {
+            next.state = State::RealTime;
+            next.via = Via::Promoted;
+            next.policy = ownPromotionName();
+        }
+        audioThreadRealtime = next;
+        return;
+    }
+
+    const auto now = realtimeHooks.query (threadId);
+    if (! now.known)
+    {
+        audioThreadRealtime = next; // the thread has gone already
+        return;
+    }
+    if (now.realtime)
+    {
+        realTime (promoted ? Via::Promoted : previousVia == Via::RealtimeKit ? Via::RealtimeKit : Via::Backend, now);
+        audioThreadRealtime = next;
+        return;
+    }
+
+    next.state = State::NotRealTime;
+    next.policy = now.policy;
+    // RealtimeKit is asked for a device thread only: never for the message
+    // thread (a test or offline driver calling the callback itself), and with
+    // the platform's own hooks only while a device this host opened runs.
+    const bool deviceThread = threadId != osThreadId() && (realtimeHooksInjected || deviceManager.getCurrentAudioDevice() != nullptr);
+    if (realtimeHooks.request == nullptr || ! deviceThread)
+    {
+        next.detail = juce::String ("the audio thread runs at ") + now.policy + " scheduling; " + kRealtimeFix;
+        audioThreadRealtime = next;
+        return;
+    }
+
+    ++next.rtkitRequests;
+    const auto result = realtimeHooks.request (threadId, kRealtimeKitPriority);
+    const auto after = realtimeHooks.query (threadId);
+    if (after.known && after.realtime)
+        realTime (Via::RealtimeKit, after);
+    else if (result.outcome == flub::platform::RealtimeKitResult::Outcome::Granted)
+        next.detail = juce::String ("RealtimeKit accepted the request, but the thread still runs at ") + (after.known ? after.policy : now.policy)
+                      + " scheduling; " + kRealtimeFix;
+    else
+        next.detail = juce::String (result.message) + "; " + kRealtimeFix;
+    audioThreadRealtime = next;
 }
 } // namespace flub::app

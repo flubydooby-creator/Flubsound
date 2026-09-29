@@ -21,6 +21,9 @@
 //           meters, e.g. "Bass +3.1 dB @ 70 Hz", "Width 118 %", "Maximizer
 //           +4.0 dB drive"; what does not fit is counted ("+3") and listed in
 //           the tooltip.
+// Layouts  Standard (the Advanced view's strip: one chip row) and Simple
+//           (docs/11 E39: the Simple view's centre piece, a larger dial and up
+//           to three wrapped chip rows).
 // All controls are bound to the selected strip's ParameterStore.
 #pragma once
 
@@ -57,6 +60,14 @@ class BoostPanel : public juce::Component, public juce::TooltipClient
 public:
     explicit BoostPanel (EngineController& controller);
 
+    enum class Layout
+    {
+        Standard, // the Advanced view: dial <= 196 px, one chip row
+        Simple    // the Simple view (docs/11 E39): dial <= 280 px, up to three chip rows
+    };
+    void setLayout (Layout layout);
+    Layout getLayout() const noexcept { return panelLayout; }
+
     /** Mode changes the macro captions / tooltips. */
     void setMode (flub::param::ModeValue mode);
     void setGovernorScale (float scale);
@@ -86,6 +97,24 @@ public:
     static std::vector<ActiveStage> describeActiveStages (const std::function<float (int)>& effective, const MeterSnapshot& snapshot,
                                                           int stripChannels);
 
+    /** Where the chips go: each chip's pill, in order, over `rows` (top to
+        bottom). A chip that does not fit moves to the next row; on the last
+        row every chip but the last keeps kMoreWidth free for the "+N" of the
+        chips that do not fit (`hidden`, drawn in `more`). Pure; tested. */
+    struct ChipLayout
+    {
+        std::vector<juce::Rectangle<float>> pills;
+        int hidden = 0;
+        juce::Rectangle<float> more;
+    };
+    static constexpr float kChipHeight = 17.0f, kChipGap = 5.0f, kMoreWidth = 34.0f;
+    static ChipLayout layoutChips (const std::vector<float>& chipWidths, const std::vector<juce::Rectangle<float>>& rows);
+
+    /** Chips drawn by the last paint (the rest are counted as "+N"). */
+    int getShownStageCount() const noexcept { return shownStages; }
+    int getChipRowCount() const noexcept { return static_cast<int> (chipRows.size()); }
+    juce::Rectangle<int> getDialBounds() const { return dial.getBounds(); }
+
     const GovernorReadout& getGovernorReadout() const noexcept { return governor; }
     const std::vector<ActiveStage>& getActiveStages() const noexcept { return stages; }
 
@@ -104,6 +133,8 @@ private:
     ParameterBinder binder;
     flub::param::ModeValue mode = flub::param::ModeValue::Music;
     juce::Rectangle<int> dialArea, macroArea, headerArea, chipsArea;
+    std::vector<juce::Rectangle<float>> chipRows; // inside chipsArea, right of the ACTIVE caption
+    Layout panelLayout = Layout::Standard;
     juce::Rectangle<float> governorChip;
     GovernorReadout governor;
     std::vector<ActiveStage> stages;

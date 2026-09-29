@@ -172,8 +172,7 @@ void StartleGuard::measure (const AudioBlock& block, bool unmeasured) noexcept F
             power += k * k;
         }
         fastMs = power + fastCoeff * (fastMs - power);
-        // The momentary loudness: the last kMomentarySteps - 1 whole 10 ms
-        // steps and the samples of the current one.
+        // The momentary loudness (400 ms).
         partialSum += power;
         ++partialLength;
         const double momentaryMs = (stepsSum + partialSum) / static_cast<double> (stepCount * stepLength + partialLength);

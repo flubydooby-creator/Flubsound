@@ -104,9 +104,26 @@
 //   it: read as it comes, the centre (dialogue) lands in the rear-left
 //   speaker and the rears in FC / LFE. So a 6- or 8-channel strip fed from
 //   an ALSA device is permuted into the engine's order while it is gathered
-//   (deviceInputOrder). The backend's channel map is not read yet: a raw
-//   hw: device whose driver uses another order (USB audio class) is permuted
-//   the same way.
+//   (deviceInputOrder). Where the device says which speaker each input
+//   channel carries, that wins and the strip is permuted generically
+//   (orderFromPositions): the backend's channel map (Linux: the capture
+//   chmap of an ALSA card PCM, platform::AudioChannelMaps) or, failing that,
+//   the device's channel names (JACK / PipeWire-JACK ports such as
+//   "monitor_FL"). The positions are read at each device start; a strip whose
+//   channels do not form the engine's 2.0 / 5.1 / 7.1 layout keeps the
+//   fallback above (EngineStatus::inputChannelMap says which applies).
+//
+// REAL-TIME AUDIO THREAD (docs/11 E44)
+//   The first callback on each new device thread promotes it itself
+//   (platform SystemTuning: MMCSS, time constraint, SCHED_FIFO within the
+//   user's RLIMIT_RTPRIO; no allocation on Linux) and records its kernel
+//   thread id. The message thread (serviceAudioThreadRealtime, on the 5 Hz
+//   timer) reads that thread's scheduling and, on Linux when it is still
+//   not real-time, asks RealtimeKit over the system D-Bus
+//   (platform::RealtimeScheduling), which the audio thread cannot do. The
+//   outcome is EngineStatus::audioThread ("real-time (RR 20 via rtkit)" or
+//   "NOT real-time: ..." with the fix), read through
+//   EngineController::getStatus().
 //
 // CALLBACK TIMING (docs/11 E45)
 //   Every device callback records its duration (steady clock, start to end)
@@ -187,6 +204,45 @@ struct DeviceSafetyState
     uint32_t generation = 0;                          // increments on every change
 };
 
+/** Is the device callback's thread real-time? (docs/11 E44, REAL-TIME
+    AUDIO THREAD) */
+struct AudioThreadRealtime
+{
+    enum class State : uint8_t
+    {
+        Unknown,    // no callback yet, or the thread cannot be inspected here
+        RealTime,
+        NotRealTime // 'detail' says why and what to do
+    };
+    enum class Via : uint8_t
+    {
+        None,
+        Backend,    // the audio server's own real-time thread (JACK / PipeWire-JACK)
+        Promoted,   // the callback promoted its thread (MMCSS, time constraint, SCHED_FIFO)
+        RealtimeKit // RealtimeKit granted it (Linux)
+    };
+
+    State state = State::Unknown;
+    Via via = Via::None;
+    juce::String policy;   // "FIFO", "RR", "MMCSS" ...; empty when unknown
+    int priority = 0;      // the real-time priority, 0 when none applies
+    juce::String detail;   // NotRealTime: the reason and the fix
+    uint32_t rtkitRequests = 0; // RealtimeKit requests made so far (at most one per new device thread)
+
+    /** The Settings status line: "real-time (RR 20 via rtkit)",
+        "NOT real-time: <detail>" or "real-time status unknown". */
+    juce::String describe() const;
+};
+
+/** Where the engine's device input channel order comes from (DEVICE CHANNEL
+    ORDER). */
+enum class InputChannelMap : uint8_t
+{
+    None,         // no positions: the identity, or ALSA's order for "ALSA" / "ALSA HW" 5.1 / 7.1 strips
+    ChannelNames, // the device's channel names (JACK / PipeWire port names such as "monitor_FL")
+    Backend       // the backend's channel map (an ALSA card PCM's capture chmap)
+};
+
 struct EngineStatus
 {
     bool deviceOpen = false;
@@ -203,6 +259,12 @@ struct EngineStatus
         keeps its previous snapshot and takes since() for a window: p99.9 /
         peak load (loadAt), overBudget, late. */
     flub::CallbackTiming::Snapshot callbackTiming;
+    /** The device thread's scheduling as the message thread last saw it
+        (docs/11 E44). */
+    AudioThreadRealtime audioThread;
+    /** Where the running device's input channel order comes from (docs/11
+        E27 step 4); None while no device runs. */
+    InputChannelMap inputChannelMap = InputChannelMap::None;
 };
 
 /** Offline source of strip audio (headless rendering, screenshots, tests). */
@@ -396,6 +458,56 @@ public:
         Pure. */
     static std::array<int, flub::kMaxChannels> deviceInputOrder (const juce::String& deviceTypeName, int stripChannels) noexcept;
 
+    /** The generic form (DEVICE CHANNEL ORDER): `positions` are the speaker
+        positions of the strip's `stripChannels` device channels, in device
+        order. True, with `order` as in deviceInputOrder, when they are
+        exactly the engine's layout for that channel count in some order:
+        FL FR; FL FR FC LFE + SL SR (or RL RR); FL FR FC LFE RL RR SL SR.
+        False otherwise (unknown, missing or repeated positions, another
+        channel count). Pure. */
+    static bool orderFromPositions (const flub::platform::SpeakerPosition* positions, int stripChannels,
+                                    std::array<int, flub::kMaxChannels>& order) noexcept;
+
+    /** The speaker position a device channel's name spells: the part after
+        the last ':' (JACK "client:port"), without a "monitor_", "capture_",
+        "playback_", "input_" or "output_" prefix, as a PipeWire / PulseAudio
+        short name (FL, FR, FC, LFE, RL, RR, SL, SR, BL, BR) or long name
+        ("front-left", "rear right", "side_left", "center", ...), in any
+        case. Unknown otherwise ("channel 1", "in_3", "AUX0"). Pure. */
+    static flub::platform::SpeakerPosition positionFromChannelName (const juce::String& name);
+
+    /** Reads the backend's channel map of the device's inputs at each device
+        start (DEVICE CHANNEL ORDER). Defaults to the platform
+        (platform::AudioChannelMaps); tests inject their own; nullptr = the
+        channel names only. Message thread, before a device starts. */
+    using ChannelMapQuery = std::function<std::vector<flub::platform::SpeakerPosition> (const juce::String& deviceTypeName,
+                                                                                        const juce::String& inputDeviceName, int channels)>;
+    void setChannelMapQuery (ChannelMapQuery query) { channelMapQuery = std::move (query); }
+
+    // =========================================================================
+    // Real-time audio thread (docs/11 E44; message thread)
+    // =========================================================================
+    /** How the message thread reads a thread's scheduling and asks for real
+        time. Default: platform::RealtimeScheduling (Linux; RealtimeKit is
+        asked only while a device this host opened is running). Tests inject
+        their own (then RealtimeKit's stand-in is asked for any thread but the
+        message thread). */
+    struct RealtimeHooks
+    {
+        std::function<flub::platform::ThreadScheduling (uint64_t threadId)> query;
+        std::function<flub::platform::RealtimeKitResult (uint64_t threadId, int wantedPriority)> request;
+    };
+    void setRealtimeHooks (RealtimeHooks hooks);
+
+    /** Handles a new device thread seen by the callback: reads its
+        scheduling and, when it is not real-time, asks RealtimeKit once.
+        Runs on the timer; public for tests. */
+    void serviceAudioThreadRealtime();
+    AudioThreadRealtime getAudioThreadRealtime() const { return audioThreadRealtime; }
+    /** The priority asked of RealtimeKit (capped at its MaxRealtimePriority):
+        the one promoteAudioThread uses, below PipeWire's own data thread. */
+    static constexpr int kRealtimeKitPriority = 20;
+
     /** Factory for per-process capture objects. Defaults to the platform
         implementation (platform_bridge); tests / alternative capture sources
         can inject their own. Message thread, before starting captures. */
@@ -569,7 +681,7 @@ private:
     // is retired at swapOldEnd and the transition ends at swapEnd.
     bool swapRunning = false, swapCounts = false;
     int swapPos = 0, swapFadeInStart = 0, swapFadeOutStart = 0, swapOldEnd = 0, swapEnd = 0;
-    juce::Thread::ThreadID promotedThread = nullptr;
+    juce::Thread::ThreadID promotedThread = nullptr; // audio thread; reset while no callback runs
     void* promotionHandle = nullptr;
     bool lastStampFromHost = false; // the previous callback's interval clock (host time or steady clock)
 
@@ -580,6 +692,15 @@ private:
     std::atomic<float> masterCeilingDb { -1.0f };
     std::array<std::atomic<int>, kMaxStrips> deviceInputFirst {};
     std::atomic<bool> alsaChannelOrder { false }; // the running device delivers ALSA's order (DEVICE CHANNEL ORDER)
+    // The speaker position of each device input the callback receives
+    // (flub::platform::SpeakerPosition; set at device start).
+    static constexpr int kMaxDeviceInputs = 64;
+    std::array<std::atomic<uint8_t>, kMaxDeviceInputs> deviceInputPositions {};
+    // The device thread as the callback last saw it (REAL-TIME AUDIO THREAD):
+    // audio thread -> message thread, published by the generation (release).
+    std::atomic<uint64_t> audioThreadId { 0 };
+    std::atomic<bool> audioThreadPromoted { false };
+    std::atomic<uint32_t> audioThreadGeneration { 0 };
     std::atomic<double> deviceSampleRate { 0.0 }; // the running device's rate, for the callback period
     flub::CallbackTiming callbackTiming;          // written by the device callback only
     std::atomic<bool> engineReady { false }, callbackRunning { false };
@@ -617,6 +738,16 @@ private:
     uint64_t lastTimedOutCounter = 0;   // ... while the counter stood here
     juce::uint32 lastCaptureRestartMs = 0;
     double graphQuantumMs = 0.0;
+    ChannelMapQuery channelMapQuery;
+    InputChannelMap inputChannelMap = InputChannelMap::None;
+    RealtimeHooks realtimeHooks;
+    bool realtimeHooksInjected = false;
+    uint32_t realtimeGenerationSeen = 0;
+    uint64_t realtimeThreadId = 0; // the thread audioThreadRealtime describes
+    AudioThreadRealtime audioThreadRealtime;
+
+    void readDeviceChannelMap (juce::AudioIODevice& device);
+    std::array<int, flub::kMaxChannels> stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngineHost)
 };

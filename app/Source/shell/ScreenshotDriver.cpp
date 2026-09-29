@@ -70,6 +70,18 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
         options.simulatedDevice = args[deviceIndex + 1].unquoted();
     }
 
+    const int viewIndex = args.indexOf ("--view");
+    if (viewIndex >= 0)
+    {
+        const auto view = args[viewIndex + 1].toLowerCase();
+        if (view != "simple" && view != "advanced")
+        {
+            error = "--view must be 'advanced' or 'simple'";
+            return false;
+        }
+        options.simpleView = view == "simple";
+    }
+
     const int stateIndex = args.indexOf ("--state");
     if (stateIndex >= 0)
     {
@@ -177,7 +189,10 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
 {
     auto* main = dynamic_cast<ui::MainComponent*> (&target);
     if (main != nullptr)
+    {
         main->getNoticeBar().clear(); // the scene's preset loads are not what a screenshot shows
+        main->setView (options.simpleView ? ui::MainComponent::View::Simple : ui::MainComponent::View::Advanced, false);
+    }
     const auto& states = options.states;
 
     if (states.contains ("latency-prompt"))

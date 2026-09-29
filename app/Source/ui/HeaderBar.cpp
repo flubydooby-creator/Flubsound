@@ -166,6 +166,15 @@ HeaderBar::HeaderBar (EngineController& c)
     };
     addAndMakeVisible (settingsButton);
 
+    // ---- View (Simple / Advanced) ----
+    viewButton.onClick = [this]
+    {
+        if (onViewToggleRequested != nullptr)
+            onViewToggleRequested();
+    };
+    addAndMakeVisible (viewButton);
+    setSimpleView (false);
+
     rebuildStrips();
     refreshPresets();
     refresh();
@@ -178,6 +187,14 @@ HeaderBar::~HeaderBar() = default;
 // =============================================================================
 // State
 // =============================================================================
+void HeaderBar::setSimpleView (bool simple)
+{
+    viewButton.setIcon (simple ? Icons::expand() : Icons::collapse());
+    Style::describe (viewButton, simple ? "Advanced view" : "Simple view",
+                     simple ? "Advanced view: routing, spectrum and EQ, the module rack and every meter"
+                            : "Simple view: Boost, the five macros, what is active now, your headset and one loudness meter");
+}
+
 void HeaderBar::rebuildStrips()
 {
     for (auto& b : stripButtons)
@@ -815,6 +832,8 @@ void HeaderBar::resized()
 
     // Right side, from the right edge.
     settingsButton.setBounds (centred (r.removeFromRight (34), 34));
+    r.removeFromRight (4);
+    viewButton.setBounds (centred (r.removeFromRight (34), 34));
     r.removeFromRight (compact ? 8 : 10);
     readoutArea = centred (r.removeFromRight ((compact ? 74 : 104) + (wideReadout ? 34 : 0)), 34);
     r.removeFromRight (compact ? 10 : 12);

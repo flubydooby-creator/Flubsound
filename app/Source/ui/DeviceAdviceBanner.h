@@ -31,6 +31,10 @@ public:
 
     static constexpr int kHeight = 34;
 
+    /** "wired", "USB / wireless dongle", "Bluetooth", "Bluetooth hands-free";
+        empty for Connection::Unknown. */
+    static juce::String connectionText (flub::device::Connection connection);
+
     std::function<void()> onDetailsRequested;
 
     void paint (juce::Graphics& g) override;

@@ -88,9 +88,24 @@
 //   Gaming (Strict 6 dB lower), PLR 8 dB in Music (Strict 10), none in
 //   Gaming. The ~3 s averages of the GR and the stage THD+N above are still
 //   kept for the meters.
+//   Tonal-balance rule (Normal / Strict, docs/11 E07; getTonalScale()): a
+//   third scale, on the lifts the macros add ungoverned - Clarity presence
+//   and air, the Gaming Voice & Score band and the Music air band (never the
+//   user's EQ, the footstep cue bands or anything in base values). The
+//   chain measures its net tonal balance (TonalBalanceMeter: long-term
+//   presence 2-5 kHz, harsh 5-10 kHz and air 10-16 kHz lifts over the
+//   200 Hz - 1 kHz lift, output against the dynamic EQ's input); the loop
+//   (a PI as above at kTonalGain, set point kTonalMarginDb inside the
+//   budget, falls at most kTonalFallDbPerSec) takes the scale down while
+//   any band's lift is over its budget, whatever made it bright, and lets
+//   it recover when all are comfortably under. Budgets: presence / harsh /
+//   air +3 / +3 / +4 dB in Music, +2 / +2 / +3 dB in Gaming (its Done-when:
+//   2-5 kHz lift minus 200 Hz - 1 kHz lift <= +2 dB), Strict 1.5 dB lower.
+//   It does not touch the drive scale.
 //   getState() / getReason() say what the loop is doing and which budget
 //   made it back off (published on MeterBus with the scale and both
-//   averages); the measured loop adds kReasonDynamics and kReasonHarmonics.
+//   averages); the measured loop adds kReasonDynamics, kReasonHarmonics and
+//   kReasonTonal.
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A 3 s K-weighted "slow" loudness that is only advanced while programme is
@@ -415,6 +430,7 @@ public:
     static constexpr uint32_t kReasonDistortion = 2u; // ~3 s THD+N average above kDistortionBudgetDb
     static constexpr uint32_t kReasonDynamics = 4u;   // Normal / Strict: output PLR under its budget
     static constexpr uint32_t kReasonHarmonics = 8u;  // Normal / Strict: exposed bass harmonics over the budget
+    static constexpr uint32_t kReasonTonal = 16u;     // Normal / Strict: the net tonal balance over its budget (docs/11 E07)
 
     /** The measured loop's budgets (Normal / Strict, docs/11 E06 Phase 3). */
     struct Budgets
@@ -422,6 +438,10 @@ public:
         float grDb = -6.0f;        // limiter GR, ~0.5 s average (dB <= 0)
         float residualDb = -35.0f; // audible span residual (WeightedResidual, dB re the output)
         float plrDb = 8.0f;        // output peak-to-loudness ratio; 0 = no dynamics budget
+        // Net tonal balance (docs/11 E07): lift over the 200 Hz - 1 kHz lift (dB).
+        float presenceDb = 3.0f;   // 2 - 5 kHz
+        float harshDb = 3.0f;      // 5 - 10 kHz
+        float airDb = 4.0f;        // 10 - 16 kHz
     };
     /** Programme that arrives with less PLR than the budget may lose at most
         this much more (a steady tone has about 3-5 dB; a mastered track 6-8). */
@@ -443,6 +463,8 @@ public:
         float plrDb = PlrMeter::kNoReading;       // output PLR over ~3 s
         float inputPlrDb = PlrMeter::kNoReading;  // the span input's PLR over ~3 s
         float feedForwardScale = 1.0f;            // drive scale the pre-maximizer peaks predict for the GR budget
+        // The chain's net tonal lifts over its 200 Hz - 1 kHz lift (TonalBalanceMeter; -160: no reading).
+        float presenceLiftDb = -160.0f, harshLiftDb = -160.0f, airLiftDb = -160.0f;
     };
     /** Measured-loop constants: PI gains on dB errors (u = 20 log10 scale),
         the set point below each budget, and the slew limits of u. */
@@ -462,6 +484,12 @@ public:
     static constexpr float kRiseDbPerSec = 1.0f;
     static constexpr float kGrAverageSeconds = 0.5f;
     static constexpr float kFloorDb = -60.0f;      // u at which a floor-0 scale is taken as 0
+    /** The tonal-balance rule (docs/11 E07): PI gain (a slow loop: its
+        readings average over TonalBalanceMeter::kAverageSeconds), set
+        point under the budget, fall limit of its u. */
+    static constexpr float kTonalGain = 0.2f;
+    static constexpr float kTonalMarginDb = 0.5f;
+    static constexpr float kTonalFallDbPerSec = 3.0f;
 
     void prepare (double sampleRate) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
@@ -497,6 +525,9 @@ public:
     float getScale() const noexcept { return scale; }
     /** Extra scale on the bass harmonics (Normal / Strict; 1 at Off). */
     float getHarmonicsScale() const noexcept { return harmonicsScale; }
+    /** Scale on the ungoverned tonal lifts of the macros (docs/11 E07;
+        Normal / Strict; 1 at Off). */
+    float getTonalScale() const noexcept { return tonalScale; }
     /** Whether the last tick ran the measured loop (strength Normal / Strict). */
     bool isMeasuredLoop() const noexcept { return strength != ProtectionStrength::Off; }
     /** The ~3 s power average of the distortion input (what the budget is compared with). */
@@ -547,8 +578,8 @@ private:
     // Measured loop (Normal / Strict).
     ProtectionStrength strength = ProtectionStrength::Off;
     bool musicMode = true, harmonicsReplace = false, measuredRunning = false;
-    float grFastDb = 0.0f, driveDb = 0.0f, harmonicsDb = 0.0f, harmonicsScale = 1.0f;
-    Loop grLoop, residualLoop, plrLoop, harmonicsLoop;
+    float grFastDb = 0.0f, driveDb = 0.0f, harmonicsDb = 0.0f, harmonicsScale = 1.0f, tonalDb = 0.0f, tonalScale = 1.0f;
+    Loop grLoop, residualLoop, plrLoop, harmonicsLoop, tonalLoop;
     State state = State::Idle;
     uint32_t reason = 0;
 };

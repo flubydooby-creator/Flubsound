@@ -9,20 +9,6 @@ namespace
 {
 const juce::String kDot { juce::CharPointer_UTF8 (" \xc2\xb7 ") };
 
-juce::String connectionText (flub::device::Connection c)
-{
-    using flub::device::Connection;
-    switch (c)
-    {
-        case Connection::Analog: return "wired";
-        case Connection::Usb: return "USB / wireless dongle";
-        case Connection::Bluetooth: return "Bluetooth";
-        case Connection::BluetoothHandsFree: return "Bluetooth hands-free";
-        case Connection::Unknown: break;
-    }
-    return {};
-}
-
 /** Simple headphone glyph (headband arc + two ear cups). */
 void drawHeadphones (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour colour)
 {
@@ -38,6 +24,20 @@ void drawHeadphones (juce::Graphics& g, juce::Rectangle<float> r, juce::Colour c
     g.fillRoundedRectangle (b.getRight() - s * 0.08f - cupW, cupY, cupW, cupH, cupW * 0.4f);
 }
 } // namespace
+
+juce::String DeviceAdviceBanner::connectionText (flub::device::Connection c)
+{
+    using flub::device::Connection;
+    switch (c)
+    {
+        case Connection::Analog: return "wired";
+        case Connection::Usb: return "USB / wireless dongle";
+        case Connection::Bluetooth: return "Bluetooth";
+        case Connection::BluetoothHandsFree: return "Bluetooth hands-free";
+        case Connection::Unknown: break;
+    }
+    return {};
+}
 
 DeviceAdviceBanner::DeviceAdviceBanner (EngineController& c) : controller (c)
 {

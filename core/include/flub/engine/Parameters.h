@@ -187,6 +187,9 @@ enum Id : int
     // Dynamics
     GuardRange,       // Choice: Dynamic Range / Startle Guard ceiling, GuardRangeValue (docs/11 E21; StartleGuard.h)
 
+    // Smoothness (docs/11 E07; SmoothnessGuard.h)
+    SmoothAmount,     // 0..1: the post-enhancement de-esser takes back the sibilance the chain added (0 = off)
+
     kNumScalarParams
 };
 

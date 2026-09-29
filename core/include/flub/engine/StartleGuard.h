@@ -20,32 +20,34 @@
 //              digital silence (< -70 LUFS), not while it is more than
 //              kQuietRestartLu under the reference (a pause, a quieter scene:
 //              after kQuietRestartSeconds of that the reference restarts on
-//              it), and not while an event is on -
-//              the detector (below) more than kEventGateLu over it, and for
-//              kEventHoldMs after - so a fight does not raise it and the
-//              ambience after it is judged against the ambience before it.
+//              it), and not while an event is on - the detector (below)
+//              more than kEventGateLu over it, and for kEventHoldMs after -
+//              so a fight does not raise it and the ambience after it is
+//              judged against the ambience before it.
 //              The gate acts per sample: a slower gate (AutoLevel's 400 ms
 //              upper gate) let the first 80 ms of gunfire into the reference,
 //              which then climbed with the fight and let it through.
 //              Programme that stays over the gate for kNewLevelSeconds is a
 //              new level: it is admitted from then on, so the reference rises
 //              (3 s) and a long battle or louder music is released smoothly.
-//              Not valid (no guarding) until kMinReferenceMs of programme. It is kept
-//              in the terms of the level before AutoLevel (setLevelOffsetDb),
-//              so AutoLevel's slow moves shift the ceiling with the programme.
+//              Not valid (no guarding) until kMinReferenceMs of programme.
+//              It is kept in the terms of the level before AutoLevel
+//              (setLevelOffsetDb), so AutoLevel's slow moves shift the
+//              ceiling with the programme.
 //   detector   max (momentary, fast - kCrestAllowanceDb) in the power domain:
 //              the BS.1770 momentary loudness (a 400 ms rectangular window, in
 //              10 ms steps plus the samples so far, so an event is forgotten
-//              400 ms after it ends; a one-pole took seconds to fall 15 dB)
+//              400 ms after it ends; a 200 ms one-pole took 0.7 s to fall
+//              15 dB, which kept the gain down past the 1 s Done-when)
 //              and a 1 ms one-pole mean square (the onset of a shot), the
 //              latter allowed kCrestAllowanceDb over the ceiling because a
 //              transient reads that much higher on 1 ms than its loudness.
 //   computer   target = min (0, reference + ceiling - detector) dB; held for
 //              kHoldMs (a 10 shots/s burst is one event, not ten), then
 //              released towards the target with a kReleaseMs time constant
-//              (15 dB of reduction is back within 1 dB about 0.95 s after the
-//              event: 400 ms for the momentary to forget it, then the
-//              release). The gain falls to a lower target with a one-pole
+//              (15 dB of reduction is back within 1 dB about 0.9 s after the
+//              event: at most 400 ms for the momentary to forget it, then
+//              the release). The gain falls to a lower target with a one-pole
 //              attack of a third of the look-ahead (at least kMinAttackMs).
 //              Programme that stays over the ceiling (loud music) is
 //              gain-modulated at its transients (the 1 ms detector) until it
@@ -89,7 +91,6 @@ public:
     static constexpr float kCrestAllowanceDb = 8.0f;
     static constexpr float kHoldMs = 150.0f, kReleaseMs = 200.0f;
     static constexpr float kMinAttackMs = 0.25f;
-    static_assert (kMomentaryMs == 400.0f && kMomentaryStepMs == 10.0f); // kMomentarySteps below
     static constexpr float kReferenceMs = 3000.0f, kMinReferenceMs = 100.0f, kSilenceLufs = -70.0f;
     static constexpr float kEventGateLu = 6.0f, kEventHoldMs = 300.0f, kNewLevelSeconds = 5.0f;
     static constexpr float kQuietRestartLu = 20.0f, kQuietRestartSeconds = 3.0f;
@@ -146,8 +147,10 @@ private:
     int pendingSamples = 0;   // gains waiting for apply()
 
     // Detector and reference (mean squares of the K-weighted sidechain).
-    static constexpr int kMomentarySteps = 40; // kMomentaryMs / kMomentaryStepMs
-    std::array<double, kMomentarySteps> stepSums {};
+    // The momentary loudness: the sums of the last kMomentarySteps - 1 whole
+    // steps (a ring) and of the samples of the current one.
+    static constexpr int kMomentarySteps = static_cast<int> (kMomentaryMs / kMomentaryStepMs);
+    std::array<double, kMomentarySteps - 1> stepSums {};
     double stepsSum = 0.0, partialSum = 0.0;
     int stepLength = 480, partialLength = 0, stepCount = 0, stepPos = 0;
     double fastMs = 0.0, slowMs = 0.0, slowFill = 0.0;

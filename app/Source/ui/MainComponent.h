@@ -19,6 +19,27 @@
 //   | WaveformHistory (output envelope + short-term LUFS)                |
 //   +--------------------------------------------------------------------+
 //
+// Simple view (docs/11 E39, the default; AppSettings::getMainView keeps the
+// last choice): the header and banners as above, then the BoostPanel in its
+// Simple layout (larger dial, the five macros, up to three rows of active-now
+// chips) over a SimpleStatusPanel (headset / output status, one loudness
+// meter, the Advanced view button), at most 1180 px wide and centred. The
+// routing panel, analyser, module rack, meters and history are hidden; the
+// header's view button and the panel's Advanced view button switch views.
+//
+//   +--------------------------------------------------------------------+
+//   | HeaderBar (with the view button)                                   |
+//   +--------------------------------------------------------------------+
+//   | banners (as above)                                                 |
+//   |        +--------------------------------------------------+        |
+//   |        | BoostPanel, Simple layout: dial | 5 macros       |        |
+//   |        |                                 | ACTIVE chips   |        |
+//   |        +------------------------+-------------------------+        |
+//   |        | OUTPUT (headset)       | LOUDNESS (one meter)    |        |
+//   |        +------------------------+-------------------------+        |
+//   |        | ... in the Advanced view.        [Advanced view] |        |
+//   +--------------------------------------------------------------------+
+//
 // Refresh model: one VBlankAttachment callback per display frame reads the
 // selected strip's MeterBus into a MeterSnapshot, drains the analyser taps
 // (AnalyzerFeed is their single consumer) and advances every view; views
@@ -50,6 +71,7 @@
 #include "NoticeBanners.h"
 #include "RoutingPanel.h"
 #include "SettingsDialog.h"
+#include "SimpleStatusPanel.h"
 #include "WaveformHistory.h"
 #include "engine/EngineController.h"
 
@@ -57,6 +79,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace flub::app::ui
 {
@@ -73,6 +96,16 @@ public:
     DeviceErrorBanner& getDeviceErrorBanner() noexcept { return deviceError; }
     NoticeBar& getNoticeBar() noexcept { return notices; }
     BoostPanel& getBoostPanel() noexcept { return boost; }
+    HeaderBar& getHeader() noexcept { return header; }
+    SimpleStatusPanel& getSimplePanel() noexcept { return simple; }
+
+    /** Simple or Advanced view (docs/11 E39). persist: remember the choice in
+        the settings (every switch the user makes). */
+    using View = AppSettings::MainView;
+    void setView (View view, bool persist = true);
+    View getView() const noexcept { return view; }
+    /** The components of the Advanced view that the Simple view hides. */
+    std::vector<juce::Component*> getAdvancedOnlyComponents();
 
     void paint (juce::Graphics& g) override;
     void resized() override;
@@ -85,12 +118,13 @@ private:
     void applyMode (flub::param::ModeValue mode);
     void resetAnalysis();
     void requestLoudnessReset();
-    /** Opens Settings (on the Audio page), or brings the open dialog to the
-        front; forceAudioPage also switches an open dialog to the Audio page. */
-    void openSettings (bool forceAudioPage = false);
+    /** Opens Settings (on `page`, else the Audio page), or brings the open
+        dialog to the front; a page also switches an open dialog to it. */
+    void openSettings (std::optional<SettingsDialog::Page> page = std::nullopt);
     /** Opens the Export / batch process dialog, or brings it to the front. */
     void openExport();
     void refreshDeviceBanner();
+    void layoutSimple (juce::Rectangle<int> area);
     /** Posts the preset reader warnings and the latency-profile suggestion
         the controller queued (Change::Preset). */
     void takePresetNotices();
@@ -113,6 +147,8 @@ private:
     LevelMeters levels;
     LoudnessPanel loudness;
     WaveformHistory history;
+    SimpleStatusPanel simple;
+    View view = View::Advanced;
     std::unique_ptr<juce::TooltipWindow> tooltips; // none in headless screenshot runs
     bool screenshotRun = false;                    // headless --screenshot: exact size, no window limits
 

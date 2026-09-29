@@ -202,6 +202,10 @@ std::vector<Info> buildLayout()
     // so every preset saved before it sounds as it did.
     set (GuardRange, v4 (choice ("guard.range", "Dynamic Range", "Global",
                                  { "Off", "20 LU", "15 LU", "10 LU (Balanced)", "6 LU (Shield)" }, 0)));
+    // docs/11 E07: the Smoothness stage after the saturator (SmoothnessGuard.h)
+    // takes back what the enhancement added to the sibilant band. 0 (off)
+    // by default, so every preset saved before it sounds as it did.
+    set (SmoothAmount, v4 (make ("smooth.amount", "Smoothness", "Clarity", Unit::Percent, 0.0f, 1.0f, 0.0f)));
 
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };

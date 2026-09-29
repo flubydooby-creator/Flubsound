@@ -26,6 +26,7 @@ constexpr const char* startWithOs = "ui.startWithOs";
 constexpr const char* windowState = "ui.windowState";
 constexpr const char* uiScale = "ui.scalePercent";
 constexpr const char* uiTheme = "ui.theme";
+constexpr const char* uiView = "ui.view";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
@@ -567,6 +568,14 @@ void AppSettings::setUiScalePercent (int percent) { properties->setValue (Keys::
 // Stored as a name so a later theme can be added without renumbering.
 bool AppSettings::getHighContrast() const { return properties->getValue (Keys::uiTheme) == "high-contrast"; }
 void AppSettings::setHighContrast (bool highContrast) { properties->setValue (Keys::uiTheme, highContrast ? "high-contrast" : "standard"); }
+
+AppSettings::MainView AppSettings::getMainView() const
+{
+    // Anything but "advanced" (absent, damaged) is the Simple default.
+    return properties->getValue (Keys::uiView) == "advanced" ? MainView::Advanced : MainView::Simple;
+}
+
+void AppSettings::setMainView (MainView view) { properties->setValue (Keys::uiView, view == MainView::Advanced ? "advanced" : "simple"); }
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
 void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 

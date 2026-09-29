@@ -1,7 +1,7 @@
 // Flubsound Pro - headless visual verification.
 //
 //   FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds S] [--scale F]
-//                [--device "output device name"] [--state name[,name...]]
+//                [--device "output device name"] [--state name[,name...]] [--view advanced|simple]
 //
 // No audio device is opened. The engine runs offline on synthetic programme
 // audio (TestSignalGenerator: drum/bass/pad music; in gaming mode a 7.1 game
@@ -28,6 +28,9 @@
 //                   --seconds 8 so its 3 s averages settle)
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
+// --view picks the main window's view (docs/11 E39); the default is advanced,
+// the full window every earlier screenshot shows (the app's own default, for
+// a user without a saved choice, is simple).
 //
 // Note for UI code: in this mode the component is on screen (under xvfb on CI),
 // isShowing() is true and every juce::Timer runs normally.
@@ -55,6 +58,7 @@ public:
         float scale = 1.0f;
         juce::String simulatedDevice; // --device: headset profile / advice banner preview
         juce::StringArray states;     // --state (see above)
+        bool simpleView = false;      // --view simple
     };
 
     /** Parses the screenshot arguments; returns false if --screenshot is absent

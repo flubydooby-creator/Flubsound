@@ -185,6 +185,15 @@ void BoostPanel::setMode (ModeValue newMode)
     repaint();
 }
 
+void BoostPanel::setLayout (Layout newLayout)
+{
+    if (newLayout == panelLayout)
+        return;
+    panelLayout = newLayout;
+    resized();
+    repaint();
+}
+
 void BoostPanel::setGovernorScale (float scale)
 {
     MeterSnapshot s;
@@ -461,39 +470,39 @@ void BoostPanel::paint (juce::Graphics& g)
     g.setColour (limiting ? Palette::amber : Palette::text.withAlpha (0.85f));
     g.drawText (governor.text, chip.withTrimmedLeft (18.0f).withTrimmedRight (6.0f), juce::Justification::centred, false);
 
-    // Active-now chips under the macros; what does not fit is counted.
+    // Active-now chips under the macros (wrapped over chipRows); what does
+    // not fit is counted.
     if (! chipsArea.isEmpty())
     {
-        auto row = chipsArea.toFloat();
         g.setFont (Theme::font (11.0f));
-        Theme::drawCaption (g, "ACTIVE", row.removeFromLeft (48.0f), Palette::faint);
+        Theme::drawCaption (g, "ACTIVE", chipsArea.toFloat().withHeight (20.0f).withWidth (48.0f), Palette::faint);
         const auto accent = Theme::accent (*this);
         shownStages = 0;
         if (stages.empty())
         {
             g.setColour (Palette::faint);
-            g.drawText ("Flat: no stage changes the sound", row, juce::Justification::centredLeft, true);
+            g.drawText ("Flat: no stage changes the sound", chipRows.front(), juce::Justification::centredLeft, true);
         }
-        for (size_t i = 0; i < stages.size(); ++i)
+        std::vector<float> widths;
+        widths.reserve (stages.size());
+        for (const auto& st : stages)
+            widths.push_back (juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), st.text) + 16.0f);
+        const auto chips = layoutChips (widths, chipRows);
+        for (size_t i = 0; i < chips.pills.size(); ++i)
         {
-            const float w = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), stages[i].text) + 16.0f;
-            const bool last = i + 1 == stages.size();
-            const float reserve = last ? 0.0f : 34.0f; // room for "+N"
-            if (w + reserve > row.getWidth())
-            {
-                g.setColour (Palette::muted);
-                g.drawText ("+" + juce::String (static_cast<int> (stages.size() - i)), row, juce::Justification::centredLeft, false);
-                break;
-            }
-            auto pill = row.removeFromLeft (w).withSizeKeepingCentre (w, 17.0f);
-            row.removeFromLeft (5.0f);
+            const auto pill = chips.pills[i];
             g.setColour (accent.withAlpha (0.1f));
             g.fillRoundedRectangle (pill, 8.5f);
             g.setColour (accent.withAlpha (0.35f));
             g.drawRoundedRectangle (pill.reduced (0.5f), 8.5f, 1.0f);
             g.setColour (Palette::text.withAlpha (0.9f));
             g.drawText (stages[i].text, pill, juce::Justification::centred, false);
-            ++shownStages;
+        }
+        shownStages = static_cast<int> (chips.pills.size());
+        if (chips.hidden > 0)
+        {
+            g.setColour (Palette::muted);
+            g.drawText ("+" + juce::String (chips.hidden), chips.more, juce::Justification::centredLeft, false);
         }
     }
 
@@ -503,29 +512,78 @@ void BoostPanel::paint (juce::Graphics& g)
                 static_cast<float> (macroArea.getHeight()) - 16.0f);
 }
 
+BoostPanel::ChipLayout BoostPanel::layoutChips (const std::vector<float>& widths, const std::vector<juce::Rectangle<float>>& rows)
+{
+    ChipLayout out;
+    size_t next = 0;
+    for (size_t r = 0; r < rows.size() && next < widths.size(); ++r)
+    {
+        auto row = rows[r];
+        const bool lastRow = r + 1 == rows.size();
+        while (next < widths.size())
+        {
+            const float w = widths[next];
+            const float reserve = lastRow && next + 1 < widths.size() ? kMoreWidth : 0.0f;
+            if (w + reserve > row.getWidth())
+            {
+                if (lastRow)
+                {
+                    out.hidden = static_cast<int> (widths.size() - next);
+                    out.more = row;
+                    return out;
+                }
+                break; // next row
+            }
+            out.pills.push_back (row.removeFromLeft (w).withSizeKeepingCentre (w, kChipHeight));
+            row.removeFromLeft (kChipGap);
+            ++next;
+        }
+    }
+    if (next < widths.size()) // no rows at all
+        out.hidden = static_cast<int> (widths.size() - next);
+    return out;
+}
+
 void BoostPanel::resized()
 {
+    const bool simple = panelLayout == Layout::Simple;
     auto r = getLocalBounds().reduced (14, 10);
     headerArea = r.removeFromTop (18);
     r.removeFromTop (2);
 
     // The dial is the hero: as tall as the panel allows.
-    const int dialSize = juce::jlimit (104, 196, r.getHeight());
+    const int dialSize = juce::jlimit (104, simple ? 280 : 196, r.getHeight());
     auto left = r.removeFromLeft (juce::jmax (dialSize, 150));
     dialArea = left;
     dial.setBounds (left.withSizeKeepingCentre (dialSize, dialSize));
 
     r.removeFromLeft (26);
     macroArea = r;
-    // The chips row takes the bottom of the macro column when the knobs can spare it.
-    chipsArea = r.getHeight() >= 104 ? r.removeFromBottom (20) : juce::Rectangle<int>();
+    // The chips take the bottom of the macro column when the knobs can spare
+    // it: one 20 px row (Standard), or up to three (Simple).
+    // A Simple row more only while the knobs keep about 118 px.
+    constexpr int kRowH = 20;
+    const int rowsWanted = simple ? juce::jlimit (1, 3, (r.getHeight() - 118) / (kRowH + 2)) : 1;
+    chipsArea = r.getHeight() >= 104 ? r.removeFromBottom (rowsWanted * kRowH + (rowsWanted - 1) * 2) : juce::Rectangle<int>();
+    chipRows.clear();
+    if (! chipsArea.isEmpty())
+    {
+        auto rows = chipsArea.toFloat().withTrimmedLeft (48.0f); // right of the ACTIVE caption
+        for (int i = 0; i < rowsWanted; ++i)
+        {
+            chipRows.push_back (rows.removeFromTop (static_cast<float> (kRowH)));
+            rows.removeFromTop (2.0f);
+        }
+    }
+    if (simple && ! chipsArea.isEmpty())
+        r.removeFromBottom (6);
 
     // Macros: evenly spaced (at most 170 px apart, centred), smaller than the dial.
     const int n = static_cast<int> (macros.size());
     const int cellW = juce::jmin (170, r.getWidth() / n);
     r = r.withSizeKeepingCentre (cellW * n, r.getHeight());
-    const int knobH = juce::jmin (r.getHeight(), 124);
-    const int knobW = juce::jmin (cellW - 6, 96);
+    const int knobH = juce::jmin (r.getHeight(), simple ? 156 : 124);
+    const int knobW = juce::jmin (cellW - 6, simple ? 124 : 96);
     for (int i = 0; i < n; ++i)
     {
         auto cell = r.removeFromLeft (cellW);

@@ -40,6 +40,8 @@
 // ($XDG_CONFIG_HOME/autostart/flubsound-pro.desktop).
 #pragma once
 
+#include "flub/common/Realtime.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -390,9 +392,109 @@ struct SystemTuning
 
     /** Promote the calling thread for audio (MMCSS "Pro Audio" on Windows,
         time-constraint policy on macOS, SCHED_FIFO on Linux where
-        RLIMIT_RTPRIO allows it; RealtimeKit is not used).
-        Returns an opaque handle to pass to revertAudioThread (may be null). */
+        RLIMIT_RTPRIO allows it; RealtimeKit is asked separately, from
+        another thread: RealtimeScheduling below).
+        Returns an opaque handle to pass to revertAudioThread (may be null).
+        Linux: no allocation (the saved policy lives in the thread's own
+        storage), so the handle must be reverted on the same thread. */
     static void* promoteAudioThread();
     static void revertAudioThread (void* handle);
 };
+
+// ---------------------------------------------------------------------------
+/** docs/11 E44: an audio thread's scheduling, read and requested from
+    another thread (the app's message thread). On most Linux desktops the
+    user has no RLIMIT_RTPRIO allowance, so promoteAudioThread() leaves the
+    thread at SCHED_OTHER; RealtimeKit (org.freedesktop.RealtimeKit1 on the
+    system bus, libdbus-1 loaded at run time like the portal hotkeys) grants
+    SCHED_RR up to its MaxRealtimePriority instead. Linux only: elsewhere
+    currentThreadId() is 0, queryThread() is unknown and requestRealtimeKit()
+    Unavailable. */
+struct ThreadScheduling
+{
+    bool known = false;    // the thread exists and its policy could be read
+    bool realtime = false; // SCHED_FIFO or SCHED_RR
+    int priority = 0;      // its real-time priority (0 when not real-time)
+    std::string policy;    // "FIFO", "RR", "OTHER", "BATCH", "IDLE"; empty when unknown
+};
+
+struct RealtimeKitResult
+{
+    enum class Outcome : uint8_t
+    {
+        Granted,    // RealtimeKit answered MakeThreadRealtime without error
+        Refused,    // RealtimeKit answered with an error, or RLIMIT_RTTIME could not be set
+        Unavailable // no libdbus-1, no system bus, or no RealtimeKit on it
+    };
+
+    Outcome outcome = Outcome::Unavailable;
+    int priority = 0;       // the priority asked for: the wanted one, capped at MaxRealtimePriority
+    int64_t rttimeUsec = 0; // RLIMIT_RTTIME (hard) in force for the request; 0 = not reached
+    std::string message;    // user-presentable when not Granted
+};
+
+struct RealtimeScheduling
+{
+    /** The calling thread's kernel thread id (Linux gettid); 0 elsewhere.
+        Audio thread: one system call, no allocation or lock. */
+    static uint64_t currentThreadId() noexcept FLUB_NONBLOCKING;
+
+    /** A thread's policy and priority (Linux sched_getscheduler /
+        sched_getparam on its id). Any thread. */
+    static ThreadScheduling queryThread (uint64_t threadId);
+
+    /** Asks RealtimeKit to make 'threadId' (a thread of this process) real
+        time at min(wantedPriority, MaxRealtimePriority). rtkit refuses a
+        process whose RLIMIT_RTTIME hard limit is above its RTTimeUSecMax
+        (200 ms by default), so the process's soft and hard limits are
+        lowered to it first: from then on a real-time thread of this process
+        that runs that long without blocking gets SIGXCPU / SIGKILL, rtkit's
+        watchdog. Blocking (system bus round trips, 1 s timeout each): call
+        from the message thread, never from the audio thread. */
+    static RealtimeKitResult requestRealtimeKit (uint64_t threadId, int wantedPriority);
+};
+
+// ---------------------------------------------------------------------------
+/** docs/11 E27 step 4: speaker positions of a device's input channels. RL /
+    RR are the back pair (WAVEFORMATEXTENSIBLE's BL / BR); a 5.1 layout may
+    use either RL RR or SL SR for its surround pair. */
+enum class SpeakerPosition : uint8_t
+{
+    Unknown = 0,
+    FL,
+    FR,
+    FC,
+    LFE,
+    RL,
+    RR,
+    SL,
+    SR
+};
+
+struct AudioChannelMaps
+{
+    /** The speaker position of each of the first 'channels' input channels
+        of a device, as its backend reports it; empty = not known here.
+          Linux : a JUCE "ALSA" / "ALSA HW" device on a sound card (hw:),
+                  the driver's capture channel map for 'channels'
+                  (snd_pcm_query_chmaps_from_hw, libasound loaded at run
+                  time). ALSA plug-in PCMs (default, pipewire, pulse) and
+                  other device types report none here.
+          others: none yet (WASAPI mask, CoreAudio AudioChannelLayout).
+        Blocking (sound-card control queries): message thread or the thread
+        that starts the device, never the audio thread. */
+    static std::vector<SpeakerPosition> queryInputPositions (const std::string& deviceTypeName, const std::string& deviceName, int channels);
+};
+
+#if ! defined(__linux__)
+inline uint64_t RealtimeScheduling::currentThreadId() noexcept FLUB_NONBLOCKING { return 0; }
+inline ThreadScheduling RealtimeScheduling::queryThread (uint64_t) { return {}; }
+inline RealtimeKitResult RealtimeScheduling::requestRealtimeKit (uint64_t, int)
+{
+    RealtimeKitResult result;
+    result.message = "RealtimeKit exists on Linux only";
+    return result;
+}
+inline std::vector<SpeakerPosition> AudioChannelMaps::queryInputPositions (const std::string&, const std::string&, int) { return {}; }
+#endif
 } // namespace flub::platform

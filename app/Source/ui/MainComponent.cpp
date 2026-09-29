@@ -21,7 +21,8 @@ MainComponent::MainComponent (EngineController& c)
       routing (c),
       boost (c),
       analyzer ([this] { return &controller.getSelectedParams(); }),
-      rack (c)
+      rack (c),
+      simple (c)
 {
     setTitle ("Flubsound Pro");
     setOpaque (true);
@@ -46,13 +47,18 @@ MainComponent::MainComponent (EngineController& c)
 
     // ---- Wiring ----
     header.onSettingsRequested = [this] { openSettings(); };
+    header.onViewToggleRequested = [this] { setView (view == View::Simple ? View::Advanced : View::Simple); };
+    addChildComponent (simple);
+    simple.onAdvancedRequested = [this] { setView (View::Advanced); };
+    simple.onOutputSettingsRequested = [this] { openSettings (SettingsDialog::Page::Audio); };
+    simple.onCorrectionRequested = [this] { openSettings (SettingsDialog::Page::Correction); };
     header.onExportRequested = [this] { openExport(); };
     addChildComponent (deviceError);
-    deviceError.onChooseOutput = [this] { openSettings (true); };
+    deviceError.onChooseOutput = [this] { openSettings (SettingsDialog::Page::Audio); };
     deviceError.onOpenSoundSettings = [this] { controller.getRouting().openSystemRoutingSettings(); };
     deviceError.refresh();
     addChildComponent (deviceBanner);
-    deviceBanner.onDetailsRequested = [this] { openSettings (true); }; // the full guidance is on the Audio page
+    deviceBanner.onDetailsRequested = [this] { openSettings (SettingsDialog::Page::Audio); }; // the full guidance is on the Audio page
     deviceBanner.refresh();
     addChildComponent (notices);
     notices.onVisibilityChanged = [this] { resized(); };
@@ -80,6 +86,8 @@ MainComponent::MainComponent (EngineController& c)
 
     stripSignature = currentStripSignature();
     loadUiPreferences();
+    setView (controller.getSettings().getMainView(), false);
+    simple.refreshDevice (deviceBanner.shouldShow());
     applyMode (controller.getMode());
     controller.addListener (this);
 
@@ -145,6 +153,37 @@ void MainComponent::saveUiPreferences()
 }
 
 // =============================================================================
+// View (docs/11 E39)
+// =============================================================================
+std::vector<juce::Component*> MainComponent::getAdvancedOnlyComponents()
+{
+    return { &routing, &analyzer, &rack, &levels, &loudness, &history };
+}
+
+void MainComponent::setView (View newView, bool persist)
+{
+    const bool focusInside = hasKeyboardFocus (true);
+    view = newView;
+    const bool isSimple = view == View::Simple;
+    if (isSimple && rack.hasExpandedCard())
+        rack.collapse();
+    for (auto* c : getAdvancedOnlyComponents())
+        c->setVisible (! isSimple);
+    simple.setVisible (isSimple);
+    boost.setLayout (isSimple ? BoostPanel::Layout::Simple : BoostPanel::Layout::Standard);
+    header.setSimpleView (isSimple);
+    if (! isSimple)
+        rack.updateFromEngine(); // not refreshed while hidden
+    if (persist)
+        controller.getSettings().setMainView (view);
+    resized();
+    repaint();
+    // The button that switched may be hidden now: keep the focus on the header's.
+    if (focusInside && isShowing())
+        header.getViewButton().grabKeyboardFocus();
+}
+
+// =============================================================================
 // Frame update
 // =============================================================================
 void MainComponent::frame (double timestampSeconds)
@@ -178,20 +217,28 @@ void MainComponent::frame (double timestampSeconds)
     analyzer.getEqEditor().setSampleRate (sampleRate);
     history.setSampleRate (sampleRate);
 
+    // The taps are drained in both views; the Simple view skips the
+    // analyser's FFTs and the rack (both hidden) and feeds its own meter.
+    const bool isSimple = view == View::Simple;
     feed.pull (chain.taps());
-    analyzer.getAnalyzer().advance (dt);
-    analyzer.getEqEditor().refresh();
-    analyzer.getEqEditor().setDynamicEqState (snapshot.dynEqGainDb, mode);
+    if (! isSimple)
+    {
+        analyzer.getAnalyzer().advance (dt);
+        analyzer.getEqEditor().refresh();
+        analyzer.getEqEditor().setDynamicEqState (snapshot.dynEqGainDb, mode);
+    }
     history.setLoudness (snapshot.shortTermLufs);
     history.advance();
     levels.update (snapshot, dt);
     loudness.update (snapshot, dt);
     boost.update (snapshot);
+    if (isSimple)
+        simple.update (snapshot, dt);
     routing.updateMeters (dt);
     header.animate (dt);
 
     ++frameCounter;
-    if (frameCounter % 4 == 0)
+    if (frameCounter % 4 == 0 && ! isSimple)
         rack.updateFromEngine();
     if (frameCounter % 15 == 0)
         header.updateStatus();
@@ -284,7 +331,9 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
 void MainComponent::refreshDeviceBanner()
 {
     const bool errorChanged = deviceError.refresh();
-    if (deviceBanner.refresh() || errorChanged)
+    const bool adviceChanged = deviceBanner.refresh();
+    simple.refreshDevice (deviceBanner.shouldShow());
+    if (adviceChanged || errorChanged)
         resized();
 }
 
@@ -315,12 +364,12 @@ juce::String MainComponent::currentStripSignature() const
     return s;
 }
 
-void MainComponent::openSettings (bool forceAudioPage)
+void MainComponent::openSettings (std::optional<SettingsDialog::Page> page)
 {
     if (settingsWindow != nullptr)
     {
-        if (auto* dialog = dynamic_cast<SettingsDialog*> (settingsWindow->getContentComponent()); dialog != nullptr && forceAudioPage)
-            dialog->showPage (SettingsDialog::Page::Audio);
+        if (auto* dialog = dynamic_cast<SettingsDialog*> (settingsWindow->getContentComponent()); dialog != nullptr && page.has_value())
+            dialog->showPage (*page);
         settingsWindow->toFront (true);
         return;
     }
@@ -334,7 +383,7 @@ void MainComponent::openSettings (bool forceAudioPage)
             safe->saveUiPreferences();
             safe->sendLookAndFeelChange(); // repaints; views that cache palette colours refresh them
         },
-        lookAndFeel().getMeterPalette());
+        lookAndFeel().getMeterPalette(), page.value_or (SettingsDialog::Page::Audio));
 }
 
 void MainComponent::openExport()
@@ -364,7 +413,7 @@ void MainComponent::parentHierarchyChanged()
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
-    if (key == juce::KeyPress::escapeKey && rack.hasExpandedCard())
+    if (key == juce::KeyPress::escapeKey && view == View::Advanced && rack.hasExpandedCard())
     {
         rack.collapse();
         return true;
@@ -404,6 +453,12 @@ void MainComponent::resized()
         r.removeFromTop (gap);
     }
 
+    if (view == View::Simple)
+    {
+        layoutSimple (r);
+        return;
+    }
+
     history.setBounds (r.removeFromBottom (juce::jlimit (76, 128, r.getHeight() / 8)));
     r.removeFromBottom (gap);
 
@@ -430,5 +485,21 @@ void MainComponent::resized()
     rack.setBounds (r.removeFromBottom (rackH));
     r.removeFromBottom (gap);
     analyzer.setBounds (r);
+}
+
+void MainComponent::layoutSimple (juce::Rectangle<int> r)
+{
+    // The Boost panel over the status row, at most 1180 px wide; spare
+    // height is split above and below.
+    const int gap = 10;
+    r = r.withSizeKeepingCentre (juce::jmin (r.getWidth(), 1180), r.getHeight());
+    const int statusH = juce::jlimit (200, 260, juce::roundToInt (r.getHeight() * 0.40));
+    const int boostH = juce::jlimit (150, 380, r.getHeight() - statusH - gap);
+    const int spare = r.getHeight() - statusH - boostH - gap;
+    if (spare > 0)
+        r.removeFromTop (spare / 2);
+    boost.setBounds (r.removeFromTop (boostH));
+    r.removeFromTop (gap);
+    simple.setBounds (r.removeFromTop (statusH));
 }
 } // namespace flub::app::ui
