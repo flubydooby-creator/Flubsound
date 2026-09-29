@@ -12,6 +12,9 @@
 //       - from here on the chain is STEREO
 //    -> (dry reference for the global bypass, input meters, "pre" tap)
 //    -> automatic preamp (auto.preamp, docs/11 E11; unity while off)
+//    -> loudness contour (contour.on, docs/11 E32; LoudnessContour.h): the
+//       ISO 226 lift for the playback level below the reference, with its
+//       own headroom trim; idle and untouched while off
 //    -> [slot] SpectralNoiseGate      (Quality latency profile only)
 //    -> [slot] Neural (AsyncModelProcessor; only while a model is installed
 //              and eligible for the latency profile, see setNeuralModel)
@@ -76,7 +79,8 @@
 // gain), the dynamic EQ's static gains, the bass shelf (at its full boost,
 // with the subsonic high-pass), presence (at its full lift) and the air
 // shelf, the saturator's wet make-up; the surround fold's -3 dB trim counts
-// against them. Left out: level-dependent boosts that withdraw on loud
+// against them, and so does the loudness contour's lift net of its own trim
+// (docs/11 E32). Left out: level-dependent boosts that withdraw on loud
 // material (the dynamic-EQ ranges and mode bands, the transient shaper),
 // harmonics (bass, air, saturation), the compressor's make-up (it follows
 // its own gain reduction) and the maximizer's drive (loudness on purpose).
@@ -150,6 +154,7 @@
 #include "flub/dsp/DeviceCorrection.h"
 #include "flub/dsp/DynamicEq.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
+#include "flub/dsp/LoudnessContour.h"
 #include "flub/dsp/LoudnessMaximizer.h"
 #include "flub/dsp/ParametricEq.h"
 #include "flub/dsp/Saturator.h"
@@ -163,6 +168,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -270,6 +276,27 @@ public:
         (one atomic), taken by the next process(). */
     void setProtectionStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING { protectionStrength.store (static_cast<int> (s), std::memory_order_relaxed); }
     ProtectionStrength getProtectionStrength() const noexcept { return static_cast<ProtectionStrength> (protectionStrength.load (std::memory_order_relaxed)); }
+
+    /** The playback level relative to the loudness contour's reference, dB
+        (docs/11 E32): the OS output endpoint's volume minus the volume the
+        user set as the reference, from the host that reads it
+        (PlatformServices EndpointVolume); added to contour.level, so a
+        plug-in without it uses the parameter alone. Only the contour reads
+        it, and only while contour.on. Any thread (one atomic), taken by the
+        next process(). */
+    void setListeningLevelDb (float dbReReference) noexcept FLUB_NONBLOCKING
+    {
+        listeningLevelDb.store (std::isfinite (dbReReference) ? dbReReference : 0.0f, std::memory_order_relaxed);
+    }
+    float getListeningLevelDb() const noexcept { return listeningLevelDb.load (std::memory_order_relaxed); }
+
+    /** The loudness contour as applied (docs/11 E32): its lift at 50 Hz
+        (without the trim) and its headroom trim (dB <= 0). 0 while off. Any thread. */
+    float getContourLiftAt50HzDb() const noexcept { return contour.getAppliedLiftAt50HzDb(); }
+    float getContourTrimDb() const noexcept { return contour.getAppliedTrimDb(); }
+    /** The contour itself (its target design), for tests and diagnostics on
+        the audio thread or after a render. */
+    const LoudnessContour& getLoudnessContour() const noexcept { return contour; }
 
     /** Input samples with a magnitude above this (+24 dBFS) are corrupt and
         muted by the sanitiser (see the header comment). */
@@ -463,7 +490,7 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 97;
+    static constexpr int kHeadroomKeySize = 97 + LoudnessContour::kNumSections + 1; // + the contour's sections and trim (E32)
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;
@@ -474,6 +501,10 @@ private:
     std::atomic<float> predictedBoostDb { 0.0f }, predictedBoostHz { 1000.0f }, autoPreampDb { 0.0f };
     AutoLevel autoLevel;
     StartleGuard startleGuard;
+    // The loudness contour (docs/11 E32) and the host's listening level.
+    LoudnessContour contour;
+    std::atomic<float> listeningLevelDb { 0.0f };
+    bool contourLfArmed = false; // the contour arms the maximizer's LF-first limiter (audio thread)
     AutoDrive autoDrive;
     SafetyGovernor governor;
     DistortionMonitor distortion;

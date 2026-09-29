@@ -18,6 +18,8 @@ set(FLUB_CLI_SOURCES
     Commands.h
     FactoryPresets.cpp
     FactoryPresets.h
+    LatencyProbeCommand.cpp
+    LatencyProbeCommand.h
     OfflineRenderer.cpp
     OfflineRenderer.h
     Soak.cpp

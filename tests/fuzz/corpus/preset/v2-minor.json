@@ -1,0 +1,1 @@
+{"format": "flubsound-preset", "version": "2.3", "uuid": "6F1C2C1E-3A0B-4D51-9A43-6C8F0E2B7D10", "contentHash": "0000000000000000", "suggestedLatencyProfile": "Low Latency", "tags": ["a", 1], "params": {"bost": 0.4, "max.drive": 99, "mode": 0.4, "comp.on": "yes", "eq.3.gain": -1e300, "bypass.matched": false}}

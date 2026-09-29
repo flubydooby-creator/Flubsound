@@ -300,11 +300,12 @@ TEST_CASE ("App: a 7.1 capture moved to a stereo strip is folded like the chain 
     // moved capture kept FL / FR as they were).
     CHECK_NEAR (hostFl[0] - source, -3.01, 0.1);
     CHECK (hostFl[1] < -100.0);
-    // The LFE: dropped before (FL / FR only: silence), now +6 dB (virt.lfe's
-    // default) re one main on both sides, as in the chain's fold (E01
-    // Done-when: the LFE-to-mains ratio within 1 dB in every fold).
-    CHECK_NEAR (hostLfe[0] - hostFl[0], 6.0, 0.1);
-    CHECK_NEAR (hostLfe[1] - hostFl[0], 6.0, 0.1);
+    // The LFE: dropped before (FL / FR only: silence), now +10 dB (virt.lfe's
+    // default since preset schema 3; +6 dB before) re one main on both sides,
+    // as in the chain's fold (E01 Done-when: the LFE-to-mains ratio within
+    // 1 dB in every fold).
+    CHECK_NEAR (hostLfe[0] - hostFl[0], 10.0, 0.1);
+    CHECK_NEAR (hostLfe[1] - hostFl[0], 10.0, 0.1);
     CHECK_NEAR (hostLfe[0] - hostFl[0], chainLfe[0] - chainFl[0], 0.1);
     CHECK_NEAR (hostFl[0], chainFl[0], 0.1);
     // Centre (dialogue) and surrounds: silent before, now k x k = -6.02 dB

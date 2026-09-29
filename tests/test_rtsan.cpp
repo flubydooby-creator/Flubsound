@@ -265,6 +265,21 @@ static_assert (std::is_same_v<decltype (&StartleGuard::setCeilingLu), void (Star
 static_assert (std::is_same_v<decltype (&StartleGuard::setLevelOffsetDb), void (StartleGuard::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<StartleGuard>);
 
+// The loudness contour ProcessingChain::process runs after the preamp
+// (tests/test_contour.cpp, docs/11 E32): its per-block setParams re-designs
+// on the audio thread (ISO 226, the fit, the headroom prediction), the
+// chain reads its target for the automatic preamp, and a host sets the
+// listening level from any thread.
+#include "flub/dsp/LoudnessContour.h"
+static_assert (hasNonblockingProcess<LoudnessContour>);
+static_assert (hasNonblockingReset<LoudnessContour>);
+static_assert (hasNonblockingSetParams<LoudnessContour, LoudnessContourParams>);
+static_assert (std::is_same_v<decltype (&LoudnessContour::targetLiftDb), double (LoudnessContour::*) (double) const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&LoudnessContour::getTargetSections), int (LoudnessContour::*) (SvfCoeffs*) const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&iso226::splDb), double (*) (int, double) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&iso226::relativeGainDb), double (*) (int, double, double) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::setListeningLevelDb), void (ProcessingChain::*) (float) noexcept FLUB_NONBLOCKING>);
+
 // The surround fold and input-channel detection (tests/test_virtualizer_fold.cpp,
 // docs/11 E01 / E27): ProcessingChain::process runs the detector and the
 // BS.775 fold every block of a 5.1 / 7.1 strip, applyParameters sets the

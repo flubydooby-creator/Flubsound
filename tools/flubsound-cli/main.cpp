@@ -19,6 +19,7 @@
 
 #include "CliOptions.h"
 #include "Commands.h"
+#include "LatencyProbeCommand.h"
 #include "Utf8Windows.h"
 
 #include <algorithm>
@@ -50,6 +51,7 @@ Usage:
   flubsound-cli soak    [preset / mode / macro / --set options] [--minutes M] [--json]
   flubsound-cli params  [--json]
   flubsound-cli presets [--dir <dir>] [--json]
+  flubsound-cli latency-probe generate|analyze ...   loopback latency (`latency-probe --help`)
   flubsound-cli help <command>        detailed help for one command
   flubsound-cli --version
 
@@ -317,6 +319,8 @@ int main (int argc, char** argv)
 {
     useUtf8Console();
     const std::vector<std::string> args = utf8Arguments (argc, argv);
+    if (! args.empty() && args[0] == "latency-probe") // docs/11 E42d: parses its own options
+        return runLatencyProbe ({ args.begin() + 1, args.end() });
 
     CliOptions options;
     std::string error;

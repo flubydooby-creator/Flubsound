@@ -114,6 +114,32 @@ constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldF
 constexpr int kHeadroomParamCount = static_cast<int> (std::size (kHeadroomScalarIds) + kEqBands * std::size (kHeadroomEqFields)
                                                       + kDynEqBands * std::size (kHeadroomDynFields));
 
+// The loudness contour (docs/11 E32): the lift it may take out of the
+// headroom (programme-weighted, see LoudnessContour.h) before it trims the
+// level instead; at protection strength Normal / Strict the SafetyGovernor's
+// scale shrinks it, so a limiter or distortion overload takes the lift out
+// of the level rather than out of the limiter. And the maximizer's LF-first
+// limiter (docs/11 E05 step 5) while the contour lifts the bass: armed once
+// the lift at 50 Hz exceeds kContourLfArmDb (released under
+// kContourLfDisarmDb, so a volume held near the threshold does not toggle
+// the splitter), its amount the lift over kContourFullLfLimitDb, at least
+// the glue's floor. Not at the reference level: the splitter's all-pass
+// raises the crest factor of mastered programme (1-3 dB, see the glue
+// floor below), which cost 0.4 dB more limiting and 0.1-0.6 LU on hot
+// programme with the contour flat; with the bass lifted 12 dB (-30 dB) it
+// halved the limiter's reduction on a kick programme (1.99 -> 1.09 dB).
+constexpr float kContourAllowanceDb = 3.0f;
+constexpr float kContourFullLfLimitDb = 12.0f, kContourLfArmDb = 4.0f, kContourLfDisarmDb = 2.0f;
+constexpr float kLfLimitArmedFloor = 0.001f;
+// The LFE fold's headroom (docs/11 E01): above +6 dB (the default before
+// preset schema 3, and every level presets saved before it load) the LFE of
+// a surround fold drives the maximizer's LF-first limiter, fully at +10 dB,
+// so an explosion's LFE is limited in the low band instead of ducking the
+// whole mix. Explosion-heavy 7.1 at +10 dB, BS.775 fold: time over 1 dB of
+// limiting 63.5 % -> 2.8 %, deepest 6.3 -> 3.0 dB (at +6 dB without it: 7.3 %,
+// 3.2 dB). At +6 dB and below nothing changes.
+constexpr float kLfeLfLimitFromDb = 6.0f, kLfeLfLimitFullDb = 10.0f;
+
 // The clarity presence bell and air shelf, the bass shelf and subsonic
 // filter as their modules design them (ClarityEnhancer.cpp, BassEngine.cpp).
 constexpr double kPresenceQ = 0.8, kPresenceMaxDb = 6.0;
@@ -412,6 +438,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     slots[SSpatial].prepare (spatial, stereo, 20.0f, on (e, SpatialOn));
     slots[SComp].prepare (compressor, stereo, 20.0f, on (e, CompressorOn));
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
+    contour.prepare (stereo); // docs/11 E32: after the preamp, ahead of the slots; no latency
 
     totalLatency = 0;
     for (int s = 0; s < kNumSlots; ++s)
@@ -503,6 +530,7 @@ void ProcessingChain::reset() noexcept
     inputDetector.reset();
     autoLevel.reset();
     startleGuard.reset();
+    contourLfArmed = false;
     autoDrive.reset();
     governor.reset();
     loudnessMatch.reset();
@@ -515,6 +543,7 @@ void ProcessingChain::resetSignalState() noexcept
             slots[static_cast<size_t> (s)].reset();
     virtualizer.reset();
     fold.reset();
+    contour.reset();
     virtMix.setImmediate (virtMix.getTarget());
     passMix.setImmediate (passMix.getTarget());
     virtRan = foldRan = passStatsValid = false;
@@ -815,6 +844,27 @@ void ProcessingChain::applyParameters() noexcept
     compressor.setParams (kp);
     slots[SComp].setActive (active (CompressorOn));
 
+    // ---- The LFE fold's headroom (docs/11 E01): the maximizer's LF-first
+    // limiter above +6 dB of LFE on a surround fold ----
+    if (config.inputChannels > 2 && ! stereoFold && on (e, VirtLfeFold) && e[VirtLfeGainDb] > kLfeLfLimitFromDb)
+        e[MaxLfLimit] = std::max ({ e[MaxLfLimit], kLfLimitArmedFloor,
+                                    std::min (1.0f, (e[VirtLfeGainDb] - kLfeLfLimitFromDb) / (kLfeLfLimitFullDb - kLfeLfLimitFromDb)) });
+
+    // ---- Loudness contour (docs/11 E32; LoudnessContour.h): the level is
+    // contour.level plus the host's offset (the OS output volume re the
+    // user's reference volume) ----
+    LoudnessContourParams lc;
+    lc.enabled = on (e, ContourOn);
+    lc.referencePhon = e[ContourReferencePhon];
+    lc.levelDb = e[ContourLevelDb] + listeningLevelDb.load (std::memory_order_relaxed);
+    lc.maxLiftDb = e[ContourMaxLiftDb];
+    lc.allowanceDb = kContourAllowanceDb * (strength != ProtectionStrength::Off ? governorScale : 1.0f);
+    contour.setParams (lc);
+    const float contourLift = contour.getAppliedLiftAt50HzDb();
+    contourLfArmed = lc.enabled && contourLift > (contourLfArmed ? kContourLfDisarmDb : kContourLfArmDb);
+    if (contourLfArmed)
+        e[MaxLfLimit] = std::max ({ e[MaxLfLimit], kLfLimitArmedFloor, std::min (1.0f, contourLift / kContourFullLfLimitDb) });
+
     // ---- Maximizer (AutoDrive may only reduce the requested drive) ----
     applyMaxStyle (e);
     MaximizerParams mp;
@@ -869,7 +919,7 @@ void ProcessingChain::applyParameters() noexcept
 
 void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
 {
-    static_assert (kHeadroomKeySize == kHeadroomParamCount + 1);
+    static_assert (kHeadroomKeySize == kHeadroomParamCount + 2 + LoudnessContour::kNumSections);
     std::array<float, kHeadroomKeySize> key {};
     size_t k = 0;
     for (int id : kHeadroomScalarIds)
@@ -880,7 +930,11 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     for (int b = 0; b < kDynEqBands; ++b)
         for (DynField f : kHeadroomDynFields)
             key[k++] = h[dyn (b, f)];
-    key[k] = surroundFold ? 1.0f : 0.0f;
+    key[k++] = surroundFold ? 1.0f : 0.0f;
+    // The loudness contour's target (docs/11 E32): its sections and trim.
+    for (int s = 0; s < LoudnessContour::kNumSections; ++s)
+        key[k++] = contour.getTargetGainDb (s);
+    key[k] = contour.getTargetTrimDb();
 
     const bool first = ! headroomKeyValid;
     if (! first && (key == headroomKey || headroomHoldoff > 0))
@@ -890,6 +944,15 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     headroomHoldoff = std::max (1, static_cast<int> (kHeadroomUpdateMs * 0.001 * config.sampleRate));
 
     buildStaticBoostModel (h, config.sampleRate, surroundFold, headroomModel);
+    // The contour's lift net of its own trim (docs/11 E32): what it leaves
+    // in counts against the allowance like any other static boost.
+    {
+        std::array<SvfCoeffs, LoudnessContour::kNumSections> sections {};
+        const int count = contour.getTargetSections (sections.data());
+        for (int s = 0; s < count && headroomModel.numSections < StaticBoostModel::kMaxSections; ++s)
+            headroomModel.sections[static_cast<size_t> (headroomModel.numSections++)] = sections[static_cast<size_t> (s)];
+        headroomModel.gainDb += contour.getTargetTrimDb();
+    }
     const headroom::Prediction p = predictStaticBoost (headroomModel, headroom::Weighting::Programme);
     const float preamp = on (h, AutoPreampOn) ? headroom::preampDb (p, h[AutoPreampAllowanceDb]) : 0.0f;
     predictedBoostDb.store (static_cast<float> (p.maxBoostDb), std::memory_order_relaxed);
@@ -1375,6 +1438,8 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         const float p0 = preampGain.getCurrent();
         st.applyGainRamp (p0, preampGain.skip (n));
     }
+    // The loudness contour (docs/11 E32): untouched while it idles.
+    contour.process (st);
     for (int s = 0; s < kNumSlots; ++s)
         if (inChain (s))
         {

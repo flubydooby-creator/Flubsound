@@ -190,6 +190,12 @@ enum Id : int
     // Smoothness (docs/11 E07; SmoothnessGuard.h)
     SmoothAmount,     // 0..1: the post-enhancement de-esser takes back the sibilance the chain added (0 = off)
 
+    // Loudness contour (docs/11 E32; LoudnessContour.h)
+    ContourOn,             // Toggle: level-dependent LF / HF compensation (ISO 226:2023, relative to a reference level)
+    ContourReferencePhon,  // loudness (phon) at the reference playback level
+    ContourLevelDb,        // playback level re the reference, dB <= 0 (the app adds the OS volume's offset)
+    ContourMaxLiftDb,      // cap on the contour's lift
+
     kNumScalarParams
 };
 

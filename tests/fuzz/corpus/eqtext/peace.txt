@@ -1,0 +1,18 @@
+﻿# Peace export
+Device: all
+Preamp: -3 dB
+Channel: L
+Preamp: -1,5 dB
+Filter: ON PK Fc 1000 Hz Gain 3 dB BW Oct 1.0
+Channel: R
+Filter 2: ON PEQ Fc 2000Hz Gain -2dB Q 2
+Filter 3: OFF PK Fc 3000 Hz Gain 9 dB Q 1
+Channel: all
+Filter 4: ON LSC 12 dB Fc 80 Hz Gain 4 dB
+Filter 5: ON HPQ Fc 20 Hz Q 0.5
+Filter 6: ON LP Fc 18000 Hz
+Filter 7: ON NO Fc 6000 Hz Q 8
+Filter 8: ON AP Fc 500 Hz Q 0.7
+Filter 9: ON BP Fc 700 Hz BW Oct 2
+Channel: C LFE
+Filter: ON HS Fc 9000 Hz Gain 2 dB

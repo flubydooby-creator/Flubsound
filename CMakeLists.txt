@@ -22,6 +22,7 @@ option(FLUB_BUILD_APP_TESTS "Build the app-level tests (flub_app_tests) together
 option(FLUB_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(FLUB_SANITIZE "Build with Address/UndefinedBehavior sanitizers" OFF)
 option(FLUB_RTSAN "Build with Clang RealtimeSanitizer (clang >= 20)" OFF)
+option(FLUB_BUILD_FUZZERS "Build the libFuzzer targets in tests/fuzz (Clang only)" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FlubCompilerSettings)
@@ -38,6 +39,10 @@ endif()
 
 if(FLUB_BUILD_TOOLS)
     add_subdirectory(tools/flubsound-cli)
+endif()
+
+if(FLUB_BUILD_FUZZERS)
+    add_subdirectory(tests/fuzz)
 endif()
 
 if(FLUB_BUILD_APP OR FLUB_BUILD_PLUGIN)

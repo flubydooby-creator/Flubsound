@@ -124,9 +124,13 @@ bool Database::load (const json::Value& root, std::string& error)
         for (const auto& t : v["exclude"].asArray())
             if (t.isString())
                 p.exclude.push_back (normalise (t.asString()));
-        p.specificity = static_cast<int> (v["specificity"].asNumber (1.0));
+        // Clamped before the casts (a user file may hold any number; found by
+        // tests/fuzz/fuzz_state): out-of-range double -> int / float is UB, and
+        // match() scores specificity * 1000 in an int. Shipped values are 1..3
+        // and -3..0 dBTP; the maximizer ceiling ends at -12 dBTP.
+        p.specificity = static_cast<int> (std::clamp (v["specificity"].asNumber (1.0), -1000.0, 1000.0));
         p.typicalConnection = connectionFromString (v["typicalConnection"].asString());
-        p.ceilingDbTp = static_cast<float> (v["ceilingDbTp"].asNumber (0.0));
+        p.ceilingDbTp = static_cast<float> (std::clamp (v["ceilingDbTp"].asNumber (0.0), -12.0, 0.0));
         p.onboardDsp = v["onboardDsp"].asBool (false);
         p.onboardVirtualSurround = v["onboardVirtualSurround"].asBool (false);
         p.mayExposeGameChat = v["mayExposeGameChat"].asBool (false);

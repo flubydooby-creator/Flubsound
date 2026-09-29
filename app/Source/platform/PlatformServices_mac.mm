@@ -26,7 +26,9 @@
 #include <mach/thread_policy.h>
 #include <pthread.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <vector>
 
@@ -564,6 +566,82 @@ EndpointTransport AudioEndpoints::queryOutputTransport (const std::string& devic
         }
     }
     return EndpointTransport::Unknown;
+}
+
+EndpointVolume AudioEndpoints::queryOutputVolume (const std::string& deviceName)
+{
+    // docs/11 E32: the output device's volume in dB (the menu bar's slider),
+    // of the named device or the default output device.
+    EndpointVolume result;
+    AudioObjectID device = kAudioObjectUnknown;
+    if (! deviceName.empty())
+    {
+        AudioObjectPropertyAddress devicesAddress { kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
+                                                    kAudioObjectPropertyElementMain };
+        UInt32 size = 0;
+        if (AudioObjectGetPropertyDataSize (kAudioObjectSystemObject, &devicesAddress, 0, nullptr, &size) == noErr && size > 0)
+        {
+            std::vector<AudioObjectID> ids (size / sizeof (AudioObjectID));
+            if (AudioObjectGetPropertyData (kAudioObjectSystemObject, &devicesAddress, 0, nullptr, &size, ids.data()) == noErr)
+                for (const AudioObjectID id : ids)
+                {
+                    AudioObjectPropertyAddress nameAddress { kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
+                                                             kAudioObjectPropertyElementMain };
+                    CFStringRef cfName = nullptr;
+                    UInt32 nameSize = sizeof (cfName);
+                    if (AudioObjectGetPropertyData (id, &nameAddress, 0, nullptr, &nameSize, &cfName) != noErr || cfName == nullptr)
+                        continue;
+                    char buffer[512] = {};
+                    const bool converted = CFStringGetCString (cfName, buffer, sizeof (buffer), kCFStringEncodingUTF8);
+                    CFRelease (cfName);
+                    if (converted && deviceName == buffer)
+                    {
+                        device = id;
+                        break;
+                    }
+                }
+        }
+    }
+    if (device == kAudioObjectUnknown)
+    {
+        AudioObjectPropertyAddress defaultAddress { kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
+                                                    kAudioObjectPropertyElementMain };
+        UInt32 size = sizeof (device);
+        if (AudioObjectGetPropertyData (kAudioObjectSystemObject, &defaultAddress, 0, nullptr, &size, &device) != noErr
+            || device == kAudioObjectUnknown)
+        {
+            result.error = "No default output device";
+            return result;
+        }
+    }
+
+    // The main element when the device has a master volume, else the mean of
+    // the first two channels (many built-in and USB devices only have those).
+    const auto readDb = [device] (AudioObjectPropertyElement element, Float32& db) {
+        AudioObjectPropertyAddress address { kAudioDevicePropertyVolumeDecibels, kAudioObjectPropertyScopeOutput, element };
+        UInt32 size = sizeof (db);
+        return AudioObjectHasProperty (device, &address) && AudioObjectGetPropertyData (device, &address, 0, nullptr, &size, &db) == noErr;
+    };
+    Float32 db = 0.0f, left = 0.0f, right = 0.0f;
+    if (readDb (kAudioObjectPropertyElementMain, db))
+        result.known = true;
+    else if (readDb (1, left) && readDb (2, right))
+    {
+        db = 0.5f * (left + right);
+        result.known = true;
+    }
+    if (! result.known)
+    {
+        result.error = "The output device has no volume control";
+        return result;
+    }
+    result.volumeDb = std::isfinite (db) ? std::max (static_cast<float> (db), EndpointVolume::kSilentDb) : EndpointVolume::kSilentDb;
+
+    AudioObjectPropertyAddress muteAddress { kAudioDevicePropertyMute, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain };
+    UInt32 mute = 0, muteSize = sizeof (mute);
+    result.muted = AudioObjectHasProperty (device, &muteAddress)
+                   && AudioObjectGetPropertyData (device, &muteAddress, 0, nullptr, &muteSize, &mute) == noErr && mute != 0;
+    return result;
 }
 
 //==============================================================================

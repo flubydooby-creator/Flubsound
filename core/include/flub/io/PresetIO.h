@@ -27,13 +27,15 @@
 //   MEMORY through the migration registry (migrate(): pure JSON -> JSON
 //   steps, one per major); the file itself is never rewritten on load, only
 //   an explicit save writes the current version.
-// * Schema 2 (docs/11 E01): missing keys keep TODAY's defaults. A version-1
-//   file (or one without "version") was written sparse against the version-1
-//   defaults: the 1 -> 2 migration fills its missing keys from the frozen
-//   version-1 defaults table (PresetIO.cpp kV1Defaults: today `virt.lfe`,
-//   0 dB in version 1, +6 dB now). A later default change bumps the major and
-//   appends a migration with the old value; tests/test_presets_golden.cpp
-//   fails when a default changes without one (tests/golden/parameter-defaults.json).
+// * Schemas 2 and 3 (docs/11 E01): missing keys keep TODAY's defaults. A
+//   version-1 file (or one without "version") was written sparse against the
+//   version-1 defaults, a version-2 file against the version-2 ones: the
+//   1 -> 2 and 2 -> 3 migrations fill their missing keys from the frozen
+//   defaults tables (PresetIO.cpp kV1Defaults, kV2Defaults: today
+//   `virt.lfe`, 0 dB in version 1, +6 dB in version 2, +10 dB now). A later
+//   default change bumps the major and appends a migration with the old
+//   value; tests/test_presets_golden.cpp fails when a default changes
+//   without one (tests/golden/parameter-defaults.json).
 // * "uuid" (optional, RFC 4122 text form, stored lower case) identifies a
 //   preset across renames; auto-profile rules, hotkeys and content packs
 //   should reference presets by it (findByUuid). Factory presets carry a
@@ -88,7 +90,7 @@ struct SchemaVersion
 };
 
 /** The version toJson() writes and the newest this build reads fully. */
-inline constexpr SchemaVersion kSchemaVersion { 2, 0 };
+inline constexpr SchemaVersion kSchemaVersion { 3, 0 };
 
 /** "2", "2.1" (the form "version" is written in). */
 std::string toString (SchemaVersion v);

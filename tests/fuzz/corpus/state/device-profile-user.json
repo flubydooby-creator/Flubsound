@@ -1,0 +1,1 @@
+{"format": "flubsound-device-profiles", "version": 1, "profiles": [{"id": "x", "displayName": "My Headset", "matchAny": ["my headset", ""], "exclude": ["mic"], "specificity": 1e12, "typicalConnection": "bluetooth", "ceilingDbTp": -1e40, "onboardDsp": true, "notes": ["n"]}]}

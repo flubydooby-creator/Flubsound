@@ -307,7 +307,7 @@ This section is the project's single latency model. The R1.1 row in `00-understa
 |---|---|---|---|
 | **Chain** | One strip's algorithmic latency: look-aheads, oversampler FIRs, the STFT frame | `ProcessingChain::getLatencySamples()`; what the plug-in reports to its host and the CLI compensates | Exact, asserted by tests |
 | **App engine** | Per strip: its chain + its sync-group padding + the desktop app's master limiter (`MixEngine::getStripLatencySamples()`); the largest of these is the engine total | `MixEngine::getLatencySamples()` | Exact, asserted by tests |
-| **Added end-to-end** | Everything Flubsound puts between the application and the ear on top of the application's normal output path: engine + I/O buffering (+ capture buffering on a capture path) | §5.2 and §5.3 | **Estimate** until the loopback measurement (roadmap `07-roadmap.md` item 1.2; device-lab test 8 in `10-headset-compatibility.md` §5) |
+| **Added end-to-end** | Everything Flubsound puts between the application and the ear on top of the application's normal output path: engine + I/O buffering (+ capture buffering on a capture path) | §5.2 and §5.3 | **Estimate** until it is measured on real devices with the loopback probe (§5.4, `flubsound-cli latency-probe`; roadmap `07-roadmap.md` item 1.2; device-lab test 8 in `10-headset-compatibility.md` §5) |
 
 **Target (R1.1): added end-to-end latency under 10–12 ms.**
 - **Low Latency** is the profile that meets it: ≈ 9.5 ms estimated, under 10 ms.
@@ -345,7 +345,7 @@ This is the budget table. It is an estimate for the virtual-driver path (`platfo
 | **Added total (estimate)** | added end-to-end | **≈ 9.5 ms: meets ≤ 10 ms** | **≈ 12–13 ms: upper edge of 10–12 ms** |
 
 - **Device mode.** Without a saved device choice the app opens JUCE's *Windows Audio (Low Latency Mode)* type (`IAudioClient3`, `AudioEngineHost::openDevice`), falling back to plain *Windows Audio* if the device cannot be opened in that mode; a type chosen in Settings > Audio (e.g. *(Exclusive Mode)*) is saved and always wins. Classic shared mode uses 10 ms periods, so the engine block and the output buffering each grow to about 10 ms and the added total roughly doubles (≈ 25 ms, estimate), well outside the target.
-- **Reported, not measured.** The app's latency readout adds the device's reported input and output latencies to the app engine latency (and the capture FIFO target, if any). A loopback measurement tool is roadmap (`07-roadmap.md` item 1.2), and the device-lab plan checks the budget per headset (`10-headset-compatibility.md` §5, test 8). Until then every end-to-end figure in the docs is an estimate.
+- **Reported, not measured.** The app's latency readout adds the device's reported input and output latencies to the app engine latency (and the capture FIFO target, if any). The loopback probe that measures it exists (§5.4, [11 E42d](11-enhancement-report.md#e42)) but has not been run on real hardware yet, and the device-lab plan checks the budget per headset with it (`10-headset-compatibility.md` §5, test 8). Until then every end-to-end figure in the docs is an estimate.
 - **Other platforms.** The structure is the same on macOS (CoreAudio) and Linux (JACK / ALSA), with that backend's period in place of the WASAPI rows; they have not been estimated separately.
 
 ### 5.3 Capture paths that exist today add their own buffering
@@ -359,6 +359,23 @@ Until the virtual drivers exist, the strips are fed by a capture path. Each one 
 | A third-party virtual cable on the device input (VB-Cable, BlackHole, a JACK port) | The cable's own buffer plus the input device's period | Set by the cable and its driver, not by Flubsound | Has to be measured per setup |
 
 The app's latency readout includes the capture FIFO target of a running process-loopback capture, but not a PipeWire quantum or a cable's buffer.
+
+### 5.4 Measuring it: the loopback probe
+
+`flubsound-cli latency-probe` ([11 E42d](11-enhancement-report.md#e42); `core/include/flub/analysis/LatencyProbe.h`) measures the delay of a real playback → capture path from a WAV recording, so the §5.2 / §5.3 estimates can be replaced by numbers per device:
+
+- `latency-probe generate -o probe.wav` writes the probe: 0.5 s of silence, then 10 exponential sweeps (20 Hz–20 kHz, 1 s, −12 dBFS peak), each followed by a gap of the longest delay searched (`--max-delay-ms`, default 500) + 250 ms.
+- `latency-probe analyze -i recording.wav` deconvolves each sweep of the recording with `flub::Fft` (division by the sweep's spectrum, regularised and limited to the swept band), takes the impulse response's largest peak (either polarity, so an inverting path is reported, not missed), refines it with a parabola, rejects runs whose peak is less than 30 dB above the rest of the response and reports the median of the others (in samples and ms, with the spread and each run's SNR; `--json` for scripts). Fewer than half of the runs accepted is no result (exit code 1).
+- Offline accuracy (`tests/test_latency_probe.cpp`): integer delays within 0.05 samples at 44.1, 48 and 96 kHz; a fractional delay (1234.37 samples) within 0.06 samples when attenuated by 30 dB, inverted and under noise 40 dB below the sweep, and within 0.1 ms through a 60 Hz high-pass and an 18 kHz low-pass (whose own group delay is part of the path); runs buried in noise rejected with the median unchanged; the processing chain measured at its reported latency on every profile (1351.997 / 191.997 / 99.997 samples against 1352 / 192 / 100).
+
+On real devices (not run yet; device-lab test 8 in `10-headset-compatibility.md` §5):
+
+1. Connect the path: a loopback cable from the output to a line input, or a measurement microphone held at the headphone's earcup (a quiet room; raise `--level` if runs are rejected).
+2. Play `probe.wav` and record the input **sample-locked** with the playback, i.e. in one duplex stream: a DAW (probe on one track, record on another, with the DAW's own latency compensation off, and export the recording from the project start), Audacity with *Latency correction* set to 0, or JACK / PipeWire clients started by one transport. `analyze` then reports the round trip: output buffering, converters, cable or air, input buffering, plus Flubsound when the probe goes through it.
+3. Without a duplex recorder, record two channels: channel 1 through the path, channel 2 over a direct path from the same output (a Y-split into a second input). Any recorder will do (for example `pw-record --channels 2 capture.wav`, then `pw-play probe.wav`); `analyze --channel 1 --ref-channel 2` finds the probe in channel 2 and reports channel 1's delay against it, so the start offset cancels.
+4. Flubsound's own added latency is the difference between two measurements of the same path, with Flubsound in it and with it bypassed or removed.
+
+Results are not stored per device yet and the app does not read them. E42's comparison with RTL Utility (within 0.2 ms on three interfaces) needs real hardware and is open.
 
 ---
 

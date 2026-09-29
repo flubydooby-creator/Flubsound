@@ -1,0 +1,1 @@
+{"format":"flubsound-strip-state","version":1,"activeBank":"B","A":{"format":"flubsound-preset","version":2,"name":"Untitled","params":{"boost":0.3,"latency.profile":"Low Latency","bypass":true}},"B":{"format":"flubsound-preset","params":{"mode":"Gaming","macro.2":0.7,"eq.5.gain":4}}}

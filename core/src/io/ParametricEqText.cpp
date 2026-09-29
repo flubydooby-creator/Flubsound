@@ -429,7 +429,9 @@ std::string format (const CorrectionCurve& curve)
     const auto preamp = [&s] (float db) { s += "Preamp: " + formatNumber (db) + " dB\n"; };
     if (curve.gainDb[0] == curve.gainDb[1])
     {
-        if (curve.gainDb[0] != 0.0f)
+        // A flat curve still gets one command: parse() refuses text without
+        // any, and the app stores a correction as this text.
+        if (curve.gainDb[0] != 0.0f || curve.numFilters == 0)
             preamp (curve.gainDb[0]);
     }
     else

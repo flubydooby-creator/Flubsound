@@ -287,6 +287,19 @@ enum class EndpointTransport : uint8_t
     Virtual             // virtual / aggregate devices (incl. Flubsound's own)
 };
 
+/** docs/11 E32: the OS volume of an output endpoint, which the loudness
+    contour follows (ProcessingChain::setListeningLevelDb gets volumeDb minus
+    the volume the user set as the reference). */
+struct EndpointVolume
+{
+    static constexpr float kSilentDb = -96.0f; // a 0 % (-inf dB) volume reads as this
+
+    bool known = false;    // read; false: 'error' says why
+    float volumeDb = 0.0f; // the endpoint's volume, dB (0 = full scale, above when a Pulse sink is over-amplified; the channels' mean), >= kSilentDb
+    bool muted = false;
+    std::string error;
+};
+
 struct AudioEndpoints
 {
     /** Transport of the active OUTPUT endpoint whose name matches the device
@@ -297,6 +310,29 @@ struct AudioEndpoints
           macOS   : kAudioDevicePropertyTransportType
           Linux   : Unknown (heuristics in flub::device::detectConnection) */
     static EndpointTransport queryOutputTransport (const std::string& deviceName);
+
+    /** docs/11 E32: the OS volume of the OUTPUT endpoint the audio layer calls
+        deviceName (empty: the default output). Best effort; never throws.
+          Windows : IAudioEndpointVolume::GetMasterVolumeLevel / GetMute of
+                    the active render endpoint with that friendly name (no
+                    match: the default console render endpoint)
+          macOS   : kAudioDevicePropertyVolumeDecibels on the output scope
+                    (the main element, else the mean of channels 1 and 2) and
+                    kAudioDevicePropertyMute of the device with that name (no
+                    match: the default output device)
+          Linux   : the PipeWire / PulseAudio sink volume through pactl
+                    (get-sink-volume, get-sink-mute; pactl 14+ or
+                    pipewire-pulse): the sink named deviceName when it is a
+                    sink name (it contains a '.', e.g.
+                    "alsa_output.usb-...analog-stereo"), else the default sink
+                    (@DEFAULT_SINK@), which JUCE's ALSA "pipewire" / "pulse" /
+                    "default" devices play to. An ALSA hw: card's own mixer is
+                    not read.
+        A headset's hardware dial is invisible to the OS on many USB and
+        wireless headsets, so this is the software part of the playback level.
+        Blocking (a pactl child, COM / Core Audio calls): a background or the
+        message thread, a few times a second at most, never the audio thread. */
+    static EndpointVolume queryOutputVolume (const std::string& deviceName);
 };
 
 // ---------------------------------------------------------------------------

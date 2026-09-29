@@ -1568,7 +1568,7 @@ TEST_CASE ("Chain: the LFE folds at virt.lfe re one main in both folds; virt.lfe
         runChain (chain, buf, 512);
         return toDb (toneAmplitude (buf.ch[0].data() + n / 2, n / 2, 50.0, kFs));
     };
-    CHECK (layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue == 6.0f);
+    CHECK (layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue == 10.0f); // +6 before preset schema 3
     for (float lfeDb : { 0.0f, 6.0f, 10.0f })
     {
         const double off = level (3, false, lfeDb) - level (0, false, lfeDb);
@@ -1621,7 +1621,7 @@ TEST_CASE ("Chain: the LFE folds at virt.lfe re one main in both folds; virt.lfe
     CHECK (err == 0.0);
 }
 
-TEST_CASE ("Presets: schema version 2 - a version-1 preset without virt.lfe keeps the version-1 default (0 dB), a version-2 one gets today's (+6 dB)")
+TEST_CASE ("Presets: schema versions 2 / 3 - a preset without virt.lfe keeps its version's default (version 1: 0 dB, 2: +6 dB), a version-3 one gets today's (+10 dB)")
 {
     auto parse = [] (const char* text, preset::Preset& p, std::string& err) {
         json::Value v;
@@ -1639,14 +1639,16 @@ TEST_CASE ("Presets: schema version 2 - a version-1 preset without virt.lfe keep
     REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 2, "name": "New", "params": {} })", p, err));
     CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == 6.0f);
     CHECK (p.values[static_cast<size_t> (VirtLfeFold)] == 1.0f);
-    CHECK (! parse (R"({ "format": "flubsound-preset", "version": 3, "name": "Future", "params": {} })", p, err));
+    REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 3, "name": "Newer", "params": {} })", p, err));
+    CHECK (p.values[static_cast<size_t> (VirtLfeGainDb)] == 10.0f);
+    CHECK (! parse (R"({ "format": "flubsound-preset", "version": 4, "name": "Future", "params": {} })", p, err));
 
-    // Saving writes version 2, so a value equal to today's default may be
+    // Saving writes version 3, so a value equal to today's default may be
     // omitted and still round-trips; a version-1 value of 0 dB is written.
     preset::Preset old;
     REQUIRE (parse (R"({ "format": "flubsound-preset", "version": 1, "name": "Old", "params": {} })", old, err));
     const auto j = preset::toJson (old);
-    CHECK (j["version"].asNumber() == 2.0);
+    CHECK (j["version"].asNumber() == 3.0);
     CHECK (j["params"]["virt.lfe"].asNumber (99.0) == 0.0);
     preset::Preset back;
     REQUIRE (preset::fromJson (j, back, err));
@@ -1654,5 +1656,5 @@ TEST_CASE ("Presets: schema version 2 - a version-1 preset without virt.lfe keep
     const auto fresh = preset::toJson (preset::makeDefault());
     CHECK (fresh["params"]["virt.lfe"].isNull());
     REQUIRE (preset::fromJson (fresh, back, err));
-    CHECK (back.values[static_cast<size_t> (VirtLfeGainDb)] == 6.0f);
+    CHECK (back.values[static_cast<size_t> (VirtLfeGainDb)] == 10.0f);
 }

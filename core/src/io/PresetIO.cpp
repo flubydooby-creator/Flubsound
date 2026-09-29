@@ -24,35 +24,43 @@ constexpr int kAppState[] = { BypassAll, LoudnessMatchBypass, LatencyProfile };
 
 // Newest minor of each OLDER major this build knows (index = major). A file
 // of an older major with a newer minor than listed here loads with a warning.
-constexpr int kKnownMinor[] = { 0, 0 };
+constexpr int kKnownMinor[] = { 0, 0, 0 };
 
-// Frozen version-1 defaults (docs/11 E01 / E52). A version-1 file (or one
-// without "version") omitted values equal to the version-1 defaults, so the
-// 1 -> 2 migration writes the version-1 default for each of these keys the
-// file does not carry: a default change never re-voices a sparse preset saved
-// before it. Only keys whose default changed since are listed. The next
-// default change bumps the major, adds kV2Defaults with the old values and a
-// 2 -> 3 step in kMigrations (tests/test_presets_golden.cpp fails until then).
+// Frozen defaults per older major (docs/11 E01 / E52). A version-N file
+// omitted values equal to the version-N defaults, so the N -> N+1 migration
+// writes the version-N default for each of these keys the file does not
+// carry: a default change never re-voices a sparse preset saved before it.
+// Only keys whose default changed in the next major are listed (a key the
+// next step does not list keeps what the earlier step wrote). The next
+// default change bumps the major, adds kV3Defaults with the old values and a
+// 3 -> 4 step in migrations() (tests/test_presets_golden.cpp fails until then).
 struct FrozenDefault
 {
     const char* key;
     float value;
 };
 constexpr FrozenDefault kV1Defaults[] = {
-    { "virt.lfe", 0.0f }, // E01: +6 dB since version 2
+    { "virt.lfe", 0.0f }, // E01: +6 dB in version 2
+};
+constexpr FrozenDefault kV2Defaults[] = {
+    { "virt.lfe", 6.0f }, // E01: +10 dB since version 3
 };
 
-json::Value migrateV1ToV2 (const json::Value& root)
+template <size_t N>
+json::Value fillFrozenDefaults (const json::Value& root, const FrozenDefault (&table)[N], int toMajor)
 {
     json::Value out = root;
     json::Value params = root["params"].isObject() ? root["params"] : json::Value { json::Value::Object {} };
-    for (const auto& d : kV1Defaults)
+    for (const auto& d : table)
         if (params[d.key].isNull())
             params.set (d.key, static_cast<double> (d.value));
     out.set ("params", std::move (params));
-    out.set ("version", 2);
+    out.set ("version", toMajor);
     return out;
 }
+
+json::Value migrateV1ToV2 (const json::Value& root) { return fillFrozenDefaults (root, kV1Defaults, 2); }
+json::Value migrateV2ToV3 (const json::Value& root) { return fillFrozenDefaults (root, kV2Defaults, 3); }
 
 bool isUnset (const Preset& p, int id)
 {
@@ -195,6 +203,7 @@ const std::vector<Migration>& migrations()
 {
     static const std::vector<Migration> registry {
         { 1, "fill keys a version-1 file omits with the frozen version-1 defaults (virt.lfe 0 dB)", &migrateV1ToV2 },
+        { 2, "fill keys a version-2 file omits with the frozen version-2 defaults (virt.lfe +6 dB)", &migrateV2ToV3 },
     };
     return registry;
 }
@@ -232,6 +241,9 @@ std::vector<std::pair<std::string, float>> frozenDefaults (int majorVersion)
     std::vector<std::pair<std::string, float>> table;
     if (majorVersion == 1)
         for (const auto& d : kV1Defaults)
+            table.emplace_back (d.key, d.value);
+    if (majorVersion == 2)
+        for (const auto& d : kV2Defaults)
             table.emplace_back (d.key, d.value);
     return table;
 }
@@ -434,7 +446,16 @@ bool fromJson (const json::Value& v, Preset& out, std::string& error)
             out.warnings.push_back ("\"" + key + "\": not a finite number, ignored");
             continue;
         }
-        out.values[static_cast<size_t> (id)] = clampReported (info, f, out.warnings);
+        f = clampReported (info, f, out.warnings);
+        // A number for a choice or a toggle is read as the chain reads it (the
+        // nearest index; on at >= 0.5), which is also what toJson writes back,
+        // so a saved and reloaded preset keeps its values and contentHash
+        // ("mode": 0.4 was kept as 0.4 and saved as "Music"; tests/fuzz).
+        if (info.unit == Unit::Choice)
+            f = static_cast<float> (std::lround (f));
+        else if (info.unit == Unit::Toggle)
+            f = f >= 0.5f ? 1.0f : 0.0f;
+        out.values[static_cast<size_t> (id)] = f;
         if (isAppState (id))
             carried.push_back (id);
     }

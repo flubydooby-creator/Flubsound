@@ -1,7 +1,8 @@
 // PresetIO schema, migration, identity and warnings (docs/11 E52):
 //   * "version" is major.minor: a newer minor loads with a warning, a newer
 //     major is refused, an older major migrates in memory through the
-//     registry (version 1 -> 2 fills the frozen version-1 defaults);
+//     registry (version 1 -> 2 and 2 -> 3 fill the frozen version-1 and
+//     version-2 defaults);
 //   * every ignored or changed key / value is reported in Preset::warnings;
 //   * uuid (stable identity) and contentHash (identity of the sound);
 //   * saved plug-in state: a parameter the state does not carry takes its
@@ -103,20 +104,23 @@ TEST_CASE ("Preset schema: the CLI reports preset warnings as \"warning: \" note
 #endif
 }
 
-TEST_CASE ("Preset schema: 2.1 loads with a warning, 3.0 is refused, 1.1 migrates with a warning, bad versions are refused")
+TEST_CASE ("Preset schema: 3.1 loads with a warning, 4.0 is refused, 1.1 and 2.1 migrate with a warning, bad versions are refused")
 {
-    for (const char* v : { "2.1", "\"2.1\"" })
+    for (const char* v : { "3.1", "\"3.1\"" })
     {
         const auto p = loadOk (std::string (R"({ "format": "flubsound-preset", "version": )") + v + R"(, "params": { "boost": 0.5 } })");
-        CHECK (p.loadedVersion == (preset::SchemaVersion { 2, 1 }));
-        CHECK (hasWarning (p, "preset schema 2.1 is newer than this build knows (2.0): settings added since are ignored"));
+        CHECK (p.loadedVersion == (preset::SchemaVersion { 3, 1 }));
+        CHECK (hasWarning (p, "preset schema 3.1 is newer than this build knows (3.0): settings added since are ignored"));
         CHECK (value (p, BoostIntensity) == 0.5f);
-        CHECK (value (p, VirtLfeGainDb) == 6.0f); // a version-2 file: today's default
+        CHECK (value (p, VirtLfeGainDb) == 10.0f); // a version-3 file: today's default
     }
+    const auto v21 = loadOk (R"({ "format": "flubsound-preset", "version": 2.1, "params": { "boost": 0.5 } })");
+    CHECK (hasWarning (v21, "preset schema 2.1 is newer than this build knows (2.0): settings added since are ignored"));
+    CHECK (value (v21, VirtLfeGainDb) == 6.0f); // migrated as version 2
 
     preset::Preset p;
     std::string error;
-    for (const char* v : { "3", "3.0", "\"3.2\"" })
+    for (const char* v : { "4", "4.0", "\"4.2\"" })
     {
         error.clear();
         CHECK (! loadText (std::string (R"({ "format": "flubsound-preset", "version": )") + v + " }", p, error));
@@ -162,7 +166,7 @@ TEST_CASE ("Preset schema: version text round trips and toJson writes the curren
     CHECK (v == preset::kSchemaVersion);
 }
 
-TEST_CASE ("Preset migration: the registry covers every older major, is pure and fills the frozen version-1 defaults")
+TEST_CASE ("Preset migration: the registry covers every older major, is pure and fills the frozen version-1 and version-2 defaults")
 {
     const auto& registry = preset::migrations();
     for (int major = 1; major < preset::kSchemaVersion.majorVersion; ++major)
@@ -176,7 +180,7 @@ TEST_CASE ("Preset migration: the registry covers every older major, is pure and
     REQUIRE (preset::migrate (v1, migrated, from, error));
     CHECK (json::write (v1) == before); // input untouched
     CHECK (from == (preset::SchemaVersion { 1, 0 }));
-    CHECK (migrated["version"].asNumber() == 2.0);
+    CHECK (migrated["version"].asNumber() == 3.0);
     CHECK (migrated["params"]["boost"].asNumber() == 0.5);
     for (const auto& [key, frozen] : preset::frozenDefaults (1))
         CHECK (migrated["params"][key].asNumber (-999.0) == static_cast<double> (frozen));
@@ -187,13 +191,21 @@ TEST_CASE ("Preset migration: the registry covers every older major, is pure and
     REQUIRE (preset::migrate (parseJson (R"({ "format": "flubsound-preset", "version": 1, "params": { "virt.lfe": -4 } })"), migrated, from, error));
     CHECK (migrated["params"]["virt.lfe"].asNumber() == -4.0);
 
+    // A version-2 file gets the frozen version-2 defaults (and keeps what it carries).
+    REQUIRE (preset::migrate (parseJson (R"({ "format": "flubsound-preset", "version": 2, "params": { "boost": 0.5 } })"), migrated, from, error));
+    CHECK (migrated["version"].asNumber() == 3.0);
+    for (const auto& [key, frozen] : preset::frozenDefaults (2))
+        CHECK (migrated["params"][key].asNumber (-999.0) == static_cast<double> (frozen));
+    REQUIRE (preset::migrate (parseJson (R"({ "format": "flubsound-preset", "version": 2, "params": { "virt.lfe": 3 } })"), migrated, from, error));
+    CHECK (migrated["params"]["virt.lfe"].asNumber() == 3.0);
+
     // The current major passes through unchanged.
-    const auto v2 = parseJson (R"({ "format": "flubsound-preset", "version": 2, "params": { "boost": 0.5 } })");
-    REQUIRE (preset::migrate (v2, migrated, from, error));
-    CHECK (json::write (migrated) == json::write (v2));
+    const auto v3 = parseJson (R"({ "format": "flubsound-preset", "version": 3, "params": { "boost": 0.5 } })");
+    REQUIRE (preset::migrate (v3, migrated, from, error));
+    CHECK (json::write (migrated) == json::write (v3));
 }
 
-TEST_CASE ("Preset migration: every factory preset (version 1) round trips v1 -> v2 -> v2 with identical values, uuid and contentHash")
+TEST_CASE ("Preset migration: every factory preset (version 1) round trips v1 -> v3 -> v3 with identical values, uuid and contentHash")
 {
 #ifdef FLUB_PRESET_DIR
     namespace fs = std::filesystem;
@@ -212,7 +224,7 @@ TEST_CASE ("Preset migration: every factory preset (version 1) round trips v1 ->
         for (const bool full : { false, true })
         {
             const auto saved = preset::toJson (v1, full);
-            CHECK (saved["version"].asNumber() == 2.0);
+            CHECK (saved["version"].asNumber() == 3.0);
             preset::Preset v2;
             REQUIRE (preset::fromJson (parseJson (json::write (saved)), v2, error));
             CHECK (v2.loadedVersion == preset::kSchemaVersion);

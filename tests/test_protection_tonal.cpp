@@ -29,6 +29,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
+#include <cstdio>
+#include <iterator>
 #include <vector>
 
 using namespace flub;

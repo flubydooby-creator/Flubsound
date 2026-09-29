@@ -3887,6 +3887,56 @@ EndpointTransport AudioEndpoints::queryOutputTransport (const std::string&)
     return EndpointTransport::Unknown;
 }
 
+EndpointVolume AudioEndpoints::queryOutputVolume (const std::string& deviceName)
+{
+    // docs/11 E32. JUCE's ALSA "pipewire" / "pulse" / "default" devices play
+    // to the default sink; a PipeWire / Pulse sink name (always dotted:
+    // alsa_output.<card>.<profile>, bluez_output.<address>.<n>) is used as is.
+    EndpointVolume result;
+    const bool isSinkName = deviceName.find ('.') != std::string::npos && pactl::isSafeToken (deviceName);
+    const std::string sink = pactl::shellQuote (isSinkName ? deviceName : std::string ("@DEFAULT_SINK@"));
+
+    // "Volume: front-left: 32768 /  50% / -18.06 dB,   front-right: ... dB\n
+    //  balance 0.00": every "<number> dB" (or "-inf dB") is one channel.
+    const auto volume = pactl::run ("LC_ALL=C pactl get-sink-volume " + sink + " 2>&1");
+    if (volume.exitCode != 0)
+    {
+        result.error = volume.exitCode < 0 ? "pactl could not be run" : "pactl get-sink-volume failed: " + pactl::firstLine (volume.output);
+        return result;
+    }
+    double sum = 0.0;
+    int channels = 0;
+    for (size_t at = volume.output.find (" dB"); at != std::string::npos; at = volume.output.find (" dB", at + 3))
+    {
+        size_t begin = at;
+        while (begin > 0 && volume.output[begin - 1] != '/' && volume.output[begin - 1] != ' ')
+            --begin;
+        const std::string text = volume.output.substr (begin, at - begin);
+        if (text == "-inf")
+        {
+            sum += EndpointVolume::kSilentDb;
+            ++channels;
+            continue;
+        }
+        char* end = nullptr;
+        const double db = std::strtod (text.c_str(), &end);
+        if (text.empty() || end != text.c_str() + text.size() || ! std::isfinite (db))
+            continue;
+        sum += std::max (db, static_cast<double> (EndpointVolume::kSilentDb));
+        ++channels;
+    }
+    if (channels == 0)
+    {
+        result.error = "Unexpected pactl output (get-sink-volume): " + pactl::firstLine (volume.output);
+        return result;
+    }
+    result.known = true;
+    result.volumeDb = std::max (static_cast<float> (sum / channels), EndpointVolume::kSilentDb); // > 0 dB when over-amplified
+    const auto mute = pactl::run ("LC_ALL=C pactl get-sink-mute " + sink + " 2>&1");
+    result.muted = mute.exitCode == 0 && mute.output.find ("Mute: yes") != std::string::npos;
+    return result;
+}
+
 //==============================================================================
 // SystemTuning
 //==============================================================================

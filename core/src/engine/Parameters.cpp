@@ -141,10 +141,12 @@ std::vector<Info> buildLayout()
     set (VirtHeadRadius, make ("virt.headRadius", "Head Radius", "Virtualizer", Unit::Millimetres, 70.0f, 105.0f, 87.5f));
     set (VirtRoom, make ("virt.room", "Room", "Virtualizer", Unit::Percent, 0.0f, 1.0f, 0.15f));
     // LFE level re one main channel, in the BS.775 fold and the virtualiser
-    // alike (docs/11 E01). The in-band convention is +10 dB; the default is
-    // +6 dB until the maximizer's LF-safe envelope (E05) lands. Presets saved
-    // before this default changed load 0 dB (PresetIO's v1 defaults).
-    set (VirtLfeGainDb, make ("virt.lfe", "LFE Level", "Virtualizer", Unit::Db, -20.0f, 16.0f, 6.0f));
+    // alike (docs/11 E01): the +10 dB in-band convention since preset schema
+    // 3, with the maximizer's LF-safe envelope (E05) and, above +6 dB, its
+    // LF-first limiter on the fold's headroom (ProcessingChain.cpp). Presets
+    // saved before load the default of their schema (PresetIO's frozen
+    // defaults: 0 dB in version 1, +6 dB in version 2).
+    set (VirtLfeGainDb, make ("virt.lfe", "LFE Level", "Virtualizer", Unit::Db, -20.0f, 16.0f, 10.0f));
     // Added in layout version 2 (docs/11 E01 / E27).
     auto v2 = [] (Info i) {
         i.sinceVersion = 2;
@@ -206,6 +208,16 @@ std::vector<Info> buildLayout()
     // takes back what the enhancement added to the sibilant band. 0 (off)
     // by default, so every preset saved before it sounds as it did.
     set (SmoothAmount, v4 (make ("smooth.amount", "Smoothness", "Clarity", Unit::Percent, 0.0f, 1.0f, 0.0f)));
+    // docs/11 E32: the relative loudness contour (LoudnessContour.h), after
+    // the automatic preamp. Off by default, so every preset saved before it
+    // sounds as it did. contour.level is the playback level below the one
+    // the reference loudness was heard at; the app adds the OS output
+    // volume's offset from the user's reference volume
+    // (ProcessingChain::setListeningLevelDb), a plug-in host automates it.
+    set (ContourOn, v4 (toggle ("contour.on", "Loudness Contour", "Contour", false)));
+    set (ContourReferencePhon, v4 (make ("contour.reference", "Contour Reference (phon)", "Contour", Unit::None, 60.0f, 90.0f, 80.0f)));
+    set (ContourLevelDb, v4 (make ("contour.level", "Listening Level", "Contour", Unit::Db, -60.0f, 0.0f, 0.0f)));
+    set (ContourMaxLiftDb, v4 (make ("contour.maxLift", "Contour Max Lift", "Contour", Unit::Db, 0.0f, 24.0f, 18.0f)));
 
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };

@@ -50,6 +50,7 @@
 #include <shlwapi.h>
 #include <mmreg.h>
 #include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <audioclient.h>
 #include <audiopolicy.h>
 #include <avrt.h>
@@ -2093,6 +2094,58 @@ EndpointTransport AudioEndpoints::queryOutputTransport (const std::string& devic
                                         readUIntProperty (store.get(), kEndpointFormFactorKey, 10));
     }
     return EndpointTransport::Unknown;
+}
+
+EndpointVolume AudioEndpoints::queryOutputVolume (const std::string& deviceName)
+{
+    // docs/11 E32: the endpoint's master volume (the volume flyout's slider)
+    // in dB, of the named render endpoint or the default console one.
+    EndpointVolume result;
+    const ScopedComInit com;
+    if (! com.isUsable())
+    {
+        result.error = "COM is not usable on this thread: " + hresultToString (com.status());
+        return result;
+    }
+    auto enumerator = createDeviceEnumerator (result.error);
+    if (! enumerator)
+        return result;
+
+    ComPtr<IMMDevice> device;
+    if (! deviceName.empty())
+    {
+        ComPtr<IMMDeviceCollection> devices;
+        UINT count = 0;
+        const std::wstring wanted = toWide (deviceName);
+        if (SUCCEEDED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put())) && SUCCEEDED (devices->GetCount (&count)))
+            for (UINT i = 0; i < count && ! device; ++i)
+                if (SUCCEEDED (devices->Item (i, device.put())) && endpointFriendlyName (device.get()) != wanted)
+                    device.reset();
+    }
+    if (! device)
+    {
+        const HRESULT hr = enumerator->GetDefaultAudioEndpoint (eRender, eConsole, device.put());
+        if (FAILED (hr))
+        {
+            result.error = "No default output endpoint: " + hresultToString (hr);
+            return result;
+        }
+    }
+    ComPtr<IAudioEndpointVolume> volume;
+    HRESULT hr = device->Activate (__uuidof (IAudioEndpointVolume), CLSCTX_ALL, nullptr, volume.putVoid());
+    float db = 0.0f;
+    if (SUCCEEDED (hr))
+        hr = volume->GetMasterVolumeLevel (&db);
+    if (FAILED (hr))
+    {
+        result.error = "Cannot read the endpoint volume: " + hresultToString (hr);
+        return result;
+    }
+    BOOL mute = FALSE;
+    result.known = true;
+    result.volumeDb = std::isfinite (db) ? std::max (db, EndpointVolume::kSilentDb) : EndpointVolume::kSilentDb;
+    result.muted = SUCCEEDED (volume->GetMute (&mute)) && mute != FALSE;
+    return result;
 }
 
 bool SystemTuning::disablePowerThrottling()

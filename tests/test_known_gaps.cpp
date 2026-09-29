@@ -572,7 +572,7 @@ TEST_CASE ("KnownGap closed: Music Boost 100 on the E59 quality suite - loudness
     CHECK_LE (q.thdn[3].db, -80.0);
 }
 
-TEST_CASE ("KnownGap: 7.1 LFE - an LFE-only 50 Hz tone folds at +6 dB re one main channel with the virtualiser off and on (E01)")
+TEST_CASE ("KnownGap closed: 7.1 LFE - an LFE-only 50 Hz tone folds at +10 dB re one main channel with the virtualiser off and on (E01)")
 {
     // 8-channel input (FL FR FC LFE BL BR SL SR), 50 Hz at -12 dBFS peak on
     // one channel, maximizer and bass engine off (docs/11 E01's setup), the
@@ -604,15 +604,148 @@ TEST_CASE ("KnownGap: 7.1 LFE - an LFE-only 50 Hz tone folds at +6 dB re one mai
     // (-15.01 -> -18.04 dBFS), while the LFE keeps its level.
     CHECK_NEAR (mainOff, -15.05, 0.3);
     CHECK_NEAR (mainOn, -18.04, 0.3);
-    // Fixed by E01 (shared Bs775Fold / LfeFold, virt.lfe default +6 dB):
-    // before, the LFE was dropped with the virtualiser off (-240 dBFS, exact
-    // silence) and sat at -0.03 dB re FL with it on. Now both folds put it at
-    // virt.lfe re one main and within 1 dB of each other (E01 Done-when).
-    CHECK_NEAR (lfeOff - mainOff, 6.00, 0.3);
-    CHECK_NEAR (lfeOn - mainOn, 8.99, 0.3); // 5.97 before E28a: per ear; the loudness ratio is the downmix's
+    // Fixed by E01 (shared Bs775Fold / LfeFold, virt.lfe default +6 dB, then
+    // +10 dB with the fold's headroom on E05's LF-first limiter): before, the
+    // LFE was dropped with the virtualiser off (-240 dBFS, exact silence) and
+    // sat at -0.03 dB re FL with it on; at +6 dB 6.00 / 8.99 dB. Now both
+    // folds put it at +10 dB re one main (E01 Done-when: within 1 dB of +10
+    // and of each other).
+    CHECK_NEAR (lfeOff - mainOff, 10.00, 0.3);
+    CHECK_NEAR (lfeOn - mainOn, 12.99, 0.3); // per ear; the loudness ratio is the downmix's (E28a), +10 dB
     CHECK_LE (std::abs (lfeOn - lfeOff), 1.0);
-    // KNOWN_GAP: target LFE = FL + 10 dB (+-1 dB) per docs/11 E01 Done-when;
-    // the default stays +6 dB until E05's LF-safe limiter envelope lands.
+    CHECK_NEAR (lfeOff - mainOff, 10.0, 1.0);
+}
+
+TEST_CASE ("KnownGap closed: 5.1 pink - the band-limited LFE sits +10 dB re one main in the BS.775 fold and the virtualiser (E01)")
+{
+    // docs/11 E01 Done-when's pink reference: independent pink on the five
+    // mains at -30 dBFS RMS, pink low-passed at 120 Hz on the LFE at the same
+    // RMS. Every module but the virtualiser (on or off) off, the surround fold
+    // forced. Ratio: the output's power over 25..100 Hz, both channels, 1..4 s,
+    // with only the LFE playing over that with only FL playing its own 120 Hz
+    // band-limited pink (the LFE's twin). The LFE reaches both sides and FL
+    // one (BS.775) or both at -3 dB each (the virtualiser's level match), so
+    // the ratio is virt.lfe + 3.01 dB in both folds, less the fold's own
+    // 120 Hz low-pass on the already band-limited LFE. The host's capture fold
+    // (AudioEngineHost) runs the same Bs775Fold at the strip's virt.lfe
+    // (tests/app/test_app_host_io.cpp, tones).
+    const int n = samplesOf (4.0);
+    auto lowPassed = [n] (uint32_t seed) {
+        auto x = pinkNoise (n, dbToGain (-30.0f), seed);
+        for (int s = 0; s < 2; ++s)
+        {
+            SvfFilter lp;
+            lp.set (FilterType::LowPass, 120.0, butterworthQ (2, s), 0.0, kFs);
+            float* p[] = { x.data() };
+            lp.process (AudioBlock (p, 1, n));
+        }
+        return x;
+    };
+    const auto lfe = lowPassed (5101), main = lowPassed (5102);
+    auto bandPower = [&] (int channel, const std::vector<float>& signal, bool virt) {
+        auto values = resolve (RenderOptions {});
+        onlyModules (values, { VirtualizerOn });
+        setValue (values, VirtualizerOn, virt ? 1.0f : 0.0f);
+        setValue (values, VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        Channels c (6, std::vector<float> (static_cast<size_t> (n), 0.0f));
+        c[static_cast<size_t> (channel)] = signal;
+        const auto out = render (fileOf (std::move (c)), values);
+        double power = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            std::vector<float> y (out[static_cast<size_t> (ch)].begin() + samplesOf (1.0), out[static_cast<size_t> (ch)].end());
+            float* p[] = { y.data() };
+            SvfFilter hp, lp;
+            hp.set (FilterType::HighPass, 25.0, 0.7071, 0.0, kFs);
+            lp.set (FilterType::LowPass, 100.0, 0.7071, 0.0, kFs);
+            hp.process (AudioBlock (p, 1, static_cast<int> (y.size())));
+            lp.process (AudioBlock (p, 1, static_cast<int> (y.size())));
+            power += rms (y.data(), static_cast<int> (y.size())) * rms (y.data(), static_cast<int> (y.size()));
+        }
+        return 10.0 * std::log10 (std::max (power, 1.0e-30));
+    };
+    const double bs775 = bandPower (3, lfe, false) - bandPower (0, main, false);
+    const double virt = bandPower (3, lfe, true) - bandPower (0, main, true);
+    measured ("LFE re one main, 25-100 Hz, BS.775 fold", bs775, "dB");
+    measured ("LFE re one main, 25-100 Hz, virtualiser", virt, "dB");
+    // Default virt.lfe +10 dB: 12.74 / 12.75 dB (+6 dB: 8.74 / 8.75; before
+    // E01: the LFE dropped / -0.03 dB). The Done-when: the ratio within 1 dB
+    // in both folds, at the +10 dB convention.
+    CHECK_NEAR (bs775, 10.0 + 3.01, 1.0);
+    CHECK_NEAR (virt, 10.0 + 3.01, 1.0);
+    CHECK_LE (std::abs (bs775 - virt), 1.0);
+}
+
+TEST_CASE ("KnownGap closed: the LFE fold's headroom - +10 dB LFE explosions ride the LF-first limiter, not the whole mix (E01)")
+{
+    // 7.1, defaults (Music, maximizer on, virtualiser off: the BS.775 fold,
+    // forced): -30 dBFS RMS pink on the mains, -26 on FC, and four
+    // explosions 1.5 s apart - a 35 Hz decaying sine at -3 dBFS peak on the
+    // LFE (tau 250 ms) with -12 dBFS noise bursts on FL FR BL BR (tau 80 ms).
+    // Measured: the maximizer limiter's gain reduction per block (the
+    // broadband limiter that ducks the dialogue) and the output's 1 kHz band.
+    const int n = samplesOf (6.0);
+    Channels c (8);
+    for (int ch = 0; ch < 8; ++ch)
+        c[static_cast<size_t> (ch)] = ch == 3 ? std::vector<float> (static_cast<size_t> (n), 0.0f)
+                                              : pinkNoise (n, dbToGain (ch == 2 ? -26.0f : -30.0f), static_cast<uint32_t> (7000 + ch));
+    FastRandom rng (4242);
+    for (int k = 0; k < 4; ++k)
+    {
+        const int onset = samplesOf (0.5 + 1.5 * k);
+        for (int i = 0; i < samplesOf (0.8); ++i)
+        {
+            const double t = i / kFs;
+            c[3][static_cast<size_t> (onset + i)] += static_cast<float> (0.7 * std::exp (-t / 0.25) * std::sin (kTwoPi * (35.0 + 25.0 * std::exp (-t / 0.05)) * t));
+            const float burst = static_cast<float> (0.25 * std::exp (-t / 0.08)) * rng.nextBipolar();
+            for (int ch : { 0, 1, 4, 5 })
+                c[static_cast<size_t> (ch)][static_cast<size_t> (onset + i)] += burst;
+        }
+    }
+    const auto input = fileOf (std::move (c));
+    struct Result
+    {
+        double overOneDbPercent, deepestDb;
+    };
+    auto measure = [&] (float lfeDb) {
+        auto values = resolve (RenderOptions {});
+        setValue (values, VirtualizerOn, 0.0f);
+        setValue (values, VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        setValue (values, VirtLfeGainDb, lfeDb);
+        ParameterStore store;
+        for (int id = 0; id < kNumParams; ++id)
+            store.set (id, values[static_cast<size_t> (id)]);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 480, 8 });
+        Channels io = input.channels;
+        std::vector<float*> ptrs;
+        for (auto& ch : io)
+            ptrs.push_back (ch.data());
+        Result r { 0.0, 0.0 };
+        int blocks = 0, over = 0;
+        for (int pos = 0; pos + 480 <= n; pos += 480)
+        {
+            chain.process (AudioBlock (ptrs.data(), 8, 480, pos));
+            const double gr = chain.meters().maxGainReductionDb.load();
+            r.deepestDb = std::min (r.deepestDb, gr);
+            over += gr < -1.0 ? 1 : 0;
+            ++blocks;
+        }
+        r.overOneDbPercent = 100.0 * over / blocks;
+        return r;
+    };
+    const Result six = measure (6.0f), ten = measure (10.0f);
+    measured ("limiter time over 1 dB, LFE +6 dB", six.overOneDbPercent, "%");
+    measured ("limiter time over 1 dB, LFE +10 dB (default)", ten.overOneDbPercent, "%");
+    measured ("deepest limiter GR, LFE +6 dB", six.deepestDb, "dB");
+    measured ("deepest limiter GR, LFE +10 dB", ten.deepestDb, "dB");
+    // +10 dB alone (before the fold armed the LF-first limiter; the same
+    // scene through flubsound-cli) held the limiter over 1 dB 63.5 % of the
+    // time, 6.3 dB deep, against 7.3 % / 3.2 dB at +6 dB: the dialogue
+    // ducked under every explosion. With the LF-first limiter above +6 dB
+    // it is back to the +6 dB figures.
+    CHECK_LE (ten.overOneDbPercent, six.overOneDbPercent + 2.0);
+    CHECK_GE (ten.deepestDb, six.deepestDb - 0.5);
 }
 
 TEST_CASE ("KnownGap closed: stereo in an 8-channel container - FL/FR-only content switches to the stereo passthrough fold: no centre notch, full separation (E27)")
