@@ -1051,17 +1051,29 @@ TEST_CASE ("Saturator ADAA: the chain's designs keep unity small-signal gain and
                     if (std::abs (y[static_cast<size_t> (i)]) > std::abs (y[static_cast<size_t> (argMax)]))
                         argMax = i;
                 CHECK (argMax == n0 + lat);
-                CHECK_NEAR (y[static_cast<size_t> (n0 + lat)], 1.0e-3, 1.0e-7);
+                CHECK_NEAR (y[static_cast<size_t> (n0 + lat)], 1.0e-3, 0.05e-3); // Tube's even term adds ~1e-6
             }
 }
 
-TEST_CASE ("Saturator ADAA: the deviation stays aligned with the dry path - 1 / 5 kHz at 12 dB match the plain curve within -60 dB, THD+N telemetry within 0.3 dB")
+TEST_CASE ("Saturator ADAA: the deviation stays aligned with the dry path - at 1 / 5 kHz and 12 dB the output's fundamental and 3rd harmonic match the plain curve's, and so does the THD+N telemetry")
 {
-    // Same design with and without ADAA: what differs is the aliasing (below
-    // -70 dBc) and the box filter's droop on the deviation (-0.02 dB at 5 kHz
-    // at 4x / 48 kHz). The half sample the decimator takes back matters: a
-    // deviation half an oversampled sample late would leave about -35 dB
-    // (1 kHz) and -21 dB (5 kHz) at 4x.
+    // Same design with and without ADAA. The half sample the decimator takes
+    // back is what keeps the phases equal: a deviation half an oversampled
+    // sample late turns the 5 kHz fundamental by 0.16 rad at 4x (0.08 at 8x).
+    // What is left is ADAA1's own error, the curve evaluated on a linear
+    // path between samples (O(step^2): -0.04 dB on the 5 kHz fundamental at
+    // 4x, -0.1 dB on its 15 kHz harmonic; 4x smaller at 8x), and the
+    // aliasing, which only the ADAA side lacks.
+    const auto phasor = [] (const ToneResult& r, double f) {
+        double re = 0.0, im = 0.0;
+        for (int i = 0; i < r.length; ++i)
+        {
+            const double v = r.out[static_cast<size_t> (r.start + i)];
+            re += v * std::cos (kTwoPi * f * i / kFs);
+            im -= v * std::sin (kTwoPi * f * i / kFs);
+        }
+        return std::pair { 2.0 * std::hypot (re, im) / r.length, std::atan2 (im, re) };
+    };
     for (const auto& withAdaa : chainDesigns (48000.0))
     {
         auto plain = withAdaa;
@@ -1073,15 +1085,15 @@ TEST_CASE ("Saturator ADAA: the deviation stays aligned with the dry path - 1 / 
                 auto b = makeSat (kFs, makeParams (type, 12.0f), plain);
                 const auto ra = runTone (*a, f, kFs, 0.5f);
                 const auto rb = runTone (*b, f, kFs, 0.5f);
-                double diff = 0.0, ref = 0.0;
-                for (int i = ra.start; i < ra.start + ra.length; ++i)
+                for (int h : { 1, 3 })
                 {
-                    const double d = ra.out[static_cast<size_t> (i)] - rb.out[static_cast<size_t> (i)];
-                    diff += d * d;
-                    ref += static_cast<double> (rb.out[static_cast<size_t> (i)]) * rb.out[static_cast<size_t> (i)];
+                    const auto [magA, phaseA] = phasor (ra, h * f);
+                    const auto [magB, phaseB] = phasor (rb, h * f);
+                    if (magB < 1.0e-4)
+                        continue; // (a harmonic the curve barely makes)
+                    CHECK_NEAR (toDb (magA / magB), 0.0, 0.15);
+                    CHECK_NEAR (std::remainder (phaseA - phaseB, kTwoPi), 0.0, 0.005);
                 }
-                const double db = 10.0 * std::log10 (std::max (1.0e-30, diff / ref));
-                CHECK_LE (db, -60.0);
                 CHECK_NEAR (a->getDistortionDb(), b->getDistortionDb(), 0.3);
                 CHECK_GE (a->getDistortionDb(), -40.0); // it is saturating
             }

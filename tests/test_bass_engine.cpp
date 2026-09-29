@@ -1074,3 +1074,320 @@ TEST_CASE ("BassEngine (review): steady bass through protection, tighten, mono a
         }
     }
 }
+
+//==============================================================================
+// docs/11 E02: split-band protection (a) and the subsonic slope.
+namespace
+{
+/** 55 Hz kicks (peak 0.5, tau 100 ms, 350 ms long) every 0.5 + 1/128 s: over
+    one kick period a 32 Hz line turns by a quarter cycle, so averaging four
+    periods cancels the kick at 32 Hz (lineGainTrack). */
+constexpr double kKickPeriod = 0.5 + 1.0 / 128.0;
+
+std::vector<float> lineUnderKicks (double lineAmp, double kickHz, int n)
+{
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t, kKickPeriod);
+        const double kick = beat < 0.35 ? 0.5 * std::exp (-beat / 0.1) * std::sin (kTwoPi * kickHz * beat) : 0.0;
+        x[static_cast<size_t> (i)] = static_cast<float> (lineAmp * std::sin (kTwoPi * 32.0 * t) + kick);
+    }
+    return x;
+}
+
+/** The 32 Hz line's level over one kick period (every 0.5 ms, dB): the
+    signal demodulated at 32 Hz, averaged over one line cycle and over four
+    kick periods from `from` (where the kicks' own 32 Hz content cancels). */
+std::vector<double> lineLevelTrack (const std::vector<float>& y, double from)
+{
+    const int period = static_cast<int> (std::lround (kKickPeriod * kFs)), cycle = static_cast<int> (std::lround (kFs / 32.0));
+    const int s0 = static_cast<int> (from * kFs);
+    std::vector<double> re (y.size()), im (y.size());
+    double accRe = 0.0, accIm = 0.0;
+    for (size_t i = 0; i < y.size(); ++i)
+    {
+        const double a = kTwoPi * 32.0 * static_cast<double> (i) / kFs;
+        accRe += y[i] * std::cos (a);
+        accIm -= y[i] * std::sin (a);
+        if (i >= static_cast<size_t> (cycle))
+        {
+            const double b = kTwoPi * 32.0 * static_cast<double> (i - static_cast<size_t> (cycle)) / kFs;
+            accRe -= y[i - static_cast<size_t> (cycle)] * std::cos (b);
+            accIm += y[i - static_cast<size_t> (cycle)] * std::sin (b);
+        }
+        re[i] = accRe;
+        im[i] = accIm;
+    }
+    std::vector<double> track;
+    for (int tau = 0; tau < period; tau += 24)
+    {
+        double r = 0.0, q = 0.0;
+        for (int p = 0; p < 4; ++p)
+        {
+            r += re[static_cast<size_t> (s0 + p * period + tau)];
+            q += im[static_cast<size_t> (s0 + p * period + tau)];
+        }
+        track.push_back (toDb (std::hypot (r, q) / (4.0 * cycle) * 2.0));
+    }
+    return track;
+}
+
+struct LineResult
+{
+    double modulationDb = 0.0, meanGainDb = 0.0;
+};
+
+/** The line's gain through `p` (the input's own track as reference): its
+    peak-to-peak modulation over the kick period and its mean. */
+LineResult lineModulation (const BassEngineParams& p, double lineAmp, double kickHz = 55.0)
+{
+    const int n = static_cast<int> (5.8 * kFs);
+    const auto x = lineUnderKicks (lineAmp, kickHz, n);
+    BassEngine be;
+    prepareBass (be);
+    be.setParams (p);
+    const auto out = runStereo (be, x);
+    const auto in = lineLevelTrack (x, 3.5), got = lineLevelTrack (out.ch[0], 3.5);
+    double lo = 1.0e9, hi = -1.0e9, sum = 0.0;
+    for (size_t k = 0; k < in.size(); ++k)
+    {
+        const double g = got[k] - in[k];
+        lo = std::min (lo, g);
+        hi = std::max (hi, g);
+        sum += g;
+    }
+    return { hi - lo, sum / static_cast<double> (in.size()) };
+}
+
+/** Music Bass Head's bass engine (presets/factory/music-bass-head.json). */
+BassEngineParams bassHead()
+{
+    BassEngineParams p;
+    p.boostDb = 6.0f;
+    p.boostFrequency = 55.0f;
+    p.protectThresholdDb = -4.0f;
+    p.harmonicsAmount = 0.2f;
+    p.harmonicsCutoff = 90.0f;
+    p.harmonicsCharacter = 0.35f;
+    p.tighten = 0.1f;
+    p.monoBelowHz = 110.0f;
+    p.subsonicHz = 25.0f;
+    return p;
+}
+} // namespace
+
+TEST_CASE ("BassEngine: split-band protection holds a 32 Hz line steady under 55 Hz kicks at Bass Head's settings (docs/11 E02 (a))")
+{
+    // The Done-when stimulus: a 32 Hz line (-24 / -18 / -12 dBFS) under 55 Hz
+    // kicks at -6 dBFS every ~500 ms. The protection alone (tighten and
+    // harmonics off) moved the line with every kick; the split detectors'
+    // program-dependent release hold one gain through the pattern. The rest
+    // of Bass Head's engine still moves it: tighten (E04) and the harmonics
+    // generator (E03) each by about 1 dB, measured below.
+    for (const double lineAmp : { 0.0625, 0.125, 0.25 })
+    {
+        auto protectionOnly = bassHead();
+        protectionOnly.tighten = 0.0f;
+        protectionOnly.harmonicsAmount = 0.0f;
+        auto split = protectionOnly;
+        split.splitProtection = true;
+        const auto before = lineModulation (protectionOnly, lineAmp), after = lineModulation (split, lineAmp);
+        auto head = bassHead();
+        const auto headBefore = lineModulation (head, lineAmp);
+        head.splitProtection = true;
+        const auto headAfter = lineModulation (head, lineAmp);
+        std::printf ("    measured 32 Hz line at %.1f dBFS: protection alone %.2f -> %.2f dB modulation (mean gain %+.2f -> %+.2f dB); "
+                     "Bass Head's engine %.2f -> %.2f dB\n",
+                     toDb (lineAmp), before.modulationDb, after.modulationDb, before.meanGainDb, after.meanGainDb, headBefore.modulationDb,
+                     headAfter.modulationDb);
+        CHECK_GE (before.modulationDb, 3.0); // the stimulus does pump the classic protection
+        CHECK_LE (after.modulationDb, 0.2);
+        CHECK_LE (headAfter.modulationDb, headBefore.modulationDb - 1.0);
+    }
+}
+
+TEST_CASE ("BassEngine: split-band protection - kicks above 60 Hz leave the sub boost, an isolated hit releases as before, and the cap holds for every shelf and tone (docs/11 E02 (a))")
+{
+    // 100 Hz kicks over the 32 Hz line with a 55 Hz shelf: the classic
+    // detector predicts the full boost for the kick and withdraws the whole
+    // shelf with each one; the split one takes the kick's excess in the punch
+    // band, so the line keeps about the classic's mean boost, steadily.
+    {
+        auto p = bassHead();
+        p.tighten = 0.0f;
+        p.harmonicsAmount = 0.0f;
+        const auto classic = lineModulation (p, 0.125, 100.0);
+        p.splitProtection = true;
+        const auto split = lineModulation (p, 0.125, 100.0);
+        std::printf ("    measured 32 Hz line under 100 Hz kicks: modulation %.2f -> %.2f dB, mean gain %+.2f -> %+.2f dB\n", classic.modulationDb,
+                     split.modulationDb, classic.meanGainDb, split.meanGainDb);
+        CHECK_LE (split.modulationDb, 0.5);
+        CHECK_GE (split.meanGainDb, classic.meanGainDb - 0.5); // steady at about the classic mean (55 Hz kicks cost 2.5 - 3.3 dB)
+    }
+
+    // One loud 40 Hz burst, then quiet: no pattern, so no hold; the boost
+    // returns as fast as the classic protection's.
+    {
+        const int n = ms (2000);
+        auto x = sine (40.0, kFs, n, dbfs (-3.0));
+        for (int i = ms (300); i < n; ++i)
+            x[static_cast<size_t> (i)] *= dbfs (-37.0);
+        float released[2] {};
+        for (int mode = 0; mode < 2; ++mode)
+        {
+            auto p = allOff();
+            p.boostDb = 9.0f;
+            p.boostFrequency = 60.0f;
+            p.protectThresholdDb = -12.0f;
+            p.splitProtection = mode == 1;
+            BassEngine be;
+            prepareBass (be);
+            be.setParams (p);
+            Planar buf (2, n);
+            setChannel (buf, 0, x);
+            setChannel (buf, 1, x);
+            float atBurst = 0.0f;
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                be.process (buf.block (pos, std::min (480, n - pos)));
+                if (pos + 480 == ms (300))
+                    atBurst = be.getProtectionDb();
+                if (pos + 480 == ms (800))
+                    released[mode] = be.getProtectionDb();
+            }
+            CHECK_GE (atBurst, 8.0f);
+        }
+        CHECK_LE (released[1], released[0] + 0.1f);
+        CHECK_LE (released[1], 0.5f);
+    }
+
+    // The cap: steady tones just under / over it, shelf anywhere in
+    // 30 .. 200 Hz, tones across the sub / punch split: never more than
+    // 0.5 dB over max (cap, input), as the classic protection.
+    const int settle = ms (500), measure = ms (400);
+    for (float boostHz : { 30.0f, 80.0f, 150.0f, 200.0f })
+        for (double f : { 30.0, 55.0, 70.0, 80.0, 120.0, 180.0 })
+            for (float thr : { 0.0f, -12.0f })
+                for (float rel : { -2.0f, 3.0f })
+                {
+                    auto p = allOff();
+                    p.boostDb = 15.0f;
+                    p.boostFrequency = boostHz;
+                    p.protectThresholdDb = thr;
+                    p.splitProtection = true;
+                    BassEngine be;
+                    prepareBass (be);
+                    be.setParams (p);
+                    const double inDb = thr + rel;
+                    const auto out = runStereo (be, sine (f, kFs, settle + measure, dbfs (inDb)));
+                    CHECK_LE (toDb (peakAbs (out.ch[0].data() + settle, measure)), std::max (static_cast<double> (thr), inDb) + 0.5);
+                    CHECK (be.getProtectionDb() > 0.0f);
+                }
+}
+
+TEST_CASE ("BassEngine: the 2nd-order subsonic filter keeps 28 Hz within 3 dB and halves the group delay at 40 Hz (docs/11 E02 subsonic slice)")
+{
+    // Group delay at 40 Hz from the phase of 39 / 41 Hz tones (a plain
+    // delay reads its length). HP4 at 25 Hz (Bass Head's) is the 8.2 ms of
+    // docs/11 E02; HP4 at 28 / 30 Hz (the gaming presets') lose 3.0 / 4.4 dB
+    // at 28 Hz.
+    const auto measure = [] (float hz, int order) {
+        auto p = allOff();
+        p.subsonicHz = hz;
+        p.subsonicOrder = order;
+        const int n = ms (1500), from = ms (1000), len = ms (500);
+        double phase[2] {};
+        for (int k = 0; k < 2; ++k)
+        {
+            const double f = k == 0 ? 39.0 : 41.0;
+            BassEngine be;
+            prepareBass (be);
+            be.setParams (p);
+            const auto x = sine (f, kFs, n, 0.1f);
+            const auto y = runStereo (be, x);
+            double re = 0.0, im = 0.0;
+            for (int i = from; i < from + len; ++i)
+            {
+                re += y.ch[0][static_cast<size_t> (i)] * std::cos (kTwoPi * f * i / kFs);
+                im -= y.ch[0][static_cast<size_t> (i)] * std::sin (kTwoPi * f * i / kFs);
+            }
+            phase[k] = std::atan2 (im, re) + 0.5 * kPi; // re the input sine
+        }
+        const double dphi = std::remainder (phase[1] - phase[0], kTwoPi);
+        BassEngine be;
+        prepareBass (be);
+        be.setParams (p);
+        const auto y28 = runStereo (be, sine (28.0, kFs, n, 0.1f));
+        return std::pair { -dphi / (kTwoPi * 2.0) * 1000.0, levelDb (y28.ch[0], from, len, 28.0, 0.1) };
+    };
+    const auto [gd4At25, at28For4At25] = measure (25.0f, 4);
+    const auto [gd4At20, at28For4At20] = measure (20.0f, 4);
+    const auto [gd2At20, at28For2At20] = measure (20.0f, 2);
+    const auto [gd4At30, at28For4At30] = measure (30.0f, 4);
+    std::printf ("    measured 40 Hz group delay: HP4 25 Hz %.2f ms, HP4 20 Hz %.2f ms, HP2 20 Hz %.2f ms; 28 Hz: HP4 30 Hz %.2f dB, HP2 20 Hz %.2f dB\n",
+                 gd4At25, gd4At20, gd2At20, at28For4At30, at28For2At20);
+    CHECK_NEAR (gd4At25, 8.2, 0.3);
+    CHECK_NEAR (gd2At20, 3.3, 0.3);
+    CHECK_LE (gd2At20, 0.5 * gd4At25);
+    CHECK_GE (at28For2At20, -3.0);
+    CHECK_LE (at28For4At30, -3.0); // what the gaming presets' 30 Hz HP4 does
+    CHECK_GE (at28For4At20, -0.5);
+    (void) at28For4At25;
+}
+
+TEST_CASE ("BassEngine: switching split-band protection and the subsonic slope is click-free and every block size gives the same output (docs/11 E02)")
+{
+    // A 32 Hz line under kicks (the protection working) with a 25 Hz
+    // rumble: split protection on / off and the slope 4 / 2 toggle every
+    // 300 ms. No output step beyond the steady signal's, and bit-identical
+    // output for every host block size.
+    const int n = ms (2400);
+    auto x = lineUnderKicks (0.125, 55.0, n);
+    const auto rumble = sine (25.0, kFs, n, 0.1f);
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] += rumble[i];
+    std::vector<Planar> outs;
+    for (int blockSize : { 480, 1, 37 })
+    {
+        auto p = bassHead();
+        p.subsonicHz = 20.0f;
+        BassEngine be;
+        prepareBass (be);
+        be.setParams (p);
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        for (int pos = 0; pos < n;)
+        {
+            // Changes land at the same sample for every block size.
+            const int step = pos / ms (300), nextChange = (step + 1) * ms (300);
+            p.splitProtection = step % 2 == 1;
+            p.subsonicOrder = (step / 2) % 2 == 1 ? 2 : 4;
+            be.setParams (p);
+            const int len = std::min ({ blockSize, n - pos, nextChange - pos });
+            be.process (buf.block (pos, len));
+            pos += len;
+        }
+        CHECK (allFinite (buf, 4.0));
+        outs.push_back (clone (buf));
+    }
+    for (size_t k = 1; k < outs.size(); ++k)
+        CHECK (maxAbsDiff (outs[0], outs[k]) == 0.0);
+
+    // Steps: the largest sample-to-sample change stays that of a run
+    // without toggles (the kicks' own attack is the largest step).
+    auto p = bassHead();
+    p.subsonicHz = 20.0f;
+    BassEngine steady;
+    prepareBass (steady);
+    steady.setParams (p);
+    const auto ref = runStereo (steady, x);
+    double maxStep = 0.0, refStep = 0.0;
+    for (int i = 1; i < n; ++i)
+    {
+        maxStep = std::max (maxStep, static_cast<double> (std::abs (outs[0].ch[0][static_cast<size_t> (i)] - outs[0].ch[0][static_cast<size_t> (i - 1)])));
+        refStep = std::max (refStep, static_cast<double> (std::abs (ref.ch[0][static_cast<size_t> (i)] - ref.ch[0][static_cast<size_t> (i - 1)])));
+    }
+    CHECK_LE (maxStep, 1.1 * refStep);
+}

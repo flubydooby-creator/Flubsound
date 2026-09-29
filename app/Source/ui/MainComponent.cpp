@@ -53,6 +53,11 @@ MainComponent::MainComponent (EngineController& c)
     simple.onOutputSettingsRequested = [this] { openSettings (SettingsDialog::Page::Audio); };
     simple.onCorrectionRequested = [this] { openSettings (SettingsDialog::Page::Correction); };
     header.onExportRequested = [this] { openExport(); };
+    header.onBlindTestRequested = [this] { openBlindTest(); };
+    header.onRoutingRequested = [this] { setRoutingDrawerOpen (! routingDrawer); };
+    // The rack's ears are matched with the header's estimator and switch (docs/11 E37).
+    rack.setEstimatorProvider ([this] { return header.getLoudnessEstimator(); });
+    header.onComparisonMatchedChanged = [this] (bool matched) { rack.getListenMatch().setEnabled (matched); };
     addChildComponent (deviceError);
     deviceError.onChooseOutput = [this] { openSettings (SettingsDialog::Page::Audio); };
     deviceError.onOpenSoundSettings = [this] { controller.getRouting().openSystemRoutingSettings(); };
@@ -97,6 +102,7 @@ MainComponent::MainComponent (EngineController& c)
 
 MainComponent::~MainComponent()
 {
+    abx.reset(); // puts the bank back that played before a running blind test
     // The settings and export windows talk to the controller: close them
     // while that exists (closing the export window aborts a running export).
     if (settingsWindow != nullptr)
@@ -158,6 +164,40 @@ void MainComponent::saveUiPreferences()
 std::vector<juce::Component*> MainComponent::getAdvancedOnlyComponents()
 {
     return { &routing, &analyzer, &rack, &levels, &loudness, &history };
+}
+
+void MainComponent::openBlindTest()
+{
+    if (abx != nullptr)
+        return;
+    rack.releaseListening();
+    abx = std::make_unique<AbxPanel> (controller, controller.getSelectedStrip(), header.getComparison().isEnabled());
+    abx->onClose = [this]
+    {
+        // Closed asynchronously: onClose runs inside the panel's own handlers.
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+                                         {
+                                             if (safe != nullptr)
+                                                 safe->closeBlindTest();
+                                         });
+    };
+    addAndMakeVisible (*abx);
+    abx->setBounds (getLocalBounds());
+    abx->toFront (true);
+    if (isShowing())
+        abx->grabKeyboardFocus();
+}
+
+void MainComponent::closeBlindTest()
+{
+    abx.reset();
+    header.refresh();
+}
+
+void MainComponent::setRoutingDrawerOpen (bool open)
+{
+    routingDrawer = open;
+    resized();
 }
 
 void MainComponent::setView (View newView, bool persist)
@@ -413,6 +453,11 @@ void MainComponent::parentHierarchyChanged()
 
 bool MainComponent::keyPressed (const juce::KeyPress& key)
 {
+    if (key == juce::KeyPress::escapeKey && view == View::Advanced && routingDrawer)
+    {
+        setRoutingDrawerOpen (false);
+        return true;
+    }
     if (key == juce::KeyPress::escapeKey && view == View::Advanced && rack.hasExpandedCard())
     {
         rack.collapse();
@@ -431,11 +476,14 @@ void MainComponent::paint (juce::Graphics& g)
 
 void MainComponent::resized()
 {
+    if (abx != nullptr)
+        abx->setBounds (getLocalBounds());
     auto r = getLocalBounds();
     header.setBounds (r.removeFromTop (56));
     r.reduce (12, 12);
     const int gap = 10;
     const int w = getWidth();
+    const bool narrow = w < HeaderBar::kNarrowWidth, shortWindow = getHeight() < 700;
 
     if (deviceError.shouldShow())
     {
@@ -459,13 +507,25 @@ void MainComponent::resized()
         return;
     }
 
-    history.setBounds (r.removeFromBottom (juce::jlimit (76, 128, r.getHeight() / 8)));
-    r.removeFromBottom (gap);
+    // Short windows: no waveform history (docs/11 E39).
+    history.setVisible (! shortWindow);
+    if (! shortWindow)
+    {
+        history.setBounds (r.removeFromBottom (juce::jlimit (76, 128, r.getHeight() / 8)));
+        r.removeFromBottom (gap);
+    }
 
-    routing.setBounds (r.removeFromLeft (juce::jlimit (228, 300, juce::roundToInt (w * 0.17))));
-    r.removeFromLeft (gap);
+    // Narrow windows: the routing panel is a drawer over the analyser.
+    const auto content = r;
+    routing.setVisible (! narrow || routingDrawer);
+    if (! narrow)
+    {
+        routingDrawer = false;
+        routing.setBounds (r.removeFromLeft (juce::jlimit (228, 300, juce::roundToInt (w * 0.17))));
+        r.removeFromLeft (gap);
+    }
 
-    auto right = r.removeFromRight (juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
+    auto right = r.removeFromRight (narrow ? juce::jlimit (200, 252, juce::roundToInt (w * 0.22)) : juce::jlimit (252, 320, juce::roundToInt (w * 0.19)));
     r.removeFromRight (gap);
     // The loudness panel's content has a fixed height (~380 px): on tall
     // windows the level meters take the spare height instead of leaving the
@@ -485,6 +545,12 @@ void MainComponent::resized()
     rack.setBounds (r.removeFromBottom (rackH));
     r.removeFromBottom (gap);
     analyzer.setBounds (r);
+
+    if (narrow && routingDrawer)
+    {
+        routing.setBounds (content.withWidth (juce::jmin (280, content.getWidth())));
+        routing.toFront (false);
+    }
 }
 
 void MainComponent::layoutSimple (juce::Rectangle<int> r)

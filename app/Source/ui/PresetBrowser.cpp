@@ -487,12 +487,12 @@ PresetBrowser::PresetBrowser (EngineController& c, std::shared_ptr<PresetLoudnes
     for (auto* b : { &favouriteButton, &cancelButton, &loadButton })
         addAndMakeVisible (*b);
 
-    estimator->onEstimate = [this]
-    {
-        updateMatch();
-        details->repaint();
-        repaint (statusArea);
-    };
+    estimateListener = estimator->addListener ([this]
+                                               {
+                                                   updateMatch();
+                                                   details->repaint();
+                                                   repaint (statusArea);
+                                               });
 
     reloadPresets();
     audition.begin (controller.getSelectedStrip());
@@ -515,7 +515,7 @@ PresetBrowser::~PresetBrowser()
     stopTimer();
     controller.removeListener (this);
     if (estimator != nullptr)
-        estimator->onEstimate = nullptr;
+        estimator->removeListener (estimateListener);
     list.setModel (nullptr);
     audition.cancel();
 }
@@ -675,7 +675,7 @@ void PresetBrowser::rowSelected (int row)
     {
         if (audition.valuesFor (*p, &selectedWarnings).empty())
             selectedError = "This preset could not be read.";
-        estimator->request (valuesFor (*p), levelLufs, true);
+        estimator->request (valuesFor (*p), levelLufs, true, estimateVariant());
     }
     if (changed || audition.getPreviewId() != selectedId)
         playSelection();
@@ -766,25 +766,35 @@ std::optional<float> PresetBrowser::estimateFor (const PresetInfo& preset) const
     const auto& values = valuesFor (preset);
     if (values.empty())
         return {};
-    return estimator->find (values, levelLufs);
+    return estimator->find (values, levelLufs, estimateVariant());
 }
 
 std::optional<float> PresetBrowser::originalEstimate() const
 {
     if (audition.getOriginalValues().empty())
         return {};
-    return estimator->find (audition.getOriginalValues(), levelLufs);
+    return estimator->find (audition.getOriginalValues(), levelLufs, estimateVariant());
 }
 
 void PresetBrowser::requestEstimates()
 {
     if (! audition.getOriginalValues().empty())
-        estimator->request (audition.getOriginalValues(), levelLufs, true);
+        estimator->request (audition.getOriginalValues(), levelLufs, true, estimateVariant());
     if (const auto* p = getSelectedPreset())
-        estimator->request (valuesFor (*p), levelLufs, true);
+        estimator->request (valuesFor (*p), levelLufs, true, estimateVariant());
     for (const auto& p : presets)
         if (const auto& values = valuesFor (p); ! values.empty())
-            estimator->request (values, levelLufs);
+            estimator->request (values, levelLufs, false, estimateVariant());
+}
+
+PresetLoudnessEstimator::Variant PresetBrowser::estimateVariant() const
+{
+    // A 7.1 strip is estimated on the 7.1 game scene (docs/11 E37): its
+    // virtualiser and input fold take part.
+    const int strip = audition.isActive() ? audition.getStrip() : controller.getSelectedStrip();
+    PresetLoudnessEstimator::Variant v;
+    v.channels = strip >= 0 && strip < controller.getNumStrips() ? controller.getStripChannels (strip) : 2;
+    return v;
 }
 
 std::optional<float> PresetBrowser::liveProgrammeLevel() const

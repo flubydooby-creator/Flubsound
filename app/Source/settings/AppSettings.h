@@ -274,6 +274,12 @@ public:
     bool getPresetPreviewMatched() const;
     void setPresetPreviewMatched (bool matched);
 
+    // ---- Comparisons (docs/11 E37) -------------------------------------------------------
+    /** Loudness-matched A/B and module listen (default on): the louder side
+        of a comparison is turned down to the quieter one. */
+    bool getComparisonMatched() const;
+    void setComparisonMatched (bool matched);
+
     /** The output device the user chose (e.g. a USB headset); restored when it
         reappears after being unplugged / powered off. */
     juce::String getPreferredOutputDevice() const;

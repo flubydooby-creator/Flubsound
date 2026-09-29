@@ -1,6 +1,6 @@
 // Flubsound Pro - main window content.
 //
-// Layout (scales from 1100 x 700 to 2560 x 1440, proportional with limits):
+// Layout (scales from 800 x 560 to 2560 x 1440, proportional with limits):
 //
 //   +--------------------------------------------------------------------+
 //   | HeaderBar: logo, mode, strip, presets, A/B, bypass, latency, gear  |
@@ -48,15 +48,28 @@
 // polling); structural events arrive through EngineController::Listener. The
 // accent colour follows the selected strip's mode.
 //
+// Narrow and short windows (docs/11 E39, down to the 800 x 560 minimum, e.g.
+// 1093 x 614: a 1366 x 768 laptop at 125 %): below 1100 px the header
+// reflows (HeaderBar::kNarrowWidth) and the routing panel leaves the row; it
+// opens as a drawer over the analyser from the header's overflow menu
+// (Escape or the same item closes it). Below 700 px of height the waveform
+// history is left out. The right column narrows to 200 px.
+//
+// Comparisons (docs/11 E37): the header's A/B is loudness matched
+// (BankComparison), the rack's ears too (ListenMatch, sharing the header's
+// estimator); the blind A/B/X test (AbxPanel) opens over the whole window,
+// header included, so nothing on screen gives X away.
+//
 // UI scale and theme (Settings > General) are app-wide (Theme::applyUiScale,
 // Theme::setTheme); the main component registers its window's design minimum
-// (1100 x 700) so the window's minimum size never exceeds its screen at a
+// (800 x 560) so the window's minimum size never exceeds its screen at a
 // large UI scale.
 //
 // Contract with the shell: namespace flub::app::ui, constructible from an
 // EngineController&, owned by MainWindow.
 #pragma once
 
+#include "AbxPanel.h"
 #include "AnalyzerFeed.h"
 #include "AnalyzerPanel.h"
 #include "BoostPanel.h"
@@ -107,6 +120,18 @@ public:
     /** The components of the Advanced view that the Simple view hides. */
     std::vector<juce::Component*> getAdvancedOnlyComponents();
 
+    /** The blind A/B/X test of the selected strip's banks (docs/11 E37). */
+    void openBlindTest();
+    void closeBlindTest();
+    AbxPanel* getBlindTest() noexcept { return abx.get(); }
+
+    /** Narrow windows: the routing panel as a drawer (docs/11 E39). */
+    void setRoutingDrawerOpen (bool open);
+    bool isRoutingDrawerOpen() const noexcept { return routingDrawer; }
+    ModuleRack& getRack() noexcept { return rack; }
+    LoudnessPanel& getLoudnessPanel() noexcept { return loudness; }
+    RoutingPanel& getRoutingPanel() noexcept { return routing; }
+
     void paint (juce::Graphics& g) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress& key) override;
@@ -149,6 +174,8 @@ private:
     WaveformHistory history;
     SimpleStatusPanel simple;
     View view = View::Advanced;
+    std::unique_ptr<AbxPanel> abx;
+    bool routingDrawer = false;
     std::unique_ptr<juce::TooltipWindow> tooltips; // none in headless screenshot runs
     bool screenshotRun = false;                    // headless --screenshot: exact size, no window limits
 

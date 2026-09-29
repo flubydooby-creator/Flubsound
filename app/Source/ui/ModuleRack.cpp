@@ -2,6 +2,7 @@
 
 #include "Theme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace flub::app::ui
@@ -11,7 +12,8 @@ using namespace flub::param;
 ModuleRack::ModuleRack (EngineController& c)
     : controller (c),
       binder ([this] { return &controller.getSelectedParams(); },
-              [this] { return &controller.getChain (controller.getSelectedStrip()); })
+              [this] { return &controller.getChain (controller.getSelectedStrip()); }),
+      listenMatch (c, [this] { return estimatorProvider != nullptr ? estimatorProvider() : nullptr; })
 {
     setTitle ("Module rack");
     setWantsKeyboardFocus (false);
@@ -31,7 +33,9 @@ ModuleRack::ModuleRack (EngineController& c)
             if (listen)
                 listenStrip = controller.getSelectedStrip();
             controller.setAuditionBypass (listenStrip, enableId, listen);
+            listenMatch.listen (listenStrip, enableId, listen);
         };
+        card->onListenHover = [this, enableId = d.enableId] { listenMatch.prepare (controller.getSelectedStrip(), enableId); };
         if (d.banding == ModuleDescriptor::Banding::Eq)
             card->onBandChanged = [this] (int band)
             {
@@ -39,8 +43,42 @@ ModuleRack::ModuleRack (EngineController& c)
                     onEqBandSelected (band);
             };
         content.addAndMakeVisible (*card);
+        order.push_back (card.get());
         cards.push_back (std::move (card));
     }
+}
+
+std::vector<juce::String> ModuleRack::relevanceOrder (ModeValue mode, int stripChannels, bool quality)
+{
+    const bool surround = stripChannels > 2;
+    std::vector<juce::String> ids;
+    if (mode == ModeValue::Gaming)
+    {
+        if (surround)
+            ids.push_back ("virt");
+        for (const char* id : { "dyneq", "clarity", "spatial", "comp", "bass", "max", "eq", "sat" })
+            ids.push_back (id);
+    }
+    else
+    {
+        ids.push_back ("eq");
+        if (surround)
+            ids.push_back ("virt");
+        for (const char* id : { "bass", "clarity", "spatial", "sat", "comp", "max", "dyneq" })
+            ids.push_back (id);
+    }
+    if (! surround)
+        ids.push_back ("virt"); // nothing to render on a stereo strip
+    if (quality)
+        ids.push_back ("gate"); // only the Quality chain runs the gate
+    return ids;
+}
+
+std::vector<ModuleCard*> ModuleRack::getShownCards() const
+{
+    if (expandedCard != nullptr)
+        return { expandedCard };
+    return order;
 }
 
 ModuleRack::~ModuleRack()
@@ -56,6 +94,24 @@ void ModuleRack::updateFromEngine()
     const auto& chain = controller.getChain (strip);
     const bool quality = static_cast<int> (std::lround (store.get (LatencyProfile))) == static_cast<int> (LatencyProfileValue::Quality);
     const bool surround = controller.getStripChannels (strip) > 2;
+
+    // Relevance order and the cards the profile leaves out (docs/11 E39).
+    const auto mode = store.get (Mode) >= 0.5f ? ModeValue::Gaming : ModeValue::Music;
+    std::vector<ModuleCard*> wanted;
+    for (const auto& id : relevanceOrder (mode, controller.getStripChannels (strip), quality))
+        for (auto& card : cards)
+            if (card->getDescriptor().id == id)
+                wanted.push_back (card.get());
+    if (wanted != order)
+    {
+        order = std::move (wanted);
+        if (expandedCard != nullptr && std::find (order.begin(), order.end(), expandedCard) == order.end())
+            collapse();
+        for (auto& card : cards)
+            card->setVisible (expandedCard == nullptr ? std::find (order.begin(), order.end(), card.get()) != order.end()
+                                                      : card.get() == expandedCard);
+        resized();
+    }
 
     for (auto& card : cards)
     {
@@ -73,6 +129,7 @@ void ModuleRack::releaseListening()
 {
     for (auto& card : cards)
         card->stopListening();
+    listenMatch.reset(); // the session's trim goes with it
 }
 
 void ModuleRack::setSelectedEqBand (int band)
@@ -101,7 +158,7 @@ void ModuleRack::expand (ModuleCard& card, bool shouldExpand)
     }
 
     for (auto& c : cards)
-        c->setVisible (expandedCard == nullptr || c.get() == expandedCard);
+        c->setVisible (expandedCard == nullptr ? std::find (order.begin(), order.end(), c.get()) != order.end() : c.get() == expandedCard);
     viewport.setScrollBarsShown (false, expandedCard == nullptr);
     resized();
     if (onLayoutModeChanged != nullptr)
@@ -163,18 +220,17 @@ void ModuleRack::resized()
 
     // Row of cards; the scrollbar sits under them when they do not fit.
     int total = 0;
-    for (auto& c : cards)
+    for (auto* c : order)
         total += c->getPreferredWidth() + 10;
     total -= 10;
 
     const bool fits = total <= viewport.getWidth();
     const int height = viewport.getHeight() - (fits ? 0 : viewport.getScrollBarThickness() + 4);
     // When everything fits, spread the spare width over the cards.
-    const float stretch = fits && total > 0 ? static_cast<float> (viewport.getWidth() + 10 - static_cast<int> (cards.size()) * 10)
-                                                  / static_cast<float> (total + 10 - static_cast<int> (cards.size()) * 10)
-                                            : 1.0f;
+    const int n = static_cast<int> (order.size());
+    const float stretch = fits && total > 0 ? static_cast<float> (viewport.getWidth() + 10 - n * 10) / static_cast<float> (total + 10 - n * 10) : 1.0f;
     int x = 0;
-    for (auto& c : cards)
+    for (auto* c : order)
     {
         const int w = juce::roundToInt (static_cast<float> (c->getPreferredWidth()) * stretch);
         c->setBounds (x, 0, w, height);

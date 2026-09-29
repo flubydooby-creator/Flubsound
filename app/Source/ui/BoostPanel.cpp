@@ -22,6 +22,42 @@ juce::String percent (float v01)
 } // namespace
 
 // =============================================================================
+// Protection readouts (docs/11 E06 / E07)
+// =============================================================================
+juce::String BoostPanel::describeProtectionLevel (float levelDb, float budgetDb)
+{
+    if (! std::isfinite (levelDb) || levelDb <= -150.0f)
+        return "not measured";
+    return juce::String (juce::roundToInt (levelDb)) + " dB (budget " + juce::String (juce::roundToInt (budgetDb)) + " dB)";
+}
+
+juce::String BoostPanel::describePlr (float plrDb, float budgetDb)
+{
+    if (! std::isfinite (plrDb) || plrDb >= flub::MeterBus::governorNoReading * 0.5f)
+        return "not measured";
+    juce::String t = juce::String (plrDb, 1) + " dB";
+    if (std::isfinite (budgetDb) && budgetDb > 0.0f)
+        t << " (at least " << juce::String (budgetDb, 0) << " dB)";
+    else
+        t << " (no budget in this mode)";
+    return t;
+}
+
+juce::String BoostPanel::describeBrightness (const MeterSnapshot& s)
+{
+    static const char* names[] = { "presence", "harsh", "air" };
+    juce::StringArray parts;
+    for (size_t b = 0; b < s.tonalLiftDb.size(); ++b)
+    {
+        const float lift = s.tonalLiftDb[b];
+        if (! std::isfinite (lift) || lift <= -150.0f)
+            return "not measured";
+        parts.add (juce::String (names[b]) + " " + Theme::formatSignedDb (lift, 1) + " dB (budget " + Theme::formatSignedDb (s.tonalBudgetDb[b], 0) + ")");
+    }
+    return parts.joinIntoString (", ");
+}
+
+// =============================================================================
 // BoostDial
 // =============================================================================
 BoostDial::BoostDial()
@@ -256,6 +292,12 @@ BoostPanel::GovernorReadout BoostPanel::describeGovernor (const MeterSnapshot& s
         reasons.add ("limiter");
     if ((s.governorReason & G::kReasonDistortion) != 0)
         reasons.add ("distortion");
+    if ((s.governorReason & G::kReasonDynamics) != 0)
+        reasons.add ("dynamics");
+    if ((s.governorReason & G::kReasonHarmonics) != 0)
+        reasons.add ("harmonics");
+    if ((s.governorReason & G::kReasonTonal) != 0)
+        reasons.add ("brightness");
 
     if (! r.limiting && state == G::State::Idle)
         r.text = "Safety governor OK";
@@ -280,9 +322,24 @@ BoostPanel::GovernorReadout BoostPanel::describeGovernor (const MeterSnapshot& s
         case G::State::Holding: r.detail << "Holding: close to a budget, the amounts stay where they are."; break;
         case G::State::Recovering: r.detail << "Recovering: comfortably within budget, the amounts rise again."; break;
     }
-    r.detail << "\nLimiter, 3 s average: " << Theme::formatDb (s.governorGrDb, 1) << " dB (budget " << juce::String (G::kGrBudgetDb, 0) << " dB)";
-    r.detail << "\nDistortion (THD+N), 3 s average: " << Theme::formatDb (s.governorDistortionDb, 0, -120.0f) << " dB (budget "
-             << juce::String (G::kDistortionBudgetDb, 0) << " dB)";
+    // The budgets the chain published for its strength and mode (docs/11 E06
+    // Phase 3): Off's fixed ones only while it runs at Off.
+    const bool measured = s.governorStrength != static_cast<int> (flub::ProtectionStrength::Off);
+    const float grBudget = measured && std::isfinite (s.governorGrBudgetDb) ? s.governorGrBudgetDb : G::kGrBudgetDb;
+    r.detail << "\nLimiter, 3 s average: " << Theme::formatDb (s.governorGrDb, 1) << " dB (budget " << juce::String (grBudget, 0) << " dB)";
+    if (measured)
+    {
+        r.detail << "\nAudible distortion (weighted residual): " << describeProtectionLevel (s.governorDriveResidualDb, s.governorResidualBudgetDb)
+                 << "; bass harmonics " << describeProtectionLevel (s.governorHarmonicsResidualDb, s.governorResidualBudgetDb)
+                 << " (scale " << percent (s.governorHarmonicsScale) << ")";
+        r.detail << "\nDynamics (PLR, 3 s): " << describePlr (s.governorPlrDb, s.governorPlrBudgetDb);
+        r.detail << "\nBrightness over 200 Hz - 1 kHz: " << describeBrightness (s) << " (tonal scale " << percent (s.governorTonalScale) << ")";
+    }
+    else
+    {
+        r.detail << "\nDistortion (THD+N), 3 s average: " << Theme::formatDb (s.governorDistortionDb, 0, -120.0f) << " dB (budget "
+                 << juce::String (G::kDistortionBudgetDb, 0) << " dB)";
+    }
     r.detail << "\nProtection strength: " << EngineController::getProtectionStrengthName (strength);
     switch (strength)
     {

@@ -29,6 +29,15 @@
 //   preset-browser  the preset browser open (docs/11 E40), searched for "late
 //                   night quiet" ("night quiet" in gaming mode), the best
 //                   match selected and previewing, loudness matched
+//   ab-matched      bank B holds a louder sound (Boost 100 %, Loudness /
+//                   Impact 100 %) and plays loudness matched (docs/11 E37):
+//                   the trim reads under A / B
+//   abx             the blind A/B/X test over the window, three trials in
+//   bypass          the master Bypass on: "proc. +x LU" under it
+//   routing-drawer  the routing panel's drawer open (narrow windows)
+//   governor-normal as governor, at protection strength Normal: the
+//                   PROTECTION readouts (residual, PLR, brightness)
+//   quick-controls  the PNG shows the tray flyout (ui::QuickControls) at --size
 //   settings-audio, settings-processing
 //                   the PNG shows that page of the Settings dialog at --size
 //                   instead of the main window (Audio: with loopback, the
@@ -95,6 +104,7 @@ private:
     std::unique_ptr<TestSignalGenerator> generator;
     std::unique_ptr<juce::Component> settingsView; // --state settings-*: what the PNG shows
     double startMs = 0.0, lastMs = 0.0, sampleRate = 48000.0;
+    double bypassAtSeconds = 0.0; // --state bypass: when the master Bypass goes on
     int64_t renderedSamples = 0;
     bool finished = false;
 

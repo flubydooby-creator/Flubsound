@@ -6,9 +6,11 @@
 //   Simple panel's Advanced view button switch views and save the choice; the
 //   Simple view hides the routing panel, analyser, rack, meters and history
 //   and shows the Boost panel (Simple layout) and the status row.
-// * Layout: at 1100 x 700 (the minimum, with and without banners), 1280 x 820
-//   and 2560 x 1440, in both views, no visible child leaves the window and
-//   the Simple controls (mode, preset, Boost dial, the five macros, the
+// * Layout: at 800 x 560 (the minimum since the reflow, docs/11 E39),
+//   1093 x 614 (a 1366 x 768 laptop at 125 %), 1100 x 700 (with and without
+//   banners), 1280 x 820, 1920 x 1080 and 2560 x 1440, in both views, no
+//   visible child leaves the window, the header's controls do not overlap,
+//   and the Simple controls (mode, preset, Boost dial, the five macros, the
 //   headset status, the loudness meter, the Advanced view button) are shown
 //   with a usable size and do not overlap.
 // * The E38 active-now chips in the Simple view: wrapped over up to three
@@ -148,7 +150,7 @@ TEST_CASE ("App UI: MainComponent starts in the saved view; the view buttons swi
     }
 }
 
-TEST_CASE ("App UI: in both views and at 1100 x 700 .. 2560 x 1440 no control leaves the window; the Simple controls are shown and do not overlap (E39)")
+TEST_CASE ("App UI: in both views and at 800 x 560 .. 2560 x 1440 no control leaves the window; the Simple controls are shown and do not overlap (E39)")
 {
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
@@ -160,6 +162,19 @@ TEST_CASE ("App UI: in both views and at 1100 x 700 .. 2560 x 1440 no control le
         main.setSize (w, h);
         std::cerr << "    window " << w << "x" << h << (main.getView() == View::Simple ? " simple" : " advanced") << "\n";
         checkInside (main, "main");
+        // The header's own controls never overlap, whatever the width.
+        std::vector<juce::Component*> headerControls;
+        for (auto* child : main.getHeader().getChildren())
+            if (child->isVisible())
+                headerControls.push_back (child);
+        for (size_t i = 0; i < headerControls.size(); ++i)
+            for (size_t j = i + 1; j < headerControls.size(); ++j)
+            {
+                const bool overlap = headerControls[i]->getBounds().intersects (headerControls[j]->getBounds());
+                if (overlap)
+                    std::cerr << "    header overlap: " << headerControls[i]->getTitle() << " / " << headerControls[j]->getTitle() << "\n";
+                CHECK (! overlap);
+            }
         if (main.getView() != View::Simple)
             return;
         auto& boost = main.getBoostPanel();
@@ -184,6 +199,8 @@ TEST_CASE ("App UI: in both views and at 1100 x 700 .. 2560 x 1440 no control le
     for (const auto view : { View::Simple, View::Advanced })
     {
         main.setView (view, false);
+        checkSize (800, 560);
+        checkSize (1093, 614);
         checkSize (1100, 700);
         checkSize (1280, 820);
         checkSize (1920, 1080);
@@ -201,6 +218,8 @@ TEST_CASE ("App UI: in both views and at 1100 x 700 .. 2560 x 1440 no control le
     for (const auto view : { View::Simple, View::Advanced })
     {
         main.setView (view, false);
+        checkSize (800, 560);
+        checkSize (1093, 614);
         checkSize (1100, 700);
     }
     // Three chip rows in the Simple view at the default size.

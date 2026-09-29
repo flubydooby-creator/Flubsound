@@ -1,6 +1,7 @@
 // Flubsound Pro - the main application window.
 //
-// A dark, resizable DocumentWindow (minimum 1100 x 700) whose content is
+// A dark, resizable DocumentWindow (minimum 800 x 560, docs/11 E39: the
+// main component reflows below 1100 x 700) whose content is
 // ui::MainComponent. What the close button does is decided by the
 // application (close to tray vs quit) through the onCloseButton callback.
 // The window position / size is persisted in AppSettings.
@@ -18,7 +19,7 @@ namespace flub::app
 class MainWindow final : public juce::DocumentWindow
 {
 public:
-    static constexpr int kMinWidth = 1100, kMinHeight = 700;
+    static constexpr int kMinWidth = 800, kMinHeight = 560;
     static constexpr int kDefaultWidth = 1280, kDefaultHeight = 820;
 
     /** The theme's background (Theme::setTheme re-maps it on a switch). */

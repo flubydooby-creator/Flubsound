@@ -62,15 +62,15 @@ constexpr std::array<MacroEntry, 25> kMusicTable {{
 }};
 
 // ---- M5 Warmth (docs/11 E14), applied after kMusicTable ----
-// The audible warmth is the tone tilt (warmth.tone: +2.9 dB at 200 Hz,
-// -2.6 dB at 10 kHz on pink noise at 100 %, level compensated, ToneTilt.h),
-// ungoverned like the other tonal rows. The saturator adds a gentle Tube
+// The audible warmth is the tone tilt (warmth.tone: a body bell at 200 Hz
+// and a high shelf, +3.5 dB at 200 Hz and -2.5 dB at 10 kHz on pink noise at
+// 100 %, level compensated, ToneTilt.h), ungoverned like the other tonal rows. The saturator adds a gentle Tube
 // colour (Tube while the saturator is Warmth's alone: sat.on off and
 // sat.type at its default in the base values, kMusicWarmthOverrides): drive
 // calibrated open loop so a -6 dBFS 1 kHz sine stays <= 0.5 % THD+N with H2
 // above H3 (0.30 %, H2 -51 / H3 -58 dBc at 100 %; docs/11 E14 Status). The
-// v1 bass boost and harmonics are gone: the tilt's low shelf already lifts
-// the bass by 3.8 dB.
+// v1 bass boost and harmonics are gone: the tilt's body bell lifts the
+// upper bass and low mids instead (100 - 400 Hz), where warmth lives.
 constexpr std::array<MacroEntry, 3> kMusicWarmthTone {{
     { MacroSource::M5, WarmthTone,           1.00f, 0.00f, 1.00f, 1.0f, false },
     { MacroSource::M5, SaturationOn,         1.00f, 0.00f, kEngage, 1.0f, false },

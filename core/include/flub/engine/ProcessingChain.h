@@ -18,13 +18,15 @@
 //    -> [slot] SpectralNoiseGate      (Quality latency profile only)
 //    -> [slot] Neural (AsyncModelProcessor; only while a model is installed
 //              and eligible for the latency profile, see setNeuralModel)
+//    -> Warmth tilt (warmth.tone, docs/11 E14; ToneTilt.h): a body bell up
+//       and a high shelf down with automatic level compensation, ahead of
+//       every stage the SafetyGovernor scales or taps (its measure stays
+//       open loop, and the bell does not lift the bass engine's
+//       harmonics); idle and untouched at 0
 //    -> [slot] ParametricEq (10 bands)
 //    -> [slot] DynamicEq (4 user bands + 4 internal mode bands)
 //    -> [slot] BassEngine
 //    -> [slot] ClarityEnhancer
-//    -> Warmth tilt (warmth.tone, docs/11 E14; ToneTilt.h): a body bell up
-//       and a high shelf down with automatic level compensation, ahead of
-//       the saturator (outside the governor's spans); idle and untouched at 0
 //    -> [slot] Saturator (oversampled)
 //    -> [slot] Smoothness (SmoothnessGuard, docs/11 E07; smooth.amount, off
 //              by default): a de-esser that takes back what the slots
@@ -518,7 +520,7 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 98 + LoudnessContour::kNumSections + 2; // + the contour's sections and trim (E32), the Warmth trim (E14)
+    static constexpr int kHeadroomKeySize = 99 + LoudnessContour::kNumSections + 2; // + the contour's sections and trim (E32), the Warmth trim (E14)
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;
@@ -531,7 +533,7 @@ private:
     StartleGuard startleGuard;
     // The loudness contour (docs/11 E32) and the host's listening level.
     LoudnessContour contour;
-    // The Warmth tilt (docs/11 E14), ahead of the saturator slot, and its
+    // The Warmth tilt (docs/11 E14), ahead of the parametric EQ slot, and its
     // level compensation at the target amount as the automatic preamp's
     // model last counted it (moved in 0.25 dB steps, audio thread).
     ToneTilt warmthTilt;

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <map>
@@ -1405,4 +1406,102 @@ TEST_CASE ("MixEngine: the master limiter has the LF-safe envelope - two strips 
         CHECK_LE (peakAbs (y.data(), static_cast<int> (y.size())), dbfs (-1.0));
         CHECK (mix.getLatencySamples() == mix.chain (0).getLatencySamples() + 48 + 20); // Balanced: 1 ms look-ahead + detector
     }
+}
+
+namespace
+{
+/** Two stereo strips a / b (mono on both channels, every module off: pure
+    delays) through MixEngine into `out`; returns the master's safety clamp count. */
+uint64_t runMasterMix (double fs, const std::vector<float>& a, const std::vector<float>& b, Planar& out)
+{
+    using namespace flub::param;
+    const std::vector<StripConfig> layout { { "Game", 2, 0.0f, false, 0 }, { "Music", 2, 0.0f, false, 0 } };
+    MixEngine mix;
+    mix.configure (layout, fs, 256);
+    for (int s = 0; s < 2; ++s)
+        for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+            mix.params (s).set (id, 0.0f);
+    const int n = out.numSamples(), block = 256;
+    Planar ia (2, block), ib (2, block), o (2, block);
+    const AudioBlock ab = ia.block(), bb = ib.block();
+    const AudioBlock* inputs[] = { &ab, &bb };
+    for (int p = 0; p < n; p += block)
+    {
+        const int len = std::min (block, n - p);
+        for (int i = 0; i < block; ++i)
+        {
+            const auto k = static_cast<size_t> (p + i);
+            for (int c = 0; c < 2; ++c)
+            {
+                ia.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = i < len && k < a.size() ? a[k] : 0.0f;
+                ib.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = i < len && k < b.size() ? b[k] : 0.0f;
+            }
+        }
+        mix.process (inputs, o.block());
+        for (int c = 0; c < 2; ++c)
+            std::copy_n (o.ch[static_cast<size_t> (c)].begin(), len, out.ch[static_cast<size_t> (c)].begin() + p);
+    }
+    return mix.getMasterSafetyClipCount();
+}
+} // namespace
+
+TEST_CASE ("MixEngine: the master limiter holds its true-peak ceiling on the 11-rate matrix with the LF-safe envelope (docs/11 E10 / E05)")
+{
+    // Two strips summed over the master's -1 dBTP ceiling, 8 .. 192 kHz:
+    // band-limited noise +6 dB on one strip, a 45 Hz line at 0.7 on the
+    // other (the period hold engages): sample peak under the ceiling, true
+    // peak within 0.1 dB, no safety clamp (docs/11 E05's matrix row for the
+    // master).
+    for (double fs : { 8000.0, 11025.0, 16000.0, 22050.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+    {
+        const int n = static_cast<int> (fs * 0.5), tail = static_cast<int> (fs * 0.02);
+        const auto noise = bandLimitedNoise (n, tail, 2.0f, 61);
+        std::vector<float> bass (static_cast<size_t> (n - tail), 0.0f);
+        for (size_t i = 0; i < bass.size(); ++i)
+            bass[i] = static_cast<float> (0.7 * std::sin (kTwoPi * 45.0 * static_cast<double> (i) / fs));
+        Planar out (2, n);
+        const auto clips = runMasterMix (fs, noise, bandLimit (bass), out);
+        const double sp = planarPeak (out), tp = planarTruePeak (out), ceil = dbfs (-1.0);
+        if (! (sp <= ceil && tp <= ceil * kTpTolerance))
+            std::printf ("    fs %.0f: sp %.2f tp %.2f dBFS\n", fs, toDb (sp), toDb (tp));
+        CHECK_LE (sp, ceil);
+        CHECK_LE (tp, ceil * kTpTolerance);
+        CHECK (clips == 0u);
+        CHECK_GE (tp, ceil * dbfs (-0.5)); // limited, not muted
+    }
+}
+
+TEST_CASE ("MixEngine: the master limiter leaves no DC on hot asymmetric bass (docs/11 E10 / E05)")
+{
+    // 0.35 sin 100 Hz + 0.35 cos 200 Hz on both strips (the E10 DC stimulus,
+    // no DC in, 3.9 dB over the ceiling summed): the master's output DC stays
+    // <= -60 dBFS (-179 dBFS). The same limiter on the plain envelope, as the
+    // master had until docs/11 E05 step 6, leaves -46 dBFS.
+    const int n = static_cast<int> (3.0 * kFs), half = n / 2;
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+        x[static_cast<size_t> (i)] = static_cast<float> (0.35 * std::sin (kTwoPi * 100.0 * i / kFs) + 0.35 * std::cos (kTwoPi * 200.0 * i / kFs));
+    const auto dcDbfs = [&] (const std::vector<float>& y) {
+        double acc = 0.0;
+        for (int i = half; i < n; ++i)
+            acc += y[static_cast<size_t> (i)];
+        return toDb (std::max (1.0e-12, std::abs (acc / (n - half))));
+    };
+    Planar out (2, n);
+    runMasterMix (kFs, x, x, out);
+    const double masterDc = dcDbfs (out.ch[0]);
+
+    // The reference: the master's limiter settings on the plain envelope.
+    TruePeakLimiter plain;
+    prepareLimiter (plain, kFs, 1, 256, MixEngine::kMasterLookaheadMs);
+    plain.setParams (limiterParams (-1.0f, 50.0f, true));
+    Planar sum (1, n);
+    for (int i = 0; i < n; ++i)
+        sum.ch[0][static_cast<size_t> (i)] = 2.0f * x[static_cast<size_t> (i)];
+    processInBlocks (plain, sum, 256);
+    const double plainDc = dcDbfs (sum.ch[0]);
+    std::printf ("    measured master DC, 100 + 200 Hz 3.9 dB over the ceiling: %.1f dBFS (plain envelope %.1f dBFS)\n", masterDc, plainDc);
+    CHECK_LE (masterDc, -60.0);
+    CHECK_GE (plainDc, -60.0); // the stimulus does exercise it
+    CHECK_LE (peakAbs (out.ch[0].data(), n), dbfs (-1.0));
 }

@@ -1,7 +1,17 @@
 // Flubsound Pro - the module rack: one ModuleCard per processing module, in
-// a horizontally scrolling Viewport. The cards follow the chain's processing
-// order, except that the Headphone Virtualizer (which the chain runs first,
-// before the gate) sits with the stereo modules.
+// a horizontally scrolling Viewport.
+//
+// Order (docs/11 E39): by relevance to the strip's mode, so the cards a
+// listener reaches for first are the ones visible at a small window size:
+//   Music   EQ, Bass, Clarity, Stereo & Space, Saturation, Compressor,
+//           Maximizer, Dynamic EQ
+//   Gaming  Dynamic EQ (the footstep bands), Clarity, Stereo & Space,
+//           Compressor, Bass, Maximizer, EQ, Saturation
+// The Headphone Virtualizer leads on a 5.1 / 7.1 strip in Gaming mode and
+// comes second there in Music mode; on a stereo strip (where it has nothing
+// to render) it is the last card. The Noise Gate card is shown only in the
+// Quality latency profile, the only one whose chain runs the gate.
+// relevanceOrder() is the pure table (tested).
 //
 // Expanding a card switches the rack into a focused view: only that card is
 // shown, at the full rack size, with every parameter of the module
@@ -10,9 +20,12 @@
 //
 // All cards share one ParameterBinder bound to the selected strip's store;
 // updateFromEngine() feeds them the post-macro "effective" module states. The
-// cards' ears (hold-to-bypass A/B) go to EngineController::setAuditionBypass.
+// cards' ears (hold-to-bypass A/B) go to EngineController::setAuditionBypass,
+// loudness matched by a ListenMatch (docs/11 E37) once the owner has given
+// the rack an estimator (setEstimatorProvider).
 #pragma once
 
+#include "Comparison.h"
 #include "ModuleCard.h"
 #include "ParameterBinding.h"
 #include "engine/EngineController.h"
@@ -42,6 +55,17 @@ public:
     void collapse();
     std::function<void()> onLayoutModeChanged;
 
+    /** Module ids (ModuleDescriptor::id) in the order the rack shows them
+        for `mode`, on a strip with `stripChannels` channels, in the latency
+        profile `quality` or not (the gate is left out outside Quality). */
+    static std::vector<juce::String> relevanceOrder (flub::param::ModeValue mode, int stripChannels, bool quality);
+    /** The visible cards, left to right (tests). */
+    std::vector<ModuleCard*> getShownCards() const;
+
+    /** The loudness estimator the ear's match uses (shared with the header). */
+    void setEstimatorProvider (EstimatorProvider provider) { estimatorProvider = std::move (provider); }
+    ListenMatch& getListenMatch() noexcept { return listenMatch; }
+
     /** Keeps the EQ card on the band selected in the curve editor. */
     void setSelectedEqBand (int band);
     std::function<void (int band)> onEqBandSelected;
@@ -60,7 +84,10 @@ private:
     juce::Component content; // declared before the viewport that shows it
     juce::Viewport viewport;
     std::vector<std::unique_ptr<ModuleCard>> cards;
+    std::vector<ModuleCard*> order; // the shown cards, in relevance order
     ModuleCard* expandedCard = nullptr;
+    EstimatorProvider estimatorProvider;
+    ListenMatch listenMatch;
     int listenStrip = 0; // strip of the current ear holds (a strip switch releases them)
 };
 } // namespace flub::app::ui

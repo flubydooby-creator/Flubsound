@@ -35,6 +35,19 @@ struct MeterSnapshot
     int governorState = 0;
     uint32_t governorReason = 0;
     float governorGrDb = 0.0f, governorDistortionDb = -160.0f;
+    // The measured loop at protection strength Normal / Strict (docs/11 E06
+    // Phase 3): the strength the chain ran at, the harmonics and tonal
+    // scales, the audible residuals (drive span, harmonics, bass span) and
+    // the output PLR against their budgets (-160 dB / MeterBus::
+    // governorNoReading while Off or not measured yet).
+    int governorStrength = 0;
+    float governorHarmonicsScale = 1.0f, governorTonalScale = 1.0f;
+    float governorDriveResidualDb = -160.0f, governorHarmonicsResidualDb = -160.0f, governorBassResidualDb = -160.0f;
+    float governorPlrDb = flub::MeterBus::governorNoReading;
+    float governorResidualBudgetDb = -35.0f, governorGrBudgetDb = -6.0f, governorPlrBudgetDb = 8.0f;
+    // Brightness (docs/11 E07): the net lift of presence / harsh / air over
+    // 200 Hz - 1 kHz (dB; -160 while not measured) and their budgets.
+    std::array<float, 3> tonalLiftDb { -160.0f, -160.0f, -160.0f }, tonalBudgetDb { 3.0f, 3.0f, 4.0f };
     float harmonicsDb = -160.0f; // intended harmonics (bass harmonics, air exciter)
     int inputFold = 0;           // 0 surround (virtualiser), 1 stereo passthrough
 

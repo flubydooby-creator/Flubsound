@@ -108,7 +108,7 @@ static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 
 // The parameters the static-boost prediction reads (docs/11 E11); a change
 // of any of them (or of the fold) re-runs it.
-constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, ClarityOn,
+constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, BassSubsonicOrder, ClarityOn,
                                        ClarityPresence, ClarityPresenceFreq, ClarityAir, SaturationOn, SatMix, SatOutputDb,
                                        AutoPreampOn, AutoPreampAllowanceDb, WarmthTone };
 constexpr EqField kHeadroomEqFields[] = { EqFieldOn, EqFieldType, EqFieldFreq, EqFieldGain, EqFieldQ, EqFieldSlope };
@@ -458,7 +458,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     slots[SComp].prepare (compressor, stereo, 20.0f, on (e, CompressorOn));
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
     contour.prepare (stereo); // docs/11 E32: after the preamp, ahead of the slots; no latency
-    warmthTilt.prepare (stereo); // docs/11 E14: ahead of the saturator slot; no latency
+    warmthTilt.prepare (stereo); // docs/11 E14: ahead of the parametric EQ slot; no latency
 
     totalLatency = 0;
     for (int s = 0; s < kNumSlots; ++s)
@@ -835,6 +835,8 @@ void ProcessingChain::applyParameters() noexcept
     bp.tighten = e[BassTighten];
     bp.monoBelowHz = e[BassMonoBelow];
     bp.subsonicHz = e[BassSubsonic];
+    bp.subsonicOrder = idx (e, BassSubsonicOrder) == static_cast<int> (SubsonicOrderValue::Slope12) ? 2 : 4;
+    bp.splitProtection = on (e, BassSplitProtect);
     bass.setParams (bp);
     slots[SBass].setActive (active (BassOn));
 
@@ -1137,7 +1139,8 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
     if (on (e, BassOn))
     {
         if (e[BassSubsonic] > 0.0f)
-            addButterworth (FilterType::HighPass, std::clamp (static_cast<double> (e[BassSubsonic]), 10.0, 40.0), 2);
+            addButterworth (FilterType::HighPass, std::clamp (static_cast<double> (e[BassSubsonic]), 10.0, 40.0),
+                            idx (e, BassSubsonicOrder) == static_cast<int> (SubsonicOrderValue::Slope12) ? 1 : 2);
         if (e[BassBoostDb] > 0.0f)
             add (SvfCoeffs::make (FilterType::LowShelf, std::clamp (static_cast<double> (e[BassBoostFreq]), 30.0, 200.0), kBassShelfQ,
                                   std::min (static_cast<double> (e[BassBoostDb]), kBassMaxBoostDb), sr));
@@ -1626,9 +1629,12 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
                 startleGuard.setLevelOffsetDb (autoLevel.getGainDb());
                 startleGuard.measure (st, contaminated);
             }
-            // The Warmth tilt (docs/11 E14) between the clarity and saturator
-            // slots, ahead of the drive span's tap: untouched while it idles.
-            if (s == SSat)
+            // The Warmth tilt (docs/11 E14) ahead of the parametric EQ: after
+            // the gate and the neural slot, before every stage the governor
+            // scales or taps, so its open-loop measure stays open loop and
+            // its body bell does not lift the bass engine's harmonics;
+            // untouched while it idles.
+            if (s == SEq)
                 warmthTilt.process (st);
             if (spanRunning && (s == SDynEq || s == SBass || s == SClarity || s == SSat || s == SMax))
                 protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06), tonal reference (E07)

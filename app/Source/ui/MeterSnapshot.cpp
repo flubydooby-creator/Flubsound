@@ -38,6 +38,21 @@ void MeterSnapshot::read (const flub::MeterBus& bus) noexcept
     governorReason = bus.governorReason.load (rl);
     governorGrDb = bus.governorGrDb.load (rl);
     governorDistortionDb = bus.governorDistortionDb.load (rl);
+    governorStrength = bus.governorStrength.load (rl);
+    governorHarmonicsScale = bus.governorHarmonicsScale.load (rl);
+    governorTonalScale = bus.governorTonalScale.load (rl);
+    governorDriveResidualDb = bus.governorDriveResidualDb.load (rl);
+    governorHarmonicsResidualDb = bus.governorHarmonicsResidualDb.load (rl);
+    governorBassResidualDb = bus.governorBassResidualDb.load (rl);
+    governorPlrDb = bus.governorPlrDb.load (rl);
+    governorResidualBudgetDb = bus.governorResidualBudgetDb.load (rl);
+    governorGrBudgetDb = bus.governorGrBudgetDb.load (rl);
+    governorPlrBudgetDb = bus.governorPlrBudgetDb.load (rl);
+    for (size_t b = 0; b < tonalLiftDb.size(); ++b)
+    {
+        tonalLiftDb[b] = bus.tonalLiftDb[b].load (rl);
+        tonalBudgetDb[b] = bus.tonalBudgetDb[b].load (rl);
+    }
     harmonicsDb = bus.harmonicsDb.load (rl);
     inputFold = bus.inputFold.load (rl);
     autoLevelGainDb = bus.autoLevelGainDb.load (rl);

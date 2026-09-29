@@ -2,6 +2,7 @@
 
 #include "Theme.h"
 
+#include "flub/engine/MeterBus.h"
 #include "flub/engine/Protection.h"
 
 #include <cmath>
@@ -70,6 +71,18 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
     shown.clip = juce::jmax (s.active ? distortion : -160.0f, shown.clip - release * 2.0f);
     shown.harmonics = juce::jmax (s.active ? finiteOr (s.harmonicsDb, -160.0f) : -160.0f, shown.harmonics - release * 2.0f);
 
+    // The measured loop (docs/11 E06 / E07): readings are 3 s averages, shown as they are.
+    shown.strength = s.governorStrength;
+    shown.residual = finiteOr (s.governorDriveResidualDb, -160.0f);
+    shown.residualBudget = finiteOr (s.governorResidualBudgetDb, -35.0f);
+    shown.plr = finiteOr (s.governorPlrDb, flub::MeterBus::governorNoReading);
+    shown.plrBudget = finiteOr (s.governorPlrBudgetDb, 0.0f);
+    for (size_t b = 0; b < shown.lift.size(); ++b)
+    {
+        shown.lift[b] = finiteOr (s.tonalLiftDb[b], -160.0f);
+        shown.liftBudget[b] = finiteOr (s.tonalBudgetDb[b], 3.0f);
+    }
+
     const float smooth = 1.0f - std::exp (-dt / 0.15f);
     shown.correlation += (juce::jlimit (-1.0f, 1.0f, finiteOr (s.correlation, 1.0f)) - shown.correlation) * smooth;
     shown.width += (juce::jlimit (0.0f, 3.0f, finiteOr (s.effectiveWidth, 1.0f)) - shown.width) * smooth;
@@ -83,7 +96,10 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
                          || differs (shown.compUp, painted.compUp, 0.02f) || differs (shown.limiter, painted.limiter, 0.02f)
                          || differs (shown.glue, painted.glue, 0.02f) || differs (shown.clip, painted.clip, 0.1f)
                          || differs (shown.bass, painted.bass, 0.02f) || differs (shown.master, painted.master, 0.02f)
-                         || differs (shown.correlation, painted.correlation, 0.005f) || differs (shown.width, painted.width, 0.005f);
+                         || differs (shown.correlation, painted.correlation, 0.005f) || differs (shown.width, painted.width, 0.005f)
+                         || shown.strength != painted.strength || differs (shown.residual, painted.residual, 0.1f)
+                         || differs (shown.plr, painted.plr, 0.05f) || differs (shown.lift[0], painted.lift[0], 0.05f)
+                         || differs (shown.lift[1], painted.lift[1], 0.05f) || differs (shown.lift[2], painted.lift[2], 0.05f);
     // Loudness readouts are read by eye: 20 Hz is plenty and halves the paint cost.
     sinceRepaint += dt;
     if (changed && sinceRepaint >= 0.05f)
@@ -98,6 +114,25 @@ void LoudnessPanel::reset()
     shown = {};
     painted = {};
     repaint();
+}
+
+juce::String LoudnessPanel::formatPlr (float plrDb, float budgetDb)
+{
+    if (! std::isfinite (plrDb) || plrDb >= flub::MeterBus::governorNoReading * 0.5f)
+        return "--";
+    return juce::String (plrDb, 1) + (budgetDb > 0.0f ? " / " + juce::String (budgetDb, 0) : juce::String());
+}
+
+juce::String LoudnessPanel::formatBrightness (const std::array<float, 3>& lift)
+{
+    juce::StringArray parts;
+    for (const float l : lift)
+    {
+        if (! std::isfinite (l) || l <= -150.0f)
+            return "--";
+        parts.add (Theme::formatSignedDb (l, 1));
+    }
+    return parts.joinIntoString (" ");
 }
 
 juce::String LoudnessPanel::formatInOutDelta (float inLufs, float outLufs)
@@ -177,14 +212,19 @@ void LoudnessPanel::paint (juce::Graphics& g)
     const auto status = Theme::statusColours (*this); // follows the meter palette
 
     auto r = getLocalBounds().toFloat().reduced (14.0f, 12.0f);
-    const int grRows = 7, stereoRows = 2;
+    const int grRows = 7, stereoRows = 2, protectionRows = 2;
     // Compact when the full layout does not fit (a short window with a
-    // banner): smaller captions, readouts and gaps, rows down to 12 px.
+    // banner): smaller captions, readouts and gaps, rows down to 12 px. The
+    // PROTECTION section (a caption, a gap and two rows) only when it fits.
     constexpr float kFullFixed = 18.0f + 60.0f + 20.0f + 20.0f + 10.0f + 18.0f + 10.0f + 18.0f; // captions / readouts / gaps
     const bool compact = r.getHeight() < kFullFixed + 14.0f * static_cast<float> (grRows + stereoRows);
     const float captionH = compact ? 16.0f : 18.0f, bigH = compact ? 46.0f : 60.0f, gapH = compact ? 4.0f : 10.0f;
-    const float fixed = 3.0f * captionH + bigH + 20.0f + 20.0f + 2.0f * gapH;
-    const float rowH = juce::jlimit (compact ? 12.0f : 14.0f, 22.0f, (r.getHeight() - fixed) / static_cast<float> (grRows + stereoRows));
+    const float minRowH = compact ? 12.0f : 14.0f;
+    const float fixedWithout = 3.0f * captionH + bigH + 20.0f + 20.0f + 2.0f * gapH;
+    protectionShown = r.getHeight() >= fixedWithout + captionH + gapH + minRowH * static_cast<float> (grRows + stereoRows + protectionRows);
+    const float fixed = fixedWithout + (protectionShown ? captionH + gapH : 0.0f);
+    const int rows = grRows + stereoRows + (protectionShown ? protectionRows : 0);
+    const float rowH = juce::jlimit (minRowH, 22.0f, (r.getHeight() - fixed) / static_cast<float> (rows));
 
     // ---- Loudness ----
     Theme::drawCaption (g, "LOUDNESS", r.removeFromTop (captionH));
@@ -256,6 +296,37 @@ void LoudnessPanel::paint (juce::Graphics& g)
     // what the bass harmonics and the air exciter add on purpose.
     drawLevelRow (g, r.removeFromTop (rowH), "Distortion", shown.clip, flub::SafetyGovernor::kDistortionBudgetDb, status.warn.withAlpha (0.8f));
     drawLevelRow (g, r.removeFromTop (rowH), "Harmonics", shown.harmonics, -160.0f, accent.withAlpha (0.8f));
+
+    // ---- Protection: the measured loop's readings (docs/11 E06 / E07) ----
+    if (protectionShown)
+    {
+        static const char* strengths[] = { "OFF", "NORMAL", "STRICT" };
+        r.removeFromTop (gapH);
+        Theme::drawCaption (g, juce::String ("PROTECTION  ") + strengths[juce::jlimit (0, 2, shown.strength)], r.removeFromTop (captionH));
+        if (shown.strength == 0)
+        {
+            auto rows2 = r.removeFromTop (rowH * 2.0f);
+            g.setColour (Palette::faint);
+            g.setFont (Theme::font (11.0f));
+            g.drawFittedText ("Measured at protection strength Normal or Strict (click the governor chip).", rows2.toNearestInt(),
+                              juce::Justification::centredLeft, 2, 1.0f);
+        }
+        else
+        {
+            drawLevelRow (g, r.removeFromTop (rowH), "Audible dist.", shown.residual, shown.residualBudget, status.warn.withAlpha (0.8f));
+            auto row = r.removeFromTop (rowH);
+            const float colW = row.getWidth() * 0.5f;
+            const auto plain = Palette::text.withAlpha (0.9f);
+            const bool plrKnown = shown.plr < flub::MeterBus::governorNoReading * 0.5f;
+            item (row, colW * 0.8f, "PLR", formatPlr (shown.plr, shown.plrBudget),
+                  ! plrKnown ? Palette::faint : (shown.plrBudget > 0.0f && shown.plr < shown.plrBudget ? status.hot : plain));
+            bool overBudget = false;
+            for (size_t b = 0; b < shown.lift.size(); ++b)
+                overBudget = overBudget || (shown.lift[b] > -150.0f && shown.lift[b] > shown.liftBudget[b]);
+            const auto bright = formatBrightness (shown.lift);
+            item (row, colW * 1.2f, "BRIGHT", bright, bright == "--" ? Palette::faint : (overBudget ? status.hot : plain));
+        }
+    }
 
     // ---- Stereo ----
     r.removeFromTop (gapH);

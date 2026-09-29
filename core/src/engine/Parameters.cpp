@@ -233,6 +233,19 @@ std::vector<Info> buildLayout()
     set (WarmthTone, v5 (make ("warmth.tone", "Warmth Tone", "Warmth", Unit::Percent, 0.0f, 1.0f, 0.0f)));
     set (WarmthTapeGrit, v5 (toggle ("warmth.tapeGrit", "Warmth: Tape Grit", "Warmth", false)));
 
+    // ---- Bass engine additions (layout version 5, docs/11 E02) ---------------------------------
+    auto since5 = [] (Info i) {
+        i.sinceVersion = 5;
+        return i;
+    };
+    // The subsonic filter's slope (12 dB/oct keeps about half the 4th
+    // order's group delay) and the split-band protection (sub / punch
+    // detectors, program-dependent release). Defaults are the behaviour
+    // before them (24 dB/oct, one detector), so older presets and states
+    // sound as they did.
+    set (BassSubsonicOrder, since5 (choice ("bass.subsonicOrder", "Subsonic Slope", "Bass", { "12 dB/oct", "24 dB/oct" }, 1)));
+    set (BassSplitProtect, since5 (toggle ("bass.splitProtect", "Split-Band Protection", "Bass", false)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

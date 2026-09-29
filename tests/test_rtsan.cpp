@@ -329,8 +329,8 @@ static_assert (std::is_same_v<decltype (&TonalBalanceMeter::tick), void (TonalBa
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::getLiftDb), float (TonalBalanceMeter::*) (int) const noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<TonalBalanceMeter>);
 
-// The Warmth tilt ProcessingChain::process runs ahead of the saturator slot,
-// its per-block setParams, and the shelves the automatic preamp's model
+// The Warmth tilt ProcessingChain::process runs ahead of the module slots,
+// its per-block setParams, and the sections the automatic preamp's model
 // reads (docs/11 E14, tests/test_warmth.cpp).
 #include "flub/dsp/ToneTilt.h"
 static_assert (hasNonblockingProcess<ToneTilt>);

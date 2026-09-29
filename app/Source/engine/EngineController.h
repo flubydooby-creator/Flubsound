@@ -27,6 +27,8 @@
 //              analyser state then.
 // A/B listen   setAuditionBypass(strip, enableId, true / false): momentary
 //              "hear the strip without this module" (not a parameter).
+//              setComparisonTrimDb(): the loudness match of a comparison
+//              (matched A/B, module listen, blind A/B/X; docs/11 E37).
 // Master       isEnabled()/setEnabled() = BypassAll on every strip (both
 //              banks); setStripBypassed() bypasses one strip on top of it.
 //              getMasterGainReductionDb() = master safety limiter.
@@ -194,6 +196,25 @@ public:
         offset of Game and Chat (see setChatMix). */
     void setStripGainDb (int strip, float gainDb);
     float getStripGainDb (int strip) const noexcept;
+    /** A loudness-matched comparison's trim (docs/11 E37): the matched A/B,
+        the matched module / virtualiser listen and the blind A/B/X test turn
+        the louder side down with it (dB, -kMaxComparisonTrimDb .. 0). Added
+        to the strip's gain in the mix, after the chain, so the maximizer's
+        loudness target never sees it; click-free through the MixEngine's
+        smoothed gain. Per session (not persisted, not part of the user's
+        strip gain); a layout change clears it. Two slots, summed: the
+        banks' comparison (A/B and the blind test) and a module listen. */
+    static constexpr float kMaxComparisonTrimDb = 20.0f;
+    enum class ComparisonSlot
+    {
+        Banks,
+        Listen
+    };
+    void setComparisonTrimDb (int strip, float db, ComparisonSlot slot = ComparisonSlot::Banks);
+    /** One slot's trim. */
+    float getComparisonTrimDb (int strip, ComparisonSlot slot = ComparisonSlot::Banks) const noexcept;
+    /** Both slots together (what the strip's gain carries). */
+    float getTotalComparisonTrimDb (int strip) const noexcept;
     void setStripMuted (int strip, bool muted);
     bool isStripMuted (int strip) const noexcept { return host->isStripMuted (strip); }
     float getMasterGainReductionDb() noexcept { return host->getMixEngine().getMasterGainReductionDb(); }
@@ -666,6 +687,7 @@ private:
     std::array<Latch, AudioEngineHost::kMaxStrips> focusLatches, nightLatches;
     std::array<bool, AudioEngineHost::kMaxStrips> stripBypassed {};
     std::array<float, AudioEngineHost::kMaxStrips> userGainDb {};
+    std::array<std::array<float, 2>, AudioEngineHost::kMaxStrips> comparisonTrimDb {}; // docs/11 E37, per session and slot
     float chatMix = 0.0f;
 
     // Automatic profiles (message thread)

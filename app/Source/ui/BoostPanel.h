@@ -11,8 +11,11 @@
 //            Footsteps / Positional / Impact / Detail / Voice & Score) and
 //            change with the mode.
 // Governor  the header chip names the SafetyGovernor's state and reason
-//           (docs/11 E06: "Governor 72 % . limiter"), its tooltip the ~3 s
-//           averages against the budgets and the protection strength; a
+//           (docs/11 E06: "Governor 72 % . limiter", also dynamics,
+//           harmonics, brightness), its tooltip the ~3 s averages against the
+//           budgets the chain runs with (at Normal / Strict the measured
+//           loop's: weighted residual, PLR, brightness, E07) and the
+//           protection strength; a
 //           click on it chooses the strength (Off / Normal / Strict,
 //           EngineController::setProtectionStrength).
 // Active    "active now" chips under the macros (docs/11 E38 slice): the
@@ -89,6 +92,12 @@ public:
         bool limiting = false;
     };
     static GovernorReadout describeGovernor (const MeterSnapshot& snapshot, flub::ProtectionStrength strength);
+    /** "-41 dB (budget -35 dB)" or "not measured" (Off, not settled). */
+    static juce::String describeProtectionLevel (float levelDb, float budgetDb);
+    /** "9.1 dB (at least 8 dB)", "... (no budget in this mode)" or "not measured". */
+    static juce::String describePlr (float plrDb, float budgetDb);
+    /** "presence +1.2 dB (budget +3), harsh ..., air ..." or "not measured". */
+    static juce::String describeBrightness (const MeterSnapshot& snapshot);
 
     struct ActiveStage
     {

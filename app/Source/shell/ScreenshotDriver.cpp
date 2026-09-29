@@ -1,6 +1,7 @@
 #include "ScreenshotDriver.h"
 
 #include "ui/MainComponent.h"
+#include "ui/QuickControls.h"
 #include "ui/SettingsDialog.h"
 
 #include "flub/io/Json.h"
@@ -86,9 +87,9 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
     const int stateIndex = args.indexOf ("--state");
     if (stateIndex >= 0)
     {
-        static const juce::StringArray known { "device-error", "loopback",       "preset-warning",     "recovery",
-                                                "latency-prompt", "governor",   "preset-browser",     "settings-audio",
-                                                "settings-processing" };
+        static const juce::StringArray known { "device-error",   "loopback",       "preset-warning", "recovery",        "latency-prompt",
+                                                "governor",       "preset-browser", "settings-audio", "settings-processing", "ab-matched",
+                                                "abx",            "bypass",         "routing-drawer", "governor-normal", "quick-controls" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -208,14 +209,32 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
             controller.loadPreset (*preset, focusStrip, error);
         controller.setBoost (0.55f, focusStrip);
     }
-    if (states.contains ("governor"))
+    if (states.contains ("governor") || states.contains ("governor-normal"))
     {
         auto& store = controller.getParams (focusStrip);
         controller.setBoost (1.0f, focusStrip);
         store.set (options.gamingMode ? Macro3 : Macro4, 1.0f); // Impact / Loudness
         store.set (MaximizerOn, 1.0f);
         store.set (MaxDriveDb, 12.0f);
-        controller.setProtectionStrength (flub::ProtectionStrength::Strict);
+        controller.setProtectionStrength (states.contains ("governor") ? flub::ProtectionStrength::Strict : flub::ProtectionStrength::Normal);
+    }
+    if (states.contains ("ab-matched") || states.contains ("abx"))
+    {
+        // B: the scene's sound pushed louder; A as it was (docs/11 E37).
+        auto& store = controller.getParams (focusStrip);
+        controller.setActiveBank (Bank::A, focusStrip);
+        controller.copyActiveToOtherBank (focusStrip);
+        for (const int id : { static_cast<int> (BoostIntensity), static_cast<int> (options.gamingMode ? Macro3 : Macro4) })
+            store.set (Bank::B, id, 1.0f);
+        controller.setActiveBank (Bank::B, focusStrip);
+    }
+    if (states.contains ("bypass"))
+        bypassAtSeconds = options.seconds * 0.6; // after the processed loudness was read
+    if (states.contains ("quick-controls"))
+    {
+        auto flyout = std::make_unique<ui::QuickControls> (controller);
+        flyout->setSize (options.width, options.height);
+        settingsView = std::move (flyout);
     }
     if (states.contains ("device-error"))
         controller.getHost().audioDeviceError ("The device \"USB Headset\" was disconnected (the driver stopped the stream)");
@@ -261,6 +280,15 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
                 browser->selectPreset (shown.front()->id);
         }
     }
+    if (states.contains ("routing-drawer"))
+        main->setRoutingDrawerOpen (true);
+    if (states.contains ("abx"))
+    {
+        main->openBlindTest();
+        if (auto* panel = main->getBlindTest(); panel != nullptr && panel->getTest() != nullptr)
+            for (const char key : { '1', '2', '1' }) // three trials answered
+                panel->keyPressed (juce::KeyPress (key));
+    }
     if (states.contains ("preset-warning"))
     {
         // A user preset with a typo'd key and an out-of-range value, read by
@@ -305,6 +333,12 @@ void ScreenshotDriver::timerCallback()
     {
         controller.renderOffline (*generator, samples);
         renderedSamples += samples;
+    }
+
+    if (bypassAtSeconds > 0.0 && now - startMs >= bypassAtSeconds * 1000.0)
+    {
+        controller.setEnabled (false);
+        bypassAtSeconds = 0.0;
     }
 
     const auto wanted = static_cast<int64_t> (options.seconds * sampleRate * 0.9);

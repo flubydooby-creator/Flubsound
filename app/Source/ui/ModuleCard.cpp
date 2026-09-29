@@ -86,6 +86,10 @@ ModuleCard::ModuleCard (const ModuleDescriptor& d, ParameterBinder& b)
     listenButton.setAccentWhenOn (false);
     listenButton.onStateChange = [this]
     {
+        // The pointer over the ear: the loudness match can be estimated
+        // before the hold starts (docs/11 E37).
+        if (listenButton.isOver() && ! listening && onListenHover != nullptr)
+            onListenHover();
         if (listenButton.isDown() && ! listening)
             startListening();
         else if (! listenButton.isDown() && listening)
@@ -176,7 +180,7 @@ void ModuleCard::bindKeys()
         // The plain-language hint (docs/11 E39); the module cards hold no
         // mode-dependent keys, so the Music text is the one for both modes.
         const auto tip = ParamHints::tooltip (id, ModeValue::Music)
-                         + (key.independent ? " Works with " + descriptor.name + " switched off too." : juce::String());
+                         + (key.independent ? " (It works with " + descriptor.name + " switched off too.)" : juce::String());
         if (auto* knob = dynamic_cast<ParamKnob*> (c))
         {
             binder.bindSlider (knob->slider, id);

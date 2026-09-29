@@ -41,6 +41,11 @@
 // matched from its first second once the preset has been estimated; a
 // request can jump the queue (the row the user just selected). Message
 // thread API; onEstimate is called on the message thread after new results.
+// Two variants serve the other comparisons (docs/11 E37, Comparison.h): a
+// 7.1 strip is estimated on the TestSignalGenerator's 7.1 game scene
+// (channels 8: the virtualiser and the input fold take part), and a module's
+// "listen without it" on a render with that module's audition bypass
+// (ProcessingChain::setAuditionBypass, as the module card's ear plays it).
 #pragma once
 
 #include "engine/EngineController.h"
@@ -55,10 +60,21 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace flub::app::ui
 {
+/** What an estimate renders besides the values: the strip's channel count
+    (8: the 7.1 game scene, anything else: the stereo music) and a module
+    whose enable parameter is audition-bypassed (-1: none). */
+struct EstimateVariant
+{
+    int channels = 2;
+    int listenBypassId = -1;
+    bool operator== (const EstimateVariant& other) const noexcept { return channels == other.channels && listenBypassId == other.listenBypassId; }
+};
+
 class PresetLoudnessEstimator final : private juce::Thread, private juce::AsyncUpdater
 {
 public:
@@ -74,26 +90,37 @@ public:
 
     double getSampleRate() const noexcept { return sampleRate; }
 
-    /** The reference programme: the TestSignalGenerator's music, stereo,
-        kProgrammeSeconds long (deterministic). */
-    static flub::io::AudioFileData makeReferenceProgramme (double sampleRate);
-    /** Renders `programme` through a chain with `values` (param::kNumParams;
-        bypass forced off) and returns output minus input integrated loudness
-        after kSettleSeconds (LU); nullopt if either side is below -70 LUFS
-        or the render failed. Non-RT, allocates, any thread. */
-    static std::optional<float> estimateGainLu (const flub::io::AudioFileData& programme, const std::vector<float>& values,
-                                                const std::atomic<bool>* abort = nullptr);
+    using Variant = EstimateVariant;
 
-    /** 64-bit FNV-1a of the values' bit patterns and the level bucket (the cache key). */
-    static uint64_t keyOf (const std::vector<float>& values, float levelLufs = kDefaultLevelLufs) noexcept;
+    /** The reference programme: the TestSignalGenerator's music, stereo,
+        kProgrammeSeconds long (deterministic); with channels == 8 its 7.1
+        game scene instead. */
+    static flub::io::AudioFileData makeReferenceProgramme (double sampleRate, int channels = 2);
+    /** Renders `programme` through a chain with `values` (param::kNumParams;
+        bypass forced off; the module of `listenBypassId` audition-bypassed)
+        and returns output minus input integrated loudness after
+        kSettleSeconds (LU; for a 7.1 programme the input is its front pair,
+        so only differences between estimates are meaningful); nullopt if
+        either side is below -70 LUFS or the render failed. Non-RT,
+        allocates, any thread. */
+    static std::optional<float> estimateGainLu (const flub::io::AudioFileData& programme, const std::vector<float>& values,
+                                                const std::atomic<bool>* abort = nullptr, int listenBypassId = -1);
+
+    /** 64-bit FNV-1a of the values' bit patterns, the level bucket and the
+        variant (the cache key). */
+    static uint64_t keyOf (const std::vector<float>& values, float levelLufs = kDefaultLevelLufs, Variant variant = {}) noexcept;
 
     /** The estimate for `values` at an input of `levelLufs`: nullopt while it
         is not known; NaN when it cannot be measured. */
-    std::optional<float> find (const std::vector<float>& values, float levelLufs) const;
+    std::optional<float> find (const std::vector<float>& values, float levelLufs, Variant variant = {}) const;
     /** Queues `values` unless known or queued; `urgent` moves it to the front. */
-    void request (const std::vector<float>& values, float levelLufs, bool urgent = false);
+    void request (const std::vector<float>& values, float levelLufs, bool urgent = false, Variant variant = {});
     int getQueuedCount() const;
 
+    /** Called on the message thread after new results: every listener
+        (addListener returns its token for removeListener), then onEstimate. */
+    int addListener (std::function<void()> listener);
+    void removeListener (int token);
     std::function<void()> onEstimate;
 
 private:
@@ -102,6 +129,7 @@ private:
         uint64_t key = 0;
         std::vector<float> values;
         int level = 0;
+        Variant variant;
     };
 
     void run() override;
@@ -114,6 +142,8 @@ private:
     uint64_t runningKey = 0;
     bool jobRunning = false;
     std::atomic<bool> abortRender { false };
+    std::vector<std::pair<int, std::function<void()>>> listeners; // message thread
+    int nextListenerToken = 1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PresetLoudnessEstimator)
 };

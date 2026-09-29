@@ -32,6 +32,7 @@ constexpr const char* presetFavourites = "presets.favourites";
 constexpr const char* presetRecent = "presets.recent";
 constexpr const char* presetPreview = "presets.preview";
 constexpr const char* presetPreviewMatched = "presets.previewMatched";
+constexpr const char* comparisonMatched = "compare.matched";
 constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
@@ -637,6 +638,8 @@ bool AppSettings::getPresetPreview() const { return properties->getBoolValue (Ke
 void AppSettings::setPresetPreview (bool preview) { properties->setValue (Keys::presetPreview, preview); }
 bool AppSettings::getPresetPreviewMatched() const { return properties->getBoolValue (Keys::presetPreviewMatched, true); }
 void AppSettings::setPresetPreviewMatched (bool matched) { properties->setValue (Keys::presetPreviewMatched, matched); }
+bool AppSettings::getComparisonMatched() const { return properties->getBoolValue (Keys::comparisonMatched, true); }
+void AppSettings::setComparisonMatched (bool matched) { properties->setValue (Keys::comparisonMatched, matched); }
 juce::String AppSettings::getPreferredOutputDevice() const { return properties->getValue (Keys::preferredOutputDevice); }
 void AppSettings::setPreferredOutputDevice (const juce::String& name) { properties->setValue (Keys::preferredOutputDevice, name); }
 

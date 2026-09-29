@@ -144,23 +144,39 @@ HeaderBar::HeaderBar (EngineController& c)
     addAndMakeVisible (nextPreset);
     addAndMakeVisible (presetMenu);
 
-    // ---- A / B ----
-    Style::set (abA, "tab");
-    Style::set (abB, "tab");
-    for (auto* b : { &abA, &abB })
+    // ---- Strip menu (narrow windows) ----
+    stripBox.setTitle ("Strip");
+    stripBox.setTooltip ("The strip (per-app profile) the window edits");
+    stripBox.onChange = [this]
     {
+        if (const int id = stripBox.getSelectedId(); id > 0)
+            controller.setSelectedStrip (id - 1);
+    };
+    addChildComponent (stripBox);
+
+    // ---- A / B (loudness matched, docs/11 E37) ----
+    comparison = std::make_unique<BankComparison> (controller, [this] { return getLoudnessEstimator(); });
+    comparison->onStatusChanged = [this] { refresh(); };
+    abA = std::make_unique<PopupButton> ("A");
+    abB = std::make_unique<PopupButton> ("B");
+    for (auto* b : { abA.get(), abB.get() })
+    {
+        Style::set (*b, "tab");
         b->setRadioGroupId (kBankRadioGroup, juce::dontSendNotification);
         b->setClickingTogglesState (true);
+        b->onPopupMenu = [this, b] { showCompareMenu (*b); };
         addAndMakeVisible (*b);
     }
-    abA.setConnectedEdges (juce::Button::ConnectedOnRight);
-    abB.setConnectedEdges (juce::Button::ConnectedOnLeft);
-    Style::describe (abA, "Settings A", "Listen to / edit settings A");
-    Style::describe (abB, "Settings B", "Listen to / edit settings B");
-    abA.onClick = [this] { controller.setActiveBank (Bank::A); };
-    abB.onClick = [this] { controller.setActiveBank (Bank::B); };
+    abA->setConnectedEdges (juce::Button::ConnectedOnRight);
+    abB->setConnectedEdges (juce::Button::ConnectedOnLeft);
+    abA->onClick = [this] { controller.setActiveBank (Bank::A); };
+    abB->onClick = [this] { controller.setActiveBank (Bank::B); };
     copyAB.onClick = [this] { controller.copyActiveToOtherBank(); };
     addAndMakeVisible (copyAB);
+
+    overflowButton.setTooltip ("Latency and CPU, copy A / B, the blind test, routing and settings");
+    overflowButton.onClick = [this] { showOverflowMenu(); };
+    addChildComponent (overflowButton);
 
     // ---- Bypass ----
     bypassButton = std::make_unique<PopupButton> ("Bypass");
@@ -194,7 +210,33 @@ HeaderBar::HeaderBar (EngineController& c)
     thumbPos = thumbTarget;
 }
 
-HeaderBar::~HeaderBar() = default;
+HeaderBar::~HeaderBar()
+{
+    comparison.reset(); // before the estimator it listens to
+}
+
+std::shared_ptr<PresetLoudnessEstimator> HeaderBar::getLoudnessEstimator()
+{
+    // One estimator per engine rate; its estimates are kept between uses.
+    const double rate = controller.getHost().getSampleRate() > 0.0 ? controller.getHost().getSampleRate() : 48000.0;
+    if (loudnessEstimator == nullptr || loudnessEstimator->getSampleRate() != rate)
+        loudnessEstimator = std::make_shared<PresetLoudnessEstimator> (rate);
+    return loudnessEstimator;
+}
+
+juce::Button& HeaderBar::getBankButton (Bank bank) noexcept
+{
+    return bank == Bank::A ? *abA : *abB;
+}
+
+void HeaderBar::setComparisonMatched (bool matched)
+{
+    controller.getSettings().setComparisonMatched (matched);
+    comparison->setEnabled (matched);
+    if (onComparisonMatchedChanged != nullptr)
+        onComparisonMatchedChanged (matched);
+    refresh();
+}
 
 // =============================================================================
 // State
@@ -234,6 +276,9 @@ void HeaderBar::rebuildStrips()
         addAndMakeVisible (*b);
         stripButtons.push_back (std::move (b));
     }
+    stripBox.clear (juce::dontSendNotification);
+    for (int i = 0; i < n; ++i)
+        stripBox.addItem (controller.getStripName (i), i + 1);
     stripActive.assign (static_cast<size_t> (n), false);
     resized();
     refresh();
@@ -287,19 +332,64 @@ void HeaderBar::refresh()
     prevPreset.setEnabled (hasPresets);
     nextPreset.setEnabled (hasPresets);
 
+    stripBox.setSelectedId (strip + 1, juce::dontSendNotification);
+
     const auto bank = controller.getActiveBank();
-    abA.setToggleState (bank == Bank::A, juce::dontSendNotification);
-    abB.setToggleState (bank == Bank::B, juce::dontSendNotification);
+    abA->setToggleState (bank == Bank::A, juce::dontSendNotification);
+    abB->setToggleState (bank == Bank::B, juce::dontSendNotification);
     copyAB.setTooltip (bank == Bank::A ? "Copy A to B" : "Copy B to A");
+    const auto status = comparison->getStatus (strip);
+    const auto abTip = (comparison->isEnabled() ? BankComparison::describe (status)
+                                                : juce::String ("A/B is not loudness matched (right-click to switch the match on)."))
+                       + "\nRight-click: loudness matching, copy, blind test (A/B/X).";
+    Style::describe (*abA, "Settings A", "Listen to / edit settings A. " + abTip);
+    Style::describe (*abB, "Settings B", "Listen to / edit settings B. " + abTip);
+    abCaption = comparison->isEnabled() ? BankComparison::shortText (status) : juce::String();
 
     const bool bypassed = ! controller.isEnabled();
     bypassButton->setToggleState (bypassed, juce::dontSendNotification);
     bypassButton->setButtonText (bypassed ? "Bypassed" : "Bypass");
     const bool matched = controller.getSelectedParams().get (LoudnessMatchBypass) >= 0.5f;
-    Style::describe (*bypassButton, "Bypass all processing",
-                     juce::String ("Bypass every strip (") + (matched ? "loudness matched" : "not loudness matched")
-                         + ") for a fair before / after comparison. Right-click for options.");
+    bypassCaption = getBypassCaption();
+    juce::String bypassTip;
+    bypassTip << "Bypass every strip (" << (matched ? "loudness matched" : "not loudness matched") << ") for a fair before / after comparison.";
+    if (processedDeltaKnown)
+        bypassTip << " The processed sound " << (bypassed ? "was " : "is ") << formatProcessedDelta (processedDeltaLu)
+                  << " against the input (short-term)" << (matched ? "; the bypass plays the input at the same loudness." : ".");
+    Style::describe (*bypassButton, "Bypass all processing", bypassTip + " Right-click for options.");
     repaint();
+}
+
+juce::String HeaderBar::formatProcessedDelta (float lu)
+{
+    return Theme::formatSignedDb (lu, 1) + " LU";
+}
+
+juce::String HeaderBar::getBypassCaption() const
+{
+    if (controller.isEnabled() || ! processedDeltaKnown)
+        return {};
+    return "proc. " + formatProcessedDelta (processedDeltaLu);
+}
+
+juce::String HeaderBar::getAbCaption() const
+{
+    return abCaption;
+}
+
+void HeaderBar::trackProcessedDelta()
+{
+    // Processed minus input, short-term, while processing plays: what the
+    // bypass takes away ("Processed +x LU", docs/11 E37).
+    if (! controller.isEnabled() || controller.isStripBypassed (controller.getSelectedStrip()))
+        return;
+    auto& meters = controller.getChain (controller.getSelectedStrip()).meters();
+    const float in = meters.inShortTermLufs.load (std::memory_order_relaxed), out = meters.shortTermLufs.load (std::memory_order_relaxed);
+    if (std::isfinite (in) && std::isfinite (out) && in > -70.0f && out > -70.0f)
+    {
+        processedDeltaLu = out - in;
+        processedDeltaKnown = true;
+    }
 }
 
 HeaderBar::CpuReadout HeaderBar::formatCpuReadout (const EngineStatus& status, const OverloadWatchdog::State& overload,
@@ -404,6 +494,9 @@ juce::String HeaderBar::describeDeviceSafety (const DeviceSafetyState& safety)
 
 void HeaderBar::updateStatus()
 {
+    trackProcessedDelta();
+    if (const auto caption = getBypassCaption(); caption != bypassCaption)
+        refresh();
     const auto li = controller.getLatencyInfo();
     const auto status = controller.getStatus();
 
@@ -553,12 +646,7 @@ void HeaderBar::showPresetBrowser()
     auto* parent = getParentComponent();
     if (browserOverlay != nullptr || parent == nullptr)
         return;
-    // One estimator per engine rate; its estimates are kept between openings.
-    const double rate = controller.getHost().getSampleRate() > 0.0 ? controller.getHost().getSampleRate() : 48000.0;
-    if (loudnessEstimator == nullptr || loudnessEstimator->getSampleRate() != rate)
-        loudnessEstimator = std::make_shared<PresetLoudnessEstimator> (rate);
-
-    browserOverlay = std::make_unique<PresetBrowserOverlay> (controller, loudnessEstimator, getBottom());
+    browserOverlay = std::make_unique<PresetBrowserOverlay> (controller, getLoudnessEstimator(), getBottom());
     juce::Component::SafePointer<HeaderBar> safe (this);
     // Closed asynchronously: onClose runs inside the browser's own button and key handlers.
     browserOverlay->onClose = [safe]
@@ -733,6 +821,72 @@ void HeaderBar::showBypassMenu()
                         });
 }
 
+void HeaderBar::showCompareMenu (juce::Component& target)
+{
+    const bool matched = comparison->isEnabled();
+    const auto bank = controller.getActiveBank();
+    juce::PopupMenu menu;
+    menu.addItem (1, "Loudness-matched A/B and module listen", true, matched);
+    menu.addItem (2, bank == Bank::A ? "Copy A to B" : "Copy B to A");
+    menu.addSeparator();
+    menu.addItem (3, "Blind test (A/B/X)...", onBlindTestRequested != nullptr);
+    juce::Component::SafePointer<HeaderBar> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&target),
+                        [safe, matched] (int result)
+                        {
+                            if (safe == nullptr)
+                                return;
+                            if (result == 1)
+                                safe->setComparisonMatched (! matched);
+                            else if (result == 2)
+                                safe->controller.copyActiveToOtherBank();
+                            else if (result == 3 && safe->onBlindTestRequested != nullptr)
+                                safe->onBlindTestRequested();
+                        });
+}
+
+void HeaderBar::showOverflowMenu()
+{
+    juce::PopupMenu menu;
+    // The readout's lines (the readout itself has no room here).
+    menu.addSectionHeader ("Latency " + latencyText + "   " + cpu.caption + " " + cpu.value);
+    if (const auto device = describeDeviceSafety (controller.getDeviceSafetyState()); device.isNotEmpty())
+        menu.addItem (-1, device, false);
+    menu.addSeparator();
+    const auto bank = controller.getActiveBank();
+    menu.addItem (1, bank == Bank::A ? "Copy A to B" : "Copy B to A");
+    menu.addItem (2, "Loudness-matched A/B and module listen", true, comparison->isEnabled());
+    menu.addItem (3, "Blind test (A/B/X)...", onBlindTestRequested != nullptr);
+    menu.addSeparator();
+    menu.addItem (4, "Routing and strips...", onRoutingRequested != nullptr);
+    menu.addItem (5, "Settings...", onSettingsRequested != nullptr);
+    juce::Component::SafePointer<HeaderBar> safe (this);
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&overflowButton),
+                        [safe] (int result)
+                        {
+                            if (safe == nullptr)
+                                return;
+                            switch (result)
+                            {
+                                case 1: safe->controller.copyActiveToOtherBank(); break;
+                                case 2: safe->setComparisonMatched (! safe->comparison->isEnabled()); break;
+                                case 3:
+                                    if (safe->onBlindTestRequested != nullptr)
+                                        safe->onBlindTestRequested();
+                                    break;
+                                case 4:
+                                    if (safe->onRoutingRequested != nullptr)
+                                        safe->onRoutingRequested();
+                                    break;
+                                case 5:
+                                    if (safe->onSettingsRequested != nullptr)
+                                        safe->onSettingsRequested();
+                                    break;
+                                default: break;
+                            }
+                        });
+}
+
 // =============================================================================
 // Painting / layout
 // =============================================================================
@@ -757,14 +911,17 @@ void HeaderBar::paint (juce::Graphics& g)
         drawIcon (g, Icons::logo(), markArea.reduced (mark * 0.16f), Palette::background, 2.4f);
         r.removeFromLeft (10.0f);
 
-        const float size = compact ? 15.0f : 17.0f;
-        g.setFont (Theme::font (size, true));
-        const float w1 = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), "Flubsound");
-        g.setColour (Palette::text);
-        g.drawText ("Flubsound", r.removeFromLeft (w1 + 1.0f), juce::Justification::centredLeft, false);
-        r.removeFromLeft (4.0f);
-        g.setColour (accent);
-        g.drawText ("Pro", r, juce::Justification::centredLeft, false);
+        if (! narrow) // narrow windows: the mark alone
+        {
+            const float size = compact ? 15.0f : 17.0f;
+            g.setFont (Theme::font (size, true));
+            const float w1 = juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), "Flubsound");
+            g.setColour (Palette::text);
+            g.drawText ("Flubsound", r.removeFromLeft (w1 + 1.0f), juce::Justification::centredLeft, false);
+            r.removeFromLeft (4.0f);
+            g.setColour (accent);
+            g.drawText ("Pro", r, juce::Justification::centredLeft, false);
+        }
     }
 
     // ---- Mode switch track + sliding thumb ----
@@ -796,10 +953,28 @@ void HeaderBar::paint (juce::Graphics& g)
         g.setColour (Palette::border);
         g.drawRoundedRectangle (area.toFloat().reduced (0.5f), Theme::kControlRadius + 1.0f, 1.0f);
     };
-    container (stripArea);
+    if (! narrow)
+        container (stripArea);
     container (abArea);
 
+    // ---- The comparison lines under A/B and Bypass (docs/11 E37) ----
+    {
+        const auto line = [&g, this] (const juce::String& text, juce::Rectangle<int> above)
+        {
+            if (text.isEmpty() || above.isEmpty())
+                return;
+            const auto area = juce::Rectangle<float> (static_cast<float> (above.getX() - 12), static_cast<float> (above.getBottom()),
+                                                      static_cast<float> (above.getWidth() + 24), static_cast<float> (getHeight() - above.getBottom()));
+            g.setFont (Theme::font (9.5f, true));
+            g.setColour (Palette::muted);
+            g.drawText (text, area, juce::Justification::centred, false);
+        };
+        line (abCaption, abArea);
+        line (bypassCaption, bypassButton->getBounds());
+    }
+
     // ---- Latency / CPU readout: caption left (hidden when compact), value right ----
+    if (! readoutArea.isEmpty())
     {
         auto r = readoutArea.toFloat();
         auto row1 = r.removeFromTop (r.getHeight() * 0.5f).withTrimmedTop (2.0f);
@@ -831,7 +1006,7 @@ void HeaderBar::paintOverChildren (juce::Graphics& g)
     // Activity dots on the strip selector.
     for (size_t i = 0; i < stripButtons.size() && i < stripActive.size(); ++i)
     {
-        if (! stripActive[i])
+        if (! stripActive[i] || ! stripButtons[i]->isVisible())
             continue;
         const auto b = stripButtons[i]->getBounds().toFloat();
         g.setColour (accent);
@@ -854,25 +1029,37 @@ void HeaderBar::resized()
 {
     const int w = getWidth();
     compact = w < 1280;
-    auto r = getLocalBounds().reduced (16, 0);
+    narrow = w < kNarrowWidth;
+    auto r = getLocalBounds().reduced (narrow ? 12 : 16, 0);
     const int controlH = 32;
     auto centred = [this] (juce::Rectangle<int> area, int h) { return area.withSizeKeepingCentre (area.getWidth(), h).withY ((getHeight() - h) / 2); };
     auto centreY = [&centred] (juce::Rectangle<int> area) { return centred (area, controlH); };
 
-    logoArea = r.removeFromLeft (compact ? 136 : 160);
-    r.removeFromLeft (compact ? 10 : 14);
+    // Narrow windows (docs/11 E39): the mark without the wordmark, a strip
+    // menu, no copy button or readout (both in the overflow menu).
+    logoArea = r.removeFromLeft (narrow ? 34 : (compact ? 136 : 160));
+    r.removeFromLeft (narrow ? 8 : (compact ? 10 : 14));
 
-    modeArea = centred (r.removeFromLeft (compact ? 152 : 176), 34);
+    modeArea = centred (r.removeFromLeft (narrow ? 132 : (compact ? 152 : 176)), 34);
     {
         auto m = modeArea.reduced (2, 2);
         musicSegment->setBounds (m.removeFromLeft (m.getWidth() / 2));
         gamingSegment->setBounds (m);
     }
-    r.removeFromLeft (compact ? 10 : 14);
+    r.removeFromLeft (narrow ? 8 : (compact ? 10 : 14));
 
     const int stripW = compact ? 54 : 60;
-    stripArea = centreY (r.removeFromLeft (stripW * static_cast<int> (stripButtons.size()) + 4));
+    for (auto& b : stripButtons)
+        b->setVisible (! narrow);
+    stripBox.setVisible (narrow);
+    if (narrow)
     {
+        stripArea = centreY (r.removeFromLeft (100));
+        stripBox.setBounds (stripArea);
+    }
+    else
+    {
+        stripArea = centreY (r.removeFromLeft (stripW * static_cast<int> (stripButtons.size()) + 4));
         auto s = stripArea.reduced (2, 2);
         for (auto& b : stripButtons)
             b->setBounds (s.removeFromLeft (stripW));
@@ -882,30 +1069,45 @@ void HeaderBar::resized()
     settingsButton.setBounds (centred (r.removeFromRight (34), 34));
     r.removeFromRight (4);
     viewButton.setBounds (centred (r.removeFromRight (34), 34));
-    r.removeFromRight (compact ? 8 : 10);
-    readoutArea = centred (r.removeFromRight ((compact ? 74 : 104) + (wideReadout ? 34 : 0)), 34);
-    r.removeFromRight (compact ? 10 : 12);
+    overflowButton.setVisible (narrow);
+    copyAB.setVisible (! narrow);
+    if (narrow)
+    {
+        r.removeFromRight (4);
+        overflowButton.setBounds (centred (r.removeFromRight (34), 34));
+        r.removeFromRight (8);
+        readoutArea = {};
+    }
+    else
+    {
+        r.removeFromRight (compact ? 8 : 10);
+        readoutArea = centred (r.removeFromRight ((compact ? 74 : 104) + (wideReadout ? 34 : 0)), 34);
+        r.removeFromRight (compact ? 10 : 12);
+    }
     bypassButton->setBounds (centreY (r.removeFromRight (compact ? 76 : 84)));
     r.removeFromRight (compact ? 8 : 10);
-    copyAB.setBounds (centreY (r.removeFromRight (32)));
-    r.removeFromRight (4);
+    if (! narrow)
+    {
+        copyAB.setBounds (centreY (r.removeFromRight (32)));
+        r.removeFromRight (4);
+    }
     abArea = centreY (r.removeFromRight (compact ? 60 : 68));
     {
         auto a = abArea.reduced (2, 2);
-        abA.setBounds (a.removeFromLeft (a.getWidth() / 2));
-        abB.setBounds (a);
+        abA->setBounds (a.removeFromLeft (a.getWidth() / 2));
+        abB->setBounds (a);
     }
     r.removeFromRight (compact ? 10 : 12);
 
     // Preset browser: right-aligned next to A/B, as wide as fits (prev / next
     // are hidden when narrow). The free space stays between the two clusters.
-    r.removeFromLeft (compact ? 10 : 12);
+    r.removeFromLeft (narrow ? 0 : (compact ? 10 : 12));
     presetArea = centreY (r);
     const int menuW = 32 + 4, arrowsW = 28 + 4 + 28 + 4;
     const bool showArrows = presetArea.getWidth() - menuW - arrowsW >= 180;
-    const int comboW = juce::jmin (compact ? 250 : 300, presetArea.getWidth() - menuW - (showArrows ? arrowsW : 0));
+    const int comboW = juce::jmax (0, juce::jmin (compact ? 250 : 300, presetArea.getWidth() - menuW - (showArrows ? arrowsW : 0)));
     const int groupW = comboW + menuW + (showArrows ? arrowsW : 0);
-    auto p = presetArea.withTrimmedLeft (presetArea.getWidth() - groupW);
+    auto p = presetArea.withTrimmedLeft (juce::jmax (0, presetArea.getWidth() - groupW));
     presetMenu.setBounds (p.removeFromRight (32));
     p.removeFromRight (4);
     prevPreset.setVisible (showArrows);

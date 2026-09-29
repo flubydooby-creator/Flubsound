@@ -1,9 +1,10 @@
 // Flubsound Pro - system tray / menu-bar icon.
 //
-// Left click (Windows / Linux): open the main window. Right click (any
-// click on macOS): quick menu
+// Left click (Windows / Linux): the quick-controls flyout (ui::QuickControls,
+// docs/11 E39: Boost, the preset stepper, Bypass, open the window); a double
+// click opens the main window. Right click (any click on macOS): quick menu
 //   Enabled | Mode: Music / Gaming | Boost +10 % / -10 % | Presets > ... |
-//   Open Flubsound Pro | Quit
+//   Quick controls | Open Flubsound Pro | Quit
 // Mode, boost and presets act on the selected strip. The icon is drawn in
 // code: white equaliser bars on a fixed teal-to-blue gradient while enabled,
 // dimmed bars on grey while bypassed; the macOS template variant is the bars
@@ -34,6 +35,9 @@ public:
     void notify (const juce::String& title, const juce::String& message);
 
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDoubleClick (const juce::MouseEvent& e) override;
+    /** Opens the quick-controls flyout next to the icon (or at the mouse). */
+    void showQuickControls();
 
     static juce::Image createIconImage (bool enabled, bool asTemplate, int size = 64);
 

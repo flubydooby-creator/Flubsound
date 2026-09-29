@@ -6,6 +6,7 @@
 
 #include "flub/analysis/LoudnessMeter.h"
 #include "flub/common/Math.h"
+#include "flub/engine/ProcessingChain.h"
 #include "flub/io/PresetIO.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 namespace flub::app::ui
 {
@@ -22,6 +24,14 @@ namespace
 {
 constexpr int kBlockSize = 512;
 constexpr float kSilentLufs = -70.0f;
+
+std::vector<float> defaultValues()
+{
+    std::vector<float> v;
+    for (const auto& info : layout())
+        v.push_back (info.defaultValue);
+    return v;
+}
 
 /** Integrated loudness of planar stereo `channels` from sample `from` on. */
 float integratedLufs (const std::vector<std::vector<float>>& channels, double sampleRate, int from)
@@ -57,35 +67,86 @@ PresetLoudnessEstimator::~PresetLoudnessEstimator()
     stopThread (4000);
 }
 
-flub::io::AudioFileData PresetLoudnessEstimator::makeReferenceProgramme (double rate)
+flub::io::AudioFileData PresetLoudnessEstimator::makeReferenceProgramme (double rate, int channels)
 {
+    const bool surround = channels == 8;
     flub::io::AudioFileData data;
     data.sampleRate = rate;
-    data.numChannels = 2;
+    data.numChannels = surround ? 8 : 2;
     const auto n = static_cast<size_t> (kProgrammeSeconds * rate);
-    data.channels.assign (2, std::vector<float> (n, 0.0f));
+    data.channels.assign (static_cast<size_t> (data.numChannels), std::vector<float> (n, 0.0f));
 
     TestSignalGenerator generator (rate);
-    generator.setProgramme (0, TestSignalGenerator::Programme::Music, 0.0f);
-    const std::array<float*, 2> ptrs { data.channels[0].data(), data.channels[1].data() };
+    generator.setProgramme (0, surround ? TestSignalGenerator::Programme::Game71 : TestSignalGenerator::Programme::Music, 0.0f);
+    std::array<float*, 8> ptrs {};
+    for (size_t c = 0; c < data.channels.size(); ++c)
+        ptrs[c] = data.channels[c].data();
     for (size_t pos = 0; pos < n; pos += kBlockSize)
-        generator.renderStrip (0, flub::AudioBlock (ptrs.data(), 2, static_cast<int> (std::min<size_t> (kBlockSize, n - pos)), static_cast<int> (pos)));
+        generator.renderStrip (0, flub::AudioBlock (ptrs.data(), data.numChannels, static_cast<int> (std::min<size_t> (kBlockSize, n - pos)),
+                                                    static_cast<int> (pos)));
     return data;
 }
 
-std::optional<float> PresetLoudnessEstimator::estimateGainLu (const flub::io::AudioFileData& programme, const std::vector<float>& values,
-                                                              const std::atomic<bool>* abort)
+namespace
 {
-    if (values.size() != static_cast<size_t> (kNumParams) || programme.numChannels != 2 || programme.sampleRate <= 0.0)
+/** renderPass with one module audition-bypassed (the module card's ear):
+    the same private store / chain / prime as the CLI's pass, without its
+    latency alignment (the estimate is an integrated loudness). */
+bool renderListenPass (const flub::io::AudioFileData& input, const std::vector<float>& values, int listenBypassId,
+                       std::vector<std::vector<float>>& out, const std::atomic<bool>* abort)
+{
+    const int channels = input.numChannels;
+    ParameterStore store;
+    for (int id = 0; id < kNumParams; ++id)
+        store.set (Bank::A, id, values[static_cast<size_t> (id)]);
+    store.setActiveBank (Bank::A);
+    flub::ProcessingChain chain (store);
+    chain.prepare ({ input.sampleRate, kBlockSize, channels });
+    chain.setAuditionBypass (listenBypassId, true);
+    flub::AudioBuffer io (channels, kBlockSize);
+    io.clear();
+    chain.process (io.block (channels, kBlockSize));
+    chain.reset();
+
+    const auto n = input.numFrames();
+    out.assign (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    for (int64_t pos = 0; pos < n; pos += kBlockSize)
+    {
+        if (abort != nullptr && abort->load (std::memory_order_relaxed))
+            return false;
+        const int count = static_cast<int> (std::min<int64_t> (kBlockSize, n - pos));
+        for (int c = 0; c < channels; ++c)
+            std::memcpy (io.channel (c), input.channels[static_cast<size_t> (c)].data() + pos, sizeof (float) * static_cast<size_t> (count));
+        chain.process (io.block (channels, count));
+        for (int c = 0; c < 2; ++c)
+            std::memcpy (out[static_cast<size_t> (c)].data() + pos, io.channel (c), sizeof (float) * static_cast<size_t> (count));
+    }
+    return true;
+}
+} // namespace
+
+std::optional<float> PresetLoudnessEstimator::estimateGainLu (const flub::io::AudioFileData& programme, const std::vector<float>& values,
+                                                              const std::atomic<bool>* abort, int listenBypassId)
+{
+    if (values.size() != static_cast<size_t> (kNumParams) || (programme.numChannels != 2 && programme.numChannels != 8)
+        || programme.sampleRate <= 0.0)
         return {};
 
     auto processed = values;
     processed[static_cast<size_t> (BypassAll)] = 0.0f; // the processed sound, whatever the master Bypass is doing
     std::vector<std::vector<float>> out;
-    int latency = 0;
-    std::string error;
-    if (! flub::cli::renderPass (programme, processed, kBlockSize, out, latency, error, abort))
-        return {};
+    if (listenBypassId >= 0)
+    {
+        if (! renderListenPass (programme, processed, listenBypassId, out, abort))
+            return {};
+    }
+    else
+    {
+        int latency = 0;
+        std::string error;
+        if (! flub::cli::renderPass (programme, processed, kBlockSize, out, latency, error, abort))
+            return {};
+    }
 
     const int settle = static_cast<int> (kSettleSeconds * programme.sampleRate);
     const float in = integratedLufs (programme.channels, programme.sampleRate, settle);
@@ -100,14 +161,23 @@ int PresetLoudnessEstimator::levelBucket (float lufs) noexcept
     return juce::roundToInt (std::clamp (std::isfinite (lufs) ? lufs : kDefaultLevelLufs, kMinLevelLufs, kMaxLevelLufs));
 }
 
-uint64_t PresetLoudnessEstimator::keyOf (const std::vector<float>& values, float levelLufs) noexcept
+uint64_t PresetLoudnessEstimator::keyOf (const std::vector<float>& values, float levelLufs, Variant variant) noexcept
 {
     uint64_t h = 1469598103934665603ull;
-    const auto level = static_cast<uint32_t> (levelBucket (levelLufs) + 1000);
-    for (int b = 0; b < 4; ++b)
+    const auto mix = [&h] (uint32_t word)
     {
-        h ^= (level >> (8 * b)) & 0xffu;
-        h *= 1099511628211ull;
+        for (int b = 0; b < 4; ++b)
+        {
+            h ^= (word >> (8 * b)) & 0xffu;
+            h *= 1099511628211ull;
+        }
+    };
+    mix (static_cast<uint32_t> (levelBucket (levelLufs) + 1000));
+    // The default variant adds nothing, so stereo keys are the ones they always were.
+    if (! (variant == Variant {}))
+    {
+        mix (static_cast<uint32_t> (variant.channels));
+        mix (static_cast<uint32_t> (variant.listenBypassId + 1));
     }
     for (const float v : values)
     {
@@ -122,9 +192,9 @@ uint64_t PresetLoudnessEstimator::keyOf (const std::vector<float>& values, float
     return h;
 }
 
-std::optional<float> PresetLoudnessEstimator::find (const std::vector<float>& values, float levelLufs) const
+std::optional<float> PresetLoudnessEstimator::find (const std::vector<float>& values, float levelLufs, Variant variant) const
 {
-    const auto key = keyOf (values, levelLufs);
+    const auto key = keyOf (values, levelLufs, variant);
     const juce::ScopedLock sl (lock);
     const auto it = results.find (key);
     if (it == results.end())
@@ -132,11 +202,12 @@ std::optional<float> PresetLoudnessEstimator::find (const std::vector<float>& va
     return it->second;
 }
 
-void PresetLoudnessEstimator::request (const std::vector<float>& values, float levelLufs, bool urgent)
+void PresetLoudnessEstimator::request (const std::vector<float>& values, float levelLufs, bool urgent, Variant variant)
 {
     if (values.size() != static_cast<size_t> (kNumParams))
         return;
-    const auto key = keyOf (values, levelLufs);
+    variant.channels = variant.channels == 8 ? 8 : 2; // the two programmes there are
+    const auto key = keyOf (values, levelLufs, variant);
     {
         const juce::ScopedLock sl (lock);
         if (results.count (key) > 0 || (jobRunning && runningKey == key))
@@ -153,9 +224,9 @@ void PresetLoudnessEstimator::request (const std::vector<float>& values, float l
             return;
         }
         if (urgent)
-            queue.push_front ({ key, values, levelBucket (levelLufs) });
+            queue.push_front ({ key, values, levelBucket (levelLufs), variant });
         else
-            queue.push_back ({ key, values, levelBucket (levelLufs) });
+            queue.push_back ({ key, values, levelBucket (levelLufs), variant });
     }
     if (! isThreadRunning())
         startThread (juce::Thread::Priority::low);
@@ -170,10 +241,45 @@ int PresetLoudnessEstimator::getQueuedCount() const
 
 void PresetLoudnessEstimator::run()
 {
-    const auto reference = makeReferenceProgramme (sampleRate);
-    const float referenceLufs = integratedLufs (reference.channels, sampleRate, static_cast<int> (kSettleSeconds * sampleRate));
-    auto programme = reference;
-    int programmeLevel = std::numeric_limits<int>::min();
+    // One reference per programme (stereo music, 7.1 game scene), made on
+    // first use, and its copy scaled to the level of the current job.
+    struct Programme
+    {
+        flub::io::AudioFileData reference, scaled;
+        float referenceLufs = 0.0f;
+        int level = std::numeric_limits<int>::min();
+    };
+    std::array<std::unique_ptr<Programme>, 2> programmes; // [0] stereo, [1] 7.1
+    const auto programmeFor = [this, &programmes] (int channels) -> Programme&
+    {
+        auto& p = programmes[channels == 8 ? 1 : 0];
+        if (p == nullptr)
+        {
+            p = std::make_unique<Programme>();
+            p->reference = makeReferenceProgramme (sampleRate, channels);
+            const int settle = static_cast<int> (kSettleSeconds * sampleRate);
+            if (channels == 8)
+            {
+                // The level the strip's input meter reads: the chain's
+                // stereo fold, i.e. its bypassed output (unmatched).
+                auto values = defaultValues();
+                values[static_cast<size_t> (BypassAll)] = 1.0f;
+                values[static_cast<size_t> (LoudnessMatchBypass)] = 0.0f;
+                std::vector<std::vector<float>> folded;
+                int latency = 0;
+                std::string error;
+                p->referenceLufs = flub::cli::renderPass (p->reference, values, kBlockSize, folded, latency, error)
+                                       ? integratedLufs (folded, sampleRate, settle)
+                                       : integratedLufs (p->reference.channels, sampleRate, settle);
+            }
+            else
+            {
+                p->referenceLufs = integratedLufs (p->reference.channels, sampleRate, settle);
+            }
+            p->scaled = p->reference;
+        }
+        return *p;
+    };
     while (! threadShouldExit())
     {
         Job job;
@@ -194,16 +300,17 @@ void PresetLoudnessEstimator::run()
             continue;
         }
 
-        if (job.level != programmeLevel)
+        auto& programme = programmeFor (job.variant.channels);
+        if (job.level != programme.level)
         {
             // The reference, scaled to the level asked for.
-            const auto gain = flub::dbToGain (static_cast<float> (job.level) - referenceLufs);
-            for (size_t c = 0; c < reference.channels.size(); ++c)
-                for (size_t i = 0; i < reference.channels[c].size(); ++i)
-                    programme.channels[c][i] = reference.channels[c][i] * gain;
-            programmeLevel = job.level;
+            const auto gain = flub::dbToGain (static_cast<float> (job.level) - programme.referenceLufs);
+            for (size_t c = 0; c < programme.reference.channels.size(); ++c)
+                for (size_t i = 0; i < programme.reference.channels[c].size(); ++i)
+                    programme.scaled.channels[c][i] = programme.reference.channels[c][i] * gain;
+            programme.level = job.level;
         }
-        const auto estimate = estimateGainLu (programme, job.values, &abortRender);
+        const auto estimate = estimateGainLu (programme.scaled, job.values, &abortRender, job.variant.listenBypassId);
         if (threadShouldExit())
             break;
         {
@@ -215,8 +322,28 @@ void PresetLoudnessEstimator::run()
     }
 }
 
+int PresetLoudnessEstimator::addListener (std::function<void()> listener)
+{
+    const int token = nextListenerToken++;
+    listeners.emplace_back (token, std::move (listener));
+    return token;
+}
+
+void PresetLoudnessEstimator::removeListener (int token)
+{
+    listeners.erase (std::remove_if (listeners.begin(), listeners.end(), [token] (const auto& l) { return l.first == token; }), listeners.end());
+}
+
 void PresetLoudnessEstimator::handleAsyncUpdate()
 {
+    // A copy: a listener may add or remove listeners (one removed meanwhile is skipped).
+    const auto current = listeners;
+    for (const auto& l : current)
+    {
+        const bool registered = std::any_of (listeners.begin(), listeners.end(), [&l] (const auto& r) { return r.first == l.first; });
+        if (registered && l.second != nullptr)
+            l.second();
+    }
     if (onEstimate != nullptr)
         onEstimate();
 }

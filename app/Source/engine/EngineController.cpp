@@ -425,7 +425,32 @@ float EngineController::getStripGainDb (int strip) const noexcept
 
 void EngineController::applyStripGain (int strip)
 {
-    host->setStripGainDb (strip, userGainDb[static_cast<size_t> (strip)] + chatMixOffsetDb (strip));
+    host->setStripGainDb (strip, userGainDb[static_cast<size_t> (strip)] + chatMixOffsetDb (strip) + getTotalComparisonTrimDb (strip));
+}
+
+void EngineController::setComparisonTrimDb (int strip, float db, ComparisonSlot slot)
+{
+    if (strip < 0 || strip >= getNumStrips() || ! std::isfinite (db))
+        return;
+    auto& trim = comparisonTrimDb[static_cast<size_t> (strip)][static_cast<size_t> (slot)];
+    const float clamped = std::clamp (db, -kMaxComparisonTrimDb, 0.0f);
+    if (clamped == trim)
+        return;
+    trim = clamped;
+    applyStripGain (strip);
+}
+
+float EngineController::getComparisonTrimDb (int strip, ComparisonSlot slot) const noexcept
+{
+    return strip >= 0 && strip < AudioEngineHost::kMaxStrips ? comparisonTrimDb[static_cast<size_t> (strip)][static_cast<size_t> (slot)] : 0.0f;
+}
+
+float EngineController::getTotalComparisonTrimDb (int strip) const noexcept
+{
+    if (strip < 0 || strip >= AudioEngineHost::kMaxStrips)
+        return 0.0f;
+    const auto& t = comparisonTrimDb[static_cast<size_t> (strip)];
+    return std::max (-kMaxComparisonTrimDb, t[0] + t[1]);
 }
 
 void EngineController::setStripMuted (int strip, bool muted)
@@ -441,6 +466,9 @@ void EngineController::setStripLayout (const std::vector<flub::StripConfig>& new
     releaseAllLatches (true);
     setChatMix (0.0f);
     stripBypassed.fill (false);
+    for (int i = 0; i < getNumStrips(); ++i) // the host's gains are read back below
+        for (const auto slot : { ComparisonSlot::Banks, ComparisonSlot::Listen })
+            setComparisonTrimDb (i, 0.0f, slot);
 
     host->setStripLayout (newLayout);
     for (int i = 0; i < getNumStrips(); ++i)

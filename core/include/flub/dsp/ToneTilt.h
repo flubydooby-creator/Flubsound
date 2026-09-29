@@ -2,22 +2,23 @@
 // and a high shelf down, with automatic level compensation, so Warmth is
 // heard as tone rather than as level.
 //
-//   sections  body bell 200 Hz, Q 0.7, +3.5 dB x amount (the upper bass and
-//             body mids, about 100 - 400 Hz: kick body, the bass's
-//             fundamentals and the chest of a voice) and high shelf 7 kHz,
-//             Q 0.707, -3.0 dB x amount (SVF, Svf.h). The bell leaves the
-//             sub-bass nearly alone (+0.5 dB at 50 Hz): a body shelf lifted
-//             the 40 - 80 Hz energy that dominates bass-heavy programme, so
-//             the level compensation took the mids and vocals down 3 dB and
-//             the body mids came out lower than before (docs/11 E14 Status,
-//             verifier). Pink noise through the chain at amount 1,
-//             compensation included, re amount 0 (tests/test_warmth.cpp):
-//             +3.5 dB in the 200 Hz third-octave band, +0.3 dB at 1 kHz,
-//             -2.7 dB at 10 kHz; about half of each at amount 0.5 (the gains
-//             are linear in dB).
+//   sections  body bell 200 Hz, Q 0.7, +3.5 dB x amount (half of it at 100
+//             and 400 Hz: the upper bass and low mids - kick body, the bass
+//             line's upper partials and the chest of a voice) and high shelf
+//             7 kHz, Q 0.707, -3.0 dB x amount (-1.5 dB at 7 kHz, -2.6 dB at
+//             10 kHz) (SVF, Svf.h). The bell leaves the sub-bass nearly
+//             alone (+0.5 dB at 50 Hz, +0.3 dB at 1 kHz): a 300 Hz low shelf
+//             (+3.8 dB) lifted the 40 - 80 Hz energy that dominates
+//             bass-heavy programme, so the level compensation took the mids
+//             and vocals down 3 dB and the low mids came out lower than at
+//             Warmth 0 (docs/11 E14 Status, verifier). Pink noise through the
+//             chain at amount 1, compensation included, re amount 0
+//             (tests/test_warmth.cpp): +3.5 dB in the 200 Hz third-octave
+//             band, +0.4 dB at 1 kHz, -2.5 dB at 10 kHz; half of each at
+//             amount 0.5 (the gains are linear in dB).
 //   level     the tilt's loudness change depends on the programme (pink
 //             noise: about 0 LU at amount 1; the drum-and-bass test
-//             programme: +0.8 LU), so no fixed trim can hold both. The stage
+//             programme: +0.7 LU), so no fixed trim can hold both. The stage
 //             measures it: the K-weighted (BS.1770) mean square of its input
 //             and of its input through the full tilt (amount 1), one-pole
 //             over kCompTimeConstantMs (a running mean for the first time
@@ -25,8 +26,10 @@
 //             both channels summed. L1 = the ratio in dB, clamped to the
 //             tilt's own range [-3.0, +3.5] dB; the trim at amount a is
 //             -a L1 (the loudness change is linear in a within 0.05 dB).
-//             Open loop: the measure reads the input only, never the stage's
-//             own output, so nothing it does feeds back into it; the trim
+//             Open loop: the measure reads the stage's input, never its
+//             output (in the chain the stage runs ahead of every module the
+//             SafetyGovernor scales, so nothing downstream feeds back into
+//             it either); the trim
 //             moves with the programme's spectral balance over seconds, never
 //             with a beat, and follows the amount at once, so turning Warmth
 //             does not change the level either. Silent chunks (below -80 dB
@@ -96,7 +99,7 @@ public:
     float getAppliedAmount() const noexcept { return appliedAmount.load (std::memory_order_relaxed); }
     float getCompensationDb() const noexcept { return appliedTrimDb.load (std::memory_order_relaxed); }
     /** The measured loudness change of the full tilt on the programme (L1,
-        dB; 0 until measured, and while idle). Any thread. */
+        dB; 0 after a start until the first measure). Any thread. */
     float getFullTiltLoudnessDb() const noexcept { return fullTiltDb.load (std::memory_order_relaxed); }
 
 private:

@@ -60,6 +60,7 @@ set(FLUB_APP_SOURCES
     Source/shell/TrayIcon.cpp
     Source/shell/HotkeyManager.cpp
     Source/shell/ScreenshotDriver.cpp
+    Source/ui/AbxPanel.cpp Source/ui/Comparison.cpp Source/ui/ParamHints.cpp Source/ui/QuickControls.cpp
     Source/ui/AnalyzerFeed.cpp
     Source/ui/AnalyzerPanel.cpp
     Source/ui/BoostPanel.cpp

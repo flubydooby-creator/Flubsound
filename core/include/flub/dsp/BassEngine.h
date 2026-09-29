@@ -1,8 +1,12 @@
 // Flubsound Pro - bass engine: adaptive boost + psychoacoustic harmonics.
 //
 // Signal flow (per block, zero latency, all IIR):
-//   1. Subsonic high-pass (Butterworth 24 dB/oct at subsonicHz; 0 = off)
-//      removes DC and inaudible rumble that would waste limiter headroom.
+//   1. Subsonic high-pass (Butterworth 24 dB/oct at subsonicHz, or 12 dB/oct
+//      with subsonicOrder 2; 0 = off) removes DC and inaudible rumble that
+//      would waste limiter headroom. The 2nd order keeps about half the group
+//      delay of the 4th (docs/11 E02 subsonic slice: at 40 Hz, HP4 at 25 Hz
+//      8.2 ms, at 20 Hz 5.9 ms, HP2 at 20 Hz 3.3 ms); changing the order
+//      crossfades the two over 20 ms (both run while the stage is on).
 //   2. Mono-bass (stereo only): LR4 split at monoBelowHz; the low band is
 //      replaced by its mid (L+R)/2 -> tight, centred low end, no phasey sub.
 //   3. Adaptive low boost: low-shelf (Q 0.7) at boostFrequency (the shelf
@@ -12,6 +16,19 @@
 //      level + boost exceeds protectThresholdDb the boost is withdrawn by the
 //      excess (soft knee 6 dB). This is what keeps "+12 dB bass" from turning
 //      into limiter pumping on bass-heavy material and explosions.
+//      Split-band protection (splitProtection, docs/11 E02 (a), off by
+//      default): a sub detector (the LR4 low band at 85 Hz, 25 ms hold)
+//      withdraws the shelf; what the classic prediction (with an 8 ms hold,
+//      the punch detector) still exceeds after that is taken by a wide bell
+//      in the 60-150 Hz punch band, at most as deep as the shelf's boost
+//      there, so a punchy kick above 60 Hz no longer takes the sub boost with
+//      it. Both withdrawals have a program-dependent release: once hits
+//      recur (level onsets <= 1.2 s apart) a withdrawal is held for the
+//      recent onset spacing + 1/8, so a sustained line under repeated kicks
+//      keeps one steady gain instead of pumping in time with them (32 Hz
+//      line under 55 Hz kicks, protection alone: 3.5-4.7 -> 0.0 dB of
+//      modulation, at a steadily lower boost); an isolated hit releases as
+//      before. Cap: <= 0.5 dB over it for any tone and shelf, as classic.
 //   4. Psychoacoustic bass ("missing fundamental"): the mid signal is band
 //      limited to [~25 Hz, harmonicsCutoff]; an amplitude-normalised
 //      Chebyshev waveshaper generates exact harmonics of a sinusoid:
@@ -65,6 +82,8 @@ struct BassEngineParams
     float tighten = 0.0f;              // 0 .. 1 -> 0 .. -12 dB low-band sustain
     float monoBelowHz = 0.0f;          // 0 = off, else 40 .. 250 Hz
     float subsonicHz = 20.0f;          // 0 = off, else 10 .. 40 Hz
+    int subsonicOrder = 4;             // 2 or 4 (12 / 24 dB per octave)
+    bool splitProtection = false;      // sub / punch detectors with program-dependent release (docs/11 E02 (a))
 
     bool operator== (const BassEngineParams&) const = default;
 };
@@ -129,7 +148,25 @@ private:
     using Lr4State = std::array<SvfState, 3>; // split section, low section, high section
     using Hp4State = std::array<SvfState, 2>;
 
+    /** Split-band protection, one band (control rate except the detector):
+        peak hold -> 10 / 150 ms follower, then a program-dependent hold on
+        the band's withdrawal (see the header comment). */
+    struct BandProtector
+    {
+        TransientShaper::PeakHold hold;
+        EnvelopeFollower env;
+        float held = 0.0f;       // held withdrawal, dB
+        float valleyDb = -160.0f; // onset detector: the band level's recent low
+        float releaseCoeff = 0.0f, valleyCoeff = 0.0f;
+        int holdTicks = 0, countdown = 0, sinceOnset = 0, spacingLast = 0, spacingPrev = 0, maxTicks = 1;
+        bool armed = true;
+
+        void reset (float envLevel) noexcept;
+        float update (float levelDb, float rawWithdrawDb) noexcept; // control rate
+    };
+
     void updateTargets() noexcept;
+    void updateSplitDesigns() noexcept;
     bool setStage (ParkedStage& stage, bool wanted, float hz) noexcept;
     bool tickStage (ParkedStage& stage, bool effectSettled) noexcept;
     void updateHarmonicFilters() noexcept;
@@ -149,10 +186,14 @@ private:
     double controlRate = 48000.0 / kControlInterval;
     int controlCountdown = kControlInterval;
 
-    // 1. Subsonic high-pass (Butterworth, 2 sections).
+    // 1. Subsonic high-pass (Butterworth, 2 sections; or 1 section, Q 0.707,
+    // with subsonicOrder 2: orderBlend 0 = 4th order .. 1 = 2nd order).
     ParkedStage subsonic;
     std::array<SvfCoeffs, 2> subsonicHp {};
+    SvfCoeffs subsonicHp2;
     std::array<Hp4State, kMaxChannels> subsonicState {};
+    std::array<SvfState, kMaxChannels> subsonic2State {};
+    LinearSmoothedValue orderBlend;
 
     // 2. Mono bass: LR4 built from one Butterworth LP design (raw SVF outputs).
     ParkedStage mono;
@@ -170,6 +211,21 @@ private:
     std::array<SvfState, kMaxChannels> detectorState {};
     TransientShaper::PeakHold detectorHold;
     EnvelopeFollower detectorEnv;
+
+    // 3b. Split-band protection (params.splitProtection): detectors and the
+    // 60-150 Hz bell. The detectors run only while it is on (they start
+    // from the classic detector's level); the bell glides back to 0 dB.
+    BandProtector subProtect, punchProtect;
+    bool splitRunning = false;
+    SvfCoeffs splitXo;                                 // the sub detector's LR4 (85 Hz)
+    std::array<Lr4State, kMaxChannels> splitState {};
+    double bellHz = 95.0;
+    float bellShelfRatio = 0.0f;                       // the shelf's boost at bellHz per dB of boost
+    OnePoleSmoother bellCutSmoothed;
+    float bellCutDb = 0.0f;
+    bool bellActive = false;
+    TransientShaper::SvfGlide bell;
+    std::array<SvfState, kMaxChannels> bellState {};
 
     // 4. Psychoacoustic harmonics (mid signal) + replace-fundamental high-pass.
     bool harmonicsActive = false;

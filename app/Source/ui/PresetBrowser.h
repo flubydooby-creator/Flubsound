@@ -174,6 +174,7 @@ private:
     void engineControllerChanged (EngineController::Change change) override;
     void timerCallback() override;
     std::optional<float> liveProgrammeLevel() const;
+    PresetLoudnessEstimator::Variant estimateVariant() const;
     void reloadPresets();
     void rebuildTagChips();
     void applyFilter();
@@ -191,6 +192,7 @@ private:
 
     EngineController& controller;
     std::shared_ptr<PresetLoudnessEstimator> estimator;
+    int estimateListener = 0;
     PresetAudition audition;
     std::vector<PresetInfo> presets;
     Context context;

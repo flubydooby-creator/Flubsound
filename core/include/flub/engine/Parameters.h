@@ -197,8 +197,12 @@ enum Id : int
     ContourMaxLiftDb,      // cap on the contour's lift
 
     // Warmth (docs/11 E14; ToneTilt.h, MacroMap.cpp)
-    WarmthTone,       // 0..1: the level-compensated warmth tilt (low shelf up, high shelf down); the Music Warmth macro drives it
+    WarmthTone,       // 0..1: the level-compensated warmth tilt (body bell up, high shelf down); the Music Warmth macro drives it
     WarmthTapeGrit,   // Toggle: the Music Warmth macro drives tape saturation and bass as in v1 instead (Lo-Fi Chill, Warm Vinyl)
+
+    // Bass engine additions (docs/11 E02; BassEngine.h)
+    BassSubsonicOrder, // Choice: the subsonic filter's slope, SubsonicOrderValue (12 dB/oct halves its group delay)
+    BassSplitProtect,  // Toggle: split-band headroom protection with a program-dependent release
 
     kNumScalarParams
 };
@@ -239,6 +243,7 @@ enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Sa
 /** GuardRange: how far an event may rise over the recent programme (LU);
     Off = no guard and no Tame (the default). */
 enum class GuardRangeValue : int { Off = 0, Lu20, Lu15, Lu10Balanced, Lu6Shield };
+enum class SubsonicOrderValue : int { Slope12 = 0, Slope24 = 1 }; // BassSubsonicOrder: 2nd / 4th order
 
 /** A named maximizer style (docs/11 E05 step 4): the values it gives the six
     maximizer controls it owns while it is selected. Custom owns none (the

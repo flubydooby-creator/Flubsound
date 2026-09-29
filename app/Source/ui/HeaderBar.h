@@ -15,9 +15,16 @@
 //   batch process audio files..." (the ExportDialog: render audio files with
 //   these settings). A preset picked here or in the browser is recorded as
 //   recent (AppSettings::addRecentPreset).
-// * A/B: active bank of the selected strip + copy to the other bank.
+// * A/B: active bank of the selected strip + copy to the other bank. A
+//   switch is loudness matched (docs/11 E37, BankComparison: the louder bank
+//   is turned down to the quieter, from the first second, refined from the
+//   strip's meters); the trim reads under the buttons ("B -3.1 dB"). Right-
+//   click: the "Loudness-matched A/B" switch, copy, and the blind A/B/X test
+//   (onBlindTestRequested; the owner opens AbxPanel over the window).
 // * Bypass: master enable (every strip); it is loudness matched while the
-//   "Loudness-matched bypass" parameter is on (right-click to change).
+//   "Loudness-matched bypass" parameter is on (right-click to change). While
+//   bypassed, the line under it says how much louder the processed sound was
+//   ("proc. +2.9 LU": short-term out minus in just before the bypass).
 // * Latency (device + engine) and CPU readout (with the device's xrun count
 //   when it reports one, and the CPU-overload watchdog's warning), settings
 //   dialog. The latency total is marked "~" while it is an estimate (driver
@@ -28,9 +35,15 @@
 //   with the message in the tooltip; a click opens Settings.
 // * View: Simple <-> Advanced main window (docs/11 E39); the owner switches
 //   (onViewToggleRequested) and tells the header which view is shown.
+// * Narrow windows (< kNarrowWidth, docs/11 E39 reflow down to 800 px): the
+//   wordmark, the strip buttons (a strip menu instead), the copy button and
+//   the latency / CPU readout make way for an overflow button whose menu
+//   holds the readout's lines, copy, the blind test, the routing panel
+//   (onRoutingRequested) and Settings.
 // Message thread only; refresh() pulls everything from the controller.
 #pragma once
 
+#include "Comparison.h"
 #include "PresetBrowser.h"
 #include "SettingsDialog.h"
 #include "Widgets.h"
@@ -76,7 +89,34 @@ public:
     /** Per display frame: animates the mode switch thumb. */
     void animate (double dtSeconds);
 
+    /** Below this width the header reflows (see the file comment). */
+    static constexpr int kNarrowWidth = 1100;
+    bool isNarrow() const noexcept { return narrow; }
+
     std::function<void()> onSettingsRequested;
+    /** A/B menu > "Blind test (A/B/X)..." (and the overflow menu). */
+    std::function<void()> onBlindTestRequested;
+    /** Overflow menu > "Routing and strips" (narrow windows hide the panel). */
+    std::function<void()> onRoutingRequested;
+
+    /** The loudness estimator shared by the browser's preview, the matched
+        A/B and the module listen (one per engine rate; its cache is kept). */
+    std::shared_ptr<PresetLoudnessEstimator> getLoudnessEstimator();
+    BankComparison& getComparison() noexcept { return *comparison; }
+    /** Sets the "Loudness-matched A/B" switch (persisted; also the module listen's). */
+    void setComparisonMatched (bool matched);
+    std::function<void (bool matched)> onComparisonMatchedChanged;
+
+    /** The line under Bypass while bypassed ("proc. +2.9 LU"; empty while
+        not bypassed or unknown) and under A/B (BankComparison::shortText). */
+    juce::String getBypassCaption() const;
+    juce::String getAbCaption() const;
+    /** Processed minus input loudness (LU) as last read while not bypassed. */
+    static juce::String formatProcessedDelta (float lu);
+
+    juce::Button& getBankButton (flub::param::Bank bank) noexcept;
+    juce::Button& getOverflowButton() noexcept { return overflowButton; }
+    juce::ComboBox& getStripBox() noexcept { return stripBox; }
     /** The view button: switch between the Simple and the Advanced view. */
     std::function<void()> onViewToggleRequested;
     /** The view shown (the button offers the other one). */
@@ -135,6 +175,9 @@ private:
 
     void showPresetMenu();
     void showBypassMenu();
+    void showCompareMenu (juce::Component& target);
+    void showOverflowMenu();
+    void trackProcessedDelta();
     void saveAs();
     void renamePreset (const PresetInfo& preset);
     void deletePreset (const PresetInfo& preset);
@@ -152,7 +195,9 @@ private:
     IconButton prevPreset { "Previous preset", Icons::chevronLeft(), IconButton::Style::Framed };
     IconButton nextPreset { "Next preset", Icons::chevronRight(), IconButton::Style::Framed };
     IconButton presetMenu { "Preset actions", Icons::more(), IconButton::Style::Framed };
-    juce::TextButton abA { "A" }, abB { "B" };
+    std::unique_ptr<PopupButton> abA, abB;
+    juce::ComboBox stripBox; // narrow windows: the strip selector
+    IconButton overflowButton { "More", Icons::more(), IconButton::Style::Framed };
     IconButton copyAB { "Copy to the other bank", Icons::copy(), IconButton::Style::Framed };
     std::unique_ptr<PopupButton> bypassButton;
     IconButton settingsButton { "Settings", Icons::gear(), IconButton::Style::Framed };
@@ -160,12 +205,16 @@ private:
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<PresetBrowserOverlay> browserOverlay;
     std::shared_ptr<PresetLoudnessEstimator> loudnessEstimator; // kept between openings: its estimates are cached
+    std::unique_ptr<BankComparison> comparison;                  // the matched A/B (docs/11 E37)
 
     std::vector<juce::String> presetIds; // combo item id - 1 -> preset id
     juce::Rectangle<int> logoArea, modeArea, stripArea, presetArea, abArea, readoutArea;
     juce::String latencyText;
     CpuReadout cpu;
-    bool compact = false, presetModified = false, wideReadout = false;
+    bool compact = false, narrow = false, presetModified = false, wideReadout = false;
+    float processedDeltaLu = 0.0f;
+    bool processedDeltaKnown = false;
+    juce::String abCaption, bypassCaption;
     std::vector<bool> stripActive;
     float thumbPos = 0.0f, thumbTarget = 0.0f; // 0 = Music, 1 = Gaming
 };

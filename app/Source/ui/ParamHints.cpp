@@ -22,7 +22,7 @@ const std::map<juce::String, Hint>& table()
         { "input.gain", { "Level into the strip. Lower it if a hot source makes the limiter work hard; it does not change the output level target." } },
         { "output.gain", { "Turns the strip's output down after everything else. Use it to balance this strip against the others." } },
         { "mode", { "Music shapes songs (punch, width, warmth); Gaming brings out cues (footsteps, direction, voices). The macros change with it." } },
-        { "boost", { "One knob for more: bass, clarity, width, then loudness, in that order, always watched by the safety governor.",
+        { "boost", { "One knob for more: clarity and width first, then bass, loudness last, always watched by the safety governor.",
                      "One knob for more: detail and direction first, then impact, loudness last, always watched by the safety governor." } },
         { "macro.1", { "Punch: sharper drum hits. Brings out the attack of kicks and snares without making the mix louder.",
                        "Footsteps: lifts steps and movement when they happen, not the whole background, so you hear who is close." } },
@@ -96,6 +96,8 @@ const std::map<juce::String, Hint>& table()
         { "bass.tighten", { "Shortens boomy bass notes so the low end sounds tighter and less muddy." } },
         { "bass.monoBelow", { "Makes the deepest bass mono, for a steadier, more centred low end on speakers and headphones." } },
         { "bass.subsonic", { "Removes rumble below hearing that wastes headroom. Raise it for small speakers." } },
+        { "bass.subsonicOrder", { "How steeply rumble is removed. The gentler slope keeps deep bass tighter in time." } },
+        { "bass.splitProtect", { "Protects deep bass and kick separately, so a steady bass line stops pumping with the kick drum." } },
 
         // ---- Clarity ----
         { "clarity.attack", { "More (or less) snap at the start of drum hits, plucks and steps." } },

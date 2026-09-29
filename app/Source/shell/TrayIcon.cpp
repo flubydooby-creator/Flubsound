@@ -1,5 +1,7 @@
 #include "TrayIcon.h"
 
+#include "ui/QuickControls.h"
+
 namespace flub::app
 {
 using flub::param::ModeValue;
@@ -146,6 +148,7 @@ juce::PopupMenu TrayIcon::buildMenu()
     menu.addSubMenu ("Presets", presetMenu);
     menu.addSeparator();
 
+    menu.addItem ("Quick controls...", [this] { showQuickControls(); });
     menu.addItem ("Open Flubsound Pro", [this]
                   {
                       if (callbacks.openWindow != nullptr)
@@ -171,10 +174,28 @@ void TrayIcon::mouseDown (const juce::MouseEvent& e)
         juce::Process::makeForegroundProcess();
         buildMenu().showMenuAsync (juce::PopupMenu::Options().withMousePosition().withDeletionCheck (*this));
     }
-    else if (callbacks.openWindow != nullptr)
+    else
     {
-        callbacks.openWindow();
+        showQuickControls();
     }
 #endif
+}
+
+void TrayIcon::mouseDoubleClick (const juce::MouseEvent&)
+{
+#if ! JUCE_MAC
+    if (callbacks.openWindow != nullptr)
+        callbacks.openWindow();
+#endif
+}
+
+void TrayIcon::showQuickControls()
+{
+    // Next to the icon where the OS reports its position (a tray icon has no
+    // real bounds on every platform), else at the mouse.
+    auto area = getScreenBounds();
+    if (area.isEmpty() || ! isShowing())
+        area = juce::Rectangle<int> (1, 1).withPosition (juce::Desktop::getMousePosition());
+    ui::QuickControls::show (controller, area, callbacks.openWindow);
 }
 } // namespace flub::app

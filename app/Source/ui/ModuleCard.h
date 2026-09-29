@@ -11,7 +11,8 @@
 // * ear        hold to hear the strip without this module ("A/B listen"):
 //              an audition bypass in the engine (onListen), not a parameter
 //              write, so it also works for macro-engaged modules and never
-//              marks the preset modified
+//              marks the preset modified; loudness matched by the rack
+//              (ListenMatch, docs/11 E37)
 // * expand     shows ALL parameters of the module's layout group
 //              (auto-generated ParamGrid in a scrolling view)
 // The card dims while the module is effectively bypassed. Banded modules
@@ -57,9 +58,10 @@ struct ModuleDescriptor
     Banding banding = Banding::None;
     std::vector<Key> keys;
 
-    /** The ten modules in rack order: the chain's processing order, except
-        that the Headphone Virtualizer (which runs first, before the gate)
-        sits with the stereo modules. */
+    /** The ten modules: the chain's processing order, except that the
+        Headphone Virtualizer (which runs first, before the gate) sits with
+        the stereo modules. The rack shows them by relevance
+        (ModuleRack::relevanceOrder, docs/11 E39). */
     static const std::vector<ModuleDescriptor>& all();
 };
 
@@ -93,6 +95,8 @@ public:
         when it ends - on mouse-up, focus loss, when the card is hidden or
         destroyed, or on stopListening(). Every start gets exactly one end. */
     std::function<void (bool listen)> onListen;
+    /** The pointer is over the ear (a hold may follow). */
+    std::function<void()> onListenHover;
     /** Ends a hold now (strip switch, engine reconfiguration). */
     void stopListening();
 

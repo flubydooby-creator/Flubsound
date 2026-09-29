@@ -13,6 +13,14 @@
 //                      gain smooth_5ms (boostDb - withdraw); getProtectionDb()
 //                      publishes smooth_5ms (withdraw). The detector LP sits
 //                      at max (150 Hz, 1.5 boostFrequency).
+//                      splitProtection (docs/11 E02 (a)): sub = LR4 low
+//                      at 85 Hz -> 25 ms hold -> 10 / 150 ms follower;
+//                      punch = the detector LP above with an 8 ms hold.
+//                      The shelf withdraws the sub's excess, a bell (Q 0.5
+//                      at 0.8 sqrt (60 Hz x detector LP)) cuts what the
+//                      punch prediction exceeds beyond that (at most the
+//                      shelf's boost at the bell), each through a
+//                      program-dependent hold (BandProtector::update).
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -98,6 +106,18 @@ constexpr float kHarmonicsMaxGain = 2.0f; // +6 dB at amount 1
 constexpr std::array<float, 4> kEvenWeights { 1.0f, 0.35f, 0.3f, 0.1f };  // w2..w5, character 0
 constexpr std::array<float, 4> kOddWeights { 0.35f, 1.0f, 0.1f, 0.3f };   // w2..w5, character 1
 
+// 3b. Split-band protection (docs/11 E02 (a)).
+constexpr double kSplitHz = 60.0;          // sub | punch
+constexpr double kSubDetectorHz = 85.0;    // the sub detector's LR4 low band: 60 Hz x sqrt 2, reads -1.9 dB at 60 Hz
+constexpr double kSubHoldMs = 25.0;        // as the classic detector
+constexpr double kPunchHoldMs = 8.0;
+constexpr double kBellQ = 0.5;             // wide: covers 60 .. 150 Hz ...
+constexpr double kBellCentre = 0.8;        // ... centred 0.8 x sqrt (60 Hz x detector LP), 76 Hz at 150 Hz;
+                                           // a tone anywhere in the band then stays <= 0.5 dB over the cap
+constexpr float kProgramMaxSpacingMs = 1200.0f; // onsets further apart are isolated
+constexpr float kProgramReleaseMs = 150.0f;     // after the hold, towards the raw withdrawal
+constexpr double kValleyRiseMs = 300.0;         // onset detector's valley: rise time constant
+
 // 5. Tighten.
 constexpr float kTightenHz = 150.0f;
 constexpr float kTightenMaxDb = -12.0f;
@@ -140,6 +160,7 @@ BassEngineParams sanitise (const BassEngineParams& in, const BassEngineParams& p
     p.tighten = clampOr (in.tighten, 0.0f, 1.0f, prev.tighten);
     p.monoBelowHz = offOrRange (in.monoBelowHz, kMinMonoHz, kMaxMonoHz, prev.monoBelowHz);
     p.subsonicHz = offOrRange (in.subsonicHz, kMinSubsonicHz, kMaxSubsonicHz, prev.subsonicHz);
+    p.subsonicOrder = in.subsonicOrder <= 2 ? 2 : 4;
     return p;
 }
 
@@ -222,6 +243,62 @@ float flushTiny (SvfState& s) noexcept
 } // namespace
 
 //==============================================================================
+void BassEngine::BandProtector::reset (float envLevel) noexcept
+{
+    hold.reset();
+    env.reset (envLevel);
+    held = 0.0f;
+    valleyDb = gainToDb (envLevel);
+    holdTicks = countdown = spacingLast = spacingPrev = 0;
+    sinceOnset = maxTicks + 1; // no onset yet
+    armed = true;
+}
+
+float BassEngine::BandProtector::update (float levelDb, float raw) noexcept
+{
+    // Onsets on the band's level: a rise of 3 dB over its recent valley (it
+    // follows the level down at once and up with a 300 ms time constant,
+    // never more than 30 dB below it), re-armed once the level is back
+    // within 1.5 dB of it, so every hit of a repeated pattern counts however
+    // much it happens to withdraw, also over a loud sustained line. Their spacing (the larger of the last
+    // two, + 1/8) is how long a withdrawal is held: kicks 500 ms apart keep
+    // one steady gain between them. An isolated onset (none in the last
+    // 1.2 s) holds nothing.
+    sinceOnset = std::min (sinceOnset + 1, maxTicks + 1);
+    valleyDb = std::min (levelDb, std::max (levelDb - 30.0f, levelDb + valleyCoeff * (valleyDb - levelDb)));
+    if (armed && levelDb > valleyDb + 3.0f)
+    {
+        armed = false;
+        const int spacing = sinceOnset <= maxTicks ? sinceOnset : 0;
+        spacingPrev = spacing > 0 ? spacingLast : 0;
+        spacingLast = spacing;
+        const int recent = std::max (spacingLast, spacingPrev);
+        holdTicks = std::min (maxTicks, recent + recent / 8);
+        countdown = holdTicks;
+        sinceOnset = 0;
+    }
+    else if (! armed && levelDb < valleyDb + 1.5f)
+    {
+        armed = true;
+    }
+
+    if (raw >= held)
+    {
+        held = raw;
+        countdown = std::max (countdown, holdTicks);
+    }
+    else if (countdown > 0)
+    {
+        --countdown;
+    }
+    else
+    {
+        held = holdTicks == 0 ? raw : raw + releaseCoeff * (held - raw);
+    }
+    return held;
+}
+
+//==============================================================================
 void BassEngine::prepare (const ProcessSpec& newSpec)
 {
     spec = newSpec;
@@ -233,6 +310,17 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
 
     detectorHold.prepare (sr, kHoldMs);
     detectorEnv.prepare (sr, kDetectorAttackMs, kDetectorReleaseMs);
+    subProtect.hold.prepare (sr, kSubHoldMs);
+    punchProtect.hold.prepare (sr, kPunchHoldMs);
+    for (auto* band : { &subProtect, &punchProtect })
+    {
+        band->env.prepare (sr, kDetectorAttackMs, kDetectorReleaseMs);
+        band->maxTicks = std::max (1, static_cast<int> (kProgramMaxSpacingMs * 0.001 * controlRate));
+        band->releaseCoeff = static_cast<float> (std::exp (-1.0 / (kProgramReleaseMs * 0.001 * controlRate)));
+        band->valleyCoeff = static_cast<float> (std::exp (-1.0 / (kValleyRiseMs * 0.001 * controlRate)));
+    }
+    splitXo = designLr4 (kSubDetectorHz, sr);
+    orderBlend.reset (sr, kBlendMs, params.subsonicOrder == 2 ? 1.0f : 0.0f);
 
     harmPreHp = SvfCoeffs::make (FilterType::HighPass, kHarmonicsLowHz, kButterworthQ2, 0.0, sr);
     harmHold.prepare (sr, kHoldMs);
@@ -294,6 +382,7 @@ void BassEngine::reset() noexcept FLUB_NONBLOCKING
     resetStage (replace);
     resetStage (tight);
     designHighPass4 (subsonicHp, subsonic.hz, sr);
+    subsonicHp2 = SvfCoeffs::make (FilterType::HighPass, subsonic.hz, kButterworthQ2, 0.0, sr);
     monoXo = designLr4 (mono.hz, sr);
     designHighPass4 (replaceHp, replace.hz, sr);
     tightXo = designLr4 (tight.hz, sr);
@@ -302,6 +391,13 @@ void BassEngine::reset() noexcept FLUB_NONBLOCKING
     shelfGainDb = params.boostDb;
     shelf.setImmediate (SvfCoeffs::make (FilterType::LowShelf, boostHz, kShelfQ, shelfGainDb, sr));
     shelfActive = ! shelf.isIdentity();
+    orderBlend.setImmediate (params.subsonicOrder == 2 ? 1.0f : 0.0f);
+    splitRunning = params.splitProtection;
+    updateSplitDesigns();
+    bellCutSmoothed.reset (controlRate, kShelfGainSmoothMs, 0.0f);
+    bellCutDb = 0.0f;
+    bell.setImmediate (SvfCoeffs::make (FilterType::Bell, bellHz, kBellQ, 0.0, sr));
+    bellActive = false;
 
     clearAllStates();
     protectionDb.store (0.0f, std::memory_order_relaxed);
@@ -342,7 +438,20 @@ void BassEngine::updateTargets() noexcept
     if (setStage (subsonic, params.subsonicHz > 0.0f, params.subsonicHz))
     {
         subsonicState.fill ({});
+        subsonic2State.fill ({});
         designHighPass4 (subsonicHp, subsonic.hz, sr);
+        subsonicHp2 = SvfCoeffs::make (FilterType::HighPass, subsonic.hz, kButterworthQ2, 0.0, sr);
+    }
+    orderBlend.setTarget (params.subsonicOrder == 2 ? 1.0f : 0.0f);
+
+    if (params.splitProtection && ! splitRunning)
+    {
+        // Start the split detectors from the classic one's level: at worst
+        // they withdraw a little more for a moment, never less.
+        splitRunning = true;
+        splitState.fill ({});
+        subProtect.reset (detectorEnv.get());
+        punchProtect.reset (detectorEnv.get());
     }
     if (setStage (mono, params.monoBelowHz > 0.0f && spec.numChannels == 2, params.monoBelowHz))
     {
@@ -361,6 +470,18 @@ void BassEngine::updateTargets() noexcept
         tightXo = designLr4 (tight.hz, sr);
         tightShaper.reset();
     }
+}
+
+void BassEngine::updateSplitDesigns() noexcept
+{
+    // The bell sits a little below the geometric centre of the punch band
+    // (60 Hz to the detector LP); what it may take back is the shelf's own
+    // boost there, bellShelfRatio dB per dB of boost at the current corner.
+    const double sr = spec.sampleRate;
+    const double detectorHz = std::max (kDetectorHz, kDetectorTrackRatio * boostHz);
+    bellHz = kBellCentre * std::sqrt (kSplitHz * detectorHz);
+    constexpr double refDb = 6.0;
+    bellShelfRatio = static_cast<float> (SvfCoeffs::make (FilterType::LowShelf, boostHz, kShelfQ, refDb, sr).magnitudeDb (bellHz, sr) / refDb);
 }
 
 bool BassEngine::setStage (ParkedStage& stage, bool wanted, float hz) noexcept
@@ -450,9 +571,14 @@ void BassEngine::clearHarmonics() noexcept
 void BassEngine::clearAllStates() noexcept
 {
     subsonicState.fill ({});
+    subsonic2State.fill ({});
     monoState.fill ({});
     shelfState.fill ({});
     detectorState.fill ({});
+    splitState.fill ({});
+    bellState.fill ({});
+    subProtect.reset (0.0f);
+    punchProtect.reset (0.0f);
     replaceState.fill ({});
     tightState.fill ({});
     tightLp.fill (0.0f);
@@ -470,6 +596,10 @@ float BassEngine::flushStates() noexcept
         const size_t ch = static_cast<size_t> (c);
         for (auto& s : subsonicState[ch])
             sum += flushTiny (s);
+        sum += flushTiny (subsonic2State[ch]);
+        for (auto& s : splitState[ch])
+            sum += flushTiny (s);
+        sum += flushTiny (bellState[ch]);
         for (auto& s : monoState[ch])
             sum += flushTiny (s);
         for (auto& s : replaceState[ch])
@@ -498,6 +628,7 @@ void BassEngine::controlTick() noexcept
     {
         const double g0 = subsonicHp[0].g;
         designHighPass4 (subsonicHp, subsonic.hz, sr);
+        subsonicHp2 = SvfCoeffs::make (FilterType::HighPass, subsonic.hz, kButterworthQ2, 0.0, sr);
         subsonic.glide.start (g0, subsonicHp[0].g);
     }
     if (tickStage (mono, true))
@@ -527,6 +658,7 @@ void BassEngine::controlTick() noexcept
     {
         boostHz = std::exp (logBoostHz.next());
         detectorLp = designDetector (boostHz, sr);
+        updateSplitDesigns();
     }
 
     // Predicted LF peak after the boost vs the cap; the boost is withdrawn by
@@ -535,7 +667,33 @@ void BassEngine::controlTick() noexcept
     // protection's reaction to it can never pull the gain in opposite
     // directions for a moment.
     const float levelDb = gainToDb (detectorEnv.get());
-    const float withdraw = std::clamp (softKnee (levelDb + boost - threshold), 0.0f, boost);
+    float withdraw = std::clamp (softKnee (levelDb + boost - threshold), 0.0f, boost);
+    float bellCut = 0.0f;
+    if (splitRunning)
+    {
+        // Split-band protection (docs/11 E02 (a)): the sub band withdraws the
+        // shelf; what the whole LF band (the classic prediction, 8 ms hold)
+        // still exceeds after that is taken by the 60-150 Hz bell, at most
+        // as deep as the shelf's boost at its centre. Each goes through its
+        // program-dependent hold.
+        const float subDb = gainToDb (subProtect.env.get()), punchDb = gainToDb (punchProtect.env.get());
+        const float subWithdraw = subProtect.update (subDb, std::clamp (softKnee (subDb + boost - threshold), 0.0f, boost));
+        const float fullWithdraw = std::clamp (softKnee (punchDb + boost - threshold), 0.0f, boost);
+        bellCut = punchProtect.update (punchDb, std::max (0.0f, fullWithdraw - subWithdraw));
+        if (params.splitProtection)
+        {
+            // The bell never takes more than the boost the shelf still
+            // gives at its centre, so no frequency ends up below flat.
+            withdraw = std::min (subWithdraw, boost);
+            bellCut = std::min (bellCut, bellShelfRatio * (boost - withdraw));
+        }
+        else
+        {
+            bellCut = 0.0f; // switched off: back to the classic detector (gains glide)
+            if (bellCutDb == 0.0f && ! bellCutSmoothed.isSmoothing())
+                splitRunning = false;
+        }
+    }
     // (While the boost itself falls, the smoothed gain may trail it by a
     // fraction of a dB; clamping it to the boost would put a kink in it.)
     shelfGainSmoothed.setTarget (boost - withdraw);
@@ -544,8 +702,28 @@ void BassEngine::controlTick() noexcept
     // Telemetry: the withdrawal itself, smoothed like the gain. (boost - gainDb
     // would also report the 5 ms lag of the gain behind a boost change as
     // "protection": a 2+ dB flash on quiet material whenever boostDb moves.)
-    withdrawSmoothed.setTarget (withdraw);
+    withdrawSmoothed.setTarget (std::max (withdraw, bellCut));
     protectionDb.store (std::clamp (withdrawSmoothed.next(), 0.0f, boost), std::memory_order_relaxed);
+
+    // The punch band's bell (a cut of bellCut dB, smoothed like the shelf gain).
+    bellCutSmoothed.setTarget (bellCut);
+    const float cut = std::max (0.0f, bellCutSmoothed.next());
+    if (cut != bellCutDb || (shelfMoved && cut != 0.0f))
+    {
+        if (! bellActive)
+        {
+            bellState.fill ({});
+            bellActive = true;
+        }
+        bellCutDb = cut;
+        bell.glideTo (SvfCoeffs::make (FilterType::Bell, bellHz, kBellQ, -cut, sr));
+    }
+    else
+    {
+        bell.ramping = false;
+        if (bell.isIdentity())
+            bellActive = false;
+    }
 
     if (gainDb != shelfGainDb || (shelfMoved && gainDb != 0.0f))
     {
@@ -586,9 +764,12 @@ void BassEngine::controlTick() noexcept
     // ---- state hygiene -----------------------------------------------------
     if (detectorEnv.get() < kEnvFlush)
         detectorEnv.reset (0.0f);
+    for (auto* band : { &subProtect, &punchProtect })
+        if (band->env.get() < kEnvFlush)
+            band->env.reset (0.0f);
     if (harmEnv.get() < kEnvFlush)
         harmEnv.reset (0.0f);
-    if (! std::isfinite (flushStates() + detectorEnv.get() + harmEnv.get()))
+    if (! std::isfinite (flushStates() + detectorEnv.get() + harmEnv.get() + subProtect.env.get() + punchProtect.env.get()))
         clearAllStates();
 }
 
@@ -647,13 +828,23 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
                 hp0 = withG (hp0, g);
                 hp1 = withG (hp1, g);
             }
+            // 4th order, 2nd order, or a crossfade of the two (order change).
+            const float order = orderBlend.next();
+            SvfCoeffs hp2 = subsonicHp2;
+            if (subsonic.glide.active)
+                hp2 = withG (hp2, subsonic.glide.at (t));
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
                 auto& s = subsonicState[ch];
-                const float y = svfTick (hp1, s[1], svfTick (hp0, s[0], x[ch]));
-                x[ch] = blendTo (x[ch], y, b);
+                const float y4 = svfTick (hp1, s[1], svfTick (hp0, s[0], x[ch]));
+                const float y2 = svfTick (hp2, subsonic2State[ch], x[ch]);
+                x[ch] = blendTo (x[ch], order == 0.0f ? y4 : blendTo (y4, y2, order), b);
             }
+        }
+        else
+        {
+            orderBlend.next();
         }
 
         // 2. Mono bass: both channels get the mid of the low band -------------
@@ -676,6 +867,23 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             lfPeak = std::max (lfPeak, std::abs (svfTick (detectorLp, detectorState[ch], x[ch])));
         }
         detectorEnv.process (detectorHold.process (lfPeak));
+        if (splitRunning)
+        {
+            // Split-band detectors, linked like the classic one: sub = the
+            // LR4 low band at 85 Hz (overlapping the punch band, so a tone
+            // near 60 Hz is not under-read), punch = the classic detector's
+            // signal with the shorter hold.
+            float subPeak = 0.0f;
+            for (int c = 0; c < numCh; ++c)
+            {
+                const size_t ch = static_cast<size_t> (c);
+                float lo = 0.0f, hi = 0.0f;
+                lr4Split (splitXo, splitState[ch], x[ch], lo, hi);
+                subPeak = std::max (subPeak, std::abs (lo));
+            }
+            subProtect.env.process (subProtect.hold.process (subPeak));
+            punchProtect.env.process (punchProtect.hold.process (lfPeak));
+        }
 
         if (shelfActive)
         {
@@ -684,6 +892,15 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             {
                 const size_t ch = static_cast<size_t> (c);
                 x[ch] = svfTick (sc, shelfState[ch], x[ch]);
+            }
+        }
+        if (bellActive)
+        {
+            const SvfCoeffs bc = bell.ramping ? bell.at (t) : bell.end;
+            for (int c = 0; c < numCh; ++c)
+            {
+                const size_t ch = static_cast<size_t> (c);
+                x[ch] = svfTick (bc, bellState[ch], x[ch]);
             }
         }
 
