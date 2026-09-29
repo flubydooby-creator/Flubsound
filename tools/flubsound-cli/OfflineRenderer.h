@@ -50,7 +50,10 @@
 // air exciter (MeterBus::harmonicsDb). Means are weighted by block length;
 // "percent" values are shares of the programme's frames. The governor's
 // scale, state and reason bits are also kept as read after the last block
-// of programme (governorScaleEnd / StateEnd / ReasonEnd, docs/11 E06 (6)).
+// of programme (governorScaleEnd / StateEnd / ReasonEnd, docs/11 E06 (6)),
+// and at protection strength Normal / Strict the measured loop's readouts:
+// harmonics and tonal scales, the audible residuals it compares, the output
+// PLR, the brightness lifts, with their budgets (docs/11 E06 batch 2).
 #pragma once
 
 #include "Analysis.h"
@@ -124,6 +127,27 @@ struct RenderStats
     uint32_t governorReasonEnd = 0;
     float autoLevelMinDb = 0.0f, autoLevelMaxDb = 0.0f;
     float autoDriveMaxDb = 0.0f;         // deepest drive reduction
+
+    // The governor's measured loop (protection strength Normal / Strict,
+    // docs/11 E06 batch 2; MeterBus::governor*): at Off the harmonics and
+    // tonal scales stay 1 and nothing below is measured (-160 dB / 1000).
+    int governorStrength = 0;            // the ProtectionStrength of the pass
+    float governorHarmonicsScaleMin = 1.0f, governorHarmonicsScaleEnd = 1.0f;
+    float governorTonalScaleMin = 1.0f, governorTonalScaleEnd = 1.0f;
+    // Frames whose reason bits name the dynamics (PLR), harmonics and tonal budgets.
+    float governorDynamicsReasonPercent = 0.0f, governorHarmonicsReasonPercent = 0.0f, governorTonalReasonPercent = 0.0f;
+    // Audible residuals (dB re the output): what the drive loop compares
+    // (max, power mean over the frames measured, at the end), the harmonics
+    // loop's (max, end), the bass engine's whole span (end); the budget.
+    float governorDriveResidualMaxDb = -160.0f, governorDriveResidualMeanDb = -160.0f, governorDriveResidualEndDb = -160.0f;
+    float governorHarmonicsResidualMaxDb = -160.0f, governorHarmonicsResidualEndDb = -160.0f, governorBassResidualEndDb = -160.0f;
+    float governorResidualBudgetDb = -35.0f;
+    // The output's PLR over ~3 s (lowest reading, at the end; 1000 = none) and its budget (0 = none).
+    float governorPlrMinDb = 1000.0f, governorPlrEndDb = 1000.0f, governorPlrBudgetDb = 8.0f;
+    // Brightness (docs/11 E07): presence / harsh / air lift over the
+    // 200 Hz - 1 kHz lift (dB; -160 = none), highest and at the end, and the budgets.
+    std::array<float, 3> tonalLiftMaxDb { -160.0f, -160.0f, -160.0f }, tonalLiftEndDb { -160.0f, -160.0f, -160.0f };
+    std::array<float, 3> tonalBudgetDb { 3.0f, 3.0f, 4.0f };
 };
 
 struct RenderResult

@@ -171,6 +171,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace flub
@@ -276,6 +277,16 @@ public:
         (one atomic), taken by the next process(). */
     void setProtectionStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING { protectionStrength.store (static_cast<int> (s), std::memory_order_relaxed); }
     ProtectionStrength getProtectionStrength() const noexcept { return static_cast<ProtectionStrength> (protectionStrength.load (std::memory_order_relaxed)); }
+    /** Non-RT, after prepare() and before this chain runs: takes over the
+        protection strength of `previous` - the chain this one replaces
+        (MixEngine::configureFrom, the crossfaded engine swap) - and what its
+        SafetyGovernor has learned (SafetyGovernor::Memory, docs/11 E06 (2)),
+        as published after previous's last block; `previous` may be running
+        on the audio thread. The governor applies it at its first tick if the
+        strength then is the same (Off: the stepwise scale; Normal / Strict:
+        the scales and the probe memory, held until the readings are back).
+        reset() keeps it too at Normal / Strict (SafetyGovernor::restart). */
+    void adoptGovernorState (const ProcessingChain& previous) noexcept;
 
     /** The playback level relative to the loudness contour's reference, dB
         (docs/11 E32): the OS output endpoint's volume minus the volume the
@@ -433,8 +444,9 @@ private:
         input (SSat), the maximizer's input peak (SMax); with kNumSlots, the
         drive span's and the tonal meter's output after the last slot. */
     void protectionTap (const AudioBlock& st, int slot, bool contaminated) noexcept FLUB_NONBLOCKING;
-    /** The measured loop's readings for the governor's next tick. */
-    SafetyGovernor::Readings governorReadings (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
+    /** The measured loop's readings for the governor's next tick
+        (closesTick: this segment closes one, the feed-forward is predicted). */
+    SafetyGovernor::Readings governorReadings (float limiterGrDb, float distortionDb, bool closesTick) noexcept FLUB_NONBLOCKING;
     /** reset() without the control loops (governor, AutoLevel, AutoDrive,
         ComparisonMatcher): the signal path, its meters and the distortion monitor. */
     void resetSignalState() noexcept;
@@ -505,12 +517,32 @@ private:
     LoudnessContour contour;
     std::atomic<float> listeningLevelDb { 0.0f };
     bool contourLfArmed = false; // the contour arms the maximizer's LF-first limiter (audio thread)
+    // Boost's transient coupling (docs/11 E05 step 6, audio thread): the
+    // limiter's programme GR, the GR of its transients over it (dB >= 0),
+    // and the attack the coupling adds to the Clarity shaper.
+    float programGrDb = 0.0f, transientGrDb = 0.0f, attackCoupleDb = 0.0f;
+    float attackBeforeCoupleDb = 0.0f; // clarity.attack as applied without it
+    void updateAttackCoupling (float limiterGrDb, bool active) noexcept FLUB_NONBLOCKING;
     AutoDrive autoDrive;
     SafetyGovernor governor;
     DistortionMonitor distortion;
     ComparisonMatcher loudnessMatch;
     std::atomic<int> protectionStrength { static_cast<int> (ProtectionStrength::Off) };
     ProtectionStrength appliedStrength = ProtectionStrength::Off; // as of the current segment (audio thread)
+    /** The governor's learned state, published once per host block for a
+        chain that takes over (adoptGovernorState): a seqlock of relaxed
+        words (written on the audio thread, read on any). */
+    struct GovernorMemoryBox
+    {
+        static_assert (std::is_trivially_copyable_v<SafetyGovernor::Memory>);
+        static constexpr size_t kWords = (sizeof (SafetyGovernor::Memory) + sizeof (uint32_t) - 1) / sizeof (uint32_t);
+        std::atomic<uint32_t> sequence { 0 };
+        std::array<std::atomic<uint32_t>, kWords> words {};
+        void publish (const SafetyGovernor::Memory& m) noexcept FLUB_NONBLOCKING;
+        /** False if nothing was published or a write kept overlapping. */
+        bool read (SafetyGovernor::Memory& m) const noexcept;
+    };
+    GovernorMemoryBox governorMemory;
     // Measured loop (Normal / Strict, docs/11 E06 Phase 3): two spans, mid
     // channel, each input delayed by its span's latency: the bass engine
     // (its harmonics), and the saturator to the maximizer's output (the
@@ -520,7 +552,9 @@ private:
     std::vector<float> bassSpanInput, driveSpanInput, spanOutput; // maxBlockSize each
     DriveFeedForward feedForward;
     PlrMeter plrMeter, inputPlrMeter;
-    float preMaxPeak = 0.0f, driveAtFullScale = 0.0f, lastHarmonicsResidualDb = kMinusInfDb;
+    float preMaxPeak = 0.0f, driveAtFullScale = 0.0f, lastHarmonicsResidualDb = kMinusInfDb, lastDriveLoopResidualDb = kMinusInfDb;
+    std::array<double, 2> preMaxEnergy {}; // the tick's sum of squares per channel, and its length
+    int preMaxSamples = 0;
     double bassShareSmoothedPow = 0.0; // the bass harmonics' share, per-tick one-pole (kBassShareSmoothing)
     static constexpr double kBassShareSmoothing = 0.967216; // exp (-10 ms / 300 ms)
     bool spanRunning = false;

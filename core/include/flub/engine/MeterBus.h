@@ -48,6 +48,28 @@ struct MeterBus
     std::atomic<int> governorState { 0 };
     std::atomic<uint32_t> governorReason { 0 };
     std::atomic<float> governorGrDb { 0.0f }, governorDistortionDb { -160.0f };
+    // The measured loop at protection strength Normal / Strict (docs/11 E06
+    // Phase 3 / batch 2; the reason bits above then also carry
+    // kReasonDynamics / kReasonHarmonics / kReasonTonal). governorStrength:
+    // the ProtectionStrength the chain ran at. The harmonics and tonal scales
+    // are 1 at Off. The audible residuals (WeightedResidual, dB re the
+    // output) are what the drive loop compares (the drive span with the
+    // bass engine's non-harmonic share) and what the harmonics loop compares,
+    // and the bass engine's whole span; the output PLR over ~3 s; the
+    // budgets they are held to in the current mode (SafetyGovernor::
+    // budgetsFor). -160 dB / governorNoReading while Off or not yet measured.
+    static constexpr float governorNoReading = 1000.0f; // PlrMeter::kNoReading
+    std::atomic<int> governorStrength { 0 };
+    std::atomic<float> governorHarmonicsScale { 1.0f }, governorTonalScale { 1.0f };
+    std::atomic<float> governorDriveResidualDb { -160.0f }, governorHarmonicsResidualDb { -160.0f }, governorBassResidualDb { -160.0f };
+    std::atomic<float> governorPlrDb { governorNoReading };
+    std::atomic<float> governorResidualBudgetDb { -35.0f }, governorGrBudgetDb { -6.0f }, governorPlrBudgetDb { 8.0f };
+    // Brightness (docs/11 E07, TonalBalanceMeter): the chain's net lift of
+    // presence 2-5 kHz, harsh 5-10 kHz and air 10-16 kHz over its
+    // 200 Hz - 1 kHz lift (dB), measured at Normal / Strict; -160 dB
+    // otherwise. The budgets are SafetyGovernor::Budgets' presence / harsh / air.
+    std::array<std::atomic<float>, 3> tonalLiftDb { { { -160.0f }, { -160.0f }, { -160.0f } } };
+    std::array<std::atomic<float>, 3> tonalBudgetDb { { { 3.0f }, { 3.0f }, { 4.0f } } };
     std::atomic<float> autoLevelGainDb { 0.0f };
     std::atomic<float> autoDriveDb { 0.0f };
 

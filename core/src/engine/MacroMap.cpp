@@ -30,7 +30,11 @@ constexpr std::array<MacroEntry, 30> kMusicTable {{
     // The LF-first limiter (docs/11 E05 step 5) in Boost's top half (no
     // factory preset goes past 45 %): kicks are limited in the low band
     // instead of ducking the whole mix. Ungoverned: it only takes level away.
-    { MacroSource::Boost, MaxLfLimit,        1.00f, 0.50f, 1.00f, 1.0f, false },
+    // Full from 75 % (docs/11 E05 step 6; it was 100 %): the drive reaches
+    // the limiter from about 60 %, and the kick's onset / body there came
+    // from the wideband limiter (E59 quality suite, Boost 70 / 80 / 90:
+    // -2.14 / -0.89 / -0.05 -> -1.46 / -0.30 / +0.16 dB).
+    { MacroSource::Boost, MaxLfLimit,        1.00f, 0.50f, 0.75f, 1.0f, false },
     // ---- M1 Punch ----
     // No BassTighten (docs/11 E04): Tighten 0.5 cut the kick's first 10 ms
     // by 2 dB, the opposite of punch.

@@ -88,50 +88,106 @@ float DistortionMonitor::smooth (float& statePow, float blockPow, int numSamples
 // ---------------------------------------------------------------------------
 void DriveFeedForward::reset() noexcept FLUB_NONBLOCKING
 {
+    peaks.fill (0.0f);
     peaksDb.fill (kMinusInfDb);
     count = pos = 0;
+    attack = static_cast<float> (std::exp (-kTickSeconds / kProgramAttackSeconds));
+    release = static_cast<float> (std::exp (-kTickSeconds / kProgramReleaseSeconds));
 }
 
-void DriveFeedForward::push (float peak) noexcept FLUB_NONBLOCKING
+void DriveFeedForward::pushTick (float peak, float rms) noexcept FLUB_NONBLOCKING
 {
-    peaksDb[static_cast<size_t> (pos)] = gainToDb (peak);
+    const float p = std::isfinite (peak) ? std::max (0.0f, peak) : 0.0f;
+    peaks[static_cast<size_t> (pos)] = p;
+    peaksDb[static_cast<size_t> (pos)] = gainToDb (p);
+    rmsLevels[static_cast<size_t> (pos)] = std::isfinite (rms) ? std::clamp (rms, 0.0f, p) : 0.0f;
     pos = (pos + 1) % kTicks;
     count = std::min (count + 1, kTicks);
 }
 
+void DriveFeedForward::setClipper (float headroomDb, float crestDb, float depthDb) noexcept FLUB_NONBLOCKING
+{
+    clipHeadroomDb = std::isnan (headroomDb) ? 1000.0f : std::min (headroomDb, 1000.0f);
+    clipCrestDb = std::isfinite (crestDb) ? std::max (0.0f, crestDb) : 0.0f;
+    clipDepthDb = std::isfinite (depthDb) ? std::clamp (depthDb, 0.0f, 24.0f) : 24.0f;
+}
+
+namespace
+{
+constexpr float kFeedForwardProgrammeDb = -70.0f; // a tick whose peak is below this is not programme
+}
+
+float DriveFeedForward::meanReductionDb (float ceilingDb, float driveDb, int programmeTicks) const noexcept FLUB_NONBLOCKING
+{
+    // Chronological order (oldest first); the second pass accumulates. The
+    // product of the applied gains is taken in runs (their logs summed), so
+    // a log per tick is not needed and the product cannot underflow.
+    // In units of the input before the drive: the ceiling k, the clipper's
+    // threshold t, its crest gate and depth cap (a peak over the threshold
+    // comes out at the threshold, but loses at most the depth: the soft
+    // knee is not modelled).
+    const double k = std::pow (10.0, static_cast<double> (ceilingDb - driveDb) / 20.0);
+    const bool clipper = clipHeadroomDb < 100.0f;
+    const double t = clipper ? k * std::pow (10.0, static_cast<double> (clipHeadroomDb) / 20.0) : 0.0;
+    const double crest = clipCrestDb > 0.0f ? std::pow (10.0, static_cast<double> (clipCrestDb) / 20.0) : 0.0;
+    const double depth = std::pow (10.0, -static_cast<double> (clipDepthDb) / 20.0);
+    const int first = count == kTicks ? pos : 0;
+    double env = 1.0, logSum = 0.0, product = 1.0;
+    for (int pass = 0; pass < 2; ++pass)
+        for (int j = 0; j < count; ++j)
+        {
+            const auto i = static_cast<size_t> ((first + j) % kTicks);
+            double peak = static_cast<double> (peaks[i]);
+            if (clipper)
+            {
+                const double threshold = std::max (t, crest * static_cast<double> (rmsLevels[i]));
+                if (peak > threshold)
+                    peak = std::max (threshold, depth * peak);
+            }
+            const double g = peak > k ? k / peak : 1.0;
+            env = g + static_cast<double> (g < env ? attack : release) * (env - g);
+            if (pass == 1 && peaksDb[i] > kFeedForwardProgrammeDb)
+            {
+                product *= std::min (g, env);
+                if (product < 1.0e-200)
+                {
+                    logSum += std::log (product);
+                    product = 1.0;
+                }
+            }
+        }
+    logSum += std::log (product);
+    return static_cast<float> (-20.0 / std::log (10.0) * logSum / programmeTicks);
+}
+
 float DriveFeedForward::driveForBudget (float ceilingDb, float grBudgetDb) const noexcept FLUB_NONBLOCKING
 {
-    // Predicted average GR at drive D: the mean over the programme ticks of
-    // how far the tick's peak would go past the ceiling. It ignores the
-    // clipper and the limiter's release, so it is an upper bound and the
-    // governor's PI trim takes the rest.
-    constexpr float kProgrammeDb = -70.0f;
-    constexpr int kMinTicks = 50;
+    // The clipper (which takes part of the peaks first) is not modelled, so
+    // with it on the prediction reads deep and the governor's PI trim takes
+    // the rest.
     int n = 0;
     for (int i = 0; i < count; ++i)
-        n += peaksDb[static_cast<size_t> (i)] > kProgrammeDb ? 1 : 0;
+        n += peaksDb[static_cast<size_t> (i)] > kFeedForwardProgrammeDb ? 1 : 0;
     if (n < kMinTicks)
         return std::numeric_limits<float>::infinity();
     const float target = -grBudgetDb;
-    const auto meanOver = [&] (float drive) {
-        double sum = 0.0;
-        for (int i = 0; i < count; ++i)
-        {
-            const float p = peaksDb[static_cast<size_t> (i)];
-            if (p > kProgrammeDb)
-                sum += std::max (0.0f, p + drive - ceilingDb);
-        }
-        return static_cast<float> (sum / n);
-    };
     float lo = -48.0f, hi = 72.0f;
-    if (meanOver (hi) < target)
+    if (meanReductionDb (ceilingDb, hi, n) < target)
         return std::numeric_limits<float>::infinity();
-    for (int it = 0; it < 24; ++it)
+    for (int it = 0; it < 16; ++it)
     {
         const float mid = 0.5f * (lo + hi);
-        (meanOver (mid) < target ? lo : hi) = mid;
+        (meanReductionDb (ceilingDb, mid, n) < target ? lo : hi) = mid;
     }
     return lo;
+}
+
+bool DriveFeedForward::hasReading() const noexcept FLUB_NONBLOCKING
+{
+    int n = 0;
+    for (int i = 0; i < count && n < kMinTicks; ++i)
+        n += peaksDb[static_cast<size_t> (i)] > kFeedForwardProgrammeDb ? 1 : 0;
+    return n >= kMinTicks;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +250,8 @@ void SafetyGovernor::prepare (double sampleRate) noexcept
     tickRise = static_cast<float> (kRisePerSec * dt);
     tickSeconds = static_cast<float> (dt);
     grFastCoeff = static_cast<float> (std::exp (-dt / kGrAverageSeconds));
+    programAttack = static_cast<float> (std::exp (-dt / kProgramAttackSeconds));
+    programRelease = static_cast<float> (std::exp (-dt / kProgramReleaseSeconds));
     reset();
 }
 
@@ -209,6 +267,83 @@ void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING
     grFastDb = driveDb = harmonicsDb = tonalDb = 0.0f;
     harmonicsScale = tonalScale = 1.0f;
     grLoop = residualLoop = plrLoop = harmonicsLoop = tonalLoop = {};
+    programDepthDb = sagLagDb = 0.0f;
+    backoffLufs = kMinusInfDb;
+    quietSeconds = 0.0f;
+    pending = {};
+    pendingProbes = {};
+    restartHold = false;
+    restartHoldLeft = 0.0f;
+}
+
+void SafetyGovernor::restart() noexcept FLUB_NONBLOCKING
+{
+    if (strength == ProtectionStrength::Off)
+    {
+        reset();
+        return;
+    }
+    const Memory m = getMemory();
+    reset();
+    restoreMemory (m);
+}
+
+SafetyGovernor::Memory SafetyGovernor::getMemory() const noexcept FLUB_NONBLOCKING
+{
+    Memory m;
+    m.strength = strength;
+    m.scale = scale;
+    m.harmonicsScale = harmonicsScale;
+    m.tonalScale = tonalScale;
+    m.reason = reason;
+    if (measuredRunning)
+    {
+        const Loop* loops[] = { &grLoop, &residualLoop, &plrLoop, &harmonicsLoop, &tonalLoop };
+        for (size_t k = 0; k < m.probes.size(); ++k)
+            m.probes[k] = loops[k]->probe();
+    }
+    else if (restartHold)
+    {
+        m.probes = pendingProbes; // still holding after an earlier restore
+    }
+    m.valid = true;
+    return m;
+}
+
+void SafetyGovernor::restoreMemory (const Memory& memory) noexcept FLUB_NONBLOCKING
+{
+    // At the strength it was learned at: now, so the next block already runs
+    // on the restored scales. Otherwise at the first tick (the host may set
+    // the strength in between).
+    pending = memory;
+    if (memory.strength == strength)
+        applyPendingMemory();
+}
+
+void SafetyGovernor::applyPendingMemory() noexcept FLUB_NONBLOCKING
+{
+    if (! pending.valid)
+        return;
+    const Memory m = pending;
+    pending.valid = false;
+    if (m.strength != strength) // learned at another strength: not this loop's state
+        return;
+    const auto unit = [] (float v) { return std::isfinite (v) ? std::clamp (v, 0.0f, 1.0f) : 1.0f; };
+    if (unit (m.scale) >= 1.0f && unit (m.harmonicsScale) >= 1.0f && unit (m.tonalScale) >= 1.0f)
+        return; // nothing learned: start as after reset() (a render's priming, a fresh chain)
+    scale = std::max (minScale, unit (m.scale));
+    if (strength != ProtectionStrength::Off)
+    {
+        harmonicsScale = unit (m.harmonicsScale);
+        tonalScale = unit (m.tonalScale);
+        pendingProbes = m.probes;
+        measuredRunning = false;
+        restartHold = true;
+        restartHoldLeft = kRestartHoldSeconds;
+    }
+    const bool governing = scale < 1.0f || harmonicsScale < 1.0f || tonalScale < 1.0f;
+    state = governing ? State::Holding : State::Idle;
+    reason = governing ? m.reason : 0u;
 }
 
 void SafetyGovernor::setStrength (ProtectionStrength s) noexcept FLUB_NONBLOCKING
@@ -261,6 +396,7 @@ void SafetyGovernor::update (float limiterGrDb, float distortionDb, int numSampl
     while (pendingSamples >= tickSamples)
     {
         pendingSamples -= tickSamples;
+        applyPendingMemory();
         tick (limiterGrDb, distortionDb);
     }
 }
@@ -271,6 +407,7 @@ void SafetyGovernor::updateMeasured (const Readings& r, int numSamples) noexcept
     while (pendingSamples >= tickSamples)
     {
         pendingSamples -= tickSamples;
+        applyPendingMemory();
         if (strength == ProtectionStrength::Off)
             tick (r.limiterGrDb, r.distortionDb);
         else
@@ -354,6 +491,33 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     const auto b = budgetsFor (strength, musicMode);
     const float ffDb = gainToDb (std::clamp (r.feedForwardScale, 1.0e-3f, 1.0f));
     const float floorDb = minScale > 0.0f ? gainToDb (minScale) : kFloorDb;
+
+    // Release tie: the limiter's programme envelope, modelled on the
+    // window's deepest GR (one-pole in the linear gain, as in the limiter).
+    const float windowDepthDb = std::max (0.0f, -r.limiterGrDb);
+    {
+        const float p = dbToGain (-programDepthDb), w = dbToGain (-windowDepthDb);
+        programDepthDb = std::max (0.0f, -gainToDb (w + (w < p ? programAttack : programRelease) * (p - w)));
+        // The dip releases as the envelope does, at 8.686 (10^(L/20) - 1) / tau dB/s
+        // at a dip of L dB, and cannot exceed the reduction the envelope holds.
+        constexpr float kDbPerNeper = 8.685889638f;
+        sagLagDb -= kDbPerNeper * (dbToGain (sagLagDb) - 1.0f) * dt / kProgramReleaseSeconds;
+        sagLagDb = std::clamp (sagLagDb, 0.0f, programDepthDb);
+    }
+
+    if (! measuredRunning && restartHold)
+    {
+        // Learned state taken over: hold the scales until the readings the
+        // loop starts from are back (see kRestartHoldSeconds); the time only
+        // counts once some are (silence holds).
+        const bool plrReady = b.plrDb <= 0.0f || (r.plrDb < PlrMeter::kNoReading && r.inputPlrDb < PlrMeter::kNoReading);
+        if (! (r.feedForwardValid && plrReady) && restartHoldLeft > 0.0f)
+        {
+            if (r.feedForwardValid || r.plrDb < PlrMeter::kNoReading)
+                restartHoldLeft -= dt;
+            return;
+        }
+    }
     if (! measuredRunning)
     {
         // Start from the scales as they are (bumpless).
@@ -368,6 +532,14 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
         grLoop.lastApplied = residualLoop.lastApplied = plrLoop.lastApplied = driveDb;
         harmonicsLoop.lastApplied = harmonicsDb;
         tonalLoop.lastApplied = tonalDb;
+        if (restartHold)
+        {
+            // ... with the probe memory it had.
+            Loop* loops[] = { &grLoop, &residualLoop, &plrLoop, &harmonicsLoop, &tonalLoop };
+            for (size_t k = 0; k < pendingProbes.size(); ++k)
+                loops[k]->setProbe (pendingProbes[k]);
+            restartHold = false;
+        }
         measuredRunning = true;
     }
 
@@ -389,7 +561,48 @@ void SafetyGovernor::measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING
     const float uPlr = plrLoop.step (ePlr, dt, 0.0f);
     const float target = std::max (floorDb, std::min ({ uGr, uResidual, uPlr }));
     const float before = driveDb;
-    driveDb = std::clamp (target, driveDb - kFallDbPerSec * dt, driveDb + kRiseDbPerSec * dt);
+    // Fall limit. Release tie (see kSagAllowanceDb): while the limiter's
+    // programme envelope holds more than the allowance, the drive may fall
+    // (in dB of drive) by what the envelope's attack has not yet taken plus
+    // what keeps the modelled dip under the allowance - unless the audible
+    // residual is over its budget, where the faster of the two applies.
+    float fallFloor = driveDb - kFallDbPerSec * dt;
+    const float roomDb = std::max (0.0f, windowDepthDb - programDepthDb);
+    const bool tie = r.driveAtFullScaleDb > 0.0f && programDepthDb + roomDb > kSagAllowanceDb;
+    if (tie)
+    {
+        const float driveNow = r.driveAtFullScaleDb * dbToGain (driveDb);
+        const float allowed = roomDb + std::max (0.0f, kSagAllowanceDb - sagLagDb);
+        const float tieFloor = driveNow - allowed > 0.0f ? gainToDb ((driveNow - allowed) / r.driveAtFullScaleDb) : kFloorDb;
+        fallFloor = eResidual > kProbeErrorDb ? std::min (fallFloor, tieFloor) : tieFloor;
+    }
+    driveDb = std::clamp (target, std::min (driveDb, fallFloor), driveDb + kRiseDbPerSec * dt);
+    // Quiet hold (see kQuietHoldLu): with a dynamics budget, the level of
+    // the programme that made the drive fall is remembered, and the drive
+    // does not rise again while the programme stays well under it.
+    if (b.plrDb > 0.0f)
+    {
+        const bool programme = r.programmeLufs > -70.0f;
+        if (driveDb < before - 1.0e-4f && programme)
+        {
+            backoffLufs = r.programmeLufs;
+            quietSeconds = 0.0f;
+        }
+        else if (driveDb > before && programme && r.programmeLufs < backoffLufs - kQuietHoldLu && quietSeconds < kQuietHoldSeconds)
+        {
+            quietSeconds += dt;
+            driveDb = before;
+            // No windup: the loops continue from what is applied.
+            for (Loop* l : { &grLoop, &residualLoop, &plrLoop })
+                l->integral = std::min (l->integral, driveDb - (l == &grLoop ? ffDb : 0.0f));
+        }
+    }
+    if (tie && driveDb < before)
+    {
+        // What the drive fell beyond the attack's room is a dip until released.
+        const float fellDb = r.driveAtFullScaleDb * (dbToGain (before) - dbToGain (driveDb));
+        sagLagDb = std::min (programDepthDb, sagLagDb + std::max (0.0f, fellDb - roomDb));
+    }
     grLoop.track (uGr, driveDb, dt);
     residualLoop.track (uResidual, driveDb, dt);
     plrLoop.track (uPlr, driveDb, dt);

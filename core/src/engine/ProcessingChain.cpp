@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iterator>
+#include <limits>
 
 namespace flub
 {
@@ -139,6 +141,21 @@ constexpr float kLfLimitArmedFloor = 0.001f;
 // limiting 63.5 % -> 2.8 %, deepest 6.3 -> 3.0 dB (at +6 dB without it: 7.3 %,
 // 3.2 dB). At +6 dB and below nothing changes.
 constexpr float kLfeLfLimitFromDb = 6.0f, kLfeLfLimitFullDb = 10.0f;
+// Boost's transient coupling (docs/11 E05 step 6): in Music, Boost's top
+// half adds attack to the Clarity shaper in proportion to how deep the
+// maximizer's limiter reaches into transients - its deepest GR per 10 ms
+// tick over its programme GR (a 1 s mean of the same readings; a steady
+// tone's GR is its own programme, so steady material adds nothing) - so
+// a kick's onset keeps its place over its body under heavy limiting. A
+// positive-feedback loop (more attack, deeper transient GR): hard-capped at
+// kAttackCoupleMaxDb, slew-limited both ways, and governed (the
+// SafetyGovernor's scale multiplies it like Boost's drive). Tuned on the
+// E59 quality suite, see docs/11 E05's Status.
+constexpr float kAttackCoupleBoostStart = 0.5f, kAttackCoupleBoostEnd = 1.0f;
+constexpr float kAttackCouplePerDb = 1.0f, kAttackCoupleMaxDb = 1.0f;
+constexpr float kAttackCoupleSlewDbPerTick = 0.04f;   // 4 dB/s
+constexpr float kProgramGrCoeff = 0.00995017f;        // 1 - exp (-10 ms / 1 s)
+constexpr float kTransientGrReleasePerTick = 0.99f;   // ~1 s
 
 // The clarity presence bell and air shelf, the bass shelf and subsonic
 // filter as their modules design them (ClarityEnhancer.cpp, BassEngine.cpp).
@@ -526,14 +543,71 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 
 void ProcessingChain::reset() noexcept
 {
+    // Boost's transient coupling starts again from 0, and the Clarity
+    // shaper's attack from the value without it (its smoother restarts on
+    // its current target), so a reset chain does not depend on its history.
+    if (attackCoupleDb != 0.0f)
+    {
+        ClarityParams cp = clarity.getParams();
+        cp.attackDb = attackBeforeCoupleDb;
+        clarity.setParams (cp);
+    }
+    programGrDb = transientGrDb = attackCoupleDb = 0.0f;
     resetSignalState();
     inputDetector.reset();
     autoLevel.reset();
     startleGuard.reset();
     contourLfArmed = false;
     autoDrive.reset();
-    governor.reset();
+    governor.restart(); // at Normal / Strict the governor keeps what it has learned (docs/11 E06 (2))
     loudnessMatch.reset();
+}
+
+void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexcept
+{
+    // The strength first: the governor applies the learned state only at the
+    // strength it was learned at, and a host re-applies its setting to a new
+    // engine a little later (the app's onEngineConfigured is asynchronous).
+    setProtectionStrength (previous.getProtectionStrength());
+    governor.setStrength (previous.getProtectionStrength()); // before its first block: not yet on the audio thread
+    SafetyGovernor::Memory m;
+    if (previous.governorMemory.read (m) && m.valid)
+        governor.restoreMemory (m);
+}
+
+void ProcessingChain::GovernorMemoryBox::publish (const SafetyGovernor::Memory& m) noexcept
+{
+    // A seqlock of relaxed words: odd while writing (audio thread only).
+    std::array<uint32_t, kWords> w {};
+    std::memcpy (w.data(), &m, sizeof (m));
+    const uint32_t s = sequence.load (std::memory_order_relaxed);
+    sequence.store (s + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence (std::memory_order_release);
+    for (size_t i = 0; i < kWords; ++i)
+        words[i].store (w[i], std::memory_order_relaxed);
+    sequence.store (s + 2, std::memory_order_release);
+}
+
+bool ProcessingChain::GovernorMemoryBox::read (SafetyGovernor::Memory& m) const noexcept
+{
+    for (int attempt = 0; attempt < 64; ++attempt)
+    {
+        const uint32_t s0 = sequence.load (std::memory_order_acquire);
+        if ((s0 & 1u) != 0u)
+            continue;
+        std::array<uint32_t, kWords> w {};
+        for (size_t i = 0; i < kWords; ++i)
+            w[i] = words[i].load (std::memory_order_relaxed);
+        std::atomic_thread_fence (std::memory_order_acquire);
+        if (sequence.load (std::memory_order_relaxed) == s0)
+        {
+            if (s0 == 0u)
+                return false; // never published
+            std::memcpy (static_cast<void*> (&m), w.data(), sizeof (m)); // trivially copyable (asserted)
+            return true;
+        }
+    }
+    return false;
 }
 
 void ProcessingChain::resetSignalState() noexcept
@@ -626,6 +700,8 @@ void ProcessingChain::applyParameters() noexcept
         plrMeter.reset();
         inputPlrMeter.reset();
         preMaxPeak = 0.0f;
+        preMaxEnergy = {};
+        preMaxSamples = 0;
         bassShareSmoothedPow = 0.0;
         lastHarmonicsResidualDb = kMinusInfDb;
         tonalMeter.reset();
@@ -748,6 +824,11 @@ void ProcessingChain::applyParameters() noexcept
     bp.subsonicHz = e[BassSubsonic];
     bass.setParams (bp);
     slots[SBass].setActive (active (BassOn));
+
+    // ---- Boost's transient coupling (docs/11 E05 step 6; see the constants) ----
+    attackBeforeCoupleDb = e[ClarityAttackDb];
+    if (mode == ModeValue::Music && attackCoupleDb > 0.0f)
+        e[ClarityAttackDb] = layout()[static_cast<size_t> (ClarityAttackDb)].clamp (e[ClarityAttackDb] + attackCoupleDb);
 
     // ---- Clarity ----
     ClarityParams cp;
@@ -1308,7 +1389,12 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
         case SMax:
             if (! contaminated)
                 for (int i = 0; i < n; ++i)
+                {
                     preMaxPeak = std::max ({ preMaxPeak, std::abs (l[i]), std::abs (r[i]) });
+                    preMaxEnergy[0] += static_cast<double> (l[i]) * l[i];
+                    preMaxEnergy[1] += static_cast<double> (r[i]) * r[i];
+                }
+            preMaxSamples += n;
             return;
         default: break;
     }
@@ -1323,7 +1409,11 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
     }
     if (governor.samplesToNextTick() == n)
     {
-        feedForward.push (preMaxPeak);
+        // The tick's peak and RMS (the louder channel, as the clipper's crest gate links them).
+        const double energy = std::max (preMaxEnergy[0], preMaxEnergy[1]);
+        feedForward.pushTick (preMaxPeak, preMaxSamples > 0 ? static_cast<float> (std::sqrt (energy / preMaxSamples)) : 0.0f);
+        preMaxEnergy = {};
+        preMaxSamples = 0;
         plrMeter.tick();
         inputPlrMeter.tick();
         tonalMeter.tick();
@@ -1336,7 +1426,7 @@ void ProcessingChain::protectionTap (const AudioBlock& st, int slot, bool contam
     }
 }
 
-SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING
+SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, float distortionDb, bool closesTick) noexcept FLUB_NONBLOCKING
 {
     SafetyGovernor::Readings r;
     r.limiterGrDb = limiterGrDb;
@@ -1361,18 +1451,50 @@ SafetyGovernor::Readings ProcessingChain::governorReadings (float limiterGrDb, f
             r.driveResidualDb = DistortionMonitor::combineDb (r.driveResidualDb, audible + static_cast<float> (10.0 * std::log10 (1.0 - share)));
     }
     lastHarmonicsResidualDb = r.harmonicsResidualDb;
+    lastDriveLoopResidualDb = r.driveResidualDb;
     r.plrDb = plrMeter.getPlrDb();
     r.inputPlrDb = inputPlrMeter.getPlrDb();
     r.presenceLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Presence);
     r.harshLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Harsh);
     r.airLiftDb = tonalMeter.getLiftDb (TonalBalanceMeter::Air);
-    // Feed-forward: the drive the pre-maximizer peaks allow within the GR
-    // budget, as a share of the drive at the full scale.
-    const float allowed = feedForward.driveForBudget (effective[static_cast<size_t> (MaxCeilingDb)],
-                                                      SafetyGovernor::budgetsFor (appliedStrength, idx (effective.data(), Mode) == static_cast<int> (ModeValue::Music)).grDb);
-    if (driveAtFullScale > 0.0f && std::isfinite (allowed))
-        r.feedForwardScale = std::clamp (allowed / driveAtFullScale, 0.0f, 1.0f);
+    // Feed-forward: the drive the pre-maximizer peaks allow at the limiter
+    // loop's set point, as a share of the drive at the full scale; only for
+    // a segment that closes a tick (the governor reads nothing else, and
+    // the prediction models the limiter's envelope over 3 s of ticks).
+    if (closesTick && driveAtFullScale > 0.0f)
+    {
+        const auto b = SafetyGovernor::budgetsFor (appliedStrength, idx (effective.data(), Mode) == static_cast<int> (ModeValue::Music));
+        // The clipper as the maximizer sets it (LoudnessMaximizer: headroom
+        // lerp (+6, +0.3 dB, amount) over the ceiling; amount 0 = off).
+        const float clipAmount = effective[static_cast<size_t> (MaxClipAmount)];
+        feedForward.setClipper (clipAmount > 0.0f ? 6.0f + (0.3f - 6.0f) * std::min (1.0f, clipAmount) : std::numeric_limits<float>::infinity(),
+                                effective[static_cast<size_t> (MaxClipCrestDb)], effective[static_cast<size_t> (MaxClipMaxDb)]);
+        const float allowed = feedForward.driveForBudget (effective[static_cast<size_t> (MaxCeilingDb)], b.grDb + SafetyGovernor::kSetPointMarginDb);
+        if (std::isfinite (allowed))
+            r.feedForwardScale = std::clamp (allowed / driveAtFullScale, 0.0f, 1.0f);
+    }
+    r.programmeLufs = inLoudness.getLufs(); // the quiet hold (docs/11 E06 batch 2)
+    r.feedForwardValid = ! (driveAtFullScale > 0.0f) || feedForward.hasReading(); // nothing to predict counts as read
+    r.driveAtFullScaleDb = std::max (0.0f, driveAtFullScale); // the release tie's unit (docs/11 E06 batch 2)
     return r;
+}
+
+void ProcessingChain::updateAttackCoupling (float limiterGrDb, bool active) noexcept FLUB_NONBLOCKING
+{
+    // Once per governor tick (the maximizer's GR window): the programme GR
+    // follows the tick's deepest GR with 1 s, the transient GR is the
+    // excess over it, held with a ~1 s release.
+    const float gr = active && std::isfinite (limiterGrDb) ? std::clamp (-limiterGrDb, 0.0f, 24.0f) : 0.0f;
+    programGrDb += kProgramGrCoeff * (gr - programGrDb);
+    transientGrDb = std::max (gr - programGrDb, transientGrDb * kTransientGrReleasePerTick);
+    const float* e = effective.data();
+    float target = 0.0f;
+    if (active && static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Music)
+    {
+        const float amount = smoothstep (kAttackCoupleBoostStart, kAttackCoupleBoostEnd, base[static_cast<size_t> (BoostIntensity)]);
+        target = std::min (kAttackCoupleMaxDb, kAttackCouplePerDb * transientGrDb) * amount * governor.getScale();
+    }
+    attackCoupleDb += std::clamp (target - attackCoupleDb, -kAttackCoupleSlewDbPerTick, kAttackCoupleSlewDbPerTick);
 }
 
 void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING
@@ -1499,6 +1621,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     st.applyGainRamp (o0, outputGain.skip (n));
 
     // ---- 6. Control loops for the next block ----
+    const bool closesTick = governor.samplesToNextTick() <= n; // segments end on the governor's 10 ms grid
     const bool maxActive = ! slots[SMax].isFullyBypassed();
     const bool satActive = ! slots[SSat].isFullyBypassed();
     const float satDistortionDb = satActive ? saturator.getDistortionDb() : kMinusInfDb;
@@ -1537,10 +1660,13 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
         if (appliedStrength == ProtectionStrength::Off)
             governor.update (grDb, stageDb, n);
         else
-            governor.updateMeasured (governorReadings (grDb, stageDb), n);
+            governor.updateMeasured (governorReadings (grDb, stageDb, governor.samplesToNextTick() <= n), n);
         autoDrive.update (st, e[MaxTargetLufs], on (e, MaxAutoDrive), e[MaxDriveDb]);
         loudnessMatch.measureWet (st);
     }
+
+    if (closesTick && ! contaminated)
+        updateAttackCoupling (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, maxActive);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
     // The louder side is turned down, never the quieter one up (docs/11 E37).
@@ -1652,6 +1778,27 @@ void ProcessingChain::publishMeters (const AudioBlock& out, int) noexcept
     m.governorReason.store (governor.getReason(), rl);
     m.governorGrDb.store (governor.getAverageGainReductionDb(), rl);
     m.governorDistortionDb.store (governor.getAverageDistortionDb(), rl);
+    // The measured loop's readouts (docs/11 E06 batch 2) and brightness (E07).
+    m.governorStrength.store (static_cast<int> (appliedStrength), rl);
+    m.governorHarmonicsScale.store (governor.getHarmonicsScale(), rl);
+    m.governorTonalScale.store (governor.getTonalScale(), rl);
+    m.governorDriveResidualDb.store (spanRunning ? lastDriveLoopResidualDb : kMinusInfDb, rl);
+    m.governorHarmonicsResidualDb.store (spanRunning ? lastHarmonicsResidualDb : kMinusInfDb, rl);
+    m.governorBassResidualDb.store (spanRunning && bassSpan.hasReading() ? bassSpan.getWeightedDb() : kMinusInfDb, rl);
+    m.governorPlrDb.store (spanRunning ? plrMeter.getPlrDb() : PlrMeter::kNoReading, rl);
+    {
+        const auto b = SafetyGovernor::budgetsFor (appliedStrength, idx (effective.data(), Mode) == static_cast<int> (ModeValue::Music));
+        m.governorResidualBudgetDb.store (b.residualDb, rl);
+        m.governorGrBudgetDb.store (b.grDb, rl);
+        m.governorPlrBudgetDb.store (b.plrDb, rl);
+        const float budgets[] = { b.presenceDb, b.harshDb, b.airDb };
+        for (int k = 0; k < 3; ++k)
+        {
+            m.tonalLiftDb[static_cast<size_t> (k)].store (spanRunning ? tonalMeter.getLiftDb (TonalBalanceMeter::Presence + k) : kMinusInfDb, rl);
+            m.tonalBudgetDb[static_cast<size_t> (k)].store (budgets[k], rl);
+        }
+    }
+    governorMemory.publish (governor.getMemory()); // for a chain that takes over (adoptGovernorState)
     driveResidualDb.store (spanRunning ? driveSpan.getWeightedDb() : kMinusInfDb, rl);
     driveResidualFlatDb.store (spanRunning ? driveSpan.getPlainResidualDb() : kMinusInfDb, rl);
     harmonicsResidualDb.store (spanRunning ? lastHarmonicsResidualDb : kMinusInfDb, rl);

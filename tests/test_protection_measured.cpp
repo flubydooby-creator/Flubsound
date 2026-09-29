@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <iostream>
 #include <vector>
 
@@ -175,19 +176,39 @@ TEST_CASE ("WeightedResidual: a linear span reads nothing at any block size, a 1
     }
 }
 
-TEST_CASE ("Protection: the feed-forward finds the drive that holds the limiter at its GR budget; the PLR meter reads a sine's crest against its loudness")
+TEST_CASE ("Protection: the feed-forward finds the drive that holds the limiter at its GR budget (its programme envelope and the clipper modelled); the PLR meter reads a sine's crest against its loudness")
 {
     DriveFeedForward ff;
     ff.reset();
-    for (int i = 0; i < 40; ++i)
-        ff.push (0.3f);
-    CHECK (std::isinf (ff.driveForBudget (-1.0f, -6.0f))); // under 0.5 s of programme: no prediction
-    for (int i = 0; i < 400; ++i)
-        ff.push (i % 2 == 0 ? std::pow (10.0f, -10.0f / 20.0f) : std::pow (10.0f, -16.0f / 20.0f));
-    // Half the ticks at -10 dBFS, half at -16: with the ceiling at -1 the
-    // mean of max (0, p + D + 1) is 6 dB at D = 15 + 3 = 18 dB (only the
-    // louder half passes the ceiling until D = 15, then both: (D - 9 + D - 15) / 2 = 6 -> D = 18).
+    const float minus10 = std::pow (10.0f, -10.0f / 20.0f), minus16 = std::pow (10.0f, -16.0f / 20.0f);
+    for (int i = 0; i < DriveFeedForward::kMinTicks - 1; ++i)
+        ff.push (minus10);
+    CHECK (std::isinf (ff.driveForBudget (-1.0f, -6.0f))); // under kMinTicks of programme: no prediction
+    CHECK (! ff.hasReading());
+    ff.push (minus10);
+    CHECK (ff.hasReading());
+    // Every tick's peak at -10 dBFS, ceiling -1: the limiter holds p + D + 1
+    // dB whatever its envelope, 6 dB at D = 15.
+    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.01f);
+    // The clipper ahead of it (headroom 0.3 dB, no crest gate, depth 3 dB)
+    // takes 3 dB off each peak first: D = 18. A crest gate of 6 dB over
+    // ticks whose RMS equals their peak leaves them unclipped: 15 again.
+    ff.setClipper (0.3f, 0.0f, 3.0f);
     CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 18.0f, 0.01f);
+    ff.reset();
+    ff.setClipper (0.3f, 6.0f, 3.0f);
+    for (int i = 0; i < 300; ++i)
+        ff.pushTick (minus10, minus10);
+    CHECK_NEAR (ff.driveForBudget (-1.0f, -6.0f), 15.0f, 0.01f);
+    ff.setClipper (std::numeric_limits<float>::infinity(), 0.0f, 24.0f); // no clipper
+    // Ticks alternating between -10 and -16 dBFS: the mean of the peaks'
+    // excess, max (0, p + D + 1), is 6 dB at D = 18 (batch 1's prediction),
+    // but the programme envelope (150 ms attack, 800 ms release) holds the
+    // louder peaks' reduction over the quieter ticks: a lower drive.
+    for (int i = 0; i < 400; ++i)
+        ff.push (i % 2 == 0 ? minus10 : minus16);
+    const float held = ff.driveForBudget (-1.0f, -6.0f);
+    CHECK (held > 15.0f && held < 17.0f);
     ff.reset();
     for (int i = 0; i < 300; ++i)
         ff.push (1.0e-5f); // silence: no prediction
@@ -291,7 +312,7 @@ TEST_CASE ("Chain: the harmonics policy - at Normal exposed bass harmonics get t
     CHECK_LE (endScale (ProtectionStrength::Strict, true).first, 0.5f);  // Strict governs them anyway
 }
 
-TEST_CASE ("Chain: Done-when rows at Normal - stationary limiter-bound programme settles within 3.5 s and then holds still; Loudness 100's audible residual is under budget within 3 s; the dynamics budget holds the output PLR")
+TEST_CASE ("Chain: Done-when rows at Normal - stationary limiter-bound programme settles within 3 s, then holds still, and never sags more than 1 dB under its settled level; Loudness 100's audible residual is under budget within 3 s; the dynamics budget holds the output PLR")
 {
     const auto pink = pinkNoise (static_cast<int> (8.0 * kFs), std::pow (10.0f, -18.0f / 20.0f), 2468);
 
@@ -311,14 +332,19 @@ TEST_CASE ("Chain: Done-when rows at Normal - stationary limiter-bound programme
         const auto [lo, hi] = std::minmax_element (u.begin() + 400, u.end());
         const double first = rmsDb (out, static_cast<int> (0.5 * kFs), static_cast<int> (1.0 * kFs));
         const double last = rmsDb (out, static_cast<int> (7.0 * kFs), static_cast<int> (8.0 * kFs));
+        // Sag: the deepest 0.5 s window from 0.5 s on (the loop's first
+        // reading is at 80 ms) under the settled level. Batch 1's loop (6 dB/s
+        // of scale) dipped 4.3 dB around 2 s while the limiter's programme
+        // envelope released; the release tie (SafetyGovernor::kSagAllowanceDb) holds it.
         double dip = 0.0;
-        for (double t = 1.0; t < 7.5; t += 0.5)
+        for (double t = 0.5; t < 7.5; t += 0.5)
             dip = std::max (dip, last - rmsDb (out, static_cast<int> (t * kFs), static_cast<int> ((t + 0.5) * kFs)));
-        std::cout << "    measured limiter-bound: scale " << u[100] << " / " << u[350] << " / " << settled << " dB at 1 / 3.5 / 8 s, range after 4 s " << *hi - *lo
+        std::cout << "    measured limiter-bound: scale " << u[100] << " / " << u[300] << " / " << settled << " dB at 1 / 3 / 8 s, range after 4 s " << *hi - *lo
                   << " dB; output 7-8 s against 0.5-1 s " << last - first << " dB, deepest 0.5 s dip under the settled level " << dip << " dB\n";
         CHECK_LE (settled, -3.0f);                  // it backed off ...
-        CHECK_NEAR (u[350], settled, 0.5f);         // ... settled by 3.5 s ...
+        CHECK_NEAR (u[300], settled, 0.5f);         // ... settled within 3 s ...
         CHECK_LE (*hi - *lo, 0.2f);                 // ... and holds still (Done-when: oscillation <= 0.2 dB)
+        CHECK_LE (dip, 1.0);                        // Done-when: sag <= 1 dB
         CHECK_GE (last - first, -1.5);              // the settled output within 1.5 dB of its first second
     }
 

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <vector>
 
@@ -205,6 +206,54 @@ TEST_CASE ("TransientShaper: negative sustain shortens a decaying tone's tail, p
         CHECK_LE (decayTime (shortened), decayTime (dry) * 3 / 4);
         CHECK_GE (decayTime (lengthened), decayTime (dry) * 5 / 4);
     }
+}
+
+TEST_CASE ("TransientShaper: a sustain gated by the attack indicator leaves every onset of a repeated note alone and still shortens its tail (docs/11 E04 step 2)")
+{
+    // 80 Hz notes (tau 60 ms) every 400 ms at -12 dB sustain. Ungated, the
+    // sustain pair still reads the previous note's decay through the next
+    // note's first 2-3 ms, so the cut lands on its first half-cycle.
+    const int n = ms (4000), period = ms (400);
+    const auto in = decayingTone (n, 80.0, 0.5f, 60.0, 400.0);
+    auto process = [&] (bool gated)
+    {
+        TransientShaper ts;
+        ts.prepare (kFs);
+        ts.setSustainGatedByAttack (gated);
+        ts.setSustainDb (-12.0f);
+        ts.reset();
+        Planar buf = monoBuffer (in);
+        runShaper (ts, buf, 256);
+        return buf.ch[0];
+    };
+    const auto plain = process (false), gated = process (true);
+    double plainOnset = 0.0, gatedOnset = 0.0, plainTail = 0.0, gatedTail = 0.0;
+    int notes = 0;
+    for (int start = period; start + period <= n; start += period, ++notes)
+    {
+        plainOnset += gainDb (plain, in, start, start + ms (10));
+        gatedOnset += gainDb (gated, in, start, start + ms (10));
+        plainTail += gainDb (plain, in, start + ms (150), start + ms (300));
+        gatedTail += gainDb (gated, in, start + ms (150), start + ms (300));
+    }
+    plainOnset /= notes;
+    gatedOnset /= notes;
+    plainTail /= notes;
+    gatedTail /= notes;
+    std::printf ("    measured 0-10 ms plain %.2f / gated %.2f dB, 150-300 ms plain %.2f / gated %.2f dB\n", plainOnset, gatedOnset, plainTail, gatedTail);
+    CHECK_LE (plainOnset, -1.0);
+    CHECK_GE (gatedOnset, -0.3);
+    CHECK_LE (gatedTail, -6.0);
+    CHECK_NEAR (gatedTail, plainTail, 1.5);
+
+    // Neutral stays bit-exact with the gate on.
+    TransientShaper ts;
+    ts.prepare (kFs);
+    ts.setSustainGatedByAttack (true);
+    ts.reset();
+    Planar buf = monoBuffer (in);
+    runShaper (ts, buf, 256);
+    CHECK (buf.ch[0] == in);
 }
 
 TEST_CASE ("TransientShaper: the shaping is independent of the absolute level")

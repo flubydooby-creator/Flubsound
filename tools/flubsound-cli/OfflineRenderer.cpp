@@ -96,6 +96,39 @@ public:
         s.governorScaleEnd = scale;
         s.governorStateEnd = state;
         s.governorReasonEnd = reason;
+        // The measured loop (Normal / Strict, docs/11 E06 batch 2).
+        dynamicsReason += (reason & SafetyGovernor::kReasonDynamics) != 0 ? w : 0.0;
+        harmonicsReason += (reason & SafetyGovernor::kReasonHarmonics) != 0 ? w : 0.0;
+        tonalReason += (reason & SafetyGovernor::kReasonTonal) != 0 ? w : 0.0;
+        s.governorStrength = m.governorStrength.load (rl);
+        const float harmonicsScale = m.governorHarmonicsScale.load (rl), tonalScale = m.governorTonalScale.load (rl);
+        s.governorHarmonicsScaleMin = std::min (s.governorHarmonicsScaleMin, harmonicsScale);
+        s.governorHarmonicsScaleEnd = harmonicsScale;
+        s.governorTonalScaleMin = std::min (s.governorTonalScaleMin, tonalScale);
+        s.governorTonalScaleEnd = tonalScale;
+        const float drive = m.governorDriveResidualDb.load (rl), harmonics = m.governorHarmonicsResidualDb.load (rl);
+        s.governorDriveResidualMaxDb = std::max (s.governorDriveResidualMaxDb, drive);
+        s.governorDriveResidualEndDb = drive;
+        if (drive > kMinusInfDb)
+        {
+            residualPower += w * std::pow (10.0, 0.1 * drive);
+            residualFrames += w;
+        }
+        s.governorHarmonicsResidualMaxDb = std::max (s.governorHarmonicsResidualMaxDb, harmonics);
+        s.governorHarmonicsResidualEndDb = harmonics;
+        s.governorBassResidualEndDb = m.governorBassResidualDb.load (rl);
+        s.governorResidualBudgetDb = m.governorResidualBudgetDb.load (rl);
+        const float plr = m.governorPlrDb.load (rl);
+        s.governorPlrMinDb = std::min (s.governorPlrMinDb, plr);
+        s.governorPlrEndDb = plr;
+        s.governorPlrBudgetDb = m.governorPlrBudgetDb.load (rl);
+        for (size_t b = 0; b < s.tonalLiftEndDb.size(); ++b)
+        {
+            const float lift = m.tonalLiftDb[b].load (rl);
+            s.tonalLiftMaxDb[b] = std::max (s.tonalLiftMaxDb[b], lift);
+            s.tonalLiftEndDb[b] = lift;
+            s.tonalBudgetDb[b] = m.tonalBudgetDb[b].load (rl);
+        }
 
         const float level = m.autoLevelGainDb.load (rl);
         s.autoLevelMinDb = first ? level : std::min (s.autoLevelMinDb, level);
@@ -128,6 +161,10 @@ public:
             r.governorStatePercent[k] = percent (stateFrames[k]);
         r.governorLimiterReasonPercent = percent (limiterReason);
         r.governorDistortionReasonPercent = percent (distortionReason);
+        r.governorDynamicsReasonPercent = percent (dynamicsReason);
+        r.governorHarmonicsReasonPercent = percent (harmonicsReason);
+        r.governorTonalReasonPercent = percent (tonalReason);
+        r.governorDriveResidualMeanDb = residualPower > 0.0 ? std::max (kMinusInfDb, static_cast<float> (10.0 * std::log10 (residualPower / residualFrames))) : kMinusInfDb;
         return r;
     }
 
@@ -137,6 +174,7 @@ private:
     RenderStats s;
     double total = 0.0, grSum = 0.0, over1 = 0.0, over3 = 0.0, glueSum = 0.0, clipActive = 0.0, thdPower = 0.0, compSum = 0.0;
     double scaleSum = 0.0, backoff = 0.0, harmPower = 0.0, limiterReason = 0.0, distortionReason = 0.0;
+    double dynamicsReason = 0.0, harmonicsReason = 0.0, tonalReason = 0.0, residualPower = 0.0, residualFrames = 0.0;
     std::array<double, 4> stateFrames {};
     std::array<double, 4> bandSum {};
 };

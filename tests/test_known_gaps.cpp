@@ -426,12 +426,17 @@ TEST_CASE ("KnownGap closed: pumping - a 2 kHz tone under 55 Hz kicks dips <= 3 
     // -> 6.0 %, integrated -10.19 -> -9.35 LUFS (CLI). docs/11 E05
     // Done-when: max dip <= 6 dB met, and the <= 3 dB it expected only from
     // a multiband mode.
-    CHECK_NEAR (rows[1].dip, 2.49, 0.3);
+    // docs/11 E05 step 6 (Boost's transient coupling, up to +1 dB of
+    // Clarity attack from the limiter's transient GR; the LF-first limiter
+    // unchanged at 100 %): dip 2.49 -> 2.10 dB, spread 1.25 -> 0.99, time
+    // > 1 dB down 6.0 -> 4.0 %, lift 0.97 -> 1.46 dB (the tone rides up a
+    // little more between the kicks, whose onsets now take slightly more GR).
+    CHECK_NEAR (rows[1].dip, 2.10, 0.3);
     CHECK_LE (rows[1].dip, 3.0);
     // E59 reports p95 - p5 and lift / dip separately; docs/11 E05 / E02 set no target for them.
-    CHECK_NEAR (rows[1].spread, 1.25, 0.3);
-    CHECK_NEAR (rows[1].lift, 0.97, 0.3);
-    CHECK_NEAR (100.0 * rows[1].down, 6.0, 3.0);
+    CHECK_NEAR (rows[1].spread, 0.99, 0.3);
+    CHECK_NEAR (rows[1].lift, 1.46, 0.3);
+    CHECK_NEAR (100.0 * rows[1].down, 4.0, 3.0);
 }
 
 TEST_CASE ("KnownGap closed: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB maximizer drive (E05)")
@@ -561,12 +566,14 @@ TEST_CASE ("KnownGap closed: Music Boost 100 on the E59 quality suite - loudness
     // unchanged. The cost: the kick's low band is held 3 dB under the
     // ceiling (CLI, the pumping scene: its < 150 Hz lift +4.0 -> +1.3 dB,
     // the 2 kHz tone +5.8 -> +7.5 dB).
+    // docs/11 E05 step 6 (Boost's transient coupling): dip 2.55 -> 2.23 dB,
+    // p95 - p5 1.09 -> 1.03 dB.
     CHECK_LE (q.ducking[1].track.dipDb, 3.0);
-    CHECK_NEAR (q.ducking[1].track.dipDb, 2.55, 0.4);
-    CHECK_NEAR (q.ducking[1].track.spreadDb, 1.09, 0.4);
+    CHECK_NEAR (q.ducking[1].track.dipDb, 2.23, 0.4);
+    CHECK_NEAR (q.ducking[1].track.spreadDb, 1.03, 0.4);
     // Kick onset minus body -1.80 -> -1.18 dB (stage 1) -> +0.21 dB (step 5;
-    // docs/11 E05 Done-when >= 0 met).
-    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, 0.21, 0.3);
+    // docs/11 E05 Done-when >= 0 met) -> +0.30 dB (step 6).
+    CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, 0.30, 0.3);
     CHECK_GE (q.kickOnsetLiftDb - q.kickBodyLiftDb, 0.0);
     // A steady 1 kHz sine at Boost 100: -50.3 -> -94.8 dB THD+N.
     CHECK_LE (q.thdn[3].db, -80.0);
@@ -1123,7 +1130,7 @@ TEST_CASE ("KnownGap: Night Mode ambush, 10 s of fire - no hole after it at any 
     CHECK_LE (std::abs (longHole5), 1.0);
 }
 
-TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body, Tighten cuts the onset, Boost 100 no longer does (E04 / E05)")
+TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body; Tighten no longer cuts the onset, Boost 80 and 100 keep it over the body (E04 / E05)")
 {
     // Synthetic kick (50 Hz + 80 Hz chirp, e^-18t, peak -6 dBFS) every
     // 500 ms for 6 s, Music mode, maximizer off unless stated. Lift = output
@@ -1157,21 +1164,28 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     punch.macros.push_back ({ "punch", 100.0f });
     auto punchValues = resolve (punch);
     setValue (punchValues, MaximizerOn, 0.0f);
-    auto tightenValues = resolve (RenderOptions {});
-    setValue (tightenValues, MaximizerOn, 0.0f);
+    auto plainValues = resolve (RenderOptions {});
+    setValue (plainValues, MaximizerOn, 0.0f);
+    auto tightenValues = plainValues;
     setValue (tightenValues, BassTighten, 0.5f);
     const auto boostValues = resolve (boosted (ModeValue::Music, 100.0f)); // maximizer on (Boost engages it)
+    const auto boost80Values = resolve (boosted (ModeValue::Music, 80.0f));
 
-    double p0 = 0, p1 = 0, p2 = 0, t0 = 0, t1 = 0, t2 = 0, b0 = 0, b1 = 0, b2 = 0;
+    double p0 = 0, p1 = 0, p2 = 0, t0 = 0, t1 = 0, t2 = 0, n0 = 0, n1 = 0, n2 = 0, b0 = 0, b1 = 0, b2 = 0, c0 = 0, c1 = 0, c2 = 0;
     lifts (punchValues, p0, p1, p2);
     lifts (tightenValues, t0, t1, t2);
+    lifts (plainValues, n0, n1, n2);
     lifts (boostValues, b0, b1, b2);
+    lifts (boost80Values, c0, c1, c2);
     measured ("Punch 100 lift 0-10 ms", p0, "dB");
     measured ("Punch 100 lift 10-30 ms", p1, "dB");
     measured ("Punch 100 lift 40-60 ms", p2, "dB");
     measured ("Tighten 0.5 lift 0-10 ms", t0, "dB");
     measured ("Tighten 0.5 lift 10-30 ms", t1, "dB");
+    measured ("Tighten 0.5 change re Tighten 0, 0-10 ms", t0 - n0, "dB");
+    measured ("Tighten 0.5 change re Tighten 0, 40-60 ms", t2 - n2, "dB");
     measured ("Boost 100 onset (0-10) minus body (10-30)", b0 - b1, "dB");
+    measured ("Boost 80 onset (0-10) minus body (10-30)", c0 - c1, "dB");
 
     // KNOWN_GAP: target Punch 100 0-10 ms lift >= 10-30 ms lift + 2 dB per docs/11 E04 Done-when.
     // docs/11 E04 step (1) took BassTighten out of the Punch macro: 0-10 /
@@ -1181,15 +1195,30 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     CHECK_NEAR (p1, 4.70, 0.3);
     CHECK_NEAR (p0 - p1, 0.68, 0.3);
     CHECK_GE (p0, p1); // the onset no longer gets less than the body
-    // KNOWN_GAP: target Tighten 0.5 0-10 ms change >= -0.5 dB per docs/11 E04 Done-when.
-    CHECK_NEAR (t0, -2.04, 0.3);
+    // docs/11 E04 Done-when, Tighten 0.5: 0-10 ms change >= -0.5 dB - met by
+    // step 2: the lift -2.04 -> -0.71 dB, i.e. -1.69 -> -0.36 dB re Tighten 0
+    // (whose chain, the 20 Hz subsonic filter, reads -0.35 dB). Two causes:
+    // the sustain cut still read the previous kick's decay through the new
+    // one's first 2-3 ms (-0.8 dB; now gated by the attack indicator), and
+    // the output was the 150 Hz LR4 split's band sum, an all-pass whose
+    // ~3 ms of group delay under 100 Hz took 1.5 dB off the first 10 ms at
+    // any Tighten > 0 (now x + (g - 1) LP1 (x): exactly x at unity gain).
+    // The tail is still cut (60-150 / 150-300 ms -1.79 / -4.98 -> -1.44 /
+    // -4.76 dB re Tighten 0, CLI).
+    CHECK_NEAR (t0, -0.71, 0.3);
+    CHECK_GE (t0 - n0, -0.5);
+    CHECK_NEAR (t1 - n1, 0.0, 0.3);
     // docs/11 E05 Done-when, Boost 100 kick onset / body >= 0 dB: stage 1
     // (crest-gated clipper, LF-safe limiter envelope) -1.80 -> -1.18 dB;
     // met by step 5, Boost's LF-first limiter (max.lfLimit from Boost 50 %):
     // the kick is limited in the low band 3 dB under the ceiling, so the
     // wideband limiter and the clipper no longer take its onset: +0.21 dB.
-    CHECK_NEAR (b0 - b1, 0.21, 0.3);
+    // Step 6 (the LF-first limiter full from 75 %, and Boost's transient
+    // coupling): Boost 100 +0.21 -> +0.30 dB, Boost 80 -0.89 -> +0.23 dB.
+    CHECK_NEAR (b0 - b1, 0.30, 0.3);
     CHECK_GE (b0 - b1, 0.0);
+    CHECK_NEAR (c0 - c1, 0.23, 0.3);
+    CHECK_GE (c0 - c1, 0.0);
 }
 
 TEST_CASE ("KnownGap closed: 30 Hz audible-band energy - the laptop preset keeps the harmonics of a 30 Hz tone (E03)")
@@ -1714,7 +1743,11 @@ TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 
     // longer widens this uncorrelated pink noise (the width polarity guard
     // caps S at M), so the mono safety's pull, which the restart clears,
     // no longer shapes the output (799.8 ms with the guard disabled).
-    CHECK_NEAR (burst.spanMs, 441.0, 20.0);
+    // Re-based by docs/11 E04 step 2, 441.0 -> 510.4 ms (the 1e30 spikes
+    // 7.2 -> 3.9 ms): Signature's Tighten 0.1 is gated by its attack
+    // indicator, which reads the restarted programme as an onset, and is
+    // applied through a one-pole shelf whose state restarts with it.
+    CHECK_NEAR (burst.spanMs, 510.4, 20.0);
     CHECK_LE (burst.worstChangeDb, 0.3);
 }
 
@@ -1885,10 +1918,14 @@ TEST_CASE ("KnownGap: hot master - the automatic preamp (auto.preamp, allowance 
         const char* file;
         double over1Off, over1On, clipOff, clipOn; // pinned: limiter time > 1 dB (%), loudest clip energy (dB)
     };
-    // Measured when auto.preamp landed (docs/11 E11).
+    // Measured when auto.preamp landed (docs/11 E11). Re-based by docs/11
+    // E04 step 2 (both presets use Tighten, 0.1 / 0.2, which no longer
+    // cuts the kicks' onsets, so the limiter sees them): Signature 17.87 /
+    // 7.47 % / -44.37 / -53.05 dB -> the values below, Punchy Pop 49.33 /
+    // 6.93 % / -36.47 / -48.75 dB -> the values below.
     const Row rows[] = {
-        { "music-flubsound-signature.json", 17.87, 7.47, -44.37, -53.05 },
-        { "music-punchy-pop.json", 49.33, 6.93, -36.47, -48.75 },
+        { "music-flubsound-signature.json", 18.93, 6.93, -41.81, -51.18 },
+        { "music-punchy-pop.json", 50.40, 7.47, -38.85, -55.37 },
     };
     for (const auto& row : rows)
     {

@@ -33,8 +33,8 @@
 // latency = L + D (1.5 ms + 20 samples at 48 kHz = 92 samples by default).
 //
 // Optional LF-safe envelope (docs/11 E05 stage 1; setEnvelope(), structural,
-// all off by default - the maximizer turns them on, the MixEngine master and
-// the chain's bypass-reference limiter keep the plain envelope):
+// all off by default - the maximizer, the chain's bypass-reference limiter
+// (E10) and the MixEngine master (E05, Phase 3) turn them all on):
 //   * periodHold: the sliding minimum also covers the H samples after the
 //     peak (window L + Kh + 2 + H), so the gain holds H after each peak
 //     before it releases. H = the spacing of the recent peaks + 1/8 (the

@@ -6,7 +6,7 @@
 //   sustain indicator : dB(env slow-release) - dB(env fast-release) >= 0 in decays
 //                       (release 400 ms vs 40 ms, equal ~1 ms attack)
 //   gainDb = attackDb * clamp(attackInd / 6 dB, 0, 1)
-//          + sustainDb * clamp(sustainInd / 6 dB, 0, 1)
+//          + sustainDb * clamp(sustainInd / 6 dB, 0, 1) [* (1 - onset weight), gated]
 // The result depends on envelope *shape*, not absolute level, so the same
 // setting behaves consistently on quiet and loud material. Gain is smoothed
 // (~1 ms) and applied identically to all channels (image-stable).
@@ -35,6 +35,11 @@ public:
     /** -12 .. +12 dB each. RT-safe. */
     void setAttackDb (float db) noexcept FLUB_NONBLOCKING;
     void setSustainDb (float db) noexcept FLUB_NONBLOCKING;
+    /** Sustain gated by the onset: the sustain gain is scaled by (1 - the
+        held level's rise over the slow attack envelope, 0..1 over 6 dB), so
+        it never acts during an onset (Tighten, docs/11 E04 step 2). Default
+        off (Clarity's sustain as before). */
+    void setSustainGatedByAttack (bool gated) noexcept FLUB_NONBLOCKING { sustainGated = gated; }
 
     /** Returns the linear gain to apply to the current sample, given the
         linked detector input max_c |x_c[n]|. Call exactly once per sample. */
@@ -162,10 +167,12 @@ private:
 
     double sr = 48000.0;
     float attackDb = 0.0f, sustainDb = 0.0f;          // targets (what isNeutral() reports)
+    bool sustainGated = false;                        // sustain weight x (1 - onset weight)
     PeakHold hold;                                    // ~25 ms: ripple-free level down to 20 Hz
     EnvelopeFollower attackFast, attackSlow;          // 0.5 / 20 ms attack, 60 ms release
     EnvelopeFollower sustainSlow, sustainFast;        // 1 ms attack, 400 / 40 ms release
     OnePoleSmoother attackAmount, sustainAmount;      // smoothed attackDb / sustainDb
     float gainCoeff = 0.0f, gainDbState = 0.0f;       // ~1 ms gain smoothing (dB domain)
+    float gatedReturnCoeff = 0.0f;                    // 0.2 ms: a gated sustain cut returning
 };
 } // namespace flub

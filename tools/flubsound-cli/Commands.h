@@ -110,6 +110,7 @@ struct QualityReport
     float duckingLimiterGrMaxDb = 0.0f, duckingLimiterGrMeanDb = 0.0f;
     double kickOnsetLiftDb = 0.0, kickBodyLiftDb = 0.0, kickLateLiftDb = 0.0, kickCentroidShiftMs = 0.0;
     double pinkInLufs = 0.0, pinkOutLufs = 0.0, pinkOutTruePeakDbtp = 0.0;
+    RenderStats pinkStats; // the pink render's (the governor's readouts, docs/11 E06 batch 2)
 };
 
 /** Called on every rendered stimulus (2 planar channels) before it is

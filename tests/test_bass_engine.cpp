@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <string>
 #include <vector>
@@ -476,6 +477,60 @@ TEST_CASE ("BassEngine: tighten shortens low-frequency decays and leaves highs a
     const auto dryHigh = run (0.0f, 1000.0);
     const auto tightHigh = run (1.0f, 1000.0);
     CHECK_NEAR (energyDb (tightHigh, onset + ms (300), onset + ms (900)) - energyDb (dryHigh, onset + ms (300), onset + ms (900)), 0.0, 0.3);
+}
+
+TEST_CASE ("BassEngine: tighten keeps a kick's first 10 ms, still shortens its tail and never lifts a frequency (docs/11 E04 step 2)")
+{
+    // Kicks (50 Hz + 80 Hz chirp, e^-18t, -6 dBFS) every 500 ms. docs/11
+    // E04 Done-when: Tighten 0.5 changes the first 10 ms by >= -0.5 dB
+    // (before: -1.69 dB re Tighten 0 - its sustain cut on the onset and the
+    // LR4 split's all-pass as the output).
+    const int n = ms (4000), period = ms (500);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double beat = static_cast<double> (i % period) / kFs;
+        x[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat));
+    }
+    auto run = [&] (float tighten, const std::vector<float>& in)
+    {
+        auto p = allOff();
+        p.tighten = tighten;
+        BassEngine be;
+        prepareBass (be);
+        be.setParams (p);
+        return runStereo (be, in).ch[0];
+    };
+    auto windowDb = [&] (const std::vector<float>& y, const std::vector<float>& ref, int from, int to) {
+        double a = 0.0, b = 0.0;
+        for (int start = period; start + period <= n; start += period)
+            for (int i = start + from; i < start + to; ++i)
+            {
+                a += static_cast<double> (y[static_cast<size_t> (i)]) * y[static_cast<size_t> (i)];
+                b += static_cast<double> (ref[static_cast<size_t> (i)]) * ref[static_cast<size_t> (i)];
+            }
+        return 10.0 * std::log10 (a / b);
+    };
+    const auto dry = run (0.0f, x), tight = run (0.5f, x);
+    const double onset = windowDb (tight, dry, 0, ms (10)), tail = windowDb (tight, dry, ms (150), ms (300));
+    std::printf ("    measured tighten 0.5 on kicks: 0-10 ms %.2f dB, 150-300 ms %.2f dB\n", onset, tail);
+    CHECK_GE (onset, -0.5);
+    CHECK_LE (tail, -3.0);
+
+    // The shelf x + (g - 1) LP1 (x) with g <= 1 only ever cuts: decaying
+    // tones from 40 Hz to 4 kHz never come out louder in any window.
+    for (double f : { 40.0, 150.0, 400.0, 1000.0, 4000.0 })
+    {
+        std::vector<float> tone (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = static_cast<double> (i % period) / kFs;
+            tone[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-t / 0.08) * std::sin (kTwoPi * f * t));
+        }
+        const auto a = run (0.0f, tone), b = run (1.0f, tone);
+        for (int from = 0; from < ms (400); from += ms (20))
+            CHECK_LE (windowDb (b, a, from, from + ms (20)), 0.02);
+    }
 }
 
 TEST_CASE ("BassEngine: switching features on and off is click-free")

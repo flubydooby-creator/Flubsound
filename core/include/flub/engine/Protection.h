@@ -365,18 +365,52 @@ class DriveFeedForward
 {
 public:
     static constexpr int kTicks = 300; // 3 s of 10 ms ticks
+    static constexpr float kTickSeconds = 0.01f;
+    /** The maximizer limiter's programme envelope (TruePeakLimiter,
+        LimiterEnvelope::programEnvelope: attack 150 ms, release 800 ms,
+        one-pole in the linear gain), which the prediction models. */
+    static constexpr float kProgramAttackSeconds = 0.15f, kProgramReleaseSeconds = 0.8f;
 
     void reset() noexcept FLUB_NONBLOCKING;
     /** One tick's peak of the maximizer input (linear, before the drive). */
-    void push (float peak) noexcept FLUB_NONBLOCKING;
-    /** The drive (dB) at which the mean over the ticks of max (0, peak +
-        drive - ceiling) equals -grBudgetDb; +inf while fewer than 50 ticks
-        (0.5 s) of programme (peaks above -70 dBFS) are held. */
+    void push (float peak) noexcept FLUB_NONBLOCKING { pushTick (peak, 0.0f); }
+    /** As push(), with the tick's RMS (the louder channel's) for the
+        clipper's crest gate. */
+    void pushTick (float peak, float rms) noexcept FLUB_NONBLOCKING;
+    /** The maximizer's soft clipper ahead of the limiter (LoudnessMaximizer:
+        its threshold headroomDb over the ceiling, raised to crestDb over the
+        signal's RMS, 0 = no gate, and each sample losing at most depthDb),
+        which the prediction takes off each tick's peak before the limiter
+        sees it; headroomDb = +inf (the default) = no clipper. Any time. */
+    void setClipper (float headroomDb, float crestDb, float depthDb) noexcept FLUB_NONBLOCKING;
+    /** The drive (dB) at which the limiter's modelled average gain
+        reduction over the programme ticks equals -grBudgetDb: per tick the
+        gain its peak needs, min (1, ceiling / (peak x drive)), through the
+        programme envelope (the deeper of the two, as the limiter applies
+        it; the envelope run over the window twice, so it starts warm),
+        after the clipper (setClipper) has taken its share of the peak.
+        Batch 1 took the mean of max (0, peak + drive - ceiling), which the
+        envelope's hold made read about 3 dB shallow on pink noise with the
+        clipper off (docs/11 E06 batch 2). +inf while fewer than kMinTicks
+        ticks of programme (peaks above -70 dBFS) are held, or when no drive
+        up to 72 dB reaches the budget. */
     float driveForBudget (float ceilingDb, float grBudgetDb) const noexcept FLUB_NONBLOCKING;
+    /** True once kMinTicks ticks of programme are held (driveForBudget() is
+        then a prediction, +inf meaning that no drive reaches the budget). */
+    bool hasReading() const noexcept FLUB_NONBLOCKING;
+    /** Programme ticks before the first prediction (docs/11 E06 batch 2:
+        early enough that the drive can fall while the limiter's programme
+        envelope is still attacking, see SafetyGovernor::kSagAllowanceDb). */
+    static constexpr int kMinTicks = 8;
 
 private:
-    std::array<float, kTicks> peaksDb {};
+    /** The modelled mean gain reduction (dB >= 0) over the programme ticks at `driveDb`. */
+    float meanReductionDb (float ceilingDb, float driveDb, int programmeTicks) const noexcept FLUB_NONBLOCKING;
+
+    std::array<float, kTicks> peaks {}, peaksDb {}, rmsLevels {};
     int count = 0, pos = 0;
+    float attack = 0.0f, release = 0.0f; // per-tick one-pole coefficients (reset)
+    float clipHeadroomDb = 1000.0f, clipCrestDb = 0.0f, clipDepthDb = 24.0f;
 };
 
 /** Peak-to-loudness ratio of the chain's output over ~3 s (docs/11 E06
@@ -465,6 +499,9 @@ public:
         float plrDb = PlrMeter::kNoReading;       // output PLR over ~3 s
         float inputPlrDb = PlrMeter::kNoReading;  // the span input's PLR over ~3 s
         float feedForwardScale = 1.0f;            // drive scale the pre-maximizer peaks predict for the GR budget
+        float programmeLufs = -160.0f;            // the chain input's ~3 s loudness (the quiet hold; -160: none)
+        bool feedForwardValid = true;             // false while the feed-forward has too little programme to predict
+        float driveAtFullScaleDb = 0.0f;          // the maximizer drive at scale 1 (dB; 0 = none, no release tie)
         // The chain's net tonal lifts over its 200 Hz - 1 kHz lift (TonalBalanceMeter; -160: no reading).
         float presenceLiftDb = -160.0f, harshLiftDb = -160.0f, airLiftDb = -160.0f;
     };
@@ -481,7 +518,7 @@ public:
     static constexpr float kMaxProbeHoldSeconds = 64.0f; // doubling to this while probes fail at the same level
     static constexpr float kVerifySeconds = 0.5f;  // wait after stepping to the cap, before integrating on
     static constexpr float kProbeErrorDb = 6.0f;   // a back-off starting further over is not a probe
-    static constexpr float kFallDbPerSec = 6.0f;            // drive scale (about the limiter's programme release)
+    static constexpr float kFallDbPerSec = 6.0f;            // drive scale, where the release tie does not apply
     static constexpr float kHarmonicsFallDbPerSec = 12.0f;  // harmonics scale
     static constexpr float kRiseDbPerSec = 1.0f;
     static constexpr float kGrAverageSeconds = 0.5f;
@@ -493,9 +530,75 @@ public:
     static constexpr float kTonalMarginDb = 0.5f;
     static constexpr float kTonalHoldBandDb = 1.0f; // narrower than the drive's: a darker programme gets its lifts back
     static constexpr float kTonalFallDbPerSec = 3.0f;
+    /** Release tie (docs/11 E06 batch 2): a drive fall the maximizer's
+        limiter must release. Its programme envelope (TruePeakLimiter,
+        LimiterEnvelope::programEnvelope: a one-pole in the linear gain,
+        attack kProgramAttackSeconds, release kProgramReleaseSeconds) holds
+        the reduction it has built, so a drive that falls faster than it
+        releases takes the output down by the difference until it has (the
+        batch 1 loop, 6 dB/s of scale, dipped 4.3 dB for about a second).
+        The governor models the envelope from the limiter's window GR and
+        lets the drive (in dB of drive, not of scale) fall by what the
+        envelope's attack has not yet taken (free: the limiter is still
+        building that reduction) plus what keeps the modelled dip - the
+        drive falls the envelope has not released - under
+        kSagAllowanceDb. While the limiter holds less than that, or the
+        audible residual is over its budget (distortion goes first), the
+        drive falls at kFallDbPerSec as before. */
+    static constexpr float kSagAllowanceDb = 0.5f;
+    static constexpr float kProgramAttackSeconds = DriveFeedForward::kProgramAttackSeconds;
+    static constexpr float kProgramReleaseSeconds = DriveFeedForward::kProgramReleaseSeconds;
+    /** After restoreMemory() / restart() at Normal / Strict the measured loop
+        holds the learned scales until its readings are back (the
+        feed-forward's first prediction, and in Music both PLRs), then
+        restarts from them (bumpless); at most this long of programme, so
+        a reading that never comes does not hold it for good. */
+    static constexpr float kRestartHoldSeconds = 3.0f;
+    /** Quiet hold (docs/11 E06 batch 2; with a dynamics budget, i.e. Music):
+        the drive does not recover while the programme is more than
+        kQuietHoldLu quieter than it was at the last back-off, for up to
+        kQuietHoldSeconds of such programme. A loop that recovered in every
+        quiet passage and backed off again in every loud one rode the
+        sections like a slow AGC: on 3 minutes of mastered music (LRA 8.5 LU)
+        Boost 100 + Loudness 100 left 3.95 LU. */
+    static constexpr float kQuietHoldLu = 2.0f;
+    static constexpr float kQuietHoldSeconds = 20.0f;
+
+    /** What the loop has learned (docs/11 E06 (2)): the scales it applies and
+        each measured loop's probe memory. Kept across restart() at Normal /
+        Strict and handed from a running chain to the one that replaces it
+        (ProcessingChain::adoptGovernorState). Plain data, rate-independent. */
+    struct Memory
+    {
+        struct Probe
+        {
+            float ceiling = 0.0f, holdLeft = 0.0f, holdTime = kProbeHoldSeconds, lastOnset = 1.0f;
+        };
+        ProtectionStrength strength = ProtectionStrength::Off;
+        float scale = 1.0f, harmonicsScale = 1.0f, tonalScale = 1.0f;
+        uint32_t reason = 0;
+        std::array<Probe, 5> probes {}; // gr, residual, plr, harmonics, tonal
+        bool valid = false;
+    };
 
     void prepare (double sampleRate) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
+    /** reset() for a chain's reset() (docs/11 E06 (2)): at Normal / Strict
+        the learned state (getMemory()) is kept - the averages, the tick grid
+        and the release tie start again, the scales hold until the readings
+        are back (kRestartHoldSeconds) - so a transport jump does not replay
+        the loud start and the back-off; at Off exactly reset(). */
+    void restart() noexcept FLUB_NONBLOCKING;
+    /** The learned state now (any strength; valid). */
+    Memory getMemory() const noexcept FLUB_NONBLOCKING;
+    /** Takes over learned state (a chain replacing a running one, or
+        restart()): applied at once if the strength is the one it was learned
+        at, else at the next tick if the strength is that by then, else
+        dropped. At Off the stepwise loop continues
+        from the scale; at Normal / Strict the measured loop holds the scales
+        until its readings are back, then restarts from them with the probe
+        memory. */
+    void restoreMemory (const Memory& memory) noexcept FLUB_NONBLOCKING;
     /** Restarts the tick grid (not the loop state), for when the maximizer's
         window grid restarts without a full reset (a dropped block). */
     void restartTickGrid() noexcept FLUB_NONBLOCKING { pendingSamples = 0; }
@@ -553,6 +656,8 @@ private:
             feed-forward runs at kTrimGain); holdBandDb is the band under
             the set point where it holds. */
         float step (float e, float dt, float offsetDb, float gain = 1.0f, float holdBandDb = kHoldBandDb) noexcept FLUB_NONBLOCKING;
+        Memory::Probe probe() const noexcept { return { ceiling, holdLeft, holdTime, lastOnset }; }
+        void setProbe (const Memory::Probe& p) noexcept { ceiling = p.ceiling; holdLeft = p.holdLeft; holdTime = p.holdTime; lastOnset = p.lastOnset; }
         /** Anti-windup (a loop that asked for less than was applied starts
             the next tick from what was applied) and the probe memory: at the
             onset of a back-off, recovery is capped kProbeMarginDb under the
@@ -570,6 +675,8 @@ private:
 
     void tick (float limiterGrDb, float distortionDb) noexcept FLUB_NONBLOCKING;
     void measuredTick (const Readings& r) noexcept FLUB_NONBLOCKING;
+    /** Applies a pending restoreMemory() at a tick (see there). */
+    void applyPendingMemory() noexcept FLUB_NONBLOCKING;
     /** Restarts the measured loop from the current scales. */
     void startMeasured() noexcept FLUB_NONBLOCKING;
 
@@ -586,6 +693,18 @@ private:
     Loop grLoop, residualLoop, plrLoop, harmonicsLoop, tonalLoop;
     State state = State::Idle;
     uint32_t reason = 0;
+    // Release tie: the modelled programme envelope's depth and the drive
+    // falls it has not yet released (dB >= 0), per-tick one-pole coefficients.
+    float programDepthDb = 0.0f, sagLagDb = 0.0f, programAttack = 0.0f, programRelease = 0.0f;
+    // Quiet hold: the programme loudness at the last back-off, and how long
+    // the programme has been quieter than that since.
+    float backoffLufs = -160.0f, quietSeconds = 0.0f;
+    // Learned state taken over (restoreMemory), and the measured loop's hold
+    // after it (restartHoldLeft: seconds of programme left).
+    Memory pending;
+    std::array<Memory::Probe, 5> pendingProbes {};
+    bool restartHold = false;
+    float restartHoldLeft = 0.0f;
 };
 
 class AutoLevel

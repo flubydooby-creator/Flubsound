@@ -11,6 +11,17 @@
 //   gdB = attackDb' * wA + sustainDb' * wS   (' = 20 ms parameter smoothing)
 //   gain = 10^(smooth_1ms (gdB) / 20)
 //
+// Sustain gate (setSustainGatedByAttack, BassEngine's Tighten; docs/11 E04
+// step 2): wS is multiplied by (1 - clamp (20 log10 (e / A_slow) / 6 dB, 0,
+// 1)), so a negative sustain never lands on an onset. Without it, the
+// sustain pair still reads the previous note's decay (S_slow high, S_fast
+// near the floor) through a new note's first 2-3 ms, i.e. the whole cut
+// sits on the first half-cycle of a kick. The held level e against A_slow
+// (still at the previous note's release) opens the gate on the onset's
+// first samples - A_fast's 0.5 ms would let the first millisecond through
+// cut - and closes it only once A_slow has caught up with the held peak,
+// 30-50 ms later, when the decay the sustain pair acts on begins.
+//
 // Only ratios of envelopes enter the gain, so the shaping follows the shape
 // of the envelope, not its level. The peak hold in front of the followers is
 // what keeps steady low notes clean: without it the 0.5 ms / 1 ms attack
@@ -45,6 +56,12 @@ constexpr float kSlowReleaseMs = 400.0f;
 constexpr float kFastReleaseMs = 40.0f;
 
 constexpr float kGainSmoothMs = 1.0f;
+// Gated sustain: a cut the onset gate lifts returns this fast, so a kick
+// arriving while the previous decay's cut is still in place loses only its
+// first fraction of a millisecond (with 1 ms: -1.3 dB over its first 4 ms).
+// The gain multiplies the low band only (Tighten), and the step lands on the
+// onset that masks it.
+constexpr float kGatedReturnMs = 0.2f;
 constexpr float kParamSmoothMs = 20.0f;
 constexpr float kMaxDb = 12.0f;
 
@@ -86,6 +103,7 @@ void TransientShaper::prepare (double sampleRate) noexcept
     sustainSlow.prepare (sr, kSustainPairAttackMs, kSlowReleaseMs);
     sustainFast.prepare (sr, kSustainPairAttackMs, kFastReleaseMs);
     gainCoeff = onePoleCoeff (kGainSmoothMs, sr);
+    gatedReturnCoeff = onePoleCoeff (kGatedReturnMs, sr);
     reset();
 }
 
@@ -138,11 +156,12 @@ float TransientShaper::computeGain (float linkedAbs) noexcept
     if (atk != 0.0f)
         targetDb += atk * indicatorWeight (aFast / aSlow);
     if (sus != 0.0f)
-        targetDb += sus * indicatorWeight (sSlow / sFast);
+        targetDb += sus * indicatorWeight (sSlow / sFast) * (sustainGated ? 1.0f - indicatorWeight (d / aSlow) : 1.0f);
 
     // ~1 ms smoothing of the gain in dB (symmetric, so the envelope shape is
     // not skewed), landing exactly on the target so neutral returns 1.0f.
-    gainDbState = targetDb + gainCoeff * (gainDbState - targetDb);
+    const float coeff = sustainGated && targetDb > gainDbState ? gatedReturnCoeff : gainCoeff;
+    gainDbState = targetDb + coeff * (gainDbState - targetDb);
     if (std::abs (gainDbState - targetDb) < 1.0e-6f)
         gainDbState = targetDb;
 

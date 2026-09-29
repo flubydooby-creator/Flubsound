@@ -26,7 +26,9 @@
 //      the original content below the cutoff is high-passed away, reclaiming
 //      headroom the transducer cannot use anyway.
 //   5. Tighten: TransientShaper on the LR4 low band (< 150 Hz) with negative
-//      sustain = shorter, drier bass decay ("punchy" rather than "boomy").
+//      sustain = shorter, drier bass decay ("punchy" rather than "boomy"),
+//      gated by the attack indicator: the first 20-40 ms of a note keep
+//      their level (docs/11 E04 step 2).
 //
 // Telemetry: getDistortionDb() = the share of the generated harmonics in the
 // stage output over the last completed 25 ms analysis window
@@ -187,10 +189,12 @@ private:
     std::array<SvfCoeffs, 2> replaceHp {};
     std::array<Hp4State, kMaxChannels> replaceState {};
 
-    // 5. Tighten: transient shaper (negative sustain) on the LR4 low band.
+    // 5. Tighten: transient shaper (negative sustain) detecting the LR4 low
+    // band, applied through a one-pole low-pass at the same corner.
     ParkedStage tight;
     SvfCoeffs tightXo;
     std::array<Lr4State, kMaxChannels> tightState {};
+    std::array<float, kMaxChannels> tightLp {}; // TPT one-pole state
     TransientShaper tightShaper;
 };
 } // namespace flub

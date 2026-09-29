@@ -18,10 +18,13 @@
 #include "TestSignals.h"
 
 #include "flub/dsp/TruePeakLimiter.h"
+#include "flub/engine/MixEngine.h"
+#include "flub/engine/Parameters.h"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <vector>
@@ -1361,4 +1364,45 @@ TEST_CASE ("TruePeakLimiter: with the LF-safe envelope the output is bit-identic
     CHECK (guard.allocations() == 0);
     CHECK_LE (planarPeak (buf), dbfs (-1.0));
     CHECK (lim.getSafetyClipCount() == 0u);
+}
+
+TEST_CASE ("MixEngine: the master limiter has the LF-safe envelope - two strips summing 40 Hz 6 dB over the ceiling stay undistorted, the ceiling and the latency hold (E05)")
+{
+    // Two stereo strips, every module off (pure delays), each carrying the
+    // same 40 Hz at 0.9 (then 1.4) peak: the sum is 6.1 (9.9) dB over the
+    // master's -1 dBTP ceiling. docs/11 E05 left the master on the plain
+    // envelope, which releases between the half-cycle peaks and modulates
+    // the tone.
+    using namespace flub::param;
+    for (const float amplitude : { 0.9f, 1.4f })
+    {
+        const std::vector<StripConfig> layout { { "Game", 2, 0.0f, false, 0 }, { "Music", 2, 0.0f, false, 0 } };
+        MixEngine mix;
+        mix.configure (layout, kFs, 256);
+        for (int s = 0; s < 2; ++s)
+            for (int id : { GateOn, EqOn, DynEqOn, BassOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+                mix.params (s).set (id, 0.0f);
+        const int n = static_cast<int> (2.0 * kFs), block = 256;
+        Planar a (2, block), b (2, block), out (2, block);
+        const AudioBlock ab = a.block(), bb = b.block();
+        const AudioBlock* inputs[] = { &ab, &bb };
+        std::vector<float> y;
+        y.reserve (static_cast<size_t> (n));
+        for (int p = 0; p < n; p += block)
+        {
+            for (int i = 0; i < block; ++i)
+            {
+                const auto v = static_cast<float> (amplitude * std::sin (kTwoPi * 40.0 * (p + i) / kFs));
+                for (auto* buf : { &a, &b })
+                    buf->ch[0][static_cast<size_t> (i)] = buf->ch[1][static_cast<size_t> (i)] = v;
+            }
+            mix.process (inputs, out.block());
+            y.insert (y.end(), out.ch[0].begin(), out.ch[0].end());
+        }
+        const double thd = thdnDb (y, static_cast<int> (kFs), static_cast<int> (kFs) - 400, 40.0);
+        std::printf ("    measured master, 40 Hz at %+.1f dB over the ceiling: THD+N = %.1f dB\n", toDb (2.0 * amplitude) + 1.0, thd);
+        CHECK_LE (thd, -60.0); // measured below -300 dB; the plain envelope -32.9 / -29.2 dB
+        CHECK_LE (peakAbs (y.data(), static_cast<int> (y.size())), dbfs (-1.0));
+        CHECK (mix.getLatencySamples() == mix.chain (0).getLatencySamples() + 48 + 20); // Balanced: 1 ms look-ahead + detector
+    }
 }

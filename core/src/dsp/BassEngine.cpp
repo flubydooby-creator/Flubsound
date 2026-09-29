@@ -23,8 +23,17 @@
 //                      (the linear branch) and the harmonics
 //                      (ParallelDistortion.h).
 //   5. Tighten       : LR4 split at 150 Hz, TransientShaper (sustain =
-//                      -12 dB * tighten) detecting max_c |low_c|; its gain is
-//                      applied to the low band only: out_c = g low_c + high_c.
+//                      -12 dB * tighten, gated by its attack indicator so it
+//                      never cuts an onset) detecting max_c |low_c|; its
+//                      gain g is applied as a dynamic low shelf, out_c = x_c
+//                      + (g - 1) LP1_150Hz (x_c) (docs/11 E04 step 2). The
+//                      LR4 bands only feed the detector: their sum is an
+//                      all-pass (about 3 ms of group delay under 100 Hz),
+//                      which as the output (g low + high, before) took
+//                      1.5 dB off a kick's first 10 ms at any setting.
+//                      The one-pole's lag bounds the cut: -6 dB (tighten
+//                      0.5) reads -4.9 / -3.2 / -2.0 dB at 50 / 100 / 150 Hz,
+//                      and never lifts anything.
 //
 // Control rate: every kControlInterval samples of absolute stream time (the
 // counter survives across process() calls, so the output does not depend on
@@ -231,6 +240,7 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     harmonicsMix.reset (sr, kParamSmoothMs, 0.0f);
 
     tightShaper.prepare (sr);
+    tightShaper.setSustainGatedByAttack (true); // never on the onset (docs/11 E04 step 2)
     distortionWindow.prepare (sr);
 
     auto initStage = [sr] (ParkedStage& stage, float parkHz)
@@ -347,6 +357,7 @@ void BassEngine::updateTargets() noexcept
     if (setStage (tight, params.tighten > 0.0f, kTightenHz))
     {
         tightState.fill ({});
+        tightLp.fill (0.0f);
         tightXo = designLr4 (tight.hz, sr);
         tightShaper.reset();
     }
@@ -444,6 +455,7 @@ void BassEngine::clearAllStates() noexcept
     detectorState.fill ({});
     replaceState.fill ({});
     tightState.fill ({});
+    tightLp.fill (0.0f);
     detectorHold.reset();
     detectorEnv.reset (0.0f);
     clearHarmonics();
@@ -464,6 +476,9 @@ float BassEngine::flushStates() noexcept
             sum += flushTiny (s);
         for (auto& s : tightState[ch])
             sum += flushTiny (s);
+        if (std::abs (tightLp[ch]) < kStateFlush)
+            tightLp[ch] = 0.0f;
+        sum += tightLp[ch];
         sum += flushTiny (shelfState[ch]) + flushTiny (detectorState[ch]);
     }
     for (auto& s : harmState)
@@ -770,10 +785,17 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
                 lowPeak = std::max (lowPeak, std::abs (low[ch]));
             }
             const float g = tightShaper.computeGain (lowPeak);
+            // Applied as x + (g - 1) LP1 (x): exactly x at unity gain, so the
+            // split's all-pass never reaches the output (see the header).
+            const float lpG = static_cast<float> (xo.g / (1.0 + xo.g));
             for (int c = 0; c < numCh; ++c)
             {
                 const size_t ch = static_cast<size_t> (c);
-                x[ch] = blendTo (x[ch], g * low[ch] + high[ch], b);
+                float& z = tightLp[ch];
+                const float v = (x[ch] - z) * lpG;
+                const float lp = v + z;
+                z = lp + v;
+                x[ch] += b * (g - 1.0f) * lp;
             }
         }
 

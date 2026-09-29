@@ -44,6 +44,7 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
         if (setup != nullptr)
             setup (static_cast<int> (i), *s->chain);
         s->chain->prepare ({ sr, maxBlockSize, s->config.inputChannels });
+        if (i < storesFrom.size() && storesFrom[i]->chain != nullptr) s->chain->adoptGovernorState (*storesFrom[i]->chain); // docs/11 E06 (2): strength + learned governor state
         s->gain.reset (sr, 20.0f, s->config.muted ? 0.0f : dbToGain (s->config.gainDb));
         next.push_back (std::move (s));
     }
@@ -75,6 +76,13 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     correction.prepare ({ sr, maxBlockSize, 2 });
     master.setLookaheadMs (allLowLatency ? kMasterLookaheadLowLatencyMs : kMasterLookaheadMs);
     master.setTruePeakDetection (true);
+    // The LF-safe envelope (docs/11 E05; TruePeakLimiter.h), as on the
+    // maximizer and the bypass reference: when the sum does overshoot - a
+    // game's explosion over music - its bass is held flat between its peaks
+    // instead of rippling at their rate (40 Hz 6 / 10 dB over: THD+N -32.9 /
+    // -29.2 dB -> below -300 dB, tests/test_limiter.cpp). The latency is
+    // unchanged.
+    master.setEnvelope ({ true, true, true });
     master.prepare ({ sr, maxBlockSize, 2 });
     LimiterParams lp;
     lp.ceilingDb = -1.0f;

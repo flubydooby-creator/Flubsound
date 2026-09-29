@@ -282,6 +282,76 @@ const char* governorStateName (int state) noexcept
     return state >= 0 && state < 4 ? kStateNames[state] : "idle";
 }
 
+/** The measured loop's reason bits and their names (docs/11 E06 batch 2). */
+std::array<std::pair<uint32_t, const char*>, 3> governorMeasuredReasons() noexcept
+{
+    return { { { SafetyGovernor::kReasonDynamics, "dynamics" }, { SafetyGovernor::kReasonHarmonics, "harmonics" }, { SafetyGovernor::kReasonTonal, "tonal" } } };
+}
+
+const char* protectionStrengthName (int strength) noexcept
+{
+    constexpr const char* kNames[] = { "off", "normal", "strict" };
+    return strength >= 0 && strength < 3 ? kNames[strength] : "off";
+}
+
+/** PLR readings: 1000 dB (PlrMeter::kNoReading) = none (null). */
+json::Value plrValue (float v)
+{
+    return v < PlrMeter::kNoReading ? statValue (v) : json::Value();
+}
+
+/** render.stats governor.measured: the measured loop's readouts at
+    protection strength Normal / Strict (MeterBus::governor*, docs/11 E06
+    batch 2); scales 1 and readings null at Off. */
+json::Value governorMeasuredToJson (const RenderStats& st)
+{
+    const auto scale = [] (float v) { return json::Value (std::round (v * 1000.0) / 1000.0); };
+    json::Value v;
+    v.set ("strength", protectionStrengthName (st.governorStrength));
+    json::Value hs;
+    hs.set ("min", scale (st.governorHarmonicsScaleMin));
+    hs.set ("end", scale (st.governorHarmonicsScaleEnd));
+    v.set ("harmonicsScale", std::move (hs));
+    json::Value ts;
+    ts.set ("min", scale (st.governorTonalScaleMin));
+    ts.set ("end", scale (st.governorTonalScaleEnd));
+    v.set ("tonalScale", std::move (ts));
+    json::Value reasons;
+    reasons.set ("dynamics", statValue (st.governorDynamicsReasonPercent));
+    reasons.set ("harmonics", statValue (st.governorHarmonicsReasonPercent));
+    reasons.set ("tonal", statValue (st.governorTonalReasonPercent));
+    v.set ("reasonPercent", std::move (reasons));
+    json::Value drive;
+    drive.set ("maxDb", statValue (st.governorDriveResidualMaxDb));
+    drive.set ("meanDb", statValue (st.governorDriveResidualMeanDb));
+    drive.set ("endDb", statValue (st.governorDriveResidualEndDb));
+    drive.set ("budgetDb", statValue (st.governorResidualBudgetDb));
+    v.set ("driveResidual", std::move (drive));
+    json::Value harmonics;
+    harmonics.set ("maxDb", statValue (st.governorHarmonicsResidualMaxDb));
+    harmonics.set ("endDb", statValue (st.governorHarmonicsResidualEndDb));
+    harmonics.set ("budgetDb", statValue (st.governorResidualBudgetDb));
+    v.set ("harmonicsResidual", std::move (harmonics));
+    v.set ("bassResidualEndDb", statValue (st.governorBassResidualEndDb));
+    json::Value plr;
+    plr.set ("minDb", plrValue (st.governorPlrMinDb));
+    plr.set ("endDb", plrValue (st.governorPlrEndDb));
+    plr.set ("budgetDb", st.governorPlrBudgetDb > 0.0f ? statValue (st.governorPlrBudgetDb) : json::Value());
+    v.set ("plr", std::move (plr));
+    json::Value tonal;
+    constexpr const char* kBands[] = { "presence", "harsh", "air" };
+    for (size_t b = 0; b < st.tonalLiftEndDb.size(); ++b)
+    {
+        json::Value band;
+        band.set ("maxDb", statValue (st.tonalLiftMaxDb[b]));
+        band.set ("endDb", statValue (st.tonalLiftEndDb[b]));
+        band.set ("budgetDb", statValue (st.tonalBudgetDb[b]));
+        tonal.set (kBands[b], std::move (band));
+    }
+    v.set ("tonalLift", std::move (tonal));
+    return v;
+}
+
 json::Value renderStatsToJson (const RenderStats& st)
 {
     json::Value limiter;
@@ -342,8 +412,12 @@ json::Value renderStatsToJson (const RenderStats& st)
         reasons.push (json::Value ("limiter"));
     if ((st.governorReasonEnd & SafetyGovernor::kReasonDistortion) != 0)
         reasons.push (json::Value ("distortion"));
+    for (const auto& [bit, name] : governorMeasuredReasons())
+        if ((st.governorReasonEnd & bit) != 0)
+            reasons.push (json::Value (name));
     end.set ("reasons", std::move (reasons));
     governor.set ("end", std::move (end));
+    governor.set ("measured", governorMeasuredToJson (st)); // docs/11 E06 batch 2
 
     json::Value leveller;
     leveller.set ("autoLevelMinDb", statValue (st.autoLevelMinDb));
@@ -376,6 +450,17 @@ std::string formatStats (const RenderStats& st)
         s += fmt (" (backing off %.0f %%", st.governorStatePercent[1]) + fmt (", holding %.0f %%", st.governorStatePercent[2])
              + fmt ("; limiter %.0f %%", st.governorLimiterReasonPercent) + fmt (", THD+N %.0f %% of the time;", st.governorDistortionReasonPercent)
              + " at the end " + governorStateName (st.governorStateEnd) + ")";
+    }
+    if (st.governorStrength != 0)
+    {
+        // The measured loop (docs/11 E06 batch 2).
+        s += std::string (", protection ") + protectionStrengthName (st.governorStrength) + fmt (": harmonics scale min %.0f %%", 100.0 * st.governorHarmonicsScaleMin)
+             + fmt (", audible residual max %.1f dB", st.governorDriveResidualMaxDb) + fmt (" (budget %.0f)", st.governorResidualBudgetDb);
+        if (st.governorPlrMinDb < PlrMeter::kNoReading)
+            s += fmt (", PLR min %.1f dB", st.governorPlrMinDb);
+        if (st.governorDynamicsReasonPercent > 0.0f || st.governorHarmonicsReasonPercent > 0.0f || st.governorTonalReasonPercent > 0.0f)
+            s += fmt ("; dynamics %.0f %%", st.governorDynamicsReasonPercent) + fmt (", harmonics %.0f %%", st.governorHarmonicsReasonPercent)
+                 + fmt (", tonal %.0f %% of the time", st.governorTonalReasonPercent);
     }
     if (st.harmonicsMaxDb > kMinusInfDb)
         s += ", harmonics max " + formatDb (st.harmonicsMaxDb, 1) + " dB";
@@ -1160,7 +1245,7 @@ bool measureQuality (const std::vector<float>& values, int blockSize, QualityRep
     // ---- loudness of pink noise ----------------------------------------------
     {
         const auto x = pinkNoise (qualitySamples (6.0), std::pow (10.0, -18.0 / 20.0), 5959);
-        if (! render (x, out, nullptr))
+        if (! render (x, out, &report.pinkStats))
             return false;
         const auto in = analyse (qualityInput (x).channels, kQualityFs);
         const auto o = analyse (out, kQualityFs);
@@ -1310,6 +1395,14 @@ json::Value qualityToJson (const QualityReport& r)
     loudness.set ("pinkOutLufs", dbValue (r.pinkOutLufs));
     loudness.set ("pinkOutTruePeakDbtp", dbValue (r.pinkOutTruePeakDbtp));
 
+    // The governor on the pink render, as render.stats reports it (docs/11 E06 batch 2).
+    json::Value governor;
+    governor.set ("scaleMin", std::round (r.pinkStats.governorScaleMin * 1000.0) / 1000.0);
+    governor.set ("scaleEnd", std::round (r.pinkStats.governorScaleEnd * 1000.0) / 1000.0);
+    governor.set ("stateEnd", governorStateName (r.pinkStats.governorStateEnd));
+    governor.set ("measured", governorMeasuredToJson (r.pinkStats));
+    loudness.set ("pinkGovernor", std::move (governor));
+
     json::Value v;
     v.set ("thdn", std::move (thdn));
     v.set ("imd", std::move (imd));
@@ -1339,6 +1432,7 @@ std::string formatQuality (const QualityReport& r, const HygieneReport* h)
          + ", 40-60 ms " + fmt ("%+.1f dB", r.kickLateLiftDb) + ", centroid " + fmt ("%+.2f ms\n", r.kickCentroidShiftMs);
     s += "Loudness: pink -18 dBFS RMS " + fmt ("%.1f", r.pinkInLufs) + " -> " + fmt ("%.1f LUFS", r.pinkOutLufs) + ", true peak "
          + fmt ("%.1f dBTP\n", r.pinkOutTruePeakDbtp);
+    s += "Governor: on the pink, " + formatStats (r.pinkStats) + "\n";
     if (h != nullptr)
     {
         s += "Hygiene : at " + fmt ("%g Hz", h->sampleRate) + ": worst alias";
