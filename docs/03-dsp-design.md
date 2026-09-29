@@ -1204,7 +1204,7 @@ Sources:
   - More punch and definition on onsets (drums, gunshots, footsteps).
   - Less smear from sustain.
   - Less low-mid "mud" when it dominates.
-  - More intelligibility from a presence lift that backs off when the band is already loud.
+  - More intelligibility from a presence lift that backs off when the band is already loud (Absolute, the default) or already bright against the programme's own body (Relative, [11 E07](11-enhancement-report.md#e07) step 3: the same lift at any playback or mastering level).
   - "Air" from harmonics generated in the top octave.
 - **All of it zero latency**, linked across channels where a gain is applied, so the stereo image is preserved.
 - **`TransientShaper`** is a standalone building block. `ClarityEnhancer` uses it full-band; `BassEngine` uses it on the low band (§4.3.5).
@@ -1218,7 +1218,9 @@ Sources:
   │                                                                     BP 250 Hz Q 1 and the broadband signal,
   │                                                                     linked mean squares (20 ms)
   ├─ 3. Presence: bell presenceFrequency', Q 0.8, gain = presence' · G_pres
-  │                                                                     detector: BP f' Q 0.8, linked mean square (20 ms)
+  │                                                                     detector: BP f' Q 0.8, linked mean square (20 ms);
+  │                                                                     Relative also: body HP2 200 Hz → LP2 1 kHz (20 ms),
+  │                                                                     band and body through 1 s followers
   ├─ 4. Air (per channel, not linked):
   │        h = HP4 3.5 kHz (x_c)          b = LP4 7 kHz (h)             (Butterworth)
   │        env = smooth_0.5ms( max( E(|b|), 0.7071 · E(|h|) ) )     E = 7.5 ms peak hold → 40 ms release
@@ -1289,6 +1291,21 @@ For sines, RMS = peak − 3 dB. Measured at presence 1 on a 3.2 kHz tone (matche
 
 The result is intelligibility on quiet dialogue and quiet cues, without harshness on loud passages.
 
+**Relative presence** (`clarity.presenceMode` Relative; [11 E07](11-enhancement-report.md#e07) step 3). The absolute law gives quiet programme up to 6 dB and a loud master almost nothing: presence 1 lifts pink noise's 2.5 – 4 kHz band 5.71 dB at −45 dBFS RMS, 1.99 dB at −18 and 0.57 dB at −12. Relative reads the band against the programme's own body instead of a fixed level:
+
+```
+body     = MS_20ms( max_c LP2_1k( HP2_200( x_c ) )^2 )                  Butterworth sections, on the stage's input
+slow     = dB( F_1s(bandMs) ) − dB( F_1s(body) )                        F_1s: one-pole, 1 s, at control rate
+fast     = dB( bandMs ) − dB( body )                                    the 20 ms detectors
+boost    = clamp( (8 − max(slow, fast)) · 0.25, 0, 6 dB )                full 6 dB with the band 16 dB under the body, 0 at 8 dB over
+G_pres   = GainSmoother_{5 ms / 100 ms}( boost · taper )                 the same noise-floor taper on L
+```
+
+- **Level independence.** Both followers scale with the programme, so the lift depends on how bright it is, not how loud: pink gets +1.94 dB over 2.5 – 4 kHz at −45, −18 and −12 dBFS alike. The threshold (8 dB) is set so pink gets what the absolute law gives it at the chain's nominal level, −18 dBFS RMS (AutoLevel's default target).
+- **Balance.** A dark programme (pink through two 800 Hz low-passes) gets the full lift (+5.14 dB over the band), a bright one (two 1.5 kHz high-passes) none.
+- **Dynamics.** The fast balance withdraws the lift at once (5 ms) when the band jumps over the body, as the absolute law does on a loud band: a 3.2 kHz burst 12 dB over pink's band is lifted 0.10 dB, while the pink between the bursts keeps 1.47 dB (the bursts brighten the slow balance by about 2.5 dB).
+- **Switching.** The body detector and the slow followers run only while Relative is selected or still mixed in. They need 60 ms to be valid. After a reset, or with the stage coming on in Relative, the lift starts from 0 once they are. A switch while the stage runs keeps the old law through the warm-up, then crossfades the two laws' targets over 20 ms, and the bell glides as always. Absolute, the default, runs none of it and is bit-identical to the module before the key.
+
 **Dynamic bells (de-mud and presence).**
 - The gain computers run at control rate. The bells glide per sample in (g, k, m) (`SvfGlide`).
 - A bell keeps running at 0 dB (an exact identity), so its state is current when the gain moves.
@@ -1354,6 +1371,7 @@ Measured at air 1, levels re the input tone:
 | Transient Sustain | `clarity.sustain` | −12 … +12 | 0 | dB | tail lengthening (+) or shortening (−) |
 | Presence | `clarity.presence` | 0 … 1 | 0 | % | scales the dynamic presence boost (≤ +6 dB) |
 | Presence Frequency | `clarity.presenceFreq` | 1000 … 6000 | 3200 | Hz | presence bell and detector centre (25 ms log glide) |
+| Presence Mode | `clarity.presenceMode` | Absolute / Relative | Absolute | choice | what the presence reads its band against: a fixed −18 dB RMS, or the programme's 200 Hz – 1 kHz body (§5.3.3; layout version 7) |
 | Air | `clarity.air` | 0 … 1 | 0 | % | exciter mix 0 … −12 dB and 10 kHz shelf 0 … +2 dB (forced to 0 below 42 kHz fs) |
 | De-Mud | `clarity.demud` | 0 … 1 | 0 | % | scales the 250 Hz dynamic cut (≤ −4 dB) |
 
@@ -1367,6 +1385,7 @@ At module level NaN keeps the previous value, other values are clamped, and unch
 | presence / de-mud amounts | 20 ms one-pole at control rate. When switched on, the stage starts from clean state with its amount rising from 0. |
 | dynamic bell gains | `GainSmoother` at control rate (15/150 ms de-mud, 5/100 ms presence), then a per-sample `SvfGlide` |
 | presence frequency | 25 ms one-pole in log frequency at control rate; the detector is redesigned per tick, the bell glides |
+| presence mode | the two laws' targets crossfade over 20 ms (one-pole at control rate) once the relative followers are valid (60 ms); the gain smoother and the bell glide as always |
 | air | exciter mix: 20 ms linear ramp per sample. Shelf: amount smoothed 20 ms at control rate, then glided. When switched on, all states start clean. |
 | switching off | a stage runs until its amount and EQ gain are exactly 0, then stops |
 | module on/off | `ModuleSlot` 20 ms crossfade |
@@ -1434,6 +1453,9 @@ The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 befo
 - *Clarity (review): every block size gives bit-identical output*
 - *Clarity (review): steady tones through shaper, de-mud and presence stay free of modulation products*
 - *Clarity (review): presence and de-mud behave the same at every sample rate*
+- *Clarity (E07 step 3): Relative presence lifts pink the same at -45 and -12 dBFS (Absolute: 5 dB more at -45); at -18 dBFS both laws agree* (1.94 dB at every level, Absolute 5.71 / 1.99 / 0.57 dB)
+- *Clarity (E07 step 3): Relative presence follows the programme's balance - a dark programme gets the full lift, a bright one none, and a band that jumps over the body is not lifted*
+- *Clarity (E07 step 3): switching presenceMode glides without a click (also during the warm-up); Relative at presence 0 is an exact pass-through; the output does not depend on the block size* (and *Clarity: process, reset and setters do not allocate* switches the mode)
 
 `tests/test_distortion.cpp` (exciter telemetry, §5.3.4 and §14.5):
 - *Distortion: the air exciter's reading matches a harmonic analysis of the stage output (the linear air shelf taken out) within 0.05 dB, also on the band's skirt* (measured < 0.001 dB)
@@ -1454,7 +1476,7 @@ Chain level: *Chain: runs at every sample rate a headset may use (8 kHz hands-fr
   - At de-mud 1 this trims pink-noise-like material by **≈ 1.7–2 dB at 250 Hz**: about 1.7 dB in the review measurement, and 1.9–2.0 dB in this document's harness with Kellet-filtered pink noise.
   - The unit test's "balanced material" case uses white noise, which is treble-heavy and does not show this.
   - This is a **tuning item**: a threshold of about broadband − 6…8 dB, or a milder ratio, would leave pink-ish spectra alone.
-- **Absolute level thresholds.** The presence thresholds (−18 / −42 dB RMS, floor −80 dB RMS) and the de-mud gate (−70 dB RMS) are absolute, so they assume the chain's nominal level. AutoLevel, when enabled, keeps the input near its target.
+- **Absolute level thresholds.** The presence thresholds of the default Absolute law (−18 / −42 dB RMS, floor −80 dB RMS) and the de-mud gate (−70 dB RMS) are absolute, so they assume the chain's nominal level. AutoLevel, when enabled, keeps the input near its target. `clarity.presenceMode` Relative (§5.3.3) removes the presence's level dependence; making it the default would re-voice every preset that lifts presence (an owner decision), so it ships off. What stays level-dependent in the chain around it are the dynamic EQ's mode bands over fixed thresholds: Music Boost 100 + Clarity 100 still lifts the presence of −45 dBFS pink 2.0 dB more than of −12 dBFS pink at protection strength Normal with Relative presence (3.2 dB with Absolute), from the Clarity macro's de-harsh band (§14.5).
 - **Residual attack gain after a click.** Both envelopes of the attack pair release with the same 60 ms time constant, so the onset ratio A_fast/A_slow built up by an isolated click decays only slowly. Quiet material that follows within about 100–200 ms can receive a few dB of residual attack gain. The peak hold reduces this but does not remove it; it is inherent to the specified topology.
 - **Peak holds delay decay detection.** They delay the start of decay detection by 25–33 ms in the shaper and 7.5–10 ms in the air envelopes. Attacks stay instant.
 - **Float envelope precision at high sample rates.** At 96/192 kHz the float followers settle within about 1e-4 of their input, so the steady-state shaper gain on constant material may sit up to about 0.002 dB off unity (implementer's measurement).
