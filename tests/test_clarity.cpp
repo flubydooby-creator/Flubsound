@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <limits>
 #include <string>
 #include <vector>
@@ -447,6 +448,7 @@ TEST_CASE ("Clarity: process, reset and setters do not allocate")
         p.presenceFrequency = 1000.0f + static_cast<float> (i * 311 % 5000);
         p.air = static_cast<float> (i % 4) * 0.33f;
         p.deMud = static_cast<float> (i % 5) * 0.25f;
+        p.presenceMode = i % 7 < 4 ? PresenceMode::Relative : PresenceMode::Absolute; // docs/11 E07 step 3
         ce.setParams (p);
         ce.process (buf.block (0, 1 + (i * 97) % 512).firstChannels (1 + i % 8));
         (void) ce.getParams();
@@ -738,4 +740,268 @@ TEST_CASE ("Clarity (review): presence and de-mud behave the same at every sampl
         processInBlocks (ce, mud, 256);
         CHECK_NEAR (toDb (toneAmplitude (mud.ch[0].data() + settle, measure, 250.0, fs) / loud), -4.0, 0.5);
     }
+}
+
+// ---- relative presence (docs/11 E07 step 3) ----
+
+namespace
+{
+void measured (const std::string& name, double value, const char* unit)
+{
+    std::printf ("    measured %s = %.2f %s\n", name.c_str(), value, unit);
+}
+
+/** Power of x[from, from + len) in [lo, hi] Hz: Hann frames of 4096, summed (dB). */
+double bandPowerDb (const std::vector<float>& x, int from, int len, double lo, double hi, double fs = kFs)
+{
+    constexpr int kFrame = 4096;
+    Fft fft;
+    fft.prepare (kFrame);
+    std::vector<float> w (kFrame);
+    std::vector<Fft::Complex> bins (kFrame / 2 + 1);
+    double sum = 0.0;
+    for (int start = from; start + kFrame <= from + len; start += kFrame / 2)
+    {
+        for (int i = 0; i < kFrame; ++i)
+            w[static_cast<size_t> (i)] = static_cast<float> (x[static_cast<size_t> (start + i)] * (0.5 - 0.5 * std::cos (kTwoPi * i / kFrame)));
+        fft.forwardReal (w.data(), bins.data());
+        for (size_t k = 0; k < bins.size(); ++k)
+        {
+            const double f = static_cast<double> (k) * fs / kFrame;
+            if (f >= lo && f <= hi)
+                sum += std::norm (bins[k]);
+        }
+    }
+    return 10.0 * std::log10 (std::max (sum, 1.0e-30));
+}
+
+/** 2.5 - 4 kHz lift of a stereo run of x (same on both channels) over its last 2 s (dB). */
+double presenceLiftDb (const ClarityParams& p, const std::vector<float>& x)
+{
+    ClarityEnhancer ce;
+    prepareClarity (ce);
+    ce.setParams (p);
+    const auto out = runStereo (ce, x);
+    const int n = static_cast<int> (x.size()), from = n - ms (2000);
+    return bandPowerDb (out.ch[0], from, ms (2000), 2500.0, 4000.0) - bandPowerDb (x, from, ms (2000), 2500.0, 4000.0);
+}
+
+std::vector<float> scaled (std::vector<float> x, double db)
+{
+    for (auto& v : x)
+        v *= dbfs (db);
+    return x;
+}
+
+/** x through a 2nd-order Butterworth section (Svf.h). */
+std::vector<float> filtered (std::vector<float> x, FilterType type, double hz)
+{
+    const auto c = SvfCoeffs::make (type, hz, 0.70710678, 0.0, kFs);
+    SvfState s;
+    for (auto& v : x)
+        v = svfTick (c, s, v);
+    return x;
+}
+
+ClarityParams presenceOnly (PresenceMode mode)
+{
+    ClarityParams p;
+    p.presence = 1.0f;
+    p.presenceMode = mode;
+    return p;
+}
+} // namespace
+
+TEST_CASE ("Clarity (E07 step 3): Relative presence lifts pink the same at -45 and -12 dBFS (Absolute: 5 dB more at -45); at -18 dBFS both laws agree")
+{
+    // docs/11 E07 Done-when: pink at -45 and -12 dBFS, presence lifts within
+    // 1.5 dB. Presence 1 at 3.2 kHz, the 2.5 - 4 kHz lift over the last 2 s
+    // of 3 s.
+    const auto pink = pinkNoise (ms (3000), 1.0f, 55);
+    double lift[2][3] = {};
+    const double levels[] = { -45.0, -18.0, -12.0 };
+    for (int m = 0; m < 2; ++m)
+        for (int l = 0; l < 3; ++l)
+        {
+            lift[m][l] = presenceLiftDb (presenceOnly (static_cast<PresenceMode> (m)), scaled (pink, levels[l]));
+            measured (std::string (m == 0 ? "Absolute" : "Relative") + " presence 1, pink at " + std::to_string (static_cast<int> (levels[l]))
+                                    + " dBFS: 2.5-4 kHz lift",
+                                lift[m][l], "dB");
+        }
+    // The absolute law: 5 dB more on the quiet pink (the KnownGap).
+    CHECK_GE (lift[0][0] - lift[0][2], 4.0);
+    // The relative law: the Done-when row, with a margin.
+    CHECK_LE (std::abs (lift[1][0] - lift[1][2]), 0.5);
+    CHECK_GE (lift[1][1], 1.0);
+    // Calibrated at the chain's nominal level (-18 dBFS RMS, AutoLevel's
+    // default target): there the two laws give pink the same lift.
+    CHECK_NEAR (lift[1][1], lift[0][1], 0.3);
+}
+
+TEST_CASE ("Clarity (E07 step 3): Relative presence follows the programme's balance - a dark programme gets the full lift, a bright one none, and a band that jumps over the body is not lifted")
+{
+    const auto pink = scaled (pinkNoise (ms (3000), 1.0f, 77), -24.0);
+    const auto rel = presenceOnly (PresenceMode::Relative);
+    const double neutral = presenceLiftDb (rel, pink);
+    // Dark: pink through two low-pass sections at 800 Hz (the presence band
+    // ~20 dB further under the body). Bright: two high-passes at 1.5 kHz.
+    const double dark = presenceLiftDb (rel, filtered (filtered (pink, FilterType::LowPass, 800.0), FilterType::LowPass, 800.0));
+    const double bright = presenceLiftDb (rel, filtered (filtered (pink, FilterType::HighPass, 1500.0), FilterType::HighPass, 1500.0));
+    measured ("Relative presence 1: lift of pink / dark / bright programme", neutral, "dB");
+    measured ("  dark (LP 800 Hz x2)", dark, "dB");
+    measured ("  bright (HP 1.5 kHz x2)", bright, "dB");
+    CHECK_GE (dark, neutral + 2.0);
+    CHECK_GE (dark, 4.5); // the full 6 dB bell reads about 5 dB over 2.5 - 4 kHz
+    CHECK_LE (bright, 0.3);
+
+    // A 3.2 kHz noise burst 12 dB over the pink's band, 40 ms every 800 ms:
+    // the fast balance withdraws the lift within the burst (as the absolute
+    // law does on a loud band); between the bursts the programme keeps most
+    // of it (the bursts brighten its slow balance by about 2.5 dB).
+    const int len = ms (4800);
+    auto x = scaled (pinkNoise (len, 1.0f, 78), -24.0);
+    const auto burst = filtered (filtered (whiteNoise (len, 1.0f, 9), FilterType::HighPass, 2800.0), FilterType::LowPass, 3600.0);
+    const double gain = std::pow (10.0, (bandPowerDb (x, 0, len, 2500.0, 4000.0) - bandPowerDb (burst, 0, len, 2500.0, 4000.0) + 12.0) / 20.0);
+    for (size_t i = 0; i < x.size(); ++i)
+        if (static_cast<int> (i) % ms (800) < ms (40))
+            x[i] += static_cast<float> (gain) * burst[i];
+    ClarityEnhancer ce;
+    prepareClarity (ce);
+    ce.setParams (rel);
+    const auto out = runStereo (ce, x);
+    double inBurst = 0.0, outBurst = 0.0, between = 0.0;
+    int windows = 0;
+    for (int start = ms (1600); start + ms (800) <= len; start += ms (800), ++windows)
+    {
+        // 15 .. 40 ms of each burst (the 5 ms withdrawal is over).
+        for (int i = start + ms (15); i < start + ms (40); ++i)
+        {
+            inBurst += static_cast<double> (x[static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+            outBurst += static_cast<double> (out.ch[0][static_cast<size_t> (i)]) * out.ch[0][static_cast<size_t> (i)];
+        }
+        between += bandPowerDb (out.ch[0], start + ms (200), ms (500), 2500.0, 4000.0) - bandPowerDb (x, start + ms (200), ms (500), 2500.0, 4000.0);
+    }
+    const double burstLift = 10.0 * std::log10 (outBurst / inBurst);
+    between /= windows;
+    measured ("Relative presence 1: broadband lift inside a 3.2 kHz burst 12 dB over the band", burstLift, "dB");
+    measured ("  2.5-4 kHz lift between the bursts", between, "dB");
+    CHECK_LE (burstLift, 0.3);
+    CHECK_GE (between, 0.7);
+}
+
+TEST_CASE ("Clarity (E07 step 3): switching presenceMode glides without a click (also during the warm-up); Relative at presence 0 is an exact pass-through; the output does not depend on the block size")
+{
+    // The parameter-change programme of "Clarity: parameter changes are
+    // click-free": the two laws ask for about 3 dB apart on its 2 kHz tone.
+    const int n = ms (3000);
+    const auto a = sine (300.0, kFs, n, 0.25f);
+    const auto b = sine (2000.0, kFs, n, 0.1f);
+    std::vector<float> x (a.size());
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = a[i] + b[i];
+    const auto hp = SvfCoeffs::make (FilterType::HighPass, 15000.0, 0.7071, 0.0, kFs);
+    auto hfPeak = [&hp] (const Planar& y) {
+        double peak = 0.0;
+        for (const auto& c : y.ch)
+        {
+            SvfState s1, s2;
+            for (size_t i = 0; i < c.size(); ++i)
+            {
+                const float v = svfTick (hp, s2, svfTick (hp, s1, c[i]));
+                if (i >= static_cast<size_t> (ms (100)))
+                    peak = std::max (peak, static_cast<double> (std::abs (v)));
+            }
+        }
+        return peak;
+    };
+    auto run = [&] (int togglePeriodBlocks, double* toneDb) {
+        ClarityEnhancer ce;
+        prepareClarity (ce);
+        auto p = presenceOnly (PresenceMode::Absolute);
+        ce.setParams (p);
+        ce.reset();
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        const int block = 240; // 5 ms: a period of 3 blocks switches within the 60 ms warm-up
+        for (int pos = 0, k = 0; pos < n; pos += block, ++k)
+        {
+            if (togglePeriodBlocks > 0 && k % togglePeriodBlocks == togglePeriodBlocks / 2)
+            {
+                p.presenceMode = p.presenceMode == PresenceMode::Absolute ? PresenceMode::Relative : PresenceMode::Absolute;
+                ce.setParams (p);
+            }
+            ce.process (buf.block (pos, std::min (block, n - pos)));
+        }
+        if (toneDb != nullptr)
+            *toneDb = levelDb (buf.ch[0], n - ms (500), ms (500), 2000.0, 0.1);
+        return buf;
+    };
+    double absoluteDb = 0.0, relativeDb = 0.0;
+    const double steady = hfPeak (run (0, &absoluteDb));
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce);
+        ce.setParams (presenceOnly (PresenceMode::Relative));
+        relativeDb = levelDb (runStereo (ce, x, 240).ch[0], n - ms (500), ms (500), 2000.0, 0.1);
+    }
+    measured ("300 Hz + 2 kHz programme, 2 kHz gain: Absolute / Relative", absoluteDb, "dB");
+    measured ("  Relative", relativeDb, "dB");
+    CHECK_GE (std::abs (relativeDb - absoluteDb), 1.5); // the switch moves the bell
+    for (int period : { 50, 3 })
+    {
+        const double toggled = hfPeak (run (period, nullptr));
+        CHECK_LE (toggled, 1.0e-4); // -80 dBFS; programme at about -9 dBFS
+        CHECK_LE (toggled, std::max (4.0 * steady, 2.0e-5));
+    }
+
+    // Relative with presence 0: nothing runs.
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce);
+        ClarityParams p;
+        p.presenceMode = PresenceMode::Relative;
+        ce.setParams (p);
+        const auto out = runStereo (ce, x);
+        bool exact = true;
+        for (size_t i = 0; i < x.size(); ++i)
+            exact = exact && out.ch[0][i] == x[i];
+        CHECK (exact);
+    }
+
+    // Block-size invariance, a switch to Relative and back on a common boundary.
+    const int len = 4096 * 5;
+    Planar input (2, len);
+    {
+        const auto pink = pinkNoise (len, 0.05f, 12);
+        const auto noise = gatedNoise (len, 0.2f, 25.0, 90.0, 4);
+        for (int i = 0; i < len; ++i)
+        {
+            const size_t k = static_cast<size_t> (i);
+            input.ch[0][k] = pink[k] + noise[k];
+            input.ch[1][k] = pink[k] - 0.5f * noise[k];
+        }
+    }
+    auto runBlocks = [&] (int blockSize) {
+        ClarityEnhancer ce;
+        prepareClarity (ce, kFs, 2, 4096);
+        auto p = allOn();
+        p.presenceMode = PresenceMode::Relative;
+        ce.setParams (p);
+        ce.reset();
+        Planar buf = clone (input);
+        for (int pos = 0; pos < len; pos += blockSize)
+        {
+            if (pos == 6144 || pos == 12288)
+            {
+                p.presenceMode = pos == 6144 ? PresenceMode::Absolute : PresenceMode::Relative;
+                ce.setParams (p);
+            }
+            ce.process (buf.block (pos, std::min (blockSize, len - pos)));
+        }
+        return buf;
+    };
+    const auto ref = runBlocks (4096 / 2);
+    for (int bs : { 1, 3, 12, 16, 48, 256, 1024 }) // all divide 6144
+        CHECK (maxAbsDiff (runBlocks (bs), ref) == 0.0);
 }

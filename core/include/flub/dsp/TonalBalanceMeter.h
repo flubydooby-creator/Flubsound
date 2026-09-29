@@ -15,10 +15,22 @@
 //   harsh 5 - 10 kHz, air 10 - 16 kHz (the air band only where 16 kHz is
 //   under 0.45 fs). Both signals stereo, squares summed over the channels.
 //   The chain accumulates both sides per sample and closes a window on the
-//   governor's 10 ms tick (tick()): each band's window mean joins a power
-//   one-pole with tau = kAverageSeconds (in samples, so a short window after
-//   a restarted grid weighs less). A window whose reference mids are under
-//   kSilencePower (a pause) is not averaged: the readings hold.
+//   governor's 10 ms tick (tick()): each band's window mean, divided by the
+//   programme's level, joins a one-pole with tau = kAverageSeconds (in
+//   samples, so a short window after a restarted grid weighs less). The
+//   level is the reference's power summed over the bands, through a
+//   kLevelSeconds one-pole of the windows, never under kLevelFloorPower;
+//   both sides are divided by the same level, so a steady programme reads
+//   as a plain power average would. What the division changes (docs/11
+//   E07): every passage weighs the same whatever its level, so the lifts of
+//   quiet passages count as much as those of loud ones - the upward
+//   lifts: the upward compressor's (it lifts a quiet passage as a whole,
+//   which brightens the programme where its quiet passages are brighter
+//   than its loud ones: a game's footsteps and foliage between dark
+//   explosions), the inverse-level presence's and the dynamic EQ's
+//   boost-below bands'. A plain power average heard only the loud
+//   passages. A window whose reference mids are under kSilencePower (a
+//   pause) is not averaged: the readings (and the level) hold.
 //   Reading, per band b over the mids:
 //     lift_b = 10 log10 ((out_b / ref_b) / (out_mids / ref_mids))   (dB)
 //   the tilt the chain added (a broadband gain reads 0 in every band).
@@ -49,6 +61,8 @@ public:
     static constexpr double kAverageSeconds = 1.0;
     static constexpr double kMinSeconds = 0.5;
     static constexpr double kSilencePower = 1.0e-9; // reference mids under -90 dB
+    static constexpr double kLevelSeconds = 0.05;    // the level the windows are divided by
+    static constexpr double kLevelFloorPower = 1.0e-7; // -70 dB: quieter passages weigh less
     static constexpr float kBandRangeDb = 60.0f;
     /** getLiftDb() of a band without a reading. */
     static constexpr float kNoReading = kMinusInfDb;
@@ -83,6 +97,7 @@ private:
     std::array<std::array<SvfCoeffs, 2>, kNumBands> highPass {}, lowPass {}; // two Butterworth sections each
     std::array<bool, kNumBands> measured {};
     Side reference, output;
+    double level = 0.0; // the reference's smoothed power over the bands (0 = none yet)
     std::int64_t windowSamples = 0, averagedSamples = 0, minSamples = 24000;
 };
 } // namespace flub

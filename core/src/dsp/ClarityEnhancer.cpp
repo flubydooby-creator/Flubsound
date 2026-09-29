@@ -101,7 +101,7 @@ constexpr float kPresenceReleaseMs = 100.0f;
 // noise gets the lift the absolute law gives it at the chain's nominal
 // level (-18 dBFS RMS, AutoLevel's default target): +1.9 dB at presence 1.
 constexpr double kBodyLowHz = 200.0, kBodyHighHz = 1000.0;
-constexpr float kPresenceRelativeDb = 9.6f;  // balance (band over body, dB) at which the boost is gone
+constexpr float kPresenceRelativeDb = 8.0f;  // balance (band over body, dB) at which the boost is gone
 constexpr float kBalanceMs = 1000.0f;        // slow followers
 constexpr float kBalanceWarmMs = 60.0f;      // 3 x the fast detectors' time constant
 

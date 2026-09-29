@@ -584,3 +584,141 @@ TEST_CASE ("Chain: at protection strength Normal the tonal scale reaches the mac
     CHECK (off.effectiveValue (ClarityPresence) == 1.0f);
     CHECK (std::abs (off.getPredictedBoostDb() - predicted) <= 0.01f);
 }
+
+// =============================================================================
+// docs/11 E07: the rule counts the upward lifts. The meter divides every
+// window by the programme's level, so a quiet passage weighs as much as a
+// loud one: what lifts the quiet passages - the inverse-level presence, the
+// dynamic EQ's boost-below bands, the upward compressor - is no longer
+// hidden under the loud passages' power.
+namespace
+{
+/** 0.5 s passages, alternately `loud` and `quiet` (the first is loud). */
+std::vector<float> alternate (const std::vector<float>& loud, const std::vector<float>& quiet)
+{
+    std::vector<float> x (loud.size());
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] = (static_cast<int> (i) / samplesOf (0.5)) % 2 == 0 ? loud[i] : quiet[i];
+    return x;
+}
+
+bool quietPassage (int i) { return (i / samplesOf (0.5)) % 2 == 1; }
+
+/** The meter over `ref` / `out` (stereo copies), 10 ms ticks. */
+void meterOver (TonalBalanceMeter& m, const std::vector<float>& ref, const std::vector<float>& out)
+{
+    m.prepare (kFs);
+    std::vector<float> rl (ref), rr (ref), ol (out), orr (out);
+    for (size_t p = 0; p + 480 <= ref.size(); p += 480)
+    {
+        float* r[2] = { rl.data() + p, rr.data() + p };
+        float* o[2] = { ol.data() + p, orr.data() + p };
+        m.processReference (AudioBlock (r, 2, 480));
+        m.processOutput (AudioBlock (o, 2, 480));
+        m.tick();
+    }
+}
+
+/** What a plain power average over [from, end) reads: presence (2 - 5 kHz) lift over the 200 Hz - 1 kHz lift, FFT. */
+double powerAverageLiftDb (const std::vector<float>& ref, const std::vector<float>& out, int from)
+{
+    const int end = static_cast<int> (ref.size());
+    return (db (bandPowerOver (out, from, end, 2000.0, 5000.0)) - db (bandPowerOver (ref, from, end, 2000.0, 5000.0)))
+           - (db (bandPowerOver (out, from, end, 200.0, 1000.0)) - db (bandPowerOver (ref, from, end, 200.0, 1000.0)));
+}
+} // namespace
+
+TEST_CASE ("TonalBalanceMeter (E07): every passage weighs the same - the lifts of quiet passages (inverse-level presence, the upward compressor) count; a plain power average hid them")
+{
+    const int n = samplesOf (6.0);
+    const auto pink = pinkNoise (n, 1.0f, 31);
+    const float loud = std::pow (10.0f, -12.0f / 20.0f), quiet = std::pow (10.0f, -45.0f / 20.0f);
+    TonalBalanceMeter m;
+
+    // (a) The inverse-level presence: the +6 dB bell on the quiet passages only.
+    const auto ref = alternate (scaled (pink, loud), scaled (pink, quiet));
+    const auto belled = filtered (ref, FilterType::Bell, 3200.0, 0.8, 6.0);
+    std::vector<float> out (ref);
+    for (int i = 0; i < n; ++i)
+        if (quietPassage (i))
+            out[static_cast<size_t> (i)] = belled[static_cast<size_t> (i)];
+    meterOver (m, ref, out);
+    const float presence = m.getLiftDb (TonalBalanceMeter::Presence);
+    const double plain = powerAverageLiftDb (ref, out, samplesOf (1.0));
+    std::printf ("    measured +6 dB bell on the quiet passages (-45 against -12 dBFS pink): meter %.2f dB, plain power average %.2f dB\n", presence, plain);
+    CHECK (presence >= 1.5f); // half the time lifted by the bell's ~4.4 dB band lift
+    CHECK (plain <= 0.1);
+
+    // (b) The upward compressor: the quiet passages lifted 8 dB as a whole,
+    // where they are brighter than the loud ones (dark explosions, quiet
+    // footsteps and foliage). Each passage keeps its own balance; the
+    // programme brightens.
+    const auto dark = filtered (filtered (pink, FilterType::LowPass, 2000.0, 0.7071, 0.0), FilterType::LowPass, 2000.0, 0.7071, 0.0);
+    const auto ref2 = alternate (scaled (dark, loud), scaled (pink, quiet));
+    auto out2 = ref2;
+    for (int i = 0; i < n; ++i)
+        if (quietPassage (i))
+            out2[static_cast<size_t> (i)] *= std::pow (10.0f, 8.0f / 20.0f);
+    meterOver (m, ref2, out2);
+    const float upward = m.getLiftDb (TonalBalanceMeter::Presence);
+    const double plain2 = powerAverageLiftDb (ref2, out2, samplesOf (1.0));
+    std::printf ("    measured 8 dB upward lift of bright quiet passages between dark loud ones: meter %.2f dB, plain power average %.2f dB\n", upward,
+                 plain2);
+    CHECK (upward >= 1.5f);
+    CHECK (plain2 <= 0.3);
+
+    // (c) The same lift on every passage (a broadband gain on the whole
+    // programme) still reads nothing.
+    meterOver (m, ref2, scaled (ref2, 2.5f));
+    for (int b = TonalBalanceMeter::Presence; b < TonalBalanceMeter::kNumBands; ++b)
+        CHECK (std::abs (m.getLiftDb (b)) <= 0.01f);
+}
+
+TEST_CASE ("Chain (E07): at protection strength Normal the tonal rule sees the presence the quiet passages get - Music Boost 100 + Clarity 100 on -12 / -45 dBFS pink passages")
+{
+    // The absolute presence law gives the -45 dBFS passages its full lift
+    // and the -12 dBFS ones almost none (docs/11 E07's presence row).
+    const int n = samplesOf (8.0);
+    const auto pink = pinkNoise (n, 1.0f, 44);
+    const auto x = alternate (scaled (pink, std::pow (10.0f, -12.0f / 20.0f)), scaled (pink, std::pow (10.0f, -45.0f / 20.0f)));
+    const auto quietLift = [&] (const std::vector<float>& y) {
+        // Presence over mids lift in the quiet passages of the last 4 s (their middle 400 ms).
+        double po = 0.0, pi = 0.0, mo = 0.0, mi = 0.0;
+        for (int a = samplesOf (4.5); a + samplesOf (0.5) <= n; a += samplesOf (1.0))
+        {
+            const int b = a + samplesOf (0.05), len = 4096;
+            po += bandPower (y, b, len, 2000.0, 5000.0) + bandPower (y, b + len, len, 2000.0, 5000.0);
+            pi += bandPower (x, b, len, 2000.0, 5000.0) + bandPower (x, b + len, len, 2000.0, 5000.0);
+            mo += bandPower (y, b, len, 200.0, 1000.0) + bandPower (y, b + len, len, 200.0, 1000.0);
+            mi += bandPower (x, b, len, 200.0, 1000.0) + bandPower (x, b + len, len, 200.0, 1000.0);
+        }
+        return (db (po) - db (pi)) - (db (mo) - db (mi));
+    };
+    double lift[3] = {};
+    float scale[3] = {}, reading[3] = {};
+    for (const auto s : { ProtectionStrength::Off, ProtectionStrength::Normal, ProtectionStrength::Strict })
+    {
+        ParameterStore store;
+        store.set (BoostIntensity, 1.0f);
+        store.set (Macro3, 1.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 512, 2 });
+        chain.setProtectionStrength (s);
+        const auto y = runChain (chain, x);
+        // The chain's latency is under 5 ms: inside the 50 ms margin of each window.
+        const auto k = static_cast<size_t> (s);
+        lift[k] = quietLift (y);
+        scale[k] = chain.getGovernorTonalScale();
+        reading[k] = chain.getTonalLiftDb (TonalBalanceMeter::Presence);
+        std::printf ("    measured strength %d: quiet passages' presence over mids lift %.2f dB, tonal scale %.3f, meter %.2f dB\n", static_cast<int> (s),
+                     lift[k], scale[k], reading[k]);
+    }
+    // The rule sees the quiet passages' lift and holds the programme to the
+    // Music budget (+3 dB at Normal, +1.5 dB at Strict); a plain power
+    // average read the loud passages only and left the scale at 1.
+    CHECK (reading[1] >= 1.5f);
+    CHECK (scale[1] < 1.0f);
+    CHECK (scale[2] < 0.6f);
+    CHECK (lift[2] <= lift[0] - 1.5);
+    CHECK (reading[2] <= 1.5f);
+}

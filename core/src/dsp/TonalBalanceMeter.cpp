@@ -35,6 +35,7 @@ void TonalBalanceMeter::reset() noexcept FLUB_NONBLOCKING
         side->average.fill (0.0);
     }
     windowSamples = averagedSamples = 0;
+    level = 0.0;
 }
 
 void TonalBalanceMeter::accumulate (const AudioBlock& block, Side& side) noexcept FLUB_NONBLOCKING
@@ -72,13 +73,23 @@ void TonalBalanceMeter::tick() noexcept FLUB_NONBLOCKING
     const double mean = reference.window[static_cast<size_t> (Mids)] / static_cast<double> (n);
     if (mean > kSilencePower)
     {
+        // The programme's level: the reference over the bands, smoothed
+        // (the first window sets it). Both sides are divided by it, so
+        // every passage weighs the same (see the header comment).
+        double total = 0.0;
+        for (int b = 0; b < kNumBands; ++b)
+            total += reference.window[static_cast<size_t> (b)] / static_cast<double> (n);
+        const double keepLevel = std::exp (-static_cast<double> (n) / (kLevelSeconds * sr));
+        level = level > 0.0 ? keepLevel * level + (1.0 - keepLevel) * total : total;
+        const double weight = 1.0 / (static_cast<double> (n) * std::max (level, kLevelFloorPower));
+
         // A one-pole in samples: a window of n samples moves it by 1 - a^n.
         const double keep = std::exp (-static_cast<double> (n) / (kAverageSeconds * sr));
         for (Side* side : { &reference, &output })
             for (int b = 0; b < kNumBands; ++b)
             {
                 const auto bi = static_cast<size_t> (b);
-                side->average[bi] = keep * side->average[bi] + (1.0 - keep) * side->window[bi] / static_cast<double> (n);
+                side->average[bi] = keep * side->average[bi] + (1.0 - keep) * side->window[bi] * weight;
             }
         averagedSamples += n;
     }
