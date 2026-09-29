@@ -219,6 +219,20 @@ std::vector<Info> buildLayout()
     set (ContourLevelDb, v4 (make ("contour.level", "Listening Level", "Contour", Unit::Db, -60.0f, 0.0f, 0.0f)));
     set (ContourMaxLiftDb, v4 (make ("contour.maxLift", "Contour Max Lift", "Contour", Unit::Db, 0.0f, 24.0f, 18.0f)));
 
+    // ---- Warmth (added in layout version 5, docs/11 E14) ----------------------------------------
+    auto v5 = [] (Info i) {
+        i.sinceVersion = 5;
+        return i;
+    };
+    // The level-compensated tone tilt before the saturator (ToneTilt.h); the
+    // Music Warmth macro adds up to 1. warmth.tapeGrit keeps the v1 Warmth
+    // (tape drive +9 dB, bass boost and harmonics, no tilt) for presets
+    // built on it. Both 0 by default: every preset saved before them that
+    // leaves Warmth at 0 sounds as it did (one that raises Warmth gets the
+    // new Warmth unless it sets warmth.tapeGrit).
+    set (WarmthTone, v5 (make ("warmth.tone", "Warmth Tone", "Warmth", Unit::Percent, 0.0f, 1.0f, 0.0f)));
+    set (WarmthTapeGrit, v5 (toggle ("warmth.tapeGrit", "Warmth: Tape Grit", "Warmth", false)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

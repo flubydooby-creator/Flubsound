@@ -173,6 +173,12 @@ struct AudioSessionInfo
     std::string displayName;    // friendly name when available
     std::string currentEndpointId;
     bool isActive = false;      // currently producing audio
+    // docs/11 E47 (route journal, doubling guard); empty / 0 where the OS
+    // implementation does not fill them (Linux, macOS).
+    std::string executablePath;          // absolute path of the process image (Windows)
+    uint64_t processStartTime = 0;       // process creation time in OS units (Windows FILETIME, 100 ns); 0 = unknown.
+                                         // With processId it names one process: a reused pid has another start time.
+    std::vector<std::string> activeEndpointIds; // every endpoint the process has an active session on (Windows); empty = only currentEndpointId known
 };
 
 /** Per-application routing: which output endpoint an app renders to. The
@@ -232,6 +238,37 @@ public:
         status.clear();
         return true;
     }
+
+    /** docs/11 E47: one active output endpoint. */
+    struct OutputEndpoint
+    {
+        std::string id;   // the id AudioSessionInfo::currentEndpointId uses (Windows: the MMDevice id)
+        std::string name; // the OS's friendly name ("Headset Earphone (Stealth 600X Gen 2 USB)")
+
+        bool operator== (const OutputEndpoint&) const = default;
+    };
+
+    /** docs/11 E47: the active output endpoints, the system default first,
+        then in the OS's enumeration order (the order JUCE's WASAPI device
+        type lists them). Feeds the doubling guard (findOutputEndpointId) and
+        its fix (a spare endpoint to move an app to). Blocks like
+        enumerateSessions (background thread). Default: none known. */
+    virtual std::vector<OutputEndpoint> listOutputEndpoints() { return {}; }
+
+    /** docs/11 E47: the id of the endpoint the audio layer calls deviceName
+        (a JUCE output device name), empty when none matches (an ASIO driver,
+        a device that went away, a router that lists no endpoints). The
+        default matches listOutputEndpoints() with matchOutputDeviceName. */
+    virtual std::string findOutputEndpointId (const std::string& deviceName)
+    {
+        return matchOutputDeviceName (listOutputEndpoints(), deviceName);
+    }
+
+    /** JUCE names WASAPI devices by their friendly names in listOutputEndpoints()
+        order and appends " (2)", " (3)" ... to later duplicates
+        (StringArray::appendNumbersToDuplicates, case-sensitive); this undoes
+        that: the id of the endpoint named deviceName, empty if none. Pure. */
+    static std::string matchOutputDeviceName (const std::vector<OutputEndpoint>& endpoints, const std::string& deviceName);
 
     static std::unique_ptr<AppAudioRouter> create();
 };
@@ -535,5 +572,141 @@ inline RealtimeKitResult RealtimeScheduling::requestRealtimeKit (uint64_t, int)
     return result;
 }
 inline std::vector<SpeakerPosition> AudioChannelMaps::queryInputPositions (const std::string&, const std::string&, int) { return {}; }
+#endif
+
+// ---------------------------------------------------------------------------
+/** docs/11 E48: Flubsound's own PipeWire node (Linux, built when pkg-config
+    finds libpipewire-0.3; elsewhere and without it isSupported() == false).
+    One pw_filter with PW_FILTER_FLAG_RT_PROCESS: an input port group per
+    strip (Game 7.1, Music, Chat, System) and an output port group. The
+    flubsound_<strip> null sinks it needs are created by the node when they
+    do not exist yet (they vanish with the process, so a crash leaves no
+    dead sink behind and the desktop moves their streams to the default
+    output). The node links each sink's monitor to its strip's ports and its
+    outputs to the output sink itself, through libpipewire registry events
+    (no pw-dump polling, no WirePlumber policy needed), and asks for the
+    latency profile's quantum as its own node.latency. */
+struct NativeAudioNodeConfig
+{
+    struct Strip
+    {
+        std::string name;                   // "Game": the strip, and the port names ("game_FL")
+        std::string sinkName;               // "flubsound_game": the null sink the strip reads
+        std::string description;            // "Flubsound Game": the sink's name in desktop mixers
+        std::vector<std::string> positions; // audio.channel of each input port, e.g. FL FR FC LFE RL RR SL SR
+
+        bool operator== (const Strip&) const = default;
+    };
+
+    enum class Latency : uint8_t
+    {
+        Balanced,  // node.latency 256/48000, a request (Quality and Balanced)
+        LowLatency // node.latency 128/48000 with node.lock-quantum
+    };
+
+    std::vector<Strip> strips;   // empty = Game 7.1, Music, Chat, System (platform/linux's sinks)
+    int outputChannels = 2;      // 1..8 output ports (2 = FL FR)
+    std::string outputTarget;    // node.name of the sink to play to; empty = the default output ("default" metadata)
+    bool createSinks = true;     // create the missing flubsound_<strip> sinks (false: link only what exists)
+    Latency latency = Latency::Balanced;
+    uint32_t sampleRate = 48000; // node.rate request; the graph may run at another rate (see NativeAudioNodeStatus)
+    int maxBlockFrames = 1024;   // largest block the callback gets; a larger quantum is split
+    std::string nodeName = "flubsound_engine";
+    std::string nodeDescription = "Flubsound Engine";
+};
+
+struct NativeAudioNodeStatus
+{
+    bool running = false;            // connected, the filter exists
+    uint32_t nodeId = 0;             // the filter's PipeWire node id; 0 = not yet known
+    uint32_t quantumFrames = 0;      // the graph's quantum at the last cycle; 0 = no cycle yet
+    uint32_t sampleRate = 0;         // the graph's rate at the last cycle; 0 = no cycle yet
+    uint64_t cycles = 0;             // process cycles so far
+    int inputLinksWanted = 0;        // sink monitor -> strip port links the plan asks for
+    int inputLinksMade = 0;          // ... of which the graph has
+    int outputLinksWanted = 0;       // output port -> output sink links
+    int outputLinksMade = 0;
+    std::string outputSink;          // node.name the outputs go to; empty = none
+    std::vector<std::string> createdSinks; // sinks this node created (they go away with it)
+    std::string message;             // user-presentable problems; empty when everything is linked
+};
+
+class NativeAudioNode
+{
+public:
+    class Callback
+    {
+    public:
+        virtual ~Callback() = default;
+
+        /** Before the first nodeProcess() of a run, on the thread that calls
+            start(): prepare for up to maxBlockFrames per call. */
+        virtual void nodeStarting (double sampleRate, int maxBlockFrames) = 0;
+
+        /** PipeWire's real-time data thread, once or more per graph cycle
+            (a quantum above maxBlockFrames is split). inputs: every strip's
+            channels in the config's order (Game FL..SR, Music FL FR, ...),
+            outputs: the output channels; never null (a port without a buffer
+            reads silence / writes to scratch). No allocation, lock or IO. */
+        virtual void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING = 0;
+
+        /** After the last nodeProcess(), on the thread that calls stop(). */
+        virtual void nodeStopped() = 0;
+    };
+
+    virtual ~NativeAudioNode() = default;
+    virtual bool isSupported() const = 0;
+
+    /** Why isSupported() == false (user-presentable); empty otherwise. */
+    virtual std::string unsupportedReason() const = 0;
+
+    /** Connects to PipeWire, creates the missing sinks and the filter, and
+        starts linking. Blocks for server round trips (at most ~2 s): message
+        thread. false with a user-presentable 'error' when there is no
+        PipeWire server or the filter cannot be created. The callback must
+        outlive the run. */
+    virtual bool start (const NativeAudioNodeConfig& config, Callback& callback, std::string& error) = 0;
+
+    /** Stops the filter (the callback is not called afterwards), removes the
+        links and sinks it made and disconnects. Idempotent. */
+    virtual void stop() = 0;
+
+    virtual bool isRunning() const = 0;
+
+    /** Changes node.latency / node.lock-quantum in place while running:
+        PipeWire moves the graph to the new quantum between two cycles, with
+        no re-open or dropout. */
+    virtual bool setLatency (NativeAudioNodeConfig::Latency latency) = 0;
+
+    /** Plays to another sink (empty = the default output) by moving the
+        output links. */
+    virtual bool setOutputTarget (const std::string& sinkName) = 0;
+
+    /** For the UI (message thread, a few times a second); never the audio
+        thread. */
+    virtual NativeAudioNodeStatus getStatus() const = 0;
+
+    static std::unique_ptr<NativeAudioNode> create();
+};
+
+#if ! defined(__linux__)
+class UnsupportedNativeAudioNode final : public NativeAudioNode
+{
+public:
+    bool isSupported() const override { return false; }
+    std::string unsupportedReason() const override { return "The native PipeWire node exists on Linux only"; }
+    bool start (const NativeAudioNodeConfig&, Callback&, std::string& error) override
+    {
+        error = unsupportedReason();
+        return false;
+    }
+    void stop() override {}
+    bool isRunning() const override { return false; }
+    bool setLatency (NativeAudioNodeConfig::Latency) override { return false; }
+    bool setOutputTarget (const std::string&) override { return false; }
+    NativeAudioNodeStatus getStatus() const override { return {}; }
+};
+
+inline std::unique_ptr<NativeAudioNode> NativeAudioNode::create() { return std::make_unique<UnsupportedNativeAudioNode>(); }
 #endif
 } // namespace flub::platform

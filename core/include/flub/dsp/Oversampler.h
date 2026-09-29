@@ -1,4 +1,4 @@
-// Flubsound Pro - linear-phase polyphase oversampling (1x / 2x / 4x).
+// Flubsound Pro - linear-phase polyphase oversampling (1x / 2x / 4x / 8x).
 //
 // Every nonlinearity (soft clipper, saturation) runs oversampled so that the
 // harmonics it creates above the original Nyquist are filtered out instead of
@@ -34,6 +34,22 @@
 // 44.1 kHz -32.2 -> -78.5 dBc (Quality), -32.3 -> -74.2 dBc (Balanced / Low
 // Latency); 48 kHz -41.2 -> -83.2 / -41.1 -> -78.0 dBc (test_signal_hygiene.cpp).
 // From 176.4 kHz up the fixed 2x designs stay.
+//
+// Harder drive (docs/11 E10 Phase 2): a hard-driven curve is close to a
+// square wave, whose harmonics fall only 6 dB per octave, so at 24 dB drive
+// the 17th / 19th harmonics of 10 kHz fold straight into the audible band at
+// 4x (-28 dBc). Two tools, both in Design: factor 8 (a third half-band stage,
+// 9 taps: at 8x it only has to reject what would fold onto 0 - 20 kHz, so
+// its transition runs from 20 kHz to the image band) and `adaa`, for a
+// curve evaluated with first-order antiderivative anti-aliasing (the
+// Saturator's curves). ADAA1 is the curve followed by a one-sample box
+// filter, whose sinc response nulls every multiple of the oversampled rate,
+// i.e. exactly where the harmonics that fold near 0 Hz come from (-28 ->
+// about -50 dBc at 4x, and below -70 dBc at 8x); it delays the curve by half
+// an oversampled sample, which stage 1's decimator takes back: with `adaa`
+// its taps are centred 1 / factor of a 2x-rate sample early (a Kaiser
+// windowed sinc at a fractional centre), so the deviation stays aligned
+// with the exactly delayed dry path and the latency is unchanged.
 //
 // A minimum-phase / polyphase-IIR variant (lower latency, non-linear phase)
 // is the planned alternative for the "Competitive" latency profile.
@@ -92,12 +108,14 @@ private:
 /** Stage-1 downsampler (2x -> base) of the rate-aware designs: a general
     Kaiser-windowed-sinc low-pass of 4m + 1 taps at the higher rate, so the
     transition band can sit below the base Nyquist (a half-band's is centred
-    on it). Delay m base-rate samples. */
+    on it). Delay m base-rate samples, less `advance` higher-rate samples. */
 class DecimatorStage
 {
 public:
-    /** Allocates. cutoff = -6 dB point as a fraction of the higher rate. */
-    void prepare (int numChannels, int m, double cutoff, double kaiserBeta);
+    /** Allocates. cutoff = -6 dB point as a fraction of the higher rate;
+        advance (0 .. 1) = higher-rate samples by which the taps are centred
+        early, to take back a fractional delay of what feeds the stage. */
+    void prepare (int numChannels, int m, double cutoff, double kaiserBeta, double advance = 0.0);
     void reset() noexcept;
 
     /** in: 2n samples at the higher rate; out: n samples at the lower rate. */
@@ -120,18 +138,24 @@ public:
     enum class Profile { Quality, Balanced, LowLatency };
 
     /** Factor and stage designs: stage 1 (base <-> 2x) has 4 d1 + 1 taps,
-        stage 2 (2x <-> 4x) 4 d2 + 1, each a Kaiser-windowed half-band sinc
-        with the given beta. With m1 > 0 stage 1 downsamples through a
-        DecimatorStage of 4 m1 + 1 taps (cutoff1 re the 2x rate) instead of
-        its half-band. Round trip in base-rate samples: d1 + (m1 or d1),
-        plus d2 at factor 4. */
+        stage 2 (2x <-> 4x) 4 d2 + 1, stage 3 (4x <-> 8x) 4 d3 + 1, each a
+        Kaiser-windowed half-band sinc with the given beta. With m1 > 0
+        stage 1 downsamples through a DecimatorStage of 4 m1 + 1 taps
+        (cutoff1 re the 2x rate) instead of its half-band. Round trip in
+        base-rate samples: d1 + (m1 or d1), plus d2 at factor 4 and 8, plus
+        d3 / 2 at factor 8 (d3 even). adaa: the curve between upsample()
+        and downsample() is first-order ADAA (half an oversampled sample
+        late); stage 1's decimator (m1 > 0 required) takes that back. */
     struct Design
     {
-        int factor = 2;      // 1, 2 or 4
+        int factor = 2;      // 1, 2, 4 or 8
         int d1 = 16, d2 = 4; // half-band half-orders
         double beta1 = 9.0, beta2 = 8.0;
         int m1 = 0;          // 0: stage 1 downsamples with its half-band
         double cutoff1 = 0.25, betaDown1 = 9.0;
+        int d3 = 2;          // factor 8 only
+        double beta3 = 5.0;
+        bool adaa = false;
 
         bool operator== (const Design&) const = default;
     };
@@ -146,7 +170,7 @@ public:
 
     /** Allocates. factor must be 1, 2 or 4. */
     void prepare (int numChannels, int maxBlockSize, int factor, Quality quality = Quality::High);
-    /** Allocates. design.factor must be 1, 2 or 4, d1 / d2 >= 1. */
+    /** Allocates. design.factor must be 1, 2, 4 or 8, d1 / d2 >= 1, d3 >= 2 and even. */
     void prepare (int numChannels, int maxBlockSize, const Design& design);
     void reset() noexcept;
 
@@ -164,12 +188,12 @@ public:
 
 private:
     int factor = 1, channels = 0, maxBlock = 0, latency = 0;
-    HalfbandStage stage1, stage2;
+    HalfbandStage stage1, stage2, stage3;
     DecimatorStage down1; // stage-1 downsampler when the design has m1 > 0
     bool useDecimator = false;
-    std::vector<float> mid, high; // per channel planar: [ch * stride]
-    int midStride = 0, highStride = 0;
-    std::array<float*, kMaxChannels> midPtrs {}, highPtrs {};
+    std::vector<float> mid, high, top; // per channel planar: [ch * stride] at 2x, 4x, 8x
+    int midStride = 0, highStride = 0, topStride = 0;
+    std::array<float*, kMaxChannels> midPtrs {}, highPtrs {}, topPtrs {};
     int lastNumSamples = 0;
 };
 } // namespace flub

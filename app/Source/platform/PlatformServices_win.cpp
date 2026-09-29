@@ -434,6 +434,18 @@ std::wstring processImagePath (DWORD processId)
     return path;
 }
 
+/** docs/11 E47: the process's creation time (FILETIME, 100 ns since 1601),
+    which tells a reused process id from the process the route journal
+    recorded; 0 when the process cannot be opened. */
+uint64_t processCreationTime (DWORD processId)
+{
+    ScopedHandle process (OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId));
+    FILETIME created {}, exited {}, kernel {}, user {};
+    if (process.handle == nullptr || ! GetProcessTimes (process.handle, &created, &exited, &kernel, &user))
+        return 0;
+    return (static_cast<uint64_t> (created.dwHighDateTime) << 32) | created.dwLowDateTime;
+}
+
 std::wstring fileNameOf (const std::wstring& path)
 {
     const auto slash = path.find_last_of (L"\\/");
@@ -1055,9 +1067,16 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
           -> IAudioSessionControl(2): process id, display name, state.
     A session lives on the endpoint the app renders to, so currentEndpointId
     tells the UI where each app is routed right now (e.g. "Flubsound Game").
-    Sessions are merged per process (an active session wins). The system
+    Sessions are merged per process (an active session wins; every endpoint
+    with an active session is kept in activeEndpointIds). The system
     sounds session and Flubsound's own sessions are skipped - routing our
     own output into our virtual devices would create a feedback loop.
+    docs/11 E47: each session also carries the process's image path and
+    creation time (GetProcessTimes; with the pid it names one process for the
+    route journal), and listOutputEndpoints() lists the active render
+    endpoints in JUCE's WASAPI order (default first), so AppRouting can tell
+    that a captured app still plays to the headset Flubsound plays to (the
+    doubling guard) and name the other devices it could play to instead.
 
     canList() is true: listing works everywhere. Moving needs the opt-in
     undocumented adapter above, so canMoveEndpoint() (and isSupported()) is
@@ -1159,6 +1178,8 @@ public:
                         info.isActive = true;
                         info.currentEndpointId = deviceIdUtf8;
                     }
+                    if (active && std::find (info.activeEndpointIds.begin(), info.activeEndpointIds.end(), deviceIdUtf8) == info.activeEndpointIds.end())
+                        info.activeEndpointIds.push_back (deviceIdUtf8);
                     continue;
                 }
 
@@ -1166,8 +1187,12 @@ public:
                 info.processId = static_cast<uint32_t> (processId);
                 info.isActive = active;
                 info.currentEndpointId = deviceIdUtf8;
+                if (active)
+                    info.activeEndpointIds.push_back (deviceIdUtf8);
 
                 const auto imagePath = processImagePath (processId);
+                info.executablePath = toUtf8 (imagePath);
+                info.processStartTime = processCreationTime (processId);
                 info.executableName = toUtf8 (fileNameOf (imagePath));
                 info.displayName = sessionDisplayName (control.get());
                 if (info.displayName.empty())
@@ -1181,6 +1206,53 @@ public:
         }
 
         return sessions;
+    }
+
+    /** The active render endpoints in the order JUCE's WASAPI device type
+        lists them: the default console endpoint first, the others in
+        enumeration order (see AppAudioRouter::matchOutputDeviceName). */
+    std::vector<OutputEndpoint> listOutputEndpoints() override
+    {
+        std::vector<OutputEndpoint> endpoints;
+
+        const ScopedComInit com;
+        if (! com.isUsable())
+            return endpoints;
+
+        std::string error;
+        auto enumerator = createDeviceEnumerator (error);
+        if (! enumerator)
+            return endpoints;
+
+        std::wstring defaultId;
+        {
+            ComPtr<IMMDevice> device;
+            if (SUCCEEDED (enumerator->GetDefaultAudioEndpoint (eRender, eConsole, device.put())))
+                defaultId = endpointId (device.get());
+        }
+
+        ComPtr<IMMDeviceCollection> devices;
+        UINT count = 0;
+        if (FAILED (enumerator->EnumAudioEndpoints (eRender, DEVICE_STATE_ACTIVE, devices.put())) || FAILED (devices->GetCount (&count)))
+            return endpoints;
+
+        for (UINT i = 0; i < count; ++i)
+        {
+            ComPtr<IMMDevice> device;
+            if (FAILED (devices->Item (i, device.put())))
+                continue;
+
+            const auto id = endpointId (device.get());
+            if (id.empty())
+                continue;
+            OutputEndpoint endpoint { toUtf8 (id), toUtf8 (endpointFriendlyName (device.get())) };
+            if (! defaultId.empty() && id == defaultId)
+                endpoints.insert (endpoints.begin(), std::move (endpoint));
+            else
+                endpoints.push_back (std::move (endpoint));
+        }
+
+        return endpoints;
     }
 
     bool setAppEndpoint (uint32_t processId, const std::string& endpointIdOrName, std::string& error) override

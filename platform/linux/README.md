@@ -78,7 +78,8 @@ Sink names and properties:
   `-`, max 255 characters) and is single-quoted as well. Nothing unsanitised
   ever reaches `popen`.
 - **`connectEndpointInputs()`** links each strip sink's monitor to the
-  engine's input with `pw-dump` / `pw-link` (see *Linking the sinks to the
+  engine's input through the libpipewire registry, or with `pw-dump` /
+  `pw-link` in a build without libpipewire (see *Linking the sinks to the
   engine* below).
 - **`openSystemRoutingSettings()`** starts `pavucontrol --tab=1` (Playback),
   or failing that `pwvucontrol`, GNOME Settings › Sound, or KDE's audio KCM.
@@ -89,9 +90,11 @@ provides the server side. The calls block for roughly 5–30 ms, so the app
 runs them on its routing worker thread (`AppRouting`, every 2 s while routes
 exist), never on the message or audio thread.
 
-**Flatpak.** The sandbox has no `pactl`, `pw-dump` or `pw-link`. The Flatpak
-build has to bundle them (with `--socket=pulseaudio` and access to the
-PipeWire socket) or replace these calls with libpulse or libpipewire.
+**Flatpak.** The sandbox has no `pactl`, `pw-dump` or `pw-link`. Linking
+and the native node (below) use libpipewire and need only access to the
+PipeWire socket; moving applications still runs `pactl`, so the Flatpak
+build has to bundle it (with `--socket=pulseaudio`) or move streams through
+libpipewire's `target.object` metadata instead (not done yet).
 
 ## Global hotkeys
 
@@ -406,11 +409,12 @@ A `PIPEWIRE_LATENCY` you exported yourself is kept (a value that is not
 devices and PulseAudio ignore the variable.
 
 The Low Latency request (`128/48000`, with `node.lock-quantum = true`
-through `PIPEWIRE_PROPS`) is implemented and tested in
-`pipewire::planLatencyEnvironment`. It is not used yet: PipeWire reads the
-variables only when a stream opens, so a profile change would have to
-export them and re-open the device, and the latency profile is not known
-when the router is created. To force a smaller quantum for everything, run
+through `PIPEWIRE_PROPS`) is exported by `EngineController` when the user
+chooses Low Latency; PipeWire reads the variables only when a stream opens,
+so a JACK or ALSA device is re-opened then (a brief dropout). The native
+node (below) sets the same values as its own `node.latency` /
+`node.lock-quantum` and changes them in place, without a re-open. To force
+a smaller quantum for everything, run
 
 ```sh
 pw-metadata -n settings 0 clock.force-quantum 128
@@ -426,7 +430,19 @@ does it, so no qpwgraph or Helvum step is needed.
 `LinuxAppAudioRouter::connectEndpointInputs`, called on every pass of the
 routing worker (`AppRouting`, every 2 s), works as follows:
 
-- It runs `pw-dump` and reads its JSON with `flub::json`
+- In a build with libpipewire (docs/11 E48; `pkg-config libpipewire-0.3`
+  found at configure time) it keeps its own PipeWire connection
+  (`pipewire::RegistryLinker` in `app/Source/platform/pipewire/`). Registry
+  events keep a mirror of the nodes, ports, links and clients current
+  (`pipewire::addGlobal` / `removeGlobal`), and every change is re-planned
+  20 ms after the last event of a burst, so a re-opened device's new ports
+  are linked at once instead of at the next 10 s check. Links are made
+  through the link factory with `object.linger = false`: they belong to
+  Flubsound's connection and go away with it, also after a crash. The plan,
+  the problem texts and the status are the same as below. When no server
+  answers, the router falls back to `pw-dump` / `pw-link` and tries the
+  connection again every 10 s.
+- Otherwise it runs `pw-dump` and reads its JSON with `flub::json`
   (`pipewire::parseDump`).
 - Flubsound's own input node is the one belonging to this process with the
   most audio input ports: its `application.process.id`, or its client's
@@ -474,8 +490,7 @@ which the engine permutes back.
 JUCE's JACK device gives the engine as many inputs as the chosen *input
 device* (a JACK client) has output ports. Choosing "Flubsound Game" gives 8,
 enough for the Game strip only. Feeding four strips from one device needs an
-input client with 14 ports, which is what the native filter node below
-removes.
+input client with 14 ports, which is what the native node below provides.
 
 Tests in `tests/test_platform_linux.cpp` need no PipeWire. `Platform:
 PipeWire quantum request …` covers the environment plan (Balanced,
@@ -494,6 +509,93 @@ card is needed; a real card's map has not been read yet), and
 `tests/app/test_app_host_io.cpp` the round-trip channel check with fake
 JACK and ALSA devices whose channel names or maps come in several orders.
 
+## Native PipeWire node (docs/11 E48)
+
+In a build with libpipewire, `app/Source/platform/pipewire/` hosts the
+engine in Flubsound's own PipeWire node, with no JACK client and no manual
+links:
+
+- **The node.** `NativeAudioNode` (`PlatformServices.h`, implemented in
+  `PipeWireNative.cpp`) is one `pw_filter` with
+  `PW_FILTER_FLAG_RT_PROCESS`: an input port group per strip, `game_FL` …
+  `game_SR` (7.1), `music_FL` / `music_FR`, `chat_*`, `system_*` (14
+  ports, in the engine's default input map 0 / 8 / 10 / 12), and an output
+  group `out_FL` / `out_FR`. Its process callback runs on PipeWire's
+  real-time data thread (`client-rt.conf` on PipeWire 1.0, whose
+  `module-rt` uses `SCHED_FIFO` or RealtimeKit). It fetches each port's
+  buffer and hands them to `pipewire::CycleRunner`, which splits a quantum
+  larger than the prepared block, reads silence for a port without a
+  buffer and never allocates or locks.
+- **Sinks from the app.** A `flubsound_<strip>` sink that does not exist is
+  created by the node (`support.null-audio-sink` through the adapter
+  factory, with the names, descriptions and channel positions of
+  `90-flubsound-sinks.conf`), so no setup script is needed. They are not
+  lingering: they vanish with Flubsound's connection, also after a crash,
+  and the desktop moves their streams back to the default output. Sinks
+  that exist already (the script or the config file) are used as they are.
+- **Links.** The node links each sink's monitor ports to its strip's ports
+  by channel (`pipewire::planStripLinks`: `monitor_FC` to `game_FC` even if
+  the sink lists its channels in another order; a mono sink feeds both
+  ports of a stereo strip) and its outputs to the default output, the
+  `default.audio.sink` of the "default" metadata, or to a sink the app names
+  (`pipewire::planOutputLinks`, `setOutputTarget`). It never plays into one
+  of its own sinks (a feedback loop): when the default output is one of
+  them (System made the default so that everything else is processed), it
+  plays to the real sink with the highest `priority.session` instead and
+  says so in its status (`pipewire::chooseOutputSink`). Registry events re-plan every change,
+  as for the JUCE path above.
+- **Latency.** `node.latency` is the profile's request, 256/48000 on Quality
+  and Balanced and 128/48000 on Low Latency, and `setLatency` changes it in
+  place (`pw_filter_update_properties`) without a re-open. A lock sent with
+  the new latency would freeze the old quantum, so Low Latency's
+  `node.lock-quantum` follows once the graph runs at 128 (checked every
+  20 ms for up to 1 s; a client that holds a larger quantum leaves the
+  request unlocked, with a note on stderr). The graph's actual quantum and
+  rate at the last cycle are in `NativeAudioNodeStatus`.
+- **Status.** `NativeAudioNode::getStatus()` counts the links wanted and
+  made each way, names the output sink and the sinks the node created, and
+  says what is missing (`pipewire::describeLinks` makes it one line for the
+  routing panel).
+- **As a JUCE device.** `pipewire/PipeWireDeviceType.*` wraps the node as
+  a `juce::AudioIODeviceType` named "PipeWire" with one device, "Flubsound
+  Engine" (its input side "Flubsound Engine inputs", so the host's feedback
+  guard does not take one virtual device on both ends for a loop). Its 14
+  input channels are named `Game:FL` … `System:FR`, which
+  `AudioEngineHost::positionFromChannelName` reads. The callback swap is
+  lock-free. `pipewire::addDeviceType` adds the type after JUCE's own;
+  `setDeviceLatency`, `setDeviceOutputTarget` and `getDeviceStatus` reach
+  the running device.
+
+Not yet wired into the app: `AudioEngineHost` / `EngineController` do not
+add the device type, pass the latency profile or show the status (one call
+each; those files belong to the engine host), so the running app still
+uses JUCE's ALSA / JACK types plus the registry links above. Also open: the
+Flatpak build with the Realtime and GlobalShortcuts portals, a headless
+mode for SteamOS Game Mode, a CI job with a headless PipeWire, moving
+applications through `target.object` metadata, the manual matrix of the
+item (Fedora, Ubuntu, KDE Neon, SteamOS), and loading libpipewire at run
+time: a build made with it links `libpipewire-0.3.so.0`, which every
+PipeWire desktop has, but a system without it cannot start that build.
+
+Tests: `tests/test_platform_linux.cpp` covers the registry mirror, the
+plans, the port names, the latency values and the cycle runner with fakes
+on every Linux build. `tests/app/test_app_pipewire.cpp` runs the node, the
+registry linker and the device type (with a real `AudioEngineHost`)
+against a running PipeWire server: sinks made and removed, 10 of 10 strip
+links and 2 of 2 output links, a tone through a sink to the right strip
+channels only, the quantum at 256 and then 128 without a re-open, no
+allocation and no lock on the data thread over 100 cycles, the feedback
+refusal, and the device's sinks gone after it closes. Without a server
+(CI) the tests print "skipped". To run them headless:
+
+```sh
+export XDG_RUNTIME_DIR=$(mktemp -d)   # a private runtime folder
+dbus-daemon --session --fork --address=unix:path=$XDG_RUNTIME_DIR/bus
+export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
+pipewire & sleep 1; wireplumber &     # packages pipewire, wireplumber
+flub_app_tests "(E48)"
+```
+
 ## Headset profiles on Linux
 
 `AudioEndpoints::queryOutputTransport()` returns *unknown* on Linux: JUCE's
@@ -504,16 +606,13 @@ detect Bluetooth and hands-free outputs from the device name and format
 
 ## Roadmap
 
-- **Native PipeWire filter node.** Host `flub_core` in a `pw_filter` with one
-  input port group per strip. This removes the JUCE device layer and the
-  monitor hop, and lets WirePlumber manage the links.
-- libpulse or libpipewire routing instead of shelling out to `pactl`, for
-  Flatpak and to receive change events instead of polling.
+- **Native PipeWire node:** built (above); the app still has to add its
+  device type, and Flatpak, Game Mode's headless mode and a headless CI job
+  are open.
+- libpipewire routing (`target.object` metadata) instead of shelling out to
+  `pactl`, for Flatpak and to receive change events instead of polling.
 - Wayland hotkeys: run on real desktops (so far tested only against a mock
   portal), pass a `parent_window` and ship a `.desktop` file so the portal
   knows the application id.
-- The Low Latency quantum request (`128/48000`, locked) on a profile change,
-  which needs the device to re-open after the variables change. Links through
-  libpipewire registry events instead of polling `pw-dump`.
 - The output's `device.bus` for headset connection detection, and the
   Realtime portal for the audio thread under Flatpak.

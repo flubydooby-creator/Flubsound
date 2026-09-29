@@ -9,6 +9,7 @@
 
 #include "../app/Source/platform/PlatformServices_common.cpp"
 #include "../app/Source/platform/PlatformServices_linux.cpp"
+#include "../app/Source/platform/pipewire/PipeWireCycle.h"
 
 #include <spawn.h>
 #include <sys/prctl.h>
@@ -3081,6 +3082,326 @@ TEST_CASE ("Platform: ALSA channel maps - card PCM names, JUCE's device names an
     CHECK (AudioChannelMaps::queryInputPositions ("ALSA", "Flubsound test: no such device", 8).empty());
     CHECK (AudioChannelMaps::queryInputPositions ("ALSA HW", "Flubsound test: no such card, no such PCM", 8).empty());
     CHECK (AudioChannelMaps::queryInputPositions ("ALSA", "", 8).empty());
+}
+
+//==============================================================================
+// docs/11 E48: the native PipeWire node's model, plans and cycle (no PipeWire
+// needed; tests/app/test_app_pipewire.cpp runs them against a server)
+//==============================================================================
+namespace
+{
+/** A registry global's properties, as spa_dict_lookup would answer. */
+pipewire::PropertyLookup fakeProps (std::map<std::string, std::string> props)
+{
+    auto shared = std::make_shared<std::map<std::string, std::string>> (std::move (props));
+    return [shared] (const char* key) -> const char*
+    {
+        const auto it = shared->find (key);
+        return it != shared->end() ? it->second.c_str() : nullptr;
+    };
+}
+
+void addPort (pipewire::RegistryState& state, uint32_t id, uint32_t node, const char* direction, const std::string& name, const std::string& channel,
+              uint32_t index, bool monitor = false)
+{
+    std::map<std::string, std::string> props { { "node.id", std::to_string (node) }, { "port.direction", direction }, { "port.name", name },
+                                               { "audio.channel", channel }, { "port.id", std::to_string (index) },
+                                               { "format.dsp", "32 bit float mono audio" } };
+    if (monitor)
+        props["port.monitor"] = "true";
+    CHECK (pipewire::addGlobal (state, id, "PipeWire:Interface:Port", fakeProps (props)));
+}
+
+void addNode (pipewire::RegistryState& state, uint32_t id, const std::string& name, const std::string& mediaClass, uint32_t client = 0)
+{
+    std::map<std::string, std::string> props { { "node.name", name }, { "media.class", mediaClass } };
+    if (client != 0)
+        props["client.id"] = std::to_string (client);
+    CHECK (pipewire::addGlobal (state, id, "PipeWire:Interface:Node", fakeProps (props)));
+}
+
+/** A sink with playback and monitor ports for 'positions'; ids from 'firstPort'. */
+void addSink (pipewire::RegistryState& state, uint32_t id, const std::string& name, const std::vector<std::string>& positions, uint32_t firstPort)
+{
+    addNode (state, id, name, "Audio/Sink");
+    for (size_t k = 0; k < positions.size(); ++k)
+    {
+        addPort (state, firstPort + 2 * static_cast<uint32_t> (k), id, "in", "playback_" + positions[k], positions[k], static_cast<uint32_t> (k));
+        addPort (state, firstPort + 2 * static_cast<uint32_t> (k) + 1, id, "out", "monitor_" + positions[k], positions[k], static_cast<uint32_t> (k), true);
+    }
+}
+
+/** The native node's filter as the registry lists it: the default strips'
+    ports and two outputs; input ids 501.., output ids 601... */
+void addFilter (pipewire::RegistryState& state, uint32_t id)
+{
+    addNode (state, id, "flubsound_engine", "", 0);
+    uint32_t port = 501, index = 0;
+    for (const auto& strip : pipewire::defaultStrips())
+        for (const auto& position : strip.positions)
+            addPort (state, port++, id, "in", pipewire::inputPortName (strip, position), position, index++);
+    addPort (state, 601, id, "out", "out_FL", "FL", 0);
+    addPort (state, 602, id, "out", "out_FR", "FR", 1);
+}
+
+bool wants (const pipewire::LinkPlan& plan, uint32_t out, uint32_t in)
+{
+    return std::find (plan.wanted.begin(), plan.wanted.end(), pipewire::PortLink { out, in }) != plan.wanted.end();
+}
+
+struct RecordingCallback final : NativeAudioNode::Callback
+{
+    void nodeStarting (double, int) override {}
+    void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING override
+    {
+        if (calls < 8)
+        {
+            blocks[calls] = numFrames;
+            firstInput[calls] = numInputs > 0 ? inputs[0] : nullptr;
+            secondInput[calls] = numInputs > 1 ? inputs[1] : nullptr;
+            firstOutput[calls] = numOutputs > 0 ? outputs[0] : nullptr;
+            secondOutput[calls] = numOutputs > 1 ? outputs[1] : nullptr;
+        }
+        for (int o = 0; o < numOutputs; ++o)
+            for (int n = 0; n < numFrames; ++n)
+                outputs[o][n] = numInputs > 0 ? inputs[0][n] * 2.0f : 1.0f;
+        ++calls;
+    }
+    void nodeStopped() override {}
+
+    int calls = 0;
+    int blocks[8] {};
+    const float* firstInput[8] {};
+    const float* secondInput[8] {};
+    float* firstOutput[8] {};
+    float* secondOutput[8] {};
+};
+} // namespace
+
+TEST_CASE ("Platform: PipeWire registry events keep the graph current: nodes, ports with channels, links, client pids, removal (E48)")
+{
+    pipewire::RegistryState state;
+
+    // A node before its client: the pid follows when the client arrives.
+    addNode (state, 80, "Flubsound Pro", "Stream/Input/Audio", 31);
+    CHECK (state.graph.nodes[80].processId == 0);
+    CHECK (pipewire::addGlobal (state, 31, "PipeWire:Interface:Client", fakeProps ({ { "pipewire.sec.pid", "4242" }, { "application.process.id", "2" } })));
+    CHECK (state.graph.nodes[80].processId == 4242); // the host pid, not the sandbox-local one
+    addNode (state, 81, "other", "Stream/Input/Audio", 31); // a node after its client
+    CHECK (state.graph.nodes[81].processId == 4242);
+
+    addSink (state, 40, "flubsound_music", { "FL", "FR" }, 41);
+    const auto monitors = pipewire::audioPorts (state.graph, 40, false, true);
+    REQUIRE (monitors.size() == 2);
+    CHECK (monitors[0]->name == "monitor_FL");
+    CHECK (monitors[1]->channel == "FR");
+    CHECK (pipewire::audioPorts (state.graph, 40, true, false).size() == 2);
+
+    // MIDI and incomplete ports: kept out of the audio ports or ignored.
+    CHECK (pipewire::addGlobal (state, 90, "PipeWire:Interface:Port",
+                                fakeProps ({ { "node.id", "80" }, { "port.direction", "in" }, { "format.dsp", "8 bit raw midi" } })));
+    CHECK (pipewire::audioPorts (state.graph, 80, true, false).empty());
+    CHECK (! pipewire::addGlobal (state, 91, "PipeWire:Interface:Port", fakeProps ({ { "port.direction", "in" } }))); // no node.id
+    CHECK (! pipewire::addGlobal (state, 92, "PipeWire:Interface:Port", fakeProps ({ { "node.id", "80" }, { "port.direction", "sideways" } })));
+
+    CHECK (pipewire::addGlobal (state, 200, "PipeWire:Interface:Link", fakeProps ({ { "link.output.port", "42" }, { "link.input.port", "90" } })));
+    CHECK (! pipewire::addGlobal (state, 201, "PipeWire:Interface:Link", fakeProps ({ { "link.output.port", "42" } })));
+    CHECK (! pipewire::addGlobal (state, 202, "PipeWire:Interface:Link", fakeProps ({ { "link.output.port", "-1" }, { "link.input.port", "90" } })));
+    REQUIRE (state.graph.links.size() == 1);
+    CHECK (pipewire::countLinked (state.graph, { { 42, 90 }, { 44, 90 } }) == 1);
+    CHECK (! pipewire::addGlobal (state, 300, "PipeWire:Interface:Factory", fakeProps ({})));
+
+    // Removal: of a link, a port, a node; an unknown id changes nothing.
+    CHECK (pipewire::removeGlobal (state, 200));
+    CHECK (state.graph.links.empty());
+    CHECK (pipewire::removeGlobal (state, 42));
+    CHECK (pipewire::audioPorts (state.graph, 40, false, true).size() == 1);
+    CHECK (pipewire::removeGlobal (state, 81));
+    CHECK (state.graph.nodes.count (81) == 0);
+    CHECK (! pipewire::removeGlobal (state, 999));
+
+    uint32_t id = 0;
+    CHECK (pipewire::parseId ("4294967295", id));
+    CHECK (id == 4294967295u);
+    CHECK (! pipewire::parseId ("4294967296", id));
+    CHECK (! pipewire::parseId ("12a", id));
+    CHECK (! pipewire::parseId ("", id));
+    CHECK (! pipewire::parseId (nullptr, id));
+    CHECK (! pipewire::parseId ("12345678901", id));
+
+    CHECK (pipewire::metadataName (R"({ "name": "alsa_output.usb-headset" })") == "alsa_output.usb-headset");
+    CHECK (pipewire::metadataName ("not json").empty());
+    CHECK (pipewire::metadataName (R"({ "nick": 1 })").empty());
+    CHECK (pipewire::metadataName (nullptr).empty());
+}
+
+TEST_CASE ("Platform: the native node links each strip's sink monitors to its own ports by channel, and its outputs to the output sink (E48)")
+{
+    pipewire::RegistryState state;
+    addFilter (state, 500);
+    addSink (state, 10, "flubsound_game", { "FL", "FR", "FC", "LFE", "RL", "RR", "SL", "SR" }, 100);
+    addSink (state, 20, "flubsound_music", { "FR", "FL" }, 200); // another channel order
+    addSink (state, 30, "flubsound_chat", { "MONO" }, 300);      // a mono sink feeds both chat ports
+    addSink (state, 40, "alsa_output.usb-headset", { "FL", "FR" }, 400);
+    addSink (state, 45, "alsa_output.hdmi", { "AUX0", "AUX1" }, 450);
+    addSink (state, 47, "mono_speaker", { "MONO" }, 470);
+    const auto strips = pipewire::defaultStrips();
+
+    auto plan = pipewire::planStripLinks (state.graph, 500, strips);
+    CHECK (plan.engineInputs == 14);
+    CHECK (plan.wanted.size() == 8 + 2 + 2);
+    for (uint32_t k = 0; k < 8; ++k)
+        CHECK (wants (plan, 101 + 2 * k, 501 + k)); // game monitor k -> game_<position k>
+    CHECK (wants (plan, 203, 509)); // music monitor FL (listed second) -> music_FL
+    CHECK (wants (plan, 201, 510)); // music monitor FR -> music_FR
+    CHECK (wants (plan, 301, 511));
+    CHECK (wants (plan, 301, 512));
+    REQUIRE (plan.problems.size() == 1);
+    CHECK (plan.problems[0] == "PipeWire has no sink 'flubsound_system' for the System strip");
+    REQUIRE (plan.sinks.size() == 3);
+    CHECK (plan.sinks[1].firstChannel == 8);
+    CHECK (plan.sinks[2].firstChannel == 10);
+
+    // Not in the graph yet (the filter's node id is 0 until it is bound).
+    CHECK (pipewire::planStripLinks (state.graph, 0, strips).wanted.empty());
+    CHECK (pipewire::planStripLinks (state.graph, 0, strips).problems.size() == 1);
+
+    auto output = pipewire::planOutputLinks (state.graph, 500, "alsa_output.usb-headset", strips);
+    CHECK (output.problems.empty());
+    CHECK ((output.wanted == std::vector<pipewire::PortLink> { { 601, 400 }, { 602, 402 } }));
+    output = pipewire::planOutputLinks (state.graph, 500, "alsa_output.hdmi", strips); // no channel names: in order
+    CHECK ((output.wanted == std::vector<pipewire::PortLink> { { 601, 450 }, { 602, 452 } }));
+    output = pipewire::planOutputLinks (state.graph, 500, "mono_speaker", strips); // a mono sink takes FL
+    CHECK ((output.wanted == std::vector<pipewire::PortLink> { { 601, 470 } }));
+
+    // Never into one of Flubsound's own sinks (a feedback loop), never nowhere.
+    output = pipewire::planOutputLinks (state.graph, 500, "flubsound_game", strips);
+    CHECK (output.wanted.empty());
+    REQUIRE (output.problems.size() == 1);
+    CHECK (output.problems[0].find ("feedback loop") != std::string::npos);
+    output = pipewire::planOutputLinks (state.graph, 500, "", strips);
+    CHECK (output.wanted.empty());
+    CHECK (output.problems.size() == 1);
+    output = pipewire::planOutputLinks (state.graph, 500, "gone", strips);
+    CHECK (output.problems.size() == 1);
+
+    // Which sink when the app names none: the default, unless it is one of
+    // Flubsound's own (System made the default) or gone; then the real sink
+    // with the highest priority.session.
+    bool fellBack = true;
+    CHECK (pipewire::chooseOutputSink (state.graph, "alsa_output.hdmi", strips, fellBack) == "alsa_output.hdmi");
+    CHECK (! fellBack);
+    CHECK (pipewire::addGlobal (state, 46, "PipeWire:Interface:Node",
+                                fakeProps ({ { "node.name", "alsa_output.usb-dac" }, { "media.class", "Audio/Sink" }, { "priority.session", "1009" } })));
+    CHECK (pipewire::chooseOutputSink (state.graph, "flubsound_game", strips, fellBack) == "alsa_output.usb-dac");
+    CHECK (fellBack);
+    CHECK (pipewire::chooseOutputSink (state.graph, "", strips, fellBack) == "alsa_output.usb-dac");
+    CHECK (pipewire::chooseOutputSink (state.graph, "unplugged", strips, fellBack) == "alsa_output.usb-dac");
+    pipewire::RegistryState onlyOwn;
+    addSink (onlyOwn, 10, "flubsound_game", { "FL", "FR" }, 100);
+    CHECK (pipewire::chooseOutputSink (onlyOwn.graph, "flubsound_game", strips, fellBack).empty());
+    CHECK (! fellBack);
+
+    // Once linked, the status counts them.
+    for (const auto& link : plan.wanted)
+        state.graph.links.push_back ({ 900 + link.inputPort, link.outputPort, link.inputPort });
+    NativeAudioNodeStatus status;
+    status.inputLinksWanted = static_cast<int> (plan.wanted.size());
+    status.inputLinksMade = pipewire::countLinked (state.graph, plan.wanted);
+    status.outputSink = "alsa_output.usb-headset";
+    status.outputLinksWanted = 2;
+    status.quantumFrames = 256;
+    status.sampleRate = 48000;
+    status.message = plan.problems[0];
+    CHECK (status.inputLinksMade == 12);
+    CHECK (pipewire::describeLinks (status)
+           == "Linked 12 of 12 input channels, output to alsa_output.usb-headset (0 of 2), quantum 256/48000. "
+              "PipeWire has no sink 'flubsound_system' for the System strip");
+}
+
+TEST_CASE ("Platform: the native node's ports, sinks and node.latency follow the strips and the latency profile (E48)")
+{
+    const auto strips = pipewire::defaultStrips();
+    REQUIRE (strips.size() == 4);
+    CHECK (strips[0].sinkName == "flubsound_game");
+    CHECK (strips[0].description == "Flubsound Game");
+    CHECK (pipewire::positionList (strips[0].positions) == "FL,FR,FC,LFE,RL,RR,SL,SR"); // 90-flubsound-sinks.conf's order
+    CHECK (pipewire::positionList (strips[3].positions) == "FL,FR");
+    CHECK (pipewire::inputPortName (strips[1], "FR") == "music_FR");
+    NativeAudioNodeConfig::Strip odd { "Voice Chat 2", "x", "x", { "FL" } };
+    CHECK (pipewire::inputPortName (odd, "FL") == "voice_chat_2_FL");
+    CHECK (pipewire::outputPortName ("FR") == "out_FR");
+    CHECK ((pipewire::outputPositions (2) == std::vector<std::string> { "FL", "FR" }));
+    CHECK (pipewire::outputPositions (8).size() == 8);
+    CHECK ((pipewire::outputPositions (3) == std::vector<std::string> { "AUX0", "AUX1", "AUX2" }));
+    CHECK (pipewire::isFlubsoundSink ("flubsound_system", strips));
+    CHECK (! pipewire::isFlubsoundSink ("flubsound_engine", strips));
+
+    const auto balanced = pipewire::nodeLatency (pipewire::quantumRequestFor (NativeAudioNodeConfig::Latency::Balanced));
+    CHECK (balanced.latency == "256/48000");
+    CHECK (! balanced.lockQuantum);
+    const auto low = pipewire::nodeLatency (pipewire::quantumRequestFor (NativeAudioNodeConfig::Latency::LowLatency));
+    CHECK (low.latency == "128/48000");
+    CHECK (low.lockQuantum);
+    CHECK (pipewire::isValidLatency (low.latency));
+
+    // This build has no libpipewire: the node says so instead of failing later.
+    auto node = NativeAudioNode::create();
+    REQUIRE (node != nullptr);
+    if (! node->isSupported())
+    {
+        CHECK (! node->unsupportedReason().empty());
+        RecordingCallback callback;
+        std::string error;
+        CHECK (! node->start ({}, callback, error));
+        CHECK (error == node->unsupportedReason());
+        CHECK (! node->isRunning());
+        CHECK (! node->setLatency (NativeAudioNodeConfig::Latency::LowLatency));
+    }
+}
+
+TEST_CASE ("Platform: the native node's cycle splits a large quantum, reads silence for a port without a buffer and allocates nothing (E48)")
+{
+    pipewire::CycleRunner runner;
+    runner.prepare (3, 2, 1024);
+    CHECK (runner.getNumInputs() == 3);
+    CHECK (runner.getMaxBlockFrames() == 1024);
+
+    constexpr uint32_t kFrames = 2500;
+    std::vector<float> in0 (kFrames), out0 (kFrames, -1.0f);
+    for (uint32_t n = 0; n < kFrames; ++n)
+        in0[n] = static_cast<float> (n);
+    const float* inputs[3] = { in0.data(), nullptr, nullptr }; // two ports without a buffer this cycle
+    float* outputs[2] = { out0.data(), nullptr };               // the second output has none either
+
+    RecordingCallback callback;
+    int calls = 0;
+    {
+        flubtest::AllocationGuard guard;
+        calls = runner.run (inputs, outputs, kFrames, callback);
+        CHECK (guard.allocations() == 0);
+    }
+    CHECK (calls == 3);
+    CHECK (callback.calls == 3);
+    CHECK (callback.blocks[0] == 1024);
+    CHECK (callback.blocks[1] == 1024);
+    CHECK (callback.blocks[2] == 452);
+    CHECK (callback.firstInput[1] == in0.data() + 1024);
+    CHECK (callback.firstOutput[2] == out0.data() + 2048);
+    CHECK (callback.secondInput[0] != nullptr);
+    CHECK (callback.secondInput[0][0] == 0.0f && callback.secondInput[0][1023] == 0.0f);
+    CHECK (callback.secondOutput[0] != nullptr); // scratch, not the caller's (null) port
+    CHECK (callback.secondOutput[0] == callback.secondOutput[1]);
+    CHECK (out0[0] == 0.0f && out0[1500] == 3000.0f && out0[kFrames - 1] == 2.0f * static_cast<float> (kFrames - 1));
+
+    // A quantum below the block size is one call; no ports at all is silence.
+    RecordingCallback small;
+    CHECK (runner.run (inputs, outputs, 128, small) == 1);
+    CHECK (small.blocks[0] == 128);
+    RecordingCallback none;
+    CHECK (runner.run (nullptr, nullptr, 64, none) == 1);
+    CHECK (none.firstInput[0] != nullptr && none.firstInput[0][63] == 0.0f);
+    CHECK (runner.run (inputs, outputs, 0, none) == 0);
 }
 
 #endif // __linux__

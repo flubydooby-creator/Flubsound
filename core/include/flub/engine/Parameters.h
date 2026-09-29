@@ -196,6 +196,10 @@ enum Id : int
     ContourLevelDb,        // playback level re the reference, dB <= 0 (the app adds the OS volume's offset)
     ContourMaxLiftDb,      // cap on the contour's lift
 
+    // Warmth (docs/11 E14; ToneTilt.h, MacroMap.cpp)
+    WarmthTone,       // 0..1: the level-compensated warmth tilt (low shelf up, high shelf down); the Music Warmth macro drives it
+    WarmthTapeGrit,   // Toggle: the Music Warmth macro drives tape saturation and bass as in v1 instead (Lo-Fi Chill, Warm Vinyl)
+
     kNumScalarParams
 };
 

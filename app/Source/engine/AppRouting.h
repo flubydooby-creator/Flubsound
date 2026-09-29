@@ -36,6 +36,26 @@
 // the next pass follows at once. A capture that fails to start is tried a few
 // times, then given up until the mapping or method changes or another
 // capture stops (and frees a slot). The public API is message-thread only.
+//
+// Route journal (docs/11 E47). Every endpoint move is recorded in a journal
+// file next to the settings (RouteJournal, "route-journal.json") BEFORE the
+// move is made, atomically (temporary file + rename), and the record goes
+// when the move is undone. A crash, TerminateProcess or SIGKILL therefore
+// leaves a journal that names every app that may still sit on a Flubsound
+// endpoint; the next start reads it and undoes those moves (a process of the
+// recorded executable is moved back to the system default when it is seen;
+// the very process that was moved, named by process id + start time, is kept
+// on its endpoint instead while it is still assigned there). A move whose
+// journal entry cannot be written is not made.
+//
+// Doubling guard (docs/11 E47). A process capture copies an app's audio into
+// a strip while the app keeps playing to its own endpoint. When that endpoint
+// is the device Flubsound plays to (a headset used for both), the original
+// and the processed copy are heard together, a few milliseconds apart (comb
+// filtering, smeared transients). Such a capture is not started (a running
+// one stops); the app is reported (AppState::doublingBlocked, amber in the
+// routing panel) with the fix: set its output to another device
+// (getSpareEndpoints), where the capture still reaches it.
 #pragma once
 
 #include "platform/PlatformServices.h"
@@ -53,6 +73,52 @@ namespace flub::app
 {
 class AudioEngineHost;
 
+/** docs/11 E47: the write-ahead record of the endpoint moves AppRouting made
+    and has not undone yet. A small JSON file, replaced atomically on every
+    change (TemporaryFile + rename, so a crash leaves either the old or the
+    new content, never a torn file) and removed when nothing is left. Not
+    thread-safe: AppRouting uses it from its worker thread only (and from
+    the message thread while the worker is not running). */
+class RouteJournal
+{
+public:
+    struct Entry
+    {
+        uint32_t processId = 0;        // 0: the process exited while moved; its executable's next process is moved back
+        uint64_t processStartTime = 0; // AudioSessionInfo::processStartTime; 0 = unknown
+        juce::String executable;       // normalised (lower case, no directory, no ".exe")
+        juce::String executablePath;   // full path when the OS reports it
+        juce::String endpoint;         // the endpoint it was moved to
+        juce::String previousEndpoint; // the endpoint it played to before the move
+        bool pending = false;          // written before the move: whether it happened is unknown, so it counts as made
+
+        bool operator== (const Entry&) const = default;
+    };
+
+    /** An invalid file (juce::File()) keeps no journal: writes succeed and
+        nothing survives the process (settings that are not persisted). */
+    explicit RouteJournal (juce::File journalFile) : file (std::move (journalFile)) {}
+
+    const juce::File& getFile() const noexcept { return file; }
+
+    /** The entries on disk; empty when there is no file. A file that cannot
+        be parsed is kept aside as "<name>.bad" (its executables are lost,
+        which the settings' routing.routedApps record still covers). */
+    std::vector<Entry> load() const;
+
+    /** Replaces the file with `entries` (an empty list deletes it). Skips the
+        write when they equal the last written ones. false when the file
+        could not be written. */
+    bool write (const std::vector<Entry>& entries);
+
+    static constexpr int kVersion = 1;
+
+private:
+    juce::File file;
+    std::vector<Entry> written;
+    bool hasWritten = false;
+};
+
 class AppRouting final : private juce::Thread, private juce::AsyncUpdater
 {
 public:
@@ -67,6 +133,8 @@ public:
         bool routed = false;       // endpoint routing applied by us
         int captureId = -1;        // >= 0 while a capture runs
         juce::String error;        // last routing / capture error
+        bool playsToOutput = false;   // docs/11 E47: it plays straight to the device Flubsound plays to (heard directly)
+        bool doublingBlocked = false; // docs/11 E47: mapped for process capture, not captured because of that (doubling guard)
     };
 
     /** Reads the routes / method from settings; does nothing until start(). */
@@ -79,6 +147,11 @@ public:
     AppRouting (AudioEngineHost& host, AppSettings& settings, std::unique_ptr<flub::platform::AppAudioRouter> router,
                 bool captureSupported);
     ~AppRouting() override;
+
+    /** Replaces the router and the capture probe before start() (tests: the
+        routing of an EngineController built without app routing). Ignored
+        once started. */
+    void setRouter (std::unique_ptr<flub::platform::AppAudioRouter> newRouter, bool canCapture);
 
     /** Begins applying routes (worker thread, captures, endpoints). */
     void start();
@@ -132,6 +205,33 @@ public:
     void stripLayoutChanged();
     void openSystemRoutingSettings();
 
+    // ---- Doubling guard (docs/11 E47) --------------------------------------------
+    using OutputEndpoint = flub::platform::AppAudioRouter::OutputEndpoint;
+
+    /** The app plays to `endpointId`: one of its active sessions does, or (none
+        active) its current one. False for an empty id (output unknown). Pure. */
+    static bool playsToEndpoint (const flub::platform::AudioSessionInfo& session, const std::string& endpointId);
+
+    /** The endpoint Flubsound plays to as the router knows it, from the last
+        pass in process-capture mode; an empty id = unknown, the guard is off. */
+    const OutputEndpoint& getOutputEndpoint() const noexcept { return outputEndpoint; }
+    /** Active output endpoints other than the output (and other than
+        Flubsound's own), from the last pass that held a capture back: where an
+        app can play instead so that only its captured copy is heard. */
+    const std::vector<OutputEndpoint>& getSpareEndpoints() const noexcept { return spareEndpoints; }
+    /** Assigned applications the doubling guard holds back (display names). */
+    juce::StringArray getDoublingBlockedApps() const;
+    /** What the guard did and the fix, user-presentable; empty when no
+        assigned application is held back. */
+    juce::String describeDoubling() const;
+
+    /** Where the name of the output device comes from (message thread).
+        Default: the host's device manager (the current device's output). */
+    void setOutputDeviceSource (std::function<juce::String()> source);
+
+    /** The route journal's file (next to the settings file). */
+    const juce::File& getJournalFile() const noexcept { return journal.getFile(); }
+
     /** Called on the message thread when the app list or routing state changed. */
     std::function<void()> onChanged;
 
@@ -143,7 +243,8 @@ private:
         Method method = Method::Disabled;
         std::vector<AppRoute> routes;
         std::vector<juce::String> stripNames, stripEndpoints;
-        uint64_t generation = 0; // bumped when routes, method or strips change
+        juce::String outputDevice; // the output device's name (doubling guard)
+        uint64_t generation = 0;   // bumped when routes, method, strips or the output device change
     };
 
     void run() override;
@@ -152,6 +253,10 @@ private:
     void applyCaptures (std::vector<AppState>& states);
     void stopAllCaptures();
     void persistRoutedExecutables (const std::set<juce::String>& executables);
+    juce::String currentOutputDevice() const;
+    /** Writes the journal for the current moves plus `pendingMove` (the move
+        about to be made), if any. Worker thread (or no worker running). */
+    bool syncJournal (const RouteJournal::Entry* pendingMove);
 
     AudioEngineHost& host;
     AppSettings& settings;
@@ -177,6 +282,9 @@ private:
     std::map<uint32_t, CaptureFailure> captureFailures; // pid -> failed starts
     uint64_t configGeneration = 0;
     std::set<juce::String> persistedRoutedExecutables; // last value written to the settings
+    std::function<juce::String()> outputDeviceSource;
+    OutputEndpoint outputEndpoint;
+    std::vector<OutputEndpoint> spareEndpoints;
 
     // Shared with the worker
     juce::CriticalSection lock;
@@ -184,6 +292,8 @@ private:
     std::vector<AppState> workerResult;
     std::set<juce::String> resultRoutedExecutables;
     uint64_t resultGeneration = 0; // config generation workerResult was computed from
+    OutputEndpoint resultOutputEndpoint;
+    std::vector<OutputEndpoint> resultSpareEndpoints;
     bool resultPending = false;
 
     // Worker thread only (and the message thread before it starts / after it stopped)
@@ -191,12 +301,19 @@ private:
     {
         juce::String endpoint;   // endpoint we assigned
         juce::String executable; // normalised executable of the process
+        juce::String executablePath, previousEndpoint; // for the journal
+        uint64_t processStartTime = 0;
     };
     std::map<uint32_t, RoutedEndpoint> routedEndpoints; // pid -> our move
     /** Normalised executables we moved and have not moved back yet (also
         those whose processes exited while routed); persisted in the settings. */
     std::set<juce::String> routedExecutables;
     std::set<uint32_t> restoreTried; // pids of such executables already moved back (once per process)
+    RouteJournal journal;
+    /** Moves an earlier run recorded (it did not undo them: a crash): pid ->
+        entry, until the first non-empty enumeration shows whether that very
+        process still runs. */
+    std::map<uint32_t, RouteJournal::Entry> recoveredMoves;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppRouting)
 };

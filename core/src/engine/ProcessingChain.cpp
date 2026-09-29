@@ -110,7 +110,7 @@ static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 // of any of them (or of the fold) re-runs it.
 constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, ClarityOn,
                                        ClarityPresence, ClarityPresenceFreq, ClarityAir, SaturationOn, SatMix, SatOutputDb,
-                                       AutoPreampOn, AutoPreampAllowanceDb };
+                                       AutoPreampOn, AutoPreampAllowanceDb, WarmthTone };
 constexpr EqField kHeadroomEqFields[] = { EqFieldOn, EqFieldType, EqFieldFreq, EqFieldGain, EqFieldQ, EqFieldSlope };
 constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldFreq, DynFieldQ, DynFieldStaticGain };
 constexpr int kHeadroomParamCount = static_cast<int> (std::size (kHeadroomScalarIds) + kEqBands * std::size (kHeadroomEqFields)
@@ -458,6 +458,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     slots[SComp].prepare (compressor, stereo, 20.0f, on (e, CompressorOn));
     slots[SMax].prepare (maximizer, stereo, 20.0f, on (e, MaximizerOn));
     contour.prepare (stereo); // docs/11 E32: after the preamp, ahead of the slots; no latency
+    warmthTilt.prepare (stereo); // docs/11 E14: ahead of the saturator slot; no latency
 
     totalLatency = 0;
     for (int s = 0; s < kNumSlots; ++s)
@@ -492,6 +493,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     preampGain.reset (sr, 20.0f, 1.0f);
     headroomKeyValid = false;
     headroomHoldoff = 0;
+    warmthTrimModelDb = 0.0f;
     outputGain.reset (sr, 20.0f, dbToGain (e[OutputGainDb]));
     bypassMix.reset (sr, 30.0f, on (e, BypassAll) ? 1.0f : 0.0f);
     dryMatchGain.reset (sr, 50.0f, 1.0f);
@@ -620,6 +622,7 @@ void ProcessingChain::resetSignalState() noexcept
     virtualizer.reset();
     fold.reset();
     contour.reset();
+    warmthTilt.reset();
     virtMix.setImmediate (virtMix.getTarget());
     passMix.setImmediate (passMix.getTarget());
     virtRan = foldRan = passStatsValid = false;
@@ -857,6 +860,9 @@ void ProcessingChain::applyParameters() noexcept
     clarity.setParams (cp);
     slots[SClarity].setActive (active (ClarityOn));
 
+    // ---- Warmth tilt (docs/11 E14; ToneTilt.h) ----
+    warmthTilt.setParams ({ e[WarmthTone] });
+
     // ---- Saturation ----
     SaturatorParams sp;
     sp.type = static_cast<SaturationType> (std::clamp (idx (e, SatType), 0, 2));
@@ -1010,7 +1016,7 @@ void ProcessingChain::applyParameters() noexcept
 
 void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
 {
-    static_assert (kHeadroomKeySize == kHeadroomParamCount + 2 + LoudnessContour::kNumSections);
+    static_assert (kHeadroomKeySize == kHeadroomParamCount + 3 + LoudnessContour::kNumSections);
     std::array<float, kHeadroomKeySize> key {};
     size_t k = 0;
     for (int id : kHeadroomScalarIds)
@@ -1025,7 +1031,16 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     // The loudness contour's target (docs/11 E32): its sections and trim.
     for (int s = 0; s < LoudnessContour::kNumSections; ++s)
         key[k++] = contour.getTargetGainDb (s);
-    key[k] = contour.getTargetTrimDb();
+    key[k++] = contour.getTargetTrimDb();
+    // The Warmth tilt's level compensation at the target amount (docs/11
+    // E14): -amount x its measured L1, followed in 0.25 dB steps (the
+    // measure moves over seconds; a step re-runs the prediction once).
+    {
+        const float trim = h[WarmthTone] > 0.0f ? -h[WarmthTone] * warmthTilt.getFullTiltLoudnessDb() : 0.0f;
+        if (trim == 0.0f || std::abs (trim - warmthTrimModelDb) >= 0.25f)
+            warmthTrimModelDb = trim;
+    }
+    key[k] = warmthTrimModelDb;
 
     const bool first = ! headroomKeyValid;
     if (! first && (key == headroomKey || headroomHoldoff > 0))
@@ -1044,6 +1059,9 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
             headroomModel.sections[static_cast<size_t> (headroomModel.numSections++)] = sections[static_cast<size_t> (s)];
         headroomModel.gainDb += contour.getTargetTrimDb();
     }
+    // The Warmth tilt's trim (docs/11 E14): on bass-heavy programme it
+    // already takes most of its sections' lift back.
+    headroomModel.gainDb += warmthTrimModelDb;
     const headroom::Prediction p = predictStaticBoost (headroomModel, headroom::Weighting::Programme);
     const float preamp = on (h, AutoPreampOn) ? headroom::preampDb (p, h[AutoPreampAllowanceDb]) : 0.0f;
     predictedBoostDb.store (static_cast<float> (p.maxBoostDb), std::memory_order_relaxed);
@@ -1130,6 +1148,15 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
             add (SvfCoeffs::make (FilterType::Bell, e[ClarityPresenceFreq], kPresenceQ, kPresenceMaxDb * e[ClarityPresence], sr));
         if (e[ClarityAir] > 0.0f)
             add (SvfCoeffs::make (FilterType::HighShelf, kAirShelfHz, kAirShelfQ, kAirShelfMaxDb * e[ClarityAir], sr));
+    }
+    if (e[WarmthTone] > 0.0f)
+    {
+        // The Warmth tilt's sections (docs/11 E14); its level compensation
+        // follows the programme, so updateHeadroom() adds it as measured.
+        SvfCoeffs body, high;
+        ToneTilt::sections (e[WarmthTone], sr, body, high);
+        add (body);
+        add (high);
     }
     if (on (e, SaturationOn))
     {
@@ -1599,6 +1626,10 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
                 startleGuard.setLevelOffsetDb (autoLevel.getGainDb());
                 startleGuard.measure (st, contaminated);
             }
+            // The Warmth tilt (docs/11 E14) between the clarity and saturator
+            // slots, ahead of the drive span's tap: untouched while it idles.
+            if (s == SSat)
+                warmthTilt.process (st);
             if (spanRunning && (s == SDynEq || s == SBass || s == SClarity || s == SSat || s == SMax))
                 protectionTap (st, s, contaminated); // the governor's spans and pre-maximizer peak (docs/11 E06), tonal reference (E07)
             // The Smoothness stage's reference (docs/11 E07): the dynamic

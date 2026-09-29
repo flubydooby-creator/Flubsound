@@ -119,6 +119,34 @@ std::string KeyChord::toString() const
 }
 
 //==============================================================================
+std::string AppAudioRouter::matchOutputDeviceName (const std::vector<OutputEndpoint>& endpoints, const std::string& deviceName)
+{
+    if (deviceName.empty())
+        return {};
+
+    // JUCE's StringArray::appendNumbersToDuplicates (ignoreCase = false,
+    // appendNumberToFirstInstance = false): the first of equal names keeps
+    // it, the later ones get " (2)", " (3)" ... in list order.
+    std::vector<std::string> names;
+    names.reserve (endpoints.size());
+    for (const auto& e : endpoints)
+        names.push_back (e.name);
+    for (size_t i = 0; i + 1 < names.size(); ++i)
+    {
+        const auto original = names[i];
+        int number = 1;
+        for (size_t j = i + 1; j < names.size(); ++j)
+            if (names[j] == original)
+                names[j] += " (" + std::to_string (++number) + ")";
+    }
+
+    for (size_t i = 0; i < names.size(); ++i)
+        if (! endpoints[i].name.empty() && names[i] == deviceName)
+            return endpoints[i].id;
+    return {};
+}
+
+//==============================================================================
 // Fallback for operating systems without a dedicated implementation (e.g. the
 // BSDs): every service reports isSupported() == false so the UI hides it.
 #if ! defined(_WIN32) && ! defined(__APPLE__) && ! defined(__linux__)

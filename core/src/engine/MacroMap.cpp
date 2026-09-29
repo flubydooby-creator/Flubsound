@@ -16,7 +16,7 @@ namespace
 constexpr float kEngage = 0.02f;
 
 // clang-format off
-constexpr std::array<MacroEntry, 30> kMusicTable {{
+constexpr std::array<MacroEntry, 25> kMusicTable {{
     // ---- Boost Intensity: clarity/width first, bass next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.35f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAir,        0.30f, 0.10f, 0.60f, 1.0f, false },
@@ -54,16 +54,41 @@ constexpr std::array<MacroEntry, 30> kMusicTable {{
     { MacroSource::M4, MaximizerOn,          1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M4, MaxDriveDb,          10.00f, 0.00f, 1.00f, 1.3f, true  },
     { MacroSource::M4, MaxGlue,              0.50f, 0.30f, 1.00f, 1.0f, false },
-    // ---- M5 Warmth ----
+    // ---- M5 Warmth: kMusicWarmthTone / kMusicWarmthTapeGrit below ----
+    // Boost Intensity engages the dynamic EQ so the music "de-boom" mode band
+    // can follow it (see ProcessingChain::configureModeBands).
+    { MacroSource::Boost, DynEqOn,           1.00f, 0.00f, kEngage, 1.0f, false },
+    { MacroSource::Boost, MaximizerOn,       1.00f, 0.25f, 0.27f, 1.0f, false },
+}};
+
+// ---- M5 Warmth (docs/11 E14), applied after kMusicTable ----
+// The audible warmth is the tone tilt (warmth.tone: +2.9 dB at 200 Hz,
+// -2.6 dB at 10 kHz on pink noise at 100 %, level compensated, ToneTilt.h),
+// ungoverned like the other tonal rows. The saturator adds a gentle Tube
+// colour (Tube while the saturator is Warmth's alone: sat.on off and
+// sat.type at its default in the base values, kMusicWarmthOverrides): drive
+// calibrated open loop so a -6 dBFS 1 kHz sine stays <= 0.5 % THD+N with H2
+// above H3 (0.30 %, H2 -51 / H3 -58 dBc at 100 %; docs/11 E14 Status). The
+// v1 bass boost and harmonics are gone: the tilt's low shelf already lifts
+// the bass by 3.8 dB.
+constexpr std::array<MacroEntry, 3> kMusicWarmthTone {{
+    { MacroSource::M5, WarmthTone,           1.00f, 0.00f, 1.00f, 1.0f, false },
+    { MacroSource::M5, SaturationOn,         1.00f, 0.00f, kEngage, 1.0f, false },
+    { MacroSource::M5, SatDriveDb,           0.90f, 0.00f, 1.00f, 1.0f, true  },
+}};
+constexpr std::array<MacroOverride, 1> kMusicWarmthOverrides {{
+    { MacroSource::M5, SatType, 1.0f, SaturationOn }, // "Tube" (even harmonics), unless the saturator is engaged in the base values
+}};
+// warmth.tapeGrit: the v1 Warmth, row for row (Lo-Fi Chill, Warm Vinyl).
+// In v1 these rows sat between M4's and the last two Boost rows, which touch
+// none of their parameters, so applying them after kMusicTable adds every
+// contribution in the same order: the effective values are bit-identical.
+constexpr std::array<MacroEntry, 5> kMusicWarmthTapeGrit {{
     { MacroSource::M5, SaturationOn,         1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M5, SatDriveDb,           9.00f, 0.00f, 1.00f, 1.0f, true  },
     { MacroSource::M5, BassHarmonics,        0.20f, 0.40f, 1.00f, 1.0f, true  },
     { MacroSource::M5, BassBoostDb,          2.00f, 0.30f, 1.00f, 1.0f, true  },
     { MacroSource::M5, BassOn,               1.00f, 0.00f, kEngage, 1.0f, false },
-    // Boost Intensity engages the dynamic EQ so the music "de-boom" mode band
-    // can follow it (see ProcessingChain::configureModeBands).
-    { MacroSource::Boost, DynEqOn,           1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::Boost, MaximizerOn,       1.00f, 0.25f, 0.27f, 1.0f, false },
 }};
 
 // Gaming: the broadband upward compressor lifts the whole bed with the cues
@@ -126,6 +151,22 @@ std::span<const MacroEntry> MacroMap::table (ModeValue mode) noexcept
     return { kMusicTable.data(), kMusicTable.size() };
 }
 
+std::span<const MacroEntry> MacroMap::warmthRows (const float* base) noexcept
+{
+    if (static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode]))) == ModeValue::Gaming)
+        return {};
+    if (base[WarmthTapeGrit] >= 0.5f)
+        return { kMusicWarmthTapeGrit.data(), kMusicWarmthTapeGrit.size() };
+    return { kMusicWarmthTone.data(), kMusicWarmthTone.size() };
+}
+
+std::span<const MacroOverride> MacroMap::overrides (const float* base) noexcept
+{
+    if (static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode]))) == ModeValue::Gaming || base[WarmthTapeGrit] >= 0.5f)
+        return {};
+    return { kMusicWarmthOverrides.data(), kMusicWarmthOverrides.size() };
+}
+
 const char* MacroMap::macroName (ModeValue mode, int macroIndex) noexcept
 {
     static const char* music[] = { "Punch", "Width", "Clarity", "Loudness", "Warmth" };
@@ -138,9 +179,11 @@ const char* MacroMap::macroName (ModeValue mode, int macroIndex) noexcept
 bool MacroMap::isArmed (const float* base, int paramId) noexcept
 {
     const auto mode = static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode])));
-    for (const auto& e : table (mode))
-        if (e.paramId == paramId && e.amount > 0.0f && sourceValue (base, e.source) > 0.0f)
-            return true;
+    const std::span<const MacroEntry> sets[] = { table (mode), warmthRows (base) };
+    for (const auto rows : sets)
+        for (const auto& e : rows)
+            if (e.paramId == paramId && e.amount > 0.0f && sourceValue (base, e.source) > 0.0f)
+                return true;
     return false;
 }
 
@@ -151,20 +194,31 @@ void MacroMap::apply (const float* base, float* effective, float governorScale) 
 
     const auto mode = static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode])));
     const auto& info = layout();
+    const std::span<const MacroEntry> sets[] = { table (mode), warmthRows (base) };
 
-    for (const auto& e : table (mode))
+    for (const auto rows : sets)
+        for (const auto& e : rows)
+        {
+            const float v = sourceValue (base, e.source);
+            if (v <= 0.0f)
+                continue;
+            float c = smoothstep (e.start, e.end, v);
+            if (e.exponent != 1.0f)
+                c = std::pow (c, e.exponent);
+            const float g = e.governed ? governorScale : 1.0f;
+            effective[e.paramId] += e.amount * c * g;
+        }
+
+    // Override rows: a choice for a parameter the user or preset left alone.
+    for (const auto& o : overrides (base))
     {
-        const float v = sourceValue (base, e.source);
-        if (v <= 0.0f)
-            continue;
-        float c = smoothstep (e.start, e.end, v);
-        if (e.exponent != 1.0f)
-            c = std::pow (c, e.exponent);
-        const float g = e.governed ? governorScale : 1.0f;
-        effective[e.paramId] += e.amount * c * g;
+        const auto& p = info[static_cast<size_t> (o.paramId)];
+        if (sourceValue (base, o.source) > 0.0f && base[o.paramId] == p.defaultValue && ! (base[o.unlessOnId] >= 0.5f))
+            effective[o.paramId] = p.clamp (o.value);
     }
 
-    for (const auto& e : table (mode))
-        effective[e.paramId] = info[static_cast<size_t> (e.paramId)].clamp (effective[e.paramId]);
+    for (const auto rows : sets)
+        for (const auto& e : rows)
+            effective[e.paramId] = info[static_cast<size_t> (e.paramId)].clamp (effective[e.paramId]);
 }
 } // namespace flub

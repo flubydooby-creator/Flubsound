@@ -329,11 +329,30 @@ static_assert (std::is_same_v<decltype (&TonalBalanceMeter::tick), void (TonalBa
 static_assert (std::is_same_v<decltype (&TonalBalanceMeter::getLiftDb), float (TonalBalanceMeter::*) (int) const noexcept FLUB_NONBLOCKING>);
 static_assert (hasNonblockingReset<TonalBalanceMeter>);
 
+// The Warmth tilt ProcessingChain::process runs ahead of the saturator slot,
+// its per-block setParams, and the shelves the automatic preamp's model
+// reads (docs/11 E14, tests/test_warmth.cpp).
+#include "flub/dsp/ToneTilt.h"
+static_assert (hasNonblockingProcess<ToneTilt>);
+static_assert (hasNonblockingReset<ToneTilt>);
+static_assert (hasNonblockingSetParams<ToneTilt, ToneTiltParams>);
+static_assert (std::is_same_v<decltype (&ToneTilt::sections), void (*) (float, double, SvfCoeffs&, SvfCoeffs&) noexcept FLUB_NONBLOCKING>);
+
 // The device callback's kernel thread id, recorded on the first callback of
 // each new device thread for the message thread's RealtimeKit request
 // (docs/11 E44, app/Source/platform; tests/test_platform_linux.cpp calls it).
 #include "../app/Source/platform/PlatformServices.h"
 
 static_assert (std::is_same_v<decltype (&flub::platform::RealtimeScheduling::currentThreadId), uint64_t (*)() noexcept FLUB_NONBLOCKING>);
+
+// The native PipeWire node's cycle on PipeWire's data thread (docs/11 E48,
+// app/Source/platform/pipewire; tests/test_platform_linux.cpp drives it).
+#include "../app/Source/platform/pipewire/PipeWireCycle.h"
+
+static_assert (std::is_same_v<decltype (&flub::platform::pipewire::CycleRunner::run),
+                              int (flub::platform::pipewire::CycleRunner::*) (const float* const*, float* const*, uint32_t,
+                                                                               flub::platform::NativeAudioNode::Callback&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callback::nodeProcess),
+                              void (flub::platform::NativeAudioNode::Callback::*) (const float* const*, int, float* const*, int, int) noexcept FLUB_NONBLOCKING>);
 
 #endif // FLUB_RTSAN

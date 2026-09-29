@@ -11,6 +11,7 @@
   "params": {
     "boost": 0.25,
     "macro.5": 0.35,
+    "warmth.tapeGrit": true,
     "sat.on": true,
     "bass.boost": 1.5,
     "bass.freq": 90,

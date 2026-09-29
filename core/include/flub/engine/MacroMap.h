@@ -17,6 +17,21 @@
 // and harmonics, and loudness (maximizer drive, saturation) ramps in last -
 // so low settings never cost dynamics and high settings stay controlled by
 // the SafetyGovernor.
+//
+// Music Warmth (docs/11 E14) has two row sets, chosen per block by the base
+// value of warmth.tapeGrit: by default the level-compensated tone tilt
+// (warmth.tone, ToneTilt.h) with a gentle, mostly 2nd-order Tube colour
+// (sat.drive up to +0.9 dB, sat.type Tube by an override row, below); with
+// warmth.tapeGrit on, the v1 rows (tape drive +9 dB, bass boost +2 dB, bass
+// harmonics +0.2, no tilt), which Lo-Fi Chill and Warm Vinyl keep.
+//
+// Override rows (MacroOverride) make a choice for a parameter the user or
+// the preset left alone: while the source is off zero, the base value is
+// still the parameter's default and the module it belongs to is not switched
+// on in the base values (a preset or user that engaged the saturator chose
+// its type, even the default one), the effective value is `value`. Presets
+// are sparse (a missing key is the default), so an explicit default on a
+// module left off reads as "not chosen"; warmth.tapeGrit keeps Tape anyway.
 #pragma once
 
 #include "Parameters.h"
@@ -47,10 +62,25 @@ struct MacroEntry
     bool governed;  // scaled by the SafetyGovernor
 };
 
+struct MacroOverride
+{
+    MacroSource source;
+    int paramId;
+    float value;   // the effective value while the source is off zero and the base is the default ...
+    int unlessOnId; // ... and this toggle (the module's enable) is off in the base values
+};
+
 class MacroMap
 {
 public:
+    /** The additive rows of `mode` without Music Warmth's (warmthRows). */
     static std::span<const MacroEntry> table (param::ModeValue mode) noexcept;
+    /** Music Warmth's additive rows for these base values (the tone set, or
+        the v1 set while warmth.tapeGrit is on); empty in Gaming. */
+    static std::span<const MacroEntry> warmthRows (const float* base) noexcept;
+    /** The override rows that apply to these base values (Music Warmth's
+        Tube, not with warmth.tapeGrit); empty in Gaming. */
+    static std::span<const MacroOverride> overrides (const float* base) noexcept;
     static const char* macroName (param::ModeValue mode, int macroIndex) noexcept; // 0..4
 
     /** effective[] <- base[] with all macro contributions applied and clamped.

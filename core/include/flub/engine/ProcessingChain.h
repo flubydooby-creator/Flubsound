@@ -22,6 +22,9 @@
 //    -> [slot] DynamicEq (4 user bands + 4 internal mode bands)
 //    -> [slot] BassEngine
 //    -> [slot] ClarityEnhancer
+//    -> Warmth tilt (warmth.tone, docs/11 E14; ToneTilt.h): a body bell up
+//       and a high shelf down with automatic level compensation, ahead of
+//       the saturator (outside the governor's spans); idle and untouched at 0
 //    -> [slot] Saturator (oversampled)
 //    -> [slot] Smoothness (SmoothnessGuard, docs/11 E07; smooth.amount, off
 //              by default): a de-esser that takes back what the slots
@@ -82,7 +85,11 @@
 // stages that can raise the level: the parametric EQ (bands and output
 // gain), the dynamic EQ's static gains, the bass shelf (at its full boost,
 // with the subsonic high-pass), presence (at its full lift) and the air
-// shelf, the saturator's wet make-up; the surround fold's -3 dB trim counts
+// shelf, the Warmth tilt's sections and its level compensation at the
+// target amount (docs/11 E14: the measured trim, in 0.25 dB steps, so a
+// bass-heavy programme's trim is not counted twice), the saturator's wet
+// make-up;
+// the surround fold's -3 dB trim counts
 // against them, and so does the loudness contour's lift net of its own trim
 // (docs/11 E32). Left out: level-dependent boosts that withdraw on loud
 // material (the dynamic-EQ ranges and mode bands, the transient shaper),
@@ -165,6 +172,7 @@
 #include "flub/dsp/SmoothnessGuard.h"
 #include "flub/dsp/SpectralNoiseGate.h"
 #include "flub/dsp/StereoSpatializer.h"
+#include "flub/dsp/ToneTilt.h"
 #include "flub/dsp/TonalBalanceMeter.h"
 #include "flub/dsp/WeightedResidual.h"
 #include "flub/neural/AsyncModelProcessor.h"
@@ -313,6 +321,10 @@ public:
         the audio thread or after a render. */
     const LoudnessContour& getLoudnessContour() const noexcept { return contour; }
 
+    /** The Warmth tilt (docs/11 E14; ToneTilt.h): its amount and level
+        compensation as applied, for tests and diagnostics. */
+    const ToneTilt& getWarmthTilt() const noexcept { return warmthTilt; }
+
     /** Input samples with a magnitude above this (+24 dBFS) are corrupt and
         muted by the sanitiser (see the header comment). */
     static constexpr float kSanitiseLimit = 15.85f;
@@ -356,7 +368,7 @@ public:
         a broadband gain. Trivially copyable, no allocation. */
     struct StaticBoostModel
     {
-        static constexpr int kMaxSections = 64; // EQ 10 x 4, dynamic EQ 4, bass 3, clarity 2
+        static constexpr int kMaxSections = 64; // EQ 10 x 4, dynamic EQ 4, bass 3, clarity 2, warmth tilt 2, contour 4
         std::array<SvfCoeffs, kMaxSections> sections {};
         int numSections = 0;
         double gainDb = 0.0; // EQ output, saturation make-up, the surround fold's trim
@@ -506,7 +518,7 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 97 + LoudnessContour::kNumSections + 1; // + the contour's sections and trim (E32)
+    static constexpr int kHeadroomKeySize = 98 + LoudnessContour::kNumSections + 2; // + the contour's sections and trim (E32), the Warmth trim (E14)
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;
@@ -519,6 +531,11 @@ private:
     StartleGuard startleGuard;
     // The loudness contour (docs/11 E32) and the host's listening level.
     LoudnessContour contour;
+    // The Warmth tilt (docs/11 E14), ahead of the saturator slot, and its
+    // level compensation at the target amount as the automatic preamp's
+    // model last counted it (moved in 0.25 dB steps, audio thread).
+    ToneTilt warmthTilt;
+    float warmthTrimModelDb = 0.0f;
     std::atomic<float> listeningLevelDb { 0.0f };
     bool contourLfArmed = false; // the contour arms the maximizer's LF-first limiter (audio thread)
     // Boost's transient coupling (docs/11 E05 step 6, audio thread): the

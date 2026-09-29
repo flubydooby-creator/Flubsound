@@ -20,6 +20,12 @@
 // process capture, or switched off) the assign button is also greyed out and
 // the notice says what to do instead. When the panel is short the notice is
 // one line, with the full text on hover / click.
+// Doubling guard (docs/11 E47): an assigned app that plays straight to the
+// device Flubsound plays to is not captured (AppRouting holds it back, it
+// would be heard twice). Its chip carries an amber "original also audible"
+// badge (two overlapping rings) and its menu the fix; while processing
+// works otherwise, an amber notice under the header names the apps and the
+// fix (set the app's output to another device, which it lists).
 //
 // Below the strips, "Auto profiles" (roadmap 2.5): one line per rule
 // ("cs2 -> Game: Competitive FPS, restores on exit") with a remove button, a
@@ -94,6 +100,10 @@ public:
     bool isShowingNoAppsProcessed() const noexcept { return noAppsProcessed; }
     /** The notice's full text (empty = no notice). */
     const juce::String& getNotice() const noexcept { return notice; }
+    /** The amber doubling notice is shown (docs/11 E47). */
+    bool isShowingDoubling() const noexcept { return doubling; }
+    /** Screen-reader description of a strip row (its apps and their states). */
+    juce::String getStripDescription (int strip) const;
 
 private:
     class StripRow;
@@ -101,7 +111,8 @@ private:
 
     void showAssignMenu();
     void promptForExecutable (const juce::String& stripName);
-    void showChipMenu (const juce::String& executable, const juce::String& error);
+    void showChipMenu (const juce::String& executable, const juce::String& error, bool doubled);
+    void showDoublingFix();
     void showAddAutoProfileDialog();
     juce::TextLayout layoutNotice (int width) const;
 
@@ -116,6 +127,7 @@ private:
     juce::String notice;   // text of the notice under the header: the red state's or `reason`
     juce::String noticeDetail; // the red state's explanation (below its title)
     bool noAppsProcessed = false;
+    bool doubling = false;     // the amber doubling notice (not while the red state shows)
     juce::Rectangle<int> headerArea, noticeArea;
     bool noticeCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;

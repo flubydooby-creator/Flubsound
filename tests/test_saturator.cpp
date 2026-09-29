@@ -14,6 +14,8 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <utility>
+#include <vector>
 
 using namespace flub;
 using namespace flubtest;
@@ -1002,4 +1004,183 @@ TEST_CASE ("Saturator (review): toggling the type every sample stays click-free"
     // The steepest step of the input sine; every curve has slope <= 1.
     const double sineStep = 0.3 * kTwoPi * 100.0 / kFs;
     CHECK_LE (maxStep (buf.ch[0], 0, n), 1.1 * sineStep);
+}
+
+// ---- first-order ADAA and 8x (docs/11 E10 Phase 2) ----
+namespace
+{
+/** The chain's designs (Oversampler::forProfile, ADAA on) at a rate. */
+std::vector<Oversampler::Design> chainDesigns (double fs)
+{
+    return { Oversampler::forProfile (Oversampler::Profile::Quality, fs), Oversampler::forProfile (Oversampler::Profile::Balanced, fs) };
+}
+
+std::unique_ptr<Saturator> makeSat (double sampleRate, const SaturatorParams& p, const Oversampler::Design& design, int numChannels = 1,
+                                    int maxBlock = 512)
+{
+    auto s = std::make_unique<Saturator>();
+    s->setOversampling (design);
+    s->setParams (p);
+    s->prepare ({ sampleRate, maxBlock, numChannels });
+    return s;
+}
+} // namespace
+
+TEST_CASE ("Saturator ADAA: the chain's designs keep unity small-signal gain and an exact latency at every rate")
+{
+    // The ADAA curve is half an oversampled sample late and the stage-1
+    // decimator takes it back, but only on the deviation: the programme still
+    // comes from the exact dry delay, so a quiet tone passes at unity and an
+    // impulse in the linear region lands exactly on the reported latency.
+    for (double fs : kRates)
+        for (const auto& design : chainDesigns (fs))
+            for (auto type : kTypes)
+            {
+                CHECK (design.adaa);
+                auto sat = makeSat (fs, makeParams (type, 12.0f), design);
+                const auto r = runTone (*sat, 1000.0, fs, 0.01f);
+                CHECK_NEAR (toDb (toneAmplitude (r.out.data() + r.start, r.length, 1000.0, fs) / 0.01), 0.0, 0.02);
+
+                auto impulse = makeSat (fs, makeParams (type, 12.0f), design);
+                const int lat = impulse->latencySamples(), n0 = 300, n = 1024;
+                std::vector<float> x (static_cast<size_t> (n), 0.0f);
+                x[static_cast<size_t> (n0)] = 1.0e-3f;
+                const auto y = runMono (*impulse, x, 64);
+                int argMax = 0;
+                for (int i = 1; i < n; ++i)
+                    if (std::abs (y[static_cast<size_t> (i)]) > std::abs (y[static_cast<size_t> (argMax)]))
+                        argMax = i;
+                CHECK (argMax == n0 + lat);
+                CHECK_NEAR (y[static_cast<size_t> (n0 + lat)], 1.0e-3, 1.0e-7);
+            }
+}
+
+TEST_CASE ("Saturator ADAA: the deviation stays aligned with the dry path - 1 / 5 kHz at 12 dB match the plain curve within -60 dB, THD+N telemetry within 0.3 dB")
+{
+    // Same design with and without ADAA: what differs is the aliasing (below
+    // -70 dBc) and the box filter's droop on the deviation (-0.02 dB at 5 kHz
+    // at 4x / 48 kHz). The half sample the decimator takes back matters: a
+    // deviation half an oversampled sample late would leave about -35 dB
+    // (1 kHz) and -21 dB (5 kHz) at 4x.
+    for (const auto& withAdaa : chainDesigns (48000.0))
+    {
+        auto plain = withAdaa;
+        plain.adaa = false;
+        for (auto type : kTypes)
+            for (double f : { 1000.0, 5000.0 })
+            {
+                auto a = makeSat (kFs, makeParams (type, 12.0f), withAdaa);
+                auto b = makeSat (kFs, makeParams (type, 12.0f), plain);
+                const auto ra = runTone (*a, f, kFs, 0.5f);
+                const auto rb = runTone (*b, f, kFs, 0.5f);
+                double diff = 0.0, ref = 0.0;
+                for (int i = ra.start; i < ra.start + ra.length; ++i)
+                {
+                    const double d = ra.out[static_cast<size_t> (i)] - rb.out[static_cast<size_t> (i)];
+                    diff += d * d;
+                    ref += static_cast<double> (rb.out[static_cast<size_t> (i)]) * rb.out[static_cast<size_t> (i)];
+                }
+                const double db = 10.0 * std::log10 (std::max (1.0e-30, diff / ref));
+                CHECK_LE (db, -60.0);
+                CHECK_NEAR (a->getDistortionDb(), b->getDistortionDb(), 0.3);
+                CHECK_GE (a->getDistortionDb(), -40.0); // it is saturating
+            }
+    }
+}
+
+TEST_CASE ("Saturator ADAA: parameter and type changes are click-free and every host block size gives the same output (4x and 8x)")
+{
+    for (const auto& [fs, design] : { std::pair { 48000.0, Oversampler::forProfile (Oversampler::Profile::Quality, 48000.0) },
+                                      std::pair { 44100.0, Oversampler::forProfile (Oversampler::Profile::Balanced, 44100.0) } })
+    {
+        const int step = 3584, n = 6 * step;
+        const SaturatorParams schedule[] = {
+            makeParams (SaturationType::Tape, 6.0f),
+            makeParams (SaturationType::Tape, 18.0f, 0.7f, 3.0f),
+            makeParams (SaturationType::Tube, 18.0f, 0.7f, 3.0f),
+            makeParams (SaturationType::Tape, 9.0f, 1.0f, -2.0f),
+            makeParams (SaturationType::Digital, 24.0f, 0.4f, 0.0f),
+            makeParams (SaturationType::Tube, 3.0f, 1.0f, 6.0f),
+        };
+        std::vector<float> in0 (static_cast<size_t> (n)), in1 = whiteNoise (n, 0.8f, 42);
+        const auto noise = whiteNoise (n, 0.2f, 43);
+        for (int i = 0; i < n; ++i)
+            in0[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::sin (kTwoPi * 220.0 * i / fs) + 0.2 * std::sin (kTwoPi * 5100.0 * i / fs))
+                                           + noise[static_cast<size_t> (i)];
+        std::vector<std::vector<float>> outs;
+        for (int blockSize : { 512, 1, 7, 64 })
+        {
+            auto sat = makeSat (fs, schedule[0], design, 2, 512);
+            Planar buf (2, n);
+            load (buf, 0, in0);
+            load (buf, 1, in1);
+            for (int pos = 0; pos < n; pos += blockSize)
+            {
+                if (pos % step == 0)
+                    sat->setParams (schedule[pos / step]);
+                sat->process (buf.block (pos, std::min (blockSize, n - pos)));
+            }
+            CHECK (allFinite (buf));
+            outs.push_back (buf.ch[0]);
+            outs.back().insert (outs.back().end(), buf.ch[1].begin(), buf.ch[1].end());
+        }
+        for (size_t k = 1; k < outs.size(); ++k)
+        {
+            double err = 0.0;
+            for (size_t i = 0; i < outs[0].size(); ++i)
+                err = std::max (err, static_cast<double> (std::abs (outs[k][i] - outs[0][i])));
+            CHECK_LE (err, 1.0e-5);
+        }
+
+        // Drive jumps and type changes on a 100 Hz sine: no step larger than
+        // the steady state's on either side (as for the plain curves).
+        const int m = static_cast<int> (fs * 0.6), change = 9600;
+        for (const auto& [before, after] : { std::pair { makeParams (SaturationType::Tape, 0.0f), makeParams (SaturationType::Tape, 18.0f) },
+                                             std::pair { makeParams (SaturationType::Tube, 24.0f), makeParams (SaturationType::Tube, 0.0f) },
+                                             std::pair { makeParams (SaturationType::Tape, 18.0f), makeParams (SaturationType::Digital, 18.0f) } })
+        {
+            auto sat = makeSat (fs, before, design, 1, 64);
+            Planar buf (1, m);
+            load (buf, 0, sine (100.0, fs, m, 0.3f));
+            for (int pos = 0; pos < m; pos += 64)
+            {
+                if (pos == change)
+                    sat->setParams (after);
+                sat->process (buf.block (pos, std::min (64, m - pos)));
+            }
+            const auto& y = buf.ch[0];
+            CHECK_LE (maxStep (y, change, m), 1.1 * std::max (maxStep (y, 4800, change), maxStep (y, m - 4800, m)));
+        }
+    }
+}
+
+TEST_CASE ("Saturator ADAA: silence, quiet tails, NaN / Inf bursts and +24 dBFS input stay finite and recover (4x and 8x)")
+{
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    for (const auto& design : chainDesigns (44100.0))
+        for (auto type : kTypes)
+        {
+            auto sat = makeSat (44100.0, makeParams (type, 24.0f), design, 2, 256);
+            const int n = 12000, n0 = 1000;
+            Planar buf (2, n);
+            fillAll (buf, sine (440.0, 44100.0, n, 0.5f));
+            buf.ch[0][n0] = nan;
+            buf.ch[1][n0 + 3] = inf;
+            buf.ch[1][n0 + 4] = -inf;
+            buf.ch[0][n0 + 2000] = 15.8f; // +24 dBFS
+            processInBlocks (*sat, buf, 256);
+            bool finite = true;
+            for (const auto& c : buf.ch)
+                for (int i = n0 + 2000 + 64; i < n; ++i)
+                    finite = finite && std::isfinite (c[static_cast<size_t> (i)]);
+            CHECK (finite);
+            CHECK_GE (peakOf (buf, n - 960, n), 0.01);
+
+            // Silence afterwards decays to exact zero (the ADAA's previous
+            // sample and every state are flushed).
+            Planar quiet (2, 2 * 44100);
+            processInBlocks (*sat, quiet, 256);
+            CHECK_LE (peakOf (quiet, 2 * 44100 - 256, 2 * 44100), 0.0);
+        }
 }

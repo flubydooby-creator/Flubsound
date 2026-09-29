@@ -16,8 +16,9 @@
 //   Digital : cubic soft clip f(x) = x - (4/27) x^3 for |x| < 1.5, +-1 beyond
 //             (f'(0) = 1, f(1.5) = 1, f'(1.5) = 0: odd harmonics, hard-ish).
 // Runs at 1x, 2x (default) or 4x via Oversampler, or an explicit
-// Oversampler::Design (the chain uses Oversampler::forProfile: 4x with the
-// 2x designs' latency below 176.4 kHz); latency = oversampler latency.
+// Oversampler::Design (the chain uses Oversampler::forProfile: 2x / 4x / 8x
+// by rate and profile, in the latency the fixed 2x designs had, with
+// first-order ADAA curves); latency = oversampler latency.
 // Dry/wet mix is latency-aligned internally (the dry path is delayed).
 // Telemetry: getDistortionDb() = THD+N of the stage over the last completed
 // 25 ms analysis window (DistortionEstimator.h), measured at the oversampled rate around the curve,
@@ -27,6 +28,13 @@
 // Residual-path DC blocker (docs/11 E10): the band-limited deviation passes a
 // 5 Hz 1st-order high-pass before it joins the dry path, so no curve leaves
 // DC; the programme never passes it.
+// ADAA (docs/11 E10 Phase 2, Design::adaa): each curve is evaluated as the
+// mean of f over the step from the previous oversampled input to the current
+// one, from closed-form antiderivatives (Saturator.cpp), which removes most of
+// what a hard-driven curve folds back: 24 dB of Tape at 44.1 kHz -28 -> -54
+// dBc at 4x, -73 dBc at 8x (test_signal_hygiene.cpp). Its half-sample delay
+// is taken back by stage 1's decimator; the telemetry's reference is the
+// input's midpoints, so THD+N still reads only what the curve adds.
 #pragma once
 
 #include "DistortionEstimator.h"
@@ -63,12 +71,13 @@ struct SaturatorParams
 class Saturator final : public Processor
 {
 public:
-    /** Structural: call before prepare(). factor 1, 2 or 4. */
+    /** Structural: call before prepare(). factor 1, 2 or 4 (others are sanitised to those). */
     void setOversampling (int factor, Oversampler::Quality q = Oversampler::Quality::High) noexcept
     {
-        osDesign = Oversampler::design (factor, q);
+        osDesign = Oversampler::design (factor >= 4 ? 4 : factor, q);
     }
-    /** Structural: call before prepare(). An explicit design (factor 1, 2 or 4). */
+    /** Structural: call before prepare(). An explicit design (factor 1, 2, 4 or 8;
+        with adaa the curves run with first-order ADAA). */
     void setOversampling (const Oversampler::Design& design) noexcept { osDesign = design; }
 
     void prepare (const ProcessSpec& spec) override;
@@ -111,6 +120,8 @@ private:
         SvfState bump;     // tape head-bump band-pass (base rate)
         float dcLp = 0.0f; // tube DC blocker integrator (base rate)
         double residualDcLp = 0.0; // residual-path DC blocker on the deviation (base rate)
+        float adaaPrevIn = 0.0f;   // ADAA: the last oversampled input (Tube / Digital curve input, midpoint reference)
+        float adaaPrevTape = 0.0f; // ADAA: the last tape curve input (after the pre-emphasis)
     };
 
     static DriveGains driveGains (float driveDb) noexcept;
@@ -129,7 +140,7 @@ private:
     AudioBuffer dryBuffer; // [channel][maxBlockSize]
 
     // Per-segment control arrays (allocated in prepare(), never resized).
-    std::vector<float> osGain, osInvGain, osScratch, osInput;        // factor * maxBlockSize (osInput: delta oversampling)
+    std::vector<float> osGain, osInvGain, osScratch, osInput;        // factor * maxBlockSize (osInput: delta oversampling; with ADAA the input's midpoints)
     std::vector<float> depthBuf, tubeBuf, bumpBuf, gainBuf, mixBuf; // maxBlockSize
     std::vector<float> distWeightBuf; // maxBlockSize: curve deviation weight re the linear path (THD+N telemetry)
 
@@ -157,6 +168,7 @@ private:
     float invFadeLengthOs = 1.0f / 1920.0f;
 
     int preparedFactor = 1; // oversampling factor actually prepared
+    bool adaa = false;      // first-order ADAA curves (Oversampler::Design::adaa)
     bool prepared = false;
 };
 } // namespace flub

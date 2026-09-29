@@ -49,6 +49,7 @@ public:
             Playing,
             Idle,
             NotRunning,
+            Doubled, // docs/11 E47: held back by the doubling guard, its original is heard directly
             Error
         };
         juce::String name, executable, error;
@@ -220,6 +221,7 @@ public:
             g.drawText ("No apps assigned", chipsArea.toFloat(), juce::Justification::centredLeft, false);
         }
         const auto alert = Theme::statusColours (*this).hot; // red, or vermillion with the colour-blind palette
+        const auto caution = Theme::statusColours (*this).warn; // amber (the colour-blind palette's own)
         for (size_t i = 0; i < chips.size() && i < chipBounds.size(); ++i)
         {
             const auto r = chipBounds[i].toFloat();
@@ -228,10 +230,11 @@ public:
             const auto state = chips[i].state;
             g.setColour (Palette::panelRaised);
             g.fillRoundedRectangle (r, r.getHeight() * 0.5f);
-            g.setColour (state == Chip::State::Error ? alert.withAlpha (0.55f) : Palette::borderStrong);
+            g.setColour (state == Chip::State::Error ? alert.withAlpha (0.55f)
+                                                     : (state == Chip::State::Doubled ? caution.withAlpha (0.6f) : Palette::borderStrong));
             g.drawRoundedRectangle (r.reduced (0.5f), r.getHeight() * 0.5f, 1.0f);
             auto content = r.reduced (6.0f, 0.0f);
-            drawChipState (g, content.removeFromLeft (11.0f), state, accent, alert);
+            drawChipState (g, content.removeFromLeft (11.0f), state, accent, alert, caution);
             content.removeFromLeft (5.0f);
             g.setColour (Palette::text.withAlpha (state == Chip::State::NotRunning ? 0.6f : 0.9f));
             g.setFont (Theme::font (11.5f));
@@ -275,7 +278,7 @@ public:
         {
             if (chipBounds[i].contains (e.getPosition()))
             {
-                panel.showChipMenu (chips[i].executable, chips[i].error);
+                panel.showChipMenu (chips[i].executable, chips[i].error, chips[i].state == Chip::State::Doubled);
                 return;
             }
         }
@@ -290,12 +293,15 @@ private:
             case Chip::State::Playing: return chip.name + ": playing (routed to " + name + ")";
             case Chip::State::Idle: return chip.name + ": running, not playing";
             case Chip::State::NotRunning: return chip.name + ": not running (routed to " + name + " when it starts)";
+            case Chip::State::Doubled:
+                return chip.name + ": original also audible (plays straight to the output device, so it is not captured; click for the fix)";
             case Chip::State::Error: return chip.name + ": routing error\n" + chip.error;
         }
         return chip.name;
     }
 
-    static void drawChipState (juce::Graphics& g, juce::Rectangle<float> area, Chip::State state, juce::Colour accent, juce::Colour alert)
+    static void drawChipState (juce::Graphics& g, juce::Rectangle<float> area, Chip::State state, juce::Colour accent, juce::Colour alert,
+                               juce::Colour caution)
     {
         const auto c = area.getCentre();
         const auto circle = [c] (float diameter) { return juce::Rectangle<float> (diameter, diameter).withCentre (c); };
@@ -314,6 +320,11 @@ private:
             case Chip::State::NotRunning:
                 g.setColour (Palette::faint.brighter (0.35f));
                 g.drawEllipse (circle (6.5f), 1.3f);
+                break;
+            case Chip::State::Doubled: // two overlapping rings: heard twice
+                g.setColour (caution);
+                g.drawEllipse (circle (6.5f).translated (-1.8f, 0.0f), 1.3f);
+                g.drawEllipse (circle (6.5f).translated (1.8f, 0.0f), 1.3f);
                 break;
             case Chip::State::Error:
                 g.setColour (alert);
@@ -744,7 +755,7 @@ void RoutingPanel::refreshRouting()
 {
     auto& routing = controller.getRouting();
     const auto& apps = routing.getApps();
-    bool anyAssignedRunning = false, anyAssignedFailing = false;
+    bool anyAssignedRunning = false, anyAssignedFailing = false, anyAssignedDoubled = false;
 
     for (auto& row : rows)
     {
@@ -754,7 +765,8 @@ void RoutingPanel::refreshRouting()
         {
             if (! route.stripName.equalsIgnoreCase (stripName))
                 continue;
-            // Every running instance counts: an error wins, then playing, then idle.
+            // Every running instance counts: an error wins, then the doubling
+            // guard (docs/11 E47), then playing, then idle.
             using State = StripRow::Chip::State;
             StripRow::Chip chip { displayNameOf (route.executable), route.executable, {}, State::NotRunning };
             for (const auto& app : apps)
@@ -766,6 +778,8 @@ void RoutingPanel::refreshRouting()
                     chip.state = State::Error;
                     chip.error = app.error;
                 }
+                else if (app.doublingBlocked || chip.state == State::Doubled)
+                    chip.state = State::Doubled;
                 else if (app.isActive)
                     chip.state = State::Playing;
                 else if (chip.state == State::NotRunning)
@@ -773,6 +787,7 @@ void RoutingPanel::refreshRouting()
             }
             anyAssignedRunning = anyAssignedRunning || chip.state == State::Playing || chip.state == State::Idle;
             anyAssignedFailing = anyAssignedFailing || chip.state == State::Error;
+            anyAssignedDoubled = anyAssignedDoubled || chip.state == State::Doubled;
             chips.push_back (std::move (chip));
         }
         row->setApps (std::move (chips));
@@ -788,10 +803,14 @@ void RoutingPanel::refreshRouting()
     reason = routing.getUnavailableReason();
     const bool fedByDeviceInput = routing.getRoutes().empty() && controller.getDeviceInputStrip() >= 0;
     noAppsProcessed = routing.getProcessedAppCount() == 0 && ! fedByDeviceInput;
+    const auto doublingText = anyAssignedDoubled ? routing.describeDoubling() : juce::String();
+    doubling = ! noAppsProcessed && doublingText.isNotEmpty();
     if (! noAppsProcessed)
-        noticeDetail = {};
+        noticeDetail = doubling ? doublingText : juce::String();
     else if (reason.isNotEmpty())
         noticeDetail = reason;
+    else if (doublingText.isNotEmpty())
+        noticeDetail = doublingText;
     else if (routing.getRoutes().empty())
         noticeDetail = "No application is assigned to a strip yet. Use \"Assign app to strip...\" below.";
     else if (anyAssignedFailing)
@@ -800,7 +819,7 @@ void RoutingPanel::refreshRouting()
         noticeDetail = "The assigned applications are not routed yet.";
     else
         noticeDetail = "None of the assigned applications is running. Each one is routed when it starts.";
-    notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail : reason;
+    notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail : (doubling ? "Original also audible. " + noticeDetail : reason);
     setDescription (notice);
 
     assignButton.setEnabled (reason.isEmpty());
@@ -937,7 +956,33 @@ void RoutingPanel::showAddAutoProfileDialog()
                              true);
 }
 
-void RoutingPanel::showChipMenu (const juce::String& executable, const juce::String& error)
+void RoutingPanel::showDoublingFix()
+{
+    auto& routing = controller.getRouting();
+    const auto text = routing.describeDoubling();
+    if (text.isEmpty())
+        return;
+    auto* window = new juce::AlertWindow ("Original also audible", text, juce::MessageBoxIconType::WarningIcon, this);
+    window->addButton ("Open sound settings", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Close", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    juce::Component::SafePointer<RoutingPanel> safe (this);
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safe] (int result)
+                                                                        {
+                                                                            if (safe != nullptr && result == 1)
+                                                                                safe->controller.getRouting().openSystemRoutingSettings();
+                                                                        }),
+                             true);
+}
+
+juce::String RoutingPanel::getStripDescription (int strip) const
+{
+    for (const auto& row : rows)
+        if (row->getStrip() == strip)
+            return row->getDescription();
+    return {};
+}
+
+void RoutingPanel::showChipMenu (const juce::String& executable, const juce::String& error, bool doubled)
 {
     auto& routing = controller.getRouting();
     const auto current = routing.getStripNameForExecutable (executable);
@@ -959,6 +1004,14 @@ void RoutingPanel::showChipMenu (const juce::String& executable, const juce::Str
         menu.addItem (item);
         menu.addSeparator();
     }
+    if (doubled)
+    {
+        juce::PopupMenu::Item item ("Original also audible - how to fix...");
+        item.itemID = 3;
+        item.colour = Theme::statusColours (*this).warn;
+        menu.addItem (item);
+        menu.addSeparator();
+    }
     menu.addSubMenu ("Move to strip", move);
     menu.addItem (1, "Remove from " + current);
 
@@ -972,6 +1025,11 @@ void RoutingPanel::showChipMenu (const juce::String& executable, const juce::Str
                             {
                                 juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
                                                                         displayNameOf (executable) + " - routing error", error, "OK", safe);
+                                return;
+                            }
+                            if (result == 3)
+                            {
+                                safe->showDoublingFix();
                                 return;
                             }
                             auto& r = safe->controller.getRouting();
@@ -1002,17 +1060,19 @@ void RoutingPanel::paint (juce::Graphics& g)
     {
         // Red state: alert colour (vermillion with the colour-blind palette)
         // plus a '!' shape and a title, so it never relies on colour alone.
+        // Amber (doubling guard): the caution colour, a hollow '!' and a title.
         const auto alert = Theme::statusColours (*this).hot;
+        const auto caution = Theme::statusColours (*this).warn;
         auto r = noticeArea.toFloat();
-        g.setColour (noAppsProcessed ? alert.withAlpha (0.1f) : Palette::well.withAlpha (0.7f));
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.1f) : (doubling ? caution.withAlpha (0.1f) : Palette::well.withAlpha (0.7f)));
         g.fillRoundedRectangle (r, 6.0f);
-        g.setColour (noAppsProcessed ? alert.withAlpha (0.75f) : Palette::border);
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.75f) : (doubling ? caution.withAlpha (0.75f) : Palette::border));
         g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
         if (noticeCompact)
         {
             auto line = r.reduced (9.0f, 0.0f);
             auto icon = line.removeFromLeft (14.0f).withSizeKeepingCentre (14.0f, 14.0f);
-            g.setColour (noAppsProcessed ? alert : Palette::amber.withAlpha (0.9f));
+            g.setColour (noAppsProcessed ? alert : (doubling ? caution : Palette::amber.withAlpha (0.9f)));
             if (noAppsProcessed)
                 g.fillEllipse (icon.reduced (0.5f));
             else
@@ -1020,11 +1080,12 @@ void RoutingPanel::paint (juce::Graphics& g)
             g.setFont (Theme::font (10.0f, true));
             if (noAppsProcessed)
                 g.setColour (Palette::well);
-            g.drawText (noAppsProcessed ? "!" : "i", icon, juce::Justification::centred, false);
+            g.drawText (noAppsProcessed || doubling ? "!" : "i", icon, juce::Justification::centred, false);
             line.removeFromLeft (7.0f);
-            g.setColour (noAppsProcessed ? alert : Palette::muted);
-            g.setFont (Theme::font (11.5f, noAppsProcessed));
-            juce::String text (noAppsProcessed ? "No apps are being processed - why?" : "Per-app routing unavailable - why?");
+            g.setColour (noAppsProcessed ? alert : (doubling ? caution : Palette::muted));
+            g.setFont (Theme::font (11.5f, noAppsProcessed || doubling));
+            juce::String text (noAppsProcessed ? "No apps are being processed - why?"
+                                               : (doubling ? "Original also audible - fix?" : "Per-app routing unavailable - why?"));
             if (noAppsProcessed && juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text) > line.getWidth())
                 text = "No apps processed - why?"; // the narrow panel
             g.drawText (text, line, juce::Justification::centredLeft, true);
@@ -1043,7 +1104,9 @@ void RoutingPanel::mouseMove (const juce::MouseEvent& e)
 
 void RoutingPanel::mouseUp (const juce::MouseEvent& e)
 {
-    if (noticeCompact && noticeArea.contains (e.getPosition()))
+    if (doubling && noticeArea.contains (e.getPosition()))
+        showDoublingFix();
+    else if (noticeCompact && noticeArea.contains (e.getPosition()))
         juce::AlertWindow::showMessageBoxAsync (noAppsProcessed ? juce::MessageBoxIconType::WarningIcon : juce::MessageBoxIconType::InfoIcon,
                                                 noAppsProcessed ? "No apps are being processed" : "Per-app routing",
                                                 noAppsProcessed ? noticeDetail : notice, "OK", this);
@@ -1055,6 +1118,11 @@ juce::TextLayout RoutingPanel::layoutNotice (int width) const
     if (noAppsProcessed)
     {
         text.append ("No apps are being processed\n", Theme::font (12.0f, true), Theme::statusColours (*this).hot);
+        text.append (noticeDetail, Theme::font (11.0f), Palette::muted);
+    }
+    else if (doubling)
+    {
+        text.append ("Original also audible\n", Theme::font (12.0f, true), Theme::statusColours (*this).warn);
         text.append (noticeDetail, Theme::font (11.0f), Palette::muted);
     }
     else

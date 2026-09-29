@@ -13,9 +13,13 @@
 //     192 kHz: <= -70 dBc (Quality / Balanced), <= -60 dBc (Low Latency),
 //     in the latency the fixed 2x designs had
 //   * the same through the whole chain at 44.1 kHz (Music, Warmth 100)
-//   * KNOWN_GAP rows at 24 dB drive and full-scale tones, which 4x cannot
-//     bring below -70 dBc (8x or ADAA, docs/11 E10 step 3), pinned so they
-//     cannot get worse unnoticed
+//   * extreme settings (docs/11 E10 Phase 2: first-order ADAA everywhere,
+//     8x in Quality up to 48 kHz): 24 dB of drive on -6 dBFS tones and 9 dB
+//     on 0 dBFS tones, every type, <= -70 dBc in Quality at every rate and
+//     in every profile from 88.2 kHz
+//   * KNOWN_GAP rows for Balanced / Low Latency at 24 dB and 44.1 / 48 kHz,
+//     which 4x with ADAA cannot bring below -70 dBc (8x would double the
+//     curve's CPU there), pinned so they cannot get worse unnoticed
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -106,7 +110,9 @@ const char* profileName (Oversampler::Profile p)
 // =============================================================================
 TEST_CASE ("Signal hygiene: the rate-aware saturator table keeps the 2x designs' latency (32 / 16 samples) at every rate")
 {
-    // Every chain latency (docs/01 5.1, test_engine.cpp) is therefore unchanged.
+    // Every chain latency (docs/01 5.1, test_engine.cpp) is therefore
+    // unchanged. Factor: 8x in Quality below 88.2 kHz, else 4x below
+    // 176.4 kHz and 2x from there; every row runs the ADAA curves.
     for (const double fs : { 8000.0, 16000.0, 32000.0, 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
         for (const auto profile : { Oversampler::Profile::Quality, Oversampler::Profile::Balanced, Oversampler::Profile::LowLatency })
         {
@@ -115,7 +121,9 @@ TEST_CASE ("Signal hygiene: the rate-aware saturator table keeps the 2x designs'
             sat.setOversampling (design);
             sat.prepare ({ fs, 256, 2 });
             CHECK (sat.latencySamples() == (profile == Oversampler::Profile::Quality ? 32 : 16));
-            CHECK (design.factor == (fs < 176400.0 ? 4 : 2));
+            const int factor = fs >= 176400.0 ? 2 : (profile == Oversampler::Profile::Quality && fs < 88200.0 ? 8 : 4);
+            CHECK (design.factor == factor);
+            CHECK (design.adaa);
         }
 }
 
@@ -183,26 +191,61 @@ TEST_CASE ("Signal hygiene: Warmth 100 through the chain at 44.1 kHz - the 10 kH
     }
 }
 
-TEST_CASE ("Signal hygiene KnownGap: 24 dB drive and full-scale tones still alias above -70 dBc (needs 8x or ADAA, docs/11 E10 step 3)")
+TEST_CASE ("Signal hygiene: extreme settings in Quality - 24 dB of drive and 0 dBFS at 9 dB, every type, <= -70 dBc at 44.1 / 48 / 96 / 192 kHz")
 {
-    // KNOWN_GAP: target <= -70 dBc per docs/11 E10. Pinned at today's value
-    // + 0.5 dB, so a change can only improve them (a fix flips these to the
-    // target). 44.1 kHz, the 16-sample design. Before (2x Low): -15.0 /
-    // -18.5 / -21.6 dBc.
-    const auto design = Oversampler::forProfile (Oversampler::Profile::Balanced, 44100.0);
+    // docs/11 E10 Phase 2 (ADAA, and 8x up to 48 kHz). Before (4x / 2x without
+    // ADAA), 44.1 kHz: Tape 24 dB -28.2, Tube -38.0, Digital -35.6, Tape at
+    // 0 dBFS -45.9 dBc; 192 kHz: -46.1 / -75.0 / -59.8 / -94.4 dBc.
+    struct Row
+    {
+        SaturationType type;
+        float drive, amplitude;
+    };
+    for (const double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        for (const auto& r : { Row { SaturationType::Tape, 24.0f, 0.5f }, Row { SaturationType::Tube, 24.0f, 0.5f },
+                               Row { SaturationType::Digital, 24.0f, 0.5f }, Row { SaturationType::Tape, 9.0f, 1.0f } })
+        {
+            const double worst = saturatorWorstAliasDbc (Oversampler::forProfile (Oversampler::Profile::Quality, fs), fs, r.type, r.drive, r.amplitude);
+            if (fs == 44100.0 || fs == 192000.0)
+                measured ("saturator alias, Quality, type " + std::to_string (static_cast<int> (r.type)) + ", " + std::to_string (static_cast<int> (r.drive)) + " dB, "
+                              + (r.amplitude < 1.0f ? "-6" : "0") + " dBFS at " + std::to_string (static_cast<int> (fs)) + " Hz",
+                          worst, "dBc");
+            CHECK_LE (worst, -70.0);
+        }
+}
+
+TEST_CASE ("Signal hygiene: extreme settings in Balanced / Low Latency - <= -70 dBc from 88.2 kHz, 0 dBFS at 9 dB <= -70 dBc at 44.1 kHz")
+{
+    // One design serves both profiles (16 samples). Before: 96 kHz Tape 24 dB
+    // -46.1, Digital -59.7 dBc; 44.1 kHz Tape at 0 dBFS -45.8 dBc (the
+    // KnownGap row it closes).
+    for (const double fs : { 88200.0, 96000.0, 192000.0 })
+        for (const auto type : { SaturationType::Tape, SaturationType::Tube, SaturationType::Digital })
+            CHECK_LE (saturatorWorstAliasDbc (Oversampler::forProfile (Oversampler::Profile::Balanced, fs), fs, type, 24.0f, 0.5f), -70.0);
+    const double fullScale = saturatorWorstAliasDbc (Oversampler::forProfile (Oversampler::Profile::Balanced, 44100.0), 44100.0, SaturationType::Tape, 9.0f, 1.0f);
+    measured ("saturator alias, Balanced, Tape, 9 dB, 0 dBFS at 44100 Hz", fullScale, "dBc");
+    CHECK_LE (fullScale, -70.0);
+}
+
+TEST_CASE ("Signal hygiene KnownGap: 24 dB of drive at 44.1 / 48 kHz in Balanced / Low Latency still aliases above -70 dBc (4x with ADAA)")
+{
+    // KNOWN_GAP: target <= -70 dBc (Balanced), <= -60 dBc (Low Latency) per
+    // docs/11 E10. Pinned at today's value + 0.5 dB, so a change can only
+    // improve them. 8x (Quality's design) meets them at twice the curve's
+    // CPU. Before ADAA (2x Low, then 4x): Tape -15.0 -> -28.0 -> -54.1,
+    // Digital -18.5 -> -35.5 -> -62.6, Tube -37.9 -> -64.3 dBc at 44.1 kHz.
     struct Row
     {
         const char* name;
+        double fs;
         SaturationType type;
-        float drive, amplitude;
         double recordedDbc;
     };
-    for (const auto& r : { Row { "Tape, 24 dB, -6 dBFS", SaturationType::Tape, 24.0f, 0.5f, -28.0 },
-                           Row { "Digital, 24 dB, -6 dBFS", SaturationType::Digital, 24.0f, 0.5f, -35.5 },
-                           Row { "Tape, 9 dB, 0 dBFS", SaturationType::Tape, 9.0f, 1.0f, -45.8 } })
+    for (const auto& r : { Row { "Tape, 44.1 kHz", 44100.0, SaturationType::Tape, -54.1 }, Row { "Digital, 44.1 kHz", 44100.0, SaturationType::Digital, -62.6 },
+                           Row { "Tube, 44.1 kHz", 44100.0, SaturationType::Tube, -64.3 }, Row { "Tape, 48 kHz", 48000.0, SaturationType::Tape, -59.3 } })
     {
-        const double worst = saturatorWorstAliasDbc (design, 44100.0, r.type, r.drive, r.amplitude);
-        measured (std::string ("saturator alias KnownGap, ") + r.name, worst, "dBc");
+        const double worst = saturatorWorstAliasDbc (Oversampler::forProfile (Oversampler::Profile::Balanced, r.fs), r.fs, r.type, 24.0f, 0.5f);
+        measured (std::string ("saturator alias KnownGap, Balanced, 24 dB, -6 dBFS, ") + r.name, worst, "dBc");
         CHECK_LE (worst, r.recordedDbc + 0.5);
     }
 }

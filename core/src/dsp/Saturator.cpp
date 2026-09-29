@@ -11,6 +11,10 @@
 //    residual-path DC blocker, a 5 Hz 1st-order high-pass with double state
 //    (docs/11 E10), removes the DC an asymmetric waveform gets from every
 //    curve, e.g. 100 + 200 Hz through Tape: see test_signal_hygiene.cpp)
+//   With ADAA (the chain's designs, docs/11 E10 Phase 2) f is replaced by its
+//   mean over each oversampled step (adaaLoop) and x^ by the step's midpoint
+//   (x^[k-1] + x^[k]) / 2: both half a sample late, which the decimator takes
+//   back, so the deviation still lines up with the dry delay.
 //
 //   s'   = s - tubeW * LP10(s)                  tube DC blocker (10 Hz HP)
 //   s''  = s' + bumpBeta * tapeW * BP80(s')     tape head bump (+1 dB * drive/24 @ 80 Hz)
@@ -54,6 +58,7 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace flub
@@ -144,6 +149,154 @@ inline float digitalCurve (float x) noexcept
     return x > 0.0f ? 1.0f : -1.0f;
 }
 
+// ---- First-order ADAA (docs/11 E10 Phase 2, Oversampler::Design::adaa) ----
+// With u = g x and the curve phi (tanh, the tube curve, the digital clip),
+// f(x) = phi (g x) / g. ADAA1 replaces f(x[n]) by its mean over the segment
+// from x[n-1] to x[n]: (F(x[n]) - F(x[n-1])) / (x[n] - x[n-1]), F' = f.
+// Only the deviation phi(u) - u is needed here (the delta oversampling of
+// the header comment), so Psi(u) = Phi(u) - u^2 / 2 with Phi' = phi, and the
+// deviation in x units is (Psi(ua) - Psi(ub)) / ((ua - ub) g). Everything is
+// in double: Psi and u^2 / 2 nearly cancel for small u, and each form below
+// keeps its absolute error proportional to u^2 (log1p of cosh u - 1 =
+// 2 sinh^2 (u / 2)), so quiet signals stay exact. Below kAdaaMinStep the
+// quotient is replaced by the deviation at the midpoint (error ~ step^2 / 24).
+constexpr double kAdaaMinStep = 1.0e-6;
+constexpr double kLn2 = 0.69314718055994531;
+
+// ln cosh u - u^2 / 2 = sum c_n u^(2n), n >= 2 (the Taylor series, from the
+// Bernoulli numbers), for |u| < kLnCoshSeriesLimit: 14 terms leave an error
+// below 1e-17 there (below the exact form's own rounding), so the two forms
+// meet without a step, and the series is about twice as fast.
+constexpr double kLnCoshSeriesLimit = 0.5;
+constexpr std::array<double, 14> kLnCoshSeries { -8.333333333333333e-02, 2.2222222222222223e-02, -6.746031746031746e-03,
+                                                 2.1869488536155205e-03, -7.386029608251831e-04, 2.565805740408915e-04,
+                                                 -9.09896491907074e-05, 3.277930227475478e-05, -1.1956455712177625e-05,
+                                                 4.405244525877023e-06, -1.6365968284715348e-06, 6.122655795895756e-07,
+                                                 -2.3041747198769394e-07, 8.715903837635848e-08 };
+
+/** ln cosh u - u^2 / 2 (Tape's Psi). */
+inline double lnCoshMinusHalfSquare (double u) noexcept
+{
+    const double a = std::abs (u), u2 = u * u;
+    if (a < kLnCoshSeriesLimit)
+    {
+        double p = kLnCoshSeries.back();
+        for (size_t k = kLnCoshSeries.size() - 1; k-- > 0;)
+            p = p * u2 + kLnCoshSeries[k];
+        return p * u2 * u2;
+    }
+    return a - kLn2 + std::log1p (std::exp (-2.0 * a)) - 0.5 * u2;
+}
+
+// Tube: ln (cosh u + b sinh u) = |u| + ln ((1 +- b) / 2) + log1p ((1 -+ b) / (1 +- b) e^(-2|u|)), sign of u.
+// (b is the float kTubeTanhBias, as in the curve itself.)
+constexpr double kTubeB = kTubeTanhBias;
+constexpr double kTubeLnHalfPlus = -0.5130152464504354;  // ln ((1 + b) / 2)
+constexpr double kTubeLnHalfMinus = -0.9130152612755894; // ln ((1 - b) / 2)
+
+// Tube's Psi = sum d_k u^k, k = 3 .. 22 (Taylor series of the integral of
+// tanh u / (1 + b tanh u), minus u^2 / 2), for |u| < kTubeSeriesLimit, where
+// its error is below 1e-16 (the series converges within |u| < pi / 2).
+constexpr double kTubeSeriesLimit = 0.35;
+constexpr std::array<double, 20> kTubeSeries { -0.06579177578290303, -0.07359407837183081, 0.024778879404233935, 0.015982327147100947,
+                                               -0.009230193291519431, -0.0034837581636299143, 0.0033565461474480635, 0.0006293163035627511,
+                                               -0.0011865040292750944, -3.563606783282601e-05, 0.00040564709699824, -4.7908023333918235e-05,
+                                               -0.00013307604683526924, 3.662081549585729e-05, 4.1330992113565494e-05, -1.920943884988969e-05,
+                                               -1.1845330413154362e-05, 8.69016158058752e-06, 2.9539214204827618e-06, -3.6005439374155532e-06 };
+
+template <SaturationType Type>
+double curvePsi (double u) noexcept
+{
+    if constexpr (Type == SaturationType::Tape)
+    {
+        // Phi = ln cosh u
+        return lnCoshMinusHalfSquare (u);
+    }
+    else if constexpr (Type == SaturationType::Tube)
+    {
+        // phi = tanh u / (1 + b tanh u): Phi = (ln (cosh u + b sinh u) - b u) / (1 - b^2)
+        constexpr double b = kTubeB;
+        const double a = std::abs (u);
+        if (a < kTubeSeriesLimit)
+        {
+            double p = kTubeSeries.back();
+            for (size_t k = kTubeSeries.size() - 1; k-- > 0;)
+                p = p * u + kTubeSeries[k];
+            return p * u * u * u;
+        }
+        double lnD;
+        if (a < 1.0)
+        {
+            // cosh u - 1 = 2 sh^2, sinh u = 2 sh sqrt (1 + sh^2), sh = sinh (u / 2)
+            const double sh = std::sinh (0.5 * u);
+            lnD = std::log1p (2.0 * sh * (sh + b * std::sqrt (1.0 + sh * sh)));
+        }
+        else
+        {
+            const double c = u > 0.0 ? 1.0 + b : 1.0 - b;
+            lnD = a + (u > 0.0 ? kTubeLnHalfPlus : kTubeLnHalfMinus) + std::log1p ((2.0 - c) / c * std::exp (-2.0 * a));
+        }
+        return (lnD - b * u) / (1.0 - b * b) - 0.5 * u * u;
+    }
+    else
+    {
+        // phi = u - (4/27) u^3 below the knee, +-1 beyond: Phi = u^2 / 2 - u^4 / 27, |u| - 9/16
+        constexpr double knee = kDigitalKnee, cubic = kDigitalCubic;
+        const double a = std::abs (u);
+        if (a < knee)
+            return -0.25 * cubic * u * u * u * u;
+        return a + (0.5 * knee * knee - 0.25 * cubic * knee * knee * knee * knee - knee) - 0.5 * u * u; // Phi (knee) + |u| - knee
+    }
+}
+
+template <SaturationType Type>
+double curveDeviation (double u) noexcept
+{
+    if constexpr (Type == SaturationType::Tape)
+        return std::tanh (u) - u;
+    else if constexpr (Type == SaturationType::Tube)
+    {
+        const double t = std::tanh (u);
+        return t / (1.0 + kTubeTanhBias * t) - u;
+    }
+    else
+        return (std::abs (u) < kDigitalKnee ? u - kDigitalCubic * u * u * u : (u > 0.0 ? 1.0 : -1.0)) - u;
+}
+
+/** One curve over n oversampled samples with ADAA1, in place: d[i] becomes
+    the curve's mean over (x[i-1], x[i]), i.e. half a sample late. prev = the
+    curve input one sample before d[0] (Tape: after the pre-emphasis);
+    updated. The midpoint (x[i-1] + x[i]) / 2 is the linear part, so a signal
+    the curve leaves alone comes out as its half-sample average. */
+template <SaturationType Type, bool Ramp>
+void adaaLoop (const SvfCoeffs& preC, const SvfCoeffs& deC, SvfState& preState, SvfState& deState, float& prev, float* d, int n,
+               const float* gains, float g0) noexcept
+{
+    SvfState ps = preState, ds = deState;
+    double xPrev = prev;
+    double psiPrev = Ramp ? 0.0 : curvePsi<Type> (static_cast<double> (g0) * xPrev);
+    for (int i = 0; i < n; ++i)
+    {
+        const double g = Ramp ? gains[i] : g0;
+        double x = d[i];
+        if constexpr (Type == SaturationType::Tape)
+            x = svfTick (preC, ps, d[i]);
+        const double ua = g * x, ub = g * xPrev, du = ua - ub;
+        const double psiA = curvePsi<Type> (ua);
+        const double dev = std::abs (du) > kAdaaMinStep ? (psiA - (Ramp ? curvePsi<Type> (ub) : psiPrev)) / du
+                                                        : curveDeviation<Type> (0.5 * (ua + ub));
+        float y = static_cast<float> (0.5 * (x + xPrev) + dev / g);
+        if constexpr (Type == SaturationType::Tape)
+            y = svfTick (deC, ds, y);
+        d[i] = y;
+        psiPrev = psiA;
+        xPrev = x;
+    }
+    prev = static_cast<float> (xPrev);
+    preState = ps;
+    deState = ds;
+}
+
 /** One curve over n oversampled samples, in place. Ramp = per-sample gain
     arrays (drive moving), otherwise the constant g / invG. Local copies keep
     the filter state in registers. */
@@ -212,9 +365,12 @@ void Saturator::prepare (const ProcessSpec& newSpec)
         spec.sampleRate = 48000.0;
 
     Oversampler::Design design = osDesign;
-    design.factor = design.factor >= 4 ? 4 : (design.factor >= 2 ? 2 : 1);
+    design.factor = design.factor >= 8 ? 8 : (design.factor >= 4 ? 4 : (design.factor >= 2 ? 2 : 1));
     design.d1 = std::max (1, design.d1);
     design.d2 = std::max (1, design.d2);
+    // ADAA needs stage 1's decimator to take its half sample back.
+    design.adaa = design.adaa && design.factor > 1 && design.m1 > 0;
+    adaa = design.adaa;
     preparedFactor = design.factor;
     oversampler.prepare (spec.numChannels, spec.maxBlockSize, design);
     dryDelay.prepare (spec.numChannels, oversampler.latencySamples());
@@ -315,6 +471,7 @@ void Saturator::updateTypeFade() noexcept
             {
                 st.pre.reset();
                 st.de.reset();
+                st.adaaPrevTape = 0.0f;
             }
         return;
     }
@@ -393,6 +550,42 @@ void Saturator::runCurve (SaturationType type, ChannelState& st, float* d, int n
     const float* g = osGain.data();
     const float* ig = osInvGain.data();
     const float g0 = steady.g, ig0 = steady.invG;
+    if (adaa)
+    {
+        // First-order ADAA (see adaaLoop). Tube and Digital share the last
+        // oversampled input as their previous sample (a copy: in a
+        // crossfade both curves start from it; processSegment advances it).
+        float prevIn = st.adaaPrevIn;
+        switch (type)
+        {
+            case SaturationType::Tape:
+                for (int pos = 0; pos < n; pos += kTapeFlushInterval) // as below
+                {
+                    const int len = std::min (kTapeFlushInterval, n - pos);
+                    if (driveRamping)
+                        adaaLoop<SaturationType::Tape, true> (preEmphasis, deEmphasis, st.pre, st.de, st.adaaPrevTape, d + pos, len, g + pos, g0);
+                    else
+                        adaaLoop<SaturationType::Tape, false> (preEmphasis, deEmphasis, st.pre, st.de, st.adaaPrevTape, d + pos, len, g, g0);
+                    flushState (st.pre);
+                    flushState (st.de);
+                }
+                st.adaaPrevTape = flushState (st.adaaPrevTape);
+                break;
+            case SaturationType::Tube:
+                if (driveRamping)
+                    adaaLoop<SaturationType::Tube, true> (preEmphasis, deEmphasis, st.pre, st.de, prevIn, d, n, g, g0);
+                else
+                    adaaLoop<SaturationType::Tube, false> (preEmphasis, deEmphasis, st.pre, st.de, prevIn, d, n, g, g0);
+                break;
+            case SaturationType::Digital:
+                if (driveRamping)
+                    adaaLoop<SaturationType::Digital, true> (preEmphasis, deEmphasis, st.pre, st.de, prevIn, d, n, g, g0);
+                else
+                    adaaLoop<SaturationType::Digital, false> (preEmphasis, deEmphasis, st.pre, st.de, prevIn, d, n, g, g0);
+                break;
+        }
+        return;
+    }
     switch (type)
     {
         case SaturationType::Tape:
@@ -457,12 +650,24 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
         // droop from the half-band filters, e.g. -2.3 dB at 20 kHz / 44.1 kHz
         // with the short 2x design).
         float* in = osInput.data();
-        std::copy (d, d + nOs, in);
+        const float lastIn = d[nOs - 1];
+        if (adaa)
+        {
+            // The ADAA curves are half an oversampled sample late: their
+            // linear part is the midpoint of consecutive inputs, so that is
+            // what the deviation and the telemetry are taken against (the
+            // stage-1 decimator takes the half sample back, Oversampler.h).
+            in[0] = 0.5f * (st.adaaPrevIn + d[0]);
+            for (int k = 1; k < nOs; ++k)
+                in[k] = 0.5f * (d[k - 1] + d[k]);
+        }
+        else
+        {
+            std::copy (d, d + nOs, in);
+        }
         if (! fading)
         {
-            runCurve (activeType, st, d, nOs);
-            for (int k = 0; k < nOs; ++k)
-                d[k] -= in[k];
+            runCurve (activeType, st, d, nOs); // the deviation is taken below
         }
         else
         {
@@ -480,18 +685,26 @@ void Saturator::processSegment (const AudioBlock& io, int start, int length) noe
             }
         }
 
-        // THD+N telemetry around the curve, where the oversampled input and
-        // the curve's deviation are aligned (the weight is held across the
-        // sub-samples of each base-rate sample, like the other controls).
+        // The deviation (outside a crossfade) and the THD+N telemetry around
+        // the curve, where the oversampled input and the curve's deviation are
+        // aligned (the weight is held across the sub-samples of each base-rate
+        // sample, like the other controls). One pass: at 8x these per-sample
+        // loops cost as much as the curve.
         DistortionSums sums;
+        const bool subtract = ! fading;
         for (int i = 0, k = 0; i < length; ++i)
         {
             const float w = distWeightBuf[static_cast<size_t> (i)];
             for (int j = 0; j < preparedFactor; ++j, ++k)
+            {
+                if (subtract)
+                    d[k] -= in[k];
                 sums.add (in[k], w * d[k]);
+            }
         }
         if (sums.isFinite())
             distortionWindow.channel (c).merge (sums);
+        st.adaaPrevIn = flushState (lastIn);
     }
     oversampler.downsample (seg); // seg now holds the band-limited deviation
     if (float db = kMinusInfDb; distortionWindow.advance (length, db))

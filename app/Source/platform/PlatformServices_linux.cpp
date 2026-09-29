@@ -9,7 +9,9 @@
 // Dependencies: flub_core (flub::json) and the C library only. Routing shells
 // out to `pactl` (pulseaudio-utils >= 16 or pipewire-pulse's pactl), which
 // works identically against PulseAudio and PipeWire's pulse server. The
-// sinks' monitors are linked to the engine's input with pw-dump / pw-link
+// sinks' monitors are linked to the engine's input through the libpipewire
+// registry when the build has libpipewire (pipewire/PipeWireNative.*, which
+// also holds the native node, docs/11 E48), else with pw-dump / pw-link
 // (PipeWire only), and creating the router exports PIPEWIRE_LATENCY so
 // Flubsound's streams ask for a 256/48000 quantum. Global
 // hotkeys use the X11 headers when present at build time and load libX11
@@ -35,6 +37,17 @@
 
 #include "PlatformServices.h"
 #include "PlatformServicesInternal.h"
+#include "pipewire/PipeWireGraph.h"
+
+// docs/11 E48: with libpipewire (pkg-config found libpipewire-0.3, see
+// PlatformServices.cmake) the router links through registry events and the
+// native node exists; without it, pw-dump / pw-link and no native node.
+#if defined(FLUB_HAS_PIPEWIRE) && FLUB_HAS_PIPEWIRE
+    #define FLUB_PIPEWIRE_CLIENT 1
+    #include "pipewire/PipeWireNative.h"
+#else
+    #define FLUB_PIPEWIRE_CLIENT 0
+#endif
 
 #include "flub/io/Json.h"
 
@@ -338,69 +351,17 @@ bool isExecutableInPath (const char* name)
 } // namespace pactl
 
 //==============================================================================
-// PipeWire: quantum request and monitor links (docs/11 E48a; unnamed
-// namespace, tests reach the helpers by including this file)
+// PipeWire: quantum request and monitor links (docs/11 E48a). The model and
+// the plans live in pipewire/PipeWireGraph.h (shared with the native node);
+// what only this file uses is in the unnamed namespace inside, and tests
+// reach it by including this file.
 //==============================================================================
+} // namespace
+
 namespace pipewire
 {
-/*  Quantum. PipeWire runs the whole graph in cycles of one quantum, the
-    smallest node.latency any running node asks for (within the server's
-    clock.min-quantum / clock.max-quantum). Without a request Flubsound's own
-    streams get the client library's default, 1024/48000 = 21.3 ms for
-    pipewire-jack, and the null sink's monitor hop adds up to one such
-    quantum. PIPEWIRE_LATENCY is read when a client opens its stream
-    (pipewire-jack, PipeWire's ALSA plug-in), so it must be in the
-    environment before the audio device opens. Balanced only asks (other
-    clients can ask for less and the graph still follows the smallest
-    request); Low Latency also locks the quantum while it runs
-    (node.lock-quantum through PIPEWIRE_PROPS). A value the user exported
-    is never replaced. */
-enum class QuantumRequest
+namespace
 {
-    Balanced,  // 256/48000 = 5.3 ms, a request only
-    LowLatency // 128/48000 = 2.7 ms, locked while running
-};
-
-constexpr const char* kBalancedLatency = "256/48000";
-constexpr const char* kLowLatency = "128/48000";
-constexpr const char* kLockQuantumProps = "{ node.lock-quantum = true }";
-
-/** "<frames>/<rate>" as PipeWire parses node.latency: frames 1..8192, rate
-    8000..768000, digits only. */
-bool isValidLatency (const std::string& text)
-{
-    const auto slash = text.find ('/');
-    if (slash == std::string::npos || slash == 0 || slash + 1 >= text.size() || slash > 4 || text.size() - slash - 1 > 6)
-        return false;
-    const auto digits = [] (const std::string& s) { return std::all_of (s.begin(), s.end(), [] (char c) { return c >= '0' && c <= '9'; }); };
-    const auto frames = text.substr (0, slash), rate = text.substr (slash + 1);
-    if (! digits (frames) || ! digits (rate))
-        return false;
-    const long f = std::strtol (frames.c_str(), nullptr, 10), r = std::strtol (rate.c_str(), nullptr, 10);
-    return f >= 1 && f <= 8192 && r >= 8000 && r <= 768000;
-}
-
-struct LatencyEnvironment
-{
-    std::string latency; // value for PIPEWIRE_LATENCY; empty = leave the variable alone
-    std::string props;   // value for PIPEWIRE_PROPS; empty = leave the variable alone
-};
-
-/** What to export for 'request', given the current values (nullptr = unset).
-    A non-empty value the user set wins, valid or not: PipeWire reports a bad
-    one itself, and the user asked for it. */
-LatencyEnvironment planLatencyEnvironment (QuantumRequest request, const char* currentLatency, const char* currentProps)
-{
-    LatencyEnvironment plan;
-    if (currentLatency != nullptr && *currentLatency != '\0')
-        return plan;
-
-    plan.latency = request == QuantumRequest::LowLatency ? kLowLatency : kBalancedLatency;
-    if (request == QuantumRequest::LowLatency && (currentProps == nullptr || *currentProps == '\0'))
-        plan.props = kLockQuantumProps;
-    return plan;
-}
-
 /** Exports the plan for this process (and the children it starts). Call it
     before the audio device opens, on the message thread while no other
     thread reads the environment: setenv is not safe against a concurrent
@@ -417,52 +378,15 @@ void applyLatencyEnvironment (QuantumRequest request)
         ::setenv ("PIPEWIRE_PROPS", plan.props.c_str(), 0);
 }
 
-/*  Monitor links. Applications play into the flubsound_<strip> null sinks;
-    the engine reads a strip from its device input starting at the strip's
-    channel (Settings > Processing > Input feeds strip, or the deviceInputMap
-    setting, e.g. "Game=0;Music=8"). PipeWire does not connect a sink's
-    monitor to that input by itself, so the router does: `pw-dump` (JSON, read
-    with flub::json) lists the nodes, ports and links, the plan below picks
-    monitor port k of each sink -> input port first + k of Flubsound's own
-    node (the node whose application.process.id, or whose client's
-    pipewire.sec.pid, is this process), and `pw-link <out> <in>` creates what
+/*  Monitor links (see planMonitorLinks). With libpipewire (FLUB_HAS_PIPEWIRE)
+    the router reads the graph from registry events and links through the
+    link factory (RegistryLinker in pipewire/PipeWireNative.h). Without it,
+    or when that connection fails: `pw-dump` (JSON, read with flub::json)
+    lists the nodes, ports and links, and `pw-link <out> <in>` creates what
     is missing. The command lines carry port ids (integers) only: no name
     ever reaches the shell. Links other programs made are left alone; links
     the router made and no longer wants (the map changed) are removed with
     `pw-link -d`. */
-struct Node
-{
-    uint32_t id = 0;
-    std::string name;       // node.name
-    std::string mediaClass; // media.class, e.g. "Audio/Sink"
-    uint32_t processId = 0; // application.process.id, else its client's pid; 0 = unknown
-    uint32_t clientId = 0;  // client.id; 0 = none
-};
-
-struct Port
-{
-    uint32_t id = 0;
-    uint32_t nodeId = 0;
-    int64_t index = -1; // port.id: position within the node's ports of one direction; -1 = not given
-    bool isInput = false;
-    bool isMonitor = false;
-    bool isAudio = true; // false for MIDI / control ports (format.dsp)
-    std::string name;    // port.name, e.g. "monitor_FL", "in_1"
-};
-
-struct Link
-{
-    uint32_t id = 0;
-    uint32_t outputPort = 0;
-    uint32_t inputPort = 0;
-};
-
-struct Graph
-{
-    std::map<uint32_t, Node> nodes;
-    std::vector<Port> ports;
-    std::vector<Link> links;
-};
 
 /** Parses `pw-dump` output (PipeWire 0.3.x and 1.x): a JSON array of objects
     {"id", "type": "PipeWire:Interface:<Node|Port|Link|Client>", "info"}.
@@ -503,9 +427,12 @@ bool parseDump (const std::string& text, Graph& graph, std::string& error)
             Node node;
             node.id = id;
             node.name = props["node.name"].asString();
+            node.description = props["node.description"].asString();
             node.mediaClass = props["media.class"].asString();
             pactl::toUInt32 (props["application.process.id"], node.processId);
             pactl::toUInt32 (props["client.id"], node.clientId);
+            if (props["priority.session"].isNumber())
+                node.priority = static_cast<int64_t> (props["priority.session"].asNumber());
             graph.nodes[id] = std::move (node);
         }
         else if (type == "PipeWire:Interface:Port")
@@ -519,6 +446,7 @@ bool parseDump (const std::string& text, Graph& graph, std::string& error)
                 continue;
             port.isInput = direction == "input" || direction == "in";
             port.name = props["port.name"].asString();
+            port.channel = props["audio.channel"].asString();
             port.isMonitor = props["port.monitor"].asBool (false) || (! port.isInput && port.name.rfind ("monitor_", 0) == 0);
             const auto& dsp = props["format.dsp"];
             port.isAudio = ! dsp.isString() || dsp.asString().find ("audio") != std::string::npos;
@@ -546,133 +474,6 @@ bool parseDump (const std::string& text, Graph& graph, std::string& error)
     return true;
 }
 
-struct PortLink
-{
-    uint32_t outputPort = 0;
-    uint32_t inputPort = 0;
-
-    bool operator< (const PortLink& other) const noexcept
-    {
-        return outputPort != other.outputPort ? outputPort < other.outputPort : inputPort < other.inputPort;
-    }
-    bool operator== (const PortLink&) const = default;
-};
-
-/** One sink's links as planned, for messages. */
-struct SinkLinks
-{
-    std::string sinkName;
-    int firstChannel = 0; // 0-based engine input channel of the first link
-    int channels = 0;     // links planned
-};
-
-struct LinkPlan
-{
-    uint32_t engineNode = 0;          // 0 = Flubsound has no PipeWire input node
-    int engineInputs = 0;             // its audio input ports
-    std::vector<PortLink> wanted;     // every link the map asks for (existing or not)
-    std::vector<SinkLinks> sinks;     // per mapped sink that could be linked
-    std::vector<std::string> problems; // user-presentable, one per issue
-};
-
-/** The audio ports of one node and direction, in channel order (port.id,
-    then object id). */
-std::vector<const Port*> audioPorts (const Graph& graph, uint32_t nodeId, bool inputs, bool monitorsOnly)
-{
-    std::vector<const Port*> result;
-    for (const auto& port : graph.ports)
-        if (port.nodeId == nodeId && port.isInput == inputs && port.isAudio && (! monitorsOnly || port.isMonitor))
-            result.push_back (&port);
-    std::stable_sort (result.begin(), result.end(), [] (const Port* a, const Port* b)
-                      { return a->index != b->index ? (a->index >= 0 && (b->index < 0 || a->index < b->index)) : a->id < b->id; });
-    return result;
-}
-
-/** Plans monitor port k of each mapped endpoint's sink -> input port
-    first + k of this process's node with the most audio inputs. A sink gets
-    as many links as it has monitor ports, but never reaches the next mapped
-    strip's first channel or past the engine's last input. */
-LinkPlan planMonitorLinks (const Graph& graph, uint32_t ownPid, const std::vector<AppAudioRouter::EndpointInput>& inputs)
-{
-    LinkPlan plan;
-
-    std::vector<const Port*> engineInputs;
-    for (const auto& [id, node] : graph.nodes)
-    {
-        if (ownPid == 0 || node.processId != ownPid)
-            continue;
-        auto ports = audioPorts (graph, id, true, false);
-        if (ports.size() > engineInputs.size())
-        {
-            engineInputs = std::move (ports);
-            plan.engineNode = id;
-        }
-    }
-    plan.engineInputs = static_cast<int> (engineInputs.size());
-
-    std::vector<int> firsts;
-    for (const auto& input : inputs)
-        if (input.firstInputChannel >= 0)
-            firsts.push_back (input.firstInputChannel);
-    if (firsts.empty())
-        return plan;
-
-    if (plan.engineNode == 0)
-    {
-        plan.problems.push_back ("Flubsound's audio input is not a PipeWire node: choose the JACK device type "
-                                 "(PipeWire provides it through pipewire-jack) to have the Flubsound sinks linked to it");
-        return plan;
-    }
-
-    for (const auto& input : inputs)
-    {
-        const int first = input.firstInputChannel;
-        if (first < 0)
-            continue;
-
-        const Node* sink = nullptr;
-        for (const auto& [id, node] : graph.nodes)
-            if (node.name == input.endpointId && node.mediaClass.rfind ("Audio/Sink", 0) == 0)
-                sink = &node;
-        if (sink == nullptr)
-        {
-            plan.problems.push_back ("PipeWire has no sink '" + input.endpointId
-                                     + "' (create the Flubsound sinks with platform/linux/flubsound-pipewire-setup.sh install)");
-            continue;
-        }
-
-        const auto monitors = audioPorts (graph, sink->id, false, true);
-        if (monitors.empty())
-        {
-            plan.problems.push_back ("The sink '" + input.endpointId + "' has no monitor ports");
-            continue;
-        }
-
-        if (first >= plan.engineInputs)
-        {
-            plan.problems.push_back ("'" + input.endpointId + "' feeds input channel " + std::to_string (first + 1) + ", but Flubsound's input has only "
-                                     + std::to_string (plan.engineInputs) + " channel" + (plan.engineInputs == 1 ? "" : "s"));
-            continue;
-        }
-
-        int limit = plan.engineInputs;
-        for (const int other : firsts)
-            if (other > first)
-                limit = std::min (limit, other);
-        const int count = std::min (static_cast<int> (monitors.size()), limit - first);
-
-        for (int k = 0; k < count; ++k)
-            plan.wanted.push_back ({ monitors[static_cast<size_t> (k)]->id, engineInputs[static_cast<size_t> (first + k)]->id });
-        plan.sinks.push_back ({ input.endpointId, first, count });
-
-        if (count < static_cast<int> (monitors.size()))
-            plan.problems.push_back ("Only " + std::to_string (count) + " of the " + std::to_string (monitors.size()) + " channels of '"
-                                     + input.endpointId + "' fit into Flubsound's input channels " + std::to_string (first + 1) + "-"
-                                     + std::to_string (first + count));
-    }
-    return plan;
-}
-
 /** The pw-link command line for one link: port ids only, never a name. */
 std::string linkCommand (const PortLink& link, bool disconnect)
 {
@@ -693,7 +494,11 @@ constexpr const char* kNoToolsMessage =
     "or link each sink's monitor to Flubsound's input channels with qpwgraph or Helvum.";
 
 void log (const std::string& text) { std::fprintf (stderr, "Flubsound: PipeWire links: %s\n", text.c_str()); }
+} // namespace
 } // namespace pipewire
+
+namespace
+{
 
 //==============================================================================
 // GlobalHotkeys - X11 key grabs (XGrabKey on the root window)
@@ -2918,7 +2723,9 @@ public:
     }
 
     /** Links each mapped strip sink's monitor to Flubsound's PipeWire input
-        (see pipewire::planMonitorLinks). pw-dump costs a few ms of CPU on a
+        (see pipewire::planMonitorLinks): through the libpipewire registry
+        when this build has it and the server answers (connectThroughRegistry),
+        else with pw-dump / pw-link. pw-dump costs a few ms of CPU on a
         busy graph, so an unchanged map is re-checked every kRecheck (links
         vanish when the audio device re-opens) and at once after a pass that
         changed something, to confirm it. What cannot be linked is logged to
@@ -2926,6 +2733,14 @@ public:
     bool connectEndpointInputs (const std::vector<EndpointInput>& inputs, std::string& status) override
     {
         const bool anyMapped = std::any_of (inputs.begin(), inputs.end(), [] (const EndpointInput& i) { return i.firstInputChannel >= 0; });
+#if FLUB_PIPEWIRE_CLIENT
+        if (anyMapped || registry != nullptr)
+        {
+            bool ok = true;
+            if (connectThroughRegistry (inputs, status, ok))
+                return ok;
+        }
+#endif
         if (! anyMapped && ourLinks.empty())
         {
             lastInputs = inputs;
@@ -3020,6 +2835,40 @@ public:
 private:
     static constexpr std::chrono::seconds kRecheck { 10 };
 
+#if FLUB_PIPEWIRE_CLIENT
+    /** docs/11 E48: the same links through libpipewire. The registry mirror
+        follows every graph change (a re-opened device's new ports are linked
+        within ~20 ms, no 10 s re-check), and the links are made by the link
+        factory without lingering, so they go away with Flubsound. false =
+        no PipeWire connection (retried every kRecheck): the caller uses
+        pw-dump / pw-link. */
+    bool connectThroughRegistry (const std::vector<EndpointInput>& inputs, std::string& status, bool& ok)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (registry != nullptr && ! registry->isConnected())
+            registry.reset();
+        if (registry == nullptr)
+        {
+            if (now < registryRetryAt)
+                return false;
+            auto linker = std::make_unique<pipewire::RegistryLinker>();
+            std::string error;
+            if (! linker->connect (error))
+            {
+                registryRetryAt = now + kRecheck;
+                return false;
+            }
+            registry = std::move (linker);
+        }
+        std::string text;
+        ok = report (registry->update (inputs, text), text, status);
+        return true;
+    }
+
+    std::unique_ptr<pipewire::RegistryLinker> registry;
+    std::chrono::steady_clock::time_point registryRetryAt {};
+#endif
+
     bool report (bool ok, const std::string& text, std::string& status)
     {
         if (! text.empty() && text != lastStatus)
@@ -3056,6 +2905,32 @@ private:
     std::string lastStatus;
     bool lastOk = true;
 };
+
+#if ! FLUB_PIPEWIRE_CLIENT
+//==============================================================================
+// NativeAudioNode - needs libpipewire at build time (docs/11 E48)
+//==============================================================================
+class LinuxNativeAudioNodeUnavailable final : public NativeAudioNode
+{
+public:
+    bool isSupported() const override { return false; }
+    std::string unsupportedReason() const override
+    {
+        return "This build of Flubsound has no native PipeWire node (it was built without libpipewire-0.3); "
+               "the JACK and ALSA device types still work";
+    }
+    bool start (const NativeAudioNodeConfig&, Callback&, std::string& error) override
+    {
+        error = unsupportedReason();
+        return false;
+    }
+    void stop() override {}
+    bool isRunning() const override { return false; }
+    bool setLatency (NativeAudioNodeConfig::Latency) override { return false; }
+    bool setOutputTarget (const std::string&) override { return false; }
+    NativeAudioNodeStatus getStatus() const override { return {}; }
+};
+#endif
 
 //==============================================================================
 // ProcessLoopbackCapture - not applicable on Linux
@@ -4191,6 +4066,9 @@ std::unique_ptr<AppAudioRouter> AppAudioRouter::create()
     return std::make_unique<LinuxAppAudioRouter>();
 }
 std::unique_ptr<ProcessLoopbackCapture> ProcessLoopbackCapture::create() { return std::make_unique<LinuxProcessLoopbackCapture>(); }
+#if ! FLUB_PIPEWIRE_CLIENT
+std::unique_ptr<NativeAudioNode> NativeAudioNode::create() { return std::make_unique<LinuxNativeAudioNodeUnavailable>(); }
+#endif
 std::unique_ptr<AutoStart> AutoStart::create() { return std::make_unique<LinuxAutoStart>(); }
 std::unique_ptr<ForegroundApp> ForegroundApp::create() { return std::make_unique<LinuxForegroundApp>(); }
 } // namespace flub::platform
