@@ -62,6 +62,9 @@
 //                   (Stealth 700 Gen 2 MAX)"): the CAPPED chips on Footsteps
 //                   and Detail (--mode gaming), the switch on with
 //                   settings-audio
+//   settings-diagnostics
+//                   the PNG shows the Settings dialog's Diagnostics page
+//                   with its Updates section (docs/11 E54) at --size
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,

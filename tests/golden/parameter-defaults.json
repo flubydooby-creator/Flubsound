@@ -111,6 +111,7 @@
     "bass.splitProtect": 0,
     "auto.preampHot": 0,
     "spatial.crossfeedType": 0,
+    "clarity.presenceMode": 0,
     "eq.0.on": 1,
     "eq.0.type": 0,
     "eq.0.freq": 32,

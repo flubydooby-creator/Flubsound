@@ -18,6 +18,7 @@
 
 #include "diagnostics/UpdateCheck.h"
 #include "settings/AppSettings.h"
+#include "shell/ScreenshotDriver.h"
 #include "ui/SettingsDialog.h"
 
 #include <atomic>
@@ -343,4 +344,10 @@ TEST_CASE ("App update check: Settings > Diagnostics shows off, not checked yet,
     CHECK (text.endsWith ("Up to date: 0.1.0 is the newest stable release."));
     setEnabled (f.file, false);
     CHECK (ui::SettingsDialog::describeUpdateCheck (f.file).startsWith ("Off"));
+
+    // The page's screenshot state (--state settings-diagnostics).
+    ScreenshotDriver::Options o;
+    juce::String error;
+    CHECK (ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-diagnostics" }), o, error));
+    CHECK (o.states.contains ("settings-diagnostics"));
 }

@@ -317,7 +317,10 @@ TEST_CASE ("PersonalProfile: the chain applies the stage per ear (every module o
     CHECK_LE (worst, 1.0);
 }
 
-TEST_CASE ("PersonalProfile: a hard-panned source keeps its ILD through the whole chain at Boost 100 (before the compressor; not after the maximizer)")
+namespace
+{
+/** The ILD row (docs/11 E33) on one factory preset; one case per preset keeps each under 2 s. */
+void checkIldThroughChain (const char* file)
 {
     // The ILD row (docs/11 E33): a +12 dB right-ear HF profile, a 2 - 8 kHz
     // source hard-panned right (the left ear 20 dB down) at -40 / -20 / -6
@@ -350,23 +353,33 @@ TEST_CASE ("PersonalProfile: a hard-panned source keeps its ILD through the whol
     CHECK_NEAR (staticIld, 12.0, 1.0);
 
     double worstBefore = 0.0, worstAfter = 0.0;
-    for (const char* file : { "gaming-competitive-fps.json", "music-flubsound-signature.json" })
-        for (double level : { -40.0, -20.0, -6.0 })
-        {
-            const Planar src = hardPannedSource (n, level);
-            const auto none = ild (renderChain (file, nullptr, PersonalPlacement::BeforeCompressor, src));
-            const auto before = ild (renderChain (file, &profile, PersonalPlacement::BeforeCompressor, src));
-            const auto after = ild (renderChain (file, &profile, PersonalPlacement::AfterMaximizer, src));
-            const double dBefore = before[0] - none[0] - staticIld, dAfter = after[0] - none[0] - staticIld;
-            worstBefore = std::max (worstBefore, std::abs (dBefore));
-            worstAfter = std::max (worstAfter, std::abs (dAfter));
-            std::cout << "    " << file << " at " << level << " dBFS: ILD change - static: before the compressor " << dBefore
-                      << " dB (left ear " << before[1] - none[1] << " dB), after the maximizer " << dAfter << " dB (left ear "
-                      << after[1] - none[1] << " dB)\n";
-        }
+    for (double level : { -40.0, -20.0, -6.0 })
+    {
+        const Planar src = hardPannedSource (n, level);
+        const auto none = ild (renderChain (file, nullptr, PersonalPlacement::BeforeCompressor, src));
+        const auto before = ild (renderChain (file, &profile, PersonalPlacement::BeforeCompressor, src));
+        const auto after = ild (renderChain (file, &profile, PersonalPlacement::AfterMaximizer, src));
+        const double dBefore = before[0] - none[0] - staticIld, dAfter = after[0] - none[0] - staticIld;
+        worstBefore = std::max (worstBefore, std::abs (dBefore));
+        worstAfter = std::max (worstAfter, std::abs (dAfter));
+        std::cout << "    " << file << " at " << level << " dBFS: ILD change - static: before the compressor " << dBefore
+                  << " dB (left ear " << before[1] - none[1] << " dB), after the maximizer " << dAfter << " dB (left ear "
+                  << after[1] - none[1] << " dB)\n";
+    }
     CHECK_LE (worstBefore, 1.0);
     // The measured alternative misses the row: it stays documented, not used.
     CHECK (worstAfter > 1.0);
+}
+} // namespace
+
+TEST_CASE ("PersonalProfile: a hard-panned source keeps its ILD through the whole chain at Boost 100, Competitive FPS (before the compressor; not after the maximizer)")
+{
+    checkIldThroughChain ("gaming-competitive-fps.json");
+}
+
+TEST_CASE ("PersonalProfile: a hard-panned source keeps its ILD through the whole chain at Boost 100, Flubsound Signature (before the compressor; not after the maximizer)")
+{
+    checkIldThroughChain ("music-flubsound-signature.json");
 }
 
 TEST_CASE ("PersonalProfile: true peak stays under the ceiling on dense material with a +15 dB profile (both placements)")

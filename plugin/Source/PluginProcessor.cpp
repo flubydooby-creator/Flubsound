@@ -221,6 +221,10 @@ FlubsoundProcessor::FlubsoundProcessor()
     bypassParameter = apvts.getParameter (juce::String (table[static_cast<size_t> (flub::param::BypassAll)].key));
     jassert (bypassParameter != nullptr);
 
+    std::vector<float> defaults;
+    for (const auto& info : table)
+        defaults.push_back (info.defaultValue);
+    snapRawValues (defaults, false);
     pushParametersToStore();
     startTimerHz (kStructuralPollHz);
 }
@@ -256,6 +260,30 @@ void FlubsoundProcessor::pushParametersToStore() noexcept
             store.set (static_cast<int> (id), v); // clamps; relaxed atomic store
             lastPushed[id] = v;
         }
+    }
+}
+
+void FlubsoundProcessor::snapRawValues (const std::vector<float>& values, bool skipAppState)
+{
+    const auto& table = flub::param::layout();
+    for (size_t id = 0; id < rawValues.size() && id < values.size(); ++id)
+    {
+        if (skipAppState && flub::preset::isAppState (static_cast<int> (id)))
+            continue;
+        const auto& info = table[id];
+        const float current = rawValues[id]->load (std::memory_order_relaxed);
+        // Only dust is replaced: a value the APVTS did not take (or a host
+        // change in between) stays what it is.
+        if (current == values[id] || std::abs (current - values[id]) > 1.0e-5f * (info.maxValue - info.minValue))
+            continue;
+        rawValues[id]->store (values[id], std::memory_order_relaxed);
+        // ... and the state tree, which the APVTS only rewrites from a raw
+        // value after a parameter change, so getStateInformation saves the
+        // exact value too (setting it calls back into the APVTS, which finds
+        // the raw value already equal and leaves it).
+        auto param = apvts.state.getChildWithProperty (kParamIdProperty, juce::String (info.key));
+        if (param.isValid())
+            param.setProperty (kParamValueProperty, static_cast<double> (values[id]), nullptr);
     }
 }
 
@@ -518,8 +546,28 @@ void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
     for (auto child : saved)
         if (! child.hasType (kParamType))
             state.appendChild (child.createCopy(), nullptr);
+    // The PARAMs in the saved state's own order, then the parameters it does
+    // not carry in layout order: the APVTS keeps this order, so a state that
+    // is loaded and saved again is the same bytes (docs/11 E53; the order an
+    // instance writes follows JUCE's internal parameter map, not the layout).
     const auto& table = flub::param::layout();
+    std::vector<size_t> order;
+    std::vector<bool> placed (table.size(), false);
+    for (auto child : saved)
+    {
+        if (! child.hasType (kParamType))
+            continue;
+        const int id = flub::param::findByKey (child[kParamIdProperty].toString().toStdString());
+        if (id >= 0 && ! placed[static_cast<size_t> (id)])
+        {
+            placed[static_cast<size_t> (id)] = true;
+            order.push_back (static_cast<size_t> (id));
+        }
+    }
     for (size_t id = 0; id < table.size(); ++id)
+        if (! placed[id])
+            order.push_back (id);
+    for (const auto id : order)
     {
         juce::ValueTree param (kParamType);
         param.setProperty (kParamIdProperty, juce::String (table[id].key), nullptr);
@@ -527,6 +575,7 @@ void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
         state.appendChild (param, nullptr);
     }
     apvts.replaceState (state); // the audio thread picks the values up through the raw values
+    snapRawValues (values, false);
 
     for ([[maybe_unused]] const auto& w : warnings)
         DBG ("Flubsound FX state: " << juce::String (w));
@@ -568,6 +617,7 @@ bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& err
             p->endChangeGesture();
         }
     }
+    snapRawValues (preset.values, true); // the preset's own values, as the app plays them
     if (warnings != nullptr)
     {
         warnings->clear();

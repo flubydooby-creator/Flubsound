@@ -7,7 +7,9 @@
 // * every parameter, at four settings (minimum, maximum and two interior
 //   points as a host sets them through the normalised value; toggles both
 //   ways; choices through every entry);
-// * every factory preset, imported as a user does (Import preset).
+// * every factory preset, imported as a user does (Import preset); the
+//   imported values are the preset's own, bit for bit, and a new instance
+//   holds the exact defaults.
 // The variants also set the latency profile (a structural parameter), so the
 // reopened instance must report the same latency too.
 // Built when the plug-in is (FLUB_BUILD_PLUGIN); the Flubsound FX processor's
@@ -19,6 +21,8 @@
  #include "PluginProcessor.h"
 
  #include "flub/engine/Parameters.h"
+ #include "flub/io/Json.h"
+ #include "flub/io/PresetIO.h"
 
  #if FLUB_HAS_FACTORY_PRESETS
   #include "FlubsoundPresetData.h"
@@ -209,6 +213,20 @@ int roundTripFactoryPresets (const juce::StringArray& prefixes)
             continue;
         }
         CHECK (checkRoundTrip (a, preset.name, true) == 0);
+        // The imported values are the preset's own, bit for bit (the app
+        // plays the same), not their trip through the normalised 0..1.
+        flub::json::Value root;
+        std::string parseError;
+        flub::preset::Preset parsed;
+        REQUIRE (flub::json::parse (preset.json.toStdString(), root, parseError) && flub::preset::fromJson (root, parsed, parseError));
+        const auto imported = rawValues (a);
+        juce::StringArray notExact;
+        for (size_t id = 0; id < imported.size(); ++id)
+            if (! flub::preset::isAppState (static_cast<int> (id)) && std::memcmp (&imported[id], &parsed.values[id], sizeof (float)) != 0)
+                notExact.add (juce::String (flub::param::layout()[id].key) + " " + juce::String (imported[id], 9));
+        if (! notExact.isEmpty())
+            std::cerr << "    " << preset.name << ": imported values differ from the preset: " << notExact.joinIntoString ("; ") << "\n";
+        CHECK (notExact.isEmpty());
         ++checked;
     }
     return checked;
@@ -225,9 +243,16 @@ TEST_CASE ("Plug-in state: every parameter at its minimum, maximum and two inter
     }
 }
 
-TEST_CASE ("Plug-in state: a state saved twice is the same bytes, and a default instance round-trips (E53)")
+TEST_CASE ("Plug-in state: a new instance holds the exact defaults; a state saved twice is the same bytes and round-trips (E53)")
 {
     FlubsoundProcessor a;
+    std::vector<float> defaults;
+    for (const auto& info : flub::param::layout())
+        defaults.push_back (info.defaultValue);
+    const auto differing = differingKeys (rawValues (a), defaults);
+    if (! differing.isEmpty())
+        std::cerr << "    not the defaults: " << differing.joinIntoString ("; ") << "\n";
+    CHECK (differing.isEmpty());
     const auto first = saveState (a);
     CHECK (saveState (a) == first);
     CHECK (checkRoundTrip (a, "defaults", true) == 0);

@@ -92,6 +92,15 @@ your user presets) and opens it:
   macOS:   ~/Library/Flubsound/Logs
   Linux:   ~/.config/Flubsound/Logs
 
+Updates
+-------
+Flubsound does not look for updates unless you ask it to. Settings >
+Diagnostics > Updates > "Check for updates (notify only)": when it is on,
+Flubsound asks GitHub at most once a day at start whether a newer release
+exists (Stable, or Beta to include pre-releases) and tells you, with a link to
+its download page. It never downloads or installs anything itself. On Linux
+the check uses the curl program.
+
 Not in this build (needs hardware work first)
 ---------------------------------------------
   - Flubsound's own virtual sound devices (Windows driver, macOS audio

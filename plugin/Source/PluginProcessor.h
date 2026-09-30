@@ -28,6 +28,12 @@
 //   its DEFAULT (flub::preset::resolveSavedState), so a project saved before a
 //   parameter existed recalls the same way every time (docs/11 E52 Phase A).
 //   As in the app, "Bypass All" is never taken from or written to a preset.
+//   A float parameter reaches the APVTS through the host's normalised 0..1
+//   value, which on a skewed range leaves float dust (90 Hz -> 89.9999 Hz);
+//   the defaults, an imported preset and a loaded state therefore set the
+//   raw values exactly afterwards (snapRawValues), so the chain plays the
+//   same values as the app and a saved project recalls bit for bit
+//   (tests/app/test_plugin_state.cpp, docs/11 E53).
 #pragma once
 
 #include "flub/engine/Parameters.h"
@@ -39,6 +45,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace flub::plugin
 {
@@ -105,6 +112,11 @@ private:
 
     /** Copies changed APVTS raw values into the store. RT-safe. */
     void pushParametersToStore() noexcept;
+    /** Makes the APVTS raw values and state tree exactly `values` (one per
+        parameter) where they are within float dust of them (docs/11 E53);
+        never on the audio thread. With `skipAppState`,
+        Bypass All, bypass.matched and latency.profile are left alone. */
+    void snapRawValues (const std::vector<float>& values, bool skipAppState);
     /** (Re-)prepares the chain for the current layout / structural params. Non-RT. */
     void prepareChain (double sampleRate, int maxBlockSize);
     /** Any Info::structural parameter differs from what the chain was prepared

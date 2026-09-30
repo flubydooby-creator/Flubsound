@@ -90,7 +90,7 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
         static const juce::StringArray known { "device-error",   "loopback",       "preset-warning", "recovery",        "latency-prompt",
                                                 "governor",       "preset-browser", "settings-audio", "settings-processing", "ab-matched",
                                                 "abx",            "bypass",         "routing-drawer", "governor-normal", "quick-controls",
-                                                "module-readings", "contour-curve", "onboard-cap" };
+                                                "module-readings", "contour-curve", "onboard-cap",   "settings-diagnostics" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -262,9 +262,11 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
             controller.simulateOutputDevice ("Headset Earphone (Stealth 700 Gen 2 MAX)", controller.getHost().getSampleRate(), 2);
         controller.setOnboardEnhancement (true);
     }
-    if (states.contains ("settings-audio") || states.contains ("settings-processing") || states.contains ("contour-curve"))
+    if (states.contains ("settings-audio") || states.contains ("settings-processing") || states.contains ("contour-curve")
+        || states.contains ("settings-diagnostics"))
     {
         const bool processing = states.contains ("settings-processing") || states.contains ("contour-curve");
+        const bool diagnostics = states.contains ("settings-diagnostics"); // docs/11 E54: the Updates section
         if (processing)
             controller.setContourFollowsVolume (true); // the listening level live (docs/11 E32)
         ui::HotkeyHooks hooks;
@@ -273,7 +275,9 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         hooks.reRegister = [] {};
         auto dialog = std::make_unique<ui::SettingsDialog> (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
         dialog->setSize (options.width, options.height);
-        dialog->showPage (processing ? ui::SettingsDialog::Page::Processing : ui::SettingsDialog::Page::Audio);
+        dialog->showPage (diagnostics  ? ui::SettingsDialog::Page::Diagnostics
+                          : processing ? ui::SettingsDialog::Page::Processing
+                                       : ui::SettingsDialog::Page::Audio);
         settingsView = std::move (dialog);
     }
     if (states.contains ("module-readings") && ! options.gamingMode)

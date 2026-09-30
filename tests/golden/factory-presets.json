@@ -4,7 +4,7 @@
   "presets": {
     "device-bluetooth-headphones": {
       "uuid": "445d1267-bae0-45b8-a6ae-10caee61ab12",
-      "contentHash": "4a34b99051af0884",
+      "contentHash": "39e146866bb327f8",
       "render": {
         "integratedLufs": -16.531,
         "thirdOctaveDb": {
@@ -43,7 +43,7 @@
     },
     "device-earbuds": {
       "uuid": "e5d06a3a-0837-475c-99b6-29312c160d80",
-      "contentHash": "4e51dd23bf07930c",
+      "contentHash": "cecb02ea6aa7efa2",
       "render": {
         "integratedLufs": -16.05,
         "thirdOctaveDb": {
@@ -82,7 +82,7 @@
     },
     "device-laptop-speakers": {
       "uuid": "5be46f63-9ab4-49d1-b2a9-ef5b919e102a",
-      "contentHash": "03338937b20e2857",
+      "contentHash": "ceb9be05267ae869",
       "render": {
         "integratedLufs": -17.216,
         "thirdOctaveDb": {
@@ -121,7 +121,7 @@
     },
     "gaming-7-1-headphone-surround": {
       "uuid": "aa5af297-6016-4325-a00e-cb961cc9bf60",
-      "contentHash": "473c569327051c35",
+      "contentHash": "45824117c81a5be7",
       "render": {
         "integratedLufs": -17.155,
         "thirdOctaveDb": {
@@ -160,7 +160,7 @@
     },
     "gaming-battle-royale": {
       "uuid": "5a8768b5-dec9-4ced-8925-c78d0a7112e2",
-      "contentHash": "ca980f577d6758b0",
+      "contentHash": "dc9354f4d5859964",
       "render": {
         "integratedLufs": -19.066,
         "thirdOctaveDb": {
@@ -199,7 +199,7 @@
     },
     "gaming-cinematic-adventure": {
       "uuid": "1ddad163-917c-4509-9424-a67bfc49ad68",
-      "contentHash": "36fa5ec62360e020",
+      "contentHash": "960868e5f2121ef8",
       "render": {
         "integratedLufs": -15.526,
         "thirdOctaveDb": {
@@ -238,7 +238,7 @@
     },
     "gaming-competitive-fps": {
       "uuid": "22e4bf40-b070-485a-8fd6-c4f6cfddeaad",
-      "contentHash": "aba53d44ec0f14bb",
+      "contentHash": "16abea673ca60d6f",
       "render": {
         "integratedLufs": -18.683,
         "thirdOctaveDb": {
@@ -277,7 +277,7 @@
     },
     "gaming-horror-detail": {
       "uuid": "6551380f-706b-4f4e-b81b-5a4de58563ff",
-      "contentHash": "db452400c9ad8c49",
+      "contentHash": "a5d1e8ed9c7b6375",
       "render": {
         "integratedLufs": -16.53,
         "thirdOctaveDb": {
@@ -316,7 +316,7 @@
     },
     "gaming-moba-strategy": {
       "uuid": "50a59066-3817-4ee0-bc76-7a93bf2e0c65",
-      "contentHash": "fcc2db918241e333",
+      "contentHash": "d5aebf9c29c0a0af",
       "render": {
         "integratedLufs": -16.77,
         "thirdOctaveDb": {
@@ -355,46 +355,46 @@
     },
     "gaming-night-mode": {
       "uuid": "c3d1f608-750c-4a10-ab4a-5321c1ce864f",
-      "contentHash": "c6d5de24f91fbccb",
+      "contentHash": "fccaf3793d9841b3",
       "render": {
-        "integratedLufs": -22.354,
+        "integratedLufs": -22.352,
         "thirdOctaveDb": {
-          "25": -48.196,
-          "31.5": -44.024,
-          "40": -42.967,
-          "50": -31.949,
-          "63": -35.513,
-          "80": -41.965,
-          "100": -42.551,
-          "125": -42.936,
-          "160": -43.685,
-          "200": -41.962,
-          "250": -42.148,
-          "315": -41.776,
-          "400": -41.95,
-          "500": -42.147,
-          "630": -41.895,
-          "800": -41.581,
-          "1000": -42.125,
-          "1250": -41.9,
-          "1600": -41.729,
-          "2000": -41.492,
-          "2500": -41.367,
-          "3150": -41.265,
-          "4000": -41.254,
-          "5000": -41.487,
-          "6300": -41.709,
-          "8000": -41.912,
-          "10000": -41.848,
-          "12500": -41.988,
-          "16000": -41.951,
-          "20000": -41.952
+          "25": -48.186,
+          "31.5": -44.015,
+          "40": -42.959,
+          "50": -31.943,
+          "63": -35.509,
+          "80": -41.966,
+          "100": -42.553,
+          "125": -42.939,
+          "160": -43.689,
+          "200": -41.978,
+          "250": -42.166,
+          "315": -41.792,
+          "400": -41.959,
+          "500": -42.149,
+          "630": -41.893,
+          "800": -41.577,
+          "1000": -42.12,
+          "1250": -41.896,
+          "1600": -41.725,
+          "2000": -41.489,
+          "2500": -41.364,
+          "3150": -41.262,
+          "4000": -41.25,
+          "5000": -41.483,
+          "6300": -41.704,
+          "8000": -41.907,
+          "10000": -41.842,
+          "12500": -41.982,
+          "16000": -41.945,
+          "20000": -41.946
         }
       }
     },
     "gaming-racing": {
       "uuid": "ce96da21-e71d-4b7e-8e3d-eec82ee341ca",
-      "contentHash": "282f0c6cd3128510",
+      "contentHash": "8ef552a0b9758f08",
       "render": {
         "integratedLufs": -16.423,
         "thirdOctaveDb": {
@@ -433,7 +433,7 @@
     },
     "gaming-tournament-clean": {
       "uuid": "8736a4e7-ab3b-4c35-9fae-ffc23fd4c9d3",
-      "contentHash": "1d89bf71a4136f7a",
+      "contentHash": "68037ea53599ad06",
       "render": {
         "integratedLufs": -17.209,
         "thirdOctaveDb": {
@@ -470,9 +470,48 @@
         }
       }
     },
+    "music-acoustic-singer-songwriter": {
+      "uuid": "32669692-66d3-44dc-87ef-7bf0eb06d104",
+      "contentHash": "f3bcfb2938b75b7d",
+      "render": {
+        "integratedLufs": -16.595,
+        "thirdOctaveDb": {
+          "25": -36.792,
+          "31.5": -32.725,
+          "40": -31.052,
+          "50": -19.602,
+          "63": -24.452,
+          "80": -34.475,
+          "100": -36.235,
+          "125": -37.413,
+          "160": -38.531,
+          "200": -37.284,
+          "250": -37.725,
+          "315": -37.696,
+          "400": -38.199,
+          "500": -38.684,
+          "630": -38.725,
+          "800": -38.735,
+          "1000": -39.288,
+          "1250": -39.161,
+          "1600": -38.885,
+          "2000": -38.492,
+          "2500": -38.255,
+          "3150": -38.199,
+          "4000": -38.43,
+          "5000": -38.817,
+          "6300": -38.941,
+          "8000": -39.281,
+          "10000": -38.941,
+          "12500": -38.744,
+          "16000": -38.551,
+          "20000": -38.502
+        }
+      }
+    },
     "music-audiophile-subtle": {
       "uuid": "22e4cfd3-2671-46ce-99de-57ccd87a91d1",
-      "contentHash": "d17c399545c35447",
+      "contentHash": "d0cdb3652a9800f5",
       "render": {
         "integratedLufs": -16.772,
         "thirdOctaveDb": {
@@ -511,7 +550,7 @@
     },
     "music-bass-head": {
       "uuid": "b322a4c0-1654-4087-bb15-7504a4dd417a",
-      "contentHash": "fe7599b817973a22",
+      "contentHash": "9fcdfa35d2c887d4",
       "render": {
         "integratedLufs": -16.166,
         "thirdOctaveDb": {
@@ -550,7 +589,7 @@
     },
     "music-classical-jazz-dynamic": {
       "uuid": "67ba4f55-c151-4574-81c4-75430fcd35e2",
-      "contentHash": "ae03e3e4c7256cdd",
+      "contentHash": "aa02b9a8d7bf3337",
       "render": {
         "integratedLufs": -16.334,
         "thirdOctaveDb": {
@@ -589,7 +628,7 @@
     },
     "music-club-loud": {
       "uuid": "fc8cdbfe-8ac2-4518-b5ee-a66b40837a29",
-      "contentHash": "daee6a94d093f5d9",
+      "contentHash": "34868e3ad692fc81",
       "render": {
         "integratedLufs": -12.712,
         "thirdOctaveDb": {
@@ -628,7 +667,7 @@
     },
     "music-crystal-clarity": {
       "uuid": "e410936b-6992-4677-9337-f22ed0d380a3",
-      "contentHash": "ee9efe3feb59d983",
+      "contentHash": "71b05ed42e6b672b",
       "render": {
         "integratedLufs": -16.984,
         "thirdOctaveDb": {
@@ -665,9 +704,48 @@
         }
       }
     },
+    "music-electronic-ambient": {
+      "uuid": "f6a6ed98-51f2-4073-ac53-5821cb2bd350",
+      "contentHash": "20384ab2c71ed778",
+      "render": {
+        "integratedLufs": -16.499,
+        "thirdOctaveDb": {
+          "25": -34.592,
+          "31.5": -30.644,
+          "40": -29.749,
+          "50": -20.039,
+          "63": -23.601,
+          "80": -32.7,
+          "100": -36.902,
+          "125": -38.653,
+          "160": -40.086,
+          "200": -38.819,
+          "250": -39.055,
+          "315": -38.707,
+          "400": -38.88,
+          "500": -39.064,
+          "630": -38.819,
+          "800": -38.601,
+          "1000": -39.012,
+          "1250": -38.88,
+          "1600": -38.746,
+          "2000": -38.589,
+          "2500": -38.559,
+          "3150": -38.48,
+          "4000": -38.473,
+          "5000": -38.565,
+          "6300": -38.594,
+          "8000": -38.945,
+          "10000": -38.562,
+          "12500": -38.555,
+          "16000": -38.481,
+          "20000": -38.463
+        }
+      }
+    },
     "music-flubsound-signature": {
       "uuid": "accb6198-6e2e-4423-975c-7a412447b077",
-      "contentHash": "b0580eccc681c5dc",
+      "contentHash": "52d58625d887f704",
       "render": {
         "integratedLufs": -16.674,
         "thirdOctaveDb": {
@@ -706,7 +784,7 @@
     },
     "music-late-night-low-volume": {
       "uuid": "a16a8230-019a-4061-b4cc-2ef458a22bc4",
-      "contentHash": "a9900091e234e2f5",
+      "contentHash": "9e7efd69a9d65cfb",
       "render": {
         "integratedLufs": -19.64,
         "thirdOctaveDb": {
@@ -745,7 +823,7 @@
     },
     "music-lo-fi-chill": {
       "uuid": "36250104-4eaa-49ac-9fee-28addd59f610",
-      "contentHash": "eac89c72d5533cf2",
+      "contentHash": "4bb7b7a2f466e2f8",
       "render": {
         "integratedLufs": -18.184,
         "thirdOctaveDb": {
@@ -782,9 +860,48 @@
         }
       }
     },
+    "music-orchestral-film": {
+      "uuid": "ee5425f9-b5b0-4d14-9156-4d23d4ff0c21",
+      "contentHash": "41b3f743892d000b",
+      "render": {
+        "integratedLufs": -16.892,
+        "thirdOctaveDb": {
+          "25": -36.658,
+          "31.5": -32.626,
+          "40": -31.408,
+          "50": -19.602,
+          "63": -24.031,
+          "80": -33.94,
+          "100": -36.268,
+          "125": -37.908,
+          "160": -39.154,
+          "200": -38.119,
+          "250": -38.552,
+          "315": -38.36,
+          "400": -38.703,
+          "500": -39.076,
+          "630": -39.078,
+          "800": -39.117,
+          "1000": -39.799,
+          "1250": -39.936,
+          "1600": -40.076,
+          "2000": -40.247,
+          "2500": -40.509,
+          "3150": -40.523,
+          "4000": -40.299,
+          "5000": -40.044,
+          "6300": -39.594,
+          "8000": -39.444,
+          "10000": -39.049,
+          "12500": -38.954,
+          "16000": -38.823,
+          "20000": -38.77
+        }
+      }
+    },
     "music-podcast-voice": {
       "uuid": "0d5c5cb4-fadf-48a3-8248-3880e74fc1fe",
-      "contentHash": "bad8b1515d4db484",
+      "contentHash": "77e7dbf6283645cc",
       "render": {
         "integratedLufs": -13.098,
         "thirdOctaveDb": {
@@ -823,7 +940,7 @@
     },
     "music-punchy-pop": {
       "uuid": "f61b9cac-d66c-47f1-9a70-a109bc7a8b8b",
-      "contentHash": "0e0957a7f5a6e727",
+      "contentHash": "034a692a23f5562b",
       "render": {
         "integratedLufs": -15.752,
         "thirdOctaveDb": {
@@ -860,9 +977,87 @@
         }
       }
     },
+    "music-rnb-vocal": {
+      "uuid": "319c5099-e5ca-4c52-b8a8-ebc2c38296b9",
+      "contentHash": "cc0ea0b4010f12eb",
+      "render": {
+        "integratedLufs": -16.45,
+        "thirdOctaveDb": {
+          "25": -35.223,
+          "31.5": -30.949,
+          "40": -29.692,
+          "50": -19.836,
+          "63": -23.7,
+          "80": -33.175,
+          "100": -36.917,
+          "125": -38.321,
+          "160": -39.521,
+          "200": -38.325,
+          "250": -38.683,
+          "315": -38.445,
+          "400": -38.646,
+          "500": -38.858,
+          "630": -38.621,
+          "800": -38.368,
+          "1000": -38.672,
+          "1250": -38.357,
+          "1600": -37.938,
+          "2000": -37.42,
+          "2500": -37.209,
+          "3150": -37.381,
+          "4000": -37.795,
+          "5000": -38.251,
+          "6300": -38.599,
+          "8000": -39.202,
+          "10000": -39.057,
+          "12500": -39.18,
+          "16000": -39.161,
+          "20000": -39.164
+        }
+      }
+    },
+    "music-rock-metal": {
+      "uuid": "0b41a0b0-8871-4730-9b76-83a15affd302",
+      "contentHash": "ea8b95613174ca60",
+      "render": {
+        "integratedLufs": -17.097,
+        "thirdOctaveDb": {
+          "25": -36.576,
+          "31.5": -32.288,
+          "40": -30.292,
+          "50": -20.336,
+          "63": -24.383,
+          "80": -33.82,
+          "100": -37.646,
+          "125": -40.384,
+          "160": -41.449,
+          "200": -40.208,
+          "250": -40.72,
+          "315": -40.563,
+          "400": -40.565,
+          "500": -40.32,
+          "630": -39.479,
+          "800": -38.712,
+          "1000": -38.574,
+          "1250": -37.967,
+          "1600": -37.521,
+          "2000": -37.412,
+          "2500": -37.91,
+          "3150": -38.729,
+          "4000": -39.969,
+          "5000": -41.105,
+          "6300": -40.347,
+          "8000": -39.618,
+          "10000": -38.921,
+          "12500": -38.785,
+          "16000": -38.64,
+          "20000": -38.584
+        }
+      }
+    },
     "music-voice-chat": {
       "uuid": "f5cdf603-63e7-40ef-9718-9ca544ce2146",
-      "contentHash": "eaf842f626473498",
+      "contentHash": "70d4c5c396c44260",
       "render": {
         "integratedLufs": -15.498,
         "thirdOctaveDb": {
@@ -901,7 +1096,7 @@
     },
     "music-warm-vinyl": {
       "uuid": "d944c4de-ff8f-4a48-b0e2-9c01db7dedf2",
-      "contentHash": "df90e5b61426f781",
+      "contentHash": "a6815d00772f4219",
       "render": {
         "integratedLufs": -17.578,
         "thirdOctaveDb": {
@@ -940,7 +1135,7 @@
     },
     "music-wide-stage": {
       "uuid": "4abae476-7a3d-4364-b696-14459184ae88",
-      "contentHash": "b76fbb5cb1ef135d",
+      "contentHash": "314f5992f06eeab7",
       "render": {
         "integratedLufs": -16.819,
         "thirdOctaveDb": {

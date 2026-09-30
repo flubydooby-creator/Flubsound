@@ -10,6 +10,9 @@ on:
       seconds:
         description: "Fuzzing time per target, in seconds"
         default: "3600"
+      soak_minutes:
+        description: "Soak programme per row, in minutes"
+        default: "60"
 
 concurrency:
   group: nightly-${{ github.ref }}
@@ -63,4 +66,50 @@ jobs:
           path: |
             fuzz-work/*-crash-*
             fuzz-work/*.log
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # docs/11 E53 step 4: the offline soak of the processing chain
+  # (tools/scripts/soak.py over `flubsound-cli soak`): the five user rows
+  # (Music, Gaming, Competitive FPS, Late Night at Low Latency / 128 samples,
+  # 44.1 kHz with protection Normal) under host automation for 60 minutes of
+  # programme each (about 5 minutes per row), with the discontinuity detector
+  # on the output. The summary goes to the run page and the JSON report is
+  # kept. The parameter-fuzz row stays out: it reports the bypass reference's
+  # true-peak limiter driven far over the ceiling as clicks (docs/11 E53),
+  # which is not a glitch. Until the clicks the user rows still find are
+  # triaged (docs/11 E53, p3b4: 10 in 2 minutes of three rows), a detection
+  # marks the step, not the nightly run, as failed.
+  soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_WARNINGS_AS_ERRORS=ON
+          -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=ON
+      - name: Build
+        run: cmake --build build --parallel --target flubsound-cli
+      - name: Soak
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 tools/scripts/soak.py --cli build/tools/flubsound-cli/flubsound-cli \
+            --minutes "${{ github.event.inputs.soak_minutes || '60' }}" --only user --jobs 4 --json soak.json 2>&1 | tee soak.txt
+      - name: Soak summary
+        if: always()
+        run: |
+          { echo '```'; cat soak.txt 2>/dev/null || echo "no soak output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-soak-report
+          path: |
+            soak.json
+            soak.txt
           retention-days: 30
