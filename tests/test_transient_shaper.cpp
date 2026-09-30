@@ -594,3 +594,236 @@ TEST_CASE ("TransientShaper (review): neutral is bit-exact again after garbage i
         CHECK (again.ch[0] == x);
     }
 }
+
+// ---- docs/11 E04 step 3: band timing, program-dependent release, speed ----
+
+namespace
+{
+/** Near-Gaussian white noise (a sum of four uniforms: its crest varies the
+    way real noise does, unlike a single uniform's). */
+std::vector<float> gaussianNoise (int n, float rmsLevel, uint32_t seed)
+{
+    FastRandom rng (seed);
+    std::vector<float> v (static_cast<size_t> (n));
+    for (auto& x : v)
+        x = rmsLevel * 0.866025f * (rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar());
+    return v;
+}
+
+/** Hits every periodMs that decay with tau: kind 0 a 60 Hz "kick", 1 a 1 kHz
+    "pluck", 2 near-Gaussian noise (a click / a footstep's grit). */
+std::vector<float> bandHits (int kind, int n, double periodMs, double tauMs)
+{
+    std::vector<float> v (static_cast<size_t> (n));
+    FastRandom rng (3);
+    const int period = ms (periodMs);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = static_cast<double> (i % period) / kFs;
+        const double env = std::exp (-t / (tauMs * 0.001));
+        double x;
+        if (kind == 0)
+            x = 0.5 * env * std::sin (kTwoPi * 60.0 * t);
+        else if (kind == 1)
+            x = 0.4 * env * std::sin (kTwoPi * 1000.0 * t);
+        else
+            x = 0.15 * env * static_cast<double> (rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar());
+        v[static_cast<size_t> (i)] = static_cast<float> (x);
+    }
+    return v;
+}
+
+TransientShaper::Timing bandTiming (int kind)
+{
+    return kind == 0 ? TransientShaper::Timing::lowBand()
+                     : kind == 1 ? TransientShaper::Timing::midBand (120.0) : TransientShaper::Timing::highBand();
+}
+
+struct HitStats
+{
+    double peakDb = 0.0;       // mean over hits of the gain's peak in the hit's first 30 ms
+    double toPeakMs = 0.0;     // worst time from the onset until the gain is within 1 dB of that peak
+    double bump4060Db = -99.0; // worst RMS lift 40 - 60 ms after an onset
+};
+
+/** +12 dB attack on hits every periodMs (hits 3..10 measured). */
+HitStats measureHits (const TransientShaper::Timing* timing, int kind, double periodMs, double tauMs)
+{
+    TransientShaper ts;
+    if (timing != nullptr)
+        ts.setTiming (*timing);
+    ts.prepare (kFs);
+    ts.setAttackDb (12.0f);
+    ts.reset();
+    const int n = ms (periodMs * 11.5);
+    const auto x = bandHits (kind, n, periodMs, tauMs);
+    std::vector<float> gdb (x.size()), y (x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const float g = ts.computeGain (std::abs (x[i]));
+        gdb[i] = static_cast<float> (toDb (g));
+        y[i] = g * x[i];
+    }
+    HitStats s;
+    int hits = 0;
+    for (int h = 3; h <= 10; ++h, ++hits)
+    {
+        const int on = h * ms (periodMs);
+        const auto first = gdb.begin() + on;
+        const double peak = *std::max_element (first, first + ms (std::min (30.0, periodMs - 1.0)));
+        int t = 0;
+        while (gdb[static_cast<size_t> (on + t)] < peak - 1.0)
+            ++t;
+        s.peakDb += peak;
+        s.toPeakMs = std::max (s.toPeakMs, 1000.0 * t / kFs);
+        if (periodMs > 100.0)
+            s.bump4060Db = std::max (s.bump4060Db, gainDb (y, x, on + ms (40), on + ms (60)));
+    }
+    s.peakDb /= hits;
+    return s;
+}
+} // namespace
+
+TEST_CASE ("TransientShaper (E04 step 3): the band timings keep +12 dB attack at >= +9 dB on hits 75 ms apart, reach the peak within 1 ms of an onset and leave no bump > 1 dB at 40-60 ms (the full-band timing: 5.5-9.9 dB, 2.2-2.3 ms, 3.3-3.5 dB)")
+{
+    // docs/11 E04 Done-when, per band: a 60 Hz kick (tau 30 ms), a 1 kHz
+    // pluck (15 ms) and a noise click (8 ms), each fed to its band's timing
+    // and to the full-band timing (Clarity without band offsets, Tighten).
+    const double taus[] = { 30.0, 15.0, 8.0 };
+    for (int kind = 0; kind < 3; ++kind)
+    {
+        const auto timing = bandTiming (kind);
+        const HitStats fast = measureHits (&timing, kind, 75.0, taus[kind]);
+        const HitStats isolated = measureHits (&timing, kind, 500.0, taus[kind]);
+        const HitStats fullFast = measureHits (nullptr, kind, 75.0, taus[kind]);
+        const HitStats fullIsolated = measureHits (nullptr, kind, 500.0, taus[kind]);
+        std::printf ("  E04 band %d: 75 ms peak %.2f dB (full band %.2f), to peak %.2f ms (75 ms apart %.2f; full band %.2f), 40-60 ms %.2f dB (full band %.2f)\n",
+                     kind, fast.peakDb, fullFast.peakDb, isolated.toPeakMs, fast.toPeakMs, fullIsolated.toPeakMs, isolated.bump4060Db,
+                     fullIsolated.bump4060Db);
+        CHECK_GE (fast.peakDb, 9.0);
+        CHECK_GE (isolated.peakDb, 11.9);
+        CHECK_LE (isolated.toPeakMs, 1.0);
+        CHECK_LE (isolated.bump4060Db, 1.0);
+        // The full-band timing is what the bands fix (and still what Clarity
+        // runs with both offsets at 0).
+        CHECK_LE (fullFast.peakDb, 10.0);
+        CHECK_GE (fullIsolated.toPeakMs, 2.0);
+        CHECK_GE (fullIsolated.bump4060Db, 3.0);
+    }
+    // Hits 75 ms apart, the kick's gain reaches its peak within its first
+    // quarter cycle (4.2 ms at 60 Hz: the held level rises with it).
+    const auto low = bandTiming (0);
+    CHECK_LE (measureHits (&low, 0, 75.0, 30.0).toPeakMs, 4.0);
+}
+
+TEST_CASE ("TransientShaper (E04 step 3): the band timings leave steady noise within 1 dB and steady low notes unmodulated; the default timing is the full-band shaper bit for bit; speed scales the lift's length; timing changes never step the gain")
+{
+    // Steady white noise at +12 / -12 dB attack: the program-dependent
+    // release must not read noise's own peaks as onsets.
+    for (int kind = 0; kind < 3; ++kind)
+        for (float attack : { 12.0f, -12.0f })
+        {
+            TransientShaper ts;
+            ts.setTiming (bandTiming (kind));
+            ts.prepare (kFs);
+            ts.setAttackDb (attack);
+            ts.reset();
+            const int n = ms (1500);
+            const auto in = gaussianNoise (n, 0.1f, 17);
+            Planar buf = monoBuffer (in);
+            runShaper (ts, buf, 256);
+            const double lift = gainDb (buf.ch[0], in, ms (500), n);
+            std::printf ("  E04 band %d steady noise at %+.0f dB attack: %.2f dB\n", kind, static_cast<double> (attack), lift);
+            CHECK_LE (std::abs (lift), 1.0);
+        }
+
+    // Steady low notes: no sidebands (the low band's 25 ms hold; the mid
+    // band's hold covers a third of its split).
+    for (int kind : { 0, 1 })
+        for (double f : { 25.0, 40.0 })
+        {
+            if (kind == 1 && f < 40.0)
+                continue; // the mid band holds for 12.5 ms at a 120 Hz split: 40 Hz and up
+            TransientShaper ts;
+            ts.setTiming (bandTiming (kind));
+            ts.prepare (kFs);
+            ts.setAttackDb (12.0f);
+            ts.setSustainDb (-12.0f);
+            ts.reset();
+            const int n = ms (1500);
+            Planar buf = monoBuffer (sine (f, kFs, n, 0.5f));
+            runShaper (ts, buf, 256);
+            const double a1 = toneAmplitude (buf.ch[0].data() + ms (500), ms (1000), f, kFs);
+            CHECK_NEAR (toDb (a1 / 0.5), 0.0, 0.01);
+            for (int k = 2; k <= 4; ++k)
+                CHECK_LE (toDb (toneAmplitude (buf.ch[0].data() + ms (500), ms (1000), k * f, kFs) / a1), -80.0);
+        }
+
+    // Timing{} is the full-band timing: bit-identical to a shaper never given one.
+    {
+        const int n = ms (400);
+        const auto in = bandHits (2, n, 75.0, 8.0);
+        TransientShaper a, b;
+        b.setTiming (TransientShaper::Timing {});
+        b.setSpeed (1.0f);
+        for (auto* ts : { &a, &b })
+        {
+            ts->prepare (kFs);
+            ts->setAttackDb (9.0f);
+            ts->setSustainDb (-5.0f);
+            ts->reset();
+        }
+        Planar x = monoBuffer (in), y = monoBuffer (in);
+        runShaper (a, x, 64);
+        runShaper (b, y, 64);
+        CHECK (x.ch == y.ch);
+    }
+
+    // Speed: 2 shortens the lift after an isolated hit, 0.5 lengthens it.
+    auto liftAt = [] (float speed, double fromMs, double toMs)
+    {
+        TransientShaper ts;
+        ts.setTiming (bandTiming (1));
+        ts.prepare (kFs);
+        ts.setSpeed (speed);
+        ts.setAttackDb (12.0f);
+        ts.reset();
+        const auto in = bandHits (1, ms (1000), 500.0, 60.0);
+        Planar buf = monoBuffer (in);
+        runShaper (ts, buf, 128);
+        return gainDb (buf.ch[0], in, ms (500 + fromMs), ms (500 + toMs));
+    };
+    const double normal = liftAt (1.0f, 8.0, 20.0), faster = liftAt (2.0f, 8.0, 20.0), slower = liftAt (0.5f, 8.0, 20.0);
+    std::printf ("  E04 speed: 8-20 ms lift %.2f dB at 1, %.2f at 2, %.2f at 0.5\n", normal, faster, slower);
+    CHECK_LE (faster, normal - 2.0);
+    CHECK_GE (slower, normal + 2.0);
+
+    // setSpeed and setHoldMs while the gain moves: the gain never steps
+    // (at most the smoothing's own per-sample slew).
+    {
+        TransientShaper ts;
+        ts.setTiming (bandTiming (1));
+        ts.prepare (kFs);
+        ts.setAttackDb (12.0f);
+        ts.setSustainDb (-12.0f);
+        ts.reset();
+        const auto in = bandHits (1, ms (1000), 75.0, 15.0);
+        double prev = 0.0, maxStep = 0.0;
+        for (int i = 0; i < ms (1000); ++i)
+        {
+            if (i % 997 == 0)
+            {
+                ts.setSpeed (i % 2 == 0 ? 2.0f : 0.5f);
+                ts.setHoldMs (i % 3 == 0 ? 25.0 : 7.5);
+            }
+            const double db = toDb (ts.computeGain (std::abs (in[static_cast<size_t> (i)])));
+            maxStep = std::max (maxStep, std::abs (db - prev));
+            prev = db;
+        }
+        // 0.3 ms one-pole on a target inside +-24 dB.
+        CHECK_LE (maxStep, 48.0 * (1.0 - std::exp (-1.0 / (kFs * 0.0003))) + 1.0e-3);
+        ts.setSpeed (std::numeric_limits<float>::quiet_NaN()); // ignored
+        ts.setSpeed (100.0f);                                  // clamped to 2
+        CHECK (std::isfinite (ts.computeGain (0.5f)));
+    }
+}

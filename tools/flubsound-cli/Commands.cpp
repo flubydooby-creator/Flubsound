@@ -938,14 +938,21 @@ int runAnalyze (const CliOptions& o)
         return kExitFailure;
     }
     const LoudnessReport r = analyse (input.channels, input.sampleRate);
+    const ContentReport content = contentReport (input.channels, input.sampleRate); // docs/11 E34
     const std::string format = sampleFormatName (input.sourceFormat);
     const auto bands = o.bands ? octaveBands (input.channels, input.sampleRate) : std::vector<BandLevel> {};
     const auto events = o.events ? sceneEvents (input.channels, input.sampleRate, o.eventBandHz) : EventsReport {};
     const auto tracks = o.events && o.bands ? bandTracks (input.channels, input.sampleRate) : std::vector<BandTrack> {};
     const auto glitches = o.glitches ? detectGlitches (input.channels, input.sampleRate) : GlitchReport {};
+    const auto spatial = o.spatial ? spatialMetrics (input.channels, input.sampleRate) : SpatialReport {};
+    const auto focus = o.focusIld ? focusIld (input.channels, input.sampleRate) : FocusIldReport {};
+    if ((o.spatial && ! spatial.stereo) || (o.focusIld && ! focus.stereo))
+        log.warning ("--spatial / --focus-ild need a stereo (binaural) file");
     if (o.json)
     {
         auto v = reportToJson (r, o.input, format);
+        v.set ("content", contentToJson (content));
+        v.set ("suggest", suggestToJson (content));
         if (o.bands)
             v.set ("bands", bandsToJson (bands));
         if (o.events)
@@ -954,11 +961,16 @@ int runAnalyze (const CliOptions& o)
             v.set ("bandTracks", bandTracksToJson (tracks));
         if (o.glitches)
             v.set ("glitches", glitchesToJson (glitches));
+        if (o.spatial)
+            v.set ("spatial", spatialToJson (spatial));
+        if (o.focusIld)
+            v.set ("focusIld", focusIldToJson (focus));
         printJson (v);
     }
     else
     {
         std::fputs (formatReport (r, o.input, format).c_str(), stdout);
+        std::fputs (formatContent (content).c_str(), stdout);
         if (o.bands)
             std::fputs (("Bands   : " + formatBands (bands) + "\n").c_str(), stdout);
         if (o.events)
@@ -967,6 +979,10 @@ int runAnalyze (const CliOptions& o)
             std::fputs (formatBandTracks (tracks).c_str(), stdout);
         if (o.glitches)
             std::fputs (formatGlitches (glitches).c_str(), stdout);
+        if (o.spatial)
+            std::fputs (formatSpatial (spatial).c_str(), stdout);
+        if (o.focusIld)
+            std::fputs (formatFocusIld (focus).c_str(), stdout);
     }
     return kExitOk;
 }

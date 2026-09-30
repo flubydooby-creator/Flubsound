@@ -14,7 +14,8 @@
 //           [onset - 1 ms, onset + 80 ms), late over [onset + 80 ms, end),
 //           broadband and per octave band (125 Hz .. 8 kHz, 4th-order
 //           Butterworth band edges at fc / sqrt 2 and fc sqrt 2, causal).
-//           NaN when a window holds no energy (e.g. no reverberant tail);
+//           NaN when a window holds less than -60 dB of the response's
+//           energy (e.g. no reverberant tail);
 //   ITD     the lag of that maximum (early window, broadband; + = the
 //           right ear lags);
 //   DRR     both ears' energy in [onset - 0.5 ms, onset + 2.5 ms) over the
@@ -74,7 +75,7 @@ double interauralCrossCorrelation (const std::vector<float>& l, const std::vecto
 struct BinauralIrMetrics
 {
     double onsetSeconds = 0.0;
-    double iaccEarly = 0.0, iaccLate = 0.0;          // broadband; NaN: no energy in the window
+    double iaccEarly = 0.0, iaccLate = 0.0;          // broadband; NaN: the window is empty (< -60 dB)
     std::array<double, 7> iaccEarlyBands {}, iaccLateBands {}; // per kIaccOctavesHz
     double itdMs = 0.0;                              // lag of the early IACC (+ = right ear lags)
     double drrDb = 0.0;                              // +inf without a reverberant part

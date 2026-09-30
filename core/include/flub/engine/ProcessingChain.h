@@ -2,6 +2,8 @@
 //
 //   in (2 / 6 / 8 ch)
 //    -> input gain -> AutoLevel (LUFS)                 [all input channels]
+//    -> content analysis tap (docs/11 E34; ContentAnalysis.h): reads only,
+//       while Smart macros (setSmartMacros) or a reader need it
 //    -> ActiveChannelDetector (5.1/7.1: surround or stereo-only content?)
 //    -> fold to stereo, one of (crossfaded, docs/11 E01 / E27):
 //         HeadphoneVirtualizer (5.1/7.1 -> binaural, virt.on),
@@ -354,6 +356,37 @@ public:
     bool getOnboardEnhancementCap() const noexcept { return onboardCapRequest.load (std::memory_order_relaxed); }
     static constexpr float kOnboardCapGlideMs = 250.0f;
 
+    /** Smart macros (docs/11 E34; a preset's "smart" flag, PresetIO.h): the
+        content analysis tap (ContentAnalysis.h) runs in-line on the input,
+        after AutoLevel and ahead of the stereo fold, and its state sets the
+        multipliers MacroMap::apply puts on what the macros add
+        (MacroMap::smartModulation: less attack and drive on a limited
+        master, less bass on bass-heavy and less air on bright programme).
+        They move once per governor tick (10 ms, so the result does not
+        depend on the host block), down at kSmartFallPerTick and back up at
+        kSmartRisePerTick, and hold while the state is not valid (the first
+        second of programme) and through silence. Off (the default) is
+        bit-identical to a chain without it; switched off, the multipliers
+        glide back to 1 before the modulation is dropped. A host / preset
+        setting, not a parameter: any thread (one atomic), taken by the next
+        process(); adoptGovernorState() carries it and the multipliers. */
+    void setSmartMacros (bool on) noexcept FLUB_NONBLOCKING { smartRequest.store (on, std::memory_order_relaxed); }
+    bool getSmartMacros() const noexcept { return smartRequest.load (std::memory_order_relaxed); }
+    static constexpr float kSmartFallPerTick = 0.04f, kSmartRisePerTick = 0.005f; // 0.25 s / 2 s for the whole range
+    /** Runs the content analysis tap without Smart macros, for a reader of
+        getContentAnalysis() (a meter, E38's chips). Any thread. */
+    void setContentAnalysisTap (bool on) noexcept FLUB_NONBLOCKING { analysisTapRequest.store (on, std::memory_order_relaxed); }
+    /** The tap's state as of its last programme frame (10 Hz); false while
+        it has published nothing since prepare() / reset(). Any thread. */
+    bool getContentAnalysis (AnalysisState& out) const noexcept { return analysisSnapshot.read (out); }
+    /** The Smart multipliers applied in the last block (all 1 while off). Any thread. */
+    MacroModulation getSmartModulation() const noexcept
+    {
+        constexpr auto rl = std::memory_order_relaxed;
+        return { publishedModulation[0].load (rl), publishedModulation[1].load (rl), publishedModulation[2].load (rl),
+                 publishedModulation[3].load (rl) };
+    }
+
     /** The safe speaker profile's bass cap (docs/11 E51): while the host
         plays an unplanned fallback to speakers, the bass lift - the bass
         engine's boost plus the parametric EQ's positive low shelves and
@@ -650,6 +683,18 @@ private:
     float programGrDb = 0.0f, transientGrDb = 0.0f, attackCoupleDb = 0.0f;
     float attackBeforeCoupleDb = 0.0f; // clarity.attack as applied without it
     void updateAttackCoupling (float limiterGrDb, bool active) noexcept FLUB_NONBLOCKING;
+    // Smart macros (docs/11 E34, audio thread): the tap, whether it runs,
+    // the multipliers as applied and whether apply() gets them (the request
+    // or multipliers still gliding back to 1), and their copies for other threads.
+    ContentAnalysis contentAnalysis;
+    AnalysisSnapshot analysisSnapshot;
+    std::atomic<bool> smartRequest { false }, analysisTapRequest { false };
+    bool analysisRunning = false, smartApplied = false;
+    uint32_t analysisFramesPublished = 0;
+    MacroModulation smartMod;
+    std::array<std::atomic<float>, 4> publishedModulation { 1.0f, 1.0f, 1.0f, 1.0f };
+    void updateSmartModulation (bool smartOn) noexcept FLUB_NONBLOCKING;
+    void publishSmartModulation() noexcept FLUB_NONBLOCKING;
     AutoDrive autoDrive;
     SafetyGovernor governor;
     DistortionMonitor distortion;

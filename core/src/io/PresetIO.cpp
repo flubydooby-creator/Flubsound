@@ -13,6 +13,7 @@
 #include <iterator>
 #include <random>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 
 namespace flub::preset
@@ -464,6 +465,15 @@ std::string contentHash (const Preset& p)
         for (int b = 0; b < 4; ++b)
             mix (static_cast<uint8_t> (bits >> (8 * b)));
     }
+    // Smart macros (docs/11 E34) change the sound: counted only when on, so
+    // every preset without them keeps its hash.
+    if (p.smart)
+    {
+        for (const char c : std::string_view ("smart"))
+            mix (static_cast<uint8_t> (c));
+        mix (0);
+        mix (1);
+    }
     char buf[17];
     std::snprintf (buf, sizeof (buf), "%016llx", static_cast<unsigned long long> (h));
     return buf;
@@ -587,6 +597,13 @@ bool fromJson (const json::Value& v, Preset& out, std::string& error)
     }
     if (root["contentHash"].isString())
         out.savedContentHash = root["contentHash"].asString();
+    if (const auto& smart = root["smart"]; ! smart.isNull())
+    {
+        if (smart.isBool())
+            out.smart = smart.asBool();
+        else
+            out.warnings.push_back ("\"smart\" is not true / false: ignored");
+    }
     if (const auto& intent = root["intent"]; ! intent.isNull())
     {
         Intent parsed;
@@ -724,6 +741,8 @@ json::Value toJson (const Preset& p, bool full)
         }
     }
     root.set ("params", std::move (params));
+    if (p.smart)
+        root.set ("smart", true);
     if (p.intent)
         root.set ("intent", intentToJson (*p.intent));
     return root;

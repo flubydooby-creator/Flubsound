@@ -64,6 +64,10 @@
 // * Plug-in / host state (resolveSavedState): every parameter the saved state
 //   does not carry takes its DEFAULT on load, never the value it had before
 //   (docs/11 E52 Phase A: deterministic DAW recall).
+// * "smart" (optional, docs/11 E34): true turns on Smart macros for the
+//   preset (Preset::smart; the content analysis scales what the macros
+//   add, ProcessingChain::setSmartMacros). It is not a parameter: the host
+//   hands it to the chain when it loads the preset. Missing = false.
 // * "intent" (optional, docs/11 E14 step 2): what the preset is meant to do
 //   to the sound, as measurable bounds that tests/test_factory_presets.cpp
 //   asserts through the offline renderer (see Intent below). The engine
@@ -174,6 +178,11 @@ struct Preset
 
     /** fromJson: the schema version the file was written in (before migration). */
     SchemaVersion loadedVersion = kSchemaVersion;
+
+    /** "smart": true (docs/11 E34): Smart macros for this preset
+        (ProcessingChain::setSmartMacros); written only when true, and
+        mixed into contentHash only then, so presets without it keep theirs. */
+    bool smart = false;
 
     /** The file's "intent" block, when it has a valid one (not part of the
         sound: contentHash ignores it, the engine never reads it). */

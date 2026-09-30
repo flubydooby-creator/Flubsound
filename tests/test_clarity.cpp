@@ -6,6 +6,7 @@
 #include "TestSignals.h"
 
 #include "flub/dsp/ClarityEnhancer.h"
+#include "flub/dsp/Crossover.h"
 #include "flub/dsp/Fft.h"
 
 #include <algorithm>
@@ -449,6 +450,11 @@ TEST_CASE ("Clarity: process, reset and setters do not allocate")
         p.air = static_cast<float> (i % 4) * 0.33f;
         p.deMud = static_cast<float> (i % 5) * 0.25f;
         p.presenceMode = i % 7 < 4 ? PresenceMode::Relative : PresenceMode::Absolute; // docs/11 E07 step 3
+        // docs/11 E04 step 3: the 3-band path switching on, gliding its split and off.
+        p.attackLowDb = i % 11 < 6 ? static_cast<float> (i % 5) * 3.0f : 0.0f;
+        p.attackHighDb = i % 13 < 4 ? -6.0f : 0.0f;
+        p.lowSplitHz = 60.0f + static_cast<float> (i * 37 % 140);
+        p.transientSpeed = 0.5f + 0.5f * static_cast<float> (i % 4);
         ce.setParams (p);
         ce.process (buf.block (0, 1 + (i * 97) % 512).firstChannels (1 + i % 8));
         (void) ce.getParams();
@@ -463,6 +469,10 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
     ClarityParams maxi;
     maxi.attackDb = 12.0f;
     maxi.sustainDb = 12.0f;
+    maxi.attackLowDb = 12.0f; // docs/11 E04 step 3: the 3-band path
+    maxi.attackHighDb = 12.0f;
+    maxi.lowSplitHz = 200.0f;
+    maxi.transientSpeed = 2.0f;
     maxi.presence = 1.0f;
     maxi.presenceFrequency = 6000.0f;
     maxi.air = 1.0f;
@@ -471,6 +481,10 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
     mini.attackDb = -12.0f;
     mini.sustainDb = -12.0f;
     mini.presenceFrequency = 1000.0f;
+    mini.attackLowDb = 0.0f; // full band (maxi and wild run the bands; the test stays under 2 s)
+    mini.attackHighDb = 0.0f;
+    mini.lowSplitHz = 60.0f;
+    mini.transientSpeed = 0.5f;
     ClarityParams wild;
     wild.attackDb = 1.0e9f;
     wild.sustainDb = -inf;
@@ -478,6 +492,10 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
     wild.presenceFrequency = 1.0e9f;
     wild.air = -3.0f;
     wild.deMud = inf;
+    wild.attackLowDb = nan;
+    wild.attackHighDb = inf;
+    wild.lowSplitHz = -5.0f;
+    wild.transientSpeed = 1.0e9f;
     const ClarityParams settings[] = { ClarityParams {}, maxi, mini, wild };
 
     for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
@@ -529,6 +547,10 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
         CHECK (q.presenceFrequency == 6000.0f);
         CHECK (q.air == 0.0f);
         CHECK (q.deMud == 1.0f);
+        CHECK (q.attackLowDb == 0.0f); // NaN keeps the previous value
+        CHECK (q.attackHighDb == 12.0f);
+        CHECK (q.lowSplitHz == 60.0f);
+        CHECK (q.transientSpeed == 2.0f);
         CHECK (std::string (ce.name()) == "Clarity");
 
         // Random automation every block on full-scale noise.
@@ -548,6 +570,10 @@ TEST_CASE ("Clarity: robustness - silence, DC, full-scale noise, impulses, extre
             r.presenceFrequency = rnd (1000.0f, 6000.0f);
             r.air = rng.nextU32() % 3u == 0u ? 0.0f : rnd (0.0f, 1.0f);
             r.deMud = rng.nextU32() % 3u == 0u ? 0.0f : rnd (0.0f, 1.0f);
+            r.attackLowDb = rng.nextU32() % 2u == 0u ? 0.0f : rnd (-12.0f, 12.0f);
+            r.attackHighDb = rng.nextU32() % 2u == 0u ? 0.0f : rnd (-12.0f, 12.0f);
+            r.lowSplitHz = rnd (60.0f, 200.0f);
+            r.transientSpeed = rnd (0.5f, 2.0f);
             ce.setParams (r);
             ce.process (buf.block (pos, len).firstChannels (1 + static_cast<int> (rng.nextU32() % 2u)));
             pos += len;
@@ -1004,4 +1030,370 @@ TEST_CASE ("Clarity (E07 step 3): switching presenceMode glides without a click 
     const auto ref = runBlocks (4096 / 2);
     for (int bs : { 1, 3, 12, 16, 48, 256, 1024 }) // all divide 6144
         CHECK (maxAbsDiff (runBlocks (bs), ref) == 0.0);
+}
+
+// ---- docs/11 E04 step 3: the 3-band path ----
+
+namespace
+{
+/** Hits every periodMs decaying with tau (kind 0: a 60 Hz kick, 1: a 1 kHz
+    pluck, 2: near-Gaussian noise differentiated twice, i.e. mostly above
+    4 kHz). */
+std::vector<float> bandHits (int kind, int n, double periodMs, double tauMs)
+{
+    std::vector<float> v (static_cast<size_t> (n));
+    FastRandom rng (3);
+    const int period = ms (periodMs);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = static_cast<double> (i % period) / kFs;
+        const double env = std::exp (-t / (tauMs * 0.001));
+        double x;
+        if (kind == 0)
+            x = 0.5 * env * std::sin (kTwoPi * 60.0 * t);
+        else if (kind == 1)
+            x = 0.4 * env * std::sin (kTwoPi * 1000.0 * t);
+        else
+            x = 0.15 * env * static_cast<double> (rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar() + rng.nextBipolar());
+        v[static_cast<size_t> (i)] = static_cast<float> (x);
+    }
+    if (kind == 2)
+    {
+        float p1 = 0.0f, p2 = 0.0f;
+        for (auto& x : v)
+        {
+            const float y = 0.25f * (x - 2.0f * p1 + p2);
+            p2 = p1;
+            p1 = x;
+            x = y;
+        }
+    }
+    return v;
+}
+
+/** The input through the 3-band path at unity gains (its all-pass): the
+    reference a band lift is read against. */
+std::vector<float> bandSum (const std::vector<float>& x, double splitHz = 120.0)
+{
+    ThreeBandSplitter sp;
+    sp.prepare (kFs, splitHz, 4000.0);
+    std::vector<float> y (x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        float l, m, h;
+        sp.processSample (0, x[i], l, m, h);
+        y[i] = l + m + h;
+    }
+    return y;
+}
+
+double liftDb (const std::vector<float>& y, const std::vector<float>& ref, int from, int to)
+{
+    return toDb (rms (y.data() + from, to - from) / std::max (1.0e-30, rms (ref.data() + from, to - from)));
+}
+
+/** Runs x on both channels from a reset; returns channel 0. */
+std::vector<float> runParams (const ClarityParams& p, const std::vector<float>& x, int blockSize = 256)
+{
+    ClarityEnhancer ce;
+    prepareClarity (ce);
+    ce.setParams (p);
+    return runStereo (ce, x, blockSize).ch[0];
+}
+} // namespace
+
+TEST_CASE ("Clarity (E04 step 3): each band keeps +12 dB of attack at >= 9 dB on hits 75 ms apart (full band: 3.9 - 7.5 dB) and leaves no bump > 1 dB at 40-60 ms (full band: 3.3 - 3.5 dB); the other bands stay at unity")
+{
+    // docs/11 E04 Done-when, through the module: the kick in the low band,
+    // the pluck in the mid band, the click in the high band, +12 dB in the
+    // band under test and 0 in the others. Lifts are the RMS of the first
+    // 10 ms of each hit (and of 40 - 60 ms after isolated hits) against the
+    // band sum at unity gains; the full-band shaper at +12 dB against the
+    // input shows what the bands fix.
+    const double taus[] = { 30.0, 15.0, 8.0 };
+    for (int kind = 0; kind < 3; ++kind)
+    {
+        ClarityParams bands;
+        bands.attackDb = kind == 1 ? 12.0f : 0.0f;
+        bands.attackLowDb = kind == 0 ? 12.0f : (kind == 1 ? -12.0f : 0.0f);
+        bands.attackHighDb = kind == 2 ? 12.0f : (kind == 1 ? -12.0f : 0.0f);
+        ClarityParams full;
+        full.attackDb = 12.0f;
+
+        double fastLift = 0.0, fullFastLift = 0.0, bump = -99.0, fullBump = -99.0;
+        for (double period : { 75.0, 500.0 })
+        {
+            const int n = ms (period * 11.5);
+            const auto x = bandHits (kind, n, period, taus[kind]);
+            const auto ref = bandSum (x);
+            const auto y = runParams (bands, x);
+            const auto yFull = runParams (full, x);
+            double lift = 0.0, liftFull = 0.0;
+            for (int h = 3; h <= 10; ++h)
+            {
+                const int on = h * ms (period);
+                lift += liftDb (y, ref, on, on + ms (10)) / 8.0;
+                liftFull += liftDb (yFull, x, on, on + ms (10)) / 8.0;
+                if (period > 100.0)
+                {
+                    bump = std::max (bump, liftDb (y, ref, on + ms (40), on + ms (60)));
+                    fullBump = std::max (fullBump, liftDb (yFull, x, on + ms (40), on + ms (60)));
+                }
+            }
+            if (period < 100.0)
+            {
+                fastLift = lift;
+                fullFastLift = liftFull;
+            }
+        }
+        std::printf ("  E04 Clarity band %d: 0-10 ms lift 75 ms apart %.2f dB (full band %.2f), 40-60 ms %.2f dB (full band %.2f)\n", kind,
+                     fastLift, fullFastLift, bump, fullBump);
+        CHECK_GE (fastLift, 9.0);
+        CHECK_LE (bump, 1.0);
+        CHECK_LE (fullFastLift, 8.0);
+        CHECK_GE (fullBump, 3.0);
+    }
+
+    // The bands at 0 dB leave their content alone: the pluck with only the
+    // low band at +12 dB comes out as the band sum within 0.25 dB (the low
+    // band still lifts the pluck onset's own low-frequency skirt: 0.10 dB).
+    const int n = ms (500 * 3);
+    const auto pluck = bandHits (1, n, 500.0, 15.0);
+    ClarityParams lowOnly;
+    lowOnly.attackLowDb = 12.0f;
+    const auto y = runParams (lowOnly, pluck);
+    CHECK_NEAR (liftDb (y, bandSum (pluck), ms (500), n), 0.0, 0.25);
+}
+
+TEST_CASE ("Clarity (E04 step 3): a steady 40 Hz note moves <= 0.1 dB with every band at +-12 dB attack and sustain, and gains no sidebands")
+{
+    // docs/11 E04 Done-when. Read once the note has settled: in its first
+    // 2.5 s a +12 dB sustain also lifts the mid band's share of the note
+    // (its LR4 slope passes 40 Hz at -38 dB) while it settles from the
+    // high-pass's onset transient, which moves the note by 0.31 dB (a -12 dB
+    // sustain 0.08 dB), once, like any decay the sustain acts on.
+    const int n = ms (3500);
+    const auto x = sine (40.0, kFs, n, 0.25f);
+    const float combos[][4] = { // attack, sustain, low offset, high offset
+        { 12, 12, 12, 12 }, { -12, -12, -12, -12 }, { 12, -12, 12, 12 }, { -12, 12, -12, -12 }, { 0, 12, 12, -12 }, { 0, -12, -12, 12 } };
+    double worst = 0.0;
+    for (const auto& c : combos)
+    {
+        ClarityParams p;
+        p.attackDb = c[0];
+        p.sustainDb = c[1];
+        p.attackLowDb = c[2];
+        p.attackHighDb = c[3];
+        const auto y = runParams (p, x);
+        double lo = 1.0e9, hi = -1.0e9;
+        for (int w = ms (2500); w + ms (25) <= n; w += ms (5))
+        {
+            const double db = toDb (rms (y.data() + w, ms (25)));
+            lo = std::min (lo, db);
+            hi = std::max (hi, db);
+        }
+        CHECK_LE (hi - lo, 0.1);
+        worst = std::max (worst, hi - lo);
+        const double a1 = toneAmplitude (y.data() + ms (2500), ms (1000), 40.0, kFs);
+        CHECK_NEAR (toDb (a1 / 0.25), 0.0, 0.05);
+        for (int k = 2; k <= 4; ++k)
+            CHECK_LE (toDb (toneAmplitude (y.data() + ms (2500), ms (1000), 40.0 * k, kFs) / a1), -80.0);
+    }
+    std::printf ("  E04 steady 40 Hz, every band at +-12 dB: level range %.4f dB\n", worst);
+}
+
+TEST_CASE ("Clarity (E04 step 3): with both offsets at 0 the shaper stays full band; an offset starts the 3-band path, which leaves the output alone while it warms up, then crossfades in and back out without a click, and stops")
+{
+    const int n = ms (2000);
+    std::vector<float> x (static_cast<size_t> (n));
+    {
+        const auto hitsNoise = gatedNoise (n, 0.3f, 30.0, 120.0, 8);
+        const auto low = sine (70.0, kFs, n, 0.3f);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] = hitsNoise[i] + low[i];
+    }
+    ClarityParams p;
+    p.attackDb = 6.0f;
+    p.sustainDb = -4.0f;
+
+    ClarityEnhancer ref, detour;
+    prepareClarity (ref);
+    prepareClarity (detour);
+    ref.setParams (p);
+    detour.setParams (p);
+    Planar a (2, n), b (2, n);
+    for (auto* buf : { &a, &b })
+    {
+        setChannel (*buf, 0, x);
+        setChannel (*buf, 1, x);
+    }
+    ref.reset();
+    detour.reset();
+    CHECK (! detour.isBandPathActive());
+    const int block = 240, on = ms (500), off = ms (1000);
+    for (int pos = 0; pos < n; pos += block)
+    {
+        if (pos == on)
+        {
+            auto q = p;
+            q.attackLowDb = 6.0f;
+            detour.setParams (q);
+            CHECK (detour.isBandPathActive());
+        }
+        if (pos == off)
+            detour.setParams (p);
+        ref.process (a.block (pos, block));
+        detour.process (b.block (pos, block));
+        if (pos == ms (1200))
+            CHECK (! detour.isBandPathActive()); // faded out and stopped
+    }
+    // The warm-up (5 x the low band's 10 ms slow attack) leaves the output
+    // bit-identical; the crossfade then changes it; once stopped, the full-
+    // band shaper (which never stopped) is bit-identical again.
+    auto same = [&] (int from, int to)
+    {
+        for (int c = 0; c < 2; ++c)
+            for (int i = from; i < to; ++i)
+                if (a.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] != b.ch[static_cast<size_t> (c)][static_cast<size_t> (i)])
+                    return false;
+        return true;
+    };
+    CHECK (same (0, on + ms (49)));
+    CHECK (! same (on + ms (50), off));
+    CHECK (same (ms (1200), n));
+
+    // Neutral with a detour through the offsets: exact pass-through again.
+    ClarityEnhancer ce;
+    prepareClarity (ce);
+    ClarityParams q;
+    q.attackHighDb = -9.0f;
+    ce.setParams (q);
+    Planar warm (2, ms (300));
+    setChannel (warm, 0, whiteNoise (ms (300), 0.3f, 4));
+    processInBlocks (ce, warm, 128);
+    ce.setParams (ClarityParams {});
+    Planar settle (2, ms (300));
+    setChannel (settle, 0, whiteNoise (ms (300), 0.3f, 5));
+    processInBlocks (ce, settle, 128);
+    CHECK (! ce.isBandPathActive());
+    Planar again (2, ms (300));
+    setChannel (again, 0, whiteNoise (ms (300), 0.3f, 6));
+    setChannel (again, 1, sine (1000.0, kFs, ms (300), 0.3f));
+    const Planar dry = clone (again);
+    processInBlocks (ce, again, 128);
+    CHECK (again.ch == dry.ch);
+}
+
+TEST_CASE ("Clarity (E04 step 3): switching the band offsets, the split and the speed is click-free; the split decides which band a note is in; the output does not depend on the block size and decays to exact silence")
+{
+    // As "Clarity: parameter changes are click-free": 300 Hz + 2 kHz, so
+    // energy above 15 kHz can only come from a discontinuity. Air is off:
+    // while the band sum's phase moves (the crossfade, a split glide) the
+    // 2 kHz tone's level in the exciter's band dips and recovers, and the
+    // exciter clips its normalised input for the 0.5 ms its envelope takes
+    // to follow a rise, as on any fast rise in a programme (-78 dBFS above
+    // 15 kHz on this -9 dBFS programme, 21 x its steady level).
+    const int n = ms (3000);
+    std::vector<float> x (static_cast<size_t> (n));
+    {
+        const auto a = sine (300.0, kFs, n, 0.25f);
+        const auto b = sine (2000.0, kFs, n, 0.1f);
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] = a[i] + b[i];
+    }
+    auto run = [&] (bool toggle, int blockSize)
+    {
+        ClarityEnhancer ce;
+        prepareClarity (ce, kFs, 2, 512);
+        ClarityParams p = allOn();
+        p.air = 0.0f;
+        ce.setParams (p);
+        ce.reset();
+        Planar buf (2, n);
+        setChannel (buf, 0, x);
+        setChannel (buf, 1, x);
+        for (int pos = 0; pos < n; pos += blockSize)
+        {
+            if (toggle && pos % 6000 == 2400) // a common boundary of every block size used
+            {
+                switch ((pos / 6000) % 5)
+                {
+                    case 0: p.attackLowDb = p.attackLowDb != 0.0f ? 0.0f : 12.0f; break;
+                    case 1: p.attackHighDb = p.attackHighDb != 0.0f ? 0.0f : -12.0f; break;
+                    case 2: p.lowSplitHz = p.lowSplitHz > 100.0f ? 60.0f : 200.0f; break;
+                    case 3: p.transientSpeed = p.transientSpeed > 1.0f ? 0.5f : 2.0f; break;
+                    default: p.attackDb = p.attackDb > 0.0f ? -12.0f : 12.0f; break;
+                }
+                ce.setParams (p);
+            }
+            ce.process (buf.block (pos, std::min (blockSize, n - pos)));
+        }
+        return buf;
+    };
+    auto hfPeak = [] (const Planar& y)
+    {
+        double peak = 0.0;
+        const auto hp = SvfCoeffs::make (FilterType::HighPass, 15000.0, 0.7071, 0.0, kFs);
+        for (const auto& c : y.ch)
+        {
+            SvfState s1, s2;
+            for (size_t i = 0; i < c.size(); ++i)
+            {
+                const float v = svfTick (hp, s2, svfTick (hp, s1, c[i]));
+                if (i >= static_cast<size_t> (ms (100)))
+                    peak = std::max (peak, static_cast<double> (std::abs (v)));
+            }
+        }
+        return peak;
+    };
+    const Planar toggled = run (true, 240);
+    const double steady = hfPeak (run (false, 240));
+    CHECK_LE (hfPeak (toggled), 1.0e-4); // -80 dBFS; programme at about -9 dBFS
+    CHECK_LE (hfPeak (toggled), std::max (4.0 * steady, 2.0e-5));
+    for (int bs : { 1, 16, 600 }) // all divide 2400 and 6000, as 240 does
+        CHECK (maxAbsDiff (run (true, bs), toggled) == 0.0);
+
+    // The split: a 150 Hz pluck is in the low band at a 200 Hz split (lifted
+    // with the low band at +12 dB) and in the mid band at 60 Hz (not lifted).
+    const auto pluck150 = [] {
+        std::vector<float> v (static_cast<size_t> (ms (1500)));
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            const double t = static_cast<double> (static_cast<int> (i) % ms (500)) / kFs;
+            v[i] = static_cast<float> (0.4 * std::exp (-t / 0.03) * std::sin (kTwoPi * 150.0 * t));
+        }
+        return v;
+    }();
+    auto onsetLift = [&] (float splitHz)
+    {
+        ClarityParams p;
+        p.attackLowDb = 12.0f;
+        p.lowSplitHz = splitHz;
+        const auto y = runParams (p, pluck150);
+        return liftDb (y, bandSum (pluck150, splitHz), ms (1000), ms (1010));
+    };
+    // (At 60 Hz the low band still passes 150 Hz at -16 dB, and a level-
+    // independent shaper lifts that as much as a full-level onset.)
+    const double at200 = onsetLift (200.0f), at60 = onsetLift (60.0f);
+    std::printf ("  E04 150 Hz pluck, low band +12 dB: first 10 ms %.2f dB at a 200 Hz split, %.2f dB at 60 Hz\n", at200, at60);
+    CHECK_GE (at200, 6.0);
+    CHECK_LE (at60, at200 - 3.0);
+
+    // Loud material, then silence: exact zeros without a reset.
+    ClarityEnhancer ce;
+    prepareClarity (ce, kFs, 2);
+    ClarityParams p = allOn();
+    p.attackLowDb = 12.0f;
+    p.attackHighDb = 12.0f;
+    p.sustainDb = 12.0f;
+    ce.setParams (p);
+    ce.reset();
+    const int loud = ms (500), total = loud + ms (3000);
+    Planar buf (2, total);
+    setChannel (buf, 0, whiteNoise (loud, 0.8f, 9));
+    setChannel (buf, 1, whiteNoise (loud, 0.8f, 10));
+    processInBlocks (ce, buf, 256);
+    CHECK (ce.isBandPathActive());
+    for (const auto& c : buf.ch)
+        CHECK (peakAbs (c.data() + total - ms (500), ms (500)) == 0.0);
 }

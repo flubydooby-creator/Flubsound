@@ -40,7 +40,7 @@
 //
 // Timing (docs/11 E04 step 3): the constants above are Timing's defaults.
 // The band shapers of ClarityEnhancer's 3-band path hold for 25 ms / a third
-// of their split / 2 ms, attack their slow envelope in 10 / 8 / 5 ms (an
+// of their split / 3 ms, attack their slow envelope in 10 / 8 / 4 ms (an
 // onset reads as one for about 0.7 of that, so the lift sits on the onset
 // and is gone 40 ms later) and release the attack pair program-dependently:
 //
@@ -114,9 +114,9 @@ TransientShaper::Timing TransientShaper::Timing::lowBand() noexcept
     Timing t;
     t.holdMs = kHoldMs; // the anti-ripple hold: steady bass is never modulated
     t.slowAttackMs = 10.0f;
-    t.attackReleaseMs = 60.0f;
-    t.fastReleaseMs = 15.0f;
-    t.gainSmoothMs = 0.4f;
+    t.attackReleaseMs = 40.0f;
+    t.fastReleaseMs = 4.0f;
+    t.gainSmoothMs = 0.3f;
     return t;
 }
 
@@ -129,7 +129,7 @@ TransientShaper::Timing TransientShaper::Timing::midBand (double splitHz) noexce
     t.holdMs = 1500.0 / std::clamp (splitHz, 60.0, 200.0);
     t.slowAttackMs = 8.0f;
     t.attackReleaseMs = 50.0f;
-    t.fastReleaseMs = 10.0f;
+    t.fastReleaseMs = 6.0f;
     t.gainSmoothMs = 0.3f;
     return t;
 }
@@ -137,10 +137,10 @@ TransientShaper::Timing TransientShaper::Timing::midBand (double splitHz) noexce
 TransientShaper::Timing TransientShaper::Timing::highBand() noexcept
 {
     Timing t;
-    t.holdMs = 2.0;
-    t.slowAttackMs = 5.0f;
+    t.holdMs = 3.0; // 2 ms read steady noise's own peaks as onsets: +1.3 dB on Gaussian white noise at +12 dB, 0.9 dB with 3
+    t.slowAttackMs = 4.0f;
     t.attackReleaseMs = 40.0f;
-    t.fastReleaseMs = 8.0f;
+    t.fastReleaseMs = 3.0f;
     t.gainSmoothMs = 0.25f;
     return t;
 }

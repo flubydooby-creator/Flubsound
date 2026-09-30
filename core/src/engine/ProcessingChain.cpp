@@ -514,6 +514,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     dryMatchGain.reset (sr, 50.0f, 1.0f);
 
     autoLevel.prepare (sr, config.inputChannels);
+    contentAnalysis.prepare (sr); // docs/11 E34: 100 ms frames (10 governor ticks)
     // The guard measures ahead of the compressor slot and applies its gains
     // to what leaves it: the slot's latency is its look-ahead.
     startleGuard.prepare (sr, maxB, slots[SComp].latencySamples());
@@ -580,6 +581,14 @@ void ProcessingChain::reset() noexcept
     autoDrive.reset();
     governor.restart(); // at Normal / Strict the governor keeps what it has learned (docs/11 E06 (2))
     loudnessMatch.reset();
+    // Smart macros (docs/11 E34): the tap measures the programme from here
+    // on, and the multipliers start from 1 (a render does not depend on
+    // what the chain heard before).
+    contentAnalysis.reset();
+    analysisSnapshot.clear();
+    analysisFramesPublished = 0;
+    smartMod = {};
+    publishSmartModulation();
 }
 
 void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexcept
@@ -592,6 +601,12 @@ void ProcessingChain::adoptGovernorState (const ProcessingChain& previous) noexc
     setOnboardEnhancementCap (previous.getOnboardEnhancementCap()); // docs/11 E16, taken at once on the first block
     setSafeSpeakerBassCapDb (previous.getSafeSpeakerBassCapDb());   // docs/11 E51
     personal.setProfileNow (previous.getPersonalProfile());         // docs/11 E33, at this chain's rate
+    // docs/11 E34: Smart macros and their multipliers, held until this
+    // chain's own tap has a valid state.
+    setSmartMacros (previous.getSmartMacros());
+    setContentAnalysisTap (previous.analysisTapRequest.load (std::memory_order_relaxed));
+    smartMod = previous.getSmartModulation();
+    publishSmartModulation();
     SafetyGovernor::Memory m;
     if (previous.governorMemory.read (m) && m.valid)
         governor.restoreMemory (m);
@@ -699,7 +714,9 @@ void ProcessingChain::applyParameters() noexcept
             governedBase[static_cast<size_t> (id)] *= governorScale;
         governed = governedBase.data();
     }
-    MacroMap::apply (governed, effective.data(), governorScale, onboardCap);
+    // Smart macros (docs/11 E34): the content's multipliers, while on or gliding back.
+    const MacroModulation* smart = smartApplied ? &smartMod : nullptr;
+    MacroMap::apply (governed, effective.data(), governorScale, onboardCap, smart);
     float* e = effective.data();
     // The measured loop (Normal / Strict, docs/11 E06 Phase 3): its own
     // scale on the bass harmonics, the budgets of the mode, Small Speaker
@@ -718,7 +735,7 @@ void ProcessingChain::applyParameters() noexcept
         std::copy (base.begin(), base.end(), quarterBase.begin());
         for (int id : { MaxDriveDb, SatDriveDb, BassHarmonics })
             quarterBase[static_cast<size_t> (id)] *= 0.25f;
-        MacroMap::apply (quarterBase.data(), quarterScale.data(), 0.25f, onboardCap);
+        MacroMap::apply (quarterBase.data(), quarterScale.data(), 0.25f, onboardCap, smart);
         driveAtFullScale = 4.0f * quarterScale[static_cast<size_t> (MaxDriveDb)];
     }
     if (strength == ProtectionStrength::Off)
@@ -1039,7 +1056,7 @@ void ProcessingChain::applyParameters() noexcept
     const float* h = e;
     if (governorScale < 1.0f || tonalScale < 1.0f)
     {
-        MacroMap::apply (base.data(), ungoverned.data(), 1.0f, onboardCap);
+        MacroMap::apply (base.data(), ungoverned.data(), 1.0f, onboardCap, smart);
         std::copy (effective.begin(), effective.end(), headroomInput.begin());
         for (int id : { BassBoostDb, ClarityPresence, ClarityAir })
             headroomInput[static_cast<size_t> (id)] = ungoverned[static_cast<size_t> (id)];
@@ -1688,6 +1705,34 @@ void ProcessingChain::updateAttackCoupling (float limiterGrDb, bool active) noex
     attackCoupleDb += std::clamp (target - attackCoupleDb, -kAttackCoupleSlewDbPerTick, kAttackCoupleSlewDbPerTick);
 }
 
+void ProcessingChain::updateSmartModulation (bool smartOn) noexcept FLUB_NONBLOCKING
+{
+    // Once per governor tick (docs/11 E34): towards the law's targets while
+    // on (held while the tap has no valid state), back to 1 while off;
+    // down fast (a limited master should not keep Punch for long), up slowly.
+    const auto& a = contentAnalysis.getState();
+    if (smartOn && ! a.valid)
+        return;
+    const MacroModulation target = smartOn ? MacroMap::smartModulation (a) : MacroModulation {};
+    const auto slew = [] (float& v, float t) {
+        v = t < v ? std::max (t, v - kSmartFallPerTick) : std::min (t, v + kSmartRisePerTick);
+    };
+    slew (smartMod.attack, target.attack);
+    slew (smartMod.drive, target.drive);
+    slew (smartMod.bass, target.bass);
+    slew (smartMod.air, target.air);
+    publishSmartModulation();
+}
+
+void ProcessingChain::publishSmartModulation() noexcept FLUB_NONBLOCKING
+{
+    constexpr auto rl = std::memory_order_relaxed;
+    publishedModulation[0].store (smartMod.attack, rl);
+    publishedModulation[1].store (smartMod.drive, rl);
+    publishedModulation[2].store (smartMod.bass, rl);
+    publishedModulation[3].store (smartMod.air, rl);
+}
+
 void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) noexcept FLUB_NONBLOCKING
 {
     const int n = io.numSamples;
@@ -1711,6 +1756,8 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     }
     onboardCapSnap = false;
     meterBus.onboardCapActive.store (onboardCap > 0.0f, std::memory_order_relaxed);
+    const bool smartOn = smartRequest.load (std::memory_order_relaxed);
+    smartApplied = smartOn || ! smartMod.isIdentity();
     applyParameters();
     headroomHoldoff = std::max (0, headroomHoldoff - n);
     const float* e = effective.data();
@@ -1728,6 +1775,27 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     // (0 dB while it is off: nothing changes).
     dynEq.setReferenceOffsetDb (autoLevel.getGainDb());
     compressor.setReferenceOffsetDb (autoLevel.getGainDb());
+    // The content analysis tap (docs/11 E34), ahead of the fold: in-line,
+    // so an offline render measures exactly what the live chain does. It
+    // starts afresh whenever it starts running.
+    if (smartApplied || analysisTapRequest.load (std::memory_order_relaxed))
+    {
+        if (! analysisRunning)
+        {
+            contentAnalysis.reset();
+            analysisRunning = true;
+        }
+        contentAnalysis.process (in, ! contaminated);
+        if (const auto& a = contentAnalysis.getState(); a.frames != analysisFramesPublished)
+        {
+            analysisSnapshot.publish (a);
+            analysisFramesPublished = a.frames;
+        }
+    }
+    else
+    {
+        analysisRunning = false;
+    }
 
     // ---- 2. Fold to stereo ----
     inputDetector.process (in);
@@ -1915,6 +1983,8 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
 
     if (couplingTick && ! contaminated)
         updateAttackCoupling (maxActive ? maximizer.getWindowGainReductionDb() : 0.0f, maxActive);
+    if (couplingTick && smartApplied)
+        updateSmartModulation (smartOn);
 
     // ---- 7. Global bypass (latency-aligned, optionally loudness matched) ----
     // The louder side is turned down, never the quieter one up (docs/11 E37).

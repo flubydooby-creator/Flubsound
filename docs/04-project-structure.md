@@ -125,7 +125,8 @@ Flubsound/
 │   │   │   ├── LatencyProbe.h          loopback latency probe: exponential sweeps, deconvolution, SNR gate, median (docs/11 E42d)
 │   │   │   ├── LoudnessFollower.h          cheap K-weighted running loudness for the control loops (default 3 s)
 │   │   │   ├── PeakMeters.h                TruePeakMeter; LevelMeter (sample peak, 300 ms RMS, correlation)
-│   │   │   └── SceneEvents.h               offline scene-event detector (onsets, loud events, silences, level changes; docs/11 E60), for the CLI and the scene tests
+│   │   │   ├── SceneEvents.h               offline scene-event detector (onsets, loud events, silences, level changes; docs/11 E60), for the CLI and the scene tests
+│   │   │   └── SpatialMetrics.h            offline spatial metrics of binaural responses (IACC early / late per octave, ITD, DRR, 1/3-octave levels, diffuse-field deviation; docs/11 E60 stage 2) and the HRTF-rendered focus-ILD method (docs/11 E24)
 │   │   ├── engine/                         L2 engine: parameters, macros, protection, bypass, chain, mixer, telemetry
 │   │   │   ├── Parameters.h                stable parameter IDs, Info table, two-bank lock-free ParameterStore (A/B)
 │   │   │   ├── MacroMap.h                  Boost Intensity + 5 mode macros → effective values; "governed" entries
@@ -156,7 +157,8 @@ Flubsound/
 │       │   ├── Discontinuity.cpp           4th-order-difference spike and cubic-fit jump tests, recurrence filter, dropout / NaN / DC-step runs
 │       │   ├── LatencyProbe.cpp        sweep generation, regularised deconvolution, parabolic peak, locate() for a reference channel
 │       │   ├── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
-│       │   └── SceneEvents.cpp             10 ms frames, background, event runs, median level changes
+│       │   ├── SceneEvents.cpp             10 ms frames, background, event runs, median level changes
+│       │   └── SpatialMetrics.cpp          FFT band levels, Butterworth octave bands, windowed cross-correlation, impulse splitting, Welch ILD, the virtualiser's and the focus's responses
 │       ├── dsp/
 │       │   ├── BassEngine.cpp
 │       │   ├── ChatDucker.cpp
@@ -292,6 +294,8 @@ Flubsound/
 │   ├── test_offline_render.cpp             flubsound-cli: OfflineRenderer vs ProcessingChain, --target-lufs, process export formats and report, batch
 │   ├── test_known_gaps.cpp                 docs/11 E59 slice: "KnownGap:" sound-quality metrics pinned at today's values (pumping, THD+N, 7.1 LFE, footstep bursts, Night Mode ambush, kick onset, 30 Hz audible band, focus ILD, 3.2 kHz lift at hands-free rates); the E19 cue enhancer's gunfire check; metric meta-validation; render.stats vs a hand computation
 │   ├── test_scenes.cpp                     docs/11 E60 stage 1: seeded burst / quiet → combat / ambush programme at −14 / −24 / −40 LUFS through every gaming and night preset, nine scene metrics pinned (ratchet), metric validation, E19's Done-when; dialogue over effects, speech → music → silence and a track change; the SceneEvents detector
+│   ├── test_spatial_metrics.cpp            docs/11 E60 stage 2: IACC / ITD / DRR / band levels on synthetic responses, parametricHrir against the virtualiser, today's renderer's weak values (pinned), a synthetic pinna notch in the diffuse field, impulse splitting
+│   ├── test_focus_ild.cpp                  docs/11 E24: the HRTF-rendered ILD method (known ILDs read back, the model's own ILD) and the focus off / 50 / 100 % at 15° steps
 │   ├── test_protection_measured.cpp    docs/11 E06 Phase 3: WeightedResidual meta-validation, feed-forward, PLR meter, the measured loop, harmonics policy, block independence
 │   ├── test_protection_tonal.cpp       docs/11 E07: SmoothnessGuard, TonalBalanceMeter, the governor's tonal rule and the Smoothness slot in the chain
 │   ├── test_dynamics_guard.cpp         docs/11 E21 / E20: StartleGuard as a unit and in the chain, guard.range, Tame keyed to it, the sustained detector, Auto Level's onset gate and time constants
@@ -312,7 +316,7 @@ Flubsound/
 │   ├── test_parameters_headroom.cpp        docs/11 E11 / E05 / E19: layout version 3 parameters, the chain's static-boost model and automatic preamp, named maximizer styles
 │   ├── test_signal_hygiene.cpp             docs/11 E10: the rate-aware saturator table, alias rows, residual-path DC blockers, the capture FIFO's sanitiser
 │   ├── test_soak.cpp                       docs/11 E53: DiscontinuityDetector on clean and damaged programme, the 10 s chain soak under automation, injected faults
-│   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches (docs/11 E60 / E53)
+│   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild (docs/11 E60 / E53 / E24)
 │   ├── test_cli_quality.cpp                tests/quality_targets.json and the KNOWN_GAP ratchet of `flubsound-cli quality` (docs/11 E59), hygiene metrics' meta-validation
 │   ├── test_cli_demo.cpp                   flubsound-cli demo: every pair written, matched within 0.5 LU unless a level feature, index band deltas = analyze, deterministic across worker counts, --input
 │   ├── test_cli_stats.cpp                  --protection off|normal|strict and render.stats' governor state / reasons (docs/11 E06)
@@ -332,7 +336,7 @@ Flubsound/
 │   │   ├── FactoryPresets.{h,cpp}          run-time preset folder lookup (--dir, $FLUBSOUND_PRESET_DIR, exe-relative, source tree)
 │   │   ├── OfflineRenderer.{h,cpp}         sample-aligned offline render through ProcessingChain, loudness-target iterations, writeRender; also compiled into the app (export/)
 │   │   ├── LatencyProbeCommand.{h,cpp} latency-probe generate / analyze: the loopback probe on files (docs/11 E42d)
-│   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters; octave bands (--bands), band tracks and events (--events), glitches, alias / DC / ultrasonic hygiene metrics
+│   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters; octave bands (--bands), band tracks and events (--events), glitches, spatial metrics of binaural impulses (--spatial), the focus ILD (--focus-ild), alias / DC / ultrasonic hygiene metrics
 │   │   └── Utf8Windows.h                   Windows: UTF-8 argv (CommandLineToArgvW), environment (GetEnvironmentVariableW) and console output; pass-through elsewhere
 │   └── scripts/
 │       ├── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
@@ -989,7 +993,9 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_parameters_headroom.cpp`: the layout version 3 parameters (docs/11 E11 / E05 / E19), the chain's static-boost model against the modules' own responses, the automatic preamp through the chain (bit-identical while off, click-free switching, AutoLevel does not cancel it) and the named maximizer styles;
   - `test_signal_hygiene.cpp`: docs/11 E10 - the rate-aware saturator designs (8× in Quality up to 48 kHz, ADAA) keep their latency, the alias rows at Warmth 100 (saturator and chain), extreme settings per profile and rate, a KnownGap for 24 dB of drive in Balanced / Low Latency at 44.1 / 48 kHz, the residual-path DC blockers and the capture FIFO's sanitiser;
   - `test_soak.cpp`: docs/11 E53 - the discontinuity detector on clean programme (nothing), on skips, impulses, steps, dropouts, NaN runs and DC steps (once each, block-size invariant), and the 10 s chain soak under automation (no click, dropout, NaN or DC step);
-  - `test_cli_analyze.cpp`, `test_cli_quality.cpp`, `test_cli_stats.cpp`: `flubsound-cli analyze --events / --bands / --glitches`, the `quality` targets file and KNOWN_GAP ratchet (a deliberately regressed render fails), and `--protection` with `render.stats`' governor state and reasons;
+  - `test_spatial_metrics.cpp`: the docs/11 E60 stage 2 spatial metrics - IACC, ITD, DRR and 1/3-octave levels read their known values on synthetic binaural impulses, `HeadphoneVirtualizer::parametricHrir` equals the module's own output, today's parametric renderer reproduces its weak values (pinned), a synthetic pinna notch moves the diffuse-field deviation at its band and follows a shift, and `splitImpulses` separates a capture;
+  - `test_focus_ild.cpp`: the docs/11 E24 HRTF-rendered ILD method - known ILDs read back per band, the rendered sources carry the model's own ILD, and the positional focus at off / 50 / 100 % at 15° steps (against the flat-ILD source);
+  - `test_cli_analyze.cpp`, `test_cli_quality.cpp`, `test_cli_stats.cpp`: `flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild`, the `quality` targets file and KNOWN_GAP ratchet (a deliberately regressed render fails), and `--protection` with `render.stats`' governor state and reasons;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_protection_measured.cpp`: docs/11 E06 Phase 3 - `WeightedResidual`'s meta-validation (a linear span reads nothing at any block size, a 1 % cubic its analytic THD, masked noise under exposed harmonics, gain riding is not distortion), the feed-forward (the limiter's programme envelope and the clipper modelled) and the PLR meter, the measured loop on a synthetic plant, the harmonics policy and the Done-when rows through the chain at Normal (settled within 3 s, still after 4 s, sag ≤ 1 dB), and block-size independence while the loop acts;
   - `test_protection_tonal.cpp`: docs/11 E07 - `SmoothnessGuard` (bit-exact at 0, the "s" taken back to its reference's balance at any level, dense programme and Gaming's light guard, the band-cut table), `TonalBalanceMeter`, the governor's tonal rule and, through the chain, the Smoothness slot (no latency, fades) and the tonal scale on the macros' lifts only;

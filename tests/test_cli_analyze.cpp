@@ -9,6 +9,7 @@
 #include "Analysis.h"
 #include "CliOptions.h"
 
+#include "flub/analysis/SpatialMetrics.h"
 #include "flub/common/Math.h"
 
 #include <algorithm>
@@ -214,4 +215,137 @@ TEST_CASE ("CLI analyze --glitches: the discontinuity detector over a file - cle
     CHECK_NEAR (list[0]["seconds"].asNumber(), 11.2, 0.001);
     CHECK (list[1]["type"].asString() == "non-finite" && list[1]["channel"].asNumber() == 0.0);
     CHECK (formatGlitches (g).find ("1 click, 0 dropout, 1 non-finite, 0 dc-step") != std::string::npos);
+}
+
+// ---- `analyze --spatial` / `--focus-ild` (docs/11 E60 stage 2, E24) ---------
+
+TEST_CASE ("CLI analyze --spatial / --focus-ild: parse for analyze only; JSON keys of binaural impulses and of an HRTF-rendered source")
+{
+    CliOptions o;
+    std::string error;
+    REQUIRE (parseCommandLine ({ "analyze", "a.wav", "--spatial", "--focus-ild", "--json" }, o, error));
+    CHECK (o.spatial && o.focusIld && o.json);
+    REQUIRE (parseCommandLine ({ "analyze", "a.wav" }, o, error));
+    CHECK (! o.spatial && ! o.focusIld);
+    CHECK (! parseCommandLine ({ "process", "-i", "a.wav", "-o", "b.wav", "--spatial" }, o, error));
+    CHECK (! parseCommandLine ({ "quality", "--focus-ild" }, o, error));
+
+    // Two virtualiser responses (FC, then SR) 0.2 s apart in one stereo file.
+    VirtualizerParams p;
+    const int n = at (0.5);
+    std::vector<std::vector<float>> ch (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    for (int k = 0; k < 2; ++k)
+    {
+        const auto ir = virtualizerResponse (p, 1u << (k == 0 ? 2 : 7), kFs, at (0.1));
+        for (size_t i = 0; i < ir.left.size(); ++i)
+        {
+            ch[0][static_cast<size_t> (at (0.05 + 0.2 * k)) + i] += ir.left[i];
+            ch[1][static_cast<size_t> (at (0.05 + 0.2 * k)) + i] += ir.right[i];
+        }
+    }
+    const auto spatial = spatialMetrics (ch, kFs);
+    REQUIRE (spatial.stereo);
+    REQUIRE (spatial.responses.size() == 2);
+    const auto j = spatialToJson (spatial);
+    const auto& list = j["responses"].asArray();
+    REQUIRE (list.size() == 2);
+    CHECK_NEAR (list[0]["onsetSeconds"].asNumber(), 0.05, 0.001);
+    CHECK_NEAR (list[1]["onsetSeconds"].asNumber(), 0.25, 0.001);
+    CHECK_NEAR (list[0]["iaccEarly"].asNumber(), 0.995, 0.003); // FC at the default room
+    CHECK (list[1]["iaccEarly"].asNumber() < 0.6);             // SR
+    CHECK (list[0]["iaccLate"].isNull());                       // no energy after 80 ms
+    CHECK_NEAR (list[0]["itdMs"].asNumber(), 0.0, 1.0e-9);
+    CHECK (list[1]["itdMs"].asNumber() < -0.5);                 // SR: the left (far) ear lags (+ = the right lags)
+    CHECK (list[0]["drrDb"].asNumber() > 20.0);
+    REQUIRE (list[0]["octaves"].asArray().size() == 7);
+    CHECK (list[0]["octaves"].asArray()[0]["hz"].asNumber() == 125.0);
+    CHECK (list[0]["octaves"].asArray()[6]["hz"].asNumber() == 8000.0);
+    CHECK (list[0]["octaves"].asArray()[3]["iaccEarly"].asNumber() > 0.98);
+    CHECK (list[0]["octaves"].asArray()[3]["iaccLate"].isNull());
+    const auto& thirds = list[0]["thirdOctaves"].asArray();
+    REQUIRE (thirds.size() == 27); // 50 Hz .. 20 kHz
+    CHECK (thirds[0]["hz"].asNumber() == 50.0 && thirds[0]["leftDb"].isNumber() && thirds[0]["rightDb"].isNumber());
+    const auto& df = j["diffuseField"];
+    CHECK (df["rangeDb"].asNumber() > 0.0 && df["rmsDeviationDb"].asNumber() > 0.0);
+    REQUIRE (df["bands"].asArray().size() == 23); // 100 Hz .. 16 kHz
+    CHECK (df["bands"].asArray()[0]["hz"].asNumber() == 100.0);
+    CHECK (df["bands"].asArray()[0]["db"].isNumber() && df["bands"].asArray()[0]["deviationDb"].isNumber());
+    const auto text = formatSpatial (spatial);
+    CHECK (text.find ("2 binaural response(s)") != std::string::npos);
+    CHECK (text.find ("IACC early 0.99") != std::string::npos);
+    CHECK (text.find ("Diffuse field") != std::string::npos);
+
+    // An HRTF-rendered source (60 degrees right) through the focus.
+    const auto source = hrtfRenderedSource (whiteNoise (at (0.75), 0.2f, 3), 60.0f, kFs);
+    const auto focus = focusIld (source, kFs);
+    REQUIRE (focus.stereo);
+    const auto f = focusIldToJson (focus);
+    REQUIRE (f["bands"].asArray().size() == 19); // 250 Hz .. 16 kHz
+    CHECK (f["bands"].asArray()[0].asNumber() == 250.0);
+    REQUIRE (f["sourceIldDb"].asArray().size() == 19);
+    CHECK (f["sourceIldDb"].asArray()[12].asNumber() < -5.0); // 4 kHz: the head shadow (left over right)
+    const auto& rows = f["focus"].asArray();
+    REQUIRE (rows.size() == 3);
+    CHECK (rows[0]["amount"].asNumber() == 0.0 && rows[1]["amount"].asNumber() == 0.5 && rows[2]["amount"].asNumber() == 1.0);
+    for (const auto& r : rows)
+    {
+        CHECK (r["ildDb"].asArray().size() == 19 && r["deviationDb"].asArray().size() == 19);
+        CHECK (r["maxAbsDeviationDb"].isNumber() && r["meanDeviationDb"].isNumber());
+        CHECK (r["maxAbsDeviationHz"].isNull() || r["maxAbsDeviationHz"].isNumber());
+    }
+    CHECK (formatFocusIld (focus).find ("focus 100 %") != std::string::npos);
+
+    // Not stereo: null, and the text says so.
+    const std::vector<std::vector<float>> mono { source[0] };
+    CHECK (spatialToJson (spatialMetrics (mono, kFs)).isNull());
+    CHECK (focusIldToJson (focusIld (mono, kFs)).isNull());
+    CHECK (formatSpatial (spatialMetrics (mono, kFs)).find ("needs a stereo") != std::string::npos);
+}
+
+TEST_CASE ("CLI analyze content / suggest (docs/11 E34): tilt, crest, M/S width and the Smart multipliers of pink noise, a hard-clipped master and a mono file")
+{
+    const int n = at (3.0);
+    // Two independent pinks: flat tilt, side as strong as mid, open dynamics.
+    const std::vector<std::vector<float>> pink { pinkNoise (n, 0.05f, 5), pinkNoise (n, 0.05f, 6) };
+    const auto p = contentReport (pink, kFs);
+    REQUIRE (p.state.valid);
+    const auto j = contentToJson (p);
+    CHECK (j["valid"].asBool());
+    CHECK_NEAR (j["tiltDbPerOctave"].asNumber(), 0.0, 0.3);
+    CHECK_NEAR (j["sideDb"].asNumber(), 0.0, 0.3);
+    CHECK_NEAR (j["correlation"].asNumber(), 0.0, 0.05);
+    // Gaussian noise: about 4 sigma of peak over 3 s; steady and dense, so its
+    // PLR sits below open music's (12.2 / 9.7 here).
+    CHECK (j["crestDb"].asNumber() > 11.0 && j["crestDb"].asNumber() < 14.0);
+    CHECK (j["plrDb"].asNumber() > 8.5 && j["plrDb"].asNumber() < 11.0);
+    for (const char* key : { "programmeSeconds", "highTiltDb", "lowShareDb", "fluxDb", "onsetsPerSecond" })
+        CHECK (j[key].isNumber());
+    const auto sj = suggestToJson (p);
+    CHECK (sj["smart"]["attack"].asNumber() > 0.5 && sj["smart"]["drive"].asNumber() > sj["smart"]["attack"].asNumber());
+    CHECK (sj["smart"]["air"].asNumber() < 1.0); // pink is bright next to music
+    CHECK (! sj["notes"].asArray().empty());
+    CHECK (formatContent (p).find ("Content:     PLR") != std::string::npos);
+    CHECK (formatContent (p).find ("M/S width: side") != std::string::npos);
+
+    // Pink driven 20 dB into a hard clip at -0.5 dBFS, mono: a limited master.
+    std::vector<float> clipped = pinkNoise (n, 0.5f, 7);
+    for (auto& v : clipped)
+        v = std::clamp (v, -0.944f, 0.944f);
+    const std::vector<std::vector<float>> mono { clipped };
+    const auto c = contentReport (mono, kFs);
+    REQUIRE (c.state.valid);
+    CHECK (c.state.plrDb < 8.0f);
+    CHECK_NEAR (c.state.correlation, 1.0, 1.0e-3);
+    CHECK (c.state.sideDb < -100.0f);
+    CHECK (c.smart.attack == 0.0f && c.smart.drive == MacroMap::kSmartDriveFloor);
+    const auto text = formatContent (c);
+    CHECK (text.find ("limited master") != std::string::npos);
+    CHECK (text.find ("near mono") != std::string::npos);
+
+    // Silence: no reading, identity, and the JSON says so.
+    const std::vector<std::vector<float>> quiet (2, std::vector<float> (static_cast<size_t> (n), 0.0f));
+    const auto q = contentReport (quiet, kFs);
+    CHECK (! q.state.valid && q.smart.isIdentity());
+    CHECK (contentToJson (q)["plrDb"].isNull());
+    CHECK (formatContent (q).find ("Content:     --") != std::string::npos);
 }

@@ -5,7 +5,7 @@
 //
 //   flubsound-cli process -i in.wav -o out.wav [render options]
 //   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N]
-//   flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--json]
+//   flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--spatial] [--focus-ild] [--json]
 //   flubsound-cli quality [chain options] [--json]
 //   flubsound-cli soak    [chain options] [--minutes M] [--seed N] [--json]
 //   flubsound-cli params  [--json]
@@ -48,7 +48,7 @@ const char* const kGeneralHelp = R"(flubsound-cli - Flubsound Pro batch processo
 Usage:
   flubsound-cli process -i in.wav -o out.wav [render options]
   flubsound-cli batch   -i <in dir> -o <out dir> [render options] [--jobs N] [--recursive]
-  flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--json]
+  flubsound-cli analyze -i file.wav [--bands] [--events] [--glitches] [--spatial] [--focus-ild] [--json]
   flubsound-cli quality [preset / mode / macro / --set options] [--json]
   flubsound-cli soak    [preset / mode / macro / --set options] [--minutes M] [--json]
   flubsound-cli params  [--json]
@@ -89,6 +89,8 @@ options, --target-lufs and --format):
       --events                   analyze: scene events (onsets, loud events,
                                  silences, level changes; see `help analyze`)
       --glitches                 analyze: clicks, dropouts, NaN / Inf, DC steps
+      --spatial                  analyze: IACC, ITD, DRR, diffuse field of binaural impulses
+      --focus-ild                analyze: ILD of a binaural source through the focus 0/50/100 %
 
 Precedence: defaults < --preset < --mode < --boost/--macro/--profile/--ceiling
 < --set. Bypass is never taken from a preset (use --set bypass=on).
@@ -156,7 +158,7 @@ Example:
   flubsound-cli batch -i ./album -o ./album-fx --mode music --boost 40 --target-lufs -14 --jobs 4 --format pcm24
 )";
 
-const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--bands] [--events [--event-band Hz]] [--glitches] [--json]
+const char* const kAnalyzeHelp = R"(flubsound-cli analyze -i file.wav [--bands] [--events [--event-band Hz]] [--glitches] [--spatial] [--focus-ild] [--json]
 
 Measures a WAV file with the engine's meters:
   integrated loudness (LUFS, EBU R128 gating), loudness range (LU, EBU Tech
@@ -168,6 +170,15 @@ Values that cannot be measured (silence, < 400 ms) print as -inf / null.
 --bands adds octave-band levels of the mean of all channels (31.5 Hz ..
 16 kHz, dBFS RMS; RBJ band-passes about one octave wide, for comparing
 renders rather than class-1 IEC 61260 filtering).
+
+Content (docs/11 E34; "content" / "suggest" with --json), over the programme
+above -70 dB RMS: PLR (sample peak over the K-weighted loudness, LU; a
+limited master reads 6 - 8), crest (peak over RMS), spectral tilt (dB per
+octave of the octave bands 125 Hz .. 8 kHz; pink noise 0, white +3) and the
+8 kHz+ bands over 500 Hz - 2 kHz, the share below 100 Hz, M/S width (side
+over mid) and correlation, spectral flux and onsets per second. Suggest:
+what Smart macros would keep of the macros' attack, drive, bass and air on
+this file (1 = all), with notes.
 
 --events (docs/11 E60; for game and film captures) reads the programme in
 10 ms frames of all channels against its own background (a slow floor that
@@ -191,6 +202,23 @@ skipped or repeated samples), dropouts (>= 0.5 ms of exact zeros starting
 abruptly after programme), NaN / Inf runs and DC steps (the 2 Hz low-passed
 signal moving >= -30 dBFS within 250 ms). It is most sensitive on tonal
 programme (a test tone); on broadband noise only large breaks show.
+
+--spatial (docs/11 E60; stereo files of binaural impulse responses, e.g.
+an impulse per speaker at least 100 ms apart rendered by `process` with the
+virtualiser) splits the file at the impulses and reports for each its IACC
+(max |interaural cross-correlation| within +-1 ms; early 0-80 ms and late
+after 80 ms from the direct sound, broadband and per octave 125 Hz .. 8 kHz),
+the ITD (the lag of that maximum), the DRR (the first 2.5 ms against the
+rest) and its 1/3-octave levels, and over all of them the diffuse-field
+response (the power average of every ear) as a deviation from its own mean.
+A dry centred source reads IACC 1; "--" / null: the window holds less than
+-60 dB of the response (e.g. no reverberant tail).
+
+--focus-ild (docs/11 E24; stereo files of a binaural or HRTF-rendered source)
+runs the file through the positional focus alone (width 1, no space or
+crossfeed) at off, 50 % and 100 % and lists per 1/3 octave (250 Hz .. 16 kHz)
+the source's ILD (left over right) and how far each rendering moves it,
+with the largest and the mean deviation over 1 - 8 kHz.
 )";
 
 const char* const kQualityHelp = R"(flubsound-cli quality [preset / mode / macro / --set options] [--json]

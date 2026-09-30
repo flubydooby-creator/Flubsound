@@ -13,8 +13,11 @@
 // is reported as kMinusInfDb and printed as "-inf" (null in JSON).
 #pragma once
 
+#include "flub/analysis/ContentAnalysis.h"
 #include "flub/analysis/Discontinuity.h"
 #include "flub/analysis/SceneEvents.h"
+#include "flub/analysis/SpatialMetrics.h"
+#include "flub/engine/MacroMap.h"
 #include "flub/io/Json.h"
 #include "flub/io/WavFile.h"
 
@@ -213,6 +216,80 @@ json::Value glitchesToJson (const GlitchReport& report);
 
 /** Multi-line text: counts, then at most maxLines events. */
 std::string formatGlitches (const GlitchReport& report, size_t maxLines = 50);
+
+// ---- Spatial metrics (docs/11 E60 stage 2, `analyze --spatial`) ------------
+/** flub/analysis/SpatialMetrics.h over a stereo capture of binaural impulse
+    responses (e.g. an impulse per speaker through `process` with the
+    virtualiser): the impulses are split at onsets at least 100 ms apart
+    (flub::splitImpulses); each gets its IACC (early / late, broadband and
+    per octave), ITD, DRR and 1/3-octave levels, and all of them together
+    the diffuse-field response and its deviation. */
+struct SpatialReport
+{
+    bool stereo = false;                      // false: not a 2-channel file (nothing measured)
+    double sampleRate = 48000.0;
+    std::vector<double> onsetSeconds;         // per response, in the file
+    std::vector<BinauralIrMetrics> responses;
+    DiffuseField diffuse;                     // over every response (empty for none)
+};
+
+SpatialReport spatialMetrics (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** { responses [{ onsetSeconds, iaccEarly, iaccLate, itdMs, drrDb, octaves [{ hz,
+    iaccEarly, iaccLate }], thirdOctaves [{ hz, leftDb, rightDb }] }],
+    diffuseField { rangeDb, rmsDeviationDb, bands [{ hz, db, deviationDb }] } }
+    (null for NaN / infinite values: no energy in a window, no reverberant
+    part), or null when the file is not stereo. */
+json::Value spatialToJson (const SpatialReport& report);
+
+/** Multi-line text: one block per response, then the diffuse field. */
+std::string formatSpatial (const SpatialReport& report);
+
+// ---- HRTF-rendered focus ILD (docs/11 E24, `analyze --focus-ild`) -----------
+/** The file (stereo: an HRTF-rendered or binaural source) through the
+    positional focus alone at off / 50 / 100 % (flub::focusIldDeviation):
+    the per-1/3-octave ILD of the source and each rendering's deviation from
+    it, 250 Hz .. 16 kHz, summarised over 1 - 8 kHz. */
+struct FocusIldReport
+{
+    bool stereo = false;
+    std::array<IldDeviation, 3> focus {}; // kFocusIldAmounts
+};
+
+FocusIldReport focusIld (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** { bands [hz...], sourceIldDb [...], focus [{ amount, ildDb [...],
+    deviationDb [...], maxAbsDeviationDb, maxAbsDeviationHz,
+    meanDeviationDb }] }, or null when the file is not stereo. */
+json::Value focusIldToJson (const FocusIldReport& report);
+
+/** Multi-line text: one row per band (source ILD, deviation at 0 / 50 / 100 %). */
+std::string formatFocusIld (const FocusIldReport& report);
+
+// ---- Content analysis (docs/11 E34, part of every `analyze`) ---------------
+/** flub/analysis/ContentAnalysis.h over the whole file: PLR, crest, spectral
+    tilt and its high end, the sub-100 Hz share, M/S width and correlation,
+    flux and onsets; and `suggest`: the multipliers Smart macros would put on
+    what the macros add (MacroMap::smartModulation), with one-line notes. */
+struct ContentReport
+{
+    AnalysisState state;       // valid: at least 0.5 s of programme above -70 dB RMS
+    MacroModulation smart;     // identity when the state is not valid
+    std::vector<std::string> notes;
+};
+
+ContentReport contentReport (const std::vector<std::vector<float>>& channels, double sampleRate);
+
+/** { "valid", "programmeSeconds", "plrDb", "crestDb", "tiltDbPerOctave",
+    "highTiltDb", "lowShareDb", "sideDb", "correlation", "fluxDb",
+    "onsetsPerSecond" } (null for no reading). */
+json::Value contentToJson (const ContentReport& report);
+
+/** { "smart": { "attack", "drive", "bass", "air" }, "notes": [...] }. */
+json::Value suggestToJson (const ContentReport& report);
+
+/** "Content: ..." and "Suggest: ..." lines. */
+std::string formatContent (const ContentReport& report);
 
 /** "pcm16", "pcm24", "pcm32", "float32", "float64". */
 const char* sampleFormatName (io::SampleFormat format) noexcept;

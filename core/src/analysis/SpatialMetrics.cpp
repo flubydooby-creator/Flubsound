@@ -11,6 +11,7 @@
 #include <complex>
 #include <cstddef>
 #include <limits>
+#include <utility>
 
 namespace flub
 {
@@ -33,7 +34,8 @@ constexpr double kPreOnsetMs = 1.0;      // the early window starts this far bef
 constexpr double kDirectPreMs = 0.5;     // DRR direct window [onset - 0.5, onset + 2.5) ms
 constexpr double kDirectPostMs = 2.5;
 constexpr double kMaxLagMs = 1.0;        // IACC lag range
-constexpr double kSilentWindow = 1.0e-10; // a window below -100 dB re the whole response is empty
+constexpr double kEmptyWindow = 1.0e-6;   // an IACC window below -60 dB re the whole response is empty
+constexpr double kNoReverb = 1.0e-10;     // DRR: after the direct sound below -100 dB re it is no reverberant part
 constexpr int kWelchSize = 8192;
 constexpr double kFocusSettleSeconds = 0.25; // skipped by focusIldDeviation (guard and envelopes settle)
 
@@ -119,11 +121,11 @@ double energy (const std::vector<float>& x, int begin, int end) noexcept
     return e;
 }
 
-/** IACC of a window, NaN when it holds less than kSilentWindow of the total energy. */
+/** IACC of a window, NaN when it holds less than kEmptyWindow of the total energy. */
 double windowIacc (const std::vector<float>& l, const std::vector<float>& r, int begin, int end, int maxLag, double total, int* lag = nullptr)
 {
     const double e = energy (l, begin, end) + energy (r, begin, end);
-    if (! (total > 0.0) || e < kSilentWindow * total)
+    if (! (total > 0.0) || e < kEmptyWindow * total)
         return kNaN;
     return interauralCrossCorrelation (l, r, begin, end, maxLag, lag);
 }
@@ -249,7 +251,7 @@ BinauralIrMetrics analyseBinauralIr (const BinauralIr& ir, double sampleRate)
     const double direct = energy (ir.left, onset - msToIndex (kDirectPreMs, sampleRate), directEnd)
                           + energy (ir.right, onset - msToIndex (kDirectPreMs, sampleRate), directEnd);
     const double rest = energy (ir.left, directEnd, n) + energy (ir.right, directEnd, n);
-    m.drrDb = rest < kSilentWindow * direct ? kInf : 10.0 * std::log10 (direct / rest);
+    m.drrDb = rest < kNoReverb * direct ? kInf : 10.0 * std::log10 (direct / rest);
 
     m.bandsHz = thirdOctaveBands (sampleRate);
     m.leftDb = thirdOctaveLevelsDb (ir.left, sampleRate, m.bandsHz);
@@ -362,7 +364,7 @@ BinauralIr virtualizerResponse (const VirtualizerParams& params, uint32_t channe
     length = std::max (1, length);
     AudioBuffer buffer (kMaxChannels, length);
     for (int c = 0; c < numLayout; ++c)
-        if ((channelMask >> c) & 1u && ! (withLfe && c == 3))
+        if (((channelMask >> c) & 1u) != 0 && ! (withLfe && c == 3))
             buffer.channel (c)[0] = 1.0f;
     for (int pos = 0; pos < length; pos += kBlock)
     {
@@ -515,10 +517,12 @@ std::array<IldDeviation, 3> focusIldDeviation (const std::vector<std::vector<flo
         return r;
     // Both measured after the first 250 ms, where the focus guard's
     // envelopes and the band-pass detectors have settled.
-    const auto skip = static_cast<std::ptrdiff_t> (std::min (source[0].size() / 2, static_cast<size_t> (kFocusSettleSeconds * sampleRate)));
-    const auto tail = [skip] (const std::vector<std::vector<float>>& x) {
-        return std::vector<std::vector<float>> { std::vector<float> (x[0].begin() + skip, x[0].end()),
-                                                 std::vector<float> (x[1].begin() + skip, x[1].end()) };
+    const size_t n = std::min (source[0].size(), source[1].size());
+    const auto skip = static_cast<std::ptrdiff_t> (std::min (n / 2, static_cast<size_t> (kFocusSettleSeconds * sampleRate)));
+    const auto end = static_cast<std::ptrdiff_t> (n);
+    const auto tail = [skip, end] (const std::vector<std::vector<float>>& x) {
+        return std::vector<std::vector<float>> { std::vector<float> (x[0].begin() + skip, x[0].begin() + end),
+                                                 std::vector<float> (x[1].begin() + skip, x[1].begin() + end) };
     };
     const auto reference = tail (source);
     for (size_t k = 0; k < kFocusIldAmounts.size(); ++k)

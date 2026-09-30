@@ -35,6 +35,7 @@
 #pragma once
 
 #include "Parameters.h"
+#include "flub/analysis/ContentAnalysis.h"
 
 #include <span>
 #include <vector>
@@ -70,6 +71,24 @@ struct MacroOverride
     int unlessOnId; // ... and this toggle (the module's enable) is off in the base values
 };
 
+/** Smart macro scaling (docs/11 E34): multipliers on what the macro rows
+    ADD to four groups of parameters (never on base values), from the
+    content analysis tap (ContentAnalysis.h) through smartModulation():
+      attack : clarity.attack, clarity.attackLow, clarity.attackHigh
+      drive  : max.drive, sat.drive
+      bass   : bass.boost, bass.harmonics
+      air    : clarity.air
+    Each is in [0, 1]: Smart only takes back. All 1 is bit-identical to no
+    modulation (x * 1 is exact). */
+struct MacroModulation
+{
+    float attack = 1.0f, drive = 1.0f, bass = 1.0f, air = 1.0f;
+
+    bool isIdentity() const noexcept { return attack == 1.0f && drive == 1.0f && bass == 1.0f && air == 1.0f; }
+    /** The multiplier on a row that targets paramId (1 outside the groups). */
+    float forParam (int paramId) const noexcept;
+};
+
 class MacroMap
 {
 public:
@@ -93,8 +112,25 @@ public:
         0..1 as it glides: above 0 the Gaming Footsteps (M1) and Detail (M4)
         inputs, and their effective values, are clamped to a limit that
         moves from 1 to kOnboardCapMacroLimit at 1, and virt.on is held off
-        in either mode; base[] is never changed. 0 is bit-identical to no cap. */
-    static void apply (const float* base, float* effective, float governorScale, float onboardCap = 0.0f) noexcept;
+        in either mode; base[] is never changed. 0 is bit-identical to no cap.
+        modulation (docs/11 E34, Smart macros): each row's contribution is
+        multiplied by modulation->forParam (row.paramId), after the
+        governor's scale; nullptr (or the identity) is bit-identical to none. */
+    static void apply (const float* base, float* effective, float governorScale, float onboardCap = 0.0f,
+                       const MacroModulation* modulation = nullptr) noexcept;
+
+    /** The Smart scaling law (docs/11 E34, docs/03 §14.16): the targets for
+        a content state (identity while it is not valid).
+          attack = smoothstep (kSmartPlrZero, kSmartPlrFull, PLR)
+          drive  = kSmartDriveFloor + (1 - kSmartDriveFloor) x attack
+          bass   = 1 - kSmartBassCut x smoothstep (kSmartLowShareFrom, kSmartLowShareTo, lowShare)
+          air    = 1 - kSmartAirCut x smoothstep (kSmartHighTiltFrom, kSmartHighTiltTo, highTilt)
+        RT-safe. */
+    static MacroModulation smartModulation (const AnalysisState& state) noexcept;
+    static constexpr float kSmartPlrZero = 7.5f, kSmartPlrFull = 10.5f; // LU
+    static constexpr float kSmartDriveFloor = 0.25f;
+    static constexpr float kSmartLowShareFrom = -3.0f, kSmartLowShareTo = 0.0f, kSmartBassCut = 0.5f; // dB
+    static constexpr float kSmartHighTiltFrom = -6.0f, kSmartHighTiltTo = 0.0f, kSmartAirCut = 0.5f;   // dB
 
     /** True when a macro source that can raise paramId in the current mode is
         above zero, even if it has not reached its entry's start point yet

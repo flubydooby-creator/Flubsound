@@ -412,4 +412,20 @@ static_assert (hasNonblockingReset<PersonalEarStage>);
 static_assert (std::is_same_v<decltype (&PersonalEarStage::processInverse), void (PersonalEarStage::*) (const AudioBlock&) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&PersonalEarStage::setCeilingDb), void (PersonalEarStage::*) (float) noexcept FLUB_NONBLOCKING>);
 
+// Clarity's 3-band transient shaper (docs/11 E04 step 3): the band shapers'
+// speed and hold, set from ClarityEnhancer::setParams and its split glide.
+static_assert (std::is_same_v<decltype (&TransientShaper::setSpeed), void (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&TransientShaper::setHoldMs), void (TransientShaper::*) (double) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ClarityEnhancer::isBandPathActive), bool (ClarityEnhancer::*)() const noexcept FLUB_NONBLOCKING>);
+
+// The content analysis tap ProcessingChain::process runs in-line ahead of the
+// fold, its hand-over to other threads, and the Smart macro setters the host
+// calls (docs/11 E34, tests/test_content_analysis.cpp).
+#include "flub/analysis/ContentAnalysis.h"
+static_assert (std::is_same_v<decltype (&ContentAnalysis::process), void (ContentAnalysis::*) (const AudioBlock&, bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ContentAnalysis::reset), void (ContentAnalysis::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&AnalysisSnapshot::publish), void (AnalysisSnapshot::*) (const AnalysisState&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::setSmartMacros), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProcessingChain::setContentAnalysisTap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

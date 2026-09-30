@@ -848,4 +848,323 @@ std::string formatGlitches (const GlitchReport& r, size_t maxLines)
         s += "  ... (" + std::to_string (total - static_cast<int64_t> (std::min (r.events.size(), maxLines))) + " more)\n";
     return s;
 }
+
+// ===========================================================================
+// Spatial metrics (docs/11 E60 stage 2) and the focus ILD (docs/11 E24)
+// ===========================================================================
+namespace
+{
+/** A finite metric rounded for JSON, null otherwise (NaN: no energy; inf: no reverberant part). */
+json::Value jsonFinite (double v, int decimals)
+{
+    if (! std::isfinite (v))
+        return json::Value();
+    const double scale = std::pow (10.0, decimals);
+    return json::Value (std::round (v * scale) / scale);
+}
+
+std::string metricText (double v, int decimals)
+{
+    if (std::isnan (v))
+        return "--";
+    if (std::isinf (v))
+        return v > 0.0 ? "+inf" : "-inf";
+    char buf[32];
+    std::snprintf (buf, sizeof (buf), "%.*f", decimals, v);
+    return buf;
+}
+
+bool isStereo (const std::vector<std::vector<float>>& channels) noexcept
+{
+    return channels.size() == 2 && ! channels[0].empty() && channels[0].size() == channels[1].size();
+}
+} // namespace
+
+SpatialReport spatialMetrics (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    SpatialReport r;
+    r.sampleRate = sampleRate;
+    r.stereo = isStereo (channels) && sampleRate > 0.0;
+    if (! r.stereo)
+        return r;
+    const auto irs = splitImpulses (channels[0], channels[1], sampleRate, 0.1, &r.onsetSeconds);
+    for (const auto& ir : irs)
+        r.responses.push_back (analyseBinauralIr (ir, sampleRate));
+    if (! irs.empty())
+        r.diffuse = diffuseField (irs, sampleRate);
+    return r;
+}
+
+json::Value spatialToJson (const SpatialReport& r)
+{
+    if (! r.stereo)
+        return json::Value();
+    json::Value v;
+    json::Value list { json::Value::Array {} };
+    for (size_t k = 0; k < r.responses.size(); ++k)
+    {
+        const auto& m = r.responses[k];
+        json::Value e;
+        e.set ("onsetSeconds", jsonFinite (k < r.onsetSeconds.size() ? r.onsetSeconds[k] : m.onsetSeconds, 4));
+        e.set ("iaccEarly", jsonFinite (m.iaccEarly, 3));
+        e.set ("iaccLate", jsonFinite (m.iaccLate, 3));
+        e.set ("itdMs", jsonFinite (m.itdMs, 3));
+        e.set ("drrDb", jsonFinite (m.drrDb, 2));
+        json::Value octaves { json::Value::Array {} };
+        for (size_t b = 0; b < kIaccOctavesHz.size(); ++b)
+        {
+            json::Value o;
+            o.set ("hz", kIaccOctavesHz[b]);
+            o.set ("iaccEarly", jsonFinite (m.iaccEarlyBands[b], 3));
+            o.set ("iaccLate", jsonFinite (m.iaccLateBands[b], 3));
+            octaves.push (std::move (o));
+        }
+        e.set ("octaves", std::move (octaves));
+        json::Value thirds { json::Value::Array {} };
+        for (size_t b = 0; b < m.bandsHz.size(); ++b)
+        {
+            json::Value t;
+            t.set ("hz", m.bandsHz[b]);
+            t.set ("leftDb", jsonFinite (m.leftDb[b], 2));
+            t.set ("rightDb", jsonFinite (m.rightDb[b], 2));
+            thirds.push (std::move (t));
+        }
+        e.set ("thirdOctaves", std::move (thirds));
+        list.push (std::move (e));
+    }
+    v.set ("responses", std::move (list));
+
+    json::Value df;
+    df.set ("rangeDb", jsonFinite (r.diffuse.rangeDb, 2));
+    df.set ("rmsDeviationDb", jsonFinite (r.diffuse.rmsDeviationDb, 2));
+    json::Value bands { json::Value::Array {} };
+    for (size_t b = 0; b < r.diffuse.bandsHz.size() && b < r.diffuse.deviationDb.size(); ++b)
+    {
+        json::Value t;
+        t.set ("hz", r.diffuse.bandsHz[b]);
+        t.set ("db", jsonFinite (r.diffuse.levelDb[b], 2));
+        t.set ("deviationDb", jsonFinite (r.diffuse.deviationDb[b], 2));
+        bands.push (std::move (t));
+    }
+    df.set ("bands", std::move (bands));
+    v.set ("diffuseField", std::move (df));
+    return v;
+}
+
+std::string formatSpatial (const SpatialReport& r)
+{
+    if (! r.stereo)
+        return "Spatial : needs a stereo (binaural) file\n";
+    std::string s = "Spatial : " + std::to_string (r.responses.size()) + " binaural response(s) (impulses >= 100 ms apart)\n";
+    char buf[200];
+    for (size_t k = 0; k < r.responses.size(); ++k)
+    {
+        const auto& m = r.responses[k];
+        std::snprintf (buf, sizeof (buf), "  #%zu at %.3f s: IACC early %s, late %s; ITD %s ms; DRR %s dB\n", k + 1,
+                       k < r.onsetSeconds.size() ? r.onsetSeconds[k] : m.onsetSeconds, metricText (m.iaccEarly, 3).c_str(),
+                       metricText (m.iaccLate, 3).c_str(), metricText (m.itdMs, 3).c_str(), metricText (m.drrDb, 1).c_str());
+        s += buf;
+        s += "    octave IACC early / late:";
+        for (size_t b = 0; b < kIaccOctavesHz.size(); ++b)
+            s += "  " + hzLabel (kIaccOctavesHz[b]) + " " + metricText (m.iaccEarlyBands[b], 2) + "/" + metricText (m.iaccLateBands[b], 2);
+        s += "\n";
+    }
+    if (! r.diffuse.bandsHz.empty())
+    {
+        std::snprintf (buf, sizeof (buf), "  Diffuse field (1/3 octave, re its mean): range %.2f dB, rms %.2f dB\n   ", r.diffuse.rangeDb,
+                       r.diffuse.rmsDeviationDb);
+        s += buf;
+        for (size_t b = 0; b < r.diffuse.bandsHz.size(); ++b)
+            s += " " + hzLabel (r.diffuse.bandsHz[b]) + " " + metricText (r.diffuse.deviationDb[b], 1);
+        s += "\n";
+    }
+    return s;
+}
+
+FocusIldReport focusIld (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    FocusIldReport r;
+    r.stereo = isStereo (channels) && sampleRate > 0.0;
+    if (r.stereo)
+        r.focus = focusIldDeviation (channels, sampleRate);
+    return r;
+}
+
+json::Value focusIldToJson (const FocusIldReport& r)
+{
+    if (! r.stereo)
+        return json::Value();
+    const auto array = [] (const std::vector<double>& values) {
+        json::Value a { json::Value::Array {} };
+        for (double x : values)
+            a.push (jsonFinite (x, 2));
+        return a;
+    };
+    json::Value v;
+    json::Value bands { json::Value::Array {} };
+    for (double hz : r.focus[0].bandsHz)
+        bands.push (hz);
+    v.set ("bands", std::move (bands));
+    v.set ("sourceIldDb", array (r.focus[0].referenceDb));
+    json::Value list { json::Value::Array {} };
+    for (size_t k = 0; k < r.focus.size(); ++k)
+    {
+        const auto& d = r.focus[k];
+        json::Value e;
+        e.set ("amount", static_cast<double> (kFocusIldAmounts[k]));
+        e.set ("ildDb", array (d.measuredDb));
+        e.set ("deviationDb", array (d.deviationDb));
+        e.set ("maxAbsDeviationDb", jsonFinite (d.maxAbsDb, 2));
+        e.set ("maxAbsDeviationHz", d.maxAbsHz > 0.0 ? json::Value (d.maxAbsHz) : json::Value());
+        e.set ("meanDeviationDb", jsonFinite (d.meanDb, 2));
+        list.push (std::move (e));
+    }
+    v.set ("focus", std::move (list));
+    return v;
+}
+
+std::string formatFocusIld (const FocusIldReport& r)
+{
+    if (! r.stereo)
+        return "Focus ILD: needs a stereo (binaural) file\n";
+    std::string s = "Focus ILD (positional focus alone; ILD = left over right, dB; deviation from the source):\n"
+                    "       Hz   source    off    50 %   100 %\n";
+    char buf[120];
+    for (size_t b = 0; b < r.focus[0].bandsHz.size(); ++b)
+    {
+        std::snprintf (buf, sizeof (buf), "  %7s  %7s  %5s  %6s  %6s\n", hzLabel (r.focus[0].bandsHz[b]).c_str(),
+                       metricText (r.focus[0].referenceDb[b], 2).c_str(), metricText (r.focus[0].deviationDb[b], 2).c_str(),
+                       metricText (r.focus[1].deviationDb[b], 2).c_str(), metricText (r.focus[2].deviationDb[b], 2).c_str());
+        s += buf;
+    }
+    for (size_t k = 0; k < r.focus.size(); ++k)
+    {
+        std::snprintf (buf, sizeof (buf), "  focus %3.0f %%: largest |deviation| 1 - 8 kHz %.2f dB at %s Hz, mean %+.2f dB\n",
+                       100.0 * static_cast<double> (kFocusIldAmounts[k]), r.focus[k].maxAbsDb,
+                       r.focus[k].maxAbsHz > 0.0 ? hzLabel (r.focus[k].maxAbsHz).c_str() : "--", r.focus[k].meanDb);
+        s += buf;
+    }
+    return s;
+}
+// ---- content analysis and `suggest` (docs/11 E34) ---------------------------
+namespace
+{
+json::Value contentNumber (float v, int decimals)
+{
+    if (! std::isfinite (v) || v <= kNoMeasurement || v >= AnalysisState::kNoReading)
+        return json::Value();
+    const double scale = std::pow (10.0, decimals);
+    return json::Value (std::round (static_cast<double> (v) * scale) / scale);
+}
+} // namespace
+
+ContentReport contentReport (const std::vector<std::vector<float>>& channels, double sampleRate)
+{
+    ContentReport r;
+    std::vector<const float*> ptrs;
+    for (const auto& c : channels)
+        ptrs.push_back (c.data());
+    const int64_t n = channels.empty() ? 0 : static_cast<int64_t> (channels[0].size());
+    r.state = ContentAnalysis::analyseWhole (ptrs.data(), static_cast<int> (ptrs.size()), n, sampleRate);
+    r.smart = MacroMap::smartModulation (r.state);
+    const auto& a = r.state;
+    if (! a.valid)
+    {
+        r.notes.push_back ("too little programme to judge (under 0.5 s above -70 dB RMS)");
+        return r;
+    }
+    char buf[200];
+    if (a.plrDb < MacroMap::kSmartPlrFull)
+    {
+        std::snprintf (buf, sizeof (buf),
+                       "%s (PLR %.1f LU): Punch and Loudness mostly drive the limiter here; Smart macros keep %.0f %% of their "
+                       "attack and %.0f %% of their drive",
+                       a.plrDb < 9.0f ? "limited master" : "dense master", static_cast<double> (a.plrDb),
+                       100.0 * static_cast<double> (r.smart.attack), 100.0 * static_cast<double> (r.smart.drive));
+        r.notes.push_back (buf);
+    }
+    if (a.lowShareDb > MacroMap::kSmartLowShareFrom)
+    {
+        std::snprintf (buf, sizeof (buf), "bass-heavy (%.1f dB of the energy below 100 Hz): Smart macros keep %.0f %% of the macros' bass",
+                       static_cast<double> (a.lowShareDb), 100.0 * static_cast<double> (r.smart.bass));
+        r.notes.push_back (buf);
+    }
+    if (a.highTiltDb > MacroMap::kSmartHighTiltFrom)
+    {
+        std::snprintf (buf, sizeof (buf), "bright (8 kHz and up %.1f dB re 500 Hz - 2 kHz): Smart macros keep %.0f %% of the macros' air",
+                       static_cast<double> (a.highTiltDb), 100.0 * static_cast<double> (r.smart.air));
+        r.notes.push_back (buf);
+    }
+    if (a.correlation < 0.0f)
+        r.notes.push_back ("out-of-phase content (correlation below 0): check mono compatibility before adding Width");
+    else if (a.sideDb > -3.0f)
+        r.notes.push_back ("already wide (side within 3 dB of mid): little Width needed");
+    else if (a.sideDb < -30.0f)
+        r.notes.push_back ("near mono: Width has room to work");
+    if (r.notes.empty())
+        r.notes.push_back ("open dynamics and a balanced spectrum: the macros apply as set, Smart or not");
+    return r;
+}
+
+json::Value contentToJson (const ContentReport& r)
+{
+    const auto& a = r.state;
+    json::Value v;
+    v.set ("valid", a.valid);
+    v.set ("programmeSeconds", contentNumber (a.windowSeconds, 2));
+    v.set ("plrDb", contentNumber (a.plrDb, 2));
+    v.set ("crestDb", contentNumber (a.crestDb, 2));
+    v.set ("tiltDbPerOctave", a.valid ? contentNumber (a.tiltDbPerOctave, 2) : json::Value());
+    v.set ("highTiltDb", a.valid ? contentNumber (a.highTiltDb, 2) : json::Value());
+    v.set ("lowShareDb", contentNumber (a.lowShareDb, 2));
+    v.set ("sideDb", contentNumber (a.sideDb, 2));
+    v.set ("correlation", a.valid ? contentNumber (a.correlation, 3) : json::Value());
+    v.set ("fluxDb", a.valid ? contentNumber (a.fluxDb, 2) : json::Value());
+    v.set ("onsetsPerSecond", a.valid ? contentNumber (a.onsetsPerSecond, 2) : json::Value());
+    return v;
+}
+
+json::Value suggestToJson (const ContentReport& r)
+{
+    json::Value smart;
+    smart.set ("attack", contentNumber (r.smart.attack, 3));
+    smart.set ("drive", contentNumber (r.smart.drive, 3));
+    smart.set ("bass", contentNumber (r.smart.bass, 3));
+    smart.set ("air", contentNumber (r.smart.air, 3));
+    json::Value notes { json::Value::Array {} };
+    for (const auto& n : r.notes)
+        notes.push (n);
+    json::Value v;
+    v.set ("smart", std::move (smart));
+    v.set ("notes", std::move (notes));
+    return v;
+}
+
+std::string formatContent (const ContentReport& r)
+{
+    const auto& a = r.state;
+    std::string s;
+    char buf[240];
+    if (a.valid)
+    {
+        std::snprintf (buf, sizeof (buf),
+                       "Content:     PLR %.1f LU, crest %.1f dB; tilt %+.2f dB/oct (8k+ %+.1f dB re 500-2k), below 100 Hz %.1f dB\n"
+                       "             M/S width: side %s dB re mid, correlation %+.2f; flux %.2f dB, onsets %.1f /s\n",
+                       static_cast<double> (a.plrDb), static_cast<double> (a.crestDb), static_cast<double> (a.tiltDbPerOctave),
+                       static_cast<double> (a.highTiltDb), static_cast<double> (a.lowShareDb), formatDb (a.sideDb, 1).c_str(),
+                       static_cast<double> (a.correlation), static_cast<double> (a.fluxDb), static_cast<double> (a.onsetsPerSecond));
+        s += buf;
+    }
+    else
+    {
+        s += "Content:     --\n";
+    }
+    std::snprintf (buf, sizeof (buf), "Suggest:     Smart macros x%.2f attack, x%.2f drive, x%.2f bass, x%.2f air\n",
+                   static_cast<double> (r.smart.attack), static_cast<double> (r.smart.drive), static_cast<double> (r.smart.bass),
+                   static_cast<double> (r.smart.air));
+    s += buf;
+    for (const auto& n : r.notes)
+        s += "             - " + n + "\n";
+    return s;
+}
 } // namespace flub::cli

@@ -188,7 +188,39 @@ bool MacroMap::isArmed (const float* base, int paramId) noexcept
     return false;
 }
 
-void MacroMap::apply (const float* base, float* effective, float governorScale, float onboardCap) noexcept
+float MacroModulation::forParam (int paramId) const noexcept
+{
+    switch (paramId)
+    {
+        case ClarityAttackDb:
+        case ClarityAttackLowDb:
+        case ClarityAttackHighDb: return attack;
+        case MaxDriveDb:
+        case SatDriveDb: return drive;
+        case BassBoostDb:
+        case BassHarmonics: return bass;
+        case ClarityAir: return air;
+        default: return 1.0f;
+    }
+}
+
+MacroModulation MacroMap::smartModulation (const AnalysisState& s) noexcept
+{
+    MacroModulation m;
+    if (! s.valid)
+        return m;
+    // Limited masters (docs/11 E34): what Punch's onset lift and the drive
+    // add only drives the limiter harder there, so it goes quieter and flatter.
+    m.attack = smoothstep (kSmartPlrZero, kSmartPlrFull, s.plrDb);
+    m.drive = kSmartDriveFloor + (1.0f - kSmartDriveFloor) * m.attack;
+    // Bass-heavy programme gets less of the macros' bass, bright programme less air.
+    m.bass = 1.0f - kSmartBassCut * smoothstep (kSmartLowShareFrom, kSmartLowShareTo, s.lowShareDb);
+    m.air = 1.0f - kSmartAirCut * smoothstep (kSmartHighTiltFrom, kSmartHighTiltTo, s.highTiltDb);
+    return m;
+}
+
+void MacroMap::apply (const float* base, float* effective, float governorScale, float onboardCap,
+                      const MacroModulation* modulation) noexcept
 {
     for (int i = 0; i < kNumParams; ++i)
         effective[i] = base[i];
@@ -220,7 +252,12 @@ void MacroMap::apply (const float* base, float* effective, float governorScale, 
             if (e.exponent != 1.0f)
                 c = std::pow (c, e.exponent);
             const float g = e.governed ? governorScale : 1.0f;
-            effective[e.paramId] += e.amount * c * g;
+            // Smart macros (docs/11 E34): the content's multiplier on what
+            // the row adds; none (nullptr) leaves the sum as it was, bit for bit.
+            if (modulation != nullptr)
+                effective[e.paramId] += e.amount * c * g * modulation->forParam (e.paramId);
+            else
+                effective[e.paramId] += e.amount * c * g;
         }
 
     // Override rows: a choice for a parameter the user or preset left alone.

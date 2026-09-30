@@ -1210,13 +1210,15 @@ Sources:
   - More intelligibility from a presence lift that backs off when the band is already loud (Absolute, the default) or already bright against the programme's own body (Relative, [11 E07](11-enhancement-report.md#e07) step 3: the same lift at any playback or mastering level).
   - "Air" from harmonics generated in the top octave.
 - **All of it zero latency**, linked across channels where a gain is applied, so the stereo image is preserved.
-- **`TransientShaper`** is a standalone building block. `ClarityEnhancer` uses it full-band; `BassEngine` uses it on the low band (§4.3.5).
+- **`TransientShaper`** is a standalone building block. `ClarityEnhancer` uses it full-band, and one per band in its 3-band path (§5.3.5); `BassEngine` uses it on the low band (§4.3.5).
 
 ### 5.2 Signal flow
 
 ```
  x_c
   ├─ 1. TransientShaper (linked): g[n] from d[n] = max_c|x_c[n]|, same g on every channel
+  │     (either offset clarity.attackLow / attackHigh ≠ 0: 3 LR4 bands at split' / 4 kHz, one
+  │      TransientShaper per band on d_b = max_c|band_b,c|, y_c = Σ_b g_b·band_b,c; §5.3.5)
   ├─ 2. De-mud:   bell 250 Hz, Q 1, gain = deMud' · G_mud              detectors on THIS stage's input:
   │                                                                     BP 250 Hz Q 1 and the broadband signal,
   │                                                                     linked mean squares (20 ms)
@@ -1365,6 +1367,35 @@ Measured at air 1, levels re the input tone:
 
 **Telemetry.** Where the harmonics are added (before the air shelf), per channel: the exciter's input, the band `b` through the same HP4 7 kHz and mix (the shaper's linear branch: below full scale `0.5·T3` leaves a term proportional to `b`, which is what the skirt floor produces; two more SVF sections per sample and channel) and the added signal feed a two-reference estimate over analysis windows of at least 25 ms (§14.5). `getDistortionDb()` is the generated harmonics' share of the output at that point: at air 1, −13.3 / −11.9 / −12.1 dB for 4 / 4.8 / 6 kHz tones and −35.1 dB for a 9.6 kHz skirt tone (a fit against the input alone read that one 12 dB high); −45 … −88 dB on the drum-like test programme. It is not a governor input (§14.5).
 
+#### 5.3.5 The 3-band path ([11 E04](11-enhancement-report.md#e04) step 3)
+
+With `clarity.attackLow` and `clarity.attackHigh` both at 0 (the default) stage 1 is the full-band shaper of §5.3.1, bit-exact with renders before the two keys existed (*Transparency (E04 step 3): ...*). With either one not 0, it runs 3 bands:
+
+```
+split'   = lowSplitHz (60 … 200 Hz, default 120; a module setting, no parameter), 25 ms log glide per sample
+bands    = ThreeBandSplitter (Crossover.h): LR4 at split' and 4 kHz, the low band through the 4 kHz all-pass
+           Σ bands = 2nd-order all-pass(split') · all-pass(4 kHz) of x   (flat magnitude)
+attack_b = clamp(attack + attackLow, ±12) | attack | clamp(attack + attackHigh, ±12);  sustain_b = sustain
+y_c      = Σ_b g_b · band_b,c          g_b = TransientShaper_b(max_c |band_b,c|)
+
+                     low (< split')      mid (split' … 4 kHz)     high (> 4 kHz)
+hold                 25 ms               1500 / split' ms         3 ms
+A_slow attack        10 ms               8 ms                     4 ms
+release (slow/fast)  40 / 4 ms           50 / 6 ms                40 / 3 ms
+gain smoothing       0.3 ms              0.3 ms                   0.25 ms
+(A_fast attack 0.5 ms; the sustain pair as in §5.3.1)
+
+program-dependent release: w = clamp(20 log10(A_slow / e) / 6 dB, 0, 1)
+                           both attack-pair envelopes release with coeff(slow) + (coeff(fast) − coeff(slow))·w
+speed (transientSpeed 0.5 … 2, default 1; a module setting): the A_slow attack and both releases ÷ speed
+```
+
+- **Why the timings.** The full-band shaper's 20 ms slow attack and 60 ms release after a 25 ms hold spread an onset's lift over 40–60 ms and leave the next hit 75 ms later with a third of it. Each band's slow attack ends its onset reading within about 0.7 × that time, the gain smoothing reaches the lift within 1 ms, and the program-dependent release lets both attack envelopes follow a decaying hit down fast (the next hit reads as a full onset) while the shallow dips of a sustained sound release them slowly (no onset read on each dip: steady Gaussian white noise at +12 dB gains 0.9 dB in the high band, 0.25 / 0.35 dB in the low / mid band; the full-band shaper 0.4 dB). Both envelopes of the pair share the release, so their ratio does not change while they fall.
+- **Holds.** The low band keeps the 25 ms anti-ripple hold. The mid band's hold covers split'/3, the lowest note its LR4 slope still passes at −38 dB (at −38 dB a ±12 dB ripple would still move the output 0.4 dB); it is resized without clearing while the split glides. The high band's 2 ms hold read steady noise's own peaks as onsets (+1.3 dB on Gaussian white noise at +12 dB); 3 ms reads 0.9 dB.
+- **Switching.** An offset leaving 0 starts the band shapers from silence at their targets: for 5 × the low band's slow attack (50 ms at speed 1) they run on the programme while the output is still the full-band shaper's (bit-identical), then the output crossfades to the band sum over 50 ms (a smoothstep). Both offsets back at 0 crossfade back and stop the path; the full-band shaper runs throughout, so it is current when it takes over. The crossfade mixes x and its all-pass, so near the crossover frequencies the level dips for those 50 ms (no step, no click); the air exciter follows such a dip (over 20 ms its products above 15 kHz reached −78 dBFS on a −9 dBFS programme, −83 dBFS over 50 ms).
+- **Measured** (per band +12 dB, the others 0; *Clarity (E04 step 3): each band keeps ...*): the first 10 ms of hits 75 ms apart lifted 10.08 / 11.04 / 10.35 dB in the low / mid / high band against the band sum (full band: 3.91 / 6.49 / 7.43 dB against the input); 40–60 ms after an isolated hit 0.34 / 0.33 / 0.04 dB (full band 3.29 / 3.28 / 3.50 dB). The shaper's own gain (*TransientShaper (E04 step 3): the band timings keep ...*): at 75 ms spacing 12.00 dB in every band (full band 5.52 / 7.89 / 9.90), within 1 dB of its peak 0.75 / 0.75 / 0.60 ms after an isolated onset (full band 2.33 / 2.23 / 2.19 ms). A steady 40 Hz note with every band at ±12 dB attack and sustain moves 0.002 dB once settled, with no sidebands above −80 dB; in its first 2.5 s a +12 dB sustain lifts the mid band's −38 dB share while it settles from the high-pass's onset transient, which moves the note by 0.31 dB once (−12 dB: 0.08 dB).
+- **CPU.** See §5.6.
+
 ### 5.4 Parameters
 
 | Name | Key | Range | Default | Unit | Effect |
@@ -1375,10 +1406,12 @@ Measured at air 1, levels re the input tone:
 | Presence | `clarity.presence` | 0 … 1 | 0 | % | scales the dynamic presence boost (≤ +6 dB) |
 | Presence Frequency | `clarity.presenceFreq` | 1000 … 6000 | 3200 | Hz | presence bell and detector centre (25 ms log glide) |
 | Presence Mode | `clarity.presenceMode` | Absolute / Relative | Absolute | choice | what the presence reads its band against: a fixed −18 dB RMS, or the programme's 200 Hz – 1 kHz body (§5.3.3; layout version 7) |
+| Attack Low Offset | `clarity.attackLow` | −12 … +12 | 0 | dB | the attack of the band below the 60–200 Hz split over Transient Attack; with both offsets at 0 the shaper stays full band (§5.3.5; layout version 8) |
+| Attack High Offset | `clarity.attackHigh` | −12 … +12 | 0 | dB | the attack of the band above 4 kHz over Transient Attack (§5.3.5; layout version 8) |
 | Air | `clarity.air` | 0 … 1 | 0 | % | exciter mix 0 … −12 dB and 10 kHz shelf 0 … +2 dB (forced to 0 below 42 kHz fs) |
 | De-Mud | `clarity.demud` | 0 … 1 | 0 | % | scales the 250 Hz dynamic cut (≤ −4 dB) |
 
-At module level NaN keeps the previous value, other values are clamped, and unchanged parameters return early.
+At module level NaN keeps the previous value, other values are clamped, and unchanged parameters return early. `ClarityParams` also carries two module settings of the 3-band path without a parameter: `lowSplitHz` (60–200 Hz, 120) and `transientSpeed` (0.5–2, 1).
 
 ### 5.5 Smoothing & click-freeness
 
@@ -1392,6 +1425,9 @@ At module level NaN keeps the previous value, other values are clamped, and unch
 | air | exciter mix: 20 ms linear ramp per sample. Shelf: amount smoothed 20 ms at control rate, then glided. When switched on, all states start clean. |
 | switching off | a stage runs until its amount and EQ gain are exactly 0, then stops |
 | module on/off | `ModuleSlot` 20 ms crossfade |
+| 3-band path on / off (§5.3.5) | 50 ms warm-up (output unchanged), then a 50 ms smoothstep crossfade between the full-band shaper and the band sum; the band shapers' amounts as above |
+| low split | 25 ms one-pole in log frequency, LR4 coefficients per sample while it glides |
+| speed, mid hold | coefficients / window changed in place; the envelopes and the held value never step |
 
 Test *TransientShaper: parameter changes and onsets move the gain smoothly* bounds the gain's slew at 48 kHz: a full 24 dB swing moves at most 0.55 dB per sample.
 
@@ -1404,8 +1440,10 @@ Test *TransientShaper: parameter changes and onsets move the gain smoothly* boun
 |---|---|---|
 | neutral (only the shaper's detector runs) | 9.6 | 0.05 % |
 | all stages on (attack +6, sustain −3, presence 1, air 1, de-mud 1) | 151 | 0.73 % |
+| 3-band path (§5.3.5): attack +6, sustain −3, attackHigh +3, rest off | 176 (full band 31) | 0.84 % |
+| 3-band path with all stages on | 335 (full band 189) | 1.61 % |
 
-The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 before, 147–149 ns after, in a same-session comparison (most of it the two extra SVF sections of the linear branch).
+The 3-band rows were measured in one session (Release, gcc 13, 48 kHz, 256-sample blocks) with another build running on the machine, so they read about 25 % over the older rows; the band path adds about 145 ns per stereo sample: 7 SVF sections per channel and three more shaper gains (a log and an exp each). On the Low Latency strip see [11 E04](11-enhancement-report.md#e04)'s Status. The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 before, 147–149 ns after, in a same-session comparison (most of it the two extra SVF sections of the linear branch).
 
 ### 5.7 Gaming vs Music usage
 
@@ -1439,6 +1477,8 @@ The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 befo
 - *TransientShaper (review): steady low notes are not gain-modulated at any rate*
 - *TransientShaper (review): gain is bounded and slews smoothly at every sample rate*
 - *TransientShaper (review): neutral is bit-exact again after garbage input at every rate*
+- *TransientShaper (E04 step 3): the band timings keep +12 dB attack at >= +9 dB on hits 75 ms apart, reach the peak within 1 ms of an onset and leave no bump > 1 dB at 40-60 ms (the full-band timing: 5.5-9.9 dB, 2.2-2.3 ms, 3.3-3.5 dB)*
+- *TransientShaper (E04 step 3): the band timings leave steady noise within 1 dB and steady low notes unmodulated; the default timing is the full-band shaper bit for bit; speed scales the lift's length; timing changes never step the gain*
 
 `tests/test_clarity.cpp`:
 - *Clarity: neutral parameters are an exact pass-through*
@@ -1459,6 +1499,12 @@ The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 befo
 - *Clarity (E07 step 3): Relative presence lifts pink the same at -45 and -12 dBFS (Absolute: 5 dB more at -45); at -18 dBFS both laws agree* (1.94 dB at every level, Absolute 5.71 / 1.99 / 0.57 dB)
 - *Clarity (E07 step 3): Relative presence follows the programme's balance - a dark programme gets the full lift, a bright one none, and a band that jumps over the body is not lifted*
 - *Clarity (E07 step 3): switching presenceMode glides without a click (also during the warm-up); Relative at presence 0 is an exact pass-through; the output does not depend on the block size* (and *Clarity: process, reset and setters do not allocate* switches the mode)
+- *Clarity (E04 step 3): each band keeps +12 dB of attack at >= 9 dB on hits 75 ms apart (full band: 3.9 - 7.5 dB) and leaves no bump > 1 dB at 40-60 ms (full band: 3.3 - 3.5 dB); the other bands stay at unity*
+- *Clarity (E04 step 3): a steady 40 Hz note moves <= 0.1 dB with every band at +-12 dB attack and sustain, and gains no sidebands*
+- *Clarity (E04 step 3): with both offsets at 0 the shaper stays full band; an offset starts the 3-band path, which leaves the output alone while it warms up, then crossfades in and back out without a click, and stops*
+- *Clarity (E04 step 3): switching the band offsets, the split and the speed is click-free; the split decides which band a note is in; the output does not depend on the block size and decays to exact silence* (air off: see §5.3.5's switching note; the allocation and robustness tests above also run the band path)
+
+`tests/test_transparency.cpp`: *Transparency (E04 step 3): with clarity.attackLow / attackHigh at 0 Clarity's stage 1 is the full-band shaper bit for bit; neutral is an exact pass-through; the chain hands the offsets over*.
 
 `tests/test_distortion.cpp` (exciter telemetry, §5.3.4 and §14.5):
 - *Distortion: the air exciter's reading matches a harmonic analysis of the stage output (the linear air shelf taken out) within 0.05 dB, also on the band's skirt* (measured < 0.001 dB)
@@ -1480,7 +1526,9 @@ Chain level: *Chain: runs at every sample rate a headset may use (8 kHz hands-fr
   - The unit test's "balanced material" case uses white noise, which is treble-heavy and does not show this.
   - This is a **tuning item**: a threshold of about broadband − 6…8 dB, or a milder ratio, would leave pink-ish spectra alone.
 - **Absolute level thresholds.** The presence thresholds of the default Absolute law (−18 / −42 dB RMS, floor −80 dB RMS) and the de-mud gate (−70 dB RMS) are absolute, so they assume the chain's nominal level. AutoLevel, when enabled, keeps the input near its target. `clarity.presenceMode` Relative (§5.3.3) removes the presence's level dependence; making it the default would re-voice every preset that lifts presence (an owner decision), so it ships off. What stays level-dependent in the chain around it are the dynamic EQ's mode bands over fixed thresholds: Music Boost 100 + Clarity 100 still lifts the presence of −45 dBFS pink 2.0 dB more than of −12 dBFS pink at protection strength Normal with Relative presence (3.2 dB with Absolute), from the Clarity macro's de-harsh band (§14.5).
-- **Residual attack gain after a click.** Both envelopes of the attack pair release with the same 60 ms time constant, so the onset ratio A_fast/A_slow built up by an isolated click decays only slowly. Quiet material that follows within about 100–200 ms can receive a few dB of residual attack gain. The peak hold reduces this but does not remove it; it is inherent to the specified topology.
+- **Residual attack gain after a click.** Both envelopes of the attack pair release with the same 60 ms time constant, so the onset ratio A_fast/A_slow built up by an isolated click decays only slowly. Quiet material that follows within about 100–200 ms can receive a few dB of residual attack gain. The peak hold reduces this but does not remove it; it is inherent to the specified topology. The 3-band path's program-dependent release (§5.3.5) removes most of it (40–60 ms after a hit 0.04–0.34 dB instead of 3.3–3.5 dB); the full-band shaper keeps it so that renders without band offsets stay bit-exact.
+- **The 3-band path is engaged by an offset, not by its timing.** At `clarity.attackLow` = `clarity.attackHigh` = 0 the shaper stays full band with the timing above; any non-zero offset also brings the bands' faster timing to the mid band and the all-pass phase of the band sum. So a small offset changes more than its own band. Step (4) of [11 E04](11-enhancement-report.md#e04) (the macros driving the offsets) decides where that switch sits for presets.
+- **Level independence per band.** Each band shaper reads only its band's envelope shape, so content that leaks through an LR4 slope is shaped as fully as the band's own: at a 60 Hz split, a 150 Hz pluck (at −16 dB in the low band) still gets 2.7 dB with the low band at +12 dB (10.5 dB at a 200 Hz split).
 - **Peak holds delay decay detection.** They delay the start of decay detection by 25–33 ms in the shaper and 7.5–10 ms in the air envelopes. Attacks stay instant.
 - **Float envelope precision at high sample rates.** At 96/192 kHz the float followers settle within about 1e-4 of their input, so the steady-state shaper gain on constant material may sit up to about 0.002 dB off unity (implementer's measurement).
 
@@ -1800,7 +1848,7 @@ A Cytomic bell (as `SvfCoeffs::make(Bell)`) on S1 at a fixed 3 kHz, Q 0.5, gain 
 A = 10^(gainDb / 40),  k = 1 / (Q A),  m = (1, k (A² − 1), 0)       focus 0 → m1 = 0 exactly
 ```
 
-At focus 1 and 48 kHz (analytic): +0.12 dB at 300 Hz, +1.06 dB at 1 kHz, **+3.00 dB at 3 kHz**, +1.82 dB at 6 kHz, +0.71 dB at 10 kHz and +0.21 dB at 15 kHz. The gain is ≥ +1.5 dB (half the peak) from 1.26 kHz to 6.84 kHz. The cap is docs/11 E24's: the old +6 dB bell added 7.9 dB of ILD to a source 6 dB to one side, the +3 dB bell adds 2.9 dB (added ILD ≤ 3 dB, the E24 Done-when). At output rates of 32 kHz and below (Bluetooth hands-free / speech links, mono and narrowband; docs/11 E17) the bell is 0 dB whatever the setting. For broadband transients (footsteps, reloads), interaural level differences in this region are the main lateral localisation cue. Emphasising S there sharpens the perceived direction without touching the centre.
+At focus 1 and 48 kHz (analytic): +0.12 dB at 300 Hz, +1.06 dB at 1 kHz, **+3.00 dB at 3 kHz**, +1.82 dB at 6 kHz, +0.71 dB at 10 kHz and +0.21 dB at 15 kHz. The gain is ≥ +1.5 dB (half the peak) from 1.26 kHz to 6.84 kHz. The cap is docs/11 E24's: the old +6 dB bell added 7.9 dB of ILD to a source 6 dB to one side, the +3 dB bell adds 2.9 dB (added ILD ≤ 3 dB, the E24 Done-when). At output rates of 32 kHz and below (Bluetooth hands-free / speech links, mono and narrowband; docs/11 E17) the bell is 0 dB whatever the setting. For broadband transients (footsteps, reloads), interaural level differences in this region are the main lateral localisation cue. Emphasising S there sharpens the perceived direction of amplitude-panned sources without touching the centre; HRTF-rendered sources gain no ILD from it (§7.9, [11 E24](11-enhancement-report.md#e24)).
 
 **Polarity guard.** Raising S by a gain G against an untouched M turns the far ear `M − G·S` negative once `G·S > M`. For a source panned hard to one side (R = 0, so M = S) any lift would do so and put an anti-phase copy in the silent ear, taking the ILD from infinite to about 10 dB. The bell's *added* signal is therefore applied only in the share that keeps the quieter ear's polarity:
 
@@ -2026,6 +2074,7 @@ The chain writes these overrides into the effective values, so `effectiveValue()
 - **Widening is bounded by M.** The width polarity guard (§7.3.1) lets S rise only up to M in the widened band. Material whose S is already as strong as its M there (uncorrelated L/R of equal level, very wide or anti-phase mixes, a pure side signal) is therefore not widened at all, and a width above 1 widens a typical mix, whose M leads S by several dB, only until S reaches M. Before [11 E12](11-enhancement-report.md#e12), hard-panned sources widened above 1 drove ρ towards −1 and any `minCorrelation ≥ 0` pulled such material back to width 1. The guard now keeps them out of anti-phase, so the mono safety sees them only in mixes (next point).
 - **Neither width nor positional focus lowers the ILD of an isolated hard-panned source.** For a source on one channel only (R = 0, so M = S), a side gain g > 1 would give `L' = (1 + g)·L/2` and `R' = (1 − g)·L/2`: an anti-phase copy in the far ear, and the interaural level difference would fall from infinite to `20 log10((1 + g)/(g − 1))` (9.5 dB at width 2, 19.1 dB at the *Positional* macro's width 1.25). Both polarity guards (§7.3.1, §7.3.2) give such a source no lift, so its far ear stays silent. Through the chain, the Gaming *Positional* macro at 100 % (with or without Boost Intensity at 100 %) leaves the far ear of a hard-left tone at 1, 2, 3, 6 or 10 kHz, or of hard-left white noise, at numerical silence; before the guard the ILD fell to 10.4 dB at 3 kHz (9.6 dB with Boost). Partially panned sources still gain ILD: an R = L/2 source goes from 6 dB to 11.2 dB at 3 kHz (11.7 dB with Boost Intensity also at 100 %; 18.0 / 20.7 dB before the 3 dB focus cap). The mono sum is unchanged in every case (§7.3.6). *Gaming Positional (M2): …* in `tests/test_modes.cpp` asserts that a hard-left 3 kHz tone keeps at least 60 dB of ILD and its near-ear level within 0.5 dB.
 - **The width guard works on the band mix, not per source, as the focus guard does.** It compares envelopes of M and S above the low cut, so a hard-panned source under a louder centred one (`e_M > e_S`) is still widened, and its anti-phase copy lands in the far ear under the centred sound. Measured at width 2 with a hard-left pink noise 6 dB below a centred one: its far-ear copy is −8.3 dB re the source, anti-phase, the same as before the guard (−11.7 dB instead of −10.0 dB at equal levels). A band-split guard would separate sources that occupy different bands, and a per-bin one (the STFT path of the Quality profile) would separate them per partial; neither exists yet ([11 E12](11-enhancement-report.md#e12) Status).
+- **Positional focus adds no ILD to HRTF-rendered sources.** Measured with the [11 E24](11-enhancement-report.md#e24) method (`tests/test_focus_ild.cpp`, `flubsound-cli analyze --focus-ild`): white noise rendered with the virtualiser's own parametric HRIRs (`HeadphoneVirtualizer::parametricHrir`) at 0–180° in 15° steps, through the spatializer alone at focus 0 / 50 / 100 %, and the ILD per 1/3 octave (250 Hz – 16 kHz) against the source's own. Focus 0 is transparent (< 0.01 dB). At 50 / 100 % no band of any azimuth moves by more than 0.09 dB. The flat-ILD source of the Phase 1 slice (6 dB, no time difference) gains +2.82 dB at 3.15 kHz at 100 % (+1.25 dB at 50 %), the §7.3.2 figure. The likely causes: the ears of a real source differ in time as well as level, so in the 1–6 kHz band its S is comparable to or stronger than M (M over S −10 to +5 dB at 3.15 kHz, depending on the azimuth) and the polarity guard, which lifts only while M leads S, holds most of the lift back; and a lift of an S that is out of phase with M changes the ears' phase difference more than their level difference. Either way, the "sharpens the perceived direction" of §7.3.2 is only shown for amplitude-panned sources. Whether to redesign focus (a filterbank ILD expander) or remove it from the competitive presets waits for the pointing task (E24).
 - **The focus polarity guard works on the band mix, not per source.** It compares band envelopes of M and S around 3 kHz, so a hard-panned sound under a louder centred one (`e_M > e_S`) is still lifted, and its anti-phase copy lands in the far ear under the centred sound. Measured through the chain at *Positional* 100 %: a hard-left 3.5 kHz tone 12 dB below a centred 2.5 kHz tone reaches the right ear 11.8 dB below its left-ear level (8.1 dB before the 3 dB focus cap). Conversely, material whose band S is at least as strong as its M (very wide or anti-phase content, a pure side signal) gets no focus lift at all. Raising only the near ear of every source would need to know where each one is panned, which an M/S processor does not.
 - **The space network is fixed:** no size, decay or modulation controls. Like any additive decorrelator, it gives frequency-dependent level differences between the ears on steady tones, up to 20·log10((1 + |A|)/(1 − |A|)) for an ambience level |A| re M: at space 1, 4.9 dB over 1–4 kHz (the presence dip) but up to 9.2 dB at 300–700 Hz and above 5 kHz. A zero-latency limiter on the ambience's in-phase ("correlated") part was prototyped and not shipped. Broadband, it removed the ILD of a pure 1.5 kHz tone (4.1 → 1.6 dB) but none of a 220 Hz harmonic tone's (5.7 dB per partial before and after), because each partial sees a different phase of the ambience. Bounding it per partial needs a resolution finer than the harmonic spacing (an STFT, so latency) or a lower |A|.
 - **The Bs2b / Meier crossfeed changes the mono sum and lifts centred bass.** See §7.3.4: +2.7 dB (Bs2b) / +2.0 dB (Meier) at low frequencies on centred content at crossfeed 1, +1.3 dB at 0.3, and a gentle comb in the fold-down above the head-shadow corner. The factory presets that store crossfeed (Classical & Jazz 0.3, Earbuds 0.25, Audiophile Subtle and Bluetooth Headphones 0.15) became up to 1.3 dB fuller below 250 Hz on centred programme, and up to +1.06 LU louder integrated. The Mono-safe type (`spatial.crossfeedType`) is the former behaviour; re-voicing these presets onto it or onto Meier is left to the listening panel ([11 E14](11-enhancement-report.md#e14)).
@@ -2344,6 +2393,10 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
   - *HeadphoneVirtualizer: fold headroom - full-scale correlated 5.1 / 7.1 stays at 0 dBFS (true peak <= +1 dBTP), content below 0 dBFS is untouched (docs/11 E28a)*
   - *HeadphoneVirtualizer: switching the level match and the fold headroom on and off is click-free (docs/11 E28a)*
   - `tests/test_virtualizer_fold.cpp`, the downmix's headroom and the meters: *FoldHeadroom: an over drops the gain at once to exactly 0 dBFS, holds 10 ms, releases over 150 ms; below 0 dBFS it is the identity (docs/11 E28a)*, *Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale correlated 5.1 / 7.1 at 0 dBFS before the limiter; below 0 dBFS it is untouched*, *Chain (docs/11 E28a): on full-scale correlated 5.1 / 7.1 overs, virt on vs off 3.8 / 5.6 -> 2.1 / 2.2 LU*, *Chain (docs/11 E28a): virt on / off and the stereo passthrough crossfade without a click while the fold headroom holds overs*, *CLI render.stats (docs/11 E28a): fold.virtMakeup\* and fold.headroom\* - the virtualiser's make-up and the fold headroom*
+- **Objective spatial metrics** (`tests/test_spatial_metrics.cpp`, [11 E60](11-enhancement-report.md#e60) stage 2; `flub/analysis/SpatialMetrics.h`, `flubsound-cli analyze --spatial`):
+  - *Spatial metrics: parametricHrir is the virtualiser's own rendering of a speaker, sample for sample* (`HeadphoneVirtualizer::parametricHrir`: the rear shelf, Woodworth ITD and Brown–Duda shadow of one speaker path at any azimuth, times the trim; equal to the module's output for every 7.1 speaker at room 0 within 1e−7)
+  - *Spatial metrics: today's parametric renderer reproduces its weak values (7.1, defaults)* (pinned; see §8.9)
+  - *Spatial metrics: a synthetic pinna notch moves the diffuse-field deviation at its band, and a shift of the notch follows it* and the metrics' own validation on synthetic responses (IACC 1 for a dry centred source, ITD sign and lag, DRR +20.00 dB for a −20 dB reflection, 1/3-octave levels of a scaled impulse)
 - **Shared fold and detector** (`tests/test_virtualizer_fold.cpp`):
   - *Bs775Fold: with the LFE fold off it is the v1 downmix bit for bit (5.1 and 7.1)*
   - *Bs775Fold: passthrough (overall 1) is the identity on FL/FR-only input, and the LFE sits at virt.lfe re one main*
@@ -2369,6 +2422,13 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
 - **Detection restarts with the chain.** A new chain (the crossfaded engine swap builds one) starts unconfirmed in the surround fold, so a stereo game in the 8-channel container is folded as surround again for 2 s after a swap; carrying the detector state across a swap needs `MixEngine::configureFrom`. The host does not yet call `redetectInputChannels()` when the routed process changes, nor show `activeChannelMask` ([11 E27](11-enhancement-report.md#e27) step 1's "receiving 2 / 6 / 8 channels").
 - **The app's own downmixes fold the LFE at `virt.lfe`'s default, not the strip's.** A 5.1 / 7.1 capture read by a stereo strip (moved there, or the layout changed under it) is folded by `AudioEngineHost` with `Bs775Fold` and an `ActiveChannelDetector`, as the chain folds: the LFE at the strip's `virt.lfe`, −3 dB or the stereo passthrough. The capture FIFO's own conversion (`DriftCompensatedFifo`, only when a capture delivers more channels than it asked for) and `TestSignalGenerator`'s stereo downmix of its Game71 scene keep their per-frame BS.775 matrices but take the LFE through the chain's `LfeFold` (`LfeFold::next`) inside the fold's −3 dB, at the parameter default (+10 dB): neither knows its strip ([11 E01](11-enhancement-report.md#e01); before, both dropped the LFE). A 50 Hz tone on the LFE re the same tone on one main, each side of the FIFO's 5.1 and 7.1 downmix: −∞ → +9.99 dB (the chain's fold +10.00 dB); the test signal's stereo downmix is the chain's `Bs775Fold` of its 8-channel render sample for sample, its LFE share −∞ → −7.95 dB re full scale as in the chain (`tests/app/test_app_lfe_fold.cpp`). The Game71 scene on a stereo strip is therefore about 10 LU louder than before (its explosions' LFE), as it already was on a 7.1 strip.
 - **Lagrange top-octave loss:** up to −3.25 dB at 16 kHz at half-sample delays (48 kHz).
+- **Weak spatial cues, measured** ([11 E60](11-enhancement-report.md#e60) stage 2 metrics on the module's impulse responses, 7.1 at the defaults, pinned in `tests/test_spatial_metrics.cpp`; [11 E28](11-enhancement-report.md#e28) is measured against them):
+  - The default room barely decorrelates the ears: centre (FC) early IACC (0–80 ms, max over ±1 ms) 1.000 dry, 0.995 at room 0.15; each octave 125 Hz – 8 kHz ≥ 0.985. Side speakers read 0.518 (ITD 0.60 ms), front 0.758, rear 0.711.
+  - Direct-to-reverberant ratio +22.9 dB (FC) and +24.8 dB (SL) at room 0.15, and nothing after 80 ms (the late IACC is undefined: no reverberant tail).
+  - Front and back differ only through the rear shelf: FL against BL at the near ear ≤ 0.35 dB in every 1/3 octave up to 2 kHz, 3.5 dB at 10 kHz.
+  - The centre is darker than the sides: FC against SL / SR (both ears' power) up to −3.8 dB at 2.5 kHz.
+  - The same impulse on all seven speakers, dry, combs to 28.06 dB peak-to-notch in 4–8 kHz at each ear.
+  - The seven speakers' diffuse-field response spans 3.5 dB around its mean (1/3 octave, 100 Hz – 16 kHz: +0.9 dB at 1.6 kHz, −2.6 dB at 16 kHz); there is no diffuse-field equalisation.
 - **Model simplifications:**
   - a spherical head (no pinna notches, no elevation);
   - the rear cue switches as the side angle crosses 90° (with a 10 ms glide) instead of blending with angle;
@@ -4092,6 +4152,44 @@ Before the compressor, every dynamics stage after the stage detects on both chan
 **Tests that prove it** (`tests/test_personal_profile.cpp`): *ranges, balance and the 12 dB cap*; *per-ear magnitude within 1 dB of target at the audiometric frequencies* (four shapes at 44.1 / 48 / 96 kHz: design within 9e-5 dB, measured with sines within 9e-5 dB; 0.4 fs); *the chain applies the stage per ear* (every module off, within 9e-5 dB); *a hard-panned source keeps its ILD through the whole chain at Boost 100 (before the compressor; not after the maximizer)* (the table); *true peak stays under the ceiling on dense material with a +15 dB profile*; *the chain's measures read the output with the stage undone*; *no profile is bit-identical; a cleared profile glides back to untouched*; *a change is a crossfade, never a click; the hand-over ring and its retry*; *the profile survives 5 preset loads, a re-prepare, an engine swap and its file* (the ILD change 11.31 – 11.33 dB after each load); *the file round-trips, rejects what it cannot read and clamps what is out of range*; the RTSan static asserts of `PersonalEarStage::process / processInverse / reset / setCeilingDb` (`tests/test_rtsan.cpp`).
 
 **Known limitations.** The core only: no editor, file location, strip wiring or on/off in the desktop app yet, so the owner cannot use it until the app unit. It sits inside the chain, so the global bypass (and the loudness-matched A/B) takes it out too, and the bypass match and Auto Drive measure the output with it. Not built from E33's full scope: the in-app threshold test, audiogram import, a fitting rule (half-gain / NAL-NL2-lite), per-ear WDRC and E36's wizard. The ripple between bands (±2 – 3 dB on steep shapes) is not corrected. The benefit for gaming (localisation) is a hypothesis until E33's participant study.
+
+
+### 14.16 Content analysis and Smart macros (chain)
+
+Sources: [`core/include/flub/analysis/ContentAnalysis.h`](../core/include/flub/analysis/ContentAnalysis.h), [`core/src/analysis/ContentAnalysis.cpp`](../core/src/analysis/ContentAnalysis.cpp), `MacroModulation` and `MacroMap::smartModulation` in [`core/include/flub/engine/MacroMap.h`](../core/include/flub/engine/MacroMap.h), `ProcessingChain::setSmartMacros` ([11 E34](11-enhancement-report.md#e34)).
+
+The same macro offsets hit a −9 LUFS brick-walled master and a −23 LUFS classical recording. On the first, Punch's onset lift and Boost's or Loudness's drive only drive the limiter harder, so the master gets quieter and flatter. **Smart macros** (off by default; a preset's top-level `"smart": true`, `Preset::smart`, which the host hands to `ProcessingChain::setSmartMacros`) scale what the macros add by what the programme is.
+
+**The tap.** `ContentAnalysis` runs in-line in `processSegment`, after the input gain and AutoLevel and ahead of the stereo fold (a 5.1 / 7.1 input is read as a stereo mixdown: centre and surrounds at −3 dB, LFE at −6 dB). It only reads the block. It runs only while Smart macros are on (or gliding back) or a reader asked for it (`setContentAnalysisTap`), and starts afresh each time it starts. In 100 ms frames (10 Hz; the frame clock counts samples, so the state does not depend on the host blocks) it accumulates, per sample and in double precision: the K-weighted power, the plain power and the sample peak of both sides; mid / side and L / R products; the mid's power below 100 Hz (4th-order Butterworth); nine octave band-passes on the mid (RBJ, Q √2, 63 Hz … 16 kHz, each below 0.4 fs, normalised so pink noise reads the same in every band); and onsets on 10 ms sub-frames (the mid's energy, or that of its bands from 4 kHz up, more than 6 dB over the mean of the 50 ms before and above −70 dB, at most one per 50 ms). A frame whose plain RMS is at or below −70 dB is a pause: it is left out and the state holds. The window is the last 30 programme frames (3 s). `AnalysisState`:
+
+| Reading | Definition | Examples |
+|---|---|---|
+| `plrDb` | highest sample peak in the window − its K-weighted loudness (LU) | synthetic limited master 7.4, the programme it came from 12.8, steady pink noise 9.7 |
+| `crestDb` | the same peak − the plain RMS of both sides | a sine 3.01 |
+| `tiltDbPerOctave` | least-squares slope of the 125 Hz … 8 kHz band levels over log₂ f | pink 0.0, white +2.85 |
+| `highTiltDb` | mean of the 8 (and 16) kHz bands − mean of 500 Hz … 2 kHz | pink 0.0, white +9.6 |
+| `lowShareDb` | mid energy below 100 Hz over all of it | the test pink −4.1 (it keeps −3 dB / octave down to about 10 Hz), a kick-heavy mix −1.5 |
+| `sideDb`, `correlation` | side over mid energy; E[LR] / √(E[L²] E[R²]) | two independent pinks 0.3 dB / −0.03; mono −∞ / 1 |
+| `fluxDb`, `onsetsPerSecond` | mean positive band-level change per frame; onsets per second of programme | kicks + hats at 2 + 2 /s: 3.8 /s; pink 0.5 /s |
+
+It is valid once 5 programme frames (0.5 s) are in. The state goes to other threads through `AnalysisSnapshot`, a seqlock of relaxed words (`ProcessingChain::getContentAnalysis`), published once per programme frame. Cost: about 15 double biquads per sample while it runs.
+
+**The law** (`MacroMap::smartModulation`; identity while the state is not valid). Each multiplier is in [0, 1]: Smart only takes back, and never touches base values (the preset's or the user's own settings).
+
+| Group (parameters) | Multiplier |
+|---|---|
+| attack (`clarity.attack`, `clarity.attackLow`, `clarity.attackHigh`) | `smoothstep(7.5, 10.5, PLR)`: all of it from 10.5 LU up, none at 7.5 LU and below (half at 9) |
+| drive (`max.drive`, `sat.drive`) | `0.25 + 0.75 × attack` |
+| bass (`bass.boost`, `bass.harmonics`) | `1 − 0.5 × smoothstep(−3, 0 dB, lowShare)` |
+| air (`clarity.air`) | `1 − 0.5 × smoothstep(−6, 0 dB, highTilt)` |
+
+`MacroMap::apply(base, effective, governorScale, onboardCap, modulation)` multiplies each row's contribution by `modulation->forParam(row.paramId)` after the governor's scale; `nullptr` or the identity is bit-identical to no modulation (×1 is exact). The chain passes the same modulation to its governed, quarter-scale (the governor's drive per unit of scale) and ungoverned (the automatic preamp's model) applications, so the preamp predicts the bass the chain applies. The multipliers move once per governor tick (10 ms, at the end of the segment that closes it, so the render does not depend on the host block size either), down by at most 0.04 per tick (0.25 s for the whole range) and up by at most 0.005 (2 s); they hold while the state is not valid and through pauses. Switched off, they glide back to 1 and only then is the modulation dropped. `reset()` (and so every offline render's priming) restarts the tap and the multipliers from 1; `adoptGovernorState()` carries the flag and the multipliers to a swapped-in chain, which holds them until its own tap is valid. Boost's transient coupling (§14.2) is not scaled.
+
+**Measured** (`tests/test_content_analysis.cpp`, synthetic programme: a 55 Hz kick every 500 ms, noise hats on the off-beats and a pink bed; the limited master is that programme through the maximizer alone at 24 dB of drive, clipper first, −0.3 dBFS ceiling: PLR 7.4 LU, −7.75 LUFS). Punch 0 → 100 on the limited master, default chain: static −0.14 LU, Smart −0.04 LU; over Boost 40 + Loudness 60: static −0.47 LU, Smart −0.04 LU (the true peak stays at the maximizer's ceiling either way). There Smart also plays the master 1.1 LU quieter than static at Punch 0: Loudness's drive is scaled to the 0.25 floor. On the open programme (PLR 12.8) Smart renders within 0.03 LU of static (Punch 100: 0.00 LU; Boost 60 + Loudness 60: +0.02 LU, where only the bass multiplier acts: the kick-heavy mix reads −1.5 dB below 100 Hz). Two Smart renders are bit-identical, and 64- and 1024-sample blocks give the same output bit for bit.
+
+**CLI.** `flubsound-cli analyze` prints the readings of the whole file (`ContentAnalysis::analyseWhole`: one window over every programme frame) and `suggest`: the multipliers Smart would apply there, with one-line notes (`content` and `suggest` in `--json`).
+
+**Known limitations.** The law's thresholds are tuned on synthetic programme only; E34's re-tune pass, real limited masters and the MUSHRA of Smart against static macros on 10 masters are gated. No factory preset sets `smart`, and the desktop app, the plug-in and the CLI's render path do not yet hand a preset's flag to the chain (the core API and the preset field are in; the wiring is in their files). The first 0.5 s of a programme, before the state is valid, gets the static macros; with the maximizer off that onset is not held under a ceiling. The classifier (Music / Speech / Game-FX / Silence) is E34's next unit.
 
 ---
 

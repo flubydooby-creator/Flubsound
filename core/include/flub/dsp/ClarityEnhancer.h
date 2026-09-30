@@ -8,7 +8,7 @@
 //      attackLowDb / attackDb / attackDb + attackHighDb (each within
 //      +-12 dB) and sustainDb, and transientSpeed on their timing. The bands
 //      sum to an all-pass (Crossover.h), so the path crossfades in over
-//      20 ms once its shapers have warmed up, and out again when both
+//      50 ms once its shapers have warmed up, and out again when both
 //      offsets return to 0.
 //   2. De-mud: dynamic cut, bell ~250 Hz Q 1.0, CutAbove, range up to -4 dB
 //      scaled by deMud, threshold tracks the broadband level (-12 dB rel.)
@@ -153,7 +153,7 @@ private:
         LinearSmoothedValue mix;                // 0 = full-band shaper .. 1 = 3 bands
         ThreeBandSplitter splitter;
         std::array<TransientShaper, 3> shapers; // low, mid, high
-        OnePoleSmoother logSplitHz;             // control rate
+        OnePoleSmoother logSplitHz;             // per sample while the path runs
         float splitHz = 120.0f;
     };
 

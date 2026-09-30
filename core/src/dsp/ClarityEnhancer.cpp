@@ -9,19 +9,22 @@
 //      TransientShaper with its own timing on d_b = max_c |band_b,c|,
 //      y_c = sum_b g_b band_b,c (an all-pass of x_c at unity gains). Band
 //      shapers: low 25 ms hold (steady bass unmodulated), mid a hold of
-//      1500 / split ms (split / 3 still steady), high 2 ms; slow attack 10 /
-//      8 / 5 ms and a program-dependent release (TransientShaper.cpp), so an
+//      1500 / split ms (split / 3 still steady), high 3 ms; slow attack 10 /
+//      8 / 4 ms and a program-dependent release (TransientShaper.cpp), so an
 //      onset's lift sits on its first milliseconds and is back at +12 dB on
 //      a hit 75 ms later. Switching on: the band shapers run for
 //      kBandWarmSlowAttacks slow-attack times (their envelopes start from
 //      silence and would read the running programme as an onset) while the
 //      output is still the full-band shaper's, then the output crossfades
-//      linearly to the band sum over 20 ms; switching off crossfades back
-//      and stops the path. The full-band shaper keeps running meanwhile, so
-//      it is current whenever it takes over. The crossfade mixes x and its
-//      all-pass, so the crossover frequencies dip for those 20 ms (no step,
-//      no click). The split glides in log frequency over 25 ms (coefficients
-//      per control tick, the mid hold resized without clearing).
+//      to the band sum over 50 ms (a smoothstep: no kink at either end);
+//      switching off crossfades back and stops the path. The full-band
+//      shaper keeps running meanwhile, so it is current whenever it takes
+//      over. The crossfade mixes x and its
+//      all-pass, so the crossover frequencies dip for those 50 ms (no step,
+//      no click; the air exciter follows the dip - over 20 ms its products
+//      above 15 kHz reached -78 dBFS on a -9 dBFS programme, -83 over 50).
+//      The split glides in log frequency over 25 ms, per sample, the mid
+//      hold resized without clearing.
 //   2. De-mud: detector = unity band-pass 250 Hz Q 1 and the broadband signal,
 //      both as linked mean squares (20 ms). Overshoot of the band level over
 //      (broadband level - 12 dB) -> 6 dB soft knee -> ratio 2:1 -> cut of at
@@ -139,7 +142,7 @@ constexpr float kAirSmoothMs = 0.5f;
 
 // 1. The 3-band path (docs/11 E04 step 3).
 constexpr double kBandHighHz = 4000.0;
-constexpr float kBandCrossfadeMs = 20.0f;
+constexpr float kBandCrossfadeMs = 50.0f; // 20 ms: the air exciter's response to the all-pass's dip reached -78 dBFS above 15 kHz
 constexpr float kBandWarmSlowAttacks = 5.0f; // the slowest band's slow attack x 5: its envelope within 1 % of the programme
 constexpr float kBandSplitGlideMs = 25.0f;
 
@@ -289,7 +292,7 @@ void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
     // start at their targets; dynamic gains start neutral.
     shaper.reset();
     bands.splitHz = params.lowSplitHz;
-    bands.logSplitHz.reset (controlRate, kBandSplitGlideMs, std::log (bands.splitHz));
+    bands.logSplitHz.reset (sr, kBandSplitGlideMs, std::log (bands.splitHz));
     bands.splitter.setLowMidFrequency (bands.splitHz);
     bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
     bands.splitter.reset();
@@ -574,12 +577,6 @@ void ClarityEnhancer::controlTick() noexcept
     // 1. The 3-band path: the split's glide; stop once faded out.
     if (bands.active)
     {
-        if (bands.logSplitHz.isSmoothing())
-        {
-            bands.splitHz = std::exp (bands.logSplitHz.next());
-            bands.splitter.setLowMidFrequency (bands.splitHz);
-            bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
-        }
         if (! wantsBands() && bands.warmCountdown == 0 && bands.mix.getCurrent() == 0.0f && ! bands.mix.isSmoothing())
             bands.active = false;
     }
@@ -701,6 +698,13 @@ void ClarityEnhancer::processBands (const AudioBlock& block, int numCh, int pos,
     std::array<std::array<float, 3>, kMaxChannels> split;
     for (int i = pos; i < pos + len; ++i)
     {
+        if (bands.logSplitHz.isSmoothing())
+        {
+            bands.splitHz = std::exp (bands.logSplitHz.next());
+            bands.splitter.setLowMidFrequency (bands.splitHz);
+            bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
+        }
+
         float linked = 0.0f;
         std::array<float, 3> peak { 0.0f, 0.0f, 0.0f };
         for (int c = 0; c < numCh; ++c)
@@ -727,7 +731,10 @@ void ClarityEnhancer::processBands (const AudioBlock& block, int numCh, int pos,
         }
         else
         {
-            m = bands.mix.next();
+            // Smoothstep over the linear ramp: no kink at either end, whose
+            // slope change on (bands - full band) would leak above 15 kHz.
+            const float t = bands.mix.next();
+            m = t * t * (3.0f - 2.0f * t);
         }
 
         for (int c = 0; c < numCh; ++c)

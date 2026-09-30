@@ -55,7 +55,7 @@ public:
             below the 60 - 200 Hz split (25 ms anti-ripple hold), the band up
             to 4 kHz (a hold covering a third of the split frequency, the
             lowest content its LR4 slope still passes at -38 dB) and the band
-            above (2 ms hold). */
+            above (3 ms hold). */
         static Timing lowBand() noexcept;
         static Timing midBand (double splitHz) noexcept;
         static Timing highBand() noexcept;
