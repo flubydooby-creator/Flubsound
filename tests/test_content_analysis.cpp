@@ -143,7 +143,18 @@ bool identical (const Planar& a, const Planar& b)
     return a.ch == b.ch;
 }
 
-bool probe() { return std::getenv ("FLUB_E34_PROBE") != nullptr; }
+bool probe()
+{
+    #if defined(_MSC_VER)
+    char* value = nullptr;
+    size_t length = 0;
+    const bool set = _dupenv_s (&value, &length, "FLUB_E34_PROBE") == 0 && value != nullptr;
+    std::free (value);
+    return set;
+    #else
+    return std::getenv ("FLUB_E34_PROBE") != nullptr;
+    #endif
+}
 } // namespace
 
 //==============================================================================

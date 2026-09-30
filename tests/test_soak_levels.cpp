@@ -841,8 +841,16 @@ TEST_CASE ("Soak levels smoke: the mixed programme's first 20 s through Competit
 
 TEST_CASE ("Soak levels (slow, FLUB_SOAK=1): 10 minutes of mixed programme through the four leveller presets, no leveller oscillation above 1 dB (docs/11 E21; KnownGap: Auto Level in combat, 1.05-1.08 dB)")
 {
-    const char* on = std::getenv ("FLUB_SOAK");
-    if (on == nullptr || std::string (on) != "1")
+    #if defined(_MSC_VER)
+    char* value = nullptr;
+    size_t length = 0;
+    const bool on = _dupenv_s (&value, &length, "FLUB_SOAK") == 0 && value != nullptr && std::string (value) == "1";
+    std::free (value);
+    #else
+    const char* value = std::getenv ("FLUB_SOAK");
+    const bool on = value != nullptr && std::string (value) == "1";
+    #endif
+    if (! on)
     {
         std::cout << "    skipped: set FLUB_SOAK=1 to run the 10-minute programme (ctest -C Soak)\n";
         return;

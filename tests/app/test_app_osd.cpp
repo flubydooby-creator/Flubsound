@@ -205,7 +205,7 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
     if (! haveDisplay())
         return; // plain Linux run without X: the Xvfb run (and Windows / macOS) cover it
 
-    const TolerateXErrors tolerateXErrors;
+    [[maybe_unused]] const TolerateXErrors tolerateXErrors; // empty off X11
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
 
