@@ -38,17 +38,17 @@
 //      cap 0 dBFS: onset peak +4.0 -> -0.4 dBFS). With splitProtection
 //      off the engine only delays its output (up to the peak holds'
 //      bucket grid, which the delay shifts).
-//   3a. Impact's punch (docs/11 E20; the chain sets `punch` from Gaming
+//   3a. Impact's punch (docs/11 E20; the chain sets `impactPunch` from Gaming
 //      Impact, no parameter): an onset detector (TransientShaper's attack
 //      indicator, low-band timing) on the 40 - 150 Hz LR4 band keys a burst
 //      envelope (held 80 ms after the onset's peak, then a 60 ms release, so
-//      80 - 300 ms long); the burst lifts the band by up to 6 dB x punch (a
+//      80 - 300 ms long); the burst lifts the band by up to 6 dB x impactPunch (a
 //      77 Hz bell built as x + (g - 1) BP (x), exactly x at unity) and adds
-//      the harmonics generator's output at up to 1 x punch while it lasts.
+//      the harmonics generator's output at up to 1 x impactPunch while it lasts.
 //      Steady rumble never reads as an onset, so it is not lifted. The lift
 //      is headroom-reserved: it never takes the band's held peak over
 //      protectThresholdDb (a loud explosion keeps only its harmonics); the
-//      chain governs `punch` by the SafetyGovernor's scale. It sits before
+//      chain governs `impactPunch` by the SafetyGovernor's scale. It sits before
 //      the protection detector, so the shelf withdraws for it too.
 //   4. Psychoacoustic bass ("missing fundamental"): the mid signal is band
 //      limited to [~25 Hz, harmonicsCutoff]; an amplitude-normalised
@@ -109,7 +109,7 @@ struct BassEngineParams
     float subsonicHz = 20.0f;          // 0 = off, else 10 .. 40 Hz
     int subsonicOrder = 4;             // 2 or 4 (12 / 24 dB per octave)
     bool splitProtection = false;      // sub / punch detectors with program-dependent release (docs/11 E02 (a))
-    float punch = 0.0f;                // 0 .. 1: Impact's event-keyed LF burst (docs/11 E20; the chain's, no parameter)
+    float impactPunch = 0.0f;          // 0 .. 1: Impact's event-keyed LF burst (docs/11 E20; the chain's, no parameter)
 
     bool operator== (const BassEngineParams&) const = default;
 };
@@ -140,7 +140,7 @@ public:
 
     /** Impact's punch (docs/11 E20): the burst's lift of the 40 - 150 Hz
         band now (dB >= 0). Audio thread (tests, meters). */
-    float getPunchDb() const noexcept FLUB_NONBLOCKING { return punchGainDb; }
+    float getImpactDb() const noexcept FLUB_NONBLOCKING { return impactGainDb; }
 
 private:
     // ---- implementation-defined below this line ----
@@ -211,8 +211,8 @@ private:
     float flushStates() noexcept;
     void controlTick() noexcept;
     void splitDetect (const std::array<float, kMaxChannels>& x, int numCh, float lfPeak) noexcept;
-    void startPunch() noexcept;
-    float processPunch (std::array<float, kMaxChannels>& x, int numCh) noexcept;
+    void startImpact() noexcept;
+    float processImpact (std::array<float, kMaxChannels>& x, int numCh) noexcept;
     void processSegment (const AudioBlock& block, int numCh, int pos, int len) noexcept;
 
     ProcessSpec spec;
@@ -276,18 +276,18 @@ private:
     // 3a. Impact's punch (docs/11 E20): the detector band, its onset
     // indicator and held level, the burst envelope (instant rise, a hold,
     // then a one-pole release), the lift in dB (2 ms rise / 20 ms fall) and
-    // the bell's unity band-pass. Runs while punch or its burst is non-zero.
-    bool punchActive = false;
-    LinkwitzRileyBand punchBand;
-    TransientShaper punchDetector;
-    TransientShaper::PeakHold punchLevel;
-    LinearSmoothedValue punchAmount;      // per sample, 20 ms
-    int punchWarm = 0;                    // samples before an onset may key a burst (warm-up)
-    int punchHoldLeft = 0, punchHoldSamples = 1;
-    float punchEnv = 0.0f, punchReleaseCoeff = 0.0f;
-    float punchGainDb = 0.0f, punchRiseCoeff = 0.0f, punchFallCoeff = 0.0f;
-    SvfCoeffs punchBell;
-    std::array<SvfState, kMaxChannels> punchBellState {};
+    // the bell's unity band-pass. Runs while impactPunch or its burst is non-zero.
+    bool impactActive = false;
+    LinkwitzRileyBand impactBand;
+    TransientShaper impactDetector;
+    TransientShaper::PeakHold impactLevel;
+    LinearSmoothedValue impactAmount;      // per sample, 20 ms
+    int impactWarm = 0;                    // samples before an onset may key a burst (warm-up)
+    int impactHoldLeft = 0, impactHoldSamples = 1;
+    float impactEnv = 0.0f, impactReleaseCoeff = 0.0f;
+    float impactGainDb = 0.0f, impactRiseCoeff = 0.0f, impactFallCoeff = 0.0f;
+    SvfCoeffs impactBell;
+    std::array<SvfState, kMaxChannels> impactBellState {};
 
     // 4. Psychoacoustic harmonics (mid signal) + replace-fundamental high-pass.
     bool harmonicsActive = false;

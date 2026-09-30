@@ -1008,7 +1008,7 @@ void ProcessingChain::applyParameters() noexcept
     // Impact's punch (docs/11 E20): Gaming Impact keys an LF burst on
     // onsets (no parameter; the curve of the static boost it replaces),
     // governed like the macro rows it replaced.
-    bp.punch = mode == ModeValue::Gaming ? smoothstep (0.0f, 1.0f, e[Macro3]) * governorScale : 0.0f;
+    bp.impactPunch = mode == ModeValue::Gaming ? smoothstep (0.0f, 1.0f, e[Macro3]) * governorScale : 0.0f;
     bass.setParams (bp);
     slots[SBass].setActive (active (BassOn));
 

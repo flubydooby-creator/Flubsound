@@ -38,12 +38,12 @@
 //                      nothing for 50 ms after a switch-on or reset (the
 //                      detector learns the programme first);
 //                      L = 25 ms peak hold of max_c |band_c| (dBFS);
-//                      lift = min (6 dB * punch * env, max (0, threshold -
+//                      lift = min (6 dB * impactPunch * env, max (0, threshold -
 //                      L)) through a 2 ms rise / 20 ms fall one-pole (dB);
 //                      out_c = x_c + (10^(lift/20) - 1) BP (x_c), BP the
 //                      unity band-pass at 77.5 Hz, Q 0.7 (a bell of the
 //                      lift; exactly x_c at 0 dB). The harmonics
-//                      generator's mix gains punch * env while it runs.
+//                      generator's mix gains impactPunch * env while it runs.
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -146,8 +146,8 @@ constexpr float kLookaheadAttackMs = 1.0f;      // split detectors' attack with 
 constexpr double kImpactLowHz = 40.0, kImpactHighHz = 150.0; // the detector band (LR4 each side)
 constexpr double kImpactBellHz = 77.5;                      // sqrt (40 x 150)
 constexpr double kImpactBellQ = 0.7;
-constexpr float kImpactMaxDb = 6.0f;          // the lift at punch 1 (the old Impact shelf's 6 dB, on onsets only)
-constexpr float kImpactHarmonicsMix = 1.0f;   // harmonics mix at punch 1 (the old Impact row's 0.25 x 2 was 0.5; bursts only)
+constexpr float kImpactMaxDb = 6.0f;          // the lift at impactPunch 1 (the old Impact shelf's 6 dB, on onsets only)
+constexpr float kImpactHarmonicsMix = 1.0f;   // harmonics mix at impactPunch 1 (the old Impact row's 0.25 x 2 was 0.5; bursts only)
 constexpr float kImpactOnsetFloor = 0.4f;     // indicator weight read as no onset (2.4 of its 6 dB)
 constexpr float kImpactHoldMs = 80.0f;
 constexpr float kImpactReleaseMs = 60.0f;
@@ -199,7 +199,7 @@ BassEngineParams sanitise (const BassEngineParams& in, const BassEngineParams& p
     p.monoBelowHz = offOrRange (in.monoBelowHz, kMinMonoHz, kMaxMonoHz, prev.monoBelowHz);
     p.subsonicHz = offOrRange (in.subsonicHz, kMinSubsonicHz, kMaxSubsonicHz, prev.subsonicHz);
     p.subsonicOrder = in.subsonicOrder <= 2 ? 2 : 4;
-    p.punch = clampOr (in.punch, 0.0f, 1.0f, prev.punch);
+    p.impactPunch = clampOr (in.impactPunch, 0.0f, 1.0f, prev.impactPunch);
     return p;
 }
 
@@ -377,15 +377,15 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     tightShaper.setSustainGatedByAttack (true); // never on the onset (docs/11 E04 step 2)
     distortionWindow.prepare (sr);
 
-    punchBand.prepare (sr, kImpactLowHz, kImpactHighHz);
-    punchDetector.setTiming (TransientShaper::Timing::lowBand());
-    punchDetector.prepare (sr);
-    punchLevel.prepare (sr, kImpactLevelHoldMs);
-    punchBell = SvfCoeffs::make (FilterType::BandPass, kImpactBellHz, kImpactBellQ, 0.0, sr);
-    punchHoldSamples = std::max (1, msToSamples (kImpactHoldMs, sr));
-    punchReleaseCoeff = onePoleCoeff (kImpactReleaseMs, sr);
-    punchRiseCoeff = onePoleCoeff (kImpactRiseMs, sr);
-    punchFallCoeff = onePoleCoeff (kImpactFallMs, sr);
+    impactBand.prepare (sr, kImpactLowHz, kImpactHighHz);
+    impactDetector.setTiming (TransientShaper::Timing::lowBand());
+    impactDetector.prepare (sr);
+    impactLevel.prepare (sr, kImpactLevelHoldMs);
+    impactBell = SvfCoeffs::make (FilterType::BandPass, kImpactBellHz, kImpactBellQ, 0.0, sr);
+    impactHoldSamples = std::max (1, msToSamples (kImpactHoldMs, sr));
+    impactReleaseCoeff = onePoleCoeff (kImpactReleaseMs, sr);
+    impactRiseCoeff = onePoleCoeff (kImpactRiseMs, sr);
+    impactFallCoeff = onePoleCoeff (kImpactFallMs, sr);
 
     auto initStage = [sr] (ParkedStage& stage, float parkHz)
     {
@@ -420,9 +420,9 @@ void BassEngine::reset() noexcept FLUB_NONBLOCKING
     cutoffHz = params.harmonicsCutoff;
 
     harmonicsMix.setImmediate (params.harmonicsAmount * kHarmonicsMaxGain);
-    harmonicsActive = params.harmonicsAmount > 0.0f || params.punch > 0.0f;
-    punchAmount.reset (sr, kParamSmoothMs, params.punch);
-    punchActive = params.punch > 0.0f;
+    harmonicsActive = params.harmonicsAmount > 0.0f || params.impactPunch > 0.0f;
+    impactAmount.reset (sr, kParamSmoothMs, params.impactPunch);
+    impactActive = params.impactPunch > 0.0f;
     updateHarmonicWeights();
     updateHarmonicFilters();
     cutoffGlide.active = upperGlide.active = false;
@@ -484,7 +484,7 @@ void BassEngine::updateTargets() noexcept
     logCutoff.setTarget (std::log (params.harmonicsCutoff));
 
     harmonicsMix.setTarget (params.harmonicsAmount * kHarmonicsMaxGain);
-    if ((params.harmonicsAmount > 0.0f || params.punch > 0.0f) && ! harmonicsActive)
+    if ((params.harmonicsAmount > 0.0f || params.impactPunch > 0.0f) && ! harmonicsActive)
     {
         // Idle harmonics path: start from clean state, the mix ramps from 0
         // (Impact's punch bursts it from 0).
@@ -494,13 +494,13 @@ void BassEngine::updateTargets() noexcept
 
     // Impact's punch (docs/11 E20): an idle stage starts from clean state,
     // its amount ramping from 0, and keys nothing until it has warmed up.
-    punchAmount.setTarget (params.punch);
-    if (params.punch > 0.0f && ! punchActive)
+    impactAmount.setTarget (params.impactPunch);
+    if (params.impactPunch > 0.0f && ! impactActive)
     {
-        punchActive = true;
-        punchAmount.setImmediate (0.0f);
-        punchAmount.setTarget (params.punch);
-        startPunch();
+        impactActive = true;
+        impactAmount.setImmediate (0.0f);
+        impactAmount.setTarget (params.impactPunch);
+        startImpact();
     }
 
     tightShaper.setSustainDb (kTightenMaxDb * params.tighten);
@@ -611,66 +611,66 @@ bool BassEngine::tickStage (ParkedStage& stage, bool effectSettled) noexcept
     return true;
 }
 
-void BassEngine::startPunch() noexcept
+void BassEngine::startImpact() noexcept
 {
-    punchBand.reset();
-    punchDetector.reset();
-    punchLevel.reset();
-    punchBellState.fill ({});
-    punchEnv = punchGainDb = 0.0f;
-    punchHoldLeft = 0;
-    punchWarm = std::max (1, msToSamples (kImpactWarmMs, spec.sampleRate));
+    impactBand.reset();
+    impactDetector.reset();
+    impactLevel.reset();
+    impactBellState.fill ({});
+    impactEnv = impactGainDb = 0.0f;
+    impactHoldLeft = 0;
+    impactWarm = std::max (1, msToSamples (kImpactWarmMs, spec.sampleRate));
 }
 
-float BassEngine::processPunch (std::array<float, kMaxChannels>& x, int numCh) noexcept
+float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) noexcept
 {
     float peak = 0.0f;
     for (int c = 0; c < numCh; ++c)
-        peak = std::max (peak, std::abs (punchBand.processSample (c, x[static_cast<size_t> (c)])));
-    const float onset = punchDetector.computeOnset (peak);
-    const float heldDb = gainToDb (punchLevel.process (peak));
+        peak = std::max (peak, std::abs (impactBand.processSample (c, x[static_cast<size_t> (c)])));
+    const float onset = impactDetector.computeOnset (peak);
+    const float heldDb = gainToDb (impactLevel.process (peak));
 
     // The burst envelope: an onset raises it at once, it holds, then releases.
     float o = std::clamp ((onset - kImpactOnsetFloor) / (1.0f - kImpactOnsetFloor), 0.0f, 1.0f);
-    if (punchWarm > 0)
+    if (impactWarm > 0)
     {
-        --punchWarm;
+        --impactWarm;
         o = 0.0f;
     }
-    if (o > 0.0f && o >= punchEnv)
+    if (o > 0.0f && o >= impactEnv)
     {
-        punchEnv = o;
-        punchHoldLeft = punchHoldSamples;
+        impactEnv = o;
+        impactHoldLeft = impactHoldSamples;
     }
-    else if (punchHoldLeft > 0)
+    else if (impactHoldLeft > 0)
     {
-        --punchHoldLeft;
+        --impactHoldLeft;
     }
     else
     {
-        punchEnv *= punchReleaseCoeff;
-        if (punchEnv < kImpactEnvFloor)
-            punchEnv = 0.0f;
+        impactEnv *= impactReleaseCoeff;
+        if (impactEnv < kImpactEnvFloor)
+            impactEnv = 0.0f;
     }
 
     // The lift, reserved inside the band's headroom under the protection
     // threshold, then smoothed in dB (landing exactly on 0).
-    const float amount = punchAmount.next();
+    const float amount = impactAmount.next();
     const float roomDb = std::max (0.0f, thresholdSmoothed.getCurrent() - heldDb);
-    const float targetDb = std::min (kImpactMaxDb * amount * punchEnv, roomDb);
-    punchGainDb = targetDb + (targetDb > punchGainDb ? punchRiseCoeff : punchFallCoeff) * (punchGainDb - targetDb);
-    if (std::abs (punchGainDb - targetDb) < 1.0e-6f)
-        punchGainDb = targetDb;
+    const float targetDb = std::min (kImpactMaxDb * amount * impactEnv, roomDb);
+    impactGainDb = targetDb + (targetDb > impactGainDb ? impactRiseCoeff : impactFallCoeff) * (impactGainDb - targetDb);
+    if (std::abs (impactGainDb - targetDb) < 1.0e-6f)
+        impactGainDb = targetDb;
 
-    const float g1 = punchGainDb == 0.0f ? 0.0f : dbToGain (punchGainDb) - 1.0f;
+    const float g1 = impactGainDb == 0.0f ? 0.0f : dbToGain (impactGainDb) - 1.0f;
     for (int c = 0; c < numCh; ++c)
     {
         const size_t ch = static_cast<size_t> (c);
-        const float bp = svfTick (punchBell, punchBellState[ch], x[ch]);
+        const float bp = svfTick (impactBell, impactBellState[ch], x[ch]);
         if (g1 != 0.0f)
             x[ch] += g1 * bp;
     }
-    return kImpactHarmonicsMix * amount * punchEnv; // the harmonics generator's burst mix
+    return kImpactHarmonicsMix * amount * impactEnv; // the harmonics generator's burst mix
 }
 
 void BassEngine::updateHarmonicFilters() noexcept
@@ -716,7 +716,7 @@ void BassEngine::clearAllStates() noexcept
     subProtect.reset (0.0f);
     punchProtect.reset (0.0f);
     replaceState.fill ({});
-    startPunch();
+    startImpact();
     tightState.fill ({});
     tightLp.fill (0.0f);
     detectorHold.reset();
@@ -746,11 +746,11 @@ float BassEngine::flushStates() noexcept
         if (std::abs (tightLp[ch]) < kStateFlush)
             tightLp[ch] = 0.0f;
         sum += tightLp[ch];
-        sum += flushTiny (shelfState[ch]) + flushTiny (detectorState[ch]) + flushTiny (punchBellState[ch]);
+        sum += flushTiny (shelfState[ch]) + flushTiny (detectorState[ch]) + flushTiny (impactBellState[ch]);
     }
     for (auto& s : harmState)
         sum += flushTiny (s);
-    sum += punchBand.flushStates (spec.numChannels, kStateFlush);
+    sum += impactBand.flushStates (spec.numChannels, kStateFlush);
     return sum;
 }
 
@@ -908,9 +908,9 @@ void BassEngine::controlTick() noexcept
         cutoffGlide.active = upperGlide.active = false;
     }
     // Impact's punch stops once its amount and its lift have landed on 0.
-    if (punchActive && params.punch == 0.0f && ! punchAmount.isSmoothing() && punchAmount.getCurrent() == 0.0f && punchGainDb == 0.0f)
-        punchActive = false;
-    if (harmonicsActive && harmonicsMix.getTarget() == 0.0f && ! harmonicsMix.isSmoothing() && ! punchActive)
+    if (impactActive && params.impactPunch == 0.0f && ! impactAmount.isSmoothing() && impactAmount.getCurrent() == 0.0f && impactGainDb == 0.0f)
+        impactActive = false;
+    if (harmonicsActive && harmonicsMix.getTarget() == 0.0f && ! harmonicsMix.isSmoothing() && ! impactActive)
         harmonicsActive = false;
 
     // ---- state hygiene -----------------------------------------------------
@@ -1055,7 +1055,7 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             lookaheadPos = lookaheadPos + 1 == lookahead ? 0 : lookaheadPos + 1;
         }
         // 3a. Impact's punch (docs/11 E20): the LF burst, and the harmonics' burst mix.
-        const float punchHarmonics = punchActive ? processPunch (x, numCh) : 0.0f;
+        const float impactHarmonics = impactActive ? processImpact (x, numCh) : 0.0f;
 
         float lfPeak = 0.0f;
         for (int c = 0; c < numCh; ++c)
@@ -1138,7 +1138,7 @@ void BassEngine::processSegment (const AudioBlock& block, int numCh, int pos, in
             float lin = svfTick (postHp, harmState[6], b);
             lin = svfTick (postLp0, harmState[7], lin);
             lin = svfTick (postLp1, harmState[8], lin);
-            const float mix = harmonicsMix.next() + punchHarmonics;
+            const float mix = harmonicsMix.next() + impactHarmonics;
             harmonics = y * mix;
             linearBranch = lin * mix;
         }
