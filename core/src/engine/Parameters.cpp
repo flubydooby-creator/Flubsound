@@ -284,6 +284,14 @@ std::vector<Info> buildLayout()
     // 3-band path (ClarityEnhancer.h).
     set (ClarityAttackLowDb, v8 (make ("clarity.attackLow", "Attack Low Offset", "Clarity", Unit::Db, -12.0f, 12.0f, 0.0f)));
     set (ClarityAttackHighDb, v8 (make ("clarity.attackHigh", "Attack High Offset", "Clarity", Unit::Db, -12.0f, 12.0f, 0.0f)));
+    // docs/11 E28: the parametric renderer's direction cues. Classic, the
+    // renderer before the key existed and the default, keeps every preset
+    // and state saved before it bit-exact; Enhanced replaces the rear shelf
+    // with the angle-continuous pinna notch, directional bands and lateral
+    // timbre match (HeadphoneVirtualizer.h), and frontBack scales its bands
+    // (50 % nominal; Classic ignores it).
+    set (VirtRenderer, v8 (choice ("virt.renderer", "Renderer", "Virtualizer", { "Classic", "Enhanced" }, 0)));
+    set (VirtFrontBack, v8 (make ("virt.frontBack", "Front/Back Contrast", "Virtualizer", Unit::Percent, 0.0f, 1.0f, 0.5f)));
 
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };

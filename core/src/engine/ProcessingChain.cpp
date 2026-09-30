@@ -966,6 +966,9 @@ void ProcessingChain::applyParameters() noexcept
     vp.roomAmount = e[VirtRoom];
     vp.lfeGainDb = e[VirtLfeGainDb];
     vp.lfeOn = on (e, VirtLfeFold);
+    vp.renderer = static_cast<VirtRendererValue> (idx (e, VirtRenderer)) == VirtRendererValue::Enhanced ? VirtualizerRenderer::Enhanced
+                                                                                                   : VirtualizerRenderer::Classic;
+    vp.frontBack = e[VirtFrontBack];
     virtualizer.setParams (vp);
 
     // ---- Compressor ----

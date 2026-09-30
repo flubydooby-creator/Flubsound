@@ -800,7 +800,10 @@ void HeadphoneVirtualizer::updateGeometry (bool snap) noexcept
         }
 
         const float shelfTarget = std::abs (az) > 90.0f ? kRearShelfDb : 0.0f;
-        designCues (sp);
+        if (cuesActive)
+            designCues (sp);
+        else if (snap) // not run: exact pass-throughs, the start point of a later glide to Enhanced
+            sp.cue = directionCues (static_cast<double> (az), 0.0, static_cast<double> (contrast.getCurrent()), fs);
         if (snap)
         {
             sp.shelfDb.setImmediate (shelfTarget);
@@ -877,9 +880,6 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     enhanced.setImmediate (enhanced.getTarget());
     contrast.setImmediate (contrast.getTarget());
     cuesActive = enhanced.getCurrent() > 0.0f;
-    if (! cuesActive)
-        for (auto& sp : speakers)
-            sp.cue = sp.prevCue = std::array<SvfCoeffs, kNumCues> {}; // identity (not run)
     updateGeometry (true);
     clearState();
     fadeDir = 0;
@@ -1063,7 +1063,7 @@ void HeadphoneVirtualizer::tick() noexcept
 }
 
 //==============================================================================
-template <bool Ramp>
+template <bool Ramp, bool Cues>
 void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const float* x, int length) noexcept
 {
     // One fused per-sample loop: the ITD line (256 samples) is shorter than a
@@ -1083,6 +1083,13 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
     BiquadState sl = el.state, sr = er.state;
     std::array<float, 4> hl = el.taps, hr = er.taps;
     int bl = el.base, br = er.base;
+    std::array<SvfCoeffs, kNumCues> cue {};
+    std::array<SvfState, kNumCues> cueState {};
+    if constexpr (Cues)
+    {
+        cue = sp.cue;
+        cueState = sp.cueState;
+    }
 
     for (int i = 0; i < length; ++i)
     {
@@ -1091,6 +1098,9 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
             // Position inside the control period -> exact end point at 16.
             const float t = static_cast<float> (std::min (rampPos + i + 1, kControlInterval)) * (1.0f / kControlInterval);
             shelf = mixSvf (sp.prevShelf, sp.shelf, t);
+            if constexpr (Cues)
+                for (size_t k = 0; k < cue.size(); ++k)
+                    cue[k] = mixSvf (sp.prevCue[k], sp.cue[k], t);
             lagrangeTaps ((1.0f - t) * el.prevDelay + t * el.delay, bl, hl);
             lagrangeTaps ((1.0f - t) * er.prevDelay + t * er.delay, br, hr);
             cl = mixFirstOrder (el.prevShadow, el.shadow, static_cast<double> (t));
@@ -1098,12 +1108,25 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
         }
 
         const int w = write0 + i;
-        line[w & mask] = svfTick (shelf, shelfState, x[i]);
+        if constexpr (Cues)
+        {
+            float v = svfTick (shelf, shelfState, x[i]);
+            for (size_t k = 0; k < cue.size(); ++k)
+                v = svfTick (cue[k], cueState[k], v);
+            line[w & mask] = v;
+        }
+        else
+        {
+            line[w & mask] = svfTick (shelf, shelfState, x[i]);
+        }
         outL[i] += static_cast<float> (biquadTick (cl, sl, static_cast<double> (readLagrange (line, w - bl, mask, hl))));
         outR[i] += static_cast<float> (biquadTick (cr, sr, static_cast<double> (readLagrange (line, w - br, mask, hr))));
     }
 
     storeState (sp.shelfState, shelfState);
+    if constexpr (Cues)
+        for (size_t k = 0; k < cueState.size(); ++k)
+            storeState (sp.cueState[k], cueState[k]);
     el.state.z1 = flushed (sl.z1);
     er.state.z1 = flushed (sr.z1);
 }
@@ -1272,11 +1295,18 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         }
         else if (ramping)
         {
-            renderParametric<true> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
+            if (cuesActive)
+                renderParametric<true, true> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
+            else
+                renderParametric<true, false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
+        }
+        else if (cuesActive)
+        {
+            renderParametric<false, true> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
         }
         else
         {
-            renderParametric<false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
+            renderParametric<false, false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
         }
     }
     if (! lfeRendered)

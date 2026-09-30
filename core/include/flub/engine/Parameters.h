@@ -217,6 +217,10 @@ enum Id : int
     ClarityAttackLowDb,  // dB over clarity.attack below the 60 - 200 Hz split; with both offsets at 0 the shaper stays full band
     ClarityAttackHighDb, // dB over clarity.attack above 4 kHz
 
+    // Virtualiser additions (docs/11 E28, layout version 8; HeadphoneVirtualizer.h)
+    VirtRenderer,        // Choice: VirtRendererValue, the parametric renderer's direction cues (Classic by default)
+    VirtFrontBack,       // 0..1: Enhanced's front/back contrast (directional-band gains x value / 0.5)
+
     kNumScalarParams
 };
 
@@ -252,6 +256,7 @@ constexpr int dyn (int band, DynField f) noexcept { return kDynBase + band * kDy
 enum class ModeValue : int { Music = 0, Gaming = 1 };
 enum class LatencyProfileValue : int { Quality = 0, Balanced = 1, LowLatency = 2 };
 enum class InputModeValue : int { Auto = 0, ForceSurround = 1, ForceStereo = 2 }; // VirtInputMode
+enum class VirtRendererValue : int { Classic = 0, Enhanced = 1 }; // VirtRenderer (flub::VirtualizerRenderer)
 enum class MaxStyleValue : int { Custom = 0, Transparent, Punchy, Aggressive, Safe }; // MaxStyle
 /** GuardRange: how far an event may rise over the recent programme (LU);
     Off = no guard and no Tame (the default). */

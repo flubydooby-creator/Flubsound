@@ -137,6 +137,8 @@ const std::map<juce::String, Hint>& table()
         { "virt.lfeFold", { "Mixes the rumble channel into your headphones at all. Off follows the plain stereo downmix." } },
         { "virt.input", { "Auto detects surround content; force surround or stereo if the game's channels are misdetected." } },
         { "virt.ownHrtf", { "Turn on when the game already makes 3D headphone sound itself, so it is not processed twice." } },
+        { "virt.renderer", { "Classic is the original 3D sound. Enhanced adds ear-shape cues so sounds behind you sound behind you, and a brighter centre." } },
+        { "virt.frontBack", { "Enhanced only: how strongly front and back sound different. Above 50 % exaggerates it for competitive play." } },
 
         // ---- Compressor ----
         { "comp.threshold", { "The level where the compressor starts turning loud parts down. Lower acts on more of the sound." } },
