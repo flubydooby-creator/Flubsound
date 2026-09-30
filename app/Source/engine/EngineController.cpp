@@ -230,6 +230,9 @@ EngineController::EngineController (Options opts)
         applyProtectionStrength(); // the new engine's chains start at Off
         applyListeningLevel();     // ... and at a 0 dB listening level
         applyOnboardCap();         // ... and without the headset enhancement cap (docs/11 E16)
+        applyHearingGuard();       // ... the hearing guard's settings, the personal profile and
+        applyPersonalProfile();    // Smart macros (docs/11 E32 (c), E33, E34) where the new
+        applySmartMacros();        // engine did not carry them over
         notify (Change::Engine);
     };
     host->onDeviceError = [this] (const juce::String& message)
@@ -324,7 +327,24 @@ EngineController::EngineController (Options opts)
     autoProfiles.setEnabled (settings->getAutoProfilesEnabled());
     autoProfiles.setRules (settings->getAutoProfileRules());
 
-    updateEndpointVolumePoller(); // docs/11 E32: while the contour follows the volume
+    // docs/11 E33: the personal profile (its own file), on every strip's
+    // chain; E32 (c): the hearing guard's settings and the day's dose so far;
+    // E34: Smart macros.
+    if (const auto file = getPersonalProfileFile(); file.existsAsFile())
+    {
+        std::string error;
+        flub::PersonalProfile loaded;
+        if (flub::personal::load (file.getFullPathName().toStdString(), loaded, error))
+            personalProfile = loaded.sanitised();
+        else
+            personalError = juce::String::fromUTF8 (error.c_str());
+    }
+    applyPersonalProfile();
+    applyHearingGuard();
+    pollHearingDose();
+    applySmartMacros();
+
+    updateEndpointVolumePoller(); // docs/11 E32: while the contour follows the volume (or the hearing guard estimates)
     startTimerHz (kTimerHz);
 }
 
@@ -360,6 +380,8 @@ void EngineController::shutdown()
     }
 
     persistStripStates (true);
+    pollHearingDose();     // docs/11 E32 (c): the day's dose as it stands
+    savePersonalProfile(); // docs/11 E33
     settings->setSelectedStrip (selectedStrip);
     settings->save();
 
@@ -934,6 +956,8 @@ void EngineController::saveState()
     if (options.openAudioDevice)
         persistDeviceState();
     persistStripStates (true);
+    pollHearingDose();     // docs/11 E32 (c): the day's dose as it stands
+    savePersonalProfile(); // docs/11 E33
     settings->setSelectedStrip (selectedStrip);
     settings->save();
 }
@@ -1099,6 +1123,7 @@ void EngineController::updateDeviceProfile()
         updateOutputIdentity(); // no output: no headset cap (docs/11 E16)
         applyDeviceCorrection();
         applyOnboardCap();
+        applyHearingGuard(); // docs/11 E32 (c): no output, no sensitivity
         return;
     }
     applyDeviceProfile (getDeviceManager().getAudioDeviceSetup().outputDeviceName, device->getCurrentSampleRate(),
@@ -1155,6 +1180,7 @@ void EngineController::applyDeviceProfile (const juce::String& outputName, doubl
     // The endpoint's headset enhancement answer (docs/11 E16), applied or
     // removed with every output change.
     applyOnboardCap();
+    applyHearingGuard(); // docs/11 E32 (c): this output's sensitivity
 }
 
 // =============================================================================
@@ -1681,11 +1707,18 @@ void EngineController::timerCallback()
     applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
     applyListeningLevel();
     applyOnboardCap();
+    applyHearingGuard();    // docs/11 E32 (c)
+    applyPersonalProfile(); // docs/11 E33
+    applySmartMacros();     // docs/11 E34
     if (! tournament.active) // docs/11 E55: no foreground poll in Tournament mode
         pollForegroundApp();
 
     if (++timerTicks % kPersistEveryTicks == 0)
+    {
         persistStripStates (false);
+        pollHearingDose();     // docs/11 E32 (c): today's dose, stored every 5 s
+        savePersonalProfile(); // docs/11 E33: an edit is written within 5 s
+    }
     if (timerTicks % kAntiCheatPollTicks == 0)
         pollAntiCheatServices();
 
@@ -1723,7 +1756,9 @@ flub::platform::EndpointVolume EngineController::readEndpointVolume (const juce:
 
 void EngineController::updateEndpointVolumePoller()
 {
-    const bool wanted = (options.openAudioDevice || options.pollEndpointVolumeHeadless) && ! isShutDown && settings->getContourFollowsVolume();
+    // docs/11 E32 (c): the hearing guard's estimate needs the volume as well.
+    const bool wanted = (options.openAudioDevice || options.pollEndpointVolumeHeadless) && ! isShutDown
+                        && (settings->getContourFollowsVolume() || hearingKnown);
     if (! wanted)
     {
         volumePoller.reset();
@@ -1761,6 +1796,8 @@ void EngineController::applyEndpointVolume (const flub::platform::EndpointVolume
         // nothing changes until the volume moves.
         if (settings->getContourFollowsVolume() && ! settings->getContourReferenceVolumeDb().has_value())
             settings->setContourReferenceVolumeDb (volume.volumeDb);
+        // docs/11 E32 (c): the hearing guard's estimate (a failed read keeps the last).
+        host->getMixEngine().getHearingGuard().setEndpointVolumeDb (volume.muted ? -std::numeric_limits<float>::infinity() : volume.volumeDb);
     }
     applyListeningLevel();
 }
@@ -2368,5 +2405,234 @@ void EngineController::cancelAutoProfile (const juce::String& stripName)
     autoAppliedPresetId = {};
     autoProfileError = {};
     notify (Change::Routing);
+}
+
+// =============================================================================
+// Hearing guard: listening-level estimate, dose and cap (docs/11 E32 (c))
+// =============================================================================
+namespace
+{
+/** "2026-09-24" for ("2026-09-30", 6): an ISO day `days` before `day`. */
+juce::String dayBefore (const juce::String& day, int days)
+{
+    const juce::Time noon (day.substring (0, 4).getIntValue(), day.substring (5, 7).getIntValue() - 1, day.substring (8, 10).getIntValue(), 12, 0);
+    return (noon - juce::RelativeTime::days (days)).formatted ("%Y-%m-%d");
+}
+} // namespace
+
+void EngineController::applyHearingGuard()
+{
+    // Relaxed atomics on the newest engine's guard (HearingGuard's setters);
+    // a swapped-in engine inherits them (MixEngine::configureFrom), a
+    // rebuilt one gets them here (onEngineConfigured and the timer).
+    auto& guard = host->getMixEngine().getHearingGuard();
+    const auto user = currentOutputName.isNotEmpty() ? settings->findHearingSensitivity (outputIdentity) : std::nullopt;
+    hearingUserDbSpl = user; // getHearing() reads it without parsing the settings
+    const float profile = deviceMatch.profile != nullptr ? flub::device::splAtFullScale (deviceMatch.profile->sensitivity)
+                                                         : std::numeric_limits<float>::quiet_NaN();
+    float chosen = std::numeric_limits<float>::quiet_NaN();
+    flub::HearingGuard::chooseSensitivity (user.value_or (std::numeric_limits<float>::quiet_NaN()), profile, chosen);
+    const float current = guard.getSensitivityDbSpl();
+    if (std::isnan (chosen) != std::isnan (current) || (! std::isnan (chosen) && chosen != current))
+        guard.setSensitivityDbSpl (chosen);
+    const bool capOn = settings->getHearingCapEnabled();
+    const float capDb = settings->getHearingCapDbA();
+    if (guard.getCapEnabled() != capOn || guard.getCapDbA() != capDb)
+        guard.setCap (capOn, capDb);
+
+    // The estimate needs the system volume: read it while a sensitivity is known.
+    if (const bool known = ! std::isnan (chosen); known != hearingKnown)
+    {
+        hearingKnown = known;
+        updateEndpointVolumePoller();
+        if (known && ! settings->getContourFollowsVolume())
+            pollEndpointVolume(); // the volume now, not only at the next poll
+    }
+}
+
+EngineController::HearingInfo EngineController::getHearing() const
+{
+    HearingInfo info;
+    info.output = currentOutputName;
+    if (currentOutputName.isNotEmpty())
+        info.userDbSpl = hearingUserDbSpl;
+    if (const auto* profile = deviceMatch.profile)
+    {
+        info.profileName = juce::String::fromUTF8 (profile->displayName.c_str());
+        info.profileDbSpl = flub::device::splAtFullScale (profile->sensitivity);
+        info.profileFigureSource = juce::String::fromUTF8 (profile->sensitivity.source.c_str());
+        info.profileLabVerified = profile->labVerified;
+    }
+    info.source = flub::HearingGuard::chooseSensitivity (info.userDbSpl.value_or (std::numeric_limits<float>::quiet_NaN()), info.profileDbSpl,
+                                                         info.sensitivityDbSpl);
+    info.known = info.source != flub::HearingGuard::SensitivitySource::Unknown;
+    info.capEnabled = settings->getHearingCapEnabled();
+    info.capDbA = settings->getHearingCapDbA();
+    info.volumeKnown = listening.known && listening.device == currentOutputName;
+    info.volumeDb = info.volumeKnown ? listening.volumeDb : 0.0f;
+
+    const auto& meters = host->getMixEngine().getHearingGuard().meters();
+    constexpr auto rx = std::memory_order_relaxed;
+    if (info.known && meters.known.load (rx))
+    {
+        info.levelDbA = meters.levelDbA.load (rx);
+        info.leq5sDbA = meters.leq5sDbA.load (rx);
+        info.sessionLeqDbA = meters.sessionLeqDbA.load (rx);
+        info.capActive = meters.capActive.load (rx);
+        info.capGainDb = meters.capGainDb.load (rx);
+    }
+    // Today's dose as the bookkeeping counts it (pollHearingDose), and the
+    // stored days before it.
+    const double session = meters.sessionDose.load (rx);
+    info.doseToday = doseDay.isNotEmpty() ? doseBaseline + std::max (0.0, session - doseMark) : 0.0;
+    info.doseWeek = info.doseToday + doseEarlierDays;
+    return info;
+}
+
+bool EngineController::setHearingSensitivity (std::optional<float> dbSpl)
+{
+    if (currentOutputName.isEmpty())
+        return false;
+    if (dbSpl.has_value() && ! std::isfinite (*dbSpl))
+        return false;
+    settings->setHearingSensitivity (outputIdentity, dbSpl);
+    applyHearingGuard();
+    notify (Change::Settings);
+    return true;
+}
+
+void EngineController::setHearingCap (bool on, float dbA)
+{
+    settings->setHearingCapEnabled (on);
+    settings->setHearingCapDbA (dbA);
+    applyHearingGuard();
+    notify (Change::Settings);
+}
+
+juce::String EngineController::getDoseDay() const
+{
+    return (options.clock ? options.clock() : juce::Time::getCurrentTime()).formatted ("%Y-%m-%d");
+}
+
+void EngineController::pollHearingDose()
+{
+    auto& guard = host->getMixEngine().getHearingGuard();
+    const double session = guard.meters().sessionDose.load (std::memory_order_relaxed);
+    const auto today = getDoseDay();
+    const auto storedDose = [this] (const juce::String& day)
+    {
+        for (const auto& d : settings->getDailyDoses())
+            if (d.day == day)
+                return d.fraction;
+        return 0.0;
+    };
+
+    double dose = doseBaseline + std::max (0.0, session - doseMark);
+    if (doseDay.isEmpty() || session < lastSessionDose)
+    {
+        // The first poll (the day's stored dose so far) or a guard that
+        // started afresh (an engine the host built without carrying it):
+        // count on from what was counted.
+        doseBaseline = doseDay.isEmpty() ? storedDose (today) : dose;
+        doseDay = today;
+        doseMark = session;
+        guard.setDoseBaseline (doseBaseline);
+        dose = doseBaseline;
+    }
+    else if (today != doseDay)
+    {
+        // Midnight: the day's dose is final; the new day starts from its own.
+        settings->setDailyDose (doseDay, dose);
+        doseDay = today;
+        doseBaseline = storedDose (today);
+        doseMark = session;
+        guard.setDoseBaseline (doseBaseline);
+        dose = doseBaseline;
+    }
+    lastSessionDose = session;
+    // Stored once there is something to store (no entry for a day nothing was estimated on).
+    if (dose > 0.0 && dose != storedDose (today))
+        settings->setDailyDose (today, dose);
+
+    // The 6 days before today, for the weekly sum (getHearing).
+    doseEarlierDays = 0.0;
+    const auto oldest = dayBefore (doseDay, AppSettings::kDoseDaysKept - 1);
+    for (const auto& d : settings->getDailyDoses())
+        if (d.day < doseDay && d.day >= oldest)
+            doseEarlierDays += d.fraction;
+}
+
+// =============================================================================
+// Personal hearing profile (docs/11 E33)
+// =============================================================================
+juce::File EngineController::getPersonalProfileFile() const
+{
+    return settings->getFile().getSiblingFile ("personal-profile.json");
+}
+
+void EngineController::applyPersonalProfile()
+{
+    // Every strip's chain designs it on this thread and crossfades to it
+    // (ProcessingChain::setPersonalProfile); an unchanged one is only handed
+    // over again if its ring was full.
+    for (int s = 0; s < getNumStrips(); ++s)
+    {
+        auto& chain = getChain (s);
+        if (chain.getPersonalProfile() != personalProfile)
+            chain.setPersonalProfile (personalProfile);
+        else
+            chain.retryPersonalProfile();
+    }
+}
+
+void EngineController::setPersonalProfile (const flub::PersonalProfile& profile)
+{
+    const auto sanitised = profile.sanitised();
+    if (sanitised == personalProfile)
+        return;
+    personalProfile = sanitised;
+    personalDirty = true;
+    applyPersonalProfile();
+    notify (Change::Settings);
+}
+
+bool EngineController::savePersonalProfile()
+{
+    if (! personalDirty || ! options.persistSettings)
+        return true;
+    std::string error;
+    const auto file = getPersonalProfileFile();
+    file.getParentDirectory().createDirectory();
+    if (! flub::personal::save (file.getFullPathName().toStdString(), personalProfile, error))
+    {
+        DBG ("Flubsound: the personal profile was not saved: " << error);
+        return false;
+    }
+    personalDirty = false;
+    return true;
+}
+
+// =============================================================================
+// Smart macros (docs/11 E34)
+// =============================================================================
+void EngineController::applySmartMacros()
+{
+    // One relaxed atomic per chain; a swapped-in engine inherits it
+    // (adoptGovernorState), a rebuilt one gets it here.
+    for (int s = 0; s < getNumStrips(); ++s)
+        if (const bool on = settings->getSmartMacros (getStripName (s)); getChain (s).getSmartMacros() != on)
+            getChain (s).setSmartMacros (on);
+}
+
+bool EngineController::getSmartMacros (int strip) const
+{
+    return settings->getSmartMacros (getStripName (resolveStrip (strip)));
+}
+
+void EngineController::setSmartMacros (bool on, int strip)
+{
+    settings->setSmartMacros (getStripName (resolveStrip (strip)), on);
+    applySmartMacros();
+    notify (Change::Settings);
 }
 } // namespace flub::app

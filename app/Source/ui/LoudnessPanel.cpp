@@ -1,6 +1,7 @@
 #include "LoudnessPanel.h"
 
 #include "Theme.h"
+#include "engine/EngineController.h"
 
 #include "flub/engine/MeterBus.h"
 #include "flub/engine/Protection.h"
@@ -21,6 +22,13 @@ float finiteOr (float v, float fallback)
 bool differs (float a, float b, float tolerance)
 {
     return std::abs (a - b) > tolerance;
+}
+
+/** The dose row repaints on what it shows: 0.5 dB, 0.1 % of the allowance, the flags. */
+bool hearingDiffers (const LoudnessPanel::HearingReadout& a, const LoudnessPanel::HearingReadout& b)
+{
+    return a.known != b.known || a.capOn != b.capOn || a.capActive != b.capActive || a.capDbA != b.capDbA
+           || differs (a.levelDbA, b.levelDbA, 0.5f) || std::abs (a.doseToday - b.doseToday) >= 0.001;
 }
 } // namespace
 
@@ -43,6 +51,8 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
     };
 
     shown.active = s.active;
+    if (hearingSource != nullptr)
+        shown.hearing = hearingSource(); // docs/11 E32 (c)
     shown.momentary = finiteOr (s.momentaryLufs, -160.0f);
     shown.shortTerm = finiteOr (s.shortTermLufs, -160.0f);
     shown.integrated = finiteOr (s.integratedLufs, -160.0f);
@@ -99,7 +109,8 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
                          || differs (shown.correlation, painted.correlation, 0.005f) || differs (shown.width, painted.width, 0.005f)
                          || shown.strength != painted.strength || differs (shown.residual, painted.residual, 0.1f)
                          || differs (shown.plr, painted.plr, 0.05f) || differs (shown.lift[0], painted.lift[0], 0.05f)
-                         || differs (shown.lift[1], painted.lift[1], 0.05f) || differs (shown.lift[2], painted.lift[2], 0.05f);
+                         || differs (shown.lift[1], painted.lift[1], 0.05f) || differs (shown.lift[2], painted.lift[2], 0.05f)
+                         || hearingDiffers (shown.hearing, painted.hearing);
     // Loudness readouts are read by eye: 20 Hz is plenty and halves the paint cost.
     sinceRepaint += dt;
     if (changed && sinceRepaint >= 0.05f)
@@ -107,6 +118,34 @@ void LoudnessPanel::update (const MeterSnapshot& s, double dtSeconds)
         sinceRepaint = 0.0f;
         repaint();
     }
+}
+
+void LoudnessPanel::setHearing (const HearingReadout& readout)
+{
+    const bool relayout = readout.known != shown.hearing.known;
+    const bool changed = hearingDiffers (readout, shown.hearing);
+    shown.hearing = readout;
+    if (relayout || changed)
+        repaint();
+}
+
+LoudnessPanel::HearingReadout LoudnessPanel::hearingReadoutOf (const EngineController& controller)
+{
+    const auto info = controller.getHearing();
+    HearingReadout r;
+    r.known = info.known;
+    r.levelDbA = info.levelDbA;
+    r.doseToday = info.doseToday;
+    r.capOn = info.capEnabled;
+    r.capActive = info.capActive;
+    r.capDbA = info.capDbA;
+    return r;
+}
+
+juce::String LoudnessPanel::formatDose (double fraction)
+{
+    const double pct = std::isfinite (fraction) ? juce::jmax (0.0, fraction) * 100.0 : 0.0;
+    return (pct < 10.0 ? juce::String (pct, 1) : juce::String (juce::roundToInt (pct))) + " %";
 }
 
 void LoudnessPanel::reset()
@@ -148,6 +187,10 @@ juce::String LoudnessPanel::getTooltip()
 {
     if (limiterActiveArea.contains (getMouseXYRelative().toFloat()))
         return describeLimiterActive (shown.limiterActive);
+    if (doseShown && doseArea.contains (getMouseXYRelative().toFloat()))
+        return "An estimate from the output, the system volume and the headset's sensitivity (Settings > Hearing), not a "
+               "measurement: the level now, today's dose against the WHO reference of 80 dB(A) for 40 hours a week, and the "
+               "listening-level cap.";
     return SettableTooltipClient::getTooltip();
 }
 
@@ -233,10 +276,13 @@ void LoudnessPanel::paint (juce::Graphics& g)
     // banner): smaller captions, readouts and gaps, rows down to 12 px. The
     // PROTECTION section (a caption, a gap and two rows) only when it fits.
     constexpr float kFullFixed = 18.0f + 60.0f + 20.0f + 20.0f + 10.0f + 18.0f + 10.0f + 18.0f; // captions / readouts / gaps
-    const bool compact = r.getHeight() < kFullFixed + 14.0f * static_cast<float> (grRows + stereoRows);
+    // docs/11 E32 (c): the dose row, only while the hearing guard knows the sensitivity.
+    doseShown = shown.hearing.known;
+    const float doseH = doseShown ? 20.0f : 0.0f;
+    const bool compact = r.getHeight() < kFullFixed + doseH + 14.0f * static_cast<float> (grRows + stereoRows);
     const float captionH = compact ? 16.0f : 18.0f, bigH = compact ? 46.0f : 60.0f, gapH = compact ? 4.0f : 10.0f;
     const float minRowH = compact ? 12.0f : 14.0f;
-    const float fixedWithout = 3.0f * captionH + bigH + 20.0f + 20.0f + 2.0f * gapH;
+    const float fixedWithout = 3.0f * captionH + bigH + 20.0f + 20.0f + doseH + 2.0f * gapH;
     protectionShown = r.getHeight() >= fixedWithout + captionH + gapH + minRowH * static_cast<float> (grRows + stereoRows + protectionRows);
     const float fixed = fixedWithout + (protectionShown ? captionH + gapH : 0.0f);
     const int rows = grRows + stereoRows + (protectionShown ? protectionRows : 0);
@@ -299,6 +345,21 @@ void LoudnessPanel::paint (juce::Graphics& g)
         item (row, colW * 0.85f, "LIM", juce::String (limitPct) + "%", limitPct > 10 ? status.warn : plain);
         item (row, colW * 0.9f, "PRE", shown.preamp < -0.05f ? Theme::formatSignedDb (shown.preamp, 1) : juce::String ("off"),
               shown.preamp < -0.05f ? plain : Palette::faint);
+    }
+    if (doseShown)
+    {
+        // The hearing guard's estimate (docs/11 E32 (c)): level now, today's
+        // dose (warn from the whole weekly allowance), the cap.
+        auto row = r.removeFromTop (doseH);
+        doseArea = row;
+        const float colW = row.getWidth() / 3.0f;
+        const auto plain = Palette::text.withAlpha (0.9f);
+        const bool level = shown.hearing.levelDbA > -500.0f;
+        item (row, colW * 1.1f, "EST.", level ? juce::String (juce::roundToInt (shown.hearing.levelDbA)) + " dB(A)" : juce::String ("--"),
+              level ? plain : Palette::faint);
+        item (row, colW * 0.95f, "DOSE", formatDose (shown.hearing.doseToday), shown.hearing.doseToday >= 1.0 ? status.warn : plain);
+        item (row, colW * 0.95f, "CAP", shown.hearing.capOn ? juce::String (juce::roundToInt (shown.hearing.capDbA)) : juce::String ("off"),
+              shown.hearing.capActive ? status.warn : (shown.hearing.capOn ? plain : Palette::faint));
     }
     // ---- Dynamics ----
     r.removeFromTop (gapH);

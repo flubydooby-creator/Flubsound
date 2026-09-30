@@ -67,6 +67,7 @@ set(FLUB_APP_SOURCES
     Source/shell/MainWindow.cpp
     Source/shell/TrayIcon.cpp
     Source/shell/HotkeyManager.cpp
+    Source/shell/RemoteControl.cpp
     Source/shell/ScreenshotDriver.cpp
     Source/ui/AbxPanel.cpp
     Source/ui/AnalyzerFeed.cpp
@@ -77,6 +78,7 @@ set(FLUB_APP_SOURCES
     Source/ui/EqCurveEditor.cpp
     Source/ui/FlubLookAndFeel.cpp
     Source/ui/HeaderBar.cpp
+    Source/ui/HearingPage.cpp
     Source/ui/LevelMeters.cpp
     Source/ui/LoudnessPanel.cpp
     Source/ui/MainComponent.cpp
@@ -84,10 +86,12 @@ set(FLUB_APP_SOURCES
     Source/ui/ModuleCard.cpp
     Source/ui/ModuleRack.cpp
     Source/ui/NoticeBanners.cpp
+    Source/ui/Osd.cpp
     Source/ui/ParameterBinding.cpp
     Source/ui/ParamGrid.cpp
     Source/ui/ParamHints.cpp
     Source/ui/ParamKnob.cpp
+    Source/ui/PersonalProfileEditor.cpp
     Source/ui/PresetAudition.cpp
     Source/ui/PresetBrowser.cpp
     Source/ui/QuickControls.cpp
@@ -101,6 +105,7 @@ set(FLUB_APP_SOURCES
     # The CLI's offline renderer (plain C++ on flub::core, no main.cpp): the
     # Export / batch dialog renders files exactly like `flubsound-cli process`.
     ../tools/flubsound-cli/Analysis.cpp
+    ../tools/flubsound-cli/Ctl.cpp # docs/11 E56: the `ctl` socket (RemoteControl, --ctl)
     ../tools/flubsound-cli/OfflineRenderer.cpp)
 
 target_sources(FlubsoundPro PRIVATE ${FLUB_APP_SOURCES})

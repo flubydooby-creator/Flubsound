@@ -35,7 +35,18 @@
 //               volume - off by default - and the reference volume with a
 //               "Use current volume" button and the live level; the
 //               contour's curve at that level, read-only), and the meter
-//               palette (standard / colour-blind safe).
+//               palette (standard / colour-blind safe). Smart macros
+//               (docs/11 E34) for the selected strip, under the preamp;
+//               Voice chat (docs/11 E22): the chat duck's switch and depth,
+//               as on the routing panel's Chat row.
+//   Hearing     the hearing guard (docs/11 E32 (c); HearingPage.h): the
+//               headset sensitivity in use (the listener's own figure per
+//               output, or the device profile's, marked "manufacturer
+//               figure, not lab-verified"), the estimated level, the
+//               listening-level cap, today's and the week's estimated dose
+//               against the WHO reference; "unknown" and nothing applied
+//               without a sensitivity; non-medical wording. And the personal
+//               per-ear profile (docs/11 E33; PersonalProfileEditor.h).
 //   Hotkeys     system-wide shortcut list: edit a chord as text
 //               ("Ctrl+Alt+F"), reset to default, enable / disable; each
 //               row shows its registration status (registered, in use,
@@ -73,6 +84,8 @@
 
 namespace flub::app::ui
 {
+class HearingPage; // HearingPage.h (docs/11 E32 (c), E33)
+
 /** Access to the application's HotkeyManager (owned by FlubsoundApplication). */
 struct HotkeyHooks
 {
@@ -91,6 +104,7 @@ public:
         Audio,
         Correction,
         Processing,
+        Hearing,
         Hotkeys,
         General,
         Diagnostics
@@ -192,12 +206,14 @@ private:
     void timerCallback() override;
 
     EngineController& controller;
-    std::array<juce::TextButton, 6> navButtons;
+    std::array<juce::TextButton, 7> navButtons;
     std::unique_ptr<AudioPage> audioPage;
     juce::Viewport audioView; // the Audio page scrolls when the guidance is long
     std::unique_ptr<CorrectionPage> correctionPage;
     std::unique_ptr<ProcessingPage> processingPage;
     juce::Viewport processingView; // ... and the Processing page when there are many capture streams
+    std::unique_ptr<HearingPage> hearingPage;
+    juce::Viewport hearingView; // ... and the Hearing page (the per-ear editor is tall)
     std::unique_ptr<HotkeysPage> hotkeysPage;
     std::unique_ptr<GeneralPage> generalPage;
     std::unique_ptr<DiagnosticsPage> diagnosticsPage;

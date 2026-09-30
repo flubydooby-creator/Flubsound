@@ -16,6 +16,8 @@ set(FLUB_CLI_SOURCES
     CliOptions.h
     Commands.cpp
     Commands.h
+    Ctl.cpp
+    Ctl.h
     Demo.cpp
     Demo.h
     FactoryPresets.cpp
@@ -41,7 +43,7 @@ target_compile_definitions(flubsound-cli PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(flubsound-cli PRIVATE Threads::Threads)
 if(WIN32)
-    target_link_libraries(flubsound-cli PRIVATE shell32) # CommandLineToArgvW
+    target_link_libraries(flubsound-cli PRIVATE shell32 ws2_32) # CommandLineToArgvW; Ctl.cpp's AF_UNIX socket
 endif()
 
 # Installed layout: bin/flubsound-cli + share/flubsound/presets/factory/*.json

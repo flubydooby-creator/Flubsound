@@ -17,6 +17,14 @@
 // * Settings > Processing: the automatic preamp's hot-programme switch
 //   (auto.preampHot, docs/11 E11) under the preamp's, dimmed without it;
 //   the loudness contour's curve (docs/11 E32) at the listening level.
+// Phase 3 batch 5 (5D U1):
+// * Clarity card: Presence Mode (clarity.presenceMode, docs/11 E07) and the
+//   per-band attack offsets (clarity.attackLow / attackHigh, E04 step 3);
+//   Stereo & Space: Crossfeed Type (spatial.crossfeedType, E12); the
+//   Virtualizer: virt.renderer / virt.frontBack (E28), bound by key name and
+//   left out while the core lacks them.
+// * Settings > Processing: Smart macros per strip (docs/11 E34).
+// * Settings > Processing: the chat duck's switch and depth (docs/11 E22).
 #include "AppTestSupport.h"
 
 #include "engine/EngineController.h"
@@ -478,4 +486,141 @@ TEST_CASE ("App UI: the Processing page draws the loudness contour's curve at th
     dialog.showPage (ui::SettingsDialog::Page::Processing); // refresh
     CHECK (view->getDescription().startsWith ("At -30.0 dB re the reference: +12.1 dB at 50 Hz"));
     CHECK_NEAR (controller.getChain (music).getLoudnessContour().targetLiftDb (50.0), curve.liftDb[at50], 0.5);
+}
+
+// =============================================================================
+// Phase 3 batch 5: the new keys in their module cards, Smart macros
+// =============================================================================
+TEST_CASE ("App UI: the batch 5 keys sit in their cards outside the generic grid; a key the core lacks is left out (E07 / E04 / E12 / E28)")
+{
+    // Every key in the table resolves to a parameter (a named key the layout
+    // lacks is dropped, never bound to -1).
+    for (const auto& d : ui::ModuleDescriptor::all())
+        for (const auto& key : d.keys)
+            CHECK ((key.banded || (key.id >= 0 && key.id < kNumParams)));
+
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    ui::ModuleRack rack (controller);
+    rack.setSize (3400, 200); // every card in view
+    rack.updateFromEngine();
+    auto& store = controller.getSelectedParams();
+
+    // Clarity: Presence Mode (a choice) and the per-band attack offsets.
+    auto* clarity = findCard (rack, "clarity");
+    REQUIRE (clarity != nullptr);
+    auto* mode = findByTitle<juce::ComboBox> (*clarity, nameOf (ClarityPresenceMode));
+    REQUIRE (mode != nullptr);
+    CHECK (visibleIn (rack, *mode));
+    CHECK (mode->getNumItems() == 2);
+    CHECK (clarity->getLocalBounds().contains (clarity->getLocalArea (mode, mode->getLocalBounds())));
+    mode->setSelectedItemIndex (static_cast<int> (PresenceModeValue::Relative), juce::sendNotificationSync);
+    CHECK (store.get (ClarityPresenceMode) == static_cast<float> (PresenceModeValue::Relative));
+    for (const char* key : { "clarity.attackLow", "clarity.attackHigh" })
+    {
+        const int id = findByKey (key);
+        if (id < 0)
+            continue; // not in this build's core yet: hidden
+        auto* knob = findByTitle<juce::Slider> (*clarity, nameOf (id));
+        REQUIRE (knob != nullptr);
+        CHECK (visibleIn (rack, *knob));
+        knob->setValue (3.0, juce::sendNotificationSync);
+        CHECK (store.get (id) == 3.0f);
+        CHECK (knob->getTooltip().isNotEmpty());
+    }
+
+    // Stereo & Space: Crossfeed Type (Bs2b / Meier / Mono-safe).
+    auto* spatial = findCard (rack, "spatial");
+    REQUIRE (spatial != nullptr);
+    auto* crossfeed = findByTitle<juce::ComboBox> (*spatial, nameOf (SpatialCrossfeedType));
+    REQUIRE (crossfeed != nullptr);
+    CHECK (visibleIn (rack, *crossfeed));
+    CHECK (crossfeed->getNumItems() == 3);
+    crossfeed->setSelectedItemIndex (static_cast<int> (CrossfeedTypeValue::MonoSafe), juce::sendNotificationSync);
+    CHECK (store.get (SpatialCrossfeedType) == static_cast<float> (CrossfeedTypeValue::MonoSafe));
+
+    // Virtualizer: the renderer and its front / back contrast once the core has them.
+    auto* virt = findCard (rack, "virt");
+    REQUIRE (virt != nullptr);
+    const int keysWithout = 3;
+    int named = 0;
+    for (const char* key : { "virt.renderer", "virt.frontBack" })
+        if (const int id = findByKey (key); id >= 0)
+        {
+            ++named;
+            juce::Component* control = findByTitle<juce::ComboBox> (*virt, nameOf (id));
+            if (control == nullptr)
+                control = findByTitle<juce::Slider> (*virt, nameOf (id));
+            REQUIRE (control != nullptr);
+            CHECK (visibleIn (rack, *control));
+        }
+    CHECK (virt->getDescriptor().keys.size() == static_cast<size_t> (keysWithout + named));
+}
+
+TEST_CASE ("App UI: Smart macros - a per-strip switch on the Processing page, persisted and handed to the strip's chain (E34)")
+{
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    ui::HotkeyHooks hooks;
+    hooks.isSupported = [] { return false; };
+    hooks.getFailures = [] { return juce::StringArray(); };
+    hooks.reRegister = [] {};
+    ui::SettingsDialog dialog (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+    dialog.setSize (900, 700);
+    dialog.showPage (ui::SettingsDialog::Page::Processing);
+
+    auto* smart = findByTitle<juce::ToggleButton> (dialog, "Smart macros");
+    auto* hot = findByTitle<juce::ToggleButton> (dialog, "Automatic preamp on hot programme");
+    REQUIRE (smart != nullptr);
+    REQUIRE (hot != nullptr);
+    CHECK (visibleIn (dialog, *smart));
+    CHECK (smart->getY() > hot->getY()); // with the preamp, under Protection
+    const int strip = controller.getSelectedStrip();
+    CHECK (smart->getButtonText().contains (controller.getStripName (strip)));
+    CHECK (! smart->getToggleState());
+    CHECK (! controller.getChain (strip).getSmartMacros());
+
+    smart->setToggleState (true, juce::sendNotificationSync);
+    CHECK (controller.getSmartMacros (strip));
+    CHECK (controller.getChain (strip).getSmartMacros());
+    CHECK (controller.getSettings().getSmartMacros (controller.getStripName (strip)));
+    const int other = (strip + 1) % controller.getNumStrips();
+    CHECK (! controller.getChain (other).getSmartMacros()); // per strip
+    controller.setSelectedStrip (other);
+    dialog.showPage (ui::SettingsDialog::Page::Processing); // refresh
+    CHECK (! smart->getToggleState());
+    CHECK (smart->getButtonText().contains (controller.getStripName (other)));
+}
+
+TEST_CASE ("App UI: Settings > Processing has the chat duck's switch and depth, driving the controller (E22)")
+{
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    ui::HotkeyHooks hooks;
+    hooks.isSupported = [] { return false; };
+    hooks.getFailures = [] { return juce::StringArray(); };
+    hooks.reRegister = [] {};
+    ui::SettingsDialog dialog (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+    dialog.setSize (900, 700);
+    dialog.showPage (ui::SettingsDialog::Page::Processing);
+
+    auto* duck = findByTitle<juce::ToggleButton> (dialog, "Duck game under voice chat");
+    auto* depth = findByTitle<juce::Slider> (dialog, "Chat duck depth");
+    REQUIRE (duck != nullptr);
+    REQUIRE (depth != nullptr);
+    CHECK (visibleIn (dialog, *duck));
+    CHECK (! duck->getToggleState());
+    CHECK (! depth->isEnabled());
+    CHECK (depth->getValue() == EngineController::kDefaultChatDuckDepthDb);
+
+    duck->setToggleState (true, juce::sendNotificationSync);
+    CHECK (controller.getChatDuck());
+    CHECK (controller.getSettings().getChatDuck());
+    dialog.showPage (ui::SettingsDialog::Page::Processing); // refresh
+    CHECK (depth->isEnabled());
+    depth->setValue (6.0, juce::sendNotificationSync);
+    CHECK (controller.getChatDuckDepthDb() == 6.0f);
+    controller.setChatDuck (false); // elsewhere (the Chat row): the page follows
+    dialog.showPage (ui::SettingsDialog::Page::Processing);
+    CHECK (! duck->getToggleState());
 }

@@ -90,7 +90,10 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
         static const juce::StringArray known { "device-error",   "loopback",       "preset-warning", "recovery",        "latency-prompt",
                                                 "governor",       "preset-browser", "settings-audio", "settings-processing", "ab-matched",
                                                 "abx",            "bypass",         "routing-drawer", "governor-normal", "quick-controls",
-                                                "module-readings", "contour-curve", "onboard-cap",   "settings-diagnostics" };
+                                                "module-readings", "contour-curve", "onboard-cap",   "settings-diagnostics",
+                                                // docs/11 E32 (c) / E33 / E34 and the batch 5 keys in their cards
+                                                "settings-hearing", "settings-hearing-unknown", "hearing-profile", "hearing-readout",
+                                                "module-keys" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -297,6 +300,50 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         store.set (MaxLfLimit, 0.5f);
         if (main != nullptr)
             main->getRack().scrollToCard ("sat"); // Saturation, Compressor and Maximizer in view from 1920 px
+    }
+    if (states.contains ("settings-hearing") || states.contains ("settings-hearing-unknown") || states.contains ("hearing-profile")
+        || states.contains ("hearing-readout"))
+    {
+        // docs/11 E32 (c): a Turtle Beach headset (no shipped profile has a
+        // sensitivity), with the listener's own figure and the cap on, except
+        // for "unknown"; E33: a right-ear high-frequency preference.
+        if (options.simulatedDevice.isEmpty())
+            controller.simulateOutputDevice ("Headset Earphone (Stealth 700 Gen 2 MAX)", controller.getHost().getSampleRate(), 2);
+        if (! states.contains ("settings-hearing-unknown"))
+        {
+            controller.setHearingSensitivity (108.0f);
+            controller.setHearingCap (true, 85.0f);
+        }
+        if (states.contains ("hearing-profile"))
+        {
+            flub::PersonalProfile profile;
+            profile.enabled = true;
+            profile.bandDb[1] = { 0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 6.0f, 9.0f, 12.0f };
+            controller.setPersonalProfile (profile); // the page below: give a tall --size (860x1400) to see the editor
+        }
+        if (! states.contains ("hearing-readout"))
+        {
+            ui::HotkeyHooks hooks;
+            hooks.isSupported = [] { return false; };
+            hooks.getFailures = [] { return juce::StringArray(); };
+            hooks.reRegister = [] {};
+            auto dialog = std::make_unique<ui::SettingsDialog> (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+            dialog->setSize (options.width, options.height);
+            dialog->showPage (ui::SettingsDialog::Page::Hearing);
+            settingsView = std::move (dialog);
+        }
+    }
+    if (states.contains ("module-keys") && main != nullptr)
+    {
+        // The batch 5 keys outside the generic grid: Presence Mode and the
+        // per-band attack on the Clarity card, Crossfeed Type on Stereo &
+        // Space, the renderer on the Virtualizer card (when the core has it).
+        auto& store = controller.getParams (focusStrip);
+        store.set (ClarityOn, 1.0f);
+        store.set (ClarityPresenceMode, static_cast<float> (PresenceModeValue::Relative));
+        store.set (SpatialOn, 1.0f);
+        store.set (SpatialCrossfeedType, static_cast<float> (CrossfeedTypeValue::Meier));
+        main->getRack().scrollToCard ("clarity");
     }
     if (main == nullptr)
         return;

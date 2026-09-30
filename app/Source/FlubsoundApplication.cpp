@@ -6,13 +6,20 @@
 #include "platform/PlatformBridge.h"
 #include "shell/HotkeyManager.h"
 #include "shell/MainWindow.h"
+#include "shell/RemoteControl.h"
 #include "shell/ScreenshotDriver.h"
 #include "shell/TrayIcon.h"
 #include "ui/FlubLookAndFeel.h"
 #include "ui/MainComponent.h"
+#include "ui/Osd.h"
 #include "ui/Theme.h"
 
+#include "Ctl.h"
+
 #include <cstdio>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace flub::app
 {
@@ -21,6 +28,12 @@ namespace
 bool commandLineRequestsScreenshot()
 {
     return juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--screenshot");
+}
+
+/** `--ctl <action> ...`: forward one action to the running instance (docs/11 E56). */
+bool commandLineRequestsControl()
+{
+    return juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--ctl");
 }
 
 std::unique_ptr<juce::LookAndFeel_V4> makeLookAndFeel()
@@ -64,12 +77,32 @@ FlubsoundApplication::~FlubsoundApplication() = default;
 
 bool FlubsoundApplication::moreThanOneInstanceAllowed()
 {
-    // Headless screenshot runs must never be swallowed by a running instance.
-    return commandLineRequestsScreenshot();
+    // Headless screenshot runs must never be swallowed by a running instance;
+    // --ctl talks to it over the control socket itself and exits.
+    if (commandLineRequestsScreenshot() || commandLineRequestsControl())
+        return true;
+
+   #if JUCE_LINUX || JUCE_BSD
+    // JUCE forwards nothing to a running instance here (its broadcast is not
+    // implemented on Linux): ask it to show its window. If one answers, the
+    // instance lock below ends this start; if none does, nothing happened.
+    flub::cli::ctl::Request show;
+    show.action = "Show";
+    flub::cli::ctl::Reply reply;
+    std::string error;
+    flub::cli::ctl::sendRequest (flub::cli::ctl::defaultSocketPath(), show, reply, error, 1000);
+   #endif
+    return false;
 }
 
 void FlubsoundApplication::initialise (const juce::String&)
 {
+    if (commandLineRequestsControl())
+    {
+        forwardControlRequest();
+        return;
+    }
+
     lookAndFeel = makeLookAndFeel();
     juce::LookAndFeel::setDefaultLookAndFeel (lookAndFeel.get());
 
@@ -112,15 +145,33 @@ void FlubsoundApplication::initialiseInteractive()
     trayCallbacks.quit = [this] { systemRequestedQuit(); };
     trayIcon = std::make_unique<TrayIcon> (*controller, std::move (trayCallbacks));
 
-    hotkeys = std::make_unique<HotkeyManager> (*controller);
-    hotkeys->onActionPerformed = [this] (HotkeyAction, const juce::String& feedback)
+    // docs/11 E56: hotkey (and `ctl`) feedback on the on-screen display; the
+    // tray bubble while the display is off or Tournament mode holds it.
+    osd = std::make_unique<ui::Osd> (*controller);
+    const auto trayFallback = [this] (ui::Osd::Outcome outcome, const juce::String& feedback)
     {
-        if (trayIcon != nullptr)
+        if ((outcome == ui::Osd::Outcome::Disabled || outcome == ui::Osd::Outcome::Tournament) && trayIcon != nullptr)
             trayIcon->notify ("Flubsound Pro", feedback);
+    };
+    hotkeys = std::make_unique<HotkeyManager> (*controller);
+    hotkeys->onActionPerformed = [this, trayFallback] (HotkeyAction action, const juce::String& feedback)
+    {
+        trayFallback (osd != nullptr ? osd->showFeedback (action, feedback) : ui::Osd::Outcome::Disabled, feedback);
     };
     hotkeys->registerAll();
     for (const auto& failure : hotkeys->getFailures())
         printLine (true, "Flubsound: hotkey: " + failure);
+
+    remoteControl = std::make_unique<RemoteControl> (*controller, *hotkeys);
+    remoteControl->onShowWindow = [this] { showMainWindow(); };
+    remoteControl->onFeedback = [this, trayFallback] (const juce::String& title, const juce::String& text, float level)
+    {
+        const auto outcome = osd != nullptr ? osd->show (title, text, level >= 0.0f ? std::optional<float> (level) : std::nullopt)
+                                            : ui::Osd::Outcome::Disabled;
+        trayFallback (outcome, title + ": " + text);
+    };
+    if (juce::String error; ! remoteControl->start (error))
+        printLine (true, "Flubsound: remote control (flubsound-cli ctl): " + error);
 
     // docs/11 E54: the notify-only update check; nothing runs while it is off.
     updateCheck = diagnostics::update::startAtLaunch (controller->getSettings().getPropertiesFile(),
@@ -220,10 +271,12 @@ void FlubsoundApplication::shutdown()
 {
     screenshot.reset();
     updateCheck.reset(); // cancels a running request
+    remoteControl.reset(); // stops the socket before what it drives goes
 
     if (hotkeys != nullptr)
         hotkeys->unregisterAll();
     hotkeys.reset();
+    osd.reset();
     trayIcon.reset();
 
     if (mainWindow != nullptr && ! screenshotMode)
@@ -239,6 +292,25 @@ void FlubsoundApplication::shutdown()
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
     lookAndFeel.reset();
     diagnosticsSession.reset(); // the "stopped" line; disarms the crash handler
+}
+
+void FlubsoundApplication::forwardControlRequest()
+{
+    // FlubsoundPro --ctl <action> [strip] [value]: the request of
+    // `flubsound-cli ctl` (tools/flubsound-cli/Ctl.h), its reply printed and
+    // its exit code returned. Never starts the app.
+    const auto args = getCommandLineParameterArray();
+    std::vector<std::string> words;
+    for (int i = args.indexOf ("--ctl") + 1; i < args.size(); ++i)
+        words.push_back (args[i].toStdString());
+    std::string out, err;
+    const int code = flub::cli::ctl::runCtl (words, out, err);
+    std::fputs (out.c_str(), stdout);
+    std::fputs (err.c_str(), stderr);
+    std::fflush (stdout);
+    std::fflush (stderr);
+    setApplicationReturnValue (code);
+    quit();
 }
 
 void FlubsoundApplication::systemRequestedQuit()

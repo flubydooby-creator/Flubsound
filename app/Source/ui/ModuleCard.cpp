@@ -4,6 +4,7 @@
 #include "ParamHints.h"
 #include "Theme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace flub::app::ui
@@ -29,8 +30,14 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
             d.enableId = enableParam;
             d.banding = bandingKind;
             d.keys = std::move (keyControls);
+            // A key bound by name (below) that this build's layout lacks is
+            // left out: the card shows what the core has, never a dead control.
+            d.keys.erase (std::remove_if (d.keys.begin(), d.keys.end(), [] (const Key& k) { return ! k.banded && k.id < 0; }), d.keys.end());
             m.push_back (std::move (d));
         };
+        // Keys that land in the same batch as their card (docs/11 E04 step 3,
+        // E28) bind by their parameter key and appear once the core has them.
+        auto named = [] (const char* key, const char* label) { return Key { findByKey (key), label }; };
 
         add ("gate", "Noise Gate", "Noise Gate", "Spectral noise gate: removes hiss and hum between sounds", GateOn, B::None,
              { { GateThresholdDb, "Threshold" }, { GateReductionDb, "Reduction" }, { GateReleaseMs, "Release" } });
@@ -44,9 +51,12 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
                { DynFieldRatio, "Ratio", true } });
         add ("bass", "Bass Engine", "Bass", "Bass boost, psychoacoustic harmonics and headroom protection", BassOn, B::None,
              { { BassBoostDb, "Boost" }, { BassBoostFreq, "Freq" }, { BassHarmonics, "Harmonics" }, { BassTighten, "Tighten" }, { BassProtectDb, "Protect" } });
+        // Presence Mode (clarity.presenceMode, docs/11 E07 step 3) and the
+        // per-band attack offsets (clarity.attackLow / attackHigh, E04 step 3).
         add ("clarity", "Clarity", "Clarity", "Presence, air, de-mud and transient shaping; Smoothness takes back added sibilance", ClarityOn,
              B::None,
-             { { ClarityPresence, "Presence" }, { ClarityAir, "Air" }, { ClarityDeMud, "De-Mud" }, { ClarityAttackDb, "Attack" },
+             { { ClarityPresence, "Presence" }, { ClarityPresenceMode, "Presence Mode" }, { ClarityAir, "Air" }, { ClarityDeMud, "De-Mud" },
+               { ClarityAttackDb, "Attack" }, named ("clarity.attackLow", "Attack Low"), named ("clarity.attackHigh", "Attack High"),
                { SmoothAmount, "Smooth", false, true } });
         // Tape Grit (warmth.tapeGrit, docs/11 E14) chooses what the Music
         // Warmth macro does to this stage, with the saturator off too.
@@ -54,10 +64,15 @@ const std::vector<ModuleDescriptor>& ModuleDescriptor::all()
              SaturationOn, B::None,
              { { SatType, "Type" }, { SatDriveDb, "Drive" }, { SatMix, "Mix" }, { SatOutputDb, "Output" },
                { WarmthTapeGrit, "Tape Grit", false, true } });
+        // Crossfeed Type (spatial.crossfeedType, docs/11 E12 Phase A).
         add ("spatial", "Stereo & Space", "Stereo", "Width, positional focus, space and crossfeed with mono safety", SpatialOn, B::None,
-             { { SpatialWidth, "Width" }, { SpatialFocus, "Focus" }, { SpatialSpace, "Space" }, { SpatialCrossfeed, "Crossfeed" } });
+             { { SpatialWidth, "Width" }, { SpatialFocus, "Focus" }, { SpatialSpace, "Space" }, { SpatialCrossfeed, "Crossfeed" },
+               { SpatialCrossfeedType, "Crossfeed Type" } });
+        // The renderer (virt.renderer: Classic / Enhanced) and its front / back
+        // contrast (virt.frontBack), docs/11 E28.
         add ("virt", "Headphone Virtualizer", "Virtualizer", "Binaural rendering of 5.1 / 7.1 game audio", VirtualizerOn, B::None,
-             { { VirtRoom, "Room" }, { VirtHeadRadius, "Head" }, { VirtLfeGainDb, "LFE" } });
+             { { VirtRoom, "Room" }, { VirtHeadRadius, "Head" }, { VirtLfeGainDb, "LFE" }, named ("virt.renderer", "Renderer"),
+               named ("virt.frontBack", "Front/Back") });
         add ("comp", "Compressor", "Compressor", "Look-ahead downward + upward compression; Dynamic Range holds sudden loud events",
              CompressorOn, B::None,
              { { CompThresholdDb, "Threshold" },

@@ -6,7 +6,10 @@
 //             in -> out difference (LU), the share of time the maximizer's
 //             limiter reduces gain by more than 1 dB (about the last 10 s:
 //             "LIM", E11's "Limiter active x %", spelled out on hover) and
-//             the automatic preamp
+//             the automatic preamp; while the hearing guard knows the
+//             headset's sensitivity (docs/11 E32 (c)), a row with the
+//             estimated level, today's estimated dose and the cap ("EST.
+//             72 dB(A)  DOSE 12 %  CAP 85"), left out otherwise
 //   DYNAMICS  gain-reduction meters: compressor (with upward gain), limiter,
 //             multiband glue, bass protection, master safety limiter,
 //             distortion (measured THD+N of saturator and clipper; the
@@ -34,6 +37,11 @@
 
 #include <array>
 #include <functional>
+
+namespace flub::app
+{
+class EngineController;
+}
 
 namespace flub::app::ui
 {
@@ -71,6 +79,26 @@ public:
 
     std::function<void()> onResetRequested;
 
+    /** The hearing guard's readings for the dose row (docs/11 E32 (c)). */
+    struct HearingReadout
+    {
+        bool known = false;        // a sensitivity is in use; the row shows only then
+        float levelDbA = -1000.0f; // the estimate now (HearingMeters::kUnknown when there is none)
+        double doseToday = 0.0;    // fraction of the weekly allowance
+        bool capOn = false, capActive = false;
+        float capDbA = 85.0f;
+        bool operator== (const HearingReadout&) const = default;
+    };
+    /** EngineController::getHearing() as the row reads it. */
+    static HearingReadout hearingReadoutOf (const EngineController& controller);
+    /** Polled by update() when set (MainComponent sets it). */
+    std::function<HearingReadout()> hearingSource;
+    void setHearing (const HearingReadout& readout);
+    /** Whether the last paint drew the dose row. */
+    bool isShowingDose() const noexcept { return doseShown; }
+    /** The dose readout's value: "12 %" ("4.5 %" under 10 %). */
+    static juce::String formatDose (double fraction);
+
     void paint (juce::Graphics& g) override;
     void mouseUp (const juce::MouseEvent& e) override;
 
@@ -86,6 +114,7 @@ private:
         int strength = 0;
         float residual = -160.0f, residualBudget = -35.0f, plr = 1000.0f, plrBudget = 8.0f;
         std::array<float, 3> lift { -160.0f, -160.0f, -160.0f }, liftBudget { 3.0f, 3.0f, 4.0f };
+        HearingReadout hearing;
     };
 
     void drawGainReductionRow (juce::Graphics& g, juce::Rectangle<float> row, const juce::String& name, float reductionDb,
@@ -97,7 +126,7 @@ private:
 
     Shown shown, painted;
     float sinceRepaint = 0.0f; // readouts refresh at <= 20 Hz
-    bool protectionShown = false;
-    juce::Rectangle<float> integratedArea, limiterActiveArea;
+    bool protectionShown = false, doseShown = false;
+    juce::Rectangle<float> integratedArea, limiterActiveArea, doseArea;
 };
 } // namespace flub::app::ui

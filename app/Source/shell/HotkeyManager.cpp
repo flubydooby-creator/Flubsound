@@ -188,12 +188,16 @@ juce::StringArray HotkeyManager::getFailures() const
     return failures;
 }
 
-void HotkeyManager::perform (HotkeyAction action)
+juce::String HotkeyManager::perform (HotkeyAction action)
 {
     // Strip actions go to the hotkey strip (an active automatic profile's,
     // else Settings > Hotkeys', default Game), never to the strip selected in
     // the window, and the feedback names it (docs/11 E56).
-    const int strip = controller.getHotkeyStrip();
+    return perform (action, controller.getHotkeyStrip());
+}
+
+juce::String HotkeyManager::perform (HotkeyAction action, int strip)
+{
     const auto stripName = controller.getStripName (strip) + ": ";
     juce::String feedback;
     switch (action)
@@ -244,7 +248,10 @@ void HotkeyManager::perform (HotkeyAction action)
         }
     }
 
+    // The on-screen display (or the tray bubble) shows it; `ctl` also
+    // prints it.
     if (onActionPerformed != nullptr)
         onActionPerformed (action, feedback);
+    return feedback;
 }
 } // namespace flub::app

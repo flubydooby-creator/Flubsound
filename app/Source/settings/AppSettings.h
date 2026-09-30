@@ -16,8 +16,11 @@
 // the UI scale and theme, the main window's view (Simple /
 // Advanced, docs/11 E39), the window position, the loudness contour's
 // system-volume follow and reference volume (docs/11 E32), the loopback
-// pairs the feedback-loop guard allows (docs/11 E51) and Tournament mode
-// (docs/11 E55).
+// pairs the feedback-loop guard allows (docs/11 E51), Tournament mode
+// (docs/11 E55), the hearing guard's headset sensitivity per endpoint, its
+// listening-level cap and the estimated dose per day (docs/11 E32 (c)) and
+// Smart macros per strip (docs/11 E34). The personal hearing profile (docs/11
+// E33) is its own file next to this one (EngineController).
 //
 // Per-strip values are keyed by strip NAME (not index) so a changed strip
 // layout does not shuffle profiles between strips.
@@ -430,6 +433,38 @@ public:
     void setChatDuck (bool on);
     float getChatDuckDepthDb() const;
     void setChatDuckDepthDb (float depthDb);
+
+    // ---- Hearing (docs/11 E32 (c), E34; Settings > Hearing) -----------------------------
+    /** The listener's own headset sensitivity (dB SPL of a 0 dBFS sine at
+        full volume), stored per output endpoint (matched as
+        findDeviceEndpoint matches); it wins over the device profile's
+        figure (HearingGuard::chooseSensitivity). nullopt: none stored. */
+    std::optional<float> findHearingSensitivity (const flub::platform::OutputEndpointIdentity& endpoint) const;
+    /** Stores (clamped to HearingGuard's 60 .. 150 dB SPL) or, with nullopt,
+        removes the figure of `endpoint`. Ignored without a name and an id. */
+    void setHearingSensitivity (const flub::platform::OutputEndpointIdentity& endpoint, std::optional<float> dbSpl);
+    /** The listening-level cap (off by default) and its level (60 .. 100
+        dB(A), 85 by default). */
+    bool getHearingCapEnabled() const;
+    void setHearingCapEnabled (bool on);
+    float getHearingCapDbA() const;
+    void setHearingCapDbA (float dbA);
+    /** The estimated dose per calendar day ("2026-09-30", local time) as a
+        fraction of the weekly allowance, newest first; days older than
+        kDoseDaysKept before `today` are dropped when a day is stored. */
+    struct DailyDose
+    {
+        juce::String day;
+        double fraction = 0.0;
+        bool operator== (const DailyDose&) const = default;
+    };
+    static constexpr int kDoseDaysKept = 7;
+    std::vector<DailyDose> getDailyDoses() const;
+    void setDailyDose (const juce::String& day, double fraction);
+    /** Smart macros (docs/11 E34, ProcessingChain::setSmartMacros) per strip
+        name; off by default. */
+    bool getSmartMacros (const juce::String& stripName) const;
+    void setSmartMacros (const juce::String& stripName, bool on);
 
 private:
     static juce::PropertiesFile::Options defaultOptions();

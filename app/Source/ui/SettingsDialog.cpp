@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 
 #include "FlubLookAndFeel.h"
+#include "HearingPage.h"
 #include "ParameterBinding.h"
 #include "diagnostics/CrashHandler.h"
 #include "diagnostics/DiagnosticLog.h"
@@ -626,6 +627,10 @@ public:
         Style::set (preampHotToggle, "switch");
         binder.bindToggle (preampHotToggle, AutoPreampHot);
         preampHotToggle.setTitle ("Automatic preamp on hot programme");
+        // Smart macros (docs/11 E34): a host setting per strip, not a parameter.
+        Style::set (smartToggle, "switch");
+        smartToggle.setTitle ("Smart macros");
+        smartToggle.onClick = [this] { controller.setSmartMacros (smartToggle.getToggleState()); };
 
         // Listening level (docs/11 E32): the contour is the preset's
         // (contour.on), following the system volume is the app's.
@@ -656,6 +661,21 @@ public:
             refresh();
         };
 
+        // Voice chat (docs/11 E22): the duck's switch and depth, as on the Chat row.
+        Style::set (duckToggle, "switch");
+        duckToggle.setTitle ("Duck game under voice chat");
+        duckToggle.onClick = [this] { controller.setChatDuck (duckToggle.getToggleState(), static_cast<float> (duckDepth.getValue())); };
+        duckDepth.setSliderStyle (juce::Slider::LinearHorizontal);
+        duckDepth.setTextBoxStyle (juce::Slider::TextBoxRight, false, 72, 22);
+        duckDepth.setRange (EngineController::kMinChatDuckDepthDb, EngineController::kMaxChatDuckDepthDb, 0.5);
+        duckDepth.setTextValueSuffix (" dB");
+        duckDepth.setTitle ("Chat duck depth");
+        duckDepth.onValueChange = [this]
+        {
+            if (! refreshing)
+                controller.setChatDuck (duckToggle.getToggleState(), static_cast<float> (duckDepth.getValue()));
+        };
+
         paletteBox.addItem ("Standard (green / amber / red)", 1);
         paletteBox.addItem ("Colour-blind safe (blue / yellow / vermillion)", 2);
         paletteBox.setSelectedId (palette == MeterPalette::ColourBlindSafe ? 2 : 1, juce::dontSendNotification);
@@ -671,10 +691,13 @@ public:
         addAndMakeVisible (autoReduceToggle);
         addAndMakeVisible (preampToggle);
         addAndMakeVisible (preampHotToggle);
+        addAndMakeVisible (smartToggle);
         addAndMakeVisible (restoreButton);
         for (auto* control :
              std::initializer_list<juce::Component*> { &contourToggle, &followToggle, &referenceSlider, &useVolumeButton, &contourView })
             addAndMakeVisible (control);
+        addAndMakeVisible (duckToggle);
+        addAndMakeVisible (duckDepth);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,
@@ -708,6 +731,10 @@ public:
                   "also takes back the preamp's 1 dB allowance and the maximizer's drive, so the limiter stays idle. Hot "
                   "masters play a little quieter; music with room is unchanged. Saved with the preset; off by default.",
                   520);
+        form.row ({}, smartToggle,
+                  "Scales what the macros add to the music: less Punch and drive on an already loud, limited master, less bass on "
+                  "bass-heavy and less air on bright programme; material with room is unchanged. Per strip; off by default.",
+                  520);
         form.section ("Listening level");
         form.row ({}, contourToggle,
                   "Adds the bass and treble the ear misses at low volume (ISO 226 equal loudness), more the further the volume is below "
@@ -719,6 +746,12 @@ public:
         form.row ({}, useVolumeButton, describeListeningLevel (controller.getListeningLevel()), 200);
         listeningRow = form.rows.size() - 1;
         // The contour's curve at that level sits under the form (resized).
+        displayForm.section ("Voice chat");
+        displayForm.row ({}, duckToggle,
+                         "While someone talks on the Chat strip, the Game and Music strips dip at 1 - 4 kHz so the voice stays clear; the "
+                         "footstep band is kept. Off by default; also on the Chat row of the routing panel.",
+                         520);
+        displayForm.row ("Duck depth", duckDepth, {}, 330);
         displayForm.section ("Display");
         displayForm.row ("Meter colours", paletteBox, {}, 330);
         refresh();
@@ -748,9 +781,17 @@ public:
                                   juce::dontSendNotification);
 
         protectionBox.setSelectedId (static_cast<int> (controller.getProtectionStrength()) + 1, juce::dontSendNotification);
+        duckToggle.setToggleState (controller.getChatDuck(), juce::dontSendNotification);
+        {
+            const juce::ScopedValueSetter<bool> guard (refreshing, true);
+            duckDepth.setValue (controller.getChatDuckDepthDb(), juce::dontSendNotification);
+        }
+        duckDepth.setEnabled (controller.getChatDuck());
         preampToggle.setButtonText ("Automatic preamp on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
         preampHotToggle.setButtonText ("... also on hot programme (" + controller.getStripName (controller.getSelectedStrip()) + " strip)");
         preampHotToggle.setEnabled (controller.getSelectedParams().get (AutoPreampOn) >= 0.5f);
+        smartToggle.setButtonText ("Smart macros on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
+        smartToggle.setToggleState (controller.getSmartMacros(), juce::dontSendNotification);
         if (const auto text = describePreamp(); text != form.rows[preampRow].help)
         {
             form.rows[preampRow].help = text;
@@ -904,6 +945,9 @@ private:
     juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, protectionBox, paletteBox;
     juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
     juce::ToggleButton preampToggle { "Automatic preamp" }, preampHotToggle { "... also on hot programme" };
+    juce::ToggleButton smartToggle { "Smart macros" }; // docs/11 E34
+    juce::ToggleButton duckToggle { "Duck game under voice chat" }; // docs/11 E22
+    juce::Slider duckDepth;
     juce::ToggleButton contourToggle { "Loudness contour" }, followToggle { "Follow the system volume" };
     juce::Slider referenceSlider;
     juce::TextButton useVolumeButton { "Use current volume" };
@@ -1591,7 +1635,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
 {
     setTitle ("Flubsound settings");
 
-    static const char* names[] = { "Audio", "Correction", "Processing", "Hotkeys", "General", "Diagnostics" };
+    static const char* names[] = { "Audio", "Correction", "Processing", "Hearing", "Hotkeys", "General", "Diagnostics" };
     for (size_t i = 0; i < navButtons.size(); ++i)
     {
         auto& b = navButtons[i];
@@ -1606,12 +1650,14 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     audioPage = std::make_unique<AudioPage> (controller);
     correctionPage = std::make_unique<CorrectionPage> (controller);
     processingPage = std::make_unique<ProcessingPage> (controller, std::move (onPalette), palette);
+    hearingPage = std::make_unique<HearingPage> (controller); // docs/11 E32 (c), E33
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
     diagnosticsPage = std::make_unique<DiagnosticsPage> (controller);
     audioView.setViewedComponent (audioPage.get(), false);
     processingView.setViewedComponent (processingPage.get(), false);
-    for (auto* view : { &audioView, &processingView })
+    hearingView.setViewedComponent (hearingPage.get(), false);
+    for (auto* view : { &audioView, &processingView, &hearingView })
     {
         view->setScrollBarsShown (true, false);
         view->setScrollBarThickness (8);
@@ -1632,6 +1678,7 @@ SettingsDialog::~SettingsDialog()
     stopTimer();
     audioView.setViewedComponent (nullptr, false);
     processingView.setViewedComponent (nullptr, false);
+    hearingView.setViewedComponent (nullptr, false);
 }
 
 juce::DialogWindow* SettingsDialog::show (EngineController& controller, juce::Component* parent, HotkeyHooks hooks,
@@ -1893,6 +1940,7 @@ void SettingsDialog::showPage (Page page)
     audioView.setVisible (page == Page::Audio);
     correctionPage->setVisible (page == Page::Correction);
     processingView.setVisible (page == Page::Processing);
+    hearingView.setVisible (page == Page::Hearing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
     diagnosticsPage->setVisible (page == Page::Diagnostics);
@@ -1900,6 +1948,8 @@ void SettingsDialog::showPage (Page page)
         processingPage->refresh();
     if (page == Page::Correction)
         correctionPage->refresh();
+    if (page == Page::Hearing)
+        hearingPage->refresh();
     if (page == Page::Hotkeys)
         hotkeysPage->refresh();
     if (page == Page::General)
@@ -1917,6 +1967,8 @@ void SettingsDialog::timerCallback()
         audioPage->refresh();
     if (current == Page::Correction)
         correctionPage->refresh();
+    if (current == Page::Hearing)
+        hearingPage->refresh(); // the estimate and the dose are live
 }
 
 void SettingsDialog::paint (juce::Graphics& g)
@@ -1956,6 +2008,9 @@ void SettingsDialog::resized()
     // margin, so its content keeps the page width).
     processingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
     processingPage->setSize (pageArea.getWidth(), juce::jmax (1, processingPage->getHeight()));
+    // The Hearing page too (docs/11 E32 (c) / E33: the per-ear editor below the guard).
+    hearingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
+    hearingPage->setSize (pageArea.getWidth(), juce::jmax (1, hearingPage->getHeight()));
     correctionPage->setBounds (pageArea);
     hotkeysPage->setBounds (pageArea);
     generalPage->setBounds (pageArea);

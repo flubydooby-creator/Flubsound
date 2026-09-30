@@ -989,4 +989,153 @@ float AppSettings::getChatDuckDepthDb() const
     return std::isfinite (depth) ? std::clamp (depth, 3.0f, 6.0f) : 4.5f;
 }
 void AppSettings::setChatDuckDepthDb (float depthDb) { properties->setValue (Keys::chatDuckDepth, depthDb); }
+
+// ---- Hearing (docs/11 E32 (c), E34) ----------------------------------------------------
+namespace
+{
+namespace HearingKeys
+{
+constexpr const char* sensitivities = "hearing.sensitivities";
+constexpr const char* capOn = "hearing.capOn";
+constexpr const char* capDbA = "hearing.capDbA";
+constexpr const char* doses = "hearing.dailyDoses";
+} // namespace HearingKeys
+
+// HearingGuard's ranges (core/include/flub/engine/HearingGuard.h), repeated
+// here so the settings do not pull in the engine.
+constexpr float kSensitivityMin = 60.0f, kSensitivityMax = 150.0f;
+constexpr float kCapMin = 60.0f, kCapMax = 100.0f, kCapDefault = 85.0f;
+
+struct SensitivityEntry
+{
+    flub::platform::OutputEndpointIdentity identity;
+    float dbSpl = 0.0f;
+};
+
+std::vector<SensitivityEntry> readSensitivities (const juce::PropertiesFile& file)
+{
+    std::vector<SensitivityEntry> entries;
+    if (auto xml = file.getXmlValue (HearingKeys::sensitivities))
+        for (auto* e : xml->getChildWithTagNameIterator ("ENDPOINT"))
+        {
+            SensitivityEntry entry;
+            entry.identity.id = e->getStringAttribute ("id").toStdString();
+            entry.identity.hardwareId = e->getStringAttribute ("hardwareId").toStdString();
+            entry.identity.name = e->getStringAttribute ("name").toStdString();
+            entry.dbSpl = static_cast<float> (e->getDoubleAttribute ("dbSpl", 0.0));
+            if ((! entry.identity.id.empty() || ! entry.identity.name.empty()) && std::isfinite (entry.dbSpl))
+                entries.push_back (entry);
+        }
+    return entries;
+}
+
+int findSensitivity (const std::vector<SensitivityEntry>& entries, const flub::platform::OutputEndpointIdentity& endpoint)
+{
+    std::vector<flub::platform::OutputEndpointIdentity> stored;
+    stored.reserve (entries.size());
+    for (const auto& e : entries)
+        stored.push_back (e.identity);
+    return flub::platform::AudioDeviceWatcher::findEndpoint (stored, endpoint);
+}
+} // namespace
+
+std::optional<float> AppSettings::findHearingSensitivity (const flub::platform::OutputEndpointIdentity& endpoint) const
+{
+    const auto entries = readSensitivities (*properties);
+    if (const int found = findSensitivity (entries, endpoint); found >= 0)
+        return std::clamp (entries[static_cast<size_t> (found)].dbSpl, kSensitivityMin, kSensitivityMax);
+    return std::nullopt;
+}
+
+void AppSettings::setHearingSensitivity (const flub::platform::OutputEndpointIdentity& endpoint, std::optional<float> dbSpl)
+{
+    if (endpoint.id.empty() && endpoint.name.empty())
+        return;
+    if (dbSpl.has_value() && ! std::isfinite (*dbSpl))
+        return;
+    auto entries = readSensitivities (*properties);
+    const int found = findSensitivity (entries, endpoint);
+    if (dbSpl.has_value())
+    {
+        const SensitivityEntry entry { endpoint, std::clamp (*dbSpl, kSensitivityMin, kSensitivityMax) };
+        if (found >= 0)
+            entries[static_cast<size_t> (found)] = entry;
+        else
+            entries.push_back (entry);
+    }
+    else if (found >= 0)
+    {
+        entries.erase (entries.begin() + found);
+    }
+    else
+    {
+        return;
+    }
+
+    juce::XmlElement xml ("HEARINGSENSITIVITIES");
+    for (const auto& e : entries)
+    {
+        auto* child = xml.createNewChildElement ("ENDPOINT");
+        child->setAttribute ("id", juce::String (e.identity.id));
+        child->setAttribute ("hardwareId", juce::String (e.identity.hardwareId));
+        child->setAttribute ("name", juce::String (e.identity.name));
+        child->setAttribute ("dbSpl", static_cast<double> (e.dbSpl));
+    }
+    properties->setValue (HearingKeys::sensitivities, &xml);
+}
+
+bool AppSettings::getHearingCapEnabled() const { return properties->getBoolValue (HearingKeys::capOn, false); }
+void AppSettings::setHearingCapEnabled (bool on) { properties->setValue (HearingKeys::capOn, on); }
+
+float AppSettings::getHearingCapDbA() const
+{
+    const auto db = static_cast<float> (properties->getDoubleValue (HearingKeys::capDbA, kCapDefault));
+    return std::isfinite (db) ? std::clamp (db, kCapMin, kCapMax) : kCapDefault;
+}
+
+void AppSettings::setHearingCapDbA (float dbA)
+{
+    if (std::isfinite (dbA))
+        properties->setValue (HearingKeys::capDbA, std::clamp (dbA, kCapMin, kCapMax));
+}
+
+std::vector<AppSettings::DailyDose> AppSettings::getDailyDoses() const
+{
+    std::vector<DailyDose> doses;
+    if (auto xml = properties->getXmlValue (HearingKeys::doses))
+        for (auto* e : xml->getChildWithTagNameIterator ("DAY"))
+        {
+            DailyDose d { e->getStringAttribute ("date").trim(), e->getDoubleAttribute ("dose", 0.0) };
+            if (d.day.length() == 10 && std::isfinite (d.fraction) && d.fraction >= 0.0)
+                doses.push_back (d);
+        }
+    std::sort (doses.begin(), doses.end(), [] (const DailyDose& a, const DailyDose& b) { return a.day > b.day; });
+    return doses;
+}
+
+void AppSettings::setDailyDose (const juce::String& day, double fraction)
+{
+    if (day.length() != 10 || ! std::isfinite (fraction))
+        return;
+    auto doses = getDailyDoses();
+    doses.erase (std::remove_if (doses.begin(), doses.end(), [&day] (const DailyDose& d) { return d.day == day; }), doses.end());
+    doses.push_back ({ day, std::max (0.0, fraction) });
+    // ISO dates sort as text; keep `day`, the kDoseDaysKept - 1 days before it and any later one.
+    const auto parsed = juce::Time (day.substring (0, 4).getIntValue(), day.substring (5, 7).getIntValue() - 1, day.substring (8, 10).getIntValue(), 12, 0);
+    const auto oldest = (parsed - juce::RelativeTime::days (kDoseDaysKept - 1)).formatted ("%Y-%m-%d");
+    doses.erase (std::remove_if (doses.begin(), doses.end(), [&oldest] (const DailyDose& d) { return d.day < oldest; }), doses.end());
+    std::sort (doses.begin(), doses.end(), [] (const DailyDose& a, const DailyDose& b) { return a.day > b.day; });
+
+    juce::XmlElement xml ("DAILYDOSES");
+    for (const auto& d : doses)
+    {
+        auto* e = xml.createNewChildElement ("DAY");
+        e->setAttribute ("date", d.day);
+        e->setAttribute ("dose", d.fraction);
+    }
+    properties->setValue (HearingKeys::doses, &xml);
+}
+
+bool AppSettings::getSmartMacros (const juce::String& stripName) const { return properties->getBoolValue (stripKey (stripName, "smart"), false); }
+void AppSettings::setSmartMacros (const juce::String& stripName, bool on) { properties->setValue (stripKey (stripName, "smart"), on); }
 } // namespace flub::app

@@ -3,8 +3,8 @@
 // Signal flow (every speaker path adds into two ear accumulators; the output
 // is (make-up * speakers + LFE) * -3 dB trim * fold headroom * swap fade):
 //
-//   speaker (parametric):  x -> rear-cue shelf -> ITD line -+-> Lagrange(D_L) -> shadow_L -> ear L
-//                                                           +-> Lagrange(D_R) -> shadow_R -> ear R
+//   speaker (parametric):  x -> rear-cue shelf [-> 6 direction cues] -> ITD line -+-> Lagrange(D_L) -> shadow_L -> ear L
+//                                                                                 +-> Lagrange(D_R) -> shadow_R -> ear R
 //   speaker (HRIR):        x -> history -> dot(h_L) -> ear L,  dot(h_R) -> ear R
 //   LFE:                   x -> 4th-order Butterworth LP 120 Hz -> lfeGain -> both ears
 //                          (LfeFold, shared with the chain's BS.775 fold)
@@ -57,6 +57,33 @@
 // centre speaker therefore reaches both ears after a/c (~12 samples at 48 kHz):
 // that common path delay is part of the acoustic model, so the module
 // reports zero latency (no look-ahead, no block delay).
+//
+// Direction cues (docs/11 E28, VirtualizerParams::renderer). Classic, the
+// default and the v1 renderer, has one front/back cue: the -4 dB rear shelf,
+// switched at |az| = 90 deg (a 10 ms glide). Enhanced replaces it with six
+// sections per speaker, common to both ears (so the ITD and the ILD of the
+// sphere are untouched), whose gains are continuous in the angle from the
+// front, phi = |az| (c = cos phi):
+//   timbre     high shelf 3 kHz, Q 0.5: -0.6 * 10 log10 (P(az) / <P>), P the
+//              sphere's both-ear HF power alpha(theta_L)^2 + alpha(theta_R)^2
+//              and <P> = 2.5992 its mean over the circle: the centre (both
+//              ears in the head's shadow, +2.1 dB) and the sides (-1.1 dB at
+//              100 deg) move 60 % of the way to the same brightness;
+//   front      bell 4 kHz, Q 2.5, +5 dB * c (a cut behind), and high shelf
+//              13.5 kHz, +6 dB * max(0, c) (Blauert's frontal bands);
+//   rear       bells 1 kHz, Q 1.4, +4 dB, and 10 kHz, Q 2, +6 dB, both
+//              * max(0, -c) (the rear bands);
+//   pinna      bell -10 dB, Q 2, at 7.6 kHz * 2^(-0.1 (1 - c) / 2) (7.6 kHz
+//              in front, 7.1 kHz behind).
+// The four band gains are scaled by frontBack / 0.5 (0: none, 1: twice the
+// nominal contrast). The renderer switch glides: the Enhanced share e moves
+// 0 <-> 1 (one-pole 30 ms at the control rate), every cue gain is e times its
+// Enhanced value and the rear shelf's gain (1 - e) times its Classic value,
+// redesigned on the control ticks and interpolated per sample as for the
+// geometry. At e = 0 the cue sections are not run at all, so Classic is the
+// v1 code path bit for bit. The level match's diffuse-field gain includes
+// the cues and is recomputed when a glide ends. The HRIR renderer has its
+// own cues (the measured set) and ignores both settings.
 //
 // Control rate: every kControlInterval samples, counted in absolute stream
 // time, a "busy" virtualiser advances its geometry smoothers (angles and head
@@ -127,6 +154,16 @@ constexpr double kRearShelfHz = 4000.0;
 constexpr double kRearShelfQ = 0.70710678;
 constexpr float kRearShelfDb = -4.0f;
 
+// Direction cues of the Enhanced renderer (docs/11 E28, see the file comment).
+constexpr double kTimbreHz = 3000.0, kTimbreQ = 0.5, kTimbreShare = 0.6;
+constexpr double kLateralPowerMean = 2.599239; // <alpha(theta_L)^2 + alpha(theta_R)^2> over the circle
+constexpr double kFrontBandHz = 4000.0, kFrontBandQ = 2.5, kFrontBandDb = 5.0;
+constexpr double kFrontShelfHz = 13500.0, kFrontShelfQ = 0.70710678, kFrontShelfDb = 6.0;
+constexpr double kRearLowHz = 1000.0, kRearLowQ = 1.4, kRearLowDb = 4.0;
+constexpr double kRearHighHz = 10000.0, kRearHighQ = 2.0, kRearHighDb = 6.0;
+constexpr double kPinnaHz = 7600.0, kPinnaQ = 2.0, kPinnaDb = -10.0, kPinnaShiftOctaves = -0.1;
+constexpr float kNominalFrontBack = 0.5f; // frontBack at which the bands have their nominal gains
+
 // Early reflections: 6 taps, alternating ears (even -> left, odd -> right),
 // weights paired so both ears receive the same reflected energy
 // (0.5^2 + 0.4^2 + 0.3^2 = 0.5, i.e. -3 dB re the direct path at room = 1).
@@ -139,6 +176,7 @@ constexpr double kReflectionHpHz = 200.0;
 constexpr double kReflectionLpHz = 5000.0;
 
 constexpr float kGeometrySmoothingMs = 30.0f; // angles and head radius (one-pole)
+constexpr float kRendererSmoothingMs = 30.0f; // Classic <-> Enhanced share and frontBack (one-pole)
 constexpr float kShelfSmoothingMs = 10.0f;    // rear-cue shelf gain in dB (one-pole)
 constexpr float kGainRampMs = 20.0f;          // room and LFE levels (linear)
 constexpr float kFadeMs = 5.0f;               // layout swap: fade out, swap, fade in
@@ -198,6 +236,8 @@ VirtualizerParams sanitise (const VirtualizerParams& p) noexcept
     s.lfeOn = p.lfeOn;
     s.levelMatch = p.levelMatch;
     s.foldHeadroom = p.foldHeadroom;
+    s.renderer = p.renderer == VirtualizerRenderer::Enhanced ? VirtualizerRenderer::Enhanced : VirtualizerRenderer::Classic;
+    s.frontBack = clampOr (p.frontBack, 0.0f, 1.0f, d.frontBack);
     return s;
 }
 
@@ -289,6 +329,28 @@ double woodworth (double theta) noexcept
 double shadowAlpha (double thetaDeg) noexcept
 {
     return 1.05 + 0.95 * std::cos (thetaDeg * (180.0 / 150.0) * (kPi / 180.0));
+}
+
+/** The Enhanced renderer's six direction-cue sections for a speaker at
+    azimuth azDeg (see the file comment), with the Enhanced share `share`
+    (0 .. 1: every gain times it) and the band scale `scale` (frontBack /
+    0.5). At share 0 every section is an exact pass-through. */
+std::array<SvfCoeffs, 6> directionCues (double azDeg, double share, double scale, double fs) noexcept
+{
+    const double phi = std::abs (std::remainder (azDeg, 360.0)); // angle from the front
+    const double c = std::cos (phi * (kPi / 180.0));
+    const double front = std::max (0.0, c), rear = std::max (0.0, -c);
+    const double alphaL = shadowAlpha (std::abs (std::remainder (azDeg + 90.0, 360.0)));
+    const double alphaR = shadowAlpha (std::abs (std::remainder (azDeg - 90.0, 360.0)));
+    const double timbreDb = -kTimbreShare * 10.0 * std::log10 ((alphaL * alphaL + alphaR * alphaR) / kLateralPowerMean);
+    const double bands = share * scale;
+    return { SvfCoeffs::make (FilterType::HighShelf, kTimbreHz, kTimbreQ, share * timbreDb, fs),
+             SvfCoeffs::make (FilterType::Bell, kFrontBandHz, kFrontBandQ, bands * kFrontBandDb * c, fs),
+             SvfCoeffs::make (FilterType::HighShelf, kFrontShelfHz, kFrontShelfQ, bands * kFrontShelfDb * front, fs),
+             SvfCoeffs::make (FilterType::Bell, kRearLowHz, kRearLowQ, bands * kRearLowDb * rear, fs),
+             SvfCoeffs::make (FilterType::Bell, kRearHighHz, kRearHighQ, bands * kRearHighDb * rear, fs),
+             SvfCoeffs::make (FilterType::Bell, kPinnaHz * std::pow (2.0, kPinnaShiftOctaves * 0.5 * (1.0 - c)), kPinnaQ,
+                              share * kPinnaDb, fs) };
 }
 
 /** 3rd-order (4-tap) Lagrange interpolator for a delay of `delay` samples,
@@ -412,11 +474,12 @@ float HeadphoneVirtualizer::speakerAzimuthDeg (ChannelLayout layout, int channel
 }
 
 void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm, double sampleRate, int length, std::vector<float>& left,
-                                           std::vector<float>& right)
+                                           std::vector<float>& right, VirtualizerRenderer renderer, float frontBack)
 {
     // The design of updateGeometry() (snap) and the per-sample path of
-    // renderParametric<false>() for one speaker: shelf -> ITD line (Lagrange
-    // read) -> head shadow, then the output trim (make-up 1, no LFE).
+    // renderParametric<false, Cues>() for one speaker: shelf (-> direction
+    // cues) -> ITD line (Lagrange read) -> head shadow, then the output trim
+    // (make-up 1, no LFE).
     const auto n = static_cast<size_t> (std::max (1, length));
     left.assign (n, 0.0f);
     right.assign (n, 0.0f);
@@ -426,12 +489,23 @@ void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm,
     const double headDelay = radius / kSpeedOfSound * fs;
     const double w0 = kSpeedOfSound / radius;
 
+    const bool enhanced = renderer == VirtualizerRenderer::Enhanced;
+    const float share = enhanced ? 1.0f : 0.0f;
     const auto shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ,
-                                        static_cast<double> (std::abs (az) > 90.0f ? kRearShelfDb : 0.0f), fs);
+                                        static_cast<double> ((std::abs (az) > 90.0f ? kRearShelfDb : 0.0f) * (1.0f - share)), fs);
+    const float scale = clampOr (frontBack, 0.0f, 1.0f, VirtualizerParams {}.frontBack) / kNominalFrontBack;
+    const auto cues = directionCues (static_cast<double> (az), static_cast<double> (share), static_cast<double> (scale), fs);
     std::vector<float> line (n, 0.0f);
     SvfState shelfState;
+    std::array<SvfState, kNumCues> cueState {};
     for (size_t i = 0; i < n; ++i)
-        line[i] = svfTick (shelf, shelfState, i == 0 ? 1.0f : 0.0f);
+    {
+        float v = svfTick (shelf, shelfState, i == 0 ? 1.0f : 0.0f);
+        if (enhanced)
+            for (size_t k = 0; k < cues.size(); ++k)
+                v = svfTick (cues[k], cueState[k], v);
+        line[i] = v;
+    }
 
     for (size_t e = 0; e < 2; ++e)
     {
@@ -616,6 +690,8 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     sideAngle.reset (controlRate, kGeometrySmoothingMs, params.sideAngleDeg);
     rearAngle.reset (controlRate, kGeometrySmoothingMs, params.rearAngleDeg);
     headRadius.reset (controlRate, kGeometrySmoothingMs, params.headRadiusMm);
+    enhanced.reset (controlRate, kRendererSmoothingMs, params.renderer == VirtualizerRenderer::Enhanced ? 1.0f : 0.0f);
+    contrast.reset (controlRate, kRendererSmoothingMs, params.frontBack / kNominalFrontBack);
     for (auto& sp : speakers)
         sp.shelfDb.reset (controlRate, kShelfSmoothingMs, 0.0f);
     roomGain.reset (fs, kGainRampMs, params.roomAmount);
@@ -677,6 +753,8 @@ void HeadphoneVirtualizer::setParams (const VirtualizerParams& p) noexcept FLUB_
     sideAngle.setTarget (s.sideAngleDeg);
     rearAngle.setTarget (s.rearAngleDeg);
     headRadius.setTarget (s.headRadiusMm);
+    enhanced.setTarget (s.renderer == VirtualizerRenderer::Enhanced ? 1.0f : 0.0f);
+    contrast.setTarget (s.frontBack / kNominalFrontBack);
     lfe.setGain (LfeFold::gainFor (s.lfeOn, s.lfeGainDb));
     roomGain.setTarget (s.roomAmount);
     // Geometry glides and layout swaps run on the control ticks, which sit at
@@ -722,11 +800,14 @@ void HeadphoneVirtualizer::updateGeometry (bool snap) noexcept
         }
 
         const float shelfTarget = std::abs (az) > 90.0f ? kRearShelfDb : 0.0f;
+        designCues (sp);
         if (snap)
         {
             sp.shelfDb.setImmediate (shelfTarget);
-            sp.shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ, static_cast<double> (shelfTarget), fs);
+            sp.shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ,
+                                        static_cast<double> (shelfTarget * (1.0f - enhanced.getCurrent())), fs);
             sp.prevShelf = sp.shelf;
+            sp.prevCue = sp.cue;
         }
         else
         {
@@ -737,10 +818,21 @@ void HeadphoneVirtualizer::updateGeometry (bool snap) noexcept
     }
 }
 
+void HeadphoneVirtualizer::designCues (Speaker& sp) noexcept
+{
+    // Classic (share 0 and settled): the sections are not run; skip the design.
+    if (! cuesActive)
+        return;
+    sp.cue = directionCues (static_cast<double> (sp.azimuth), static_cast<double> (enhanced.getCurrent()),
+                            static_cast<double> (contrast.getCurrent()), spec.sampleRate);
+}
+
 void HeadphoneVirtualizer::clearChannel (int channel) noexcept
 {
     auto& sp = speakers[static_cast<size_t> (channel)];
     sp.shelfState.reset();
+    for (auto& st : sp.cueState)
+        st.reset();
     for (auto& ear : sp.ears)
         ear.state.reset();
     auto& line = itdLines[static_cast<size_t> (channel)];
@@ -782,6 +874,12 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     sideAngle.setImmediate (sideAngle.getTarget());
     rearAngle.setImmediate (rearAngle.getTarget());
     headRadius.setImmediate (headRadius.getTarget());
+    enhanced.setImmediate (enhanced.getTarget());
+    contrast.setImmediate (contrast.getTarget());
+    cuesActive = enhanced.getCurrent() > 0.0f;
+    if (! cuesActive)
+        for (auto& sp : speakers)
+            sp.cue = sp.prevCue = std::array<SvfCoeffs, kNumCues> {}; // identity (not run)
     updateGeometry (true);
     clearState();
     fadeDir = 0;
@@ -841,7 +939,10 @@ float HeadphoneVirtualizer::diffuseGainFor() const noexcept
             ref += w * static_cast<double> (d[0] * d[0] + d[1] * d[1]);
             if (! useHrir)
             {
-                const double shelf = std::norm (sp.shelf.response (f, fs));
+                double shelf = std::norm (sp.shelf.response (f, fs));
+                if (cuesActive)
+                    for (const auto& cue : sp.cue)
+                        shelf *= std::norm (cue.response (f, fs));
                 for (const auto& ear : sp.ears)
                     ears += w * shelf * std::norm (ear.shadow.response (f, fs));
             }
@@ -863,6 +964,7 @@ void HeadphoneVirtualizer::tick() noexcept
     for (auto& sp : speakers)
     {
         sp.prevShelf = sp.shelf;
+        sp.prevCue = sp.cue;
         for (auto& ear : sp.ears)
         {
             ear.prevDelay = ear.delay;
@@ -892,9 +994,28 @@ void HeadphoneVirtualizer::tick() noexcept
         fadeDir = fadePos < fadeSamples ? 1 : 0;
     }
 
-    // 2. Continuous geometry: glide angles and head radius, redesign delays and
-    //    head-shadow filters, ramp to them across the coming control period.
-    if (frontAngle.isSmoothing() || sideAngle.isSmoothing() || rearAngle.isSmoothing() || headRadius.isSmoothing())
+    // 2. The renderer's direction cues (E28): glide the Enhanced share and
+    //    the band scale. In Classic with nothing to glide the scale just
+    //    follows its target (the cues are not run), so a frontBack change
+    //    leaves the Classic render untouched.
+    const bool shareWasOn = cuesActive;
+    if (! enhanced.isSmoothing() && enhanced.getCurrent() == 0.0f)
+        contrast.setImmediate (contrast.getTarget());
+    const bool cuesMoving = enhanced.isSmoothing() || contrast.isSmoothing();
+    if (cuesMoving)
+    {
+        enhanced.next();
+        contrast.next();
+    }
+    // The cues run while the share is above 0, and for the one period that
+    // ramps them down to the pass-through.
+    cuesActive = enhanced.getCurrent() > 0.0f || enhanced.isSmoothing() || (shareWasOn && cuesMoving);
+
+    // 3. Continuous geometry: glide angles and head radius, redesign delays,
+    //    head-shadow filters and cues, ramp to them across the coming control
+    //    period.
+    const bool geometryMoving = frontAngle.isSmoothing() || sideAngle.isSmoothing() || rearAngle.isSmoothing() || headRadius.isSmoothing();
+    if (geometryMoving)
     {
         frontAngle.next();
         sideAngle.next();
@@ -903,21 +1024,42 @@ void HeadphoneVirtualizer::tick() noexcept
         updateGeometry (false);
         ramping = true;
     }
+    else if (cuesMoving)
+    {
+        for (auto& sp : speakers)
+            if (sp.role == Role::Speaker)
+                designCues (sp);
+        ramping = true;
+    }
 
-    // 3. Rear-cue shelves (targets set by updateGeometry()).
+    // 4. Rear-cue shelves (targets set by updateGeometry(); the gain is the
+    //    Classic share of it).
     bool shelvesMoving = false;
     for (auto& sp : speakers)
     {
-        if (sp.role != Role::Speaker || ! sp.shelfDb.isSmoothing())
+        if (sp.role != Role::Speaker || ! (sp.shelfDb.isSmoothing() || cuesMoving))
             continue;
-        const float db = sp.shelfDb.next();
-        sp.shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ, static_cast<double> (db), spec.sampleRate);
+        const float db = sp.shelfDb.isSmoothing() ? sp.shelfDb.next() : sp.shelfDb.getCurrent();
+        sp.shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ, static_cast<double> (db * (1.0f - enhanced.getCurrent())),
+                                    spec.sampleRate);
         ramping = true;
         shelvesMoving = shelvesMoving || sp.shelfDb.isSmoothing();
     }
 
+    if (cuesMoving && ! enhanced.isSmoothing() && ! contrast.isSmoothing())
+    {
+        // The glide has landed: the level match starts from the new design's
+        // diffuse-field gain (the make-up still moves at most 6 dB/s).
+        diffuseGain = diffuseGainFor();
+    }
+    if (shareWasOn && ! cuesActive)
+        for (auto& sp : speakers)
+            for (auto& st : sp.cueState)
+                st.reset(); // no longer run (the last ramp reached the pass-through); start clean next time
+
     busy = ramping || shelvesMoving || fadeDir != 0 || holdRemaining > 0 || params.layout != runningLayout || frontAngle.isSmoothing()
-           || sideAngle.isSmoothing() || rearAngle.isSmoothing() || headRadius.isSmoothing();
+           || sideAngle.isSmoothing() || rearAngle.isSmoothing() || headRadius.isSmoothing() || enhanced.isSmoothing()
+           || contrast.isSmoothing();
 }
 
 //==============================================================================

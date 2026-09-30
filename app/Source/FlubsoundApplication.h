@@ -11,9 +11,19 @@
 //   5. HotkeyManager (system-wide shortcuts)
 //   6. the update check (docs/11 E54): only when the user switched it on;
 //      a newer release is announced once in the tray
+//   7. the on-screen display of hotkey actions (ui::Osd, docs/11 E56; the
+//      tray bubble while it is off or Tournament mode holds it) and the
+//      remote control socket (RemoteControl: `flubsound-cli ctl`)
 // Closing the window hides it to the tray when "close to tray" is on (on
 // Linux, where a tray host is not guaranteed, the window is minimised
 // instead); "Quit" in the tray or a system quit request ends the app.
+//
+// Forwarding (docs/11 E56): `FlubsoundPro --ctl <action> [strip] [value]`
+// sends that action to the running instance over RemoteControl's socket
+// exactly as `flubsound-cli ctl` does, prints the reply and exits with ctl's
+// code (3: not running; it never starts the app). A second plain start shows
+// the running instance's window: JUCE forwards it on Windows and macOS; on
+// Linux, where JUCE forwards nothing, it sends "Show" over the socket.
 //
 // Headless mode: --screenshot <out.png> [--mode music|gaming] [--size WxH]
 // [--seconds S] [--scale F] [--device "output device name"] (see
@@ -31,7 +41,12 @@ class EngineController;
 class MainWindow;
 class TrayIcon;
 class HotkeyManager;
+class RemoteControl;
 class ScreenshotDriver;
+namespace ui
+{
+class Osd;
+}
 namespace diagnostics
 {
 class DiagnosticsSession;
@@ -62,6 +77,7 @@ public:
 private:
     void initialiseInteractive();
     bool initialiseScreenshot();
+    void forwardControlRequest();
     void closeButtonPressed();
 
     std::unique_ptr<diagnostics::DiagnosticsSession> diagnosticsSession; // first in, last out
@@ -70,6 +86,8 @@ private:
     std::unique_ptr<MainWindow> mainWindow;
     std::unique_ptr<TrayIcon> trayIcon;
     std::unique_ptr<HotkeyManager> hotkeys;
+    std::unique_ptr<ui::Osd> osd;                    // docs/11 E56
+    std::unique_ptr<RemoteControl> remoteControl;    // docs/11 E56: `flubsound-cli ctl`
     std::unique_ptr<diagnostics::update::UpdateChecker> updateCheck; // docs/11 E54: opt-in, notify-only
     std::unique_ptr<ScreenshotDriver> screenshot;
     bool screenshotMode = false;

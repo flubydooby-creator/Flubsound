@@ -72,6 +72,7 @@ MainComponent::MainComponent (EngineController& c)
     takePresetNotices(); // warnings of the presets restored at start-up
     levels.onResetRequested = [this] { requestLoudnessReset(); };
     loudness.onResetRequested = [this] { requestLoudnessReset(); };
+    loudness.hearingSource = [this] { return LoudnessPanel::hearingReadoutOf (controller); }; // docs/11 E32 (c): the dose row
     loudness.setTooltip ("Click the integrated loudness to reset it (also resets the true-peak hold).\n"
                          "IN>OUT: short-term loudness out minus in. LIM: share of about the last 10 s with the limiter more than 1 dB down. "
                          "PRE: the automatic preamp (off unless Automatic Preamp is on).\n"

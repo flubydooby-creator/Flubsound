@@ -91,14 +91,18 @@ public:
     juce::StringArray getFailures() const;
 
     /** Runs an action exactly as the hotkey would (the registered chords call
-        it; the tray menu drives EngineController directly). */
-    void perform (HotkeyAction action);
+        it; the tray menu drives EngineController directly) and returns the
+        feedback text. The second form names the strip (`flubsound-cli ctl`,
+        docs/11 E56; global actions ignore it). */
+    juce::String perform (HotkeyAction action);
+    juce::String perform (HotkeyAction action, int strip);
 
     /** ChatMix balance change per press (5 presses from centre to one end:
         the other side -1.9 dB after one press, muted after five; docs/11 E22). */
     static constexpr float kChatMixStep = 0.2f;
 
-    /** Feedback after an action (e.g. for a tray bubble / on-screen display). */
+    /** Feedback after an action: the on-screen display (ui/Osd.h), else a
+        tray bubble (FlubsoundApplication). */
     std::function<void (HotkeyAction action, const juce::String& feedback)> onActionPerformed;
 
     /** Called on the message thread whenever an action's status changes. */

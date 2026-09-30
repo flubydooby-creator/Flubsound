@@ -4189,7 +4189,7 @@ It is valid once 5 programme frames (0.5 s) are in. The state goes to other thre
 
 **CLI.** `flubsound-cli analyze` prints the readings of the whole file (`ContentAnalysis::analyseWhole`: one window over every programme frame) and `suggest`: the multipliers Smart would apply there, with one-line notes (`content` and `suggest` in `--json`).
 
-**Known limitations.** The law's thresholds are tuned on synthetic programme only; E34's re-tune pass, real limited masters and the MUSHRA of Smart against static macros on 10 masters are gated. No factory preset sets `smart`, and the desktop app, the plug-in and the CLI's render path do not yet hand a preset's flag to the chain (the core API and the preset field are in; the wiring is in their files). The first 0.5 s of a programme, before the state is valid, gets the static macros; with the maximizer off that onset is not held under a ceiling. The classifier (Music / Speech / Game-FX / Silence) is E34's next unit.
+**Known limitations.** The law's thresholds are tuned on synthetic programme only; E34's re-tune pass, real limited masters and the MUSHRA of Smart against static macros on 10 masters are gated. No factory preset sets `smart`, and the desktop app, the plug-in and the CLI's render path do not yet hand a preset's flag to the chain (the core API and the preset field are in; the wiring is in their files). The first 0.5 s of a programme, before the state is valid, gets the static macros; with the maximizer off that onset is not held under a ceiling (the limited master at Punch 100: 7.07 dBTP in its first half second with Smart as without, 2.39 dBTP after the first second against 2.44 at Punch 0; static 4.31). The classifier (Music / Speech / Game-FX / Silence) is E34's next unit.
 
 ---
 

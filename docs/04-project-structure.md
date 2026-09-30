@@ -120,6 +120,7 @@ Flubsound/
 │   │   ├── analysis/                       L1 read-only meters
 │   │   │   ├── CallbackTiming.h            lock-free per-callback duration / interval histograms, read by another thread (docs/11 E45)
 │   │   │   ├── ChannelWeights.h            ITU-R BS.1770-4 channel weights for stereo / 5.1 / 7.1 (LFE excluded)
+│   │   │   ├── ContentAnalysis.h           the per-strip content tap (docs/11 E34): PLR, crest, tilt, sub-100 Hz share, M/S width, flux, onsets in 100 ms frames; AnalysisState and its seqlock snapshot
 │   │   │   ├── Discontinuity.h             streaming, allocation-free discontinuity detector: clicks, dropouts, NaN / Inf runs, DC steps (docs/11 E53 soak, analyze --glitches)
 │   │   │   ├── LoudnessMeter.h             BS.1770-4 / EBU R128: momentary, short-term, integrated, LRA
 │   │   │   ├── LatencyProbe.h          loopback latency probe: exponential sweeps, deconvolution, SNR gate, median (docs/11 E42d)
@@ -154,6 +155,7 @@ Flubsound/
 │   └── src/                                implementations, same area/name as the header
 │       ├── analysis/
 │       │   ├── CallbackTiming.cpp          log buckets at 1/8 octave, percentiles, windows (since)
+│       │   ├── ContentAnalysis.cpp         K-weighting, octave band-passes normalised on pink, a 100 Hz low-pass, 10 ms onset sub-frames, the 3 s programme window, analyseWhole()
 │       │   ├── Discontinuity.cpp           4th-order-difference spike and cubic-fit jump tests, recurrence filter, dropout / NaN / DC-step runs
 │       │   ├── LatencyProbe.cpp        sweep generation, regularised deconvolution, parabolic peak, locate() for a reference channel
 │       │   ├── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
@@ -251,7 +253,8 @@ Flubsound/
 │   │   ├── test_app_routing_tournament.cpp docs/11 E55: the process cache, Tournament mode for routing and automatic profiles
 │   │   ├── test_app_tournament.cpp docs/11 E55: Tournament mode in the app (anti-cheat switch-on, no foreground poll or process open, persistence, badge, tray)
 │   │   ├── test_app_ui_compare.cpp         docs/11 E37: per-bank A/B matching, module / virtualiser ears, the bypass line, the blind A/B/X test
-│   │   ├── test_app_ui_guards.cpp          docs/11 E21 / E07: Dynamic Range and Smoothness in the Simple view and on the rack's cards
+│   │   ├── test_app_ui_guards.cpp          docs/11 E21 / E07: Dynamic Range and Smoothness in the Simple view and on the rack's cards; the batch 5 keys on their cards; Smart macros (E34)
+│   │   ├── test_app_hearing.cpp            docs/11 E32 (c) / E33: Settings › Hearing (sensitivity per endpoint, "unknown", the cap, the daily dose), the per-ear profile's file and its sound, the dose row
 │   │   ├── test_app_ui_hints.cpp           docs/11 E39: a plain-language hint for every parameter key in both modes, as tooltips
 │   │   ├── test_app_ui_reflow.cpp          docs/11 E39 / E38: reflow below 1100 px, the routing drawer, relevance-ordered rack, the tray flyout, the protection readouts
 │   │   └── test_app_ui_status.cpp          docs/11 E51 / E52 / E42a / E48a / E06 / E11 / E38: device banner, notices, latency prompt, PipeWire quantum plan, protection strength, governor chip, active-now chips, loudness readouts
@@ -316,7 +319,8 @@ Flubsound/
 │   ├── test_parameters_headroom.cpp        docs/11 E11 / E05 / E19: layout version 3 parameters, the chain's static-boost model and automatic preamp, named maximizer styles
 │   ├── test_signal_hygiene.cpp             docs/11 E10: the rate-aware saturator table, alias rows, residual-path DC blockers, the capture FIFO's sanitiser
 │   ├── test_soak.cpp                       docs/11 E53: DiscontinuityDetector on clean and damaged programme, the 10 s chain soak under automation, injected faults
-│   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild (docs/11 E60 / E53 / E24)
+│   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild and the content / suggest sections (docs/11 E60 / E53 / E24 / E34)
+│   ├── test_content_analysis.cpp           docs/11 E34: ContentAnalysis readings, block-size independence, the Smart law, Smart Punch on a limited master, bit-identity, the preset flag
 │   ├── test_cli_quality.cpp                tests/quality_targets.json and the KNOWN_GAP ratchet of `flubsound-cli quality` (docs/11 E59), hygiene metrics' meta-validation
 │   ├── test_cli_demo.cpp                   flubsound-cli demo: every pair written, matched within 0.5 LU unless a level feature, index band deltas = analyze, deterministic across worker counts, --input
 │   ├── test_cli_stats.cpp                  --protection off|normal|strict and render.stats' governor state / reasons (docs/11 E06)
@@ -406,7 +410,7 @@ Flubsound/
 │           ├── EqCurveEditor.{h,cpp}       interactive 10-band EQ curve drawn from ParametricEq::responseDb
 │           ├── WaveformHistory.{h,cpp}     scrolling min/max output history with a short-term LUFS trace
 │           ├── LevelMeters.{h,cpp}         input / output peak + RMS bars, peak hold, clip latch, true-peak readout
-│           ├── LoudnessPanel.{h,cpp}       LUFS M / S / I, LRA, gain-reduction meters, correlation, width
+│           ├── LoudnessPanel.{h,cpp}       LUFS M / S / I, LRA, gain-reduction meters, correlation, width; the hearing guard's dose row (docs/11 E32)
 │           ├── MeterSnapshot.{h,cpp}       one frame of MeterBus values, read once per frame
 │           ├── ModuleRack.{h,cpp}          horizontally scrolling rack of ModuleCards, focused (expanded) view
 │           ├── ModuleCard.{h,cpp}          one module card; ModuleDescriptor::all() is the table of the ten modules
@@ -418,7 +422,9 @@ Flubsound/
 │           ├── QuickControls.{h,cpp}       the tray flyout: Boost, preset stepper, Bypass, open the window (docs/11 E39)
 │           ├── SimpleStatusPanel.{h,cpp}the Simple view's headset status and loudness meter in plain words (docs/11 E39)
 │           ├── RoutingPanel.{h,cpp}        strips, gains, mutes, per-app assignment
-│           └── SettingsDialog.{h,cpp}      Audio / Correction / Processing / Hotkeys / General / Diagnostics pages
+│           ├── HearingPage.{h,cpp}         Settings › Hearing: sensitivity, estimate, listening-level cap, daily dose (docs/11 E32 (c))
+│           ├── PersonalProfileEditor.{h,cpp} the per-ear listening preference's editor on the Hearing page (docs/11 E33)
+│           └── SettingsDialog.{h,cpp}      Audio / Correction / Processing / Hearing / Hotkeys / General / Diagnostics pages
 │
 ├── plugin/                                 FlubsoundFX: VST3 + Standalone (+ AU on macOS)
 │   ├── CMakeLists.txt                      juce_add_plugin (manufacturer code Flub, plug-in code FlFx), explicit sources
@@ -995,6 +1001,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_soak.cpp`: docs/11 E53 - the discontinuity detector on clean programme (nothing), on skips, impulses, steps, dropouts, NaN runs and DC steps (once each, block-size invariant), and the 10 s chain soak under automation (no click, dropout, NaN or DC step);
   - `test_spatial_metrics.cpp`: the docs/11 E60 stage 2 spatial metrics - IACC, ITD, DRR and 1/3-octave levels read their known values on synthetic binaural impulses, `HeadphoneVirtualizer::parametricHrir` equals the module's own output, today's parametric renderer reproduces its weak values (pinned), a synthetic pinna notch moves the diffuse-field deviation at its band and follows a shift, and `splitImpulses` separates a capture;
   - `test_focus_ild.cpp`: the docs/11 E24 HRTF-rendered ILD method - known ILDs read back per band, the rendered sources carry the model's own ILD, and the positional focus at off / 50 / 100 % at 15° steps (against the flat-ILD source);
+  - `test_content_analysis.cpp`: docs/11 E34 - the content tap reads pink / white tilt, the sub-100 Hz share, correlation and M/S width, a sine's crest, a limited master's PLR and the kicks' onsets; frames close on the sample count and silence holds the state; the Smart law and its bit-identical identity; on a synthetic limited master Smart Punch 100 costs <= 0.1 LU (static 0.14 / 0.47 LU), open programme within 0.2 LU of static; Smart renders bit-identical twice and across block sizes, Smart off bit-identical; the multipliers publish and glide back; the preset's `"smart"` flag;
   - `test_cli_analyze.cpp`, `test_cli_quality.cpp`, `test_cli_stats.cpp`: `flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild`, the `quality` targets file and KNOWN_GAP ratchet (a deliberately regressed render fails), and `--protection` with `render.stats`' governor state and reasons;
   - `test_driver_shared.cpp` + `test_driver_shared_c.c`: the driver ↔ engine ABI header (`platform/windows/driver/FlubVirtualAudioShared.h`) on every OS, and its C89 build and layout on GCC / Clang;
   - `test_protection_measured.cpp`: docs/11 E06 Phase 3 - `WeightedResidual`'s meta-validation (a linear span reads nothing at any block size, a 1 % cubic its analytic THD, masked noise under exposed harmonics, gain riding is not distortion), the feed-forward (the limiter's programme envelope and the clipper modelled) and the PLR meter, the measured loop on a synthetic plant, the harmonics policy and the Done-when rows through the chain at Normal (settled within 3 s, still after 4 s, sag ≤ 1 dB), and block-size independence while the loop acts;

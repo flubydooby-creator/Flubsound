@@ -21,8 +21,18 @@
 //     ILD : head-shadow  H(s) = (1 + alpha s / (2 w0)) / (1 + s / (2 w0)),
 //           w0 = c/a, alpha(theta) = 1.05 + 0.95 cos(theta * 180/150 deg),
 //           bilinear-transformed (BiquadCoeffs::fromAnalogFirstOrder).
-//     Rear cue: -4 dB high shelf @ 4 kHz for |azimuth| > 90 deg (pinna
-//           shadow; resolves the front/back symmetry of a sphere).
+//     Rear cue (renderer Classic, the default): -4 dB high shelf @ 4 kHz
+//           for |azimuth| > 90 deg (pinna shadow; resolves the front/back
+//           symmetry of a sphere).
+//     Direction cues (renderer Enhanced, docs/11 E28): instead of that
+//           binary shelf, six sections per speaker whose gains are
+//           continuous functions of the angle from the front, phi = |az|:
+//           a lateral timbre match (high shelf 3 kHz, 60 % of the sphere's
+//           both-ear HF power difference to its circle average), Blauert's
+//           directional bands (front: 4 kHz bell and 13.5 kHz shelf, gains
+//           * cos phi and * max(0, cos phi); rear: 1 kHz and 10 kHz bells,
+//           * max(0, -cos phi)), scaled by frontBack, and a pinna notch
+//           (-10 dB, Q 2) at 7.6 kHz * 2^(-0.1 (1 - cos phi) / 2).
 //     Early reflections: 6 taps 4-19 ms, band-passed (HP 200 Hz, LP 5 kHz),
 //           alternating ears,
 //           level = roomAmount -> externalisation ("out of head").
@@ -83,6 +93,15 @@ struct HrirSet
     std::vector<std::vector<float>> left, right; // [speaker][tap], speaker order as layout
 };
 
+/** The parametric renderer's direction cues (docs/11 E28): Classic is the
+    v1 rear shelf; Enhanced the angle-continuous pinna notch, directional
+    bands and lateral timbre match. Switching glides (see setParams()). */
+enum class VirtualizerRenderer : uint8_t
+{
+    Classic = 0,
+    Enhanced
+};
+
 struct VirtualizerParams
 {
     ChannelLayout layout = ChannelLayout::Surround71;
@@ -95,6 +114,8 @@ struct VirtualizerParams
     bool lfeOn = true;           // false: the LFE is not rendered (fades out over 20 ms)
     bool levelMatch = true;      // loudness of the BS.775 downmix (E28a); off glides to unity
     bool foldHeadroom = true;    // binaural output held at or below 0 dBFS (E28a)
+    VirtualizerRenderer renderer = VirtualizerRenderer::Classic; // direction cues (E28)
+    float frontBack = 0.5f;      // 0 .. 1, Enhanced's directional-band gains x frontBack / 0.5 (Classic ignores it)
 
     bool operator== (const VirtualizerParams&) const = default;
 };
@@ -111,7 +132,9 @@ public:
     const char* name() const noexcept override { return "Headphone Virtualizer"; }
 
     /** RT-safe. Angle / head-radius changes glide (one-pole, 30 ms) and the
-        filters are redesigned on 16-sample control ticks; a layout change
+        filters are redesigned on 16-sample control ticks; so do the renderer
+        (Classic <-> Enhanced: a 30 ms glide of every cue gain between the
+        two designs) and frontBack; a layout change
         fades out (~5 ms), swaps at silence, pre-rolls (2 ms, up to 10 ms for
         an HRIR) and fades back in (~5 ms). See HeadphoneVirtualizer.cpp. */
     void setParams (const VirtualizerParams& p) noexcept FLUB_NONBLOCKING;
@@ -122,15 +145,17 @@ public:
 
     /** The parametric renderer's own head-related impulse responses for a
         source at any azimuth (degrees, + = right, 0 = front; wrapped into
-        -180 .. 180): the rear-cue shelf, the Woodworth ITD (Lagrange) and the
-        Brown-Duda head shadow of one speaker path times the -3 dB trim,
-        sample for sample what process() renders for a speaker at that
-        azimuth with room 0, the level match and the fold headroom off. The
-        head radius clamps as VirtualizerParams::headRadiusMm does. For
-        measurements (flub/analysis/SpatialMetrics.h, docs/11 E60 / E24):
-        non-RT, allocates. */
+        -180 .. 180): the direction cues of `renderer` (Classic: the rear-cue
+        shelf; Enhanced: the six cue sections at frontBack), the Woodworth
+        ITD (Lagrange) and the Brown-Duda head shadow of one speaker path
+        times the -3 dB trim, sample for sample what process() renders for a
+        speaker at that azimuth with room 0, the level match and the fold
+        headroom off. The head radius and frontBack clamp as in
+        VirtualizerParams. For measurements (flub/analysis/SpatialMetrics.h,
+        docs/11 E60 / E24 / E28): non-RT, allocates. */
     static void parametricHrir (float azimuthDeg, float headRadiusMm, double sampleRate, int length, std::vector<float>& left,
-                                std::vector<float>& right);
+                                std::vector<float>& right, VirtualizerRenderer renderer = VirtualizerRenderer::Classic,
+                                float frontBack = 0.5f);
 
     /** Level match state, for meters and tests (read on the audio thread or
         between process() calls): the make-up applied to the speakers now,
@@ -143,6 +168,7 @@ private:
     // ---- implementation-defined below this line ----
     static constexpr int kControlInterval = 16; // samples between geometry updates
     static constexpr int kNumReflections = 6;
+    static constexpr int kNumCues = 6; // Enhanced's direction-cue sections per speaker
 
     enum class Role : uint8_t
     {
@@ -170,6 +196,8 @@ private:
         OnePoleSmoother shelfDb; // rear-cue shelf gain, control rate
         SvfCoeffs shelf, prevShelf;
         SvfState shelfState;
+        std::array<SvfCoeffs, kNumCues> cue {}, prevCue {}; // Enhanced's direction cues (after the shelf)
+        std::array<SvfState, kNumCues> cueState {};
         std::array<EarPath, 2> ears {}; // 0 = left, 1 = right
         bool clean = true;              // every state of this channel is zero
     };
@@ -189,10 +217,11 @@ private:
     void tick() noexcept;
     void swapLayout() noexcept;
     void updateGeometry (bool snap) noexcept;
+    void designCues (Speaker& sp) noexcept;
     void clearState() noexcept;
     void clearChannel (int channel) noexcept;
     void renderSegment (const AudioBlock& block, int start, int length, int numInputs) noexcept;
-    template <bool Ramp>
+    template <bool Ramp, bool Cues>
     void renderParametric (Speaker& sp, float* line, const float* x, int length) noexcept;
     void renderHrir (HrirPath& path, const float* x, int length) noexcept;
     void renderLfe (const float* x, int length) noexcept;
@@ -208,6 +237,11 @@ private:
     ChannelLayout runningLayout = ChannelLayout::Surround71;
     std::array<Speaker, kMaxChannels> speakers {};
     OnePoleSmoother frontAngle, sideAngle, rearAngle, headRadius; // control rate
+    // Direction cues (E28): the Enhanced share (0 = Classic, 1 = Enhanced)
+    // and the directional-band scale, control rate. While the share is 0 and
+    // settled the cue sections do not run (Classic is the v1 code path).
+    OnePoleSmoother enhanced, contrast;
+    bool cuesActive = false;
 
     // Parametric ITD delay lines (one per channel, shared write position).
     std::array<std::vector<float>, kMaxChannels> itdLines;

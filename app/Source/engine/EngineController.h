@@ -75,6 +75,14 @@
 //              (setContourReferenceVolumeDb / useCurrentVolumeAsReference;
 //              ProcessingChain::setListeningLevelDb). getListeningLevel()
 //              for the UI. The contour itself is contour.on, per preset.
+// Hearing      getHearing() / setHearingSensitivity() / setHearingCap():
+//              the hearing guard's listening-level estimate, the daily dose
+//              (pollHearingDose, persisted per day) and the listening-level
+//              cap (docs/11 E32 (c); Settings > Hearing). getPersonalProfile()
+//              / setPersonalProfile(): the per-ear listening preference
+//              (docs/11 E33), its own file, applied to every strip's chain.
+//              getSmartMacros() / setSmartMacros(): Smart macros per strip
+//              (docs/11 E34).
 // Loopback     getAllowedLoopbackPairs() / setLoopbackPairAllowed(): the
 //   override   feedback-loop guard's per-pair override (docs/11 E51),
 //              persisted and applied to every device start.
@@ -108,8 +116,8 @@
 //              profiles and stops the foreground poll; it switches itself
 //              on while a known anti-cheat service runs
 //              (pollAntiCheatServices, every 10 s) unless
-//              setTournamentAuto (false). isTournamentActive() for any
-//              later OSD / hook.
+//              setTournamentAuto (false). isTournamentActive() also
+//              silences the on-screen display (ui/Osd.h, docs/11 E56).
 // Settings     getSettings() (tray / start-up / hotkeys ...).
 // Listening    addListener(); Listener::engineControllerChanged(Change) is
 //              called on the message thread for state the UI cannot poll
@@ -125,12 +133,15 @@
 #include "settings/AppSettings.h"
 
 #include "flub/engine/DeviceProfiles.h"
+#include "flub/engine/HearingGuard.h"
+#include "flub/engine/PersonalProfile.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_events/juce_events.h>
 
 #include <array>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -189,6 +200,9 @@ public:
             read on each output change) with an open device, none headless
             (the name alone). Tests inject a fake. */
         std::function<std::vector<flub::platform::OutputEndpointIdentity>()> outputEndpoints;
+        /** docs/11 E32 (c): the calendar the estimated daily dose is kept by
+            (local time); empty = juce::Time::getCurrentTime. Tests inject one. */
+        std::function<juce::Time()> clock;
     };
 
     EngineController();
@@ -603,6 +617,86 @@ public:
     /** How often the background poll reads the volume. */
     static constexpr int kEndpointVolumePollMs = 250;
 
+    // ---- Hearing guard: listening-level estimate, dose and cap (docs/11 E32 (c)) ---------------
+    /** Settings > Hearing and the LoudnessPanel's dose readout. An ESTIMATE
+        (flub::HearingGuard, after the master limiter): the output's
+        A-weighted level + the system volume + the headset's sensitivity.
+        Without a sensitivity nothing is estimated and the output is not
+        touched. The sensitivity is the listener's own figure for the output
+        endpoint (persisted per endpoint) or else the matched device
+        profile's (none of the shipped profiles has one yet). While a
+        sensitivity is known, the system volume is read as for the loudness
+        contour (kEndpointVolumePollMs, off the audio thread); an unreadable
+        volume counts as full volume (the loudest case). */
+    struct HearingInfo
+    {
+        juce::String output;                        // the output endpoint ("" = none)
+        bool known = false;                         // a sensitivity is in use: the guard estimates
+        float sensitivityDbSpl = std::numeric_limits<float>::quiet_NaN();
+        flub::HearingGuard::SensitivitySource source = flub::HearingGuard::SensitivitySource::Unknown;
+        std::optional<float> userDbSpl;             // the listener's own figure for this output
+        juce::String profileName;                   // the matched device profile ("" = generic)
+        float profileDbSpl = std::numeric_limits<float>::quiet_NaN(); // its figure (NaN: none)
+        juce::String profileFigureSource;           // "manufacturer", "lab", ... as the profile says
+        bool profileLabVerified = false;
+        bool capEnabled = false;
+        float capDbA = flub::HearingGuard::kDefaultCapDbA;
+        bool capActive = false;                     // the cap holds the level down now
+        float capGainDb = 0.0f;
+        float levelDbA = flub::HearingMeters::kUnknown, leq5sDbA = flub::HearingMeters::kUnknown,
+              sessionLeqDbA = flub::HearingMeters::kUnknown;
+        double doseToday = 0.0;                     // fraction of the weekly allowance (80 dB(A) for 40 h)
+        double doseWeek = 0.0;                      // today and the 6 days before
+        bool volumeKnown = false;                   // the system volume was read
+        float volumeDb = 0.0f;
+    };
+    HearingInfo getHearing() const;
+    /** The listener's own sensitivity for the current output (dB SPL of a 0
+        dBFS sine at full volume, 60 .. 150), persisted per endpoint; nullopt
+        goes back to the profile's figure (or unknown). False (nothing
+        stored) without an output. Broadcasts Change::Settings. */
+    bool setHearingSensitivity (std::optional<float> dbSpl);
+    /** The listening-level cap (persisted; off by default, 60 .. 100 dB(A)).
+        It acts only while a sensitivity is known. Broadcasts Change::Settings. */
+    void setHearingCap (bool on, float dbA);
+    /** One step of the daily dose's bookkeeping: today's dose (the day's
+        stored dose + what the guard counted since) is stored under today's
+        date; at midnight the day's dose is final and the next day starts
+        from its own. The timer calls it; tests call it directly. */
+    void pollHearingDose();
+    /** "2026-09-30": the day the dose is kept under now (Options::clock). */
+    juce::String getDoseDay() const;
+
+    // ---- Personal hearing profile (docs/11 E33) ------------------------------------------------
+    /** A listening preference (flub::PersonalProfile: per ear a gain and 8
+        bands, and a balance), not a hearing test. Stored in its own file
+        (getPersonalProfileFile, flub::personal::save) outside ParameterStore,
+        so presets, A/B banks, macros and automatic profiles never touch it;
+        applied to every strip's chain (ProcessingChain::setPersonalProfile)
+        at start, on every edit and on every engine the host builds. */
+    const flub::PersonalProfile& getPersonalProfile() const noexcept { return personalProfile; }
+    /** Sanitised, applied to every chain at once (a 20 ms crossfade) and
+        saved a moment later (the controller's timer and shutdown, while the
+        settings persist). Broadcasts Change::Settings. */
+    void setPersonalProfile (const flub::PersonalProfile& profile);
+    /** Next to the settings file: "personal-profile.json". */
+    juce::File getPersonalProfileFile() const;
+    /** Why the file could not be read at start ("" = read, or no file). */
+    juce::String getPersonalProfileError() const { return personalError; }
+    /** Writes the profile now if it changed since the last write (and the
+        settings persist). False when the write failed. */
+    bool savePersonalProfile();
+
+    // ---- Smart macros (docs/11 E34) ------------------------------------------------------------
+    /** Content-aware macro scaling per strip (ProcessingChain::setSmartMacros:
+        the content analysis takes back attack and drive on a limited master,
+        bass on bass-heavy and air on bright programme). Persisted per strip
+        name, off by default; strip = -1 is the selected strip. Broadcasts
+        Change::Settings. A preset's own "smart" flag is not applied on load
+        yet (PresetManager does not read it). */
+    bool getSmartMacros (int strip = -1) const;
+    void setSmartMacros (bool on, int strip = -1);
+
     // ---- Feedback-loop guard override (docs/11 E51) ------------------------------------------
     /** The pairs the guard lets through (AppSettings::getAllowedLoopbackPairs). */
     std::vector<AppSettings::LoopbackPair> getAllowedLoopbackPairs() const { return settings->getAllowedLoopbackPairs(); }
@@ -695,7 +789,8 @@ public:
     };
     const TournamentState& getTournamentState() const noexcept { return tournament; }
     /** While true: no session enumeration, no foreground poll, no automatic
-        profile switch (and no OSD or hook of a later feature). */
+        profile switch, and no on-screen display (ui::Osd hides itself on
+        the Change::Settings that turns it on). */
     bool isTournamentActive() const noexcept { return tournament.active; }
     /** The user's switch (persisted). Switching it off while an anti-cheat
         service holds Tournament mode on turns it off until those services
@@ -857,6 +952,22 @@ private:
     TournamentState tournament;
     bool tournamentDismissed = false; // switched off by the user while services held it on
     int tournamentQuietPolls = 0;     // polls without a service since one was seen
+
+    // Hearing guard (docs/11 E32 (c)), personal profile (docs/11 E33) and
+    // Smart macros (docs/11 E34), message thread.
+    void applyHearingGuard();
+    void applyPersonalProfile();
+    void applySmartMacros();
+    bool hearingKnown = false;           // the guard has a sensitivity (the volume poll runs for it)
+    std::optional<float> hearingUserDbSpl; // the listener's figure for the output (as last applied)
+    double doseEarlierDays = 0.0;        // the stored doses of the 6 days before doseDay
+    juce::String doseDay;                // the day the dose below counts for ("" before the first poll)
+    double doseBaseline = 0.0;           // that day's stored dose when counting started
+    double doseMark = 0.0;               // the guard's session dose then
+    double lastSessionDose = 0.0;
+    flub::PersonalProfile personalProfile;
+    bool personalDirty = false;          // changed since the last write
+    juce::String personalError;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EngineController)
 };

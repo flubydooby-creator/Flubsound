@@ -11,6 +11,7 @@
 //   flubsound-cli params  [--json]
 //   flubsound-cli presets [--dir <dir>] [--json]
 //   flubsound-cli demo    [--input file.wav] [--out <dir>]   (Demo.cpp)
+//   flubsound-cli ctl     <action> [strip] [value]          (Ctl.cpp: the running app)
 //
 // Exit codes: 0 success, 1 processing / I/O failure (for batch: at least one
 // file failed), 2 usage error (bad option, unknown preset or parameter).
@@ -20,6 +21,7 @@
 
 #include "CliOptions.h"
 #include "Commands.h"
+#include "Ctl.h"
 #include "Demo.h"
 #include "LatencyProbeCommand.h"
 #include "Utf8Windows.h"
@@ -56,6 +58,7 @@ Usage:
   flubsound-cli demo    [--input file.wav] [--out <dir>] [--seconds S] [--jobs N]
                                       by-ear before / after pairs (`help demo`)
   flubsound-cli latency-probe generate|analyze ...   loopback latency (`latency-probe --help`)
+  flubsound-cli ctl <action> [strip] [value]   control the running app (`ctl --help`)
   flubsound-cli help <command>        detailed help for one command
   flubsound-cli --version
 
@@ -391,6 +394,8 @@ int main (int argc, char** argv)
     const std::vector<std::string> args = utf8Arguments (argc, argv);
     if (! args.empty() && args[0] == "latency-probe") // docs/11 E42d: parses its own options
         return runLatencyProbe ({ args.begin() + 1, args.end() });
+    if (! args.empty() && args[0] == "ctl") // docs/11 E56: remote control of the running app (Ctl.h)
+        return ctl::runCtl ({ args.begin() + 1, args.end() });
 
     CliOptions options;
     std::string error;
