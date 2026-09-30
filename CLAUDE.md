@@ -81,6 +81,8 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **Never compiled on MSVC or Apple Clang so far:** anything added in batches 3–5. The risky spots are
   `Ctl.cpp`'s Winsock AF_UNIX path, the OSD's WS_EX styles and fullscreen query (SHQueryUserNotificationState), and the
   arm64 scalar path of the Enhanced virtualiser.
+- **Final hand-over check (2026-09-30, Linux):** a fresh gcc Release build (app, plug-in, tools, tests, warnings as
+  errors), `ctest` under xvfb (flub_tests and flub_app_tests) and the golden step (`FLUB_GOLDEN_REFERENCE=1`) all passed.
 - **Real hardware:** only the per-app capture and the double-audio fix have been confirmed, on the owner's PC.
 
 ### Next steps for the local session, in priority order
