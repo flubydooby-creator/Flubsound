@@ -88,25 +88,48 @@
 //
 // Automatic preamp (docs/11 E11). The chain's static maximum boost is
 // predicted from the effective values (macros included, the governor's
-// scale not: the preamp follows what was asked for, not the governor's
-// reaction to it; nor the GUI's momentary audition bypass) on the exact digital responses of the level-independent
-// stages that can raise the level: the parametric EQ (bands and output
-// gain), the dynamic EQ's static gains, the bass shelf (at its full boost,
-// with the subsonic high-pass), presence (at its full lift) and the air
-// shelf, the Warmth tilt's sections and its level compensation at the
-// target amount (docs/11 E14: the measured trim, in 0.25 dB steps, so a
-// bass-heavy programme's trim is not counted twice), the saturator's wet
-// make-up;
-// the surround fold's -3 dB trim counts
-// against them, and so does the loudness contour's lift net of its own trim
-// (docs/11 E32). Left out: level-dependent boosts that withdraw on loud
-// material (the dynamic-EQ ranges and mode bands, the transient shaper),
-// harmonics (bass, air, saturation), the compressor's make-up (it follows
-// its own gain reduction) and the maximizer's drive (loudness on purpose).
+// scales not: the preamp follows what was asked for, not the governor's
+// reaction to it; nor the GUI's momentary audition bypass) on the exact
+// digital responses of the stages that can raise the level, in the chain's
+// order: the loudness contour's lift net of its trim (docs/11 E32) and the
+// Warmth tilt's sections with its level compensation at the target amount
+// (docs/11 E14: the measured trim, in 0.25 dB steps), the parametric EQ
+// (bands and output gain), the dynamic EQ (static gains, and each user and
+// mode band's dynamic gain), the bass shelf (with the subsonic high-pass,
+// less the headroom protection's withdrawal), the bass harmonics (added
+// power) and Small Speaker Mode's high-pass, presence and the air shelf,
+// the saturator's wet make-up, the Bs2b / Meier crossfeed's sum on a
+// centred source (up to +2.7 dB at low frequencies) and the compressor's
+// net gain (make-up minus its reduction, mixed); the surround fold's -3 dB
+// trim counts against them. Left out: the transient shaper, the air and
+// saturation harmonics, the maximizer's drive (loudness on purpose).
+// Level-dependent terms (docs/11 E11, Phase 3 batch 5): presence (both
+// laws), the dynamic EQ, the bass protection and the compressor are taken
+// at a programme level - pink noise high-passed at 20 Hz, centred, at
+// programmeDb RMS per channel: each term's detector reads the programme
+// through the stages before it (pinkPowerDb), with its crest and spread
+// fitted on that pink through the module itself (ProcessingChain.cpp). The
+// chain's programme level is the loud parts' level of its input (after
+// AutoLevel, before the preamp): the 3 s loudness (inLoudness) as a
+// pink-equivalent RMS, held at its maximum for kProgrammeHoldSeconds, then
+// released at kProgrammeReleaseDbPerSecond, gated at kProgrammeGateLufs,
+// after kProgrammeWarmSeconds; kNominalProgrammeDb until then. The
+// published prediction (getPredictedBoostDb) is the model at that level:
+// on pink it is within 1 dB of the rendered transfer's maximum for every
+// factory preset at Boost 0 / 50 / 100 (-30 .. -18 dBFS; hotter programme
+// over-predicts where saturation compresses). The preamp's own model takes
+// the boosts that withdraw on loud programme (presence, the dynamic EQ, the
+// bass protection) at a quiet programme's size (kPreampQuietProgrammeDb):
+// they withdraw only after their detectors' attack, so an onset - what
+// reaches the limiter - still gets them in full; the compressor (its
+// look-ahead meets the onsets) and the level-invariant terms as predicted.
+// A Relative presence is level-invariant, so the preamp counts its lift on
+// the programme's balance, not a full 6 dB.
 // The prediction uses headroom::predictMaxBoostWith (the 1/12-octave grid
 // and golden-section refinement of DeviceCorrection.h) with the programme
 // weighting, on the audio thread without allocation, whenever an input
-// changes, at most once per kHeadroomUpdateMs (about 45 us for 25 sections).
+// changes, at most once per kHeadroomUpdateMs (two models while auto.preamp
+// is on, 20 - 50 us each plus about 25 us per prediction).
 // preamp = -max(0, prediction - auto.preampAllowance), glided over 20 ms.
 // It is applied after the dry reference and the input meters: AutoLevel's
 // detector does not see it (AutoLevel would otherwise cancel it), bypass
@@ -270,7 +293,12 @@ public:
     explicit ProcessingChain (param::ParameterStore& store);
 
     /** Non-RT. Reads structural parameters (latency profile) from the store,
-        swaps in a pending neural model and decides whether it is in the chain. */
+        swaps in a pending neural model and decides whether it is in the chain.
+        A re-prepare at the same sample rate and input layout (a plug-in
+        host's prepareToPlay) keeps what the SafetyGovernor has learned, as
+        reset() does (Normal / Strict; docs/11 E06); a new rate or layout
+        starts afresh. The automatic preamp's programme level starts again
+        at kNominalProgrammeDb. */
     void prepare (const ChainConfig& config);
     void reset() noexcept;
 
@@ -326,7 +354,8 @@ public:
         on the audio thread. The governor applies it at once (Off: the
         stepwise scale; Normal / Strict: the scales and the probe memory,
         held until the readings are back).
-        reset() keeps it too at Normal / Strict (SafetyGovernor::restart). */
+        reset() keeps it too at Normal / Strict (SafetyGovernor::restart), and
+        so does a re-prepare at the same rate and layout. */
     void adoptGovernorState (const ProcessingChain& previous) noexcept;
 
     /** The playback level relative to the loudness contour's reference, dB

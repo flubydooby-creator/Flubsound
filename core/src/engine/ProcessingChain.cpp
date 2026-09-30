@@ -1557,7 +1557,7 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
         }
         for (int b = 0; b < std::min (ctx.numModeBands, ProcessingChain::kNumModeBands) && ctx.modeBands != nullptr; ++b)
             bands[static_cast<size_t> (count++)] = ctx.modeBands[b];
-        std::array<double, bands.size()> gains {};
+        std::array<double, kDynEqBands + ProcessingChain::kNumModeBands> gains {};
         for (int b = 0; b < count; ++b)
         {
             const DynEqBandParams& dp = bands[static_cast<size_t> (b)];

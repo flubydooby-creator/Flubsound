@@ -156,6 +156,9 @@ void TransientShaper::prepare (double sampleRate) noexcept
     gainCoeff = onePoleCoeff (timing.gainSmoothMs, sr);
     gatedReturnCoeff = onePoleCoeff (kGatedReturnMs, sr);
     programRelease = timing.fastReleaseMs > 0.0f;
+    const float floorDb = std::clamp (timing.onsetFloorDb, 0.0f, kIndicatorRangeDb - 1.0f);
+    onsetFloorRatio = std::pow (10.0f, floorDb / 20.0f);
+    onsetFloorScale = 20.0f / (2.30258509f * (kIndicatorRangeDb - floorDb));
     updateTimes();
     reset();
 }
@@ -251,7 +254,19 @@ float TransientShaper::computeOnset (float linkedAbs) noexcept FLUB_NONBLOCKING
     const float d = hold.process (x) + kDetectorFloor;
     float aFast, aSlow;
     updateAttackPair (d, aFast, aSlow);
-    return indicatorWeight (aFast / aSlow);
+    return attackWeight (aFast / aSlow);
+}
+
+float TransientShaper::attackWeight (float ratio) const noexcept
+{
+    if (onsetFloorRatio == 1.0f)
+        return indicatorWeight (ratio);
+    // clamp ((20 log10 (ratio) - floor) / (6 dB - floor), 0, 1).
+    if (ratio <= onsetFloorRatio)
+        return 0.0f;
+    if (ratio >= kFullScaleRatio)
+        return 1.0f;
+    return std::log (ratio / onsetFloorRatio) * onsetFloorScale;
 }
 
 float TransientShaper::computeGain (float linkedAbs) noexcept
@@ -273,7 +288,7 @@ float TransientShaper::computeGain (float linkedAbs) noexcept
 
     float targetDb = 0.0f;
     if (atk != 0.0f)
-        targetDb += atk * indicatorWeight (aFast / aSlow);
+        targetDb += atk * attackWeight (aFast / aSlow);
     if (sus != 0.0f)
         targetDb += sus * indicatorWeight (sSlow / sFast) * (sustainGated ? 1.0f - indicatorWeight (d / aSlow) : 1.0f);
 

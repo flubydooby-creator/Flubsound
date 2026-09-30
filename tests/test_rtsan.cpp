@@ -152,8 +152,16 @@ static_assert (std::is_same_v<decltype (&TransientShaper::setSustainDb), void (T
 static_assert (std::is_same_v<decltype (&TransientShaper::setSustainGatedByAttack), void (TransientShaper::*) (bool) noexcept FLUB_NONBLOCKING>);
 // The automatic preamp's static-boost prediction (docs/11 E11), run by
 // ProcessingChain::applyParameters when its inputs change.
-static_assert (std::is_same_v<decltype (&ProcessingChain::buildStaticBoostModel),
+// Two overloads since docs/11 E11 p3b5 (the programme-level context): each
+// selected by its exact nonblocking type.
+static_assert (std::is_same_v<decltype (static_cast<void (*) (const float*, double, bool, ProcessingChain::StaticBoostModel&) noexcept FLUB_NONBLOCKING> (
+                                  &ProcessingChain::buildStaticBoostModel)),
                               void (*) (const float*, double, bool, ProcessingChain::StaticBoostModel&) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (static_cast<void (*) (const float*, double, bool, ProcessingChain::StaticBoostModel&,
+                                                              const ProcessingChain::BoostModelContext&) noexcept FLUB_NONBLOCKING> (
+                                  &ProcessingChain::buildStaticBoostModel)),
+                              void (*) (const float*, double, bool, ProcessingChain::StaticBoostModel&, const ProcessingChain::BoostModelContext&) noexcept
+                                  FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::predictStaticBoost),
                               headroom::Prediction (*) (const ProcessingChain::StaticBoostModel&, headroom::Weighting) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::StaticBoostModel::responseDb),

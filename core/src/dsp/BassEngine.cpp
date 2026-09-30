@@ -29,21 +29,22 @@
 //   3a. Punch        : (docs/11 E20; before the protection detector)
 //                      band_c = LR4 HP 40 Hz -> LR4 LP 150 Hz (x_c);
 //                      w = TransientShaper::computeOnset (max_c |band_c|)
-//                      (low-band timing: 25 ms hold, 10 ms slow attack,
-//                      program-dependent release); o = clamp ((w - 0.4) /
-//                      0.6, 0, 1) (under 2.4 dB of rise is not an onset:
-//                      the held level of LF noise rumbles by about that);
+//                      (50 ms hold, 40 ms slow attack, 200 / 20 ms
+//                      program-dependent release); o = clamp ((w - 0.65) /
+//                      0.35, 0, 1) (under 3.9 dB of rise is not an onset:
+//                      the held peaks of LF noise rumble by a few dB);
 //                      env: rises to o at once, held 80 ms after its last
 //                      rise, then * 60 ms one-pole (flushed under 1e-4),
 //                      nothing for 50 ms after a switch-on or reset (the
 //                      detector learns the programme first);
-//                      L = 25 ms peak hold of max_c |band_c| (dBFS);
+//                      L = 25 ms peak hold of max_c |LP2_150Hz (x_c)| (dBFS);
 //                      lift = min (6 dB * impactPunch * env, max (0, threshold -
 //                      L)) through a 2 ms rise / 20 ms fall one-pole (dB);
 //                      out_c = x_c + (10^(lift/20) - 1) BP (x_c), BP the
 //                      unity band-pass at 77.5 Hz, Q 0.7 (a bell of the
 //                      lift; exactly x_c at 0 dB). The harmonics
-//                      generator's mix gains impactPunch * env while it runs.
+//                      generator's mix gains 0.5 impactPunch * env while it
+//                      runs.
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -147,8 +148,15 @@ constexpr double kImpactLowHz = 40.0, kImpactHighHz = 150.0; // the detector ban
 constexpr double kImpactBellHz = 77.5;                      // sqrt (40 x 150)
 constexpr double kImpactBellQ = 0.7;
 constexpr float kImpactMaxDb = 6.0f;          // the lift at impactPunch 1 (the old Impact shelf's 6 dB, on onsets only)
-constexpr float kImpactHarmonicsMix = 1.0f;   // harmonics mix at impactPunch 1 (the old Impact row's 0.25 x 2 was 0.5; bursts only)
-constexpr float kImpactOnsetFloor = 0.4f;     // indicator weight read as no onset (2.4 of its 6 dB)
+constexpr float kImpactHarmonicsMix = 0.5f;   // harmonics mix at impactPunch 1 (the old Impact row's 0.25 x 2, now on bursts only)
+constexpr float kImpactOnsetFloor = 0.65f;    // indicator weight read as no onset (3.9 of its 6 dB)
+// The onset detector: a 50 ms hold and a 40 ms slow attack (the shaper's
+// low band has 25 / 10 ms), so the peaks of steady LF noise rumble, which
+// fluctuate by a few dB within 25 ms, do not read as onsets (a -40 dBFS
+// rumble: +1.1 -> +0.25 dB with them); an explosion's rise does.
+constexpr double kImpactDetectorHoldMs = 50.0;
+constexpr float kImpactDetectorSlowAttackMs = 40.0f, kImpactDetectorReleaseMs = 200.0f, kImpactDetectorFastReleaseMs = 20.0f;
+constexpr double kImpactLevelHz = 150.0;      // the headroom's level: LP2 150 Hz (all the LF the bell reaches)
 constexpr float kImpactHoldMs = 80.0f;
 constexpr float kImpactReleaseMs = 60.0f;
 constexpr float kImpactRiseMs = 2.0f, kImpactFallMs = 20.0f;
@@ -378,10 +386,18 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     distortionWindow.prepare (sr);
 
     impactBand.prepare (sr, kImpactLowHz, kImpactHighHz);
-    impactDetector.setTiming (TransientShaper::Timing::lowBand());
+    {
+        TransientShaper::Timing t;
+        t.holdMs = kImpactDetectorHoldMs;
+        t.slowAttackMs = kImpactDetectorSlowAttackMs;
+        t.attackReleaseMs = kImpactDetectorReleaseMs;
+        t.fastReleaseMs = kImpactDetectorFastReleaseMs;
+        impactDetector.setTiming (t);
+    }
     impactDetector.prepare (sr);
     impactLevel.prepare (sr, kImpactLevelHoldMs);
     impactBell = SvfCoeffs::make (FilterType::BandPass, kImpactBellHz, kImpactBellQ, 0.0, sr);
+    impactLevelLp = SvfCoeffs::make (FilterType::LowPass, kImpactLevelHz, kButterworthQ2, 0.0, sr);
     impactHoldSamples = std::max (1, msToSamples (kImpactHoldMs, sr));
     impactReleaseCoeff = onePoleCoeff (kImpactReleaseMs, sr);
     impactRiseCoeff = onePoleCoeff (kImpactRiseMs, sr);
@@ -617,6 +633,7 @@ void BassEngine::startImpact() noexcept
     impactDetector.reset();
     impactLevel.reset();
     impactBellState.fill ({});
+    impactLevelState.fill ({});
     impactEnv = impactGainDb = 0.0f;
     impactHoldLeft = 0;
     impactWarm = std::max (1, msToSamples (kImpactWarmMs, spec.sampleRate));
@@ -624,11 +641,15 @@ void BassEngine::startImpact() noexcept
 
 float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) noexcept
 {
-    float peak = 0.0f;
+    float peak = 0.0f, lf = 0.0f;
     for (int c = 0; c < numCh; ++c)
-        peak = std::max (peak, std::abs (impactBand.processSample (c, x[static_cast<size_t> (c)])));
+    {
+        const size_t ch = static_cast<size_t> (c);
+        peak = std::max (peak, std::abs (impactBand.processSample (c, x[ch])));
+        lf = std::max (lf, std::abs (svfTick (impactLevelLp, impactLevelState[ch], x[ch])));
+    }
     const float onset = impactDetector.computeOnset (peak);
-    const float heldDb = gainToDb (impactLevel.process (peak));
+    const float heldDb = gainToDb (impactLevel.process (lf));
 
     // The burst envelope: an onset raises it at once, it holds, then releases.
     float o = std::clamp ((onset - kImpactOnsetFloor) / (1.0f - kImpactOnsetFloor), 0.0f, 1.0f);
@@ -746,7 +767,8 @@ float BassEngine::flushStates() noexcept
         if (std::abs (tightLp[ch]) < kStateFlush)
             tightLp[ch] = 0.0f;
         sum += tightLp[ch];
-        sum += flushTiny (shelfState[ch]) + flushTiny (detectorState[ch]) + flushTiny (impactBellState[ch]);
+        sum += flushTiny (shelfState[ch]) + flushTiny (detectorState[ch]) + flushTiny (impactBellState[ch])
+             + flushTiny (impactLevelState[ch]);
     }
     for (auto& s : harmState)
         sum += flushTiny (s);

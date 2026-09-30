@@ -2084,12 +2084,12 @@ TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 
 
 TEST_CASE ("Chain (E11) Done-when: a -17 LUFS classical stand-in (LRA about 20 LU, -0.5 dBTP) through Classical & Jazz Dynamic keeps its loudness range within 0.1 LU with auto.preamp on")
 {
-    // Classical programme: wide-band noise (partly correlated stereo) in 4 s
-    // sections spanning 24 dB (250 ms raised-cosine joins), at -17 LUFS
+    // Classical programme: wide-band noise (partly correlated stereo) in 3 s
+    // sections spanning 27 dB (250 ms raised-cosine joins), at -17 LUFS
     // integrated. The automatic preamp follows the loud parts' level (it does
     // not ride the sections), so it must not change the loudness range.
-    const int section = samplesOf (4.0), ramp = samplesOf (0.25);
-    const double gains[] = { 0.0, -6.0, -14.0, -22.0, -24.0, -10.0, -3.0, -18.0, -8.0 };
+    const int section = samplesOf (3.0), ramp = samplesOf (0.25);
+    const double gains[] = { 0.0, -9.0, -18.0, -27.0, -13.0, -4.0, -23.0 };
     const int n = section * static_cast<int> (std::size (gains));
     const auto a = pinkNoise (n, 0.1f, 1701), b = pinkNoise (n, 0.1f, 1702);
     Channels x (2, std::vector<float> (static_cast<size_t> (n)));

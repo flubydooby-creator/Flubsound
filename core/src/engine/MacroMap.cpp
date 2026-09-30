@@ -114,7 +114,7 @@ constexpr std::array<MacroEntry, 24> kGamingTable {{
     // explosion's tail).
     { MacroSource::M1, DynEqOn,              1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M1, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::M1, ClarityAttackHighDb,  2.50f, 0.00f, 1.00f, 1.0f, false },
+    { MacroSource::M1, ClarityAttackHighDb,  2.00f, 0.00f, 1.00f, 1.0f, false },
     // ---- M2 Positional ----
     { MacroSource::M2, SpatialOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M2, SpatialFocus,         0.90f, 0.00f, 1.00f, 1.0f, false },

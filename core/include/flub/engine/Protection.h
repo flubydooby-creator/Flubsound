@@ -120,7 +120,9 @@
 //   and the loop restarts from them, instead of replaying the over-driven
 //   start and the back-off. A chain that replaces a running one (the
 //   crossfaded engine swap) takes it over with the strength
-//   (ProcessingChain::adoptGovernorState), at Off too.
+//   (ProcessingChain::adoptGovernorState), at Off too. prepare (rate, true)
+//   at the rate it already has - a plug-in host's prepareToPlay on the same
+//   chain - keeps it as restart() does; a new rate starts afresh.
 //
 // GatedLoudness (AutoLevel and AutoDrive):
 //   A K-weighted "slow" loudness (3 s; AutoLevel's 15 s) that is only

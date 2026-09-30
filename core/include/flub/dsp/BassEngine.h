@@ -40,16 +40,17 @@
 //      bucket grid, which the delay shifts).
 //   3a. Impact's punch (docs/11 E20; the chain sets `impactPunch` from Gaming
 //      Impact, no parameter): an onset detector (TransientShaper's attack
-//      indicator, low-band timing) on the 40 - 150 Hz LR4 band keys a burst
+//      indicator, a slow timing) on the 40 - 150 Hz LR4 band keys a burst
 //      envelope (held 80 ms after the onset's peak, then a 60 ms release, so
-//      80 - 300 ms long); the burst lifts the band by up to 6 dB x impactPunch (a
-//      77 Hz bell built as x + (g - 1) BP (x), exactly x at unity) and adds
-//      the harmonics generator's output at up to 1 x impactPunch while it lasts.
-//      Steady rumble never reads as an onset, so it is not lifted. The lift
-//      is headroom-reserved: it never takes the band's held peak over
-//      protectThresholdDb (a loud explosion keeps only its harmonics); the
-//      chain governs `impactPunch` by the SafetyGovernor's scale. It sits before
-//      the protection detector, so the shelf withdraws for it too.
+//      80 - 300 ms long); the burst lifts the band by up to 6 dB x
+//      impactPunch (a 77 Hz bell built as x + (g - 1) BP (x), exactly x at
+//      unity) and adds the harmonics generator's output at up to 0.5 x
+//      impactPunch while it lasts. Steady rumble does not read as an onset,
+//      so it is not lifted. The lift is headroom-reserved: it never takes
+//      the held LF peak (under 150 Hz) over protectThresholdDb (a loud
+//      explosion keeps only its harmonics); the chain governs
+//      `impactPunch` by the SafetyGovernor's scale. It sits before the
+//      protection detector, so the shelf withdraws for it too.
 //   4. Psychoacoustic bass ("missing fundamental"): the mid signal is band
 //      limited to [~25 Hz, harmonicsCutoff]; an amplitude-normalised
 //      Chebyshev waveshaper generates exact harmonics of a sinusoid:
@@ -286,8 +287,8 @@ private:
     int impactHoldLeft = 0, impactHoldSamples = 1;
     float impactEnv = 0.0f, impactReleaseCoeff = 0.0f;
     float impactGainDb = 0.0f, impactRiseCoeff = 0.0f, impactFallCoeff = 0.0f;
-    SvfCoeffs impactBell;
-    std::array<SvfState, kMaxChannels> impactBellState {};
+    SvfCoeffs impactBell, impactLevelLp;
+    std::array<SvfState, kMaxChannels> impactBellState {}, impactLevelState {};
 
     // 4. Psychoacoustic harmonics (mid signal) + replace-fundamental high-pass.
     bool harmonicsActive = false;

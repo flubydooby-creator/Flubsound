@@ -229,6 +229,13 @@ float flushTiny (SvfState& s) noexcept
     return s.ic1 + s.ic2;
 }
 
+/** A TPT one-pole's g / (1 + g), g = tan (pi hz / fs) (the corner clamped as the SVFs'). */
+float onePoleTptG (double hz, double sampleRate) noexcept
+{
+    const double g = std::tan (kPi * SvfCoeffs::clampFrequency (hz, sampleRate) / sampleRate);
+    return static_cast<float> (g / (1.0 + g));
+}
+
 float flushTiny (float& v) noexcept
 {
     if (std::abs (v) < kEnvFlush)
@@ -256,6 +263,9 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
     bands.shapers[2].setTiming (TransientShaper::Timing::highBand());
     for (auto& ts : bands.shapers)
         ts.prepare (sr);
+    bands.highG = onePoleTptG (kBandHighHz, sr);
+    lookahead = static_cast<int> (std::lround (lookaheadMs * 0.001 * sr));
+    lookaheadBuf.assign (static_cast<size_t> (lookahead * spec.numChannels), 0.0f);
 
     deMud.detector = SvfCoeffs::make (FilterType::BandPass, kDeMudHz, kDeMudQ, 0.0, sr);
     deMud.gain.prepare (controlRate, kDeMudAttackMs, kDeMudReleaseMs, false);
@@ -293,7 +303,7 @@ void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
     shaper.reset();
     bands.splitHz = params.lowSplitHz;
     bands.logSplitHz.reset (sr, kBandSplitGlideMs, std::log (bands.splitHz));
-    bands.splitter.setLowMidFrequency (bands.splitHz);
+    setApplySplit (bands.splitHz);
     bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
     bands.splitter.reset();
     for (auto& ts : bands.shapers)
@@ -400,14 +410,38 @@ void ClarityEnhancer::activateBands() noexcept
     bands.active = true;
     bands.splitHz = params.lowSplitHz; // a split moved while the path was off lands at once
     bands.logSplitHz.setImmediate (std::log (bands.splitHz));
-    bands.splitter.setLowMidFrequency (bands.splitHz);
+    setApplySplit (bands.splitHz);
     bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
     bands.splitter.reset();
+    bands.lowState.fill (0.0f);
+    bands.highState.fill (0.0f);
+    bands.lowDetState1.fill (0.0f);
+    bands.lowDetState2.fill (0.0f);
     for (auto& ts : bands.shapers)
         ts.reset();
     bands.mix.setImmediate (0.0f);
     const float warmMs = kBandWarmSlowAttacks * TransientShaper::Timing::lowBand().slowAttackMs / params.transientSpeed;
     bands.warmCountdown = std::max (1, msToSamples (warmMs, spec.sampleRate));
+}
+
+void ClarityEnhancer::setApplySplit (double hz) noexcept
+{
+    bands.splitter.setLowMidFrequency (hz);
+    bands.lowG = onePoleTptG (hz, spec.sampleRate);
+}
+
+void ClarityEnhancer::delayFrame (std::array<float, kMaxChannels>& x, int numCh) noexcept
+{
+    if (lookahead == 0)
+        return;
+    for (int c = 0; c < numCh; ++c)
+    {
+        float& slot = lookaheadBuf[static_cast<size_t> (c * lookahead + lookaheadPos)];
+        const float delayed = slot;
+        slot = x[static_cast<size_t> (c)];
+        x[static_cast<size_t> (c)] = delayed;
+    }
+    lookaheadPos = lookaheadPos + 1 == lookahead ? 0 : lookaheadPos + 1;
 }
 
 void ClarityEnhancer::activateBell (DynamicBell& bell, double hz, double q) noexcept
@@ -467,6 +501,12 @@ void ClarityEnhancer::activateAir() noexcept
 void ClarityEnhancer::clearAllStates() noexcept
 {
     bands.splitter.reset();
+    bands.lowState.fill (0.0f);
+    bands.highState.fill (0.0f);
+    bands.lowDetState1.fill (0.0f);
+    bands.lowDetState2.fill (0.0f);
+    std::fill (lookaheadBuf.begin(), lookaheadBuf.end(), 0.0f);
+    lookaheadPos = 0;
     for (auto* bell : { &deMud, &presence })
     {
         bell->bandMs = bell->broadMs = 0.0f;
@@ -489,7 +529,15 @@ float ClarityEnhancer::flushStates() noexcept
 {
     float sum = 0.0f;
     if (bands.active)
+    {
         sum += bands.splitter.flushStates (spec.numChannels, kStateFlush);
+        for (int c = 0; c < spec.numChannels; ++c)
+        {
+            const size_t ch = static_cast<size_t> (c);
+            sum += flushTiny (bands.lowState[ch]) + flushTiny (bands.highState[ch]) + flushTiny (bands.lowDetState1[ch])
+                 + flushTiny (bands.lowDetState2[ch]);
+        }
+    }
     for (auto* bell : { &deMud, &presence })
     {
         if (! bell->active)
@@ -681,6 +729,26 @@ void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
 
 void ClarityEnhancer::processShaper (const AudioBlock& block, int numCh, int pos, int len) noexcept
 {
+    if (lookahead > 0)
+    {
+        // The shaper reads the signal lookahead samples ahead of what it shapes.
+        std::array<float, kMaxChannels> x {};
+        for (int i = pos; i < pos + len; ++i)
+        {
+            float linked = 0.0f;
+            for (int c = 0; c < numCh; ++c)
+            {
+                x[static_cast<size_t> (c)] = block.channel (c)[i];
+                linked = std::max (linked, std::abs (x[static_cast<size_t> (c)]));
+            }
+            const float g = shaper.computeGain (linked);
+            delayFrame (x, numCh);
+            for (int c = 0; c < numCh; ++c)
+                block.channel (c)[i] = g != 1.0f ? x[static_cast<size_t> (c)] * g : x[static_cast<size_t> (c)];
+        }
+        return;
+    }
+
     for (int i = pos; i < pos + len; ++i)
     {
         float linked = 0.0f;
@@ -695,26 +763,40 @@ void ClarityEnhancer::processShaper (const AudioBlock& block, int numCh, int pos
 
 void ClarityEnhancer::processBands (const AudioBlock& block, int numCh, int pos, int len) noexcept
 {
-    std::array<std::array<float, 3>, kMaxChannels> split;
+    std::array<float, kMaxChannels> x {};
     for (int i = pos; i < pos + len; ++i)
     {
         if (bands.logSplitHz.isSmoothing())
         {
             bands.splitHz = std::exp (bands.logSplitHz.next());
-            bands.splitter.setLowMidFrequency (bands.splitHz);
+            setApplySplit (bands.splitHz);
             bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
         }
 
+        // The detectors, on the (undelayed) signal: the LR4 mid and high
+        // bands, and for the low band two one-poles at the split (LR2: its
+        // 2.6 ms of group delay under the split against LR4's 3.8 ms keeps
+        // the gain on a 60 Hz onset, whose one-pole band it lifts).
         float linked = 0.0f;
         std::array<float, 3> peak { 0.0f, 0.0f, 0.0f };
         for (int c = 0; c < numCh; ++c)
         {
-            const float x = block.channel (c)[i];
-            auto& b = split[static_cast<size_t> (c)];
-            bands.splitter.processSample (c, x, b[0], b[1], b[2]);
-            linked = std::max (linked, std::abs (x));
-            for (size_t k = 0; k < 3; ++k)
-                peak[k] = std::max (peak[k], std::abs (b[k]));
+            const size_t ch = static_cast<size_t> (c);
+            float b0, b1, b2;
+            x[ch] = block.channel (c)[i];
+            bands.splitter.processSample (c, x[ch], b0, b1, b2);
+            float& z1 = bands.lowDetState1[ch];
+            const float v1 = (x[ch] - z1) * bands.lowG;
+            const float lp1 = v1 + z1;
+            z1 = lp1 + v1;
+            float& z2 = bands.lowDetState2[ch];
+            const float v2 = (lp1 - z2) * bands.lowG;
+            const float lp2 = v2 + z2;
+            z2 = lp2 + v2;
+            linked = std::max (linked, std::abs (x[ch]));
+            peak[0] = std::max (peak[0], std::abs (lp2));
+            peak[1] = std::max (peak[1], std::abs (b1));
+            peak[2] = std::max (peak[2], std::abs (b2));
         }
 
         // Every shaper runs every sample, so whichever path takes over is current.
@@ -731,18 +813,31 @@ void ClarityEnhancer::processBands (const AudioBlock& block, int numCh, int pos,
         }
         else
         {
-            // Smoothstep over the linear ramp: no kink at either end, whose
-            // slope change on (bands - full band) would leak above 15 kHz.
+            // Smoothstep over the linear ramp: no kink at either end.
             const float t = bands.mix.next();
             m = t * t * (3.0f - 2.0f * t);
         }
 
+        // The gains apply to the complementary one-pole bands of what the
+        // shapers read lookahead samples ago: low + mid + high = x, so
+        // unity gains leave it exactly, and no band's phase reaches another.
+        delayFrame (x, numCh);
         for (int c = 0; c < numCh; ++c)
         {
-            const auto& b = split[static_cast<size_t> (c)];
-            const float banded = gLow * b[0] + gMid * b[1] + gHigh * b[2];
-            float& y = block.channel (c)[i];
-            y = m == 1.0f ? banded : (1.0f - m) * full * y + m * banded;
+            const size_t ch = static_cast<size_t> (c);
+            const float in = x[ch];
+            float& zl = bands.lowState[ch];
+            const float vl = (in - zl) * bands.lowG;
+            const float low = vl + zl;
+            zl = low + vl;
+            const float rest = in - low;
+            float& zh = bands.highState[ch];
+            const float vh = (rest - zh) * bands.highG;
+            const float mid = vh + zh; // LP1 at 4 kHz of the rest
+            zh = mid + vh;
+            const float high = rest - mid;
+            const float banded = in + (gLow - 1.0f) * low + (gMid - 1.0f) * mid + (gHigh - 1.0f) * high;
+            block.channel (c)[i] = m == 1.0f ? banded : (1.0f - m) * full * in + m * banded;
         }
     }
 }

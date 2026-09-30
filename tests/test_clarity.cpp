@@ -1071,22 +1071,6 @@ std::vector<float> bandHits (int kind, int n, double periodMs, double tauMs)
     return v;
 }
 
-/** The input through the 3-band path at unity gains (its all-pass): the
-    reference a band lift is read against. */
-std::vector<float> bandSum (const std::vector<float>& x, double splitHz = 120.0)
-{
-    ThreeBandSplitter sp;
-    sp.prepare (kFs, splitHz, 4000.0);
-    std::vector<float> y (x.size());
-    for (size_t i = 0; i < x.size(); ++i)
-    {
-        float l, m, h;
-        sp.processSample (0, x[i], l, m, h);
-        y[i] = l + m + h;
-    }
-    return y;
-}
-
 double liftDb (const std::vector<float>& y, const std::vector<float>& ref, int from, int to)
 {
     return toDb (rms (y.data() + from, to - from) / std::max (1.0e-30, rms (ref.data() + from, to - from)));
@@ -1108,8 +1092,8 @@ TEST_CASE ("Clarity (E04 step 3): each band keeps +12 dB of attack at >= 9 dB on
     // the pluck in the mid band, the click in the high band, +12 dB in the
     // band under test and 0 in the others. Lifts are the RMS of the first
     // 10 ms of each hit (and of 40 - 60 ms after isolated hits) against the
-    // band sum at unity gains; the full-band shaper at +12 dB against the
-    // input shows what the bands fix.
+    // input (the path at unity gains is the input exactly, step 4); the
+    // full-band shaper at +12 dB shows what the bands fix.
     const double taus[] = { 30.0, 15.0, 8.0 };
     for (int kind = 0; kind < 3; ++kind)
     {
@@ -1125,7 +1109,7 @@ TEST_CASE ("Clarity (E04 step 3): each band keeps +12 dB of attack at >= 9 dB on
         {
             const int n = ms (period * 11.5);
             const auto x = bandHits (kind, n, period, taus[kind]);
-            const auto ref = bandSum (x);
+            const auto& ref = x;
             const auto y = runParams (bands, x);
             const auto yFull = runParams (full, x);
             double lift = 0.0, liftFull = 0.0;
@@ -1154,15 +1138,22 @@ TEST_CASE ("Clarity (E04 step 3): each band keeps +12 dB of attack at >= 9 dB on
         CHECK_GE (fullBump, 3.0);
     }
 
-    // The bands at 0 dB leave their content alone: the pluck with only the
-    // low band at +12 dB comes out as the band sum within 0.25 dB (the low
-    // band still lifts the pluck onset's own low-frequency skirt: 0.10 dB).
+    // The bands at 0 dB leave their content nearly alone: the pluck with
+    // only the low band at +12 dB comes out within 0.75 dB. The level-
+    // independent low band reads the pluck onset's own low-frequency skirt
+    // as an onset, and its lift reaches 1 kHz through the one-pole low band
+    // it is applied to (-18.5 dB, near quadrature): 0.60 dB (0.10 dB when
+    // step 3 applied it to the LR4 band, whose all-pass took 2.4 dB off a
+    // kick's first 10 ms instead; docs/11 E04 step 4).
     const int n = ms (500 * 3);
     const auto pluck = bandHits (1, n, 500.0, 15.0);
     ClarityParams lowOnly;
     lowOnly.attackLowDb = 12.0f;
     const auto y = runParams (lowOnly, pluck);
-    CHECK_NEAR (liftDb (y, bandSum (pluck), ms (500), n), 0.0, 0.25);
+    const double leak = liftDb (y, pluck, ms (500), n);
+    std::printf ("  E04 1 kHz pluck, low band +12 dB: %.2f dB\n", leak);
+    CHECK_GE (leak, -0.05);
+    CHECK_LE (leak, 0.75);
 }
 
 TEST_CASE ("Clarity (E04 step 3): a steady 40 Hz note moves <= 0.1 dB with every band at +-12 dB attack and sustain, and gains no sidebands")
@@ -1370,7 +1361,7 @@ TEST_CASE ("Clarity (E04 step 3): switching the band offsets, the split and the 
         p.attackLowDb = 12.0f;
         p.lowSplitHz = splitHz;
         const auto y = runParams (p, pluck150);
-        return liftDb (y, bandSum (pluck150, splitHz), ms (1000), ms (1010));
+        return liftDb (y, pluck150, ms (1000), ms (1010));
     };
     // (At 60 Hz the low band still passes 150 Hz at -16 dB, and a level-
     // independent shaper lifts that as much as a full-level onset.)

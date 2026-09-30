@@ -50,6 +50,12 @@ public:
             level changes of a sustained sound), interpolated in between. */
         float fastReleaseMs = 0.0f;
         float gainSmoothMs = 1.0f;     // symmetric smoothing of the gain in dB
+        /** > 0: the attack indicator ignores the first onsetFloorDb of the
+            fast envelope's rise (it then reaches full weight at 6 dB as
+            before), so the held peaks of steady noise, which fluctuate by a
+            dB or two in a short hold, are not read as onsets (the high band,
+            docs/11 E04 step 4). */
+        float onsetFloorDb = 0.0f;
 
         /** The 3-band path of ClarityEnhancer (docs/11 E04 step 3): the band
             below the 60 - 200 Hz split (25 ms anti-ripple hold), the band up
@@ -229,6 +235,8 @@ private:
     void updateTimes() noexcept;
     /** The hold and the attack pair for one detector sample (both paths). */
     void updateAttackPair (float held, float& aFast, float& aSlow) noexcept;
+    /** The attack indicator's weight of aFast / aSlow, with timing.onsetFloorDb. */
+    float attackWeight (float ratio) const noexcept;
 
     double sr = 48000.0;
     Timing timing;
@@ -246,5 +254,6 @@ private:
     bool programRelease = false;
     float progFast = 0.0f, progSlow = 0.0f;           // A_fast / A_slow
     float progFastAttack = 0.0f, progSlowAttack = 0.0f, progSlowRelease = 0.0f, progFastRelease = 0.0f;
+    float onsetFloorRatio = 1.0f, onsetFloorScale = 0.0f; // timing.onsetFloorDb as a ratio, and the weight's slope over it
 };
 } // namespace flub

@@ -48,8 +48,11 @@
 #include "TransientShaper.h"
 #include "flub/common/SmoothedValue.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <vector>
 
 namespace flub
 {
@@ -83,9 +86,17 @@ struct ClarityParams
 class ClarityEnhancer final : public Processor
 {
 public:
+    /** Structural: call before prepare(). Look-ahead of stage 1 (docs/11
+        E04 step 5; 0 .. 5 ms, default 0, meant for the Quality profile):
+        the shapers read the signal this much ahead of what they shape, so
+        an onset's lift is in place when it arrives. It is the module's
+        latency (its whole output is delayed by it). */
+    void setLookaheadMs (float ms) noexcept { lookaheadMs = std::isfinite (ms) ? std::clamp (ms, 0.0f, 5.0f) : 0.0f; }
+
     void prepare (const ProcessSpec& spec) override;
     void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+    int latencySamples() const noexcept override { return lookahead; }
     const char* name() const noexcept override { return "Clarity"; }
 
     void setParams (const ClarityParams& p) noexcept FLUB_NONBLOCKING;
@@ -145,7 +156,11 @@ private:
 
     /** Stage 1's 3-band path (docs/11 E04 step 3). While it warms up its
         shapers run on the bands but the output is still the full-band
-        shaper's; then mix crossfades (per sample) to the bands' sum. */
+        shaper's; then mix crossfades (per sample) to the bands' gains.
+        The LR4 bands feed the shapers' detectors only; the gains apply to
+        complementary one-pole bands of the signal (step 4), which sum to
+        it exactly: low = LP1 at the split, high = HP1 at 4 kHz of the rest
+        (x - low), mid what remains. */
     struct BandPath
     {
         bool active = false;
@@ -155,6 +170,9 @@ private:
         std::array<TransientShaper, 3> shapers; // low, mid, high
         OnePoleSmoother logSplitHz;             // per sample while the path runs
         float splitHz = 120.0f;
+        float lowG = 0.0f, highG = 0.0f;        // TPT one-pole g / (1 + g) at the split / 4 kHz
+        std::array<float, kMaxChannels> lowState {}, highState {};
+        std::array<float, kMaxChannels> lowDetState1 {}, lowDetState2 {}; // the low band's detector (LR2 at the split)
     };
 
     bool wantsBands() const noexcept { return params.attackLowDb != 0.0f || params.attackHighDb != 0.0f; }
@@ -162,6 +180,9 @@ private:
     void activateBands() noexcept;
     void processShaper (const AudioBlock& block, int numCh, int pos, int len) noexcept;
     void processBands (const AudioBlock& block, int numCh, int pos, int len) noexcept;
+    void setApplySplit (double hz) noexcept;
+    /** The look-ahead's delay of one frame (x in, x - lookahead out); a no-op without one. */
+    void delayFrame (std::array<float, kMaxChannels>& x, int numCh) noexcept;
     void activateBell (DynamicBell& bell, double hz, double q) noexcept;
     void startBalance (bool fromNothing) noexcept;
     float updateBalance() noexcept;
@@ -184,9 +205,14 @@ private:
     int controlCountdown = kControlInterval;
     float msCoeff = 0.0f; // mean-square detector one-pole
 
-    // 1. Transient shaper (full band, linked) and the 3-band path.
+    // 1. Transient shaper (full band, linked) and the 3-band path, and
+    // their look-ahead (setLookaheadMs): the delay of the shaped signal
+    // (planar, lookahead samples per channel).
     TransientShaper shaper;
     BandPath bands;
+    float lookaheadMs = 0.0f;
+    int lookahead = 0, lookaheadPos = 0;
+    std::vector<float> lookaheadBuf;
 
     // 2. De-mud, 3. dynamic presence.
     DynamicBell deMud, presence;
