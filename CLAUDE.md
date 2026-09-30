@@ -58,3 +58,77 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   before working and prefer a separate branch (for example `local/<topic>`) for local changes.
 - Every commit ends with these trailers:
   `Co-Authored-By: Flubes <flubydooby@gmail.com>` followed by the Claude co-author trailer.
+
+## Hand-over from the cloud session (2026-09-30)
+
+### Current state
+
+- docs/11 Phases 0–2 are done. Phase 3 ran in five batches, and the cloud session stopped after batch 5 at the owner's request.
+  Each E-item's Status line in `docs/11-enhancement-report.md` says what is done, what remains and what is gated.
+- `docs/12-feature-guide.md` is the Feature & Listening Guide. For every control it says what it does to the sound and how
+  to check it by ear; the checks use `flubsound-cli demo`, A/B and the module ear.
+
+### What was verified where
+
+- **CI (GitHub Actions)** was last green at commit 714b601 (after batch 2 and the Warmth fix). CI has **not** run for
+  batches 3–5: the repo went private and Actions billing blocks every job ("recent account payments have failed or
+  your spending limit needs to be increased").
+- **Batches 3–5 were verified only on Linux in the cloud container.**
+  - Builds: gcc and clang Release with app, plug-in, tools and app tests.
+  - Test runs: flub_tests and flub_app_tests, plain and under xvfb.
+  - Checks: the golden step; RTSan, ASan+UBSan, the no-X11 build, the fuzzers, a MinGW cross-build of the Windows
+    platform code, packaging, the offline soak and headless screenshots.
+- **Never compiled on MSVC or Apple Clang so far:** anything added in batches 3–5. The risky spots are
+  `Ctl.cpp`'s Winsock AF_UNIX path, the OSD's WS_EX styles and fullscreen query (SHQueryUserNotificationState), and the
+  arm64 scalar path of the Enhanced virtualiser.
+- **Real hardware:** only the per-app capture and the double-audio fix have been confirmed, on the owner's PC.
+
+### Next steps for the local session, in priority order
+
+1. **Build on Windows** (commands above) and run `ctest`. Fix any MSVC-only compile errors or test failures first;
+   they are the most likely breakage, because batches 3–5 were never built with MSVC.
+2. **Real-hardware checks on the Turtle Beach headset**, using the list in "Testing on real hardware" above and
+   docs/12 §0. Put each result in the item's docs/11 Status line, as "owner-verified", with the device name and
+   connection (USB dongle / 3.5 mm / Bluetooth).
+   - First: headset matching, the per-app capture, device re-plug and sleep/resume.
+   - Then Warmth, Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking.
+   - Also the OSD over a fullscreen game with PresentMon, and Tournament mode with an anti-cheat game.
+3. **Owner decisions.** These are listed in docs/11 §5.4, in the "Status of Phase 3 batch 4" and "Status of Phase 3 batch 5" paragraphs.
+   - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 30 presets;
+     Late Night and Podcast are re-voiced.
+   - Should Enhanced become the default virtualiser renderer?
+   - Night Mode attack: 3 → 1 ms?
+   - Should Relative presence be the default?
+   - The E19 flux key.
+   - virt.lfe +10 dB on Music.
+   - Smart Loudness level.
+   - Bass headroom protect.
+   - E33: a one-ear HF profile turns both ears down.
+   - E24 positional focus: redesign or remove?
+4. **Known open items (software).**
+   - Soak: 12 clicks at −40 to −50 dB. Two of them come from E04's high-band onset lift.
+   - E28: the comb row is 18.9 dB against a < 12 dB target.
+   - E04 step 5: Quality look-ahead and the plug-in PDC.
+   - E34: the preset `smart` flag is not applied on load.
+   - E20: the Impact burst is missing from the auto-preamp model.
+   - E11: Classical and Jazz lose 0.72 / 0.44 LU.
+   - E22: the chat sub-limiter.
+   - E07: the 2.00 dB row.
+   - Two test cases run over 2 s: the Scenes matrix and the factory whole-library case.
+5. **Gated items** (they need hardware, people or network, not code):
+   - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E51 / E16 / E55 / E22
+     on hardware, and the E54 update check against a real release.
+   - Linux: the desktop distribution matrix and WirePlumber 0.5.
+   - Listening panels for E24, E28, E34 and E60.
+   - The AMT cross-check, which needs access to sofacoustics.org.
+
+### Re-enabling CI
+
+Either option works:
+
+- In GitHub › Settings › Billing and plans, fix the failed payment or raise the Actions spending limit.
+- Make the repository public; Actions is free for public repositories.
+
+Then push to the branch (or use "Re-run all jobs" on the latest run of `.github/workflows/ci.yml`).
+The first green run should be recorded in `docs/TRACEABILITY.md`, `docs/04` §7 and `docs/11` §5.4. The new PipeWire
+job is `continue-on-error` until it has passed 20 runs in a row.
