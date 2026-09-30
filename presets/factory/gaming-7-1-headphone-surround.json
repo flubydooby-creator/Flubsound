@@ -35,10 +35,10 @@
   },
   "intent": {
     "tone": {
-      "pink": { "db": [-2.4, -1.5, -0.7, -0.3, -0.2, 0.0, 0.3, 0.4, 0.1, -0.1], "toleranceDb": 1.0 },
-      "music": { "db": [-0.7, -0.5, -0.1, 0.3, 0.7, 0.8, 1.6, 3.1, 1.9, 1.0], "toleranceDb": 1.5 }
+      "pink": { "db": [-3.4, -2.1, -0.9, -0.3, -0.1, 0.0, 0.3, 0.5, 0.1, 0.0], "toleranceDb": 1.0 },
+      "music": { "db": [-0.8, -0.7, -0.2, 0.4, 1.0, 1.0, 1.8, 3.5, 2.3, 1.5], "toleranceDb": 1.5 }
     },
-    "loudnessOffsetLu": { "pink": 0.1, "music": 0.9, "toleranceLu": 1.0 },
+    "loudnessOffsetLu": { "pink": 0.1, "music": 0.6, "toleranceLu": 1.0 },
     "lraLossMaxLu": 2.0,
     "thdnMaxDb": -100,
     "stepBedContrastDb": { "value": 3.2, "toleranceDb": 1.0 }

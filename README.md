@@ -52,6 +52,27 @@ To report a problem, use *Settings › Diagnostics › Export diagnostics*: one 
 | 9 | [Future expansion roadmap](docs/09-future-roadmap.md) |
 | + | [Headset compatibility (incl. all Turtle Beach headsets)](docs/10-headset-compatibility.md) |
 | 11 | [Post-construction enhancement report](docs/11-enhancement-report.md) |
+| 12 | [Feature and listening guide](docs/12-feature-guide.md): every control, what it does to the sound in numbers, what to listen for, its demo-pack pair and a by-ear checklist |
+
+---
+
+## What each control does (one-screen summary)
+
+Every control, with its numbers, what to listen for and how to compare it fairly, is in the [feature and listening guide](docs/12-feature-guide.md). `flubsound-cli demo --out demo` renders a loudness-matched before / after pair for each one (61 pairs; `--input my-song.wav` for your own music), and the guide ends with a checklist to fill in by ear.
+
+| Control | What you should hear |
+|---|---|
+| **Boost Intensity** | Music: clarity and width first, then bass, loudness last. Gaming: detail and direction, then impact. Watched by the Safety Governor |
+| **Punch** · **Width** · **Clarity** · **Loudness** · **Warmth** (Music) | harder drum starts · a wider image that survives mono · clearer voice and cymbals · denser and louder · a softer top and fuller body |
+| **Footsteps** · **Positional** · **Impact** · **Detail** · **Voice & Score** (Gaming) | steps lifted as they happen · sharper placement · a bigger thump on blasts · quiet sounds closer · dialogue and score over the effects |
+| **Dynamic Range** | sudden blasts held to 20 / 15 / 10 / 6 LU over the scene before them |
+| **Smoothness** | the "s" sounds that the enhancement adds taken back |
+| **Smart macros** (Settings › Processing) | less attack and drive on masters that are already loud |
+| **Module cards** (Advanced view) | EQ, dynamic EQ, bass engine, clarity, saturation, stereo and crossfeed, the 7.1 headphone virtualiser, compressor, maximizer styles; hold a card's ear to hear the strip without it |
+| **ChatMix** · **Duck game under voice chat** | the game quieter against chat · the game dipped around 1–2.4 kHz only while a teammate talks, footsteps kept |
+| **Headset enhancement is ON** | Footsteps and Detail capped at 30 % so Superhuman Hearing and Flubsound do not stack |
+| **Settings › Hearing** | an estimate of your listening level and dose (with your headset's sensitivity), an optional level cap, and a per-ear profile |
+| **A / B**, **Bypass**, the module ear, **Blind test** | comparisons at matched loudness, so the louder side cannot win |
 
 ---
 
@@ -125,6 +146,7 @@ flubsound-cli quality --mode music --boost 100         # THD+N, IMD, MTND, ducki
 flubsound-cli quality --macro warmth=100 --rate 44100  # ... plus aliasing, DC and ultrasonic energy at 44.1 kHz
 flubsound-cli params                                   # every parameter key, range and default
 flubsound-cli presets                                  # factory preset list
+flubsound-cli demo --out demo                          # loudness-matched before / after pairs of every feature (docs/12)
 ```
 
 Offline rendering uses exactly the same `ProcessingChain` as real-time processing. It is sample-aligned (latency compensated). Loudness targeting re-renders up to 4 more times, moving `max.drive` (then `input.gain` to go louder, or `output.gain` and then `input.gain` to go quieter) until the integrated loudness is within 0.3 LU of the target, and delivers the closest pass; the true-peak limiter holds the ceiling, with a static trim as a last resort. The CLI reads WAV only (PCM 16/24/32-bit, float 32/64, `WAVE_FORMAT_EXTENSIBLE`, up to 8 channels) and writes float32, or PCM24 / PCM16 with TPDF dither. The printed and `--json` output report measures the file as written: a PCM export is read back, so quantisation and dither are included. `tests/test_offline_render.cpp` runs the render, export and batch code (including parallel jobs and a corrupt input file).

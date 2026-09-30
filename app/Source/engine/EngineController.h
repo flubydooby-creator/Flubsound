@@ -846,6 +846,12 @@ private:
         Linux only); with `reopen`, re-opens a JACK / ALSA device when the
         request changed. */
     void requestGraphQuantum (flub::param::LatencyProfileValue profile, bool reopen);
+    /** docs/11 E48: a native PipeWire device (the "PipeWire" type) takes the
+        profile's node.latency in place; false for any other device or none. */
+    bool applyNodeLatency (flub::param::LatencyProfileValue profile);
+    /** docs/11 E42: the native node's reported quantum into the host's
+        LatencyInfo::graphQuantumMs (every timer tick). */
+    void feedGraphQuantum();
     void presetLoadedByUser (const PresetInfo& preset);
     void applyAutoProfileActions (const std::vector<AutoProfileSwitcher::Action>& actions);
     void applyAutoProfile (const AutoProfileRule& rule);
@@ -882,6 +888,7 @@ private:
 
     bool enabled = true, isShutDown = false;
     int selectedStrip = 0, timerTicks = 0;
+    bool feedingGraphQuantum = false; // docs/11 E42: feedGraphQuantum set the host's graph quantum
     std::array<uint32_t, AudioEngineHost::kMaxStrips> persistedVersions {};
     juce::String lastDeviceError;
 

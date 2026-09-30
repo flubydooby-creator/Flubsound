@@ -27,24 +27,26 @@
 //                      the split withdrawals apply without the 5 ms
 //                      smoothing (their releases keep it).
 //   3a. Punch        : (docs/11 E20; before the protection detector)
-//                      band_c = LR4 HP 40 Hz -> LR4 LP 150 Hz (x_c);
-//                      w = TransientShaper::computeOnset (max_c |band_c|)
-//                      (50 ms hold, 40 ms slow attack, 200 / 20 ms
-//                      program-dependent release); o = clamp ((w - 0.65) /
-//                      0.35, 0, 1) (under 3.9 dB of rise is not an onset:
+//                      band = LR4 HP 40 Hz -> LR4 LP 150 Hz (mean_c x_c);
+//                      w = TransientShaper::computeOnset (|band|)
+//                      (100 ms hold, 40 ms slow attack, 200 / 20 ms
+//                      program-dependent release); o = clamp ((w - 0.8) /
+//                      0.2, 0, 1) (under 4.8 dB of rise is not an onset:
 //                      the held peaks of LF noise rumble by a few dB);
 //                      env: rises to o at once, held 80 ms after its last
 //                      rise, then * 60 ms one-pole (flushed under 1e-4),
-//                      nothing for 50 ms after a switch-on or reset (the
-//                      detector learns the programme first);
+//                      nothing for 200 ms after a switch-on or reset (the
+//                      detector learns the programme first); b = env
+//                      through two 1 ms one-poles;
 //                      L = 25 ms peak hold of max_c |LP2_150Hz (x_c)| (dBFS);
-//                      lift = min (6 dB * impactPunch * env, max (0, threshold -
-//                      L)) through a 2 ms rise / 20 ms fall one-pole (dB);
+//                      lift = min (6 dB * impactPunch * b, max (0, threshold -
+//                      L)) through a 1 ms rise / 20 ms fall one-pole (dB);
 //                      out_c = x_c + (10^(lift/20) - 1) BP (x_c), BP the
 //                      unity band-pass at 77.5 Hz, Q 0.7 (a bell of the
 //                      lift; exactly x_c at 0 dB). The harmonics
-//                      generator's mix gains 0.5 impactPunch * env while it
-//                      runs.
+//                      generator's mix gains 0.5 impactPunch * b (the
+//                      generator starts with a burst and idles again when
+//                      its mix and b are back at 0).
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -149,19 +151,22 @@ constexpr double kImpactBellHz = 77.5;                      // sqrt (40 x 150)
 constexpr double kImpactBellQ = 0.7;
 constexpr float kImpactMaxDb = 6.0f;          // the lift at impactPunch 1 (the old Impact shelf's 6 dB, on onsets only)
 constexpr float kImpactHarmonicsMix = 0.5f;   // harmonics mix at impactPunch 1 (the old Impact row's 0.25 x 2, now on bursts only)
-constexpr float kImpactOnsetFloor = 0.65f;    // indicator weight read as no onset (3.9 of its 6 dB)
-// The onset detector: a 50 ms hold and a 40 ms slow attack (the shaper's
-// low band has 25 / 10 ms), so the peaks of steady LF noise rumble, which
-// fluctuate by a few dB within 25 ms, do not read as onsets (a -40 dBFS
-// rumble: +1.1 -> +0.25 dB with them); an explosion's rise does.
-constexpr double kImpactDetectorHoldMs = 50.0;
+constexpr float kImpactOnsetFloor = 0.8f;     // indicator weight read as no onset (4.8 of its 6 dB)
+// The onset detector: a 100 ms hold and a 40 ms slow attack (the shaper's
+// low band has 25 / 10 ms) and the floor above, so the peaks of steady LF
+// noise rumble, which fluctuate by several dB within 25 ms, do not read as
+// onsets (20 s of -40 dBFS rumble, the 40 - 150 Hz band of white noise:
+// bursts 9 % of the time with a 50 ms hold and a 3.9 dB floor, never with
+// these); an explosion's rise still does.
+constexpr double kImpactDetectorHoldMs = 100.0;
 constexpr float kImpactDetectorSlowAttackMs = 40.0f, kImpactDetectorReleaseMs = 200.0f, kImpactDetectorFastReleaseMs = 20.0f;
 constexpr double kImpactLevelHz = 150.0;      // the headroom's level: LP2 150 Hz (all the LF the bell reaches)
 constexpr float kImpactHoldMs = 80.0f;
 constexpr float kImpactReleaseMs = 60.0f;
-constexpr float kImpactRiseMs = 2.0f, kImpactFallMs = 20.0f;
+constexpr float kImpactRiseMs = 1.0f, kImpactFallMs = 20.0f;
+constexpr float kImpactSmoothMs = 1.0f;       // the burst's two smoothing stages (a second-order rise: no splatter above 3 kHz)
 constexpr double kImpactLevelHoldMs = 25.0;
-constexpr float kImpactWarmMs = 50.0f;        // 5 slow attacks of the detector: its envelopes within 1 % of the programme
+constexpr float kImpactWarmMs = 200.0f;       // the detector band's own build-up (its LR4 high-pass rings in over ~40 ms), then 3 slow attacks
 constexpr float kImpactEnvFloor = 1.0e-4f;
 
 // 5. Tighten.
@@ -402,6 +407,7 @@ void BassEngine::prepare (const ProcessSpec& newSpec)
     impactReleaseCoeff = onePoleCoeff (kImpactReleaseMs, sr);
     impactRiseCoeff = onePoleCoeff (kImpactRiseMs, sr);
     impactFallCoeff = onePoleCoeff (kImpactFallMs, sr);
+    impactSmoothCoeff = onePoleCoeff (kImpactSmoothMs, sr);
 
     auto initStage = [sr] (ParkedStage& stage, float parkHz)
     {
@@ -436,7 +442,7 @@ void BassEngine::reset() noexcept FLUB_NONBLOCKING
     cutoffHz = params.harmonicsCutoff;
 
     harmonicsMix.setImmediate (params.harmonicsAmount * kHarmonicsMaxGain);
-    harmonicsActive = params.harmonicsAmount > 0.0f || params.impactPunch > 0.0f;
+    harmonicsActive = params.harmonicsAmount > 0.0f;
     impactAmount.reset (sr, kParamSmoothMs, params.impactPunch);
     impactActive = params.impactPunch > 0.0f;
     updateHarmonicWeights();
@@ -500,10 +506,9 @@ void BassEngine::updateTargets() noexcept
     logCutoff.setTarget (std::log (params.harmonicsCutoff));
 
     harmonicsMix.setTarget (params.harmonicsAmount * kHarmonicsMaxGain);
-    if ((params.harmonicsAmount > 0.0f || params.impactPunch > 0.0f) && ! harmonicsActive)
+    if (params.harmonicsAmount > 0.0f && ! harmonicsActive)
     {
-        // Idle harmonics path: start from clean state, the mix ramps from 0
-        // (Impact's punch bursts it from 0).
+        // Idle harmonics path: start from clean state, the mix ramps from 0.
         clearHarmonics();
         harmonicsActive = true;
     }
@@ -634,22 +639,25 @@ void BassEngine::startImpact() noexcept
     impactLevel.reset();
     impactBellState.fill ({});
     impactLevelState.fill ({});
-    impactEnv = impactGainDb = 0.0f;
+    impactEnv = impactBurst1 = impactBurst = impactGainDb = 0.0f;
     impactHoldLeft = 0;
     impactWarm = std::max (1, msToSamples (kImpactWarmMs, spec.sampleRate));
 }
 
 float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) noexcept
 {
-    float peak = 0.0f, lf = 0.0f;
+    // The onset detector reads the band of the channels' mean (LF onsets
+    // are not anti-phase; half the filters of a per-channel detector), the
+    // headroom the largest channel's LF.
+    float mid = 0.0f, lf = 0.0f;
     for (int c = 0; c < numCh; ++c)
     {
         const size_t ch = static_cast<size_t> (c);
-        peak = std::max (peak, std::abs (impactBand.processSample (c, x[ch])));
+        mid += x[ch];
         lf = std::max (lf, std::abs (svfTick (impactLevelLp, impactLevelState[ch], x[ch])));
     }
-    const float onset = impactDetector.computeOnset (peak);
-    const float heldDb = gainToDb (impactLevel.process (lf));
+    const float onset = impactDetector.computeOnset (std::abs (impactBand.processSample (0, mid / static_cast<float> (numCh))));
+    const float held = impactLevel.process (lf);
 
     // The burst envelope: an onset raises it at once, it holds, then releases.
     float o = std::clamp ((onset - kImpactOnsetFloor) / (1.0f - kImpactOnsetFloor), 0.0f, 1.0f);
@@ -662,6 +670,14 @@ float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) 
     {
         impactEnv = o;
         impactHoldLeft = impactHoldSamples;
+        if (! harmonicsActive)
+        {
+            // The harmonics generator idles between bursts (Impact alone
+            // sets no harmonics amount): it starts from clean state, and
+            // the burst's smoothed rise brings its mix in.
+            clearHarmonics();
+            harmonicsActive = true;
+        }
     }
     else if (impactHoldLeft > 0)
     {
@@ -674,11 +690,19 @@ float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) 
             impactEnv = 0.0f;
     }
 
+    // The burst through two 1 ms one-poles (so neither the lift nor the
+    // harmonics mix starts with a corner), landing exactly on 0.
+    impactBurst1 = impactEnv + impactSmoothCoeff * (impactBurst1 - impactEnv);
+    impactBurst = impactBurst1 + impactSmoothCoeff * (impactBurst - impactBurst1);
+    if (impactEnv == 0.0f && impactBurst < kImpactEnvFloor)
+        impactBurst1 = impactBurst = 0.0f;
+
     // The lift, reserved inside the band's headroom under the protection
     // threshold, then smoothed in dB (landing exactly on 0).
     const float amount = impactAmount.next();
-    const float roomDb = std::max (0.0f, thresholdSmoothed.getCurrent() - heldDb);
-    const float targetDb = std::min (kImpactMaxDb * amount * impactEnv, roomDb);
+    float targetDb = kImpactMaxDb * amount * impactBurst;
+    if (targetDb > 0.0f)
+        targetDb = std::min (targetDb, std::max (0.0f, thresholdSmoothed.getCurrent() - gainToDb (held)));
     impactGainDb = targetDb + (targetDb > impactGainDb ? impactRiseCoeff : impactFallCoeff) * (impactGainDb - targetDb);
     if (std::abs (impactGainDb - targetDb) < 1.0e-6f)
         impactGainDb = targetDb;
@@ -691,7 +715,7 @@ float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) 
         if (g1 != 0.0f)
             x[ch] += g1 * bp;
     }
-    return kImpactHarmonicsMix * amount * impactEnv; // the harmonics generator's burst mix
+    return kImpactHarmonicsMix * amount * impactBurst; // the harmonics generator's burst mix
 }
 
 void BassEngine::updateHarmonicFilters() noexcept
@@ -930,9 +954,10 @@ void BassEngine::controlTick() noexcept
         cutoffGlide.active = upperGlide.active = false;
     }
     // Impact's punch stops once its amount and its lift have landed on 0.
-    if (impactActive && params.impactPunch == 0.0f && ! impactAmount.isSmoothing() && impactAmount.getCurrent() == 0.0f && impactGainDb == 0.0f)
+    if (impactActive && params.impactPunch == 0.0f && ! impactAmount.isSmoothing() && impactAmount.getCurrent() == 0.0f && impactGainDb == 0.0f
+        && impactBurst == 0.0f)
         impactActive = false;
-    if (harmonicsActive && harmonicsMix.getTarget() == 0.0f && ! harmonicsMix.isSmoothing() && ! impactActive)
+    if (harmonicsActive && harmonicsMix.getTarget() == 0.0f && ! harmonicsMix.isSmoothing() && impactBurst == 0.0f)
         harmonicsActive = false;
 
     // ---- state hygiene -----------------------------------------------------

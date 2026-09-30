@@ -2,6 +2,7 @@
 
 #include "flub/common/Denormals.h"
 #include "platform/PlatformBridge.h"
+#include "platform/pipewire/PipeWireDeviceType.h"
 
 #include <algorithm>
 #include <chrono>
@@ -256,6 +257,10 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     if (deviceWatcher != nullptr && ! deviceWatcherStarted)
         deviceWatcherStarted = deviceWatcher->start ([this] (const flub::platform::AudioDeviceEvent& e) { postDeviceEvent (e); });
 
+    // docs/11 E48: the native PipeWire node is offered as the "PipeWire"
+    // device type, after JUCE's own (a no-op in a build without libpipewire).
+    flub::platform::pipewire::addDeviceType (deviceManager);
+
    #if JUCE_WINDOWS
     // Nothing saved (first run, or the user never changed the device): prefer
     // JUCE's IAudioClient3 low-latency shared mode to the default "Windows
@@ -277,10 +282,43 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     }
    #endif
 
+   #if JUCE_LINUX
+    // docs/11 E48: nothing saved (first run): prefer the native PipeWire node,
+    // which creates the strips' sinks, links them and plays to the default
+    // output by itself, so no setup script or manual wiring is needed. Only
+    // in the app's own device list (JUCE's ALSA type present, never over a
+    // type a caller added) and only when it opens (a PipeWire server
+    // answers); JUCE's default type otherwise. Not "chosen": nothing is
+    // persisted until the user picks a device.
+    juce::String pipewireFallbackType;
+    if (savedState == nullptr && flub::platform::pipewire::kHasDeviceType)
+    {
+        bool haveAlsa = false, havePipeWire = false;
+        for (auto* type : deviceManager.getAvailableDeviceTypes())
+        {
+            haveAlsa = haveAlsa || type->getTypeName() == "ALSA";
+            havePipeWire = havePipeWire || type->getTypeName() == flub::platform::pipewire::kDeviceTypeName;
+        }
+        if (haveAlsa && havePipeWire && deviceManager.getCurrentAudioDeviceType() != flub::platform::pipewire::kDeviceTypeName)
+        {
+            pipewireFallbackType = deviceManager.getCurrentAudioDeviceType();
+            deviceManager.setCurrentAudioDeviceType (flub::platform::pipewire::kDeviceTypeName, false);
+        }
+    }
+   #endif
+
     // Explicit selection: never JUCE's selectDefaultDeviceOnFailure, whose
     // default may be the input's loopback partner (the cable setup's system
     // default IS CABLE Input). reselectOutput() picks instead.
     auto error = deviceManager.initialise (maxInputChannels, maxOutputChannels, savedState, false);
+
+   #if JUCE_LINUX
+    if (pipewireFallbackType.isNotEmpty() && (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr))
+    {
+        deviceManager.setCurrentAudioDeviceType (pipewireFallbackType, false);
+        error = deviceManager.initialise (maxInputChannels, maxOutputChannels, nullptr, false);
+    }
+   #endif
 
    #if JUCE_WINDOWS
     if (fallbackType.isNotEmpty() && (error.isNotEmpty() || deviceManager.getCurrentAudioDevice() == nullptr))
@@ -2174,6 +2212,17 @@ LatencyInfo AudioEngineHost::getLatencyInfo() const
 
     info.totalMs = info.deviceInputMs + info.deviceOutputMs + info.engineMs + info.graphQuantumMs;
     return info;
+}
+
+flub::platform::NativeAudioNodeStatus AudioEngineHost::getNativeNodeStatus() const
+{
+    return flub::platform::pipewire::getDeviceStatus (deviceManager.getCurrentAudioDevice());
+}
+
+bool AudioEngineHost::isNativeNodeDevice() const
+{
+    const auto* device = deviceManager.getCurrentAudioDevice();
+    return device != nullptr && device->getTypeName() == flub::platform::pipewire::kDeviceTypeName;
 }
 
 juce::String AudioEngineHost::formatTotalLatency (const LatencyInfo& info)

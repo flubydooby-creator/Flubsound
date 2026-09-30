@@ -458,6 +458,18 @@ void AppRouting::openSystemRoutingSettings()
         router->openSystemRoutingSettings();
 }
 
+juce::String AppRouting::getInputLinkStatus() const
+{
+    const juce::ScopedLock sl (lock);
+    return inputLinkStatus;
+}
+
+bool AppRouting::areInputsLinked() const
+{
+    const juce::ScopedLock sl (lock);
+    return inputsLinked;
+}
+
 void AppRouting::publishConfig()
 {
     WorkerConfig c;
@@ -466,6 +478,7 @@ void AppRouting::publishConfig()
     c.routes = routes;
     c.outputDevice = currentOutputDevice();
     c.frozen = tournament;
+    c.deviceLinksInputs = host.isNativeNodeDevice();
     for (const auto& strip : host.getStripLayout())
     {
         const juce::String name (strip.name);
@@ -477,7 +490,8 @@ void AppRouting::publishConfig()
     // without the lock is safe. A pass computed from an older generation is
     // discarded (handleAsyncUpdate), so make sure a fresh one follows.
     const bool changed = c.method != config.method || ! sameRoutes (c.routes, config.routes) || c.stripNames != config.stripNames
-                         || c.stripEndpoints != config.stripEndpoints || c.outputDevice != config.outputDevice || c.frozen != config.frozen;
+                         || c.stripEndpoints != config.stripEndpoints || c.outputDevice != config.outputDevice || c.frozen != config.frozen
+                         || c.deviceLinksInputs != config.deviceLinksInputs;
     if (changed)
         ++configGeneration;
     c.generation = configGeneration;
@@ -722,14 +736,20 @@ void AppRouting::run()
         // Connect each strip endpoint's capture side to the device input at
         // the strip's channel where the OS does not (Linux: the sinks'
         // monitors, docs/11 E48a); a no-op elsewhere. The router throttles
-        // itself and logs what it cannot link.
+        // itself and logs what it cannot link; its status reaches the
+        // routing panel (getInputLinkStatus). The native PipeWire device
+        // links its own sinks (docs/11 E48): nothing is mapped for it, which
+        // also removes links the router made for a device used before.
         {
             const auto firstChannels = host.getDeviceInputMap(); // atomics: safe off the message thread
             std::vector<flub::platform::AppAudioRouter::EndpointInput> inputs;
             for (size_t i = 0; i < c.stripEndpoints.size() && i < firstChannels.size(); ++i)
-                inputs.push_back ({ c.stripEndpoints[i].toStdString(), firstChannels[i] });
+                inputs.push_back ({ c.stripEndpoints[i].toStdString(), c.deviceLinksInputs ? -1 : firstChannels[i] });
             std::string status;
-            router->connectEndpointInputs (inputs, status);
+            const bool linked = router->connectEndpointInputs (inputs, status);
+            const juce::ScopedLock sl (lock);
+            inputLinkStatus = juce::String (status);
+            inputsLinked = linked;
         }
 
         wait (kRefreshIntervalMs); // refresh() / config changes wake it early

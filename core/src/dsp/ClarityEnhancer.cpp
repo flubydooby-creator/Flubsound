@@ -1,30 +1,44 @@
 // Flubsound Pro - clarity & transient-detail enhancer.
 //
-// Stages in series, all zero latency:
+// Stages in series, all zero latency (stage 1 has an optional look-ahead):
 //
 //   1. TransientShaper, full band, detector max_c |x_c| (see its header).
 //      3-band path (docs/11 E04 step 3), running while attackLowDb or
-//      attackHighDb is not 0: ThreeBandSplitter (LR4 at lowSplitHz and
-//      4 kHz, the low band through the 4 kHz all-pass), per band b a
-//      TransientShaper with its own timing on d_b = max_c |band_b,c|,
-//      y_c = sum_b g_b band_b,c (an all-pass of x_c at unity gains). Band
-//      shapers: low 25 ms hold (steady bass unmodulated), mid a hold of
-//      1500 / split ms (split / 3 still steady), high 3 ms; slow attack 10 /
-//      8 / 4 ms and a program-dependent release (TransientShaper.cpp), so an
-//      onset's lift sits on its first milliseconds and is back at +12 dB on
-//      a hit 75 ms later. Switching on: the band shapers run for
-//      kBandWarmSlowAttacks slow-attack times (their envelopes start from
-//      silence and would read the running programme as an onset) while the
-//      output is still the full-band shaper's, then the output crossfades
-//      to the band sum over 50 ms (a smoothstep: no kink at either end);
-//      switching off crossfades back and stops the path. The full-band
-//      shaper keeps running meanwhile, so it is current whenever it takes
-//      over. The crossfade mixes x and its
-//      all-pass, so the crossover frequencies dip for those 50 ms (no step,
-//      no click; the air exciter follows the dip - over 20 ms its products
-//      above 15 kHz reached -78 dBFS on a -9 dBFS programme, -83 over 50).
-//      The split glides in log frequency over 25 ms, per sample, the mid
-//      hold resized without clearing.
+//      attackHighDb is not 0: per band b a TransientShaper with its own
+//      timing on a detector d_b = max_c |det_b,c|: the low band's det is
+//      LR2 at lowSplitHz (two one-poles: 2.6 ms of group delay under the
+//      split, where LR4's 3.8 ms left a 60 Hz onset's lift 4 ms late on
+//      hits 75 ms apart, 4.7 against 9.8 dB), mid and high the LR4 bands
+//      of ThreeBandSplitter (LR4 at lowSplitHz and 4 kHz). The gains apply
+//      to complementary one-pole bands of x (docs/11 E04 step 4): low_c =
+//      LP1_split (x_c), high_c = HP1_4k (x_c - low_c), mid_c = the rest, so
+//      y_c = x_c + (g_low - 1) low_c + (g_mid - 1) mid_c + (g_high - 1)
+//      high_c is exactly x_c at unity gains. Applying them to the LR4 bands
+//      (step 3) summed to an all-pass whose 3 ms of group delay under
+//      100 Hz took 2.4 dB off a kick's first 10 ms at any setting; the one-
+//      pole bands overlap instead (a band's lift reaches its neighbours as
+//      a shelf would: +12 dB on the low band lifts a 1 kHz pluck whose own
+//      low skirt it reads by 0.6 dB). Band shapers: low 25 ms hold (steady
+//      bass unmodulated), mid a hold of 1500 / split ms (split / 3 still
+//      steady), high 3 ms; slow attack 10 / 8 / 4 ms, a program-dependent
+//      release and, mid and high, a 1.5 dB onset floor (TransientShaper.cpp),
+//      so an onset's lift sits on its first milliseconds and is back at
+//      +12 dB on a hit 75 ms later, while steady noise is not lifted.
+//      Switching on: the band shapers run for kBandWarmSlowAttacks slow-
+//      attack times (their envelopes start from silence and would read the
+//      running programme as an onset) while the output is still the full-
+//      band shaper's, then the output crossfades to the band gains over
+//      50 ms (a smoothstep: no kink at either end); switching off crossfades
+//      back and stops the path. The full-band shaper keeps running
+//      meanwhile, so it is current whenever it takes over. Both sides of the
+//      crossfade are gains on x, so it has no dip. The split glides in log
+//      frequency over 25 ms, per sample (the detectors' and the one-pole
+//      bands' corners), the mid hold resized without clearing.
+//      Look-ahead L (setLookaheadMs, docs/11 E04 step 5): every detector
+//      reads x[n], the gains apply to x[n - L] (in both paths), so an
+//      onset's lift is in place when it arrives; the module's latency is L
+//      (neutral: x delayed, bit for bit). The stages below run on the
+//      delayed signal.
 //   2. De-mud: detector = unity band-pass 250 Hz Q 1 and the broadband signal,
 //      both as linked mean squares (20 ms). Overshoot of the band level over
 //      (broadband level - 12 dB) -> 6 dB soft knee -> ratio 2:1 -> cut of at
@@ -142,7 +156,7 @@ constexpr float kAirSmoothMs = 0.5f;
 
 // 1. The 3-band path (docs/11 E04 step 3).
 constexpr double kBandHighHz = 4000.0;
-constexpr float kBandCrossfadeMs = 50.0f; // 20 ms: the air exciter's response to the all-pass's dip reached -78 dBFS above 15 kHz
+constexpr float kBandCrossfadeMs = 50.0f; // a gain crossfade (step 3's all-pass needed 50 ms: over 20 ms its dip drove the air exciter to -78 dBFS above 15 kHz)
 constexpr float kBandWarmSlowAttacks = 5.0f; // the slowest band's slow attack x 5: its envelope within 1 % of the programme
 constexpr float kBandSplitGlideMs = 25.0f;
 

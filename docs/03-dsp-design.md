@@ -428,7 +428,7 @@ Flubsound adds bass, presence, air, harmonics, transient punch, drive and loudne
 The rules are identical in both modes. The difference is *which* contributions are governed; see the tables in section 14:
 
 - **Music:** bass boost, harmonics, maximizer drive and saturation drive (Boost Intensity, Loudness, Warmth).
-- **Gaming:** bass boost, harmonics and maximizer drive (Boost Intensity, Impact). No Gaming macro engages or drives saturation (§6.8).
+- **Gaming:** bass boost and maximizer drive (Boost Intensity), and Impact's punch (§4.3.7), which the chain scales by the governor. No Gaming macro engages or drives saturation (§6.8).
 
 In both modes the tonal, spatial and detail contributions are ungoverned, because they add little loudness.
 
@@ -921,6 +921,11 @@ The bass engine delivers "more bass" without the three usual costs: limiter pump
   ├─ 2. Mono bass (exactly 2 channels): LR4 split @ monoBelowHz               [parked stage, park 10 Hz]
   │        out_L = (low_L + low_R)/2 + high_L,   out_R = (low_L + low_R)/2 + high_R
   │
+  ├─ 3a. Impact's punch (impactPunch > 0, set by the chain from Gaming Impact; §4.3.7):
+  │        onset w = TransientShaper indicator on LR4 40–150 Hz (mean_c x_c) → burst envelope b
+  │        out_c = x_c + (10^(lift/20) − 1)·BP_77.5Hz(x_c),  lift = min(6 dB·punch·b, protect' − L_LF)
+  │        the harmonics generator (4.) gets 0.5·punch·b of extra mix while b > 0
+  │
   ├──────► protection detector (reads the pre-shelf signal):
   │          LP2 (Q 0.7071) @ max(150 Hz, 1.5·boostFrequency') → max_c|·| (linked)
   │          → 25 ms peak hold → EnvelopeFollower 10 ms / 150 ms → L (dBFS peak)
@@ -939,7 +944,7 @@ The bass engine delivers "more bass" without the three usual costs: limiter pump
   ├──────► 4. harmonics source: mid = mean_c(x_c)
   │          → HP2 25 Hz → LP4 @ cutoff' → peak hold 25 ms → env (0.5 ms / 50 ms)
   │          → xn = clamp(b/env, −1, 1) → env·(w2 T2 + w3 T3 + w4 T4 + w5 T5)(xn)
-  │          → HP2 @ cutoff' → LP4 @ 6·cutoff' → × 2·amount (20 ms linear ramp) = h
+  │          → HP2 @ cutoff' → LP4 @ 6·cutoff' → × (2·amount (20 ms linear ramp) + Impact's burst mix) = h
   │
   ├─ replace fundamental (optional): HP4 @ cutoff' on every channel             [parked stage, park 10 Hz]
   ├─ x_c += h   (same harmonics added to every channel)
@@ -1071,6 +1076,32 @@ corner change on an engaged stage: plain log-frequency glide, per-sample g inter
 
 The implementer measured a high-frequency (> 3 kHz) residual of at most about −87 dBFS while toggling.
 
+#### 4.3.7 Impact's punch ([11 E20](11-enhancement-report.md#e20))
+
+Gaming *Impact* was a static low shelf (+6 dB) and harmonics (+0.25), which lifted a quiet rumble more than the explosion over it. It now keys the bass engine's punch: an LF onset detector triggers a short, headroom-reserved LF lift and a burst of harmonics. There is no parameter: `ProcessingChain` sets `BassEngineParams::impactPunch = smoothstep (0, 1, Impact) × governor scale` in Gaming mode (the curve of the shelf row it replaces, governed like it), 0 otherwise.
+
+```
+detector  band  = LR4 HP 40 Hz → LR4 LP 150 Hz (mean_c x_c)
+          w     = TransientShaper::computeOnset(|band|)    hold 100 ms, A_slow attack 40 ms, release 200 / 20 ms
+                                                             (program-dependent), A_fast attack 0.5 ms
+          o     = clamp((w − 0.8) / 0.2, 0, 1)              a rise under 4.8 dB is no onset
+burst     env   = o at once when o ≥ env, held 80 ms, then × one-pole 60 ms (flushed under 1e-4);
+                  nothing for 200 ms after a switch-on or reset (the detector learns the programme)
+          b     = env through two 1 ms one-poles             (a second-order rise: no splatter)
+lift      L_LF  = 25 ms peak hold of max_c |LP2_150Hz(x_c)| (dBFS)
+          lift  = min(6 dB · punch · b, max(0, bass.protect − L_LF)), then 1 ms rise / 20 ms fall (dB)
+          out_c = x_c + (10^(lift/20) − 1) · BP(x_c)       BP = unity SVF band-pass 77.5 Hz, Q 0.7: a bell of
+                                                             the lift, exactly x_c at 0 dB
+harmonics the generator of §4.3.4 gets 0.5 · punch · b of extra mix; it starts with a burst (clean state)
+          and idles again once its mix and b are back at 0
+```
+
+- **Why the slow detector.** The shaper's low band (§5.3.5: 25 ms hold, 10 ms slow attack) reads the held peaks of steady LF noise, which move by several dB within 25 ms, as onsets: 20 s of −40 dBFS rumble (the 40–150 Hz band of white noise) raised a burst 9 % of the time with a 50 ms hold and a 3.9 dB floor, never with these settings; an explosion's rise (tens of dB within milliseconds) still reads as one.
+- **Headroom reserved.** The lift never takes the held LF peak over `bass.protect` (default −12 dBFS): an explosion whose LF is already there keeps only its harmonics (the module's hit 20 dB louder: 0.02 dB of lift). The stage sits before the protection detector, so the adaptive shelf withdraws for it too, and the chain's governor scale takes `impactPunch` back when the limiter or the distortion budget is over.
+- **Measured** (chain, Gaming, Impact 100 against 0; *Gaming Impact (M3) Done-when (docs/11 E20): ...*): an explosion (45 Hz + noise under 250 Hz, peak −20 dBFS) over a −40 dBFS rumble: onset window (0–150 ms) LF +4.51 dB, rumble alone +0.37 dB, tail (300–800 ms) +0.18 dB; before (the static shelf, same scene, CLI) +6.15 / +2.40 / +4.09 dB. At Boost 50 a −1 dBFS explosion stays at −1.05 dBFS, as at Impact 0.
+- **Switching** is click-free: `impactPunch` ramps over 20 ms, and a stage switched on starts from clean state with a 200 ms warm-up; on a steady tone nothing reaches above 3 kHz (−169 dBFS), and a burst on a hit leaves only the harmonics generator's own splatter (−75 dBFS on a −20 dBFS hit). Per sample, so block-size independent; the engine's non-finite guard restarts it.
+- **CPU.** About +75 ns per stereo sample while Impact is on (the detector band, the headroom LP2, the bell and the onset indicator; the harmonics generator only during bursts; §4.6).
+
 ### 4.4 Parameters
 
 | Name | Key | Range | Default | Unit | Effect |
@@ -1113,6 +1144,7 @@ At module level NaN keeps the previous value and ±inf clamps. Unchanged paramet
 |---|---|---|
 | defaults (only the 20 Hz subsonic HP active) | 24 | 0.12 % |
 | all stages on (boost 9 dB, harmonics 0.5, replace, tighten 0.5, mono 120 Hz) | 165 | 0.79 % |
+| defaults + Impact's punch (§4.3.7), no burst / bursts every 100 ms | 107 / 129 (defaults 33) | 0.51 / 0.62 % |
 
 The harmonics telemetry (§4.3.4) is within run-to-run noise at this setting: 160–169 before, 162–171 ns after, in a same-session comparison. So is the 2nd-order subsonic section that runs beside the 4th since [11 E02](11-enhancement-report.md#e02) (defaults 46 → 31 ns, all on 211 → 210 ns, best of three on a busy machine); the split-band detectors add an LR4 split per channel while `bass.splitProtect` is on.
 
@@ -1127,7 +1159,7 @@ Macro contributions (section 14 has the full tables):
   - Boost Intensity also scales the de-boom dynamic-EQ band (120 Hz, §3.4), which holds boomy passages in check while the shelf boosts.
 - **Gaming.**
   - **Boost Intensity:** boost +3 dB over 30–90 %, governed.
-  - **Impact** (explosions, gunshots): engages Bass; boost +6 dB (governed) and harmonics +0.25 over 40–100 % (governed).
+  - **Impact** (explosions, gunshots): engages Bass for its event-keyed punch (§4.3.7): up to +6 dB on LF onsets and a burst of harmonics, governed and inside `bass.protect`; no static boost or harmonics since [11 E20](11-enhancement-report.md#e20) (before: boost +6 dB and harmonics +0.25 over 40–100 %, both governed, which lifted a quiet rumble more than the explosion).
   - The protection keeps explosions from turning the boost into limiter pumping.
   - The linked detector and the centred harmonics never shift a source's position.
 - **Preset/user settings only** (no macro touches them): boost frequency, headroom protect, subsonic, mono bass, the harmonics cutoff and character, and Small Speaker Mode. These are device-oriented, e.g. raise *Speaker Low Limit* for a small headset driver.
@@ -1209,7 +1241,7 @@ Sources:
   - Less low-mid "mud" when it dominates.
   - More intelligibility from a presence lift that backs off when the band is already loud (Absolute, the default) or already bright against the programme's own body (Relative, [11 E07](11-enhancement-report.md#e07) step 3: the same lift at any playback or mastering level).
   - "Air" from harmonics generated in the top octave.
-- **All of it zero latency**, linked across channels where a gain is applied, so the stereo image is preserved.
+- **All of it zero latency** (the shaper has an optional look-ahead for the Quality profile, §5.3.6, not yet set by the chain), linked across channels where a gain is applied, so the stereo image is preserved.
 - **`TransientShaper`** is a standalone building block. `ClarityEnhancer` uses it full-band, and one per band in its 3-band path (§5.3.5); `BassEngine` uses it on the low band (§4.3.5).
 
 ### 5.2 Signal flow
@@ -1217,8 +1249,10 @@ Sources:
 ```
  x_c
   ├─ 1. TransientShaper (linked): g[n] from d[n] = max_c|x_c[n]|, same g on every channel
-  │     (either offset clarity.attackLow / attackHigh ≠ 0: 3 LR4 bands at split' / 4 kHz, one
-  │      TransientShaper per band on d_b = max_c|band_b,c|, y_c = Σ_b g_b·band_b,c; §5.3.5)
+  │     (either offset clarity.attackLow / attackHigh ≠ 0: 3 bands at split' / 4 kHz, one
+  │      TransientShaper per band on its detector band (LR2 below the split, LR4 above), the gains
+  │      on complementary one-pole bands: y_c = x_c + Σ_b (g_b − 1)·band1_b,c; §5.3.5, §5.3.6;
+  │      look-ahead L: the gains land on x_c[n − L])
   ├─ 2. De-mud:   bell 250 Hz, Q 1, gain = deMud' · G_mud              detectors on THIS stage's input:
   │                                                                     BP 250 Hz Q 1 and the broadband signal,
   │                                                                     linked mean squares (20 ms)
@@ -1373,16 +1407,18 @@ With `clarity.attackLow` and `clarity.attackHigh` both at 0 (the default) stage 
 
 ```
 split'   = lowSplitHz (60 … 200 Hz, default 120; a module setting, no parameter), 25 ms log glide per sample
-bands    = ThreeBandSplitter (Crossover.h): LR4 at split' and 4 kHz, the low band through the 4 kHz all-pass
-           Σ bands = 2nd-order all-pass(split') · all-pass(4 kHz) of x   (flat magnitude)
+detect   = low: LR2 at split' (two one-poles); mid, high: ThreeBandSplitter (Crossover.h), LR4 at split' and 4 kHz
+apply    = low1 = LP1_split'(x), high1 = HP1_4k(x − low1), mid1 = x − low1 − high1   (sum = x exactly; §5.3.6)
 attack_b = clamp(attack + attackLow, ±12) | attack | clamp(attack + attackHigh, ±12);  sustain_b = sustain
-y_c      = Σ_b g_b · band_b,c          g_b = TransientShaper_b(max_c |band_b,c|)
+y_c      = x_c + Σ_b (g_b − 1) · band1_b,c      g_b = TransientShaper_b(max_c |detect_b,c|)
+           (step 3 applied the gains to the LR4 bands, y_c = Σ_b g_b·band_b,c: an all-pass at unity; §5.3.6)
 
                      low (< split')      mid (split' … 4 kHz)     high (> 4 kHz)
 hold                 25 ms               1500 / split' ms         3 ms
 A_slow attack        10 ms               8 ms                     4 ms
 release (slow/fast)  40 / 4 ms           50 / 6 ms                40 / 3 ms
 gain smoothing       0.3 ms              0.3 ms                   0.25 ms
+onset floor          0                   1.5 dB                   1.5 dB     (step 4, §5.3.6)
 (A_fast attack 0.5 ms; the sustain pair as in §5.3.1)
 
 program-dependent release: w = clamp(20 log10(A_slow / e) / 6 dB, 0, 1)
@@ -1392,9 +1428,16 @@ speed (transientSpeed 0.5 … 2, default 1; a module setting): the A_slow attack
 
 - **Why the timings.** The full-band shaper's 20 ms slow attack and 60 ms release after a 25 ms hold spread an onset's lift over 40–60 ms and leave the next hit 75 ms later with a third of it. Each band's slow attack ends its onset reading within about 0.7 × that time, the gain smoothing reaches the lift within 1 ms, and the program-dependent release lets both attack envelopes follow a decaying hit down fast (the next hit reads as a full onset) while the shallow dips of a sustained sound release them slowly (no onset read on each dip: steady Gaussian white noise at +12 dB gains 0.9 dB in the high band, 0.25 / 0.35 dB in the low / mid band; the full-band shaper 0.4 dB). Both envelopes of the pair share the release, so their ratio does not change while they fall.
 - **Holds.** The low band keeps the 25 ms anti-ripple hold. The mid band's hold covers split'/3, the lowest note its LR4 slope still passes at −38 dB (at −38 dB a ±12 dB ripple would still move the output 0.4 dB); it is resized without clearing while the split glides. The high band's 2 ms hold read steady noise's own peaks as onsets (+1.3 dB on Gaussian white noise at +12 dB); 3 ms reads 0.9 dB.
-- **Switching.** An offset leaving 0 starts the band shapers from silence at their targets: for 5 × the low band's slow attack (50 ms at speed 1) they run on the programme while the output is still the full-band shaper's (bit-identical), then the output crossfades to the band sum over 50 ms (a smoothstep). Both offsets back at 0 crossfade back and stop the path; the full-band shaper runs throughout, so it is current when it takes over. The crossfade mixes x and its all-pass, so near the crossover frequencies the level dips for those 50 ms (no step, no click); the air exciter follows such a dip (over 20 ms its products above 15 kHz reached −78 dBFS on a −9 dBFS programme, −83 dBFS over 50 ms).
-- **Measured** (per band +12 dB, the others 0; *Clarity (E04 step 3): each band keeps ...*): the first 10 ms of hits 75 ms apart lifted 10.08 / 11.04 / 10.35 dB in the low / mid / high band against the band sum (full band: 3.91 / 6.49 / 7.43 dB against the input); 40–60 ms after an isolated hit 0.34 / 0.33 / 0.04 dB (full band 3.29 / 3.28 / 3.50 dB). The shaper's own gain (*TransientShaper (E04 step 3): the band timings keep ...*): at 75 ms spacing 12.00 dB in every band (full band 5.52 / 7.89 / 9.90), within 1 dB of its peak 0.75 / 0.75 / 0.60 ms after an isolated onset (full band 2.33 / 2.23 / 2.19 ms). A steady 40 Hz note with every band at ±12 dB attack and sustain moves 0.002 dB once settled, with no sidebands above −80 dB; in its first 2.5 s a +12 dB sustain lifts the mid band's −38 dB share while it settles from the high-pass's onset transient, which moves the note by 0.31 dB once (−12 dB: 0.08 dB).
+- **Switching.** An offset leaving 0 starts the band shapers from silence at their targets: for 5 × the low band's slow attack (50 ms at speed 1) they run on the programme while the output is still the full-band shaper's (bit-identical), then the output crossfades to the band gains over 50 ms (a smoothstep). Both offsets back at 0 crossfade back and stop the path; the full-band shaper runs throughout, so it is current when it takes over. Since step 4 both sides are gains on x, so the crossfade has no dip (step 3's mixed x and its all-pass, so near the crossover frequencies the level dipped for those 50 ms; the air exciter followed such a dip: over 20 ms its products above 15 kHz reached −78 dBFS on a −9 dBFS programme, −83 dBFS over 50 ms).
+- **Measured** (per band +12 dB, the others 0; *Clarity (E04 step 3): each band keeps ...*), with step 4's application and against the input: the first 10 ms of hits 75 ms apart lifted 9.81 / 10.56 / 10.06 dB in the low / mid / high band (full band: 3.91 / 6.49 / 7.43 dB; step 3, against its band sum, 10.08 / 11.04 / 10.35 dB, the low band 9.21 dB against the input); 40–60 ms after an isolated hit 0.25 / 0.00 / 0.00 dB (full band 3.29 / 3.28 / 3.50 dB). The shaper's own gain (*TransientShaper (E04 step 3): the band timings keep ...*): at 75 ms spacing 12.00 dB in every band (full band 5.52 / 7.89 / 9.90), within 1 dB of its peak 0.75 / 0.75 / 0.60 ms after an isolated onset (full band 2.33 / 2.23 / 2.19 ms). A steady 40 Hz note with every band at ±12 dB attack and sustain moves 0.002 dB once settled, with no sidebands above −80 dB; in its first 2.5 s a +12 dB sustain lifts the mid band's −38 dB share while it settles from the high-pass's onset transient, which moves the note by 0.31 dB once (−12 dB: 0.08 dB).
 - **CPU.** See §5.6.
+
+#### 5.3.6 The macros, the one-pole application and the look-ahead ([11 E04](11-enhancement-report.md#e04) steps 4–5)
+
+- **The macros** (§14.3, §14.4). Music *Punch* adds the attack high offset (+2.5 dB at 100 %) to its +6 dB attack, so any Punch runs the 3-band path; Gaming *Footsteps* and *Detail* add +2 dB each to the high band (Footsteps engages Clarity for it); *Impact*'s +4 dB goes to the low band (attack low offset) instead of the full band, beside the bass engine's event-keyed punch (§4.3.7). Punch 100 on the E59 kick (50 + 80 Hz chirp every 500 ms, *KnownGap closed: kick onset ...*): 0–10 / 10–30 ms lift 5.38 / 4.70 → 5.43 / 2.52 dB, onset minus body +0.68 → **+2.91 dB** (Done-when ≥ +2). A 20 ms step above 3 kHz 150 ms into an explosion's tail (peak −12 dBFS) at Gaming Boost 100 + Impact 100 keeps its isolated lift within 0.49 dB (7.67 / 7.18 dB; the full-band shaper 11.27 / 6.05 dB, −5.22 dB; *KnownGap closed: an HF step under an explosion's tail ...*).
+- **The one-pole application.** Step 3 applied the band gains to the LR4 bands, whose sum is an all-pass with about 3 ms of group delay under 100 Hz: with every gain at 1 it took 2.4 dB off a kick's first 10 ms and put 1 dB on the next 20 (Punch 100 then read onset minus body −0.96 dB, worse than the full band). The gains now apply to complementary one-pole bands (low1 = LP1 at the split, high1 = HP1 at 4 kHz of the rest, mid1 the remainder): they sum to x exactly, so unity gains are the input, and a lift reads like a shelf of the band's gain (+12 dB on the low band: +11.1 / +9.3 / +2.6 / +0.8 dB at 60 / 120 / 500 / 1000 Hz; on the high band +2.3 / +9.2 / +11.1 dB at 1 / 4 / 8 kHz). The one-pole lags less than the LR4 band, so the low band's detector is LR2 (two one-poles, 2.6 ms of group delay under the split against LR4's 3.8 ms): with LR4 a 60 Hz hit 75 ms after the previous one got its lift 4–5 ms late (4.74 dB over the first 10 ms, 9.81 with LR2).
+- **The onset floor** (mid and high band): the first 1.5 dB of the fast envelope's rise over the slow one is not an onset, `wA = clamp((20 log10(A_fast / A_slow) − 1.5 dB) / 4.5 dB, 0, 1)`. Their short holds follow the peaks of steady noise, which rise by a dB or two within 3–12 ms: steady Gaussian noise at +12 dB attack 0.23 / 0.53 → 0.00 / 0.00 dB (mid / high), hits 75 ms apart 10.69 / 10.28 → 10.56 / 10.06 dB. The low band (25 ms hold, 0.14 dB) and the full-band shaper keep no floor.
+- **Look-ahead** (`ClarityEnhancer::setLookaheadMs`, structural, 0–5 ms, default 0; meant for Quality). Every detector reads x[n] and the gains apply to x[n − L] in both paths, so an onset's lift is in place when it arrives; the module's latency is L (neutral: the input delayed by L, bit for bit). 1 ms, +12 dB attack, the first millisecond of an onset: 4.18 → 8.90 dB (full band, 1 kHz plucks), 9.50 → 11.85 dB (high band, clicks); the first 10 ms within 0.5 dB (*Clarity (E04 step 5): ...*). **Not in the chain yet**: 1 ms raises Quality's total from 1352 to 1400 samples at 48 kHz, which `tests/test_engine.cpp`, `tests/test_neural_slot.cpp` and [01 §5.1](01-architecture.md#51-algorithmic-latency-per-profile-48-khz-the-only-latency-sources-in-the-chain) pin (with the bass engine's 2 ms, §4.9, 1496); wiring it is one line in `ProcessingChain::prepare()` (`clarity.setLookaheadMs (1.0f)` in the Quality case, 0 elsewhere) with those numbers, and the plug-in then reports it through the chain's latency.
 
 ### 5.4 Parameters
 
@@ -1425,15 +1468,15 @@ At module level NaN keeps the previous value, other values are clamped, and unch
 | air | exciter mix: 20 ms linear ramp per sample. Shelf: amount smoothed 20 ms at control rate, then glided. When switched on, all states start clean. |
 | switching off | a stage runs until its amount and EQ gain are exactly 0, then stops |
 | module on/off | `ModuleSlot` 20 ms crossfade |
-| 3-band path on / off (§5.3.5) | 50 ms warm-up (output unchanged), then a 50 ms smoothstep crossfade between the full-band shaper and the band sum; the band shapers' amounts as above |
-| low split | 25 ms one-pole in log frequency, LR4 coefficients per sample while it glides |
+| 3-band path on / off (§5.3.5) | 50 ms warm-up (output unchanged), then a 50 ms smoothstep crossfade between the full-band shaper's gain and the band gains (both on x, no dip); the band shapers' amounts as above |
+| low split | 25 ms one-pole in log frequency; the LR4, LR2 and one-pole coefficients per sample while it glides |
 | speed, mid hold | coefficients / window changed in place; the envelopes and the held value never step |
 
 Test *TransientShaper: parameter changes and onsets move the gain smoothly* bounds the gain's slew at 48 kHz: a full 24 dB swing moves at most 0.55 dB per sample.
 
 ### 5.6 Latency & CPU
 
-- **Latency: 0.** Tests: *TransientShaper: zero latency - an impulse is not delayed* and *Clarity: zero latency - an impulse is not delayed*.
+- **Latency: 0**, or the look-ahead when one is set (`setLookaheadMs`, structural; §5.3.6; the chain does not set one yet). Tests: *TransientShaper: zero latency - an impulse is not delayed*, *Clarity: zero latency - an impulse is not delayed* and *Clarity (E04 step 5): a look-ahead is the module's latency ...*.
 - **CPU** (indicative):
 
 | Configuration | ns / stereo sample | % core |
@@ -1442,6 +1485,7 @@ Test *TransientShaper: parameter changes and onsets move the gain smoothly* boun
 | all stages on (attack +6, sustain −3, presence 1, air 1, de-mud 1) | 151 | 0.73 % |
 | 3-band path (§5.3.5): attack +6, sustain −3, attackHigh +3, rest off | 176 (full band 31) | 0.84 % |
 | 3-band path with all stages on | 335 (full band 189) | 1.61 % |
+| 3-band path, step 4's application (the LR2 detector and three one-poles per channel): attack +6, sustain −3, attackHigh +3 | 174 (full band 31); with a 1 ms look-ahead 172 | 0.84 % |
 
 The 3-band rows were measured in one session (Release, gcc 13, 48 kHz, 256-sample blocks) with another build running on the machine, so they read about 25 % over the older rows; the band path adds about 145 ns per stereo sample: 7 SVF sections per channel and three more shaper gains (a log and an exp each). On the Low Latency strip see [11 E04](11-enhancement-report.md#e04)'s Status. The exciter telemetry (§5.3.4) adds about 20 ns at this setting: 124–130 before, 147–149 ns after, in a same-session comparison (most of it the two extra SVF sections of the linear branch).
 
@@ -1449,12 +1493,13 @@ The 3-band rows were measured in one session (Release, gcc 13, 48 kHz, 256-sampl
 
 - **Music.**
   - **Boost Intensity:** presence +0.35 (0–50 %), air +0.30 (10–60 %), attack +2 dB (10–60 %).
-  - **Punch:** attack +6 dB.
+  - **Punch:** attack +6 dB and the attack high offset +2.5 dB (the 3-band path, §5.3.6).
   - **Clarity:** presence +0.8, air +0.7 (20–100 %), de-mud +0.5 (0–70 %). It also drives the dynamic-EQ de-harsh (3.5 kHz) and air-lift (12 kHz) bands, so the static-looking brightness is dynamically policed.
 - **Gaming.**
   - **Boost Intensity:** presence +0.3 (0–50 %), attack +2 dB (20–70 %).
-  - **Impact:** attack +4 dB (20–100 %).
-  - **Detail:** air +0.4 (20–100 %).
+  - **Footsteps:** the attack high offset +2 dB.
+  - **Impact:** the attack low offset +4 dB (20–100 %; the full-band attack before [11 E04](11-enhancement-report.md#e04) step 4).
+  - **Detail:** air +0.4 (20–100 %) and the attack high offset +2 dB.
   - **Voice & Score:** presence +0.7, de-mud +0.4 (20–100 %).
 - **Gaming-relevant properties.**
   - The shaper, de-mud and presence gains are linked, so they never move a source.
@@ -1504,7 +1549,11 @@ The 3-band rows were measured in one session (Release, gcc 13, 48 kHz, 256-sampl
 - *Clarity (E04 step 3): with both offsets at 0 the shaper stays full band; an offset starts the 3-band path, which leaves the output alone while it warms up, then crossfades in and back out without a click, and stops*
 - *Clarity (E04 step 3): switching the band offsets, the split and the speed is click-free; the split decides which band a note is in; the output does not depend on the block size and decays to exact silence* (air off: see §5.3.5's switching note; the allocation and robustness tests above also run the band path)
 
+- *Clarity (E04 step 5): a look-ahead is the module's latency - neutral it delays the input bit for bit - and an onset's lift is in place when it arrives, in both paths; it allocates nothing and does not depend on the block size*
+
 `tests/test_transparency.cpp`: *Transparency (E04 step 3): with clarity.attackLow / attackHigh at 0 Clarity's stage 1 is the full-band shaper bit for bit; neutral is an exact pass-through; the chain hands the offsets over*.
+
+The macros (§5.3.6): *KnownGap closed: kick onset - Punch 100 lifts the kick's first 10 ms >= 2 dB more than its body (E04 step 4); ...* and *KnownGap closed: an HF step under an explosion's tail keeps its isolated lift within 1 dB at Gaming Boost 100 + Impact 100 (E04 step 4)* (`tests/test_known_gaps.cpp`); *Gaming Impact (M3): no static bass boost or harmonics; the attack goes to the shaper's low band and the bass engine's event-keyed punch (docs/11 E04 step 4, E20)* (`tests/test_modes.cpp`, which also holds the E20 cases of §4.3.7).
 
 `tests/test_distortion.cpp` (exciter telemetry, §5.3.4 and §14.5):
 - *Distortion: the air exciter's reading matches a harmonic analysis of the stage output (the linear air shelf taken out) within 0.05 dB, also on the band's skirt* (measured < 0.001 dB)
@@ -1527,7 +1576,8 @@ Chain level: *Chain: runs at every sample rate a headset may use (8 kHz hands-fr
   - This is a **tuning item**: a threshold of about broadband − 6…8 dB, or a milder ratio, would leave pink-ish spectra alone.
 - **Absolute level thresholds.** The presence thresholds of the default Absolute law (−18 / −42 dB RMS, floor −80 dB RMS) and the de-mud gate (−70 dB RMS) are absolute, so they assume the chain's nominal level. AutoLevel, when enabled, keeps the input near its target. `clarity.presenceMode` Relative (§5.3.3) removes the presence's level dependence; making it the default would re-voice every preset that lifts presence (an owner decision), so it ships off. What stays level-dependent in the chain around it are the dynamic EQ's mode bands over fixed thresholds: Music Boost 100 + Clarity 100 still lifts the presence of −45 dBFS pink 2.0 dB more than of −12 dBFS pink at protection strength Normal with Relative presence (3.2 dB with Absolute), from the Clarity macro's de-harsh band (§14.5).
 - **Residual attack gain after a click.** Both envelopes of the attack pair release with the same 60 ms time constant, so the onset ratio A_fast/A_slow built up by an isolated click decays only slowly. Quiet material that follows within about 100–200 ms can receive a few dB of residual attack gain. The peak hold reduces this but does not remove it; it is inherent to the specified topology. The 3-band path's program-dependent release (§5.3.5) removes most of it (40–60 ms after a hit 0.04–0.34 dB instead of 3.3–3.5 dB); the full-band shaper keeps it so that renders without band offsets stay bit-exact.
-- **The 3-band path is engaged by an offset, not by its timing.** At `clarity.attackLow` = `clarity.attackHigh` = 0 the shaper stays full band with the timing above; any non-zero offset also brings the bands' faster timing to the mid band and the all-pass phase of the band sum. So a small offset changes more than its own band. Step (4) of [11 E04](11-enhancement-report.md#e04) (the macros driving the offsets) decides where that switch sits for presets.
+- **The 3-band path is engaged by an offset, not by its timing.** At `clarity.attackLow` = `clarity.attackHigh` = 0 the shaper stays full band with the timing above; any non-zero offset also brings the bands' faster timing and onset floor to the other bands. So a small offset changes more than its own band: since [11 E04](11-enhancement-report.md#e04) step 4 every preset with Punch, Footsteps, Impact or Detail above 0 runs the bands (the all-pass phase that step 3's band sum brought along is gone, §5.3.6).
+- **The one-pole application overlaps.** A band's lift reaches its neighbours' content as a shelf of that gain would (§5.3.6), and each band shaper is level-independent, so it lifts what it reads of another band's onset: a 1 kHz pluck with only the low band at +12 dB rises 0.60 dB (0.10 dB when step 3 applied the gains to the LR4 bands). At the macros' own offsets (+2 … +4 dB) the overlap is a few tenths of a dB. A relevance gate (lift a band only while its own content dominates what the gain is applied to) is not implemented.
 - **Level independence per band.** Each band shaper reads only its band's envelope shape, so content that leaks through an LR4 slope is shaped as fully as the band's own: at a 60 Hz split, a 150 Hz pluck (at −16 dB in the low band) still gets 2.7 dB with the low band at +12 dB (10.5 dB at a 200 Hz split).
 - **Peak holds delay decay detection.** They delay the start of decay detection by 25–33 ms in the shaper and 7.5–10 ms in the air envelopes. Attacks stay instant.
 - **Float envelope precision at high sample rates.** At 96/192 kHz the float followers settle within about 1e-4 of their input, so the steady-state shaper gain on constant material may sit up to about 0.002 dB off unity (implementer's measurement).
@@ -3707,7 +3757,7 @@ Every entry from `kMusicTable` / `kGamingTable` (amount at 100 %, active window,
 
 | Macro | Targets (amount at 100 %, active window; \* governed) | Internal dynamic-EQ companion (mode bands, set by `configureModeBands()`) |
 |---|---|---|
-| **Punch** | Clarity on; transient attack +6 dB (0–100 %) (no bass tighten since docs/11 E04) | — |
+| **Punch** | Clarity on; transient attack +6 dB (0–100 %); attack high offset +2.5 dB (0–100 %: runs the shaper's 3-band path, §5.3.6; docs/11 E04 step 4) (no bass tighten since docs/11 E04) | — |
 | **Width** | Stereo on; width +0.6 (0–100 %); space +0.35 (40–100 %) | — |
 | **Clarity** | Clarity on; presence +0.8 (0–100 %); air +0.7 (20–100 %); de-mud +0.5 (0–70 %); Dynamic EQ on | Band 4: **de-harsh** bell 3.5 kHz, Q 1.2, *cut above* −22 dBFS, 3:1, range 3 dB × Clarity, 2 / 80 ms. Band 5: **air** high shelf 12 kHz, Q 0.7, *boost below* −45 dBFS, 2:1, range 3 dB × Clarity, 10 / 200 ms |
 | **Loudness** | Maximizer on; drive +10 dB\* (0–100 %, curve^1.3); glue +0.5 (30–100 %) | — |
@@ -3723,7 +3773,7 @@ Maximum effective values with Boost and all five macros at 100 % (governor scale
 |---|---|---|---|
 | presence | 1.0 (1.15 clamped) | bass boost | +5 dB (+7 dB with `warmth.tapeGrit`) |
 | air | 1.0 (0 below 42 kHz, §5) | harmonic bass | 0.3 (0.5 with `warmth.tapeGrit`) |
-| transient attack | +8 dB | maximizer drive | +18 dB |
+| transient attack | +8 dB (attack high offset +2.5 dB) | maximizer drive | +18 dB |
 | width | 1.8 | glue | 0.8 |
 | space | 0.35 | saturation drive | +4.9 dB, Tube (+13 dB, Tape, with `warmth.tapeGrit`) |
 | Warmth tilt | 1 (0 with `warmth.tapeGrit`) | | |
@@ -3732,17 +3782,17 @@ Maximum effective values with Boost and all five macros at 100 % (governor scale
 
 | Macro | Targets (\* governed) | Internal dynamic-EQ companion |
 |---|---|---|
-| **Footsteps** | Dynamic EQ on (docs/11 E19: no longer the compressor) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *cue lift*, range 7 dB × Footsteps (1 / 40 ms), floor −75 dBFS; off at 32 kHz and below. Band 5: **footstep body** bell 260 Hz, Q 1.2, *cue lift*, range 3 dB × Footsteps (2 / 60 ms), floor −75 dBFS. Both lift what rises out of the band's own background, not the bed, loud events or hiss (§3.3, §3.4). Band 6 (**explosion anti-masking**) no longer follows Footsteps (docs/11 E20); the presets that use it carry it as user band 0 |
+| **Footsteps** | Dynamic EQ on (docs/11 E19: no longer the compressor); Clarity on; attack high offset +2 dB (0–100 %, the shaper's band above 4 kHz, §5.3.6; docs/11 E04 step 4) | Band 4: **footstep detail** bell 3.2 kHz, Q 0.9, *cue lift*, range 7 dB × Footsteps (1 / 40 ms), floor −75 dBFS; off at 32 kHz and below. Band 5: **footstep body** bell 260 Hz, Q 1.2, *cue lift*, range 3 dB × Footsteps (2 / 60 ms), floor −75 dBFS. Both lift what rises out of the band's own background, not the bed, loud events or hiss (§3.3, §3.4). Band 6 (**explosion anti-masking**) no longer follows Footsteps (docs/11 E20); the presets that use it carry it as user band 0 |
 | **Positional** | Stereo on; positional focus +0.9 (0–100 %); width +0.25 (30–100 %, widens only above `spatial.lowCut`, default 180 Hz). Raises the ILD of partially panned sources; a hard-panned source keeps its infinite ILD (the focus's polarity guard, §7.3.2; §7.9) | — |
-| **Impact** (explosions, gunshots) | Bass on; bass boost +6 dB\* (0–100 %); harmonic bass +0.25\* (40–100 %); Clarity on; transient attack +4 dB (20–100 %) | — |
-| **Detail** (environment) | Compressor on (upward only unless a ratio is set); upward max gain +8 dB (0–100 %), the floor following the programme's background (§9.3, docs/11 E19): quiet sounds that rise out of the ambience are lifted, the ambience is not; Clarity on; air +0.4 (20–100 %) | — |
+| **Impact** (explosions, gunshots) | Bass on, for the bass engine's event-keyed punch (`impactPunch` = smoothstep (0, 1, Impact)\*, set by the chain: up to +6 dB on LF onsets and a burst of harmonics, §4.3.7; docs/11 E20); Clarity on; attack low offset +4 dB (20–100 %, the shaper's band below the split, §5.3.6). No static bass boost or harmonics since E20 (before: +6 dB\* and +0.25\*, and a full-band attack +4 dB) | — |
+| **Detail** (environment) | Compressor on (upward only unless a ratio is set); upward max gain +8 dB (0–100 %), the floor following the programme's background (§9.3, docs/11 E19): quiet sounds that rise out of the ambience are lifted, the ambience is not; Clarity on; air +0.4 (20–100 %); attack high offset +2 dB (0–100 %, §5.3.6; docs/11 E04 step 4) | — |
 | **Voice & Score** | Clarity on; presence +0.7 (0–100 %); de-mud +0.4 (20–100 %); Dynamic EQ on | Band 7: **voice / score** bell 2 kHz, Q 0.7, *boost below* −36 dBFS, 2:1, range 4 dB × Voice (5 / 150 ms), floor −70 dBFS |
 
 Maximum effective values with Boost and all macros at 100 %:
-- presence 1.0, positional focus 1.0 (1.2 clamped), transient attack +6 dB, air 0.4, de-mud 0.4;
+- presence 1.0, positional focus 1.0 (1.2 clamped), transient attack +2 dB with the attack low / high offsets +4 / +4 dB (the 3-band path, §5.3.6; +6 dB full band before docs/11 E04 step 4), air 0.4, de-mud 0.4;
 - width 1.25 (forced to 1 under the binaural lock);
 - upward max gain +8 dB (Detail alone since docs/11 E19). With the default upward curve the lift itself tops out at +8 dB here (§9.3);
-- bass boost +9 dB, harmonic bass 0.25, maximizer drive +6 dB.
+- bass boost +3 dB, harmonic bass 0 (Impact's punch: up to +6 dB on LF onsets and 0.5 of harmonics mix during its bursts, §4.3.7; +9 dB and 0.25 before docs/11 E20), maximizer drive +6 dB.
 
 **Why this footstep design works.**
 - Footsteps are quiet, transient and broadband, with their identifying energy around 2–5 kHz (the scuff and tick) and 150–400 Hz (the heel).

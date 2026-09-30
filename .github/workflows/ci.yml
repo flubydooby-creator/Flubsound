@@ -339,3 +339,81 @@ jobs:
           name: pluginval-${{ runner.os }}
           path: pluginval-logs/
           retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # docs/11 E48 / E47: the native PipeWire node, the app playing through it
+  # and the Linux route-journal crash test (pw-play moved to a Game sink,
+  # kill -9, restart) against a headless PipeWire + WirePlumber +
+  # pipewire-pulse on a private runtime folder and session bus (the dummy
+  # driver, no sound card). The cases run 20 times in a row; a case that
+  # prints "(skipped: ...)" (no server, a missing tool) fails the step. Non-blocking
+  # (continue-on-error) until 20 consecutive CI runs of this job are green,
+  # E48's Done-when: a flaky daemon shows here without failing the workflow.
+  pipewire:
+    name: pipewire (headless, ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    needs: core
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev \
+            libgl1-mesa-dev libpipewire-0.3-dev ninja-build \
+            pipewire pipewire-bin pipewire-pulse wireplumber pulseaudio-utils dbus
+      - name: JUCE version
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*FLUB_JUCE_VERSION[[:space:]]+"([^"]+)".*/\1/p' cmake/FlubJuce.cmake | head -n 1)
+          echo "FLUB_JUCE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ env.FLUB_JUCE_VERSION }}-${{ runner.os }}
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_WARNINGS_AS_ERRORS=ON
+          -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=OFF -DFLUB_BUILD_APP_TESTS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
+      - name: Build
+        run: cmake --build build --parallel --target flub_app_tests
+      # The runtime folder's path must stay short: PipeWire's socket path
+      # (plus "-manager") has to fit in 108 bytes.
+      - name: Start a headless PipeWire
+        run: |
+          rt=$(mktemp -d /tmp/pw.XXXXXX); chmod 700 "$rt"
+          {
+            echo "XDG_RUNTIME_DIR=$rt"
+            echo "XDG_STATE_HOME=$rt/state"
+            echo "XDG_CONFIG_HOME=$rt/config"
+            echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus"
+          } >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR=$rt XDG_STATE_HOME=$rt/state XDG_CONFIG_HOME=$rt/config DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus
+          dbus-daemon --session --fork --address="$DBUS_SESSION_BUS_ADDRESS"
+          nohup pipewire > "$rt/pipewire.log" 2>&1 &
+          for i in $(seq 100); do [ -S "$rt/pipewire-0" ] && break; sleep 0.1; done
+          nohup wireplumber > "$rt/wireplumber.log" 2>&1 &
+          nohup pipewire-pulse > "$rt/pulse.log" 2>&1 &
+          for i in $(seq 100); do pactl info > /dev/null 2>&1 && break; sleep 0.1; done
+          pactl info | head -n 3
+          pw-cli ls Node | grep node.name
+      - name: Node and journal tests (20 runs in a row)
+        run: |
+          app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
+          for run in $(seq 20); do
+            for filter in "(E48" "E47 Linux"; do
+              if ! out=$("$app" "$filter" 2>&1); then
+                echo "$out"; echo "::error::run $run, '$filter' failed"; exit 1
+              fi
+              if echo "$out" | grep -qF "(skipped"; then
+                echo "$out"; echo "::error::run $run, '$filter' was skipped (no server or a missing tool)"; exit 1
+              fi
+            done
+            echo "run $run: green"
+          done
+      - name: Daemon logs
+        if: failure()
+        run: tail -n 50 "$XDG_RUNTIME_DIR"/*.log

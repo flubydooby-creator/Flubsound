@@ -202,6 +202,8 @@ struct SinkInput
     uint32_t index = 0;
     uint32_t sinkIndex = 0;
     uint32_t processId = 0; // 0 = unknown
+    uint32_t nodeId = 0;    // PipeWire's object.id (the "default" metadata's subject); 0 = unknown (PulseAudio)
+    uint32_t clientIndex = 0xffffffffu; // the owning client ("client"); none = 0xffffffff
     bool corked = true;
     std::string binary;
     std::string applicationName;
@@ -253,6 +255,7 @@ bool parseSinkInputs (const std::string& text, std::vector<SinkInput>& inputs, s
             continue;
 
         toUInt32 (item["sink"], input.sinkIndex);
+        toUInt32 (item["client"], input.clientIndex);
         input.corked = item["corked"].asBool (false);
 
         // Prefer PipeWire's socket-credential pid: the kernel reports it in
@@ -268,9 +271,51 @@ bool parseSinkInputs (const std::string& text, std::vector<SinkInput>& inputs, s
             toUInt32 (props["application.process.id"], input.processId);
         }
 
+        toUInt32 (props["object.id"], input.nodeId);
         input.binary = props["application.process.binary"].asString();
         input.applicationName = props["application.name"].asString();
         inputs.push_back (std::move (input));
+    }
+    return true;
+}
+
+/** docs/11 E47: a stream of a native PipeWire client (pw-play, SDL or
+    OpenAL with their PipeWire back-end) carries no application.process.* of
+    its own in pipewire-pulse's list: those are properties of its client.
+    Fills the pid (the kernel's pipewire.sec.pid, else application.process.id),
+    the binary and the name of such streams from `pactl --format=json list
+    clients`, so they can be listed and moved like any other. Streams that
+    already have a pid are left alone. */
+bool fillFromClients (const std::string& text, std::vector<SinkInput>& inputs, std::string& error)
+{
+    json::Value root;
+    if (! json::parse (text, root, error) || ! root.isArray())
+    {
+        error = "Unexpected pactl output (clients): " + (error.empty() ? std::string ("not a JSON array") : error);
+        return false;
+    }
+    for (const auto& client : root.asArray())
+    {
+        uint32_t index = 0;
+        if (! toUInt32 (client["index"], index))
+            continue;
+        const auto& props = client["properties"];
+        uint32_t pid = 0;
+        if (! toUInt32 (props["pipewire.sec.pid"], pid) || pid == 0)
+        {
+            pid = 0;
+            toUInt32 (props["application.process.id"], pid);
+        }
+        for (auto& input : inputs)
+        {
+            if (input.processId != 0 || input.clientIndex != index)
+                continue;
+            input.processId = pid;
+            if (input.binary.empty())
+                input.binary = props["application.process.binary"].asString();
+            if (input.applicationName.empty())
+                input.applicationName = props["application.name"].asString();
+        }
     }
     return true;
 }
@@ -2616,7 +2661,8 @@ class LinuxAppAudioRouter final : public AppAudioRouter
 public:
     LinuxAppAudioRouter()
         : havePactl (pactl::isExecutableInPath ("pactl")),
-          havePipeWireTools (pactl::isExecutableInPath ("pw-dump") && pactl::isExecutableInPath ("pw-link"))
+          havePipeWireTools (pactl::isExecutableInPath ("pw-dump") && pactl::isExecutableInPath ("pw-link")),
+          havePwMetadata (pactl::isExecutableInPath ("pw-metadata"))
     {
     }
 
@@ -2646,7 +2692,17 @@ public:
         This affects running streams; PipeWire/WirePlumber (restore-stream)
         and PulseAudio (module-stream-restore) remember the choice for the
         application's future streams. See platform/linux for a rule file
-        that pre-seeds routes without a running stream. */
+        that pre-seeds routes without a running stream.
+
+        Back to the default (docs/11 E47): WirePlumber keeps the target of a
+        stream's last move (its "target.object" / "target.node" in the
+        "default" metadata) as the restore-stream entry of the application,
+        and moves the application's next streams there. pipewire-pulse 1.0
+        writes -1 (no target) for a move to @DEFAULT_SINK@, which clears it;
+        older versions write the default sink's own id, which would pin the
+        application to that device. So the two keys are also deleted for
+        each moved stream (pw-metadata -d): WirePlumber then forgets the
+        entry and the stream follows the default output again. */
     bool setAppEndpoint (uint32_t processId, const std::string& endpointId, std::string& error) override
     {
         if (! havePactl)
@@ -2703,7 +2759,66 @@ public:
             return false;
         }
 
+        // pipewire-pulse acknowledges a move before the session manager
+        // applies it, and a move that races WirePlumber's own placement of
+        // the stream (a default-output change, a stream it is still linking)
+        // can be dropped: pactl said yes and the stream stayed where it was.
+        // Check, move again once, and otherwise report it, so that the
+        // routing worker tries again on its next pass instead of taking the
+        // app for moved (docs/11 E47).
+        if (! endpointId.empty() && ! waitUntilOn (processId, target))
+        {
+            for (const auto& input : inputs)
+                if (input.processId == processId)
+                    pactl::run ("LC_ALL=C pactl move-sink-input " + std::to_string (input.index) + " " + pactl::shellQuote (target) + " >/dev/null 2>&1");
+            if (! waitUntilOn (processId, target))
+            {
+                error = "The sound server accepted the move to '" + target + "', but the stream stayed where it was; it is tried again.";
+                return false;
+            }
+        }
+
+        if (endpointId.empty() && havePwMetadata)
+            for (const auto& input : inputs)
+                if (input.processId == processId && input.nodeId != 0)
+                    clearStreamTarget (input.nodeId);
+
         return true;
+    }
+
+    /** Every stream of the process plays to the sink named 'sinkName' (or
+        whose index it is), checked every 20 ms for up to 300 ms. */
+    static bool waitUntilOn (uint32_t processId, const std::string& sinkName)
+    {
+        for (int attempt = 0; attempt < 15; ++attempt)
+        {
+            if (attempt > 0)
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+            std::string error;
+            std::map<uint32_t, std::string> sinkNames;
+            std::vector<pactl::SinkInput> inputs;
+            const auto sinks = pactl::run ("LC_ALL=C pactl --format=json list sinks 2>/dev/null");
+            if (sinks.exitCode != 0 || ! pactl::parseSinks (sinks.output, sinkNames, error) || ! listSinkInputs (inputs, error))
+                return true; // cannot tell: take pactl's word for it
+            bool all = true;
+            for (const auto& input : inputs)
+                if (input.processId == processId)
+                {
+                    const auto it = sinkNames.find (input.sinkIndex);
+                    all = all && ((it != sinkNames.end() && it->second == sinkName) || std::to_string (input.sinkIndex) == sinkName);
+                }
+            if (all)
+                return true;
+        }
+        return false;
+    }
+
+    /** Deletes a stream's move target from the "default" metadata (see
+        setAppEndpoint). Integers and constants only on the command line. */
+    static void clearStreamTarget (uint32_t nodeId)
+    {
+        for (const char* key : { "target.object", "target.node" })
+            pactl::run ("LC_ALL=C pw-metadata -d " + std::to_string (nodeId) + " " + key + " >/dev/null 2>&1");
     }
 
     void openSystemRoutingSettings() override
@@ -2884,7 +2999,19 @@ private:
         // stderr is discarded so warnings can never corrupt the JSON on stdout.
         const auto result = pactl::run ("LC_ALL=C pactl --format=json list sink-inputs 2>/dev/null");
         if (result.exitCode == 0)
-            return pactl::parseSinkInputs (result.output, inputs, error);
+        {
+            if (! pactl::parseSinkInputs (result.output, inputs, error))
+                return false;
+            // Native PipeWire clients: their pid is their client's (docs/11 E47).
+            if (std::any_of (inputs.begin(), inputs.end(), [] (const pactl::SinkInput& i) { return i.processId == 0 && i.clientIndex != 0xffffffffu; }))
+            {
+                const auto clients = pactl::run ("LC_ALL=C pactl --format=json list clients 2>/dev/null");
+                std::string clientError;
+                if (clients.exitCode == 0)
+                    pactl::fillFromClients (clients.output, inputs, clientError); // a failure leaves those streams unlisted, as before
+            }
+            return true;
+        }
 
         // Tell "no server" apart from "pactl too old for --format=json".
         const auto info = pactl::run ("LC_ALL=C pactl info 2>&1");
@@ -2899,6 +3026,7 @@ private:
 
     // connectEndpointInputs (one caller thread at a time)
     const bool havePipeWireTools;
+    const bool havePwMetadata; // docs/11 E47: restore-stream targets are cleared (setAppEndpoint)
     std::set<pipewire::PortLink> ourLinks; // links this router made and still wants
     std::vector<EndpointInput> lastInputs;
     std::chrono::steady_clock::time_point nextPass {};

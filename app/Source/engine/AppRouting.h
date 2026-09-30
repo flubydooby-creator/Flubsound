@@ -244,6 +244,17 @@ public:
     /** The route journal's file (next to the settings file). */
     const juce::File& getJournalFile() const noexcept { return journal.getFile(); }
 
+    // ---- Device input links (docs/11 E48) ----------------------------------------
+    /** What the router's last connectEndpointInputs pass said about linking
+        the strips' endpoints to the device input (Linux: the sinks' monitors
+        to Flubsound's PipeWire input), user-presentable; empty while nothing
+        is wrong or nothing needs linking. The native PipeWire device links
+        its own sinks, so the router links nothing for it (its status comes
+        from AudioEngineHost::getNativeNodeStatus). Any thread. */
+    juce::String getInputLinkStatus() const;
+    /** false when the last pass left a wanted link missing. Any thread. */
+    bool areInputsLinked() const;
+
     /** Called on the message thread when the app list or routing state changed. */
     std::function<void()> onChanged;
 
@@ -257,6 +268,7 @@ private:
         std::vector<juce::String> stripNames, stripEndpoints;
         juce::String outputDevice; // the output device's name (doubling guard)
         bool frozen = false;       // tournament mode: no pass at all
+        bool deviceLinksInputs = false; // docs/11 E48: the native PipeWire device links the strips' sinks itself
         uint64_t generation = 0;   // bumped when routes, method, strips, the output device or tournament mode change
     };
 
@@ -308,6 +320,8 @@ private:
     OutputEndpoint resultOutputEndpoint;
     std::vector<OutputEndpoint> resultSpareEndpoints;
     bool resultPending = false;
+    juce::String inputLinkStatus; // docs/11 E48: connectEndpointInputs' last status
+    bool inputsLinked = true;
 
     // Worker thread only (and the message thread before it starts / after it stopped)
     struct RoutedEndpoint

@@ -11,16 +11,21 @@
 // name with this process's pid; nothing is played to a real output: the
 // tests' outputs go to sinks they created themselves, or write silence. The
 // device-type test is skipped when the desktop already has Flubsound's own
-// sinks (a real setup the test must not play into). Waits are hang guards
-// (5 s), not timing assertions.
+// sinks (a real setup the test must not play into), and the app-level case
+// (EngineController with a device, which opens the first-run default and
+// plays to the default output until it is moved) runs on a test server only:
+// one without ALSA or Bluetooth devices. Waits are hang guards (5 s), not
+// timing assertions.
 #if defined(__linux__) && defined(FLUB_HAS_PIPEWIRE) && FLUB_HAS_PIPEWIRE
 
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
+#include "engine/EngineController.h"
 #include "platform/PlatformServices.h"
 #include "platform/pipewire/PipeWireDeviceType.h"
 #include "platform/pipewire/PipeWireNative.h"
+#include "ui/RoutingPanel.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
@@ -28,6 +33,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cmath>
 #include <iostream>
 #include <thread>
@@ -86,6 +92,56 @@ std::vector<std::string> nodeNames()
 }
 
 bool hasNode (const std::vector<std::string>& names, const std::string& name) { return std::find (names.begin(), names.end(), name) != names.end(); }
+
+/** A server without real devices (a headless test server: the dummy driver,
+    null sinks), where a test may open the default output. */
+bool isTestServer()
+{
+    for (const auto& name : nodeNames())
+        if (name.rfind ("alsa_", 0) == 0 || name.rfind ("bluez_", 0) == 0)
+        {
+            std::cerr << "    (skipped: this server has real devices, e.g. " << name << "; the test needs a headless test server)\n";
+            return false;
+        }
+    return true;
+}
+
+/** Records what AppRouting's worker asks the router to link. */
+class InputRecorder final : public AppAudioRouter
+{
+public:
+    bool isSupported() const override { return true; }
+    std::vector<AudioSessionInfo> enumerateSessions() override { return {}; }
+    bool setAppEndpoint (uint32_t, const std::string&, std::string& error) override
+    {
+        error = "test";
+        return false;
+    }
+    void openSystemRoutingSettings() override {}
+    bool connectEndpointInputs (const std::vector<EndpointInput>& inputs, std::string& status) override
+    {
+        const std::lock_guard<std::mutex> guard (mutex);
+        last = inputs;
+        ++calls;
+        status.clear();
+        return true;
+    }
+    std::vector<EndpointInput> lastInputs() const
+    {
+        const std::lock_guard<std::mutex> guard (mutex);
+        return last;
+    }
+    int callCount() const
+    {
+        const std::lock_guard<std::mutex> guard (mutex);
+        return calls;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::vector<EndpointInput> last;
+    int calls = 0;
+};
 
 /** A node callback for the tests: a 997 Hz tone at -20 dBFS on every output
     (or silence), the RMS of each input over the last cycles, and the data
@@ -420,6 +476,121 @@ TEST_CASE ("App: the PipeWire device type runs AudioEngineHost in the node: 14 n
 
     player->stop();
     host.closeDevice();
+    sinkNode->stop();
+    CHECK (! hasNode (nodeNames(), "flubsound_game")); // the device's sinks went with it
+}
+
+TEST_CASE ("App: the running app offers the PipeWire device and plays through it: first-run default, every strip mapped, Low Latency without a re-open, the quantum in the latency total, the routing panel's link line (E48)")
+{
+    if (! serverAvailable() || ! isTestServer())
+        return;
+    if (hasNode (nodeNames(), "flubsound_game"))
+    {
+        std::cerr << "    (skipped: this server already has Flubsound's sinks)\n";
+        return;
+    }
+
+    // Stands in for the headset: the engine is moved here once it runs.
+    const auto out = unique ("app_out");
+    auto sinkNode = NativeAudioNode::create();
+    TestCallback sinkCallback (false);
+    std::string error;
+    REQUIRE (sinkNode->start (testConfig ("appsink", { { "Out", out, "Flubsound test app output", { "FL", "FR" } } }, ""), sinkCallback, error));
+
+    // A fresh install: nothing saved, a real device session.
+    const flubapptest::TempFolder temp;
+    EngineController::Options o;
+    o.openAudioDevice = true;
+    o.restoreState = false;
+    o.enableAppRouting = false; // started below with a recording router
+    o.settingsFile = temp.file ("settings.xml");
+    o.persistSettings = false;
+    o.foregroundAppFactory = [] { return std::unique_ptr<ForegroundApp>(); };
+    o.antiCheatServices = [] { return std::vector<std::string>(); };
+    o.outputEndpoints = [] { return std::vector<OutputEndpointIdentity>(); };
+    o.endpointVolumeReader = [] (const std::string&) { return EndpointVolume {}; };
+    EngineController controller (o);
+    auto& host = controller.getHost();
+    auto& manager = controller.getDeviceManager();
+
+    // Offered after JUCE's own types, and the first-run choice when a
+    // PipeWire server answers.
+    bool offered = false;
+    for (auto* type : manager.getAvailableDeviceTypes())
+        offered = offered || type->getTypeName() == pipewire::kDeviceTypeName;
+    CHECK (offered);
+    CHECK (manager.getAvailableDeviceTypes().getFirst()->getTypeName() != pipewire::kDeviceTypeName);
+    auto* device = manager.getCurrentAudioDevice();
+    REQUIRE (device != nullptr);
+    CHECK (device->getTypeName() == pipewire::kDeviceTypeName);
+    CHECK (host.isNativeNodeDevice());
+    CHECK (host.createDeviceStateXml() == nullptr); // not chosen: nothing is persisted until the user picks a device
+    CHECK (pipewire::setDeviceOutputTarget (device, out));
+
+    // Every strip reads its own sink: Game 0-7, Music 8-9, Chat 10-11, System 12-13.
+    CHECK (device->getActiveInputChannels().countNumberOfSetBits() == 14);
+    const auto map = host.getDeviceInputMap();
+    CHECK (map[0] == 0);
+    CHECK (map[1] == 8);
+    CHECK (map[2] == 10);
+    CHECK (map[3] == 12);
+
+    // The router is given nothing to link: the node links its own sinks.
+    auto recorder = std::make_unique<InputRecorder>();
+    auto* recorded = recorder.get();
+    controller.getRouting().setRouter (std::move (recorder), false);
+    controller.getRouting().start();
+
+    // Tones into flubsound_game and flubsound_chat reach those strips, and
+    // processed audio arrives at the output sink.
+    auto gamePlayer = NativeAudioNode::create();
+    auto chatPlayer = NativeAudioNode::create();
+    TestCallback gameTone (true), chatTone (true);
+    REQUIRE (gamePlayer->start (testConfig ("gameplayer", { { "Src", unique ("gp_in"), "x", { "FL", "FR" } } }, "flubsound_game"), gameTone, error));
+    REQUIRE (chatPlayer->start (testConfig ("chatplayer", { { "Src", unique ("cp_in"), "x", { "FL", "FR" } } }, "flubsound_chat"), chatTone, error));
+    const auto stripHears = [&] (int strip) { return (host.getMixEngine().chain (strip).meters().activeChannelMask.load() & 3u) == 3u; };
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return stripHears (0) && stripHears (2); }, 5000));
+    CHECK (! stripHears (1)); // Music's sink is silent
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return sinkCallback.rms (0) > 1.0e-4f; }, 5000));
+    CHECK (flubapptest::pumpMessagesUntil ([&] { return recorded->callCount() > 0; }, 5000));
+    const auto inputs = recorded->lastInputs();
+    CHECK (inputs.size() == 4);
+    CHECK (std::all_of (inputs.begin(), inputs.end(), [] (const AppAudioRouter::EndpointInput& i) { return i.firstInputChannel < 0; }));
+
+    // The routing panel's line.
+    ui::RoutingPanel panel (controller);
+    panel.setSize (340, 900);
+    CHECK (flubapptest::pumpMessagesUntil ([&] {
+        const auto s = host.getNativeNodeStatus();
+        return s.inputLinksMade == 14 && s.outputLinksMade == 2 && s.quantumFrames != 0;
+    }, 5000));
+    panel.refreshLinkStatus();
+    CHECK (panel.getLinkStatus().startsWith ("PipeWire: Linked 14 of 14 input channels, output to " + juce::String (out) + " (2 of 2), quantum "));
+    CHECK (! panel.isLinkStatusWarning());
+    std::cout << "    panel: " << panel.getLinkStatus() << "\n";
+
+    // Low Latency: node.latency in place, the same device keeps running, and
+    // the header's total carries the graph quantum (E42).
+    const auto callbacksBefore = host.getStatus().callbacks;
+    controller.setLatencyProfile (flub::param::LatencyProfileValue::LowLatency);
+    CHECK (manager.getCurrentAudioDevice() == device);
+    CHECK (flubapptest::pumpMessagesUntil ([&] { const auto q = host.getNativeNodeStatus().quantumFrames; return q != 0 && q <= 128; }, 5000));
+    CHECK (host.getStatus().callbacks > callbacksBefore);
+    CHECK (flubapptest::pumpMessagesUntil ([&] {
+        const auto info = host.getLatencyInfo();
+        return info.graphQuantumMs > 0.0 && info.graphQuantumMs <= 128.0 / 44100.0 * 1000.0 + 1.0e-6;
+    }, 3000));
+    const auto info = host.getLatencyInfo();
+    CHECK (info.deviceInputSamples == 0);  // the node adds no device latency of its own
+    CHECK (info.deviceOutputSamples == 0);
+    CHECK (std::abs (info.totalMs - info.engineMs - info.graphQuantumMs) < 1.0e-9);
+    std::cout << "    latency total " << info.totalMs << " ms = engine " << info.engineMs << " + graph quantum " << info.graphQuantumMs << "\n";
+    panel.refreshLinkStatus();
+    CHECK (panel.getLinkStatus().contains ("quantum 128/"));
+
+    gamePlayer->stop();
+    chatPlayer->stop();
+    controller.shutdown();
     sinkNode->stop();
     CHECK (! hasNode (nodeNames(), "flubsound_game")); // the device's sinks went with it
 }

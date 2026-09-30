@@ -29,10 +29,10 @@
   },
   "intent": {
     "tone": {
-      "pink": { "db": [2.9, 2.4, 1.3, 0.6, 0.1, -0.3, -0.1, -0.5, -1.4, 0.0], "toleranceDb": 1.0 },
-      "music": { "db": [0.6, 0.4, 0.4, 0.0, -1.5, -1.7, -1.5, -1.7, -2.5, -1.7], "toleranceDb": 1.5 }
+      "pink": { "db": [3.1, 2.5, 1.3, 0.6, 0.1, -0.3, -0.1, -0.5, -1.4, 0.0], "toleranceDb": 1.0 },
+      "music": { "db": [0.6, 0.4, 0.3, 0.0, -1.5, -1.7, -1.5, -1.6, -2.4, -1.5], "toleranceDb": 1.5 }
     },
-    "loudnessOffsetLu": { "pink": 0.1, "music": 2.1, "toleranceLu": 1.0 },
+    "loudnessOffsetLu": { "pink": 0.0, "music": 2.0, "toleranceLu": 1.0 },
     "lraLossMaxLu": 0.7,
     "thdnMaxDb": -100
   }

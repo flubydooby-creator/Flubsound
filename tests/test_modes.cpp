@@ -13,6 +13,8 @@
 #include "TestSignals.h"
 
 #include "flub/common/Denormals.h"
+#include "flub/dsp/BassEngine.h"
+#include "flub/dsp/Crossover.h"
 #include "flub/dsp/DynamicEq.h"
 #include "flub/engine/ProcessingChain.h"
 
@@ -20,9 +22,11 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <functional>
 #include <initializer_list>
 #include <limits>
+#include <string>
 #include <utility>
 
 using namespace flub;
@@ -436,34 +440,286 @@ TEST_CASE ("Gaming Positional (M2): focus + width raise the ILD of an off-centre
     CHECK_GE (hard.toneDb (0, 3000.0), -20.5);
 }
 
-TEST_CASE ("Gaming Impact (M3): governed bass boost + harmonics and transient attack; a sub-bass hit gains level and harmonics")
+namespace
 {
-    const auto impact = [] (float amount) { return macroOnly (Macro3, amount, { BassOn, ClarityOn }); };
+void measured (const std::string& name, double value, const char* unit)
+{
+    std::printf ("    measured %s = %.2f %s\n", name.c_str(), value, unit);
+}
+
+/** docs/11 E20's scene, 3 s stereo: a steady LF noise rumble (the 40 - 150 Hz
+    LR4 band of white noise, `rumbleDb` dBFS RMS) and from 1.5 s an explosion
+    (a 45 Hz sine and noise under 250 Hz, 0.6 / 0.4, peak `explosionDb` dBFS,
+    2 ms rise, 400 ms decay); explosionDb below -150: the rumble alone. */
+Planar rumbleScene (float rumbleDb, float explosionDb)
+{
+    const int n = static_cast<int> (3.0 * kFs), onset = static_cast<int> (1.5 * kFs);
+    auto rumble = whiteNoise (n, 1.0f, 77);
+    auto noise = whiteNoise (n, 1.0f, 78);
+    LinkwitzRileyBand band;
+    band.prepare (kFs, 40.0, 150.0);
+    LinkwitzRiley4 low;
+    low.prepare (kFs);
+    low.setFrequency (250.0);
+    for (int i = 0; i < n; ++i)
     {
-        const auto e0 = effectiveAfterPrepare (impact (0.0f));
-        CHECK (e0[BassOn] < 0.5f);
-        CHECK (e0[ClarityOn] < 0.5f);
-        const auto e5 = effectiveAfterPrepare (impact (0.5f));
-        CHECK (e5[BassOn] >= 0.5f);
-        CHECK (e5[ClarityOn] >= 0.5f);
-        CHECK_NEAR (e5[BassBoostDb], 3.0, 1e-4);                 // 6 dB x smoothstep(0, 1)
-        CHECK_NEAR (e5[BassHarmonics], 0.25 * 0.0740741, 1e-5);  // x smoothstep(0.4, 1)
-        CHECK_NEAR (e5[ClarityAttackDb], 4.0 * 0.316406, 1e-4);  // x smoothstep(0.2, 1)
-        const auto e1 = effectiveAfterPrepare (impact (1.0f));
-        CHECK_NEAR (e1[BassBoostDb], 6.0, 1e-4);
-        CHECK_NEAR (e1[BassHarmonics], 0.25, 1e-5);
-        CHECK_NEAR (e1[ClarityAttackDb], 4.0, 1e-4);
+        float lo, hi;
+        rumble[static_cast<size_t> (i)] = band.processSample (0, rumble[static_cast<size_t> (i)]);
+        low.processSample (0, noise[static_cast<size_t> (i)], lo, hi);
+        noise[static_cast<size_t> (i)] = lo;
     }
-    // A -30 dBFS 50 Hz rumble: the low shelf (corner 70 Hz) lifts it by most
-    // of its 6 dB, and the harmonic generator adds its 3rd harmonic (150 Hz)
-    // where there was none.
-    const auto off = renderGaming (impact (0.0f), tone (50.0, -30.0f));
-    const auto on = renderGaming (impact (1.0f), tone (50.0, -30.0f));
-    const double boost = on.toneDb (0, 50.0) - off.toneDb (0, 50.0);
-    CHECK_GE (boost, 3.5);
-    CHECK_LE (boost, 6.05);
-    CHECK_LE (off.toneDb (0, 150.0), -130.0);
-    CHECK_GE (on.toneDb (0, 150.0) - on.toneDb (0, 50.0), -20.0);
+    const double rumbleGain = dbToGain (rumbleDb) / std::max (1.0e-12, rms (rumble.data(), n));
+    const double noiseRms = std::max (1.0e-12, rms (noise.data() + onset, n - onset));
+    std::vector<double> explosion (static_cast<size_t> (n), 0.0);
+    double peak = 1.0e-12;
+    for (int i = onset; i < n; ++i)
+    {
+        const double t = (i - onset) / kFs;
+        const double env = std::min (1.0, t / 0.002) * std::exp (-t / 0.4);
+        explosion[static_cast<size_t> (i)] = env * (0.6 * std::sin (kTwoPi * 45.0 * t) + 0.4 * noise[static_cast<size_t> (i)] / noiseRms);
+        peak = std::max (peak, std::abs (explosion[static_cast<size_t> (i)]));
+    }
+    const double explosionGain = explosionDb > -150.0f ? dbToGain (explosionDb) / peak : 0.0;
+    Planar p (2, n);
+    for (int i = 0; i < n; ++i)
+    {
+        const auto v = static_cast<float> (rumbleGain * rumble[static_cast<size_t> (i)] + explosionGain * explosion[static_cast<size_t> (i)]);
+        p.ch[0][static_cast<size_t> (i)] = p.ch[1][static_cast<size_t> (i)] = v;
+    }
+    return p;
+}
+
+/** Power (dB) of channel 0's 40 - 150 Hz LR4 band over [fromS, toS) of the
+    input's time line (the output read `delay` samples later). */
+double lfBandDb (const Planar& p, double fromS, double toS, int delay)
+{
+    LinkwitzRileyBand band;
+    band.prepare (kFs, 40.0, 150.0);
+    const int a = static_cast<int> (fromS * kFs) + delay, b = std::min (p.numSamples(), static_cast<int> (toS * kFs) + delay);
+    double acc = 0.0;
+    for (int i = 0; i < b; ++i)
+    {
+        const double y = band.processSample (0, p.ch[0][static_cast<size_t> (i)]);
+        if (i >= a)
+            acc += y * y;
+    }
+    return 10.0 * std::log10 (std::max (1.0e-30, acc / std::max (1, b - a)));
+}
+} // namespace
+
+TEST_CASE ("Gaming Impact (M3): no static bass boost or harmonics; the attack goes to the shaper's low band and the bass engine's event-keyed punch (docs/11 E04 step 4, E20)")
+{
+    // Before (docs/11 E20 Why): Impact was a governed 6 dB low shelf x
+    // smoothstep (0, 1), harmonics 0.25 x smoothstep (0.4, 1) and a full-band
+    // attack of 4 dB x smoothstep (0.2, 1), which lifted a quiet rumble more
+    // than the explosion. Now it engages the bass engine for its punch (the
+    // chain sets BassEngineParams::impactPunch from Impact, governed) and
+    // Clarity for the low band's attack.
+    const auto impact = [] (float amount) { return macroOnly (Macro3, amount, { BassOn, ClarityOn }); };
+    const auto e0 = effectiveAfterPrepare (impact (0.0f));
+    CHECK (e0[BassOn] < 0.5f);
+    CHECK (e0[ClarityOn] < 0.5f);
+    for (float amount : { 0.5f, 1.0f })
+    {
+        const auto e = effectiveAfterPrepare (impact (amount));
+        CHECK (e[BassOn] >= 0.5f);
+        CHECK (e[ClarityOn] >= 0.5f);
+        CHECK (e[BassBoostDb] == 0.0f);
+        CHECK (e[BassHarmonics] == 0.0f);
+        CHECK (e[ClarityAttackDb] == 0.0f);
+        CHECK (e[ClarityAttackHighDb] == 0.0f);
+    }
+    CHECK_NEAR (effectiveAfterPrepare (impact (0.5f))[ClarityAttackLowDb], 4.0 * 0.316406, 1e-4); // x smoothstep (0.2, 1)
+    CHECK_NEAR (effectiveAfterPrepare (impact (1.0f))[ClarityAttackLowDb], 4.0, 1e-4);
+
+    // Footsteps (M1) and Detail (M4) reach the shaper's high band (docs/11
+    // E04 step 4): 2 dB each at 100 %, from any amount; Footsteps engages
+    // Clarity for it.
+    const auto fs = effectiveAfterPrepare (macroOnly (Macro1, 1.0f, { ClarityOn }));
+    CHECK (fs[ClarityOn] >= 0.5f);
+    CHECK_NEAR (fs[ClarityAttackHighDb], 2.0, 1e-5);
+    CHECK (fs[ClarityAttackDb] == 0.0f);
+    CHECK_NEAR (effectiveAfterPrepare (macroOnly (Macro4, 1.0f, { ClarityOn }))[ClarityAttackHighDb], 2.0, 1e-5);
+    CHECK_NEAR (effectiveAfterPrepare (macroOnly (Macro4, 0.5f, { ClarityOn }))[ClarityAttackHighDb], 1.0, 1e-5);
+}
+
+TEST_CASE ("Gaming Impact (M3) Done-when (docs/11 E20): an explosion's onset window gains >= 3 dB of LF, a steady rumble stays within 0.5 dB, the lift is gone in the tail, and a hot explosion stays under the ceiling")
+{
+    // Impact 100 against Impact 0, everything else default, on the scene
+    // above: a -40 dBFS RMS rumble, an explosion peaking at -20 dBFS. The
+    // 40 - 150 Hz band over the explosion's first 150 ms (onset window), over
+    // 0.5 - 1.4 s (rumble only) and 300 - 800 ms after the onset (tail).
+    // Before (the static shelf, CLI, same scene): rumble +2.40 dB, onset
+    // window +6.15 dB, tail +4.09 dB - the rumble was lifted nearly as much
+    // as the explosion.
+    const auto impact = [] (float amount) { return macroOnly (Macro3, amount, {}); };
+    const int delay = chainLatency (impact (1.0f), kFs);
+    CHECK (delay == chainLatency (impact (0.0f), kFs));
+    const auto in = rumbleScene (-40.0f, -20.0f);
+    const auto off = renderGaming (impact (0.0f), in), on = renderGaming (impact (1.0f), in);
+    const double onsetLift = lfBandDb (on.out, 1.5, 1.65, delay) - lfBandDb (off.out, 1.5, 1.65, delay);
+    const double rumbleLift = lfBandDb (on.out, 0.5, 1.4, delay) - lfBandDb (off.out, 0.5, 1.4, delay);
+    const double tailLift = lfBandDb (on.out, 1.8, 2.3, delay) - lfBandDb (off.out, 1.8, 2.3, delay);
+    measured ("Impact 100, explosion onset window (0-150 ms) LF lift", onsetLift, "dB");
+    measured ("Impact 100, rumble-only LF lift", rumbleLift, "dB");
+    measured ("Impact 100, explosion tail (300-800 ms) LF lift", tailLift, "dB");
+    CHECK_GE (onsetLift, 3.0);
+    CHECK_LE (std::abs (rumbleLift), 0.5);
+    CHECK_LE (tailLift, 1.0);
+    CHECK_NEAR (onsetLift, 4.46, 0.3);
+
+    // Headroom-reserved: an explosion peaking at -12 dBFS, its LF near
+    // bass.protect (-12 dBFS), gets less of the burst while its peak lasts
+    // (the next case reads the cap on the bass engine alone: the chain adds
+    // the shaper's low-band attack, which is not reserved).
+    const auto loudIn = rumbleScene (-36.0f, -12.0f);
+    const auto loudOff = renderGaming (impact (0.0f), loudIn), loudOn = renderGaming (impact (1.0f), loudIn);
+    const double loudLift = lfBandDb (loudOn.out, 1.5, 1.65, delay) - lfBandDb (loudOff.out, 1.5, 1.65, delay);
+    measured ("Impact 100, -12 dBFS explosion onset window LF lift", loudLift, "dB");
+    CHECK_LE (loudLift, onsetLift);
+
+    // Ceiling held: Boost 50 (the maximizer on, ceiling -1 dBTP) and Impact
+    // 100 on an explosion peaking at -1 dBFS; the output's sample peak stays
+    // under the ceiling, as it does at Impact 0.
+    const auto boosted = [] (float amount) {
+        return [amount] (ParameterStore& s) {
+            s.set (BoostIntensity, 0.5f);
+            s.set (Macro3, amount);
+        };
+    };
+    const auto hot = rumbleScene (-30.0f, -1.0f);
+    const auto hotOff = renderGaming (boosted (0.0f), hot), hotOn = renderGaming (boosted (1.0f), hot);
+    const double peakOff = toDb (std::max (peakAbs (hotOff.out.ch[0].data(), hot.numSamples()), peakAbs (hotOff.out.ch[1].data(), hot.numSamples())));
+    const double peakOn = toDb (std::max (peakAbs (hotOn.out.ch[0].data(), hot.numSamples()), peakAbs (hotOn.out.ch[1].data(), hot.numSamples())));
+    measured ("Boost 50 + Impact 0 / 100, -1 dBFS explosion: output peak (Impact 0)", peakOff, "dBFS");
+    measured ("Boost 50 + Impact 0 / 100, -1 dBFS explosion: output peak (Impact 100)", peakOn, "dBFS");
+    CHECK_LE (peakOn, -1.0 + 0.05);
+    CHECK_LE (peakOff, -1.0 + 0.05);
+}
+
+TEST_CASE ("BassEngine Impact punch (docs/11 E20): switching it is click-free, the burst keys on onsets only and stays under bass.protect, the output does not depend on the block size, a NaN burst does not stick, and nothing allocates")
+{
+    // A 60 Hz tone at -40 dBFS (steady: no onset) with an explosion-like hit
+    // at 0.5 s (from the scene above, peak -20 dBFS).
+    const auto hit = rumbleScene (-150.0f, -20.0f);
+    const int n = static_cast<int> (1.5 * kFs);
+    Planar in (2, n);
+    const auto tone60 = sine (60.0, kFs, n, dbToGain (-40.0f));
+    for (int c = 0; c < 2; ++c)
+        for (int i = 0; i < n; ++i)
+            in.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = tone60[static_cast<size_t> (i)] + hit.ch[0][static_cast<size_t> (i + static_cast<int> (1.0 * kFs))];
+
+    const auto run = [&] (const Planar& x, int blockSize, auto&& perBlock, float* maxImpactDb = nullptr) {
+        BassEngine be;
+        be.prepare ({ kFs, 512, 2 });
+        Planar y = x;
+        float maxDb = 0.0f;
+        for (int pos = 0, b = 0; pos < n; pos += blockSize, ++b)
+        {
+            perBlock (be, pos);
+            be.process (y.block (pos, std::min (blockSize, n - pos)));
+            maxDb = std::max (maxDb, be.getImpactDb());
+        }
+        if (maxImpactDb != nullptr)
+            *maxImpactDb = maxDb;
+        return y;
+    };
+    const auto withPunch = [] (float punch) {
+        return [punch] (BassEngine& be, int) {
+            BassEngineParams p;
+            p.impactPunch = punch;
+            be.setParams (p);
+        };
+    };
+
+    // The hit keys a burst (up to 6 dB); the steady tone alone does not.
+    float burstDb = 0.0f, steadyDb = 0.0f;
+    const auto a = run (in, 256, withPunch (1.0f), &burstDb);
+    Planar toneOnly (2, n);
+    for (int c = 0; c < 2; ++c)
+        toneOnly.ch[static_cast<size_t> (c)] = tone60;
+    run (toneOnly, 256, withPunch (1.0f), &steadyDb);
+    measured ("Impact punch: largest lift on the hit / on the steady tone", burstDb, "dB");
+    measured ("  on the steady tone", steadyDb, "dB");
+    CHECK_GE (burstDb, 5.0f);
+    CHECK_LE (burstDb, 6.0f);
+    CHECK_LE (steadyDb, 0.05f);
+
+    // Block-size independent (the stage runs per sample).
+    const auto b = run (in, 61, withPunch (1.0f));
+    CHECK (maxAbsDiff (a, b) == 0.0);
+
+    // Nothing above 3 kHz (the harmonics end at 6 x 120 Hz), measured
+    // through four one-pole high-passes: switching Impact on and off on the
+    // steady tone is click-free, and the burst on the hit (a second-order
+    // rise of the lift and of the harmonics mix) leaves only the harmonics
+    // generator's own splatter, 45 dB under the hit.
+    const auto hfPeakDb = [&] (const Planar& y) {
+        double hf = 0.0;
+        std::array<double, 4> z {};
+        const double g = std::tan (kPi * 3000.0 / kFs), G = g / (1.0 + g);
+        for (int i = 0; i < n; ++i)
+        {
+            double v = y.ch[0][static_cast<size_t> (i)];
+            for (auto& s : z)
+            {
+                const double w = (v - s) * G, lp = w + s;
+                s = lp + w;
+                v -= lp;
+            }
+            if (i > static_cast<int> (0.05 * kFs))
+                hf = std::max (hf, std::abs (v));
+        }
+        return toDb (hf);
+    };
+    const auto toggle = [] (BassEngine& be, int pos) {
+        BassEngineParams p;
+        p.impactPunch = pos < static_cast<int> (0.3 * kFs) ? 0.0f : (pos < static_cast<int> (0.7 * kFs) ? 1.0f : (pos < static_cast<int> (1.0 * kFs) ? 0.0f : 0.6f));
+        be.setParams (p);
+    };
+    const double switchedDb = hfPeakDb (run (toneOnly, 256, toggle)), burstHfDb = hfPeakDb (run (in, 256, toggle));
+    measured ("Impact punch switched on the steady tone: largest content above 3 kHz", switchedDb, "dBFS");
+    measured ("Impact punch switched with a burst on the hit: largest content above 3 kHz", burstHfDb, "dBFS");
+    CHECK_LE (switchedDb, -100.0);
+    CHECK_LE (burstHfDb, -65.0);
+
+    // Headroom: the same hit 20 dB louder (its LF over bass.protect's
+    // -12 dBFS) gets almost none of the lift.
+    Planar loud = in;
+    for (auto& c : loud.ch)
+        for (auto& v : c)
+            v *= 10.0f;
+    float loudDb = 0.0f;
+    run (loud, 256, withPunch (1.0f), &loudDb);
+    measured ("Impact punch: largest lift on the hit 20 dB louder", loudDb, "dB");
+    CHECK_LE (loudDb, 1.0f);
+
+    // A NaN burst resets the stage (the engine's non-finite guard) and the
+    // output is finite and back to the undisturbed render 0.5 s later.
+    Planar nan = in;
+    for (int i = static_cast<int> (0.2 * kFs); i < static_cast<int> (0.2 * kFs) + 64; ++i)
+        nan.ch[0][static_cast<size_t> (i)] = std::numeric_limits<float>::quiet_NaN();
+    const auto c = run (nan, 256, withPunch (1.0f));
+    bool finite = true;
+    for (int i = static_cast<int> (0.3 * kFs); i < n; ++i)
+        finite = finite && std::isfinite (c.ch[0][static_cast<size_t> (i)]) && std::isfinite (c.ch[1][static_cast<size_t> (i)]);
+    CHECK (finite);
+
+    // process / setParams / reset allocate nothing.
+    BassEngine be;
+    be.prepare ({ kFs, 512, 2 });
+    Planar buf = in;
+    flubtest::AllocationGuard guard;
+    be.reset();
+    for (int i = 0; i < 40; ++i)
+    {
+        BassEngineParams p;
+        p.impactPunch = static_cast<float> (i % 4) / 3.0f;
+        p.harmonicsAmount = i % 5 == 0 ? 0.3f : 0.0f;
+        be.setParams (p);
+        be.process (buf.block (i * 512 % (n - 512), 1 + i * 37 % 512));
+    }
+    CHECK (guard.allocations() == 0);
 }
 
 TEST_CASE ("Gaming Detail (M4): upward compression lifts quiet cues by its law (up to 8 dB) over the programme's background; a steady sound and loud ones are not lifted")

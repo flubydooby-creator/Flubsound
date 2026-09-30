@@ -39,6 +39,13 @@
 // under the list; where the foreground app cannot be detected (Wayland, no
 // platform services) the reason is shown instead and adding is disabled.
 //
+// Above the footer, one line says how the strips' endpoints reach
+// Flubsound's input (docs/11 E48): with the native PipeWire device its links,
+// output device and graph quantum ("PipeWire: Linked 14 of 14 input
+// channels, output to ... (2 of 2), quantum 256/48000"); otherwise only
+// what the router could not link (e.g. a missing Flubsound sink). The full
+// text is its tooltip; amber when a link is missing.
+//
 // While visible the panel asks AppRouting for live session updates.
 #pragma once
 
@@ -116,6 +123,12 @@ public:
     bool isVoiceDotLit() const;
     /** Re-reads ChatMix and the duck setting into the Chat row. */
     void refreshChat();
+    /** docs/11 E48: the input-link line (empty = not shown) and whether it
+        reports a missing link. Re-read by refreshRouting() and, twice a
+        second, by updateMeters(). */
+    const juce::String& getLinkStatus() const noexcept { return linkStatus; }
+    bool isLinkStatusWarning() const noexcept { return linkWarning; }
+    void refreshLinkStatus();
 
 private:
     class StripRow;
@@ -144,5 +157,9 @@ private:
     juce::Rectangle<int> headerArea, noticeArea;
     bool noticeCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;
+    juce::String linkStatus;     // docs/11 E48: the input-link line
+    bool linkWarning = false;
+    juce::Rectangle<int> linkArea;
+    double linkPollSeconds = 0.0;
 };
 } // namespace flub::app::ui

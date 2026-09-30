@@ -3,15 +3,19 @@
 #include "Commands.h"
 #include "FactoryPresets.h"
 
+#include "flub/common/Denormals.h"
 #include "flub/common/Math.h"
 #include "flub/engine/MacroMap.h"
+#include "flub/engine/MixEngine.h"
 #include "flub/io/FilePath.h"
+#include "flub/io/ParametricEqText.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -330,6 +334,47 @@ io::AudioFileData makeSpeech (double seconds)
     return d;
 }
 
+/** The music programme mastered loud, for Smart macros: 14 dB into a tanh
+    soft clipper, then peak -1 dBFS (a limited master: Smart's analysis reads
+    its PLR under 7.5 LU, where it takes the macros' attack back). */
+io::AudioFileData makeLoudMusic (double seconds)
+{
+    auto d = makeMusic (seconds);
+    const double drive = std::pow (10.0, 14.0 / 20.0);
+    for (auto& c : d.channels)
+        for (float& v : c)
+            v = static_cast<float> (std::tanh (drive * static_cast<double> (v)));
+    normalisePeak (d.channels, -1.0);
+    return d;
+}
+
+/** The speech programme over a steady hiss floor (pink, -50 dBFS RMS per
+    channel, uncorrelated), for the noise gate. */
+io::AudioFileData makeSpeechHiss (double seconds)
+{
+    auto d = makeSpeech (seconds);
+    const double level = std::pow (10.0, -50.0 / 20.0) / 0.3;
+    for (size_t c = 0; c < d.channels.size(); ++c)
+    {
+        Pink pink (static_cast<uint32_t> (909 + c));
+        for (float& v : d.channels[c])
+            v += static_cast<float> (level * pink.next());
+    }
+    return d;
+}
+
+/** The chat scene's teammate: a higher formant voice (about 180 Hz) talking
+    from 25 to 75 % of the programme, centred, peak -9 dBFS. */
+io::AudioFileData makeChatVoice (double seconds)
+{
+    const int n = framesFor (seconds);
+    std::vector<float> mono (static_cast<size_t> (n));
+    addVoice (mono, framesFor (0.25 * seconds), framesFor (0.75 * seconds), 3141, 180.0, 1.0);
+    auto d = stereoData (mono, mono);
+    normalisePeak (d.channels, -9.0);
+    return d;
+}
+
 // Speaker azimuths (degrees) of the 7.1 bed, WAVE_FORMAT_EXTENSIBLE order
 // FL FR FC LFE BL BR SL SR (the LFE has none).
 constexpr int kLfe = 3;
@@ -559,9 +604,17 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
 {
     std::vector<DemoPairSpec> pairs;
     auto add = [&pairs] (std::string slug, std::string title, std::string programme, std::vector<ParamSetting> before,
-                         std::vector<ParamSetting> after, bool levelFeature, std::string listenFor) {
-        pairs.push_back ({ std::move (slug), std::move (title), std::move (programme), std::move (before), std::move (after),
-                           levelFeature, std::move (listenFor) });
+                         std::vector<ParamSetting> after, bool levelFeature, std::string listenFor) -> DemoPairSpec& {
+        DemoPairSpec p;
+        p.slug = std::move (slug);
+        p.title = std::move (title);
+        p.programme = std::move (programme);
+        p.before = std::move (before);
+        p.after = std::move (after);
+        p.levelFeature = levelFeature;
+        p.listenFor = std::move (listenFor);
+        pairs.push_back (std::move (p));
+        return pairs.back();
     };
 
     // ---- The macros, 0 -> 100 % at Boost 0 ----------------------------------
@@ -680,6 +733,236 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
              "music", { setting ("mode", "Music"), setting ("max.drive", "9") },
              { setting ("mode", "Music"), setting ("max.drive", "9"), setting ("max.style", styles[static_cast<size_t> (s)]) }, false,
              std::string ("Both sides drive the maximizer by 9 dB; before uses the Custom (default) clipper and release. ") + kStyleListen[s - 1]);
+
+    // ---- Batch 4 - 5 features and the module cards (docs/12-feature-guide.md) ----
+    const ParamSetting music = setting ("mode", "Music"), gaming = setting ("mode", "Gaming");
+
+    // Punch and Impact against a driven maximizer (docs/11 E04 step 4, E20).
+    add ("music-punch-boost-100", "Music - Punch 0 -> 100 % at Boost 100", "music", { music, setting ("boost", "100%") },
+         { music, setting ("boost", "100%"), setting ("macro.1", "100%") }, false,
+         "Both sides run Boost 100, so the maximizer is working. Punch should still put the kick's and snare's first "
+         "milliseconds ahead of their body - a click and a thump at the start of each hit - with the level between hits "
+         "unchanged. If the hits only get louder overall, or the mix pumps, Punch is not doing its job.");
+    add ("gaming-impact-boost-100", "Gaming - Impact 0 -> 100 % at Boost 100", "game", { gaming, setting ("boost", "100%") },
+         { gaming, setting ("boost", "100%"), setting ("macro.3", "100%") }, false,
+         "Both sides run Boost 100. The explosions and gunshots start with a bigger low-end thump; the rumble after them "
+         "and the ambience stay where they were, and the footsteps right after a blast should stay as audible as before.");
+
+    // The transient shaper's bands (docs/11 E04 step 3).
+    add ("attack-low", "Music - Transient attack, low band (clarity.attackLow) 0 -> +6 dB", "music", { music },
+         { music, setting ("clarity.attackLow", "6") }, false,
+         "Only the kick's and the bass's onsets get harder: a firmer thump at the start of each kick. The hats and the "
+         "voice do not change.");
+    add ("attack-high", "Music - Transient attack, high band (clarity.attackHigh) 0 -> +6 dB", "music", { music },
+         { music, setting ("clarity.attackHigh", "6") }, false,
+         "Only the onsets above 4 kHz get sharper: the hats' ticks and the snare's crack. The kick and the bass line do "
+         "not change.");
+
+    // Presence against the programme's level (docs/11 E07 step 3).
+    add ("relative-presence", "Music - Presence mode Absolute -> Relative (Clarity 100 on a quiet master, input -20 dB)", "music",
+         { music, setting ("input.gain", "-20"), setting ("macro.3", "100%") },
+         { music, setting ("input.gain", "-20"), setting ("macro.3", "100%"), setting ("clarity.presenceMode", "Relative") }, false,
+         "Both sides play the music 20 dB quieter than mastered, with Clarity at 100. Absolute presence lifts a quiet "
+         "master more than a loud one; Relative reads the presence band against the music's own body and lifts it as it "
+         "would at a normal level. After should sound less bright and less forward in the 2 - 5 kHz region (voice, snare), "
+         "with nothing else changed.");
+
+    // Crossfeed types (docs/11 E12).
+    add ("crossfeed-meier", "Music - Crossfeed type Bs2b -> Meier (crossfeed 50 %)", "music",
+         { music, setting ("spatial.crossfeed", "50%") }, { music, setting ("spatial.crossfeed", "50%"), setting ("spatial.crossfeedType", "Meier") },
+         false,
+         "Headphones only. Both sides feed a little of each side to the other ear; Meier's model keeps more of the top "
+         "end and the centre's tone. Listen to the hats and the pad at the sides: a slightly clearer, less dull image.");
+    add ("crossfeed-mono-safe", "Music - Crossfeed type Bs2b -> Mono-safe (crossfeed 50 %)", "music",
+         { music, setting ("spatial.crossfeed", "50%") },
+         { music, setting ("spatial.crossfeed", "50%"), setting ("spatial.crossfeedType", "Mono-safe") }, false,
+         "Headphones only. Mono-safe crossfeeds without changing what a mono sum hears: the centre (kick, bass, voice) "
+         "keeps its level and tone exactly; the sides move inwards a little.");
+
+    // The virtualiser's renderer (docs/11 E28).
+    add ("enhanced-renderer", "Gaming - Virtualiser renderer Classic -> Enhanced (7.1 scene)", "game-7.1", { gaming },
+         { gaming, setting ("virt.renderer", "Enhanced") }, false,
+         "Headphones only. Enhanced adds direction cues: sounds in front get a brighter 4 kHz and 13 kHz edge, sounds "
+         "behind a 1 kHz and 10 kHz colour, and the centre voice keeps the sides' tone. The footsteps circling you should "
+         "be easier to place in front or behind.");
+    add ("virt-front-back", "Gaming - Enhanced renderer, front/back contrast 50 -> 100 % (7.1 scene)", "game-7.1",
+         { gaming, setting ("virt.renderer", "Enhanced") },
+         { gaming, setting ("virt.renderer", "Enhanced"), setting ("virt.frontBack", "100%") }, false,
+         "Headphones only. Both sides use the Enhanced renderer; after doubles its front / back colour. The steps behind "
+         "you should sound more clearly behind, at the price of a more coloured sound in front and behind.");
+
+    // The five genre presets (docs/11 E14 step 3) and the voice / night presets.
+    struct PresetPair
+    {
+        const char *slug, *file, *name, *programme;
+        bool level;
+        const char* listen;
+    };
+    static const PresetPair kPresets[] = {
+        { "preset-rock-metal", "music-rock-metal", "Rock & Metal", "music", false,
+          "Less boxiness at 250 - 500 Hz (about -1 dB), a little more bite at 1 - 2 kHz and a softer fizz above 4 kHz: "
+          "guitars and drums with edge, without mud." },
+        { "preset-orchestral-film", "music-orchestral-film", "Orchestral & Film", "music", false,
+          "A deeper low end (+1.4 - 1.7 dB at 31 - 63 Hz), a slightly softer 2 - 4 kHz and headphone crossfeed; no "
+          "maximizer drive, clipper or compression, so the drums keep their full jump." },
+        { "preset-acoustic-singer-songwriter", "music-acoustic-singer-songwriter", "Acoustic & Singer-Songwriter", "music", false,
+          "Warmth at 35 %: more body at 125 - 250 Hz (about +0.8 dB) and a gentler top, with a light tube colour on the "
+          "voice. It should sound closer and rounder, not muffled." },
+        { "preset-rnb-vocal", "music-rnb-vocal", "R&B & Vocal", "music", false,
+          "A smooth, deep low end (+1.1 - 1.4 dB at 31 - 63 Hz, mono below 100 Hz), the voice a little forward at 2 kHz and "
+          "a softer top above 8 kHz." },
+        { "preset-electronic-ambient", "music-electronic-ambient", "Electronic & Ambient", "music", false,
+          "A deeper sub (+2.3 dB at 31 Hz), the rest of the spectrum within 0.3 dB, and a wider, more spacious pad." },
+        { "preset-late-night", "music-late-night-low-volume", "Late Night Low Volume", "music", true,
+          "Not level-matched (a level feature): Late Night aims at about -20 LUFS with the quiet parts lifted and the loud "
+          "ones held down. Play it quietly: every part of the song should stay audible without the drums jumping out." },
+        { "preset-podcast-voice", "music-podcast-voice", "Podcast & Voice", "speech", true,
+          "Not level-matched (a level feature): speech levelled and brought up, with the rumble and boxiness removed and "
+          "the consonants clearer. Quiet and loud phrases should come out at about the same level." },
+        { "preset-voice-chat", "music-voice-chat", "Voice Chat", "speech", true,
+          "Not level-matched (a level feature): the Chat strip's preset. Rumble below 110 Hz and boxiness go, presence "
+          "comes up, and Auto Level evens the talker out: easier to understand at a lower volume." },
+    };
+    for (const auto& pp : kPresets)
+        add (pp.slug, std::string ("Music - defaults -> ") + pp.name + " (factory preset)", pp.programme, { music }, {}, pp.level, pp.listen)
+            .afterPreset = pp.file;
+
+    // Module cards (docs/12 section 4).
+    add ("noise-gate", "Speech - Noise gate off -> on (Quality profile)", "speech-hiss", { music, setting ("latency.profile", "Quality") },
+         { music, setting ("latency.profile", "Quality"), setting ("gate.on", "on") }, false,
+         "The hiss under the voice drops in the pauses between phrases and under the voice it is lower; the voice itself "
+         "should not sound watery or chopped. (The gate runs only in the Quality latency profile.)");
+    add ("eq-bell", "Music - Parametric EQ band 8 (4 kHz) 0 -> +6 dB bell", "music", { music }, { music, setting ("eq.7.gain", "6") }, false,
+         "A plain tone change: the 2 - 8 kHz region (the voice's edge, the snare's crack, the hats' body) comes forward.");
+    add ("dynamic-eq", "Music - Dynamic EQ band 3 (3.5 kHz) cuts above -30 dB", "music", { music },
+         { music, setting ("dyneq.2.on", "on"), setting ("dyneq.2.threshold", "-30"), setting ("dyneq.2.range", "6") }, false,
+         "The 3.5 kHz region is turned down only while it is loud: the loud vowels and snare hits lose their edge, the "
+         "quiet passages keep theirs.");
+    add ("bass-boost", "Music - Bass engine boost 0 -> +6 dB (70 Hz; input -12 dB)", "music", { music, setting ("input.gain", "-12") },
+         { music, setting ("input.gain", "-12"), setting ("bass.boost", "6") }, false,
+         "More low end below about 100 Hz: the kick's thump and the bass line's weight. Both sides play the music 12 dB "
+         "down, as a quieter recording: on a loud master the engine's headroom protection (-12 dB) holds almost all of "
+         "the boost back instead of letting it distort.");
+    add ("bass-harmonics", "Music - Harmonic bass 0 -> 60 %", "music", { music }, { music, setting ("bass.harmonics", "60%") }, false,
+         "Overtones of the bass line and the kick: they sound deeper on small speakers and earbuds that cannot play the "
+         "lowest notes. On good headphones: a little more growl on the bass.");
+    add ("bass-tighten", "Music - Bass Tighten 0 -> 50 %", "music", { music }, { music, setting ("bass.tighten", "50%") }, false,
+         "Each kick's tail gets shorter while its first hit stays: a drier, tighter low end with less boom between the "
+         "beats.");
+    add ("saturation", "Music - Saturation off -> Tube, drive 12 dB", "music", { music },
+         { music, setting ("sat.on", "on"), setting ("sat.type", "Tube"), setting ("sat.drive", "12") }, false,
+         "Added harmonics: a denser, rounder, slightly gritty sound on the voice and the bass. Too much sounds fuzzy.");
+    add ("tape-grit", "Music - Warmth 100 %: tone -> Tape grit", "music", { music, setting ("macro.5", "100%") },
+         { music, setting ("macro.5", "100%"), setting ("warmth.tapeGrit", "on") }, false,
+         "Both sides at Warmth 100. Before is Warmth's tone tilt (more body at 200 Hz, a softer top); after is the classic "
+         "tape grit (hard tape drive, more bass and harmonics, no tilt): more distortion and bass, less of the soft top.");
+    add ("compressor", "Music - Compressor off -> on (-24 dB, 4:1, automatic make-up)", "music", { music },
+         { music, setting ("comp.on", "on"), setting ("comp.threshold", "-24"), setting ("comp.ratio", "4"), setting ("comp.autoMakeup", "on") },
+         false,
+         "Flatter dynamics: the drums jump less above the rest and the quiet pad and voice come closer to them. Listen "
+         "for the drum hits losing their snap, the price of compression.");
+    add ("auto-preamp", "Music - Automatic preamp off -> on (Boost 100)", "music", { music, setting ("boost", "100%") },
+         { music, setting ("boost", "100%"), setting ("auto.preamp", "on") }, false,
+         "Both sides run Boost 100. The automatic preamp turns the input down by what the enhancement adds, so the "
+         "maximizer works less: the drums keep more of their attack and the limiter's pumping is less. The readouts give "
+         "the limiter's work.");
+    add ("latency-profile", "Music - Latency profile Low Latency -> Quality (Boost 100, Warmth 100)", "music",
+         { music, setting ("boost", "100%"), setting ("macro.5", "100%"), setting ("latency.profile", "Low Latency") },
+         { music, setting ("boost", "100%"), setting ("macro.5", "100%"), setting ("latency.profile", "Quality") }, false,
+         "Quality oversamples the saturator and clipper more and gives the limiters more look-ahead: a slightly cleaner "
+         "top end (hats, sibilants) on driven material. The difference is small; a blind A/B/X is the fair test.");
+    add ("protection-normal", "Music - Protection strength Off -> Normal (Boost 100, every macro 100 %)", "music",
+         { music, setting ("boost", "100%"), setting ("macro.1", "100%"), setting ("macro.2", "100%"), setting ("macro.3", "100%"),
+           setting ("macro.4", "100%"), setting ("macro.5", "100%") },
+         { music, setting ("boost", "100%"), setting ("macro.1", "100%"), setting ("macro.2", "100%"), setting ("macro.3", "100%"),
+           setting ("macro.4", "100%"), setting ("macro.5", "100%") },
+         false,
+         "Everything at 100. At Normal the safety governor also measures the distortion, the dynamics and the brightness "
+         "it adds and backs off: less grit, less harshness and more jump in the drums, at a slightly less dense sound.")
+        .afterHost.protection = ProtectionStrength::Normal;
+
+    // The app's own settings: rendered through the mix engine (DemoHost).
+    DemoHost engine;
+    engine.engine = true;
+    {
+        auto& p = add ("smart-macros", "Music - Smart macros off -> on (Boost 100, Punch 100, Loudness 60 on a loud master)", "music-loud",
+                       { music, setting ("boost", "100%"), setting ("macro.1", "100%"), setting ("macro.4", "60%") },
+                       { music, setting ("boost", "100%"), setting ("macro.1", "100%"), setting ("macro.4", "60%") }, false,
+                       "The programme is already mastered loud. Smart reads that and takes back most of the attack and drive "
+                       "the macros add: after should sound less squashed and less distorted, with the drums no flatter than "
+                       "the master itself. On an open, dynamic recording Smart changes nothing.");
+        p.beforeHost = p.afterHost = engine;
+        p.afterHost.smartMacros = true;
+    }
+    {
+        auto& p = add ("onboard-cap", "Gaming - Headset enhancement cap off -> on (Footsteps 100, Detail 100)", "game",
+                       { gaming, setting ("macro.1", "100%"), setting ("macro.4", "100%") },
+                       { gaming, setting ("macro.1", "100%"), setting ("macro.4", "100%") }, false,
+                       "What happens when you tell Flubsound the headset's own enhancement (Superhuman Hearing, on-board EQ) "
+                       "is ON: Footsteps and Detail are held at 30 % so the two do not stack. After, the steps and the "
+                       "ambience are lifted less - the headset is expected to add its own lift on top.");
+        p.beforeHost = p.afterHost = engine;
+        p.afterHost.onboardCap = true;
+    }
+    {
+        auto& p = add ("safe-speaker-cap", "Music - Safe speaker bass cap off -> on (+3 dB; bass boost 9 dB, Boost 100, input -12 dB)", "music",
+                       { music, setting ("input.gain", "-12"), setting ("boost", "100%"), setting ("bass.boost", "9") },
+                       { music, setting ("input.gain", "-12"), setting ("boost", "100%"), setting ("bass.boost", "9") }, false,
+                       "What plays when the headset disconnects and Flubsound falls back to speakers: the bass lift is held "
+                       "to +3 dB so small speakers are not overdriven. After has much less low end; the mids and highs stay.");
+        p.beforeHost = p.afterHost = engine;
+        p.afterHost.safeSpeakerBassCapDb = 3.0f;
+    }
+    {
+        auto& p = add ("device-correction", "Music - Headphone correction off -> on (an example curve: +6 dB bass shelf, -4 dB at 3 kHz)", "music",
+                       { music }, { music }, false,
+                       "A headphone correction curve (Settings > Correction imports AutoEQ / Equalizer APO files) on the "
+                       "whole output: here an example curve with more bass and a dip at 3 kHz. Its automatic preamp keeps it "
+                       "from clipping. With your own headset's file the change should sound like a more neutral headphone.");
+        p.beforeHost = p.afterHost = engine;
+        p.afterHost.correctionText = "Preamp: -6.0 dB\nFilter 1: ON LSC Fc 105 Hz Gain 6.0 dB Q 0.70\nFilter 2: ON PK Fc 3000 Hz Gain -4.0 dB Q 1.40\n";
+    }
+    {
+        auto& p = add ("per-ear", "Music - Personal profile off -> right ear +9 dB at 4 - 8 kHz", "music", { music }, { music }, false,
+                       "Headphones only. The right ear gets brighter (4, 6 and 8 kHz +9 dB); both ears are turned down by the "
+                       "headroom reservation first, so the left ear sounds a little quieter. Listen with each ear: the hats "
+                       "and the voice's edge move towards the right.");
+        p.beforeHost = p.afterHost = engine;
+        p.afterHost.personal.enabled = true;
+        for (int b = 5; b < PersonalProfile::kNumBands; ++b)
+            p.afterHost.personal.bandDb[1][static_cast<size_t> (b)] = 9.0f;
+    }
+    {
+        auto& p = add ("hearing-cap", "Music - Listening-level cap off -> on at 75 dB(A) (sensitivity 110 dB SPL, full volume)", "music",
+                       { music }, { music }, true,
+                       "Not level-matched (a level feature). With a known sensitivity the hearing guard estimates the level "
+                       "at your ear; the cap holds its 5 s average at 75 dB(A). After is quieter by the amount the estimate "
+                       "was over, gliding down over about a second, with the tone unchanged.");
+        p.beforeHost = p.afterHost = engine;
+        p.beforeHost.sensitivityDbSpl = p.afterHost.sensitivityDbSpl = 110.0f;
+        p.afterHost.capOn = true;
+        p.afterHost.capDbA = 75.0f;
+    }
+    {
+        auto& p = add ("chat-duck", "Game + Chat - Duck game under voice chat off -> on (4.5 dB)", "chat-scene", { gaming, setting ("macro.5", "100%") },
+                       { gaming, setting ("macro.5", "100%") }, true,
+                       "Not level-matched (a level feature). A teammate talks from 25 to 75 %. With the duck on, the game dips "
+                       "4.5 dB around 1 - 2.4 kHz while the teammate talks (the footsteps' bands stay), Voice & Score's lift "
+                       "is taken back and the game's peaks are held under the voice: the voice is easier to follow and the "
+                       "steps are still there. Before and after the talking nothing changes.");
+        p.beforeHost = p.afterHost = engine;
+        p.beforeHost.chatStrip = p.afterHost.chatStrip = true;
+        p.afterHost.chatDuck = true;
+    }
+    {
+        auto& p = add ("chatmix", "Game + Chat - ChatMix centre -> 50 % towards Chat", "chat-scene", { gaming }, { gaming }, true,
+                       "Not level-matched (a level feature). ChatMix moves one balance: towards Chat the game falls "
+                       "(-6 dB at 50 %) and the voice stays at 0 dB. The game scene should be quieter under the voice; the "
+                       "voice itself does not change.");
+        p.beforeHost = p.afterHost = engine;
+        p.beforeHost.chatStrip = p.afterHost.chatStrip = true;
+        p.afterHost.chatMix = 0.5f;
+    }
     return pairs;
 }
 
@@ -715,15 +998,31 @@ void forEachParallel (size_t count, size_t workers, const std::function<void (si
 
 /** One distinct render (sides shared by pairs are rendered once), kept
     until the last pair that uses it has been written. */
+/** What the mix engine read during an engine render (DemoHost::engine). */
+struct EngineReadings
+{
+    float masterGrMaxDb = 0.0f;          // the master limiter, deepest (dB <= 0)
+    MacroModulation smartMin;            // Smart's multipliers, lowest
+    bool onboardCapActive = false;       // the CAPPED chip (MeterBus::onboardCapActive) at any time
+    float bassBoostDb = 0.0f;            // bass.boost as the chain applied it, at the end
+    float personalReservationDb = 0.0f;  // the per-ear stage's headroom reservation
+    bool hearingKnown = false;
+    float leq5sMaxDbA = HearingMeters::kUnknown, capGainMinDb = 0.0f;
+    float voicePercent = 0.0f, duckMax = 0.0f; // the Chat strip's voice detector, the duck's depth (0..1)
+};
+
 struct RenderSlot
 {
     size_t programme = 0;
+    std::string preset;
     std::vector<ParamSetting> settings;
+    DemoHost host;
     std::vector<float> values;
     std::mutex mutex;
     bool done = false, ok = false;
     std::string error;
     RenderResult result;
+    EngineReadings readings;
     std::atomic<int> uses { 0 };
 };
 
@@ -731,6 +1030,7 @@ struct Programme
 {
     std::string name, description;
     io::AudioFileData audio;
+    io::AudioFileData chat; // "chat-scene": the Chat strip's voice
 };
 
 std::string describeBuiltIn (const std::string& name)
@@ -744,17 +1044,316 @@ std::string describeBuiltIn (const std::string& name)
     if (name == "game")
         return "built-in: ambience, footsteps walking left to right, three gunshots right of centre at 20 %, explosions at "
                "42 % and 80 %, a voice line at 55 - 75 %, a quiet score";
+    if (name == "music-loud")
+        return "built-in: the music programme mastered loud (14 dB into a soft clipper, peak -1 dBFS; PLR under 7.5 LU)";
+    if (name == "speech-hiss")
+        return "built-in: the synthetic voice over a steady hiss floor (pink noise, -50 dBFS RMS per channel)";
+    if (name == "chat-scene")
+        return "built-in: the game scene on a Game strip and a teammate's voice (a higher formant voice, peak -9 dBFS, "
+               "talking from 25 to 75 %) on a Chat strip, mixed as the app mixes them";
     return "built-in: the game scene as a 7.1 bed (FL FR FC LFE BL BR SL SR): the footsteps circle the listener, the "
            "explosions reach the LFE, the voice is on the centre";
 }
+
+/** A side as `flubsound-cli process` options, plus its app settings. */
+std::string formatSide (const std::string& preset, const std::vector<ParamSetting>& settings, const DemoHost& host)
+{
+    std::string s;
+    if (! preset.empty())
+        s = "--preset " + preset;
+    if (! settings.empty())
+        s += (s.empty() ? "" : " ") + formatSettings (settings);
+    if (const auto app = host.describe(); ! app.empty())
+        s += (s.empty() ? "" : " ") + std::string ("+ app: ") + app;
+    return s.empty() ? std::string ("the defaults") : s;
+}
+
+/** Renders `p` through a MixEngine as the app runs it (DemoHost::engine):
+    the main strip named after the mode (so it takes the Game or Music
+    role), a Chat strip fed p.chat when host.chatStrip (its own defaults),
+    the host settings given before the first block, the idle freeze off.
+    Primed like renderPass (silence through the engine, then every chain
+    reset() onto its targets) and compensated by the main strip's latency,
+    so the output has the input's length and alignment. Non-RT, allocates. */
+bool renderThroughEngine (const Programme& p, const std::vector<float>& values, const DemoHost& host, int blockSize,
+                          RenderResult& result, EngineReadings& readings, std::string& error)
+{
+    result = RenderResult();
+    readings = EngineReadings();
+    const io::AudioFileData& in = p.audio;
+    if (! checkRenderable (in, error))
+        return false;
+    if (values.size() != static_cast<size_t> (kNumParams))
+    {
+        error = "internal error: parameter table has the wrong size";
+        return false;
+    }
+    const int inChannels = in.numChannels, mainChannels = inChannels == 1 ? 2 : inChannels;
+    const int64_t numFrames = in.numFrames();
+    blockSize = std::clamp (blockSize, 16, 16384);
+    const bool gaming = std::lround (values[static_cast<size_t> (Mode)]) == static_cast<long> (ModeValue::Gaming);
+
+    std::vector<StripConfig> strips (1);
+    strips[0].name = gaming ? "Game" : "Music";
+    strips[0].inputChannels = mainChannels;
+    if (host.chatStrip)
+    {
+        StripConfig chat;
+        chat.name = "Chat";
+        strips.push_back (chat);
+    }
+
+    CorrectionCurve curve;
+    if (! host.correctionText.empty())
+    {
+        const auto parsed = eqtext::parse (host.correctionText, curve);
+        if (! parsed.ok)
+        {
+            error = "demo headphone correction: " + parsed.error;
+            return false;
+        }
+    }
+
+    // The main strip's values must be in its store before its chain is
+    // prepared (latency.profile is structural): a first engine makes the
+    // stores, the engine that renders shares them (configureFrom).
+    MixEngine stores;
+    stores.configure (strips, in.sampleRate, blockSize);
+    for (int id = 0; id < kNumParams; ++id)
+        stores.params (0).set (Bank::A, id, values[static_cast<size_t> (id)]);
+    stores.params (0).setActiveBank (Bank::A);
+    auto engine = std::make_unique<MixEngine>();
+    engine->configureFrom (stores, strips, in.sampleRate, blockSize);
+    // After configureFrom, whose chains adopt the first engine's host
+    // settings (adoptGovernorState); each is taken by the next process()
+    // (the per-ear profile crossfades in 20 ms, inside the priming below).
+    for (int s = 0; s < engine->getNumStrips(); ++s)
+        engine->chain (s).setProtectionStrength (host.protection);
+    auto& chain = engine->chain (0);
+    chain.setSmartMacros (host.smartMacros);
+    chain.setOnboardEnhancementCap (host.onboardCap);
+    chain.setSafeSpeakerBassCapDb (host.safeSpeakerBassCapDb);
+    if (host.personal.enabled)
+        chain.setPersonalProfile (host.personal);
+    engine->setIdleFreeze (false);
+    if (! host.correctionText.empty())
+    {
+        DeviceCorrectionSettings settings;
+        settings.curve = curve;
+        engine->getDeviceCorrection().setSettingsNow (settings);
+    }
+    auto& guard = engine->getHearingGuard();
+    guard.setSensitivityDbSpl (host.sensitivityDbSpl);
+    guard.setEndpointVolumeDb (host.endpointVolumeDb);
+    guard.setCap (host.capOn, host.capDbA);
+    engine->setChatDuck (host.chatDuck, host.chatDuckDepthDb);
+    engine->setChatMix (host.chatMix);
+
+    const int latency = engine->getStripLatencySamples (0);
+    AudioBuffer mainIo (mainChannels, blockSize), chatIo (2, blockSize), out (2, blockSize);
+    std::vector<std::vector<float>> outStereo (2, std::vector<float> (static_cast<size_t> (numFrames), 0.0f));
+    ScopedNoDenormals noDenormals;
+    auto processBlock = [&] (int n) {
+        const AudioBlock mainBlock = mainIo.block (mainChannels, n), chatBlock = chatIo.block (2, n);
+        const AudioBlock* inputs[2] = { &mainBlock, &chatBlock };
+        engine->process (inputs, out.block (2, n));
+    };
+
+    // Prime: 0.25 s of silence (the ChatMix and cap glides land), then snap
+    // every chain's smoothers onto their targets.
+    mainIo.clear();
+    chatIo.clear();
+    for (int64_t pos = 0; pos < static_cast<int64_t> (0.25 * in.sampleRate); pos += blockSize)
+        processBlock (blockSize);
+    for (int s = 0; s < engine->getNumStrips(); ++s)
+        engine->chain (s).reset();
+
+    int64_t voiceBlocks = 0, programmeBlocks = 0;
+    const int64_t totalFrames = numFrames + latency;
+    for (int64_t pos = 0; pos < totalFrames; pos += blockSize)
+    {
+        const int n = static_cast<int> (std::min<int64_t> (blockSize, totalFrames - pos));
+        const int available = static_cast<int> (std::clamp<int64_t> (numFrames - pos, 0, n));
+        for (int c = 0; c < mainChannels; ++c)
+        {
+            float* dst = mainIo.channel (c);
+            const auto& src = in.channels[static_cast<size_t> (inChannels == 1 ? 0 : c)];
+            if (available > 0)
+                std::memcpy (dst, src.data() + pos, sizeof (float) * static_cast<size_t> (available));
+            if (available < n)
+                std::memset (dst + available, 0, sizeof (float) * static_cast<size_t> (n - available));
+        }
+        for (int c = 0; c < 2; ++c)
+        {
+            float* dst = chatIo.channel (c);
+            const int64_t chatFrames = p.chat.channels.empty() ? 0 : p.chat.numFrames();
+            const int chatAvailable = static_cast<int> (std::clamp<int64_t> (chatFrames - pos, 0, n));
+            if (chatAvailable > 0)
+                std::memcpy (dst, p.chat.channels[static_cast<size_t> (std::min (c, p.chat.numChannels - 1))].data() + pos,
+                             sizeof (float) * static_cast<size_t> (chatAvailable));
+            if (chatAvailable < n)
+                std::memset (dst + chatAvailable, 0, sizeof (float) * static_cast<size_t> (n - chatAvailable));
+        }
+        processBlock (n);
+
+        if (available > 0)
+        {
+            ++programmeBlocks;
+            readings.masterGrMaxDb = std::min (readings.masterGrMaxDb, -std::abs (engine->getMasterGainReductionDb()));
+            const auto smart = engine->chain (0).getSmartModulation();
+            readings.smartMin = { std::min (readings.smartMin.attack, smart.attack), std::min (readings.smartMin.drive, smart.drive),
+                                  std::min (readings.smartMin.bass, smart.bass), std::min (readings.smartMin.air, smart.air) };
+            readings.onboardCapActive = readings.onboardCapActive || engine->chain (0).meters().onboardCapActive.load (std::memory_order_relaxed);
+            const auto& hm = guard.meters();
+            if (hm.known.load (std::memory_order_relaxed))
+            {
+                readings.hearingKnown = true;
+                readings.leq5sMaxDbA = std::max (readings.leq5sMaxDbA, hm.leq5sDbA.load (std::memory_order_relaxed));
+                readings.capGainMinDb = std::min (readings.capGainMinDb, hm.capGainDb.load (std::memory_order_relaxed));
+            }
+            if (engine->isChatVoiceActive())
+                ++voiceBlocks;
+            readings.duckMax = std::max (readings.duckMax, engine->getChatDuckAmount());
+        }
+
+        // Keep the main strip's output frames [latency, latency + numFrames).
+        const int64_t firstOut = pos - latency;
+        const int skip = static_cast<int> (std::clamp<int64_t> (-firstOut, 0, n));
+        const int64_t dstStart = firstOut + skip;
+        const int count = static_cast<int> (std::clamp<int64_t> (std::min<int64_t> (n - skip, numFrames - dstStart), 0, n));
+        if (count > 0)
+            for (int c = 0; c < 2; ++c)
+                std::memcpy (outStereo[static_cast<size_t> (c)].data() + dstStart, out.channel (c) + skip, sizeof (float) * static_cast<size_t> (count));
+    }
+    readings.voicePercent = programmeBlocks > 0 ? 100.0f * static_cast<float> (voiceBlocks) / static_cast<float> (programmeBlocks) : 0.0f;
+    readings.bassBoostDb = engine->chain (0).effectiveValue (BassBoostDb);
+    readings.personalReservationDb = engine->chain (0).getPersonalReservationDb();
+
+    result.output.sampleRate = in.sampleRate;
+    result.output.numChannels = 2;
+    result.output.sourceFormat = io::SampleFormat::Float32;
+    result.output.channels = std::move (outStereo);
+    result.outputReport = analyse (result.output.channels, in.sampleRate);
+    result.latencySamples = latency;
+    result.chainInputChannels = mainChannels;
+    result.passes = 1;
+    return true;
+}
+
+std::string signedDb (float db)
+{
+    char buf[32];
+    std::snprintf (buf, sizeof (buf), "%+.1f", std::abs (db) < 0.05f ? 0.0 : static_cast<double> (db));
+    return buf;
+}
+
+/** The engine's readouts of one side, for the features the pair's two sides set. */
+std::string describeEngine (const EngineReadings& r, const DemoHost& a, const DemoHost& b)
+{
+    std::string s = "master limiter GR max " + signedDb (r.masterGrMaxDb) + " dB";
+    if (a.smartMacros || b.smartMacros)
+    {
+        char buf[128];
+        std::snprintf (buf, sizeof (buf), "; Smart multipliers min: attack %.2f, drive %.2f, bass %.2f, air %.2f", static_cast<double> (r.smartMin.attack),
+                       static_cast<double> (r.smartMin.drive), static_cast<double> (r.smartMin.bass), static_cast<double> (r.smartMin.air));
+        s += buf;
+    }
+    if (a.onboardCap || b.onboardCap)
+        s += std::string ("; CAPPED ") + (r.onboardCapActive ? "on" : "off");
+    if (std::isfinite (a.safeSpeakerBassCapDb) || std::isfinite (b.safeSpeakerBassCapDb))
+        s += "; bass boost as applied " + signedDb (r.bassBoostDb) + " dB";
+    if (a.personal.enabled || b.personal.enabled)
+        s += "; per-ear headroom reservation " + signedDb (r.personalReservationDb) + " dB";
+    if (std::isfinite (a.sensitivityDbSpl) || std::isfinite (b.sensitivityDbSpl))
+        s += r.hearingKnown ? "; estimate: loudest 5 s " + numberText (std::round (r.leq5sMaxDbA * 10.0f) / 10.0f) + " dB(A), cap gain min "
+                                  + signedDb (r.capGainMinDb) + " dB"
+                            : std::string ("; estimate unknown");
+    if (a.chatStrip || b.chatStrip)
+    {
+        char buf[96];
+        std::snprintf (buf, sizeof (buf), "; voice held %.0f %% of the time, duck depth max %.0f %%", static_cast<double> (r.voicePercent),
+                       static_cast<double> (100.0f * r.duckMax));
+        s += buf;
+    }
+    return s;
+}
 } // namespace
+
+std::string DemoHost::describe() const
+{
+    std::vector<std::string> parts;
+    if (protection != ProtectionStrength::Off)
+        parts.push_back (std::string ("protection strength ") + (protection == ProtectionStrength::Normal ? "Normal" : "Strict"));
+    if (smartMacros)
+        parts.push_back ("Smart macros on");
+    if (onboardCap)
+        parts.push_back ("headset enhancement is ON (cap)");
+    if (std::isfinite (safeSpeakerBassCapDb))
+        parts.push_back ("safe speaker bass cap +" + numberText (safeSpeakerBassCapDb) + " dB");
+    if (! correctionText.empty())
+    {
+        std::string text = correctionText;
+        while (! text.empty() && text.back() == '\n')
+            text.pop_back();
+        for (size_t i = text.find ('\n'); i != std::string::npos; i = text.find ('\n', i))
+            text.replace (i, 1, " / ");
+        parts.push_back ("headphone correction \"" + text + "\"");
+    }
+    if (personal.enabled)
+    {
+        std::string ears;
+        for (int ear = 0; ear < 2; ++ear)
+        {
+            std::string e;
+            if (personal.gainDb[static_cast<size_t> (ear)] != 0.0f)
+                e += "gain " + numberText (personal.gainDb[static_cast<size_t> (ear)]) + " dB";
+            for (int b = 0; b < PersonalProfile::kNumBands; ++b)
+                if (const float g = personal.bandDb[static_cast<size_t> (ear)][static_cast<size_t> (b)]; g != 0.0f)
+                    e += (e.empty() ? "" : ", ") + numberText (static_cast<float> (PersonalProfile::kBandHz[static_cast<size_t> (b)])) + " Hz "
+                         + (g > 0.0f ? "+" : "") + numberText (g) + " dB";
+            if (! e.empty())
+                ears += (ears.empty() ? "" : "; ") + std::string (ear == 0 ? "left " : "right ") + e;
+        }
+        if (personal.balanceDb != 0.0f)
+            ears += (ears.empty() ? "" : "; ") + std::string ("balance ") + numberText (personal.balanceDb) + " dB";
+        parts.push_back ("personal profile (" + (ears.empty() ? std::string ("flat") : ears) + ")");
+    }
+    if (std::isfinite (sensitivityDbSpl))
+        parts.push_back ("sensitivity " + numberText (sensitivityDbSpl) + " dB SPL, system volume " + numberText (endpointVolumeDb) + " dB");
+    if (capOn)
+        parts.push_back ("listening-level cap " + numberText (capDbA) + " dB(A)");
+    if (chatStrip)
+        parts.push_back ("a Chat strip with the voice");
+    if (chatDuck)
+        parts.push_back ("duck game under voice chat " + numberText (chatDuckDepthDb) + " dB");
+    if (chatMix != 0.0f)
+        parts.push_back ("ChatMix " + numberText (chatMix));
+    if (engine)
+        parts.push_back ("through the app's mix engine");
+    std::string s;
+    for (const auto& part : parts)
+        s += (s.empty() ? "" : ", ") + part;
+    return s;
+}
 
 bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error, const std::function<void (const std::string&)>& progress)
 {
     result = DemoResult();
     std::string nightNote;
-    const auto specs = demoPairs (o.presetDir, &nightNote);
-    if (! nightNote.empty())
+    auto specs = demoPairs (o.presetDir, &nightNote);
+    if (! o.only.empty())
+    {
+        for (const auto& slug : o.only)
+            if (std::none_of (specs.begin(), specs.end(), [&slug] (const DemoPairSpec& spec) { return spec.slug == slug; }))
+            {
+                error = "unknown demo pair '" + slug + "'";
+                return false;
+            }
+        specs.erase (std::remove_if (specs.begin(), specs.end(),
+                                     [&o] (const DemoPairSpec& spec) { return std::find (o.only.begin(), o.only.end(), spec.slug) == o.only.end(); }),
+                     specs.end());
+    }
+    if (! nightNote.empty() && std::any_of (specs.begin(), specs.end(), [] (const DemoPairSpec& spec) { return spec.slug == "night"; }))
         result.notes.push_back (nightNote);
 
     // ---- Programmes ----
@@ -768,7 +1367,7 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
         userName = io::pathToUtf8 (io::pathFromUtf8 (o.input).filename());
     }
     auto programmeIndex = [&] (const std::string& name) -> size_t {
-        const bool userFits = ! o.input.empty() && (name != "game-7.1" || user.numChannels > 2);
+        const bool userFits = ! o.input.empty() && name != "chat-scene" && (name != "game-7.1" || user.numChannels > 2);
         const std::string key = userFits ? "user" : name;
         for (size_t i = 0; i < programmes.size(); ++i)
             if (programmes[i].name == key)
@@ -783,9 +1382,13 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
         else
         {
             p.description = name + " (" + describeBuiltIn (name) + ")";
-            p.audio = name == "music" ? makeMusic (o.seconds)
-                      : name == "speech" ? makeSpeech (o.seconds)
-                                         : makeGameScene (o.seconds, name == "game-7.1");
+            p.audio = name == "music"         ? makeMusic (o.seconds)
+                      : name == "music-loud"  ? makeLoudMusic (o.seconds)
+                      : name == "speech"      ? makeSpeech (o.seconds)
+                      : name == "speech-hiss" ? makeSpeechHiss (o.seconds)
+                                              : makeGameScene (o.seconds, name == "game-7.1");
+            if (name == "chat-scene")
+                p.chat = makeChatVoice (o.seconds);
         }
         programmes.push_back (std::move (p));
         return programmes.size() - 1;
@@ -793,13 +1396,16 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
 
     // ---- Distinct renders ----
     std::vector<std::unique_ptr<RenderSlot>> slots;
-    auto slotFor = [&] (size_t programme, const std::vector<ParamSetting>& settings) -> size_t {
+    auto slotFor = [&] (size_t programme, const std::string& preset, const std::vector<ParamSetting>& settings, const DemoHost& host) -> size_t {
+        const std::string key = formatSide (preset, settings, host);
         for (size_t i = 0; i < slots.size(); ++i)
-            if (slots[i]->programme == programme && formatSettings (slots[i]->settings) == formatSettings (settings))
+            if (slots[i]->programme == programme && formatSide (slots[i]->preset, slots[i]->settings, slots[i]->host) == key)
                 return i;
         auto slot = std::make_unique<RenderSlot>();
         slot->programme = programme;
+        slot->preset = preset;
         slot->settings = settings;
+        slot->host = host;
         slots.push_back (std::move (slot));
         return slots.size() - 1;
     };
@@ -807,24 +1413,31 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
     for (const auto& spec : specs)
     {
         const size_t p = programmeIndex (spec.programme);
-        const size_t before = slotFor (p, spec.before), after = slotFor (p, spec.after);
+        const size_t before = slotFor (p, spec.beforePreset, spec.before, spec.beforeHost);
+        const size_t after = slotFor (p, spec.afterPreset, spec.after, spec.afterHost);
         ++slots[before]->uses;
         ++slots[after]->uses;
         pairSlots.emplace_back (before, after);
     }
-    if (! o.input.empty() && user.numChannels <= 2)
-        result.notes.push_back ("the virtualiser pair uses the built-in 7.1 game scene: the virtualiser runs only on 5.1 / 7.1 input, and "
+    const auto uses = [&specs] (const char* programme) {
+        return std::any_of (specs.begin(), specs.end(), [programme] (const DemoPairSpec& spec) { return spec.programme == programme; });
+    };
+    if (! o.input.empty() && user.numChannels <= 2 && uses ("game-7.1"))
+        result.notes.push_back ("the virtualiser pairs use the built-in 7.1 game scene: the virtualiser runs only on 5.1 / 7.1 input, and "
                                 + userName + " has " + std::to_string (user.numChannels) + " channel(s)");
+    if (! o.input.empty() && uses ("chat-scene"))
+        result.notes.push_back ("the chat pairs use the built-in game scene and voice: they need a game and a voice on two strips");
     // Every side's parameters are resolved up front, so a bad setting fails before any work.
     for (auto& slot : slots)
     {
         RenderOptions ro;
+        ro.presetSpec = slot->preset;
         ro.sets = slot->settings;
         ro.presetDir = o.presetDir;
         ResolvedParameters params;
         if (! buildParameters (ro, params, error))
         {
-            error = "demo settings " + formatSettings (slot->settings) + ": " + error;
+            error = "demo settings " + formatSide (slot->preset, slot->settings, slot->host) + ": " + error;
             return false;
         }
         slot->values = std::move (params.values);
@@ -850,7 +1463,15 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
         {
             try
             {
-                slot.ok = renderFile (programmes[slot.programme].audio, slot.values, rs, slot.result, slot.error);
+                if (slot.host.engine)
+                    slot.ok = renderThroughEngine (programmes[slot.programme], slot.values, slot.host, o.blockSize, slot.result, slot.readings,
+                                                   slot.error);
+                else
+                {
+                    RenderSettings settings = rs;
+                    settings.protection = slot.host.protection;
+                    slot.ok = renderFile (programmes[slot.programme].audio, slot.values, settings, slot.result, slot.error);
+                }
             }
             catch (const std::exception& e)
             {
@@ -861,7 +1482,7 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
             if (progress)
             {
                 const std::lock_guard<std::mutex> plock (progressMutex);
-                progress ("rendered " + programmes[slot.programme].name + " " + formatSettings (slot.settings));
+                progress ("rendered " + programmes[slot.programme].name + " " + formatSide (slot.preset, slot.settings, slot.host));
             }
         }
         return slot;
@@ -897,6 +1518,11 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
             {
                 r.beforeStats = before.result.stats;
                 r.afterStats = after.result.stats;
+                if (r.spec.beforeHost.engine || r.spec.afterHost.engine)
+                {
+                    r.beforeEngine = describeEngine (before.readings, r.spec.beforeHost, r.spec.afterHost);
+                    r.afterEngine = describeEngine (after.readings, r.spec.beforeHost, r.spec.afterHost);
+                }
                 const float lb = before.result.outputReport.integratedLufs, la = after.result.outputReport.integratedLufs;
                 r.matched = ! r.spec.levelFeature && lb > kMinusInfDb && la > kMinusInfDb;
                 if (r.matched)
@@ -1060,8 +1686,14 @@ std::string formatDemoIndex (const DemoOptions& o, const DemoResult& result)
          + "\n\n";
     s += wrap ("Loudness: in a pair, only the louder file is turned down to the quieter's integrated loudness (EBU R128), so the "
                "comparison is not won by the louder side and nothing is raised into clipping. Level features (the Loudness "
-               "macro, Startle Guard, Night) are not matched, because their job is the level; their 'Level' line gives the "
-               "difference.", 0)
+               "macro, Startle Guard, Night, the levelling presets, the listening-level cap, the chat duck and ChatMix) are not "
+               "matched, because their job is the level; their 'Level' line gives the difference.", 0)
+         + "\n\n";
+    s += wrap ("App settings: a side marked '+ app:' also has settings the app keeps outside the presets (Smart macros, the "
+               "headset enhancement cap, the safe speaker bass cap, a headphone correction, the personal per-ear profile, the "
+               "hearing guard, the chat duck, ChatMix). Both sides of such a pair are rendered through the app's mix engine "
+               "(the strip, a Chat strip where the pair has one, the master limiter at -1 dBTP and the hearing guard), and its "
+               "'Readouts' are the engine's own.", 0)
          + "\n\n";
     s += wrap ("Numbers: every file is read back and measured as `flubsound-cli analyze --bands <file>` measures it. 'Band "
                "delta' is after minus before, dB, per octave band (31.5 Hz .. 16 kHz, the mean of the channels). 'Readouts' are "
@@ -1090,15 +1722,18 @@ std::string formatDemoIndex (const DemoOptions& o, const DemoResult& result)
         s += "  Files      : " + r.beforeFile + " | " + r.afterFile + "\n";
         const std::string programme = r.programmeUsed.substr (0, r.programmeUsed.find (" ("));
         s += "  Programme  : " + (programme == "your file" ? r.programmeUsed : programme) + "\n";
-        s += "  Before     : " + formatSettings (r.spec.before) + "\n";
-        s += "  After      : " + wrap (formatSettings (r.spec.after), 15) + "\n";
+        s += "  Before     : " + wrap (formatSide (r.spec.beforePreset, r.spec.before, r.spec.beforeHost), 15) + "\n";
+        s += "  After      : " + wrap (formatSide (r.spec.afterPreset, r.spec.after, r.spec.afterHost), 15) + "\n";
         s += "  Level      : " + describeLevel (r) + "\n";
         s += "  Loudness   : before " + formatDb (r.beforeReport.integratedLufs, 2) + " LUFS, LRA " + fixed (r.beforeReport.loudnessRangeLu, 1)
              + " LU, true peak " + formatDb (r.beforeReport.truePeakDbtp, 1) + " dBTP | after " + formatDb (r.afterReport.integratedLufs, 2)
              + " LUFS, LRA " + fixed (r.afterReport.loudnessRangeLu, 1) + " LU, true peak " + formatDb (r.afterReport.truePeakDbtp, 1)
              + " dBTP\n";
         s += "  Band delta : " + formatBandDelta (r.beforeBands, r.afterBands) + "\n";
-        s += "  Readouts   : " + wrap (describeReadouts (r), 15) + "\n";
+        if (r.beforeEngine.empty())
+            s += "  Readouts   : " + wrap (describeReadouts (r), 15) + "\n";
+        else
+            s += "  Readouts   : " + wrap ("before: " + r.beforeEngine + " | after: " + r.afterEngine, 15) + "\n";
         s += "  Listen for : " + wrap (r.spec.listenFor, 15) + "\n";
     }
     return s;

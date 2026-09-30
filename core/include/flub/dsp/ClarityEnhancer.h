@@ -2,14 +2,17 @@
 //
 //   1. Transient shaper (linked): attackDb / sustainDb. Full band while
 //      both band offsets are 0 (the shaper before docs/11 E04 step 3, bit-
-//      exact); otherwise 3 LR4 bands (below lowSplitHz, 60 - 200 Hz, up to
+//      exact); otherwise 3 bands (below lowSplitHz, 60 - 200 Hz, up to
 //      4 kHz, above), each with its own TransientShaper timed for its band
 //      (TransientShaper::Timing::lowBand / midBand / highBand) at attackDb +
 //      attackLowDb / attackDb / attackDb + attackHighDb (each within
-//      +-12 dB) and sustainDb, and transientSpeed on their timing. The bands
-//      sum to an all-pass (Crossover.h), so the path crossfades in over
+//      +-12 dB) and sustainDb, and transientSpeed on their timing. The
+//      shapers read LR2 / LR4 bands; their gains apply to complementary
+//      one-pole bands that sum to the input exactly (docs/11 E04 step 4),
+//      so the path is the input at unity gains. It crossfades in over
 //      50 ms once its shapers have warmed up, and out again when both
-//      offsets return to 0.
+//      offsets return to 0. Optional look-ahead (setLookaheadMs, docs/11
+//      E04 step 5): the latency.
 //   2. De-mud: dynamic cut, bell ~250 Hz Q 1.0, CutAbove, range up to -4 dB
 //      scaled by deMud, threshold tracks the broadband level (-12 dB rel.)
 //      so it only acts when the low-mids are disproportionately loud.
@@ -29,7 +32,7 @@
 //      inside the band; strong tones on the 24 dB/oct skirt (7.6-9 kHz) leave
 //      small aliases (-25..-44 dB) folding to 17-21 kHz. The chain disables
 //      air below 42 kHz sample rate.
-// Zero latency.
+// Zero latency, unless setLookaheadMs.
 //
 // Telemetry: getDistortionDb() = the share of the exciter's generated
 // harmonics in its output over the last completed 25 ms analysis window

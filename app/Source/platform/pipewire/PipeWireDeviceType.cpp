@@ -37,8 +37,13 @@ public:
     juce::String open (const juce::BigInteger& inputChannels, const juce::BigInteger& outputChannels, double sampleRate, int bufferSizeSamples) override
     {
         close();
-        activeInputs = inputChannels;
-        activeInputs.setRange (inputNames.size(), juce::jmax (0, activeInputs.getHighestBit() + 1 - inputNames.size()), false);
+        // Every input: they are the strips' sinks, not a hardware selection.
+        // JUCE asks for its default channel count (the first 8 when the app
+        // opens it, or when it is picked in Settings), which would cut the
+        // Music, Chat and System strips off.
+        juce::ignoreUnused (inputChannels);
+        activeInputs.clear();
+        activeInputs.setRange (0, inputNames.size(), true);
         activeOutputs = outputChannels;
         activeOutputs.setRange (outputNames.size(), juce::jmax (0, activeOutputs.getHighestBit() + 1 - outputNames.size()), false);
 
@@ -98,10 +103,15 @@ public:
     juce::BigInteger getActiveOutputChannels() const override { return activeOutputs; }
     juce::BigInteger getActiveInputChannels() const override { return activeInputs; }
 
-    /** The graph's quantum each way: a sink's monitor hands the engine one
-        quantum late, and the output sink plays it one quantum later. */
-    int getOutputLatencyInSamples() override { return static_cast<int> (node->getStatus().quantumFrames); }
-    int getInputLatencyInSamples() override { return static_cast<int> (node->getStatus().quantumFrames); }
+    /** None of its own: the node runs in the same graph cycle as the sinks
+        it reads and the sink it plays to. What the path adds is the graph's
+        quantum (the output device's period), which changes while the device
+        runs (node.latency in place), so it is reported through
+        getStatus().quantumFrames and shown as the graph quantum
+        (AudioEngineHost::setGraphQuantumMs, docs/11 E42), not read once at
+        start as a device latency. */
+    int getOutputLatencyInSamples() override { return 0; }
+    int getInputLatencyInSamples() override { return 0; }
 
     bool setLatency (NativeAudioNodeConfig::Latency newLatency)
     {

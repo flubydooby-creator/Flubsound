@@ -350,8 +350,10 @@ public:
     juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
 
     /** Opens the device (saved XML state or system default; without saved
-        state Windows prefers the "Windows Audio (Low Latency Mode)" type) and
-        attaches the engine. Returns an error message, empty on success. */
+        state Windows prefers the "Windows Audio (Low Latency Mode)" type and
+        Linux the native PipeWire node, docs/11 E48, when a server answers)
+        and attaches the engine. Also adds the "PipeWire" device type in a
+        build with libpipewire. Returns an error message, empty on success. */
     juce::String openDevice (const juce::XmlElement* savedState, int maxInputChannels = 8, int maxOutputChannels = 2);
 
     /** Detaches the engine and closes the device. */
@@ -719,6 +721,12 @@ public:
         LatencyInfo::totalMs. Message thread. */
     void setGraphQuantumMs (double ms) noexcept { graphQuantumMs = std::max (0.0, ms); }
     EngineStatus getStatus() const;
+    /** docs/11 E48: the native PipeWire device's links, output sink, graph
+        quantum and problems (pipewire::getDeviceStatus); running == false
+        while another device type (or none) is open. Message thread. */
+    flub::platform::NativeAudioNodeStatus getNativeNodeStatus() const;
+    /** The open device is the native PipeWire node (the "PipeWire" type). */
+    bool isNativeNodeDevice() const;
     /** The device callback's timing histograms (see CALLBACK TIMING). Any thread. */
     flub::CallbackTiming::Snapshot getCallbackTiming() const noexcept { return callbackTiming.snapshot(); }
     double getSampleRate() const noexcept { return currentSampleRate; }

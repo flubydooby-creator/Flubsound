@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace flub;
@@ -1387,4 +1388,92 @@ TEST_CASE ("Clarity (E04 step 3): switching the band offsets, the split and the 
     CHECK (ce.isBandPathActive());
     for (const auto& c : buf.ch)
         CHECK (peakAbs (c.data() + total - ms (500), ms (500)) == 0.0);
+}
+
+TEST_CASE ("Clarity (E04 step 5): a look-ahead is the module's latency - neutral it delays the input bit for bit - and an onset's lift is in place when it arrives, in both paths; it allocates nothing and does not depend on the block size")
+{
+    // setLookaheadMs is meant for the Quality profile (the chain does not
+    // set it yet: the Quality totals it would raise are pinned elsewhere,
+    // docs/11 E04 Status). 1 ms at 48 kHz = 48 samples.
+    const int n = ms (1000);
+    const auto runWith = [] (float lookaheadMs, const ClarityParams& p, const std::vector<float>& x, int blockSize) {
+        ClarityEnhancer ce;
+        ce.setLookaheadMs (lookaheadMs);
+        prepareClarity (ce);
+        ce.setParams (p);
+        return std::make_pair (runStereo (ce, x, blockSize), ce.latencySamples());
+    };
+
+    // Neutral: the input, 48 samples later, exactly.
+    const auto noise = whiteNoise (n, 0.3f, 17);
+    const auto [neutral, latency] = runWith (1.0f, ClarityParams {}, noise, 256);
+    CHECK (latency == 48);
+    bool exact = true;
+    for (int i = 0; i < n; ++i)
+        exact = exact && neutral.ch[0][static_cast<size_t> (i)] == (i < latency ? 0.0f : noise[static_cast<size_t> (i - latency)]);
+    CHECK (exact);
+    ClarityEnhancer plain;
+    prepareClarity (plain);
+    CHECK (plain.latencySamples() == 0);
+
+    // +12 dB attack on isolated 1 kHz plucks (full band) and high-band
+    // clicks (the 3-band path): the lift over each onset's first 1 ms and
+    // first 10 ms, against the input (the output read `latency` later).
+    const auto firstLift = [&] (const Planar& y, const std::vector<float>& x, int delay, double toMs) {
+        double lift = 0.0;
+        for (int h = 3; h <= 10; ++h)
+        {
+            const int on = h * ms (100);
+            double yy = 0.0, xx = 0.0;
+            for (int i = on; i < on + ms (toMs); ++i)
+            {
+                yy += static_cast<double> (y.ch[0][static_cast<size_t> (i + delay)]) * y.ch[0][static_cast<size_t> (i + delay)];
+                xx += static_cast<double> (x[static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+            }
+            lift += 10.0 * std::log10 (yy / xx) / 8.0;
+        }
+        return lift;
+    };
+    for (int kind : { 1, 2 })
+    {
+        const auto x = bandHits (kind, ms (1100), 100.0, kind == 1 ? 15.0 : 8.0);
+        ClarityParams p;
+        p.attackDb = kind == 1 ? 12.0f : 0.0f;
+        p.attackHighDb = kind == 2 ? 12.0f : 0.0f;
+        const auto [y0, l0] = runWith (0.0f, p, x, 256);
+        const auto [y1, l1] = runWith (1.0f, p, x, 256);
+        const double before1 = firstLift (y0, x, l0, 1.0), after1 = firstLift (y1, x, l1, 1.0);
+        const double before10 = firstLift (y0, x, l0, 10.0), after10 = firstLift (y1, x, l1, 10.0);
+        std::printf ("  E04 step 5, %s: first 1 ms lift %.2f -> %.2f dB, first 10 ms %.2f -> %.2f dB\n",
+                     kind == 1 ? "full band, 1 kHz pluck" : "high band, click", before1, after1, before10, after10);
+        // Measured: full band 4.18 -> 8.90 dB (its 20 ms slow attack lets the
+        // gain reach its peak about 2 ms into an onset), high band 9.50 ->
+        // 11.85 dB; over 10 ms 10.19 -> 10.72 and 9.87 -> 9.77 dB.
+        CHECK_GE (after1, before1 + 2.0);
+        CHECK_GE (after1, 8.5);
+        CHECK_GE (after10, before10 - 0.1);
+
+        // Block-size independent.
+        const auto [y2, l2] = runWith (1.0f, p, x, 61);
+        CHECK (maxAbsDiff (y1, y2) == 0.0);
+    }
+
+    // No allocation with the delay line running (both paths).
+    ClarityEnhancer ce;
+    ce.setLookaheadMs (2.0f);
+    prepareClarity (ce, kFs, 2, 512);
+    Planar buf (2, 512);
+    setChannel (buf, 0, whiteNoise (512, 0.5f, 3));
+    setChannel (buf, 1, whiteNoise (512, 0.5f, 4));
+    flubtest::AllocationGuard guard;
+    ce.reset();
+    for (int i = 0; i < 40; ++i)
+    {
+        ClarityParams p;
+        p.attackDb = static_cast<float> (i % 7) - 3.0f;
+        p.attackHighDb = i % 3 == 0 ? 6.0f : 0.0f;
+        ce.setParams (p);
+        ce.process (buf.block (0, 1 + i * 53 % 512));
+    }
+    CHECK (guard.allocations() == 0);
 }

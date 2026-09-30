@@ -53,7 +53,13 @@
 // (no onset read on every dip). Both envelopes share rel, so their ratio -
 // the onset indicator - is unchanged while they fall. The speed divides
 // the slow attack and both releases (not the hold, which only removes
-// ripple, and not the sustain pair).
+// ripple, and not the sustain pair). The mid and high band shapers also
+// have an onset floor (docs/11 E04 step 4): wA = clamp ((20 log10 (A_fast /
+// A_slow) - 1.5 dB) / 4.5 dB, 0, 1), so the dB or two by which a short hold
+// follows steady noise's own peaks is not read as an onset.
+//
+// computeOnset() (BassEngine's Impact punch, docs/11 E20) runs the hold and
+// the attack pair only and returns wA.
 #include "flub/dsp/TransientShaper.h"
 
 #include "flub/common/Math.h"
@@ -83,6 +89,13 @@ constexpr float kMaxDb = 12.0f;
 // The hold must span half a period of the lowest note that should read as
 // "steady": 25 ms = 20 Hz (rectified period).
 constexpr double kHoldMs = 25.0;
+
+// The mid and high band shapers' onset floor (docs/11 E04 step 4): their
+// short holds (12.5 / 3 ms) follow the peaks of steady noise, whose rises
+// of a dB or two read as small onsets; ignoring the first 1.5 dB of a rise
+// leaves steady noise alone (+12 dB attack: +0.23 / +0.53 -> 0.00 dB) and
+// hits 75 ms apart at 10.6 / 10.1 dB (10.7 / 10.3 without it).
+constexpr float kBandOnsetFloorDb = 1.5f;
 
 // Added to the detector input (-100 dBFS). Adding a constant to a branching
 // one-pole follower adds the same constant to its output, so this equals a
@@ -131,6 +144,7 @@ TransientShaper::Timing TransientShaper::Timing::midBand (double splitHz) noexce
     t.attackReleaseMs = 50.0f;
     t.fastReleaseMs = 6.0f;
     t.gainSmoothMs = 0.3f;
+    t.onsetFloorDb = kBandOnsetFloorDb;
     return t;
 }
 
@@ -142,6 +156,7 @@ TransientShaper::Timing TransientShaper::Timing::highBand() noexcept
     t.attackReleaseMs = 40.0f;
     t.fastReleaseMs = 3.0f;
     t.gainSmoothMs = 0.25f;
+    t.onsetFloorDb = kBandOnsetFloorDb;
     return t;
 }
 

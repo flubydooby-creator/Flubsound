@@ -7,6 +7,7 @@
 #include "flub/io/PresetIO.h"
 #include "platform/PlatformBridge.h"
 #include "platform/PlatformServices.h"
+#include "platform/pipewire/PipeWireDeviceType.h"
 
 #include <algorithm>
 #include <cmath>
@@ -307,6 +308,7 @@ EngineController::EngineController (Options opts)
         const auto savedState = settings->getDeviceState();
         lastDeviceError = host->openDevice (savedState.get());
         getDeviceManager().addChangeListener (this);
+        applyNodeLatency (getLatencyProfile()); // docs/11 E48: the native node opens on Balanced
         applyDeviceInputPolicy();
         trackPreferredOutput (false);
         updateDeviceProfile();
@@ -969,6 +971,7 @@ juce::String EngineController::reopenDevice()
 {
     const auto savedState = settings->getDeviceState();
     lastDeviceError = host->openDevice (savedState.get());
+    applyNodeLatency (getLatencyProfile()); // docs/11 E48
     applyDeviceInputPolicy();
     notify (Change::Device);
     return lastDeviceError;
@@ -1040,6 +1043,29 @@ void EngineController::applyDeviceInputPolicy()
             }
         }
 
+        // docs/11 E48: the native PipeWire device's inputs are the strips'
+        // sinks, named by strip ("Game:FL" ... "System:FR"): each strip reads
+        // its own channels.
+        auto* device = getDeviceManager().getCurrentAudioDevice();
+        if (! mapped && device != nullptr && host->isNativeNodeDevice())
+        {
+            const auto names = device->getInputChannelNames();
+            const auto active = device->getActiveInputChannels();
+            int index = 0; // among the active channels, as the callback gets them
+            for (int c = 0; c < names.size(); ++c)
+            {
+                if (! active[c])
+                    continue;
+                const int strip = findStrip (names[c].upToFirstOccurrenceOf (":", false, false));
+                if (strip >= 0 && map[static_cast<size_t> (strip)] < 0)
+                {
+                    map[static_cast<size_t> (strip)] = index;
+                    mapped = true;
+                }
+                ++index;
+            }
+        }
+
         if (! mapped)
         {
             int strip = findStrip (settings->getDeviceInputStripName());
@@ -1069,6 +1095,7 @@ void EngineController::changeListenerCallback (juce::ChangeBroadcaster*)
     // The device manager changed (device / rate / block / channels, or a device
     // appeared / disappeared).
     trackPreferredOutput (false);
+    applyNodeLatency (getLatencyProfile()); // docs/11 E48: e.g. the native node picked in Settings
     persistDeviceState();
     applyDeviceInputPolicy();
     updateDeviceProfile();
@@ -1600,7 +1627,13 @@ void EngineController::requestGraphQuantum (LatencyProfileValue profile, bool re
     if (! options.openAudioDevice)
         return;
     const auto& user = startupPipeWire;
-    if (! applyGraphQuantum (profile, user.latency ? user.latency->c_str() : nullptr, user.props ? user.props->c_str() : nullptr))
+    const bool changed = applyGraphQuantum (profile, user.latency ? user.latency->c_str() : nullptr, user.props ? user.props->c_str() : nullptr);
+    // docs/11 E48: the native PipeWire node changes its own node.latency in
+    // place (the graph moves to the new quantum between two cycles): no
+    // re-open and no dropout.
+    if (reopen && applyNodeLatency (profile))
+        return;
+    if (! changed)
         return;
     // PipeWire reads the request when a stream opens: re-open a device that
     // talks to it (pipewire-jack, or ALSA through PipeWire's plug-in).
@@ -1613,6 +1646,33 @@ void EngineController::requestGraphQuantum (LatencyProfileValue profile, bool re
    #else
     juce::ignoreUnused (profile, reopen);
    #endif
+}
+
+bool EngineController::applyNodeLatency (LatencyProfileValue profile)
+{
+    if (! options.openAudioDevice)
+        return false;
+    using NodeLatency = flub::platform::NativeAudioNodeConfig::Latency;
+    return flub::platform::pipewire::setDeviceLatency (getDeviceManager().getCurrentAudioDevice(),
+                                                       profile == LatencyProfileValue::LowLatency ? NodeLatency::LowLatency : NodeLatency::Balanced);
+}
+
+void EngineController::feedGraphQuantum()
+{
+    // docs/11 E42: the quantum the graph runs at, as the native PipeWire node
+    // saw it at its last cycle (the profile's node.latency, or less when
+    // another client asks for less), is part of the header's total. Other
+    // devices report their own latency; nothing is fed for them.
+    const auto node = host->getNativeNodeStatus();
+    if (node.running && node.quantumFrames != 0 && node.sampleRate != 0)
+    {
+        host->setGraphQuantumMs (1000.0 * static_cast<double> (node.quantumFrames) / static_cast<double> (node.sampleRate));
+        feedingGraphQuantum = true;
+    }
+    else if (std::exchange (feedingGraphQuantum, false))
+    {
+        host->setGraphQuantumMs (0.0);
+    }
 }
 
 void EngineController::setProtectionStrength (ProtectionStrength strength)
@@ -1704,6 +1764,7 @@ void EngineController::timerCallback()
 {
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     updateOverloadWatchdog (host->getStatus());
+    feedGraphQuantum();        // docs/11 E42 / E48
     applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
     applyListeningLevel();
     applyOnboardCap();

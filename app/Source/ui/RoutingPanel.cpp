@@ -3,6 +3,9 @@
 #include "FlubLookAndFeel.h"
 #include "LevelMeters.h"
 #include "Theme.h"
+#if JUCE_LINUX
+ #include "platform/pipewire/PipeWireGraph.h"
+#endif
 
 #include <cmath>
 #include <iterator>
@@ -939,6 +942,7 @@ void RoutingPanel::refreshRouting()
     }
 
     autoProfiles->refresh();
+    refreshLinkStatus();
 
     // The red state: no application reaches a strip through us, whatever the
     // reason (an unavailable method gives its own). Not while nothing is
@@ -1018,6 +1022,44 @@ void RoutingPanel::updateMeters (double dtSeconds)
     const auto dt = static_cast<float> (juce::jlimit (0.0, 0.25, dtSeconds));
     for (auto& r : rows)
         r->updateMeters (dt);
+
+    // The links and the quantum change on their own (a sink appears, another
+    // client lowers the quantum): re-read twice a second.
+    linkPollSeconds += juce::jlimit (0.0, 0.25, dtSeconds);
+    if (linkPollSeconds >= 0.5)
+    {
+        linkPollSeconds = 0.0;
+        refreshLinkStatus();
+    }
+}
+
+void RoutingPanel::refreshLinkStatus()
+{
+    juce::String text;
+    bool warning = false;
+   #if JUCE_LINUX
+    const auto node = controller.getHost().getNativeNodeStatus();
+    if (node.running)
+    {
+        text = "PipeWire: " + juce::String (flub::platform::pipewire::describeLinks (node));
+        warning = ! node.message.empty() || node.inputLinksMade < node.inputLinksWanted || node.outputLinksMade < node.outputLinksWanted
+                  || node.outputSink.empty();
+    }
+    else
+   #endif
+    {
+        auto& routing = controller.getRouting();
+        text = routing.getInputLinkStatus();
+        warning = ! routing.areInputsLinked();
+    }
+    if (text == linkStatus && warning == linkWarning)
+        return;
+    const bool relayout = text.isEmpty() != linkStatus.isEmpty();
+    linkStatus = text;
+    linkWarning = warning;
+    if (relayout)
+        resized();
+    repaint (linkArea);
 }
 
 void RoutingPanel::visibilityChanged()
@@ -1278,11 +1320,21 @@ void RoutingPanel::paint (juce::Graphics& g)
             layoutNotice (noticeArea.getWidth()).draw (g, r.reduced (9.0f, 6.0f));
         }
     }
+
+    if (linkStatus.isNotEmpty() && ! linkArea.isEmpty())
+    {
+        g.setColour (linkWarning ? Theme::statusColours (*this).warn : Palette::muted);
+        g.setFont (Theme::font (10.5f));
+        g.drawFittedText (linkStatus, linkArea, juce::Justification::centredLeft, 1, 1.0f); // elided; the full text is the tooltip
+    }
 }
 
 void RoutingPanel::mouseMove (const juce::MouseEvent& e)
 {
-    setTooltip (noticeCompact && noticeArea.contains (e.getPosition()) ? notice : juce::String());
+    if (linkArea.contains (e.getPosition()))
+        setTooltip (linkStatus);
+    else
+        setTooltip (noticeCompact && noticeArea.contains (e.getPosition()) ? notice : juce::String());
 }
 
 void RoutingPanel::mouseUp (const juce::MouseEvent& e)
@@ -1329,6 +1381,12 @@ void RoutingPanel::resized()
     r.removeFromBottom (6);
     assignButton.setBounds (r.removeFromBottom (30));
     r.removeFromBottom (8);
+    linkArea = {};
+    if (linkStatus.isNotEmpty())
+    {
+        linkArea = r.removeFromBottom (16);
+        r.removeFromBottom (6);
+    }
 
     int rowsHeight = autoProfiles->getPreferredHeight (r.getWidth()) + 8;
     for (auto& row : rows)

@@ -878,8 +878,11 @@ TEST_CASE ("KnownGap closed: burst footsteps - Footsteps 100 gives isolated 20 /
     // Target (docs/11 E19 Done-when): 20-50 ms bursts >= 80 % of the steady lift (the interim's 20 ms >= 90 % too).
     CHECK_GE (r.burstLiftDb[0], 0.9 * r.steadyLiftDb);
     CHECK_GE (r.burstLiftDb[1], 0.9 * r.steadyLiftDb);
-    CHECK_NEAR (r.burstLiftDb[0], 5.34, 0.3);
-    CHECK_NEAR (r.burstLiftDb[1], 5.63, 0.3);
+    // Re-based by docs/11 E04 step 4 (Footsteps also offsets the Clarity
+    // shaper's high band, +2 dB at 100 %: the steps' onsets above 4 kHz get
+    // it) 5.34 / 5.63 / 5.67 -> 5.85 / 5.82 / 5.71 dB, steady unchanged.
+    CHECK_NEAR (r.burstLiftDb[0], 5.85, 0.3);
+    CHECK_NEAR (r.burstLiftDb[1], 5.82, 0.3);
     CHECK_NEAR (r.burstLiftDb[2], 5.67, 0.3);
     CHECK_NEAR (r.steadyLiftDb, 5.68, 0.3);
 }
@@ -1011,7 +1014,12 @@ TEST_CASE ("E19: the cue enhancer's loud cap keeps gunfire nearly unlifted in th
     {
         const char* file;
         double shotLiftDb;
-    } presets[] = { { "gaming-competitive-fps.json", 0.22 }, { "gaming-battle-royale.json", 0.25 }, { "gaming-night-mode.json", 0.05 } };
+    } presets[] = { { "gaming-competitive-fps.json", -0.18 }, { "gaming-battle-royale.json", 0.32 }, { "gaming-night-mode.json", -0.44 } };
+    // Re-based by docs/11 E04 step 4, +0.22 / +0.25 / +0.05 -> -0.18 / +0.32
+    // / -0.44 dB: Footsteps also offsets the shaper's high band, which lifts
+    // the shots' onsets above 4 kHz, and the limiter (in Night Mode also the
+    // Startle Guard) then holds the shipped shots a little lower in this
+    // 3.2 kHz band.
     for (const auto& p : presets)
     {
         auto opts = factoryPreset (p.file);
@@ -1097,10 +1105,12 @@ TEST_CASE ("KnownGap closed: Night Mode ambush - no hole after the event, the be
     // 11.10 -> 5.10 dB (the next case: -0.90 dB with Auto Level off, the
     // -3 dB shelf at 90 Hz). The Startle Guard (guard.range 20 LU) holds the
     // fire, about 30 LU over the bed, to 20 LU over it: event change
-    // +1.18 -> -10.31 dB.
+    // +1.18 -> -10.31 dB. Re-based by docs/11 E04 step 4, -10.31 -> -11.10
+    // dB (Footsteps and Detail offset the shaper's high band: the fire's HF
+    // onsets get it and the guard holds them to the same 20 LU).
     CHECK_LE (before, 6.0);
     CHECK_NEAR (before, kNightBedLiftDb, 0.3);
-    CHECK_NEAR (event, -10.31, 0.3);
+    CHECK_NEAR (event, -11.10, 0.3);
 }
 
 TEST_CASE ("KnownGap closed: Night Mode ambush - with Auto Level off the preset itself leaves the bed where it was, so the lift is Auto Level's +6 dB cap alone (E21)")
@@ -1138,7 +1148,7 @@ TEST_CASE ("KnownGap: Night Mode ambush, 10 s of fire - no hole after it at any 
     CHECK_LE (std::abs (longHole5), 1.0);
 }
 
-TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only slightly more than its body; Tighten no longer cuts the onset, Boost 80 and 100 keep it over the body (E04 / E05)")
+TEST_CASE ("KnownGap closed: kick onset - Punch 100 lifts the kick's first 10 ms >= 2 dB more than its body (E04 step 4); Tighten no longer cuts the onset, Boost 80 and 100 keep it over the body (E04 / E05)")
 {
     // Synthetic kick (50 Hz + 80 Hz chirp, e^-18t, peak -6 dBFS) every
     // 500 ms for 6 s, Music mode, maximizer off unless stated. Lift = output
@@ -1195,14 +1205,21 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     measured ("Boost 100 onset (0-10) minus body (10-30)", b0 - b1, "dB");
     measured ("Boost 80 onset (0-10) minus body (10-30)", c0 - c1, "dB");
 
-    // KNOWN_GAP: target Punch 100 0-10 ms lift >= 10-30 ms lift + 2 dB per docs/11 E04 Done-when.
-    // docs/11 E04 step (1) took BassTighten out of the Punch macro: 0-10 /
-    // 10-30 ms 3.92 / 5.47 -> 5.38 / 4.70 dB, onset minus body -1.55 ->
-    // +0.68 dB. The rest is the full-band shaper's own smear (E04 steps 2-5).
-    CHECK_NEAR (p0, 5.38, 0.3);
-    CHECK_NEAR (p1, 4.70, 0.3);
-    CHECK_NEAR (p0 - p1, 0.68, 0.3);
-    CHECK_GE (p0, p1); // the onset no longer gets less than the body
+    // docs/11 E04 Done-when, Punch 100: 0-10 ms lift >= 10-30 ms lift + 2 dB.
+    // Step (1) took BassTighten out of the Punch macro: 0-10 / 10-30 ms
+    // 3.92 / 5.47 -> 5.38 / 4.70 dB, onset minus body -1.55 -> +0.68 dB; the
+    // rest was the full-band shaper's own smear. Step 4: Punch also offsets
+    // the shaper's high band (clarity.attackHigh +2.5 dB), which runs the
+    // 3-band path: the kick is in the low band, whose timing (10 ms slow
+    // attack, fast release) keeps the lift on the onset, and whose gain is
+    // applied to a one-pole low band of the signal (the step 3 path's LR4
+    // band sum was an all-pass that took 2.4 dB off the kick's first 10 ms
+    // at any setting), read by an LR2 detector: 5.38 / 4.70 -> 5.43 / 2.52
+    // dB, onset minus body +0.68 -> +2.91 dB.
+    CHECK_NEAR (p0, 5.43, 0.3);
+    CHECK_NEAR (p1, 2.52, 0.3);
+    CHECK_NEAR (p0 - p1, 2.91, 0.3);
+    CHECK_GE (p0 - p1, 2.0);
     // docs/11 E04 Done-when, Tighten 0.5: 0-10 ms change >= -0.5 dB - met by
     // step 2: the lift -2.04 -> -0.55 dB, i.e. -1.69 -> -0.20 dB re Tighten 0
     // (whose chain, the 20 Hz subsonic filter, reads -0.35 dB). Two causes:
@@ -1227,6 +1244,93 @@ TEST_CASE ("KnownGap: kick onset - Punch 100 lifts the kick's first 10 ms only s
     CHECK_GE (b0 - b1, 0.0);
     CHECK_NEAR (c0 - c1, 0.23, 0.3);
     CHECK_GE (c0 - c1, 0.0);
+}
+
+TEST_CASE ("KnownGap closed: an HF step under an explosion's tail keeps its isolated lift within 1 dB at Gaming Boost 100 + Impact 100 (E04 step 4)")
+{
+    // docs/11 E04 Done-when. An explosion (a 45 Hz sine and noise under
+    // 250 Hz, 0.6 / 0.4, peak -12 dBFS, 2 ms rise, 400 ms decay) from 0.5 s
+    // and a step 150 ms into its tail: 20 ms of noise above 3 kHz, peak
+    // -36 dBFS, 1 ms rise, 6 ms decay. Lift = the power above 3 kHz (four
+    // one-pole high-passes) over the step (2 ms before it to its end), the
+    // output's against the input's: the step alone, and under the tail as
+    // (step + explosion) out minus explosion out. Before step 4 Impact's
+    // attack went to the full-band shaper, whose detector the explosion's
+    // tail holds up, so the step got the attack only in isolation: 11.27 /
+    // 6.05 dB, -5.22 dB (Boost 100 alone, the full-band shaper: 7.74 / 6.22,
+    // -1.52 dB). Impact's attack now goes to the low band and runs the
+    // 3-band path; the high band reads the step on its own: 7.67 / 7.18 dB,
+    // -0.49 dB (the maximizer's gain reduction on the tail is the rest).
+    const int n = samplesOf (2.0), onset = samplesOf (0.5), at = samplesOf (0.65), len = samplesOf (0.02);
+    const auto onePoles = [] (std::vector<float> x, double hz, bool highPass) {
+        const double g = std::tan (kPi * hz / kFs), G = g / (1.0 + g);
+        for (int stage = 0; stage < 4; ++stage)
+        {
+            double z = 0.0;
+            for (auto& v : x)
+            {
+                const double w = (v - z) * G, lp = w + z;
+                z = lp + w;
+                v = static_cast<float> (highPass ? v - lp : lp);
+            }
+        }
+        return x;
+    };
+    const auto normalised = [] (std::vector<float> x, int from, int to) {
+        double acc = 0.0;
+        for (int i = from; i < to; ++i)
+            acc += static_cast<double> (x[static_cast<size_t> (i)]) * x[static_cast<size_t> (i)];
+        const auto g = static_cast<float> (1.0 / std::sqrt (std::max (1.0e-30, acc / (to - from))));
+        for (auto& v : x)
+            v *= g;
+        return x;
+    };
+    const auto noise = normalised (onePoles (whiteNoise (n, 1.0f, 451), 250.0, false), onset, n);
+    const auto click = normalised (onePoles (whiteNoise (n, 1.0f, 452), 3000.0, true), at, at + len);
+    std::vector<float> explosion (static_cast<size_t> (n), 0.0f), step (static_cast<size_t> (n), 0.0f);
+    double explosionPeak = 0.0, stepPeak = 0.0;
+    for (int i = onset; i < n; ++i)
+    {
+        const double t = (i - onset) / kFs;
+        explosion[static_cast<size_t> (i)] = static_cast<float> (std::min (1.0, t / 0.002) * std::exp (-t / 0.4)
+                                                                 * (0.6 * std::sin (kTwoPi * 45.0 * t) + 0.4 * noise[static_cast<size_t> (i)]));
+        explosionPeak = std::max (explosionPeak, static_cast<double> (std::abs (explosion[static_cast<size_t> (i)])));
+    }
+    for (int i = 0; i < len; ++i)
+    {
+        step[static_cast<size_t> (at + i)] = static_cast<float> (std::min (1.0, i / (0.001 * kFs)) * std::exp (-i / (0.006 * kFs)) * click[static_cast<size_t> (at + i)]);
+        stepPeak = std::max (stepPeak, static_cast<double> (std::abs (step[static_cast<size_t> (at + i)])));
+    }
+    std::vector<float> both (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        explosion[static_cast<size_t> (i)] *= static_cast<float> (std::pow (10.0, -12.0 / 20.0) / explosionPeak);
+        step[static_cast<size_t> (i)] *= static_cast<float> (std::pow (10.0, -36.0 / 20.0) / stepPeak);
+        both[static_cast<size_t> (i)] = explosion[static_cast<size_t> (i)] + step[static_cast<size_t> (i)];
+    }
+    const std::vector<Window> window { { at - samplesOf (0.002), at + len } };
+    const auto hfDb = [&] (const std::vector<float>& x) { return powerDb (meanPower (onePoles (x, 3000.0, true), window)); };
+    const double stepDb = hfDb (step);
+    const auto lifts = [&] (const std::vector<float>& values, double& isolated, double& underTail) {
+        const auto s = render (stereoOf (step), values), b = render (stereoOf (both), values), e = render (stereoOf (explosion), values);
+        std::vector<float> diff (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            diff[static_cast<size_t> (i)] = b[0][static_cast<size_t> (i)] - e[0][static_cast<size_t> (i)];
+        isolated = hfDb (s[0]) - stepDb;
+        underTail = hfDb (diff) - stepDb;
+    };
+    RenderOptions impact = boosted (ModeValue::Gaming, 100.0f);
+    impact.macros.push_back ({ "impact", 100.0f });
+    double isolated = 0.0, underTail = 0.0, boostIsolated = 0.0, boostUnderTail = 0.0;
+    lifts (resolve (impact), isolated, underTail);
+    lifts (resolve (boosted (ModeValue::Gaming, 100.0f)), boostIsolated, boostUnderTail);
+    measured ("Gaming Boost 100 + Impact 100: HF step lift, isolated", isolated, "dB");
+    measured ("Gaming Boost 100 + Impact 100: HF step lift, 150 ms into an explosion's tail", underTail, "dB");
+    measured ("Gaming Boost 100 alone: HF step lift, isolated", boostIsolated, "dB");
+    measured ("Gaming Boost 100 alone: HF step lift, under the tail", boostUnderTail, "dB");
+    CHECK_LE (std::abs (underTail - isolated), 1.0);
+    CHECK_NEAR (isolated, 7.67, 0.3);
+    CHECK_NEAR (underTail - isolated, -0.49, 0.3);
 }
 
 namespace
@@ -1336,9 +1440,12 @@ TEST_CASE ("KnownGap: bass-line pumping - a 32 Hz line under 55 Hz kicks through
     // (test_bass_engine.cpp) and Bass Head's whole engine 3.4 -> 1.8 dB; what
     // is left comes from Tighten (E04) and the harmonics generator (E03),
     // about 1 dB each, and from the chain after them (Punch's transient
-    // shaper, the glue and the maximizer at Boost 45 %).
-    CHECK_NEAR (asShipped, 5.07, 0.3);
-    CHECK_NEAR (withSplit, 2.95, 0.3);
+    // shaper, the glue and the maximizer at Boost 45 %). Re-based by docs/11
+    // E04 step 4 (Bass Head's Punch 0.25 runs the shaper's 3-band path,
+    // whose low band lifts the kicks' onsets, not the line): with the split
+    // 2.95 -> 2.26 dB, as shipped 5.07 -> 5.02 dB.
+    CHECK_NEAR (asShipped, 5.02, 0.3);
+    CHECK_NEAR (withSplit, 2.26, 0.3);
     CHECK_LE (withSplit, asShipped - 1.0);
 }
 
@@ -1902,8 +2009,10 @@ TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 
     // Re-based by docs/11 E04 step 2, 441.0 -> 510.1 ms (the 1e30 spikes
     // 7.2 -> 3.9 ms): Signature's Tighten 0.1 is gated by the onset, which
     // reads the restarted programme as one, and is applied through a
-    // one-pole shelf whose state restarts with it.
-    CHECK_NEAR (burst.spanMs, 510.1, 20.0);
+    // one-pole shelf whose state restarts with it. Re-based by docs/11 E04
+    // step 4, 510.1 -> 457.5 ms: Signature's Punch 0.2 runs the Clarity
+    // shaper's 3-band path, whose shapers restart with the path too.
+    CHECK_NEAR (burst.spanMs, 457.5, 20.0);
     CHECK_LE (burst.worstChangeDb, 0.3);
 }
 
@@ -2406,7 +2515,11 @@ TEST_CASE ("KnownGap closed at protection strength Normal: Gaming full stack on 
     }
     // KNOWN_GAP at Off (the default): target <= +2 dB per docs/11 E07
     // Done-when; the rule runs at protection strength Normal / Strict.
-    CHECK_NEAR (tilt[0], 4.06, 0.2);
+    // Re-based by docs/11 E20, 4.06 -> 4.39 dB: Impact 100's static 6 dB
+    // shelf at 70 Hz and harmonics became an event-keyed burst, and their
+    // skirt had lifted the reference band, 200 Hz - 1 kHz (CLI, same
+    // stack: 2-5 kHz lift 10.84 -> 10.78 dB, 200 Hz - 1 kHz 6.47 -> 6.00).
+    CHECK_NEAR (tilt[0], 4.39, 0.2);
     // The Done-when row at Normal.
     CHECK_LE (tilt[1], 2.0);
     CHECK_LE (harsh[1], 2.0);

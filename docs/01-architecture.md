@@ -358,7 +358,7 @@ Until the virtual drivers exist, the strips are fed by a capture path. Each one 
 | Linux PipeWire null sinks (`flubsound_*`, §1) | The sink and its monitor add up to one graph quantum (`platform/linux/README.md`) | 1024 / 48000 = **21.3 ms** at pipewire-jack's default request; **256 / 48000 = 5.3 ms** requested by the app (`PIPEWIRE_LATENCY`, exported before the device opens; a request, not a lock, docs/11 E48a), or forced with `pw-metadata -n settings 0 clock.force-quantum 256` | Within the target when the request is honoured (PipeWire clients through pipewire-jack or PipeWire's ALSA plug-in; not yet measured on a PipeWire system). The Low Latency request (128 / 48000, locked) is not used yet |
 | A third-party virtual cable on the device input (VB-Cable, BlackHole, a JACK port) | The cable's own buffer plus the input device's period | Set by the cable and its driver, not by Flubsound | Has to be measured per setup |
 
-The app's latency readout includes the capture FIFO target of a running process-loopback capture, but not a PipeWire quantum or a cable's buffer.
+The app's latency readout includes the capture FIFO target of a running process-loopback capture and, with the native "PipeWire" device, the quantum the graph runs at ([11 E48](11-enhancement-report.md#e48), fed from the node's last cycle), but not the PipeWire quantum above a JUCE ALSA / JACK device or a cable's buffer.
 
 ### 5.4 Measuring it: the loopback probe
 

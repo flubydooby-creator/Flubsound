@@ -436,4 +436,9 @@ static_assert (std::is_same_v<decltype (&AnalysisSnapshot::publish), void (Analy
 static_assert (std::is_same_v<decltype (&ProcessingChain::setSmartMacros), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::setContentAnalysisTap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);
 
+// Impact's event-keyed punch (docs/11 E20): the onset detector BassEngine's
+// process runs per sample, and the burst's reading (tests, meters).
+static_assert (std::is_same_v<decltype (&TransientShaper::computeOnset), float (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&BassEngine::getImpactDb), float (BassEngine::*)() const noexcept FLUB_NONBLOCKING>);
+
 #endif // FLUB_RTSAN

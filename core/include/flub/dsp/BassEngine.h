@@ -276,8 +276,9 @@ private:
 
     // 3a. Impact's punch (docs/11 E20): the detector band, its onset
     // indicator and held level, the burst envelope (instant rise, a hold,
-    // then a one-pole release), the lift in dB (2 ms rise / 20 ms fall) and
-    // the bell's unity band-pass. Runs while impactPunch or its burst is non-zero.
+    // then a one-pole release, then two 1 ms smoothing stages), the lift in
+    // dB (1 ms rise / 20 ms fall) and the bell's unity band-pass. Runs while
+    // impactPunch or its burst is non-zero.
     bool impactActive = false;
     LinkwitzRileyBand impactBand;
     TransientShaper impactDetector;
@@ -286,6 +287,7 @@ private:
     int impactWarm = 0;                    // samples before an onset may key a burst (warm-up)
     int impactHoldLeft = 0, impactHoldSamples = 1;
     float impactEnv = 0.0f, impactReleaseCoeff = 0.0f;
+    float impactBurst1 = 0.0f, impactBurst = 0.0f, impactSmoothCoeff = 0.0f; // the envelope through two 1 ms one-poles
     float impactGainDb = 0.0f, impactRiseCoeff = 0.0f, impactFallCoeff = 0.0f;
     SvfCoeffs impactBell, impactLevelLp;
     std::array<SvfState, kMaxChannels> impactBellState {}, impactLevelState {};

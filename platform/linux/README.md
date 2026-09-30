@@ -70,13 +70,25 @@ Sink names and properties:
   socket credentials) or else `application.process.id` (the client's own
   `getpid()`, which is sandbox-local for Flatpak/Snap apps), binary,
   application name, the current sink name, and
-  whether the stream is playing (`corked == false`). Flubsound's own streams
-  and streams without a pid are skipped.
+  whether the stream is playing (`corked == false`). A stream of a native
+  PipeWire client (`pw-play`, SDL or OpenAL on their PipeWire back-end)
+  carries none of these itself; they come from its client (the stream's
+  `client` in `pactl --format=json list clients`, asked only when such a
+  stream exists). Flubsound's own streams and streams without a pid are
+  skipped.
 - **`setAppEndpoint(pid, sink)`** runs `pactl move-sink-input <id> '<sink>'`
   for every stream of that pid. An empty sink means `@DEFAULT_SINK@`. The
   sink argument passes a strict whitelist (`[A-Za-z0-9_.:@+-]`, no leading
   `-`, max 255 characters) and is single-quoted as well. Nothing unsanitised
-  ever reaches `popen`.
+  ever reaches `popen`. WirePlumber remembers a stream's move target as the
+  application's restore-stream entry and sends its next streams there, so
+  a move back to the default also deletes the stream's `target.object` /
+  `target.node` in the "default" metadata (`pw-metadata -d <node id> …`,
+  docs/11 E47): pipewire-pulse 1.0 already writes -1 (no target) for a move
+  to `@DEFAULT_SINK@`, older versions the default sink's own id, which
+  would pin the application to that device. The route journal
+  (`route-journal.json`, next to the settings) makes the next start undo
+  the moves of a run that was killed.
 - **`connectEndpointInputs()`** links each strip sink's monitor to the
   engine's input through the libpipewire registry, or with `pw-dump` /
   `pw-link` in a build without libpipewire (see *Linking the sinks to the
@@ -564,18 +576,32 @@ links:
   `AudioEngineHost::positionFromChannelName` reads. The callback swap is
   lock-free. `pipewire::addDeviceType` adds the type after JUCE's own;
   `setDeviceLatency`, `setDeviceOutputTarget` and `getDeviceStatus` reach
-  the running device.
+  the running device. All 14 inputs are always active (they are the
+  strips' sinks, not a hardware selection), and the device reports no
+  latency of its own: the node runs in the same graph cycle as the sinks it
+  reads, and the graph's quantum is reported separately.
+- **In the app.** Settings › Audio lists the "PipeWire" device type
+  (`AudioEngineHost::openDevice` adds it). On a first start (nothing saved)
+  the app opens it by itself when a PipeWire server answers, so a fresh
+  install needs no setup script and no manual links; JUCE's own type
+  otherwise, and nothing is saved until the user picks a device. Each
+  strip reads its own sink (the channel names give the map: Game 0-7,
+  Music 8-9, Chat 10-11, System 12-13; a `Game=0;Music=8` map typed in the
+  settings still wins). A latency profile change sets the node's
+  `node.latency` in place, with no re-open and no dropout. The quantum the
+  graph runs at is part of the header's latency total ("+ audio graph").
+  The routing panel shows the node's line above its buttons, e.g.
+  *PipeWire: Linked 14 of 14 input channels, output to
+  alsa_output.usb-… (2 of 2), quantum 256/48000*, in amber when a link is
+  missing; with a JUCE device it shows what the registry links could not
+  make, if anything.
 
-Not yet wired into the app: `AudioEngineHost` / `EngineController` do not
-add the device type, pass the latency profile or show the status (one call
-each; those files belong to the engine host), so the running app still
-uses JUCE's ALSA / JACK types plus the registry links above. Also open: the
-Flatpak build with the Realtime and GlobalShortcuts portals, a headless
-mode for SteamOS Game Mode, a CI job with a headless PipeWire, moving
-applications through `target.object` metadata, the manual matrix of the
-item (Fedora, Ubuntu, KDE Neon, SteamOS), and loading libpipewire at run
-time: a build made with it links `libpipewire-0.3.so.0`, which every
-PipeWire desktop has, but a system without it cannot start that build.
+Also open: the Flatpak build with the Realtime and GlobalShortcuts
+portals, a headless mode for SteamOS Game Mode, moving applications
+through `target.object` metadata, the manual matrix of the item (Fedora,
+Ubuntu, KDE Neon, SteamOS), and loading libpipewire at run time: a build
+made with it links `libpipewire-0.3.so.0`, which every PipeWire desktop
+has, but a system without it cannot start that build.
 
 Tests: `tests/test_platform_linux.cpp` covers the registry mirror, the
 plans, the port names, the latency values and the cycle runner with fakes
@@ -585,15 +611,33 @@ against a running PipeWire server: sinks made and removed, 10 of 10 strip
 links and 2 of 2 output links, a tone through a sink to the right strip
 channels only, the quantum at 256 and then 128 without a re-open, no
 allocation and no lock on the data thread over 100 cycles, the feedback
-refusal, and the device's sinks gone after it closes. Without a server
-(CI) the tests print "skipped". To run them headless:
+refusal, and the device's sinks gone after it closes. The app-level case
+runs an `EngineController` with a device on a fresh settings file: the
+"PipeWire" type is offered and taken on the first start, all four strips
+read their sinks (tones into `flubsound_game` and `flubsound_chat` reach
+those strips, processed audio reaches the output), Low Latency moves the
+quantum to 128 with the same device still running, the latency total is
+engine + graph quantum, and the routing panel's line reads *Linked 14 of
+14 input channels*. `tests/app/test_app_route_journal_linux.cpp` is the
+route journal's crash test: a child `flub_app_tests` moves a `pw-play`
+stream to a Game sink through the real `pactl` router and is killed with
+SIGKILL; WirePlumber then sends the application's next stream to the
+Game sink too; the restart moves both back to the default output, and
+with another default output the application's next stream follows it (the
+restore-stream entry is gone). Without a server the tests print
+"skipped"; the app-level and crash cases also skip on a server with real
+(ALSA or Bluetooth) devices, since they open the default output or change
+it. CI's `pipewire` job runs them 20 times in a row against a headless
+server. To run them headless here (the runtime folder's path must be
+short: the socket path has to fit in 108 bytes):
 
 ```sh
-export XDG_RUNTIME_DIR=$(mktemp -d)   # a private runtime folder
+export XDG_RUNTIME_DIR=$(mktemp -d /tmp/pw.XXXXXX)   # a private runtime folder
+export XDG_STATE_HOME=$XDG_RUNTIME_DIR/state XDG_CONFIG_HOME=$XDG_RUNTIME_DIR/config
 dbus-daemon --session --fork --address=unix:path=$XDG_RUNTIME_DIR/bus
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
-pipewire & sleep 1; wireplumber &     # packages pipewire, wireplumber
-flub_app_tests "(E48)"
+pipewire & sleep 1; wireplumber & pipewire-pulse &   # pipewire, wireplumber, pipewire-pulse, pulseaudio-utils
+flub_app_tests "(E48"; flub_app_tests "E47 Linux"
 ```
 
 ## Headset profiles on Linux
@@ -606,9 +650,10 @@ detect Bluetooth and hands-free outputs from the device name and format
 
 ## Roadmap
 
-- **Native PipeWire node:** built (above); the app still has to add its
-  device type, and Flatpak, Game Mode's headless mode and a headless CI job
-  are open.
+- **Native PipeWire node:** built and offered in the app (above, the
+  first-run default when a PipeWire server answers); Flatpak and Game
+  Mode's headless mode are open, and the CI job stays non-blocking until
+  20 consecutive runs are green.
 - libpipewire routing (`target.object` metadata) instead of shelling out to
   `pactl`, for Flatpak and to receive change events instead of polling.
 - Wayland hotkeys: run on real desktops (so far tested only against a mock
