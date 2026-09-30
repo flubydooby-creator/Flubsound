@@ -116,6 +116,49 @@ private:
     std::array<SvfState, kMaxChannels> st {};
 };
 
+/** One Linkwitz-Riley band, per channel: an LR4 high-pass at lowHz into an
+    LR4 low-pass at highHz (24 dB/oct skirts; the detector band of
+    BassEngine's Impact punch, docs/11 E20). */
+class LinkwitzRileyBand
+{
+public:
+    void prepare (double sampleRate, double lowHz, double highHz) noexcept
+    {
+        const double q = 1.0 / std::sqrt (2.0);
+        highPass = SvfCoeffs::make (FilterType::HighPass, lowHz, q, 0.0, sampleRate);
+        lowPass = SvfCoeffs::make (FilterType::LowPass, highHz, q, 0.0, sampleRate);
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        for (auto& ch : st)
+            for (auto& s : ch)
+                s.reset();
+    }
+
+    float processSample (int ch, float x) noexcept
+    {
+        auto& s = st[static_cast<size_t> (ch)];
+        const float h = svfTick (highPass, s[1], svfTick (highPass, s[0], x));
+        return svfTick (lowPass, s[3], svfTick (lowPass, s[2], h));
+    }
+
+    /** See ThreeBandSplitter::flushStates. */
+    float flushStates (int numChannels, float tiny) noexcept
+    {
+        float sum = 0.0f;
+        for (int c = 0; c < numChannels && c < kMaxChannels; ++c)
+            for (auto& s : st[static_cast<size_t> (c)])
+                sum += LinkwitzRiley4::flushSvf (s, tiny);
+        return sum;
+    }
+
+private:
+    SvfCoeffs highPass, lowPass;
+    std::array<std::array<SvfState, 4>, kMaxChannels> st {};
+};
+
 /** Three phase-coherent bands (low | mid | high) that sum to an all-pass. */
 class ThreeBandSplitter
 {

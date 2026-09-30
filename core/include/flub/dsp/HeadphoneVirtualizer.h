@@ -196,7 +196,7 @@ private:
         OnePoleSmoother shelfDb; // rear-cue shelf gain, control rate
         SvfCoeffs shelf, prevShelf;
         SvfState shelfState;
-        std::array<SvfCoeffs, kNumCues> cue {}, prevCue {}; // Enhanced's direction cues (after the shelf)
+        std::array<SvfCoeffs, kNumCues> cue {}, prevCue {}; // Enhanced's direction cues (ahead of the shelf)
         std::array<SvfState, kNumCues> cueState {};
         std::array<EarPath, 2> ears {}; // 0 = left, 1 = right
         bool clean = true;              // every state of this channel is zero
@@ -221,8 +221,9 @@ private:
     void clearState() noexcept;
     void clearChannel (int channel) noexcept;
     void renderSegment (const AudioBlock& block, int start, int length, int numInputs) noexcept;
-    template <bool Ramp, bool Cues>
+    template <bool Ramp>
     void renderParametric (Speaker& sp, float* line, const float* x, int length) noexcept;
+    void renderCues (const AudioBlock& block, int start, int length, int numInputs) noexcept;
     void renderHrir (HrirPath& path, const float* x, int length) noexcept;
     void renderLfe (const float* x, int length) noexcept;
     void renderReflections (int length) noexcept;
@@ -268,6 +269,7 @@ private:
     // Scratch (maxBlockSize): ear accumulators, the reflection bus, the LFE
     // (kept apart from the level match) and the reference downmix D.
     std::vector<float> accL, accR, bus, lfeBus, refL, refR;
+    std::array<std::vector<float>, kMaxChannels> cueOut; // Enhanced: each speaker's input after its direction cues
 
     // Level match (E28a). K-weighting (BS.1770 shelf and RLB high-pass,
     // designed for fs / 2: it runs on every other sample) of four lanes:

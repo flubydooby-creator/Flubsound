@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstring>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 
@@ -110,9 +112,15 @@ static_assert (SafetyGovernor::kTickMs == LoudnessMaximizer::kGrWindowMs);
 // of any of them (or of the fold) re-runs it.
 constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, BassBoostDb, BassBoostFreq, BassSubsonic, BassSubsonicOrder, ClarityOn,
                                        ClarityPresence, ClarityPresenceFreq, ClarityAir, SaturationOn, SatMix, SatOutputDb,
-                                       AutoPreampOn, AutoPreampAllowanceDb, WarmthTone };
+                                       AutoPreampOn, AutoPreampAllowanceDb, WarmthTone,
+                                       // The level-dependent terms (docs/11 E11, p3b5)
+                                       ClarityPresenceMode, SpatialOn, SpatialCrossfeed, SpatialCrossfeedType, Mode,
+                                       CompressorOn, CompThresholdDb, CompRatio, CompKneeDb, CompMakeupDb, CompAutoMakeup, CompSidechainHp,
+                                       CompMix, CompUpThresholdDb, CompUpRatio, CompUpMaxGainDb, CompUpFloorDb, CompAttackMs, CompReleaseMs,
+                                       BassProtectDb, BassHarmonics, BassHarmonicsCutoff, BassReplaceFundamental };
 constexpr EqField kHeadroomEqFields[] = { EqFieldOn, EqFieldType, EqFieldFreq, EqFieldGain, EqFieldQ, EqFieldSlope };
-constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldFreq, DynFieldQ, DynFieldStaticGain };
+constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldFreq, DynFieldQ, DynFieldStaticGain,
+                                            DynFieldMode, DynFieldThreshold, DynFieldRatio, DynFieldRange, DynFieldNoiseFloor };
 constexpr int kHeadroomParamCount = static_cast<int> (std::size (kHeadroomScalarIds) + kEqBands * std::size (kHeadroomEqFields)
                                                       + kDynEqBands * std::size (kHeadroomDynFields));
 
@@ -163,6 +171,101 @@ constexpr double kPresenceQ = 0.8, kPresenceMaxDb = 6.0;
 constexpr double kAirShelfHz = 10000.0, kAirShelfQ = 0.70710678118654752, kAirShelfMaxDb = 2.0;
 constexpr double kBassShelfQ = 0.7, kBassMaxBoostDb = 15.0;
 
+// The static-boost model's level-dependent terms (docs/11 E11, p3b5; see
+// the header comment). Presence's laws as ClarityEnhancer.cpp has them,
+// the Bs2b / Meier crossfeed as StereoSpatializer.cpp designs it, and three
+// offsets fitted on pink noise through the modules themselves (-40 ..
+// -10 dBFS; tests/test_parameters_headroom.cpp): the presence detector's
+// smoothed reading against the band's mean power, the relative law's
+// max (slow, fast) balance against the mean balance, and the compressor's
+// held linked peak against its sidechain's RMS.
+constexpr double kPresenceThresholdDb = -18.0, kPresenceSlope = 0.25, kPresenceRelativeDb = 8.0, kPresenceFloorDb = -80.0;
+constexpr double kPresenceBodyLowHz = 200.0, kPresenceBodyHighHz = 1000.0;
+constexpr double kPresenceLevelBiasDb = 0.2, kPresenceBalanceBiasDb = 0.8;
+// The compressor's held peak over its sidechain RMS, plus what a slow release
+// after a fast attack at a steep ratio keeps down beyond it (the smoothed
+// gain rides the peaks): kCompressorHoldSlope x max (0, (1 - 1 / ratio)
+// x ln (release / attack) - kCompressorHoldKnee).
+// The bass harmonics' added power on pink (the envelope-normalised shaper
+// tracks its source: level-independent): kHarmonicsPower x
+// amount^kHarmonicsExponent x the source band's power over the harmonics
+// band's, falling as (f / (kHarmonicsKnee cutoff))^-kHarmonicsFall above
+// the knee (fitted over cutoffs 60 .. 120 Hz, characters 0 .. 1).
+constexpr double kHarmonicsPower = 4.0, kHarmonicsExponent = 1.5, kHarmonicsKnee = 1.2, kHarmonicsFall = 2.7;
+constexpr double kCompressorCrestDb = 10.1, kCompressorHoldSlope = 0.6, kCompressorHoldKnee = 3.5;
+// The dynamic EQ's held band peak over the band's RMS, and its spread, at
+// the shortest (1 ms) and the longest (25 ms) peak hold DynamicEq.cpp uses;
+// log-interpolated in between.
+constexpr double kDynEqShortHoldCrestDb = 8.75, kDynEqShortHoldSpreadDb = 2.0;
+constexpr double kDynEqLongHoldCrestDb = 7.0, kDynEqLongHoldSpreadDb = 2.0;
+// The bass engine's protection detector (25 ms hold, 10 / 150 ms follower).
+constexpr double kBassProtectCrestDb = 8.25, kBassProtectSpreadDb = 1.0;
+constexpr double kButterworthQ2 = 0.70710678118654752; // the body's and the sidechain's 2nd-order filters
+constexpr double kSqrt2 = 1.41421356237309505;
+constexpr double kXfeedItdSeconds = 0.235e-3;
+constexpr double kXfeedBs2bHz = 700.0, kXfeedBs2bDb = 4.5, kXfeedMeierHz = 650.0, kXfeedMeierDb = 9.5;
+// K-weighted loudness of stereo pink noise (20 Hz high-passed, the same in
+// both channels) over its RMS per channel (LoudnessFollower, 44.1 / 48 kHz):
+// the input's loudness as the model's programme level.
+constexpr float kPinkLufsOverRmsDb = 3.7f;
+
+/** A user dynamic-EQ band's dynamic gain (dB) for a steady programme whose
+    detector peak level sits around levelDb: DynamicEq.cpp's computer
+    averaged over a Gaussian spread of spreadDb (5-point Gauss-Hermite),
+    which smooths its knee and range as the band's fluctuating level does. */
+double dynamicGainDb (DynEqMode mode, double levelDb, double spreadDb, double thresholdDb, double ratio, double rangeDb,
+                      double noiseFloorDb) noexcept
+{
+    static constexpr double nodes[] = { -2.02018287, -0.95857246, 0.0, 0.95857246, 2.02018287 };
+    static constexpr double weights[] = { 0.01995324, 0.39361932, 0.94530872, 0.39361932, 0.01995324 };
+    const double r = std::max (1.0, ratio);
+    double sum = 0.0;
+    for (size_t i = 0; i < std::size (nodes); ++i)
+    {
+        const double x = levelDb + kSqrt2 * spreadDb * nodes[i], over = x - thresholdDb;
+        double g = 0.0;
+        switch (mode)
+        {
+            case DynEqMode::CutAbove: g = -std::min (rangeDb, std::max (0.0, over) * (1.0 - 1.0 / r)); break;
+            case DynEqMode::BoostBelow: g = std::min (rangeDb, std::max (0.0, -over) * (1.0 - 1.0 / r)) * std::clamp ((x - noiseFloorDb) / 10.0, 0.0, 1.0); break;
+            case DynEqMode::BoostAbove: g = std::min (rangeDb, std::max (0.0, over) * (r - 1.0)); break;
+            case DynEqMode::CutBelow: g = -std::min (rangeDb, std::max (0.0, -over) * (r - 1.0)); break;
+            case DynEqMode::CueLift: break;
+        }
+        sum += weights[i] * g;
+    }
+    return sum / std::sqrt (kPi);
+}
+
+/** The bass protection's withdrawal (dB, 0 .. boostDb) for a predicted LF
+    peak excessDb over the cap: BassEngine.cpp's 6 dB soft knee, averaged
+    over the held peak's spread (as dynamicGainDb). */
+double protectionWithdrawDb (double excessDb, double boostDb) noexcept
+{
+    static constexpr double nodes[] = { -2.02018287, -0.95857246, 0.0, 0.95857246, 2.02018287 };
+    static constexpr double weights[] = { 0.01995324, 0.39361932, 0.94530872, 0.39361932, 0.01995324 };
+    constexpr double knee = 6.0, halfKnee = 0.5 * knee;
+    double sum = 0.0;
+    for (size_t i = 0; i < std::size (nodes); ++i)
+    {
+        const double x = excessDb + kSqrt2 * kBassProtectSpreadDb * nodes[i];
+        const double w = x <= -halfKnee ? 0.0 : x >= halfKnee ? x : (x + halfKnee) * (x + halfKnee) / (2.0 * knee);
+        sum += weights[i] * std::clamp (w, 0.0, boostDb);
+    }
+    return sum / std::sqrt (kPi);
+}
+
+/** |H|^2 of an SVF section at t = tan (pi f / fs) (Svf.h):
+    H = (m0 (1 - W^2) + m2 + j (m0 k + m1) W) / (1 - W^2 + j k W), W = t / g. */
+double sectionPower (const SvfCoeffs& c, double t) noexcept
+{
+    const double w = t / c.g, w2 = w * w;
+    const double m0 = c.m0, m1 = c.m1, m2 = c.m2;
+    const double nr = m0 * (1.0 - w2) + m2, ni = (m0 * c.k + m1) * w;
+    const double dr = 1.0 - w2, di = c.k * w;
+    return (nr * nr + ni * ni) / std::max (dr * dr + di * di, 1.0e-300);
+}
+
 /** A named maximizer style (docs/11 E05 step 4) owns its six controls: their
     effective values become the style's (published like every other
     override, so the GUI's markers show what is applied). */
@@ -190,9 +293,11 @@ int gateFftSizeFor (double sampleRate) noexcept
     threshold, keyed to the Dynamic Range control (docs/11 E20 / E21,
     StartleGuard.h). tonalScale: the governor's tonal-balance scale (docs/11
     E07) on the macros' ungoverned lifts here, the Gaming Voice & Score band
-    and the Music air band (1 at protection strength Off). */
-void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate, float tame, float tameThresholdDb,
-                         float tonalScale) noexcept
+    and the Music air band (1 at protection strength Off). The mode bands'
+    parameters (bands 4..7 as out[0..3]); the automatic preamp's model reads
+    them too (docs/11 E11, at the macros' ungoverned values). */
+void modeBandParams (std::array<DynEqBandParams, ProcessingChain::kNumModeBands>& out, ModeValue mode, const float* e, double sampleRate,
+                     float tame, float tameThresholdDb, float tonalScale) noexcept
 {
     const auto& hz = mode == ModeValue::Gaming ? kGamingModeBandHz : kMusicModeBandHz;
     if (mode == ModeValue::Gaming)
@@ -202,29 +307,38 @@ void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double 
         const float detailRange = sampleRate > kSpeechLinkMaxRate ? 7.0f * footsteps : 0.0f;
         // Cue detail (steps, reloads, cloth) and footstep "body" (heel
         // impact): cue enhancer bands (threshold / ratio unused, see above).
-        dyn.setBand (4, modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[0], 0.9f, 0.0f, 1.0f, detailRange, kCueDetailAttackMs, kCueDetailReleaseMs, -75.0f));
-        dyn.setBand (5, modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[1], 1.2f, 0.0f, 1.0f, 3.0f * footsteps, kCueBodyAttackMs, kCueBodyReleaseMs, -75.0f));
+        out[0] = modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[0], 0.9f, 0.0f, 1.0f, detailRange, kCueDetailAttackMs, kCueDetailReleaseMs, -75.0f);
+        out[1] = modeBand (DynEqMode::CueLift, EqBandType::Bell, hz[1], 1.2f, 0.0f, 1.0f, 3.0f * footsteps, kCueBodyAttackMs, kCueBodyReleaseMs, -75.0f);
         // Anti-masking (a CutAbove low shelf at 90 Hz) no longer follows
         // Footsteps (docs/11 E20): Footsteps 100 changed the explosion level.
         // It is the Tame stage of the Dynamic Range control (guard.range,
         // docs/11 E21): off (range 0) with the guard, as before E21; the
         // presets that tamed loud LF carry their old band as user band 0.
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, tameThresholdDb,
-                                  tame > 0.0f ? StartleGuard::kTameRatio : 3.0f, tame * StartleGuard::kTameMaxRangeDb, 10.0f, 250.0f, -80.0f));
+        out[2] = modeBand (DynEqMode::CutAbove, EqBandType::LowShelf, hz[2], 0.7f, tameThresholdDb,
+                           tame > 0.0f ? StartleGuard::kTameRatio : 3.0f, tame * StartleGuard::kTameMaxRangeDb, 10.0f, 250.0f, -80.0f);
         // Voice comms / dialogue / score intelligibility.
-        dyn.setBand (7, modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice * tonalScale, 5.0f, 150.0f, -70.0f));
+        out[3] = modeBand (DynEqMode::BoostBelow, EqBandType::Bell, hz[3], 0.7f, -36.0f, 2.0f, 4.0f * voice * tonalScale, 5.0f, 150.0f, -70.0f);
     }
     else
     {
         const float clarity = e[Macro3];
         const float boost = e[BoostIntensity];
         // Presence/air boosts are paired with a dynamic de-harsh band.
-        dyn.setBand (4, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[0], 1.2f, -22.0f, 3.0f, 3.0f * clarity, 2.0f, 80.0f, -80.0f));
-        dyn.setBand (5, modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, hz[1], 0.7f, -45.0f, 2.0f, 3.0f * clarity * tonalScale, 10.0f, 200.0f, -80.0f));
+        out[0] = modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[0], 1.2f, -22.0f, 3.0f, 3.0f * clarity, 2.0f, 80.0f, -80.0f);
+        out[1] = modeBand (DynEqMode::BoostBelow, EqBandType::HighShelf, hz[1], 0.7f, -45.0f, 2.0f, 3.0f * clarity * tonalScale, 10.0f, 200.0f, -80.0f);
         // Bass boost is paired with a dynamic de-boom band.
-        dyn.setBand (6, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[2], 1.0f, -14.0f, 2.5f, 4.0f * boost, 10.0f, 150.0f, -80.0f));
-        dyn.setBand (7, modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[3], 1.0f, 0.0f, 1.0f, 0.0f, 5.0f, 80.0f, -80.0f));
+        out[2] = modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[2], 1.0f, -14.0f, 2.5f, 4.0f * boost, 10.0f, 150.0f, -80.0f);
+        out[3] = modeBand (DynEqMode::CutAbove, EqBandType::Bell, hz[3], 1.0f, 0.0f, 1.0f, 0.0f, 5.0f, 80.0f, -80.0f);
     }
+}
+
+void configureModeBands (DynamicEq& dyn, ModeValue mode, const float* e, double sampleRate, float tame, float tameThresholdDb,
+                         float tonalScale) noexcept
+{
+    std::array<DynEqBandParams, ProcessingChain::kNumModeBands> bands {};
+    modeBandParams (bands, mode, e, sampleRate, tame, tameThresholdDb, tonalScale);
+    for (int b = 0; b < ProcessingChain::kNumModeBands; ++b)
+        dyn.setBand (ProcessingChain::kFirstModeBand + b, bands[static_cast<size_t> (b)]);
 }
 } // namespace
 
@@ -503,6 +617,10 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     preampGain.reset (sr, 20.0f, 1.0f);
     headroomKeyValid = false;
     headroomHoldoff = 0;
+    programmeDb = static_cast<float> (kNominalProgrammeDb); // nothing measured yet (docs/11 E11); a reset() keeps it
+    programmeHeldDb = kMinusInfDb;
+    programmeHoldLeft = 0;
+    modelProgrammeDb.store (programmeDb, std::memory_order_relaxed);
     // The hot-programme peak (auto.preampHot) is held again from the first
     // block; a reset() keeps it, like the governor's learned state.
     hotPeakDb = kMinusInfDb;
@@ -519,7 +637,11 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     // to what leaves it: the slot's latency is its look-ahead.
     startleGuard.prepare (sr, maxB, slots[SComp].latencySamples());
     autoDrive.prepare (sr, 2);
-    governor.prepare (sr);
+    // docs/11 E06: a re-prepare at the same rate and layout (a plug-in host's
+    // prepareToPlay) keeps what the governor has learned, as reset() does
+    // (at Normal / Strict); a new rate or layout starts afresh.
+    governor.prepare (sr, config.inputChannels == governorLayout);
+    governorLayout = config.inputChannels;
     distortion.prepare (sr);
     {
         // The governor's spans (docs/11 E06 Phase 3): the bass engine alone,
@@ -545,7 +667,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
     outLevel.prepare (sr, 2);
     outTruePeak.prepare (2);
     outLoudness.prepare (sr, 2);
-    inLoudness.prepare (sr, 2, 3000.0f);
+    inLoudness.prepare (sr, 2, kInLoudnessMs);
     bedInShort.prepare (sr, 2, kBedShortMs);
     preMaxShort.prepare (sr, 2, kBedShortMs);
     bedEventLoudness.prepare (sr, 2, kBedEventMs);
@@ -675,6 +797,8 @@ void ProcessingChain::resetSignalState() noexcept
     outTruePeak.reset();
     outLoudness.reset();
     inLoudness.reset();
+    programmeWarmLeft = static_cast<int> (kProgrammeWarmSeconds * config.sampleRate); // the automatic preamp's level (docs/11 E11)
+    programmeElapsed = 0;
     bedInShort.reset();
     preMaxShort.reset();
     bedEventLoudness.reset();
@@ -721,6 +845,7 @@ void ProcessingChain::applyParameters() noexcept
     // The measured loop (Normal / Strict, docs/11 E06 Phase 3): its own
     // scale on the bass harmonics, the budgets of the mode, Small Speaker
     // Mode, and the maximizer drive at the full scale for the feed-forward.
+    const float ungovernedHarmonics = e[BassHarmonics]; // before the harmonics scale (the automatic preamp's model)
     if (strength != ProtectionStrength::Off)
     {
         e[BassHarmonics] *= governor.getHarmonicsScale();
@@ -863,6 +988,7 @@ void ProcessingChain::applyParameters() noexcept
     if (tame > 0.0f && startleGuard.getReferenceLufs() > -60.0f)
         tameThresholdDb = std::min (tameThresholdDb, startleGuard.getReferenceLufs() + StartleGuard::kTameOverReferenceDb);
     configureModeBands (dynEq, mode, e, config.sampleRate, tame, tameThresholdDb, tonalScale);
+    modeTame = tame, modeTameThresholdDb = tameThresholdDb; // for the automatic preamp's model (docs/11 E11)
     slots[SDynEq].setActive (active (DynEqOn));
 
     // ---- Bass ----
@@ -879,6 +1005,10 @@ void ProcessingChain::applyParameters() noexcept
     bp.subsonicHz = e[BassSubsonic];
     bp.subsonicOrder = idx (e, BassSubsonicOrder) == static_cast<int> (SubsonicOrderValue::Slope12) ? 2 : 4;
     bp.splitProtection = on (e, BassSplitProtect);
+    // Impact's punch (docs/11 E20): Gaming Impact keys an LF burst on
+    // onsets (no parameter; the curve of the static boost it replaces),
+    // governed like the macro rows it replaced.
+    bp.punch = mode == ModeValue::Gaming ? smoothstep (0.0f, 1.0f, e[Macro3]) * governorScale : 0.0f;
     bass.setParams (bp);
     slots[SBass].setActive (active (BassOn));
 
@@ -1055,13 +1185,14 @@ void ProcessingChain::applyParameters() noexcept
     // its loop). A momentary audition bypass does not move it, so holding
     // "listen without" a module plays exactly that module's own effect ----
     // The same holds for the tonal-balance rule's scale on presence and air
-    // (docs/11 E07): the preamp sees what the macros ask for.
+    // (docs/11 E07) and the harmonics scale (the model counts the bass
+    // harmonics since p3b5): the preamp sees what the macros ask for.
     const float* h = e;
-    if (governorScale < 1.0f || tonalScale < 1.0f)
+    if (governorScale < 1.0f || tonalScale < 1.0f || e[BassHarmonics] < ungovernedHarmonics)
     {
         MacroMap::apply (base.data(), ungoverned.data(), 1.0f, onboardCap, smart);
         std::copy (effective.begin(), effective.end(), headroomInput.begin());
-        for (int id : { BassBoostDb, ClarityPresence, ClarityAir })
+        for (int id : { BassBoostDb, ClarityPresence, ClarityAir, BassHarmonics })
             headroomInput[static_cast<size_t> (id)] = ungoverned[static_cast<size_t> (id)];
         applySafeSpeakerBassCap (headroomInput.data()); // docs/11 E51: the macros' boost, capped as applied
         if (config.sampleRate < 42000.0)
@@ -1107,7 +1238,7 @@ void ProcessingChain::applySafeSpeakerBassCap (float* e) const noexcept FLUB_NON
 
 void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
 {
-    static_assert (kHeadroomKeySize == kHeadroomParamCount + 3 + LoudnessContour::kNumSections);
+    static_assert (kHeadroomKeySize == kHeadroomParamCount + 4 + 10 * kNumModeBands + LoudnessContour::kNumSections);
     std::array<float, kHeadroomKeySize> key {};
     size_t k = 0;
     for (int id : kHeadroomScalarIds)
@@ -1119,6 +1250,17 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
         for (DynField f : kHeadroomDynFields)
             key[k++] = h[dyn (b, f)];
     key[k++] = surroundFold ? 1.0f : 0.0f;
+    // The dynamic EQ's mode bands as the mode policy sets them for the
+    // macros' ungoverned values (docs/11 E11; the tonal scale left out, as
+    // for presence and air).
+    std::array<DynEqBandParams, kNumModeBands> modeBands {};
+    modeBandParams (modeBands, static_cast<ModeValue> (idx (h, Mode)), h, config.sampleRate, modeTame, modeTameThresholdDb, 1.0f);
+    for (const DynEqBandParams& dp : modeBands)
+    {
+        for (float v : { dp.enabled ? 1.0f : 0.0f, static_cast<float> (dp.mode), static_cast<float> (dp.shape), dp.frequency, dp.q,
+                         dp.thresholdDb, dp.ratio, dp.rangeDb, dp.noiseFloorDb, dp.staticGainDb })
+            key[k++] = v;
+    }
     // The loudness contour's target (docs/11 E32): its sections and trim.
     for (int s = 0; s < LoudnessContour::kNumSections; ++s)
         key[k++] = contour.getTargetGainDb (s);
@@ -1131,7 +1273,12 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
         if (trim == 0.0f || std::abs (trim - warmthTrimModelDb) >= 0.25f)
             warmthTrimModelDb = trim;
     }
-    key[k] = warmthTrimModelDb;
+    key[k++] = warmthTrimModelDb;
+    // The programme level (docs/11 E11; trackProgrammeLevel()), in
+    // kProgrammeStepDb steps.
+    if (programmeHeldDb > kMinusInfDb && std::abs (programmeHeldDb - programmeDb) >= kProgrammeStepDb)
+        programmeDb = programmeHeldDb;
+    key[k] = programmeDb;
 
     const bool first = ! headroomKeyValid;
     if (! first && (key == headroomKey || headroomHoldoff > 0))
@@ -1140,29 +1287,78 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     headroomKeyValid = true;
     headroomHoldoff = std::max (1, static_cast<int> (kHeadroomUpdateMs * 0.001 * config.sampleRate));
 
-    buildStaticBoostModel (h, config.sampleRate, surroundFold, headroomModel);
     // The contour's lift net of its own trim (docs/11 E32): what it leaves
-    // in counts against the allowance like any other static boost.
-    {
-        std::array<SvfCoeffs, LoudnessContour::kNumSections> sections {};
-        const int count = contour.getTargetSections (sections.data());
-        for (int s = 0; s < count && headroomModel.numSections < StaticBoostModel::kMaxSections; ++s)
-            headroomModel.sections[static_cast<size_t> (headroomModel.numSections++)] = sections[static_cast<size_t> (s)];
-        headroomModel.gainDb += contour.getTargetTrimDb();
-    }
-    // The Warmth tilt's trim (docs/11 E14): on bass-heavy programme it
-    // already takes most of its sections' lift back.
-    headroomModel.gainDb += warmthTrimModelDb;
+    // in counts against the allowance like any other static boost. The
+    // Warmth tilt's trim (docs/11 E14): on bass-heavy programme it already
+    // takes most of its sections' lift back. The measured level is the
+    // folded one; the model's is the input's (its fold trim counts again).
+    std::array<SvfCoeffs, LoudnessContour::kNumSections> contourSections {};
+    BoostModelContext ctx;
+    ctx.preSections = contourSections.data();
+    ctx.numPreSections = contour.getTargetSections (contourSections.data());
+    ctx.preGainDb = static_cast<double> (contour.getTargetTrimDb()) + static_cast<double> (warmthTrimModelDb);
+    ctx.programmeDb = static_cast<double> (programmeDb) - (surroundFold ? 20.0 * std::log10 (static_cast<double> (Bs775Fold::kMatrixGain)) : 0.0);
+    ctx.modeBands = modeBands.data();
+    ctx.numModeBands = kNumModeBands;
+    modelProgrammeDb.store (programmeDb, std::memory_order_relaxed);
+    buildStaticBoostModel (h, config.sampleRate, surroundFold, headroomModel, ctx);
     const headroom::Prediction p = predictStaticBoost (headroomModel, headroom::Weighting::Programme);
-    const float preamp = on (h, AutoPreampOn) ? headroom::preampDb (p, h[AutoPreampAllowanceDb]) : 0.0f;
     predictedBoostDb.store (static_cast<float> (p.maxBoostDb), std::memory_order_relaxed);
     predictedBoostHz.store (static_cast<float> (p.atHz), std::memory_order_relaxed);
+    // The preamp makes room for the onsets, and the boosts that withdraw on
+    // loud programme (presence, the dynamic EQ, the bass protection) do so
+    // only after their detectors' attack: an onset still gets them in full.
+    // It therefore counts them at a quiet programme's size
+    // (kPreampQuietProgrammeDb); the compressor's net gain (its look-ahead
+    // meets the onsets) and the level-invariant terms as predicted.
+    float preamp = 0.0f;
+    double leftDb = p.maxBoostDb;
+    if (on (h, AutoPreampOn))
+    {
+        ctx.preampDb = std::min (0.0, kPreampQuietProgrammeDb - ctx.programmeDb);
+        buildStaticBoostModel (h, config.sampleRate, surroundFold, preampModel, ctx);
+        const headroom::Prediction q = predictStaticBoost (preampModel, headroom::Weighting::Programme);
+        preamp = headroom::preampDb (q, h[AutoPreampAllowanceDb]);
+        leftDb = q.maxBoostDb;
+    }
     staticPreampDb = preamp;
-    staticGainDb = static_cast<float> (p.maxBoostDb) + preamp; // what the allowance leaves in (hot programme)
+    staticGainDb = static_cast<float> (leftDb) + preamp; // what the allowance leaves in (hot programme)
     autoPreampDb.store (preamp + hotPreampDb, std::memory_order_relaxed);
     preampGain.setTarget (dbToGain (preamp + hotPreampDb));
     if (first)
         preampGain.setImmediate (preampGain.getTarget());
+}
+
+void ProcessingChain::trackProgrammeLevel (int n, bool contaminated) noexcept FLUB_NONBLOCKING
+{
+    // The loud parts' level (see the header comment), from the input's 3 s
+    // loudness once it has measured kProgrammeWarmSeconds since a reset.
+    programmeElapsed = std::min (programmeElapsed + n, static_cast<int> (kProgrammeSettledSeconds * config.sampleRate));
+    if (programmeWarmLeft > 0)
+    {
+        programmeWarmLeft = std::max (0, programmeWarmLeft - n);
+        return;
+    }
+    const float lufs = inLoudness.getLufs();
+    if (contaminated || ! (lufs > kProgrammeGateLufs))
+        return; // silence and muted blocks hold it
+    // The follower started from nothing at the reset: its reading of a
+    // steady programme is 1 - exp (-t / 3 s) of the programme's power.
+    const double settled = 1.0 - std::exp (-static_cast<double> (programmeElapsed) / (0.001 * kInLoudnessMs * config.sampleRate));
+    const float db = lufs - kPinkLufsOverRmsDb - static_cast<float> (10.0 * std::log10 (std::max (settled, 1.0e-3)));
+    if (db >= programmeHeldDb)
+    {
+        programmeHeldDb = db;
+        programmeHoldLeft = static_cast<int> (kProgrammeHoldSeconds * config.sampleRate);
+    }
+    else if (programmeHoldLeft > 0)
+    {
+        programmeHoldLeft = std::max (0, programmeHoldLeft - n);
+    }
+    else
+    {
+        programmeHeldDb = std::max (db, programmeHeldDb - kProgrammeReleaseDbPerSecond * static_cast<float> (n / config.sampleRate));
+    }
 }
 
 void ProcessingChain::updateHotPreamp (const AudioBlock& st, bool contaminated) noexcept FLUB_NONBLOCKING
@@ -1221,33 +1417,94 @@ void ProcessingChain::updateHotPreamp (const AudioBlock& st, bool contaminated) 
 
 double ProcessingChain::StaticBoostModel::responseDb (double freqHz) const noexcept FLUB_NONBLOCKING
 {
-    // |H|^2 of each SVF section at s = j W, W = tan (pi f / fs) / g (Svf.h):
-    //   H = (m0 (1 - W^2) + m2 + j (m0 k + m1) W) / (1 - W^2 + j k W)
-    const double t = std::tan (kPi * std::clamp (freqHz, 0.0, 0.4999 * sampleRate) / sampleRate);
-    double power = 1.0;
-    for (int i = 0; i < numSections; ++i)
+    const double f = std::clamp (freqHz, 0.0, 0.4999 * sampleRate);
+    const double t = std::tan (kPi * f / sampleRate);
+    double power = 1.0, post = 1.0;
+    const int split = harmPower > 0.0 ? std::clamp (harmSplit, 0, numSections) : numSections;
+    for (int i = 0; i < split; ++i)
+        power *= sectionPower (sections[static_cast<size_t> (i)], t);
+    for (int i = split; i < numSections; ++i)
+        post *= sectionPower (sections[static_cast<size_t> (i)], t);
+    if (harmPower > 0.0)
     {
-        const SvfCoeffs& c = sections[static_cast<size_t> (i)];
-        const double w = t / c.g, w2 = w * w;
-        const double m0 = c.m0, m1 = c.m1, m2 = c.m2;
-        const double nr = m0 * (1.0 - w2) + m2, ni = (m0 * c.k + m1) * w;
-        const double dr = 1.0 - w2, di = c.k * w;
-        power *= (nr * nr + ni * ni) / std::max (dr * dr + di * di, 1.0e-300);
+        // The harmonics add to what the stages before them pass.
+        double h = harmPower * std::min (1.0, std::pow (std::max (f, 1.0) / (kHarmonicsKnee * harmCutoffHz), -kHarmonicsFall));
+        for (const SvfCoeffs& c : harmBand)
+            h *= sectionPower (c, t);
+        power = power * std::pow (10.0, 0.1 * harmGainDb) + h;
+        post *= std::pow (10.0, 0.1 * (gainDb - harmGainDb));
     }
-    return gainDb + 10.0 * std::log10 (std::max (power, 1.0e-30));
+    else
+    {
+        post *= std::pow (10.0, 0.1 * gainDb);
+    }
+    power *= post;
+    if (xfeedFar > 0.0)
+    {
+        // A centred source through the crossfeed: near + far ear of one
+        // channel (the TPT head shadow is the bilinear 1 / (1 + j t / tc)).
+        const std::complex<double> lp = 1.0 / std::complex<double> (1.0, t / xfeedTan);
+        const std::complex<double> h = 1.0 - xfeedNearCut * lp + xfeedFar * std::polar (1.0, -2.0 * kPi * f * xfeedDelaySeconds) * lp;
+        power *= std::norm (h);
+    }
+    return 10.0 * std::log10 (std::max (power, 1.0e-30));
 }
 
+namespace
+{
+/** Pink noise's power through the model and `filters` (in series), relative
+    to its own (dB): pink has the same power in every octave, so this is the
+    mean of |H|^2 over a log-spaced grid (1/6 octave, 20 Hz .. 0.49 fs: the
+    band of the programme the terms are fitted on, pink noise high-passed at
+    20 Hz). RT-safe. */
+double pinkPowerDb (const ProcessingChain::StaticBoostModel& m, std::initializer_list<SvfCoeffs> filters) noexcept
+{
+    const double top = 0.49 * m.sampleRate, step = std::exp2 (1.0 / 6.0);
+    double sum = 0.0;
+    int count = 0;
+    for (double f = 20.0; f <= top; f *= step, ++count)
+    {
+        double p = std::pow (10.0, 0.1 * m.responseDb (f));
+        const double t = std::tan (kPi * f / m.sampleRate);
+        for (const SvfCoeffs& c : filters)
+            p *= sectionPower (c, t);
+        sum += p;
+    }
+    return 10.0 * std::log10 (std::max (sum / std::max (1, count), 1.0e-30));
+}
+} // namespace
+
 void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, bool surroundFold,
-                                             StaticBoostModel& m) noexcept FLUB_NONBLOCKING
+                                             StaticBoostModel& m, const BoostModelContext& ctx) noexcept FLUB_NONBLOCKING
 {
     m.sampleRate = sampleRate > 0.0 ? sampleRate : 48000.0;
     m.numSections = 0;
     m.gainDb = surroundFold ? 20.0 * std::log10 (static_cast<double> (Bs775Fold::kMatrixGain)) : 0.0;
+    m.xfeedNearCut = m.xfeedFar = m.xfeedDelaySeconds = 0.0;
+    m.xfeedTan = 1.0;
+    m.harmSplit = 0;
+    m.harmGainDb = m.harmPower = 0.0;
     const double sr = m.sampleRate;
     const auto add = [&m] (const SvfCoeffs& c) {
         if (m.numSections < StaticBoostModel::kMaxSections)
             m.sections[static_cast<size_t> (m.numSections++)] = c;
     };
+    // Ahead of every module: the loudness contour and the trims (docs/11
+    // E32, E14). The stages are added in the chain's order, so a level term
+    // reads what reaches its module.
+    for (int s = 0; s < ctx.numPreSections && ctx.preSections != nullptr; ++s)
+        add (ctx.preSections[s]);
+    m.gainDb += ctx.preGainDb;
+    if (e[WarmthTone] > 0.0f)
+    {
+        // The Warmth tilt's sections (docs/11 E14), ahead of the EQ; its level
+        // compensation follows the programme, so updateHeadroom() passes it
+        // as measured (preGainDb).
+        SvfCoeffs body, high;
+        ToneTilt::sections (e[WarmthTone], sr, body, high);
+        add (body);
+        add (high);
+    }
     const auto addButterworth = [&add, sr] (FilterType type, double hz, int numSections) {
         for (int s = 0; s < numSections; ++s)
             add (SvfCoeffs::make (type, hz, butterworthQ (numSections, s), 0.0, sr));
@@ -1275,11 +1532,65 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
     }
     if (on (e, DynEqOn))
     {
-        static constexpr FilterType shapes[] = { FilterType::Bell, FilterType::LowShelf, FilterType::HighShelf };
+        // The static gains, and the dynamic gains at the programme level
+        // (docs/11 E11): each band's computer on the peak level its detector
+        // reads of the module's input, averaged over the level's spread;
+        // the user bands 0 .. 3 and the mode bands the context carries (a
+        // CueLift band lifts onsets out of their background, never a
+        // steady programme).
+        static constexpr EqBandType shapes[] = { EqBandType::Bell, EqBandType::LowShelf, EqBandType::HighShelf };
+        std::array<DynEqBandParams, kDynEqBands + ProcessingChain::kNumModeBands> bands {};
+        int count = 0;
         for (int b = 0; b < kDynEqBands; ++b)
-            if (on (e, dyn (b, DynFieldOn)) && e[dyn (b, DynFieldStaticGain)] != 0.0f)
-                add (SvfCoeffs::make (shapes[std::clamp (idx (e, dyn (b, DynFieldShape)), 0, 2)], e[dyn (b, DynFieldFreq)],
-                                      e[dyn (b, DynFieldQ)], e[dyn (b, DynFieldStaticGain)], sr));
+        {
+            DynEqBandParams& dp = bands[static_cast<size_t> (count++)];
+            dp.enabled = on (e, dyn (b, DynFieldOn));
+            dp.mode = static_cast<DynEqMode> (idx (e, dyn (b, DynFieldMode)));
+            dp.shape = shapes[std::clamp (idx (e, dyn (b, DynFieldShape)), 0, 2)];
+            dp.frequency = e[dyn (b, DynFieldFreq)];
+            dp.q = e[dyn (b, DynFieldQ)];
+            dp.thresholdDb = e[dyn (b, DynFieldThreshold)];
+            dp.ratio = e[dyn (b, DynFieldRatio)];
+            dp.rangeDb = e[dyn (b, DynFieldRange)];
+            dp.staticGainDb = e[dyn (b, DynFieldStaticGain)];
+            dp.noiseFloorDb = e[dyn (b, DynFieldNoiseFloor)];
+        }
+        for (int b = 0; b < std::min (ctx.numModeBands, ProcessingChain::kNumModeBands) && ctx.modeBands != nullptr; ++b)
+            bands[static_cast<size_t> (count++)] = ctx.modeBands[b];
+        std::array<double, bands.size()> gains {};
+        for (int b = 0; b < count; ++b)
+        {
+            const DynEqBandParams& dp = bands[static_cast<size_t> (b)];
+            if (! dp.enabled)
+                continue;
+            double& g = gains[static_cast<size_t> (b)];
+            g = dp.staticGainDb;
+            if (dp.mode == DynEqMode::CueLift || ! (dp.rangeDb > 0.0f))
+                continue;
+            // The detector and its peak hold as DynamicEq::updateDetector()
+            // sets them (low shelf 25 ms, high shelf 4 periods, a bell two
+            // periods of its lower edge; 1 .. 25 ms).
+            const int shape = dp.shape == EqBandType::LowShelf ? 1 : dp.shape == EqBandType::HighShelf ? 2 : 0;
+            const double f = std::clamp (static_cast<double> (dp.frequency), 20.0, 0.49 * sr);
+            const double q = shape == 0 ? std::max (0.1, static_cast<double> (dp.q)) : std::min (static_cast<double> (dp.q), kButterworthQ2);
+            const double halfBw = 0.5 / q;
+            const double hold = std::clamp (shape == 1 ? 0.025 : shape == 2 ? 4.0 / f : 2.0 / (f * (std::sqrt (1.0 + halfBw * halfBw) - halfBw)),
+                                            0.001, 0.025);
+            static constexpr FilterType detectors[] = { FilterType::BandPass, FilterType::LowPass, FilterType::HighPass };
+            const double w = std::log (hold / 0.001) / std::log (25.0);
+            const double level = ctx.programmeDb + ctx.preampDb + kDynEqShortHoldCrestDb + w * (kDynEqLongHoldCrestDb - kDynEqShortHoldCrestDb)
+                                 + pinkPowerDb (m, { SvfCoeffs::make (detectors[shape], f, q, 0.0, sr) });
+            g += dynamicGainDb (dp.mode, level, kDynEqShortHoldSpreadDb + w * (kDynEqLongHoldSpreadDb - kDynEqShortHoldSpreadDb), dp.thresholdDb,
+                                dp.ratio, dp.rangeDb, dp.noiseFloorDb);
+        }
+        for (int b = 0; b < count; ++b)
+        {
+            const DynEqBandParams& dp = bands[static_cast<size_t> (b)];
+            if (gains[static_cast<size_t> (b)] != 0.0)
+                add (SvfCoeffs::make (dp.shape == EqBandType::LowShelf ? FilterType::LowShelf : dp.shape == EqBandType::HighShelf ? FilterType::HighShelf
+                                                                                                                                 : FilterType::Bell,
+                                      dp.frequency, dp.q, gains[static_cast<size_t> (b)], sr));
+        }
     }
     if (on (e, BassOn))
     {
@@ -1287,24 +1598,73 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
             addButterworth (FilterType::HighPass, std::clamp (static_cast<double> (e[BassSubsonic]), 10.0, 40.0),
                             idx (e, BassSubsonicOrder) == static_cast<int> (SubsonicOrderValue::Slope12) ? 1 : 2);
         if (e[BassBoostDb] > 0.0f)
-            add (SvfCoeffs::make (FilterType::LowShelf, std::clamp (static_cast<double> (e[BassBoostFreq]), 30.0, 200.0), kBassShelfQ,
-                                  std::min (static_cast<double> (e[BassBoostDb]), kBassMaxBoostDb), sr));
+        {
+            // The boost less the headroom protection's withdrawal at the
+            // programme level (docs/11 E11; BassEngine.cpp's classic
+            // detector: the LF peak after the boost against bass.protect,
+            // 6 dB soft knee), averaged over the held peak's spread.
+            const double hz = std::clamp (static_cast<double> (e[BassBoostFreq]), 30.0, 200.0);
+            const double boost = std::min (static_cast<double> (e[BassBoostDb]), kBassMaxBoostDb);
+            const double level = ctx.programmeDb + ctx.preampDb + kBassProtectCrestDb
+                                 + pinkPowerDb (m, { SvfCoeffs::make (FilterType::LowPass, std::max (150.0, 1.5 * hz), kButterworthQ2, 0.0, sr) });
+            const double withdraw = protectionWithdrawDb (level + boost - e[BassProtectDb], boost);
+            if (boost - withdraw > 0.0)
+                add (SvfCoeffs::make (FilterType::LowShelf, hz, kBassShelfQ, boost - withdraw, sr));
+        }
+        const double cutoff = std::clamp (static_cast<double> (e[BassHarmonicsCutoff]), 40.0, 250.0);
+        if (e[BassHarmonics] > 0.0f)
+        {
+            // The harmonics of the mid's 25 Hz .. cutoff band (BassEngine.cpp:
+            // HP2 25 Hz, LP4 cutoff in; HP2 cutoff, LP4 6 cutoff out).
+            const SvfCoeffs out[] = { SvfCoeffs::make (FilterType::HighPass, cutoff, kButterworthQ2, 0.0, sr),
+                                      SvfCoeffs::make (FilterType::LowPass, 6.0 * cutoff, butterworthQ (2, 0), 0.0, sr),
+                                      SvfCoeffs::make (FilterType::LowPass, 6.0 * cutoff, butterworthQ (2, 1), 0.0, sr) };
+            const double sourceDb = pinkPowerDb (m, { SvfCoeffs::make (FilterType::HighPass, 25.0, kButterworthQ2, 0.0, sr),
+                                                      SvfCoeffs::make (FilterType::LowPass, cutoff, butterworthQ (2, 0), 0.0, sr),
+                                                      SvfCoeffs::make (FilterType::LowPass, cutoff, butterworthQ (2, 1), 0.0, sr) });
+            StaticBoostModel unity;
+            unity.sampleRate = sr;
+            const double bandDb = pinkPowerDb (unity, { out[0], out[1], out[2] });
+            const double amount = std::min (1.0, static_cast<double> (e[BassHarmonics]));
+            m.harmPower = kHarmonicsPower * std::pow (amount, kHarmonicsExponent) * std::pow (10.0, 0.1 * (sourceDb - bandDb));
+            m.harmCutoffHz = cutoff;
+            m.harmBand = { out[0], out[1], out[2] };
+        }
+        // Small Speaker Mode: the original loses what is below the cutoff
+        // (HP4); the harmonics stand in for it.
+        if (on (e, BassReplaceFundamental))
+            addButterworth (FilterType::HighPass, cutoff, 2);
+        m.harmSplit = m.numSections;
+        m.harmGainDb = m.gainDb;
     }
     if (on (e, ClarityOn))
     {
         if (e[ClarityPresence] > 0.0f)
-            add (SvfCoeffs::make (FilterType::Bell, e[ClarityPresenceFreq], kPresenceQ, kPresenceMaxDb * e[ClarityPresence], sr));
+        {
+            // Presence at the programme level (docs/11 E11): the lift its law
+            // gives the band that reaches it - Absolute on the band's level,
+            // Relative on its balance over the body (level-invariant).
+            const double hz = e[ClarityPresenceFreq];
+            const SvfCoeffs band = SvfCoeffs::make (FilterType::BandPass, hz, kPresenceQ, 0.0, sr);
+            const double bandDb = ctx.programmeDb + ctx.preampDb + pinkPowerDb (m, { band });
+            double lift = 0.0;
+            if (idx (e, ClarityPresenceMode) == static_cast<int> (PresenceModeValue::Relative))
+            {
+                const double bodyDb = ctx.programmeDb + ctx.preampDb
+                                      + pinkPowerDb (m, { SvfCoeffs::make (FilterType::HighPass, kPresenceBodyLowHz, kButterworthQ2, 0.0, sr),
+                                                          SvfCoeffs::make (FilterType::LowPass, kPresenceBodyHighHz, kButterworthQ2, 0.0, sr) });
+                lift = (kPresenceRelativeDb - (bandDb - bodyDb + kPresenceBalanceBiasDb)) * kPresenceSlope;
+            }
+            else
+            {
+                lift = (kPresenceThresholdDb - (bandDb + kPresenceLevelBiasDb)) * kPresenceSlope;
+            }
+            lift = std::clamp (lift, 0.0, kPresenceMaxDb) * std::clamp ((bandDb - kPresenceFloorDb) / 10.0, 0.0, 1.0);
+            if (lift > 0.0)
+                add (SvfCoeffs::make (FilterType::Bell, hz, kPresenceQ, lift * e[ClarityPresence], sr));
+        }
         if (e[ClarityAir] > 0.0f)
             add (SvfCoeffs::make (FilterType::HighShelf, kAirShelfHz, kAirShelfQ, kAirShelfMaxDb * e[ClarityAir], sr));
-    }
-    if (e[WarmthTone] > 0.0f)
-    {
-        // The Warmth tilt's sections (docs/11 E14); its level compensation
-        // follows the programme, so updateHeadroom() adds it as measured.
-        SvfCoeffs body, high;
-        ToneTilt::sections (e[WarmthTone], sr, body, high);
-        add (body);
-        add (high);
     }
     if (on (e, SaturationOn))
     {
@@ -1312,6 +1672,76 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
         const double mix = std::clamp (static_cast<double> (e[SatMix]), 0.0, 1.0);
         m.gainDb += 20.0 * std::log10 (std::max (1.0 - mix + mix * std::pow (10.0, e[SatOutputDb] / 20.0), 1.0e-6));
     }
+    if (on (e, SpatialOn) && e[SpatialCrossfeed] > 0.0f
+        && idx (e, SpatialCrossfeedType) != static_cast<int> (CrossfeedTypeValue::MonoSafe))
+    {
+        // The Bs2b / Meier crossfeed sums a centred source coherently at low
+        // frequencies (up to +2.7 dB at crossfeed 1); width, focus, space and
+        // Mono-safe act on the side signal only.
+        const bool meier = idx (e, SpatialCrossfeedType) == static_cast<int> (CrossfeedTypeValue::Meier);
+        const double r = std::clamp (static_cast<double> (e[SpatialCrossfeed]), 0.0, 1.0) * std::pow (10.0, -0.05 * (meier ? kXfeedMeierDb : kXfeedBs2bDb));
+        const double n0 = 1.0 / std::sqrt (1.0 + r * r);
+        m.xfeedNearCut = 1.0 - n0;
+        m.xfeedFar = r * n0;
+        m.xfeedTan = std::tan (kPi * (meier ? kXfeedMeierHz : kXfeedBs2bHz) / sr);
+        m.xfeedDelaySeconds = kXfeedItdSeconds;
+    }
+    if (on (e, CompressorOn))
+    {
+        // The compressor's net gain at the programme level (docs/11 E11):
+        // make-up minus the reduction its curve gives the held peak of what
+        // reaches its sidechain, mixed with the dry path.
+        CompressorParams kp;
+        kp.thresholdDb = e[CompThresholdDb];
+        kp.ratio = e[CompRatio];
+        kp.kneeDb = e[CompKneeDb];
+        kp.makeupDb = e[CompMakeupDb];
+        kp.autoMakeup = on (e, CompAutoMakeup);
+        kp.sidechainHpHz = e[CompSidechainHp];
+        kp.mix = e[CompMix];
+        kp.upThresholdDb = e[CompUpThresholdDb];
+        kp.upRatio = e[CompUpRatio];
+        kp.upMaxGainDb = e[CompUpMaxGainDb];
+        kp.upFloorDb = e[CompUpFloorDb];
+        kp.upRelativeFloor = static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Gaming;
+        const double scDb = kp.sidechainHpHz > 0.0f
+                                ? pinkPowerDb (m, { SvfCoeffs::make (FilterType::HighPass, kp.sidechainHpHz, kButterworthQ2, 0.0, sr) })
+                                : pinkPowerDb (m, {});
+        const double ride = std::max (0.0, (1.0 - 1.0 / std::max (1.0, static_cast<double> (e[CompRatio])))
+                                               * std::log (std::max (1.0, static_cast<double> (e[CompReleaseMs]))
+                                                           / std::max (0.1, static_cast<double> (e[CompAttackMs])))
+                                           - kCompressorHoldKnee);
+        const auto level = static_cast<float> (ctx.programmeDb + scDb + kCompressorCrestDb + kCompressorHoldSlope * ride);
+        // A steady programme is its own background (the relative floor's).
+        const float curveDb = Compressor::computeGainDb (kp, level, level);
+        const float makeupDb = kp.autoMakeup ? std::clamp (-0.5f * Compressor::computeGainDb (kp, 0.0f), 0.0f, 24.0f)
+                                             : std::clamp (kp.makeupDb, -12.0f, 24.0f);
+        const double mix = std::clamp (static_cast<double> (kp.mix), 0.0, 1.0);
+        m.gainDb += 20.0 * std::log10 (std::max (1.0 - mix + mix * std::pow (10.0, (curveDb + makeupDb) / 20.0), 1.0e-6));
+    }
+}
+
+void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, bool surroundFold,
+                                             StaticBoostModel& m) noexcept FLUB_NONBLOCKING
+{
+    buildStaticBoostModel (e, sampleRate, surroundFold, m, BoostModelContext {});
+}
+
+void ProcessingChain::buildHeadroomModel (StaticBoostModel& model, double level) const noexcept
+{
+    const bool surroundFold = config.inputChannels > 2 && ! stereoFoldFor (effective.data(), inputDetector.getFold());
+    std::array<SvfCoeffs, LoudnessContour::kNumSections> contourSections {};
+    std::array<DynEqBandParams, kNumModeBands> modeBands {};
+    modeBandParams (modeBands, static_cast<ModeValue> (idx (effective.data(), Mode)), effective.data(), config.sampleRate, modeTame,
+                    modeTameThresholdDb, 1.0f);
+    BoostModelContext ctx;
+    ctx.programmeDb = level;
+    ctx.preSections = contourSections.data();
+    ctx.numPreSections = contour.getTargetSections (contourSections.data());
+    ctx.preGainDb = static_cast<double> (contour.getTargetTrimDb()) + static_cast<double> (warmthTrimModelDb);
+    ctx.modeBands = modeBands.data();
+    ctx.numModeBands = kNumModeBands;
+    buildStaticBoostModel (effective.data(), config.sampleRate, surroundFold, model, ctx);
 }
 
 headroom::Prediction ProcessingChain::predictStaticBoost (const StaticBoostModel& m, headroom::Weighting weighting) noexcept FLUB_NONBLOCKING
@@ -1815,6 +2245,7 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
 
     inLevel.process (st);
     inLoudness.process (st);
+    trackProgrammeLevel (n, contaminated); // the automatic preamp's programme level (docs/11 E11)
     // The bed-lift budget (docs/11 E19 step 3, see the header comment):
     // the input's short-term level, and whether this is the programme's bed
     // (not an event: a 400 ms loudness more than kBedEventLu over the

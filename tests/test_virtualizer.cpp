@@ -4,11 +4,15 @@
 #include "TestSignals.h"
 
 #include "flub/analysis/LoudnessMeter.h"
+#include "flub/analysis/SpatialMetrics.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
 #include "flub/dsp/TruePeakDetector.h"
+#include "flub/engine/Parameters.h"
+#include "flub/engine/ProcessingChain.h"
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -561,6 +565,8 @@ TEST_CASE ("HeadphoneVirtualizer: no allocation in reset / setParams / process")
             p.roomAmount = 0.1f * static_cast<float> (b % 5);
             p.lfeGainDb = static_cast<float> (b) - 6.0f;
             p.layout = b == 5 ? ChannelLayout::Surround51 : (b == 8 ? ChannelLayout::Stereo : ChannelLayout::Surround71);
+            p.renderer = b % 4 < 2 ? VirtualizerRenderer::Enhanced : VirtualizerRenderer::Classic; // docs/11 E28
+            p.frontBack = 0.1f * static_cast<float> (b % 7);
             v.setParams (p);
             v.process (buf.block (b * 512, b == 3 ? 17 : 512));
         }
@@ -581,12 +587,16 @@ TEST_CASE ("HeadphoneVirtualizer: robustness - silence, DC, full-scale noise, im
     extremes[1].headRadiusMm = 0.0f;
     extremes[1].roomAmount = -5.0f;
     extremes[1].lfeGainDb = -inf;
+    extremes[1].renderer = VirtualizerRenderer::Enhanced; // docs/11 E28: the direction cues, at no contrast
+    extremes[1].frontBack = -inf;
     extremes[2].frontAngleDeg = inf; // ... and the maximum
     extremes[2].sideAngleDeg = 1000.0f;
     extremes[2].rearAngleDeg = 720.0f;
     extremes[2].headRadiusMm = 1.0e9f;
     extremes[2].roomAmount = 100.0f;
     extremes[2].lfeGainDb = 100.0f;
+    extremes[2].renderer = VirtualizerRenderer::Enhanced; // ... and at twice the nominal contrast
+    extremes[2].frontBack = inf;
     extremes[3].frontAngleDeg = nan; // ... or the defaults
     extremes[3].sideAngleDeg = nan;
     extremes[3].rearAngleDeg = nan;
@@ -594,6 +604,8 @@ TEST_CASE ("HeadphoneVirtualizer: robustness - silence, DC, full-scale noise, im
     extremes[3].roomAmount = nan;
     extremes[3].lfeGainDb = nan;
     extremes[3].layout = static_cast<ChannelLayout> (200);
+    extremes[3].renderer = static_cast<VirtualizerRenderer> (200); // an unknown renderer is Classic
+    extremes[3].frontBack = nan;
 
     for (double fs : { 44100.0, 48000.0, 96000.0, 192000.0 })
         for (const auto& p : extremes)
@@ -603,6 +615,8 @@ TEST_CASE ("HeadphoneVirtualizer: robustness - silence, DC, full-scale noise, im
             const auto& got = v.getParams();
             CHECK (std::isfinite (got.frontAngleDeg) && std::isfinite (got.headRadiusMm) && std::isfinite (got.lfeGainDb));
             CHECK (got.roomAmount >= 0.0f && got.roomAmount <= 1.0f);
+            CHECK (got.frontBack >= 0.0f && got.frontBack <= 1.0f);
+            CHECK ((got.renderer == VirtualizerRenderer::Classic || got.renderer == VirtualizerRenderer::Enhanced));
 
             const int n = 8192;
             // Silence stays exactly silent.
@@ -1245,17 +1259,20 @@ TEST_CASE ("HeadphoneVirtualizer [adversarial]: absurd sample rates in prepare()
 TEST_CASE ("HeadphoneVirtualizer [adversarial]: tiny inputs decay to exact zero at every rate (no subnormal crawl)")
 {
     for (double fs : { 44100.0, 192000.0 })
-    {
-        HeadphoneVirtualizer v;
-        setUp (v, paramsFor (ChannelLayout::Surround71, 1.0f), fs, 4096);
-        const int n = static_cast<int> (fs);
-        auto buf = noiseOnAll (8, n, 1.0e-20f, false, 61);
-        for (auto& c : buf.ch)
-            std::fill (c.begin() + n / 4, c.end(), 0.0f);
-        processInBlocks (v, buf, 4096);
-        for (int e = 0; e < 2; ++e)
-            CHECK (peakAbs (buf.ch[static_cast<size_t> (e)].data() + n - 4096, 4096) == 0.0);
-    }
+        for (auto renderer : { VirtualizerRenderer::Classic, VirtualizerRenderer::Enhanced })
+        {
+            HeadphoneVirtualizer v;
+            auto p = paramsFor (ChannelLayout::Surround71, 1.0f);
+            p.renderer = renderer;
+            setUp (v, p, fs, 4096);
+            const int n = static_cast<int> (fs);
+            auto buf = noiseOnAll (8, n, 1.0e-20f, false, 61);
+            for (auto& c : buf.ch)
+                std::fill (c.begin() + n / 4, c.end(), 0.0f);
+            processInBlocks (v, buf, 4096);
+            for (int e = 0; e < 2; ++e)
+                CHECK (peakAbs (buf.ch[static_cast<size_t> (e)].data() + n - 4096, 4096) == 0.0);
+        }
 }
 
 TEST_CASE ("HeadphoneVirtualizer [adversarial]: switching renderer (HRIR 7.1 -> parametric stereo) is click-free")
@@ -1569,4 +1586,344 @@ TEST_CASE ("HeadphoneVirtualizer: switching the level match and the fold headroo
             CHECK_LE (atOn, 1.25 * std::max (steadyOn, steadyOff));
         }
     }
+}
+
+//==============================================================================
+// Enhanced renderer (docs/11 E28): an angle-continuous pinna notch, Blauert's
+// directional bands and a lateral timbre match instead of the rear shelf.
+// Measured with flub/analysis/SpatialMetrics.h (docs/11 E60 stage 2) on the
+// module's own impulse responses, 7.1 at the defaults.
+namespace
+{
+constexpr int kIrLength = 12000; // 250 ms: every response of the renderer ends well inside
+
+BinauralIrMetrics speakerIr (VirtualizerRenderer renderer, int channel, float room = 0.15f, float frontBack = 0.5f)
+{
+    VirtualizerParams p;
+    p.renderer = renderer;
+    p.frontBack = frontBack;
+    p.roomAmount = room;
+    return analyseBinauralIr (virtualizerResponse (p, 1u << channel, kFs, kIrLength), kFs);
+}
+
+size_t bandAt (const BinauralIrMetrics& m, double hz)
+{
+    return static_cast<size_t> (std::find (m.bandsHz.begin(), m.bandsHz.end(), hz) - m.bandsHz.begin());
+}
+
+/** FL - BL at the near (left) ear in a 1/3-octave band, dB. */
+double frontMinusRearDb (VirtualizerRenderer renderer, double hz, float frontBack = 0.5f)
+{
+    const auto fl = speakerIr (renderer, FL, 0.15f, frontBack), bl = speakerIr (renderer, BL, 0.15f, frontBack);
+    return fl.leftDb[bandAt (fl, hz)] - bl.leftDb[bandAt (bl, hz)];
+}
+
+struct CentreTilt
+{
+    double tiltDb = 0.0;                 // least-squares line of FC - sides over 100 Hz .. 16 kHz, end to end
+    double worstDb = 0.0, worstHz = 0.0; // the largest |FC - sides| of one band
+};
+
+/** FC against the mean of SL and SR, both ears' power per 1/3 octave. */
+CentreTilt centreTilt (VirtualizerRenderer renderer)
+{
+    const auto fc = speakerIr (renderer, FC), sl = speakerIr (renderer, SL), sr = speakerIr (renderer, SR);
+    const auto both = [] (const BinauralIrMetrics& m, size_t b)
+    { return 10.0 * std::log10 (std::pow (10.0, 0.1 * m.leftDb[b]) + std::pow (10.0, 0.1 * m.rightDb[b])); };
+    std::vector<double> x, d;
+    CentreTilt t;
+    for (size_t b = 0; b < fc.bandsHz.size(); ++b)
+    {
+        if (fc.bandsHz[b] < 100.0 || fc.bandsHz[b] > 16000.0)
+            continue;
+        const double v = both (fc, b) - 0.5 * (both (sl, b) + both (sr, b));
+        x.push_back (std::log2 (fc.bandsHz[b]));
+        d.push_back (v);
+        if (std::abs (v) > std::abs (t.worstDb))
+        {
+            t.worstDb = v;
+            t.worstHz = fc.bandsHz[b];
+        }
+    }
+    double mx = 0.0, md = 0.0;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        mx += x[i] / static_cast<double> (x.size());
+        md += d[i] / static_cast<double> (x.size());
+    }
+    double sxy = 0.0, sxx = 0.0;
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        sxy += (x[i] - mx) * (d[i] - md);
+        sxx += (x[i] - mx) * (x[i] - mx);
+    }
+    t.tiltDb = sxy / sxx * (x.back() - x.front());
+    return t;
+}
+} // namespace
+
+TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all four directional bands, FC vs sides tilt within 1 dB, the sphere's ITD and ILD kept (docs/11 E28)")
+{
+    constexpr auto classic = VirtualizerRenderer::Classic, enhanced = VirtualizerRenderer::Enhanced;
+    // Blauert's directional bands, with the sign they should have: the front
+    // bands (4 and 16 kHz) louder for FL, the rear bands (1 and 10 kHz) louder
+    // for BL, at the near ear. Classic: only 16 kHz qualifies (its 10 kHz
+    // difference has the front's sign: the rear shelf darkens BL there).
+    struct Band
+    {
+        double hz, sign, classicDb, enhancedDb;
+    };
+    const Band bands[] = { { 1000.0, -1.0, 0.31, 3.34 }, { 4000.0, 1.0, 1.46, 7.15 }, { 10000.0, -1.0, -3.52, 4.10 }, { 16000.0, 1.0, 4.27, 4.31 } };
+    int classicMet = 0, enhancedMet = 0;
+    for (const auto& b : bands)
+    {
+        const double c = b.sign * frontMinusRearDb (classic, b.hz), e = b.sign * frontMinusRearDb (enhanced, b.hz);
+        std::cout << "    measured " << b.hz << " Hz: FL vs BL near ear (" << (b.sign > 0 ? "front" : "rear") << " band) " << c << " -> " << e << " dB\n";
+        CHECK_NEAR (c, b.classicDb, 0.1);
+        CHECK_NEAR (e, b.enhancedDb, 0.1);
+        classicMet += c >= 3.0 ? 1 : 0;
+        enhancedMet += e >= 3.0 ? 1 : 0;
+        // frontBack scales the bands: 0 leaves none of them (the timbre match
+        // and the notch are common to both), 1 doubles them.
+        CHECK (b.sign * frontMinusRearDb (enhanced, b.hz, 0.0f) < 1.0);
+        CHECK (b.sign * frontMinusRearDb (enhanced, b.hz, 1.0f) > 1.5 * e);
+    }
+    CHECK (classicMet == 1);
+    CHECK (enhancedMet == 4); // Done-when: >= 3 dB in >= 2 directional bands
+
+    // Centre timbre: FC against the sides, both ears' power per 1/3 octave.
+    // The least-squares line over 100 Hz .. 16 kHz (Done-when: within 1 dB)
+    // -2.78 -> -0.57 dB; the largest single band -3.82 dB at 2.5 kHz ->
+    // -3.42 dB at 8 kHz (the pinna notch sits 0.1 octave lower behind, where
+    // the sides are 100 deg round).
+    const auto ct = centreTilt (classic), et = centreTilt (enhanced);
+    std::cout << "    measured FC vs sides: tilt " << ct.tiltDb << " -> " << et.tiltDb << " dB, largest band " << ct.worstDb << " dB at "
+              << ct.worstHz << " Hz -> " << et.worstDb << " dB at " << et.worstHz << " Hz\n";
+    CHECK_NEAR (ct.tiltDb, -2.78, 0.1);
+    CHECK (std::abs (et.tiltDb) <= 1.0);
+    CHECK_NEAR (et.tiltDb, -0.57, 0.1);
+    CHECK_NEAR (et.worstDb, -3.42, 0.1);
+    CHECK (et.worstHz == 8000.0);
+
+    // The cues are common to both ears (before the ITD line), so the sphere's
+    // interaural cues are untouched: dry, every speaker keeps its ITD and,
+    // frequency by frequency, its ILD |H_R / H_L| (1/3-octave band levels
+    // would not: the cues re-weight the ILD's slope inside a band).
+    const auto ildDb = [] (const BinauralIr& ir, double hz)
+    {
+        std::complex<double> l, r;
+        for (size_t i = 0; i < ir.left.size(); ++i)
+        {
+            const auto z = std::polar (1.0, -kTwoPi * hz * static_cast<double> (i) / kFs);
+            l += static_cast<double> (ir.left[i]) * z;
+            r += static_cast<double> (ir.right[i]) * z;
+        }
+        return 20.0 * std::log10 (std::abs (r) / std::abs (l));
+    };
+    for (int c : { FL, FC, BL, SL })
+    {
+        CHECK (speakerIr (classic, c, 0.0f).itdMs == speakerIr (enhanced, c, 0.0f).itdMs);
+        VirtualizerParams p;
+        p.roomAmount = 0.0f;
+        const auto a = virtualizerResponse (p, 1u << c, kFs, 1024);
+        p.renderer = enhanced;
+        const auto b = virtualizerResponse (p, 1u << c, kFs, 1024);
+        double worst = 0.0;
+        for (double hz = 100.0; hz < 16000.0; hz *= 1.2)
+            worst = std::max (worst, std::abs (ildDb (a, hz) - ildDb (b, hz)));
+        CHECK (worst < 0.001);
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a correlated 7-speaker impulse and the diffuse field (docs/11 E28, pinned)")
+{
+    // The same impulse on all seven speakers, dry: 28.06 -> 18.88 dB peak to
+    // notch in 4 - 8 kHz at each ear. The Done-when's < 12 dB is NOT met: the
+    // comb is the sum of seven near-equal paths at up to 0.6 ms apart at one
+    // ear (FC against FL alone combs 11 dB at 3.9 kHz), and only a much
+    // larger level difference between directions would flatten it (a grid of
+    // per-direction HF gains needs about 18 dB between centre / sides and
+    // front / rear to reach 12 dB), which the centre-timbre row forbids.
+    VirtualizerParams dry;
+    dry.roomAmount = 0.0f;
+    const auto classicAll = virtualizerResponse (dry, 0xF7u, kFs, kIrLength);
+    dry.renderer = VirtualizerRenderer::Enhanced;
+    const auto enhancedAll = virtualizerResponse (dry, 0xF7u, kFs, kIrLength);
+    const double c = peakToNotchDb (classicAll.left, kFs, 4000.0, 8000.0), e = peakToNotchDb (enhancedAll.left, kFs, 4000.0, 8000.0);
+    std::cout << "    measured 4-8 kHz peak to notch, 7 correlated speakers: " << c << " -> " << e << " dB\n";
+    CHECK_NEAR (c, 28.06, 0.1);
+    CHECK_NEAR (e, 18.88, 0.1);
+    CHECK_NEAR (peakToNotchDb (enhancedAll.right, kFs, 4000.0, 8000.0), e, 0.01); // left / right symmetric
+
+    // What it costs: the seven speakers' diffuse field is less flat (the
+    // notch and the bands are not diffuse-field equalised; that inverse is
+    // the next E28 stage): range 3.52 -> 7.19 dB.
+    std::vector<BinauralIr> irs;
+    VirtualizerParams p;
+    p.renderer = VirtualizerRenderer::Enhanced;
+    for (int ch : { 0, 1, 2, 4, 5, 6, 7 })
+        irs.push_back (virtualizerResponse (p, 1u << ch, kFs, kIrLength));
+    const auto df = diffuseField (irs, kFs);
+    std::cout << "    measured diffuse field of the 7 speakers (Enhanced): range " << df.rangeDb << " dB, rms " << df.rmsDeviationDb << " dB\n";
+    CHECK_NEAR (df.rangeDb, 7.19, 0.1);
+}
+
+TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - the level match keeps virt on vs off within 0.5 LU for 5.1 / 7.1 pink, correlated or not (docs/11 E28)")
+{
+    // As the E28a case above (-30 dBFS pink on every speaker, room 0.15,
+    // loudness over 3 .. 6 s), with the Enhanced renderer.
+    const int n = static_cast<int> (6.0 * kFs), from = static_cast<int> (3.0 * kFs);
+    for (auto layout : { ChannelLayout::Surround51, ChannelLayout::Surround71 })
+        for (bool correlated : { true, false })
+        {
+            const Planar in = pinkOnSpeakers (layout, n, correlated);
+            HeadphoneVirtualizer v;
+            auto p = matchedFor (layout);
+            p.renderer = VirtualizerRenderer::Enhanced;
+            setUp (v, p, kFs, 512, channelCount (layout));
+            Planar out = in;
+            processInBlocks (v, out, 512);
+            const double diff = kPowerDb (out, from) - kPowerDb (downmixOf (in), from);
+            std::cout << "    measured Enhanced " << (layout == ChannelLayout::Surround51 ? "5.1" : "7.1") << (correlated ? " correlated" : " uncorrelated")
+                      << ": virt re downmix " << diff << " LU (diffuse " << v.getDiffuseMakeupDb() << " dB, make-up " << v.getMakeupDb() << " dB)\n";
+            CHECK_LE (std::abs (diff), 0.5);
+        }
+}
+
+TEST_CASE ("HeadphoneVirtualizer: Classic is the default and ignores frontBack bit for bit; switching the renderer glides without a click and lands on the target design (docs/11 E28)")
+{
+    CHECK (VirtualizerParams {}.renderer == VirtualizerRenderer::Classic);
+    CHECK (VirtualizerParams {}.frontBack == 0.5f);
+
+    // A 3 kHz tone on FC, BL and SL (where the cues act), 7.1, room 0.15.
+    const int n = static_cast<int> (1.5 * kFs);
+    const auto tone = sine (3000.0, kFs, n, 0.3f);
+    const auto source = [&]
+    {
+        Planar buf (8, n);
+        for (int c : { FC, BL, SL })
+            fill (buf, c, tone);
+        return buf;
+    };
+    const auto run = [&] (const std::vector<std::pair<int, VirtualizerParams>>& changes, const VirtualizerParams& start)
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, start);
+        Planar buf = source();
+        size_t next = 0;
+        for (int pos = 0; pos < n; pos += 96)
+        {
+            while (next < changes.size() && changes[next].first <= pos)
+                v.setParams (changes[next++].second);
+            v.process (buf.block (pos, std::min (96, n - pos)));
+        }
+        return buf;
+    };
+    auto classic = paramsFor (ChannelLayout::Surround71, 0.15f), enhanced = classic;
+    enhanced.renderer = VirtualizerRenderer::Enhanced;
+
+    // Classic: frontBack does nothing, set at the start or moved mid-stream.
+    const Planar reference = run ({}, classic);
+    auto wide = classic;
+    wide.frontBack = 1.0f;
+    auto none = classic;
+    none.frontBack = 0.0f;
+    CHECK (run ({}, wide).ch == reference.ch);
+    CHECK (run ({ { 24000, none }, { 48000, wide } }, classic).ch == reference.ch);
+
+    // Classic -> Enhanced at 0.5 s -> Classic at 1 s: the largest sample step
+    // around each switch stays within 1.25x the steady maximum of the louder
+    // side, and the output lands on a module started in the target.
+    const int toEnhanced = 24000, toClassic = 48000;
+    const Planar switched = run ({ { toEnhanced, enhanced }, { toClassic, classic } }, classic);
+    const Planar steadyEnhanced = run ({}, enhanced);
+    for (size_t e = 0; e < 2; ++e)
+    {
+        const auto& y = switched.ch[e];
+        const double classicStep = largestStep (y, toEnhanced - 9600, toEnhanced), enhancedStep = largestStep (y, toClassic - 9600, toClassic);
+        const double atEnhanced = largestStep (y, toEnhanced, toEnhanced + 4800), atClassic = largestStep (y, toClassic, toClassic + 4800);
+        std::cout << "    measured renderer switch ear " << e << ": steady steps " << classicStep << " / " << enhancedStep << ", at the switches "
+                  << atEnhanced << " / " << atClassic << "\n";
+        CHECK_LE (atEnhanced, 1.25 * std::max (classicStep, enhancedStep));
+        CHECK_LE (atClassic, 1.25 * std::max (classicStep, enhancedStep));
+        CHECK (maxAbsDiff (std::vector<float> (y.begin() + toEnhanced, y.begin() + toClassic), std::vector<float> (steadyEnhanced.ch[e].begin() + toEnhanced, steadyEnhanced.ch[e].begin() + toClassic), 12000) <= 1e-4);
+        CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 12000) <= 1e-4);
+    }
+
+    // Enhanced with frontBack moved mid-stream glides too.
+    auto enhancedWide = enhanced;
+    enhancedWide.frontBack = 1.0f;
+    const Planar moved = run ({ { toEnhanced, enhancedWide } }, enhanced);
+    for (size_t e = 0; e < 2; ++e)
+    {
+        const auto& y = moved.ch[e];
+        CHECK_LE (largestStep (y, toEnhanced, toEnhanced + 4800), 1.25 * std::max (largestStep (y, 4800, toEnhanced), largestStep (y, n - 9600, n)));
+    }
+}
+
+TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - bit-exact under random block partitions with renderer switches, and the chain hands virt.renderer / virt.frontBack over (docs/11 E28)")
+{
+    // Module: the same switches at the same stream positions, any partition.
+    const int n = 48000;
+    const auto input = noiseOnAll (8, n, 0.2f, true, 91);
+    auto classic = paramsFor (ChannelLayout::Surround71, 0.3f), enhanced = classic;
+    enhanced.renderer = VirtualizerRenderer::Enhanced;
+    enhanced.frontBack = 0.8f;
+    const std::array<std::pair<int, VirtualizerParams>, 3> changes { { { 9000, enhanced }, { 21000, classic }, { 33000, enhanced } } };
+    const auto render = [&] (uint32_t seed)
+    {
+        HeadphoneVirtualizer v;
+        setUp (v, classic);
+        Planar buf = input;
+        uint32_t s = seed;
+        int pos = 0;
+        size_t next = 0;
+        while (pos < n)
+        {
+            while (next < changes.size() && changes[next].first <= pos)
+                v.setParams (changes[next++].second);
+            const int limit = next < changes.size() ? changes[next].first : n;
+            s = s * 1664525u + 1013904223u;
+            const int len = seed == 0 ? std::min (512, limit - pos) : std::min (1 + static_cast<int> ((s >> 8) % 700u), limit - pos);
+            v.process (buf.block (pos, len));
+            pos += len;
+        }
+        return buf;
+    };
+    const Planar a = render (0);
+    CHECK (render (7).ch == a.ch);
+    CHECK (render (12345).ch == a.ch);
+
+    // Chain: the keys, their layout version 8 and defaults; Classic set
+    // explicitly (with any frontBack) is the default render bit for bit,
+    // Enhanced changes it.
+    namespace P = flub::param;
+    CHECK (P::findByKey ("virt.renderer") == P::VirtRenderer);
+    CHECK (P::findByKey ("virt.frontBack") == P::VirtFrontBack);
+    for (int id : { static_cast<int> (P::VirtRenderer), static_cast<int> (P::VirtFrontBack) })
+        CHECK (P::layout()[static_cast<size_t> (id)].sinceVersion == 8);
+    CHECK (P::layout()[static_cast<size_t> (P::VirtRenderer)].defaultValue == 0.0f);
+    const std::vector<std::string> labels { "Classic", "Enhanced" };
+    CHECK (P::layout()[static_cast<size_t> (P::VirtRenderer)].choices == labels);
+    CHECK (P::layout()[static_cast<size_t> (P::VirtFrontBack)].defaultValue == 0.5f);
+    const int m = 12000;
+    const auto chainRender = [&] (int renderer, float frontBack, bool setExplicitly)
+    {
+        P::ParameterStore store;
+        if (setExplicitly)
+        {
+            store.set (P::VirtRenderer, static_cast<float> (renderer));
+            store.set (P::VirtFrontBack, frontBack);
+        }
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, 256, 8 });
+        Planar buf = noiseOnAll (8, m, 0.1f, true, 5);
+        for (int pos = 0; pos < m; pos += 256)
+            chain.process (buf.block (pos, std::min (256, m - pos)));
+        return buf.ch;
+    };
+    const auto defaults = chainRender (0, 0.5f, false);
+    CHECK (chainRender (0, 0.5f, true) == defaults);
+    CHECK (chainRender (0, 1.0f, true) == defaults);
+    CHECK (chainRender (1, 0.5f, true) != defaults);
 }

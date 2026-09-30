@@ -220,16 +220,8 @@ void TransientShaper::setSustainDb (float db) noexcept FLUB_NONBLOCKING
     sustainAmount.setTarget (sustainDb);
 }
 
-float TransientShaper::computeGain (float linkedAbs) noexcept
+void TransientShaper::updateAttackPair (float d, float& aFast, float& aSlow) noexcept
 {
-    // NaN reads as silence, +inf / huge values saturate: the envelopes can
-    // never be poisoned by a bad input sample.
-    float x = 0.0f;
-    if (linkedAbs > 0.0f)
-        x = std::min (linkedAbs, kMaxDetector);
-
-    const float d = hold.process (x) + kDetectorFloor;
-    float aFast, aSlow;
     if (programRelease)
     {
         // Program-dependent release (see the header comment): both envelopes
@@ -247,6 +239,32 @@ float TransientShaper::computeGain (float linkedAbs) noexcept
         aFast = attackFast.process (d);
         aSlow = attackSlow.process (d);
     }
+}
+
+float TransientShaper::computeOnset (float linkedAbs) noexcept FLUB_NONBLOCKING
+{
+    // As computeGain(): NaN reads as silence, huge values saturate. The
+    // sustain pair, the amounts and the gain smoothing do not run.
+    float x = 0.0f;
+    if (linkedAbs > 0.0f)
+        x = std::min (linkedAbs, kMaxDetector);
+    const float d = hold.process (x) + kDetectorFloor;
+    float aFast, aSlow;
+    updateAttackPair (d, aFast, aSlow);
+    return indicatorWeight (aFast / aSlow);
+}
+
+float TransientShaper::computeGain (float linkedAbs) noexcept
+{
+    // NaN reads as silence, +inf / huge values saturate: the envelopes can
+    // never be poisoned by a bad input sample.
+    float x = 0.0f;
+    if (linkedAbs > 0.0f)
+        x = std::min (linkedAbs, kMaxDetector);
+
+    const float d = hold.process (x) + kDetectorFloor;
+    float aFast, aSlow;
+    updateAttackPair (d, aFast, aSlow);
     const float sSlow = sustainSlow.process (d);
     const float sFast = sustainFast.process (d);
 

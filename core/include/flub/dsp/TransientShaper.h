@@ -90,6 +90,13 @@ public:
         linked detector input max_c |x_c[n]|. Call exactly once per sample. */
     float computeGain (float linkedAbs) noexcept;
 
+    /** The attack indicator alone (0 .. 1: the fast attack envelope's rise
+        over the slow one, full at 6 dB), for a detector that keys something
+        else on onsets (BassEngine's Impact punch, docs/11 E20). Runs the
+        hold and the attack pair only; call it instead of computeGain(),
+        once per sample. RT-safe. */
+    float computeOnset (float linkedAbs) noexcept FLUB_NONBLOCKING;
+
     /** Convenience: full-band in-place processing with linked detection. */
     void process (const AudioBlock& block) noexcept;
 
@@ -220,6 +227,8 @@ private:
     }
 
     void updateTimes() noexcept;
+    /** The hold and the attack pair for one detector sample (both paths). */
+    void updateAttackPair (float held, float& aFast, float& aSlow) noexcept;
 
     double sr = 48000.0;
     Timing timing;

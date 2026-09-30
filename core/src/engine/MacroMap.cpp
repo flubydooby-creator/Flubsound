@@ -17,7 +17,7 @@ namespace
 constexpr float kEngage = 0.02f;
 
 // clang-format off
-constexpr std::array<MacroEntry, 25> kMusicTable {{
+constexpr std::array<MacroEntry, 26> kMusicTable {{
     // ---- Boost Intensity: clarity/width first, bass next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.35f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAir,        0.30f, 0.10f, 0.60f, 1.0f, false },
@@ -38,9 +38,13 @@ constexpr std::array<MacroEntry, 25> kMusicTable {{
     { MacroSource::Boost, MaxLfLimit,        1.00f, 0.50f, 0.75f, 1.0f, false },
     // ---- M1 Punch ----
     // No BassTighten (docs/11 E04): Tighten 0.5 cut the kick's first 10 ms
-    // by 2 dB, the opposite of punch.
+    // by 2 dB, the opposite of punch. The attack-high offset (docs/11 E04
+    // step 4) runs the shaper's 3-band path, whose band timing keeps the
+    // lift on the onset (a kick's 0-10 ms over its 10-30 ms, Punch 100:
+    // +0.68 dB with the full-band shaper), and adds the beater's click.
     { MacroSource::M1, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M1, ClarityAttackDb,      6.00f, 0.00f, 1.00f, 1.0f, false },
+    { MacroSource::M1, ClarityAttackHighDb,  2.50f, 0.00f, 1.00f, 1.0f, false },
     // ---- M2 Width ----
     { MacroSource::M2, SpatialOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M2, SpatialWidth,         0.60f, 0.00f, 1.00f, 1.0f, false },
@@ -97,7 +101,7 @@ constexpr std::array<MacroEntry, 5> kMusicWarmthTapeGrit {{
 // Footsteps is the cue enhancer alone (mode bands 4 / 5, see
 // ProcessingChain::configureModeBands), and Boost no longer engages the
 // compressor.
-constexpr std::array<MacroEntry, 23> kGamingTable {{
+constexpr std::array<MacroEntry, 24> kGamingTable {{
     // ---- Boost Intensity: detail/positional first, impact next, loudness last ----
     { MacroSource::Boost, ClarityPresence,   0.30f, 0.00f, 0.50f, 1.0f, false },
     { MacroSource::Boost, ClarityAttackDb,   2.00f, 0.20f, 0.70f, 1.0f, false },
@@ -105,22 +109,32 @@ constexpr std::array<MacroEntry, 23> kGamingTable {{
     { MacroSource::Boost, BassBoostDb,       3.00f, 0.30f, 0.90f, 1.0f, true  },
     { MacroSource::Boost, MaxDriveDb,        6.00f, 0.30f, 1.00f, 1.2f, true  },
     // ---- M1 Footsteps (the internal cue-enhancer dynamic-EQ bands) ----
+    // and the onsets above 4 kHz (docs/11 E04 step 4: the shaper's high
+    // band, which reads its own band, so a step keeps its lift under an
+    // explosion's tail).
     { MacroSource::M1, DynEqOn,              1.00f, 0.00f, kEngage, 1.0f, false },
+    { MacroSource::M1, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
+    { MacroSource::M1, ClarityAttackHighDb,  2.50f, 0.00f, 1.00f, 1.0f, false },
     // ---- M2 Positional ----
     { MacroSource::M2, SpatialOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M2, SpatialFocus,         0.90f, 0.00f, 1.00f, 1.0f, false },
     { MacroSource::M2, SpatialWidth,         0.25f, 0.30f, 1.00f, 1.0f, false },
     // ---- M3 Impact (explosions, gunshots) ----
+    // Event-keyed (docs/11 E20): no static bass boost or harmonics, which
+    // lifted quiet rumble more than the explosion. The bass engine's punch
+    // (its amount is Impact itself, set by ProcessingChain, governed) lifts
+    // the LF on onsets and adds a harmonics burst; the attack goes to the
+    // shaper's low band (docs/11 E04 step 4), so it no longer takes the
+    // onsets of the other bands with an explosion's.
     { MacroSource::M3, BassOn,               1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::M3, BassBoostDb,          6.00f, 0.00f, 1.00f, 1.0f, true  },
-    { MacroSource::M3, BassHarmonics,        0.25f, 0.40f, 1.00f, 1.0f, true  },
     { MacroSource::M3, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
-    { MacroSource::M3, ClarityAttackDb,      4.00f, 0.20f, 1.00f, 1.0f, false },
+    { MacroSource::M3, ClarityAttackLowDb,   4.00f, 0.20f, 1.00f, 1.0f, false },
     // ---- M4 Detail (environment, quiet cues) ----
     { MacroSource::M4, CompressorOn,         1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M4, CompUpMaxGainDb,      8.00f, 0.00f, 1.00f, 1.0f, false },
     { MacroSource::M4, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M4, ClarityAir,           0.40f, 0.20f, 1.00f, 1.0f, false },
+    { MacroSource::M4, ClarityAttackHighDb,  2.00f, 0.00f, 1.00f, 1.0f, false }, // quiet cues' onsets (docs/11 E04 step 4)
     // ---- M5 Voice & Score (plus the internal voice dynamic-EQ band) ----
     { MacroSource::M5, ClarityOn,            1.00f, 0.00f, kEngage, 1.0f, false },
     { MacroSource::M5, ClarityPresence,      0.70f, 0.00f, 1.00f, 1.0f, false },

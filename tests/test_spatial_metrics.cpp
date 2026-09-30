@@ -151,6 +151,24 @@ TEST_CASE ("Spatial metrics: parametricHrir is the virtualiser's own rendering o
             diff = std::max ({ diff, std::abs (l[i] - module.left[i]), std::abs (r[i] - module.right[i]) });
         CHECK (diff <= 1.0e-7f);
     }
+    // The Enhanced renderer's direction cues too (docs/11 E28), at any frontBack.
+    for (float frontBack : { 0.5f, 1.0f })
+    {
+        auto q = p;
+        q.renderer = VirtualizerRenderer::Enhanced;
+        q.frontBack = frontBack;
+        for (int c : { 0, 2, 4, 6 })
+        {
+            const auto module = virtualizerResponse (q, 1u << c, kFs, 512);
+            std::vector<float> l, r;
+            HeadphoneVirtualizer::parametricHrir (HeadphoneVirtualizer::speakerAzimuthDeg (ChannelLayout::Surround71, c, q), q.headRadiusMm, kFs, 512, l,
+                                                  r, VirtualizerRenderer::Enhanced, frontBack);
+            float diff = 0.0f;
+            for (size_t i = 0; i < 512; ++i)
+                diff = std::max ({ diff, std::abs (l[i] - module.left[i]), std::abs (r[i] - module.right[i]) });
+            CHECK (diff <= 1.0e-7f);
+        }
+    }
     // Any azimuth, wrapped: 270 is -90; the model is left / right symmetric.
     std::vector<float> a, b, c, d;
     HeadphoneVirtualizer::parametricHrir (270.0f, 87.5f, kFs, 256, a, b);

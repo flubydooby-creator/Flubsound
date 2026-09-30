@@ -2090,7 +2090,7 @@ Sources: [`core/include/flub/dsp/HeadphoneVirtualizer.h`](../core/include/flub/d
 
 Games render true positional audio when the endpoint reports 7.1, so the "Flubsound Game" endpoint advertises 7.1. This module folds 5.1/7.1 (or two virtual stereo speakers) down to **binaural** stereo for headphones: the "virtual 7.1" idea. It has two renderers:
 
-- **A. Parametric** (built in, no data licence): a Brown & Duda (1998) spherical head. It provides Woodworth ITD, a first-order head shadow, a rear pinna cue and early reflections.
+- **A. Parametric** (built in, no data licence): a Brown & Duda (1998) spherical head. It provides Woodworth ITD, a first-order head shadow, a front/back cue and early reflections. The front/back cue is chosen by `virt.renderer`: **Classic** (the default, the v1 renderer bit for bit) is one rear pinna shelf; **Enhanced** ([11 E28](11-enhancement-report.md#e28)) is an angle-continuous pinna notch, Blauert's directional bands and a lateral timbre match (§8.3.9).
 - **B. Measured HRIRs**: direct-form time-domain convolution of a per-speaker left/right impulse-response set.
 
 Both renderers share the LFE path, the room reflections, a −3 dB headroom trim and ([11 E28a](11-enhancement-report.md#e28)) a **level match** that holds the render at the loudness of the BS.775 downmix, plus a **fold headroom** gain that keeps the binaural output at or below 0 dBFS (§8.3.8). The module reports **zero latency**: the ITD delays are part of the acoustic model (a centre source reaches both ears after a/c), not added latency.
@@ -2101,8 +2101,8 @@ Both renderers share the LFE path, the room reflections, a −3 dB headroom trim
  channel map (WAVEFORMATEXTENSIBLE):  5.1 = FL FR FC LFE SL SR     7.1 = FL FR FC LFE BL BR SL SR
  azimuth (deg, + = right):            FL/FR ∓front (30)  FC 0  SL/SR ∓side (100)  BL/BR ∓rear (145)
 
- speaker x (renderer A) ─► rear-cue shelf ─► ITD line ─┬─► Lagrange(D_L) ─► shadow_L ─► ear L ─┐
-                                                       └─► Lagrange(D_R) ─► shadow_R ─► ear R ─┤
+ speaker x (renderer A) ─► [6 direction cues: Enhanced] ─► rear-cue shelf ─► ITD line ─┬─► Lagrange(D_L) ─► shadow_L ─► ear L ─┐
+                                                                                        └─► Lagrange(D_R) ─► shadow_R ─► ear R ─┤
  speaker x (renderer B) ─► 2L history ─► dot(h_L) ─► ear L,  dot(h_R) ─► ear R ────────────────┤
  LFE ─► LP 120 Hz (Butterworth, 24 dB/oct) ─► × lfeGain ─► both ears (LfeFold) ────────────────┤
  Σ non-LFE speaker inputs ─► HP 200 Hz ─► LP 5 kHz ─► 6 taps 4–19 ms, alternating ears ─► × room ┤
@@ -2194,6 +2194,7 @@ In renderer A every speaker passes an SVF high shelf at 4 kHz, Q 0.7071. Its gai
 - At the defaults it applies to BL/BR (145°) and also to SL/SR, because the default side angle, 100°, is past 90°.
 - A 0 dB shelf is an exact identity, but it still runs on every speaker so its state stays warm.
 - When a side angle crosses 90°, the shelf gain glides (10 ms) rather than stepping.
+- This is the **Classic** renderer's only front/back cue. With `virt.renderer` Enhanced its gain is 0 dB (it glides there with the renderer, §8.5) and the direction cues of §8.3.9 take its place.
 
 #### 8.3.4 LFE
 
@@ -2270,6 +2271,27 @@ Measured, module alone, room 0.15, loudness over 3–6 s against `0.7071·D` (`t
 
 `levelMatch` off glides the make-up to unity at 6 dB/s; `foldHeadroom` off lets the gain recover. Both switches are click-free (largest sample step within 1.25× the steady maximum). Cost: 7–9 ns per 7.1 frame at 48 kHz on top of the renderer, about 0.04 % of a core (the four-lane K-weighting at fs/2, the reference sum and the per-sample gains).
 
+#### 8.3.9 Enhanced direction cues (E28)
+
+`virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28), layout version 8) replaces the binary rear shelf with six SVF sections per speaker, run ahead of the shelf and common to both ears, so the sphere's ITD and ILD are untouched (frequency by frequency, test below). Their gains are continuous functions of the angle from the front, φ = |azimuth|, with c = cos φ:
+
+| Section | Filter | Gain | Why |
+|---|---|---|---|
+| Lateral timbre match | high shelf 3 kHz, Q 0.5 | −0.6 · 10 log10(P(az) / 2.5992) | P = α(θ_L)² + α(θ_R)², the sphere's both-ear HF power (§8.3.2), and 2.5992 its mean over the circle: the centre (both ears in the head's shadow) gets +2.1 dB, the sides at 100° −1.1 dB, 60 % of the way to one brightness |
+| Front band | bell 4 kHz, Q 2.5 | +5 dB · c · s | Blauert's frontal band (a cut of the same size behind) |
+| Front top | high shelf 13.5 kHz, Q 0.7071 | +6 dB · max(0, c) · s | the frontal 16 kHz band |
+| Rear band | bell 1 kHz, Q 1.4 | +4 dB · max(0, −c) · s | Blauert's rear band |
+| Rear top | bell 10 kHz, Q 2 | +6 dB · max(0, −c) · s | the rear 10–12 kHz band |
+| Pinna notch | bell 7.6 kHz · 2^(−0.1 (1 − c) / 2), Q 2 | −10 dB | the concha notch: 7.6 kHz in front, 7.3 kHz at the side, 7.1 kHz behind |
+
+`s` = `virt.frontBack` / 0.5 (0 … 2: 0 removes the bands, 100 % doubles them; the timbre match and the notch do not scale). The constants were chosen on an analytic model of the renderer (a search over the band gains, Qs, the timbre share and the notch path, with the Done-when rows as constraints and the 4–8 kHz comb as the objective) and rounded; the measured rows are in [11 E28](11-enhancement-report.md#e28) and §8.9. No listener has heard them yet.
+
+- **Switching** glides: the Enhanced share e goes 0 ↔ 1 over a one-pole of 30 ms at the control rate; every cue gain is e times its Enhanced value and the rear shelf's gain (1 − e) times its Classic value, redesigned on the ticks and interpolated per sample like the geometry (§8.5). At e = 0 the sections are not run at all, so Classic is the v1 code path bit for bit, whatever `virt.frontBack` says.
+- **Level match:** the diffuse-field gain (§8.3.8) includes the cues and is recomputed when a glide lands (the make-up still moves at most 6 dB/s): −4.77 / −5.09 dB for 5.1 / 7.1 at the defaults (Classic −3.84 / −4.03 dB).
+- **Cost:** the sections of four speakers run side by side (one SSE register per section, `renderCues`), +47 ns per 7.1 frame at 48 kHz (§8.6).
+- **HRIR renderer:** a measured set carries its own cues; both settings are ignored while it runs.
+- `HeadphoneVirtualizer::parametricHrir (az, radius, fs, length, l, r, renderer, frontBack)` renders either renderer's speaker path at any azimuth (equal to the module within 1e−7).
+
 ### 8.4 Parameters
 
 | Name | Key | Range | Default | Unit | What it does |
@@ -2284,6 +2306,8 @@ Measured, module alone, room 0.15, loudness over 3–6 s against `0.7071·D` (`t
 | LFE Fold | `virt.lfeFold` | off/on | on | toggle | off: the LFE is dropped in every fold (the v1 downmix bit for bit) |
 | Input Channels | `virt.input` | Auto, Force Surround, Force Stereo | Auto | choice | fold of 5.1/7.1 input: the detector's choice, or forced (§8.2) |
 | Game Renders Own HRTF | `virt.ownHrtf` | off/on | off | toggle | the game's output is already binaural: virtualiser off, width 1, focus 0, crossfeed 0, space 0 on any strip, and the stereo passthrough fold on a 5.1/7.1 strip unless Force Surround |
+| Renderer | `virt.renderer` | Classic, Enhanced | Classic | choice | the parametric renderer's front/back cue: the rear shelf (§8.3.3) or the direction cues (§8.3.9); switching glides over 30 ms; layout version 8 |
+| Front/Back Contrast | `virt.frontBack` | 0 … 1 | 0.5 | % | Enhanced only: the directional bands × value / 0.5 (§8.3.9); Classic ignores it; layout version 8 |
 | (layout) | — | Stereo, 5.1, 7.1 | from the strip | — | the chain sets it from the strip channel count: ≥ 8 → 7.1, 6–7 → 5.1, 3–5 → stereo |
 | (HRIR set) | API `setHrirSet()` | — | none | — | structural; renderer B (not wired to any host yet) |
 | (level match) | API `VirtualizerParams::levelMatch` | off/on | on | — | render at the BS.775 downmix's loudness (§8.3.8); off glides to unity; no parameter key |
@@ -2298,6 +2322,7 @@ Module sanitising: NaN takes the default; ±inf clamps to the range edge; an inv
   - it redesigns every speaker's delays, Lagrange taps and shadow coefficients;
   - across the following 16 samples, delays (hence Lagrange taps), shadow `b0/b1/a1` and the six shelf coefficients are interpolated per sample and land exactly on the new design. Interpolating a1 between two stable first-order poles keeps the pole inside the unit circle.
 - **Rear-shelf gain:** its own one-pole (10 ms, control rate) in dB.
+- **Renderer and front/back contrast** ([11 E28](11-enhancement-report.md#e28)): the Enhanced share and `virt.frontBack` / 0.5 each glide on a one-pole (30 ms, control rate); the rear shelf and the six cue sections are redesigned on every tick of the glide and interpolated per sample. Classic → Enhanced → Classic on a 3 kHz tone: the largest sample step around each switch stays within 1.25× the steady maximum, and 250 ms after the switch the output equals a module started in the target within 1e−4.
 - **Room and LFE levels:** linear per-sample ramps over 20 ms.
 - **Level-match make-up:** a linear ramp across each 16-sample period (stream time), at most 6 dB/s; **fold headroom:** instant attack to exactly 0 dBFS, 10 ms hold, 150 ms release, per sample (§8.3.8).
 - **Layout change** (discrete: channel meaning and possibly renderer):
@@ -2330,6 +2355,8 @@ stateDiagram-v2
 |---|---|---|
 | parametric, room 0.15, steady geometry | 78–80 | 0.38 % |
 | … plus the level match and fold headroom (the default, [11 E28a](11-enhancement-report.md#e28)) | +7–9 | +0.04 % |
+| the default (Classic, with the level match), measured again in batch 5 | 88 | 0.42 % |
+| `virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28); six cue sections per speaker, four speakers per SSE register) | 135 (+47) | 0.65 % (Done-when < 1.5 %) |
 | HRIR direct-form, 128 taps | 467–478 | 2.3 % |
 | HRIR 256 taps | 838–844 | 4.0 % |
 | HRIR 512 taps | ≈ 1 700 | 8.2 % |
@@ -2396,7 +2423,14 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
 - **Objective spatial metrics** (`tests/test_spatial_metrics.cpp`, [11 E60](11-enhancement-report.md#e60) stage 2; `flub/analysis/SpatialMetrics.h`, `flubsound-cli analyze --spatial`):
   - *Spatial metrics: parametricHrir is the virtualiser's own rendering of a speaker, sample for sample* (`HeadphoneVirtualizer::parametricHrir`: the rear shelf, Woodworth ITD and Brown–Duda shadow of one speaker path at any azimuth, times the trim; equal to the module's output for every 7.1 speaker at room 0 within 1e−7)
   - *Spatial metrics: today's parametric renderer reproduces its weak values (7.1, defaults)* (pinned; see §8.9)
+  - the same test of `parametricHrir` also covers the Enhanced renderer at `virt.frontBack` 0.5 and 1
   - *Spatial metrics: a synthetic pinna notch moves the diffuse-field deviation at its band, and a shift of the notch follows it* and the metrics' own validation on synthetic responses (IACC 1 for a dry centred source, ITD sign and lag, DRR +20.00 dB for a −20 dB reflection, 1/3-octave levels of a scaled impulse)
+- **Enhanced renderer** ([11 E28](11-enhancement-report.md#e28), §8.3.9; the allocation test also switches the renderer and `virt.frontBack`):
+  - *HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all four directional bands, FC vs sides tilt within 1 dB, the sphere's ITD and ILD kept (docs/11 E28)*
+  - *HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a correlated 7-speaker impulse and the diffuse field (docs/11 E28, pinned)*
+  - *HeadphoneVirtualizer: Enhanced renderer - the level match keeps virt on vs off within 0.5 LU for 5.1 / 7.1 pink, correlated or not (docs/11 E28)*
+  - *HeadphoneVirtualizer: Classic is the default and ignores frontBack bit for bit; switching the renderer glides without a click and lands on the target design (docs/11 E28)*
+  - *HeadphoneVirtualizer: Enhanced renderer - bit-exact under random block partitions with renderer switches, and the chain hands virt.renderer / virt.frontBack over (docs/11 E28)*
 - **Shared fold and detector** (`tests/test_virtualizer_fold.cpp`):
   - *Bs775Fold: with the LFE fold off it is the v1 downmix bit for bit (5.1 and 7.1)*
   - *Bs775Fold: passthrough (overall 1) is the identity on FL/FR-only input, and the LFE sits at virt.lfe re one main*
@@ -2422,16 +2456,22 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
 - **Detection restarts with the chain.** A new chain (the crossfaded engine swap builds one) starts unconfirmed in the surround fold, so a stereo game in the 8-channel container is folded as surround again for 2 s after a swap; carrying the detector state across a swap needs `MixEngine::configureFrom`. The host does not yet call `redetectInputChannels()` when the routed process changes, nor show `activeChannelMask` ([11 E27](11-enhancement-report.md#e27) step 1's "receiving 2 / 6 / 8 channels").
 - **The app's own downmixes fold the LFE at `virt.lfe`'s default, not the strip's.** A 5.1 / 7.1 capture read by a stereo strip (moved there, or the layout changed under it) is folded by `AudioEngineHost` with `Bs775Fold` and an `ActiveChannelDetector`, as the chain folds: the LFE at the strip's `virt.lfe`, −3 dB or the stereo passthrough. The capture FIFO's own conversion (`DriftCompensatedFifo`, only when a capture delivers more channels than it asked for) and `TestSignalGenerator`'s stereo downmix of its Game71 scene keep their per-frame BS.775 matrices but take the LFE through the chain's `LfeFold` (`LfeFold::next`) inside the fold's −3 dB, at the parameter default (+10 dB): neither knows its strip ([11 E01](11-enhancement-report.md#e01); before, both dropped the LFE). A 50 Hz tone on the LFE re the same tone on one main, each side of the FIFO's 5.1 and 7.1 downmix: −∞ → +9.99 dB (the chain's fold +10.00 dB); the test signal's stereo downmix is the chain's `Bs775Fold` of its 8-channel render sample for sample, its LFE share −∞ → −7.95 dB re full scale as in the chain (`tests/app/test_app_lfe_fold.cpp`). The Game71 scene on a stereo strip is therefore about 10 LU louder than before (its explosions' LFE), as it already was on a 7.1 strip.
 - **Lagrange top-octave loss:** up to −3.25 dB at 16 kHz at half-sample delays (48 kHz).
-- **Weak spatial cues, measured** ([11 E60](11-enhancement-report.md#e60) stage 2 metrics on the module's impulse responses, 7.1 at the defaults, pinned in `tests/test_spatial_metrics.cpp`; [11 E28](11-enhancement-report.md#e28) is measured against them):
+- **Weak spatial cues of the Classic renderer, measured** ([11 E60](11-enhancement-report.md#e60) stage 2 metrics on the module's impulse responses, 7.1 at the defaults, pinned in `tests/test_spatial_metrics.cpp`; [11 E28](11-enhancement-report.md#e28) is measured against them; the Enhanced renderer's values follow the list):
   - The default room barely decorrelates the ears: centre (FC) early IACC (0–80 ms, max over ±1 ms) 1.000 dry, 0.995 at room 0.15; each octave 125 Hz – 8 kHz ≥ 0.985. Side speakers read 0.518 (ITD 0.60 ms), front 0.758, rear 0.711.
   - Direct-to-reverberant ratio +22.9 dB (FC) and +24.8 dB (SL) at room 0.15, and nothing after 80 ms (the late IACC is undefined: no reverberant tail).
   - Front and back differ only through the rear shelf: FL against BL at the near ear ≤ 0.35 dB in every 1/3 octave up to 2 kHz, 3.5 dB at 10 kHz.
   - The centre is darker than the sides: FC against SL / SR (both ears' power) up to −3.8 dB at 2.5 kHz.
   - The same impulse on all seven speakers, dry, combs to 28.06 dB peak-to-notch in 4–8 kHz at each ear.
   - The seven speakers' diffuse-field response spans 3.5 dB around its mean (1/3 octave, 100 Hz – 16 kHz: +0.9 dB at 1.6 kHz, −2.6 dB at 16 kHz); there is no diffuse-field equalisation.
+- **What the Enhanced renderer changes, and what it does not** (§8.3.9, `tests/test_virtualizer.cpp`, same conditions):
+  - FL against BL at the near ear, with the sign of each directional band: 1 kHz (rear) −0.31 → +3.34 dB, 4 kHz (front) +1.46 → +7.15 dB, 10 kHz (rear) −3.52 → +4.10 dB, 16 kHz (front) +4.27 → +4.31 dB: four bands at ≥ 3 dB (Classic: one). `virt.frontBack` 0 leaves none, 100 % doubles them.
+  - FC against the sides: the least-squares tilt over 100 Hz – 16 kHz −2.78 → −0.57 dB; the largest single band −3.82 dB at 2.5 kHz → −3.42 dB at 8 kHz (the notch sits 0.1 octave lower behind the sides).
+  - The same impulse on all seven speakers, dry: 28.06 → 18.88 dB peak-to-notch in 4–8 kHz, still above the 12 dB target. The comb is seven near-equal paths up to 0.6 ms apart at one ear (FC against FL alone combs 11 dB at 3.9 kHz); flattening it would take about 18 dB of HF difference between centre / sides and front / rear, which the centre-timbre row rules out.
+  - The diffuse field is less flat: 3.52 → 7.19 dB range (the notch and the bands are in every direction; the diffuse-field inverse is the next E28 stage).
+  - Unchanged: the ITD and, frequency by frequency, the ILD of every speaker; the IACC (FC 0.995 → 0.998 at room 0.15, SL 0.518 → 0.524), so the centre still reads as a point source; the room (no reverberant tail).
 - **Model simplifications:**
-  - a spherical head (no pinna notches, no elevation);
-  - the rear cue switches as the side angle crosses 90° (with a 10 ms glide) instead of blending with angle;
+  - a spherical head (no elevation; pinna notches only as the Enhanced renderer's one parametric notch);
+  - in Classic, the rear cue switches as the side angle crosses 90° (with a 10 ms glide) instead of blending with angle (Enhanced blends every cue with the angle);
   - reflections are direction-independent and unshadowed.
 - **Room and LFE also apply in HRIR mode.** Users of BRIRs, which already contain a room, should set room to 0.
 

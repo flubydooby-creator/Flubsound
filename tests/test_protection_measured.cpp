@@ -9,7 +9,9 @@
 //     hunting, and Off still runs the stepwise loop, unchanged;
 //   * through the chain: the harmonics policy (Small Speaker Mode), the
 //     Done-when rows for stationary programme, Loudness 100 and the
-//     dynamics budget, and block-size independence at Normal.
+//     dynamics budget, and block-size independence at Normal;
+//   * a re-prepare at the same rate and layout keeps the learned state, a
+//     new rate or layout starts afresh (docs/11 E06, Phase 3 batch 5).
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -405,4 +407,75 @@ TEST_CASE ("Chain: at Normal the output does not depend on the host block size w
         for (size_t i = 0; i < a.ch[ch].size(); ++i)
             maxDiff = std::max ({ maxDiff, static_cast<double> (std::abs (a.ch[ch][i] - b.ch[ch][i])), static_cast<double> (std::abs (a.ch[ch][i] - c.ch[ch][i])) });
     CHECK_LE (maxDiff, 1e-4);
+}
+
+//==============================================================================
+// docs/11 E06 (Phase 3 batch 5): a plug-in host calls prepareToPlay on the same
+// chain for a new block size or on a transport start. At the same rate and
+// layout that keeps what the governor has learned, as reset() does (Normal /
+// Strict); a new rate or layout is a new device and starts afresh.
+TEST_CASE ("SafetyGovernor: prepare (keepLearned) at the rate it has keeps the learned scale at Normal; a new rate, keepLearned false or Off start from 1 (E06)")
+{
+    SafetyGovernor g;
+    g.prepare (kFs);
+    g.setStrength (ProtectionStrength::Normal);
+    SafetyGovernor::Memory m;
+    m.strength = ProtectionStrength::Normal;
+    m.scale = 0.5f;
+    m.valid = true;
+    const auto learn = [&] {
+        g.restoreMemory (m);
+        REQUIRE (g.getMemory().scale == 0.5f);
+    };
+    learn();
+    g.prepare (kFs, true);
+    CHECK (g.getMemory().scale == 0.5f); // same rate: kept
+    g.prepare (44100.0, true);
+    CHECK (g.getMemory().scale == 1.0f); // a new rate: afresh
+    g.prepare (44100.0);
+    learn();
+    g.prepare (44100.0, false);
+    CHECK (g.getMemory().scale == 1.0f); // not asked to keep
+    learn();
+    g.setStrength (ProtectionStrength::Off);
+    g.prepare (44100.0, true);
+    CHECK (g.getMemory().scale == 1.0f); // Off: exactly reset(), as restart()
+}
+
+TEST_CASE ("Chain: at Normal a re-prepare at the same rate and layout (another block size) keeps the governor's learned scale; a new layout starts from 1 (E06)")
+{
+    // docs/11 E06's limiter-bound scene (tests/test_protection_readouts.cpp):
+    // Gaming, Boost 100, base max.drive 24 dB, clipper off.
+    ParameterStore store;
+    store.set (Mode, static_cast<float> (ModeValue::Gaming));
+    store.set (BoostIntensity, 1.0f);
+    store.set (MaxDriveDb, 24.0f);
+    store.set (MaxClipAmount, 0.0f);
+    const auto pink = pinkNoise (static_cast<int> (5.5 * kFs), std::pow (10.0f, -18.0f / 20.0f), 2468);
+    ProcessingChain chain (store);
+    chain.prepare ({ kFs, 480, 2 });
+    chain.setProtectionStrength (ProtectionStrength::Normal);
+    const auto feed = [&] (int from, int length, int block, int channels) {
+        Planar buf (channels, block);
+        ScopedNoDenormals noDenormals;
+        float highest = 0.0f;
+        for (int pos = 0; pos < length; pos += block)
+        {
+            for (auto& ch : buf.ch)
+                std::copy_n (pink.begin() + from + pos, block, ch.begin());
+            chain.process (buf.block());
+            highest = std::max (highest, chain.meters().governorScale.load());
+        }
+        return highest;
+    };
+    feed (0, static_cast<int> (5.0 * kFs), 480, 2);
+    const float learned = chain.meters().governorScale.load();
+    chain.prepare ({ kFs, 256, 2 }); // the host's new block size
+    const float held = feed (static_cast<int> (5.0 * kFs), static_cast<int> (0.25 * kFs), 256, 2);
+    std::cout << "    measured re-prepare at Normal: scale " << gainToDb (learned) << " dB learned, at most " << gainToDb (held)
+              << " dB in the 250 ms after\n";
+    CHECK_LE (gainToDb (learned), -3.0f);                  // it had backed off ...
+    CHECK_NEAR (gainToDb (held), gainToDb (learned), 0.5f); // ... and holds that through the re-prepare
+    chain.prepare ({ kFs, 256, 6 }); // 5.1: a new layout
+    CHECK_GE (feed (0, 256, 256, 6), 0.99f);
 }

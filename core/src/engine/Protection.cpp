@@ -240,9 +240,14 @@ float PlrMeter::getPlrDb() const noexcept FLUB_NONBLOCKING
 }
 
 // ---------------------------------------------------------------------------
-void SafetyGovernor::prepare (double sampleRate) noexcept
+void SafetyGovernor::prepare (double sampleRate, bool keepLearned) noexcept
 {
+    // The learned state is rate-independent, but a new rate is a new device
+    // (or a new session): it starts afresh.
+    const bool keep = keepLearned && prepared && sampleRate == sr;
+    const Memory learned = getMemory();
     sr = sampleRate;
+    prepared = true;
     // The maximizer's limiter-GR window, counted the same way, so the ticks
     // fall where its windows close (both grids start at reset()).
     tickSamples = msToSamples (kTickMs, sampleRate);
@@ -255,6 +260,8 @@ void SafetyGovernor::prepare (double sampleRate) noexcept
     programAttack = static_cast<float> (std::exp (-dt / kProgramAttackSeconds));
     programRelease = static_cast<float> (std::exp (-dt / kProgramReleaseSeconds));
     reset();
+    if (keep && strength != ProtectionStrength::Off) // as restart()
+        restoreMemory (learned);
 }
 
 void SafetyGovernor::reset() noexcept FLUB_NONBLOCKING

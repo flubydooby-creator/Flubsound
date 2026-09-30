@@ -3,7 +3,7 @@
 // Signal flow (every speaker path adds into two ear accumulators; the output
 // is (make-up * speakers + LFE) * -3 dB trim * fold headroom * swap fade):
 //
-//   speaker (parametric):  x -> rear-cue shelf [-> 6 direction cues] -> ITD line -+-> Lagrange(D_L) -> shadow_L -> ear L
+//   speaker (parametric):  x [-> 6 direction cues] -> rear-cue shelf -> ITD line -+-> Lagrange(D_L) -> shadow_L -> ear L
 //                                                                                 +-> Lagrange(D_R) -> shadow_R -> ear R
 //   speaker (HRIR):        x -> history -> dot(h_L) -> ear L,  dot(h_R) -> ear R
 //   LFE:                   x -> 4th-order Butterworth LP 120 Hz -> lfeGain -> both ears
@@ -61,9 +61,9 @@
 // Direction cues (docs/11 E28, VirtualizerParams::renderer). Classic, the
 // default and the v1 renderer, has one front/back cue: the -4 dB rear shelf,
 // switched at |az| = 90 deg (a 10 ms glide). Enhanced replaces it with six
-// sections per speaker, common to both ears (so the ITD and the ILD of the
-// sphere are untouched), whose gains are continuous in the angle from the
-// front, phi = |az| (c = cos phi):
+// sections per speaker, ahead of the shelf and common to both ears (so the
+// ITD and the ILD of the sphere are untouched), whose gains are continuous
+// in the angle from the front, phi = |az| (c = cos phi):
 //   timbre     high shelf 3 kHz, Q 0.5: -0.6 * 10 log10 (P(az) / <P>), P the
 //              sphere's both-ear HF power alpha(theta_L)^2 + alpha(theta_R)^2
 //              and <P> = 2.5992 its mean over the circle: the centre (both
@@ -80,8 +80,9 @@
 // 0 <-> 1 (one-pole 30 ms at the control rate), every cue gain is e times its
 // Enhanced value and the rear shelf's gain (1 - e) times its Classic value,
 // redesigned on the control ticks and interpolated per sample as for the
-// geometry. At e = 0 the cue sections are not run at all, so Classic is the
-// v1 code path bit for bit. The level match's diffuse-field gain includes
+// geometry. The sections of four speakers run side by side (one SSE register
+// per section, renderCues). At e = 0 they are not run at all, so Classic is
+// the v1 code path bit for bit. The level match's diffuse-field gain includes
 // the cues and is recomputed when a glide ends. The HRIR renderer has its
 // own cues (the measured set) and ignores both settings.
 //
@@ -477,8 +478,8 @@ void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm,
                                            std::vector<float>& right, VirtualizerRenderer renderer, float frontBack)
 {
     // The design of updateGeometry() (snap) and the per-sample path of
-    // renderParametric<false, Cues>() for one speaker: shelf (-> direction
-    // cues) -> ITD line (Lagrange read) -> head shadow, then the output trim
+    // renderParametric<false>() for one speaker: (direction cues ->) shelf
+    // -> ITD line (Lagrange read) -> head shadow, then the output trim
     // (make-up 1, no LFE).
     const auto n = static_cast<size_t> (std::max (1, length));
     left.assign (n, 0.0f);
@@ -500,11 +501,11 @@ void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm,
     std::array<SvfState, kNumCues> cueState {};
     for (size_t i = 0; i < n; ++i)
     {
-        float v = svfTick (shelf, shelfState, i == 0 ? 1.0f : 0.0f);
+        float v = i == 0 ? 1.0f : 0.0f;
         if (enhanced)
             for (size_t k = 0; k < cues.size(); ++k)
                 v = svfTick (cues[k], cueState[k], v);
-        line[i] = v;
+        line[i] = svfTick (shelf, shelfState, v);
     }
 
     for (size_t e = 0; e < 2; ++e)
@@ -671,6 +672,8 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     const auto scratch = static_cast<size_t> (spec.maxBlockSize);
     for (auto* v : { &accL, &accR, &bus, &lfeBus, &refL, &refR })
         v->assign (scratch, 0.0f);
+    for (auto& v : cueOut)
+        v.assign (scratch, 0.0f);
 
     // Level match and fold headroom (E28a).
     // The servo's K-weighting runs on every other sample (renderSegment), so
@@ -1063,7 +1066,7 @@ void HeadphoneVirtualizer::tick() noexcept
 }
 
 //==============================================================================
-template <bool Ramp, bool Cues>
+template <bool Ramp>
 void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const float* x, int length) noexcept
 {
     // One fused per-sample loop: the ITD line (256 samples) is shorter than a
@@ -1083,13 +1086,6 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
     BiquadState sl = el.state, sr = er.state;
     std::array<float, 4> hl = el.taps, hr = er.taps;
     int bl = el.base, br = er.base;
-    std::array<SvfCoeffs, kNumCues> cue {};
-    std::array<SvfState, kNumCues> cueState {};
-    if constexpr (Cues)
-    {
-        cue = sp.cue;
-        cueState = sp.cueState;
-    }
 
     for (int i = 0; i < length; ++i)
     {
@@ -1098,9 +1094,6 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
             // Position inside the control period -> exact end point at 16.
             const float t = static_cast<float> (std::min (rampPos + i + 1, kControlInterval)) * (1.0f / kControlInterval);
             shelf = mixSvf (sp.prevShelf, sp.shelf, t);
-            if constexpr (Cues)
-                for (size_t k = 0; k < cue.size(); ++k)
-                    cue[k] = mixSvf (sp.prevCue[k], sp.cue[k], t);
             lagrangeTaps ((1.0f - t) * el.prevDelay + t * el.delay, bl, hl);
             lagrangeTaps ((1.0f - t) * er.prevDelay + t * er.delay, br, hr);
             cl = mixFirstOrder (el.prevShadow, el.shadow, static_cast<double> (t));
@@ -1108,27 +1101,122 @@ void HeadphoneVirtualizer::renderParametric (Speaker& sp, float* line, const flo
         }
 
         const int w = write0 + i;
-        if constexpr (Cues)
-        {
-            float v = svfTick (shelf, shelfState, x[i]);
-            for (size_t k = 0; k < cue.size(); ++k)
-                v = svfTick (cue[k], cueState[k], v);
-            line[w & mask] = v;
-        }
-        else
-        {
-            line[w & mask] = svfTick (shelf, shelfState, x[i]);
-        }
+        line[w & mask] = svfTick (shelf, shelfState, x[i]);
         outL[i] += static_cast<float> (biquadTick (cl, sl, static_cast<double> (readLagrange (line, w - bl, mask, hl))));
         outR[i] += static_cast<float> (biquadTick (cr, sr, static_cast<double> (readLagrange (line, w - br, mask, hr))));
     }
 
     storeState (sp.shelfState, shelfState);
-    if constexpr (Cues)
-        for (size_t k = 0; k < cueState.size(); ++k)
-            storeState (sp.cueState[k], cueState[k]);
     el.state.z1 = flushed (sl.z1);
     er.state.z1 = flushed (sr.z1);
+}
+
+void HeadphoneVirtualizer::renderCues (const AudioBlock& block, int start, int length, int numInputs) noexcept
+{
+    // The six cue sections of up to four speakers run side by side on the
+    // four lanes of Lane4 (the arithmetic of svfTick per lane); while
+    // ramping, each lane's coefficients are interpolated per sample as
+    // mixSvf does. Speaker channels missing from the block are skipped (the
+    // main loop does not render them); an unused lane runs on silence with
+    // pass-through coefficients and is not stored.
+    std::array<int, kMaxChannels> channels {};
+    int count = 0;
+    for (int c = 0; c < std::min (numInputs, kMaxChannels); ++c)
+        if (speakers[static_cast<size_t> (c)].role == Role::Speaker)
+            channels[static_cast<size_t> (count++)] = c;
+
+    const SvfCoeffs identity = SvfCoeffs::make (FilterType::Bell, 1000.0, 1.0, 0.0, spec.sampleRate);
+    const SvfState silent;
+    for (int g = 0; g < count; g += 4)
+    {
+        std::array<Speaker*, 4> sp {};
+        std::array<const float*, 4> in {};
+        std::array<float*, 4> out {};
+        for (size_t l = 0; l < 4; ++l)
+        {
+            const int k = g + static_cast<int> (l);
+            if (k < count)
+            {
+                const int c = channels[static_cast<size_t> (k)];
+                sp[l] = &speakers[static_cast<size_t> (c)];
+                in[l] = block.channel (c) + start;
+                out[l] = cueOut[static_cast<size_t> (c)].data();
+            }
+        }
+        const auto coeff = [&] (size_t l, size_t k, bool prev) -> const SvfCoeffs&
+        { return sp[l] == nullptr ? identity : (prev ? sp[l]->prevCue[k] : sp[l]->cue[k]); };
+        const auto lanes = [&] (size_t k, bool prev, float SvfCoeffs::*m)
+        { return lane4 (coeff (0, k, prev).*m, coeff (1, k, prev).*m, coeff (2, k, prev).*m, coeff (3, k, prev).*m); };
+
+        struct Section
+        {
+            Lane4 a1, a2, a3, m0, m1, m2;
+        };
+        std::array<Section, kNumCues> cur {}, prv {};
+        std::array<Lane4, kNumCues> ic1 {}, ic2 {};
+        for (size_t k = 0; k < cur.size(); ++k)
+        {
+            for (auto* set : { &cur, &prv })
+            {
+                const bool prev = set == &prv;
+                (*set)[k] = { lanes (k, prev, &SvfCoeffs::a1), lanes (k, prev, &SvfCoeffs::a2), lanes (k, prev, &SvfCoeffs::a3),
+                              lanes (k, prev, &SvfCoeffs::m0), lanes (k, prev, &SvfCoeffs::m1), lanes (k, prev, &SvfCoeffs::m2) };
+            }
+            const auto& s0 = sp[0] != nullptr ? sp[0]->cueState[k] : silent;
+            const auto& s1 = sp[1] != nullptr ? sp[1]->cueState[k] : silent;
+            const auto& s2 = sp[2] != nullptr ? sp[2]->cueState[k] : silent;
+            const auto& s3 = sp[3] != nullptr ? sp[3]->cueState[k] : silent;
+            ic1[k] = lane4 (s0.ic1, s1.ic1, s2.ic1, s3.ic1);
+            ic2[k] = lane4 (s0.ic2, s1.ic2, s2.ic2, s3.ic2);
+        }
+
+        std::array<float, 4> y {};
+        std::array<Section, kNumCues> run = cur;
+        for (int i = 0; i < length; ++i)
+        {
+            if (ramping)
+            {
+                const float t = static_cast<float> (std::min (rampPos + i + 1, kControlInterval)) * (1.0f / kControlInterval);
+                const Lane4 lt = splat (t), lu = splat (1.0f - t);
+                for (size_t k = 0; k < cur.size(); ++k)
+                {
+                    const auto& a = prv[k];
+                    const auto& b = cur[k];
+                    run[k] = { lu * a.a1 + lt * b.a1, lu * a.a2 + lt * b.a2, lu * a.a3 + lt * b.a3,
+                               lu * a.m0 + lt * b.m0, lu * a.m1 + lt * b.m1, lu * a.m2 + lt * b.m2 };
+                }
+            }
+            Lane4 v = lane4 (in[0] != nullptr ? in[0][i] : 0.0f, in[1] != nullptr ? in[1][i] : 0.0f, in[2] != nullptr ? in[2][i] : 0.0f,
+                             in[3] != nullptr ? in[3][i] : 0.0f);
+            for (size_t k = 0; k < cur.size(); ++k)
+            {
+                const auto& c = run[k];
+                const Lane4 v3 = v - ic2[k];
+                const Lane4 v1 = c.a1 * ic1[k] + c.a2 * v3;
+                const Lane4 v2 = ic2[k] + c.a2 * ic1[k] + c.a3 * v3;
+                ic1[k] = (v1 + v1) - ic1[k];
+                ic2[k] = (v2 + v2) - ic2[k];
+                v = c.m0 * v + c.m1 * v1 + c.m2 * v2;
+            }
+            store (v, y);
+            for (size_t l = 0; l < 4; ++l)
+                if (out[l] != nullptr)
+                    out[l][i] = y[l];
+        }
+
+        std::array<float, 4> s1 {}, s2 {};
+        for (size_t k = 0; k < cur.size(); ++k)
+        {
+            store (ic1[k], s1);
+            store (ic2[k], s2);
+            for (size_t l = 0; l < 4; ++l)
+                if (sp[l] != nullptr)
+                {
+                    sp[l]->cueState[k].ic1 = flushed (s1[l]);
+                    sp[l]->cueState[k].ic2 = flushed (s2[l]);
+                }
+        }
+    }
 }
 
 void HeadphoneVirtualizer::renderHrir (HrirPath& path, const float* x, int length) noexcept
@@ -1247,6 +1335,10 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         std::fill_n (dr, length, 0.0f);
     }
 
+    // Enhanced's direction cues, four speakers at a time, into cueOut.
+    if (cuesActive && ! useHrir)
+        renderCues (block, start, length, numInputs);
+
     // Every input is read (into the accumulators) before any output is
     // written, so in-place processing is safe although ch 0/1 are both
     // speaker inputs and ear outputs.
@@ -1293,20 +1385,14 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
             if (hrirPaths[static_cast<size_t> (c)].present)
                 renderHrir (hrirPaths[static_cast<size_t> (c)], x, length);
         }
-        else if (ramping)
-        {
-            if (cuesActive)
-                renderParametric<true, true> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
-            else
-                renderParametric<true, false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
-        }
-        else if (cuesActive)
-        {
-            renderParametric<false, true> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
-        }
         else
         {
-            renderParametric<false, false> (sp, itdLines[static_cast<size_t> (c)].data(), x, length);
+            // Enhanced: the speaker path starts from the cue-filtered input.
+            const float* xs = cuesActive ? cueOut[static_cast<size_t> (c)].data() : x;
+            if (ramping)
+                renderParametric<true> (sp, itdLines[static_cast<size_t> (c)].data(), xs, length);
+            else
+                renderParametric<false> (sp, itdLines[static_cast<size_t> (c)].data(), xs, length);
         }
     }
     if (! lfeRendered)

@@ -677,7 +677,12 @@ public:
         bool valid = false;
     };
 
-    void prepare (double sampleRate) noexcept;
+    /** keepLearned (docs/11 E06, a plug-in host's prepareToPlay on the same
+        chain): when the governor was prepared before at this sample rate,
+        the learned state (getMemory()) is kept as restart() keeps it (at
+        Normal / Strict; at Off exactly reset()); a new rate, or
+        keepLearned false, starts afresh (reset()). */
+    void prepare (double sampleRate, bool keepLearned = false) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
     /** reset() for a chain's reset() (docs/11 E06 (2)): at Normal / Strict
         the learned state (getMemory()) is kept - the averages, the tick grid
@@ -777,6 +782,7 @@ private:
     void startMeasured() noexcept FLUB_NONBLOCKING;
 
     double sr = 48000.0;
+    bool prepared = false; // prepare() has run (at sr)
     int tickSamples = 480, pendingSamples = 0;
     float tickAverage = 0.0f, tickFall = 0.0f, tickRise = 0.0f; // per-tick constants (prepare)
     float tickSeconds = 0.01f, grFastCoeff = 0.0f;

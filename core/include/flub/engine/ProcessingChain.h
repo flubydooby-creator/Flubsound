@@ -489,19 +489,67 @@ public:
         static constexpr int kMaxSections = 64; // EQ 10 x 4, dynamic EQ 4, bass 3, clarity 2, warmth tilt 2, contour 4
         std::array<SvfCoeffs, kMaxSections> sections {};
         int numSections = 0;
-        double gainDb = 0.0; // EQ output, saturation make-up, the surround fold's trim
+        double gainDb = 0.0; // EQ output, saturation make-up, the compressor's net gain, the surround fold's trim, the contour's and Warmth's trims
         double sampleRate = 48000.0;
+        // The Bs2b / Meier crossfeed's sum on a centred source (docs/11 E11):
+        // 1 - nearCut LP + far z^-D LP, LP the head shadow (tan (pi fc / fs)
+        // in xfeedTan), D in seconds; far 0 = none.
+        double xfeedNearCut = 0.0, xfeedFar = 0.0, xfeedTan = 1.0, xfeedDelaySeconds = 0.0;
+        // The bass harmonics (docs/11 E11): power added after the first
+        // harmSplit sections and harmGainDb of broadband gain (the later
+        // stages act on both), harmPower (re the programme) x a fall above
+        // the cutoff x the harmonics' band filters (harmBand); 0 = none.
+        int harmSplit = 0;
+        double harmGainDb = 0.0, harmPower = 0.0, harmCutoffHz = 100.0;
+        std::array<SvfCoeffs, 3> harmBand {};
 
         /** Magnitude in dB at freqHz. RT-safe. */
         double responseDb (double freqHz) const noexcept FLUB_NONBLOCKING;
     };
 
+    /** The programme the model's level-dependent terms assume (docs/11 E11):
+        pink noise at programmeDb (RMS per channel, dBFS) at the chain's
+        input, centred; what the chain puts ahead of every module (the
+        loudness contour's sections, its and the Warmth tilt's trims); and
+        the dynamic EQ's mode bands as the mode policy set them. */
+    static constexpr double kNominalProgrammeDb = -18.0; // AutoLevel's default target
+    /** The automatic preamp's model takes the boosts that withdraw on loud
+        programme (presence, the dynamic EQ, the bass protection) at a
+        programme this quiet (dBFS, as programmeDb): their full size, over
+        every noise-floor taper (see the header comment). */
+    static constexpr double kPreampQuietProgrammeDb = -50.0;
+    struct BoostModelContext
+    {
+        double programmeDb = kNominalProgrammeDb;
+        // The automatic preamp ahead of the modules (dB <= 0): the terms that
+        // withdraw a boost on loud programme (presence, the dynamic EQ, the
+        // bass protection) see the programme this much lower; the
+        // compressor's net gain is taken at programmeDb (see the header
+        // comment).
+        double preampDb = 0.0;
+        const SvfCoeffs* preSections = nullptr;
+        int numPreSections = 0;
+        double preGainDb = 0.0;
+        const DynEqBandParams* modeBands = nullptr;
+        int numModeBands = 0;
+    };
+
     /** Builds the model from effective values (param::kNumParams entries; a
         module counts when its enable value is on). surroundFold: a 5.1 / 7.1
         strip folds through the virtualiser or the BS.775 downmix (-3 dB).
-        RT-safe. */
+        Presence and the compressor are taken at the context's programme
+        level (see the header comment). RT-safe. */
+    static void buildStaticBoostModel (const float* effective, double sampleRate, bool surroundFold,
+                                       StaticBoostModel& model, const BoostModelContext& context) noexcept FLUB_NONBLOCKING;
+    /** At kNominalProgrammeDb, nothing ahead of the modules. RT-safe. */
     static void buildStaticBoostModel (const float* effective, double sampleRate, bool surroundFold,
                                        StaticBoostModel& model) noexcept FLUB_NONBLOCKING;
+    /** The model the chain's prediction is made of, at programmeDb instead of
+        the measured level: the effective values (with the governor's
+        scales), the mode bands, the contour and the Warmth trim as of the
+        last block (docs/11 E11; tests and tools). Not while another thread
+        runs process(). */
+    void buildHeadroomModel (StaticBoostModel& model, double programmeDb) const noexcept;
     /** Maximum of the model's response over 20 Hz .. min (20 kHz, 0.49 fs). RT-safe. */
     static headroom::Prediction predictStaticBoost (const StaticBoostModel& model,
                                                     headroom::Weighting weighting) noexcept FLUB_NONBLOCKING;
@@ -512,6 +560,10 @@ public:
     float getPredictedBoostDb() const noexcept { return predictedBoostDb.load (std::memory_order_relaxed); }
     float getPredictedBoostHz() const noexcept { return predictedBoostHz.load (std::memory_order_relaxed); }
     float getAutoPreampDb() const noexcept { return autoPreampDb.load (std::memory_order_relaxed); }
+    /** The programme level the prediction last assumed (RMS per channel of a
+        pink-equivalent programme, dBFS; kNominalProgrammeDb until the input
+        has been measured for kProgrammeWarmSeconds). Any thread. */
+    float getModelProgrammeDb() const noexcept { return modelProgrammeDb.load (std::memory_order_relaxed); }
 
     // ---- Governor measurements at protection strength Normal / Strict
     // (docs/11 E06 Phase 3; Protection.h). Published once per block;
@@ -636,13 +688,14 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 99 + LoudnessContour::kNumSections + 2; // + the contour's sections and trim (E32), the Warmth trim (E14)
+    static constexpr int kHeadroomKeySize = 182 + LoudnessContour::kNumSections + 3; // + the contour's sections and trim (E32), the Warmth trim (E14), the programme level
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;
     int headroomHoldoff = 0; // samples until the next prediction may run
     std::vector<float> headroomInput, ungoverned; // kNumParams each (allocated in ctor)
-    StaticBoostModel headroomModel;
+    StaticBoostModel headroomModel, preampModel;
+    float modeTame = 0.0f, modeTameThresholdDb = 0.0f; // the Tame band's depth and threshold as last applied (the mode bands' model)
     LinearSmoothedValue preampGain;
     std::atomic<float> predictedBoostDb { 0.0f }, predictedBoostHz { 1000.0f }, autoPreampDb { 0.0f };
     // Hot programme (auto.preampHot): the static preamp and what it leaves
@@ -661,6 +714,22 @@ private:
     // model last counted it (moved in 0.25 dB steps, audio thread).
     ToneTilt warmthTilt;
     float warmthTrimModelDb = 0.0f;
+    // The programme level the model assumes (docs/11 E11): the loud parts'
+    // level - the input's 3 s loudness (inLoudness) as a pink-equivalent RMS,
+    // measured once kProgrammeWarmSeconds of input have passed since a
+    // reset, held at its maximum (a louder reading at once; after
+    // kProgrammeHoldSeconds it releases at kProgrammeReleaseDbPerSecond
+    // towards the reading), gated below kProgrammeGateLufs - and the
+    // prediction follows it in kProgrammeStepDb steps. Headroom matters in
+    // the loud passages, and a level that followed the programme's
+    // dynamics would turn the preamp into a slow expander.
+    static constexpr float kProgrammeWarmSeconds = 3.0f, kProgrammeStepDb = 0.5f, kProgrammeGateLufs = -60.0f;
+    static constexpr float kProgrammeHoldSeconds = 30.0f, kProgrammeReleaseDbPerSecond = 0.1f;
+    static constexpr float kInLoudnessMs = 3000.0f, kProgrammeSettledSeconds = 30.0f; // inLoudness's time constant; its start-up counted this long
+    float programmeDb = static_cast<float> (kNominalProgrammeDb), programmeHeldDb = kMinusInfDb;
+    int programmeWarmLeft = 0, programmeHoldLeft = 0, programmeElapsed = 0;
+    void trackProgrammeLevel (int numSamples, bool contaminated) noexcept FLUB_NONBLOCKING;
+    std::atomic<float> modelProgrammeDb { static_cast<float> (kNominalProgrammeDb) };
     // The personal per-ear stage (docs/11 E33) and, at BeforeCompressor, the
     // output with it undone for the chain's own measures (personalView).
     PersonalEarStage personal;
@@ -715,6 +784,7 @@ private:
         bool read (SafetyGovernor::Memory& m) const noexcept;
     };
     GovernorMemoryBox governorMemory;
+    int governorLayout = 0; // input channels at the last prepare(): a re-prepare with the same keeps the learned state (docs/11 E06)
     // Measured loop (Normal / Strict, docs/11 E06 Phase 3): two spans, mid
     // channel, each input delayed by its span's latency: the bass engine
     // (its harmonics), and the saturator to the maximizer's output (the

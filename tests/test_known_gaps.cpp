@@ -2082,6 +2082,55 @@ TEST_CASE ("KnownGap closed: all Music macros at 100 on a 50 Hz sine - THD+N <= 
     CHECK_LE (r.tracked[1], kAllMacrosOffThdDb[1] - 10.0);
 }
 
+TEST_CASE ("Chain (E11) Done-when: a -17 LUFS classical stand-in (LRA about 20 LU, -0.5 dBTP) through Classical & Jazz Dynamic keeps its loudness range within 0.1 LU with auto.preamp on")
+{
+    // Classical programme: wide-band noise (partly correlated stereo) in 4 s
+    // sections spanning 24 dB (250 ms raised-cosine joins), at -17 LUFS
+    // integrated. The automatic preamp follows the loud parts' level (it does
+    // not ride the sections), so it must not change the loudness range.
+    const int section = samplesOf (4.0), ramp = samplesOf (0.25);
+    const double gains[] = { 0.0, -6.0, -14.0, -22.0, -24.0, -10.0, -3.0, -18.0, -8.0 };
+    const int n = section * static_cast<int> (std::size (gains));
+    const auto a = pinkNoise (n, 0.1f, 1701), b = pinkNoise (n, 0.1f, 1702);
+    Channels x (2, std::vector<float> (static_cast<size_t> (n)));
+    for (int i = 0; i < n; ++i)
+    {
+        const int k = i / section, j = i % section;
+        double g = gains[k];
+        if (j < ramp && k > 0)
+            g = gains[k - 1] + (gains[k] - gains[k - 1]) * 0.5 * (1.0 - std::cos (kPi * j / ramp));
+        const auto v = static_cast<float> (std::pow (10.0, g / 20.0));
+        x[0][static_cast<size_t> (i)] = v * (0.8f * a[static_cast<size_t> (i)] + 0.6f * b[static_cast<size_t> (i)]);
+        x[1][static_cast<size_t> (i)] = v * (0.8f * a[static_cast<size_t> (i)] - 0.6f * b[static_cast<size_t> (i)]);
+    }
+    const double scale = std::pow (10.0, (-17.0 - static_cast<double> (analyse (x, kFs).integratedLufs)) / 20.0);
+    for (auto& ch : x)
+        for (auto& v : ch)
+            v = static_cast<float> (v * scale);
+    const auto input = fileOf (x);
+    const auto in = analyse (input.channels, kFs);
+    measured ("classical stand-in integrated", in.integratedLufs, "LUFS");
+    measured ("classical stand-in loudness range", in.loudnessRangeLu, "LU");
+    measured ("classical stand-in true peak", in.truePeakDbtp, "dBTP");
+    CHECK_NEAR (in.integratedLufs, -17.0, 0.1);
+    CHECK_GE (in.loudnessRangeLu, 18.0f);
+    CHECK_LE (in.truePeakDbtp, -0.5f);
+
+    auto values = resolve (factoryPreset ("music-classical-jazz-dynamic.json"));
+    RenderResult off, on;
+    std::string error;
+    REQUIRE (renderFile (input, values, RenderSettings {}, off, error));
+    setValue (values, AutoPreampOn, 1.0f);
+    REQUIRE (renderFile (input, values, RenderSettings {}, on, error));
+    measured ("Classical & Jazz loudness range, preamp off", off.outputReport.loudnessRangeLu, "LU");
+    measured ("Classical & Jazz loudness range, preamp on", on.outputReport.loudnessRangeLu, "LU");
+    measured ("Classical & Jazz integrated, preamp off", off.outputReport.integratedLufs, "LUFS");
+    measured ("Classical & Jazz integrated, preamp on", on.outputReport.integratedLufs, "LUFS");
+    measured ("Classical & Jazz limiter > 1 dB, preamp on", on.stats.limiterOver1DbPercent, "%");
+    CHECK_NEAR (on.outputReport.loudnessRangeLu, in.loudnessRangeLu, 0.1);  // the Done-when row
+    CHECK_NEAR (on.outputReport.loudnessRangeLu, off.outputReport.loudnessRangeLu, 0.1);
+}
+
 TEST_CASE ("KnownGap closed: hot master - the automatic preamp (auto.preamp, allowance 1 dB) takes the chain's static boost off the limiter; with auto.preampHot also the allowance, the drive and half the Punch attack: Signature and Punchy Pop limit > 1 dB <= 2 % of the time (E11)")
 {
     // A hot master: -20 dBFS-RMS pink noise with 55 Hz kicks (-6 dBFS peak)
