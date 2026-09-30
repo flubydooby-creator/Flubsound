@@ -10,6 +10,7 @@
 #include "Svf.h"
 
 #include <array>
+#include <cmath>
 
 namespace flub
 {
@@ -52,6 +53,26 @@ public:
         high = hp1 - static_cast<float> (coeffs.k) * v1 - v2;
     }
 
+    /** See ThreeBandSplitter::flushStates. */
+    float flushStates (int numChannels, float tiny) noexcept
+    {
+        float sum = 0.0f;
+        for (int c = 0; c < numChannels && c < kMaxChannels; ++c)
+        {
+            auto& s = st[static_cast<size_t> (c)];
+            sum += flushSvf (s.split, tiny) + flushSvf (s.low2, tiny) + flushSvf (s.high2, tiny);
+        }
+        return sum;
+    }
+
+    /** Zeroes a state whose integrators are both below `tiny`. */
+    static float flushSvf (SvfState& s, float tiny) noexcept
+    {
+        if (std::abs (s.ic1) < tiny && std::abs (s.ic2) < tiny)
+            s.ic1 = s.ic2 = 0.0f;
+        return s.ic1 + s.ic2;
+    }
+
 private:
     struct ChannelState
     {
@@ -80,6 +101,15 @@ public:
     }
 
     float processSample (int ch, float x) noexcept { return svfTick (coeffs, st[static_cast<size_t> (ch)], x); }
+
+    /** See ThreeBandSplitter::flushStates. */
+    float flushStates (int numChannels, float tiny) noexcept
+    {
+        float sum = 0.0f;
+        for (int c = 0; c < numChannels && c < kMaxChannels; ++c)
+            sum += LinkwitzRiley4::flushSvf (st[static_cast<size_t> (c)], tiny);
+        return sum;
+    }
 
 private:
     SvfCoeffs coeffs;
@@ -112,6 +142,21 @@ public:
         lowSplit.processSample (ch, x, low, rest);
         highSplit.processSample (ch, rest, mid, high);
         low = lowAlign.processSample (ch, low);
+    }
+
+    /** RT-safe; moves the low / mid split (coefficients only, the state is
+        kept). Glide it in small steps (ClarityEnhancer moves it once per
+        control interval). */
+    void setLowMidFrequency (double hz) noexcept { lowSplit.setFrequency (hz); }
+    double getLowMidFrequency() const noexcept { return lowSplit.getFrequency(); }
+
+    /** Flushes filter states below `tiny` to 0 on the first numChannels
+        channels (so a decay reaches exact silence); returns the sum of the
+        states kept, non-finite if any state is. */
+    float flushStates (int numChannels, float tiny) noexcept
+    {
+        return lowSplit.flushStates (numChannels, tiny) + highSplit.flushStates (numChannels, tiny)
+             + lowAlign.flushStates (numChannels, tiny);
     }
 
 private:

@@ -120,6 +120,18 @@ public:
     /** Speaker azimuth in degrees for a channel of a layout (NaN for LFE). */
     static float speakerAzimuthDeg (ChannelLayout layout, int channel, const VirtualizerParams& p) noexcept;
 
+    /** The parametric renderer's own head-related impulse responses for a
+        source at any azimuth (degrees, + = right, 0 = front; wrapped into
+        -180 .. 180): the rear-cue shelf, the Woodworth ITD (Lagrange) and the
+        Brown-Duda head shadow of one speaker path times the -3 dB trim,
+        sample for sample what process() renders for a speaker at that
+        azimuth with room 0, the level match and the fold headroom off. The
+        head radius clamps as VirtualizerParams::headRadiusMm does. For
+        measurements (flub/analysis/SpatialMetrics.h, docs/11 E60 / E24):
+        non-RT, allocates. */
+    static void parametricHrir (float azimuthDeg, float headRadiusMm, double sampleRate, int length, std::vector<float>& left,
+                                std::vector<float>& right);
+
     /** Level match state, for meters and tests (read on the audio thread or
         between process() calls): the make-up applied to the speakers now,
         the running layout's diffuse-field gain, and the fold-headroom gain. */

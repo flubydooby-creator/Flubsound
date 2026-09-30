@@ -213,6 +213,10 @@ enum Id : int
     // Clarity addition (docs/11 E07 step 3; ClarityEnhancer.h)
     ClarityPresenceMode, // Choice: PresenceModeValue, what the dynamic presence reads its band against (Absolute by default)
 
+    // Clarity additions (docs/11 E04 step 3, layout version 8; ClarityEnhancer.h)
+    ClarityAttackLowDb,  // dB over clarity.attack below the 60 - 200 Hz split; with both offsets at 0 the shaper stays full band
+    ClarityAttackHighDb, // dB over clarity.attack above 4 kHz
+
     kNumScalarParams
 };
 

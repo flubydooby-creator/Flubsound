@@ -103,6 +103,8 @@ const std::map<juce::String, Hint>& table()
         // ---- Clarity ----
         { "clarity.attack", { "More (or less) snap at the start of drum hits, plucks and steps." } },
         { "clarity.sustain", { "More (or less) of the ring after each hit: raise for fuller, lower for drier and tighter." } },
+        { "clarity.attackLow", { "Adds (or takes away) snap on kicks and bass hits only, on top of Transient Attack." } },
+        { "clarity.attackHigh", { "Adds (or takes away) snap on clicks, hi-hats and footsteps only, on top of Transient Attack." } },
         { "clarity.presence", { "Brings voices and lead instruments forward. Too much sounds forward or shouty." } },
         { "clarity.presenceFreq", { "Where the presence lift sits: lower for body in voices, higher for bite and definition." } },
         { "clarity.presenceMode", { "Relative gives quiet and loud recordings the same presence, judged by how bright each one already is. Absolute adds more on quiet ones." } },

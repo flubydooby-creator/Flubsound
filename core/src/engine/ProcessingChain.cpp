@@ -880,6 +880,10 @@ void ProcessingChain::applyParameters() noexcept
     // programme's body (the module crossfades the two laws).
     cp.presenceMode = idx (e, ClarityPresenceMode) == static_cast<int> (PresenceModeValue::Relative) ? PresenceMode::Relative
                                                                                                     : PresenceMode::Absolute;
+    // docs/11 E04 step 3: the outer bands' attack offsets; both 0 keeps the
+    // full-band shaper (bit-exact), anything else runs the 3-band path.
+    cp.attackLowDb = e[ClarityAttackLowDb];
+    cp.attackHighDb = e[ClarityAttackHighDb];
     // The air exciter is alias-free only because its <= 3rd-order products of
     // <= 7 kHz content stay below 21 kHz. Headsets running at low rates (USB
     // 32 kHz modes, Bluetooth hands-free at 16 / 8 kHz) would fold them back,

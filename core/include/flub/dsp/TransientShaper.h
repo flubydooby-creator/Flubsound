@@ -10,8 +10,15 @@
 // The result depends on envelope *shape*, not absolute level, so the same
 // setting behaves consistently on quiet and loud material. Gain is smoothed
 // (~1 ms) and applied identically to all channels (image-stable).
-// Used by ClarityEnhancer (full band "punch / detail") and BassEngine
-// (low-band "tighten" = negative sustain). Zero latency.
+// Used by ClarityEnhancer (full band "punch / detail", and one per band of
+// its 3-band path) and BassEngine (low-band "tighten" = negative sustain).
+// Zero latency.
+//
+// Timing (docs/11 E04 step 3): the hold, the slow attack, the attack pair's
+// release and the gain smoothing can be set per instance; the defaults are
+// the full-band timing above. A band shaper can also release its attack
+// pair program-dependently (fast after a real decay or gap, slow on a
+// sustained sound's shallow dips) and scale its timing with a speed.
 #pragma once
 
 #include "EnvelopeFollower.h"
@@ -29,8 +36,46 @@ namespace flub
 class TransientShaper
 {
 public:
+    /** Detector timing (docs/11 E04 step 3). The defaults are the full-band
+        shaper's timing, which Clarity without band offsets and BassEngine's
+        Tighten run (bit-exact with the shaper before the struct existed). */
+    struct Timing
+    {
+        double holdMs = 25.0;          // peak-hold window: >= half the rectified period of the lowest steady note
+        float slowAttackMs = 20.0f;    // A_slow's attack: how long an onset reads as one
+        float attackReleaseMs = 60.0f; // the attack pair's release
+        /** > 0: program-dependent release. The attack pair releases at this
+            time constant once the held level has fallen 6 dB under A_slow (a
+            decaying hit, a gap), at attackReleaseMs on shallower dips (the
+            level changes of a sustained sound), interpolated in between. */
+        float fastReleaseMs = 0.0f;
+        float gainSmoothMs = 1.0f;     // symmetric smoothing of the gain in dB
+
+        /** The 3-band path of ClarityEnhancer (docs/11 E04 step 3): the band
+            below the 60 - 200 Hz split (25 ms anti-ripple hold), the band up
+            to 4 kHz (a hold covering a third of the split frequency, the
+            lowest content its LR4 slope still passes at -38 dB) and the band
+            above (2 ms hold). */
+        static Timing lowBand() noexcept;
+        static Timing midBand (double splitHz) noexcept;
+        static Timing highBand() noexcept;
+    };
+
+    /** Not RT-safe in general (the hold is re-sized): call before prepare()
+        or re-prepare. prepare() keeps the timing. */
+    void setTiming (const Timing& t) noexcept { timing = t; }
+    const Timing& getTiming() const noexcept { return timing; }
+
     void prepare (double sampleRate) noexcept;
     void reset() noexcept FLUB_NONBLOCKING;
+
+    /** Scales the slow attack and both releases by 1 / speed (0.5 .. 2;
+        1 = the timing as set). NaN is ignored. RT-safe; the envelopes keep
+        their state, so a change never steps the gain. */
+    void setSpeed (float speed) noexcept FLUB_NONBLOCKING;
+    /** Re-sizes the hold window without clearing it (the held value never
+        steps; the new window applies as buckets close). RT-safe. */
+    void setHoldMs (double holdMs) noexcept FLUB_NONBLOCKING;
 
     /** -12 .. +12 dB each. RT-safe. */
     void setAttackDb (float db) noexcept FLUB_NONBLOCKING;
@@ -75,6 +120,15 @@ private:
             const double samples = std::max (1.0, sampleRate * minWindowMs * 0.001);
             length = std::max (1, static_cast<int> (std::ceil (samples / static_cast<double> (kBuckets - 1))));
             reset();
+        }
+
+        /** Changes the window without clearing it: the buckets already
+            closed keep their maxima, so the held value never steps. */
+        void resize (double sampleRate, double minWindowMs) noexcept
+        {
+            const double samples = std::max (1.0, sampleRate * minWindowMs * 0.001);
+            length = std::max (1, static_cast<int> (std::ceil (samples / static_cast<double> (kBuckets - 1))));
+            countdown = std::min (countdown, length);
         }
 
         void reset() noexcept
@@ -165,7 +219,11 @@ private:
         return isNeutral() && attackAmount.getCurrent() == 0.0f && sustainAmount.getCurrent() == 0.0f && gainDbState == 0.0f;
     }
 
+    void updateTimes() noexcept;
+
     double sr = 48000.0;
+    Timing timing;
+    float speed = 1.0f;
     float attackDb = 0.0f, sustainDb = 0.0f;          // targets (what isNeutral() reports)
     bool sustainGated = false;                        // sustain weight x (1 - onset weight)
     PeakHold hold;                                    // ~25 ms: ripple-free level down to 20 Hz
@@ -174,5 +232,10 @@ private:
     OnePoleSmoother attackAmount, sustainAmount;      // smoothed attackDb / sustainDb
     float gainCoeff = 0.0f, gainDbState = 0.0f;       // ~1 ms gain smoothing (dB domain)
     float gatedReturnCoeff = 0.0f;                    // 0.5 ms: a gated sustain cut returning
+    // Program-dependent release (timing.fastReleaseMs > 0): the attack pair
+    // as plain one-poles, since the release coefficient moves per sample.
+    bool programRelease = false;
+    float progFast = 0.0f, progSlow = 0.0f;           // A_fast / A_slow
+    float progFastAttack = 0.0f, progSlowAttack = 0.0f, progSlowRelease = 0.0f, progFastRelease = 0.0f;
 };
 } // namespace flub

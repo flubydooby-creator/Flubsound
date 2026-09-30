@@ -3,6 +3,25 @@
 // Stages in series, all zero latency:
 //
 //   1. TransientShaper, full band, detector max_c |x_c| (see its header).
+//      3-band path (docs/11 E04 step 3), running while attackLowDb or
+//      attackHighDb is not 0: ThreeBandSplitter (LR4 at lowSplitHz and
+//      4 kHz, the low band through the 4 kHz all-pass), per band b a
+//      TransientShaper with its own timing on d_b = max_c |band_b,c|,
+//      y_c = sum_b g_b band_b,c (an all-pass of x_c at unity gains). Band
+//      shapers: low 25 ms hold (steady bass unmodulated), mid a hold of
+//      1500 / split ms (split / 3 still steady), high 2 ms; slow attack 10 /
+//      8 / 5 ms and a program-dependent release (TransientShaper.cpp), so an
+//      onset's lift sits on its first milliseconds and is back at +12 dB on
+//      a hit 75 ms later. Switching on: the band shapers run for
+//      kBandWarmSlowAttacks slow-attack times (their envelopes start from
+//      silence and would read the running programme as an onset) while the
+//      output is still the full-band shaper's, then the output crossfades
+//      linearly to the band sum over 20 ms; switching off crossfades back
+//      and stops the path. The full-band shaper keeps running meanwhile, so
+//      it is current whenever it takes over. The crossfade mixes x and its
+//      all-pass, so the crossover frequencies dip for those 20 ms (no step,
+//      no click). The split glides in log frequency over 25 ms (coefficients
+//      per control tick, the mid hold resized without clearing).
 //   2. De-mud: detector = unity band-pass 250 Hz Q 1 and the broadband signal,
 //      both as linked mean squares (20 ms). Overshoot of the band level over
 //      (broadband level - 12 dB) -> 6 dB soft knee -> ratio 2:1 -> cut of at
@@ -118,6 +137,12 @@ constexpr float kAirSkirtFloor = 0.70710678f;  // -3 dB: the LP4 7 kHz level at 
 constexpr float kAirReleaseMs = 40.0f;
 constexpr float kAirSmoothMs = 0.5f;
 
+// 1. The 3-band path (docs/11 E04 step 3).
+constexpr double kBandHighHz = 4000.0;
+constexpr float kBandCrossfadeMs = 20.0f;
+constexpr float kBandWarmSlowAttacks = 5.0f; // the slowest band's slow attack x 5: its envelope within 1 % of the programme
+constexpr float kBandSplitGlideMs = 25.0f;
+
 constexpr float kStateFlush = 1.0e-20f;
 constexpr float kEnvFlush = 1.0e-15f;
 
@@ -136,6 +161,10 @@ ClarityParams sanitise (const ClarityParams& in, const ClarityParams& prev) noex
     p.air = clampOr (in.air, 0.0f, 1.0f, prev.air);
     p.deMud = clampOr (in.deMud, 0.0f, 1.0f, prev.deMud);
     p.presenceMode = in.presenceMode == PresenceMode::Relative ? PresenceMode::Relative : PresenceMode::Absolute;
+    p.attackLowDb = clampOr (in.attackLowDb, -12.0f, 12.0f, prev.attackLowDb);
+    p.attackHighDb = clampOr (in.attackHighDb, -12.0f, 12.0f, prev.attackHighDb);
+    p.lowSplitHz = clampOr (in.lowSplitHz, 60.0f, 200.0f, prev.lowSplitHz);
+    p.transientSpeed = clampOr (in.transientSpeed, 0.5f, 2.0f, prev.transientSpeed);
     return p;
 }
 
@@ -217,6 +246,13 @@ void ClarityEnhancer::prepare (const ProcessSpec& newSpec)
 
     msCoeff = onePoleCoeff (kDetectorMs, sr);
     shaper.prepare (sr);
+    bands.splitHz = params.lowSplitHz;
+    bands.splitter.prepare (sr, bands.splitHz, kBandHighHz);
+    bands.shapers[0].setTiming (TransientShaper::Timing::lowBand());
+    bands.shapers[1].setTiming (TransientShaper::Timing::midBand (bands.splitHz));
+    bands.shapers[2].setTiming (TransientShaper::Timing::highBand());
+    for (auto& ts : bands.shapers)
+        ts.prepare (sr);
 
     deMud.detector = SvfCoeffs::make (FilterType::BandPass, kDeMudHz, kDeMudQ, 0.0, sr);
     deMud.gain.prepare (controlRate, kDeMudAttackMs, kDeMudReleaseMs, false);
@@ -252,6 +288,16 @@ void ClarityEnhancer::reset() noexcept FLUB_NONBLOCKING
     // After a reset there is no previous output to click against: amounts
     // start at their targets; dynamic gains start neutral.
     shaper.reset();
+    bands.splitHz = params.lowSplitHz;
+    bands.logSplitHz.reset (controlRate, kBandSplitGlideMs, std::log (bands.splitHz));
+    bands.splitter.setLowMidFrequency (bands.splitHz);
+    bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
+    bands.splitter.reset();
+    for (auto& ts : bands.shapers)
+        ts.reset();
+    bands.active = wantsBands();
+    bands.warmCountdown = 0;
+    bands.mix.reset (sr, kBandCrossfadeMs, bands.active ? 1.0f : 0.0f);
 
     presenceHz = params.presenceFrequency;
     logPresenceHz.reset (controlRate, kFreqGlideMs, std::log (presenceHz));
@@ -293,6 +339,19 @@ void ClarityEnhancer::setParams (const ClarityParams& newParams) noexcept FLUB_N
 
     shaper.setAttackDb (p.attackDb);
     shaper.setSustainDb (p.sustainDb);
+    setBandTargets();
+    if (wantsBands())
+    {
+        if (! bands.active)
+            activateBands();
+        else if (bands.warmCountdown == 0)
+            bands.mix.setTarget (1.0f);
+    }
+    else if (bands.active)
+    {
+        bands.warmCountdown = 0; // still warming: the mix is at 0, the path stops at the next tick
+        bands.mix.setTarget (0.0f);
+    }
     logPresenceHz.setTarget (std::log (p.presenceFrequency));
 
     if (p.deMud > 0.0f && ! deMud.active)
@@ -313,6 +372,39 @@ void ClarityEnhancer::setParams (const ClarityParams& newParams) noexcept FLUB_N
         activateAir();
     airAmount.setTarget (p.air);
     airMix.setTarget (p.air * kAirMixMax);
+}
+
+void ClarityEnhancer::setBandTargets() noexcept
+{
+    // clarity.attack and clarity.sustain act on every band; the offsets
+    // move the outer bands' attack (each band within the shaper's +-12 dB).
+    const ClarityParams& p = params;
+    bands.shapers[0].setAttackDb (std::clamp (p.attackDb + p.attackLowDb, -12.0f, 12.0f));
+    bands.shapers[1].setAttackDb (p.attackDb);
+    bands.shapers[2].setAttackDb (std::clamp (p.attackDb + p.attackHighDb, -12.0f, 12.0f));
+    for (auto& ts : bands.shapers)
+    {
+        ts.setSustainDb (p.sustainDb);
+        ts.setSpeed (p.transientSpeed);
+    }
+    bands.logSplitHz.setTarget (std::log (p.lowSplitHz));
+}
+
+void ClarityEnhancer::activateBands() noexcept
+{
+    // The shapers start from silence at their targets and warm up on the
+    // programme before the crossfade may start (see the header comment).
+    bands.active = true;
+    bands.splitHz = params.lowSplitHz; // a split moved while the path was off lands at once
+    bands.logSplitHz.setImmediate (std::log (bands.splitHz));
+    bands.splitter.setLowMidFrequency (bands.splitHz);
+    bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
+    bands.splitter.reset();
+    for (auto& ts : bands.shapers)
+        ts.reset();
+    bands.mix.setImmediate (0.0f);
+    const float warmMs = kBandWarmSlowAttacks * TransientShaper::Timing::lowBand().slowAttackMs / params.transientSpeed;
+    bands.warmCountdown = std::max (1, msToSamples (warmMs, spec.sampleRate));
 }
 
 void ClarityEnhancer::activateBell (DynamicBell& bell, double hz, double q) noexcept
@@ -371,6 +463,7 @@ void ClarityEnhancer::activateAir() noexcept
 
 void ClarityEnhancer::clearAllStates() noexcept
 {
+    bands.splitter.reset();
     for (auto* bell : { &deMud, &presence })
     {
         bell->bandMs = bell->broadMs = 0.0f;
@@ -392,6 +485,8 @@ void ClarityEnhancer::clearAllStates() noexcept
 float ClarityEnhancer::flushStates() noexcept
 {
     float sum = 0.0f;
+    if (bands.active)
+        sum += bands.splitter.flushStates (spec.numChannels, kStateFlush);
     for (auto* bell : { &deMud, &presence })
     {
         if (! bell->active)
@@ -476,6 +571,19 @@ void ClarityEnhancer::controlTick() noexcept
 {
     const double sr = spec.sampleRate;
 
+    // 1. The 3-band path: the split's glide; stop once faded out.
+    if (bands.active)
+    {
+        if (bands.logSplitHz.isSmoothing())
+        {
+            bands.splitHz = std::exp (bands.logSplitHz.next());
+            bands.splitter.setLowMidFrequency (bands.splitHz);
+            bands.shapers[1].setHoldMs (TransientShaper::Timing::midBand (bands.splitHz).holdMs);
+        }
+        if (! wantsBands() && bands.warmCountdown == 0 && bands.mix.getCurrent() == 0.0f && ! bands.mix.isSmoothing())
+            bands.active = false;
+    }
+
     bool presenceMoved = false;
     if (logPresenceHz.isSmoothing())
     {
@@ -541,17 +649,12 @@ void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         const int len = std::min (numSamples - pos, controlCountdown);
         const int phase = kControlInterval - controlCountdown;
 
-        // 1. Transient shaper: one linked gain per sample. Neutral -> exactly 1.
-        for (int i = pos; i < pos + len; ++i)
-        {
-            float linked = 0.0f;
-            for (int c = 0; c < numCh; ++c)
-                linked = std::max (linked, std::abs (block.channel (c)[i]));
-            const float g = shaper.computeGain (linked);
-            if (g != 1.0f)
-                for (int c = 0; c < numCh; ++c)
-                    block.channel (c)[i] *= g;
-        }
+        // 1. Transient shaper: full band (one linked gain per sample; neutral
+        // -> exactly 1) or the 3-band path.
+        if (bands.active)
+            processBands (block, numCh, pos, len);
+        else
+            processShaper (block, numCh, pos, len);
 
         // 2. De-mud, 3. presence, 4. air (each skipped while inactive).
         if (deMud.active)
@@ -577,6 +680,64 @@ void ClarityEnhancer::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
     // Exciter telemetry: a window without air (all sums 0) reads -160 dB.
     if (float db = kMinusInfDb; distortionWindow.advance (numSamples, db))
         distortionDb.store (db, std::memory_order_relaxed);
+}
+
+void ClarityEnhancer::processShaper (const AudioBlock& block, int numCh, int pos, int len) noexcept
+{
+    for (int i = pos; i < pos + len; ++i)
+    {
+        float linked = 0.0f;
+        for (int c = 0; c < numCh; ++c)
+            linked = std::max (linked, std::abs (block.channel (c)[i]));
+        const float g = shaper.computeGain (linked);
+        if (g != 1.0f)
+            for (int c = 0; c < numCh; ++c)
+                block.channel (c)[i] *= g;
+    }
+}
+
+void ClarityEnhancer::processBands (const AudioBlock& block, int numCh, int pos, int len) noexcept
+{
+    std::array<std::array<float, 3>, kMaxChannels> split;
+    for (int i = pos; i < pos + len; ++i)
+    {
+        float linked = 0.0f;
+        std::array<float, 3> peak { 0.0f, 0.0f, 0.0f };
+        for (int c = 0; c < numCh; ++c)
+        {
+            const float x = block.channel (c)[i];
+            auto& b = split[static_cast<size_t> (c)];
+            bands.splitter.processSample (c, x, b[0], b[1], b[2]);
+            linked = std::max (linked, std::abs (x));
+            for (size_t k = 0; k < 3; ++k)
+                peak[k] = std::max (peak[k], std::abs (b[k]));
+        }
+
+        // Every shaper runs every sample, so whichever path takes over is current.
+        const float full = shaper.computeGain (linked);
+        const float gLow = bands.shapers[0].computeGain (peak[0]);
+        const float gMid = bands.shapers[1].computeGain (peak[1]);
+        const float gHigh = bands.shapers[2].computeGain (peak[2]);
+
+        float m = 0.0f;
+        if (bands.warmCountdown > 0)
+        {
+            if (--bands.warmCountdown == 0 && wantsBands())
+                bands.mix.setTarget (1.0f);
+        }
+        else
+        {
+            m = bands.mix.next();
+        }
+
+        for (int c = 0; c < numCh; ++c)
+        {
+            const auto& b = split[static_cast<size_t> (c)];
+            const float banded = gLow * b[0] + gMid * b[1] + gHigh * b[2];
+            float& y = block.channel (c)[i];
+            y = m == 1.0f ? banded : (1.0f - m) * full * y + m * banded;
+        }
+    }
 }
 
 void ClarityEnhancer::processBell (DynamicBell& bell, const AudioBlock& block, int numCh, int pos, int len, int phase,

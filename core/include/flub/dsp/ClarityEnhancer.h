@@ -1,6 +1,15 @@
 // Flubsound Pro - clarity & transient-detail enhancer.
 //
-//   1. Transient shaper (full band, linked): attackDb / sustainDb.
+//   1. Transient shaper (linked): attackDb / sustainDb. Full band while
+//      both band offsets are 0 (the shaper before docs/11 E04 step 3, bit-
+//      exact); otherwise 3 LR4 bands (below lowSplitHz, 60 - 200 Hz, up to
+//      4 kHz, above), each with its own TransientShaper timed for its band
+//      (TransientShaper::Timing::lowBand / midBand / highBand) at attackDb +
+//      attackLowDb / attackDb / attackDb + attackHighDb (each within
+//      +-12 dB) and sustainDb, and transientSpeed on their timing. The bands
+//      sum to an all-pass (Crossover.h), so the path crossfades in over
+//      20 ms once its shapers have warmed up, and out again when both
+//      offsets return to 0.
 //   2. De-mud: dynamic cut, bell ~250 Hz Q 1.0, CutAbove, range up to -4 dB
 //      scaled by deMud, threshold tracks the broadband level (-12 dB rel.)
 //      so it only acts when the low-mids are disproportionately loud.
@@ -31,6 +40,7 @@
 // counted. -160 dB while air is off.
 #pragma once
 
+#include "Crossover.h"
 #include "EnvelopeFollower.h"
 #include "ParallelDistortion.h"
 #include "Processor.h"
@@ -59,6 +69,13 @@ struct ClarityParams
     float air = 0.0f;                 // 0 .. 1
     float deMud = 0.0f;               // 0 .. 1
     PresenceMode presenceMode = PresenceMode::Absolute;
+    // Stage 1's 3-band path (docs/11 E04 step 3). The offsets are the
+    // clarity.attackLow / clarity.attackHigh parameters; the split and the
+    // speed are module settings (no parameter yet).
+    float attackLowDb = 0.0f;         // -12 .. +12, over attackDb below the split
+    float attackHighDb = 0.0f;        // -12 .. +12, over attackDb above 4 kHz
+    float lowSplitHz = 120.0f;        // 60 .. 200 Hz (25 ms log glide)
+    float transientSpeed = 1.0f;      // 0.5 .. 2: the band shapers' slow attack and releases / speed
 
     bool operator== (const ClarityParams&) const = default;
 };
@@ -78,6 +95,10 @@ public:
         output over the last 25 ms analysis window (dB; -160 = air off or
         silent). See the header comment. */
     float getDistortionDb() const noexcept FLUB_NONBLOCKING { return distortionDb.load (std::memory_order_relaxed); }
+
+    /** Stage 1 runs its 3-band path (fully or crossfading); false = the full-
+        band shaper alone. Audio thread (tests). */
+    bool isBandPathActive() const noexcept FLUB_NONBLOCKING { return bands.active; }
 
 private:
     // ---- implementation-defined below this line ----
@@ -122,6 +143,25 @@ private:
         std::array<std::array<SvfState, 2>, kMaxChannels> bodyState {};
     };
 
+    /** Stage 1's 3-band path (docs/11 E04 step 3). While it warms up its
+        shapers run on the bands but the output is still the full-band
+        shaper's; then mix crossfades (per sample) to the bands' sum. */
+    struct BandPath
+    {
+        bool active = false;
+        int warmCountdown = 0;                  // samples until the crossfade may start
+        LinearSmoothedValue mix;                // 0 = full-band shaper .. 1 = 3 bands
+        ThreeBandSplitter splitter;
+        std::array<TransientShaper, 3> shapers; // low, mid, high
+        OnePoleSmoother logSplitHz;             // control rate
+        float splitHz = 120.0f;
+    };
+
+    bool wantsBands() const noexcept { return params.attackLowDb != 0.0f || params.attackHighDb != 0.0f; }
+    void setBandTargets() noexcept;
+    void activateBands() noexcept;
+    void processShaper (const AudioBlock& block, int numCh, int pos, int len) noexcept;
+    void processBands (const AudioBlock& block, int numCh, int pos, int len) noexcept;
     void activateBell (DynamicBell& bell, double hz, double q) noexcept;
     void startBalance (bool fromNothing) noexcept;
     float updateBalance() noexcept;
@@ -144,8 +184,9 @@ private:
     int controlCountdown = kControlInterval;
     float msCoeff = 0.0f; // mean-square detector one-pole
 
-    // 1. Transient shaper (full band, linked).
+    // 1. Transient shaper (full band, linked) and the 3-band path.
     TransientShaper shaper;
+    BandPath bands;
 
     // 2. De-mud, 3. dynamic presence.
     DynamicBell deMud, presence;

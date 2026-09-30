@@ -37,6 +37,23 @@
 //
 // CPU per sample: one max per channel, 4 one-pole followers, at most two
 // logs (only while an indicator is inside its 0..6 dB range) and one exp.
+//
+// Timing (docs/11 E04 step 3): the constants above are Timing's defaults.
+// The band shapers of ClarityEnhancer's 3-band path hold for 25 ms / a third
+// of their split / 2 ms, attack their slow envelope in 10 / 8 / 5 ms (an
+// onset reads as one for about 0.7 of that, so the lift sits on the onset
+// and is gone 40 ms later) and release the attack pair program-dependently:
+//
+//   w   = clamp (20 log10 (A_slow / e) / 6 dB, 0, 1)   (the fall of the held level under A_slow)
+//   rel = coeff (attackReleaseMs) + (coeff (fastReleaseMs) - coeff (attackReleaseMs)) * w
+//
+// so after a decaying hit or in a gap both envelopes of the pair follow the
+// held level down fast (the next hit, 75 ms later, reads as a full onset
+// again), while the shallow dips of a sustained sound release them slowly
+// (no onset read on every dip). Both envelopes share rel, so their ratio -
+// the onset indicator - is unchanged while they fall. The speed divides
+// the slow attack and both releases (not the hold, which only removes
+// ripple, and not the sustain pair).
 #include "flub/dsp/TransientShaper.h"
 
 #include "flub/common/Math.h"
@@ -49,13 +66,10 @@ namespace flub
 namespace
 {
 constexpr float kFastAttackMs = 0.5f;
-constexpr float kSlowAttackMs = 20.0f;
-constexpr float kAttackPairReleaseMs = 60.0f;
 constexpr float kSustainPairAttackMs = 1.0f;
 constexpr float kSlowReleaseMs = 400.0f;
 constexpr float kFastReleaseMs = 40.0f;
 
-constexpr float kGainSmoothMs = 1.0f;
 // Gated sustain: a cut the onset gate lifts returns this fast, so a kick
 // arriving while the previous decay's cut is still in place keeps its first
 // milliseconds (Tighten 0.5 on kicks, first 10 ms: -0.62 dB with the 1 ms
@@ -95,17 +109,86 @@ float indicatorWeight (float ratio) noexcept
 }
 } // namespace
 
+TransientShaper::Timing TransientShaper::Timing::lowBand() noexcept
+{
+    Timing t;
+    t.holdMs = kHoldMs; // the anti-ripple hold: steady bass is never modulated
+    t.slowAttackMs = 10.0f;
+    t.attackReleaseMs = 60.0f;
+    t.fastReleaseMs = 15.0f;
+    t.gainSmoothMs = 0.4f;
+    return t;
+}
+
+TransientShaper::Timing TransientShaper::Timing::midBand (double splitHz) noexcept
+{
+    // The rectified period of split / 3 (half its period): its LR4 high-pass
+    // passes that at -38 dB, and at -38 dB a +-12 dB ripple would still
+    // move the output 0.4 dB.
+    Timing t;
+    t.holdMs = 1500.0 / std::clamp (splitHz, 60.0, 200.0);
+    t.slowAttackMs = 8.0f;
+    t.attackReleaseMs = 50.0f;
+    t.fastReleaseMs = 10.0f;
+    t.gainSmoothMs = 0.3f;
+    return t;
+}
+
+TransientShaper::Timing TransientShaper::Timing::highBand() noexcept
+{
+    Timing t;
+    t.holdMs = 2.0;
+    t.slowAttackMs = 5.0f;
+    t.attackReleaseMs = 40.0f;
+    t.fastReleaseMs = 8.0f;
+    t.gainSmoothMs = 0.25f;
+    return t;
+}
+
 void TransientShaper::prepare (double sampleRate) noexcept
 {
     sr = sampleRate > 0.0 ? sampleRate : 48000.0;
-    hold.prepare (sr, kHoldMs);
-    attackFast.prepare (sr, kFastAttackMs, kAttackPairReleaseMs);
-    attackSlow.prepare (sr, kSlowAttackMs, kAttackPairReleaseMs);
+    hold.prepare (sr, timing.holdMs);
+    attackFast.prepare (sr, kFastAttackMs, timing.attackReleaseMs);
+    attackSlow.prepare (sr, timing.slowAttackMs, timing.attackReleaseMs);
     sustainSlow.prepare (sr, kSustainPairAttackMs, kSlowReleaseMs);
     sustainFast.prepare (sr, kSustainPairAttackMs, kFastReleaseMs);
-    gainCoeff = onePoleCoeff (kGainSmoothMs, sr);
+    gainCoeff = onePoleCoeff (timing.gainSmoothMs, sr);
     gatedReturnCoeff = onePoleCoeff (kGatedReturnMs, sr);
+    programRelease = timing.fastReleaseMs > 0.0f;
+    updateTimes();
     reset();
+}
+
+void TransientShaper::updateTimes() noexcept
+{
+    const float slowAttack = timing.slowAttackMs / speed;
+    const float release = timing.attackReleaseMs / speed;
+    attackFast.setTimes (kFastAttackMs, release);
+    attackSlow.setTimes (slowAttack, release);
+    progFastAttack = onePoleCoeff (kFastAttackMs, sr);
+    progSlowAttack = onePoleCoeff (slowAttack, sr);
+    progSlowRelease = onePoleCoeff (release, sr);
+    progFastRelease = programRelease ? onePoleCoeff (timing.fastReleaseMs / speed, sr) : progSlowRelease;
+}
+
+void TransientShaper::setSpeed (float newSpeed) noexcept FLUB_NONBLOCKING
+{
+    if (std::isnan (newSpeed))
+        return;
+    const float s = std::clamp (newSpeed, 0.5f, 2.0f);
+    if (s == speed)
+        return;
+    speed = s;
+    updateTimes();
+}
+
+void TransientShaper::setHoldMs (double holdMs) noexcept FLUB_NONBLOCKING
+{
+    if (! (holdMs > 0.0) || holdMs == timing.holdMs)
+        return;
+    timing.holdMs = holdMs;
+    hold.resize (sr, holdMs);
 }
 
 void TransientShaper::reset() noexcept FLUB_NONBLOCKING
@@ -113,6 +196,7 @@ void TransientShaper::reset() noexcept FLUB_NONBLOCKING
     hold.reset();
     attackFast.reset (kDetectorFloor);
     attackSlow.reset (kDetectorFloor);
+    progFast = progSlow = kDetectorFloor;
     sustainSlow.reset (kDetectorFloor);
     sustainFast.reset (kDetectorFloor);
     attackAmount.reset (sr, kParamSmoothMs, attackDb);
@@ -145,8 +229,24 @@ float TransientShaper::computeGain (float linkedAbs) noexcept
         x = std::min (linkedAbs, kMaxDetector);
 
     const float d = hold.process (x) + kDetectorFloor;
-    const float aFast = attackFast.process (d);
-    const float aSlow = attackSlow.process (d);
+    float aFast, aSlow;
+    if (programRelease)
+    {
+        // Program-dependent release (see the header comment): both envelopes
+        // of the pair share the release coefficient, chosen by how far the
+        // held level has fallen under A_slow.
+        const float w = indicatorWeight (progSlow / d);
+        const float rel = progSlowRelease + (progFastRelease - progSlowRelease) * w;
+        progFast = d + (d > progFast ? progFastAttack : rel) * (progFast - d);
+        progSlow = d + (d > progSlow ? progSlowAttack : rel) * (progSlow - d);
+        aFast = progFast;
+        aSlow = progSlow;
+    }
+    else
+    {
+        aFast = attackFast.process (d);
+        aSlow = attackSlow.process (d);
+    }
     const float sSlow = sustainSlow.process (d);
     const float sFast = sustainFast.process (d);
 

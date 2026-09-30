@@ -271,6 +271,20 @@ std::vector<Info> buildLayout()
     // at any playback or mastering level).
     set (ClarityPresenceMode, v7 (choice ("clarity.presenceMode", "Presence Mode", "Clarity", { "Absolute", "Relative" }, 0)));
 
+    // ---- Batch 5 additions (layout version 8) ----------------------------------------------------
+    auto v8 = [] (Info i) {
+        i.sinceVersion = 8;
+        return i;
+    };
+    // docs/11 E04 step 3: the attack of the band below the low split and of
+    // the band above 4 kHz, as offsets over clarity.attack (which, like
+    // clarity.sustain, stays "all bands"). With both at 0, the default, the
+    // transient shaper stays full band, so every preset and state saved
+    // before them sounds as it did (bit-exact); any other value runs its
+    // 3-band path (ClarityEnhancer.h).
+    set (ClarityAttackLowDb, v8 (make ("clarity.attackLow", "Attack Low Offset", "Clarity", Unit::Db, -12.0f, 12.0f, 0.0f)));
+    set (ClarityAttackHighDb, v8 (make ("clarity.attackHigh", "Attack High Offset", "Clarity", Unit::Db, -12.0f, 12.0f, 0.0f)));
+
     // ---- Parametric EQ bands (ISO octave centres, all bells at 0 dB) ------------------------
     static const float eqFreqs[kEqBands] = { 32.0f, 64.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
     for (int b = 0; b < kEqBands; ++b)

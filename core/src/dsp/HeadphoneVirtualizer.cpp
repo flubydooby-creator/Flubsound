@@ -411,6 +411,52 @@ float HeadphoneVirtualizer::speakerAzimuthDeg (ChannelLayout layout, int channel
     return nan;
 }
 
+void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm, double sampleRate, int length, std::vector<float>& left,
+                                           std::vector<float>& right)
+{
+    // The design of updateGeometry() (snap) and the per-sample path of
+    // renderParametric<false>() for one speaker: shelf -> ITD line (Lagrange
+    // read) -> head shadow, then the output trim (make-up 1, no LFE).
+    const auto n = static_cast<size_t> (std::max (1, length));
+    left.assign (n, 0.0f);
+    right.assign (n, 0.0f);
+    const double fs = sampleRate > 0.0 && std::isfinite (sampleRate) ? std::clamp (sampleRate, 8000.0, 768000.0) : 48000.0;
+    const float az = std::isfinite (azimuthDeg) ? static_cast<float> (std::remainder (static_cast<double> (azimuthDeg), 360.0)) : 0.0f;
+    const double radius = static_cast<double> (clampOr (headRadiusMm, kMinHeadMm, kMaxHeadMm, VirtualizerParams {}.headRadiusMm)) * 0.001;
+    const double headDelay = radius / kSpeedOfSound * fs;
+    const double w0 = kSpeedOfSound / radius;
+
+    const auto shelf = SvfCoeffs::make (FilterType::HighShelf, kRearShelfHz, kRearShelfQ,
+                                        static_cast<double> (std::abs (az) > 90.0f ? kRearShelfDb : 0.0f), fs);
+    std::vector<float> line (n, 0.0f);
+    SvfState shelfState;
+    for (size_t i = 0; i < n; ++i)
+        line[i] = svfTick (shelf, shelfState, i == 0 ? 1.0f : 0.0f);
+
+    for (size_t e = 0; e < 2; ++e)
+    {
+        const double earAz = e == 0 ? -90.0 : 90.0;
+        const double thetaDeg = std::abs (std::remainder (static_cast<double> (az) - earAz, 360.0));
+        const auto delay = static_cast<float> (woodworth (thetaDeg * (kPi / 180.0)) * headDelay);
+        int base = 0;
+        std::array<float, 4> taps {};
+        lagrangeTaps (delay, base, taps);
+        const auto shadow = BiquadCoeffs::fromAnalogFirstOrder (1.0, shadowAlpha (thetaDeg) / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
+        BiquadState state;
+        auto& out = e == 0 ? left : right;
+        for (size_t i = 0; i < n; ++i)
+        {
+            float x = 0.0f;
+            for (size_t k = 0; k < taps.size(); ++k)
+            {
+                const auto back = static_cast<size_t> (base) + k;
+                x += i >= back ? taps[k] * line[i - back] : 0.0f;
+            }
+            out[i] = kTrim * static_cast<float> (biquadTick (shadow, state, static_cast<double> (x)));
+        }
+    }
+}
+
 //==============================================================================
 bool HeadphoneVirtualizer::loadHrir()
 {
