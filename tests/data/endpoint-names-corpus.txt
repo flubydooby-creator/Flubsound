@@ -21,6 +21,8 @@ headset | turtle-beach-stealth | Headset (Stealth 700 Gen 2 MAX Hands-Free AG Au
 headset | turtle-beach-stealth | Speakers (Turtle Beach Stealth Pro)
 headset | turtle-beach-stealth | Speakers (2- Stealth Pro Xbox)
 headset | turtle-beach-stealth | Stealth Pro
+headset | turtle-beach-stealth | Speakers (Stealth 600PC Gen 3)
+headset | turtle-beach-stealth | Speakers (2- Stealth 600PC Gen 3)
 headset | turtle-beach-stealth | Headset Earphone (Stealth 600 Gen 3)
 headset | turtle-beach-stealth | Headset (Stealth 600 Gen 3 Hands-Free AG Audio)
 headset | turtle-beach-stealth | Headset Earphone (Stealth 600 Gen 2 MAX for Xbox)

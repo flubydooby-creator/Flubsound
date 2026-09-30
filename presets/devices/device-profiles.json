@@ -29,7 +29,7 @@
       "vendor": "Turtle Beach",
       "family": "Stealth",
       "displayName": "Turtle Beach Stealth series",
-      "matchAny": ["stealth pro", "stealth 700", "stealth 600", "stealth 500", "stealth 400", "stealth 350", "stealth 300", "stealth 700x", "stealth 700p", "stealth 600x", "stealth 600p", "stealth 500x", "stealth 500p", "stealth 450", "stealth 420x", "stealth 350vr", "stealth 300x", "stealth 300p", {"token": "stealth", "generic": true}],
+      "matchAny": ["stealth pro", "stealth 700", "stealth 600", "stealth 500", "stealth 400", "stealth 350", "stealth 300", "stealth 700x", "stealth 700p", "stealth 600x", "stealth 600p", "stealth 600pc", "stealth 500x", "stealth 500p", "stealth 450", "stealth 420x", "stealth 350vr", "stealth 300x", "stealth 300p", {"token": "stealth", "generic": true}],
       "vendorWords": ["turtle beach", "turtlebeach", "ear force", "voyetra"],
       "exclude": ["razer", "blade stealth"],
       "specificity": 2,
