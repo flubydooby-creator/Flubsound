@@ -2272,10 +2272,16 @@ TEST_CASE ("KnownGap closed: hot master - the automatic preamp (auto.preamp, all
     // E04 step 2 (both presets use Tighten, 0.1 / 0.2, which no longer
     // cuts the kicks' onsets, so the limiter sees them): Signature 17.87 /
     // 7.47 % / -44.37 / -53.05 dB -> the values below, Punchy Pop 49.33 /
-    // 6.93 % / -36.47 / -48.75 dB -> the values below.
+    // 6.93 % / -36.47 / -48.75 dB -> 50.13 / 7.47 % / -38.65 / -54.87 dB.
+    // Re-based by docs/11 E04 step 4 (Punch adds clarity.attackHigh, so both
+    // presets run the shaper's 3-band path; the preamp and the prediction
+    // are unchanged, the hot-programme rows still <= 2 %): Signature 18.93 /
+    // 6.93 % / -41.53 / -50.78 dB -> the values below, Punchy Pop 50.13 /
+    // 7.47 % / -38.65 / -54.87 dB -> the values below (confirmed in review
+    // on a tree with only the E04 / E20 macro rows reverted: the old values).
     const Row rows[] = {
-        { "music-flubsound-signature.json", 18.93, 6.93, -41.53, -50.78 },
-        { "music-punchy-pop.json", 50.13, 7.47, -38.65, -54.87 },
+        { "music-flubsound-signature.json", 17.33, 7.20, -40.91, -50.20 },
+        { "music-punchy-pop.json", 43.47, 6.93, -36.47, -50.17 },
     };
     for (const auto& row : rows)
     {

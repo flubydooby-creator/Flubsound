@@ -318,11 +318,19 @@ processing chain, one pair per feature, and index.txt, which says per pair
 how both sides were set (`process --set` options), what changed in numbers
 and what to listen for.
 
-  Pairs: every macro of both modes 0 -> 100 % (Music: Punch, Width, Clarity,
-  Loudness, Warmth; Gaming: Footsteps, Positional, Impact, Detail, Voice &
-  Score), Boost 0 -> 50 and 0 -> 100 in both modes, Smoothness, headphone
-  crossfeed, the headphone virtualiser (on a 7.1 scene), the loudness contour,
-  Startle Guard, Night and the four maximizer styles.
+  Pairs (61): every macro of both modes 0 -> 100 % (Music: Punch, Width,
+  Clarity, Loudness, Warmth; Gaming: Footsteps, Positional, Impact, Detail,
+  Voice & Score), Punch and Impact at Boost 100, Boost 0 -> 50 and 0 -> 100
+  in both modes, Smoothness, the shaper's Attack Low / High, Relative
+  presence, the crossfeed and its types, the headphone virtualiser (on a 7.1
+  scene), the Enhanced renderer and its front / back contrast, the loudness
+  contour, Startle Guard, Night, the four maximizer styles, the genre and
+  levelling presets, the module cards (noise gate, EQ, dynamic EQ, bass
+  boost, harmonics, Tighten, saturation, Tape grit, compressor, automatic
+  preamp, latency profile, protection) and the app's own settings (Smart
+  macros, the headset enhancement cap, the safe speaker bass cap, a
+  headphone correction, the per-ear profile, the hearing cap, the chat duck
+  and ChatMix). docs/12-feature-guide.md names the pair of every control.
 
   * Programmes: built-in synthetic music, speech and a game scene (steps,
     gunshots, explosions, a voice line; a 7.1 version for the virtualiser),

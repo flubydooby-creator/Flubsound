@@ -518,9 +518,10 @@ TEST_CASE ("App UI: the batch 5 keys sit in their cards outside the generic grid
     CHECK (store.get (ClarityPresenceMode) == static_cast<float> (PresenceModeValue::Relative));
     for (const char* key : { "clarity.attackLow", "clarity.attackHigh" })
     {
+        // Layout version 8 has both keys (the card's drop path for a key the
+        // core lacks is covered by the table check above).
         const int id = findByKey (key);
-        if (id < 0)
-            continue; // not in this build's core yet: hidden
+        REQUIRE (id >= 0);
         auto* knob = findByTitle<juce::Slider> (*clarity, nameOf (id));
         REQUIRE (knob != nullptr);
         CHECK (visibleIn (rack, *knob));
@@ -554,6 +555,7 @@ TEST_CASE ("App UI: the batch 5 keys sit in their cards outside the generic grid
             REQUIRE (control != nullptr);
             CHECK (visibleIn (rack, *control));
         }
+    CHECK (named == 2); // both keys are in layout version 8
     CHECK (virt->getDescriptor().keys.size() == static_cast<size_t> (keysWithout + named));
 }
 

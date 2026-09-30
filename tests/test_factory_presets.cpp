@@ -1324,7 +1324,11 @@ double classicalHotMasterLraLu (bool autoPreamp, bool preampHot, cli::LoudnessRe
 // peaks arrive and releases at 1 dB/s. Closing it needs a preamp that knows
 // the track's peak ahead (E11's intro / loud-section row, look-ahead or a
 // learned per-track peak) or the preset's own headroom (a re-voicing).
-TEST_CASE ("KnownGap: Classical & Jazz Dynamic on a -10.5 LUFS pop master with auto.preamp on loses 1.42 LU of loudness range (E14 row <= 0.3 LU)")
+// Re-based by docs/11 E11's p3b5 predictor terms (the Bs2b crossfeed's
+// centred sum now counts in the preamp, -4.77 -> -6.07 dB at -18 dBFS):
+// auto.preamp 1.42 -> 0.72 LU (limiter > 1 dB 59.1 -> 22.7 %), with
+// auto.preampHot 0.97 -> 0.44 LU (45.2 -> 0.5 %); both still over the row.
+TEST_CASE ("KnownGap: Classical & Jazz Dynamic on a -10.5 LUFS pop master with auto.preamp on loses 0.72 LU of loudness range (E14 row <= 0.3 LU)")
 {
     cli::LoudnessReport in;
     const double lra = classicalHotMasterLraLu (true, false, &in);
@@ -1334,7 +1338,7 @@ TEST_CASE ("KnownGap: Classical & Jazz Dynamic on a -10.5 LUFS pop master with a
     measured ("Classical & Jazz, auto.preamp: loudness range lost", in.loudnessRangeLu - lra, "LU");
     CHECK_NEAR (in.integratedLufs, -10.5, 0.05);
     CHECK_NEAR (in.truePeakDbtp, -0.35, 0.1);
-    CHECK_NEAR (in.loudnessRangeLu - lra, 1.42, 0.1); // KNOWN_GAP: target <= 0.3 LU per docs/11 E14
+    CHECK_NEAR (in.loudnessRangeLu - lra, 0.72, 0.1); // KNOWN_GAP: target <= 0.3 LU per docs/11 E14
 }
 
 TEST_CASE ("KnownGap: Classical & Jazz Dynamic on the -10.5 LUFS pop master without a preamp loses 1.48 LU of loudness range (E14 / E11)")
@@ -1345,12 +1349,12 @@ TEST_CASE ("KnownGap: Classical & Jazz Dynamic on the -10.5 LUFS pop master with
     CHECK_NEAR (in.loudnessRangeLu - off, 1.48, 0.1); // KNOWN_GAP: target <= 0.3 LU per docs/11 E14
 }
 
-TEST_CASE ("KnownGap: Classical & Jazz Dynamic on the -10.5 LUFS pop master with auto.preamp + auto.preampHot loses 0.97 LU of loudness range (E14 / E11)")
+TEST_CASE ("KnownGap: Classical & Jazz Dynamic on the -10.5 LUFS pop master with auto.preamp + auto.preampHot loses 0.44 LU of loudness range (E14 / E11)")
 {
     cli::LoudnessReport in;
     const double hot = classicalHotMasterLraLu (true, true, &in);
     measured ("Classical & Jazz, auto.preamp + auto.preampHot: loudness range lost", in.loudnessRangeLu - hot, "LU");
-    CHECK_NEAR (in.loudnessRangeLu - hot, 0.97, 0.1); // KNOWN_GAP: target <= 0.3 LU per docs/11 E14
+    CHECK_NEAR (in.loudnessRangeLu - hot, 0.44, 0.1); // KNOWN_GAP: target <= 0.3 LU per docs/11 E14
 }
 
 #endif // FLUB_PRESET_DIR

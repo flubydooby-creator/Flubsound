@@ -368,6 +368,10 @@ jobs:
         shell: bash
         run: |
           version=$(sed -nE 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*FLUB_JUCE_VERSION[[:space:]]+"([^"]+)".*/\1/p' cmake/FlubJuce.cmake | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error file=cmake/FlubJuce.cmake::FLUB_JUCE_VERSION not found"
+            exit 1
+          fi
           echo "FLUB_JUCE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Cache JUCE
         uses: actions/cache@v4
