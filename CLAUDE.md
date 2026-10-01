@@ -16,8 +16,9 @@ The product is called **Flubsound**; never use any other name.
 
 ## Building on Windows (the owner's PC)
 
-Requirements: Visual Studio 2022 with "Desktop development with C++" (includes CMake and Ninja), Git.
-Run from the "x64 Native Tools Command Prompt for VS 2022" (MSVC must be on PATH; MinGW is not supported by JUCE 9):
+Requirements: Visual Studio 2022 or 2026 with "Desktop development with C++" (includes CMake and Ninja), Git.
+The owner's PC has Visual Studio 2026 Community (MSVC 19.51). Run from the "x64 Native Tools Command Prompt"
+(or call `VC\Auxiliary\Build\vcvars64.bat` first; MSVC must be on PATH; MinGW is not supported by JUCE 9):
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_TESTS=ON -DFLUB_BUILD_TOOLS=ON
@@ -85,6 +86,15 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   errors), `ctest` under xvfb (flub_tests and flub_app_tests) and the golden step (`FLUB_GOLDEN_REFERENCE=1`) all passed.
 - **Real hardware:** only the per-app capture and the double-audio fix have been confirmed, on the owner's PC.
 
+### Local session progress (Windows, from 2026-09-30)
+
+- **Step 1 done.** First MSVC build (Visual Studio 2026, warnings as errors): app, plug-in, tools and tests build;
+  `ctest` passes. Only three test files needed fixes (`getenv` → `_dupenv_s`, one unused X11 guard).
+- **E16 owner-verified:** the owner's headset is a **Turtle Beach Stealth 600PC Gen 3** on its USB dongle; Windows
+  names it "Speakers (Stealth 600PC Gen 3)", which matched nothing until a `stealth 600pc` token was added.
+- **E34 done:** a preset's `smart` flag is applied by the app, the plug-in and the CLI (see the docs/11 E34 Status).
+- A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
+
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows** (commands above) and run `ctest`. Fix any MSVC-only compile errors or test failures first;
@@ -111,7 +121,6 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - Soak: 12 clicks at −40 to −50 dB. Two of them come from E04's high-band onset lift.
    - E28: the comb row is 18.9 dB against a < 12 dB target.
    - E04 step 5: Quality look-ahead and the plug-in PDC.
-   - E34: the preset `smart` flag is not applied on load.
    - E20: the Impact burst is missing from the auto-preamp model.
    - E11: Classical and Jazz lose 0.72 / 0.44 LU.
    - E22: the chat sub-limiter.

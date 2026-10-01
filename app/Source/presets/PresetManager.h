@@ -114,16 +114,19 @@ public:
 
     // ---- Strip glue ----------------------------------------------------------------
     /** Loads a preset into a strip's ACTIVE bank and remembers it as the strip's
-        current preset. */
-    bool loadIntoStrip (int strip, const PresetInfo& info, flub::param::ParameterStore& store, juce::String& error);
+        current preset. `smart` (optional) receives the preset's "smart" flag
+        (docs/11 E34): not a parameter, so the caller hands it to the strip. */
+    bool loadIntoStrip (int strip, const PresetInfo& info, flub::param::ParameterStore& store, juce::String& error,
+                        bool* smart = nullptr);
 
     /** Loads into an explicit bank (does not change the strip's current preset).
         Writes the preset's sound only: Bypass All, loudness-matched bypass and
         the latency profile keep the bank's values (see the file comment). */
-    bool loadIntoBank (const PresetInfo& info, flub::param::ParameterStore& store, flub::param::Bank bank, juce::String& error) const;
+    bool loadIntoBank (const PresetInfo& info, flub::param::ParameterStore& store, flub::param::Bank bank, juce::String& error,
+                       bool* smart = nullptr) const;
 
     /** next / previous preset relative to the strip's current one (wraps). */
-    bool stepPreset (int strip, int direction, flub::param::ParameterStore& store, juce::String& error);
+    bool stepPreset (int strip, int direction, flub::param::ParameterStore& store, juce::String& error, bool* smart = nullptr);
 
     juce::String getCurrentPresetId (int strip) const;
     /** Marks `id` as the strip's current preset without loading it (e.g. when
@@ -139,12 +142,16 @@ public:
     // ---- Saving -------------------------------------------------------------------------
     /** Saves the store's active bank as a user preset, every sound parameter
         included. A new file gets a new uuid; overwriting a file keeps its
-        preset's uuid. Returns the preset's id (empty on failure). */
+        preset's uuid. `smart`: the strip's Smart macros, written as the
+        preset's "smart" flag (docs/11 E34). Returns the preset's id (empty on
+        failure). */
     juce::String saveUserPreset (const juce::String& name, const juce::String& category, const juce::String& description,
-                                 const flub::param::ParameterStore& store, juce::String& error, bool overwriteExisting = true);
+                                 const flub::param::ParameterStore& store, juce::String& error, bool overwriteExisting = true,
+                                 bool smart = false);
 
-    /** Overwrites the strip's current preset if it is a user preset. */
-    bool saveCurrent (int strip, const flub::param::ParameterStore& store, juce::String& error);
+    /** Overwrites the strip's current preset if it is a user preset (`smart`
+        as in saveUserPreset). */
+    bool saveCurrent (int strip, const flub::param::ParameterStore& store, juce::String& error, bool smart = false);
 
     /** The audition bank (docs/11 E40): given a store and a bank, fills
         `values` (param::kNumParams) with what a save must take and returns

@@ -62,6 +62,9 @@ struct RenderOptions
     // SafetyGovernor reach (--protection): a host setting of the chain, not
     // a parameter (ProcessingChain::setProtectionStrength); Off like the app.
     ProtectionStrength protection = ProtectionStrength::Off;
+    // Smart macros (--smart, docs/11 E34): a host setting of the chain like
+    // protection; unset = the preset's own "smart" flag.
+    std::optional<bool> smart;
     io::SampleFormat format = io::SampleFormat::Float32;
     int blockSize = 512;
 };
@@ -104,6 +107,7 @@ struct ResolvedParameters
 {
     std::vector<float> values;      // param::kNumParams base values for the store
     std::string presetDescription;  // "defaults", "factory preset 'X' (...)", ...
+    bool smart = false;             // Smart macros: --smart, else the preset's "smart" flag (docs/11 E34)
     std::vector<std::string> notes; // informational adjustments worth printing
 };
 

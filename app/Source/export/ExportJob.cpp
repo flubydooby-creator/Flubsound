@@ -194,12 +194,13 @@ std::vector<float> ExportJob::snapshotStrip (const ParameterStore& store)
     return values;
 }
 
-bool ExportJob::presetValues (const PresetManager& presets, const PresetInfo& preset, std::vector<float>& values, juce::String& error)
+bool ExportJob::presetValues (const PresetManager& presets, const PresetInfo& preset, std::vector<float>& values, juce::String& error,
+                              bool* smart)
 {
     // A fresh store (defaults, Bypass All off) receives the preset through the
     // PresetManager's own rules (loadIntoBank keeps the bank's bypass value).
     auto store = std::make_unique<ParameterStore>();
-    if (! presets.loadIntoBank (preset, *store, Bank::A, error))
+    if (! presets.loadIntoBank (preset, *store, Bank::A, error, smart))
         return false;
     store->setActiveBank (Bank::A);
     values = snapshotStrip (*store);
@@ -232,6 +233,7 @@ flub::cli::RenderSettings ExportJob::makeRenderSettings (const ExportSettings& s
     flub::cli::RenderSettings rs;
     rs.blockSize = s.blockSize;
     rs.targetLufs = s.targetLufs;
+    rs.smartMacros = s.smartMacros;
     if ((s.ceilingDb || s.targetLufs) && values.size() == static_cast<size_t> (kNumParams))
         rs.verifyCeilingDb = values[static_cast<size_t> (MaxCeilingDb)];
     return rs;

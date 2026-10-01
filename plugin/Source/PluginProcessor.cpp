@@ -24,6 +24,9 @@ constexpr int kStructuralPollHz = 5;
 
 const juce::Identifier kStateType { "FlubsoundFX" };
 const juce::Identifier kStateVersionProperty { "flubStateVersion" };
+// Smart macros (docs/11 E34): written only while on, so states without them
+// keep their bytes; a state without it loads with them off.
+const juce::Identifier kSmartMacrosProperty { "flubSmartMacros" };
 constexpr int kStateVersion = 1;
 // AudioProcessorValueTreeState's tree layout: <PARAM id="key" value="..."/>
 // per parameter (the denormalised value).
@@ -493,6 +496,8 @@ void FlubsoundProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     state.setProperty (kStateVersionProperty, kStateVersion, nullptr);
+    if (chain.getSmartMacros())
+        state.setProperty (kSmartMacrosProperty, true, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -543,6 +548,7 @@ void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     juce::ValueTree state (apvts.state.getType());
     state.copyPropertiesFrom (saved, nullptr);
+    state.removeProperty (kSmartMacrosProperty, nullptr); // the chain holds it, getStateInformation writes it
     for (auto child : saved)
         if (! child.hasType (kParamType))
             state.appendChild (child.createCopy(), nullptr);
@@ -576,6 +582,7 @@ void FlubsoundProcessor::setStateInformation (const void* data, int sizeInBytes)
     }
     apvts.replaceState (state); // the audio thread picks the values up through the raw values
     snapRawValues (values, false);
+    chain.setSmartMacros (static_cast<bool> (saved.getProperty (kSmartMacrosProperty, false)));
 
     for ([[maybe_unused]] const auto& w : warnings)
         DBG ("Flubsound FX state: " << juce::String (w));
@@ -618,6 +625,7 @@ bool FlubsoundProcessor::importPreset (const juce::File& file, juce::String& err
         }
     }
     snapRawValues (preset.values, true); // the preset's own values, as the app plays them
+    chain.setSmartMacros (preset.smart);  // docs/11 E34: part of the preset, so one without it turns Smart off
     if (warnings != nullptr)
     {
         warnings->clear();
@@ -652,6 +660,7 @@ bool FlubsoundProcessor::exportPreset (const juce::File& file, juce::String& err
     }
     const auto bypass = static_cast<size_t> (flub::param::BypassAll);
     preset.values[bypass] = table[bypass].defaultValue;
+    preset.smart = chain.getSmartMacros();
 
     // Numbers are floats: write them with float precision ("0.6", not
     // "0.6000000238418579") so presets stay readable and diff cleanly.

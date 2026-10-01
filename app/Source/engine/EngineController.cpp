@@ -626,8 +626,10 @@ bool EngineController::loadPreset (const juce::String& presetId, int strip, juce
 bool EngineController::loadPreset (const PresetInfo& preset, int strip, juce::String& error)
 {
     const int s = resolveStrip (strip);
-    if (! presets->loadIntoStrip (s, preset, getParams (s), error))
+    bool smart = false;
+    if (! presets->loadIntoStrip (s, preset, getParams (s), error, &smart))
         return false;
+    setPresetSmartMacros (s, smart);
     settings->setLastPreset (getStripName (s), preset.id);
     presetChangedByUser (s);
     presetLoadedByUser (preset);
@@ -639,8 +641,10 @@ bool EngineController::nextPreset (int strip)
 {
     const int s = resolveStrip (strip);
     juce::String error;
-    if (! presets->stepPreset (s, +1, getParams (s), error))
+    bool smart = false;
+    if (! presets->stepPreset (s, +1, getParams (s), error, &smart))
         return false;
+    setPresetSmartMacros (s, smart);
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
     presetChangedByUser (s);
     if (const auto* info = presets->findById (presets->getCurrentPresetId (s)))
@@ -653,8 +657,10 @@ bool EngineController::previousPreset (int strip)
 {
     const int s = resolveStrip (strip);
     juce::String error;
-    if (! presets->stepPreset (s, -1, getParams (s), error))
+    bool smart = false;
+    if (! presets->stepPreset (s, -1, getParams (s), error, &smart))
         return false;
+    setPresetSmartMacros (s, smart);
     settings->setLastPreset (getStripName (s), presets->getCurrentPresetId (s));
     presetChangedByUser (s);
     if (const auto* info = presets->findById (presets->getCurrentPresetId (s)))
@@ -685,7 +691,7 @@ juce::String EngineController::saveUserPreset (const juce::String& name, const j
 {
     const int s = resolveStrip (strip);
     auto& store = getParams (s);
-    const auto id = presets->saveUserPreset (name, category, description, store, error, true);
+    const auto id = presets->saveUserPreset (name, category, description, store, error, true, getSmartMacros (s));
     if (id.isNotEmpty())
     {
         // docs/11 E40: the saved sound (the pre-preview one while a preview
@@ -2183,6 +2189,7 @@ void EngineController::applyAutoProfile (const AutoProfileRule& rule)
         point.presetId = presets->getCurrentPresetId (s);
         point.presetModified = presets->isModified (s, store);
         point.activeBank = store.getActiveBank();
+        point.smartMacros = getSmartMacros (s);
         for (int i = 0; i < kNumParams; ++i)
         {
             point.bankA.push_back (store.get (Bank::A, i));
@@ -2195,12 +2202,14 @@ void EngineController::applyAutoProfile (const AutoProfileRule& rule)
     forgetLatches (s);
     const auto preset = *info;
     juce::String error;
-    if (! presets->loadIntoStrip (s, preset, store, error))
+    bool smart = false;
+    if (! presets->loadIntoStrip (s, preset, store, error, &smart))
     {
         autoRestorePoint.reset();
         autoProfileError = "Automatic profile for " + rule.executable + ": " + error;
         return;
     }
+    setPresetSmartMacros (s, smart);
     if (rule.mode != AutoProfileRule::Mode::Preset)
         store.set (Mode, static_cast<float> (static_cast<int> (rule.mode == AutoProfileRule::Mode::Gaming ? ModeValue::Gaming : ModeValue::Music)));
     autoAppliedPresetId = preset.id;
@@ -2239,6 +2248,7 @@ void EngineController::endAutoProfile (const AutoProfileSwitcher::Action& action
     }
     if (! reference)
         presets->setCurrentPresetId (s, info != nullptr ? point->presetId : juce::String(), &store);
+    setPresetSmartMacros (s, point->smartMacros);
     settings->setLastPreset (getStripName (s), info != nullptr ? point->presetId : juce::String());
     notify (Change::Preset);
 }
@@ -2695,5 +2705,13 @@ void EngineController::setSmartMacros (bool on, int strip)
     settings->setSmartMacros (getStripName (resolveStrip (strip)), on);
     applySmartMacros();
     notify (Change::Settings);
+}
+
+void EngineController::setPresetSmartMacros (int strip, bool on)
+{
+    // Part of the preset (docs/11 E34): the switch follows it, and the
+    // Settings page hears about it only when it moved.
+    if (getSmartMacros (strip) != on)
+        setSmartMacros (on, strip);
 }
 } // namespace flub::app

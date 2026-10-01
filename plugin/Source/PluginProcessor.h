@@ -92,13 +92,21 @@ public:
     /** Telemetry published by the audio thread (atomics; poll from a timer). */
     const flub::MeterBus& getMeters() noexcept { return chain.meters(); }
 
-    /** Loads a Flubsound preset JSON (*.flubpreset.json) into the parameters.
-        `warnings` (optional) receives what the reader ignored or changed:
-        unknown keys, clamped values, a newer schema minor. */
+    /** Loads a Flubsound preset JSON (*.flubpreset.json) into the parameters
+        and the preset's "smart" flag into the chain (Smart macros, docs/11
+        E34; a preset without it turns them off). `warnings` (optional)
+        receives what the reader ignored or changed: unknown keys, clamped
+        values, a newer schema minor. */
     bool importPreset (const juce::File& file, juce::String& error, juce::StringArray* warnings = nullptr);
 
-    /** Writes the current parameters as a Flubsound preset JSON. */
+    /** Writes the current parameters (and "smart" while Smart macros are on)
+        as a Flubsound preset JSON. */
     bool exportPreset (const juce::File& file, juce::String& error) const;
+
+    /** Smart macros (docs/11 E34): not a parameter but a preset / host
+        setting of the chain, set by importPreset and saved in the state
+        (missing = off). */
+    bool getSmartMacros() const noexcept { return chain.getSmartMacros(); }
 
     /** The chain's latency in samples as last reported to the host. */
     int getChainLatencySamples() const noexcept { return reportedLatency.load (std::memory_order_relaxed); }

@@ -144,6 +144,8 @@ std::string describeSettings (const ResolvedParameters& p, const RenderOptions& 
     s += ", profile " + formatParameterValue (LatencyProfile, val (LatencyProfile));
     s += ", maximizer " + formatParameterValue (MaximizerOn, val (MaximizerOn));
     s += " (drive " + formatParameterValue (MaxDriveDb, val (MaxDriveDb)) + ", ceiling " + fmt ("%.1f dBTP", val (MaxCeilingDb)) + ")";
+    if (p.smart)
+        s += ", Smart macros on";
     if (o.targetLufs)
         s += ", target " + fmt ("%.1f LUFS", *o.targetLufs);
     s += ", output " + std::string (sampleFormatName (o.format)) + "\n";
@@ -189,6 +191,7 @@ json::Value renderInfoJson (const RenderResult& rr, const RenderOptions& o, cons
 {
     json::Value r;
     r.set ("preset", p.presetDescription);
+    r.set ("smartMacros", p.smart);
     r.set ("passes", rr.passes);
     r.set ("latencySamples", rr.latencySamples);
     r.set ("latencyMs", std::round (1.0e5 * rr.latencySamples / sampleRate) / 100.0);
@@ -271,6 +274,7 @@ RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParamet
     rs.blockSize = o.blockSize;
     rs.targetLufs = o.targetLufs;
     rs.protection = o.protection;
+    rs.smartMacros = p.smart;
     if (o.ceilingDb || o.targetLufs)
         rs.verifyCeilingDb = p.values[static_cast<size_t> (param::MaxCeilingDb)];
     return rs;
@@ -1182,12 +1186,12 @@ json::Value dbValue (double v) { return json::Value (std::round (v * 100.0) / 10
 } // namespace
 
 bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
-                     const QualityInjector& inject, ProtectionStrength protection)
+                     const QualityInjector& inject, ProtectionStrength protection, bool smartMacros)
 {
     report = QualityReport();
     const auto render = [&] (const std::vector<float>& mono, Stereo& out, RenderStats* stats) {
         int latency = 0;
-        if (! renderPass (qualityInput (mono), values, blockSize, out, latency, error, nullptr, stats, protection))
+        if (! renderPass (qualityInput (mono), values, blockSize, out, latency, error, nullptr, stats, protection, smartMacros))
             return false;
         if (inject)
             inject (out);
@@ -1292,7 +1296,7 @@ bool measureQuality (const std::vector<float>& values, int blockSize, QualityRep
 
 // ---- hygiene (docs/11 E10) --------------------------------------------------
 bool measureHygiene (const std::vector<float>& values, double sampleRate, int blockSize, HygieneReport& report, std::string& error,
-                     ProtectionStrength protection)
+                     ProtectionStrength protection, bool smartMacros)
 {
     report = HygieneReport();
     report.sampleRate = sampleRate;
@@ -1303,7 +1307,7 @@ bool measureHygiene (const std::vector<float>& values, double sampleRate, int bl
         d.numChannels = 2;
         d.channels = { mono, mono };
         int latency = 0;
-        return renderPass (d, values, blockSize, out, latency, error, nullptr, nullptr, protection);
+        return renderPass (d, values, blockSize, out, latency, error, nullptr, nullptr, protection, smartMacros);
     };
     Stereo out;
 
@@ -1493,8 +1497,8 @@ int runQuality (const CliOptions& o)
     logSettings (log, params, o.render);
     QualityReport report;
     HygieneReport hygiene;
-    if (! measureQuality (params.values, o.render.blockSize, report, error, {}, o.render.protection)
-        || ! measureHygiene (params.values, o.rate, o.render.blockSize, hygiene, error, o.render.protection))
+    if (! measureQuality (params.values, o.render.blockSize, report, error, {}, o.render.protection, params.smart)
+        || ! measureHygiene (params.values, o.rate, o.render.blockSize, hygiene, error, o.render.protection, params.smart))
     {
         log.error (error);
         return kExitFailure;

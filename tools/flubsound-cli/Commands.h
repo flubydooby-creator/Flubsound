@@ -121,7 +121,8 @@ using QualityInjector = std::function<void (std::vector<std::vector<float>>& out
 /** Renders and measures every quality stimulus with `values` (param::kNumParams
     base values) at `blockSize`. Non-RT, allocates; about 34 s of audio. */
 bool measureQuality (const std::vector<float>& values, int blockSize, QualityReport& report, std::string& error,
-                     const QualityInjector& inject = {}, ProtectionStrength protection = ProtectionStrength::Off);
+                     const QualityInjector& inject = {}, ProtectionStrength protection = ProtectionStrength::Off,
+                     bool smartMacros = false);
 
 /** Signal hygiene (docs/11 E10) at any sample rate: `quality`'s hygiene
     family, measured at `--rate` (default 48 kHz) on the output mid.
@@ -147,7 +148,7 @@ struct HygieneReport
 };
 
 bool measureHygiene (const std::vector<float>& values, double sampleRate, int blockSize, HygieneReport& report, std::string& error,
-                     ProtectionStrength protection = ProtectionStrength::Off);
+                     ProtectionStrength protection = ProtectionStrength::Off, bool smartMacros = false);
 
 /** The hygiene object of `quality --json` (dB rounded to 0.01). */
 json::Value hygieneToJson (const HygieneReport& report);

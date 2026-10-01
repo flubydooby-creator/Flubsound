@@ -727,7 +727,8 @@ void HeaderBar::showPresetMenu()
                                 {
                                     juce::String error;
                                     const int strip = self.controller.getSelectedStrip();
-                                    if (! self.controller.getPresetManager().saveCurrent (strip, self.controller.getParams (strip), error))
+                                    if (! self.controller.getPresetManager().saveCurrent (strip, self.controller.getParams (strip), error,
+                                                                                           self.controller.getSmartMacros (strip)))
                                         self.showError ("Could not save the preset", error);
                                     self.updateStatus();
                                     break;

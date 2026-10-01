@@ -271,4 +271,45 @@ TEST_CASE ("Plug-in state: every Gaming and device factory preset round-trips bi
     CHECK (factoryPresets().size() >= 25); // the Done-when's 25+
 }
 
+TEST_CASE ("Plug-in Smart macros (docs/11 E34): a preset's \"smart\" flag is imported, exported and kept in the state; a state without it loads with Smart off")
+{
+    flubapptest::TempFolder temp;
+    auto smartPreset = flub::preset::makeDefault();
+    smartPreset.name = "Smart";
+    smartPreset.smart = true;
+    const auto smartFile = temp.file ("smart.flubpreset.json");
+    REQUIRE (smartFile.replaceWithText (juce::String::fromUTF8 (flub::json::write (flub::preset::toJson (smartPreset), 2).c_str())));
+    auto plainPreset = smartPreset;
+    plainPreset.smart = false;
+    const auto plainFile = temp.file ("plain.flubpreset.json");
+    REQUIRE (plainFile.replaceWithText (juce::String::fromUTF8 (flub::json::write (flub::preset::toJson (plainPreset), 2).c_str())));
+
+    FlubsoundProcessor a;
+    const auto offState = saveState (a);
+    CHECK (! a.getSmartMacros());
+    juce::String error;
+    REQUIRE (a.importPreset (smartFile, error));
+    CHECK (a.getSmartMacros());
+    CHECK (checkRoundTrip (a, "smart preset", false) == 0);
+    const auto smartState = saveState (a);
+    FlubsoundProcessor b;
+    b.setStateInformation (smartState.getData(), static_cast<int> (smartState.getSize()));
+    CHECK (b.getSmartMacros());
+
+    // Export writes it; importing a preset without it turns Smart off.
+    const auto exported = temp.file ("exported.flubpreset.json");
+    REQUIRE (a.exportPreset (exported, error));
+    flub::json::Value root;
+    std::string parseError;
+    REQUIRE (flub::json::parse (exported.loadFileAsString().toStdString(), root, parseError));
+    CHECK (root["smart"].asBool (false));
+    REQUIRE (a.importPreset (plainFile, error));
+    CHECK (! a.getSmartMacros());
+    CHECK (saveState (a) == offState); // Smart off writes no property: older states keep their bytes
+
+    // A state without the property (an older project) loads with Smart off.
+    b.setStateInformation (offState.getData(), static_cast<int> (offState.getSize()));
+    CHECK (! b.getSmartMacros());
+}
+
 #endif // FLUB_APP_TESTS_HAVE_PLUGIN

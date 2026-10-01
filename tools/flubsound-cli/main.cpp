@@ -82,6 +82,9 @@ options, --target-lufs and --format):
                                  app): normal also governs the base max.drive,
                                  sat.drive and bass.harmonics, strict lets the
                                  scale fall to 0
+      --smart on|off             Smart macros (default: the preset's own
+                                 "smart" flag, off without one): the content
+                                 analysis scales what the macros add
   -f, --format f32|pcm24|pcm16   output sample format (default f32; PCM is
                                  TPDF dithered)
       --block N                  processing block size (default 512)
@@ -230,7 +233,7 @@ Measures the sound quality of a setting on pinned test stimuli (docs/11
 E59): the stimuli are generated (48 kHz, fixed seeds), rendered through the
 processing chain exactly as `process` would, and measured on the output mid.
 The settings options are those of `process` (--preset, --mode, --boost,
---macro, --set, --ceiling, --profile, --protection, --block).
+--macro, --set, --ceiling, --profile, --protection, --smart, --block).
 
   THD+N    sines at 40 / 60 / 100 / 1000 Hz, -6 dBFS peak: everything but the
            fundamental, dB re the output

@@ -3,7 +3,8 @@
 // the reading at the end of the programme), the harmonics reading of the
 // bass harmonics generator / air exciter, `--protection` (the chain's
 // protection strength, a host setting) and `quality --rate` (the hygiene
-// family's sample rate). Each render is a few seconds of 48 kHz audio.
+// family's sample rate) and `--smart` with a preset's "smart" flag (docs/11
+// E34). Each render is a few seconds of 48 kHz audio.
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -13,8 +14,12 @@
 
 #include "flub/common/Math.h"
 #include "flub/engine/Protection.h"
+#include "flub/io/PresetIO.h"
 
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -139,4 +144,76 @@ TEST_CASE ("CLI --protection reaches the chain: Normal governs the base drives (
     CHECK_LE (normal.stats.distortionMeanDb, off.stats.distortionMeanDb - 0.5f);
     CHECK_GE (off.stats.governorScaleMin, 0.3f - 1.0e-6f);
     CHECK_LE (strict.stats.governorScaleMin, 0.3f - 0.05f);
+}
+
+TEST_CASE ("CLI Smart macros (docs/11 E34): a preset's \"smart\" flag reaches the render, --smart on|off overrides it, and quality takes it too")
+{
+    namespace fs = std::filesystem;
+    std::random_device rd;
+    const fs::path file = fs::temp_directory_path() / ("flub_smart_" + std::to_string (rd()) + ".json");
+    struct Remove
+    {
+        fs::path p;
+        ~Remove() { std::error_code ec; fs::remove (p, ec); }
+    } const cleanup { file };
+
+    // A preset with Smart macros: Music, Boost 100, Punch 100, Loudness 60.
+    std::vector<std::string> base { "--mode", "music", "--boost", "100", "--macro", "punch=100", "loudness=60" };
+    auto smartPreset = preset::makeDefault();
+    smartPreset.name = "Smart test";
+    smartPreset.values = resolveArgs (base);
+    smartPreset.smart = true;
+    std::string error;
+    REQUIRE (preset::save (file.string(), smartPreset, error));
+
+    const auto resolve = [] (std::vector<std::string> args) {
+        args.insert (args.begin(), { "process", "-i", "in.wav", "-o", "out.wav" });
+        CliOptions o;
+        std::string e;
+        REQUIRE (parseCommandLine (args, o, e));
+        ResolvedParameters p;
+        REQUIRE (buildParameters (o.render, p, e));
+        return std::make_pair (o, p);
+    };
+    const auto [plainOptions, plain] = resolve (base);
+    const auto [fromPresetOptions, fromPreset] = resolve ({ "--preset", file.string() });
+    const auto [forcedOffOptions, forcedOff] = resolve ({ "--preset", file.string(), "--smart", "off" });
+    const auto [forcedOnOptions, forcedOn] = resolve ({ "--smart", "on", "--mode", "music", "--boost", "100", "--macro", "punch=100", "loudness=60" });
+    CHECK (! plain.smart);
+    CHECK (fromPreset.smart);
+    CHECK (! forcedOff.smart);
+    CHECK (forcedOn.smart);
+    CHECK (fromPreset.values == plain.values);
+    CHECK (makeRenderSettings (fromPresetOptions.render, fromPreset).smartMacros);
+    CHECK (! makeRenderSettings (forcedOffOptions.render, forcedOff).smartMacros);
+
+    CliOptions bad;
+    CHECK (! parseCommandLine ({ "process", "-i", "a.wav", "-o", "b.wav", "--smart", "maybe" }, bad, error));
+    CHECK (error.find ("--smart expects on or off") != std::string::npos);
+    REQUIRE (parseCommandLine ({ "quality", "--smart", "on" }, bad, error));
+    CHECK (bad.render.smart == std::optional<bool> (true));
+
+    // A limited master (pink through a hard tanh, PLR well under 7.5 LU): Smart
+    // takes back attack and drive, so the preset's render differs from the
+    // static one and matches --smart on bit for bit.
+    auto mono = pinkNoise (static_cast<int> (2.0 * kFs), 0.25f, 77);
+    for (auto& x : mono)
+        x = 0.9f * std::tanh (6.0f * x);
+    const auto input = stereoOf (mono);
+    const auto render = [&input] (const std::vector<float>& values, const RenderSettings& s) {
+        RenderResult rr;
+        std::string e;
+        REQUIRE (renderFile (input, values, s, rr, e));
+        return rr.output.channels;
+    };
+    const auto staticOut = render (plain.values, makeRenderSettings (plainOptions.render, plain));
+    const auto presetOut = render (fromPreset.values, makeRenderSettings (fromPresetOptions.render, fromPreset));
+    const auto onOut = render (forcedOn.values, makeRenderSettings (forcedOnOptions.render, forcedOn));
+    const auto offOut = render (forcedOff.values, makeRenderSettings (forcedOffOptions.render, forcedOff));
+    CHECK (presetOut == onOut);
+    CHECK (offOut == staticOut);
+    double diff = 0.0;
+    for (size_t i = static_cast<size_t> (kFs); i < staticOut[0].size(); ++i) // after Smart's 0.5 s warm-up
+        diff = std::max (diff, static_cast<double> (std::abs (presetOut[0][i] - staticOut[0][i])));
+    CHECK_GE (diff, 1.0e-3);
 }

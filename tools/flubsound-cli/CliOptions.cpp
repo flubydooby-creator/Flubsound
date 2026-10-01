@@ -125,6 +125,7 @@ enum class Opt
     Ceiling,
     Profile,
     Protection,
+    Smart,
     Rate,
     Format,
     Block,
@@ -171,6 +172,7 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Ceiling, "--ceiling", "-c", true, false, kChain },
     { Opt::Profile, "--profile", nullptr, true, false, kChain },
     { Opt::Protection, "--protection", nullptr, true, false, kChain },
+    { Opt::Smart, "--smart", nullptr, true, false, kChain },
     { Opt::Rate, "--rate", nullptr, true, false, kQuality | kSoak },
     { Opt::Format, "--format", "-f", true, false, kRender | kDemo },
     { Opt::Block, "--block", nullptr, true, false, kChain | kDemo },
@@ -372,6 +374,21 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
             else
             {
                 error = "--protection expects off, normal or strict, got '" + value + "'";
+                return false;
+            }
+            return true;
+        }
+
+        case Opt::Smart:
+        {
+            const std::string k = looseKey (v);
+            if (k == "on")
+                r.smart = true;
+            else if (k == "off")
+                r.smart = false;
+            else
+            {
+                error = "--smart expects on or off, got '" + value + "'";
                 return false;
             }
             return true;
@@ -895,6 +912,10 @@ bool buildParameters (const RenderOptions& o, ResolvedParameters& out, std::stri
         for (const auto& w : p.warnings)
             out.notes.push_back ("warning: preset: " + w);
     }
+    // Smart macros (docs/11 E34): the preset's flag unless --smart says otherwise.
+    out.smart = o.smart.value_or (p.smart);
+    if (p.smart && ! out.smart)
+        out.notes.push_back ("the preset turns Smart macros on; --smart off keeps them off");
     auto& v = out.values;
     v = p.values;
 

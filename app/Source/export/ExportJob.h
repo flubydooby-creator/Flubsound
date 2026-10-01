@@ -84,6 +84,7 @@ struct ExportSettings
     std::optional<float> targetLufs; // -60 .. -1 LUFS (the CLI's --target-lufs range)
     std::optional<float> ceilingDb;  // true-peak ceiling (the max.ceiling range, -12 .. 0 dBTP)
     std::vector<float> values;       // param::kNumParams base values (snapshotStrip / presetValues)
+    bool smartMacros = false;        // Smart macros (docs/11 E34): the preset's "smart" flag or the strip's switch
     int blockSize = 512;
 };
 
@@ -178,8 +179,10 @@ public:
         All" is application state (master enable), not the strip's sound: it
         is set off, like the CLI does for presets. */
     static std::vector<float> snapshotStrip (const flub::param::ParameterStore& store);
-    /** A preset's values (the app's PresetManager rules; Bypass All off). */
-    static bool presetValues (const PresetManager& presets, const PresetInfo& preset, std::vector<float>& values, juce::String& error);
+    /** A preset's values (the app's PresetManager rules; Bypass All off);
+        `smart` (optional) receives its "smart" flag (docs/11 E34). */
+    static bool presetValues (const PresetManager& presets, const PresetInfo& preset, std::vector<float>& values, juce::String& error,
+                              bool* smart = nullptr);
     /** The CLI's rules for --ceiling / --target-lufs (CliOptions.cpp
         buildParameters): the ceiling goes into max.ceiling, the maximizer is
         switched on when a ceiling or target needs it, and max.autoDrive is

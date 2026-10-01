@@ -250,13 +250,14 @@ bool ExportDialog::buildSettings (ExportSettings& s, juce::String& error) const
             error = "The selected preset no longer exists.";
             return false;
         }
-        if (! ExportJob::presetValues (presets, *preset, s.values, error))
+        if (! ExportJob::presetValues (presets, *preset, s.values, error, &s.smartMacros))
             return false;
     }
     else
     {
         // The strip the UI edits, as heard right now (its active A/B bank).
         s.values = ExportJob::snapshotStrip (controller.getParams (controller.getSelectedStrip()));
+        s.smartMacros = controller.getSmartMacros (controller.getSelectedStrip());
     }
     return ExportJob::validate (s, error);
 }

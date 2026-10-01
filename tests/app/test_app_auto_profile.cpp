@@ -13,16 +13,22 @@
 //   before uuids (PresetManager ids) is migrated once and keeps working
 //   after the preset file is renamed.
 // * The routing panel lists the rules and explains an unsupported system.
+// * docs/11 E34: a preset's "smart" flag sets the strip's Smart macros on
+//   load (manual, next / previous, an automatic profile, which restores the
+//   switch it found), a save writes the switch, and an export renders with it.
 #include "AppTestSupport.h"
 
 #include "engine/AutoProfile.h"
 #include "engine/EngineController.h"
+#include "export/ExportJob.h"
 #include "presets/PresetManager.h"
 #include "ui/RoutingPanel.h"
 
 #include "flub/io/Json.h"
 
+#include <algorithm>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <vector>
 
@@ -792,3 +798,102 @@ TEST_CASE ("App: automatic profiles: the add form offers recently focused apps, 
     CHECK (controller.getSettings().getAutoProfileRules() == rules);
 }
 
+
+TEST_CASE ("App: Smart macros follow the preset (E34) - a save writes the strip's switch, loading and stepping set it, an automatic profile sets and restores it, an export renders with it")
+{
+    const flubapptest::TempFolder temp;
+    ForegroundScript script;
+    EngineController controller (headlessOptions (temp, script));
+    auto& manager = controller.getPresetManager();
+    manager.setUserPresetFolder (temp.file ("Presets"));
+    const int music = controller.findStrip ("Music");
+    const int game = controller.findStrip ("Game");
+    REQUIRE (music >= 0);
+    REQUIRE (game >= 0);
+    const auto musicPreset = factoryPreset (controller, "Music");
+    const auto gamingPreset = factoryPreset (controller, "Gaming");
+    REQUIRE (musicPreset.isValid());
+    REQUIRE (gamingPreset.isValid());
+    const auto smartOn = [&controller] (int strip) {
+        const bool on = controller.getSmartMacros (strip);
+        CHECK (controller.getChain (strip).getSmartMacros() == on); // the chain hears what the switch says
+        CHECK (controller.getSettings().getSmartMacros (controller.getStripName (strip)) == on);
+        return on;
+    };
+
+    // Saving writes the switch into the preset; off writes nothing.
+    juce::String error;
+    REQUIRE (controller.loadPreset (musicPreset.id, music, error));
+    controller.setSmartMacros (true, music);
+    const auto smartId = controller.saveUserPreset ("Smart Mine", "User", "", music, error);
+    REQUIRE (smartId.isNotEmpty());
+    controller.setSmartMacros (false, music);
+    const auto plainId = controller.saveUserPreset ("Plain Mine", "User", "", music, error);
+    REQUIRE (plainId.isNotEmpty());
+    const auto readSmart = [&manager] (const juce::String& id) {
+        flub::json::Value root;
+        std::string parseError;
+        const auto* info = manager.findById (id);
+        REQUIRE (info != nullptr);
+        REQUIRE (flub::json::parse (info->file.loadFileAsString().toStdString(), root, parseError));
+        return root["smart"];
+    };
+    CHECK (readSmart (smartId).asBool (false));
+    CHECK (readSmart (plainId).isNull());
+
+    // Loading sets the switch to the preset's flag, either way.
+    REQUIRE (controller.loadPreset (smartId, music, error));
+    CHECK (smartOn (music));
+    REQUIRE (controller.loadPreset (musicPreset.id, music, error));
+    CHECK (! smartOn (music));
+    CHECK (! smartOn (game)); // per strip
+
+    // Next / previous land on it the same way.
+    const auto& all = manager.getPresets();
+    const auto at = std::find_if (all.begin(), all.end(), [&smartId] (const PresetInfo& p) { return p.id == smartId; });
+    REQUIRE (at != all.end());
+    const auto index = static_cast<size_t> (std::distance (all.begin(), at));
+    const auto before = all[(index + all.size() - 1) % all.size()].id;
+    REQUIRE (controller.loadPreset (before, music, error));
+    REQUIRE (controller.nextPreset (music));
+    CHECK (controller.getCurrentPresetId (music) == smartId);
+    CHECK (smartOn (music));
+    REQUIRE (controller.previousPreset (music));
+    CHECK (! smartOn (music));
+
+    // The HeaderBar's Save (PresetManager::saveCurrent) takes the switch too.
+    REQUIRE (controller.loadPreset (plainId, music, error));
+    controller.setSmartMacros (true, music);
+    REQUIRE (manager.saveCurrent (music, controller.getParams (music), error, controller.getSmartMacros (music)));
+    CHECK (readSmart (plainId).asBool (false));
+
+    // An automatic profile plays its preset's flag and gives the user's switch back.
+    controller.setSmartMacros (true, game);
+    controller.setAutoProfileRules ({ rule ("cs2.exe", "Game", gamingPreset.id.toRawUTF8(), true) });
+    script.show ("C:\\Games\\CS2\\cs2.exe", 4242);
+    poll (controller, 2);
+    REQUIRE (controller.getCurrentPresetId (game) == gamingPreset.id);
+    CHECK (! smartOn (game));
+    script.show ("/usr/bin/firefox", 777);
+    poll (controller, 2);
+    CHECK (controller.getActiveAutoProfile() == nullptr);
+    CHECK (smartOn (game));
+    controller.setSmartMacros (false, game);
+    controller.setAutoProfileRules ({ rule ("cs2.exe", "Game", smartId.toRawUTF8(), true) });
+    script.show ("C:\\Games\\CS2\\cs2.exe", 4242);
+    poll (controller, 2);
+    REQUIRE (controller.getCurrentPresetId (game) == smartId);
+    CHECK (smartOn (game));
+    script.show ("/usr/bin/firefox", 777);
+    poll (controller, 2);
+    CHECK (! smartOn (game));
+
+    // Export: a preset renders with its flag.
+    ExportSettings s;
+    REQUIRE (ExportJob::presetValues (manager, *manager.findById (smartId), s.values, error, &s.smartMacros));
+    CHECK (s.smartMacros);
+    CHECK (ExportJob::makeRenderSettings (s, s.values).smartMacros);
+    REQUIRE (ExportJob::presetValues (manager, musicPreset, s.values, error, &s.smartMacros));
+    CHECK (! s.smartMacros);
+    CHECK (! ExportJob::makeRenderSettings (s, s.values).smartMacros);
+}

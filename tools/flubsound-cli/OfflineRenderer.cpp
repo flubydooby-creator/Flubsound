@@ -222,7 +222,7 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error)
 
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort, RenderStats* stats, ProtectionStrength protection)
+                 const std::atomic<bool>* abort, RenderStats* stats, ProtectionStrength protection, bool smartMacros)
 {
     if (! checkRenderable (input, error))
         return false;
@@ -245,6 +245,7 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
 
     auto chain = std::make_unique<ProcessingChain> (*store);
     chain->setProtectionStrength (protection);
+    chain->setSmartMacros (smartMacros);
     chain->prepare ({ input.sampleRate, blockSize, chainChannels });
     const int latency = chain->getLatencySamples();
     latencySamples = latency;
@@ -327,7 +328,8 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
     auto runPass = [&] (std::vector<std::vector<float>>& out, LoudnessReport& report) {
         const auto t0 = Clock::now();
         int latency = 0;
-        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats, settings.protection);
+        const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats, settings.protection,
+                                    settings.smartMacros);
         renderSeconds += std::chrono::duration<double> (Clock::now() - t0).count();
         if (! ok)
             return false;

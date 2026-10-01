@@ -692,8 +692,12 @@ public:
         the content analysis takes back attack and drive on a limited master,
         bass on bass-heavy and air on bright programme). Persisted per strip
         name, off by default; strip = -1 is the selected strip. Broadcasts
-        Change::Settings. A preset's own "smart" flag is not applied on load
-        yet (PresetManager does not read it). */
+        Change::Settings. A preset carries it as its "smart" flag: loading a
+        preset (loadPreset, next / previousPreset, an automatic profile) sets
+        the strip's switch to the preset's flag (off without one), saving
+        writes the switch into the preset, and the end of an automatic
+        profile restores the switch it found. Restoring the session at start
+        keeps the persisted switch. */
     bool getSmartMacros (int strip = -1) const;
     void setSmartMacros (bool on, int strip = -1);
 
@@ -945,6 +949,7 @@ private:
     {
         juce::String stripName, presetId;
         bool presetModified = false;
+        bool smartMacros = false; // the strip's Smart macros switch (docs/11 E34)
         flub::param::Bank activeBank = flub::param::Bank::A;
         std::vector<float> bankA, bankB;
     };
@@ -965,6 +970,7 @@ private:
     void applyHearingGuard();
     void applyPersonalProfile();
     void applySmartMacros();
+    void setPresetSmartMacros (int strip, bool on); // a preset's "smart" flag, on load
     bool hearingKnown = false;           // the guard has a sensitivity (the volume poll runs for it)
     std::optional<float> hearingUserDbSpl; // the listener's figure for the output (as last applied)
     double doseEarlierDays = 0.0;        // the stored doses of the 6 days before doseDay

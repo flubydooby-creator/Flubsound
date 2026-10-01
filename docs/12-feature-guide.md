@@ -304,7 +304,8 @@ The macros add to the preset's own values; they never replace them. At 0 a macro
 - **What it does to the sound:** on a limited master (PLR under 10.5 LU, fully under 7.5 LU) Smart takes back the attack the macros add and down to 25 % of their drive; on bass-heavy programme up to half their bass; on bright programme up to half their air. It moves down in 0.25 s and back in 2 s, and needs 0.5 s of programme first. Status (synthetic limited master, PLR 7.4 LU): Punch 0 → 100 changes the loudness −0.14 LU static and −0.04 LU with Smart; Boost 40 + Loudness 60 −0.47 → −0.04 LU; an open programme (PLR 12.8) within 0.02 LU of static. Demo pack (the music mastered loud, Boost 100, Punch 100, Loudness 60): Smart's attack multiplier 0.00, drive 0.25, bass 0.69; 16 kHz −4.0 dB and 31.5 Hz +1.6 dB after the match (less clipped top, more body).
 - **Listen for:** on a loud master: less squashed, less distorted, the drums no flatter than the master itself. On an open recording Smart should change nothing.
 - **Demo pairs:** `smart-macros`
-- **Limits:** a preset's own `smart` flag is not applied on load yet, the switch is not in the macro area yet, and Smart plays Loudness 60 on a limited master about 1.1 LU quieter (a product call). The MUSHRA against static macros on 10 real masters is gated on the listening panel.
+- **Presets:** a preset can carry Smart (its `smart` flag): loading it sets the strip's switch, a preset without it switches Smart off, and saving a user preset keeps the switch. The command line follows the preset too; `--smart on|off` overrides it (`process`, `batch`, `quality`), and Flubsound FX keeps it in the project.
+- **Limits:** the switch is not in the macro area yet, and Smart plays Loudness 60 on a limited master about 1.1 LU quieter (a product call). The MUSHRA against static macros on 10 real masters is gated on the listening panel.
 
 ### First Run – Game
 

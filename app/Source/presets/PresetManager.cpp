@@ -351,7 +351,7 @@ bool PresetManager::readPreset (const PresetInfo& info, flub::preset::Preset& ou
 // =============================================================================
 // Strip glue
 // =============================================================================
-bool PresetManager::loadIntoBank (const PresetInfo& info, ParameterStore& store, Bank bank, juce::String& error) const
+bool PresetManager::loadIntoBank (const PresetInfo& info, ParameterStore& store, Bank bank, juce::String& error, bool* smart) const
 {
     flub::preset::Preset p;
     if (! readPreset (info, p, error))
@@ -363,18 +363,20 @@ bool PresetManager::loadIntoBank (const PresetInfo& info, ParameterStore& store,
     // (docs/11 E40). A profile the file carries is info.suggestedLatencyProfile.
     flub::preset::applyPresetToStore (p, store, bank);
     reportWarnings (info, p);
+    if (smart != nullptr)
+        *smart = p.smart;
     return true;
 }
 
-bool PresetManager::loadIntoStrip (int strip, const PresetInfo& info, ParameterStore& store, juce::String& error)
+bool PresetManager::loadIntoStrip (int strip, const PresetInfo& info, ParameterStore& store, juce::String& error, bool* smart)
 {
-    if (! loadIntoBank (info, store, store.getActiveBank(), error))
+    if (! loadIntoBank (info, store, store.getActiveBank(), error, smart))
         return false;
     setCurrentPresetId (strip, info.id, &store);
     return true;
 }
 
-bool PresetManager::stepPreset (int strip, int direction, ParameterStore& store, juce::String& error)
+bool PresetManager::stepPreset (int strip, int direction, ParameterStore& store, juce::String& error, bool* smart)
 {
     if (presets.empty())
     {
@@ -396,7 +398,7 @@ bool PresetManager::stepPreset (int strip, int direction, ParameterStore& store,
         next = ((index + (direction >= 0 ? 1 : -1)) % n + n) % n;
 
     const auto info = presets[static_cast<size_t> (next)]; // copy: loading may not invalidate, but be safe
-    return loadIntoStrip (strip, info, store, error);
+    return loadIntoStrip (strip, info, store, error, smart);
 }
 
 juce::String PresetManager::getCurrentPresetId (int strip) const
@@ -487,7 +489,7 @@ juce::String PresetManager::sanitiseFileName (const juce::String& name)
 }
 
 juce::String PresetManager::saveUserPreset (const juce::String& name, const juce::String& category, const juce::String& description,
-                                            const ParameterStore& store, juce::String& error, bool overwriteExisting)
+                                            const ParameterStore& store, juce::String& error, bool overwriteExisting, bool smart)
 {
     if (name.trim().isEmpty())
     {
@@ -511,6 +513,7 @@ juce::String PresetManager::saveUserPreset (const juce::String& name, const juce
     p.category = (category.trim().isNotEmpty() ? category.trim() : juce::String ("User")).toStdString();
     p.author = "User";
     p.description = description.toStdString();
+    p.smart = smart; // docs/11 E34: the strip's Smart macros
 
     // App state is not written into "params" (it would never be applied: see
     // loadIntoBank); the profile the preset was made in becomes its
@@ -595,7 +598,7 @@ juce::String PresetManager::renameUserPreset (const PresetInfo& info, const juce
     return id;
 }
 
-bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::String& error)
+bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::String& error, bool smart)
 {
     const auto* info = findById (getCurrentPresetId (strip));
     if (info == nullptr || info->isFactory)
@@ -605,7 +608,7 @@ bool PresetManager::saveCurrent (int strip, const ParameterStore& store, juce::S
     }
 
     const auto copy = *info;
-    if (saveUserPreset (copy.name, copy.category, copy.description, store, error, true).isEmpty())
+    if (saveUserPreset (copy.name, copy.category, copy.description, store, error, true, smart).isEmpty())
         return false;
     // (the same file, so the same uuid and id)
     if (strip >= 0 && strip < kMaxStrips)
