@@ -4,8 +4,11 @@
 //
 //   y = x + mix * (H(x) - x)        H = cascade of 1..4 TPT SVF sections
 //
-// mix is the band's wet amount: exactly 1 in steady state, ramped linearly
-// over ~5 ms (a whole number of control periods) for discrete changes.
+// mix is the band's wet amount: exactly 1 in steady state, ramped over ~5 ms
+// (a whole number of control periods) for discrete changes along a
+// smoothstep, whose ends have no corner: a linear ramp's start and end are
+// breaks in the slope of mix * (H(x) - x), which under loud bass read as
+// clicks in the soak (docs/11 E53).
 //
 // Control rate: every kControlInterval samples, counted in absolute stream
 // time (the counter survives across process() calls), each band that is
@@ -511,9 +514,10 @@ void ParametricEq::processBand (Band& band, const AudioBlock& block, int start, 
             runCascade (st, d + off, n, off);
             for (int i = 0; i < n; ++i)
             {
-                // Linear per-sample ramp; integer position -> exact 0 / 1 endpoints.
+                // Smoothstep of the per-sample position; integer position -> exact 0 / 1 endpoints.
                 const int pos = std::clamp (band.fadePos + band.fadeDir * (off + i + 1), 0, fadeSamples);
-                const float mix = static_cast<float> (pos) * invFadeSamples;
+                const float lin = static_cast<float> (pos) * invFadeSamples;
+                const float mix = lin * lin * (3.0f - 2.0f * lin);
                 const float x = dry[static_cast<size_t> (i)];
                 d[off + i] = x + mix * (d[off + i] - x);
             }

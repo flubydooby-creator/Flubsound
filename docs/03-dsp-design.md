@@ -595,7 +595,8 @@ Neither the macros nor the mode policy touch the parametric EQ. `MacroMap` has n
   - *ParametricEq: abrupt gain / Q jumps are click-free (first-difference criterion)*
   - *ParametricEq: gain glides are as smooth as an ideal per-sample glide (no zipper, no stale state)*
   - *ParametricEq: abrupt type / slope / enable changes are crossfaded without clicks*
-  - *ParametricEq: discrete changes use a linear ~5 ms wet/dry crossfade*
+  - *ParametricEq: discrete changes use a smoothstep ~5 ms wet/dry crossfade*
+  - *ParametricEq: a type switch crossfades without corners - the 4th difference during the fade stays near steady state (smoothstep, soak click)*
   - *ParametricEq: frequency glides in the log domain (~20 ms) without clicks*
   - *ParametricEq: the frequency glide is exponential in log2 (Hz), not in Hz*
   - *ParametricEq: output gain is smoothed, clamped and NaN-safe*
@@ -615,7 +616,7 @@ Neither the macros nor the mode policy touch the parametric EQ. `MacroMap` has n
 ### 2.9 Known limitations
 
 - **No linear-phase mode.** It is roadmap, for offline/batch use only, because it would add latency.
-- **Discrete changes crossfade through the dry signal.** Switching the type or slope of a steep cut on bright or bassy material briefly (5 ms each way) lets the unfiltered band through. This is an audible "flash", not a click. Running old and new filters in parallel during the fade would remove it; that is not implemented.
+- **Discrete changes crossfade through the dry signal.** Switching the type or slope of a steep cut on bright or bassy material briefly (5 ms each way) lets the unfiltered band through. This is an audible "flash", not a click. Running old and new filters in parallel during the fade would remove it; that is not implemented. The wet amount follows a smoothstep, not a straight line ([11 E53](11-enhancement-report.md#e53)'s soak click triage): a linear ramp's start and end are breaks in the slope of the band's contribution, 72.8 dB over the steady-state 4th difference on loud bass against 28.8 dB for the smoothstep.
 - **The SVF clamps design frequencies to 0.49 fs.** Below 40.8 kHz the top of the 20 kHz range is therefore clamped, and `responseDb()` reflects this consistently.
 - **Changing a cut's Q or gain field makes the band "busy".** Q and gain do not affect the Butterworth cuts, so the band redesigns identical coefficients for the length of the glide. This costs CPU only.
 - **Channel-count changes without `prepare()`.** If a host changes the channel count between blocks without calling `prepare()`, newly used channels resume from old state.

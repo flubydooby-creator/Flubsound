@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <memory>
 
@@ -551,7 +552,7 @@ TEST_CASE ("ParametricEq: abrupt type / slope / enable changes are crossfaded wi
     CHECK_GE (maxStep (ref, seg - 16, seg + 64), 3.0 * steady);
 }
 
-TEST_CASE ("ParametricEq: discrete changes use a linear ~5 ms wet/dry crossfade")
+TEST_CASE ("ParametricEq: discrete changes use a smoothstep ~5 ms wet/dry crossfade")
 {
     for (double fs : { 44100.0, 48000.0 })
     {
@@ -582,13 +583,70 @@ TEST_CASE ("ParametricEq: discrete changes use a linear ~5 ms wet/dry crossfade"
         double rampErr = 0.0;
         for (int i = 48; i < fade - 8; ++i)
         {
-            const double mix = static_cast<double> (i + 1) / fade;
+            const double p = static_cast<double> (i + 1) / fade;
+            const double mix = p * p * (3.0 - 2.0 * p);
             rampErr = std::max (rampErr, std::abs (y[static_cast<size_t> (t0 + i)] - (1.0 - mix) * x[static_cast<size_t> (t0 + i)]));
         }
         CHECK_LE (rampErr, 2.0e-3);
         // Fully wet after the fade.
         CHECK_LE (peakAbs (y.data() + t0 + fade + 96, n - t0 - fade - 96), 2.0e-3);
     }
+}
+
+TEST_CASE ("ParametricEq: a type switch crossfades without corners - the 4th difference during the fade stays near steady state (smoothstep, soak click)")
+{
+    // The soak (docs/11 E53) found a click 9 ms after a preset switch that
+    // turned EQ band 1 from a 64 Hz bell into a 110 Hz low cut under loud
+    // bass (the compressor's +16 dB make-up switching on with it): the
+    // linear crossfade's corners - where the ramp starts and stops - are
+    // breaks in the slope of mix * (H(x) - x), which the detector's 4th
+    // difference reads as a spike. A smoothstep ramp has no corners. On a
+    // bass-only programme, bell -> low cut -> bell at eight phases, the
+    // largest 4th difference within 20 ms of a switch is compared with the
+    // largest one in steady state.
+    const int n = static_cast<int> (kFs * 4.0);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs;
+        x[static_cast<size_t> (i)] = static_cast<float> (0.4 * std::sin (2.0 * kPi * 47.0 * t) + 0.3 * std::sin (2.0 * kPi * 93.0 * t + 0.4));
+    }
+    auto eq = makeEq (kFs);
+    eq->setBand (1, makeBand (EqBandType::Bell, 64.0f, 6.0f, 0.7071f));
+    eq->reset();
+    Planar buf (1, n);
+    load (buf, 0, x);
+    std::vector<int> at;
+    for (int pos = 0; pos < n; pos += 512)
+    {
+        // Every 0.43 s (a different phase each time), from 0.41 s on.
+        if (pos >= 19456 && (pos - 19456) % 20480 == 0)
+        {
+            at.push_back (pos);
+            eq->setBand (1, at.size() % 2 == 1 ? makeBand (EqBandType::LowCut, 110.0f, 0.0f, 0.7071f, 12)
+                                               : makeBand (EqBandType::Bell, 64.0f, 6.0f, 0.7071f));
+        }
+        eq->process (buf.block (pos, std::min (512, n - pos)));
+    }
+    REQUIRE (at.size() >= 8);
+    const auto& y = buf.ch[0];
+    const auto d4 = [&y] (int i) {
+        const auto v = [&y] (int k) { return static_cast<double> (y[static_cast<size_t> (k)]); };
+        return std::abs (v (i) - 4.0 * v (i - 1) + 6.0 * v (i - 2) - 4.0 * v (i - 3) + v (i - 4));
+    };
+    const int window = static_cast<int> (0.02 * kFs);
+    double transition = 0.0, steady = 0.0;
+    for (int i = 4; i < n; ++i)
+    {
+        bool near = false;
+        for (int t : at)
+            near = near || (i >= t && i < t + window);
+        (near ? transition : steady) = std::max (near ? transition : steady, d4 (i));
+    }
+    std::printf ("    4th difference: steady %.3g, during the switches %.3g (%.1f dB over)\n", steady, transition, 20.0 * std::log10 (transition / steady));
+    // Measured: linear 72.8 dB over steady state, smoothstep 28.8 dB (what
+    // is left is the jump in curvature where the ramp starts and stops).
+    CHECK_LE (transition, 100.0 * steady); // 40 dB
 }
 
 TEST_CASE ("ParametricEq: frequency glides in the log domain (~20 ms) without clicks")

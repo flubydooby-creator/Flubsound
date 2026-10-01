@@ -100,6 +100,8 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   Still over 2 s on the owner's PC (MSVC, measured with the machine ~45 % busy): a few KnownGap / quality-suite
   cases, DriftFifo, the Chain sample-rate sweep and three app cases, all 2.0–4.4 s; under 2 s on Linux per the
   cloud's runs, so not split.
+- **Soak click triage:** the EQ's discrete-change crossfade is now a smoothstep (2 of the 12 clicks, a preset switch);
+  the other 10 are explained in docs/11 E53.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order
@@ -125,7 +127,9 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
 4. **Known open items (software).**
-   - Soak: 12 clicks at −40 to −50 dB. Two of them come from E04's high-band onset lift.
+   - Soak: the user rows read 10 clicks, triaged in docs/11 E53 (4 from E04's high-band onset lift, an owner
+     decision; 1 detector false positive; 5 from the bypass reference's limiter at +22 dB input gain). The `fuzz` row's 6
+     are not triaged yet.
    - E28: the comb row is 18.9 dB against a < 12 dB target.
    - E04 step 5: Quality look-ahead and the plug-in PDC.
    - E20: the Impact burst is missing from the auto-preamp model.
