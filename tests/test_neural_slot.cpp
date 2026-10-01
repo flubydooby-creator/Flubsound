@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <initializer_list>
 #include <memory>
 #include <stdexcept>
 #include <thread>
@@ -252,7 +253,9 @@ TEST_CASE ("NeuralSlot: with no model the latency is the reference value per pro
     CHECK_LE (maxDelayedError (out, input, kBalancedLatency, 0), 1e-6);
 }
 
-TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L and delays the chain's output by L")
+/** The identity-model check below, for each listed set-up (static settings /
+    the Boost macro); one set-up per test case keeps each under 2 s. */
+static void checkIdentityModelDelay (std::initializer_list<bool> setups)
 {
     // Static settings (no macros) with every shift-invariant module engaged,
     // the maximizer driven into limiting. Everything downstream of the slot
@@ -295,7 +298,7 @@ TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L 
             std::copy (prog.ch[c].begin(), prog.ch[c].end(), input.ch[c].begin() + silence);
     }
 
-    for (bool macros : { false, true })
+    for (bool macros : setups)
     {
         ParameterStore store;
         configure (store, macros);
@@ -328,6 +331,16 @@ TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L 
         CHECK (withModel.getNeuralCounters().deadlineMisses == 0);
         CHECK (withModel.getNeuralCounters().modelFailures == 0);
     }
+}
+
+TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L and delays the chain's output by L: static settings")
+{
+    checkIdentityModelDelay ({ false });
+}
+
+TEST_CASE ("NeuralSlot: an identity model in Quality adds exactly its latency L and delays the chain's output by L: with the Boost macro")
+{
+    checkIdentityModelDelay ({ true });
 }
 
 TEST_CASE ("NeuralSlot: a 2-frame model is ineligible in Low Latency: slot bypassed, latency unchanged, status says why")
@@ -545,11 +558,12 @@ TEST_CASE ("NeuralSlot: an Offline render faster than real time applies every fr
     CHECK (bitIdentical (outputs[0], outputs[1])); // the same bytes on every run
 }
 
-TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter still holds the true-peak ceiling on hot material")
+/** Two set-ups: the full Music boost (every macro at 1), and the maximizer
+    alone, where the model's effect on the limited output is measurable; one
+    set-up per test case keeps each under 2 s. */
+static void checkModelCeiling (std::initializer_list<bool> setups)
 {
-    // Two set-ups: the full Music boost (every macro at 1), and the maximizer
-    // alone, where the model's effect on the limited output is measurable.
-    for (bool fullBoost : { true, false })
+    for (bool fullBoost : setups)
     {
         double referenceRms = 0.0;
         for (float gainDb : { 0.0f, -6.0f, 12.0f }) // 0 dB: the chain without a model
@@ -617,6 +631,16 @@ TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter st
             }
         }
     }
+}
+
+TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter still holds the true-peak ceiling on hot material: full Music boost")
+{
+    checkModelCeiling ({ true });
+}
+
+TEST_CASE ("NeuralSlot: a constant -6 dB (or +12 dB) model before the limiter still holds the true-peak ceiling on hot material: the maximizer alone")
+{
+    checkModelCeiling ({ false });
 }
 
 TEST_CASE ("NeuralSlot: bypassing an active model fades to the latency-compensated dry path without changing the latency")

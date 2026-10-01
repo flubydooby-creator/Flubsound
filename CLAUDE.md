@@ -93,6 +93,13 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **E16 owner-verified:** the owner's headset is a **Turtle Beach Stealth 600PC Gen 3** on its USB dongle; Windows
   names it "Speakers (Stealth 600PC Gen 3)", which matched nothing until a `stealth 600pc` token was added.
 - **E34 done:** a preset's `smart` flag is applied by the app, the plug-in and the CLI (see the docs/11 E34 Status).
+- **The 2 s rule:** the Scenes matrix is one case per row and level (34 cases) and the factory hot-programme and
+  full-macros checks one case per preset (registered like the intent cases). On Windows two more causes were found:
+  the core runner slept at 15.6 ms (no JUCE, so no `timeBeginPeriod (1)`; TestMain now calls it — NeuralSlot 13 s →
+  ~1 s per case) and Windows file I/O made the WAV fuzz 17 s (now `readWavMemory`, the same parser, < 0.5 s).
+  Still over 2 s on the owner's PC (MSVC, measured with the machine ~45 % busy): a few KnownGap / quality-suite
+  cases, DriftFifo, the Chain sample-rate sweep and three app cases, all 2.0–4.4 s; under 2 s on Linux per the
+  cloud's runs, so not split.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order
@@ -125,7 +132,6 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - E11: Classical and Jazz lose 0.72 / 0.44 LU.
    - E22: the chat sub-limiter.
    - E07: the 2.00 dB row.
-   - Two test cases run over 2 s: the Scenes matrix and the factory whole-library case.
 5. **Gated items** (they need hardware, people or network, not code):
    - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E51 / E16 / E55 / E22
      on hardware, and the E54 update check against a real release.

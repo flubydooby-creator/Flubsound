@@ -923,146 +923,184 @@ TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell 
     CHECK_GE (rp.recoveryS, 1.2); // fails docs/11 E21's "within 1 dB 1 s after the event"
 }
 
-TEST_CASE ("Scenes: every gaming and night preset at -14 / -24 / -40 LUFS (E60 stage 1 matrix, E59 ratchet), and docs/11 E19's Done-when on the cue enhancer, Competitive FPS and Battle Royale")
+namespace
 {
-    // The ratchet: every metric of every configuration pinned at today's
-    // value (0.3 dB, recovery 0.4 s: compiler / FMA differences only). A
-    // change that moves one must say why and re-pin it. Recorded after the
-    // docs/11 E19 redesign (Footsteps = the CueLift bands 4 / 5) and the
-    // gaming preset retune; the values before it are in docs/11 E19 / E60.
-    // Re-pinned by docs/11 E04 step 4 and E20 (Phase 3 batch 5), every
-    // gaming row: Footsteps and Detail add the Clarity shaper's high-band
-    // attack (+2 dB each at 100 %), Impact's attack moved to its low band
-    // and its static bass boost and harmonics became the bass engine's
-    // event-keyed punch. Moved by more than the tolerance: the combat's
-    // event change at -40 LUFS (its HF onsets get the high-band attack too;
-    // the cue enhancer's loud cap does not apply to the shaper): Footsteps
-    // 100 0.74 -> 1.08 dB, Competitive FPS 0.02 -> 0.46, Horror Detail 1.91
-    // -> 2.31; Racing's 4.13 -> 3.82 (Impact 0.35's static boost gone);
-    // Cinematic Adventure (Impact 0.5: its 1.3 dB full-band attack lifted
-    // the steps' onsets too, now only the low band's) cue SNR gain 0.56 /
-    // 1.53 / 2.84 -> 0.11 / 1.16 / 2.41 dB, contrast 0.16 / 0.32 / 0.20 ->
-    // -0.45 / -0.26 / -0.40 dB, event change at -40 LUFS 4.51 -> 4.09 dB,
-    // onset jump 0.52 -> 0.06 dB. Everything else within 0.3 dB (cue SNR and
-    // contrast of the other rows within 0.15 dB, bed lift within 0.1 dB).
-    //                      cue SNR, contrast, bed, drift, event, onset jump, hole, recovery (s), step after
-    struct Pinned
-    {
-        const char* file; // nullptr: Gaming mode, Footsteps 100, everything else default (the module)
-        double v[3][9];   // [-14 / -24 / -40 LUFS][metric]
-    };
-    static const Pinned pinned[] = {
-        { nullptr,
-          { { 6.01, 5.92, -0.01, -0.04, 0.72, -0.09, -0.10, 0.00, 0.27 },
-            { 6.18, 6.09, 0.03, 0.03, 0.98, -0.07, -0.03, 0.00, 0.05 },
-            { 6.18, 6.09, 0.03, 0.03, 1.08, -0.26, -0.03, 0.00, 0.06 } } },
-        { "gaming-competitive-fps.json",
-          { { 5.43, 4.61, 0.07, -0.07, 0.22, 0.14, -0.12, 0.00, 0.27 },
-            { 6.02, 4.85, 0.36, -0.02, -0.24, 0.08, -0.04, 0.00, 0.08 },
-            { 6.85, 4.94, 0.81, -0.04, 0.46, -0.13, -0.04, 0.00, -0.04 } } },
-        { "gaming-battle-royale.json",
-          { { 4.28, 3.58, -2.49, -0.12, -2.84, 0.28, -0.35, 0.00, 0.35 },
-            { 5.18, 4.24, 0.08, -0.04, -2.91, 0.70, -0.23, 0.00, 0.29 },
-            { 6.16, 4.69, 0.70, -0.02, 0.33, -0.03, -0.04, 0.00, -0.01 } } },
-        // Night Mode: re-pinned by docs/11 E21 Phase 3's retune (Auto Level
-        // -20 -> -14 LUFS with the compressor's +6 dB make-up removed and its
-        // thresholds, the upward section's and dyneq.0's moved up 6 dB with
-        // it; the Startle Guard at 20 LU). Before: bed lift -7.86 / 1.92 /
-        // 9.79, event change -8.86 / -6.54 / 2.52, onset jump 0.65 / 3.39 /
-        // 0.92, hole -0.47 / 0.79 / -1.80, recovery 0.00 / 1.38 / 4.18. The
-        // -24 LUFS hole is now negative (the bed after the event 1.1 dB
-        // louder, not quieter): at -24 LUFS the new target asks Auto Level
-        // for +10 dB, so it is still rising to its +6 dB cap (1 dB/s) through
-        // this 12 s scene. Re-pinned by docs/11 E21's time constants (Phase 3
-        // batch 3: Auto Level's 15 s measure, its 10 ms onset gate and 300 ms
-        // hold; the Startle Guard's sustained detector): event change -9.03 /
-        // -7.44 / -0.05 -> -8.97 / -7.12 / -0.29, onset jump 0.65 / 1.80 /
-        // -0.07 -> 0.57 / 1.20 / 0.28, step lift after at -24 LUFS 0.78 ->
-        // 1.05 dB, the rest within 0.05 dB.
-        { "gaming-night-mode.json",
-          { { 1.74, 1.03, -7.91, -0.20, -9.09, 0.56, -0.43, 0.00, 0.01 },
-            { 2.01, 1.03, -0.15, 0.75, -7.25, 1.47, -1.19, 2.43, 1.06 },
-            { 3.83, 1.96, 3.82, 1.94, -0.33, 0.47, -1.86, 4.18, 2.80 } } },
-        { "gaming-horror-detail.json",
-          { { 3.07, 2.56, 0.39, -0.08, 0.06, 0.27, -0.25, 0.00, 0.23 },
-            { 3.97, 3.09, 2.02, 0.00, -0.06, 0.69, -0.08, 0.00, 0.13 },
-            { 4.96, 3.10, 2.66, -0.03, 2.31, -0.02, -0.02, 0.00, -0.05 } } },
-        { "gaming-7-1-headphone-surround.json",
-          { { 2.49, 1.89, -0.95, -0.09, -1.52, 0.32, -0.27, 0.00, 0.23 },
-            { 3.40, 2.41, 2.09, -0.06, -1.36, 0.86, -0.20, 0.00, 0.23 },
-            { 4.76, 2.72, 3.07, -0.04, 1.88, 0.00, -0.03, 0.00, -0.07 } } },
-        { "gaming-cinematic-adventure.json",
-          { { 0.11, -0.45, 0.78, -0.05, 0.16, 0.69, -0.14, 0.00, 0.01 },
-            { 1.16, -0.26, 2.91, -0.01, 0.83, 0.95, 0.00, 0.00, -0.11 },
-            { 2.41, -0.40, 3.83, -0.07, 4.09, 0.06, -0.02, 0.00, -0.35 } } },
-        { "gaming-moba-strategy.json",
-          { { -1.30, -1.01, -1.49, -0.03, -2.28, 0.29, -0.19, 0.00, -0.39 },
-            { -0.72, -2.28, 2.80, -0.03, -1.34, 1.37, -0.04, 0.00, -0.60 },
-            { 2.88, -0.48, 4.22, -0.11, 2.28, 0.13, -0.05, 0.00, -0.46 } } },
-        // Racing: re-pinned by docs/11 E04 step 2 (Phase 3 batch 2; its
-        // Tighten 0.2 no longer cuts onsets and is applied as a one-pole
-        // shelf). Before: onset jump 0.30 / 1.56 / 0.15, step lift after vs
-        // before 0.31 / 0.27 / -0.22, cue SNR gain -0.34 / 0.35 / 1.89.
-        { "gaming-racing.json",
-          { { -0.37, -0.93, -0.81, -0.06, -1.78, 0.57, -0.19, 0.00, -0.17 },
-            { 0.35, -0.83, 3.17, -0.04, -0.77, 1.51, -0.06, 0.00, -0.19 },
-            { 1.77, -0.47, 4.04, -0.06, 3.82, -0.03, -0.03, 0.00, -0.35 } } },
-        { "gaming-tournament-clean.json",
-          { { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
-            { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
-            { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 } } },
-        // Late Night: re-pinned by docs/11 E21 (Phase 3 batch 3): its retune
-        // for -20 LUFS (Auto Level -26 LUFS, 10:1 compressor with +11.8 dB
-        // make-up, a stronger upward section) and the Auto Level time
-        // constants. A leveller now: the -40 LUFS bed is brought up to the
-        // target (+7.30 -> +22.56 dB), the -24 LUFS onset jump 6.03 -> 1.76 dB,
-        // hole 1.86 -> -0.89 dB, recovery 4.18 -> 2.43 s.
-        { "music-late-night-low-volume.json",
-          { { -0.02, -0.11, -5.91, 0.42, -6.34, 0.42, -0.30, 0.00, -0.04 },
-            { -0.02, -0.16, 4.45, -0.15, -4.53, 1.76, -0.89, 2.43, -0.06 },
-            { 0.33, -0.13, 22.56, 0.12, 6.79, 2.56, 0.07, 1.03, -1.37 } } },
-    };
-    for (int l = 0; l < 3; ++l)
-    {
-        const auto scene = makeScene (kLevels[l]);
-        for (const auto& p : pinned)
-        {
-            RenderOptions o;
-            if (p.file == nullptr)
-            {
-                o.mode = ModeValue::Gaming;
-                o.macros.push_back ({ "footsteps", 100.0f });
-            }
-            else
-                o = factoryPreset (p.file);
-            const std::string what = std::string (p.file == nullptr ? "Footsteps 100" : p.file) + " at " + levelName (l);
-            const auto r = measureScene (scene, render (scene.input, resolve (o)));
-            print (what, r);
-            const double got[9] = { r.cueSnrGainDb, r.contrastChangeDb, r.bedLiftDb, r.bedDriftDb, r.eventChangeDb,
-                                    r.onsetJumpDb, r.holeDb, r.recoveryS, r.stepAfterDb };
-            for (int m = 0; m < 9; ++m)
-                CHECK_NEAR (got[m], p.v[l][m], m == 7 ? 0.4 : 0.3);
+// E60 stage 1 matrix (E59 ratchet) and docs/11 E19's Done-when on the cue
+// enhancer, Competitive FPS and Battle Royale: one test case per row and
+// level (registerSceneMatrixCases), so each stays under 2 s.
+// The ratchet: every metric of every configuration pinned at today's
+// value (0.3 dB, recovery 0.4 s: compiler / FMA differences only). A
+// change that moves one must say why and re-pin it. Recorded after the
+// docs/11 E19 redesign (Footsteps = the CueLift bands 4 / 5) and the
+// gaming preset retune; the values before it are in docs/11 E19 / E60.
+// Re-pinned by docs/11 E04 step 4 and E20 (Phase 3 batch 5), every
+// gaming row: Footsteps and Detail add the Clarity shaper's high-band
+// attack (+2 dB each at 100 %), Impact's attack moved to its low band
+// and its static bass boost and harmonics became the bass engine's
+// event-keyed punch. Moved by more than the tolerance: the combat's
+// event change at -40 LUFS (its HF onsets get the high-band attack too;
+// the cue enhancer's loud cap does not apply to the shaper): Footsteps
+// 100 0.74 -> 1.08 dB, Competitive FPS 0.02 -> 0.46, Horror Detail 1.91
+// -> 2.31; Racing's 4.13 -> 3.82 (Impact 0.35's static boost gone);
+// Cinematic Adventure (Impact 0.5: its 1.3 dB full-band attack lifted
+// the steps' onsets too, now only the low band's) cue SNR gain 0.56 /
+// 1.53 / 2.84 -> 0.11 / 1.16 / 2.41 dB, contrast 0.16 / 0.32 / 0.20 ->
+// -0.45 / -0.26 / -0.40 dB, event change at -40 LUFS 4.51 -> 4.09 dB,
+// onset jump 0.52 -> 0.06 dB. Everything else within 0.3 dB (cue SNR and
+// contrast of the other rows within 0.15 dB, bed lift within 0.1 dB).
+//                      cue SNR, contrast, bed, drift, event, onset jump, hole, recovery (s), step after
+struct Pinned
+{
+    const char* file; // nullptr: Gaming mode, Footsteps 100, everything else default (the module)
+    double v[3][9];   // [-14 / -24 / -40 LUFS][metric]
+};
+const Pinned kScenePins[] = {
+    { nullptr,
+      { { 6.01, 5.92, -0.01, -0.04, 0.72, -0.09, -0.10, 0.00, 0.27 },
+        { 6.18, 6.09, 0.03, 0.03, 0.98, -0.07, -0.03, 0.00, 0.05 },
+        { 6.18, 6.09, 0.03, 0.03, 1.08, -0.26, -0.03, 0.00, 0.06 } } },
+    { "gaming-competitive-fps.json",
+      { { 5.43, 4.61, 0.07, -0.07, 0.22, 0.14, -0.12, 0.00, 0.27 },
+        { 6.02, 4.85, 0.36, -0.02, -0.24, 0.08, -0.04, 0.00, 0.08 },
+        { 6.85, 4.94, 0.81, -0.04, 0.46, -0.13, -0.04, 0.00, -0.04 } } },
+    { "gaming-battle-royale.json",
+      { { 4.28, 3.58, -2.49, -0.12, -2.84, 0.28, -0.35, 0.00, 0.35 },
+        { 5.18, 4.24, 0.08, -0.04, -2.91, 0.70, -0.23, 0.00, 0.29 },
+        { 6.16, 4.69, 0.70, -0.02, 0.33, -0.03, -0.04, 0.00, -0.01 } } },
+    // Night Mode: re-pinned by docs/11 E21 Phase 3's retune (Auto Level
+    // -20 -> -14 LUFS with the compressor's +6 dB make-up removed and its
+    // thresholds, the upward section's and dyneq.0's moved up 6 dB with
+    // it; the Startle Guard at 20 LU). Before: bed lift -7.86 / 1.92 /
+    // 9.79, event change -8.86 / -6.54 / 2.52, onset jump 0.65 / 3.39 /
+    // 0.92, hole -0.47 / 0.79 / -1.80, recovery 0.00 / 1.38 / 4.18. The
+    // -24 LUFS hole is now negative (the bed after the event 1.1 dB
+    // louder, not quieter): at -24 LUFS the new target asks Auto Level
+    // for +10 dB, so it is still rising to its +6 dB cap (1 dB/s) through
+    // this 12 s scene. Re-pinned by docs/11 E21's time constants (Phase 3
+    // batch 3: Auto Level's 15 s measure, its 10 ms onset gate and 300 ms
+    // hold; the Startle Guard's sustained detector): event change -9.03 /
+    // -7.44 / -0.05 -> -8.97 / -7.12 / -0.29, onset jump 0.65 / 1.80 /
+    // -0.07 -> 0.57 / 1.20 / 0.28, step lift after at -24 LUFS 0.78 ->
+    // 1.05 dB, the rest within 0.05 dB.
+    { "gaming-night-mode.json",
+      { { 1.74, 1.03, -7.91, -0.20, -9.09, 0.56, -0.43, 0.00, 0.01 },
+        { 2.01, 1.03, -0.15, 0.75, -7.25, 1.47, -1.19, 2.43, 1.06 },
+        { 3.83, 1.96, 3.82, 1.94, -0.33, 0.47, -1.86, 4.18, 2.80 } } },
+    { "gaming-horror-detail.json",
+      { { 3.07, 2.56, 0.39, -0.08, 0.06, 0.27, -0.25, 0.00, 0.23 },
+        { 3.97, 3.09, 2.02, 0.00, -0.06, 0.69, -0.08, 0.00, 0.13 },
+        { 4.96, 3.10, 2.66, -0.03, 2.31, -0.02, -0.02, 0.00, -0.05 } } },
+    { "gaming-7-1-headphone-surround.json",
+      { { 2.49, 1.89, -0.95, -0.09, -1.52, 0.32, -0.27, 0.00, 0.23 },
+        { 3.40, 2.41, 2.09, -0.06, -1.36, 0.86, -0.20, 0.00, 0.23 },
+        { 4.76, 2.72, 3.07, -0.04, 1.88, 0.00, -0.03, 0.00, -0.07 } } },
+    { "gaming-cinematic-adventure.json",
+      { { 0.11, -0.45, 0.78, -0.05, 0.16, 0.69, -0.14, 0.00, 0.01 },
+        { 1.16, -0.26, 2.91, -0.01, 0.83, 0.95, 0.00, 0.00, -0.11 },
+        { 2.41, -0.40, 3.83, -0.07, 4.09, 0.06, -0.02, 0.00, -0.35 } } },
+    { "gaming-moba-strategy.json",
+      { { -1.30, -1.01, -1.49, -0.03, -2.28, 0.29, -0.19, 0.00, -0.39 },
+        { -0.72, -2.28, 2.80, -0.03, -1.34, 1.37, -0.04, 0.00, -0.60 },
+        { 2.88, -0.48, 4.22, -0.11, 2.28, 0.13, -0.05, 0.00, -0.46 } } },
+    // Racing: re-pinned by docs/11 E04 step 2 (Phase 3 batch 2; its
+    // Tighten 0.2 no longer cuts onsets and is applied as a one-pole
+    // shelf). Before: onset jump 0.30 / 1.56 / 0.15, step lift after vs
+    // before 0.31 / 0.27 / -0.22, cue SNR gain -0.34 / 0.35 / 1.89.
+    { "gaming-racing.json",
+      { { -0.37, -0.93, -0.81, -0.06, -1.78, 0.57, -0.19, 0.00, -0.17 },
+        { 0.35, -0.83, 3.17, -0.04, -0.77, 1.51, -0.06, 0.00, -0.19 },
+        { 1.77, -0.47, 4.04, -0.06, 3.82, -0.03, -0.03, 0.00, -0.35 } } },
+    { "gaming-tournament-clean.json",
+      { { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
+        { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
+        { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 } } },
+    // Late Night: re-pinned by docs/11 E21 (Phase 3 batch 3): its retune
+    // for -20 LUFS (Auto Level -26 LUFS, 10:1 compressor with +11.8 dB
+    // make-up, a stronger upward section) and the Auto Level time
+    // constants. A leveller now: the -40 LUFS bed is brought up to the
+    // target (+7.30 -> +22.56 dB), the -24 LUFS onset jump 6.03 -> 1.76 dB,
+    // hole 1.86 -> -0.89 dB, recovery 4.18 -> 2.43 s.
+    { "music-late-night-low-volume.json",
+      { { -0.02, -0.11, -5.91, 0.42, -6.34, 0.42, -0.30, 0.00, -0.04 },
+        { -0.02, -0.16, 4.45, -0.15, -4.53, 1.76, -0.89, 2.43, -0.06 },
+        { 0.33, -0.13, 22.56, 0.12, 6.79, 2.56, 0.07, 1.03, -1.37 } } },
+};
 
-            // docs/11 E19 Done-when: the module and the Competitive FPS /
-            // Battle Royale presets lift the bed <= +1 dB and raise the
-            // step / bed contrast >= +3 dB, at every level (before the
-            // redesign, at -24 / -40 LUFS: module bed +2.44 / +2.44 dB,
-            // contrast +0.77 / +0.77 dB; Competitive FPS +2.50 / +3.63 and
-            // +0.50 / +0.35 dB; Battle Royale +3.92 / +5.48 and +0.06 /
-            // +0.31 dB).
-            const bool judged = p.file == nullptr || std::string (p.file) == "gaming-competitive-fps.json"
-                                || std::string (p.file) == "gaming-battle-royale.json";
-            if (judged)
-            {
-                CHECK_LE (r.bedLiftDb, 1.0);
-                CHECK_GE (r.contrastChangeDb, 3.0);
-            }
-        }
+/** The three scenes of the matrix, made once. */
+const Scene& matrixScene (int l)
+{
+    static const Scene scenes[3] = { makeScene (kLevels[0]), makeScene (kLevels[1]), makeScene (kLevels[2]) };
+    return scenes[l];
+}
+
+/** Renders the row of `file` (nullptr: the module) at level `l` (-14 / -24 / -40 LUFS) against its pins. */
+void checkScenePins (const char* file, int l)
+{
+    const Pinned* row = nullptr;
+    for (const auto& p : kScenePins)
+        if ((p.file == nullptr) == (file == nullptr) && (file == nullptr || std::string (p.file) == file))
+            row = &p;
+    REQUIRE (row != nullptr);
+    const auto& p = *row;
+    const auto& scene = matrixScene (l);
+    RenderOptions o;
+    if (p.file == nullptr)
+    {
+        o.mode = ModeValue::Gaming;
+        o.macros.push_back ({ "footsteps", 100.0f });
     }
-    // The module's lift is the same law at every level: within +-1 dB
-    // across -14 / -24 / -40 LUFS (docs/11 E19 Done-when).
+    else
+        o = factoryPreset (p.file);
+    const std::string what = std::string (p.file == nullptr ? "Footsteps 100" : p.file) + " at " + levelName (l);
+    const auto r = measureScene (scene, render (scene.input, resolve (o)));
+    print (what, r);
+    const double got[9] = { r.cueSnrGainDb, r.contrastChangeDb, r.bedLiftDb, r.bedDriftDb, r.eventChangeDb,
+                            r.onsetJumpDb, r.holeDb, r.recoveryS, r.stepAfterDb };
+    for (int m = 0; m < 9; ++m)
+        CHECK_NEAR (got[m], p.v[l][m], m == 7 ? 0.4 : 0.3);
+
+    // docs/11 E19 Done-when: the module and the Competitive FPS /
+    // Battle Royale presets lift the bed <= +1 dB and raise the
+    // step / bed contrast >= +3 dB, at every level (before the
+    // redesign, at -24 / -40 LUFS: module bed +2.44 / +2.44 dB,
+    // contrast +0.77 / +0.77 dB; Competitive FPS +2.50 / +3.63 and
+    // +0.50 / +0.35 dB; Battle Royale +3.92 / +5.48 and +0.06 /
+    // +0.31 dB).
+    const bool judged = p.file == nullptr || std::string (p.file) == "gaming-competitive-fps.json"
+                        || std::string (p.file) == "gaming-battle-royale.json";
+    if (judged)
+    {
+        CHECK_LE (r.bedLiftDb, 1.0);
+        CHECK_GE (r.contrastChangeDb, 3.0);
+    }
+}
+
+/** One case per row and level ("Scenes matrix (E60 stage 1, E59 ratchet):
+    <row> at <level>"), so each stays under the suite's 2 s per case. */
+bool registerSceneMatrixCases()
+{
+    for (const auto& p : kScenePins)
+        for (int l = 0; l < 3; ++l)
+        {
+            const char* file = p.file;
+            std::string name = std::string ("Scenes matrix (E60 stage 1, E59 ratchet): ")
+                               + (file == nullptr ? "Footsteps 100 (the cue enhancer)" : file) + " at " + levelName (l);
+            const bool judged = file == nullptr || std::string (file) == "gaming-competitive-fps.json"
+                                || std::string (file) == "gaming-battle-royale.json";
+            if (judged)
+                name += ", and docs/11 E19's Done-when (bed <= +1 dB, contrast >= +3 dB)";
+            ::flubtest::Registrar (name.c_str(), [file, l] { checkScenePins (file, l); }, __FILE__, __LINE__);
+        }
+    return true;
+}
+
+[[maybe_unused]] const bool kSceneMatrixCasesRegistered = registerSceneMatrixCases();
+} // namespace
+
+TEST_CASE ("Scenes matrix (E60 stage 1): the cue enhancer's pinned lift is the same law at every level - within +-1 dB across -14 / -24 / -40 LUFS (docs/11 E19 Done-when)")
+{
     for (int l = 1; l < 3; ++l)
-        CHECK_NEAR (pinned[0].v[l][0], pinned[0].v[0][0], 1.0);
+        CHECK_NEAR (kScenePins[0].v[l][0], kScenePins[0].v[0][0], 1.0);
 }
 
 namespace

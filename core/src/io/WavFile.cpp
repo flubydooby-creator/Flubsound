@@ -30,6 +30,7 @@
 #include <fstream>
 #include <limits>
 #include <new>
+#include <sstream>
 
 namespace flub::io
 {
@@ -260,7 +261,7 @@ bool parseFmt (const uint8_t* p, uint32_t chunkSize, WavFormat& fmt, std::string
 class FileReader
 {
 public:
-    FileReader (std::ifstream& s, int64_t size) noexcept : stream (s), fileSize (size) {}
+    FileReader (std::istream& s, int64_t size) noexcept : stream (s), fileSize (size) {}
 
     /** Reads exactly numBytes at offset; false if that would pass the end of the file. */
     bool readAt (int64_t offset, uint8_t* dst, int64_t numBytes)
@@ -274,7 +275,7 @@ public:
     }
 
 private:
-    std::ifstream& stream;
+    std::istream& stream;
     const int64_t fileSize;
 };
 
@@ -315,28 +316,13 @@ float decodeSample (const uint8_t* p, SampleFormat format) noexcept
     return 0.0f;
 }
 
-bool readWavImpl (const std::string& path, AudioFileData& out, std::string& error)
+bool parseWav (std::istream& in, const std::string& name, AudioFileData& out, std::string& error)
 {
     const auto fail = [&] (const std::string& message)
     {
-        error = path + ": " + message;
+        error = name + ": " + message;
         return false;
     };
-
-    // Checked before opening: a directory opens fine on Linux and seeking to
-    // its end reports a bogus size (LLONG_MAX on ext4), which would give a
-    // baffling "too short" message; on Windows the open itself fails.
-    const auto fsPath = pathFromUtf8 (path);
-    std::error_code ec;
-    if (std::filesystem::is_directory (fsPath, ec))
-        return fail ("is a directory");
-
-    std::ifstream in (fsPath, std::ios::binary);
-    if (! in)
-    {
-        error = "cannot open " + path;
-        return false;
-    }
 
     in.seekg (0, std::ios::end);
     const auto endPos = static_cast<int64_t> (in.tellg());
@@ -696,7 +682,24 @@ bool readWav (const std::string& path, AudioFileData& out, std::string& error)
 {
     try
     {
-        return readWavImpl (path, out, error);
+        // Checked before opening: a directory opens fine on Linux and seeking to
+        // its end reports a bogus size (LLONG_MAX on ext4), which would give a
+        // baffling "too short" message; on Windows the open itself fails.
+        const auto fsPath = pathFromUtf8 (path);
+        std::error_code ec;
+        if (std::filesystem::is_directory (fsPath, ec))
+        {
+            error = path + ": is a directory";
+            return false;
+        }
+
+        std::ifstream in (fsPath, std::ios::binary);
+        if (! in)
+        {
+            error = "cannot open " + path;
+            return false;
+        }
+        return parseWav (in, path, out, error);
     }
     catch (const std::bad_alloc&)
     {
@@ -705,6 +708,25 @@ bool readWav (const std::string& path, AudioFileData& out, std::string& error)
     catch (const std::exception& e)
     {
         error = path + ": " + e.what();
+    }
+    return false;
+}
+
+bool readWavMemory (const uint8_t* data, size_t size, AudioFileData& out, std::string& error)
+{
+    const std::string name = "<memory>";
+    try
+    {
+        std::istringstream in (std::string (reinterpret_cast<const char*> (data), size), std::ios::binary);
+        return parseWav (in, name, out, error);
+    }
+    catch (const std::bad_alloc&)
+    {
+        error = name + ": out of memory while reading";
+    }
+    catch (const std::exception& e)
+    {
+        error = name + ": " + e.what();
     }
     return false;
 }

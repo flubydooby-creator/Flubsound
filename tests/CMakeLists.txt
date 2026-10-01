@@ -44,5 +44,5 @@ target_sources(flub_tests PRIVATE
 target_include_directories(flub_tests PRIVATE "${FLUB_CLI_DIR}")
 target_compile_definitions(flub_tests PRIVATE FLUB_SOURCE_PRESET_DIR="${PROJECT_SOURCE_DIR}/presets/factory")
 if(WIN32)
-    target_link_libraries(flub_tests PRIVATE shell32 ws2_32) # Utf8Windows.h: CommandLineToArgvW; Ctl.cpp's socket
+    target_link_libraries(flub_tests PRIVATE shell32 ws2_32 winmm) # Utf8Windows.h: CommandLineToArgvW; Ctl.cpp's socket; TestMain's timeBeginPeriod
 endif()

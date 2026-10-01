@@ -6,6 +6,14 @@
 
 #if defined(_WIN32)
     #include <malloc.h>
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <timeapi.h>
 #endif
 
 // ---- allocation counting ---------------------------------------------------
@@ -112,6 +120,14 @@ int main (int argc, char** argv)
 {
     const std::string filter = argc > 1 ? argv[1] : "";
     int run = 0, failedCases = 0;
+
+#if defined(_WIN32)
+    // A 1 ms system timer, as every JUCE process (the app, the plug-in's
+    // hosts, flub_app_tests) has: otherwise a short sleep lasts 15.6 ms and
+    // the neural worker's poll (AsyncModelProcessor.h) makes the NeuralSlot
+    // tests 13 s each instead of well under 1 s.
+    timeBeginPeriod (1);
+#endif
 
     for (const auto& tc : flubtest::registry())
     {

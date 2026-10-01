@@ -603,13 +603,13 @@ TEST_CASE ("WavFile: every truncation of a valid file is rejected or clamped wit
     AudioFileData reference;
     REQUIRE (readWav (src.path, reference, error));
 
-    TempFile f;
+    // Each truncation in memory (readWavMemory, the same parser): a file
+    // round-trip per length costs over 2 s on Windows.
     for (size_t length = 0; length <= full.size(); ++length)
     {
-        writeBytes (f.path, std::vector<uint8_t> (full.begin(), full.begin() + static_cast<std::ptrdiff_t> (length)));
         AudioFileData out;
         error.clear();
-        const bool ok = readWav (f.path, out, error);
+        const bool ok = readWavMemory (full.data(), length, out, error);
         if (length < headerSize)
         {
             CHECK (! ok);
@@ -737,7 +737,8 @@ TEST_CASE ("WavFile: fuzzed headers never crash and successful reads are well-fo
     chunks.chunk ("LIST", list).chunk ("fmt ", fmtExtensibleBody (1, 2, 48000, 16, 16, 3)).chunk ("data", data);
     const auto base = riff (chunks);
 
-    TempFile f;
+    // In memory (readWavMemory, the same parser as readWav): 2500 file
+    // round-trips cost about 17 s on Windows, under 1 s on Linux.
     FastRandom rng (4242);
     int accepted = 0;
     for (int iter = 0; iter < 2500; ++iter)
@@ -752,11 +753,10 @@ TEST_CASE ("WavFile: fuzzed headers never crash and successful reads are well-fo
         }
         if ((rng.nextU32() & 7u) == 0)
             bytes.resize (rng.nextU32() % bytes.size());
-        writeBytes (f.path, bytes);
 
         AudioFileData out;
         std::string error;
-        if (readWav (f.path, out, error))
+        if (readWavMemory (bytes.data(), bytes.size(), out, error))
         {
             ++accepted;
             CHECK (out.numChannels >= 1 && out.numChannels <= 8);
@@ -772,6 +772,36 @@ TEST_CASE ("WavFile: fuzzed headers never crash and successful reads are well-fo
         }
     }
     CHECK (accepted > 0); // benign mutations (e.g. inside sample data) must still load
+}
+
+TEST_CASE ("WavFile: readWavMemory reads what readWav reads from the same bytes, and fails the same way")
+{
+    Bytes data;
+    for (int i = 0; i < 48 * 2; ++i)
+        data.u16 (static_cast<uint32_t> (i * 1231));
+    Bytes chunks;
+    chunks.chunk ("fmt ", fmtExtensibleBody (1, 2, 44100, 16, 16, 3)).chunk ("data", data);
+    const auto good = riff (chunks);
+    auto bad = good;
+    bad[8] = 'X'; // not WAVE
+
+    TempFile f;
+    const std::vector<uint8_t>* const cases[] = { &good, &bad };
+    for (const auto* bytes : cases)
+    {
+        writeBytes (f.path, *bytes);
+        AudioFileData fromFile, fromMemory;
+        std::string fileError, memoryError;
+        const bool fileOk = readWav (f.path, fromFile, fileError);
+        const bool memoryOk = readWavMemory (bytes->data(), bytes->size(), fromMemory, memoryError);
+        CHECK (fileOk == memoryOk);
+        CHECK (fileOk == (bytes == &good));
+        CHECK (fromFile.sampleRate == fromMemory.sampleRate);
+        CHECK (fromFile.numChannels == fromMemory.numChannels);
+        CHECK (fromFile.channels == fromMemory.channels);
+        // The same message after the name ("<path>: ..." / "<memory>: ...").
+        CHECK (fileError.substr (fileError.find (": ") + 1) == memoryError.substr (memoryError.find (": ") + 1));
+    }
 }
 
 TEST_CASE ("WavFile: TPDF dither is zero-mean with 0.5 LSB rms error independent of the signal")
