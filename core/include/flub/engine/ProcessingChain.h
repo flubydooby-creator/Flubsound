@@ -565,6 +565,7 @@ public:
         // its harmonics) count: the automatic preamp's model, which makes
         // room for the onsets; a steady programme never gets them.
         bool onsets = false;
+        double impactScale = 1.0; // the Smart macros' bass multiplier on the burst (docs/11 E34)
     };
 
     /** Builds the model from effective values (param::kNumParams entries; a
@@ -721,7 +722,7 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 183 + LoudnessContour::kNumSections + 3; // + the contour's sections and trim (E32), the Warmth trim (E14), the programme level
+    static constexpr int kHeadroomKeySize = 184 + LoudnessContour::kNumSections + 3; // + the contour's sections and trim (E32), the Warmth trim (E14), the programme level
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;
@@ -792,6 +793,8 @@ private:
     AnalysisSnapshot analysisSnapshot;
     std::atomic<bool> smartRequest { false }, analysisTapRequest { false };
     bool analysisRunning = false, smartApplied = false;
+    /** The Smart macros' bass multiplier on Impact's burst (docs/11 E20, E34); 1 while Smart is not applied. */
+    float impactSmartScale() const noexcept { return smartApplied ? smartMod.bass : 1.0f; }
     uint32_t analysisFramesPublished = 0;
     MacroModulation smartMod;
     std::array<std::atomic<float>, 4> publishedModulation { 1.0f, 1.0f, 1.0f, 1.0f };

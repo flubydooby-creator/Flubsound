@@ -1012,8 +1012,9 @@ void ProcessingChain::applyParameters() noexcept
     bp.splitProtection = on (e, BassSplitProtect);
     // Impact's punch (docs/11 E20): Gaming Impact keys an LF burst on
     // onsets (no parameter; the curve of the static boost it replaces),
-    // governed like the macro rows it replaced.
-    bp.impactPunch = mode == ModeValue::Gaming ? smoothstep (0.0f, 1.0f, e[Macro3]) * governorScale : 0.0f;
+    // governed like the macro rows it replaced, and scaled by the Smart
+    // macros' bass multiplier like the bass rows (docs/11 E34).
+    bp.impactPunch = mode == ModeValue::Gaming ? smoothstep (0.0f, 1.0f, e[Macro3]) * governorScale * impactSmartScale() : 0.0f;
     bass.setParams (bp);
     slots[SBass].setActive (active (BassOn));
 
@@ -1243,7 +1244,7 @@ void ProcessingChain::applySafeSpeakerBassCap (float* e) const noexcept FLUB_NON
 
 void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcept FLUB_NONBLOCKING
 {
-    static_assert (kHeadroomKeySize == kHeadroomParamCount + 4 + 10 * kNumModeBands + LoudnessContour::kNumSections);
+    static_assert (kHeadroomKeySize == kHeadroomParamCount + 5 + 10 * kNumModeBands + LoudnessContour::kNumSections);
     std::array<float, kHeadroomKeySize> key {};
     size_t k = 0;
     for (int id : kHeadroomScalarIds)
@@ -1279,6 +1280,7 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
             warmthTrimModelDb = trim;
     }
     key[k++] = warmthTrimModelDb;
+    key[k++] = impactSmartScale(); // the burst's Smart multiplier (docs/11 E20, E34)
     // The programme level (docs/11 E11; trackProgrammeLevel()), in
     // kProgrammeStepDb steps.
     if (programmeHeldDb > kMinusInfDb && std::abs (programmeHeldDb - programmeDb) >= kProgrammeStepDb)
@@ -1305,6 +1307,7 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     ctx.programmeDb = static_cast<double> (programmeDb) - (surroundFold ? 20.0 * std::log10 (static_cast<double> (Bs775Fold::kMatrixGain)) : 0.0);
     ctx.modeBands = modeBands.data();
     ctx.numModeBands = kNumModeBands;
+    ctx.impactScale = impactSmartScale();
     modelProgrammeDb.store (programmeDb, std::memory_order_relaxed);
     buildStaticBoostModel (h, config.sampleRate, surroundFold, headroomModel, ctx);
     const headroom::Prediction p = predictStaticBoost (headroomModel, headroom::Weighting::Programme);
@@ -1621,9 +1624,9 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
         // 3a): the 77.5 Hz bell x + (g - 1) BP (x), up to 6 dB x punch and
         // never over bass.protect on the LF peak that reaches it, and 0.25 x
         // punch more harmonics while it lasts. The macro's ungoverned value,
-        // as for the bass boost.
+        // as for the bass boost, with the Smart bass multiplier.
         const double punch = ctx.onsets && static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Gaming
-                                 ? static_cast<double> (smoothstep (0.0f, 1.0f, e[Macro3]))
+                                 ? static_cast<double> (smoothstep (0.0f, 1.0f, e[Macro3])) * ctx.impactScale
                                  : 0.0;
         if (punch > 0.0)
         {

@@ -16,6 +16,7 @@
 #include "flub/dsp/BassEngine.h"
 #include "flub/dsp/Crossover.h"
 #include "flub/dsp/DynamicEq.h"
+#include "flub/engine/MacroMap.h"
 #include "flub/engine/ProcessingChain.h"
 
 #include <algorithm>
@@ -659,6 +660,61 @@ TEST_CASE ("Gaming Impact (M3) and the automatic preamp (docs/11 E20): the pream
     CHECK_NEAR (modelAt77 (ModeValue::Gaming, true), 6.0, 0.3); // the bell, plus a little harmonics power
     CHECK_NEAR (modelAt77 (ModeValue::Gaming, false), 0.0, 0.01); // the default subsonic filter's skirt
     CHECK_NEAR (modelAt77 (ModeValue::Music, true), 0.0, 0.01);
+}
+
+TEST_CASE ("Gaming Impact (M3) and Smart macros (docs/11 E20, E34): on bass-heavy programme the burst takes the Smart bass multiplier like the bass rows, and so does the automatic preamp's model")
+{
+    // Before: Smart's bass multiplier scaled the macros' bass boost and
+    // harmonics rows but not Impact's burst (it has no row), so on LF-heavy
+    // programme Smart took nothing off it (this scene, Smart on: lift 4.50 dB,
+    // preamp -6.22 dB, as static). The scene follows 3 s of the
+    // rumble alone, so the analysis is valid and the multiplier has glided.
+    struct Result
+    {
+        Planar out;
+        float preampDb = 0.0f, bass = 1.0f;
+    };
+    const auto render = [] (float impact, bool smart, bool preamp) {
+        ParameterStore store;
+        store.set (Mode, static_cast<float> (ModeValue::Gaming));
+        store.set (Macro3, impact);
+        store.set (AutoPreampOn, preamp ? 1.0f : 0.0f);
+        store.set (AutoPreampAllowanceDb, 0.0f);
+        ProcessingChain chain (store);
+        chain.prepare ({ kFs, kBlock, 2 });
+        chain.setSmartMacros (smart);
+        ScopedNoDenormals noDenormals;
+        Planar lead = rumbleScene (-40.0f, -150.0f);
+        for (int pos = 0; pos < lead.numSamples(); pos += kBlock)
+            chain.process (lead.block (pos, std::min (kBlock, lead.numSamples() - pos)));
+        Result r { rumbleScene (-40.0f, -20.0f), 0.0f, 1.0f };
+        for (int pos = 0; pos < r.out.numSamples(); pos += kBlock)
+            chain.process (r.out.block (pos, std::min (kBlock, r.out.numSamples() - pos)));
+        r.preampDb = chain.getAutoPreampDb();
+        r.bass = chain.getSmartModulation().bass;
+        return r;
+    };
+    const int delay = chainLatency (macroOnly (Macro3, 1.0f, {}), kFs);
+    const auto lift = [delay] (const Result& on, const Result& off) {
+        return lfBandDb (on.out, 1.5, 1.65, delay) - lfBandDb (off.out, 1.5, 1.65, delay);
+    };
+    const auto staticOn = render (1.0f, false, false), staticOff = render (0.0f, false, false);
+    const auto smartOn = render (1.0f, true, false), smartOff = render (0.0f, true, false);
+    measured ("Smart bass multiplier on the LF-heavy scene", smartOn.bass, "");
+    CHECK_LE (smartOn.bass, 0.85f); // LF-heavy: Smart takes some of the macros' bass
+    CHECK_GE (smartOn.bass, 1.0f - MacroMap::kSmartBassCut - 0.01f);
+    const double staticLift = lift (staticOn, staticOff), smartLift = lift (smartOn, smartOff);
+    measured ("Impact 100, onset window LF lift, static", staticLift, "dB");
+    measured ("Impact 100, onset window LF lift, Smart", smartLift, "dB");
+    CHECK_GE (staticLift, 3.0);
+    CHECK_LE (smartLift, staticLift - 0.15);
+    CHECK_GE (smartLift, 3.0);
+
+    // The preamp's model counts the burst at the same multiplier: the bell
+    // of 6 dB x the multiplier, and a little harmonics power.
+    const double preampDb = render (1.0f, true, true).preampDb - render (0.0f, true, true).preampDb;
+    measured ("Impact 100 against 0 with Smart: the automatic preamp's change", preampDb, "dB");
+    CHECK_NEAR (preampDb, -(6.0 * smartOn.bass + 0.2), 0.3);
 }
 
 TEST_CASE ("BassEngine Impact punch (docs/11 E20): switching it is click-free, the burst keys on onsets only and stays under bass.protect, the output does not depend on the block size, a NaN burst does not stick, and nothing allocates")
