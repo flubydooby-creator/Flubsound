@@ -42,7 +42,7 @@ constexpr double kFs = 48000.0;
 
 // The chain's latency per profile at 48 kHz with no model (test_engine.cpp's
 // MixEngine latency test and the table in ProcessingChain.h).
-constexpr int kQualityLatency = 1352, kBalancedLatency = 192, kLowLatency = 100;
+constexpr int kQualityLatency = 1400, kBalancedLatency = 192, kLowLatency = 100;
 
 /** Drum-like programme (the one test_engine.cpp uses). */
 Planar makeProgramme (int numSamples, float level = 0.5f, uint32_t seed = 7)

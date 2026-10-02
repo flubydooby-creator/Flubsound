@@ -110,8 +110,8 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
   | | Quality | Balanced (default) | Low Latency |
   |---|---|---|---|
-  | Chain latency | 28.2 ms | 4.0 ms | 2.1 ms |
-  | App engine (with the master limiter) | 29.6 ms | 5.4 ms | 3.0 ms |
+  | Chain latency | 29.2 ms | 4.0 ms | 2.1 ms |
+  | App engine (with the master limiter) | 30.6 ms | 5.4 ms | 3.0 ms |
   | Added end to end (estimate, driver path) | music and batch use | ≈ 12–13 ms | ≈ 9.5 ms |
   | Noise gate | yes (21.3 ms STFT) | no | no |
   | Saturator oversampling | 8× below 88.2 kHz | 4× | 4× |

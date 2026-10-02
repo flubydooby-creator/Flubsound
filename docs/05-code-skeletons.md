@@ -642,17 +642,18 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
 |---|---|---|---|
 | `SpectralNoiseGate` (STFT) | 1024 | not in chain | not in chain |
 | `Saturator` 2× oversampling | 32 (High) | 16 (Low) | 16 (Low) |
+| `ClarityEnhancer` attack look-ahead | 48 (1 ms) | 0 | 0 |
 | `Compressor` look-ahead | 144 (3 ms) | 48 (1 ms) | 24 (0.5 ms) |
 | `LoudnessMaximizer` clip oversampler | 36 (4× High) | 36 (4× High) | 16 (2× Low) |
 | `LoudnessMaximizer` limiter L + D | 96 + 20 = 116 | 72 + 20 = 92 | 24 + 20 = 44 |
-| **Total** | **1352 = 28.17 ms** | **192 = 4.00 ms** | **100 = 2.08 ms** |
+| **Total** | **1400 = 29.17 ms** | **192 = 4.00 ms** | **100 = 2.08 ms** |
 
 | Sample rate | Quality | Balanced | Low Latency |
 |---|---|---|---|
-| 44.1 kHz | 1332 (30.20 ms) | 182 (4.13 ms) | 96 (2.18 ms) |
-| 48 kHz | 1352 (28.17 ms) | 192 (4.00 ms) | 100 (2.08 ms) |
-| 96 kHz | 1592 (16.58 ms) | 312 (3.25 ms) | 148 (1.54 ms) |
-| 192 kHz | 2072 (10.79 ms) | 552 (2.88 ms) | 244 (1.27 ms) |
+| 44.1 kHz | 1376 (31.20 ms) | 182 (4.13 ms) | 96 (2.18 ms) |
+| 48 kHz | 1400 (29.17 ms) | 192 (4.00 ms) | 100 (2.08 ms) |
+| 96 kHz | 2712 (28.25 ms) | 312 (3.25 ms) | 148 (1.54 ms) |
+| 192 kHz | 5336 (27.79 ms) | 552 (2.88 ms) | 244 (1.27 ms) |
 
 The oversampler and detector latencies (and the 1024-sample STFT) are fixed sample counts; look-ahead scales with `fs`. EQ, dynamic EQ, bass, clarity, spatializer and virtualiser have zero latency. An active neural model adds its fixed `L = frameSize × (1 + safetyFrames)` to every column (decision 20); with no model the slot adds nothing.
 

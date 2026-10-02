@@ -536,6 +536,9 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::Quality, sr));
             maximizer.setLookaheadMs (2.0f);
             maximizer.setTruePeakDetection (true);
+            // The attack shapers' look-ahead (docs/11 E04 step 5): an onset's
+            // gain is in place when it arrives (+48 samples at 48 kHz).
+            clarity.setLookaheadMs (1.0f);
             break;
         case LatencyProfileValue::LowLatency:
             gateInChain = false;
@@ -544,6 +547,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::LowLatency, sr));
             maximizer.setLookaheadMs (0.5f);
             maximizer.setTruePeakDetection (true);
+            clarity.setLookaheadMs (0.0f);
             break;
         case LatencyProfileValue::Balanced:
         default:
@@ -553,6 +557,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
             maximizer.setClipOversampling (Oversampler::forClipper (Oversampler::Profile::Balanced, sr));
             maximizer.setLookaheadMs (1.5f);
             maximizer.setTruePeakDetection (true);
+            clarity.setLookaheadMs (0.0f);
             break;
     }
 

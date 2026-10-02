@@ -1439,7 +1439,7 @@ speed (transientSpeed 0.5 … 2, default 1; a module setting): the A_slow attack
 - **The macros** (§14.3, §14.4). Music *Punch* adds the attack high offset (+2.5 dB at 100 %) to its +6 dB attack, so any Punch runs the 3-band path; Gaming *Footsteps* and *Detail* add +2 dB each to the high band (Footsteps engages Clarity for it); *Impact*'s +4 dB goes to the low band (attack low offset) instead of the full band, beside the bass engine's event-keyed punch (§4.3.7). Punch 100 on the E59 kick (50 + 80 Hz chirp every 500 ms, *KnownGap closed: kick onset ...*): 0–10 / 10–30 ms lift 5.38 / 4.70 → 5.43 / 2.52 dB, onset minus body +0.68 → **+2.91 dB** (Done-when ≥ +2). A 20 ms step above 3 kHz 150 ms into an explosion's tail (peak −12 dBFS) at Gaming Boost 100 + Impact 100 keeps its isolated lift within 0.49 dB (7.67 / 7.18 dB; the full-band shaper 11.27 / 6.05 dB, −5.22 dB; *KnownGap closed: an HF step under an explosion's tail ...*).
 - **The one-pole application.** Step 3 applied the band gains to the LR4 bands, whose sum is an all-pass with about 3 ms of group delay under 100 Hz: with every gain at 1 it took 2.4 dB off a kick's first 10 ms and put 1 dB on the next 20 (Punch 100 then read onset minus body −0.96 dB, worse than the full band). The gains now apply to complementary one-pole bands (low1 = LP1 at the split, high1 = HP1 at 4 kHz of the rest, mid1 the remainder): they sum to x exactly, so unity gains are the input, and a lift reads like a shelf of the band's gain (+12 dB on the low band: +11.1 / +9.3 / +2.6 / +0.8 dB at 60 / 120 / 500 / 1000 Hz; on the high band +2.3 / +9.2 / +11.1 dB at 1 / 4 / 8 kHz). The one-pole lags less than the LR4 band, so the low band's detector is LR2 (two one-poles, 2.6 ms of group delay under the split against LR4's 3.8 ms): with LR4 a 60 Hz hit 75 ms after the previous one got its lift 4–5 ms late (4.74 dB over the first 10 ms, 9.81 with LR2).
 - **The onset floor** (mid and high band): the first 1.5 dB of the fast envelope's rise over the slow one is not an onset, `wA = clamp((20 log10(A_fast / A_slow) − 1.5 dB) / 4.5 dB, 0, 1)`. Their short holds follow the peaks of steady noise, which rise by a dB or two within 3–12 ms: steady Gaussian noise at +12 dB attack 0.23 / 0.53 → 0.00 / 0.00 dB (mid / high), hits 75 ms apart 10.69 / 10.28 → 10.56 / 10.06 dB. The low band (25 ms hold, 0.14 dB) and the full-band shaper keep no floor.
-- **Look-ahead** (`ClarityEnhancer::setLookaheadMs`, structural, 0–5 ms, default 0; meant for Quality). Every detector reads x[n] and the gains apply to x[n − L] in both paths, so an onset's lift is in place when it arrives; the module's latency is L (neutral: the input delayed by L, bit for bit). 1 ms, +12 dB attack, the first millisecond of an onset: 4.18 → 8.90 dB (full band, 1 kHz plucks), 9.50 → 11.85 dB (high band, clicks); the first 10 ms within 0.5 dB (*Clarity (E04 step 5): ...*). **Not in the chain yet**: 1 ms raises Quality's total from 1352 to 1400 samples at 48 kHz, which `tests/test_engine.cpp`, `tests/test_neural_slot.cpp` and [01 §5.1](01-architecture.md#51-algorithmic-latency-per-profile-48-khz-the-only-latency-sources-in-the-chain) pin (with the bass engine's 2 ms, §4.9, 1496); wiring it is one line in `ProcessingChain::prepare()` (`clarity.setLookaheadMs (1.0f)` in the Quality case, 0 elsewhere) with those numbers, and the plug-in then reports it through the chain's latency.
+- **Look-ahead** (`ClarityEnhancer::setLookaheadMs`, structural, 0–5 ms, default 0; the chain sets 1 ms in Quality, 0 otherwise). Every detector reads x[n] and the gains apply to x[n − L] in both paths, so an onset's lift is in place when it arrives; the module's latency is L (neutral: the input delayed by L, bit for bit). 1 ms, +12 dB attack, the first millisecond of an onset: 4.18 → 8.90 dB (full band, 1 kHz plucks), 9.50 → 11.85 dB (high band, clicks); the first 10 ms within 0.5 dB (*Clarity (E04 step 5): ...*). **In the chain** (Quality, [11 E04](11-enhancement-report.md#e04) step 5): Quality's total is 1400 samples at 48 kHz instead of 1352 ([01 §5.1](01-architecture.md#51-algorithmic-latency-per-profile-48-khz-the-only-latency-sources-in-the-chain)), and the plug-in reports it to the host through the chain's latency. The bass engine's 2 ms look-ahead (§4.9) is still not set: it only acts with `bass.splitProtect`, which no factory preset turns on, and would otherwise only add delay.
 
 ### 5.4 Parameters
 
@@ -1478,7 +1478,7 @@ Test *TransientShaper: parameter changes and onsets move the gain smoothly* boun
 
 ### 5.6 Latency & CPU
 
-- **Latency: 0**, or the look-ahead when one is set (`setLookaheadMs`, structural; §5.3.6; the chain does not set one yet). Tests: *TransientShaper: zero latency - an impulse is not delayed*, *Clarity: zero latency - an impulse is not delayed* and *Clarity (E04 step 5): a look-ahead is the module's latency ...*.
+- **Latency: 0**, or the look-ahead when one is set (`setLookaheadMs`, structural; §5.3.6; 1 ms in the Quality profile). Tests: *TransientShaper: zero latency - an impulse is not delayed*, *Clarity: zero latency - an impulse is not delayed* and *Clarity (E04 step 5): a look-ahead is the module's latency ...*.
 - **CPU** (indicative):
 
 | Configuration | ns / stereo sample | % core |
@@ -3900,7 +3900,7 @@ THD+N    = 10 log10( residual / Σ_ch <y, y> )       dB re the output energy; �
 
 | Profile | Gate (STFT) | Saturator OS | Compressor LA | Clipper OS | Limiter LA | Total @ 48 kHz |
 |---|---|---|---|---|---|---|
-| Quality | in chain (1024) | 8× ADAA (32; 4× from 88.2 kHz) | 3 ms (144) | 4× High (36) | 2 ms + 20 (116) | 1352 smp ≈ 28.2 ms |
+| Quality | in chain (1024) | 8× ADAA (32; 4× from 88.2 kHz) | 3 ms (144) | 4× High (36) | 2 ms + 20 (116) | 1400 smp ≈ 29.2 ms (with Clarity's 1 ms look-ahead, 48) |
 | Balanced (default) | — | 4× ADAA (16) | 1 ms (48) | 4× High (36) | 1.5 ms + 20 (92) | 192 smp = 4.0 ms |
 | Low Latency | — | 4× ADAA (16) | 0.5 ms (24) | 4× rate-aware (16) | 0.5 ms + 20 (44) | 100 smp ≈ 2.1 ms |
 
@@ -4311,22 +4311,23 @@ Latency is the sum of the slot latencies of the current profile. It is constant 
 | Input gain, AutoLevel | — | 0 | 0 | 0 |
 | Virtualiser / BS.775 downmix | ITD is part of the cue (§8.6) | 0 | 0 | 0 |
 | Spectral noise gate | STFT frame N (in chain only in Quality) | **1024** | — | — |
-| Parametric EQ, Dynamic EQ, Bass, Clarity | minimum-phase IIR | 0 | 0 | 0 |
+| Parametric EQ, Dynamic EQ, Bass | minimum-phase IIR | 0 | 0 | 0 |
+| Clarity | attack look-ahead in Quality ([11 E04](11-enhancement-report.md#e04) step 5, §5.3.6); IIR otherwise | 48 (1 ms) | 0 | 0 |
 | Saturator | 2× oversampler round trip | 32 (2× High) | 16 (2× Low) | 16 (2× Low) |
 | Stereo & Space | IIR | 0 | 0 | 0 |
 | Compressor | look-ahead | 144 (3 ms) | 48 (1 ms) | 24 (0.5 ms) |
 | Maximizer: clipper | oversampler round trip | 36 (4× High) | 36 (4× High) | 16 (4× rate-aware below 88.2 kHz, §11.6) |
 | Maximizer: limiter | look-ahead + TP detector (20) | 96 + 20 = 116 | 72 + 20 = 92 | 24 + 20 = 44 |
-| **Strip total** | | **1352 = 28.17 ms** | **192 = 4.00 ms** | **100 = 2.08 ms** |
+| **Strip total** | | **1400 = 29.17 ms** | **192 = 4.00 ms** | **100 = 2.08 ms** |
 
 Strip totals at other rates, measured with `ProcessingChain::getLatencySamples()`:
 
 | fs | Quality | Balanced | Low Latency |
 |---|---|---|---|
-| 44.1 kHz | 1332 = 30.20 ms | 182 = 4.13 ms | 96 = 2.18 ms |
-| 48 kHz | 1352 = 28.17 ms | 192 = 4.00 ms | 100 = 2.08 ms |
-| 96 kHz | 2616 = 27.25 ms | 312 = 3.25 ms | 148 = 1.54 ms |
-| 192 kHz | 5144 = 26.79 ms | 552 = 2.88 ms | 244 = 1.27 ms |
+| 44.1 kHz | 1376 = 31.20 ms | 182 = 4.13 ms | 96 = 2.18 ms |
+| 48 kHz | 1400 = 29.17 ms | 192 = 4.00 ms | 100 = 2.08 ms |
+| 96 kHz | 2712 = 28.25 ms | 312 = 3.25 ms | 148 = 1.54 ms |
+| 192 kHz | 5336 = 27.79 ms | 552 = 2.88 ms | 244 = 1.27 ms |
 | 8 kHz | 92 = 11.50 ms (runs as Balanced) | 92 = 11.50 ms | 60 = 7.50 ms |
 
 Why the totals behave as they do:
@@ -4337,7 +4338,7 @@ Why the totals behave as they do:
 
 **Desktop app.**
 - `MixEngine` pads a strip only to the slowest strip of its sync group (`StripConfig::syncGroup`, [11 E40](11-enhancement-report.md#e40) part 3), so strips that carry one A/V programme stay in sync. By default every strip is in a group of its own and is not padded: a Quality Music strip no longer delays a Low Latency Game strip. `getStripLatencySamples()` / `getStripPaddingSamples()` report each strip's output latency and padding.
-- The master limiter then adds its own look-ahead plus the 20-sample detector delay: 1 ms, i.e. 68 samples = 1.42 ms at 48 kHz, or 0.5 ms (44 samples = 0.92 ms) when every strip runs the Low Latency profile, as the app sets it. App engine totals at 48 kHz: 144 samples = 3.0 ms (Low Latency), 260 = 5.4 ms (Balanced), 1420 ≈ 29.6 ms (Quality).
+- The master limiter then adds its own look-ahead plus the 20-sample detector delay: 1 ms, i.e. 68 samples = 1.42 ms at 48 kHz, or 0.5 ms (44 samples = 0.92 ms) when every strip runs the Low Latency profile, as the app sets it. App engine totals at 48 kHz: 144 samples = 3.0 ms (Low Latency), 260 = 5.4 ms (Balanced), 1468 ≈ 30.6 ms (Quality).
 - The bypass-reference limiter of the global bypass (§14.5) sits inside the strip's dry-path delay and adds nothing.
 - Device buffering (WASAPI / CoreAudio / ALSA periods, and the drift-compensated FIFO of captured strips) comes on top. It is not algorithmic and is not included here; the added end-to-end budget, with its scope labels (chain / app engine / added end-to-end), is `01-architecture.md` §5.
 - The README's "~2.1 ms Low Latency profile" is the strip's algorithmic (chain) latency at 48 kHz.

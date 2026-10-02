@@ -105,6 +105,9 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **E20 automatic preamp:** the preamp's model counts Gaming Impact's LF burst (Impact 100: preamp 0.00 → −6.22 dB;
   no factory preset turns the preamp on, so nothing in the renders or golden files moves).
   Smart's bass multiplier now scales the burst as well (no factory preset turns Smart on).
+- **E04 step 5:** Quality sets Clarity's 1 ms look-ahead (Quality 1352 → 1400 samples at 48 kHz; the plug-in's PDC
+  follows). The six Quality presets' rows in `tests/golden/preset-render-baseline.json` were re-based from an MSVC
+  before → after diff; a Linux gcc re-record should confirm them.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order
@@ -134,8 +137,7 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
      decision; 1 detector false positive; 5 from the bypass reference's limiter at +22 dB input gain). The `fuzz` row's 6
      are not triaged yet.
    - E28: the comb row is 18.9 dB against a < 12 dB target.
-   - E04 step 5: Quality look-ahead and the plug-in PDC.
-   - E20: the Impact burst's harmonics are not reserved inside `bass.protect` (the automatic preamp's model and the
+    - E20: the Impact burst's harmonics are not reserved inside `bass.protect` (the automatic preamp's model and the
     Smart bass multiplier cover the burst since the local session).
    - E11: Classical and Jazz lose 0.72 / 0.44 LU.
    - E22: the chat sub-limiter.

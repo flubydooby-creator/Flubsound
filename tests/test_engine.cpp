@@ -339,15 +339,15 @@ TEST_CASE ("Chain: each profile's latency in ms is about the same from 44.1 to 1
         chain.prepare ({ sr, 512, 2 });
         return 1000.0 * chain.getLatencySamples() / sr;
     };
-    CHECK (latencyMs (LatencyProfileValue::Quality, 48000.0) == 1000.0 * 1352 / 48000.0); // 48 kHz is unchanged
+    CHECK (latencyMs (LatencyProfileValue::Quality, 48000.0) == 1000.0 * 1400 / 48000.0); // 48 kHz: 1400 + Clarity's 1 ms look-ahead (docs/11 E04 step 5)
     for (const double sr : { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
     {
         const double q = latencyMs (LatencyProfileValue::Quality, sr);
         const double b = latencyMs (LatencyProfileValue::Balanced, sr);
         const double l = latencyMs (LatencyProfileValue::LowLatency, sr);
         std::cerr << "    " << sr << " Hz: Quality " << q << " ms, Balanced " << b << " ms, Low Latency " << l << " ms\n";
-        CHECK (q >= 26.0);
-        CHECK (q <= 30.5);
+        CHECK (q >= 27.0); // with Clarity's 1 ms look-ahead (docs/11 E04 step 5)
+        CHECK (q <= 31.5);
         // Look-aheads: Balanced 2.5 ms, Low Latency 1 ms, plus FIRs that are at
         // most their 48 kHz length in ms.
         CHECK (b >= 2.5);
@@ -945,11 +945,11 @@ TEST_CASE ("MixEngine: master look-ahead follows the strips' latency profiles (0
     CHECK (mix.getLatencySamples() == 192 + 48 + 20);
     CHECK (impulsePosition (mix) == mix.getLatencySamples());
 
-    // Quality anywhere: 1352 + 68.
+    // Quality anywhere: 1400 + 68.
     mix.params (1).set (LatencyProfile, static_cast<float> (LatencyProfileValue::Quality));
     CHECK (mix.needsReprepare());
     mix.configure (layout, kFs, 1024);
-    CHECK (mix.getLatencySamples() == 1352 + 48 + 20);
+    CHECK (mix.getLatencySamples() == 1400 + 48 + 20);
 }
 
 TEST_CASE ("MixEngine: with all strips on Low Latency the 0.5 ms master still holds the ceiling")
@@ -1123,7 +1123,7 @@ TEST_CASE ("MixEngine: padding only within sync groups, per-strip latency report
 
     // Default: every strip in a group of its own. A Quality preset on Music
     // no longer delays the Low Latency Game strip: 100 + master 1 ms (48 + 20)
-    // instead of 1352 + 68 (before this change every strip was padded).
+    // instead of 1400 + 68 (before this change every strip was padded).
     {
         MixEngine mix;
         build (mix, { { "Game", 8, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } });
@@ -1132,9 +1132,9 @@ TEST_CASE ("MixEngine: padding only within sync groups, per-strip latency report
         CHECK (mix.getStripPaddingSamples (1) == 0);
         CHECK (mix.getStripPaddingSamples (2) == 0);
         CHECK (mix.getStripLatencySamples (0) == 100 + 68);
-        CHECK (mix.getStripLatencySamples (1) == 1352 + 68);
+        CHECK (mix.getStripLatencySamples (1) == 1400 + 68);
         CHECK (mix.getStripLatencySamples (2) == 192 + 68);
-        CHECK (mix.getLatencySamples() == 1352 + 68); // the slowest strip
+        CHECK (mix.getLatencySamples() == 1400 + 68); // the slowest strip
         for (int s = 0; s < 3; ++s)
             CHECK (impulsePosition (mix, s) == mix.getStripLatencySamples (s));
     }
@@ -1148,7 +1148,7 @@ TEST_CASE ("MixEngine: padding only within sync groups, per-strip latency report
         CHECK (mix.getStripPaddingSamples (2) == 0);
         CHECK (mix.getStripLatencySamples (0) == 192 + 68);
         CHECK (mix.getStripLatencySamples (2) == 192 + 68);
-        CHECK (mix.getStripLatencySamples (1) == 1352 + 68);
+        CHECK (mix.getStripLatencySamples (1) == 1400 + 68);
         for (int s = 0; s < 3; ++s)
             CHECK (impulsePosition (mix, s) == mix.getStripLatencySamples (s));
     }
