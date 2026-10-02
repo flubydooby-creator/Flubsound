@@ -51,6 +51,7 @@ struct Render
     float effectiveWidth = 0.0f, compUpwardDb = 0.0f;
     std::vector<float> effective;
     double fs = kFs;
+    float autoPreampDb = 0.0f, predictedBoostDb = 0.0f;
 
     /** Level (dBFS) of the component at `freq` in output channel `ch`, over
         the last 0.5 s. */
@@ -85,6 +86,8 @@ Render renderGaming (const Setup& setup, Planar in, std::initializer_list<int> h
         r.dynEqDb[b] = chain.meters().dynEqGainDb[b].load();
     r.effectiveWidth = chain.meters().effectiveWidth.load();
     r.compUpwardDb = chain.meters().compUpwardGainDb.load();
+    r.autoPreampDb = chain.getAutoPreampDb();
+    r.predictedBoostDb = chain.getPredictedBoostDb();
     for (int i = 0; i < kNumParams; ++i)
         r.effective.push_back (chain.effectiveValue (i));
     return r;
@@ -595,6 +598,67 @@ TEST_CASE ("Gaming Impact (M3) Done-when (docs/11 E20): an explosion's onset win
     measured ("Boost 50 + Impact 0 / 100, -1 dBFS explosion: output peak (Impact 100)", peakOn, "dBFS");
     CHECK_LE (peakOn, -1.0 + 0.05);
     CHECK_LE (peakOff, -1.0 + 0.05);
+}
+
+TEST_CASE ("Gaming Impact (M3) and the automatic preamp (docs/11 E20): the preamp makes room for the burst - its model counts the 77.5 Hz bell and the burst's harmonics at a quiet programme's size, the steady prediction does not, and the onset's lift comes back by what the preamp takes")
+{
+    // Before: the preamp's model did not know the burst (Impact 100 against
+    // 0, allowance 0: the same preamp, a change of 0.00 dB), so the
+    // explosion's onset window kept its full +4.51 dB LF lift on top of a
+    // preamp sized for the steady boosts. After: -6.22 dB, and -1.71 dB.
+    const auto impact = [] (float amount, bool preamp) {
+        return [amount, preamp] (ParameterStore& s) {
+            s.set (Macro3, amount);
+            s.set (AutoPreampOn, preamp ? 1.0f : 0.0f);
+            s.set (AutoPreampAllowanceDb, 0.0f);
+        };
+    };
+    const int delay = chainLatency (impact (1.0f, true), kFs);
+    const auto in = rumbleScene (-40.0f, -20.0f);
+    const auto off = renderGaming (impact (0.0f, true), in), on = renderGaming (impact (1.0f, true), in);
+    const double preampDb = on.autoPreampDb - off.autoPreampDb;
+    measured ("Impact 100 against 0: the automatic preamp's change", preampDb, "dB");
+    measured ("Impact 100 against 0: the steady prediction's change", on.predictedBoostDb - off.predictedBoostDb, "dB");
+    CHECK_LE (preampDb, -3.0);
+    CHECK_GE (preampDb, -6.5); // the burst's 6 dB and its harmonics
+    CHECK_NEAR (on.predictedBoostDb, off.predictedBoostDb, 0.01); // a steady programme never gets the burst
+    // Impact 50 counts smoothstep (0.5) of the burst: less.
+    const auto half = renderGaming (impact (0.5f, true), rumbleScene (-40.0f, -20.0f));
+    CHECK_NEAR (half.autoPreampDb - off.autoPreampDb, 0.5 * preampDb, 0.3);
+
+    // The onset window's LF lift with the preamp on is the lift without it
+    // plus the preamp's change: the burst itself is unchanged.
+    const double lift = lfBandDb (on.out, 1.5, 1.65, delay) - lfBandDb (off.out, 1.5, 1.65, delay);
+    const auto bareOff = renderGaming (impact (0.0f, false), in), bareOn = renderGaming (impact (1.0f, false), in);
+    const double bareLift = lfBandDb (bareOn.out, 1.5, 1.65, delay) - lfBandDb (bareOff.out, 1.5, 1.65, delay);
+    measured ("Impact 100, explosion onset window LF lift, preamp on", lift, "dB");
+    measured ("Impact 100, explosion onset window LF lift, preamp off", bareLift, "dB");
+    CHECK_NEAR (lift, bareLift + preampDb, 0.5);
+
+    // The model directly: only Gaming's M3 is a burst, and only the onset
+    // model (the preamp's) counts it - a bell of 6 dB at 77.5 Hz on a quiet
+    // programme, nothing at Music or with onsets off.
+    ParameterStore store;
+    for (int id : { GateOn, EqOn, DynEqOn, ClarityOn, SaturationOn, SpatialOn, VirtualizerOn, CompressorOn, MaximizerOn })
+        store.set (id, 0.0f);
+    store.set (BassOn, 1.0f);
+    store.set (Macro3, 1.0f);
+    std::vector<float> e (static_cast<size_t> (kNumParams));
+    const auto modelAt77 = [&] (ModeValue mode, bool onsets) {
+        store.set (Mode, static_cast<float> (mode));
+        for (int i = 0; i < kNumParams; ++i)
+            e[static_cast<size_t> (i)] = store.get (i);
+        ProcessingChain::StaticBoostModel m;
+        ProcessingChain::BoostModelContext ctx;
+        ctx.programmeDb = ProcessingChain::kPreampQuietProgrammeDb;
+        ctx.onsets = onsets;
+        ProcessingChain::buildStaticBoostModel (e.data(), kFs, false, m, ctx);
+        return m.responseDb (77.5);
+    };
+    measured ("the onset model at 77.5 Hz, Gaming Impact 100", modelAt77 (ModeValue::Gaming, true), "dB");
+    CHECK_NEAR (modelAt77 (ModeValue::Gaming, true), 6.0, 0.3); // the bell, plus a little harmonics power
+    CHECK_NEAR (modelAt77 (ModeValue::Gaming, false), 0.0, 0.01); // the default subsonic filter's skirt
+    CHECK_NEAR (modelAt77 (ModeValue::Music, true), 0.0, 0.01);
 }
 
 TEST_CASE ("BassEngine Impact punch (docs/11 E20): switching it is click-free, the burst keys on onsets only and stays under bass.protect, the output does not depend on the block size, a NaN burst does not stick, and nothing allocates")

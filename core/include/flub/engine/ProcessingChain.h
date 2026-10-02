@@ -561,6 +561,10 @@ public:
         double preGainDb = 0.0;
         const DynEqBandParams* modeBands = nullptr;
         int numModeBands = 0;
+        // The onset-only boosts (docs/11 E20: Gaming Impact's LF burst and
+        // its harmonics) count: the automatic preamp's model, which makes
+        // room for the onsets; a steady programme never gets them.
+        bool onsets = false;
     };
 
     /** Builds the model from effective values (param::kNumParams entries; a
@@ -717,7 +721,7 @@ private:
     // Automatic preamp (docs/11 E11): the prediction's inputs as of the last
     // prediction (headroomKey), a copy of the effective values it is made
     // from (with the ungoverned bass boost), the model.
-    static constexpr int kHeadroomKeySize = 182 + LoudnessContour::kNumSections + 3; // + the contour's sections and trim (E32), the Warmth trim (E14), the programme level
+    static constexpr int kHeadroomKeySize = 183 + LoudnessContour::kNumSections + 3; // + the contour's sections and trim (E32), the Warmth trim (E14), the programme level
     static constexpr float kHeadroomUpdateMs = 10.0f;
     std::array<float, kHeadroomKeySize> headroomKey {};
     bool headroomKeyValid = false;

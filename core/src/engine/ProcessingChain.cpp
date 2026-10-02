@@ -117,7 +117,8 @@ constexpr int kHeadroomScalarIds[] = { EqOn, EqOutputGainDb, DynEqOn, BassOn, Ba
                                        ClarityPresenceMode, SpatialOn, SpatialCrossfeed, SpatialCrossfeedType, Mode,
                                        CompressorOn, CompThresholdDb, CompRatio, CompKneeDb, CompMakeupDb, CompAutoMakeup, CompSidechainHp,
                                        CompMix, CompUpThresholdDb, CompUpRatio, CompUpMaxGainDb, CompUpFloorDb, CompAttackMs, CompReleaseMs,
-                                       BassProtectDb, BassHarmonics, BassHarmonicsCutoff, BassReplaceFundamental };
+                                       BassProtectDb, BassHarmonics, BassHarmonicsCutoff, BassReplaceFundamental,
+                                       Macro3 }; // Gaming Impact's burst (docs/11 E20)
 constexpr EqField kHeadroomEqFields[] = { EqFieldOn, EqFieldType, EqFieldFreq, EqFieldGain, EqFieldQ, EqFieldSlope };
 constexpr DynField kHeadroomDynFields[] = { DynFieldOn, DynFieldShape, DynFieldFreq, DynFieldQ, DynFieldStaticGain,
                                             DynFieldMode, DynFieldThreshold, DynFieldRatio, DynFieldRange, DynFieldNoiseFloor };
@@ -200,6 +201,10 @@ constexpr double kDynEqShortHoldCrestDb = 8.75, kDynEqShortHoldSpreadDb = 2.0;
 constexpr double kDynEqLongHoldCrestDb = 7.0, kDynEqLongHoldSpreadDb = 2.0;
 // The bass engine's protection detector (25 ms hold, 10 / 150 ms follower).
 constexpr double kBassProtectCrestDb = 8.25, kBassProtectSpreadDb = 1.0;
+// Gaming Impact's burst (BassEngine.cpp stage 3a, docs/11 E20): its bell,
+// its lift at punch 1, the LF level its headroom reads (LP2 150 Hz) and the
+// harmonics amount a burst adds (a mix of 0.5 on the generator's 2 x amount).
+constexpr double kImpactBellHz = 77.5, kImpactBellQ = 0.7, kImpactMaxDb = 6.0, kImpactLevelHz = 150.0, kImpactHarmonics = 0.25;
 constexpr double kButterworthQ2 = 0.70710678118654752; // the body's and the sidechain's 2nd-order filters
 constexpr double kSqrt2 = 1.41421356237309505;
 constexpr double kXfeedItdSeconds = 0.235e-3;
@@ -1316,6 +1321,7 @@ void ProcessingChain::updateHeadroom (const float* h, bool surroundFold) noexcep
     if (on (h, AutoPreampOn))
     {
         ctx.preampDb = std::min (0.0, kPreampQuietProgrammeDb - ctx.programmeDb);
+        ctx.onsets = true;
         buildStaticBoostModel (h, config.sampleRate, surroundFold, preampModel, ctx);
         const headroom::Prediction q = predictStaticBoost (preampModel, headroom::Weighting::Programme);
         preamp = headroom::preampDb (q, h[AutoPreampAllowanceDb]);
@@ -1611,8 +1617,29 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
             if (boost - withdraw > 0.0)
                 add (SvfCoeffs::make (FilterType::LowShelf, hz, kBassShelfQ, boost - withdraw, sr));
         }
+        // Gaming Impact's burst on onsets (docs/11 E20; BassEngine.cpp stage
+        // 3a): the 77.5 Hz bell x + (g - 1) BP (x), up to 6 dB x punch and
+        // never over bass.protect on the LF peak that reaches it, and 0.25 x
+        // punch more harmonics while it lasts. The macro's ungoverned value,
+        // as for the bass boost.
+        const double punch = ctx.onsets && static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Gaming
+                                 ? static_cast<double> (smoothstep (0.0f, 1.0f, e[Macro3]))
+                                 : 0.0;
+        if (punch > 0.0)
+        {
+            const double level = ctx.programmeDb + ctx.preampDb + kBassProtectCrestDb
+                                 + pinkPowerDb (m, { SvfCoeffs::make (FilterType::LowPass, kImpactLevelHz, kButterworthQ2, 0.0, sr) });
+            const double lift = std::min (kImpactMaxDb * punch, std::max (0.0, e[BassProtectDb] - level));
+            if (lift > 0.0)
+            {
+                SvfCoeffs bell = SvfCoeffs::make (FilterType::BandPass, kImpactBellHz, kImpactBellQ, 0.0, sr);
+                bell.m0 = 1.0f;
+                bell.m1 = static_cast<float> (bell.k * (std::pow (10.0, lift / 20.0) - 1.0));
+                add (bell);
+            }
+        }
         const double cutoff = std::clamp (static_cast<double> (e[BassHarmonicsCutoff]), 40.0, 250.0);
-        if (e[BassHarmonics] > 0.0f)
+        if (const double harmonics = std::min (1.0, static_cast<double> (e[BassHarmonics]) + kImpactHarmonics * punch); harmonics > 0.0)
         {
             // The harmonics of the mid's 25 Hz .. cutoff band (BassEngine.cpp:
             // HP2 25 Hz, LP4 cutoff in; HP2 cutoff, LP4 6 cutoff out).
@@ -1625,7 +1652,7 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
             StaticBoostModel unity;
             unity.sampleRate = sr;
             const double bandDb = pinkPowerDb (unity, { out[0], out[1], out[2] });
-            const double amount = std::min (1.0, static_cast<double> (e[BassHarmonics]));
+            const double amount = harmonics;
             m.harmPower = kHarmonicsPower * std::pow (amount, kHarmonicsExponent) * std::pow (10.0, 0.1 * (sourceDb - bandDb));
             m.harmCutoffHz = cutoff;
             m.harmBand = { out[0], out[1], out[2] };
