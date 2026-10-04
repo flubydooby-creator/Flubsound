@@ -133,9 +133,9 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
 4. **Known open items (software).**
-   - Soak: the user rows read 10 clicks, triaged in docs/11 E53 (4 from E04's high-band onset lift, an owner
-     decision; 1 detector false positive; 5 from the bypass reference's limiter at +22 dB input gain). The `fuzz` row's 6
-     are not triaged yet.
+   - Soak: every click is triaged (docs/11 E53): 4 user-row and 5 fuzz-row clicks are Punch's onset lift into a
+     Boost-driven maximizer (an owner decision on E04; Boost 66 + Punch 53 clicks 8 times in the Speech scene); the rest
+     are the bypass reference's limiter at high input gain and one detector false positive.
    - E28: the comb row is 18.9 dB against a < 12 dB target.
     - E20: the Impact burst's harmonics are not reserved inside `bass.protect` (the automatic preamp's model and the
     Smart bass multiplier cover the burst since the local session).

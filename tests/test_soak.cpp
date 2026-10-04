@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <string>
@@ -490,4 +491,53 @@ TEST_CASE ("KnownGap closed: engaging the global bypass is click-free - the cros
     };
     CHECK (run (true).total() == 0);  // engaging (was one click)
     CHECK (run (false).total() == 0); // disengaging
+}
+
+TEST_CASE ("KnownGap: Punch 53 % with Boost 66 % reads as clicks on the soak's speech voice - Clarity's onset lift into the maximizer (E53 fuzz triage, an owner decision on E04)")
+{
+    // docs/11 E53 (fuzz row triage): 5 of the fuzz row's 6 clicks, and 4 of
+    // the user rows' 10, are the processing's own sound with no parameter
+    // moving: Clarity's high-band onset lift (Punch) on syllable and kick
+    // onsets going into the maximizer that Boost drives. The soak's Speech
+    // scene (12 - 18 s of seed 6) through the plain defaults with only those
+    // two macros set; the chain starts cold at 12 s, so the first 50 ms are
+    // not judged. Both macros are needed: either at 0 reads clean.
+    const auto clicks = [] (float boost, float punch, float& worstOverDb) {
+        auto store = std::make_unique<param::ParameterStore>();
+        store->set (param::BoostIntensity, boost);
+        store->set (param::Macro1, punch);
+        auto chain = std::make_unique<ProcessingChain> (*store);
+        chain->prepare ({ kFs, 512, 2 });
+        SoakProgramme programme (kFs, 6);
+        const int skip = static_cast<int> (12.0 * kFs), n = static_cast<int> (6.0 * kFs);
+        AudioBuffer io (2, 512);
+        for (int pos = 0; pos < skip; pos += 512)
+            programme.render (io.channel (0), io.channel (1), std::min (512, skip - pos));
+        DiscontinuityDetector d;
+        d.prepare (kFs, 2);
+        for (int pos = 0; pos < n; pos += 512)
+        {
+            const int len = std::min (512, n - pos);
+            programme.render (io.channel (0), io.channel (1), len);
+            chain->process (io.block (2, len));
+            const float* ch[] = { io.channel (0), io.channel (1) };
+            d.process (ch, len);
+        }
+        d.finish();
+        int count = 0;
+        worstOverDb = 0.0f;
+        for (const auto& e : d.events())
+            if (e.type == DiscontinuityType::Click && e.frame >= static_cast<int64_t> (0.05 * kFs))
+            {
+                ++count;
+                worstOverDb = std::max (worstOverDb, e.overDb);
+            }
+        return count;
+    };
+    float overOn = 0.0f, overNoPunch = 0.0f, overNoBoost = 0.0f;
+    const int on = clicks (0.66f, 0.53f, overOn), noPunch = clicks (0.66f, 0.0f, overNoPunch), noBoost = clicks (0.0f, 0.53f, overNoBoost);
+    std::printf ("    measured clicks in the Speech scene: Boost 66 + Punch 53 %d (largest %.1f dB over), Punch 0 %d, Boost 0 %d\n", on, overOn, noPunch, noBoost);
+    CHECK (on > 0); // KNOWN_GAP: 0 if Punch's onset lift is re-voiced (docs/11 E04, an owner decision)
+    CHECK (noPunch == 0);
+    CHECK (noBoost == 0);
 }
