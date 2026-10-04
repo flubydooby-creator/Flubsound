@@ -289,6 +289,7 @@ private:
     float impactEnv = 0.0f, impactReleaseCoeff = 0.0f;
     float impactBurst1 = 0.0f, impactBurst = 0.0f, impactSmoothCoeff = 0.0f; // the envelope through two 1 ms one-poles
     float impactGainDb = 0.0f, impactRiseCoeff = 0.0f, impactFallCoeff = 0.0f;
+    float impactReserve1 = 1.0f, impactReserve = 1.0f; // the share of the lift bass.protect grants, for the harmonics burst
     SvfCoeffs impactBell, impactLevelLp;
     std::array<SvfState, kMaxChannels> impactBellState {}, impactLevelState {};
 

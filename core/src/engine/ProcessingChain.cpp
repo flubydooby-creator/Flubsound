@@ -1628,16 +1628,17 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
         // Gaming Impact's burst on onsets (docs/11 E20; BassEngine.cpp stage
         // 3a): the 77.5 Hz bell x + (g - 1) BP (x), up to 6 dB x punch and
         // never over bass.protect on the LF peak that reaches it, and 0.25 x
-        // punch more harmonics while it lasts. The macro's ungoverned value,
+        // punch more harmonics while it lasts, reserved with the lift. The macro's ungoverned value,
         // as for the bass boost, with the Smart bass multiplier.
         const double punch = ctx.onsets && static_cast<ModeValue> (idx (e, Mode)) == ModeValue::Gaming
                                  ? static_cast<double> (smoothstep (0.0f, 1.0f, e[Macro3])) * ctx.impactScale
                                  : 0.0;
+        double lift = 0.0; // the granted lift; the harmonics burst is reserved with it
         if (punch > 0.0)
         {
             const double level = ctx.programmeDb + ctx.preampDb + kBassProtectCrestDb
                                  + pinkPowerDb (m, { SvfCoeffs::make (FilterType::LowPass, kImpactLevelHz, kButterworthQ2, 0.0, sr) });
-            const double lift = std::min (kImpactMaxDb * punch, std::max (0.0, e[BassProtectDb] - level));
+            lift = std::min (kImpactMaxDb * punch, std::max (0.0, e[BassProtectDb] - level));
             if (lift > 0.0)
             {
                 SvfCoeffs bell = SvfCoeffs::make (FilterType::BandPass, kImpactBellHz, kImpactBellQ, 0.0, sr);
@@ -1647,7 +1648,7 @@ void ProcessingChain::buildStaticBoostModel (const float* e, double sampleRate, 
             }
         }
         const double cutoff = std::clamp (static_cast<double> (e[BassHarmonicsCutoff]), 40.0, 250.0);
-        if (const double harmonics = std::min (1.0, static_cast<double> (e[BassHarmonics]) + kImpactHarmonics * punch); harmonics > 0.0)
+        if (const double harmonics = std::min (1.0, static_cast<double> (e[BassHarmonics]) + kImpactHarmonics * lift / kImpactMaxDb); harmonics > 0.0)
         {
             // The harmonics of the mid's 25 Hz .. cutoff band (BassEngine.cpp:
             // HP2 25 Hz, LP4 cutoff in; HP2 cutoff, LP4 6 cutoff out).

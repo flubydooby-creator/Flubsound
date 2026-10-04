@@ -44,9 +44,11 @@
 //                      out_c = x_c + (10^(lift/20) - 1) BP (x_c), BP the
 //                      unity band-pass at 77.5 Hz, Q 0.7 (a bell of the
 //                      lift; exactly x_c at 0 dB). The harmonics
-//                      generator's mix gains 0.5 impactPunch * b (the
+//                      generator's mix gains 0.5 impactPunch * b * r, r
+//                      the share of the lift bass.protect grants (at once
+//                      down, 20 ms up, then a 1 ms one-pole; 1 uncapped); the
 //                      generator starts with a burst and idles again when
-//                      its mix and b are back at 0).
+//                      its mix and b are back at 0.
 //   4. Harmonics     : mid = mean of the channels -> HP2 25 Hz -> LP4 cutoff
 //                      -> envelope-normalised Chebyshev waveshaper (header)
 //                      -> HP2 cutoff -> LP4 6 * cutoff -> * 2 * amount,
@@ -640,6 +642,7 @@ void BassEngine::startImpact() noexcept
     impactBellState.fill ({});
     impactLevelState.fill ({});
     impactEnv = impactBurst1 = impactBurst = impactGainDb = 0.0f;
+    impactReserve1 = impactReserve = 1.0f;
     impactHoldLeft = 0;
     impactWarm = std::max (1, msToSamples (kImpactWarmMs, spec.sampleRate));
 }
@@ -700,9 +703,22 @@ float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) 
     // The lift, reserved inside the band's headroom under the protection
     // threshold, then smoothed in dB (landing exactly on 0).
     const float amount = impactAmount.next();
-    float targetDb = kImpactMaxDb * amount * impactBurst;
-    if (targetDb > 0.0f)
-        targetDb = std::min (targetDb, std::max (0.0f, thresholdSmoothed.getCurrent() - gainToDb (held)));
+    const float wantDb = kImpactMaxDb * amount * impactBurst;
+    float targetDb = wantDb, reserveTarget = 1.0f;
+    if (wantDb > 0.0f)
+    {
+        targetDb = std::min (wantDb, std::max (0.0f, thresholdSmoothed.getCurrent() - gainToDb (held)));
+        reserveTarget = targetDb / wantDb; // exactly 1 while nothing is capped
+    }
+    // The harmonics burst is reserved with the lift (docs/11 E20): the
+    // granted share, withheld at once and released over the lift's 20 ms,
+    // then through a 1 ms one-pole (no corner in the mix: no splatter).
+    impactReserve1 = reserveTarget < impactReserve1 ? reserveTarget : reserveTarget + impactFallCoeff * (impactReserve1 - reserveTarget);
+    if (std::abs (impactReserve1 - reserveTarget) < 1.0e-6f)
+        impactReserve1 = reserveTarget;
+    impactReserve = impactReserve1 + impactSmoothCoeff * (impactReserve - impactReserve1);
+    if (std::abs (impactReserve - impactReserve1) < 1.0e-6f)
+        impactReserve = impactReserve1;
     impactGainDb = targetDb + (targetDb > impactGainDb ? impactRiseCoeff : impactFallCoeff) * (impactGainDb - targetDb);
     if (std::abs (impactGainDb - targetDb) < 1.0e-6f)
         impactGainDb = targetDb;
@@ -715,7 +731,7 @@ float BassEngine::processImpact (std::array<float, kMaxChannels>& x, int numCh) 
         if (g1 != 0.0f)
             x[ch] += g1 * bp;
     }
-    return kImpactHarmonicsMix * amount * impactBurst; // the harmonics generator's burst mix
+    return kImpactHarmonicsMix * amount * impactBurst * impactReserve; // the harmonics generator's burst mix
 }
 
 void BassEngine::updateHarmonicFilters() noexcept

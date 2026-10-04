@@ -717,6 +717,58 @@ TEST_CASE ("Gaming Impact (M3) and Smart macros (docs/11 E20, E34): on bass-heav
     CHECK_NEAR (preampDb, -(6.0 * smartOn.bass + 0.2), 0.3);
 }
 
+TEST_CASE ("BassEngine Impact punch (docs/11 E20): the burst's harmonics are reserved with the lift - a hit already at bass.protect gets less harmonics than a quiet one, an uncapped hit is unchanged")
+{
+    // Before: the lift stayed under bass.protect but the harmonics burst
+    // (0.5 x punch of mix) played in full on any hit, so a hot hit whose
+    // lift was withheld still sent its harmonics into the limiter. The hit
+    // of the case below (peak -20 dBFS) at x1 and x10 (+20 dB, its LF over
+    // the -12 dBFS default), and x10 with bass.protect at 0 dBFS (nothing
+    // capped but its own peak); the harmonics read as the 250 - 720 Hz band
+    // of punch 1 less punch 0 over the 150 ms after the hit. Before: -47.25 /
+    // -34.99 / -29.34 dB, after: -47.25 / -79.57 / -33.20 dB.
+    const int n = static_cast<int> (1.0 * kFs);
+    const auto hit = rumbleScene (-150.0f, -20.0f);
+    const auto tone60 = sine (60.0, kFs, n, dbToGain (-40.0f));
+    const auto render = [&] (float scale, float punch, float protectDb) {
+        Planar y (2, n);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < n; ++i)
+                y.ch[static_cast<size_t> (c)][static_cast<size_t> (i)] = tone60[static_cast<size_t> (i)] + scale * hit.ch[0][static_cast<size_t> (i + static_cast<int> (1.0 * kFs))];
+        BassEngine be;
+        be.prepare ({ kFs, 512, 2 });
+        BassEngineParams p;
+        p.impactPunch = punch;
+        p.protectThresholdDb = protectDb;
+        be.setParams (p);
+        for (int pos = 0; pos < n; pos += 256)
+            be.process (y.block (pos, std::min (256, n - pos)));
+        return y;
+    };
+    const auto harmonicsDb = [&] (float scale, float protectDb) {
+        const auto on = render (scale, 1.0f, protectDb), off = render (scale, 0.0f, protectDb);
+        LinkwitzRileyBand band;
+        band.prepare (kFs, 250.0, 720.0);
+        const int a = static_cast<int> (0.5 * kFs), b = static_cast<int> (0.65 * kFs);
+        double acc = 0.0;
+        for (int i = 0; i < b; ++i)
+        {
+            const double v = band.processSample (0, on.ch[0][static_cast<size_t> (i)] - off.ch[0][static_cast<size_t> (i)]);
+            if (i >= a)
+                acc += v * v;
+        }
+        return 10.0 * std::log10 (std::max (1.0e-30, acc / (b - a)));
+    };
+    const double quiet = harmonicsDb (1.0f, -12.0f), hot = harmonicsDb (10.0f, -12.0f), hotUncapped = harmonicsDb (10.0f, 0.0f);
+    measured ("Impact harmonics burst (250-720 Hz of on - off): the -20 dBFS hit", quiet, "dB");
+    measured ("Impact harmonics burst: the hit +20 dB (over bass.protect)", hot, "dB");
+    measured ("Impact harmonics burst: the hit +20 dB with bass.protect at 0 dBFS", hotUncapped, "dB");
+    CHECK_GE (hotUncapped, quiet + 10.0); // with nothing capped the burst grows with the hit
+    CHECK_LE (hot, quiet);                // reserved: the hot hit gets less than the quiet one
+    // An uncapped hit is unchanged: its granted share is exactly 1 (the next
+    // case's -20 dBFS hit reads its full 6.0 dB and the same splatter).
+}
+
 TEST_CASE ("BassEngine Impact punch (docs/11 E20): switching it is click-free, the burst keys on onsets only and stays under bass.protect, the output does not depend on the block size, a NaN burst does not stick, and nothing allocates")
 {
     // A 60 Hz tone at -40 dBFS (steady: no onset) with an explosion-like hit

@@ -1093,7 +1093,8 @@ lift      L_LF  = 25 ms peak hold of max_c |LP2_150Hz(x_c)| (dBFS)
           lift  = min(6 dB · punch · b, max(0, bass.protect − L_LF)), then 1 ms rise / 20 ms fall (dB)
           out_c = x_c + (10^(lift/20) − 1) · BP(x_c)       BP = unity SVF band-pass 77.5 Hz, Q 0.7: a bell of
                                                              the lift, exactly x_c at 0 dB
-harmonics the generator of §4.3.4 gets 0.5 · punch · b of extra mix; it starts with a burst (clean state)
+harmonics the generator of §4.3.4 gets 0.5 · punch · b · r of extra mix, r the share of the lift bass.protect grants
+          (at once down, 20 ms up, then 1 ms; exactly 1 uncapped); it starts with a burst (clean state)
           and idles again once its mix and b are back at 0
 ```
 
