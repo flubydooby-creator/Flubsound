@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <string>
 #include <vector>
 
 using flub::app::DriftCompensatedFifo;
@@ -168,46 +169,66 @@ Outcome simulate (const Scenario& sc)
 } // namespace
 
 // ---------------------------------------------------------------------------
-TEST_CASE ("DriftFifo: +-200 and +-2000 ppm drift, 10 ms and 441-frame packets, 128 and 512 blocks: settles clean")
+namespace
+{
+/** One drift x packet scenario of the settling case, at both block sizes. */
+void checkDriftScenario (double drift, int packet)
+{
+    for (int block : { 128, 512 })
+    {
+        Scenario sc;
+        sc.driftPpm = drift;
+        sc.packet = packet;
+        sc.block = block;
+        // The loop (critically damped, 0.15 rad/s) needs longer to
+        // learn a large drift to within a few ppm.
+        sc.seconds = std::abs (drift) > 1000.0 ? 120.0 : 90.0;
+        sc.settle = sc.seconds / 2.0;
+        sc.average = sc.seconds / 6.0;
+        const auto o = simulate (sc);
+
+        // Target = max(2 blocks, largest packet + 1 block) + 4 frames.
+        const double targetMs = 1000.0 * (std::max (2 * block, packet + block) + 4) / kFifoFs;
+        CHECK_NEAR (o.atEnd.targetMs, targetMs, 0.05);
+        CHECK (o.atEnd.streaming);
+        // After settling: no xruns, fill held at the target, and the
+        // correction equals the true drift.
+        CHECK (o.atEnd.underruns == o.atSettle.underruns);
+        CHECK (o.atEnd.overflows == 0);
+        CHECK (o.atEnd.droppedFrames == 0);
+        CHECK_GE (o.minFillMs, targetMs - 1.0);
+        CHECK_LE (o.maxFillMs, targetMs + 1.0);
+        CHECK_NEAR (o.meanCorrectionPpm, drift, 5.0);
+        // A producer faster than the device never underruns; a slower
+        // one may underrun while the loop learns the drift, not after.
+        if (drift > 0.0)
+            CHECK (o.atEnd.underruns == 0);
+        // Continuity over the whole run, including the initial prime
+        // and any re-prime (fade-out / fade-in): no step larger than
+        // the clean sine's.
+        CHECK_LE (o.maxStep, kCleanStep);
+        CHECK (o.allocations == 0);
+    }
+}
+
+/** One case per drift and packet size ("DriftFifo: +-200 and +-2000 ppm
+    drift, ...: settles clean - <drift> ppm, <packet>-frame packets"), so
+    each stays under the suite's 2 s per case. */
+bool registerDriftSettleCases()
 {
     for (double drift : { 200.0, -200.0, 2000.0, -2000.0 })
         for (int packet : { 480, 441 })
-            for (int block : { 128, 512 })
-            {
-                Scenario sc;
-                sc.driftPpm = drift;
-                sc.packet = packet;
-                sc.block = block;
-                // The loop (critically damped, 0.15 rad/s) needs longer to
-                // learn a large drift to within a few ppm.
-                sc.seconds = std::abs (drift) > 1000.0 ? 120.0 : 90.0;
-                sc.settle = sc.seconds / 2.0;
-                sc.average = sc.seconds / 6.0;
-                const auto o = simulate (sc);
-
-                // Target = max(2 blocks, largest packet + 1 block) + 4 frames.
-                const double targetMs = 1000.0 * (std::max (2 * block, packet + block) + 4) / kFifoFs;
-                CHECK_NEAR (o.atEnd.targetMs, targetMs, 0.05);
-                CHECK (o.atEnd.streaming);
-                // After settling: no xruns, fill held at the target, and the
-                // correction equals the true drift.
-                CHECK (o.atEnd.underruns == o.atSettle.underruns);
-                CHECK (o.atEnd.overflows == 0);
-                CHECK (o.atEnd.droppedFrames == 0);
-                CHECK_GE (o.minFillMs, targetMs - 1.0);
-                CHECK_LE (o.maxFillMs, targetMs + 1.0);
-                CHECK_NEAR (o.meanCorrectionPpm, drift, 5.0);
-                // A producer faster than the device never underruns; a slower
-                // one may underrun while the loop learns the drift, not after.
-                if (drift > 0.0)
-                    CHECK (o.atEnd.underruns == 0);
-                // Continuity over the whole run, including the initial prime
-                // and any re-prime (fade-out / fade-in): no step larger than
-                // the clean sine's.
-                CHECK_LE (o.maxStep, kCleanStep);
-                CHECK (o.allocations == 0);
-            }
+        {
+            const std::string name = std::string ("DriftFifo: +-200 and +-2000 ppm drift, 10 ms and 441-frame packets, 128 and 512 blocks: settles clean - ")
+                                     + (drift > 0.0 ? "+" : "") + std::to_string (static_cast<int> (drift)) + " ppm, " + std::to_string (packet)
+                                     + "-frame packets";
+            ::flubtest::Registrar (name.c_str(), [drift, packet] { checkDriftScenario (drift, packet); }, __FILE__, __LINE__);
+        }
+    return true;
 }
+
+[[maybe_unused]] const bool kDriftSettleCasesRegistered = registerDriftSettleCases();
+} // namespace
 
 TEST_CASE ("DriftFifo: a capture stall is one counted underrun, then the stream recovers")
 {

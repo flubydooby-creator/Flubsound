@@ -27,6 +27,7 @@
 #include <initializer_list>
 #include <limits>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 using namespace flub;
@@ -292,24 +293,37 @@ TEST_CASE ("Protection: the measured loop settles on a steep synthetic plant wit
 // =============================================================================
 // Through the chain
 // =============================================================================
-TEST_CASE ("Chain: the harmonics policy - at Normal exposed bass harmonics get their own scale, Small Speaker Mode's are left alone, Strict governs both; Off never moves it")
+namespace
 {
-    // All Music macros on a -12 dBFS 50 Hz sine (the E06 Done-when scene), 6 s.
-    const auto sine50 = tone (50.0, std::pow (10.0, -12.0 / 20.0), static_cast<int> (6.0 * kFs));
-    const auto endScale = [&] (ProtectionStrength strength, bool smallSpeaker) {
-        ParameterStore store;
-        allMusicMacros (store);
-        store.set (BassReplaceFundamental, smallSpeaker ? 1.0f : 0.0f);
-        float hs = 1.0f, lowest = 1.0f;
-        renderChain (store, sine50, strength, 512, [&] (ProcessingChain& c, int) {
-            hs = c.getGovernorHarmonicsScale();
-            lowest = std::min (lowest, hs);
-        });
-        std::cout << "    measured harmonics scale, strength " << static_cast<int> (strength) << (smallSpeaker ? ", Small Speaker Mode" : "") << ": " << hs << "\n";
-        return std::pair { hs, lowest };
-    };
+/** All Music macros on a -12 dBFS 50 Hz sine (the E06 Done-when scene), 6 s:
+    the governor's harmonics scale at the end and its lowest value. */
+std::pair<float, float> harmonicsEndScale (ProtectionStrength strength, bool smallSpeaker)
+{
+    static const auto sine50 = tone (50.0, std::pow (10.0, -12.0 / 20.0), static_cast<int> (6.0 * kFs));
+    ParameterStore store;
+    allMusicMacros (store);
+    store.set (BassReplaceFundamental, smallSpeaker ? 1.0f : 0.0f);
+    float hs = 1.0f, lowest = 1.0f;
+    renderChain (store, sine50, strength, 512, [&] (ProcessingChain& c, int) {
+        hs = c.getGovernorHarmonicsScale();
+        lowest = std::min (lowest, hs);
+    });
+    std::cout << "    measured harmonics scale, strength " << static_cast<int> (strength) << (smallSpeaker ? ", Small Speaker Mode" : "") << ": " << hs << "\n";
+    return std::pair { hs, lowest };
+}
+} // namespace
+
+// Two renders per case, so each stays under 2 s.
+TEST_CASE ("Chain: the harmonics policy - at Normal exposed bass harmonics get their own scale, Small Speaker Mode's are left alone, Strict governs both; Off never moves it - Off and Normal")
+{
+    const auto endScale = harmonicsEndScale;
     CHECK (endScale (ProtectionStrength::Off, false).second == 1.0f);
     CHECK_LE (endScale (ProtectionStrength::Normal, false).first, 0.1f); // exposed: taken down
+}
+
+TEST_CASE ("Chain: the harmonics policy - at Normal exposed bass harmonics get their own scale, Small Speaker Mode's are left alone, Strict governs both; Off never moves it - Small Speaker Mode at Normal and Strict")
+{
+    const auto endScale = harmonicsEndScale;
     CHECK (endScale (ProtectionStrength::Normal, true).second == 1.0f);  // they replace the fundamental: intended
     CHECK_LE (endScale (ProtectionStrength::Strict, true).first, 0.5f);  // Strict governs them anyway
 }

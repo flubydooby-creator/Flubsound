@@ -853,12 +853,16 @@ TEST_CASE ("Scenes: the scene is deterministic, its input stays under full scale
         CHECK (st.step.second <= st.bed.first); // bed windows hold no step
 }
 
-TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell reads its gain on the steps over the rest, a 20 dB pumping compressor fails the recovery metric (E60)")
+// docs/11 E60 Done-when: "Bypass: cue SNR gain 0 +- 0.1 dB; a +6 dB
+// step-band EQ reads about +6 dB; a 20 dB pumping compressor fails the
+// recovery metric". One case per configuration (bypass: per level), so each
+// stays under 2 s.
+namespace
 {
-    // docs/11 E60 Done-when: "Bypass: cue SNR gain 0 +- 0.1 dB; a +6 dB
-    // step-band EQ reads about +6 dB; a 20 dB pumping compressor fails the
-    // recovery metric".
-    for (int l = 0; l < 3; ++l)
+const char* const kMetricValidationCase = "Scenes: metric validation - bypass reads 0, a static step-band bell reads its gain on the steps over the rest, a 20 dB pumping compressor fails the recovery metric (E60)";
+
+void checkBypassReadsZero (int l)
+{
     {
         const auto scene = makeScene (kLevels[l]);
         auto bypass = resolve (RenderOptions {});
@@ -874,7 +878,20 @@ TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell 
         CHECK_LE (r.recoveryS, 0.0);
         CHECK_NEAR (r.stepAfterDb, 0.0, 0.1);
     }
+}
 
+bool registerBypassReadsZeroCases()
+{
+    for (int l = 0; l < 3; ++l)
+        ::flubtest::Registrar ((std::string (kMetricValidationCase) + " - bypass at " + levelName (l)).c_str(), [l] { checkBypassReadsZero (l); }, __FILE__, __LINE__);
+    return true;
+}
+
+[[maybe_unused]] const bool kBypassReadsZeroCasesRegistered = registerBypassReadsZeroCases();
+} // namespace
+
+TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell reads its gain on the steps over the rest, a 20 dB pumping compressor fails the recovery metric (E60) - static bell and broadband cut")
+{
     const auto scene = makeScene (-24.0);
     // A static +6 dB bell at the steps' centre and Q (3.2 kHz, Q 1),
     // everything else off. The metric reads the bell's gain on the steps
@@ -902,7 +919,11 @@ TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell 
     CHECK_NEAR (rc.cueSnrGainDb, 0.0, 0.1);
     CHECK_NEAR (rc.contrastChangeDb, 0.0, 0.1);
     CHECK_NEAR (rc.bedLiftDb, -6.0, 0.1);
+}
 
+TEST_CASE ("Scenes: metric validation - bypass reads 0, a static step-band bell reads its gain on the steps over the rest, a 20 dB pumping compressor fails the recovery metric (E60) - pumping compressor")
+{
+    const auto scene = makeScene (-24.0);
     // A pumping compressor: 20:1 from 2 dB over the bed, 1 ms attack, 2 s
     // release, no make-up - about 20 dB of gain reduction through the combat
     // that recovers over seconds.

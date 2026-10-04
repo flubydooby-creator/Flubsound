@@ -81,12 +81,14 @@
 #include "flub/io/WavFile.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -475,51 +477,71 @@ TEST_CASE ("KnownGap closed: 60 Hz and 1 kHz THD+N of a -6 dBFS sine at 12 dB ma
     CHECK_LE (thd[1], -100.0);
 }
 
-TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - THD+N, IMD, MTND, ducking of 1-8 kHz probes under kicks, kick onset and loudness (E05 stage 1)")
+namespace
 {
-    // `flubsound-cli quality --set max.drive=12` with every other module off
-    // (Commands.h measureQuality; stimuli and metrics defined there), with
-    // the clipper at its default share and off. Values before docs/11 E05
-    // stage 1 in the comments (same suite, pre-change build).
+/** `flubsound-cli quality --set max.drive=12` with every other module off
+    (Commands.h measureQuality; stimuli and metrics defined there), the
+    clipper at its default share or off (`clipperOff`); prints the report. */
+QualityReport maximizerQualityAt12 (bool clipperOff)
+{
     auto values = resolve (RenderOptions {});
     onlyModules (values, { MaximizerOn });
     setValue (values, MaxDriveDb, 12.0f);
-    QualityReport q, limiterOnly;
+    if (clipperOff)
+        setValue (values, MaxClipAmount, 0.0f);
+    QualityReport report;
     std::string error;
-    REQUIRE (measureQuality (values, 512, q, error));
-    setValue (values, MaxClipAmount, 0.0f);
-    REQUIRE (measureQuality (values, 512, limiterOnly, error));
-    for (const auto* r : { &q, &limiterOnly })
+    REQUIRE (measureQuality (values, 512, report, error));
+    const auto* r = &report;
+    const std::string tag = ! clipperOff ? "max.drive 12: " : "max.drive 12, clipper off: ";
+    for (const auto& t : r->thdn)
+        measured (tag + "THD+N at " + std::to_string (static_cast<int> (t.hz)) + " Hz", t.db, "dB");
+    measured (tag + "IMD 50 + 63 Hz", r->bassImdDb, "dB");
+    measured (tag + "IMD SMPTE", r->smpteImdDb, "dB");
+    for (const auto& m : r->mtnd)
     {
-        const std::string tag = r == &q ? "max.drive 12: " : "max.drive 12, clipper off: ";
-        for (const auto& t : r->thdn)
-            measured (tag + "THD+N at " + std::to_string (static_cast<int> (t.hz)) + " Hz", t.db, "dB");
-        measured (tag + "IMD 50 + 63 Hz", r->bassImdDb, "dB");
-        measured (tag + "IMD SMPTE", r->smpteImdDb, "dB");
-        for (const auto& m : r->mtnd)
-        {
-            measured (tag + "MTND at " + std::to_string (static_cast<int> (m.inputRmsDbfs)) + " dBFS", m.db, "dB");
-            measured (tag + "  output loudness", m.outputLufs, "LUFS");
-        }
-        measured (tag + "2 kHz probe under kicks: max dip", r->ducking[1].track.dipDb, "dB");
-        measured (tag + "2 kHz probe under kicks: p95-p5", r->ducking[1].track.spreadDb, "dB");
-        measured (tag + "2 kHz probe under kicks: 2 Hz modulation", r->ducking[1].track.modulationDb[0], "dB");
-        measured (tag + "kick onset minus body", r->kickOnsetLiftDb - r->kickBodyLiftDb, "dB");
-        measured (tag + "kick energy centroid shift", r->kickCentroidShiftMs, "ms");
-        measured (tag + "pink -18 dBFS out", r->pinkOutLufs, "LUFS");
+        measured (tag + "MTND at " + std::to_string (static_cast<int> (m.inputRmsDbfs)) + " dBFS", m.db, "dB");
+        measured (tag + "  output loudness", m.outputLufs, "LUFS");
     }
+    measured (tag + "2 kHz probe under kicks: max dip", r->ducking[1].track.dipDb, "dB");
+    measured (tag + "2 kHz probe under kicks: p95-p5", r->ducking[1].track.spreadDb, "dB");
+    measured (tag + "2 kHz probe under kicks: 2 Hz modulation", r->ducking[1].track.modulationDb[0], "dB");
+    measured (tag + "kick onset minus body", r->kickOnsetLiftDb - r->kickBodyLiftDb, "dB");
+    measured (tag + "kick energy centroid shift", r->kickCentroidShiftMs, "ms");
+    measured (tag + "pink -18 dBFS out", r->pinkOutLufs, "LUFS");
+    return report;
+}
+} // namespace
+
+// One case per clipper setting (each a whole quality-suite run), so each
+// stays under the suite's 2 s per case. Values before docs/11 E05 stage 1
+// in the comments (same suite, pre-change build).
+TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - THD+N, IMD, MTND, ducking of 1-8 kHz probes under kicks, kick onset and loudness (E05 stage 1) - clipper off")
+{
+    const auto limiterOnly = maximizerQualityAt12 (true);
+    // docs/11 E05 Done-when: 40 Hz at about 7 dB GR <= -45 dB in Balanced
+    // (limiter alone, before -32.5).
+    for (const auto* r : { &limiterOnly })
+        for (const auto& t : r->thdn)
+            CHECK_LE (t.db, -100.0);
+    // SMPTE 60 Hz + 7 kHz, the limiter alone -37.8 -> -107.8 dB.
+    CHECK_LE (limiterOnly.smpteImdDb, -90.0);
+    // Loudness of -18 dBFS pink, limiter alone -7.32 -> -8.31 LUFS.
+    CHECK_NEAR (limiterOnly.pinkOutLufs, -8.31, 0.2);
+}
+
+TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - THD+N, IMD, MTND, ducking of 1-8 kHz probes under kicks, kick onset and loudness (E05 stage 1) - clipper at its default share")
+{
+    const auto q = maximizerQualityAt12 (false);
     // docs/11 E05 Done-when: sines at 12 dB drive <= -30 dB THD+N at 60 Hz
-    // and 1 kHz (before -16.3 / -16.2), and 40 Hz at about 7 dB GR <= -45 dB
-    // in Balanced (limiter alone, before -32.5).
-    for (const auto* r : { &q, &limiterOnly })
+    // and 1 kHz (before -16.3 / -16.2).
+    for (const auto* r : { &q })
         for (const auto& t : r->thdn)
             CHECK_LE (t.db, -100.0);
     // IMD: bass third -15.3 -> -33.5 dB, SMPTE 60 Hz + 7 kHz -5.1 -> -45.2 dB
-    // (the old clipper chopped the 7 kHz riding on the clipped 60 Hz; the
-    // limiter alone -37.8 -> -107.8 dB).
+    // (the old clipper chopped the 7 kHz riding on the clipped 60 Hz).
     CHECK_NEAR (q.bassImdDb, -33.46, 1.0);
     CHECK_NEAR (q.smpteImdDb, -45.21, 1.0);
-    CHECK_LE (limiterOnly.smpteImdDb, -90.0);
     // MTND at -18 / -12 dBFS RMS in: -23.6 / -13.4 -> -30.1 / -21.6 dB, at
     // -7.8 / -4.4 -> -8.3 / -7.7 LUFS out (the clipper's loudness came with
     // its distortion; at matched loudness, -8 LUFS, about 6 dB cleaner).
@@ -544,9 +566,8 @@ TEST_CASE ("KnownGap: the maximizer at 12 dB drive on the E59 quality suite - TH
     // decay (KNOWN_GAP: < 2 ms per docs/11 E59 kick alignment).
     CHECK_NEAR (q.kickOnsetLiftDb - q.kickBodyLiftDb, -0.51, 0.3);
     CHECK_NEAR (q.kickCentroidShiftMs, 8.62, 0.5);
-    // Loudness of -18 dBFS pink: -6.28 -> -6.90 LUFS (limiter alone -7.32 -> -8.31).
+    // Loudness of -18 dBFS pink: -6.28 -> -6.90 LUFS (limiter alone: the case above).
     CHECK_NEAR (q.pinkOutLufs, -6.90, 0.2);
-    CHECK_NEAR (limiterOnly.pinkOutLufs, -8.31, 0.2);
 }
 
 TEST_CASE ("KnownGap closed: Music Boost 100 on the E59 quality suite - loudness within 1.5 LU of the pre-E05 maximizer, probes under kicks dip <= 3 dB, kick onset >= body (E05 stage 1, step 5)")
@@ -887,24 +908,56 @@ TEST_CASE ("KnownGap closed: burst footsteps - Footsteps 100 gives isolated 20 /
     CHECK_NEAR (r.steadyLiftDb, 5.68, 0.3);
 }
 
-TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer lifts 20-80 ms steps under a bed by the same law at -14..-50 LUFS and raises their contrast; Competitive FPS keeps the bed within +1 dB (E19)")
+namespace
 {
-    // makeBurstScene() (steps 6 dB under a pink bed) at -14 / -24 / -40 LUFS,
-    // plus -50 LUFS (docs/11 E19's quiet-material case). Metrics (mid channel):
-    //   burst lift  = step-only power in the 3.2 kHz band (burst windows minus
-    //                 the bed), out vs in, per burst length;
-    //   steady lift = the same over the last 500 ms of a 1 s burst;
-    //   bed lift    = full-band power 200..400 ms after each burst onset;
-    //   contrast change = (step / bed in the band) out minus in.
-    // The reference is the same scene through a static +7 dB bell at 3.2 kHz,
-    // Q 0.9 (band 4's shape as a user EQ band, every other module off): a
-    // static EQ moves the contrast only by +0.77 dB, because the steps sit
-    // closer to its centre than the pink bed does.
-    RenderOptions footsteps;
-    footsteps.mode = ModeValue::Gaming;
-    footsteps.macros.push_back ({ "footsteps", 100.0f });
-    const auto footstepValues = resolve (footsteps);
-    const auto fpsValues = resolve (factoryPreset ("gaming-competitive-fps.json"));
+// "KnownGap closed: step/bed contrast" (E19): makeBurstScene() (steps 6 dB
+// under a pink bed) at -14 / -24 / -40 LUFS, plus -50 LUFS (docs/11 E19's
+// quiet-material case). Metrics (mid channel):
+//   burst lift  = step-only power in the 3.2 kHz band (burst windows minus
+//                 the bed), out vs in, per burst length;
+//   steady lift = the same over the last 500 ms of a 1 s burst;
+//   bed lift    = full-band power 200..400 ms after each burst onset;
+//   contrast change = (step / bed in the band) out minus in.
+// The reference is the same scene through a static +7 dB bell at 3.2 kHz,
+// Q 0.9 (band 4's shape as a user EQ band, every other module off): a
+// static EQ moves the contrast only by +0.77 dB, because the steps sit
+// closer to its centre than the pink bed does.
+// One case per level for Footsteps 100 (with the bell) and one per level for
+// Competitive FPS (registerStepBedContrastCases), so each stays under 2 s.
+constexpr int kStepBedLevels = 4;
+constexpr double kStepBedLufs[kStepBedLevels] = { -14.0, -24.0, -40.0, -50.0 };
+
+std::string stepBedAt (int l)
+{
+    return " at " + std::to_string (static_cast<int> (kStepBedLufs[l])) + " LUFS: ";
+}
+
+/** Footsteps 100 at level `l`, rendered (and printed) once: the other
+    levels' cases compare their lift with the -24 LUFS one. */
+const BurstResult& stepBedFootsteps (int l)
+{
+    static std::array<std::optional<BurstResult>, kStepBedLevels> memo;
+    auto& slot = memo[static_cast<size_t> (l)];
+    if (! slot)
+    {
+        RenderOptions footsteps;
+        footsteps.mode = ModeValue::Gaming;
+        footsteps.macros.push_back ({ "footsteps", 100.0f });
+        const auto r = measureBursts (makeBurstScene (kStepBedLufs[l]), resolve (footsteps));
+        const std::string at = stepBedAt (l);
+        measured ("Footsteps 100 step lift" + at + "20 ms", r.burstLiftDb[0], "dB");
+        measured ("Footsteps 100 step lift" + at + "40 ms", r.burstLiftDb[1], "dB");
+        measured ("Footsteps 100 step lift" + at + "80 ms", r.burstLiftDb[2], "dB");
+        measured ("Footsteps 100 step lift" + at + "steady", r.steadyLiftDb, "dB");
+        measured ("Footsteps 100 bed lift" + at.substr (0, at.size() - 2), r.bedLiftDb, "dB");
+        measured ("Footsteps 100 contrast change" + at + "40 ms", r.contrastChangeDb[1], "dB");
+        slot = r;
+    }
+    return *slot;
+}
+
+void checkStepBedFootsteps (int l)
+{
     auto bellValues = resolve (RenderOptions {});
     onlyModules (bellValues, { EqOn });
     setValue (bellValues, eq (0, EqFieldOn), 1.0f);
@@ -912,29 +965,13 @@ TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer 
     setValue (bellValues, eq (0, EqFieldFreq), 3200.0f);
     setValue (bellValues, eq (0, EqFieldGain), 7.0f);
     setValue (bellValues, eq (0, EqFieldQ), 0.9f);
-
-    constexpr int kLevels = 4;
-    const double levels[kLevels] = { -14.0, -24.0, -40.0, -50.0 };
-    BurstResult fs[kLevels], fps[kLevels], bell[kLevels];
-    for (int l = 0; l < kLevels; ++l)
-    {
-        const auto scene = makeBurstScene (levels[l]);
-        fs[l] = measureBursts (scene, footstepValues);
-        fps[l] = measureBursts (scene, fpsValues);
-        bell[l] = measureBursts (scene, bellValues);
-        const std::string at = " at " + std::to_string (static_cast<int> (levels[l])) + " LUFS: ";
-        measured ("Footsteps 100 step lift" + at + "20 ms", fs[l].burstLiftDb[0], "dB");
-        measured ("Footsteps 100 step lift" + at + "40 ms", fs[l].burstLiftDb[1], "dB");
-        measured ("Footsteps 100 step lift" + at + "80 ms", fs[l].burstLiftDb[2], "dB");
-        measured ("Footsteps 100 step lift" + at + "steady", fs[l].steadyLiftDb, "dB");
-        measured ("Footsteps 100 bed lift" + at.substr (0, at.size() - 2), fs[l].bedLiftDb, "dB");
-        measured ("Footsteps 100 contrast change" + at + "40 ms", fs[l].contrastChangeDb[1], "dB");
-        measured ("static +7 dB bell contrast change" + at + "40 ms", bell[l].contrastChangeDb[1], "dB");
-        measured ("Competitive FPS bed lift" + at.substr (0, at.size() - 2), fps[l].bedLiftDb, "dB");
-        measured ("Competitive FPS contrast change" + at + "20 ms", fps[l].contrastChangeDb[0], "dB");
-        measured ("Competitive FPS contrast change" + at + "40 ms", fps[l].contrastChangeDb[1], "dB");
-        measured ("Competitive FPS contrast change" + at + "80 ms", fps[l].contrastChangeDb[2], "dB");
-    }
+    // Indexed as in the original single case: this level's fs[l] and bell[l],
+    // and fs[1] (-24 LUFS) for the cross-level check.
+    BurstResult fs[kStepBedLevels] {}, bell[kStepBedLevels] {};
+    fs[l] = stepBedFootsteps (l);
+    fs[1] = stepBedFootsteps (1);
+    bell[l] = measureBursts (makeBurstScene (kStepBedLufs[l]), bellValues);
+    measured ("static +7 dB bell contrast change" + stepBedAt (l) + "40 ms", bell[l].contrastChangeDb[1], "dB");
 
     // Footsteps 100. Before the E19 redesign (the interim static bell): lift
     // 20 / 40 / 80 ms / steady 3.81 / 3.18 / 2.57 / 2.30 dB at -14 LUFS (the
@@ -945,24 +982,32 @@ TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer 
     // about 0.5 s (1.00 dB over its last 500 ms); contrast change +5.99 dB;
     // the bed -1.13 dB (the default 20 Hz subsonic filter on the generator's
     // infrasonic pink; the cue bands add nothing).
-    for (int l = 0; l < kLevels; ++l)
-    {
-        // docs/11 E19 Done-when: lift within +-1 dB across the levels, 20-50 ms
-        // steps >= 80 % of the law (the 80 ms lift), contrast >= +3 dB, and
-        // well above a static bell's.
-        for (int d = 0; d < 3; ++d)
-            CHECK_NEAR (fs[l].burstLiftDb[d], fs[1].burstLiftDb[d], 1.0);
-        CHECK_GE (fs[l].burstLiftDb[0], 0.8 * fs[l].burstLiftDb[2]);
-        CHECK_GE (fs[l].contrastChangeDb[1], 3.0);
-        CHECK_GE (fs[l].contrastChangeDb[1], bell[l].contrastChangeDb[1] + 3.0);
-        CHECK_NEAR (fs[l].burstLiftDb[0], 5.24, 0.3);
-        CHECK_NEAR (fs[l].burstLiftDb[1], 6.03, 0.3);
-        CHECK_NEAR (fs[l].burstLiftDb[2], 6.53, 0.3);
-        CHECK_NEAR (fs[l].steadyLiftDb, 1.00, 0.3);
-        CHECK_NEAR (fs[l].contrastChangeDb[1], 5.99, 0.3);
-        CHECK_NEAR (fs[l].bedLiftDb, -1.13, 0.3);
-        CHECK_NEAR (bell[l].contrastChangeDb[1], 0.77, 0.1);
-    }
+    // docs/11 E19 Done-when: lift within +-1 dB across the levels, 20-50 ms
+    // steps >= 80 % of the law (the 80 ms lift), contrast >= +3 dB, and
+    // well above a static bell's.
+    for (int d = 0; d < 3; ++d)
+        CHECK_NEAR (fs[l].burstLiftDb[d], fs[1].burstLiftDb[d], 1.0);
+    CHECK_GE (fs[l].burstLiftDb[0], 0.8 * fs[l].burstLiftDb[2]);
+    CHECK_GE (fs[l].contrastChangeDb[1], 3.0);
+    CHECK_GE (fs[l].contrastChangeDb[1], bell[l].contrastChangeDb[1] + 3.0);
+    CHECK_NEAR (fs[l].burstLiftDb[0], 5.24, 0.3);
+    CHECK_NEAR (fs[l].burstLiftDb[1], 6.03, 0.3);
+    CHECK_NEAR (fs[l].burstLiftDb[2], 6.53, 0.3);
+    CHECK_NEAR (fs[l].steadyLiftDb, 1.00, 0.3);
+    CHECK_NEAR (fs[l].contrastChangeDb[1], 5.99, 0.3);
+    CHECK_NEAR (fs[l].bedLiftDb, -1.13, 0.3);
+    CHECK_NEAR (bell[l].contrastChangeDb[1], 0.77, 0.1);
+}
+
+void checkStepBedCompetitiveFps (int l)
+{
+    BurstResult fps[kStepBedLevels] {}; // indexed as in the original single case
+    fps[l] = measureBursts (makeBurstScene (kStepBedLufs[l]), resolve (factoryPreset ("gaming-competitive-fps.json")));
+    const std::string at = stepBedAt (l);
+    measured ("Competitive FPS bed lift" + at.substr (0, at.size() - 2), fps[l].bedLiftDb, "dB");
+    measured ("Competitive FPS contrast change" + at + "20 ms", fps[l].contrastChangeDb[0], "dB");
+    measured ("Competitive FPS contrast change" + at + "40 ms", fps[l].contrastChangeDb[1], "dB");
+    measured ("Competitive FPS contrast change" + at + "80 ms", fps[l].contrastChangeDb[2], "dB");
 
     // Competitive FPS. Before the redesign: bed -0.06 / 0.66 / 1.66 / 4.37 dB;
     // contrast change 20 / 40 / 80 ms 0.05 / -0.53 / -1.11, 0.83 / 0.70 /
@@ -971,20 +1016,36 @@ TEST_CASE ("KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer 
     // Detail upward compressor lifted the bed until its floor followed the
     // background (E19 step 2): bed 0.69 -> -0.93 dB, contrast 4.55 / 4.72 /
     // 5.21 -> 4.63 / 5.35 / 5.81 dB.
-    const double fpsBed[kLevels] = { -1.86, -1.30, -0.94, -0.93 };
-    const double fpsContrast[kLevels][3] = { { 4.39, 4.93, 5.17 }, { 4.49, 5.04, 5.26 }, { 4.58, 5.21, 5.67 }, { 4.63, 5.35, 5.81 } }; // 20 / 40 / 80 ms
-    for (int l = 0; l < kLevels; ++l)
+    const double fpsBed[kStepBedLevels] = { -1.86, -1.30, -0.94, -0.93 };
+    const double fpsContrast[kStepBedLevels][3] = { { 4.39, 4.93, 5.17 }, { 4.49, 5.04, 5.26 }, { 4.58, 5.21, 5.67 }, { 4.63, 5.35, 5.81 } }; // 20 / 40 / 80 ms
+    // docs/11 E19 Done-when: Competitive FPS bed <= +1 dB and step/bed contrast change >= +3 dB.
+    CHECK_LE (fps[l].bedLiftDb, 1.0);
+    CHECK_NEAR (fps[l].bedLiftDb, fpsBed[l], 0.3);
+    for (int d = 0; d < 3; ++d)
     {
-        // docs/11 E19 Done-when: Competitive FPS bed <= +1 dB and step/bed contrast change >= +3 dB.
-        CHECK_LE (fps[l].bedLiftDb, 1.0);
-        CHECK_NEAR (fps[l].bedLiftDb, fpsBed[l], 0.3);
-        for (int d = 0; d < 3; ++d)
-        {
-            CHECK_GE (fps[l].contrastChangeDb[d], 3.0);
-            CHECK_NEAR (fps[l].contrastChangeDb[d], fpsContrast[l][d], 0.3);
-        }
+        CHECK_GE (fps[l].contrastChangeDb[d], 3.0);
+        CHECK_NEAR (fps[l].contrastChangeDb[d], fpsContrast[l][d], 0.3);
     }
 }
+
+bool registerStepBedContrastCases()
+{
+    const std::string base = "KnownGap closed: step/bed contrast - the Footsteps 100 cue enhancer lifts 20-80 ms steps under a bed by the same law at -14..-50 LUFS and raises their contrast; Competitive FPS keeps the bed within +1 dB (E19)";
+    for (int l = 0; l < kStepBedLevels; ++l)
+    {
+        const std::string level = std::to_string (static_cast<int> (kStepBedLufs[l])) + " LUFS";
+        ::flubtest::Registrar ((base + " - Footsteps 100 and the static bell at " + level).c_str(), [l] { checkStepBedFootsteps (l); }, __FILE__, __LINE__);
+    }
+    for (int l = 0; l < kStepBedLevels; ++l)
+    {
+        const std::string level = std::to_string (static_cast<int> (kStepBedLufs[l])) + " LUFS";
+        ::flubtest::Registrar ((base + " - Competitive FPS at " + level).c_str(), [l] { checkStepBedCompetitiveFps (l); }, __FILE__, __LINE__);
+    }
+    return true;
+}
+
+[[maybe_unused]] const bool kStepBedContrastCasesRegistered = registerStepBedContrastCases();
+} // namespace
 
 TEST_CASE ("E19: the cue enhancer's loud cap keeps gunfire nearly unlifted in the gaming presets")
 {
@@ -1658,16 +1719,25 @@ TEST_CASE ("KnownGap metrics: each metric reads an injected artefact at its inje
     }
 }
 
-TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59)")
+// docs/11 E59 Done-when: each metric reports the injected value within
+// +-10 % (of the power ratio for dB metrics: +-0.41 dB). The suite is
+// `flubsound-cli quality` (Commands.h measureQuality); every module is
+// off, so the chain passes the stimuli through and only the injected
+// artefact shows. One case per quality-suite run, so each stays under 2 s.
+namespace
 {
-    // docs/11 E59 Done-when: each metric reports the injected value within
-    // +-10 % (of the power ratio for dB metrics: +-0.41 dB). The suite is
-    // `flubsound-cli quality` (Commands.h measureQuality); every module is
-    // off, so the chain passes the stimuli through and only the injected
-    // artefact shows.
+std::vector<float> passThroughValues()
+{
     auto values = resolve (RenderOptions {});
     onlyModules (values, {});
-    QualityReport clean, cubic, modulated, delayed;
+    return values;
+}
+} // namespace
+
+TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59) - clean pass-through reads nothing")
+{
+    const auto values = passThroughValues();
+    QualityReport clean;
     std::string error;
     REQUIRE (measureQuality (values, 512, clean, error));
     for (const auto& t : clean.thdn)
@@ -1681,7 +1751,13 @@ TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz s
     CHECK_NEAR (clean.kickOnsetLiftDb - clean.kickBodyLiftDb, 0.0, 0.01);
     CHECK_NEAR (clean.kickCentroidShiftMs, 0.0, 0.01);
     CHECK_NEAR (clean.pinkOutLufs, clean.pinkInLufs, 0.01);
+}
 
+TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59) - 1 % cubic")
+{
+    const auto values = passThroughValues();
+    QualityReport cubic;
+    std::string error;
     // 1 % cubic: y = x + c x^3 with c = 0.16, so the -6 dBFS (A = 0.5) sine's
     // 3rd harmonic is 1 % of A. Expected values from the expansion of
     // (sum a_i cos w_i t)^3: harmonic c A^3 / 4, fundamental A + 3 c A^3 / 4
@@ -1704,7 +1780,13 @@ TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz s
     measured ("meta: 1 % cubic THD+N (expected " + std::to_string (thdExpected) + ")", cubic.thdn[0].db, "dB");
     measured ("meta: 1 % cubic bass IMD", cubic.bassImdDb, "dB");
     measured ("meta: 1 % cubic SMPTE IMD", cubic.smpteImdDb, "dB");
+}
 
+TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59) - 6 dB 2 Hz square gain modulation")
+{
+    const auto values = passThroughValues();
+    QualityReport modulated;
+    std::string error;
     // 6 dB 2 Hz square gain modulation: every probe's gain track spreads
     // 6.02 dB, and its kick-rate component is the square wave's fundamental,
     // (4 / pi) x 3.01 dB (3rd harmonic a third of that, even ones 0).
@@ -1724,7 +1806,13 @@ TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz s
         CHECK_NEAR (d.track.downPercent, 50.0, 5.0);
     }
     measured ("meta: 6 dB 2 Hz square, 2 kHz probe 2 Hz modulation", modulated.ducking[1].track.modulationDb[0], "dB");
+}
 
+TEST_CASE ("KnownGap metrics: the quality suite reads a 1 % cubic, a 6 dB 2 Hz square gain modulation and a 3 ms delay injected into a pass-through render at their injected values (meta-validation, docs/11 E59) - 3 ms delay, and the MTND residual")
+{
+    const auto values = passThroughValues();
+    QualityReport delayed;
+    std::string error;
     // 3 ms delay: the kick's energy centroid moves 3 ms.
     REQUIRE (measureQuality (values, 512, delayed, error, [] (Channels& out) {
         const auto d = static_cast<size_t> (samplesOf (0.003));
@@ -1907,39 +1995,70 @@ io::AudioFileData kickProgramme (double seconds)
     }
     return fileOf ({ l, r });
 }
-} // namespace
 
-TEST_CASE ("KnownGap closed: governed macros at 64..4096-sample blocks - Boost 100 + Loudness 100 on kick-heavy programme lands within 0.05 LU integrated (E06)")
+// "KnownGap closed: governed macros at 64..4096-sample blocks" (E06).
+// The governor ticks on the maximizer's 10 ms GR-window grid and the chain
+// ends its processing segments on that grid, so the scale's trajectory -
+// the only block-size dependent part of the chain on this programme -
+// is nearly the same at every host block size. Before the E06 slice (a
+// per-block tick with dt = block length, the new scale taking effect at
+// the next host block) this scene spread 0.25 LU (-10.40 LUFS at 256 to
+// -10.65 at 4096 samples); now 0.047 LU. What is left is the 25 ms
+// THD+N windows of the saturator and the clipper, which close at the
+// first segment boundary after 25 ms (1216 samples at 64-sample blocks,
+// 1440 at 480 and above).
+// One case renders each block size (registerGovernedBlockCases), so each
+// stays under 2 s; the spread case reads their memo (and renders whatever
+// a filtered run left out).
+constexpr int kGovernedBlocks[] = { 64, 256, 512, 1024, 2048, 4096 };
+constexpr size_t kNumGovernedBlocks = std::size (kGovernedBlocks);
+
+/** Integrated loudness of Boost 100 + Loudness 100 on the kick programme at
+    the k-th block size, rendered (and printed) once. */
+double governedLufsAt (size_t k)
 {
-    // The governor ticks on the maximizer's 10 ms GR-window grid and the chain
-    // ends its processing segments on that grid, so the scale's trajectory -
-    // the only block-size dependent part of the chain on this programme -
-    // is nearly the same at every host block size. Before the E06 slice (a
-    // per-block tick with dt = block length, the new scale taking effect at
-    // the next host block) this scene spread 0.25 LU (-10.40 LUFS at 256 to
-    // -10.65 at 4096 samples); now 0.047 LU. What is left is the 25 ms
-    // THD+N windows of the saturator and the clipper, which close at the
-    // first segment boundary after 25 ms (1216 samples at 64-sample blocks,
-    // 1440 at 480 and above).
-    const auto input = kickProgramme (20.0);
-    RenderOptions o = boosted (ModeValue::Music, 100.0f);
-    o.macros.push_back ({ "loudness", 100.0f });
-    const auto values = resolve (o);
-    double lo = 1.0e9, hi = -1.0e9;
-    for (const int block : { 64, 256, 512, 1024, 2048, 4096 })
+    static std::array<std::optional<double>, kNumGovernedBlocks> memo;
+    if (! memo[k])
     {
+        static const auto input = kickProgramme (20.0);
+        RenderOptions o = boosted (ModeValue::Music, 100.0f);
+        o.macros.push_back ({ "loudness", 100.0f });
+        const auto values = resolve (o);
+        const int block = kGovernedBlocks[k];
         Channels out;
         int latency = 0;
         std::string error;
         REQUIRE (renderPass (input, values, block, out, latency, error));
         const double lufs = analyse (out, kFs).integratedLufs;
         measured ("Boost 100 + Loudness 100 integrated at " + std::to_string (block) + "-sample blocks", lufs, "LUFS");
-        lo = std::min (lo, lufs);
-        hi = std::max (hi, lufs);
+        memo[k] = lufs;
     }
-    measured ("Boost 100 + Loudness 100 block-size spread", hi - lo, "LU");
-    CHECK_LE (hi - lo, 0.05); // docs/11 E06 Done-when
+    return *memo[k];
 }
+
+const char* const kGovernedBlocksCase = "KnownGap closed: governed macros at 64..4096-sample blocks - Boost 100 + Loudness 100 on kick-heavy programme lands within 0.05 LU integrated (E06)";
+
+bool registerGovernedBlockCases()
+{
+    for (size_t k = 0; k < kNumGovernedBlocks; ++k)
+        ::flubtest::Registrar ((std::string (kGovernedBlocksCase) + " - render at " + std::to_string (kGovernedBlocks[k]) + "-sample blocks").c_str(),
+                               [k] { governedLufsAt (k); }, __FILE__, __LINE__);
+    ::flubtest::Registrar ((std::string (kGovernedBlocksCase) + " - spread over the block sizes").c_str(), [] {
+        double lo = 1.0e9, hi = -1.0e9;
+        for (size_t k = 0; k < kNumGovernedBlocks; ++k)
+        {
+            const double lufs = governedLufsAt (k);
+            lo = std::min (lo, lufs);
+            hi = std::max (hi, lufs);
+        }
+        measured ("Boost 100 + Loudness 100 block-size spread", hi - lo, "LU");
+        CHECK_LE (hi - lo, 0.05); // docs/11 E06 Done-when
+    }, __FILE__, __LINE__);
+    return true;
+}
+
+[[maybe_unused]] const bool kGovernedBlockCasesRegistered = registerGovernedBlockCases();
+} // namespace
 
 TEST_CASE ("KnownGap closed: a single 1e30 sample disturbs the output for under 50 ms and leaves the level alone; a NaN burst does not regress (E10)")
 {

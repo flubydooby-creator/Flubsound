@@ -472,68 +472,108 @@ TEST_CASE ("App: first-run defaults never overwrite saved strip state (E36 / E23
     second.shutdown();
 }
 
-TEST_CASE ("App: Voice Chat on the Chat strip brings speech at -35 and -12 LUFS within 3 LU short-term, ceiling held (E23)")
+// One case per level (each with its own engine), and one that compares the
+// two levels' ends, so each stays under the suite's 2 s per case.
+namespace
 {
-    const flubapptest::TempFolder temp;
-    EngineController controller (headlessOptions (temp, true));
-    const int chat = controller.findStrip ("Chat");
-    REQUIRE (controller.getCurrentPresetId (chat) == idOf (controller, "factory:music-voice-chat"));
+const char* const kVoiceChatCase = "App: Voice Chat on the Chat strip brings speech at -35 and -12 LUFS within 3 LU short-term, ceiling held (E23)";
+constexpr double kVoiceChatLufs[2] = { -35.0, -12.0 };
 
-    const auto speech = speechLike (30.0, 17);
-    double ends[2] = {};
-    int k = 0;
-    for (const double lufs : { -35.0, -12.0 })
+/** Speech at the k-th level through Voice Chat on the Chat strip of a fresh
+    first-run controller, rendered (printed and checked) once: its short-term
+    loudness at the end. */
+double voiceChatEnd (int k)
+{
+    static std::array<std::optional<double>, 2> memo;
+    auto& slot = memo[static_cast<size_t> (k)];
+    if (! slot)
     {
+        const flubapptest::TempFolder temp;
+        EngineController controller (headlessOptions (temp, true));
+        const int chat = controller.findStrip ("Chat");
+        REQUIRE (controller.getCurrentPresetId (chat) == idOf (controller, "factory:music-voice-chat"));
+
+        const auto speech = speechLike (30.0, 17);
+        const double lufs = kVoiceChatLufs[k];
         controller.getHost().reconfigure(); // a fresh engine: no level history from the previous run
         const auto in = atLoudness (speech, lufs);
         const auto out = renderThroughEngine (controller, chat, in, in);
-        ends[k++] = out.shortTermLufsAtEnd;
         std::cerr << "    measured Voice Chat: speech at " << lufs << " LUFS ends at " << out.shortTermLufsAtEnd << " LUFS short-term, peak "
                   << out.peakDb << " dBFS\n";
         CHECK_LE (out.peakDb, -1.0 + 0.05);          // the -1 dBTP ceiling (sample peak)
         CHECK_GE (out.shortTermLufsAtEnd, -24.0);     // levelled towards -18 .. -20 LUFS ...
         CHECK_LE (out.shortTermLufsAtEnd, -15.0);
-    }
-    CHECK_LE (std::abs (ends[0] - ends[1]), 3.0); // ... from 23 LU apart to within 3 LU
 
-    // No loudness maximizing: the maximizer is only its true-peak limiter
-    // (values after Boost and the macros, as the chain ran them).
-    auto& chain = controller.getChain (chat);
-    CHECK (chain.effectiveValue (MaximizerOn) == 1.0f); // the ceiling guarantee stays
-    CHECK (chain.effectiveValue (MaxDriveDb) == 0.0f);
-    CHECK (chain.effectiveValue (MaxClipAmount) == 0.0f);
-    CHECK (chain.effectiveValue (MaxGlue) == 0.0f);
-    CHECK (chain.effectiveValue (SaturationOn) == 0.0f);
+        if (k == 1)
+        {
+            // No loudness maximizing: the maximizer is only its true-peak limiter
+            // (values after Boost and the macros, as the chain ran them).
+            auto& chain = controller.getChain (chat);
+            CHECK (chain.effectiveValue (MaximizerOn) == 1.0f); // the ceiling guarantee stays
+            CHECK (chain.effectiveValue (MaxDriveDb) == 0.0f);
+            CHECK (chain.effectiveValue (MaxClipAmount) == 0.0f);
+            CHECK (chain.effectiveValue (MaxGlue) == 0.0f);
+            CHECK (chain.effectiveValue (SaturationOn) == 0.0f);
+        }
+        slot = out.shortTermLufsAtEnd;
+    }
+    return *slot;
 }
 
-TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and plays FL/FR-only input through the stereo passthrough fold (E36)")
+bool registerVoiceChatCases()
+{
+    ::flubtest::Registrar ((std::string (kVoiceChatCase) + " - speech at -35 LUFS").c_str(), [] { voiceChatEnd (0); }, __FILE__, __LINE__);
+    ::flubtest::Registrar ((std::string (kVoiceChatCase) + " - speech at -12 LUFS, and no loudness maximizing").c_str(), [] { voiceChatEnd (1); },
+                           __FILE__, __LINE__);
+    ::flubtest::Registrar ((std::string (kVoiceChatCase) + " - the two levels end within 3 LU").c_str(), [] {
+        const double ends[2] = { voiceChatEnd (0), voiceChatEnd (1) };
+        CHECK_LE (std::abs (ends[0] - ends[1]), 3.0); // ... from 23 LU apart to within 3 LU
+    }, __FILE__, __LINE__);
+    return true;
+}
+
+[[maybe_unused]] const bool kVoiceChatCasesRegistered = registerVoiceChatCases();
+
+const char* const kFirstRunGameBedsCase = "App: First Run - Game lifts quiet pink beds by at most +3 LU and plays FL/FR-only input through the stereo passthrough fold (E36)";
+
+/** The Game strip of a fresh first-run controller (Competitive FPS as shipped
+    when `shippedPreset`): the integrated lift of an FL/FR-only pink bed at
+    `rmsDb` dBFS RMS. */
+double firstRunGameBedLift (double rmsDb, bool shippedPreset)
 {
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp, true));
     const int game = controller.findStrip ("Game");
     REQUIRE (game >= 0);
     REQUIRE (controller.getStripChannels (game) == 8);
+    if (shippedPreset)
+    {
+        juce::String error;
+        REQUIRE (controller.loadPreset ("factory:gaming-competitive-fps", game, error));
+    }
 
     const int n = static_cast<int> (12.0 * kFs), from = static_cast<int> (6.0 * kFs);
-    const auto lift = [&] (double rmsDb)
-    {
-        controller.getHost().reconfigure();
-        const auto amp = static_cast<float> (std::pow (10.0, rmsDb / 20.0));
-        const auto l = flubtest::pinkNoise (n, amp, 101), r = flubtest::pinkNoise (n, amp, 202);
-        const auto out = renderThroughEngine (controller, game, l, r);
-        CHECK (controller.getChain (game).meters().inputFold.load() == 1); // FL / FR only: stereo passthrough (E27)
-        return integratedLufs (out.left, out.right, from) - integratedLufs (l, r, from);
-    };
+    controller.getHost().reconfigure();
+    const auto amp = static_cast<float> (std::pow (10.0, rmsDb / 20.0));
+    const auto l = flubtest::pinkNoise (n, amp, 101), r = flubtest::pinkNoise (n, amp, 202);
+    const auto out = renderThroughEngine (controller, game, l, r);
+    CHECK (controller.getChain (game).meters().inputFold.load() == 1); // FL / FR only: stereo passthrough (E27)
+    return integratedLufs (out.left, out.right, from) - integratedLufs (l, r, from);
+}
 
+bool registerFirstRunGameBedCases()
+{
     // With the Footsteps / Detail caps it dropped (docs/11 E36's review):
     // +0.495 / +0.471 LU; without them +0.504 / +0.479 LU.
     for (const double bed : { -50.0, -60.0 })
-    {
-        const double lu = lift (bed);
-        std::cerr << "    measured First Run - Game: " << bed << " dBFS pink bed lifted " << lu << " LU\n";
-        CHECK_LE (lu, 3.0); // docs/11 E36 Done-when
-        CHECK_LE (lu, 1.0);
-    }
+        ::flubtest::Registrar ((std::string (kFirstRunGameBedsCase) + " - the first-run default at " + std::to_string (static_cast<int> (bed)) + " dBFS").c_str(),
+                               [bed] {
+                                   const double lu = firstRunGameBedLift (bed, false);
+                                   std::cerr << "    measured First Run - Game: " << bed << " dBFS pink bed lifted " << lu << " LU\n";
+                                   CHECK_LE (lu, 3.0); // docs/11 E36 Done-when
+                                   CHECK_LE (lu, 1.0);
+                               },
+                               __FILE__, __LINE__);
 
     // Competitive FPS as shipped: before docs/11 E19's cue enhancer it failed
     // the same measurement (+9.8 LU; the caps were what passed it). The cue
@@ -541,13 +581,17 @@ TEST_CASE ("App: First Run - Game lifts quiet pink beds by at most +3 LU and pla
     // and E19's background-relative floor for Detail's upward compressor
     // took it to +0.80 LU. From then on the Footsteps / Detail caps only cost
     // step/bed contrast, so docs/11 E36's review dropped them (the next test).
-    juce::String error;
-    REQUIRE (controller.loadPreset ("factory:gaming-competitive-fps", game, error));
-    const double shipped = lift (-60.0);
-    std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
-    CHECK_LE (shipped, 3.0);
-    CHECK_NEAR (shipped, 0.80, 0.3);
+    ::flubtest::Registrar ((std::string (kFirstRunGameBedsCase) + " - Competitive FPS as shipped at -60 dBFS").c_str(), [] {
+        const double shipped = firstRunGameBedLift (-60.0, true);
+        std::cerr << "    measured Competitive FPS: -60 dBFS pink bed lifted " << shipped << " LU\n";
+        CHECK_LE (shipped, 3.0);
+        CHECK_NEAR (shipped, 0.80, 0.3);
+    }, __FILE__, __LINE__);
+    return true;
 }
+
+[[maybe_unused]] const bool kFirstRunGameBedCasesRegistered = registerFirstRunGameBedCases();
+} // namespace
 
 TEST_CASE ("App: First Run - Game keeps Competitive FPS's step/bed contrast on the E59 burst scene (E36)")
 {

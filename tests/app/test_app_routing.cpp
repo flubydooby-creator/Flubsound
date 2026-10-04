@@ -704,9 +704,13 @@ TEST_CASE ("App: AppRouting discards a worker pass computed from an outdated con
     CHECK (captures->starts[700] == 0); // no capture into Music from the outdated mapping
     CHECK (findApp (routing, 700)->strip == -1);
 
-    // The fresh pass publishes the current state.
+    // The fresh pass publishes the current state. With the flickering session
+    // at this parity the fresh pass itself may publish no change, so wake the
+    // worker for one more pass as runPasses() does (otherwise the wait runs
+    // into the 2 s refresh interval).
     const int before = passes;
     script.release();
+    routing.refresh();
     REQUIRE (flubapptest::pumpMessagesUntil ([&] { return passes > before; }));
     CHECK (findApp (routing, 700)->strip == -1);
     CHECK (captures->starts[700] == 0);

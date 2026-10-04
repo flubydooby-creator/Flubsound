@@ -97,9 +97,21 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   full-macros checks one case per preset (registered like the intent cases). On Windows two more causes were found:
   the core runner slept at 15.6 ms (no JUCE, so no `timeBeginPeriod (1)`; TestMain now calls it — NeuralSlot 13 s →
   ~1 s per case) and Windows file I/O made the WAV fuzz 17 s (now `readWavMemory`, the same parser, < 0.5 s).
-  Still over 2 s on the owner's PC (MSVC, measured with the machine ~45 % busy): a few KnownGap / quality-suite
-  cases, DriftFifo, the Chain sample-rate sweep and three app cases, all 2.0–4.4 s; under 2 s on Linux per the
-  cloud's runs, so not split.
+  The cases that were still 2.0–7 s alone on the owner's PC (MSVC) are now split, assertions unchanged, each new
+  name the old one plus " - <row>" (so docs references still match by substring); the printed measurements are
+  identical before and after. Core: governed macros at 64..4096-sample blocks (one case per block, 1.2–1.6 s, plus
+  the spread check over their memo), step/bed contrast (Footsteps + bell and Competitive FPS per level, ≤ 1.5 s),
+  DriftFifo settling (per drift × packet, ≤ 0.65 s), the Chain sample-rate sweep (per rate, ≤ 0.8 s), the quality
+  suite's meta-validation (4 cases, ~0.7 s), the maximizer at 12 dB on the quality suite (clipper default / off,
+  ~1.2 s), Scenes metric validation (bypass per level, bell + cut, pump; ≤ 1.0 s) and the harmonics policy (2 cases,
+  ~1 s). App: Voice Chat at -35 / -12 LUFS (per level, 1.3 / 1.6 s, plus the within-3-LU check over their memo),
+  First Run - Game pink beds (3 cases, ~0.75 s), and AppRouting's outdated-pass case (2.05 → 0.05 s: it now wakes
+  the worker for one more pass, so the flickering session's parity no longer waits out the 2 s refresh).
+  Caveats: the two memo comparison cases (governed spread, Voice Chat within 3 LU) take < 0.01 s in a full or
+  prefix-filtered run but re-render everything (8.4 s / 3.0 s) when filtered on their own. Not split: in a full
+  run with the machine 65–97 % busy (another job running) about 25 other core cases read 2.0–3.0 s (Startle Guard
+  scenes, Music Boost 100 quality suite, Protection strength, E22 duck, intent Racing / Night Mode); they were
+  under 2 s alone in the earlier measurement, but re-time them on an idle machine before deciding.
 - **Soak click triage:** the EQ's discrete-change crossfade is now a smoothstep (2 of the 12 clicks, a preset switch);
   the other 10 are explained in docs/11 E53.
 - **E20 automatic preamp:** the preamp's model counts Gaming Impact's LF burst (Impact 100: preamp 0.00 → −6.22 dB;
