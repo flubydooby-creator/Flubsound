@@ -116,7 +116,7 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
                                                 "module-keys",
                                                 // the analyser's optional views
                                                 "analyzer-diff", "analyzer-lows", "analyzer-width", "analyzer-keys", "analyzer-spectrogram",
-                                                "analyzer-hover", "analyzer-freeze" };
+                                                "analyzer-hover", "analyzer-freeze", "analyzer-fundamentals" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -378,7 +378,8 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         o.difference = o.difference || states.contains ("analyzer-diff");
         o.sharpLows = o.sharpLows || states.contains ("analyzer-lows");
         o.width = o.width || states.contains ("analyzer-width");
-        o.pianoKeys = o.pianoKeys || states.contains ("analyzer-keys");
+        o.pianoKeys = o.pianoKeys || states.contains ("analyzer-keys") || states.contains ("analyzer-fundamentals");
+        o.fundamentals = o.fundamentals || states.contains ("analyzer-fundamentals");
         o.spectrogram = o.spectrogram || states.contains ("analyzer-spectrogram");
         // Visualisers: vis-<id> (main view), vis-strip-<id>, vis-beside.
         juce::String popOut;

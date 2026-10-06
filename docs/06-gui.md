@@ -970,6 +970,14 @@ both the Spectrum and the Spectrogram view, with the EQ curve, nodes and dynamic
   Playing notes light their keys (owner request): `keyActivity()` reads the output's displayed level at each
   note and lights a key 3 → 9 dB over the notes 2–4 semitones either side, within 30 dB of the loudest note and over
   −80 dB; the glow fades with a 0.15 s time constant (`getKeyGlow()`).
+  **Fundamentals only** (View › *Piano keys: fundamentals only*, enabled while Piano keys is on; owner request): the
+  keys are lit from `vis::PitchEstimator` (§6.4.2) instead: each estimated note lights its key at
+  `0.35 + 0.65 × its level` (the fundamental's level on the estimator's compressed scale), with the same 0.15 s glow
+  fade, so a note's overtones (octave, twelfth, ...) stay dark. `SpectrumAnalyzer::setFundamentalsOnly` creates the
+  estimator on first use and feeds it the post mid only while Piano keys and Fundamentals only are both on (it has its
+  own decimated long analysis, so it does not depend on Sharper lows). Persisted in the `keys` field of
+  `ui.analyzer`: 0 / 1 = off / on, + 2 with Fundamentals only (kept while the keys are off); older values (0 / 1) read
+  as before, and an older build reads 2 / 3 as keys off. Screenshot state `analyzer-fundamentals`.
 
 #### 6.4.2 Visualisers (owner request 2026-10-06)
 
@@ -1116,6 +1124,62 @@ controller's Settings change, and a check every 15 frames). Tests: `tests/app/te
 normal bounds, reopening from the saved state; the waterfall's ring and projection, the radial mapping and pulse, the
 mirrors, no allocation per frame with a live analyser). Screenshot states: `vis-popout-<id>` (the PNG is the window
 at `--size` with that view) and `vis-popout-full` (its full-screen layout).
+
+**Music-theory views** (owner request 2026-10-06; `tests/app/test_app_music_views.cpp`):
+
+- **Pitch estimator** (`PitchEstimator.*`, shared by the views below and the fundamentals-only piano keys; message
+  thread, no allocation after `setSampleRate`). The post mid is decimated by `round (fs / 16 kHz)` (3 at 44.1 / 48 kHz)
+  behind an 8th-order Butterworth low-pass at 0.3 × the decimated rate; every 512 decimated samples (32 ms) the latest
+  8192 (0.51 s at 16 kHz, 1.95 Hz bins, like Sharper lows) are Blackman-windowed and zero-padded to a 16384-point FFT
+  (only the latest pending hop runs). `findPeaks`: local maxima from 27 Hz to 0.28 × the decimated rate (4.48 kHz),
+  above −84 dBFS and within 50 dB of the loudest, frequency and level by parabolic interpolation in dB (a sine of
+  amplitude a reads a). `estimateNotes`: harmonic summation over C1–C8 with iterative subtraction. A candidate needs a
+  peak at its fundamental within ±35 cents, at least 0.3 on the compressed scale (0 = 50 dB under the loudest peak,
+  1 = the loudest) and at least 20 % of it not yet explained by the notes found; its salience is
+  `Σ h^−0.5 · level · residual / amplitude` over its first 10 harmonics. The best candidate is taken and each of its
+  harmonics loses at most the mean of it and its neighbouring harmonics (spectral smoothness, so a partial two notes
+  share keeps the other note's part); repeat while the best salience is ≥ 0.45 and ≥ 0.3 × the first note's, up to 6
+  notes, and at most one note below C3 (a bass line plays one note; a kick drum's low smear otherwise reads as a
+  cluster of low notes). The result clears after 0.35 s without samples. `foldChroma`: every peak from 100 Hz up
+  (under it there is mostly kick; a bass note counts by its harmonics) adds `x²` (x = its level on a 36 dB scale under
+  the loudest peak) to its pitch class, split between the two nearest by its offset in semitones; normalised to a
+  largest bin of 1. Measured on synthetic notes with six harmonics: C2, A3 and E5 read as exactly that note; C major,
+  A minor 7 and A2 + C4 E4 G4 read as exactly their notes.
+- **Music theory** (`MusicTheory.*`). `nameChord (mask, bass)`: tries every pitch class of the set as the root against
+  26 templates (major, m, 7, maj7, m7, 5, sus4, sus2, dim, aug, m7b5, dim7, add9, m(add9), 6, m6, 7sus4, m(maj7), 9,
+  maj9, m9, and 7 / maj7 / m7 / major / minor without the fifth), preferring a root in the bass, then the earlier
+  template (so C E G A is C6 over C and Am7 otherwise); a bass that is not the root makes a slash chord (`C/E`); a lone
+  note is its name, nothing `N.C.`; a set no template fits is tried without one, then two notes (never the bass).
+  `ChordTracker`: per pitch class a presence that follows the notes' salience (full from half the strongest note's)
+  with 0.12 s attack / 0.25 s release; the pitch classes over 0.4 are named strongest first (the most of them, up to
+  6, that make a chord without dropping, so a stray note is left out); a new name shows after holding 0.25 s, `N.C.`
+  after 0.8 s with nothing sounding or 3 s of notes no chord fits; the last 8 chords are kept. `KeyDetector`:
+  Krumhansl-Schmuckler: the chroma of every analysis accumulated with a 15 s leaky time constant, Pearson-correlated
+  with the 24 rotated Krumhansl-Kessler major / minor profiles; a new key must beat the shown one by 0.015; confidence
+  = best correlation × (0.55 + 0.45 × min (1, its lead over the runner-up / 0.1)) × min (1, signal in the window /
+  6 s). Flat keys (F, Bb, Eb, Ab, Db major; D, G, C, F, Bb, Eb minor) spell chords with flats. `MusicListener`
+  bundles an estimator with a key detector for a view.
+- **Chord name** (`chord`, `ChordView.*`, main view and strip). The tracker's chord as a big symbol in the accent
+  (faint for `N.C.`) that cross-fades and rises 8 px over 0.18 s on a change, what it is (*minor seventh · bass G*),
+  the chord's notes from the root as pills (the root filled), the last chords (*Am › F › C › G*, older ones fainter)
+  and the key top right. At least 600 px wide: a one-octave keyboard at the right lighting every pitch class by its
+  presence (the root brightest, a dot on the bass) and the estimated notes with their octaves at the left; narrower,
+  the keyboard goes under the pills when there is height. As a strip: the symbol, its notes and kind, the key.
+- **Chromagram** (`chromagram`, `ChromagramView.*`, main view and strip, keeps its history while hidden). Twelve bars
+  C … B from `foldChroma` (rising with 0.03 s, falling with 0.35 s), labels in the key's spelling with the scale tones
+  dotted and the tonic in the accent; beside them (under them below 520 px) a 15 s history, 300 columns of 50 ms
+  (each the bars' maximum in it), 12 rows (C at the bottom) as a software image through a 256-entry colour table
+  (re-tinted on a mode / theme change); the header shows the key with a confidence bar and the relative key. As a
+  strip: twelve cells lit by the bars and the key.
+- **Song key** (`key`, `KeyView.*`, strip, keeps its history while hidden). The key in the accent, its confidence as
+  a bar and a percentage, the scale's notes from the tonic and the relative key; *listening…* until the detector has
+  ¼ s of signal, *no signal* without any. `reset()` (strip switch, engine rebuilt) starts it afresh.
+
+Measured on the app's own test music (the screenshot scene's Am – F – C – G with kick, a snare with a 185 Hz tone,
+hats and a bass line with octaves and fifths, 8.5 s): the tracker shows *Am Am6 Fmaj7 F C Gmaj7* (the passing names
+come from the change-overs and the snare's F♯) and the key reads A minor at 0.77. Cost: each music view (and the
+fundamentals-only keys) runs one 16384-point FFT and the note search per 32 ms while it is fed; chord name only while
+shown, chromagram and key also while hidden once created.
 
 ### 6.5 `EqCurveEditor` — the interactive EQ curve
 
@@ -1635,7 +1699,7 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
 | `--theme standard\|high-contrast` | `standard` | anything else is an error | Palette (§2.1), applied before the window is created (parsed in `FlubsoundApplication.cpp`) |
 | `--device "name"` | none | must be followed by a name | `EngineController::simulateOutputDevice (name, engine rate, 2 channels)`. The device-profile match, advice banner and master-ceiling cap then behave as if that output were open. It never overrides a real device |
 | `--view advanced\|simple` | `advanced` | anything else is an error | The main window's view (§3.5), set without saving it. The default is the full window every earlier screenshot shows; the app's own default, without a saved choice, is Simple |
-| `--state a,b` | none | one or more of the names below, comma separated; anything else is an error | UI states that need a real device or a real mistake, reached through the same code paths where they can: `device-error` (`AudioEngineHost::audioDeviceError`: the error banner), `loopback` (the device input feeds the Game strip and `checkLoopbackPair` is given CABLE Output / CABLE Input: the muted banner), `preset-warning` (a preset with a typo'd key and an out-of-range value, read by `flub::preset::fromJson`, as the notice bar shows its warnings), `recovery` (the notice for a settings file restored from `.bak1`), `latency-prompt` (Audiophile Subtle, or Competitive FPS in gaming mode, loaded on Balanced), `governor` (Boost 100 %, Loudness / Impact 100 %, maximizer drive 12 dB, protection Strict; use `--seconds 8` so the governor's 3 s averages settle), `preset-browser` (the preset browser open, searched for *late night quiet* — *night quiet* with `--mode gaming` — with the best match selected and previewing, loudness matched), `settings-audio` / `settings-processing` (the PNG is that Settings page at `--size` instead of the main window; with `loopback` the Audio page shows the muted pair and **Allow this pair**, [11 E51](11-enhancement-report.md#e51); Processing switches *Follow the system volume* on, [11 E32](11-enhancement-report.md#e32); give a tall size such as `780x1500` to see the whole page), `ab-matched` (bank B = the scene's sound at Boost 100 % and Loudness / Impact 100 %, playing loudness matched: the trim line under A / B, [11 E37](11-enhancement-report.md#e37)), `abx` (that pair in the blind A/B/X panel, three trials answered), `bypass` (the master Bypass switched on at 80 % of the run, so give `--seconds 5` or more: *proc. +x LU* under it), `routing-drawer` (the routing panel's drawer open; narrow windows), `governor-normal` (as `governor` at protection Normal: the loudness panel's PROTECTION readouts), `quick-controls` (the PNG is the tray flyout at `--size`, e.g. `330x216`), `settings-diagnostics` (the PNG is the Diagnostics page with its Updates section, [11 E54](11-enhancement-report.md#e54); nothing is requested unless the check is on in the settings used), `settings-hearing` (the PNG is the Hearing page with a Turtle Beach output, the listener's figure of 108 dB SPL and the cap at 85 dB(A), [11 E32](11-enhancement-report.md#e32)), `settings-hearing-unknown` (the same page without a sensitivity: *Unknown*), `hearing-profile` (as `settings-hearing` with a right-ear high-frequency preference in the per-ear editor, [11 E33](11-enhancement-report.md#e33); give a tall size such as `860x1400` to see the editor), `hearing-readout` (the main window with a sensitivity: the loudness panel's dose row), `module-keys` (the rack scrolled to the Clarity card: Presence Mode Relative, Crossfeed Type Meier on Stereo & Space), `analyzer-diff` / `-lows` / `-width` / `-keys` / `-spectrogram` / `-hover` / `-freeze` (§6.4.1), `vis-<id>` (that visualiser in place of the spectrum, any registered main view, e.g. `vis-goniometer`), `vis-beside` (beside it instead) and `vis-strip-<id>` (that strip, e.g. `vis-strip-correlation`) (§6.4.2; not saved), `vis-popout-<id>` (the PNG is the visualiser window at `--size` showing that view: `spectrum`, `spectrogram` or a main view id) with `vis-popout-full` for its full-screen layout (§6.4.2). Without `--state` the notice bar starts empty |
+| `--state a,b` | none | one or more of the names below, comma separated; anything else is an error | UI states that need a real device or a real mistake, reached through the same code paths where they can: `device-error` (`AudioEngineHost::audioDeviceError`: the error banner), `loopback` (the device input feeds the Game strip and `checkLoopbackPair` is given CABLE Output / CABLE Input: the muted banner), `preset-warning` (a preset with a typo'd key and an out-of-range value, read by `flub::preset::fromJson`, as the notice bar shows its warnings), `recovery` (the notice for a settings file restored from `.bak1`), `latency-prompt` (Audiophile Subtle, or Competitive FPS in gaming mode, loaded on Balanced), `governor` (Boost 100 %, Loudness / Impact 100 %, maximizer drive 12 dB, protection Strict; use `--seconds 8` so the governor's 3 s averages settle), `preset-browser` (the preset browser open, searched for *late night quiet* — *night quiet* with `--mode gaming` — with the best match selected and previewing, loudness matched), `settings-audio` / `settings-processing` (the PNG is that Settings page at `--size` instead of the main window; with `loopback` the Audio page shows the muted pair and **Allow this pair**, [11 E51](11-enhancement-report.md#e51); Processing switches *Follow the system volume* on, [11 E32](11-enhancement-report.md#e32); give a tall size such as `780x1500` to see the whole page), `ab-matched` (bank B = the scene's sound at Boost 100 % and Loudness / Impact 100 %, playing loudness matched: the trim line under A / B, [11 E37](11-enhancement-report.md#e37)), `abx` (that pair in the blind A/B/X panel, three trials answered), `bypass` (the master Bypass switched on at 80 % of the run, so give `--seconds 5` or more: *proc. +x LU* under it), `routing-drawer` (the routing panel's drawer open; narrow windows), `governor-normal` (as `governor` at protection Normal: the loudness panel's PROTECTION readouts), `quick-controls` (the PNG is the tray flyout at `--size`, e.g. `330x216`), `settings-diagnostics` (the PNG is the Diagnostics page with its Updates section, [11 E54](11-enhancement-report.md#e54); nothing is requested unless the check is on in the settings used), `settings-hearing` (the PNG is the Hearing page with a Turtle Beach output, the listener's figure of 108 dB SPL and the cap at 85 dB(A), [11 E32](11-enhancement-report.md#e32)), `settings-hearing-unknown` (the same page without a sensitivity: *Unknown*), `hearing-profile` (as `settings-hearing` with a right-ear high-frequency preference in the per-ear editor, [11 E33](11-enhancement-report.md#e33); give a tall size such as `860x1400` to see the editor), `hearing-readout` (the main window with a sensitivity: the loudness panel's dose row), `module-keys` (the rack scrolled to the Clarity card: Presence Mode Relative, Crossfeed Type Meier on Stereo & Space), `analyzer-diff` / `-lows` / `-width` / `-keys` / `-spectrogram` / `-hover` / `-freeze` / `-fundamentals` (§6.4.1), `vis-<id>` (that visualiser in place of the spectrum, any registered main view, e.g. `vis-goniometer`), `vis-beside` (beside it instead) and `vis-strip-<id>` (that strip, e.g. `vis-strip-correlation`) (§6.4.2; not saved), `vis-popout-<id>` (the PNG is the visualiser window at `--size` showing that view: `spectrum`, `spectrogram` or a main view id) with `vis-popout-full` for its full-screen layout (§6.4.2). Without `--state` the notice bar starts empty |
 
 - **Exit codes:** 0 success, 1 the PNG could not be written, 2 bad arguments.
 - **Headless controller.** No audio device, no state restore, no app routing, settings never written (temporary file `FlubsoundPro-screenshot.settings`). There is also no tray, no hotkeys and no tooltip window, and multiple instances are allowed.
@@ -1663,7 +1727,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | Theme | `ui.theme` (`standard` / `high-contrast`) | standard |
 | Main window view ([11 E39](11-enhancement-report.md#e39)) | `ui.view` (`simple` / `advanced`; anything else reads as simple) | simple |
 | Visualiser window | `ui.visualiserWindow` = `"view,x,y,w,h,maximised,fullscreen"` (`vis::VisualiserWindow::State`, §6.4.2): the view (`spectrum`, `spectrogram` or a main visualiser id; unknown reads as `spectrum`), the normal bounds (below 360 × 240: the default size), maximised and full screen | unset: the panel's view, 1100 × 680 centred |
-| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram,visualiser,strip,beside"` (`AnalyzerPanel::Options::toString`; visualiser / strip are registry ids, §6.4.2); range clamped 6–24; the older 10- and 5-field values read with the newer fields at their defaults; an unknown id reads as the default | `"1,1,1,1,12,0,0,0,0,0,spectrum,none,0"` |
+| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram,visualiser,strip,beside"` (`AnalyzerPanel::Options::toString`; visualiser / strip are registry ids, §6.4.2; keys 0–3: + 2 = fundamentals only, §6.4.1); range clamped 6–24; the older 10- and 5-field values read with the newer fields at their defaults; an unknown id reads as the default | `"1,1,1,1,12,0,0,0,0,0,spectrum,none,0"` |
 | Window position and size | `DocumentWindow::getWindowStateAsString()` | centred 1280 × 820 |
 | Selected strip, master enable | `AppSettings` | 0 (Game), enabled |
 | Strip parameter state (both banks + active bank) | JSON per strip; autosaved within 5 s of a change and at shutdown; during a preset preview the bank as the preview's end will leave it (§6.1a) | — |

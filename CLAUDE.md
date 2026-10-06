@@ -145,6 +145,14 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   LUFS), plus a visualiser window (View › *Open in a window*: any main view or the spectrum / spectrogram, F11 / Esc
   borderless full screen, second monitor, persisted in `ui.visualiserWindow`, off in Tournament mode) (docs/06 §6.4.2,
   docs/12 §8, `tests/app/test_app_visualiser_window.cpp`). Not yet seen on the owner's screen or at 60 fps on real music.
+- **Music-theory views (owner request 2026-10-06):** a multi-pitch estimator (`vis/PitchEstimator.*`: 16 kHz-decimated
+  0.51 s Blackman FFT, harmonic summation over C1–C8 with iterative subtraction, one bass note below C3) and
+  `vis/MusicTheory.*` (chord naming incl. slash chords, a steadying chord tracker, Krumhansl-Schmuckler key over a
+  15 s window). Piano keys can light only the fundamentals (View › *Piano keys: fundamentals only*, persisted as
+  keys field 2 / 3 in `ui.analyzer`); three visualisers: *Chord name* (`chord`, main / strip), *Chromagram*
+  (`chromagram`, main / strip, 15 s history, key in the header) and *Song key* (`key`, strip) (docs/06 §6.4.2,
+  docs/12 §8, `tests/app/test_app_music_views.cpp`). Checked only on synthetic tones and the app's own test music
+  (Am-F-C-G with drums: Am, F, C read, A minor); not yet heard / seen on real songs on the owner's screen.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order

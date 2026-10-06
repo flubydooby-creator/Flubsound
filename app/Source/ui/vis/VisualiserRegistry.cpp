@@ -1,8 +1,11 @@
 #include "VisualiserRegistry.h"
 
+#include "ChordView.h"
+#include "ChromagramView.h"
 #include "CorrelationMeter.h"
 #include "GainReductionTrace.h"
 #include "Goniometer.h"
+#include "KeyView.h"
 #include "LoudnessHistory.h"
 #include "RadialSpectrum.h"
 #include "StereoField.h"
@@ -47,6 +50,18 @@ const std::vector<Descriptor>& registry()
           "Phase correlation of the output's left and right channels: +1 mono, 0 unrelated (wide), below 0 "
           "(red) partly out of phase. The marker holds the lowest value of the last 3 seconds.",
           false, true, &make<CorrelationMeter> },
+        { "chord", "Chord name", "CHORD",
+          "The chord that is playing, named from the notes' fundamentals (not their overtones): big symbol, its notes, "
+          "a keyboard lighting the pitch classes that sound and the last chords. Slash chords name the bass note.",
+          true, true, &make<ChordView> },
+        { "chromagram", "Chromagram (notes in all octaves)", "CHROMAGRAM",
+          "How much of each note C .. B the output holds, all octaves folded together, with a 15-second history and "
+          "the estimated key (its scale tones marked).",
+          true, true, &make<ChromagramView> },
+        { "key", "Song key", "KEY",
+          "The estimated key of what is playing (major or minor, from about the last 15 seconds) with a confidence, "
+          "the relative key and the scale's notes.",
+          false, true, &make<KeyView> },
     };
     return list;
 }

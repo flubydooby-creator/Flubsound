@@ -66,9 +66,10 @@
 //                   the PNG shows the Settings dialog's Diagnostics page
 //                   with its Updates section (docs/11 E54) at --size
 //   analyzer-diff, analyzer-lows, analyzer-width, analyzer-keys,
-//   analyzer-spectrogram
+//   analyzer-spectrogram, analyzer-fundamentals
 //                   that optional analyser view switched on (combinable, not
-//                   saved to the settings)
+//                   saved to the settings; analyzer-fundamentals: the piano
+//                   keys lighting only the estimated fundamentals)
 //   analyzer-hover  the hover readout (crosshair, note, levels) at 62 Hz,
 //                   as if the mouse rested there when the PNG is taken
 //   analyzer-freeze the traces frozen at 40 % of the run, then EQ band 7

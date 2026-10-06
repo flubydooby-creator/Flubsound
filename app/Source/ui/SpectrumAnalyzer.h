@@ -48,16 +48,21 @@
 //   Freeze          a dashed copy of the current post (and pre) traces.
 //   Piano keys      a keyboard C1 .. C8 along the bottom of the plot (inside
 //                   it: the plot never changes size), the hovered key lit.
+//                   Fundamentals only: the playing notes' keys are lit from
+//                   vis::PitchEstimator (fundamentals, not overtones) instead
+//                   of keyActivity.
 // The hover readout itself is drawn by EqCurveEditor (it gets the mouse);
 // the analyser provides the levels and the note naming (describeFrequency).
 #pragma once
 
 #include "Spectrogram.h"
+#include "vis/PitchEstimator.h"
 
 #include <juce_dsp/juce_dsp.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <array>
+#include <memory>
 #include <vector>
 
 namespace flub::app::ui
@@ -161,6 +166,11 @@ public:
     void setWidthEnabled (bool shouldShow);
     void setSpectrogramEnabled (bool shouldShow);
     void setPianoKeysEnabled (bool shouldShow);
+    /** Piano keys light only the estimated fundamentals (vis::PitchEstimator). */
+    void setFundamentalsOnly (bool shouldUse);
+    bool isFundamentalsOnly() const noexcept { return fundamentalsOnly; }
+    /** The fundamentals estimate (nullptr until Fundamentals only was first on). */
+    const vis::PitchEstimator* getPitchEstimator() const noexcept { return pitch.get(); }
     bool isSpectrogramEnabled() const noexcept { return spectrogramOn; }
     bool isDifferenceEnabled() const noexcept { return differenceOn; }
     /** The EQ display range (the difference trace uses the EQ gain axis). */
@@ -266,6 +276,8 @@ private:
     juce::Path preLine, preFill, postLine, postFill, peakLine, diffLine, diffFill, widthFill, widthLine, frozenPreDashes, frozenPostDashes;
     juce::Path whiteKeys, blackKeys, keySeparators;
     std::array<float, kNumKeys> keyGlow {};
+    std::unique_ptr<vis::PitchEstimator> pitch; // created when Fundamentals only is first switched on
+    bool fundamentalsOnly = false;
     bool keysGlowing = false;
     bool anyData = false;
 };

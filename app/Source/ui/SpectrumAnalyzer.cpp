@@ -112,6 +112,8 @@ void SpectrumAnalyzer::setSampleRate (double newSampleRate)
     if (newSampleRate <= 0.0 || std::abs (newSampleRate - sampleRate) < 0.5)
         return;
     sampleRate = newSampleRate;
+    if (pitch != nullptr)
+        pitch->setSampleRate (sampleRate);
     rebuildBands();
     reset();
 }
@@ -238,6 +240,8 @@ void SpectrumAnalyzer::push (bool post, const float* samples, int numSamples)
 {
     // The decimated history only runs while Sharper lows is on (no extra work otherwise).
     pushInto (streams[post ? 1 : 0], samples, numSamples, sharpLows);
+    if (post && keysOn && fundamentalsOnly && pitch != nullptr)
+        pitch->push (samples, numSamples);
 }
 
 void SpectrumAnalyzer::pushSide (const float* samples, int numSamples)
@@ -269,6 +273,8 @@ void SpectrumAnalyzer::reset()
     std::fill (widthTarget.begin(), widthTarget.end(), 0.0f);
     std::fill (widthDisplay.begin(), widthDisplay.end(), 0.0f);
     spectrogram.clear();
+    if (pitch != nullptr)
+        pitch->reset();
     anyData = false;
     rebuildPaths();
     repaint();
@@ -463,12 +469,27 @@ void SpectrumAnalyzer::advance (double dtSeconds)
 
     // ---- Piano keys: the playing notes light their keys ----
     bool keysChanged = false;
-    if (keysOn && (moved || keysGlowing))
+    const bool fundamentals = keysOn && fundamentalsOnly && pitch != nullptr;
+    const bool pitchUpdated = fundamentals && pitch->update (dtSeconds);
+    if (keysOn && (moved || keysGlowing || pitchUpdated))
     {
         std::array<float, kNumKeys> noteDb {}, target {};
-        for (int k = 0; k < kNumKeys; ++k)
-            noteDb[static_cast<size_t> (k)] = streams[1].displayDb[pointIndex (midiFrequency (kKeysLowMidi + k))];
-        keyActivity (noteDb.data(), kNumKeys, target.data());
+        if (fundamentals)
+        {
+            // Only the estimated fundamentals light (the loudest fully).
+            for (int i = 0; i < pitch->getNumNotes(); ++i)
+            {
+                const auto& note = pitch->getNote (i);
+                if (note.midi >= kKeysLowMidi && note.midi <= kKeysHighMidi)
+                    target[static_cast<size_t> (note.midi - kKeysLowMidi)] = std::clamp (0.35f + 0.65f * note.level, 0.0f, 1.0f);
+            }
+        }
+        else
+        {
+            for (int k = 0; k < kNumKeys; ++k)
+                noteDb[static_cast<size_t> (k)] = streams[1].displayDb[pointIndex (midiFrequency (kKeysLowMidi + k))];
+            keyActivity (noteDb.data(), kNumKeys, target.data());
+        }
         const auto fall = static_cast<float> (std::exp (-std::max (0.0, dtSeconds) / kKeyGlowReleaseS));
         keysGlowing = false;
         for (size_t k = 0; k < keyGlow.size(); ++k)
@@ -669,9 +690,28 @@ void SpectrumAnalyzer::setPianoKeysEnabled (bool shouldShow)
     if (keysOn == shouldShow)
         return;
     keysOn = shouldShow;
+    if (pitch != nullptr)
+        pitch->reset();
     keyGlow.fill (0.0f);
     keysGlowing = false;
     rebuildPaths(); // the width view sits on the keys
+    repaint();
+}
+
+void SpectrumAnalyzer::setFundamentalsOnly (bool shouldUse)
+{
+    if (fundamentalsOnly == shouldUse)
+        return;
+    fundamentalsOnly = shouldUse;
+    if (fundamentalsOnly && pitch == nullptr)
+    {
+        pitch = std::make_unique<vis::PitchEstimator>();
+        pitch->setSampleRate (sampleRate);
+    }
+    if (pitch != nullptr)
+        pitch->reset();
+    keyGlow.fill (0.0f);
+    keysGlowing = false;
     repaint();
 }
 

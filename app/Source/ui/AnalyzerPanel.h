@@ -38,6 +38,8 @@ public:
         float eqRangeDb = 12.0f;
         // Optional views (docs/06 §6.4), all off by default.
         bool difference = false, sharpLows = false, width = false, pianoKeys = false, spectrogram = false;
+        // Piano keys light only the estimated fundamentals (kept while the keys are off).
+        bool fundamentals = false;
         // Visualisers (vis::registry() ids): the main view (kSpectrum = none),
         // the strip under it (kNone) and whether the main view sits beside the
         // spectrum instead of replacing it.
@@ -48,7 +50,8 @@ public:
         static constexpr const char* kNone = "none";
 
         /** The `ui.analyzer` preference:
-            "pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram,visualiser,strip,beside". */
+            "pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram,visualiser,strip,beside";
+            keys is 0 / 1 (off / on), + 2 with Fundamentals only (older builds read 2 and 3 as off). */
         juce::String toString() const;
         /** Reads toString()'s format, or the older 10- and 5-field ones (the
             newer fields at their defaults). An id that is not (or no longer)

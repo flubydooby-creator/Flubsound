@@ -16,6 +16,7 @@ constexpr int kMenuVisualiser = 100; // + registry index; kMenuVisualiser - 1 = 
 constexpr int kMenuStrip = 200;      // + registry index; kMenuStrip - 1 = no strip
 constexpr int kMenuBeside = 300;
 constexpr int kMenuPopOut = 400;
+constexpr int kMenuFundamentals = 50;
 
 struct LegendEntry
 {
@@ -32,7 +33,7 @@ juce::String AnalyzerPanel::Options::toString() const
 {
     const auto b = [] (bool v) { return juce::String (v ? 1 : 0); };
     return b (showPre) + "," + b (showPost) + "," + b (tilt) + "," + b (peakHold) + "," + juce::String (juce::roundToInt (eqRangeDb)) + ","
-           + b (difference) + "," + b (sharpLows) + "," + b (width) + "," + b (pianoKeys) + "," + b (spectrogram) + "," + visualiser + ","
+           + b (difference) + "," + b (sharpLows) + "," + b (width) + "," + juce::String ((pianoKeys ? 1 : 0) + (fundamentals ? 2 : 0)) + "," + b (spectrogram) + "," + visualiser + ","
            + strip + "," + b (beside);
 }
 
@@ -52,7 +53,9 @@ bool AnalyzerPanel::Options::fromString (const juce::String& text, Options& o)
         o.difference = tokens[5] == "1";
         o.sharpLows = tokens[6] == "1";
         o.width = tokens[7] == "1";
-        o.pianoKeys = tokens[8] == "1";
+        const int keys = tokens[8].getIntValue();
+        o.pianoKeys = (keys & 1) != 0;
+        o.fundamentals = (keys & 2) != 0;
         o.spectrogram = tokens[9] == "1";
     }
     if (tokens.size() == 13)
@@ -164,6 +167,7 @@ void AnalyzerPanel::applyOptions()
     analyzer.setSharpLowsEnabled (options.sharpLows);
     analyzer.setWidthEnabled (options.width);
     analyzer.setPianoKeysEnabled (options.pianoKeys);
+    analyzer.setFundamentalsOnly (options.fundamentals);
     analyzer.setSpectrogramEnabled (options.spectrogram);
     eqEditor.setRangeDb (static_cast<float> (range));
 
@@ -248,6 +252,7 @@ void AnalyzerPanel::showViewMenu()
     menu.addItem (3, "Sharper lows (long FFT below 300 Hz)", true, options.sharpLows);
     menu.addItem (4, "Stereo width", true, options.width);
     menu.addItem (5, "Piano keys", true, options.pianoKeys);
+    menu.addItem (kMenuFundamentals, "Piano keys: fundamentals only", options.pianoKeys, options.fundamentals);
     menu.addSeparator();
     menu.addItem (6, analyzer.isFrozen() ? "Re-capture frozen trace" : "Freeze the current trace");
     menu.addItem (7, "Clear frozen trace", analyzer.isFrozen());
@@ -298,6 +303,7 @@ void AnalyzerPanel::showViewMenu()
                                 case 3: o.sharpLows = ! o.sharpLows; break;
                                 case 4: o.width = ! o.width; break;
                                 case 5: o.pianoKeys = ! o.pianoKeys; break;
+                                case kMenuFundamentals: o.fundamentals = ! o.fundamentals; break;
                                 case 6: self.freeze(); return;
                                 case 7: self.clearFreeze(); return;
                                 default: return;
