@@ -413,7 +413,8 @@ Flubsound/
 │           ├── BoostPanel.{h,cpp}          Boost Intensity dial (with governor arc), governor chip (state, reason, strength), the five mode macros, active-now chips
 │           ├── AnalyzerFeed.{h,cpp}        the single consumer of a chain's AnalyzerTaps; fans out to the views
 │           ├── AnalyzerPanel.{h,cpp}       SpectrumAnalyzer with EqCurveEditor stacked on top
-│           ├── SpectrumAnalyzer.{h,cpp}    pre/post spectrum: 4096-point Hann FFT (juce::dsp::FFT), 75 % overlap
+│           ├── SpectrumAnalyzer.{h,cpp}    pre/post spectrum: 4096-point Hann FFT (juce::dsp::FFT), 75 % overlap; optional views (06 §6.4.1)
+│           ├── Spectrogram.{h,cpp}         the analyser's scrolling waterfall image (ring of rows, fixed size)
 │           ├── EqCurveEditor.{h,cpp}       interactive 10-band EQ curve drawn from ParametricEq::responseDb
 │           ├── WaveformHistory.{h,cpp}     scrolling min/max output history with a short-term LUFS trace
 │           ├── LevelMeters.{h,cpp}         input / output peak + RMS bars, peak hold, clip latch, true-peak readout

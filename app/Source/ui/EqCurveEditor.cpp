@@ -90,6 +90,9 @@ void EqCurveEditor::selectBand (int band)
 // =============================================================================
 void EqCurveEditor::refresh (bool force)
 {
+    if (readoutVisible)
+        repaint(); // the levels under the readout move every frame
+
     auto* store = storeProvider != nullptr ? storeProvider() : nullptr;
     if (store == nullptr)
         return;
@@ -163,9 +166,7 @@ void EqCurveEditor::resetBand (int band)
 // =============================================================================
 float EqCurveEditor::yForGain (float db) const noexcept
 {
-    const auto plot = geometry.getPlotArea();
-    const float t = juce::jlimit (-1.08f, 1.08f, db / rangeDb);
-    return plot.getCentreY() - t * plot.getHeight() * 0.5f * 0.92f;
+    return geometry.yForGain (db, rangeDb);
 }
 
 float EqCurveEditor::gainForY (float y) const noexcept
@@ -337,7 +338,106 @@ void EqCurveEditor::paint (juce::Graphics& g)
         g.fillPath (diamond);
     }
 
+    if (readoutVisible)
+        drawReadout (g);
+
     g.restoreState();
+}
+
+// =============================================================================
+// Hover readout
+// =============================================================================
+void EqCurveEditor::showReadoutAt (juce::Point<float> pos)
+{
+    const auto plot = geometry.getPlotArea();
+    const bool visible = plot.contains (pos);
+    if (visible == readoutVisible && pos == readoutPos)
+        return;
+    readoutVisible = visible;
+    readoutPos = pos;
+    geometry.setHoverFrequency (visible ? geometry.frequencyForX (pos.x) : 0.0);
+    repaint();
+}
+
+void EqCurveEditor::hideReadout()
+{
+    if (! readoutVisible)
+        return;
+    readoutVisible = false;
+    geometry.setHoverFrequency (0.0);
+    repaint();
+}
+
+juce::StringArray EqCurveEditor::getReadoutLines() const
+{
+    juce::StringArray lines;
+    if (! readoutVisible)
+        return lines;
+    const double hz = geometry.frequencyForX (readoutPos.x);
+    lines.add (SpectrumAnalyzer::describeFrequency (hz));
+    if (geometry.hasData())
+    {
+        juce::String levels;
+        if (geometry.isShowingPost())
+            levels << "Out " << Theme::formatDb (geometry.getDisplayLevelDb (true, hz)) << " dB";
+        if (geometry.isShowingPre())
+            levels << (levels.isEmpty() ? "" : "   ") << "In " << Theme::formatDb (geometry.getDisplayLevelDb (false, hz)) << " dB";
+        if (geometry.isDifferenceEnabled())
+            levels << (levels.isEmpty() ? "" : "   ") << juce::String (juce::CharPointer_UTF8 ("\xce\x94 "))
+                   << Theme::formatSignedDb (geometry.getDifferenceDb (hz)) << " dB";
+        if (levels.isNotEmpty())
+            lines.add (levels);
+    }
+    return lines;
+}
+
+void EqCurveEditor::drawReadout (juce::Graphics& g) const
+{
+    const auto plot = geometry.getPlotArea();
+    const double hz = geometry.frequencyForX (readoutPos.x);
+    const auto accent = Theme::accent (*this);
+
+    // Crosshair: the frequency line, a faint level line and a dot on the output trace.
+    g.setColour (Palette::text.withAlpha (0.28f));
+    g.drawVerticalLine (juce::roundToInt (readoutPos.x), plot.getY(), plot.getBottom());
+    g.setColour (Palette::text.withAlpha (0.10f));
+    g.drawHorizontalLine (juce::roundToInt (readoutPos.y), plot.getX(), plot.getRight());
+    if (geometry.hasData() && geometry.isShowingPost() && ! geometry.isSpectrogramEnabled())
+    {
+        const auto dot = juce::Rectangle<float> (7.0f, 7.0f).withCentre ({ readoutPos.x, geometry.traceY (true, hz) });
+        g.setColour (Palette::well.withAlpha (0.8f));
+        g.fillEllipse (dot.expanded (1.5f));
+        g.setColour (accent);
+        g.fillEllipse (dot);
+    }
+
+    const auto lines = getReadoutLines();
+    const auto font = Theme::font (11.5f);
+    float w = 0.0f;
+    for (const auto& line : lines)
+        w = juce::jmax (w, juce::GlyphArrangement::getStringWidth (font, line));
+    w += 16.0f;
+    const float lineH = 15.0f, h = static_cast<float> (lines.size()) * lineH + 8.0f;
+
+    // Up and to the right of the cursor; flipped where that leaves the plot.
+    auto r = juce::Rectangle<float> (readoutPos.x + 12.0f, readoutPos.y - 12.0f - h, w, h);
+    if (r.getRight() > plot.getRight() - 2.0f)
+        r.setX (readoutPos.x - 12.0f - w);
+    if (r.getY() < plot.getY() + 2.0f)
+        r.setY (readoutPos.y + 14.0f);
+    r = r.constrainedWithin (plot.reduced (2.0f));
+
+    g.setColour (Palette::tooltip.withAlpha (0.94f));
+    g.fillRoundedRectangle (r, 6.0f);
+    g.setColour (accent.withAlpha (0.55f));
+    g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
+    g.setFont (font);
+    auto text = r.reduced (8.0f, 4.0f);
+    for (int i = 0; i < lines.size(); ++i)
+    {
+        g.setColour (i == 0 ? Palette::text : Palette::muted);
+        g.drawText (lines[i], text.removeFromTop (lineH), juce::Justification::centredLeft, false);
+    }
 }
 
 void EqCurveEditor::invalidate()
@@ -452,10 +552,16 @@ void EqCurveEditor::mouseMove (const juce::MouseEvent& e)
         setMouseCursor (b >= 0 ? juce::MouseCursor::DraggingHandCursor : juce::MouseCursor::NormalCursor);
         invalidate();
     }
+    // Over a node its own bubble is the readout.
+    if (b >= 0)
+        hideReadout();
+    else
+        showReadoutAt (e.position);
 }
 
 void EqCurveEditor::mouseExit (const juce::MouseEvent&)
 {
+    hideReadout();
     if (hovered >= 0)
     {
         hovered = -1;
@@ -480,6 +586,7 @@ void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
     dragging = b;
     if (b >= 0)
     {
+        hideReadout();
         const auto& p = bands[static_cast<size_t> (b)];
         dragStartFreq = p.frequency;
         dragStartGain = p.gainDb;
@@ -492,7 +599,11 @@ void EqCurveEditor::mouseDown (const juce::MouseEvent& e)
 void EqCurveEditor::mouseDrag (const juce::MouseEvent& e)
 {
     if (dragging < 0)
+    {
+        showReadoutAt (e.position); // dragging over empty plot: the readout follows
         return;
+    }
+    hideReadout();
 
     const float fine = e.mods.isShiftDown() ? 0.2f : 1.0f;
     const auto delta = (e.position - dragStartPos) * fine;

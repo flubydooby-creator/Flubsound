@@ -111,6 +111,9 @@ struct AnalyzerTaps
 
     SpscRing<float> pre { kCapacity };
     SpscRing<float> post { kCapacity };
+    // The post tap's side signal (L - R) / 2, written right after `post`
+    // (same block, same length): the analyser's stereo-width view.
+    SpscRing<float> postSide { kCapacity };
 };
 
 // Listening level (docs/11 E32 (c)): HearingGuard's readings for the mix

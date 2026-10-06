@@ -129,6 +129,10 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **Synthwave preset (owner request 2026-10-06):** a new Music preset for synthwave / synth-pop / progressive house
   (30 → 31 presets; demo pair `preset-synthwave`, 61 → 62 pairs). Its golden entry and render-baseline rows are MSVC
   values; a Linux gcc golden run should confirm them. Not heard yet (docs/11 E14 Status).
+- **Analyser optional views (owner request 2026-10-06):** the default Spectrum + EQ look is unchanged; a View menu adds
+  a hover readout (note + cents, levels), Diff (out − in), Sharper lows (8 kHz-decimated long FFT below 300 Hz),
+  Spectrogram, Stereo width (new `AnalyzerTaps::postSide` ring), Freeze and Piano keys, persisted in `ui.analyzer`
+  (docs/06 §6.4.1, docs/12 §8, `tests/app/test_app_analyzer_views.cpp`). Not yet seen on the owner's screen.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order

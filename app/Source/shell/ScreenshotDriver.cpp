@@ -93,7 +93,10 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
                                                 "module-readings", "contour-curve", "onboard-cap",   "settings-diagnostics",
                                                 // docs/11 E32 (c) / E33 / E34 and the batch 5 keys in their cards
                                                 "settings-hearing", "settings-hearing-unknown", "hearing-profile", "hearing-readout",
-                                                "module-keys" };
+                                                "module-keys",
+                                                // the analyser's optional views
+                                                "analyzer-diff", "analyzer-lows", "analyzer-width", "analyzer-keys", "analyzer-spectrogram",
+                                                "analyzer-hover", "analyzer-freeze" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -170,6 +173,7 @@ void ScreenshotDriver::setUpScene()
             store.set (macros[i], macroValues[i]);
 
     controller.setSelectedStrip (focus);
+    sceneStrip = focus;
     if (options.simulatedDevice.isNotEmpty())
         controller.simulateOutputDevice (options.simulatedDevice, controller.getHost().getSampleRate(), 2);
 
@@ -347,6 +351,18 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
     }
     if (main == nullptr)
         return;
+    {
+        // The analyser's optional views: through setOptions, so nothing is saved.
+        auto o = main->getAnalyzerPanel().getOptions();
+        o.difference = o.difference || states.contains ("analyzer-diff");
+        o.sharpLows = o.sharpLows || states.contains ("analyzer-lows");
+        o.width = o.width || states.contains ("analyzer-width");
+        o.pianoKeys = o.pianoKeys || states.contains ("analyzer-keys");
+        o.spectrogram = o.spectrogram || states.contains ("analyzer-spectrogram");
+        main->getAnalyzerPanel().setOptions (o);
+        if (states.contains ("analyzer-freeze"))
+            freezeAtSeconds = options.seconds * 0.4;
+    }
     if (states.contains ("recovery"))
     {
         AppSettings::Recovery recovery;
@@ -428,6 +444,17 @@ void ScreenshotDriver::timerCallback()
         controller.setEnabled (false);
         bypassAtSeconds = 0.0;
     }
+    if (freezeAtSeconds > 0.0 && now - startMs >= freezeAtSeconds * 1000.0)
+    {
+        freezeAtSeconds = 0.0;
+        if (auto* main = dynamic_cast<ui::MainComponent*> (&target))
+        {
+            main->getAnalyzerPanel().freeze();
+            auto& store = controller.getParams (sceneStrip);
+            store.set (eq (6, EqFieldOn), 1.0f);
+            store.set (eq (6, EqFieldGain), 9.0f);
+        }
+    }
 
     const auto wanted = static_cast<int64_t> (options.seconds * sampleRate * 0.9);
     if (now - startMs >= options.seconds * 1000.0 && renderedSamples >= wanted)
@@ -438,6 +465,14 @@ void ScreenshotDriver::finish()
 {
     finished = true;
     stopTimer();
+
+    if (auto* main = dynamic_cast<ui::MainComponent*> (&target); main != nullptr && options.states.contains ("analyzer-hover"))
+    {
+        // As if the mouse rested over 62 Hz, a third of the way down the plot.
+        auto& panel = main->getAnalyzerPanel();
+        const auto plot = panel.getAnalyzer().getPlotArea();
+        panel.getEqEditor().showReadoutAt ({ panel.getAnalyzer().xForFrequency (62.0), plot.getY() + plot.getHeight() * 0.35f });
+    }
 
     auto& shown = settingsView != nullptr ? *settingsView : target;
     const auto image = shown.createComponentSnapshot (shown.getLocalBounds(), true, options.scale);

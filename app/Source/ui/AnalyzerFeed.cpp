@@ -17,12 +17,36 @@ void AnalyzerFeed::pull (flub::AnalyzerTaps& taps)
 {
     drain (taps.pre, Stream::Pre);
     drain (taps.post, Stream::Post);
+    drainSide (taps.postSide);
 }
 
 void AnalyzerFeed::discard (flub::AnalyzerTaps& taps)
 {
     taps.pre.skip (taps.pre.available());
     taps.post.skip (taps.post.available());
+    taps.postSide.skip (taps.postSide.available());
+}
+
+void AnalyzerFeed::drainSide (flub::SpscRing<float>& ring)
+{
+    const size_t available = ring.available();
+    if (sideSink == nullptr)
+    {
+        ring.skip (available);
+        return;
+    }
+    if (available > kMaxBacklog)
+        ring.skip (available - kMaxBacklog / 2);
+
+    for (int guard = 0; guard < 32; ++guard)
+    {
+        const size_t n = ring.pop (scratch.data(), scratch.size());
+        if (n == 0)
+            break;
+        sideSink (scratch.data(), static_cast<int> (n));
+        if (n < scratch.size())
+            break;
+    }
 }
 
 void AnalyzerFeed::drain (flub::SpscRing<float>& ring, Stream stream)

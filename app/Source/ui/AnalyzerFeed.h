@@ -30,7 +30,14 @@ public:
 
     void addSink (Sink sink) { sinks.push_back (std::move (sink)); }
 
-    /** Drains both rings (message thread; the only consumer). */
+    /** The post tap's side signal (L - R) / 2 (the analyser's stereo-width
+        view). Kept apart from the mid sinks above, which see exactly the
+        pre / post mid streams they always did. Without a side sink the side
+        ring is drained and dropped. */
+    using SideSink = std::function<void (const float* samples, int numSamples)>;
+    void setSideSink (SideSink sink) { sideSink = std::move (sink); }
+
+    /** Drains the rings (message thread; the only consumer). */
     void pull (flub::AnalyzerTaps& taps);
 
     /** Discards whatever is queued (strip switch / engine rebuilt). */
@@ -38,8 +45,10 @@ public:
 
 private:
     void drain (flub::SpscRing<float>& ring, Stream stream);
+    void drainSide (flub::SpscRing<float>& ring);
 
     std::vector<Sink> sinks;
+    SideSink sideSink;
     std::vector<float> scratch;
 };
 } // namespace flub::app::ui

@@ -65,6 +65,14 @@
 //   settings-diagnostics
 //                   the PNG shows the Settings dialog's Diagnostics page
 //                   with its Updates section (docs/11 E54) at --size
+//   analyzer-diff, analyzer-lows, analyzer-width, analyzer-keys,
+//   analyzer-spectrogram
+//                   that optional analyser view switched on (combinable, not
+//                   saved to the settings)
+//   analyzer-hover  the hover readout (crosshair, note, levels) at 62 Hz,
+//                   as if the mouse rested there when the PNG is taken
+//   analyzer-freeze the traces frozen at 40 % of the run, then EQ band 7
+//                   (2 kHz) raised by 9 dB so the live trace moves away
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,
@@ -126,6 +134,8 @@ private:
     std::unique_ptr<juce::Component> settingsView; // --state settings-*: what the PNG shows
     double startMs = 0.0, lastMs = 0.0, sampleRate = 48000.0;
     double bypassAtSeconds = 0.0; // --state bypass: when the master Bypass goes on
+    double freezeAtSeconds = 0.0; // --state analyzer-freeze: when the traces are frozen
+    int sceneStrip = 0;
     int64_t renderedSamples = 0;
     bool finished = false;
 

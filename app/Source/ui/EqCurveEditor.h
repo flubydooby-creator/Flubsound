@@ -15,6 +15,11 @@
 //   internal mode bands) are shown as "ghost" markers.
 // Geometry (frequency axis, plot area) comes from the SpectrumAnalyzer this
 // editor is stacked on; the right-hand axis shows EQ gain (+-6 / 12 / 24 dB).
+// * Hover readout: over the plot (not over a node, not while dragging one) a
+//   crosshair and a small box with the frequency, its nearest note and cents
+//   (SpectrumAnalyzer::describeFrequency) and the Out / In levels (and the
+//   difference when that view is on) at that point. The editor owns the
+//   mouse, so the readout lives here; it hides when the mouse leaves.
 #pragma once
 
 #include "SpectrumAnalyzer.h"
@@ -51,6 +56,14 @@ public:
 
     static juce::Colour bandColour (int band);
 
+    /** Hover readout at `pos` (component coordinates; hidden outside the
+        plot). The mouse handlers drive it; public for the screenshot driver. */
+    void showReadoutAt (juce::Point<float> pos);
+    void hideReadout();
+    bool isReadoutVisible() const noexcept { return readoutVisible; }
+    /** The readout's lines for the current position ("" when hidden). */
+    juce::StringArray getReadoutLines() const;
+
     void paint (juce::Graphics& g) override;
     void resized() override;
     void mouseMove (const juce::MouseEvent& e) override;
@@ -79,6 +92,7 @@ private:
     void showBandMenu (int band);
     juce::String describeBand (int band) const;
     void drawBubble (juce::Graphics& g, int band) const;
+    void drawReadout (juce::Graphics& g) const;
     void renderLayer (juce::Graphics& g);
     void invalidate();
 
@@ -103,5 +117,7 @@ private:
     int selected = -1, hovered = -1, dragging = -1;
     float dragStartFreq = 0.0f, dragStartGain = 0.0f;
     juce::Point<float> dragStartPos;
+    juce::Point<float> readoutPos;
+    bool readoutVisible = false;
 };
 } // namespace flub::app::ui

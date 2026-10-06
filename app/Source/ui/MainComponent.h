@@ -129,6 +129,7 @@ public:
     void setRoutingDrawerOpen (bool open);
     bool isRoutingDrawerOpen() const noexcept { return routingDrawer; }
     ModuleRack& getRack() noexcept { return rack; }
+    AnalyzerPanel& getAnalyzerPanel() noexcept { return analyzer; }
     LoudnessPanel& getLoudnessPanel() noexcept { return loudness; }
     RoutingPanel& getRoutingPanel() noexcept { return routing; }
 

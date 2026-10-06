@@ -2513,6 +2513,9 @@ void ProcessingChain::processSegment (const AudioBlock& io, bool contaminated) n
     for (int i = 0; i < n; ++i)
         tapScratch[static_cast<size_t> (i)] = 0.5f * (st.channel (0)[i] + st.channel (1)[i]);
     analyzerTaps.post.push (tapScratch.data(), static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+        tapScratch[static_cast<size_t> (i)] = 0.5f * (st.channel (0)[i] - st.channel (1)[i]);
+    analyzerTaps.postSide.push (tapScratch.data(), static_cast<size_t> (n));
 
     for (int c = 2; c < io.numChannels; ++c)
         std::fill (io.channel (c), io.channel (c) + n, 0.0f);

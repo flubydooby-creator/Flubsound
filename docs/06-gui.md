@@ -559,7 +559,7 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 | Audition mask (`ProcessingChain::setAuditionBypass`) | UI → audio | `ModuleCard` ear via `ModuleRack` → `EngineController::setAuditionBypass` | one atomic bit per module. It forces the module off whatever the preset or macros say, via the slot's click-free crossfade. It is not a parameter |
 | `MeterBus` | audio → UI | `MeterSnapshot::read()` once per frame for the selected strip. `RoutingPanel` reads `outPeakDb` of every strip directly | relaxed atomics written once per block |
 | `MeterBus::resetLoudnessRequest` | UI → audio | click on TRUE PEAK or INTEGR. | atomic flag; the chain `exchange`s it at the next block and resets integrated loudness and the TP hold |
-| `AnalyzerTaps` pre / post | audio → UI | `AnalyzerFeed`, the **only** consumer | SPSC rings of mid `(L+R)/2` samples, 32768 floats each (≈ 0.68 s at 48 kHz); the producer drops samples when a ring is full |
+| `AnalyzerTaps` pre / post / postSide | audio → UI | `AnalyzerFeed`, the **only** consumer | SPSC rings of mid `(L+R)/2` samples (pre, post) and the post side `(L−R)/2` (stereo-width view, §6.4.1), 32768 floats each (≈ 0.68 s at 48 kHz); the producer drops samples when a ring is full |
 | Host atomics | UI → audio | strip gain / mute (routing panel), master ceiling (device advice) | `AudioEngineHost` atomics, applied at the start of each audio block |
 | `EngineController::Listener` | controller → UI | `MainComponent`, `TrayIcon` | callbacks on the message thread for state that cannot be polled cheaply |
 
@@ -630,6 +630,7 @@ flowchart LR
 | — every 4 frames | ≈ 15 Hz | `ModuleRack::updateFromEngine()`: card base / effective state |
 | — every 15 frames | ≈ 4 Hz | `HeaderBar::updateStatus()`: latency, CPU, strip activity dots, preset-modified dot |
 | `SpectrumAnalyzer` FFT | one hop per 1024 new samples (≈ 46.9/s at 48 kHz); at most one per stream per frame | 4096-point FFT |
+| — optional views (§6.4.1) | Sharper lows: one 8192-point FFT per stream per `kHop / decimation` decimated samples; Stereo width: one 4096-point FFT of the side per hop; Spectrogram: one image row per post hop | each only while its view is on |
 | `LevelMeters` numeric readouts | ≥ 0.08 s apart (≈ 12 Hz) | TRUE PEAK and L/R readouts; the bars repaint every frame |
 | `LoudnessPanel` | repaint ≥ 0.05 s apart (≤ 20 Hz), and only when a value changed | readouts and bars |
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
@@ -856,6 +857,10 @@ The macros add staged contributions on top of the preset's base values (`MacroMa
   - caption `SPECTRUM + EQ`;
   - a legend, drawn only if it fits: Input (muted), Output (accent), EQ (text), Dynamic EQ (amber diamond);
   - four "chip" toggles, 46 px each: **In**, **Out**, **Tilt**, **Hold**;
+  - a **View** chip (50 px) left of them that opens the optional-views menu (§6.4.1); it is lit while any of
+    Spectrogram, Sharper lows, Stereo width or Piano keys is on;
+  - **Diff** and **Freeze** chips left of View, each shown only if the caption and the whole legend still fit
+    (at 1280 px Diff fits, Freeze does not; both are always in the View menu);
   - the EQ display-range combo: **±6 / ±12 / ±24 dB**.
 
   The options persist as `ui.analyzer` (§12).
@@ -902,6 +907,65 @@ Above 61.44 kHz (1024 samples × 60 frames/s), for example at 88.2 or 96 kHz, mo
 - With no data yet, the plot reads *"Waiting for audio on this strip"*.
 
 The component is opaque, so 60 Hz repaints never repaint the parent, and it ignores the mouse. **Rate:** paths are rebuilt, and the plot area repainted, only when some display point moved by more than 0.01 dB.
+
+#### 6.4.1 Optional views (owner request 2026-10-06)
+
+All are additions: they are off by default, and with them off the analyser analyses and draws exactly as above
+(no decimation, side analysis or spectrogram rows run while their view is off). They are switched in the **View**
+menu (and the Diff / Freeze chips), persist in `ui.analyzer` (Freeze excepted), and stack: every overlay is drawn in
+both the Spectrum and the Spectrogram view, with the EQ curve, nodes and dynamic-EQ markers on top as always.
+`flub_app_tests` covers each in `tests/app/test_app_analyzer_views.cpp`; the screenshot driver has a state per view
+(`analyzer-diff`, `-lows`, `-width`, `-keys`, `-spectrogram`, `-hover`, `-freeze`).
+
+- **Hover readout.** The `EqCurveEditor` owns the mouse, so it draws the readout: over the plot, and not over a node
+  (a node shows its own bubble) or while dragging one, a vertical crosshair, a faint level line, a dot on the output
+  trace and a tooltip-coloured box with `describeFrequency()`, e.g. `B1 +7c · 62.0 Hz` (nearest equal-tempered note,
+  A4 = 440 Hz, cents rounded; Hz with one decimal below 100 Hz, kHz above 1 kHz), and a second line
+  `Out −8.9 dB   In −11.0 dB` (the shown traces' levels after ballistics, **without** the tilt, i.e. the band level on
+  the analyser's scale) plus `Δ +2.1 dB` while the difference view is on. It hides on mouse exit. With Piano keys on,
+  the hovered note's key is lit in the accent.
+- **What Flubsound changes (Diff).** `differenceDb[i]` = the mean of `post − pre` over the display points within ±6
+  of i (≈ ±1/7 octave), using the ballistic values and skipping points where both are below −100 dB (0 where none
+  qualifies): `SpectrumAnalyzer::computeDifference()`. Drawn against the EQ gain axis on the right (0 dB = no change,
+  same range as the EQ curve) in `Palette::green` with a 4 px glow and a fill to 0 dB. Unlike the EQ curve it shows
+  everything the chain does (dynamics, saturation, Boost, loudness), averaged over the programme.
+- **Sharper lows.** A second analysis per stream of the input decimated to ≈ 8 kHz (factor `round (fs / 8000)`: 6 at
+  48 kHz, 12 at 96 kHz) after a 4th-order Butterworth low-pass at fs_dec / 10 (800 Hz at 48 kHz; ≈ −79 dB where
+  7.7–8.3 kHz would fold into 0–300 Hz, −0.002 dB at 300 Hz). Window 4096 decimated samples (24576 input samples,
+  0.51 s at 48 kHz), Hann, zero-padded to an 8192-point FFT, one hop per `kHop / decimation` decimated samples (the
+  main FFT's update rate). The display points below 300 Hz read its magnitude interpolated between the padded bins
+  (no band averaging), calibrated on the same density scale (`20·log10(4/4096) − 10·log10(1.5) + 10·log10(B1k ·
+  4096 / fs_dec)`); a smoothstep in log frequency crossfades (in dB) from it at 220 Hz to the main analysis at 300 Hz.
+  Ballistics, peak hold and tilt apply unchanged. Measured (`flub_app_tests`, 48 kHz): white noise reads the same on
+  both analyses (60–200 Hz mean −41.15 vs −41.04 dB), two sines 1/6 octave apart around 60 Hz show a 16.4 dB dip
+  between them (the main analysis: one lump, 1.0 dB), and the 1 kHz calibration is untouched. **Scale note:** the
+  display is a density scale (pink noise reads flat, a sine reads its dBFS level only at 1 kHz). A sine reads its
+  level + 10·log10(B1k / resolution bandwidth), and the resolution bandwidth below 220 Hz drops from 1.5 × 11.7 Hz to
+  1.5 × 1.95 Hz, so with Sharper lows on a pure low tone reads +16.0 dB instead of +8.2 dB (55 and 80 Hz sines read
+  within 0.25 dB of that); broadband programme reads the same. Bass notes therefore stand out more in this view.
+- **Stereo width.** `ProcessingChain` also writes the post side `(L − R) / 2` into `AnalyzerTaps::postSide` (same
+  block, right after `post`; a third 32768-float ring, no new audio-thread entry point). `AnalyzerFeed::setSideSink`
+  hands it to `SpectrumAnalyzer::pushSide`; the mid sinks are unchanged, and without a side sink the ring is drained
+  and dropped. While the view is on, the side stream gets the main 4096-point analysis and each point's width is
+  `S / (M + S)` in power from the side and post mid band levels (`widthFromLevels`: 0 mono, 0.5 uncorrelated, 1
+  anti-phase; 0 below −100 dB), smoothed with a 150 ms time constant. It is drawn as a translucent area in the bottom
+  fifth of the plot (above the piano keys and their labels when those are on) with a dashed guide at 0.5 and a
+  `WIDTH` caption, in the other mode's accent (magenta in Music, teal in Gaming).
+- **Spectrogram.** A View option that replaces the traces (not the overlays or the EQ) with a scrolling waterfall:
+  `ui/Spectrogram.*` keeps a 420 × 256 software ARGB image (one column per display point, so it shares the log axis)
+  used as a ring of rows; each post hop writes one row of the analysed levels (tilt included when on) through a
+  256-entry colour table from the well colour through dark accent tints to the accent and, at the top, towards the
+  text colour (range −90…−6 dB). `draw()` blits the ring in two pieces, newest at the top: 256 hops = 5.5 s at
+  48 kHz. Nothing is allocated after construction (the test checks the pixel buffer never changes). The left axis
+  reads `now`, `−2 s`, `−4 s`; decade lines are drawn over the image. A mode or theme change re-tints new rows.
+- **Freeze.** `SpectrumAnalyzer::freeze()` copies the ballistic post trace (and the pre trace if shown) into a
+  reference drawn as dashed lines (post: text colour 62 %, 1.3 px; pre: muted 45 %, 1 px). Pressing again
+  re-captures; Shift+click on the chip or **View › Clear frozen trace** removes it. It survives strip switches and
+  engine rebuilds (`reset()` keeps it) but is not persisted.
+- **Piano keys.** An 11 px keyboard C1–C8 drawn inside the bottom of the plot (the plot never changes size), keys
+  placed with `xForFrequency`: a black key spans its semitone (f·2^(±1/24)) at 62 % height, a white key reaches the
+  centre of a neighbouring black key (else the semitone edge, E–F and B–C), so A and every black key are centred on
+  their frequency; C labels sit above the strip (`getKeyBounds()`).
 
 ### 6.5 `EqCurveEditor` — the interactive EQ curve
 
@@ -1448,7 +1512,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | UI scale | `ui.scalePercent` (0 follow the system, else 75–200) | 0 |
 | Theme | `ui.theme` (`standard` / `high-contrast`) | standard |
 | Main window view ([11 E39](11-enhancement-report.md#e39)) | `ui.view` (`simple` / `advanced`; anything else reads as simple) | simple |
-| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range"`; range clamped 6–24 | `"1,1,1,1,12"` |
+| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram"` (`AnalyzerPanel::Options::toString`); range clamped 6–24; the older 5-field value reads with the new views off | `"1,1,1,1,12,0,0,0,0,0"` |
 | Window position and size | `DocumentWindow::getWindowStateAsString()` | centred 1280 × 820 |
 | Selected strip, master enable | `AppSettings` | 0 (Game), enabled |
 | Strip parameter state (both banks + active bank) | JSON per strip; autosaved within 5 s of a change and at shutdown; during a preset preview the bank as the preview's end will leave it (§6.1a) | — |

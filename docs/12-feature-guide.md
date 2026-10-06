@@ -563,6 +563,19 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 - **Listen for:** a high *LIM* (the limiter working much of the time) with a flat, pumping sound means too much Boost or Loudness for this material.
 - **Demo pairs:** `music-loudness`
 
+### The spectrum analyser and its views
+
+- **What it is:** the SPECTRUM + EQ panel: the input spectrum (grey fill), the output (accent line with a glow), peak hold, the +4.5 dB/octave Tilt and the EQ curve with its nodes and the amber dynamic-EQ markers. That view is the default and is unchanged. The **View** chip adds optional views, all off until you switch them on (remembered between sessions, except Freeze); **Diff** and **Freeze** also have chips when the header has room ([06 §6.4.1](06-gui.md#641-optional-views-owner-request-2026-10-06)).
+  - *Hover readout:* rest the mouse on the plot (not on a node) for a crosshair and a box with the note and cents (*B1 +7c · 62.0 Hz*, A4 = 440 Hz) and the Out / In levels there (without the tilt). Handy to name a boomy note or a resonance.
+  - *What Flubsound changes (Diff):* a green line on the right-hand EQ scale: output minus input per frequency, smoothed. 0 dB = untouched. It includes everything (Boost, macros, dynamics, loudness), not only the EQ you drew, averaged over the music.
+  - *Sharper lows:* below 220–300 Hz a longer analysis (about half a second) separates bass notes that the normal view merges (two notes a whole tone apart at 60 Hz: one lump before, two peaks now). Noise and dense mixes read the same; a single held bass note stands about 8 dB taller than in the normal view, because the finer analysis concentrates a tone into a narrower slice.
+  - *Spectrogram:* the output as a scrolling picture, newest at the top, about 5.5 s of history; brighter = louder. The EQ and the other overlays stay on top.
+  - *Stereo width:* a translucent band at the bottom of the plot: how much of each frequency is side (L − R) rather than centre. Flat at the bottom = mono there (bass usually is), the dashed line = as wide as two unrelated channels, the top = out of phase.
+  - *Freeze:* keeps the current output (and input) trace as a dashed reference; press again to re-capture, Shift+click or View › Clear to remove. It stays when you switch strips.
+  - *Piano keys:* a small keyboard C1–C8 along the bottom, lined up with the frequency axis; the hovered note's key lights up.
+- **Check it:** play a sine (an online tone generator) at 55 Hz: the readout names *A1 +0c*. Turn Diff on and raise an EQ band by 6 dB: the green line rises about 6 dB around that band (less if Boost's limiter takes some back). Freeze, change a macro, and compare the live line with the dashed one. Pan a mono song hard to one side in its player (or use a mono / stereo test track): Stereo width jumps from the bottom to about the dashed line.
+- **Limits:** the analyser shows the strip's own output before the strip gain and the master limiter. Sharper lows reacts about half a second later than the normal view in the bass.
+
 ### The governor chip, budgets and brightness
 
 - **What it is:** *Safety governor OK*, or amber *Governor NN% · limiter / distortion / dynamics / harmonics / brightness · holding / recovering*; its tooltip gives the readings against their budgets; the loudness panel's PROTECTION section at Normal / Strict shows the audible residual, the output PLR and the presence / harsh / air lifts against theirs ([E06](11-enhancement-report.md#e06), [E38](11-enhancement-report.md#e38)).

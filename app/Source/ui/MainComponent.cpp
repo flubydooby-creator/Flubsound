@@ -89,6 +89,7 @@ MainComponent::MainComponent (EngineController& c)
                       if (post)
                           history.push (samples, n);
                   });
+    feed.setSideSink ([this] (const float* samples, int n) { analyzer.getAnalyzer().pushSide (samples, n); });
 
     stripSignature = currentStripSignature();
     loadUiPreferences();
@@ -138,15 +139,8 @@ void MainComponent::loadUiPreferences()
     lookAndFeel().setMeterPalette (props.getIntValue (kPrefMeterPalette, 0) == 1 ? MeterPalette::ColourBlindSafe : MeterPalette::Standard);
 
     AnalyzerPanel::Options o;
-    const auto tokens = juce::StringArray::fromTokens (props.getValue (kPrefAnalyzer, "1,1,1,1,12"), ",", {});
-    if (tokens.size() == 5)
-    {
-        o.showPre = tokens[0] != "0";
-        o.showPost = tokens[1] != "0";
-        o.tilt = tokens[2] != "0";
-        o.peakHold = tokens[3] != "0";
-        o.eqRangeDb = static_cast<float> (juce::jlimit (6, 24, tokens[4].getIntValue()));
-    }
+    if (! AnalyzerPanel::Options::fromString (props.getValue (kPrefAnalyzer, o.toString()), o))
+        o = {};
     analyzer.setOptions (o);
 }
 
@@ -154,9 +148,7 @@ void MainComponent::saveUiPreferences()
 {
     auto& props = controller.getSettings().getPropertiesFile();
     props.setValue (kPrefMeterPalette, lookAndFeel().getMeterPalette() == MeterPalette::ColourBlindSafe ? 1 : 0);
-    const auto& o = analyzer.getOptions();
-    props.setValue (kPrefAnalyzer, juce::String (o.showPre ? 1 : 0) + "," + juce::String (o.showPost ? 1 : 0) + "," + juce::String (o.tilt ? 1 : 0) + ","
-                                       + juce::String (o.peakHold ? 1 : 0) + "," + juce::String (juce::roundToInt (o.eqRangeDb)));
+    props.setValue (kPrefAnalyzer, analyzer.getOptions().toString());
 }
 
 // =============================================================================
