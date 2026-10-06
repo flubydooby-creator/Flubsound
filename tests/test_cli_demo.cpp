@@ -207,8 +207,8 @@ const std::vector<std::string> kFirstPairs {
 const std::vector<std::string> kChainPairs {
     "music-punch-boost-100", "gaming-impact-boost-100", "attack-low", "attack-high", "relative-presence", "crossfeed-meier",
     "crossfeed-mono-safe", "enhanced-renderer", "virt-front-back", "preset-rock-metal", "preset-orchestral-film",
-    "preset-acoustic-singer-songwriter", "preset-rnb-vocal", "preset-electronic-ambient", "preset-late-night", "preset-podcast-voice",
-    "preset-voice-chat", "noise-gate", "eq-bell", "dynamic-eq", "bass-boost", "bass-harmonics", "bass-tighten", "saturation",
+    "preset-acoustic-singer-songwriter", "preset-rnb-vocal", "preset-electronic-ambient", "preset-synthwave", "preset-late-night",
+    "preset-podcast-voice", "preset-voice-chat", "noise-gate", "eq-bell", "dynamic-eq", "bass-boost", "bass-harmonics", "bass-tighten", "saturation",
     "tape-grit", "compressor", "auto-preamp", "latency-profile", "protection-normal"
 };
 const std::vector<std::string> kEnginePairs { "smart-macros", "onboard-cap",  "safe-speaker-cap", "device-correction",

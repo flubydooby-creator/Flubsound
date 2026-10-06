@@ -792,7 +792,7 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
          "Headphones only. Both sides use the Enhanced renderer; after doubles its front / back colour. The steps behind "
          "you should sound more clearly behind, at the price of a more coloured sound in front and behind.");
 
-    // The five genre presets (docs/11 E14 step 3) and the voice / night presets.
+    // The five genre presets (docs/11 E14 step 3), Synthwave and the voice / night presets.
     struct PresetPair
     {
         const char *slug, *file, *name, *programme;
@@ -814,6 +814,10 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
           "a softer top above 8 kHz." },
         { "preset-electronic-ambient", "music-electronic-ambient", "Electronic & Ambient", "music", false,
           "A deeper sub (+2.3 dB at 31 Hz), the rest of the spectrum within 0.3 dB, and a wider, more spacious pad." },
+        { "preset-synthwave", "music-synthwave", "Synthwave", "music", false,
+          "A deeper sub (+2.2 dB at 31 Hz on pink) with the kick's 125 Hz left alone, a warmer body, the leads and "
+          "arpeggios forward around 3 kHz (here 2 / 4 kHz +1.1 / +1.9 dB) and a wider pad. The kick should stay tight, not "
+          "boomy, and the top bright but not harsh." },
         { "preset-late-night", "music-late-night-low-volume", "Late Night Low Volume", "music", true,
           "Not level-matched (a level feature): Late Night aims at about -20 LUFS with the quiet parts lifted and the loud "
           "ones held down. Play it quietly: every part of the song should stay audible without the drums jumping out." },

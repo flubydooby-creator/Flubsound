@@ -126,6 +126,9 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **E04 step 5:** Quality sets Clarity's 1 ms look-ahead (Quality 1352 → 1400 samples at 48 kHz; the plug-in's PDC
   follows). The six Quality presets' rows in `tests/golden/preset-render-baseline.json` were re-based from an MSVC
   before → after diff; a Linux gcc re-record should confirm them.
+- **Synthwave preset (owner request 2026-10-06):** a new Music preset for synthwave / synth-pop / progressive house
+  (30 → 31 presets; demo pair `preset-synthwave`, 61 → 62 pairs). Its golden entry and render-baseline rows are MSVC
+  values; a Linux gcc golden run should confirm them. Not heard yet (docs/11 E14 Status).
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order
@@ -139,7 +142,7 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - Then Warmth, Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking.
    - Also the OSD over a fullscreen game with PresentMon, and Tournament mode with an anti-cheat game.
 3. **Owner decisions.** These are listed in docs/11 §5.4, in the "Status of Phase 3 batch 4" and "Status of Phase 3 batch 5" paragraphs.
-   - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 30 presets;
+   - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets (Synthwave added locally);
      Late Night and Podcast are re-voiced.
    - Should Enhanced become the default virtualiser renderer?
    - Night Mode attack: 3 → 1 ms?

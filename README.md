@@ -58,7 +58,7 @@ To report a problem, use *Settings › Diagnostics › Export diagnostics*: one 
 
 ## What each control does (one-screen summary)
 
-Every control, with its numbers, what to listen for and how to compare it fairly, is in the [feature and listening guide](docs/12-feature-guide.md). `flubsound-cli demo --out demo` renders a loudness-matched before / after pair for each one (61 pairs; `--input my-song.wav` for your own music), and the guide ends with a checklist to fill in by ear.
+Every control, with its numbers, what to listen for and how to compare it fairly, is in the [feature and listening guide](docs/12-feature-guide.md). `flubsound-cli demo --out demo` renders a loudness-matched before / after pair for each one (62 pairs; `--input my-song.wav` for your own music), and the guide ends with a checklist to fill in by ear.
 
 | Control | What you should hear |
 |---|---|

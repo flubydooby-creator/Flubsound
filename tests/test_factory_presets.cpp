@@ -1247,9 +1247,10 @@ TEST_CASE ("Factory presets: the genre presets keep the voicing their descriptio
         REQUIRE (p.intent.has_value());
         CHECK (p.intent->lraLossMaxLu.value_or (99.0) <= 1.0);
     }
-    // Acoustic & Singer-Songwriter and R&B & Vocal: Warmth's tone tilt (not
-    // the Tape grit), with the Tube colour it picks for an untouched saturator.
-    for (const char* file : { "music-acoustic-singer-songwriter.json", "music-rnb-vocal.json" })
+    // Acoustic & Singer-Songwriter, R&B & Vocal and Synthwave: Warmth's tone
+    // tilt (not the Tape grit), with the Tube colour it picks for an untouched
+    // saturator.
+    for (const char* file : { "music-acoustic-singer-songwriter.json", "music-rnb-vocal.json", "music-synthwave.json" })
     {
         preset::Preset p;
         const auto eff = effective (file, p);
@@ -1257,10 +1258,10 @@ TEST_CASE ("Factory presets: the genre presets keep the voicing their descriptio
         CHECK (at (eff, WarmthTapeGrit) < 0.5f);
         CHECK (std::lround (at (eff, SatType)) == 1); // Tube
     }
-    // None of the five adds fixed drive or raises the ceiling (the factory
+    // None of the six adds fixed drive or raises the ceiling (the factory
     // policy above), and none drives the maximizer from Boost or Loudness.
     for (const char* file : { "music-rock-metal.json", "music-orchestral-film.json", "music-acoustic-singer-songwriter.json",
-                              "music-rnb-vocal.json", "music-electronic-ambient.json" })
+                              "music-rnb-vocal.json", "music-electronic-ambient.json", "music-synthwave.json" })
     {
         preset::Preset p;
         const auto eff = effective (file, p);

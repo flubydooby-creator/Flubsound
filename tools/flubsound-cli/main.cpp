@@ -321,7 +321,7 @@ processing chain, one pair per feature, and index.txt, which says per pair
 how both sides were set (`process --set` options), what changed in numbers
 and what to listen for.
 
-  Pairs (61): every macro of both modes 0 -> 100 % (Music: Punch, Width,
+  Pairs (62): every macro of both modes 0 -> 100 % (Music: Punch, Width,
   Clarity, Loudness, Warmth; Gaming: Footsteps, Positional, Impact, Detail,
   Voice & Score), Punch and Impact at Boost 100, Boost 0 -> 50 and 0 -> 100
   in both modes, Smoothness, the shaper's Attack Low / High, Relative

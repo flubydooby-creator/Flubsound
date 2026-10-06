@@ -1,0 +1,46 @@
+{
+  "format": "flubsound-preset",
+  "version": 1,
+  "uuid": "88ca0d59-61e8-484e-b97d-07ead7e52cec",
+  "name": "Synthwave",
+  "category": "Music",
+  "author": "Flubsound (Flubes & Claude)",
+  "description": "For synth-led music: synthwave, retrowave and outrun, synth-pop, and progressive house and electro in the deadmau5 vein. A solid sub lift (about +2 dB at 31 Hz and +1.3 dB at 63 Hz, adaptive with headroom protection, mono below 120 Hz) that leaves the kick's 125 Hz punch where it was, Warmth at 30 % for an analogue Tube body, synth leads and plucky arpeggios brought forward around 3 kHz (on pink noise 2-4 kHz sit about 1.3 dB above the mids) with a touch of air, and pads widened above 220 Hz with a little space; Mono Safety pulls the width back if the image would collapse. Punch is kept low and the glue light, so build-ups and drops keep their dynamics.",
+  "tags": ["synthwave", "retrowave", "synth-pop", "progressive house", "electro", "synth", "wide"],
+  "params": {
+    "boost": 0.3,
+    "macro.1": 0.05,
+    "macro.2": 0.3,
+    "macro.5": 0.3,
+    "bass.boost": 5.5,
+    "bass.freq": 55,
+    "bass.protect": -8,
+    "bass.monoBelow": 120,
+    "clarity.presence": 0.2,
+    "clarity.presenceFreq": 3000,
+    "clarity.presenceMode": "Relative",
+    "clarity.air": 0.15,
+    "spatial.width": 1.1,
+    "spatial.lowCut": 220,
+    "spatial.space": 0.15,
+    "spatial.minCorrelation": 0.15,
+    "max.glue": 0.15,
+    "eq.6.freq": 3000,
+    "eq.6.gain": 2.5,
+    "eq.6.q": 1.2,
+    "eq.9.type": "High Shelf",
+    "eq.9.freq": 12000,
+    "eq.9.gain": 1,
+    "eq.9.q": 0.7,
+    "bass.subsonicOrder": "12 dB/oct"
+  },
+  "intent": {
+    "tone": {
+      "pink": { "db": [2.2, 1.3, 0.0, -0.5, -0.8, -0.6, 0.5, 0.7, -0.6, -0.6], "toleranceDb": 1.0 },
+      "music": { "db": [0.6, 0.5, 0.0, -0.6, -1.5, -1.5, -1.0, -0.2, -1.3, -1.2], "toleranceDb": 1.5 }
+    },
+    "loudnessOffsetLu": { "pink": 1.3, "music": 1.9, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.8,
+    "thdnMaxDb": -77
+  }
+}

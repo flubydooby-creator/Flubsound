@@ -14,7 +14,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
 ### The demo pack (`flubsound-cli demo`)
 
-- **What it is:** before / after WAV pairs for every control in this guide, rendered through the same processing chain the app runs, with an `index.txt` that gives each pair's settings, its loudness, its band deltas (as `flubsound-cli analyze --bands` reads the two files), the chain's readouts and what to listen for. There are 61 pairs on built-in programmes: music (drums, bass line, chord pad, a sung lead), the music mastered loud, speech, speech over a hiss floor, a game scene (ambience, footsteps walking left to right, gunshots, two explosions, a voice line, a quiet score) and the same scene as a 7.1 bed. The chat pairs use a game scene with a teammate's voice on a Chat strip. `--input song.wav` renders the pairs on your own file instead (the virtualiser pairs keep the 7.1 scene for a stereo file, and the chat pairs keep their built-in scene).
+- **What it is:** before / after WAV pairs for every control in this guide, rendered through the same processing chain the app runs, with an `index.txt` that gives each pair's settings, its loudness, its band deltas (as `flubsound-cli analyze --bands` reads the two files), the chain's readouts and what to listen for. There are 62 pairs on built-in programmes: music (drums, bass line, chord pad, a sung lead), the music mastered loud, speech, speech over a hiss floor, a game scene (ambience, footsteps walking left to right, gunshots, two explosions, a voice line, a quiet score) and the same scene as a 7.1 bed. The chat pairs use a game scene with a teammate's voice on a Chat strip. `--input song.wav` renders the pairs on your own file instead (the virtualiser pairs keep the 7.1 scene for a stereo file, and the chat pairs keep their built-in scene).
 - **How to run it:** `flubsound-cli demo --out demo` (10 s programmes, 24-bit WAV; about 30 s on two cores). Add `--input my-song.wav` for your own music, `--seconds 20` for longer programmes, `--format f32` for float files. Every CI run of the Linux job also uploads it as the `Flubsound-demo-pack` artifact.
 - **Pairs that set the app's own settings** (Smart macros, the headset enhancement cap, the safe speaker cap, a headphone correction, the per-ear profile, the hearing guard, the chat duck, ChatMix) are rendered through the app's mix engine: the strip, a Chat strip where the pair has one, the master limiter at −1 dBTP and the hearing guard. Their index lines are marked `+ app:`.
 - **Listen for:** play both files of a pair in turn in any player, at the same volume. Use headphones for the crossfeed, virtualiser, per-ear and positional pairs. Read the pair's *Listen for* line first. Then close your eyes and swap without knowing which is which.
@@ -167,7 +167,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
 ### The factory presets
 
-- **What it is:** 30 presets: 18 Music (including Podcast & Voice, Late Night Low Volume and Voice Chat), 9 Gaming and 3 Device. Every one states its intent (a tone envelope per octave band, a loudness offset, an LRA bound, a THD+N limit and, in Gaming, a step / bed contrast), and a test checks each against renders ([E14](11-enhancement-report.md#e14)). The numbers below are from the intent blocks (tone on pink re the loudness change) unless a demo pair is named.
+- **What it is:** 31 presets: 19 Music (including Podcast & Voice, Late Night Low Volume and Voice Chat), 9 Gaming and 3 Device. Every one states its intent (a tone envelope per octave band, a loudness offset, an LRA bound, a THD+N limit and, in Gaming, a step / bed contrast), and a test checks each against renders ([E14](11-enhancement-report.md#e14)). The numbers below are from the intent blocks (tone on pink re the loudness change) unless a demo pair is named.
 
   | Preset | In one line |
   |---|---|
@@ -186,6 +186,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
   | Acoustic & Singer-Songwriter | Warmth 35 %: 125 / 250 Hz +0.8 dB, 8 kHz −0.5 dB, a light tube colour |
   | R&B & Vocal | 31.5 / 63 Hz +1.4 / +1.1 dB, 2 kHz +0.6 dB, 8 / 16 kHz −0.8 / −0.6 dB |
   | Electronic & Ambient | 31.5 Hz +2.3 dB, the rest within 0.3 dB, width 1.15, space 0.2 |
+  | Synthwave | synthwave, synth-pop, progressive house / electro: 31.5 / 63 Hz +2.2 / +1.3 dB with 125 Hz (the kick) at 0.0, Warmth 30 % (Tube), 2 / 4 kHz +0.5 / +0.7 dB over 500 Hz–1 kHz at −0.8 / −0.6 dB (the leads forward), width 1.1 above 220 Hz, space 0.15; +1.3 LU on pink, LRA loss 0.3 LU |
   | Podcast & Voice, Late Night Low Volume, Voice Chat | levellers: see [§5](#5-night-and-voice) |
   | Competitive FPS | footsteps lifted as they rise out of the ambience: step / bed contrast +5.4 dB |
   | Battle Royale | the same for large maps: contrast +5.0 dB |
@@ -200,10 +201,10 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
   | Earbuds | sub-bass weight small drivers lose, dynamic taming of harsh peaks |
   | Bluetooth Headphones | −2 dBTP ceiling for lossy codecs, a gentle clipper |
 
-- **Demo pack (defaults → preset, matched):** Rock & Metal 250 Hz −0.6, 2–16 kHz +1.3 … +2.3 dB; Orchestral & Film 2 / 4 kHz −1.0 / −1.4 dB; Acoustic 250 Hz +0.3, 8 kHz −0.4 dB; R&B 2 / 4 kHz +0.7 / +1.0 dB; Electronic 31.5 / 63 Hz +0.2, 4–16 kHz +0.3 … +0.5 dB.
+- **Demo pack (defaults → preset, matched):** Rock & Metal 250 Hz −0.6, 2–16 kHz +1.3 … +2.3 dB; Orchestral & Film 2 / 4 kHz −1.0 / −1.4 dB; Acoustic 250 Hz +0.3, 8 kHz −0.4 dB; R&B 2 / 4 kHz +0.7 / +1.0 dB; Electronic 31.5 / 63 Hz +0.2, 4–16 kHz +0.3 … +0.5 dB; Synthwave 2 / 4 / 8 / 16 kHz +1.1 / +1.9 / +0.7 / +0.4 dB, 125 Hz–1 kHz −0.2 … −0.3 dB (its sub shelf is held back by the headroom protection on this bass-heavy programme: 31.5 / 63 Hz +0.0 / +0.1 dB).
 - **Listen for:** each preset against the flat defaults, matched: the table's tone, not more level.
-- **Demo pairs:** `preset-rock-metal`, `preset-orchestral-film`, `preset-acoustic-singer-songwriter`, `preset-rnb-vocal`, `preset-electronic-ambient`, `preset-late-night`, `preset-podcast-voice`, `preset-voice-chat`
-- **Limits (owner decisions and the panel):** the five genre presets are conservative (0.6–1.0 dB from their nearest preset on pink) and no listener has heard them; their voicing is the listening panel's call (E14 step 4). Classical & Jazz loses 1.42 LU of LRA on a −10.5 LUFS master (a pinned KnownGap).
+- **Demo pairs:** `preset-rock-metal`, `preset-orchestral-film`, `preset-acoustic-singer-songwriter`, `preset-rnb-vocal`, `preset-electronic-ambient`, `preset-synthwave`, `preset-late-night`, `preset-podcast-voice`, `preset-voice-chat`
+- **Limits (owner decisions and the panel):** the five genre presets are conservative (0.6–1.0 dB from their nearest preset on pink) and no listener has heard them; their voicing is the listening panel's call (E14 step 4). Synthwave (owner request 2026-10-06) has not been heard yet either; it is the first factory preset with Relative presence. Classical & Jazz loses 1.42 LU of LRA on a −10.5 LUFS master (a pinned KnownGap).
 
 ---
 
@@ -782,16 +783,17 @@ One row per feature, for the owner to fill in and return. Play the pair (in the 
 | 52 | Acoustic & Singer-Songwriter | `preset-acoustic-singer-songwriter` | closer, rounder voice | | |
 | 53 | R&B & Vocal | `preset-rnb-vocal` | smooth deep lows, voice forward | | |
 | 54 | Electronic & Ambient | `preset-electronic-ambient` | deeper sub, wider pad | | |
-| 55 | ChatMix (level) | `chatmix` | game quieter, voice unchanged | | |
-| 56 | Chat duck (level) | `chat-duck` | voice easier to follow while it talks | | |
-| 57 | Headset enhancement cap | `onboard-cap` | smaller cue lift (the headset adds its own) | | |
-| 58 | Safe speaker bass cap | `safe-speaker-cap` | much less low end | | |
-| 59 | Headphone correction | `device-correction` | the example curve's tone | | |
-| 60 | Listening-level cap (level) | `hearing-cap` | loud passages glide down, tone unchanged | | |
-| 61 | Personal profile | `per-ear` | right ear brighter | | |
-| 62 | Doubling fix (app, Windows) | — | the captured app heard once, no phasing | | confirmed 2026-09-29 |
-| 63 | Headset matched (app) | — | Settings › Audio names the Turtle Beach series | | |
-| 64 | Re-plug / sleep (app) | — | the dongle in another port keeps its settings | | |
+| 55 | Synthwave | `preset-synthwave` | deeper sub with a tight kick, leads forward, wider pad, no harshness | | |
+| 56 | ChatMix (level) | `chatmix` | game quieter, voice unchanged | | |
+| 57 | Chat duck (level) | `chat-duck` | voice easier to follow while it talks | | |
+| 58 | Headset enhancement cap | `onboard-cap` | smaller cue lift (the headset adds its own) | | |
+| 59 | Safe speaker bass cap | `safe-speaker-cap` | much less low end | | |
+| 60 | Headphone correction | `device-correction` | the example curve's tone | | |
+| 61 | Listening-level cap (level) | `hearing-cap` | loud passages glide down, tone unchanged | | |
+| 62 | Personal profile | `per-ear` | right ear brighter | | |
+| 63 | Doubling fix (app, Windows) | — | the captured app heard once, no phasing | | confirmed 2026-09-29 |
+| 64 | Headset matched (app) | — | Settings › Audio names the Turtle Beach series | | |
+| 65 | Re-plug / sleep (app) | — | the dongle in another port keeps its settings | | |
 
 ---
 
