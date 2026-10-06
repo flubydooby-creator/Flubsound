@@ -66,6 +66,11 @@ public:
     const Options& getOptions() const noexcept { return options; }
     /** Called when the user changed a display option (for persistence). */
     std::function<void (const Options&)> onOptionsChanged;
+    /** The View menu's "Open in a window" item (MainComponent opens the
+        visualiser window, vis/VisualiserWindow.h). */
+    std::function<void()> onPopOutRequested;
+    /** Why that window cannot open now (Tournament mode), "" when it can. */
+    std::function<juce::String()> popOutBlockedReason;
 
     /** Freeze (re-)captures the traces; clear removes them (not persisted). */
     void freeze();

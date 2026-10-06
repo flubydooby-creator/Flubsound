@@ -15,6 +15,7 @@ constexpr int kBesideMinWidth = 640; // narrower panels replace the spectrum ins
 constexpr int kMenuVisualiser = 100; // + registry index; kMenuVisualiser - 1 = the spectrum
 constexpr int kMenuStrip = 200;      // + registry index; kMenuStrip - 1 = no strip
 constexpr int kMenuBeside = 300;
+constexpr int kMenuPopOut = 400;
 
 struct LegendEntry
 {
@@ -265,6 +266,14 @@ void AnalyzerPanel::showViewMenu()
         if (list[i].canBeStrip)
             strips.addItem (kMenuStrip + static_cast<int> (i), list[i].menuName, true, options.strip == list[i].id);
     menu.addSubMenu ("Strip under the plot", strips);
+    if (onPopOutRequested != nullptr)
+    {
+        const auto blocked = popOutBlockedReason != nullptr ? popOutBlockedReason() : juce::String();
+        menu.addSeparator();
+        menu.addItem (kMenuPopOut, blocked.isEmpty() ? juce::String ("Open in a window (full screen, second monitor)...")
+                                                     : "Open in a window (" + blocked + ")",
+                      blocked.isEmpty());
+    }
 
     juce::Component::SafePointer<AnalyzerPanel> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&viewButton),
@@ -276,6 +285,12 @@ void AnalyzerPanel::showViewMenu()
                             auto& o = self.options;
                             if (self.applyVisualiserMenuItem (result))
                                 return;
+                            if (result == kMenuPopOut)
+                            {
+                                if (self.onPopOutRequested != nullptr)
+                                    self.onPopOutRequested();
+                                return;
+                            }
                             switch (result)
                             {
                                 case 1: o.spectrogram = ! o.spectrogram; break;

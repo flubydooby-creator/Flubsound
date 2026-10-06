@@ -140,6 +140,11 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   history. The post side tap became `AnalyzerTaps::postStereo` (aligned mid / side pairs). Adding a view = new files +
   one registry line (docs/06 §6.4.2, docs/12 §8, `tests/app/test_app_visualisers.cpp`, screenshot states `vis-<id>`).
   Not yet seen on the owner's screen.
+- **Eye-candy visualisers (owner request 2026-10-06):** a 3D waterfall (`waterfall-3d`: 6 s of the output spectrum as a
+  hidden-line landscape) and a radial spectrum (`radial-spectrum`: mirrored ring with a bass pulse and the momentary
+  LUFS), plus a visualiser window (View › *Open in a window*: any main view or the spectrum / spectrogram, F11 / Esc
+  borderless full screen, second monitor, persisted in `ui.visualiserWindow`, off in Tournament mode) (docs/06 §6.4.2,
+  docs/12 §8, `tests/app/test_app_visualiser_window.cpp`). Not yet seen on the owner's screen or at 60 fps on real music.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order

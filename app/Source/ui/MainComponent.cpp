@@ -11,6 +11,7 @@ namespace
 {
 constexpr const char* kPrefMeterPalette = "ui.meterPalette";
 constexpr const char* kPrefAnalyzer = "ui.analyzer";
+constexpr const char* kPrefVisualiserWindow = "ui.visualiserWindow";
 } // namespace
 
 MainComponent::MainComponent (EngineController& c)
@@ -81,6 +82,8 @@ MainComponent::MainComponent (EngineController& c)
     rack.onEqBandSelected = [this] (int band) { analyzer.getEqEditor().selectBand (band); };
     analyzer.getEqEditor().onBandSelected = [this] (int band) { rack.setSelectedEqBand (band); };
     analyzer.onOptionsChanged = [this] (const AnalyzerPanel::Options&) { saveUiPreferences(); };
+    analyzer.onPopOutRequested = [this] { openVisualiserWindow(); };
+    analyzer.popOutBlockedReason = [this] { return controller.isTournamentActive() ? juce::String ("off in Tournament mode") : juce::String(); };
 
     feed.addSink ([this] (AnalyzerFeed::Stream stream, const float* samples, int n)
                   {
@@ -109,6 +112,7 @@ MainComponent::MainComponent (EngineController& c)
 MainComponent::~MainComponent()
 {
     abx.reset(); // puts the bank back that played before a running blind test
+    closeVisualiserWindow();
     // The settings and export windows talk to the controller: close them
     // while that exists (closing the export window aborts a running export).
     if (settingsWindow != nullptr)
@@ -153,6 +157,66 @@ void MainComponent::saveUiPreferences()
     auto& props = controller.getSettings().getPropertiesFile();
     props.setValue (kPrefMeterPalette, lookAndFeel().getMeterPalette() == MeterPalette::ColourBlindSafe ? 1 : 0);
     props.setValue (kPrefAnalyzer, analyzer.getOptions().toString());
+}
+
+// =============================================================================
+// Visualiser window (docs/06 §6.4.2)
+// =============================================================================
+void MainComponent::openVisualiserWindow (const juce::String& viewId)
+{
+    if (controller.isTournamentActive())
+        return;
+    if (visualiserWindow != nullptr)
+    {
+        if (viewId.isNotEmpty())
+            visualiserWindow->setView (viewId);
+        visualiserWindow->toFront (true);
+        return;
+    }
+    vis::VisualiserWindow::State state;
+    if (! vis::VisualiserWindow::State::fromString (controller.getSettings().getPropertiesFile().getValue (kPrefVisualiserWindow), state))
+        state.view = analyzer.getMainVisualiser() != nullptr ? analyzer.getOptions().visualiser : juce::String (vis::VisualiserWindow::kDefaultView);
+    if (viewId.isNotEmpty())
+        state.view = viewId;
+
+    visualiserWindow = std::make_unique<vis::VisualiserWindow> (state.view);
+    auto& window = *visualiserWindow;
+    window.setLookAndFeel (&lookAndFeel());
+    // The window's own view is fed with the panel's views (the host's extra view).
+    analyzer.getVisualisers().setExtra (window.getView());
+    window.onViewChanged = [this] (vis::Visualiser* v) { analyzer.getVisualisers().setExtra (v); };
+    window.onCloseRequested = [this]
+    {
+        // Deleted asynchronously: this runs inside the window's own button handler.
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<MainComponent> (this)]
+                                         {
+                                             if (safe != nullptr)
+                                                 safe->closeVisualiserWindow();
+                                         });
+    };
+    window.applyState (state);
+    window.onStateChanged = [this] { saveVisualiserWindowState(); };
+    window.setVisible (true);
+    window.toFront (true);
+    saveVisualiserWindowState();
+}
+
+void MainComponent::closeVisualiserWindow()
+{
+    if (visualiserWindow == nullptr)
+        return;
+    saveVisualiserWindowState();
+    analyzer.getVisualisers().setExtra (nullptr);
+    visualiserWindow->onStateChanged = nullptr;
+    visualiserWindow->onViewChanged = nullptr;
+    visualiserWindow->setLookAndFeel (nullptr);
+    visualiserWindow.reset();
+}
+
+void MainComponent::saveVisualiserWindowState()
+{
+    if (visualiserWindow != nullptr)
+        controller.getSettings().getPropertiesFile().setValue (kPrefVisualiserWindow, visualiserWindow->getState().toString());
 }
 
 // =============================================================================
@@ -258,13 +322,17 @@ void MainComponent::frame (double timestampSeconds)
     // analyser's FFTs and the rack (both hidden) and feeds its own meter.
     const bool isSimple = view == View::Simple;
     feed.pull (chain.taps());
+    // The visualiser window reads the analyser too: it runs while the window is open.
+    const bool analyse = ! isSimple || visualiserWindow != nullptr;
+    if (analyse)
+        analyzer.getAnalyzer().advance (dt);
     if (! isSimple)
     {
-        analyzer.getAnalyzer().advance (dt);
         analyzer.getEqEditor().refresh();
         analyzer.getEqEditor().setDynamicEqState (snapshot.dynEqGainDb, mode);
-        analyzer.advanceVisualisers (snapshot, dt, sampleRate);
     }
+    if (analyse)
+        analyzer.advanceVisualisers (snapshot, dt, sampleRate);
     history.setLoudness (snapshot.shortTermLufs);
     history.advance();
     levels.update (snapshot, dt);
@@ -279,7 +347,11 @@ void MainComponent::frame (double timestampSeconds)
     if (frameCounter % 4 == 0 && ! isSimple)
         rack.updateFromEngine();
     if (frameCounter % 15 == 0)
+    {
         header.updateStatus();
+        if (visualiserWindow != nullptr && controller.isTournamentActive())
+            closeVisualiserWindow(); // docs/11 E55: no extra windows while Tournament mode is on
+    }
 }
 
 void MainComponent::resetAnalysis()
@@ -307,6 +379,8 @@ void MainComponent::applyMode (ModeValue newMode)
     boost.setMode (mode);
     header.refresh();
     sendLookAndFeelChange();
+    if (visualiserWindow != nullptr)
+        visualiserWindow->sendLookAndFeelChange();
     repaint();
 }
 
@@ -351,6 +425,8 @@ void MainComponent::engineControllerChanged (EngineController::Change change)
             break;
         case Change::Device:
         case Change::Settings:
+            if (controller.isTournamentActive())
+                closeVisualiserWindow(); // docs/11 E55
             header.updateStatus();
             routing.refreshRouting();
             refreshDeviceBanner();

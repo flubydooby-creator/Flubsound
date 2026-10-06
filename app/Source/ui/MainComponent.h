@@ -87,6 +87,7 @@
 #include "SimpleStatusPanel.h"
 #include "WaveformHistory.h"
 #include "engine/EngineController.h"
+#include "vis/VisualiserWindow.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
@@ -129,6 +130,15 @@ public:
     void setRoutingDrawerOpen (bool open);
     bool isRoutingDrawerOpen() const noexcept { return routingDrawer; }
     ModuleRack& getRack() noexcept { return rack; }
+
+    /** The visualiser window (docs/06 §6.4.2): opens it (or brings it to the
+        front) with `viewId`, else the view it showed last time, else the
+        panel's view; restores its bounds, monitor and full screen from
+        `ui.visualiserWindow`. Not while Tournament mode is on (docs/11 E55),
+        which also closes an open one. */
+    void openVisualiserWindow (const juce::String& viewId = {});
+    void closeVisualiserWindow();
+    vis::VisualiserWindow* getVisualiserWindow() noexcept { return visualiserWindow.get(); }
     AnalyzerPanel& getAnalyzerPanel() noexcept { return analyzer; }
     LoudnessPanel& getLoudnessPanel() noexcept { return loudness; }
     RoutingPanel& getRoutingPanel() noexcept { return routing; }
@@ -157,6 +167,7 @@ private:
     juce::String currentStripSignature() const;
     void loadUiPreferences();
     void saveUiPreferences();
+    void saveVisualiserWindowState();
     FlubLookAndFeel& lookAndFeel();
 
     EngineController& controller;
@@ -176,6 +187,7 @@ private:
     SimpleStatusPanel simple;
     View view = View::Advanced;
     std::unique_ptr<AbxPanel> abx;
+    std::unique_ptr<vis::VisualiserWindow> visualiserWindow;
     bool routingDrawer = false;
     std::unique_ptr<juce::TooltipWindow> tooltips; // none in headless screenshot runs
     bool screenshotRun = false;                    // headless --screenshot: exact size, no window limits

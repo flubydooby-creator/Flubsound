@@ -16,8 +16,10 @@ using namespace flub::param;
 
 bool ScreenshotDriver::isVisualiserState (const juce::String& state)
 {
-    if (state == "vis-beside")
+    if (state == "vis-beside" || state == "vis-popout-full")
         return true;
+    if (state.startsWith ("vis-popout-"))
+        return ui::vis::VisualiserWindow::findChoice (state.fromFirstOccurrenceOf ("vis-popout-", false, false)) != nullptr;
     if (state.startsWith ("vis-strip-"))
     {
         const auto* d = ui::vis::findDescriptor (state.fromFirstOccurrenceOf ("vis-strip-", false, false));
@@ -379,9 +381,14 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         o.pianoKeys = o.pianoKeys || states.contains ("analyzer-keys");
         o.spectrogram = o.spectrogram || states.contains ("analyzer-spectrogram");
         // Visualisers: vis-<id> (main view), vis-strip-<id>, vis-beside.
+        juce::String popOut;
         for (const auto& state : states)
         {
-            if (state == "vis-beside")
+            if (state == "vis-popout-full")
+                continue;
+            if (state.startsWith ("vis-popout-"))
+                popOut = state.fromFirstOccurrenceOf ("vis-popout-", false, false);
+            else if (state == "vis-beside")
                 o.beside = true;
             else if (state.startsWith ("vis-strip-"))
                 o.strip = state.fromFirstOccurrenceOf ("vis-strip-", false, false);
@@ -389,6 +396,23 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
                 o.visualiser = state.fromFirstOccurrenceOf ("vis-", false, false);
         }
         main->getAnalyzerPanel().setOptions (o);
+        if (popOut.isNotEmpty())
+        {
+            main->openVisualiserWindow (popOut);
+            if (auto* window = main->getVisualiserWindow())
+            {
+                if (states.contains ("vis-popout-full"))
+                {
+                    window->setFullScreenMode (true);
+                    window->setBounds (window->getBounds().withSize (options.width, options.height));
+                }
+                else
+                {
+                    window->setContentComponentSize (options.width, options.height);
+                }
+                popOutShot = true;
+            }
+        }
         if (states.contains ("analyzer-freeze"))
             freezeAtSeconds = options.seconds * 0.4;
     }
@@ -503,7 +527,10 @@ void ScreenshotDriver::finish()
         panel.getEqEditor().showReadoutAt ({ panel.getAnalyzer().xForFrequency (62.0), plot.getY() + plot.getHeight() * 0.35f });
     }
 
-    auto& shown = settingsView != nullptr ? *settingsView : target;
+    juce::Component* popOut = nullptr;
+    if (auto* main = dynamic_cast<ui::MainComponent*> (&target); main != nullptr && popOutShot && main->getVisualiserWindow() != nullptr)
+        popOut = main->getVisualiserWindow()->getContentComponent();
+    auto& shown = popOut != nullptr ? *popOut : (settingsView != nullptr ? *settingsView : target);
     const auto image = shown.createComponentSnapshot (shown.getLocalBounds(), true, options.scale);
     bool ok = false;
 

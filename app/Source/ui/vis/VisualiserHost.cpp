@@ -63,6 +63,13 @@ bool VisualiserHost::isFed (const juce::String& id) const noexcept
     return i >= 0 && fed (static_cast<size_t> (i));
 }
 
+void VisualiserHost::setExtra (Visualiser* view)
+{
+    extra = view;
+    if (extra != nullptr)
+        extra->setSampleRate (sampleRate);
+}
+
 void VisualiserHost::setSampleRate (double newSampleRate)
 {
     if (newSampleRate <= 0.0 || newSampleRate == sampleRate)
@@ -71,6 +78,8 @@ void VisualiserHost::setSampleRate (double newSampleRate)
     for (auto& v : views)
         if (v != nullptr)
             v->setSampleRate (sampleRate);
+    if (extra != nullptr)
+        extra->setSampleRate (sampleRate);
 }
 
 void VisualiserHost::reset()
@@ -78,6 +87,8 @@ void VisualiserHost::reset()
     for (auto& v : views)
         if (v != nullptr)
             v->reset();
+    if (extra != nullptr)
+        extra->reset();
 }
 
 void VisualiserHost::pushPre (const float* mid, int numSamples)
@@ -85,6 +96,8 @@ void VisualiserHost::pushPre (const float* mid, int numSamples)
     for (size_t i = 0; i < views.size(); ++i)
         if (fed (i))
             views[i]->pushPre (mid, numSamples);
+    if (extra != nullptr)
+        extra->pushPre (mid, numSamples);
 }
 
 void VisualiserHost::pushPost (const float* mid, const float* side, int numSamples)
@@ -92,6 +105,8 @@ void VisualiserHost::pushPost (const float* mid, const float* side, int numSampl
     for (size_t i = 0; i < views.size(); ++i)
         if (fed (i))
             views[i]->pushPost (mid, side, numSamples);
+    if (extra != nullptr)
+        extra->pushPost (mid, side, numSamples);
 }
 
 void VisualiserHost::advance (const FrameContext& frame)
@@ -99,5 +114,7 @@ void VisualiserHost::advance (const FrameContext& frame)
     for (size_t i = 0; i < views.size(); ++i)
         if (fed (i))
             views[i]->advance (frame);
+    if (extra != nullptr)
+        extra->advance (frame);
 }
 } // namespace flub::app::ui::vis

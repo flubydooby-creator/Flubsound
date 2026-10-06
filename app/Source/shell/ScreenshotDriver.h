@@ -78,6 +78,10 @@
 //                   spectrum, e.g. vis-goniometer); vis-beside puts it beside
 //                   the spectrum; vis-strip-<id> adds that strip view (e.g.
 //                   vis-strip-correlation). Not saved to the settings.
+//   vis-popout-<id> the PNG shows the visualiser window (docs/06 §6.4.2) at
+//                   --size with that view (spectrum, spectrogram or a main
+//                   visualiser id); with vis-popout-full as well, in its
+//                   full-screen layout (header hidden) at --size
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,
@@ -116,7 +120,8 @@ public:
     /** Parses the screenshot arguments; returns false if --screenshot is absent
         (error stays empty) or malformed (error set). */
     static bool parseCommandLine (const juce::StringArray& args, Options& options, juce::String& error);
-    /** True for "vis-beside", "vis-<id>" and "vis-strip-<id>" with a registered id usable there. */
+    /** True for "vis-beside", "vis-<id>", "vis-strip-<id>" with a registered id
+        usable there, "vis-popout-<id>" with a visualiser window view and "vis-popout-full". */
     static bool isVisualiserState (const juce::String& state);
 
     using Completion = std::function<void (bool ok, const juce::String& message)>;
@@ -145,6 +150,7 @@ private:
     int sceneStrip = 0;
     int64_t renderedSamples = 0;
     bool finished = false;
+    bool popOutShot = false; // --state vis-popout-<id>: the PNG shows the visualiser window
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ScreenshotDriver)
 };

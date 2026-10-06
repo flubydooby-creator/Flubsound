@@ -4,7 +4,9 @@
 #include "GainReductionTrace.h"
 #include "Goniometer.h"
 #include "LoudnessHistory.h"
+#include "RadialSpectrum.h"
 #include "StereoField.h"
+#include "Waterfall3D.h"
 #include "WaveformView.h"
 
 namespace flub::app::ui::vis
@@ -33,6 +35,14 @@ const std::vector<Descriptor>& registry()
           "How much the compressor, limiter, glue, bass protection and master limiter turn the sound down over "
           "the last 15 seconds.",
           true, false, &make<GainReductionTrace> },
+        { "waterfall-3d", "3D waterfall (spectrum landscape)", "3D WATERFALL",
+          "The output spectrum of the last 6 seconds as a landscape: low frequencies left, high right, louder is "
+          "higher; the live spectrum is the glowing front ridge and older ones recede towards the horizon.",
+          true, false, &make<Waterfall3D> },
+        { "radial-spectrum", "Radial spectrum", "RADIAL SPECTRUM",
+          "The output spectrum around a ring, mirrored left and right: lows at the top, highs at the bottom, louder "
+          "reaches further out. The centre swells on kicks and shows the momentary loudness.",
+          true, false, &make<RadialSpectrum> },
         { "correlation", "Correlation meter", "CORRELATION",
           "Phase correlation of the output's left and right channels: +1 mono, 0 unrelated (wide), below 0 "
           "(red) partly out of phase. The marker holds the lowest value of the last 3 seconds.",

@@ -32,6 +32,11 @@ public:
     void setSelected (const juce::String& mainId, const juce::String& stripId);
     /** True if the view with this id receives this frame's data. */
     bool isFed (const juce::String& id) const noexcept;
+    /** A view the host does not own (the visualiser window's, VisualiserWindow)
+        that gets the same data every frame as the selected views (nullptr:
+        none). Its owner clears it before deleting the view. */
+    void setExtra (Visualiser* view);
+    Visualiser* getExtra() const noexcept { return extra; }
 
     void setSampleRate (double sampleRate);
     void reset();
@@ -43,6 +48,7 @@ private:
     bool fed (size_t index) const noexcept;
 
     std::vector<std::unique_ptr<Visualiser>> views; // registry order; null until created
+    Visualiser* extra = nullptr;
     int mainIndex = -1, stripIndex = -1;
     double sampleRate = 48000.0;
 };
