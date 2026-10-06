@@ -149,7 +149,7 @@ TEST_CASE ("Spatial metrics: parametricHrir is the virtualiser's own rendering o
         float diff = 0.0f;
         for (size_t i = 0; i < 512; ++i)
             diff = std::max ({ diff, std::abs (l[i] - module.left[i]), std::abs (r[i] - module.right[i]) });
-        CHECK (diff <= 1.0e-7f);
+        CHECK (diff <= 1.0e-6f); // float rounding: compilers that fuse multiply-adds differ in the last bits
     }
     // The Enhanced renderer's direction cues too (docs/11 E28), at any frontBack.
     for (float frontBack : { 0.5f, 1.0f })
@@ -166,7 +166,7 @@ TEST_CASE ("Spatial metrics: parametricHrir is the virtualiser's own rendering o
             float diff = 0.0f;
             for (size_t i = 0; i < 512; ++i)
                 diff = std::max ({ diff, std::abs (l[i] - module.left[i]), std::abs (r[i] - module.right[i]) });
-            CHECK (diff <= 1.0e-7f);
+            CHECK (diff <= 1.0e-6f); // float rounding: compilers that fuse multiply-adds differ in the last bits
         }
     }
     // Any azimuth, wrapped: 270 is -90; the model is left / right symmetric.

@@ -288,10 +288,11 @@ void MacroMap::apply (const float* base, float* effective, float governorScale, 
             const float g = e.governed ? governorScale : 1.0f;
             // Smart macros (docs/11 E34): the content's multiplier on what
             // the row adds; none (nullptr) leaves the sum as it was, bit for bit.
-            if (modulation != nullptr)
-                effective[e.paramId] += e.amount * c * g * modulation->forParam (e.paramId);
-            else
-                effective[e.paramId] += e.amount * c * g;
+            // The row's amount in its own statement: a compiler that contracts
+            // a * b + c into one fused multiply-add (Apple Clang on arm64) then
+            // rounds both paths alike, so the identity stays bit for bit.
+            const float add = e.amount * c * g;
+            effective[e.paramId] += modulation != nullptr ? add * modulation->forParam (e.paramId) : add;
         }
 
     // Override rows: a choice for a parameter the user or preset left alone.

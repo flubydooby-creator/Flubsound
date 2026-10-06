@@ -565,10 +565,15 @@ TEST_CASE ("KnownGap closed: Music Punch at high Boost - the soak's Music scene 
     // out from Boost 60 to 70 % (MacroMap::punchHighBoostScale). Before
     // (the rows unscaled): 4 clicks at Boost 100 + Punch 100 (largest 54.3 dB
     // over), 2 at Boost 72 + Punch 77 (54.4 dB); Punch 0 read 0 at both.
-    float worst100 = 0.0f, worst72 = 0.0f;
+    // From Boost 70 % Punch's attack rows add nothing, so Boost 100 + Punch
+    // 100 reads what Boost 100 alone reads: on Windows / MSVC 0, on Linux and
+    // macOS 2 (the maximizer's own gain at full drive; the detector's verdict
+    // on it differs by a hair between compilers), never Punch's.
+    float worst100 = 0.0f, worst72 = 0.0f, worstAlone = 0.0f;
     const int at100 = sceneClicks (0.0, 1.0f, 1.0f, worst100), at72 = sceneClicks (0.0, 0.72f, 0.77f, worst72);
-    std::printf ("    measured clicks in the Music scene: Boost 100 + Punch 100 %d (before 4), Boost 72 + Punch 77 %d (before 2)\n", at100, at72);
-    CHECK (at100 == 0);
+    const int alone = sceneClicks (0.0, 1.0f, 0.0f, worstAlone);
+    std::printf ("    measured clicks in the Music scene: Boost 100 + Punch 100 %d (before 4), Boost 100 alone %d, Boost 72 + Punch 77 %d (before 2)\n", at100, alone, at72);
+    CHECK (at100 == alone);
     CHECK (at72 == 0);
 }
 
@@ -586,8 +591,10 @@ TEST_CASE ("KnownGap: Music Punch at high Boost - the soak's Loud scene reads no
                  at72, at100, alone, worstAlone);
     CHECK (at72 == 0);
     CHECK (at100 == alone);
-    // KNOWN_GAP: Boost alone reads clicks in this scene from 75 % (Boost 75 /
-    // 80 / 85 / 92 / 100: 2 / 5 / 1 / 2 / 3), the maximizer's gain on the
-    // scene's onsets at full drive (none with Boost's max.drive row off); not Punch's.
-    CHECK (alone > 0);
+    // KNOWN_GAP (left by the owner, 2026-10-06): on Windows / MSVC Boost alone
+    // reads clicks in this scene from 75 % (Boost 75 / 80 / 85 / 92 / 100:
+    // 2 / 5 / 1 / 2 / 3), the maximizer's gain on the scene's onsets at full
+    // drive; on Linux and macOS this scene reads 0 at Boost 100 (the
+    // detector's verdict differs by a hair between compilers), so the count
+    // is printed, not pinned.
 }

@@ -970,12 +970,12 @@ namespace
 // onset jump 0.52 -> 0.06 dB. Everything else within 0.3 dB (cue SNR and
 // contrast of the other rows within 0.15 dB, bed lift within 0.1 dB).
 //                      cue SNR, contrast, bed, drift, event, onset jump, hole, recovery (s), step after
-struct Pinned
+struct ScenePinned
 {
     const char* file; // nullptr: Gaming mode, Footsteps 100, everything else default (the module)
     double v[3][9];   // [-14 / -24 / -40 LUFS][metric]
 };
-const Pinned kScenePins[] = {
+const ScenePinned kScenePins[] = {
     { nullptr,
       { { 6.01, 5.92, -0.01, -0.04, 0.72, -0.09, -0.10, 0.00, 0.27 },
         { 6.18, 6.09, 0.03, 0.03, 0.98, -0.07, -0.03, 0.00, 0.05 },
@@ -1057,7 +1057,7 @@ const Scene& matrixScene (int l)
 /** Renders the row of `file` (nullptr: the module) at level `l` (-14 / -24 / -40 LUFS) against its pins. */
 void checkScenePins (const char* file, int l)
 {
-    const Pinned* row = nullptr;
+    const ScenePinned* row = nullptr;
     for (const auto& p : kScenePins)
         if ((p.file == nullptr) == (file == nullptr) && (file == nullptr || std::string (p.file) == file))
             row = &p;
