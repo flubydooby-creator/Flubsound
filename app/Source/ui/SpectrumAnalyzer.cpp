@@ -461,10 +461,60 @@ void SpectrumAnalyzer::advance (double dtSeconds)
         rowWritten = true;
     }
 
+    // ---- Piano keys: the playing notes light their keys ----
+    bool keysChanged = false;
+    if (keysOn && (moved || keysGlowing))
+    {
+        std::array<float, kNumKeys> noteDb {}, target {};
+        for (int k = 0; k < kNumKeys; ++k)
+            noteDb[static_cast<size_t> (k)] = streams[1].displayDb[pointIndex (midiFrequency (kKeysLowMidi + k))];
+        keyActivity (noteDb.data(), kNumKeys, target.data());
+        const auto fall = static_cast<float> (std::exp (-std::max (0.0, dtSeconds) / kKeyGlowReleaseS));
+        keysGlowing = false;
+        for (size_t k = 0; k < keyGlow.size(); ++k)
+        {
+            const float before = keyGlow[k];
+            keyGlow[k] = std::max (target[k], before * fall);
+            if (keyGlow[k] < 0.01f)
+                keyGlow[k] = 0.0f;
+            keysGlowing = keysGlowing || keyGlow[k] > 0.0f;
+            keysChanged = keysChanged || std::abs (keyGlow[k] - before) > 0.005f;
+        }
+    }
+
     if (moved)
         rebuildPaths();
-    if (moved || rowWritten)
+    if (moved || rowWritten || keysChanged)
         repaint (plot.expanded (2.0f).getSmallestIntegerContainer());
+}
+
+void SpectrumAnalyzer::keyActivity (const float* noteDb, int count, float* activity) noexcept
+{
+    float loudest = -1000.0f;
+    for (int i = 0; i < count; ++i)
+        loudest = std::max (loudest, noteDb[i]);
+    for (int i = 0; i < count; ++i)
+    {
+        // The notes 2 - 4 semitones either side: the neighbours a 1/6-octave
+        // band does not share with this note.
+        double sum = 0.0;
+        int n = 0;
+        for (int d : { -4, -3, -2, 2, 3, 4 })
+            if (i + d >= 0 && i + d < count)
+            {
+                sum += noteDb[i + d];
+                ++n;
+            }
+        const float around = n > 0 ? static_cast<float> (sum / n) : noteDb[i];
+        const float stand = std::clamp ((noteDb[i] - around - kKeyLitFromDb) / (kKeyLitFullDb - kKeyLitFromDb), 0.0f, 1.0f);
+        const float inRange = std::clamp ((noteDb[i] - (loudest - kKeyLitRangeDb)) / 10.0f, 0.0f, 1.0f);
+        activity[i] = noteDb[i] > kKeyLitFloorDb ? stand * inRange : 0.0f;
+    }
+}
+
+float SpectrumAnalyzer::getKeyGlow (int midi) const noexcept
+{
+    return midi >= kKeysLowMidi && midi <= kKeysHighMidi ? keyGlow[static_cast<size_t> (midi - kKeysLowMidi)] : 0.0f;
 }
 
 // =============================================================================
@@ -619,6 +669,8 @@ void SpectrumAnalyzer::setPianoKeysEnabled (bool shouldShow)
     if (keysOn == shouldShow)
         return;
     keysOn = shouldShow;
+    keyGlow.fill (0.0f);
+    keysGlowing = false;
     rebuildPaths(); // the width view sits on the keys
     repaint();
 }
@@ -976,6 +1028,19 @@ void SpectrumAnalyzer::paintKeys (juce::Graphics& g, juce::Colour accent) const
         lit = getKeyBounds (m);
         litBlack = isBlackKey (m);
     }
+    // The playing notes' keys glow (white keys under the separators, black
+    // keys over their own fill), then the hovered key on top.
+    const auto glowKeys = [&] (bool black)
+    {
+        for (int m = kKeysLowMidi; m <= kKeysHighMidi; ++m)
+            if (isBlackKey (m) == black)
+                if (const float glow = getKeyGlow (m); glow > 0.0f)
+                {
+                    g.setColour (accent.withAlpha (0.15f + 0.65f * glow));
+                    g.fillRect (getKeyBounds (m));
+                }
+    };
+    glowKeys (false);
     if (! lit.isEmpty() && ! litBlack)
     {
         g.setColour (accent.withAlpha (0.9f));
@@ -984,6 +1049,7 @@ void SpectrumAnalyzer::paintKeys (juce::Graphics& g, juce::Colour accent) const
     g.setColour (Palette::well);
     g.fillPath (keySeparators);
     g.fillPath (blackKeys);
+    glowKeys (true);
     if (! lit.isEmpty() && litBlack)
     {
         g.setColour (accent.withAlpha (0.9f));

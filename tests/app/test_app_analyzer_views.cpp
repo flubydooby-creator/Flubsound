@@ -14,6 +14,7 @@
 #include "flub/engine/MeterBus.h"
 #include "flub/engine/Parameters.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -448,6 +449,51 @@ TEST_CASE ("App: piano keys line up with the frequency axis and leave the plot a
     }
     CHECK (a.getKeyBounds (23).isEmpty());
     CHECK (a.getKeyBounds (109).isEmpty());
+}
+
+TEST_CASE ("App: piano keys light the notes that are playing and fade when they stop")
+{
+    // The pure rule: a note 12 dB over a flat bed lights fully, its
+    // neighbours and the bed do not; nothing under the floor lights.
+    {
+        std::array<float, ui::SpectrumAnalyzer::kNumKeys> db {}, act {};
+        db.fill (-40.0f);
+        db[21] = -28.0f; // A2
+        ui::SpectrumAnalyzer::keyActivity (db.data(), ui::SpectrumAnalyzer::kNumKeys, act.data());
+        CHECK_NEAR (act[21], 1.0f, 1.0e-6f);
+        CHECK (act[19] == 0.0f);
+        CHECK (act[23] == 0.0f);
+        CHECK (act[60] == 0.0f);
+        db.fill (-95.0f);
+        db[21] = -83.0f;
+        ui::SpectrumAnalyzer::keyActivity (db.data(), ui::SpectrumAnalyzer::kNumKeys, act.data());
+        CHECK (act[21] == 0.0f);
+    }
+    // Through the analyser: A4 and E5 played together light their keys, C5
+    // between them stays dark; 1 s of silence lets the glow fade out.
+    ui::SpectrumAnalyzer a;
+    a.setSampleRate (48000.0);
+    a.setPianoKeysEnabled (true);
+    for (int f = 0; f < 30; ++f)
+    {
+        const auto out = tones ({ 440.0, 659.255 }, 0.05f, 1024, 48000.0, static_cast<int64_t> (f) * 1024);
+        a.push (true, out.data(), 1024);
+        a.advance (1024.0 / 48000.0);
+    }
+    CHECK_GE (a.getKeyGlow (69), 0.5f); // A4
+    CHECK_GE (a.getKeyGlow (76), 0.5f); // E5
+    CHECK_LE (a.getKeyGlow (72), 0.05f); // C5
+    CHECK_LE (a.getKeyGlow (45), 0.05f); // A2: nothing there
+    const std::vector<float> silence (1024, 0.0f);
+    for (int f = 0; f < 47; ++f)
+    {
+        a.push (true, silence.data(), 1024);
+        a.advance (1024.0 / 48000.0);
+    }
+    CHECK (a.getKeyGlow (69) == 0.0f);
+    // Off: nothing glows.
+    a.setPianoKeysEnabled (false);
+    CHECK (a.getKeyGlow (76) == 0.0f);
 }
 
 TEST_CASE ("App: analyser options persist the new views and read the older format")

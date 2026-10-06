@@ -572,7 +572,7 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
   - *Spectrogram:* the output as a scrolling picture, newest at the top, about 5.5 s of history; brighter = louder. The EQ and the other overlays stay on top.
   - *Stereo width:* a translucent band at the bottom of the plot: how much of each frequency is side (L − R) rather than centre. Flat at the bottom = mono there (bass usually is), the dashed line = as wide as two unrelated channels, the top = out of phase.
   - *Freeze:* keeps the current output (and input) trace as a dashed reference; press again to re-capture, Shift+click or View › Clear to remove. It stays when you switch strips.
-  - *Piano keys:* a small keyboard C1–C8 along the bottom, lined up with the frequency axis; the hovered note's key lights up.
+  - *Piano keys:* a small keyboard C1–C8 along the bottom, lined up with the frequency axis; the hovered note's key lights up, and the keys of the notes that are playing glow (a note that stands out over its neighbours; the glow fades over 0.15 s when it stops).
 - **Check it:** play a sine (an online tone generator) at 55 Hz: the readout names *A1 +0c*. Turn Diff on and raise an EQ band by 6 dB: the green line rises about 6 dB around that band (less if Boost's limiter takes some back). Freeze, change a macro, and compare the live line with the dashed one. Pan a mono song hard to one side in its player (or use a mono / stereo test track): Stereo width jumps from the bottom to about the dashed line.
 - **Demo pairs:** none (a display; it has no sound of its own)
 - **Limits:** the analyser shows the strip's own output before the strip gain and the master limiter. Sharper lows reacts about half a second later than the normal view in the bass.

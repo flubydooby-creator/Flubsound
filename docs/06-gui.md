@@ -966,6 +966,9 @@ both the Spectrum and the Spectrogram view, with the EQ curve, nodes and dynamic
   placed with `xForFrequency`: a black key spans its semitone (f·2^(±1/24)) at 62 % height, a white key reaches the
   centre of a neighbouring black key (else the semitone edge, E–F and B–C), so A and every black key are centred on
   their frequency; C labels sit above the strip (`getKeyBounds()`).
+  Playing notes light their keys (owner request): `keyActivity()` reads the output's displayed level at each
+  note and lights a key 3 → 9 dB over the notes 2–4 semitones either side, within 30 dB of the loudest note and over
+  −80 dB; the glow fades with a 0.15 s time constant (`getKeyGlow()`).
 
 ### 6.5 `EqCurveEditor` — the interactive EQ curve
 

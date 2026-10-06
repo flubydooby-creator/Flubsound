@@ -87,6 +87,12 @@ public:
     // Piano keys: height of the strip at the bottom of the plot; lowest / highest C (MIDI).
     static constexpr float kKeysHeight = 11.0f;
     static constexpr int kKeysLowMidi = 24, kKeysHighMidi = 108; // C1 .. C8
+    static constexpr int kNumKeys = kKeysHighMidi - kKeysLowMidi + 1;
+    // Playing notes light their keys: a note stands kKeyLitFromDb .. kKeyLitFullDb over
+    // the notes 2 - 4 semitones either side, within kKeyLitRangeDb of the loudest
+    // note and over kKeyLitFloorDb; the glow fades over kKeyGlowReleaseS.
+    static constexpr float kKeyLitFromDb = 3.0f, kKeyLitFullDb = 9.0f, kKeyLitRangeDb = 30.0f, kKeyLitFloorDb = -80.0f;
+    static constexpr double kKeyGlowReleaseS = 0.15;
 
     SpectrumAnalyzer();
 
@@ -126,6 +132,11 @@ public:
     /** Nearest equal-tempered note (A4 = 440 Hz) and the offset in cents,
         e.g. 55.4 Hz -> "A1 +13c"; "" outside 8 Hz .. 30 kHz. */
     static juce::String noteName (double hz);
+    /** Piano keys: how lit each of `count` consecutive semitones is (0..1)
+        from their levels (dB): see kKeyLitFromDb. */
+    static void keyActivity (const float* noteDb, int count, float* activity) noexcept;
+    /** The glow of MIDI note `midi`'s key (0..1; 0 outside C1 .. C8). */
+    float getKeyGlow (int midi) const noexcept;
     /** "55.4 Hz", "440 Hz", "1.25 kHz", "12.5 kHz". */
     static juce::String frequencyText (double hz);
     /** The readout's first line: "A1 +3c · 55.4 Hz". */
@@ -254,6 +265,8 @@ private:
     bool gridForSpectrogram = false;
     juce::Path preLine, preFill, postLine, postFill, peakLine, diffLine, diffFill, widthFill, widthLine, frozenPreDashes, frozenPostDashes;
     juce::Path whiteKeys, blackKeys, keySeparators;
+    std::array<float, kNumKeys> keyGlow {};
+    bool keysGlowing = false;
     bool anyData = false;
 };
 } // namespace flub::app::ui
