@@ -1,6 +1,9 @@
 #include "AnalyzerPanel.h"
 
 #include "Theme.h"
+#include "vis/VisualiserRegistry.h"
+
+#include <cmath>
 
 namespace flub::app::ui
 {
@@ -8,6 +11,10 @@ namespace
 {
 constexpr const char* kCaption = "SPECTRUM  +  EQ";
 constexpr int kChipWidth = 46, kChipGap = 5;
+constexpr int kBesideMinWidth = 640; // narrower panels replace the spectrum instead
+constexpr int kMenuVisualiser = 100; // + registry index; kMenuVisualiser - 1 = the spectrum
+constexpr int kMenuStrip = 200;      // + registry index; kMenuStrip - 1 = no strip
+constexpr int kMenuBeside = 300;
 
 struct LegendEntry
 {
@@ -24,13 +31,14 @@ juce::String AnalyzerPanel::Options::toString() const
 {
     const auto b = [] (bool v) { return juce::String (v ? 1 : 0); };
     return b (showPre) + "," + b (showPost) + "," + b (tilt) + "," + b (peakHold) + "," + juce::String (juce::roundToInt (eqRangeDb)) + ","
-           + b (difference) + "," + b (sharpLows) + "," + b (width) + "," + b (pianoKeys) + "," + b (spectrogram);
+           + b (difference) + "," + b (sharpLows) + "," + b (width) + "," + b (pianoKeys) + "," + b (spectrogram) + "," + visualiser + ","
+           + strip + "," + b (beside);
 }
 
 bool AnalyzerPanel::Options::fromString (const juce::String& text, Options& o)
 {
     const auto tokens = juce::StringArray::fromTokens (text, ",", {});
-    if (tokens.size() != 5 && tokens.size() != 10)
+    if (tokens.size() != 5 && tokens.size() != 10 && tokens.size() != 13)
         return false;
     o = Options {};
     o.showPre = tokens[0] != "0";
@@ -38,7 +46,7 @@ bool AnalyzerPanel::Options::fromString (const juce::String& text, Options& o)
     o.tilt = tokens[2] != "0";
     o.peakHold = tokens[3] != "0";
     o.eqRangeDb = static_cast<float> (juce::jlimit (6, 24, tokens[4].getIntValue()));
-    if (tokens.size() == 10)
+    if (tokens.size() >= 10)
     {
         o.difference = tokens[5] == "1";
         o.sharpLows = tokens[6] == "1";
@@ -46,12 +54,21 @@ bool AnalyzerPanel::Options::fromString (const juce::String& text, Options& o)
         o.pianoKeys = tokens[8] == "1";
         o.spectrogram = tokens[9] == "1";
     }
+    if (tokens.size() == 13)
+    {
+        // Ids of views this build does not have (a newer version wrote them) read as the default.
+        if (const auto* d = vis::findDescriptor (tokens[10].trim()); d != nullptr && d->canBeMain)
+            o.visualiser = d->id;
+        if (const auto* d = vis::findDescriptor (tokens[11].trim()); d != nullptr && d->canBeStrip)
+            o.strip = d->id;
+        o.beside = tokens[12] == "1";
+    }
     return true;
 }
 
 // =============================================================================
 AnalyzerPanel::AnalyzerPanel (EqCurveEditor::StoreProvider storeProvider)
-    : eqEditor (analyzer, std::move (storeProvider))
+    : eqEditor (analyzer, storeProvider), stores (std::move (storeProvider))
 {
     setTitle ("Spectrum and EQ");
     setDescription ("Spectrum analyser with the editable parametric EQ curve of the selected strip");
@@ -79,7 +96,8 @@ AnalyzerPanel::AnalyzerPanel (EqCurveEditor::StoreProvider storeProvider)
 
     Style::set (viewButton, "chip");
     Style::describe (viewButton, "Analyser views",
-                     "More views: spectrogram, what Flubsound changes, sharper lows, stereo width, piano keys, freeze");
+                     "More views: spectrogram, what Flubsound changes, sharper lows, stereo width, piano keys, freeze, "
+                     "and visualisers (goniometer, stereo field, loudness, waveform, gain reduction, correlation)");
     viewButton.onClick = [this] { showViewMenu(); };
     addAndMakeVisible (viewButton);
 
@@ -147,7 +165,65 @@ void AnalyzerPanel::applyOptions()
     analyzer.setPianoKeysEnabled (options.pianoKeys);
     analyzer.setSpectrogramEnabled (options.spectrogram);
     eqEditor.setRangeDb (static_cast<float> (range));
-    repaint (headerArea);
+
+    // Visualisers: an id that is unknown or registered for the other place shows nothing.
+    const auto* mainDesc = vis::findDescriptor (options.visualiser);
+    const auto* stripDesc = vis::findDescriptor (options.strip);
+    auto* newMain = mainDesc != nullptr && mainDesc->canBeMain ? visualisers.get (mainDesc->id) : nullptr;
+    auto* newStrip = stripDesc != nullptr && stripDesc->canBeStrip ? visualisers.get (stripDesc->id) : nullptr;
+    for (auto* v : { newMain, newStrip })
+        if (v != nullptr && v->getParentComponent() != this)
+            addChildComponent (*v);
+    for (auto* old : { mainView, stripView })
+        if (old != nullptr && old != newMain && old != newStrip)
+            old->setVisible (false);
+    mainView = newMain;
+    stripView = newStrip;
+    visualisers.setSelected (mainView != nullptr ? juce::String (mainDesc->id) : juce::String(),
+                             stripView != nullptr ? juce::String (stripDesc->id) : juce::String());
+    if (mainView != nullptr || stripView != nullptr)
+        viewButton.setToggleState (true, juce::dontSendNotification);
+    resized();
+    repaint();
+}
+
+bool AnalyzerPanel::isSpectrumReplaced() const noexcept
+{
+    return mainView != nullptr && ! analyzer.isVisible();
+}
+
+float AnalyzerPanel::loudnessTarget (const flub::param::ParameterStore& store, juce::String& name)
+{
+    using namespace flub::param;
+    if (store.get (MaximizerOn) > 0.5f && store.get (MaxAutoDrive) > 0.5f)
+    {
+        name = "Maximizer target";
+        return store.get (MaxTargetLufs);
+    }
+    if (store.get (AutoLevelOn) > 0.5f)
+    {
+        name = "Auto level target (input)";
+        return store.get (AutoLevelTargetLufs);
+    }
+    name = {};
+    return std::nanf ("");
+}
+
+void AnalyzerPanel::advanceVisualisers (const MeterSnapshot& meters, double dtSeconds, double sampleRate)
+{
+    visualisers.setSampleRate (sampleRate);
+    vis::FrameContext frame { meters, dtSeconds, sampleRate, &analyzer };
+    if (const auto* store = stores != nullptr ? stores() : nullptr)
+        frame.targetLufs = loudnessTarget (*store, frame.targetName);
+    visualisers.advance (frame);
+}
+
+juce::String AnalyzerPanel::caption() const
+{
+    if (isSpectrumReplaced())
+        if (const auto* d = vis::findDescriptor (options.visualiser))
+            return d->caption;
+    return kCaption;
 }
 
 void AnalyzerPanel::freeze()
@@ -175,6 +251,21 @@ void AnalyzerPanel::showViewMenu()
     menu.addItem (6, analyzer.isFrozen() ? "Re-capture frozen trace" : "Freeze the current trace");
     menu.addItem (7, "Clear frozen trace", analyzer.isFrozen());
 
+    // Visualisers: one main view (radio), beside or instead of the spectrum, and a strip.
+    menu.addSectionHeader ("Visualiser");
+    menu.addItem (kMenuVisualiser - 1, "Spectrum + EQ (default)", true, mainView == nullptr);
+    const auto& list = vis::registry();
+    for (size_t i = 0; i < list.size(); ++i)
+        if (list[i].canBeMain)
+            menu.addItem (kMenuVisualiser + static_cast<int> (i), list[i].menuName, true, options.visualiser == list[i].id);
+    menu.addItem (kMenuBeside, "Beside the spectrum (wide windows)", mainView != nullptr, options.beside);
+    juce::PopupMenu strips;
+    strips.addItem (kMenuStrip - 1, "None", true, stripView == nullptr);
+    for (size_t i = 0; i < list.size(); ++i)
+        if (list[i].canBeStrip)
+            strips.addItem (kMenuStrip + static_cast<int> (i), list[i].menuName, true, options.strip == list[i].id);
+    menu.addSubMenu ("Strip under the plot", strips);
+
     juce::Component::SafePointer<AnalyzerPanel> safe (this);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&viewButton),
                         [safe] (int result)
@@ -183,6 +274,8 @@ void AnalyzerPanel::showViewMenu()
                                 return;
                             auto& self = *safe;
                             auto& o = self.options;
+                            if (self.applyVisualiserMenuItem (result))
+                                return;
                             switch (result)
                             {
                                 case 1: o.spectrogram = ! o.spectrogram; break;
@@ -213,8 +306,10 @@ void AnalyzerPanel::paint (juce::Graphics& g)
     Theme::drawPanel (g, getLocalBounds().toFloat());
 
     auto h = headerArea.toFloat();
-    const float w = Theme::drawCaption (g, kCaption, h, Palette::muted);
+    const float w = Theme::drawCaption (g, caption(), h, Palette::muted);
     h.removeFromLeft (w + 18.0f);
+    if (isSpectrumReplaced())
+        return; // the visualiser draws its own legend
 
     // Legend (only when all of it fits).
     const auto accent = Theme::accent (*this);
@@ -259,6 +354,13 @@ void AnalyzerPanel::resized()
 {
     auto r = getLocalBounds().reduced (12, 10);
     headerArea = r.removeFromTop (24);
+    const bool replaced = mainView != nullptr && ! (options.beside && r.getWidth() >= kBesideMinWidth);
+    if (replaced)
+    {
+        // Only the View chip: the spectrum's controls have nothing to act on.
+        viewButton.setBounds (headerArea.withLeft (headerArea.getRight() - (kChipWidth + 4)).reduced (0, 2));
+    }
+    else
     {
         auto h = headerArea;
         rangeBox.setBounds (h.removeFromRight (82).reduced (0, 1));
@@ -286,7 +388,57 @@ void AnalyzerPanel::resized()
         }
     }
     r.removeFromTop (4);
+
+    if (stripView != nullptr)
+    {
+        stripView->setBounds (r.removeFromBottom (stripView->getStripHeight()));
+        r.removeFromBottom (6);
+        stripView->setVisible (true);
+    }
+
+    // A main visualiser: beside the spectrum where there is room for both, else in its place.
+    bool spectrumShown = true;
+    if (mainView != nullptr)
+    {
+        if (options.beside && r.getWidth() >= kBesideMinWidth)
+        {
+            const int w = juce::jlimit (220, r.getWidth() / 2, juce::roundToInt (static_cast<float> (r.getHeight()) * 1.15f));
+            mainView->setBounds (r.removeFromRight (w));
+            r.removeFromRight (8);
+        }
+        else
+        {
+            mainView->setBounds (r);
+            spectrumShown = false;
+        }
+        mainView->setVisible (true);
+    }
+    analyzer.setVisible (spectrumShown);
+    eqEditor.setVisible (spectrumShown);
+    for (auto* c : std::initializer_list<juce::Component*> { &preButton, &postButton, &tiltButton, &holdButton, &rangeBox })
+        c->setVisible (spectrumShown);
+    if (! spectrumShown)
+    {
+        diffButton.setVisible (false);
+        freezeButton.setVisible (false);
+    }
     analyzer.setBounds (r);
     eqEditor.setBounds (r);
+}
+
+bool AnalyzerPanel::applyVisualiserMenuItem (int item)
+{
+    const auto& views = vis::registry();
+    const auto count = static_cast<int> (views.size());
+    if (item == kMenuVisualiser - 1 || (item >= kMenuVisualiser && item < kMenuVisualiser + count))
+        options.visualiser = item < kMenuVisualiser ? juce::String (Options::kSpectrum) : juce::String (views[static_cast<size_t> (item - kMenuVisualiser)].id);
+    else if (item == kMenuStrip - 1 || (item >= kMenuStrip && item < kMenuStrip + count))
+        options.strip = item < kMenuStrip ? juce::String (Options::kNone) : juce::String (views[static_cast<size_t> (item - kMenuStrip)].id);
+    else if (item == kMenuBeside)
+        options.beside = ! options.beside;
+    else
+        return false;
+    changed();
+    return true;
 }
 } // namespace flub::app::ui

@@ -3,6 +3,7 @@
 #include "ui/MainComponent.h"
 #include "ui/QuickControls.h"
 #include "ui/SettingsDialog.h"
+#include "ui/vis/VisualiserRegistry.h"
 
 #include "flub/io/Json.h"
 #include "flub/io/PresetIO.h"
@@ -12,6 +13,23 @@
 namespace flub::app
 {
 using namespace flub::param;
+
+bool ScreenshotDriver::isVisualiserState (const juce::String& state)
+{
+    if (state == "vis-beside")
+        return true;
+    if (state.startsWith ("vis-strip-"))
+    {
+        const auto* d = ui::vis::findDescriptor (state.fromFirstOccurrenceOf ("vis-strip-", false, false));
+        return d != nullptr && d->canBeStrip;
+    }
+    if (state.startsWith ("vis-"))
+    {
+        const auto* d = ui::vis::findDescriptor (state.fromFirstOccurrenceOf ("vis-", false, false));
+        return d != nullptr && d->canBeMain;
+    }
+    return false;
+}
 
 bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options& options, juce::String& error)
 {
@@ -101,9 +119,10 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
         options.states.trim();
         options.states.removeEmptyStrings();
         for (const auto& state : options.states)
-            if (! known.contains (state))
+            if (! known.contains (state) && ! isVisualiserState (state))
             {
-                error = "--state must be one or more of " + known.joinIntoString (", ") + " (comma separated)";
+                error = "--state must be one or more of " + known.joinIntoString (", ")
+                        + ", vis-beside, vis-<id> or vis-strip-<id> for a visualiser id (comma separated)";
                 return false;
             }
         if (options.states.isEmpty())
@@ -359,6 +378,16 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         o.width = o.width || states.contains ("analyzer-width");
         o.pianoKeys = o.pianoKeys || states.contains ("analyzer-keys");
         o.spectrogram = o.spectrogram || states.contains ("analyzer-spectrogram");
+        // Visualisers: vis-<id> (main view), vis-strip-<id>, vis-beside.
+        for (const auto& state : states)
+        {
+            if (state == "vis-beside")
+                o.beside = true;
+            else if (state.startsWith ("vis-strip-"))
+                o.strip = state.fromFirstOccurrenceOf ("vis-strip-", false, false);
+            else if (state.startsWith ("vis-"))
+                o.visualiser = state.fromFirstOccurrenceOf ("vis-", false, false);
+        }
         main->getAnalyzerPanel().setOptions (o);
         if (states.contains ("analyzer-freeze"))
             freezeAtSeconds = options.seconds * 0.4;

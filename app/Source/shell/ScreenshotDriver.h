@@ -73,6 +73,11 @@
 //                   as if the mouse rested there when the PNG is taken
 //   analyzer-freeze the traces frozen at 40 % of the run, then EQ band 7
 //                   (2 kHz) raised by 9 dB so the live trace moves away
+//   vis-<id>        the analyser shows that visualiser (any id in
+//                   ui/vis/VisualiserRegistry.cpp that can replace the
+//                   spectrum, e.g. vis-goniometer); vis-beside puts it beside
+//                   the spectrum; vis-strip-<id> adds that strip view (e.g.
+//                   vis-strip-correlation). Not saved to the settings.
 // Without --state the notice bar starts empty (the scene's own preset loads
 // would otherwise leave a latency prompt in every screenshot).
 // --view picks the main window's view (docs/11 E39); the default is advanced,
@@ -111,6 +116,8 @@ public:
     /** Parses the screenshot arguments; returns false if --screenshot is absent
         (error stays empty) or malformed (error set). */
     static bool parseCommandLine (const juce::StringArray& args, Options& options, juce::String& error);
+    /** True for "vis-beside", "vis-<id>" and "vis-strip-<id>" with a registered id usable there. */
+    static bool isVisualiserState (const juce::String& state);
 
     using Completion = std::function<void (bool ok, const juce::String& message)>;
 

@@ -348,17 +348,18 @@ TEST_CASE ("App: stereo width is S / (M + S) per band; the feed delivers the sid
     int midSamples = 0, sideSamples = 0;
     feed.addSink ([&] (ui::AnalyzerFeed::Stream, const float*, int n) { midSamples += n; });
     std::vector<float> block (500, 0.25f);
+    std::vector<flub::StereoTapFrame> pairs (500, flub::StereoTapFrame { 0.5f, 0.25f });
     taps.post.push (block.data(), block.size());
-    taps.postSide.push (block.data(), block.size());
+    taps.postStereo.push (pairs.data(), pairs.size());
     feed.pull (taps);
     CHECK (midSamples == 500);
-    CHECK (taps.postSide.available() == 0); // no side sink: drained and dropped
+    CHECK (taps.postStereo.available() == 0); // no side sink: drained and dropped
     feed.setSideSink ([&] (const float* x, int n)
                       {
                           sideSamples += n;
                           CHECK (x[0] == 0.25f);
                       });
-    taps.postSide.push (block.data(), block.size());
+    taps.postStereo.push (pairs.data(), pairs.size());
     feed.pull (taps);
     CHECK (sideSamples == 500);
     CHECK (midSamples == 500);
@@ -390,15 +391,19 @@ TEST_CASE ("App: the chain's post side tap carries (L - R) / 2")
         host.renderOffline (source, 512);
 
     auto& taps = host.getMixEngine().chain (1).taps();
-    const size_t n = taps.postSide.available();
+    const size_t n = taps.postStereo.available();
     REQUIRE (n > 512);
     CHECK (taps.post.available() == n);
-    std::vector<float> mid (n), side (n);
+    std::vector<float> mid (n);
+    std::vector<flub::StereoTapFrame> pairs (n);
     taps.post.pop (mid.data(), n);
-    taps.postSide.pop (side.data(), n);
-    // Bypassed strip: after the warm-up L = 0.5, R = 0: mid = side = 0.25.
-    CHECK_NEAR (side.back(), mid.back(), 1.0e-4);
-    CHECK_NEAR (side.back(), 0.25, 0.02);
+    taps.postStereo.pop (pairs.data(), n);
+    // Bypassed strip: after the warm-up L = 0.5, R = 0: mid = side = 0.25,
+    // and the stereo ring's mid is the post ring's sample for sample.
+    CHECK_NEAR (pairs.back().side, mid.back(), 1.0e-4);
+    CHECK_NEAR (pairs.back().side, 0.25, 0.02);
+    CHECK (pairs.back().mid == mid.back());
+    CHECK (pairs[n / 2].mid == mid[n / 2]);
 }
 
 // =============================================================================
@@ -499,7 +504,7 @@ TEST_CASE ("App: piano keys light the notes that are playing and fade when they 
 TEST_CASE ("App: analyser options persist the new views and read the older format")
 {
     ui::AnalyzerPanel::Options o;
-    CHECK (o.toString() == "1,1,1,1,12,0,0,0,0,0"); // new views off by default
+    CHECK (o.toString() == "1,1,1,1,12,0,0,0,0,0,spectrum,none,0"); // new views off by default
 
     o.tilt = false;
     o.eqRangeDb = 24.0f;
@@ -510,6 +515,6 @@ TEST_CASE ("App: analyser options persist the new views and read the older forma
 
     // A preference written before the new views: they stay off.
     REQUIRE (ui::AnalyzerPanel::Options::fromString ("1,0,1,1,6", back));
-    CHECK (back.toString() == "1,0,1,1,6,0,0,0,0,0");
+    CHECK (back.toString() == "1,0,1,1,6,0,0,0,0,0,spectrum,none,0");
     CHECK (! ui::AnalyzerPanel::Options::fromString ("1,1,1", back));
 }

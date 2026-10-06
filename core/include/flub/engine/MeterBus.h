@@ -2,9 +2,10 @@
 //
 // Scalars: relaxed atomics written once per block by the audio thread and
 // polled by the GUI at display rate (~60 Hz). No locks, no allocation.
-// Streams : two SPSC rings (pre / post processing, mid = (L+R)/2 samples) that
-// feed the spectrum analyser and waveform view. If the GUI is slow or hidden
-// the rings simply fill and further pushes are dropped (never blocks audio).
+// Streams : SPSC rings (pre / post processing, mid = (L+R)/2 samples, and the
+// post mid / side pairs) that feed the spectrum analyser, waveform and
+// visualiser views. If the GUI is slow or hidden the rings simply fill and
+// further pushes are dropped (never blocks audio).
 #pragma once
 
 #include "flub/common/SpscRing.h"
@@ -105,15 +106,23 @@ struct MeterBus
     std::atomic<float> virtMakeupDb { 0.0f }, foldHeadroomDb { 0.0f };
 };
 
+/** One sample of the post tap's stereo stream: mid (L + R) / 2 and side (L - R) / 2. */
+struct StereoTapFrame
+{
+    float mid = 0.0f, side = 0.0f;
+};
+
 struct AnalyzerTaps
 {
     static constexpr size_t kCapacity = 1 << 15; // ~0.68 s at 48 kHz
 
     SpscRing<float> pre { kCapacity };
     SpscRing<float> post { kCapacity };
-    // The post tap's side signal (L - R) / 2, written right after `post`
-    // (same block, same length): the analyser's stereo-width view.
-    SpscRing<float> postSide { kCapacity };
+    // The post tap as mid / side pairs, written right after `post` (same
+    // block, same length): the analyser's stereo views (stereo width,
+    // goniometer, stereo field, correlation). One ring of pairs, so mid and
+    // side can never slip against each other (a drop or a trim takes both).
+    SpscRing<StereoTapFrame> postStereo { kCapacity };
 };
 
 // Listening level (docs/11 E32 (c)): HearingGuard's readings for the mix

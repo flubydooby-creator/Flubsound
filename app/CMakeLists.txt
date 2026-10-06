@@ -109,6 +109,12 @@ set(FLUB_APP_SOURCES
     ../tools/flubsound-cli/Ctl.cpp # docs/11 E56: the `ctl` socket (RemoteControl, --ctl)
     ../tools/flubsound-cli/OfflineRenderer.cpp)
 
+# The analyser's visualiser views (docs/06 §6.4.2): one pair of files per
+# view, picked up here so adding a view needs no edit to this file.
+file(GLOB FLUB_APP_VIS_SOURCES CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/Source/ui/vis/*.cpp")
+list(SORT FLUB_APP_VIS_SOURCES)
+list(APPEND FLUB_APP_SOURCES ${FLUB_APP_VIS_SOURCES})
+
 target_sources(FlubsoundPro PRIVATE ${FLUB_APP_SOURCES})
 target_include_directories(FlubsoundPro PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Source"

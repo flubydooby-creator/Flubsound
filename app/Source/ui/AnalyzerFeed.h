@@ -32,10 +32,16 @@ public:
 
     /** The post tap's side signal (L - R) / 2 (the analyser's stereo-width
         view). Kept apart from the mid sinks above, which see exactly the
-        pre / post mid streams they always did. Without a side sink the side
-        ring is drained and dropped. */
+        pre / post mid streams they always did. */
     using SideSink = std::function<void (const float* samples, int numSamples)>;
     void setSideSink (SideSink sink) { sideSink = std::move (sink); }
+
+    /** The post tap's mid and side as aligned pairs (mid[i] and side[i] are
+        the same instant; AnalyzerTaps::postStereo): the stereo visualisers
+        (vis::Visualiser::pushPost). Without a side or stereo sink the
+        stereo ring is drained and dropped. */
+    using StereoSink = std::function<void (const float* mid, const float* side, int numSamples)>;
+    void setStereoSink (StereoSink sink) { stereoSink = std::move (sink); }
 
     /** Drains the rings (message thread; the only consumer). */
     void pull (flub::AnalyzerTaps& taps);
@@ -45,10 +51,12 @@ public:
 
 private:
     void drain (flub::SpscRing<float>& ring, Stream stream);
-    void drainSide (flub::SpscRing<float>& ring);
+    void drainStereo (flub::SpscRing<flub::StereoTapFrame>& ring);
 
     std::vector<Sink> sinks;
     SideSink sideSink;
-    std::vector<float> scratch;
+    StereoSink stereoSink;
+    std::vector<float> scratch, midScratch, sideScratch;
+    std::vector<flub::StereoTapFrame> stereoScratch;
 };
 } // namespace flub::app::ui

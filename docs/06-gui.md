@@ -559,7 +559,7 @@ Every UI object lives on the **JUCE message thread**. The audio thread never cal
 | Audition mask (`ProcessingChain::setAuditionBypass`) | UI → audio | `ModuleCard` ear via `ModuleRack` → `EngineController::setAuditionBypass` | one atomic bit per module. It forces the module off whatever the preset or macros say, via the slot's click-free crossfade. It is not a parameter |
 | `MeterBus` | audio → UI | `MeterSnapshot::read()` once per frame for the selected strip. `RoutingPanel` reads `outPeakDb` of every strip directly | relaxed atomics written once per block |
 | `MeterBus::resetLoudnessRequest` | UI → audio | click on TRUE PEAK or INTEGR. | atomic flag; the chain `exchange`s it at the next block and resets integrated loudness and the TP hold |
-| `AnalyzerTaps` pre / post / postSide | audio → UI | `AnalyzerFeed`, the **only** consumer | SPSC rings of mid `(L+R)/2` samples (pre, post) and the post side `(L−R)/2` (stereo-width view, §6.4.1), 32768 floats each (≈ 0.68 s at 48 kHz); the producer drops samples when a ring is full |
+| `AnalyzerTaps` pre / post / postStereo | audio → UI | `AnalyzerFeed`, the **only** consumer | SPSC rings of mid `(L+R)/2` samples (pre, post) and of post mid / side `(L−R)/2` pairs (stereo width §6.4.1, the visualisers §6.4.2), 32768 entries each (≈ 0.68 s at 48 kHz); the producer drops samples when a ring is full |
 | Host atomics | UI → audio | strip gain / mute (routing panel), master ceiling (device advice) | `AudioEngineHost` atomics, applied at the start of each audio block |
 | `EngineController::Listener` | controller → UI | `MainComponent`, `TrayIcon` | callbacks on the message thread for state that cannot be polled cheaply |
 
@@ -631,6 +631,7 @@ flowchart LR
 | — every 15 frames | ≈ 4 Hz | `HeaderBar::updateStatus()`: latency, CPU, strip activity dots, preset-modified dot |
 | `SpectrumAnalyzer` FFT | one hop per 1024 new samples (≈ 46.9/s at 48 kHz); at most one per stream per frame | 4096-point FFT |
 | — optional views (§6.4.1) | Sharper lows: one 8192-point FFT per stream per `kHop / decimation` decimated samples; Stereo width: one 4096-point FFT of the side per hop; Spectrogram: one image row per post hop | each only while its view is on |
+| Visualisers (§6.4.2) | `advance` once per frame for the selected view and strip and the created history views; Stereo field: two 4096-point FFTs per 2048 samples; Goniometer: a 320 × 320 phosphor fade + render per frame | nothing for views never chosen |
 | `LevelMeters` numeric readouts | ≥ 0.08 s apart (≈ 12 Hz) | TRUE PEAK and L/R readouts; the bars repaint every frame |
 | `LoudnessPanel` | repaint ≥ 0.05 s apart (≤ 20 Hz), and only when a value changed | readouts and bars |
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
@@ -943,10 +944,10 @@ both the Spectrum and the Spectrogram view, with the EQ curve, nodes and dynamic
   level + 10·log10(B1k / resolution bandwidth), and the resolution bandwidth below 220 Hz drops from 1.5 × 11.7 Hz to
   1.5 × 1.95 Hz, so with Sharper lows on a pure low tone reads +16.0 dB instead of +8.2 dB (55 and 80 Hz sines read
   within 0.25 dB of that); broadband programme reads the same. Bass notes therefore stand out more in this view.
-- **Stereo width.** `ProcessingChain` also writes the post side `(L − R) / 2` into `AnalyzerTaps::postSide` (same
-  block, right after `post`; a third 32768-float ring, no new audio-thread entry point). `AnalyzerFeed::setSideSink`
-  hands it to `SpectrumAnalyzer::pushSide`; the mid sinks are unchanged, and without a side sink the ring is drained
-  and dropped. While the view is on, the side stream gets the main 4096-point analysis and each point's width is
+- **Stereo width.** `ProcessingChain` also writes the post side `(L − R) / 2` into `AnalyzerTaps::postStereo` (with
+  the mid, as aligned pairs, §6.4.2; same block, right after `post`; no new audio-thread entry point).
+  `AnalyzerFeed::setSideSink` hands the side to `SpectrumAnalyzer::pushSide`; the mid sinks are unchanged, and without
+  a side or stereo sink the ring is drained and dropped. While the view is on, the side stream gets the main 4096-point analysis and each point's width is
   `S / (M + S)` in power from the side and post mid band levels (`widthFromLevels`: 0 mono, 0.5 uncorrelated, 1
   anti-phase; 0 below −100 dB), smoothed with a 150 ms time constant. It is drawn as a translucent area in the bottom
   fifth of the plot (above the piano keys and their labels when those are on) with a dashed guide at 0.5 and a
@@ -969,6 +970,98 @@ both the Spectrum and the Spectrogram view, with the EQ curve, nodes and dynamic
   Playing notes light their keys (owner request): `keyActivity()` reads the output's displayed level at each
   note and lights a key 3 → 9 dB over the notes 2–4 semitones either side, within 30 dB of the loudest note and over
   −80 dB; the glow fades with a 0.15 s time constant (`getKeyGlow()`).
+
+#### 6.4.2 Visualisers (owner request 2026-10-06)
+
+The owner asked for many more visual styles. They are **visualisers**: optional views the analyser panel shows in place
+of the spectrum plot, beside it, or as a thin strip under it. *Spectrum + EQ* stays the default and is not a
+visualiser: with the defaults (no visualiser, no strip) the panel lays out and draws exactly as in §6.4 / §6.4.1.
+
+**Choosing.** The **View** menu has a *Visualiser* section: *Spectrum + EQ (default)* and one radio item per view,
+*Beside the spectrum (wide windows)* and a *Strip under the plot* submenu (*None* and the strip views). A view that
+replaces the spectrum takes the whole plot area and the header keeps only the View chip (In / Out / Tilt / Hold, the
+range box, Diff and Freeze have nothing to act on and hide); the caption becomes the view's (e.g. `GONIOMETER`) and
+the legend is the view's own. *Beside* puts the view at the right of the spectrum (width `clamp (220, half the plot,
+1.15 × its height)`) when the plot is at least 640 px wide, else it replaces the spectrum as before. A strip view
+(`getStripHeight()`, 30 px for the correlation meter) sits under whichever is shown, 6 px apart. Persisted in
+`ui.analyzer` (§12): three fields appended to the earlier ten, `visualiser,strip,beside`, e.g.
+`...,goniometer,correlation,1`; the 10- and 5-field values still read with the defaults (`spectrum`, `none`, 0), and
+an id this build does not know (written by a newer version) or registered for the other place reads as the default.
+
+**Framework** (`app/Source/ui/vis/`, message thread only):
+
+- `Visualiser.h`: `class Visualiser : public juce::Component` with
+  `setSampleRate (double)`, `reset()` (strip switch / engine rebuilt), `pushPre (mid, n)`,
+  `pushPost (mid, side, n)` (aligned: `L = mid + side`, `R = mid − side`), `advance (const FrameContext&)` (pure
+  virtual; once per frame after the pushes: analyse, update, repaint), `keepsHistory()` (default false) and
+  `getStripHeight()` (default 34). `FrameContext` carries this frame's `MeterSnapshot` (levels, LUFS, correlation, gain
+  reductions, …), `dtSeconds`, `sampleRate`, the `SpectrumAnalyzer*` (its latest analysis and geometry; nullptr in
+  tests) and the loudness target (`targetLufs`, NaN for none, and `targetName`). Rules: pushes only copy into
+  preallocated buffers, analysis happens in `advance`; no allocation per frame (images, FFT buffers and paths are sized
+  in the constructor / `setSampleRate` / `resized`; `juce::Path::clear` keeps its storage, `preallocateSpace` reserves
+  it); colours from `Palette::` / `Theme::` (`Theme::accent (*this)`: teal in Music, magenta in Gaming;
+  `Theme::statusColours (*this)` for good / caution / alert, colour-blind aware); paint inside the view's own bounds
+  (the plot well `vis::drawWell`, transparent elsewhere so the panel fill shows through).
+- `VisualiserRegistry.{h,cpp}`: `vis::registry()` is the list of `Descriptor { id, menuName, caption, description,
+  canBeMain, canBeStrip, create }` in menu order; `findDescriptor (id)`, `indexOf (id)`, `isValidId (id)` (1–40 of
+  `a-z 0-9 -`; `spectrum` and `none` are reserved). The id is persisted: never rename or reuse one.
+- `VisualiserHost.{h,cpp}`: owned by `AnalyzerPanel` (`getVisualisers()`). Creates a view from the registry on first
+  use (`get (id)`, setting its title, description, tooltip and sample rate) and keeps it, so a view with a history
+  keeps it across switches. Each frame's pushes and `advance` go to the selected main view and strip and to every
+  created view whose `keepsHistory()` is true; the rest cost nothing.
+- `VisCommon.{h,cpp}`: shared pieces: `drawWell`, `labelFont` / `labelColour`, `drawLegend`, `frequencyColour (hz)`
+  (20 Hz red → 20 kHz violet), `formatValue`, `SlotHistory` (a fixed ring of N time slots of K values, each slot the
+  max / min / last of the frames in it; `getSlotFraction()` for smooth scrolling) and `Phosphor` (a fixed intensity
+  grid that fades per frame and takes bilinear splats, shown through a 256-entry colour table as a software image).
+- Wiring: `AnalyzerFeed::setStereoSink` hands `pushPost` the post tap as aligned pairs (below); the pre mid sink calls
+  `pushPre`; `MainComponent::frame()` calls `AnalyzerPanel::advanceVisualisers (snapshot, dt, sampleRate)` in the
+  Advanced view and `resetAnalysis()` calls the host's `reset()`. The loudness target is
+  `AnalyzerPanel::loudnessTarget (store)`: the maximizer's `MaxTargetLufs` while `MaximizerOn` and `MaxAutoDrive` are on, else
+  `AutoLevelTargetLufs` while `AutoLevelOn` is on (an *input* target, labelled so), else none.
+- **Aligned mid / side.** `AnalyzerTaps::postStereo` (core `MeterBus.h`) is one SPSC ring of `StereoTapFrame { mid,
+  side }` written by `ProcessingChain` right after `post` (same block, same length; it replaced the separate
+  `postSide` float ring of §6.4.1). Being one ring, a drop when it is full or a backlog trim takes mid and side
+  together, so the pairs can never slip. No new audio-thread entry point; one preallocated scratch vector.
+- **Adding a view:** write `vis/MyView.{h,cpp}` (derive from `Visualiser`), add one line to the list in
+  `vis/VisualiserRegistry.cpp`. `app/CMakeLists.txt` globs `Source/ui/vis/*.cpp`; the View menu, persistence, the
+  screenshot driver's `vis-<id>` / `vis-strip-<id>` states and the framework tests in
+  `tests/app/test_app_visualisers.cpp` (ids, creation, no allocation per frame) pick it up from the registry. Add a
+  mapping test of its own and a docs/12 line.
+
+**The views** (`tests/app/test_app_visualisers.cpp` checks each one's mapping; screenshot states `vis-<id>`):
+
+- **Goniometer** (`goniometer`, `Goniometer.*`). Lissajous of the output: `x = −side · g`, `y = mid · g`
+  (`scopePoint`), so mono is the vertical (M) axis, left only leans to the upper-left (L), right only upper-right (R)
+  and out-of-phase sound lies on the horizontal (S) axis. Every sample is splatted into a 320 × 320 `Phosphor` that
+  fades with a 0.12 s time constant (the trail) and is drawn into the largest square that fits, over a full-scale
+  circle, a half circle, the M / S axes and dashed L / R diagonals. Automatic gain `g`: the peak of |mid|, |side|
+  (instant attack, 0.8 s release) is put at 0.95 of the circle, between 0 and +30 dB; it falls at once and rises
+  gently. Corner readouts: *Auto gain +n dB* and the meter bus's correlation. Main view only.
+- **Stereo field by frequency** (`stereo-field`, `StereoField.*`). Per ISO third-octave band (30 bands, 25 Hz –
+  20 kHz) from a 4096-point Hann FFT of mid and side every 2048 samples: `PM = Σ|M|²`, `PS = Σ|S|²`,
+  `C = Σ Re (M·S*)`, averaged over 0.3 s; with `PL = PM + PS + 2C`, `PR = PM + PS − 2C`: pan `= (PR − PL) / (PL + PR)`
+  (−1 left … +1 right), correlation `= (PM − PS) / √(PL·PR)` (+1 when one side is silent) and level
+  `10·log10 (PM + PS)` (`analyse`). Frequency up the plot, pan across (L / C / R), one dot per band in
+  `frequencyColour`, a bar of half length `(1 − correlation) / 2` of the half width for a wide band (outlined red
+  below 0), size and brightness from the level within 48 dB of the loudest band. Main view only.
+- **Correlation meter** (`correlation`, `CorrelationMeter.*`). A strip: L / R correlation from the aligned pairs
+  (one-pole averages of LR, L², R² over 0.1 s), a −1 … +1 bar with a red zone below 0, a fill from 0 and a needle in
+  the status colours (good ≥ 0.3, caution 0 … 0.3, alert < 0), a hold triangle at the lowest value of the last 3 s
+  (then rising 0.5 per second) and the value at the right; below −70 dB *no signal* (dimmed, `--`). Strip only.
+- **Loudness history** (`loudness-history`, `LoudnessHistory.*`). The meter bus's momentary and short-term LUFS
+  (the LOUDNESS panel's) in 600 slots of 0.1 s (60 s; momentary: the slot's maximum, short-term: its last reading),
+  momentary as a thin line over a translucent area, short-term as a bold accent line with a glow, gaps below
+  −70 LUFS, −42 … 0 LUFS with a grid every 6 LU and time every 10 s; the target (above) as a dashed amber line with
+  its name; current readings top right. Keeps its history while hidden.
+- **Waveform before / after** (`waveform`, `WaveformView.*`). The pre tap (input, grey fill with a faint outline on
+  top) and the post mid (output, accent fill and outline) as min / max envelopes in 800 columns over the last 4 s
+  (5 ms each), on a linear ±1 (0 dBFS) axis with −6 dB lines; each stream scrolls with its own sample count. Keeps
+  its history while hidden.
+- **Gain reduction history** (`gain-reduction`, `GainReductionTrace.*`). Compressor (accent), limiter (alert colour,
+  with a translucent fill), glue (caution colour), bass protection (blue) and master limiter (text colour) from the
+  meter bus, 600 slots of 25 ms (15 s, each the slot's deepest reading), 0 dB at the top, 0 … −12 dB growing to
+  −24 dB while the history holds more than 11 dB; a stage draws only where it reduces by more than 0.05 dB; the
+  legend carries the current values. Keeps its history while hidden.
 
 ### 6.5 `EqCurveEditor` — the interactive EQ curve
 
@@ -1488,7 +1581,7 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
 | `--theme standard\|high-contrast` | `standard` | anything else is an error | Palette (§2.1), applied before the window is created (parsed in `FlubsoundApplication.cpp`) |
 | `--device "name"` | none | must be followed by a name | `EngineController::simulateOutputDevice (name, engine rate, 2 channels)`. The device-profile match, advice banner and master-ceiling cap then behave as if that output were open. It never overrides a real device |
 | `--view advanced\|simple` | `advanced` | anything else is an error | The main window's view (§3.5), set without saving it. The default is the full window every earlier screenshot shows; the app's own default, without a saved choice, is Simple |
-| `--state a,b` | none | one or more of the names below, comma separated; anything else is an error | UI states that need a real device or a real mistake, reached through the same code paths where they can: `device-error` (`AudioEngineHost::audioDeviceError`: the error banner), `loopback` (the device input feeds the Game strip and `checkLoopbackPair` is given CABLE Output / CABLE Input: the muted banner), `preset-warning` (a preset with a typo'd key and an out-of-range value, read by `flub::preset::fromJson`, as the notice bar shows its warnings), `recovery` (the notice for a settings file restored from `.bak1`), `latency-prompt` (Audiophile Subtle, or Competitive FPS in gaming mode, loaded on Balanced), `governor` (Boost 100 %, Loudness / Impact 100 %, maximizer drive 12 dB, protection Strict; use `--seconds 8` so the governor's 3 s averages settle), `preset-browser` (the preset browser open, searched for *late night quiet* — *night quiet* with `--mode gaming` — with the best match selected and previewing, loudness matched), `settings-audio` / `settings-processing` (the PNG is that Settings page at `--size` instead of the main window; with `loopback` the Audio page shows the muted pair and **Allow this pair**, [11 E51](11-enhancement-report.md#e51); Processing switches *Follow the system volume* on, [11 E32](11-enhancement-report.md#e32); give a tall size such as `780x1500` to see the whole page), `ab-matched` (bank B = the scene's sound at Boost 100 % and Loudness / Impact 100 %, playing loudness matched: the trim line under A / B, [11 E37](11-enhancement-report.md#e37)), `abx` (that pair in the blind A/B/X panel, three trials answered), `bypass` (the master Bypass switched on at 80 % of the run, so give `--seconds 5` or more: *proc. +x LU* under it), `routing-drawer` (the routing panel's drawer open; narrow windows), `governor-normal` (as `governor` at protection Normal: the loudness panel's PROTECTION readouts), `quick-controls` (the PNG is the tray flyout at `--size`, e.g. `330x216`), `settings-diagnostics` (the PNG is the Diagnostics page with its Updates section, [11 E54](11-enhancement-report.md#e54); nothing is requested unless the check is on in the settings used), `settings-hearing` (the PNG is the Hearing page with a Turtle Beach output, the listener's figure of 108 dB SPL and the cap at 85 dB(A), [11 E32](11-enhancement-report.md#e32)), `settings-hearing-unknown` (the same page without a sensitivity: *Unknown*), `hearing-profile` (as `settings-hearing` with a right-ear high-frequency preference in the per-ear editor, [11 E33](11-enhancement-report.md#e33); give a tall size such as `860x1400` to see the editor), `hearing-readout` (the main window with a sensitivity: the loudness panel's dose row), `module-keys` (the rack scrolled to the Clarity card: Presence Mode Relative, Crossfeed Type Meier on Stereo & Space). Without `--state` the notice bar starts empty |
+| `--state a,b` | none | one or more of the names below, comma separated; anything else is an error | UI states that need a real device or a real mistake, reached through the same code paths where they can: `device-error` (`AudioEngineHost::audioDeviceError`: the error banner), `loopback` (the device input feeds the Game strip and `checkLoopbackPair` is given CABLE Output / CABLE Input: the muted banner), `preset-warning` (a preset with a typo'd key and an out-of-range value, read by `flub::preset::fromJson`, as the notice bar shows its warnings), `recovery` (the notice for a settings file restored from `.bak1`), `latency-prompt` (Audiophile Subtle, or Competitive FPS in gaming mode, loaded on Balanced), `governor` (Boost 100 %, Loudness / Impact 100 %, maximizer drive 12 dB, protection Strict; use `--seconds 8` so the governor's 3 s averages settle), `preset-browser` (the preset browser open, searched for *late night quiet* — *night quiet* with `--mode gaming` — with the best match selected and previewing, loudness matched), `settings-audio` / `settings-processing` (the PNG is that Settings page at `--size` instead of the main window; with `loopback` the Audio page shows the muted pair and **Allow this pair**, [11 E51](11-enhancement-report.md#e51); Processing switches *Follow the system volume* on, [11 E32](11-enhancement-report.md#e32); give a tall size such as `780x1500` to see the whole page), `ab-matched` (bank B = the scene's sound at Boost 100 % and Loudness / Impact 100 %, playing loudness matched: the trim line under A / B, [11 E37](11-enhancement-report.md#e37)), `abx` (that pair in the blind A/B/X panel, three trials answered), `bypass` (the master Bypass switched on at 80 % of the run, so give `--seconds 5` or more: *proc. +x LU* under it), `routing-drawer` (the routing panel's drawer open; narrow windows), `governor-normal` (as `governor` at protection Normal: the loudness panel's PROTECTION readouts), `quick-controls` (the PNG is the tray flyout at `--size`, e.g. `330x216`), `settings-diagnostics` (the PNG is the Diagnostics page with its Updates section, [11 E54](11-enhancement-report.md#e54); nothing is requested unless the check is on in the settings used), `settings-hearing` (the PNG is the Hearing page with a Turtle Beach output, the listener's figure of 108 dB SPL and the cap at 85 dB(A), [11 E32](11-enhancement-report.md#e32)), `settings-hearing-unknown` (the same page without a sensitivity: *Unknown*), `hearing-profile` (as `settings-hearing` with a right-ear high-frequency preference in the per-ear editor, [11 E33](11-enhancement-report.md#e33); give a tall size such as `860x1400` to see the editor), `hearing-readout` (the main window with a sensitivity: the loudness panel's dose row), `module-keys` (the rack scrolled to the Clarity card: Presence Mode Relative, Crossfeed Type Meier on Stereo & Space), `analyzer-diff` / `-lows` / `-width` / `-keys` / `-spectrogram` / `-hover` / `-freeze` (§6.4.1), `vis-<id>` (that visualiser in place of the spectrum, any registered main view, e.g. `vis-goniometer`), `vis-beside` (beside it instead) and `vis-strip-<id>` (that strip, e.g. `vis-strip-correlation`) (§6.4.2; not saved). Without `--state` the notice bar starts empty |
 
 - **Exit codes:** 0 success, 1 the PNG could not be written, 2 bad arguments.
 - **Headless controller.** No audio device, no state restore, no app routing, settings never written (temporary file `FlubsoundPro-screenshot.settings`). There is also no tray, no hotkeys and no tooltip window, and multiple instances are allowed.
@@ -1515,7 +1608,7 @@ The settings file is XML, `Flubsound Pro.settings` in the per-user application-d
 | UI scale | `ui.scalePercent` (0 follow the system, else 75–200) | 0 |
 | Theme | `ui.theme` (`standard` / `high-contrast`) | standard |
 | Main window view ([11 E39](11-enhancement-report.md#e39)) | `ui.view` (`simple` / `advanced`; anything else reads as simple) | simple |
-| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram"` (`AnalyzerPanel::Options::toString`); range clamped 6–24; the older 5-field value reads with the new views off | `"1,1,1,1,12,0,0,0,0,0"` |
+| Analyser options | `ui.analyzer` = `"pre,post,tilt,hold,range,diff,lows,width,keys,spectrogram,visualiser,strip,beside"` (`AnalyzerPanel::Options::toString`; visualiser / strip are registry ids, §6.4.2); range clamped 6–24; the older 10- and 5-field values read with the newer fields at their defaults; an unknown id reads as the default | `"1,1,1,1,12,0,0,0,0,0,spectrum,none,0"` |
 | Window position and size | `DocumentWindow::getWindowStateAsString()` | centred 1280 × 820 |
 | Selected strip, master enable | `AppSettings` | 0 (Game), enabled |
 | Strip parameter state (both banks + active bank) | JSON per strip; autosaved within 5 s of a change and at shutdown; during a preset preview the bank as the preview's end will leave it (§6.1a) | — |

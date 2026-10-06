@@ -88,8 +88,12 @@ MainComponent::MainComponent (EngineController& c)
                       analyzer.getAnalyzer().push (post, samples, n);
                       if (post)
                           history.push (samples, n);
+                      else
+                          analyzer.getVisualisers().pushPre (samples, n);
                   });
     feed.setSideSink ([this] (const float* samples, int n) { analyzer.getAnalyzer().pushSide (samples, n); });
+    // The visualisers get the post tap as aligned mid / side pairs (AnalyzerTaps::postStereo).
+    feed.setStereoSink ([this] (const float* mid, const float* side, int n) { analyzer.getVisualisers().pushPost (mid, side, n); });
 
     stripSignature = currentStripSignature();
     loadUiPreferences();
@@ -259,6 +263,7 @@ void MainComponent::frame (double timestampSeconds)
         analyzer.getAnalyzer().advance (dt);
         analyzer.getEqEditor().refresh();
         analyzer.getEqEditor().setDynamicEqState (snapshot.dynEqGainDb, mode);
+        analyzer.advanceVisualisers (snapshot, dt, sampleRate);
     }
     history.setLoudness (snapshot.shortTermLufs);
     history.advance();
@@ -282,6 +287,7 @@ void MainComponent::resetAnalysis()
     auto& chain = controller.getChain (controller.getSelectedStrip());
     AnalyzerFeed::discard (chain.taps());
     analyzer.getAnalyzer().reset();
+    analyzer.getVisualisers().reset();
     history.reset();
     levels.reset();
     loudness.reset();

@@ -415,6 +415,10 @@ Flubsound/
 │           ├── AnalyzerPanel.{h,cpp}       SpectrumAnalyzer with EqCurveEditor stacked on top
 │           ├── SpectrumAnalyzer.{h,cpp}    pre/post spectrum: 4096-point Hann FFT (juce::dsp::FFT), 75 % overlap; optional views (06 §6.4.1)
 │           ├── Spectrogram.{h,cpp}         the analyser's scrolling waterfall image (ring of rows, fixed size)
+│           ├── vis/                        the analyser's visualiser views (06 §6.4.2): Visualiser.h (interface),
+│           │                               VisualiserRegistry (the list), VisualiserHost, VisCommon (shared pieces),
+│           │                               Goniometer, StereoField, CorrelationMeter, LoudnessHistory, WaveformView,
+│           │                               GainReductionTrace
 │           ├── EqCurveEditor.{h,cpp}       interactive 10-band EQ curve drawn from ParametricEq::responseDb
 │           ├── WaveformHistory.{h,cpp}     scrolling min/max output history with a short-term LUFS trace
 │           ├── LevelMeters.{h,cpp}         input / output peak + RMS bars, peak hold, clip latch, true-peak readout

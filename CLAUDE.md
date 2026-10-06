@@ -133,6 +133,13 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   a hover readout (note + cents, levels), Diff (out − in), Sharper lows (8 kHz-decimated long FFT below 300 Hz),
   Spectrogram, Stereo width (new `AnalyzerTaps::postSide` ring), Freeze and Piano keys, persisted in `ui.analyzer`
   (docs/06 §6.4.1, docs/12 §8, `tests/app/test_app_analyzer_views.cpp`). Not yet seen on the owner's screen.
+- **Analyser visualisers (owner request 2026-10-06):** a framework (`app/Source/ui/vis/`: `Visualiser` interface,
+  `VisualiserRegistry.cpp` list, `VisualiserHost`) for optional views in place of / beside the spectrum or as a strip,
+  chosen in View › Visualiser and persisted in `ui.analyzer` (13 fields; older values still read). Six views:
+  goniometer, stereo field by frequency, correlation strip, loudness history, waveform before / after, gain-reduction
+  history. The post side tap became `AnalyzerTaps::postStereo` (aligned mid / side pairs). Adding a view = new files +
+  one registry line (docs/06 §6.4.2, docs/12 §8, `tests/app/test_app_visualisers.cpp`, screenshot states `vis-<id>`).
+  Not yet seen on the owner's screen.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
 ### Next steps for the local session, in priority order

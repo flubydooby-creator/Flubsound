@@ -903,5 +903,6 @@ private:
     MeterBus meterBus;
     AnalyzerTaps analyzerTaps;
     std::vector<float> tapScratch;
+    std::vector<StereoTapFrame> stereoTapScratch;
 };
 } // namespace flub
