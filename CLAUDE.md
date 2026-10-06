@@ -90,6 +90,8 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 
 - **Step 1 done.** First MSVC build (Visual Studio 2026, warnings as errors): app, plug-in, tools and tests build;
   `ctest` passes. Only three test files needed fixes (`getenv` → `_dupenv_s`, one unused X11 guard).
+- **E51 owner-verified (2026-10-06):** dongle moved to another USB port and the headset switched off / on during per-app
+  capture: the sound came back by itself both times. Sleep / resume still to check.
 - **E16 owner-verified:** the owner's headset is a **Turtle Beach Stealth 600PC Gen 3** on its USB dongle; Windows
   names it "Speakers (Stealth 600PC Gen 3)", which matched nothing until a `stealth 600pc` token was added.
 - **E34 done:** a preset's `smart` flag is applied by the app, the plug-in and the CLI (see the docs/11 E34 Status).
