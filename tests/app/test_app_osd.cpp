@@ -269,10 +269,17 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         const auto until = juce::Time::getMillisecondCounter() + 250;
         flubapptest::pumpMessagesUntil ([until] { return juce::Time::getMillisecondCounter() > until; });
         CHECK (osd.isShowing());
+       #if ! JUCE_MAC
+        // macOS does not give a background test process's window key status,
+        // so the focus holder is never focused there; the OSD's own flags
+        // (temporary, ignores clicks, no keyboard focus) are checked above.
         CHECK (focusHolder.getPeer()->isFocused());
         CHECK (! peer->isFocused());
         CHECK (focusHolder.hasKeyboardFocus (false));
         CHECK (juce::Component::getCurrentlyFocusedComponent() == &focusHolder);
+       #else
+        CHECK (! peer->isFocused());
+       #endif
 
         // A second message and the fade to hidden: still no focus change.
         CHECK (osd.showFeedback (HotkeyAction::BoostDown, "Game: Boost 50%") == Osd::Outcome::Shown);
@@ -281,8 +288,10 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (! osd.isVisible());
         const auto later = juce::Time::getMillisecondCounter() + 100;
         flubapptest::pumpMessagesUntil ([later] { return juce::Time::getMillisecondCounter() > later; });
+       #if ! JUCE_MAC
         CHECK (focusHolder.getPeer()->isFocused());
         CHECK (juce::Component::getCurrentlyFocusedComponent() == &focusHolder);
+       #endif
     }
     focusHolder.removeFromDesktop();
 }

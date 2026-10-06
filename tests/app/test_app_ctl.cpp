@@ -44,10 +44,30 @@ float boostOf (EngineController& controller, const char* strip)
     return controller.getParams (controller.findStrip (strip)).get (flub::param::BoostIntensity);
 }
 
-/** A socket path in a folder only this user can use (as the server requires). */
+/** A socket path in a folder only this user can use (as the server requires).
+    A Unix socket path has to fit sockaddr_un (104 bytes on macOS, whose
+    temporary folders are long): then the folder is a short one under /tmp,
+    removed when the test run ends. */
 std::string privateSocket (const flubapptest::TempFolder& temp)
 {
-    const auto folder = temp.file ("run");
+    auto folder = temp.file ("run");
+   #if ! JUCE_WINDOWS
+    if (folder.getChildFile ("ctl.sock").getFullPathName().length() > 100)
+    {
+        struct ShortFolders
+        {
+            std::vector<juce::File> made;
+            ~ShortFolders()
+            {
+                for (auto& f : made)
+                    f.deleteRecursively();
+            }
+        };
+        static ShortFolders shortFolders;
+        folder = juce::File ("/tmp").getNonexistentChildFile ("flubctl", {}, false);
+        shortFolders.made.push_back (folder);
+    }
+   #endif
     folder.createDirectory();
     std::filesystem::permissions (folder.getFullPathName().toStdString(), std::filesystem::perms::owner_all,
                                   std::filesystem::perm_options::replace);

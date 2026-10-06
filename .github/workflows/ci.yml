@@ -208,9 +208,11 @@ jobs:
       - name: Configure
         shell: bash
         env:
-          CFLAGS: ${{ runner.os == 'Windows' && '/Z7' || '-g' }}
-          CXXFLAGS: ${{ runner.os == 'Windows' && '/Z7' || '-g' }}
-          LDFLAGS: ${{ runner.os == 'Windows' && '/DEBUG /OPT:REF /OPT:ICF' || '' }}
+          # Dash forms on Windows: the bash step's MSYS layer rewrites a
+          # leading "/Z7" into "C:/Program Files/Git/Z7"; cl and link take both.
+          CFLAGS: ${{ runner.os == 'Windows' && '-Z7' || '-g' }}
+          CXXFLAGS: ${{ runner.os == 'Windows' && '-Z7' || '-g' }}
+          LDFLAGS: ${{ runner.os == 'Windows' && '-DEBUG -OPT:REF -OPT:ICF' || '' }}
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=ON -DFLUB_BUILD_APP_TESTS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
