@@ -233,6 +233,12 @@ MacroModulation MacroMap::smartModulation (const AnalysisState& s) noexcept
     return m;
 }
 
+float MacroMap::punchHighBoostScale (float boost) noexcept
+{
+    // smoothstep is exactly 0 up to kPunchEaseFrom, so the scale is exactly 1.
+    return 1.0f - smoothstep (kPunchEaseFrom, kPunchEaseTo, boost);
+}
+
 void MacroMap::apply (const float* base, float* effective, float governorScale, float onboardCap,
                       const MacroModulation* modulation) noexcept
 {
@@ -242,6 +248,18 @@ void MacroMap::apply (const float* base, float* effective, float governorScale, 
     const auto mode = static_cast<ModeValue> (static_cast<int> (std::lround (base[Mode])));
     const auto& info = layout();
     const std::span<const MacroEntry> sets[] = { table (mode), warmthRows (base) };
+
+    // Music Punch at high Boost (docs/11 E04 / E53, owner decision
+    // 2026-10-06): the owner heard Punch's onset lift tick at Boost 100 +
+    // Punch 100 on music; Boost 40 + Punch 100 sounds right and stays as it
+    // is. Swept on the soak's scenes (seed 6), the ticks are the maximizer's
+    // gain turning hard on the lifted onsets (none with Boost's drive row
+    // off) and need Punch's attack rows all but gone at Boost 92 - 100: any
+    // share left (5 - 15 %) still read 2 clicks there. So the rows fade out
+    // from Boost 60 % to 0 at 70 %; up to 60 % the scale is exactly 1, so
+    // every value below is bit-identical. Separate from the Smart attack
+    // multiplier, which also scales Boost's own attack row.
+    const float punchScale = mode == ModeValue::Gaming ? 1.0f : punchHighBoostScale (base[BoostIntensity]);
 
     // The on-board enhancement cap (docs/11 E16): Footsteps and Detail are
     // clamped as inputs, so every row they drive and the mode bands that read
@@ -265,6 +283,8 @@ void MacroMap::apply (const float* base, float* effective, float governorScale, 
             float c = smoothstep (e.start, e.end, v);
             if (e.exponent != 1.0f)
                 c = std::pow (c, e.exponent);
+            if (e.source == MacroSource::M1 && (e.paramId == ClarityAttackDb || e.paramId == ClarityAttackHighDb))
+                c *= punchScale; // Music only (1 in Gaming); x 1 is exact
             const float g = e.governed ? governorScale : 1.0f;
             // Smart macros (docs/11 E34): the content's multiplier on what
             // the row adds; none (nullptr) leaves the sum as it was, bit for bit.

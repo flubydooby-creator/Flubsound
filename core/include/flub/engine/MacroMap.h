@@ -106,6 +106,17 @@ public:
         Footsteps and Detail that reaches the chain while it is fully on. */
     static constexpr float kOnboardCapMacroLimit = 0.30f;
 
+    /** Music Punch at high Boost (docs/11 E04 / E53, owner decision
+        2026-10-06): what Punch's two attack rows (clarity.attack +6 dB,
+        clarity.attackHigh +2.5 dB) add is multiplied by
+          punchHighBoostScale (b) = 1 - smoothstep (kPunchEaseFrom, kPunchEaseTo, b)
+        so it is exactly 1 up to Boost 60 % (bit-identical) and 0 from 70 %:
+        the onset lift goes into a maximizer driven hard enough to tick on
+        it (the soak's Music / Loud scenes, docs/11 E53). Boost's own attack
+        row is not scaled, nor are Gaming's M1 rows (Footsteps). RT-safe. */
+    static constexpr float kPunchEaseFrom = 0.60f, kPunchEaseTo = 0.70f;
+    static float punchHighBoostScale (float boost) noexcept;
+
     /** effective[] <- base[] with all macro contributions applied and clamped.
         Both arrays have param::kNumParams entries. RT-safe.
         onboardCap (docs/11 E16, ProcessingChain::setOnboardEnhancementCap),

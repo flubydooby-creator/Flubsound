@@ -5,6 +5,8 @@
 
 #include "flub/analysis/PeakMeters.h"
 #include "flub/common/Denormals.h"
+#include "flub/common/Math.h"
+#include "flub/engine/MacroMap.h"
 #include "flub/engine/MixEngine.h"
 #include "flub/engine/ProcessingChain.h"
 #include "flub/io/PresetIO.h"
@@ -166,6 +168,68 @@ TEST_CASE ("MacroMap: Boost Intensity is staged and governed")
         const auto& info = layout()[static_cast<size_t> (i)];
         CHECK (eff[static_cast<size_t> (i)] >= info.minValue && eff[static_cast<size_t> (i)] <= info.maxValue);
     }
+}
+
+TEST_CASE ("MacroMap (E04 / E53, owner decision 2026-10-06): Music Punch's attack rows are bit-identical up to Boost 60 %, fade out by 70 %; Boost's own attack row and Gaming Footsteps are not scaled")
+{
+    std::vector<float> base (static_cast<size_t> (kNumParams)), eff (static_cast<size_t> (kNumParams));
+    for (int i = 0; i < kNumParams; ++i)
+        base[static_cast<size_t> (i)] = layout()[static_cast<size_t> (i)].defaultValue;
+    base[Mode] = static_cast<float> (ModeValue::Music);
+    // The unscaled sum, row for row as MacroMap::apply adds it (Boost's
+    // attack row first, then Punch's; governor scale 1).
+    const auto unscaled = [&] (int id, float boost, float punch) {
+        float v = base[static_cast<size_t> (id)];
+        if (id == ClarityAttackDb && boost > 0.0f)
+            v += 2.0f * smoothstep (0.10f, 0.60f, boost) * 1.0f;
+        if (punch > 0.0f)
+            v += (id == ClarityAttackDb ? 6.0f : 2.5f) * smoothstep (0.0f, 1.0f, punch) * 1.0f;
+        return v;
+    };
+    for (float punch : { 1.0f, 0.53f })
+        for (float boost : { 0.0f, 0.3f, 0.5f, 0.6f })
+        {
+            base[BoostIntensity] = boost;
+            base[Macro1] = punch;
+            MacroMap::apply (base.data(), eff.data(), 1.0f);
+            CHECK (eff[ClarityAttackDb] == unscaled (ClarityAttackDb, boost, punch)); // exactly
+            CHECK (eff[ClarityAttackHighDb] == unscaled (ClarityAttackHighDb, boost, punch));
+        }
+    CHECK (MacroMap::punchHighBoostScale (0.0f) == 1.0f);
+    CHECK (MacroMap::punchHighBoostScale (MacroMap::kPunchEaseFrom) == 1.0f);
+    CHECK_NEAR (MacroMap::punchHighBoostScale (0.65f), 0.5, 1e-5);
+    CHECK (MacroMap::punchHighBoostScale (MacroMap::kPunchEaseTo) == 0.0f);
+    CHECK (MacroMap::punchHighBoostScale (1.0f) == 0.0f);
+    float previous = 1.0f;
+    for (int k = 0; k <= 100; ++k)
+    {
+        const float s = MacroMap::punchHighBoostScale (static_cast<float> (k) / 100.0f);
+        CHECK (s <= previous);
+        previous = s;
+    }
+
+    // Boost 65 %: half of Punch's rows; from 70 %: none, Boost's own +2 dB
+    // stays (the onset lift Punch 100 had at Boost 100: +6 / +2.5 dB).
+    base[Macro1] = 1.0f;
+    base[BoostIntensity] = 0.65f;
+    MacroMap::apply (base.data(), eff.data(), 1.0f);
+    CHECK_NEAR (eff[ClarityAttackDb], 2.0 + 3.0, 1e-4);
+    CHECK_NEAR (eff[ClarityAttackHighDb], 1.25, 1e-4);
+    for (float boost : { 0.7f, 1.0f })
+    {
+        base[BoostIntensity] = boost;
+        MacroMap::apply (base.data(), eff.data(), 1.0f);
+        CHECK (eff[ClarityAttackDb] == 2.0f);
+        CHECK (eff[ClarityAttackHighDb] == 0.0f);
+        CHECK (eff[ClarityOn] >= 0.5f);
+    }
+
+    // Gaming: Footsteps' high-band attack (M1) is not Punch: unscaled.
+    base[Mode] = static_cast<float> (ModeValue::Gaming);
+    base[BoostIntensity] = 1.0f;
+    base[Macro1] = 1.0f;
+    MacroMap::apply (base.data(), eff.data(), 1.0f);
+    CHECK (eff[ClarityAttackHighDb] == 2.0f);
 }
 
 TEST_CASE ("MacroMap: glue is armed only while a source that can raise it is off zero")

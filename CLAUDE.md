@@ -92,6 +92,8 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   `ctest` passes. Only three test files needed fixes (`getenv` → `_dupenv_s`, one unused X11 guard).
 - **E51 owner-verified (2026-10-06):** dongle moved to another USB port and the headset switched off / on during per-app
   capture, and sleep / wake: the sound came back by itself every time.
+- **Owner listening (2026-10-06, Music strip via Edge):** Warmth (warmer, same loudness), Width, Clarity, Loudness,
+  Late Night, Podcast & Voice, A/B and the contour's Windows-volume follow all work; Classical & Jazz stays as voiced.
 - **E16 owner-verified:** the owner's headset is a **Turtle Beach Stealth 600PC Gen 3** on its USB dongle; Windows
   names it "Speakers (Stealth 600PC Gen 3)", which matched nothing until a `stealth 600pc` token was added.
 - **E34 done:** a preset's `smart` flag is applied by the app, the plug-in and the CLI (see the docs/11 E34 Status).
@@ -149,11 +151,12 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
 4. **Known open items (software).**
-   - Soak: every click is triaged (docs/11 E53): 4 user-row and 5 fuzz-row clicks are Punch's onset lift into a
-     Boost-driven maximizer (an owner decision on E04; Boost 66 + Punch 53 clicks 8 times in the Speech scene); the rest
-     are the bypass reference's limiter at high input gain and one detector false positive.
+   - Soak: the Punch decision is taken (2026-10-06, docs/11 E04 / E53): Punch's attack fades out from Boost 60 to 70 %,
+     so its ticks at high Boost are gone (bit-identical below 60 %); speech ticks at medium Boost are accepted. Open:
+     Boost's own maximizer ticks at full drive on loud programme (with Punch 0 too), the bypass reference's limiter at
+     high input gain and one detector false positive.
    - E28: the comb row is 18.9 dB against a < 12 dB target.
-   - E11: Classical and Jazz lose 0.72 / 0.44 LU.
+   - E11: Classical and Jazz lose 0.72 / 0.44 LU (the owner keeps the preset as voiced, 2026-10-06).
    - E22: the chat sub-limiter.
    - E07: the 2.00 dB row.
 5. **Gated items** (they need hardware, people or network, not code):

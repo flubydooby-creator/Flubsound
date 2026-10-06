@@ -1307,6 +1307,43 @@ TEST_CASE ("KnownGap closed: kick onset - Punch 100 lifts the kick's first 10 ms
     CHECK_GE (c0 - c1, 0.0);
 }
 
+TEST_CASE ("Punch at high Boost (E04 / E53, owner decision 2026-10-06): Punch 100's kick onset lift is whole at Boost 60, half its attack at 65 and none from 70 (Boost 100 + Punch 100 renders as Boost 100 alone)")
+{
+    // The kick of the case above for 4 s, Music mode, the maximizer on (Boost
+    // engages it). Lift = the Punch 100 output's power over the Punch 0
+    // output's at the same Boost, 0-10 ms after each onset from 1 s on.
+    const int n = samplesOf (4.0);
+    std::vector<float> x (static_cast<size_t> (n));
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs, beat = std::fmod (t, 0.5);
+        x[static_cast<size_t> (i)] = static_cast<float> (0.5 * std::exp (-beat * 18.0) * std::sin (kTwoPi * (50.0 + 80.0 * std::exp (-beat * 30.0)) * beat));
+    }
+    const auto input = stereoOf (x);
+    std::vector<Window> w0;
+    for (double k = 1.0; k < 3.9; k += 0.5)
+        w0.push_back ({ samplesOf (k), samplesOf (k) + samplesOf (0.010) });
+    const auto at = [&] (float boost, float punch) {
+        auto o = boosted (ModeValue::Music, boost);
+        o.macros.push_back ({ "punch", punch });
+        return render (input, resolve (o));
+    };
+    const auto lift = [&] (const Channels& a, const Channels& b) { return powerDb (meanPower (a, w0)) - powerDb (meanPower (b, w0)); };
+    const auto b60 = at (60.0f, 0.0f), b65 = at (65.0f, 0.0f), b100 = at (100.0f, 0.0f);
+    const auto p60 = at (60.0f, 100.0f), p65 = at (65.0f, 100.0f), p100 = at (100.0f, 100.0f);
+    const double l60 = lift (p60, b60), l65 = lift (p65, b65), l100 = lift (p100, b100);
+    measured ("Punch 100 onset lift over Punch 0 at Boost 60", l60, "dB");
+    measured ("Punch 100 onset lift over Punch 0 at Boost 65", l65, "dB");
+    measured ("Punch 100 onset lift over Punch 0 at Boost 100", l100, "dB");
+    CHECK_NEAR (l60, 2.99, 0.3); // unchanged: Boost <= 60 % is bit-identical
+    CHECK_NEAR (l65, 2.07, 0.3);
+    CHECK (l65 > 0.0);
+    CHECK (l65 < l60);
+    // From Boost 70 % Punch's attack rows add nothing: the same effective
+    // values as Punch 0 (Clarity is on in the defaults), so the same output.
+    CHECK (p100 == b100);
+}
+
 TEST_CASE ("KnownGap closed: an HF step under an explosion's tail keeps its isolated lift within 1 dB at Gaming Boost 100 + Impact 100 (E04 step 4)")
 {
     // docs/11 E04 Done-when. An explosion (a 45 Hz sine and noise under

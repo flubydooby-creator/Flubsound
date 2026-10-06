@@ -737,12 +737,13 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
     // ---- Batch 4 - 5 features and the module cards (docs/12-feature-guide.md) ----
     const ParamSetting music = setting ("mode", "Music"), gaming = setting ("mode", "Gaming");
 
-    // Punch and Impact against a driven maximizer (docs/11 E04 step 4, E20).
+    // Punch and Impact against a driven maximizer (docs/11 E04 step 4, E20; Punch's attack is off from
+    // Boost 70 %, docs/11 E04 owner decision 2026-10-06, so the Punch pair's sides are the same).
     add ("music-punch-boost-100", "Music - Punch 0 -> 100 % at Boost 100", "music", { music, setting ("boost", "100%") },
          { music, setting ("boost", "100%"), setting ("macro.1", "100%") }, false,
-         "Both sides run Boost 100, so the maximizer is working. Punch should still put the kick's and snare's first "
-         "milliseconds ahead of their body - a click and a thump at the start of each hit - with the level between hits "
-         "unchanged. If the hits only get louder overall, or the mix pumps, Punch is not doing its job.");
+         "Both sides run Boost 100, so the maximizer is working hard. Punch's attack fades out from Boost 60 to 70 % "
+         "(owner decision 2026-10-06: its onset lift ticked in the maximizer up there), so the two sides should sound "
+         "the same: no ticks at the start of the kicks and snares on the after side. Punch's own sound is in music-punch.");
     add ("gaming-impact-boost-100", "Gaming - Impact 0 -> 100 % at Boost 100", "game", { gaming, setting ("boost", "100%") },
          { gaming, setting ("boost", "100%"), setting ("macro.3", "100%") }, false,
          "Both sides run Boost 100. The explosions and gunshots start with a bigger low-end thump; the rumble after them "

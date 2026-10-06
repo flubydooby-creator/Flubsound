@@ -223,7 +223,7 @@ The macros add to the preset's own values; they never replace them. At 0 a macro
 ### Punch (Music macro 1)
 
 - **What it is:** harder drum hits: the attack of kicks and snares, not a louder mix.
-- **What it does to the sound:** the transient shaper's attack +6 dB and its high band (above 4 kHz) +2.5 dB more, through the 3-band shaper of [E04](11-enhancement-report.md#e04) step 3 (Punch no longer drives Tighten, which cut the kick's first 10 ms). Target (E04 Done-when): a kick's 0–10 ms lift at least 2 dB above its 10–30 ms lift at Punch 100; before the remap it was +0.68 dB. Demo pack on the batch 5 tree: 8 / 16 kHz +1.6 / +3.7 dB (the beater's click and the hats' ticks), limiter GR max −0.8 → −2.7 dB; at Boost 100 16 kHz +6.0 dB and limiter GR −5.8 → −6.5 dB. Measured after the remap (E04 Status): Punch 100 lifts a kick's first 10 ms +5.43 dB against +2.52 dB for its 10–30 ms, onset minus body **+2.91 dB** (target met; +0.68 dB before).
+- **What it does to the sound:** the transient shaper's attack +6 dB and its high band (above 4 kHz) +2.5 dB more, through the 3-band shaper of [E04](11-enhancement-report.md#e04) step 3 (Punch no longer drives Tighten, which cut the kick's first 10 ms). Target (E04 Done-when): a kick's 0–10 ms lift at least 2 dB above its 10–30 ms lift at Punch 100; before the remap it was +0.68 dB. Demo pack on the batch 5 tree: 8 / 16 kHz +1.6 / +3.7 dB (the beater's click and the hats' ticks), limiter GR max −0.8 → −2.7 dB; at Boost 100 (before the change below) 16 kHz +6.0 dB and limiter GR −5.8 → −6.5 dB. Measured after the remap (E04 Status): Punch 100 lifts a kick's first 10 ms +5.43 dB against +2.52 dB for its 10–30 ms, onset minus body **+2.91 dB** (target met; +0.68 dB before). At Boost above 60 % Punch's attack eases off (to none from 70 %) so it does not tick in the maximizer (owner decision 2026-10-06, [E04](11-enhancement-report.md#e04)).
 - **Listen for:** the first few milliseconds of each kick and snare: a click and a thump at the start, with the level between hits unchanged. If the hits only get louder, or the top end gets splashy, Punch is overdone.
 - **Demo pairs:** `music-punch`, `music-punch-boost-100`, `attack-high`
 - **Limits:** the remap re-voiced every factory preset that uses Punch, Footsteps, Impact or Detail (21 of 30; integrated loudness of their golden renders −0.20 … +0.05 LU, e.g. Rock & Metal −17.10 → −17.30 LUFS): they sound different from batch 4, most on dense mixes (Punch's bands read fewer of a dense mix's small onsets than the full-band shaper did).
@@ -733,7 +733,7 @@ One row per feature, for the owner to fill in and return. Play the pair (in the 
 | 3 | Boost 50 (Gaming) | `gaming-boost-50` | detail and direction first, hardly louder | | |
 | 4 | Boost 100 (Gaming) | `gaming-boost-100` | steps and placement clearer; no pumping after blasts | | |
 | 5 | Punch † | `music-punch` | a click and thump at each hit's start, no louder mix | | |
-| 6 | Punch at Boost 100 † | `music-punch-boost-100` | the hits' starts still ahead of their bodies | | |
+| 6 | Punch at Boost 100 † | `music-punch-boost-100` | the same on both sides: no ticks at the hits' starts (Punch's attack is off from Boost 70 %) | | |
 | 7 | Width | `music-width` | pad and hats wider; nothing lost in mono | | |
 | 8 | Clarity | `music-clarity` | voice and hats forward, less boxy low mids | | |
 | 9 | Loudness (level) | `music-loudness` | louder and denser; drums jump less | | |
