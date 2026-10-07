@@ -162,32 +162,32 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **Merge of 2026-10-07:** the six branches above were merged with an independent audit; the device soak now turns
   *Automatic buffer size* off before its device opens (R1.5 x R1.1), the callback writes the soak tap after the latency
   probe, and the docs' stale "CI cannot run" statements are updated (commit 8fda1ff).
+- **R1.2 audio backends (2026-10-07, merged after the six above; Linux code CI-verified only):** the native PipeWire device type opens `libpipewire-0.3.so.0` at run time (`pipewire/PipeWireLibrary.*`: dlopen and a dlsym table; the app links no libpipewire, CI checks there is no NEEDED entry and runs the app with the library hidden), so one binary starts without PipeWire and keeps ALSA / JACK. A first start prefers the node only when PipeWire plays the audio (a server answers and has an output sink that is not Flubsound's, `pipewire::serverPlaysAudio`), so a PulseAudio desktop keeps ALSA (pulse-alsa). The node counts its own xruns (`XrunCounter`: a cycle finished late or cycles missed; the first two cycles of a run, after a restart or a new driver are not judged, and the device takes its baseline at its first callback) for the header's `xr` and the overload watchdog, stamps each block with the driver's time for the E45 timing, reports a removed node or a lost server to the host's E51 recovery directly (JUCE 9.0.2 drops `audioDeviceError`; a test pins the gap) and drops a stale node error on close. Final CI run 37605340907 (branch wip/pipewire-backend, all 12 jobs green): no start-up xrun in 20 of 20 loops (before 4-9 of 20), wall clock 2.6664-2.6671 ms mean against 2.667 ms. ASIO is a build option: `-DFLUB_ASIO=ON` with `FLUB_ASIO_SDK_DIR` (an SDK you downloaded) or `FLUB_ASIO_FETCH` (the official SDK 2.3.4 archive, SHA-256 pinned, used under its GPLv3 option; `cmake/FlubAsio.cmake`), off by default; CI's non-blocking `asio` job builds and tests it and uploads nothing. Settings > Audio shows a **DEVICE TYPE** note for ASIO and Windows Audio (Exclusive Mode) (single client; the Windows way in for other apps: per-app capture with the app's own output moved, a virtual cable on exclusive mode's input, or a shared type) and for PipeWire, right under the device selector (so the selector never moves) and above R1.1's LATENCY panel (`tests/app/test_app_device_types.cpp` checks both places). Owner decision: the ASIO licence for a published build (docs/02 §6: Steinberg's proprietary licence with a signed agreement, or GPLv3 for the whole build). Not yet tried: a real ASIO driver, exclusive mode with the per-app way in, a Linux desktop or real sound card. MSVC here: flub_app_tests 378/378, full ctest passes.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
-### IN FLIGHT (2026-10-07): seven requirement gaps, unmerged work in local worktree branches
+### The seven requirement gaps of 2026-10-07: ALL SEVEN MERGED
 
 The owner asked to close TRACEABILITY's "Partially implemented" rows R1.1, R1.2, R4.5, R4.4, R1.5, R5.3 and the
 macOS / Linux platform gap. Each was built in its own git worktree (`.claude/worktrees/wf_ac6c1e42-cb8-N`, each with
-its own `build-wt`), reviewed by an independent agent, then fixed. Items 1 and 3-7 are MERGED (8fda1ff, after a merge
-audit); only item 2 (the native PipeWire backend) is still on its branch.
-Branches (local; base 51abe53), status at the time of writing:
+its own `build-wt`), reviewed by an independent agent, then fixed. All seven items are now MERGED into this branch:
+items 1 and 3-7 first (merge audit fixes in 8fda1ff), then item 2, R1.2, on top (its six commits from 735d49b, merge
+fixes in 975afb9: Settings > Audio is the selector, the DEVICE TYPE note, then LATENCY). The worktree branches
+(base 51abe53) are kept for reference; nothing on them is left to merge:
 
 | N | Branch `worktree-wf_ac6c1e42-cb8-N` | Item | State |
 |---|---|---|---|
-| 1 | 47de1a6 + uncommitted fix edits | R1.1 live "Measure latency" + device buffer per profile | review fixes were in progress (uncommitted) |
-| 2 | 68dea16 (also pushed as `origin/wip/pipewire-backend`) | R1.2 native PipeWire backend (dlopen) + ASIO build option | implementation iterating on CI; not reviewed yet |
-| 3 | 6cb10d2 | R4.5 auto-move a captured app's own output (Windows), Settings > Routing input map (Linux) | reviewed + fixed |
-| 4 | 4c91ebf | R4.4 hotkey conflicts first-class, Bypass default Ctrl+Alt+Shift+B, rebinding | reviewed + fixed |
-| 5 | e828318 | R1.5 headless real-device soak (`--device-soak`, S/PDIF output) | review was in progress |
-| 6 | 7ab6d26 + uncommitted fix edits | R5.3 TinyNet runtime + trained voice-cleanup model (experimental, off) | review fixes were in progress (uncommitted) |
-| 7 | 3b27287 (also `origin/wip/macos-osd`) | macOS OSD as a non-activating NSPanel (CI-verified) | reviewed + fixed |
+| 1 | 7ce96c8 | R1.1 live "Measure latency" + device buffer per profile | merged (5b7e1d7, 74f3c7d) |
+| 2 | 35128e4 (CI runs on `origin/wip/pipewire-backend`) | R1.2 native PipeWire backend (dlopen) + ASIO build option | reviewed + fixed, merged (735d49b .. e0b9d1a, 975afb9) |
+| 3 | 6cb10d2 | R4.5 auto-move a captured app's own output (Windows), Settings > Routing input map (Linux) | merged (6ec1907, b2b3005) |
+| 4 | 4c91ebf | R4.4 hotkey conflicts first-class, Bypass default Ctrl+Alt+Shift+B, rebinding | merged (5347ea5, e1d90e5) |
+| 5 | 3cb3561 | R1.5 headless real-device soak (`--device-soak`, S/PDIF output) | merged (4aff55a, 5ac729b) |
+| 6 | baf241a | R5.3 TinyNet runtime + trained voice-cleanup model (experimental, off) | merged (95a6841, 8105f8a) |
+| 7 | ce1666e (CI runs on `origin/wip/macos-osd`) | macOS OSD as a non-activating NSPanel (CI-verified) | merged (d1e3daa, 9e1cb5b, ec66aa3) |
 
-To finish: in each worktree check `git status` (commit or finish uncommitted fixes; do not delete a worktree with
-uncommitted changes), build and run its tests, review anything not reviewed (items 2 and 5), then cherry-pick the
-branches onto this branch one at a time (expect small conflicts in docs/TRACEABILITY.md, docs/11, docs/06, docs/12,
-AppSettings / SettingsDialog), run the full ctest, push, rebuild the app. The owner still has to: run the latency
-measurement (headset mic against an ear cup), decide on the ASIO SDK licence, and decide whether to install WSL
-for a real Linux test.
+Left to do: push this branch (CI then runs the seven items together for the first time; only R1.2 and the macOS
+OSD have run on CI, on their own branches; the others were built with MSVC only), rebuild the app. The owner still has to: run the latency measurement
+(headset mic against an ear cup), decide on the ASIO SDK licence, and decide whether to install WSL for a real
+Linux test.
 
 ### Next steps for the local session, in priority order
 
