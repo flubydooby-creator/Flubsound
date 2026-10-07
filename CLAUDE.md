@@ -71,20 +71,26 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 
 ### What was verified where
 
-- **CI (GitHub Actions)** was last green at commit 714b601 (after batch 2 and the Warmth fix). CI has **not** run for
-  batches 3–5: the repo went private and Actions billing blocks every job ("recent account payments have failed or
-  your spending limit needs to be increased").
-- **Batches 3–5 were verified only on Linux in the cloud container.**
-  - Builds: gcc and clang Release with app, plug-in, tools and app tests.
-  - Test runs: flub_tests and flub_app_tests, plain and under xvfb.
-  - Checks: the golden step; RTSan, ASan+UBSan, the no-X11 build, the fuzzers, a MinGW cross-build of the Windows
-    platform code, packaging, the offline soak and headless screenshots.
-- **Never compiled on MSVC or Apple Clang so far:** anything added in batches 3–5. The risky spots are
-  `Ctl.cpp`'s Winsock AF_UNIX path, the OSD's WS_EX styles and fullscreen query (SHQueryUserNotificationState), and the
-  arm64 scalar path of the Enhanced virtualiser.
-- **Final hand-over check (2026-09-30, Linux):** a fresh gcc Release build (app, plug-in, tools, tests, warnings as
-  errors), `ctest` under xvfb (flub_tests and flub_app_tests) and the golden step (`FLUB_GOLDEN_REFERENCE=1`) all passed.
-- **Real hardware:** only the per-app capture and the double-audio fix have been confirmed, on the owner's PC.
+- **CI (GitHub Actions) runs again; the repository is public.** Billing blocked every job up to run 36695058369 (the
+  hand-over commit 8e5a11c). Jobs start again from run 36783725945 (2026-09-30), but core failed on Apple Clang (from
+  2026-10-01 on gcc too), so the app jobs were skipped, until the CI fixes c2d05e5 / caccf81 (2026-10-06) and 51abe53.
+  **First fully green run after the hand-over: 37572308549** (51abe53, 2026-10-07, all 11 jobs).
+  The seven items merged on 2026-10-07 first ran together in 37634884865 (70a2a98): 11 of 12 green, the non-blocking
+  `pipewire` job failed on an idle xrun (docs/11 E48). The code now at HEAD (3554497) ran all 12 jobs green, `asio`
+  included, in 37649158870 on `wip/pipewire-xrun`.
+  The branch's own run on that commit, 37654557630, ended as a failure: its 7 core, sanitizer, RTSan and fuzz jobs
+  are green, but the app, `asio` and `pipewire` jobs never started and gh shows no failed step or error (worth a re-run).
+- **Batches 3–5 are built and tested on CI:** MSVC (windows-2022), gcc and clang (ubuntu-24.04), Apple Clang
+  (macos-14, arm64), RTSan, ASan + UBSan and the fuzzers; app, plug-in, `flub_app_tests` and pluginval on all three
+  OSes; the gcc golden-render step; the `pipewire` job. Locally on MSVC 19.51 too (step 1 below). The former risky
+  spots (`Ctl.cpp`'s Winsock AF_UNIX path, the OSD's WS_EX styles and fullscreen query, the Enhanced virtualiser's
+  arm64 scalar path) build and pass there. Until then batches 3–5 had run only on Linux in the cloud container.
+- **Real hardware (owner-verified, Windows 11, Turtle Beach Stealth 600PC Gen 3 on its USB dongle):** headset matching
+  (E16); per-app capture (Edge onto the Music strip) with the double-audio fix; recovery after a dongle re-plug into
+  another USB port, headset off / on and sleep / wake (E51); by ear on the Music strip: Warmth, Width, Clarity,
+  Loudness, Late Night, Podcast & Voice, A/B, the contour following the Windows volume, and the Punch ticks on speech
+  at Boost ~70 % (E53) and their fix ("sounds a little better", E04). On the same PC but not the headset: the R1.5
+  device soak (S/PDIF output), the R4.5 router check (build 26200) and the R4.4 hotkey probe.
 
 ### Local session progress (Windows, from 2026-09-30)
 
@@ -153,11 +159,11 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   (`chromagram`, main / strip, 15 s history, key in the header) and *Song key* (`key`, strip) (docs/06 §6.4.2,
   docs/12 §8, `tests/app/test_app_music_views.cpp`). Checked only on synthetic tones and the app's own test music
   (Am-F-C-G with drums: Am, F, C read, A minor); not yet heard / seen on real songs on the owner's screen.
-- **R1.1 review fixes (2026-10-07, merged):** with a programme playing, *Through Flubsound* fades the output out at its start and opens it as the first sweep arrives, so the programme's tail no longer sets the −18 dBFS cap (fake device, programme at −1.1 dBFS: cap −16.94 → 0.00 dB, sweeps −38.8 → −21.9 dBFS). *Both* hands both passes over at once, chained on the audio thread, so nothing plays between them (was 0–500 ms of programme). A Through cancel brings the programme back uncapped, and the probe pointers are loaded with seq_cst. The buffer follows the profile chosen by hand, stored as `device.bufferProfile`, so the overload response's step does not shrink it after a restart. On the first start with *Automatic buffer size*, a buffer size picked before keeps Automatic off. The back-off now doubles the size per step, with a 5 s hold. The Game strip measures 7 samples (0.15 ms) more than its reported engine latency because of the virtualiser, and the result says so. Tested with fake devices only (330/330 app tests); not on CI, not on the headset.
+- **R1.1 review fixes (2026-10-07, merged):** with a programme playing, *Through Flubsound* fades the output out at its start and opens it as the first sweep arrives, so the programme's tail no longer sets the −18 dBFS cap (fake device, programme at −1.1 dBFS: cap −16.94 → 0.00 dB, sweeps −38.8 → −21.9 dBFS). *Both* hands both passes over at once, chained on the audio thread, so nothing plays between them (was 0–500 ms of programme). A Through cancel brings the programme back uncapped, and the probe pointers are loaded with seq_cst. The buffer follows the profile chosen by hand, stored as `device.bufferProfile`, so the overload response's step does not shrink it after a restart. On the first start with *Automatic buffer size*, a buffer size picked before keeps Automatic off. The back-off now doubles the size per step, with a 5 s hold. The Game strip measures 7 samples (0.15 ms) more than its reported engine latency because of the virtualiser, and the result says so. Tested with fake devices only (330/330 app tests; green on CI since run 37634884865); not on the headset.
 - **R4.5 review fixes (2026-10-07, merged):** measured here (build 26200, opt-in real check): Windows moves only streams an app opens after a per-app device change, in both directions. So an app that is playing when Flubsound puts it back (unassign / option off / quit) keeps playing to S/PDIF and, no longer captured, is not heard until it restarts its playback. Flubsound now says so (amber "Not heard" notice on the routing panel and in Settings › Routing; a log line at quit), and the texts no longer promise otherwise. Moves are now kept per executable path (two game.exe files, Discord's update folders). A crash during a re-point keeps the record ("from" in the journal). The automatic silent device skips outputs named Speakers / Headphones / Headset and any output an unassigned app plays to. The input-map line says when the device input is not processed. Return in the fix dialog is back on "Open sound settings". `canMoveAppOutput()` defaults to false (only Windows says true). Owner check still open: does Edge or a game play to the headset again after an unassign without a reload?
 - **R4.4 review fixes (2026-10-07, merged):** clicking reset, the switch, Pick a free one or typed entry in Settings › Hotkeys now ends a recording first, and resuming always re-registers. Before, a chord recorded after clicking reset was saved but not registered while the page said all were registered. The recorder refuses system chords (Alt+F4, Alt+Space, Ctrl+Alt+Delete, F1-F12 alone) and, when recorded, one-modifier app chords such as Ctrl+C; typing one still takes it. Pick a free one offers only Ctrl+Alt+Shift alternatives (Ctrl+Alt+Shift+F1-F11 replace the Ctrl+Alt+letter ones, which AltGr types on); a probe on the owner's PC found them free. The row says "Could not register", the notice lists every hotkey still failing, Space / Shift+F10 / screen-reader actions reach the field, and Windows maps AZERTY and Cyrillic keys to their letter or digit key. MSVC: flub_tests pass; flub_app_tests 321 of 321 in a second ctest run (the first full run had one unrelated route-journal timing failure that then passed 5 of 5). Owner check: in the running app, click a chord, press Space and record one; click reset during a recording; check that Alt+F4 is refused.
-- **R1.5 real-device soak (2026-10-07, docs/11 E53):** `Flubsound Pro --device-soak --device "<output>" [--type ...] [--buffer n|min] [--minutes m] [--report f.json] [--dump t,...] [--allow-audible]` (shell/DeviceSoak.*, docs/06 §11.1; rows: `tools/scripts/device-soak.py`, which redirects the output - the app is a windowed program) plays the full engine on one pinned output (the host only asks for that output; a device JUCE opens by itself is silenced and closed) with temporary settings (never created or written), generated game + music inside the callback and seeded automation (15 action kinds), and reports callback timing, xruns, CPU, restarts / errors, memory and the discontinuity detector's findings on the engine's output as handed to the device (device underruns are not visible; late callbacks are the proxy) with a triage class. It refuses the system default output without --allow-audible, closes its device before freeing its source and tap, and `--replay <report.json>` re-runs the session on a virtual device (a detection that comes back - same type within one block + 3 ms of the same frame - is the DSP's own; a damaged report exits 2). Soak only on "Digital Audio (S/PDIF) (High Definition Audio Device)" (silent), never the headset. Results on the owner's PC (busy with other builds; rows ran on earlier builds of the soak driver with the same real-time path): Low Latency 480 samples 10 + 30 min and shared 10 min: 0 late / over-budget callbacks, 0 dropouts in the engine's output, 0 NaN / restarts; 128 samples: 0.4 % overruns while builds ran beside it, 0.008 % in a quiet rerun; all 11 detections of rows 1-2 came back in the replay at the same frame (DC steps at the threshold on explosions, one click from the fold headroom's instant attack, E28a - owner decision), so none came from the real-time path. Review fixes (3cb3561): --dump near the start, damaged --replay reports and a stopped virtual device no longer crash or spin; the test loop gcc / clang reject is fixed. Not yet on CI (gcc / clang / Apple Clang never compiled it; clang-tidy 22's front end is clean here).
-- **R5.3 neural (2026-10-07, merged; MSVC only until CI runs it):** an in-house inference runtime, TinyNet (`core/include/flub/neural/TinyNet.h`: Dense / causal Conv1D / GRU, the validated `.fnn` format with CRC and int8 rows, allocation-free `run()`), `ControlKind::BandGains` (an STFT band-gain renderer in `AsyncModelProcessor`, L = frame x (2 + safety); its circular-convolution wrap measured 56 dB under the output at worst, `tools/neural/renderer_aliasing.py`) and a first trained model, the experimental **neural voice cleanup** for the Chat strip (`VoiceCleanupRunner`, 51 k params, `presets/neural/voice-cleanup.fnn` embedded in `core/src/neural/VoiceCleanupModelData.cpp`), trained here with numpy only on 4 h of synthetic speech in noise (`tools/neural/`). Held-out synthetic set: +4.7 dB SNR and -19.9 dB between words (spectral gate +3.5 / -6.1 dB, Quality only), clean speech -0.24 dB (gate -0.04); 27 us per 5 ms frame. Off by default: Settings > Processing > Voice chat (`chat.neuralCleanup`) with a fixed-height Status line that names the fix when it cannot run; +960 samples on the Chat strip only at 48 kHz / 480 in Balanced or Quality (512-sample buffers: 25 ms, Quality only). The host resolves the safety frames for every engine it builds (`AudioEngineHost::NeuralSafety::OneDeviceBuffer`), and neural models follow their strip by name on a layout change. A paced real-time test misses 0 of 196 frames. CLI `--neural voice-cleanup`; demo pair `neural-voice-cleanup` (63 pairs; `demo --only neural-voice-cleanup`; the scene's noise sits 17.7 dB under the voice). Retrain with `python tools/neural/train_voice_cleanup.py all --work <dir> [--cli <flubsound-cli>]`; the .fnn, the embedded .cpp and `tests/neural_reference_data.h` change together. Docs: 03 §16, 09 §1.1, 11 E35 / E23, 12. Owner: listen to `neural-voice-cleanup`, then try the switch on real Discord audio.
+- **R1.5 real-device soak (2026-10-07, docs/11 E53):** `Flubsound Pro --device-soak --device "<output>" [--type ...] [--buffer n|min] [--minutes m] [--report f.json] [--dump t,...] [--allow-audible]` (shell/DeviceSoak.*, docs/06 §11.1; rows: `tools/scripts/device-soak.py`, which redirects the output - the app is a windowed program) plays the full engine on one pinned output (the host only asks for that output; a device JUCE opens by itself is silenced and closed) with temporary settings (never created or written), generated game + music inside the callback and seeded automation (15 action kinds), and reports callback timing, xruns, CPU, restarts / errors, memory and the discontinuity detector's findings on the engine's output as handed to the device (device underruns are not visible; late callbacks are the proxy) with a triage class. It refuses the system default output without --allow-audible, closes its device before freeing its source and tap, and `--replay <report.json>` re-runs the session on a virtual device (a detection that comes back - same type within one block + 3 ms of the same frame - is the DSP's own; a damaged report exits 2). Soak only on "Digital Audio (S/PDIF) (High Definition Audio Device)" (silent), never the headset. Results on the owner's PC (busy with other builds; rows ran on earlier builds of the soak driver with the same real-time path): Low Latency 480 samples 10 + 30 min and shared 10 min: 0 late / over-budget callbacks, 0 dropouts in the engine's output, 0 NaN / restarts; 128 samples: 0.4 % overruns while builds ran beside it, 0.008 % in a quiet rerun; all 11 detections of rows 1-2 came back in the replay at the same frame (DC steps at the threshold on explosions, one click from the fold headroom's instant attack, E28a - owner decision), so none came from the real-time path. Review fixes (3cb3561): --dump near the start, damaged --replay reports and a stopped virtual device no longer crash or spin; the test loop gcc / clang reject is fixed. Built and tested in CI's three app jobs since run 37634884865.
+- **R5.3 neural (2026-10-07, merged; green on CI since run 37634884865, with the macOS worker fix 70a2a98):** an in-house inference runtime, TinyNet (`core/include/flub/neural/TinyNet.h`: Dense / causal Conv1D / GRU, the validated `.fnn` format with CRC and int8 rows, allocation-free `run()`), `ControlKind::BandGains` (an STFT band-gain renderer in `AsyncModelProcessor`, L = frame x (2 + safety); its circular-convolution wrap measured 56 dB under the output at worst, `tools/neural/renderer_aliasing.py`) and a first trained model, the experimental **neural voice cleanup** for the Chat strip (`VoiceCleanupRunner`, 51 k params, `presets/neural/voice-cleanup.fnn` embedded in `core/src/neural/VoiceCleanupModelData.cpp`), trained here with numpy only on 4 h of synthetic speech in noise (`tools/neural/`). Held-out synthetic set: +4.7 dB SNR and -19.9 dB between words (spectral gate +3.5 / -6.1 dB, Quality only), clean speech -0.24 dB (gate -0.04); 27 us per 5 ms frame. Off by default: Settings > Processing > Voice chat (`chat.neuralCleanup`) with a fixed-height Status line that names the fix when it cannot run; +960 samples on the Chat strip only at 48 kHz / 480 in Balanced or Quality (512-sample buffers: 25 ms, Quality only). The host resolves the safety frames for every engine it builds (`AudioEngineHost::NeuralSafety::OneDeviceBuffer`), and neural models follow their strip by name on a layout change. A paced real-time test misses 0 of 196 frames. CLI `--neural voice-cleanup`; demo pair `neural-voice-cleanup` (63 pairs; `demo --only neural-voice-cleanup`; the scene's noise sits 17.7 dB under the voice). Retrain with `python tools/neural/train_voice_cleanup.py all --work <dir> [--cli <flubsound-cli>]`; the .fnn, the embedded .cpp and `tests/neural_reference_data.h` change together. Docs: 03 §16, 09 §1.1, 11 E35 / E23, 12. Owner: listen to `neural-voice-cleanup`, then try the switch on real Discord audio.
 - **E56 OSD on macOS and X11 (2026-10-07, CI-verified):** on macOS the OSD sits in its own non-activating `NSPanel` (`app/Source/ui/OsdNative_mac.mm`). It never becomes the key or main window, ignores the mouse and is set to show on every Space and over fullscreen apps. On X11 it has an empty input shape (`OsdNative_linux.cpp`): input rectangles 1 → 0, and the query is now error-checked, so a failed query reads -1, not 0. `test_app_osd.cpp` asserts the focus on all three OSes. On the macOS runner it first makes the test process the active app with a key window (`tests/app/AppTestSupport_mac.mm`); the CI line reads "this app active yes, key window the focus holder's, unchanged by the OSD". The CI Linux app job runs under Xvfb and every app job uses `ctest -V`. Runs 37580674924 (36e2c33), 37585159151 (3b27287, review fixes) and 37588059080 (ce1666e) on branch wip/macos-osd: all 11 jobs green. Not yet tried on a real Mac or a Linux desktop with a fullscreen game.
 - **Merge of 2026-10-07:** the six branches above were merged with an independent audit; the device soak now turns
   *Automatic buffer size* off before its device opens (R1.5 x R1.1), the callback writes the soak tap after the latency
@@ -165,43 +171,37 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **R1.2 audio backends (2026-10-07, merged after the six above; Linux code CI-verified only):** the native PipeWire device type opens `libpipewire-0.3.so.0` at run time (`pipewire/PipeWireLibrary.*`: dlopen and a dlsym table; the app links no libpipewire, CI checks there is no NEEDED entry and runs the app with the library hidden), so one binary starts without PipeWire and keeps ALSA / JACK. A first start prefers the node only when PipeWire plays the audio (a server answers and has an output sink that is not Flubsound's, `pipewire::serverPlaysAudio`), so a PulseAudio desktop keeps ALSA (pulse-alsa). The node counts its own xruns (`XrunCounter`: a cycle finished late or cycles missed; the first two cycles of a run, after a restart or a new driver are not judged, and the device takes its baseline at its first callback) for the header's `xr` and the overload watchdog, stamps each block with the driver's time for the E45 timing, reports a removed node or a lost server to the host's E51 recovery directly (JUCE 9.0.2 drops `audioDeviceError`; a test pins the gap) and drops a stale node error on close. Final CI run 37605340907 (branch wip/pipewire-backend, all 12 jobs green): no start-up xrun in 20 of 20 loops (before 4-9 of 20), wall clock 2.6664-2.6671 ms mean against 2.667 ms. ASIO is a build option: `-DFLUB_ASIO=ON` with `FLUB_ASIO_SDK_DIR` (an SDK you downloaded) or `FLUB_ASIO_FETCH` (the official SDK 2.3.4 archive, SHA-256 pinned, used under its GPLv3 option; `cmake/FlubAsio.cmake`), off by default; CI's non-blocking `asio` job builds and tests it and uploads nothing. Settings > Audio shows a **DEVICE TYPE** note for ASIO and Windows Audio (Exclusive Mode) (single client; the Windows way in for other apps: per-app capture with the app's own output moved, a virtual cable on exclusive mode's input, or a shared type) and for PipeWire, right under the device selector (so the selector never moves) and above R1.1's LATENCY panel (`tests/app/test_app_device_types.cpp` checks both places). Owner decision: the ASIO licence for a published build (docs/02 §6: Steinberg's proprietary licence with a signed agreement, or GPLv3 for the whole build). Not yet tried: a real ASIO driver, exclusive mode with the per-app way in, a Linux desktop or real sound card. MSVC here: flub_app_tests 378/378, full ctest passes.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
-### The seven requirement gaps of 2026-10-07: ALL SEVEN MERGED
+### Merged 2026-10-07
 
-The owner asked to close TRACEABILITY's "Partially implemented" rows R1.1, R1.2, R4.5, R4.4, R1.5, R5.3 and the
-macOS / Linux platform gap. Each was built in its own git worktree (`.claude/worktrees/wf_ac6c1e42-cb8-N`, each with
-its own `build-wt`), reviewed by an independent agent, then fixed. All seven items are now MERGED into this branch:
-items 1 and 3-7 first (merge audit fixes in 8fda1ff), then item 2, R1.2, on top (its six commits from 735d49b, merge
-fixes in 975afb9: Settings > Audio is the selector, the DEVICE TYPE note, then LATENCY). The worktree branches
-(base 51abe53) are kept for reference; nothing on them is left to merge:
-
-| N | Branch `worktree-wf_ac6c1e42-cb8-N` | Item | State |
-|---|---|---|---|
-| 1 | 7ce96c8 | R1.1 live "Measure latency" + device buffer per profile | merged (5b7e1d7, 74f3c7d) |
-| 2 | 35128e4 (CI runs on `origin/wip/pipewire-backend`) | R1.2 native PipeWire backend (dlopen) + ASIO build option | reviewed + fixed, merged (735d49b .. e0b9d1a, 975afb9) |
-| 3 | 6cb10d2 | R4.5 auto-move a captured app's own output (Windows), Settings > Routing input map (Linux) | merged (6ec1907, b2b3005) |
-| 4 | 4c91ebf | R4.4 hotkey conflicts first-class, Bypass default Ctrl+Alt+Shift+B, rebinding | merged (5347ea5, e1d90e5) |
-| 5 | 3cb3561 | R1.5 headless real-device soak (`--device-soak`, S/PDIF output) | merged (4aff55a, 5ac729b) |
-| 6 | baf241a | R5.3 TinyNet runtime + trained voice-cleanup model (experimental, off) | merged (95a6841, 8105f8a) |
-| 7 | ce1666e (CI runs on `origin/wip/macos-osd`) | macOS OSD as a non-activating NSPanel (CI-verified) | merged (d1e3daa, 9e1cb5b, ec66aa3) |
-
-Left to do: push this branch (CI then runs the seven items together for the first time; only R1.2 and the macOS
-OSD have run on CI, on their own branches; the others were built with MSVC only), rebuild the app. The owner still has to: run the latency measurement
-(headset mic against an ear cup), decide on the ASIO SDK licence, and decide whether to install WSL for a real
-Linux test.
+The seven requirement items are merged into this branch: R1.1 latency measurement + automatic buffer, R1.2 PipeWire
+native + ASIO option, R1.5 real-device soak, R4.4 hotkey conflicts, R4.5 move-away routing + R4.6 input map, R5.3
+TinyNet + experimental neural voice cleanup, E56 macOS / X11 OSD (merge fixes 8fda1ff, 975afb9). After the merge:
+the neural worker's macOS scheduling (70a2a98) and the PipeWire xrun case that attributes an idle xrun to a
+scheduling stall (d4f05a5, 5e04bac, 3554497). The worktrees `.claude/worktrees/wf_ac6c1e42-cb8-1..7` are kept for
+reference; nothing on them is left to merge. The temporary remote branches `wip/macos-osd`, `wip/pipewire-backend`,
+`wip/pipewire-xrun`, `wip/mac-neural`, `wip/mac-neural-check`, `wip/mac-neural-diag` and `wip/mac-neural-diag2`
+(CI iterations) still exist; delete them only with the owner's OK.
 
 ### Next steps for the local session, in priority order
 
-1. **Build on Windows** (commands above) and run `ctest`. Fix any MSVC-only compile errors or test failures first;
-   they are the most likely breakage, because batches 3–5 were never built with MSVC.
-2. **Real-hardware checks on the Turtle Beach headset**, using the list in "Testing on real hardware" above and
-   docs/12 §0. Put each result in the item's docs/11 Status line, as "owner-verified", with the device name and
-   connection (USB dongle / 3.5 mm / Bluetooth).
-   - First: headset matching, the per-app capture, device re-plug and sleep/resume.
-   - Then Warmth, Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking.
-   - Also the OSD over a fullscreen game with PresentMon, and Tournament mode with an anti-cheat game.
-3. **Owner decisions.** These are listed in docs/11 §5.4, in the "Status of Phase 3 batch 4" and "Status of Phase 3 batch 5" paragraphs.
-   - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets (Synthwave added locally);
-     Late Night and Podcast are re-voiced.
+1. **Build on Windows: done** (step 1 above; CI green on all three OSes since run 37572308549).
+2. **Real-hardware checks still open** on the Stealth 600PC Gen 3 (rebuild the app from HEAD first; docs/12 §0).
+   Put each result in the item's docs/11 Status line, as "owner-verified", with the device name and connection.
+   - Games: Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking, the on-board
+     enhancement cap (Superhuman Hearing), the OSD over a fullscreen game with PresentMon, Tournament mode with an
+     anti-cheat game (E55).
+   - R1.1: Settings › Audio › *Measure latency* with the headset mic against an ear cup.
+   - Listening / looking: Synthwave (not heard yet), the analyser views and visualisers (not yet seen on the owner's
+     screen; 60 fps on real music), the music-theory views on real songs.
+   - R5.3: the `neural-voice-cleanup` demo pair, then the switch on real Discord / chat audio.
+   - R4.5: the move-away with Edge: does Edge (or a game) play to the headset again after an unassign without a reload?
+   - R4.4: record a chord, reset during a recording, check that Alt+F4 is refused.
+3. **Owner decisions** (docs/11 §5.4, the batch 4 / 5 paragraphs, and the Status lines).
+   - Decided 2026-10-06: Punch fades out from Boost 60 to 70 % (speech ticks at medium Boost accepted, E04 / E53);
+     Classical & Jazz stays as voiced (−0.72 / −0.44 LU, E11); Boost's own maximizer ticks at full drive are left.
+   - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets
+     (Synthwave added locally); Late Night and Podcast are re-voiced; *Automatic buffer size* is new and on by default,
+     and a buffer size picked before keeps it off (E42c).
    - Should Enhanced become the default virtualiser renderer?
    - Night Mode attack: 3 → 1 ms?
    - Should Relative presence be the default?
@@ -211,30 +211,37 @@ Linux test.
    - Bass headroom protect.
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
+   - New (2026-10-07): the ASIO licence for a published build (Steinberg's proprietary licence with a signed
+     agreement, or GPLv3 for the whole build; docs/02 §6); install WSL for a real Linux test?; delete the `wip/*`
+     branches?; the buffer back-off's step (now at least double the size per step, 5 s hold, thresholds untuned; E42c);
+     the E28a fold headroom's instant attack (one soak click on a full-scale 7.1 explosion; a soft attack or a short
+     look-ahead would move only renders of such overs; E53); the neural voice cleanup model (experimental, off,
+     trained on synthetic speech only): keep, retrain or hide?
 4. **Known open items (software).**
-   - Soak: the Punch decision is taken (2026-10-06, docs/11 E04 / E53): Punch's attack fades out from Boost 60 to 70 %,
-     so its ticks at high Boost are gone (bit-identical below 60 %); speech ticks at medium Boost are accepted. Open:
-     Boost's own maximizer ticks at full drive on loud programme (with Punch 0 too; the owner leaves them,
-     2026-10-06), the bypass reference's limiter at
-     high input gain and one detector false positive.
+   - Soak: the bypass reference's limiter at high input gain and one detector false positive. R1.5 on a real device:
+     captures, device inputs and the drift FIFO, a 128-sample run on an idle machine (E53).
    - E28: the comb row is 18.9 dB against a < 12 dB target.
-   - E11: Classical and Jazz lose 0.72 / 0.44 LU (the owner keeps the preset as voiced, 2026-10-06).
    - E22: the chat sub-limiter.
    - E07: the 2.00 dB row.
+   - Golden: the MSVC-recorded rows (E20's Impact presets, Synthwave) pass CI's gcc golden-render step (±0.05 dB)
+     since run 37572308549; `tests/golden/preset-render-baseline.json` (E20, E04 step 5, Synthwave rows) is not
+     checked by CI and still wants a gcc re-record.
+   - PipeWire on CI: an idle xrun is tolerated only as an attributed scheduling stall; a desktop with real-time
+     priority is not checked (E48).
 5. **Gated items** (they need hardware, people or network, not code):
-   - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E51 / E16 / E55 / E22
-     on hardware, and the E54 update check against a real release.
-   - Linux: the desktop distribution matrix and WirePlumber 0.5.
+   - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E55 / E22 on
+     hardware, and the E54 update check against a real release.
+   - A real Mac: the OSD's key-window check (E56), the neural worker (os_workgroup, wake-up energy; E35).
+   - Linux: the desktop distribution matrix, WirePlumber 0.5, the R1.2 node on a real desktop and sound card.
    - Listening panels for E24, E28, E34 and E60.
    - The AMT cross-check, which needs access to sofacoustics.org.
 
-### Re-enabling CI
+### CI
 
-Either option works:
-
-- In GitHub › Settings › Billing and plans, fix the failed payment or raise the Actions spending limit.
-- Make the repository public; Actions is free for public repositories.
-
-Then push to the branch (or use "Re-run all jobs" on the latest run of `.github/workflows/ci.yml`).
-The first green run should be recorded in `docs/TRACEABILITY.md`, `docs/04` §7 and `docs/11` §5.4. The new PipeWire
-job is `continue-on-error` until it has passed 20 runs in a row.
+CI runs on every push. Billing blocked every job on 2026-09-29 / 30 ("recent account payments have failed or your
+spending limit needs to be increased"); the repository is now public, where Actions is free. Record first green runs
+in `docs/TRACEABILITY.md` (verification baseline), `docs/04` §7 and `docs/11` §5.4. The `pipewire` job (and `asio`,
+which depends on Steinberg's server) is `continue-on-error`; `pipewire` stays so until 20 runs in a row are green.
+Count on 2026-10-07: 26 green `pipewire` results (25 runs on all branches plus one re-run; 6 on this branch) and 5
+failures (2 on WIP R1.2 code, a test-comment compile error on `wip/mac-neural`, the idle xruns of 70a2a98 and
+d4f05a5); the longest green streak is 12 runs, the current one 2 (37643504114, 37649158870).
