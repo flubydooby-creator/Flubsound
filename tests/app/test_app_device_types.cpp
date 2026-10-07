@@ -142,16 +142,22 @@ TEST_CASE ("App: Settings > Audio notes what the device type means for other app
     // ASIO and exclusive mode exist on Windows only, where Flubsound has no
     // virtual devices (R4.6: the driver is a design): the notes give the way
     // in that works there, the per-app capture with the app's own output on
-    // another device (the double-audio fix), and a shared type.
+    // another device (the double-audio fix), and a shared type. Exclusive
+    // mode's note adds that Flubsound can make that move itself (R4.5,
+    // Settings > Routing, off by default); ASIO's says it cannot there (an
+    // ASIO output is no endpoint AppRouting can name: no guard, no moves).
+    const juce::String moveAway ("Settings > Routing > \"Move the app's own sound away automatically\"");
     const auto asio = SettingsDialog::describeDeviceTypeNote ("ASIO");
     CHECK (asio.contains ("one application at a time"));
     CHECK (asio.contains ("Assign app to strip"));
     CHECK (asio.contains ("Volume mixer"));
+    CHECK (asio.contains (moveAway + " cannot do it with ASIO"));
     CHECK (asio.contains ("\"Windows Audio\""));
     const auto exclusive = SettingsDialog::describeDeviceTypeNote ("Windows Audio (Exclusive Mode)");
     CHECK (exclusive.contains ("to Flubsound alone"));
     CHECK (exclusive.contains ("Assign app to strip"));
     CHECK (exclusive.contains ("Volume mixer"));
+    CHECK (exclusive.contains ("let Flubsound do it: " + moveAway + ", off by default"));
     CHECK (exclusive.contains ("virtual cable chosen as Flubsound's input"));
     for (const auto& note : { asio, exclusive })
     {

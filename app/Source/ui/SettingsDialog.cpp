@@ -2454,19 +2454,25 @@ juce::String SettingsDialog::describeDeviceTypeNote (const juce::String& deviceT
     // where Flubsound has no virtual devices yet (R4.6: the driver is a
     // design), so the way in for another app is the per-app capture with
     // the app's own output moved off this device: the double-audio fix
-    // (docs/11 E47), confirmed on the owner's PC.
+    // (docs/11 E47), confirmed on the owner's PC. Flubsound makes that move
+    // itself with Settings > Routing's "Move the app's own sound away
+    // automatically" (R4.5, off by default) for an app it sees playing to its
+    // output; an ASIO driver's output is no Windows endpoint it can name
+    // (AppRouting: no doubling guard, no new moves), so the ASIO note keeps
+    // the move by hand.
     if (deviceTypeName == "ASIO")
         return "ASIO drivers usually serve one application at a time: while Flubsound plays through this ASIO device, other apps "
                "cannot use it directly. To hear an app through Flubsound, assign it to a strip in the routing panel (\"Assign app to "
-               "strip...\") and set the app's own output to another device (Windows: Settings > System > Sound > Volume mixer); or "
-               "choose \"Windows Audio\" to share the output. The driver's own control panel may also fix the sample rate and buffer "
-               "size.";
+               "strip...\") and set the app's own output to another device by hand (Windows: Settings > System > Sound > Volume "
+               "mixer; Settings > Routing > \"Move the app's own sound away automatically\" cannot do it with ASIO); or choose "
+               "\"Windows Audio\" to share the output. The driver's own control panel may also fix the sample rate and buffer size.";
     // docs/08 D2: the same for WASAPI exclusive mode; its input is chosen
     // apart from the output, so a virtual cable can feed it as well.
     if (deviceTypeName == "Windows Audio (Exclusive Mode)")
         return "Exclusive mode gives this output to Flubsound alone: other apps cannot play to it while Flubsound runs. To hear an "
                "app through Flubsound, assign it to a strip in the routing panel (\"Assign app to strip...\") and set the app's own "
-               "output to another device (Windows: Settings > System > Sound > Volume mixer), or play it into a virtual cable chosen "
+               "output to another device (Windows: Settings > System > Sound > Volume mixer, or let Flubsound do it: Settings > "
+               "Routing > \"Move the app's own sound away automatically\", off by default), or play it into a virtual cable chosen "
                "as Flubsound's input; or choose \"Windows Audio\" or \"Windows Audio (Low Latency Mode)\" to share the output.";
     // docs/11 E48: the native node; its single device is not a sound card.
     if (deviceTypeName == "PipeWire")
