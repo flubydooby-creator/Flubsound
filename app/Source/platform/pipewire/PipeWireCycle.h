@@ -120,8 +120,9 @@ public:
         wrong: the data thread and the engine start cold, and the node joins
         a graph that is already running (CI, before this: 1 xrun within the
         first 20 cycles in 4 to 9 of 20 runs on an idle server, none in the
-        0.6 s after; with it, 1 in 40, before the device's first callback,
-        which the device leaves out: PipeWireDeviceType.cpp). */
+        0.6 s after; with it, 6 in 60, all before the host's first callback,
+        from which the device counts and settles again:
+        PipeWireDeviceType.cpp). */
     static constexpr int kSettleCycles = 2;
 
     /** Not real time (before the node starts): back to zero, no baseline. */
@@ -134,9 +135,10 @@ public:
     }
 
     /** Any thread, wait-free (the loop thread, when the node enters
-        streaming again): the next cycle starts a new baseline, and it and
-        the one after are not judged. The count is kept. */
-    void restart() noexcept { restartPending.store (true, std::memory_order_release); }
+        streaming again; the data thread, at the device's first callback):
+        the next cycle starts a new baseline, and it and the one after are
+        not judged. The count is kept. */
+    void restart() noexcept FLUB_NONBLOCKING { restartPending.store (true, std::memory_order_release); }
 
     /** Real time, once per cycle: 'doneNs' is when this node finished the
         cycle (CLOCK_MONOTONIC ns). True when the cycle counts as an xrun. */

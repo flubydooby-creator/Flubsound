@@ -59,7 +59,7 @@ public:
         config.outputTarget = outputTarget;
         currentRate = static_cast<double> (config.sampleRate);
         currentBlock = config.maxBlockFrames;
-        xrunBase.store (-1); // set by this run's first start()
+        xrunBase.store (-1); // set by this run's first callback (nodeProcess)
 
         std::string error;
         if (! node->start (config, *this, error))
@@ -101,11 +101,6 @@ public:
         if (! opened || newCallback == nullptr || newCallback == activeCallback.load())
             return;
         stop();
-        // R1.2 review: xruns count from this run's first callback on. Before
-        // it the node joins and links into the graph and plays silence; CI's
-        // one start-up xrun left after the settling (1 of 40 runs) was there.
-        if (xrunBase.load() < 0)
-            xrunBase.store (node->getXrunCount());
         newCallback->audioDeviceAboutToStart (this);
         activeCallback.store (newCallback);
     }
@@ -131,7 +126,8 @@ public:
     /** R1.2: the node's own count (pipewire::XrunCounter: cycles it finished
         after the next one was due, or missed), so AudioEngineHost::getStatus,
         the header's "xr" and the overload watchdog see PipeWire's xruns as
-        they see a JUCE backend's; from this run's first start() on. */
+        they see a JUCE backend's; from this run's first callback on (0
+        before it). */
     int getXRunCount() const noexcept override
     {
         if (! opened)
@@ -191,6 +187,17 @@ private:
         auto* callback = activeCallback.load();
         for (int o = 0; o < numOutputs; ++o)
             std::fill (nodeOutputs[o], nodeOutputs[o] + numFrames, 0.0f);
+        if (callback != nullptr && xrunBase.load (std::memory_order_relaxed) < 0)
+        {
+            // R1.2 review: xruns count from this run's first callback on, and
+            // its first cycles settle (the engine's first blocks run cold).
+            // Before it the node joins and links into the graph and plays
+            // silence while the host prepares the engine; CI's start-up
+            // xruns left after the node's own settling (1 of 20, then 5 of
+            // 20 loops) were all counted before the host's first callback.
+            node->settleXruns();
+            xrunBase.store (node->getXrunCount(), std::memory_order_relaxed);
+        }
         if (callback != nullptr)
         {
             for (size_t i = 0; i < activeInputIndex.size(); ++i)
@@ -260,7 +267,7 @@ private:
 
     std::atomic<juce::AudioIODeviceCallback*> activeCallback { nullptr };
     std::atomic<bool> inCallback { false };
-    std::atomic<int> xrunBase { -1 }; // the node's count at this run's first start(); -1 = not started yet
+    std::atomic<int> xrunBase { -1 }; // the node's count at this run's first callback; -1 = none yet
 
     std::mutex errorMutex; // nodeError (loop thread) -> handleAsyncUpdate (message thread)
     std::string pendingError;

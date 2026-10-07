@@ -741,6 +741,13 @@ public:
         Wait-free, any thread. */
     virtual int getXrunCount() const noexcept { return -1; }
 
+    /** R1.2 review: the count takes a new baseline and does not judge the
+        next few cycles (pipewire::XrunCounter::restart); what it counted so
+        far is kept. Wait-free, any thread, nodeProcess() included: the
+        PipeWire device calls it at its first callback, whose first blocks
+        run cold. */
+    virtual void settleXruns() noexcept FLUB_NONBLOCKING {}
+
     static std::unique_ptr<NativeAudioNode> create();
 };
 

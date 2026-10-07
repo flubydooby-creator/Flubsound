@@ -563,6 +563,7 @@ public:
     bool isSupported() const override { return library().loaded; }
     std::string unsupportedReason() const override { return library().loaded ? std::string() : library().error; }
     int getXrunCount() const noexcept override { return xrunCounter.count(); }
+    void settleXruns() noexcept FLUB_NONBLOCKING override { xrunCounter.restart(); }
 
     bool start (const NativeAudioNodeConfig& requested, Callback& cb, std::string& error) override
     {

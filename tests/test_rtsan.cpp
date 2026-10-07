@@ -398,6 +398,12 @@ static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callba
 // tests/test_pipewire_cycle.cpp drives it on every platform).
 static_assert (std::is_same_v<decltype (&flub::platform::pipewire::XrunCounter::cycleDone),
                               bool (flub::platform::pipewire::XrunCounter::*) (const flub::platform::pipewire::CycleClock&, uint64_t) noexcept FLUB_NONBLOCKING>);
+// The PipeWire device settles the count at its first callback, from the data
+// thread (R1.2 review; XrunCounter::restart is one atomic store).
+static_assert (std::is_same_v<decltype (&flub::platform::pipewire::XrunCounter::restart),
+                              void (flub::platform::pipewire::XrunCounter::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::settleXruns),
+                              void (flub::platform::NativeAudioNode::*)() noexcept FLUB_NONBLOCKING>);
 
 // The app's live latency probe (docs/11 E42d, app/Source/engine): the
 // device callback plays and records it (tests/app/test_app_latency_measure.cpp

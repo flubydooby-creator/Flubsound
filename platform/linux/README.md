@@ -645,10 +645,11 @@ links:
   (`XrunCounter::kSettleCycles`, `restart()` from the state callback;
   R1.2 review: a run's first cycle was often late on an idle server, which
   showed `· 1 xr` after an open). The device reports the count from its
-  run's first callback on (cycles before it, while the node joins and
-  links into the graph, play silence) through `getXRunCount()`, so the
-  header shows `· 3 xr` and the overload watchdog
-  counts the node's xruns as it counts a JUCE backend's. Each callback
+  run's first callback on, and lets the count settle there again
+  (`settleXruns`): cycles before it, while the node joins and links into
+  the graph and the host prepares the engine, play silence. It reports it
+  through `getXRunCount()`, so the header shows `· 3 xr` and the overload
+  watchdog counts the node's xruns as it counts a JUCE backend's. Each callback
   also carries the driver's time (`hostTimeNs`: the cycle's start plus the
   block's offset), so the callback timing (docs/11 E45) follows the
   graph's cadence even when a large quantum is split into blocks. Its
