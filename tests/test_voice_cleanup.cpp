@@ -17,6 +17,7 @@
 #include "flub/neural/VoiceCleanupRunner.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -26,6 +27,13 @@
 #include <memory>
 #include <thread>
 #include <vector>
+
+#if defined(__APPLE__)
+    #include <mach/mach.h>
+    #include <mach/mach_time.h>
+    #include <mach/thread_policy.h>
+    #include <pthread.h>
+#endif
 
 using namespace flub;
 using namespace flubtest;
@@ -99,6 +107,34 @@ private:
     Mode mode;
     int failFrom = 0, frames = 0;
 };
+
+/** Gives the calling thread the scheduling a device callback has: on macOS
+    the time-constraint policy Core Audio's I/O thread runs with (period one
+    host block, half of it computation). Elsewhere it changes nothing (an
+    ordinary thread keeps time there: TestMain sets Windows' 1 ms timer).
+    Returns true when the policy was set. */
+bool scheduleLikeAudioCallback (double blockSeconds)
+{
+#if defined(__APPLE__)
+    mach_timebase_info_data_t timebase {};
+    if (mach_timebase_info (&timebase) != KERN_SUCCESS || timebase.numer == 0 || timebase.denom == 0)
+        return false;
+    const auto ticks = [&timebase] (double seconds) {
+        return static_cast<uint32_t> (seconds * 1.0e9 * static_cast<double> (timebase.denom) / static_cast<double> (timebase.numer));
+    };
+    thread_time_constraint_policy_data_t policy {};
+    policy.period = ticks (blockSeconds);
+    policy.computation = ticks (0.5 * blockSeconds);
+    policy.constraint = ticks (blockSeconds);
+    policy.preemptible = 1;
+    return thread_policy_set (pthread_mach_thread_np (pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, reinterpret_cast<thread_policy_t> (&policy),
+                              THREAD_TIME_CONSTRAINT_POLICY_COUNT)
+           == KERN_SUCCESS;
+#else
+    (void) blockSeconds;
+    return false;
+#endif
+}
 
 AsyncModelConfig config (int safetyFrames, bool offline)
 {
@@ -355,41 +391,156 @@ TEST_CASE ("VoiceCleanup: on the real worker thread (waited for after every bloc
         CHECK (std::isfinite (v));
 }
 
+namespace
+{
+/** The voice cleanup model, timed: for every run() the worker makes, which
+    input frame it got (found in the test signal; the mono downmix of two equal
+    channels is the signal itself) and when the run started and ended. */
+class TimedVoiceCleanup : public ModelRunner
+{
+public:
+    using Clock = std::chrono::steady_clock;
+    struct Record
+    {
+        int frame = -1; // -1: not found in the signal
+        Clock::time_point start, end;
+    };
+
+    explicit TimedVoiceCleanup (const std::vector<float>& signal) : input (signal) {}
+    ModelDescription describe() const override { return model.describe(); }
+    void prepare (double sampleRate) override { model.prepare (sampleRate); }
+    void reset() override { model.reset(); }
+    bool run (const float* in, float* out) override
+    {
+        Record rec;
+        rec.frame = findFrame (in);
+        rec.start = Clock::now();
+        const bool ok = model.run (in, out);
+        rec.end = Clock::now();
+        if (count < records.size())
+            records[count++] = rec;
+        return ok;
+    }
+
+    // Written by the worker; read once it has stopped.
+    std::array<Record, 512> records {};
+    size_t count = 0;
+
+private:
+    int findFrame (const float* in) noexcept
+    {
+        const auto hop = static_cast<size_t> (kHop);
+        for (size_t f = searchFrom; f + hop <= input.size(); f += hop)
+            if (std::memcmp (in, input.data() + f, sizeof (float) * hop) == 0)
+            {
+                searchFrom = f + hop;
+                return static_cast<int> (f / hop);
+            }
+        return -1;
+    }
+
+    VoiceCleanupRunner model;
+    const std::vector<float>& input;
+    size_t searchFrom = 0;
+};
+
+double percentile (std::vector<double> v, double q)
+{
+    if (v.empty())
+        return 0.0;
+    std::sort (v.begin(), v.end());
+    return v[std::min (v.size() - 1, static_cast<size_t> (q * static_cast<double> (v.size())))];
+}
+} // namespace
+
 // No waiting: 480-sample blocks are processed at the device's pace (one per
-// 10 ms, as an audio callback would), and the worker must deliver each frame's
-// gains within the two safety frames on its own. The calling thread is an
-// ordinary thread, not a real-time one, and CI machines are shared, so the
-// bound is loose (5 % of the frames); the printed count is the measurement.
+// 10 ms) by a thread scheduled like a device callback, and the worker must
+// deliver each frame's gains within the two safety frames on its own. On
+// macOS the pacing thread takes the time-constraint policy Core Audio's I/O
+// thread has: the test's main thread (utility QoS) sleeps 14 - 86 ms for 10 ms on the CI
+// runner (its timers are coalesced), so the blocks would come in bursts no
+// device produces. The worker's own scheduling is the product's
+// (AsyncModelProcessor.h, "Worker scheduling"): the time-constraint policy on
+// macOS, the OS default elsewhere. CI machines are shared, so the bound is
+// loose (5 % of the frames). Printed: the misses; the worker's response (a
+// frame's result ready, counted from the end of the process() call that
+// queued it; its deadline is the next call, 10 ms later) and the model's own
+// run time on the worker.
 TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, the worker meets its deadlines")
 {
-    AsyncModelProcessor live (std::make_unique<VoiceCleanupRunner>(), config (2, false));
-    live.prepare ({ kFs, 480, 2 });
-    REQUIRE (live.isModelActive());
     constexpr int kBlocks = 100; // 1 s of audio, 200 model frames
     auto x = whiteNoise (kBlocks * 480, 0.02f, 13);
     for (size_t i = 0; i < x.size(); ++i)
         x[i] += static_cast<float> (0.2 * std::sin (2.0 * 3.14159265358979 * 180.0 * static_cast<double> (i) / kFs));
+    auto runner = std::make_unique<TimedVoiceCleanup> (x);
+    const TimedVoiceCleanup* timed = runner.get();
+    AsyncModelProcessor live (std::move (runner), config (2, false));
+    live.prepare ({ kFs, 480, 2 });
+    REQUIRE (live.isModelActive());
+    REQUIRE (waitUntil ([&live] { return live.getWorkerScheduling() != NeuralWorkerScheduling::None; }));
+#if defined(__APPLE__)
+    CHECK (live.getWorkerScheduling() == NeuralWorkerScheduling::TimeConstraint);
+#else
+    CHECK (live.getWorkerScheduling() == NeuralWorkerScheduling::Default);
+#endif
+
     std::vector<float> l (x), r (x);
-    const auto period = std::chrono::microseconds (10000);
-    auto next = std::chrono::steady_clock::now();
-    for (int k = 0; k < kBlocks; ++k)
-    {
-        std::this_thread::sleep_until (next);
-        next += period;
-        const auto pos = static_cast<size_t> (k) * 480u;
-        AudioBlock b (std::array<float*, 2> { l.data() + pos, r.data() + pos }.data(), 2, 480);
-        live.process (b);
-    }
+    std::vector<TimedVoiceCleanup::Clock::time_point> queued (kBlocks);
+    bool deviceScheduled = false;
+    std::thread device ([&] {
+        deviceScheduled = scheduleLikeAudioCallback (480.0 / kFs);
+        const auto period = std::chrono::microseconds (10000);
+        auto next = TimedVoiceCleanup::Clock::now();
+        for (size_t k = 0; k < queued.size(); ++k)
+        {
+            std::this_thread::sleep_until (next);
+            next += period;
+            AudioBlock b (std::array<float*, 2> { l.data() + k * 480u, r.data() + k * 480u }.data(), 2, 480);
+            live.process (b);
+            queued[k] = TimedVoiceCleanup::Clock::now();
+        }
+    });
+    device.join();
+#if defined(__APPLE__)
+    CHECK (deviceScheduled);
+#endif
+
     // Frames reach their deadline L = 960 samples after they start: the last two
     // blocks' frames are still in the delay line when the loop ends.
     const auto due = static_cast<uint64_t> ((kBlocks - 2) * 480 / kHop);
     const uint64_t misses = live.getDeadlineMisses();
+    const uint64_t failures = live.getModelFailures();
+    const uint64_t framesRun = live.getFramesProcessed();
+    live.releaseResources(); // joins the worker: its records are complete
+    std::vector<double> responseUs, runUs;
+    for (size_t i = 0; i < timed->count; ++i)
+    {
+        const auto& rec = timed->records[i];
+        runUs.push_back (std::chrono::duration<double, std::micro> (rec.end - rec.start).count());
+        const auto block = static_cast<size_t> (rec.frame / 2); // two model frames per block
+        if (rec.frame >= 0 && block < queued.size())
+            responseUs.push_back (std::chrono::duration<double, std::micro> (rec.end - queued[block]).count());
+    }
     std::printf ("    paced at real time: %llu of %llu due frames missed their deadline, %llu failures, %llu frames run\n",
                  static_cast<unsigned long long> (misses), static_cast<unsigned long long> (due),
-                 static_cast<unsigned long long> (live.getModelFailures()), static_cast<unsigned long long> (live.getFramesProcessed()));
-    CHECK (live.getModelFailures() == 0u);
+                 static_cast<unsigned long long> (failures), static_cast<unsigned long long> (framesRun));
+    std::printf ("    worker response (deadline 10000 us): median %.0f us, 90th percentile %.0f us, 99th %.0f us, max %.0f us; model run median %.0f us, "
+                 "max %.0f us\n",
+                 percentile (responseUs, 0.5), percentile (responseUs, 0.9), percentile (responseUs, 0.99), percentile (responseUs, 1.0),
+                 percentile (runUs, 0.5), percentile (runUs, 1.0));
+    CHECK (failures == 0u);
     CHECK_LE (misses, due / 20);
-    CHECK (live.getFramesProcessed() + misses >= due);
+    CHECK (framesRun + misses >= due);
+    // Every frame that ran has its response time (else the bound below could pass on nothing).
+    CHECK (static_cast<uint64_t> (responseUs.size()) + 2 >= framesRun);
+#if defined(__APPLE__)
+    // The time-constraint worker answers 9 frames in 10 within a quarter of the
+    // deadline (macOS CI: about 0.6 ms at the 90th percentile). With the default
+    // policy its coalesced poll sleeps took it to 5.0 ms (and to 8.5 ms at the
+    // 99th percentile) without a miss in that run: the misses alone would not
+    // show the difference.
+    CHECK_LE (percentile (responseUs, 0.9), 2500.0);
+#endif
     for (float v : l)
         CHECK (std::isfinite (v));
 }

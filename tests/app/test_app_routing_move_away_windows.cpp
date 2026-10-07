@@ -13,8 +13,9 @@
 //
 // It changes a per-app setting for the duration, so it runs only with
 // FLUB_TEST_REAL_APP_MOVE=1 (and prints what it saw); otherwise both cases
-// return at once. Dump HKCU\Software\Microsoft\Internet Explorer\LowRegistry\
-// Audio\PolicyConfig\PropertyStore before and after to compare.
+// return at once. Dump the key
+// HKCU\Software\Microsoft\Internet Explorer\LowRegistry\Audio\PolicyConfig\PropertyStore
+// before and after to compare (no line here may end in a backslash: gcc's -Wcomment).
 #include "AppTestSupport.h"
 
 #include "engine/AppRouting.h"

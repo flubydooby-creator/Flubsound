@@ -1,9 +1,18 @@
 #include "flub/neural/AsyncModelProcessor.h"
 
+#include "flub/common/Denormals.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+
+#if defined(__APPLE__)
+    #include <mach/mach.h>
+    #include <mach/mach_time.h>
+    #include <mach/thread_policy.h>
+    #include <pthread.h>
+#endif
 
 #if defined(FLUB_RTSAN) && defined(__has_include)
     #if __has_include(<sanitizer/rtsan_interface.h>)
@@ -33,6 +42,36 @@ constexpr int kMaxPollMicroseconds = 100000;
 // safety frames, the frames one host block can complete, and a little slack
 // so a worker that is merely late never finds the result queue full.
 constexpr int kQueueSlackFrames = 4;
+
+/** Called on the worker thread when it starts ("Worker scheduling" in the header). */
+NeuralWorkerScheduling scheduleWorkerThread (double framePeriodSeconds) noexcept
+{
+#if defined(__APPLE__)
+    // macOS: the time-constraint policy. The period is one model frame,
+    // clamped so that the computation (half of it) stays inside the kernel's
+    // accepted real-time quantum.
+    constexpr double kMinSchedulingPeriodSeconds = 0.001;
+    constexpr double kMaxSchedulingPeriodSeconds = 0.040;
+    mach_timebase_info_data_t timebase {};
+    if (mach_timebase_info (&timebase) != KERN_SUCCESS || timebase.numer == 0 || timebase.denom == 0)
+        return NeuralWorkerScheduling::Default;
+    const double period = std::clamp (framePeriodSeconds, kMinSchedulingPeriodSeconds, kMaxSchedulingPeriodSeconds);
+    const auto ticks = [&timebase] (double seconds) {
+        return static_cast<uint32_t> (seconds * 1.0e9 * static_cast<double> (timebase.denom) / static_cast<double> (timebase.numer));
+    };
+    thread_time_constraint_policy_data_t policy {};
+    policy.period = ticks (period);
+    policy.computation = ticks (0.5 * period);
+    policy.constraint = ticks (period);
+    policy.preemptible = 1;
+    const kern_return_t result = thread_policy_set (pthread_mach_thread_np (pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
+                                                    reinterpret_cast<thread_policy_t> (&policy), THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    return result == KERN_SUCCESS ? NeuralWorkerScheduling::TimeConstraint : NeuralWorkerScheduling::Default;
+#else
+    (void) framePeriodSeconds;
+    return NeuralWorkerScheduling::Default;
+#endif
+}
 
 bool isValidBandLayout (const ModelDescription& d) noexcept
 {
@@ -142,6 +181,7 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
     else
         pollMicroseconds = std::clamp (static_cast<int> (kAutoPollFraction * 1.0e6 * frameSize / std::max (1.0, s.sampleRate)),
                                        kMinAutoPollMicroseconds, kMaxAutoPollMicroseconds);
+    framePeriodSeconds = static_cast<double> (frameSize) / std::max (1.0, s.sampleRate);
 
     deadlineMisses.store (0, std::memory_order_relaxed);
     modelFailures.store (0, std::memory_order_relaxed);
@@ -446,10 +486,13 @@ void AsyncModelProcessor::stopWorker() noexcept
         return;
     stopRequested.store (true, std::memory_order_release);
     worker.join();
+    workerScheduling.store (static_cast<int> (NeuralWorkerScheduling::None), std::memory_order_release);
 }
 
 void AsyncModelProcessor::runFrame (const float* frame, uint64_t seq, bool& resetPending) noexcept
 {
+    // FTZ / DAZ for the model, on the worker and in offline mode alike (header).
+    const ScopedNoDenormals noDenormals;
     if (resetPending)
     {
         try
@@ -492,6 +535,7 @@ void AsyncModelProcessor::runFrame (const float* frame, uint64_t seq, bool& rese
 
 void AsyncModelProcessor::workerLoop() noexcept
 {
+    workerScheduling.store (static_cast<int> (scheduleWorkerThread (framePeriodSeconds)), std::memory_order_release);
     bool resetPending = false;
     while (! stopRequested.load (std::memory_order_acquire))
     {

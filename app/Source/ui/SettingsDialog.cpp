@@ -2471,8 +2471,8 @@ juce::String SettingsDialog::describeDeviceTypeNote (const juce::String& deviceT
     if (deviceTypeName == "Windows Audio (Exclusive Mode)")
         return "Exclusive mode gives this output to Flubsound alone: other apps cannot play to it while Flubsound runs. To hear an "
                "app through Flubsound, assign it to a strip in the routing panel (\"Assign app to strip...\") and set the app's own "
-               "output to another device (Windows: Settings > System > Sound > Volume mixer, or let Flubsound do it: Settings > "
-               "Routing > \"Move the app's own sound away automatically\", off by default), or play it into a virtual cable chosen "
+               "output to another device (Windows: Settings > System > Sound > Volume mixer, or, for an app Windows still lists on this "
+               "output, let Flubsound do it: Settings > Routing > \"Move the app's own sound away automatically\", off by default), or play it into a virtual cable chosen "
                "as Flubsound's input; or choose \"Windows Audio\" or \"Windows Audio (Low Latency Mode)\" to share the output.";
     // docs/11 E48: the native node; its single device is not a sound card.
     if (deviceTypeName == "PipeWire")

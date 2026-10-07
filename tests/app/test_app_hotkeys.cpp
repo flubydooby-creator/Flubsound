@@ -35,6 +35,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -916,6 +917,12 @@ TEST_CASE ("App: the hotkey notice is posted once per new failure, lists every h
     HotkeyManager manager (controller, std::move (service));
     manager.registerAll();
 
+    // Xlib errors are harmless for as long as `main` lives: the Settings
+    // window it opens below goes with it, after the last statement (a guard
+    // made there ended first, and Xvfb's BadAtom then ended the process).
+    std::optional<flubapptest::TolerateXErrors> tolerateXErrors;
+    if (flubapptest::haveDisplay())
+        tolerateXErrors.emplace(); // empty off X11
     ui::MainComponent main (controller);
     main.setSize (1280, 820);
     main.setHotkeyHooks (hooksFor (manager));
@@ -971,12 +978,11 @@ TEST_CASE ("App: the hotkey notice is posted once per new failure, lists every h
     // Settings > Hotkeys open (a real window): the page shows a new failure
     // itself - its 4 Hz poll picks it up - so no notice is posted, and the
     // failure counts as named.
-    if (! flubapptest::haveDisplay())
+    if (! tolerateXErrors.has_value())
     {
         std::cerr << "    (the Settings window part skipped: no display)\n";
         return;
     }
-    [[maybe_unused]] const flubapptest::TolerateXErrors tolerateXErrors; // empty off X11
     main.openSettingsPage (ui::SettingsDialog::Page::Hotkeys);
     REQUIRE (main.isSettingsPageShowing (ui::SettingsDialog::Page::Hotkeys));
     auto* dialog = main.getSettingsDialog();

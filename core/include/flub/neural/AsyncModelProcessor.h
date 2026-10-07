@@ -82,6 +82,23 @@
 // the process has called timeBeginPeriod (1). A host that needs the last
 // millisecond can shorten the interval.
 //
+// Worker scheduling (getWorkerScheduling()). The worker has a deadline, so
+// its poll sleeps must end on time. macOS coalesces the timers of every
+// thread that is not real time, whatever its QoS class: on the GitHub macOS
+// runner a 625 us sleep lasted 5.6 - 6.2 ms (median) on a default, a utility
+// and a user-interactive QoS thread alike, and the worker's response reached
+// 8.5 ms (99th percentile) of its 10 ms budget at 480-sample blocks. So on
+// macOS the worker gives itself the Mach time-constraint (real-time) policy
+// Core Audio's I/O threads have, whose timers are not coalesced (the same
+// sleep: 0.64 - 0.66 ms; the response: about 1 ms): period one model frame,
+// computation half of it, constraint one frame (the period clamped to
+// 1 .. 40 ms). A refused policy leaves the worker as it was (Default).
+// Windows and Linux keep the OS default (a 1 ms timer once the process has
+// called timeBeginPeriod (1); Linux's 50 us timer slack). On every OS the
+// model runs inside a ScopedNoDenormals (FTZ / DAZ, AArch64 FZ), like every
+// real-time entry point; offline mode too, so both paths compute the same
+// bits.
+//
 // Threading. prepare() (non-RT) stops a running worker, allocates the queues,
 // calls runner->prepare() and starts one worker thread (none in offline
 // mode). process() and reset() are RT-safe (no allocation, no lock, no wait;
@@ -126,6 +143,14 @@ struct AsyncModelConfig
     float maxGain = 4.0f;             // controls are clamped to [0, maxGain] (+12 dB by default)
     int workerPollMicroseconds = 0;   // 0 = auto (frame period / 8, 100 .. 1000 us); at most 100 000 us
     bool offline = false;             // run the model inside process() on the calling thread (non-RT callers only, see above)
+};
+
+/** How the inference worker thread is scheduled ("Worker scheduling" above). */
+enum class NeuralWorkerScheduling : int
+{
+    None = 0,          // no worker thread running (unprepared, offline mode, model not active), or not started yet
+    Default = 1,       // the OS's default policy for a new thread (Windows, Linux; macOS if the policy was refused)
+    TimeConstraint = 2 // macOS: the Mach time-constraint (real-time) policy
 };
 
 class AsyncModelProcessor final : public Processor
@@ -174,6 +199,12 @@ public:
     uint64_t getModelFailures() const noexcept { return modelFailures.load (std::memory_order_relaxed); }
     /** runner->run() calls the worker completed (successful or not). */
     uint64_t getFramesProcessed() const noexcept { return framesProcessed.load (std::memory_order_relaxed); }
+    /** The worker thread's scheduling: None until the worker has started
+        (shortly after prepare()) and after it stops, then what it got. */
+    NeuralWorkerScheduling getWorkerScheduling() const noexcept
+    {
+        return static_cast<NeuralWorkerScheduling> (workerScheduling.load (std::memory_order_acquire));
+    }
 
     /** Input frames queued but not yet run or skipped by the worker (never
         negative; 0 in offline mode). Read on the thread that calls process(),
@@ -238,11 +269,13 @@ private:
     std::thread worker;
     std::vector<float> workerControls;
     int pollMicroseconds = 1000;
+    double framePeriodSeconds = 0.0;      // the worker's scheduling period (frameSize / sample rate)
 
     // Shared.
     std::atomic<bool> stopRequested { false };
     std::atomic<uint64_t> firstUsefulSeq { 0 }; // frames below this are past their deadline
     std::atomic<uint64_t> deadlineMisses { 0 }, modelFailures { 0 }, framesProcessed { 0 };
     std::atomic<uint64_t> framesSubmitted { 0 }, framesHandled { 0 };
+    std::atomic<int> workerScheduling { 0 };    // NeuralWorkerScheduling, written by the worker
 };
 } // namespace flub

@@ -158,6 +158,7 @@ TEST_CASE ("App: Settings > Audio notes what the device type means for other app
     CHECK (exclusive.contains ("Assign app to strip"));
     CHECK (exclusive.contains ("Volume mixer"));
     CHECK (exclusive.contains ("let Flubsound do it: " + moveAway + ", off by default"));
+    CHECK (exclusive.contains ("for an app Windows still lists on this output")); // the move needs a session on this output
     CHECK (exclusive.contains ("virtual cable chosen as Flubsound's input"));
     for (const auto& note : { asio, exclusive })
     {
