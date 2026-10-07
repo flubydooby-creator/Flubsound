@@ -13,6 +13,7 @@
 #include "PlatformServices.h"
 
 #include <memory>
+#include <string>
 
 namespace flub::app::platform_bridge
 {
@@ -29,6 +30,12 @@ std::unique_ptr<flub::platform::ProcessLoopbackCapture> createProcessLoopbackCap
 std::unique_ptr<flub::platform::AutoStart> createAutoStart();
 /** Foreground application (automatic profiles); nullptr = unsupported. */
 std::unique_ptr<flub::platform::ForegroundApp> createForegroundApp();
+
+/** Why `chord` cannot be a global hotkey on any OS (the shared validator,
+    detail::isValidChord: a supported key, and a modifier other than Shift
+    for letters, digits and navigation keys); empty when it can. Without the
+    services, only an unassigned chord is refused. */
+std::string chordProblem (const flub::platform::KeyChord& chord);
 
 /** True if a capture object can be created and reports isSupported(). Creates
     and destroys a probe object: call from the message thread, not per block. */

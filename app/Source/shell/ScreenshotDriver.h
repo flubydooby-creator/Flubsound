@@ -65,6 +65,13 @@
 //   settings-diagnostics
 //                   the PNG shows the Settings dialog's Diagnostics page
 //                   with its Updates section (docs/11 E54) at --size
+//   settings-hotkeys
+//                   the PNG shows the Settings dialog's Hotkeys page at
+//                   --size with Bypass hotkey strip saved as Ctrl+Alt+B and
+//                   reported in use by another application (R4.4): the row
+//                   in red, "Pick a free one" and the reason under the rows
+//                   (no hotkey is registered)
+//   hotkey-notice   the notice under the header for that failure (R4.4)
 //   analyzer-diff, analyzer-lows, analyzer-width, analyzer-keys,
 //   analyzer-spectrogram, analyzer-fundamentals
 //                   that optional analyser view switched on (combinable, not

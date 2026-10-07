@@ -8,7 +8,9 @@
 //   2. EngineController (settings, device, engine, presets, routing)
 //   3. MainWindow (content: ui::MainComponent), shown unless "start minimised"
 //   4. TrayIcon (enable, mode, boost, preset quick list, open, quit)
-//   5. HotkeyManager (system-wide shortcuts)
+//   5. HotkeyManager (system-wide shortcuts); a hotkey that cannot be
+//      registered is printed to stderr and the log, and named once in the
+//      notice under the header (R4.4)
 //   6. the update check (docs/11 E54): only when the user switched it on;
 //      a newer release is announced once in the tray
 //   7. the on-screen display of hotkey actions (ui::Osd, docs/11 E56; the
@@ -73,12 +75,18 @@ public:
 
     /** Shows / focuses the main window (tray "Open", second instance). */
     void showMainWindow();
+    /** Shows the main window with Settings > Hotkeys open (the tray's
+        "hotkeys not active" item, R4.4). */
+    void openHotkeySettings();
 
 private:
     void initialiseInteractive();
     bool initialiseScreenshot();
     void forwardControlRequest();
     void closeButtonPressed();
+    /** The hotkey notice (ui::MainComponent::announceHotkeyFailures), and a
+        tray bubble while the window is hidden. */
+    void announceHotkeyFailures();
 
     std::unique_ptr<diagnostics::DiagnosticsSession> diagnosticsSession; // first in, last out
     std::unique_ptr<juce::LookAndFeel_V4> lookAndFeel;

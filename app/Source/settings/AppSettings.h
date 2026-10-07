@@ -7,8 +7,8 @@
 //
 // Contents: audio device state (AudioDeviceManager XML), per-strip last preset
 // and full parameter state (both A/B banks), master enable, selected strip,
-// the automatic overload response, device-input routing, hotkey chords and
-// the hotkey strip, start
+// the automatic overload response, device-input routing, hotkey chords, the
+// hotkey strip and the hotkey failures the notice already named, start
 // minimised / close to tray / start with the OS, the app routing map
 // (executable -> strip), the automatic profile rules (foreground app ->
 // preset on a strip), the device corrections (one per output endpoint,
@@ -243,10 +243,26 @@ public:
 
     // ---- Hotkeys -------------------------------------------------------------------
     static flub::platform::KeyChord getDefaultHotkey (HotkeyAction action);
+    /** The short list Settings > Hotkeys' "Pick a free combination" tries, in
+        order (R4.4): the default, the default key with Ctrl+Alt+Shift, a
+        second key per action with Ctrl+Alt+Shift, then with Ctrl+Alt. The
+        second keys are distinct across actions and from every default key. */
+    static std::vector<flub::platform::KeyChord> getAlternativeHotkeys (HotkeyAction action);
+    /** Same modifiers and key (two unassigned chords are the same). */
+    static bool sameChord (const flub::platform::KeyChord& a, const flub::platform::KeyChord& b) noexcept;
     static juce::String getHotkeyActionName (HotkeyAction action);
     static std::vector<HotkeyAction> getAllHotkeyActions();
+    /** The saved chord, else the default (so a user who never changed a
+        hotkey follows a new default, and a saved one is kept). */
     flub::platform::KeyChord getHotkey (HotkeyAction action) const;
     void setHotkey (HotkeyAction action, const flub::platform::KeyChord& chord);
+    /** True when the settings hold a chord (or "None") for the action. */
+    bool hasSavedHotkey (HotkeyAction action) const;
+    /** Whether the notice under the header already named this action's
+        failure with this chord (R4.4: a failure is announced once; the entry
+        goes when the action registers or gets another chord). */
+    bool isHotkeyFailureAnnounced (HotkeyAction action, const juce::String& chord) const;
+    void setHotkeyFailureAnnounced (HotkeyAction action, const juce::String& chord, bool announced);
     bool getHotkeysEnabled() const;
     void setHotkeysEnabled (bool enabled);
     /** The strip the strip-level hotkeys act on (docs/11 E56): never the GUI

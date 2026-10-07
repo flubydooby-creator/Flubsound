@@ -175,6 +175,11 @@ TEST_CASE ("App UI: the screenshot driver accepts --state settings-audio and set
     CHECK (ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-processing" }), p, error));
     CHECK (p.states.contains ("settings-processing"));
     ScreenshotDriver::Options q;
-    CHECK (! ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-hotkeys" }), q, error));
+    CHECK (! ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-general" }), q, error));
     CHECK (error.contains ("settings-processing"));
+    // R4.4 (2026-10-07): the Hotkeys page with a hotkey another program holds, and its notice.
+    ScreenshotDriver::Options h;
+    CHECK (ScreenshotDriver::parseCommandLine (juce::StringArray ({ "--screenshot", "a.png", "--state", "settings-hotkeys,hotkey-notice" }), h, error));
+    CHECK (h.states.contains ("settings-hotkeys"));
+    CHECK (h.states.contains ("hotkey-notice"));
 }

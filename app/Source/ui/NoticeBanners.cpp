@@ -379,4 +379,23 @@ NoticeBar::Notice NoticeBar::latencyNotice (const EngineController::LatencySugge
     n.seconds = 30.0;
     return n;
 }
+
+NoticeBar::Notice NoticeBar::hotkeyNotice (const std::vector<HotkeyManager::Failure>& failures, std::function<void()> openSettings)
+{
+    Notice n;
+    if (failures.empty())
+        return n;
+    n.key = kHotkeysKey;
+    n.kind = Notice::Kind::Warning;
+    n.text << (failures.size() == 1 ? "Hotkey not active: " : "Hotkeys not active: ") << HotkeyManager::describeFailure (failures.front()) << ".";
+    if (failures.size() > 1)
+        n.text << " (+" << static_cast<int> (failures.size() - 1) << (failures.size() == 2 ? " other)" : " others)");
+    n.detail << "These system-wide shortcuts do nothing until they get a combination of their own:";
+    for (const auto& failure : failures)
+        n.detail << "\n- " << HotkeyManager::describeFailure (failure) << ".";
+    n.detail << "\nSettings > Hotkeys can pick a free combination, or record a new one when you press it.";
+    n.actionLabel = "Fix in Settings";
+    n.action = std::move (openSettings);
+    return n;
+}
 } // namespace flub::app::ui

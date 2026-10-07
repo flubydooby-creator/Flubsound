@@ -24,17 +24,24 @@
 //                    * the latency-profile suggestion (docs/11 E42a): a
 //                      loaded preset was made for another profile; its
 //                      button switches the profile (every strip), the
-//                      preset never does by itself.
+//                      preset never does by itself;
+//                    * hotkeys that are not active (R4.4: in use by another
+//                      application, the same chord as another action, ...),
+//                      once per action and chord (HotkeyManager::
+//                      takeUnannouncedFailures); "Fix in Settings" opens
+//                      Settings > Hotkeys; it goes by itself when they work.
 // Both are message-thread components owned by MainComponent, which lays them
 // out when refresh() / onVisibilityChanged say their visibility changed.
 #pragma once
 
 #include "engine/EngineController.h"
+#include "shell/HotkeyManager.h"
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <deque>
 #include <functional>
+#include <vector>
 
 namespace flub::app::ui
 {
@@ -135,6 +142,7 @@ public:
     static constexpr const char* kPresetWarningsKey = "preset-warnings";
     static constexpr const char* kRecoveryKey = "settings-recovery";
     static constexpr const char* kLatencyKey = "latency-suggestion";
+    static constexpr const char* kHotkeysKey = "hotkey-failures";
 
     /** "Preset "Club Loud": unknown parameter "bost" ignored (did you mean
         "boost"?) (+1 more)"; the detail lists every warning. */
@@ -146,6 +154,12 @@ public:
     /** ""Competitive FPS" was made for Low Latency; the engine runs Balanced."
         with the button "Use Low Latency", which calls `accept`. */
     static Notice latencyNotice (const EngineController::LatencySuggestion& suggestion, std::function<void()> accept);
+    /** "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+B) is in use by
+        another application (or reserved by the system)." (+1 more), a
+        warning that stays until dismissed or fixed, with "Fix in Settings",
+        which calls `openSettings`; the detail lists every failure. Text
+        empty for no failures. */
+    static Notice hotkeyNotice (const std::vector<HotkeyManager::Failure>& failures, std::function<void()> openSettings);
     static juce::String profileName (flub::param::LatencyProfileValue profile);
 
     void paint (juce::Graphics& g) override;

@@ -116,7 +116,9 @@ bool ScreenshotDriver::parseCommandLine (const juce::StringArray& args, Options&
                                                 "module-keys",
                                                 // the analyser's optional views
                                                 "analyzer-diff", "analyzer-lows", "analyzer-width", "analyzer-keys", "analyzer-spectrogram",
-                                                "analyzer-hover", "analyzer-freeze", "analyzer-fundamentals" };
+                                                "analyzer-hover", "analyzer-freeze", "analyzer-fundamentals",
+                                                // R4.4: a hotkey another program holds
+                                                "settings-hotkeys", "hotkey-notice" };
         options.states = juce::StringArray::fromTokens (args[stateIndex + 1].toLowerCase(), ",", {});
         options.states.trim();
         options.states.removeEmptyStrings();
@@ -416,6 +418,41 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
         }
         if (states.contains ("analyzer-freeze"))
             freezeAtSeconds = options.seconds * 0.4;
+    }
+    if (states.contains ("hotkey-notice") && main != nullptr)
+    {
+        // R4.4: what the owner's PC reported at every start before
+        // 2026-10-07 (another program holds Ctrl+Alt+B).
+        HotkeyManager::Failure failure;
+        failure.action = HotkeyAction::ToggleBypass;
+        failure.status.status = HotkeyManager::Status::Unavailable;
+        failure.status.chord = "Ctrl+Alt+B";
+        main->getNoticeBar().post (ui::NoticeBar::hotkeyNotice ({ failure }, [] {}));
+    }
+    if (states.contains ("settings-hotkeys"))
+    {
+        // R4.4: a saved Ctrl+Alt+B another program holds - the row in red,
+        // "Pick a free one" and the reason under the rows. No hotkey is
+        // registered here: the statuses are the hooks' own.
+        flub::platform::KeyChord saved;
+        AppSettings::chordFromString ("Ctrl+Alt+B", saved);
+        controller.getSettings().setHotkey (HotkeyAction::ToggleBypass, saved);
+        ui::HotkeyHooks hooks;
+        hooks.isSupported = [] { return true; };
+        hooks.getFailures = [] { return juce::StringArray(); };
+        hooks.reRegister = [] {};
+        hooks.getStatus = [&settings = controller.getSettings()] (HotkeyAction action)
+        {
+            HotkeyManager::ActionStatus status;
+            status.chord = AppSettings::chordToString (settings.getHotkey (action));
+            status.status = action == HotkeyAction::ToggleBypass ? HotkeyManager::Status::Unavailable : HotkeyManager::Status::Registered;
+            return status;
+        };
+        hooks.pickFreeChord = [] (HotkeyAction) { return HotkeyManager::PickResult(); };
+        auto dialog = std::make_unique<ui::SettingsDialog> (controller, hooks, [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+        dialog->setSize (options.width, options.height);
+        dialog->showPage (ui::SettingsDialog::Page::Hotkeys);
+        settingsView = std::move (dialog);
     }
     if (states.contains ("recovery"))
     {

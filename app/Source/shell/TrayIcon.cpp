@@ -104,22 +104,27 @@ void TrayIcon::notify (const juce::String& title, const juce::String& message)
 
 juce::PopupMenu TrayIcon::buildMenu()
 {
+    return buildMenu (controller, callbacks, [this] { showQuickControls(); });
+}
+
+juce::PopupMenu TrayIcon::buildMenu (EngineController& controller, const Callbacks& actions, std::function<void()> openQuickControls)
+{
     juce::PopupMenu menu;
+    auto* c = &controller; // the items outlive this call, never the controller
     const int strip = controller.getSelectedStrip();
     menu.addSectionHeader ("Flubsound Pro - " + controller.getStripName (strip));
 
-    menu.addItem ("Enabled", true, controller.isEnabled(), [this] { controller.toggleEnabled(); });
+    menu.addItem ("Enabled", true, controller.isEnabled(), [c] { c->toggleEnabled(); });
     menu.addSeparator();
 
     const auto mode = controller.getMode();
-    menu.addItem ("Music Mode", true, mode == ModeValue::Music, [this] { controller.setMode (ModeValue::Music); });
-    menu.addItem ("Gaming Mode", true, mode == ModeValue::Gaming, [this] { controller.setMode (ModeValue::Gaming); });
+    menu.addItem ("Music Mode", true, mode == ModeValue::Music, [c] { c->setMode (ModeValue::Music); });
+    menu.addItem ("Gaming Mode", true, mode == ModeValue::Gaming, [c] { c->setMode (ModeValue::Gaming); });
     menu.addSeparator();
 
     const int boostPercent = juce::roundToInt (controller.getBoost() * 100.0f);
-    menu.addItem ("Boost +10%   (now " + juce::String (boostPercent) + "%)", boostPercent < 100, false,
-                  [this] { controller.nudgeBoost (0.1f); });
-    menu.addItem ("Boost -10%", boostPercent > 0, false, [this] { controller.nudgeBoost (-0.1f); });
+    menu.addItem ("Boost +10%   (now " + juce::String (boostPercent) + "%)", boostPercent < 100, false, [c] { c->nudgeBoost (0.1f); });
+    menu.addItem ("Boost -10%", boostPercent > 0, false, [c] { c->nudgeBoost (-0.1f); });
     menu.addSeparator();
 
     // Factory preset quick list (grouped by category when there are several).
@@ -145,10 +150,10 @@ juce::PopupMenu TrayIcon::buildMenu()
                     continue;
                 const auto id = p.id;
                 sub.addItem (p.name, true, p.id == currentId,
-                             [this, id]
+                             [c, id]
                              {
                                  juce::String error;
-                                 controller.loadPreset (id, -1, error);
+                                 c->loadPreset (id, -1, error);
                              });
             }
             if (categories.size() == 1)
@@ -163,16 +168,33 @@ juce::PopupMenu TrayIcon::buildMenu()
     addTournamentItems (menu, controller);
     menu.addSeparator();
 
-    menu.addItem ("Quick controls...", [this] { showQuickControls(); });
-    menu.addItem ("Open Flubsound Pro", [this]
+    // R4.4: hotkeys that failed to register are one click from their fix.
+    if (const int problems = actions.countHotkeyProblems != nullptr ? actions.countHotkeyProblems() : 0; problems > 0)
+    {
+        menu.addItem ((problems == 1 ? juce::String ("1 hotkey not active") : juce::String (problems) + " hotkeys not active") + " - fix...",
+                      actions.openHotkeySettings != nullptr, false,
+                      [openFix = actions.openHotkeySettings]
+                      {
+                          if (openFix != nullptr)
+                              openFix();
+                      });
+        menu.addSeparator();
+    }
+
+    menu.addItem ("Quick controls...", [show = std::move (openQuickControls)]
                   {
-                      if (callbacks.openWindow != nullptr)
-                          callbacks.openWindow();
+                      if (show != nullptr)
+                          show();
                   });
-    menu.addItem ("Quit", [this]
+    menu.addItem ("Open Flubsound Pro", [openWindow = actions.openWindow]
                   {
-                      if (callbacks.quit != nullptr)
-                          callbacks.quit();
+                      if (openWindow != nullptr)
+                          openWindow();
+                  });
+    menu.addItem ("Quit", [quitApp = actions.quit]
+                  {
+                      if (quitApp != nullptr)
+                          quitApp();
                   });
     return menu;
 }

@@ -4,8 +4,10 @@
 // docs/11 E39: Boost, the preset stepper, Bypass, open the window); a double
 // click opens the main window. Right click (any click on macOS): quick menu
 //   Enabled | Mode: Music / Gaming | Boost +10 % / -10 % | Presets > ... |
-//   Tournament mode | Tournament mode > automatic | Quick controls |
-//   Open Flubsound Pro | Quit
+//   Tournament mode | Tournament mode > automatic | [Hotkeys not active] |
+//   Quick controls | Open Flubsound Pro | Quit
+// "N hotkeys not active - fix..." appears only while hotkeys failed to
+// register (R4.4) and opens Settings > Hotkeys.
 // Mode, boost and presets act on the selected strip. Tournament mode
 // (docs/11 E55) is the user's switch; when it comes on by itself because an
 // anti-cheat service runs, a bubble says so once. The icon is drawn in
@@ -29,6 +31,11 @@ public:
     {
         std::function<void()> openWindow;
         std::function<void()> quit;
+        /** Opens Settings > Hotkeys (the "hotkeys not active" item); optional. */
+        std::function<void()> openHotkeySettings;
+        /** How many hotkeys are not active (HotkeyManager::getFailureList);
+            optional, no item without it. */
+        std::function<int()> countHotkeyProblems;
     };
 
     TrayIcon (EngineController& controller, Callbacks callbacks);
@@ -48,6 +55,11 @@ public:
         (ticked while active; named after the anti-cheat that holds it on)
         and the automatic switch-on. */
     static void addTournamentItems (juce::PopupMenu& menu, EngineController& controller);
+
+    /** The quick menu (above) for the controller's selected strip; the items
+        call the controller, `actions` and `openQuickControls` (tests build
+        it without a tray icon). */
+    static juce::PopupMenu buildMenu (EngineController& controller, const Callbacks& actions, std::function<void()> openQuickControls);
 
 private:
     void engineControllerChanged (EngineController::Change change) override;

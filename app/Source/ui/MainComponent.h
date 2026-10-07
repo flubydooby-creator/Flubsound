@@ -7,7 +7,8 @@
 //   +--------------------------------------------------------------------+
 //   | DeviceErrorBanner (only while the output is muted or failed, E51)  |
 //   | DeviceAdviceBanner (only for a recognised headset / Bluetooth)     |
-//   | NoticeBar (preset warnings, settings recovery, latency prompt)     |
+//   | NoticeBar (preset warnings, settings recovery, latency prompt,     |
+//   |            hotkeys that are not active, R4.4)                      |
 //   +-----------+----------------------------------------+---------------+
 //   | Routing   | BoostPanel (Boost Intensity + macros)  | LevelMeters   |
 //   | Panel     +----------------------------------------+               |
@@ -105,6 +106,20 @@ public:
 
     /** Gives the settings dialog access to the application's hotkey manager. */
     void setHotkeyHooks (HotkeyHooks hooks) { hotkeyHooks = std::move (hooks); }
+
+    /** Opens Settings on `page` (or switches the open dialog to it). */
+    void openSettingsPage (SettingsDialog::Page page) { openSettings (page); }
+    /** True while the Settings dialog is open on `page`. */
+    bool isSettingsPageShowing (SettingsDialog::Page page) const;
+    /** The open Settings dialog's content, nullptr when it is closed (tests). */
+    SettingsDialog* getSettingsDialog() const;
+
+    /** R4.4: posts the hotkey notice (NoticeBar::hotkeyNotice, "Fix in
+        Settings" opens Settings > Hotkeys) for the failures it has not named
+        yet (HotkeyManager::takeUnannouncedFailures; none while that page is
+        showing, which shows them itself), and takes it away once no hotkey
+        fails. Returns true when it posted. */
+    bool announceHotkeyFailures (HotkeyManager& hotkeys);
 
     /** The banners under the header (headless screenshots and tests). */
     DeviceErrorBanner& getDeviceErrorBanner() noexcept { return deviceError; }

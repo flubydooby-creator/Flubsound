@@ -79,6 +79,7 @@ set(FLUB_APP_SOURCES
     Source/ui/FlubLookAndFeel.cpp
     Source/ui/HeaderBar.cpp
     Source/ui/HearingPage.cpp
+    Source/ui/HotkeyCapture.cpp
     Source/ui/LevelMeters.cpp
     Source/ui/LoudnessPanel.cpp
     Source/ui/MainComponent.cpp

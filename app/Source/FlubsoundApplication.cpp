@@ -143,6 +143,8 @@ void FlubsoundApplication::initialiseInteractive()
     TrayIcon::Callbacks trayCallbacks;
     trayCallbacks.openWindow = [this] { showMainWindow(); };
     trayCallbacks.quit = [this] { systemRequestedQuit(); };
+    trayCallbacks.openHotkeySettings = [this] { openHotkeySettings(); };
+    trayCallbacks.countHotkeyProblems = [this] { return hotkeys != nullptr ? static_cast<int> (hotkeys->getFailureList().size()) : 0; };
     trayIcon = std::make_unique<TrayIcon> (*controller, std::move (trayCallbacks));
 
     // docs/11 E56: hotkey (and `ctl`) feedback on the on-screen display; the
@@ -205,7 +207,21 @@ void FlubsoundApplication::initialiseInteractive()
             if (hotkeys != nullptr)
                 hotkeys->registerAll(); // unregisters the previous chords first
         };
+        hooks.pickFreeChord = [this] (HotkeyAction action)
+        { return hotkeys != nullptr ? hotkeys->pickFreeChord (action) : HotkeyManager::PickResult(); };
+        hooks.setSuspended = [this] (bool suspended)
+        {
+            if (hotkeys != nullptr)
+                hotkeys->setSuspended (suspended);
+        };
         content->setHotkeyHooks (std::move (hooks));
+
+        // R4.4: a hotkey that cannot be registered is named once in the
+        // notice under the header (and the tray menu links to the fix); a
+        // later answer (the Wayland portal) or a change is checked after it
+        // settles. The failures known now are announced below, once the
+        // window is shown (or not).
+        hotkeys->onStatusChanged = [this] { juce::MessageManager::callAsync ([this] { announceHotkeyFailures(); }); };
     }
 
     if (controller->getSettings().getStartMinimised())
@@ -220,6 +236,7 @@ void FlubsoundApplication::initialiseInteractive()
     {
         mainWindow->setVisible (true);
     }
+    announceHotkeyFailures();
 }
 
 bool FlubsoundApplication::initialiseScreenshot()
@@ -331,6 +348,28 @@ void FlubsoundApplication::showMainWindow()
     if (mainWindow->isMinimised())
         mainWindow->setMinimised (false);
     mainWindow->toFront (true);
+}
+
+void FlubsoundApplication::announceHotkeyFailures()
+{
+    if (hotkeys == nullptr || mainWindow == nullptr)
+        return;
+    auto* content = dynamic_cast<ui::MainComponent*> (mainWindow->getContentComponent());
+    if (content == nullptr || ! content->announceHotkeyFailures (*hotkeys))
+        return;
+    // Started minimised to the tray: the notice waits in the hidden window,
+    // so the tray says it once too.
+    if (! mainWindow->isVisible() && trayIcon != nullptr)
+        if (const auto* notice = content->getNoticeBar().current(); notice != nullptr && notice->key == ui::NoticeBar::kHotkeysKey)
+            trayIcon->notify ("Flubsound Pro - hotkey not active", notice->text);
+}
+
+void FlubsoundApplication::openHotkeySettings()
+{
+    showMainWindow();
+    if (mainWindow != nullptr)
+        if (auto* content = dynamic_cast<ui::MainComponent*> (mainWindow->getContentComponent()))
+            content->openSettingsPage (ui::SettingsDialog::Page::Hotkeys);
 }
 
 void FlubsoundApplication::closeButtonPressed()

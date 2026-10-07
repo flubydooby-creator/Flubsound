@@ -72,7 +72,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
 - **What it is:** *Assign app to strip…* in the routing panel (Advanced view). On Windows 10 2004+ / 11 the app is captured per process (the capture follows the process, not the device). On Linux the app is moved to the strip's PipeWire sink. The app chips show the state: playing, idle, not running, or an error with its text.
 - **What it does to the sound:** nothing by itself. It decides which strip's processing the app gets.
-- **Listen for:** the app should be heard once, processed. Check it by switching the strip's Bypass hotkey (*Ctrl+Alt+B*): the sound should change, not double.
+- **Listen for:** the app should be heard once, processed. Check it by switching the strip's Bypass hotkey (*Ctrl+Alt+Shift+B*; *Ctrl+Alt+B* if you saved that chord before 2026-10-07): the sound should change, not double.
 - **Demo pairs:** none (routing has no sound of its own; the strip's meter and the doubling guard below are the checks)
 - **Limits:** a captured app that also plays straight to your headset would be heard twice, so Flubsound holds it back (see below; on Windows it can also move the app's own sound away for you). On macOS per-app capture (E49) is not built.
 
@@ -647,11 +647,12 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
   | Focus (footsteps) | Ctrl+Alt+S | latches Footsteps at 100 % (Gaming only) until pressed again |
   | ChatMix: more chat / more game | Ctrl+Alt+PageUp / PageDown | the ChatMix balance ±0.2 |
   | Night listening | Ctrl+Alt+N | latches Night Mode Gaming's dynamics |
-  | Bypass hotkey strip | Ctrl+Alt+B | that strip only, loudness matched |
+  | Bypass hotkey strip | Ctrl+Alt+Shift+B (was Ctrl+Alt+B) | that strip only, loudness matched |
 
 - **Listen for:** each press changes what its row says, on the strip you play on.
+- **When one does nothing:** another program may hold that combination (on the owner's PC another program holds Ctrl+Alt+B, which is why Bypass moved to Ctrl+Alt+Shift+B; a chord you saved yourself is kept). Flubsound then says so once in a notice under the header (*Hotkey not active: … is in use by another application* with **Fix in Settings**), the tray menu shows *1 hotkey not active - fix…*, and Settings › Hotkeys shows the row in red with **Pick a free one**, which tries a few alternatives (for Bypass: Ctrl+Alt+Shift+B, Ctrl+Alt+Shift+Y, Ctrl+Alt+Y) and keeps the first free one. Two actions on one chord, or a chord without Ctrl / Alt / Win, are named as such ("Same chord as …", "Not a valid shortcut"). Check by ear: press the new chord and listen for the change on the hotkey strip.
 - **Demo pairs:** `gaming-boost-50`, `gaming-footsteps`, `night`, `chatmix`
-- **Limits:** on Wayland the desktop's GlobalShortcuts portal must allow them (KDE 5.27+, GNOME 48+).
+- **Limits:** on Wayland the desktop's GlobalShortcuts portal must allow them (KDE 5.27+, GNOME 48+). Flubsound cannot tell which program holds a combination (the system does not say).
 
 ### The tray flyout
 
@@ -747,7 +748,7 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 
 ### Settings › Hotkeys
 
-- **What it is:** the switch for system-wide hotkeys, *Hotkeys act on* (the hotkey strip, Game by default), and one row per action with its chord and registration status ([§9](#global-hotkeys)).
+- **What it is:** the switch for system-wide hotkeys, *Hotkeys act on* (the hotkey strip, Game by default), and one row per action with its chord and registration status ([§9](#global-hotkeys)). To change a chord, click it and press the new combination (Esc cancels, Backspace clears it; Flubsound's own hotkeys pause meanwhile so their chords can be recorded; a chord another action has is refused with its name). Right-click to type one instead (for Win / Super chords). A row in red is not active: the reason is next to it and under the rows, and **Pick a free one** picks a free combination. The reset button puts the default back.
 - **Demo pairs:** `gaming-boost-50`
 
 ### Settings › General

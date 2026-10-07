@@ -2,6 +2,7 @@
 
 #include "FlubLookAndFeel.h"
 #include "HearingPage.h"
+#include "HotkeyCapture.h"
 #include "ParameterBinding.h"
 #include "diagnostics/CrashHandler.h"
 #include "diagnostics/DiagnosticLog.h"
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 namespace flub::app::ui
 {
@@ -1210,10 +1212,13 @@ private:
 // =============================================================================
 // Hotkeys page
 // =============================================================================
-/** One row per action: name, chord editor, reset button and the action's
-    registration status. Results that arrive later (the Wayland portal asks
-    the desktop, which may ask the user) are picked up by a 4 Hz poll while
-    the page is visible. */
+/** One row per action: name, the chord (recorded by pressing it,
+    HotkeyCapture.h), reset to default, the action's registration status and,
+    while it is not active, "Pick a free combination" (R4.4). The summary
+    under the rows names every problem with its reason, the recorder's
+    prompt and refusals, and what a pick did. Results that arrive later (the
+    Wayland portal asks the desktop, which may ask the user) are picked up by
+    a 4 Hz poll while the page is visible. */
 class SettingsDialog::HotkeysPage : public juce::Component, private juce::Timer
 {
 public:
@@ -1226,6 +1231,7 @@ public:
         enabledToggle.onClick = [this]
         {
             controller.getSettings().setHotkeysEnabled (enabledToggle.getToggleState());
+            note = {};
             reRegister();
         };
         addAndMakeVisible (enabledToggle);
@@ -1247,42 +1253,105 @@ public:
             Row row;
             row.action = action;
             row.name = AppSettings::getHotkeyActionName (action);
+
+            row.field = std::make_unique<HotkeyCaptureField> (row.name);
+            auto* field = row.field.get();
+            field->onCaptureStarted = [this, action]
+            {
+                recording = action;
+                recordedChange = false;
+                note = "Press the new shortcut for " + AppSettings::getHotkeyActionName (action)
+                       + " (Ctrl, Alt and Shift with a letter, a digit, F1-F24 or a navigation key). Esc cancels, Backspace clears it. "
+                         "A combination another application holds never arrives here.";
+                noteIsError = false;
+                setSuspended (true);
+                updateStatus();
+            };
+            field->onChordPressed = [this, action] (const flub::platform::KeyChord& chord) { return acceptRecorded (action, chord); };
+            field->onCleared = [this, action]
+            {
+                controller.getSettings().setHotkey (action, {});
+                note = AppSettings::getHotkeyActionName (action) + " has no shortcut now.";
+                noteIsError = false;
+                recordedChange = true;
+            };
+            field->onUnsupportedKey = [this] (const juce::String& key)
+            {
+                note = "\"" + key + "\" cannot be part of a hotkey: use a letter, a digit, F1-F24, Space or a navigation key, with Ctrl or Alt. "
+                       "Esc cancels.";
+                noteIsError = true;
+                updateStatus();
+            };
+            field->onCaptureEnded = [this]
+            {
+                recording.reset();
+                if (! recordedChange)
+                {
+                    note = {}; // cancelled: nothing changed
+                    noteIsError = false;
+                }
+                setSuspended (false); // registers everything again, with the new chord
+                refreshFields();
+                updateStatus();
+            };
+            addAndMakeVisible (*row.field);
+
+            // A right click on the field types the chord instead (Win / Super
+            // key chords, which JUCE cannot record on Windows and Linux).
             row.editor = std::make_unique<juce::TextEditor>();
-            row.editor->setTitle (row.name + " shortcut");
+            row.editor->setTitle (row.name + " shortcut as text");
             row.editor->setFont (Theme::font (13.0f));
             row.editor->setJustification (juce::Justification::centredLeft);
             row.editor->setIndents (8, 0);
-            row.editor->setTooltip ("Type a chord such as Ctrl+Alt+F, Ctrl+Shift+F5 or None, then press Return");
-            auto* editor = row.editor.get();
-            row.editor->onReturnKey = [this, action, editor] { commit (action, *editor); };
-            row.editor->onFocusLost = [this, action, editor] { commit (action, *editor); };
-            row.editor->onEscapeKey = [this, action, editor]
-            {
-                editor->setText (AppSettings::chordToString (controller.getSettings().getHotkey (action)), false);
-                editor->giveAwayKeyboardFocus();
-            };
-            addAndMakeVisible (*row.editor);
+            row.editor->setTooltip ("Type a chord such as Ctrl+Alt+F, Super+F5 or None, then press Return. Esc cancels.");
+            row.editor->onReturnKey = [this, action] { commitTyped (action); };
+            row.editor->onFocusLost = [this, action] { commitTyped (action); };
+            row.editor->onEscapeKey = [this, action] { closeTyped (action); };
+            addChildComponent (*row.editor);
+            field->onTypeRequested = [this, action] { openTyped (action); };
 
             row.reset = std::make_unique<IconButton> ("Reset " + row.name + " to default", Icons::reset(), IconButton::Style::Framed);
             row.reset->setTooltip ("Default: " + AppSettings::chordToString (AppSettings::getDefaultHotkey (action)));
-            row.reset->onClick = [this, action, editor]
+            row.reset->onClick = [this, action]
             {
-                controller.getSettings().setHotkey (action, AppSettings::getDefaultHotkey (action));
-                editor->setText (AppSettings::chordToString (AppSettings::getDefaultHotkey (action)), false);
+                const auto chord = AppSettings::getDefaultHotkey (action);
+                controller.getSettings().setHotkey (action, chord);
+                note = AppSettings::getHotkeyActionName (action) + " is back to its default, " + AppSettings::chordToString (chord) + ".";
+                noteIsError = false;
                 reRegister();
             };
             addAndMakeVisible (*row.reset);
+
+            row.pick = std::make_unique<juce::TextButton> ("Pick a free one");
+            row.pick->setTitle ("Pick a free combination for " + row.name);
+            row.pick->onClick = [this, action] { pickFree (action); };
+            addChildComponent (*row.pick);
             rows.push_back (std::move (row));
         }
         refresh();
     }
 
+    ~HotkeysPage() override
+    {
+        // Closed while recording (the window's close button): the hotkeys
+        // must not stay suspended.
+        for (auto& row : rows)
+        {
+            row.field->onCaptureEnded = nullptr;
+            row.editor->onFocusLost = nullptr;
+        }
+        if (recording.has_value())
+            setSuspended (false);
+    }
+
     void refresh()
     {
-        for (auto& row : rows)
-            if (! row.editor->hasKeyboardFocus (true))
-                row.editor->setText (AppSettings::chordToString (controller.getSettings().getHotkey (row.action)), false);
-
+        if (! recording.has_value())
+        {
+            note = {}; // the page shown again: the state, not an old outcome
+            noteIsError = false;
+        }
+        refreshFields();
         stripBox.clear (juce::dontSendNotification);
         const auto chosen = controller.getSettings().getHotkeyStripName();
         for (int i = 0; i < controller.getNumStrips(); ++i)
@@ -1296,12 +1365,22 @@ public:
         updateStatus();
     }
 
+    /** The text under the rows (tests). */
+    const juce::String& getSummary() const noexcept { return status; }
+
     void visibilityChanged() override
     {
         if (isVisible())
             startTimerHz (4);
         else
+        {
             stopTimer();
+            for (auto& row : rows)
+            {
+                row.field->cancelCapture();
+                closeTyped (row.action);
+            }
+        }
     }
 
     void paint (juce::Graphics& g) override
@@ -1310,6 +1389,7 @@ public:
         g.setColour (Palette::text.withAlpha (0.88f));
         g.setFont (Theme::font (13.0f));
         g.drawText ("Hotkeys act on", stripCaptionArea, juce::Justification::centredLeft, true);
+        const auto colours = Theme::statusColours (*this);
         for (const auto& row : rows)
         {
             g.setColour (Palette::text.withAlpha (0.88f));
@@ -1318,17 +1398,15 @@ public:
 
             using S = HotkeyManager::Status;
             const auto state = row.state.status;
-            g.setColour (state == S::Unavailable || state == S::Declined ? Palette::amber
-                         : state == S::Registered                         ? Palette::green
-                                                                          : Palette::muted);
+            g.setColour (HotkeyManager::isProblem (state) ? colours.hot : state == S::Registered ? Palette::green : Palette::muted);
             g.setFont (Theme::font (11.5f));
-            g.drawFittedText (row.stateText, row.stateArea, juce::Justification::centredLeft, 2, 1.0f);
+            g.drawFittedText (row.stateText, row.stateArea, juce::Justification::centredLeft, 2, 0.8f);
         }
         if (status.isNotEmpty())
         {
-            g.setColour (statusIsError ? Palette::amber : Palette::faint.brighter (0.2f));
+            g.setColour (statusIsError ? colours.hot : Palette::faint.brighter (0.2f));
             g.setFont (Theme::font (12.0f));
-            g.drawFittedText (status, statusArea, juce::Justification::topLeft, 8, 1.0f);
+            g.drawFittedText (status, statusArea, juce::Justification::topLeft, 9, 1.0f);
         }
     }
 
@@ -1341,19 +1419,26 @@ public:
         r.removeFromTop (6);
         {
             auto line = r.removeFromTop (kRowHeight);
-            stripCaptionArea = line.removeFromLeft (160);
-            stripBox.setBounds (line.removeFromLeft (150).reduced (0, 2));
+            stripCaptionArea = line.removeFromLeft (140);
+            stripBox.setBounds (line.removeFromLeft (140).reduced (0, 2));
         }
         r.removeFromTop (6);
         for (auto& row : rows)
         {
             auto line = r.removeFromTop (kRowHeight);
-            row.captionArea = line.removeFromLeft (160);
-            row.editor->setBounds (line.removeFromLeft (150).reduced (0, 2));
+            row.captionArea = line.removeFromLeft (140);
+            row.field->setBounds (line.removeFromLeft (140).reduced (0, 2));
+            row.editor->setBounds (row.field->getBounds());
             line.removeFromLeft (6);
             row.reset->setBounds (line.removeFromLeft (26).reduced (0, 2));
-            line.removeFromLeft (12);
-            row.stateArea = line;
+            line.removeFromLeft (8);
+            // "Pick a free one" at the right of a row that is not active; the
+            // status text keeps the rest (two lines).
+            const int pickWidth = juce::jlimit (84, 132, line.getWidth() / 2);
+            row.pick->setButtonText (pickWidth >= 116 ? "Pick a free one" : "Pick free");
+            row.pick->setBounds (line.removeFromRight (pickWidth).reduced (0, 3));
+            line.removeFromRight (6);
+            row.stateArea = row.pick->isVisible() ? line : line.withRight (row.pick->getRight());
             r.removeFromTop (2);
         }
         r.removeFromTop (10);
@@ -1365,8 +1450,10 @@ private:
     {
         HotkeyAction action {};
         juce::String name;
-        std::unique_ptr<juce::TextEditor> editor;
+        std::unique_ptr<HotkeyCaptureField> field;
+        std::unique_ptr<juce::TextEditor> editor; // the typed alternative, in the field's place while open
         std::unique_ptr<IconButton> reset;
+        std::unique_ptr<juce::TextButton> pick; // shown while the action's hotkey is not active
         juce::Rectangle<int> captionArea, stateArea;
         HotkeyManager::ActionStatus state;
         juce::String stateText; // HotkeyManager::describe, "" without the hook
@@ -1374,8 +1461,8 @@ private:
 
     void timerCallback() override
     {
-        // Only a change rewrites the summary, so an invalid-chord message
-        // stays until the next change.
+        // Only a change rewrites the summary, so a refusal stays until the
+        // next change.
         for (const auto& row : rows)
         {
             if (readState (row.action).text != row.stateText)
@@ -1400,42 +1487,139 @@ private:
         return { state, HotkeyManager::describe (state) };
     }
 
-    void commit (HotkeyAction action, juce::TextEditor& editor)
+    void refreshFields()
+    {
+        for (auto& row : rows)
+            if (! row.field->isCapturing())
+                row.field->setChordText (AppSettings::chordToString (controller.getSettings().getHotkey (row.action)));
+    }
+
+    /** A recorded chord: refused (recording goes on) when it is not a valid
+        hotkey or another action has it; otherwise saved. */
+    bool acceptRecorded (HotkeyAction action, const flub::platform::KeyChord& chord)
     {
         auto& settings = controller.getSettings();
-        const auto text = editor.getText().trim();
+        const auto text = AppSettings::chordToString (chord);
+        if (const auto why = HotkeyManager::validateChord (chord); why.isNotEmpty())
+        {
+            note = text + " cannot be a hotkey: " + why + " Press another combination, or Esc.";
+            noteIsError = true;
+            updateStatus();
+            return false;
+        }
+        if (const auto other = HotkeyManager::findConflict (settings, action, chord))
+        {
+            note = text + " is already " + AppSettings::getHotkeyActionName (*other) + "'s shortcut. Press another combination, or Esc to keep "
+                   + AppSettings::chordToString (settings.getHotkey (action)) + ".";
+            noteIsError = true;
+            updateStatus();
+            return false;
+        }
+        settings.setHotkey (action, chord);
+        note = AppSettings::getHotkeyActionName (action) + " is now " + text + ".";
+        noteIsError = false;
+        recordedChange = true;
+        return true;
+    }
+
+    Row* rowOf (HotkeyAction action)
+    {
+        for (auto& row : rows)
+            if (row.action == action)
+                return &row;
+        return nullptr;
+    }
+
+    void openTyped (HotkeyAction action)
+    {
+        auto* row = rowOf (action);
+        if (row == nullptr)
+            return;
+        typing = action;
+        row->editor->setText (AppSettings::chordToString (controller.getSettings().getHotkey (action)), false);
+        row->field->setVisible (false);
+        row->editor->setVisible (true);
+        if (row->editor->isShowing())
+            row->editor->grabKeyboardFocus();
+        row->editor->selectAll();
+    }
+
+    void closeTyped (HotkeyAction action)
+    {
+        auto* row = rowOf (action);
+        if (row == nullptr || typing != action)
+            return;
+        typing.reset(); // first: hiding the editor takes its focus (onFocusLost)
+        row->editor->setVisible (false);
+        row->field->setVisible (true);
+    }
+
+    /** The typed chord: "None" or empty clears it; otherwise saved when it is
+        a valid hotkey no other action has. */
+    void commitTyped (HotkeyAction action)
+    {
+        auto* row = rowOf (action);
+        if (row == nullptr || typing != action)
+            return;
+        auto& settings = controller.getSettings();
+        const auto name = AppSettings::getHotkeyActionName (action);
+        const auto text = row->editor->getText().trim();
         flub::platform::KeyChord chord;
+        noteIsError = true;
         if (text.isEmpty() || text.equalsIgnoreCase ("None"))
         {
             settings.setHotkey (action, {});
+            note = name + " has no shortcut now.";
+            noteIsError = false;
         }
-        else if (AppSettings::chordFromString (text, chord))
-        {
-            settings.setHotkey (action, chord);
-        }
+        else if (! AppSettings::chordFromString (text, chord))
+            note = "\"" + text + "\" is not a shortcut. Use modifiers + one key, e.g. Ctrl+Alt+F or Super+F5.";
+        else if (const auto why = HotkeyManager::validateChord (chord); why.isNotEmpty())
+            note = AppSettings::chordToString (chord) + " cannot be a hotkey: " + why;
+        else if (const auto other = HotkeyManager::findConflict (settings, action, chord))
+            note = AppSettings::chordToString (chord) + " is already " + AppSettings::getHotkeyActionName (*other) + "'s shortcut.";
         else
         {
-            editor.setText (AppSettings::chordToString (settings.getHotkey (action)), false);
-            status = "\"" + text + "\" is not a valid shortcut. Use modifiers + one key, e.g. Ctrl+Alt+F or Ctrl+Shift+F5.";
-            statusIsError = true;
-            repaint();
-            return;
+            settings.setHotkey (action, chord);
+            note = name + " is now " + AppSettings::chordToString (chord) + ".";
+            noteIsError = false;
         }
-        editor.setText (AppSettings::chordToString (settings.getHotkey (action)), false);
+        closeTyped (action);
         reRegister();
+    }
+
+    void pickFree (HotkeyAction action)
+    {
+        if (hooks.pickFreeChord == nullptr)
+            return;
+        const auto result = hooks.pickFreeChord (action);
+        note = result.message;
+        noteIsError = ! result.found;
+        refreshFields();
+        updateStatus();
+    }
+
+    void setSuspended (bool suspended)
+    {
+        if (hooks.setSuspended != nullptr)
+            hooks.setSuspended (suspended);
+        else if (! suspended && hooks.reRegister != nullptr)
+            hooks.reRegister();
     }
 
     void reRegister()
     {
         if (hooks.reRegister != nullptr)
             hooks.reRegister();
+        refreshFields();
         updateStatus();
     }
 
     void updateStatus()
     {
         using S = HotkeyManager::Status;
-        int pending = 0, reassigned = 0, inactive = 0;
+        int pending = 0, reassigned = 0;
+        juce::StringArray problems;
         for (auto& row : rows)
         {
             const auto latest = readState (row.action);
@@ -1443,39 +1627,63 @@ private:
             row.stateText = latest.text;
             pending += row.state.status == S::Pending ? 1 : 0;
             reassigned += row.state.status == S::Reassigned ? 1 : 0;
-            inactive += row.state.status == S::Unavailable || row.state.status == S::Declined ? 1 : 0;
+            const bool problem = HotkeyManager::isProblem (row.state.status);
+            if (problem)
+                problems.add (HotkeyManager::describeFailure ({ row.action, row.state }) + ".");
+            row.field->setProblem (problem);
+            row.pick->setVisible (problem && hooks.pickFreeChord != nullptr);
+            if (problem)
+                row.pick->setTooltip ("Tries " + describeCandidates (row.action)
+                                      + " in turn and keeps the first one no other application holds.");
         }
+        resized(); // the status text takes the room of a hidden pick button
 
         const bool supported = hooks.isSupported != nullptr && hooks.isSupported();
-        statusIsError = false;
-        if (! supported)
+        juce::String state;
+        bool stateIsError = false;
+        if (recording.has_value())
         {
-            status = "System-wide hotkeys are not available here (no platform support, or a Wayland session without the "
-                     "GlobalShortcuts portal). The shortcuts are saved and apply where supported.";
+            state = {};
+        }
+        else if (! supported)
+        {
+            state = "System-wide hotkeys are not available here (no platform support, or a Wayland session without the "
+                    "GlobalShortcuts portal). The shortcuts are saved and apply where supported.";
         }
         else if (! controller.getSettings().getHotkeysEnabled())
         {
-            status = "Shortcuts are switched off.";
+            state = "Shortcuts are switched off.";
         }
-        else if (inactive > 0)
+        else if (! problems.isEmpty())
         {
-            status = "Some shortcuts are not active (see each row): another application may already use the chord, or the desktop "
-                     "declined it. Choose another chord, or bind the action in the desktop's keyboard settings.";
-            statusIsError = true;
+            state = "Not active: " + problems.joinIntoString (" ")
+                    + " Pick a free combination, or click the shortcut and press a new one.";
+            stateIsError = true;
         }
         else if (const auto failures = hooks.getStatus == nullptr && hooks.getFailures != nullptr ? hooks.getFailures() : juce::StringArray();
                  ! failures.isEmpty())
         {
-            status = "Could not register: " + failures.joinIntoString ("; ") + ".";
-            statusIsError = true;
+            state = "Could not register: " + failures.joinIntoString ("; ") + ".";
+            stateIsError = true;
         }
         else if (pending > 0)
-            status = "Waiting for the desktop to confirm the shortcuts; it may ask you in a dialog.";
+            state = "Waiting for the desktop to confirm the shortcuts; it may ask you in a dialog.";
         else if (reassigned > 0)
-            status = "The desktop bound some shortcuts to other keys (shown next to each); change them in its keyboard settings.";
+            state = "The desktop bound some shortcuts to other keys (shown next to each); change them in its keyboard settings.";
         else
-            status = "All shortcuts are registered.";
+            state = "All shortcuts are registered.";
+
+        status = note.isNotEmpty() && state.isNotEmpty() ? note + "\n" + state : note + state;
+        statusIsError = noteIsError || (note.isEmpty() && stateIsError);
         repaint();
+    }
+
+    juce::String describeCandidates (HotkeyAction action) const
+    {
+        juce::StringArray names;
+        for (const auto& chord : HotkeyManager::freeChordCandidates (controller.getSettings(), action))
+            names.add (AppSettings::chordToString (chord));
+        return names.isEmpty() ? juce::String ("the alternatives") : names.joinIntoString (", ");
     }
 
     EngineController& controller;
@@ -1484,6 +1692,11 @@ private:
     juce::ComboBox stripBox;
     juce::Rectangle<int> stripCaptionArea;
     std::vector<Row> rows;
+    std::optional<HotkeyAction> recording; // the row whose chord is being recorded
+    std::optional<HotkeyAction> typing;    // the row whose chord is being typed
+    bool recordedChange = false;           // this recording saved or cleared a chord
+    juce::String note;                     // the last edit's outcome, a refusal or the recorder's prompt
+    bool noteIsError = false;
     juce::String status;
     bool statusIsError = false;
     juce::Rectangle<int> titleArea, statusArea;
@@ -2248,6 +2461,11 @@ void SettingsDialog::showPage (Page page)
     if (page == Page::Diagnostics)
         diagnosticsPage->refresh();
     repaint();
+}
+
+juce::String SettingsDialog::getHotkeysSummary() const
+{
+    return hotkeysPage->getSummary();
 }
 
 void SettingsDialog::timerCallback()

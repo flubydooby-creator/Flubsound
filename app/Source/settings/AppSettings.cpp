@@ -21,6 +21,7 @@ constexpr const char* selectedStrip = "engine.selectedStrip";
 constexpr const char* reduceLoadOnOverload = "engine.reduceLoadOnOverload";
 constexpr const char* hotkeysEnabled = "hotkeys.enabled";
 constexpr const char* hotkeyStrip = "hotkeys.strip";
+constexpr const char* hotkeysAnnounced = "hotkeys.announced";
 constexpr const char* startMinimised = "ui.startMinimised";
 constexpr const char* closeToTray = "ui.closeToTray";
 constexpr const char* startWithOs = "ui.startWithOs";
@@ -147,6 +148,14 @@ bool keyCodeFromString (const juce::String& raw, uint32_t& code)
         }
     }
     return false;
+}
+
+juce::StringArray announcedHotkeyFailures (const juce::PropertiesFile& file)
+{
+    auto entries = juce::StringArray::fromTokens (file.getValue (Keys::hotkeysAnnounced), ",", {});
+    entries.trim();
+    entries.removeEmptyStrings();
+    return entries;
 }
 
 const char* hotkeySettingKey (HotkeyAction action)
@@ -452,9 +461,64 @@ KeyChord AppSettings::getDefaultHotkey (HotkeyAction action)
         case HotkeyAction::ChatMixToChat: chord.keyCode = 0x21; break;  // PageUp
         case HotkeyAction::ChatMixToGame: chord.keyCode = 0x22; break;  // PageDown
         case HotkeyAction::ToggleNight: chord.keyCode = 'N'; break;
-        case HotkeyAction::ToggleBypass: chord.keyCode = 'B'; break;
+        case HotkeyAction::ToggleBypass:
+            // Ctrl+Alt+Shift+B since 2026-10-07 (was Ctrl+Alt+B, which another
+            // program holds on the owner's PC; docs/06 §7.2). A saved
+            // "hotkey.toggleBypass" is kept as it is.
+            chord.modifiers |= KeyChord::Shift;
+            chord.keyCode = 'B';
+            break;
     }
     return chord;
+}
+
+std::vector<KeyChord> AppSettings::getAlternativeHotkeys (HotkeyAction action)
+{
+    // A second key per action (a mnemonic or a neighbour), distinct across
+    // the actions and from every default key, so two actions never compete
+    // for the same alternative.
+    uint32_t second = 0;
+    switch (action)
+    {
+        case HotkeyAction::ToggleEnable: second = 'E'; break;   // Enable
+        case HotkeyAction::ToggleMode: second = 'G'; break;     // Gaming
+        case HotkeyAction::BoostUp: second = 'U'; break;        // Up
+        case HotkeyAction::BoostDown: second = 'D'; break;      // Down
+        case HotkeyAction::NextPreset: second = 'P'; break;     // P right of O, like Right of Left
+        case HotkeyAction::PreviousPreset: second = 'O'; break;
+        case HotkeyAction::ToggleFocus: second = 'H'; break;    // Hear
+        case HotkeyAction::ChatMixToChat: second = 'C'; break;  // Chat (C left of V)
+        case HotkeyAction::ChatMixToGame: second = 'V'; break;
+        case HotkeyAction::ToggleNight: second = 'L'; break;    // Late night
+        case HotkeyAction::ToggleBypass: second = 'Y'; break;   // bYpass
+    }
+
+    // Three-modifier chords first: other programs rarely hold Ctrl+Alt+Shift
+    // chords, and AltGr (= Ctrl+Alt on Windows) never types a character with
+    // them on most layouts. The two-modifier chord with the second key last.
+    constexpr uint32_t ctrlAlt = KeyChord::Ctrl | KeyChord::Alt;
+    const auto def = getDefaultHotkey (action);
+    std::vector<KeyChord> list;
+    const auto add = [&list] (uint32_t modifiers, uint32_t keyCode)
+    {
+        KeyChord chord;
+        chord.modifiers = modifiers;
+        chord.keyCode = keyCode;
+        for (const auto& c : list)
+            if (sameChord (c, chord))
+                return;
+        list.push_back (chord);
+    };
+    add (def.modifiers, def.keyCode);
+    add (ctrlAlt | KeyChord::Shift, def.keyCode);
+    add (ctrlAlt | KeyChord::Shift, second);
+    add (ctrlAlt, second);
+    return list;
+}
+
+bool AppSettings::sameChord (const KeyChord& a, const KeyChord& b) noexcept
+{
+    return a.keyCode == b.keyCode && (a.keyCode == 0 || a.modifiers == b.modifiers);
 }
 
 juce::String AppSettings::getHotkeyActionName (HotkeyAction action)
@@ -498,6 +562,33 @@ KeyChord AppSettings::getHotkey (HotkeyAction action) const
 void AppSettings::setHotkey (HotkeyAction action, const KeyChord& chord)
 {
     properties->setValue (hotkeySettingKey (action), chordToString (chord));
+}
+
+bool AppSettings::hasSavedHotkey (HotkeyAction action) const { return properties->containsKey (hotkeySettingKey (action)); }
+
+// "hotkey.toggleBypass=Ctrl+Alt+B,..." : the failures the notice has named.
+bool AppSettings::isHotkeyFailureAnnounced (HotkeyAction action, const juce::String& chord) const
+{
+    const auto entry = juce::String (hotkeySettingKey (action)) + "=" + chord;
+    return announcedHotkeyFailures (*properties).contains (entry);
+}
+
+void AppSettings::setHotkeyFailureAnnounced (HotkeyAction action, const juce::String& chord, bool announced)
+{
+    const auto prefix = juce::String (hotkeySettingKey (action)) + "=";
+    auto entries = announcedHotkeyFailures (*properties);
+    const auto before = entries;
+    for (int i = entries.size(); --i >= 0;)
+        if (entries[i].startsWith (prefix))
+            entries.remove (i);
+    if (announced && chord.isNotEmpty() && ! chord.containsChar (','))
+        entries.add (prefix + chord);
+    if (entries == before)
+        return;
+    if (entries.isEmpty())
+        properties->removeValue (Keys::hotkeysAnnounced);
+    else
+        properties->setValue (Keys::hotkeysAnnounced, entries.joinIntoString (","));
 }
 
 bool AppSettings::getHotkeysEnabled() const { return properties->getBoolValue (Keys::hotkeysEnabled, true); }

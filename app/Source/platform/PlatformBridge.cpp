@@ -4,6 +4,10 @@
     #define FLUB_HAS_PLATFORM_SERVICES 0
 #endif
 
+#if FLUB_HAS_PLATFORM_SERVICES
+    #include "PlatformServicesInternal.h" // detail::isValidChord
+#endif
+
 namespace flub::app::platform_bridge
 {
 bool servicesCompiledIn() noexcept
@@ -16,6 +20,21 @@ bool servicesCompiledIn() noexcept
 std::unique_ptr<flub::platform::GlobalHotkeys> createGlobalHotkeys()
 {
     return flub::platform::GlobalHotkeys::create();
+}
+
+std::string chordProblem (const flub::platform::KeyChord& chord)
+{
+    if (chord.keyCode == 0)
+        return "No key.";
+    std::string reason;
+    if (! flub::platform::detail::isValidChord (chord, &reason))
+        return reason;
+   #if defined(_WIN32)
+    // PlatformServices_win.cpp refuses it too (RegisterHotKey's documentation).
+    if (chord.keyCode == flub::platform::detail::kFunctionKeyBase + 11 && chord.modifiers == flub::platform::KeyChord::None)
+        return "F12 alone is reserved by Windows.";
+   #endif
+    return {};
 }
 
 std::unique_ptr<flub::platform::AppAudioRouter> createAppAudioRouter()
@@ -56,6 +75,7 @@ void revertAudioThread (void* handle)
 #else // no OS implementation in this build
 
 std::unique_ptr<flub::platform::GlobalHotkeys> createGlobalHotkeys() { return {}; }
+std::string chordProblem (const flub::platform::KeyChord& chord) { return chord.keyCode == 0 ? "No key." : std::string(); }
 std::unique_ptr<flub::platform::AppAudioRouter> createAppAudioRouter() { return {}; }
 std::unique_ptr<flub::platform::ProcessLoopbackCapture> createProcessLoopbackCapture() { return {}; }
 std::unique_ptr<flub::platform::AutoStart> createAutoStart() { return {}; }

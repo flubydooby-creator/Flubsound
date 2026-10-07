@@ -501,6 +501,33 @@ void MainComponent::openSettings (std::optional<SettingsDialog::Page> page)
         lookAndFeel().getMeterPalette(), page.value_or (SettingsDialog::Page::Audio));
 }
 
+SettingsDialog* MainComponent::getSettingsDialog() const
+{
+    return settingsWindow != nullptr ? dynamic_cast<SettingsDialog*> (settingsWindow->getContentComponent()) : nullptr;
+}
+
+bool MainComponent::isSettingsPageShowing (SettingsDialog::Page page) const
+{
+    const auto* dialog = getSettingsDialog();
+    return dialog != nullptr && dialog->isShowing() && dialog->getCurrentPage() == page;
+}
+
+bool MainComponent::announceHotkeyFailures (HotkeyManager& hotkeys)
+{
+    if (hotkeys.getFailureList().empty())
+        notices.dismiss (NoticeBar::kHotkeysKey); // fixed (or switched off): the notice has nothing left to say
+    const auto fresh = hotkeys.takeUnannouncedFailures();
+    if (fresh.empty() || isSettingsPageShowing (SettingsDialog::Page::Hotkeys))
+        return false;
+    notices.post (NoticeBar::hotkeyNotice (fresh,
+                                           [safe = juce::Component::SafePointer<MainComponent> (this)]
+                                           {
+                                               if (safe != nullptr)
+                                                   safe->openSettingsPage (SettingsDialog::Page::Hotkeys);
+                                           }));
+    return true;
+}
+
 void MainComponent::openExport()
 {
     if (exportWindow != nullptr)

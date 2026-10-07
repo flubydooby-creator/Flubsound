@@ -59,11 +59,17 @@
 //               against the WHO reference; "unknown" and nothing applied
 //               without a sensitivity; non-medical wording. And the personal
 //               per-ear profile (docs/11 E33; PersonalProfileEditor.h).
-//   Hotkeys     system-wide shortcut list: edit a chord as text
-//               ("Ctrl+Alt+F"), reset to default, enable / disable; each
-//               row shows its registration status (registered, in use,
-//               declined by the desktop, bound by the desktop as another
-//               key, waiting for the desktop), updated as results arrive.
+//   Hotkeys     system-wide shortcut list (R4.4): record a chord by
+//               pressing it (HotkeyCapture.h; Flubsound's own hotkeys are
+//               suspended meanwhile; a chord another action has or an
+//               invalid one is refused with the reason; Esc cancels,
+//               Backspace clears), reset to default, enable / disable; each
+//               row shows its registration status (registered, in use by
+//               another application, same chord as another action, not a
+//               valid shortcut, declined by the desktop, bound by the
+//               desktop as another key, waiting for the desktop), in red
+//               while not active with "Pick a free combination"
+//               (HotkeyManager::pickFreeChord), updated as results arrive.
 //   General     start with the OS (reflects the OS's actual entry; hidden
 //               where unsupported), start minimised, close to tray, UI scale
 //               (Follow system or 75 - 200 %) and theme (standard / high
@@ -106,6 +112,13 @@ struct HotkeyHooks
     std::function<void()> reRegister;
     /** Per-action status (HotkeyManager::getStatus); optional. */
     std::function<HotkeyManager::ActionStatus (HotkeyAction)> getStatus;
+    /** "Pick a free combination" (HotkeyManager::pickFreeChord); optional:
+        without it the button is not shown. */
+    std::function<HotkeyManager::PickResult (HotkeyAction)> pickFreeChord;
+    /** Suspends / resumes the registered hotkeys while a chord is recorded
+        (HotkeyManager::setSuspended); optional: without it the hotkeys are
+        registered again (reRegister) when recording ends. */
+    std::function<void (bool)> setSuspended;
 };
 
 class SettingsDialog : public juce::Component, private juce::Timer
@@ -139,6 +152,11 @@ public:
                                      Page page = Page::Audio);
 
     void showPage (Page page);
+    Page getCurrentPage() const noexcept { return current; }
+
+    /** The Hotkeys page's text under the rows: the problems with their
+        reasons, the recorder's prompt or refusal, a pick's outcome (tests). */
+    juce::String getHotkeysSummary() const;
 
     /** Output device + matched headset profile, connection, safety ceiling and
         the profile's guidance (EngineController::getDeviceAdvice), one line
