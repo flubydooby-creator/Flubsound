@@ -302,6 +302,28 @@ EngineController::EngineController (Options opts)
     // Before the device opens: PipeWire reads the request when the stream opens.
     requestGraphQuantum (getLatencyProfile(), false);
 
+    // docs/11 E42c: the device buffer follows the profile chosen by hand
+    // (applied when the device opens); the back-off floors per device.
+    host->setBufferFloors (settings->getBufferFloors());
+    host->setAutomaticBufferSize (settings->getAutoBufferSize());
+    host->setBufferProfile (getLatencyProfile());
+    host->onBufferChoiceChanged = [this]
+    {
+        settings->setBufferFloors (host->getBufferFloors());
+        notify (Change::Device);
+    };
+    // docs/11 E42d: the live latency measurement; its result goes to the log.
+    latencyMeasurer = std::make_unique<LatencyMeasurer> (*host);
+    latencyMeasurer->onFinished = [this] (const LatencyMeasurer::State& st)
+    {
+        for (const auto* report : { st.deviceOnly ? &*st.deviceOnly : nullptr, st.through ? &*st.through : nullptr })
+            if (report != nullptr)
+                juce::Logger::writeToLog (juce::String::fromUTF8 (latency::summarise (*report).c_str()));
+        if (st.phase == LatencyMeasurer::Phase::Failed)
+            juce::Logger::writeToLog ("Latency measurement: " + st.error);
+        notify (Change::Device);
+    };
+
     applyAllowedLoopbackPairs(); // before the device starts: its first check sees them
     // docs/11 E53: a soak's device and pin (in memory only: such runs never persist).
     host->setOutputPin (options.outputPin);
@@ -371,6 +393,11 @@ void EngineController::shutdown()
     volumePoller.reset(); // before its async updates are cancelled
     cancelPendingUpdate();
     routing->shutdown();
+    if (latencyMeasurer != nullptr)
+    {
+        latencyMeasurer->onFinished = nullptr;
+        latencyMeasurer->cancel(); // the probe fades out; the host frees it with the device
+    }
 
     // Latched hotkey overrides are per session: the saved state is the user's own.
     releaseAllLatches (true);
@@ -1588,7 +1615,24 @@ void EngineController::updateOverloadWatchdog (const EngineStatus& status)
     }
 
     // The header's CPU readout turns into an overload warning (docs/01 §7).
-    bool changed = overloadWatchdog.update (sample) != OverloadWatchdog::Event::None;
+    const auto event = overloadWatchdog.update (sample);
+    bool changed = event != OverloadWatchdog::Event::None;
+
+    // docs/11 E42c: glitches at an automatic buffer raise it one size (the
+    // floor is persisted through onBufferChoiceChanged). Not while a latency
+    // measurement runs: the device restart would end it.
+    if (bufferBackoff.update (sample.running, overloadWatchdog.getState().glitches, event == OverloadWatchdog::Event::OverloadStarted)
+        && ! latencyMeasurer->isBusy())
+    {
+        const int before = host->getBufferInfo().current;
+        if (host->raiseBufferOneStep())
+        {
+            ++bufferBackoffSteps;
+            juce::Logger::writeToLog ("Buffer raised after dropouts: " + juce::String (before) + " -> "
+                                      + juce::String (host->getBufferInfo().current) + " samples");
+            changed = true;
+        }
+    }
 
     // Opt-in (default off): on a lasting overload, one latency-profile step
     // down (AutoLoadReducer: rate limited, never back up). Applied exactly
@@ -1632,6 +1676,14 @@ void EngineController::setLatencyProfile (LatencyProfileValue profile)
 {
     applyLatencyProfile (profile);
     loadReducer.profileChangedByUser();
+    // docs/11 E42c: the buffer follows a profile chosen by hand only (the
+    // automatic overload response's steps never shrink it). The device
+    // restarts at the new size now, and the engine is built once for it.
+    if (profile != host->getBufferProfile())
+    {
+        host->setBufferProfile (profile);
+        bufferBackoff.restarted();
+    }
     // A choice by hand only: the automatic overload response steps down to
     // shed DSP load, and a smaller quantum would add callbacks, not remove them.
     requestGraphQuantum (profile, true);
@@ -1809,6 +1861,52 @@ void EngineController::restoreLatencyProfile()
         setLatencyProfile (loadReducer.getState().restoreProfile);
 }
 
+// =============================================================================
+// Device buffer size (docs/11 E42c) and the live latency measurement (E42d)
+// =============================================================================
+void EngineController::setAutomaticBufferSize (bool automatic)
+{
+    settings->setAutoBufferSize (automatic);
+    if (automatic != host->getAutomaticBufferSize())
+    {
+        host->setAutomaticBufferSize (automatic); // on: forgets the device's floor and applies the profile's size
+        settings->setBufferFloors (host->getBufferFloors());
+        bufferBackoff.restarted();
+    }
+    notify (Change::Device);
+    notify (Change::Settings);
+}
+
+juce::String EngineController::whyCannotMeasureLatency (LatencyMode mode) const
+{
+    LatencyMeasurer::Request request;
+    request.mode = mode;
+    request.strip = selectedStrip;
+    request.stripName = getStripName (selectedStrip);
+    return latencyMeasurer->whyNot (request);
+}
+
+juce::String EngineController::startLatencyMeasurement (LatencyMode mode)
+{
+    LatencyMeasurer::Request request;
+    request.mode = mode;
+    request.strip = selectedStrip;
+    request.stripName = getStripName (selectedStrip);
+    const auto error = latencyMeasurer->start (request);
+    if (error.isEmpty())
+        juce::Logger::writeToLog ("Latency measurement started (" + juce::String (mode == LatencyMode::DeviceOnly ? "device only"
+                                                                                  : mode == LatencyMode::ThroughFlubsound ? "through Flubsound"
+                                                                                                                          : "device only, then through Flubsound")
+                                  + ", " + request.stripName + " strip)");
+    notify (Change::Device);
+    return error;
+}
+
+void EngineController::cancelLatencyMeasurement()
+{
+    latencyMeasurer->cancel();
+}
+
 std::vector<EngineController::CaptureStream> EngineController::getCaptureStreams() const
 {
     std::vector<CaptureStream> streams;
@@ -1829,6 +1927,7 @@ void EngineController::timerCallback()
 {
     // (Structural re-prepares are handled by AudioEngineHost's own 5 Hz poll.)
     updateOverloadWatchdog (host->getStatus());
+    latencyMeasurer->poll(); // docs/11 E42d: the next pass, the analysis (onFinished announces the end)
     feedGraphQuantum();        // docs/11 E42 / E48
     applyProtectionStrength(); // an engine built since (onEngineConfigured is asynchronous)
     applyListeningLevel();

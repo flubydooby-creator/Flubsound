@@ -3,6 +3,7 @@
 #include "FlubLookAndFeel.h"
 #include "HearingPage.h"
 #include "HotkeyCapture.h"
+#include "LatencyPanel.h"
 #include "ParameterBinding.h"
 #include "diagnostics/CrashHandler.h"
 #include "diagnostics/DiagnosticLog.h"
@@ -113,16 +114,17 @@ struct FormLayout
     grows with its wrapped text (every guidance message of the profile) and
     the page sets its own height; the dialog shows it in a vertical viewport,
     so long guidance scrolls instead of pushing the selector out of reach. */
-class SettingsDialog::AudioPage : public juce::Component
+class SettingsDialog::AudioPage : public juce::Component, private juce::ComboBox::Listener
 {
 public:
     explicit AudioPage (EngineController& c)
-        : controller (c)
+        : controller (c), latencyPanel (c)
     {
         // Up to 16 inputs: one 7.1 strip plus three stereo strips via JACK / PipeWire monitors.
         selector = std::make_unique<juce::AudioDeviceSelectorComponent> (controller.getDeviceManager(), 0, 16, 1, 2, false, false, true, false);
         selector->setItemHeight (26);
         addAndMakeVisible (*selector);
+        addAndMakeVisible (latencyPanel); // docs/11 E42c / E42d, under the selector
         deviceText = describeOutputDevice (controller);
 
         // Feedback-loop guard override (docs/11 E51).
@@ -162,8 +164,22 @@ public:
         refresh();
     }
 
+    ~AudioPage() override
+    {
+        if (auto* box = bufferList.getComponent())
+            box->removeListener (this);
+    }
+
+    LatencyPanel& getLatencyPanel() noexcept { return latencyPanel; }
+
     void refresh()
     {
+        hookBufferList();
+        const int panelHeight = latencyPanel.getHeight();
+        latencyPanel.refresh();
+        if (latencyPanel.getHeightForWidth (getWidth()) != panelHeight)
+            placeLatencyPanel();
+
         const auto text = describeOutputDevice (controller);
         const auto guard = describeLoopbackGuard (controller);
         const auto pairs = controller.getAllowedLoopbackPairs();
@@ -257,14 +273,14 @@ public:
 
         followDefaultToggle.setBounds (kInset, guardArea.getBottom() + 10, w, kToggleH);
         selector->setBounds (0, followDefaultToggle.getBottom() + 6, getWidth(), juce::jmax (1, selector->getHeight()));
-        fitHeight();
+        placeLatencyPanel();
     }
 
     // The selector sizes its own height to its controls (device type, channel lists, ...).
     void childBoundsChanged (juce::Component* child) override
     {
         if (child == selector.get())
-            fitHeight();
+            placeLatencyPanel();
     }
 
 private:
@@ -295,11 +311,55 @@ private:
         }
     }
 
+    void placeLatencyPanel()
+    {
+        latencyPanel.setBounds (0, selector->getBottom() + 10, getWidth(), latencyPanel.getHeightForWidth (getWidth()));
+        fitHeight();
+    }
+
     void fitHeight()
     {
-        const int h = selector->getBottom() + 12;
+        const int h = latencyPanel.getBottom() + 12;
         if (h != getHeight())
             setSize (getWidth(), h);
+    }
+
+    /** docs/11 E42c: a size picked in the selector's "Audio buffer size"
+        list is the user's choice, so Automatic turns off. The list lives
+        inside JUCE's selector (re-created with the device type), found by its
+        attached label. */
+    void hookBufferList()
+    {
+        juce::ComboBox* found = nullptr;
+        std::function<void (juce::Component&)> search = [&] (juce::Component& parent)
+        {
+            for (auto* child : parent.getChildren())
+            {
+                if (found != nullptr)
+                    return;
+                if (auto* label = dynamic_cast<juce::Label*> (child); label != nullptr && label->getText().startsWith ("Audio buffer size"))
+                    found = dynamic_cast<juce::ComboBox*> (label->getAttachedComponent());
+                search (*child);
+            }
+        };
+        search (*selector);
+        if (found == bufferList.getComponent())
+            return;
+        if (auto* old = bufferList.getComponent())
+            old->removeListener (this);
+        bufferList = found;
+        if (found != nullptr)
+            found->addListener (this);
+    }
+
+    void comboBoxChanged (juce::ComboBox* box) override
+    {
+        // Listeners hear the pick before JUCE applies it (onChange): the
+        // device still runs at the old size here.
+        if (box != bufferList.getComponent() || box->getSelectedId() <= 0 || ! controller.getAutomaticBufferSize())
+            return;
+        if (box->getSelectedId() != controller.getBufferInfo().current)
+            controller.setAutomaticBufferSize (false);
     }
 
     /** First lines: device, profile, connection, ceiling. Every further line
@@ -325,6 +385,8 @@ private:
 
     EngineController& controller;
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
+    LatencyPanel latencyPanel;                         // docs/11 E42c / E42d
+    juce::Component::SafePointer<juce::ComboBox> bufferList; // the selector's buffer size list (hookBufferList)
     juce::String deviceText, guardText;
     juce::TextLayout introLayout, deviceLayout, guardLayout;
     juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea;
@@ -790,15 +852,26 @@ public:
           << juce::String (li.deviceOutputMs, 1) << " ms";
         if (li.captureBufferMs > 0.0)
             t << "  +  app capture " << juce::String (li.captureBufferMs, 1) << " ms";
-        t << "  =  " << juce::String (li.totalMs + li.captureBufferMs, 1) << " ms\n";
+        t << "  =  " << juce::String (li.totalMs + li.captureBufferMs, 1) << " ms (reported)\n";
         t << describeCpuLine (status, controller.getOverloadState());
+        // docs/11 E42d: the latest measurement this session (Settings > Audio).
+        const auto& measured = controller.getLatencyMeasurement();
+        const auto* report = measured.phase != LatencyMeasurer::Phase::Done ? nullptr
+                             : measured.through.has_value()               ? &*measured.through
+                             : measured.deviceOnly.has_value()            ? &*measured.deviceOnly
+                                                                          : nullptr;
+        if (report != nullptr && report->ok)
+            t << "\nMeasured (Settings > Audio): round trip " << juce::String (report->roundTripMs, 1) << " ms, playback about "
+              << juce::String (report->path == latency::Path::DeviceOnly ? report->withEngineMs : report->playbackMs, 1)
+              << " ms with Flubsound, confidence " << latency::confidenceName (report->confidence);
 
         auto captures = describeCaptureStreams (controller.getCaptureStreams());
         if (captures.isEmpty())
             captures = "No per-app capture streams. Endpoint routing and device inputs do not use one.";
         if (t != latencyText || captures != captureText)
         {
-            const bool relayout = captures != captureText; // the capture block wraps its text
+            // The capture block wraps its text; the latency block grows by the measured line.
+            const bool relayout = captures != captureText || t.contains ("\nMeasured") != latencyText.contains ("\nMeasured");
             latencyText = t;
             captureText = captures;
             if (relayout)
@@ -825,7 +898,7 @@ public:
         g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
         g.setColour (Palette::text.withAlpha (0.85f));
         g.setFont (Theme::font (12.0f));
-        g.drawFittedText (latencyText, latencyArea.reduced (12, 8), juce::Justification::topLeft, 4, 1.0f);
+        g.drawFittedText (latencyText, latencyArea.reduced (12, 8), juce::Justification::topLeft, 5, 1.0f);
 
         // Per-app capture streams: DriftCompensatedFifo statistics (R1.5).
         drawSectionTitle (g, captureTitle, "Per-app capture streams");
@@ -852,7 +925,7 @@ public:
         contourTextArea = { contourView.getX(), contourView.getBottom() + 3, r.getWidth() - kCaptionWidth, 2 * kTextLine + 2 };
         const int formBottom = displayForm.layout (r.withTop (contourTextArea.getBottom() + 14));
         latencyTitle = { r.getX(), formBottom + 14, r.getWidth(), 22 };
-        latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), 4 * kTextLine + 16 };
+        latencyArea = { r.getX(), latencyTitle.getBottom() + 6, r.getWidth(), (latencyText.contains ("\nMeasured") ? 5 : 4) * kTextLine + 16 };
         captureTitle = { r.getX(), latencyArea.getBottom() + 14, r.getWidth(), 22 };
         juce::AttributedString text;
         text.setWordWrap (juce::AttributedString::byWord);

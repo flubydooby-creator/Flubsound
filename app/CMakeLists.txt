@@ -60,6 +60,8 @@ set(FLUB_APP_SOURCES
     Source/engine/DriftCompensatedFifo.cpp
     Source/engine/EngineController.cpp
     Source/engine/AppRouting.cpp
+    Source/engine/LatencyMeasurement.cpp
+    Source/engine/LatencyMeasurer.cpp
     Source/engine/TestSignalGenerator.cpp
     Source/export/ExportDialog.cpp
     Source/export/ExportJob.cpp
@@ -83,6 +85,7 @@ set(FLUB_APP_SOURCES
     Source/ui/HeaderBar.cpp
     Source/ui/HearingPage.cpp
     Source/ui/HotkeyCapture.cpp
+    Source/ui/LatencyPanel.cpp
     Source/ui/LevelMeters.cpp
     Source/ui/LoudnessPanel.cpp
     Source/ui/MainComponent.cpp

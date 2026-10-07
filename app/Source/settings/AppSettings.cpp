@@ -38,6 +38,8 @@ constexpr const char* preferredOutputDevice = "device.preferredOutput";
 constexpr const char* preferredOutputId = "device.preferredOutputId";
 constexpr const char* preferredOutputHardwareId = "device.preferredOutputHardwareId";
 constexpr const char* followSystemDefault = "device.followSystemDefault";
+constexpr const char* autoBufferSize = "device.autoBufferSize";
+constexpr const char* bufferFloors = "device.bufferFloors";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
 constexpr const char* routingMoveAway = "routing.moveOriginalAway";
@@ -772,6 +774,35 @@ void AppSettings::setPreferredOutput (const DeviceEndpointEntry& output)
 
 bool AppSettings::getFollowSystemDefaultOutput() const { return properties->getBoolValue (Keys::followSystemDefault, false); }
 void AppSettings::setFollowSystemDefaultOutput (bool follow) { properties->setValue (Keys::followSystemDefault, follow); }
+
+bool AppSettings::getAutoBufferSize() const { return properties->getBoolValue (Keys::autoBufferSize, true); }
+void AppSettings::setAutoBufferSize (bool automatic) { properties->setValue (Keys::autoBufferSize, automatic); }
+
+std::map<juce::String, int> AppSettings::getBufferFloors() const
+{
+    // One "<device type>|<output device>\t<samples>" per line.
+    std::map<juce::String, int> floors;
+    for (const auto& line : juce::StringArray::fromLines (properties->getValue (Keys::bufferFloors)))
+    {
+        const auto key = line.upToLastOccurrenceOf ("\t", false, false);
+        const auto value = line.fromLastOccurrenceOf ("\t", false, false).trim();
+        if (key.isNotEmpty() && line.containsChar ('\t') && value.containsOnly ("0123456789") && value.getIntValue() > 0)
+            floors[key] = value.getIntValue();
+    }
+    return floors;
+}
+
+void AppSettings::setBufferFloors (const std::map<juce::String, int>& floors)
+{
+    juce::StringArray lines;
+    for (const auto& [key, samples] : floors)
+        if (key.isNotEmpty() && samples > 0)
+            lines.add (key.removeCharacters ("\t\r\n") + "\t" + juce::String (samples));
+    if (lines.isEmpty())
+        properties->removeValue (Keys::bufferFloors);
+    else
+        properties->setValue (Keys::bufferFloors, lines.joinIntoString ("\n"));
+}
 
 // ---- App routing ----------------------------------------------------------------------------------------
 AppSettings::RoutingMethod AppSettings::getRoutingMethod() const

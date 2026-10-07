@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -266,6 +267,41 @@ TEST_CASE ("LatencyProbe (E42d): measures the processing chain's reported latenc
         CHECK (r.acceptedRuns == 10);
         CHECK_NEAR (r.delaySamples, reported, 0.1); // measured 1351.997 / 191.997 / 99.997
     }
+}
+
+TEST_CASE ("LatencyProbe (E42d): the strongest other arrival reports an echo nearly as strong as the direct path")
+{
+    // The app's live measurement warns when a second path is nearly as
+    // strong as the first (a headset's sidetone loop, an echo): the delay is
+    // then ambiguous although every run has a high SNR.
+    const auto settings = quickSettings (48000.0);
+    const auto probe = makeProbe (settings);
+    LatencyProbe lp (settings);
+
+    // A clean path: nothing else within 0 .. maxDelayMs (the band-limited
+    // impulse's own skirt stays far down).
+    const auto clean = delayed (probe, 300.0);
+    auto r = lp.analyse (clean.data(), static_cast<int64_t> (clean.size()));
+    REQUIRE (r.ok);
+    CHECK (r.secondaryDb < -40.0);
+    CHECK (r.medianSnrDb > 60.0);
+    const double cleanSecondary = r.secondaryDb;
+
+    // The direct path plus an echo 3 dB down, 10 ms later: the delay is
+    // still the direct path's, and the echo is reported where it is.
+    auto echo = delayed (probe, 300.0);
+    const auto late = delayed (probe, 780.0);
+    for (size_t i = 0; i < echo.size(); ++i)
+        echo[i] += 0.7079f * late[i];
+    r = lp.analyse (echo.data(), static_cast<int64_t> (echo.size()));
+    REQUIRE (r.ok);
+    CHECK (r.acceptedRuns == 10);
+    CHECK_NEAR (r.delaySamples, 300.0, 0.05);
+    CHECK_NEAR (r.secondaryDb, -3.0, 0.2);
+    for (const auto& run : r.runs)
+        CHECK_NEAR (run.secondaryLagSamples, 780.0, 1.0);
+    std::printf ("    strongest other arrival: clean path %.1f dB, with a -3 dB echo %.2f dB at %.0f samples\n", cleanSecondary, r.secondaryDb,
+                 r.runs.front().secondaryLagSamples);
 }
 
 TEST_CASE ("LatencyProbe (E42d): settings are validated")

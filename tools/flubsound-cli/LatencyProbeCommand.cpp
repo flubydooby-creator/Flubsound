@@ -258,6 +258,9 @@ json::Value toJson (const latency::Result& r, const Options& o, double sampleRat
     v.set ("delayMs", r.ok ? json::Value (std::round (r.delayMs * 1000.0) / 1000.0) : json::Value());
     v.set ("spreadSamples", r.ok ? json::Value (round2 (r.spreadSamples)) : json::Value());
     v.set ("inverted", r.inverted);
+    // The strongest arrival > 1 ms from the peak, dB re the peak (an echo or
+    // a second path; -200 when none).
+    v.set ("secondaryDb", r.ok ? json::Value (round2 (r.secondaryDb)) : json::Value());
     v.set ("acceptedRuns", r.acceptedRuns);
     v.set ("minSnrDb", o.probe.minSnrDb);
     json::Value runs { json::Value::Array {} };
@@ -267,6 +270,7 @@ json::Value toJson (const latency::Result& r, const Options& o, double sampleRat
         j.set ("index", run.index);
         j.set ("delaySamples", std::round (run.delaySamples * 1000.0) / 1000.0);
         j.set ("snrDb", round2 (run.snrDb));
+        j.set ("secondaryDb", round2 (run.secondaryDb));
         j.set ("inverted", run.inverted);
         j.set ("accepted", run.accepted);
         runs.push (std::move (j));
@@ -288,6 +292,9 @@ std::string toText (const latency::Result& r, const Options& o)
                          r.spreadSamples)
          + (o.refChannel > 0 ? printfString (", channel %.0f against channel %.0f", o.channel, o.refChannel) : std::string())
          + (r.inverted ? ", polarity inverted" : "") + "\n";
+    if (r.secondaryDb > latency::Run::kNoSecondaryDb)
+        s += printfString ("Echo    : the strongest other arrival is %.1f dB under the peak", -r.secondaryDb)
+             + (r.secondaryDb > -6.0 ? " (ambiguous: a second path nearly as strong)" : "") + "\n";
     return s;
 }
 

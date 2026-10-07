@@ -382,6 +382,19 @@ static_assert (std::is_same_v<decltype (&flub::platform::pipewire::CycleRunner::
 static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callback::nodeProcess),
                               void (flub::platform::NativeAudioNode::Callback::*) (const float* const*, int, float* const*, int, int) noexcept FLUB_NONBLOCKING>);
 
+// The app's live latency probe (docs/11 E42d, app/Source/engine): the
+// device callback plays and records it (tests/app/test_app_latency_measure.cpp
+// counts its allocations and locks: none).
+#include "../app/Source/engine/LatencyMeasurement.h"
+
+using flub::app::latency::ProbeSession;
+static_assert (std::is_same_v<decltype (&ProbeSession::beginCallback), void (ProbeSession::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProbeSession::isPlaying), bool (ProbeSession::*)() const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProbeSession::fillStrip), void (ProbeSession::*) (const AudioBlock&, int) const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProbeSession::muteOther), void (ProbeSession::*) (const AudioBlock&, int) const noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ProbeSession::process),
+                              void (ProbeSession::*) (const float* const*, int, float* const*, int, int, bool) noexcept FLUB_NONBLOCKING>);
+
 // The on-board enhancement cap (docs/11 E16): one atomic, any thread; the
 // glide runs inside process(); tests/test_onboard_cap.cpp drives it.
 static_assert (std::is_same_v<decltype (&ProcessingChain::setOnboardEnhancementCap), void (ProcessingChain::*) (bool) noexcept FLUB_NONBLOCKING>);

@@ -64,6 +64,15 @@
 //              describeLoadReduction(), restoreLatencyProfile(). On Linux a
 //              profile chosen by hand also asks PipeWire for its quantum and
 //              re-opens a JACK / ALSA device (docs/11 E48a, planGraphQuantum).
+// Buffer /     the device buffer follows the profile chosen by hand
+//   latency    (docs/11 E42c, AudioEngineHost DEVICE BUFFER SIZE):
+//              setAutomaticBufferSize(), getBufferInfo(); glitches raise it
+//              one size (buffer::Backoff, from the watchdog's poll; the floor
+//              is persisted per device). The live latency measurement
+//              (docs/11 E42d, LatencyMeasurer): startLatencyMeasurement(),
+//              cancelLatencyMeasurement(), getLatencyMeasurement(),
+//              whyCannotMeasureLatency(); polled by the timer, the result
+//              logged and announced with Change::Device.
 // Protection   getProtectionStrength() / setProtectionStrength(): how far the
 //              SafetyGovernor reaches (docs/11 E06; persisted, every strip,
 //              re-applied to every engine the host builds).
@@ -128,6 +137,8 @@
 #include "AudioEngineHost.h"
 #include "AutoLoadReducer.h"
 #include "AutoProfile.h"
+#include "BufferPolicy.h"
+#include "LatencyMeasurer.h"
 #include "OverloadWatchdog.h"
 #include "presets/PresetManager.h"
 #include "settings/AppSettings.h"
@@ -425,6 +436,30 @@ public:
         automatic step (a user change: the ladder resets; it never steps back
         up by itself). Does nothing while hasReducedLoad() is false. */
     void restoreLatencyProfile();
+
+    // ---- Device buffer size (docs/11 E42c) ---------------------------------------------
+    /** Settings > Audio "Automatic buffer size" (persisted, default on): the
+        device buffer follows the latency profile chosen by hand
+        (AudioEngineHost DEVICE BUFFER SIZE). Off: the size stays as it is
+        and the device list's buffer sets it; the Audio page turns it off
+        when the user picks a size there. On again: the device's back-off
+        floor is forgotten. Broadcasts Change::Device and Change::Settings. */
+    void setAutomaticBufferSize (bool automatic);
+    bool getAutomaticBufferSize() const noexcept { return host->getAutomaticBufferSize(); }
+    AudioEngineHost::BufferInfo getBufferInfo() const { return host->getBufferInfo(); }
+    /** Times the back-off raised the buffer this session. */
+    uint64_t getBufferBackoffSteps() const noexcept { return bufferBackoffSteps; }
+
+    // ---- Live latency measurement (docs/11 E42d) ------------------------------------------
+    using LatencyMode = LatencyMeasurer::Mode;
+    /** Starts measuring through the selected strip (Through / Both); "" or
+        why it cannot (LatencyMeasurer::whyNot). The result arrives with
+        Change::Device (the timer polls) and goes to the log. */
+    juce::String startLatencyMeasurement (LatencyMode mode);
+    void cancelLatencyMeasurement();
+    const LatencyMeasurer::State& getLatencyMeasurement() const noexcept { return latencyMeasurer->getState(); }
+    juce::String whyCannotMeasureLatency (LatencyMode mode) const;
+    LatencyMeasurer& getLatencyMeasurer() noexcept { return *latencyMeasurer; }
 
     // ---- Protection strength (docs/11 E06) --------------------------------------------
     /** How far the SafetyGovernor reaches (flub::ProtectionStrength): Off
@@ -917,6 +952,7 @@ private:
     std::unique_ptr<AudioEngineHost> host;
     std::unique_ptr<PresetManager> presets;
     std::unique_ptr<AppRouting> routing;
+    std::unique_ptr<LatencyMeasurer> latencyMeasurer; // docs/11 E42d (destroyed before the host)
     juce::ListenerList<Listener> listeners;
 
     bool enabled = true, isShutDown = false;
@@ -959,6 +995,8 @@ private:
     OverloadWatchdog overloadWatchdog;
     flub::CallbackTiming::Snapshot lastCallbackTiming; // the previous poll's (docs/11 E45)
     AutoLoadReducer loadReducer;
+    buffer::Backoff bufferBackoff; // docs/11 E42c: glitches raise the automatic buffer
+    uint64_t bufferBackoffSteps = 0;
     flub::ProtectionStrength protectionStrength = flub::ProtectionStrength::Off;
 
     std::vector<PresetWarnings> pendingPresetWarnings;

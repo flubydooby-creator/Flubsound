@@ -352,6 +352,14 @@ public:
         docs/11 E51, AudioEngineHost::setFollowSystemDefault). */
     bool getFollowSystemDefaultOutput() const;
     void setFollowSystemDefaultOutput (bool follow);
+    /** Settings > Audio > "Automatic buffer size" (default on; docs/11 E42c,
+        AudioEngineHost::setAutomaticBufferSize). */
+    bool getAutoBufferSize() const;
+    void setAutoBufferSize (bool automatic);
+    /** The buffer back-off floors by AudioEngineHost::bufferDeviceKey
+        ("<device type>|<output device>" -> samples; docs/11 E42c). */
+    std::map<juce::String, int> getBufferFloors() const;
+    void setBufferFloors (const std::map<juce::String, int>& floors);
 
     // ---- App routing -------------------------------------------------------------------
     enum class RoutingMethod { Automatic, EndpointRouting, ProcessCapture, Disabled };

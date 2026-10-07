@@ -197,9 +197,44 @@
 //   Clearing a source or a tap waits (bounded) for the callback in flight to
 //   return and says whether it did; when it did not (a stalled callback),
 //   close the device before destroying the source or the tap.
+//
+// DEVICE BUFFER SIZE (docs/11 E42c; BufferPolicy.h)
+//   While "Automatic buffer size" is on (setAutomaticBufferSize, default on)
+//   the host asks the device for the latency profile's size
+//   (setBufferProfile: Low Latency the smallest of at least 1.33 ms,
+//   Balanced the nearest to 5 ms, Quality the device's default; never above
+//   the default, never below the device's back-off floor) whenever the
+//   device, its rate, the profile or the floor changes: applyBufferPolicy()
+//   re-opens the same device at that size through the device manager
+//   (treatAsChosenDevice = false: the saved device state keeps what the user
+//   chose). Not for device types whose buffer is not the app's to choose:
+//   plain "Windows Audio" (shared mode ignores it), ALSA, JACK and the
+//   native PipeWire node (the graph quantum, docs/11 E48a). The user's own
+//   pick in Settings > Audio's buffer list always wins: the page turns
+//   Automatic off when the user picks a size there (EngineController::
+//   setAutomaticBufferSize), and while it is off the host never touches the
+//   size. raiseBufferOneStep() is the
+//   back-off's step (EngineController drives buffer::Backoff from the
+//   overload watchdog): one available size up, at most the default,
+//   remembered as the device's floor (getBufferFloors, persisted by the
+//   controller).
+//
+// LATENCY PROBE (docs/11 E42d; LatencyMeasurement.h)
+//   startLatencyProbe() hands a latency::ProbeSession to the audio thread
+//   through one atomic pointer. Each callback then calls its beginCallback(),
+//   on the Through path mixes the probe into its strip and fades the other
+//   strips' inputs out (processBlock), and after the engine (and the guard /
+//   trim) lets it replace or cap the outputs and record the inputs
+//   (ProbeSession::process). Once finished() the message thread takes it back
+//   (takeLatencyProbe: the pointer is cleared and the host waits for one
+//   callback to pass, as for a capture slot), so the audio thread never frees
+//   it. While the loopback guard holds the output, the probe stays silent
+//   (it still advances and records, so the session ends).
 #pragma once
 
+#include "BufferPolicy.h"
 #include "DriftCompensatedFifo.h"
+#include "LatencyMeasurement.h"
 #include "flub/analysis/CallbackTiming.h"
 #include "flub/analysis/StreamTap.h"
 #include "flub/dsp/ActiveChannelDetector.h"
@@ -214,6 +249,7 @@
 #include <array>
 #include <atomic>
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -787,6 +823,86 @@ public:
     flub::CallbackTiming::Snapshot getCallbackTiming() const noexcept { return callbackTiming.snapshot(); }
     double getSampleRate() const noexcept { return currentSampleRate; }
     int getBlockSize() const noexcept { return currentBlockSize; }
+    /** The device latencies the running device reported at its start
+        (juce::AudioIODevice::getInput / getOutputLatencyInSamples), whether or
+        not the device manager owns it (tests drive the callback directly). */
+    int getReportedInputLatency() const noexcept { return deviceInputLatency; }
+    int getReportedOutputLatency() const noexcept { return deviceOutputLatency; }
+    /** Device inputs the running device delivers (its active input channels at start). */
+    int getDeviceInputChannels() const noexcept { return deviceInputChannels.load (std::memory_order_relaxed); }
+
+    // =========================================================================
+    // Device buffer size (message thread; see DEVICE BUFFER SIZE)
+    // =========================================================================
+    struct BufferInfo
+    {
+        bool deviceOpen = false;
+        bool managed = false;   // the device type's buffer is the app's to choose (managesBufferSize)
+        bool automatic = true;  // Settings > Audio "Automatic buffer size"
+        flub::param::LatencyProfileValue profile = flub::param::LatencyProfileValue::Balanced;
+        juce::String deviceTypeName, outputDeviceName;
+        double sampleRate = 0.0;
+        int current = 0;        // the device's buffer now
+        int target = 0;         // what Automatic asks for (current while not managed)
+        int deviceDefault = 0, smallest = 0, largest = 0;
+        int floor = 0;          // this device's back-off floor (0 = none)
+        std::vector<int> available; // sorted
+        buffer::Reason reason = buffer::Reason::DeviceDefault;
+    };
+    BufferInfo getBufferInfo() const;
+
+    /** On (the default): the profile's size, applied now. Off: the size stays
+        as it is, and Settings > Audio's buffer list sets it. Turning it on
+        forgets the current device's back-off floor. */
+    void setAutomaticBufferSize (bool automatic);
+    bool getAutomaticBufferSize() const noexcept { return autoBuffer; }
+
+    /** The latency profile the automatic size follows (the user's choice:
+        EngineController never passes a profile the overload response stepped
+        to). Applied now while automatic. */
+    void setBufferProfile (flub::param::LatencyProfileValue profile);
+    flub::param::LatencyProfileValue getBufferProfile() const noexcept { return bufferProfile; }
+
+    /** Re-opens the device at the automatic size when it differs (once per
+        device, rate and target, so a device that opens at another size is not
+        re-opened again and again). True when it changed the buffer. Runs by
+        itself on device changes; public for tests. */
+    bool applyBufferPolicy();
+
+    /** The back-off's step: the next available size above the current one
+        (at most the device's default) becomes the device's floor and is
+        applied. False at the top, while not automatic or not managed. */
+    bool raiseBufferOneStep();
+
+    /** The back-off floors by device (bufferDeviceKey), for persistence. */
+    const std::map<juce::String, int>& getBufferFloors() const noexcept { return bufferFloors; }
+    void setBufferFloors (std::map<juce::String, int> floors);
+    /** "<device type>|<output device>". */
+    static juce::String bufferDeviceKey (const juce::String& deviceTypeName, const juce::String& outputDeviceName);
+    /** False for the types whose buffer the host leaves alone (see DEVICE BUFFER SIZE). */
+    static bool managesBufferSize (const juce::String& deviceTypeName);
+
+    /** Called on the message thread when raiseBufferOneStep() changed a floor. */
+    std::function<void()> onBufferChoiceChanged;
+
+    // =========================================================================
+    // Latency probe (message thread; see LATENCY PROBE)
+    // =========================================================================
+    /** Plays and records `session` from the next device callback on. False
+        (the session is not taken) while another one is handed over or no
+        device runs. */
+    bool startLatencyProbe (std::unique_ptr<latency::ProbeSession>& session);
+    /** The session handed over (nullptr when none): progress and finished(). */
+    const latency::ProbeSession* getLatencyProbe() const noexcept { return probeOwned.get(); }
+    /** False once the device stopped or closed under the session (it no
+        longer advances; takeLatencyProbe hands it back unfinished). */
+    bool isLatencyProbeLive() const noexcept { return probeLive.load (std::memory_order_acquire) != nullptr; }
+    /** Asks the running session to fade out and finish. */
+    void cancelLatencyProbe() noexcept;
+    /** Takes the session back once it finished (or the device stopped):
+        after the audio thread has provably let go of it. nullptr while it
+        still runs. */
+    std::unique_ptr<latency::ProbeSession> takeLatencyProbe();
 
     // =========================================================================
     // juce::AudioIODeviceCallback
@@ -1010,6 +1126,20 @@ private:
 
     void readDeviceChannelMap (juce::AudioIODevice& device);
     std::array<int, flub::kMaxChannels> stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept;
+
+    // Device buffer size (DEVICE BUFFER SIZE), message thread.
+    bool autoBuffer = true;
+    flub::param::LatencyProfileValue bufferProfile = flub::param::LatencyProfileValue::Balanced;
+    std::map<juce::String, int> bufferFloors;
+    juce::String lastBufferAttempt; // device|rate|target last asked for (not again)
+    bool applyingBuffer = false;
+    std::atomic<int> deviceInputChannels { 0 }; // set at device start (any thread)
+
+    // Latency probe (LATENCY PROBE): owned here, read by the audio thread
+    // through `probeLive` while handed over.
+    std::unique_ptr<latency::ProbeSession> probeOwned;
+    std::atomic<latency::ProbeSession*> probeLive { nullptr };
+    latency::ProbeSession* probeInBlock = nullptr; // audio thread: the session processBlock mixes into the strips
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngineHost)
 };

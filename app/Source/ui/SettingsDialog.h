@@ -14,7 +14,12 @@
 //               this pair" for a deliberate cable monitor and the allowed
 //               pairs with Remove; and "Follow the system default output"
 //               (docs/11 E51, off by default; choosing an output in the
-//               selector turns it off).
+//               selector turns it off). Under the selector, LATENCY
+//               (LatencyPanel.h, docs/11 E42c / E42d): "Automatic buffer
+//               size" (on by default; picking a size in the selector's buffer
+//               list turns it off) with the buffer and the latency the device
+//               reports, and "Measure latency..." (device only / through
+//               Flubsound / both) with its progress and result.
 //   Correction  the output device's headphone / speaker correction (docs/11
 //               E15): import an AutoEQ or Equalizer APO / Peace
 //               ParametricEQ.txt, switch it on / off, hold a level-fair

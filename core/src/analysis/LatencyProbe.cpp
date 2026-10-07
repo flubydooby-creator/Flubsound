@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace flub::latency
 {
@@ -14,6 +15,7 @@ constexpr double kFadeSeconds = 0.005;
 constexpr double kTailMs = 250.0;         // gap beyond maxDelayMs: the path's own tail
 constexpr double kPeakGuardBeforeMs = 1.0; // excluded from the noise around the peak
 constexpr double kPeakGuardAfterMs = 20.0;
+constexpr double kSecondaryGuardMs = 1.0;  // a secondary arrival is further than this from the peak
 constexpr double kRegularisation = 1.0e-4; // x max |X|^2
 
 int samplesOf (double seconds, double sampleRate)
@@ -215,6 +217,19 @@ Run LatencyProbe::measureAt (const float* recording, int64_t numSamples, int run
     r.delaySamples = peak + offset;
     r.inverted = response[static_cast<size_t> (peak)] < 0.0f;
 
+    // The strongest other arrival within the searched lags (see the header):
+    // an echo or a second path nearly as strong as the peak.
+    const int secondaryGuard = std::max (1, samplesOf (kSecondaryGuardMs * 0.001, settings.sampleRate));
+    int second = -1;
+    for (int i = 0; i < maxLag; ++i)
+        if (std::abs (i - peak) > secondaryGuard && (second < 0 || at (i) > at (second)))
+            second = i;
+    if (second >= 0 && y0 > 0.0 && at (second) > 0.0)
+    {
+        r.secondaryDb = std::max (Run::kNoSecondaryDb, 20.0 * std::log10 (at (second) / y0));
+        r.secondaryLagSamples = static_cast<double> (second);
+    }
+
     // Noise: every lag of the window but the peak's neighbourhood.
     const int before = std::max (1, samplesOf (kPeakGuardBeforeMs * 0.001, settings.sampleRate));
     const int after = std::max (1, samplesOf (kPeakGuardAfterMs * 0.001, settings.sampleRate));
@@ -243,7 +258,7 @@ Result LatencyProbe::summarise (std::vector<Run> runs) const
         return result;
     }
 
-    std::vector<double> delays;
+    std::vector<double> delays, snrs;
     int inverted = 0;
     double bestSnr = -1.0e9;
     for (const auto& r : result.runs)
@@ -252,7 +267,9 @@ Result LatencyProbe::summarise (std::vector<Run> runs) const
         if (! r.accepted)
             continue;
         delays.push_back (r.delaySamples);
+        snrs.push_back (r.snrDb);
         inverted += r.inverted ? 1 : 0;
+        result.secondaryDb = std::max (result.secondaryDb, r.secondaryDb);
     }
     result.acceptedRuns = static_cast<int> (delays.size());
     if (delays.empty() || 2 * delays.size() < result.runs.size())
@@ -264,8 +281,10 @@ Result LatencyProbe::summarise (std::vector<Run> runs) const
         return result;
     }
     std::sort (delays.begin(), delays.end());
+    std::sort (snrs.begin(), snrs.end());
     const size_t n = delays.size();
     result.delaySamples = n % 2 == 1 ? delays[n / 2] : 0.5 * (delays[n / 2 - 1] + delays[n / 2]);
+    result.medianSnrDb = n % 2 == 1 ? snrs[n / 2] : 0.5 * (snrs[n / 2 - 1] + snrs[n / 2]);
     result.delayMs = 1000.0 * result.delaySamples / settings.sampleRate;
     result.spreadSamples = delays.back() - delays.front();
     result.inverted = 2 * inverted > result.acceptedRuns;
@@ -357,6 +376,8 @@ Result LatencyProbe::analyseRelative (const float* recording, const float* refer
         r.snrDb = std::min (measured.snrDb, direct.snrDb);
         r.inverted = measured.inverted != direct.inverted;
         r.accepted = measured.accepted && direct.accepted;
+        r.secondaryDb = std::max (measured.secondaryDb, direct.secondaryDb);
+        r.secondaryLagSamples = measured.secondaryDb >= direct.secondaryDb ? measured.secondaryLagSamples : direct.secondaryLagSamples;
         runs.push_back (r);
     }
     return summarise (std::move (runs));

@@ -331,6 +331,10 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     deviceManager.addChangeListener (this);
     noteExplicitOutput();
     reselectOutput();
+    // docs/11 E42c: the profile's buffer size, before the engine attaches (one
+    // device start fewer).
+    lastBufferAttempt = {};
+    applyBufferPolicy();
     if (deviceManager.getCurrentAudioDevice() != nullptr)
         error = {};
     else if (error.isEmpty() && selection.reason == OutputReason::NoSafeOutput && chosen.deviceName.isNotEmpty())
@@ -390,6 +394,10 @@ void AudioEngineHost::closeDevice()
     engineReady.store (false, std::memory_order_release);
     callbackRunning.store (false, std::memory_order_release);
     deviceInputLatency = deviceOutputLatency = 0;
+    deviceInputChannels.store (0, std::memory_order_relaxed);
+    // No callback runs now: a latency probe stops here (takeLatencyProbe
+    // hands it back unfinished).
+    probeLive.store (nullptr, std::memory_order_release);
 
     // No callback can run now: a swap in flight ends here, on the newest engine.
     if (latest != nullptr)
@@ -1363,6 +1371,24 @@ void AudioEngineHost::processBlock (const float* const* inputs, int numInputs, f
                     pullCapture (slot, s, block, fed);
                     fed = true;
                 }
+
+                // docs/11 E42d, Through Flubsound: the probe is this strip's
+                // input; every other strip's input fades out meanwhile (the
+                // captures above keep being read, so their FIFOs stay level).
+                if (probeInBlock != nullptr && probeInBlock->getPath() == latency::Path::ThroughFlubsound)
+                {
+                    if (s == probeInBlock->getStrip())
+                    {
+                        if (! fed)
+                            block.clear();
+                        probeInBlock->fillStrip (block, pos);
+                        fed = true;
+                    }
+                    else if (fed)
+                    {
+                        probeInBlock->muteOther (block, pos);
+                    }
+                }
             }
 
             if (fed)
@@ -1492,6 +1518,15 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     // The guard reads the device input map here too, so a map that starts
     // feeding a strip while the pair loops is muted from that block on.
     const bool guarded = loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
+
+    // docs/11 E42d: a latency probe handed over (see LATENCY PROBE).
+    latency::ProbeSession* probe = probeLive.load (std::memory_order_acquire);
+    if (probe != nullptr && ! probe->isPlaying())
+        probe = nullptr;
+    if (probe != nullptr)
+        probe->beginCallback();
+    probeInBlock = probe;
+
     // docs/11 E53: a device that is not the soak's pinned output plays nothing.
     const bool blocked = pinBlocked.load (std::memory_order_acquire);
     if (ready && ! blocked && ! (guarded && guardGain <= 0.0f))
@@ -1518,6 +1553,13 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     // docs/11 E53: the output as handed to the device, for the soak's analysis.
     if (auto* tap = outputTap.load (std::memory_order_seq_cst))
         tap->write (outputChannelData, numOutputChannels, numSamples);
+
+    // The probe replaces (device only) or caps (through Flubsound) what the
+    // engine wrote, records the inputs and advances; silent while the guard
+    // holds the output or the engine is not ready.
+    if (probe != nullptr)
+        probe->process (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, ready && ! guarded);
+    probeInBlock = nullptr;
 
     // docs/11 E45: the interval runs on one clock only, so a backend that
     // starts or stops giving host times begins a new run.
@@ -1586,6 +1628,7 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
 
     // Read by the callback, which has not started yet.
     alsaChannelOrder.store (isAlsaDeviceType (device->getTypeName()), std::memory_order_relaxed);
+    deviceInputChannels.store (device->getActiveInputChannels().countNumberOfSetBits(), std::memory_order_relaxed);
     readDeviceChannelMap (*device);
     deviceSampleRate.store (sampleRate, std::memory_order_relaxed);
     callbackTiming.restartIntervals();
@@ -1626,6 +1669,9 @@ void AudioEngineHost::audioDeviceStopped()
 {
     engineReady.store (false, std::memory_order_release);
     callbackRunning.store (false, std::memory_order_release);
+    // A latency probe does not continue on another device start (its
+    // recording would mix two devices): takeLatencyProbe hands it back.
+    probeLive.store (nullptr, std::memory_order_release);
     // No callback runs now. The next device's thread is checked again even if
     // it reuses this one's pthread id (a new kernel thread may).
     promotedThread = nullptr;
@@ -2033,10 +2079,11 @@ void AudioEngineHost::changeListenerCallback (juce::ChangeBroadcaster*)
     // The device manager changed: a device came or went (JUCE may have
     // fallen back by itself), the user chose another device, or the rate /
     // block size changed.
-    if (! managingDevice || selecting)
+    if (! managingDevice || selecting || applyingBuffer)
         return;
     noteExplicitOutput();
     reselectOutput();
+    applyBufferPolicy(); // docs/11 E42c: a new device or rate gets the profile's size
 }
 
 std::vector<flub::platform::OutputEndpointIdentity> AudioEngineHost::listEndpoints()
@@ -2326,6 +2373,190 @@ EngineStatus AudioEngineHost::getStatus() const
     st.audioThread = audioThreadRealtime;
     st.inputChannelMap = st.deviceOpen || callbackRunning.load (std::memory_order_acquire) ? inputChannelMap : InputChannelMap::None;
     return st;
+}
+
+// =============================================================================
+// Device buffer size (docs/11 E42c)
+// =============================================================================
+juce::String AudioEngineHost::bufferDeviceKey (const juce::String& deviceTypeName, const juce::String& outputDeviceName)
+{
+    return deviceTypeName + "|" + outputDeviceName;
+}
+
+bool AudioEngineHost::managesBufferSize (const juce::String& deviceTypeName)
+{
+    // Plain shared WASAPI opens at the engine's period whatever is asked;
+    // ALSA and JACK on Linux run in PipeWire's or JACK's graph, whose
+    // quantum the latency profile already requests (docs/11 E48a); the native
+    // PipeWire node takes the profile's node.latency.
+    for (const auto* type : { "Windows Audio", "DirectSound", "ALSA", "ALSA HW", "JACK" })
+        if (deviceTypeName == type)
+            return false;
+    return deviceTypeName.isNotEmpty() && deviceTypeName != flub::platform::pipewire::kDeviceTypeName;
+}
+
+AudioEngineHost::BufferInfo AudioEngineHost::getBufferInfo() const
+{
+    BufferInfo info;
+    info.automatic = autoBuffer;
+    info.profile = bufferProfile;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return info;
+    info.deviceOpen = true;
+    info.deviceTypeName = device->getTypeName();
+    info.outputDeviceName = deviceManager.getAudioDeviceSetup().outputDeviceName;
+    if (info.outputDeviceName.isEmpty())
+        info.outputDeviceName = device->getName();
+    info.sampleRate = device->getCurrentSampleRate();
+    info.current = device->getCurrentBufferSizeSamples();
+    info.deviceDefault = device->getDefaultBufferSize();
+    std::vector<int> sizes;
+    for (const int s : device->getAvailableBufferSizes())
+        sizes.push_back (s);
+    info.available = buffer::normalise (sizes);
+    if (! info.available.empty())
+    {
+        info.smallest = info.available.front();
+        info.largest = info.available.back();
+    }
+    if (const auto it = bufferFloors.find (bufferDeviceKey (info.deviceTypeName, info.outputDeviceName)); it != bufferFloors.end())
+        info.floor = it->second;
+    info.managed = managesBufferSize (info.deviceTypeName);
+    const auto choice = buffer::choose (bufferProfile, info.available, info.deviceDefault, info.sampleRate, info.floor);
+    info.reason = choice.reason;
+    info.target = info.managed ? choice.samples : info.current;
+    return info;
+}
+
+void AudioEngineHost::setAutomaticBufferSize (bool automatic)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (automatic && ! autoBuffer)
+    {
+        // Back on: try the profile's size again from scratch.
+        if (auto* device = deviceManager.getCurrentAudioDevice())
+        {
+            auto output = deviceManager.getAudioDeviceSetup().outputDeviceName;
+            bufferFloors.erase (bufferDeviceKey (device->getTypeName(), output.isNotEmpty() ? output : device->getName()));
+        }
+    }
+    autoBuffer = automatic;
+    lastBufferAttempt = {};
+    applyBufferPolicy();
+}
+
+void AudioEngineHost::setBufferProfile (flub::param::LatencyProfileValue profile)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (profile == bufferProfile)
+        return;
+    bufferProfile = profile;
+    lastBufferAttempt = {};
+    applyBufferPolicy();
+}
+
+void AudioEngineHost::setBufferFloors (std::map<juce::String, int> floors)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    bufferFloors = std::move (floors);
+    lastBufferAttempt = {};
+}
+
+bool AudioEngineHost::applyBufferPolicy()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (! autoBuffer || applyingBuffer || selecting)
+        return false;
+    if (deviceManager.getCurrentAudioDevice() == nullptr)
+        return false;
+    const auto info = getBufferInfo();
+    if (! info.managed || info.target <= 0 || info.target == info.current)
+        return false;
+
+    // Once per device, rate and target: a device that opens at another size
+    // than asked is not re-opened at every change message.
+    const auto attempt = bufferDeviceKey (info.deviceTypeName, info.outputDeviceName) + "|" + juce::String (info.sampleRate) + "|"
+                         + juce::String (info.target);
+    if (attempt == lastBufferAttempt)
+        return false;
+    lastBufferAttempt = attempt;
+
+    const juce::ScopedValueSetter<bool> busy (applyingBuffer, true);
+    const auto previous = deviceManager.getAudioDeviceSetup();
+    auto setup = previous;
+    setup.bufferSize = info.target;
+    // Not "chosen": the saved device state keeps what the user picked.
+    const auto error = deviceManager.setAudioDeviceSetup (setup, false);
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (error.isNotEmpty() || device == nullptr)
+    {
+        // JUCE closed the device: back to the size it ran at.
+        auto restore = previous;
+        restore.bufferSize = info.current;
+        deviceManager.setAudioDeviceSetup (restore, false);
+        if (deviceManager.getCurrentAudioDevice() == nullptr && managingDevice)
+            scheduleRecovery ("the output could not be re-opened at " + juce::String (info.target) + " samples: " + error,
+                              recoveryTiming.firstRetryMs, true);
+        return false;
+    }
+    if (device->getCurrentBufferSizeSamples() == info.target)
+        lastBufferAttempt = {}; // done: a later re-open at another size is put right again
+    return true;
+}
+
+bool AudioEngineHost::raiseBufferOneStep()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    const auto info = getBufferInfo();
+    if (! info.deviceOpen || ! info.managed || ! info.automatic)
+        return false;
+    const auto next = buffer::nextLarger (info.available, info.current, info.deviceDefault);
+    if (! next.has_value())
+        return false;
+    bufferFloors[bufferDeviceKey (info.deviceTypeName, info.outputDeviceName)] = *next;
+    lastBufferAttempt = {};
+    applyBufferPolicy();
+    if (onBufferChoiceChanged != nullptr)
+        onBufferChoiceChanged();
+    return true;
+}
+
+// =============================================================================
+// Latency probe (docs/11 E42d)
+// =============================================================================
+bool AudioEngineHost::startLatencyProbe (std::unique_ptr<latency::ProbeSession>& session)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (session == nullptr || probeOwned != nullptr || ! callbackRunning.load (std::memory_order_acquire))
+        return false;
+    probeOwned = std::move (session);
+    probeLive.store (probeOwned.get(), std::memory_order_release);
+    return true;
+}
+
+void AudioEngineHost::cancelLatencyProbe() noexcept
+{
+    if (probeOwned != nullptr)
+        probeOwned->requestCancel();
+}
+
+std::unique_ptr<latency::ProbeSession> AudioEngineHost::takeLatencyProbe()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    if (probeOwned == nullptr)
+        return nullptr;
+    const bool stopped = ! callbackRunning.load (std::memory_order_acquire) || probeLive.load (std::memory_order_acquire) == nullptr;
+    if (! probeOwned->finished() && ! stopped)
+        return nullptr;
+    // Like a capture slot: unpublish, then wait until a callback that may
+    // have read the pointer has returned (bounded; retried later if the audio
+    // thread is stalled).
+    probeLive.store (nullptr, std::memory_order_seq_cst);
+    uint64_t counter = 0;
+    if (! waitForAudioThreadToPass (counter))
+        return nullptr;
+    return std::move (probeOwned);
 }
 
 std::array<int, flub::kMaxChannels> AudioEngineHost::deviceInputOrder (const juce::String& deviceTypeName, int stripChannels) noexcept

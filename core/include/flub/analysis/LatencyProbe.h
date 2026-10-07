@@ -16,6 +16,13 @@
 // products); the result is the median of the accepted runs, and the
 // measurement fails when fewer than half of the runs are accepted.
 //
+// Each run also reports its strongest other arrival (Run::secondaryDb, the
+// largest |response| more than 1 ms away from the peak within 0 ..
+// maxDelayMs, re the peak): a second path nearly as strong as the first (an
+// echo, a headset's sidetone loop, the other earcup) makes "the" delay
+// ambiguous even when the SNR is high. The analysis does not reject such a
+// run; callers judge it (the app warns above -6 dB).
+//
 // The delay is the time from the start of the probe file to its arrival in
 // the recording, so playback and capture must start sample-locked (one
 // duplex stream: a DAW, `jack_iodelay`-style tools, pw-cat on one graph), or
@@ -73,6 +80,9 @@ struct Run
     double snrDb = 0.0;        // peak re the RMS of the rest of the response
     bool inverted = false;     // the peak is negative (the path inverts polarity)
     bool accepted = false;     // snrDb >= minSnrDb
+    static constexpr double kNoSecondaryDb = -200.0;
+    double secondaryDb = kNoSecondaryDb; // the strongest arrival > 1 ms from the peak, re the peak
+    double secondaryLagSamples = 0.0;    // where it is (lag, samples); 0 when none
 };
 
 struct Result
@@ -85,6 +95,8 @@ struct Result
     double delayMs = 0.0;
     double spreadSamples = 0.0; // max - min over the accepted runs
     bool inverted = false;      // most accepted runs are inverted
+    double secondaryDb = Run::kNoSecondaryDb; // the strongest secondary arrival over the accepted runs (dB re each run's peak)
+    double medianSnrDb = 0.0;   // median SNR of the accepted runs
 };
 
 class LatencyProbe
