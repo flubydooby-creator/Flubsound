@@ -661,7 +661,7 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 
 ### The on-screen display
 
-- **What it is:** after every hotkey or `ctl` action, a small display at the top centre of the screen (*GAME / Boost 60%* with a level bar) for 1.2 s, faded over 0.3 s. It never takes focus or clicks (a click on it reaches the window below; on macOS it is a panel that never becomes the key window, also shown over fullscreen apps); in exclusive fullscreen it is not shown and an optional earcon (two 60 ms blips at −24 dBFS, `ctl Earcon fullscreen`) plays instead; Tournament mode hides it ([E56](11-enhancement-report.md#e56)).
+- **What it is:** after every hotkey or `ctl` action, a small display at the top centre of the screen (*GAME / Boost 60%* with a level bar) for 1.2 s, faded over 0.3 s. It never takes focus or clicks (a click on it reaches the window below; on macOS it is a panel that never becomes the key window and should also show over fullscreen apps, not yet tried on a real Mac); in exclusive fullscreen it is not shown and an optional earcon (two 60 ms blips at −24 dBFS, `ctl Earcon fullscreen`) plays instead; Tournament mode hides it ([E56](11-enhancement-report.md#e56)).
 - **Demo pairs:** none (feedback; no sound of its own)
 - **Look for:** with a game or a text editor focused, press a Boost hotkey: the display shows and fades, and typing still goes to the game or editor; a click on the display lands in the window under it.
 - **Limits (gated):** the PresentMon check with borderless games is the owner's; the macOS and Linux behaviour is checked on CI's machines only (no Mac or Linux desktop with a fullscreen game yet); Settings has no row for it yet (`flubsound-cli ctl Osd on|off`).

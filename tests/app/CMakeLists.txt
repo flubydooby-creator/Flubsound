@@ -19,6 +19,12 @@ list(TRANSFORM FLUB_APP_TEST_APP_SOURCES PREPEND "${FLUB_APP_DIR}/")
 
 file(GLOB FLUB_APP_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp")
 
+# macOS: AppKit helpers for the OSD's display case (test_app_osd.cpp; Objective-C++,
+# manual reference counting like the JUCE and app .mm sources in this target).
+if(APPLE)
+    list(APPEND FLUB_APP_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/AppTestSupport_mac.mm")
+endif()
+
 juce_add_console_app(flub_app_tests PRODUCT_NAME "flub_app_tests")
 target_sources(flub_app_tests PRIVATE ${FLUB_APP_TEST_SOURCES} ${FLUB_APP_TEST_APP_SOURCES} ${FLUB_PLATFORM_SOURCES})
 

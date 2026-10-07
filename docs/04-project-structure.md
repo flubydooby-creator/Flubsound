@@ -217,10 +217,11 @@ Flubsound/
 │   │   ├── AppTestMain.cpp                 runner under juce::ScopedJuceInitialiser_GUI; per-thread counting operator new / delete; Linux: counting pthread_mutex_lock / _trylock
 │   │   ├── AppTestSupport.h                RealtimeProbe (allocations, frees, locks on the calling thread), pumpMessagesUntil, TempFolder
 │   │   ├── DisplayTestSupport.h            haveDisplay, TolerateXErrors: tests that put a real window on a display (the OSD, the Settings dialog)
+│   │   ├── AppTestSupport_mac.h, .mm       macOS only: AppKit helpers for test_app_osd.cpp (make the runner's console process the active app with a key window)
 │   │   ├── test_app_realtime.cpp           AudioEngineHost's device callback with a fake AudioIODevice (48 kHz / 256): no allocation, free or lock per block
 │   │   ├── test_app_export.cpp             ExportJob on real WAV / AIFF / FLAC / corrupt / .txt files: formats, loudness target, CLI parity, cancel, refusals; ExportDialog
 │   │   ├── test_app_hotkeys.cpp            HotkeyManager with a fake GlobalHotkeys: action names as descriptions, per-action status, answers from another thread
-│   │   ├── test_app_osd.cpp                docs/11 E56: the on-screen display's hold and fade, exclusive fullscreen and the earcon, Tournament mode, the window flags and focus under Xvfb
+│   │   ├── test_app_osd.cpp                docs/11 E56: the on-screen display's hold and fade, exclusive fullscreen and the earcon, Tournament mode, the window flags and focus with a display (Xvfb, the macOS and Windows desktops)
 │   │   ├── test_app_ctl.cpp                docs/11 E56: `ctl` against the running controller (BoostUp Game, refusals and exit codes, LoadPreset by uuid, every hotkey action)
 │   │   ├── test_app_chatmix.cpp            docs/11 E22: ChatMix from the tray flyout, the Chat row and the hotkeys at the output; the chat-duck setting persisted; the voice dot on speech
 │   │   ├── test_app_headset_cap.cpp        EngineController::simulateOutputDevice -> master ceiling -2 (Bluetooth) / -3 (hands-free) / -1 dBTP, measured on the output

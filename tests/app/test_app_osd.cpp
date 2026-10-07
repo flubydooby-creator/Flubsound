@@ -7,9 +7,10 @@
 // real window's style flags (on Windows its WS_EX_NOACTIVATE |
 // WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW extended styles; on macOS its
 // non-activating NSPanel and on X11 its empty input shape, ui/OsdNative.h),
-// its place at the top centre, and
-// that a focused window keeps the keyboard focus (macOS: also the active app
-// and the key window) while the display comes and goes.
+// its place at the top centre, and that a focused window keeps the keyboard
+// focus while the display comes and goes (macOS: the test process is made the
+// active app with the focus holder's window key, as a game would be, and both
+// must stay so).
 #include "AppTestSupport.h"
 #include "DisplayTestSupport.h"
 
@@ -23,6 +24,10 @@
 #include <cmath>
 #include <iostream>
 #include <vector>
+
+#if JUCE_MAC
+    #include "AppTestSupport_mac.h"
+#endif
 
 using namespace flub::app;
 using flub::app::ui::Osd;
@@ -216,6 +221,30 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
     }
    #endif
     REQUIRE (focusHolder.hasKeyboardFocus (false));
+   #if JUCE_MAC
+    // A game is the active app with its window key. The runner starts this
+    // console process as neither (no key window at all), where the OSD could
+    // take neither; so make it the active app with the focus holder's window
+    // key first. macOS may refuse: then say so, and the comparison below only
+    // shows that the OSD changes neither.
+    auto* holderView = focusHolder.getPeer()->getNativeHandle();
+    const void* holderWindow = flubapptest::macos::windowOf (holderView);
+    REQUIRE (holderWindow != nullptr);
+    flubapptest::macos::requestActivation();
+    const bool macKeyHeld = flubapptest::pumpMessagesUntil ([&]
+                                                            {
+                                                                const auto focusNow = Osd::getNativeFocus();
+                                                                if (focusNow.appActive && focusNow.keyWindow != holderWindow)
+                                                                    flubapptest::macos::makeKeyAndFront (holderView);
+                                                                return focusNow.appActive && focusNow.keyWindow == holderWindow;
+                                                            },
+                                                            800);
+    if (! macKeyHeld)
+        std::cout << "    (macOS: this process did not become the active app with the focus holder's window key;"
+                     " the active app / key window comparison is weak here)\n";
+    REQUIRE (focusHolder.getPeer()->isFocused());
+    REQUIRE (focusHolder.hasKeyboardFocus (false));
+   #endif
     // macOS: whether this process is the active app and which window is key
     // (empty elsewhere); the OSD must change neither.
     const auto nativeFocus = Osd::getNativeFocus();
@@ -240,7 +269,9 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
 
         // At the top centre of the primary display (macOS: the panel's
         // frame, set in Cocoa's bottom-left coordinates, read back by JUCE).
-        const auto area = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getLargestIntegerWithin();
+        const auto* primary = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+        REQUIRE (primary != nullptr);
+        const auto area = primary->userBounds.getLargestIntegerWithin();
         const auto onScreen = osd.getScreenBounds();
         CHECK (std::abs (onScreen.getCentreX() - area.getCentreX()) <= 1);
         CHECK (std::abs (onScreen.getY() - (area.getY() + area.getHeight() / 10)) <= 1);
@@ -275,9 +306,17 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (! native.hidesOnDeactivate);
         CHECK (native.visible);
         CHECK (native.level == flub::app::ui::osdpanel::kWindowLevel);
+        if (macKeyHeld)
+        {
+            CHECK (Osd::getNativeFocus().appActive);
+            CHECK (Osd::getNativeFocus().keyWindow == holderWindow); // the "game" keeps the key window
+        }
+        const char* keyName = nativeFocus.keyWindow == nullptr      ? "none"
+                              : nativeFocus.keyWindow == holderWindow ? "the focus holder's"
+                                                                      : "another";
         std::cout << "    [E56] macOS: OSD panel level " << native.level << ", key " << (native.isKey ? "yes" : "no")
-                  << "; this app active " << (nativeFocus.appActive ? "yes" : "no") << ", key window "
-                  << (nativeFocus.keyWindow != nullptr ? "the focus holder's" : "none") << ", unchanged by the OSD\n";
+                  << "; this app active " << (nativeFocus.appActive ? "yes" : "no") << ", key window " << keyName
+                  << ", unchanged by the OSD\n";
        #elif JUCE_LINUX || JUCE_BSD
         // X11: an empty input shape, so a click inside the display reaches
         // the window below; an ordinary JUCE window (the focus holder) has
@@ -289,6 +328,20 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (native.inputRectangles == 0);
         CHECK (native.ignoresMouseEvents);
         CHECK (ordinaryRectangles == 1);
+        // A failed query (here BadWindow: a window that is gone) reads as
+        // unknown, not as an empty shape.
+        void* goneHandle = nullptr;
+        {
+            juce::Component gone;
+            gone.setBounds (40, 300, 120, 60);
+            gone.addToDesktop (0);
+            REQUIRE (gone.getPeer() != nullptr);
+            goneHandle = gone.getPeer()->getNativeHandle();
+            gone.removeFromDesktop(); // XDestroyWindow, then XSync
+        }
+        const int goneRectangles = flub::app::ui::osdx11::countInputRectangles (goneHandle);
+        std::cout << "    [E56] X11 input shape of a destroyed window: " << goneRectangles << " (-1: unknown)\n";
+        CHECK (goneRectangles == -1);
        #else
         CHECK (! native.available);
        #endif
@@ -306,9 +359,16 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (Osd::getNativeFocus() == nativeFocus);
        #if JUCE_MAC
         CHECK (! osd.getNativeWindowState().visible); // ordered out with the message
+        if (macKeyHeld)
+        {
+            CHECK (Osd::getNativeFocus().keyWindow == holderWindow);
+        }
        #endif
     }
     focusHolder.removeFromDesktop();
+   #if JUCE_MAC
+    flubapptest::macos::deactivate();
+   #endif
 }
 
 TEST_CASE ("App: the OSD earcon is two short blips at -24 dBFS on the app's output, rendered without allocating or locking (E56)")

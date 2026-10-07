@@ -90,11 +90,15 @@ namespace osdpanel
 namespace osdx11
 {
     /** Gives the X window (a JUCE peer's native handle) an empty input shape,
-        through JUCE's own display connection. False without X or without
-        SHAPE 1.1 on the server. */
+        through JUCE's own display connection. False without X, without
+        SHAPE 1.1 on the server, or when the server answers with an X error
+        (caught while the request runs, then synced). */
     bool setEmptyInputShape (void* nativeHandle);
     /** The number of rectangles in the window's input shape: 0 when
-        click-through, 1 for an ordinary window; -1 when it cannot be read. */
+        click-through, 1 for an ordinary window; -1 when it cannot be read
+        (no SHAPE 1.1, or the query failed with an X error such as
+        BadWindow: libXext returns no rectangles both then and for an empty
+        shape, so the X error decides). */
     int countInputRectangles (void* nativeHandle);
 } // namespace osdx11
 #endif

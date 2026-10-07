@@ -7,6 +7,8 @@
 
 #include "OsdNative.h"
 
+#include <atomic>
+
 #include <dlfcn.h>
 
 namespace flub::app::ui::osdx11
@@ -85,6 +87,63 @@ const ShapeFunctions& shapeFunctions()
 {
     return static_cast<::Window> (reinterpret_cast<juce::pointer_sized_uint> (nativeHandle));
 }
+
+/** Catches the X errors of the requests this display makes while it lives
+    (as JUCE's own XShm check does); any other error goes on to the handler it
+    replaced (JUCE's, or the test runner's). Without it a failed request
+    (BadWindow) would read as an answer: XShapeGetRectangles returns no
+    rectangles both for a failed request and for an empty shape. Construct
+    and ask with the display locked, on the message thread. */
+class ScopedErrorTrap
+{
+public:
+    explicit ScopedErrorTrap (::Display* trappedDisplay) : display (trappedDisplay)
+    {
+        auto* x = juce::X11Symbols::getInstance();
+        x->xSync (display, False); // errors of earlier requests go to the old handler
+        firstSerial = NextRequest (display);
+        current.store (this);
+        previous = x->xSetErrorHandler (&handleError);
+    }
+
+    ~ScopedErrorTrap()
+    {
+        juce::X11Symbols::getInstance()->xSetErrorHandler (previous);
+        current.store (nullptr);
+    }
+
+    ScopedErrorTrap (const ScopedErrorTrap&) = delete;
+    ScopedErrorTrap& operator= (const ScopedErrorTrap&) = delete;
+
+    /** Waits for the server to answer every request so far: whether any of
+        them failed. */
+    bool failed()
+    {
+        juce::X11Symbols::getInstance()->xSync (display, False);
+        return errors > 0;
+    }
+
+private:
+    static int handleError (::Display* errorDisplay, XErrorEvent* event)
+    {
+        auto* trap = current.load();
+        if (trap == nullptr)
+            return 0;
+        if (errorDisplay == trap->display && event != nullptr && event->serial >= trap->firstSerial)
+        {
+            ++trap->errors;
+            return 0;
+        }
+        return trap->previous != nullptr ? trap->previous (errorDisplay, event) : 0;
+    }
+
+    static inline std::atomic<ScopedErrorTrap*> current { nullptr };
+
+    ::Display* display = nullptr;
+    unsigned long firstSerial = 0;
+    XErrorHandler previous = nullptr;
+    int errors = 0;
+};
 } // namespace
 
 bool setEmptyInputShape (void* nativeHandle)
@@ -95,10 +154,10 @@ bool setEmptyInputShape (void* nativeHandle)
     auto* display = displayWithInputShapes();
     if (display == nullptr)
         return false;
+    ScopedErrorTrap trap (display);
     // No rectangles, ShapeSet: the input region is empty.
     shapeFunctions().combineRectangles (display, toWindow (nativeHandle), kShapeInput, 0, 0, nullptr, 0, kShapeSet, Unsorted);
-    juce::X11Symbols::getInstance()->xFlush (display);
-    return true;
+    return ! trap.failed();
 }
 
 int countInputRectangles (void* nativeHandle)
@@ -109,10 +168,13 @@ int countInputRectangles (void* nativeHandle)
     auto* display = displayWithInputShapes();
     if (display == nullptr)
         return -1;
-    int count = 0, ordering = 0;
+    ScopedErrorTrap trap (display);
+    // libXext writes count only from a reply; an empty shape's reply has no
+    // rectangles and returns nullptr as well, so the trap tells the cases apart.
+    int count = -1, ordering = 0;
     auto* rectangles = shapeFunctions().getRectangles (display, toWindow (nativeHandle), kShapeInput, &count, &ordering);
     if (rectangles != nullptr)
         juce::X11Symbols::getInstance()->xFree (rectangles);
-    return count;
+    return trap.failed() ? -1 : count;
 }
 } // namespace flub::app::ui::osdx11
