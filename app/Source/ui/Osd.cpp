@@ -73,7 +73,10 @@ Osd::~Osd()
     if (earconRegistered)
         controller.getDeviceManager().removeAudioCallback (&earconVoice);
     if (isOnDesktop())
-        removeFromDesktop();
+        removeFromDesktop(); // first: the peer's view lives in the panel
+   #if JUCE_MAC
+    osdpanel::destroy (macPanel);
+   #endif
 }
 
 void Osd::playEarcon()
@@ -146,7 +149,11 @@ void OsdEarconVoice::audioDeviceIOCallbackWithContext (const float* const*, int,
 
 int Osd::getDesktopStyleFlags() noexcept
 {
-    return juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresMouseClicks;
+    // windowIgnoresKeyPresses: macOS - JUCE's view refuses first responder and
+    // its window key status; X11 - WM_TAKE_FOCUS is ignored (JUCE's tooltip
+    // window has the same three flags).
+    return juce::ComponentPeer::windowIsTemporary | juce::ComponentPeer::windowIgnoresMouseClicks
+         | juce::ComponentPeer::windowIgnoresKeyPresses;
 }
 
 unsigned long Osd::getNativeExStyle() const
@@ -156,6 +163,33 @@ unsigned long Osd::getNativeExStyle() const
         return static_cast<unsigned long> (GetWindowLongPtrW (static_cast<HWND> (peer->getNativeHandle()), GWL_EXSTYLE));
    #endif
     return 0;
+}
+
+OsdNativeWindowState Osd::getNativeWindowState() const
+{
+   #if JUCE_MAC
+    return osdpanel::getState (macPanel);
+   #elif JUCE_LINUX || JUCE_BSD
+    OsdNativeWindowState state;
+    if (auto* peer = getPeer())
+    {
+        state.inputRectangles = osdx11::countInputRectangles (peer->getNativeHandle());
+        state.available = state.inputRectangles >= 0;
+        state.ignoresMouseEvents = state.inputRectangles == 0;
+    }
+    return state;
+   #else
+    return {};
+   #endif
+}
+
+OsdNativeFocus Osd::getNativeFocus()
+{
+   #if JUCE_MAC
+    return osdpanel::getFocus();
+   #else
+    return {};
+   #endif
 }
 
 double Osd::now() const
@@ -207,7 +241,20 @@ Osd::Outcome Osd::show (const juce::String& newTitle, const juce::String& newTex
     {
         if (! isOnDesktop())
         {
+           #if JUCE_MAC
+            // The peer goes into the OSD's own non-activating panel (OsdNative.h).
+            if (macPanel == nullptr)
+                macPanel = osdpanel::create();
+            addToDesktop (getDesktopStyleFlags(), osdpanel::getContentView (macPanel));
+            placeOnScreen(); // now the panel's frame, the component filling it
+           #else
             addToDesktop (getDesktopStyleFlags());
+           #endif
+           #if JUCE_LINUX || JUCE_BSD
+            // X11: an empty input shape, so clicks reach the window below (OsdNative.h).
+            if (auto* peer = getPeer())
+                osdx11::setEmptyInputShape (peer->getNativeHandle());
+           #endif
            #if JUCE_WINDOWS
             if (auto* peer = getPeer())
             {
@@ -219,6 +266,9 @@ Osd::Outcome Osd::show (const juce::String& newTitle, const juce::String& newTex
         }
         setVisible (true);
         toFront (false); // never activate
+       #if JUCE_MAC
+        osdpanel::orderFront (macPanel); // also while another app is active
+       #endif
     }
     else
     {
@@ -254,6 +304,9 @@ void Osd::hideNow()
     phase = Phase::Hidden;
     opacity = 0.0f;
     setVisible (false); // the window stays created (and hidden) for the next message
+   #if JUCE_MAC
+    osdpanel::orderOut (macPanel);
+   #endif
 }
 
 void Osd::setOpacity (float newOpacity)
@@ -280,7 +333,19 @@ void Osd::placeOnScreen()
     juce::Rectangle<int> area (0, 0, 1280, 720);
     if (const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay())
         area = display->userBounds.getLargestIntegerWithin();
-    setBounds (area.getCentreX() - width / 2, area.getY() + area.getHeight() / 10, width, height);
+    const juce::Rectangle<int> bounds (area.getCentreX() - width / 2, area.getY() + area.getHeight() / 10, width, height);
+   #if JUCE_MAC
+    if (macPanel != nullptr && isOnDesktop())
+    {
+        // The panel takes the screen position, in points (JUCE's logical
+        // pixels times the app's UI scale); the component fills its content.
+        const auto points = bounds.toDouble() * static_cast<double> (getDesktopScaleFactor());
+        osdpanel::setFrame (macPanel, points.getX(), points.getY(), points.getWidth(), points.getHeight());
+        setBounds (bounds.withZeroOrigin());
+        return;
+    }
+   #endif
+    setBounds (bounds);
 }
 
 void Osd::paint (juce::Graphics& g)

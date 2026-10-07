@@ -4,9 +4,12 @@
 // there), the switch in the settings file, and Tournament mode (docs/11
 // E55): nothing shown, and a message on screen goes at once when it comes
 // on. With a display (Xvfb on Linux CI, the desktop on Windows / macOS): the
-// real window's style flags (and on Windows its WS_EX_NOACTIVATE |
-// WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW extended styles), and that a focused
-// window keeps the keyboard focus while the display comes and goes.
+// real window's style flags (on Windows its WS_EX_NOACTIVATE |
+// WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW extended styles; on macOS its
+// non-activating NSPanel and on X11 its empty input shape, ui/OsdNative.h),
+// its place at the top centre, and
+// that a focused window keeps the keyboard focus (macOS: also the active app
+// and the key window) while the display comes and goes.
 #include "AppTestSupport.h"
 #include "DisplayTestSupport.h"
 
@@ -174,6 +177,7 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
     const int flags = Osd::getDesktopStyleFlags();
     CHECK ((flags & juce::ComponentPeer::windowIsTemporary) != 0);         // X11: override-redirect, no WM focus
     CHECK ((flags & juce::ComponentPeer::windowIgnoresMouseClicks) != 0);  // click-through
+    CHECK ((flags & juce::ComponentPeer::windowIgnoresKeyPresses) != 0);   // macOS: never key, never first responder
     CHECK ((flags & juce::ComponentPeer::windowAppearsOnTaskbar) == 0);    // Windows: WS_EX_TOOLWINDOW
     CHECK (Osd::kWindowsExStyle == (0x08000000ul | 0x00000020ul | 0x00000080ul));
 
@@ -196,18 +200,25 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
                                     1500);
     focusHolder.grabKeyboardFocus();
     REQUIRE (focusHolder.getPeer() != nullptr);
-   #if JUCE_LINUX || JUCE_BSD
-    REQUIRE (focusHolder.getPeer()->isFocused()); // Xvfb: XSetInputFocus always works
+   #if JUCE_LINUX || JUCE_BSD || JUCE_MAC
+    // Xvfb: XSetInputFocus always works. macOS: without a JUCEApplication
+    // (this console runner) JUCE tracks the focused peer itself, and
+    // grabFocus() makes it the focus holder's.
+    REQUIRE (focusHolder.getPeer()->isFocused());
    #else
     if (! focusHolder.getPeer()->isFocused())
     {
         // A desktop may refuse the foreground to a background test process:
         // nothing to compare against there.
+        std::cout << "    (skipped: the desktop did not give the focus holder the foreground)\n";
         focusHolder.removeFromDesktop();
         return;
     }
    #endif
     REQUIRE (focusHolder.hasKeyboardFocus (false));
+    // macOS: whether this process is the active app and which window is key
+    // (empty elsewhere); the OSD must change neither.
+    const auto nativeFocus = Osd::getNativeFocus();
 
     FakeEnvironment fake;
     {
@@ -218,6 +229,7 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         REQUIRE (peer != nullptr);
         CHECK ((peer->getStyleFlags() & juce::ComponentPeer::windowIsTemporary) != 0);
         CHECK ((peer->getStyleFlags() & juce::ComponentPeer::windowIgnoresMouseClicks) != 0);
+        CHECK ((peer->getStyleFlags() & juce::ComponentPeer::windowIgnoresKeyPresses) != 0);
         CHECK (osd.isAlwaysOnTop());
         CHECK (! osd.getWantsKeyboardFocus());
        #if JUCE_WINDOWS
@@ -226,25 +238,59 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (osd.getNativeExStyle() == 0ul);
        #endif
 
+        // At the top centre of the primary display (macOS: the panel's
+        // frame, set in Cocoa's bottom-left coordinates, read back by JUCE).
+        const auto area = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay()->userBounds.getLargestIntegerWithin();
+        const auto onScreen = osd.getScreenBounds();
+        CHECK (std::abs (onScreen.getCentreX() - area.getCentreX()) <= 1);
+        CHECK (std::abs (onScreen.getY() - (area.getY() + area.getHeight() / 10)) <= 1);
+        CHECK (std::abs (onScreen.getHeight() - osd.getHeight()) <= 1);
+
         // Let the window system map it and deliver any focus events.
         const auto until = juce::Time::getMillisecondCounter() + 250;
         flubapptest::pumpMessagesUntil ([until] { return juce::Time::getMillisecondCounter() > until; });
         CHECK (osd.isShowing());
-       #if ! JUCE_MAC
-        // macOS does not give a background test process's window key status,
-        // so the focus holder is never focused there; the OSD's own flags
-        // (temporary, ignores clicks, no keyboard focus) are checked above.
         CHECK (focusHolder.getPeer()->isFocused());
         CHECK (! peer->isFocused());
         CHECK (focusHolder.hasKeyboardFocus (false));
         CHECK (juce::Component::getCurrentlyFocusedComponent() == &focusHolder);
+        CHECK (Osd::getNativeFocus() == nativeFocus);
+
+        const auto native = osd.getNativeWindowState();
+       #if JUCE_MAC
+        // The OSD's own panel (ui/OsdNative.h): a non-activating NSPanel that
+        // cannot become key or main, whose view is not the first responder,
+        // click-through, on every Space and over fullscreen apps, and not
+        // hidden while another app is active.
+        REQUIRE (native.available);
+        CHECK (native.isPanel);
+        CHECK (native.nonactivating);
+        CHECK (! native.canBecomeKey);
+        CHECK (! native.canBecomeMain);
+        CHECK (! native.isKey);
+        CHECK (! native.viewIsFirstResponder);
+        CHECK (native.ignoresMouseEvents);
+        CHECK (native.joinsAllSpaces);
+        CHECK (native.fullScreenAuxiliary);
+        CHECK (! native.hidesOnDeactivate);
+        CHECK (native.visible);
+        CHECK (native.level == flub::app::ui::osdpanel::kWindowLevel);
+        std::cout << "    [E56] macOS: OSD panel level " << native.level << ", key " << (native.isKey ? "yes" : "no")
+                  << "; this app active " << (nativeFocus.appActive ? "yes" : "no") << ", key window "
+                  << (nativeFocus.keyWindow != nullptr ? "the focus holder's" : "none") << ", unchanged by the OSD\n";
+       #elif JUCE_LINUX || JUCE_BSD
+        // X11: an empty input shape, so a click inside the display reaches
+        // the window below; an ordinary JUCE window (the focus holder) has
+        // its one rectangle, as the OSD had before.
+        const int ordinaryRectangles = flub::app::ui::osdx11::countInputRectangles (focusHolder.getPeer()->getNativeHandle());
+        std::cout << "    [E56] X11 input shape: OSD " << native.inputRectangles << " rectangles, an ordinary window "
+                  << ordinaryRectangles << "\n";
+        REQUIRE (native.available);
+        CHECK (native.inputRectangles == 0);
+        CHECK (native.ignoresMouseEvents);
+        CHECK (ordinaryRectangles == 1);
        #else
-        // KNOWN_GAP (macOS, docs/11 E56): on the CI's macOS runner the OSD's
-        // peer reports focus although it is created without keyboard focus
-        // and as a temporary, click-through window; whether a real Mac's key
-        // window loses focus to it (it would leave a fullscreen game) needs a
-        // check on a Mac. Printed, not asserted.
-        std::cout << "    [E56] macOS: OSD peer focused = " << (peer->isFocused() ? "yes" : "no") << "\n";
+        CHECK (! native.available);
        #endif
 
         // A second message and the fade to hidden: still no focus change.
@@ -254,9 +300,12 @@ TEST_CASE ("App: the OSD window is non-activating and click-through, and a focus
         CHECK (! osd.isVisible());
         const auto later = juce::Time::getMillisecondCounter() + 100;
         flubapptest::pumpMessagesUntil ([later] { return juce::Time::getMillisecondCounter() > later; });
-       #if ! JUCE_MAC
         CHECK (focusHolder.getPeer()->isFocused());
+        CHECK (! peer->isFocused());
         CHECK (juce::Component::getCurrentlyFocusedComponent() == &focusHolder);
+        CHECK (Osd::getNativeFocus() == nativeFocus);
+       #if JUCE_MAC
+        CHECK (! osd.getNativeWindowState().visible); // ordered out with the message
        #endif
     }
     focusHolder.removeFromDesktop();

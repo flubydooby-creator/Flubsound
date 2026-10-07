@@ -5,11 +5,14 @@
 //
 // It must never disturb a game:
 // * it never takes keyboard focus or activation: a JUCE top-level window
-//   with windowIsTemporary | windowIgnoresMouseClicks (X11: an
-//   override-redirect window the window manager does not focus), shown with
-//   toFront (false), and on Windows WS_EX_NOACTIVATE | WS_EX_TRANSPARENT |
-//   WS_EX_TOOLWINDOW (click-through, no taskbar button; JUCE adds
-//   WS_EX_LAYERED for the translucent window) and HWND_TOPMOST;
+//   with windowIsTemporary | windowIgnoresMouseClicks |
+//   windowIgnoresKeyPresses, shown with toFront (false); on Windows
+//   WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW (click-through,
+//   no taskbar button; JUCE adds WS_EX_LAYERED for the translucent window)
+//   and HWND_TOPMOST; on X11 an override-redirect window the window manager
+//   does not focus, with an empty input shape (click-through); on macOS the
+//   peer sits in a non-activating NSPanel of its own that cannot become key,
+//   ignores the mouse and joins every Space and fullscreen app (OsdNative.h);
 // * while a game runs in exclusive fullscreen (Windows:
 //   SHQueryUserNotificationState == QUNS_RUNNING_D3D_FULL_SCREEN) the window
 //   is not shown at all - a topmost window can knock the game out of
@@ -29,6 +32,7 @@
 // keeps the component off the desktop, and a fake clock drives the fade.
 #pragma once
 
+#include "OsdNative.h"
 #include "engine/EngineController.h"
 #include "settings/AppSettings.h"
 
@@ -131,6 +135,13 @@ public:
     static constexpr unsigned long kWindowsExStyle = 0x08000000ul | 0x00000020ul | 0x00000080ul;
     /** The window's GWL_EXSTYLE on Windows; 0 elsewhere or without a window. */
     unsigned long getNativeExStyle() const;
+    /** What the native window reports (OsdNative.h): macOS - the OSD's
+        NSPanel; X11 - its input shape. Available is false on Windows (see
+        getNativeExStyle) and before the first message. */
+    OsdNativeWindowState getNativeWindowState() const;
+    /** macOS: whether Flubsound is the active app and which window is key;
+        empty elsewhere. */
+    static OsdNativeFocus getNativeFocus();
 
     // ---- settings (the settings file) ----
     static bool getEnabled (juce::PropertiesFile& settings);
@@ -168,6 +179,9 @@ private:
     float opacity = 0.0f;
     juce::String title, text;
     std::optional<float> level;
+   #if JUCE_MAC
+    void* macPanel = nullptr; // the retained NSPanel the peer is attached to (OsdNative.h)
+   #endif
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Osd)
 };

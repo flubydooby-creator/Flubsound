@@ -439,6 +439,7 @@ Flubsound/
 │           ├── SimpleStatusPanel.{h,cpp}the Simple view's headset status and loudness meter in plain words (docs/11 E39)
 │           ├── RoutingPanel.{h,cpp}        strips, gains, mutes, per-app assignment
 │           ├── Osd.{h,cpp}                 the on-screen display of hotkey and `ctl` actions: click-through, never focused, hidden in Tournament mode; the earcon voice (docs/11 E56)
+│           ├── OsdNative.h, OsdNative_mac.mm, OsdNative_linux.cpp  the OSD's window-system parts: macOS non-activating NSPanel, X11 empty input shape (docs/11 E56)
 │           ├── HearingPage.{h,cpp}         Settings › Hearing: sensitivity, estimate, listening-level cap, daily dose (docs/11 E32 (c))
 │           ├── HotkeyCapture.{h,cpp}       Settings › Hotkeys' recorder: a chord set by pressing it (R4.4)
 │           ├── PersonalProfileEditor.{h,cpp} the per-ear listening preference's editor on the Hearing page (docs/11 E33)

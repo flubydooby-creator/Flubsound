@@ -283,7 +283,10 @@ private:
 
         // Another instance's hot key (same signature): let the event reach
         // the next handler, which is that instance's.
-        return static_cast<MacGlobalHotkeys*> (userData)->dispatch (hotKeyId.id) ? noErr : eventNotHandledErr;
+        // Both as OSStatus: noErr and eventNotHandledErr are constants of two
+        // different anonymous enums (Apple Clang: -Wdeprecated-anon-enum-enum-conversion).
+        return static_cast<MacGlobalHotkeys*> (userData)->dispatch (hotKeyId.id) ? static_cast<OSStatus> (noErr)
+                                                                                 : static_cast<OSStatus> (eventNotHandledErr);
     }
 
     EventHandlerUPP handlerUpp = nullptr;

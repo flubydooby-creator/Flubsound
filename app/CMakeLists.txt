@@ -116,6 +116,16 @@ file(GLOB FLUB_APP_VIS_SOURCES CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURC
 list(SORT FLUB_APP_VIS_SOURCES)
 list(APPEND FLUB_APP_SOURCES ${FLUB_APP_VIS_SOURCES})
 
+# docs/11 E56: the on-screen display's window-system parts (ui/OsdNative.h).
+# macOS: a non-activating NSPanel of its own (Objective-C++, manual reference
+# counting like JUCE's own .mm sources in this target; AppKit comes with
+# JUCE). X11: an empty input shape (libXext loaded at run time, like JUCE).
+if(APPLE)
+    list(APPEND FLUB_APP_SOURCES Source/ui/OsdNative_mac.mm)
+elseif(UNIX)
+    list(APPEND FLUB_APP_SOURCES Source/ui/OsdNative_linux.cpp)
+endif()
+
 target_sources(FlubsoundPro PRIVATE ${FLUB_APP_SOURCES})
 target_include_directories(FlubsoundPro PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Source"

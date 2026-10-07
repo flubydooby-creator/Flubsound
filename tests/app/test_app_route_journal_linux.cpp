@@ -77,9 +77,16 @@ bool haveTools()
 {
     // A build without the platform services has no pactl router to test.
     const auto router = platform_bridge::createAppAudioRouter();
-    if (router == nullptr || ! router->canMoveEndpoint())
+    if (router == nullptr)
     {
         std::cerr << "    (skipped: this build has no Linux per-app router)\n";
+        return false;
+    }
+    if (! router->canMoveEndpoint())
+    {
+        // The pactl router is built in but needs pactl at run time (CI's app
+        // job has none; its pipewire job runs this test).
+        std::cerr << "    (skipped: the per-app router needs pactl, which is not installed)\n";
         return false;
     }
     for (const char* tool : { "pactl", "pw-play", "pw-metadata", "pw-cli" })

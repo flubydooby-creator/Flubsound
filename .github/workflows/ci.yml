@@ -221,11 +221,20 @@ jobs:
         run: cmake --build build --parallel
       # tests/app (flub_app_tests): device callback real-time safety, headset
       # ceiling cap, analyser / meter data paths, per-app routing model. No
-      # audio device and no display needed (the Ninja build is single-config,
-      # so ctest finds the binary on every OS; it is the only registered test
-      # here because FLUB_BUILD_TESTS is OFF).
+      # audio device needed (the Ninja build is single-config, so ctest finds
+      # the binary on every OS; it is the only registered test here because
+      # FLUB_BUILD_TESTS is OFF). Linux runs under Xvfb, so the cases that
+      # need a display (the OSD's real window, docs/11 E56) run there too
+      # instead of returning early; -V keeps every case's printed measurements
+      # and known gaps in the log when the step is green.
       - name: App tests
-        run: ctest --test-dir build --output-on-failure --timeout 300
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = Linux ]; then
+            xvfb-run -a ctest --test-dir build -V --output-on-failure --timeout 300
+          else
+            ctest --test-dir build -V --output-on-failure --timeout 300
+          fi
       - name: Headless screenshot (Linux)
         if: runner.os == 'Linux'
         run: |
