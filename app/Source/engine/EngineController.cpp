@@ -275,6 +275,9 @@ EngineController::EngineController (Options opts)
     }
     // docs/11 E22: the chat duck (every engine built later copies it).
     host->getMixEngine().setChatDuck (settings->getChatDuck(), settings->getChatDuckDepthDb());
+    // docs/03 §16: the experimental neural voice cleanup on the Chat strip.
+    neuralTelemetry = std::make_shared<flub::VoiceCleanupTelemetry>();
+    applyChatNeuralCleanup();
 
     selectedStrip = std::clamp (settings->getSelectedStrip(), 0, std::max (0, getNumStrips() - 1));
     enabled = settings->getMasterEnabled();
@@ -570,6 +573,7 @@ void EngineController::setStripLayout (const std::vector<flub::StripConfig>& new
             setComparisonTrimDb (i, 0.0f, slot);
 
     host->setStripLayout (newLayout);
+    applyChatNeuralCleanup(); // the Chat strip may have moved
     for (int i = 0; i < getNumStrips(); ++i)
         userGainDb[static_cast<size_t> (i)] = host->getStripGainDb (i);
     selectedStrip = resolveStrip (selectedStrip);
@@ -1950,6 +1954,7 @@ void EngineController::timerCallback()
     applyHearingGuard();    // docs/11 E32 (c)
     applyPersonalProfile(); // docs/11 E33
     applySmartMacros();     // docs/11 E34
+    applyChatNeuralCleanup(); // docs/03 §16: follows the device buffer and the strip layout
     if (! tournament.active) // docs/11 E55: no foreground poll in Tournament mode
         pollForegroundApp();
 
@@ -2634,6 +2639,105 @@ float EngineController::getChatDuckDepthDb() const
 bool EngineController::isChatVoiceActive() const noexcept { return host->getMixEngine().isChatVoiceActive(); }
 
 float EngineController::getChatDuckAmount() const noexcept { return host->getMixEngine().getChatDuckAmount(); }
+
+// =============================================================================
+// Neural voice cleanup on the Chat strip (docs/03 §16, docs/11 E35)
+// =============================================================================
+void EngineController::setChatNeuralCleanup (bool on)
+{
+    if (on == getChatNeuralCleanup())
+        return;
+    settings->setChatNeuralCleanup (on);
+    applyChatNeuralCleanup();
+    notify (Change::Settings);
+}
+
+bool EngineController::getChatNeuralCleanup() const { return settings->getChatNeuralCleanup(); }
+
+void EngineController::applyChatNeuralCleanup()
+{
+    const int chat = findStrip (kChatMixChatStrip);
+    const bool on = settings->getChatNeuralCleanup() && chat >= 0;
+    // Enough safety frames for one device buffer (AsyncModelProcessor.h): a result can only be
+    // picked up by a later callback than the one that completed its frame.
+    constexpr int frame = flub::VoiceCleanupRunner::kFrameSize;
+    const int safety = std::clamp ((std::max (1, host->getBlockSize()) + frame - 1) / frame, 1, 16);
+    const NeuralApplied want { on ? chat : -1, on ? safety : 0 };
+    if (want == neuralApplied)
+        return;
+    if (neuralApplied.strip >= 0 && neuralApplied.strip != want.strip && neuralApplied.strip < getNumStrips())
+        host->clearNeuralModel (neuralApplied.strip);
+    if (on)
+    {
+        flub::NeuralSlotConfig config;
+        config.processor.safetyFrames = safety;
+        auto telemetry = neuralTelemetry;
+        host->setNeuralModel (chat, [telemetry] { return std::make_unique<flub::VoiceCleanupRunner> (telemetry); }, config);
+    }
+    neuralApplied = want;
+}
+
+EngineController::NeuralCleanupStatus EngineController::getChatNeuralCleanupStatus() const
+{
+    NeuralCleanupStatus s;
+    s.enabled = settings->getChatNeuralCleanup();
+    const int chat = findStrip (kChatMixChatStrip);
+    s.hasChatStrip = chat >= 0;
+    s.sampleRate = host->getSampleRate();
+    if (chat < 0)
+        return s;
+    auto& chain = host->getMixEngine().chain (chat);
+    const auto st = chain.getNeuralStatus();
+    s.state = st.state;
+    s.latencySamples = st.modelLatencySamples;
+    s.pending = st.changePending || (s.enabled && neuralApplied.strip != chat);
+    const auto counters = chain.getNeuralCounters();
+    s.deadlineMisses = counters.deadlineMisses;
+    s.modelFailures = counters.modelFailures;
+    s.framesProcessed = counters.framesProcessed;
+    if (neuralTelemetry != nullptr)
+    {
+        s.voiceActivity = neuralTelemetry->voiceActivity.load (std::memory_order_relaxed);
+        s.reductionDb = neuralTelemetry->reductionDb.load (std::memory_order_relaxed);
+    }
+    return s;
+}
+
+juce::String EngineController::describeChatNeuralCleanup() const
+{
+    const auto s = getChatNeuralCleanupStatus();
+    if (! s.enabled)
+        return "Off.";
+    if (! s.hasChatStrip)
+        return "Not running: the strip layout has no Chat strip.";
+    if (s.pending)
+        return "Starting...";
+    using State = flub::NeuralSlotState;
+    switch (s.state)
+    {
+        case State::Active:
+        {
+            juce::String t ("On: ");
+            t << juce::String (1000.0 * s.latencySamples / std::max (1.0, s.sampleRate), 0) << " ms added to the Chat strip. Now: voice "
+              << juce::roundToInt (100.0f * s.voiceActivity) << " %, noise cut " << juce::String (s.reductionDb, 1) << " dB";
+            if (s.deadlineMisses > 0 || s.modelFailures > 0)
+                t << " (" << juce::String (static_cast<juce::int64> (s.deadlineMisses + s.modelFailures)) << " late or failed frames)";
+            return t << ".";
+        }
+        case State::Ineligible:
+            return "Not running: Low Latency allows less than the model's " + juce::String (1000.0 * s.latencySamples / std::max (1.0, s.sampleRate), 0)
+                   + " ms. Choose Balanced or Quality (Latency profile, above).";
+        case State::SampleRateMismatch:
+            return "Not running: the model works at 48 kHz and the device runs at " + juce::String (s.sampleRate / 1000.0, 1) + " kHz.";
+        case State::BlockTooLarge:
+            return "Not running: the audio buffer is longer than the model's safety margin (it adapts within a second).";
+        case State::InvalidModel:
+        case State::PrepareFailed:
+        case State::Empty:
+            break;
+    }
+    return juce::String ("Not running: ") + flub::neuralSlotReason (s.state);
+}
 
 void EngineController::presetChangedByUser (int strip)
 {

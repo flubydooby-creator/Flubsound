@@ -85,6 +85,9 @@ options, --target-lufs and --format):
       --smart on|off             Smart macros (default: the preset's own
                                  "smart" flag, off without one): the content
                                  analysis scales what the macros add
+      --neural voice-cleanup|off process / batch: the experimental neural voice
+                                 cleanup (speech in noise) in the chain's
+                                 neural slot; 48 kHz input only, adds 20 ms
   -f, --format f32|pcm24|pcm16   output sample format (default f32; PCM is
                                  TPDF dithered)
       --block N                  processing block size (default 512)

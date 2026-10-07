@@ -12,12 +12,14 @@
 // The model consumes fixed frames of audio and produces a *control frame*
 // (docs/09 §1.1: prefer control signals over raw audio): numControls floats
 // per model frame that the existing DSP applies, so artefacts stay bounded
-// and the chain's limiter still guarantees the ceiling. Today the controls
-// are linear gains (see ControlKind); per-band gains need a band-split
-// renderer and are the next kind to add.
+// and the chain's limiter still guarantees the ceiling. The controls are
+// linear gains (see ControlKind): broadband, per channel, or per frequency
+// band (BandGains: AsyncModelProcessor's STFT renderer, flub/neural/BandGains.h).
 //
-// No ONNX Runtime and no trained model ship yet. flub/neural/ReferenceRunners.h
-// has stand-ins (identity, constant gain, always failing) for tests and hosts.
+// Runners: flub/neural/ReferenceRunners.h has stand-ins (identity, constant
+// gain, always failing) for tests and hosts; flub/neural/VoiceCleanupRunner.h
+// is the first real model (the in-house TinyNet runtime, flub/neural/TinyNet.h,
+// with trained weights; no third-party inference runtime).
 #pragma once
 
 namespace flub
@@ -28,12 +30,18 @@ namespace flub
 enum class ControlKind : int
 {
     BroadbandGain = 0, // control[0] scales every channel (numControls >= 1; the rest are ignored)
-    ChannelGains = 1   // control[c] scales output channel c; channels beyond numControls use the last one
+    ChannelGains = 1,  // control[c] scales output channel c; channels beyond numControls use the last one
+    BandGains = 2      // control[b] scales frequency band b of every channel: an STFT with hop frameSize and a
+                       // 2 * frameSize Vorbis window (zero-padded to fftSize), bin gains interpolated linearly
+                       // between bandCentresHz (numControls >= 2). Unity gains reconstruct the input exactly; the
+                       // renderer adds one frame of latency (L = frameSize * (2 + safetyFrames)), and a change of
+                       // the controls is crossfaded by the overlapping windows over one frame instead of controlRampMs
 };
 
 /** Upper bounds a description must respect (AsyncModelProcessor stays inert otherwise). */
 inline constexpr int kMaxModelFrameSize = 16384;
 inline constexpr int kMaxModelControls = 256;
+inline constexpr int kMaxModelFftSize = 32768;
 
 /** What a model consumes and produces. Constant for the runner's lifetime. */
 struct ModelDescription
@@ -54,6 +62,14 @@ struct ModelDescription
     /** The rate the model was trained for; 0 = any. At a different processing
         rate the processor keeps its latency but does not run the model. */
     double sampleRate = 0.0;
+
+    /** BandGains only: the FFT size (a power of two, 2 * frameSize ..
+        kMaxModelFftSize) and numControls band centre frequencies in Hz
+        (finite, >= 0, strictly increasing; a bin below the first centre takes
+        the first band's gain, one at or above the last centre the last band's),
+        in storage that outlives the runner (e.g. a static array). */
+    int fftSize = 0;
+    const float* bandCentresHz = nullptr;
 };
 
 class ModelRunner

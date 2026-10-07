@@ -16,6 +16,7 @@ compile_commands.json
 # Test / render artefacts
 *.wav
 !presets/**/*.wav
+!tests/data/neural/*.wav
 /renders/
 *.whl
 __pycache__/

@@ -13,6 +13,9 @@ set_tests_properties(flub_soak_levels PROPERTIES LABELS "slow;soak" TIMEOUT 900)
 target_compile_definitions(flub_tests PRIVATE FLUB_PRESET_DIR="${PROJECT_SOURCE_DIR}/presets/factory")
 target_compile_definitions(flub_tests PRIVATE FLUB_DEVICE_PROFILES="${PROJECT_SOURCE_DIR}/presets/devices/device-profiles.json")
 target_compile_definitions(flub_tests PRIVATE FLUB_ENDPOINT_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/data/endpoint-names-corpus.txt")
+# The neural voice cleanup model and its held-out quality-floor clip (tools/neural/, docs/03 §16).
+target_compile_definitions(flub_tests PRIVATE FLUB_NEURAL_MODEL_FILE="${PROJECT_SOURCE_DIR}/presets/neural/voice-cleanup.fnn")
+target_compile_definitions(flub_tests PRIVATE FLUB_NEURAL_TEST_CLIP="${CMAKE_CURRENT_SOURCE_DIR}/data/neural/voice-cleanup-clip.wav")
 
 # platform/windows/driver/FlubVirtualAudioShared.h (driver <-> engine ABI) is
 # plain C that needs no Windows headers outside kernel mode:

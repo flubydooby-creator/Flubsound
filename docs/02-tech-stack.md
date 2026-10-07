@@ -27,7 +27,7 @@
 | CI | **GitHub Actions**: Linux GCC/Clang (+ sanitizers), Windows MSVC, macOS; JUCE app + plug-in builds; headless screenshots | Azure Pipelines, Jenkins | Matrix builds on all target OSes at no infrastructure cost. |
 | Packaging (planned) | Windows: **WiX 4 MSI** + signed driver package; macOS: signed + notarised `.pkg`; Linux: `.deb`/`.rpm` + Flatpak | Inno Setup, MSIX, DMG-only | Drivers and HAL plug-ins need privileged installers. MSIX cannot install kernel drivers. Today only `cmake --install` exists (CLI + factory presets). |
 | Crash reporting (planned) | **Crashpad** (Apache-2.0) / Sentry Native (MIT), opt-in | BugSplat, custom minidumps | Symbolicated crashes across three OSes. Opt-in to respect privacy. |
-| Neural (roadmap) | **ONNX Runtime** (MIT) with DirectML / CoreML / CPU execution providers | TensorFlow Lite, LibTorch | Small runtime, hardware acceleration on every target, and a model format every framework can export. |
+| Neural | **TinyNet**, in-house (`core/include/flub/neural/TinyNet.h`): Dense / Conv1D / GRU in plain C++, its own `.fnn` format; models trained with numpy (`tools/neural/`). Roadmap for larger models: **ONNX Runtime** (MIT) with DirectML / CoreML / CPU execution providers | ONNX Runtime now, TensorFlow Lite, LibTorch | No third-party dependency in the core and an allocation-free, deterministic real-time path for small recurrent models (the voice cleanup has 51 k parameters, 27 µs per 5 ms frame); ONNX Runtime later for models that need hardware acceleration or layers TinyNet lacks. |
 
 ---
 

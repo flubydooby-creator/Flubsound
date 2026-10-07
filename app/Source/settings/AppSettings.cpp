@@ -57,6 +57,7 @@ constexpr const char* tournamentMode = "tournament.mode";
 constexpr const char* tournamentAuto = "tournament.auto";
 constexpr const char* chatDuck = "chat.duck";
 constexpr const char* chatDuckDepth = "chat.duckDepthDb";
+constexpr const char* chatNeuralCleanup = "chat.neuralCleanup";
 constexpr const char* schemaVersion = "settings.schemaVersion";
 } // namespace Keys
 
@@ -1153,6 +1154,8 @@ float AppSettings::getChatDuckDepthDb() const
     return std::isfinite (depth) ? std::clamp (depth, 3.0f, 6.0f) : 4.5f;
 }
 void AppSettings::setChatDuckDepthDb (float depthDb) { properties->setValue (Keys::chatDuckDepth, depthDb); }
+bool AppSettings::getChatNeuralCleanup() const { return properties->getBoolValue (Keys::chatNeuralCleanup, false); }
+void AppSettings::setChatNeuralCleanup (bool on) { properties->setValue (Keys::chatNeuralCleanup, on); }
 
 // ---- Hearing (docs/11 E32 (c), E34) ----------------------------------------------------
 namespace

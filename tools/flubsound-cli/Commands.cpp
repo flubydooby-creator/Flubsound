@@ -146,6 +146,8 @@ std::string describeSettings (const ResolvedParameters& p, const RenderOptions& 
     s += " (drive " + formatParameterValue (MaxDriveDb, val (MaxDriveDb)) + ", ceiling " + fmt ("%.1f dBTP", val (MaxCeilingDb)) + ")";
     if (p.smart)
         s += ", Smart macros on";
+    if (o.neuralVoiceCleanup)
+        s += ", neural voice cleanup (experimental)";
     if (o.targetLufs)
         s += ", target " + fmt ("%.1f LUFS", *o.targetLufs);
     s += ", output " + std::string (sampleFormatName (o.format)) + "\n";
@@ -192,6 +194,7 @@ json::Value renderInfoJson (const RenderResult& rr, const RenderOptions& o, cons
     json::Value r;
     r.set ("preset", p.presetDescription);
     r.set ("smartMacros", p.smart);
+    r.set ("neuralVoiceCleanup", o.neuralVoiceCleanup);
     r.set ("passes", rr.passes);
     r.set ("latencySamples", rr.latencySamples);
     r.set ("latencyMs", std::round (1.0e5 * rr.latencySamples / sampleRate) / 100.0);
@@ -275,6 +278,7 @@ RenderSettings makeRenderSettings (const RenderOptions& o, const ResolvedParamet
     rs.targetLufs = o.targetLufs;
     rs.protection = o.protection;
     rs.smartMacros = p.smart;
+    rs.neuralVoiceCleanup = o.neuralVoiceCleanup;
     if (o.ceilingDb || o.targetLufs)
         rs.verifyCeilingDb = p.values[static_cast<size_t> (param::MaxCeilingDb)];
     return rs;

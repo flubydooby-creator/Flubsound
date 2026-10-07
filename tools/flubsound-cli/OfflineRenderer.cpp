@@ -4,6 +4,7 @@
 #include "flub/common/Math.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
+#include "flub/neural/VoiceCleanupRunner.h"
 
 #include <algorithm>
 #include <chrono>
@@ -222,7 +223,8 @@ bool checkRenderable (const io::AudioFileData& input, std::string& error)
 
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
-                 const std::atomic<bool>* abort, RenderStats* stats, ProtectionStrength protection, bool smartMacros)
+                 const std::atomic<bool>* abort, RenderStats* stats, ProtectionStrength protection, bool smartMacros,
+                 bool neuralVoiceCleanup)
 {
     if (! checkRenderable (input, error))
         return false;
@@ -246,7 +248,20 @@ bool renderPass (const io::AudioFileData& input, const std::vector<float>& value
     auto chain = std::make_unique<ProcessingChain> (*store);
     chain->setProtectionStrength (protection);
     chain->setSmartMacros (smartMacros);
+    if (neuralVoiceCleanup)
+    {
+        NeuralSlotConfig neural;
+        neural.context = ModelContext::Offline; // the model runs inside process(): every frame gets its result
+        neural.processor.safetyFrames = 2;      // the app's latency (960 samples at 48 kHz)
+        chain->setNeuralModel (std::make_unique<VoiceCleanupRunner>(), neural);
+    }
     chain->prepare ({ input.sampleRate, blockSize, chainChannels });
+    if (neuralVoiceCleanup && chain->getNeuralStatus().state != NeuralSlotState::Active)
+    {
+        error = std::string ("--neural voice-cleanup: ") + neuralSlotReason (chain->getNeuralStatus().state)
+              + (input.sampleRate != VoiceCleanupRunner::kSampleRate ? " The model runs at 48 kHz only." : "");
+        return false;
+    }
     const int latency = chain->getLatencySamples();
     latencySamples = latency;
 
@@ -329,7 +344,7 @@ bool renderFile (const io::AudioFileData& input, const std::vector<float>& baseV
         const auto t0 = Clock::now();
         int latency = 0;
         const bool ok = renderPass (input, values, settings.blockSize, out, latency, error, settings.abort, &currentStats, settings.protection,
-                                    settings.smartMacros);
+                                    settings.smartMacros, settings.neuralVoiceCleanup);
         renderSeconds += std::chrono::duration<double> (Clock::now() - t0).count();
         if (! ok)
             return false;

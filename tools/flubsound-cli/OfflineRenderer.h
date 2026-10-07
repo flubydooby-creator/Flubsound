@@ -79,6 +79,11 @@ struct RenderSettings
     std::optional<float> verifyCeilingDb;  // hold (maximizer on) / report a true peak above this
     ProtectionStrength protection = ProtectionStrength::Off; // ProcessingChain::setProtectionStrength
     bool smartMacros = false; // ProcessingChain::setSmartMacros (docs/11 E34: a preset's "smart" flag)
+    // The neural voice cleanup model in the chain's neural slot (offline
+    // context, 2 safety frames: 960 samples at 48 kHz; docs/03 §16). The
+    // render fails with the slot's reason when the model cannot run (only
+    // 48 kHz input).
+    bool neuralVoiceCleanup = false;
     // Optional: another thread sets it to stop the render between blocks
     // (renderFile / renderPass then fail with kAbortedError). The CLI leaves
     // it null; the app's Export / batch job uses it to quit without waiting.
@@ -197,9 +202,11 @@ bool writeRender (const std::string& path, io::SampleFormat format, RenderResult
     2 planar channels of input length. A non-null `abort` is polled once per
     block (see RenderSettings::abort); a non-null `stats` receives the pass's
     statistics; `protection` is the chain's protection strength and
-    `smartMacros` its Smart macros switch (docs/11 E34). */
+    `smartMacros` its Smart macros switch (docs/11 E34); `neuralVoiceCleanup`
+    installs the voice cleanup model (RenderSettings::neuralVoiceCleanup). */
 bool renderPass (const io::AudioFileData& input, const std::vector<float>& values, int blockSize,
                  std::vector<std::vector<float>>& outStereo, int& latencySamples, std::string& error,
                  const std::atomic<bool>* abort = nullptr, RenderStats* stats = nullptr,
-                 ProtectionStrength protection = ProtectionStrength::Off, bool smartMacros = false);
+                 ProtectionStrength protection = ProtectionStrength::Off, bool smartMacros = false,
+                 bool neuralVoiceCleanup = false);
 } // namespace flub::cli

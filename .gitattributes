@@ -1,0 +1,3 @@
+# Binary data: never touch line endings.
+*.fnn binary
+*.wav binary

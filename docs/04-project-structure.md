@@ -41,10 +41,11 @@
 | `tests/app/` | App-level tests: the app's own sources with a fake audio device, a fake per-app router and headless views | `flub_app_tests` (one CTest test, `flub_app_tests`) | with the app (`FLUB_BUILD_APP=ON`, `FLUB_BUILD_APP_TESTS=ON`) | `flub_core`, JUCE 9.0.2, the app's sources |
 | `tools/flubsound-cli/` | Batch processor, loudness analyser, parameter and preset browser | `flubsound-cli` | yes (`FLUB_BUILD_TOOLS=ON`) | `flub_core` |
 | `tools/scripts/` | Generator for the embedded device-profile database; all-preset render diff; quality-target report; soak matrix | — (run by hand) | — | Python 3 (standard library) |
+| `tools/neural/` | Synthetic data, training, export and evaluation of the neural voice cleanup model (docs/03 §16) | — (run by hand) | — | Python 3, numpy |
 | `app/` | JUCE desktop app: engine host, GUI, tray, hotkeys, presets, settings, platform services | `FlubsoundPro`, `FlubsoundPresets` (BinaryData) | no (`FLUB_BUILD_APP=OFF`) | `flub_core`, JUCE 9.0.2, OS SDKs |
 | `plugin/` | VST3 / AU / Standalone wrapper around one `ProcessingChain` | `FlubsoundFX` + per-format wrappers | no (`FLUB_BUILD_PLUGIN=OFF`) | `flub_core`, JUCE 9.0.2 |
 | `platform/` | Virtual-device designs, a shared driver header, PipeWire scripts and configs | — (not built) | — | — |
-| `presets/` | 31 factory presets and the device-profile database (JSON) | embedded by `FlubsoundPresets` / installed by `flubsound-cli` | — | — |
+| `presets/` | 31 factory presets, the device-profile database (JSON) and the neural voice cleanup model (`neural/voice-cleanup.fnn`, embedded in `flub_core`) | embedded by `FlubsoundPresets` / installed by `flubsound-cli` | — | — |
 | `docs/` | The design deliverables and screenshots | — | — | — |
 | `.github/workflows/ci.yml` | CI: core matrix, sanitizers, RTSan, app + plug-in | — | — | — |
 | `.clang-format`, `.editorconfig`, `.gitignore` | Formatting and editor rules; ignores for build trees and renders | — | — | — |
@@ -63,7 +64,8 @@ Flubsound/
 ├── CONTRIBUTING.md                         build & test, the real-time contract, style, adversarial review checklist, preset rules
 ├── .clang-format                           house style (LLVM base, Allman, 4 spaces, SpaceBeforeParens: Always, 140 columns)
 ├── .editorconfig                           UTF-8, LF, 4-space indent (2 for JSON/YAML), trim trailing whitespace except in *.md
-├── .gitignore                              build trees, IDE folders, *.wav (except presets/**/*.wav), /renders/
+├── .gitattributes                          *.fnn and *.wav are binary (no line-ending conversion)
+├── .gitignore                              build trees, IDE folders, *.wav (except presets/**/*.wav and tests/data/neural/*.wav), /renders/
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                          jobs: core (4 compilers), sanitizers (ASan+UBSan), rtsan (Clang 20), fuzz (libFuzzer, 30 s per target), app + plugin (3 OSes, flub_app_tests, headless screenshots, test installers, pluginval)
@@ -140,8 +142,11 @@ Flubsound/
 │   │   │   ├── PersonalProfile.h           the personal per-ear profile (gain, balance, 8 bands), its design, the per-ear stage and its file format (docs/11 E33)
 │   │   │   ├── MeterBus.h                  audio → GUI telemetry atomics; AnalyzerTaps (pre/post SPSC rings, 1 << 15 samples)
 │   │   │   └── DeviceProfiles.h            flub::device: headset profile database, connection detection, ceiling caps, advice
-│   │   ├── neural/                         neural extension point (docs/09 §1.1), run by ProcessingChain's neural slot; no inference runtime, no model
-│   │   │   ├── ModelRunner.h               model interface: describe() (frame size, channels, control frame), prepare / reset / run on the worker
+│   │   ├── neural/                         neural extension point (docs/09 §1.1), run by ProcessingChain's neural slot; the TinyNet runtime and the first model (docs/03 §16)
+│   │   │   ├── ModelRunner.h               model interface: describe() (frame size, channels, control frame, BandGains layout), prepare / reset / run on the worker
+│   │   │   ├── TinyNet.h                   the in-house inference runtime: Dense / Conv1D / GRU, the .fnn format and its validation, allocation-free run()
+│   │   │   ├── BandGains.h                 the BandGains window (Vorbis) and band <-> bin weights shared by a model's features and the renderer
+│   │   │   ├── VoiceCleanupRunner.h        the neural voice cleanup model (experimental): features, TinyNet, gain floor / release, telemetry
 │   │   │   ├── FrameQueue.h                wait-free SPSC queue of fixed-size float frames with a sequence header
 │   │   │   ├── AsyncModelProcessor.h       Processor: runs a ModelRunner on one worker thread behind latency frameSize × (1 + safetyFrames); miss / failure fallback
 │   │   │   ├── Eligibility.h               isEligible (latency profile, model latency, rate, realtime / offline)
@@ -197,7 +202,10 @@ Flubsound/
 │       │   ├── StartleGuard.cpp
 │       │   └── Protection.cpp
 │       ├── neural/
-│       │   ├── AsyncModelProcessor.cpp     frame capture, boundary bookkeeping, fallback ramps, polling worker loop
+│       │   ├── AsyncModelProcessor.cpp     frame capture, boundary bookkeeping, fallback ramps, polling worker loop, the BandGains STFT renderer
+│       │   ├── TinyNet.cpp                 file parsing (CRC-32, limits, int8 dequantisation) and inference
+│       │   ├── VoiceCleanupRunner.cpp
+│       │   ├── VoiceCleanupModelData.cpp   GENERATED from presets/neural/voice-cleanup.fnn by tools/neural/train_voice_cleanup.py. Do not edit by hand.
 │       │   ├── Eligibility.cpp
 │       │   └── ReferenceRunners.cpp
 │       └── io/
@@ -208,7 +216,7 @@ Flubsound/
 │           └── WavFile.cpp
 │
 ├── tests/                                  flub_tests: one executable, zero dependencies
-│   ├── CMakeLists.txt                      globs tests/*.cpp; defines FLUB_PRESET_DIR and FLUB_DEVICE_PROFILES; adds platform/windows/driver to the include path and, except on MSVC, test_driver_shared_c.c as C89; compiles the tools/flubsound-cli sources except main.cpp
+│   ├── CMakeLists.txt                      globs tests/*.cpp; defines FLUB_PRESET_DIR, FLUB_DEVICE_PROFILES, FLUB_NEURAL_MODEL_FILE and FLUB_NEURAL_TEST_CLIP; adds platform/windows/driver to the include path and, except on MSVC, test_driver_shared_c.c as C89; compiles the tools/flubsound-cli sources except main.cpp
 │   ├── TestFramework.h                     TEST_CASE / CHECK / REQUIRE / CHECK_NEAR / CHECK_LE / CHECK_GE, AllocationGuard
 │   ├── TestMain.cpp                        runner (substring filter, exit code = failed cases), counting global operator new
 │   ├── TestSignals.h                       sine / whiteNoise / rms / peakAbs / toDb / measureGainDb helpers, Planar buffer, processInBlocks
@@ -244,6 +252,7 @@ Flubsound/
 │   │   ├── test_app_ui_simple_view.cpp docs/11 E39 / E38: the Simple view by default and kept, layouts 800 × 560 .. 2560 × 1440, headset status, chips
 │   │   ├── RoutingTestFakes.h              fake AppAudioRouter / captures shared by the E47 / E55 routing tests
 │   │   ├── test_app_device_selection.cpp   docs/11 E51: endpoint identities, explicit output selection, hot-plug on another USB port, sleep / resume, exclusive-mode retries, the safe speaker profile
+│   │   ├── test_app_neural_cleanup.cpp     docs/03 §16: the Chat strip's neural voice cleanup switch: off by default, Active (+960 samples on Chat only), Low Latency / 44.1 kHz reasons, the Settings switch, persisted
 │   │   ├── test_app_onboard_cap.cpp        docs/11 E16: "Headset enhancement is ON" per output endpoint (applied / removed by device changes, persisted, found after a "2- " re-plug), the banner offer, Settings › Audio, the CAPPED chips
 │   │   ├── test_app_diagnostics.cpp        docs/11 E54: redaction, the rotating log, engine events, crash reports (forked child), the session log, the diagnostics zip
 │   │   ├── test_app_update_check.cpp       docs/11 E54: semver order, a fake release feed (newer / same / older / beta-only), malformed feeds refused, nothing runs while off
@@ -283,6 +292,9 @@ Flubsound/
 │   ├── test_maximizer.cpp                  LoudnessMaximizer
 │   ├── test_transparency.cpp               top-octave transparency of the oversampled clipper and saturator
 │   ├── test_noise_gate.cpp                 SpectralNoiseGate
+│   ├── test_tinynet.cpp                    TinyNet against numpy reference outputs, corrupt model files, allocation-free deterministic inference; the voice cleanup's embedded model and front end
+│   ├── test_voice_cleanup.cpp              BandGains renderer (unity null, gains on their window, fallback); the voice cleanup on the worker, in the chain, its cost and a quality floor
+│   ├── neural_reference_data.h             GENERATED by tools/neural/train_voice_cleanup.py: numpy reference outputs for test_tinynet.cpp
 │   ├── test_neural.cpp                     AsyncModelProcessor on its real worker thread with scripted stand-in models; eligibility rule
 │   ├── test_neural_slot.cpp                ProcessingChain's neural slot: empty = unchanged, latency + L when eligible, ineligible / failing models kept out, ceiling, bypass
 │   ├── test_loudness_meter.cpp             LoudnessMeter and LoudnessFollower (EBU Tech 3341 / 3342 cases)
@@ -292,6 +304,7 @@ Flubsound/
 │   ├── test_distortion.cpp                 measured THD+N: estimator vs harmonic analysis, in-stage readings, block-size independence, DistortionMonitor, SafetyGovernor on measured distortion; the bass harmonics / air exciter readings, kept out of the governor
 │   ├── test_factory_presets.cpp            every presets/factory/*.json: metadata (unique uuid), keys, protection rules, render below the ceiling
 │   ├── test_device_profiles.cpp            DeviceProfiles, and embedded copy == presets/devices/device-profiles.json; the endpoint-name corpus and generic tokens (docs/11 E16)
+│   ├── data/neural/voice-cleanup-clip.wav  2 s held-out speech (channel 0) and fan noise (channel 1) at 5 dB SNR, the quality-floor clip
 │   ├── data/endpoint-names-corpus.txt      130 Windows / macOS / PipeWire endpoint names with their expected profile (docs/11 E16), read by test_device_profiles.cpp
 │   ├── test_onboard_cap.cpp                docs/11 E16: the headset enhancement cap (MacroMap clamp, the null against Footsteps / Detail 30, the glide, click-free switching, MeterBus)
 │   ├── test_mix_engine_sidechain.cpp       docs/11 E22: VoiceActivity, ChatDucker, the MixEngine chat duck, the Game ceiling offset, ChatMix, the engine swap
@@ -331,7 +344,7 @@ Flubsound/
 │   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild and the content / suggest sections (docs/11 E60 / E53 / E24 / E34)
 │   ├── test_content_analysis.cpp           docs/11 E34: ContentAnalysis readings, block-size independence, the Smart law, Smart Punch on a limited master, bit-identity, the preset flag
 │   ├── test_cli_quality.cpp                tests/quality_targets.json and the KNOWN_GAP ratchet of `flubsound-cli quality` (docs/11 E59), hygiene metrics' meta-validation
-│   ├── test_cli_demo.cpp                   flubsound-cli demo: every pair written, the 62-pair list, matched within 0.5 LU unless a level feature, index band deltas = analyze, deterministic across worker counts, --input
+│   ├── test_cli_demo.cpp                   flubsound-cli demo: every pair written, the 63-pair list, matched within 0.5 LU unless a level feature, index band deltas = analyze, deterministic across worker counts, --input
 │   ├── test_cli_ctl.cpp                    flubsound-cli ctl (docs/11 E56): argument rules, the wire format, client against server, a stale socket replaced, a writable folder refused
 │   ├── test_cli_stats.cpp                  --protection off|normal|strict and render.stats' governor state / reasons (docs/11 E06)
 │   ├── quality_targets.json                named `quality` settings and metric rows with targets, per-profile / per-rate rows, recorded KNOWN_GAP values per compiler (docs/11 E59)
@@ -344,7 +357,7 @@ Flubsound/
 │   │   ├── CMakeLists.txt                  explicit source list, FLUB_CLI_VERSION, FLUB_SOURCE_PRESET_DIR, install rules
 │   │   ├── main.cpp                        command-line parsing, help text and dispatch; exit codes 0 / 1 / 2
 │   │   ├── Commands.{h,cpp}                process / batch / analyze / quality / params / presets: render-and-write glue, batch folder walk, worker pool, per-file reports
-│   │   ├── Demo.{h,cpp}                    demo: the by-ear pack, 61 loudness-matched before / after WAV pairs (every macro, Boost steps, the module cards, factory presets, and the app's own settings rendered through its `MixEngine`) on built-in music / speech / game (and 7.1, speech-over-hiss, loud-master, game + voice) programmes or --input, and index.txt (settings, band deltas as analyze reads them, readouts, what to listen for)
+│   │   ├── Demo.{h,cpp}                    demo: the by-ear pack, 63 loudness-matched before / after WAV pairs (every macro, Boost steps, the module cards, factory presets, and the app's own settings rendered through its `MixEngine`) on built-in music / speech / game (and 7.1, speech-over-hiss, loud-master, game + voice) programmes or --input, and index.txt (settings, band deltas as analyze reads them, readouts, what to listen for)
 │   │   ├── Ctl.{h,cpp}                     ctl (docs/11 E56): the actions, the one-line wire format and the per-user AF_UNIX socket client / server, shared with the app's RemoteControl
 │   │   ├── Soak.{h,cpp}                    soak: the chain on a seeded streaming programme under parameter automation, watched by the discontinuity detector (docs/11 E53)
 │   │   ├── CliOptions.{h,cpp}              strict option parsing; precedence defaults → --preset → --mode → --boost/... → --set
@@ -353,6 +366,11 @@ Flubsound/
 │   │   ├── LatencyProbeCommand.{h,cpp} latency-probe generate / analyze: the loopback probe on files (docs/11 E42d)
 │   │   ├── Analysis.{h,cpp}                whole-file LUFS / LRA / true peak / sample peak / RMS with the core meters; octave bands (--bands), band tracks and events (--events), glitches, spatial metrics of binaural impulses (--spatial), the focus ILD (--focus-ild), alias / DC / ultrasonic hygiene metrics
 │   │   └── Utf8Windows.h                   Windows: UTF-8 argv (CommandLineToArgvW), environment (GetEnvironmentVariableW) and console output; pass-through elsewhere
+│   ├── neural/                             numpy-only training of the neural voice cleanup (docs/03 §16; README.md)
+│   │   ├── fvdsp.py                        feature set 1 and the BandGains renderer (the numpy twin of the C++)
+│   │   ├── fvsynth.py                      synthetic speech (source-filter) and noises (white, pink, brown, fan, keyboard, babble)
+│   │   ├── tinynet.py                      Dense / Conv1D / GRU forward and backward, Adam, int8 quantisation, the .fnn writer
+│   │   └── train_voice_cleanup.py          generate / train / export / evaluate / card
 │   └── scripts/
 │       ├── embed-device-profiles.py        regenerates core/src/engine/DeviceProfilesData.cpp from the JSON (≤ 16000 bytes); --check only verifies
 │       ├── preset-render-diff.py           renders every factory preset on pinned programmes with flubsound-cli and diffs the results against tests/golden (docs/11 E59)
@@ -479,8 +497,11 @@ Flubsound/
 │   │   ├── music-*.json                    12 Music presets
 │   │   ├── gaming-*.json                   9 Gaming presets
 │   │   └── device-*.json                   3 Device presets
-│   └── devices/
-│       └── device-profiles.json            headset / output-device profiles (8 profiles; source of truth for the embedded copy)
+│   ├── devices/
+│   │   └── device-profiles.json            headset / output-device profiles (8 profiles; source of truth for the embedded copy)
+│   └── neural/
+│       ├── voice-cleanup.fnn               the neural voice cleanup model (TinyNet format 1, int8; source of truth for the embedded copy)
+│       └── voice-cleanup.model.json        its model card: architecture, data, training, evaluation
 │
 └── docs/
     ├── 00-understanding-and-plan.md        scope, requirement IDs, interpretation decisions, delivery plan
@@ -577,7 +598,7 @@ The `include/flub/` sub-folders form a strict hierarchy. The `#include` graph wa
    3    engine/*                          common/*, dsp/*, analysis/*, engine/*,
                                           io/Json.h (engine/DeviceProfiles.h only; DeviceProfiles.cpp also io/FilePath.h),
                                           neural/* (engine/ProcessingChain.h only: the neural slot)
-   3    neural/*                          common/*, dsp/Processor.h, neural/*, engine/Parameters.h (neural/Eligibility.h only)
+   3    neural/*                          common/*, dsp/Processor.h, dsp/Fft.h, neural/*, engine/Parameters.h (neural/Eligibility.h only)
    4    io/PresetIO.h                     engine/Parameters.h, io/Json.h (PresetIO.cpp also io/FilePath.h)
    2    io/ParametricEqText.h             dsp/DeviceCorrection.h (ParametricEqText.cpp also io/Json.h)
 ```
@@ -1039,7 +1060,7 @@ cmake -S . -B build-asan -G Ninja -DCMAKE_CXX_COMPILER=clang++ -DFLUB_SANITIZE=O
   - `test_personal_profile.cpp`: docs/11 E33 - `PersonalProfile`: ranges, balance and the 12 dB ear-difference cap, per-ear magnitude at the audiometric frequencies, the stage in the chain per ear, the ILD row through the whole chain at Boost 100 (one case each for Competitive FPS and Flubsound Signature, both placements), true peak with a +15 dB profile, the chain's measures reading the output with the stage undone, bit-identity without a profile, the crossfaded hand-over and its retry, 5 preset loads / a re-prepare / an engine swap, the JSON file;
   - `test_soak_levels.cpp`: docs/11 E21 - Late Night Low Volume within 1 LU of −20 LUFS and Podcast & Voice's speech rows, the seeded mixed programme's 20 s smoke excerpts through the four leveller presets, the first combat event after 10 s of quiet; the 10-minute run (`Soak levels (slow`) is skipped unless `FLUB_SOAK=1` (`ctest -C Soak` registers it as `flub_soak_levels`, labels `slow;soak`);
   - `test_idle_freeze.cpp`: docs/11 E45 - `MixEngine`'s idle freeze: a frozen-then-resumed strip against continuous processing (impulse, footstep, music at 44.1 / 48 / 96 kHz), the CPU of a fed-silence strip, no allocation, a strip that never falls silent bit-identical;
-  - `test_cli_demo.cpp`: `flubsound-cli demo` - the 62-pair list, every pair written (in three cases: the first 24, the chain pairs, the engine pairs), matched within 0.5 LU unless a level feature, the index's band deltas equal to `analyze`, each engine side changing what its setting changes, byte-identical across runs and worker counts, `--input`, and docs/12-feature-guide.md naming an existing pair for every entry;
+  - `test_cli_demo.cpp`: `flubsound-cli demo` - the 63-pair list, every pair written (in three cases: the first 24, the chain pairs, the engine pairs), matched within 0.5 LU unless a level feature, the index's band deltas equal to `analyze`, each engine side changing what its setting changes, byte-identical across runs and worker counts, `--input`, and docs/12-feature-guide.md naming an existing pair for every entry;
   - `test_cli_ctl.cpp`: `flubsound-cli ctl` (docs/11 E56) - argument rules and exit codes, the wire format, a client against a server, a stale socket file replaced, a group-writable folder refused;
   - `fuzz/` (not in `flub_tests`): the libFuzzer targets of docs/11 E53, built with `FLUB_BUILD_FUZZERS=ON` (Clang), each with a round-trip property beyond "no crash, no sanitizer report"; `run-fuzzers.sh` seeds them from `fuzz/corpus`, the factory presets and the device-profile database;
   - `test_rtsan.cpp`: compiles to nothing unless `FLUB_RTSAN` is on; then checks at compile time that the audio entry points carry `[[clang::nonblocking]]` and, in a forked child, that RTSan stops an allocation inside a nonblocking function.

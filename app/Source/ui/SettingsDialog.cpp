@@ -709,6 +709,14 @@ public:
             if (! refreshing)
                 controller.setChatDuck (duckToggle.getToggleState(), static_cast<float> (duckDepth.getValue()));
         };
+        // The experimental neural voice cleanup on the Chat strip (docs/03 §16).
+        Style::set (neuralToggle, "switch");
+        neuralToggle.setTitle ("Neural voice cleanup (experimental)");
+        neuralToggle.onClick = [this]
+        {
+            controller.setChatNeuralCleanup (neuralToggle.getToggleState());
+            refresh();
+        };
 
         paletteBox.addItem ("Standard (green / amber / red)", 1);
         paletteBox.addItem ("Colour-blind safe (blue / yellow / vermillion)", 2);
@@ -732,6 +740,7 @@ public:
             addAndMakeVisible (control);
         addAndMakeVisible (duckToggle);
         addAndMakeVisible (duckDepth);
+        addAndMakeVisible (neuralToggle);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,
@@ -778,6 +787,8 @@ public:
                          "footstep band is kept. Off by default; also on the Chat row of the routing panel.",
                          520);
         displayForm.row ("Duck depth", duckDepth, {}, 330);
+        displayForm.row ({}, neuralToggle, describeNeural(), 520);
+        neuralRow = displayForm.rows.size() - 1;
         displayForm.section ("Display");
         displayForm.row ("Meter colours", paletteBox, {}, 330);
         refresh();
@@ -802,6 +813,13 @@ public:
             duckDepth.setValue (controller.getChatDuckDepthDb(), juce::dontSendNotification);
         }
         duckDepth.setEnabled (controller.getChatDuck());
+        neuralToggle.setToggleState (controller.getChatNeuralCleanup(), juce::dontSendNotification);
+        if (const auto text = describeNeural(); text != displayForm.rows[neuralRow].help)
+        {
+            displayForm.rows[neuralRow].help = text;
+            resized();
+            repaint();
+        }
         preampToggle.setButtonText ("Automatic preamp on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
         preampHotToggle.setButtonText ("... also on hot programme (" + controller.getStripName (controller.getSelectedStrip()) + " strip)");
         preampHotToggle.setEnabled (controller.getSelectedParams().get (AutoPreampOn) >= 0.5f);
@@ -947,6 +965,15 @@ private:
                "system cannot see.";
     }
 
+    /** The neural voice cleanup row's help: what it is and, live, its status (docs/03 §16). */
+    juce::String describeNeural() const
+    {
+        return "Experimental. A small neural network, trained by Flubsound on synthetic speech, turns down steady noise, hum, "
+               "typing and background voices between and under the words of the voices on the Chat strip (per frequency band, "
+               "never a hard gate). Adds 20 ms to the Chat strip only, at 48 kHz in Balanced or Quality. Off by default. "
+               + controller.describeChatNeuralCleanup();
+    }
+
     juce::String describeReduction() const
     {
         const auto text = controller.describeLoadReduction();
@@ -974,6 +1001,8 @@ private:
     juce::ToggleButton smartToggle { "Smart macros" }; // docs/11 E34
     juce::ToggleButton duckToggle { "Duck game under voice chat" }; // docs/11 E22
     juce::Slider duckDepth;
+    juce::ToggleButton neuralToggle { "Neural voice cleanup on the Chat strip (experimental)" }; // docs/03 §16
+    size_t neuralRow = 0;
     juce::ToggleButton contourToggle { "Loudness contour" }, followToggle { "Follow the system volume" };
     juce::Slider referenceSlider;
     juce::TextButton useVolumeButton { "Use current volume" };

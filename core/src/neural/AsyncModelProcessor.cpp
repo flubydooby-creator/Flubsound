@@ -34,13 +34,35 @@ constexpr int kMaxPollMicroseconds = 100000;
 // so a worker that is merely late never finds the result queue full.
 constexpr int kQueueSlackFrames = 4;
 
+bool isValidBandLayout (const ModelDescription& d) noexcept
+{
+    const bool powerOfTwo = d.fftSize > 0 && (d.fftSize & (d.fftSize - 1)) == 0;
+    if (! powerOfTwo || d.fftSize < 2 * d.frameSize || d.fftSize > kMaxModelFftSize || d.numControls < 2 || d.bandCentresHz == nullptr)
+        return false;
+    for (int b = 0; b < d.numControls; ++b)
+    {
+        const float c = d.bandCentresHz[b];
+        if (! std::isfinite (c) || c < 0.0f || (b > 0 && c <= d.bandCentresHz[b - 1]))
+            return false;
+    }
+    return true;
+}
+
 bool isValid (const ModelDescription& d) noexcept
 {
-    return d.frameSize >= 1 && d.frameSize <= kMaxModelFrameSize
-        && d.numInputChannels >= 1 && d.numInputChannels <= kMaxChannels
-        && d.numControls >= 1 && d.numControls <= kMaxModelControls
-        && (d.controlKind == ControlKind::BroadbandGain || d.controlKind == ControlKind::ChannelGains)
-        && std::isfinite (d.sampleRate) && d.sampleRate >= 0.0;
+    const bool basics = d.frameSize >= 1 && d.frameSize <= kMaxModelFrameSize
+                     && d.numInputChannels >= 1 && d.numInputChannels <= kMaxChannels
+                     && d.numControls >= 1 && d.numControls <= kMaxModelControls
+                     && std::isfinite (d.sampleRate) && d.sampleRate >= 0.0;
+    if (! basics)
+        return false;
+    switch (d.controlKind)
+    {
+        case ControlKind::BroadbandGain:
+        case ControlKind::ChannelGains: return true;
+        case ControlKind::BandGains: return isValidBandLayout (d);
+    }
+    return false;
 }
 } // namespace
 
@@ -61,8 +83,11 @@ AsyncModelProcessor::AsyncModelProcessor (std::unique_ptr<ModelRunner> r, const 
     if (descriptionValid)
     {
         frameSize = desc.frameSize;
-        latency = frameSize * (1 + config.safetyFrames);
-        activeControls = desc.controlKind == ControlKind::BroadbandGain ? 1 : std::min (desc.numControls, kMaxChannels);
+        bandGains = desc.controlKind == ControlKind::BandGains;
+        // BandGains: the renderer's overlap-add adds one frame (see the header).
+        latency = frameSize * ((bandGains ? 2 : 1) + config.safetyFrames);
+        lineLength = bandGains ? frameSize * config.safetyFrames : latency;
+        activeControls = desc.controlKind == ControlKind::ChannelGains ? std::min (desc.numControls, kMaxChannels) : 1;
         inputFloats = desc.numInputChannels * frameSize;
     }
 }
@@ -81,7 +106,24 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
         return;
 
     numChannels = std::clamp (s.numChannels, 1, kMaxChannels);
-    delayBuffer.assign (static_cast<size_t> (numChannels) * static_cast<size_t> (latency), 0.0f);
+    delayBuffer.assign (static_cast<size_t> (numChannels) * static_cast<size_t> (lineLength), 0.0f);
+    if (bandGains)
+    {
+        const auto perChannel = static_cast<size_t> (numChannels) * static_cast<size_t> (frameSize);
+        hopIn.assign (perChannel, 0.0f);
+        prevHop.assign (perChannel, 0.0f);
+        olaTail.assign (perChannel, 0.0f);
+        hopOut.assign (perChannel, 0.0f);
+        fft.prepare (desc.fftSize);
+        fftBuffer.assign (static_cast<size_t> (desc.fftSize), 0.0f);
+        bins.assign (static_cast<size_t> (desc.fftSize / 2 + 1), Fft::Complex {});
+        binGains.assign (bins.size(), 1.0f);
+        bandTargets.assign (static_cast<size_t> (desc.numControls), 1.0f);
+        bandMap.build (desc.bandCentresHz, desc.numControls, desc.fftSize, s.sampleRate);
+        window.resize (static_cast<size_t> (2 * frameSize));
+        for (int n = 0; n < 2 * frameSize; ++n)
+            window[static_cast<size_t> (n)] = bandgains::vorbisWindow (n, 2 * frameSize);
+    }
     stagingFrame.assign (static_cast<size_t> (inputFloats), 0.0f);
     workerControls.assign (static_cast<size_t> (desc.numControls), 1.0f);
 
@@ -90,10 +132,10 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
     inQueue.allocate (queueFrames, static_cast<size_t> (inputFloats));
     outQueue.allocate (queueFrames, static_cast<size_t> (desc.numControls));
 
-    smoothers.assign (static_cast<size_t> (activeControls), LinearSmoothedValue {});
+    smoothers.assign (bandGains ? 0u : static_cast<size_t> (activeControls), LinearSmoothedValue {});
     for (auto& sm : smoothers)
         sm.reset (s.sampleRate, config.controlRampMs, 1.0f);
-    gains.assign (static_cast<size_t> (activeControls), 1.0f);
+    gains.assign (smoothers.size(), 1.0f);
 
     if (config.workerPollMicroseconds > 0)
         pollMicroseconds = config.workerPollMicroseconds;
@@ -140,6 +182,11 @@ void AsyncModelProcessor::resetAudioState() noexcept
     discontinuity = true;
     for (auto& sm : smoothers)
         sm.setImmediate (1.0f);
+    std::fill (hopIn.begin(), hopIn.end(), 0.0f);
+    std::fill (prevHop.begin(), prevHop.end(), 0.0f);
+    std::fill (olaTail.begin(), olaTail.end(), 0.0f);
+    std::fill (hopOut.begin(), hopOut.end(), 0.0f);
+    std::fill (bandTargets.begin(), bandTargets.end(), 1.0f);
 }
 
 void AsyncModelProcessor::reset() noexcept FLUB_NONBLOCKING
@@ -177,7 +224,8 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
     const int channels = std::min (block.numChannels, numChannels);
     const int modelChannels = desc.numInputChannels;
     const float downmixScale = 1.0f / static_cast<float> (std::max (1, channels));
-    const auto lineLength = static_cast<size_t> (latency);
+    const auto line = static_cast<size_t> (lineLength);
+    const auto hop = static_cast<size_t> (frameSize);
 
     for (int start = 0; start < block.numSamples;)
     {
@@ -202,21 +250,49 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
                 }
             }
 
+            const auto pos = static_cast<size_t> (delayPos);
+            if (bandGains)
+            {
+                // 2b. Delay by safetyFrames frames into the renderer's hop; output the
+                //     hop the renderer completed at the last frame boundary.
+                for (int c = 0; c < channels; ++c)
+                {
+                    float x = block.channel (c)[i];
+                    if (line > 0)
+                    {
+                        float* delayed = delayBuffer.data() + static_cast<size_t> (c) * line;
+                        const float d = delayed[pos];
+                        delayed[pos] = x;
+                        x = d;
+                    }
+                    hopIn[static_cast<size_t> (c) * hop + framePosition] = x;
+                    block.channel (c)[i] = hopOut[static_cast<size_t> (c) * hop + framePosition];
+                }
+                for (int c = channels; c < numChannels; ++c) // absent channels stay silent, not stale
+                {
+                    if (line > 0)
+                        delayBuffer[static_cast<size_t> (c) * line + pos] = 0.0f;
+                    hopIn[static_cast<size_t> (c) * hop + framePosition] = 0.0f;
+                }
+                if (line > 0)
+                    delayPos = delayPos + 1 == lineLength ? 0 : delayPos + 1;
+                continue;
+            }
+
             // 2. Advance the control ramps (one step per sample).
             for (size_t k = 0; k < gains.size(); ++k)
                 gains[k] = smoothers[k].next();
 
             // 3. Delay by exactly `latency` and apply the controls.
-            const auto pos = static_cast<size_t> (delayPos);
             for (int c = 0; c < channels; ++c)
             {
-                float* line = delayBuffer.data() + static_cast<size_t> (c) * lineLength;
-                const float delayed = line[pos];
-                line[pos] = block.channel (c)[i];
-                block.channel (c)[i] = delayed * gains[static_cast<size_t> (std::min (c, activeControls - 1))];
+                float* delayed = delayBuffer.data() + static_cast<size_t> (c) * line;
+                const float d = delayed[pos];
+                delayed[pos] = block.channel (c)[i];
+                block.channel (c)[i] = d * gains[static_cast<size_t> (std::min (c, activeControls - 1))];
             }
             for (int c = channels; c < numChannels; ++c)
-                delayBuffer[static_cast<size_t> (c) * lineLength + pos] = 0.0f; // absent channels stay silent, not stale
+                delayBuffer[static_cast<size_t> (c) * line + pos] = 0.0f; // absent channels stay silent, not stale
             delayPos = delayPos + 1 == latency ? 0 : delayPos + 1;
         }
         framePos += n;
@@ -235,6 +311,38 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
                 if (framesSinceReset > config.safetyFrames) // safetyFrames + 1 frames in: output frame 0 starts
                     consumeResult();
             }
+            if (bandGains)
+                renderBands(); // the delayed hop just completed window k - safetyFrames: its gains are in place
+        }
+    }
+}
+
+void AsyncModelProcessor::renderBands() noexcept
+{
+    const int n2 = 2 * frameSize;
+    const auto hop = static_cast<size_t> (frameSize);
+    bandMap.bandsToBins (bandTargets.data(), binGains.data());
+    for (int c = 0; c < numChannels; ++c)
+    {
+        float* in = hopIn.data() + static_cast<size_t> (c) * hop;
+        float* prev = prevHop.data() + static_cast<size_t> (c) * hop;
+        float* tail = olaTail.data() + static_cast<size_t> (c) * hop;
+        float* out = hopOut.data() + static_cast<size_t> (c) * hop;
+        for (int n = 0; n < frameSize; ++n)
+        {
+            fftBuffer[static_cast<size_t> (n)] = window[static_cast<size_t> (n)] * prev[n];
+            fftBuffer[static_cast<size_t> (frameSize + n)] = window[static_cast<size_t> (frameSize + n)] * in[n];
+        }
+        std::fill (fftBuffer.begin() + n2, fftBuffer.end(), 0.0f);
+        fft.forwardReal (fftBuffer.data(), bins.data());
+        for (size_t k = 0; k < bins.size(); ++k)
+            bins[k] *= binGains[k];
+        fft.inverseReal (bins.data(), fftBuffer.data());
+        for (int n = 0; n < frameSize; ++n)
+        {
+            out[n] = tail[n] + window[static_cast<size_t> (n)] * fftBuffer[static_cast<size_t> (n)];
+            tail[n] = window[static_cast<size_t> (frameSize + n)] * fftBuffer[static_cast<size_t> (frameSize + n)];
+            prev[n] = in[n];
         }
     }
 }
@@ -303,8 +411,7 @@ void AsyncModelProcessor::consumeResult() noexcept
         // Hold the last good controls (the current targets); from the K-th bad
         // frame in a row ramp to neutral.
         if (consecutiveBad < config.fallbackAfterFrames && ++consecutiveBad == config.fallbackAfterFrames)
-            for (auto& sm : smoothers)
-                sm.setTarget (1.0f);
+            setNeutralTargets();
     }
 
     ++neededSeq;
@@ -315,6 +422,15 @@ void AsyncModelProcessor::setTargets (const float* controls) noexcept
 {
     for (size_t k = 0; k < smoothers.size(); ++k)
         smoothers[k].setTarget (controls[k]);
+    for (size_t k = 0; k < bandTargets.size(); ++k)
+        bandTargets[k] = controls[k];
+}
+
+void AsyncModelProcessor::setNeutralTargets() noexcept
+{
+    for (auto& sm : smoothers)
+        sm.setTarget (1.0f);
+    std::fill (bandTargets.begin(), bandTargets.end(), 1.0f);
 }
 
 // ---- worker thread ----------------------------------------------------------

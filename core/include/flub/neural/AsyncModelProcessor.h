@@ -7,6 +7,7 @@
 //   every frame boundary: pop the result ◄────  push the control frame
 //     for the frame now reaching the output
 //   output = input delayed by L, times the smoothed controls
+//   (BandGains: input delayed by safetyFrames frames, then the band renderer)
 //
 // Latency. L = frameSize * (1 + safetyFrames), reported by latencySamples()
 // and constant for the processor's lifetime. The control computed from input
@@ -21,6 +22,24 @@
 // instant model (getMaxBlockSizeWithoutMisses(); ProcessingChain keeps such
 // a model out of the chain). safetyFrames = 0 is allowed but only useful in
 // offline mode: asynchronously, expect every frame to miss.
+//
+// Band gains (ControlKind::BandGains, flub/neural/BandGains.h). The controls
+// are the gains of numControls frequency bands, applied to every channel by
+// an STFT renderer on the audio thread: the input is delayed by
+// safetyFrames * frameSize, cut into hops of frameSize, and at every frame
+// boundary the last two hops are windowed (Vorbis, 2 * frameSize), zero-
+// padded to fftSize, transformed, multiplied by the bin gains interpolated
+// from the band gains, transformed back, windowed again and overlap-added.
+// The window that ends with input frame k is the one the model analysed for
+// frame k, so its gains land on exactly the spectra they were computed from.
+// Overlap-add completes a hop one frame after its second window, so
+// L = frameSize * (2 + safetyFrames); with unity gains the output is the
+// input delayed by L to within float rounding (a null below -120 dB). The
+// controls change once per frame and the overlapping windows crossfade the
+// change over one frame (controlRampMs does not apply); the fallback holds
+// the last good band gains, then sets them to unity. Cost on the audio
+// thread: one forward and one inverse real FFT of fftSize per channel per
+// frame. The model sees the same frames as with the other kinds.
 //
 // Graceful degradation. A result that is not there when its frame reaches
 // the output is a deadline miss (getDeadlineMisses()); a result whose run()
@@ -80,7 +99,9 @@
 #pragma once
 
 #include "flub/common/SmoothedValue.h"
+#include "flub/dsp/Fft.h"
 #include "flub/dsp/Processor.h"
+#include "flub/neural/BandGains.h"
 #include "flub/neural/FrameQueue.h"
 #include "flub/neural/ModelRunner.h"
 
@@ -121,6 +142,7 @@ public:
     void releaseResources() noexcept;
     void reset() noexcept FLUB_NONBLOCKING override;
     void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+    /** frameSize * (1 + safetyFrames); BandGains: frameSize * (2 + safetyFrames). */
     int latencySamples() const noexcept override { return latency; }
     const char* name() const noexcept override { return "Neural"; }
 
@@ -169,6 +191,8 @@ private:
     void runFrame (const float* frame, uint64_t seq, bool& resetPending) noexcept;
     void consumeResult() noexcept;
     void setTargets (const float* controls) noexcept;
+    void setNeutralTargets() noexcept;
+    void renderBands() noexcept; // BandGains: one frame of the STFT renderer, every channel
 
     std::unique_ptr<ModelRunner> runner;
     ModelDescription desc;
@@ -177,6 +201,8 @@ private:
     int frameSize = 0, latency = 0;
     int activeControls = 1;               // controls the audio path applies (1 for BroadbandGain)
     int inputFloats = 0;                  // numInputChannels * frameSize
+    bool bandGains = false;               // ControlKind::BandGains
+    int lineLength = 0;                   // delay line per channel: latency, or safetyFrames * frameSize for BandGains
 
     // Audio thread (and prepare / reset).
     bool prepared = false, modelActive = false;
@@ -191,6 +217,17 @@ private:
     int consecutiveBad = 0;
     std::vector<LinearSmoothedValue> smoothers; // one per active control
     std::vector<float> gains;             // per-sample smoothed gains (scratch)
+
+    // BandGains renderer (audio thread).
+    Fft fft;
+    bandgains::BandMap bandMap;
+    std::vector<float> window;            // 2 * frameSize
+    std::vector<float> hopIn, prevHop;    // per channel: the delayed hop being collected, the previous one
+    std::vector<float> olaTail, hopOut;   // per channel: overlap-add carry, the hop being output
+    std::vector<float> fftBuffer;         // fftSize
+    std::vector<Fft::Complex> bins;       // fftSize / 2 + 1
+    std::vector<float> bandTargets;       // numControls band gains in effect
+    std::vector<float> binGains;          // fftSize / 2 + 1
     FrameQueue inQueue, outQueue;
 
     // Worker thread (the calling thread in offline mode).

@@ -38,6 +38,7 @@
 | [13](#13-metering-loudness-lra-true-peak-rms-and-correlation) | Metering: loudness, LRA, true peak, RMS and correlation | `core/src/analysis/LoudnessMeter.cpp`, `core/include/flub/analysis/{PeakMeters,LoudnessFollower,ChannelWeights}.h` |
 | [14](#14-macros-musicgaming-modes--protection-loops) | Macros, Music/Gaming modes & protection loops; device correction and the headroom predictor (§14.10) | `core/src/engine/{MacroMap,ProcessingChain,Protection,MixEngine}.cpp`, `core/src/dsp/DeviceCorrection.cpp`, `core/src/io/ParametricEqText.cpp` |
 | [15](#15-chain-level-cpu-and-latency-summary) | Chain-level CPU and latency summary | `core/src/engine/{ProcessingChain,ModuleSlot,MixEngine}.cpp` |
+| [16](#16-neural-voice-cleanup-experimental) | Neural voice cleanup (experimental): the TinyNet runtime, the BandGains renderer and the first trained model | `core/src/neural/{TinyNet,VoiceCleanupRunner,AsyncModelProcessor}.cpp`, `core/include/flub/neural/BandGains.h`, `tools/neural/` |
 
 ---
 
@@ -4410,3 +4411,112 @@ Each of these is O(N) or bounded by a small constant. Planned optimisations (**r
 - SIMD across channels for the SVF cascades and the true-peak detector;
 - a real FFT (PFFFT / vDSP / IPP) for the gate;
 - a partitioned FFT convolver for long HRIRs (item 2.6).
+
+---
+
+## 16. Neural voice cleanup (experimental)
+
+Sources: [`core/include/flub/neural/TinyNet.h`](../core/include/flub/neural/TinyNet.h), [`core/src/neural/TinyNet.cpp`](../core/src/neural/TinyNet.cpp) (the runtime); [`core/include/flub/neural/BandGains.h`](../core/include/flub/neural/BandGains.h) (window and band layout); [`core/include/flub/neural/VoiceCleanupRunner.h`](../core/include/flub/neural/VoiceCleanupRunner.h), [`core/src/neural/VoiceCleanupRunner.cpp`](../core/src/neural/VoiceCleanupRunner.cpp) (the model's front end and post-processing), `core/src/neural/VoiceCleanupModelData.cpp` (the embedded weights, generated from [`presets/neural/voice-cleanup.fnn`](../presets/neural/voice-cleanup.fnn)); the `BandGains` renderer in [`core/src/neural/AsyncModelProcessor.cpp`](../core/src/neural/AsyncModelProcessor.cpp); training and evaluation in [`tools/neural/`](../tools/neural/README.md); the model card [`presets/neural/voice-cleanup.model.json`](../presets/neural/voice-cleanup.model.json). Framework: [09 §1.1](09-future-roadmap.md#11-how-a-neural-module-plugs-in-framework-tinynet-runtime-and-the-first-model); roadmap item [11 E35](11-enhancement-report.md#e35).
+
+### 16.1 Purpose
+
+An RNNoise-style speech-in-noise suppressor for the Chat strip (09 §1.2 N1): it turns down steady noise, hum, typing and background voices around and under a voice, as per-band gains that the DSP applies, never as generated audio. It is Flubsound's first trained model and is **experimental**: opt-in (Settings › Processing › *Voice chat*), off by default, trained and evaluated on synthetic data only.
+
+### 16.2 Signal flow in the chain
+
+The model sits in the Chat strip's neural slot (§15.1, 09 §1.1): after the spectral gate (Quality only) and before the EQ, AutoLevel's dynamics, the compressor and the maximizer, so the Voice Chat preset's leveller and the limiter act on the cleaned voice and the ceiling holds. `AsyncModelProcessor` collects 240-sample frames of the strip's mono downmix for its worker thread; the worker's runner computes the features, runs the network and returns 22 band gains; the processor's `BandGains` renderer applies them to both channels on the audio thread.
+
+```
+Chat strip input ─► [gate] ─► AsyncModelProcessor ─────────────────────────────► EQ ─► ... ─► maximizer
+                               │ mono frames (240)          ▲ 22 band gains / frame
+                               ▼                            │
+                    worker: Vorbis window 480 → FFT 512 → 22 band energies + voicing
+                            → TinyNet (Conv1D, GRU 48, GRU 64, 2 heads) → floor / release
+```
+
+### 16.3 Algorithm as implemented
+
+**Front end (feature set 1, 48 kHz).** Hop N = 240 (5 ms). Frame k analyses the window [previous hop, this hop] (480 samples, 10 ms) with the Vorbis power-complementary window w[n] = sin (π/2 · sin² (π (n + ½) / 480)), zero-padded to a 512-point FFT (93.75 Hz bins). 22 bands on RNNoise's layout, centres 0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 2000, 2400, 2800, 3200, 4000, 4800, 5600, 6800, 8000, 9600, 12 000, 15 600 and 20 000 Hz, with triangular weights: bin k between centres c[b] ≤ f < c[b + 1] counts (1 − frac) to band b and frac to band b + 1; a bin at or above 20 kHz belongs to the last band. Features: log10 (E_b + 10⁻¹⁰) for the 22 band energies, and a voicing strength: the signal box-decimated by 4 (12 kHz), the largest normalised autocorrelation of its last 20 ms (240 samples) at lags 30 – 180 (400 – 67 Hz), num / √(E_seg · E_ref + 10⁻⁹), at least 0.
+
+**Network (TinyNet, 51 111 parameters).** Feature normalisation is folded into the first layer's weights.
+
+| Layer | Input | Output | Activation |
+|---|---|---|---|
+| Conv1D, 3 frames (15 ms of features) | 23 features | 48 | tanh |
+| GRU | conv (48) | 48 | — |
+| Dense (voice activity) | GRU 1 (48) | 1 | sigmoid |
+| GRU | conv + GRU 1 (96) | 64 | — |
+| Dense (band gains) | GRU 1 + GRU 2 (112) | 22 | sigmoid |
+
+The GRU is the "reset after" form (z, r, n rows; n = tanh (W_n x + b_xn + r ⊙ (U_n h + b_hn))). Weights are stored as int8 with one float scale per row (dequantised once at load), biases as float32: a 56 580-byte file.
+
+**Post-processing (runner).** g_b ← max (g_b, 0.03): no band below −30.5 dB, never a hard gate; g_b ← max (g_b, 0.775 · g_b,prev): a cut deepens by at most 2.2 dB per 5 ms frame (RNNoise's 0.6 per 10 ms) and lets go at once; after a reset the previous gains are 1, so the cleanup fades in.
+
+**Renderer (`ControlKind::BandGains`).** The processor delays the input by safetyFrames × 240 samples, cuts it into hops and, at every frame boundary, windows the last two hops with the same Vorbis window, zero-pads to 512, transforms, multiplies each bin by the band gains interpolated with the same weights (bin gain = (1 − frac) g_b + frac g_b+1), transforms back, windows again and overlap-adds. The window that ends with input frame k is the one the model analysed for frame k, so its gains land on exactly those spectra (test: within 5 · 10⁻¹⁰ of the analytic crossfade). w² + w² shifted by a hop = 1, so unity gains reconstruct the input: the null is −128.9 dB. Gains change once per frame and the overlapping windows crossfade them over 5 ms. The zero-padding gives the gains' circular convolution 32 samples of room; what wraps past the 480-sample window is dropped.
+
+**Training (tools/neural/, numpy only).** 4 h of synthetic training audio (2 400 clips of 6 s): a source-filter speech synthesiser (male, female and child speakers; phrases of (C)(C)V(C) syllables with formant vowels and diphthongs, nasals, approximants, fricatives, plosives; declination, accents, question rises, jitter, shimmer, breathiness) mixed with white, pink, brown, fan (broadband + 50 / 60 Hz hum with harmonics + blade tone), keyboard typing and babble (3 – 8 voices) noise, one or two at a time, at −5 … +20 dB SNR on the speech-active frames, with a random EQ (± 6 dB) on speech and noise, levels of −42 … −18 dBFS and codec band limits (4 – 16 kHz) and low cuts; 7 % nearly clean and 4 % noise-only clips. Targets: g_b = √(E_speech / (E_speech + E_noise)) per band and a voice-activity label (speech energy within 40 dB of the clip's loudest frame, widened by two frames). Loss: 10 · mean (d² + 10 d⁴) with d = √ĝ − √g over bands with energy, plus 0.5 · binary cross-entropy of the voice activity (RNNoise's weighting). BPTT over 2 s sequences (400 frames), batch 192, Adam, cosine learning rate 2 · 10⁻³ → 10⁻⁴, 2 500 steps (192 M frames), gradient-norm clip 5, the best of 40 validation checks on 96 held-out clips (step 2 046). Synchronous data-parallel over 12 processes on the owner's i7-13700KF: data 9.5 min, training 27 min.
+
+### 16.4 Parameters
+
+None: no `ParameterStore` key, preset field or A/B bank carries it. The app's switch (`chat.neuralCleanup`, `EngineController::setChatNeuralCleanup`) installs or removes the model; the CLI's `process` / `batch --neural voice-cleanup` renders with it. The constants are the model's (frame, bands, floor 0.03, release 0.775).
+
+### 16.5 Latency & CPU
+
+- **Latency.** L = 240 × (2 + safetyFrames): one frame to collect, one for the overlap-add, and the safety frames that give the worker time (09 §1.1). The app picks safetyFrames = ⌈buffer / 240⌉: **960 samples = 20 ms** with the usual 480-sample buffer (Balanced allows two 10 ms reference frames; Low Latency does not), 1 200 samples = 25 ms with 481 – 720-sample buffers (Quality only). Added to the Chat strip only: strips in no sync group are not padded (§15.1), so the Game strip's latency does not change.
+- **CPU (worker thread).** 27 µs median, 155 µs 99th percentile per 5 ms frame on the i7-13700KF with other builds running (MSVC 19.51 Release; *VoiceCleanup: inference is allocation-free and costs well under 1 ms per 5 ms frame*): 0.55 % of one core. The audio thread adds two 512-point real FFTs per channel per frame for the renderer.
+
+### 16.6 Evaluation
+
+Held-out synthetic test set (seeds never used in training): 6 noise types × 6 SNRs (−5 … +20 dB) × 3 clips of 8 s, plus 6 nearly clean clips. *ΔSNR* = SNR of the output against the clean speech minus that of the input; *ΔsegSNR* over 20 ms speech frames, each clipped to −10 … 35 dB; *clean band error* = the mean |level change| per band of clean speech run alone (frames with speech, bands within 40 dB of the frame's loudest); *pauses* = the output's level change between the words; *VAD* = the voice-activity output against the labels (5 ms frames). "C++" is the shipped runtime rendered by `flubsound-cli batch --neural voice-cleanup` (Balanced, every other module off); "gate" is the spectral noise gate (§12) alone in Quality, at its defaults (12 dB) and at 30 dB.
+
+| 108 noisy clips | ΔSNR | ΔsegSNR | clean band error | clean level | pauses | VAD |
+|---|---|---|---|---|---|---|
+| model (numpy) | **+4.73 dB** | +2.25 dB | 0.55 dB | −0.24 dB | **−19.9 dB** | 89.8 % |
+| model (C++ runtime, CLI) | +4.72 dB | +2.25 dB | 0.54 dB | −0.24 dB | −19.2 dB | — |
+| spectral gate, 12 dB (Quality) | +3.48 dB | +2.73 dB | 0.33 dB | −0.04 dB | −6.1 dB | — |
+| spectral gate, 30 dB (Quality) | +3.68 dB | **+3.16 dB** | 0.71 dB | −0.06 dB | −10.3 dB | — |
+
+| ΔSNR / pauses by noise | white | pink | brown | fan | keyboard | babble |
+|---|---|---|---|---|---|---|
+| model | +8.15 / −21.2 | +4.74 / −21.5 | +3.78 / −22.0 | +4.01 / −19.8 | +4.33 / −16.5 | +3.35 / −18.3 |
+| gate, 12 dB | +7.17 / −9.5 | +4.60 / −8.4 | +3.29 / −7.0 | +4.54 / −9.3 | +0.01 / −0.0 | +1.29 / −2.5 |
+
+| ΔSNR by input SNR | −5 dB | 0 dB | +5 dB | +10 dB | +15 dB | +20 dB | nearly clean (40 dB) |
+|---|---|---|---|---|---|---|---|
+| model | +8.59 | +6.52 | +5.17 | +4.23 | +3.15 | +0.69 | −8.00 |
+| gate, 12 dB | +5.44 | +4.49 | +3.96 | +3.09 | +2.17 | +1.74 | −0.74 |
+
+Reading it honestly:
+- **Better than the gate** where a voice-chat denoiser matters: 3 × the reduction between words (−19.9 vs −6.1 dB), +1.25 dB SNR overall, and typing and babble, which the gate's slow noise-floor tracker cannot follow (+4.3 and +3.4 dB against +0.0 and +1.3 dB). It runs in Balanced; the gate only in Quality (21 ms).
+- **Worse than the gate** on clean or nearly clean speech and on segmental SNR: it takes 0.24 dB off clean speech and changes its bands by 0.55 dB on average (gate 0.33 dB), which caps the output SNR near 30 dB (nearly clean speech 40 → 32 dB) and costs segmental SNR on frames that had no noise (typing: −5.1 dB, because most speech frames have no keystroke and their input SNR is clipped at 35 dB). On fan noise the gate's SNR gain is 0.5 dB higher; the model still removes twice as much between words.
+- **VAD**: 89.8 % overall; 97.6 % with typing, 82.8 % with babble (other voices are voices), 81.6 % at −5 dB SNR.
+- **Through the Voice Chat preset** (the Chat strip's own, Balanced; 108 clips): the speech-to-pause ratio goes 7.3 → 21.7 dB (pauses −27.7 → −43.1 dBFS, speech −20.4 → −21.4 dBFS): the preset's upward compression lifts some of the residual back, most of the cleanup survives.
+- **Synthetic only.** No real voice, microphone, room or codec has been through it; a listening check and real Discord captures are the owner's ([11 E35](11-enhancement-report.md#e35)).
+
+### 16.7 Tests that prove it
+
+`tests/test_tinynet.cpp`:
+- *TinyNet: Dense, Conv1D and GRU layers with every activation match the numpy reference (float32 and int8 weights)*: a 7-layer reference net with skip connections and a reset, 9 frames, against `tools/neural`'s reference outputs (`tests/neural_reference_data.h`): largest deviation 2.4 · 10⁻⁷.
+- *TinyNet: the header and outputs of a valid file are reported; run() before load() is a no-op*.
+- *TinyNet: truncated, corrupt and hostile model files are refused with a reason*: every truncation, every single-byte change of the payload (CRC), and two dozen targeted edits (magic, version, sizes, counts, flags, layer type, activation, kernel, forward references, weight format, NaN weights, negative or −128 int8 values, a GRU activation, trailing bytes).
+- *TinyNet: run() and reset() allocate nothing and give the same bits on every run*.
+- *VoiceCleanup: the embedded model is presets/neural/voice-cleanup.fnn byte for byte and fits the front end*.
+- *VoiceCleanup: features, band gains and voice activity match the numpy reference on a test signal*: 50 frames; band log-energies within 1.3 · 10⁻⁶, voicing 1.8 · 10⁻⁷, gains 2.2 · 10⁻⁷.
+
+`tests/test_voice_cleanup.cpp`:
+- *Neural BandGains: unity band gains reconstruct the input delayed by L = frameSize * (2 + safetyFrames), for any block size* (null −128.9 dB; offline and on the worker; blocks 1 – 480).
+- *Neural BandGains: the gains computed from window k are applied to window k (the overlap-add crossfades them across the hop)*.
+- *Neural BandGains: a failing model holds the last good band gains, then returns to unity after K frames*.
+- *VoiceCleanup: on the real worker thread with 480-sample blocks it adds 960 samples, misses no frame and matches the offline render* (bit for bit).
+- *VoiceCleanup: in the chain's neural slot it is eligible in Balanced (480-sample buffers) and Quality, not in Low Latency or at 44.1 kHz* (and a corrupt embedded copy is `InvalidModel`).
+- *VoiceCleanup: inference is allocation-free and costs well under 1 ms per 5 ms frame*.
+- *VoiceCleanup: quality floor on the held-out clip (fan noise at 5 dB SNR)*: `tests/data/neural/voice-cleanup-clip.wav` (2 s, speech and noise on two channels): SNR +3.22 dB (gate +3.31), clean speech −0.33 dB, noise alone −16.99 dB (gate −11.08); floors +3.0 dB, −0.6 dB, −16.0 dB.
+
+`tests/test_rtsan.cpp` asserts `TinyNet::run` / `reset` and `VoiceCleanupRunner::processFrame` carry `FLUB_NONBLOCKING` (RTSan checks every test call). `tests/app/test_app_neural_cleanup.cpp`: the app's switch (off by default; on: the Chat strip's slot `Active`, +960 samples on Chat only, no parameter changed; Low Latency `Ineligible` with the reason; the Settings switch; persisted; 44.1 kHz `SampleRateMismatch`). `tests/test_cli_demo.cpp`: the `neural-voice-cleanup` pair.
+
+### 16.8 Known limitations
+
+- Trained and evaluated on synthetic speech and noise only; real voices, microphones, rooms and chat codecs are untested. Experimental, opt-in.
+- 48 kHz only; Balanced needs buffers of at most 480 samples, Low Latency never runs it.
+- Gains only: no pitch (comb) filter between harmonics, so noise inside a voiced band stays; no dereverberation.
+- One model per strip, on the Chat strip only; the microphone path ([11 E18](11-enhancement-report.md#e18)) does not exist.

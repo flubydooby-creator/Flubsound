@@ -18,11 +18,14 @@
 //     a quiet score), "game-7.1" (the same scene as an 8-channel bed, for
 //     the virtualiser), "music-loud" (the music mastered loud: soft-clipped,
 //     PLR under 7.5 LU, for Smart macros), "speech-hiss" (the voice over a
-//     hiss floor, for the noise gate) and "chat-scene" (the game scene on the
+//     hiss floor, for the noise gate), "speech-noisy" (the voice over a fan
+//     with mains hum and keyboard typing, for the neural voice cleanup) and
+//     "chat-scene" (the game scene on the
 //     Game strip with a teammate's voice on a Chat strip). --input replaces
 //     them with the user's file; the virtualiser pairs keep the built-in 7.1
 //     scene when that file is not 5.1 / 7.1 (the virtualiser does not run on
-//     stereo), and the chat pairs always keep the built-in scene and voice.
+//     stereo), the chat pairs always keep the built-in scene and voice, and
+//     the neural voice cleanup pair its noisy voice (a 48 kHz speech model).
 //   * Loudness matching: by the E37 rule, only the louder side of a pair is
 //     turned down to the quieter's integrated loudness (EBU R128), so a pair
 //     is not won by the louder side and nothing is raised into clipping.
@@ -96,6 +99,7 @@ struct DemoHost
     bool chatDuck = false;          // MixEngine::setChatDuck
     float chatDuckDepthDb = 4.5f;
     float chatMix = 0.0f;           // MixEngine::setChatMix, -1 (Game) .. +1 (Chat)
+    bool neuralVoiceCleanup = false; // the voice cleanup model in the chain's neural slot (RenderSettings, docs/03 §16)
 
     /** "" when nothing is set; else the settings in words ("Smart macros on,
         ..."), unique per distinct setting (a render is shared by it). */
@@ -107,7 +111,7 @@ struct DemoPairSpec
 {
     std::string slug;           // file stem: "music-punch"
     std::string title;          // "Music - Punch 0 -> 100 %"
-    std::string programme;      // "music", "music-loud", "speech", "speech-hiss", "game", "game-7.1", "chat-scene"
+    std::string programme;      // "music", "music-loud", "speech", "speech-hiss", "speech-noisy", "game", "game-7.1", "chat-scene"
     std::vector<ParamSetting> before, after; // --set options of each side
     bool levelFeature = false;  // not loudness-matched
     std::string listenFor;

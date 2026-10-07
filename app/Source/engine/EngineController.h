@@ -150,6 +150,7 @@
 #include "flub/engine/DeviceProfiles.h"
 #include "flub/engine/HearingGuard.h"
 #include "flub/engine/PersonalProfile.h"
+#include "flub/neural/VoiceCleanupRunner.h"
 
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_events/juce_events.h>
@@ -654,6 +655,34 @@ public:
     bool isChatVoiceActive() const noexcept;
     float getChatDuckAmount() const noexcept;
 
+    /** "Neural voice cleanup" (experimental; docs/03 §16, docs/11 E35;
+        persisted, off by default): the Chat strip's neural slot runs the
+        voice cleanup model (flub::VoiceCleanupRunner through
+        AudioEngineHost::setNeuralModel, so it is a crossfaded engine swap).
+        Its safety frames follow the device buffer (ceil (buffer / 240)), so
+        L = 240 x (2 + safety) samples: 960 (20 ms) at the usual 480-sample
+        buffer, which Balanced and Quality allow and Low Latency does not.
+        48 kHz only. Re-applied when the buffer or the strip layout changes
+        (the 2 Hz timer). No parameter, preset or A/B bank carries it.
+        Broadcasts Change::Settings. */
+    void setChatNeuralCleanup (bool on);
+    bool getChatNeuralCleanup() const;
+    struct NeuralCleanupStatus
+    {
+        bool enabled = false;      // the switch
+        bool hasChatStrip = false; // the layout has a strip named Chat
+        bool pending = false;      // applied, but the engine running it is not built yet
+        flub::NeuralSlotState state = flub::NeuralSlotState::Empty; // the Chat strip's neural slot
+        int latencySamples = 0;    // the model's latency L (in the chain only when Active)
+        double sampleRate = 0.0;
+        float voiceActivity = 0.0f; // the model's voice activity, last frame (0..1)
+        float reductionDb = 0.0f;   // what its band gains took off the last frame (dB <= 0)
+        uint64_t deadlineMisses = 0, modelFailures = 0, framesProcessed = 0; // since the engine was prepared
+    };
+    NeuralCleanupStatus getChatNeuralCleanupStatus() const;
+    /** One line for Settings: "On: 20 ms added to the Chat strip ..." or why it does not run. */
+    juce::String describeChatNeuralCleanup() const;
+
     // ---- Listening level: the contour follows the system volume (docs/11 E32) -------------------
     struct ListeningLevel
     {
@@ -889,6 +918,13 @@ public:
 
 private:
     void timerCallback() override;
+    void applyChatNeuralCleanup(); // installs / removes the model when the switch, the Chat strip or the buffer changed
+    struct NeuralApplied
+    {
+        int strip = -1, safetyFrames = 0;
+        bool operator== (const NeuralApplied&) const = default;
+    } neuralApplied;
+    std::shared_ptr<flub::VoiceCleanupTelemetry> neuralTelemetry;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
     void handleAsyncUpdate() override; // announces preset warnings no preset load announced
     void notify (Change change);

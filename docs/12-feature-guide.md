@@ -14,7 +14,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
 ### The demo pack (`flubsound-cli demo`)
 
-- **What it is:** before / after WAV pairs for every control in this guide, rendered through the same processing chain the app runs, with an `index.txt` that gives each pair's settings, its loudness, its band deltas (as `flubsound-cli analyze --bands` reads the two files), the chain's readouts and what to listen for. There are 62 pairs on built-in programmes: music (drums, bass line, chord pad, a sung lead), the music mastered loud, speech, speech over a hiss floor, a game scene (ambience, footsteps walking left to right, gunshots, two explosions, a voice line, a quiet score) and the same scene as a 7.1 bed. The chat pairs use a game scene with a teammate's voice on a Chat strip. `--input song.wav` renders the pairs on your own file instead (the virtualiser pairs keep the 7.1 scene for a stereo file, and the chat pairs keep their built-in scene).
+- **What it is:** before / after WAV pairs for every control in this guide, rendered through the same processing chain the app runs, with an `index.txt` that gives each pair's settings, its loudness, its band deltas (as `flubsound-cli analyze --bands` reads the two files), the chain's readouts and what to listen for. There are 63 pairs on built-in programmes: music (drums, bass line, chord pad, a sung lead), the music mastered loud, speech, speech over a hiss floor, a game scene (ambience, footsteps walking left to right, gunshots, two explosions, a voice line, a quiet score) and the same scene as a 7.1 bed. The chat pairs use a game scene with a teammate's voice on a Chat strip. `--input song.wav` renders the pairs on your own file instead (the virtualiser pairs keep the 7.1 scene for a stereo file, and the chat pairs keep their built-in scene).
 - **How to run it:** `flubsound-cli demo --out demo` (10 s programmes, 24-bit WAV; about 30 s on two cores). Add `--input my-song.wav` for your own music, `--seconds 20` for longer programmes, `--format f32` for float files. Every CI run of the Linux job also uploads it as the `Flubsound-demo-pack` artifact.
 - **Pairs that set the app's own settings** (Smart macros, the headset enhancement cap, the safe speaker cap, a headphone correction, the per-ear profile, the hearing guard, the chat duck, ChatMix) are rendered through the app's mix engine: the strip, a Chat strip where the pair has one, the master limiter at −1 dBTP and the hearing guard. Their index lines are marked `+ app:`.
 - **Listen for:** play both files of a pair in turn in any player, at the same volume. Use headphones for the crossfeed, virtualiser, per-ear and positional pairs. Read the pair's *Listen for* line first. Then close your eyes and swap without knowing which is which.
@@ -524,6 +524,14 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 - **What it does to the sound:** nothing; it shows what drives the duck. Status: lit 0.10–0.15 s after speech starts, out about 0.6 s after the last syllable; dark for a 1 kHz tone and for music (0 % false positives on 10 s of drums, pads and noise).
 - **Demo pairs:** `chat-duck`
 
+### Neural voice cleanup (experimental)
+
+- **What it is:** a switch in Settings › Processing › *Voice chat*, *Neural voice cleanup on the Chat strip (experimental)*, off by default ([03 §16](03-dsp-design.md#16-neural-voice-cleanup-experimental), [E35](11-enhancement-report.md#e35)). A small neural network (51 k parameters), trained by Flubsound from scratch on synthetic speech and noise, listens to the Chat strip every 5 ms and sets 22 band gains that turn the noise down and leave the voice; Flubsound's first neural model, run by its own runtime (no third-party AI library, nothing leaves the PC). It works at 48 kHz in Balanced and Quality and adds 20 ms to the Chat strip only (with 480-sample buffers; the Game strip is not delayed). Its help text shows whether it runs and, live, the voice activity and how much it cuts.
+- **What it does to the sound:** steady noise (fans, hum, hiss), typing and background voices drop, most of all between words: on the held-out synthetic test set (108 clips of 8 s, six noise types at −5 to +20 dB SNR) −19.9 dB between words (the existing noise gate −6.1 dB, and only in Quality), +4.7 dB SNR overall (gate +3.5 dB), +4.3 dB on typing and +3.4 dB on babble where the gate does almost nothing. The voice changes little: clean speech −0.24 dB, 0.55 dB per band on average (gate 0.33 dB); on nearly clean speech it does more harm than good (SNR 40 → 32 dB). Through the Voice Chat preset the speech-to-pause ratio goes 7.3 → 21.7 dB. Never a hard gate: each band keeps at least −30 dB, and a cut deepens by at most 2.2 dB per 5 ms (it lets go at once). Demo pack (*speech-noisy*: the voice with a fan, mains hum and typing): matched.
+- **Listen for:** the fan, the hum and the typing lower, most of all between words and phrases; the voice should stay whole. Listen for a thinner or watery voice, chopped word ends, a background that pumps with the voice, and "musical" chirps in the pauses.
+- **Demo pairs:** `neural-voice-cleanup`
+- **Limits:** experimental. Trained and tested only on synthetic speech and noise: real voices, real microphones and real Discord / Teams codecs are unheard, and the model may cut a soft voice or keep a noise it never saw. 48 kHz only (at 44.1 kHz it stays off and says so); not in Low Latency (one 10 ms frame is less than its 20 ms); with 512-sample or longer buffers it needs more safety frames (1 200 samples = 25 ms), which only Quality allows. It does not dereverberate and has no pitch filter between the harmonics (RNNoise's), so noise right under a vowel stays.
+
 ---
 
 ## 7. Your headset and your ears
@@ -853,6 +861,7 @@ One row per feature, for the owner to fill in and return. Play the pair (in the 
 | 63 | Doubling fix (app, Windows) | — | the captured app heard once, no phasing | | confirmed 2026-09-29 |
 | 64 | Headset matched (app) | — | Settings › Audio names the Turtle Beach series | | |
 | 65 | Re-plug / sleep (app) | — | the dongle in another port keeps its settings | | |
+| 66 | Neural voice cleanup (experimental) † | `neural-voice-cleanup` | fan, hum and typing lower between words; the voice whole, not watery | | |
 
 ---
 

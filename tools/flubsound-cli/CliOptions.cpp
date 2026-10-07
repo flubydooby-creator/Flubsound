@@ -126,6 +126,7 @@ enum class Opt
     Profile,
     Protection,
     Smart,
+    Neural,
     Rate,
     Format,
     Block,
@@ -173,6 +174,7 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Profile, "--profile", nullptr, true, false, kChain },
     { Opt::Protection, "--protection", nullptr, true, false, kChain },
     { Opt::Smart, "--smart", nullptr, true, false, kChain },
+    { Opt::Neural, "--neural", nullptr, true, false, kRender },
     { Opt::Rate, "--rate", nullptr, true, false, kQuality | kSoak },
     { Opt::Format, "--format", "-f", true, false, kRender | kDemo },
     { Opt::Block, "--block", nullptr, true, false, kChain | kDemo },
@@ -389,6 +391,21 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
             else
             {
                 error = "--smart expects on or off, got '" + value + "'";
+                return false;
+            }
+            return true;
+        }
+
+        case Opt::Neural:
+        {
+            const std::string k = looseKey (v);
+            if (k == "voice-cleanup" || k == "voicecleanup")
+                r.neuralVoiceCleanup = true;
+            else if (k == "off" || k == "none")
+                r.neuralVoiceCleanup = false;
+            else
+            {
+                error = "--neural expects voice-cleanup or off, got '" + value + "'";
                 return false;
             }
             return true;

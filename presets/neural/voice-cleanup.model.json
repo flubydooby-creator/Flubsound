@@ -1,0 +1,788 @@
+{
+ "name": "Flubsound voice cleanup v1 (experimental)",
+ "file": "voice-cleanup.fnn",
+ "modelVersion": 1,
+ "status": "experimental",
+ "what": "Per-band gains (22 bands) and a voice-activity output for speech in noise, RNNoise-style, trained from scratch on synthetic data only (tools/neural/).",
+ "features": "flub-voice-v1: 48 kHz, 5 ms hop, 10 ms Vorbis window, 512-point FFT, 22 band log-energies + voicing",
+ "architecture": [
+  {
+   "kind": 2,
+   "inputs": [
+    0
+   ],
+   "out": 48,
+   "act": 2,
+   "kernel": 3
+  },
+  {
+   "kind": 3,
+   "inputs": [
+    1
+   ],
+   "out": 48
+  },
+  {
+   "kind": 1,
+   "inputs": [
+    2
+   ],
+   "out": 1,
+   "act": 3
+  },
+  {
+   "kind": 3,
+   "inputs": [
+    1,
+    2
+   ],
+   "out": 64
+  },
+  {
+   "kind": 1,
+   "inputs": [
+    2,
+    4
+   ],
+   "out": 22,
+   "act": 3
+  }
+ ],
+ "parameters": 51111,
+ "weights": "int8, one float scale per row; biases float32",
+ "postProcessing": {
+  "gainFloor": 0.03,
+  "releasePerFrame": 0.775
+ },
+ "training": {
+  "steps": 2500,
+  "batch": 192,
+  "seq": 400,
+  "lr": 0.002,
+  "seed": 1,
+  "workers": 12,
+  "frames_seen": 192000000,
+  "best_val": 1.0239681204160054,
+  "train_s": 1616.153380393982
+ },
+ "data": {
+  "train": {
+   "clips": 2400,
+   "seconds": 6.0,
+   "hours": 4.0,
+   "generate_s": 541.3102951049805,
+   "kinds": {
+    "babble": 240,
+    "keyboard": 297,
+    "pink": 239,
+    "noise-only": 84,
+    "keyboard+white": 19,
+    "pink+fan": 33,
+    "fan+pink": 30,
+    "brown": 222,
+    "clean": 183,
+    "fan": 292,
+    "white": 171,
+    "white+fan": 26,
+    "babble+fan": 34,
+    "keyboard+fan": 24,
+    "fan+brown": 30,
+    "keyboard+brown": 24,
+    "pink+brown": 15,
+    "white+keyboard": 21,
+    "fan+keyboard": 35,
+    "babble+brown": 21,
+    "babble+white": 13,
+    "pink+keyboard": 37,
+    "brown+keyboard": 13,
+    "brown+white": 9,
+    "babble+pink": 37,
+    "white+babble": 18,
+    "fan+babble": 26,
+    "pink+babble": 25,
+    "white+pink": 9,
+    "keyboard+pink": 19,
+    "babble+keyboard": 28,
+    "fan+white": 22,
+    "brown+pink": 25,
+    "brown+babble": 14,
+    "keyboard+babble": 21,
+    "brown+fan": 18,
+    "pink+white": 18,
+    "white+brown": 8
+   }
+  },
+  "val": {
+   "clips": 96,
+   "seconds": 6.0,
+   "hours": 0.16,
+   "generate_s": 29.932074069976807,
+   "kinds": {
+    "babble": 12,
+    "pink": 11,
+    "fan+keyboard": 2,
+    "white": 10,
+    "brown": 10,
+    "fan+babble": 1,
+    "pink+fan": 1,
+    "fan": 15,
+    "keyboard": 13,
+    "brown+babble": 1,
+    "brown+pink": 2,
+    "keyboard+fan": 2,
+    "clean": 5,
+    "brown+white": 2,
+    "white+fan": 2,
+    "white+babble": 2,
+    "fan+brown": 1,
+    "white+pink": 1,
+    "pink+brown": 1,
+    "pink+keyboard": 1,
+    "babble+keyboard": 1
+   }
+  }
+ },
+ "export": {
+  "bytes": 56580,
+  "params": 51111,
+  "clip": {
+   "seed": 309999,
+   "kind": "mix",
+   "noise": "fan",
+   "snr_db": 5.0,
+   "level_dbfs": -20.81973784358735,
+   "lowcut_hz": 0.0,
+   "bandwidth_hz": 0.0
+  },
+  "clip_snr_in": 3.6760840230519087,
+  "clip_snr_out": 7.067298681524603
+ },
+ "evaluation": {
+  "clips": 114,
+  "seconds": 8.0,
+  "table": [
+   {
+    "set": "all noisy",
+    "method": "model",
+    "n": 108,
+    "dsnr": 4.725046757600118,
+    "dseg": 2.2489296693070666,
+    "band_err": 0.5510537505813436,
+    "clean_level": -0.23713163107540697,
+    "pause_att": -19.89418245414495,
+    "vad_acc": 0.8981539351851852
+   },
+   {
+    "set": "all noisy",
+    "method": "neural_cpp",
+    "n": 108,
+    "dsnr": 4.716203374141126,
+    "dseg": 2.24904043497307,
+    "band_err": 0.5442614166825912,
+    "clean_level": -0.23728654102639468,
+    "pause_att": -19.238639692236326,
+    "vad_acc": NaN
+   },
+   {
+    "set": "all noisy",
+    "method": "gate",
+    "n": 108,
+    "dsnr": 3.4823063029823365,
+    "dseg": 2.7328110036406392,
+    "band_err": 0.32684917914573763,
+    "clean_level": -0.044731679456517154,
+    "pause_att": -6.133484383155218,
+    "vad_acc": NaN
+   },
+   {
+    "set": "all noisy",
+    "method": "gate30",
+    "n": 108,
+    "dsnr": 3.679385410784778,
+    "dseg": 3.1570770655167206,
+    "band_err": 0.7134667765378706,
+    "clean_level": -0.06145665815796308,
+    "pause_att": -10.328509916696621,
+    "vad_acc": NaN
+   },
+   {
+    "set": "white",
+    "method": "model",
+    "n": 18,
+    "dsnr": 8.14750153654418,
+    "dseg": 6.974701730561983,
+    "band_err": 0.5526024193681268,
+    "clean_level": -0.24117132250235743,
+    "pause_att": -21.199160757590832,
+    "vad_acc": 0.9096527777777776
+   },
+   {
+    "set": "white",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 8.118931602274765,
+    "dseg": 6.971394051531255,
+    "band_err": 0.5438138028371272,
+    "clean_level": -0.2413661822045762,
+    "pause_att": -20.309282525505566,
+    "vad_acc": NaN
+   },
+   {
+    "set": "white",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 7.174034967062645,
+    "dseg": 6.315288375470083,
+    "band_err": 0.31028190864073957,
+    "clean_level": -0.047174750032206954,
+    "pause_att": -9.534512170643485,
+    "vad_acc": NaN
+   },
+   {
+    "set": "white",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 8.603733572396106,
+    "dseg": 8.090052145309444,
+    "band_err": 0.6878321722182437,
+    "clean_level": -0.06248939511657189,
+    "pause_att": -16.32209478430986,
+    "vad_acc": NaN
+   },
+   {
+    "set": "pink",
+    "method": "model",
+    "n": 18,
+    "dsnr": 4.740136169253265,
+    "dseg": 3.513115516336813,
+    "band_err": 0.501321732112533,
+    "clean_level": -0.2043047093414604,
+    "pause_att": -21.509387885937638,
+    "vad_acc": 0.880625
+   },
+   {
+    "set": "pink",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 4.728382114224066,
+    "dseg": 3.5113651469753373,
+    "band_err": 0.495856838222517,
+    "clean_level": -0.20448786167277988,
+    "pause_att": -20.340362562361744,
+    "vad_acc": NaN
+   },
+   {
+    "set": "pink",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 4.595352157092227,
+    "dseg": 3.3952792795455546,
+    "band_err": 0.29180780255981664,
+    "clean_level": -0.06057337411693656,
+    "pause_att": -8.39585993578214,
+    "vad_acc": NaN
+   },
+   {
+    "set": "pink",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 4.561696102563164,
+    "dseg": 3.572727905587866,
+    "band_err": 0.6262716787349467,
+    "clean_level": -0.08305130596128123,
+    "pause_att": -14.217287994485737,
+    "vad_acc": NaN
+   },
+   {
+    "set": "brown",
+    "method": "model",
+    "n": 18,
+    "dsnr": 3.7841204382452562,
+    "dseg": 3.1220169265449265,
+    "band_err": 0.5442836308632387,
+    "clean_level": -0.232314050644453,
+    "pause_att": -21.97810628797072,
+    "vad_acc": 0.9197569444444444
+   },
+   {
+    "set": "brown",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 3.777118704656535,
+    "dseg": 3.1216068197768916,
+    "band_err": 0.536486173031538,
+    "clean_level": -0.23244161412627154,
+    "pause_att": -21.018899215813917,
+    "vad_acc": NaN
+   },
+   {
+    "set": "brown",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 3.2928169764725883,
+    "dseg": 2.8210787983295713,
+    "band_err": 0.4764339352395198,
+    "clean_level": -0.06312777352060732,
+    "pause_att": -7.0486026321490565,
+    "vad_acc": NaN
+   },
+   {
+    "set": "brown",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 3.428655842836085,
+    "dseg": 3.367898026307883,
+    "band_err": 1.0459341260800352,
+    "clean_level": -0.08509988729463293,
+    "pause_att": -11.975639237294919,
+    "vad_acc": NaN
+   },
+   {
+    "set": "fan",
+    "method": "model",
+    "n": 18,
+    "dsnr": 4.007344813413088,
+    "dseg": 2.8613004099759043,
+    "band_err": 0.5364476173524797,
+    "clean_level": -0.24127942486203477,
+    "pause_att": -19.829840278517647,
+    "vad_acc": 0.8749999999999999
+   },
+   {
+    "set": "fan",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 4.002358776419211,
+    "dseg": 2.8604035158709125,
+    "band_err": 0.5315191332032608,
+    "clean_level": -0.24137647079968602,
+    "pause_att": -19.365432390638034,
+    "vad_acc": NaN
+   },
+   {
+    "set": "fan",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 4.536835722253186,
+    "dseg": 3.1754422523563073,
+    "band_err": 0.16632112380007527,
+    "clean_level": -0.010421558312829827,
+    "pause_att": -9.342927291441754,
+    "vad_acc": NaN
+   },
+   {
+    "set": "fan",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 3.9202578999710798,
+    "dseg": 3.208158213866371,
+    "band_err": 0.36743182471349156,
+    "clean_level": -0.015464266506176997,
+    "pause_att": -15.79580382648237,
+    "vad_acc": NaN
+   },
+   {
+    "set": "keyboard",
+    "method": "model",
+    "n": 18,
+    "dsnr": 4.325162717995018,
+    "dseg": -5.066941401219193,
+    "band_err": 0.5833219518839222,
+    "clean_level": -0.24525712229459018,
+    "pause_att": -16.49924157594199,
+    "vad_acc": 0.9759722222222221
+   },
+   {
+    "set": "keyboard",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 4.325440591797442,
+    "dseg": -5.061287580809201,
+    "band_err": 0.5783210218794084,
+    "clean_level": -0.24550084783485765,
+    "pause_att": -16.165156565872064,
+    "vad_acc": NaN
+   },
+   {
+    "set": "keyboard",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 0.00848269435114873,
+    "dseg": -0.1943581093896787,
+    "band_err": 0.24859503215535575,
+    "clean_level": -0.018672552601564828,
+    "pause_att": -0.020117911766540007,
+    "vad_acc": NaN
+   },
+   {
+    "set": "keyboard",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 0.017975779105154816,
+    "dseg": -0.32812777006561394,
+    "band_err": 0.5445659053606203,
+    "clean_level": -0.027778227357723673,
+    "pause_att": -0.044672745490792636,
+    "vad_acc": NaN
+   },
+   {
+    "set": "babble",
+    "method": "model",
+    "n": 18,
+    "dsnr": 3.346014870149897,
+    "dseg": 2.0893848336419683,
+    "band_err": 0.5883451519077618,
+    "clean_level": -0.25846315680754617,
+    "pause_att": -18.349357938910885,
+    "vad_acc": 0.8279166666666665
+   },
+   {
+    "set": "babble",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 3.3449884554747373,
+    "dseg": 2.0907606564932255,
+    "band_err": 0.5795715309216953,
+    "clean_level": -0.2585462695201968,
+    "pause_att": -18.232704893226654,
+    "vad_acc": NaN
+   },
+   {
+    "set": "babble",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 1.2863153006622234,
+    "dseg": 0.8841354255319939,
+    "band_err": 0.46765527247891875,
+    "clean_level": -0.06842006815495746,
+    "pause_att": -2.458886357148336,
+    "vad_acc": NaN
+   },
+   {
+    "set": "babble",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 1.5439932678370802,
+    "dseg": 1.0317538720943722,
+    "band_err": 1.008764952119885,
+    "clean_level": -0.09485686671139183,
+    "pause_att": -3.615560912116033,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR -5",
+    "method": "model",
+    "n": 18,
+    "dsnr": 8.59231428060015,
+    "dseg": 5.120478316677785,
+    "band_err": 0.5155584819986895,
+    "clean_level": -0.21883331301757994,
+    "pause_att": -19.452333969260117,
+    "vad_acc": 0.8159722222222222
+   },
+   {
+    "set": "SNR -5",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 8.567972412122236,
+    "dseg": 5.119444372549,
+    "band_err": 0.5096798517746933,
+    "clean_level": -0.21894474497276,
+    "pause_att": -18.9918114156551,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR -5",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 5.4358263805943015,
+    "dseg": 3.9432304645760903,
+    "band_err": 0.3687785793281492,
+    "clean_level": -0.05663272651974782,
+    "pause_att": -6.523369764750345,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR -5",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 6.69491809215062,
+    "dseg": 5.311297876695171,
+    "band_err": 0.7984978062731949,
+    "clean_level": -0.07838823449887457,
+    "pause_att": -11.26893707816863,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +0",
+    "method": "model",
+    "n": 18,
+    "dsnr": 6.5191459963882705,
+    "dseg": 3.5192504986155657,
+    "band_err": 0.5430567209425967,
+    "clean_level": -0.23165213530772957,
+    "pause_att": -19.968162926661662,
+    "vad_acc": 0.849826388888889
+   },
+   {
+    "set": "SNR +0",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 6.509691481102099,
+    "dseg": 3.517252143132084,
+    "band_err": 0.531679202829755,
+    "clean_level": -0.23206473251357318,
+    "pause_att": -19.56350217470912,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +0",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 4.490356757051829,
+    "dseg": 3.6679112833691554,
+    "band_err": 0.4375568793223358,
+    "clean_level": -0.06270325476221686,
+    "pause_att": -6.266970514756268,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +0",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 5.11915743205658,
+    "dseg": 4.6449328174008455,
+    "band_err": 0.9568441413552049,
+    "clean_level": -0.08472375756463563,
+    "pause_att": -10.699711446154637,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +5",
+    "method": "model",
+    "n": 18,
+    "dsnr": 5.168096389844819,
+    "dseg": 2.5842343188905406,
+    "band_err": 0.626905529824055,
+    "clean_level": -0.2937722999130583,
+    "pause_att": -18.565784880258256,
+    "vad_acc": 0.8938541666666667
+   },
+   {
+    "set": "SNR +5",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 5.159341510368189,
+    "dseg": 2.5822050465145514,
+    "band_err": 0.6202201088306039,
+    "clean_level": -0.29393634035219474,
+    "pause_att": -18.165342156572827,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +5",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 3.9634693612810192,
+    "dseg": 3.209531717028011,
+    "band_err": 0.33517979028499867,
+    "clean_level": -0.022731936331840417,
+    "pause_att": -6.197185735309983,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +5",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 4.342810532142551,
+    "dseg": 3.7847466763361632,
+    "band_err": 0.7337921841101482,
+    "clean_level": -0.03387692943917328,
+    "pause_att": -10.795032646092968,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +10",
+    "method": "model",
+    "n": 18,
+    "dsnr": 4.229499902528884,
+    "dseg": 2.197372465973844,
+    "band_err": 0.5747122606488746,
+    "clean_level": -0.24681459671124342,
+    "pause_att": -20.03409159436349,
+    "vad_acc": 0.9301736111111113
+   },
+   {
+    "set": "SNR +10",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 4.223074268760573,
+    "dseg": 2.198775395275551,
+    "band_err": 0.5686125016124085,
+    "clean_level": -0.24690806635352625,
+    "pause_att": -19.26607789203917,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +10",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 3.094388630206811,
+    "dseg": 2.569905178426696,
+    "band_err": 0.3212682705646906,
+    "clean_level": -0.06185593816667234,
+    "pause_att": -6.104413630000052,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +10",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 3.000971869846664,
+    "dseg": 2.719806956300271,
+    "band_err": 0.7102775944643062,
+    "clean_level": -0.08318170301179294,
+    "pause_att": -10.259957528930443,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +15",
+    "method": "model",
+    "n": 18,
+    "dsnr": 3.1464736941283054,
+    "dseg": 0.9862367172108875,
+    "band_err": 0.5288585146957913,
+    "clean_level": -0.21686084229021454,
+    "pause_att": -20.281362717536226,
+    "vad_acc": 0.9405208333333334
+   },
+   {
+    "set": "SNR +15",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 3.1441199561041904,
+    "dseg": 0.9874276601225007,
+    "band_err": 0.523991799352867,
+    "clean_level": -0.21691642456190008,
+    "pause_att": -19.711329765540043,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +15",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 2.165595271444487,
+    "dseg": 1.8476470674931444,
+    "band_err": 0.3336822451643571,
+    "clean_level": -0.05480218131935875,
+    "pause_att": -5.766510692841991,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +15",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 1.7110765182404026,
+    "dseg": 1.6475616514952893,
+    "band_err": 0.7278098387285976,
+    "clean_level": -0.07330488135945713,
+    "pause_att": -9.737962735343748,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +20",
+    "method": "model",
+    "n": 18,
+    "dsnr": 0.6947502821102803,
+    "dseg": -0.9139943015262245,
+    "band_err": 0.5172309953780553,
+    "clean_level": -0.2148565992126161,
+    "pause_att": -21.063358636789967,
+    "vad_acc": 0.9585763888888889
+   },
+   {
+    "set": "SNR +20",
+    "method": "neural_cpp",
+    "n": 18,
+    "dsnr": 0.6930206163894752,
+    "dseg": -0.9108620077552665,
+    "band_err": 0.5113850356952194,
+    "clean_level": -0.21494893740441384,
+    "pause_att": -19.733774748901713,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +20",
+    "method": "gate",
+    "n": 18,
+    "dsnr": 1.7442014173155735,
+    "dseg": 1.158640310950735,
+    "band_err": 0.16462931020989444,
+    "clean_level": -0.00966403963926674,
+    "pause_att": -5.942455961272669,
+    "vad_acc": NaN
+   },
+   {
+    "set": "SNR +20",
+    "method": "gate30",
+    "n": 18,
+    "dsnr": 1.2073780202718511,
+    "dseg": 0.8341164148725826,
+    "band_err": 0.3535790942957706,
+    "clean_level": -0.015264443073845002,
+    "pause_att": -9.209458065489285,
+    "vad_acc": NaN
+   },
+   {
+    "set": "clean speech",
+    "method": "model",
+    "n": 6,
+    "dsnr": -8.004623797166227,
+    "dseg": -3.4113024040000917,
+    "band_err": 0.5194317554748855,
+    "clean_level": -0.19409623005402846,
+    "pause_att": -22.992596789253327,
+    "vad_acc": 0.9777083333333333
+   },
+   {
+    "set": "clean speech",
+    "method": "neural_cpp",
+    "n": 6,
+    "dsnr": -7.985811671399513,
+    "dseg": -3.401444224649285,
+    "band_err": 0.5064026767260194,
+    "clean_level": -0.1942127788849051,
+    "pause_att": -22.274310580678392,
+    "vad_acc": NaN
+   },
+   {
+    "set": "clean speech",
+    "method": "gate",
+    "n": 6,
+    "dsnr": -0.7415776232811938,
+    "dseg": -0.22678680043410657,
+    "band_err": 0.22296581718184652,
+    "clean_level": -0.01853466609389286,
+    "pause_att": -6.686065684653175,
+    "vad_acc": NaN
+   },
+   {
+    "set": "clean speech",
+    "method": "gate30",
+    "n": 6,
+    "dsnr": -3.8680593639675056,
+    "dseg": -0.7869605891200262,
+    "band_err": 0.4915097973056712,
+    "clean_level": -0.0305234649172299,
+    "pause_att": -9.48511548636425,
+    "vad_acc": NaN
+   }
+  ],
+  "cli": {
+   "gate": "--profile quality --set gate.on=on",
+   "gate30": "--profile quality --set gate.on=on --set gate.reduction=30",
+   "neural_cpp": "--profile balanced --neural voice-cleanup"
+  }
+ },
+ "numpy": "2.5.2"
+}

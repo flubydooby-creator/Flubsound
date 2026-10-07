@@ -209,7 +209,7 @@ const std::vector<std::string> kChainPairs {
     "crossfeed-mono-safe", "enhanced-renderer", "virt-front-back", "preset-rock-metal", "preset-orchestral-film",
     "preset-acoustic-singer-songwriter", "preset-rnb-vocal", "preset-electronic-ambient", "preset-synthwave", "preset-late-night",
     "preset-podcast-voice", "preset-voice-chat", "noise-gate", "eq-bell", "dynamic-eq", "bass-boost", "bass-harmonics", "bass-tighten", "saturation",
-    "tape-grit", "compressor", "auto-preamp", "latency-profile", "protection-normal"
+    "tape-grit", "compressor", "auto-preamp", "latency-profile", "protection-normal", "neural-voice-cleanup"
 };
 const std::vector<std::string> kEnginePairs { "smart-macros", "onboard-cap",  "safe-speaker-cap", "device-correction",
                                               "per-ear",      "hearing-cap", "chat-duck",        "chatmix" };
@@ -242,7 +242,7 @@ TEST_CASE ("CLI demo: the pair list - every feature pair, level features, app se
         if (! engine)
         {
             CHECK (s.beforeHost.describe().empty());
-            CHECK (s.afterHost.describe().empty() == (s.slug != "protection-normal"));
+            CHECK (s.afterHost.describe().empty() == (s.slug != "protection-normal" && s.slug != "neural-voice-cleanup"));
         }
         else
             CHECK (s.beforeHost.describe() != s.afterHost.describe());
@@ -309,6 +309,8 @@ TEST_CASE ("CLI demo: the chain pairs - presets, module cards and the batch 4 - 
         CHECK (p.afterEngine.empty());
         if (p.spec.slug == "noise-gate")
             CHECK (p.programmeUsed.rfind ("speech-hiss", 0) == 0);
+        else if (p.spec.slug == "neural-voice-cleanup")
+            CHECK (p.programmeUsed.rfind ("speech-noisy", 0) == 0);
         else if (p.spec.slug == "enhanced-renderer" || p.spec.slug == "virt-front-back")
             CHECK (p.programmeUsed.rfind ("game-7.1", 0) == 0);
         else if (p.spec.slug == "protection-normal")
@@ -463,24 +465,27 @@ TEST_CASE ("CLI demo: --input renders the pairs on the user's file (the virtuali
     o.seconds = 0.5;
     o.jobs = 2;
     o.format = io::SampleFormat::Float32;
-    o.only = { "music-punch", "virtualiser", "smart-macros", "preset-rock-metal", "noise-gate", "chat-duck", "night" };
+    o.only = { "music-punch", "virtualiser", "smart-macros", "preset-rock-metal", "noise-gate", "chat-duck", "night", "neural-voice-cleanup" };
     DemoResult r;
     REQUIRE (makeDemoPack (o, r, error));
     REQUIRE (r.pairs.size() == o.only.size());
     for (const auto& p : r.pairs)
     {
-        const bool builtIn = p.spec.slug == "virtualiser" || p.spec.slug == "chat-duck";
+        const bool builtIn = p.spec.slug == "virtualiser" || p.spec.slug == "chat-duck" || p.spec.slug == "neural-voice-cleanup";
         if (p.spec.slug == "virtualiser")
             CHECK (p.programmeUsed.rfind ("game-7.1", 0) == 0);
         else if (p.spec.slug == "chat-duck")
             CHECK (p.programmeUsed.rfind ("chat-scene", 0) == 0);
+        else if (p.spec.slug == "neural-voice-cleanup")
+            CHECK (p.programmeUsed.rfind ("speech-noisy", 0) == 0);
         else
             CHECK (p.programmeUsed == "your file (my song.wav)");
         CHECK_NEAR (p.afterReport.sampleRate, builtIn ? 48000.0 : 44100.0, 0.0);
     }
-    REQUIRE (r.notes.size() == 2);
+    REQUIRE (r.notes.size() == 3);
     CHECK (r.notes[0].find ("7.1") != std::string::npos);
     CHECK (r.notes[1].find ("chat pairs") != std::string::npos);
+    CHECK (r.notes[2].find ("neural voice cleanup") != std::string::npos);
     checkPack (dir.path / "pack", r);
 
     // A file that cannot be read is an error, not an empty pack.

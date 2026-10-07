@@ -65,6 +65,9 @@ struct RenderOptions
     // Smart macros (--smart, docs/11 E34): a host setting of the chain like
     // protection; unset = the preset's own "smart" flag.
     std::optional<bool> smart;
+    // Neural voice cleanup (--neural voice-cleanup, docs/03 §16): the
+    // experimental model in the chain's neural slot, offline. process / batch.
+    bool neuralVoiceCleanup = false;
     io::SampleFormat format = io::SampleFormat::Float32;
     int blockSize = 512;
 };

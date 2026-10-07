@@ -484,6 +484,10 @@ public:
     void setChatDuck (bool on);
     float getChatDuckDepthDb() const;
     void setChatDuckDepthDb (float depthDb);
+    /** "Neural voice cleanup" on the Chat strip (experimental, default off;
+        docs/03 §16): EngineController::setChatNeuralCleanup. */
+    bool getChatNeuralCleanup() const;
+    void setChatNeuralCleanup (bool on);
 
     // ---- Hearing (docs/11 E32 (c), E34; Settings > Hearing) -----------------------------
     /** The listener's own headset sensitivity (dB SPL of a 0 dBFS sine at

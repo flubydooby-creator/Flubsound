@@ -363,6 +363,41 @@ io::AudioFileData makeSpeechHiss (double seconds)
     return d;
 }
 
+/** The speech programme in a noisy room, for the neural voice cleanup: a fan
+    (pink noise low-passed at 900 Hz, 50 Hz mains hum with harmonics) and
+    keyboard typing (bursts of clicks, 2 - 6 kHz), about 8 dB under the voice
+    on its active parts; uncorrelated between the channels. */
+io::AudioFileData makeSpeechNoisy (double seconds)
+{
+    auto d = makeSpeech (seconds);
+    const auto n = static_cast<int> (d.channels[0].size());
+    for (size_t c = 0; c < d.channels.size(); ++c)
+    {
+        Pink pink (static_cast<uint32_t> (1201 + c));
+        Biquad fanTone (Biquad::LowPass, 900.0, 0.7);
+        Biquad clickTone (Biquad::BandPass, 3500.0, 1.2);
+        FastRandom rng (static_cast<uint32_t> (77 + c));
+        double clickEnv = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / kRate;
+            double hum = 0.0;
+            for (int k = 1; k <= 8; ++k)
+                hum += std::sin (kTwoPi * 50.0 * k * t + 0.3 * k) / (k * k);
+            // typing: a key every 150 ms during the first 70 % of each 3 s
+            const double inBurst = std::fmod (t, 3.0);
+            const double key = std::fmod (inBurst, 0.15);
+            if (inBurst < 2.1 && key < 1.0 / kRate)
+                clickEnv = 1.0;
+            clickEnv *= std::exp (-1.0 / (0.003 * kRate));
+            const double click = clickTone.process (rng.nextBipolar()) * clickEnv;
+            const double fan = fanTone.process (pink.next());
+            d.channels[c][static_cast<size_t> (i)] += static_cast<float> (0.06 * fan + 0.004 * hum + 0.12 * click);
+        }
+    }
+    return d;
+}
+
 /** The chat scene's teammate: a higher formant voice (about 180 Hz) talking
     from 25 to 75 % of the programme, centred, peak -9 dBFS. */
 io::AudioFileData makeChatVoice (double seconds)
@@ -885,6 +920,12 @@ std::vector<DemoPairSpec> demoPairs (const std::string& presetDir, std::string* 
          "Everything at 100. At Normal the safety governor also measures the distortion, the dynamics and the brightness "
          "it adds and backs off: less grit, less harshness and more jump in the drums, at a slightly less dense sound.")
         .afterHost.protection = ProtectionStrength::Normal;
+    add ("neural-voice-cleanup", "Speech - Neural voice cleanup off -> on (experimental; fan, hum and typing)", "speech-noisy", { music },
+         { music }, false,
+         "The fan, the hum and the typing drop, most of all between words and phrases; the voice should stay whole - "
+         "listen for a thinner or watery voice, chopped word ends and a pumping background. (Experimental: trained on "
+         "synthetic speech only; the app adds it to the Chat strip, 20 ms.)")
+        .afterHost.neuralVoiceCleanup = true;
 
     // The app's own settings: rendered through the mix engine (DemoHost).
     DemoHost engine;
@@ -1053,6 +1094,9 @@ std::string describeBuiltIn (const std::string& name)
         return "built-in: the music programme mastered loud (14 dB into a soft clipper, peak -1 dBFS; PLR under 7.5 LU)";
     if (name == "speech-hiss")
         return "built-in: the synthetic voice over a steady hiss floor (pink noise, -50 dBFS RMS per channel)";
+    if (name == "speech-noisy")
+        return "built-in: the synthetic voice in a noisy room (a fan with 50 Hz mains hum, keyboard typing), about 8 dB "
+               "under the voice";
     if (name == "chat-scene")
         return "built-in: the game scene on a Game strip and a teammate's voice (a higher formant voice, peak -9 dBFS, "
                "talking from 25 to 75 %) on a Chat strip, mixed as the app mixes them";
@@ -1333,6 +1377,8 @@ std::string DemoHost::describe() const
         parts.push_back ("duck game under voice chat " + numberText (chatDuckDepthDb) + " dB");
     if (chatMix != 0.0f)
         parts.push_back ("ChatMix " + numberText (chatMix));
+    if (neuralVoiceCleanup)
+        parts.push_back ("neural voice cleanup (experimental)");
     if (engine)
         parts.push_back ("through the app's mix engine");
     std::string s;
@@ -1372,7 +1418,7 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
         userName = io::pathToUtf8 (io::pathFromUtf8 (o.input).filename());
     }
     auto programmeIndex = [&] (const std::string& name) -> size_t {
-        const bool userFits = ! o.input.empty() && name != "chat-scene" && (name != "game-7.1" || user.numChannels > 2);
+        const bool userFits = ! o.input.empty() && name != "chat-scene" && name != "speech-noisy" && (name != "game-7.1" || user.numChannels > 2);
         const std::string key = userFits ? "user" : name;
         for (size_t i = 0; i < programmes.size(); ++i)
             if (programmes[i].name == key)
@@ -1391,6 +1437,7 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
                       : name == "music-loud"  ? makeLoudMusic (o.seconds)
                       : name == "speech"      ? makeSpeech (o.seconds)
                       : name == "speech-hiss" ? makeSpeechHiss (o.seconds)
+                      : name == "speech-noisy" ? makeSpeechNoisy (o.seconds)
                                               : makeGameScene (o.seconds, name == "game-7.1");
             if (name == "chat-scene")
                 p.chat = makeChatVoice (o.seconds);
@@ -1432,6 +1479,8 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
                                 + userName + " has " + std::to_string (user.numChannels) + " channel(s)");
     if (! o.input.empty() && uses ("chat-scene"))
         result.notes.push_back ("the chat pairs use the built-in game scene and voice: they need a game and a voice on two strips");
+    if (! o.input.empty() && uses ("speech-noisy"))
+        result.notes.push_back ("the neural voice cleanup pair uses the built-in noisy voice: the model is for speech in noise, at 48 kHz");
     // Every side's parameters are resolved up front, so a bad setting fails before any work.
     for (auto& slot : slots)
     {
@@ -1475,6 +1524,7 @@ bool makeDemoPack (const DemoOptions& o, DemoResult& result, std::string& error,
                 {
                     RenderSettings settings = rs;
                     settings.protection = slot.host.protection;
+                    settings.neuralVoiceCleanup = slot.host.neuralVoiceCleanup;
                     slot.ok = renderFile (programmes[slot.programme].audio, slot.values, settings, slot.result, slot.error);
                 }
             }

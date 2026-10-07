@@ -265,6 +265,19 @@ static_assert (std::is_same_v<decltype (&ProcessingChain::setNeuralBypass), void
 static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralStatus), NeuralSlotStatus (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&ProcessingChain::getNeuralCounters), NeuralSlotCounters (ProcessingChain::*)() const noexcept FLUB_NONBLOCKING>);
 
+// The TinyNet runtime and the voice cleanup model (tests/test_tinynet.cpp,
+// tests/test_voice_cleanup.cpp). They run on AsyncModelProcessor's worker
+// (or inside process() in offline mode), not on the audio thread, but
+// inference must still be allocation-free, so they carry the annotation and
+// RTSan checks every call the tests make. The BandGains renderer runs inside
+// AsyncModelProcessor::process (asserted above).
+#include "flub/neural/TinyNet.h"
+#include "flub/neural/VoiceCleanupRunner.h"
+
+static_assert (std::is_same_v<decltype (&nn::TinyNet::run), void (nn::TinyNet::*) (const float*) noexcept FLUB_NONBLOCKING>);
+static_assert (hasNonblockingReset<nn::TinyNet>);
+static_assert (std::is_same_v<decltype (&VoiceCleanupRunner::processFrame), void (VoiceCleanupRunner::*) (const float*, float*) noexcept FLUB_NONBLOCKING>);
+
 // The intentional harmonic generators (tests/test_distortion.cpp): the
 // two-reference estimator the bass engine's harmonics and the air exciter
 // run inside process(), their readings, and the monitor's harmonics update
