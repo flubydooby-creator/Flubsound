@@ -2,9 +2,10 @@
 // (docs/11 E53: the real-device soak).
 //
 // StreamTap carries what a real-time thread produced - the desktop app's
-// final device output, after its loopback guard and output trim, i.e. what
-// the device plays - to one reader thread, which analyses it (the
-// DiscontinuityDetector, levels). Stereo, in chunks of up to kChunkFrames
+// output as its device callback hands it to the device, after the loopback
+// guard and the output trim (what the device then does with it, e.g. an
+// underrun after a late callback, is not seen) - to one reader thread, which
+// analyses it (the DiscontinuityDetector, levels). Stereo, in chunks of up to kChunkFrames
 // frames; every chunk carries its position in the stream (frames since
 // prepare / reset, dropped ones included).
 //

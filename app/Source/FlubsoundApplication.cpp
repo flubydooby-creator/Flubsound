@@ -1,6 +1,7 @@
 #include "FlubsoundApplication.h"
 
 #include "diagnostics/DiagnosticsSession.h"
+#include "diagnostics/ProcessStats.h"
 #include "diagnostics/UpdateCheck.h"
 #include "engine/EngineController.h"
 #include "platform/PlatformBridge.h"
@@ -301,7 +302,12 @@ bool FlubsoundApplication::initialiseScreenshot()
 void FlubsoundApplication::initialiseDeviceSoak()
 {
     // docs/11 E53: shell/DeviceSoak.h. Exit codes: 0 clean, 1 findings, 2 bad
-    // arguments, 3 the device could not be opened, 4 aborted.
+    // arguments, 3 the device could not be opened (or was refused), 4 aborted.
+    // A windowed program may start with no standard output at all (it is
+    // not given one): attach to the console of the process that started it
+    // then. Output that leads somewhere (an inherited console, a file, the
+    // pipe of tools/scripts/device-soak.py) stays as it is.
+    diagnostics::attachToParentConsole();
     const auto finishNow = [this] (int code, const juce::String& message)
     {
         printLine (code >= 2, message);
@@ -343,9 +349,12 @@ void FlubsoundApplication::initialiseDeviceSoak()
                                                                                 + ".json");
 
     // Temporary settings in a folder of their own (never the user's file).
+    // The folder is not created: nothing is written there (doNotSave, no
+    // routing journal, no personal profile) and nothing of another run is
+    // read, so a crashed or killed soak leaves nothing behind. Shutdown
+    // deletes it should anything have created it after all.
     soakFolder = juce::File::getSpecialLocation (juce::File::tempDirectory)
                      .getNonexistentChildFile ("FlubsoundPro-device-soak-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()), {}, false);
-    soakFolder.createDirectory();
     controller = std::make_unique<EngineController> (DeviceSoak::makeEngineOptions (options, clock, soakFolder.getChildFile ("settings.xml")));
 
     if (options.ui)
@@ -368,6 +377,9 @@ void FlubsoundApplication::initialiseDeviceSoak()
     }
     printLine (false, "Flubsound: device soak on \"" + options.device + "\" [" + options.type + "], " + juce::String (options.minutes, 2)
                           + " min, report " + options.report.getFullPathName());
+    if (clock == DeviceSoak::Clock::Device)
+        printLine (false, "Flubsound: the soak plays a game scene and music up to full scale on that output; it is meant for an output "
+                          "nobody listens to");
     if (! deviceSoak->start (error))
         return finishNow (3, "Flubsound: device soak: " + error);
 }

@@ -179,20 +179,24 @@
 //
 // REAL-DEVICE SOAK HOOKS (docs/11 E53; shell/DeviceSoak.h)
 //   * Output pin: setOutputPin() names the only output the host may play
-//     to. The selection then opens that output or none (never the system
-//     default or a first safe output), and a device started under any other
-//     name - JUCE's own fallback after a hot-unplug - gets silence from its
-//     first callback (isPinBlocked()) and is closed again by the timer.
+//     to. The host's own selection then asks for that output or none (never
+//     the system default or a first safe output). JUCE may still open
+//     another device by itself (its fallback when the pinned one fails or
+//     disappears): such a device gets silence from its first callback
+//     (isPinBlocked()) and is closed again on the message thread's next
+//     pass, so audio reaches the pinned output only.
 //   * Device signal source: setDeviceSignalSource() feeds the strips from a
 //     StripSignalSource (the TestSignalGenerator) inside the running device
 //     callback instead of the device inputs and captures. The source is
 //     called on the audio thread and must be allocation- and lock-free.
-//   * Output tap: setOutputTap() copies the final device output (after the
-//     loopback guard and the output trim: what the device plays, silence
-//     included) into a flub::StreamTap every callback; the soak analyses it
-//     on the message thread.
+//   * Output tap: setOutputTap() copies the engine's output as the callback
+//     hands it to the device (after the loopback guard and the output trim,
+//     silence included) into a flub::StreamTap every callback; the soak
+//     analyses it on the message thread. What the device does with it after
+//     that (an underrun after a late callback) is not seen.
 //   Clearing a source or a tap waits (bounded) for the callback in flight to
-//   return, so the caller may destroy it afterwards.
+//   return and says whether it did; when it did not (a stalled callback),
+//   close the device before destroying the source or the tap.
 #pragma once
 
 #include "DriftCompensatedFifo.h"
@@ -588,11 +592,18 @@ public:
 
     /** Strip audio from `source` (any strip it renders; the others are
         unfed) in place of the device inputs and captures while a device runs;
-        nullptr ends it. Message thread. */
-    void setDeviceSignalSource (StripSignalSource* source);
-    /** A copy of every callback's final device output; nullptr ends it.
-        Message thread. */
-    void setOutputTap (flub::StreamTap* tap);
+        nullptr ends it. Message thread. Ending it waits (bounded,
+        kAudioThreadPassTimeoutMs) for a callback in flight to return: true
+        when none can still be using the old source, false when the wait gave
+        up on a stalled callback - then close the device (closeDevice()
+        removes the callback, which waits for the one in flight) before the
+        old source is destroyed. */
+    bool setDeviceSignalSource (StripSignalSource* source);
+    /** A copy of every callback's output as handed to the device (see
+        REAL-DEVICE SOAK HOOKS); nullptr ends it. Message thread. Returns as
+        setDeviceSignalSource does (false: a stalled callback may still write
+        into the old tap). */
+    bool setOutputTap (flub::StreamTap* tap);
 
     /** Device starts (audioDeviceAboutToStart) and device errors
         (audioDeviceError) since the host was created. Any thread. */

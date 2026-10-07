@@ -4,7 +4,7 @@
 //                [--buffer <samples>|min] [--rate <Hz>] [--minutes <m>]
 //                [--report <file.json>] [--profile quality|balanced|low]
 //                [--seed <n>] [--interval <ms>] [--automation user|off] [--ui]
-//                [--dump <seconds>[,<seconds>...]]
+//                [--dump <seconds>[,<seconds>...]] [--allow-audible]
 //   FlubsoundPro --device-soak --list [--device "<output>"] [--type "<device type>"]
 //   FlubsoundPro --device-soak --replay <report.json> [--report <file.json>]
 //
@@ -12,17 +12,24 @@
 // on ONE real output for `minutes`, with temporary settings (never the user's
 // settings file, never written), no tray, hotkeys, routing or remote control,
 // and the system default output untouched. Several instances may run at once.
+// It is a test tool: the programme reaches full scale (a 7.1 game scene whose
+// fold goes over 0 dBFS, strip gain up to +6 dB, protection cycled through
+// Off), so it belongs on an output nobody listens to.
 //
 // * Device: --device names the output exactly as the device type lists it;
 //   --type the JUCE device type (default: the app's own first-run choice,
 //   "Windows Audio (Low Latency Mode)" on Windows, else the first type).
-//   The output is PINNED (AudioEngineHost::setOutputPin): the host opens it
-//   or nothing - never the system default or another output - and a device
-//   that starts under another name (JUCE's own fallback after a hot-unplug)
-//   plays silence from its first callback, is closed, and ends the soak
-//   (exit code 4). An output the type does not list is not opened at all
-//   (exit code 3). --buffer picks the buffer size (min: the smallest the
-//   device offers; default: the device's own), --rate the sample rate.
+//   The system default output (the one people listen to) is refused unless
+//   --allow-audible is given (exit code 3, nothing opened).
+//   The output is PINNED (AudioEngineHost::setOutputPin): the host only ever
+//   asks for that output (never the system default or a first safe output),
+//   and audio reaches no other one. JUCE itself may still open another device
+//   (its own fallback when the pinned one fails or disappears); such a device
+//   plays silence from its first callback, is closed again by the host's
+//   next message-thread pass, and ends the soak (exit code 4). An output the
+//   type does not list is not opened at all (exit code 3). --buffer picks the
+//   buffer size (min: the smallest the device offers; default: the device's
+//   own), --rate the sample rate.
 // * Programme: the strips are fed inside the device callback
 //   (AudioEngineHost::setDeviceSignalSource) by the app's TestSignalGenerator:
 //   the 7.1 game scene on the Game strip and the music on the Music strip,
@@ -36,12 +43,16 @@
 //   Night, Focus, protection strength and Smart macros. The kinds are drawn
 //   from a seeded bag, so every kind comes up in every 20 actions. Each
 //   action is logged with the stream frame it was applied at.
-// * Watched: the final device output - after the loopback guard and the
-//   output trim, what the device plays - copied in the callback into a
-//   preallocated flub::StreamTap (AudioEngineHost::setOutputTap) and read on
-//   the message thread by a flub::DiscontinuityDetector (clicks, dropouts,
-//   NaN / Inf, DC steps; restarted at a tap gap). A second detector reads
-//   the dry programme (the same generator, rendered again) as a self-check.
+// * Watched: the engine's output as the callback hands it to the device
+//   (after the loopback guard and the output trim), copied in the callback
+//   into a preallocated flub::StreamTap (AudioEngineHost::setOutputTap) and
+//   read on the message thread by a flub::DiscontinuityDetector (clicks,
+//   dropouts, NaN / Inf, DC steps; restarted at a tap gap). What the device
+//   then does with it is not seen: a device underrun (a late callback the
+//   device could not cover) leaves no trace in the tap, so "0 dropouts"
+//   speaks for the engine's output only; late callbacks are the proxy. A
+//   second detector reads the dry programme (the same generator, rendered
+//   again) as a self-check.
 //   Also: the callback timing (flub::CallbackTiming: duration and interval
 //   percentiles, over-budget and late callbacks with their times), the
 //   device's xrun count (-1: the device type reports none) and JUCE's glitch
@@ -62,18 +73,33 @@
 //   current folder) and a human summary, printed and written next to it as
 //   .txt. Exit code: 0 nothing found, 1 findings (any detection, late or
 //   over-budget callback, xrun, device error, tap drop), 2 bad arguments,
-//   3 the device could not be opened, 4 aborted (pin, stall, closed).
+//   3 the device could not be opened (or was refused), 4 aborted (pin,
+//   stall, closed). The app is a windowed program: run it through
+//   tools/scripts/device-soak.py or with its output redirected, so the shell
+//   waits for it and keeps what it prints (an interactive prompt does not
+//   wait; started with no standard output at all, it attaches to the console
+//   of the process that started it).
+// * The end: the soak closes its device (the host's callback is removed,
+//   which waits for a callback in flight, and the backend's thread ends)
+//   before it detaches and frees the programme and the tap, so no callback,
+//   not even one stalled beyond the host's bounded wait, can still use them.
 // * --replay re-runs a report's session on a virtual device (no hardware,
 //   faster than real time): the same programme, buffer size and rate, every
-//   logged action at its logged frame. Detections that come back are the
-//   processing's own response (or the action's); those that do not came from
-//   the real-time path. The replay's report lists both.
-// * --dump writes, for each programme time given, the device output from
-//   0.5 s before to 0.5 s after it (<report>-dump-<t>.wav, 32-bit float,
-//   for `flubsound-cli analyze --glitches`) and the Game and Music strips'
-//   states with both banks as the stream passed it (<report>-dump-<t>-strips.json).
+//   logged action at its logged frame. Detections that come back (same
+//   type, within one block and 3 ms of the same programme frame; levels are
+//   not compared) are the processing's own response (or the action's);
+//   those that do not came from the real-time path. The replay's report
+//   lists both. A report whose actions name a strip or a parameter that
+//   does not exist is refused (exit code 2).
+// * --dump writes, for each programme time given (seconds >= 0), the device
+//   output from 0.5 s before to 0.5 s after it (<report>-dump-<t>.wav, 32-bit
+//   float, for `flubsound-cli analyze --glitches`; shorter when the stream
+//   started less than 0.5 s before it) and the Game and Music strips' states
+//   with both banks as the stream passed it (<report>-dump-<t>-strips.json).
+//   The report's "dumps" lists what was written.
 // * --list prints the device types and their outputs and, for --device, the
-//   buffer sizes and rates it offers. Nothing is opened or played.
+//   buffer sizes and rates it offers and whether a soak would accept it.
+//   Nothing is opened or played.
 #pragma once
 
 #include "engine/EngineController.h"
@@ -111,9 +137,10 @@ struct DeviceSoakOptions
     bool ui = false;             // --ui: show the main window as well
     bool list = false;           // --list
     juce::File replay;           // --replay <report.json>
-    std::vector<double> dumpAt;  // --dump t[,t...]: programme seconds to write the output around (+-0.5 s)
+    std::vector<double> dumpAt;  // --dump t[,t...]: programme seconds (>= 0) to write the output around (+-0.5 s)
+    bool allowAudible = false;   // --allow-audible: the system default output may be soaked too
 
-    // Not on the command line (tests):
+    // Not on the command line (tests; a report carries them, so --replay repeats them):
     double warmupSeconds = 5.0;         // no action before this
     double injectPulseAtSeconds = -1.0; // a one-sample impulse of +0.5 in the Music strip's input (programme time)
 };
@@ -245,17 +272,26 @@ public:
         added and no device watcher runs. */
     static EngineController::Options makeEngineOptions (const DeviceSoakOptions& options, Clock clock, const juce::File& settingsFile);
 
-    /** Device clock: checks that options.type lists options.device and fills
-        in the device type's name when it was empty and the buffer size for
-        --buffer min. Opens nothing. False with `error` otherwise. */
-    static bool resolveDevice (DeviceSoakOptions& options, juce::String& error);
-    /** --list: what resolveDevice would see, as text. Opens nothing. */
+    /** Device clock: checks that options.type lists options.device, that it
+        is not the type's system default output (unless options.allowAudible),
+        and fills in the device type's name when it was empty and the buffer
+        size for --buffer min. Opens nothing. False with `error` otherwise.
+        `manager`: the device types to look in (tests); nullptr = a fresh
+        AudioDeviceManager's default types. */
+    static bool resolveDevice (DeviceSoakOptions& options, juce::String& error, juce::AudioDeviceManager* manager = nullptr);
+    /** --list: what resolveDevice would see, as text, and for --device
+        whether it accepts it. Opens nothing. */
     static juce::String listDevices (const DeviceSoakOptions& options);
 
     /** --replay: the options and the action log of a report. False with `error`
-        when the file is not a device-soak report. */
+        when the file is not a device-soak report, or when an action names a
+        strip outside 0 .. kMaxStrips - 1, a parameter its kind does not take
+        (a macro, a module ear, a parameter id) or a value that is not finite. */
     static bool readReplay (const juce::File& reportFile, DeviceSoakOptions& options, std::vector<SoakAction>& actions, juce::String& error);
 
+    /** The controller is the soak's own (makeEngineOptions): when the soak
+        ends (finish, or destruction while running) it closes the
+        controller's device. */
     DeviceSoak (EngineController& controller, DeviceSoakOptions options, Clock clock, Completion onFinished);
     ~DeviceSoak() override;
 
@@ -300,6 +336,7 @@ private:
     void sampleHeadroom();
     void sampleProcess (double elapsedSeconds);
     void pumpVirtual();
+    void releaseHooks();
     void finish (const juce::String& reason);
     void buildReport (const juce::String& reason);
     juce::String classify (int64_t frame, flub::DiscontinuityType type, juce::String& lastAction, double& ageMs, bool& bypassed) const;
@@ -319,6 +356,8 @@ private:
     std::unique_ptr<Programme> programme;    // the device callback's source
     flub::StreamTap tap;
     std::unique_ptr<Analysis> analysis;
+    bool hooksAttached = false;              // the host's callback may use `programme` and `tap` (releaseHooks)
+    int virtualIdleSteps = 0;                // virtual clock: steps in a row without a new frame
 
     // Automation
     bool scripted = false;
@@ -378,6 +417,9 @@ private:
         double seconds = 0.0;
         juce::String states; // the strips' states as the stream passed it
         bool written = false;
+        juce::String file;           // the WAV's file name
+        double fromSeconds = 0.0;    // the WAV's span, programme time
+        double toSeconds = 0.0;
     };
     std::vector<Dump> dumps;
 

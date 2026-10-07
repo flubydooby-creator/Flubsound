@@ -28,6 +28,7 @@ constexpr double kRestartWindowSeconds = 1.0;
 constexpr double kProgrammeGainDb = -6.0;
 constexpr int kMaxListedTimes = 200;          // late / over-budget times kept in the report
 constexpr int kVirtualBlocksPerStep = 32;
+constexpr int kVirtualIdleStepsLimit = 64;    // virtual clock: steps in a row without a new frame before it aborts
 
 const char* profileName (LatencyProfileValue p) noexcept
 {
@@ -84,6 +85,17 @@ juce::String valueOf (const juce::StringArray& args, const char* flag)
     if (i < 0 || i + 1 >= args.size() || args[i + 1].startsWith ("--"))
         return {};
     return args[i + 1].unquoted();
+}
+
+/** A programme time in seconds: digits with at most one decimal point,
+    0 .. 24 h (no sign, no exponent, nothing else). */
+bool parseSeconds (const juce::String& token, double& seconds)
+{
+    const auto t = token.trim();
+    if (t.isEmpty() || ! t.containsOnly ("0123456789.") || t.indexOfChar ('.') != t.lastIndexOfChar ('.') || t == ".")
+        return false;
+    seconds = t.getDoubleValue();
+    return std::isfinite (seconds) && seconds >= 0.0 && seconds <= 24.0 * 3600.0;
 }
 
 juce::var v64 (int64_t value)
@@ -240,15 +252,24 @@ bool parseDeviceSoakCommandLine (const juce::StringArray& args, DeviceSoakOption
 
     if (args.contains ("--dump"))
     {
+        // Every time must read as seconds >= 0 (a negative or a non-numeric
+        // one would otherwise silently become a time the stream never had).
+        bool valid = true;
         for (const auto& t : juce::StringArray::fromTokens (valueOf (args, "--dump"), ",", {}))
-            if (t.trim().isNotEmpty())
-                options.dumpAt.push_back (t.getDoubleValue());
-        if (options.dumpAt.empty())
         {
-            error = "--dump needs programme times in seconds, e.g. --dump 199.68,350.26";
+            double seconds = 0.0;
+            if (parseSeconds (t, seconds))
+                options.dumpAt.push_back (seconds);
+            else
+                valid = false;
+        }
+        if (! valid || options.dumpAt.empty())
+        {
+            error = "--dump needs programme times in seconds (0 or more), e.g. --dump 199.68,350.26";
             return false;
         }
     }
+    options.allowAudible = args.contains ("--allow-audible");
 
     if (args.contains ("--automation"))
     {
@@ -308,27 +329,26 @@ juce::String SoakAction::describe (const EngineController& controller) const
 {
     const auto stripName = controller.getStripName (strip);
     const auto onOff = [this] { return value >= 0.5f ? juce::String ("on") : juce::String ("off"); };
+    // A parameter's key, or its number when it is no parameter (never indexes out of the layout).
+    const auto key = [this] { return param >= 0 && param < kNumParams ? juce::String (layout()[static_cast<size_t> (param)].key) : juce::String (param); };
     juce::String text = juce::String (kindName (kind)) + " ";
     switch (kind)
     {
         case Kind::Preset: return text + stripName + " " + presetName;
         case Kind::Boost: return text + stripName + " " + juce::String (value, 2);
-        case Kind::Macro: return text + stripName + " " + juce::String (layout()[static_cast<size_t> (param)].key) + " " + juce::String (value, 2);
+        case Kind::Macro: return text + stripName + " " + key() + " " + juce::String (value, 2);
         case Kind::Bypass: return text + onOff();
         case Kind::StripBypass:
         case Kind::Mute:
         case Kind::Night:
         case Kind::Focus:
         case Kind::Smart: return text + stripName + " " + onOff();
-        case Kind::Param:
-            return text + stripName + " "
-                   + (param >= 0 && param < kNumParams ? juce::String (layout()[static_cast<size_t> (param)].key) : juce::String (param)) + " "
-                   + juce::String (value, 3);
+        case Kind::Param: return text + stripName + " " + key() + " " + juce::String (value, 3);
         case Kind::Bank: return text + stripName + (value >= 0.5f ? " B" : " A");
         case Kind::Gain: return text + stripName + " " + juce::String (value, 1) + " dB";
-        case Kind::Profile: return text + profileName (static_cast<LatencyProfileValue> (juce::roundToInt (value)));
+        case Kind::Profile: return text + profileName (static_cast<LatencyProfileValue> (std::clamp (juce::roundToInt (value), 0, 2)));
         case Kind::Mode: return text + stripName + (juce::roundToInt (value) == static_cast<int> (ModeValue::Gaming) ? " Gaming" : " Music");
-        case Kind::Audition: return text + stripName + " " + juce::String (layout()[static_cast<size_t> (param)].key) + " " + onOff();
+        case Kind::Audition: return text + stripName + " " + key() + " " + onOff();
         case Kind::Protection: return text + protectionName (juce::roundToInt (value));
     }
     return text;
@@ -689,9 +709,12 @@ juce::AudioIODeviceType* findType (juce::AudioDeviceManager& manager, const juce
 }
 } // namespace
 
-bool DeviceSoak::resolveDevice (DeviceSoakOptions& options, juce::String& error)
+bool DeviceSoak::resolveDevice (DeviceSoakOptions& options, juce::String& error, juce::AudioDeviceManager* given)
 {
-    juce::AudioDeviceManager manager;
+    std::unique_ptr<juce::AudioDeviceManager> own;
+    if (given == nullptr)
+        own = std::make_unique<juce::AudioDeviceManager>();
+    auto& manager = given != nullptr ? *given : *own;
     const auto& types = manager.getAvailableDeviceTypes();
     if (types.isEmpty())
     {
@@ -719,6 +742,17 @@ bool DeviceSoak::resolveDevice (DeviceSoakOptions& options, juce::String& error)
     {
         error = "\"" + options.device + "\" is not an output of \"" + options.type + "\"; nothing was opened (outputs: "
                 + outputs.joinIntoString (" | ") + ")";
+        return false;
+    }
+    // The system default output is what people listen to; the soak's
+    // programme reaches full scale (the 7.1 fold over 0 dBFS, strip gain up
+    // to +6 dB, protection cycled through Off).
+    if (const int defaultIndex = type->getDefaultDeviceIndex (false);
+        ! options.allowAudible && defaultIndex >= 0 && defaultIndex < outputs.size() && outputs[defaultIndex] == options.device)
+    {
+        error = "\"" + options.device + "\" is the system default output of \"" + options.type
+                + "\", likely the one you listen to; the soak plays a game scene and music up to full scale on it. Nothing was "
+                  "opened. Pick an output nothing is connected to (see --list), or pass --allow-audible";
         return false;
     }
     if (options.smallestBuffer)
@@ -771,6 +805,15 @@ juce::String DeviceSoak::listDevices (const DeviceSoakOptions& options)
             }
         }
     }
+    if (options.device.isNotEmpty())
+    {
+        // What a soak with these options would say (nothing is opened).
+        auto check = options;
+        check.smallestBuffer = false;
+        juce::String error;
+        text << "--device \"" << options.device << "\": "
+             << (resolveDevice (check, error) ? "a soak would run on it [" + check.type + "]" : "a soak would refuse it: " + error) << "\n";
+    }
     return text;
 }
 
@@ -795,6 +838,7 @@ bool DeviceSoak::readReplay (const juce::File& reportFile, DeviceSoakOptions& op
     options.intervalMs = static_cast<double> (config.getProperty ("intervalMs", 2000.0));
     options.automation = static_cast<bool> (config.getProperty ("automation", true));
     options.warmupSeconds = static_cast<double> (config.getProperty ("warmupSeconds", 5.0));
+    options.injectPulseAtSeconds = static_cast<double> (config.getProperty ("injectPulseAtSeconds", -1.0)); // tests
     if (options.bufferSize <= 0 || options.minutes <= 0.0)
     {
         error = reportFile.getFullPathName() + " has no device format or no frames to replay";
@@ -802,11 +846,16 @@ bool DeviceSoak::readReplay (const juce::File& reportFile, DeviceSoakOptions& op
     }
 
     // Each action at its logged frame, relative to the programme's start.
+    // A report this tool wrote names only strips and parameters that exist;
+    // anything else is a damaged or hand-made file and is refused as a
+    // whole (a replay that skipped actions would not be the session).
     const int64_t programmeStart = static_cast<juce::int64> (json.getProperty ("programmeStartFrame", 0));
+    const auto isAuditionModule = [] (int id) { return std::find (std::begin (kAuditionModules), std::end (kAuditionModules), id) != std::end (kAuditionModules); };
     logged.clear();
     if (const auto* list = json.getProperty ("actions", {}).getArray())
-        for (const auto& a : *list)
+        for (int i = 0; i < list->size(); ++i)
         {
+            const auto& a = list->getReference (i);
             const auto kind = SoakAction::kindFromName (a.getProperty ("kind", "").toString());
             if (! kind)
                 continue;
@@ -818,6 +867,25 @@ bool DeviceSoak::readReplay (const juce::File& reportFile, DeviceSoakOptions& op
             action.value = static_cast<float> (static_cast<double> (a.getProperty ("value", 0.0)));
             action.preset = a.getProperty ("preset", "").toString();
             action.presetName = a.getProperty ("presetName", "").toString();
+
+            juce::String problem;
+            if (action.strip < 0 || action.strip >= AudioEngineHost::kMaxStrips)
+                problem = "strip " + juce::String (action.strip) + " (0 .. " + juce::String (AudioEngineHost::kMaxStrips - 1) + ")";
+            else if (! std::isfinite (action.value))
+                problem = "a value that is not a number";
+            else if (action.kind == SoakAction::Kind::Macro && (action.param < Macro1 || action.param > Macro5))
+                problem = "parameter " + juce::String (action.param) + ", not a macro";
+            else if (action.kind == SoakAction::Kind::Audition && ! isAuditionModule (action.param))
+                problem = "parameter " + juce::String (action.param) + ", not a module's ear";
+            else if (action.kind == SoakAction::Kind::Param && (action.param < 0 || action.param >= kNumParams))
+                problem = "parameter " + juce::String (action.param) + " (0 .. " + juce::String (kNumParams - 1) + ")";
+            if (problem.isNotEmpty())
+            {
+                error = reportFile.getFullPathName() + ": action " + juce::String (i) + " (" + SoakAction::kindName (action.kind) + ") names "
+                        + problem + "; not replayed";
+                logged.clear();
+                return false;
+            }
             logged.push_back (action);
         }
     return true;
@@ -837,9 +905,28 @@ DeviceSoak::~DeviceSoak()
     stopTimer();
     cancelPendingUpdate();
     // The callback must not touch the source or the tap once they are gone.
+    releaseHooks();
+}
+
+void DeviceSoak::releaseHooks()
+{
+    if (! hooksAttached)
+        return;
+    hooksAttached = false;
     auto& host = controller.getHost();
-    host.setDeviceSignalSource (nullptr);
-    host.setOutputTap (nullptr);
+    // The soak's device ends with it. Closing it first removes the host's
+    // callback from the device manager, which waits for a callback in flight
+    // (JUCE's callback lock), and the backend stops its thread: no callback
+    // can still be using the programme or the tap afterwards, even one that
+    // stalled beyond the bounded wait of setDeviceSignalSource / setOutputTap
+    // (which would return false then). With the virtual clock the callbacks
+    // run on this thread, so none is in flight anyway, and the setters do not
+    // wait for one that will not come.
+    host.closeDevice();
+    const bool sourceReleased = host.setDeviceSignalSource (nullptr);
+    const bool tapReleased = host.setOutputTap (nullptr);
+    jassert (sourceReleased && tapReleased); // nothing runs once the device is closed
+    juce::ignoreUnused (sourceReleased, tapReleased);
 }
 
 void DeviceSoak::setScriptedActions (std::vector<SoakAction> list)
@@ -881,12 +968,17 @@ bool DeviceSoak::start (juce::String& error)
     tap.prepare (static_cast<int> (kTapSeconds * sampleRate));
     const int64_t pulse = options.injectPulseAtSeconds >= 0.0 ? framesFor (options.injectPulseAtSeconds) : -1;
     programme = std::make_unique<Programme> (sampleRate, gameStrip, musicStrip, tap, pulse);
+    hooksAttached = true;
     host.setOutputTap (&tap);
     host.setDeviceSignalSource (programme.get());
 
     dumps.clear();
     for (const auto t : options.dumpAt)
-        dumps.push_back ({ t, {}, false });
+    {
+        Dump d;
+        d.seconds = t;
+        dumps.push_back (d);
+    }
 
     rng = flub::FastRandom (options.seed * 2654435761u + 1u);
     bag.clear();
@@ -1014,6 +1106,8 @@ void DeviceSoak::pumpVirtual()
     // A step of blocks, ended early after an action so that what it posts
     // (an engine swap's onEngineConfigured) runs before the next step, as it
     // would between two real callbacks.
+    const int64_t framesBefore = analysis->frames;
+    bool running = true;
     for (int b = 0; b < kVirtualBlocksPerStep; ++b)
     {
         const int64_t position = tap.framesWritten();
@@ -1021,7 +1115,9 @@ void DeviceSoak::pumpVirtual()
             break;
         const size_t before = actions.size();
         applyDueActions (position);
-        device->process();
+        running = device->process();
+        if (! running)
+            break; // stopped: no callback ran
         sampleHeadroom();
         drainTap();
         if (actions.size() != before)
@@ -1033,6 +1129,13 @@ void DeviceSoak::pumpVirtual()
         return finish ("aborted: a device other than the pinned output started (silenced and closed)");
     if (analysis->frames >= totalFrames)
         return finish ({});
+    // The virtual clock's stall guards (the device clock has its own): a
+    // stopped device, or steps that bring no new frame to the analysis.
+    if (! running)
+        return finish ("aborted: the virtual device is not running");
+    virtualIdleSteps = analysis->frames > framesBefore ? 0 : virtualIdleSteps + 1;
+    if (virtualIdleSteps >= kVirtualIdleStepsLimit)
+        return finish ("aborted: the virtual device delivered no frames for " + juce::String (kVirtualIdleStepsLimit) + " steps");
     triggerAsyncUpdate();
 }
 
@@ -1070,20 +1173,28 @@ void DeviceSoak::serviceDumps()
         if (analysis->historyEnd < centre + half)
             continue;
         d.written = true;
+        // The frames kept: from the tap's first frame (never before the
+        // stream's start: a time less than 0.5 s into it gives a shorter
+        // file) and within the history ring.
         const auto size = static_cast<int64_t> (analysis->historyLeft.size());
+        const int64_t from = std::max ({ centre - half, analysis->historyEnd - size + 1, std::max<int64_t> (0, analysis->firstFrame) });
+        const int64_t to = centre + half;
         flub::io::AudioFileData wav;
         wav.sampleRate = sampleRate;
         wav.numChannels = 2;
         wav.channels.assign (2, {});
-        for (int64_t f = std::max<int64_t> (centre - half, analysis->historyEnd - size + 1); f < centre + half; ++f)
+        for (int64_t f = from; f < to; ++f)
         {
-            wav.channels[0].push_back (analysis->historyLeft[static_cast<size_t> (f % size)]);
-            wav.channels[1].push_back (analysis->historyRight[static_cast<size_t> (f % size)]);
+            const auto h = static_cast<size_t> (f % size); // f >= 0
+            wav.channels[0].push_back (analysis->historyLeft[h]);
+            wav.channels[1].push_back (analysis->historyRight[h]);
         }
         const auto stem = options.report.getFileNameWithoutExtension() + "-dump-" + juce::String (d.seconds, 3);
+        d.file = stem + ".wav";
+        d.fromSeconds = secondsAt (from - origin);
+        d.toSeconds = secondsAt (to - origin);
         std::string error;
-        flub::io::writeWav (options.report.getSiblingFile (stem + ".wav").getFullPathName().toStdString(), wav, flub::io::SampleFormat::Float32,
-                            error);
+        flub::io::writeWav (options.report.getSiblingFile (d.file).getFullPathName().toStdString(), wav, flub::io::SampleFormat::Float32, error);
         options.report.getSiblingFile (stem + "-strips.json").replaceWithText ("{\n" + d.states.dropLastCharacters (2) + "\n}\n");
     }
 }
@@ -1206,7 +1317,12 @@ SoakAction DeviceSoak::nextAction (int64_t frame)
 
 void DeviceSoak::apply (SoakAction& a)
 {
+    // The automation draws the Game or the Music strip, and readReplay
+    // refuses strips past kMaxStrips; a scripted strip this layout lacks is
+    // skipped (it is still logged, as given).
     const int s = a.strip;
+    if (s < 0 || s >= controller.getNumStrips() || ! std::isfinite (a.value))
+        return;
     const bool on = a.value >= 0.5f;
     switch (a.kind)
     {
@@ -1237,7 +1353,7 @@ void DeviceSoak::apply (SoakAction& a)
             break;
         case SoakAction::Kind::Mode: controller.setMode (static_cast<ModeValue> (std::clamp (juce::roundToInt (a.value), 0, 1)), s); break;
         case SoakAction::Kind::Audition:
-            if (a.param >= 0 && a.param < kNumParams)
+            if (a.param >= 0 && a.param < kNumParams && static_cast<size_t> (s) < heldAudition.size())
             {
                 controller.setAuditionBypass (s, a.param, on);
                 heldAudition[static_cast<size_t> (s)] = on ? a.param : -1;
@@ -1411,21 +1527,23 @@ void DeviceSoak::finish (const juce::String& reason)
     if (analysis != nullptr)
         drainTap();
     sampleStatus (true);
-
-    auto& host = controller.getHost();
-    host.setDeviceSignalSource (nullptr);
-    host.setOutputTap (nullptr);
     if (analysis != nullptr)
         analysis->finish();
 
+    // The report reads the device and the engine as they ran (latency,
+    // counters), so it is built while the device is still open; it is
+    // written before the device is closed, so a close that has to wait for
+    // a stalled callback does not cost the report.
     buildReport (reason);
-
     if (options.report != juce::File())
     {
         options.report.getParentDirectory().createDirectory();
         options.report.replaceWithText (juce::JSON::toString (report, false));
         options.report.withFileExtension ("txt").replaceWithText (summary);
     }
+
+    releaseHooks(); // closes the device, then detaches the programme and the tap
+
     if (onFinished)
         onFinished (exitCode, summary);
 }
@@ -1464,6 +1582,9 @@ void DeviceSoak::buildReport (const juce::String& reason)
     config->setProperty ("automation", options.automation && ! scripted);
     config->setProperty ("replayOf", options.replay.getFullPathName());
     config->setProperty ("warmupSeconds", options.warmupSeconds);
+    if (options.injectPulseAtSeconds >= 0.0)
+        config->setProperty ("injectPulseAtSeconds", options.injectPulseAtSeconds); // tests; --replay repeats it
+    config->setProperty ("allowAudible", options.allowAudible);
     config->setProperty ("ui", options.ui);
     config->setProperty ("programme", "TestSignalGenerator: Game71 on " + controller.getStripName (gameStrip) + ", Music on "
                                           + controller.getStripName (musicStrip) + ", each at " + juce::String (kProgrammeGainDb, 0) + " dB");
@@ -1680,6 +1801,24 @@ void DeviceSoak::buildReport (const juce::String& reason)
     head->setProperty ("events", headList); // [seconds, strip, gain dB], at most the first 2000
     root->setProperty ("foldHeadroom", juce::var (head));
 
+    // --dump: what was written (a time the run did not reach, or with no
+    // --report, is not).
+    juce::Array<juce::var> dumpList;
+    for (const auto& d : dumps)
+    {
+        auto* e = obj();
+        e->setProperty ("seconds", d.seconds);
+        e->setProperty ("written", d.written);
+        if (d.written)
+        {
+            e->setProperty ("wav", d.file);
+            e->setProperty ("fromSeconds", round3 (d.fromSeconds)); // programme time
+            e->setProperty ("toSeconds", round3 (d.toSeconds));
+        }
+        dumpList.add (juce::var (e));
+    }
+    root->setProperty ("dumps", dumpList);
+
     // Replay: which of the original run's detections came back here.
     juce::String replayText;
     if (replayReference.isObject())
@@ -1712,8 +1851,9 @@ void DeviceSoak::buildReport (const juce::String& reason)
         cmp->setProperty ("replayOnly", replayOnly);
         cmp->setProperty ("notReproducedEvents", notBack);
         root->setProperty ("replayComparison", juce::var (cmp));
+        cmp->setProperty ("matchedBy", "type and programme frame within " + juce::String (tolerance) + " frames (one block + 3 ms); levels are not compared");
         replayText << "  replay    of " << originals << " detections in the original run, " << back.size() << " came back here (the processing's own), "
-                   << notBack.size() << " did not (the real-time path); " << replayOnly << " here only\n";
+                   << notBack.size() << " did not (the real-time path); " << replayOnly << " here only (matched: same type within one block + 3 ms of the same programme frame)\n";
         for (const auto& e : notBack)
             replayText << "    not reproduced: " << e.getProperty ("seconds", 0).toString() << " s " << e.getProperty ("type", "").toString() << " "
                        << e.getProperty ("class", "").toString() << " " << e.getProperty ("lastAction", "").toString() << "\n";
@@ -1845,6 +1985,11 @@ void DeviceSoak::buildReport (const juce::String& reason)
           << " MB (after the first minute " << juce::String (growthAfterWarmup, 2) << " MB, " << juce::String (slopePerHour, 2)
           << " MB/h; floor, last third - first third: " << juce::String (floorGrowth, 2) << " MB), working set " << juce::String (memory.front().workingSetMB, 1) << " -> " << juce::String (memory.back().workingSetMB, 1) << " MB\n";
     s << replayText;
+    for (const auto& d : dumps)
+        s << "  dump      " << juce::String (d.seconds, 3) << " s: "
+          << (d.written ? d.file + " (" + juce::String (d.fromSeconds, 3) + " .. " + juce::String (d.toSeconds, 3) + " s)"
+                        : juce::String ("not written (the run did not reach it, or no --report)"))
+          << "\n";
     s << "  verdict   " << (aborted ? "ABORTED" : (findings ? "FINDINGS" : "CLEAN")) << " (exit " << exitCode << ")\n";
     if (findingsText.isNotEmpty())
         s << "  detections (first 60):\n" << findingsText;

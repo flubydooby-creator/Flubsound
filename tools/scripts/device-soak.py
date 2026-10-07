@@ -20,10 +20,15 @@ The rows (--rows picks them by name, comma separated; default: the first three):
   default       the app's first-run configuration (as low-default), for long runs
 
 Use an output nothing is connected to (or nobody listens to): the soak
-plays generated music and a game scene at -6 dB with automation. The app
-opens that output only (it is pinned: never the system default or another
-output) and exits 3 without opening anything when the device type does not
-list it.
+plays generated music and a game scene at -6 dB with automation, which
+reaches full scale (the 7.1 fold over 0 dBFS, strip gain up to +6 dB,
+protection cycled through Off). The app refuses the system default output
+(exit 3, nothing opened; it has no --allow-audible here) and an output the
+device type does not list. The output is pinned: the app only ever asks for
+that output, and a device JUCE opens by itself instead (its fallback when the
+pinned one fails) plays silence and is closed, which ends the row (exit 4).
+The app is a windowed program, so its output is only kept when redirected,
+as this script does (each row's .log).
 
 Exit code 0 when every row ran clean, 1 when a row had findings, 2 when a
 row could not run (bad arguments, device missing, aborted).
@@ -72,7 +77,8 @@ def row_line(name, code, data):
             f"late {t['late']:3d} over {t['overBudget']:3d} max {t['durationMaxMs']:6.2f} ms ({100 * t['maxLoad']:5.1f} %)  "
             f"xruns {t['xrunsDevice']:3d}  restarts {dev['restarts']} errors {dev['errors']}  "
             f"clicks {d['click']} dropouts {d['dropout']} nan {d['non-finite']} dc {d['dc-step']} "
-            f"[trans {classes['transition']} static {classes['static']} prog {classes['programme']} restart {classes['restart']}]  "
+            f"[trans {classes['transition']} static {classes['static']} prog {classes['programme']} restart {classes['restart']} "
+            f"gap {classes.get('gap', 0)} headroom {classes.get('headroom', 0)}]  "
             f"mem {m.get('privateGrowthAfterFirstMinuteMB', 0):+.2f} MB")
 
 

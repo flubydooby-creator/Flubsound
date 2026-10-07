@@ -11,6 +11,8 @@
 // two reads: (cpu1 - cpu0) / wall for this process (100 % = one core), and
 // (busy1 - busy0) / (total1 - total0) for the whole system (100 % = every
 // core busy).
+//
+// Also attachToParentConsole(): the device soak's console output on Windows.
 #pragma once
 
 namespace flub::app::diagnostics
@@ -25,4 +27,15 @@ struct ProcessStats
 };
 
 ProcessStats readProcessStats();
+
+/** Windows: the app is a windowed (GUI-subsystem) program, which may be
+    started with no standard output or error at all (nothing leads anywhere;
+    a shell usually hands down its console, a redirection a file or a pipe).
+    For its command-line modes (the device soak) this attaches to the console
+    of the process that started it and points a stdout / stderr that has no
+    handle at that console; a handle that leads somewhere stays as it is. An
+    interactive prompt does not wait for a windowed program, so the text may
+    appear under the next prompt. True when it attached. Elsewhere: nothing,
+    false. */
+bool attachToParentConsole();
 } // namespace flub::app::diagnostics

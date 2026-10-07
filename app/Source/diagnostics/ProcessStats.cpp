@@ -9,6 +9,7 @@
     #endif
     #include <windows.h>
     #include <psapi.h>
+    #include <cstdio>
 #elif defined(__APPLE__)
     #include <mach/mach.h>
     #include <sys/resource.h>
@@ -54,6 +55,27 @@ ProcessStats readProcessStats()
         s.systemBusySeconds = s.systemTotalSeconds - seconds (idle);
     }
     return s;
+}
+
+bool attachToParentConsole()
+{
+    // A handle that leads somewhere (a file, a pipe as with
+    // tools/scripts/device-soak.py, NUL or a console): leave it. None (the
+    // windowed program's default: GetFileType says FILE_TYPE_UNKNOWN):
+    // attach to the parent's console.
+    const auto redirected = [] (DWORD which) { return GetFileType (GetStdHandle (which)) != FILE_TYPE_UNKNOWN; };
+    const bool outRedirected = redirected (STD_OUTPUT_HANDLE);
+    const bool errRedirected = redirected (STD_ERROR_HANDLE);
+    if (outRedirected && errRedirected)
+        return false;
+    if (! AttachConsole (ATTACH_PARENT_PROCESS))
+        return false;
+    std::FILE* stream = nullptr;
+    if (! outRedirected)
+        freopen_s (&stream, "CONOUT$", "w", stdout);
+    if (! errRedirected)
+        freopen_s (&stream, "CONOUT$", "w", stderr);
+    return true;
 }
 
 #elif defined(__APPLE__)
@@ -128,5 +150,12 @@ ProcessStats readProcessStats()
     return s;
 }
 
+#endif
+
+#if ! defined(_WIN32)
+bool attachToParentConsole()
+{
+    return false; // a terminal program's output already goes to its terminal
+}
 #endif
 } // namespace flub::app::diagnostics

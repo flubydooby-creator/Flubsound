@@ -1190,24 +1190,22 @@ void AudioEngineHost::enforceOutputPin()
     pinBlocked.store (false, std::memory_order_release);
 }
 
-void AudioEngineHost::setDeviceSignalSource (StripSignalSource* source)
+bool AudioEngineHost::setDeviceSignalSource (StripSignalSource* source)
 {
     JUCE_ASSERT_MESSAGE_THREAD
     // seq_cst on both sides: the waitForAudioThreadToPass handshake (a
     // callback that read the old pointer has returned once the counter moved).
     deviceSignalSource.store (source, std::memory_order_seq_cst);
     uint64_t counter = 0;
-    if (source == nullptr)
-        waitForAudioThreadToPass (counter);
+    return source != nullptr || waitForAudioThreadToPass (counter);
 }
 
-void AudioEngineHost::setOutputTap (flub::StreamTap* tap)
+bool AudioEngineHost::setOutputTap (flub::StreamTap* tap)
 {
     JUCE_ASSERT_MESSAGE_THREAD
     outputTap.store (tap, std::memory_order_seq_cst);
     uint64_t counter = 0;
-    if (tap == nullptr)
-        waitForAudioThreadToPass (counter);
+    return tap != nullptr || waitForAudioThreadToPass (counter);
 }
 
 // =============================================================================
@@ -1517,7 +1515,7 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
                 a.store (false, std::memory_order_relaxed);
     }
 
-    // docs/11 E53: what the device plays, for the soak's analysis.
+    // docs/11 E53: the output as handed to the device, for the soak's analysis.
     if (auto* tap = outputTap.load (std::memory_order_seq_cst))
         tap->write (outputChannelData, numOutputChannels, numSamples);
 
