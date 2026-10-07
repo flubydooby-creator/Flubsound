@@ -111,10 +111,13 @@ struct FormLayout
 // =============================================================================
 // Audio page
 // =============================================================================
-/** Intro, OUTPUT DEVICE PROFILE box and device selector, stacked. The box
-    grows with its wrapped text (every guidance message of the profile) and
-    the page sets its own height; the dialog shows it in a vertical viewport,
-    so long guidance scrolls instead of pushing the selector out of reach. */
+/** Intro, OUTPUT DEVICE PROFILE box, FEEDBACK-LOOP GUARD box, "Follow the
+    system default output", the device selector, the DEVICE TYPE note (R1.2,
+    only when the type has one) and LATENCY (docs/11 E42c / E42d), stacked
+    in that order. The profile box grows with its wrapped text (every
+    guidance message of the profile) and the page sets its own height; the
+    dialog shows it in a vertical viewport, so long guidance scrolls instead
+    of pushing the selector out of reach. */
 class SettingsDialog::AudioPage : public juce::Component, private juce::ComboBox::Listener
 {
 public:
@@ -125,7 +128,7 @@ public:
         selector = std::make_unique<juce::AudioDeviceSelectorComponent> (controller.getDeviceManager(), 0, 16, 1, 2, false, false, true, false);
         selector->setItemHeight (26);
         addAndMakeVisible (*selector);
-        addAndMakeVisible (latencyPanel); // docs/11 E42c / E42d, under the selector
+        addAndMakeVisible (latencyPanel); // docs/11 E42c / E42d, under the selector and its type note (R1.2)
         deviceText = describeOutputDevice (controller);
 
         // Feedback-loop guard override (docs/11 E51).
@@ -323,6 +326,7 @@ public:
     /** Where the selector and the type note are, in page coordinates (tests). */
     juce::Rectangle<int> getSelectorBounds() const { return selector->getBounds(); }
     juce::Rectangle<int> getNoteBounds() const { return noteArea; }
+    juce::Rectangle<int> getLatencyPanelBounds() const { return latencyPanel.getBounds(); }
 
 private:
     static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8, kToggleH = 26;
@@ -2488,6 +2492,11 @@ juce::Rectangle<int> SettingsDialog::getAudioDeviceSelectorBounds() const
 juce::Rectangle<int> SettingsDialog::getAudioDeviceTypeNoteBounds() const
 {
     return audioPage != nullptr ? audioPage->getNoteBounds() : juce::Rectangle<int>();
+}
+
+juce::Rectangle<int> SettingsDialog::getAudioLatencyPanelBounds() const
+{
+    return audioPage != nullptr ? audioPage->getLatencyPanelBounds() : juce::Rectangle<int>();
 }
 
 juce::String SettingsDialog::describeLoopbackGuard (EngineController& controller)

@@ -222,11 +222,14 @@ public:
     /** The note the Audio page shows, refreshed now as its timer would
         (tests); empty when none. */
     juce::String getAudioDeviceTypeNote();
-    /** The Audio page's device selector and its type note (empty when none),
-        in page coordinates, as last laid out (tests: the note sits under
-        the selector, so it never moves the selector). */
+    /** The Audio page's device selector, its type note (empty when none) and
+        the LATENCY panel (docs/11 E42c / E42d), in page coordinates, as last
+        laid out (tests: the note sits under the selector, so it never moves
+        the selector, and the panel under the note, or under the selector
+        when there is none). */
     juce::Rectangle<int> getAudioDeviceSelectorBounds() const;
     juce::Rectangle<int> getAudioDeviceTypeNoteBounds() const;
+    juce::Rectangle<int> getAudioLatencyPanelBounds() const;
 
     /** The Audio page's feedback-loop guard text (docs/11 E51): whether the
         output is muted for a loopback pair and which pair, or that the
