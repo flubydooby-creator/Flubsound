@@ -8,14 +8,22 @@
 // it from its 2 Hz timer; tests poll it directly.
 //
 //   Idle --start()--> Running (pass 1 [, pass 2]) --> Analysing --> Done
-//                        |  cancel(), the device stopped, a pass failed to start
+//                        |  cancel(), the device stopped
 //                        +--> Failed (error says why; "Cancelled." for a cancel)
+//
+// Both passes are handed to the host at start(), chained (ProbeSession::
+// chainTo): the second plays from the callback after the first ends, so the
+// programme never returns between them and the 2 Hz poll only collects
+// them.
 //
 // start() refuses (and says why, whyNot()) without a running device, with no
 // input channel open, while the feedback-loop guard holds the output, for a
 // strip that does not exist or (Through) is muted, and while a measurement
-// runs. Each pass snapshots what the device and the engine report
-// (latency::DeviceContext) when it starts and the glitch counter when it ends.
+// runs. What the device and the engine report (latency::DeviceContext) is
+// snapshot at start(); each pass's glitches are counted from start() (the
+// first) or from the last poll before the pass before it was collected (the
+// second) to the poll that collects it: a glitch near the passes' boundary
+// counts for both.
 //
 // Message thread only (the worker only runs analyse() on sessions it owns).
 #pragma once
@@ -101,7 +109,6 @@ public:
 
 private:
     static flub::latency::ProbeSettings settingsFor (const Request& r, double sampleRate);
-    bool startPass (latency::Path path);
     latency::DeviceContext snapshot() const;
     void fail (const juce::String& error);
     void finishAnalysis();
@@ -110,10 +117,11 @@ private:
     Request request;
     State state;
     std::vector<latency::Path> plan;
-    size_t planIndex = 0;
     bool cancelling = false;                    // cancel() during this measurement
+    juce::String failure;                       // set on a cancel or a stop; reported once every pass is handed back
     int64_t playedBefore = 0, totalSamples = 0; // over the plan
-    latency::DeviceContext context;             // the running pass's
+    latency::DeviceContext context;             // the running pass's (snapshot at the start; glitches from its start)
+    int64_t glitchesAtLastPoll = -1;            // the device's glitch count at the previous poll
     std::vector<std::pair<std::unique_ptr<latency::ProbeSession>, latency::DeviceContext>> passes;
 
     std::thread worker;

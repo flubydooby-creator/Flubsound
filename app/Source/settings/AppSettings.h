@@ -353,9 +353,20 @@ public:
     bool getFollowSystemDefaultOutput() const;
     void setFollowSystemDefaultOutput (bool follow);
     /** Settings > Audio > "Automatic buffer size" (default on; docs/11 E42c,
-        AudioEngineHost::setAutomaticBufferSize). */
+        AudioEngineHost::setAutomaticBufferSize). hasAutoBufferSize(): stored
+        yet (false on the first start of a version with the switch: the
+        saved device state decides it, AudioEngineHost::
+        setAutomaticBufferSizeFromSavedState). */
     bool getAutoBufferSize() const;
     void setAutoBufferSize (bool automatic);
+    bool hasAutoBufferSize() const;
+    /** The latency profile the device buffer follows: the last one chosen by
+        hand (flub::param::LatencyProfileValue as int; docs/11 E42c), so the
+        automatic overload response's step, persisted in the strip state,
+        never shrinks the buffer at the next start. `fallback` when none is
+        stored. */
+    int getBufferProfile (int fallback) const;
+    void setBufferProfile (int profile);
     /** The buffer back-off floors by AudioEngineHost::bufferDeviceKey
         ("<device type>|<output device>" -> samples; docs/11 E42c). */
     std::map<juce::String, int> getBufferFloors() const;

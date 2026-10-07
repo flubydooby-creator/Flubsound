@@ -303,15 +303,28 @@ EngineController::EngineController (Options opts)
     requestGraphQuantum (getLatencyProfile(), false);
 
     // docs/11 E42c: the device buffer follows the profile chosen by hand
-    // (applied when the device opens); the back-off floors per device.
+    // (applied when the device opens), stored on its own: the strip state
+    // keeps a profile the automatic overload response stepped to, which must
+    // not shrink the buffer at this start. The back-off floors per device.
+    // Upgrading (no Automatic setting stored yet): the saved device state
+    // decides it when the device opens, and the decision is stored.
     host->setBufferFloors (settings->getBufferFloors());
-    host->setAutomaticBufferSize (settings->getAutoBufferSize());
-    host->setBufferProfile (getLatencyProfile());
     host->onBufferChoiceChanged = [this]
     {
         settings->setBufferFloors (host->getBufferFloors());
+        if (! host->isAutomaticBufferSizePending())
+            settings->setAutoBufferSize (host->getAutomaticBufferSize());
         notify (Change::Device);
     };
+    if (settings->hasAutoBufferSize())
+        host->setAutomaticBufferSize (settings->getAutoBufferSize());
+    else
+        host->setAutomaticBufferSizeFromSavedState();
+    {
+        constexpr int lowest = static_cast<int> (LatencyProfileValue::Quality), highest = static_cast<int> (LatencyProfileValue::LowLatency);
+        const int byHand = std::clamp (settings->getBufferProfile (static_cast<int> (getLatencyProfile())), lowest, highest);
+        host->setBufferProfile (static_cast<LatencyProfileValue> (byHand));
+    }
     // docs/11 E42d: the live latency measurement; its result goes to the log.
     latencyMeasurer = std::make_unique<LatencyMeasurer> (*host);
     latencyMeasurer->onFinished = [this] (const LatencyMeasurer::State& st)
@@ -1677,8 +1690,10 @@ void EngineController::setLatencyProfile (LatencyProfileValue profile)
     applyLatencyProfile (profile);
     loadReducer.profileChangedByUser();
     // docs/11 E42c: the buffer follows a profile chosen by hand only (the
-    // automatic overload response's steps never shrink it). The device
+    // automatic overload response's steps never shrink it, also after a
+    // restart: the choice is stored apart from the strip state). The device
     // restarts at the new size now, and the engine is built once for it.
+    settings->setBufferProfile (static_cast<int> (profile));
     if (profile != host->getBufferProfile())
     {
         host->setBufferProfile (profile);
@@ -1867,7 +1882,7 @@ void EngineController::restoreLatencyProfile()
 void EngineController::setAutomaticBufferSize (bool automatic)
 {
     settings->setAutoBufferSize (automatic);
-    if (automatic != host->getAutomaticBufferSize())
+    if (automatic != host->getAutomaticBufferSize() || host->isAutomaticBufferSizePending())
     {
         host->setAutomaticBufferSize (automatic); // on: forgets the device's floor and applies the profile's size
         settings->setBufferFloors (host->getBufferFloors());

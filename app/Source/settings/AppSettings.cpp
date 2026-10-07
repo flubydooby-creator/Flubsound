@@ -40,6 +40,7 @@ constexpr const char* preferredOutputHardwareId = "device.preferredOutputHardwar
 constexpr const char* followSystemDefault = "device.followSystemDefault";
 constexpr const char* autoBufferSize = "device.autoBufferSize";
 constexpr const char* bufferFloors = "device.bufferFloors";
+constexpr const char* bufferProfile = "device.bufferProfile";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
 constexpr const char* routingMoveAway = "routing.moveOriginalAway";
@@ -777,6 +778,17 @@ void AppSettings::setFollowSystemDefaultOutput (bool follow) { properties->setVa
 
 bool AppSettings::getAutoBufferSize() const { return properties->getBoolValue (Keys::autoBufferSize, true); }
 void AppSettings::setAutoBufferSize (bool automatic) { properties->setValue (Keys::autoBufferSize, automatic); }
+bool AppSettings::hasAutoBufferSize() const { return properties->containsKey (Keys::autoBufferSize); }
+
+int AppSettings::getBufferProfile (int fallback) const
+{
+    if (! properties->containsKey (Keys::bufferProfile))
+        return fallback;
+    const int v = properties->getIntValue (Keys::bufferProfile, fallback);
+    return v >= 0 && v <= 2 ? v : fallback;
+}
+
+void AppSettings::setBufferProfile (int profile) { properties->setValue (Keys::bufferProfile, profile); }
 
 std::map<juce::String, int> AppSettings::getBufferFloors() const
 {

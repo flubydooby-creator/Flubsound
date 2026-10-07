@@ -70,13 +70,52 @@ ProbeSession::ProbeSession (const flub::latency::ProbeSettings& probeSettings, P
     fade = std::max<int64_t> (1, std::llround (kFadeMs * 0.001 * settings.sampleRate));
     tail = std::llround (kCancelTailMs * 0.001 * settings.sampleRate);
     end = stopAt = length();
+    gateStep = 1.0f / static_cast<float> (fade);
     capLinear = static_cast<float> (std::pow (10.0, kThroughCapDbfs / 20.0));
+    plan();
 }
+
+void ProbeSession::setOutputLatency (int samples) noexcept
+{
+    outputLatency = samples < 0 ? -1 : samples;
+    plan();
+}
+
+void ProbeSession::chainTo (ProbeSession& following) noexcept
+{
+    next = &following;
+}
+
+void ProbeSession::plan() noexcept
+{
+    // The first sweep enters the strip after the lead-in and reaches the
+    // output a strip latency later; the gate is fully open there (it needs
+    // two fades to close and open again). From capUntil on, the programme
+    // that returns at the strip inputs over the last fade can reach the
+    // output: the cap stops tracking there.
+    const int64_t len = length();
+    const int64_t delay = std::max<int64_t> (0, outputLatency);
+    arrival = std::clamp<int64_t> (flub::latency::runStart (settings, 0), 0, len) + delay;
+    openAt = std::clamp<int64_t> (arrival, 2 * fade, std::max<int64_t> (2 * fade, len));
+    capUntil = len - fade + delay;
+}
+
+namespace
+{
+double gainDb (float g) noexcept
+{
+    return g >= 1.0f ? 0.0 : 20.0 * std::log10 (std::max (g, 1.0e-6f));
+}
+} // namespace
 
 double ProbeSession::getCapGainDb() const noexcept
 {
-    const float g = capGainStat.load (std::memory_order_relaxed);
-    return g >= 1.0f ? 0.0 : 20.0 * std::log10 (std::max (g, 1.0e-6f));
+    return gainDb (capMinStat.load (std::memory_order_relaxed));
+}
+
+double ProbeSession::getCapBeforeSweepDb() const noexcept
+{
+    return gainDb (capBeforeStat.load (std::memory_order_relaxed));
 }
 
 // =============================================================================
@@ -101,6 +140,7 @@ PassReport analyse (const ProbeSession& session, const DeviceContext& context)
     const double rate = settings.sampleRate;
     report.runs = settings.runs;
     report.capGainDb = session.getCapGainDb();
+    report.capBeforeSweepDb = session.getCapBeforeSweepDb();
     if (context.glitchesBefore >= 0 && context.glitchesAfter >= context.glitchesBefore)
         report.glitches = context.glitchesAfter - context.glitchesBefore;
 
@@ -205,10 +245,18 @@ PassReport analyse (const ProbeSession& session, const DeviceContext& context)
     report.confidence = low ? Confidence::Low : (medium ? Confidence::Medium : Confidence::High);
 
     // Notes that do not change the grade.
-    if (report.capGainDb < -0.05)
-        report.warnings.push_back (fmt ("Note: the strip's processing raised the sweep; the safety cap held the output at %.0f dBFS "
-                                        "(%.1f dB down). The delay is not affected.",
-                                        kThroughCapDbfs, report.capGainDb));
+    // The cap tracks only from the gate's opening, so the programme that was
+    // playing never reaches it; what it did before the first sweep arrived
+    // was something left over (a long tail), and the rest was the sweep.
+    if (const double sweepCapDb = report.capGainDb - report.capBeforeSweepDb; sweepCapDb < -0.05)
+        report.warnings.push_back (fmt ("Note: the sweep left the strip above %.0f dBFS (its processing raised it), so the safety cap held "
+                                        "the output there (%.1f dB down). The delay is not affected.",
+                                        kThroughCapDbfs, sweepCapDb));
+    if (report.capBeforeSweepDb < -0.05)
+        report.warnings.push_back (fmt ("Note: sound left over from before the measurement reached the output above %.0f dBFS before the "
+                                        "first sweep, so the safety cap turned the sweeps down %.1f dB as well. The delay is not affected; "
+                                        "for a stronger signal measure again with nothing playing.",
+                                        kThroughCapDbfs, -report.capBeforeSweepDb));
     if (report.unexplainedMs < -0.5)
         report.warnings.push_back (fmt ("Note: the device reports %.1f ms more than the whole round trip measured, so its reported "
                                         "figures are an upper bound.",
@@ -266,6 +314,15 @@ std::string describeBoth (const PassReport& deviceOnly, const PassReport& throug
         s += fmt ("\n\nFlubsound's engine, measured (through - device only): %.2f ms (%.1f samples); it reports %.2f ms (%d samples).",
                   measured, through.roundTripSamples - deviceOnly.roundTripSamples, toMs (through.context.stripLatencySamples, rate),
                   through.context.stripLatencySamples);
+        // A virtualised strip (the Game strip by default) puts its main
+        // arrival a few samples after the engine's latency: its head-related
+        // filters start late (7 samples measured with the virtualiser on,
+        // none with it bypassed).
+        const double extra = through.roundTripSamples - deviceOnly.roundTripSamples - through.context.stripLatencySamples;
+        if (extra > 2.0 && toMs (extra, rate) < 1.0)
+            s += fmt (" The %.2f ms more is the strip's own sound, not buffering: with the virtualiser on, its head-related filters start a "
+                      "few samples late.",
+                      toMs (extra, rate));
     }
     return s;
 }

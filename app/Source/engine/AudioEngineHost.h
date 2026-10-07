@@ -215,21 +215,30 @@
 //   setAutomaticBufferSize), and while it is off the host never touches the
 //   size. raiseBufferOneStep() is the
 //   back-off's step (EngineController drives buffer::Backoff from the
-//   overload watchdog): one available size up, at most the default,
-//   remembered as the device's floor (getBufferFloors, persisted by the
-//   controller).
+//   overload watchdog): the smallest available size of at least twice the
+//   current one, at most the default, remembered as the device's floor
+//   (getBufferFloors, persisted by the controller). Upgrading from a version
+//   without the switch (setAutomaticBufferSizeFromSavedState): the first
+//   device open decides it; a size other than the device's default that the
+//   device opened at from the saved state was the user's pick (the app never
+//   asked for one before), so Automatic starts off and keeps it.
 //
 // LATENCY PROBE (docs/11 E42d; LatencyMeasurement.h)
-//   startLatencyProbe() hands a latency::ProbeSession to the audio thread
-//   through one atomic pointer. Each callback then calls its beginCallback(),
-//   on the Through path mixes the probe into its strip and fades the other
-//   strips' inputs out (processBlock), and after the engine (and the guard /
-//   trim) lets it replace or cap the outputs and record the inputs
-//   (ProbeSession::process). Once finished() the message thread takes it back
-//   (takeLatencyProbe: the pointer is cleared and the host waits for one
-//   callback to pass, as for a capture slot), so the audio thread never frees
-//   it. While the loopback guard holds the output, the probe stays silent
-//   (it still advances and records, so the session ends).
+//   startLatencyProbe() hands one or two latency::ProbeSessions (Both: device
+//   only, then through Flubsound, chained) to the audio thread, one atomic
+//   pointer per slot, published in order. Each callback plays the first
+//   session that is still playing, so the second starts in the callback
+//   after the first ends (no gap the message thread's poll could cause): it
+//   calls its beginCallback(), on the Through path mixes the probe into its
+//   strip and fades the other strips' inputs out (processBlock), and after
+//   the engine (and the guard / trim) lets it replace, or gate and cap, the
+//   outputs and record the inputs (ProbeSession::process). Once the first
+//   session finished() the message thread takes it back (takeLatencyProbe:
+//   its pointer is cleared and the host waits for one callback to pass, as
+//   for a capture slot, seq_cst on both sides), so the audio thread never
+//   frees one; the slots never move. While the loopback guard holds the
+//   output, the probe stays silent (it still advances and records, so the
+//   session ends).
 #pragma once
 
 #include "BufferPolicy.h"
@@ -869,9 +878,21 @@ public:
         itself on device changes; public for tests. */
     bool applyBufferPolicy();
 
-    /** The back-off's step: the next available size above the current one
-        (at most the device's default) becomes the device's floor and is
-        applied. False at the top, while not automatic or not managed. */
+    /** Upgrading from a version without "Automatic buffer size" (the setting
+        is not stored yet): the next device open decides it. A buffer size
+        other than the device's default that the device opened at from the
+        saved state was the user's pick in Settings > Audio (the app never
+        asked for a size before docs/11 E42c), so Automatic starts off and
+        keeps it; otherwise on (and the profile's size applies at once).
+        onBufferChoiceChanged reports the decision. */
+    void setAutomaticBufferSizeFromSavedState();
+    /** True until that decision is made. */
+    bool isAutomaticBufferSizePending() const noexcept { return autoBufferPending; }
+
+    /** The back-off's step: the smallest available size of at least twice
+        the current one (at most the device's default) becomes the device's
+        floor and is applied. False at the top, while not automatic or not
+        managed. */
     bool raiseBufferOneStep();
 
     /** The back-off floors by device (bufferDeviceKey), for persistence. */
@@ -882,26 +903,33 @@ public:
     /** False for the types whose buffer the host leaves alone (see DEVICE BUFFER SIZE). */
     static bool managesBufferSize (const juce::String& deviceTypeName);
 
-    /** Called on the message thread when raiseBufferOneStep() changed a floor. */
+    /** Called on the message thread when raiseBufferOneStep() changed a
+        floor, or when setAutomaticBufferSizeFromSavedState() was decided. */
     std::function<void()> onBufferChoiceChanged;
 
     // =========================================================================
     // Latency probe (message thread; see LATENCY PROBE)
     // =========================================================================
-    /** Plays and records `session` from the next device callback on. False
-        (the session is not taken) while another one is handed over or no
-        device runs. */
+    static constexpr int kMaxProbeSessions = 2;
+    /** Plays and records `sessions` (1 or 2) one after the other from the
+        next device callback on; the second starts in the callback after the
+        first ends (chain them with ProbeSession::chainTo). False (nothing is
+        taken) while sessions are handed over or no device runs. */
+    bool startLatencyProbe (std::vector<std::unique_ptr<latency::ProbeSession>>& sessions);
+    /** One session (taken, `session` left empty, on success). */
     bool startLatencyProbe (std::unique_ptr<latency::ProbeSession>& session);
-    /** The session handed over (nullptr when none): progress and finished(). */
-    const latency::ProbeSession* getLatencyProbe() const noexcept { return probeOwned.get(); }
-    /** False once the device stopped or closed under the session (it no
+    /** The first session still handed over (nullptr when none): progress and
+        finished(). */
+    const latency::ProbeSession* getLatencyProbe() const noexcept;
+    /** False once the device stopped or closed under that session (it no
         longer advances; takeLatencyProbe hands it back unfinished). */
-    bool isLatencyProbeLive() const noexcept { return probeLive.load (std::memory_order_acquire) != nullptr; }
-    /** Asks the running session to fade out and finish. */
+    bool isLatencyProbeLive() const noexcept;
+    /** Asks every session handed over to fade out and finish (one that has
+        not played yet ends at once). */
     void cancelLatencyProbe() noexcept;
-    /** Takes the session back once it finished (or the device stopped):
-        after the audio thread has provably let go of it. nullptr while it
-        still runs. */
+    /** Takes the first session back once it finished (or the device
+        stopped): after the audio thread has provably let go of it. nullptr
+        while it still runs. The next one (if any) is then the first. */
     std::unique_ptr<latency::ProbeSession> takeLatencyProbe();
 
     // =========================================================================
@@ -1128,7 +1156,8 @@ private:
     std::array<int, flub::kMaxChannels> stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept;
 
     // Device buffer size (DEVICE BUFFER SIZE), message thread.
-    bool autoBuffer = true;
+    bool autoBuffer = true, autoBufferPending = false;
+    void decidePendingAutomaticBuffer();
     flub::param::LatencyProfileValue bufferProfile = flub::param::LatencyProfileValue::Balanced;
     std::map<juce::String, int> bufferFloors;
     juce::String lastBufferAttempt; // device|rate|target last asked for (not again)
@@ -1136,9 +1165,12 @@ private:
     std::atomic<int> deviceInputChannels { 0 }; // set at device start (any thread)
 
     // Latency probe (LATENCY PROBE): owned here, read by the audio thread
-    // through `probeLive` while handed over.
-    std::unique_ptr<latency::ProbeSession> probeOwned;
-    std::atomic<latency::ProbeSession*> probeLive { nullptr };
+    // through `probeLive` while handed over (slot i holds the i-th session;
+    // the slots never move).
+    std::array<std::unique_ptr<latency::ProbeSession>, kMaxProbeSessions> probeOwned;
+    std::array<std::atomic<latency::ProbeSession*>, kMaxProbeSessions> probeLive {};
+    int probeFront() const noexcept; // the first slot still owned, -1 when none
+    void unpublishLatencyProbes() noexcept;
     latency::ProbeSession* probeInBlock = nullptr; // audio thread: the session processBlock mixes into the strips
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioEngineHost)

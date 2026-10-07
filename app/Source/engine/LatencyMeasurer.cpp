@@ -61,27 +61,42 @@ juce::String LatencyMeasurer::start (const Request& r)
 
     request = r;
     cancelling = false;
+    failure.clear();
     plan.clear();
     if (r.mode != Mode::ThroughFlubsound)
         plan.push_back (latency::Path::DeviceOnly);
     if (r.mode != Mode::DeviceOnly)
         plan.push_back (latency::Path::ThroughFlubsound);
-    planIndex = 0;
     passes.clear();
     playedBefore = 0;
-    totalSamples = flub::latency::probeLength (settingsFor (request, host.getSampleRate())) * static_cast<int64_t> (plan.size());
+    const auto probeSettings = settingsFor (request, host.getSampleRate());
+    totalSamples = flub::latency::probeLength (probeSettings) * static_cast<int64_t> (plan.size());
+
+    // Every pass is handed over at once, chained (Both: device only, then
+    // through Flubsound from the very next callback), so the programme never
+    // plays between them and no poll can delay the second.
+    context = snapshot();
+    glitchesAtLastPoll = context.glitchesBefore;
+    const int channels = std::min (host.getDeviceInputChannels(), latency::ProbeSession::kMaxRecordChannels);
+    std::vector<std::unique_ptr<latency::ProbeSession>> sessions;
+    for (const auto path : plan)
+    {
+        sessions.push_back (std::make_unique<latency::ProbeSession> (probeSettings, path, request.strip, channels));
+        if (path == latency::Path::ThroughFlubsound)
+            sessions.back()->setOutputLatency (context.stripLatencySamples);
+    }
+    if (sessions.size() == 2)
+        sessions.front()->chainTo (*sessions.back());
 
     const auto generation = state.generation;
     state = {};
     state.generation = generation + 1;
     state.mode = r.mode;
     state.passes = static_cast<int> (plan.size());
-    state.phase = Phase::Running;
-    if (! startPass (plan.front()))
-    {
-        state.phase = Phase::Idle;
+    if (! host.startLatencyProbe (sessions))
         return "The audio device did not take the measurement (it may have just restarted). Try again.";
-    }
+    state.phase = Phase::Running;
+    state.pass = 1;
     return {};
 }
 
@@ -106,18 +121,6 @@ latency::DeviceContext LatencyMeasurer::snapshot() const
     c.captureBufferMs = host.getLatencyInfo().captureBufferMs;
     c.glitchesBefore = status.deviceOpen ? static_cast<int64_t> (status.glitches) : -1;
     return c;
-}
-
-bool LatencyMeasurer::startPass (latency::Path path)
-{
-    const int channels = std::min (host.getDeviceInputChannels(), latency::ProbeSession::kMaxRecordChannels);
-    auto session = std::make_unique<latency::ProbeSession> (settingsFor (request, host.getSampleRate()), path, request.strip, channels);
-    context = snapshot();
-    if (! host.startLatencyProbe (session))
-        return false;
-    state.pass = static_cast<int> (planIndex) + 1;
-    ++state.generation;
-    return true;
 }
 
 void LatencyMeasurer::cancel()
@@ -150,60 +153,81 @@ bool LatencyMeasurer::poll()
     if (state.phase != Phase::Running)
         return false;
 
-    const auto* session = host.getLatencyProbe();
-    if (session == nullptr)
+    bool changed = false;
+    const auto now = host.getStatus();
+    const int64_t glitchesNow = now.deviceOpen ? static_cast<int64_t> (now.glitches) : -1;
+    for (;;)
     {
-        fail ("The measurement was lost (the audio device restarted). Measure again.");
-        return true;
+        const auto* session = host.getLatencyProbe();
+        if (session == nullptr)
+            break; // every pass handed back
+
+        // Progress over every pass.
+        if (failure.isEmpty())
+        {
+            const double rate = std::max (1.0, host.getSampleRate());
+            const int64_t played = playedBefore + session->position();
+            const double progress = totalSamples > 0 ? std::clamp (static_cast<double> (played) / static_cast<double> (totalSamples), 0.0, 1.0) : 0.0;
+            changed = changed || std::abs (progress - state.progress) > 1.0e-9;
+            state.progress = progress;
+            state.secondsLeft = static_cast<double> (std::max<int64_t> (0, totalSamples - played)) / rate;
+        }
+
+        // The device stopped, closed or restarted under it (a device, rate or
+        // buffer change, a re-open): the session no longer advances.
+        const bool stopped = ! host.getStatus().running || ! host.isLatencyProbeLive();
+        if (! session->finished() && ! stopped)
+            break;
+        auto taken = host.takeLatencyProbe();
+        if (taken == nullptr)
+            break; // the audio thread has not let go yet: next poll
+        changed = true;
+
+        // After a cancel or a stop the rest is only handed back (a pass that
+        // had not started ends at its first callback).
+        if (failure.isNotEmpty())
+            continue;
+        if (cancelling || taken->wasCancelled())
+        {
+            failure = "Cancelled.";
+            host.cancelLatencyProbe();
+            continue;
+        }
+        if (! taken->finished())
+        {
+            failure = "The audio device stopped during the measurement (a device, rate or buffer change). Measure again.";
+            continue;
+        }
+
+        // A pass recorded; the next one (chained) is already playing. It ended
+        // between the last poll and this one, so a glitch in between counts
+        // for both passes (a warning too many rather than one missed).
+        auto passContext = context;
+        passContext.glitchesAfter = glitchesNow;
+        context.glitchesBefore = glitchesAtLastPoll;
+        playedBefore += taken->length();
+        passes.emplace_back (std::move (taken), passContext);
+        state.pass = std::min (static_cast<int> (passes.size()) + 1, state.passes);
     }
 
-    // Progress over every pass.
-    const double rate = std::max (1.0, host.getSampleRate());
-    const int64_t played = playedBefore + session->position();
-    const double progress = totalSamples > 0 ? std::clamp (static_cast<double> (played) / static_cast<double> (totalSamples), 0.0, 1.0) : 0.0;
-    const double left = static_cast<double> (std::max<int64_t> (0, totalSamples - played)) / rate;
-    bool changed = std::abs (progress - state.progress) > 1.0e-9;
-    state.progress = progress;
-    state.secondsLeft = left;
-
-    const bool finished = session->finished();
-    // The device stopped, closed or restarted under it (a device, rate or
-    // buffer change, a re-open): the session no longer advances.
-    const bool stopped = ! host.getStatus().running || ! host.isLatencyProbeLive();
-    if (! finished && ! stopped)
+    if (host.getLatencyProbe() != nullptr)
     {
+        glitchesAtLastPoll = glitchesNow;
         if (changed)
             ++state.generation;
         return changed;
     }
-
-    auto taken = host.takeLatencyProbe();
-    if (taken == nullptr)
-        return changed; // the audio thread has not let go yet: next poll
-    if (cancelling || taken->wasCancelled())
+    if (failure.isNotEmpty())
     {
-        fail ("Cancelled.");
+        fail (failure);
         return true;
     }
-    if (! taken->finished())
+    if (passes.size() < plan.size())
     {
-        fail ("The audio device stopped during the measurement (a device, rate or buffer change). Measure again.");
+        fail ("The measurement was lost (the audio device restarted). Measure again.");
         return true;
     }
-
-    const auto status = host.getStatus();
-    context.glitchesAfter = status.deviceOpen ? static_cast<int64_t> (status.glitches) : -1;
-    playedBefore += taken->length();
-    passes.emplace_back (std::move (taken), context);
-    ++planIndex;
     ++state.generation;
-
-    if (planIndex < plan.size())
-    {
-        if (! startPass (plan[planIndex]))
-            fail ("The audio device did not take the second pass (it may have restarted). Measure again.");
-        return true;
-    }
 
     // Every pass recorded: analyse them off the message thread.
     state.phase = Phase::Analysing;

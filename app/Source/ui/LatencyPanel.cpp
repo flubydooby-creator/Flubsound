@@ -48,7 +48,7 @@ LatencyPanel::LatencyPanel (EngineController& c)
     Style::set (automaticToggle, "switch");
     automaticToggle.setTitle ("Automatic buffer size");
     automaticToggle.setTooltip ("On: Low Latency asks the device for its smallest buffer (at least 1.3 ms), Balanced for about 5 ms, "
-                                "Quality for its default; dropouts raise it one size. Off: the buffer size chosen in the list above stays.");
+                                "Quality for its default; dropouts raise it (to at least twice the size). Off: the buffer size chosen in the list above stays.");
     automaticToggle.onClick = [this]
     {
         controller.setAutomaticBufferSize (automaticToggle.getToggleState());

@@ -67,8 +67,12 @@
 // Buffer /     the device buffer follows the profile chosen by hand
 //   latency    (docs/11 E42c, AudioEngineHost DEVICE BUFFER SIZE):
 //              setAutomaticBufferSize(), getBufferInfo(); glitches raise it
-//              one size (buffer::Backoff, from the watchdog's poll; the floor
-//              is persisted per device). The live latency measurement
+//              to at least twice the size (buffer::Backoff, from the
+//              watchdog's poll; the floor is persisted per device); the
+//              profile chosen by hand is persisted on its own
+//              (device.bufferProfile), so a restart after the overload
+//              response's step keeps the buffer; a first start without the
+//              switch stored lets the saved device state decide it. The live latency measurement
 //              (docs/11 E42d, LatencyMeasurer): startLatencyMeasurement(),
 //              cancelLatencyMeasurement(), getLatencyMeasurement(),
 //              whyCannotMeasureLatency(); polled by the timer, the result

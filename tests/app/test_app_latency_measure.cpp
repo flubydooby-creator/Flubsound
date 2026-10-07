@@ -17,8 +17,13 @@
 //     are reported as such, never as a confident number; the probe allocates
 //     nothing on the audio thread, stays silent while the feedback-loop guard
 //     holds the output, and a cancel fades it out within 5 ms.
+//   * The measurement with a loud programme playing on the strip: Through and
+//     Both play only the sweeps (the output gate holds the programme's tail,
+//     the passes are chained), the -18 dBFS cap stays off unless the strip
+//     raises the sweep, and a cancel brings the programme back without a step.
 //   * EngineController: Automatic and the floors persisted, the profile
-//     chosen by hand (never the overload response's) drives the buffer, the
+//     chosen by hand (never the overload response's, also after a restart)
+//     drives the buffer, the upgrade from a version without Automatic, the
 //     back-off from the watchdog's glitches; the Settings > Audio panel.
 #include "AppTestSupport.h"
 
@@ -40,8 +45,10 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace flub::app;
@@ -203,9 +210,13 @@ struct BufferRig
         saved.setAttribute ("deviceType", "BufferBackend");
         saved.setAttribute ("audioOutputDeviceName", output);
         saved.setAttribute ("audioInputDeviceName", kStealthMic);
-        saved.setAttribute ("audioDeviceBufferSize", 480); // what a state saved before docs/11 E42c holds
+        // What a state saved before docs/11 E42c holds when the user never
+        // picked a size: the device's default (JUCE saves the size it ran at).
+        saved.setAttribute ("audioDeviceBufferSize", savedBufferSize);
         return host.openDevice (&saved, 2, 2);
     }
+
+    int savedBufferSize = 480;
 
     int buffer() { return host.getDeviceManager().getCurrentAudioDevice()->getCurrentBufferSizeSamples(); }
 };
@@ -219,7 +230,7 @@ public:
     LoopDevice() : juce::AudioIODevice ("Loop Out", "Fake") {}
 
     juce::StringArray getOutputChannelNames() override { return { "Left", "Right" }; }
-    juce::StringArray getInputChannelNames() override { return { "In 1", "In 2" }; }
+    juce::StringArray getInputChannelNames() override { return { "In 1", "In 2", "In 3", "In 4" }; }
     juce::Array<double> getAvailableSampleRates() override { return { 48000.0 }; }
     juce::Array<int> getAvailableBufferSizes() override { return { kBlock }; }
     int getDefaultBufferSize() override { return kBlock; }
@@ -234,15 +245,17 @@ public:
     double getCurrentSampleRate() override { return 48000.0; }
     int getCurrentBitDepth() override { return 32; }
     juce::BigInteger getActiveOutputChannels() const override { return juce::BigInteger (0x3); }
-    juce::BigInteger getActiveInputChannels() const override { return juce::BigInteger (inputs ? 0x3 : 0x0); }
+    juce::BigInteger getActiveInputChannels() const override { return juce::BigInteger (inputs ? (programmeInputs ? 0xF : 0x3) : 0x0); }
     int getOutputLatencyInSamples() override { return 2 * kBlock; }
     int getInputLatencyInSamples() override { return kBlock; }
 
     bool inputs = true;
+    bool programmeInputs = false; // inputs 3 / 4: a programme (a virtual cable's), routed to a strip by the test
 };
 
 /** The device's audio thread: input = loopGain x the output `delay` samples
-    ago (+ an echo, + white noise), as fast as it can. */
+    ago (+ an echo, + white noise), as fast as it can. With programmeAmp > 0
+    inputs 3 / 4 carry a 440 Hz sine of that amplitude (the programme). */
 struct LoopRig
 {
     AudioEngineHost& host;
@@ -251,8 +264,12 @@ struct LoopRig
     float echoGain = 0.0f;
     int echoDelay = 960;        // after the direct path
     float noiseRms = 0.0f;
+    float programmeAmp = 0.0f;  // inputs 3 / 4
     std::vector<float> history; // output channel 0
     std::atomic<bool> stop { false };
+    std::atomic<int64_t> played { 0 };                                   // samples so far
+    std::atomic<int64_t> pauseAt { std::numeric_limits<int64_t>::max() }; // the rig waits here (before a block)
+    std::atomic<bool> paused { false };
     std::thread thread;
 
     explicit LoopRig (AudioEngineHost& h) : host (h) { history.reserve (48000 * 60); }
@@ -262,13 +279,23 @@ struct LoopRig
     {
         thread = std::thread ([this]
         {
-            std::array<std::vector<float>, 2> in { std::vector<float> (kBlock), std::vector<float> (kBlock) };
+            std::array<std::vector<float>, 4> in { std::vector<float> (kBlock), std::vector<float> (kBlock), std::vector<float> (kBlock),
+                                                   std::vector<float> (kBlock) };
             std::array<std::vector<float>, 2> out { std::vector<float> (kBlock), std::vector<float> (kBlock) };
             juce::Random rng (12345);
             const float noiseScale = noiseRms * std::sqrt (3.0f);
+            const int numIns = programmeAmp > 0.0f ? 4 : 2;
             int64_t t = 0;
             while (! stop.load (std::memory_order_relaxed))
             {
+                if (t >= pauseAt.load (std::memory_order_acquire))
+                {
+                    paused.store (true, std::memory_order_release);
+                    while (t >= pauseAt.load (std::memory_order_acquire) && ! stop.load (std::memory_order_relaxed))
+                        std::this_thread::yield();
+                    paused.store (false, std::memory_order_release);
+                    continue;
+                }
                 for (int i = 0; i < kBlock; ++i)
                 {
                     const auto at = [this] (int64_t index) { return index >= 0 && index < static_cast<int64_t> (history.size()) ? history[static_cast<size_t> (index)] : 0.0f; };
@@ -277,14 +304,33 @@ struct LoopRig
                                     + noiseScale * (2.0f * rng.nextFloat() - 1.0f);
                     in[0][static_cast<size_t> (i)] = v;
                     in[1][static_cast<size_t> (i)] = v;
+                    const float p = programmeAmp * static_cast<float> (std::sin (2.0 * 3.141592653589793 * 440.0 * static_cast<double> (now) / 48000.0));
+                    in[2][static_cast<size_t> (i)] = p;
+                    in[3][static_cast<size_t> (i)] = p;
                 }
-                const std::array<const float*, 2> ins { in[0].data(), in[1].data() };
+                const std::array<const float*, 4> ins { in[0].data(), in[1].data(), in[2].data(), in[3].data() };
                 const std::array<float*, 2> outs { out[0].data(), out[1].data() };
-                host.audioDeviceIOCallbackWithContext (ins.data(), 2, outs.data(), 2, kBlock, juce::AudioIODeviceCallbackContext {});
+                host.audioDeviceIOCallbackWithContext (ins.data(), numIns, outs.data(), 2, kBlock, juce::AudioIODeviceCallbackContext {});
                 history.insert (history.end(), out[0].begin(), out[0].end());
                 t += kBlock;
+                played.store (t, std::memory_order_relaxed);
             }
         });
+    }
+
+    /** Plays `samples` more (from now, or from a pause), then pauses. */
+    void playThenPause (int64_t samples)
+    {
+        pauseAt.store (played.load (std::memory_order_acquire) + samples, std::memory_order_release);
+        flubapptest::pumpMessagesUntil ([this] { return paused.load (std::memory_order_acquire); }, 5000);
+    }
+    void resume() { pauseAt.store (std::numeric_limits<int64_t>::max(), std::memory_order_release); }
+
+    /** Lets the rig play `samples` more (the engine settles, a tail decays). */
+    void playFor (int64_t samples)
+    {
+        const int64_t until = played.load (std::memory_order_relaxed) + samples;
+        flubapptest::pumpMessagesUntil ([this, until] { return played.load (std::memory_order_relaxed) >= until; }, 5000);
     }
 
     void halt()
@@ -304,6 +350,43 @@ flub::latency::ProbeSettings quickProbe()
     s.leadInSeconds = 0.1;
     s.runs = 5;
     return s;
+}
+
+/** [begin, end) runs of at least minLength samples in which |x| <= threshold. */
+std::vector<std::pair<size_t, size_t>> quietRuns (const std::vector<float>& x, float threshold, size_t minLength)
+{
+    std::vector<std::pair<size_t, size_t>> runs;
+    size_t begin = 0;
+    for (size_t i = 0; i <= x.size(); ++i)
+    {
+        if (i < x.size() && std::abs (x[i]) <= threshold)
+            continue;
+        if (i - begin >= minLength)
+            runs.emplace_back (begin, i);
+        begin = i + 1;
+    }
+    return runs;
+}
+
+float peakIn (const std::vector<float>& x, size_t begin, size_t end)
+{
+    float p = 0.0f;
+    for (size_t i = begin; i < std::min (end, x.size()); ++i)
+        p = std::max (p, std::abs (x[i]));
+    return p;
+}
+
+float maxStepIn (const std::vector<float>& x, size_t begin, size_t end)
+{
+    float s = 0.0f;
+    for (size_t i = std::max<size_t> (begin, 1); i < std::min (end, x.size()); ++i)
+        s = std::max (s, std::abs (x[i] - x[i - 1]));
+    return s;
+}
+
+double dbfs (double v)
+{
+    return 20.0 * std::log10 (std::max (v, 1.0e-9));
 }
 
 bool runUntilFinished (LatencyMeasurer& m, int timeoutMs = 10000)
@@ -376,11 +459,19 @@ TEST_CASE ("App: E42c buffer choice per latency profile on real devices' lists (
     CHECK (choose (Profile::Balanced, hdAudioSizes(), 480, 48000.0, 160).samples == 256); // above the floor anyway
     CHECK (choose (Profile::LowLatency, hdAudioSizes(), 480, 48000.0, 4096).samples == 480);
 
-    // The back-off's step: one size up, at most the default.
-    CHECK (buffer::nextLarger (hdAudioSizes(), 128, 480) == 160);
+    // The back-off's step: at least twice the size, at most the default (a
+    // 32-sample step at a time took about a minute of dropouts from 64 to
+    // 512 on a CoreAudio list; now three steps).
+    CHECK (buffer::nextLarger (hdAudioSizes(), 128, 480) == 256);
+    CHECK (buffer::nextLarger (hdAudioSizes(), 256, 480) == 480);
     CHECK (buffer::nextLarger (hdAudioSizes(), 448, 480) == 480);
     CHECK (! buffer::nextLarger (hdAudioSizes(), 480, 480).has_value());
     CHECK (! buffer::nextLarger ({ 480 }, 480, 480).has_value());
+    CHECK (buffer::nextLarger (coreAudio, 64, 512) == 128);
+    CHECK (buffer::nextLarger (coreAudio, 128, 512) == 256);
+    CHECK (buffer::nextLarger (coreAudio, 256, 512) == 512);
+    CHECK (! buffer::nextLarger (coreAudio, 512, 512).has_value());
+    CHECK (buffer::nextLarger (exclusiveSizes(), 144, 480) == 288);
 
     // Device types whose buffer the app leaves alone.
     CHECK (AudioEngineHost::managesBufferSize ("Windows Audio (Low Latency Mode)"));
@@ -393,7 +484,7 @@ TEST_CASE ("App: E42c buffer choice per latency profile on real devices' lists (
     CHECK (! AudioEngineHost::managesBufferSize ("PipeWire"));
 }
 
-TEST_CASE ("App: E42c back-off: more than 2 glitches within 10 s (or a sustained overload) raise the buffer, then it holds 10 s")
+TEST_CASE ("App: E42c back-off: more than 2 glitches within 10 s (or a sustained overload) raise the buffer, then it holds 5 s")
 {
     buffer::Backoff b;
     uint64_t glitches = 0;
@@ -411,26 +502,27 @@ TEST_CASE ("App: E42c back-off: more than 2 glitches within 10 s (or a sustained
     CHECK (! poll (1));
     CHECK (! poll (1));
     CHECK (poll (1));
-    // Then 20 polls (10 s) of hold: the device restart's own glitches do not count.
-    for (int i = 0; i < 20; ++i)
+    // Then 10 polls (5 s) of hold: the device restart's own glitches do not count.
+    CHECK (b.getConfig().holdPolls == 10);
+    for (int i = 0; i < 10; ++i)
         CHECK (! poll (5));
     CHECK (! poll (1));
     CHECK (! poll (1));
     CHECK (poll (1));
     // A sustained overload steps at once (after the hold).
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 10; ++i)
         poll (0);
     CHECK (poll (0, true));
     CHECK (b.getSteps() == 3);
 
     // A stopped device (and a restart by the profile) starts a hold.
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 10; ++i)
         poll (0);
     CHECK (! b.update (false, glitches, false));
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 10; ++i)
         CHECK (! poll (3));
     b.restarted();
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 10; ++i)
         CHECK (! poll (3, true));
     CHECK (poll (3));
 }
@@ -477,17 +569,17 @@ TEST_CASE ("App: E42c the host asks for the profile's buffer; Automatic off keep
     rig.host.setAutomaticBufferSize (true);
     CHECK (rig.buffer() == 128);
 
-    // The back-off: one size up, remembered as this device's floor.
+    // The back-off: twice the size, remembered as this device's floor.
     CHECK (rig.host.raiseBufferOneStep());
-    CHECK (rig.buffer() == 160);
+    CHECK (rig.buffer() == 256);
     CHECK (rig.host.getBufferInfo().reason == Reason::Floor);
     const auto key = AudioEngineHost::bufferDeviceKey ("BufferBackend", kHdAudio);
     REQUIRE (rig.host.getBufferFloors().count (key) == 1);
-    CHECK (rig.host.getBufferFloors().at (key) == 160);
-    rig.host.setBufferProfile (Profile::Balanced);
-    CHECK (rig.buffer() == 256); // above the floor
+    CHECK (rig.host.getBufferFloors().at (key) == 256);
+    rig.host.setBufferProfile (Profile::Quality);
+    CHECK (rig.buffer() == 480); // above the floor
     rig.host.setBufferProfile (Profile::LowLatency);
-    CHECK (rig.buffer() == 160);
+    CHECK (rig.buffer() == 256);
     // Off and on again forgets the floor.
     rig.host.setAutomaticBufferSize (false);
     rig.host.setAutomaticBufferSize (true);
@@ -521,6 +613,46 @@ TEST_CASE ("App: E42c a device with one buffer size (the Stealth 600PC Gen 3 don
     CHECK (text.contains ("Buffer 480 samples (10.0 ms)"));
     CHECK (text.contains ("offers only this size"));
     CHECK (text.contains ("device out 10.0 ms + engine 5.4 ms + device in 10.0 ms"));
+}
+
+TEST_CASE ("App: E42c upgrading: a buffer size picked before Automatic existed keeps it off; a device at its default turns it on")
+{
+    {
+        // The user had picked 320 samples in Settings > Audio: JUCE saved the
+        // size the device ran at, and the app never asked for one before.
+        BufferRig rig;
+        rig.host.setBufferProfile (Profile::LowLatency);
+        int decided = 0;
+        rig.host.onBufferChoiceChanged = [&decided] { ++decided; };
+        rig.host.setAutomaticBufferSizeFromSavedState();
+        CHECK (rig.host.isAutomaticBufferSizePending());
+        CHECK (! rig.host.raiseBufferOneStep());
+        rig.savedBufferSize = 320;
+        REQUIRE (rig.open (kHdAudio).isEmpty());
+        CHECK (! rig.host.isAutomaticBufferSizePending());
+        CHECK (! rig.host.getAutomaticBufferSize());
+        CHECK (decided == 1);
+        CHECK (rig.buffer() == 320);
+        rig.host.setBufferProfile (Profile::Balanced);
+        CHECK (rig.buffer() == 320);
+    }
+    {
+        // Never picked: the saved state holds the device's default, 480.
+        BufferRig rig;
+        rig.host.setBufferProfile (Profile::LowLatency);
+        rig.host.setAutomaticBufferSizeFromSavedState();
+        REQUIRE (rig.open (kHdAudio).isEmpty());
+        CHECK (rig.host.getAutomaticBufferSize());
+        CHECK (rig.buffer() == 128);
+    }
+    {
+        // The Stealth's dongle offers 480 only: on (nothing to choose anyway).
+        BufferRig rig;
+        rig.host.setAutomaticBufferSizeFromSavedState();
+        REQUIRE (rig.open (kStealth).isEmpty());
+        CHECK (rig.host.getAutomaticBufferSize());
+        CHECK (rig.buffer() == 480);
+    }
 }
 
 // =============================================================================
@@ -579,6 +711,7 @@ TEST_CASE ("App: E42d live measurement through a fake loopback finds the round t
     CHECK (thr.playbackMinMs <= thr.playbackMs);
     CHECK (thr.playbackMs <= thr.playbackMaxMs);
     CHECK (thr.capGainDb == 0.0); // the strip did not raise the -24 dBFS sweep past -18 dBFS
+    CHECK (thr.capBeforeSweepDb == 0.0);
 
     const auto text = st.describe();
     CHECK (text.contains ("Device only"));
@@ -591,6 +724,262 @@ TEST_CASE ("App: E42d live measurement through a fake loopback finds the round t
               << juce::String (thr.roundTripSamples, 3) << " smp (engine " << engine << ", measured "
               << juce::String (thr.roundTripSamples - dev.roundTripSamples, 3) << "); SNR " << juce::String (dev.result.medianSnrDb, 1)
               << " dB, strongest other arrival " << juce::String (dev.result.secondaryDb, 1) << " dB\n";
+}
+
+TEST_CASE ("App: E42d through Flubsound with a loud programme on the strip: only the sweeps play and the cap stays off")
+{
+    AudioEngineHost host;
+    LoopDevice device;
+    device.programmeInputs = true;
+    host.audioDeviceAboutToStart (&device);
+    host.setDeviceInputRouting (1, 2); // the Music strip plays inputs 3 / 4 (a virtual cable's programme)
+    const int engine = host.getMixEngine().getStripLatencySamples (1);
+    const auto passLength = static_cast<size_t> (flub::latency::probeLength (quickProbe()));
+
+    LoopRig rig (host);
+    rig.noiseRms = 3.0e-4f;
+    rig.programmeAmp = 0.9f;
+    rig.start();
+    rig.playFor (24000); // the programme plays
+    LatencyMeasurer measurer (host);
+    LatencyMeasurer::Request request;
+    request.mode = LatencyMeasurer::Mode::ThroughFlubsound;
+    request.strip = 1;
+    request.stripName = "Music";
+    request.settings = quickProbe();
+    REQUIRE (measurer.start (request).isEmpty());
+    REQUIRE (runUntilFinished (measurer));
+    rig.playFor (24000); // the programme is back
+    rig.halt();
+
+    const auto& st = measurer.getState();
+    REQUIRE (st.phase == LatencyMeasurer::Phase::Done);
+    REQUIRE (st.through.has_value());
+    const auto& thr = *st.through;
+    REQUIRE (thr.ok);
+    CHECK_NEAR (thr.roundTripSamples, 1512.0 + engine, 0.5);
+    CHECK (thr.confidence == latency::Confidence::High);
+    // The programme's tail never reaches the cap (before the output gate it
+    // set it to -12 .. -17 dB and the sweeps came out that much lower).
+    CHECK (thr.capGainDb == 0.0);
+    CHECK (thr.capBeforeSweepDb == 0.0);
+    CHECK (! st.describe().contains ("safety cap"));
+
+    // The output: the programme, then only the sweeps (one quiet stretch as
+    // long as the pass, from the gate's 5 ms fade), then the programme.
+    const auto& out = rig.history;
+    const float programmePeak = peakIn (out, 12000, 24000);
+    REQUIRE (programmePeak > 0.4f);
+    const auto runs = quietRuns (out, 0.25f, 24000);
+    REQUIRE (runs.size() == 1);
+    const auto [begin, end] = runs.front();
+    CHECK (end - begin >= passLength - 512);
+    CHECK (end - begin <= passLength + static_cast<size_t> (engine) + 2048);
+    // The sweeps at their own level: -24 dBFS into the strip.
+    const float sweepPeak = peakIn (out, end - passLength / 2, end - static_cast<size_t> (engine) - 4800);
+    CHECK (dbfs (sweepPeak) > -27.0);
+    CHECK (dbfs (sweepPeak) < -18.0);
+    std::cout << "    programme " << juce::String (dbfs (programmePeak), 1) << " dBFS on the Music strip; through Flubsound: cap "
+              << juce::String (thr.capGainDb, 2) << " dB, sweeps at the output " << juce::String (dbfs (sweepPeak), 1)
+              << " dBFS, round trip " << juce::String (thr.roundTripSamples, 3) << " smp, SNR " << juce::String (thr.result.medianSnrDb, 1)
+              << " dB\n";
+}
+
+TEST_CASE ("App: E42d both passes with a loud programme on the strip: the passes are chained and nothing plays between them")
+{
+    AudioEngineHost host;
+    LoopDevice device;
+    device.programmeInputs = true;
+    host.audioDeviceAboutToStart (&device);
+    host.setDeviceInputRouting (1, 2);
+    const int engine = host.getMixEngine().getStripLatencySamples (1);
+    const auto passLength = static_cast<size_t> (flub::latency::probeLength (quickProbe()));
+
+    LoopRig rig (host);
+    rig.noiseRms = 3.0e-4f;
+    rig.programmeAmp = 0.9f;
+    rig.start();
+    rig.playFor (24000);
+    LatencyMeasurer measurer (host);
+    LatencyMeasurer::Request request;
+    request.mode = LatencyMeasurer::Mode::Both;
+    request.strip = 1;
+    request.stripName = "Music";
+    request.settings = quickProbe();
+    REQUIRE (measurer.start (request).isEmpty());
+    REQUIRE (runUntilFinished (measurer));
+    rig.playFor (24000);
+    rig.halt();
+
+    const auto& st = measurer.getState();
+    REQUIRE (st.phase == LatencyMeasurer::Phase::Done);
+    REQUIRE (st.deviceOnly.has_value());
+    REQUIRE (st.through.has_value());
+    REQUIRE (st.deviceOnly->ok);
+    REQUIRE (st.through->ok);
+    CHECK_NEAR (st.deviceOnly->roundTripSamples, 1512.0, 0.5);
+    CHECK_NEAR (st.through->roundTripSamples - st.deviceOnly->roundTripSamples, static_cast<double> (engine), 0.5);
+    CHECK (st.through->capGainDb == 0.0);
+    CHECK (st.deviceOnly->confidence == latency::Confidence::High);
+    CHECK (st.through->confidence == latency::Confidence::High);
+
+    // One quiet stretch over both passes: the programme never came back
+    // between them (before, the 2 Hz poll started the second pass 0 .. 500 ms
+    // after the first ended, with the programme at full level meanwhile).
+    const auto& out = rig.history;
+    const float programmePeak = peakIn (out, 12000, 24000);
+    REQUIRE (programmePeak > 0.4f);
+    const auto runs = quietRuns (out, 0.25f, 4800);
+    REQUIRE (runs.size() == 1);
+    const auto [begin, end] = runs.front();
+    CHECK (end - begin >= 2 * passLength - 512);
+    CHECK (end - begin <= 2 * passLength + static_cast<size_t> (engine) + 2048);
+    const float devicePeak = peakIn (out, begin + passLength / 2, begin + passLength - 4800);
+    const float throughPeak = peakIn (out, end - passLength / 2, end - static_cast<size_t> (engine) - 4800);
+    CHECK_NEAR (dbfs (devicePeak), -24.0, 0.5);
+    CHECK (dbfs (throughPeak) > -27.0);
+    std::cout << "    both, programme " << juce::String (dbfs (programmePeak), 1) << " dBFS: one quiet stretch of "
+              << juce::String (static_cast<double> (end - begin) / 48.0, 1) << " ms for 2 x " << juce::String (static_cast<double> (passLength) / 48.0, 1)
+              << " ms of probe; sweeps device only " << juce::String (dbfs (devicePeak), 1) << " dBFS, through "
+              << juce::String (dbfs (throughPeak), 1) << " dBFS; cap " << juce::String (st.through->capGainDb, 2) << " dB\n";
+}
+
+TEST_CASE ("App: E42d through Flubsound a sweep the strip leaves above -18 dBFS is held there by the cap, and the result says so")
+{
+    AudioEngineHost host;
+    LoopDevice device;
+    host.audioDeviceAboutToStart (&device);
+    const int engine = host.getMixEngine().getStripLatencySamples (1);
+    LoopRig rig (host);
+    rig.noiseRms = 3.0e-4f;
+    rig.start();
+    LatencyMeasurer measurer (host);
+    LatencyMeasurer::Request request;
+    request.mode = LatencyMeasurer::Mode::ThroughFlubsound;
+    request.strip = 1;
+    request.stripName = "Music";
+    request.settings = quickProbe();
+    request.settings->levelDbfs = -6.0; // a strip that raises the sweep 18 dB, in effect
+    REQUIRE (measurer.start (request).isEmpty());
+    REQUIRE (runUntilFinished (measurer));
+    rig.halt();
+
+    const auto& st = measurer.getState();
+    REQUIRE (st.through.has_value());
+    const auto& thr = *st.through;
+    REQUIRE (thr.ok);
+    CHECK_NEAR (thr.roundTripSamples, 1512.0 + engine, 0.5);
+    const float peak = peakIn (rig.history, 0, rig.history.size());
+    CHECK (dbfs (peak) <= latency::kThroughCapDbfs + 0.01);
+    CHECK (thr.capGainDb < -3.0);
+    CHECK (thr.capBeforeSweepDb == 0.0);
+    CHECK (st.describe().contains ("the sweep left the strip above -18 dBFS"));
+    CHECK (! st.describe().contains ("left over"));
+    std::cout << "    a -6 dBFS sweep through the Music strip: output peak " << juce::String (dbfs (peak), 2) << " dBFS, cap "
+              << juce::String (thr.capGainDb, 2) << " dB, round trip " << juce::String (thr.roundTripSamples, 3) << " smp\n";
+}
+
+TEST_CASE ("App: E42d a cancel with a programme playing brings it back without a step: device only crossfades, through Flubsound reopens uncapped")
+{
+    AudioEngineHost host;
+    LoopDevice device;
+    device.programmeInputs = true;
+    host.audioDeviceAboutToStart (&device);
+    host.setDeviceInputRouting (1, 2);
+
+    for (const auto mode : { LatencyMeasurer::Mode::DeviceOnly, LatencyMeasurer::Mode::ThroughFlubsound })
+    {
+        LoopRig rig (host);
+        rig.programmeAmp = 0.9f;
+        rig.start();
+        rig.playFor (24000);
+        LatencyMeasurer measurer (host);
+        LatencyMeasurer::Request request;
+        request.mode = mode;
+        request.strip = 1;
+        request.stripName = "Music";
+        request.settings = quickProbe();
+        if (mode == LatencyMeasurer::Mode::ThroughFlubsound)
+            request.settings->levelDbfs = -6.0; // the cap acts on the sweep: it must not hold the programme after the cancel
+        // Cancelled in the gap after the first sweep (the probe silent at the
+        // output, so every step left there is the programme's): the rig is
+        // paused 22000 samples into the pass (the gap is 16800 .. 33600).
+        rig.playThenPause (0);
+        REQUIRE (measurer.start (request).isEmpty());
+        rig.playThenPause (22000);
+        measurer.cancel();
+        rig.resume();
+        REQUIRE (runUntilFinished (measurer, 3000));
+        CHECK (measurer.getState().error == "Cancelled.");
+        rig.playFor (24000);
+        rig.halt();
+
+        const auto& out = rig.history;
+        const float programmePeak = peakIn (out, 12000, 24000);
+        REQUIRE (programmePeak > 0.4f);
+        const auto runs = quietRuns (out, 0.25f, 4800);
+        REQUIRE (runs.size() == 1);
+        const size_t end = runs.front().second;
+        // A 440 Hz sine's own largest step, with 30 % to spare for the fade
+        // (before: through Flubsound the cap held the returning programme at
+        // -18 dBFS for 100 ms and then let go in one sample).
+        const float naturalStep = programmePeak * static_cast<float> (2.0 * 3.141592653589793 * 440.0 / 48000.0);
+        const float step = maxStepIn (out, end - 2400, end + 4800);
+        CHECK (step < 1.3f * naturalStep);
+        // The programme back at its level (the cap does not hold it).
+        const float after = peakIn (out, end + 2400, end + 12000);
+        CHECK (after > 0.95f * programmePeak);
+        std::cout << "    cancel (" << (mode == LatencyMeasurer::Mode::DeviceOnly ? "device only" : "through Flubsound")
+                  << ") with a programme: largest step " << juce::String (step, 4) << " (the sine's own " << juce::String (naturalStep, 4)
+                  << "), programme back at " << juce::String (dbfs (after), 2) << " dBFS (before " << juce::String (dbfs (programmePeak), 2) << ")\n";
+    }
+}
+
+TEST_CASE ("App: E42d through the Game strip the virtualiser's head-related filters add a few samples to the reported engine latency")
+{
+    AudioEngineHost host;
+    LoopDevice device;
+    host.audioDeviceAboutToStart (&device);
+    const int engine = host.getMixEngine().getStripLatencySamples (0);
+    std::array<double, 2> extra {};
+    std::array<double, 2> secondary {};
+    for (int bypass = 0; bypass < 2; ++bypass)
+    {
+        host.getMixEngine().chain (0).setAuditionBypass (flub::param::VirtualizerOn, bypass == 1);
+        LoopRig rig (host);
+        rig.noiseRms = 3.0e-4f;
+        rig.start();
+        rig.playFor (4800); // the bypass's own fade
+        LatencyMeasurer measurer (host);
+        LatencyMeasurer::Request request;
+        request.mode = LatencyMeasurer::Mode::ThroughFlubsound;
+        request.strip = 0;
+        request.stripName = "Game";
+        request.settings = quickProbe();
+        REQUIRE (measurer.start (request).isEmpty());
+        REQUIRE (runUntilFinished (measurer));
+        rig.halt();
+        REQUIRE (measurer.getState().through.has_value());
+        const auto& thr = *measurer.getState().through;
+        REQUIRE (thr.ok);
+        extra[static_cast<size_t> (bypass)] = thr.roundTripSamples - 1512.0 - engine;
+        secondary[static_cast<size_t> (bypass)] = thr.result.secondaryDb;
+        // Both's text says what the few samples more are (a device-only pass of the loop's 1512).
+        latency::PassReport dev;
+        dev.ok = true;
+        dev.path = latency::Path::DeviceOnly;
+        dev.context = thr.context;
+        dev.roundTripSamples = 1512.0;
+        dev.roundTripMs = 31.5;
+        CHECK (juce::String (latency::describeBoth (dev, thr)).contains ("head-related filters start a few samples late") == (bypass == 0));
+    }
+    host.getMixEngine().chain (0).setAuditionBypass (flub::param::VirtualizerOn, false);
+    std::cout << "    Game strip (engine " << engine << " smp reported): measured - reported = " << juce::String (extra[0], 2)
+              << " smp with the virtualiser (strongest other arrival " << juce::String (secondary[0], 1) << " dB), "
+              << juce::String (extra[1], 2) << " smp without (" << juce::String (secondary[1], 1) << " dB)\n";
+    CHECK (extra[0] > 2.0);
+    CHECK (extra[0] < 12.0);
+    CHECK (std::abs (extra[1]) < 0.5);
 }
 
 TEST_CASE ("App: E42d a weak or silent input, or an echo nearly as strong as the direct path, is reported as such, not as a confident number")
@@ -692,16 +1081,17 @@ TEST_CASE ("App: E42d the probe allocates nothing on the audio thread, stays sil
         CHECK (raw->position() == 40 * kBlock);
 
         // Cancel: the sweep fades out within 5 ms (240 samples); through
-        // Flubsound the session (and its output cap) lasts 100 ms more for
-        // the chain's delayed tail, then it finishes.
+        // Flubsound the output gate closes in 5 ms, stays closed while the
+        // chain's delayed tail passes (100 ms when the strip latency is not
+        // known, as here) and opens in 5 ms; then the session finishes.
         const size_t mark = played.size();
         host.cancelLatencyProbe();
         for (int b = 0; b < 40 && ! raw->finished(); ++b)
             callback();
         CHECK (raw->finished());
         CHECK (raw->wasCancelled());
-        CHECK (raw->position() <= 40 * kBlock + 240 + 4800 + kBlock);
-        CHECK (raw->position() >= 40 * kBlock + 240 + 4800);
+        CHECK (raw->position() <= 40 * kBlock + 240 + 4800 + 240 + kBlock);
+        CHECK (raw->position() >= 40 * kBlock + 240 + 4800 + 240);
         float step = 0.0f;
         for (size_t i = mark + 1; i < played.size(); ++i)
             step = std::max (step, std::abs (played[i] - played[i - 1]));
@@ -715,6 +1105,60 @@ TEST_CASE ("App: E42d the probe allocates nothing on the audio thread, stays sil
         auto back = host.takeLatencyProbe();
         deviceThread.join();
         REQUIRE (back != nullptr);
+        CHECK (host.getLatencyProbe() == nullptr);
+    }
+
+    // Both: a chained pair, across the boundary where the second session
+    // takes over in the callback after the first ends: no allocation, no gap.
+    {
+        std::vector<std::unique_ptr<latency::ProbeSession>> pair;
+        pair.push_back (std::make_unique<latency::ProbeSession> (quickProbe(), latency::Path::DeviceOnly, 1, 2));
+        pair.push_back (std::make_unique<latency::ProbeSession> (quickProbe(), latency::Path::ThroughFlubsound, 1, 2));
+        pair.back()->setOutputLatency (host.getMixEngine().getStripLatencySamples (1));
+        pair.front()->chainTo (*pair.back());
+        const auto* first = pair.front().get();
+        const auto* second = pair.back().get();
+        REQUIRE (host.startLatencyProbe (pair));
+        CHECK (pair.empty());
+        CHECK (host.getLatencyProbe() == first);
+        const int blocks = static_cast<int> ((first->length() + kBlock - 1) / kBlock);
+        played.clear();
+        played.reserve (static_cast<size_t> ((blocks + 8) * kBlock));
+        {
+            flubapptest::RealtimeProbe probe;
+            for (int b = 0; b < blocks + 4; ++b)
+                callback();
+            CHECK (probe.allocations() == 0);
+            CHECK (probe.deallocations() == 0);
+            if (flubapptest::lockCountingAvailable())
+                CHECK (probe.locks() == 0);
+        }
+        CHECK (first->finished());
+        CHECK (! first->wasCancelled());
+        // The second started in the callback after the first ended.
+        CHECK (second->position() == static_cast<int64_t> (blocks + 4) * kBlock - static_cast<int64_t> (blocks) * kBlock);
+        // From the first's end to the second's gate: silence (no programme here
+        // either way, but no fade back and nothing from the engine).
+        for (size_t i = static_cast<size_t> (first->length()); i < played.size(); ++i)
+            CHECK (played[i] == 0.0f);
+        host.cancelLatencyProbe();
+        while (! second->finished())
+            callback();
+        std::thread deviceThread ([&]
+        {
+            for (int i = 0; i < 2; ++i)
+            {
+                std::this_thread::sleep_for (std::chrono::milliseconds (20));
+                callback();
+            }
+        });
+        auto a = host.takeLatencyProbe();
+        auto b2 = host.takeLatencyProbe();
+        deviceThread.join();
+        REQUIRE (a != nullptr);
+        REQUIRE (b2 != nullptr);
+        CHECK (a.get() == first);
+        CHECK (b2.get() == second);
         CHECK (host.getLatencyProbe() == nullptr);
     }
 
@@ -886,6 +1330,43 @@ TEST_CASE ("App: E42c the controller persists Automatic and the floors; the prof
     CHECK (panel.getHeightForWidth (640) > 100);
 }
 
+TEST_CASE ("App: E42c after a restart the buffer still follows the profile chosen by hand, not the overload response's step")
+{
+    flubapptest::TempFolder temp;
+    const auto options = [&temp]
+    {
+        auto o = headlessOptions (temp);
+        o.restoreState = true;
+        o.persistSettings = true;
+        return o;
+    };
+    {
+        EngineController controller (options());
+        controller.setLatencyProfile (Profile::Quality);
+        controller.setReduceLoadOnOverload (true);
+        EngineStatus hot;
+        hot.deviceOpen = hot.running = true;
+        hot.cpuLoad = 0.97;
+        hot.xruns = -1;
+        for (int i = 0; i < 100 && controller.getLatencyProfile() == Profile::Quality; ++i)
+            controller.updateOverloadWatchdog (hot);
+        REQUIRE (controller.getLatencyProfile() == Profile::Balanced);
+        CHECK (controller.getHost().getBufferProfile() == Profile::Quality);
+        controller.shutdown();
+    }
+    {
+        // The step is in the saved strip state; the buffer keeps the choice by hand.
+        EngineController controller (options());
+        CHECK (controller.getLatencyProfile() == Profile::Balanced);
+        CHECK (controller.getHost().getBufferProfile() == Profile::Quality);
+        // A choice by hand moves both, and is what the next start uses.
+        controller.setLatencyProfile (Profile::LowLatency);
+        CHECK (controller.getHost().getBufferProfile() == Profile::LowLatency);
+        CHECK (controller.getSettings().getBufferProfile (-1) == static_cast<int> (Profile::LowLatency));
+        controller.shutdown();
+    }
+}
+
 TEST_CASE ("App: E42c the controller's back-off raises an automatic buffer after glitches and persists the floor")
 {
     flubapptest::TempFolder temp;
@@ -899,16 +1380,23 @@ TEST_CASE ("App: E42c the controller's back-off raises an automatic buffer after
     saved.setAttribute ("deviceType", "BufferBackend");
     saved.setAttribute ("audioOutputDeviceName", kHdAudio);
     saved.setAttribute ("audioInputDeviceName", kStealthMic);
+    // A settings file from before the switch: the device's open decides it
+    // (it runs at its default here, so on) and the decision is stored.
+    CHECK (! controller.getSettings().hasAutoBufferSize());
+    CHECK (host.isAutomaticBufferSizePending());
     REQUIRE (host.openDevice (&saved, 2, 2).isEmpty());
+    CHECK (! host.isAutomaticBufferSizePending());
+    CHECK (controller.getSettings().hasAutoBufferSize());
+    CHECK (controller.getSettings().getAutoBufferSize());
     CHECK (host.getBufferInfo().current == 128);
 
-    // The watchdog's 2 Hz polls: after the profile change's 10 s hold,
-    // glitches 1, 2, 3 within 10 s -> one size up.
+    // The watchdog's 2 Hz polls: after the profile change's 5 s hold,
+    // glitches 1, 2, 3 within 10 s -> twice the size.
     EngineStatus status;
     status.deviceOpen = status.running = true;
     status.cpuLoad = 0.3;
     status.xruns = -1;
-    for (int i = 0; i < 20; ++i)
+    for (int i = 0; i < 10; ++i)
         controller.updateOverloadWatchdog (status);
     CHECK (controller.getBufferBackoffSteps() == 0);
     for (int g : { 0, 0, 1, 2, 3 })
@@ -917,10 +1405,10 @@ TEST_CASE ("App: E42c the controller's back-off raises an automatic buffer after
         controller.updateOverloadWatchdog (status);
     }
     CHECK (controller.getBufferBackoffSteps() == 1);
-    CHECK (host.getBufferInfo().current == 160);
+    CHECK (host.getBufferInfo().current == 256);
     const auto floors = controller.getSettings().getBufferFloors();
     REQUIRE (floors.count (AudioEngineHost::bufferDeviceKey ("BufferBackend", kHdAudio)) == 1);
-    CHECK (floors.at (AudioEngineHost::bufferDeviceKey ("BufferBackend", kHdAudio)) == 160);
+    CHECK (floors.at (AudioEngineHost::bufferDeviceKey ("BufferBackend", kHdAudio)) == 256);
     host.closeDevice();
 }
 

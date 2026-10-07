@@ -19,19 +19,25 @@
 // maximum; a driver without small periods (USB Audio class drivers, many
 // wireless dongles: minimum = default = maximum = 480) offers one size and
 // nothing changes. A buffer the user picks in Settings > Audio always wins
-// (Automatic turns itself off); the latency profile the automatic overload
-// response steps to never shrinks the buffer (EngineController passes the
-// profile the user chose).
+// (Automatic turns itself off; on the first start with this switch, a size
+// picked before it existed keeps it off, AudioEngineHost::
+// setAutomaticBufferSizeFromSavedState); the latency profile the automatic
+// overload response steps to never shrinks the buffer, in this session or
+// after a restart (EngineController passes the profile the user chose by
+// hand, persisted as device.bufferProfile).
 //
 // Back-off (the safety net): Backoff watches the overload watchdog's glitch
 // count (xruns, overrunning and late callbacks; OverloadWatchdog) at its 2 Hz
 // poll. More than 2 glitches within 10 s, or a sustained overload starting,
-// raises the buffer one available size (AudioEngineHost::raiseBufferOneStep),
-// at most up to the device's default, and that size becomes the device's
-// floor (persisted per device type and output: the next start does not
-// glitch at the smaller size again). After a step it waits 10 s (the device
-// restart's own glitch does not count). Turning Automatic off and on again
-// forgets the floor.
+// raise the buffer (AudioEngineHost::raiseBufferOneStep) to the smallest
+// available size of at least twice the current one, at most the device's
+// default (nextLarger: 64 -> 128 -> 256 -> 512 on a CoreAudio or ASIO list
+// instead of one 32-sample step at a time), and that size becomes the
+// device's floor (persisted per device type and output: the next start does
+// not glitch at the smaller size again). After a step it waits 5 s (the
+// device restart's own glitch does not count). Turning Automatic off and on
+// again forgets the floor. The thresholds are a first guess, not tuned on
+// real overloads.
 //
 // Plain C++, no JUCE, no threads, no clock: decision logic only (like
 // AutoLoadReducer); AudioEngineHost applies it.
@@ -134,18 +140,17 @@ inline Choice choose (Profile profile, std::vector<int> available, int defaultSi
     return c;
 }
 
-/** The back-off's next size: the smallest available size above `current`,
-    at most the device's default; nothing at the top. */
+/** The back-off's next size: the smallest available size of at least twice
+    `current` (the largest when none is), at most the device's default;
+    nothing at the top. */
 inline std::optional<int> nextLarger (std::vector<int> available, int current, int defaultSize)
 {
     const auto sizes = normalise (std::move (available));
-    if (sizes.empty())
+    if (sizes.empty() || current >= sizes.back())
         return std::nullopt;
     const int deflt = nearest (sizes, defaultSize > 0 ? defaultSize : sizes.back());
-    for (const int s : sizes)
-        if (s > current)
-            return s <= deflt ? std::optional<int> (s) : std::nullopt;
-    return std::nullopt;
+    const int next = std::min (smallestAtLeast (sizes, std::max (current + 1, 2 * current)), deflt);
+    return next > current ? std::optional<int> (next) : std::nullopt;
 }
 
 /** When to raise the buffer (see the header). One update() per watchdog
@@ -157,7 +162,7 @@ public:
     {
         int windowPolls = 20;  // 10 s at 2 Hz ...
         int maxGlitches = 2;   // ... with more glitches than this: a step
-        int holdPolls = 20;    // after a step (or a device start), this long before the next
+        int holdPolls = 10;    // after a step (or a device start), this long (5 s) before the next
     };
 
     Backoff() = default;

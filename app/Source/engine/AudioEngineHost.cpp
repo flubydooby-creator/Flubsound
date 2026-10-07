@@ -332,7 +332,8 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     noteExplicitOutput();
     reselectOutput();
     // docs/11 E42c: the profile's buffer size, before the engine attaches (one
-    // device start fewer).
+    // device start fewer). Upgrading: the saved state decides Automatic first.
+    decidePendingAutomaticBuffer();
     lastBufferAttempt = {};
     applyBufferPolicy();
     if (deviceManager.getCurrentAudioDevice() != nullptr)
@@ -397,7 +398,7 @@ void AudioEngineHost::closeDevice()
     deviceInputChannels.store (0, std::memory_order_relaxed);
     // No callback runs now: a latency probe stops here (takeLatencyProbe
     // hands it back unfinished).
-    probeLive.store (nullptr, std::memory_order_release);
+    unpublishLatencyProbes();
 
     // No callback can run now: a swap in flight ends here, on the newest engine.
     if (latest != nullptr)
@@ -1519,12 +1520,22 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     // feeding a strip while the pair loops is muted from that block on.
     const bool guarded = loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
 
-    // docs/11 E42d: a latency probe handed over (see LATENCY PROBE).
-    latency::ProbeSession* probe = probeLive.load (std::memory_order_acquire);
-    if (probe != nullptr && ! probe->isPlaying())
-        probe = nullptr;
-    if (probe != nullptr)
-        probe->beginCallback();
+    // docs/11 E42d: the first latency probe session handed over that still
+    // plays (see LATENCY PROBE). seq_cst: pairs with takeLatencyProbe() /
+    // waitForAudioThreadToPass(), like the capture slots.
+    latency::ProbeSession* probe = nullptr;
+    for (auto& slot : probeLive)
+    {
+        auto* session = slot.load (std::memory_order_seq_cst);
+        if (session == nullptr || ! session->isPlaying())
+            continue;
+        session->beginCallback(); // a session cancelled before it played ends here
+        if (session->isPlaying())
+        {
+            probe = session;
+            break;
+        }
+    }
     probeInBlock = probe;
 
     // docs/11 E53: a device that is not the soak's pinned output plays nothing.
@@ -1671,7 +1682,7 @@ void AudioEngineHost::audioDeviceStopped()
     callbackRunning.store (false, std::memory_order_release);
     // A latency probe does not continue on another device start (its
     // recording would mix two devices): takeLatencyProbe hands it back.
-    probeLive.store (nullptr, std::memory_order_release);
+    unpublishLatencyProbes();
     // No callback runs now. The next device's thread is checked again even if
     // it reuses this one's pthread id (a new kernel thread may).
     promotedThread = nullptr;
@@ -2083,7 +2094,8 @@ void AudioEngineHost::changeListenerCallback (juce::ChangeBroadcaster*)
         return;
     noteExplicitOutput();
     reselectOutput();
-    applyBufferPolicy(); // docs/11 E42c: a new device or rate gets the profile's size
+    decidePendingAutomaticBuffer(); // docs/11 E42c: upgrading, no device at openDevice()
+    applyBufferPolicy();            // docs/11 E42c: a new device or rate gets the profile's size
 }
 
 std::vector<flub::platform::OutputEndpointIdentity> AudioEngineHost::listEndpoints()
@@ -2442,8 +2454,38 @@ void AudioEngineHost::setAutomaticBufferSize (bool automatic)
         }
     }
     autoBuffer = automatic;
+    autoBufferPending = false;
     lastBufferAttempt = {};
     applyBufferPolicy();
+}
+
+void AudioEngineHost::setAutomaticBufferSizeFromSavedState()
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    autoBufferPending = true;
+    autoBuffer = true;
+    decidePendingAutomaticBuffer();
+}
+
+void AudioEngineHost::decidePendingAutomaticBuffer()
+{
+    if (! autoBufferPending)
+        return;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return; // at the next device start
+    autoBufferPending = false;
+    // Before docs/11 E42c the app never asked for a size: a device that opened
+    // from the saved state at another size than its default runs at the
+    // user's pick from Settings > Audio's buffer list, which must stay.
+    const int current = device->getCurrentBufferSizeSamples(), deflt = device->getDefaultBufferSize();
+    autoBuffer = ! (managesBufferSize (device->getTypeName()) && current > 0 && deflt > 0 && current != deflt);
+    juce::Logger::writeToLog ("Automatic buffer size (first start with it): " + juce::String (autoBuffer ? "on" : "off")
+                              + " (the device runs at " + juce::String (current) + " samples, its default is " + juce::String (deflt)
+                              + (autoBuffer ? ")" : "; that size was picked in Settings > Audio and is kept)"));
+    lastBufferAttempt = {};
+    if (onBufferChoiceChanged != nullptr)
+        onBufferChoiceChanged();
 }
 
 void AudioEngineHost::setBufferProfile (flub::param::LatencyProfileValue profile)
@@ -2466,7 +2508,7 @@ void AudioEngineHost::setBufferFloors (std::map<juce::String, int> floors)
 bool AudioEngineHost::applyBufferPolicy()
 {
     JUCE_ASSERT_MESSAGE_THREAD
-    if (! autoBuffer || applyingBuffer || selecting)
+    if (! autoBuffer || autoBufferPending || applyingBuffer || selecting)
         return false;
     if (deviceManager.getCurrentAudioDevice() == nullptr)
         return false;
@@ -2509,7 +2551,7 @@ bool AudioEngineHost::raiseBufferOneStep()
 {
     JUCE_ASSERT_MESSAGE_THREAD
     const auto info = getBufferInfo();
-    if (! info.deviceOpen || ! info.managed || ! info.automatic)
+    if (! info.deviceOpen || ! info.managed || ! info.automatic || autoBufferPending)
         return false;
     const auto next = buffer::nextLarger (info.available, info.current, info.deviceDefault);
     if (! next.has_value())
@@ -2525,38 +2567,87 @@ bool AudioEngineHost::raiseBufferOneStep()
 // =============================================================================
 // Latency probe (docs/11 E42d)
 // =============================================================================
-bool AudioEngineHost::startLatencyProbe (std::unique_ptr<latency::ProbeSession>& session)
+bool AudioEngineHost::startLatencyProbe (std::vector<std::unique_ptr<latency::ProbeSession>>& sessions)
 {
     JUCE_ASSERT_MESSAGE_THREAD
-    if (session == nullptr || probeOwned != nullptr || ! callbackRunning.load (std::memory_order_acquire))
+    if (sessions.empty() || sessions.size() > static_cast<size_t> (kMaxProbeSessions) || probeFront() >= 0
+        || ! callbackRunning.load (std::memory_order_acquire))
         return false;
-    probeOwned = std::move (session);
-    probeLive.store (probeOwned.get(), std::memory_order_release);
+    for (const auto& s : sessions)
+        if (s == nullptr)
+            return false;
+    // In order: the callback plays the first slot's session before it looks
+    // at the second.
+    for (size_t i = 0; i < sessions.size(); ++i)
+    {
+        probeOwned[i] = std::move (sessions[i]);
+        probeLive[i].store (probeOwned[i].get(), std::memory_order_seq_cst);
+    }
+    sessions.clear();
     return true;
+}
+
+bool AudioEngineHost::startLatencyProbe (std::unique_ptr<latency::ProbeSession>& session)
+{
+    std::vector<std::unique_ptr<latency::ProbeSession>> one;
+    one.push_back (std::move (session));
+    if (startLatencyProbe (one))
+        return true;
+    session = std::move (one.front());
+    return false;
+}
+
+int AudioEngineHost::probeFront() const noexcept
+{
+    for (int i = 0; i < kMaxProbeSessions; ++i)
+        if (probeOwned[static_cast<size_t> (i)] != nullptr)
+            return i;
+    return -1;
+}
+
+const latency::ProbeSession* AudioEngineHost::getLatencyProbe() const noexcept
+{
+    const int i = probeFront();
+    return i >= 0 ? probeOwned[static_cast<size_t> (i)].get() : nullptr;
+}
+
+bool AudioEngineHost::isLatencyProbeLive() const noexcept
+{
+    const int i = probeFront();
+    return i >= 0 && probeLive[static_cast<size_t> (i)].load (std::memory_order_acquire) != nullptr;
+}
+
+void AudioEngineHost::unpublishLatencyProbes() noexcept
+{
+    for (auto& slot : probeLive)
+        slot.store (nullptr, std::memory_order_seq_cst);
 }
 
 void AudioEngineHost::cancelLatencyProbe() noexcept
 {
-    if (probeOwned != nullptr)
-        probeOwned->requestCancel();
+    for (auto& session : probeOwned)
+        if (session != nullptr)
+            session->requestCancel();
 }
 
 std::unique_ptr<latency::ProbeSession> AudioEngineHost::takeLatencyProbe()
 {
     JUCE_ASSERT_MESSAGE_THREAD
-    if (probeOwned == nullptr)
+    const int front = probeFront();
+    if (front < 0)
         return nullptr;
-    const bool stopped = ! callbackRunning.load (std::memory_order_acquire) || probeLive.load (std::memory_order_acquire) == nullptr;
-    if (! probeOwned->finished() && ! stopped)
+    const auto i = static_cast<size_t> (front);
+    const bool stopped = ! callbackRunning.load (std::memory_order_acquire) || probeLive[i].load (std::memory_order_acquire) == nullptr;
+    if (! probeOwned[i]->finished() && ! stopped)
         return nullptr;
     // Like a capture slot: unpublish, then wait until a callback that may
     // have read the pointer has returned (bounded; retried later if the audio
-    // thread is stalled).
-    probeLive.store (nullptr, std::memory_order_seq_cst);
+    // thread is stalled). The next slot's session keeps playing meanwhile.
+    probeLive[i].store (nullptr, std::memory_order_seq_cst);
     uint64_t counter = 0;
     if (! waitForAudioThreadToPass (counter))
         return nullptr;
-    return std::move (probeOwned);
+    return std::move (probeOwned[i]);
 }
 
 std::array<int, flub::kMaxChannels> AudioEngineHost::deviceInputOrder (const juce::String& deviceTypeName, int stripChannels) noexcept
