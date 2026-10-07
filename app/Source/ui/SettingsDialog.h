@@ -48,7 +48,9 @@
 //               device input processing, "Input feeds strip", and the input
 //               map (R4.6 / docs/11 E48: per strip the first device input
 //               channel, "Fill in one after another", "Clear map"; persisted
-//               as deviceInput.map). The page scrolls.
+//               as deviceInput.map; its line says when the device input is
+//               not processed, so the map is not used). Lists are not
+//               rebuilt while open. The page scrolls.
 //   Hearing     the hearing guard (docs/11 E32 (c); HearingPage.h): the
 //               headset sensitivity in use (the listener's own figure per
 //               output, or the device profile's, marked "manufacturer
@@ -188,6 +190,16 @@ public:
         guard muted, else the current devices when they look like a loopback
         pair that is not allowed yet; empty names when there is none. */
     static AppSettings::LoopbackPair loopbackPairToAllow (EngineController& controller);
+
+    /** The Routing page's input-map line (R4.6): whether the map is in use,
+        empty, or not used because the device input is not processed now
+        (Device input Off, or Automatic with an input that does not look
+        like a virtual cable / loopback device), then the open device's
+        active inputs (and, on Linux, the sink-monitor links). */
+    static juce::String describeInputMap (EngineController& controller);
+    /** The open device's active input channels (16 without a device): the
+        choices of each input-map row. */
+    static int inputMapChannelCount (EngineController& controller);
 
     /** The Diagnostics page's export (docs/11 E54): writes the diagnostics
         zip for this controller, with the logs and crash reports of

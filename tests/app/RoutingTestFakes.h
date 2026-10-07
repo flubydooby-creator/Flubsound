@@ -36,7 +36,9 @@ struct AudioServiceScript
     // ---- R4.5 (moving an app's own output away) -------------------------------------
     bool outputMovable = false;     // canMoveAppOutput(); off = the earlier tests' router
     bool canReadAppDevice = true;   // getAppEndpoint() answers
-    /** Windows' per-app devices, per executable (lower case, no ".exe"); absent = the system default. */
+    /** Windows' per-app devices, per executable file (keyOf: the lower-case
+        path when the session has one, else the name in lower case without
+        ".exe"); absent = the system default. */
     std::map<std::string, std::string> appDevices;
     /** setAppEndpoint behaves like the audio service: it sets the executable's
         per-app device, moves that executable's sessions there (the system
@@ -55,11 +57,25 @@ struct AudioServiceScript
         return key.toStdString();
     }
 
-    /** Moves the sessions of `executable` (not pinned ones) to `endpoint` (lock held). */
-    void placeSessions (const std::string& executable, const std::string& endpoint)
+    /** Where Windows keeps a session's per-app device: its executable file. */
+    static std::string keyOf (const flub::platform::AudioSessionInfo& s)
     {
+        return s.executablePath.empty() ? exeKey (s.executableName) : juce::String (s.executablePath).toLowerCase().toStdString();
+    }
+
+    /** A key as tests name it: a path (it has a separator) or an executable name. */
+    static std::string keyFor (const std::string& executableOrPath)
+    {
+        return executableOrPath.find_first_of ("\\/") != std::string::npos ? juce::String (executableOrPath).toLowerCase().toStdString()
+                                                                             : exeKey (executableOrPath);
+    }
+
+    /** Moves the sessions of the executable `key` (keyFor; not pinned ones) to `endpoint` (lock held). */
+    void placeSessions (const std::string& key, const std::string& endpoint)
+    {
+        const auto wanted = keyFor (key);
         for (auto& s : sessions)
-            if (exeKey (s.executableName) == executable && pinned.count (s.processId) == 0)
+            if (keyOf (s) == wanted && pinned.count (s.processId) == 0)
             {
                 s.currentEndpointId = endpoint;
                 s.activeEndpointIds.clear();
@@ -68,10 +84,11 @@ struct AudioServiceScript
             }
     }
 
-    std::string getAppDevice (const std::string& executable)
+    /** The per-app device of an executable name or path ("" = the system default). */
+    std::string getAppDevice (const std::string& executableOrPath)
     {
         const std::lock_guard<std::mutex> g (lock);
-        const auto it = appDevices.find (exeKey (executable));
+        const auto it = appDevices.find (keyFor (executableOrPath));
         return it != appDevices.end() ? it->second : std::string();
     }
 
@@ -149,12 +166,13 @@ public:
             error = session == nullptr ? "No such process." : "Access is denied.";
             return false;
         }
-        const auto executable = AudioServiceScript::exeKey (session->executableName);
+        // Windows applies it to the process's executable file (its path).
+        const auto key = AudioServiceScript::keyOf (*session);
         if (endpointId.empty())
-            script.appDevices.erase (executable);
+            script.appDevices.erase (key);
         else
-            script.appDevices[executable] = endpointId;
-        script.placeSessions (executable, endpointId.empty() ? script.systemDefault : endpointId);
+            script.appDevices[key] = endpointId;
+        script.placeSessions (key, endpointId.empty() ? script.systemDefault : endpointId);
         return true;
     }
 
@@ -174,7 +192,7 @@ public:
             error = "unknown (test)";
             return false;
         }
-        if (const auto it = script.appDevices.find (AudioServiceScript::exeKey (session->executableName)); it != script.appDevices.end())
+        if (const auto it = script.appDevices.find (AudioServiceScript::keyOf (*session)); it != script.appDevices.end())
             endpointId = it->second;
         return true;
     }

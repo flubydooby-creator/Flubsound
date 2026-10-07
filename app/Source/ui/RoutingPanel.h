@@ -33,9 +33,13 @@
 // Flubsound can make that move itself (docs/11 E47, R4.5: Windows), the fix
 // dialog (a click on the amber notice, or on the red one carrying the same
 // text) and the chip menu offer it in one click ("Move automatically to
-// Digital Audio (S/PDIF)", or "Move again to ..."), which switches on "Move
-// the app's own sound away automatically"; a moved app's chip says "its own
-// sound moved to ...".
+// Digital Audio (S/PDIF)", or "Move again to ..."; no key: Return stays on
+// "Open sound settings"), which switches on "Move the app's own sound away
+// automatically"; a moved app's chip says "its own sound moved to ...". An
+// app Flubsound put back (unassigned, option off) that still plays to the
+// silent device, uncaptured, gets an amber "Not heard" notice ("... restart
+// its playback"), or that text added to the red / amber one: Windows moves
+// only the streams an app opens after the change.
 //
 // Below the strips, "Auto profiles" (roadmap 2.5): one line per rule
 // ("cs2 -> Game: Competitive FPS, restores on exit") with a remove button, a
@@ -119,6 +123,11 @@ public:
     const juce::String& getNotice() const noexcept { return notice; }
     /** The amber doubling notice is shown (docs/11 E47). */
     bool isShowingDoubling() const noexcept { return doubling; }
+    /** docs/11 E47 (R4.5): the amber "Not heard" notice is shown: an app
+        Flubsound put back still plays to the silent device, uncaptured
+        (AppRouting::describePutBack). With a red or amber notice its text is
+        added to that one instead. */
+    bool isShowingPutBack() const noexcept { return putBackOnly; }
     /** docs/11 E47 (R4.5): the notice explains the doubling guard (amber, or
         the red state with that text) and offers this one-click move (the fix
         dialog's first button, also in the chip menu), e.g. "Move automatically
@@ -168,6 +177,7 @@ private:
     bool noAppsProcessed = false;
     bool doubling = false;     // the amber doubling notice (not while the red state shows)
     bool doublingInNotice = false; // the notice's text is the doubling guard's (amber or red): a click opens its fix
+    bool putBackOnly = false;      // R4.5: the amber "Not heard" notice (AppRouting::describePutBack) is the only one
     juce::Rectangle<int> headerArea, noticeArea;
     bool noticeCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;

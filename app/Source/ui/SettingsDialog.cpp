@@ -953,7 +953,8 @@ public:
         moveAwayToggle.setTitle ("Move the app's own sound away automatically");
         moveAwayToggle.setTooltip ("Windows: when an app Flubsound captures also plays straight to your headset, move that app's own "
                                    "output to the silent device below, so you hear only Flubsound's processed copy. Its own device "
-                                   "comes back when you unassign it, switch this off or quit Flubsound.");
+                                   "is set back when you unassign it, switch this off or quit Flubsound; an app that is playing then "
+                                   "may need its playback restarted (reload, or pause and play) to be heard again.");
         moveAwayToggle.onClick = [this]
         {
             controller.getRouting().setMoveOriginalAway (moveAwayToggle.getToggleState());
@@ -1052,11 +1053,13 @@ public:
         routingBox.setSelectedId (method == M::EndpointRouting ? 2 : (method == M::ProcessCapture ? 3 : (method == M::Disabled ? 4 : 1)),
                                   juce::dontSendNotification);
 
-        // The option and its silent device.
+        // The option and its silent device. (Not while the device list is
+        // open: a rebuild would shift the items under the pointer.)
         const bool offered = routing.canMoveOriginalAway();
         moveAwayToggle.setToggleState (routing.getMoveOriginalAway(), juce::dontSendNotification);
         moveAwayToggle.setEnabled (offered);
-        rebuildSilentItems();
+        if (! silentBox.isPopupActive())
+            rebuildSilentItems();
         silentBox.setEnabled (offered);
         if (const auto text = routing.describeMoveAway(); text != form.rows[moveAwayRow].help)
         {
@@ -1080,6 +1083,8 @@ public:
             auto& box = *mapBoxes[s];
             const int first = s < map.size() ? map[s] : -1;
             anyMapped = anyMapped || first >= 0;
+            if (box.isPopupActive())
+                continue; // the list is open: left as it is until it closes
             if (box.getNumItems() != juce::jmax (inputs, first + 1) + 1)
             {
                 box.clear (juce::dontSendNotification);
@@ -1093,7 +1098,7 @@ public:
         }
         clearButton.setEnabled (anyMapped);
         inputStripBox.setEnabled (! anyMapped);
-        const auto text = describeMap (inputs, anyMapped);
+        const auto text = SettingsDialog::describeInputMap (controller);
         if (text != mapText)
         {
             mapText = text;
@@ -1128,30 +1133,7 @@ public:
     }
 
 private:
-    int inputChannelCount() const
-    {
-        if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
-            if (const int active = device->getActiveInputChannels().countNumberOfSetBits(); active > 0)
-                return active;
-        return 16;
-    }
-
-    juce::String describeMap (int inputs, bool anyMapped) const
-    {
-        juce::String t (anyMapped ? "The map is in use: each strip reads its channels from the one chosen, and \"Input feeds strip\" is not used. "
-                                  : "Empty: the device input feeds the one strip chosen above. ");
-        t << "Use it when one input carries several strips (e.g. a 14-channel JACK / PipeWire input, or a virtual mixer's "
-             "outputs). ";
-       #if JUCE_LINUX
-        t << "On Linux Flubsound links each flubsound_<strip> sink's monitor to these inputs itself (pw-link), so no qpwgraph step "
-             "is needed; Flubsound's own PipeWire device needs no map. ";
-       #endif
-        if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
-            t << device->getName() << ": " << inputs << " input channel" << (inputs == 1 ? "" : "s") << " active.";
-        else
-            t << "No device is open: up to 16 inputs are offered.";
-        return t;
-    }
+    int inputChannelCount() const { return SettingsDialog::inputMapChannelCount (controller); }
 
     void rebuildSilentItems()
     {
@@ -2074,6 +2056,51 @@ juce::String SettingsDialog::describeLoopbackGuard (EngineController& controller
     }
     return "Flubsound mutes the output when it would play back into the input it processes (the two ends of a virtual cable, "
            "a sink and its monitor), e.g. after a wireless headset disconnects. Pairs you allow play anyway.";
+}
+
+int SettingsDialog::inputMapChannelCount (EngineController& controller)
+{
+    if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
+        if (const int active = device->getActiveInputChannels().countNumberOfSetBits(); active > 0)
+            return active;
+    return 16;
+}
+
+juce::String SettingsDialog::describeInputMap (EngineController& controller)
+{
+    bool anyMapped = false;
+    for (const int first : controller.getDeviceInputMapChannels())
+        anyMapped = anyMapped || first >= 0;
+    // Whether the device input feeds any strip now (EngineController's
+    // policy: Off, or Automatic with an input that is no virtual cable /
+    // loopback device, processes none of it, and then no map applies).
+    bool processed = false;
+    for (const int first : controller.getHost().getDeviceInputMap())
+        processed = processed || first >= 0;
+
+    using Mode = AppSettings::DeviceInputMode;
+    juce::String t;
+    if (! processed)
+        t << (controller.getSettings().getDeviceInputMode() == Mode::Off
+                  ? juce::String ("Device input is off")
+                  : juce::String ("Device input is not processed now (Automatic takes only an input that looks like a virtual cable or "
+                                  "loopback device; choose Always to process this one)"))
+          << (anyMapped ? ": the map is not used. " : ". ");
+    else if (anyMapped)
+        t << "The map is in use: each strip reads its channels from the one chosen, and \"Input feeds strip\" is not used. ";
+    else
+        t << "Empty: the device input feeds the one strip chosen above. ";
+    t << "Use it when one input carries several strips (e.g. a 14-channel JACK / PipeWire input, or a virtual mixer's outputs). ";
+   #if JUCE_LINUX
+    t << "On Linux Flubsound links each flubsound_<strip> sink's monitor to these inputs itself (pw-link), so no qpwgraph step "
+         "is needed; Flubsound's own PipeWire device needs no map. ";
+   #endif
+    const int inputs = inputMapChannelCount (controller);
+    if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
+        t << device->getName() << ": " << inputs << " input channel" << (inputs == 1 ? "" : "s") << " active.";
+    else
+        t << "No device is open: up to 16 inputs are offered.";
+    return t;
 }
 
 juce::String SettingsDialog::describeListeningLevel (const EngineController::ListeningLevel& level)

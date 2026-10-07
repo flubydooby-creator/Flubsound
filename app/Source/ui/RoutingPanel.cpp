@@ -974,10 +974,20 @@ void RoutingPanel::refreshRouting()
         noticeDetail = "The assigned applications are not routed yet.";
     else
         noticeDetail = "None of the assigned applications is running. Each one is routed when it starts.";
-    notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail : (doubling ? "Original also audible. " + noticeDetail : reason);
     // The notice explains the doubling guard (amber, or the red state's text):
     // a click opens the fix, with the one-click move where it is offered.
     doublingInNotice = doublingText.isNotEmpty() && noticeDetail == doublingText;
+    // R4.5: an app Flubsound put back that still plays to the silent device,
+    // uncaptured (Windows moves only the streams it opens from now on). Added
+    // to the red / amber text, else an amber notice of its own.
+    const auto putBack = routing.describePutBack();
+    putBackOnly = putBack.isNotEmpty() && ! noAppsProcessed && ! doubling && reason.isEmpty();
+    if (putBack.isNotEmpty() && (noAppsProcessed || doubling))
+        noticeDetail << " " << putBack;
+    notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail
+                             : (doubling ? "Original also audible. " + noticeDetail
+                                         : (putBackOnly ? "Not heard. " + putBack
+                                                        : reason + (putBack.isNotEmpty() ? " " + putBack : juce::String())));
     setDescription (notice);
 
     assignButton.setEnabled (reason.isEmpty());
@@ -1211,11 +1221,13 @@ void RoutingPanel::showDoublingFix()
     if (text.isEmpty())
         return;
     auto* window = new juce::AlertWindow ("Original also audible", text, juce::MessageBoxIconType::WarningIcon, this);
-    // The one-click move first (Return) where Flubsound can make it itself.
+    // The one-click move first where Flubsound can make it itself. It
+    // changes a Windows per-app setting, so it has no key: Return stays on
+    // the harmless "Open sound settings".
     const auto action = routing.getMoveAwayAction();
     if (action.isNotEmpty())
-        window->addButton (action, 2, juce::KeyPress (juce::KeyPress::returnKey));
-    window->addButton ("Open sound settings", 1, action.isEmpty() ? juce::KeyPress (juce::KeyPress::returnKey) : juce::KeyPress());
+        window->addButton (action, 2);
+    window->addButton ("Open sound settings", 1, juce::KeyPress (juce::KeyPress::returnKey));
     window->addButton ("Close", 0, juce::KeyPress (juce::KeyPress::escapeKey));
     juce::Component::SafePointer<RoutingPanel> safe (this);
     window->enterModalState (true, juce::ModalCallbackFunction::create ([safe] (int result)
@@ -1328,15 +1340,16 @@ void RoutingPanel::paint (juce::Graphics& g)
         const auto alert = Theme::statusColours (*this).hot;
         const auto caution = Theme::statusColours (*this).warn;
         auto r = noticeArea.toFloat();
-        g.setColour (noAppsProcessed ? alert.withAlpha (0.1f) : (doubling ? caution.withAlpha (0.1f) : Palette::well.withAlpha (0.7f)));
+        const bool amber = doubling || putBackOnly; // R4.5: an app put back that is not heard is amber too
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.1f) : (amber ? caution.withAlpha (0.1f) : Palette::well.withAlpha (0.7f)));
         g.fillRoundedRectangle (r, 6.0f);
-        g.setColour (noAppsProcessed ? alert.withAlpha (0.75f) : (doubling ? caution.withAlpha (0.75f) : Palette::border));
+        g.setColour (noAppsProcessed ? alert.withAlpha (0.75f) : (amber ? caution.withAlpha (0.75f) : Palette::border));
         g.drawRoundedRectangle (r.reduced (0.5f), 6.0f, 1.0f);
         if (noticeCompact)
         {
             auto line = r.reduced (9.0f, 0.0f);
             auto icon = line.removeFromLeft (14.0f).withSizeKeepingCentre (14.0f, 14.0f);
-            g.setColour (noAppsProcessed ? alert : (doubling ? caution : Palette::amber.withAlpha (0.9f)));
+            g.setColour (noAppsProcessed ? alert : (amber ? caution : Palette::amber.withAlpha (0.9f)));
             if (noAppsProcessed)
                 g.fillEllipse (icon.reduced (0.5f));
             else
@@ -1344,12 +1357,13 @@ void RoutingPanel::paint (juce::Graphics& g)
             g.setFont (Theme::font (10.0f, true));
             if (noAppsProcessed)
                 g.setColour (Palette::well);
-            g.drawText (noAppsProcessed || doubling ? "!" : "i", icon, juce::Justification::centred, false);
+            g.drawText (noAppsProcessed || amber ? "!" : "i", icon, juce::Justification::centred, false);
             line.removeFromLeft (7.0f);
-            g.setColour (noAppsProcessed ? alert : (doubling ? caution : Palette::muted));
-            g.setFont (Theme::font (11.5f, noAppsProcessed || doubling));
+            g.setColour (noAppsProcessed ? alert : (amber ? caution : Palette::muted));
+            g.setFont (Theme::font (11.5f, noAppsProcessed || amber));
             juce::String text (noAppsProcessed ? "No apps are being processed - why?"
-                                               : (doubling ? "Original also audible - fix?" : "Per-app routing unavailable - why?"));
+                                               : (doubling ? "Original also audible - fix?"
+                                                           : (putBackOnly ? "An app is not heard - why?" : "Per-app routing unavailable - why?")));
             if (noAppsProcessed && juce::GlyphArrangement::getStringWidth (g.getCurrentFont(), text) > line.getWidth())
                 text = "No apps processed - why?"; // the narrow panel
             g.drawText (text, line, juce::Justification::centredLeft, true);
@@ -1381,9 +1395,9 @@ void RoutingPanel::mouseUp (const juce::MouseEvent& e)
     if (doublingInNotice && noticeArea.contains (e.getPosition()))
         showDoublingFix();
     else if (noticeCompact && noticeArea.contains (e.getPosition()))
-        juce::AlertWindow::showMessageBoxAsync (noAppsProcessed ? juce::MessageBoxIconType::WarningIcon : juce::MessageBoxIconType::InfoIcon,
-                                                noAppsProcessed ? "No apps are being processed" : "Per-app routing",
-                                                noAppsProcessed ? noticeDetail : notice, "OK", this);
+        juce::AlertWindow::showMessageBoxAsync (noAppsProcessed || putBackOnly ? juce::MessageBoxIconType::WarningIcon : juce::MessageBoxIconType::InfoIcon,
+                                                noAppsProcessed ? "No apps are being processed" : (putBackOnly ? "Not heard" : "Per-app routing"),
+                                                noAppsProcessed ? noticeDetail : (putBackOnly ? controller.getRouting().describePutBack() : notice), "OK", this);
 }
 
 juce::TextLayout RoutingPanel::layoutNotice (int width) const
@@ -1398,6 +1412,11 @@ juce::TextLayout RoutingPanel::layoutNotice (int width) const
     {
         text.append ("Original also audible\n", Theme::font (12.0f, true), Theme::statusColours (*this).warn);
         text.append (noticeDetail, Theme::font (11.0f), Palette::muted);
+    }
+    else if (putBackOnly)
+    {
+        text.append ("Not heard\n", Theme::font (12.0f, true), Theme::statusColours (*this).warn);
+        text.append (controller.getRouting().describePutBack(), Theme::font (11.0f), Palette::muted);
     }
     else
     {

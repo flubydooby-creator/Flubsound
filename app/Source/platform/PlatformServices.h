@@ -225,12 +225,15 @@ public:
         every build (the undocumented per-app device API, used only after the
         user switched that option on), while endpoint routing to strip
         endpoints stays opt-in (FLUB_ENABLE_UNDOCUMENTED_ROUTING) and needs
-        the virtual driver. Default: canMoveEndpoint(). */
-    virtual bool canMoveAppOutput() const { return canMoveEndpoint(); }
+        the virtual driver. Default: false. Only the Windows router says
+        true: its per-app device is kept per executable path and "" means
+        the system default, which AppRouting's moves and put-backs rely on;
+        a Linux stream move (pactl) does not work that way. */
+    virtual bool canMoveAppOutput() const { return false; }
 
     /** docs/11 E47 (R4.5): the output endpoint the OS keeps for the
         application of processId (Windows: the per-app device of Settings >
-        Sound > Volume mixer, persisted per executable), as the id
+        Sound > Volume mixer, persisted per executable path), as the id
         listOutputEndpoints() uses, or empty when the app follows the system
         default. false = unknown (error says why; the default: not
         supported). Blocks like setAppEndpoint (background thread). */

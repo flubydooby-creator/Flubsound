@@ -4,11 +4,15 @@
 // option on (off by default; the routing panel's one-click fix switches it
 // on) Flubsound moves the app's own output to a silent device first and then
 // captures it, journals the move, and puts the app's own device back when it
-// is unassigned, the option goes off, at shutdown and after a crash.
+// is unassigned, the option goes off, at shutdown and after a crash (also
+// one during a re-point; not in Tournament mode). An app whose stream stays
+// on the silent device after the put-back is reported ("restart its
+// playback"). Moves are kept per executable file.
 //
 // The audio service is scripted (RoutingTestFakes.h, followMoves): per-app
-// devices kept per executable like Windows keeps them, sessions that follow
-// a move unless the app picks its device itself. The owner's PC: the
+// devices kept per executable file like Windows keeps them, sessions that
+// follow a move unless the app picks its device itself ("pinned": also how
+// an open stream stays put on Windows 11). The owner's PC: the
 // Turtle Beach Stealth 600PC Gen 3 headset is the default and Flubsound's
 // output; S/PDIF (nothing plugged in) and two NVIDIA HDMI monitor outputs.
 #include "RoutingTestFakes.h"
@@ -64,7 +68,8 @@ void setEndpoints (AudioServiceScript& script, std::vector<OutputEndpoint> endpo
 }
 
 /** The user (or Windows) puts an executable's sessions on `endpoint`; with
-    `device` it also sets the per-app device ("" removes it). */
+    `device` it also sets the per-app device ("" removes it). `executable`:
+    a name, or a path for sessions that have one. */
 void placeApp (AudioServiceScript& script, const std::string& executable, const std::string& endpoint, const std::string* device = nullptr)
 {
     const std::lock_guard<std::mutex> g (script.lock);
@@ -72,11 +77,39 @@ void placeApp (AudioServiceScript& script, const std::string& executable, const 
     if (device != nullptr)
     {
         if (device->empty())
-            script.appDevices.erase (executable);
+            script.appDevices.erase (AudioServiceScript::keyFor (executable));
         else
-            script.appDevices[executable] = *device;
+            script.appDevices[AudioServiceScript::keyFor (executable)] = *device;
     }
 }
+
+/** A session of a process whose executable file is `file` (Windows reports the path). */
+flub::platform::AudioSessionInfo sessionAt (uint32_t pid, const char* exe, const juce::File& file, const char* endpoint, uint64_t startTime)
+{
+    auto s = makeSession (pid, exe, endpoint, startTime);
+    s.executablePath = file.getFullPathName().toStdString();
+    return s;
+}
+
+/** Message-thread log lines (juce::Logger) while it is installed. */
+struct CapturingLogger final : juce::Logger
+{
+    CapturingLogger() : previous (juce::Logger::getCurrentLogger()) { juce::Logger::setCurrentLogger (this); }
+    ~CapturingLogger() override { juce::Logger::setCurrentLogger (previous); }
+    juce::Logger* previous;
+    void logMessage (const juce::String& message) override
+    {
+        const std::lock_guard<std::mutex> g (lock);
+        lines.add (message);
+    }
+    juce::String text()
+    {
+        const std::lock_guard<std::mutex> g (lock);
+        return lines.joinIntoString ("\n");
+    }
+    std::mutex lock;
+    juce::StringArray lines;
+};
 
 std::vector<RouteJournal::Entry> readJournal (const juce::File& file)
 {
@@ -148,10 +181,13 @@ TEST_CASE ("App: R4.5 silent device rules: S/PDIF, then a free HDMI output; neve
                           const OutputEndpoint& chosen, const std::set<std::string>& busy, const std::string& current)
     { return R::chooseSilentEndpoint (endpoints, output, input, chosen, busy, current); };
 
-    // Automatic: S/PDIF first (also with apps parked there), then an HDMI
-    // output nothing else plays to.
+    // Automatic: S/PDIF first, then an HDMI output, each only while no
+    // unassigned app plays to it (a receiver or a monitor's speakers may be
+    // in use then).
     CHECK (pick (all, "ep-headset", {}, {}, {}, {}).endpoint.id == "ep-spdif");
-    CHECK (pick (all, "ep-headset", {}, {}, { "ep-spdif" }, {}).endpoint.id == "ep-spdif");
+    CHECK (pick (all, "ep-headset", {}, {}, { "ep-spdif" }, {}).endpoint.id == "ep-hdmi1");
+    CHECK (pick (all, "ep-headset", {}, {}, { "ep-spdif", "ep-hdmi1" }, {}).endpoint.id == "ep-hdmi2");
+    CHECK (pick (all, "ep-headset", {}, {}, { "ep-hdmi2" }, "ep-hdmi2").endpoint.id == "ep-spdif"); // where the moves are, but now in use
     std::vector<OutputEndpoint> noSpdif;
     for (const auto& e : all)
         if (e.id != "ep-spdif")
@@ -195,6 +231,14 @@ TEST_CASE ("App: R4.5 silent device rules: S/PDIF, then a free HDMI output; neve
     CHECK (R::silentPreference ("DisplayPort (Intel(R) Display Audio)") == 1);
     CHECK (R::silentPreference (kHeadset) == 0);
     CHECK (R::silentPreference ("Speakers (Realtek(R) Audio)") == 0);
+    CHECK (R::silentPreference ("SPDIF Out (Sound Blaster Z)") == 2);
+    CHECK (R::silentPreference ("Digital Audio (HDMI) (High Definition Audio Device)") == 1);
+    // Named after what one listens with, or a generic "Digital Audio" (USB DACs, headsets): never likely silent.
+    CHECK (R::silentPreference ("Speakers (USB Digital Audio)") == 0);
+    CHECK (R::silentPreference ("Headphones (Optical Out DAC)") == 0);
+    CHECK (R::silentPreference ("Speakers (NVIDIA High Definition Audio)") == 0);
+    CHECK (R::silentPreference ("Digital Audio (USB Audio Device)") == 0);
+    CHECK (pick ({ { "ep-headset", kHeadset }, { "ep-dac", "Speakers (USB Digital Audio)" } }, "ep-headset", {}, {}, {}, {}).endpoint.id.empty());
     CHECK (R::looksLikeVirtualCable (kCable));
     CHECK (R::looksLikeVirtualCable ("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"));
     CHECK (! R::looksLikeVirtualCable (kSpdif));
@@ -495,12 +539,18 @@ TEST_CASE ("App: R4.5 an app the user moved is left alone; a device change after
     REQUIRE (journal.size() == 1);
     CHECK (journal[0].executable == "spotify");
 
-    // Unassigning Edge moves nothing: its device stays the user's.
+    // Unassigning Edge moves nothing: its device stays the user's. It keeps
+    // playing to S/PDIF, now as an app Flubsound does not capture, so S/PDIF
+    // may be in use (a receiver): the automatic choice moves Spotify on to
+    // the first HDMI output; its own earlier device stays the one to put back.
     rig.routing->removeRoute ("msedge");
-    waitForPasses (*rig.routing, rig.script, 2);
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.movedAway (700) && rig.app (700)->movedTo == kHdmi1; }));
+    waitForPasses (*rig.routing, rig.script, 1);
     for (const auto& move : rig.script.getMoves())
         CHECK (move.first != 1004u);
     CHECK (rig.script.getAppDevice ("msedge") == "ep-spdif");
+    CHECK (rig.script.countMoves (700, "ep-hdmi1") == 1);
+    CHECK (readJournal (rig.journalFile()).front().previousEndpoint.isEmpty());
 
     // The user sets Spotify back to the headset in the Volume mixer: Flubsound
     // forgets its move, does not fight it, and says so.
@@ -514,14 +564,15 @@ TEST_CASE ("App: R4.5 an app the user moved is left alone; a device change after
     }));
     waitForPasses (*rig.routing, rig.script, 2);
     CHECK (rig.script.countMoves (700, "ep-spdif") == 1);
+    CHECK (rig.script.countMoves (700, "ep-hdmi1") == 1);
     CHECK (rig.script.countMoves (700, "") == 0);
     CHECK (! rig.journalFile().exists());
     CHECK (rig.routing->describeDoubling().contains ("Spotify.exe's output was changed after Flubsound moved it, so Flubsound leaves it there."));
-    CHECK (rig.routing->getMoveAwayAction() == "Move again to " + juce::String (kSpdif));
+    CHECK (rig.routing->getMoveAwayAction() == "Move again to " + juce::String (kHdmi1));
 
     // "Move again": moved, and the headset (now its own device) is what comes back.
     rig.routing->moveOriginalsAwayNow();
-    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.movedAway (700) && rig.script.countMoves (700, "ep-spdif") == 2; }));
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.movedAway (700) && rig.script.countMoves (700, "ep-hdmi1") == 2; }));
     journal = readJournal (rig.journalFile());
     REQUIRE (journal.size() == 1);
     CHECK (journal[0].previousEndpoint == "ep-headset");
@@ -733,6 +784,225 @@ TEST_CASE ("App: R4.5 nothing is moved where the option is not offered or not sw
     }
 }
 
+TEST_CASE ("App: R4.5 an app put back while its stream stays on the silent device is reported until it restarts its playback")
+{
+    const flubapptest::TempFolder temp;
+    EngineController::Options o;
+    o.openAudioDevice = false;
+    o.restoreState = false;
+    o.enableAppRouting = false; // started below with the scripted audio service
+    o.settingsFile = temp.file ("settings.xml");
+    o.persistSettings = false;
+    o.foregroundAppFactory = [] { return std::unique_ptr<flub::platform::ForegroundApp>(); };
+    EngineController controller (o);
+    auto& routing = controller.getRouting();
+    flubapptest::useCountingCaptures (controller.getHost());
+    AudioServiceScript script;
+    scriptOwnerPc (script);
+    // Spotify follows the default (the headset); VLC plays to an HDMI output and is captured there.
+    script.setSessions ({ makeSession (700, "Spotify.exe", "ep-headset", 7001), makeSession (800, "vlc.exe", "ep-hdmi2", 8001) });
+    routing.setRouter (std::make_unique<ScriptedRouter> (script), true);
+    routing.setOutputDeviceSource ([] { return juce::String (kHeadset); });
+    routing.setInputDeviceSource ([] { return juce::String(); });
+    routing.setMoveOriginalAway (true);
+    routing.setRoute ("spotify", "Music");
+    routing.setRoute ("vlc", "Game");
+    routing.start();
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        const auto* a = findRoutedApp (routing, 700);
+        return a != nullptr && a->moveAway == MoveAway::Moved && a->captureId >= 0 && findRoutedApp (routing, 800)->captureId >= 0;
+    }));
+
+    // As measured on Windows 11: Spotify's open stream stays where it is
+    // when its per-app device changes; only a new stream follows.
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        script.pinned.insert (700);
+    }
+    routing.removeRoute ("spotify");
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return ! routing.getPutBackNotes().isEmpty(); }));
+    CHECK (script.getAppDevice ("spotify").empty()); // its own device (the default) is set back ...
+    CHECK (findRoutedApp (routing, 700)->captureId < 0); // ... the capture stopped, and it still plays to S/PDIF: not heard
+    const auto note = routing.describePutBack();
+    CHECK (note == "Spotify.exe still plays to " + juce::String (kSpdif) + ", where Flubsound had moved its own sound, so it is not heard. "
+                   + "Its own output device is set back: restart its playback (reload, or pause and play) to hear it again.");
+    CHECK (routing.describeMoveAway().endsWith (note));
+    CHECK (! routing.getJournalFile().exists()); // put back: nothing left to record
+
+    ui::RoutingPanel panel (controller);
+    panel.setSize (340, 900);
+    panel.refreshRouting();
+    CHECK (! panel.isShowingNoAppsProcessed()); // VLC is processed
+    CHECK (panel.isShowingPutBack());
+    CHECK (panel.getNotice() == "Not heard. " + note);
+
+    // It restarts its playback: the new stream opens on its own device (the
+    // default, the headset), so it is heard again and the note goes.
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        script.pinned.erase (700);
+        script.placeSessions ("spotify", "ep-headset");
+    }
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        routing.refresh();
+        return routing.getPutBackNotes().isEmpty();
+    }));
+    panel.refreshRouting();
+    CHECK (! panel.isShowingPutBack());
+    CHECK (panel.getNotice().isEmpty());
+
+    // Assigned again: moved again. Its stream then stays on S/PDIF at quit:
+    // the put-back is logged with that, as nothing can show it afterwards.
+    routing.setRoute ("spotify", "Music");
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        const auto* a = findRoutedApp (routing, 700);
+        return a != nullptr && a->moveAway == MoveAway::Moved && a->captureId >= 0;
+    }));
+    {
+        const std::lock_guard<std::mutex> g (script.lock);
+        script.pinned.insert (700);
+    }
+    CapturingLogger log;
+    controller.shutdown();
+    CHECK (script.getAppDevice ("spotify").empty());
+    CHECK (log.text().contains ("Routing: Spotify.exe's own output device was put back at quit, but it was still playing to " + juce::String (kSpdif)
+                                + " (where Flubsound had moved it): it is not heard until it restarts its playback."));
+}
+
+TEST_CASE ("App: R4.5 moves are kept per executable file: two programs of one name each move; an updated app's new file is moved afresh")
+{
+    const flubapptest::TempFolder temp;
+    const auto oldDiscord = temp.file ("Discord/app-1.0.1/Discord.exe"), newDiscord = temp.file ("Discord/app-1.0.2/Discord.exe");
+    const auto gameA = temp.file ("Games A/game.exe"), gameB = temp.file ("Games B/game.exe");
+    for (const auto& f : { oldDiscord, newDiscord, gameA, gameB })
+        REQUIRE (f.create().wasOk());
+    const auto pathOf = [] (const juce::File& f) { return f.getFullPathName().toStdString(); };
+
+    Rig rig (temp.file ("settings.xml"));
+    rig.script.setSessions ({ sessionAt (900, "Discord.exe", oldDiscord, "ep-headset", 9900), sessionAt (500, "game.exe", gameA, "ep-headset", 5500),
+                              sessionAt (501, "game.exe", gameB, "ep-headset", 5501) });
+    rig.settings.setMoveOriginalAway (true);
+    rig.settings.setAppRoutes ({ { "discord", "Chat" }, { "game", "Game" } });
+    rig.start();
+
+    // Two programs named game.exe: Windows keeps one device per file, so each is moved (through its own process) and captured.
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.movedAway (900) && rig.movedAway (500) && rig.movedAway (501); }));
+    CHECK (rig.script.countMoves (500, "ep-spdif") == 1);
+    CHECK (rig.script.countMoves (501, "ep-spdif") == 1);
+    CHECK (rig.script.getAppDevice (pathOf (gameA)) == "ep-spdif");
+    CHECK (rig.script.getAppDevice (pathOf (gameB)) == "ep-spdif");
+    CHECK (readJournal (rig.journalFile()).size() == 3);
+
+    // Discord updates itself: the old folder goes and the new file starts on
+    // the headset (Windows has no device for that file). That is not the
+    // user's change: the new file is moved, and the old file's record is
+    // forgotten (its setting can never apply again).
+    REQUIRE (oldDiscord.getParentDirectory().deleteRecursively());
+    rig.script.setSessions ({ sessionAt (901, "Discord.exe", newDiscord, "ep-headset", 9901), sessionAt (500, "game.exe", gameA, "ep-spdif", 5500),
+                              sessionAt (501, "game.exe", gameB, "ep-spdif", 5501) });
+    REQUIRE (flubapptest::pumpMessagesUntil ([&]
+    {
+        rig.routing->refresh();
+        return rig.movedAway (901);
+    }));
+    CHECK (rig.script.countMoves (901, "ep-spdif") == 1);
+    CHECK (rig.routing->describeDoubling().isEmpty()); // no "changed after Flubsound moved it"
+    std::set<juce::String> paths;
+    for (const auto& e : readJournal (rig.journalFile()))
+        paths.insert (e.executablePath);
+    CHECK ((paths == std::set<juce::String> { newDiscord.getFullPathName(), gameA.getFullPathName(), gameB.getFullPathName() }));
+
+    // Unassigning "game" puts both files back, each through its own process.
+    rig.routing->removeRoute ("game");
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.script.countMoves (500, "") == 1 && rig.script.countMoves (501, "") == 1; }));
+    CHECK (rig.script.getAppDevice (pathOf (gameA)).empty());
+    CHECK (rig.script.getAppDevice (pathOf (gameB)).empty());
+    rig.routing->shutdown();
+    CHECK (rig.script.countMoves (901, "") == 1);
+    CHECK (rig.script.countMoves (900, "") == 0);
+    CHECK (! rig.journalFile().exists());
+}
+
+TEST_CASE ("App: R4.5 a crash during a re-point keeps the app as Flubsound's move, so it is put back later")
+{
+    const flubapptest::TempFolder temp;
+    Rig rig (temp.file ("settings.xml"));
+    // The journal of a run that crashed while re-pointing Spotify from S/PDIF
+    // to HDMI 1: the entry was written (pending, from S/PDIF), the move was not made.
+    REQUIRE (RouteJournal (rig.settings.getPropertiesFile().getFile().getSiblingFile ("route-journal.json"))
+                 .write ({ { 700, 7001, "spotify", {}, "ep-hdmi1", {}, true, true, "ep-spdif" } }));
+    REQUIRE (readJournal (rig.settings.getPropertiesFile().getFile().getSiblingFile ("route-journal.json")).front().movedFrom == "ep-spdif");
+    rig.script.setSessions ({ makeSession (700, "Spotify.exe", "ep-spdif", 7001) });
+    const std::string spdif ("ep-spdif");
+    placeApp (rig.script, "spotify", "ep-spdif", &spdif);
+    rig.settings.setMoveOriginalAway (true);
+    rig.settings.setAppRoutes ({ { "spotify", "Music" } });
+    rig.start();
+
+    // Still Flubsound's move: the re-point is finished and confirmed.
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.movedAway (700) && rig.app (700)->movedTo == kHdmi1; }));
+    CHECK ((rig.script.getMoves() == std::vector<std::pair<uint32_t, std::string>> { { 700, "ep-hdmi1" } }));
+    auto journal = readJournal (rig.journalFile());
+    REQUIRE (journal.size() == 1);
+    CHECK (! journal[0].pending);
+    CHECK (journal[0].movedFrom.isEmpty());
+    CHECK (journal[0].previousEndpoint.isEmpty());
+
+    // Unassigned, then quit: its own device (the default) is back, nothing is left.
+    rig.routing->removeRoute ("spotify");
+    REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.script.countMoves (700, "") == 1 && ! rig.journalFile().exists(); }));
+    rig.routing->shutdown();
+    CHECK (rig.script.getAppDevice ("spotify").empty());
+    CHECK (rig.script.getMoves().size() == 2);
+}
+
+TEST_CASE ("App: R4.5 Tournament mode moves and puts back nothing; the journal keeps the move for the next start")
+{
+    const flubapptest::TempFolder temp;
+    const auto settingsFile = temp.file ("settings.xml");
+    const auto placeSpotifyOnSpdif = [] (AudioServiceScript& script)
+    {
+        script.setSessions ({ makeSession (700, "Spotify.exe", "ep-spdif", 7001) });
+        const std::string spdif ("ep-spdif");
+        placeApp (script, "spotify", "ep-spdif", &spdif);
+    };
+    {
+        Rig rig (settingsFile);
+        // An earlier run moved Spotify; it is no longer assigned, so outside
+        // Tournament mode it would be put back at once.
+        REQUIRE (RouteJournal (settingsFile.getSiblingFile ("route-journal.json")).write ({ { 700, 7001, "spotify", {}, "ep-spdif", {}, false, true, {} } }));
+        placeSpotifyOnSpdif (rig.script);
+        rig.settings.setMoveOriginalAway (true);
+        rig.routing = std::make_unique<AppRouting> (rig.host, rig.settings, std::make_unique<ScriptedRouter> (rig.script), true);
+        rig.routing->setOutputDeviceSource ([] { return juce::String (kHeadset); });
+        rig.routing->setTournamentMode (true);
+        rig.routing->start();
+        bool waited = false;
+        juce::Timer::callAfterDelay (300, [&waited] { waited = true; });
+        REQUIRE (flubapptest::pumpMessagesUntil ([&waited] { return waited; }));
+        rig.routing->shutdown();
+        CHECK (rig.script.getEnumerations() == 0); // no process opened, no session touched
+        CHECK (rig.script.getMoves().empty());
+        const auto kept = readJournal (rig.journalFile());
+        REQUIRE (kept.size() == 1);
+        CHECK (kept[0].movedAway);
+        CHECK (kept[0].endpoint == "ep-spdif");
+        CHECK (rig.script.getAppDevice ("spotify") == "ep-spdif");
+    }
+    {
+        // The next start, outside Tournament mode: put back.
+        Rig rig (settingsFile);
+        placeSpotifyOnSpdif (rig.script);
+        rig.start();
+        REQUIRE (flubapptest::pumpMessagesUntil ([&] { return rig.script.countMoves (700, "") == 1 && ! rig.journalFile().exists(); }));
+        rig.routing->shutdown();
+        CHECK (rig.script.getAppDevice ("spotify").empty());
+    }
+}
+
 // =============================================================================
 namespace
 {
@@ -828,9 +1098,16 @@ TEST_CASE ("App UI: Settings > Routing has the move-away switch, the silent devi
     CHECK (game->getItemText (0) == "Not fed");
     CHECK (game->getItemText (1) == "Inputs 1 - 8"); // Game is 7.1
     CHECK (music->getItemText (9) == "Inputs 9 - 10");
-    controller.setDeviceInputMode (AppSettings::DeviceInputMode::On);
     music->setSelectedId (2 + 8, juce::sendNotificationSync); // from input 9
     CHECK (controller.getSettings().getDeviceInputMap() == "Music=8");
+    // Automatic with no device open: the device input is not processed, so the saved map is not used, and the page says so.
+    CHECK (controller.getHost().getDeviceInputMap()[1] == -1);
+    CHECK (ui::SettingsDialog::describeInputMap (controller).startsWith ("Device input is not processed now"));
+    CHECK (ui::SettingsDialog::describeInputMap (controller).contains (": the map is not used."));
+    controller.setDeviceInputMode (AppSettings::DeviceInputMode::Off);
+    CHECK (ui::SettingsDialog::describeInputMap (controller).startsWith ("Device input is off: the map is not used."));
+    controller.setDeviceInputMode (AppSettings::DeviceInputMode::On);
+    CHECK (ui::SettingsDialog::describeInputMap (controller).startsWith ("The map is in use"));
     CHECK (controller.getHost().getDeviceInputMap()[1] == 8);
     CHECK (controller.getHost().getDeviceInputMap()[0] == -1); // the map replaces "Input feeds strip"
 

@@ -129,7 +129,7 @@ Useful options:
 | `FLUB_JUCE_VERSION` | `9.0.2` | JUCE git tag fetched for the app / plug-in |
 | `FLUB_ASIO_SDK_DIR` | empty | Windows app: Steinberg ASIO SDK root; enables the ASIO device type |
 | `FLUB_FACTORY_PRESET_DIR` | `presets/factory` | Folder whose `*.json` files the app embeds as factory presets |
-| `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | OFF | Windows app: lets the routing panel move apps between output devices through the undocumented `IAudioPolicyConfigFactory` API (see `docs/08` D7) |
+| `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | OFF | Windows app: offers endpoint routing, moving apps to the strips' own output devices (needs the Flubsound driver, not built yet). The undocumented `IAudioPolicyConfigFactory` adapter is in every Windows build; without this option it is used only for Settings › Routing › *Move the app's own sound away automatically* (off by default; see `docs/08` D7) |
 | `FLUB_WITH_PIPEWIRE` | ON | Linux app: build the native PipeWire node and registry linking when `pkg-config` finds libpipewire-0.3 (`libpipewire-0.3-dev`); without it the app falls back to `pw-dump` / `pw-link` (docs/11 E48) |
 
 ---

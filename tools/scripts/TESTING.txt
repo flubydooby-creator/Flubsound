@@ -53,6 +53,9 @@ Flubsound processes other apps' audio and plays it on your headset.
        apps' own output to a device you do not listen to (Windows Settings >
        Sound > Volume mixer), or switch on Settings > Routing > "Move the
        app's own sound away automatically", so you do not hear them twice.
+       When Flubsound sets an app's own device back (you unassign it or
+       quit), an app that is playing may stay silent until you restart its
+       playback (reload, or pause and play): Windows moves only new sound.
      Any OS: install a virtual cable (VB-CABLE on Windows, BlackHole on
        macOS), make it the system output, and pick its "Output" side as the
        input device in Settings > Audio. Settings > Routing > "Input feeds

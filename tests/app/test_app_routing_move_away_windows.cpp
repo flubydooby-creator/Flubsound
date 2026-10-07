@@ -5,8 +5,11 @@
 // choice of AppRouting::chooseSilentEndpoint) and back. It reads the per-app
 // device back after each step, starts a second process of the same
 // executable while the first is moved (Windows keeps the device per
-// executable), and leaves the device as it found it. Nothing else is touched:
-// the moved executable is this test binary.
+// executable file: it reads the moved device and its new stream must play
+// there), and leaves the device as it found it, also when a check fails (a
+// scope guard puts it back through a child, then stops the children). It
+// prints whether an open stream follows either change. Nothing else is
+// touched: the moved executable is this test binary.
 //
 // It changes a per-app setting for the duration, so it runs only with
 // FLUB_TEST_REAL_APP_MOVE=1 (and prints what it saw); otherwise both cases
@@ -19,6 +22,7 @@
 #include "platform/PlatformServices.h"
 
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -172,17 +176,48 @@ TEST_CASE ("App: R4.5 Windows: the real per-app device move of a test process an
         return done();
     };
 
-    juce::ChildProcess first, second;
-    REQUIRE (startChild (first));
+    // Puts the device back and stops the children however the case ends (a
+    // failed REQUIRE throws): the test binary must not stay moved. Windows
+    // sets the device per executable file, through a running process of it
+    // (the router refuses this very process): the children, before they stop.
+    struct Cleanup
+    {
+        explicit Cleanup (flub::platform::AppAudioRouter& r) : router (r) {}
+        ~Cleanup()
+        {
+            if (moved)
+            {
+                std::string error;
+                const bool restored = (firstPid != 0 && router.setAppEndpoint (firstPid, before, error))
+                                      || (secondPid != 0 && router.setAppEndpoint (secondPid, before, error));
+                std::printf ("  cleanup: per-app device %s ('%s')%s%s\n", restored ? "put back" : "NOT put back", before.c_str(),
+                             restored ? "" : ": ", restored ? "" : error.c_str());
+            }
+            first.kill();
+            second.kill();
+        }
+        Cleanup (const Cleanup&) = delete;
+        Cleanup& operator= (const Cleanup&) = delete;
+
+        flub::platform::AppAudioRouter& router;
+        juce::ChildProcess first, second;
+        uint32_t firstPid = 0, secondPid = 0;
+        bool moved = false;
+        std::string before;
+    } cleanup (*router);
+
+    REQUIRE (startChild (cleanup.first));
     flub::platform::AudioSessionInfo a;
     REQUIRE (waitFor ([&] { return findChild (0, a) && a.isActive; }, 5000));
+    cleanup.firstPid = a.processId;
     std::printf ("  child A before: %s\n", describe (a).toRawUTF8());
 
-    std::string before, error;
-    REQUIRE (router->getAppEndpoint (a.processId, before, error));
-    std::printf ("  child A per-app device before: '%s'\n", before.c_str());
+    std::string error;
+    REQUIRE (router->getAppEndpoint (a.processId, cleanup.before, error));
+    std::printf ("  child A per-app device before: '%s'\n", cleanup.before.c_str());
 
     // The move.
+    cleanup.moved = true; // (from here on the cleanup puts it back, also when the call half-failed)
     REQUIRE (router->setAppEndpoint (a.processId, target.endpoint.id, error));
     std::string now;
     REQUIRE (router->getAppEndpoint (a.processId, now, error));
@@ -191,29 +226,40 @@ TEST_CASE ("App: R4.5 Windows: the real per-app device move of a test process an
     {
         flub::platform::AudioSessionInfo s;
         return findChild (0, s) && AppRouting::playsToEndpoint (s, target.endpoint.id);
-    }, 1500);
+    }, 500); // (a stream that follows does so at once; the waits keep the case near 2 s)
     findChild (0, a);
     std::printf ("  child A after the move (%s): %s\n", followed ? "its stream followed" : "its stream stayed", describe (a).toRawUTF8());
 
-    // A second process of the same executable starts on the moved device.
-    REQUIRE (startChild (second));
+    // A second process of the same executable: it reads the moved device, and
+    // the stream it opens (on the default device, as an app that follows the
+    // default does) plays there.
+    REQUIRE (startChild (cleanup.second));
     flub::platform::AudioSessionInfo b;
     REQUIRE (waitFor ([&] { return findChild (a.processId, b) && b.isActive; }, 5000));
+    cleanup.secondPid = b.processId;
     std::string secondDevice;
     REQUIRE (router->getAppEndpoint (b.processId, secondDevice, error));
     CHECK (juce::String (secondDevice).equalsIgnoreCase (juce::String (target.endpoint.id)));
+    const bool secondOnTarget = waitFor ([&] { return findChild (a.processId, b) && AppRouting::playsToEndpoint (b, target.endpoint.id); }, 2000);
     std::printf ("  child B (same executable): per-app device '%s', %s\n", secondDevice.c_str(), describe (b).toRawUTF8());
+    CHECK (secondOnTarget);
 
     // Put back as found, through the first process.
-    REQUIRE (router->setAppEndpoint (a.processId, before, error));
+    REQUIRE (router->setAppEndpoint (a.processId, cleanup.before, error));
+    cleanup.moved = false;
     std::string after;
     REQUIRE (router->getAppEndpoint (a.processId, after, error));
-    CHECK (juce::String (after).equalsIgnoreCase (juce::String (before)));
+    CHECK (juce::String (after).equalsIgnoreCase (juce::String (cleanup.before)));
     REQUIRE (router->getAppEndpoint (b.processId, after, error));
-    CHECK (juce::String (after).equalsIgnoreCase (juce::String (before)));
+    CHECK (juce::String (after).equalsIgnoreCase (juce::String (cleanup.before)));
     std::printf ("  per-app device after putting it back: '%s'\n", after.c_str());
-
-    first.kill();
-    second.kill();
+    // A stream that is open stays where it is (the put-back direction, as AppRouting's watch expects).
+    flub::platform::AudioSessionInfo bAfter;
+    const bool bFollowedBack = waitFor ([&]
+    {
+        return findChild (a.processId, bAfter) && ! AppRouting::playsToEndpoint (bAfter, target.endpoint.id);
+    }, 500);
+    std::printf ("  child B after the put-back (%s): %s\n", bFollowedBack ? "its stream followed" : "its stream stayed on the silent device",
+                 describe (bAfter).toRawUTF8());
 #endif
 }
