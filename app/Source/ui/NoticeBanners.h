@@ -25,11 +25,13 @@
 //                      loaded preset was made for another profile; its
 //                      button switches the profile (every strip), the
 //                      preset never does by itself;
-//                    * hotkeys that are not active (R4.4: in use by another
-//                      application, the same chord as another action, ...),
-//                      once per action and chord (HotkeyManager::
-//                      takeUnannouncedFailures); "Fix in Settings" opens
-//                      Settings > Hotkeys; it goes by itself when they work.
+//                    * hotkeys that are not active (R4.4: could not be
+//                      registered, the same chord as another action, ...),
+//                      posted once per action and chord (HotkeyManager::
+//                      takeUnannouncedFailures), listing every hotkey still
+//                      failing and kept up to date (refresh); "Fix in
+//                      Settings" opens Settings > Hotkeys; it goes by itself
+//                      when they work.
 // Both are message-thread components owned by MainComponent, which lays them
 // out when refresh() / onVisibilityChanged say their visibility changed.
 #pragma once
@@ -118,6 +120,10 @@ public:
 
     /** Shows `notice` now (it replaces a notice with the same key). */
     void post (Notice notice);
+    /** Replaces the notice with `notice`'s key where it is (keeping its place
+        and its time left) without bringing it to the front; false when there
+        is none (nothing is posted then). */
+    bool refresh (Notice notice);
     /** Removes the notice with this key, if any. */
     void dismiss (const juce::String& key);
     void clear();
@@ -154,11 +160,12 @@ public:
     /** ""Competitive FPS" was made for Low Latency; the engine runs Balanced."
         with the button "Use Low Latency", which calls `accept`. */
     static Notice latencyNotice (const EngineController::LatencySuggestion& suggestion, std::function<void()> accept);
-    /** "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+B) is in use by
-        another application (or reserved by the system)." (+1 more), a
-        warning that stays until dismissed or fixed, with "Fix in Settings",
-        which calls `openSettings`; the detail lists every failure. Text
-        empty for no failures. */
+    /** "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+B) could not be
+        registered (another application may hold it, or the system reserves
+        it)." (+1 other), a warning that stays until dismissed or fixed, with
+        "Fix in Settings", which calls `openSettings`; the detail lists every
+        failure. The text names the first failure of the list. Text empty for
+        no failures. */
     static Notice hotkeyNotice (const std::vector<HotkeyManager::Failure>& failures, std::function<void()> openSettings);
     static juce::String profileName (flub::param::LatencyProfileValue profile);
 

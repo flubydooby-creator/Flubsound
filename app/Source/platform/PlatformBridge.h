@@ -37,6 +37,15 @@ std::unique_ptr<flub::platform::ForegroundApp> createForegroundApp();
     services, only an unassigned chord is refused. */
 std::string chordProblem (const flub::platform::KeyChord& chord);
 
+/** The KeyChord key ('A' - 'Z' or '0' - '9') that types `character` on the
+    current keyboard layout without Shift (or, for a capital letter, its
+    lower case), 0 when there is none or it is not known. Windows only
+    (VkKeyScanW): JUCE names a key by its unshifted character there, so an
+    AZERTY digit key arrives as '&' or 'é' and a Cyrillic letter key as its
+    letter. Other systems: 0 (such keys are typed, not recorded). Call on the
+    message thread: the layout is that of the window with the focus. */
+uint32_t keyCodeForCharacter (uint32_t character);
+
 /** True if a capture object can be created and reports isSupported(). Creates
     and destroys a probe object: call from the message thread, not per block. */
 bool isProcessCaptureSupported();

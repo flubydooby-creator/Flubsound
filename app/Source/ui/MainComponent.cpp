@@ -3,6 +3,8 @@
 #include "Theme.h"
 #include "shell/MainWindow.h"
 
+#include <algorithm>
+
 namespace flub::app::ui
 {
 using namespace flub::param;
@@ -514,18 +516,44 @@ bool MainComponent::isSettingsPageShowing (SettingsDialog::Page page) const
 
 bool MainComponent::announceHotkeyFailures (HotkeyManager& hotkeys)
 {
-    if (hotkeys.getFailureList().empty())
+    const auto all = hotkeys.getFailureList();
+    const auto fresh = hotkeys.takeUnannouncedFailures(); // also forgets the ones that work again
+    if (all.empty())
+    {
         notices.dismiss (NoticeBar::kHotkeysKey); // fixed (or switched off): the notice has nothing left to say
-    const auto fresh = hotkeys.takeUnannouncedFailures();
-    if (fresh.empty() || isSettingsPageShowing (SettingsDialog::Page::Hotkeys))
         return false;
-    notices.post (NoticeBar::hotkeyNotice (fresh,
+    }
+
+    // The notice lists every hotkey that still fails, the news first, so a
+    // later failure adds to it and a fixed one drops off it.
+    auto list = fresh;
+    for (const auto& failure : all)
+        if (std::none_of (fresh.begin(), fresh.end(), [&failure] (const HotkeyManager::Failure& f) { return f.action == failure.action; }))
+            list.push_back (failure);
+    auto notice = NoticeBar::hotkeyNotice (list,
                                            [safe = juce::Component::SafePointer<MainComponent> (this)]
                                            {
                                                if (safe != nullptr)
                                                    safe->openSettingsPage (SettingsDialog::Page::Hotkeys);
-                                           }));
+                                           });
+
+    // Nothing new, or Settings > Hotkeys shows the failures itself: only a
+    // notice already up (not one the user dismissed) is brought up to date.
+    if (fresh.empty() || isSettingsPageShowing (SettingsDialog::Page::Hotkeys))
+    {
+        notices.refresh (std::move (notice));
+        return false;
+    }
+    notices.post (std::move (notice));
     return true;
+}
+
+juce::String MainComponent::getHotkeyTrayText (bool windowSeen) const
+{
+    if (windowSeen)
+        return {};
+    const auto* notice = notices.current();
+    return notice != nullptr && notice->key == NoticeBar::kHotkeysKey ? notice->text : juce::String();
 }
 
 void MainComponent::openExport()

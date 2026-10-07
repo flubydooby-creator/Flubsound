@@ -493,10 +493,19 @@ std::vector<KeyChord> AppSettings::getAlternativeHotkeys (HotkeyAction action)
         case HotkeyAction::ToggleBypass: second = 'Y'; break;   // bYpass
     }
 
-    // Three-modifier chords first: other programs rarely hold Ctrl+Alt+Shift
-    // chords, and AltGr (= Ctrl+Alt on Windows) never types a character with
-    // them on most layouts. The two-modifier chord with the second key last.
-    constexpr uint32_t ctrlAlt = KeyChord::Ctrl | KeyChord::Alt;
+    // A third key: F1 - F11 in the settings' action order.
+    uint32_t functionKey = 0x70; // F1
+    const auto actions = getAllHotkeyActions();
+    for (size_t i = 0; i < actions.size(); ++i)
+        if (actions[i] == action)
+            functionKey = 0x70 + static_cast<uint32_t> (i);
+
+    // Only Ctrl+Alt+Shift chords after the default: other programs rarely
+    // hold them, and AltGr (= Ctrl+Alt on Windows) types no character with
+    // them, whereas Ctrl+Alt+E is AltGr+E (the euro sign on German, French,
+    // Italian and Spanish layouts) and Ctrl+Alt+C / L / O type Polish
+    // letters (docs/06 §7.2).
+    constexpr uint32_t ctrlAltShift = KeyChord::Ctrl | KeyChord::Alt | KeyChord::Shift;
     const auto def = getDefaultHotkey (action);
     std::vector<KeyChord> list;
     const auto add = [&list] (uint32_t modifiers, uint32_t keyCode)
@@ -510,9 +519,9 @@ std::vector<KeyChord> AppSettings::getAlternativeHotkeys (HotkeyAction action)
         list.push_back (chord);
     };
     add (def.modifiers, def.keyCode);
-    add (ctrlAlt | KeyChord::Shift, def.keyCode);
-    add (ctrlAlt | KeyChord::Shift, second);
-    add (ctrlAlt, second);
+    add (ctrlAltShift, def.keyCode);
+    add (ctrlAltShift, second);
+    add (ctrlAltShift, functionKey);
     return list;
 }
 

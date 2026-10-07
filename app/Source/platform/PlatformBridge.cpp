@@ -8,6 +8,16 @@
     #include "PlatformServicesInternal.h" // detail::isValidChord
 #endif
 
+#if defined(_WIN32)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h> // VkKeyScanW, CharLowerW (keyCodeForCharacter)
+#endif
+
 namespace flub::app::platform_bridge
 {
 bool servicesCompiledIn() noexcept
@@ -85,6 +95,31 @@ void* promoteAudioThread() { return nullptr; }
 void revertAudioThread (void*) {}
 
 #endif
+
+uint32_t keyCodeForCharacter (uint32_t character)
+{
+   #if defined(_WIN32)
+    if (character <= 0x20 || character > 0xFFFF)
+        return 0;
+    const auto ch = static_cast<WCHAR> (character);
+    SHORT scan = VkKeyScanW (ch);
+    if (scan != -1 && (scan & 0xFF00) != 0)
+    {
+        // A capital letter needs Shift: its lower case may not (a Cyrillic
+        // 'И' is the B key's 'и'); '&' on a US layout stays Shift+7, refused.
+        const auto lower = static_cast<WCHAR> (reinterpret_cast<ULONG_PTR> (CharLowerW (reinterpret_cast<LPWSTR> (static_cast<ULONG_PTR> (ch)))));
+        if (lower != ch)
+            scan = VkKeyScanW (lower);
+    }
+    if (scan == -1 || (scan & 0xFF00) != 0)
+        return 0; // no key types it, or only with Shift / Ctrl / Alt
+    const auto vk = static_cast<uint32_t> (scan & 0xFF);
+    return (vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9') ? vk : 0;
+   #else
+    (void) character;
+    return 0;
+   #endif
+}
 
 bool isProcessCaptureSupported()
 {

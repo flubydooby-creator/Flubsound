@@ -357,11 +357,11 @@ void FlubsoundApplication::announceHotkeyFailures()
     auto* content = dynamic_cast<ui::MainComponent*> (mainWindow->getContentComponent());
     if (content == nullptr || ! content->announceHotkeyFailures (*hotkeys))
         return;
-    // Started minimised to the tray: the notice waits in the hidden window,
-    // so the tray says it once too.
-    if (! mainWindow->isVisible() && trayIcon != nullptr)
-        if (const auto* notice = content->getNoticeBar().current(); notice != nullptr && notice->key == ui::NoticeBar::kHotkeysKey)
-            trayIcon->notify ("Flubsound Pro - hotkey not active", notice->text);
+    // Started minimised (to the tray): the notice waits in the window nobody
+    // sees, so the tray says it once too.
+    const bool windowSeen = mainWindow->isVisible() && ! mainWindow->isMinimised();
+    if (const auto text = content->getHotkeyTrayText (windowSeen); text.isNotEmpty() && trayIcon != nullptr)
+        trayIcon->notify ("Flubsound Pro - hotkey not active", text);
 }
 
 void FlubsoundApplication::openHotkeySettings()

@@ -150,17 +150,19 @@ void HotkeyManager::unregisterAll()
 
 void HotkeyManager::setSuspended (bool shouldBeSuspended)
 {
-    if (shouldBeSuspended == suspended)
-        return;
     if (shouldBeSuspended)
     {
-        unregisterAll();
-        suspended = true;
+        if (! suspended)
+        {
+            unregisterAll();
+            suspended = true;
+        }
+        return;
     }
-    else
-    {
-        registerAll(); // clears the flag
-    }
+    // Resuming always registers from the settings, also when something else
+    // already ended the suspension (a registerAll() in between): the chord
+    // just recorded must not stay saved but unregistered.
+    registerAll(); // clears the flag
 }
 
 bool HotkeyManager::isProblem (Status status) noexcept
@@ -217,7 +219,7 @@ juce::String HotkeyManager::describe (const ActionStatus& status)
         case Status::Pending: return "Waiting for the desktop";
         case Status::Registered: return "Registered";
         case Status::Reassigned: return "Bound by the desktop as " + status.trigger;
-        case Status::Unavailable: return "In use by another app";
+        case Status::Unavailable: return "Could not register"; // another app, the system, or no working service
         case Status::Declined: return "Declined by the desktop";
         case Status::Conflict: return "Same chord as " + status.detail;
         case Status::Invalid: return "Not a valid shortcut";
@@ -261,7 +263,7 @@ juce::String HotkeyManager::describeFailure (const Failure& failure)
     const auto name = AppSettings::getHotkeyActionName (failure.action) + " (" + status.chord + ")";
     switch (status.status)
     {
-        case Status::Unavailable: return name + " is in use by another application (or reserved by the system)";
+        case Status::Unavailable: return name + " could not be registered (another application may hold it, or the system reserves it)";
         case Status::Declined: return name + " was declined by the desktop";
         case Status::Conflict: return name + " is the same chord as " + status.detail;
         case Status::Invalid: return name + " is not a valid shortcut: " + status.detail.trimCharactersAtEnd (".");
@@ -302,6 +304,52 @@ std::vector<HotkeyManager::Failure> HotkeyManager::takeUnannouncedFailures()
 juce::String HotkeyManager::validateChord (const KeyChord& chord)
 {
     return juce::String::fromUTF8 (platform_bridge::chordProblem (chord).c_str());
+}
+
+juce::String HotkeyManager::commonShortcutProblem (const KeyChord& chord, bool recorded)
+{
+    if (chord.keyCode == 0)
+        return {};
+    constexpr uint32_t ctrl = KeyChord::Ctrl, alt = KeyChord::Alt, shift = KeyChord::Shift, super = KeyChord::Super;
+    constexpr uint32_t f4 = 0x73, f12 = 0x7B, f24 = 0x87, space = 0x20, del = 0x2E;
+    const auto mods = chord.modifiers;
+    const auto key = chord.keyCode;
+    const auto text = AppSettings::chordToString (chord);
+    const bool functionKey = key >= 0x70 && key <= f24;
+
+    // System chords: a global hotkey would take them from every window
+    // while Flubsound runs (and at every start, as it is saved).
+    if (mods == alt && key == f4)
+        return text + " closes the active window in every application.";
+    if (mods == alt && key == space)
+        return text + " opens the window menu in every application.";
+    if (mods == (ctrl | alt) && key == del)
+        return text + " is reserved by the system.";
+    if (mods == super && (key == space || key == 'L' || key == 'D' || key == 'Q'))
+        return text + " is a system shortcut (" + (key == space ? "input language or search" : key == 'L' ? "lock" : key == 'D' ? "desktop" : "quit / search")
+               + ").";
+    // F1 - F12 alone or with Shift: Help, Rename, Find next, Refresh, the
+    // menu bar, Full screen, Shift+F10's context menu ... (F13 - F24 are free).
+    if (functionKey && key <= f12 && (mods & ~shift) == 0)
+        return text + " is a key applications use (F1 help, F2 rename, F5 refresh, F10 menu ...): add Ctrl or Alt, or use F13-F24.";
+
+    if (! recorded)
+        return {};
+    // Recorded only (one reflex press after a stray click must not take a
+    // key from every application; typing the chord takes it on purpose):
+    // one modifier besides Shift - Ctrl, Alt, on macOS also Cmd - with a
+    // letter, a digit, a navigation key or F1 - F12 (copy, paste, undo,
+    // save, tabs, menus, word jumps, Back, Ctrl+F4 ...).
+    const auto primary = mods & ~shift;
+   #if JUCE_MAC
+    const bool oneAppModifier = primary == ctrl || primary == alt || primary == super;
+   #else
+    const bool oneAppModifier = primary == ctrl || primary == alt;
+   #endif
+    if (oneAppModifier && ! (functionKey && key > f12))
+        return text + " is a shortcut other applications use (copy, paste, undo, menus ...): add a second modifier such as Ctrl+Alt, "
+                      "or right-click / Shift+F10 to type it if you want it anyway.";
+    return {};
 }
 
 std::optional<HotkeyAction> HotkeyManager::findConflict (const AppSettings& settings, HotkeyAction action, const KeyChord& chord)

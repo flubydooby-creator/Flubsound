@@ -1,12 +1,13 @@
 #include "HotkeyCapture.h"
 
 #include "Theme.h"
+#include "platform/PlatformBridge.h"
 
 namespace flub::app::ui
 {
 using flub::platform::KeyChord;
 
-bool chordFromKeyPress (const juce::KeyPress& key, KeyChord& chord)
+bool chordFromKeyPress (const juce::KeyPress& key, KeyChord& chord, const std::function<uint32_t (uint32_t character)>& keyForCharacter)
 {
     chord = {};
     const int code = key.getKeyCode();
@@ -44,6 +45,18 @@ bool chordFromKeyPress (const juce::KeyPress& key, KeyChord& chord)
         for (uint32_t i = 0; i < 24; ++i)
             if (code == functionKeys[i])
                 vk = 0x70 + i;
+
+        // Another character: the letter or digit key that types it on this
+        // layout (JUCE names a key by its unshifted character on Windows, so
+        // AZERTY's 1 key arrives as '&' and a Cyrillic B key as its letter).
+        // JUCE's codes for keys without a character are 0x10000 and above.
+        if (vk == 0 && code > 0x20 && code < 0x10000)
+        {
+            const auto character = static_cast<uint32_t> (code);
+            const auto mapped = keyForCharacter != nullptr ? keyForCharacter (character) : platform_bridge::keyCodeForCharacter (character);
+            if ((mapped >= 'A' && mapped <= 'Z') || (mapped >= '0' && mapped <= '9'))
+                vk = mapped;
+        }
     }
     if (vk == 0)
         return false;
@@ -90,8 +103,8 @@ HotkeyCaptureField::HotkeyCaptureField (const juce::String& name)
     : juce::Button (name + " shortcut"), actionName (name)
 {
     setTitle (name + " shortcut");
-    setTooltip ("Click, then press the new shortcut (for example Ctrl+Alt+Shift+B). Esc cancels, Backspace clears it. "
-                "Right-click to type it instead (Win / Super key chords).");
+    setTooltip ("Click (or Return / Space), then press the new shortcut, for example Ctrl+Alt+Shift+B. Esc cancels, Backspace clears it. "
+                "Right-click or Shift+F10 to type it instead (Win / Super key chords).");
     setWantsKeyboardFocus (true);
     setMouseClickGrabsKeyboardFocus (true);
 }
@@ -181,7 +194,21 @@ void HotkeyCaptureField::clicked (const juce::ModifierKeys& modifiers)
 bool HotkeyCaptureField::keyPressed (const juce::KeyPress& key)
 {
     if (! capturing)
+    {
+        const auto mods = key.getModifiers().withoutMouseButtons();
+        const bool plain = ! mods.isAnyModifierKeyDown();
+        if (plain && (key.isKeyCode (juce::KeyPress::returnKey) || key.isKeyCode (juce::KeyPress::spaceKey)))
+        {
+            startCapture(); // juce::Button only knows Return, and clicks asynchronously
+            return true;
+        }
+        if (key.isKeyCode (juce::KeyPress::F10Key) && mods == juce::ModifierKeys (juce::ModifierKeys::shiftModifier) && onTypeRequested != nullptr)
+        {
+            onTypeRequested(); // the keyboard's context menu: typed entry
+            return true;
+        }
         return juce::Button::keyPressed (key);
+    }
 
     if (key.isKeyCode (juce::KeyPress::escapeKey))
     {
@@ -226,6 +253,19 @@ void HotkeyCaptureField::focusLost (FocusChangeType cause)
 {
     cancelCapture();
     juce::Button::focusLost (cause);
+}
+
+std::unique_ptr<juce::AccessibilityHandler> HotkeyCaptureField::createAccessibilityHandler()
+{
+    juce::AccessibilityActions actions;
+    actions.addAction (juce::AccessibilityActionType::press, [this] { startCapture(); });
+    actions.addAction (juce::AccessibilityActionType::showMenu,
+                       [this]
+                       {
+                           if (! capturing && onTypeRequested != nullptr)
+                               onTypeRequested();
+                       });
+    return std::make_unique<juce::AccessibilityHandler> (*this, juce::AccessibilityRole::button, std::move (actions));
 }
 
 void HotkeyCaptureField::paintButton (juce::Graphics& g, bool highlighted, bool)

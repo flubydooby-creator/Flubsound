@@ -212,6 +212,20 @@ void NoticeBar::post (Notice notice)
     update (wasShowing);
 }
 
+bool NoticeBar::refresh (Notice notice)
+{
+    for (auto& entry : entries)
+    {
+        if (entry.notice.key == notice.key)
+        {
+            entry.notice = std::move (notice);
+            update (shouldShow());
+            return true;
+        }
+    }
+    return false;
+}
+
 void NoticeBar::dismiss (const juce::String& key)
 {
     const bool wasShowing = shouldShow();

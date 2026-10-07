@@ -8,6 +8,7 @@
 // WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW extended styles), and that a focused
 // window keeps the keyboard focus while the display comes and goes.
 #include "AppTestSupport.h"
+#include "DisplayTestSupport.h"
 
 #include "engine/EngineController.h"
 #include "settings/AppSettings.h"
@@ -17,16 +18,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <iostream>
 #include <vector>
 
-#if JUCE_LINUX || JUCE_BSD
-    #include <dlfcn.h>
-#endif
-
 using namespace flub::app;
 using flub::app::ui::Osd;
+using flubapptest::haveDisplay;
+using flubapptest::TolerateXErrors;
 
 namespace
 {
@@ -58,44 +56,6 @@ struct FakeEnvironment
         return env;
     }
 };
-
-/** Xlib's default error handler exits the process. JUCE replaces it in a
-    GUI app (JUCEApplication), not in this console test runner, and on a
-    window-manager-less Xvfb JUCE queries atoms no WM created (BadAtom on
-    _NET_WM_STATE), which the app ignores. Do the same while this lives. */
-struct TolerateXErrors
-{
-   #if JUCE_LINUX || JUCE_BSD
-    using Handler = int (*) (void*, void*);
-    using Setter = Handler (*) (Handler);
-
-    TolerateXErrors()
-    {
-        if (auto* x11 = dlopen ("libX11.so.6", RTLD_LAZY | RTLD_NOLOAD))
-            if ((setter = reinterpret_cast<Setter> (dlsym (x11, "XSetErrorHandler"))) != nullptr)
-                previous = setter (&ignore);
-    }
-    ~TolerateXErrors()
-    {
-        if (setter != nullptr)
-            setter (previous);
-    }
-    static int ignore (void*, void*) { return 0; }
-
-    Setter setter = nullptr;
-    Handler previous = nullptr;
-   #endif
-};
-
-/** A display to put windows on (Xvfb or a desktop session). */
-bool haveDisplay()
-{
-   #if JUCE_LINUX || JUCE_BSD
-    if (std::getenv ("DISPLAY") == nullptr)
-        return false;
-   #endif
-    return juce::Desktop::getInstance().getDisplays().getPrimaryDisplay() != nullptr;
-}
 } // namespace
 
 TEST_CASE ("App: the OSD shows a hotkey's feedback for 1.2 s and fades out over 0.3 s (E56)")

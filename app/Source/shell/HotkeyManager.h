@@ -73,7 +73,9 @@ public:
     /** While suspended no chord is registered (the statuses stay as they
         were): Settings > Hotkeys records a new chord then, so pressing one of
         Flubsound's own chords reaches the recorder instead of running its
-        action. Resuming registers everything again. */
+        action. Resuming (false) always registers everything from the
+        settings again, also when a registerAll() in between already ended
+        the suspension. */
     void setSuspended (bool shouldBeSuspended);
     bool isSuspended() const noexcept { return suspended; }
 
@@ -105,8 +107,9 @@ public:
 
     ActionStatus getStatus (HotkeyAction action) const;
 
-    /** Short text for the Hotkeys page's row: "Registered", "In use by
-        another app", "Declined by the desktop", "Same chord as
+    /** Short text for the Hotkeys page's row: "Registered", "Could not
+        register" (another application holds it, the system reserves it, or
+        the service could not take it), "Declined by the desktop", "Same chord as
         <action>", "Not a valid shortcut", "Bound by the desktop as
         <trigger>", "Waiting for the desktop", "Not assigned", "Off",
         "Not supported here". */
@@ -126,7 +129,8 @@ public:
     };
     /** The actions whose status isProblem(), in the settings' action order. */
     std::vector<Failure> getFailureList() const;
-    /** "Bypass hotkey strip (Ctrl+Alt+B) is in use by another application",
+    /** "Bypass hotkey strip (Ctrl+Alt+B) could not be registered (another
+        application may hold it, or the system reserves it)",
         "... was declined by the desktop", "... is the same chord as Toggle
         Music / Gaming", "... is not a valid shortcut: <why>". */
     static juce::String describeFailure (const Failure& failure);
@@ -139,6 +143,16 @@ public:
     // ---- Rebinding (Settings > Hotkeys) ------------------------------------------------
     /** Why `chord` cannot be a global hotkey ("" when it can). */
     static juce::String validateChord (const flub::platform::KeyChord& chord);
+    /** Why Settings > Hotkeys refuses a chord the system would accept: it
+        would take a key from every other application ("" when it does not).
+        Always: Alt+F4, Alt+Space, Ctrl+Alt+Delete, Super+Space / L / D / Q,
+        and F1 - F12 alone or with Shift only. `recorded` (pressed in the
+        recorder, where one reflex press after a stray click is enough) also
+        refuses one modifier besides Shift - Ctrl, Alt, on macOS Cmd - with a
+        letter, digit, navigation key or F1 - F12 (copy, paste, undo, menus,
+        Ctrl+F4 ...); typing such a chord takes it on purpose. Saved chords
+        are never checked (registerAll keeps them working). */
+    static juce::String commonShortcutProblem (const flub::platform::KeyChord& chord, bool recorded);
     /** The other action that has `chord` in the settings, if any. */
     static std::optional<HotkeyAction> findConflict (const AppSettings& settings, HotkeyAction action,
                                                      const flub::platform::KeyChord& chord);

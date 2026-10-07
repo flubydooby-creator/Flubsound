@@ -244,9 +244,11 @@ public:
     // ---- Hotkeys -------------------------------------------------------------------
     static flub::platform::KeyChord getDefaultHotkey (HotkeyAction action);
     /** The short list Settings > Hotkeys' "Pick a free combination" tries, in
-        order (R4.4): the default, the default key with Ctrl+Alt+Shift, a
-        second key per action with Ctrl+Alt+Shift, then with Ctrl+Alt. The
-        second keys are distinct across actions and from every default key. */
+        order (R4.4): the default, then Ctrl+Alt+Shift with the default key,
+        with a second key per action and with F1 - F11 (the action's place in
+        getAllHotkeyActions). The second keys are distinct across actions and
+        from every default key. No Ctrl+Alt+letter fallback: that is AltGr+
+        letter on Windows, which types a character on many layouts. */
     static std::vector<flub::platform::KeyChord> getAlternativeHotkeys (HotkeyAction action);
     /** Same modifiers and key (two unassigned chords are the same). */
     static bool sameChord (const flub::platform::KeyChord& a, const flub::platform::KeyChord& b) noexcept;

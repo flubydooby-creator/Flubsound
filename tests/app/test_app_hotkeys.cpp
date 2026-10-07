@@ -13,7 +13,12 @@
 // Hotkeys page (key presses delivered straight to the recorder, no OS
 // events), the new Bypass default and its persistence; on Windows also the
 // real RegisterHotKey service against a second registrant in this process.
+// After the review: every control on the page ends a recording before the
+// hotkeys are registered again, chords other applications use are refused,
+// the notice lists what still fails, and with a display the Settings window
+// is really open on the Hotkeys page (its 4 Hz poll included).
 #include "AppTestSupport.h"
+#include "DisplayTestSupport.h"
 
 #include "engine/EngineController.h"
 #include "platform/PlatformBridge.h"
@@ -189,7 +194,7 @@ TEST_CASE ("App: HotkeyManager registers each action under its name and shows pe
     // Synchronous answers are applied before registerAll() returns.
     CHECK (manager.getStatusText (HotkeyAction::ToggleEnable) == "Registered");
     CHECK (manager.getStatusText (HotkeyAction::BoostUp) == "Registered");
-    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "In use by another app");
+    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "Could not register");
     CHECK (manager.getStatusText (HotkeyAction::NextPreset) == "Not assigned");
     CHECK (manager.getStatus (HotkeyAction::BoostDown).status == HotkeyManager::Status::Unavailable);
     CHECK (manager.getStatus (HotkeyAction::BoostDown).chord == chordOf (controller, HotkeyAction::BoostDown));
@@ -285,9 +290,9 @@ TEST_CASE ("App: HotkeyManager shows the desktop's later answers per action (wai
     fake.reportFromAnotherThread ({ { idOf (HotkeyAction::BoostDown), Result::Status::Registered, {} } }); // posted, not yet run
     fake.taken = { idOf (HotkeyAction::BoostDown) };
     manager.registerAll();
-    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "In use by another app");
+    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "Could not register");
     drainMessages();
-    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "In use by another app");
+    CHECK (manager.getStatusText (HotkeyAction::BoostDown) == "Could not register");
     fake.taken.clear();
 
     // Answers for actions no longer requested (hotkeys switched off since) are dropped.
@@ -678,7 +683,21 @@ TEST_CASE ("App: the Bypass default is Ctrl+Alt+Shift+B; a saved Ctrl+Alt+B is k
     for (const auto& [chord, count] : owners)
         CHECK (count == 1);
     CHECK (AppSettings::chordToString (AppSettings::getAlternativeHotkeys (HotkeyAction::ToggleBypass)[1]) == "Ctrl+Alt+Shift+Y");
+    CHECK (AppSettings::chordToString (AppSettings::getAlternativeHotkeys (HotkeyAction::ToggleBypass).back()) == "Ctrl+Alt+Shift+F11");
     CHECK (AppSettings::chordToString (AppSettings::getAlternativeHotkeys (HotkeyAction::ToggleEnable)[1]) == "Ctrl+Alt+Shift+F");
+    CHECK (AppSettings::chordToString (AppSettings::getAlternativeHotkeys (HotkeyAction::ToggleEnable).back()) == "Ctrl+Alt+Shift+F1");
+
+    // After the default only Ctrl+Alt+Shift chords: Ctrl+Alt+letter is
+    // AltGr+letter on Windows (Ctrl+Alt+E types the euro sign on German or
+    // French layouts), and no alternative is a key other applications use.
+    for (const auto action : AppSettings::getAllHotkeyActions())
+    {
+        const auto list = AppSettings::getAlternativeHotkeys (action);
+        for (size_t i = 1; i < list.size(); ++i)
+            CHECK (list[i].modifiers == (KeyChord::Ctrl | KeyChord::Alt | KeyChord::Shift));
+        for (const auto& chord : list)
+            CHECK (HotkeyManager::commonShortcutProblem (chord, true).isEmpty());
+    }
 }
 
 TEST_CASE ("App: hotkeys: a chord an earlier action has, or an invalid one, is named as such and never blamed on another application (R4.4)")
@@ -738,16 +757,16 @@ TEST_CASE ("App: Pick a free combination tries the alternatives in order and kee
     manager.onStatusChanged = [&changes] { ++changes; };
     manager.registerAll();
 
-    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "In use by another app");
+    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "Could not register");
     REQUIRE (manager.getFailureList().size() == 1);
     CHECK (HotkeyManager::describeFailure (manager.getFailureList()[0])
-           == "Bypass hotkey strip (Ctrl+Alt+B) is in use by another application (or reserved by the system)");
+           == "Bypass hotkey strip (Ctrl+Alt+B) could not be registered (another application may hold it, or the system reserves it)");
 
-    // The list: the default, then Y with Ctrl+Alt+Shift, then with Ctrl+Alt (the current chord left out).
+    // The list: the default, then Y and F11 with Ctrl+Alt+Shift (the current chord left out).
     juce::StringArray candidates;
     for (const auto& chord : HotkeyManager::freeChordCandidates (settings, HotkeyAction::ToggleBypass))
         candidates.add (AppSettings::chordToString (chord));
-    CHECK (candidates == (juce::StringArray { "Ctrl+Alt+Shift+B", "Ctrl+Alt+Shift+Y", "Ctrl+Alt+Y" }));
+    CHECK (candidates == (juce::StringArray { "Ctrl+Alt+Shift+B", "Ctrl+Alt+Shift+Y", "Ctrl+Alt+Shift+F11" }));
 
     changes = 0;
     auto result = manager.pickFreeChord (HotkeyAction::ToggleBypass);
@@ -770,18 +789,18 @@ TEST_CASE ("App: Pick a free combination tries the alternatives in order and kee
     manager.registerAll();
     result = manager.pickFreeChord (HotkeyAction::ToggleBypass);
     CHECK (result.found);
-    CHECK (bypassChord (controller) == "Ctrl+Alt+Y");
+    CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+F11");
     CHECK (! result.tried.contains ("Ctrl+Alt+Shift+Y"));
 
     // None free: nothing changes, and the message says so.
     settings.setHotkey (HotkeyAction::ToggleBypass, chordNamed ("Ctrl+Alt+B"));
-    fake.takenChords.insert ("Ctrl+Alt+Y");
+    fake.takenChords.insert ("Ctrl+Alt+Shift+F11");
     manager.registerAll();
     const int attempts = fake.attempts;
     result = manager.pickFreeChord (HotkeyAction::ToggleBypass);
     CHECK (! result.found);
-    CHECK (fake.attempts - attempts == 2); // Ctrl+Alt+Shift+B and Ctrl+Alt+Y (Ctrl+Alt+Shift+Y is Focus's)
-    CHECK (result.message.startsWith ("None of Ctrl+Alt+Shift+B, Ctrl+Alt+Y is free"));
+    CHECK (fake.attempts - attempts == 2); // Ctrl+Alt+Shift+B and Ctrl+Alt+Shift+F11 (Ctrl+Alt+Shift+Y is Focus's)
+    CHECK (result.message.startsWith ("None of Ctrl+Alt+Shift+B, Ctrl+Alt+Shift+F11 is free"));
     CHECK (bypassChord (controller) == "Ctrl+Alt+B");
     CHECK (manager.getStatus (HotkeyAction::ToggleBypass).status == HotkeyManager::Status::Unavailable);
     CHECK (manager.getStatus (HotkeyAction::ToggleBypass).chord == "Ctrl+Alt+B");
@@ -845,7 +864,7 @@ TEST_CASE ("App: a hotkey failure is announced once per action and chord, also a
         const auto notice = ui::NoticeBar::hotkeyNotice (fresh, [] {});
         CHECK (notice.key == ui::NoticeBar::kHotkeysKey);
         CHECK (notice.kind == ui::NoticeBar::Notice::Kind::Warning);
-        CHECK (notice.text == "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+Shift+B) is in use by another application (or reserved by the system).");
+        CHECK (notice.text == "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+Shift+B) could not be registered (another application may hold it, or the system reserves it).");
         CHECK (notice.actionLabel == "Fix in Settings");
         CHECK (notice.action != nullptr);
         CHECK (notice.seconds == 0.0); // stays until dismissed or fixed
@@ -885,11 +904,12 @@ TEST_CASE ("App: a hotkey failure is announced once per action and chord, also a
     }
 }
 
-TEST_CASE ("App: the main window posts the hotkey notice once, not while Settings > Hotkeys shows the failures, and takes it away when fixed (R4.4)")
+TEST_CASE ("App: the hotkey notice is posted once per new failure, lists every hotkey still failing, drops fixed ones, goes when all work, and is not posted while Settings > Hotkeys is open (R4.4)")
 {
     const flubapptest::TempFolder temp;
     EngineController controller (headlessOptions (temp));
-    useDefaults (controller.getSettings());
+    auto& settings = controller.getSettings();
+    useDefaults (settings);
     auto service = std::make_unique<FakeHotkeys>();
     auto& fake = *service;
     fake.takenChords = { "Ctrl+Alt+Shift+B" };
@@ -898,22 +918,79 @@ TEST_CASE ("App: the main window posts the hotkey notice once, not while Setting
 
     ui::MainComponent main (controller);
     main.setSize (1280, 820);
+    main.setHotkeyHooks (hooksFor (manager));
     auto& notices = main.getNoticeBar();
     CHECK (main.announceHotkeyFailures (manager));
     REQUIRE (notices.current() != nullptr);
     CHECK (notices.current()->key == ui::NoticeBar::kHotkeysKey);
-    CHECK (notices.current()->text.contains ("Bypass hotkey strip (Ctrl+Alt+Shift+B)"));
+    CHECK (notices.current()->text
+           == "Hotkey not active: Bypass hotkey strip (Ctrl+Alt+Shift+B) could not be registered (another application may hold it, or the system "
+              "reserves it).");
     CHECK (notices.getActionButton().isVisible());
     CHECK (notices.getActionButton().getButtonText() == "Fix in Settings");
     CHECK (! main.announceHotkeyFailures (manager)); // once
     CHECK (notices.hasNotice (ui::NoticeBar::kHotkeysKey));
-    CHECK (! main.isSettingsPageShowing (ui::SettingsDialog::Page::Hotkeys));
 
-    // Fixed: the notice goes by itself.
+    // Started minimised (the window not seen): the tray bubble says it too.
+    CHECK (main.getHotkeyTrayText (false) == notices.current()->text);
+    CHECK (main.getHotkeyTrayText (true).isEmpty());
+
+    // A later failure: posted, naming the new one first, Bypass still listed.
+    fake.takenChords.insert ("Ctrl+Alt+M");
+    manager.registerAll();
+    CHECK (main.announceHotkeyFailures (manager));
+    CHECK (notices.getNumNotices() == 1);
+    CHECK (notices.current()->text.startsWith ("Hotkeys not active: Toggle Music / Gaming (Ctrl+Alt+M) could not be registered"));
+    CHECK (notices.current()->text.endsWith ("(+1 other)"));
+    CHECK (notices.current()->detail.contains ("Bypass hotkey strip (Ctrl+Alt+Shift+B)"));
+
+    // One of them works again: nothing new is posted, the notice drops it.
+    fake.takenChords.erase ("Ctrl+Alt+Shift+B");
+    manager.registerAll();
+    CHECK (! main.announceHotkeyFailures (manager));
+    REQUIRE (notices.current() != nullptr);
+    CHECK (notices.current()->text.startsWith ("Hotkey not active: Toggle Music / Gaming (Ctrl+Alt+M)"));
+    CHECK (! notices.current()->detail.contains ("Bypass"));
+
+    // All work: the notice goes by itself.
     fake.takenChords.clear();
     manager.registerAll();
     CHECK (! main.announceHotkeyFailures (manager));
     CHECK (! notices.hasNotice (ui::NoticeBar::kHotkeysKey));
+
+    // Failing again is news again; dismissed by the user, a change with
+    // nothing new does not bring it back.
+    fake.takenChords = { "Ctrl+Alt+Shift+B" };
+    manager.registerAll();
+    CHECK (main.announceHotkeyFailures (manager));
+    notices.dismiss (ui::NoticeBar::kHotkeysKey);
+    manager.registerAll();
+    CHECK (! main.announceHotkeyFailures (manager));
+    CHECK (! notices.hasNotice (ui::NoticeBar::kHotkeysKey));
+
+    // Settings > Hotkeys open (a real window): the page shows a new failure
+    // itself - its 4 Hz poll picks it up - so no notice is posted, and the
+    // failure counts as named.
+    if (! flubapptest::haveDisplay())
+    {
+        std::cerr << "    (the Settings window part skipped: no display)\n";
+        return;
+    }
+    [[maybe_unused]] const flubapptest::TolerateXErrors tolerateXErrors; // empty off X11
+    main.openSettingsPage (ui::SettingsDialog::Page::Hotkeys);
+    REQUIRE (main.isSettingsPageShowing (ui::SettingsDialog::Page::Hotkeys));
+    auto* dialog = main.getSettingsDialog();
+    REQUIRE (dialog != nullptr);
+    fake.takenChords.insert ("Ctrl+Alt+N");
+    manager.registerAll();
+    CHECK (! main.announceHotkeyFailures (manager));
+    CHECK (! notices.hasNotice (ui::NoticeBar::kHotkeysKey));
+    CHECK (settings.isHotkeyFailureAnnounced (HotkeyAction::ToggleNight, "Ctrl+Alt+N"));
+    CHECK (flubapptest::pumpMessagesUntil ([dialog] { return dialog->getHotkeysSummary().contains ("Night listening (Ctrl+Alt+N)"); }, 1500));
+    // Seen there: not posted after the page is left either.
+    dialog->showPage (ui::SettingsDialog::Page::General);
+    CHECK (! main.isSettingsPageShowing (ui::SettingsDialog::Page::Hotkeys));
+    CHECK (! main.announceHotkeyFailures (manager));
 }
 
 TEST_CASE ("App: a key press becomes a chord: letters in either case, digits, F1-F24 and navigation keys with their modifiers; others are refused (R4.4)")
@@ -939,8 +1016,59 @@ TEST_CASE ("App: a key press becomes a chord: letters in either case, digits, F1
     CHECK (AppSettings::chordToString (chord) == "Ctrl+Alt+Delete");
     CHECK (! ui::chordFromKeyPress (press (juce::KeyPress::numberPad4, kCtrlAlt), chord));
     CHECK (! ui::chordFromKeyPress (press (juce::KeyPress::tabKey, kCtrlAlt), chord));
-    CHECK (! ui::chordFromKeyPress (press (',', kCtrlAlt), chord));
+    CHECK (! ui::chordFromKeyPress (press (',', kCtrlAlt), chord, [] (uint32_t) { return 0u; }));
     CHECK (ui::describeHeldModifiers (juce::ModifierKeys (kCtrlAltShift)) == "Ctrl+Alt+Shift+");
+
+    // A character key goes through the layout: on AZERTY the digit keys type
+    // '&', 0xE9 (e acute), ..., 0xE0 (a grave) unshifted, which is what JUCE
+    // reports on Windows.
+    const auto azerty = [] (uint32_t character) -> uint32_t
+    {
+        const std::map<uint32_t, uint32_t> keys { { '&', '1' }, { 0xE9, '2' }, { 0xE0, '0' }, { ',', 0xBC } };
+        const auto it = keys.find (character);
+        return it != keys.end() ? it->second : 0u;
+    };
+    REQUIRE (ui::chordFromKeyPress (press ('&', kCtrlAltShift), chord, azerty));
+    CHECK (AppSettings::chordToString (chord) == "Ctrl+Alt+Shift+1");
+    REQUIRE (ui::chordFromKeyPress (press (0xE9, kCtrlAlt), chord, azerty));
+    CHECK (AppSettings::chordToString (chord) == "Ctrl+Alt+2");
+    REQUIRE (ui::chordFromKeyPress (press (0xE0, kCtrlAlt), chord, azerty));
+    CHECK (AppSettings::chordToString (chord) == "Ctrl+Alt+0");
+    CHECK (! ui::chordFromKeyPress (press (',', kCtrlAlt), chord, azerty)); // a key that is no letter or digit
+    CHECK (! ui::chordFromKeyPress (press (juce::KeyPress::numberPad4, kCtrlAlt), chord, azerty)); // never asked
+   #if JUCE_WINDOWS
+    // The real lookup (VkKeyScanW on this PC's layout): a lower-case letter
+    // is its key; a character needing Shift, or on no letter / digit key, is not.
+    CHECK (flub::app::platform_bridge::keyCodeForCharacter ('a') == 'A');
+    CHECK (flub::app::platform_bridge::keyCodeForCharacter (',') == 0);
+    CHECK (flub::app::platform_bridge::keyCodeForCharacter ('!') == 0);
+   #else
+    CHECK (flub::app::platform_bridge::keyCodeForCharacter ('&') == 0); // not known here: such chords are typed
+   #endif
+
+    // Chords the system would accept but that would take a key from every
+    // other application: refused by Settings > Hotkeys (never by
+    // registerAll, so a saved one keeps working).
+    using HM = HotkeyManager;
+    CHECK (HM::commonShortcutProblem (chordNamed ("Alt+F4"), false) == "Alt+F4 closes the active window in every application.");
+    CHECK (HM::commonShortcutProblem (chordNamed ("Alt+Space"), false).contains ("window menu"));
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+Alt+Delete"), false).isNotEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Super+L"), false).contains ("lock"));
+    CHECK (HM::commonShortcutProblem (chordNamed ("F5"), false).startsWith ("F5 is a key applications use"));
+    CHECK (HM::commonShortcutProblem (chordNamed ("Shift+F10"), false).isNotEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("F13"), true).isEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Alt+F1"), false).isEmpty());   // typed: on purpose
+    CHECK (HM::commonShortcutProblem (chordNamed ("Alt+F1"), true).isNotEmpty()); // recorded: one reflex press
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+C"), true).startsWith ("Ctrl+C is a shortcut other applications use"));
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+Shift+M"), true).isNotEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+Shift+M"), false).isEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Alt+Left"), true).isNotEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+F13"), true).isEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+Alt+Shift+B"), true).isEmpty());
+    CHECK (HM::commonShortcutProblem (chordNamed ("Ctrl+Alt+M"), true).isEmpty());
+    CHECK (HM::commonShortcutProblem ({}, true).isEmpty());
+    for (const auto action : AppSettings::getAllHotkeyActions()) // no default is refused
+        CHECK (HM::commonShortcutProblem (AppSettings::getDefaultHotkey (action), true).isEmpty());
     CHECK (ui::describeHeldModifiers ({}).isEmpty());
    #if JUCE_MAC
     REQUIRE (ui::chordFromKeyPress (press ('k', juce::ModifierKeys::commandModifier | juce::ModifierKeys::altModifier), chord));
@@ -1041,12 +1169,13 @@ TEST_CASE ("App: Settings > Hotkeys records a chord by pressing it: hotkeys susp
     // "Pick a free combination"; one click picks the next free one.
     fake.takenChords = { "Ctrl+Alt+Shift+B" };
     manager.registerAll();
-    dialog.showPage (ui::SettingsDialog::Page::Hotkeys); // as the 4 Hz poll does
+    CHECK (flubapptest::pumpMessagesUntil ([pick] { return pick->isVisible(); }, 1500)); // the page's 4 Hz poll picks it up
     CHECK (field->hasProblem());
     CHECK (pick->isVisible());
     CHECK (pick->getTooltip().contains ("Ctrl+Alt+Shift+Y"));
-    CHECK (dialog.getHotkeysSummary().startsWith (
-        "Not active: Bypass hotkey strip (Ctrl+Alt+Shift+B) is in use by another application (or reserved by the system)."));
+    // Under the last edit's outcome (the reset's), which the poll keeps.
+    CHECK (dialog.getHotkeysSummary().startsWith ("Bypass hotkey strip is back to its default, Ctrl+Alt+Shift+B.\nNot active: Bypass hotkey strip "
+                                                  "(Ctrl+Alt+Shift+B) could not be registered (another application may hold it, or the system reserves it)."));
     REQUIRE (pick->onClick != nullptr);
     pick->onClick();
     CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+Y");
@@ -1106,6 +1235,162 @@ TEST_CASE ("App: Settings > Hotkeys records a chord by pressing it: hotkeys susp
     CHECK (fake.callbacks.size() == AppSettings::getAllHotkeyActions().size());
 }
 
+TEST_CASE ("App: Settings > Hotkeys: reset, the switch, Pick a free one and typed entry end a recording first, so a chord recorded afterwards is registered; chords other applications use are refused (R4.4)")
+{
+    const flubapptest::TempFolder temp;
+    EngineController controller (headlessOptions (temp));
+    auto& settings = controller.getSettings();
+    useDefaults (settings);
+    auto service = std::make_unique<FakeHotkeys>();
+    auto& fake = *service;
+    HotkeyManager manager (controller, std::move (service));
+    manager.registerAll();
+
+    ui::SettingsDialog dialog (controller, hooksFor (manager), [] (ui::MeterPalette) {}, ui::MeterPalette::Standard);
+    dialog.setSize (ui::SettingsDialog::kMinWidth, ui::SettingsDialog::kMinHeight);
+    dialog.showPage (ui::SettingsDialog::Page::Hotkeys);
+    const auto fieldOf = [&dialog] (const juce::String& name)
+    { return findChild<ui::HotkeyCaptureField> (dialog, [name] (ui::HotkeyCaptureField& f) { return f.getTitle() == name + " shortcut"; }); };
+    auto* field = fieldOf ("Bypass hotkey strip");
+    auto* night = fieldOf ("Night listening");
+    auto* reset = findChild<ui::IconButton> (dialog, [] (ui::IconButton& b) { return b.getTitle() == "Reset Bypass hotkey strip to default"; });
+    auto* pick = findChild<juce::TextButton> (dialog, [] (juce::TextButton& b) { return b.getTitle() == "Pick a free combination for Bypass hotkey strip"; });
+    auto* enable = findChild<juce::ToggleButton> (dialog, [] (juce::ToggleButton& t) { return t.getButtonText() == "Enable system-wide hotkeys"; });
+    auto* nightTyped = findChild<juce::TextEditor> (dialog, [] (juce::TextEditor& e) { return e.getTitle() == "Night listening shortcut as text"; });
+    REQUIRE (field != nullptr);
+    REQUIRE (night != nullptr);
+    REQUIRE (reset != nullptr);
+    REQUIRE (pick != nullptr);
+    REQUIRE (enable != nullptr);
+    REQUIRE (nightTyped != nullptr);
+    const auto all = AppSettings::getAllHotkeyActions().size();
+    // Never a recording field while Flubsound's chords are registered.
+    const auto consistent = [&] { return ! field->isCapturing() || (manager.isSuspended() && fake.callbacks.empty()); };
+
+    // The review's sequence: recording, then the reset button (which takes no
+    // keyboard focus, so the field never loses it), then a chord.
+    field->startCapture();
+    REQUIRE (manager.isSuspended());
+    reset->onClick();
+    CHECK (! field->isCapturing()); // the recording ended first
+    CHECK (! manager.isSuspended());
+    CHECK (fake.callbacks.size() == all);
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleBypass)] == "Ctrl+Alt+Shift+B");
+    CHECK (! field->keyPressed (press ('k', kCtrlAltShift))); // no longer recording: nothing is saved
+    CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+B");
+    // Recording again: the chord is saved and registered, and the page says so truthfully.
+    field->startCapture();
+    CHECK (field->keyPressed (press ('k', kCtrlAltShift)));
+    CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+K");
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleBypass)] == "Ctrl+Alt+Shift+K");
+    CHECK (manager.getStatus (HotkeyAction::ToggleBypass).chord == "Ctrl+Alt+Shift+K");
+    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "Registered");
+    CHECK (dialog.getHotkeysSummary() == "Bypass hotkey strip is now Ctrl+Alt+Shift+K.\nAll shortcuts are registered.");
+
+    // Resuming registers from the settings even when a registerAll() in
+    // between already ended the suspension (HotkeyManager::setSuspended).
+    manager.setSuspended (true);
+    manager.registerAll();
+    settings.setHotkey (HotkeyAction::ToggleBypass, chordNamed ("Ctrl+Alt+Shift+J"));
+    manager.setSuspended (false);
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleBypass)] == "Ctrl+Alt+Shift+J");
+    settings.setHotkey (HotkeyAction::ToggleBypass, chordNamed ("Ctrl+Alt+Shift+K"));
+    manager.registerAll();
+
+    // The switch while recording: off, then on again.
+    field->startCapture();
+    enable->setToggleState (false, juce::dontSendNotification);
+    REQUIRE (enable->onClick != nullptr);
+    enable->onClick();
+    CHECK (! field->isCapturing());
+    CHECK (consistent());
+    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "Off");
+    field->startCapture();
+    enable->setToggleState (true, juce::dontSendNotification);
+    enable->onClick();
+    CHECK (! field->isCapturing());
+    CHECK (! manager.isSuspended());
+    CHECK (fake.callbacks.size() == all);
+
+    // Pick a free one while recording (the row failed meanwhile).
+    fake.takenChords = { "Ctrl+Alt+Shift+K" };
+    manager.registerAll();
+    CHECK (flubapptest::pumpMessagesUntil ([pick] { return pick->isVisible(); }, 1500)); // the page's 4 Hz poll
+    field->startCapture();
+    REQUIRE (pick->onClick != nullptr);
+    pick->onClick();
+    CHECK (! field->isCapturing());
+    CHECK (! manager.isSuspended());
+    CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+B"); // the first free candidate, the default
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleBypass)] == "Ctrl+Alt+Shift+B");
+    CHECK (fake.callbacks.size() == all);
+
+    // Typed entry for another row (right click, or Shift+F10 from the
+    // keyboard) while recording: the recording ends first.
+    field->startCapture();
+    night->clicked (juce::ModifierKeys (juce::ModifierKeys::rightButtonModifier));
+    CHECK (! field->isCapturing());
+    CHECK (! manager.isSuspended());
+    CHECK (nightTyped->isVisible());
+    REQUIRE (nightTyped->onEscapeKey != nullptr);
+    nightTyped->onEscapeKey();
+    CHECK (! nightTyped->isVisible());
+    field->startCapture();
+    CHECK (night->keyPressed (press (juce::KeyPress::F10Key, juce::ModifierKeys::shiftModifier)));
+    CHECK (! field->isCapturing());
+    CHECK (nightTyped->isVisible());
+    // Typed on purpose, a chord other applications use is taken; a system chord never is.
+    nightTyped->setText ("Ctrl+Shift+F9", false);
+    nightTyped->onReturnKey();
+    CHECK (chordOf (controller, HotkeyAction::ToggleNight) == "Ctrl+Shift+F9");
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleNight)] == "Ctrl+Shift+F9");
+    night->keyPressed (press (juce::KeyPress::F10Key, juce::ModifierKeys::shiftModifier));
+    nightTyped->setText ("Alt+F4", false);
+    nightTyped->onReturnKey();
+    CHECK (dialog.getHotkeysSummary().startsWith ("Not taken: Alt+F4 closes the active window in every application."));
+    CHECK (chordOf (controller, HotkeyAction::ToggleNight) == "Ctrl+Shift+F9");
+
+    // From the keyboard: Space or Return starts recording (juce::Button alone
+    // knows only Return); a screen reader's press records, its "show menu" types.
+    CHECK (field->keyPressed (press (juce::KeyPress::spaceKey, 0)));
+    CHECK (field->isCapturing());
+    CHECK (consistent());
+    // Recorded, a reflex press of a system chord or of a key other
+    // applications use is refused and recording goes on.
+    CHECK (field->keyPressed (press (juce::KeyPress::F4Key, juce::ModifierKeys::altModifier)));
+    CHECK (field->isCapturing());
+    CHECK (dialog.getHotkeysSummary().startsWith ("Not taken: Alt+F4 closes the active window in every application. Press another combination"));
+    CHECK (field->keyPressed (press (juce::KeyPress::F5Key, 0)));
+    CHECK (dialog.getHotkeysSummary().startsWith ("Not taken: F5 is a key applications use"));
+    CHECK (field->keyPressed (press ('c', juce::ModifierKeys::ctrlModifier)));
+    CHECK (field->isCapturing());
+    CHECK (dialog.getHotkeysSummary().startsWith ("Not taken: Ctrl+C is a shortcut other applications use"));
+    CHECK (bypassChord (controller) == "Ctrl+Alt+Shift+B");
+    CHECK (consistent());
+    CHECK (field->keyPressed (press (juce::KeyPress::F13Key, 0))); // F13 alone is free to take
+    CHECK (! field->isCapturing());
+    CHECK (bypassChord (controller) == "F13");
+    CHECK (fake.chords[idOf (HotkeyAction::ToggleBypass)] == "F13");
+    CHECK (field->keyPressed (press (juce::KeyPress::returnKey, 0)));
+    CHECK (field->isCapturing());
+    CHECK (field->keyPressed (press (juce::KeyPress::escapeKey, 0)));
+    CHECK (! field->isCapturing());
+
+    const auto handler = field->createAccessibilityHandler();
+    REQUIRE (handler != nullptr);
+    CHECK (handler->getRole() == juce::AccessibilityRole::button);
+    CHECK (handler->getActions().invoke (juce::AccessibilityActionType::press));
+    CHECK (field->isCapturing());
+    field->cancelCapture();
+    auto* bypassTyped = findChild<juce::TextEditor> (dialog, [] (juce::TextEditor& e) { return e.getTitle() == "Bypass hotkey strip shortcut as text"; });
+    REQUIRE (bypassTyped != nullptr);
+    CHECK (handler->getActions().invoke (juce::AccessibilityActionType::showMenu));
+    CHECK (bypassTyped->isVisible());
+    bypassTyped->onEscapeKey();
+    CHECK (! manager.isSuspended());
+    CHECK (fake.callbacks.size() == all);
+}
+
 #if JUCE_WINDOWS
 TEST_CASE ("App: Windows hotkeys: RegisterHotKey refuses a chord another registrant holds, the row says so, and Pick a free combination takes the next one (R4.4, real service)")
 {
@@ -1138,7 +1423,7 @@ TEST_CASE ("App: Windows hotkeys: RegisterHotKey refuses a chord another registr
     REQUIRE (manager.isSupported());
     manager.registerAll();
     CHECK (manager.getStatus (HotkeyAction::ToggleBypass).status == HotkeyManager::Status::Unavailable);
-    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "In use by another app");
+    CHECK (manager.getStatusText (HotkeyAction::ToggleBypass) == "Could not register");
     CHECK (manager.getFailureList().size() == 1);
 
     const auto result = manager.pickFreeChord (

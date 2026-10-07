@@ -1,16 +1,18 @@
 // Flubsound Pro - records a hotkey by pressing it (Settings > Hotkeys, R4.4).
 //
 // HotkeyCaptureField shows an action's chord ("Ctrl+Alt+Shift+B"). A click
-// (or Return / Space while it has the focus) starts recording: the field
-// reads "Press a shortcut..." and shows the modifiers held so far
-// ("Ctrl+Alt+..."); the next key with its modifiers is offered to
-// onChordPressed, which accepts it (recording ends) or refuses it (the page
-// says why, recording goes on). Esc or leaving the field cancels, Backspace
-// clears the action's chord; a right click asks the owner for a text entry
-// instead (onTypeRequested). The owner suspends Flubsound's own global
-// hotkeys while recording (HotkeyManager::setSuspended), so its chords reach
-// the field; a chord another application holds never arrives at all (the
-// system gives it to that application), which the page's prompt says.
+// (or Return / Space while it has the focus, or a screen reader's press)
+// starts recording: the field reads "Press a shortcut..." and shows the
+// modifiers held so far ("Ctrl+Alt+..."); the next key with its modifiers is
+// offered to onChordPressed, which accepts it (recording ends) or refuses it
+// (the page says why, recording goes on). Esc or leaving the field cancels,
+// Backspace clears the action's chord; a right click, Shift+F10 or a screen
+// reader's "show menu" asks the owner for a text entry instead
+// (onTypeRequested). The owner suspends Flubsound's own global hotkeys while
+// recording (HotkeyManager::setSuspended), so its chords reach the field,
+// and ends any recording before another control registers them again; a
+// chord another application holds never arrives at all (the system gives
+// it to that application), which the page's prompt says.
 #pragma once
 
 #include "platform/PlatformServices.h"
@@ -23,10 +25,14 @@ namespace flub::app::ui
 {
 /** The chord a key press stands for: a letter, a digit, F1 - F24, Space or a
     navigation key (PageUp / PageDown / Home / End / arrows / Insert /
-    Delete) with Ctrl, Alt, Shift and, on macOS, Cmd (KeyChord::Super). False
-    for other keys (numeric keypad, punctuation, Esc, Tab, Return ...). The
-    result is not validated (HotkeyManager::validateChord). */
-bool chordFromKeyPress (const juce::KeyPress& key, flub::platform::KeyChord& chord);
+    Delete) with Ctrl, Alt, Shift and, on macOS, Cmd (KeyChord::Super). Any
+    other character goes through `keyForCharacter` (default
+    platform_bridge::keyCodeForCharacter: on Windows the letter or digit key
+    that types it on the current layout, so AZERTY's '&' is the 1 key).
+    False for other keys (numeric keypad, punctuation, Esc, Tab, Return ...).
+    The result is not validated (HotkeyManager::validateChord). */
+bool chordFromKeyPress (const juce::KeyPress& key, flub::platform::KeyChord& chord,
+                        const std::function<uint32_t (uint32_t character)>& keyForCharacter = {});
 
 /** "Ctrl+Alt+" style prefix for the modifiers held while recording ("" for
     none), in the settings' chord order (AppSettings::chordToString). */
@@ -63,9 +69,10 @@ public:
     std::function<void()> onCleared;
     /** A key that cannot be part of a hotkey ("Tab", "numpad 4" ...). */
     std::function<void (const juce::String& keyDescription)> onUnsupportedKey;
-    /** A right click: the owner offers typing the chord as text instead
-        ("Super+F5": JUCE reports no Win / Super key on Windows and Linux, so
-        such chords cannot be recorded). */
+    /** A right click, Shift+F10 or a screen reader's "show menu": the owner
+        offers typing the chord as text instead ("Super+F5": JUCE reports no
+        Win / Super key on Windows and Linux, so such chords cannot be
+        recorded). */
     std::function<void()> onTypeRequested;
 
     bool keyPressed (const juce::KeyPress& key) override;
@@ -74,6 +81,8 @@ public:
     void clicked() override;
     void clicked (const juce::ModifierKeys& modifiers) override;
     void paintButton (juce::Graphics& g, bool highlighted, bool down) override;
+    /** A button whose press records and whose "show menu" types the chord. */
+    std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
 
 private:
     void endCapture();

@@ -1230,6 +1230,7 @@ public:
         enabledToggle.setToggleState (settings.getHotkeysEnabled(), juce::dontSendNotification);
         enabledToggle.onClick = [this]
         {
+            stopRecording();
             controller.getSettings().setHotkeysEnabled (enabledToggle.getToggleState());
             note = {};
             reRegister();
@@ -1278,7 +1279,7 @@ public:
             field->onUnsupportedKey = [this] (const juce::String& key)
             {
                 note = "\"" + key + "\" cannot be part of a hotkey: use a letter, a digit, F1-F24, Space or a navigation key, with Ctrl or Alt. "
-                       "Esc cancels.";
+                       "Esc cancels; right-click or Shift+F10 types a chord instead.";
                 noteIsError = true;
                 updateStatus();
             };
@@ -1314,6 +1315,7 @@ public:
             row.reset->setTooltip ("Default: " + AppSettings::chordToString (AppSettings::getDefaultHotkey (action)));
             row.reset->onClick = [this, action]
             {
+                stopRecording(); // the button takes no focus, so the field would go on recording
                 const auto chord = AppSettings::getDefaultHotkey (action);
                 controller.getSettings().setHotkey (action, chord);
                 note = AppSettings::getHotkeyActionName (action) + " is back to its default, " + AppSettings::chordToString (chord) + ".";
@@ -1495,7 +1497,9 @@ private:
     }
 
     /** A recorded chord: refused (recording goes on) when it is not a valid
-        hotkey or another action has it; otherwise saved. */
+        hotkey, would take a key other applications use
+        (HotkeyManager::commonShortcutProblem) or another action has it;
+        otherwise saved. */
     bool acceptRecorded (HotkeyAction action, const flub::platform::KeyChord& chord)
     {
         auto& settings = controller.getSettings();
@@ -1503,6 +1507,13 @@ private:
         if (const auto why = HotkeyManager::validateChord (chord); why.isNotEmpty())
         {
             note = text + " cannot be a hotkey: " + why + " Press another combination, or Esc.";
+            noteIsError = true;
+            updateStatus();
+            return false;
+        }
+        if (const auto why = HotkeyManager::commonShortcutProblem (chord, true); why.isNotEmpty())
+        {
+            note = "Not taken: " + why + " Press another combination, or Esc.";
             noteIsError = true;
             updateStatus();
             return false;
@@ -1535,6 +1546,7 @@ private:
         auto* row = rowOf (action);
         if (row == nullptr)
             return;
+        stopRecording();
         typing = action;
         row->editor->setText (AppSettings::chordToString (controller.getSettings().getHotkey (action)), false);
         row->field->setVisible (false);
@@ -1576,6 +1588,8 @@ private:
             note = "\"" + text + "\" is not a shortcut. Use modifiers + one key, e.g. Ctrl+Alt+F or Super+F5.";
         else if (const auto why = HotkeyManager::validateChord (chord); why.isNotEmpty())
             note = AppSettings::chordToString (chord) + " cannot be a hotkey: " + why;
+        else if (const auto taken = HotkeyManager::commonShortcutProblem (chord, false); taken.isNotEmpty())
+            note = "Not taken: " + taken;
         else if (const auto other = HotkeyManager::findConflict (settings, action, chord))
             note = AppSettings::chordToString (chord) + " is already " + AppSettings::getHotkeyActionName (*other) + "'s shortcut.";
         else
@@ -1592,11 +1606,25 @@ private:
     {
         if (hooks.pickFreeChord == nullptr)
             return;
+        stopRecording();
         const auto result = hooks.pickFreeChord (action);
         note = result.message;
         noteIsError = ! result.found;
         refreshFields();
         updateStatus();
+    }
+
+    /** Ends a recording before another control changes or registers the
+        hotkeys: the reset button and the switch take no keyboard focus, so
+        the field would go on recording while its chords are registered
+        again, and a chord recorded then would be saved but not registered.
+        Cancelling resumes the hotkeys (onCaptureEnded); the caller's own
+        registration follows in the same message, which the Wayland portal
+        coalesces into one binding. */
+    void stopRecording()
+    {
+        for (auto& row : rows)
+            row.field->cancelCapture();
     }
 
     void setSuspended (bool suspended)
@@ -1609,8 +1637,11 @@ private:
 
     void reRegister()
     {
+        stopRecording();
         if (hooks.reRegister != nullptr)
             hooks.reRegister();
+        else
+            setSuspended (false);
         refreshFields();
         updateStatus();
     }

@@ -115,11 +115,18 @@ public:
     SettingsDialog* getSettingsDialog() const;
 
     /** R4.4: posts the hotkey notice (NoticeBar::hotkeyNotice, "Fix in
-        Settings" opens Settings > Hotkeys) for the failures it has not named
-        yet (HotkeyManager::takeUnannouncedFailures; none while that page is
-        showing, which shows them itself), and takes it away once no hotkey
-        fails. Returns true when it posted. */
+        Settings" opens Settings > Hotkeys) when a failure it has not named
+        yet appears (HotkeyManager::takeUnannouncedFailures; not while that
+        page is showing, which shows them itself), listing every hotkey that
+        still fails, the new ones first. Otherwise a notice already up is
+        brought up to date (a fixed failure drops off), and it is taken away
+        once no hotkey fails. Returns true when it posted. */
     bool announceHotkeyFailures (HotkeyManager& hotkeys);
+    /** The tray bubble after announceHotkeyFailures posted while the window
+        is not seen (hidden in the tray or minimised, e.g. started
+        minimised): the hotkey notice's text; empty when `windowSeen` or no
+        hotkey notice is current. */
+    juce::String getHotkeyTrayText (bool windowSeen) const;
 
     /** The banners under the header (headless screenshots and tests). */
     DeviceErrorBanner& getDeviceErrorBanner() noexcept { return deviceError; }

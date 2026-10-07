@@ -68,7 +68,7 @@
 //   settings-hotkeys
 //                   the PNG shows the Settings dialog's Hotkeys page at
 //                   --size with Bypass hotkey strip saved as Ctrl+Alt+B and
-//                   reported in use by another application (R4.4): the row
+//                   reported as not registered (R4.4: "Could not register"): the row
 //                   in red, "Pick a free one" and the reason under the rows
 //                   (no hotkey is registered)
 //   hotkey-notice   the notice under the header for that failure (R4.4)
