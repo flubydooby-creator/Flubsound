@@ -199,7 +199,7 @@ TEST_CASE ("Platform: the native node counts a late cycle and missed cycles as x
     CHECK (counter.count() == 0);
 }
 
-TEST_CASE ("Platform: the native node does not judge its first cycles after a start or a pause - a late start-up cycle is no xrun, a later one is (R1.2)")
+TEST_CASE ("Platform: the native node does not judge its first cycles after a start, a pause or a move to another driver - a late start-up cycle is no xrun, a later one is (R1.2)")
 {
     constexpr uint64_t kInTimeNs = 1000000u; // finished 1 ms into the cycle
     static_assert (pipewire::XrunCounter::kSettleCycles == 2);
@@ -243,6 +243,23 @@ TEST_CASE ("Platform: the native node does not judge its first cycles after a st
     CHECK (! counter.cycleDone (steady (612), steady (612).nsec + kInTimeNs));
     CHECK (counter.cycleDone (steady (614), steady (614).nsec + kInTimeNs)); // one cycle missed
     CHECK (counter.count() == 2);
+
+    // The output moved to another device (a new driver, its own position):
+    // the node joins another cycle, so its first two cycles there are not
+    // judged either, even late ones; the third is.
+    auto moved = steady (700);
+    moved.driverId = 31;
+    moved.position = 77;
+    CHECK (! counter.cycleDone (moved, moved.nsec + 2 * kPeriodNs));
+    auto moved2 = moved;
+    moved2.position += kQuantum;
+    moved2.nsec += kPeriodNs;
+    CHECK (! counter.cycleDone (moved2, moved2.nsec + kPeriodNs + 1));
+    auto moved3 = moved2;
+    moved3.position += kQuantum;
+    moved3.nsec += kPeriodNs;
+    CHECK (counter.cycleDone (moved3, moved3.nsec + kPeriodNs + 1));
+    CHECK (counter.count() == 3);
 
     // Without restart() the same pause reads as 500 missed cycles (one xrun):
     // why the node calls it whenever it streams again.

@@ -59,6 +59,7 @@ public:
         config.outputTarget = outputTarget;
         currentRate = static_cast<double> (config.sampleRate);
         currentBlock = config.maxBlockFrames;
+        xrunBase.store (-1); // set by this run's first start()
 
         std::string error;
         if (! node->start (config, *this, error))
@@ -100,6 +101,11 @@ public:
         if (! opened || newCallback == nullptr || newCallback == activeCallback.load())
             return;
         stop();
+        // R1.2 review: xruns count from this run's first callback on. Before
+        // it the node joins and links into the graph and plays silence; CI's
+        // one start-up xrun left after the settling (1 of 40 runs) was there.
+        if (xrunBase.load() < 0)
+            xrunBase.store (node->getXrunCount());
         newCallback->audioDeviceAboutToStart (this);
         activeCallback.store (newCallback);
     }
@@ -125,8 +131,14 @@ public:
     /** R1.2: the node's own count (pipewire::XrunCounter: cycles it finished
         after the next one was due, or missed), so AudioEngineHost::getStatus,
         the header's "xr" and the overload watchdog see PipeWire's xruns as
-        they see a JUCE backend's. */
-    int getXRunCount() const noexcept override { return opened ? node->getXrunCount() : -1; }
+        they see a JUCE backend's; from this run's first start() on. */
+    int getXRunCount() const noexcept override
+    {
+        if (! opened)
+            return -1;
+        const int base = xrunBase.load();
+        return base < 0 ? 0 : juce::jmax (0, node->getXrunCount() - base);
+    }
 
     /** None of its own: the node runs in the same graph cycle as the sinks
         it reads and the sink it plays to. What the path adds is the graph's
@@ -248,6 +260,7 @@ private:
 
     std::atomic<juce::AudioIODeviceCallback*> activeCallback { nullptr };
     std::atomic<bool> inCallback { false };
+    std::atomic<int> xrunBase { -1 }; // the node's count at this run's first start(); -1 = not started yet
 
     std::mutex errorMutex; // nodeError (loop thread) -> handleAsyncUpdate (message thread)
     std::string pendingError;

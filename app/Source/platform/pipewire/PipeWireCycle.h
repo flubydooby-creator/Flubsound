@@ -106,20 +106,22 @@ struct CycleClock
     A cycle that is both counts once. A new driver (the output moved to
     another device), a new rate, a position that went backwards (the driver
     restarted) or freewheeling re-bases the comparison without counting.
-    The first kSettleCycles cycles of a run (after reset()) and after the node
-    streams again (restart(): PipeWire paused and resumed it, while the graph
-    may have run on without it) are not judged; they only set the baseline.
+    The first kSettleCycles cycles of a run (after reset()), on a new driver,
+    rate or restarted driver, and after the node streams again (restart():
+    PipeWire paused and resumed it, while the graph may have run on without
+    it) are not judged; they only set the baseline.
     Real time: cycleDone() is wait-free; count() and restart() from any
     thread. */
 class XrunCounter
 {
 public:
-    /** Cycles not judged at the start of a run or after a pause. A run's
-        first cycle is often late without anything going wrong: the data
-        thread and the engine start cold, and the node joins a graph that is
-        already running (CI, before this: 1 xrun within the first 20 cycles
-        in 4 to 9 of 20 runs on an idle server, none in the 0.6 s after;
-        with it, none in 20). */
+    /** Cycles not judged at the start of a run, after a pause or on a new
+        driver. A run's first cycle is often late without anything going
+        wrong: the data thread and the engine start cold, and the node joins
+        a graph that is already running (CI, before this: 1 xrun within the
+        first 20 cycles in 4 to 9 of 20 runs on an idle server, none in the
+        0.6 s after; with it, 1 in 40, before the device's first callback,
+        which the device leaves out: PipeWireDeviceType.cpp). */
     static constexpr int kSettleCycles = 2;
 
     /** Not real time (before the node starts): back to zero, no baseline. */
@@ -150,6 +152,10 @@ public:
             haveLast = false;
             return false;
         }
+        // A new driver (the output moved to another device), a new rate or a
+        // driver that restarted: the node joins another cycle, as at a start.
+        if (haveLast && (cycle.driverId != lastDriver || cycle.rate != lastRate || cycle.position < lastPosition))
+            settle = kSettleCycles;
         bool xrun = false;
         if (settle > 0)
             --settle; // settling: a baseline only

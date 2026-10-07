@@ -639,13 +639,15 @@ links:
   a cycle it finished after the next one was due (the driver's `nsec` +
   one quantum, PipeWire's own xrun), or a position that skipped ahead on
   the same driver (cycles run without it); a new driver, rate or a restart
-  re-bases without counting. The first two cycles of a run, and the first
-  two after the filter enters `STREAMING` again (a pause, during which the
-  graph may run on without it), are not judged
+  re-bases without counting. The first two cycles of a run, on a new
+  driver or rate, and after the filter enters `STREAMING` again (a pause,
+  during which the graph may run on without it) are not judged
   (`XrunCounter::kSettleCycles`, `restart()` from the state callback;
   R1.2 review: a run's first cycle was often late on an idle server, which
-  showed `· 1 xr` after an open). The device reports it through
-  `getXRunCount()`, so the header shows `· 3 xr` and the overload watchdog
+  showed `· 1 xr` after an open). The device reports the count from its
+  run's first callback on (cycles before it, while the node joins and
+  links into the graph, play silence) through `getXRunCount()`, so the
+  header shows `· 3 xr` and the overload watchdog
   counts the node's xruns as it counts a JUCE backend's. Each callback
   also carries the driver's time (`hostTimeNs`: the cycle's start plus the
   block's offset), so the callback timing (docs/11 E45) follows the
