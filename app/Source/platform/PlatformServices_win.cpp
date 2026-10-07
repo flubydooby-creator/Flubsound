@@ -840,8 +840,7 @@ private:
 //==============================================================================
 // Undocumented per-application default endpoint adapter
 //==============================================================================
-#if defined(FLUB_ENABLE_UNDOCUMENTED_ROUTING)
-/*  !!! UNDOCUMENTED WINDOWS API - OPT-IN ONLY (FLUB_ENABLE_UNDOCUMENTED_ROUTING) !!!
+/*  !!! UNDOCUMENTED WINDOWS API - USED ONLY AFTER AN EXPLICIT USER CHOICE !!!
 
     Windows has NO documented API to choose the output device of another
     application. Settings > System > Sound > Volume mixer (Win11) / "App volume
@@ -850,9 +849,31 @@ private:
     implements IAudioPolicyConfigFactory:
 
         SetPersistedDefaultAudioEndpoint (UINT processId, EDataFlow, ERole, HSTRING deviceInterfacePath)
+        GetPersistedDefaultAudioEndpoint (UINT processId, EDataFlow, ERole, HSTRING* deviceInterfacePath)
 
-    The setting is persisted per executable by the audio service, and running
-    streams that use the default device are moved to the new endpoint.
+    The setting is persisted per executable by the audio service: the app's
+    new streams on the default device open on the new endpoint. A stream that
+    is already open stays where it is until the app opens a new one (measured
+    on build 26200 with a WASAPI stream opened through
+    GetDefaultAudioEndpoint); apps that follow default-device changes
+    themselves may re-open at once.
+
+    Who calls it (docs/11 E47, R4.5): the adapter is compiled into every
+    Windows build, but nothing calls it unless the user asked for it:
+      - "Move the app's own sound away automatically" (Settings > Routing, or
+        the routing panel's one-click fix; off by default): AppRouting moves an
+        app it captures off Flubsound's output device to a silent device and
+        puts it back (the per-app device read with GetPersisted... before the
+        move) when it is unassigned, the option goes off, Flubsound exits, or
+        at the next start after a crash (route journal);
+      - endpoint routing to strip endpoints, which stays opt-in
+        (FLUB_ENABLE_UNDOCUMENTED_ROUTING: canMoveEndpoint()) because without
+        the virtual driver there is no strip endpoint to move to.
+    Verified on Windows 11 build 26200 (2026-10-07) with a test process
+    (tests/app/test_app_routing_move_away_windows.cpp, opt-in): a set reads
+    back through Get, a second process of the same executable starts on the
+    persisted device, and setting the earlier value ("" = the default) reads
+    back as that value.
 
     The interface layout used below is the one published by the open-source
     EarTrumpet project (MIT, Interop/MMDeviceAPI/IAudioPolicyConfigFactory.cs)
@@ -873,10 +894,12 @@ private:
     Risks / obligations:
       - Microsoft may change or remove this at any Windows update; it must be
         validated on EVERY supported Windows build (CI matrix: Win10 22H2
-        19045, Win11 23H2 22631, Win11 24H2 26100 and each new feature update)
-        before a release enables FLUB_ENABLE_UNDOCUMENTED_ROUTING.
+        19045, Win11 23H2 22631, Win11 24H2 26100 and each new feature update);
+        only 26200 has been checked so far.
       - A wrong vtable layout would crash the calling process, so this runs
-        only on explicit user action, never automatically at start-up.
+        only after an explicit user choice (the option above, off by default),
+        never on its own at a first start; at a later start it runs only to
+        undo moves that choice made (the journal).
       - The device argument is a device *interface path*, not the MMDevice id:
         "\\?\SWD#MMDEVAPI#<mmdevice id>#{e6327cad-dcec-4949-ae8a-991e976a79d2}"
         (render interface class GUID); a null HSTRING clears the override.
@@ -892,6 +915,7 @@ using HStringHandle = OpaqueHString*; // ABI-identical to HSTRING (an opaque poi
 using RoGetActivationFactoryFn = HRESULT (WINAPI*) (HStringHandle, REFIID, void**);
 using WindowsCreateStringFn = HRESULT (WINAPI*) (LPCWSTR, UINT32, HStringHandle*);
 using WindowsDeleteStringFn = HRESULT (WINAPI*) (HStringHandle);
+using WindowsGetStringRawBufferFn = PCWSTR (WINAPI*) (HStringHandle, UINT32*);
 
 /** Explicit C-style vtable so the assumed slot index is visible and checked. */
 struct AudioPolicyConfigFactoryVtbl
@@ -939,6 +963,7 @@ public:
         getActivationFactory = loadFunction<RoGetActivationFactoryFn> (module, "RoGetActivationFactory");
         createString = loadFunction<WindowsCreateStringFn> (module, "WindowsCreateString");
         deleteString = loadFunction<WindowsDeleteStringFn> (module, "WindowsDeleteString");
+        getRawBuffer = loadFunction<WindowsGetStringRawBufferFn> (module, "WindowsGetStringRawBuffer");
     }
 
     ~WinRt()
@@ -956,6 +981,7 @@ public:
     RoGetActivationFactoryFn getActivationFactory = nullptr;
     WindowsCreateStringFn createString = nullptr;
     WindowsDeleteStringFn deleteString = nullptr;
+    WindowsGetStringRawBufferFn getRawBuffer = nullptr; // getPersistedDefaultEndpoint only
 };
 
 /** RAII HSTRING; an empty text yields the null HSTRING (== empty string). */
@@ -986,21 +1012,21 @@ private:
     HRESULT result = S_OK;
 };
 
-/** Requires COM to be initialised on the calling thread (any apartment). */
-bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceId, std::string& error)
+/** The activation factory, or nullptr with `error` set. Requires COM to be
+    initialised on the calling thread (any apartment). The caller releases it. */
+AudioPolicyConfigFactory* acquireFactory (const WinRt& winrt, std::string& error)
 {
-    const WinRt winrt;
     if (! winrt.isValid())
     {
         error = "Windows Runtime functions are unavailable (combase.dll).";
-        return false;
+        return nullptr;
     }
 
     const HString className (winrt, kClassName);
     if (FAILED (className.status()))
     {
         error = "Cannot create WinRT class name: " + hresultToString (className.status());
-        return false;
+        return nullptr;
     }
 
     // Prefer the IID that matches this build, but accept the other one: the
@@ -1021,15 +1047,23 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
     }
 
     if (factory == nullptr)
-    {
         error = "The per-app audio device API is not available on this Windows build (" + std::to_string (windowsBuildNumber())
               + "): " + hresultToString (hr);
+    return factory;
+}
+
+/** Requires COM to be initialised on the calling thread (any apartment). */
+bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceId, std::string& error)
+{
+    const WinRt winrt;
+    auto* factory = acquireFactory (winrt, error);
+    if (factory == nullptr)
         return false;
-    }
 
     const std::wstring devicePath = mmDeviceId.empty() ? std::wstring() : kMmDevApiPrefix + mmDeviceId + kRenderInterfaceSuffix;
     const HString device (winrt, devicePath);
 
+    HRESULT hr = S_OK;
     if (FAILED (device.status()))
     {
         hr = device.status();
@@ -1055,8 +1089,42 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
 
     return true;
 }
+
+/** The per-app device Windows keeps for the process's executable (console
+    role, the one the Settings page shows): the MMDevice id, or empty when it
+    follows the system default. Requires COM on the calling thread. */
+bool getPersistedDefaultEndpoint (DWORD processId, std::string& mmDeviceId, std::string& error)
+{
+    mmDeviceId.clear();
+    const WinRt winrt;
+    if (winrt.getRawBuffer == nullptr)
+    {
+        error = "Windows Runtime functions are unavailable (combase.dll).";
+        return false;
+    }
+    auto* factory = acquireFactory (winrt, error);
+    if (factory == nullptr)
+        return false;
+
+    HStringHandle device = nullptr;
+    const HRESULT hr = factory->vtbl->GetPersistedDefaultAudioEndpoint (factory, static_cast<UINT> (processId), eRender, eConsole, &device);
+    factory->vtbl->Release (factory);
+    if (FAILED (hr))
+    {
+        error = "Windows did not tell the per-app output device: " + hresultToString (hr);
+        return false;
+    }
+    if (device != nullptr)
+    {
+        UINT32 length = 0;
+        const wchar_t* text = winrt.getRawBuffer (device, &length);
+        const auto path = text != nullptr ? toUtf8 (text, length) : std::string();
+        winrt.deleteString (device);
+        mmDeviceId = AppAudioRouter::endpointIdFromInterfacePath (path);
+    }
+    return true;
+}
 } // namespace undocumented_routing
-#endif // FLUB_ENABLE_UNDOCUMENTED_ROUTING
 
 //==============================================================================
 // AppAudioRouter
@@ -1078,12 +1146,16 @@ bool setPersistedDefaultEndpoint (DWORD processId, const std::wstring& mmDeviceI
     that a captured app still plays to the headset Flubsound plays to (the
     doubling guard) and name the other devices it could play to instead.
 
-    canList() is true: listing works everywhere. Moving needs the opt-in
-    undocumented adapter above, so canMoveEndpoint() (and isSupported()) is
-    false without it: automatic routing then never picks endpoint moves, and
-    setAppEndpoint() returns false with cannotMoveReason(); the UI offers
-    openSystemRoutingSettings(). With the adapter a move can still fail on a
-    build whose interface changed (E_NOINTERFACE, reported per app). */
+    canList() is true: listing works everywhere. Endpoint routing to strip
+    endpoints is opt-in (FLUB_ENABLE_UNDOCUMENTED_ROUTING) and needs the
+    virtual driver, so canMoveEndpoint() (and isSupported()) is false without
+    it: automatic routing then never picks endpoint moves; the UI offers
+    openSystemRoutingSettings(). setAppEndpoint() / getAppEndpoint() use the
+    undocumented adapter above in every build (canMoveAppOutput(), Windows 10
+    1803+, where the per-app device exists): AppRouting calls them only for
+    "Move the app's own sound away" (docs/11 E47, R4.5) and for endpoint
+    routing. A move can still fail on a build whose interface changed
+    (E_NOINTERFACE, reported per app). */
 class WinAppAudioRouter final : public AppAudioRouter
 {
 public:
@@ -1129,9 +1201,30 @@ public:
     {
         if (canMoveEndpoint())
             return {};
-        return "This build of Flubsound cannot move applications between output devices by itself (Windows only offers "
-               "an undocumented API for it). Choose the output for each app in Windows Settings > System > Sound > "
+        return "This build of Flubsound cannot route applications to strip devices (that needs the Flubsound virtual audio "
+               "driver). Choose the output for each app in Windows Settings > System > Sound > "
                "Volume mixer (Windows 11) or App volume and device preferences (Windows 10).";
+    }
+
+    // The per-app device ("App volume and device preferences") exists from
+    // Windows 10 1803 (build 17134).
+    bool canMoveAppOutput() const override { return windowsBuildNumber() >= 17134; }
+
+    bool getAppEndpoint (uint32_t processId, std::string& endpointIdOut, std::string& error) override
+    {
+        endpointIdOut.clear();
+        if (processId == 0 || processId == GetCurrentProcessId())
+        {
+            error = "Invalid process id.";
+            return false;
+        }
+        const ScopedComInit com;
+        if (! com.isUsable())
+        {
+            error = "COM initialisation failed: " + hresultToString (com.status());
+            return false;
+        }
+        return undocumented_routing::getPersistedDefaultEndpoint (static_cast<DWORD> (processId), endpointIdOut, error);
     }
 
     std::vector<AudioSessionInfo> enumerateSessions() override
@@ -1306,7 +1399,12 @@ public:
             return false;
         }
 
-#if defined(FLUB_ENABLE_UNDOCUMENTED_ROUTING)
+        if (! canMoveAppOutput())
+        {
+            error = "This Windows version has no per-app output device (it needs Windows 10 version 1803 or later).";
+            return false;
+        }
+
         const ScopedComInit com;
         if (! com.isUsable())
         {
@@ -1323,11 +1421,6 @@ public:
         }
 
         return undocumented_routing::setPersistedDefaultEndpoint (static_cast<DWORD> (processId), mmDeviceId, error);
-#else
-        (void) endpointIdOrName;
-        error = cannotMoveReason();
-        return false;
-#endif
     }
 
     void openSystemRoutingSettings() override

@@ -520,6 +520,24 @@ public:
     /** Heuristic: virtual cables / loopback drivers / monitor sources. */
     static bool looksLikeLoopbackDevice (const juce::String& inputDeviceName);
 
+    /** The multi-strip device input map (R4.6 / docs/11 E48; Settings >
+        Routing > Input map): per strip, the first device input channel that
+        feeds it, -1 = not fed. All -1 = no map (the single "Input feeds
+        strip" applies). Setting it persists AppSettings' deviceInput.map
+        ("Game=0;Music=8") and re-applies the device input policy; on Linux
+        the router then links each flubsound_<strip> sink's monitor to those
+        inputs (pw-link / registry). Broadcasts Change::Settings. */
+    std::vector<int> getDeviceInputMapChannels() const;
+    void setDeviceInputMapChannels (const std::vector<int>& firstChannels);
+    /** "Game=0;Music=8" <-> per-strip first channels for these strip names
+        (unknown names and malformed entries are skipped; -1 = not fed). Pure. */
+    static std::vector<int> parseDeviceInputMap (const juce::String& map, const juce::StringArray& stripNames);
+    static juce::String formatDeviceInputMap (const std::vector<int>& firstChannels, const juce::StringArray& stripNames);
+    /** The strips one after another from channel 0 (each takes its own channel
+        count): Game 7.1 = 0, Music = 8, Chat = 10, System = 12, as the Linux
+        setup script's sinks and the native PipeWire node order them. Pure. */
+    static std::vector<int> consecutiveInputMap (const std::vector<int>& stripChannels);
+
     /** Replaces the strip layout (brief dropout). Stores of surviving strips
         are kept; UI must re-fetch everything (Change::Engine). */
     void setStripLayout (const std::vector<flub::StripConfig>& newLayout);

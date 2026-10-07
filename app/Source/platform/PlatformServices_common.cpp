@@ -10,6 +10,7 @@
 #include "PlatformServicesInternal.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iterator>
 
 namespace flub::platform
@@ -147,6 +148,21 @@ std::string AppAudioRouter::matchOutputDeviceName (const std::vector<OutputEndpo
         if (! endpoints[i].name.empty() && names[i] == deviceName)
             return endpoints[i].id;
     return {};
+}
+
+std::string AppAudioRouter::endpointIdFromInterfacePath (const std::string& path)
+{
+    // "\\?\SWD#MMDEVAPI#" + id + "#{interface class guid}"; the case of the
+    // prefix varies between Windows components, the id keeps its own.
+    static constexpr char prefix[] = "\\\\?\\SWD#MMDEVAPI#";
+    constexpr size_t prefixLength = sizeof (prefix) - 1;
+    if (path.size() <= prefixLength)
+        return path;
+    for (size_t i = 0; i < prefixLength; ++i)
+        if (std::tolower (static_cast<unsigned char> (path[i])) != std::tolower (static_cast<unsigned char> (prefix[i])))
+            return path;
+    const auto end = path.find ('#', prefixLength);
+    return path.substr (prefixLength, end == std::string::npos ? std::string::npos : end - prefixLength);
 }
 
 //==============================================================================

@@ -39,6 +39,9 @@ constexpr const char* preferredOutputHardwareId = "device.preferredOutputHardwar
 constexpr const char* followSystemDefault = "device.followSystemDefault";
 constexpr const char* routingMethod = "routing.method";
 constexpr const char* routingMap = "routing.map";
+constexpr const char* routingMoveAway = "routing.moveOriginalAway";
+constexpr const char* routingSilentEndpoint = "routing.silentEndpoint";
+constexpr const char* routingSilentEndpointName = "routing.silentEndpointName";
 constexpr const char* autoProfilesEnabled = "autoProfile.enabled";
 constexpr const char* autoProfileRules = "autoProfile.rules";
 constexpr const char* deviceCorrections = "device.corrections";
@@ -738,6 +741,24 @@ juce::String AppSettings::getStripEndpointId (const juce::String& stripName) con
 void AppSettings::setStripEndpointId (const juce::String& stripName, const juce::String& endpointId)
 {
     properties->setValue (stripKey (stripName, "endpoint"), endpointId);
+}
+
+bool AppSettings::getMoveOriginalAway() const { return properties->getBoolValue (Keys::routingMoveAway, false); }
+void AppSettings::setMoveOriginalAway (bool shouldMove) { properties->setValue (Keys::routingMoveAway, shouldMove); }
+
+juce::String AppSettings::getSilentEndpointId() const { return properties->getValue (Keys::routingSilentEndpoint).trim(); }
+juce::String AppSettings::getSilentEndpointName() const { return properties->getValue (Keys::routingSilentEndpointName).trim(); }
+
+void AppSettings::setSilentEndpoint (const juce::String& endpointId, const juce::String& name)
+{
+    if (endpointId.trim().isEmpty())
+    {
+        properties->removeValue (Keys::routingSilentEndpoint);
+        properties->removeValue (Keys::routingSilentEndpointName);
+        return;
+    }
+    properties->setValue (Keys::routingSilentEndpoint, endpointId.trim());
+    properties->setValue (Keys::routingSilentEndpointName, name.trim());
 }
 
 // ---- Automatic profiles -------------------------------------------------------------------------------------

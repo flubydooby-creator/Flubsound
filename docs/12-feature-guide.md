@@ -74,14 +74,19 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 - **What it does to the sound:** nothing by itself. It decides which strip's processing the app gets.
 - **Listen for:** the app should be heard once, processed. Check it by switching the strip's Bypass hotkey (*Ctrl+Alt+B*): the sound should change, not double.
 - **Demo pairs:** none (routing has no sound of its own; the strip's meter and the doubling guard below are the checks)
-- **Limits:** a captured app that also plays straight to your headset is heard twice (see below). On macOS per-app capture (E49) is not built.
+- **Limits:** a captured app that also plays straight to your headset would be heard twice, so Flubsound holds it back (see below; on Windows it can also move the app's own sound away for you). On macOS per-app capture (E49) is not built.
 
 ### "Original also audible" (the doubling guard)
 
 - **What it is:** if a captured app still plays straight to the device Flubsound plays to (a headset used for both), you would hear it twice: the original and the processed copy a few milliseconds later, which sounds like comb filtering, phasing or an echo. Flubsound does not start that capture, marks the app's chip with two overlapping amber rings and shows the fix ([E47](11-enhancement-report.md#e47)).
 - **The fix (confirmed on the owner's Windows 11 PC):** set that app's output to a device you do not listen to (*Settings › System › Sound › Volume mixer*, or *App volume and device preferences*). The capture keeps capturing it, and only the processed copy reaches your headset. The notice lists spare output devices; with none, a virtual cable works as one.
-- **Listen for:** after the fix, the phasing is gone and Bypass removes the processing completely.
+- **Or let Flubsound do it (Windows):** *Move the app's own sound away automatically* (Settings › Routing; off by default) makes that move for you ([E47](11-enhancement-report.md#e47), R4.5). One click turns it on: the button in the notice's dialog or the chip's menu item, e.g. **Move automatically to Digital Audio (S/PDIF)**. Before Flubsound captures an app that plays to your headset, it sets that app's own output to a silent device, then captures it. Automatic picks an S/PDIF or other digital output, else an HDMI / DisplayPort output nothing else plays to; never your headset, the system default or a virtual cable that feeds Flubsound. You can choose the device yourself in Settings › Routing. The app's own device comes back when you unassign it, switch the option off or quit Flubsound, and after a crash at the next start. The chip's tooltip then says *its own sound moved to …*.
+  - An app whose output you set yourself (for example Edge on S/PDIF) does not play to the headset, so Flubsound leaves it alone and never "puts it back".
+  - If you change an app's output after Flubsound moved it, Flubsound leaves your choice; **Move again** in the notice lets it move the app again.
+  - If the silent device is unplugged, an automatic choice moves to the next candidate. A device you chose pauses: the app is held back, and the notice says it is not connected.
+- **Listen for:** after the fix, the phasing is gone and Bypass removes the processing completely. With the option on, nothing should be heard from the silent device (nothing is plugged into S/PDIF), and the app should play once, processed.
 - **Demo pairs:** none (it prevents a doubled sound; it has no sound of its own)
+- **Limits (gated):** the move uses an undocumented Windows API (the one behind the Volume mixer). It was checked on the owner's PC (Windows 11 build 26200) with a test process only, not yet with Edge or a game. Some apps choose their output device themselves and keep playing to the headset; Flubsound then keeps them held back and says so. If you quit Flubsound while a moved app is closed, Windows keeps that app on the silent device until Flubsound sees it again (it is moved back then) or you change it in the Volume mixer.
 
 ### Output device, re-plug, sleep and resume
 
@@ -725,8 +730,14 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 
 ### Settings › Processing
 
-- **What it is:** Latency profile; automatic overload response; device input and the strip it feeds; per-app routing method; Protection strength; Automatic preamp (and hot programme) and Smart macros per strip; Voice chat (duck and depth); Listening level (the contour, follow the system volume, reference volume, the curve).
+- **What it is:** Latency profile; automatic overload response; Protection strength; Automatic preamp (and hot programme) and Smart macros per strip; Voice chat (duck and depth); Listening level (the contour, follow the system volume, reference volume, the curve).
 - **Demo pairs:** `latency-profile`, `protection-normal`, `auto-preamp`, `smart-macros`, `chat-duck`, `contour`
+
+### Settings › Routing
+
+- **What it is:** the per-app routing method; *Move the app's own sound away automatically* (Windows, off by default) with a line on what it does now, and the *Silent device*: *Automatic (…)* names the device it picks; Flubsound's output and the system default are greyed out ([§1](#original-also-audible-the-doubling-guard)). Then the device input: *Device input* (Automatic / Always / Off), *Input feeds strip*, and the **input map**: for each strip, the first input channel that feeds it. Use the map when one input carries several strips, for example a 14-channel JACK / PipeWire input, or a virtual mixer's outputs. **Fill in one after another** sets Game 1–8, Music 9–10, Chat 11–12 and System 13–14 (the order of Flubsound's Linux sinks); **Clear map** goes back to *Input feeds strip*. On Linux, Flubsound links each `flubsound_<strip>` sink's monitor to those inputs by itself (R4.6, [E48](11-enhancement-report.md#e48)).
+- **Demo pairs:** none (routing; the sound is the strip's chain)
+- **Limits:** the input map was tested with fakes and on Windows only; it has not run on a Linux desktop.
 
 ### Settings › Hearing
 

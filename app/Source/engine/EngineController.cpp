@@ -1096,6 +1096,59 @@ void EngineController::setDeviceInputStrip (int strip)
     notify (Change::Settings);
 }
 
+std::vector<int> EngineController::parseDeviceInputMap (const juce::String& map, const juce::StringArray& stripNames)
+{
+    std::vector<int> channels (static_cast<size_t> (stripNames.size()), -1);
+    for (const auto& entry : juce::StringArray::fromTokens (map, ";,", {}))
+    {
+        const auto name = entry.upToFirstOccurrenceOf ("=", false, false).trim();
+        const auto channelText = entry.fromFirstOccurrenceOf ("=", false, false).trim();
+        const int strip = stripNames.indexOf (name, true);
+        if (strip >= 0 && channelText.isNotEmpty() && channelText.containsOnly ("0123456789") && channelText.length() <= 4)
+            channels[static_cast<size_t> (strip)] = channelText.getIntValue();
+    }
+    return channels;
+}
+
+juce::String EngineController::formatDeviceInputMap (const std::vector<int>& firstChannels, const juce::StringArray& stripNames)
+{
+    juce::StringArray entries;
+    for (size_t i = 0; i < firstChannels.size() && static_cast<int> (i) < stripNames.size(); ++i)
+        if (firstChannels[i] >= 0)
+            entries.add (stripNames[static_cast<int> (i)] + "=" + juce::String (firstChannels[i]));
+    return entries.joinIntoString (";");
+}
+
+std::vector<int> EngineController::consecutiveInputMap (const std::vector<int>& stripChannels)
+{
+    std::vector<int> first;
+    int next = 0;
+    for (const int channels : stripChannels)
+    {
+        first.push_back (next);
+        next += juce::jmax (1, channels);
+    }
+    return first;
+}
+
+std::vector<int> EngineController::getDeviceInputMapChannels() const
+{
+    juce::StringArray names;
+    for (int i = 0; i < getNumStrips(); ++i)
+        names.add (getStripName (i));
+    return parseDeviceInputMap (settings->getDeviceInputMap(), names);
+}
+
+void EngineController::setDeviceInputMapChannels (const std::vector<int>& firstChannels)
+{
+    juce::StringArray names;
+    for (int i = 0; i < getNumStrips(); ++i)
+        names.add (getStripName (i));
+    settings->setDeviceInputMap (formatDeviceInputMap (firstChannels, names));
+    applyDeviceInputPolicy();
+    notify (Change::Settings);
+}
+
 void EngineController::changeListenerCallback (juce::ChangeBroadcaster*)
 {
     // The device manager changed (device / rate / block / channels, or a device

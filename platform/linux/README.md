@@ -435,8 +435,10 @@ pw-metadata -n settings 0 clock.force-quantum 128
 ## Linking the sinks to the engine
 
 The engine reads each strip from its device input, starting at the strip's
-channel (*Settings › Processing › Input feeds strip*, or several strips
-through the `deviceInputMap` setting, for example `Game=0;Music=8`).
+channel (*Settings › Routing › Input feeds strip*, or several strips
+through the *Input map* on the same page, stored as the `deviceInput.map`
+setting, for example `Game=0;Music=8`; **Fill in one after another** sets
+Game 1–8, Music 9–10, Chat 11–12 and System 13–14).
 PipeWire does not connect a sink's monitor to that input by itself. The app
 does it, so no qpwgraph or Helvum step is needed.
 `LinuxAppAudioRouter::connectEndpointInputs`, called on every pass of the

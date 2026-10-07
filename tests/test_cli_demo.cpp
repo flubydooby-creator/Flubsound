@@ -600,7 +600,7 @@ TEST_CASE ("CLI demo: the feature guide (docs/12) names an existing pair in ever
                               "Saturation card", "Stereo & Space card", "Headphone Virtualizer card", "Compressor card",
                               "Loudness Maximizer card", "Loudness contour", "Protection strength", "Automatic preamp" })
         required.push_back (card);
-    for (const char* page : { "Audio", "Correction", "Processing", "Hearing", "Hotkeys", "General", "Diagnostics" })
+    for (const char* page : { "Audio", "Correction", "Processing", "Routing", "Hearing", "Hotkeys", "General", "Diagnostics" })
         required.push_back (std::string ("Settings › ") + page);
     for (const char* command : { "`flubsound-cli process`", "`batch`", "`flubsound-cli analyze`", "`flubsound-cli quality`", "`soak`",
                                  "`flubsound-cli demo`", "`flubsound-cli latency-probe`", "`flubsound-cli params`", "`presets`", "`help`",

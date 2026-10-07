@@ -26,7 +26,7 @@
 //               automatic overload response (switch, what it changed and a
 //               Restore button), live latency breakdown with CPU / xruns /
 //               overloads, the per-app capture streams' FIFO statistics,
-//               device-input routing, per-app routing method, protection
+//               protection
 //               strength (docs/11 E06: Off / Normal / Strict, engine-wide),
 //               the selected strip's Automatic Preamp (docs/11 E11) with its
 //               live prediction and its hot-programme switch
@@ -39,6 +39,16 @@
 //               (docs/11 E34) for the selected strip, under the preamp;
 //               Voice chat (docs/11 E22): the chat duck's switch and depth,
 //               as on the routing panel's Chat row.
+//   Routing     per-app routing method; "Move the app's own sound away
+//               automatically" (docs/11 E47, R4.5; Windows, off by default)
+//               with what it does now, and the silent device (Automatic, or
+//               one of the output endpoints the last routing pass listed;
+//               Flubsound's output and the system default greyed out, a
+//               chosen one that is unplugged kept as "(not connected)");
+//               device input processing, "Input feeds strip", and the input
+//               map (R4.6 / docs/11 E48: per strip the first device input
+//               channel, "Fill in one after another", "Clear map"; persisted
+//               as deviceInput.map). The page scrolls.
 //   Hearing     the hearing guard (docs/11 E32 (c); HearingPage.h): the
 //               headset sensitivity in use (the listener's own figure per
 //               output, or the device profile's, marked "manufacturer
@@ -104,6 +114,7 @@ public:
         Audio,
         Correction,
         Processing,
+        Routing,
         Hearing,
         Hotkeys,
         General,
@@ -199,6 +210,7 @@ private:
     class AudioPage;
     class CorrectionPage;
     class ProcessingPage;
+    class RoutingPage;
     class HotkeysPage;
     class GeneralPage;
     class DiagnosticsPage;
@@ -206,12 +218,14 @@ private:
     void timerCallback() override;
 
     EngineController& controller;
-    std::array<juce::TextButton, 7> navButtons;
+    std::array<juce::TextButton, 8> navButtons;
     std::unique_ptr<AudioPage> audioPage;
     juce::Viewport audioView; // the Audio page scrolls when the guidance is long
     std::unique_ptr<CorrectionPage> correctionPage;
     std::unique_ptr<ProcessingPage> processingPage;
     juce::Viewport processingView; // ... and the Processing page when there are many capture streams
+    std::unique_ptr<RoutingPage> routingPage;
+    juce::Viewport routingView; // ... and the Routing page (one input-map row per strip)
     std::unique_ptr<HearingPage> hearingPage;
     juce::Viewport hearingView; // ... and the Hearing page (the per-ear editor is tall)
     std::unique_ptr<HotkeysPage> hotkeysPage;

@@ -8,8 +8,12 @@ if(NOT TARGET FlubsoundPro OR NOT FLUB_HAS_PLATFORM_SERVICES)
     return()
 endif()
 
+# The adapter itself is compiled into every Windows build: "Move the app's own
+# sound away" (docs/11 E47, R4.5; off until the user switches it on) uses it.
+# This option only offers endpoint routing to strip endpoints, which needs the
+# Flubsound virtual audio driver (docs/11 E46).
 option(FLUB_ENABLE_UNDOCUMENTED_ROUTING
-    "Windows: move apps between output devices through the undocumented IAudioPolicyConfigFactory API (validate on every supported Windows build first)"
+    "Windows: offer endpoint routing (move apps to strip endpoints) through the undocumented IAudioPolicyConfigFactory API (validate on every supported Windows build first)"
     OFF)
 
 if(WIN32)

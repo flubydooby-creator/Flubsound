@@ -57,6 +57,31 @@
 // routing panel) with the fix: set its output to another device
 // (getSpareEndpoints), where the capture still reaches it.
 //
+// Moving the original away (docs/11 E47, R4.5; Windows). With "Move the app's
+// own sound away automatically" on (setMoveOriginalAway, off by default; the
+// routing panel's one-click fix switches it on) Flubsound applies that fix
+// itself: an assigned app that plays to Flubsound's output under process
+// capture has its own output moved (router->setAppEndpoint, the per-app
+// device Windows keeps per executable) to a silent device - the one chosen in
+// Settings > Routing, or automatically an active S/PDIF / digital output,
+// else an HDMI / DisplayPort output nobody else plays to, never Flubsound's
+// output, the system default, a Flubsound endpoint or a virtual cable
+// (chooseSilentEndpoint). The capture then starts. Such moves are kept per
+// executable (a browser's audio comes from a child process: the session's
+// process is moved, which Windows applies to the executable), journaled
+// before they are made (RouteJournal::Entry::movedAway, with the app's own
+// earlier per-app device), and put back to that device when the app is
+// unassigned, the option goes off or capture stops being the method, at
+// shutdown, and after a crash at the next start (as soon as a process of the
+// executable is seen). An app that does not play to the output (e.g. the user
+// set its device by hand) is left alone and nothing is recorded; when the
+// user changes the device of an app Flubsound moved, Flubsound forgets that
+// move and does not move the app again until the one-click fix asks for it
+// (moveOriginalsAwayNow). A silent device that goes away pauses new moves
+// (an automatic choice falls back to the next candidate) and the app shows
+// why; an app that still plays to the output after the move (it picks the
+// device itself) stays held back with that explanation.
+//
 // Tournament mode (docs/11 E55). setTournamentMode (true) freezes routing:
 // the worker stops enumerating sessions (no process is opened, no audio
 // session is touched), makes no endpoint move and starts or stops no
@@ -96,8 +121,9 @@ public:
         juce::String executable;       // normalised (lower case, no directory, no ".exe")
         juce::String executablePath;   // full path when the OS reports it
         juce::String endpoint;         // the endpoint it was moved to
-        juce::String previousEndpoint; // the endpoint it played to before the move
+        juce::String previousEndpoint; // the endpoint it played to before the move (movedAway: its own per-app device, "" = the system default)
         bool pending = false;          // written before the move: whether it happened is unknown, so it counts as made
+        bool movedAway = false;        // R4.5: its own output moved off Flubsound's output (put back to previousEndpoint)
 
         bool operator== (const Entry&) const = default;
     };
@@ -131,6 +157,17 @@ class AppRouting final : private juce::Thread, private juce::AsyncUpdater
 public:
     using Method = AppSettings::RoutingMethod;
 
+    /** docs/11 E47 (R4.5): what "Move the app's own sound away" did for an app. */
+    enum class MoveAway : uint8_t
+    {
+        None,       // nothing to do (option off, unassigned, or it does not play to the output)
+        Moved,      // its own output is on the silent device (Flubsound's move)
+        StillPlays, // moved, but it still plays to the output (the app picks that device itself)
+        LeftToUser, // the user changed its device after Flubsound's move: not moved again
+        NoTarget,   // no silent device (none found, or the chosen one is not connected)
+        Failed      // the move failed (AppState::error says why)
+    };
+
     struct AppState
     {
         uint32_t processId = 0;
@@ -142,6 +179,10 @@ public:
         juce::String error;        // last routing / capture error
         bool playsToOutput = false;   // docs/11 E47: it plays straight to the device Flubsound plays to (heard directly)
         bool doublingBlocked = false; // docs/11 E47: mapped for process capture, not captured because of that (doubling guard)
+        MoveAway moveAway = MoveAway::None; // R4.5
+        juce::String movedTo;         // R4.5: the silent device's name while Moved / StillPlays
+        juce::String moveNote;        // R4.5: why it is still held back (user-presentable), empty otherwise
+        bool movePending = false;     // R4.5: moved in this pass; captured once the next pass (250 ms) sees it off the output
     };
 
     /** Reads the routes / method from settings; does nothing until start(). */
@@ -200,8 +241,9 @@ public:
     /** Last enumeration result (message thread copy). */
     const std::vector<AppState>& getApps() const noexcept { return apps; }
     /** Running applications whose audio reaches a strip through us right now
-        (moved to a strip endpoint, or captured), counted once per process.
-        0 = per-app routing processes nothing (the panel's red state). */
+        (moved to a strip endpoint, or captured; R4.5: or moved away in this
+        pass, captured 250 ms later), counted once per process. 0 = per-app
+        routing processes nothing (the panel's red state). */
     int getProcessedAppCount() const;
     /** Requests an enumeration + apply pass now (asynchronous). */
     void refresh();
@@ -235,6 +277,72 @@ public:
     /** Where the name of the output device comes from (message thread).
         Default: the host's device manager (the current device's output). */
     void setOutputDeviceSource (std::function<juce::String()> source);
+    /** Where the name of Flubsound's input device comes from (a virtual cable
+        that feeds Flubsound is never a silent device). Default: the host's
+        device manager. */
+    void setInputDeviceSource (std::function<juce::String()> source);
+
+    // ---- Moving the original away (docs/11 E47, R4.5) ----------------------------
+    /** The option is offered: the router can move an app's own output
+        (canMoveAppOutput, Windows) and process capture works. */
+    bool canMoveOriginalAway() const noexcept;
+    bool getMoveOriginalAway() const noexcept { return moveAway; }
+    /** Switches the option (persisted). Off: the next pass puts back what
+        Flubsound moved. */
+    void setMoveOriginalAway (bool shouldMove);
+    /** The routing panel's one-click fix: switches the option on and lets
+        Flubsound move again the apps whose device the user changed after an
+        earlier move. */
+    void moveOriginalsAwayNow();
+    /** The silent device chosen in Settings > Routing (persisted); an empty
+        id = automatic. */
+    OutputEndpoint getSilentEndpointChoice() const;
+    void setSilentEndpointChoice (const OutputEndpoint& endpoint);
+    /** Where the last pass would move an app's own output; an empty id = none,
+        and getSilentTargetReason() says why. Known once a process-capture
+        pass has run with a router that can move. */
+    const OutputEndpoint& getSilentTarget() const noexcept { return silentTarget; }
+    const juce::String& getSilentTargetReason() const noexcept { return silentTargetReason; }
+    /** The output endpoints the last such pass listed (the system default
+        first): the choices of Settings > Routing. */
+    const std::vector<OutputEndpoint>& getKnownOutputEndpoints() const noexcept { return knownEndpoints; }
+    /** The one-click fix's label ("Move automatically to Digital Audio
+        (S/PDIF)", or "Move again to ..." for an app the user took back), empty
+        when it is not offered (option unavailable, nothing to move to, or the
+        option on with nothing to retry). */
+    juce::String getMoveAwayAction() const;
+    /** One line for Settings > Routing: what the option does now. */
+    juce::String describeMoveAway() const;
+
+    /** The silent device rules (pure). From `endpoints` (the system default
+        first, as listOutputEndpoints() gives them) never the output
+        (outputId), the system default, a Flubsound endpoint or one that feeds
+        Flubsound's input device (feedsInput). A chosen id wins when it is
+        listed and allowed; a chosen one that is not listed gives no target and
+        says it is not connected. Automatic: `current` (where Flubsound's moves
+        already are) while it is a candidate, else the first digital output
+        (S/PDIF, optical; apps parked there make no sound), else the first
+        display output (HDMI, DisplayPort) not in `busy` (another, unassigned
+        app plays there: a monitor's speakers may be in use); never a virtual
+        cable; none: an explanation. */
+    struct SilentTarget
+    {
+        OutputEndpoint endpoint; // empty id = none
+        juce::String reason;     // why there is none (user-presentable)
+    };
+    static SilentTarget chooseSilentEndpoint (const std::vector<OutputEndpoint>& endpoints, const std::string& outputId,
+                                              const juce::String& inputDevice, const OutputEndpoint& chosen,
+                                              const std::set<std::string>& busy, const std::string& current);
+    /** 2 = a digital output (S/PDIF, optical), 1 = a display output (HDMI,
+        DisplayPort, a graphics card's audio), 0 = anything else. Pure. */
+    static int silentPreference (const juce::String& endpointName);
+    /** A virtual cable / mixer endpoint (VB-CABLE, VoiceMeeter, BlackHole,
+        "Virtual", "Loopback", Flubsound's own). Pure. */
+    static bool looksLikeVirtualCable (const juce::String& endpointName);
+    /** The render endpoint is the other end of the cable Flubsound records
+        from (a virtual cable whose device part, the last "(...)", is the
+        input device's). Pure. */
+    static bool feedsInput (const juce::String& endpointName, const juce::String& inputDevice);
 
     // ---- Tournament mode (docs/11 E55) ------------------------------------------
     /** Freezes routing (see the header comment); not persisted here. */
@@ -269,7 +377,22 @@ private:
         juce::String outputDevice; // the output device's name (doubling guard)
         bool frozen = false;       // tournament mode: no pass at all
         bool deviceLinksInputs = false; // docs/11 E48: the native PipeWire device links the strips' sinks itself
+        bool moveAway = false;          // R4.5: the option is on (and offered)
+        OutputEndpoint silentChoice;    // R4.5: the chosen silent device (empty id = automatic)
+        juce::String inputDevice;       // R4.5: Flubsound's input device (a cable feeding it is never silent)
+        uint64_t moveRetry = 0;         // R4.5: bumped by moveOriginalsAwayNow()
         uint64_t generation = 0;   // bumped when routes, method, strips, the output device or tournament mode change
+    };
+
+    /** One application's own output, moved away by Flubsound (R4.5). */
+    struct SilentMove
+    {
+        juce::String endpoint;          // where Flubsound moved it
+        juce::String previous;          // its own per-app device before ("" = the system default)
+        uint32_t processId = 0;         // the latest process of it seen (moves and restores go through it)
+        uint64_t processStartTime = 0;
+        juce::String executablePath;
+        bool unconfirmed = false;       // a pending journal entry of an earlier run: the move may never have happened
     };
 
     void run() override;
@@ -279,6 +402,18 @@ private:
     void stopAllCaptures();
     void persistRoutedExecutables (const std::set<juce::String>& executables);
     juce::String currentOutputDevice() const;
+    juce::String currentInputDevice() const;
+    /** Puts the moved-away apps back through the processes `sessions` lists
+        (same executable; the recorded process when its start time matches).
+        Worker thread, or no worker running. */
+    void restoreSilentMoves (const std::vector<flub::platform::AudioSessionInfo>& sessions);
+    /** The worker's R4.5 step of a pass: moves, re-points, puts back and
+        explains (AppState::moveAway / movedTo / moveNote), per executable.
+        `states` parallels `sessions`. Returns the executables moved or put
+        back in this pass (the next pass then follows in 250 ms). */
+    std::set<juce::String> applySilentMoves (const WorkerConfig& c, const std::vector<flub::platform::AudioSessionInfo>& sessions,
+                                             std::vector<AppState>& states, const OutputEndpoint& output, const SilentTarget& silent,
+                                             const std::vector<OutputEndpoint>& endpoints, bool canMoveAway);
     /** Writes the journal for the current moves plus `pendingMove` (the move
         about to be made), if any. Worker thread (or no worker running). */
     bool syncJournal (const RouteJournal::Entry* pendingMove);
@@ -289,6 +424,9 @@ private:
     bool captureSupported = false, liveUpdates = false, isStarted = false, isShutDown = false, tournament = false;
     Method method = Method::Automatic;
     std::vector<AppRoute> routes;
+    bool moveAway = false;        // R4.5: the option (settings)
+    OutputEndpoint silentChoice;  // R4.5: the chosen silent device (settings)
+    uint64_t moveRetry = 0;
 
     // Message thread
     std::vector<AppState> apps;
@@ -307,9 +445,12 @@ private:
     std::map<uint32_t, CaptureFailure> captureFailures; // pid -> failed starts
     uint64_t configGeneration = 0;
     std::set<juce::String> persistedRoutedExecutables; // last value written to the settings
-    std::function<juce::String()> outputDeviceSource;
+    std::function<juce::String()> outputDeviceSource, inputDeviceSource;
     OutputEndpoint outputEndpoint;
     std::vector<OutputEndpoint> spareEndpoints;
+    OutputEndpoint silentTarget;                // R4.5: the last pass's silent device
+    juce::String silentTargetReason;
+    std::vector<OutputEndpoint> knownEndpoints; // R4.5: the last pass's output endpoints
 
     // Shared with the worker
     juce::CriticalSection lock;
@@ -319,6 +460,9 @@ private:
     uint64_t resultGeneration = 0; // config generation workerResult was computed from
     OutputEndpoint resultOutputEndpoint;
     std::vector<OutputEndpoint> resultSpareEndpoints;
+    SilentTarget resultSilentTarget;
+    std::vector<OutputEndpoint> resultKnownEndpoints;
+    bool resultHasSilentTarget = false; // the pass computed one (process capture, a router that can move)
     bool resultPending = false;
     juce::String inputLinkStatus; // docs/11 E48: connectEndpointInputs' last status
     bool inputsLinked = true;
@@ -341,6 +485,14 @@ private:
         entry, until the first non-empty enumeration shows whether that very
         process still runs. */
     std::map<uint32_t, RouteJournal::Entry> recoveredMoves;
+    /** R4.5: apps whose own output Flubsound moved away (normalised
+        executable -> move), also those whose processes exited (Windows keeps
+        the device per executable) and those an earlier run left (journal). */
+    std::map<juce::String, SilentMove> silentMoves;
+    std::set<juce::String> silentLeftToUser;               // the user changed the device after a move: not moved again
+    std::map<juce::String, CaptureFailure> silentFailures; // failed moves per executable since the last configuration change
+    uint64_t silentRetrySeen = 0, silentGenerationSeen = 0;
+    OutputEndpoint silentChoiceSeen; // the choice of the last pass (a change re-picks the automatic device)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppRouting)
 };

@@ -853,7 +853,7 @@ TEST_CASE ("App: AppRouting with a router that lists but cannot move never picks
         CHECK (routing.getEffectiveMethod() == AppRouting::Method::Disabled);
         CHECK (routing.getUnavailableReason().startsWith ("Per-app capture"));
         routing.setMethod (AppRouting::Method::Disabled);
-        CHECK (routing.getUnavailableReason() == "Per-app routing is switched off (Settings > Processing).");
+        CHECK (routing.getUnavailableReason() == "Per-app routing is switched off (Settings > Routing).");
         routing.setMethod (AppRouting::Method::Automatic);
 
         routing.setRoute ("cs2", "Game");
@@ -939,7 +939,7 @@ TEST_CASE ("App: the routing panel shows the red \"No apps are being processed\"
     routing.setMethod (AppRouting::Method::Disabled);
     panel.refreshRouting();
     CHECK (panel.isShowingNoAppsProcessed());
-    CHECK (panel.getNotice() == "No apps are being processed. Per-app routing is switched off (Settings > Processing).");
+    CHECK (panel.getNotice() == "No apps are being processed. Per-app routing is switched off (Settings > Routing).");
 
     // Nothing assigned, but the device input (a virtual cable set as the
     // system output) feeds a strip: audio is processed, just not per app, so
@@ -950,7 +950,7 @@ TEST_CASE ("App: the routing panel shows the red \"No apps are being processed\"
     REQUIRE (controller.getDeviceInputStrip() >= 0);
     panel.refreshRouting();
     CHECK (! panel.isShowingNoAppsProcessed());
-    CHECK (panel.getNotice() == "Per-app routing is switched off (Settings > Processing).");
+    CHECK (panel.getNotice() == "Per-app routing is switched off (Settings > Routing).");
 
     // An assigned app that is not processed is red again, device input or not.
     routing.setRoute ("cs2.exe", "Game");

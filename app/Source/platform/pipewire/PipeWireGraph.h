@@ -311,8 +311,8 @@ inline const Node* findSink (const Graph& graph, const std::string& name)
 
 /*  Monitor links for the JUCE device path. Applications play into the
     flubsound_<strip> null sinks; the engine reads a strip from its device
-    input starting at the strip's channel (Settings > Processing > Input feeds
-    strip, or the deviceInputMap setting, e.g. "Game=0;Music=8"). PipeWire
+    input starting at the strip's channel (Settings > Routing > Input feeds
+    strip, or its input map, the deviceInputMap setting, e.g. "Game=0;Music=8"). PipeWire
     does not connect a sink's monitor to that input by itself, so the router
     does: monitor port k of each sink -> input port first + k of Flubsound's
     own node (the node whose application.process.id, or whose client's

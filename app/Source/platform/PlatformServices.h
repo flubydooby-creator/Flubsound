@@ -4,11 +4,14 @@
 // and tested in isolation. Each OS provides an implementation; unsupported
 // features return isSupported() == false and the UI hides/greys them.
 //
-//   Windows : RegisterHotKey on a message-only window; per-app routing via
-//             the (undocumented, version-dependent) IAudioPolicyConfig
-//             "persisted default endpoint" API, compiled in only with
-//             FLUB_ENABLE_UNDOCUMENTED_ROUTING (otherwise each move fails
-//             and points to the documented fallback, ms-settings:apps-volume);
+//   Windows : RegisterHotKey on a message-only window; per-app device moves
+//             via the (undocumented, version-dependent) IAudioPolicyConfig
+//             "persisted default endpoint" API: in every build for moving a
+//             captured app's own output away (canMoveAppOutput, used only
+//             once the user switched that on), and for endpoint routing to
+//             strip endpoints only with FLUB_ENABLE_UNDOCUMENTED_ROUTING
+//             (canMoveEndpoint; otherwise the UI points to the documented
+//             fallback, ms-settings:apps-volume);
 //             per-process capture via
 //             AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK (Windows 10 2004,
 //             build 19041+, and Windows 11; see windows_builds below);
@@ -183,10 +186,12 @@ struct AudioSessionInfo
 
 /** Per-application routing: which output endpoint an app renders to. The
     engine exposes one virtual endpoint per strip ("Flubsound Game", ...).
-    Two separate capabilities: listing the apps that play audio (canList)
-    and moving one to another endpoint (canMoveEndpoint). Windows lists
-    everywhere but moves only in builds with FLUB_ENABLE_UNDOCUMENTED_ROUTING,
-    so a caller that needs moves must ask canMoveEndpoint(), not canList(). */
+    Separate capabilities: listing the apps that play audio (canList),
+    moving one to a strip endpoint (canMoveEndpoint) and moving an app's own
+    output to another physical endpoint (canMoveAppOutput). Windows lists
+    everywhere but routes to strip endpoints only in builds with
+    FLUB_ENABLE_UNDOCUMENTED_ROUTING, so a caller that needs endpoint routing
+    must ask canMoveEndpoint(), not canList(). */
 class AppAudioRouter
 {
 public:
@@ -212,6 +217,36 @@ public:
     /** Route an application (by process id / exe) to an output endpoint;
         empty endpointId restores the system default. */
     virtual bool setAppEndpoint (uint32_t processId, const std::string& endpointId, std::string& error) = 0;
+
+    /** docs/11 E47 (R4.5): setAppEndpoint() can move an application's own
+        output to another physical output endpoint of listOutputEndpoints()
+        and back, the doubling guard's automatic fix ("Move the app's own
+        sound away"). Separate from canMoveEndpoint(): Windows moves apps in
+        every build (the undocumented per-app device API, used only after the
+        user switched that option on), while endpoint routing to strip
+        endpoints stays opt-in (FLUB_ENABLE_UNDOCUMENTED_ROUTING) and needs
+        the virtual driver. Default: canMoveEndpoint(). */
+    virtual bool canMoveAppOutput() const { return canMoveEndpoint(); }
+
+    /** docs/11 E47 (R4.5): the output endpoint the OS keeps for the
+        application of processId (Windows: the per-app device of Settings >
+        Sound > Volume mixer, persisted per executable), as the id
+        listOutputEndpoints() uses, or empty when the app follows the system
+        default. false = unknown (error says why; the default: not
+        supported). Blocks like setAppEndpoint (background thread). */
+    virtual bool getAppEndpoint (uint32_t /*processId*/, std::string& endpointId, std::string& error)
+    {
+        endpointId.clear();
+        error = "The per-app output device cannot be read on this system.";
+        return false;
+    }
+
+    /** Windows names a per-app device by its device interface path
+        ("\\?\SWD#MMDEVAPI#{0.0.0.00000000}.{guid}#{e6327cad-...}"); this gives
+        the MMDevice id inside it ("{0.0.0.00000000}.{guid}"), the id
+        listOutputEndpoints() and the sessions use. Text that is not such a
+        path is returned unchanged. Pure. */
+    static std::string endpointIdFromInterfacePath (const std::string& path);
 
     /** Opens the OS's own per-app device UI (fallback when unsupported). */
     virtual void openSystemRoutingSettings() = 0;

@@ -12,7 +12,9 @@ namespace flub::app
 namespace
 {
 constexpr int kRefreshIntervalMs = 2000;
+constexpr int kVerifyMoveDelayMs = 250; // R4.5: the pass after a move looks again this soon (did the app follow?)
 constexpr int kMaxCaptureAttempts = 3;
+constexpr int kMaxMoveAttempts = 3;     // R4.5: failed moves of an app's own output, until the configuration changes
 constexpr const char* kRoutedAppsKey = "routing.routedApps"; // executables whose endpoint move is not undone yet
 constexpr const char* kJournalFileName = "route-journal.json"; // docs/11 E47, next to the settings file
 
@@ -34,7 +36,27 @@ bool sameState (const AppRouting::AppState& x, const AppRouting::AppState& y)
 {
     return x.processId == y.processId && x.strip == y.strip && x.isActive == y.isActive && x.routed == y.routed
            && x.captureId == y.captureId && x.error == y.error && x.endpointId == y.endpointId && x.playsToOutput == y.playsToOutput
-           && x.doublingBlocked == y.doublingBlocked;
+           && x.doublingBlocked == y.doublingBlocked && x.moveAway == y.moveAway && x.movedTo == y.movedTo && x.moveNote == y.moveNote
+           && x.movePending == y.movePending;
+}
+
+bool sameEndpoint (const juce::String& a, const juce::String& b)
+{
+    return a.equalsIgnoreCase (b); // Windows writes the ids' GUIDs in either case
+}
+
+/** The text inside the last "( ... )" of a device name: "CABLE Output
+    (VB-Audio Virtual Cable)" -> "vb-audio virtual cable" (lower case). */
+juce::String devicePart (const juce::String& name)
+{
+    const auto open = name.lastIndexOfChar ('(');
+    const auto close = name.lastIndexOfChar (')');
+    return open >= 0 && close > open ? name.substring (open + 1, close).trim().toLowerCase() : juce::String();
+}
+
+juce::String nameOf (const AppRouting::OutputEndpoint& e)
+{
+    return e.name.empty() ? juce::String (e.id) : juce::String (e.name);
 }
 
 juce::File journalFileFor (AppSettings& settings)
@@ -72,6 +94,7 @@ std::vector<RouteJournal::Entry> RouteJournal::load() const
         e.endpoint = item.getProperty ("endpoint", {}).toString();
         e.previousEndpoint = item.getProperty ("previousEndpoint", {}).toString();
         e.pending = static_cast<bool> (item.getProperty ("pending", false));
+        e.movedAway = item.getProperty ("kind", {}).toString() == "away";
         if (e.executable.isNotEmpty())
             entries.push_back (std::move (e));
     }
@@ -108,6 +131,10 @@ bool RouteJournal::write (const std::vector<Entry>& entries)
             item->setProperty ("endpoint", e.endpoint);
             item->setProperty ("previousEndpoint", e.previousEndpoint);
             item->setProperty ("pending", e.pending);
+            // R4.5: an app's own output moved away (put back to previousEndpoint);
+            // absent = a move to a strip endpoint (put back to the default).
+            if (e.movedAway)
+                item->setProperty ("kind", "away");
             list.add (juce::var (item));
         }
         auto* root = new juce::DynamicObject();
@@ -148,6 +175,8 @@ AppRouting::AppRouting (AudioEngineHost& h, AppSettings& s, std::unique_ptr<flub
 {
     method = settings.getRoutingMethod();
     routes = settings.getAppRoutes();
+    moveAway = settings.getMoveOriginalAway();
+    silentChoice = { settings.getSilentEndpointId().toStdString(), settings.getSilentEndpointName().toStdString() };
 
     if (auto xml = settings.getPropertiesFile().getXmlValue (kRoutedAppsKey))
         for (auto* e : xml->getChildWithTagNameIterator ("APP"))
@@ -159,6 +188,15 @@ AppRouting::AppRouting (AudioEngineHost& h, AppSettings& s, std::unique_ptr<flub
     for (const auto& e : journal.load())
     {
         const auto exe = normaliseExecutable (e.executable);
+        if (e.movedAway)
+        {
+            // R4.5: kept as this run's move (pending or not: putting the
+            // earlier device back is right either way); the worker puts it
+            // back when the app is seen unassigned or the option is off, and
+            // keeps it while the app is still captured.
+            silentMoves[exe] = { e.endpoint, e.previousEndpoint, e.processId, e.processStartTime, e.executablePath, e.pending };
+            continue;
+        }
         routedExecutables.insert (exe);
         if (e.processId != 0)
         {
@@ -226,6 +264,16 @@ void AppRouting::shutdown()
         for (const auto& exe : restored)
             if (failed.count (exe) == 0)
                 routedExecutables.erase (exe);
+
+        // R4.5: the apps' own outputs go back to their earlier devices. One
+        // last enumeration names the processes to do it through: a process
+        // id from the last pass may belong to another program by now. Apps
+        // that are not running keep their journal entries (the next start
+        // puts them back when they are seen).
+        // In Tournament mode (docs/11 E55) no process is opened: the journal
+        // keeps them for the next start.
+        if (! silentMoves.empty() && ! tournament)
+            restoreSilentMoves (router->enumerateSessions());
     }
     routedEndpoints.clear();
     recoveredMoves.clear();
@@ -270,7 +318,7 @@ juce::String AppRouting::getUnavailableReason() const
 
     constexpr const char* instead = "Choose a Flubsound output device per app in the system sound settings instead.";
     if (method == Method::Disabled)
-        return "Per-app routing is switched off (Settings > Processing).";
+        return "Per-app routing is switched off (Settings > Routing).";
     if (router == nullptr && ! platform_bridge::servicesCompiledIn())
         return juce::String ("Per-app routing needs the Flubsound platform services, which are not part of this build. ") + instead;
     // The platform's own reason says what to do instead (e.g. macOS: pick the
@@ -291,9 +339,9 @@ juce::String AppRouting::getUnavailableReason() const
     switch (method)
     {
         case Method::EndpointRouting:
-            return moveReason + (isCaptureSupported() ? " Choose Automatic or Process capture in Settings > Processing." : "");
+            return moveReason + (isCaptureSupported() ? " Choose Automatic or Process capture in Settings > Routing." : "");
         case Method::ProcessCapture:
-            return captureReason + (isEndpointRoutingSupported() ? juce::String (" Choose Automatic or Endpoint routing in Settings > Processing.")
+            return captureReason + (isEndpointRoutingSupported() ? juce::String (" Choose Automatic or Endpoint routing in Settings > Routing.")
                                                                  : " " + juce::String (instead));
         case Method::Automatic:
         case Method::Disabled: break;
@@ -308,6 +356,231 @@ bool AppRouting::playsToEndpoint (const flub::platform::AudioSessionInfo& sessio
     if (! session.activeEndpointIds.empty())
         return std::find (session.activeEndpointIds.begin(), session.activeEndpointIds.end(), endpointId) != session.activeEndpointIds.end();
     return session.currentEndpointId == endpointId;
+}
+
+// =============================================================================
+// Moving the original away (docs/11 E47, R4.5)
+// =============================================================================
+int AppRouting::silentPreference (const juce::String& endpointName)
+{
+    const auto name = endpointName.toLowerCase();
+    for (const auto* p : { "s/pdif", "spdif", "digital audio", "digital output", "optical", "toslink" })
+        if (name.contains (p))
+            return 2;
+    for (const auto* p : { "hdmi", "displayport", "display audio", "nvidia high definition audio", "amd high definition audio" })
+        if (name.contains (p))
+            return 1;
+    return 0;
+}
+
+bool AppRouting::looksLikeVirtualCable (const juce::String& endpointName)
+{
+    const auto name = endpointName.toLowerCase();
+    for (const auto* p : { "flubsound", "cable", "vb-audio", "voicemeeter", "virtual", "blackhole", "soundflower", "loopback" })
+        if (name.contains (p))
+            return true;
+    return false;
+}
+
+bool AppRouting::feedsInput (const juce::String& endpointName, const juce::String& inputDevice)
+{
+    const auto part = devicePart (endpointName);
+    return looksLikeVirtualCable (endpointName) && part.isNotEmpty() && part == devicePart (inputDevice);
+}
+
+AppRouting::SilentTarget AppRouting::chooseSilentEndpoint (const std::vector<OutputEndpoint>& endpoints, const std::string& outputId,
+                                                           const juce::String& inputDevice, const OutputEndpoint& chosen,
+                                                           const std::set<std::string>& busy, const std::string& current)
+{
+    const auto isDefault = [&endpoints] (const OutputEndpoint& e) { return ! endpoints.empty() && e.id == endpoints.front().id; };
+    // Why an endpoint can never be the silent device (empty = it can).
+    const auto refusal = [&] (const OutputEndpoint& e) -> juce::String
+    {
+        const auto name = nameOf (e);
+        if (! outputId.empty() && sameEndpoint (juce::String (e.id), juce::String (outputId)))
+            return name + " is the device Flubsound plays to.";
+        if (isDefault (e))
+            return name + " is the system's default output: apps that follow the default would play there too.";
+        if (name.containsIgnoreCase ("Flubsound"))
+            return name + " is one of Flubsound's own devices.";
+        if (feedsInput (name, inputDevice))
+            return name + " feeds Flubsound's input (" + inputDevice + "): the app would be heard twice.";
+        return {};
+    };
+
+    SilentTarget result;
+    if (! chosen.id.empty())
+    {
+        const auto chosenName = nameOf (chosen);
+        for (const auto& e : endpoints)
+            if (sameEndpoint (juce::String (e.id), juce::String (chosen.id)))
+            {
+                if (const auto why = refusal (e); why.isNotEmpty())
+                    result.reason = why + " Choose another silent device in Settings > Routing.";
+                else
+                    result.endpoint = e;
+                return result;
+            }
+        result.reason = chosenName + " (the silent device chosen in Settings > Routing) is not connected. Flubsound moves apps there again "
+                        "when it is back; or choose another device.";
+        return result;
+    }
+
+    // Automatic: stay where the moves already are, then digital, then display
+    // outputs. A display output another app plays to may be a monitor with
+    // speakers someone listens to; a digital output with apps on it is
+    // usually where apps were parked (an S/PDIF jack with nothing plugged in).
+    const auto candidate = [&] (const OutputEndpoint& e, int minimum)
+    {
+        const auto name = nameOf (e);
+        const int preference = silentPreference (name);
+        return refusal (e).isEmpty() && ! looksLikeVirtualCable (name) && preference >= minimum && (preference >= 2 || busy.count (e.id) == 0);
+    };
+    if (! current.empty())
+        for (const auto& e : endpoints)
+            if (sameEndpoint (juce::String (e.id), juce::String (current)) && candidate (e, 1))
+                return { e, {} };
+    for (const int preference : { 2, 1 })
+        for (const auto& e : endpoints)
+            if (candidate (e, preference) && silentPreference (nameOf (e)) == preference)
+                return { e, {} };
+
+    result.reason = "No output device that is likely silent was found (an S/PDIF or other digital output, or an HDMI / DisplayPort output "
+                    "nothing else plays to). Choose a device you do not listen to in Settings > Routing, or set the app's output "
+                    "yourself in Windows' Volume mixer.";
+    return result;
+}
+
+bool AppRouting::canMoveOriginalAway() const noexcept
+{
+    return router != nullptr && router->canMoveAppOutput() && isCaptureSupported();
+}
+
+void AppRouting::setMoveOriginalAway (bool shouldMove)
+{
+    if (shouldMove == moveAway)
+        return;
+    moveAway = shouldMove;
+    settings.setMoveOriginalAway (shouldMove);
+    publishConfig();
+    refresh();
+}
+
+void AppRouting::moveOriginalsAwayNow()
+{
+    ++moveRetry; // the worker forgets which apps the user took back, and the failed attempts
+    if (! moveAway)
+    {
+        moveAway = true;
+        settings.setMoveOriginalAway (true);
+    }
+    publishConfig();
+    refresh();
+}
+
+AppRouting::OutputEndpoint AppRouting::getSilentEndpointChoice() const
+{
+    return silentChoice;
+}
+
+void AppRouting::setSilentEndpointChoice (const OutputEndpoint& endpoint)
+{
+    if (endpoint == silentChoice)
+        return;
+    silentChoice = endpoint.id.empty() ? OutputEndpoint() : endpoint;
+    settings.setSilentEndpoint (juce::String (silentChoice.id), juce::String (silentChoice.name));
+    publishConfig();
+    refresh();
+}
+
+juce::String AppRouting::getMoveAwayAction() const
+{
+    if (! canMoveOriginalAway() || getEffectiveMethod() != Method::ProcessCapture || silentTarget.id.empty())
+        return {};
+    const auto target = nameOf (silentTarget);
+    if (! moveAway)
+        return "Move automatically to " + target;
+    for (const auto& a : apps)
+        if (a.doublingBlocked && (a.moveAway == MoveAway::LeftToUser || a.moveAway == MoveAway::Failed))
+            return "Move again to " + target;
+    return {};
+}
+
+juce::String AppRouting::describeMoveAway() const
+{
+    if (! canMoveOriginalAway())
+    {
+       #if JUCE_WINDOWS
+        if (router != nullptr && ! router->canMoveAppOutput())
+            return "Needs Windows 10 version 1803 or later.";
+        return "Needs per-app capture (Windows 10 version 2004 or later).";
+       #else
+        return "Windows only: on this system apps are routed to the strips' own devices instead.";
+       #endif
+    }
+    if (getEffectiveMethod() != Method::ProcessCapture)
+        return "Acts with process capture only (Per-app routing above).";
+
+    const juce::String output (outputEndpoint.name.empty() ? juce::String ("the device Flubsound plays to") : juce::String (outputEndpoint.name));
+    const auto target = silentTarget.id.empty() ? juce::String() : nameOf (silentTarget);
+    if (! moveAway)
+        return "Off (default). A captured app that plays to " + output + " is held back (it would be heard twice). On: Flubsound moves its own sound to "
+               + (target.isNotEmpty() ? target : juce::String ("a silent device")) + " and captures it; the app's own device comes back when you "
+               + "unassign it, switch this off or quit Flubsound.";
+
+    int moved = 0;
+    juce::StringArray notes;
+    std::set<juce::String> seenExecutables;
+    for (const auto& a : apps)
+    {
+        if (! seenExecutables.insert (normaliseExecutable (a.executable)).second)
+            continue;
+        moved += a.moveAway == MoveAway::Moved ? 1 : 0;
+        if (a.moveNote.isNotEmpty())
+            notes.addIfNotAlreadyThere (a.moveNote);
+    }
+    juce::String text ("On. ");
+    if (target.isEmpty())
+        text << "Paused: " << silentTargetReason;
+    else if (moved > 0)
+        text << moved << (moved == 1 ? " app plays its own sound to " : " apps play their own sound to ") << target
+             << " while Flubsound captures " << (moved == 1 ? "it." : "them.");
+    else
+        text << "Apps that play to " << output << " are moved to " << target << " when Flubsound captures them.";
+    if (! notes.isEmpty())
+        text << " " << notes.joinIntoString (" ");
+    return text;
+}
+
+void AppRouting::restoreSilentMoves (const std::vector<flub::platform::AudioSessionInfo>& sessions)
+{
+    for (auto it = silentMoves.begin(); it != silentMoves.end();)
+    {
+        const auto& exe = it->first;
+        const auto& m = it->second;
+        // The recorded process when it still runs (same start time), else any process of the executable.
+        uint32_t pid = 0;
+        for (const auto& s : sessions)
+        {
+            if (normaliseExecutable (juce::String (s.executableName)) != exe)
+                continue;
+            const bool recorded = s.processId == m.processId
+                                  && (m.processStartTime == 0 || s.processStartTime == 0 || m.processStartTime == s.processStartTime);
+            if (pid == 0 || recorded)
+                pid = s.processId;
+            if (recorded)
+                break;
+        }
+        std::string error;
+        bool done = false;
+        if (pid != 0)
+        {
+            done = router->setAppEndpoint (pid, m.previous.toStdString(), error);
+            if (! done && m.previous.isNotEmpty()) // its own earlier device is gone: the system default then
+                done = router->setAppEndpoint (pid, {}, error);
+        }
+        it = done ? silentMoves.erase (it) : std::next (it);
+    }
 }
 
 juce::StringArray AppRouting::getDoublingBlockedApps() const
@@ -335,12 +608,31 @@ juce::String AppRouting::describeDoubling() const
                 + "a device you do not listen to (Windows: Settings > System > Sound > Volume mixer, or App volume and device preferences). "
                 + "The capture still reaches it there.";
     if (spareEndpoints.empty())
-        return text + " No other output device is active: a virtual cable (e.g. VB-CABLE) can serve as one.";
+    {
+        text += " No other output device is active: a virtual cable (e.g. VB-CABLE) can serve as one.";
+    }
+    else
+    {
+        juce::StringArray spare;
+        for (const auto& e : spareEndpoints)
+            spare.add (juce::String (e.name));
+        text += " Devices available: " + spare.joinIntoString (", ") + ".";
+    }
 
-    juce::StringArray spare;
-    for (const auto& e : spareEndpoints)
-        spare.add (juce::String (e.name));
-    return text + " Devices available: " + spare.joinIntoString (", ") + ".";
+    // R4.5: Flubsound can make the move itself, or says why it did not.
+    if (! canMoveOriginalAway())
+        return text;
+    if (! moveAway)
+        return text
+               + (silentTarget.id.empty() ? " Flubsound can also do this for you (Settings > Routing), but " + silentTargetReason
+                                          : " Or let Flubsound do it: \"" + getMoveAwayAction() + "\" turns on \"Move the app's own sound away "
+                                                + "automatically\" (Settings > Routing), and the app's own device comes back when you unassign it, "
+                                                + "switch that off or quit Flubsound.");
+    juce::StringArray notes;
+    for (const auto& a : apps)
+        if (a.doublingBlocked && a.moveNote.isNotEmpty())
+            notes.addIfNotAlreadyThere (a.moveNote);
+    return notes.isEmpty() ? text : text + " " + notes.joinIntoString (" ");
 }
 
 void AppRouting::setOutputDeviceSource (std::function<juce::String()> source)
@@ -361,11 +653,25 @@ juce::String AppRouting::currentOutputDevice() const
     return name.isNotEmpty() ? name : device->getName();
 }
 
+void AppRouting::setInputDeviceSource (std::function<juce::String()> source)
+{
+    inputDeviceSource = std::move (source);
+    publishConfig();
+}
+
+juce::String AppRouting::currentInputDevice() const
+{
+    if (inputDeviceSource != nullptr)
+        return inputDeviceSource();
+    auto& manager = host.getDeviceManager();
+    return manager.getCurrentAudioDevice() != nullptr ? manager.getAudioDeviceSetup().inputDeviceName : juce::String();
+}
+
 int AppRouting::getProcessedAppCount() const
 {
     std::set<uint32_t> processed;
     for (const auto& a : apps)
-        if (a.routed || a.captureId >= 0)
+        if (a.routed || a.captureId >= 0 || a.movePending) // (R4.5: captured at the next pass, 250 ms later)
             processed.insert (a.processId);
     return static_cast<int> (processed.size());
 }
@@ -479,6 +785,10 @@ void AppRouting::publishConfig()
     c.outputDevice = currentOutputDevice();
     c.frozen = tournament;
     c.deviceLinksInputs = host.isNativeNodeDevice();
+    c.moveAway = moveAway && canMoveOriginalAway();
+    c.silentChoice = silentChoice;
+    c.inputDevice = currentInputDevice();
+    c.moveRetry = moveRetry;
     for (const auto& strip : host.getStripLayout())
     {
         const juce::String name (strip.name);
@@ -491,7 +801,8 @@ void AppRouting::publishConfig()
     // discarded (handleAsyncUpdate), so make sure a fresh one follows.
     const bool changed = c.method != config.method || ! sameRoutes (c.routes, config.routes) || c.stripNames != config.stripNames
                          || c.stripEndpoints != config.stripEndpoints || c.outputDevice != config.outputDevice || c.frozen != config.frozen
-                         || c.deviceLinksInputs != config.deviceLinksInputs;
+                         || c.deviceLinksInputs != config.deviceLinksInputs || c.moveAway != config.moveAway
+                         || c.silentChoice != config.silentChoice || c.inputDevice != config.inputDevice || c.moveRetry != config.moveRetry;
     if (changed)
         ++configGeneration;
     c.generation = configGeneration;
@@ -508,17 +819,24 @@ bool AppRouting::syncJournal (const RouteJournal::Entry* pendingMove)
 {
     std::vector<RouteJournal::Entry> entries;
     std::set<juce::String> covered;
+    const bool pendingAway = pendingMove != nullptr && pendingMove->movedAway;
     for (const auto& [pid, routed] : routedEndpoints)
     {
-        if (pendingMove != nullptr && pendingMove->processId == pid)
+        if (pendingMove != nullptr && ! pendingAway && pendingMove->processId == pid)
             continue; // re-pointed: the pending entry replaces it
-        entries.push_back ({ pid, routed.processStartTime, routed.executable, routed.executablePath, routed.endpoint, routed.previousEndpoint, false });
+        entries.push_back ({ pid, routed.processStartTime, routed.executable, routed.executablePath, routed.endpoint, routed.previousEndpoint, false, false });
         covered.insert (routed.executable);
     }
+    // R4.5: the apps' own outputs moved away, one entry per executable.
+    for (const auto& [exe, moved] : silentMoves)
+        if (! (pendingAway && pendingMove->executable == exe)) // re-pointed: the pending entry replaces it
+            entries.push_back ({ moved.processId, moved.processStartTime, exe, moved.executablePath, moved.endpoint, moved.previous,
+                                 moved.unconfirmed, true });
     if (pendingMove != nullptr)
     {
         entries.push_back (*pendingMove);
-        covered.insert (pendingMove->executable);
+        if (! pendingAway)
+            covered.insert (pendingMove->executable);
     }
     // Moves of an earlier run whose processes have not been seen yet keep
     // their process identity; other executables whose move is not undone
@@ -528,7 +846,7 @@ bool AppRouting::syncJournal (const RouteJournal::Entry* pendingMove)
             entries.push_back (recovered);
     for (const auto& exe : routedExecutables)
         if (covered.count (exe) == 0)
-            entries.push_back ({ 0, 0, exe, {}, {}, {}, false });
+            entries.push_back ({ 0, 0, exe, {}, {}, {}, false, false });
     return journal.write (entries);
 }
 
@@ -573,12 +891,14 @@ void AppRouting::run()
         // Also runs while endpoints we moved are outstanding (or apps that
         // exited while routed may come back), so that routes are undone when
         // the method changes or apps are un-mapped.
-        if (c.active || ! routedEndpoints.empty() || ! routedExecutables.empty())
+        int nextPassMs = kRefreshIntervalMs;
+        if (c.active || ! routedEndpoints.empty() || ! routedExecutables.empty() || ! silentMoves.empty())
         {
             const auto sessions = router->enumerateSessions();
             std::vector<AppState> states;
             std::set<uint32_t> seen;
             std::set<juce::String> restored; // executables moved back to the default in this pass
+            std::set<std::string> busy;      // R4.5: endpoints an unassigned app plays to right now
 
             // Doubling guard: the endpoint Flubsound plays to (only captures can double).
             OutputEndpoint output;
@@ -587,7 +907,6 @@ void AppRouting::run()
                 output.id = router->findOutputEndpointId (c.outputDevice.toStdString());
                 output.name = c.outputDevice.toStdString();
             }
-            bool anyDoubled = false;
 
             for (const auto& session : sessions)
             {
@@ -612,7 +931,11 @@ void AppRouting::run()
                     break;
                 }
 
-                anyDoubled = anyDoubled || (a.playsToOutput && a.strip >= 0);
+                if (a.strip < 0 && session.isActive && silentMoves.count (normaliseExecutable (a.executable)) == 0)
+                {
+                    busy.insert (session.currentEndpointId);
+                    busy.insert (session.activeEndpointIds.begin(), session.activeEndpointIds.end());
+                }
 
                 // Several sessions can belong to one process: act once per process.
                 if (seen.insert (a.processId).second)
@@ -652,7 +975,7 @@ void AppRouting::run()
                             // earlier recorded endpoint before Flubsound.)
                             const auto previous = existing != routedEndpoints.end() ? existing->second.previousEndpoint : a.endpointId;
                             const RouteJournal::Entry pending { a.processId, session.processStartTime, executable,
-                                                                juce::String (session.executablePath), target, previous, true };
+                                                                juce::String (session.executablePath), target, previous, true, false };
                             std::string error;
                             if (! syncJournal (&pending))
                             {
@@ -712,14 +1035,37 @@ void AppRouting::run()
             // in routedExecutables (the next process is moved back).
             if (! sessions.empty())
                 recoveredMoves.clear();
+
+            // ---- R4.5: move a captured app's own output away -------------------
+            const bool canMoveAway = c.method == Method::ProcessCapture && router->canMoveAppOutput();
+            std::vector<OutputEndpoint> endpoints;
+            SilentTarget silent;
+            if (canMoveAway)
+            {
+                endpoints = router->listOutputEndpoints();
+                // An automatic choice stays where the moves already are,
+                // unless the user just changed the choice (a fresh pick then).
+                const bool choiceChanged = c.silentChoice != silentChoiceSeen;
+                silentChoiceSeen = c.silentChoice;
+                const std::string current = silentMoves.empty() || choiceChanged ? std::string()
+                                                                                 : silentMoves.begin()->second.endpoint.toStdString();
+                silent = chooseSilentEndpoint (endpoints, output.id, c.inputDevice, c.silentChoice, busy, current);
+            }
+            if (! applySilentMoves (c, sessions, states, output, silent, endpoints, canMoveAway).empty())
+                nextPassMs = kVerifyMoveDelayMs; // moved or put back: where do the apps play now?
+
+            bool anyDoubled = false;
+            for (const auto& a : states)
+                anyDoubled = anyDoubled || (a.playsToOutput && a.strip >= 0);
+
             syncJournal (nullptr); // retried every pass until it is written
 
             // Where a held-back app could play instead (the guard's fix).
             std::vector<OutputEndpoint> spare;
             if (anyDoubled)
-                for (auto& e : router->listOutputEndpoints())
+                for (auto& e : canMoveAway ? endpoints : router->listOutputEndpoints())
                     if (e.id != output.id && ! juce::String (e.name).containsIgnoreCase ("Flubsound"))
-                        spare.push_back (std::move (e));
+                        spare.push_back (e);
 
             {
                 const juce::ScopedLock sl (lock);
@@ -728,6 +1074,9 @@ void AppRouting::run()
                 resultGeneration = c.generation;
                 resultOutputEndpoint = std::move (output);
                 resultSpareEndpoints = std::move (spare);
+                resultSilentTarget = std::move (silent);
+                resultKnownEndpoints = std::move (endpoints);
+                resultHasSilentTarget = canMoveAway;
                 resultPending = true;
             }
             triggerAsyncUpdate();
@@ -752,8 +1101,248 @@ void AppRouting::run()
             inputsLinked = linked;
         }
 
-        wait (kRefreshIntervalMs); // refresh() / config changes wake it early
+        wait (nextPassMs); // refresh() / config changes wake it early
     }
+}
+
+std::set<juce::String> AppRouting::applySilentMoves (const WorkerConfig& c, const std::vector<flub::platform::AudioSessionInfo>& sessions,
+                                                     std::vector<AppState>& states, const OutputEndpoint& output, const SilentTarget& silent,
+                                                     const std::vector<OutputEndpoint>& endpoints, bool canMoveAway)
+{
+    if (c.moveRetry != silentRetrySeen)
+    {
+        silentRetrySeen = c.moveRetry; // the one-click fix: move again what the user took back, retry failures
+        silentLeftToUser.clear();
+        silentFailures.clear();
+    }
+    if (c.generation != silentGenerationSeen)
+    {
+        silentGenerationSeen = c.generation; // a deliberate change retries failed moves
+        silentFailures.clear();
+    }
+    if (! c.moveAway)
+        silentLeftToUser.clear(); // switched on again later: a fresh start
+
+    // Per executable: Windows keeps the device per executable, and a browser
+    // plays through a child process (the session's process is the one moved).
+    struct View
+    {
+        std::vector<size_t> rows; // indices into sessions / states (parallel)
+        juce::String name;        // display name
+        bool mapped = false, playsToOutput = false;
+    };
+    std::map<juce::String, View> views;
+    for (size_t i = 0; i < states.size() && i < sessions.size(); ++i)
+    {
+        const auto exe = normaliseExecutable (states[i].executable);
+        if (exe.isEmpty())
+            continue;
+        auto& v = views[exe];
+        v.rows.push_back (i);
+        if (v.name.isEmpty())
+            v.name = states[i].displayName.isNotEmpty() ? states[i].displayName : states[i].executable;
+        v.mapped = v.mapped || states[i].strip >= 0;
+        v.playsToOutput = v.playsToOutput || (states[i].strip >= 0 && states[i].playsToOutput);
+    }
+
+    const juce::String outputName (output.name.empty() ? juce::String ("the device Flubsound plays to") : juce::String (output.name));
+    const auto endpointName = [&endpoints] (const juce::String& id)
+    {
+        for (const auto& e : endpoints)
+            if (sameEndpoint (juce::String (e.id), id))
+                return nameOf (e);
+        return id;
+    };
+
+    struct Outcome
+    {
+        MoveAway state = MoveAway::None;
+        juce::String text;  // the note, or the error (Failed)
+        juce::String where; // the silent device's name (Moved / StillPlays)
+    };
+    std::map<juce::String, Outcome> outcomes;
+    std::set<juce::String> movedNow, putBack;
+
+    for (auto& entry : views)
+    {
+        const auto& exe = entry.first; // (not a structured binding: older Apple Clang cannot capture those in lambdas)
+        const auto& view = entry.second;
+
+        // The process to act through: the recorded one while it runs, else the first.
+        auto sm = silentMoves.find (exe);
+        const auto* via = &sessions[view.rows.front()];
+        if (sm != silentMoves.end())
+            for (const auto row : view.rows)
+                if (sessions[row].processId == sm->second.processId)
+                    via = &sessions[row];
+        const auto pid = via->processId;
+
+        // Endpoint routing took the app over: its own restore applies.
+        if (std::any_of (view.rows.begin(), view.rows.end(), [&] (size_t row) { return routedEndpoints.count (sessions[row].processId) != 0; }))
+        {
+            if (sm != silentMoves.end())
+                silentMoves.erase (sm);
+            continue;
+        }
+
+        // A move stays while the app is captured with the option on, also
+        // while the output cannot be named (an ASIO driver: no new moves then,
+        // as nothing is known to play to it).
+        const bool wanted = canMoveAway && c.moveAway && view.mapped;
+
+        // Moves the app's own output to the silent device, journaled first.
+        const auto moveTo = [&] (const juce::String& previous)
+        {
+            auto& failure = silentFailures[exe];
+            if (failure.attempts >= kMaxMoveAttempts)
+            {
+                outcomes[exe] = { MoveAway::Failed, failure.error, {} };
+                return;
+            }
+            const RouteJournal::Entry pending { pid, via->processStartTime, exe, juce::String (via->executablePath),
+                                                juce::String (silent.endpoint.id), previous, true, true };
+            std::string error;
+            juce::String problem;
+            if (! syncJournal (&pending))
+                problem = "Flubsound could not write its route journal (" + journal.getFile().getFullPathName()
+                          + "), so it does not move this app's own sound: after a crash it could stay on " + nameOf (silent.endpoint) + ".";
+            else if (! router->setAppEndpoint (pid, silent.endpoint.id, error))
+                problem = "Flubsound could not move its own sound to " + nameOf (silent.endpoint) + ": " + juce::String (error);
+            if (problem.isNotEmpty())
+            {
+                ++failure.attempts;
+                failure.error = problem;
+                outcomes[exe] = { MoveAway::Failed, problem, {} };
+                return;
+            }
+            silentFailures.erase (exe);
+            silentMoves[exe] = { juce::String (silent.endpoint.id), previous, pid, via->processStartTime, juce::String (via->executablePath), false };
+            movedNow.insert (exe);
+            outcomes[exe] = { MoveAway::Moved, {}, nameOf (silent.endpoint) };
+        };
+
+        if (sm != silentMoves.end())
+        {
+            auto& m = sm->second;
+            m.processId = pid;
+            m.processStartTime = via->processStartTime;
+            if (! via->executablePath.empty())
+                m.executablePath = juce::String (via->executablePath);
+
+            if (! wanted)
+            {
+                // Unassigned, the option off or capture no longer the method:
+                // its own earlier device comes back (the system default when
+                // that device is gone). A failure is retried by the next pass.
+                std::string error;
+                bool done = router->setAppEndpoint (pid, m.previous.toStdString(), error);
+                if (! done && m.previous.isNotEmpty())
+                    done = router->setAppEndpoint (pid, {}, error);
+                if (done)
+                {
+                    silentMoves.erase (sm);
+                    putBack.insert (exe);
+                }
+                continue;
+            }
+
+            // Did the user change the app's device since the move?
+            std::string persisted, readError;
+            const bool known = router->getAppEndpoint (pid, persisted, readError);
+            if (known && ! sameEndpoint (juce::String (persisted), m.endpoint))
+            {
+                const bool userChange = ! m.unconfirmed; // else: an earlier run's move that never happened
+                silentMoves.erase (sm);
+                if (userChange)
+                {
+                    silentLeftToUser.insert (exe);
+                    outcomes[exe] = { MoveAway::LeftToUser,
+                                      view.name + "'s output was changed after Flubsound moved it, so Flubsound leaves it there.", {} };
+                    continue;
+                }
+                // Treated as never moved: below.
+            }
+            else
+            {
+                if (known)
+                    m.unconfirmed = false;
+                if (silent.endpoint.id.empty())
+                {
+                    // Paused: Windows plays the app on the default meanwhile,
+                    // and returns it to the device when that comes back.
+                    outcomes[exe] = { MoveAway::NoTarget, silent.reason, {} };
+                    continue;
+                }
+                if (! sameEndpoint (m.endpoint, juce::String (silent.endpoint.id)))
+                {
+                    moveTo (m.previous); // re-pointed: its own earlier device stays the one to put back
+                    continue;
+                }
+                const auto where = endpointName (m.endpoint);
+                if (view.playsToOutput)
+                    outcomes[exe] = { MoveAway::StillPlays,
+                                      view.name + " still plays to " + outputName + " after Flubsound moved its own sound to " + where
+                                          + ": the app picks that device itself. Set its output to Default inside the app, or restart its playback.",
+                                      where };
+                else
+                    outcomes[exe] = { MoveAway::Moved, {}, where };
+                continue;
+            }
+        }
+
+        // Not moved by Flubsound: only an app that plays to the output is
+        // moved. Elsewhere - e.g. a device the user set for it - it is left
+        // alone and nothing is recorded.
+        if (! wanted || ! view.playsToOutput)
+            continue;
+        if (silentLeftToUser.count (exe) != 0)
+        {
+            outcomes[exe] = { MoveAway::LeftToUser, view.name + "'s output was changed after Flubsound moved it, so Flubsound leaves it there.", {} };
+            continue;
+        }
+        if (silent.endpoint.id.empty())
+        {
+            outcomes[exe] = { MoveAway::NoTarget, silent.reason, {} };
+            continue;
+        }
+        // Its own device, put back later: unknown counts as the system default.
+        std::string previous, readError;
+        if (! router->getAppEndpoint (pid, previous, readError))
+            previous.clear();
+        if (sameEndpoint (juce::String (previous), juce::String (silent.endpoint.id)))
+        {
+            // Its device already is the silent one, yet it plays to the output.
+            outcomes[exe] = { MoveAway::StillPlays,
+                              view.name + " still plays to " + outputName + " although its output is set to " + nameOf (silent.endpoint)
+                                  + ": the app picks that device itself. Set its output to Default inside the app, or restart its playback.",
+                              nameOf (silent.endpoint) };
+            continue;
+        }
+        moveTo (juce::String (previous));
+    }
+
+    for (auto& a : states)
+    {
+        if (a.strip < 0)
+            continue;
+        const auto exe = normaliseExecutable (a.executable);
+        // Moved now: whether its streams follow is known at the next pass, in
+        // 250 ms (a stream opened on the device itself stays until the app
+        // opens a new one, as measured on Windows 11). Until then neither
+        // captured (it could be heard twice) nor shown as held back.
+        a.movePending = movedNow.count (exe) != 0;
+        if (const auto o = outcomes.find (exe); o != outcomes.end())
+        {
+            a.moveAway = o->second.state;
+            a.movedTo = o->second.where;
+            if (o->second.state == MoveAway::Failed)
+                a.error = o->second.text;
+            else
+                a.moveNote = o->second.text;
+        }
+    }
+    putBack.insert (movedNow.begin(), movedNow.end());
+    return putBack;
 }
 
 // =============================================================================
@@ -766,6 +1355,9 @@ void AppRouting::handleAsyncUpdate()
     uint64_t generation = 0;
     OutputEndpoint output;
     std::vector<OutputEndpoint> spare;
+    SilentTarget silent;
+    std::vector<OutputEndpoint> endpoints;
+    bool hasSilentTarget = false;
     {
         const juce::ScopedLock sl (lock);
         if (! resultPending)
@@ -775,6 +1367,9 @@ void AppRouting::handleAsyncUpdate()
         generation = resultGeneration;
         output = std::move (resultOutputEndpoint);
         spare = std::move (resultSpareEndpoints);
+        silent = std::move (resultSilentTarget);
+        endpoints = std::move (resultKnownEndpoints);
+        hasSilentTarget = resultHasSilentTarget;
         resultPending = false;
     }
 
@@ -795,6 +1390,10 @@ void AppRouting::handleAsyncUpdate()
 
     outputEndpoint = std::move (output);
     spareEndpoints = std::move (spare);
+    silentTarget = hasSilentTarget ? silent.endpoint : OutputEndpoint();
+    silentTargetReason = hasSilentTarget ? silent.reason : juce::String();
+    if (hasSilentTarget)
+        knownEndpoints = std::move (endpoints); // kept while no such pass runs (Settings' list)
     applyCaptures (next);
 
     const bool changed = next.size() != apps.size() || ! std::equal (next.begin(), next.end(), apps.begin(), sameState);
@@ -816,6 +1415,14 @@ void AppRouting::applyCaptures (std::vector<AppState>& states)
             continue;
 
         auto existing = captures.find (a.processId);
+        // R4.5: its own output was moved in this pass. The next pass, in
+        // 250 ms, shows whether it plays elsewhere now: until then a running
+        // capture (a re-pointed move) stays, and none starts.
+        if (captureMethod && a.strip >= 0 && a.movePending)
+        {
+            a.doublingBlocked = false;
+            continue;
+        }
         // Doubling guard: the app plays to Flubsound's own output device, so
         // a capture would be heard on top of the original.
         a.doublingBlocked = captureMethod && a.strip >= 0 && a.playsToOutput;

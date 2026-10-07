@@ -49,12 +49,13 @@ Flubsound processes other apps' audio and plays it on your headset.
   1. Settings > Audio: pick your headset as the OUTPUT device.
   2. Feed it audio, one of:
      Windows 10 (2004+) / 11: per-app capture is automatic. Open the routing
-       panel and put your game / music / chat apps on a strip. Mute or turn
-       down those apps' direct output in Windows (Settings > Sound > Volume
-       mixer) so you do not hear them twice.
+       panel and put your game / music / chat apps on a strip. Set those
+       apps' own output to a device you do not listen to (Windows Settings >
+       Sound > Volume mixer), or switch on Settings > Routing > "Move the
+       app's own sound away automatically", so you do not hear them twice.
      Any OS: install a virtual cable (VB-CABLE on Windows, BlackHole on
        macOS), make it the system output, and pick its "Output" side as the
-       input device in Settings > Audio. Settings > Processing > "Input feeds
+       input device in Settings > Audio. Settings > Routing > "Input feeds
        strip" chooses which strip gets it (Game by default).
      Linux: the flubsound_game / _music / _chat / _system sinks (see
        platform/linux in the repository) route apps per strip.

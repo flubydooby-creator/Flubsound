@@ -578,37 +578,7 @@ public:
             refresh();
         };
 
-        inputModeBox.addItem ("Automatic (virtual cables / loopback only)", 1);
-        inputModeBox.addItem ("Always process the device input", 2);
-        inputModeBox.addItem ("Off", 3);
-        inputModeBox.setTitle ("Device input processing");
-        inputModeBox.onChange = [this]
-        {
-            using Mode = AppSettings::DeviceInputMode;
-            const int id = inputModeBox.getSelectedId();
-            controller.setDeviceInputMode (id == 2 ? Mode::On : (id == 3 ? Mode::Off : Mode::Automatic));
-        };
-
-        for (int s = 0; s < controller.getNumStrips(); ++s)
-            inputStripBox.addItem (controller.getStripName (s), s + 1);
-        inputStripBox.setTitle ("Strip fed by the device input");
-        inputStripBox.onChange = [this] { controller.setDeviceInputStrip (inputStripBox.getSelectedId() - 1); };
-
-        auto& routing = controller.getRouting();
-        routingBox.addItem ("Automatic", 1);
-        routingBox.addItem ("Endpoint routing", 2);
-        routingBox.addItem ("Process capture", 3);
-        routingBox.addItem ("Off", 4);
-        routingBox.setItemEnabled (2, routing.isEndpointRoutingSupported());
-        routingBox.setItemEnabled (3, routing.isCaptureSupported());
-        routingBox.setTitle ("Per-app routing method");
-        routingBox.onChange = [this]
-        {
-            using M = AppRouting::Method;
-            static constexpr M methods[] = { M::Automatic, M::EndpointRouting, M::ProcessCapture, M::Disabled };
-            const int id = juce::jlimit (1, 4, routingBox.getSelectedId());
-            controller.getRouting().setMethod (methods[id - 1]);
-        };
+        // (The device input and per-app routing moved to the Routing page.)
 
         // Protection (docs/11 E06 / E11).
         protectionBox.addItem ("Off: govern the macro amounts only", 1);
@@ -686,7 +656,7 @@ public:
                 onPaletteChanged (paletteBox.getSelectedId() == 2 ? MeterPalette::ColourBlindSafe : MeterPalette::Standard);
         };
 
-        for (auto* box : { &latencyBox, &inputModeBox, &inputStripBox, &routingBox, &protectionBox, &paletteBox })
+        for (auto* box : { &latencyBox, &protectionBox, &paletteBox })
             addAndMakeVisible (*box);
         addAndMakeVisible (autoReduceToggle);
         addAndMakeVisible (preampToggle);
@@ -710,14 +680,6 @@ public:
                   520);
         form.row ("Automatic change", restoreButton, describeReduction(), 100);
         reductionRow = form.rows.size() - 1;
-        form.section ("Sources");
-        form.row ("Device input", inputModeBox, "Automatic only processes inputs that look like a virtual cable or loopback device, never a microphone.",
-                  330);
-        form.row ("Input feeds strip", inputStripBox, {}, 180);
-        form.row ("Per-app routing", routingBox,
-                  routing.canEnumerateApps() ? juce::String ("Unsupported methods are greyed out.")
-                                             : juce::String ("Per-app routing is not available on this system."),
-                  220);
         form.section ("Protection");
         form.row ("Protection strength", protectionBox,
                   "The safety governor always scales the Boost and macro amounts back when the limiter works too hard or distortion "
@@ -768,17 +730,6 @@ public:
             resized();
             repaint();
         }
-
-        using Mode = AppSettings::DeviceInputMode;
-        const auto mode = controller.getSettings().getDeviceInputMode();
-        inputModeBox.setSelectedId (mode == Mode::On ? 2 : (mode == Mode::Off ? 3 : 1), juce::dontSendNotification);
-        const int strip = controller.findStrip (controller.getSettings().getDeviceInputStripName());
-        inputStripBox.setSelectedId (strip >= 0 ? strip + 1 : 1, juce::dontSendNotification);
-
-        using M = AppRouting::Method;
-        const auto method = controller.getRouting().getMethod();
-        routingBox.setSelectedId (method == M::EndpointRouting ? 2 : (method == M::ProcessCapture ? 3 : (method == M::Disabled ? 4 : 1)),
-                                  juce::dontSendNotification);
 
         protectionBox.setSelectedId (static_cast<int> (controller.getProtectionStrength()) + 1, juce::dontSendNotification);
         duckToggle.setToggleState (controller.getChatDuck(), juce::dontSendNotification);
@@ -942,7 +893,7 @@ private:
 
     EngineController& controller;
     std::function<void (MeterPalette)> onPaletteChanged;
-    juce::ComboBox latencyBox, inputModeBox, inputStripBox, routingBox, protectionBox, paletteBox;
+    juce::ComboBox latencyBox, protectionBox, paletteBox;
     juce::ToggleButton autoReduceToggle { "Reduce processing load automatically when the CPU overloads" };
     juce::ToggleButton preampToggle { "Automatic preamp" }, preampHotToggle { "... also on hot programme" };
     juce::ToggleButton smartToggle { "Smart macros" }; // docs/11 E34
@@ -965,6 +916,313 @@ private:
     juce::String latencyText, captureText;
     juce::TextLayout captureLayout; // one wrapped paragraph per capture stream
     juce::Rectangle<int> latencyArea, latencyTitle, captureArea, captureTitle;
+};
+
+// =============================================================================
+// Routing page
+// =============================================================================
+/** Per-app routing (the method; docs/11 E47 / R4.5: "Move the app's own
+    sound away automatically" and the silent device) and the device input
+    (mode, "Input feeds strip" and the multi-strip input map, R4.6 / docs/11
+    E48). The page sets its own height and scrolls in the dialog. */
+class SettingsDialog::RoutingPage : public juce::Component
+{
+public:
+    explicit RoutingPage (EngineController& c)
+        : controller (c)
+    {
+        auto& routing = controller.getRouting();
+        routingBox.addItem ("Automatic", 1);
+        routingBox.addItem ("Endpoint routing", 2);
+        routingBox.addItem ("Process capture", 3);
+        routingBox.addItem ("Off", 4);
+        routingBox.setItemEnabled (2, routing.isEndpointRoutingSupported());
+        routingBox.setItemEnabled (3, routing.isCaptureSupported());
+        routingBox.setTitle ("Per-app routing method");
+        routingBox.onChange = [this]
+        {
+            using M = AppRouting::Method;
+            static constexpr M methods[] = { M::Automatic, M::EndpointRouting, M::ProcessCapture, M::Disabled };
+            const int id = juce::jlimit (1, 4, routingBox.getSelectedId());
+            controller.getRouting().setMethod (methods[id - 1]);
+            refresh();
+        };
+
+        // docs/11 E47 (R4.5): the doubling guard's automatic fix.
+        Style::set (moveAwayToggle, "switch");
+        moveAwayToggle.setTitle ("Move the app's own sound away automatically");
+        moveAwayToggle.setTooltip ("Windows: when an app Flubsound captures also plays straight to your headset, move that app's own "
+                                   "output to the silent device below, so you hear only Flubsound's processed copy. Its own device "
+                                   "comes back when you unassign it, switch this off or quit Flubsound.");
+        moveAwayToggle.onClick = [this]
+        {
+            controller.getRouting().setMoveOriginalAway (moveAwayToggle.getToggleState());
+            refresh();
+        };
+        silentBox.setTitle ("Silent device");
+        silentBox.onChange = [this]
+        {
+            if (refreshing)
+                return;
+            const int index = silentBox.getSelectedId() - 2;
+            controller.getRouting().setSilentEndpointChoice (index >= 0 && index < static_cast<int> (silentItems.size())
+                                                                 ? silentItems[static_cast<size_t> (index)]
+                                                                 : AppRouting::OutputEndpoint());
+            refresh();
+        };
+
+        inputModeBox.addItem ("Automatic (virtual cables / loopback only)", 1);
+        inputModeBox.addItem ("Always process the device input", 2);
+        inputModeBox.addItem ("Off", 3);
+        inputModeBox.setTitle ("Device input processing");
+        inputModeBox.onChange = [this]
+        {
+            using Mode = AppSettings::DeviceInputMode;
+            const int id = inputModeBox.getSelectedId();
+            controller.setDeviceInputMode (id == 2 ? Mode::On : (id == 3 ? Mode::Off : Mode::Automatic));
+        };
+        for (int s = 0; s < controller.getNumStrips(); ++s)
+            inputStripBox.addItem (controller.getStripName (s), s + 1);
+        inputStripBox.setTitle ("Strip fed by the device input");
+        inputStripBox.onChange = [this] { controller.setDeviceInputStrip (inputStripBox.getSelectedId() - 1); };
+
+        // R4.6 / docs/11 E48: one first-channel choice per strip (the deviceInput.map setting).
+        for (int s = 0; s < controller.getNumStrips(); ++s)
+        {
+            auto box = std::make_unique<juce::ComboBox>();
+            box->setTitle ("Input map: " + controller.getStripName (s));
+            box->onChange = [this]
+            {
+                if (! refreshing)
+                    applyMap();
+            };
+            addAndMakeVisible (*box);
+            mapBoxes.push_back (std::move (box));
+        }
+        fillButton.setTooltip ("Each strip from the next free input channel: Game 7.1 from 1, Music from 9, Chat from 11, System from 13 "
+                               "(the order of Flubsound's Linux sinks and of its PipeWire device)");
+        fillButton.onClick = [this]
+        {
+            std::vector<int> channels;
+            for (int s = 0; s < controller.getNumStrips(); ++s)
+                channels.push_back (controller.getStripChannels (s));
+            controller.setDeviceInputMapChannels (EngineController::consecutiveInputMap (channels));
+            refresh();
+        };
+        clearButton.setTooltip ("No map: the device input feeds the one strip chosen above");
+        clearButton.onClick = [this]
+        {
+            controller.setDeviceInputMapChannels (std::vector<int> (static_cast<size_t> (controller.getNumStrips()), -1));
+            refresh();
+        };
+
+        for (auto* control : std::initializer_list<juce::Component*> { &routingBox, &moveAwayToggle, &silentBox, &inputModeBox, &inputStripBox,
+                                                                      &fillButton, &clearButton })
+            addAndMakeVisible (control);
+
+        form.section ("Per-app routing");
+        form.row ("Per-app routing", routingBox,
+                  routing.canEnumerateApps() ? juce::String ("Unsupported methods are greyed out.")
+                                             : juce::String ("Per-app routing is not available on this system."),
+                  220);
+        form.row ({}, moveAwayToggle, {}, 520);
+        moveAwayRow = form.rows.size() - 1;
+        form.row ("Silent device", silentBox,
+                  "Where a captured app's own sound goes: a device you do not listen to. Automatic picks an S/PDIF / digital "
+                  "output, else an HDMI / DisplayPort output nothing else plays to; never the device Flubsound plays to, the "
+                  "system default or a virtual cable that feeds Flubsound.",
+                  330);
+        form.section ("Device input");
+        form.row ("Device input", inputModeBox, "Automatic only processes inputs that look like a virtual cable or loopback device, never a microphone.",
+                  330);
+        form.row ("Input feeds strip", inputStripBox, "Used while the input map below is empty.", 180);
+        mapForm.section ("Input map (several strips from one input)");
+        for (size_t s = 0; s < mapBoxes.size(); ++s)
+            mapForm.row (controller.getStripName (static_cast<int> (s)), *mapBoxes[s], {}, 220);
+        refresh();
+    }
+
+    void refresh()
+    {
+        const juce::ScopedValueSetter<bool> guard (refreshing, true);
+        auto& routing = controller.getRouting();
+
+        using M = AppRouting::Method;
+        const auto method = routing.getMethod();
+        routingBox.setSelectedId (method == M::EndpointRouting ? 2 : (method == M::ProcessCapture ? 3 : (method == M::Disabled ? 4 : 1)),
+                                  juce::dontSendNotification);
+
+        // The option and its silent device.
+        const bool offered = routing.canMoveOriginalAway();
+        moveAwayToggle.setToggleState (routing.getMoveOriginalAway(), juce::dontSendNotification);
+        moveAwayToggle.setEnabled (offered);
+        rebuildSilentItems();
+        silentBox.setEnabled (offered);
+        if (const auto text = routing.describeMoveAway(); text != form.rows[moveAwayRow].help)
+        {
+            form.rows[moveAwayRow].help = text;
+            resized();
+            repaint();
+        }
+
+        using Mode = AppSettings::DeviceInputMode;
+        const auto mode = controller.getSettings().getDeviceInputMode();
+        inputModeBox.setSelectedId (mode == Mode::On ? 2 : (mode == Mode::Off ? 3 : 1), juce::dontSendNotification);
+        const int strip = controller.findStrip (controller.getSettings().getDeviceInputStripName());
+        inputStripBox.setSelectedId (strip >= 0 ? strip + 1 : 1, juce::dontSendNotification);
+
+        // Input map: "Not fed", or "Inputs N - M" (a mono strip: "Input N") from every input channel of the open device (16 without one).
+        const int inputs = inputChannelCount();
+        const auto map = controller.getDeviceInputMapChannels();
+        bool anyMapped = false;
+        for (size_t s = 0; s < mapBoxes.size(); ++s)
+        {
+            auto& box = *mapBoxes[s];
+            const int first = s < map.size() ? map[s] : -1;
+            anyMapped = anyMapped || first >= 0;
+            if (box.getNumItems() != juce::jmax (inputs, first + 1) + 1)
+            {
+                box.clear (juce::dontSendNotification);
+                box.addItem ("Not fed", 1);
+                const int width = controller.getStripChannels (static_cast<int> (s));
+                for (int ch = 0; ch < juce::jmax (inputs, first + 1); ++ch)
+                    box.addItem (width > 1 ? "Inputs " + juce::String (ch + 1) + " - " + juce::String (ch + width) : "Input " + juce::String (ch + 1),
+                                 ch + 2);
+            }
+            box.setSelectedId (first >= 0 ? first + 2 : 1, juce::dontSendNotification);
+        }
+        clearButton.setEnabled (anyMapped);
+        inputStripBox.setEnabled (! anyMapped);
+        const auto text = describeMap (inputs, anyMapped);
+        if (text != mapText)
+        {
+            mapText = text;
+            resized();
+            repaint();
+        }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        form.paint (g);
+        mapForm.paint (g);
+        g.setColour (Palette::faint.brighter (0.2f));
+        g.setFont (Theme::font (11.5f));
+        g.drawFittedText (mapText, mapTextArea, juce::Justification::topLeft, 6, 1.0f);
+    }
+
+    void resized() override
+    {
+        const auto r = getLocalBounds();
+        const int formBottom = form.layout (r);
+        const int mapBottom = mapForm.layout (r.withTop (formBottom));
+        auto buttons = juce::Rectangle<int> (r.getX() + kCaptionWidth, mapBottom + 2, r.getWidth() - kCaptionWidth, kRowHeight - 4);
+        fillButton.setBounds (buttons.removeFromLeft (200));
+        buttons.removeFromLeft (8);
+        clearButton.setBounds (buttons.removeFromLeft (110));
+        const int lines = juce::jmax (1, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), mapText)
+                                                                       / juce::jmax (80.0f, static_cast<float> (r.getWidth() - kCaptionWidth)))));
+        mapTextArea = { r.getX() + kCaptionWidth, fillButton.getBottom() + 6, r.getWidth() - kCaptionWidth, (lines + 1) * 15 };
+        if (const int h = mapTextArea.getBottom() + 8; h != getHeight())
+            setSize (getWidth(), h);
+    }
+
+private:
+    int inputChannelCount() const
+    {
+        if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
+            if (const int active = device->getActiveInputChannels().countNumberOfSetBits(); active > 0)
+                return active;
+        return 16;
+    }
+
+    juce::String describeMap (int inputs, bool anyMapped) const
+    {
+        juce::String t (anyMapped ? "The map is in use: each strip reads its channels from the one chosen, and \"Input feeds strip\" is not used. "
+                                  : "Empty: the device input feeds the one strip chosen above. ");
+        t << "Use it when one input carries several strips (e.g. a 14-channel JACK / PipeWire input, or a virtual mixer's "
+             "outputs). ";
+       #if JUCE_LINUX
+        t << "On Linux Flubsound links each flubsound_<strip> sink's monitor to these inputs itself (pw-link), so no qpwgraph step "
+             "is needed; Flubsound's own PipeWire device needs no map. ";
+       #endif
+        if (auto* device = controller.getDeviceManager().getCurrentAudioDevice())
+            t << device->getName() << ": " << inputs << " input channel" << (inputs == 1 ? "" : "s") << " active.";
+        else
+            t << "No device is open: up to 16 inputs are offered.";
+        return t;
+    }
+
+    void rebuildSilentItems()
+    {
+        auto& routing = controller.getRouting();
+        const auto& known = routing.getKnownOutputEndpoints();
+        const auto chosen = routing.getSilentEndpointChoice();
+        const auto target = routing.getSilentTarget();
+
+        std::vector<AppRouting::OutputEndpoint> items = known;
+        bool chosenListed = chosen.id.empty();
+        for (const auto& e : known)
+            chosenListed = chosenListed || e.id == chosen.id;
+        if (! chosenListed)
+            items.push_back (chosen);
+
+        // "Automatic (Digital Audio (S/PDIF))": what the automatic choice picks now.
+        juce::String automatic ("Automatic");
+        if (chosen.id.empty() && ! target.id.empty())
+            automatic << " (" << juce::String (target.name) << ")";
+        else if (chosen.id.empty() && ! known.empty())
+            automatic << " (none found)";
+        if (items != silentItems || automatic != silentBox.getItemText (0))
+        {
+            silentItems = items;
+            silentBox.clear (juce::dontSendNotification);
+            silentBox.addItem (automatic, 1);
+            const auto outputId = routing.getOutputEndpoint().id;
+            for (size_t i = 0; i < silentItems.size(); ++i)
+            {
+                const auto& e = silentItems[i];
+                juce::String text (e.name.empty() ? e.id : e.name);
+                const bool isOutput = ! outputId.empty() && e.id == outputId;
+                const bool isDefault = ! known.empty() && e.id == known.front().id;
+                const bool missing = ! chosenListed && e.id == chosen.id;
+                if (isOutput)
+                    text << " (Flubsound's output)";
+                else if (isDefault)
+                    text << " (system default)";
+                else if (missing)
+                    text << " (not connected)";
+                silentBox.addItem (text, static_cast<int> (i) + 2);
+                silentBox.setItemEnabled (static_cast<int> (i) + 2, ! isOutput && ! isDefault);
+            }
+        }
+        int selected = 1;
+        for (size_t i = 0; i < silentItems.size() && ! chosen.id.empty(); ++i)
+            if (silentItems[i].id == chosen.id)
+                selected = static_cast<int> (i) + 2;
+        silentBox.setSelectedId (selected, juce::dontSendNotification);
+    }
+
+    void applyMap()
+    {
+        std::vector<int> channels;
+        for (const auto& box : mapBoxes)
+            channels.push_back (box->getSelectedId() >= 2 ? box->getSelectedId() - 2 : -1);
+        controller.setDeviceInputMapChannels (channels);
+        refresh();
+    }
+
+    EngineController& controller;
+    juce::ComboBox routingBox, silentBox, inputModeBox, inputStripBox;
+    juce::ToggleButton moveAwayToggle { "Move the app's own sound away automatically" };
+    std::vector<std::unique_ptr<juce::ComboBox>> mapBoxes; // one per strip
+    juce::TextButton fillButton { "Fill in one after another" }, clearButton { "Clear map" };
+    std::vector<AppRouting::OutputEndpoint> silentItems; // item id - 2
+    FormLayout form, mapForm;
+    size_t moveAwayRow = 0;
+    juce::String mapText;
+    juce::Rectangle<int> mapTextArea;
+    bool refreshing = false;
 };
 
 // =============================================================================
@@ -1635,7 +1893,7 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
 {
     setTitle ("Flubsound settings");
 
-    static const char* names[] = { "Audio", "Correction", "Processing", "Hearing", "Hotkeys", "General", "Diagnostics" };
+    static const char* names[] = { "Audio", "Correction", "Processing", "Routing", "Hearing", "Hotkeys", "General", "Diagnostics" };
     for (size_t i = 0; i < navButtons.size(); ++i)
     {
         auto& b = navButtons[i];
@@ -1650,14 +1908,16 @@ SettingsDialog::SettingsDialog (EngineController& c, HotkeyHooks hooks, std::fun
     audioPage = std::make_unique<AudioPage> (controller);
     correctionPage = std::make_unique<CorrectionPage> (controller);
     processingPage = std::make_unique<ProcessingPage> (controller, std::move (onPalette), palette);
+    routingPage = std::make_unique<RoutingPage> (controller); // docs/11 E47 (R4.5), E48 (R4.6)
     hearingPage = std::make_unique<HearingPage> (controller); // docs/11 E32 (c), E33
     hotkeysPage = std::make_unique<HotkeysPage> (controller, std::move (hooks));
     generalPage = std::make_unique<GeneralPage> (controller);
     diagnosticsPage = std::make_unique<DiagnosticsPage> (controller);
     audioView.setViewedComponent (audioPage.get(), false);
     processingView.setViewedComponent (processingPage.get(), false);
+    routingView.setViewedComponent (routingPage.get(), false);
     hearingView.setViewedComponent (hearingPage.get(), false);
-    for (auto* view : { &audioView, &processingView, &hearingView })
+    for (auto* view : { &audioView, &processingView, &routingView, &hearingView })
     {
         view->setScrollBarsShown (true, false);
         view->setScrollBarThickness (8);
@@ -1678,6 +1938,7 @@ SettingsDialog::~SettingsDialog()
     stopTimer();
     audioView.setViewedComponent (nullptr, false);
     processingView.setViewedComponent (nullptr, false);
+    routingView.setViewedComponent (nullptr, false);
     hearingView.setViewedComponent (nullptr, false);
 }
 
@@ -1940,12 +2201,15 @@ void SettingsDialog::showPage (Page page)
     audioView.setVisible (page == Page::Audio);
     correctionPage->setVisible (page == Page::Correction);
     processingView.setVisible (page == Page::Processing);
+    routingView.setVisible (page == Page::Routing);
     hearingView.setVisible (page == Page::Hearing);
     hotkeysPage->setVisible (page == Page::Hotkeys);
     generalPage->setVisible (page == Page::General);
     diagnosticsPage->setVisible (page == Page::Diagnostics);
     if (page == Page::Processing)
         processingPage->refresh();
+    if (page == Page::Routing)
+        routingPage->refresh();
     if (page == Page::Correction)
         correctionPage->refresh();
     if (page == Page::Hearing)
@@ -1963,6 +2227,8 @@ void SettingsDialog::timerCallback()
 {
     if (current == Page::Processing)
         processingPage->refresh();
+    if (current == Page::Routing)
+        routingPage->refresh(); // the silent device and the moves follow the routing passes
     if (current == Page::Audio)
         audioPage->refresh();
     if (current == Page::Correction)
@@ -2008,6 +2274,9 @@ void SettingsDialog::resized()
     // margin, so its content keeps the page width).
     processingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
     processingPage->setSize (pageArea.getWidth(), juce::jmax (1, processingPage->getHeight()));
+    // The Routing page too (one input-map row per strip).
+    routingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
+    routingPage->setSize (pageArea.getWidth(), juce::jmax (1, routingPage->getHeight()));
     // The Hearing page too (docs/11 E32 (c) / E33: the per-ear editor below the guard).
     hearingView.setBounds (pageArea.withTrimmedRight (-scrollbar));
     hearingPage->setSize (pageArea.getWidth(), juce::jmax (1, hearingPage->getHeight()));

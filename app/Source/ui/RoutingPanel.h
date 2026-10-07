@@ -29,7 +29,13 @@
 // would be heard twice). Its chip carries an amber "original also audible"
 // badge (two overlapping rings) and its menu the fix; while processing
 // works otherwise, an amber notice under the header names the apps and the
-// fix (set the app's output to another device, which it lists).
+// fix (set the app's output to another device, which it lists). Where
+// Flubsound can make that move itself (docs/11 E47, R4.5: Windows), the fix
+// dialog (a click on the amber notice, or on the red one carrying the same
+// text) and the chip menu offer it in one click ("Move automatically to
+// Digital Audio (S/PDIF)", or "Move again to ..."), which switches on "Move
+// the app's own sound away automatically"; a moved app's chip says "its own
+// sound moved to ...".
 //
 // Below the strips, "Auto profiles" (roadmap 2.5): one line per rule
 // ("cs2 -> Game: Competitive FPS, restores on exit") with a remove button, a
@@ -113,6 +119,13 @@ public:
     const juce::String& getNotice() const noexcept { return notice; }
     /** The amber doubling notice is shown (docs/11 E47). */
     bool isShowingDoubling() const noexcept { return doubling; }
+    /** docs/11 E47 (R4.5): the notice explains the doubling guard (amber, or
+        the red state with that text) and offers this one-click move (the fix
+        dialog's first button, also in the chip menu), e.g. "Move automatically
+        to Digital Audio (S/PDIF)"; empty when none is offered. */
+    juce::String getDoublingFixAction() const;
+    /** What that button does: AppRouting::moveOriginalsAwayNow(). */
+    void applyDoublingFixAction();
     /** Screen-reader description of a strip row (its apps and their states). */
     juce::String getStripDescription (int strip) const;
     /** The Chat row's controls (docs/11 E22); nullptr without a Chat strip. */
@@ -154,6 +167,7 @@ private:
     juce::String noticeDetail; // the red state's explanation (below its title)
     bool noAppsProcessed = false;
     bool doubling = false;     // the amber doubling notice (not while the red state shows)
+    bool doublingInNotice = false; // the notice's text is the doubling guard's (amber or red): a click opens its fix
     juce::Rectangle<int> headerArea, noticeArea;
     bool noticeCompact = false; // one-line notice (full text on hover / click) when space is short
     int selectedStrip = -1;

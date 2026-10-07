@@ -214,7 +214,8 @@ public:
     void setDeviceInputStripName (const juce::String& stripName);
     /** Optional multi-strip map "Game=0;Music=8;Chat=10;System=12" (strip name =
         first device input channel). When set it replaces the single-strip
-        routing above (e.g. Linux: one JACK / PipeWire monitor per strip). */
+        routing above (e.g. Linux: one JACK / PipeWire monitor per strip).
+        Settings > Routing edits it (EngineController::setDeviceInputMap). */
     juce::String getDeviceInputMap() const;
     void setDeviceInputMap (const juce::String& map);
 
@@ -346,6 +347,19 @@ public:
         (Linux PipeWire / PulseAudio null-sink name). */
     juce::String getStripEndpointId (const juce::String& stripName) const;
     void setStripEndpointId (const juce::String& stripName, const juce::String& endpointId);
+    /** docs/11 E47 (R4.5), Windows: "Move the app's own sound away
+        automatically" (routing.moveOriginalAway, default off): an app captured
+        while it plays to Flubsound's output device is moved to the silent
+        device below instead of being held back by the doubling guard. */
+    bool getMoveOriginalAway() const;
+    void setMoveOriginalAway (bool shouldMove);
+    /** The silent device chosen in Settings > Routing (an output endpoint id
+        as the router lists it, and its name for when it is unplugged); empty
+        = automatic (routing.silentEndpoint / routing.silentEndpointName). An
+        empty id removes both. */
+    juce::String getSilentEndpointId() const;
+    juce::String getSilentEndpointName() const;
+    void setSilentEndpoint (const juce::String& endpointId, const juce::String& name);
 
     // ---- Automatic profiles ------------------------------------------------------------
     /** Master switch for the rules below (default on; rules only exist when the

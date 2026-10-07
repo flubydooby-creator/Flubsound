@@ -57,6 +57,7 @@ public:
         };
         juce::String name, executable, error;
         State state = State::NotRunning;
+        juce::String movedTo; // R4.5: its own sound plays to this silent device (Flubsound moved it)
     };
 
     StripRow (RoutingPanel& p, int stripIndex)
@@ -428,8 +429,11 @@ private:
     {
         switch (chip.state)
         {
-            case Chip::State::Playing: return chip.name + ": playing (routed to " + name + ")";
-            case Chip::State::Idle: return chip.name + ": running, not playing";
+            case Chip::State::Playing:
+                return chip.name + ": playing (routed to " + name + ")"
+                       + (chip.movedTo.isNotEmpty() ? ", its own sound moved to " + chip.movedTo : juce::String());
+            case Chip::State::Idle:
+                return chip.name + ": running, not playing" + (chip.movedTo.isNotEmpty() ? " (its own sound moved to " + chip.movedTo + ")" : juce::String());
             case Chip::State::NotRunning: return chip.name + ": not running (routed to " + name + " when it starts)";
             case Chip::State::Doubled:
                 return chip.name + ": original also audible (plays straight to the output device, so it is not captured; click for the fix)";
@@ -916,11 +920,13 @@ void RoutingPanel::refreshRouting()
             // Every running instance counts: an error wins, then the doubling
             // guard (docs/11 E47), then playing, then idle.
             using State = StripRow::Chip::State;
-            StripRow::Chip chip { displayNameOf (route.executable), route.executable, {}, State::NotRunning };
+            StripRow::Chip chip { displayNameOf (route.executable), route.executable, {}, State::NotRunning, {} };
             for (const auto& app : apps)
             {
                 if (! AppRouting::executablesMatch (app.executable, route.executable) || chip.state == State::Error)
                     continue;
+                if (app.moveAway == AppRouting::MoveAway::Moved)
+                    chip.movedTo = app.movedTo;
                 if (app.error.isNotEmpty())
                 {
                     chip.state = State::Error;
@@ -969,6 +975,9 @@ void RoutingPanel::refreshRouting()
     else
         noticeDetail = "None of the assigned applications is running. Each one is routed when it starts.";
     notice = noAppsProcessed ? "No apps are being processed. " + noticeDetail : (doubling ? "Original also audible. " + noticeDetail : reason);
+    // The notice explains the doubling guard (amber, or the red state's text):
+    // a click opens the fix, with the one-click move where it is offered.
+    doublingInNotice = doublingText.isNotEmpty() && noticeDetail == doublingText;
     setDescription (notice);
 
     assignButton.setEnabled (reason.isEmpty());
@@ -1181,6 +1190,20 @@ void RoutingPanel::showAddAutoProfileDialog()
                              true);
 }
 
+juce::String RoutingPanel::getDoublingFixAction() const
+{
+    return doublingInNotice ? controller.getRouting().getMoveAwayAction() : juce::String();
+}
+
+void RoutingPanel::applyDoublingFixAction()
+{
+    // R4.5: switches "Move the app's own sound away automatically" on (and
+    // lets Flubsound move again an app the user took back); the worker moves
+    // the held-back apps at once.
+    controller.getRouting().moveOriginalsAwayNow();
+    refreshRouting();
+}
+
 void RoutingPanel::showDoublingFix()
 {
     auto& routing = controller.getRouting();
@@ -1188,13 +1211,21 @@ void RoutingPanel::showDoublingFix()
     if (text.isEmpty())
         return;
     auto* window = new juce::AlertWindow ("Original also audible", text, juce::MessageBoxIconType::WarningIcon, this);
-    window->addButton ("Open sound settings", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    // The one-click move first (Return) where Flubsound can make it itself.
+    const auto action = routing.getMoveAwayAction();
+    if (action.isNotEmpty())
+        window->addButton (action, 2, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Open sound settings", 1, action.isEmpty() ? juce::KeyPress (juce::KeyPress::returnKey) : juce::KeyPress());
     window->addButton ("Close", 0, juce::KeyPress (juce::KeyPress::escapeKey));
     juce::Component::SafePointer<RoutingPanel> safe (this);
     window->enterModalState (true, juce::ModalCallbackFunction::create ([safe] (int result)
                                                                         {
-                                                                            if (safe != nullptr && result == 1)
+                                                                            if (safe == nullptr)
+                                                                                return;
+                                                                            if (result == 1)
                                                                                 safe->controller.getRouting().openSystemRoutingSettings();
+                                                                            else if (result == 2)
+                                                                                safe->applyDoublingFixAction();
                                                                         }),
                              true);
 }
@@ -1235,6 +1266,9 @@ void RoutingPanel::showChipMenu (const juce::String& executable, const juce::Str
         item.itemID = 3;
         item.colour = Theme::statusColours (*this).warn;
         menu.addItem (item);
+        // R4.5: the one-click move, where Flubsound can make it itself.
+        if (const auto action = routing.getMoveAwayAction(); action.isNotEmpty())
+            menu.addItem (4, action);
         menu.addSeparator();
     }
     menu.addSubMenu ("Move to strip", move);
@@ -1255,6 +1289,11 @@ void RoutingPanel::showChipMenu (const juce::String& executable, const juce::Str
                             if (result == 3)
                             {
                                 safe->showDoublingFix();
+                                return;
+                            }
+                            if (result == 4)
+                            {
+                                safe->applyDoublingFixAction();
                                 return;
                             }
                             auto& r = safe->controller.getRouting();
@@ -1339,7 +1378,7 @@ void RoutingPanel::mouseMove (const juce::MouseEvent& e)
 
 void RoutingPanel::mouseUp (const juce::MouseEvent& e)
 {
-    if (doubling && noticeArea.contains (e.getPosition()))
+    if (doublingInNotice && noticeArea.contains (e.getPosition()))
         showDoublingFix();
     else if (noticeCompact && noticeArea.contains (e.getPosition()))
         juce::AlertWindow::showMessageBoxAsync (noAppsProcessed ? juce::MessageBoxIconType::WarningIcon : juce::MessageBoxIconType::InfoIcon,
