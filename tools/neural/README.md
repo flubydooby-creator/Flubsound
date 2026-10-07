@@ -11,6 +11,7 @@ runtime (`core/include/flub/neural/TinyNet.h`).
 | `fvsynth.py` | Synthetic data: a source-filter speech synthesiser (male / female / child speakers, phrases of syllables, formants, fricatives, plosives, prosody, jitter, shimmer) and noises (white, pink, brown, fan + mains hum, keyboard typing, babble of 3–8 voices), mixed at −5 … 20 dB SNR with random EQ, levels and codec band limits. |
 | `tinynet.py` | A tiny network library: Dense, causal Conv1D and GRU layers with forward / backward (BPTT), Adam, int8 row quantisation, the `.fnn` file writer and a frame-by-frame reference inference. |
 | `train_voice_cleanup.py` | The pipeline: `generate`, `train`, `export`, `evaluate`, `card` (or `all`). |
+| `renderer_aliasing.py` | Measures the BandGains renderer's time aliasing (its 512-point circular convolution against the linear one with the same response; docs/03 §16.3): `python tools/neural/renderer_aliasing.py`. |
 
 ## Reproduce
 

@@ -429,7 +429,8 @@ public:
     // =========================================================================
     // Engine structure (message thread)
     // =========================================================================
-    /** Replaces the strip layout (1..kMaxStrips strips) and reconfigures. */
+    /** Replaces the strip layout (1..kMaxStrips strips) and reconfigures.
+        Neural models follow their strips by name (setNeuralModel). */
     void setStripLayout (std::vector<flub::StripConfig> newLayout);
     /** Current layout, including the live strip gain / mute values. */
     std::vector<flub::StripConfig> getStripLayout() const;
@@ -467,11 +468,29 @@ public:
         model, so one runner is never in two engines, and a model installed
         directly with ProcessingChain::setNeuralModel() would not carry over.
         Whether the model joins the chain (latency profile, sample rate,
-        block size) is getMixEngine().chain (strip).getNeuralStatus(). */
+        block size) is getMixEngine().chain (strip).getNeuralStatus().
+        A model belongs to its strip: setStripLayout() carries it to the
+        index of the strip with the same name (in the same reconfigure(), so
+        no other strip ever runs it) and drops it when no strip has that
+        name any more. */
     using NeuralModelFactory = std::function<std::unique_ptr<flub::ModelRunner>()>;
-    void setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config = {});
+    /** How the safety frames (AsyncModelConfig::safetyFrames) are chosen. */
+    enum class NeuralSafety
+    {
+        AsConfigured,   // config.processor.safetyFrames as given
+        OneDeviceBuffer // resolved for every engine built, from the device buffer it is built for:
+                        // safetyFramesForBuffer (buffer, the model's frame), so a device restart with
+                        // another buffer gets the matching latency in that same engine (no second swap)
+    };
+    void setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config = {},
+                         NeuralSafety safetyRule = NeuralSafety::AsConfigured);
     void clearNeuralModel (int strip) { setNeuralModel (strip, nullptr); }
     bool hasNeuralModel (int strip) const noexcept;
+    /** The fewest safety frames that cover one device buffer: ceil (blockSize /
+        frameSize), 1 .. AsyncModelConfig::kMaxSafetyFrames. A result can only
+        be picked up by a later callback than the one that completed its frame
+        (AsyncModelProcessor.h, "Latency"), so fewer would make frames miss. */
+    static int safetyFramesForBuffer (int blockSize, int frameSize) noexcept;
 
     /** Increments after every MixEngine::configure (chains were re-created). */
     uint32_t getStructureGeneration() const noexcept { return structureGeneration.load (std::memory_order_acquire); }
@@ -1090,8 +1109,9 @@ private:
     {
         NeuralModelFactory factory;
         flub::NeuralSlotConfig config;
+        NeuralSafety safetyRule = NeuralSafety::AsConfigured;
     };
-    std::array<NeuralModelSetup, kMaxStrips> neuralModels;
+    std::array<NeuralModelSetup, kMaxStrips> neuralModels; // per strip index (setStripLayout moves them by name)
     flub::DeviceCorrectionSettings deviceCorrection; // every new engine starts on it
     double currentSampleRate = 48000.0;
     int currentBlockSize = 512;

@@ -16,7 +16,7 @@ namespace flub
 {
 namespace
 {
-constexpr int kMaxSafetyFrames = 16;
+constexpr int kMaxSafetyFrames = AsyncModelConfig::kMaxSafetyFrames;
 
 // Auto poll interval: an eighth of a frame period, so polling adds at most
 // ~12 % of a frame to the worker's response time, within 100 .. 1000 us so

@@ -44,14 +44,15 @@ struct FormLayout
         juce::String section; // non-empty: a section title row instead
         int controlWidth = 260;
         juce::Rectangle<int> captionArea, helpArea, sectionArea;
+        int height = kRowHeight; // the control's row (a fixed height: live text in it never moves the rows below)
     };
 
     std::vector<Row> rows;
 
-    void section (const juce::String& title) { rows.push_back ({ {}, nullptr, {}, title, 0, {}, {}, {} }); }
-    void row (const juce::String& caption, juce::Component& control, const juce::String& help = {}, int width = 260)
+    void section (const juce::String& title) { rows.push_back ({ {}, nullptr, {}, title, 0, {}, {}, {}, kRowHeight }); }
+    void row (const juce::String& caption, juce::Component& control, const juce::String& help = {}, int width = 260, int height = kRowHeight)
     {
-        rows.push_back ({ caption, &control, help, {}, width, {}, {}, {} });
+        rows.push_back ({ caption, &control, help, {}, width, {}, {}, {}, height });
     }
 
     /** Lays the rows out from the top of `area`; returns the bottom edge used. */
@@ -70,8 +71,8 @@ struct FormLayout
             const int indent = r.caption.isEmpty() ? 0 : kCaptionWidth;
             r.captionArea = { area.getX(), y, indent, kRowHeight };
             if (r.control != nullptr)
-                r.control->setBounds (area.getX() + indent, y + 2, juce::jmin (r.controlWidth, area.getWidth() - indent), kRowHeight - 4);
-            y += kRowHeight;
+                r.control->setBounds (area.getX() + indent, y + 2, juce::jmin (r.controlWidth, area.getWidth() - indent), r.height - 4);
+            y += r.height;
             if (r.help.isNotEmpty())
             {
                 const auto lines = juce::jmax (1, static_cast<int> (std::ceil (juce::GlyphArrangement::getStringWidth (Theme::font (11.5f), r.help)
@@ -717,6 +718,14 @@ public:
             controller.setChatNeuralCleanup (neuralToggle.getToggleState());
             refresh();
         };
+        // Its live status, in a fixed-height line of its own: the text changes
+        // at 2 Hz while the model runs and must not re-lay out the page.
+        neuralStatus.setTitle ("Neural voice cleanup status");
+        neuralStatus.setFont (Theme::font (11.5f));
+        neuralStatus.setColour (juce::Label::textColourId, Palette::text.withAlpha (0.85f));
+        neuralStatus.setJustificationType (juce::Justification::topLeft);
+        neuralStatus.setBorderSize ({ 0, 0, 0, 0 });
+        neuralStatus.setInterceptsMouseClicks (false, false);
 
         paletteBox.addItem ("Standard (green / amber / red)", 1);
         paletteBox.addItem ("Colour-blind safe (blue / yellow / vermillion)", 2);
@@ -741,6 +750,7 @@ public:
         addAndMakeVisible (duckToggle);
         addAndMakeVisible (duckDepth);
         addAndMakeVisible (neuralToggle);
+        addAndMakeVisible (neuralStatus);
 
         form.section ("Latency");
         form.row ("Latency profile", latencyBox,
@@ -788,7 +798,7 @@ public:
                          520);
         displayForm.row ("Duck depth", duckDepth, {}, 330);
         displayForm.row ({}, neuralToggle, describeNeural(), 520);
-        neuralRow = displayForm.rows.size() - 1;
+        displayForm.row ({}, neuralStatus, {}, 2000, kNeuralStatusHeight);
         displayForm.section ("Display");
         displayForm.row ("Meter colours", paletteBox, {}, 330);
         refresh();
@@ -814,12 +824,7 @@ public:
         }
         duckDepth.setEnabled (controller.getChatDuck());
         neuralToggle.setToggleState (controller.getChatNeuralCleanup(), juce::dontSendNotification);
-        if (const auto text = describeNeural(); text != displayForm.rows[neuralRow].help)
-        {
-            displayForm.rows[neuralRow].help = text;
-            resized();
-            repaint();
-        }
+        neuralStatus.setText ("Status: " + controller.describeChatNeuralCleanup(), juce::dontSendNotification); // repaints itself only
         preampToggle.setButtonText ("Automatic preamp on the " + controller.getStripName (controller.getSelectedStrip()) + " strip");
         preampHotToggle.setButtonText ("... also on hot programme (" + controller.getStripName (controller.getSelectedStrip()) + " strip)");
         preampHotToggle.setEnabled (controller.getSelectedParams().get (AutoPreampOn) >= 0.5f);
@@ -965,13 +970,14 @@ private:
                "system cannot see.";
     }
 
-    /** The neural voice cleanup row's help: what it is and, live, its status (docs/03 §16). */
-    juce::String describeNeural() const
+    /** The neural voice cleanup row's help: what it is (static; the live
+        status is the Status line under it). docs/03 §16. */
+    static juce::String describeNeural()
     {
         return "Experimental. A small neural network, trained by Flubsound on synthetic speech, turns down steady noise, hum, "
                "typing and background voices between and under the words of the voices on the Chat strip (per frequency band, "
-               "never a hard gate). Adds 20 ms to the Chat strip only, at 48 kHz in Balanced or Quality. Off by default. "
-               + controller.describeChatNeuralCleanup();
+               "never a hard gate). Adds 20 ms to the Chat strip only, at 48 kHz in Balanced or Quality with buffers of up to "
+               "480 samples (longer buffers: 25 ms or more, Quality only). Off by default.";
     }
 
     juce::String describeReduction() const
@@ -1002,7 +1008,8 @@ private:
     juce::ToggleButton duckToggle { "Duck game under voice chat" }; // docs/11 E22
     juce::Slider duckDepth;
     juce::ToggleButton neuralToggle { "Neural voice cleanup on the Chat strip (experimental)" }; // docs/03 §16
-    size_t neuralRow = 0;
+    juce::Label neuralStatus;                    // its live status (EngineController::describeChatNeuralCleanup)
+    static constexpr int kNeuralStatusHeight = 36; // room for two lines of 11.5 px text at full width: never re-laid out
     juce::ToggleButton contourToggle { "Loudness contour" }, followToggle { "Follow the system volume" };
     juce::Slider referenceSlider;
     juce::TextButton useVolumeButton { "Use current volume" };

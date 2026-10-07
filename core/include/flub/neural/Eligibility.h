@@ -3,7 +3,8 @@
 //
 // The unit is the reference model frame, kNeuralReferenceFrameMs (10 ms, the
 // hop of the voice-denoise class of models). A model's latency is what its
-// processor reports (AsyncModelProcessor: frameSize * (1 + safetyFrames)):
+// processor reports (AsyncModelProcessor: frameSize * (1 + safetyFrames), or
+// frameSize * (2 + safetyFrames) for ControlKind::BandGains):
 //   Offline (batch render) : any model. No real-time deadline: the chain
 //                            runs the processor in offline mode (the model
 //                            runs inside process(), so a render faster than

@@ -641,6 +641,14 @@ TEST_CASE ("CLI demo: command line")
     CHECK (o.input.empty());
     CHECK_NEAR (o.demoSeconds, 10.0, 0.0);
 
+    CHECK (o.demoOnly.empty());
+    REQUIRE (parseCommandLine ({ "demo", "--only", "neural-voice-cleanup, music-warmth", "--only", "night" }, o, error));
+    const std::vector<std::string> expectedOnly { "neural-voice-cleanup", "music-warmth", "night" };
+    CHECK (o.demoOnly == expectedOnly);
+    CHECK (! parseCommandLine ({ "demo", "--only", " , " }, o, error));
+    CHECK (error.find ("--only") != std::string::npos);
+    CHECK (! parseCommandLine ({ "process", "-i", "a.wav", "-o", "b.wav", "--only", "night" }, o, error)); // demo only
+
     CHECK (! parseCommandLine ({ "demo", "--seconds", "0.1" }, o, error));
     CHECK (error.find ("--seconds") != std::string::npos);
     CHECK (! parseCommandLine ({ "demo", "--boost", "50" }, o, error)); // the pairs set the chain

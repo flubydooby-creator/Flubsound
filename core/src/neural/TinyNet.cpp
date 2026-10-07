@@ -31,6 +31,9 @@ public:
 
     size_t remaining() const noexcept { return size - pos; }
 
+    /** Why the last f32() / int8Rows() call returned false (static storage). */
+    const char* problem() const noexcept { return lastProblem; }
+
     bool u32 (uint32_t& v) noexcept
     {
         if (remaining() < 4)
@@ -45,7 +48,7 @@ public:
     bool f32 (std::vector<float>& dst, size_t count)
     {
         if (count > remaining() / 4)
-            return false;
+            return failWith ("truncated");
         for (size_t i = 0; i < count; ++i)
         {
             uint32_t bits = 0;
@@ -53,7 +56,7 @@ public:
             float v = 0.0f;
             std::memcpy (&v, &bits, sizeof v);
             if (! std::isfinite (v))
-                return false;
+                return failWith ("not finite");
             dst.push_back (v);
         }
         return true;
@@ -64,26 +67,26 @@ public:
     {
         std::vector<float> scales;
         if (! f32 (scales, rows))
-            return false;
+            return false; // f32() set the reason
         const size_t count = rows * cols;
         const size_t padded = (count + 3) / 4 * 4;
         if (padded > remaining())
-            return false;
+            return failWith ("truncated");
         for (size_t r = 0; r < rows; ++r)
         {
             if (scales[r] < 0.0f)
-                return false;
+                return failWith ("have a negative row scale");
             for (size_t c = 0; c < cols; ++c)
             {
                 const auto q = static_cast<int8_t> (data[pos + r * cols + c]);
                 if (q == -128)
-                    return false; // the writer never emits -128 (symmetric range)
+                    return failWith ("hold the int8 value -128 (the format's range is symmetric, -127 .. 127)");
                 dst.push_back (static_cast<float> (q) * scales[r]);
             }
         }
         for (size_t i = count; i < padded; ++i)
             if (data[pos + i] != 0)
-                return false;
+                return failWith ("have non-zero padding");
         pos += padded;
         return true;
     }
@@ -102,8 +105,15 @@ public:
     }
 
 private:
+    bool failWith (const char* reason) noexcept
+    {
+        lastProblem = reason;
+        return false;
+    }
+
     const uint8_t* data;
     size_t size, pos = 0;
+    const char* lastProblem = "truncated";
 };
 
 /** Four independent partial sums in a fixed order: vectorisable, and the same
@@ -253,24 +263,24 @@ bool TinyNet::load (const void* raw, size_t size, std::string& error)
             return fail (where + "too many parameters");
         layer.w = w.size();
         if (! readMatrix (rows, cols))
-            return fail (where + "weights truncated or not finite");
+            return fail (where + "weights " + r.problem());
         params += rows * cols;
         if (layer.type == LayerType::Gru)
         {
             layer.u = w.size();
             if (! readMatrix (rows, static_cast<size_t> (layer.out)))
-                return fail (where + "recurrent weights truncated or not finite");
+                return fail (where + "recurrent weights " + r.problem());
             params += rows * static_cast<size_t> (layer.out);
         }
         layer.b = w.size();
         if (! r.f32 (w, rows))
-            return fail (where + "biases truncated or not finite");
+            return fail (where + "biases " + r.problem());
         params += rows;
         if (layer.type == LayerType::Gru)
         {
             layer.bh = w.size();
             if (! r.f32 (w, rows))
-                return fail (where + "recurrent biases truncated or not finite");
+                return fail (where + "recurrent biases " + r.problem());
             params += rows;
             layer.state = stateFloats;
             stateFloats += static_cast<size_t> (layer.out);

@@ -1,10 +1,12 @@
 // Tests for ControlKind::BandGains (AsyncModelProcessor's STFT renderer) and the
 // neural voice cleanup model on it (flub/neural/VoiceCleanupRunner.h): exact
 // reconstruction at unity gains, gains landing on the window they were computed
-// from, the fallback, the real worker thread with the app's block size, the
-// chain's eligibility rules, allocation-free inference, the cost per frame, and
-// a quality floor on a held-out clip (tests/data/neural/voice-cleanup-clip.wav,
-// written by tools/neural/train_voice_cleanup.py export).
+// from, the fallback, the band-layout validation, the real worker thread with
+// the app's block size (waiting for it: determinism and bookkeeping; paced at
+// real time: deadlines), the chain's eligibility rules, allocation-free
+// inference, the cost per frame, and a quality floor on a held-out clip
+// (tests/data/neural/voice-cleanup-clip.wav, written by
+// tools/neural/train_voice_cleanup.py export).
 #include "TestFramework.h"
 #include "TestSignals.h"
 
@@ -20,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -59,7 +62,8 @@ public:
     };
     ScriptedBandRunner (Mode m, int failFromFrame = 0) : mode (m), failFrom (failFromFrame) {}
 
-    ModelDescription describe() const override
+    /** The voice cleanup's layout: 240-sample hop, 512-point FFT, its 22 band centres. */
+    static ModelDescription validDescription()
     {
         ModelDescription d;
         d.frameSize = kHop;
@@ -70,6 +74,10 @@ public:
         d.bandCentresHz = VoiceCleanupRunner::kBandCentresHz;
         return d;
     }
+    ModelDescription describe() const override { return description; }
+
+    ModelDescription description = validDescription(); // a test may break it
+
     void reset() override { frames = 0; }
     bool run (const float* in, float* out) override
     {
@@ -83,7 +91,7 @@ public:
                 return false;
             g = 0.5f;
         }
-        std::fill (out, out + VoiceCleanupRunner::kNumBands, g);
+        std::fill (out, out + description.numControls, g);
         return true;
     }
 
@@ -235,7 +243,90 @@ TEST_CASE ("Neural BandGains: a failing model holds the last good band gains, th
     CHECK_LE (steepest, 0.125f * 2.5f / kHop); // a crossfade over one hop, no step
 }
 
-TEST_CASE ("VoiceCleanup: on the real worker thread with 480-sample blocks it adds 960 samples, misses no frame and matches the offline render")
+TEST_CASE ("Neural BandGains: an invalid band layout gives an inert processor (no latency, audio untouched)")
+{
+    // isValidBandLayout(): fftSize a power of two, 2 * frameSize .. kMaxModelFftSize;
+    // numControls >= 2; band centres present, finite, >= 0 and strictly increasing.
+    static const float equalCentres[] = { 0.0f, 1000.0f, 1000.0f, 4000.0f };
+    static const float fallingCentres[] = { 0.0f, 2000.0f, 1000.0f, 4000.0f };
+    static const float negativeCentre[] = { -10.0f, 1000.0f, 2000.0f, 4000.0f };
+    static const float nanCentre[] = { 0.0f, std::numeric_limits<float>::quiet_NaN(), 2000.0f, 4000.0f };
+    static const float infiniteCentre[] = { 0.0f, 1000.0f, 2000.0f, std::numeric_limits<float>::infinity() };
+    static const float goodCentres[] = { 0.0f, 1000.0f, 2000.0f, 4000.0f };
+    struct Broken
+    {
+        const char* what;
+        int fftSize, numControls;
+        const float* centres;
+    };
+    const Broken cases[] = {
+        { "fftSize 0", 0, 4, goodCentres },
+        { "fftSize 500 (not a power of two)", 500, 4, goodCentres },
+        { "fftSize 256 < 2 x frameSize", 256, 4, goodCentres },
+        { "fftSize 65536 > kMaxModelFftSize", 65536, 4, goodCentres },
+        { "1 band", 512, 1, goodCentres },
+        { "no band centres", 512, 4, nullptr },
+        { "equal centres", 512, 4, equalCentres },
+        { "falling centres", 512, 4, fallingCentres },
+        { "negative centre", 512, 4, negativeCentre },
+        { "NaN centre", 512, 4, nanCentre },
+        { "infinite centre", 512, 4, infiniteCentre },
+    };
+    const auto x = whiteNoise (2400, 0.5f, 21);
+    struct Outcome
+    {
+        int latency = -1;
+        bool active = true, untouched = false;
+    };
+    const auto runCase = [&x] (const ModelDescription& d)
+    {
+        auto runner = std::make_unique<ScriptedBandRunner> (ScriptedBandRunner::Mode::Unity);
+        runner->description = d;
+        AsyncModelProcessor p (std::move (runner), config (2, true));
+        p.prepare ({ kFs, 480, 2 });
+        Outcome o;
+        o.latency = p.latencySamples();
+        o.active = p.isModelActive();
+        const auto y = runThrough (p, x, 480, false);
+        o.untouched = std::memcmp (y.data(), x.data(), x.size() * sizeof (float)) == 0;
+        return o;
+    };
+
+    // The same description with good values is valid (so each case below breaks one rule only).
+    auto good = ScriptedBandRunner::validDescription();
+    good.numControls = 4;
+    good.bandCentresHz = goodCentres;
+    const Outcome valid = runCase (good);
+    CHECK (valid.latency == 960);
+    CHECK (valid.active);
+    for (const auto& k : cases)
+    {
+        auto d = good;
+        d.fftSize = k.fftSize;
+        d.numControls = k.numControls;
+        d.bandCentresHz = k.centres;
+        const Outcome o = runCase (d);
+        if (o.latency != 0 || o.active || ! o.untouched)
+            std::printf ("    %s: latency %d, active %d, untouched %d\n", k.what, o.latency, o.active ? 1 : 0, o.untouched ? 1 : 0);
+        CHECK (o.latency == 0);
+        CHECK (! o.active);
+        CHECK (o.untouched);
+    }
+
+    // In the chain such a model is InvalidModel and adds nothing.
+    param::ParameterStore store;
+    ProcessingChain chain (store);
+    auto broken = std::make_unique<ScriptedBandRunner> (ScriptedBandRunner::Mode::Unity);
+    broken->description.fftSize = 500;
+    chain.setNeuralModel (std::move (broken));
+    chain.prepare ({ 48000.0, 480, 2 });
+    CHECK (chain.getNeuralStatus().state == NeuralSlotState::InvalidModel);
+}
+
+// Waits for the worker after every block, so no deadline can pass: this checks
+// the threaded path's determinism and bookkeeping, not real-time head room
+// (the paced case below does that).
+TEST_CASE ("VoiceCleanup: on the real worker thread (waited for after every block) with 480-sample blocks it adds 960 samples, handles every frame and matches the offline render")
 {
     auto telemetry = std::make_shared<VoiceCleanupTelemetry>();
     AsyncModelProcessor live (std::make_unique<VoiceCleanupRunner> (telemetry), config (2, false));
@@ -261,6 +352,45 @@ TEST_CASE ("VoiceCleanup: on the real worker thread with 480-sample blocks it ad
     const auto yOff = runThrough (offline, x, 480, false);
     CHECK (std::memcmp (yLive.data(), yOff.data(), yLive.size() * sizeof (float)) == 0);
     for (float v : yLive)
+        CHECK (std::isfinite (v));
+}
+
+// No waiting: 480-sample blocks are processed at the device's pace (one per
+// 10 ms, as an audio callback would), and the worker must deliver each frame's
+// gains within the two safety frames on its own. The calling thread is an
+// ordinary thread, not a real-time one, and CI machines are shared, so the
+// bound is loose (5 % of the frames); the printed count is the measurement.
+TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, the worker meets its deadlines")
+{
+    AsyncModelProcessor live (std::make_unique<VoiceCleanupRunner>(), config (2, false));
+    live.prepare ({ kFs, 480, 2 });
+    REQUIRE (live.isModelActive());
+    constexpr int kBlocks = 100; // 1 s of audio, 200 model frames
+    auto x = whiteNoise (kBlocks * 480, 0.02f, 13);
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] += static_cast<float> (0.2 * std::sin (2.0 * 3.14159265358979 * 180.0 * static_cast<double> (i) / kFs));
+    std::vector<float> l (x), r (x);
+    const auto period = std::chrono::microseconds (10000);
+    auto next = std::chrono::steady_clock::now();
+    for (int k = 0; k < kBlocks; ++k)
+    {
+        std::this_thread::sleep_until (next);
+        next += period;
+        const auto pos = static_cast<size_t> (k) * 480u;
+        AudioBlock b (std::array<float*, 2> { l.data() + pos, r.data() + pos }.data(), 2, 480);
+        live.process (b);
+    }
+    // Frames reach their deadline L = 960 samples after they start: the last two
+    // blocks' frames are still in the delay line when the loop ends.
+    const auto due = static_cast<uint64_t> ((kBlocks - 2) * 480 / kHop);
+    const uint64_t misses = live.getDeadlineMisses();
+    std::printf ("    paced at real time: %llu of %llu due frames missed their deadline, %llu failures, %llu frames run\n",
+                 static_cast<unsigned long long> (misses), static_cast<unsigned long long> (due),
+                 static_cast<unsigned long long> (live.getModelFailures()), static_cast<unsigned long long> (live.getFramesProcessed()));
+    CHECK (live.getModelFailures() == 0u);
+    CHECK_LE (misses, due / 20);
+    CHECK (live.getFramesProcessed() + misses >= due);
+    for (float v : l)
         CHECK (std::isfinite (v));
 }
 

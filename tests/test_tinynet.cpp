@@ -165,7 +165,7 @@ TEST_CASE ("TinyNet: truncated, corrupt and hostile model files are refused with
         { "forward reference", 84, 5u, false, "earlier tensor", true },
         { "weight format", 88, 2u, false, "weight format", true },
         { "NaN weight", 92, 0x7FC00000u, false, "finite", true },
-        { "negative int8 scale", 92, 0xBF800000u, true, "weights", true },
+        { "negative int8 scale", 92, 0xBF800000u, true, "negative row scale", true },
     };
     for (const auto& e : edits)
     {
@@ -184,7 +184,7 @@ TEST_CASE ("TinyNet: truncated, corrupt and hostile model files are refused with
         auto b = good8;
         b[92 + 6 * 4] = 0x80u;
         fixCrc (b);
-        CHECK (! loadError (b).empty());
+        CHECK (loadError (b).find ("-128") != std::string::npos);
     }
     // A GRU with an activation field.
     {

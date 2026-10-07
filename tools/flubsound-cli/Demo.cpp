@@ -365,8 +365,11 @@ io::AudioFileData makeSpeechHiss (double seconds)
 
 /** The speech programme in a noisy room, for the neural voice cleanup: a fan
     (pink noise low-passed at 900 Hz, 50 Hz mains hum with harmonics) and
-    keyboard typing (bursts of clicks, 2 - 6 kHz), about 8 dB under the voice
-    on its active parts; uncorrelated between the channels. */
+    keyboard typing (bursts of clicks, 2 - 6 kHz); uncorrelated between the
+    channels. Measured (10 s, 2026-10-07): speech -18.6 dBFS RMS on its
+    active 10 ms frames, noise -36.4 dBFS RMS (fan -36.6, hum -50.6, typing
+    -53.3), so about 18 dB under the voice (17.7 dB SNR on the active
+    speech): a mild scene, where the cleanup is heard mostly between words. */
 io::AudioFileData makeSpeechNoisy (double seconds)
 {
     auto d = makeSpeech (seconds);
@@ -1095,8 +1098,8 @@ std::string describeBuiltIn (const std::string& name)
     if (name == "speech-hiss")
         return "built-in: the synthetic voice over a steady hiss floor (pink noise, -50 dBFS RMS per channel)";
     if (name == "speech-noisy")
-        return "built-in: the synthetic voice in a noisy room (a fan with 50 Hz mains hum, keyboard typing), about 8 dB "
-               "under the voice";
+        return "built-in: the synthetic voice in a noisy room (a fan with 50 Hz mains hum, quieter keyboard typing), about "
+               "18 dB under the voice";
     if (name == "chat-scene")
         return "built-in: the game scene on a Game strip and a teammate's voice (a higher formant voice, peak -9 dBFS, "
                "talking from 25 to 75 %) on a Chat strip, mixed as the app mixes them";
@@ -1801,6 +1804,7 @@ int runDemo (const CliOptions& options)
     if (! options.output.empty())
         d.outDir = options.output;
     d.seconds = options.demoSeconds;
+    d.only = options.demoOnly;
     d.jobs = options.jobs;
     d.presetDir = options.render.presetDir;
     d.blockSize = options.render.blockSize;

@@ -572,8 +572,14 @@ void EngineController::setStripLayout (const std::vector<flub::StripConfig>& new
         for (const auto slot : { ComparisonSlot::Banks, ComparisonSlot::Listen })
             setComparisonTrimDb (i, 0.0f, slot);
 
+    // The host carries the voice cleanup with the Chat strip (models follow
+    // their strips by name) in this one engine build; a Chat strip new to the
+    // layout gets it from applyChatNeuralCleanup() (docs/03 §16).
     host->setStripLayout (newLayout);
-    applyChatNeuralCleanup(); // the Chat strip may have moved
+    neuralStrip = -1;
+    if (const int chat = findStrip (kChatMixChatStrip); chat >= 0 && host->hasNeuralModel (chat))
+        neuralStrip = chat;
+    applyChatNeuralCleanup();
     for (int i = 0; i < getNumStrips(); ++i)
         userGainDb[static_cast<size_t> (i)] = host->getStripGainDb (i);
     selectedStrip = resolveStrip (selectedStrip);
@@ -1954,7 +1960,7 @@ void EngineController::timerCallback()
     applyHearingGuard();    // docs/11 E32 (c)
     applyPersonalProfile(); // docs/11 E33
     applySmartMacros();     // docs/11 E34
-    applyChatNeuralCleanup(); // docs/03 §16: follows the device buffer and the strip layout
+    applyChatNeuralCleanup(); // docs/03 §16: a Chat strip that appeared or moved (the host follows the buffer itself)
     if (! tournament.active) // docs/11 E55: no foreground poll in Tournament mode
         pollForegroundApp();
 
@@ -2657,24 +2663,28 @@ bool EngineController::getChatNeuralCleanup() const { return settings->getChatNe
 void EngineController::applyChatNeuralCleanup()
 {
     const int chat = findStrip (kChatMixChatStrip);
-    const bool on = settings->getChatNeuralCleanup() && chat >= 0;
-    // Enough safety frames for one device buffer (AsyncModelProcessor.h): a result can only be
-    // picked up by a later callback than the one that completed its frame.
-    constexpr int frame = flub::VoiceCleanupRunner::kFrameSize;
-    const int safety = std::clamp ((std::max (1, host->getBlockSize()) + frame - 1) / frame, 1, 16);
-    const NeuralApplied want { on ? chat : -1, on ? safety : 0 };
-    if (want == neuralApplied)
+    const int want = settings->getChatNeuralCleanup() && chat >= 0 ? chat : -1;
+    if (want == neuralStrip)
         return;
-    if (neuralApplied.strip >= 0 && neuralApplied.strip != want.strip && neuralApplied.strip < getNumStrips())
-        host->clearNeuralModel (neuralApplied.strip);
-    if (on)
+    if (neuralStrip >= 0 && neuralStrip < getNumStrips())
+        host->clearNeuralModel (neuralStrip);
+    if (want >= 0)
     {
-        flub::NeuralSlotConfig config;
-        config.processor.safetyFrames = safety;
+        // The safety frames cover one device buffer, resolved by the host for
+        // every engine it builds (a result can only be picked up by a later
+        // callback than the one that completed its frame; AsyncModelProcessor.h).
         auto telemetry = neuralTelemetry;
-        host->setNeuralModel (chat, [telemetry] { return std::make_unique<flub::VoiceCleanupRunner> (telemetry); }, config);
+        host->setNeuralModel (
+            want, [telemetry] { return std::make_unique<flub::VoiceCleanupRunner> (telemetry); }, flub::NeuralSlotConfig {},
+            AudioEngineHost::NeuralSafety::OneDeviceBuffer);
     }
-    neuralApplied = want;
+    neuralStrip = want;
+}
+
+int EngineController::chatNeuralLatencyForBuffer (int blockSize) noexcept
+{
+    constexpr int frame = flub::VoiceCleanupRunner::kFrameSize;
+    return frame * (2 + AudioEngineHost::safetyFramesForBuffer (blockSize, frame)); // BandGains: L = frame x (2 + safety)
 }
 
 EngineController::NeuralCleanupStatus EngineController::getChatNeuralCleanupStatus() const
@@ -2684,13 +2694,15 @@ EngineController::NeuralCleanupStatus EngineController::getChatNeuralCleanupStat
     const int chat = findStrip (kChatMixChatStrip);
     s.hasChatStrip = chat >= 0;
     s.sampleRate = host->getSampleRate();
+    s.blockSize = host->getBlockSize();
     if (chat < 0)
         return s;
     auto& chain = host->getMixEngine().chain (chat);
     const auto st = chain.getNeuralStatus();
     s.state = st.state;
     s.latencySamples = st.modelLatencySamples;
-    s.pending = st.changePending || (s.enabled && neuralApplied.strip != chat);
+    s.profile = chain.getLatencyProfile();
+    s.pending = st.changePending || (s.enabled && neuralStrip != chat);
     const auto counters = chain.getNeuralCounters();
     s.deadlineMisses = counters.deadlineMisses;
     s.modelFailures = counters.modelFailures;
@@ -2725,12 +2737,35 @@ juce::String EngineController::describeChatNeuralCleanup() const
             return t << ".";
         }
         case State::Ineligible:
-            return "Not running: Low Latency allows less than the model's " + juce::String (1000.0 * s.latencySamples / std::max (1.0, s.sampleRate), 0)
-                   + " ms. Choose Balanced or Quality (Latency profile, above).";
+        {
+            // Quality admits every model, so the profile is Low Latency or Balanced (docs/03 §16.5).
+            using Profile = flub::param::LatencyProfileValue;
+            const double rate = std::max (1.0, s.sampleRate);
+            const auto ms = [rate] (double samples) { return juce::String (1000.0 * samples / rate, 0); };
+            // The longest buffer Balanced allows the model at this rate (480 samples at 48 kHz; 0: none).
+            int balancedBuffer = 0;
+            for (int safety = flub::AsyncModelConfig::kMaxSafetyFrames; safety >= 1 && balancedBuffer == 0; --safety)
+                if (const int buffer = safety * flub::VoiceCleanupRunner::kFrameSize;
+                    flub::isEligible (Profile::Balanced, chatNeuralLatencyForBuffer (buffer), rate))
+                    balancedBuffer = buffer;
+            const bool lowLatency = s.profile == Profile::LowLatency;
+            juce::String t ("Not running: ");
+            t << (lowLatency ? "Low Latency" : "Balanced") << " allows at most "
+              << juce::String (flub::neuralLatencyBudgetFrames (s.profile) * flub::kNeuralReferenceFrameMs, 0) << " ms, and with this "
+              << s.blockSize << "-sample buffer the model needs " << ms (s.latencySamples) << " ms. Choose ";
+            if (lowLatency && balancedBuffer >= s.blockSize)
+                return t << "Balanced or Quality (Latency profile, above).";
+            t << "Quality (Latency profile, above)";
+            if (balancedBuffer > 0)
+                t << (lowLatency ? ", or Balanced with a buffer of " : " or a buffer of ") << balancedBuffer << " samples or less (Settings > Audio)";
+            return t << ".";
+        }
         case State::SampleRateMismatch:
             return "Not running: the model works at 48 kHz and the device runs at " + juce::String (s.sampleRate / 1000.0, 1) + " kHz.";
         case State::BlockTooLarge:
-            return "Not running: the audio buffer is longer than the model's safety margin (it adapts within a second).";
+            return "Not running: this " + juce::String (s.blockSize) + "-sample buffer is longer than the model's largest safety margin ("
+                   + juce::String (flub::AsyncModelConfig::kMaxSafetyFrames * flub::VoiceCleanupRunner::kFrameSize)
+                   + " samples). Choose a shorter buffer (Settings > Audio).";
         case State::InvalidModel:
         case State::PrepareFailed:
         case State::Empty:

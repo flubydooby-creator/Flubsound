@@ -139,6 +139,7 @@ enum class Opt
     Spatial,
     FocusIld,
     Seconds,
+    Only,
     Minutes,
     Seed,
     Automation,
@@ -187,6 +188,7 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Spatial, "--spatial", nullptr, false, false, kAnalyze },
     { Opt::FocusIld, "--focus-ild", nullptr, false, false, kAnalyze },
     { Opt::Seconds, "--seconds", nullptr, true, false, kSoak | kDemo },
+    { Opt::Only, "--only", nullptr, true, false, kDemo },
     { Opt::Minutes, "--minutes", nullptr, true, false, kSoak },
     { Opt::Seed, "--seed", nullptr, true, false, kSoak },
     { Opt::Automation, "--automation", nullptr, true, false, kSoak },
@@ -508,6 +510,29 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
                 return false;
             }
             o.soakSeconds = d * scale;
+            return true;
+        }
+
+        case Opt::Only:
+        {
+            // `demo --only a,b`: pair names (the file names' stems), comma-separated; repeatable.
+            const size_t before = o.demoOnly.size();
+            size_t start = 0;
+            while (start <= v.size())
+            {
+                const auto comma = v.find (',', start);
+                const std::string slug = trim (v.substr (start, comma == std::string::npos ? std::string::npos : comma - start));
+                if (! slug.empty())
+                    o.demoOnly.push_back (slug);
+                if (comma == std::string::npos)
+                    break;
+                start = comma + 1;
+            }
+            if (o.demoOnly.size() == before)
+            {
+                error = "--only expects demo pair names such as neural-voice-cleanup, got '" + value + "'";
+                return false;
+            }
             return true;
         }
 

@@ -100,6 +100,7 @@ struct CliOptions
     // --format was given (the pack defaults to pcm24, not f32)
     double demoSeconds = 10.0;
     bool demoFormatSet = false;
+    std::vector<std::string> demoOnly; // `demo --only`: pair names to render (empty = every pair)
     RenderOptions render;
 };
 

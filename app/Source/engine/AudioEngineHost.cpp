@@ -425,10 +425,22 @@ void AudioEngineHost::setStripLayout (std::vector<flub::StripConfig> newLayout)
             releaseSlot (slot);
 
     for (size_t i = newLayout.size(); i < static_cast<size_t> (kMaxStrips); ++i)
-    {
         deviceInputFirst[i].store (-1);
-        neuralModels[i] = {};
-    }
+
+    // A neural model follows its strip (the first unused strip of the same
+    // name), so the one reconfigure() below carries it to the strip's new
+    // index: no engine ever runs it on the strip that now has its old index.
+    std::array<NeuralModelSetup, kMaxStrips> movedModels {};
+    std::array<bool, kMaxStrips> modelTaken {};
+    for (size_t i = 0; i < newLayout.size(); ++i)
+        for (size_t j = 0; j < layout.size() && j < static_cast<size_t> (kMaxStrips); ++j)
+            if (! modelTaken[j] && layout[j].name == newLayout[i].name)
+            {
+                modelTaken[j] = true;
+                movedModels[i] = std::move (neuralModels[j]);
+                break;
+            }
+    neuralModels = std::move (movedModels);
 
     layout = std::move (newLayout);
     for (size_t i = 0; i < layout.size(); ++i)
@@ -471,7 +483,7 @@ void AudioEngineHost::reconfigure()
     afterStructureChange();
 }
 
-void AudioEngineHost::setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config)
+void AudioEngineHost::setNeuralModel (int strip, NeuralModelFactory factory, const flub::NeuralSlotConfig& config, NeuralSafety safetyRule)
 {
     JUCE_ASSERT_MESSAGE_THREAD
     if (strip < 0 || strip >= latest->numStrips)
@@ -479,8 +491,17 @@ void AudioEngineHost::setNeuralModel (int strip, NeuralModelFactory factory, con
         jassertfalse;
         return;
     }
-    neuralModels[static_cast<size_t> (strip)] = { std::move (factory), config };
+    neuralModels[static_cast<size_t> (strip)] = { std::move (factory), config, safetyRule };
     reconfigure();
+}
+
+int AudioEngineHost::safetyFramesForBuffer (int blockSize, int frameSize) noexcept
+{
+    if (frameSize <= 0)
+        return 1;
+    const int block = std::max (1, blockSize);
+    const int frames = block / frameSize + (block % frameSize != 0 ? 1 : 0); // ceil, without overflow
+    return std::clamp (frames, 1, flub::AsyncModelConfig::kMaxSafetyFrames);
 }
 
 bool AudioEngineHost::hasNeuralModel (int strip) const noexcept
@@ -505,13 +526,20 @@ std::unique_ptr<AudioEngineHost::EngineInstance> AudioEngineHost::buildEngine()
 
     // Every engine gets its own runner for each strip's neural model, installed
     // before the chain's prepare(), so it is in the chain (and its latency)
-    // from the first block.
+    // from the first block. NeuralSafety::OneDeviceBuffer resolves the safety
+    // frames here, for the buffer this engine is built for.
     const auto installNeuralModel = [this] (int strip, flub::ProcessingChain& chain)
     {
         const auto& model = neuralModels[static_cast<size_t> (strip)];
-        if (model.factory != nullptr)
-            if (auto runner = model.factory())
-                chain.setNeuralModel (std::move (runner), model.config);
+        if (model.factory == nullptr)
+            return;
+        auto runner = model.factory();
+        if (runner == nullptr)
+            return;
+        flub::NeuralSlotConfig config = model.config;
+        if (model.safetyRule == NeuralSafety::OneDeviceBuffer)
+            config.processor.safetyFrames = safetyFramesForBuffer (currentBlockSize, runner->describe().frameSize);
+        chain.setNeuralModel (std::move (runner), config);
     };
 
     auto next = std::make_unique<EngineInstance>();

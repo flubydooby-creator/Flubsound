@@ -9,11 +9,13 @@
 //   output = input delayed by L, times the smoothed controls
 //   (BandGains: input delayed by safetyFrames frames, then the band renderer)
 //
-// Latency. L = frameSize * (1 + safetyFrames), reported by latencySamples()
-// and constant for the processor's lifetime. The control computed from input
+// Latency. L = frameSize * (1 + safetyFrames) for BroadbandGain and
+// ChannelGains, frameSize * (2 + safetyFrames) for BandGains (its overlap-add
+// adds one frame, see "Band gains" below), reported by latencySamples() and
+// constant for the processor's lifetime. The control computed from input
 // frame k is applied to exactly the samples of frame k when they leave the
 // delay line, so the worker has safetyFrames frame periods from the moment
-// frame k is complete to deliver its result. That budget must cover one host
+// frame k is complete to deliver its result (the same for every kind). That budget must cover one host
 // block, the model's worst-case run time, the worker's poll interval and
 // scheduling jitter. The block is a hard limit: a result can only be picked
 // up by a later process() call than the one that submitted its frame, so
@@ -116,7 +118,9 @@ namespace flub
 {
 struct AsyncModelConfig
 {
-    int safetyFrames = 1;             // 0 .. 16 frames of head room for the worker (L = frameSize * (1 + safetyFrames))
+    static constexpr int kMaxSafetyFrames = 16;
+    int safetyFrames = 1;             // 0 .. kMaxSafetyFrames frames of head room for the worker
+                                      // (L = frameSize * (1 + safetyFrames); BandGains: frameSize * (2 + safetyFrames))
     int fallbackAfterFrames = 4;      // K >= 1: consecutive missed / failed frames before the ramp to neutral
     float controlRampMs = 5.0f;       // every control change is a linear ramp this long (>= 1 sample)
     float maxGain = 4.0f;             // controls are clamped to [0, maxGain] (+12 dB by default)

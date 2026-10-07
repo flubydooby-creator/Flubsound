@@ -318,13 +318,14 @@ presets/factory next to the executable or up to four parent folders above it,
 )";
 
 const char* const kDemoHelp = R"(flubsound-cli demo [--input file.wav] [--out <dir>] [--seconds S] [--jobs N] [--format f32|pcm24|pcm16]
+                   [--only <pair>[,<pair>...]]
 
 Renders the by-ear demo pack: before / after WAV pairs through the Flubsound
 processing chain, one pair per feature, and index.txt, which says per pair
 how both sides were set (`process --set` options), what changed in numbers
 and what to listen for.
 
-  Pairs (62): every macro of both modes 0 -> 100 % (Music: Punch, Width,
+  Pairs (63): every macro of both modes 0 -> 100 % (Music: Punch, Width,
   Clarity, Loudness, Warmth; Gaming: Footsteps, Positional, Impact, Detail,
   Voice & Score), Punch and Impact at Boost 100, Boost 0 -> 50 and 0 -> 100
   in both modes, Smoothness, the shaper's Attack Low / High, Relative
@@ -336,7 +337,8 @@ and what to listen for.
   preamp, latency profile, protection) and the app's own settings (Smart
   macros, the headset enhancement cap, the safe speaker bass cap, a
   headphone correction, the per-ear profile, the hearing cap, the chat duck
-  and ChatMix). docs/12-feature-guide.md names the pair of every control.
+  and ChatMix) and the experimental neural voice cleanup (on speech in a
+  noisy room). docs/12-feature-guide.md names the pair of every control.
 
   * Programmes: built-in synthetic music, speech and a game scene (steps,
     gunshots, explosions, a voice line; a 7.1 version for the virtualiser),
@@ -352,10 +354,15 @@ and what to listen for.
     needed; existing pack files are replaced). --format: default pcm24
     (TPDF dithered). --jobs: parallel renders (default: CPU cores). The same
     options give the same files, whatever --jobs is.
+  * --only: just these pairs, by name (the file names without the number:
+    neural-voice-cleanup, music-warmth, ...); comma-separated or repeated.
+    The files are numbered in the order rendered, so a pair's number
+    differs from the full pack's.
 
 Examples:
   flubsound-cli demo
   flubsound-cli demo --input "My Song.wav" --out my-song-demo
+  flubsound-cli demo --only neural-voice-cleanup --out demo-neural
 )";
 
 void printHelp (const std::string& topic, std::FILE* stream)
