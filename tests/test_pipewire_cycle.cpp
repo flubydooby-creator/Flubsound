@@ -1,13 +1,16 @@
-// Flubsound Pro - the native PipeWire node's cycle bookkeeping (R1.2,
-// app/Source/platform/pipewire/PipeWireCycle.h): the driver time each block
-// of a split quantum is stamped with, and the xrun count the "PipeWire"
-// device reports through juce::AudioIODevice::getXRunCount. Plain C++ with
-// made-up driver clocks, so it runs on every platform (the cycle runner's
-// buffer handling is tested in test_platform_linux.cpp, the node against a
-// real server in tests/app/test_app_pipewire.cpp).
+// Flubsound Pro - the native PipeWire node's bookkeeping that needs no
+// server (R1.2, app/Source/platform/pipewire/PipeWireCycle.h and
+// PipeWireGraph.h): the driver time each block of a split quantum is stamped
+// with, the xrun count the "PipeWire" device reports through
+// juce::AudioIODevice::getXRunCount, and the first start's choice of the
+// node only where PipeWire plays audio. Plain C++ with made-up driver clocks
+// and graphs, so it runs on every platform (the cycle runner's buffer
+// handling and the link plans are tested in test_platform_linux.cpp, the
+// node against a real server in tests/app/test_app_pipewire.cpp).
 #include "TestFramework.h"
 
 #include "../app/Source/platform/pipewire/PipeWireCycle.h"
+#include "../app/Source/platform/pipewire/PipeWireGraph.h"
 
 #include <cstdint>
 #include <vector>
@@ -194,4 +197,109 @@ TEST_CASE ("Platform: the native node counts a late cycle and missed cycles as x
     CHECK (counter.count() == 0);
     CHECK (! counter.cycleDone (steady (10000), steady (10000).nsec));
     CHECK (counter.count() == 0);
+}
+
+TEST_CASE ("Platform: the native node does not judge its first cycles after a start or a pause - a late start-up cycle is no xrun, a later one is (R1.2)")
+{
+    constexpr uint64_t kInTimeNs = 1000000u; // finished 1 ms into the cycle
+    static_assert (pipewire::XrunCounter::kSettleCycles == 2);
+
+    // A new run: its first two cycles finish late (the data thread and the
+    // engine start cold): they only set the baseline. The third is judged.
+    pipewire::XrunCounter counter;
+    {
+        flubtest::AllocationGuard guard;
+        CHECK (! counter.cycleDone (steady (0), steady (0).nsec + 2 * kPeriodNs));
+        CHECK (! counter.cycleDone (steady (1), steady (1).nsec + kPeriodNs + 1));
+        CHECK (counter.count() == 0);
+        CHECK (counter.cycleDone (steady (2), steady (2).nsec + kPeriodNs + 1));
+        CHECK (counter.count() == 1);
+        CHECK (guard.allocations() == 0);
+    }
+
+    // reset() (the next open): the same again, from zero.
+    counter.reset();
+    CHECK (counter.count() == 0);
+    CHECK (! counter.cycleDone (steady (100), steady (100).nsec + 3 * kPeriodNs));
+    CHECK (! counter.cycleDone (steady (101), steady (101).nsec + kInTimeNs));
+    CHECK (counter.cycleDone (steady (102), steady (102).nsec + kPeriodNs + 1));
+    CHECK (counter.count() == 1);
+
+    // Paused and streaming again on the same driver, which ran 500 cycles
+    // without the node. restart() (the filter entered STREAMING): the jump is
+    // no missed cycle and the first two cycles after it are not judged, even
+    // a late one; the count is kept, and a real gap after them counts again.
+    for (uint64_t k = 103; k < 110; ++k)
+        CHECK (! counter.cycleDone (steady (k), steady (k).nsec + kInTimeNs));
+    counter.restart();
+    counter.restart(); // twice before the next cycle: one restart
+    {
+        flubtest::AllocationGuard guard;
+        CHECK (! counter.cycleDone (steady (610), steady (610).nsec + 2 * kPeriodNs));
+        CHECK (! counter.cycleDone (steady (611), steady (611).nsec + kInTimeNs));
+        CHECK (guard.allocations() == 0);
+    }
+    CHECK (counter.count() == 1);
+    CHECK (! counter.cycleDone (steady (612), steady (612).nsec + kInTimeNs));
+    CHECK (counter.cycleDone (steady (614), steady (614).nsec + kInTimeNs)); // one cycle missed
+    CHECK (counter.count() == 2);
+
+    // Without restart() the same pause reads as 500 missed cycles (one xrun):
+    // why the node calls it whenever it streams again.
+    pipewire::XrunCounter noRestart;
+    for (uint64_t k = 0; k < 5; ++k)
+        CHECK (! noRestart.cycleDone (steady (k), steady (k).nsec + kInTimeNs));
+    CHECK (noRestart.cycleDone (steady (505), steady (505).nsec + kInTimeNs));
+    CHECK (noRestart.count() == 1);
+
+    // A restart whose next cycle carries no clock (no rate or duration):
+    // still a fresh baseline, and the settling waits for real cycles.
+    noRestart.restart();
+    CHECK (! noRestart.cycleDone (pipewire::CycleClock {}, kStartNs));
+    CHECK (! noRestart.cycleDone (steady (900), steady (900).nsec + 2 * kPeriodNs));
+    CHECK (! noRestart.cycleDone (steady (901), steady (901).nsec + kInTimeNs));
+    CHECK (noRestart.cycleDone (steady (902), steady (902).nsec + kPeriodNs + 1));
+    CHECK (noRestart.count() == 2);
+}
+
+namespace
+{
+pipewire::Node graphNode (uint32_t id, const std::string& name, const std::string& mediaClass)
+{
+    pipewire::Node node;
+    node.id = id;
+    node.name = name;
+    node.mediaClass = mediaClass;
+    return node;
+}
+} // namespace
+
+TEST_CASE ("Platform: a first start prefers the PipeWire node only where PipeWire plays audio - an output sink that is not Flubsound's own (R1.2)")
+{
+    const auto strips = pipewire::defaultStrips();
+    const std::string card = "alsa_output.pci-0000_00_1f.3.analog-stereo";
+
+    // A PipeWire run for screen capture and cameras beside PulseAudio: it
+    // answers, but its graph has no output, so the first start keeps ALSA
+    // (pulse-alsa) instead of a node that would play into nothing.
+    pipewire::Graph capture;
+    capture.nodes[30] = graphNode (30, "v4l2_input.pci-0000_00_14.0-usb-0_5_1.0", "Video/Source");
+    capture.nodes[31] = graphNode (31, "xdg-desktop-portal-gnome", "Stream/Input/Video");
+    capture.nodes[32] = graphNode (32, "alsa_input.usb-microphone", "Audio/Source"); // a source is not an output
+    CHECK (! pipewire::playsAudio (capture, "", strips));
+    CHECK (! pipewire::playsAudio (capture, card, strips)); // a default named in the metadata but not in the graph
+    capture.nodes[40] = graphNode (40, "flubsound_game", "Audio/Sink"); // only Flubsound's own sinks: no output either
+    capture.nodes[41] = graphNode (41, "flubsound_system", "Audio/Sink");
+    CHECK (! pipewire::playsAudio (capture, "flubsound_system", strips));
+
+    // A PipeWire desktop: a sound card's sink, the default or not, or
+    // WirePlumber's fallback "Dummy Output" while no card is up.
+    pipewire::Graph desktop = capture;
+    desktop.nodes[50] = graphNode (50, card, "Audio/Sink");
+    CHECK (pipewire::playsAudio (desktop, card, strips));
+    CHECK (pipewire::playsAudio (desktop, "", strips));
+    CHECK (pipewire::playsAudio (desktop, "flubsound_system", strips)); // System made the default: the card is still there
+    pipewire::Graph fallback;
+    fallback.nodes[60] = graphNode (60, "auto_null", "Audio/Sink");
+    CHECK (pipewire::playsAudio (fallback, "auto_null", strips));
 }

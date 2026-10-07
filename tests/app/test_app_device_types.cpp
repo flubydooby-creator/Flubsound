@@ -138,10 +138,25 @@ ui::HotkeyHooks noHotkeys()
 TEST_CASE ("App: Settings > Audio notes what the device type means for other apps: ASIO and exclusive mode serve Flubsound alone, PipeWire links itself (R1.2, docs/08 D10)")
 {
     using ui::SettingsDialog;
+    // ASIO and exclusive mode exist on Windows only, where Flubsound has no
+    // virtual devices (R4.6: the driver is a design): the notes give the way
+    // in that works there, the per-app capture with the app's own output on
+    // another device (the double-audio fix), and a shared type.
     const auto asio = SettingsDialog::describeDeviceTypeNote ("ASIO");
     CHECK (asio.contains ("one application at a time"));
-    CHECK (asio.contains ("Flubsound's virtual devices"));
-    CHECK (SettingsDialog::describeDeviceTypeNote ("Windows Audio (Exclusive Mode)").contains ("to Flubsound alone"));
+    CHECK (asio.contains ("Assign app to strip"));
+    CHECK (asio.contains ("Volume mixer"));
+    CHECK (asio.contains ("\"Windows Audio\""));
+    const auto exclusive = SettingsDialog::describeDeviceTypeNote ("Windows Audio (Exclusive Mode)");
+    CHECK (exclusive.contains ("to Flubsound alone"));
+    CHECK (exclusive.contains ("Assign app to strip"));
+    CHECK (exclusive.contains ("Volume mixer"));
+    CHECK (exclusive.contains ("virtual cable chosen as Flubsound's input"));
+    for (const auto& note : { asio, exclusive })
+    {
+        CHECK (! note.containsIgnoreCase ("virtual device"));
+        CHECK (! note.containsIgnoreCase ("Flubsound device"));
+    }
     CHECK (SettingsDialog::describeDeviceTypeNote (flub::platform::pipewire::kDeviceTypeName).contains ("linking everything itself"));
     for (const auto* shared : { "Windows Audio", "Windows Audio (Low Latency Mode)", "CoreAudio", "ALSA", "JACK", "" })
         CHECK (SettingsDialog::describeDeviceTypeNote (shared).isEmpty());
@@ -172,9 +187,26 @@ TEST_CASE ("App: Settings > Audio notes what the device type means for other app
         manager.closeAudioDevice();
         return shown;
     };
+    // The note sits under the selector: picking a type with a note never
+    // moves the selector's combo boxes (R1.2 review), and nothing overlaps.
+    CHECK (showsNoteFor ("Stand-in shared type").isEmpty());
+    const auto selectorWithout = settings.getAudioDeviceSelectorBounds();
+    CHECK (settings.getAudioDeviceTypeNoteBounds().isEmpty());
+    const auto checkPlacement = [&] (const juce::String& type)
+    {
+        const auto selector = settings.getAudioDeviceSelectorBounds();
+        const auto note = settings.getAudioDeviceTypeNoteBounds();
+        CHECK (selector.getY() == selectorWithout.getY());
+        CHECK (! note.isEmpty());
+        CHECK (note.getY() >= selector.getBottom());
+        if (selector.getY() != selectorWithout.getY() || note.getY() < selector.getBottom())
+            std::cout << "    " << type << ": selector " << selector.toString() << " (without a note " << selectorWithout.toString() << "), note "
+                      << note.toString() << "\n";
+    };
     if (! realAsio)
     {
         CHECK (showsNoteFor ("ASIO") == asio);
+        checkPlacement ("ASIO");
         CHECK (settings.createComponentSnapshot (settings.getLocalBounds(), true, 1.0f).isValid()); // the note's box paints
     }
     else
@@ -182,7 +214,10 @@ TEST_CASE ("App: Settings > Audio notes what the device type means for other app
         std::cout << "    (ASIO is built in: the page is checked with the stand-in types; no real ASIO driver is opened)\n";
     }
     CHECK (showsNoteFor (flub::platform::pipewire::kDeviceTypeName) == SettingsDialog::describeDeviceTypeNote ("PipeWire"));
+    checkPlacement (flub::platform::pipewire::kDeviceTypeName);
     CHECK (showsNoteFor ("Stand-in shared type").isEmpty());
+    CHECK (settings.getAudioDeviceTypeNoteBounds().isEmpty());
+    CHECK (settings.getAudioDeviceSelectorBounds().getY() == selectorWithout.getY());
 }
 
 TEST_CASE ("App: JUCE 9.0.2's AudioDeviceManager drops a device's audioDeviceError - why the PipeWire device reports to the host directly (R1.2)")

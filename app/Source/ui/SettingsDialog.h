@@ -14,15 +14,17 @@
 //               this pair" for a deliberate cable monitor and the allowed
 //               pairs with Remove; and "Follow the system default output"
 //               (docs/11 E51, off by default; choosing an output in the
-//               selector turns it off). Above the selector, a note on the
+//               selector turns it off). Under the selector, a note on the
 //               current device type when it has one (R1.2, docs/08 D10 / D2:
-//               ASIO and exclusive mode serve one application, the native
-//               PipeWire node links itself). Under the selector, LATENCY
-//               (LatencyPanel.h, docs/11 E42c / E42d): "Automatic buffer
-//               size" (on by default; picking a size in the selector's buffer
-//               list turns it off) with the buffer and the latency the device
-//               reports, and "Measure latency..." (device only / through
-//               Flubsound / both) with its progress and result.
+//               ASIO and exclusive mode serve one application, and how other
+//               apps get through Flubsound on Windows; the native PipeWire
+//               node links itself). Under that note (or right under the
+//               selector when the type has none), LATENCY (LatencyPanel.h,
+//               docs/11 E42c / E42d): "Automatic buffer size" (on by
+//               default; picking a size in the selector's buffer list turns
+//               it off) with the buffer and the latency the device reports,
+//               and "Measure latency..." (device only / through Flubsound /
+//               both) with its progress and result.
 //   Correction  the output device's headphone / speaker correction (docs/11
 //               E15): import an AutoEQ or Equalizer APO / Peace
 //               ParametricEQ.txt, switch it on / off, hold a level-fair
@@ -209,15 +211,22 @@ public:
     static juce::String describeContourCurve (const ContourCurve& curve, float trimDb);
 
     /** The Audio page's note on a device type (R1.2): "ASIO" (docs/08 D10:
-        ASIO drivers are usually single-client, so other apps play through
-        Flubsound's virtual devices), "Windows Audio (Exclusive Mode)"
-        (docs/08 D2: the output is Flubsound's alone) and "PipeWire" (the
-        native node makes and links its sinks itself); empty for any other
-        type. */
+        ASIO drivers are usually single-client) and "Windows Audio
+        (Exclusive Mode)" (docs/08 D2: the output is Flubsound's alone),
+        both with the way in for other apps that works on Windows today
+        (per-app capture with the app's own output on another device, or a
+        cable on exclusive mode's input; no virtual devices exist there),
+        and "PipeWire" (the native node makes and links its sinks itself);
+        empty for any other type. */
     static juce::String describeDeviceTypeNote (const juce::String& deviceTypeName);
     /** The note the Audio page shows, refreshed now as its timer would
         (tests); empty when none. */
     juce::String getAudioDeviceTypeNote();
+    /** The Audio page's device selector and its type note (empty when none),
+        in page coordinates, as last laid out (tests: the note sits under
+        the selector, so it never moves the selector). */
+    juce::Rectangle<int> getAudioDeviceSelectorBounds() const;
+    juce::Rectangle<int> getAudioDeviceTypeNoteBounds() const;
 
     /** The Audio page's feedback-loop guard text (docs/11 E51): whether the
         output is muted for a loopback pair and which pair, or that the

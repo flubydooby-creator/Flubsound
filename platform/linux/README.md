@@ -621,17 +621,37 @@ links:
   PipeWire-only: on PulseAudio the router suggests choosing a sink's
   monitor as the input device (above). This path is documented, not
   tested: no CI job or run here has had a PulseAudio-only system.
+- **Which type a first start opens.** With nothing saved the app prefers
+  the "PipeWire" type only when a PipeWire server answers *and* plays the
+  audio: its graph has an output sink that is not one of Flubsound's own
+  (`pipewire::serverPlaysAudio`, which connects a probe session for a few
+  ms, and the pure check `pipewire::playsAudio`). Otherwise it keeps
+  JUCE's default (ALSA) and says why on stderr. The library alone is not
+  enough (R1.2 review): many PulseAudio desktops have libpipewire
+  installed, and some run a PipeWire daemon for screen capture beside
+  PulseAudio, which answers but has no audio sink; the node would play
+  into nothing there. In both cases the "PipeWire" entry stays listed.
+  The choice is unit-tested with made-up graphs
+  (`tests/test_pipewire_cycle.cpp`, every OS) and the probe on CI's
+  headless server; no PulseAudio desktop has run it.
 - **Xruns.** libpipewire has no xrun event for a client, so the node counts
   its own (`pipewire::XrunCounter`, after each cycle on the data thread):
   a cycle it finished after the next one was due (the driver's `nsec` +
   one quantum, PipeWire's own xrun), or a position that skipped ahead on
   the same driver (cycles run without it); a new driver, rate or a restart
-  re-bases without counting. The device reports it through
+  re-bases without counting. The first two cycles of a run, and the first
+  two after the filter enters `STREAMING` again (a pause, during which the
+  graph may run on without it), are not judged
+  (`XrunCounter::kSettleCycles`, `restart()` from the state callback;
+  R1.2 review: a run's first cycle was often late on an idle server, which
+  showed `· 1 xr` after an open). The device reports it through
   `getXRunCount()`, so the header shows `· 3 xr` and the overload watchdog
   counts the node's xruns as it counts a JUCE backend's. Each callback
   also carries the driver's time (`hostTimeNs`: the cycle's start plus the
   block's offset), so the callback timing (docs/11 E45) follows the
-  graph's cadence even when a large quantum is split into blocks.
+  graph's cadence even when a large quantum is split into blocks. Its
+  intervals are therefore the driver's clock, not when the data thread
+  woke: a late wake-up shows as an xrun, not as a late interval.
 - **When PipeWire takes the node away.** If the server quits or restarts
   (the connection drops) or removes the node (`pw-cli destroy`, a
   patchbay), the node tells the device once (`nodeError`, on the loop
@@ -646,7 +666,10 @@ links:
   `audioDeviceError`. Tested on CI with `pw-cli destroy` (the error 12 – 14
   ms after it, callbacks again 260 – 281 ms after it with the test's 100 ms
   settle time; the app waits 1.5 s); a server restart takes the same path
-  but is not tested.
+  but is not tested. Closing the device drops an error the message thread
+  has not handled yet (R1.2 review): JUCE re-opens the same device object
+  for a new rate or buffer size, and the old node's error must not reach
+  the new run as a device-error banner.
 
 Also open: the Flatpak build with the Realtime and GlobalShortcuts
 portals, a headless mode for SteamOS Game Mode, moving applications
@@ -674,15 +697,21 @@ stream to a Game sink through the real `pactl` router and is killed with
 SIGKILL; WirePlumber then sends the application's next stream to the
 Game sink too; the restart moves both back to the default output, and
 with another default output the application's next stream follows it (the
-restore-stream entry is gone). R1.2 added three cases there: the run-time
+restore-stream entry is gone). R1.2 added four cases there: the run-time
 loading (a missing soname is reported and offers no device type; the
 installed library resolves every entry point; this one needs no server),
 the device's xruns and time stamps (0.6 s on the idle test server: one
-callback per block at the graph's cadence, none late, no xrun) and the
-recovery (`pw-cli destroy` on the device's node: the host gets the error
-and re-opens the device with a new node by itself); and
-`tests/test_pipewire_cycle.cpp` tests the xrun count and the block time
-stamps with made-up clocks on every OS. CI's `app` job also hides
+callback per block at the graph's cadence, none late, no xrun; since the
+review also on the wall clock, read by a second callback next to the
+driver's stamp), the hot-plug (a second sink made the default takes the
+outputs, and they move to the remaining sink when it goes, without a
+re-open) and the recovery (`pw-cli destroy` on the device's node: the host
+gets the error and re-opens the device with a new node by itself). The
+review added a fifth, the stale error (a node error still pending when
+JUCE re-opens the same device object for a new buffer size never reaches
+the host). `tests/test_pipewire_cycle.cpp` tests the xrun count (with the
+settling after a start or a pause), the block time stamps and the first
+start's choice with made-up clocks and graphs on every OS. CI's `app` job also hides
 `libpipewire-0.3.so.0` for one step: the app still renders and the loading
 case takes its "not installed" branch. Without a server the tests print
 "skipped"; the app-level and crash cases also skip on a server with real

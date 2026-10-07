@@ -106,31 +106,59 @@ struct CycleClock
     A cycle that is both counts once. A new driver (the output moved to
     another device), a new rate, a position that went backwards (the driver
     restarted) or freewheeling re-bases the comparison without counting.
-    Real time: cycleDone() is wait-free; count() from any thread. */
+    The first kSettleCycles cycles of a run (after reset()) and after the node
+    streams again (restart(): PipeWire paused and resumed it, while the graph
+    may have run on without it) are not judged; they only set the baseline.
+    Real time: cycleDone() is wait-free; count() and restart() from any
+    thread. */
 class XrunCounter
 {
 public:
+    /** Cycles not judged at the start of a run or after a pause. A run's
+        first cycle is often late without anything going wrong: the data
+        thread and the engine start cold, and the node joins a graph that is
+        already running (CI, before this: 1 xrun within the first 20 cycles
+        in 4 to 9 of 20 runs on an idle server, none in the 0.6 s after). */
+    static constexpr int kSettleCycles = 2;
+
     /** Not real time (before the node starts): back to zero, no baseline. */
     void reset() noexcept
     {
         haveLast = false;
+        settle = kSettleCycles;
+        restartPending.store (false, std::memory_order_relaxed);
         xruns.store (0, std::memory_order_relaxed);
     }
+
+    /** Any thread, wait-free (the loop thread, when the node enters
+        streaming again): the next cycle starts a new baseline, and it and
+        the one after are not judged. The count is kept. */
+    void restart() noexcept { restartPending.store (true, std::memory_order_release); }
 
     /** Real time, once per cycle: 'doneNs' is when this node finished the
         cycle (CLOCK_MONOTONIC ns). True when the cycle counts as an xrun. */
     bool cycleDone (const CycleClock& cycle, uint64_t doneNs) noexcept FLUB_NONBLOCKING
     {
+        if (restartPending.load (std::memory_order_relaxed) && restartPending.exchange (false, std::memory_order_acquire))
+        {
+            haveLast = false;
+            settle = kSettleCycles;
+        }
         if (cycle.freewheel || cycle.rate == 0 || cycle.duration == 0)
         {
             haveLast = false;
             return false;
         }
         bool xrun = false;
-        if (cycle.nsec != 0 && doneNs > cycle.nsec + cycle.duration * CycleRunner::kNsPerSecond / cycle.rate)
-            xrun = true; // late
-        if (haveLast && cycle.driverId == lastDriver && cycle.rate == lastRate && cycle.position > lastPosition + lastDuration)
-            xrun = true; // missed
+        if (settle > 0)
+            --settle; // settling: a baseline only
+        else
+        {
+            if (cycle.nsec != 0 && doneNs > cycle.nsec + cycle.duration * CycleRunner::kNsPerSecond / cycle.rate)
+                xrun = true; // late
+            if (haveLast && cycle.driverId == lastDriver && cycle.rate == lastRate && cycle.position > lastPosition + lastDuration)
+                xrun = true; // missed
+        }
         haveLast = true;
         lastDriver = cycle.driverId;
         lastRate = cycle.rate;
@@ -144,9 +172,12 @@ public:
     int count() const noexcept { return xruns.load (std::memory_order_relaxed); }
 
 private:
+    // The data thread's own (cycleDone), or before the node starts (reset):
     bool haveLast = false;
+    int settle = kSettleCycles;
     uint32_t lastDriver = 0, lastRate = 0;
     uint64_t lastPosition = 0, lastDuration = 0;
+    std::atomic<bool> restartPending { false };
     std::atomic<int> xruns { 0 };
 };
 } // namespace flub::platform::pipewire

@@ -32,13 +32,17 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <cmath>
 #include <iostream>
+#include <string>
 #include <thread>
+#include <vector>
 
 using namespace flub::app;
 using namespace flub::platform;
@@ -533,7 +537,12 @@ TEST_CASE ("App: the running app offers the PipeWire device and plays through it
     auto& manager = controller.getDeviceManager();
 
     // Offered after JUCE's own types, and the first-run choice when a
-    // PipeWire server answers.
+    // PipeWire server answers and plays audio (R1.2: an output sink that is
+    // not Flubsound's; the test's own sink is one).
+    std::string notPlaying;
+    CHECK (pipewire::serverPlaysAudio (notPlaying));
+    if (! notPlaying.empty())
+        std::cout << "    first start: " << notPlaying << "\n";
     bool offered = false;
     for (auto* type : manager.getAvailableDeviceTypes())
         offered = offered || type->getTypeName() == pipewire::kDeviceTypeName;
@@ -640,6 +649,42 @@ juce::String openNodeDevice (AudioEngineHost& host)
     state.setAttribute ("audioDeviceBufferSize", 256);
     return host.openDevice (&state, 14, 2);
 }
+
+/** A second device-manager callback that reads the steady clock (on Linux
+    CLOCK_MONOTONIC, the clock of the driver's clock.nsec) in each device
+    callback, right after the engine's, next to the driver time the device
+    stamped it with. The stamps alone cannot show that callbacks ran on
+    time: they are the driver's cycle start plus the block's offset (R1.2
+    review). Preallocated; writes silence. */
+class WallClockRecorder final : public juce::AudioIODeviceCallback
+{
+public:
+    WallClockRecorder() : wallNs (kCapacity, 0), stampNs (kCapacity, 0) {}
+
+    void audioDeviceIOCallbackWithContext (const float* const*, int, float* const* outputs, int numOutputs, int numSamples,
+                                           const juce::AudioIODeviceCallbackContext& context) override
+    {
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
+        for (int c = 0; c < numOutputs; ++c)
+            if (outputs[c] != nullptr)
+                std::fill (outputs[c], outputs[c] + numSamples, 0.0f);
+        if (! recording.load (std::memory_order_acquire))
+            return;
+        const auto i = count.load (std::memory_order_relaxed);
+        if (i >= kCapacity)
+            return;
+        wallNs[i] = static_cast<int64_t> (now);
+        stampNs[i] = context.hostTimeNs != nullptr ? static_cast<int64_t> (*context.hostTimeNs) : 0;
+        count.store (i + 1, std::memory_order_release);
+    }
+    void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
+    void audioDeviceStopped() override {}
+
+    static constexpr size_t kCapacity = 8192;
+    std::atomic<bool> recording { false };
+    std::atomic<size_t> count { 0 };
+    std::vector<int64_t> wallNs, stampNs;
+};
 } // namespace
 
 TEST_CASE ("App: libpipewire is opened at run time - a missing library is reported and offers no PipeWire type, the installed one resolves every entry point (E48, R1.2)")
@@ -691,32 +736,86 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
     REQUIRE (device != nullptr);
     CHECK (pipewire::setDeviceOutputTarget (device, out));
     CHECK (device->getXRunCount() >= 0); // counted (JUCE's "not supported" is -1)
+    WallClockRecorder wall;
+    host.getDeviceManager().addAudioCallback (&wall);
 
-    // Past the first cycles, then 0.6 s measured (the 2 s rule): one callback
-    // per block of min (quantum, 256) frames, stamped by the driver's clock.
-    CHECK (waitUntil ([&] { return pipewire::getDeviceStatus (device).quantumFrames != 0 && host.getStatus().callbacks > 20; }));
+    // Past the first cycles (watching for a start-up xrun: the node does not
+    // judge its first XrunCounter::kSettleCycles), then 0.6 s measured (the
+    // 2 s rule): one callback per block of min (quantum, 256) frames.
+    long long firstXrunNear = -1; // the engine's callback count when the first xrun was seen
+    CHECK (waitUntil ([&] {
+        if (firstXrunNear < 0 && device->getXRunCount() > 0)
+            firstXrunNear = static_cast<long long> (host.getStatus().callbacks);
+        return pipewire::getDeviceStatus (device).quantumFrames != 0 && host.getStatus().callbacks > 20;
+    }));
     const auto before = host.getStatus();
     const auto xrunsBefore = device->getXRunCount();
+    wall.recording.store (true, std::memory_order_release);
     const auto start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for (std::chrono::milliseconds (600));
     const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
+    wall.recording.store (false, std::memory_order_release);
     const auto after = host.getStatus();
     const auto node = pipewire::getDeviceStatus (device);
     const auto xrunsAfter = device->getXRunCount();
     REQUIRE (node.sampleRate != 0);
     const double block = std::min (256.0, static_cast<double> (node.quantumFrames));
+    const double periodNs = 1.0e9 * block / node.sampleRate;
     const double expected = seconds * node.sampleRate / block;
     const auto callbacks = static_cast<double> (after.callbacks - before.callbacks);
     const auto timing = after.callbackTiming.since (before.callbackTiming);
     std::cout << "    " << seconds << " s on the node: " << callbacks << " callbacks (expected " << expected << ", quantum " << node.quantumFrames << "/"
-              << node.sampleRate << "), xruns " << xrunsBefore << " -> " << xrunsAfter << ", late intervals " << timing.late << ", mean interval "
-              << timing.interval.meanNs() / 1.0e6 << " ms\n";
+              << node.sampleRate << "), xruns " << xrunsBefore << " -> " << xrunsAfter << " (start-up: "
+              << (firstXrunNear < 0 ? std::string ("none") : "first seen near callback " + std::to_string (firstXrunNear)) << "), late intervals "
+              << timing.late << ", mean interval " << timing.interval.meanNs() / 1.0e6 << " ms (driver clock)\n";
     CHECK (after.xruns == xrunsAfter); // the engine status carries the device's count
     CHECK (xrunsAfter == xrunsBefore); // none while idle
     CHECK_NEAR (callbacks, expected, expected * 0.1);
+    // E45 takes the interval from the host time when the device gives one,
+    // so on this device the histogram is the driver's cadence (it cannot
+    // show a late wake-up; the xrun count does). These two follow from the
+    // stamps; the wall-clock checks below are the independent ones.
     CHECK (timing.late == 0);
-    CHECK_NEAR (timing.interval.meanNs(), 1.0e9 * block / node.sampleRate, 0.1e9 * block / node.sampleRate);
+    CHECK_NEAR (timing.interval.meanNs(), periodNs, 0.1 * periodNs);
 
+    // Wall clock: the callbacks really ran at the graph's cadence, and each
+    // ran (up to the end of the engine's work, where the recorder reads the
+    // clock) before its cycle's deadline: within one quantum of the driver's
+    // cycle start (no quantum split here: block = quantum <= 256).
+    const auto recorded = wall.count.load (std::memory_order_acquire);
+    REQUIRE (recorded > 10);
+    const double wallMeanNs = static_cast<double> (wall.wallNs[recorded - 1] - wall.wallNs[0]) / static_cast<double> (recorded - 1);
+    int64_t maxIntervalNs = 0, maxDelayNs = std::numeric_limits<int64_t>::min();
+    int wideIntervals = 0; // a wake-up more than half a period off its cadence
+    std::vector<int64_t> delays;
+    for (size_t i = 0; i < recorded; ++i)
+    {
+        if (i > 0)
+        {
+            const auto interval = wall.wallNs[i] - wall.wallNs[i - 1];
+            maxIntervalNs = std::max (maxIntervalNs, interval);
+            wideIntervals += static_cast<double> (interval) > 1.5 * periodNs ? 1 : 0;
+        }
+        if (wall.stampNs[i] != 0)
+        {
+            delays.push_back (wall.wallNs[i] - wall.stampNs[i]);
+            maxDelayNs = std::max (maxDelayNs, delays.back());
+        }
+    }
+    REQUIRE (! delays.empty());
+    std::sort (delays.begin(), delays.end());
+    const auto medianDelayNs = delays[delays.size() / 2];
+    std::cout << "    wall clock: " << recorded << " callbacks, mean interval " << wallMeanNs / 1.0e6 << " ms, max " << static_cast<double> (maxIntervalNs) / 1.0e6
+              << " ms, " << wideIntervals << " over 1.5 periods; done after the cycle start: median " << static_cast<double> (medianDelayNs) / 1.0e6
+              << " ms, max " << static_cast<double> (maxDelayNs) / 1.0e6 << " ms (period " << periodNs / 1.0e6 << " ms)\n";
+    CHECK_NEAR (wallMeanNs, periodNs, 0.1 * periodNs);
+    if (static_cast<double> (node.quantumFrames) <= block)
+    {
+        CHECK (medianDelayNs >= 0);                              // the stamps are on the same clock, not in the future
+        CHECK (static_cast<double> (maxDelayNs) < periodNs);     // every callback finished within its cycle
+    }
+
+    host.getDeviceManager().removeAudioCallback (&wall);
     host.closeDevice();
     sinkNode->stop();
 }
@@ -840,6 +939,67 @@ TEST_CASE ("App: the PipeWire device comes back by itself when the server remove
 
     host.closeDevice();
     CHECK (! hasNode (nodeNames(), "flubsound_game")); // the device's sinks went with it
+}
+
+TEST_CASE ("App: the PipeWire device drops its node's error when it is re-opened before the error is handled - no stale device error after a buffer change (E48, R1.2)")
+{
+    if (! serverAvailable() || ! isTestServer())
+        return;
+    if (hasNode (nodeNames(), "flubsound_game"))
+    {
+        std::cerr << "    (skipped: this server already has Flubsound's sinks)\n";
+        return;
+    }
+    if (std::system ("command -v pw-cli > /dev/null 2>&1") != 0)
+    {
+        std::cerr << "    (skipped: needs pw-cli)\n";
+        return;
+    }
+
+    juce::StringArray errors; // outlives the host
+    AudioEngineHost host;
+    AudioEngineHost::RecoveryTiming fast;
+    fast.settleMs = 100;
+    fast.firstRetryMs = 100;
+    fast.maxRetryMs = 400;
+    host.setRecoveryTiming (fast);
+    host.onDeviceError = [&errors] (const juce::String& message) { errors.add (message); };
+    CHECK (openNodeDevice (host).isEmpty()); // plays to the test server's default (null) sink
+    auto& manager = host.getDeviceManager();
+    auto* device = manager.getCurrentAudioDevice();
+    REQUIRE (device != nullptr);
+    CHECK (waitUntil ([&] { return pipewire::getDeviceStatus (device).nodeId != 0 && host.getStatus().callbacks > 10; }));
+    const auto oldNode = pipewire::getDeviceStatus (device).nodeId;
+
+    // The node goes away; its error waits for the message thread, which this
+    // test does not run yet (waitUntil only sleeps).
+    CHECK (std::system (("pw-cli destroy " + std::to_string (oldNode) + " > /dev/null 2>&1").c_str()) == 0);
+    CHECK (waitUntil ([&] { return pipewire::getPendingDeviceError (device).isNotEmpty(); }));
+    const auto pending = pipewire::getPendingDeviceError (device);
+
+    // Before the message thread handles it, JUCE re-opens the same device
+    // object for a new buffer size (setAudioDeviceSetup: open() on the open
+    // device, which closes it first): a new run with a new node. The old
+    // run's error must not reach the host now (a spurious device banner and
+    // recovery check).
+    auto setup = manager.getAudioDeviceSetup();
+    setup.bufferSize = 128;
+    CHECK (manager.setAudioDeviceSetup (setup, false).isEmpty());
+    CHECK (manager.getCurrentAudioDevice() == device); // the same object
+    CHECK (pipewire::getPendingDeviceError (device).isEmpty());
+    const auto mark = host.getStatus().callbacks;
+    flubapptest::pumpMessagesUntil ([&] { return ! errors.isEmpty(); }, 400);
+    std::cout << "    stale error: '" << pending << "' pending before the re-open; after it, " << errors.size() << " reached the host, node " << oldNode
+              << " -> " << pipewire::getDeviceStatus (device).nodeId << ", callbacks +" << (host.getStatus().callbacks - mark) << "\n";
+    CHECK (errors.isEmpty());
+    CHECK (host.getLastDeviceError().isEmpty());
+    CHECK (pipewire::getDeviceStatus (device).nodeId != 0);
+    CHECK (pipewire::getDeviceStatus (device).nodeId != oldNode);
+    CHECK (host.getStatus().callbacks > mark + 10); // the new run plays
+    CHECK (device->getCurrentBufferSizeSamples() == 128);
+
+    host.closeDevice();
+    CHECK (! hasNode (nodeNames(), "flubsound_game"));
 }
 
 #endif

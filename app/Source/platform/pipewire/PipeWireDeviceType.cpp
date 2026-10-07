@@ -6,8 +6,10 @@
 
 #include "PipeWireGraph.h"
 #include "PipeWireLibrary.h"
+#include "PipeWireNative.h"
 
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -28,11 +30,7 @@ public:
             outputNames.add ("Output:" + juce::String (position));
     }
 
-    ~PipeWireAudioIODevice() override
-    {
-        close(); // no nodeError() after this
-        cancelPendingUpdate();
-    }
+    ~PipeWireAudioIODevice() override { close(); } // no nodeError() or pending update after this
 
     juce::StringArray getOutputChannelNames() override { return outputNames; }
     juce::StringArray getInputChannelNames() override { return inputNames; }
@@ -77,8 +75,22 @@ public:
     {
         stop();
         if (opened)
-            node->stop();
+            node->stop(); // takes the loop lock, under which nodeError runs: none follows
         opened = false;
+        // R1.2 review: an error of this run that the message thread has not
+        // handled yet belongs to the node just stopped. JUCE re-opens the
+        // same device object for a new rate or buffer size (open() closes
+        // first), and the next run's error target must not get it.
+        cancelPendingUpdate();
+        const std::lock_guard<std::mutex> guard (errorMutex);
+        pendingError.clear();
+    }
+
+    /** The node error waiting for the message thread (tests). */
+    juce::String getPendingError()
+    {
+        const std::lock_guard<std::mutex> guard (errorMutex);
+        return juce::String (pendingError);
     }
 
     bool isOpen() override { return opened; }
@@ -269,9 +281,11 @@ std::unique_ptr<juce::AudioIODeviceType> createDeviceType() { return std::make_u
 
 bool addDeviceType (juce::AudioDeviceManager& manager)
 {
-    // R1.2: libpipewire is opened at run time; without it (a system with
-    // PulseAudio only, or no sound server) there is no "PipeWire" entry and
-    // the app keeps JUCE's ALSA / JACK types.
+    // R1.2: libpipewire is opened at run time; without it there is no
+    // "PipeWire" entry and the app keeps JUCE's ALSA / JACK types. With it
+    // the entry is offered even where PipeWire does not play the audio (a
+    // PulseAudio desktop with the library installed); the first start then
+    // keeps ALSA (serverPlaysAudio, AudioEngineHost::openDevice).
     if (! library().loaded)
         return false;
     for (auto* type : manager.getAvailableDeviceTypes()) // creates JUCE's own first
@@ -306,6 +320,29 @@ bool setDeviceErrorTarget (juce::AudioIODevice* device, juce::AudioIODeviceCallb
         return false;
     pipewireDevice->setErrorTarget (target);
     return true;
+}
+
+juce::String getPendingDeviceError (juce::AudioIODevice* device)
+{
+    auto* pipewireDevice = dynamic_cast<PipeWireAudioIODevice*> (device);
+    return pipewireDevice != nullptr ? pipewireDevice->getPendingError() : juce::String();
+}
+
+bool serverPlaysAudio (std::string& why)
+{
+    Session probe;
+    if (! probe.connect ("Flubsound Pro (probe)", why)) // not installed, or no server
+        return false;
+    probe.lock();
+    const bool plays = playsAudio (probe.graph(), probe.defaultSink(), defaultStrips());
+    probe.unlock();
+    probe.disconnect();
+    if (! plays)
+    {
+        why = "PipeWire runs here but has no audio output (another sound server, e.g. PulseAudio, may own the sound card)";
+        std::fprintf (stderr, "Flubsound: PipeWire: %s; the first start keeps the default device type\n", why.c_str());
+    }
+    return plays;
 }
 } // namespace flub::platform::pipewire
 

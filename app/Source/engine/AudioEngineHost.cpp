@@ -288,9 +288,12 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
     // which creates the strips' sinks, links them and plays to the default
     // output by itself, so no setup script or manual wiring is needed. Only
     // in the app's own device list (JUCE's ALSA type present, never over a
-    // type a caller added) and only when it opens (a PipeWire server
-    // answers); JUCE's default type otherwise. Not "chosen": nothing is
-    // persisted until the user picks a device.
+    // type a caller added), only when a PipeWire server answers and plays
+    // the audio (R1.2: it has an output sink that is not Flubsound's; a
+    // PipeWire run for screen capture beside PulseAudio has none, and the
+    // node would play into nothing) and only when it opens; JUCE's default
+    // type otherwise. Not "chosen": nothing is persisted until the user
+    // picks a device.
     juce::String pipewireFallbackType;
     if (savedState == nullptr && flub::platform::pipewire::kHasDeviceType)
     {
@@ -300,7 +303,9 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
             haveAlsa = haveAlsa || type->getTypeName() == "ALSA";
             havePipeWire = havePipeWire || type->getTypeName() == flub::platform::pipewire::kDeviceTypeName;
         }
-        if (haveAlsa && havePipeWire && deviceManager.getCurrentAudioDeviceType() != flub::platform::pipewire::kDeviceTypeName)
+        std::string notPlaying;
+        if (haveAlsa && havePipeWire && deviceManager.getCurrentAudioDeviceType() != flub::platform::pipewire::kDeviceTypeName
+            && flub::platform::pipewire::serverPlaysAudio (notPlaying))
         {
             pipewireFallbackType = deviceManager.getCurrentAudioDeviceType();
             deviceManager.setCurrentAudioDeviceType (flub::platform::pipewire::kDeviceTypeName, false);

@@ -258,7 +258,7 @@ Flubsound/
 │   │   ├── test_app_device_soak.cpp        docs/11 E53: the device soak's command line, the callback hooks (no allocation, free or lock), the output pin, a virtual run and its report, pulse triage, --replay, --dump at the stream start, refusals, a stalled callback
 │   │   ├── test_app_latency_measure.cpp    docs/11 E42c / E42d: the buffer per latency profile and the back-off, the controller's persistence, the live measurement through a fake loopback, weak / silent / echo results, the probe on the audio thread, restarts and cancels, the Settings › Audio texts
 │   │   ├── test_app_neural_cleanup.cpp     docs/03 §16: the Chat strip's neural voice cleanup switch: off by default, Active (+960 samples on Chat only), Low Latency / 512-sample / 44.1 kHz reasons and fixes, the Settings switch and Status line; safety frames from the device start's engine; the model follows the Chat strip on a layout change, persisted
-│   │   ├── test_app_device_types.cpp       R1.2: Settings › Audio's DEVICE TYPE note (ASIO / exclusive mode / PipeWire, stand-in types), ASIO offered exactly with FLUB_ASIO
+│   │   ├── test_app_device_types.cpp       R1.2: Settings › Audio's DEVICE TYPE note (ASIO / exclusive mode / PipeWire, stand-in types; the Windows way in for other apps, under the selector, which it never moves), ASIO offered exactly with FLUB_ASIO
 │   │   ├── test_app_onboard_cap.cpp        docs/11 E16: "Headset enhancement is ON" per output endpoint (applied / removed by device changes, persisted, found after a "2- " re-plug), the banner offer, Settings › Audio, the CAPPED chips
 │   │   ├── test_app_diagnostics.cpp        docs/11 E54: redaction, the rotating log, engine events, crash reports (forked child), the session log, the diagnostics zip
 │   │   ├── test_app_update_check.cpp       docs/11 E54: semver order, a fake release feed (newer / same / older / beta-only), malformed feeds refused, nothing runs while off
@@ -266,7 +266,7 @@ Flubsound/
 │   │   ├── test_app_drift_asrc.cpp         docs/11 E50 Phase A: the polyphase resampler kernel, THD+N at ±200 ppm, levels through the FIFO
 │   │   ├── test_app_listening_level.cpp    docs/11 E32: the contour following the system volume (fake reader), the background poll, persistence, Settings › Processing
 │   │   ├── test_app_night_loopback.cpp     docs/11 E21 / E51: the Night latch reads Night Mode Gaming; allowed loopback pairs persisted and applied
-│   │   ├── test_app_pipewire.cpp           docs/11 E48: the native node, registry linker and PipeWire device type against a running PipeWire (skipped without one)
+│   │   ├── test_app_pipewire.cpp           docs/11 E48: the native node, registry linker and PipeWire device type against a running PipeWire (skipped without one); R1.2: run-time libpipewire, xruns with the wall clock, hot-plug, recovery, no stale error after a re-open
 │   │   ├── test_app_pipewire_links.cpp     docs/11 E48: the routing panel's link line (router status in amber, gone once linked), the device map handed to the router (every OS, a fake router)
 │   │   ├── test_app_route_journal_linux.cpp docs/11 E47 Linux: pw-play moved to a Game sink, kill -9, restart: back on the default output, no WirePlumber restore (headless PipeWire only)
 │   │   ├── test_app_routing_doubling.cpp   docs/11 E47: the doubling guard (output endpoint lookup, held-back capture, the amber state)
@@ -282,7 +282,7 @@ Flubsound/
 │   │   ├── test_app_ui_hints.cpp           docs/11 E39: a plain-language hint for every parameter key in both modes, as tooltips
 │   │   ├── test_app_ui_reflow.cpp          docs/11 E39 / E38: reflow below 1100 px, the routing drawer, relevance-ordered rack, the tray flyout, the protection readouts
 │   │   └── test_app_ui_status.cpp          docs/11 E51 / E52 / E42a / E48a / E06 / E11 / E38: device banner, notices, latency prompt, PipeWire quantum plan, protection strength, governor chip, active-now chips, loudness readouts
-│   ├── test_pipewire_cycle.cpp             R1.2 (every OS): the native PipeWire node's per-block driver time and its xrun count (app/Source/platform/pipewire/PipeWireCycle.h)
+│   ├── test_pipewire_cycle.cpp             R1.2 (every OS): the native PipeWire node's per-block driver time, its xrun count (settling after a start or a pause) and the first start's choice (PipeWireCycle.h, PipeWireGraph.h playsAudio)
 │   ├── test_primitives.cpp                 Svf, Biquad, LR4, ThreeBandSplitter, Oversampler, TruePeakDetector, Fft, SpscRing, DelayLine, OnePoleSmoother
 │   ├── test_parametric_eq.cpp              ParametricEq
 │   ├── test_dynamic_eq.cpp                 DynamicEq

@@ -572,6 +572,21 @@ inline std::string chooseOutputSink (const Graph& graph, const std::string& defa
     return best != nullptr ? best->name : std::string();
 }
 
+/** R1.2: whether this PipeWire plays the desktop's audio, i.e. whether the
+    native node would have an output to play to (chooseOutputSink finds a
+    sink that is not one of Flubsound's own). A PipeWire that runs only for
+    screen capture or cameras beside PulseAudio answers a connection too, but
+    its graph has no Audio/Sink (PulseAudio owns the sound card), so the
+    app's first start keeps JUCE's ALSA type there. A PipeWire desktop has
+    one once a sound card is up (or WirePlumber's fallback "Dummy Output"
+    null sink); a start before that also keeps ALSA, which PipeWire's own
+    ALSA plug-in then serves. */
+inline bool playsAudio (const Graph& graph, const std::string& defaultSink, const std::vector<NativeAudioNodeConfig::Strip>& strips)
+{
+    bool fellBack = false;
+    return ! chooseOutputSink (graph, defaultSink, strips, fellBack).empty();
+}
+
 /** Links from the filter's output ports to 'target' (a sink's node.name)'s
     playback ports, matched by channel. Flubsound's own sinks are refused. */
 inline LinkPlan planOutputLinks (const Graph& graph, uint32_t filterNode, const std::string& target,

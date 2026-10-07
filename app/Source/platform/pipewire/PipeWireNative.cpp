@@ -793,10 +793,15 @@ private:
         pw_loop_update_timer (pw_thread_loop_get_loop (session.threadLoop()), lockTimer, &zero, nullptr, false);
     }
 
-    static void onStateChanged (void* data, pw_filter_state /*old*/, pw_filter_state state, const char* error)
+    static void onStateChanged (void* data, pw_filter_state old, pw_filter_state state, const char* error)
     {
         auto* self = static_cast<PipeWireNativeNode*> (data);
         self->filterState = state;
+        // R1.2: streaming again after a pause (or for the first time): the
+        // graph may have run on without the node, so the xrun count starts a
+        // new baseline and lets the first cycles settle.
+        if (state == PW_FILTER_STATE_STREAMING && old != PW_FILTER_STATE_STREAMING)
+            self->xrunCounter.restart();
         if (state == PW_FILTER_STATE_ERROR)
             self->filterError = error != nullptr ? error : "unknown error";
         if (self->filter != nullptr)

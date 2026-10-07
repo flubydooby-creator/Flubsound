@@ -291,21 +291,21 @@ public:
         }
 
         followDefaultToggle.setBounds (kInset, guardArea.getBottom() + 10, w, kToggleH);
-        int selectorTop = followDefaultToggle.getBottom() + 6;
+        selector->setBounds (0, followDefaultToggle.getBottom() + 6, getWidth(), juce::jmax (1, selector->getHeight()));
 
-        // The device type's note (R1.2), right above the selector it is about.
-        noteArea = {};
+        // The device type's note (R1.2) goes under the selector, so picking a
+        // type with a note never moves the selector's combo boxes under the
+        // pointer (R1.2 review).
+        noteHeight = 0;
         if (typeNote.isNotEmpty())
         {
             juce::AttributedString t;
             t.setWordWrap (juce::AttributedString::byWord);
             t.append (typeNote, Theme::font (12.0f), Palette::text.withAlpha (0.85f));
             noteLayout.createLayout (t, static_cast<float> (juce::jmax (80, w - 2 * kBoxPadX)));
-            const int noteH = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (noteLayout.getHeight())) + kBoxPadY;
-            noteArea = { kInset, selectorTop + 2, w, noteH };
-            selectorTop = noteArea.getBottom() + 6;
+            noteHeight = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (noteLayout.getHeight())) + kBoxPadY;
         }
-        selector->setBounds (0, selectorTop, getWidth(), juce::jmax (1, selector->getHeight()));
+        placeNote();
         placeLatencyPanel();
     }
 
@@ -313,8 +313,16 @@ public:
     void childBoundsChanged (juce::Component* child) override
     {
         if (child == selector.get())
+        {
+            placeNote();
             placeLatencyPanel();
+            repaint();
+        }
     }
+
+    /** Where the selector and the type note are, in page coordinates (tests). */
+    juce::Rectangle<int> getSelectorBounds() const { return selector->getBounds(); }
+    juce::Rectangle<int> getNoteBounds() const { return noteArea; }
 
 private:
     static constexpr int kInset = 10, kBoxPadX = 12, kBoxPadY = 8, kToggleH = 26;
@@ -344,9 +352,19 @@ private:
         }
     }
 
+    // Under the selector, in this order: the device type's note (R1.2, only
+    // when the type has one), then LATENCY (docs/11 E42c / E42d). Neither
+    // moves the selector.
+    void placeNote()
+    {
+        const int w = getWidth() - kInset;
+        noteArea = noteHeight > 0 ? juce::Rectangle<int> { kInset, selector->getBottom() + 8, w, noteHeight } : juce::Rectangle<int>();
+    }
+
     void placeLatencyPanel()
     {
-        latencyPanel.setBounds (0, selector->getBottom() + 10, getWidth(), latencyPanel.getHeightForWidth (getWidth()));
+        const int top = (noteArea.isEmpty() ? selector->getBottom() : noteArea.getBottom()) + 10;
+        latencyPanel.setBounds (0, top, getWidth(), latencyPanel.getHeightForWidth (getWidth()));
         fitHeight();
     }
 
@@ -423,6 +441,7 @@ private:
     juce::String deviceText, guardText, typeNote;
     juce::TextLayout introLayout, deviceLayout, guardLayout, noteLayout;
     juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea, noteArea;
+    int noteHeight = 0; // 0 = no note for this device type
     juce::TextButton allowButton { "Allow this pair" };
     juce::ToggleButton enhancementToggle { "Headset enhancement (Superhuman Hearing / on-board EQ) is ON" };
     juce::ToggleButton followDefaultToggle { "Follow the system default output" };
@@ -2427,15 +2446,24 @@ AppSettings::LoopbackPair SettingsDialog::loopbackPairToAllow (EngineController&
 juce::String SettingsDialog::describeDeviceTypeNote (const juce::String& deviceTypeName)
 {
     // docs/08 D10: an ASIO driver usually takes one client, and the output
-    // device is then Flubsound's alone.
+    // device is then Flubsound's alone. Both types exist on Windows only,
+    // where Flubsound has no virtual devices yet (R4.6: the driver is a
+    // design), so the way in for another app is the per-app capture with
+    // the app's own output moved off this device: the double-audio fix
+    // (docs/11 E47), confirmed on the owner's PC.
     if (deviceTypeName == "ASIO")
         return "ASIO drivers usually serve one application at a time: while Flubsound plays through this ASIO device, other apps "
-               "cannot use it directly. Send them to Flubsound's virtual devices so Flubsound plays everything. The driver's own "
-               "control panel may also fix the sample rate and buffer size.";
-    // docs/08 D2: the same for WASAPI exclusive mode.
+               "cannot use it directly. To hear an app through Flubsound, assign it to a strip in the routing panel (\"Assign app to "
+               "strip...\") and set the app's own output to another device (Windows: Settings > System > Sound > Volume mixer); or "
+               "choose \"Windows Audio\" to share the output. The driver's own control panel may also fix the sample rate and buffer "
+               "size.";
+    // docs/08 D2: the same for WASAPI exclusive mode; its input is chosen
+    // apart from the output, so a virtual cable can feed it as well.
     if (deviceTypeName == "Windows Audio (Exclusive Mode)")
-        return "Exclusive mode gives this output to Flubsound alone: other apps cannot play to it while Flubsound runs. Send them to "
-               "Flubsound's virtual devices, or choose \"Windows Audio\" or \"Windows Audio (Low Latency Mode)\" to share the output.";
+        return "Exclusive mode gives this output to Flubsound alone: other apps cannot play to it while Flubsound runs. To hear an "
+               "app through Flubsound, assign it to a strip in the routing panel (\"Assign app to strip...\") and set the app's own "
+               "output to another device (Windows: Settings > System > Sound > Volume mixer), or play it into a virtual cable chosen "
+               "as Flubsound's input; or choose \"Windows Audio\" or \"Windows Audio (Low Latency Mode)\" to share the output.";
     // docs/11 E48: the native node; its single device is not a sound card.
     if (deviceTypeName == "PipeWire")
         return "Flubsound's own PipeWire node: it creates the Game, Music, Chat and System sinks, reads them and plays to the default "
@@ -2450,6 +2478,16 @@ juce::String SettingsDialog::getAudioDeviceTypeNote()
         return {};
     audioPage->refresh();
     return audioPage->getTypeNote();
+}
+
+juce::Rectangle<int> SettingsDialog::getAudioDeviceSelectorBounds() const
+{
+    return audioPage != nullptr ? audioPage->getSelectorBounds() : juce::Rectangle<int>();
+}
+
+juce::Rectangle<int> SettingsDialog::getAudioDeviceTypeNoteBounds() const
+{
+    return audioPage != nullptr ? audioPage->getNoteBounds() : juce::Rectangle<int>();
 }
 
 juce::String SettingsDialog::describeLoopbackGuard (EngineController& controller)
