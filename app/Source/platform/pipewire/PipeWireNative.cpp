@@ -1,17 +1,24 @@
 // Flubsound Pro - libpipewire client code: registry mirror, links, the
 // native filter node (docs/11 E48). See PipeWireNative.h. Compiled only with
-// FLUB_HAS_PIPEWIRE (pkg-config found libpipewire-0.3).
+// FLUB_HAS_PIPEWIRE (pkg-config found libpipewire-0.3's headers); the
+// library itself is opened at run time (R1.2, PipeWireLibrary.h).
 #if defined(__linux__) && defined(FLUB_HAS_PIPEWIRE) && FLUB_HAS_PIPEWIRE
 
 #include "PipeWireNative.h"
 
 #include "PipeWireCycle.h"
+#include "PipeWireLibrary.h"
 
 #include <pipewire/extensions/metadata.h>
 #include <pipewire/filter.h>
 #include <pipewire/pipewire.h>
+#include <pipewire/version.h>
+#include <spa/node/io.h>
 #include <spa/utils/dict.h>
 
+#include "PipeWireApi.h"
+
+#include <time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -22,14 +29,55 @@
 #include <mutex>
 #include <set>
 
+// R1.2: every exported libpipewire function this file calls goes through the
+// table PipeWireLibrary.cpp fills with dlsym (after the headers, so their
+// inline functions are untouched). The app does not link libpipewire, so a
+// call missing here fails the link instead of reaching the library.
+#define pw_init (::flub::platform::pipewire::api().init)
+#define pw_thread_loop_new (::flub::platform::pipewire::api().thread_loop_new)
+#define pw_thread_loop_get_loop (::flub::platform::pipewire::api().thread_loop_get_loop)
+#define pw_thread_loop_start (::flub::platform::pipewire::api().thread_loop_start)
+#define pw_thread_loop_stop (::flub::platform::pipewire::api().thread_loop_stop)
+#define pw_thread_loop_destroy (::flub::platform::pipewire::api().thread_loop_destroy)
+#define pw_thread_loop_lock (::flub::platform::pipewire::api().thread_loop_lock)
+#define pw_thread_loop_unlock (::flub::platform::pipewire::api().thread_loop_unlock)
+#define pw_thread_loop_signal (::flub::platform::pipewire::api().thread_loop_signal)
+#define pw_thread_loop_get_time (::flub::platform::pipewire::api().thread_loop_get_time)
+#define pw_thread_loop_timed_wait_full (::flub::platform::pipewire::api().thread_loop_timed_wait_full)
+#define pw_context_new (::flub::platform::pipewire::api().context_new)
+#define pw_context_destroy (::flub::platform::pipewire::api().context_destroy)
+#define pw_context_connect (::flub::platform::pipewire::api().context_connect)
+#define pw_core_disconnect (::flub::platform::pipewire::api().core_disconnect)
+#define pw_proxy_destroy (::flub::platform::pipewire::api().proxy_destroy)
+#define pw_proxy_add_listener (::flub::platform::pipewire::api().proxy_add_listener)
+#define pw_properties_new (::flub::platform::pipewire::api().properties_new)
+#define pw_properties_setf (::flub::platform::pipewire::api().properties_setf)
+#define pw_properties_free (::flub::platform::pipewire::api().properties_free)
+#define pw_filter_new (::flub::platform::pipewire::api().filter_new)
+#define pw_filter_add_listener (::flub::platform::pipewire::api().filter_add_listener)
+#define pw_filter_add_port (::flub::platform::pipewire::api().filter_add_port)
+#define pw_filter_connect (::flub::platform::pipewire::api().filter_connect)
+#define pw_filter_disconnect (::flub::platform::pipewire::api().filter_disconnect)
+#define pw_filter_destroy (::flub::platform::pipewire::api().filter_destroy)
+#define pw_filter_get_node_id (::flub::platform::pipewire::api().filter_get_node_id)
+#define pw_filter_get_dsp_buffer (::flub::platform::pipewire::api().filter_get_dsp_buffer)
+#define pw_filter_update_properties (::flub::platform::pipewire::api().filter_update_properties)
+
 namespace flub::platform::pipewire
 {
 namespace
 {
+void log (const std::string& text);
+
 void ensureInitialised()
 {
     static std::once_flag once;
-    std::call_once (once, [] { pw_init (nullptr, nullptr); });
+    std::call_once (once, []
+                    {
+                        pw_init (nullptr, nullptr);
+                        log ("libpipewire " + library().version + " opened at run time (built against " + std::string (pw_get_headers_version())
+                             + ")");
+                    });
 }
 
 const char* lookup (const spa_dict* dict, const char* key) { return dict != nullptr ? spa_dict_lookup (dict, key) : nullptr; }
@@ -75,8 +123,11 @@ struct SessionEvents
         auto* session = static_cast<Session*> (data);
         if (id == PW_ID_CORE && res == -EPIPE)
         {
+            const bool first = ! session->connectionLost;
             session->connectionLost = true;
             log (std::string ("lost the connection to the server") + (message != nullptr ? std::string (": ") + message : std::string()));
+            if (first && session->onConnectionLost)
+                session->onConnectionLost();
         }
         pw_thread_loop_signal (session->loop, false);
     }
@@ -151,6 +202,11 @@ Session::~Session() { disconnect(); }
 bool Session::connect (const std::string& clientName, std::string& error)
 {
     disconnect();
+    if (! library().loaded)
+    {
+        error = library().error; // R1.2: not installed; the caller falls back (ALSA / JACK, pw-link)
+        return false;
+    }
     ensureInitialised();
 
     loop = pw_thread_loop_new ("flubsound-pw", nullptr);
@@ -222,6 +278,7 @@ void Session::disconnect()
 
     lock();
     onGraphChanged = nullptr;
+    onConnectionLost = nullptr;
     if (debounce != nullptr)
         pw_loop_destroy_source (pw_thread_loop_get_loop (loop), debounce);
     debounce = nullptr;
@@ -502,8 +559,10 @@ public:
     PipeWireNativeNode() : links (session) {}
     ~PipeWireNativeNode() override { stop(); }
 
-    bool isSupported() const override { return true; }
-    std::string unsupportedReason() const override { return {}; }
+    // R1.2: libpipewire is opened at run time; without it, say why.
+    bool isSupported() const override { return library().loaded; }
+    std::string unsupportedReason() const override { return library().loaded ? std::string() : library().error; }
+    int getXrunCount() const noexcept override { return xrunCounter.count(); }
 
     bool start (const NativeAudioNodeConfig& requested, Callback& cb, std::string& error) override
     {
@@ -516,6 +575,11 @@ public:
         if (config.sampleRate < 8000 || config.sampleRate > 768000)
             config.sampleRate = 48000;
 
+        if (! isSupported())
+        {
+            error = unsupportedReason();
+            return false;
+        }
         if (! session.connect ("Flubsound Pro", error))
             return false;
 
@@ -528,10 +592,13 @@ public:
         quantum.store (0);
         rate.store (0);
         cycles.store (0);
+        xrunCounter.reset();
+        errorReported = false;
         callback = &cb;
         cb.nodeStarting (static_cast<double> (config.sampleRate), config.maxBlockFrames);
 
         session.lock();
+        session.onConnectionLost = [this] { reportErrorLocked ("The PipeWire server went away (it quit or restarted)"); };
         createMissingSinksLocked();
         if (! createFilterLocked (error))
         {
@@ -559,6 +626,8 @@ public:
         {
             session.lock();
             session.onGraphChanged = nullptr;
+            session.onConnectionLost = nullptr;
+            errorReported = true; // a stop is not an error
             if (lockTimer != nullptr)
                 pw_loop_destroy_source (pw_thread_loop_get_loop (session.threadLoop()), lockTimer);
             lockTimer = nullptr;
@@ -628,21 +697,49 @@ public:
 
 private:
     /** PipeWire's data thread (PW_FILTER_FLAG_RT_PROCESS): buffer lookups
-        (lock-free in libpipewire) and the cycle runner; nothing else. */
+        (lock-free in libpipewire), the cycle runner and the xrun count (a
+        vDSO clock read); nothing else. */
     static void onProcess (void* data, spa_io_position* position)
     {
         auto* self = static_cast<PipeWireNativeNode*> (data);
         if (position == nullptr || self->callback == nullptr)
             return;
-        const auto frames = static_cast<uint32_t> (position->clock.duration);
+        const auto& driver = position->clock;
+        const auto frames = static_cast<uint32_t> (driver.duration);
         for (size_t i = 0; i < self->inputPorts.size(); ++i)
             self->inputBuffers[i] = static_cast<const float*> (pw_filter_get_dsp_buffer (self->inputPorts[i], frames));
         for (size_t o = 0; o < self->outputPorts.size(); ++o)
             self->outputBuffers[o] = static_cast<float*> (pw_filter_get_dsp_buffer (self->outputPorts[o], frames));
-        self->runner.run (self->inputBuffers.data(), self->outputBuffers.data(), frames, *self->callback);
+        self->runner.run (self->inputBuffers.data(), self->outputBuffers.data(), frames, *self->callback, driver.nsec, driver.rate.denom);
+
+        // R1.2: was this cycle late, or were cycles missed? (XrunCounter)
+        timespec now {};
+        ::clock_gettime (CLOCK_MONOTONIC, &now);
+        CycleClock cycle;
+        cycle.driverId = driver.id;
+        cycle.rate = driver.rate.denom;
+        cycle.nsec = driver.nsec;
+        cycle.position = driver.position;
+        cycle.duration = driver.duration;
+#ifdef SPA_IO_CLOCK_FLAG_FREEWHEEL
+        cycle.freewheel = (driver.flags & SPA_IO_CLOCK_FLAG_FREEWHEEL) != 0;
+#endif
+        self->xrunCounter.cycleDone (cycle, static_cast<uint64_t> (now.tv_sec) * CycleRunner::kNsPerSecond + static_cast<uint64_t> (now.tv_nsec));
+
         self->quantum.store (frames, std::memory_order_relaxed);
-        self->rate.store (position->clock.rate.denom, std::memory_order_relaxed);
+        self->rate.store (driver.rate.denom, std::memory_order_relaxed);
         self->cycles.fetch_add (1, std::memory_order_relaxed);
+    }
+
+    /** Loop thread, loop lock held: tells the owner once per run that the
+        node stopped working (nodeError), so it can re-open it. */
+    void reportErrorLocked (const std::string& message)
+    {
+        if (errorReported || ! running.load() || callback == nullptr)
+            return;
+        errorReported = true;
+        log (message);
+        callback->nodeError (message);
     }
 
     /*  node.lock-quantum keeps the graph at the quantum it has when the
@@ -708,6 +805,13 @@ private:
             if (id != SPA_ID_INVALID)
                 self->nodeId = id;
         }
+        // R1.2: while running (stop() removes this listener before it
+        // disconnects), an error or an unconnected filter means the server
+        // failed or removed the node: no more cycles until a re-open.
+        if (state == PW_FILTER_STATE_ERROR)
+            self->reportErrorLocked ("PipeWire stopped the Flubsound node: " + self->filterError);
+        else if (state == PW_FILTER_STATE_UNCONNECTED)
+            self->reportErrorLocked ("PipeWire removed the Flubsound node" + (error != nullptr ? " (" + std::string (error) + ")" : std::string()));
         pw_thread_loop_signal (self->session.threadLoop(), false);
     }
 
@@ -752,8 +856,14 @@ private:
         // Unlocked at first; armQuantumLockLocked locks Low Latency's quantum
         // once the graph runs at it.
         const auto latency = nodeLatency (quantumRequestFor (config.latency));
+        // A DSP filter (pw-filter's own example properties), not a device:
+        // no media.class, so the session manager neither offers it as a sink
+        // or source nor links it; the node links itself. node.name stays an
+        // identifier ("flubsound_engine"); the desktop shows the description,
+        // the nick and the application name (R1.2).
         auto* props = pw_properties_new (PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Filter", PW_KEY_MEDIA_ROLE, "DSP",
                                          PW_KEY_NODE_NAME, config.nodeName.c_str(), PW_KEY_NODE_DESCRIPTION, config.nodeDescription.c_str(),
+                                         PW_KEY_NODE_NICK, "Flubsound Pro", PW_KEY_APP_NAME, "Flubsound Pro",
                                          PW_KEY_NODE_LATENCY, latency.latency.c_str(), PW_KEY_NODE_LOCK_QUANTUM, "false",
                                          PW_KEY_NODE_ALWAYS_PROCESS, "true", nullptr);
         pw_properties_setf (props, PW_KEY_NODE_RATE, "1/%u", config.sampleRate);
@@ -876,6 +986,8 @@ private:
     std::atomic<uint32_t> quantum { 0 }, rate { 0 };
     std::atomic<uint64_t> cycles { 0 };
     std::atomic<bool> running { false };
+    XrunCounter xrunCounter;     // the data thread counts, any thread reads (R1.2)
+    bool errorReported = false;  // loop thread / loop lock: nodeError sent this run
 };
 } // namespace
 } // namespace flub::platform::pipewire

@@ -24,6 +24,7 @@
 #include "engine/EngineController.h"
 #include "platform/PlatformServices.h"
 #include "platform/pipewire/PipeWireDeviceType.h"
+#include "platform/pipewire/PipeWireLibrary.h"
 #include "platform/pipewire/PipeWireNative.h"
 #include "ui/RoutingPanel.h"
 
@@ -33,6 +34,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 #include <cmath>
 #include <iostream>
@@ -158,8 +160,10 @@ public:
         started = true;
     }
 
-    void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING override
+    void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames,
+                      uint64_t timeNs) noexcept FLUB_NONBLOCKING override
     {
+        lastTimeNs.store (timeNs, std::memory_order_relaxed);
         const auto cycle = calls.load (std::memory_order_relaxed);
         if (cycle == 20)
         {
@@ -197,6 +201,18 @@ public:
 
     void nodeStopped() override { stopped = true; }
 
+    void nodeError (const std::string& message) override
+    {
+        const std::lock_guard<std::mutex> guard (errorMutex);
+        errors.push_back (message);
+    }
+
+    std::vector<std::string> errorMessages() const
+    {
+        const std::lock_guard<std::mutex> guard (errorMutex);
+        return errors;
+    }
+
     float rms (int channel) const { return inputRms[static_cast<size_t> (channel)].load(); }
 
     static constexpr int kChannels = 16;
@@ -208,7 +224,10 @@ public:
     int64_t allocationsAt20 = 0, locksAt20 = 0;
     std::atomic<int64_t> dataThreadAllocations { -1 }, dataThreadLocks { -1 };
     std::atomic<int> calls { 0 }, largestBlock { 0 }, inputsSeen { 0 }, outputsSeen { 0 };
+    std::atomic<uint64_t> lastTimeNs { 0 };
     std::array<std::atomic<float>, kChannels> inputRms {};
+    mutable std::mutex errorMutex;
+    std::vector<std::string> errors;
 };
 
 NativeAudioNodeConfig testConfig (const std::string& prefix, std::vector<NativeAudioNodeConfig::Strip> strips, const std::string& outputTarget)
@@ -592,6 +611,234 @@ TEST_CASE ("App: the running app offers the PipeWire device and plays through it
     chatPlayer->stop();
     controller.shutdown();
     sinkNode->stop();
+    CHECK (! hasNode (nodeNames(), "flubsound_game")); // the device's sinks went with it
+}
+
+// ---------------------------------------------------------------------------
+// R1.2: libpipewire at run time, the device's xruns and time stamps, and the
+// device coming back by itself.
+// ---------------------------------------------------------------------------
+namespace
+{
+/** Opens the "PipeWire" device in 'host' as a saved choice, every strip mapped
+    (Game 0-7, Music 8-9, Chat 10-11, System 12-13). */
+juce::String openNodeDevice (AudioEngineHost& host)
+{
+    std::array<int, AudioEngineHost::kMaxStrips> map {};
+    map.fill (-1);
+    map[0] = 0;
+    map[1] = 8;
+    map[2] = 10;
+    map[3] = 12;
+    host.setDeviceInputMap (map);
+    pipewire::addDeviceType (host.getDeviceManager());
+    juce::XmlElement state ("DEVICESETUP");
+    state.setAttribute ("deviceType", pipewire::kDeviceTypeName);
+    state.setAttribute ("audioOutputDeviceName", pipewire::kDeviceName);
+    state.setAttribute ("audioInputDeviceName", pipewire::kInputDeviceName);
+    state.setAttribute ("audioDeviceRate", 48000.0);
+    state.setAttribute ("audioDeviceBufferSize", 256);
+    return host.openDevice (&state, 14, 2);
+}
+} // namespace
+
+TEST_CASE ("App: libpipewire is opened at run time - a missing library is reported and offers no PipeWire type, the installed one resolves every entry point (E48, R1.2)")
+{
+    // What a system without PipeWire's client library sees (PulseAudio only,
+    // no sound server): a soname that does not exist.
+    const auto missing = pipewire::probeLibrary ("libpipewire-0.3.so.flubtest-missing");
+    CHECK (! missing.loaded);
+    CHECK (missing.error.find ("is not installed") != std::string::npos);
+    CHECK (missing.version.empty());
+
+    // This machine (CI installs the library with libpipewire-0.3-dev).
+    const auto& installed = pipewire::library();
+    std::cout << "    " << pipewire::kLibraryName << ": " << (installed.loaded ? "loaded, version " + installed.version : installed.error) << "\n";
+    juce::AudioDeviceManager manager;
+    CHECK (pipewire::addDeviceType (manager) == installed.loaded); // no "PipeWire" entry without the library
+    CHECK (NativeAudioNode::create()->isSupported() == installed.loaded);
+    if (! installed.loaded)
+    {
+        CHECK (! installed.error.empty());
+        CHECK (NativeAudioNode::create()->unsupportedReason() == installed.error);
+        return;
+    }
+    CHECK (installed.error.empty());
+    CHECK (! installed.version.empty());
+    CHECK (pipewire::probeLibrary (pipewire::kLibraryName).loaded); // every entry point resolves
+}
+
+TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - callbacks at the graph's cadence, none late, no xruns while idle (E48, R1.2)")
+{
+    if (! serverAvailable() || ! isTestServer())
+        return;
+    if (hasNode (nodeNames(), "flubsound_game"))
+    {
+        std::cerr << "    (skipped: this server already has Flubsound's sinks)\n";
+        return;
+    }
+
+    // The output plays into a sink this test makes, never a device.
+    const auto out = unique ("xrun_out");
+    auto sinkNode = NativeAudioNode::create();
+    TestCallback sinkCallback (false);
+    std::string error;
+    REQUIRE (sinkNode->start (testConfig ("xrunsink", { { "Out", out, "Flubsound test xrun output", { "FL", "FR" } } }, ""), sinkCallback, error));
+
+    AudioEngineHost host;
+    CHECK (openNodeDevice (host).isEmpty());
+    auto* device = host.getDeviceManager().getCurrentAudioDevice();
+    REQUIRE (device != nullptr);
+    CHECK (pipewire::setDeviceOutputTarget (device, out));
+    CHECK (device->getXRunCount() >= 0); // counted (JUCE's "not supported" is -1)
+
+    // Past the first cycles, then 0.6 s measured (the 2 s rule): one callback
+    // per block of min (quantum, 256) frames, stamped by the driver's clock.
+    CHECK (waitUntil ([&] { return pipewire::getDeviceStatus (device).quantumFrames != 0 && host.getStatus().callbacks > 20; }));
+    const auto before = host.getStatus();
+    const auto xrunsBefore = device->getXRunCount();
+    const auto start = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for (std::chrono::milliseconds (600));
+    const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
+    const auto after = host.getStatus();
+    const auto node = pipewire::getDeviceStatus (device);
+    const auto xrunsAfter = device->getXRunCount();
+    REQUIRE (node.sampleRate != 0);
+    const double block = std::min (256.0, static_cast<double> (node.quantumFrames));
+    const double expected = seconds * node.sampleRate / block;
+    const auto callbacks = static_cast<double> (after.callbacks - before.callbacks);
+    const auto timing = after.callbackTiming.since (before.callbackTiming);
+    std::cout << "    " << seconds << " s on the node: " << callbacks << " callbacks (expected " << expected << ", quantum " << node.quantumFrames << "/"
+              << node.sampleRate << "), xruns " << xrunsBefore << " -> " << xrunsAfter << ", late intervals " << timing.late << ", mean interval "
+              << timing.interval.meanNs() / 1.0e6 << " ms\n";
+    CHECK (after.xruns == xrunsAfter); // the engine status carries the device's count
+    CHECK (xrunsAfter == xrunsBefore); // none while idle
+    CHECK_NEAR (callbacks, expected, expected * 0.1);
+    CHECK (timing.late == 0);
+    CHECK_NEAR (timing.interval.meanNs(), 1.0e9 * block / node.sampleRate, 0.1e9 * block / node.sampleRate);
+
+    host.closeDevice();
+    sinkNode->stop();
+}
+
+TEST_CASE ("App: the PipeWire device follows the default output as it is plugged in and unplugged, without a re-open (E48, R1.2)")
+{
+    if (! serverAvailable() || ! isTestServer())
+        return;
+    if (hasNode (nodeNames(), "flubsound_game"))
+    {
+        std::cerr << "    (skipped: this server already has Flubsound's sinks)\n";
+        return;
+    }
+    if (std::system ("command -v pw-metadata > /dev/null 2>&1") != 0)
+    {
+        std::cerr << "    (skipped: needs pw-metadata)\n";
+        return;
+    }
+
+    // Stand in for the speakers (they stay) and a USB headset (it comes and
+    // goes). Without a second real sink nothing would be left to play to:
+    // WirePlumber's fallback null sink exists only while there is no sink.
+    const auto speakersSink = unique ("hotplug_speakers"), headsetSink = unique ("hotplug_headset");
+    auto speakers = NativeAudioNode::create();
+    auto headset = NativeAudioNode::create();
+    TestCallback speakersCallback (false), headsetCallback (false);
+    std::string error;
+    REQUIRE (speakers->start (testConfig ("hpspeakers", { { "Out", speakersSink, "Flubsound test speakers", { "FL", "FR" } } }, ""), speakersCallback, error));
+    REQUIRE (headset->start (testConfig ("hpheadset", { { "Out", headsetSink, "Flubsound test headset", { "FL", "FR" } } }, ""), headsetCallback, error));
+
+    AudioEngineHost host;
+    CHECK (openNodeDevice (host).isEmpty()); // no output target: the default output
+    auto* device = host.getDeviceManager().getCurrentAudioDevice();
+    REQUIRE (device != nullptr);
+
+    // Plugged in and made the default (what the desktop's sound settings
+    // write): the node's outputs move there.
+    const auto sinkValue = "'{ \"name\": \"" + headsetSink + "\" }' Spa:String:JSON > /dev/null 2>&1";
+    CHECK (std::system (("pw-metadata -n default 0 default.configured.audio.sink " + sinkValue).c_str()) == 0);
+    CHECK (std::system (("pw-metadata -n default 0 default.audio.sink " + sinkValue).c_str()) == 0);
+    CHECK (waitUntil ([&] {
+        const auto s = pipewire::getDeviceStatus (device);
+        return s.outputSink == headsetSink && s.outputLinksMade == 2;
+    }));
+
+    // Unplugged: the outputs go to what is left (the speakers), by themselves.
+    headset->stop();
+    CHECK (waitUntil ([&] {
+        const auto s = pipewire::getDeviceStatus (device);
+        return s.outputSink == speakersSink && s.outputLinksMade == 2;
+    }));
+    std::cout << "    unplugged: output to " << pipewire::getDeviceStatus (device).outputSink << "\n";
+    CHECK (host.getDeviceManager().getCurrentAudioDevice() == device); // the same device, never re-opened
+    CHECK (host.getStatus().running);
+
+    if (std::system ("pw-metadata -n default -d 0 default.configured.audio.sink > /dev/null 2>&1") != 0)
+        std::cerr << "    (could not clear default.configured.audio.sink)\n";
+    host.closeDevice();
+    speakers->stop();
+}
+
+TEST_CASE ("App: the PipeWire device comes back by itself when the server removes its node - the error reaches the host, which re-opens it (E48, R1.2)")
+{
+    if (! serverAvailable() || ! isTestServer())
+        return;
+    if (hasNode (nodeNames(), "flubsound_game"))
+    {
+        std::cerr << "    (skipped: this server already has Flubsound's sinks)\n";
+        return;
+    }
+    if (std::system ("command -v pw-cli > /dev/null 2>&1") != 0)
+    {
+        std::cerr << "    (skipped: needs pw-cli)\n";
+        return;
+    }
+
+    juce::StringArray errors; // outlives the host
+    AudioEngineHost host;
+    AudioEngineHost::RecoveryTiming fast;
+    fast.settleMs = 100;
+    fast.firstRetryMs = 100;
+    fast.maxRetryMs = 400;
+    host.setRecoveryTiming (fast);
+    host.onDeviceError = [&errors] (const juce::String& message) { errors.add (message); };
+    CHECK (openNodeDevice (host).isEmpty()); // plays to the test server's default (null) sink
+    auto* device = host.getDeviceManager().getCurrentAudioDevice();
+    REQUIRE (device != nullptr);
+    CHECK (waitUntil ([&] { return pipewire::getDeviceStatus (device).nodeId != 0 && host.getStatus().callbacks > 10; }));
+    const auto oldNode = pipewire::getDeviceStatus (device).nodeId;
+
+    // What a patchbay's "destroy" or a crashed session manager does to it.
+    const auto destroyedAt = juce::Time::getMillisecondCounterHiRes();
+    CHECK (std::system (("pw-cli destroy " + std::to_string (oldNode) + " > /dev/null 2>&1").c_str()) == 0);
+
+    // The host hears of it (the device banner) and re-opens the device by
+    // itself (the E51 recovery): a new node, callbacks again.
+    const bool heard = flubapptest::pumpMessagesUntil ([&] { return ! errors.isEmpty(); }, 3000);
+    const auto heardAt = juce::Time::getMillisecondCounterHiRes();
+    CHECK (heard);
+    std::cout << "    error: " << errors.joinIntoString (" | ") << "\n";
+    if (! heard)
+        std::cout << "    device lastError '" << device->getLastError() << "', playing " << device->isPlaying() << ", host lastDeviceError '"
+                  << host.getLastDeviceError() << "', current device " << (host.getDeviceManager().getCurrentAudioDevice() == device) << "\n";
+    CHECK (errors.joinIntoString (" | ").contains ("the Flubsound node")); // "removed ..." (or "stopped ...: <error>")
+    const auto mark = host.getStatus().callbacks;
+    const bool back = flubapptest::pumpMessagesUntil (
+        [&]
+        {
+            auto* now = host.getDeviceManager().getCurrentAudioDevice();
+            if (now == nullptr || now->getTypeName() != pipewire::kDeviceTypeName)
+                return false;
+            const auto s = pipewire::getDeviceStatus (now);
+            return s.nodeId != 0 && s.nodeId != oldNode && host.getStatus().callbacks > mark + 10;
+        },
+        3000);
+    CHECK (back);
+    std::cout << "    re-opened: node " << oldNode << " -> " << pipewire::getDeviceStatus (host.getDeviceManager().getCurrentAudioDevice()).nodeId
+              << ", the error " << juce::roundToInt (heardAt - destroyedAt) << " ms and callbacks again "
+              << juce::roundToInt (juce::Time::getMillisecondCounterHiRes() - destroyedAt) << " ms after the destroy, recovery attempts "
+              << host.getRecoveryAttempts() << "\n";
+
+    host.closeDevice();
     CHECK (! hasNode (nodeNames(), "flubsound_game")); // the device's sinks went with it
 }
 

@@ -23,11 +23,13 @@
 #                ParamGrid, RoutingPanel, shared Theme / Widgets / ParamKnob
 #
 # Options:
-#   FLUB_ASIO_SDK_DIR        Steinberg ASIO SDK root (enables JUCE_ASIO on Windows)
+#   FLUB_ASIO                Windows: the ASIO device type (OFF; cmake/FlubAsio.cmake),
+#   FLUB_ASIO_SDK_DIR        with the Steinberg ASIO SDK from this folder,
+#   FLUB_ASIO_FETCH          or downloaded at configure time under its GPLv3 option
 #   FLUB_FACTORY_PRESET_DIR  folder whose *.json files are embedded as factory presets
 #   FLUB_BUILD_APP_TESTS     also build flub_app_tests (tests/app, see the end of this file)
 
-set(FLUB_ASIO_SDK_DIR "" CACHE PATH "Steinberg ASIO SDK root folder (Windows, optional; enables the ASIO device type)")
+include(FlubAsio) # R1.2: FLUB_ASIO, FLUB_ASIO_SDK_DIR, FLUB_ASIO_FETCH -> FLUB_ASIO_ENABLED
 set(FLUB_FACTORY_PRESET_DIR "${PROJECT_SOURCE_DIR}/presets/factory" CACHE PATH "Folder with factory preset *.json files to embed")
 
 juce_add_gui_app(FlubsoundPro
@@ -225,12 +227,11 @@ if(WIN32)
     # WASAPI shared / exclusive / low-latency are JUCE device types; the
     # legacy DirectSound backend only adds confusing duplicate devices.
     target_compile_definitions(FlubsoundPro PRIVATE JUCE_WASAPI=1 JUCE_DIRECTSOUND=0)
-    if(FLUB_ASIO_SDK_DIR)
-        if(NOT EXISTS "${FLUB_ASIO_SDK_DIR}/common/iasiodrv.h")
-            message(WARNING "FLUB_ASIO_SDK_DIR does not look like an ASIO SDK (missing common/iasiodrv.h)")
-        endif()
+    # ASIO (R1.2): only with the SDK (cmake/FlubAsio.cmake); Settings > Audio
+    # then notes that ASIO drivers usually serve one application (docs/08 D10).
+    if(FLUB_ASIO_ENABLED)
         target_compile_definitions(FlubsoundPro PRIVATE JUCE_ASIO=1)
-        target_include_directories(FlubsoundPro PRIVATE "${FLUB_ASIO_SDK_DIR}/common")
+        target_include_directories(FlubsoundPro PRIVATE "${FLUB_ASIO_INCLUDE_DIR}")
     else()
         target_compile_definitions(FlubsoundPro PRIVATE JUCE_ASIO=0)
     endif()

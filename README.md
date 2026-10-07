@@ -113,7 +113,8 @@ ctest --test-dir build-app --output-on-failure   # flub_tests + the app-level fl
 
 Linux packages for the app build: `libasound2-dev libjack-jackd2-dev libfreetype-dev libfontconfig1-dev libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev` (CI also installs `libgl1-mesa-dev`, and `xvfb` for the headless screenshots; `libxi-dev` is optional and enables JUCE's XInput2 support).
 Linux at run time: create the `flubsound_*` sinks with `platform/linux/flubsound-pipewire-setup.sh install`. Per-app routing needs `pactl` (pulseaudio-utils 16+). On PipeWire, the app links each strip sink's monitor to its input by itself, which needs `pw-dump` / `pw-link` (`pipewire-bin` / `pipewire-utils`); without them it says so on stderr, and qpwgraph does the same by hand. It also asks for a 256/48000 quantum (`PIPEWIRE_LATENCY`, 5.3 ms instead of pipewire-jack's 21.3 ms default) unless you set the variable yourself. Details: [platform/linux/README.md](platform/linux/README.md).
-ASIO on Windows: `-DFLUB_ASIO_SDK_DIR=<path to Steinberg ASIO SDK>`.
+Linux audio devices: JUCE's ALSA and JACK types, plus Flubsound's native **PipeWire** device (the default on a first start when a PipeWire server answers). The app is built against libpipewire-0.3's headers (`libpipewire-0.3-dev`) but opens the library at run time, so the same binary runs on a PulseAudio-only system, where it plays through ALSA (PulseAudio's ALSA plug-in, `pulse-alsa`) and no PipeWire entry is offered.
+ASIO on Windows (off by default; Steinberg's SDK is not in the repository, and its licence choice is the owner's, see [docs/02 §6](docs/02-tech-stack.md#6-licensing-summary-third-party-components)): download the ASIO SDK from [steinberg.net/developers](https://www.steinberg.net/developers/), unzip it, and configure with `-DFLUB_ASIO=ON -DFLUB_ASIO_SDK_DIR=<the unzipped ASIOSDK folder>`; or let CMake fetch the official 2.3.4 archive (SHA-256 pinned) under its GPLv3 option with `-DFLUB_ASIO=ON -DFLUB_ASIO_FETCH=ON`. Settings › Audio then offers *ASIO* with a note that ASIO drivers usually serve one application.
 
 Useful options:
 
@@ -127,10 +128,12 @@ Useful options:
 | `FLUB_BUILD_FUZZERS` | OFF | libFuzzer targets in `tests/fuzz` (Clang with libFuzzer only; not with `FLUB_RTSAN`): the JSON parser, preset load and migration, saved strip / plug-in state and device profiles, ParametricEQ text; run them with `tests/fuzz/run-fuzzers.sh <build> <seconds>`. CI job `fuzz` runs each for 30 s |
 | `FLUB_WARNINGS_AS_ERRORS` | OFF | `-Werror` / `/WX` (CI uses it for the Linux core builds) |
 | `FLUB_JUCE_VERSION` | `9.0.2` | JUCE git tag fetched for the app / plug-in |
-| `FLUB_ASIO_SDK_DIR` | empty | Windows app: Steinberg ASIO SDK root; enables the ASIO device type |
+| `FLUB_ASIO` | OFF | Windows app: the ASIO device type; needs `FLUB_ASIO_SDK_DIR` or `FLUB_ASIO_FETCH` (`cmake/FlubAsio.cmake`) |
+| `FLUB_ASIO_SDK_DIR` | empty | Windows app: a Steinberg ASIO SDK you downloaded (the `ASIOSDK` folder with `common/iasiodrv.h`); set alone, it also turns `FLUB_ASIO` on |
+| `FLUB_ASIO_FETCH` | OFF | Windows app, with `FLUB_ASIO`: download the official ASIO SDK 2.3.4 at configure time and use it under its GPLv3 option (a build you give to others must then be GPLv3-compatible) |
 | `FLUB_FACTORY_PRESET_DIR` | `presets/factory` | Folder whose `*.json` files the app embeds as factory presets |
 | `FLUB_ENABLE_UNDOCUMENTED_ROUTING` | OFF | Windows app: offers endpoint routing, moving apps to the strips' own output devices (needs the Flubsound driver, not built yet). The undocumented `IAudioPolicyConfigFactory` adapter is in every Windows build; without this option it is used only for Settings › Routing › *Move the app's own sound away automatically* (off by default; see `docs/08` D7) |
-| `FLUB_WITH_PIPEWIRE` | ON | Linux app: build the native PipeWire node and registry linking when `pkg-config` finds libpipewire-0.3 (`libpipewire-0.3-dev`); without it the app falls back to `pw-dump` / `pw-link` (docs/11 E48) |
+| `FLUB_WITH_PIPEWIRE` | ON | Linux app: build the native PipeWire node and registry linking when `pkg-config` finds libpipewire-0.3's headers (`libpipewire-0.3-dev`); the library is opened at run time, not linked; without the headers the app falls back to `pw-dump` / `pw-link` (docs/11 E48) |
 
 ---
 

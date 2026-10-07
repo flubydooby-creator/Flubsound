@@ -82,7 +82,7 @@
   - *Windows Audio (Exclusive Mode)*: lowest latency, takes the device.
   - *Windows Audio (Low Latency Mode)*: shared mode on `IAudioClient3` small periods.
 
-  ASIO is enabled when the developer supplies Steinberg's SDK (`-DFLUB_ASIO_SDK_DIR=...`). The SDK is never committed; it is distributed by Steinberg under its own licence agreement.
+  *ASIO* is off by default (`cmake/FlubAsio.cmake`, R1.2). `-DFLUB_ASIO=ON` builds JUCE's ASIO type with Steinberg's SDK, which is never committed: either from a folder the developer downloaded from steinberg.net (`-DFLUB_ASIO_SDK_DIR=<ASIOSDK folder>`) or, with `-DFLUB_ASIO_FETCH=ON`, from the official 2.3.4 archive downloaded at configure time (SHA-256 pinned) and used under its GPLv3 option. The licence choice for a published build is in §6. Settings › Audio notes that ASIO drivers usually serve one application ([08 D10](08-pitfalls-and-solutions.md#d10-asio-specifics)).
 - **Virtual endpoints (design, not yet built):** a WaveRT miniport driver, "Flubsound Virtual Audio", based on Microsoft's SYSVAD / SimpleAudioSample samples (MS-PL). It exposes Game (7.1), Music, Chat and System render endpoints plus a Mic capture endpoint. A private IOCTL maps the endpoint's cyclic buffer and position registers into the engine process, avoiding a second WASAPI hop. Design and the user/kernel header: `platform/windows/driver/`.
 - **Per-app routing:** Windows' own per-app output device setting is honoured. Programmatic assignment needs the undocumented `IAudioPolicyConfigFactory` (`Windows.Media.Internal.AudioPolicyConfig`). The adapter is in every Windows build and picks the interface id by Windows build. It is used only after a user action: for *Move the app's own sound away automatically* (Settings › Routing, off by default; it moves a captured app's own output to a silent device and puts it back, docs/11 E47, R4.5), and for endpoint routing to strip endpoints only in builds with `FLUB_ENABLE_UNDOCUMENTED_ROUTING` (off by default; it needs the driver). It must be validated on every supported build before release (only build 26200 is checked), and the manual fallback is opening `ms-settings:apps-volume`.
 - **Per-process capture without a driver:** `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` (documented from Windows 10 build 20348; Flubsound uses it from build 19041, Windows 10 2004, as OBS does, and Windows 11). This captures one app's audio but cannot mute its original output, so it is a monitoring/"lite" path. The driver path is the primary one.
@@ -102,12 +102,12 @@ Equalizer APO proves APOs can deliver system-wide processing with near-zero adde
 Because `flub_core` is framework-free and allocation-free, an **"APO Lite" mode** is on the roadmap for users who want zero-install-driver, per-endpoint processing. It reuses the same DSP.
 
 ### 4.4 Linux (priority 3)
-- **Device I/O:** ALSA and JACK via JUCE. PipeWire serves both through its compatibility layers.
+- **Device I/O:** ALSA and JACK via JUCE (PipeWire serves both through pipewire-jack and its ALSA plug-in; a PulseAudio-only system plays through PulseAudio's ALSA plug-in, pulse-alsa, as JUCE's ALSA "default" / "pulse" device), plus Flubsound's native **PipeWire** device type ([11 E48](11-enhancement-report.md#e48)): a `pw_filter` hosting the engine on PipeWire's real-time data thread, with its own sinks, links and `node.latency`, the default on a first start when a PipeWire server answers. libpipewire-0.3 is opened at run time (`dlopen`, no link dependency; R1.2), so the same binary runs where PipeWire is missing; it is built when pkg-config finds the headers (`FLUB_WITH_PIPEWIRE`).
 - **Virtual endpoints:** PipeWire null sinks, "Flubsound Game/Music/Chat/System" (`platform/linux/flubsound-pipewire-setup.sh`).
 - **Per-app routing:** moving sink-inputs (`pactl move-sink-input`), or WirePlumber rules with `target.object`.
 - **Global hotkeys:** X11 `XGrabKey` on the root window, with libX11 loaded at run time (`dlopen`, no link dependency). Wayland sessions use the xdg-desktop-portal GlobalShortcuts interface over D-Bus, with libdbus-1 loaded the same way; without that portal they report hotkeys unsupported.
 - **Real-time audio thread:** best-effort `SCHED_FIFO` from the thread itself, else RealtimeKit over the system D-Bus, asked from the message thread (libdbus-1 loaded at run time; docs/11 E44). Tested against a mock rtkit only.
-- **Roadmap:** a native `pw_filter` node hosting `flub_core` directly inside the PipeWire graph for the lowest latency.
+- **Roadmap:** the desktop distribution matrix, Flatpak portals and SteamOS Game Mode for the native node ([11 E48](11-enhancement-report.md#e48)).
 
 ---
 
@@ -129,7 +129,7 @@ Because `flub_core` is framework-free and allocation-free, an **"APO Lite" mode*
 | Component | Licence | Use | Obligation |
 |---|---|---|---|
 | JUCE 9 | AGPLv3 **or** commercial JUCE 9 licence | App + plug-in | Closed-source distribution requires a commercial JUCE licence tier. |
-| Steinberg ASIO SDK | Steinberg licence agreement | Optional ASIO device type | Developer obtains the SDK; not redistributed in source. |
+| Steinberg ASIO SDK 2.3.4 (2025-10-15) | Dual: the proprietary Steinberg ASIO Licence **or** the GNU GPL version 3, chosen per project (the SDK's `LICENSE.txt`; announced by Steinberg on 2025-10-15) | Optional ASIO device type (`-DFLUB_ASIO=ON`, off by default) | Not in the repository either way. Proprietary option: the SDK must not be redistributed, and a copy of the Steinberg ASIO SDK Licence Agreement signed by Steinberg is needed before publishing software built with it. GPLv3 option: anyone may fetch and build with it (`-DFLUB_ASIO_FETCH=ON`), but a build given to others must be distributed under GPLv3-compatible terms with its complete source (with JUCE's free licence: AGPLv3, which GPLv3 §13 lets it be combined with). See the owner's decision below. |
 | Steinberg VST3 SDK (inside JUCE) | Depends on the SDK version JUCE bundles: historically dual GPLv3 / proprietary Steinberg licence; recent SDK releases (VST 3.8, 2025) are MIT-licensed | VST3 plug-in | Check the bundled SDK version's licence before a closed-source VST3 release. |
 | Microsoft SYSVAD / SimpleAudioSample | MS-PL | Basis of the Windows virtual driver (planned) | Keep licence notices. |
 | libASPL | MIT | macOS virtual device (planned) | Attribution. |
@@ -140,3 +140,10 @@ Because `flub_core` is framework-free and allocation-free, an **"APO Lite" mode*
 | HRTF datasets (SOFA) | Varies per dataset | Measured-HRIR virtualiser (the renderer is in core; a SOFA loader is planned) | Check each dataset's licence before bundling; the built-in parametric head model needs no data. |
 
 `flub_core` itself has **no** third-party code. It can be licensed however Flubsound chooses and embedded anywhere.
+
+**ASIO: the owner's decision (R1.2, 2026-10-07).** The repository has no licence file, so Flubsound is not yet published under any licence, and the app's JUCE licence choice (AGPLv3 or commercial) decides the ASIO route too:
+
+- **Open source (AGPLv3 with JUCE's free licence):** use the ASIO SDK under GPLv3. A build may then be made with `-DFLUB_ASIO=ON -DFLUB_ASIO_FETCH=ON` (or the downloaded folder) and published with its complete source under AGPLv3. Nothing to sign.
+- **Closed source (commercial JUCE licence):** use the proprietary Steinberg ASIO Licence: download the SDK from steinberg.net yourself (`-DFLUB_ASIO=ON -DFLUB_ASIO_SDK_DIR=<ASIOSDK folder>`), never commit or redistribute it, and obtain the Steinberg ASIO SDK Licence Agreement signed by Steinberg before publishing a build with ASIO.
+
+Until that choice is made, published packages (CI's `app` job) are built without ASIO; CI's non-blocking `asio` job only compiles and tests it under GPLv3 and uploads nothing.

@@ -242,6 +242,33 @@ jobs:
           xvfb-run -a "$APP" --screenshot screenshot-music.png --mode music --size 1440x900
           xvfb-run -a "$APP" --screenshot screenshot-gaming.png --mode gaming --size 1440x900
           xvfb-run -a "$APP" --screenshot screenshot-headset.png --mode gaming --size 1440x900 --device "Headphones (Stealth 700 Gen 2 MAX)"
+      # R1.2: libpipewire is opened at run time, never linked, so the same
+      # binary runs on a system without PipeWire's client library (PulseAudio
+      # only, no sound server). The library is hidden for this step: the app
+      # must start and render, and the run-time loading case must take its
+      # "not installed" branch (no "PipeWire" device type).
+      - name: Without libpipewire (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          APP=$(find build -type f -name "Flubsound Pro" -perm -u+x | head -n 1)
+          TESTS=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
+          for bin in "$APP" "$TESTS"; do
+            if readelf -d "$bin" | grep NEEDED | grep -q libpipewire; then
+              readelf -d "$bin" | grep NEEDED; echo "::error::$bin links libpipewire (it must be opened at run time)"; exit 1
+            fi
+          done
+          lib=$(ldconfig -p | awk '/libpipewire-0\.3\.so\.0 /{print $NF; exit}')
+          [ -n "$lib" ] || { echo "::error::libpipewire-0.3.so.0 is not installed on the runner"; exit 1; }
+          real=$(readlink -f "$lib")
+          sudo mv "$real" "$real.hidden"
+          status=0
+          xvfb-run -a "$APP" --screenshot screenshot-no-pipewire.png --mode music --size 1440x900 || status=1
+          out=$("$TESTS" "libpipewire is opened at run time" 2>&1) || status=1
+          sudo mv "$real.hidden" "$real"
+          echo "$out"
+          echo "$out" | grep -q "is not installed" || { echo "::error::the loading case did not see a missing library"; status=1; }
+          [ -s screenshot-no-pipewire.png ] || { echo "::error::the app did not render without libpipewire"; status=1; }
+          exit $status
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:
@@ -352,6 +379,48 @@ jobs:
           retention-days: 30
 
   # ---------------------------------------------------------------------------
+  # R1.2 / docs/08 D10: the ASIO device type compiles against the Steinberg
+  # ASIO SDK and is offered. The SDK is not in the repository: -DFLUB_ASIO_FETCH=ON
+  # downloads the official 2.3.4 archive from Steinberg (SHA-256 pinned in
+  # cmake/FlubAsio.cmake) and uses it under its GPLv3 option, which allows
+  # this private build. Nothing is uploaded and the JUCE cache is only
+  # restored: no ASIO binary leaves the runner until the owner has chosen the
+  # licence (docs/02 §6). Non-blocking: it depends on Steinberg's server.
+  asio:
+    name: asio (windows-2022, compile + device type)
+    runs-on: windows-2022
+    needs: core
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: JUCE version
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*set[[:space:]]*\([[:space:]]*FLUB_JUCE_VERSION[[:space:]]+"([^"]+)".*/\1/p' cmake/FlubJuce.cmake | head -n 1)
+          [ -n "$version" ] || { echo "::error file=cmake/FlubJuce.cmake::FLUB_JUCE_VERSION not found"; exit 1; }
+          echo "FLUB_JUCE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Restore the JUCE cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/_deps
+          key: juce-${{ env.FLUB_JUCE_VERSION }}-${{ runner.os }}
+      - name: Configure (ASIO SDK fetched, GPLv3)
+        shell: bash
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DFLUB_BUILD_APP=ON -DFLUB_BUILD_PLUGIN=OFF -DFLUB_BUILD_APP_TESTS=ON -DFLUB_BUILD_TESTS=OFF -DFLUB_BUILD_TOOLS=OFF
+          -DFLUB_ASIO=ON -DFLUB_ASIO_FETCH=ON -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      - name: Build
+        run: cmake --build build --parallel --target FlubsoundPro flub_app_tests
+      - name: ASIO cases
+        shell: bash
+        run: |
+          app=$(find build -type f -name flub_app_tests.exe | head -n 1)
+          "$app" "R1.2"
+
+  # ---------------------------------------------------------------------------
   # docs/11 E48 / E47: the native PipeWire node, the app playing through it
   # and the Linux route-journal crash test (pw-play moved to a Game sink,
   # kill -9, restart) against a headless PipeWire + WirePlumber +
@@ -426,6 +495,8 @@ jobs:
               if echo "$out" | grep -qF "(skipped"; then
                 echo "$out"; echo "::error::run $run, '$filter' was skipped (no server or a missing tool)"; exit 1
               fi
+              # R1.2's measurements (callbacks / xruns, hot-plug, recovery time).
+              echo "$out" | grep -E "s on the node:|unplugged:|re-opened:" | sed "s/^ */  run $run: /" || true
             done
             echo "run $run: green"
           done

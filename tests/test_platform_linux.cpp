@@ -3152,11 +3152,13 @@ bool wants (const pipewire::LinkPlan& plan, uint32_t out, uint32_t in)
 struct RecordingCallback final : NativeAudioNode::Callback
 {
     void nodeStarting (double, int) override {}
-    void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING override
+    void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames,
+                      uint64_t timeNs) noexcept FLUB_NONBLOCKING override
     {
         if (calls < 8)
         {
             blocks[calls] = numFrames;
+            times[calls] = timeNs;
             firstInput[calls] = numInputs > 0 ? inputs[0] : nullptr;
             secondInput[calls] = numInputs > 1 ? inputs[1] : nullptr;
             firstOutput[calls] = numOutputs > 0 ? outputs[0] : nullptr;
@@ -3171,6 +3173,7 @@ struct RecordingCallback final : NativeAudioNode::Callback
 
     int calls = 0;
     int blocks[8] {};
+    uint64_t times[8] {};
     const float* firstInput[8] {};
     const float* secondInput[8] {};
     float* firstOutput[8] {};
@@ -3383,6 +3386,7 @@ TEST_CASE ("Platform: the native node's cycle splits a large quantum, reads sile
     }
     CHECK (calls == 3);
     CHECK (callback.calls == 3);
+    CHECK (callback.times[0] == 0); // no cycle time given: unknown (test_pipewire_cycle.cpp covers the stamps)
     CHECK (callback.blocks[0] == 1024);
     CHECK (callback.blocks[1] == 1024);
     CHECK (callback.blocks[2] == 452);

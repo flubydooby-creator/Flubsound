@@ -11,8 +11,13 @@
 // input device needed. The callback swap is lock-free (an atomic pointer and
 // a busy flag; stop() waits on the message thread, never the audio thread).
 //
-// Built with libpipewire only (FLUB_HAS_PIPEWIRE); elsewhere addDeviceType
-// adds nothing, so a caller needs no #if.
+// Built with libpipewire's headers only (FLUB_HAS_PIPEWIRE); elsewhere
+// addDeviceType adds nothing, so a caller needs no #if. The library is opened
+// at run time (R1.2, PipeWireLibrary.h): where it does not load,
+// addDeviceType adds nothing either. The device reports the node's xruns
+// (getXRunCount), passes the driver's time as hostTimeNs, and hands a node
+// error (server gone, node removed) to its callback's audioDeviceError on the
+// message thread.
 #pragma once
 
 #include "../PlatformServices.h"
@@ -48,12 +53,23 @@ bool setDeviceOutputTarget (juce::AudioIODevice* device, const std::string& sink
 /** The node's link status (routing panel); running == false when 'device'
     is not a PipeWire device. */
 NativeAudioNodeStatus getDeviceStatus (juce::AudioIODevice* device);
+
+/** R1.2: where a running PipeWire device reports that its node stopped
+    working (server gone, node removed): 'target'->audioDeviceError on the
+    message thread. JUCE 9.0.2's AudioDeviceManager starts devices through a
+    wrapper (CallbackMaxSizeEnforcer) that does not forward audioDeviceError,
+    so an error given to the device's own callback never reaches the
+    manager's callbacks; the host registers itself here instead (from
+    audioDeviceAboutToStart). Cleared when the device stops; nullptr clears.
+    false when 'device' is not a PipeWire device. Any thread. */
+bool setDeviceErrorTarget (juce::AudioIODevice* device, juce::AudioIODeviceCallback* target);
 #else
 inline constexpr bool kHasDeviceType = false;
 inline bool addDeviceType (juce::AudioDeviceManager&) { return false; }
 inline bool setDeviceLatency (juce::AudioIODevice*, NativeAudioNodeConfig::Latency) { return false; }
 inline bool setDeviceOutputTarget (juce::AudioIODevice*, const std::string&) { return false; }
 inline NativeAudioNodeStatus getDeviceStatus (juce::AudioIODevice*) { return {}; }
+inline bool setDeviceErrorTarget (juce::AudioIODevice*, juce::AudioIODeviceCallback*) { return false; }
 #endif
 
 inline constexpr const char* kDeviceTypeName = "PipeWire";

@@ -42,7 +42,7 @@ flowchart LR
     M --> E2
     C --> E3
     S --> E4
-    E1 & E2 & E3 & E4 -->|shared memory / capture| H --> MX -->|WASAPI shared-LL / exclusive / ASIO<br/>CoreAudio · ALSA · JACK| DAC
+    E1 & E2 & E3 & E4 -->|shared memory / capture| H --> MX -->|WASAPI shared-LL / exclusive / ASIO<br/>CoreAudio · ALSA · JACK · PipeWire| DAC
     UI <-->|atomics + lock-free FIFOs| MX
 ```
 
@@ -54,6 +54,14 @@ How each platform realises the virtual endpoints:
 | macOS | Audio Server Plug-in virtual device (libASPL) and per-app capture on 14.2+ via Core Audio process taps with *mute-when-tapped* (**design only**, `platform/macos/README.md`; the app reports routing and capture as unsupported). |
 | Linux | PipeWire / PulseAudio null sinks `flubsound_game/music/chat/system` ("Flubsound Game" ...), created by `platform/linux/flubsound-pipewire-setup.sh` or a PipeWire config drop-in. Apps are moved per sink-input (`pactl move-sink-input`) or with `target.object` rules. **Implemented.** |
 | Any OS, zero install | Any third-party virtual cable (VB-Cable, BlackHole, a JACK port) feeding a strip through the device input. |
+
+Audio backends (R1.2): the device types Settings › Audio offers, the one a first start opens, and what has run where.
+
+| Platform | Device types | First start (nothing saved) | Notes and verification |
+|---|---|---|---|
+| Windows | *Windows Audio* (WASAPI shared), *Windows Audio (Exclusive Mode)*, *Windows Audio (Low Latency Mode)* (`IAudioClient3`); *ASIO* only with `-DFLUB_ASIO=ON` and Steinberg's SDK (`cmake/FlubAsio.cmake`, off by default); DirectSound off | Low Latency Mode, else Windows Audio | JUCE 9.0.2's backends. Exclusive Mode and ASIO show a single-client note above the selector ([08 D2 / D10](08-pitfalls-and-solutions.md#d10-asio-specifics)). The app runs on the owner's Windows 11 PC; ASIO is compiled only by CI's non-blocking `asio` job (SDK under its GPLv3 option) and has never run with a driver; the licence for a published ASIO build is the owner's decision ([02 §6](02-tech-stack.md#6-licensing-summary-third-party-components)) |
+| macOS | *CoreAudio* | CoreAudio | JUCE; built on CI (macos-14) |
+| Linux | *ALSA*, *JACK* (JUCE; PipeWire through pipewire-jack / its ALSA plug-in, PulseAudio through pulse-alsa), *PipeWire* (Flubsound's own `pw_filter` node, [11 E48](11-enhancement-report.md#e48)) | PipeWire when a server answers, else ALSA | The node is offered only when `libpipewire-0.3.so.0` loads at run time (`dlopen`, no link dependency), so a PulseAudio-only system starts the same binary and keeps ALSA / JACK. It sets `node.latency` per profile in place, counts its own xruns (`getXRunCount`), stamps callbacks with the driver's time, and a lost server or removed node goes through the host's device recovery. Run against a headless PipeWire 1.0 + WirePlumber 0.4 on CI (`pipewire` job), not on a desktop distribution or a sound card |
 
 ---
 

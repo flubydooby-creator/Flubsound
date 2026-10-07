@@ -614,7 +614,8 @@ inline std::vector<SpeakerPosition> AudioChannelMaps::queryInputPositions (const
 
 // ---------------------------------------------------------------------------
 /** docs/11 E48: Flubsound's own PipeWire node (Linux, built when pkg-config
-    finds libpipewire-0.3; elsewhere and without it isSupported() == false).
+    finds libpipewire-0.3's headers and supported when libpipewire-0.3.so.0
+    loads at run time, R1.2; elsewhere isSupported() == false).
     One pw_filter with PW_FILTER_FLAG_RT_PROCESS: an input port group per
     strip (Game 7.1, Music, Chat, System) and an output port group. The
     flubsound_<strip> null sinks it needs are created by the node when they
@@ -685,11 +686,22 @@ public:
             (a quantum above maxBlockFrames is split). inputs: every strip's
             channels in the config's order (Game FL..SR, Music FL FR, ...),
             outputs: the output channels; never null (a port without a buffer
-            reads silence / writes to scratch). No allocation, lock or IO. */
-        virtual void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING = 0;
+            reads silence / writes to scratch). timeNs: the block's first
+            frame on the driver's clock (CLOCK_MONOTONIC ns: the cycle's start
+            plus the block's offset in a split quantum); 0 when unknown. No
+            allocation, lock or IO. */
+        virtual void nodeProcess (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numFrames,
+                                  uint64_t timeNs) noexcept FLUB_NONBLOCKING = 0;
 
         /** After the last nodeProcess(), on the thread that calls stop(). */
         virtual void nodeStopped() = 0;
+
+        /** R1.2: the node stopped working while running (the PipeWire server
+            went away, or removed or failed the node); no nodeProcess() follows
+            until the owner stops and starts it again. On PipeWire's loop
+            thread (never the data thread), at most once per run; must not call
+            back into the node. User-presentable message. */
+        virtual void nodeError (const std::string& message) { (void) message; }
     };
 
     virtual ~NativeAudioNode() = default;
@@ -723,6 +735,11 @@ public:
     /** For the UI (message thread, a few times a second); never the audio
         thread. */
     virtual NativeAudioNodeStatus getStatus() const = 0;
+
+    /** R1.2: graph cycles this run missed or finished too late
+        (pipewire::XrunCounter), since start(); -1 when the node counts none.
+        Wait-free, any thread. */
+    virtual int getXrunCount() const noexcept { return -1; }
 
     static std::unique_ptr<NativeAudioNode> create();
 };

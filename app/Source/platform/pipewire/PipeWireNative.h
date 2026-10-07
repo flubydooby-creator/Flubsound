@@ -1,7 +1,9 @@
 // Flubsound Pro - libpipewire client code (docs/11 E48). Built only when
-// pkg-config finds libpipewire-0.3 (FLUB_HAS_PIPEWIRE=1, see
-// PlatformServices.cmake); without it the app keeps the pw-dump / pw-link
-// router and NativeAudioNode::isSupported() is false.
+// pkg-config finds libpipewire-0.3's headers (FLUB_HAS_PIPEWIRE=1, see
+// PlatformServices.cmake); without them the app keeps the pw-dump / pw-link
+// router and NativeAudioNode::isSupported() is false. The library itself is
+// opened at run time (R1.2, PipeWireLibrary.h); where it does not load,
+// Session::connect fails with the reason and the same fallbacks apply.
 //
 //   Session       one connection: a pw_thread_loop, its context and core,
 //                 and a registry mirror (pipewire::RegistryState) that
@@ -81,6 +83,10 @@ public:
     /** Runs on the loop thread (lock held) 20 ms after the last graph or
         default-sink change of a burst. Set it with the lock held. */
     std::function<void()> onGraphChanged;
+
+    /** R1.2: runs on the loop thread (lock held) once, when the server drops
+        the connection (it quit or restarted). Set it with the lock held. */
+    std::function<void()> onConnectionLost;
 
     /** Arms the 20 ms debounce by hand (loop lock held), e.g. after a
         request changed what the owner wants. */

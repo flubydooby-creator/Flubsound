@@ -109,6 +109,14 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 - **What it is:** if the output is the playback side of the cable that feeds a strip (for example *CABLE Input* as output while *CABLE Output* feeds Game), Flubsound's output would loop back into itself and howl. The guard holds the output at silence and shows *Output muted: feedback loop* with **Retry**, **Choose output** and **Sound settings** ([E51](11-enhancement-report.md#e51)). A pair you monitor on purpose can be allowed in Settings › Audio (**Allow this pair**).
 - **Demo pairs:** none (it prevents a howl; it has no sound of its own)
 
+### Audio device types (Windows Audio, exclusive mode, ASIO, PipeWire)
+
+- **What it is:** Settings › Audio's *Audio device type*. Windows: *Windows Audio (Low Latency Mode)* (the default), *Windows Audio* and *Windows Audio (Exclusive Mode)*; *ASIO* only in a build made with Steinberg's ASIO SDK (`-DFLUB_ASIO=ON`, not the default; [R1.2](TRACEABILITY.md)). macOS: CoreAudio. Linux: ALSA, JACK and, when PipeWire's client library is installed, Flubsound's own *PipeWire* node (the default on a first start with a PipeWire server; a PulseAudio-only system keeps ALSA, where PulseAudio's ALSA plug-in carries the sound). When the type has a catch, a **DEVICE TYPE** note above the selector says so: ASIO drivers and exclusive mode usually serve one application, so other apps must play through Flubsound's virtual devices; the PipeWire node makes and links its sinks itself.
+- **What it does to the sound:** nothing; it decides who else can use the output and how much delay the driver adds (exclusive mode and ASIO can run smaller buffers). The header's CPU line shows the device's xruns (`· 3 xr`) for every type that counts them, the PipeWire node included.
+- **Listen for:** with ASIO or exclusive mode, another app playing straight to the same output is silent (or Windows refuses it): send it to a Flubsound device instead.
+- **Demo pairs:** none (device choice; no sound of its own)
+- **Limits (gated):** ASIO has been built only by CI with the GPLv3 SDK (the `asio` job) and never run with a real ASIO driver; a published build with ASIO needs the owner's licence choice (docs/02 §6).
+
 ### Latency profiles: Quality, Balanced, Low Latency
 
 - **What it is:** Settings › Processing › *Latency profile*, for every strip. The profile decides the look-aheads and the oversampling ([01 §5](01-architecture.md#5-latency-budget)).
@@ -155,7 +163,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
 ### Linux: PipeWire sinks and the native node
 
-- **What it is:** on Linux the strips are PipeWire sinks (`platform/linux/flubsound-pipewire-setup.sh install` creates them); an app is assigned by moving it to its strip's sink, and Flubsound links each sink's monitor to its input by itself. The app also offers a native **PipeWire** device ([E48](11-enhancement-report.md#e48)): on a first start with a PipeWire server it opens it by itself, creates the strips' sinks, maps every strip (Game, Music, Chat, System) and links them with no setup script, and the routing panel shows a link line (*PipeWire: Linked 14 of 14 input channels …*, amber when something is missing). Tested against a headless PipeWire 1.0 + WirePlumber 0.4, not yet on a desktop distribution.
+- **What it is:** on Linux the strips are PipeWire sinks (`platform/linux/flubsound-pipewire-setup.sh install` creates them); an app is assigned by moving it to its strip's sink, and Flubsound links each sink's monitor to its input by itself. The app also offers a native **PipeWire** device ([E48](11-enhancement-report.md#e48)): on a first start with a PipeWire server it opens it by itself, creates the strips' sinks, maps every strip (Game, Music, Chat, System) and links them with no setup script, and the routing panel shows a link line (*PipeWire: Linked 14 of 14 input channels …*, amber when something is missing). PipeWire's library is opened when Flubsound starts, not required to start it: without it (PulseAudio only) the PipeWire entry is simply missing and ALSA / JACK work as before. The node counts its own xruns (the header's `xr`), and if PipeWire removes it, Flubsound shows the device error and re-opens it by itself within about a second and a half (a PipeWire restart takes the same path but has not been tested). Tested against a headless PipeWire 1.0 + WirePlumber 0.4, not yet on a desktop distribution.
 - **Demo pairs:** none (routing; the sound is the strip's chain)
 
 ---

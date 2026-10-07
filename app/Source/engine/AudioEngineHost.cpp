@@ -258,7 +258,8 @@ juce::String AudioEngineHost::openDevice (const juce::XmlElement* savedState, in
         deviceWatcherStarted = deviceWatcher->start ([this] (const flub::platform::AudioDeviceEvent& e) { postDeviceEvent (e); });
 
     // docs/11 E48: the native PipeWire node is offered as the "PipeWire"
-    // device type, after JUCE's own (a no-op in a build without libpipewire).
+    // device type, after JUCE's own (a no-op in a build without libpipewire's
+    // headers, or on a system where libpipewire-0.3.so.0 does not load; R1.2).
     flub::platform::pipewire::addDeviceType (deviceManager);
 
    #if JUCE_WINDOWS
@@ -1666,6 +1667,13 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
     const double sampleRate = device->getCurrentSampleRate();
     const int blockSize = device->getCurrentBufferSizeSamples();
+
+    // R1.2: the native PipeWire device reports a lost server or a removed
+    // node to this host directly. JUCE 9.0.2's AudioDeviceManager starts
+    // devices through a wrapper (CallbackMaxSizeEnforcer) that drops
+    // audioDeviceError, so the error would otherwise never arrive and the
+    // E51 recovery never start. A no-op for every other device.
+    flub::platform::pipewire::setDeviceErrorTarget (device, this);
 
     // Read by the callback, which has not started yet.
     alsaChannelOrder.store (isAlsaDeviceType (device->getTypeName()), std::memory_order_relaxed);

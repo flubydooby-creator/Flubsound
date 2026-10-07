@@ -5,8 +5,10 @@
 #include "PipeWireDeviceType.h"
 
 #include "PipeWireGraph.h"
+#include "PipeWireLibrary.h"
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -14,7 +16,7 @@ namespace flub::platform::pipewire
 {
 namespace
 {
-class PipeWireAudioIODevice final : public juce::AudioIODevice, private NativeAudioNode::Callback
+class PipeWireAudioIODevice final : public juce::AudioIODevice, private NativeAudioNode::Callback, private juce::AsyncUpdater
 {
 public:
     PipeWireAudioIODevice() : juce::AudioIODevice (kDeviceName, kDeviceTypeName), node (NativeAudioNode::create())
@@ -26,7 +28,11 @@ public:
             outputNames.add ("Output:" + juce::String (position));
     }
 
-    ~PipeWireAudioIODevice() override { close(); }
+    ~PipeWireAudioIODevice() override
+    {
+        close(); // no nodeError() after this
+        cancelPendingUpdate();
+    }
 
     juce::StringArray getOutputChannelNames() override { return outputNames; }
     juce::StringArray getInputChannelNames() override { return inputNames; }
@@ -88,6 +94,7 @@ public:
 
     void stop() override
     {
+        errorTarget.store (nullptr); // the next start's audioDeviceAboutToStart registers again
         auto* previous = activeCallback.exchange (nullptr);
         while (inCallback.load())
             std::this_thread::yield(); // message thread: the audio thread finishes its block
@@ -102,6 +109,12 @@ public:
     int getCurrentBitDepth() override { return 32; }
     juce::BigInteger getActiveOutputChannels() const override { return activeOutputs; }
     juce::BigInteger getActiveInputChannels() const override { return activeInputs; }
+
+    /** R1.2: the node's own count (pipewire::XrunCounter: cycles it finished
+        after the next one was due, or missed), so AudioEngineHost::getStatus,
+        the header's "xr" and the overload watchdog see PipeWire's xruns as
+        they see a JUCE backend's. */
+    int getXRunCount() const noexcept override { return opened ? node->getXrunCount() : -1; }
 
     /** None of its own: the node runs in the same graph cycle as the sinks
         it reads and the sink it plays to. What the path adds is the graph's
@@ -127,6 +140,8 @@ public:
 
     NativeAudioNodeStatus getStatus() const { return node->getStatus(); }
 
+    void setErrorTarget (juce::AudioIODeviceCallback* target) { errorTarget.store (target); }
+
 private:
     // NativeAudioNode::Callback
     void nodeStarting (double, int maxBlockFrames) override
@@ -145,7 +160,8 @@ private:
         juce::ignoreUnused (maxBlockFrames);
     }
 
-    void nodeProcess (const float* const* nodeInputs, int numInputs, float* const* nodeOutputs, int numOutputs, int numFrames) noexcept FLUB_NONBLOCKING override
+    void nodeProcess (const float* const* nodeInputs, int numInputs, float* const* nodeOutputs, int numOutputs, int numFrames,
+                      uint64_t timeNs) noexcept FLUB_NONBLOCKING override
     {
         inCallback.store (true);
         auto* callback = activeCallback.load();
@@ -157,13 +173,51 @@ private:
                 inputs[i] = activeInputIndex[i] < numInputs ? nodeInputs[activeInputIndex[i]] : nodeInputs[0];
             for (size_t o = 0; o < activeOutputIndex.size(); ++o)
                 outputs[o] = activeOutputIndex[o] < numOutputs ? nodeOutputs[activeOutputIndex[o]] : nodeOutputs[0];
+            // The driver's time of this block (docs/11 E45: the callback
+            // timing's intervals then follow the graph's cadence, and a split
+            // quantum is not a burst of "late" callbacks).
+            juce::AudioIODeviceCallbackContext context;
+            context.hostTimeNs = timeNs != 0 ? &timeNs : nullptr;
             callback->audioDeviceIOCallbackWithContext (inputs.data(), static_cast<int> (inputs.size()), outputs.data(), static_cast<int> (outputs.size()),
-                                                        numFrames, {});
+                                                        numFrames, context);
         }
         inCallback.store (false);
     }
 
     void nodeStopped() override {}
+
+    /** PipeWire's loop thread: hand the error to the message thread, where
+        start() / stop() swap the callback, so it reaches the current one
+        (AudioEngineHost shows it and re-opens the device once callbacks stop:
+        the E51 recovery, which brings the node back when the server is).
+        It goes to the registered error target (setDeviceErrorTarget), since
+        JUCE 9.0.2's AudioDeviceManager drops audioDeviceError from the
+        callback it starts devices with; to that callback only without one. */
+    void nodeError (const std::string& message) override
+    {
+        {
+            const std::lock_guard<std::mutex> guard (errorMutex);
+            pendingError = message;
+        }
+        triggerAsyncUpdate();
+    }
+
+    void handleAsyncUpdate() override
+    {
+        juce::String message;
+        {
+            const std::lock_guard<std::mutex> guard (errorMutex);
+            message = juce::String (pendingError);
+            pendingError.clear();
+        }
+        if (message.isEmpty())
+            return;
+        lastError = message;
+        if (auto* target = errorTarget.load())
+            target->audioDeviceError (message);
+        else if (auto* callback = activeCallback.load())
+            callback->audioDeviceError (message);
+    }
 
     std::unique_ptr<NativeAudioNode> node;
     juce::StringArray inputNames, outputNames;
@@ -182,6 +236,10 @@ private:
 
     std::atomic<juce::AudioIODeviceCallback*> activeCallback { nullptr };
     std::atomic<bool> inCallback { false };
+
+    std::mutex errorMutex; // nodeError (loop thread) -> handleAsyncUpdate (message thread)
+    std::string pendingError;
+    std::atomic<juce::AudioIODeviceCallback*> errorTarget { nullptr }; // setDeviceErrorTarget
 };
 
 class PipeWireAudioIODeviceType final : public juce::AudioIODeviceType
@@ -211,6 +269,11 @@ std::unique_ptr<juce::AudioIODeviceType> createDeviceType() { return std::make_u
 
 bool addDeviceType (juce::AudioDeviceManager& manager)
 {
+    // R1.2: libpipewire is opened at run time; without it (a system with
+    // PulseAudio only, or no sound server) there is no "PipeWire" entry and
+    // the app keeps JUCE's ALSA / JACK types.
+    if (! library().loaded)
+        return false;
     for (auto* type : manager.getAvailableDeviceTypes()) // creates JUCE's own first
         if (type->getTypeName() == kDeviceTypeName)
             return false;
@@ -234,6 +297,15 @@ NativeAudioNodeStatus getDeviceStatus (juce::AudioIODevice* device)
 {
     auto* pipewireDevice = dynamic_cast<PipeWireAudioIODevice*> (device);
     return pipewireDevice != nullptr ? pipewireDevice->getStatus() : NativeAudioNodeStatus {};
+}
+
+bool setDeviceErrorTarget (juce::AudioIODevice* device, juce::AudioIODeviceCallback* target)
+{
+    auto* pipewireDevice = dynamic_cast<PipeWireAudioIODevice*> (device);
+    if (pipewireDevice == nullptr)
+        return false;
+    pipewireDevice->setErrorTarget (target);
+    return true;
 }
 } // namespace flub::platform::pipewire
 

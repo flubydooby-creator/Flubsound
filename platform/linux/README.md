@@ -597,13 +597,61 @@ links:
   alsa_output.usb-… (2 of 2), quantum 256/48000*, in amber when a link is
   missing; with a JUCE device it shows what the registry links could not
   make, if anything.
+- **libpipewire at run time (R1.2).** The app is built against
+  libpipewire-0.3's headers but does not link the library:
+  `PipeWireLibrary.cpp` opens `libpipewire-0.3.so.0` with `dlopen` the
+  first time a PipeWire connection is wanted and resolves 30 exported
+  functions: the 29 `PipeWireNative.cpp` calls and
+  `pw_get_library_version` (`PipeWireApi.h`; what the headers implement
+  inline needs no symbol). A missing one leaves the library unloaded, with
+  its name in the reason. One binary therefore starts on every
+  distribution. Without the library, `pipewire::library()` says why
+  (*PipeWire's client library (libpipewire-0.3.so.0) is not installed*),
+  the "PipeWire" device type is not offered, `NativeAudioNode` reports
+  itself unsupported with that reason and the routing falls back to
+  `pw-dump` / `pw-link` (which also fail without PipeWire, with their own
+  message). stderr names the run-time and build-time versions once
+  (*libpipewire 1.0.5 opened at run time (built against 1.0.5)*).
+- **PulseAudio without PipeWire.** There is no native PulseAudio device
+  type: the app plays through JUCE's ALSA type, whose `default` (or
+  `pulse`) PCM is PulseAudio's ALSA plug-in (`pulse-alsa`, package
+  `libasound2-plugins` / `alsa-plugins-pulseaudio`); `pactl` per-app
+  routing and the `flubsound_*` null sinks work the same on PulseAudio
+  (`flubsound-pipewire-setup.sh print-pa-config`). The monitor links are
+  PipeWire-only: on PulseAudio the router suggests choosing a sink's
+  monitor as the input device (above). This path is documented, not
+  tested: no CI job or run here has had a PulseAudio-only system.
+- **Xruns.** libpipewire has no xrun event for a client, so the node counts
+  its own (`pipewire::XrunCounter`, after each cycle on the data thread):
+  a cycle it finished after the next one was due (the driver's `nsec` +
+  one quantum, PipeWire's own xrun), or a position that skipped ahead on
+  the same driver (cycles run without it); a new driver, rate or a restart
+  re-bases without counting. The device reports it through
+  `getXRunCount()`, so the header shows `· 3 xr` and the overload watchdog
+  counts the node's xruns as it counts a JUCE backend's. Each callback
+  also carries the driver's time (`hostTimeNs`: the cycle's start plus the
+  block's offset), so the callback timing (docs/11 E45) follows the
+  graph's cadence even when a large quantum is split into blocks.
+- **When PipeWire takes the node away.** If the server quits or restarts
+  (the connection drops) or removes the node (`pw-cli destroy`, a
+  patchbay), the node tells the device once (`nodeError`, on the loop
+  thread), the device hands it to the message thread and the host shows
+  the device error and runs its recovery (docs/11 E51): after the settle
+  time it re-opens the device, which connects again and makes a new node
+  and new sinks; with the server still away it retries with back-off and
+  then keeps the error banner. The device reports to the host directly
+  (`pipewire::setDeviceErrorTarget`, registered in
+  `AudioEngineHost::audioDeviceAboutToStart`): JUCE 9.0.2's
+  `AudioDeviceManager` starts devices through a wrapper that drops
+  `audioDeviceError`. Tested on CI with `pw-cli destroy` (the error 12 – 14
+  ms after it, callbacks again 260 – 281 ms after it with the test's 100 ms
+  settle time; the app waits 1.5 s); a server restart takes the same path
+  but is not tested.
 
 Also open: the Flatpak build with the Realtime and GlobalShortcuts
 portals, a headless mode for SteamOS Game Mode, moving applications
-through `target.object` metadata, the manual matrix of the item (Fedora,
-Ubuntu, KDE Neon, SteamOS), and loading libpipewire at run time: a build
-made with it links `libpipewire-0.3.so.0`, which every PipeWire desktop
-has, but a system without it cannot start that build.
+through `target.object` metadata, and the manual matrix of the item
+(Fedora, Ubuntu, KDE Neon, SteamOS) on real sound cards.
 
 Tests: `tests/test_platform_linux.cpp` covers the registry mirror, the
 plans, the port names, the latency values and the cycle runner with fakes
@@ -626,7 +674,17 @@ stream to a Game sink through the real `pactl` router and is killed with
 SIGKILL; WirePlumber then sends the application's next stream to the
 Game sink too; the restart moves both back to the default output, and
 with another default output the application's next stream follows it (the
-restore-stream entry is gone). Without a server the tests print
+restore-stream entry is gone). R1.2 added three cases there: the run-time
+loading (a missing soname is reported and offers no device type; the
+installed library resolves every entry point; this one needs no server),
+the device's xruns and time stamps (0.6 s on the idle test server: one
+callback per block at the graph's cadence, none late, no xrun) and the
+recovery (`pw-cli destroy` on the device's node: the host gets the error
+and re-opens the device with a new node by itself); and
+`tests/test_pipewire_cycle.cpp` tests the xrun count and the block time
+stamps with made-up clocks on every OS. CI's `app` job also hides
+`libpipewire-0.3.so.0` for one step: the app still renders and the loading
+case takes its "not installed" branch. Without a server the tests print
 "skipped"; the app-level and crash cases also skip on a server with real
 (ALSA or Bluetooth) devices, since they open the default output or change
 it. CI's `pipewire` job runs them 20 times in a row against a headless

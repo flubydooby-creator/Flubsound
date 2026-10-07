@@ -391,9 +391,13 @@ static_assert (std::is_same_v<decltype (&flub::platform::RealtimeScheduling::cur
 
 static_assert (std::is_same_v<decltype (&flub::platform::pipewire::CycleRunner::run),
                               int (flub::platform::pipewire::CycleRunner::*) (const float* const*, float* const*, uint32_t,
-                                                                               flub::platform::NativeAudioNode::Callback&) noexcept FLUB_NONBLOCKING>);
+                                                                               flub::platform::NativeAudioNode::Callback&, uint64_t, uint32_t) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&flub::platform::NativeAudioNode::Callback::nodeProcess),
-                              void (flub::platform::NativeAudioNode::Callback::*) (const float* const*, int, float* const*, int, int) noexcept FLUB_NONBLOCKING>);
+                              void (flub::platform::NativeAudioNode::Callback::*) (const float* const*, int, float* const*, int, int, uint64_t) noexcept FLUB_NONBLOCKING>);
+// The node's xrun count, after each cycle on the same data thread (R1.2,
+// tests/test_pipewire_cycle.cpp drives it on every platform).
+static_assert (std::is_same_v<decltype (&flub::platform::pipewire::XrunCounter::cycleDone),
+                              bool (flub::platform::pipewire::XrunCounter::*) (const flub::platform::pipewire::CycleClock&, uint64_t) noexcept FLUB_NONBLOCKING>);
 
 // The app's live latency probe (docs/11 E42d, app/Source/engine): the
 // device callback plays and records it (tests/app/test_app_latency_measure.cpp

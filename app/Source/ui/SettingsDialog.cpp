@@ -189,10 +189,12 @@ public:
         enhancementToggle.setEnabled (onboard.endpoint.isNotEmpty());
         enhancementToggle.setToggleState (onboard.on, juce::dontSendNotification);
         followDefaultToggle.setToggleState (controller.getFollowSystemDefaultOutput(), juce::dontSendNotification);
-        if (text != deviceText || guard != guardText || pairs != shownPairs)
+        const auto note = describeDeviceTypeNote (controller.getDeviceManager().getCurrentAudioDeviceType());
+        if (text != deviceText || guard != guardText || pairs != shownPairs || note != typeNote)
         {
             deviceText = text;
             guardText = guard;
+            typeNote = note;
             if (pairs != shownPairs)
                 rebuildPairRows (pairs);
             resized();
@@ -229,7 +231,23 @@ public:
         for (size_t i = 0; i < shownPairs.size() && i < pairRows.size(); ++i)
             g.drawFittedText ("Allowed: input \"" + shownPairs[i].input + "\", output \"" + shownPairs[i].output + "\"", pairRows[i].textArea,
                               juce::Justification::centredLeft, 1, 0.9f);
+
+        // R1.2: what the current device type means for other apps.
+        if (! noteArea.isEmpty())
+        {
+            box = noteArea.toFloat();
+            g.setColour (Palette::well);
+            g.fillRoundedRectangle (box, 6.0f);
+            g.setColour (Palette::amber.withAlpha (0.55f));
+            g.drawRoundedRectangle (box.reduced (0.5f), 6.0f, 1.0f);
+            auto noteInner = noteArea.reduced (kBoxPadX, kBoxPadY);
+            Theme::drawCaption (g, "DEVICE TYPE", noteInner.removeFromTop (16).toFloat(), Palette::amber);
+            noteInner.removeFromTop (4);
+            noteLayout.draw (g, noteInner.toFloat());
+        }
     }
+
+    juce::String getTypeNote() const { return typeNote; }
 
     void resized() override
     {
@@ -273,7 +291,21 @@ public:
         }
 
         followDefaultToggle.setBounds (kInset, guardArea.getBottom() + 10, w, kToggleH);
-        selector->setBounds (0, followDefaultToggle.getBottom() + 6, getWidth(), juce::jmax (1, selector->getHeight()));
+        int selectorTop = followDefaultToggle.getBottom() + 6;
+
+        // The device type's note (R1.2), right above the selector it is about.
+        noteArea = {};
+        if (typeNote.isNotEmpty())
+        {
+            juce::AttributedString t;
+            t.setWordWrap (juce::AttributedString::byWord);
+            t.append (typeNote, Theme::font (12.0f), Palette::text.withAlpha (0.85f));
+            noteLayout.createLayout (t, static_cast<float> (juce::jmax (80, w - 2 * kBoxPadX)));
+            const int noteH = kBoxPadY + 16 + 4 + static_cast<int> (std::ceil (noteLayout.getHeight())) + kBoxPadY;
+            noteArea = { kInset, selectorTop + 2, w, noteH };
+            selectorTop = noteArea.getBottom() + 6;
+        }
+        selector->setBounds (0, selectorTop, getWidth(), juce::jmax (1, selector->getHeight()));
         placeLatencyPanel();
     }
 
@@ -388,9 +420,9 @@ private:
     std::unique_ptr<juce::AudioDeviceSelectorComponent> selector;
     LatencyPanel latencyPanel;                         // docs/11 E42c / E42d
     juce::Component::SafePointer<juce::ComboBox> bufferList; // the selector's buffer size list (hookBufferList)
-    juce::String deviceText, guardText;
-    juce::TextLayout introLayout, deviceLayout, guardLayout;
-    juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea;
+    juce::String deviceText, guardText, typeNote;
+    juce::TextLayout introLayout, deviceLayout, guardLayout, noteLayout;
+    juce::Rectangle<int> titleArea, introArea, deviceArea, guardArea, guardTextArea, noteArea;
     juce::TextButton allowButton { "Allow this pair" };
     juce::ToggleButton enhancementToggle { "Headset enhancement (Superhuman Hearing / on-board EQ) is ON" };
     juce::ToggleButton followDefaultToggle { "Follow the system default output" };
@@ -2390,6 +2422,34 @@ AppSettings::LoopbackPair SettingsDialog::loopbackPairToAllow (EngineController&
         if (p.input.equalsIgnoreCase (setup.inputDeviceName) && p.output.equalsIgnoreCase (setup.outputDeviceName))
             return {};
     return { setup.inputDeviceName, setup.outputDeviceName };
+}
+
+juce::String SettingsDialog::describeDeviceTypeNote (const juce::String& deviceTypeName)
+{
+    // docs/08 D10: an ASIO driver usually takes one client, and the output
+    // device is then Flubsound's alone.
+    if (deviceTypeName == "ASIO")
+        return "ASIO drivers usually serve one application at a time: while Flubsound plays through this ASIO device, other apps "
+               "cannot use it directly. Send them to Flubsound's virtual devices so Flubsound plays everything. The driver's own "
+               "control panel may also fix the sample rate and buffer size.";
+    // docs/08 D2: the same for WASAPI exclusive mode.
+    if (deviceTypeName == "Windows Audio (Exclusive Mode)")
+        return "Exclusive mode gives this output to Flubsound alone: other apps cannot play to it while Flubsound runs. Send them to "
+               "Flubsound's virtual devices, or choose \"Windows Audio\" or \"Windows Audio (Low Latency Mode)\" to share the output.";
+    // docs/11 E48: the native node; its single device is not a sound card.
+    if (deviceTypeName == "PipeWire")
+        return "Flubsound's own PipeWire node: it creates the Game, Music, Chat and System sinks, reads them and plays to the default "
+               "output, linking everything itself (no setup script or manual links). Send apps to those sinks in the routing panel "
+               "or your desktop's sound settings.";
+    return {};
+}
+
+juce::String SettingsDialog::getAudioDeviceTypeNote()
+{
+    if (audioPage == nullptr)
+        return {};
+    audioPage->refresh();
+    return audioPage->getTypeNote();
 }
 
 juce::String SettingsDialog::describeLoopbackGuard (EngineController& controller)
