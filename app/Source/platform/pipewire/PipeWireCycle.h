@@ -118,7 +118,8 @@ public:
         first cycle is often late without anything going wrong: the data
         thread and the engine start cold, and the node joins a graph that is
         already running (CI, before this: 1 xrun within the first 20 cycles
-        in 4 to 9 of 20 runs on an idle server, none in the 0.6 s after). */
+        in 4 to 9 of 20 runs on an idle server, none in the 0.6 s after;
+        with it, none in 20). */
     static constexpr int kSettleCycles = 2;
 
     /** Not real time (before the node starts): back to zero, no baseline. */
