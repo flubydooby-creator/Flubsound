@@ -73,13 +73,19 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 
 - **CI (GitHub Actions) runs again; the repository is public.** Billing blocked every job up to run 36695058369 (the
   hand-over commit 8e5a11c). Jobs start again from run 36783725945 (2026-09-30), but core failed on Apple Clang (from
-  2026-10-01 on gcc too), so the app jobs were skipped, until the CI fixes c2d05e5 / caccf81 (2026-10-06) and 51abe53.
-  **First fully green run after the hand-over: 37572308549** (51abe53, 2026-10-07, all 11 jobs).
-  The seven items merged on 2026-10-07 first ran together in 37634884865 (70a2a98): 11 of 12 green, the non-blocking
-  `pipewire` job failed on an idle xrun (docs/11 E48). The code now at HEAD (3554497) ran all 12 jobs green, `asio`
-  included, in 37649158870 on `wip/pipewire-xrun`.
-  The branch's own run on that commit, 37654557630, ended as a failure: its 7 core, sanitizer, RTSan and fuzz jobs
-  are green, but the app, `asio` and `pipewire` jobs never started and gh shows no failed step or error (worth a re-run).
+  2026-10-01 on gcc too), so the app jobs were skipped until c2d05e5: its run 37427019405 had every core leg and the
+  Linux app job green (the Windows and macOS app jobs failed). The Windows app job went green after caccf81
+  (37444883054), the macOS one after 51abe53. **First fully green run after the hand-over: 37572308549** (51abe53,
+  2026-10-07, all 11 jobs).
+  Six of the items merged on 2026-10-07 (R1.1, R1.5, R4.4, R4.5 / R4.6, R5.3, E56) first ran together in 37598813718
+  (055e792); all seven, with R1.2, first ran together in 37615196405 (b9d9ab7: the macOS core leg failed the paced
+  VoiceCleanup test, the app, `asio` and `pipewire` jobs were skipped). The first run in which all their jobs ran is
+  37634884865 (70a2a98): 11 of 12 green, the non-blocking `pipewire` job failed on an idle xrun (docs/11 E48). The
+  code at HEAD (unchanged since 3554497) ran all 12 jobs green, `asio` included, in 37649158870 on `wip/pipewire-xrun`.
+  The branch's own run on that commit, 37654557630, ended as a failure in its first attempt, a GitHub-side failure to
+  create the dependent jobs: its 7 core, sanitizer, RTSan and fuzz jobs were all green, the app, `asio` and `pipewire`
+  jobs were never created (no failed step or error), and the same code is all green in 37649158870. A re-run
+  (attempt 2) was started on 2026-10-07.
 - **Batches 3–5 are built and tested on CI:** MSVC (windows-2022), gcc and clang (ubuntu-24.04), Apple Clang
   (macos-14, arm64), RTSan, ASan + UBSan and the fuzzers; app, plug-in, `flub_app_tests` and pluginval on all three
   OSes; the gcc golden-render step; the `pipewire` job. Locally on MSVC 19.51 too (step 1 below). The former risky
@@ -88,8 +94,9 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
 - **Real hardware (owner-verified, Windows 11, Turtle Beach Stealth 600PC Gen 3 on its USB dongle):** headset matching
   (E16); per-app capture (Edge onto the Music strip) with the double-audio fix; recovery after a dongle re-plug into
   another USB port, headset off / on and sleep / wake (E51); by ear on the Music strip: Warmth, Width, Clarity,
-  Loudness, Late Night, Podcast & Voice, A/B, the contour following the Windows volume, and the Punch ticks on speech
-  at Boost ~70 % (E53) and their fix ("sounds a little better", E04). On the same PC but not the headset: the R1.5
+  Loudness, Late Night, Podcast & Voice, A/B, the contour following the Windows volume, the Punch ticks on speech
+  at Boost ~70 % (E53); after the high-Boost fade, music (The Veldt) at Boost 100 + Punch 100 "sounds a little
+  better" (E04). **Run by the local session on the owner's PC** (not owner-verified, not on the headset): the R1.5
   device soak (S/PDIF output), the R4.5 router check (build 26200) and the R4.4 hotkey probe.
 
 ### Local session progress (Windows, from 2026-09-30)
@@ -184,7 +191,8 @@ reference; nothing on them is left to merge. The temporary remote branches `wip/
 
 ### Next steps for the local session, in priority order
 
-1. **Build on Windows: done** (step 1 above; CI green on all three OSes since run 37572308549).
+1. **Build on Windows: done** (step 1 above; CI first fully green on all three OSes in run 37572308549; latest
+   all-green code: 37649158870).
 2. **Real-hardware checks still open** on the Stealth 600PC Gen 3 (rebuild the app from HEAD first; docs/12 §0).
    Put each result in the item's docs/11 Status line, as "owner-verified", with the device name and connection.
    - Games: Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking, the on-board
@@ -224,14 +232,14 @@ reference; nothing on them is left to merge. The temporary remote branches `wip/
    - E22: the chat sub-limiter.
    - E07: the 2.00 dB row.
    - Golden: the MSVC-recorded rows (E20's Impact presets, Synthwave) pass CI's gcc golden-render step (±0.05 dB)
-     since run 37572308549; `tests/golden/preset-render-baseline.json` (E20, E04 step 5, Synthwave rows) is not
-     checked by CI and still wants a gcc re-record.
+     since run 37427019405 (c2d05e5); `tests/golden/preset-render-baseline.json` (E20, E04 step 5, Synthwave rows)
+     is not checked by CI and still wants a gcc re-record.
    - PipeWire on CI: an idle xrun is tolerated only as an attributed scheduling stall; a desktop with real-time
      priority is not checked (E48).
 5. **Gated items** (they need hardware, people or network, not code):
    - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E55 / E22 on
      hardware, and the E54 update check against a real release.
-   - A real Mac: the OSD's key-window check (E56), the neural worker (os_workgroup, wake-up energy; E35).
+   - A real Mac: the OSD over a fullscreen game's Space (E56), the neural worker (os_workgroup, wake-up energy; E35).
    - Linux: the desktop distribution matrix, WirePlumber 0.5, the R1.2 node on a real desktop and sound card.
    - Listening panels for E24, E28, E34 and E60.
    - The AMT cross-check, which needs access to sofacoustics.org.
