@@ -18,12 +18,13 @@
 //
 // start() refuses (and says why, whyNot()) without a running device, with no
 // input channel open, while the feedback-loop guard holds the output, for a
-// strip that does not exist or (Through) is muted, and while a measurement
-// runs. What the device and the engine report (latency::DeviceContext) is
-// snapshot at start(); each pass's glitches are counted from start() (the
-// first) or from the last poll before the pass before it was collected (the
-// second) to the poll that collects it: a glitch near the passes' boundary
-// counts for both.
+// strip that does not exist or (Through) is muted, while a measurement runs,
+// and during a device soak (an output pin or a device signal source is set,
+// docs/11 E53). What the device and the engine report
+// (latency::DeviceContext) is snapshot at start(); each pass's glitches are
+// counted from start() (the first) or from the last poll before the pass
+// before it was collected (the second) to the poll that collects it: a glitch
+// near the passes' boundary counts for both.
 //
 // Message thread only (the worker only runs analyse() on sessions it owns).
 #pragma once

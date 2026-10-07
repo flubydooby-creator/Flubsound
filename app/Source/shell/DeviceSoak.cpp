@@ -686,15 +686,25 @@ EngineController::Options DeviceSoak::makeEngineOptions (const DeviceSoakOptions
     o.deviceState = std::move (xml);
     o.outputPin = output;
 
-    if (isVirtual)
+    o.beforeDeviceOpen = [isVirtual] (AudioEngineHost& host)
     {
-        o.beforeDeviceOpen = [] (AudioEngineHost& host)
+        // docs/11 E42c / E53: the soak runs at the buffer it asked for (--buffer,
+        // or the device's default) for the whole run. Automatic buffer size is
+        // off before the device opens (the temporary settings have no stored
+        // choice, so the upgrade path would turn it on at a device-default
+        // size): its latency-profile actions are engine swaps only and the
+        // glitch back-off never re-opens the device, so a device start during
+        // the soak stays a finding. Off after the open would keep the size the
+        // host had already asked for.
+        host.setAutomaticBufferSize (false);
+        if (isVirtual)
         {
             host.getDeviceManager().addAudioDeviceType (std::make_unique<SoakVirtualDeviceType>());
             host.setDeviceWatcher (nullptr); // no OS device events
-        };
+        }
+    };
+    if (isVirtual)
         o.outputEndpoints = [] { return std::vector<flub::platform::OutputEndpointIdentity>(); }; // no OS endpoints
-    }
     return o;
 }
 

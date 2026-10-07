@@ -221,10 +221,11 @@ public:
     /** Once per callback after the engine wrote `outputs`: DeviceOnly
         crossfades the probe in place of them; ThroughFlubsound gates and caps
         them (it only ever turns them down). With `outputAllowed` false (the
-        feedback-loop guard holds the output, or the engine is not ready) the
-        DeviceOnly probe is not written. Then the inputs are recorded and the
-        session advances; it finishes at the end of the probe (or of a
-        cancel's fade, or of a Through cancel's silence). */
+        feedback-loop guard holds the output, the engine is not ready, or the
+        device is not a soak's pinned output) the DeviceOnly probe is not
+        written. Then the inputs are recorded and the session advances; it
+        finishes at the end of the probe (or of a cancel's fade, or of a
+        Through cancel's silence). */
     void process (const float* const* inputs, int numInputs, float* const* outputs, int numOutputs, int numSamples,
                   bool outputAllowed) noexcept FLUB_NONBLOCKING
     {

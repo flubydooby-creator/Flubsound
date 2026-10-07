@@ -1589,16 +1589,18 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
                 a.store (false, std::memory_order_relaxed);
     }
 
-    // docs/11 E53: the output as handed to the device, for the soak's analysis.
-    if (auto* tap = outputTap.load (std::memory_order_seq_cst))
-        tap->write (outputChannelData, numOutputChannels, numSamples);
-
     // The probe replaces (device only) or caps (through Flubsound) what the
     // engine wrote, records the inputs and advances; silent while the guard
-    // holds the output or the engine is not ready.
+    // holds the output, the engine is not ready or the device is not the
+    // pinned output (docs/11 E53: such a device plays nothing).
     if (probe != nullptr)
-        probe->process (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, ready && ! guarded);
+        probe->process (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, ready && ! guarded && ! blocked);
     probeInBlock = nullptr;
+
+    // docs/11 E53: the output as handed to the device (after the engine, the
+    // guard, the trim and a latency probe), for the soak's analysis.
+    if (auto* tap = outputTap.load (std::memory_order_seq_cst))
+        tap->write (outputChannelData, numOutputChannels, numSamples);
 
     // docs/11 E45: the interval runs on one clock only, so a backend that
     // starts or stops giving host times begins a new run.

@@ -37,6 +37,11 @@ juce::String LatencyMeasurer::whyNot (const Request& r) const
 {
     if (isBusy())
         return "A measurement is already running.";
+    // docs/11 E53: a device soak plays its own programme into the strips on
+    // a pinned output; the probe would be heard in its analysis (and the
+    // Through pass would get no input).
+    if (host.getOutputPin().isNotEmpty() || host.hasDeviceSignalSource())
+        return "A device soak is running on this output: measure latency in a normal start of the app.";
     if (! host.getStatus().running)
         return "No audio device is running. Choose an output and an input above first.";
     if (host.isOutputMutedByGuard())

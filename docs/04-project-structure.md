@@ -129,6 +129,7 @@ Flubsound/
 │   │   │   ├── LoudnessFollower.h          cheap K-weighted running loudness for the control loops (default 3 s)
 │   │   │   ├── PeakMeters.h                TruePeakMeter; LevelMeter (sample peak, 300 ms RMS, correlation)
 │   │   │   ├── SceneEvents.h               offline scene-event detector (onsets, loud events, silences, level changes; docs/11 E60), for the CLI and the scene tests
+│   │   │   ├── StreamTap.h                 one writer, one reader: a preallocated copy of a real-time stream's output (stereo chunks with stream positions; a full ring drops whole chunks, counted; docs/11 E53 device soak)
 │   │   │   └── SpatialMetrics.h            offline spatial metrics of binaural responses (IACC early / late per octave, ITD, DRR, 1/3-octave levels, diffuse-field deviation; docs/11 E60 stage 2) and the HRTF-rendered focus-ILD method (docs/11 E24)
 │   │   ├── engine/                         L2 engine: parameters, macros, protection, bypass, chain, mixer, telemetry
 │   │   │   ├── Parameters.h                stable parameter IDs, Info table, two-bank lock-free ParameterStore (A/B)
@@ -165,6 +166,7 @@ Flubsound/
 │       │   ├── LatencyProbe.cpp        sweep generation, regularised deconvolution, parabolic peak, locate() for a reference channel
 │       │   ├── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
 │       │   ├── SceneEvents.cpp             10 ms frames, background, event runs, median level changes
+│       │   ├── StreamTap.cpp               the chunk ring: write() never waits or allocates, read() and the counters
 │       │   └── SpatialMetrics.cpp          FFT band levels, Butterworth octave bands, windowed cross-correlation, impulse splitting, Welch ILD, the virtualiser's and the focus's responses
 │       ├── dsp/
 │       │   ├── BassEngine.cpp
@@ -252,6 +254,8 @@ Flubsound/
 │   │   ├── test_app_ui_simple_view.cpp docs/11 E39 / E38: the Simple view by default and kept, layouts 800 × 560 .. 2560 × 1440, headset status, chips
 │   │   ├── RoutingTestFakes.h              fake AppAudioRouter / captures shared by the E47 / E55 routing tests
 │   │   ├── test_app_device_selection.cpp   docs/11 E51: endpoint identities, explicit output selection, hot-plug on another USB port, sleep / resume, exclusive-mode retries, the safe speaker profile
+│   │   ├── test_app_device_soak.cpp        docs/11 E53: the device soak's command line, the callback hooks (no allocation, free or lock), the output pin, a virtual run and its report, pulse triage, --replay, --dump at the stream start, refusals, a stalled callback
+│   │   ├── test_app_latency_measure.cpp    docs/11 E42c / E42d: the buffer per latency profile and the back-off, the controller's persistence, the live measurement through a fake loopback, weak / silent / echo results, the probe on the audio thread, restarts and cancels, the Settings › Audio texts
 │   │   ├── test_app_neural_cleanup.cpp     docs/03 §16: the Chat strip's neural voice cleanup switch: off by default, Active (+960 samples on Chat only), Low Latency / 512-sample / 44.1 kHz reasons and fixes, the Settings switch and Status line; safety frames from the device start's engine; the model follows the Chat strip on a layout change, persisted
 │   │   ├── test_app_onboard_cap.cpp        docs/11 E16: "Headset enhancement is ON" per output endpoint (applied / removed by device changes, persisted, found after a "2- " re-plug), the banner offer, Settings › Audio, the CAPPED chips
 │   │   ├── test_app_diagnostics.cpp        docs/11 E54: redaction, the rotating log, engine events, crash reports (forked child), the session log, the diagnostics zip
@@ -341,6 +345,7 @@ Flubsound/
 │   ├── test_parameters_headroom.cpp        docs/11 E11 / E05 / E19: layout version 3 parameters, the chain's static-boost model and automatic preamp, named maximizer styles
 │   ├── test_signal_hygiene.cpp             docs/11 E10: the rate-aware saturator table, alias rows, residual-path DC blockers, the capture FIFO's sanitiser
 │   ├── test_soak.cpp                       docs/11 E53: DiscontinuityDetector on clean and damaged programme, the 10 s chain soak under automation, injected faults
+│   ├── test_stream_tap.cpp                 StreamTap (docs/11 E53): chunk positions, mono to both sides, whole-chunk drops counted, an allocation-free write(), a writer and a reader on two threads
 │   ├── test_cli_analyze.cpp                flubsound-cli analyze --events / --bands / --glitches / --spatial / --focus-ild and the content / suggest sections (docs/11 E60 / E53 / E24 / E34)
 │   ├── test_content_analysis.cpp           docs/11 E34: ContentAnalysis readings, block-size independence, the Smart law, Smart Punch on a limited master, bit-identity, the preset flag
 │   ├── test_cli_quality.cpp                tests/quality_targets.json and the KNOWN_GAP ratchet of `flubsound-cli quality` (docs/11 E59), hygiene metrics' meta-validation
@@ -377,6 +382,7 @@ Flubsound/
 │       ├── preset-render-diff.py           renders every factory preset on pinned programmes with flubsound-cli and diffs the results against tests/golden (docs/11 E59)
 │       ├── quality-report.py               runs every tests/quality_targets.json row through `flubsound-cli quality`: met / known gap / REGRESSED; --update-recorded (docs/11 E59)
 │       ├── soak.py                         the soak matrix (user rows, Low Latency, 44.1 kHz, parameter fuzz) for N minutes each through `flubsound-cli soak` (docs/11 E53)
+│       ├── device-soak.py                  runs `Flubsound Pro --device-soak` rows (low-default, low-min, shared; default for long runs) one after the other and prints one table (docs/06 §11.1, docs/11 E53)
 │       ├── package-desktop.sh              the CI test package per OS: folder + Inno Setup installer (Windows), .zip + .dmg (macOS), .tar.gz with install.sh (Linux)
 │       └── TESTING.txt                     the tester's notes shipped in every test package
 │
@@ -391,6 +397,7 @@ Flubsound/
 │       │   ├── CrashHandler.{h,cpp}        crash reports: POSIX signals on an alternate stack (async-signal-safe), Windows exception filter + minidump
 │       │   ├── DiagnosticsBundle.{h,cpp}   Settings › Diagnostics: the diagnostics zip (system details, settings, route journal, logs, crash reports)
 │       │   ├── DiagnosticsSession.{h,cpp}  wires the log, the crash handler and the monitor into the app's lifetime
+│       │   ├── ProcessStats.{h,cpp}        private bytes, working set, process and system CPU time (the device soak's memory and CPU readings, docs/11 E53)
 │       │   └── UpdateCheck.{h,cpp}         the opt-in, notify-only update check (GitHub releases over HTTPS, semver, Stable / Beta)
 │       ├── engine/                         L3 host and L4 services (message thread + audio callback)
 │       │   ├── AudioEngineHost.{h,cpp}     juce::AudioDeviceManager, device callback, MixEngine owner, capture FIFO slots
@@ -399,6 +406,9 @@ Flubsound/
 │       │   ├── AppRouting.{h,cpp}          executable → strip map; endpoint routing or per-process capture (a second constructor injects the router); the doubling guard, route journal and Tournament mode (docs/11 E47 / E55)
 │       │   ├── OverloadWatchdog.h          CPU-overload decision logic (load + glitch counter per 2 Hz poll, hysteresis)
 │       │   ├── AutoLoadReducer.h           opt-in overload response: latency-profile step-down ladder (rate limited, never back up)
+│       │   ├── BufferPolicy.h              the device buffer per latency profile (`buffer::choose`) and the glitch back-off (`buffer::Backoff`) (docs/11 E42c)
+│       │   ├── LatencyMeasurement.{h,cpp}  the in-app latency measurement: `latency::ProbeSession` (sweeps played and recorded in the device callback), `analyse`, the split, the playback estimate and the grade (docs/11 E42d)
+│       │   ├── LatencyMeasurer.{h,cpp}     runs the passes (device only / through Flubsound / both) and the analysis worker for Settings › Audio › Measure latency… (docs/11 E42d)
 │       │   └── TestSignalGenerator.{h,cpp} deterministic synthetic music / 7.1 game scene (screenshots, demos)
 │       ├── export/                         Export / batch process (docs/06-gui.md §6.12)
 │       │   ├── ExportJob.{h,cpp}           worker-thread job: JUCE decoding, the CLI's OfflineRenderer, WAV (core writer) / FLAC (JUCE) output, per-file results
@@ -421,6 +431,7 @@ Flubsound/
 │       │   ├── MainWindow.{h,cpp}          resizable DocumentWindow (minimum 800 × 560; the main component reflows below 1100 × 700) hosting ui::MainComponent
 │       │   ├── TrayIcon.{h,cpp}            tray / menu-bar icon, quick menu and the quick-controls flyout
 │       │   ├── HotkeyManager.{h,cpp}       registers the system-wide shortcuts through PlatformBridge; per-action registration status
+│       │   ├── DeviceSoak.{h,cpp}          `--device-soak`: the headless real-device soak of the full engine (pinned output, programme in the callback, automation, StreamTap watch, triage, `--replay`, `--dump`) and its virtual device type (docs/06 §11.1, docs/11 E53)
 │       │   ├── RemoteControl.{h,cpp}       listens on the `ctl` socket and runs each request on the message thread (docs/11 E56)
 │       │   └── ScreenshotDriver.{h,cpp}    headless render: synthetic audio, 60 Hz pacing, PNG snapshot, exit codes 0 / 1 / 2
 │       └── ui/                             L5 GUI (message thread only)
@@ -447,6 +458,7 @@ Flubsound/
 │           ├── WaveformHistory.{h,cpp}     scrolling min/max output history with a short-term LUFS trace
 │           ├── LevelMeters.{h,cpp}         input / output peak + RMS bars, peak hold, clip latch, true-peak readout
 │           ├── LoudnessPanel.{h,cpp}       LUFS M / S / I, LRA, gain-reduction meters, correlation, width; the hearing guard's dose row (docs/11 E32)
+│           ├── LatencyPanel.{h,cpp}        Settings › Audio › LATENCY: Automatic buffer size, the buffer line, Measure latency… and its result (docs/11 E42c / E42d)
 │           ├── MeterSnapshot.{h,cpp}       one frame of MeterBus values, read once per frame
 │           ├── ModuleRack.{h,cpp}          horizontally scrolling rack of ModuleCards, focused (expanded) view
 │           ├── ModuleCard.{h,cpp}          one module card; ModuleDescriptor::all() is the table of the ten modules
@@ -463,7 +475,7 @@ Flubsound/
 │           ├── HearingPage.{h,cpp}         Settings › Hearing: sensitivity, estimate, listening-level cap, daily dose (docs/11 E32 (c))
 │           ├── HotkeyCapture.{h,cpp}       Settings › Hotkeys' recorder: a chord set by pressing it (R4.4)
 │           ├── PersonalProfileEditor.{h,cpp} the per-ear listening preference's editor on the Hearing page (docs/11 E33)
-│           └── SettingsDialog.{h,cpp}      Audio / Correction / Processing / Hearing / Hotkeys / General / Diagnostics pages
+│           └── SettingsDialog.{h,cpp}      Audio / Correction / Processing / Routing / Hearing / Hotkeys / General / Diagnostics pages
 │
 ├── plugin/                                 FlubsoundFX: VST3 + Standalone (+ AU on macOS)
 │   ├── CMakeLists.txt                      juce_add_plugin (manufacturer code Flub, plug-in code FlFx), explicit sources

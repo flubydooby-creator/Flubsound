@@ -318,11 +318,17 @@ struct LoopRig
         });
     }
 
-    /** Plays `samples` more (from now, or from a pause), then pauses. */
+    /** Plays `samples` more (from now, or from a pause), then pauses. Waits
+        for THIS pause: from an earlier one `paused` stays true until the rig
+        thread sees the new pauseAt, so it alone could return at once (the
+        caller then acted before the rig had played anything). */
     void playThenPause (int64_t samples)
     {
-        pauseAt.store (played.load (std::memory_order_acquire) + samples, std::memory_order_release);
-        flubapptest::pumpMessagesUntil ([this] { return paused.load (std::memory_order_acquire); }, 5000);
+        const int64_t until = played.load (std::memory_order_acquire) + samples;
+        pauseAt.store (until, std::memory_order_release);
+        flubapptest::pumpMessagesUntil ([this, until]
+                                        { return paused.load (std::memory_order_acquire) && played.load (std::memory_order_acquire) >= until; },
+                                        5000);
     }
     void resume() { pauseAt.store (std::numeric_limits<int64_t>::max(), std::memory_order_release); }
 

@@ -4,9 +4,13 @@
 //   * the command line;
 //   * the device signal source and the output tap inside the device callback:
 //     no allocation, no free, no lock (Linux), and the tap holds exactly what
-//     the device was handed;
-//   * the output pin: a device started under another name plays silence and
-//     is closed, the pinned one is opened again;
+//     the device was handed (a latency probe's output included);
+//   * the output pin: a device started under another name plays silence (a
+//     latency probe's too) and is closed, the pinned one is opened again; no
+//     latency measurement while a pin or a device signal source is set;
+//   * the soak keeps its buffer on both clocks (Automatic buffer size off
+//     before the device opens): a latency-profile switch is an engine swap,
+//     never a device restart;
 //   * a short soak through the full EngineController: the report's fields,
 //     every automation kind applied, engine swaps from the profile switches;
 //   * an injected pulse is found and classed "static" (no action near it),
@@ -21,6 +25,7 @@
 #include "AppTestSupport.h"
 
 #include "engine/AudioEngineHost.h"
+#include "engine/LatencyMeasurer.h"
 #include "engine/TestSignalGenerator.h"
 #include "shell/DeviceSoak.h"
 
@@ -247,6 +252,7 @@ TEST_CASE ("App: E53 device soak: the device signal source and the output tap al
     AudioEngineHost host;
     host.getDeviceManager().addAudioDeviceType (std::make_unique<SoakVirtualDeviceType>());
     host.setDeviceWatcher (nullptr);
+    host.setAutomaticBufferSize (false); // docs/11 E42c: keep the size asked for, as a soak does
     host.setOutputPin (SoakVirtualDeviceType::kOutputName);
     juce::XmlElement saved ("DEVICESETUP");
     saved.setAttribute ("deviceType", SoakVirtualDeviceType::kTypeName);
@@ -254,6 +260,7 @@ TEST_CASE ("App: E53 device soak: the device signal source and the output tap al
     saved.setAttribute ("audioDeviceBufferSize", 256);
     REQUIRE (host.openDevice (&saved, 0, 2).isEmpty());
     REQUIRE (host.getDeviceManager().getCurrentAudioDevice() != nullptr);
+    CHECK (host.getDeviceManager().getCurrentAudioDevice()->getCurrentBufferSizeSamples() == 256);
     CHECK (! host.isPinBlocked());
 
     TestSignalGenerator generator (48000.0);
@@ -307,11 +314,35 @@ TEST_CASE ("App: E53 device soak: the device signal source and the output tap al
                && last.samples[2 * i + 1] == out[1][static_cast<size_t> (kBlock - last.numFrames + i)];
     CHECK (same);
 
+    // docs/11 E42d: a latency probe runs before the tap, so the tap still
+    // holds what the device was handed - here the device-only probe's silent
+    // lead-in (0.3 s) in place of the programme.
+    auto session = std::make_unique<latency::ProbeSession> (latency::liveProbeSettings (48000.0), latency::Path::DeviceOnly, 1, 2);
+    REQUIRE (host.startLatencyProbe (session));
+    for (int b = 0; b < 4; ++b) // past the probe's 5 ms crossfade
+        callback();
+    float handed = 0.0f;
+    for (const auto& channel : out)
+        for (const float v : channel)
+            handed = std::max (handed, std::abs (v));
+    CHECK (handed < 1.0e-6f); // the probe replaced the programme
+    while (tap.read (chunk))
+        last = chunk;
+    bool sameWithProbe = last.numFrames > 0;
+    for (int i = 0; i < last.numFrames; ++i)
+        sameWithProbe = sameWithProbe && last.samples[2 * i] == out[0][static_cast<size_t> (kBlock - last.numFrames + i)]
+                        && last.samples[2 * i + 1] == out[1][static_cast<size_t> (kBlock - last.numFrames + i)];
+    CHECK (sameWithProbe);
+    host.cancelLatencyProbe();
+
     host.setDeviceSignalSource (nullptr);
     host.setOutputTap (nullptr);
+    const auto written = tap.framesWritten();
+    CHECK (written == 224 * kBlock);
     callback();
-    CHECK (tap.framesWritten() == 220 * kBlock); // detached: nothing more
+    CHECK (tap.framesWritten() == written); // detached: nothing more
     host.closeDevice();
+    CHECK (host.takeLatencyProbe() != nullptr); // handed back once the device stopped
 }
 
 TEST_CASE ("App: E53 output pin: a device started under another name plays silence, is closed, and the pinned output comes back")
@@ -319,6 +350,7 @@ TEST_CASE ("App: E53 output pin: a device started under another name plays silen
     AudioEngineHost host;
     host.getDeviceManager().addAudioDeviceType (std::make_unique<SoakVirtualDeviceType> (juce::StringArray { "Other Output", "Virtual Output" }));
     host.setDeviceWatcher (nullptr);
+    host.setAutomaticBufferSize (false); // docs/11 E42c: keep the device's own buffer, as a soak does
     host.setOutputPin ("Virtual Output");
 
     // Asked for the other output (as JUCE's own fallback would open it): the
@@ -331,6 +363,7 @@ TEST_CASE ("App: E53 output pin: a device started under another name plays silen
     auto* device = host.getDeviceManager().getCurrentAudioDevice();
     REQUIRE (device != nullptr);
     CHECK (device->getName() == "Virtual Output");
+    CHECK (device->getCurrentBufferSizeSamples() == 480); // the device's default
 
     TestSignalGenerator generator (48000.0);
     generator.setProgramme (1, TestSignalGenerator::Programme::Music, 0.0f);
@@ -341,10 +374,22 @@ TEST_CASE ("App: E53 output pin: a device started under another name plays silen
     for (int b = 0; b < 40; ++b)
         dynamic_cast<SoakVirtualDevice*> (host.getDeviceManager().getCurrentAudioDevice())->process();
     float peak = 0.0f;
-    for (int c = 0; c < 2; ++c)
-        for (int i = 0; i < 480; ++i)
-            peak = std::max (peak, std::abs (dynamic_cast<SoakVirtualDevice*> (host.getDeviceManager().getCurrentAudioDevice())->getOutput (c)[i]));
+    {
+        auto* pinned = dynamic_cast<SoakVirtualDevice*> (host.getDeviceManager().getCurrentAudioDevice());
+        REQUIRE (pinned != nullptr);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < pinned->getCurrentBufferSizeSamples(); ++i) // the last callback's block, no more
+                peak = std::max (peak, std::abs (pinned->getOutput (c)[i]));
+    }
     CHECK (peak > 0.01f); // the pinned output plays
+
+    // docs/11 E42d: no latency measurement during a soak (a pin is set).
+    LatencyMeasurer measurer (host);
+    LatencyMeasurer::Request request;
+    request.mode = LatencyMeasurer::Mode::DeviceOnly;
+    request.strip = 1;
+    CHECK (measurer.whyNot (request).contains ("device soak"));
+    CHECK (measurer.start (request).contains ("device soak"));
 
     // JUCE starts the other output by itself (its fallback after a hot-unplug).
     auto setup = host.getDeviceManager().getAudioDeviceSetup();
@@ -354,15 +399,24 @@ TEST_CASE ("App: E53 output pin: a device started under another name plays silen
     REQUIRE (other != nullptr);
     CHECK (other->getName() == "Other Output");
     CHECK (host.isPinBlocked());
+    // A device-only latency probe handed to the host anyway (the measurer
+    // refuses) plays nothing there either: its sweep from the first sample.
+    auto loud = latency::liveProbeSettings (48000.0);
+    loud.leadInSeconds = 0.0;
+    auto session = std::make_unique<latency::ProbeSession> (loud, latency::Path::DeviceOnly, 1, 2);
+    const auto* probe = session.get();
+    REQUIRE (host.startLatencyProbe (session));
     const auto before = tap.framesWritten();
     for (int b = 0; b < 5; ++b)
         other->process();
+    CHECK (probe->position() > 0); // it ran (and advanced) in those callbacks
     float otherPeak = 0.0f;
     for (int c = 0; c < 2; ++c)
         for (int i = 0; i < other->getCurrentBufferSizeSamples(); ++i)
             otherPeak = std::max (otherPeak, std::abs (other->getOutput (c)[i]));
-    CHECK (otherPeak == 0.0f); // silence from its first callback
+    CHECK (otherPeak == 0.0f); // silence from its first callback, the probe's sweep included
     CHECK (tap.framesWritten() > before);
+    host.cancelLatencyProbe();
 
     // The message thread closes it and the selection opens the pin again.
     flubapptest::pumpMessagesUntil ([&]
@@ -374,10 +428,85 @@ TEST_CASE ("App: E53 output pin: a device started under another name plays silen
     CHECK (host.getPinViolations() == 1);
     REQUIRE (host.getDeviceManager().getCurrentAudioDevice() != nullptr);
     CHECK (host.getDeviceManager().getCurrentAudioDevice()->getName() == "Virtual Output");
+    CHECK (host.getDeviceManager().getCurrentAudioDevice()->getCurrentBufferSizeSamples() == 480);
 
     host.setDeviceSignalSource (nullptr);
     host.setOutputTap (nullptr);
     host.closeDevice();
+    CHECK (host.takeLatencyProbe() != nullptr); // the device that ran it stopped: handed back
+}
+
+TEST_CASE ("App: E53 device soak: both clocks keep the buffer asked for (Automatic buffer size off); a profile switch swaps the engine, never restarts the device")
+{
+    struct Row
+    {
+        DeviceSoak::Clock clock;
+        int buffer;   // --buffer (0: the device's default)
+        int expected; // what the device must run at, before and after the switches
+    };
+    // 0 and 480 are the device's default: the upgrade path (no stored
+    // choice in the soak's temporary settings) would turn Automatic on there,
+    // and Balanced would re-open the device at 256. The real-device clock is
+    // checked with the virtual type standing in for a device type whose
+    // buffer the app manages (Windows Audio Low Latency / Exclusive, ASIO,
+    // CoreAudio).
+    const Row rows[] = {
+        { DeviceSoak::Clock::Virtual, 0, 480 },
+        { DeviceSoak::Clock::Virtual, 144, 144 },
+        { DeviceSoak::Clock::Device, 480, 480 },
+    };
+    for (const auto& row : rows)
+    {
+        flubapptest::TempFolder folder;
+        auto options = shortOptions (0.02);
+        options.bufferSize = row.buffer;
+        options.type = SoakVirtualDeviceType::kTypeName;
+        auto engineOptions = DeviceSoak::makeEngineOptions (options, row.clock, folder.file ("settings.xml"));
+        REQUIRE (engineOptions.beforeDeviceOpen != nullptr); // both clocks
+        if (row.clock == DeviceSoak::Clock::Device)
+        {
+            auto soakHook = engineOptions.beforeDeviceOpen;
+            engineOptions.beforeDeviceOpen = [soakHook] (AudioEngineHost& h)
+            {
+                soakHook (h);
+                h.getDeviceManager().addAudioDeviceType (std::make_unique<SoakVirtualDeviceType>()); // the "hardware"
+                h.setDeviceWatcher (nullptr);
+            };
+            engineOptions.outputEndpoints = [] { return std::vector<flub::platform::OutputEndpointIdentity>(); };
+        }
+        EngineController controller (engineOptions);
+        auto& host = controller.getHost();
+        auto* opened = controller.getDeviceManager().getCurrentAudioDevice();
+        REQUIRE (opened != nullptr);
+        CHECK (opened->getName() == SoakVirtualDeviceType::kOutputName);
+        CHECK (! host.getAutomaticBufferSize());
+        CHECK (host.getBufferInfo().managed); // the policy would apply to this device type
+        CHECK (opened->getCurrentBufferSizeSamples() == row.expected);
+
+        const auto starts = host.getDeviceStartCount();
+        for (const auto profile : { flub::param::LatencyProfileValue::LowLatency, flub::param::LatencyProfileValue::Quality,
+                                    flub::param::LatencyProfileValue::Balanced })
+        {
+            const auto swaps = host.getCompletedSwaps();
+            controller.setLatencyProfile (profile); // as the soak's Profile action does
+            if (host.needsReprepare())
+                host.reconfigure();
+            auto* device = dynamic_cast<SoakVirtualDevice*> (controller.getDeviceManager().getCurrentAudioDevice());
+            REQUIRE (device != nullptr);
+            for (int b = 0; b < 200 && host.isSwapInProgress(); ++b)
+                device->process();
+            flubapptest::pumpMessagesUntil ([] { return false; }, 20); // anything posted (a device change) runs
+            CHECK (host.getCompletedSwaps() == swaps + 1);
+            CHECK (host.getDeviceStartCount() == starts);
+            CHECK (device->getCurrentBufferSizeSamples() == row.expected);
+        }
+        // The glitch back-off never re-opens it either.
+        CHECK (! host.raiseBufferOneStep());
+        CHECK (host.getDeviceStartCount() == starts);
+        REQUIRE (controller.getDeviceManager().getCurrentAudioDevice() != nullptr);
+        CHECK (controller.getDeviceManager().getCurrentAudioDevice()->getCurrentBufferSizeSamples() == row.expected);
+        controller.shutdown();
+    }
 }
 
 TEST_CASE ("App: E53 device soak: a short virtual run - the report's fields and every automation kind")
@@ -685,6 +814,7 @@ TEST_CASE ("App: E53 device soak hooks: a stalled callback - clearing reports it
     AudioEngineHost host;
     host.getDeviceManager().addAudioDeviceType (std::make_unique<SoakVirtualDeviceType>());
     host.setDeviceWatcher (nullptr);
+    host.setAutomaticBufferSize (false); // docs/11 E42c: keep the size asked for, as a soak does
     juce::XmlElement saved ("DEVICESETUP");
     saved.setAttribute ("deviceType", SoakVirtualDeviceType::kTypeName);
     saved.setAttribute ("audioOutputDeviceName", SoakVirtualDeviceType::kOutputName);
@@ -692,6 +822,7 @@ TEST_CASE ("App: E53 device soak hooks: a stalled callback - clearing reports it
     REQUIRE (host.openDevice (&saved, 0, 2).isEmpty());
     auto* device = dynamic_cast<SoakVirtualDevice*> (host.getDeviceManager().getCurrentAudioDevice());
     REQUIRE (device != nullptr);
+    CHECK (device->getCurrentBufferSizeSamples() == 256);
 
     // A source whose render stalls (as a driver hang or a debugger would)
     // until it is released.
@@ -713,8 +844,13 @@ TEST_CASE ("App: E53 device soak hooks: a stalled callback - clearing reports it
     } source;
     flub::StreamTap tap;
     tap.prepare (48000);
+    LatencyMeasurer measurer (host);
+    LatencyMeasurer::Request request;
+    request.mode = LatencyMeasurer::Mode::DeviceOnly;
+    CHECK (! measurer.whyNot (request).contains ("device soak")); // no pin here (it lacks an input instead)
     host.setOutputTap (&tap);
     host.setDeviceSignalSource (&source);
+    CHECK (measurer.whyNot (request).contains ("device soak")); // docs/11 E42d: not while a device signal source is set
     for (int b = 0; b < 4; ++b)
         device->process();
 

@@ -190,10 +190,11 @@
 //     callback instead of the device inputs and captures. The source is
 //     called on the audio thread and must be allocation- and lock-free.
 //   * Output tap: setOutputTap() copies the engine's output as the callback
-//     hands it to the device (after the loopback guard and the output trim,
-//     silence included) into a flub::StreamTap every callback; the soak
-//     analyses it on the message thread. What the device does with it after
-//     that (an underrun after a late callback) is not seen.
+//     hands it to the device (after the loopback guard, the output trim and
+//     a latency probe, silence included) into a flub::StreamTap every
+//     callback; the soak analyses it on the message thread. What the device
+//     does with it after that (an underrun after a late callback) is not
+//     seen.
 //   Clearing a source or a tap waits (bounded) for the callback in flight to
 //   return and says whether it did; when it did not (a stalled callback),
 //   close the device before destroying the source or the tap.
@@ -237,8 +238,10 @@
 //   its pointer is cleared and the host waits for one callback to pass, as
 //   for a capture slot, seq_cst on both sides), so the audio thread never
 //   frees one; the slots never move. While the loopback guard holds the
-//   output, the probe stays silent (it still advances and records, so the
-//   session ends).
+//   output, or the device is not the soak's pinned output (isPinBlocked),
+//   the probe stays silent (it still advances and records, so the session
+//   ends). LatencyMeasurer refuses to measure while an output pin or a
+//   device signal source is set (a device soak).
 #pragma once
 
 #include "BufferPolicy.h"
@@ -663,6 +666,8 @@ public:
         removes the callback, which waits for the one in flight) before the
         old source is destroyed. */
     bool setDeviceSignalSource (StripSignalSource* source);
+    /** True while a device signal source is set. Any thread. */
+    bool hasDeviceSignalSource() const noexcept { return deviceSignalSource.load (std::memory_order_acquire) != nullptr; }
     /** A copy of every callback's output as handed to the device (see
         REAL-DEVICE SOAK HOOKS); nullptr ends it. Message thread. Returns as
         setDeviceSignalSource does (false: a stalled callback may still write

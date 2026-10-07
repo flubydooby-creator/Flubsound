@@ -29,7 +29,12 @@
 //   next message-thread pass, and ends the soak (exit code 4). An output the
 //   type does not list is not opened at all (exit code 3). --buffer picks the
 //   buffer size (min: the smallest the device offers; default: the device's
-//   own), --rate the sample rate.
+//   own), kept for the whole run: Automatic buffer size (docs/11 E42c) is
+//   off in a soak, so a latency-profile action is an engine swap only (on
+//   Linux, an ALSA / JACK device behind PipeWire is still re-opened when a
+//   switch to or from Low Latency changes the graph quantum, docs/11 E48)
+//   and the glitch back-off never re-opens the device. --rate picks the
+//   sample rate.
 // * Programme: the strips are fed inside the device callback
 //   (AudioEngineHost::setDeviceSignalSource) by the app's TestSignalGenerator:
 //   the 7.1 game scene on the Game strip and the music on the Music strip,
@@ -267,9 +272,10 @@ public:
 
     /** The engine options a soak runs with: temporary `settingsFile` (never
         written), the device state for options.device / type / buffer / rate
-        (or the virtual device), the output pinned, no routing, no automatic
-        profiles, no Tournament mode switch. Virtual: the virtual device type is
-        added and no device watcher runs. */
+        (or the virtual device), the output pinned, Automatic buffer size off
+        before the device opens (the buffer stays as asked), no routing, no
+        automatic profiles, no Tournament mode switch. Virtual: the virtual
+        device type is added and no device watcher runs. */
     static EngineController::Options makeEngineOptions (const DeviceSoakOptions& options, Clock clock, const juce::File& settingsFile);
 
     /** Device clock: checks that options.type lists options.device, that it
