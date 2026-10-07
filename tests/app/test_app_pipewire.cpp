@@ -30,12 +30,14 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <ctime>
 #include <limits>
 #include <mutex>
 #include <cmath>
@@ -656,15 +658,20 @@ juce::String openNodeDevice (AudioEngineHost& host)
     callback, right after the engine's, next to the driver time the device
     stamped it with and the device's xrun count. The stamps alone cannot show
     that callbacks ran on time: they are the driver's cycle start plus the
-    block's offset (R1.2 review). It records every callback from the moment
-    it is added until 'recording' goes false (at most kCapacity), so an xrun
-    at the edge of a measured window still has the callbacks around it.
-    Preallocated; writes silence. */
+    block's offset (R1.2 review). It also reads the data thread's CPU time
+    and its voluntary / involuntary context switches (getrusage
+    RUSAGE_THREAD), so a callback that ran late can be told apart: the
+    engine's own work (CPU time), a wait of its own (a voluntary switch more
+    than the cycle's wait for its trigger) or the kernel's preemption. It
+    records every callback from the moment it is added until 'recording'
+    goes false (at most kCapacity), so an xrun at the edge of a measured
+    window still has the callbacks around it. Preallocated; writes silence. */
 class WallClockRecorder final : public juce::AudioIODeviceCallback
 {
 public:
     explicit WallClockRecorder (const juce::AudioIODevice& deviceToRead)
-        : wallNs (kCapacity, 0), stampNs (kCapacity, 0), xruns (kCapacity, 0), device (deviceToRead)
+        : wallNs (kCapacity, 0), stampNs (kCapacity, 0), cpuNs (kCapacity, 0), voluntary (kCapacity, 0), involuntary (kCapacity, 0),
+          xruns (kCapacity, 0), device (deviceToRead)
     {
     }
 
@@ -680,8 +687,15 @@ public:
         const auto i = count.load (std::memory_order_relaxed);
         if (i >= kCapacity)
             return;
+        timespec cpu {};
+        ::clock_gettime (CLOCK_THREAD_CPUTIME_ID, &cpu);
+        rusage usage {};
+        ::getrusage (RUSAGE_THREAD, &usage);
         wallNs[i] = static_cast<int64_t> (now);
         stampNs[i] = context.hostTimeNs != nullptr ? static_cast<int64_t> (*context.hostTimeNs) : 0;
+        cpuNs[i] = static_cast<int64_t> (cpu.tv_sec) * 1000000000 + static_cast<int64_t> (cpu.tv_nsec);
+        voluntary[i] = usage.ru_nvcsw;
+        involuntary[i] = usage.ru_nivcsw;
         // The node counts a cycle's xrun after that cycle's callbacks
         // (XrunCounter::cycleDone), so this is the count up to the previous
         // cycle: an xrun of callback i's cycle shows at callback i + 1.
@@ -694,7 +708,8 @@ public:
     static constexpr size_t kCapacity = 8192;
     std::atomic<bool> recording { true };
     std::atomic<size_t> count { 0 };
-    std::vector<int64_t> wallNs, stampNs;
+    std::vector<int64_t> wallNs, stampNs, cpuNs;
+    std::vector<long> voluntary, involuntary;
     std::vector<int> xruns;
 
 private:
@@ -802,77 +817,105 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
     // Wall clock: the callbacks really ran at the graph's cadence, and each
     // ran (up to the end of the engine's work, where the recorder reads the
     // clock) before its cycle's deadline: within one quantum of the driver's
-    // cycle start (no quantum split here: block = quantum <= 256).
+    // cycle start (no quantum split here: block = quantum <= 256). The data
+    // thread's CPU time from one recorder call to the next is a cycle's own
+    // work (the engine's callback and PipeWire's for the node), whatever the
+    // scheduler did meanwhile.
     REQUIRE (first > 0);
     REQUIRE (last > first + 10);
     REQUIRE (recorded >= last + 3);
+    const auto wallGap = [&] (size_t k) { return wall.wallNs[k] - wall.wallNs[k - 1]; };
+    const auto cycleCpu = [&] (size_t k) { return wall.cpuNs[k] - wall.cpuNs[k - 1]; };
+    const auto doneAfter = [&] (size_t k) { return wall.wallNs[k] - wall.stampNs[k]; };
+    const auto ms = [] (int64_t ns) { return static_cast<double> (ns) / 1.0e6; };
+    const auto median = [] (auto values) // a copy, sorted here
+    {
+        std::sort (values.begin(), values.end());
+        return values[values.size() / 2];
+    };
     const double wallMeanNs = static_cast<double> (wall.wallNs[last - 1] - wall.wallNs[first]) / static_cast<double> (last - 1 - first);
-    int64_t maxIntervalNs = 0, maxDelayNs = std::numeric_limits<int64_t>::min();
-    int wideIntervals = 0; // a wake-up more than half a period off its cadence
-    std::vector<int64_t> delays;
+    int64_t maxIntervalNs = 0, maxDelayNs = std::numeric_limits<int64_t>::min(), maxCpuNs = 0;
+    int wideIntervals = 0;   // a wake-up more than half a period off its cadence
+    int preemptedCycles = 0; // cycles in which the kernel preempted the data thread
+    std::vector<int64_t> delays, cpus;
+    std::vector<long> waits; // the data thread's voluntary context switches per cycle
     for (size_t i = first; i < last; ++i)
     {
         if (i > first)
         {
-            const auto interval = wall.wallNs[i] - wall.wallNs[i - 1];
+            const auto interval = wallGap (i);
             maxIntervalNs = std::max (maxIntervalNs, interval);
             wideIntervals += static_cast<double> (interval) > 1.5 * periodNs ? 1 : 0;
         }
         if (wall.stampNs[i] != 0)
         {
-            delays.push_back (wall.wallNs[i] - wall.stampNs[i]);
+            delays.push_back (doneAfter (i));
             maxDelayNs = std::max (maxDelayNs, delays.back());
         }
+        cpus.push_back (cycleCpu (i));
+        maxCpuNs = std::max (maxCpuNs, cpus.back());
+        waits.push_back (wall.voluntary[i] - wall.voluntary[i - 1]);
+        preemptedCycles += wall.involuntary[i] > wall.involuntary[i - 1] ? 1 : 0;
     }
     REQUIRE (! delays.empty());
-    std::sort (delays.begin(), delays.end());
-    const auto medianDelayNs = delays[delays.size() / 2];
+    const auto medianDelayNs = median (delays);
+    const auto usualWaits = median (waits); // the cycle's wait for its trigger
     std::cout << "    wall clock: " << last - first << " callbacks, mean interval " << wallMeanNs / 1.0e6 << " ms, max " << static_cast<double> (maxIntervalNs) / 1.0e6
               << " ms, " << wideIntervals << " over 1.5 periods; done after the cycle start: median " << static_cast<double> (medianDelayNs) / 1.0e6
               << " ms, max " << static_cast<double> (maxDelayNs) / 1.0e6 << " ms (period " << periodNs / 1.0e6 << " ms)\n";
+    std::cout << "    own work: the data thread's CPU time per cycle median " << ms (median (cpus)) << " ms, max " << ms (maxCpuNs) << " ms; preempted in "
+              << preemptedCycles << " of " << last - first << " cycles; voluntary switches per cycle (median) " << usualWaits << "\n";
     CHECK_NEAR (wallMeanNs, periodNs, 0.1 * periodNs);
+    CHECK (static_cast<double> (maxCpuNs) < periodNs); // the engine's own work fit its period in every cycle
     const bool unsplit = static_cast<double> (node.quantumFrames) <= block;
     if (unsplit)
-    {
-        CHECK (medianDelayNs >= 0);                              // the stamps are on the same clock, not in the future
-        CHECK (static_cast<double> (maxDelayNs) < periodNs);     // every callback finished within its cycle
-    }
+        CHECK (medianDelayNs >= 0); // the stamps are on the same clock, not in the future
 
-    // No xruns and no late intervals while idle: that stays the expectation.
-    // But a shared CI runner can keep the node's data thread off the CPU for
-    // more than a period (run 37634884865: one missed cycle, 5.05 ms on the
-    // wall clock between two callbacks, each done within 0.95 ms of its
-    // cycle's start). So each xrun and each late interval (driver clock) in
-    // the window must be such a stall: the wall clock saw an interval over
-    // 1.5 periods around it, while every callback's own work stayed within
-    // its period (the delays just checked, and no callback of the engine over
-    // its period). One with no stall around it would be the engine's own
-    // doing and fails, as do more than kToleratedStalls in 0.6 s.
+    // No xruns, no late intervals (driver clock) and every callback finished
+    // within its cycle while idle: that stays the expectation. But a shared
+    // CI runner can keep the node's data thread off the CPU for a period or
+    // more: run 37634884865 woke it too late for one cycle (an xrun and a
+    // late interval; 5.05 ms on the wall clock between two callbacks, each
+    // done within 0.95 ms of its cycle's start), run 37640705514 held one
+    // callback 2.5 ms or more (done 2.87 ms after its cycle's start; an
+    // xrun). So each such event in the window must be a scheduling stall at
+    // a callback around it: a cycle whose own work fit the period (CPU time)
+    // and that waited for nothing but its trigger (a voluntary switch more
+    // than usual is a lock or a wait in the engine), and that still ran
+    // late: more than 1.5 periods after the callback before it, or finished
+    // after its cycle's end while the kernel preempted it. One without such
+    // a stall, one the recorder did not locate, or more than
+    // kToleratedStalls of a kind in 0.6 s fails.
     constexpr int kToleratedStalls = 2;
     const double stallNs = flub::CallbackTiming::kLateFactor * periodNs; // E45's "late", 1.5 periods
-    const auto wallGap = [&] (size_t k) { return wall.wallNs[k] - wall.wallNs[k - 1]; };
-    // The longest wall-clock interval over 1.5 periods that ends at a
-    // callback in from .. to; 0 when there is none.
+    const auto finishedLate = [&] (size_t k) { return wall.stampNs[k] != 0 && static_cast<double> (doneAfter (k)) >= periodNs; };
+    const auto stalledAt = [&] (size_t k)
+    {
+        if (! unsplit || k < 1 || k >= recorded)
+            return false;
+        if (wall.voluntary[k] - wall.voluntary[k - 1] > usualWaits || static_cast<double> (cycleCpu (k)) >= periodNs)
+            return false; // a wait of its own, or its own work over the period
+        return static_cast<double> (wallGap (k)) > stallNs || (finishedLate (k) && wall.involuntary[k] > wall.involuntary[k - 1]);
+    };
+    // The first stalled callback in from .. to; 0 when there is none.
     const auto stallIn = [&] (size_t from, size_t to)
     {
-        size_t at = 0;
         for (size_t k = std::max<size_t> (from, 1); k <= std::min (to, recorded - 1); ++k)
-            if (static_cast<double> (wallGap (k)) > stallNs && (at == 0 || wallGap (k) > wallGap (at)))
-                at = k;
-        return at;
+            if (stalledAt (k))
+                return k;
+        return size_t { 0 };
     };
-    const auto ms = [] (int64_t ns) { return static_cast<double> (ns) / 1.0e6; };
-    int xrunsSeen = 0, xrunsStalled = 0, lateSeen = 0, lateStalled = 0;
+    int xrunsSeen = 0, xrunsStalled = 0, lateSeen = 0, lateStalled = 0, finishesSeen = 0, finishesStalled = 0;
     std::ostringstream events;
     const auto describe = [&] (const char* what, size_t i, size_t at)
     {
-        events << "; " << what << " at callback " << i - first << " (" << ms (wall.wallNs[i] - wall.wallNs[first]) << " ms into the window): ";
-        if (at == 0 || ! unsplit)
-            events << "no wall-clock stall around it";
-        else
-            events << "wall-clock gap " << ms (wallGap (at)) << " ms (" << static_cast<double> (wallGap (at)) / periodNs << " periods) before callback "
-                   << static_cast<long long> (at) - static_cast<long long> (first) << ", driver-clock gap "
-                   << (wall.stampNs[at] != 0 && wall.stampNs[at - 1] != 0 ? ms (wall.stampNs[at] - wall.stampNs[at - 1]) : 0.0) << " ms";
+        const auto k = at != 0 ? at : i; // the stall, or the event's own callback
+        events << "; " << what << " at callback " << i - first << " (" << ms (wall.wallNs[i] - wall.wallNs[first]) << " ms into the window): "
+               << (at != 0 ? "a scheduling stall at callback " : "NO scheduling stall around it; callback ") << static_cast<long long> (k) - static_cast<long long> (first)
+               << " ended " << ms (wallGap (k)) << " ms after the one before (" << static_cast<double> (wallGap (k)) / periodNs << " periods; driver clock "
+               << (wall.stampNs[k] != 0 && wall.stampNs[k - 1] != 0 ? ms (wall.stampNs[k] - wall.stampNs[k - 1]) : 0.0) << " ms), done "
+               << (wall.stampNs[k] != 0 ? ms (doneAfter (k)) : 0.0) << " ms after its cycle's start, CPU " << ms (cycleCpu (k)) << " ms, "
+               << wall.involuntary[k] - wall.involuntary[k - 1] << " preemptions, " << wall.voluntary[k] - wall.voluntary[k - 1] << " waits";
     };
     for (size_t i = first; i <= last; ++i)
     {
@@ -883,30 +926,41 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
         {
             const auto at = stallIn (i >= 3 ? i - 3 : 1, i + 1);
             ++xrunsSeen;
-            xrunsStalled += (at != 0 && unsplit) ? 1 : 0;
+            xrunsStalled += at != 0 ? 1 : 0;
             describe ("xrun seen", i, at);
         }
         if (wall.stampNs[i] != 0 && wall.stampNs[i - 1] != 0 && static_cast<double> (wall.stampNs[i] - wall.stampNs[i - 1]) > stallNs)
         {
             const auto at = stallIn (i - 1, i + 1);
             ++lateSeen;
-            lateStalled += (at != 0 && unsplit) ? 1 : 0;
+            lateStalled += at != 0 ? 1 : 0;
             describe ("late interval", i, at);
+        }
+        if (unsplit && finishedLate (i))
+        {
+            const auto at = stallIn (i - 1, i);
+            ++finishesSeen;
+            finishesStalled += at != 0 ? 1 : 0;
+            describe ("finished after its cycle", i, at);
         }
     }
     const int xruns = xrunsAfter - xrunsBefore;
-    std::cout << "    stall attribution: " << xruns << " xruns and " << timing.late << " late intervals in the window (" << xrunsSeen << " and " << lateSeen
-              << " located, " << xrunsStalled << " and " << lateStalled << " a scheduling stall); the engine's own work at most "
-              << ms (static_cast<int64_t> (timing.duration.maxNs)) << " ms, " << timing.overBudget << " callbacks over the period"
-              << (xrunsSeen + lateSeen == 0 ? std::string ("; none, as expected") : events.str()) << "\n";
+    std::cout << "    stall attribution: " << xruns << " xruns, " << timing.late << " late intervals and " << finishesSeen
+              << " callbacks finished after their cycle in the window (" << xrunsSeen << ", " << lateSeen << " and " << finishesSeen << " located; "
+              << xrunsStalled << ", " << lateStalled << " and " << finishesStalled << " a scheduling stall); the engine's callback at most "
+              << ms (static_cast<int64_t> (timing.duration.maxNs)) << " ms, " << timing.overBudget << " over the period"
+              << (xrunsSeen + lateSeen + finishesSeen == 0 ? std::string ("; none, as expected") : events.str()) << "\n";
     CHECK (xruns >= 0);
     CHECK (xruns <= kToleratedStalls);
     CHECK (static_cast<int> (timing.late) <= kToleratedStalls);
-    CHECK (xrunsSeen >= xruns);                          // the recorder located every xrun of the window...
-    CHECK (lateSeen >= static_cast<int> (timing.late));  // ... and every late interval
-    CHECK (xrunsStalled == xrunsSeen);                   // each one a scheduling stall, none the engine's own
+    CHECK (finishesSeen <= kToleratedStalls);
+    CHECK (xrunsSeen >= xruns);                         // the recorder located every xrun of the window,
+    CHECK (lateSeen >= static_cast<int> (timing.late)); // every late interval
+    if (unsplit)
+        CHECK (finishesSeen >= static_cast<int> (timing.overBudget)); // and every engine callback over its period (it finished late)
+    CHECK (xrunsStalled == xrunsSeen);                  // each one a scheduling stall, none the engine's own
     CHECK (lateStalled == lateSeen);
-    CHECK (timing.overBudget == 0);                      // the engine's work fit its period in every callback
+    CHECK (finishesStalled == finishesSeen);
 
     host.getDeviceManager().removeAudioCallback (&wall);
     host.closeDevice();
