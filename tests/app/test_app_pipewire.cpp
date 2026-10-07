@@ -40,6 +40,7 @@
 #include <mutex>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -653,13 +654,19 @@ juce::String openNodeDevice (AudioEngineHost& host)
 /** A second device-manager callback that reads the steady clock (on Linux
     CLOCK_MONOTONIC, the clock of the driver's clock.nsec) in each device
     callback, right after the engine's, next to the driver time the device
-    stamped it with. The stamps alone cannot show that callbacks ran on
-    time: they are the driver's cycle start plus the block's offset (R1.2
-    review). Preallocated; writes silence. */
+    stamped it with and the device's xrun count. The stamps alone cannot show
+    that callbacks ran on time: they are the driver's cycle start plus the
+    block's offset (R1.2 review). It records every callback from the moment
+    it is added until 'recording' goes false (at most kCapacity), so an xrun
+    at the edge of a measured window still has the callbacks around it.
+    Preallocated; writes silence. */
 class WallClockRecorder final : public juce::AudioIODeviceCallback
 {
 public:
-    WallClockRecorder() : wallNs (kCapacity, 0), stampNs (kCapacity, 0) {}
+    explicit WallClockRecorder (const juce::AudioIODevice& deviceToRead)
+        : wallNs (kCapacity, 0), stampNs (kCapacity, 0), xruns (kCapacity, 0), device (deviceToRead)
+    {
+    }
 
     void audioDeviceIOCallbackWithContext (const float* const*, int, float* const* outputs, int numOutputs, int numSamples,
                                            const juce::AudioIODeviceCallbackContext& context) override
@@ -675,15 +682,23 @@ public:
             return;
         wallNs[i] = static_cast<int64_t> (now);
         stampNs[i] = context.hostTimeNs != nullptr ? static_cast<int64_t> (*context.hostTimeNs) : 0;
+        // The node counts a cycle's xrun after that cycle's callbacks
+        // (XrunCounter::cycleDone), so this is the count up to the previous
+        // cycle: an xrun of callback i's cycle shows at callback i + 1.
+        xruns[i] = device.getXRunCount();
         count.store (i + 1, std::memory_order_release);
     }
     void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
     void audioDeviceStopped() override {}
 
     static constexpr size_t kCapacity = 8192;
-    std::atomic<bool> recording { false };
+    std::atomic<bool> recording { true };
     std::atomic<size_t> count { 0 };
     std::vector<int64_t> wallNs, stampNs;
+    std::vector<int> xruns;
+
+private:
+    const juce::AudioIODevice& device;
 };
 } // namespace
 
@@ -713,7 +728,7 @@ TEST_CASE ("App: libpipewire is opened at run time - a missing library is report
     CHECK (pipewire::probeLibrary (pipewire::kLibraryName).loaded); // every entry point resolves
 }
 
-TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - callbacks at the graph's cadence, none late, no xruns while idle (E48, R1.2)")
+TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - callbacks at the graph's cadence, none late, no xruns while idle, a runner's scheduling stall attributed (E48, R1.2)")
 {
     if (! serverAvailable() || ! isTestServer())
         return;
@@ -736,28 +751,35 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
     REQUIRE (device != nullptr);
     CHECK (pipewire::setDeviceOutputTarget (device, out));
     CHECK (device->getXRunCount() >= 0); // counted (JUCE's "not supported" is -1)
-    WallClockRecorder wall;
+    WallClockRecorder wall (*device);
     host.getDeviceManager().addAudioCallback (&wall);
 
     // Past the first cycles (watching for a start-up xrun: the node does not
     // judge its first XrunCounter::kSettleCycles), then 0.6 s measured (the
-    // 2 s rule): one callback per block of min (quantum, 256) frames.
+    // 2 s rule): one callback per block of min (quantum, 256) frames. The
+    // recorder runs throughout; the window is its callbacks first .. last.
     long long firstXrunNear = -1; // the engine's callback count when the first xrun was seen
     CHECK (waitUntil ([&] {
         if (firstXrunNear < 0 && device->getXRunCount() > 0)
             firstXrunNear = static_cast<long long> (host.getStatus().callbacks);
-        return pipewire::getDeviceStatus (device).quantumFrames != 0 && host.getStatus().callbacks > 20;
+        return pipewire::getDeviceStatus (device).quantumFrames != 0 && host.getStatus().callbacks > 20
+               && wall.count.load (std::memory_order_acquire) > 4;
     }));
+    const auto first = wall.count.load (std::memory_order_acquire);
     const auto before = host.getStatus();
     const auto xrunsBefore = device->getXRunCount();
-    wall.recording.store (true, std::memory_order_release);
     const auto start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for (std::chrono::milliseconds (600));
     const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
-    wall.recording.store (false, std::memory_order_release);
     const auto after = host.getStatus();
     const auto node = pipewire::getDeviceStatus (device);
     const auto xrunsAfter = device->getXRunCount();
+    const auto last = wall.count.load (std::memory_order_acquire);
+    // A few callbacks more: an xrun counted at the window's end reaches the
+    // recorder one callback later, and its stall may follow it.
+    CHECK (waitUntil ([&] { return wall.count.load (std::memory_order_acquire) >= last + 3; }));
+    wall.recording.store (false, std::memory_order_release);
+    const auto recorded = wall.count.load (std::memory_order_acquire);
     REQUIRE (node.sampleRate != 0);
     const double block = std::min (256.0, static_cast<double> (node.quantumFrames));
     const double periodNs = 1.0e9 * block / node.sampleRate;
@@ -769,28 +791,28 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
               << (firstXrunNear < 0 ? std::string ("none") : "first seen near callback " + std::to_string (firstXrunNear)) << "), late intervals "
               << timing.late << ", mean interval " << timing.interval.meanNs() / 1.0e6 << " ms (driver clock)\n";
     CHECK (after.xruns == xrunsAfter); // the engine status carries the device's count
-    CHECK (xrunsAfter == xrunsBefore); // none while idle
     CHECK_NEAR (callbacks, expected, expected * 0.1);
     // E45 takes the interval from the host time when the device gives one,
     // so on this device the histogram is the driver's cadence (it cannot
-    // show a late wake-up; the xrun count does). These two follow from the
-    // stamps; the wall-clock checks below are the independent ones.
-    CHECK (timing.late == 0);
+    // show a late wake-up; the xrun count does). The mean follows from the
+    // stamps; the wall-clock checks below are the independent ones. The xrun
+    // count and the late intervals are judged with the wall clock below.
     CHECK_NEAR (timing.interval.meanNs(), periodNs, 0.1 * periodNs);
 
     // Wall clock: the callbacks really ran at the graph's cadence, and each
     // ran (up to the end of the engine's work, where the recorder reads the
     // clock) before its cycle's deadline: within one quantum of the driver's
     // cycle start (no quantum split here: block = quantum <= 256).
-    const auto recorded = wall.count.load (std::memory_order_acquire);
-    REQUIRE (recorded > 10);
-    const double wallMeanNs = static_cast<double> (wall.wallNs[recorded - 1] - wall.wallNs[0]) / static_cast<double> (recorded - 1);
+    REQUIRE (first > 0);
+    REQUIRE (last > first + 10);
+    REQUIRE (recorded >= last + 3);
+    const double wallMeanNs = static_cast<double> (wall.wallNs[last - 1] - wall.wallNs[first]) / static_cast<double> (last - 1 - first);
     int64_t maxIntervalNs = 0, maxDelayNs = std::numeric_limits<int64_t>::min();
     int wideIntervals = 0; // a wake-up more than half a period off its cadence
     std::vector<int64_t> delays;
-    for (size_t i = 0; i < recorded; ++i)
+    for (size_t i = first; i < last; ++i)
     {
-        if (i > 0)
+        if (i > first)
         {
             const auto interval = wall.wallNs[i] - wall.wallNs[i - 1];
             maxIntervalNs = std::max (maxIntervalNs, interval);
@@ -805,15 +827,86 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
     REQUIRE (! delays.empty());
     std::sort (delays.begin(), delays.end());
     const auto medianDelayNs = delays[delays.size() / 2];
-    std::cout << "    wall clock: " << recorded << " callbacks, mean interval " << wallMeanNs / 1.0e6 << " ms, max " << static_cast<double> (maxIntervalNs) / 1.0e6
+    std::cout << "    wall clock: " << last - first << " callbacks, mean interval " << wallMeanNs / 1.0e6 << " ms, max " << static_cast<double> (maxIntervalNs) / 1.0e6
               << " ms, " << wideIntervals << " over 1.5 periods; done after the cycle start: median " << static_cast<double> (medianDelayNs) / 1.0e6
               << " ms, max " << static_cast<double> (maxDelayNs) / 1.0e6 << " ms (period " << periodNs / 1.0e6 << " ms)\n";
     CHECK_NEAR (wallMeanNs, periodNs, 0.1 * periodNs);
-    if (static_cast<double> (node.quantumFrames) <= block)
+    const bool unsplit = static_cast<double> (node.quantumFrames) <= block;
+    if (unsplit)
     {
         CHECK (medianDelayNs >= 0);                              // the stamps are on the same clock, not in the future
         CHECK (static_cast<double> (maxDelayNs) < periodNs);     // every callback finished within its cycle
     }
+
+    // No xruns and no late intervals while idle: that stays the expectation.
+    // But a shared CI runner can keep the node's data thread off the CPU for
+    // more than a period (run 37634884865: one missed cycle, 5.05 ms on the
+    // wall clock between two callbacks, each done within 0.95 ms of its
+    // cycle's start). So each xrun and each late interval (driver clock) in
+    // the window must be such a stall: the wall clock saw an interval over
+    // 1.5 periods around it, while every callback's own work stayed within
+    // its period (the delays just checked, and no callback of the engine over
+    // its period). One with no stall around it would be the engine's own
+    // doing and fails, as do more than kToleratedStalls in 0.6 s.
+    constexpr int kToleratedStalls = 2;
+    const double stallNs = flub::CallbackTiming::kLateFactor * periodNs; // E45's "late", 1.5 periods
+    const auto wallGap = [&] (size_t k) { return wall.wallNs[k] - wall.wallNs[k - 1]; };
+    // The longest wall-clock interval over 1.5 periods that ends at a
+    // callback in from .. to; 0 when there is none.
+    const auto stallIn = [&] (size_t from, size_t to)
+    {
+        size_t at = 0;
+        for (size_t k = std::max<size_t> (from, 1); k <= std::min (to, recorded - 1); ++k)
+            if (static_cast<double> (wallGap (k)) > stallNs && (at == 0 || wallGap (k) > wallGap (at)))
+                at = k;
+        return at;
+    };
+    const auto ms = [] (int64_t ns) { return static_cast<double> (ns) / 1.0e6; };
+    int xrunsSeen = 0, xrunsStalled = 0, lateSeen = 0, lateStalled = 0;
+    std::ostringstream events;
+    const auto describe = [&] (const char* what, size_t i, size_t at)
+    {
+        events << "; " << what << " at callback " << i - first << " (" << ms (wall.wallNs[i] - wall.wallNs[first]) << " ms into the window): ";
+        if (at == 0 || ! unsplit)
+            events << "no wall-clock stall around it";
+        else
+            events << "wall-clock gap " << ms (wallGap (at)) << " ms (" << static_cast<double> (wallGap (at)) / periodNs << " periods) before callback "
+                   << static_cast<long long> (at) - static_cast<long long> (first) << ", driver-clock gap "
+                   << (wall.stampNs[at] != 0 && wall.stampNs[at - 1] != 0 ? ms (wall.stampNs[at] - wall.stampNs[at - 1]) : 0.0) << " ms";
+    };
+    for (size_t i = first; i <= last; ++i)
+    {
+        // The device's count, up to the previous cycle: an xrun of a missed
+        // cycle shows one callback after the gap that skipped it, one of a
+        // cycle finished late one callback after that cycle.
+        for (int x = wall.xruns[i - 1]; x < wall.xruns[i]; ++x)
+        {
+            const auto at = stallIn (i >= 3 ? i - 3 : 1, i + 1);
+            ++xrunsSeen;
+            xrunsStalled += (at != 0 && unsplit) ? 1 : 0;
+            describe ("xrun seen", i, at);
+        }
+        if (wall.stampNs[i] != 0 && wall.stampNs[i - 1] != 0 && static_cast<double> (wall.stampNs[i] - wall.stampNs[i - 1]) > stallNs)
+        {
+            const auto at = stallIn (i - 1, i + 1);
+            ++lateSeen;
+            lateStalled += (at != 0 && unsplit) ? 1 : 0;
+            describe ("late interval", i, at);
+        }
+    }
+    const int xruns = xrunsAfter - xrunsBefore;
+    std::cout << "    stall attribution: " << xruns << " xruns and " << timing.late << " late intervals in the window (" << xrunsSeen << " and " << lateSeen
+              << " located, " << xrunsStalled << " and " << lateStalled << " a scheduling stall); the engine's own work at most "
+              << ms (static_cast<int64_t> (timing.duration.maxNs)) << " ms, " << timing.overBudget << " callbacks over the period"
+              << (xrunsSeen + lateSeen == 0 ? std::string ("; none, as expected") : events.str()) << "\n";
+    CHECK (xruns >= 0);
+    CHECK (xruns <= kToleratedStalls);
+    CHECK (static_cast<int> (timing.late) <= kToleratedStalls);
+    CHECK (xrunsSeen >= xruns);                          // the recorder located every xrun of the window...
+    CHECK (lateSeen >= static_cast<int> (timing.late));  // ... and every late interval
+    CHECK (xrunsStalled == xrunsSeen);                   // each one a scheduling stall, none the engine's own
+    CHECK (lateStalled == lateSeen);
+    CHECK (timing.overBudget == 0);                      // the engine's work fit its period in every callback
 
     host.getDeviceManager().removeAudioCallback (&wall);
     host.closeDevice();

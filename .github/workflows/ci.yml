@@ -496,8 +496,9 @@ jobs:
                 echo "$out"; echo "::error::run $run, '$filter' was skipped (no server or a missing tool)"; exit 1
               fi
               # R1.2's measurements (callbacks / xruns and the wall clock,
-              # hot-plug, recovery time, the stale-error case).
-              echo "$out" | grep -E "s on the node:|wall clock:|unplugged:|re-opened:|stale error:|first start:" | sed "s/^ */  run $run: /" || true
+              # each idle xrun's attribution, hot-plug, recovery time, the
+              # stale-error case).
+              echo "$out" | grep -E "s on the node:|wall clock:|stall attribution:|unplugged:|re-opened:|stale error:|first start:" | sed "s/^ */  run $run: /" || true
             done
             echo "run $run: green"
           done
