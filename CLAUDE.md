@@ -155,6 +155,30 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   (Am-F-C-G with drums: Am, F, C read, A minor); not yet heard / seen on real songs on the owner's screen.
 - A build fails at the link step (LNK1104) while `Flubsound Pro.exe` is running; the tests still build and run.
 
+### IN FLIGHT (2026-10-07): seven requirement gaps, unmerged work in local worktree branches
+
+The owner asked to close TRACEABILITY's "Partially implemented" rows R1.1, R1.2, R4.5, R4.4, R1.5, R5.3 and the
+macOS / Linux platform gap. Each was built in its own git worktree (`.claude/worktrees/wf_ac6c1e42-cb8-N`, each with
+its own `build-wt`), reviewed by an independent agent, then fixed. NOTHING here is merged into this branch yet.
+Branches (local; base 51abe53), status at the time of writing:
+
+| N | Branch `worktree-wf_ac6c1e42-cb8-N` | Item | State |
+|---|---|---|---|
+| 1 | 47de1a6 + uncommitted fix edits | R1.1 live "Measure latency" + device buffer per profile | review fixes were in progress (uncommitted) |
+| 2 | 68dea16 (also pushed as `origin/wip/pipewire-backend`) | R1.2 native PipeWire backend (dlopen) + ASIO build option | implementation iterating on CI; not reviewed yet |
+| 3 | 6cb10d2 | R4.5 auto-move a captured app's own output (Windows), Settings > Routing input map (Linux) | reviewed + fixed |
+| 4 | 4c91ebf | R4.4 hotkey conflicts first-class, Bypass default Ctrl+Alt+Shift+B, rebinding | reviewed + fixed |
+| 5 | e828318 | R1.5 headless real-device soak (`--device-soak`, S/PDIF output) | review was in progress |
+| 6 | 7ab6d26 + uncommitted fix edits | R5.3 TinyNet runtime + trained voice-cleanup model (experimental, off) | review fixes were in progress (uncommitted) |
+| 7 | 3b27287 (also `origin/wip/macos-osd`) | macOS OSD as a non-activating NSPanel (CI-verified) | reviewed + fixed |
+
+To finish: in each worktree check `git status` (commit or finish uncommitted fixes; do not delete a worktree with
+uncommitted changes), build and run its tests, review anything not reviewed (items 2 and 5), then cherry-pick the
+branches onto this branch one at a time (expect small conflicts in docs/TRACEABILITY.md, docs/11, docs/06, docs/12,
+AppSettings / SettingsDialog), run the full ctest, push, rebuild the app. The owner still has to: run the latency
+measurement (headset mic against an ear cup), decide on the ASIO SDK licence, and decide whether to install WSL
+for a real Linux test.
+
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows** (commands above) and run `ctest`. Fix any MSVC-only compile errors or test failures first;
