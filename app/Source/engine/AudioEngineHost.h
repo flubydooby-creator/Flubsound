@@ -176,10 +176,28 @@
 //   histograms the message thread reads (getCallbackTiming(),
 //   EngineStatus::callbackTiming). A device start or stop starts a new run of
 //   intervals, so the gap is not counted as a late callback.
+//
+// REAL-DEVICE SOAK HOOKS (docs/11 E53; shell/DeviceSoak.h)
+//   * Output pin: setOutputPin() names the only output the host may play
+//     to. The selection then opens that output or none (never the system
+//     default or a first safe output), and a device started under any other
+//     name - JUCE's own fallback after a hot-unplug - gets silence from its
+//     first callback (isPinBlocked()) and is closed again by the timer.
+//   * Device signal source: setDeviceSignalSource() feeds the strips from a
+//     StripSignalSource (the TestSignalGenerator) inside the running device
+//     callback instead of the device inputs and captures. The source is
+//     called on the audio thread and must be allocation- and lock-free.
+//   * Output tap: setOutputTap() copies the final device output (after the
+//     loopback guard and the output trim: what the device plays, silence
+//     included) into a flub::StreamTap every callback; the soak analyses it
+//     on the message thread.
+//   Clearing a source or a tap waits (bounded) for the callback in flight to
+//   return, so the caller may destroy it afterwards.
 #pragma once
 
 #include "DriftCompensatedFifo.h"
 #include "flub/analysis/CallbackTiming.h"
+#include "flub/analysis/StreamTap.h"
 #include "flub/dsp/ActiveChannelDetector.h"
 #include "flub/dsp/Bs775Fold.h"
 #include "flub/engine/MixEngine.h"
@@ -553,6 +571,33 @@ public:
     int getRecoveryAttempts() const noexcept { return recoveryAttempts; }
     /** Device events handled so far (message thread). */
     uint32_t getDeviceEventsHandled() const noexcept { return deviceEventsHandled; }
+
+    // =========================================================================
+    // Real-device soak hooks (docs/11 E53; see REAL-DEVICE SOAK HOOKS)
+    // =========================================================================
+    /** The only output device this host may play to; empty (the default)
+        lifts the pin. Message thread, before openDevice(). */
+    void setOutputPin (const juce::String& outputDeviceName);
+    const juce::String& getOutputPin() const noexcept { return outputPin; }
+    /** True while the device that started is not the pinned output: the
+        callback writes silence and the timer closes it. Any thread. */
+    bool isPinBlocked() const noexcept { return pinBlocked.load (std::memory_order_acquire); }
+    /** Devices started under another name than the pin (each was silenced
+        and closed). Message thread. */
+    uint32_t getPinViolations() const noexcept { return pinViolations; }
+
+    /** Strip audio from `source` (any strip it renders; the others are
+        unfed) in place of the device inputs and captures while a device runs;
+        nullptr ends it. Message thread. */
+    void setDeviceSignalSource (StripSignalSource* source);
+    /** A copy of every callback's final device output; nullptr ends it.
+        Message thread. */
+    void setOutputTap (flub::StreamTap* tap);
+
+    /** Device starts (audioDeviceAboutToStart) and device errors
+        (audioDeviceError) since the host was created. Any thread. */
+    uint32_t getDeviceStartCount() const noexcept { return deviceStarts.load (std::memory_order_acquire); }
+    uint32_t getDeviceErrorCount() const noexcept { return deviceErrors.load (std::memory_order_acquire); }
 
     // =========================================================================
     // Strip mix controls (any thread; applied click-free on the audio thread)
@@ -942,6 +987,15 @@ private:
     bool reselectPending = false;       // a device event's second look, once the device type caught up
     juce::uint32 reselectDueMs = 0;
     static constexpr juce::uint32 kReselectSettleMs = 500;
+
+    // Real-device soak hooks (REAL-DEVICE SOAK HOOKS)
+    juce::String outputPin;                                  // message thread; read by audioDeviceAboutToStart
+    std::atomic<bool> pinBlocked { false };                  // the started device is not the pin: silence
+    uint32_t pinViolations = 0;
+    std::atomic<StripSignalSource*> deviceSignalSource { nullptr };
+    std::atomic<flub::StreamTap*> outputTap { nullptr };
+    std::atomic<uint32_t> deviceStarts { 0 }, deviceErrors { 0 };
+    void enforceOutputPin();
 
     void readDeviceChannelMap (juce::AudioIODevice& device);
     std::array<int, flub::kMaxChannels> stripInputOrder (int firstInput, int stripChannels, bool alsaOrder) const noexcept;

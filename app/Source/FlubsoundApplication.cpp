@@ -4,6 +4,7 @@
 #include "diagnostics/UpdateCheck.h"
 #include "engine/EngineController.h"
 #include "platform/PlatformBridge.h"
+#include "shell/DeviceSoak.h"
 #include "shell/HotkeyManager.h"
 #include "shell/MainWindow.h"
 #include "shell/RemoteControl.h"
@@ -28,6 +29,12 @@ namespace
 bool commandLineRequestsScreenshot()
 {
     return juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--screenshot");
+}
+
+/** `--device-soak ...`: the headless real-device soak (docs/11 E53). */
+bool commandLineRequestsDeviceSoak()
+{
+    return juce::JUCEApplicationBase::getCommandLineParameterArray().contains ("--device-soak");
 }
 
 /** `--ctl <action> ...`: forward one action to the running instance (docs/11 E56). */
@@ -77,9 +84,9 @@ FlubsoundApplication::~FlubsoundApplication() = default;
 
 bool FlubsoundApplication::moreThanOneInstanceAllowed()
 {
-    // Headless screenshot runs must never be swallowed by a running instance;
-    // --ctl talks to it over the control socket itself and exits.
-    if (commandLineRequestsScreenshot() || commandLineRequestsControl())
+    // Headless screenshot and soak runs must never be swallowed by a running
+    // instance; --ctl talks to it over the control socket itself and exits.
+    if (commandLineRequestsScreenshot() || commandLineRequestsDeviceSoak() || commandLineRequestsControl())
         return true;
 
    #if JUCE_LINUX || JUCE_BSD
@@ -114,6 +121,13 @@ void FlubsoundApplication::initialise (const juce::String&)
             setApplicationReturnValue (2);
             quit();
         }
+        return;
+    }
+
+    soakMode = commandLineRequestsDeviceSoak();
+    if (soakMode)
+    {
+        initialiseDeviceSoak();
         return;
     }
 
@@ -284,8 +298,87 @@ bool FlubsoundApplication::initialiseScreenshot()
     return true;
 }
 
+void FlubsoundApplication::initialiseDeviceSoak()
+{
+    // docs/11 E53: shell/DeviceSoak.h. Exit codes: 0 clean, 1 findings, 2 bad
+    // arguments, 3 the device could not be opened, 4 aborted.
+    const auto finishNow = [this] (int code, const juce::String& message)
+    {
+        printLine (code >= 2, message);
+        setApplicationReturnValue (code);
+        quit();
+    };
+
+    DeviceSoakOptions options;
+    juce::String error;
+    if (! parseDeviceSoakCommandLine (getCommandLineParameterArray(), options, error))
+        return finishNow (2, "Flubsound: " + (error.isNotEmpty() ? error : juce::String ("invalid --device-soak arguments")));
+    if (options.list)
+        return finishNow (0, DeviceSoak::listDevices (options));
+
+    auto clock = DeviceSoak::Clock::Device;
+    std::vector<SoakAction> script;
+    juce::var reference;
+    if (options.replay != juce::File())
+    {
+        // A report's session again, on the virtual device (no hardware).
+        DeviceSoakOptions replayed;
+        if (! DeviceSoak::readReplay (options.replay, replayed, script, error))
+            return finishNow (2, "Flubsound: " + error);
+        replayed.replay = options.replay;
+        replayed.dumpAt = options.dumpAt;
+        replayed.report = options.report != juce::File()
+                              ? options.report
+                              : options.replay.getSiblingFile (options.replay.getFileNameWithoutExtension() + "-replay.json");
+        reference = juce::JSON::parse (options.replay.loadFileAsString());
+        options = replayed;
+        clock = DeviceSoak::Clock::Virtual;
+    }
+    else if (! DeviceSoak::resolveDevice (options, error))
+    {
+        return finishNow (3, "Flubsound: device soak: " + error);
+    }
+    if (options.report == juce::File())
+        options.report = juce::File::getCurrentWorkingDirectory().getChildFile ("device-soak-" + juce::Time::getCurrentTime().formatted ("%Y%m%d-%H%M%S")
+                                                                                + ".json");
+
+    // Temporary settings in a folder of their own (never the user's file).
+    soakFolder = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                     .getNonexistentChildFile ("FlubsoundPro-device-soak-" + juce::String::toHexString (juce::Random::getSystemRandom().nextInt64()), {}, false);
+    soakFolder.createDirectory();
+    controller = std::make_unique<EngineController> (DeviceSoak::makeEngineOptions (options, clock, soakFolder.getChildFile ("settings.xml")));
+
+    if (options.ui)
+    {
+        mainWindow = std::make_unique<MainWindow> (*controller, [] { quit(); });
+        mainWindow->setVisible (true);
+    }
+
+    deviceSoak = std::make_unique<DeviceSoak> (*controller, options, clock,
+                                               [this] (int code, const juce::String& summary)
+                                               {
+                                                   printLine (false, summary);
+                                                   setApplicationReturnValue (code);
+                                                   quit();
+                                               });
+    if (clock == DeviceSoak::Clock::Virtual)
+    {
+        deviceSoak->setScriptedActions (std::move (script));
+        deviceSoak->setReplayReference (reference);
+    }
+    printLine (false, "Flubsound: device soak on \"" + options.device + "\" [" + options.type + "], " + juce::String (options.minutes, 2)
+                          + " min, report " + options.report.getFullPathName());
+    if (! deviceSoak->start (error))
+        return finishNow (3, "Flubsound: device soak: " + error);
+}
+
 void FlubsoundApplication::shutdown()
 {
+    // A soak still running (the window was closed, or the system quits)
+    // writes what it has.
+    if (deviceSoak != nullptr && deviceSoak->isStarted() && ! deviceSoak->isFinished())
+        deviceSoak->stop ("aborted: the app was closed");
+    deviceSoak.reset();
     screenshot.reset();
     updateCheck.reset(); // cancels a running request
     remoteControl.reset(); // stops the socket before what it drives goes
@@ -296,7 +389,7 @@ void FlubsoundApplication::shutdown()
     osd.reset();
     trayIcon.reset();
 
-    if (mainWindow != nullptr && ! screenshotMode)
+    if (mainWindow != nullptr && ! screenshotMode && ! soakMode)
         mainWindow->saveWindowState();
     mainWindow.reset();
 
@@ -305,6 +398,8 @@ void FlubsoundApplication::shutdown()
     if (controller != nullptr)
         controller->shutdown();
     controller.reset();
+    if (soakFolder != juce::File())
+        soakFolder.deleteRecursively();
 
     juce::LookAndFeel::setDefaultLookAndFeel (nullptr);
     lookAndFeel.reset();

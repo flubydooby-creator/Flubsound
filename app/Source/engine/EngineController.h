@@ -203,6 +203,17 @@ public:
         /** docs/11 E32 (c): the calendar the estimated daily dose is kept by
             (local time); empty = juce::Time::getCurrentTime. Tests inject one. */
         std::function<juce::Time()> clock;
+        /** docs/11 E53, the real-device soak (shell/DeviceSoak.h): the device
+            state (a JUCE DEVICESETUP element) to open instead of the saved
+            one; it replaces the settings' device state in memory, so a
+            re-open uses it too. nullptr = the settings' own. */
+        std::shared_ptr<const juce::XmlElement> deviceState;
+        /** docs/11 E53: the only output the host may play to
+            (AudioEngineHost::setOutputPin); empty = any. */
+        juce::String outputPin;
+        /** Called with the host just before the device opens (a soak's
+            virtual device type, a test's fake device watcher). */
+        std::function<void (AudioEngineHost&)> beforeDeviceOpen;
     };
 
     EngineController();

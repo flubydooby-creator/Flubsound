@@ -303,6 +303,12 @@ EngineController::EngineController (Options opts)
     requestGraphQuantum (getLatencyProfile(), false);
 
     applyAllowedLoopbackPairs(); // before the device starts: its first check sees them
+    // docs/11 E53: a soak's device and pin (in memory only: such runs never persist).
+    host->setOutputPin (options.outputPin);
+    if (options.deviceState != nullptr)
+        settings->setDeviceState (options.deviceState.get());
+    if (options.beforeDeviceOpen)
+        options.beforeDeviceOpen (*host);
     if (options.openAudioDevice)
     {
         const auto savedState = settings->getDeviceState();

@@ -31,6 +31,14 @@
 // [--seconds S] [--scale F] [--device "output device name"] (see
 // shell/ScreenshotDriver.h). No device, no tray, no hotkeys, no settings are
 // written, nothing is logged and no crash handler is installed.
+//
+// Real-device soak (docs/11 E53): --device-soak --device "<output>" [--type
+// ...] [--buffer n|min] [--minutes m] [--report file.json] ... (see
+// shell/DeviceSoak.h): the engine plays generated programme on that one
+// output (pinned) under automation for m minutes and writes a report. Like
+// the screenshot mode: temporary settings, no tray, hotkeys, routing, remote
+// control, log or crash handler, several instances allowed; --ui also shows
+// the main window.
 #pragma once
 
 #include <juce_gui_extra/juce_gui_extra.h>
@@ -45,6 +53,7 @@ class TrayIcon;
 class HotkeyManager;
 class RemoteControl;
 class ScreenshotDriver;
+class DeviceSoak;
 namespace ui
 {
 class Osd;
@@ -82,6 +91,7 @@ public:
 private:
     void initialiseInteractive();
     bool initialiseScreenshot();
+    void initialiseDeviceSoak();
     void forwardControlRequest();
     void closeButtonPressed();
     /** The hotkey notice (ui::MainComponent::announceHotkeyFailures), and a
@@ -99,5 +109,8 @@ private:
     std::unique_ptr<diagnostics::update::UpdateChecker> updateCheck; // docs/11 E54: opt-in, notify-only
     std::unique_ptr<ScreenshotDriver> screenshot;
     bool screenshotMode = false;
+    std::unique_ptr<DeviceSoak> deviceSoak; // docs/11 E53
+    bool soakMode = false;
+    juce::File soakFolder;                  // the soak's temporary settings
 };
 } // namespace flub::app

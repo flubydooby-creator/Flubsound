@@ -660,6 +660,7 @@ void AudioEngineHost::dispose (EngineInstance* instance)
 
 void AudioEngineHost::timerCallback()
 {
+    enforceOutputPin();
     collectRetired();
     if (latest->engine.needsReprepare())
         reconfigure();
@@ -695,6 +696,8 @@ void AudioEngineHost::timerCallback()
 
 void AudioEngineHost::handleAsyncUpdate()
 {
+    enforceOutputPin(); // docs/11 E53: before anything re-selects
+
     if (configurePending.exchange (false, std::memory_order_acq_rel))
     {
         // Rare path: the backend started the device from a non-message thread.
@@ -1165,6 +1168,49 @@ std::vector<AudioEngineHost::CaptureInfo> AudioEngineHost::getCaptures() const
 }
 
 // =============================================================================
+// Real-device soak hooks (docs/11 E53)
+// =============================================================================
+void AudioEngineHost::setOutputPin (const juce::String& outputDeviceName)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    jassert (! callbackRunning.load (std::memory_order_acquire)); // audioDeviceAboutToStart reads it
+    outputPin = outputDeviceName;
+}
+
+void AudioEngineHost::enforceOutputPin()
+{
+    if (! pinBlocked.load (std::memory_order_acquire))
+        return;
+    // Silenced since its first callback; nothing of it reached the device.
+    if (auto* device = deviceManager.getCurrentAudioDevice(); device != nullptr && device->getName() != outputPin)
+    {
+        ++pinViolations;
+        deviceManager.closeAudioDevice(); // the change message re-selects: the pin, or nothing
+    }
+    pinBlocked.store (false, std::memory_order_release);
+}
+
+void AudioEngineHost::setDeviceSignalSource (StripSignalSource* source)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    // seq_cst on both sides: the waitForAudioThreadToPass handshake (a
+    // callback that read the old pointer has returned once the counter moved).
+    deviceSignalSource.store (source, std::memory_order_seq_cst);
+    uint64_t counter = 0;
+    if (source == nullptr)
+        waitForAudioThreadToPass (counter);
+}
+
+void AudioEngineHost::setOutputTap (flub::StreamTap* tap)
+{
+    JUCE_ASSERT_MESSAGE_THREAD
+    outputTap.store (tap, std::memory_order_seq_cst);
+    uint64_t counter = 0;
+    if (tap == nullptr)
+        waitForAudioThreadToPass (counter);
+}
+
+// =============================================================================
 // Offline
 // =============================================================================
 void AudioEngineHost::prepareOffline (double sampleRate, int blockSize)
@@ -1448,9 +1494,12 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
     // The guard reads the device input map here too, so a map that starts
     // feeding a strip while the pair loops is muted from that block on.
     const bool guarded = loopbackPair.load (std::memory_order_acquire) && deviceInputFeedsStrip();
-    if (ready && ! (guarded && guardGain <= 0.0f))
+    // docs/11 E53: a device that is not the soak's pinned output plays nothing.
+    const bool blocked = pinBlocked.load (std::memory_order_acquire);
+    if (ready && ! blocked && ! (guarded && guardGain <= 0.0f))
     {
-        processBlock (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples, nullptr);
+        processBlock (inputChannelData, numInputChannels, outputChannelData, numOutputChannels, numSamples,
+                      deviceSignalSource.load (std::memory_order_seq_cst)); // seq_cst: see setDeviceSignalSource
         if (guarded || guardGain < 1.0f)
             applyGuardToOutput (outputChannelData, numOutputChannels, numSamples, guarded);
         applyOutputTrim (outputChannelData, numOutputChannels, numSamples);
@@ -1467,6 +1516,10 @@ void AudioEngineHost::audioDeviceIOCallbackWithContext (const float* const* inpu
             for (auto& a : stripActive)
                 a.store (false, std::memory_order_relaxed);
     }
+
+    // docs/11 E53: what the device plays, for the soak's analysis.
+    if (auto* tap = outputTap.load (std::memory_order_seq_cst))
+        tap->write (outputChannelData, numOutputChannels, numSamples);
 
     // docs/11 E45: the interval runs on one clock only, so a backend that
     // starts or stops giving host times begins a new run.
@@ -1538,6 +1591,12 @@ void AudioEngineHost::audioDeviceAboutToStart (juce::AudioIODevice* device)
     readDeviceChannelMap (*device);
     deviceSampleRate.store (sampleRate, std::memory_order_relaxed);
     callbackTiming.restartIntervals();
+    // docs/11 E53: a device started under another name than the pin (JUCE's
+    // own fallback) plays silence from its first callback; the timer closes it.
+    pinBlocked.store (outputPin.isNotEmpty() && device->getName() != outputPin, std::memory_order_release);
+    deviceStarts.fetch_add (1, std::memory_order_acq_rel);
+    if (pinBlocked.load (std::memory_order_relaxed))
+        triggerAsyncUpdate(); // handleAsyncUpdate closes it at once
 
     // Must be visible before any async configure request is handled.
     callbackRunning.store (true, std::memory_order_release);
@@ -1583,6 +1642,7 @@ void AudioEngineHost::audioDeviceError (const juce::String& errorMessage)
         const juce::ScopedLock sl (errorLock);
         lastDeviceError = errorMessage;
     }
+    deviceErrors.fetch_add (1, std::memory_order_acq_rel);
     errorPending.store (true, std::memory_order_release);
     triggerAsyncUpdate();
 }
@@ -2047,6 +2107,17 @@ void AudioEngineHost::reselectOutput()
         // Following the system default: as if nothing were chosen (the choice is kept).
         next = selectOutput (followDefault ? OutputChoice {} : chosen, outputs, type->getDefaultDeviceIndex (false), endpointCache,
                              setup.inputDeviceName, deviceInputFeedsStrip(), unavailableOutputs);
+        if (outputPin.isNotEmpty())
+        {
+            // docs/11 E53: the pinned output or nothing, never a fallback.
+            next = {};
+            next.reason = OutputReason::NoSafeOutput;
+            if (outputs.contains (outputPin) && ! unavailableOutputs.contains (outputPin))
+            {
+                next.deviceName = outputPin;
+                next.reason = OutputReason::Chosen;
+            }
+        }
         if (next.deviceName.isEmpty() || (device != nullptr && setup.outputDeviceName == next.deviceName))
             break;
 
@@ -2065,6 +2136,11 @@ void AudioEngineHost::reselectOutput()
         unavailableOutputs.addIfNotAlreadyThere (next.deviceName);
         scheduleRecovery ("\"" + next.deviceName + "\" could not be opened: " + error, recoveryTiming.firstRetryMs, false);
     }
+
+    // docs/11 E53: with a pin, any other device that is open now is closed.
+    if (outputPin.isNotEmpty())
+        if (auto* stillOpen = deviceManager.getCurrentAudioDevice(); stillOpen != nullptr && stillOpen->getName() != outputPin)
+            deviceManager.closeAudioDevice();
 
     // The chosen output from settings older than its identity: fill it in.
     if (next.reason == OutputReason::Chosen && chosen.endpointId.isEmpty())

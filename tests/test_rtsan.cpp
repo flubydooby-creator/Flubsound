@@ -21,6 +21,7 @@
 
 #include "flub/analysis/CallbackTiming.h"
 #include "flub/analysis/Discontinuity.h"
+#include "flub/analysis/StreamTap.h"
 #include "flub/common/Realtime.h"
 #include "flub/dsp/BackgroundTracker.h"
 #include "flub/dsp/BassEngine.h"
@@ -119,6 +120,9 @@ static_assert (std::is_same_v<decltype (&CallbackTiming::record), void (Callback
 static_assert (std::is_same_v<decltype (&CallbackTiming::restartIntervals), void (CallbackTiming::*)() noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TimingHistogram::add), void (TimingHistogram::*) (uint64_t) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&TimingHistogram::bucketFor), int (*) (uint64_t) noexcept FLUB_NONBLOCKING>);
+// The real-device soak's copy of the final device output (docs/11 E53),
+// written once per callback by the app's AudioEngineHost while a soak runs.
+static_assert (std::is_same_v<decltype (&StreamTap::write), void (StreamTap::*) (const float* const*, int, int) noexcept FLUB_NONBLOCKING>);
 // MixEngine's idle freeze (docs/11 E45): its switches, set between process()
 // calls on the audio thread (the freeze and wake themselves run inside
 // MixEngine::process, asserted above; tests/test_idle_freeze.cpp checks that

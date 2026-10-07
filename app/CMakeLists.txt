@@ -2,7 +2,8 @@
 #
 # Layout of app/Source:
 #   Main.cpp, FlubsoundApplication.*  JUCEApplication, command line, lifetime
-#   shell/       MainWindow, tray icon, global hotkeys, headless screenshot driver
+#   shell/       MainWindow, tray icon, global hotkeys, headless screenshot driver,
+#                the real-device soak (DeviceSoak, docs/11 E53)
 #   diagnostics/ rotating log, crash reports, engine event monitor, the
 #                diagnostics zip, the notify-only update check (docs/11 E54)
 #   engine/      AudioEngineHost (device callback), DriftCompensatedFifo,
@@ -53,6 +54,7 @@ set(FLUB_APP_SOURCES
     Source/diagnostics/DiagnosticsBundle.cpp
     Source/diagnostics/DiagnosticsMonitor.cpp
     Source/diagnostics/DiagnosticsSession.cpp
+    Source/diagnostics/ProcessStats.cpp
     Source/diagnostics/UpdateCheck.cpp
     Source/engine/AudioEngineHost.cpp
     Source/engine/DriftCompensatedFifo.cpp
@@ -69,6 +71,7 @@ set(FLUB_APP_SOURCES
     Source/shell/HotkeyManager.cpp
     Source/shell/RemoteControl.cpp
     Source/shell/ScreenshotDriver.cpp
+    Source/shell/DeviceSoak.cpp
     Source/ui/AbxPanel.cpp
     Source/ui/AnalyzerFeed.cpp
     Source/ui/AnalyzerPanel.cpp

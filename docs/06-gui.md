@@ -23,7 +23,7 @@
 | [8](#8-per-app-routing-ux) | Per-app routing UX |
 | [9](#9-first-run-and-onboarding) | First run and onboarding |
 | [10](#10-plug-in-editor-strategy) | Plug-in editor strategy |
-| [11](#11-headless-screenshot-driver) | Headless screenshot driver |
+| [11](#11-headless-screenshot-driver) | Headless screenshot driver; real-device soak (§11.1) |
 | [12](#12-persisted-ui-state) | Persisted UI state |
 | [13](#13-known-limitations) | Known limitations |
 | [14](#14-requirement-traceability) | Requirement traceability |
@@ -1741,6 +1741,42 @@ FlubsoundPro --screenshot out.png [--mode music|gaming] [--size WxH] [--seconds 
      - `gaming`: a 7.1 game scene on the Game strip, plus music at −12 dB on the Music strip, which is set to Music mode with 30 % Boost.
 - **Pacing.** A 60 Hz timer renders exactly the audio that would have played since the last tick, capped at 0.1 s per tick, through `EngineController::renderOffline`. Meters, analyser and history therefore fill as they would live. The driver finishes once `seconds` have elapsed *and* at least 90 % of that much audio has been rendered, then writes `createComponentSnapshot()` at `--scale`.
 - **CI** (`.github/workflows/ci.yml`). Under `xvfb-run` it renders `--mode music`, `--mode gaming` and `--mode gaming --device "Headphones (Stealth 700 Gen 2 MAX)"` at 1440 × 900, and uploads them as the `screenshots` artifact.
+
+### 11.1 Headless real-device soak ([11 E53](11-enhancement-report.md#e53), R1.5)
+
+`shell/DeviceSoak.*` runs the full engine (`EngineController` → `AudioEngineHost` → `MixEngine`) on **one real output** for a set time under automation and writes a report. It is a test tool, not a user feature: nothing in the UI starts it.
+
+```
+FlubsoundPro --device-soak --device "<output>" [--type "<device type>"] [--buffer <samples>|min]
+             [--rate <Hz>] [--minutes <m>] [--report <file.json>] [--profile quality|balanced|low]
+             [--seed <n>] [--interval <ms>] [--automation user|off] [--ui] [--dump <s>[,<s>...]]
+FlubsoundPro --device-soak --list [--device "<output>"] [--type "<device type>"]
+FlubsoundPro --device-soak --replay <report.json> [--report <file.json>] [--dump <s>[,<s>...]]
+```
+
+| Option | Default | Validation | Effect |
+|---|---|---|---|
+| `--device "<output>"` | required (unless `--list` / `--replay`) | must be listed by the device type, else exit 3 and nothing is opened | The output, exactly as the device type lists it. It is **pinned** (`AudioEngineHost::setOutputPin`): the host opens it or nothing, never the system default or another output; a device JUCE starts under another name (its own fallback after a hot-unplug) plays silence from its first callback, is closed, and ends the soak (exit 4) |
+| `--type "<type>"` | the app's first-run type: `Windows Audio (Low Latency Mode)` on Windows, else the first type | must exist | JUCE device type |
+| `--buffer n\|min\|default` | `default` | 16–16384 | Buffer size; `min` is the smallest the device offers (`getAvailableBufferSizes`, read without opening a stream) |
+| `--rate Hz` | the device's | 8000–384000 | Sample rate |
+| `--minutes m` | `10` | 0.05–1440 | Programme time analysed |
+| `--report file.json` | `device-soak-<time>.json` in the working folder | — | The JSON report; the human summary is printed and written next to it as `.txt` |
+| `--profile quality\|balanced\|low` | `balanced` | — | Latency profile at the start (the automation switches it) |
+| `--seed n`, `--interval ms` | `1`, `2000` | interval 50–600000 | The automation's seed and mean time between actions (± 50 %) |
+| `--automation user\|off` | `user` | — | `off`: the scene only |
+| `--ui` | off | — | Also show the main window (its meters and analyser run as usual) |
+| `--dump s[,s...]` | none | programme seconds | Triage: for each time, the device output from 0.5 s before to 0.5 s after it (`<report>-dump-<s>.wav`, 32-bit float, for `flubsound-cli analyze --glitches`) and the Game and Music strips' states with both banks as the stream passed it (`<report>-dump-<s>-strips.json`) |
+| `--list` | — | — | Print the device types, their outputs (the system default marked) and, for `--device`, its buffer sizes and rates. Opens nothing |
+| `--replay report.json` | — | must be a device-soak report | Re-run that session on a virtual device (`SoakVirtualDeviceType`, no hardware, faster than real time): the same rate, buffer size, programme and every logged action at its logged frame. The replay's report says which detections came back (the processing's own, or an action's) and which did not (the real-time path) |
+
+- **Exit codes:** 0 clean, 1 findings (any detection, late or over-budget callback, device xrun, device restart or error, tap drop; on the virtual device the callback timing is not real time and not judged), 2 bad arguments, 3 the device could not be opened, 4 aborted (pin, a stall of 15 s without callbacks, the app closed).
+- **Isolation.** Temporary settings in a folder of their own under the temp folder (never the user's settings file; never written; deleted at the end), no state restore, routing, automatic profiles, Tournament switch, tray, hotkeys, remote control, diagnostic log or crash handler; several instances may run. The system default output is never changed.
+- **Programme.** `TestSignalGenerator` inside the device callback (`AudioEngineHost::setDeviceSignalSource`, allocation- and lock-free): the 7.1 game scene on Game and the music on Music, each at −6 dB; Chat and System silent. Game starts on *Competitive FPS*, Music on *Signature*, both at Boost 50 %.
+- **Automation.** From 5 s on, one action every `--interval` ms ± 50 % on the Game or the Music strip, through the same `EngineController` calls as the UI and the hotkeys: factory preset, Boost, macro, master bypass, strip bypass, A/B bank, mute, strip gain, latency profile (a crossfaded engine swap, started at once), mode, a module's ear, Night, Focus, protection strength, Smart macros. The kinds come from a seeded bag of 20 (preset, Boost, gain twice, macro three times), so each comes up in every 20 actions. Nothing happens in the last 2 s.
+- **Watched.** The final device output (after the loopback guard and the output trim) is copied in the callback into a preallocated `flub::StreamTap` (`AudioEngineHost::setOutputTap`; a 4 s ring of 128-frame chunks with stream positions) and read on the message thread at 50 Hz by a `DiscontinuityDetector` (restarted at a gap in the tap); a second detector reads the dry programme as a self-check. Also recorded: the callback timing since the start (`CallbackTiming`: duration and interval percentiles, the longest callback against its period, over-budget and late callbacks with the second they came in), the device's xrun count (−1: the type reports none; JUCE's WASAPI types count input discontinuities only) and JUCE's glitch count, JUCE's CPU load, the process's and the system's CPU time, device restarts and errors, overload episodes, engine swaps, and private bytes / working set every 10 s (growth and slope after the first minute).
+- **Triage** of every detection: `restart` (within 1 s after a device restart), `gap` (at a tap gap), `headroom` (the 7.1 fold's zero-latency headroom limiter, [11 E28](11-enhancement-report.md#e28)a, acted in the block before: `MeterBus::foldHeadroomDb`, read after every block on the virtual device and at 50 Hz on a real one), `transition` (within 500 ms after an action, named with its age), `programme` (the dry programme breaks there too; for a DC step, the dry programme read 6 dB more sensitively within the step's 250 ms window), else `static`; plus whether the master bypass was engaged. The replay is the stronger test: a detection that comes back on the virtual device at the same frame is the processing's own; a replay's script may also carry `param` actions (any parameter of a strip's active bank, by id), which the automation never draws, to take parts away (11 E53, 2026-10-07).
+- **Wrapper.** `tools/scripts/device-soak.py --app "<Flubsound Pro.exe>" --device "<output>" --minutes 10 --out <folder>` runs the rows `low-default`, `low-min` and `shared` (and `default` for long runs) one after the other and prints one table.
 
 ---
 
