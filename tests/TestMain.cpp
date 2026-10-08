@@ -14,6 +14,9 @@
     #endif
     #include <windows.h>
     #include <timeapi.h>
+    #ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION // Windows SDK before 10.0.22000
+        #define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+    #endif
 #endif
 
 // ---- allocation counting ---------------------------------------------------
@@ -129,6 +132,26 @@ int main (int argc, char** argv)
     // polling reference case and the paced cases' 10 ms device clock still
     // sleep.
     timeBeginPeriod (1);
+
+    // Windows 11 stops honouring that request for a process it treats as in
+    // the background (no visible window: ctest from a script), and may run it
+    // under EcoQoS. The app opts out of both (SystemTuning::
+    // disablePowerThrottling); the runner does the same, or a full run can
+    // fall back to the 15.6 ms timer after a few minutes (seen on the owner's
+    // PC: the paced VoiceCleanup case read 64 wake-ups per second instead of
+    // 100 and missed 70 of 196 frames; alone it read 100 and 0). Older
+    // builds reject the timer bit, so retry with execution speed only.
+    {
+        PROCESS_POWER_THROTTLING_STATE throttling {};
+        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        throttling.StateMask = 0;
+        if (! SetProcessInformation (GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof (throttling)))
+        {
+            throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+            SetProcessInformation (GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof (throttling));
+        }
+    }
 #endif
 
     for (const auto& tc : flubtest::registry())

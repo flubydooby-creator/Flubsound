@@ -17,6 +17,7 @@
 //     that folder.
 #include "AppTestSupport.h"
 
+#include "platform/PlatformServices.h"
 #include "settings/UserDataFolder.h"
 
 #include <juce_events/juce_events.h>
@@ -190,6 +191,12 @@ int main (int argc, char** argv)
     int run = 0, failedCases = 0;
 
     juce::ScopedJuceInitialiser_GUI juceInitialiser; // this thread becomes the message thread
+
+    // As the app does at its start: on Windows 11 a process without a visible
+    // window (this console runner under ctest) may lose its 1 ms timer request
+    // and run under EcoQoS; the paced and device-clock cases need neither
+    // (tests/TestMain.cpp has the core runner's measurement). No-op elsewhere.
+    flub::platform::SystemTuning::disablePowerThrottling();
 
     // The app's user data folder (settings, user presets, device-profile
     // override) points at a temporary folder on every OS. The name has
