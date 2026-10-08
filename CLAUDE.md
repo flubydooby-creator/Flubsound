@@ -305,8 +305,8 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
      different); nothing is left to re-record.
    - Tests that draw random numbers inside one argument list get other inputs per compiler (they pass everywhere):
      `tests/test_compressor.cpp` (~line 1434), `tests/test_parametric_eq.cpp` (~line 1021).
-   - PipeWire on CI: an idle xrun is tolerated only as an attributed scheduling stall; a desktop with real-time
-     priority is not checked (E48).
+   - PipeWire on CI: the job is blocking since 2026-10-08; an idle xrun is tolerated only as an attributed
+     scheduling stall; a desktop with real-time priority is not checked (E48).
 5. **Gated items** (they need hardware, people or network, not code):
    - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E55 / E22 on
      hardware, and the E54 update check against a real release.
@@ -319,11 +319,14 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
 
 CI runs on every push. Billing blocked every job on 2026-09-29 / 30 ("recent account payments have failed or your
 spending limit needs to be increased"); the repository is now public, where Actions is free. Record first green runs
-in `docs/TRACEABILITY.md` (verification baseline), `docs/04` §7 and `docs/11` §5.4. The `pipewire` job (and `asio`,
-which depends on Steinberg's server) is `continue-on-error`; `pipewire` stays so until 20 runs in a row are green.
+in `docs/TRACEABILITY.md` (verification baseline), `docs/04` §7 and `docs/11` §5.4. The `asio` job (it depends on
+Steinberg's server) is `continue-on-error`. The `pipewire` job was so until 20 runs in a row were green; it is
+**blocking since 2026-10-08** (streak 37643504114 .. 37744936845, docs/11 E48). `fuzz` has a 20 min timeout (a slow
+apt mirror took the old 10 min in the install alone in run 37744936845, which then needed a re-run).
 Count on 2026-10-07: 27 green `pipewire` results (26 runs on all branches plus one re-run; 7 on this branch) and 5
 failures (2 on WIP R1.2 code, a test-comment compile error on `wip/mac-neural`, the idle xruns of 70a2a98 and
 d4f05a5); the longest green streak is 12 runs, the current one 3 (37643504114, 37649158870, 37654557630 attempt 2).
 Count on 2026-10-08: 16 more green `pipewire` results and no failure (the five items' `wip/` runs, this branch's
 37661923343, 37721890037 and the merge's 37741568844; cancelled or skipped jobs not counted), so 43 green and 5
-failures in all, and the current streak is 19 (37643504114 .. 37741568844), the longest so far.
+failures in all, and the current streak is 19 (37643504114 .. 37741568844), the longest so far. Then 37744936845
+(9cc4a7e) made it 20 (44 green), and the job became blocking.

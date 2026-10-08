@@ -156,7 +156,9 @@ jobs:
   # input. The 1 h per target run is nightly (.github/workflows/nightly.yml).
   fuzz:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # The fuzzing is 2 min; the rest is the apt install and the build. A slow
+    # mirror took the old 10 min in the install alone (run 37744936845).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Install Clang 20 + libFuzzer runtime
@@ -447,14 +449,14 @@ jobs:
   # kill -9, restart) against a headless PipeWire + WirePlumber +
   # pipewire-pulse on a private runtime folder and session bus (the dummy
   # driver, no sound card). The cases run 20 times in a row; a case that
-  # prints "(skipped: ...)" (no server, a missing tool) fails the step. Non-blocking
-  # (continue-on-error) until 20 consecutive CI runs of this job are green,
-  # E48's Done-when: a flaky daemon shows here without failing the workflow.
+  # prints "(skipped: ...)" (no server, a missing tool) fails the step. Blocking
+  # since 2026-10-08: it was non-blocking (continue-on-error) until 20
+  # consecutive CI runs of it were green, E48's Done-when (37643504114 ..
+  # 37744936845; docs/11 E48 Status).
   pipewire:
     name: pipewire (headless, ubuntu-24.04)
     runs-on: ubuntu-24.04
     needs: core
-    continue-on-error: true
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
