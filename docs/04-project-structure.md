@@ -118,7 +118,7 @@ Flubsound/
 │   │   │   ├── LoudnessContour.h       ISO 226:2023 relative loudness contour after the preamp, four fitted sections and a headroom trim (docs/11 E32)
 │   │   │   ├── ToneTilt.h                  the Warmth tilt: a body bell and a high shelf with open-loop level compensation (docs/11 E14)
 │   │   │   ├── VoiceActivity.h             voice activity on the Chat strip's input: telephone-band share, flatness, syllable dips, hangover (docs/11 E22)
-│   │   │   ├── ChatDucker.h                the voice-keyed duck on Game / Music: footstep-protected 1 - 2.4 kHz dip, Voice & Score lift cancel, Game ceiling offset, the room for the chat (ChatRoomEnvelope, the provisional room floor; docs/11 E22)
+│   │   │   ├── ChatDucker.h                the voice-keyed duck on Game / Music: footstep-protected 1 - 2.4 kHz dip, Voice & Score lift cancel, Game ceiling offset, the room for the chat (ChatRoomEnvelope, the −6 dB room floor; docs/11 E22)
 │   │   │   └── DeviceCorrection.h          output-device correction (docs/11 E15, MixEngine only): ≤ 16 RBJ sections per channel, crossfaded hand-off; headroom:: max-boost predictor and automatic preamp (E11)
 │   │   ├── analysis/                       L1 read-only meters
 │   │   │   ├── CallbackTiming.h            lock-free per-callback duration / interval histograms, read by another thread (docs/11 E45)

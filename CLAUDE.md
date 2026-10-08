@@ -192,7 +192,7 @@ the neural worker's macOS scheduling (70a2a98) and the PipeWire xrun case that a
 scheduling stall (d4f05a5, 5e04bac, 3554497). The worktrees `.claude/worktrees/wf_ac6c1e42-cb8-1..7` are kept for
 reference; nothing on them is left to merge. The temporary remote branches `wip/macos-osd`, `wip/pipewire-backend`,
 `wip/pipewire-xrun`, `wip/mac-neural`, `wip/mac-neural-check`, `wip/mac-neural-diag` and `wip/mac-neural-diag2`
-(CI iterations) still exist; delete them only with the owner's OK.
+(CI iterations) were deleted on 2026-10-08 with the owner's OK.
 
 ### Merged 2026-10-08
 
@@ -221,7 +221,7 @@ all 12 CI jobs green in run 37741568844**.
   under the near ear); the ILD at 16 kHz is up to −3.25 dB off the analytic sphere (Classic −1.78 dB). Not heard.
 - **E22 chat room inside the duck.** With *Duck game under voice chat* on, a gain after the Game strip's ceiling
   limiter leaves room for the chat under the master ceiling, never deeper than the floor
-  (`ChatDucker::kDefaultRoomFloorDb` −6 dB, provisional; `MixEngine::setChatRoomFloorDb`, 0 dB = off; the app does
+  (`ChatDucker::kDefaultRoomFloorDb` −6 dB, kept by the owner 2026-10-08; `MixEngine::setChatRoomFloorDb`, 0 dB = off; the app does
   not set it yet). A silent chat leaves the offset ceiling alone, exactly. A −14 LUFS teammate under −1 dBFS
   explosions: chat drop 0.82 → 0.45 / 0.18 / 0.15 dB at floors −6 / −9 / −12 dB (game peaks pulled down 4.7 / 7.4 /
   10.0 dB); 0 clicks with the Game strip at 0 to +12 dB; +7 to +11 ns per sample. The duck limiter's release no
@@ -241,7 +241,7 @@ all 12 CI jobs green in run 37741568844**.
 
 The worktrees `.claude/worktrees/wf_7df3eb45-bb4-1..5` are kept for reference; nothing on them is left to merge.
 New temporary remote branches: `wip/golden-gcc`, `wip/e22-room`, `wip/neural-wake`, `wip/neural-wake-print` (a
-print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb`; delete them only with the owner's OK.
+print-only CI step, never merged), `wip/e53-bypass-limiter`, `wip/e28-comb`; all deleted on 2026-10-08 with the owner's OK.
 
 ### Next steps for the local session, in priority order
 
@@ -264,7 +264,9 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
    - Decided 2026-10-06: Punch fades out from Boost 60 to 70 % (speech ticks at medium Boost accepted, E04 / E53);
      Classical & Jazz stays as voiced (−0.72 / −0.44 LU, E11); Boost's own maximizer ticks at full drive are left.
    - Decided 2026-10-08: **no Linux testing yet** - do not build or test Flubsound in the PC's WSL Ubuntu (it is
-     installed, and another project builds in it) until the owner says so; Linux stays CI-only.
+     installed, and another project builds in it) until the owner says so; Linux stays CI-only. The E22 room floor
+     stays at −6 dB (the engine default, so the app needs no setting; −9 dB was the alternative). The `wip/*` CI
+     branches are deleted (all 13, after checking that their work is on this branch).
    - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets
      (Synthwave added locally); Late Night and Podcast are re-voiced; *Automatic buffer size* is new and on by default,
      and a buffer size picked before keeps it off (E42c).
@@ -278,13 +280,11 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
    - New (2026-10-07): the ASIO licence for a published build (Steinberg's proprietary licence with a signed
-     agreement, or GPLv3 for the whole build; docs/02 §6); a real Linux test in WSL (not yet, see above); delete the `wip/*`
-     branches?; the buffer back-off's step (now at least double the size per step, 5 s hold, thresholds untuned; E42c);
+     agreement, or GPLv3 for the whole build; docs/02 §6); a real Linux test in WSL (not yet, see above); the buffer back-off's step (now at least double the size per step, 5 s hold, thresholds untuned; E42c);
      the E28a fold headroom's instant attack (one soak click on a full-scale 7.1 explosion; a soft attack or a short
      look-ahead would move only renders of such overs; E53); the neural voice cleanup model (experimental, off,
      trained on synthetic speech only): keep, retrain or hide?
-   - New (2026-10-08): the E22 room floor, −6 dB (provisional) or −9 dB (−12 dB buys 0.03 dB for 2.6 dB more peak
-     pull-down), and whether the room should also hold the game's own excess with the Game fader up (extra limiting
+   - New (2026-10-08): E22: should the room also hold the game's own excess with the Game fader up (extra limiting
      while the duck is in), and a loud-teammate-over-explosions demo pair to judge it by ear; E28: accept the far
      ear's deeper 1.3 kHz comb and the ~0.5 s settle after a renderer switch (listen to `enhanced-renderer` first),
      and should E28a's virt on / off overs row count as met only when the default renderer meets it (Classic
@@ -302,7 +302,7 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
    - Float release stall: HeadphoneVirtualizer's fold headroom and FoldHeadroom (E28a, `Bs775Fold.h`) release like
      the old duck limiter and stall at about −0.0019 dB after an over (fixed for the duck in E22); the fix moves
      renders, so it needs its own change with render diffs and a baseline re-record.
-   - E22: the room is done (2026-10-08); the app does not set the floor yet (owner decision first).
+   - E22: the room is done (2026-10-08); its floor stays at the engine default −6 dB (owner, 2026-10-08).
    - E07: the 2.00 dB row.
    - Golden: the MSVC-recorded rows pass CI's gcc golden-render step (±0.05 dB) since run 37427019405 and, since
      2026-10-08, the blocking strict render diff of `tests/golden/preset-render-baseline.json` (0 of 5121 values
