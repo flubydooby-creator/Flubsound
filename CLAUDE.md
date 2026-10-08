@@ -263,6 +263,8 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
 3. **Owner decisions** (docs/11 §5.4, the batch 4 / 5 paragraphs, and the Status lines).
    - Decided 2026-10-06: Punch fades out from Boost 60 to 70 % (speech ticks at medium Boost accepted, E04 / E53);
      Classical & Jazz stays as voiced (−0.72 / −0.44 LU, E11); Boost's own maximizer ticks at full drive are left.
+   - Decided 2026-10-08: **no Linux testing yet** - do not build or test Flubsound in the PC's WSL Ubuntu (it is
+     installed, and another project builds in it) until the owner says so; Linux stays CI-only.
    - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets
      (Synthwave added locally); Late Night and Podcast are re-voiced; *Automatic buffer size* is new and on by default,
      and a buffer size picked before keeps it off (E42c).
@@ -276,7 +278,7 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
    - E33: a one-ear HF profile turns both ears down.
    - E24 positional focus: redesign or remove?
    - New (2026-10-07): the ASIO licence for a published build (Steinberg's proprietary licence with a signed
-     agreement, or GPLv3 for the whole build; docs/02 §6); install WSL for a real Linux test?; delete the `wip/*`
+     agreement, or GPLv3 for the whole build; docs/02 §6); a real Linux test in WSL (not yet, see above); delete the `wip/*`
      branches?; the buffer back-off's step (now at least double the size per step, 5 s hold, thresholds untuned; E42c);
      the E28a fold headroom's instant attack (one soak click on a full-scale 7.1 explosion; a soft attack or a short
      look-ahead would move only renders of such overs; E53); the neural voice cleanup model (experimental, off,
