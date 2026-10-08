@@ -14,8 +14,8 @@ render to a small set of numbers and compares them with a stored baseline:
   * the compensated latency
 
 It is the before/after evidence docs/11 E59 asks to attach to every
-preset-, macro- or mode-band-affecting change until E52's golden renders
-gate CI. Typical use:
+preset-, macro- or mode-band-affecting change, and since 2026-10-08 a
+blocking CI check of the committed baseline (below). Typical use:
 
     # on the base commit (or use the committed baseline, see below)
     python3 tools/scripts/preset-render-diff.py --cli build/tools/flubsound-cli/flubsound-cli \\
@@ -26,18 +26,24 @@ gate CI. Typical use:
 
 Exit code 0 when every value is within tolerance, 1 when anything moved
 (a table of the changes is printed, largest first), 2 on usage / render
-errors. `--update` writes the baseline instead of comparing. `--largest N`
+errors. `--update` writes the baseline instead of comparing. Tolerances:
+0.1 dB / LU (`--tolerance-db`), 1 percentage point, 0.005 governor scale,
+latency exact; `--strict` (CI) narrows them to two steps of the file's
+resolution: 0.02 dB / LU, 0.02 points, 0.002 governor scale. `--largest N`
 also prints the N largest differences within tolerance (the noise floor), and
-`--print-moved` the full baseline line of every render that moved, as
-`--update` would write it, so a baseline can be re-based from a CI log.
+`--print-moved` the full baseline line, as `--update` would write it, of every
+render with any value that differs at all (moved or within tolerance), so
+pasting them from a CI log syncs those renders exactly.
 
 The committed baseline, tests/golden/preset-render-baseline.json, is the
 reference of a gcc Release build on Linux x86-64: CI's core job runs this
-script against it on its gcc leg (step "Preset render diff"). Other compilers
-and CPUs can differ by a few hundredths of a dB (FMA contraction, libm);
-feedback loops (governor, AutoLevel) can amplify that. Compare like with like:
-record a baseline on the base commit with the same build when the committed
-one does not match.
+script against it on its gcc leg (step "Preset render diff", `--strict`).
+Other compilers and CPUs could differ in the last digits (FMA contraction,
+libm), and feedback loops (governor, AutoLevel) could amplify that, but on
+2026-10-08 gcc 13.3, clang 18.1, MSVC 19.44 / 19.51 and Apple Clang 15
+(arm64) all matched the committed file to its 0.01 resolution (0 of 5121
+values different). When a baseline does not match your build on the base
+commit, compare like with like: record one there with the same build.
 
 Standard library only; the programmes are generated here, deterministically
 (xorshift32 noise, fixed seeds), so the script needs no audio files.
@@ -356,19 +362,28 @@ def render_one(cli, preset_file, programme, stimulus, work):
     return values
 
 
-def tolerance_for(key, db_tol):
+# Tolerances (dB / LU, percentage points, governor scale); the latency is
+# compared exactly. STRICT (CI) is two steps of the baseline's resolution
+# (0.01 dB / LU / point, 0.001 scale), so a rounding flip passes and any real
+# move fails.
+DEFAULT_TOLERANCES = (0.1, 1.0, 0.005)
+STRICT_TOLERANCES = (0.02, 0.02, 0.002)
+
+
+def tolerance_for(key, tolerances):
+    db_tol, percent_tol, scale_tol = tolerances
     if key == "latencySamples":
         return 0
     if key.endswith("Percent"):
-        return 1.0
+        return percent_tol
     if key == "governorScaleMin":
-        return 0.005
+        return scale_tol
     return db_tol
 
 
-def compare(baseline, current, db_tol):
+def compare(baseline, current, tolerances):
     """Rows (|delta| sort key, preset, programme, key, before, after) beyond tolerance."""
-    return [r for r in differences(baseline, current) if r[0] > tolerance_for(r[3], db_tol) + 1e-9]
+    return [r for r in differences(baseline, current) if r[0] > tolerance_for(r[3], tolerances) + 1e-9]
 
 
 def differences(baseline, current):
@@ -403,14 +418,24 @@ def main():
     ap.add_argument("--update", action="store_true", help="write the baseline instead of comparing")
     ap.add_argument("--presets", nargs="*", help="only these preset files (stems, e.g. gaming-night-mode)")
     ap.add_argument("--programmes", nargs="*", choices=sorted(PROGRAMMES), help="only these programmes")
-    ap.add_argument("--tolerance-db", type=float, default=0.1, help="dB / LU tolerance (default %(default)s)")
+    ap.add_argument("--tolerance-db", type=float, default=None,
+                    help="dB / LU tolerance (default 0.1, with --strict 0.02)")
+    ap.add_argument("--strict", action="store_true",
+                    help="CI tolerances, two steps of the baseline's resolution: 0.02 dB / LU, "
+                         "0.02 percentage points, 0.002 governor scale (latency exact)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2, help="parallel renders (default: CPU count)")
     ap.add_argument("--keep", metavar="DIR", help="keep the generated programmes in DIR")
     ap.add_argument("--largest", type=int, default=0, metavar="N",
                     help="also print the N largest differences within tolerance (the noise floor)")
     ap.add_argument("--print-moved", action="store_true",
-                    help="also print the full baseline line (as --update writes it) of every render that moved")
+                    help="also print the full baseline line (as --update writes it) of every render with any value "
+                         "that differs at all, moved or within tolerance, so pasting them syncs those renders")
     args = ap.parse_args()
+    tolerances = STRICT_TOLERANCES if args.strict else DEFAULT_TOLERANCES
+    if args.tolerance_db is not None:
+        tolerances = (args.tolerance_db,) + tolerances[1:]
+    tolerance_text = (f"{tolerances[0]:g} dB / LU, {tolerances[1]:g} percentage points, "
+                      f"governor scale {tolerances[2]:g}, latency exact")
 
     cli = pathlib.Path(args.cli)
     if not cli.is_file():
@@ -480,7 +505,7 @@ def main():
     if args.presets or args.programmes:
         baseline = {k: v for k, v in baseline.items() if k in current}
     every = differences(baseline, current)
-    rows = compare(baseline, current, args.tolerance_db)
+    rows = compare(baseline, current, tolerances)
 
     def fmt(v):
         return f"{v:9.2f}" if isinstance(v, (int, float)) else f"{str(v):>9}"
@@ -500,17 +525,31 @@ def main():
               f"{len(within)} within tolerance, the largest {min(args.largest, len(within))}:")
         if within:
             table(within[:args.largest])
-    if not rows:
-        print(f"no change: {len(current)} renders within tolerance ({args.tolerance_db} dB) of {baseline_path}")
-        return 0
-    print(f"{len(rows)} value(s) moved beyond tolerance ({args.tolerance_db} dB) against {baseline_path}:")
-    table(rows)
-    if args.print_moved:
-        moved = sorted({f"{r[1]}|{r[2]}" for r in rows} & set(current))
-        print(f"baseline lines of the {len(moved)} render(s) that moved (as --update writes them):")
-        for name in moved:
+    if rows:
+        print(f"{len(rows)} value(s) moved beyond tolerance ({tolerance_text}) against {baseline_path}:")
+        table(rows)
+    elif every:
+        print(f"within tolerance ({tolerance_text}) of {baseline_path}: {len(every)} value(s) differ below it, "
+              f"in {len({(r[1], r[2]) for r in every})} of {len(current)} render(s)")
+    else:
+        print(f"no change: {len(current)} renders equal to {baseline_path}")
+    if args.print_moved and every:
+        # Every render with any difference, not only those past the
+        # tolerance: pasting these lines leaves no smaller move behind.
+        differ = sorted({f"{r[1]}|{r[2]}" for r in every})
+        present = [name for name in differ if name in current]
+        print(f"baseline lines of the {len(present)} render(s) with any value that differs "
+              f"(as --update writes them; pasting them syncs those renders exactly):")
+        for name in present:
             print(baseline_line(name))
-    return 1
+        for name in differ:
+            if name not in current:
+                print(f"remove the line of {name} (no longer rendered)")
+        renamed = sorted(p for p in keys if doc["keys"].get(p) != keys[p])
+        if renamed:
+            print(f"the value names of {', '.join(renamed)} differ from the file's header: "
+                  f"pasted lines would not match it, re-record with --update")
+    return 1 if rows else 0
 
 
 if __name__ == "__main__":
