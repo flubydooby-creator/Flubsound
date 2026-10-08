@@ -189,6 +189,18 @@ reference; nothing on them is left to merge. The temporary remote branches `wip/
 `wip/pipewire-xrun`, `wip/mac-neural`, `wip/mac-neural-check`, `wip/mac-neural-diag` and `wip/mac-neural-diag2`
 (CI iterations) still exist; delete them only with the owner's OK.
 
+### IN FLIGHT (2026-10-08): five open software items, unmerged, in local worktree branches
+
+Workflow run wf_7df3eb45-bb4 (implement, independent review, fix), each in `.claude/worktrees/wf_7df3eb45-bb4-N` on
+branch `worktree-wf_7df3eb45-bb4-N` (base bb828a3), possibly also pushed as `wip/<topic>` for CI: (1) golden-gcc - a CI
+render-diff check of `tests/golden/preset-render-baseline.json` on gcc and the MSVC-rebased rows re-based to gcc;
+(2) E22 chat sub-limiter (room ceiling, inside the duck, floors measured at -6 / -9 / -12 dB for the owner);
+(3) neural worker woken by a semaphore from the audio thread instead of polling (E35 energy); (4) E53 follow-ups:
+the bypass reference limiter at high input gain and the detector's false positive; (5) E28 comb row investigation.
+To finish if interrupted: per worktree check `git status` / `git log bb828a3..HEAD`, finish or review, then merge one
+at a time (expect docs conflicts), full ctest, push, rebuild the app. Still to do after them on an idle machine:
+re-time the ~25 core cases that read 2-3 s under load, and the 128-sample real-device soak row (E53).
+
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows: done** (step 1 above; CI first fully green on all three OSes in run 37572308549; latest
