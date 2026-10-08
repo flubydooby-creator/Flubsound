@@ -2210,6 +2210,8 @@ Per-ear delays and ITDs at the defaults (a = 87.5 mm, 48 kHz; analytic):
 | SL | −100° | 10° / 170° | 0.19 / 29.34 | 607 µs |
 | BL | −145° | 55° / 125° | 5.22 / 19.72 | 302 µs |
 
+These are the Classic renderer's delays (head-centred). The Enhanced renderer takes the near ear's delay off both ears (§8.3.9): D_L / D_R 0 / 12.54 (FL), 0 / 0 (FC), 0 / 29.15 (SL), 0 / 14.50 (BL), the same ITDs.
+
 The maximum per-ear delay is `(a/c)(1 + π/2)`: 655.8 µs at the default radius and 787.0 µs = 151.1 samples at 192 kHz for a = 105 mm. The ITD lines are sized for that (+ 8, rounded up to a power of two): 256 samples up to 192 kHz, 512 at 384 kHz and 1024 at 768 kHz. The line can be shorter than a host block, so each speaker runs one fused per-sample loop that writes a sample and reads its four Lagrange taps before the line wraps.
 
 **Fractional delay** is a 3rd-order (4-tap) Lagrange interpolator:
@@ -2328,7 +2330,7 @@ Measured, module alone, room 0.15, loudness over 3–6 s against `0.7071·D` (`t
 
 #### 8.3.9 Enhanced direction cues (E28)
 
-`virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28), layout version 8) replaces the binary rear shelf with six SVF sections per speaker, run ahead of the shelf and common to both ears, so the sphere's ITD and ILD are untouched (frequency by frequency, test below). Their gains are continuous functions of the angle from the front, φ = |azimuth|, with c = cos φ:
+`virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28), layout version 8) replaces the binary rear shelf with six SVF sections per speaker, run ahead of the shelf and common to both ears, so the sphere's ITD and ILD are untouched (frequency by frequency, test below), and references each speaker's delays to its nearer ear (below). Their gains are continuous functions of the angle from the front, φ = |azimuth|, with c = cos φ:
 
 | Section | Filter | Gain | Why |
 |---|---|---|---|
@@ -2341,7 +2343,8 @@ Measured, module alone, room 0.15, loudness over 3–6 s against `0.7071·D` (`t
 
 `s` = `virt.frontBack` / 0.5 (0 … 2: 0 removes the bands, 100 % doubles them; the timbre match and the notch do not scale). The constants were chosen on an analytic model of the renderer (a search over the band gains, Qs, the timbre share and the notch path, with the Done-when rows as constraints and the 4–8 kHz comb as the objective) and rounded; the measured rows are in [11 E28](11-enhancement-report.md#e28) and §8.9. No listener has heard them yet.
 
-- **Switching** glides: the Enhanced share e goes 0 ↔ 1 over a one-pole of 30 ms at the control rate; every cue gain is e times its Enhanced value and the rear shelf's gain (1 − e) times its Classic value, redesigned on the ticks and interpolated per sample like the geometry (§8.5). At e = 0 the sections are not run at all, so Classic is the v1 code path bit for bit, whatever `virt.frontBack` says.
+- **Near-ear reference** ([11 E28](11-enhancement-report.md#e28)'s 4–8 kHz comb row, local 2026-10-08): Enhanced takes e times each speaker's near-ear Woodworth delay off both of its ears, `D_ear − e · min(D_L, D_R)`, so at e = 1 every speaker reaches its near ear at sample 0 (Lagrange taps 1, 0, 0, 0: exact, no top-octave droop) and its far ear after its ITD. With the head-centred delays of §8.3.1 the paths of one side and the centre reach that side's ear up to a/c apart (left ear: SL 0.19, BL 5.22, FL 6.12, FC 12.24 samples), and correlated content on several speakers combs the ear where the level is: SL against FL + BL, 5.5 samples apart, notches 4.36 kHz. Referenced to the near ear those paths add in phase; the far ear, 10–20 dB lower at those frequencies, carries the interaural lags. Each speaker keeps its ITD and the model's ILD (only the far ear is interpolated now, so the two renderers' ILDs differ by the interpolator: up to 0.23 dB at 8 kHz, 2.8 dB at 16 kHz). Measured: the correlated seven-speaker impulse 18.88 → 9.38 dB peak-to-notch in 4–8 kHz; for every pair of speakers both ears' power of the correlated sum combs no deeper than with head-centred delays (18 of 21 shallower, the mirror pairs equal), while the far ear of a same-side pair combs deeper and lower (FL + SL, right ear: −25.1 dB at 2.0 kHz → −37.8 dB at 1.3 kHz re the power sum). No per-sample cost: the reference is part of the delay designed on the control ticks.
+- **Switching** glides: the Enhanced share e goes 0 ↔ 1 over a one-pole of 30 ms at the control rate; every cue gain is e times its Enhanced value, the rear shelf's gain (1 − e) times its Classic value and the near-ear reference e times its delay (a share glide redesigns the whole geometry on each tick), interpolated per sample like the geometry (§8.5). At e = 0 the sections are not run at all and the reference is exactly 0, so Classic is the v1 code path bit for bit, whatever `virt.frontBack` says.
 - **Level match:** the diffuse-field gain (§8.3.8) includes the cues and is recomputed when a glide lands (the make-up still moves at most 6 dB/s): −4.77 / −5.09 dB for 5.1 / 7.1 at the defaults (Classic −3.84 / −4.03 dB).
 - **Cost:** the sections of four speakers run side by side (one SSE register per section, `renderCues`), +47 ns per 7.1 frame at 48 kHz (§8.6).
 - **HRIR renderer:** a measured set carries its own cues; both settings are ignored while it runs.
@@ -2377,7 +2380,7 @@ Module sanitising: NaN takes the default; ±inf clamps to the range edge; an inv
   - it redesigns every speaker's delays, Lagrange taps and shadow coefficients;
   - across the following 16 samples, delays (hence Lagrange taps), shadow `b0/b1/a1` and the six shelf coefficients are interpolated per sample and land exactly on the new design. Interpolating a1 between two stable first-order poles keeps the pole inside the unit circle.
 - **Rear-shelf gain:** its own one-pole (10 ms, control rate) in dB.
-- **Renderer and front/back contrast** ([11 E28](11-enhancement-report.md#e28)): the Enhanced share and `virt.frontBack` / 0.5 each glide on a one-pole (30 ms, control rate); the rear shelf and the six cue sections are redesigned on every tick of the glide and interpolated per sample. Classic → Enhanced → Classic on a 3 kHz tone: the largest sample step around each switch stays within 1.25× the steady maximum, and 250 ms after the switch the output equals a module started in the target within 1e−4.
+- **Renderer and front/back contrast** ([11 E28](11-enhancement-report.md#e28)): the Enhanced share and `virt.frontBack` / 0.5 each glide on a one-pole (30 ms, control rate); the rear shelf, the six cue sections and (with the share) the delays' near-ear reference are redesigned on every tick of the glide and interpolated per sample. Classic → Enhanced → Classic on a 3 kHz tone: the largest sample step around each switch stays within 1.25× the steady maximum, and 300 ms after the switch the output equals a module started in the target within 1e−4, 450 ms after within 1e−6 (250 ms / 1e−4 before the near-ear reference, whose delays glide up to 12 samples).
 - **Room and LFE levels:** linear per-sample ramps over 20 ms.
 - **Level-match make-up:** a linear ramp across each 16-sample period (stream time), at most 6 dB/s; **fold headroom:** instant attack to exactly 0 dBFS, 10 ms hold, 150 ms release, per sample (§8.3.8).
 - **Layout change** (discrete: channel meaning and possibly renderer):
@@ -2403,7 +2406,7 @@ stateDiagram-v2
 
 ### 8.6 Latency & CPU
 
-- **Latency: 0** (test *zero latency - near-ear and HRIR paths respond at sample 0*). The Woodworth path delay of up to (a/c)(1 + π/2) is part of the binaural cue.
+- **Latency: 0** (test *zero latency - near-ear and HRIR paths respond at sample 0*). The Woodworth path delay of up to (a/c)(1 + π/2) is part of the binaural cue; with the Enhanced renderer every near ear is at 0 and only the far ear is delayed, by the ITD (§8.3.9).
 - CPU, indicative, 7.1 in → binaural out, 48 kHz, 512-sample blocks:
 
 | Configuration | ns / sample frame | % core |
@@ -2411,7 +2414,7 @@ stateDiagram-v2
 | parametric, room 0.15, steady geometry | 78–80 | 0.38 % |
 | … plus the level match and fold headroom (the default, [11 E28a](11-enhancement-report.md#e28)) | +7–9 | +0.04 % |
 | the default (Classic, with the level match), measured again in batch 5 | 88 | 0.42 % |
-| `virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28); six cue sections per speaker, four speakers per SSE register) | 135 (+47) | 0.65 % (Done-when < 1.5 %) |
+| `virt.renderer` Enhanced ([11 E28](11-enhancement-report.md#e28); six cue sections per speaker, four speakers per SSE register; the near-ear reference adds nothing per sample) | 135 (+47) | 0.65 % (Done-when < 1.5 %) |
 | HRIR direct-form, 128 taps | 467–478 | 2.3 % |
 | HRIR 256 taps | 838–844 | 4.0 % |
 | HRIR 512 taps | ≈ 1 700 | 8.2 % |
@@ -2510,7 +2513,7 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
 - **Switching `virt.on` changes the image over 20 ms,** not the loudness: the chain crossfades the two folds (no step), which differ in timing (ITD, head shadow) and spectrum. The surround ↔ passthrough switch is a 400 ms glide of up to +3.01 dB from the downmix and about +2.9 dB from the level-matched virtualiser (about +0.8 dB before E28a).
 - **Detection restarts with the chain.** A new chain (the crossfaded engine swap builds one) starts unconfirmed in the surround fold, so a stereo game in the 8-channel container is folded as surround again for 2 s after a swap; carrying the detector state across a swap needs `MixEngine::configureFrom`. The host does not yet call `redetectInputChannels()` when the routed process changes, nor show `activeChannelMask` ([11 E27](11-enhancement-report.md#e27) step 1's "receiving 2 / 6 / 8 channels").
 - **The app's own downmixes fold the LFE at `virt.lfe`'s default, not the strip's.** A 5.1 / 7.1 capture read by a stereo strip (moved there, or the layout changed under it) is folded by `AudioEngineHost` with `Bs775Fold` and an `ActiveChannelDetector`, as the chain folds: the LFE at the strip's `virt.lfe`, −3 dB or the stereo passthrough. The capture FIFO's own conversion (`DriftCompensatedFifo`, only when a capture delivers more channels than it asked for) and `TestSignalGenerator`'s stereo downmix of its Game71 scene keep their per-frame BS.775 matrices but take the LFE through the chain's `LfeFold` (`LfeFold::next`) inside the fold's −3 dB, at the parameter default (+10 dB): neither knows its strip ([11 E01](11-enhancement-report.md#e01); before, both dropped the LFE). A 50 Hz tone on the LFE re the same tone on one main, each side of the FIFO's 5.1 and 7.1 downmix: −∞ → +9.99 dB (the chain's fold +10.00 dB); the test signal's stereo downmix is the chain's `Bs775Fold` of its 8-channel render sample for sample, its LFE share −∞ → −7.95 dB re full scale as in the chain (`tests/app/test_app_lfe_fold.cpp`). The Game71 scene on a stereo strip is therefore about 10 LU louder than before (its explosions' LFE), as it already was on a 7.1 strip.
-- **Lagrange top-octave loss:** up to −3.25 dB at 16 kHz at half-sample delays (48 kHz).
+- **Lagrange top-octave loss:** up to −3.25 dB at 16 kHz at half-sample delays (48 kHz); with the Enhanced renderer only at the far ear (the near ear's delay is 0, §8.3.9).
 - **Weak spatial cues of the Classic renderer, measured** ([11 E60](11-enhancement-report.md#e60) stage 2 metrics on the module's impulse responses, 7.1 at the defaults, pinned in `tests/test_spatial_metrics.cpp`; [11 E28](11-enhancement-report.md#e28) is measured against them; the Enhanced renderer's values follow the list):
   - The default room barely decorrelates the ears: centre (FC) early IACC (0–80 ms, max over ±1 ms) 1.000 dry, 0.995 at room 0.15; each octave 125 Hz – 8 kHz ≥ 0.985. Side speakers read 0.518 (ITD 0.60 ms), front 0.758, rear 0.711.
   - Direct-to-reverberant ratio +22.9 dB (FC) and +24.8 dB (SL) at room 0.15, and nothing after 80 ms (the late IACC is undefined: no reverberant tail).
@@ -2519,11 +2522,12 @@ During a `virt.on` crossfade the chain runs both the virtualiser and the BS.775 
   - The same impulse on all seven speakers, dry, combs to 28.06 dB peak-to-notch in 4–8 kHz at each ear.
   - The seven speakers' diffuse-field response spans 3.5 dB around its mean (1/3 octave, 100 Hz – 16 kHz: +0.9 dB at 1.6 kHz, −2.6 dB at 16 kHz); there is no diffuse-field equalisation.
 - **What the Enhanced renderer changes, and what it does not** (§8.3.9, `tests/test_virtualizer.cpp`, same conditions):
-  - FL against BL at the near ear, with the sign of each directional band: 1 kHz (rear) −0.31 → +3.34 dB, 4 kHz (front) +1.46 → +7.15 dB, 10 kHz (rear) −3.52 → +4.10 dB, 16 kHz (front) +4.27 → +4.31 dB: four bands at ≥ 3 dB (Classic: one). `virt.frontBack` 0 leaves none, 100 % doubles them.
-  - FC against the sides: the least-squares tilt over 100 Hz – 16 kHz −2.78 → −0.57 dB; the largest single band −3.82 dB at 2.5 kHz → −3.42 dB at 8 kHz (the notch sits 0.1 octave lower behind the sides).
-  - The same impulse on all seven speakers, dry: 28.06 → 18.88 dB peak-to-notch in 4–8 kHz, still above the 12 dB target. The comb is seven near-equal paths up to 0.6 ms apart at one ear (FC against FL alone combs 11 dB at 3.9 kHz); flattening it would take about 18 dB of HF difference between centre / sides and front / rear, which the centre-timbre row rules out.
-  - The diffuse field is less flat: 3.52 → 7.19 dB range (the notch and the bands are in every direction; the diffuse-field inverse is the next E28 stage).
-  - Unchanged: the ITD and, frequency by frequency, the ILD of every speaker; the IACC (FC 0.995 → 0.998 at room 0.15, SL 0.518 → 0.524), so the centre still reads as a point source; the room (no reverberant tail).
+  - FL against BL at the near ear, with the sign of each directional band: 1 kHz (rear) −0.31 → +3.34 dB, 4 kHz (front) +1.46 → +7.11 dB, 10 kHz (rear) −3.52 → +4.25 dB, 16 kHz (front) +4.27 → +3.48 dB: four bands at ≥ 3 dB (Classic: one). `virt.frontBack` 0 leaves none, 100 % doubles them. (Before the near-ear reference, 2026-10-08: +3.34 / +7.15 / +4.10 / +4.31 dB; the near ears lost the Lagrange droop, BL's more than FL's.)
+  - FC against the sides: the least-squares tilt over 100 Hz – 16 kHz −2.78 → −0.07 dB (−0.57 before the near-ear reference); the largest single band −3.82 dB at 2.5 kHz → −3.09 dB at 8 kHz (the notch sits 0.1 octave lower behind the sides).
+  - The same impulse on all seven speakers, dry: 28.06 → 9.38 dB peak-to-notch in 4–8 kHz, below the 12 dB target (18.88 dB with the cues alone: the comb was the head-centred arrival times at one ear, which the near-ear reference of §8.3.9 removes; what is left is the cues' own shape). Per pair of speakers both ears' power combs no deeper than Classic; per ear, the far ear of a same-side pair combs deeper and lower (§8.3.9).
+  - The diffuse field is less flat: 3.52 → 8.24 dB range (7.19 before the near-ear reference; the notch and the bands are in every direction; the diffuse-field inverse is the next E28 stage).
+  - Unchanged: the ITD of every speaker and its ILD in the model (each renderer's ILD is the model's two ear paths at its own delays; the interpolator alone separates them, up to 0.23 dB at 8 kHz); the octave-band IACC 125 Hz – 8 kHz within 0.02, FC 0.995 → 0.999 at room 0.15, so the centre still reads as a point source; the room (no reverberant tail). The broadband IACC of the front and rear speakers is lower (FL 0.758 → 0.567, BL 0.711 → 0.565, SL 0.518 → 0.530) and the DRR higher (FC +22.9 → +28.8 dB): the near ears' top octave, which the interpolator no longer dulls, and the front shelf.
+  - Correlated content renders louder before the level match (the near ears add in phase; the module's make-up on 7.1 correlated pink −4.94 dB, Classic −1.48 dB, Enhanced before the near-ear reference −1.68 dB), and on full-scale correlated overs virt on vs off with Enhanced reads −0.31 / −0.56 LU (5.1 / 7.1, every other module off; Classic −1.78 / −1.91 LU).
 - **Model simplifications:**
   - a spherical head (no elevation; pinna notches only as the Enhanced renderer's one parametric notch);
   - in Classic, the rear cue switches as the side angle crosses 90° (with a 10 ms glide) instead of blending with angle (Enhanced blends every cue with the angle);

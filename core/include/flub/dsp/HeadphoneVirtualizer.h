@@ -33,6 +33,10 @@
 //           * cos phi and * max(0, cos phi); rear: 1 kHz and 10 kHz bells,
 //           * max(0, -cos phi)), scaled by frontBack, and a pinna notch
 //           (-10 dB, Q 2) at 7.6 kHz * 2^(-0.1 (1 - cos phi) / 2).
+//           Enhanced also references each speaker's Woodworth delays to
+//           its nearer ear (the near ear at 0, the far ear at the ITD), so
+//           correlated speakers reach an ear's bright side in phase instead
+//           of combing it (the same ITD and ILD per speaker).
 //     Early reflections: 6 taps 4-19 ms, band-passed (HP 200 Hz, LP 5 kHz),
 //           alternating ears,
 //           level = roomAmount -> externalisation ("out of head").
@@ -146,8 +150,9 @@ public:
     /** The parametric renderer's own head-related impulse responses for a
         source at any azimuth (degrees, + = right, 0 = front; wrapped into
         -180 .. 180): the direction cues of `renderer` (Classic: the rear-cue
-        shelf; Enhanced: the six cue sections at frontBack), the Woodworth
-        ITD (Lagrange) and the Brown-Duda head shadow of one speaker path
+        shelf; Enhanced: the six cue sections at frontBack and the delays
+        referenced to the nearer ear), the Woodworth ITD (Lagrange) and the
+        Brown-Duda head shadow of one speaker path
         times the -3 dB trim, sample for sample what process() renders for a
         speaker at that azimuth with room 0, the level match and the fold
         headroom off. The head radius and frontBack clamp as in

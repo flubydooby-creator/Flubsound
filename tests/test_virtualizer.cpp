@@ -5,12 +5,14 @@
 
 #include "flub/analysis/LoudnessMeter.h"
 #include "flub/analysis/SpatialMetrics.h"
+#include "flub/dsp/Fft.h"
 #include "flub/dsp/HeadphoneVirtualizer.h"
 #include "flub/dsp/TruePeakDetector.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <cstddef>
@@ -1669,11 +1671,14 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all fo
     // bands (4 and 16 kHz) louder for FL, the rear bands (1 and 10 kHz) louder
     // for BL, at the near ear. Classic: only 16 kHz qualifies (its 10 kHz
     // difference has the front's sign: the rear shelf darkens BL there).
+    // Enhanced before the near-ear reference (p3b5) read 3.34 / 7.15 / 4.10 /
+    // 4.31 dB; the near ears now play without the Lagrange interpolator's HF
+    // droop (FL's was 0.9 dB at 16 kHz, BL's 1.7 dB), so 16 kHz reads 3.48.
     struct Band
     {
         double hz, sign, classicDb, enhancedDb;
     };
-    const Band bands[] = { { 1000.0, -1.0, 0.31, 3.34 }, { 4000.0, 1.0, 1.46, 7.15 }, { 10000.0, -1.0, -3.52, 4.10 }, { 16000.0, 1.0, 4.27, 4.31 } };
+    const Band bands[] = { { 1000.0, -1.0, 0.31, 3.34 }, { 4000.0, 1.0, 1.46, 7.11 }, { 10000.0, -1.0, -3.52, 4.25 }, { 16000.0, 1.0, 4.27, 3.48 } };
     int classicMet = 0, enhancedMet = 0;
     for (const auto& b : bands)
     {
@@ -1693,57 +1698,147 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all fo
 
     // Centre timbre: FC against the sides, both ears' power per 1/3 octave.
     // The least-squares line over 100 Hz .. 16 kHz (Done-when: within 1 dB)
-    // -2.78 -> -0.57 dB; the largest single band -3.82 dB at 2.5 kHz ->
-    // -3.42 dB at 8 kHz (the pinna notch sits 0.1 octave lower behind, where
-    // the sides are 100 deg round).
+    // -2.78 -> -0.07 dB (-0.57 before the near-ear reference: FC's two ears
+    // lost a 1.9 dB Lagrange droop at 16 kHz, the sides' near ears 1.4 dB);
+    // the largest single band -3.82 dB at 2.5 kHz -> -3.09 dB at 8 kHz (the
+    // pinna notch sits 0.1 octave lower behind, where the sides are 100 deg
+    // round).
     const auto ct = centreTilt (classic), et = centreTilt (enhanced);
     std::cout << "    measured FC vs sides: tilt " << ct.tiltDb << " -> " << et.tiltDb << " dB, largest band " << ct.worstDb << " dB at "
               << ct.worstHz << " Hz -> " << et.worstDb << " dB at " << et.worstHz << " Hz\n";
     CHECK_NEAR (ct.tiltDb, -2.78, 0.1);
     CHECK (std::abs (et.tiltDb) <= 1.0);
-    CHECK_NEAR (et.tiltDb, -0.57, 0.1);
-    CHECK_NEAR (et.worstDb, -3.42, 0.1);
+    CHECK_NEAR (et.tiltDb, -0.07, 0.1);
+    CHECK_NEAR (et.worstDb, -3.09, 0.1);
     CHECK (et.worstHz == 8000.0);
 
-    // The cues are common to both ears (before the ITD line), so the sphere's
-    // interaural cues are untouched: dry, every speaker keeps its ITD and,
-    // frequency by frequency, its ILD |H_R / H_L| (1/3-octave band levels
-    // would not: the cues re-weight the ILD's slope inside a band).
-    const auto ildDb = [] (const BinauralIr& ir, double hz)
+    // The cues are common to both ears (before the ITD line) and Enhanced's
+    // near-ear reference takes the same delay off both ears, so the sphere's
+    // interaural cues are kept: dry, every speaker keeps its ITD and,
+    // frequency by frequency, the ILD |H_R / H_L| of the model's two ear
+    // paths at the renderer's delays (the 4-tap Lagrange read and the
+    // Brown-Duda shadow, referenceEarImpulse; 1/3-octave band levels would
+    // not do: the cues re-weight the ILD's slope inside a band). The two
+    // renderers' ILDs differ only by the interpolator: Classic reads both
+    // ears at fractional delays (its HF droops partly cancel), Enhanced reads
+    // the near ear exactly and the far ear at the ITD.
+    const auto ildDb = [] (const auto& left, const auto& right, double hz)
     {
         std::complex<double> l, r;
-        for (size_t i = 0; i < ir.left.size(); ++i)
+        for (size_t i = 0; i < left.size(); ++i)
         {
             const auto z = std::polar (1.0, -kTwoPi * hz * static_cast<double> (i) / kFs);
-            l += static_cast<double> (ir.left[i]) * z;
-            r += static_cast<double> (ir.right[i]) * z;
+            l += static_cast<double> (left[i]) * z;
+            r += static_cast<double> (right[i]) * z;
         }
         return 20.0 * std::log10 (std::abs (r) / std::abs (l));
     };
+    const double radiusM = 0.0875, headDelay = radiusM / kC * kFs;
     for (int c : { FL, FC, BL, SL })
     {
         CHECK (speakerIr (classic, c, 0.0f).itdMs == speakerIr (enhanced, c, 0.0f).itdMs);
+        const double az = HeadphoneVirtualizer::speakerAzimuthDeg (ChannelLayout::Surround71, c, VirtualizerParams {});
+        std::array<double, 2> theta {}, delay {};
+        for (size_t e = 0; e < 2; ++e)
+        {
+            theta[e] = std::abs (std::remainder (az - (e == 0 ? -90.0 : 90.0), 360.0));
+            const double t = theta[e] * kPi / 180.0;
+            delay[e] = (t < 0.5 * kPi ? 1.0 - std::cos (t) : 1.0 + t - 0.5 * kPi) * headDelay;
+        }
+        const double nearDelay = std::min (delay[0], delay[1]);
+        double worstClassic = 0.0, worstEnhanced = 0.0, diff8k = 0.0, diff16k = 0.0;
         VirtualizerParams p;
         p.roomAmount = 0.0f;
         const auto a = virtualizerResponse (p, 1u << c, kFs, 1024);
         p.renderer = enhanced;
         const auto b = virtualizerResponse (p, 1u << c, kFs, 1024);
-        double worst = 0.0;
-        for (double hz = 100.0; hz < 16000.0; hz *= 1.2)
-            worst = std::max (worst, std::abs (ildDb (a, hz) - ildDb (b, hz)));
-        CHECK (worst < 0.001);
+        const auto refA = std::array { referenceEarImpulse (delay[0], theta[0], radiusM, kFs, 1024),
+                                       referenceEarImpulse (delay[1], theta[1], radiusM, kFs, 1024) };
+        const auto refB = std::array { referenceEarImpulse (delay[0] - nearDelay, theta[0], radiusM, kFs, 1024),
+                                       referenceEarImpulse (delay[1] - nearDelay, theta[1], radiusM, kFs, 1024) };
+        for (double hz = 100.0; hz < 16500.0; hz *= 1.2)
+        {
+            worstClassic = std::max (worstClassic, std::abs (ildDb (a.left, a.right, hz) - ildDb (refA[0], refA[1], hz)));
+            worstEnhanced = std::max (worstEnhanced, std::abs (ildDb (b.left, b.right, hz) - ildDb (refB[0], refB[1], hz)));
+        }
+        diff8k = ildDb (b.left, b.right, 8000.0) - ildDb (a.left, a.right, 8000.0);
+        diff16k = ildDb (b.left, b.right, 16000.0) - ildDb (a.left, a.right, 16000.0);
+        std::cout << "    measured channel " << c << ": ILD re the model at its delays, worst " << worstClassic << " / " << worstEnhanced
+                  << " dB (Classic / Enhanced); Enhanced - Classic ILD at 8 / 16 kHz " << diff8k << " / " << diff16k << " dB\n";
+        CHECK (worstClassic < 0.001);
+        CHECK (worstEnhanced < 0.001);
+        CHECK (std::abs (diff8k) < 0.25);
     }
 }
 
+namespace
+{
+/** Both ears' power of a correlated sum of speakers over that of their
+    uncorrelated (power) sum, per FFT bin in [loHz, hiHz]: the comb's lowest
+    and highest points, dB, and where the lowest is. A single ear's version
+    when ear is 0 or 1 (-1: both). */
+struct Ripple
+{
+    double minDb = 0.0, maxDb = 0.0, minHz = 0.0;
+};
+
+Ripple correlatedRipple (const std::vector<BinauralIr>& irs, int ear, double loHz = 500.0, double hiHz = 16000.0)
+{
+    constexpr int n = 16384;
+    Fft fft;
+    fft.prepare (n);
+    std::vector<double> coherent (n / 2 + 1, 0.0), power (n / 2 + 1, 0.0);
+    for (int e = 0; e < 2; ++e)
+    {
+        if (ear >= 0 && e != ear)
+            continue;
+        std::vector<std::complex<double>> sum (n / 2 + 1);
+        for (const auto& ir : irs)
+        {
+            const auto& x = e == 0 ? ir.left : ir.right;
+            std::vector<float> buf (n, 0.0f);
+            std::copy_n (x.begin(), std::min (x.size(), buf.size()), buf.begin());
+            std::vector<std::complex<float>> bins (n / 2 + 1);
+            fft.forwardReal (buf.data(), bins.data());
+            for (int k = 0; k <= n / 2; ++k)
+            {
+                const std::complex<double> h (bins[static_cast<size_t> (k)]);
+                sum[static_cast<size_t> (k)] += h;
+                power[static_cast<size_t> (k)] += std::norm (h);
+            }
+        }
+        for (int k = 0; k <= n / 2; ++k)
+            coherent[static_cast<size_t> (k)] += std::norm (sum[static_cast<size_t> (k)]);
+    }
+    Ripple r { std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(), 0.0 };
+    for (int k = 0; k <= n / 2; ++k)
+    {
+        const double hz = k * kFs / n;
+        if (hz < loHz || hz > hiHz)
+            continue;
+        const double db = 10.0 * std::log10 (coherent[static_cast<size_t> (k)] / power[static_cast<size_t> (k)]);
+        if (db < r.minDb)
+        {
+            r.minDb = db;
+            r.minHz = hz;
+        }
+        r.maxDb = std::max (r.maxDb, db);
+    }
+    return r;
+}
+} // namespace
+
 TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a correlated 7-speaker impulse and the diffuse field (docs/11 E28, pinned)")
 {
-    // The same impulse on all seven speakers, dry: 28.06 -> 18.88 dB peak to
-    // notch in 4 - 8 kHz at each ear. The Done-when's < 12 dB is NOT met: the
-    // comb is the sum of seven near-equal paths at up to 0.6 ms apart at one
-    // ear (FC against FL alone combs 11 dB at 3.9 kHz), and only a much
-    // larger level difference between directions would flatten it (a grid of
-    // per-direction HF gains needs about 18 dB between centre / sides and
-    // front / rear to reach 12 dB), which the centre-timbre row forbids.
+    // The same impulse on all seven speakers, dry: 28.06 -> 9.38 dB peak to
+    // notch in 4 - 8 kHz at each ear (Done-when: < 12 dB, met; 18.88 dB
+    // before Enhanced's near-ear reference). The comb was the head-centred
+    // Woodworth delays: at the left ear SL arrives 0.19, BL 5.2, FL 6.1 and
+    // FC 12.2 samples after the head centre's reference, the bright
+    // (ipsilateral) paths, so SL against FL + BL (0.12 ms apart) notched
+    // 4.4 kHz; without SL the sum read 6 dB. Referenced to the near ear they
+    // add in phase there, and what is left is the cues' own shape (the
+    // pinna notch and the front bell: FL alone reads 12.5 dB in 4 - 8 kHz).
     VirtualizerParams dry;
     dry.roomAmount = 0.0f;
     const auto classicAll = virtualizerResponse (dry, 0xF7u, kFs, kIrLength);
@@ -1752,12 +1847,62 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a
     const double c = peakToNotchDb (classicAll.left, kFs, 4000.0, 8000.0), e = peakToNotchDb (enhancedAll.left, kFs, 4000.0, 8000.0);
     std::cout << "    measured 4-8 kHz peak to notch, 7 correlated speakers: " << c << " -> " << e << " dB\n";
     CHECK_NEAR (c, 28.06, 0.1);
-    CHECK_NEAR (e, 18.88, 0.1);
+    CHECK_NEAR (e, 9.38, 0.1);
+    CHECK (e < 12.0);
     CHECK_NEAR (peakToNotchDb (enhancedAll.right, kFs, 4000.0, 8000.0), e, 0.01); // left / right symmetric
+
+    // Every pair of speakers with the same signal (a sound panned between
+    // them), 0.5 - 16 kHz: both ears' power of the correlated sum over the
+    // power sum combs no deeper with Enhanced than with Classic (the three
+    // mirror pairs are the same: their two paths keep the same delays to
+    // each other), and nowhere for the seven together. Per ear the far ear of
+    // a same-side pair now carries the whole ITD difference and combs deeper
+    // and lower (FL + SL, right ear: Classic -25.1 dB at 2.0 kHz -> -37.8 dB
+    // at 1.3 kHz re the power sum), where it is the quieter ear.
+    VirtualizerParams one;
+    one.roomAmount = 0.0f;
+    std::array<BinauralIr, 8> cl {}, en {};
+    for (int ch : { 0, 1, 2, 4, 5, 6, 7 })
+    {
+        one.renderer = VirtualizerRenderer::Classic;
+        cl[static_cast<size_t> (ch)] = virtualizerResponse (one, 1u << ch, kFs, 4096);
+        one.renderer = VirtualizerRenderer::Enhanced;
+        en[static_cast<size_t> (ch)] = virtualizerResponse (one, 1u << ch, kFs, 4096);
+    }
+    const std::array<int, 7> speakers { 0, 1, 2, 4, 5, 6, 7 };
+    const char* names[] = { "FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR" };
+    int deeper = 0, shallower = 0;
+    for (size_t i = 0; i < speakers.size(); ++i)
+        for (size_t j = i + 1; j < speakers.size(); ++j)
+        {
+            const auto a = static_cast<size_t> (speakers[i]), b = static_cast<size_t> (speakers[j]);
+            const auto rc = correlatedRipple ({ cl[a], cl[b] }, -1), re = correlatedRipple ({ en[a], en[b] }, -1);
+            std::cout << "    measured " << names[a] << " + " << names[b] << ", both ears: deepest " << rc.minDb << " dB at " << rc.minHz << " Hz -> "
+                      << re.minDb << " dB at " << re.minHz << " Hz\n";
+            CHECK (re.minDb >= rc.minDb - 0.05);
+            deeper += re.minDb < rc.minDb - 0.5 ? 1 : 0;
+            shallower += re.minDb > rc.minDb + 0.5 ? 1 : 0;
+        }
+    CHECK (deeper == 0);
+    CHECK (shallower == 18); // all but FL + FR, BL + BR, SL + SR
+    std::vector<BinauralIr> allCl, allEn;
+    for (int s : speakers)
+    {
+        allCl.push_back (cl[static_cast<size_t> (s)]);
+        allEn.push_back (en[static_cast<size_t> (s)]);
+    }
+    const auto rc = correlatedRipple (allCl, -1), re = correlatedRipple (allEn, -1);
+    std::cout << "    measured all 7, both ears: deepest " << rc.minDb << " dB at " << rc.minHz << " Hz -> " << re.minDb << " dB at " << re.minHz << " Hz\n";
+    CHECK (re.minDb > 0.0); // never below the power sum
+    const auto farCl = correlatedRipple ({ cl[0], cl[6] }, 1), farEn = correlatedRipple ({ en[0], en[6] }, 1);
+    std::cout << "    measured FL + SL, right (far) ear: deepest " << farCl.minDb << " dB at " << farCl.minHz << " Hz -> " << farEn.minDb << " dB at "
+              << farEn.minHz << " Hz\n";
 
     // What it costs: the seven speakers' diffuse field is less flat (the
     // notch and the bands are not diffuse-field equalised; that inverse is
-    // the next E28 stage): range 3.52 -> 7.19 dB.
+    // the next E28 stage): range 3.52 -> 8.24 dB (7.19 before the near-ear
+    // reference: the near ears lost the Lagrange droop that took the edge off
+    // the front shelf at 16 kHz).
     std::vector<BinauralIr> irs;
     VirtualizerParams p;
     p.renderer = VirtualizerRenderer::Enhanced;
@@ -1765,7 +1910,7 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a
         irs.push_back (virtualizerResponse (p, 1u << ch, kFs, kIrLength));
     const auto df = diffuseField (irs, kFs);
     std::cout << "    measured diffuse field of the 7 speakers (Enhanced): range " << df.rangeDb << " dB, rms " << df.rmsDeviationDb << " dB\n";
-    CHECK_NEAR (df.rangeDb, 7.19, 0.1);
+    CHECK_NEAR (df.rangeDb, 8.24, 0.1);
 }
 
 TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - the level match keeps virt on vs off within 0.5 LU for 5.1 / 7.1 pink, correlated or not (docs/11 E28)")
@@ -1846,8 +1991,17 @@ TEST_CASE ("HeadphoneVirtualizer: Classic is the default and ignores frontBack b
                   << atEnhanced << " / " << atClassic << "\n";
         CHECK_LE (atEnhanced, 1.25 * std::max (classicStep, enhancedStep));
         CHECK_LE (atClassic, 1.25 * std::max (classicStep, enhancedStep));
-        CHECK (maxAbsDiff (std::vector<float> (y.begin() + toEnhanced, y.begin() + toClassic), std::vector<float> (steadyEnhanced.ch[e].begin() + toEnhanced, steadyEnhanced.ch[e].begin() + toClassic), 12000) <= 1e-4);
-        CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 12000) <= 1e-4);
+        // Enhanced's near-ear reference glides the delays with the share (up
+        // to 12 samples for FC at 48 kHz, one-pole 30 ms), so the output is
+        // within 1e-4 of the target 300 ms after a switch (it was 250 ms with
+        // the cue gains alone) and on it (1e-6) once the share has snapped,
+        // 450 ms after.
+        const std::vector<float> afterEnhanced (y.begin() + toEnhanced, y.begin() + toClassic),
+            targetEnhanced (steadyEnhanced.ch[e].begin() + toEnhanced, steadyEnhanced.ch[e].begin() + toClassic);
+        CHECK (maxAbsDiff (afterEnhanced, targetEnhanced, 14400) <= 1e-4);
+        CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 14400) <= 1e-4);
+        CHECK (maxAbsDiff (afterEnhanced, targetEnhanced, 21600) <= 1e-6);
+        CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 21600) <= 1e-6);
     }
 
     // Enhanced with frontBack moved mid-stream glides too.

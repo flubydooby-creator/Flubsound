@@ -56,7 +56,8 @@
 // The delay is realised with a 4-tap (3rd-order) Lagrange interpolator. The
 // centre speaker therefore reaches both ears after a/c (~12 samples at 48 kHz):
 // that common path delay is part of the acoustic model, so the module
-// reports zero latency (no look-ahead, no block delay).
+// reports zero latency (no look-ahead, no block delay). Enhanced references
+// the delays to the nearer ear instead (below).
 //
 // Direction cues (docs/11 E28, VirtualizerParams::renderer). Classic, the
 // default and the v1 renderer, has one front/back cue: the -4 dB rear shelf,
@@ -76,9 +77,23 @@
 //   pinna      bell -10 dB, Q 2, at 7.6 kHz * 2^(-0.1 (1 - c) / 2) (7.6 kHz
 //              in front, 7.1 kHz behind).
 // The four band gains are scaled by frontBack / 0.5 (0: none, 1: twice the
-// nominal contrast). The renderer switch glides: the Enhanced share e moves
-// 0 <-> 1 (one-pole 30 ms at the control rate), every cue gain is e times its
-// Enhanced value and the rear shelf's gain (1 - e) times its Classic value,
+// nominal contrast). Enhanced also references each speaker's two Woodworth
+// delays to its nearer ear: e times the near ear's delay comes off both ears,
+// so at e = 1 every speaker reaches its near ear at sample 0 (exactly: the
+// Lagrange taps of a zero delay are 1, 0, 0, 0) and its far ear after its own
+// ITD (docs/11 E28, the 4-8 kHz comb row). The ITD and the ILD of every
+// speaker are the model's, as in Classic (only the far ear is interpolated
+// now). Head-centred delays make the speakers of one side and the centre
+// reach that side's ear up to a/c apart (SL 0.19, BL 5.2, FL 6.1, FC 12.2
+// samples at 48 kHz), so correlated content on several speakers combs the
+// near ear, where the level is: SL against FL + BL notches at 4.4 kHz. Aligned,
+// those paths add in phase at the near ear and the far ear (10 - 20 dB lower
+// up there) carries the interaural lags; both ears' power of any correlated
+// pair combs no deeper than with head-centred delays (the far ear of a
+// same-side pair combs deeper, lower down). The renderer switch glides:
+// the Enhanced share e moves 0 <-> 1 (one-pole 30 ms at the control rate),
+// every cue gain is e times its Enhanced value, the rear shelf's gain (1 - e)
+// times its Classic value and the near-ear reference e times its delay,
 // redesigned on the control ticks and interpolated per sample as for the
 // geometry. The sections of four speakers run side by side (one SSE register
 // per section, renderCues). At e = 0 they are not run at all, so Classic is
@@ -332,6 +347,22 @@ double shadowAlpha (double thetaDeg) noexcept
     return 1.05 + 0.95 * std::cos (thetaDeg * (180.0 / 150.0) * (kPi / 180.0));
 }
 
+/** Angle (deg, 0 .. 180) between a source at azimuth azDeg and the axis of
+    ear 0 (left, -90 deg) or 1 (right, +90 deg). */
+double earAngleDeg (double azDeg, size_t ear) noexcept
+{
+    return std::abs (std::remainder (azDeg - (ear == 0 ? -90.0 : 90.0), 360.0));
+}
+
+/** What comes off both ears' Woodworth delays (samples) of one speaker: the
+    Enhanced share times the nearer ear's delay (docs/11 E28: Enhanced
+    references the delays to the near ear; Classic, share 0, takes off
+    exactly 0, so its delays are the head-centred ones bit for bit). */
+float nearEarLead (const std::array<float, 2>& delays, float share) noexcept
+{
+    return share * std::min (delays[0], delays[1]);
+}
+
 /** The Enhanced renderer's six direction-cue sections for a speaker at
     azimuth azDeg (see the file comment), with the Enhanced share `share`
     (0 .. 1: every gain times it) and the band scale `scale` (frontBack /
@@ -508,15 +539,21 @@ void HeadphoneVirtualizer::parametricHrir (float azimuthDeg, float headRadiusMm,
         line[i] = svfTick (shelf, shelfState, v);
     }
 
+    std::array<double, 2> thetaDeg {};
+    std::array<float, 2> delays {};
     for (size_t e = 0; e < 2; ++e)
     {
-        const double earAz = e == 0 ? -90.0 : 90.0;
-        const double thetaDeg = std::abs (std::remainder (static_cast<double> (az) - earAz, 360.0));
-        const auto delay = static_cast<float> (woodworth (thetaDeg * (kPi / 180.0)) * headDelay);
+        thetaDeg[e] = earAngleDeg (static_cast<double> (az), e);
+        delays[e] = static_cast<float> (woodworth (thetaDeg[e] * (kPi / 180.0)) * headDelay);
+    }
+    const float lead = nearEarLead (delays, share);
+    for (size_t e = 0; e < 2; ++e)
+    {
+        const float delay = delays[e] - lead;
         int base = 0;
         std::array<float, 4> taps {};
         lagrangeTaps (delay, base, taps);
-        const auto shadow = BiquadCoeffs::fromAnalogFirstOrder (1.0, shadowAlpha (thetaDeg) / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
+        const auto shadow = BiquadCoeffs::fromAnalogFirstOrder (1.0, shadowAlpha (thetaDeg[e]) / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
         BiquadState state;
         auto& out = e == 0 ? left : right;
         for (size_t i = 0; i < n; ++i)
@@ -786,15 +823,23 @@ void HeadphoneVirtualizer::updateGeometry (bool snap) noexcept
 
         const float az = speakerAzimuthDeg (runningLayout, c, p);
         sp.azimuth = az;
+        // Angle between the source and each ear's axis (ears at -90 / +90
+        // deg) and the Woodworth delays; Enhanced takes its share of the near
+        // ear's delay off both (see the file comment).
+        std::array<double, 2> thetaDeg {};
+        std::array<float, 2> delays {};
         for (size_t e = 0; e < 2; ++e)
         {
-            // Angle between the source and this ear's axis (ears at -90 / +90 deg).
-            const double earAz = e == 0 ? -90.0 : 90.0;
-            const double thetaDeg = std::abs (std::remainder (static_cast<double> (az) - earAz, 360.0));
+            thetaDeg[e] = earAngleDeg (static_cast<double> (az), e);
+            delays[e] = static_cast<float> (woodworth (thetaDeg[e] * (kPi / 180.0)) * headDelay);
+        }
+        const float lead = nearEarLead (delays, enhanced.getCurrent());
+        for (size_t e = 0; e < 2; ++e)
+        {
             auto& ear = sp.ears[e];
-            ear.delay = std::clamp (static_cast<float> (woodworth (thetaDeg * (kPi / 180.0)) * headDelay), 0.0f, maxDelaySamples);
+            ear.delay = std::clamp (delays[e] - lead, 0.0f, maxDelaySamples);
             lagrangeTaps (ear.delay, ear.base, ear.taps);
-            ear.shadow = BiquadCoeffs::fromAnalogFirstOrder (1.0, shadowAlpha (thetaDeg) / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
+            ear.shadow = BiquadCoeffs::fromAnalogFirstOrder (1.0, shadowAlpha (thetaDeg[e]) / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), fs);
             if (snap)
             {
                 ear.prevDelay = ear.delay;
@@ -1029,9 +1074,9 @@ void HeadphoneVirtualizer::tick() noexcept
     }
     else if (cuesMoving)
     {
-        for (auto& sp : speakers)
-            if (sp.role == Role::Speaker)
-                designCues (sp);
+        // The cues and, as the share moves, Enhanced's near-ear reference of
+        // the delays (the geometry itself is where it was).
+        updateGeometry (false);
         ramping = true;
     }
 
