@@ -37,6 +37,12 @@
 // folds. The averages survive reset() (the chain resets the module whenever
 // virt comes back on, and the content has not changed); prepare() and a
 // layout swap start them again. levelMatch off glides the make-up to unity.
+// A renderer switch starts them again twice: when the Enhanced share starts
+// to glide and when it is within 1 % of its target (about 140 ms later), and
+// for 0.5 s after each the make-up may move at 24 dB/s. The renderers render
+// correlated content up to about 3.5 dB apart before the make-up (7.1: make-up
+// -1.5 dB Classic, -4.9 dB Enhanced), and the old renderer's 3 s averages
+// would carry its make-up across the switch for seconds (docs/11 E28).
 //
 // Fold headroom (E28a). Correlated content on every speaker adds up: 7.1 with
 // the same full-scale signal everywhere reaches about +10 dBFS. A linked peak
@@ -208,6 +214,11 @@ constexpr double kKHighPassQ = 0.5003270373238773;
 constexpr float kMakeupAverageMs = 3000.0f; // power averages (one-pole)
 constexpr float kMakeupSlewDbPerS = 6.0f;
 constexpr float kMakeupRangeDb = 4.0f;      // around the diffuse-field gain
+// After a renderer switch (see the file comment): the second restart once the
+// share is within 1 % of its target, and the faster make-up slew after each.
+constexpr float kRelearnShare = 0.01f;
+constexpr float kRelearnSlewFactor = 4.0f; // 24 dB/s
+constexpr float kRelearnMs = 500.0f;
 // Gate: K-weighted mean square of D summed over both channels >= -70 LUFS.
 constexpr double kMakeupGate = 1.1695e-7;   // 10^((-70 + 0.691) / 10)
 constexpr float kHeadroomCeiling = 1.0f;    // 0 dBFS
@@ -719,6 +730,8 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     kHighPass = SvfCoeffs::make (FilterType::HighPass, kKHighPassHz, kKHighPassQ, 0.0, 0.5 * fs);
     averageCoeff = 1.0 - std::exp (-kControlInterval / (static_cast<double> (kMakeupAverageMs) * 0.001 * fs));
     makeupSlew = dbToGain (kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
+    makeupSlewFast = dbToGain (kRelearnSlewFactor * kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
+    relearnPeriods = std::max (1, static_cast<int> (std::lround (static_cast<double> (kRelearnMs) * 0.001 * fs / kControlInterval)));
     headroomHoldSamples = msToSamples (kHeadroomHoldMs, fs);
     headroomRelease = static_cast<float> (1.0 - std::exp (-1.0 / (static_cast<double> (kHeadroomReleaseMs) * 0.001 * fs)));
     servoSeeded = false;
@@ -788,6 +801,13 @@ void HeadphoneVirtualizer::setParams (const VirtualizerParams& p) noexcept FLUB_
     if (s == params)
         return; // the chain pushes parameters every block: unchanged is free
 
+    if (s.renderer != params.renderer)
+    {
+        // The level match learns the new renderer afresh (see the file
+        // comment); tick() restarts it once more near the end of the glide.
+        restartLevelMatch (true);
+        relearnPending = true;
+    }
     params = s;
     frontAngle.setTarget (s.frontAngleDeg);
     sideAngle.setTarget (s.sideAngleDeg);
@@ -911,6 +931,7 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     // clean per-channel state. A silent pre-roll then lets the new paths fill
     // before the fade-in, which hides the rest of the filters' start-up.
     const bool layoutChanged = params.layout != runningLayout;
+    const bool rendererJumps = relearnPending || enhanced.getCurrent() != enhanced.getTarget();
     runningLayout = params.layout;
     const bool withLfe = hasLfe (runningLayout);
     const int numLayoutChannels = channelCount (runningLayout);
@@ -933,17 +954,20 @@ void HeadphoneVirtualizer::swapLayout() noexcept
     fadeDir = 0;
     holdRemaining = useHrir ? holdHrir : holdParametric;
 
-    // Level match: the new design's diffuse-field gain. A new layout (or the
-    // first swap after prepare()) starts the averages again at it; the
-    // output is silent here, so the make-up may jump.
+    // Level match: the new design's diffuse-field gain. A new layout, a
+    // renderer that jumps here instead of gliding (set while the module was
+    // not processed, then reset()), or the first swap after prepare() starts
+    // the averages again at it; the output is silent here, so the make-up may
+    // jump. A renderer jump alone then relearns at the faster slew, as after
+    // a glide.
     diffuseGain = diffuseGainFor();
-    if (layoutChanged || ! servoSeeded)
+    if (layoutChanged || rendererJumps || ! servoSeeded)
     {
-        avgRef = avgBin = 0.0;
-        learned = false;
+        restartLevelMatch (rendererJumps && servoSeeded && ! layoutChanged);
         makeupFrom = makeupTo = params.levelMatch ? diffuseGain : 1.0f;
         servoSeeded = true;
     }
+    relearnPending = false;
 }
 
 double HeadphoneVirtualizer::pathWeight (double freqHz) const noexcept
@@ -1058,6 +1082,14 @@ void HeadphoneVirtualizer::tick() noexcept
     // The cues run while the share is above 0, and for the one period that
     // ramps them down to the pass-through.
     cuesActive = enhanced.getCurrent() > 0.0f || enhanced.isSmoothing() || (shareWasOn && cuesMoving);
+    // A renderer switch's second level-match restart: the share is within
+    // 1 % of its target (about 140 ms into the glide), so the averages now
+    // learn the new renderer alone.
+    if (relearnPending && std::abs (enhanced.getTarget() - enhanced.getCurrent()) <= kRelearnShare)
+    {
+        relearnPending = false;
+        restartLevelMatch (true);
+    }
 
     // 3. Continuous geometry: glide angles and head radius, redesign delays,
     //    head-shadow filters and cues, ramp to them across the coming control
@@ -1295,6 +1327,16 @@ void HeadphoneVirtualizer::renderLfe (const float* x, int length) noexcept
     lfe.addToMono (x, lfeBus.data(), length); // the same in both ears
 }
 
+void HeadphoneVirtualizer::restartLevelMatch (bool fastSlew) noexcept
+{
+    // Forget the averages (they restart from the next gated period; until
+    // then the make-up aims at the diffuse-field gain) and set how fast the
+    // make-up may move for the next 0.5 s.
+    avgRef = avgBin = 0.0;
+    learned = false;
+    fastSlewPeriods = fastSlew ? relearnPeriods : 0;
+}
+
 void HeadphoneVirtualizer::updateMakeup() noexcept
 {
     // End of a 16-sample period (stream time): fold its energies into the
@@ -1318,7 +1360,10 @@ void HeadphoneVirtualizer::updateMakeup() noexcept
         }
     }
     makeupFrom = makeupTo;
-    makeupTo = std::clamp (target, makeupFrom / makeupSlew, makeupFrom * makeupSlew);
+    const float slew = fastSlewPeriods > 0 ? makeupSlewFast : makeupSlew;
+    if (fastSlewPeriods > 0)
+        --fastSlewPeriods;
+    makeupTo = std::clamp (target, makeupFrom / slew, makeupFrom * slew);
 }
 
 void HeadphoneVirtualizer::renderReflections (int length) noexcept

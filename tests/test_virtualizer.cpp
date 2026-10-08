@@ -1664,7 +1664,7 @@ CentreTilt centreTilt (VirtualizerRenderer renderer)
 }
 } // namespace
 
-TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all four directional bands, FC vs sides tilt within 1 dB, the sphere's ITD and ILD kept (docs/11 E28)")
+TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all four directional bands, FC vs sides tilt within 1 dB, the sphere's ITD and its ILD to 8 kHz kept (docs/11 E28)")
 {
     constexpr auto classic = VirtualizerRenderer::Classic, enhanced = VirtualizerRenderer::Enhanced;
     // Blauert's directional bands, with the sign they should have: the front
@@ -1768,6 +1768,69 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - FL vs BL >= 3 dB in all fo
         CHECK (worstClassic < 0.001);
         CHECK (worstEnhanced < 0.001);
         CHECK (std::abs (diff8k) < 0.25);
+    }
+
+    // Against the analytic sphere (the shadow filters with pure delays, no
+    // interpolator), H_R / H_L: the interaural phase delay at 500 Hz and
+    // 1 kHz is the Woodworth ITD to within 0.01 samples in both renderers (a
+    // sub-sample check; itdMs above is the integer IACC lag). The ILD is the
+    // sphere's up to 8 kHz (within 0.33 dB); at 16 kHz the far ear's Lagrange
+    // droop shows: Classic FL / BL / SL -1.78 / -0.44 / -1.27 dB, Enhanced
+    // -3.23 / -3.25 / -1.18 dB (its near ear no longer droops, so nothing
+    // offsets the far ear's).
+    const auto ratioAt = [] (const auto& left, const auto& right, double hz)
+    {
+        std::complex<double> l, r;
+        for (size_t i = 0; i < left.size(); ++i)
+        {
+            const auto z = std::polar (1.0, -kTwoPi * hz * static_cast<double> (i) / kFs);
+            l += static_cast<double> (left[i]) * z;
+            r += static_cast<double> (right[i]) * z;
+        }
+        return r / l;
+    };
+    const auto shadowAt = [&] (double thetaDeg, double hz)
+    {
+        const double w0 = kC / radiusM;
+        const double alpha = 1.05 + 0.95 * std::cos (thetaDeg * 1.2 * kPi / 180.0);
+        return std::complex<double> (BiquadCoeffs::fromAnalogFirstOrder (1.0, alpha / (2.0 * w0), 1.0, 1.0 / (2.0 * w0), kFs).response (hz, kFs));
+    };
+    struct Sphere16k
+    {
+        int channel;
+        double classicDb, enhancedDb;
+    };
+    for (const auto& s : { Sphere16k { FL, -1.78, -3.23 }, Sphere16k { FC, 0.0, 0.0 }, Sphere16k { BL, -0.44, -3.25 }, Sphere16k { SL, -1.27, -1.18 } })
+    {
+        const double az = HeadphoneVirtualizer::speakerAzimuthDeg (ChannelLayout::Surround71, s.channel, VirtualizerParams {});
+        std::array<double, 2> theta {}, delay {};
+        for (size_t e = 0; e < 2; ++e)
+        {
+            theta[e] = std::abs (std::remainder (az - (e == 0 ? -90.0 : 90.0), 360.0));
+            const double t = theta[e] * kPi / 180.0;
+            delay[e] = (t < 0.5 * kPi ? 1.0 - std::cos (t) : 1.0 + t - 0.5 * kPi) * headDelay;
+        }
+        const auto sphere = [&] (double hz)
+        { return shadowAt (theta[1], hz) / shadowAt (theta[0], hz) * std::polar (1.0, -kTwoPi * hz / kFs * (delay[1] - delay[0])); };
+        VirtualizerParams p;
+        p.roomAmount = 0.0f;
+        for (auto renderer : { classic, enhanced })
+        {
+            p.renderer = renderer;
+            const auto ir = virtualizerResponse (p, 1u << s.channel, kFs, 1024);
+            double worstPhase = 0.0, worstIld8k = 0.0;
+            for (double hz : { 500.0, 1000.0 })
+                worstPhase = std::max (worstPhase, std::abs (std::arg (ratioAt (ir.left, ir.right, hz) / sphere (hz)) / (kTwoPi * hz / kFs)));
+            for (double hz = 100.0; hz <= 8000.0; hz *= 1.2)
+                worstIld8k = std::max (worstIld8k, std::abs (20.0 * std::log10 (std::abs (ratioAt (ir.left, ir.right, hz) / sphere (hz)))));
+            const double ild16k = 20.0 * std::log10 (std::abs (ratioAt (ir.left, ir.right, 16000.0) / sphere (16000.0)));
+            std::cout << "    measured channel " << s.channel << (renderer == classic ? " Classic" : " Enhanced")
+                      << " re the analytic sphere: interaural phase delay at 0.5 / 1 kHz off by " << worstPhase << " samples at most, ILD up to 8 kHz "
+                      << worstIld8k << " dB, at 16 kHz " << ild16k << " dB\n";
+            CHECK (worstPhase < 0.01);
+            CHECK (worstIld8k < 0.4);
+            CHECK_NEAR (ild16k, renderer == classic ? s.classicDb : s.enhancedDb, 0.05);
+        }
     }
 }
 
@@ -1897,6 +1960,13 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - 4-8 kHz peak-to-notch of a
     const auto farCl = correlatedRipple ({ cl[0], cl[6] }, 1), farEn = correlatedRipple ({ en[0], en[6] }, 1);
     std::cout << "    measured FL + SL, right (far) ear: deepest " << farCl.minDb << " dB at " << farCl.minHz << " Hz -> " << farEn.minDb << " dB at "
               << farEn.minHz << " Hz\n";
+    // Pinned, so a later change to this trade shows up (the right ear is only
+    // 4 - 7 dB below the left there: Brown-Duda at 1.3 kHz, FL +1.5 / -2.8 dB,
+    // SL +4.0 / -3.0 dB; and 1 - 1.5 kHz is where the ITD still leads).
+    CHECK_NEAR (farCl.minDb, -25.05, 0.2);
+    CHECK_NEAR (farCl.minHz, 2000.0, 30.0);
+    CHECK_NEAR (farEn.minDb, -37.77, 0.2);
+    CHECK_NEAR (farEn.minHz, 1290.0, 30.0);
 
     // What it costs: the seven speakers' diffuse field is less flat (the
     // notch and the bands are not diffuse-field equalised; that inverse is
@@ -1933,6 +2003,98 @@ TEST_CASE ("HeadphoneVirtualizer: Enhanced renderer - the level match keeps virt
                       << ": virt re downmix " << diff << " LU (diffuse " << v.getDiffuseMakeupDb() << " dB, make-up " << v.getMakeupDb() << " dB)\n";
             CHECK_LE (std::abs (diff), 0.5);
         }
+}
+
+TEST_CASE ("HeadphoneVirtualizer: level match across a renderer switch - the make-up relearns the new renderer within 1 s instead of carrying the old one's over (docs/11 E28)")
+{
+    // Enhanced renders correlated content louder before the make-up than
+    // Classic (7.1 correlated pink: make-up -1.48 dB Classic, -4.94 dB
+    // Enhanced), and the 3 s averages carried the old renderer's make-up
+    // across a switch: 6 s after the start, the output was +2.96 / -3.20 dB
+    // off a module started in the target in the first 0.5 s and still +1.00 /
+    // -1.59 dB 2.5 - 3 s later (7.1, -30 dBFS pink, C -> E / E -> C). Now the
+    // averages restart when the share starts to glide and when it is within
+    // 1 % of its target, and the make-up may move at 24 dB/s for 0.5 s after
+    // each restart. Correlated pink, 2 s before the switch, 1.5 s after.
+    const int n = static_cast<int> (3.5 * kFs), at = static_cast<int> (2.0 * kFs), window = static_cast<int> (0.1 * kFs);
+    const Planar in = pinkOnSpeakers (ChannelLayout::Surround71, n, true);
+    const auto levelDb = [&] (const Planar& y, int s0)
+    {
+        double e = 0.0;
+        for (size_t c = 0; c < 2; ++c)
+            for (int i = s0; i < s0 + window; ++i)
+                e += static_cast<double> (y.ch[c][static_cast<size_t> (i)]) * static_cast<double> (y.ch[c][static_cast<size_t> (i)]);
+        return 10.0 * std::log10 (std::max (1.0e-30, e / window));
+    };
+    for (bool toEnhanced : { true, false })
+    {
+        auto from = matchedFor (ChannelLayout::Surround71), to = from;
+        (toEnhanced ? to : from).renderer = VirtualizerRenderer::Enhanced;
+        HeadphoneVirtualizer switched, target;
+        setUp (switched, from);
+        setUp (target, to);
+        Planar a = in, b = in;
+        float prev = 0.0f, fastest = 0.0f, fastestLate = 0.0f;
+        for (int pos = 0; pos < n; pos += 64)
+        {
+            if (pos == at)
+                switched.setParams (to);
+            switched.process (a.block (pos, 64));
+            target.process (b.block (pos, 64));
+            const float step = std::abs (switched.getMakeupDb() - prev);
+            prev = switched.getMakeupDb();
+            if (pos >= at)
+                fastest = std::max (fastest, step);
+            if (pos >= at + static_cast<int> (0.75 * kFs))
+                fastestLate = std::max (fastestLate, step);
+        }
+        double firstHalf = 0.0, worstLater = 0.0;
+        for (int s0 = at; s0 + window <= n; s0 += window)
+        {
+            const double d = levelDb (a, s0) - levelDb (b, s0);
+            if (s0 < at + 5 * window)
+                firstHalf = std::max (firstHalf, std::abs (d));
+            else
+                worstLater = std::max (worstLater, std::abs (d));
+        }
+        std::cout << "    measured level match " << (toEnhanced ? "Classic -> Enhanced" : "Enhanced -> Classic")
+                  << ", switched minus started in the target per 0.1 s: largest " << firstHalf << " dB in the first 0.5 s, " << worstLater
+                  << " dB from 0.5 to 1.5 s; make-up at 1.5 s " << switched.getMakeupDb() << " / " << target.getMakeupDb() << " dB\n";
+        CHECK_LE (worstLater, 0.5);
+        CHECK_NEAR (switched.getMakeupDb(), target.getMakeupDb(), 0.2f);
+        // The make-up moves at most 24 dB/s while it relearns and 6 dB/s once
+        // the faster window has ended (0.64 s after the switch).
+        CHECK_LE (fastest, 24.0f * 64.0f / 48000.0f + 1e-3f);
+        CHECK_LE (fastestLate, 6.0f * 64.0f / 48000.0f + 1e-3f);
+        CHECK (fastest > 2.0f * 6.0f * 64.0f / 48000.0f);
+    }
+
+    // A renderer set while the module was not processed (virt off in the
+    // chain) jumps at the next reset() (virt back on): the averages restart
+    // there too, at the new renderer's diffuse-field gain, and the make-up
+    // has the new renderer's value 1 s later (before: the old renderer's).
+    {
+        auto classic = matchedFor (ChannelLayout::Surround71), enhanced = classic;
+        enhanced.renderer = VirtualizerRenderer::Enhanced;
+        HeadphoneVirtualizer v, target;
+        setUp (v, classic);
+        setUp (target, enhanced);
+        Planar a = in, b = in;
+        processInBlocks (target, b, 512);
+        Planar first = in;
+        for (int pos = 0; pos < at; pos += 512)
+            v.process (first.block (pos, std::min (512, at - pos)));
+        v.setParams (enhanced);
+        v.reset();
+        CHECK_NEAR (v.getMakeupDb(), v.getDiffuseMakeupDb(), 1e-4f);
+        CHECK_NEAR (v.getDiffuseMakeupDb(), -5.09f, 0.05f);
+        const int m = static_cast<int> (1.0 * kFs);
+        for (int pos = 0; pos < m; pos += 512)
+            v.process (a.block (at + pos, std::min (512, m - pos)));
+        std::cout << "    measured level match after a renderer jump at reset(): make-up 1 s later " << v.getMakeupDb() << " dB, target "
+                  << target.getMakeupDb() << " dB\n";
+        CHECK_NEAR (v.getMakeupDb(), target.getMakeupDb(), 0.3f);
+    }
 }
 
 TEST_CASE ("HeadphoneVirtualizer: Classic is the default and ignores frontBack bit for bit; switching the renderer glides without a click and lands on the target design (docs/11 E28)")
@@ -1992,7 +2154,9 @@ TEST_CASE ("HeadphoneVirtualizer: Classic is the default and ignores frontBack b
         CHECK_LE (atEnhanced, 1.25 * std::max (classicStep, enhancedStep));
         CHECK_LE (atClassic, 1.25 * std::max (classicStep, enhancedStep));
         // Enhanced's near-ear reference glides the delays with the share (up
-        // to 12 samples for FC at 48 kHz, one-pole 30 ms), so the output is
+        // to 12 samples for FC at 48 kHz, one-pole 30 ms), so with the level
+        // match off (paramsFor; with it on, the make-up relearns: the case
+        // above) the output is
         // within 1e-4 of the target 300 ms after a switch (it was 250 ms with
         // the cue gains alone) and on it (1e-6) once the share has snapped,
         // 450 ms after.
@@ -2002,6 +2166,44 @@ TEST_CASE ("HeadphoneVirtualizer: Classic is the default and ignores frontBack b
         CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 14400) <= 1e-4);
         CHECK (maxAbsDiff (afterEnhanced, targetEnhanced, 21600) <= 1e-6);
         CHECK (maxAbsDiff (y, reference.ch[e], toClassic + 21600) <= 1e-6);
+    }
+
+    // The check above scales with the louder renderer (the three correlated
+    // tones render 4.6x louder in Enhanced, which aligns them at the near
+    // ear), so the switch is also checked on one speaker at a time, where the
+    // two renderers differ only by their cues (up to 1.5x here: FC at 3 kHz
+    // sits in Enhanced's front band), not by the alignment of several
+    // speakers: the steps at each switch stay within 1.25x the louder steady
+    // side.
+    for (int c : { FL, FC, BL, SL })
+    {
+        const auto single = [&] (const std::vector<std::pair<int, VirtualizerParams>>& changes, const VirtualizerParams& start)
+        {
+            HeadphoneVirtualizer v;
+            setUp (v, start);
+            Planar buf (8, n);
+            fill (buf, c, tone);
+            size_t next = 0;
+            for (int pos = 0; pos < n; pos += 96)
+            {
+                while (next < changes.size() && changes[next].first <= pos)
+                    v.setParams (changes[next++].second);
+                v.process (buf.block (pos, std::min (96, n - pos)));
+            }
+            return buf;
+        };
+        const Planar one = single ({ { toEnhanced, enhanced }, { toClassic, classic } }, classic);
+        for (size_t e = 0; e < 2; ++e)
+        {
+            const auto& y = one.ch[e];
+            const double classicStep = largestStep (y, toEnhanced - 9600, toEnhanced), enhancedStep = largestStep (y, toClassic - 9600, toClassic);
+            const double atEnhanced = largestStep (y, toEnhanced, toEnhanced + 4800), atClassic = largestStep (y, toClassic, toClassic + 4800);
+            std::cout << "    measured renderer switch, channel " << c << " alone, ear " << e << ": steady steps " << classicStep << " / " << enhancedStep
+                      << ", at the switches " << atEnhanced << " / " << atClassic << "\n";
+            CHECK (std::max (classicStep, enhancedStep) <= 1.55 * std::min (classicStep, enhancedStep));
+            CHECK_LE (atEnhanced, 1.25 * std::max (classicStep, enhancedStep));
+            CHECK_LE (atClassic, 1.25 * std::max (classicStep, enhancedStep));
+        }
     }
 
     // Enhanced with frontBack moved mid-stream glides too.

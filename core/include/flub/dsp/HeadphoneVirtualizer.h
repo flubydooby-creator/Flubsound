@@ -53,8 +53,10 @@
 //   the HRIRs) is the starting point; a feed-forward servo (K-weighted powers
 //   of the downmix and of the render, 3 s averages, -70 LUFS gate, 6 dB/s
 //   slew, +-4 dB around the diffuse gain) trims it to the content, because
-//   correlated and uncorrelated content need different gains. The LFE is not
-//   scaled (it is the same in both folds).
+//   correlated and uncorrelated content need different gains. A renderer
+//   switch restarts the averages (twice, as the share glides) and lets the
+//   make-up move at 24 dB/s for 0.5 s (docs/11 E28). The LFE is not scaled
+//   (it is the same in both folds).
 // Fold headroom (foldHeadroom): a linked zero-latency peak limiter keeps the
 //   binaural output at or below 0 dBFS, so correlated full-scale content on
 //   every channel is not handed to the chain as a +10 dBFS over (instant
@@ -234,6 +236,7 @@ private:
     void renderReflections (int length) noexcept;
     double pathWeight (double freqHz) const noexcept;
     float diffuseGainFor() const noexcept;
+    void restartLevelMatch (bool fastSlew) noexcept;
     void updateMakeup() noexcept;
 
     std::shared_ptr<const HrirSet> hrir;
@@ -290,6 +293,13 @@ private:
     int servoPhase = 0;                      // samples into the period (stream time)
     bool learned = false;                    // the averages hold gated content
     bool servoSeeded = false;                // false until the first swap after prepare()
+    // A renderer switch (docs/11 E28): the averages restart as the share
+    // starts to glide and again once it is nearly there, and after each
+    // restart the make-up may move faster for a while.
+    float makeupSlewFast = 1.0f;             // ... its largest ratio per period (24 dB/s)
+    int relearnPeriods = 0;                  // ... how long (0.5 s in periods)
+    int fastSlewPeriods = 0;                 // periods left at the faster slew
+    bool relearnPending = false;             // a renderer glide awaits its second restart
 
     // Fold headroom (E28a): linked zero-latency peak gain.
     float headroomGain = 1.0f, headroomRelease = 0.0f;
