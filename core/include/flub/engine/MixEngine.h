@@ -68,11 +68,14 @@
 // chain's 2 kHz Voice & Score lift taken back, and the Game strip's peaks
 // held 3 dB under the master ceiling (strip-priority master protection), all
 // gliding in over 30 ms and out over 300 ms (ChatDucker.h). The Game
-// strips' peak limiter also leaves room for the chat (the chat sub-limiter,
-// docs/11 E22 (1)): its ceiling is at most what the Chat strip's share of
-// the sum (after its gain) leaves of the master ceiling, divided by the
-// device correction's largest gain, never more than the room floor
-// (setChatRoomFloorDb, -6 dB by default) under it. To know the Chat strip's
+// strips' duck also leaves room for the chat (the chat sub-limiter, a gain
+// after that limiter, docs/11 E22 (1)): after the strip's gain, its peaks
+// may reach the room's reference (the master ceiling over the device
+// correction's largest gain, or the offset ceiling after the gain where
+// that is higher) less the Chat strip's share of the sum (after its gain),
+// never more than the room floor (setChatRoomFloorDb, -6 dB by default)
+// under that reference; a silent chat leaves the offset ceiling alone.
+// To know the Chat strip's
 // block before a Game strip's duck, process() runs in two passes: every
 // strip's chain, pad, wake fade and idle decision first, in place in the
 // caller's blocks, then each strip's duck, gain and share of the sum in
@@ -216,12 +219,15 @@ public:
         Any thread, as setChatDuck. */
     void setChatMix (float balance) noexcept FLUB_NONBLOCKING;
     float getChatMix() const noexcept { return requestedChatMix.load (std::memory_order_relaxed); }
-    /** The duck's room for the chat (see above): how far under the master
-        ceiling it may push a Game strip's peaks at most, clamped to
-        ChatDucker::kMinRoomFloorDb .. 0; 0 dB turns the room off (the 3 dB
-        offset ceiling alone, as before 2026-10-08). A constant the app does
-        not set (ChatDucker::kDefaultRoomFloorDb); tests and measurements
-        change it. Any thread, as setChatDuck; configureFrom() carries it. */
+    /** The duck's room for the chat (see above): how far under the room's
+        reference (the master ceiling over the device correction's largest
+        gain, or the 3 dB offset ceiling after the strip's gain where that
+        is higher) it may push a Game strip's peaks after its gain at most,
+        clamped to ChatDucker::kMinRoomFloorDb .. 0; 0 dB turns the room off
+        (the 3 dB offset ceiling alone, as before 2026-10-08). A constant
+        the app does not set (ChatDucker::kDefaultRoomFloorDb); tests and
+        measurements change it. Any thread, as setChatDuck; configureFrom()
+        carries it. */
     void setChatRoomFloorDb (float floorDb) noexcept FLUB_NONBLOCKING;
     float getChatRoomFloorDb() const noexcept { return requestedRoomFloorDb.load (std::memory_order_relaxed); }
     /** VoiceActivity's verdict on the Chat strip (false without one). Any thread (relaxed). */
