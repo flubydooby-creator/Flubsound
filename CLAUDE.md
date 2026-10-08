@@ -125,10 +125,15 @@ Report findings in `docs/11` Status lines (owner-verified, with the device name 
   First Run - Game pink beds (3 cases, ~0.75 s), and AppRouting's outdated-pass case (2.05 → 0.05 s: it now wakes
   the worker for one more pass, so the flickering session's parity no longer waits out the 2 s refresh).
   Caveats: the two memo comparison cases (governed spread, Voice Chat within 3 LU) take < 0.01 s in a full or
-  prefix-filtered run but re-render everything (8.4 s / 3.0 s) when filtered on their own. Not split: in a full
-  run with the machine 65–97 % busy (another job running) about 25 other core cases read 2.0–3.0 s (Startle Guard
-  scenes, Music Boost 100 quality suite, Protection strength, E22 duck, intent Racing / Night Mode); they were
-  under 2 s alone in the earlier measurement, but re-time them on an idle machine before deciding.
+  prefix-filtered run but re-render everything (8.4 s / 3.0 s) when filtered on their own. The ~25 core cases
+  that read 2.0–3.0 s in a full run were **Windows power throttling of the runner**, not slow cases (2026-10-08):
+  Windows 11 stops honouring the 1 ms timer of a process with no visible window and may run it under EcoQoS. Both
+  runners now opt out like the app does (`SetProcessInformation` in `tests/TestMain.cpp`, the app's
+  `SystemTuning::disablePowerThrottling` in `tests/app/AppTestMain.cpp`; 09dc1a4). Throttled, 2 of 4 full core runs
+  also failed the paced VoiceCleanup case (64 worker wake-ups per second = the 15.6 ms timer, 70 of 196 frames
+  missed). After: full core run 1161 / 1161 in 257 s (386 s throttled), no case at 2 s (slowest 1.66 s); app suite
+  378 / 378 in 38.9 s, slowest 1.26 s. Nothing needs a split. Time cases with the runner as is (per-case times:
+  stream its `[ RUN ]` / `[ OK ]` lines with timestamps); a run from a background script is now representative.
 - **Soak click triage:** the EQ's discrete-change crossfade is now a smoothstep (2 of the 12 clicks, a preset switch);
   the other 10 are explained in docs/11 E53.
 - **E20 automatic preamp:** the preamp's model counts Gaming Impact's LF burst (Impact 100: preamp 0.00 → −6.22 dB;
@@ -189,22 +194,59 @@ reference; nothing on them is left to merge. The temporary remote branches `wip/
 `wip/pipewire-xrun`, `wip/mac-neural`, `wip/mac-neural-check`, `wip/mac-neural-diag` and `wip/mac-neural-diag2`
 (CI iterations) still exist; delete them only with the owner's OK.
 
-### IN FLIGHT (2026-10-08): five open software items, unmerged, in local worktree branches
+### Merged 2026-10-08
 
-Workflow run wf_7df3eb45-bb4 (implement, independent review, fix), each in `.claude/worktrees/wf_7df3eb45-bb4-N` on
-branch `worktree-wf_7df3eb45-bb4-N` (base bb828a3), possibly also pushed as `wip/<topic>` for CI: (1) golden-gcc - a CI
-render-diff check of `tests/golden/preset-render-baseline.json` on gcc and the MSVC-rebased rows re-based to gcc;
-(2) E22 chat sub-limiter (room ceiling, inside the duck, floors measured at -6 / -9 / -12 dB for the owner);
-(3) neural worker woken by a semaphore from the audio thread instead of polling (E35 energy); (4) E53 follow-ups:
-the bypass reference limiter at high input gain and the detector's false positive; (5) E28 comb row investigation.
-To finish if interrupted: per worktree check `git status` / `git log bb828a3..HEAD`, finish or review, then merge one
-at a time (expect docs conflicts), full ctest, push, rebuild the app. Still to do after them on an idle machine:
-re-time the ~25 core cases that read 2-3 s under load, and the 128-sample real-device soak row (E53).
+Five open software items (workflow wf_7df3eb45-bb4: implement, independent review, fix; each had all 12 CI jobs
+green on its own `wip/` branch) are merged as an implementation commit and a review-fix commit each (cd98552 ..
+1835002), with no textual conflict. An independent audit found no code problem (the E22 numbers are unchanged on
+the merged tree, though its bypassed chains now pass E53's smooth take-over) and stale or false docs statements
+(CI state, the soak known gap, docs/12 §13), all fixed. Locally the full ctest passes (flub_tests 1161,
+flub_app_tests 378) and the strict render diff reads 0 of 5121 with the merged CLI; **the merged code (1835002) ran
+all 12 CI jobs green in run 37741568844**.
+
+- **E59 render-diff baseline on CI.** CI's gcc `core` leg runs `tools/scripts/preset-render-diff.py --strict
+  --largest 20 --print-moved` against `tests/golden/preset-render-baseline.json` ("Preset render diff (reference
+  platform)", about 30 s, **blocking** like the golden renders). `--strict` fails a render when a value moves by more
+  than 0.02 dB / LU or 0.02 points (governor scale 0.002), the latency changes, or a render is added or missing;
+  without it the script keeps its 0.1 dB default for local diffs. A probe on every core leg (run 37722477794) read
+  0 of 5121 values different on gcc 13.3, clang 18.1, MSVC 19.44 and Apple Clang 15 (arm64), MSVC 19.51 locally too,
+  so the 48 MSVC-derived rows (E20 Impact, E04 step 5 Quality, Synthwave) were already the gcc values; nothing was
+  re-based. **A change that moves a factory preset's render, even below the tolerance, re-records the baseline
+  (`--update`; MSVC is fine) in the same change**; `--print-moved` prints every moved line in the CI log. The golden
+  renders, the render diff and the demo pack run whenever the build succeeded.
+- **E28 comb row met.** The Enhanced renderer references each speaker's delays to its nearer ear: comb 18.88 →
+  9.38 dB (< 12); Classic is bit-identical (render diff 155/155 at 0 dB). A renderer switch relearns the level match
+  (7.1 correlated pink: +2.96 dB in the first 0.5 s and still +1.00 dB 2.5 s later → within 0.34 dB from 0.5 s on).
+  Trade: the far ear of a same-side pair combs deeper at 1.3 kHz (FL + SL right ear −25.1 → −37.8 dB, only 4-7 dB
+  under the near ear); the ILD at 16 kHz is up to −3.25 dB off the analytic sphere (Classic −1.78 dB). Not heard.
+- **E22 chat room inside the duck.** With *Duck game under voice chat* on, a gain after the Game strip's ceiling
+  limiter leaves room for the chat under the master ceiling, never deeper than the floor
+  (`ChatDucker::kDefaultRoomFloorDb` −6 dB, provisional; `MixEngine::setChatRoomFloorDb`, 0 dB = off; the app does
+  not set it yet). A silent chat leaves the offset ceiling alone, exactly. A −14 LUFS teammate under −1 dBFS
+  explosions: chat drop 0.82 → 0.45 / 0.18 / 0.15 dB at floors −6 / −9 / −12 dB (game peaks pulled down 4.7 / 7.4 /
+  10.0 dB); 0 clicks with the Game strip at 0 to +12 dB; +7 to +11 ns per sample. The duck limiter's release no
+  longer stalls at −0.0019 dB (the stage idles again). Synthetic signals only.
+- **E53 soak follow-ups.** The bypass reference's limiter takes over smoothly (`LimiterEnvelope::smoothTakeover`,
+  only the chain's `dryLimiter`): loud scene at +10 / +16 / +22 dB input gain 7 / 12 / 9 → 0 clicks; nothing moves
+  with bypass off. The user-gaming 97.05 s "false positive" is real: a one-sample step from the positional-focus
+  guard's instant attack (owner decision). The detector's broadband check is opt-in (`--band-check`; it would hide a
+  break made ahead of an EQ high cut such as Lo-fi Chill's 10 kHz). The soak programme is now the same on every
+  compiler (clang drew its random numbers in another order). `soak.py --minutes 2`: user rows 14 → 5 clicks, 0 while
+  bypassed.
+- **R5.3 / E35 neural worker woken by the audio thread.** `AsyncModelProcessor::process()` signals a `WakeEvent`
+  (SetEvent / futex / Mach semaphore; that one OS call is a documented RTSan exemption) instead of the worker
+  polling: wake-ups about 1 500 → 100 per second on macOS / Linux, about 500 → 100 on Windows; idle 7-10 per second;
+  worker CPU on macOS 28-32 → 10-12 ms per second; `process()` up to about 20 µs higher. Polling stays as the
+  fallback; its paced test twin prints its misses instead of bounding them. No sound change. Not yet on a real Mac.
+
+The worktrees `.claude/worktrees/wf_7df3eb45-bb4-1..5` are kept for reference; nothing on them is left to merge.
+New temporary remote branches: `wip/golden-gcc`, `wip/e22-room`, `wip/neural-wake`, `wip/neural-wake-print` (a
+print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb`; delete them only with the owner's OK.
 
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows: done** (step 1 above; CI first fully green on all three OSes in run 37572308549; latest
-   all-green code: 37649158870).
+   all-green code: 37741568844, the 2026-10-08 merge).
 2. **Real-hardware checks still open** on the Stealth 600PC Gen 3 (rebuild the app from HEAD first; docs/12 §0).
    Put each result in the item's docs/11 Status line, as "owner-verified", with the device name and connection.
    - Games: Punch / Footsteps / Impact / Detail (re-voiced in batch 5), Night Mode, ChatMix and ducking, the on-board
@@ -214,6 +256,8 @@ re-time the ~25 core cases that read 2-3 s under load, and the 128-sample real-d
    - Listening / looking: Synthwave (not heard yet), the analyser views and visualisers (not yet seen on the owner's
      screen; 60 fps on real music), the music-theory views on real songs.
    - R5.3: the `neural-voice-cleanup` demo pair, then the switch on real Discord / chat audio.
+   - E28: the `enhanced-renderer` demo pair, then a 7.1 game's footsteps moving between side and front; in the app
+     wait about a second after switching the renderer before comparing.
    - R4.5: the move-away with Edge: does Edge (or a game) play to the headset again after an unassign without a reload?
    - R4.4: record a chord, reset during a recording, check that Alt+F4 is refused.
 3. **Owner decisions** (docs/11 §5.4, the batch 4 / 5 paragraphs, and the Status lines).
@@ -237,15 +281,30 @@ re-time the ~25 core cases that read 2-3 s under load, and the 128-sample real-d
      the E28a fold headroom's instant attack (one soak click on a full-scale 7.1 explosion; a soft attack or a short
      look-ahead would move only renders of such overs; E53); the neural voice cleanup model (experimental, off,
      trained on synthetic speech only): keep, retrain or hide?
+   - New (2026-10-08): the E22 room floor, −6 dB (provisional) or −9 dB (−12 dB buys 0.03 dB for 2.6 dB more peak
+     pull-down), and whether the room should also hold the game's own excess with the Game fader up (extra limiting
+     while the duck is in), and a loud-teammate-over-explosions demo pair to judge it by ear; E28: accept the far
+     ear's deeper 1.3 kHz comb and the ~0.5 s settle after a renderer switch (listen to `enhanced-renderer` first),
+     and should E28a's virt on / off overs row count as met only when the default renderer meets it (Classic
+     −1.91 LU, Enhanced −0.56 LU)?; E53: soften the positional-focus guard's instant attack (the user-gaming 97.05 s
+     step)?; E35: keep the polling twin of the paced VoiceCleanup test (about 1 s per run) or drop it?; E59: the strict
+     render diff blocks CI and the golden renders / demo pack also run after an earlier failed step - OK?
 4. **Known open items (software).**
-   - Soak: the bypass reference's limiter at high input gain and one detector false positive. R1.5 on a real device:
-     captures, device inputs and the drift FIFO, a 128-sample run on an idle machine (E53).
-   - E28: the comb row is 18.9 dB against a < 12 dB target.
-   - E22: the chat sub-limiter.
+   - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine;
+     the maximizer's full-drive clicks and the untriaged user-music 107.79 s / user-fps 44.56 s clicks (E53). (The
+     bypass reference limiter and the detector item are done, 2026-10-08.)
+   - E28: the comb row is met (9.38 dB, 2026-10-08); left: Enhanced's far-ear ILD at 16 kHz (a better far-ear
+     interpolator, its own change).
+   - Float release stall: HeadphoneVirtualizer's fold headroom and FoldHeadroom (E28a, `Bs775Fold.h`) release like
+     the old duck limiter and stall at about −0.0019 dB after an over (fixed for the duck in E22); the fix moves
+     renders, so it needs its own change with render diffs and a baseline re-record.
+   - E22: the room is done (2026-10-08); the app does not set the floor yet (owner decision first).
    - E07: the 2.00 dB row.
-   - Golden: the MSVC-recorded rows (E20's Impact presets, Synthwave) pass CI's gcc golden-render step (±0.05 dB)
-     since run 37427019405 (c2d05e5); `tests/golden/preset-render-baseline.json` (E20, E04 step 5, Synthwave rows)
-     is not checked by CI and still wants a gcc re-record.
+   - Golden: the MSVC-recorded rows pass CI's gcc golden-render step (±0.05 dB) since run 37427019405 and, since
+     2026-10-08, the blocking strict render diff of `tests/golden/preset-render-baseline.json` (0 of 5121 values
+     different); nothing is left to re-record.
+   - Tests that draw random numbers inside one argument list get other inputs per compiler (they pass everywhere):
+     `tests/test_compressor.cpp` (~line 1434), `tests/test_parametric_eq.cpp` (~line 1021).
    - PipeWire on CI: an idle xrun is tolerated only as an attributed scheduling stall; a desktop with real-time
      priority is not checked (E48).
 5. **Gated items** (they need hardware, people or network, not code):
@@ -265,3 +324,6 @@ which depends on Steinberg's server) is `continue-on-error`; `pipewire` stays so
 Count on 2026-10-07: 27 green `pipewire` results (26 runs on all branches plus one re-run; 7 on this branch) and 5
 failures (2 on WIP R1.2 code, a test-comment compile error on `wip/mac-neural`, the idle xruns of 70a2a98 and
 d4f05a5); the longest green streak is 12 runs, the current one 3 (37643504114, 37649158870, 37654557630 attempt 2).
+Count on 2026-10-08: 16 more green `pipewire` results and no failure (the five items' `wip/` runs, this branch's
+37661923343, 37721890037 and the merge's 37741568844; cancelled or skipped jobs not counted), so 43 green and 5
+failures in all, and the current streak is 19 (37643504114 .. 37741568844), the longest so far.
