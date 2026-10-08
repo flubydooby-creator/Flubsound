@@ -1,6 +1,7 @@
 #include "flub/neural/WakeEvent.h"
 
 #include <algorithm>
+#include <cstdint>
 
 #if defined(_WIN32)
     #ifndef NOMINMAX
@@ -133,7 +134,9 @@ WakeEvent::WaitResult WakeEvent::wait (int timeoutMicroseconds) noexcept
 void WakeEvent::sleepInOs (int timeoutMicroseconds) noexcept
 {
 #if defined(_WIN32)
-    const DWORD ms = static_cast<DWORD> ((timeoutMicroseconds + 999) / 1000);
+    // Rounded up to whole milliseconds, in 64 bits: + 999 would overflow an int
+    // near the top of the documented range (2^31 - 1 us is 2 147 484 ms).
+    const DWORD ms = static_cast<DWORD> ((static_cast<std::int64_t> (timeoutMicroseconds) + 999) / 1000);
     WaitForSingleObject (reinterpret_cast<HANDLE> (native), ms);
 #elif defined(__APPLE__)
     mach_timespec_t timeout {};

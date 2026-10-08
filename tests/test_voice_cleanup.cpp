@@ -629,8 +629,11 @@ PacedRun runPaced (AsyncModelConfig cfg, const char* label)
     return r;
 }
 
-/** The assertions both paced cases share (see the first). */
-void checkPaced (const PacedRun& r)
+/** The assertions both paced cases share (see the first). With
+    deadlinesBound false (the polling twin) the misses and the response are
+    printed, not bounded: only that the worker runs and its results stay
+    finite is asserted. */
+void checkPaced (const PacedRun& r, bool deadlinesBound)
 {
 #if defined(__APPLE__)
     CHECK (r.scheduling == NeuralWorkerScheduling::TimeConstraint);
@@ -641,10 +644,14 @@ void checkPaced (const PacedRun& r)
     CHECK (r.deviceScheduled);
 #endif
     CHECK (r.failures == 0u);
-    CHECK_LE (r.misses, r.due / 20);
+    CHECK (r.framesRun > 0u);
     CHECK (r.framesRun + r.misses >= r.due);
     // Every frame that ran has its response time (else the bound below could pass on nothing).
     CHECK (static_cast<uint64_t> (r.responseUs.size()) + 2 >= r.framesRun);
+    CHECK (r.finite);
+    if (! deadlinesBound)
+        return;
+    CHECK_LE (r.misses, r.due / 20);
 #if defined(__APPLE__)
     // The time-constraint worker answers 9 frames in 10 within a quarter of the
     // deadline (macOS CI, polling: about 0.6 ms at the 90th percentile). With
@@ -653,7 +660,6 @@ void checkPaced (const PacedRun& r)
     // alone would not show the difference.
     CHECK_LE (percentile (r.responseUs, 0.9), 2500.0);
 #endif
-    CHECK (r.finite);
 }
 } // namespace
 
@@ -680,21 +686,31 @@ void checkPaced (const PacedRun& r)
 TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, the worker meets its deadlines")
 {
     const PacedRun r = runPaced (config (2, false), "woken");
-    checkPaced (r);
+    checkPaced (r, true);
     CHECK (r.wake == NeuralWorkerWake::Signal);
     CHECK_LE (r.wakeups, static_cast<uint64_t> (kPacedBlocks + kPacedBlocks / 2));
 }
 
 // The same with the worker polling its queue every frame / 8 (625 us): the
 // behaviour before 2026-10-08 and the fallback where no OS wake-up object can
-// be created. Kept as the before / after reference for the case above.
-TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, a polling worker (the fallback; before 2026-10-08) meets its deadlines")
+// be created. Kept as the before / after reference for the case above (its
+// numbers are printed) and as the fallback's check: it asserts that the
+// polling worker runs every frame it gets, without failures, not its
+// deadlines. Those depend on the machine's load: on Windows, with other
+// builds running, a normal-priority poller woke only 140 times a second and
+// missed up to 62 of 196 frames (the code before 2026-10-08, the same case:
+// up to 54), while the woken worker missed none in 10 runs; with 28 busy
+// loops on 24 logical CPUs, polling up to 10 and woken up to 6 (docs/11 E35).
+TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, a polling worker (the fallback; before 2026-10-08) runs its frames (misses printed, not bounded)")
 {
     AsyncModelConfig c = config (2, false);
     c.workerPolls = true;
     const PacedRun r = runPaced (c, "polling");
-    checkPaced (r);
+    checkPaced (r, false);
     CHECK (r.wake == NeuralWorkerWake::Poll);
+    if (r.misses > r.due / 20)
+        std::printf ("    [polling] note: %llu misses exceed the woken case's 5 %% bound (a loaded machine; not asserted here)\n",
+                     static_cast<unsigned long long> (r.misses));
 }
 
 TEST_CASE ("VoiceCleanup: in the chain's neural slot it is eligible in Balanced (480-sample buffers) and Quality, not in Low Latency or at 44.1 kHz")

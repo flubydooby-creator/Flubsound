@@ -15,6 +15,13 @@
 // (tests/test_rtsan.cpp lists them). Placement is after noexcept, on the
 // declaration and the definition:
 //   void process (const AudioBlock& block) noexcept FLUB_NONBLOCKING override;
+//
+// One deliberate exemption: WakeEvent::signal() (flub/neural/WakeEvent.h)
+// is FLUB_NONBLOCKING, but its one OS call that readies the sleeping neural
+// worker (SetEvent, a futex wake, semaphore_signal; it never waits) runs
+// under __rtsan::ScopedDisabler, because RTSan cannot tell it from a
+// blocking system call. tests/test_rtsan.cpp shows RTSan stops the bare
+// call and passes the exempted one (docs/08, docs/11 E35).
 #pragma once
 
 #if defined(FLUB_RTSAN) && defined(__clang__) && defined(__has_cpp_attribute)

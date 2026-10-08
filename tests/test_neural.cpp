@@ -22,6 +22,7 @@
 #include "flub/neural/ReferenceRunners.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -42,13 +43,14 @@ constexpr double kFs = 48000.0;
 constexpr int kFrame = 64;
 
 /** Spins (yielding) until pred() holds. The bound is a hang guard for a
-    broken worker, never a timing assumption: a healthy worker answers within
-    one poll interval. Yielding rather than sleeping keeps the test's own wait
+    broken worker, never a timing assumption: a healthy worker answers as soon
+    as the process() call that queued the frame wakes it (a polling worker
+    within one poll interval). Yielding rather than sleeping keeps the test's own wait
     out of the timer granularity (up to 15.6 ms per sleep on Windows). */
 template <typename Pred>
-bool waitUntil (Pred pred)
+bool waitUntil (Pred pred, std::chrono::steady_clock::duration bound = std::chrono::seconds (20))
 {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds (20);
+    const auto deadline = std::chrono::steady_clock::now() + bound;
     while (! pred())
     {
         if (std::chrono::steady_clock::now() > deadline)
@@ -791,13 +793,38 @@ TEST_CASE ("Neural: WakeEvent wakes its waiter, collapses signals sent while it 
 
     // A producer publishes items one at a time, signals, and waits until the
     // consumer has seen each; the consumer drains, then waits (1 s timeout).
-    // Every hand-over races the consumer's way to sleep; a lost wake-up would
-    // show as a timeout.
-    constexpr uint32_t kItems = 2000;
+    // Two halves. In the first the consumer is almost always asleep when the
+    // signal comes, so signal() is timed with its OS wake-up call (the audio
+    // thread's cost in AsyncModelProcessor). In the second both spin for
+    // pseudo-random times (the producer 0 - 8 us before it publishes, the
+    // consumer 0 - 16 us between finding the queue empty and its wait()), so
+    // the signals land at varied points of the consumer's way to sleep: before
+    // its announcement ("already signalled"), or after it, before or during
+    // the OS sleep (counted as woken). A lost wake-up leaves the consumer
+    // asleep until its 1 s timeout: it then returns TimedOut, or Woken if only
+    // the OS call was lost (the state word still says Signalled). So each
+    // hand-over gets 0.5 s (a healthy one takes microseconds, at most a few ms
+    // on a busy machine), and the first one that takes longer, or any
+    // timeout, ends the run: without the stop a broken primitive would take
+    // 1 s per item, about 33 minutes.
+    constexpr uint32_t kItems = 2000, kQuietItems = kItems / 2;
     std::atomic<uint32_t> published { 0 }, consumed { 0 };
-    int timeouts = 0, woken = 0, pending = 0;
+    std::atomic<int> timeouts { 0 };
+    std::array<int, 2> woken {}, pending {}; // per half
+    const auto nextJitter = [] (uint32_t& s) noexcept { // xorshift32: the same spins every run
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return s;
+    };
+    const auto spinFor = [] (uint32_t spinNs) noexcept {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds (spinNs);
+        while (std::chrono::steady_clock::now() < until)
+        {
+        }
+    };
     std::thread consumer ([&] {
-        uint32_t seen = 0;
+        uint32_t seen = 0, consumerJitter = 0x9E3779B9u;
         while (seen < kItems)
         {
             const uint32_t latest = published.load (std::memory_order_acquire);
@@ -807,28 +834,42 @@ TEST_CASE ("Neural: WakeEvent wakes its waiter, collapses signals sent while it 
                 consumed.store (seen, std::memory_order_release);
                 continue;
             }
+            const size_t half = seen < kQuietItems ? 0 : 1; // the half of the item awaited (seen + 1)
+            if (half == 1)
+                spinFor (nextJitter (consumerJitter) % 16000u);
             switch (wake.wait (1000000))
             {
-                case WakeEvent::WaitResult::TimedOut: ++timeouts; break;
-                case WakeEvent::WaitResult::Woken: ++woken; break;
-                case WakeEvent::WaitResult::Pending: ++pending; break;
+                case WakeEvent::WaitResult::TimedOut: timeouts.fetch_add (1, std::memory_order_release); break;
+                case WakeEvent::WaitResult::Woken: ++woken[half]; break;
+                case WakeEvent::WaitResult::Pending: ++pending[half]; break;
             }
         }
     });
-    // The signaller's cost (the audio thread's, in AsyncModelProcessor):
-    // mostly with the consumer asleep, i.e. with the OS wake-up call.
-    std::vector<double> signalUs (kItems, 0.0);
+    std::vector<double> signalUs; // the first half's signal() times
+    signalUs.reserve (kQuietItems);
+    uint32_t producerJitter = 0x2545F491u;
     const auto start = std::chrono::steady_clock::now();
     bool handedOver = true;
+    uint32_t handOvers = 0;
+    double slowestMs = 0.0;
     for (uint32_t i = 1; i <= kItems && handedOver; ++i)
     {
+        if (i > kQuietItems)
+            spinFor (nextJitter (producerJitter) % 8000u);
         published.store (i, std::memory_order_release);
         const auto before = std::chrono::steady_clock::now();
         wake.signal();
-        signalUs[i - 1] = std::chrono::duration<double, std::micro> (std::chrono::steady_clock::now() - before).count();
-        handedOver = waitUntil ([&consumed, i] { return consumed.load (std::memory_order_acquire) == i; });
+        if (i <= kQuietItems)
+            signalUs.push_back (std::chrono::duration<double, std::micro> (std::chrono::steady_clock::now() - before).count());
+        handedOver = waitUntil ([&consumed, &timeouts, i] {
+                         return consumed.load (std::memory_order_acquire) == i || timeouts.load (std::memory_order_acquire) != 0;
+                     },
+                                std::chrono::milliseconds (500))
+                     && timeouts.load (std::memory_order_acquire) == 0;
+        slowestMs = std::max (slowestMs, std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now() - before).count());
+        handOvers += handedOver ? 1u : 0u;
     }
-    if (! handedOver) // hang guard: let the consumer finish
+    if (! handedOver) // a timeout or a hand-over over 0.5 s: let the consumer finish (within its 1 s timeout)
     {
         published.store (kItems, std::memory_order_release);
         wake.signal();
@@ -836,12 +877,18 @@ TEST_CASE ("Neural: WakeEvent wakes its waiter, collapses signals sent while it 
     consumer.join();
     const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
     std::sort (signalUs.begin(), signalUs.end());
-    std::printf ("    %u hand-overs in %.1f ms: %d woken from a sleep, %d already signalled, %d timeouts; signal() median %.2f us, "
-                 "99th percentile %.2f us, max %.2f us\n",
-                 kItems, seconds * 1000.0, woken, pending, timeouts, signalUs[kItems / 2], signalUs[kItems * 99 / 100], signalUs[kItems - 1]);
+    const auto signalAt = [&signalUs] (size_t perMille) {
+        return signalUs.empty() ? 0.0 : signalUs[std::min (signalUs.size() - 1, signalUs.size() * perMille / 1000)];
+    };
+    std::printf ("    %u of %u hand-overs in %.1f ms (slowest %.2f ms), %d timeouts. First half: %d woken from a sleep, %d already "
+                 "signalled; signal() median %.2f us, 99th percentile %.2f us, max %.2f us. Second half (random spins): %d woken, "
+                 "%d already signalled\n",
+                 handOvers, kItems, seconds * 1000.0, slowestMs, timeouts.load(), woken[0], pending[0], signalAt (500), signalAt (990),
+                 signalAt (1000), woken[1], pending[1]);
     CHECK (handedOver);
-    CHECK (timeouts == 0);
-    CHECK (woken + pending >= 1);
+    CHECK (handOvers == kItems);
+    CHECK (timeouts.load() == 0);
+    CHECK (woken[0] + woken[1] >= 1); // the OS path was taken (a consumer that never slept would not test it)
 }
 
 // docs/11 E35 (energy): the worker sleeps until process() queues a frame and
