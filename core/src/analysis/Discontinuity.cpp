@@ -57,6 +57,17 @@ void DiscontinuityDetector::prepare (double sampleRate, int numChannels, const D
     ringSize = std::max (guard + window, maxRepeat) + lookAhead + 2;
     clickRatio = dbToLinear (s.clickRatioDb);
     clickFloor = dbToLinear (s.clickFloorDb);
+    minTopShare = std::isfinite (s.minTopBandShare) ? std::clamp (static_cast<double> (s.minTopBandShare), 0.0, 1.0) : 0.0;
+    for (int i = 0; i < kShare; ++i)
+    {
+        shareWindow[static_cast<size_t> (i)] = 0.5 - 0.5 * std::cos (kTwoPi * (i + 0.5) / kShare);
+        for (int b = 0; b < kShareBins; ++b)
+        {
+            const double w = kTwoPi * (kShareFirstBin + b) * i / kShare;
+            shareCos[static_cast<size_t> (b)][static_cast<size_t> (i)] = std::cos (w);
+            shareSin[static_cast<size_t> (b)][static_cast<size_t> (i)] = std::sin (w);
+        }
+    }
     activityThreshold = dbToLinear (2.0 * s.dropoutActivityDb); // mean square
     dcStep = dbToLinear (s.dcStepDb);
     activityCoeff = 1.0 - std::exp (-1000.0 / (kActivityMs * fs));
@@ -144,6 +155,7 @@ void DiscontinuityDetector::reset() noexcept
     frames = 0;
     recurringCount = 0;
     kinkCount = 0;
+    bandLimitedCount = 0;
     counts = {};
     list.clear();
 }
@@ -320,8 +332,49 @@ void DiscontinuityDetector::judgeClick (Channel& ch, int c, int64_t centre) noex
         ch.holdUntil = centre + kOrder + 1;
         return;
     }
+    if (minTopShare > 0.0 && topBandShare (ch, centre) < minTopShare)
+    {
+        // A band-limited onset rings for a few samples: one set-aside each.
+        ++bandLimitedCount;
+        ch.holdUntil = centre + kShare / 2;
+        return;
+    }
     report ({ DiscontinuityType::Click, c, centre, 0, linearToDb (peak), linearToDb (peak / std::max (ref, 1.0e-12)) });
     ch.holdUntil = centre + window + guard;
+}
+
+double DiscontinuityDetector::topBandShare (const Channel& ch, int64_t centre) const noexcept
+{
+    // The residual over [centre - 14, centre + 17] (the spike's pattern,
+    // centre .. centre + kOrder, near the middle), Hann-windowed; the energy
+    // of DFT bins kShareFirstBin .. kShare / 2 against the total (Parseval:
+    // the sum over all kShare bins is kShare x the windowed energy).
+    // Needs r from centre - 14 to centre + 17: in the ring.
+    std::array<double, kShare> w {};
+    double energy = 0.0;
+    for (int i = 0; i < kShare; ++i)
+    {
+        const int64_t f = centre - (kShare / 2 - 2) + i;
+        const double v = f < 0 ? 0.0 : ch.r[static_cast<size_t> (f % ringSize)] * shareWindow[static_cast<size_t> (i)];
+        w[static_cast<size_t> (i)] = v;
+        energy += v * v;
+    }
+    if (! (energy > 0.0))
+        return 1.0;
+    double top = 0.0;
+    for (int b = 0; b < kShareBins; ++b)
+    {
+        const auto& cs = shareCos[static_cast<size_t> (b)];
+        const auto& sn = shareSin[static_cast<size_t> (b)];
+        double re = 0.0, im = 0.0;
+        for (size_t i = 0; i < static_cast<size_t> (kShare); ++i)
+        {
+            re += w[i] * cs[i];
+            im += w[i] * sn[i];
+        }
+        top += (kShareFirstBin + b == kShare / 2 ? 1.0 : 2.0) * (re * re + im * im);
+    }
+    return top / (static_cast<double> (kShare) * energy);
 }
 
 bool DiscontinuityDetector::recurs (const Channel& ch, int64_t centre, double peak) const noexcept

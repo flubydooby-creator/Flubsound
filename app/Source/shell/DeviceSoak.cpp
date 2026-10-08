@@ -491,7 +491,7 @@ struct DeviceSoak::Analysis
     flub::DiscontinuityDetector detector;
     int64_t firstFrame = -1, segmentStart = -1, expected = -1;
     std::array<int64_t, flub::kNumDiscontinuityTypes> counts {};
-    int64_t kinks = 0, recurring = 0, frames = 0;
+    int64_t kinks = 0, recurring = 0, bandLimited = 0, frames = 0;
     std::vector<flub::Discontinuity> events;
     std::vector<std::pair<int64_t, int64_t>> gaps; // (stream frame, frames missing)
     double peak = 0.0, sumSquares = 0.0;
@@ -545,6 +545,7 @@ struct DeviceSoak::Analysis
             counts[static_cast<size_t> (t)] += detector.count (static_cast<flub::DiscontinuityType> (t));
         kinks += detector.kinks();
         recurring += detector.recurring();
+        bandLimited += detector.bandLimited();
         for (auto e : detector.events())
         {
             e.frame += segmentStart;
@@ -1739,6 +1740,7 @@ void DeviceSoak::buildReport (const juce::String& reason)
                               v64 (analysis->counts[static_cast<size_t> (k)]));
         dis->setProperty ("kinks", v64 (analysis->kinks));
         dis->setProperty ("recurring", v64 (analysis->recurring));
+        dis->setProperty ("bandLimited", v64 (analysis->bandLimited));
         dis->setProperty ("tapGaps", static_cast<int> (analysis->gaps.size()));
         dis->setProperty ("tapFramesDropped", v64 (tapDropped));
         dis->setProperty ("outputPeakDbfs", round2 (20.0 * std::log10 (std::max (analysis->peak, 1.0e-9))));
@@ -1979,7 +1981,8 @@ void DeviceSoak::buildReport (const juce::String& reason)
     if (analysis != nullptr)
     {
         s << "  output    " << analysis->counts[0] << " clicks, " << analysis->counts[1] << " dropouts, " << analysis->counts[2] << " non-finite, "
-          << analysis->counts[3] << " DC steps (set aside: " << analysis->kinks << " kinks, " << analysis->recurring << " recurring); tap gaps "
+          << analysis->counts[3] << " DC steps (set aside: " << analysis->kinks << " kinks, " << analysis->recurring << " recurring, "
+          << analysis->bandLimited << " band-limited); tap gaps "
           << static_cast<int> (analysis->gaps.size()) << " (" << tapDropped << " frames)\n";
         s << "            classes: transition " << perClass["transition"] << ", static " << perClass["static"] << ", programme "
           << perClass["programme"] << ", restart " << perClass["restart"] << ", gap " << perClass["gap"] << ", headroom "

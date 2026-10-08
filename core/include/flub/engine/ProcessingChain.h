@@ -881,8 +881,9 @@ private:
     // Global bypass dry path (post input stage, stereo): delayed by
     // totalLatency - dryLimiter latency, then (while bypass is engaged)
     // loudness-matched and true-peak limited at the ceiling by dryLimiter
-    // (with the LF-safe envelope, docs/11 E10), so it lines up with the
-    // processed path and never overshoots.
+    // (with the LF-safe envelope, docs/11 E10, and the smooth take-over,
+    // docs/11 E53), so it lines up with the processed path and never
+    // overshoots.
     AudioBuffer dryBuffer;
     DelayLine dryDelay;
     TruePeakLimiter dryLimiter;

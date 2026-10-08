@@ -34,7 +34,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 - **What it is:** *Bypass* in the header bypasses every strip (click-free and latency-aligned). With *Loudness-matched bypass* on (the default, right-click *Bypass*), the processed side is turned down to the level of the bypassed one on every flip after the first, and a line under the button reads how much louder the processed sound was: *proc. +2.9 LU*.
 - **Listen for:** the first press plays the bypassed sound at its own level, and the line tells you how much of what you liked was only level. Flip a few times after that: the flips are matched.
 - **Demo pairs:** `music-loudness` (what "just louder" sounds like, unmatched)
-- **Limits:** the bypass takes the whole chain out, including the per-ear profile ([§7](#7-your-headset-and-your-ears)).
+- **Limits:** the bypass takes the whole chain out, including the per-ear profile ([§7](#7-your-headset-and-your-ears)). The input gain stays in: the bypassed sound is held under the ceiling by its own limiter, so with the input gain far up (+10 dB or more on loud music) the bypassed side is limited hard - it should sound squashed, never crackly (since 2026-10-08 its limiter has no corners where it catches a new peak; before, the soak read clicks there).
 
 ### The module ear (hold to hear without)
 

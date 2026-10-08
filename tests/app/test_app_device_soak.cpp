@@ -562,8 +562,8 @@ TEST_CASE ("App: E53 device soak: a short virtual run - the report's fields and 
         CHECK (static_cast<int> (report.getProperty ("engine", {}).getProperty ("swapsCompleted", 0)) >= 1);
 
     const auto dis = report.getProperty ("discontinuities", {});
-    for (const auto* key : { "click", "dropout", "non-finite", "dc-step", "kinks", "recurring", "tapGaps", "tapFramesDropped", "perClass", "events",
-                             "dryProgramme", "outputPeakDbfs" })
+    for (const auto* key : { "click", "dropout", "non-finite", "dc-step", "kinks", "recurring", "bandLimited", "tapGaps", "tapFramesDropped", "perClass",
+                             "events", "dryProgramme", "outputPeakDbfs" })
         CHECK (dis.hasProperty (key));
     CHECK (static_cast<int> (dis.getProperty ("non-finite", -1)) == 0);
     CHECK (static_cast<int> (dis.getProperty ("tapGaps", -1)) == 0);

@@ -27,9 +27,11 @@ the one known finding so far, a click 1.4 ms after "bypass -> on" from the
 dry path's cold true-peak limiter, is fixed) is reported as known and does
 not fail the run.
 Detections made while the global bypass was engaged (the output is the
-bypass reference, not the processing) are counted per row: in the fuzz row
-the reference's true-peak limiter clicks when a large input.gain drives it
-far over the ceiling (docs/11 E53).
+bypass reference, not the processing) are counted per row: the reference's
+true-peak limiter clicked when a large input.gain drove it far over the
+ceiling, until its smooth take-over (docs/11 E53, 2026-10-08); a click
+there now is a new finding. The click candidates the detector set aside as
+the waveform's own (kinks, recurring, band-limited) are listed per row.
 
 Exit code 0 when no row found a discontinuity outside --known (and no
 programme self-check failed), 1 otherwise, 2 on usage / run errors.
@@ -118,7 +120,8 @@ def main():
         t = r["timing"]
         print(f"{r['name']:<12} {r['seconds'] / 60:6.1f} min  {r['actions']['total']:6d} actions  "
               f"click {out['click']:4d}  dropout {out['dropout']:3d}  non-finite {out['non-finite']:3d}  dc-step {out['dc-step']:3d}  "
-              f"(set aside: {out['setAside']['kinks']} kinks, {out['setAside']['recurring']} recurring)  "
+              f"(set aside: {out['setAside']['kinks']} kinks, {out['setAside']['recurring']} recurring, "
+              f"{out['setAside'].get('bandLimited', 0)} band-limited)  "
               f"not known {unknown} ({bypassed} while bypassed)  peak {r['outputPeakDbfs']} dBFS  {t['realtimeFactor']}x RT, max block {t['maxBlockMs']} ms  "
               f"{'FAIL' if bad else 'ok'}")
         if inp["total"] > 0:

@@ -612,8 +612,15 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
         dryLimiter.setLookaheadMs (static_cast<float> (1000.0 * lookahead / sr));
         // The maximizer's LF-safe envelope (docs/11 E05 / E10): a hot
         // reference is limited without rippling its bass, so the bypass
-        // side carries no limiter THD or DC either. Unity while idle.
-        dryLimiter.setEnvelope ({ true, true, true });
+        // side carries no limiter THD or DC either. Unity while idle. Plus
+        // the smooth take-over (docs/11 E53): an input gain of +10 .. +22 dB
+        // drives this limiter 6 - 12 dB deep, where an attack taking over
+        // from a release (or the program envelope from the gain) cornered
+        // the gain within a sample and read as clicks; with it the gain is
+        // the attack smoothing's output throughout. Only this limiter has
+        // it: it runs only while the bypass is engaged, so nothing moves
+        // with the bypass off.
+        dryLimiter.setEnvelope ({ true, true, true, true });
         dryLimiter.prepare ({ sr, maxB, 2 });
     }
     dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples()));

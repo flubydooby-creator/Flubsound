@@ -613,6 +613,7 @@ bool soakChain (const std::vector<float>& baseValues, const SoakSettings& s, Soa
     }
     report.outputKinks = out.kinks();
     report.outputRecurring = out.recurring();
+    report.outputBandLimited = out.bandLimited();
     for (const auto& e : out.events())
     {
         SoakDetection d;
@@ -657,6 +658,7 @@ json::Value soakToJson (const SoakReport& r)
     json::Value aside;
     aside.set ("kinks", static_cast<double> (r.outputKinks));
     aside.set ("recurring", static_cast<double> (r.outputRecurring));
+    aside.set ("bandLimited", static_cast<double> (r.outputBandLimited));
     output.set ("setAside", std::move (aside));
     v.set ("output", std::move (output));
     v.set ("input", countsToJson (r.input));
@@ -707,7 +709,7 @@ std::string formatSoak (const SoakReport& r)
         s += "\n";
     }
     s += "Output  : " + countsToText (r.output) + " (set aside as the waveform's own: " + std::to_string (r.outputKinks) + " kinks, "
-         + std::to_string (r.outputRecurring) + " recurring)\n";
+         + std::to_string (r.outputRecurring) + " recurring, " + std::to_string (r.outputBandLimited) + " band-limited)\n";
     s += "Input   : " + countsToText (r.input) + " (programme self-check)\n";
     for (const auto& d : r.detections)
     {

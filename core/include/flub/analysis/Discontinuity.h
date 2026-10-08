@@ -29,7 +29,21 @@
 //                  break (counted apart: recurring()). Recurrences at 1 or
 //                  2 x blockSize (when given) do not count: zipper noise, a
 //                  step at every block boundary while a parameter moves,
-//                  recurs at exactly that lag.
+//                  recurs at exactly that lag;
+//                * broadband (docs/11 E53): at least minTopBandShare of the
+//                  spike's residual energy (32 samples around it, Hann
+//                  window) lies at or above 3/8 fs. A break in the stream
+//                  - an impulse, a step, a skipped sample, a gain step -
+//                  reaches Nyquist whatever the programme: 0.72 - 0.81 on
+//                  tones, 0.33 - 0.85 for every click the E53 soak found.
+//                  A sharp onset of band-limited programme does not: a tick
+//                  through a 10 kHz high cut is 0.10 (6 kHz 0.07, 12 kHz
+//                  0.13), yet over a residual the high cut also lowered it
+//                  read 47 dB over (counted apart: bandLimited()). A break
+//                  made ahead of a high cut (inside the processing, before
+//                  an EQ's high cut) is band-limited by it as well and is
+//                  set aside the same way; under a high cut at 16 kHz
+//                  (0.26) a tick still reads as a click.
 //              One event per windowMs.
 //   Dropout    a run of exact zeros of at least minDropoutMs that starts
 //              abruptly (the residual at its edge is clickRatioDb over the
@@ -84,6 +98,7 @@ struct DiscontinuitySettings
     double windowMs = 2.0;            // ... RMS window on each side
     double repeatMs = 25.0;           // ... and not recurring within this (a pitch period)
     int blockSize = 0;                // ... except at 1 and 2 blocks (0 = unknown)
+    float minTopBandShare = 0.2f;     // ... and broadband: this share of it at or above 3/8 fs (0 = off)
     double minDropoutMs = 0.5;        // Dropout: exact zeros for at least this long ...
     float dropoutActivityDb = -60.0f; // ... after at least this RMS (10 ms before)
     float dcStepDb = -30.0f;          // DcStep: the 2 Hz low-passed signal moves this much ...
@@ -122,10 +137,12 @@ public:
 
     int64_t count (DiscontinuityType type) const noexcept { return counts[static_cast<size_t> (type)]; }
     int64_t total() const noexcept;
-    /** Click candidates set aside because they recur (waveform structure)
-        or break the slope only (kinks: a limiter or clipper catching a peak). */
+    /** Click candidates set aside because they recur (waveform structure),
+        break the slope only (kinks: a limiter or clipper catching a peak) or
+        are band-limited (a sharp onset of programme under a high cut). */
     int64_t recurring() const noexcept { return recurringCount; }
     int64_t kinks() const noexcept { return kinkCount; }
+    int64_t bandLimited() const noexcept { return bandLimitedCount; }
     const std::vector<Discontinuity>& events() const noexcept { return list; }
     int64_t framesSeen() const noexcept { return frames; }
     double sampleRate() const noexcept { return fs; }
@@ -162,6 +179,7 @@ private:
     void judgeClick (Channel& ch, int c, int64_t centre) noexcept;
     bool recurs (const Channel& ch, int64_t centre, double peak) const noexcept;
     bool isValueBreak (const Channel& ch, int64_t centre, double peak) const noexcept;
+    double topBandShare (const Channel& ch, int64_t centre) const noexcept;
     bool isDropout (const Channel& ch, int64_t length) const noexcept;
     void closeZeroRun (Channel& ch, int c, int64_t end) noexcept;
     void closeNanRun (Channel& ch, int c, int64_t end) noexcept;
@@ -186,7 +204,14 @@ private:
         std::array<std::array<double, kFit>, kFit> hat {};
     };
     SideFit fitLeft, fitRight;
-    int64_t frames = 0, recurringCount = 0, kinkCount = 0;
+    // Broadband check: a kShare-point DFT of the Hann-windowed residual
+    // around a candidate, bins kShareFirstBin .. kShare / 2 (3/8 fs ..
+    // Nyquist); the window and the bins' cos / sin.
+    static constexpr int kShare = 32, kShareFirstBin = 12, kShareBins = kShare / 2 - kShareFirstBin + 1;
+    std::array<double, kShare> shareWindow {};
+    std::array<std::array<double, kShare>, kShareBins> shareCos {}, shareSin {};
+    double minTopShare = 0.2;
+    int64_t frames = 0, recurringCount = 0, kinkCount = 0, bandLimitedCount = 0;
     std::array<int64_t, kNumDiscontinuityTypes> counts {};
     std::vector<Channel> chans;
     std::vector<Discontinuity> list;

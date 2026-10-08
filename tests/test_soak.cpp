@@ -11,8 +11,11 @@
 #include "Soak.h"
 
 #include "flub/analysis/Discontinuity.h"
+#include "flub/analysis/LoudnessMeter.h"
 #include "flub/common/AudioBlock.h"
 #include "flub/common/Math.h"
+#include "flub/dsp/ParametricEq.h"
+#include "flub/dsp/TruePeakLimiter.h"
 #include "flub/engine/Parameters.h"
 #include "flub/engine/ProcessingChain.h"
 
@@ -283,6 +286,80 @@ TEST_CASE ("Discontinuity detector: waveform structure is not a click - a clippe
     CHECK (detect (zipper).count (DiscontinuityType::Click) == 0);
 }
 
+TEST_CASE ("Discontinuity detector: a sharp onset of programme under a high cut is band-limited, not a click; a break in that programme still is (E53)")
+{
+    // The soak's game bed (white noise through two 800 Hz one-poles, about
+    // -45 dBFS) with 12 ticks (one-sample impulses of 0.01), through the
+    // EQ's 10 kHz High Cut (12 dB/oct) as a soak row had it: the high cut
+    // makes each tick a smooth band-limited pulse - programme, nothing breaks
+    // - but it also takes the bed's residual down, so all 12 read as clicks,
+    // up to 43 dB over it (the threshold is 24). Now set aside as
+    // band-limited (such a pulse's residual has about 10 % of its energy at
+    // 3/8 fs and above; a break has 70 - 80 %).
+    constexpr int n = kN;
+    std::vector<float> bed (static_cast<size_t> (n));
+    FastRandom rng (11);
+    const double a = 1.0 - std::exp (-kTwoPi * 800.0 / kFs);
+    double lp1 = 0.0, lp2 = 0.0;
+    for (auto& v : bed)
+    {
+        lp1 += a * (rng.nextBipolar() - lp1);
+        lp2 += a * (lp1 - lp2);
+        v = static_cast<float> (0.02 * lp2);
+    }
+    auto ticks = bed;
+    for (int k = 0; k < 12; ++k)
+        ticks[static_cast<size_t> (2011 + k * 3803)] += 0.01f;
+    const auto highCut = [] (std::vector<float> x) {
+        ParametricEq eq;
+        eq.prepare ({ kFs, n, 1 });
+        EqBandParams band;
+        band.enabled = true;
+        band.type = EqBandType::HighCut;
+        band.frequency = 10000.0f;
+        band.slopeDbPerOct = 12;
+        eq.setBand (0, band);
+        eq.reset();
+        float* ch[] = { x.data() };
+        eq.process (AudioBlock (ch, 1, n));
+        return x;
+    };
+    const auto cut = highCut (ticks);
+    DiscontinuitySettings off;
+    off.minTopBandShare = 0.0f; // the check off: as before
+    const auto before = detect (cut, 512, off), after = detect (cut);
+    float worstBefore = 0.0f;
+    for (const auto& e : before.events())
+        worstBefore = std::max (worstBefore, e.overDb);
+    std::printf ("    measured ticks under the 10 kHz high cut: %lld clicks with the check off (largest %.1f dB over), %lld with it (%lld set aside as band-limited)\n",
+                 static_cast<long long> (before.count (DiscontinuityType::Click)), static_cast<double> (worstBefore),
+                 static_cast<long long> (after.count (DiscontinuityType::Click)), static_cast<long long> (after.bandLimited()));
+    CHECK (before.count (DiscontinuityType::Click) == 12);
+    CHECK (after.total() == 0);
+    CHECK (after.bandLimited() == 12);
+    // Without the high cut the ticks are one-sample impulses - breaks: all 12 read.
+    CHECK (detect (ticks).count (DiscontinuityType::Click) == 12);
+
+    // A break made after the high cut is broadband, however band-limited the
+    // programme: a -60 dBFS impulse and a -50 dBFS step on the bed under the
+    // high cut each read once.
+    constexpr int at = 24011;
+    const auto bedCut = highCut (bed);
+    CHECK (detect (bedCut).total() == 0);
+    auto impulse = bedCut;
+    impulse[static_cast<size_t> (at)] += 0.001f;
+    auto step = bedCut;
+    for (int i = at; i < n; ++i)
+        step[static_cast<size_t> (i)] += 0.003f;
+    const std::vector<float>* breaks[] = { &impulse, &step };
+    for (const auto* x : breaks)
+    {
+        const auto d = detect (*x);
+        CHECK (d.count (DiscontinuityType::Click) == 1);
+        CHECK (std::any_of (d.events().begin(), d.events().end(), [] (const Discontinuity& e) { return std::abs (e.frame - at) <= 4; }));
+    }
+}
+
 // ===========================================================================
 // Soak (tools/flubsound-cli/Soak.h)
 // ===========================================================================
@@ -536,6 +613,140 @@ int sceneClicks (double sceneStart, float boost, float macro1, float& worstOverD
     return count;
 }
 } // namespace
+
+namespace
+{
+/** The soak programme's Loud scene (seed 6, 18 - 24 s), rendered once. */
+const std::array<std::vector<float>, 2>& loudScene()
+{
+    static const std::array<std::vector<float>, 2> scene = [] {
+        SoakProgramme programme (kFs, 6);
+        const int skip = static_cast<int> (18.0 * kFs), n = static_cast<int> (6.0 * kFs);
+        std::array<std::vector<float>, 2> s { std::vector<float> (static_cast<size_t> (n)), std::vector<float> (static_cast<size_t> (n)) };
+        std::vector<float> a (512), b (512);
+        for (int pos = 0; pos < skip; pos += 512)
+            programme.render (a.data(), b.data(), std::min (512, skip - pos));
+        for (int pos = 0; pos < n; pos += 512)
+            programme.render (s[0].data() + pos, s[1].data() + pos, std::min (512, n - pos));
+        return s;
+    }();
+    return scene;
+}
+
+/** Clicks in the Loud scene through the plain defaults with the global
+    bypass engaged and the input gain at `inputGainDb` (the chain starts cold
+    at the scene; its first 50 ms are not judged), and the output's
+    integrated loudness. */
+int bypassedLoudClicks (float inputGainDb, float& worstOverDb, float& lufs)
+{
+    auto store = std::make_unique<param::ParameterStore>();
+    store->set (param::BypassAll, 1.0f);
+    store->set (param::InputGainDb, inputGainDb);
+    auto chain = std::make_unique<ProcessingChain> (*store);
+    chain->prepare ({ kFs, 512, 2 });
+    const auto& scene = loudScene();
+    const int n = static_cast<int> (scene[0].size());
+    AudioBuffer io (2, 512);
+    DiscontinuityDetector d;
+    DiscontinuitySettings settings;
+    settings.blockSize = 512;
+    d.prepare (kFs, 2, settings);
+    LoudnessMeter meter;
+    meter.prepare (kFs, 2);
+    for (int pos = 0; pos < n; pos += 512)
+    {
+        const int len = std::min (512, n - pos);
+        for (int c = 0; c < 2; ++c)
+            std::copy_n (scene[static_cast<size_t> (c)].data() + pos, len, io.channel (c));
+        chain->process (io.block (2, len));
+        const float* ch[] = { io.channel (0), io.channel (1) };
+        d.process (ch, len);
+        meter.process (io.block (2, len));
+    }
+    d.finish();
+    int count = 0;
+    worstOverDb = 0.0f;
+    for (const auto& e : d.events())
+        if (e.type == DiscontinuityType::Click && e.frame >= static_cast<int64_t> (0.05 * kFs))
+        {
+            ++count;
+            worstOverDb = std::max (worstOverDb, e.overDb);
+        }
+    lufs = meter.getIntegratedLufs();
+    return count;
+}
+
+/** Integrated loudness of the Loud scene, `inputGainDb` up, through a
+    TruePeakLimiter set up as the bypass reference's (1 ms look-ahead, true
+    peak, -1 dB, 80 ms auto release) with the given envelope. */
+float referenceLimiterLufs (float inputGainDb, const LimiterEnvelope& envelope)
+{
+    TruePeakLimiter limiter;
+    limiter.setLookaheadMs (1.0f);
+    limiter.setTruePeakDetection (true);
+    limiter.setEnvelope (envelope);
+    limiter.prepare ({ kFs, 512, 2 });
+    limiter.setParams ({ -1.0f, 80.0f, true });
+    const auto& scene = loudScene();
+    const int n = static_cast<int> (scene[0].size());
+    const auto gain = static_cast<float> (dbToGain (inputGainDb));
+    AudioBuffer io (2, 512);
+    LoudnessMeter meter;
+    meter.prepare (kFs, 2);
+    for (int pos = 0; pos < n; pos += 512)
+    {
+        const int len = std::min (512, n - pos);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < len; ++i)
+                io.channel (c)[i] = gain * scene[static_cast<size_t> (c)][static_cast<size_t> (pos + i)];
+        limiter.process (io.block (2, len));
+        meter.process (io.block (2, len));
+    }
+    return meter.getIntegratedLufs();
+}
+
+void checkBypassedLoud (float inputGainDb, int clicksBefore)
+{
+    float worst = 0.0f, lufs = 0.0f;
+    const int clicks = bypassedLoudClicks (inputGainDb, worst, lufs);
+    // The take-over's own effect on loudness, the same limiter with and
+    // without it (MSVC, the chain's bypassed output before -> after:
+    // -11.101 -> -11.102, -10.336 -> -10.337, -10.497 -> -10.499 LUFS at
+    // +10 / +16 / +22 dB; its absolute value differs between compilers).
+    const float plain = referenceLimiterLufs (inputGainDb, { true, true, true });
+    const float smooth = referenceLimiterLufs (inputGainDb, { true, true, true, true });
+    std::printf ("    measured clicks in the Loud scene, bypass on, input +%.0f dB: %d (before %d), largest %.1f dB over; integrated %.3f LUFS; "
+                 "the reference limiter alone %.3f -> %.3f LUFS with the smooth take-over\n",
+                 static_cast<double> (inputGainDb), clicks, clicksBefore, static_cast<double> (worst), static_cast<double> (lufs), static_cast<double> (plain),
+                 static_cast<double> (smooth));
+    CHECK (clicks == 0);
+    CHECK_NEAR (smooth, plain, 0.02); // the reference's loudness is unchanged
+}
+} // namespace
+
+// docs/11 E53 class (c): the fuzz and user rows clicked while the global
+// bypass was engaged and the automation had set input.gain to +9 .. +22 dB.
+// The bypass reference's true-peak limiter then works 6 - 12 dB deep, and
+// where an attack ramp took over from a gain still releasing from the last
+// peak (g = min (ramp, release)), or the program envelope from the gain, the
+// gain cornered within a sample. The reference limiter now releases ahead of
+// its attack smoothing (LimiterEnvelope::smoothTakeover), so its gain has no
+// corners; nothing changes with the bypass off (the limiter runs only while
+// it is engaged). Before: the clicks below, all at those corners.
+TEST_CASE ("KnownGap closed: the bypass reference at +10 dB input gain reads no clicks in the soak's Loud scene - its limiter's attack takes over from a release without a corner (E53 class (c))")
+{
+    checkBypassedLoud (10.0f, 7);
+}
+
+TEST_CASE ("KnownGap closed: the bypass reference at +16 dB input gain reads no clicks in the soak's Loud scene (E53 class (c))")
+{
+    checkBypassedLoud (16.0f, 12);
+}
+
+TEST_CASE ("KnownGap closed: the bypass reference at +22 dB input gain reads no clicks in the soak's Loud scene (E53 class (c))")
+{
+    checkBypassedLoud (22.0f, 9);
+}
 
 TEST_CASE ("KnownGap: Punch 53 % with Boost 66 % reads as clicks on the soak's speech voice - Clarity's onset lift into the maximizer (E53 fuzz triage; speech ticks at medium Boost accepted by the owner, 2026-10-06)")
 {

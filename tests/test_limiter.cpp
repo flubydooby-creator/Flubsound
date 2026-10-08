@@ -17,6 +17,7 @@
 #include "TestFramework.h"
 #include "TestSignals.h"
 
+#include "flub/analysis/Discontinuity.h"
 #include "flub/dsp/TruePeakLimiter.h"
 #include "flub/engine/MixEngine.h"
 #include "flub/engine/Parameters.h"
@@ -1365,6 +1366,126 @@ TEST_CASE ("TruePeakLimiter: with the LF-safe envelope the output is bit-identic
     CHECK (guard.allocations() == 0);
     CHECK_LE (planarPeak (buf), dbfs (-1.0));
     CHECK (lim.getSafetyClipCount() == 0u);
+}
+
+//==============================================================================
+// docs/11 E53: the smooth take-over (LimiterEnvelope::smoothTakeover, the
+// chain's bypass-reference limiter)
+//==============================================================================
+namespace
+{
+struct TakeoverRun
+{
+    double maxCurvature = 0.0; // max |second difference| of the gain
+    double minGain = 1.0;
+    double peak = 0.0;
+    uint64_t clips = 0;
+    int64_t clicks = 0; // DiscontinuityDetector on the output
+    std::vector<float> out;
+};
+
+/** Eight pairs of 100 Hz bursts (20 ms, 2 ms raised-cosine edges) on a quiet
+    220 Hz tone: 4 dB, then 5 ms after it 14 dB over a -1 dB ceiling, so the
+    second burst's attack meets the gain while it still releases from the
+    first. 1 ms look-ahead (the bypass reference's); a third, quiet channel
+    (1e-3, never limited) reads the linked gain. */
+TakeoverRun takeoverRun (const LimiterEnvelope& envelope, int blockSize = 256)
+{
+    const int n = static_cast<int> (kFs * 0.8);
+    std::vector<float> x (static_cast<size_t> (n));
+    const auto burst = [] (double t, double start, double amp) {
+        const double u = t - start, edge = 0.002, length = 0.02;
+        if (u <= 0.0 || u >= length)
+            return 0.0;
+        const double env = u < edge ? 0.5 - 0.5 * std::cos (kPi * u / edge) : u > length - edge ? 0.5 - 0.5 * std::cos (kPi * (length - u) / edge) : 1.0;
+        return amp * env * std::sin (kTwoPi * 100.0 * u);
+    };
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / kFs;
+        double v = 0.1 * std::sin (kTwoPi * 220.0 * t);
+        for (int k = 0; k < 8; ++k)
+            v += burst (t, 0.05 + 0.09 * k, 1.4) + burst (t, 0.075 + 0.09 * k, 4.5);
+        x[static_cast<size_t> (i)] = static_cast<float> (v);
+    }
+    TruePeakLimiter lim;
+    lim.setEnvelope (envelope);
+    prepareLimiter (lim, kFs, 3, 512, 1.0f);
+    lim.setParams (limiterParams (-1.0f, 80.0f, true));
+    Planar buf (3, n);
+    setChannel (buf, 0, x);
+    setChannel (buf, 1, x);
+    setChannel (buf, 2, std::vector<float> (static_cast<size_t> (n), 1.0e-3f));
+    processInBlocks (lim, buf, blockSize);
+    TakeoverRun r;
+    const int latency = lim.latencySamples();
+    for (int i = latency + 2; i < n; ++i)
+    {
+        const auto g = [&buf] (int k) { return static_cast<double> (buf.ch[2][static_cast<size_t> (k)]) / 1.0e-3; };
+        r.maxCurvature = std::max (r.maxCurvature, std::abs (g (i) - 2.0 * g (i - 1) + g (i - 2)));
+        r.minGain = std::min (r.minGain, g (i));
+    }
+    r.peak = std::max (peakAbs (buf.ch[0].data(), n), peakAbs (buf.ch[1].data(), n));
+    r.clips = lim.getSafetyClipCount();
+    DiscontinuityDetector detector;
+    detector.prepare (kFs, 1);
+    const float* ch[] = { buf.ch[0].data() };
+    detector.process (ch, n);
+    detector.finish();
+    r.clicks = detector.count (DiscontinuityType::Click);
+    r.out = buf.ch[0];
+    return r;
+}
+} // namespace
+
+TEST_CASE ("TruePeakLimiter: with smoothTakeover an attack that takes over from a release has no corner; the ceiling, the bass hold and block-size invariance hold (docs/11 E53)")
+{
+    // Without it the gain is min (attack ramp, release): the second burst's
+    // ramp is already falling where it meets the releasing gain, so the gain
+    // turns from rising to falling within a sample (a corner as steep as the
+    // ramp), which the E53 soak read as clicks on the bypass reference driven
+    // 10 - 22 dB over its ceiling. With it the release runs ahead of the
+    // attack smoothing, so the gain is that smoothing's output: its second
+    // difference stays within the triangular ramp's own curvature, at most a
+    // full-scale drop over the two 21-sample boxes (1 / 441).
+    const auto plain = takeoverRun ({ true, true, true });
+    const auto smooth = takeoverRun ({ true, true, true, true });
+    std::printf ("    measured max |gain second difference|: LF-safe envelope %.2e, + smooth take-over %.2e (deepest gain %.3f / %.3f); clicks %lld / %lld\n",
+                 plain.maxCurvature, smooth.maxCurvature, plain.minGain, smooth.minGain, static_cast<long long> (plain.clicks),
+                 static_cast<long long> (smooth.clicks));
+    CHECK_GE (plain.maxCurvature, 4.0 * smooth.maxCurvature);
+    CHECK_LE (smooth.maxCurvature, 1.0 / 441.0);
+    CHECK (plain.clicks >= 4);
+    CHECK (smooth.clicks == 0);
+    // The limiting itself: as deep, under the ceiling, no safety clamp.
+    CHECK_NEAR (smooth.minGain, plain.minGain, 0.02);
+    CHECK_LE (smooth.peak, dbfs (-1.0));
+    CHECK (smooth.clips == 0u);
+    CHECK (plain.clips == 0u);
+    // Bit-identical for any block size.
+    for (int block : { 1, 7, 4096 })
+        CHECK (takeoverRun ({ true, true, true, true }, block).out == smooth.out);
+
+    // The period hold still holds a hot bass tone's gain from peak to peak.
+    const int n = static_cast<int> (kFs * 2.0);
+    TruePeakLimiter held;
+    const auto y = limitTone (sine (40.0, kFs, n, 2.0f), { true, true, true, true }, &held);
+    CHECK_LE (thdnDb (y, static_cast<int> (kFs), static_cast<int> (kFs), 40.0), -90.0);
+    CHECK_LE (peakAbs (y.data(), n), dbfs (-1.0));
+    CHECK (held.getSafetyClipCount() == 0u);
+
+    // process() does not allocate.
+    TruePeakLimiter lim;
+    lim.setEnvelope ({ true, true, true, true });
+    prepareLimiter (lim, kFs, 2, 512, 1.0f);
+    lim.setParams (limiterParams (-1.0f, 80.0f, true));
+    Planar buf (2, n);
+    setChannel (buf, 0, sine (40.0, kFs, n, 2.0f));
+    setChannel (buf, 1, sine (55.0, kFs, n, 2.0f));
+    AllocationGuard guard;
+    processInBlocks (lim, buf, 256);
+    lim.reset();
+    CHECK (guard.allocations() == 0);
 }
 
 TEST_CASE ("MixEngine: the master limiter has the LF-safe envelope - two strips summing 40 Hz 6 dB over the ceiling stay undistorted, the ceiling and the latency hold (E05)")

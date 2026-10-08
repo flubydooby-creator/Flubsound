@@ -94,7 +94,7 @@ struct SoakReport
     std::vector<std::pair<std::string, int64_t>> actionCounts; // per kind ("macro", "toggle", ...)
     std::array<int64_t, kNumDiscontinuityTypes> output {}, input {}; // detections per type
     std::vector<SoakDetection> detections;                           // output, up to detector.maxReported
-    int64_t outputKinks = 0, outputRecurring = 0; // click candidates set aside (DiscontinuityDetector::kinks / recurring)
+    int64_t outputKinks = 0, outputRecurring = 0, outputBandLimited = 0; // click candidates set aside (DiscontinuityDetector::kinks / recurring / bandLimited)
     float outputPeakDbfs = -160.0f;
     double wallSeconds = 0.0, maxBlockMs = 0.0, meanBlockMs = 0.0, blockBudgetMs = 0.0;
     int64_t blocksOverBudget = 0;

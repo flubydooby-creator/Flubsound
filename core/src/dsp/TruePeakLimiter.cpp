@@ -247,6 +247,7 @@ void TruePeakLimiter::reset() noexcept FLUB_NONBLOCKING
     holdSamples = spacingLast = spacingPrev = 0;
     sincePeakStart = sinceOverSample = 2 * holdMax + peakGap; // no recent peak
     programGain = 1.0;
+    held = 1.0;
     holdMs.store (0.0f, std::memory_order_relaxed);
 
     // No previous output to click against: the ceiling starts at its target.
@@ -319,7 +320,28 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
     uint64_t clips = 0;
     const bool periodHold = envelope.periodHold;
     const bool program = envelope.programEnvelope;
+    const bool takeover = envelope.smoothTakeover;
     const uint32_t counterCap = 2 * holdMax + peakGap;
+
+    // The release coefficient: fast for isolated peaks, blended to slow as the
+    // current limiting run spans kBlendStartMs .. kBlendEndMs.
+    const auto releaseCoeff = [this]() noexcept {
+        const double blend = std::clamp (static_cast<double> (runSpan - blendStart) * blendScale, 0.0, 1.0);
+        return fastCoeff + (slowCoeff - fastCoeff) * blend;
+    };
+    // The program envelope: a slow one-pole follower of `level`.
+    const auto followProgram = [this] (double level) noexcept {
+        if (level < programGain)
+        {
+            programGain = level + programAttack * (programGain - level);
+        }
+        else
+        {
+            programGain = level + programRelease * (programGain - level);
+            if (level - programGain < kLand)
+                programGain = level;
+        }
+    };
 
     // Strictly per sample with all state carried across calls, so the output
     // is bit-identical for any host block size.
@@ -393,7 +415,51 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         const float m = dqValue[dequeFront & dequeMask];
         ++sampleIndex;
 
-        // ---- 4) box filter: mean of m over the last L - Kh + 1 samples ------------
+        // ---- 4) program-dependent release: the run it belongs to ------------------
+        // runSpan = time from the first to the latest over of the current run
+        // (overs < kRunGapMs apart); the run ends once the gain has recovered.
+        // (smoothTakeover: the released minimum h stands for the gain.)
+        if (r < 1.0f)
+        {
+            sinceOver = 0;
+            runSpan = runAge;
+        }
+        else if (sinceOver <= gapSamples)
+        {
+            ++sinceOver;
+        }
+        if (sinceOver > gapSamples && (takeover ? held : gain) >= kRecoveredGain)
+            runAge = runSpan = 0;
+        else if (runAge < blendEnd)
+            ++runAge;
+
+        // ---- 4b) smoothTakeover: release and program envelope ahead of the box ----
+        // h = min (m, release (h)) and h' = min (h, p): h' <= m, so the box
+        // below keeps its guarantee, and its output is the gain itself.
+        float boxIn = m;
+        if (takeover)
+        {
+            if (m <= held)
+            {
+                held = m;
+            }
+            else
+            {
+                held = m + releaseCoeff() * (held - m);
+                if (m - held < kLand)
+                    held = m;
+            }
+            double target = held;
+            if (program)
+            {
+                followProgram (held);
+                target = std::min (held, programGain);
+            }
+            boxIn = static_cast<float> (target);
+        }
+
+        // ---- 5) box filter: mean of m (smoothTakeover: h' <= m) over the last
+        //         L - Kh + 1 samples -------------------------------------------------
         // Every m[k], k in [n-L+Kh, n], has r[j] in its window for every j in
         // [n-L-1-Kh, n-L+Kh], so the mean is <= all of them: the gain is down
         // to the required value Kh samples before the peak (and the
@@ -401,8 +467,8 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
         // linear ramp of L - Kh + 1 samples, and stays there until Kh samples
         // after it.
         const float oldM = box[ringPos];
-        box[ringPos] = m;
-        boxSum += static_cast<double> (m) - static_cast<double> (oldM);
+        box[ringPos] = boxIn;
+        boxSum += static_cast<double> (boxIn) - static_cast<double> (oldM);
         ceilHist[ceilingPos] = ceilingLin;
         if (++ceilingPos > lookahead)
             ceilingPos = 0;
@@ -437,53 +503,36 @@ void TruePeakLimiter::process (const AudioBlock& block) noexcept FLUB_NONBLOCKIN
             env = std::clamp (box2Sum / box2Length, 0.0, 1.0);
         }
 
-        // ---- 5) program-dependent release ----------------------------------------
-        // runSpan = time from the first to the latest over of the current run
-        // (overs < kRunGapMs apart); the run ends once the gain has recovered.
-        if (r < 1.0f)
+        // ---- 5b) gain ----------------------------------------------------------------
+        double outGain = env;
+        if (takeover)
         {
-            sinceOver = 0;
-            runSpan = runAge;
-        }
-        else if (sinceOver <= gapSamples)
-        {
-            ++sinceOver;
-        }
-        if (sinceOver > gapSamples && gain >= kRecoveredGain)
-            runAge = runSpan = 0;
-        else if (runAge < blendEnd)
-            ++runAge;
-
-        // g = min (a, release (g)): attack follows the envelope exactly (it is
-        // already a linear ramp), release is a one-pole towards it.
-        if (env <= gain)
-        {
+            // Released (and program-enveloped) ahead of the box: the box's
+            // output is the gain.
             gain = env;
         }
         else
         {
-            const double blend = std::clamp (static_cast<double> (runSpan - blendStart) * blendScale, 0.0, 1.0);
-            const double coeff = fastCoeff + (slowCoeff - fastCoeff) * blend;
-            gain = env + coeff * (gain - env);
-            if (env - gain < kLand)
-                gain = env;
-        }
-        double outGain = gain;
-        if (program)
-        {
-            // Program envelope: a slow follower of g; the output takes the
-            // lower of the two, so it can only reduce further.
-            if (gain < programGain)
+            // g = min (a, release (g)): attack follows the envelope exactly (it
+            // is already a ramp), release is a one-pole towards it.
+            if (env <= gain)
             {
-                programGain = gain + programAttack * (programGain - gain);
+                gain = env;
             }
             else
             {
-                programGain = gain + programRelease * (programGain - gain);
-                if (gain - programGain < kLand)
-                    programGain = gain;
+                gain = env + releaseCoeff() * (gain - env);
+                if (env - gain < kLand)
+                    gain = env;
             }
-            outGain = std::min (gain, programGain);
+            outGain = gain;
+            if (program)
+            {
+                // Program envelope: a slow follower of g; the output takes the
+                // lower of the two, so it can only reduce further.
+                followProgram (gain);
+                outGain = std::min (gain, programGain);
+            }
         }
         const float g = static_cast<float> (outGain);
         minGain = std::min (minGain, g);

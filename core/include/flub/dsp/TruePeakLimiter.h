@@ -53,6 +53,25 @@
 //     release 800 ms, one-pole in the linear gain) and the output gain is
 //     min(g, p) <= g: sustained limiting keeps a base reduction, so dense
 //     kicks modulate everything else less. The ceiling guarantee is g's.
+//
+// Optional smooth take-over (docs/11 E53; setEnvelope(), structural, off by
+// default - only the chain's bypass-reference limiter turns it on):
+//   * smoothTakeover: the release (and the program envelope) act on the
+//     sliding minimum before the attack smoothing instead of after it:
+//         h[n] = min(m[n], release(h[n-1]))   (p follows h; h' = min(h, p))
+//         g[n] = mean(h'[n-L+Kh .. n])         (the box or smoothAttack cascade)
+//     Without it, g = min(a, release(g)) switches from a release to an
+//     attack ramp that is already falling where the ramp crosses the
+//     releasing gain, so the gain turns from rising to falling within a
+//     sample (a corner as steep as the ramp: on the E53 soak's loud music
+//     at +16 dB, 1 ms look-ahead, 0.3 - 0.7 % of the signal per sample),
+//     and min(g, p) corners the same way; driven 10 - 22 dB over the
+//     ceiling, the bypass reference read as clicks at those corners. With
+//     it, every change of g - attack, take-over, release - comes out of the
+//     same smoothing, so g is as smooth as the attack ramp itself (no
+//     corners with smoothAttack). h' <= m, so the attack guarantee above
+//     (a[n] <= r[j]) holds unchanged; a release starts up to L - Kh + 1
+//     samples later (the smoothing's length; no ceiling consequence).
 #pragma once
 
 #include "Processor.h"
@@ -76,12 +95,13 @@ struct LimiterParams
     bool operator== (const LimiterParams&) const = default;
 };
 
-/** The optional LF-safe envelope stages (see the header comment); structural. */
+/** The optional LF-safe envelope stages and the smooth take-over (see the header comment); structural. */
 struct LimiterEnvelope
 {
     bool periodHold = false;
     bool smoothAttack = false;
     bool programEnvelope = false;
+    bool smoothTakeover = false;
 
     bool operator== (const LimiterEnvelope&) const = default;
 };
@@ -195,6 +215,9 @@ private:
 
     // programEnvelope: the slow program gain and its one-pole coefficients.
     double programGain = 1.0, programAttack = 0.0, programRelease = 0.0;
+
+    // smoothTakeover: the released sliding minimum h (ahead of the smoothing).
+    double held = 1.0;
 
     // Ceiling: smoothed in dB; linear value and detector threshold derived from it.
     LinearSmoothedValue ceilingDbS;
