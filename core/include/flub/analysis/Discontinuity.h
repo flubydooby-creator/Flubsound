@@ -30,20 +30,31 @@
 //                  2 x blockSize (when given) do not count: zipper noise, a
 //                  step at every block boundary while a parameter moves,
 //                  recurs at exactly that lag;
-//                * broadband (docs/11 E53): at least minTopBandShare of the
-//                  spike's residual energy (32 samples around it, Hann
-//                  window) lies at or above 3/8 fs. A break in the stream
+//                * broadband, only when minTopBandShare is set (docs/11
+//                  E53; OFF by default - every built-in user, the CLI soak,
+//                  the device soak and `analyze --glitches`, leaves it off
+//                  unless --band-check asks for it): at least that share of
+//                  the spike's residual energy (32 samples around it, Hann
+//                  window) lies at or above 3/8 fs (kBandCheckShare = 0.2
+//                  is the value --band-check uses). A break in the stream
 //                  - an impulse, a step, a skipped sample, a gain step -
 //                  reaches Nyquist whatever the programme: 0.72 - 0.81 on
 //                  tones, 0.33 - 0.85 for every click the E53 soak found.
 //                  A sharp onset of band-limited programme does not: a tick
 //                  through a 10 kHz high cut is 0.10 (6 kHz 0.07, 12 kHz
 //                  0.13), yet over a residual the high cut also lowered it
-//                  read 47 dB over (counted apart: bandLimited()). A break
-//                  made ahead of a high cut (inside the processing, before
-//                  an EQ's high cut) is band-limited by it as well and is
-//                  set aside the same way; under a high cut at 16 kHz
-//                  (0.26) a tick still reads as a click.
+//                  read 47 dB over (counted apart: bandLimited()). The cost,
+//                  and why it is off by default: a break made ahead of a
+//                  high cut at about 12 kHz or lower is band-limited by it
+//                  as well and is set aside the same way. In the chain the
+//                  EQ is the third slot, so with an EQ high cut that hides
+//                  the breaks of the input stage and fold, the gate, the
+//                  neural slot and the EQ's own coefficient switches; the
+//                  factory preset Lo-fi Chill has one (eq.8: High Cut
+//                  10 kHz, 12 dB/oct), and the soak's automation loads
+//                  factory presets. Under a high cut at 16 kHz (0.26) a
+//                  tick still reads as a click. No soak row has needed it
+//                  (0 set aside in every row of the 2026-10-08 runs).
 //              One event per windowMs.
 //   Dropout    a run of exact zeros of at least minDropoutMs that starts
 //              abruptly (the residual at its edge is clickRatioDb over the
@@ -98,12 +109,15 @@ struct DiscontinuitySettings
     double windowMs = 2.0;            // ... RMS window on each side
     double repeatMs = 25.0;           // ... and not recurring within this (a pitch period)
     int blockSize = 0;                // ... except at 1 and 2 blocks (0 = unknown)
-    float minTopBandShare = 0.2f;     // ... and broadband: this share of it at or above 3/8 fs (0 = off)
+    float minTopBandShare = 0.0f;     // ... and broadband: this share of it at or above 3/8 fs (0 = off, the default)
     double minDropoutMs = 0.5;        // Dropout: exact zeros for at least this long ...
     float dropoutActivityDb = -60.0f; // ... after at least this RMS (10 ms before)
     float dcStepDb = -30.0f;          // DcStep: the 2 Hz low-passed signal moves this much ...
     double dcStepWindowMs = 250.0;    // ... within this long
     int maxReported = 100;            // events kept in events() (the counts are always complete)
+
+    /** The broadband check's share when it is asked for (`--band-check`; see the header comment). */
+    static constexpr float kBandCheckShare = 0.2f;
 };
 
 struct Discontinuity
@@ -131,15 +145,16 @@ public:
     void process (const float* const* channels, int numFrames) noexcept FLUB_NONBLOCKING;
 
     /** End of the stream: closes open dropout / non-finite runs. The last
-        few ms (the look-ahead: repeatMs or windowMs, + 6 samples) are not
-        judged for clicks. */
+        few ms (the look-ahead: repeatMs or windowMs, + 6 samples; at least
+        17 samples) are not judged for clicks. */
     void finish() noexcept;
 
     int64_t count (DiscontinuityType type) const noexcept { return counts[static_cast<size_t> (type)]; }
     int64_t total() const noexcept;
     /** Click candidates set aside because they recur (waveform structure),
-        break the slope only (kinks: a limiter or clipper catching a peak) or
-        are band-limited (a sharp onset of programme under a high cut). */
+        break the slope only (kinks: a limiter or clipper catching a peak) or,
+        with minTopBandShare set, are band-limited (a sharp onset of programme
+        under a high cut - or a break made ahead of one). */
     int64_t recurring() const noexcept { return recurringCount; }
     int64_t kinks() const noexcept { return kinkCount; }
     int64_t bandLimited() const noexcept { return bandLimitedCount; }
@@ -210,7 +225,7 @@ private:
     static constexpr int kShare = 32, kShareFirstBin = 12, kShareBins = kShare / 2 - kShareFirstBin + 1;
     std::array<double, kShare> shareWindow {};
     std::array<std::array<double, kShare>, kShareBins> shareCos {}, shareSin {};
-    double minTopShare = 0.2;
+    double minTopShare = 0.0;
     int64_t frames = 0, recurringCount = 0, kinkCount = 0, bandLimitedCount = 0;
     std::array<int64_t, kNumDiscontinuityTypes> counts {};
     std::vector<Channel> chans;

@@ -636,6 +636,12 @@ public:
         diagnostics on the audio thread or after a render. */
     const StartleGuard& getStartleGuard() const noexcept { return startleGuard; }
 
+    /** Tests only (docs/11 E53): false builds the bypass reference's limiter
+        without its smooth take-over (LimiterEnvelope::smoothTakeover) from
+        the next prepare() on, so a test can measure that fix's before -> after
+        on the chain itself. Default true; the app never calls it. */
+    void setBypassReferenceSmoothTakeoverForTests (bool on) noexcept { drySmoothTakeover = on; }
+
     MeterBus& meters() noexcept { return meterBus; }
     AnalyzerTaps& taps() noexcept { return analyzerTaps; }
 
@@ -887,6 +893,7 @@ private:
     AudioBuffer dryBuffer;
     DelayLine dryDelay;
     TruePeakLimiter dryLimiter;
+    bool drySmoothTakeover = true; // setBypassReferenceSmoothTakeoverForTests()
     bool dryLimiterRunning = false;
     int dryWarmup = 0; // samples the crossfade waits after a cold start of dryLimiter (its latency)
 

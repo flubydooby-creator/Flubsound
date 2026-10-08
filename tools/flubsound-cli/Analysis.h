@@ -199,19 +199,22 @@ std::string formatEvents (const EventsReport& report, size_t maxLines = 50);
 std::string formatBandTracks (const std::vector<BandTrack>& tracks);
 
 // ---- Glitches (docs/11 E53, `analyze --glitches`) ---------------------------
-/** flub::DiscontinuityDetector (default settings) over every channel of a
-    file (a loopback capture, a render). */
+/** flub::DiscontinuityDetector (default settings; `bandCheck` turns on its
+    broadband check, DiscontinuitySettings::kBandCheckShare) over every
+    channel of a file (a loopback capture, a render). */
 struct GlitchReport
 {
     double sampleRate = 48000.0;
     std::array<int64_t, kNumDiscontinuityTypes> counts {};
     std::vector<Discontinuity> events; // the first 100
+    bool bandCheck = false;
+    int64_t bandLimited = 0; // click candidates set aside as band-limited (bandCheck only)
 };
 
-GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate);
+GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate, bool bandCheck = false);
 
-/** { click, dropout, non-finite, dc-step, total, list [{ type, channel,
-    seconds, lengthMs, levelDb, overDb }] }. */
+/** { click, dropout, non-finite, dc-step, total, [bandLimited (bandCheck
+    only),] list [{ type, channel, seconds, lengthMs, levelDb, overDb }] }. */
 json::Value glitchesToJson (const GlitchReport& report);
 
 /** Multi-line text: counts, then at most maxLines events. */

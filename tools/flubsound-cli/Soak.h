@@ -28,7 +28,13 @@
 //     automation action before it. Also: the output's sample peak, and the
 //     wall time per block against its real-time budget.
 //
-// Everything but the wall times is deterministic for a seed.
+// Everything but the wall times is deterministic for a seed, and every
+// compiler makes the same random draws in the same order (each draw is a
+// statement of its own: a call's arguments are evaluated in an unspecified
+// order, and until 2026-10-08 clang drew the chord notes' pans and phases
+// and the syllables' pitches and lengths in another order than MSVC and
+// gcc, so its programme was another one). Only the maths library's last
+// bits (sin, exp, pow) still differ between platforms.
 #pragma once
 
 #include "flub/analysis/Discontinuity.h"

@@ -762,14 +762,18 @@ std::string formatBandTracks (const std::vector<BandTrack>& tracks)
 // ===========================================================================
 // Glitches (docs/11 E53)
 // ===========================================================================
-GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate)
+GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, double sampleRate, bool bandCheck)
 {
     GlitchReport r;
     r.sampleRate = sampleRate;
+    r.bandCheck = bandCheck;
     if (channels.empty())
         return r;
+    DiscontinuitySettings settings;
+    if (bandCheck)
+        settings.minTopBandShare = DiscontinuitySettings::kBandCheckShare;
     DiscontinuityDetector d;
-    d.prepare (sampleRate, static_cast<int> (channels.size()));
+    d.prepare (sampleRate, static_cast<int> (channels.size()), settings);
     size_t length = channels[0].size();
     for (const auto& c : channels)
         length = std::min (length, c.size());
@@ -784,6 +788,7 @@ GlitchReport detectGlitches (const std::vector<std::vector<float>>& channels, do
     for (int t = 0; t < kNumDiscontinuityTypes; ++t)
         r.counts[static_cast<size_t> (t)] = d.count (static_cast<DiscontinuityType> (t));
     r.events = d.events();
+    r.bandLimited = d.bandLimited();
     return r;
 }
 
@@ -797,6 +802,8 @@ json::Value glitchesToJson (const GlitchReport& r)
         total += r.counts[static_cast<size_t> (t)];
     }
     v.set ("total", static_cast<double> (total));
+    if (r.bandCheck)
+        v.set ("bandLimited", static_cast<double> (r.bandLimited));
     json::Value list { json::Value::Array {} };
     for (const auto& e : r.events)
     {
@@ -824,6 +831,8 @@ std::string formatGlitches (const GlitchReport& r, size_t maxLines)
         s += (t == 0 ? "" : ", ") + std::to_string (r.counts[static_cast<size_t> (t)]) + " " + discontinuityName (static_cast<DiscontinuityType> (t));
         total += r.counts[static_cast<size_t> (t)];
     }
+    if (r.bandCheck)
+        s += " (band check: " + std::to_string (r.bandLimited) + " set aside as band-limited)";
     s += "\n";
     char buf[160];
     for (size_t i = 0; i < r.events.size() && i < maxLines; ++i)

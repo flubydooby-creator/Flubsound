@@ -136,6 +136,7 @@ enum class Opt
     Events,
     EventBand,
     Glitches,
+    BandCheck,
     Spatial,
     FocusIld,
     Seconds,
@@ -185,6 +186,7 @@ constexpr OptionSpec kOptions[] = {
     { Opt::Events, "--events", nullptr, false, false, kAnalyze },
     { Opt::EventBand, "--event-band", nullptr, true, false, kAnalyze },
     { Opt::Glitches, "--glitches", nullptr, false, false, kAnalyze },
+    { Opt::BandCheck, "--band-check", nullptr, false, false, kAnalyze | kSoak },
     { Opt::Spatial, "--spatial", nullptr, false, false, kAnalyze },
     { Opt::FocusIld, "--focus-ild", nullptr, false, false, kAnalyze },
     { Opt::Seconds, "--seconds", nullptr, true, false, kSoak | kDemo },
@@ -579,6 +581,7 @@ bool applyOption (const OptionSpec& spec, const std::string& value, CliOptions& 
         case Opt::Bands: o.bands = true; return true;
         case Opt::Events: o.events = true; return true;
         case Opt::Glitches: o.glitches = true; return true;
+        case Opt::BandCheck: o.bandCheck = true; return true;
         case Opt::Spatial: o.spatial = true; return true;
         case Opt::FocusIld: o.focusIld = true; return true;
         case Opt::Json: o.json = true; return true;

@@ -32,9 +32,16 @@ true-peak limiter clicked when a large input.gain drove it far over the
 ceiling, until its smooth take-over (docs/11 E53, 2026-10-08); a click
 there now is a new finding. The click candidates the detector set aside as
 the waveform's own (kinks, recurring, band-limited) are listed per row.
+--band-check passes the detector's broadband check to every row (off by
+default: it also hides a break made ahead of a high cut at about 12 kHz or
+lower, e.g. inside the chain while a factory preset such as Lo-fi Chill,
+10 kHz high cut, is loaded). A row where it set anything aside is marked
+REVIEW (it does not fail the run): rerun that row without --band-check to
+see those candidates as clicks.
 
 Exit code 0 when no row found a discontinuity outside --known (and no
-programme self-check failed), 1 otherwise, 2 on usage / run errors.
+programme self-check failed; REVIEW rows included), 1 otherwise, 2 on usage
+/ run errors.
 Standard library only.
 """
 import argparse
@@ -90,8 +97,11 @@ def main():
     ap.add_argument("--known", action="append", default=None,
                     help='last actions whose detections are known findings, e.g. "bypass -> on" (default: none); repeatable')
     ap.add_argument("--json", default="", help="write the full reports here")
+    ap.add_argument("--band-check", action="store_true",
+                    help="the detector's broadband check in every row (off by default; rows where it set anything aside are marked REVIEW)")
     args = ap.parse_args()
     known = set(args.known or [])
+    common = ["--band-check"] if args.band_check else []
 
     rows = [r for r in MATRIX if args.only in r[0]]
     if not rows:
@@ -101,13 +111,14 @@ def main():
     reports = []
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = [pool.submit(run_row, args.cli, name, seed + args.seed, extra, args.minutes) for name, seed, extra in rows]
+            futures = [pool.submit(run_row, args.cli, name, seed + args.seed, extra + common, args.minutes) for name, seed, extra in rows]
             reports = [f.result() for f in futures]
     except (RuntimeError, OSError, json.JSONDecodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
     failed = False
+    review = []
     for r in reports:
         out, inp = r["output"], r["input"]
         by_kind = collections.Counter(action_kind(d["lastAction"]) for d in r["detections"])
@@ -117,15 +128,21 @@ def main():
         bypassed = sum(1 for d in r["detections"] if d.get("bypassed") and action_kind(d["lastAction"]) not in known)
         bad = unknown > 0 or inp["total"] > 0
         failed |= bad
+        band_limited = int(out["setAside"].get("bandLimited", 0))
+        if band_limited > 0:
+            review.append(r["name"])
         t = r["timing"]
         print(f"{r['name']:<12} {r['seconds'] / 60:6.1f} min  {r['actions']['total']:6d} actions  "
               f"click {out['click']:4d}  dropout {out['dropout']:3d}  non-finite {out['non-finite']:3d}  dc-step {out['dc-step']:3d}  "
               f"(set aside: {out['setAside']['kinks']} kinks, {out['setAside']['recurring']} recurring, "
-              f"{out['setAside'].get('bandLimited', 0)} band-limited)  "
+              f"{band_limited} band-limited)  "
               f"not known {unknown} ({bypassed} while bypassed)  peak {r['outputPeakDbfs']} dBFS  {t['realtimeFactor']}x RT, max block {t['maxBlockMs']} ms  "
-              f"{'FAIL' if bad else 'ok'}")
+              f"{'FAIL' if bad else 'REVIEW' if band_limited > 0 else 'ok'}")
         if inp["total"] > 0:
             print(f"    programme self-check failed: {inp}")
+        if band_limited > 0:
+            print(f"    REVIEW: {band_limited} click candidate(s) set aside as band-limited by --band-check - a sharp onset under a high cut, "
+                  f"or a break made ahead of one; rerun without --band-check to see them")
         for kind, n in by_kind.most_common():
             first = next(d for d in r["detections"] if action_kind(d["lastAction"]) == kind)
             print(f"    {n:4d} after {kind}{' (known)' if kind in known else ''}: first at {first['seconds']} s, ch {first['channel']}, "
@@ -134,8 +151,10 @@ def main():
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
-            json.dump({"format": "flubsound-soak-report", "minutes": args.minutes, "known": sorted(known), "rows": reports}, f, indent=1)
-    print("soak: " + ("DISCONTINUITIES FOUND" if failed else "no discontinuities outside the known findings"))
+            json.dump({"format": "flubsound-soak-report", "minutes": args.minutes, "known": sorted(known), "bandCheck": args.band_check,
+                       "review": review, "rows": reports}, f, indent=1)
+    print("soak: " + ("DISCONTINUITIES FOUND" if failed else "no discontinuities outside the known findings")
+          + (f"; to review (band-limited set-asides): {', '.join(review)}" if review else ""))
     return 1 if failed else 0
 
 

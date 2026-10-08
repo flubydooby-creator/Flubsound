@@ -136,7 +136,16 @@ struct SoakProgramme::Impl
         {
             const double root = kRoot[rng.nextU32() % 4];
             for (double ratio : { 1.0, 1.26, 1.5 })
-                pan (add (Voice::Tone, root * ratio, 0.035, 60.0, 1750.0, 150.0), uniform (0.2, 0.8));
+            {
+                // Each draw in a statement of its own: the order in which a
+                // call's arguments are evaluated is unspecified (clang goes
+                // left to right, MSVC and gcc here right to left), so the
+                // programme was not the same for a seed on every compiler
+                // (docs/11 E53, 2026-10-08). The position first, then the
+                // voice's phase (inside add()): MSVC's and gcc's order.
+                const double position = uniform (0.2, 0.8);
+                pan (add (Voice::Tone, root * ratio, 0.035, 60.0, 1750.0, 150.0), position);
+            }
         }
         for (int half = 0; half < 2; ++half)
             if (uniform (0.0, 1.0) < 0.7)
@@ -189,7 +198,10 @@ struct SoakProgramme::Impl
 
     void syllable()
     {
-        auto& v = add (Voice::Harmonic, uniform (110.0, 180.0), 0.12, 20.0, uniform (80.0, 150.0), 40.0);
+        // One draw per statement (see musicBeat()): the hold, then the pitch.
+        const double holdMs = uniform (80.0, 150.0);
+        const double pitchHz = uniform (110.0, 180.0);
+        auto& v = add (Voice::Harmonic, pitchHz, 0.12, 20.0, holdMs, 40.0);
         v.freqEnd = v.freq * uniform (0.85, 1.15);
         // Harmonics up to 4 kHz, 1/k weighted plus two formant peaks (a vowel).
         const double formant1 = uniform (300.0, 800.0), formant2 = uniform (900.0, 2200.0);

@@ -620,7 +620,7 @@ void ProcessingChain::prepare (const ChainConfig& cfg)
         // the attack smoothing's output throughout. Only this limiter has
         // it: it runs only while the bypass is engaged, so nothing moves
         // with the bypass off.
-        dryLimiter.setEnvelope ({ true, true, true, true });
+        dryLimiter.setEnvelope ({ true, true, true, drySmoothTakeover });
         dryLimiter.prepare ({ sr, maxB, 2 });
     }
     dryDelay.prepare (2, std::max (0, totalLatency - dryLimiter.latencySamples()));

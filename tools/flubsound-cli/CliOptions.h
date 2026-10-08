@@ -89,6 +89,7 @@ struct CliOptions
     bool events = false;      // scene events (with --bands: per octave band, and level tracks)
     double eventBandHz = 0.0; // the events list in one band (0 = full band)
     bool glitches = false;    // discontinuity detector
+    bool bandCheck = false;   // `analyze --glitches` / `soak --band-check`: the detector's broadband check (off by default, docs/11 E53)
     bool spatial = false;     // `analyze --spatial`: IACC / DRR / diffuse field of binaural impulses (docs/11 E60)
     bool focusIld = false;    // `analyze --focus-ild`: ILD through the positional focus off / 50 / 100 % (docs/11 E24)
     // `soak` (docs/11 E53)

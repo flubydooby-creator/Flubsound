@@ -98,6 +98,9 @@ options, --target-lufs and --format):
       --events                   analyze: scene events (onsets, loud events,
                                  silences, level changes; see `help analyze`)
       --glitches                 analyze: clicks, dropouts, NaN / Inf, DC steps
+      --band-check               analyze --glitches / soak: also set band-limited
+                                 click candidates aside (off by default; see
+                                 `help analyze`)
       --spatial                  analyze: IACC, ITD, DRR, diffuse field of binaural impulses
       --focus-ild                analyze: ILD of a binaural source through the focus 0/50/100 %
 
@@ -211,6 +214,11 @@ skipped or repeated samples), dropouts (>= 0.5 ms of exact zeros starting
 abruptly after programme), NaN / Inf runs and DC steps (the 2 Hz low-passed
 signal moving >= -30 dBFS within 250 ms). It is most sensitive on tonal
 programme (a test tone); on broadband noise only large breaks show.
+--band-check (off by default) also sets aside click candidates with less
+than 20 % of their residual's energy at 3/8 of the sample rate and above (a
+sharp onset of programme under a high cut) and counts them apart: a break
+made ahead of a high cut at about 12 kHz or lower looks the same and is set
+aside as well (e.g. inside the chain with Lo-fi Chill's 10 kHz high cut).
 
 --spatial (docs/11 E60; stereo files of binaural impulse responses, e.g.
 an impulse per speaker at least 100 ms apart rendered by `process` with the
@@ -265,7 +273,7 @@ Examples:
 )";
 
 const char* const kSoakHelp = R"(flubsound-cli soak [preset / mode / macro / --set options] [--minutes M | --seconds S]
-                   [--seed N] [--automation off|user|all] [--interval ms] [--rate R] [--json]
+                   [--seed N] [--automation off|user|all] [--interval ms] [--rate R] [--band-check] [--json]
 
 Runs the processing chain for a long time on generated programme with
 parameter automation and watches its output for discontinuities (docs/11
@@ -287,12 +295,15 @@ E53): the offline half of the soak, without devices.
     (see `help analyze`, --glitches), each with the last automation action
     before it and [bypassed] when the global bypass was engaged; the
     output's peak; the wall time per block against its real-time budget
-    (--block, default 512, at --rate, default 48000).
+    (--block, default 512, at --rate, default 48000). --band-check turns on
+    the detector's broadband check (off by default, `help analyze`); what
+    it sets aside is counted as band-limited.
 
 --seconds S / --minutes M: length (default 10 minutes). Exit code 0 if the
 output has no discontinuity, 1 if it has one (or the programme itself read
 as discontinuous). tools/scripts/soak.py runs the long soak over several
-settings. Everything but the timing is deterministic for a seed.
+settings. Everything but the timing is deterministic for a seed (and the
+same programme on every compiler, up to the maths library's last bits).
 
 Examples:
   flubsound-cli soak --minutes 60

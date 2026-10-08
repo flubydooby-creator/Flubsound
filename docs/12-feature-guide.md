@@ -716,13 +716,13 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [Â
 
 ### `flubsound-cli analyze`
 
-- **What it is:** measures a file: integrated / short-term loudness, LRA, true and sample peak, RMS, PLR; `--bands` (octave bands, what the demo index's band deltas use), `--events`, `--glitches`, `--spatial` (IACC, DRR, diffuse-field deviation), `--focus-ild`, `--json`; and always the content reading and `Suggest` (what Smart macros would do to this file).
+- **What it is:** measures a file: integrated / short-term loudness, LRA, true and sample peak, RMS, PLR; `--bands` (octave bands, what the demo index's band deltas use), `--events`, `--glitches` (clicks, dropouts, NaN, DC steps; `--band-check`, off by default, also sets aside sharp onsets under a high cut - and with them a break made ahead of one, [E53](11-enhancement-report.md#e53)), `--spatial` (IACC, DRR, diffuse-field deviation), `--focus-ild`, `--json`; and always the content reading and `Suggest` (what Smart macros would do to this file).
 - **Listen for:** run it on a demo file and compare with your ears: a band delta of +2 dB at 4 kHz is a clearly brighter voice.
 - **Demo pairs:** `music-clarity`, `smart-macros`
 
 ### `flubsound-cli quality` and `soak`
 
-- **What it is:** `quality` measures a setting on pinned stimuli (THD+N, IMD, MTND, ducking, kick timing, aliasing, DC and ultrasonic energy) against the numeric targets of the regression suite ([E59](11-enhancement-report.md#e59)); `soak` runs a long seeded session with parameter automation and counts glitches.
+- **What it is:** `quality` measures a setting on pinned stimuli (THD+N, IMD, MTND, ducking, kick timing, aliasing, DC and ultrasonic energy) against the numeric targets of the regression suite ([E59](11-enhancement-report.md#e59)); `soak` runs a long seeded session with parameter automation and counts glitches (the same programme for a seed on every compiler; `--band-check` as for `analyze --glitches`).
 - **Demo pairs:** none (measurements; no audio to judge)
 
 ### `flubsound-cli demo`

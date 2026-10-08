@@ -163,7 +163,7 @@ Flubsound/
 │       ├── analysis/
 │       │   ├── CallbackTiming.cpp          log buckets at 1/8 octave, percentiles, windows (since)
 │       │   ├── ContentAnalysis.cpp         K-weighting, octave band-passes normalised on pink, a 100 Hz low-pass, 10 ms onset sub-frames, the 3 s programme window, analyseWhole()
-│       │   ├── Discontinuity.cpp           4th-order-difference spike and cubic-fit jump tests, recurrence filter, dropout / NaN / DC-step runs
+│       │   ├── Discontinuity.cpp           4th-order-difference spike and cubic-fit jump tests, recurrence filter, the optional broadband check (--band-check), dropout / NaN / DC-step runs
 │       │   ├── LatencyProbe.cpp        sweep generation, regularised deconvolution, parabolic peak, locate() for a reference channel
 │       │   ├── LoudnessMeter.cpp           K-weighting, 100 ms sub-blocks, two-level gating histogram
 │       │   ├── SceneEvents.cpp             10 ms frames, background, event runs, median level changes

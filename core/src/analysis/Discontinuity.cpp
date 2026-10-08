@@ -52,8 +52,14 @@ void DiscontinuityDetector::prepare (double sampleRate, int numChannels, const D
     blockSize = std::max (0, s.blockSize);
     // A centre is judged once its after-window, a dropout that starts there
     // and a recurrence after it can be seen; the ring also holds the window
-    // and the recurrence range before it.
-    lookAhead = guard + std::max ({ window, minDropout, maxRepeat });
+    // and the recurrence range before it. The value-break fits read the
+    // input to centre + kFit + 4 and the broadband check the residual to
+    // centre + kShare / 2 + 1, so the look-ahead is at least both. With the
+    // default settings it is 22 samples or more at any rate anyway; short
+    // windows at a low rate (8 kHz, windowMs 1, repeatMs 0.75: 14) left the
+    // band check's last three reads on ring slots not yet written (the
+    // residual from ringSize frames earlier; docs/11 E53 review).
+    lookAhead = std::max ({ guard + std::max ({ window, minDropout, maxRepeat }), kFit + 4, kShare / 2 + 1 });
     ringSize = std::max (guard + window, maxRepeat) + lookAhead + 2;
     clickRatio = dbToLinear (s.clickRatioDb);
     clickFloor = dbToLinear (s.clickFloorDb);
@@ -349,7 +355,9 @@ double DiscontinuityDetector::topBandShare (const Channel& ch, int64_t centre) c
     // centre .. centre + kOrder, near the middle), Hann-windowed; the energy
     // of DFT bins kShareFirstBin .. kShare / 2 against the total (Parseval:
     // the sum over all kShare bins is kShare x the windowed energy).
-    // Needs r from centre - 14 to centre + 17: in the ring.
+    // Needs r from centre - 14 to centre + 17: in the ring (prepare() keeps
+    // the look-ahead at kShare / 2 + 1 or more, and the ring holds at least
+    // guard + window >= 14 frames before the centre).
     std::array<double, kShare> w {};
     double energy = 0.0;
     for (int i = 0; i < kShare; ++i)

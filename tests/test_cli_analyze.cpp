@@ -81,7 +81,13 @@ TEST_CASE ("CLI analyze: --events / --event-band / --glitches / --bands parse fo
     CliOptions o;
     std::string error;
     REQUIRE (parseCommandLine ({ "analyze", "-i", "a.wav", "--bands", "--events", "--glitches" }, o, error));
-    CHECK (o.bands && o.events && o.glitches && o.eventBandHz == 0.0);
+    CHECK (o.bands && o.events && o.glitches && o.eventBandHz == 0.0 && ! o.bandCheck);
+    // The detector's broadband check (docs/11 E53): off unless asked for, analyze and soak only.
+    REQUIRE (parseCommandLine ({ "analyze", "-i", "a.wav", "--glitches", "--band-check" }, o, error));
+    CHECK (o.glitches && o.bandCheck);
+    REQUIRE (parseCommandLine ({ "soak", "--band-check" }, o, error));
+    CHECK (o.bandCheck);
+    CHECK (! parseCommandLine ({ "process", "-i", "a.wav", "-o", "b.wav", "--band-check" }, o, error));
     REQUIRE (parseCommandLine ({ "analyze", "a.wav", "--event-band", "3.2k" }, o, error));
     CHECK (o.events && o.eventBandHz == 3200.0); // --event-band implies --events
     REQUIRE (parseCommandLine ({ "analyze", "a.wav", "--event-band=800Hz" }, o, error));
@@ -215,6 +221,17 @@ TEST_CASE ("CLI analyze --glitches: the discontinuity detector over a file - cle
     CHECK_NEAR (list[0]["seconds"].asNumber(), 11.2, 0.001);
     CHECK (list[1]["type"].asString() == "non-finite" && list[1]["channel"].asNumber() == 0.0);
     CHECK (formatGlitches (g).find ("1 click, 0 dropout, 1 non-finite, 0 dc-step") != std::string::npos);
+    CHECK (j["bandLimited"].isNull()); // the band check is off by default
+    CHECK (formatGlitches (g).find ("band") == std::string::npos);
+
+    // --band-check: the skip is a broadband break, so it still reads; the
+    // report says how many candidates the check set aside (none here).
+    const auto checked = detectGlitches (ch, kFs, true);
+    CHECK (checked.bandCheck);
+    CHECK (checked.counts == g.counts);
+    CHECK (checked.bandLimited == 0);
+    CHECK (glitchesToJson (checked)["bandLimited"].asNumber() == 0.0);
+    CHECK (formatGlitches (checked).find ("band check: 0 set aside as band-limited") != std::string::npos);
 }
 
 // ---- `analyze --spatial` / `--focus-ild` (docs/11 E60 stage 2, E24) ---------

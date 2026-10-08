@@ -951,7 +951,9 @@ int runAnalyze (const CliOptions& o)
     const auto bands = o.bands ? octaveBands (input.channels, input.sampleRate) : std::vector<BandLevel> {};
     const auto events = o.events ? sceneEvents (input.channels, input.sampleRate, o.eventBandHz) : EventsReport {};
     const auto tracks = o.events && o.bands ? bandTracks (input.channels, input.sampleRate) : std::vector<BandTrack> {};
-    const auto glitches = o.glitches ? detectGlitches (input.channels, input.sampleRate) : GlitchReport {};
+    const auto glitches = o.glitches ? detectGlitches (input.channels, input.sampleRate, o.bandCheck) : GlitchReport {};
+    if (o.bandCheck && ! o.glitches)
+        log.warning ("--band-check applies to --glitches only");
     const auto spatial = o.spatial ? spatialMetrics (input.channels, input.sampleRate) : SpatialReport {};
     const auto focus = o.focusIld ? focusIld (input.channels, input.sampleRate) : FocusIldReport {};
     if ((o.spatial && ! spatial.stereo) || (o.focusIld && ! focus.stereo))
@@ -1019,6 +1021,8 @@ int runSoak (const CliOptions& o)
     s.automation = o.automation == "off" ? SoakAutomation::Off : o.automation == "all" ? SoakAutomation::All : SoakAutomation::User;
     s.intervalMs = o.intervalMs;
     s.protection = o.render.protection;
+    if (o.bandCheck)
+        s.detector.minTopBandShare = DiscontinuitySettings::kBandCheckShare;
 
     // The factory presets the automation loads (none found: no preset switches).
     if (const auto dir = findFactoryPresetDir (o.render.presetDir))

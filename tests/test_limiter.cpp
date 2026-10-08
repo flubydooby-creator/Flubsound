@@ -1446,8 +1446,11 @@ TEST_CASE ("TruePeakLimiter: with smoothTakeover an attack that takes over from 
     // ramp), which the E53 soak read as clicks on the bypass reference driven
     // 10 - 22 dB over its ceiling. With it the release runs ahead of the
     // attack smoothing, so the gain is that smoothing's output: its second
-    // difference stays within the triangular ramp's own curvature, at most a
-    // full-scale drop over the two 21-sample boxes (1 / 441).
+    // difference is the triangular ramp's own curvature, (h[n] - 2 h[n-21] +
+    // h[n-42]) / 441 through the two 21-sample boxes. One full-scale drop
+    // bends it by 1 / 441, the limit in practice with a release this slow
+    // (asserted below); the strict bound, a full drop meeting a full rise,
+    // is 2 / 441.
     const auto plain = takeoverRun ({ true, true, true });
     const auto smooth = takeoverRun ({ true, true, true, true });
     std::printf ("    measured max |gain second difference|: LF-safe envelope %.2e, + smooth take-over %.2e (deepest gain %.3f / %.3f); clicks %lld / %lld\n",
