@@ -290,7 +290,9 @@ print-only CI step, never to be merged), `wip/e53-bypass-limiter`, `wip/e28-comb
      step)?; E35: keep the polling twin of the paced VoiceCleanup test (about 1 s per run) or drop it?; E59: the strict
      render diff blocks CI and the golden renders / demo pack also run after an earlier failed step - OK?
 4. **Known open items (software).**
-   - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine;
+   - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine
+     (on the merged code with the PC 93 % busy from another project's WSL builds: 48 late / 2 over budget of
+     225 004 callbacks, 0 clicks / dropouts, docs/11 E53 2026-10-08; was 896 / 837 with builds, 16 / 19 at 78 %);
      the maximizer's full-drive clicks and the untriaged user-music 107.79 s / user-fps 44.56 s clicks (E53). (The
      bypass reference limiter and the detector item are done, 2026-10-08.)
    - E28: the comb row is met (9.38 dB, 2026-10-08); left: Enhanced's far-ear ILD at 16 kHz (a better far-ear
