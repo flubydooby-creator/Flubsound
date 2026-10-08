@@ -254,6 +254,15 @@ public:
     float getPreampDb() const noexcept { return preampDb; }
     const headroom::Prediction& getPrediction() const noexcept { return prediction; }
 
+    /** AUDIO THREAD (or while process() cannot run): the largest
+        steady-state gain (linear) of the curve now running, after its
+        automatic preamp: the larger of the running and the incoming one
+        during a crossfade (and of a design waiting for it); 1 while off or
+        flat. A sine at any frequency leaves the stage at most this much
+        louder; a transient's sample peak can still grow through a curve's
+        phase. MixEngine lowers docs/11 E22's room by it. */
+    float getMaxGain() const noexcept FLUB_NONBLOCKING;
+
     /** Designs handed to the audio thread that it has finished crossfading
         to (any thread; for tests and "applied" indicators). */
     uint32_t getCompletedTransitions() const noexcept { return completed.load (std::memory_order_acquire); }
@@ -265,6 +274,7 @@ private:
         std::array<int, 2> numSections {};
         std::array<float, 2> gain { 1.0f, 1.0f };
         bool identity = true; // no sections, unity gain: nothing to do
+        float maxGain = 1.0f; // getMaxGain(): the prediction's maximum after the preamp, linear
     };
     using State = std::array<std::array<SvfState, kMaxSections>, 2>;
 

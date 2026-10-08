@@ -265,7 +265,23 @@ DeviceCorrection::Design DeviceCorrection::makeDesign (const DeviceCorrectionSet
         d.numSections[c] = n;
     }
     d.identity = d.numSections[0] == 0 && d.numSections[1] == 0 && d.gain[0] == 1.0f && d.gain[1] == 1.0f;
+    // docs/11 E22's room: the largest steady-state gain after the preamp
+    // (the prediction already holds each channel's own gain; compare runs
+    // the broadband gains alone).
+    d.maxGain = s.compare ? std::max (d.gain[0], d.gain[1]) : dbToGain (static_cast<float> (prediction.maxBoostDb) + preampDb);
+    if (d.identity || ! std::isfinite (d.maxGain) || d.maxGain <= 0.0f)
+        d.maxGain = 1.0f;
     return d;
+}
+
+float DeviceCorrection::getMaxGain() const noexcept FLUB_NONBLOCKING
+{
+    float g = current.maxGain;
+    if (fading)
+        g = std::max (g, incoming.maxGain);
+    if (hasWaiting)
+        g = std::max (g, waiting.maxGain);
+    return g;
 }
 
 void DeviceCorrection::reset() noexcept FLUB_NONBLOCKING

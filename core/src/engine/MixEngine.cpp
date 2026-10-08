@@ -3,6 +3,7 @@
 #include "flub/common/Math.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 
@@ -27,6 +28,7 @@ void MixEngine::configureFrom (const MixEngine& previous, const std::vector<Stri
     requestedDuck.store (previous.getChatDuck(), std::memory_order_relaxed);
     requestedDuckDepthDb.store (previous.getChatDuckDepthDb(), std::memory_order_relaxed);
     requestedChatMix.store (previous.getChatMix(), std::memory_order_relaxed);
+    requestedRoomFloorDb.store (previous.getChatRoomFloorDb(), std::memory_order_relaxed);
     build (configs, sr, maxBlockSize, previous.strips, setup);
     if (chatStrip >= 0 && previous.isChatVoiceActive())
         voice.seedActive();
@@ -53,6 +55,7 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     chatDuck = requestedDuck.load (std::memory_order_relaxed); // docs/11 E22: a new engine starts on the requests
     chatDuckDepthDb = requestedDuckDepthDb.load (std::memory_order_relaxed);
     chatMix = requestedChatMix.load (std::memory_order_relaxed);
+    roomFloorDb = requestedRoomFloorDb.load (std::memory_order_relaxed);
     const size_t count = std::min (configs.size(), static_cast<size_t> (kMaxStrips));
     for (size_t i = 0; i < count; ++i)
     {
@@ -86,7 +89,9 @@ void MixEngine::build (const std::vector<StripConfig>& configs, double sr, int m
     for (size_t i = 0; i < strips.size() && chatStrip < 0; ++i)
         if (strips[i]->role == StripRole::Chat)
             chatStrip = static_cast<int> (i);
+    hasGameStrip = std::any_of (strips.begin(), strips.end(), [] (const auto& s) { return s->role == StripRole::Game; });
     voice.prepare (sr);
+    room.prepare (sr, maxBlockSize);
     duckAmount.store (0.0f, std::memory_order_relaxed);
 
     // Padding within sync groups only (docs/11 E40 part 3 / E42a): a strip
@@ -205,10 +210,17 @@ void MixEngine::setChatMix (float balance) noexcept FLUB_NONBLOCKING
     requestedChatMix.store (std::isfinite (balance) ? std::clamp (balance, -1.0f, 1.0f) : 0.0f, std::memory_order_relaxed);
 }
 
+void MixEngine::setChatRoomFloorDb (float floorDb) noexcept FLUB_NONBLOCKING
+{
+    requestedRoomFloorDb.store (std::isfinite (floorDb) ? std::clamp (floorDb, ChatDucker::kMinRoomFloorDb, 0.0f) : ChatDucker::kDefaultRoomFloorDb,
+                                std::memory_order_relaxed);
+}
+
 void MixEngine::applyChatRequests() noexcept FLUB_NONBLOCKING
 {
     chatDuck = requestedDuck.load (std::memory_order_relaxed);
     chatDuckDepthDb = requestedDuckDepthDb.load (std::memory_order_relaxed);
+    roomFloorDb = requestedRoomFloorDb.load (std::memory_order_relaxed);
     const float balance = requestedChatMix.load (std::memory_order_relaxed);
     if (balance != chatMix)
     {
@@ -291,6 +303,13 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
     const float masterCeilingDb = master.getParams().ceilingDb;
     float duckNow = 0.0f;
 
+    // Two passes (docs/11 E22's room needs the Chat strip's block before a
+    // Game strip's duck): first every strip's chain, pad, wake fade and idle
+    // decision, in place in the caller's blocks; then, in strip order, each
+    // strip's duck, gain and its share of the sum. Each step touches only
+    // its own strip and the sum is taken in the same order as in one pass,
+    // so the output is the same bit for bit.
+    std::array<bool, kMaxStrips> processed {};
     for (size_t i = 0; i < strips.size(); ++i)
     {
         auto& s = *strips[i];
@@ -362,6 +381,45 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
                 s.preRollPos = s.preRollFill = 0;
             }
         }
+        processed[i] = true;
+    }
+
+    // The room (docs/11 E22): the Chat strip's share of this block's sum
+    // (its output after its gain, ChatRoomEnvelope), for the Game strips'
+    // ducks; only while one of them may duck, so off it costs nothing.
+    const float* chatLevel = nullptr;
+    float roomCeiling = 1.0f;
+    const bool anyGameDucking = std::any_of (strips.begin(), strips.end(), [] (const auto& s) {
+        return s->role == StripRole::Game && ! s->ducker.isIdle();
+    });
+    if (chatDuck && roomFloorDb < 0.0f && chatStrip >= 0 && hasGameStrip && (voiceActive || anyGameDucking))
+    {
+        const auto& c = *strips[static_cast<size_t> (chatStrip)];
+        if (processed[static_cast<size_t> (chatStrip)])
+        {
+            const AudioBlock chatOut = inputs[chatStrip]->firstChannels (2).subBlock (0, n);
+            LinearSmoothedValue gain = c.gain, mixGain = c.mixGain; // the glide the sum below takes
+            const float g0 = gain.getCurrent() * mixGain.getCurrent();
+            const float g1 = gain.skip (n) * mixGain.skip (n);
+            chatLevel = room.process (&chatOut, n, g0, g1);
+        }
+        else
+            chatLevel = room.process (nullptr, n, 0.0f, 0.0f); // frozen or not fed: silence
+        // The device correction sits between the sum and the master limiter:
+        // a boost after its preamp lowers the room by that much (a curve
+        // that only cuts counts as flat).
+        const float correctionGain = correction.getMaxGain();
+        roomCeiling = dbToGain (masterCeilingDb) / (std::isfinite (correctionGain) ? std::max (1.0f, correctionGain) : 1.0f);
+    }
+    else
+        room.reset();
+
+    for (size_t i = 0; i < strips.size(); ++i)
+    {
+        if (! processed[i])
+            continue;
+        auto& s = *strips[i];
+        const AudioBlock st = inputs[i]->firstChannels (2).subBlock (0, n);
 
         // The voice-keyed duck (docs/11 E22), after the idle decision (it
         // judges the strip's own output) and before the strip gain. Off,
@@ -372,6 +430,16 @@ void MixEngine::process (const AudioBlock* const* inputs, const AudioBlock& out)
             dc.voiceActive = voiceActive;
             dc.depthDb = chatDuckDepthDb;
             dc.ceilingDb = masterCeilingDb;
+            if (s.role == StripRole::Game && chatLevel != nullptr)
+            {
+                // The room: the strip's gain after the duck, as the sum below glides it.
+                LinearSmoothedValue gain = s.gain, mixGain = s.mixGain;
+                dc.postGain0 = gain.getCurrent() * mixGain.getCurrent();
+                dc.postGain1 = gain.skip (n) * mixGain.skip (n);
+                dc.chatLevel = chatLevel;
+                dc.roomCeiling = roomCeiling;
+                dc.roomFloorDb = roomFloorDb;
+            }
             // The Game chain's Voice & Score lift (Gaming mode band 7, as
             // its MeterBus published it for this block).
             if (s.role == StripRole::Game && (voiceActive || ! s.ducker.isIdle())

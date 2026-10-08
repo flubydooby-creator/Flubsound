@@ -444,6 +444,14 @@ static_assert (std::is_same_v<decltype (&ChatDucker::skip), void (ChatDucker::*)
 static_assert (std::is_same_v<decltype (&ChatDucker::reset), void (ChatDucker::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&MixEngine::setChatDuck), void (MixEngine::*) (bool, float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&MixEngine::setChatMix), void (MixEngine::*) (float) noexcept FLUB_NONBLOCKING>);
+// The duck's room for the chat (docs/11 E22 (1), 2026-10-08): the Chat
+// strip's envelope and the device correction's largest gain, read inside
+// MixEngine::process; the floor's setter from any thread.
+static_assert (std::is_same_v<decltype (&ChatRoomEnvelope::process),
+                              const float* (ChatRoomEnvelope::*) (const AudioBlock*, int, float, float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&ChatRoomEnvelope::reset), void (ChatRoomEnvelope::*)() noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&MixEngine::setChatRoomFloorDb), void (MixEngine::*) (float) noexcept FLUB_NONBLOCKING>);
+static_assert (std::is_same_v<decltype (&DeviceCorrection::getMaxGain), float (DeviceCorrection::*)() const noexcept FLUB_NONBLOCKING>);
 
 // The listening-level estimate and cap (docs/11 E32 (c)) after MixEngine's
 // master limiter; the host's setters are relaxed atomics (tests/test_hearing_guard.cpp).

@@ -49,11 +49,12 @@ void ChatDucker::reset (float startAmount) noexcept FLUB_NONBLOCKING
             s.reset();
     amount = std::clamp (startAmount, 0.0f, 1.0f);
     liftCancelDb = 0.0f;
-    limiterGain = 1.0f;
+    limiterDepth = 0.0f;
     holdLeft = 0;
     countdown = 0;
     idle = amount <= 0.0f;
     ceilingGainDb.store (0.0f, std::memory_order_relaxed);
+    roomDb.store (0.0f, std::memory_order_relaxed);
     design (appliedDepthDb, 0.0f);
 }
 
@@ -89,6 +90,7 @@ void ChatDucker::process (const AudioBlock& stereo, const Control& control) noex
     if (idle && ! control.voiceActive)
     {
         ceilingGainDb.store (0.0f, std::memory_order_relaxed);
+        roomDb.store (0.0f, std::memory_order_relaxed);
         return;
     }
     if (idle)
@@ -104,7 +106,13 @@ void ChatDucker::process (const AudioBlock& stereo, const Control& control) noex
     const bool game = shape == Shape::Game;
     float* ch[2] = { stereo.channel (0), stereo.channel (stereo.numChannels > 1 ? 1 : 0) };
     const int channels = stereo.numChannels > 1 ? 2 : 1;
-    float deepest = 1.0f;
+    float deepest = 1.0f, deepestRoom = 1.0f;
+    // The room (Game): a chat level is given, the floor is under 0 dB and
+    // the ceiling it is measured from is usable.
+    const bool room = game && control.chatLevel != nullptr && control.roomFloorDb < 0.0f && std::isfinite (control.roomCeiling)
+                      && control.roomCeiling > 0.0f && std::isfinite (control.postGain0) && std::isfinite (control.postGain1);
+    const float roomFloor = room ? control.roomCeiling * dbToGain (std::max (control.roomFloorDb, kMinRoomFloorDb)) : 0.0f;
+    const float gainStep = room ? (control.postGain1 - control.postGain0) / static_cast<float> (std::max (1, n)) : 0.0f;
 
     for (int pos = 0; pos < n;)
     {
@@ -135,35 +143,58 @@ void ChatDucker::process (const AudioBlock& stereo, const Control& control) noex
             float* r = ch[channels - 1] + pos;
             for (int k = 0; k < len; ++k)
             {
-                const float peak = std::max (std::abs (l[k]), std::abs (r[k]));
-                const float target = peak > ceiling ? ceiling / peak : 1.0f;
-                if (target < limiterGain)
+                // The room: what the chat leaves of the master ceiling (after
+                // the strip's gain; a muted strip is left alone), never under
+                // the floor; the lower of it and the offset ceiling holds.
+                float limit = ceiling;
+                if (room)
                 {
-                    limiterGain = target;
+                    const float g = control.postGain0 + gainStep * static_cast<float> (pos + k);
+                    if (g > kMinPostGain)
+                    {
+                        const float post = std::max (roomFloor, control.roomCeiling - amount * control.chatLevel[pos + k]);
+                        if (post < limit * g)
+                        {
+                            limit = post / g;
+                            deepestRoom = std::min (deepestRoom, post / control.roomCeiling);
+                        }
+                    }
+                }
+                const float peak = std::max (std::abs (l[k]), std::abs (r[k]));
+                const float target = peak > limit ? limit / peak : 1.0f;
+                // The state is the depth (1 - gain): released as 1 - r (1 - g)
+                // the gain stalled in float about 2e-4 under 1 at 48 kHz (the
+                // step fell under half an ulp) and the stage never idled; the
+                // depth itself decays all the way.
+                if (target < 1.0f - limiterDepth)
+                {
+                    limiterDepth = 1.0f - target;
                     holdLeft = holdSamples;
                 }
                 else if (holdLeft > 0)
                     --holdLeft;
-                else if (limiterGain < 1.0f)
+                else if (limiterDepth > 0.0f)
                 {
-                    limiterGain = std::min (target, 1.0f - limiterRelease * (1.0f - limiterGain));
-                    if (limiterGain > 0.999999f)
-                        limiterGain = 1.0f;
+                    limiterDepth = std::max (1.0f - target, limiterRelease * limiterDepth);
+                    if (limiterDepth < 1.0e-6f)
+                        limiterDepth = 0.0f;
                 }
-                if (limiterGain < 1.0f)
+                const float gain = 1.0f - limiterDepth;
+                if (limiterDepth > 0.0f)
                 {
-                    l[k] *= limiterGain;
+                    l[k] *= gain;
                     if (channels > 1)
-                        r[k] *= limiterGain;
+                        r[k] *= gain;
                 }
-                deepest = std::min (deepest, limiterGain);
+                deepest = std::min (deepest, gain);
             }
         }
         pos += len;
         countdown -= len;
     }
     ceilingGainDb.store (deepest < 1.0f ? gainToDb (deepest) : 0.0f, std::memory_order_relaxed);
-    if (amount <= 0.0f && ! control.voiceActive && limiterGain >= 1.0f)
+    roomDb.store (deepestRoom < 1.0f ? gainToDb (deepestRoom) : 0.0f, std::memory_order_relaxed);
+    if (amount <= 0.0f && ! control.voiceActive && limiterDepth <= 0.0f)
     {
         idle = true;
         liftCancelDb = 0.0f;
@@ -177,9 +208,10 @@ void ChatDucker::skip (int numSamples, bool voiceActive) noexcept FLUB_NONBLOCKI
     stepAmount (voiceActive, numSamples);
     countdown = 0;
     // Silence went through: the limiter has released.
-    limiterGain = 1.0f;
+    limiterDepth = 0.0f;
     holdLeft = 0;
     ceilingGainDb.store (0.0f, std::memory_order_relaxed);
+    roomDb.store (0.0f, std::memory_order_relaxed);
     if (amount <= 0.0f && ! voiceActive)
     {
         idle = true;
@@ -203,5 +235,71 @@ double ChatDucker::dipResponseDb (Shape s, double depthDb, double hz, double sr)
         h *= c[0].response (hz, sr);
     }
     return 20.0 * std::log10 (std::max (1.0e-12, std::abs (h)));
+}
+
+// =============================================================================
+// ChatRoomEnvelope
+// =============================================================================
+void ChatRoomEnvelope::prepare (double sr, int maxBlockSize)
+{
+    levels.assign (static_cast<size_t> (std::max (1, maxBlockSize)), 0.0f);
+    slope = static_cast<float> (1.0 / std::max (1.0, static_cast<double> (kAttackMs) * 0.001 * sr));
+    release = onePoleCoeff (kReleaseMs, sr);
+    holdSamples = std::max (1, static_cast<int> (std::lround (kHoldMs * 0.001 * sr)));
+    reset();
+}
+
+void ChatRoomEnvelope::reset() noexcept FLUB_NONBLOCKING
+{
+    level = 0.0f;
+    holdLeft = 0;
+}
+
+const float* ChatRoomEnvelope::process (const AudioBlock* chat, int numSamples, float gain0, float gain1) noexcept FLUB_NONBLOCKING
+{
+    const int n = std::clamp (numSamples, 0, static_cast<int> (levels.size()));
+    float* h = levels.data();
+    // The Chat strip's share of the sum, stereo-linked, through its gain as
+    // MixEngine glides it; a NaN reads as 0, anything huge as kMaxLevel.
+    constexpr float kMaxLevel = 16.0f;
+    if (chat != nullptr && chat->numChannels > 0 && chat->numSamples >= n)
+    {
+        const float* l = chat->channel (0);
+        const float* r = chat->channel (chat->numChannels > 1 ? 1 : 0);
+        const float step = (gain1 - gain0) / static_cast<float> (std::max (1, n));
+        for (int k = 0; k < n; ++k)
+        {
+            const float v = std::abs (gain0 + step * static_cast<float> (k)) * std::max (std::abs (l[k]), std::abs (r[k]));
+            h[k] = v < kMaxLevel ? v : (v >= kMaxLevel ? kMaxLevel : 0.0f);
+        }
+    }
+    else
+        std::fill (h, h + n, 0.0f);
+
+    // Look ahead within the block: towards each peak the level rises by at
+    // most `slope` per sample, so it is there when the peak is.
+    for (int k = n - 2; k >= 0; --k)
+        h[k] = std::max (h[k], h[k + 1] - slope);
+
+    // Across blocks the same slope; after a peak hold, then release.
+    for (int k = 0; k < n; ++k)
+    {
+        const float t = h[k];
+        if (t > level)
+        {
+            level = std::min (t, level + slope);
+            holdLeft = holdSamples;
+        }
+        else if (holdLeft > 0)
+            --holdLeft;
+        else
+        {
+            level = t + release * (level - t);
+            if (level < 1.0e-9f)
+                level = 0.0f;
+        }
+        h[k] = level;
+    }
+    return h;
 }
 } // namespace flub

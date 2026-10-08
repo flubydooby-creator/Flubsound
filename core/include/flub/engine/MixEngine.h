@@ -67,7 +67,17 @@
 // at 1 - 4 kHz that leaves the Game strip's footstep band alone, the Game
 // chain's 2 kHz Voice & Score lift taken back, and the Game strip's peaks
 // held 3 dB under the master ceiling (strip-priority master protection), all
-// gliding in over 30 ms and out over 300 ms (ChatDucker.h). ChatMix
+// gliding in over 30 ms and out over 300 ms (ChatDucker.h). The Game
+// strips' peak limiter also leaves room for the chat (the chat sub-limiter,
+// docs/11 E22 (1)): its ceiling is at most what the Chat strip's share of
+// the sum (after its gain) leaves of the master ceiling, divided by the
+// device correction's largest gain, never more than the room floor
+// (setChatRoomFloorDb, -6 dB by default) under it. To know the Chat strip's
+// block before a Game strip's duck, process() runs in two passes: every
+// strip's chain, pad, wake fade and idle decision first, in place in the
+// caller's blocks, then each strip's duck, gain and share of the sum in
+// strip order (the same operations in the same order as one pass: with
+// the duck off the output is unchanged, bit for bit). ChatMix
 // (setChatMix) is one balance between Game and Chat with
 // complementary gains: the side it moves away from keeps 0 dB, the other
 // falls to (1 - |balance|) in amplitude (muted at the end), both 0 dB at
@@ -206,6 +216,14 @@ public:
         Any thread, as setChatDuck. */
     void setChatMix (float balance) noexcept FLUB_NONBLOCKING;
     float getChatMix() const noexcept { return requestedChatMix.load (std::memory_order_relaxed); }
+    /** The duck's room for the chat (see above): how far under the master
+        ceiling it may push a Game strip's peaks at most, clamped to
+        ChatDucker::kMinRoomFloorDb .. 0; 0 dB turns the room off (the 3 dB
+        offset ceiling alone, as before 2026-10-08). A constant the app does
+        not set (ChatDucker::kDefaultRoomFloorDb); tests and measurements
+        change it. Any thread, as setChatDuck; configureFrom() carries it. */
+    void setChatRoomFloorDb (float floorDb) noexcept FLUB_NONBLOCKING;
+    float getChatRoomFloorDb() const noexcept { return requestedRoomFloorDb.load (std::memory_order_relaxed); }
     /** VoiceActivity's verdict on the Chat strip (false without one). Any thread (relaxed). */
     bool isChatVoiceActive() const noexcept { return voice.isActivePublished(); }
     /** How far the duck is in, 0..1 (the Game and Music strips share it). Any thread (relaxed). */
@@ -298,11 +316,14 @@ private:
 
     // Chat sidechain and ChatMix (docs/11 E22).
     VoiceActivity voice;
+    ChatRoomEnvelope room; // the Chat strip's share of the sum, for the Game strips' room
     int chatStrip = -1;
+    bool hasGameStrip = false;
     bool chatDuck = false; // as the audio thread runs them (applyChatRequests)
-    float chatDuckDepthDb = ChatDucker::kDefaultDepthDb, chatMix = 0.0f;
-    std::atomic<bool> requestedDuck { false }; // setChatDuck / setChatMix, from any thread
+    float chatDuckDepthDb = ChatDucker::kDefaultDepthDb, chatMix = 0.0f, roomFloorDb = ChatDucker::kDefaultRoomFloorDb;
+    std::atomic<bool> requestedDuck { false }; // setChatDuck / setChatMix / setChatRoomFloorDb, from any thread
     std::atomic<float> requestedDuckDepthDb { ChatDucker::kDefaultDepthDb }, requestedChatMix { 0.0f };
+    std::atomic<float> requestedRoomFloorDb { ChatDucker::kDefaultRoomFloorDb };
     std::atomic<float> duckAmount { 0.0f };
 
     /** Audio thread (process()) or configure: takes the requested chat settings. */

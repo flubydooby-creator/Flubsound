@@ -15,10 +15,15 @@
 #include "flub/engine/MixEngine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <functional>
+#include <future>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
+#include <string>
 
 using namespace flub;
 using namespace flubtest;
@@ -279,6 +284,10 @@ struct RunOptions
     int block = kBlock;
     std::function<void (int)> beforeBlock, afterBlock; // called with the block's first sample
     int64_t* allocations = nullptr;                    // heap allocations inside process()
+    /** Each fed strip's own output (MixEngine processes in place: after
+        its chain, pad and duck, before its gain), one Planar per strip. */
+    std::vector<Planar>* stripOutputs = nullptr;
+    double* processSeconds = nullptr; // wall-clock time inside process()
 };
 
 /** Runs the engine over the inputs (nullptr: that strip is not fed) and
@@ -290,6 +299,8 @@ Planar run (MixEngine& m, const std::vector<const Planar*>& inputs, int n, const
     std::vector<Planar> scratch;
     for (int s = 0; s < strips; ++s)
         scratch.emplace_back (2, o.block);
+    if (o.stripOutputs != nullptr)
+        o.stripOutputs->assign (static_cast<size_t> (strips), Planar (2, n));
     std::vector<AudioBlock> blocks;
     std::vector<const AudioBlock*> ptrs (static_cast<size_t> (strips), nullptr);
     for (int s = 0; s < strips; ++s)
@@ -312,10 +323,18 @@ Planar run (MixEngine& m, const std::vector<const Planar*>& inputs, int n, const
         const AudioBlock dst = out.block (pos, len);
         {
             AllocationGuard guard;
+            const auto start = std::chrono::steady_clock::now();
             m.process (ptrs.data(), dst);
+            if (o.processSeconds != nullptr)
+                *o.processSeconds += std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
             if (o.allocations != nullptr)
                 *o.allocations += guard.allocations();
         }
+        if (o.stripOutputs != nullptr)
+            for (int s = 0; s < strips; ++s)
+                for (size_t c = 0; c < 2; ++c)
+                    std::copy_n (scratch[static_cast<size_t> (s)].ch[c].begin(), len,
+                                 (*o.stripOutputs)[static_cast<size_t> (s)].ch[c].begin() + pos);
         if (o.afterBlock)
             o.afterBlock (pos);
     }
@@ -591,99 +610,734 @@ TEST_CASE ("E22 off: bit-identical to an engine without a Chat strip; on with no
 
 namespace
 {
-/** Game: an ambience at about -45 dBFS and, every 2 s from 1 s, an
-    explosion (low rumble plus a broadband crack, 0.8 s decay), limited the
-    way a game's own mix is (a tanh stage) and scaled to a -1 dBFS sample
-    peak; Chat: speech throughout at `lufs`. Returns how far the chat's
-    short-term level falls at the output, at worst from 3 s on: its input
-    through the master limiter's gain (the deepest of each 64-sample block)
-    against the chat alone. */
-double explosionChatDropDb (bool duck, double lufs, float& gameCeilingGainDb)
+/** The explosion scene (6 s). Game: an ambience at about -45 dBFS and,
+    every 2 s from 1 s, an explosion (low rumble plus a broadband crack,
+    0.8 s decay), limited the way a game's own mix is (a tanh stage) and
+    scaled to a -1 dBFS sample peak; Chat: speech throughout at `lufs`. */
+struct ExplosionScene
 {
-    const int n = samplesOf (6.0), block = 64;
-    Planar game (2, n);
+    Planar game, chat;
+    double lufs = 0.0;
+};
+
+ExplosionScene explosionScene (double lufs)
+{
+    const int n = samplesOf (6.0);
+    ExplosionScene scene { Planar (2, n), stereo (formantSpeech (n, 7)), lufs };
+    const auto rumble = lowPass (lowPass (whiteNoise (n, 1.0f, 3), 150.0), 150.0);
+    const auto crack = whiteNoise (n, 1.0f, 4);
+    const auto bed = pinkNoise (n, 0.005f, 5);
+    const double rumbleRms = rms (rumble.data(), n);
+    for (int i = 0; i < n; ++i)
     {
-        const auto rumble = lowPass (lowPass (whiteNoise (n, 1.0f, 3), 150.0), 150.0);
-        const auto crack = whiteNoise (n, 1.0f, 4);
-        const auto bed = pinkNoise (n, 0.005f, 5);
-        const double rumbleRms = rms (rumble.data(), n);
-        for (int i = 0; i < n; ++i)
-        {
-            const double t = i / kFs, e = t >= 1.0 ? std::fmod (t - 1.0, 2.0) : 10.0;
-            const double env = e < 1.8 ? std::exp (-e / 0.8) : 0.0;
-            const double x = env * (rumble[static_cast<size_t> (i)] / rumbleRms + 0.3 * crack[static_cast<size_t> (i)]);
-            const float v = static_cast<float> (bed[static_cast<size_t> (i)] + std::tanh (0.8 * x));
-            game.ch[0][static_cast<size_t> (i)] = v;
-            game.ch[1][static_cast<size_t> (i)] = v;
-        }
-        scale (game, dbToGain (-1.0f) / peakAbs (game.ch[0].data(), n));
+        const double t = i / kFs, e = t >= 1.0 ? std::fmod (t - 1.0, 2.0) : 10.0;
+        const double env = e < 1.8 ? std::exp (-e / 0.8) : 0.0;
+        const double x = env * (rumble[static_cast<size_t> (i)] / rumbleRms + 0.3 * crack[static_cast<size_t> (i)]);
+        const float v = static_cast<float> (bed[static_cast<size_t> (i)] + std::tanh (0.8 * x));
+        scene.game.ch[0][static_cast<size_t> (i)] = v;
+        scene.game.ch[1][static_cast<size_t> (i)] = v;
     }
-    Planar chat = stereo (formantSpeech (n, 7));
-    scaleToLufs (chat, lufs);
+    scale (scene.game, dbToGain (-1.0f) / peakAbs (scene.game.ch[0].data(), n));
+    scaleToLufs (scene.chat, lufs);
+    return scene;
+}
+
+/** The scene at `lufs`, made once per test process (main thread only). */
+const ExplosionScene& sceneFor (double lufs)
+{
+    static std::map<long, std::unique_ptr<ExplosionScene>> scenes;
+    auto& s = scenes[std::lround (lufs * 100.0)];
+    if (s == nullptr)
+        s = std::make_unique<ExplosionScene> (explosionScene (lufs));
+    return *s;
+}
+
+struct ExplosionOptions
+{
+    bool duck = true;
+    float floorDb = ChatDucker::kDefaultRoomFloorDb; // the room's floor (0: the offset ceiling alone, as before the room)
+    bool chatFirst = false;                           // the layout Chat, Game, Music instead of Game, Music, Chat
+    const DeviceCorrectionSettings* correction = nullptr;
+};
+
+/** What one run of the scene measured. From 3 s on (the explosions at 3
+    and 5 s, the detector long settled): */
+struct ExplosionResult
+{
+    double chatDropDb = 0.0;      // the chat's short-term level at the output against the chat alone, worst
+    double masterGrDb = 0.0;      // the master limiter's deepest gain reduction
+    float gameCeilingDb = 0.0f;   // the Game duck's limiter, deepest gain
+    float roomDb = 0.0f;          // the room's deepest ceiling under the master ceiling (0: never under the offset)
+    Planar gameOut { 2, 0 };      // the Game strip's own output (after its duck, before its gain = its share)
+    int64_t gameClicks = 0;       // DiscontinuityDetector clicks on gameOut (from 0.5 s)
+};
+
+/** Runs the scene through a three-strip engine (64-sample blocks, the
+    chains bypassed). The chat drop is its input through the master
+    limiter's gain (the deepest of each block) against the chat alone.
+    Thread-safe (its own engine; no CHECK). */
+ExplosionResult runExplosions (const ExplosionScene& scene, const ExplosionOptions& options)
+{
+    const int n = scene.game.numSamples(), block = 64;
+    ExplosionResult r;
+    auto m = std::make_unique<MixEngine>();
+    const int game = options.chatFirst ? 1 : kGame, chat = options.chatFirst ? 0 : kChat;
+    std::vector<StripConfig> layout { { "Game", 2, 0.0f, false }, { "Music", 2, 0.0f, false }, { "Chat", 2, 0.0f, false } };
+    if (options.chatFirst)
+        layout = { { "Chat", 2, 0.0f, false }, { "Game", 2, 0.0f, false }, { "Music", 2, 0.0f, false } };
+    m->configure (layout, kFs, block);
+    m->setIdleFreeze (false);
+    for (int s = 0; s < m->getNumStrips(); ++s)
+        m->params (s).set (param::BypassAll, 1.0f);
+    if (options.correction != nullptr)
+        m->getDeviceCorrection().setSettingsNow (*options.correction);
+    m->setChatDuck (options.duck);
+    m->setChatRoomFloorDb (options.floorDb);
+
+    std::vector<float> gr;
+    std::vector<Planar> outs;
+    RunOptions o;
+    o.block = block;
+    o.stripOutputs = &outs;
+    o.afterBlock = [&] (int pos) {
+        gr.push_back (m->getMasterGainReductionDb());
+        if (pos < samplesOf (3.0))
+            return;
+        r.masterGrDb = std::min (r.masterGrDb, static_cast<double> (std::min (0.0f, m->getMasterGainReductionDb())));
+        r.gameCeilingDb = std::min (r.gameCeilingDb, m->getChatDucker (game)->getCeilingGainDb());
+        r.roomDb = std::min (r.roomDb, m->getChatDucker (game)->getRoomDb());
+    };
+    std::vector<const Planar*> inputs (3, nullptr);
+    inputs[static_cast<size_t> (game)] = &scene.game;
+    inputs[static_cast<size_t> (chat)] = &scene.chat;
+    run (*m, inputs, n, o);
+    r.gameOut = outs[static_cast<size_t> (game)];
+
+    Planar alone = scene.chat, through = scene.chat;
+    const int latency = m->getLatencySamples();
+    for (int i = 0; i < n; ++i)
     {
-        auto m = makeEngine (block);
-        m->setChatDuck (duck);
-        std::vector<float> gr;
-        RunOptions o;
-        o.block = block;
-        gameCeilingGainDb = 0.0f;
-        o.afterBlock = [&] (int) {
-            gr.push_back (m->getMasterGainReductionDb());
-            gameCeilingGainDb = std::min (gameCeilingGainDb, m->getChatDucker (kGame)->getCeilingGainDb());
-        };
-        run (*m, { &game, nullptr, &chat }, n, o);
-        Planar through = chat;
-        const int latency = m->getLatencySamples();
-        for (int i = 0; i < n; ++i)
-        {
-            const size_t k = static_cast<size_t> (std::min (n - 1, i + latency) / block);
-            const float g = dbToGain (std::min (0.0f, gr[std::min (k, gr.size() - 1)]));
-            through.ch[0][static_cast<size_t> (i)] *= g;
-            through.ch[1][static_cast<size_t> (i)] *= g;
-        }
-        LoudnessMeter alone, ducked;
-        alone.prepare (kFs, 2);
-        ducked.prepare (kFs, 2);
-        double worst = 0.0;
+        const size_t k = static_cast<size_t> (std::min (n - 1, i + latency) / block);
+        const float g = dbToGain (std::min (0.0f, gr[std::min (k, gr.size() - 1)]));
+        through.ch[0][static_cast<size_t> (i)] *= g;
+        through.ch[1][static_cast<size_t> (i)] *= g;
+    }
+    LoudnessMeter aloneMeter, throughMeter;
+    aloneMeter.prepare (kFs, 2);
+    throughMeter.prepare (kFs, 2);
+    const int step = samplesOf (0.1);
+    for (int pos = 0; pos + step <= n; pos += step)
+    {
+        aloneMeter.process (alone.block (pos, step));
+        throughMeter.process (through.block (pos, step));
+        if (pos >= samplesOf (3.0))
+            r.chatDropDb = std::max (r.chatDropDb, static_cast<double> (aloneMeter.getShortTermLufs() - throughMeter.getShortTermLufs()));
+    }
+
+    DiscontinuitySettings ds;
+    ds.blockSize = block;
+    DiscontinuityDetector det;
+    det.prepare (kFs, 2, ds);
+    const int skip = samplesOf (0.5);
+    const float* from[2] = { r.gameOut.ch[0].data() + skip, r.gameOut.ch[1].data() + skip };
+    det.process (from, n - skip);
+    det.finish();
+    r.gameClicks = det.count (DiscontinuityType::Click);
+    return r;
+}
+
+/** Runs each configuration of `scene`, in parallel (each its own engine),
+    and returns the results in order. Runs without a correction are kept
+    for the rest of the process (main thread only), so the floor table's
+    cases share their duck-off and offset-alone runs; a case run on its own
+    makes what it needs. */
+std::vector<ExplosionResult> runAll (const ExplosionScene& scene, const std::vector<ExplosionOptions>& configs)
+{
+    static std::map<std::string, ExplosionResult> memo;
+    const auto keyOf = [&scene] (const ExplosionOptions& o) {
+        char key[96];
+        std::snprintf (key, sizeof (key), "%.2f/%d/%.2f/%d", scene.lufs, o.duck ? 1 : 0, static_cast<double> (o.floorDb), o.chatFirst ? 1 : 0);
+        return std::string (key);
+    };
+    std::vector<std::future<ExplosionResult>> pending (configs.size());
+    for (size_t i = 0; i < configs.size(); ++i)
+        if (configs[i].correction != nullptr || memo.count (keyOf (configs[i])) == 0)
+            pending[i] = std::async (std::launch::async, [&scene, o = configs[i]] { return runExplosions (scene, o); });
+    std::vector<ExplosionResult> results;
+    for (size_t i = 0; i < configs.size(); ++i)
+    {
+        if (! pending[i].valid())
+            results.push_back (memo.at (keyOf (configs[i])));
+        else if (configs[i].correction != nullptr)
+            results.push_back (pending[i].get());
+        else
+            results.push_back (memo[keyOf (configs[i])] = pending[i].get());
+    }
+    return results;
+}
+
+/** How far the duck (and its room) pulled the explosions down against the
+    duck off (both the Game strip's own output, from 3 s): the deepest drop
+    of a 10 ms window's peak where the explosion is loud (that window over
+    -12 dBFS with the duck off), and the drop of the loudest short-term
+    loudness (3 s). */
+struct PullDown
+{
+    double peakDb = 0.0, shortTermDb = 0.0;
+};
+
+PullDown pullDown (const Planar& off, const Planar& on)
+{
+    PullDown p;
+    const int n = off.numSamples(), w = samplesOf (0.01);
+    for (int pos = samplesOf (3.0); pos + w <= n; pos += w)
+    {
+        const double a = std::max (peakAbs (off.ch[0].data() + pos, w), peakAbs (off.ch[1].data() + pos, w));
+        const double b = std::max (peakAbs (on.ch[0].data() + pos, w), peakAbs (on.ch[1].data() + pos, w));
+        if (a > dbToGain (-12.0f))
+            p.peakDb = std::min (p.peakDb, toDb (b) - toDb (a));
+    }
+    const auto loudest = [n] (Planar x) {
+        LoudnessMeter meter;
+        meter.prepare (kFs, 2);
+        double most = -200.0;
         const int step = samplesOf (0.1);
         for (int pos = 0; pos + step <= n; pos += step)
         {
-            alone.process (chat.block (pos, step));
-            ducked.process (through.block (pos, step));
+            meter.process (x.block (pos, step));
             if (pos >= samplesOf (3.0))
-                worst = std::max (worst, static_cast<double> (alone.getShortTermLufs() - ducked.getShortTermLufs()));
+                most = std::max (most, static_cast<double> (meter.getShortTermLufs()));
         }
-        return worst;
-    }
+        return most;
+    };
+    p.shortTermDb = loudest (on) - loudest (off);
+    return p;
 }
 
-void checkExplosions (double lufs)
+void printRow (const char* label, const ExplosionResult& r, const PullDown* p)
 {
+    char line[400];
+    std::snprintf (line, sizeof (line), "      %-14s chat short-term -%.2f dB, master GR %.2f dB, Game duck limiter %.2f dB, room %.2f dB", label, r.chatDropDb,
+                   r.masterGrDb, static_cast<double> (r.gameCeilingDb), static_cast<double> (r.roomDb));
+    std::cout << line;
+    if (p != nullptr)
     {
-        float ceilingOff = 0.0f, ceilingOn = 0.0f;
-        const double before = explosionChatDropDb (false, lufs, ceilingOff), after = explosionChatDropDb (true, lufs, ceilingOn);
-                std::cout << "    [E22] chat at " << lufs << " LUFS, short-term level under -1 dBTP explosions: duck off -" << before << " dB, on -" << after
-                  << " dB (Game ceiling offset deepest " << ceilingOn << " dB)\n";
-        // The Done-when row is the Voice Chat level; a teammate 6 dB louder
-        // still overshoots the master with the Game 3 dB down (the
-        // sub-limiter that would hold it is not built, docs/11 E22).
-        if (lufs <= -20.0)
-            CHECK (after < 0.5);
-        CHECK (after < before);
-        CHECK (ceilingOff == 0.0f);
-        CHECK (ceilingOn < -2.5f);
+        std::snprintf (line, sizeof (line), ", explosions pulled down: peak %.2f dB, short-term %.2f dB", p->peakDb, p->shortTermDb);
+        std::cout << line;
     }
+    std::cout << ", Game clicks " << r.gameClicks << "\n";
 }
 } // namespace
 
 TEST_CASE ("E22 duck: -1 dBTP explosions on Game change the Chat short-term level < 0.5 dB (Chat at -20 LUFS)")
 {
-    checkExplosions (-20.0); // E23's Voice Chat level
+    ExplosionOptions off;
+    off.duck = false;
+    const auto r = runAll (sceneFor (-20.0), { off, {} }); // E23's Voice Chat level
+    const auto &before = r[0], &after = r[1];
+    std::cout << "    [E22] chat at -20 LUFS, short-term level under -1 dBTP explosions: duck off -" << before.chatDropDb << " dB, on -"
+              << after.chatDropDb << " dB (Game duck limiter deepest " << after.gameCeilingDb << " dB)\n";
+    CHECK (after.chatDropDb < 0.5);
+    CHECK (after.chatDropDb < before.chatDropDb);
+    CHECK (before.gameCeilingDb == 0.0f);
+    CHECK (after.gameCeilingDb < -2.5f);
 }
 
-TEST_CASE ("E22 duck: -1 dBTP explosions on Game, a loud teammate (Chat at -14 LUFS): less ducking than without")
+TEST_CASE ("E22 duck: -1 dBTP explosions on Game, a loud teammate (Chat at -14 LUFS): the room holds it < 0.5 dB")
 {
-    checkExplosions (-14.0);
+    ExplosionOptions off, offset;
+    off.duck = false;
+    offset.floorDb = 0.0f; // the offset ceiling alone (before the room)
+    const auto r = runAll (sceneFor (-14.0), { off, offset, {} });
+    const auto &before = r[0], &withOffset = r[1], &after = r[2];
+    std::cout << "    [E22] chat at -14 LUFS, short-term level under -1 dBTP explosions: duck off -" << before.chatDropDb << " dB, offset ceiling alone -"
+              << withOffset.chatDropDb << " dB, with the room (floor " << ChatDucker::kDefaultRoomFloorDb << " dB) -" << after.chatDropDb << " dB\n";
+    CHECK (after.chatDropDb < 0.5);
+    CHECK (withOffset.chatDropDb < before.chatDropDb);
+    CHECK (after.chatDropDb < withOffset.chatDropDb);
+    CHECK (after.roomDb < -ChatDucker::kCeilingOffsetDb); // the room went under the offset ceiling
+    CHECK (withOffset.roomDb == 0.0f);                    // floor 0 dB: no room
+}
+
+// ---- the room (the chat sub-limiter, docs/11 E22 (1)) -------------------------
+
+namespace
+{
+/** One row of the floor table for the owner: chat at `lufs` under the
+    explosions with the duck off, the offset ceiling alone (floor 0 dB, as
+    before the room) and the room at `floorDb`. */
+void floorRow (double lufs, float floorDb)
+{
+    ExplosionOptions off, offset, withRoom;
+    off.duck = false;
+    offset.floorDb = 0.0f;
+    withRoom.floorDb = floorDb;
+    const auto r = runAll (sceneFor (lufs), { off, offset, withRoom });
+    const auto &a = r[0], &b = r[1], &c = r[2];
+    const PullDown pb = pullDown (a.gameOut, b.gameOut), pc = pullDown (a.gameOut, c.gameOut);
+    std::cout << "    [E22] room table, chat " << lufs << " LUFS, floor " << floorDb << " dB:\n";
+    printRow ("duck off", a, nullptr);
+    printRow ("offset alone", b, &pb);
+    printRow ("with the room", c, &pc);
+    // The room only ever adds protection, within its floor, without clicks.
+    CHECK (c.chatDropDb <= b.chatDropDb + 0.01);
+    CHECK (c.roomDb < -ChatDucker::kCeilingOffsetDb);
+    CHECK (c.roomDb >= floorDb - 0.01f);
+    CHECK (pc.peakDb >= static_cast<double> (floorDb) - 1.0); // + the 1 - 2.4 kHz dip's share of a peak
+    CHECK (c.gameClicks <= b.gameClicks);
+}
+} // namespace
+
+TEST_CASE ("E22 room: floor table - chat -20 LUFS, floor -6 dB")
+{
+    floorRow (-20.0, -6.0f);
+}
+
+TEST_CASE ("E22 room: floor table - chat -20 LUFS, floor -9 dB")
+{
+    floorRow (-20.0, -9.0f);
+}
+
+TEST_CASE ("E22 room: floor table - chat -20 LUFS, floor -12 dB")
+{
+    floorRow (-20.0, -12.0f);
+}
+
+TEST_CASE ("E22 room: floor table - chat -14 LUFS, floor -6 dB")
+{
+    floorRow (-14.0, -6.0f);
+}
+
+TEST_CASE ("E22 room: floor table - chat -14 LUFS, floor -9 dB")
+{
+    floorRow (-14.0, -9.0f);
+}
+
+TEST_CASE ("E22 room: floor table - chat -14 LUFS, floor -12 dB")
+{
+    floorRow (-14.0, -12.0f);
+}
+
+TEST_CASE ("E22 room: the same whichever order the strips are in (the Chat strip first)")
+{
+    ExplosionOptions chatFirst;
+    chatFirst.chatFirst = true;
+    const auto r = runAll (sceneFor (-14.0), { {}, chatFirst });
+    std::cout << "    [E22] room, chat -14 LUFS: Game, Music, Chat -" << r[0].chatDropDb << " dB; Chat, Game, Music -" << r[1].chatDropDb << " dB\n";
+    CHECK (r[1].chatDropDb < 0.5);
+    CHECK_NEAR (r[0].chatDropDb, r[1].chatDropDb, 0.05);
+    CHECK_NEAR (r[0].roomDb, r[1].roomDb, 0.05f);
+}
+
+TEST_CASE ("E22 room: ChatRoomEnvelope looks ahead within the block, rises at most full scale per kAttackMs, holds, releases; NaN reads as 0")
+{
+    ChatRoomEnvelope env;
+    env.prepare (kFs, 1024);
+    const double slope = 1.0 / (ChatRoomEnvelope::kAttackMs * 0.001 * kFs); // per sample
+    const int hold = samplesOf (ChatRoomEnvelope::kHoldMs * 0.001);
+    const int ramp = static_cast<int> (std::ceil (0.6 / slope));
+
+    // A peak 700 samples into the block is reached on time, by a ramp.
+    Planar x (2, 1024);
+    x.ch[0][700] = 0.6f;
+    x.rebind();
+    std::vector<float> level (1024);
+    {
+        const AudioBlock first = x.block (0, 1024);
+        const float* l = env.process (&first, 1024, 1.0f, 1.0f);
+        std::copy (l, l + 1024, level.begin());
+    }
+    REQUIRE (ramp < 690);
+    CHECK_NEAR (level[700], 0.6, 1.0e-5);
+    CHECK_NEAR (level[static_cast<size_t> (700 - ramp / 2)], 0.6 - (ramp / 2) * slope, 1.0e-4);
+    CHECK (level[static_cast<size_t> (700 - ramp - 1)] == 0.0f);
+    double steepest = 0.0;
+    for (size_t k = 1; k < level.size(); ++k)
+        steepest = std::max (steepest, static_cast<double> (level[k] - level[k - 1]));
+    CHECK (steepest <= slope * 1.0001);
+    CHECK (level[1023] == level[700]); // held (the block ends inside the hold)
+
+    // Then released: one release time after the hold, about 1 / e of it.
+    Planar silence (2, 1024);
+    int pos = 1024;
+    float atRelease = 0.0f, oneTau = 0.0f;
+    const int releaseAt = 700 + hold, tauAt = releaseAt + samplesOf (ChatRoomEnvelope::kReleaseMs * 0.001);
+    while (pos < tauAt + 1024)
+    {
+        const AudioBlock b = silence.block (0, 1024);
+        const float* l = env.process (&b, 1024, 1.0f, 1.0f);
+        for (int k = 0; k < 1024; ++k)
+        {
+            if (pos + k == releaseAt)
+                atRelease = l[k];
+            if (pos + k == tauAt)
+                oneTau = l[k];
+        }
+        pos += 1024;
+    }
+    std::cout << "    [E22] ChatRoomEnvelope: a 0.6 peak, ramp " << ramp << " samples ahead, at the end of the hold " << atRelease
+              << ", one release time later " << oneTau << "\n";
+    CHECK_NEAR (atRelease, 0.6, 1.0e-4);
+    CHECK_NEAR (oneTau, 0.6 * std::exp (-1.0), 0.01);
+
+    // A peak at the very start of a block (not seen ahead): the rise is
+    // still rate-limited, from where the level stood.
+    env.reset();
+    Planar y (2, 64);
+    for (auto& c : y.ch)
+        std::fill (c.begin(), c.end(), 0.5f);
+    y.rebind();
+    {
+        const AudioBlock b = y.block (0, 64);
+        const float* l = env.process (&b, 64, 1.0f, 1.0f);
+        CHECK_NEAR (l[0], slope, 1.0e-6);
+        CHECK_NEAR (l[9], 10.0 * slope, 1.0e-5);
+        CHECK (l[63] <= 0.5f);
+    }
+
+    // The gain glide is applied (a muted Chat strip adds nothing); NaN and
+    // Inf read as 0 / capped; nullptr is silence.
+    env.reset();
+    {
+        const AudioBlock b = y.block (0, 64);
+        CHECK (env.process (&b, 64, 0.0f, 0.0f)[63] == 0.0f);
+    }
+    Planar bad (2, 64);
+    bad.ch[0][10] = std::numeric_limits<float>::quiet_NaN();
+    bad.ch[1][20] = std::numeric_limits<float>::infinity();
+    bad.rebind();
+    {
+        const AudioBlock b = bad.block (0, 64);
+        const float* l = env.process (&b, 64, 1.0f, 1.0f);
+        bool finite = true;
+        for (int k = 0; k < 64; ++k)
+            finite = finite && std::isfinite (l[k]);
+        CHECK (finite);
+        const float last = l[63];
+        CHECK (env.process (nullptr, 64, 1.0f, 1.0f)[63] <= last);
+    }
+}
+
+TEST_CASE ("E22 room: its level is a ramp, not a step, on a loud sustained Game signal (a stepped room clicks)")
+{
+    // The Game duck at full amount on a sustained -1 dBFS 55 + 110 Hz rumble,
+    // held at the offset ceiling (-4 dBFS). Where the rumble is at its
+    // loudest the chat's level jumps from 0 to 0.7: as a step (a room
+    // without its attack) or through ChatRoomEnvelope (the room as
+    // MixEngine gives it, 64-sample blocks), floor -12 dB.
+    const int n = samplesOf (0.5), block = 64;
+    const Planar rumble = tones (n, { 55.0, 110.0 }, 0.445f);
+    int at = samplesOf (0.2);
+    for (int i = samplesOf (0.2); i < samplesOf (0.2) + samplesOf (1.0 / 55.0); ++i)
+        if (std::abs (rumble.ch[0][static_cast<size_t> (i)]) > std::abs (rumble.ch[0][static_cast<size_t> (at)]))
+            at = i;
+    std::vector<float> stepped (static_cast<size_t> (n), 0.0f), shaped (static_cast<size_t> (n), 0.0f);
+    {
+        Planar chat (2, n);
+        for (int i = at; i < n; ++i)
+        {
+            stepped[static_cast<size_t> (i)] = 0.7f;
+            chat.ch[0][static_cast<size_t> (i)] = chat.ch[1][static_cast<size_t> (i)] = (i / 200) % 2 == 0 ? 0.7f : -0.7f;
+        }
+        chat.rebind();
+        ChatRoomEnvelope env;
+        env.prepare (kFs, block);
+        for (int pos = 0; pos < n; pos += block)
+        {
+            const AudioBlock b = chat.block (pos, block);
+            const float* l = env.process (&b, block, 1.0f, 1.0f);
+            std::copy (l, l + block, shaped.begin() + pos);
+        }
+    }
+    const auto clicksWith = [&] (const std::vector<float>& level) {
+        ChatDucker d;
+        d.prepare (kFs, ChatDucker::Shape::Game);
+        d.reset (1.0f);
+        Planar x = rumble;
+        ChatDucker::Control dc;
+        dc.voiceActive = true;
+        dc.ceilingDb = -1.0f;
+        dc.roomCeiling = dbToGain (-1.0f);
+        dc.roomFloorDb = -12.0f;
+        for (int pos = 0; pos < n; pos += block)
+        {
+            dc.chatLevel = level.data() + pos;
+            d.process (x.block (pos, block), dc);
+        }
+        DiscontinuitySettings ds;
+        ds.blockSize = block;
+        DiscontinuityDetector det;
+        det.prepare (kFs, 2, ds);
+        const int skip = samplesOf (0.1);
+        const float* from[2] = { x.ch[0].data() + skip, x.ch[1].data() + skip };
+        det.process (from, n - skip);
+        det.finish();
+        return det.count (DiscontinuityType::Click);
+    };
+    const int64_t steppedClicks = clicksWith (stepped), shapedClicks = clicksWith (shaped);
+    std::cout << "    [E22] room on a -1 dBFS 55 + 110 Hz rumble at its loudest: a stepped chat level " << steppedClicks << " clicks, through ChatRoomEnvelope "
+              << shapedClicks << "\n";
+    CHECK (steppedClicks > 0); // the detector sees a step ...
+    CHECK (shapedClicks == 0); // ... and the room's ramp is none
+}
+
+TEST_CASE ("E22 ChatDucker: the Game limiter releases all the way to 1 and the stage idles after the chat")
+{
+    // A -1 dBFS 200 Hz tone held at the offset ceiling (-4 dBFS) while the
+    // voice is active; then the voice is gone and the tone at -7 dBFS, under
+    // every ceiling. The limiter holds 20 ms and releases with 150 ms to 1 / e,
+    // all the way to 1, and the stage idles once the amount is 0 (300 ms
+    // release to 1e-3: about 2.1 s). Before 2026-10-08 the release
+    // `1 - r (1 - g)` stalled in float about 2e-4 under 1 (-0.0019 dB at
+    // 48 kHz: the step fell under half an ulp), so the stage never idled.
+    ChatDucker d;
+    d.prepare (kFs, ChatDucker::Shape::Game);
+    d.reset (1.0f);
+    ChatDucker::Control dc;
+    const int block = 16, n = samplesOf (3.5), quietFrom = samplesOf (0.5);
+    Planar x = tones (n, { 200.0 }, 0.89f);
+    for (auto& c : x.ch)
+        for (int i = quietFrom; i < n; ++i)
+            c[static_cast<size_t> (i)] *= 0.5f;
+    const int oneTau = quietFrom + samplesOf ((ChatDucker::kHoldMs + ChatDucker::kLimiterReleaseMs) * 0.001);
+    float limitedDb = 0.0f, atOneTauDb = 0.0f, lastDb = -1.0f;
+    int idleAt = -1;
+    for (int pos = 0; pos < n; pos += block)
+    {
+        dc.voiceActive = pos < quietFrom;
+        d.process (x.block (pos, block), dc);
+        if (pos < quietFrom)
+            limitedDb = std::min (limitedDb, d.getCeilingGainDb());
+        if (pos <= oneTau && oneTau < pos + block)
+            atOneTauDb = d.getCeilingGainDb();
+        lastDb = d.getCeilingGainDb();
+        if (idleAt < 0 && d.isIdle())
+            idleAt = pos + block;
+    }
+    // The depth (1 - gain) one release time after the hold: 1 / e of the held one.
+    const double held = 1.0 - dbToGain (limitedDb), released = 1.0 - dbToGain (atOneTauDb);
+    std::cout << "    [E22] Game limiter: held " << limitedDb << " dB, one release time after the hold " << atOneTauDb << " dB (depth ratio "
+              << released / held << "), at the end " << lastDb << " dB, idle " << (idleAt < 0 ? -1.0 : (idleAt - quietFrom) / kFs)
+              << " s after the voice\n";
+    CHECK (limitedDb < -2.5f);
+    CHECK_NEAR (released / held, std::exp (-1.0), 0.03);
+    CHECK (lastDb == 0.0f);
+    CHECK (idleAt >= 0);
+    CHECK (idleAt <= quietFrom + samplesOf (2.3));
+    CHECK (d.getAmount() == 0.0f);
+}
+
+TEST_CASE ("E22 room: in the engine, no click on a loud sustained Game signal under a loud teammate")
+{
+    const int n = samplesOf (3.0);
+    const Planar game = tones (n, { 55.0, 110.0 }, 0.445f);
+    Planar chat = stereo (formantSpeech (n, 7, 0.3));
+    scaleToLufs (chat, -14.0);
+    for (const float floorDb : { ChatDucker::kDefaultRoomFloorDb, -12.0f })
+    {
+        auto m = makeEngine (64);
+        m->setChatDuck (true);
+        m->setChatRoomFloorDb (floorDb);
+        std::vector<Planar> outs;
+        float roomDb = 0.0f;
+        RunOptions o;
+        o.block = 64;
+        o.stripOutputs = &outs;
+        o.afterBlock = [&] (int) { roomDb = std::min (roomDb, m->getChatDucker (kGame)->getRoomDb()); };
+        run (*m, { &game, nullptr, &chat }, n, o);
+        DiscontinuitySettings ds;
+        ds.blockSize = 64;
+        DiscontinuityDetector det;
+        det.prepare (kFs, 2, ds);
+        const int skip = samplesOf (0.2);
+        const float* from[2] = { outs[kGame].ch[0].data() + skip, outs[kGame].ch[1].data() + skip };
+        det.process (from, n - skip);
+        det.finish();
+        std::cout << "    [E22] room floor " << floorDb << " dB on a -1 dBFS rumble: room down to " << roomDb << " dB, "
+                  << det.count (DiscontinuityType::Click) << " clicks on the Game strip\n";
+        CHECK (roomDb < -ChatDucker::kCeilingOffsetDb);
+        CHECK (roomDb >= floorDb - 0.01f);
+        CHECK (det.count (DiscontinuityType::Click) == 0);
+    }
+}
+
+TEST_CASE ("E22 room: with the chat silent while the hangover holds, the offset ceiling alone")
+{
+    // A -1 dBFS 200 Hz tone on Game, a loud teammate from 0.2 s to about
+    // 1.7 s, then silence while the detector's hangover holds the duck in:
+    // the room engine against one with floor 0 dB (the offset ceiling alone).
+    const int n = samplesOf (3.5);
+    const Planar game = tones (n, { 200.0 }, 0.89f);
+    Planar chat = stereo (formantSpeech (n, 11, 0.2, 2.0));
+    scaleToLufs (chat, -14.0);
+    int lastChat = 0;
+    for (int i = 0; i < n; ++i)
+        if (chat.ch[0][static_cast<size_t> (i)] != 0.0f)
+            lastChat = i;
+    struct BlockReading
+    {
+        float ceilingDb, roomDb, amount;
+        bool voice;
+    };
+    const auto readings = [&] (float floorDb) {
+        auto m = makeEngine();
+        m->setChatDuck (true);
+        m->setChatRoomFloorDb (floorDb);
+        std::vector<BlockReading> r;
+        RunOptions o;
+        o.afterBlock = [&] (int) {
+            const auto* d = m->getChatDucker (kGame);
+            r.push_back ({ d->getCeilingGainDb(), d->getRoomDb(), m->getChatDuckAmount(), m->isChatVoiceActive() });
+        };
+        run (*m, { &game, nullptr, &chat }, n, o);
+        return r;
+    };
+    const auto withRoom = readings (ChatDucker::kDefaultRoomFloorDb), offsetAlone = readings (0.0f);
+    float duringSpeech = 0.0f, silentRoom = 0.0f;
+    double worstDiff = 0.0;
+    int silentBlocks = 0;
+    for (size_t b = 0; b < withRoom.size(); ++b)
+    {
+        const int pos = static_cast<int> (b) * kBlock;
+        if (pos < lastChat)
+            duringSpeech = std::min (duringSpeech, withRoom[b].roomDb);
+        // Silent for longer than the envelope's hold and a few release
+        // times; the hangover still holds the duck fully in.
+        if (pos >= lastChat + samplesOf (0.3) && withRoom[b].voice && withRoom[b].amount >= 0.999f)
+        {
+            ++silentBlocks;
+            silentRoom = std::min (silentRoom, withRoom[b].roomDb);
+            worstDiff = std::max (worstDiff, std::abs (static_cast<double> (withRoom[b].ceilingDb - offsetAlone[b].ceilingDb)));
+        }
+    }
+    std::cout << "    [E22] room while the chat talks: down to " << duringSpeech << " dB; " << silentBlocks
+              << " blocks of the hangover after it: room " << silentRoom << " dB, the Game limiter within " << worstDiff
+              << " dB of the offset ceiling alone\n";
+    CHECK (duringSpeech < -ChatDucker::kCeilingOffsetDb);
+    CHECK (silentBlocks >= 20);
+    CHECK (silentRoom == 0.0f);
+    CHECK (worstDiff < 0.01);
+}
+
+TEST_CASE ("E22 room: a muted Game strip and ChatMix fully towards Chat give no inf / NaN, and no room on a silent share")
+{
+    const auto& scene = sceneFor (-14.0);
+    const int n = scene.game.numSamples();
+    auto m = makeEngine (64);
+    m->setChatDuck (true);
+    bool finite = true;
+    float roomWhileSilent = 0.0f, roomOtherwise = 0.0f;
+    RunOptions o;
+    o.block = 64;
+    o.beforeBlock = [&] (int pos) {
+        m->setChatMix (pos >= samplesOf (2.0) && pos < samplesOf (4.0) ? 1.0f : 0.0f); // the Game at gain 0 from 2.05 s
+        m->setStripMuted (kGame, pos >= samplesOf (4.5));
+    };
+    o.afterBlock = [&] (int pos) {
+        const auto* d = m->getChatDucker (kGame);
+        finite = finite && std::isfinite (d->getCeilingGainDb()) && std::isfinite (d->getRoomDb());
+        if ((pos >= samplesOf (2.1) && pos < samplesOf (4.0)) || pos >= samplesOf (4.6))
+            roomWhileSilent = std::min (roomWhileSilent, d->getRoomDb());
+        else
+            roomOtherwise = std::min (roomOtherwise, d->getRoomDb());
+    };
+    const Planar out = run (*m, { &scene.game, nullptr, &scene.chat }, n, o);
+    for (const auto& c : out.ch)
+        for (const float v : c)
+            finite = finite && std::isfinite (v);
+    std::cout << "    [E22] room with the Game at gain 0 (ChatMix +1, then muted): room " << roomWhileSilent << " dB (" << roomOtherwise
+              << " dB otherwise), all finite " << finite << "\n";
+    CHECK (finite);
+    CHECK (roomWhileSilent == 0.0f);
+    CHECK (roomOtherwise < -ChatDucker::kCeilingOffsetDb);
+}
+
+TEST_CASE ("E22 room: the device correction's largest gain after its preamp lowers the room")
+{
+    // DeviceCorrection::getMaxGain: a +6 dB bell at 80 Hz with 6 dB of
+    // allowance keeps +6 dB; with none, the automatic preamp takes it to 0.
+    DeviceCorrectionSettings boost;
+    CorrectionFilter bell;
+    bell.frequency = 80.0f;
+    bell.gainDb = 6.0f;
+    bell.q = 1.0f;
+    REQUIRE (boost.curve.add (bell));
+    boost.allowanceDb = 6.0f;
+    {
+        DeviceCorrection dc;
+        dc.prepare ({ kFs, 256, 2 });
+        CHECK (dc.getMaxGain() == 1.0f); // flat
+        dc.setSettingsNow (boost);
+        CHECK_NEAR (gainToDb (dc.getMaxGain()), 6.0f, 0.05f);
+        auto none = boost;
+        none.allowanceDb = 0.0f;
+        dc.setSettingsNow (none);
+        CHECK_NEAR (gainToDb (dc.getMaxGain()), 0.0f, 0.02f);
+        auto compare = boost;
+        compare.compare = true;
+        dc.setSettingsNow (compare);
+        CHECK_NEAR (gainToDb (dc.getMaxGain()), 0.0f, 0.01f); // flat filters, the preamp (0 dB here) kept
+    }
+    // In the engine: the explosions' rumble boosted 6 dB after the sum. The
+    // room is lowered by the correction's gain; the offset ceiling is not.
+    ExplosionOptions offset, withRoom;
+    offset.floorDb = 0.0f;
+    offset.correction = withRoom.correction = &boost;
+    const auto r = runAll (sceneFor (-20.0), { offset, withRoom });
+    std::cout << "    [E22] +6 dB 80 Hz correction, chat -20 LUFS: offset ceiling alone -" << r[0].chatDropDb << " dB, with the room -" << r[1].chatDropDb
+              << " dB (room " << r[1].roomDb << " dB under the master ceiling over the correction's gain)\n";
+    CHECK (r[1].chatDropDb < r[0].chatDropDb - 0.3);
+    CHECK (r[1].chatDropDb < 0.5);
+    CHECK (r[1].roomDb < -ChatDucker::kCeilingOffsetDb);
+}
+
+TEST_CASE ("E22 room: CPU - the Game duck with and without the room, and the chat envelope")
+{
+    // Best of five passes over 1 s at 64 and 480-sample blocks, the duck
+    // fully in on a -1 dBFS rumble, the chat a loud teammate.
+    const int n = samplesOf (1.0);
+    const Planar rumble = tones (n, { 55.0, 110.0 }, 0.445f);
+    Planar chat = stereo (formantSpeech (n, 7, 0.0));
+    scaleToLufs (chat, -14.0);
+    for (const int block : { 64, 480 })
+    {
+        const auto timeOf = [&] (bool withRoom, bool envelopeOnly) {
+            double best = 1.0e9;
+            for (int pass = 0; pass < 5; ++pass)
+            {
+                ChatDucker d;
+                d.prepare (kFs, ChatDucker::Shape::Game);
+                d.reset (1.0f);
+                ChatRoomEnvelope env;
+                env.prepare (kFs, block);
+                Planar x = rumble, c = chat;
+                ChatDucker::Control dc;
+                dc.voiceActive = true;
+                dc.roomCeiling = dbToGain (-1.0f);
+                const auto start = std::chrono::steady_clock::now();
+                for (int pos = 0; pos + block <= n; pos += block)
+                {
+                    const AudioBlock cb = c.block (pos, block);
+                    if (withRoom || envelopeOnly)
+                        dc.chatLevel = env.process (&cb, block, 1.0f, 1.0f);
+                    if (! envelopeOnly)
+                    {
+                        if (! withRoom)
+                            dc.chatLevel = nullptr;
+                        d.process (x.block (pos, block), dc);
+                    }
+                }
+                best = std::min (best, std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count());
+            }
+            return 1.0e9 * best / static_cast<double> (n); // ns per sample
+        };
+        const double plain = timeOf (false, false), roomed = timeOf (true, false), envelope = timeOf (false, true);
+        char line[200];
+        std::snprintf (line, sizeof (line), "    [E22] CPU, %d-sample blocks: Game duck %.1f ns / sample, with the room %.1f (the envelope alone %.1f)\n", block, plain,
+                       roomed, envelope);
+        std::cout << line;
+        CHECK (roomed < 1000.0); // far under 1 us per sample (20.8 us at 48 kHz)
+    }
 }
 
 TEST_CASE ("E22 duck: the Game chain's Voice & Score lift is taken back while chat is active")
@@ -835,6 +1489,8 @@ TEST_CASE ("E22 engine swap carries the chat settings and an active talker; a fr
     auto m = makeEngine();
     m->setChatDuck (true, 6.0f);
     m->setChatMix (0.3f);
+    CHECK (m->getChatRoomFloorDb() == ChatDucker::kDefaultRoomFloorDb);
+    m->setChatRoomFloorDb (-9.0f);
     run (*m, { &game, nullptr, &chat }, samplesOf (1.5));
     REQUIRE (m->isChatVoiceActive());
     const float amount = m->getChatDuckAmount();
@@ -846,6 +1502,16 @@ TEST_CASE ("E22 engine swap carries the chat settings and an active talker; a fr
     CHECK (next.getChatDuck());
     CHECK (next.getChatDuckDepthDb() == 6.0f);
     CHECK (next.getChatMix() == 0.3f);
+    CHECK (next.getChatRoomFloorDb() == -9.0f);
+    {
+        MixEngine e;
+        e.setChatRoomFloorDb (3.0f);
+        CHECK (e.getChatRoomFloorDb() == 0.0f);
+        e.setChatRoomFloorDb (-40.0f);
+        CHECK (e.getChatRoomFloorDb() == ChatDucker::kMinRoomFloorDb);
+        e.setChatRoomFloorDb (std::numeric_limits<float>::quiet_NaN());
+        CHECK (e.getChatRoomFloorDb() == ChatDucker::kDefaultRoomFloorDb);
+    }
     CHECK (next.isChatVoiceActive());
     CHECK (next.getChatDuckAmount() == amount);
     CHECK (next.getChatDucker (kGame)->getAmount() == amount);
