@@ -2,8 +2,9 @@
 // (docs/09-future-roadmap.md §1.1).
 //
 //   audio thread (process)                      inference worker (one thread)
-//   copy input into the current model frame     poll the input queue
+//   copy input into the current model frame     sleep until woken (safety timeout)
 //   frame full -> input FrameQueue       ────►  frame -> runner->run() -> controls
+//   end of the call: wake the worker     ────►    (every queued frame, then sleep)
 //   every frame boundary: pop the result ◄────  push the control frame
 //     for the frame now reaching the output
 //   output = input delayed by L, times the smoothed controls
@@ -16,8 +17,8 @@
 // frame k is applied to exactly the samples of frame k when they leave the
 // delay line, so the worker has safetyFrames frame periods from the moment
 // frame k is complete to deliver its result (the same for every kind). That budget must cover one host
-// block, the model's worst-case run time, the worker's poll interval and
-// scheduling jitter. The block is a hard limit: a result can only be picked
+// block, the model's worst-case run time, the worker's wake-up latency (one
+// poll interval when it polls) and scheduling jitter. The block is a hard limit: a result can only be picked
 // up by a later process() call than the one that submitted its frame, so
 // with blocks longer than safetyFrames * frameSize about
 // (block - safetyFrames * frameSize) / block of the frames miss even with an
@@ -69,41 +70,51 @@
 // audio callback). Latency, controls, failure fallback and counters work as
 // above; there are no deadline misses.
 //
-// Waking the worker. The audio thread only publishes frames to a lock-free
-// queue; it does not signal the worker. std::atomic::wait / notify would
-// need macOS 11 in libc++ and is a futex / WaitOnAddress system call on the
-// audio thread (RTSan's contract forbids blocking calls there), so the worker
-// polls the queue with a bounded sleep instead (workerPollMicroseconds; auto
-// = frame period / 8, clamped to 100 .. 1000 us). The cost is CPU wakeups
-// while idle (at most 10 000/s; 1 000 - 1 600/s for 5 - 10 ms frames at
-// 48 kHz), and up to one poll interval plus the OS timer slack added to the
-// model's run time, which the safety frames must absorb. On Windows a short
-// sleep lasts up to one system timer period: 15.6 ms by default, ~1 ms once
-// the process has called timeBeginPeriod (1). A host that needs the last
-// millisecond can shorten the interval.
+// Waking the worker (getWorkerWake(), getWorkerWakeups()). The worker sleeps
+// until the audio thread has queued work: at the end of every process() call
+// that queued a frame, the audio thread signals a WakeEvent
+// (flub/neural/WakeEvent.h). That is an atomic exchange, plus one
+// non-blocking OS wake-up call only when the worker is asleep: SetEvent
+// (Windows), a futex wake (Linux), semaphore_signal (macOS). It never waits
+// or takes a lock; RealtimeSanitizer cannot tell it from a blocking system
+// call, so that one call is exempted on purpose (WakeEvent.h). The worker
+// therefore wakes once per process() call that completes a frame (at most
+// one wake-up per host block and per model frame: 100 a second with
+// 480-sample blocks and 5 ms frames) and answers within the OS's wake-up
+// latency rather than up to one poll interval plus timer slack later. Its
+// sleep has a long safety timeout
+// (workerTimeoutMicroseconds; auto = 100 ms, so an idle prepared worker
+// wakes 10 times a second), and a stop request signals it, so prepare() and
+// the destructor do not wait for a timeout. Until 2026-10-08 the worker
+// polled the queue with a bounded sleep instead (frame period / 8, clamped to
+// 100 .. 1000 us: 1 600 wake-ups a second for 5 ms frames, busy or idle,
+// where the OS timer is precise; on Windows a short sleep lasts at least one
+// timer period, ~1 ms after timeBeginPeriod (1)). config.workerPolls keeps
+// that behaviour (workerPollMicroseconds), and it is the fallback when the OS
+// object cannot be created.
 //
 // Worker scheduling (getWorkerScheduling()). The worker has a deadline, so
-// its poll sleeps must end on time. macOS coalesces the timers of every
-// thread that is not real time, whatever its QoS class: on the GitHub macOS
-// runner a 625 us sleep lasted 5.6 - 6.2 ms (median) on a default, a utility
-// and a user-interactive QoS thread alike, and the worker's response reached
-// 8.5 ms (99th percentile) of its 10 ms budget at 480-sample blocks. So on
-// macOS the worker gives itself the Mach time-constraint (real-time) policy
-// Core Audio's I/O threads have, whose timers are not coalesced (the same
-// sleep: 0.64 - 0.66 ms; the response: about 1 ms): period one model frame,
+// it must get a CPU as soon as it is woken (and, polling, its sleeps must end
+// on time). macOS coalesces the timers of every thread that is not real
+// time, whatever its QoS class: on the GitHub macOS runner a 625 us sleep
+// lasted 5.6 - 6.2 ms (median) on a default, a utility and a user-interactive
+// QoS thread alike, and the polling worker's response reached 8.5 ms (99th
+// percentile) of its 10 ms budget at 480-sample blocks. So on macOS the
+// worker gives itself the Mach time-constraint (real-time) policy Core
+// Audio's I/O threads have, whose timers are not coalesced (the same sleep:
+// 0.64 - 0.66 ms; the response: about 1 ms): period one model frame,
 // computation half of it, constraint one frame (the period clamped to
 // 1 .. 40 ms). A refused policy leaves the worker as it was (Default).
-// Windows and Linux keep the OS default (a 1 ms timer once the process has
-// called timeBeginPeriod (1); Linux's 50 us timer slack). On every OS the
-// model runs inside a ScopedNoDenormals (FTZ / DAZ, AArch64 FZ), like every
-// real-time entry point; offline mode too, so both paths compute the same
-// bits.
+// Windows and Linux keep the OS default. On every OS the model runs inside a
+// ScopedNoDenormals (FTZ / DAZ, AArch64 FZ), like every real-time entry
+// point; offline mode too, so both paths compute the same bits.
 //
 // Threading. prepare() (non-RT) stops a running worker, allocates the queues,
 // calls runner->prepare() and starts one worker thread (none in offline
 // mode). process() and reset() are RT-safe (no allocation, no lock, no wait;
-// bounded by the queue capacities and the block length; in offline mode
-// process() also runs the model); reset() may be called on the audio thread,
+// bounded by the queue capacities and the block length; process() makes at
+// most one non-blocking wake-up call, above; in offline mode it also runs
+// the model); reset() may be called on the audio thread,
 // as ProcessingChain does when it drops a NaN block, and it does not stop the
 // worker: frames already queued become stale and are skipped. The destructor
 // stops and joins the worker (it waits for a frame that is still running).
@@ -123,6 +134,7 @@
 #include "flub/neural/BandGains.h"
 #include "flub/neural/FrameQueue.h"
 #include "flub/neural/ModelRunner.h"
+#include "flub/neural/WakeEvent.h"
 
 #include <atomic>
 #include <cstdint>
@@ -141,8 +153,18 @@ struct AsyncModelConfig
     int fallbackAfterFrames = 4;      // K >= 1: consecutive missed / failed frames before the ramp to neutral
     float controlRampMs = 5.0f;       // every control change is a linear ramp this long (>= 1 sample)
     float maxGain = 4.0f;             // controls are clamped to [0, maxGain] (+12 dB by default)
-    int workerPollMicroseconds = 0;   // 0 = auto (frame period / 8, 100 .. 1000 us); at most 100 000 us
+    int workerTimeoutMicroseconds = 0; // the woken worker's safety timeout: 0 = auto (100 ms); 100 .. 1 000 000 us
+    bool workerPolls = false;         // poll the queue instead of being woken (the behaviour before 2026-10-08; "Waking the worker")
+    int workerPollMicroseconds = 0;   // polling only: 0 = auto (frame period / 8, 100 .. 1000 us); at most 100 000 us
     bool offline = false;             // run the model inside process() on the calling thread (non-RT callers only, see above)
+};
+
+/** How the inference worker learns that a frame is queued ("Waking the worker" above). */
+enum class NeuralWorkerWake : int
+{
+    None = 0,   // no worker thread running (unprepared, offline mode, model not active)
+    Signal = 1, // the audio thread wakes it (the default)
+    Poll = 2    // it polls the queue (config.workerPolls, or no OS wake-up object could be created)
 };
 
 /** How the inference worker thread is scheduled ("Worker scheduling" above). */
@@ -205,6 +227,16 @@ public:
     {
         return static_cast<NeuralWorkerScheduling> (workerScheduling.load (std::memory_order_acquire));
     }
+    /** How the worker learns about queued frames: Signal or Poll from
+        prepare() while a worker runs, None otherwise ("Waking the worker"). */
+    NeuralWorkerWake getWorkerWake() const noexcept
+    {
+        return static_cast<NeuralWorkerWake> (workerWakeMode.load (std::memory_order_acquire));
+    }
+    /** The worker's sleeps that ended (woken, timed out or a poll interval
+        over), i.e. its OS wake-ups; a wait that found a signal already there
+        did not sleep and is not counted. The energy measure of "Waking the worker". */
+    uint64_t getWorkerWakeups() const noexcept { return workerWakeups.load (std::memory_order_relaxed); }
 
     /** Input frames queued but not yet run or skipped by the worker (never
         negative; 0 in offline mode). Read on the thread that calls process(),
@@ -221,8 +253,9 @@ private:
     void startWorker();
     void stopWorker() noexcept;
     void workerLoop() noexcept;
+    void waitForWork() noexcept;
     void resetAudioState() noexcept;
-    void submitFrame() noexcept;
+    bool submitFrame() noexcept; // true when the frame went to the worker's queue
     void runFrame (const float* frame, uint64_t seq, bool& resetPending) noexcept;
     void consumeResult() noexcept;
     void setTargets (const float* controls) noexcept;
@@ -268,14 +301,19 @@ private:
     // Worker thread (the calling thread in offline mode).
     std::thread worker;
     std::vector<float> workerControls;
-    int pollMicroseconds = 1000;
+    bool workerSignalled = false;         // set in prepare(): the audio thread signals `wake` (else the worker polls)
+    int pollMicroseconds = 1000;          // polling: the sleep between looks at the queue
+    int timeoutMicroseconds = 100000;     // signalled: the safety timeout of one sleep
     double framePeriodSeconds = 0.0;      // the worker's scheduling period (frameSize / sample rate)
 
     // Shared.
+    WakeEvent wake;                       // audio thread -> worker ("Waking the worker")
     std::atomic<bool> stopRequested { false };
     std::atomic<uint64_t> firstUsefulSeq { 0 }; // frames below this are past their deadline
     std::atomic<uint64_t> deadlineMisses { 0 }, modelFailures { 0 }, framesProcessed { 0 };
     std::atomic<uint64_t> framesSubmitted { 0 }, framesHandled { 0 };
+    std::atomic<uint64_t> workerWakeups { 0 };
     std::atomic<int> workerScheduling { 0 };    // NeuralWorkerScheduling, written by the worker
+    std::atomic<int> workerWakeMode { 0 };      // NeuralWorkerWake, written by prepare() / stopWorker()
 };
 } // namespace flub

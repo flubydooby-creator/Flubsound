@@ -151,6 +151,7 @@ Flubsound/
 │   │   │   ├── VoiceCleanupRunner.h        the neural voice cleanup model (experimental): features, TinyNet, gain floor / release, telemetry
 │   │   │   ├── FrameQueue.h                wait-free SPSC queue of fixed-size float frames with a sequence header
 │   │   │   ├── AsyncModelProcessor.h       Processor: runs a ModelRunner on one worker thread behind latency frameSize × (1 + safetyFrames); miss / failure fallback
+│   │   │   ├── WakeEvent.h                 wakes the worker from the audio thread: an atomic, plus one non-blocking OS call (SetEvent / futex / Mach semaphore)
 │   │   │   ├── Eligibility.h               isEligible (latency profile, model latency, rate, realtime / offline)
 │   │   │   └── ReferenceRunners.h          stand-in models: IdentityRunner, ConstantGainRunner, FailingRunner
 │   │   └── io/                             non-real-time file formats
@@ -205,7 +206,8 @@ Flubsound/
 │       │   ├── StartleGuard.cpp
 │       │   └── Protection.cpp
 │       ├── neural/
-│       │   ├── AsyncModelProcessor.cpp     frame capture, boundary bookkeeping, fallback ramps, polling worker loop, the BandGains STFT renderer
+│       │   ├── AsyncModelProcessor.cpp     frame capture, boundary bookkeeping, fallback ramps, the worker loop (woken by process(); polling as the fallback), the BandGains STFT renderer
+│       │   ├── WakeEvent.cpp               the three OS wake-ups and their documented RTSan exemption
 │       │   ├── TinyNet.cpp                 file parsing (CRC-32, limits, int8 dequantisation) and inference
 │       │   ├── VoiceCleanupRunner.cpp
 │       │   ├── VoiceCleanupModelData.cpp   GENERATED from presets/neural/voice-cleanup.fnn by tools/neural/train_voice_cleanup.py. Do not edit by hand.

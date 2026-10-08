@@ -489,4 +489,84 @@ static_assert (std::is_same_v<decltype (&ProcessingChain::setContentAnalysisTap)
 static_assert (std::is_same_v<decltype (&TransientShaper::computeOnset), float (TransientShaper::*) (float) noexcept FLUB_NONBLOCKING>);
 static_assert (std::is_same_v<decltype (&BassEngine::getImpactDb), float (BassEngine::*)() const noexcept FLUB_NONBLOCKING>);
 
+// The neural worker's wake-up (docs/11 E35, flub/neural/WakeEvent.h):
+// AsyncModelProcessor::process signals it at the end of a call that queued a
+// frame. Its one OS call (SetEvent, a futex wake, semaphore_signal) never
+// waits, but RTSan cannot tell it from a blocking call, so WakeEvent exempts
+// that call on purpose. The case below shows that the exemption is needed
+// (RTSan stops a bare futex wake) and that it works (signal() waking a
+// sleeping waiter from a nonblocking function passes); every Neural,
+// NeuralSlot and VoiceCleanup case runs signal() under RTSan as well.
+#include "flub/neural/WakeEvent.h"
+static_assert (std::is_same_v<decltype (&WakeEvent::signal), void (WakeEvent::*)() noexcept FLUB_NONBLOCKING>);
+
+#if defined(__linux__)
+    #include <linux/futex.h>
+    #include <sys/syscall.h>
+
+    #include <chrono>
+    #include <cstdint>
+    #include <thread>
+
+namespace
+{
+[[gnu::noinline]] void bareFutexWake (uint32_t* word) noexcept FLUB_NONBLOCKING
+{
+    syscall (SYS_futex, word, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
+}
+
+[[gnu::noinline]] void signalFromRealtime (WakeEvent& event) noexcept FLUB_NONBLOCKING
+{
+    event.signal();
+}
+} // namespace
+
+TEST_CASE ("RTSan: the neural worker's wake-up call is exempted on purpose (RTSan stops a bare futex wake, not WakeEvent::signal)")
+{
+    // The bare system call in a nonblocking function: stopped (the report is
+    // expected; keep it out of the test log).
+    const pid_t bare = fork();
+    REQUIRE (bare >= 0);
+    if (bare == 0)
+    {
+        if (const int devNull = open ("/dev/null", O_WRONLY); devNull >= 0)
+            dup2 (devNull, STDERR_FILENO);
+        uint32_t word = 0;
+        bareFutexWake (&word);
+        _exit (0); // reached only if RTSan did not intervene
+    }
+    int status = 0;
+    REQUIRE (waitpid (bare, &status, 0) == bare);
+    CHECK (! (WIFEXITED (status) && WEXITSTATUS (status) == 0));
+
+    // WakeEvent::signal() from a nonblocking function while the waiter sleeps
+    // (so the OS call is made): it passes and wakes the waiter. In a child as
+    // well, so a report fails this check instead of ending the run.
+    const pid_t exempted = fork();
+    REQUIRE (exempted >= 0);
+    if (exempted == 0)
+    {
+        WakeEvent event;
+        if (! event.isValid())
+            _exit (3);
+        for (int attempt = 0; attempt < 50; ++attempt)
+        {
+            WakeEvent::WaitResult result = WakeEvent::WaitResult::TimedOut;
+            std::thread waiter ([&event, &result] { result = event.wait (2000000); });
+            std::this_thread::sleep_for (std::chrono::milliseconds (10));
+            signalFromRealtime (event);
+            waiter.join();
+            if (result == WakeEvent::WaitResult::Woken)
+                _exit (0); // asleep, woken by the OS call RTSan let pass
+            if (result == WakeEvent::WaitResult::TimedOut)
+                _exit (4); // the signal was lost
+            // Pending: the waiter was not asleep yet; again.
+        }
+        _exit (5);
+    }
+    REQUIRE (waitpid (exempted, &status, 0) == exempted);
+    CHECK (WIFEXITED (status) && WEXITSTATUS (status) == 0);
+}
+#endif
+
 #endif // FLUB_RTSAN

@@ -186,13 +186,13 @@ ModelDescription description (int frameSize, double sampleRate = 0.0)
     return d;
 }
 
-/** One safety frame by default (L = 2 * frameSize), fast worker polling. A
-    host block may be at most safetyFrames * frameSize (BlockTooLarge). */
+/** One safety frame by default (L = 2 * frameSize). The worker is woken by
+    each block that queues a frame, so the per-block waits stay short. A host
+    block may be at most safetyFrames * frameSize (BlockTooLarge). */
 NeuralSlotConfig slotConfig (int safetyFrames = 1)
 {
     NeuralSlotConfig c;
     c.processor.safetyFrames = safetyFrames;
-    c.processor.workerPollMicroseconds = 100; // keeps the per-block waits short
     return c;
 }
 } // namespace

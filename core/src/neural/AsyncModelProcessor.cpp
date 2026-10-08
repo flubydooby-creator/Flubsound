@@ -27,15 +27,24 @@ namespace
 {
 constexpr int kMaxSafetyFrames = AsyncModelConfig::kMaxSafetyFrames;
 
-// Auto poll interval: an eighth of a frame period, so polling adds at most
-// ~12 % of a frame to the worker's response time, within 100 .. 1000 us so
-// tiny frames do not spin and long ones do not idle for whole milliseconds.
+// The woken worker's safety timeout ("Waking the worker" in the header): a
+// net, not a schedule. The audio thread wakes the worker for every frame and
+// a stop request wakes it too, so the timeout only bounds an idle worker's
+// sleep (10 wake-ups a second at the auto value).
+constexpr int kAutoTimeoutMicroseconds = 100000;
+constexpr int kMinTimeoutMicroseconds = 100;
+constexpr int kMaxTimeoutMicroseconds = 1000000;
+
+// Polling (config.workerPolls, or no OS wake-up object): an eighth of a frame
+// period, so polling adds at most ~12 % of a frame to the worker's response
+// time, within 100 .. 1000 us so tiny frames do not spin and long ones do
+// not idle for whole milliseconds.
 constexpr double kAutoPollFraction = 0.125;
 constexpr int kMinAutoPollMicroseconds = 100;
 constexpr int kMaxAutoPollMicroseconds = 1000;
 
-// Explicit poll intervals are capped: the worker only notices a stop request
-// between sleeps, so prepare() and the destructor wait up to one interval.
+// Explicit poll intervals are capped: a polling worker only notices a stop
+// request between sleeps, so prepare() and the destructor wait up to one interval.
 constexpr int kMaxPollMicroseconds = 100000;
 
 // Frames that can be in flight between the audio thread and the worker: the
@@ -113,6 +122,9 @@ AsyncModelProcessor::AsyncModelProcessor (std::unique_ptr<ModelRunner> r, const 
     config.controlRampMs = std::isfinite (config.controlRampMs) ? std::max (0.0f, config.controlRampMs) : 0.0f;
     config.maxGain = std::isfinite (config.maxGain) ? std::max (0.0f, config.maxGain) : 1.0f;
     config.workerPollMicroseconds = std::clamp (config.workerPollMicroseconds, 0, kMaxPollMicroseconds);
+    config.workerTimeoutMicroseconds = config.workerTimeoutMicroseconds <= 0
+                                           ? 0
+                                           : std::clamp (config.workerTimeoutMicroseconds, kMinTimeoutMicroseconds, kMaxTimeoutMicroseconds);
 
     if (runner != nullptr)
     {
@@ -182,12 +194,15 @@ void AsyncModelProcessor::prepare (const ProcessSpec& s)
         pollMicroseconds = std::clamp (static_cast<int> (kAutoPollFraction * 1.0e6 * frameSize / std::max (1.0, s.sampleRate)),
                                        kMinAutoPollMicroseconds, kMaxAutoPollMicroseconds);
     framePeriodSeconds = static_cast<double> (frameSize) / std::max (1.0, s.sampleRate);
+    timeoutMicroseconds = config.workerTimeoutMicroseconds > 0 ? config.workerTimeoutMicroseconds : kAutoTimeoutMicroseconds;
+    workerSignalled = ! config.workerPolls && wake.isValid();
 
     deadlineMisses.store (0, std::memory_order_relaxed);
     modelFailures.store (0, std::memory_order_relaxed);
     framesProcessed.store (0, std::memory_order_relaxed);
     framesSubmitted.store (0, std::memory_order_relaxed);
     framesHandled.store (0, std::memory_order_relaxed);
+    workerWakeups.store (0, std::memory_order_relaxed);
     nextSubmitSeq = 0;
     neededSeq = 0;
     firstUsefulSeq.store (0, std::memory_order_relaxed);
@@ -266,6 +281,7 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
     const float downmixScale = 1.0f / static_cast<float> (std::max (1, channels));
     const auto line = static_cast<size_t> (lineLength);
     const auto hop = static_cast<size_t> (frameSize);
+    bool queued = false; // a frame went to the worker in this call
 
     for (int start = 0; start < block.numSamples;)
     {
@@ -345,7 +361,7 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
             framePos = 0;
             if (modelActive)
             {
-                submitFrame();
+                queued = submitFrame() || queued;
                 if (framesSinceReset <= config.safetyFrames)
                     ++framesSinceReset;
                 if (framesSinceReset > config.safetyFrames) // safetyFrames + 1 frames in: output frame 0 starts
@@ -355,6 +371,11 @@ void AsyncModelProcessor::process (const AudioBlock& block) noexcept FLUB_NONBLO
                 renderBands(); // the delayed hop just completed window k - safetyFrames: its gains are in place
         }
     }
+
+    // One wake-up per call, after every frame of the block is queued: the
+    // results are needed by a later call at the earliest (see "Latency").
+    if (queued && workerSignalled)
+        wake.signal();
 }
 
 void AsyncModelProcessor::renderBands() noexcept
@@ -387,7 +408,7 @@ void AsyncModelProcessor::renderBands() noexcept
     }
 }
 
-void AsyncModelProcessor::submitFrame() noexcept
+bool AsyncModelProcessor::submitFrame() noexcept
 {
     const uint64_t seq = nextSubmitSeq++;
     if (config.offline)
@@ -400,7 +421,7 @@ void AsyncModelProcessor::submitFrame() noexcept
         bool resetPending = discontinuity;
         runFrame (stagingFrame.data(), seq, resetPending);
         discontinuity = false;
-        return;
+        return false;
     }
     if (float* slot = inQueue.beginWrite())
     {
@@ -413,10 +434,12 @@ void AsyncModelProcessor::submitFrame() noexcept
         framesSubmitted.fetch_add (1, std::memory_order_relaxed);
         inQueue.commitWrite (h);
         discontinuity = false;
+        return true;
     }
     // A full queue drops the frame (the worker is stalled); its boundary then
     // counts as a deadline miss. The discontinuity flag waits for a frame that
     // does get through.
+    return false;
 }
 
 void AsyncModelProcessor::consumeResult() noexcept
@@ -478,6 +501,7 @@ void AsyncModelProcessor::startWorker()
 {
     stopRequested.store (false, std::memory_order_relaxed);
     worker = std::thread ([this] { workerLoop(); });
+    workerWakeMode.store (static_cast<int> (workerSignalled ? NeuralWorkerWake::Signal : NeuralWorkerWake::Poll), std::memory_order_release);
 }
 
 void AsyncModelProcessor::stopWorker() noexcept
@@ -485,8 +509,10 @@ void AsyncModelProcessor::stopWorker() noexcept
     if (! worker.joinable())
         return;
     stopRequested.store (true, std::memory_order_release);
+    wake.signal(); // a sleeping worker sees the request at once (a polling one after its interval)
     worker.join();
     workerScheduling.store (static_cast<int> (NeuralWorkerScheduling::None), std::memory_order_release);
+    workerWakeMode.store (static_cast<int> (NeuralWorkerWake::None), std::memory_order_release);
 }
 
 void AsyncModelProcessor::runFrame (const float* frame, uint64_t seq, bool& resetPending) noexcept
@@ -543,7 +569,7 @@ void AsyncModelProcessor::workerLoop() noexcept
         const float* frame = inQueue.peek (in);
         if (frame == nullptr)
         {
-            std::this_thread::sleep_for (std::chrono::microseconds (pollMicroseconds));
+            waitForWork();
             continue;
         }
         resetPending = resetPending || in.discontinuity;
@@ -553,5 +579,21 @@ void AsyncModelProcessor::workerLoop() noexcept
         inQueue.release();
         framesHandled.fetch_add (1, std::memory_order_release); // after the result is published
     }
+}
+
+void AsyncModelProcessor::waitForWork() noexcept
+{
+    // The queue was empty. Signalled: sleep until the audio thread queues a
+    // frame (or asks the worker to stop), the safety timeout at most; a signal
+    // that came while the worker was busy returns at once without sleeping.
+    // The caller looks at the queue again either way.
+    if (workerSignalled)
+    {
+        if (wake.wait (timeoutMicroseconds) != WakeEvent::WaitResult::Pending)
+            workerWakeups.fetch_add (1, std::memory_order_relaxed);
+        return;
+    }
+    std::this_thread::sleep_for (std::chrono::microseconds (pollMicroseconds));
+    workerWakeups.fetch_add (1, std::memory_order_relaxed);
 }
 } // namespace flub

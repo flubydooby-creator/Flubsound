@@ -34,6 +34,18 @@
     #include <mach/thread_policy.h>
     #include <pthread.h>
 #endif
+#if defined(_WIN32)
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <intrin.h>
+#else
+    #include <time.h>
+#endif
 
 using namespace flub;
 using namespace flubtest;
@@ -110,12 +122,20 @@ private:
 
 /** Gives the calling thread the scheduling a device callback has: on macOS
     the time-constraint policy Core Audio's I/O thread runs with (period one
-    host block, half of it computation). Elsewhere it changes nothing (an
-    ordinary thread keeps time there: TestMain sets Windows' 1 ms timer).
-    Returns true when the policy was set. */
+    host block, half of it computation). On Windows a priority above the
+    worker's, as a device thread has (JUCE's WASAPI thread: high priority plus
+    MMCSS "Pro Audio", in the real-time range): THREAD_PRIORITY_TIME_CRITICAL,
+    so the worker that process() wakes (with the OS's wake-up boost) cannot
+    preempt it and add its run to process()'s measured time. On Linux it
+    changes nothing (SCHED_FIFO needs privileges; an ordinary thread keeps
+    time there, as on Windows with TestMain's 1 ms timer). Returns true when
+    the policy was set. */
 bool scheduleLikeAudioCallback (double blockSeconds)
 {
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    (void) blockSeconds;
+    return SetThreadPriority (GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) != 0;
+#elif defined(__APPLE__)
     mach_timebase_info_data_t timebase {};
     if (mach_timebase_info (&timebase) != KERN_SUCCESS || timebase.numer == 0 || timebase.denom == 0)
         return false;
@@ -393,9 +413,56 @@ TEST_CASE ("VoiceCleanup: on the real worker thread (waited for after every bloc
 
 namespace
 {
+/** The calling thread's CPU time (user + system) in seconds, or a negative
+    value where it cannot be read precisely. POSIX: CLOCK_THREAD_CPUTIME_ID.
+    Windows (x64): QueryThreadCycleTime, which counts time-stamp-counter
+    ticks, over the TSC rate measured once against QueryPerformanceCounter
+    (GetThreadTimes only samples at the timer tick). Call cpuTicksPerSecond()
+    once before the measured threads start: its first call spins for 20 ms. */
+double cpuTicksPerSecond()
+{
+#if defined(_WIN32) && defined(_M_X64)
+    static const double rate = [] {
+        LARGE_INTEGER frequency {}, start {}, now {};
+        QueryPerformanceFrequency (&frequency);
+        QueryPerformanceCounter (&start);
+        const unsigned long long tscStart = __rdtsc();
+        do
+            QueryPerformanceCounter (&now);
+        while (now.QuadPart - start.QuadPart < frequency.QuadPart / 50);
+        const unsigned long long tscEnd = __rdtsc();
+        return static_cast<double> (tscEnd - tscStart) * static_cast<double> (frequency.QuadPart)
+               / static_cast<double> (now.QuadPart - start.QuadPart);
+    }();
+    return rate;
+#else
+    return 1.0;
+#endif
+}
+
+double threadCpuSeconds() noexcept
+{
+#if defined(_WIN32)
+    #if defined(_M_X64)
+    ULONG64 cycles = 0;
+    if (QueryThreadCycleTime (GetCurrentThread(), &cycles) == 0)
+        return -1.0;
+    return static_cast<double> (cycles) / cpuTicksPerSecond();
+    #else
+    return -1.0;
+    #endif
+#else
+    timespec ts {};
+    if (clock_gettime (CLOCK_THREAD_CPUTIME_ID, &ts) != 0)
+        return -1.0;
+    return static_cast<double> (ts.tv_sec) + 1.0e-9 * static_cast<double> (ts.tv_nsec);
+#endif
+}
+
 /** The voice cleanup model, timed: for every run() the worker makes, which
     input frame it got (found in the test signal; the mono downmix of two equal
-    channels is the signal itself) and when the run started and ended. */
+    channels is the signal itself), when the run started and ended, and the
+    worker thread's CPU time at its end. */
 class TimedVoiceCleanup : public ModelRunner
 {
 public:
@@ -404,6 +471,7 @@ public:
     {
         int frame = -1; // -1: not found in the signal
         Clock::time_point start, end;
+        double cpuSeconds = -1.0; // the worker thread's CPU time when the run ended
     };
 
     explicit TimedVoiceCleanup (const std::vector<float>& signal) : input (signal) {}
@@ -417,6 +485,7 @@ public:
         rec.start = Clock::now();
         const bool ok = model.run (in, out);
         rec.end = Clock::now();
+        rec.cpuSeconds = threadCpuSeconds();
         if (count < records.size())
             records[count++] = rec;
         return ok;
@@ -451,6 +520,141 @@ double percentile (std::vector<double> v, double q)
     std::sort (v.begin(), v.end());
     return v[std::min (v.size() - 1, static_cast<size_t> (q * static_cast<double> (v.size())))];
 }
+
+constexpr int kPacedBlocks = 100; // 1 s of audio, 200 model frames
+
+struct PacedRun
+{
+    uint64_t misses = 0, due = 0, failures = 0, framesRun = 0, wakeups = 0;
+    double seconds = 0.0; // the paced loop's wall time
+    std::vector<double> responseUs, runUs, processUs;
+    double workerCpuMsPerSecond = -1.0, modelMsPerSecond = 0.0;
+    NeuralWorkerScheduling scheduling = NeuralWorkerScheduling::None;
+    NeuralWorkerWake wake = NeuralWorkerWake::None;
+    bool deviceScheduled = false, finite = true;
+};
+
+/** 480-sample blocks at the device's pace (one per 10 ms) from a thread
+    scheduled like a device callback, no waiting; see the test cases below.
+    Prints the misses, the worker's response, its wake-ups and CPU time, and
+    the time process() takes on the pacing ("audio") thread. */
+PacedRun runPaced (AsyncModelConfig cfg, const char* label)
+{
+    PacedRun r;
+    auto x = whiteNoise (kPacedBlocks * 480, 0.02f, 13);
+    for (size_t i = 0; i < x.size(); ++i)
+        x[i] += static_cast<float> (0.2 * std::sin (2.0 * 3.14159265358979 * 180.0 * static_cast<double> (i) / kFs));
+    cpuTicksPerSecond(); // calibrated here, not on the worker
+    auto runner = std::make_unique<TimedVoiceCleanup> (x);
+    const TimedVoiceCleanup* timed = runner.get();
+    AsyncModelProcessor live (std::move (runner), cfg);
+    live.prepare ({ kFs, 480, 2 });
+    REQUIRE (live.isModelActive());
+    REQUIRE (waitUntil ([&live] { return live.getWorkerScheduling() != NeuralWorkerScheduling::None; }));
+    r.scheduling = live.getWorkerScheduling();
+    r.wake = live.getWorkerWake();
+
+    std::vector<float> left (x), right (x);
+    std::vector<TimedVoiceCleanup::Clock::time_point> queued (kPacedBlocks);
+    r.processUs.assign (kPacedBlocks, 0.0);
+    uint64_t wakeupsBefore = 0, wakeupsAfter = 0;
+    std::thread device ([&] {
+        r.deviceScheduled = scheduleLikeAudioCallback (480.0 / kFs);
+        const auto period = std::chrono::microseconds (10000);
+        const auto start = TimedVoiceCleanup::Clock::now();
+        wakeupsBefore = live.getWorkerWakeups();
+        auto next = start;
+        for (size_t k = 0; k < queued.size(); ++k)
+        {
+            std::this_thread::sleep_until (next);
+            next += period;
+            AudioBlock b (std::array<float*, 2> { left.data() + k * 480u, right.data() + k * 480u }.data(), 2, 480);
+            const auto before = TimedVoiceCleanup::Clock::now();
+            live.process (b);
+            queued[k] = TimedVoiceCleanup::Clock::now();
+            r.processUs[k] = std::chrono::duration<double, std::micro> (queued[k] - before).count();
+        }
+        wakeupsAfter = live.getWorkerWakeups();
+        r.seconds = std::chrono::duration<double> (TimedVoiceCleanup::Clock::now() - start).count();
+    });
+    device.join();
+
+    // Frames reach their deadline L = 960 samples after they start: the last two
+    // blocks' frames are still in the delay line when the loop ends.
+    r.due = static_cast<uint64_t> ((kPacedBlocks - 2) * 480 / kHop);
+    r.misses = live.getDeadlineMisses();
+    r.failures = live.getModelFailures();
+    r.framesRun = live.getFramesProcessed();
+    r.wakeups = wakeupsAfter - wakeupsBefore;
+    live.releaseResources(); // joins the worker: its records are complete
+    double modelSeconds = 0.0;
+    for (size_t i = 0; i < timed->count; ++i)
+    {
+        const auto& rec = timed->records[i];
+        const double runUs = std::chrono::duration<double, std::micro> (rec.end - rec.start).count();
+        r.runUs.push_back (runUs);
+        if (i > 0)
+            modelSeconds += 1.0e-6 * runUs;
+        const auto block = static_cast<size_t> (rec.frame / 2); // two model frames per block
+        if (rec.frame >= 0 && block < queued.size())
+            r.responseUs.push_back (std::chrono::duration<double, std::micro> (rec.end - queued[block]).count());
+    }
+    // The worker's CPU time between the end of its first run and the end of its
+    // last (runs 2 .. n and every sleep and wake-up in between), per second.
+    if (timed->count >= 2)
+    {
+        const auto& first = timed->records[0];
+        const auto& last = timed->records[timed->count - 1];
+        const double wall = std::chrono::duration<double> (last.end - first.end).count();
+        if (wall > 0.0 && first.cpuSeconds >= 0.0 && last.cpuSeconds >= 0.0)
+            r.workerCpuMsPerSecond = 1000.0 * (last.cpuSeconds - first.cpuSeconds) / wall;
+        if (wall > 0.0)
+            r.modelMsPerSecond = 1000.0 * modelSeconds / wall;
+    }
+    for (float v : left)
+        r.finite = r.finite && std::isfinite (v);
+
+    std::printf ("    [%s] paced at real time: %llu of %llu due frames missed their deadline, %llu failures, %llu frames run\n", label,
+                 static_cast<unsigned long long> (r.misses), static_cast<unsigned long long> (r.due),
+                 static_cast<unsigned long long> (r.failures), static_cast<unsigned long long> (r.framesRun));
+    std::printf ("    [%s] worker response (deadline 10000 us): median %.0f us, 90th percentile %.0f us, 99th %.0f us, max %.0f us; model run median "
+                 "%.0f us, max %.0f us\n",
+                 label, percentile (r.responseUs, 0.5), percentile (r.responseUs, 0.9), percentile (r.responseUs, 0.99),
+                 percentile (r.responseUs, 1.0), percentile (r.runUs, 0.5), percentile (r.runUs, 1.0));
+    std::printf ("    [%s] worker wake-ups %llu in %.2f s (%.0f / s); worker thread CPU %.2f ms per s (model runs %.2f ms per s); "
+                 "process() on the pacing thread: median %.1f us, 90th percentile %.1f us, max %.1f us\n",
+                 label, static_cast<unsigned long long> (r.wakeups), r.seconds, static_cast<double> (r.wakeups) / std::max (r.seconds, 1.0e-9),
+                 r.workerCpuMsPerSecond, r.modelMsPerSecond, percentile (r.processUs, 0.5), percentile (r.processUs, 0.9),
+                 percentile (r.processUs, 1.0));
+    return r;
+}
+
+/** The assertions both paced cases share (see the first). */
+void checkPaced (const PacedRun& r)
+{
+#if defined(__APPLE__)
+    CHECK (r.scheduling == NeuralWorkerScheduling::TimeConstraint);
+#else
+    CHECK (r.scheduling == NeuralWorkerScheduling::Default);
+#endif
+#if defined(__APPLE__) || defined(_WIN32)
+    CHECK (r.deviceScheduled);
+#endif
+    CHECK (r.failures == 0u);
+    CHECK_LE (r.misses, r.due / 20);
+    CHECK (r.framesRun + r.misses >= r.due);
+    // Every frame that ran has its response time (else the bound below could pass on nothing).
+    CHECK (static_cast<uint64_t> (r.responseUs.size()) + 2 >= r.framesRun);
+#if defined(__APPLE__)
+    // The time-constraint worker answers 9 frames in 10 within a quarter of the
+    // deadline (macOS CI, polling: about 0.6 ms at the 90th percentile). With
+    // the default policy its coalesced poll sleeps took it to 5.0 ms (and to
+    // 8.5 ms at the 99th percentile) without a miss in that run: the misses
+    // alone would not show the difference.
+    CHECK_LE (percentile (r.responseUs, 0.9), 2500.0);
+#endif
+    CHECK (r.finite);
+}
 } // namespace
 
 // No waiting: 480-sample blocks are processed at the device's pace (one per
@@ -459,90 +663,38 @@ double percentile (std::vector<double> v, double q)
 // macOS the pacing thread takes the time-constraint policy Core Audio's I/O
 // thread has: the test's main thread (utility QoS) sleeps 14 - 86 ms for 10 ms on the CI
 // runner (its timers are coalesced), so the blocks would come in bursts no
-// device produces. The worker's own scheduling is the product's
+// device produces. On Windows it runs above the worker, as a device thread
+// does (THREAD_PRIORITY_TIME_CRITICAL; since 2026-10-08, when the woken
+// worker could otherwise preempt it). The worker's own scheduling is the product's
 // (AsyncModelProcessor.h, "Worker scheduling"): the time-constraint policy on
 // macOS, the OS default elsewhere. CI machines are shared, so the bound is
 // loose (5 % of the frames). Printed: the misses; the worker's response (a
 // frame's result ready, counted from the end of the process() call that
-// queued it; its deadline is the next call, 10 ms later) and the model's own
-// run time on the worker.
+// queued it; its deadline is the next call, 10 ms later), the model's own
+// run time on the worker, the worker's wake-ups and CPU time, and process()'s
+// time on the pacing thread (which now includes the wake-up call).
+//
+// The worker is woken by each process() call that queues a frame (docs/11
+// E35, "Waking the worker"): one wake-up per block, where the polling worker
+// below woke every 625 us (1 600 / s with a precise timer).
 TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, the worker meets its deadlines")
 {
-    constexpr int kBlocks = 100; // 1 s of audio, 200 model frames
-    auto x = whiteNoise (kBlocks * 480, 0.02f, 13);
-    for (size_t i = 0; i < x.size(); ++i)
-        x[i] += static_cast<float> (0.2 * std::sin (2.0 * 3.14159265358979 * 180.0 * static_cast<double> (i) / kFs));
-    auto runner = std::make_unique<TimedVoiceCleanup> (x);
-    const TimedVoiceCleanup* timed = runner.get();
-    AsyncModelProcessor live (std::move (runner), config (2, false));
-    live.prepare ({ kFs, 480, 2 });
-    REQUIRE (live.isModelActive());
-    REQUIRE (waitUntil ([&live] { return live.getWorkerScheduling() != NeuralWorkerScheduling::None; }));
-#if defined(__APPLE__)
-    CHECK (live.getWorkerScheduling() == NeuralWorkerScheduling::TimeConstraint);
-#else
-    CHECK (live.getWorkerScheduling() == NeuralWorkerScheduling::Default);
-#endif
+    const PacedRun r = runPaced (config (2, false), "woken");
+    checkPaced (r);
+    CHECK (r.wake == NeuralWorkerWake::Signal);
+    CHECK_LE (r.wakeups, static_cast<uint64_t> (kPacedBlocks + kPacedBlocks / 2));
+}
 
-    std::vector<float> l (x), r (x);
-    std::vector<TimedVoiceCleanup::Clock::time_point> queued (kBlocks);
-    bool deviceScheduled = false;
-    std::thread device ([&] {
-        deviceScheduled = scheduleLikeAudioCallback (480.0 / kFs);
-        const auto period = std::chrono::microseconds (10000);
-        auto next = TimedVoiceCleanup::Clock::now();
-        for (size_t k = 0; k < queued.size(); ++k)
-        {
-            std::this_thread::sleep_until (next);
-            next += period;
-            AudioBlock b (std::array<float*, 2> { l.data() + k * 480u, r.data() + k * 480u }.data(), 2, 480);
-            live.process (b);
-            queued[k] = TimedVoiceCleanup::Clock::now();
-        }
-    });
-    device.join();
-#if defined(__APPLE__)
-    CHECK (deviceScheduled);
-#endif
-
-    // Frames reach their deadline L = 960 samples after they start: the last two
-    // blocks' frames are still in the delay line when the loop ends.
-    const auto due = static_cast<uint64_t> ((kBlocks - 2) * 480 / kHop);
-    const uint64_t misses = live.getDeadlineMisses();
-    const uint64_t failures = live.getModelFailures();
-    const uint64_t framesRun = live.getFramesProcessed();
-    live.releaseResources(); // joins the worker: its records are complete
-    std::vector<double> responseUs, runUs;
-    for (size_t i = 0; i < timed->count; ++i)
-    {
-        const auto& rec = timed->records[i];
-        runUs.push_back (std::chrono::duration<double, std::micro> (rec.end - rec.start).count());
-        const auto block = static_cast<size_t> (rec.frame / 2); // two model frames per block
-        if (rec.frame >= 0 && block < queued.size())
-            responseUs.push_back (std::chrono::duration<double, std::micro> (rec.end - queued[block]).count());
-    }
-    std::printf ("    paced at real time: %llu of %llu due frames missed their deadline, %llu failures, %llu frames run\n",
-                 static_cast<unsigned long long> (misses), static_cast<unsigned long long> (due),
-                 static_cast<unsigned long long> (failures), static_cast<unsigned long long> (framesRun));
-    std::printf ("    worker response (deadline 10000 us): median %.0f us, 90th percentile %.0f us, 99th %.0f us, max %.0f us; model run median %.0f us, "
-                 "max %.0f us\n",
-                 percentile (responseUs, 0.5), percentile (responseUs, 0.9), percentile (responseUs, 0.99), percentile (responseUs, 1.0),
-                 percentile (runUs, 0.5), percentile (runUs, 1.0));
-    CHECK (failures == 0u);
-    CHECK_LE (misses, due / 20);
-    CHECK (framesRun + misses >= due);
-    // Every frame that ran has its response time (else the bound below could pass on nothing).
-    CHECK (static_cast<uint64_t> (responseUs.size()) + 2 >= framesRun);
-#if defined(__APPLE__)
-    // The time-constraint worker answers 9 frames in 10 within a quarter of the
-    // deadline (macOS CI: about 0.6 ms at the 90th percentile). With the default
-    // policy its coalesced poll sleeps took it to 5.0 ms (and to 8.5 ms at the
-    // 99th percentile) without a miss in that run: the misses alone would not
-    // show the difference.
-    CHECK_LE (percentile (responseUs, 0.9), 2500.0);
-#endif
-    for (float v : l)
-        CHECK (std::isfinite (v));
+// The same with the worker polling its queue every frame / 8 (625 us): the
+// behaviour before 2026-10-08 and the fallback where no OS wake-up object can
+// be created. Kept as the before / after reference for the case above.
+TEST_CASE ("VoiceCleanup: paced at real time with 480-sample blocks and no waiting, a polling worker (the fallback; before 2026-10-08) meets its deadlines")
+{
+    AsyncModelConfig c = config (2, false);
+    c.workerPolls = true;
+    const PacedRun r = runPaced (c, "polling");
+    checkPaced (r);
+    CHECK (r.wake == NeuralWorkerWake::Poll);
 }
 
 TEST_CASE ("VoiceCleanup: in the chain's neural slot it is eligible in Balanced (480-sample buffers) and Quality, not in Low Latency or at 44.1 kHz")

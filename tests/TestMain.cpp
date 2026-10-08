@@ -123,9 +123,11 @@ int main (int argc, char** argv)
 
 #if defined(_WIN32)
     // A 1 ms system timer, as every JUCE process (the app, the plug-in's
-    // hosts, flub_app_tests) has: otherwise a short sleep lasts 15.6 ms and
-    // the neural worker's poll (AsyncModelProcessor.h) makes the NeuralSlot
-    // tests 13 s each instead of well under 1 s.
+    // hosts, flub_app_tests) has: otherwise a short sleep lasts 15.6 ms. The
+    // neural worker's poll (AsyncModelProcessor.h) made the NeuralSlot tests
+    // 13 s each without it; the worker is now woken by process(), but the
+    // polling reference case and the paced cases' 10 ms device clock still
+    // sleep.
     timeBeginPeriod (1);
 #endif
 

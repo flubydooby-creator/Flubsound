@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <thread>
@@ -737,15 +738,163 @@ TEST_CASE ("Neural: repeated create, prepare, process and destroy joins the work
             waitedProcessed += p.getFramesProcessed();
             ++waitedIterations;
         }
-        // Destroyed here, possibly while the worker is polling.
+        // Destroyed here, possibly while the worker sleeps.
     }
     CHECK (waitedIterations == 10);
     CHECK (waitedProcessed == static_cast<uint64_t> (waitedIterations * (n / kFrame)));
 
-    // An explicit poll interval is capped at 100 ms: the worker notices a stop
-    // request only between sleeps, so prepare() and the destructor wait that long.
+    // A polling worker's explicit interval is capped at 100 ms: it notices a
+    // stop request only between sleeps, so prepare() and the destructor wait that long.
     AsyncModelConfig slow;
     slow.workerPollMicroseconds = std::numeric_limits<int>::max();
     const AsyncModelProcessor capped (std::make_unique<IdentityRunner> (kFrame), slow);
     CHECK (capped.getConfig().workerPollMicroseconds == 100000);
+    // The woken worker's safety timeout: 0 = auto (100 ms), otherwise 100 us .. 1 s.
+    AsyncModelConfig longest, shortest;
+    longest.workerTimeoutMicroseconds = std::numeric_limits<int>::max();
+    shortest.workerTimeoutMicroseconds = 1;
+    CHECK (AsyncModelProcessor (std::make_unique<IdentityRunner> (kFrame), longest).getConfig().workerTimeoutMicroseconds == 1000000);
+    CHECK (AsyncModelProcessor (std::make_unique<IdentityRunner> (kFrame), shortest).getConfig().workerTimeoutMicroseconds == 100);
+    CHECK (AsyncModelProcessor (std::make_unique<IdentityRunner> (kFrame)).getConfig().workerTimeoutMicroseconds == 0);
+}
+
+namespace
+{
+double secondsSince (std::chrono::steady_clock::time_point t)
+{
+    return std::chrono::duration<double> (std::chrono::steady_clock::now() - t).count();
+}
+
+/** The wake-ups of a prepared worker that has nothing to do, over `seconds`. */
+uint64_t idleWakeups (AsyncModelProcessor& p, double seconds, double& measuredSeconds)
+{
+    REQUIRE (waitUntil ([&p] { return p.getWorkerScheduling() != NeuralWorkerScheduling::None; }));
+    const uint64_t before = p.getWorkerWakeups();
+    const auto start = std::chrono::steady_clock::now();
+    std::this_thread::sleep_for (std::chrono::duration<double> (seconds));
+    measuredSeconds = secondsSince (start);
+    return p.getWorkerWakeups() - before;
+}
+} // namespace
+
+// flub/neural/WakeEvent.h, the primitive under the woken worker.
+TEST_CASE ("Neural: WakeEvent wakes its waiter, collapses signals sent while it is awake and loses none (2000 hand-overs)")
+{
+    WakeEvent wake;
+    REQUIRE (wake.isValid()); // Windows, Linux and macOS all have one
+    CHECK (wake.wait (2000) == WakeEvent::WaitResult::TimedOut); // no signal
+    wake.signal();
+    wake.signal();
+    wake.signal();
+    CHECK (wake.wait (1000000) == WakeEvent::WaitResult::Pending); // three signals while awake: one, no sleep
+    CHECK (wake.wait (2000) == WakeEvent::WaitResult::TimedOut);
+
+    // A producer publishes items one at a time, signals, and waits until the
+    // consumer has seen each; the consumer drains, then waits (1 s timeout).
+    // Every hand-over races the consumer's way to sleep; a lost wake-up would
+    // show as a timeout.
+    constexpr uint32_t kItems = 2000;
+    std::atomic<uint32_t> published { 0 }, consumed { 0 };
+    int timeouts = 0, woken = 0, pending = 0;
+    std::thread consumer ([&] {
+        uint32_t seen = 0;
+        while (seen < kItems)
+        {
+            const uint32_t latest = published.load (std::memory_order_acquire);
+            if (latest != seen)
+            {
+                seen = latest;
+                consumed.store (seen, std::memory_order_release);
+                continue;
+            }
+            switch (wake.wait (1000000))
+            {
+                case WakeEvent::WaitResult::TimedOut: ++timeouts; break;
+                case WakeEvent::WaitResult::Woken: ++woken; break;
+                case WakeEvent::WaitResult::Pending: ++pending; break;
+            }
+        }
+    });
+    // The signaller's cost (the audio thread's, in AsyncModelProcessor):
+    // mostly with the consumer asleep, i.e. with the OS wake-up call.
+    std::vector<double> signalUs (kItems, 0.0);
+    const auto start = std::chrono::steady_clock::now();
+    bool handedOver = true;
+    for (uint32_t i = 1; i <= kItems && handedOver; ++i)
+    {
+        published.store (i, std::memory_order_release);
+        const auto before = std::chrono::steady_clock::now();
+        wake.signal();
+        signalUs[i - 1] = std::chrono::duration<double, std::micro> (std::chrono::steady_clock::now() - before).count();
+        handedOver = waitUntil ([&consumed, i] { return consumed.load (std::memory_order_acquire) == i; });
+    }
+    if (! handedOver) // hang guard: let the consumer finish
+    {
+        published.store (kItems, std::memory_order_release);
+        wake.signal();
+    }
+    consumer.join();
+    const double seconds = std::chrono::duration<double> (std::chrono::steady_clock::now() - start).count();
+    std::sort (signalUs.begin(), signalUs.end());
+    std::printf ("    %u hand-overs in %.1f ms: %d woken from a sleep, %d already signalled, %d timeouts; signal() median %.2f us, "
+                 "99th percentile %.2f us, max %.2f us\n",
+                 kItems, seconds * 1000.0, woken, pending, timeouts, signalUs[kItems / 2], signalUs[kItems * 99 / 100], signalUs[kItems - 1]);
+    CHECK (handedOver);
+    CHECK (timeouts == 0);
+    CHECK (woken + pending >= 1);
+}
+
+// docs/11 E35 (energy): the worker sleeps until process() queues a frame and
+// signals it, with a long safety timeout, instead of polling the queue
+// every frame / 8 (here 64 / 48 000 / 8 = 167 us). Printed: the idle
+// wake-ups of a woken and of a polling worker.
+TEST_CASE ("Neural: the worker sleeps until the audio thread queues a frame (wake-ups idle, per block and at a stop)")
+{
+    // 1. Idle: only the safety timeout (auto 100 ms) wakes it.
+    AsyncModelProcessor woken (std::make_unique<IdentityRunner> (kFrame));
+    woken.prepare (spec());
+    CHECK (woken.getWorkerWake() == NeuralWorkerWake::Signal);
+    double wokenSeconds = 0.0;
+    const uint64_t wokenIdle = idleWakeups (woken, 0.3, wokenSeconds);
+    CHECK_LE (wokenIdle, static_cast<uint64_t> (wokenSeconds / 0.1) + 2);
+
+    AsyncModelConfig pollConfig;
+    pollConfig.workerPolls = true; // the behaviour before 2026-10-08
+    AsyncModelProcessor polling (std::make_unique<IdentityRunner> (kFrame), pollConfig);
+    polling.prepare (spec());
+    CHECK (polling.getWorkerWake() == NeuralWorkerWake::Poll);
+    double pollingSeconds = 0.0;
+    const uint64_t pollingIdle = idleWakeups (polling, 0.3, pollingSeconds);
+    polling.releaseResources();
+    std::printf ("    idle worker: woken %llu wake-ups in %.0f ms (%.0f / s); polling %llu in %.0f ms (%.0f / s)\n",
+                 static_cast<unsigned long long> (wokenIdle), wokenSeconds * 1000.0, static_cast<double> (wokenIdle) / wokenSeconds,
+                 static_cast<unsigned long long> (pollingIdle), pollingSeconds * 1000.0, static_cast<double> (pollingIdle) / pollingSeconds);
+
+    // 2. Each block that queues a frame wakes it. With a 1 s safety timeout a
+    // lost wake-up would cost a whole second; 20 blocks, each waited for,
+    // take a few milliseconds, with at most one wake-up per block.
+    AsyncModelConfig longTimeout;
+    longTimeout.workerTimeoutMicroseconds = 1000000;
+    AsyncModelProcessor p (std::make_unique<IdentityRunner> (kFrame), longTimeout);
+    p.prepare (spec());
+    REQUIRE (waitUntil ([&p] { return p.getWorkerScheduling() != NeuralWorkerScheduling::None; }));
+    const int blocks = 20;
+    Planar buf = noise (2, kFrame * blocks);
+    const uint64_t before = p.getWorkerWakeups();
+    const auto blocksStart = std::chrono::steady_clock::now();
+    REQUIRE (runBlocks (p, buf, 0, kFrame * blocks, { kFrame }));
+    const double blocksSeconds = secondsSince (blocksStart);
+    const uint64_t blockWakeups = p.getWorkerWakeups() - before;
+    CHECK (p.getFramesProcessed() == static_cast<uint64_t> (blocks));
+    CHECK_LE (blocksSeconds, 0.5);
+    CHECK_LE (blockWakeups, static_cast<uint64_t> (blocks + 1)); // + 1: a stale token after a timeout race
+
+    // 3. A stop request wakes it: releaseResources() does not wait out the 1 s timeout.
+    const auto stopStart = std::chrono::steady_clock::now();
+    p.releaseResources();
+    const double stopSeconds = secondsSince (stopStart);
+    CHECK_LE (stopSeconds, 0.5);
+    CHECK (p.getWorkerWake() == NeuralWorkerWake::None);
+    std::printf ("    woken worker: %d blocks waited for in %.2f ms with %llu wake-ups; stop in %.2f ms\n", blocks, blocksSeconds * 1000.0,
+                 static_cast<unsigned long long> (blockWakeups), stopSeconds * 1000.0);
 }
