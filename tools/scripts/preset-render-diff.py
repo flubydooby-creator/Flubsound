@@ -26,13 +26,18 @@ gate CI. Typical use:
 
 Exit code 0 when every value is within tolerance, 1 when anything moved
 (a table of the changes is printed, largest first), 2 on usage / render
-errors. `--update` writes the baseline instead of comparing.
+errors. `--update` writes the baseline instead of comparing. `--largest N`
+also prints the N largest differences within tolerance (the noise floor), and
+`--print-moved` the full baseline line of every render that moved, as
+`--update` would write it, so a baseline can be re-based from a CI log.
 
-The committed baseline, tests/golden/preset-render-baseline.json, was recorded
-with a gcc Release build on Linux x86-64. Other compilers and CPUs can differ
-by a few hundredths of a dB (FMA contraction, libm); feedback loops (governor,
-AutoLevel) can amplify that. Compare like with like: record a baseline on the
-base commit with the same build when the committed one does not match.
+The committed baseline, tests/golden/preset-render-baseline.json, is the
+reference of a gcc Release build on Linux x86-64: CI's core job runs this
+script against it on its gcc leg (step "Preset render diff"). Other compilers
+and CPUs can differ by a few hundredths of a dB (FMA contraction, libm);
+feedback loops (governor, AutoLevel) can amplify that. Compare like with like:
+record a baseline on the base commit with the same build when the committed
+one does not match.
 
 Standard library only; the programmes are generated here, deterministically
 (xorshift32 noise, fixed seeds), so the script needs no audio files.
@@ -363,6 +368,12 @@ def tolerance_for(key, db_tol):
 
 def compare(baseline, current, db_tol):
     """Rows (|delta| sort key, preset, programme, key, before, after) beyond tolerance."""
+    return [r for r in differences(baseline, current) if r[0] > tolerance_for(r[3], db_tol) + 1e-9]
+
+
+def differences(baseline, current):
+    """Rows (|delta| sort key, preset, programme, key, before, after) of every
+    value that differs at all (a missing render or value sorts first)."""
     rows = []
     for name in sorted(set(baseline) | set(current)):
         before, after = baseline.get(name), current.get(name)
@@ -379,7 +390,7 @@ def compare(baseline, current, db_tol):
                 rows.append((math.inf, preset, programme, key, b, a))
                 continue
             delta = a - b
-            if abs(delta) > tolerance_for(key, db_tol) + 1e-9:
+            if abs(delta) > 1e-9:
                 rows.append((abs(delta), preset, programme, key, b, a))
     rows.sort(key=lambda r: (-r[0], r[1], r[2], r[3]))
     return rows
@@ -395,6 +406,10 @@ def main():
     ap.add_argument("--tolerance-db", type=float, default=0.1, help="dB / LU tolerance (default %(default)s)")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 2, help="parallel renders (default: CPU count)")
     ap.add_argument("--keep", metavar="DIR", help="keep the generated programmes in DIR")
+    ap.add_argument("--largest", type=int, default=0, metavar="N",
+                    help="also print the N largest differences within tolerance (the noise floor)")
+    ap.add_argument("--print-moved", action="store_true",
+                    help="also print the full baseline line (as --update writes it) of every render that moved")
     args = ap.parse_args()
 
     cli = pathlib.Path(args.cli)
@@ -434,14 +449,17 @@ def main():
             shutil.rmtree(work, ignore_errors=True)
 
     baseline_path = pathlib.Path(args.baseline)
+    # Columnar: one key list per programme, one value list per render
+    # (one render per line, so a diff of the baseline itself is readable).
+    keys = {}
+    for name in sorted(current):
+        keys.setdefault(name.partition("|")[2], list(current[name]))
+
+    def baseline_line(name):
+        return f'"{name}":' + json.dumps([current[name].get(k) for k in keys[name.partition("|")[2]]], separators=(",", ":"))
+
     if args.update:
-        # Columnar: one key list per programme, one value list per render
-        # (one render per line, so a diff of the baseline itself is readable).
-        keys = {}
-        for name in sorted(current):
-            keys.setdefault(name.partition("|")[2], list(current[name]))
-        lines = [f'"{name}":' + json.dumps([current[name].get(k) for k in keys[name.partition("|")[2]]], separators=(",", ":"))
-                 for name in sorted(current)]
+        lines = [baseline_line(name) for name in sorted(current)]
         head = json.dumps({"format": BASELINE_FORMAT, "version": 1, "sampleRate": FS,
                            "note": "tools/scripts/preset-render-diff.py --update: per programme the value names, "
                                    "per 'preset|programme' render the values in that order",
@@ -461,19 +479,37 @@ def main():
     baseline = {name: dict(zip(doc["keys"][name.partition("|")[2]], values)) for name, values in doc["renders"].items()}
     if args.presets or args.programmes:
         baseline = {k: v for k, v in baseline.items() if k in current}
+    every = differences(baseline, current)
     rows = compare(baseline, current, args.tolerance_db)
-    if not rows:
-        print(f"no change: {len(current)} renders within tolerance ({args.tolerance_db} dB) of {baseline_path}")
-        return 0
-    print(f"{len(rows)} value(s) moved beyond tolerance ({args.tolerance_db} dB) against {baseline_path}:")
-    print(f"{'preset':34} {'programme':13} {'value':24} {'before':>9} {'after':>9} {'delta':>8}")
 
     def fmt(v):
         return f"{v:9.2f}" if isinstance(v, (int, float)) else f"{str(v):>9}"
 
-    for d, preset, programme, key, b, a in rows:
-        delta = f"{a - b:+8.2f}" if isinstance(a, (int, float)) and isinstance(b, (int, float)) else f"{'':>8}"
-        print(f"{preset:34} {programme:13} {key:24} {fmt(b)} {fmt(a)} {delta}")
+    def table(table_rows):
+        print(f"{'preset':34} {'programme':13} {'value':24} {'before':>9} {'after':>9} {'delta':>8}")
+        for d, preset, programme, key, b, a in table_rows:
+            delta = f"{a - b:+8.2f}" if isinstance(a, (int, float)) and isinstance(b, (int, float)) else f"{'':>8}"
+            print(f"{preset:34} {programme:13} {key:24} {fmt(b)} {fmt(a)} {delta}")
+
+    if args.largest > 0:
+        values = sum(1 for v in current.values() for x in v.values() if x is not None)
+        moved_rows = set(rows)
+        within = [r for r in every if r not in moved_rows]
+        changed = {f"{r[1]}|{r[2]}" for r in every}
+        print(f"noise floor: {len(every)} of {values} values differ at all, in {len(changed)} of {len(current)} renders; "
+              f"{len(within)} within tolerance, the largest {min(args.largest, len(within))}:")
+        if within:
+            table(within[:args.largest])
+    if not rows:
+        print(f"no change: {len(current)} renders within tolerance ({args.tolerance_db} dB) of {baseline_path}")
+        return 0
+    print(f"{len(rows)} value(s) moved beyond tolerance ({args.tolerance_db} dB) against {baseline_path}:")
+    table(rows)
+    if args.print_moved:
+        moved = sorted({f"{r[1]}|{r[2]}" for r in rows} & set(current))
+        print(f"baseline lines of the {len(moved)} render(s) that moved (as --update writes them):")
+        for name in moved:
+            print(baseline_line(name))
     return 1
 
 

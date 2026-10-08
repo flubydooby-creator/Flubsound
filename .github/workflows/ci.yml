@@ -48,6 +48,20 @@ jobs:
         env:
           FLUB_GOLDEN_REFERENCE: "1"
         run: ./build/tests/flub_tests "Golden renders"
+      # docs/11 E59: the all-preset render diff (31 presets x 5 programmes,
+      # tools/scripts/preset-render-diff.py, about 30 s) against the committed
+      # tests/golden/preset-render-baseline.json, on the leg it is recorded
+      # on. Fails when a value moves by more than 0.1 dB / LU (latency: any
+      # change; percentages: 1 point; governor scale: 0.005) or a render is
+      # added or missing. It prints the moved values, the 20 largest
+      # differences within tolerance (the noise floor) and each moved
+      # render's baseline line as --update writes it, so an intended change
+      # is re-based from this log (or re-recorded with --update). Blocking since
+      # 2026-10-08: gcc, clang, MSVC and Apple Clang (arm64) all read 0 of
+      # 5121 values different (wip/golden-gcc probe, run 37722477794).
+      - name: Preset render diff (reference platform)
+        if: matrix.compiler == 'gcc'
+        run: python3 tools/scripts/preset-render-diff.py --cli build/tools/flubsound-cli/flubsound-cli --largest 20 --print-moved
       - name: CLI smoke test
         shell: bash
         run: |
