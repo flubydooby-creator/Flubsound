@@ -243,6 +243,19 @@ The worktrees `.claude/worktrees/wf_7df3eb45-bb4-1..5` are kept for reference; n
 New temporary remote branches: `wip/golden-gcc`, `wip/e22-room`, `wip/neural-wake`, `wip/neural-wake-print` (a
 print-only CI step, never merged), `wip/e53-bypass-limiter`, `wip/e28-comb`; all deleted on 2026-10-08 with the owner's OK.
 
+### IN FLIGHT (2026-10-09): the 3D brain visualiser (owner request), unmerged
+
+Owner request: a 3D brain view of how the music travels through the brain, based on real neurology. The owner
+approved a three.js browser mock-up after four rounds (3D point-cloud brain he loves; connected nerve tracts;
+no orbs; landing spots that brighten and grow with intensity, dark when quiet). Workflow wf_0f5beb3e-d6e builds it
+as the analyser visualiser "brain" (CPU rendering like Waterfall3D; ascending auditory pathway with tonotopy and
+real relative latencies shown 20x slower, contralateral dominance, beat network, chord-surprise IFG, dopamine
+caudate / accumbens; approximate MNI coordinates) in a workflow worktree, branch pushed as `wip/brain-view`, then two
+reviews, a fix pass and a verification. To finish if interrupted: find the worktree with `git worktree list`
+(branch name from the workflow journal), check `git log 93eb318..HEAD` there, finish or review, merge onto this
+branch, full ctest, push, rebuild the app; the owner said "commit when ready". The mock-up and its screenshots:
+the session scratchpad's `brain3d_v5.html` and `brain-shots/`.
+
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows: done** (step 1 above; CI first fully green on all three OSes in run 37572308549; latest
