@@ -1218,8 +1218,8 @@ an id this build does not know (written by a newer version) or registered for th
       beat (±15 %) after the last of three counted beats whose two gaps match (a snare on a steady kick's grid, as the
       test music's snare on a kick, or the next hit of a pattern already counted; only counted beats make the grid, so
       hits between that do not count leave it intact). Every snare-like hit, counted or not, extends the pattern; one
-      that does not count stays
-      sound: its onset lights the auditory pathway (a percussive onset), not the beat network. Kicks are unchanged.
+      that does not count stays sound: its onset lights the auditory pathway (a percussive onset), not the beat
+      network. Kicks are unchanged.
       The grid is the counted beats' next slot only, where the kick usually is (no half beats, no rule "anywhere on
       the kick grid"): 4 of the 9 irregular gunshots below land within 75 ms (15 % of a beat) of a 120 BPM kick grid,
       and the rule counts only the 2 that hid a kick. A beat of strength a starts waves:
