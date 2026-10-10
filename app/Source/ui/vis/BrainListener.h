@@ -27,13 +27,18 @@
 //     snare-like hit is a beat only when it repeats like a drum beat (owner
 //     decision 2026-10-10: gunshots and bursts in a game read as snares): its
 //     gap to the previous snare-like hit and the gap before that are both
-//     0.2 - 2 s and match within 15 % (so a backbeat counts from its third
-//     snare), or it lands one beat (within 15 %) after the last of three counted
-//     beats whose two gaps match (a snare on a steady kick's grid, or the next
-//     hit of a pattern already counted). Single shots, automatic fire (gaps
-//     under 0.2 s), irregular bursts and noise stay sound: their onsets light
-//     the auditory pathway, not the beat network. A perfectly regular train of
-//     bursts at 30 - 300 per minute still counts from its third.
+//     0.2 - 2.3 s and match within 8 % (so a backbeat counts from its third
+//     snare); or nothing snare-like came since the last counted snare and it
+//     lands one or two of that pattern's gaps after it (one missed snare); or
+//     it lands one beat (within 8 %) after the last of three counted beats
+//     whose two gaps match (a snare on a steady kick's grid). Single shots at
+//     irregular gaps, automatic fire (gaps under 0.2 s), 3-round bursts,
+//     irregular bursts and noise stay sound: their onsets light the auditory
+//     pathway, not the beat network. Limits: game sounds that repeat steadily
+//     count from their third hit (a gun fired at its cycle rate, steady
+//     footsteps, about half of a human's taps at +-10 %); after a fill or a
+//     tempo change the next two snares do not count; syncopated snares
+//     (breakbeats) mostly do not. Footsteps with a low thud can read as kicks.
 //   * Chord change (heuristic): the shared music listener (PitchEstimator +
 //     KeyDetector, as the chord view) and a ChordTracker; a change from one
 //     chord to another is "unexpected" when the new chord has a pitch class
@@ -84,8 +89,10 @@ public:
     static constexpr int kLookahead = 4; // hops before a beat candidate is decided (43 ms at 48 kHz)
     static constexpr double kBeatRefractory = 0.15, kSlotSeconds = 0.25;
     /** A snare-like hit is a beat only when it repeats like a drum beat: gaps of kSnareMinGap .. kSnareMaxGap s
-        (300 .. 30 per minute) that match the one before within kSnareGapTolerance of it. */
-    static constexpr double kSnareMinGap = 0.2, kSnareMaxGap = 2.0, kSnareGapTolerance = 0.15;
+        (300 .. 26 per minute; 2.3 s keeps a 60 BPM backbeat's 2.0 s, which the hop grid measures as 1.995 / 2.005 s)
+        that match the one before within kSnareGapTolerance of it (8 %: a drummer's +-30 ms at 120 BPM passes, about
+        half of a human's taps at +-10 % do not; the hop grid's step is at most 5.3 % of a 0.2 s gap). */
+    static constexpr double kSnareMinGap = 0.2, kSnareMaxGap = 2.3, kSnareGapTolerance = 0.08;
     static constexpr int kSlots = 64;
     /** A 0.25 s slot under this (summed power, dBFS) is a pause, left out of the build-up's and the drop's means. */
     static constexpr float kSilentDb = -60.0f;
@@ -151,8 +158,10 @@ private:
     float rangeSum (const std::vector<float>& p, double fromHz, double toHz, int size) const noexcept;
     void detectBeat (double time, float centroid, float flatness, float allDb, BrainActivity& activity) noexcept;
     /** Whether a snare-like hit at t continues a steady pattern: its own (the two gaps to the previous snare-like hits
-        match) or the counted beats' (it lands one beat after the last of three steady beats). */
-    bool snareRepeats (double t) const noexcept;
+        match), the counted snares' across one missed hit (nothing snare-like since the last counted snare, and t one
+        or two of its gaps after it) or the counted beats' (it lands one beat after the last of three steady beats).
+        `period` gets the snare pattern's gap it continues (0 when not known). */
+    bool snareRepeats (double t, double& period) const noexcept;
     void updateMacro (double time, double streamSeconds, float totalP, float lowP, float highP, bool hfHit, BrainActivity& activity) noexcept;
     void updateChords (double clock, double dt, BrainActivity& activity) noexcept;
 
@@ -188,6 +197,8 @@ private:
     Candidate candidate;
     double lastBeatTime = -1.0e9;
     double snareLast = -1.0e9, snareBefore = -1.0e9; // the last two snare-like hits, counted or not
+    double lastSnareBeat = -1.0e9, snarePeriod = 0.0;  // the last counted snare and its pattern's gap (0: none)
+    bool snareSinceBeat = false;                       // a snare-like hit was heard after the last counted snare
     int kicks = 0, snares = 0, snareHits = 0;
     std::array<double, kBeatLog> beatLog {};
     int beatLogCount = 0, beatLogNext = 0;

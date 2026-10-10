@@ -138,7 +138,9 @@ void BrainListener::reset() noexcept
     low = click = body = Feature {};
     candidate = Candidate {};
     lastBeatTime = -1.0e9;
-    snareLast = snareBefore = -1.0e9;
+    snareLast = snareBefore = lastSnareBeat = -1.0e9;
+    snarePeriod = 0.0;
+    snareSinceBeat = false;
     kicks = snares = snareHits = 0;
     beatLog.fill (0.0);
     beatLogCount = beatLogNext = 0;
@@ -435,14 +437,16 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
     const bool snare = ! kick && candidate.snareLike && flatness >= kSnareFlatness * 0.8f;
     if (! (kick || snare))
         return;
+    double period = 0.0; // the counted snare pattern's gap this hit continues (0: not known)
     if (snare)
     {
         // A beat only when it repeats like a drum beat; otherwise (a shot, a burst, noise) it stays sound: its onset
         // lights the auditory pathway, not the beat network. Every snare-like hit, counted or not, extends the pattern.
         ++snareHits;
-        const bool repeats = snareRepeats (candidate.time);
+        const bool repeats = snareRepeats (candidate.time, period);
         snareBefore = snareLast;
         snareLast = candidate.time;
+        snareSinceBeat = true; // until it is counted below
         if (! repeats)
             return;
     }
@@ -453,28 +457,50 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
     if (kick)
         ++kicks;
     else
+    {
         ++snares;
+        snarePeriod = period;
+        lastSnareBeat = candidate.time;
+        snareSinceBeat = false;
+    }
     sink.beat (candidate.time, kick ? strength (candidate.lowDb) : 0.7f * strength (candidate.clickDb + 10.0f));
     beatLog[static_cast<size_t> (beatLogNext)] = candidate.time;
     beatLogNext = (beatLogNext + 1) % kBeatLog;
     beatLogCount = std::min (beatLogCount + 1, kBeatLog);
 }
 
-bool BrainListener::snareRepeats (double t) const noexcept
+bool BrainListener::snareRepeats (double t, double& period) const noexcept
 {
-    const auto steady = [] (double gap, double reference) noexcept
-    {
-        const auto inRange = [] (double g) noexcept { return g >= kSnareMinGap && g <= kSnareMaxGap; };
-        return inRange (gap) && inRange (reference) && std::abs (gap - reference) <= kSnareGapTolerance * reference;
-    };
+    const auto inRange = [] (double g) noexcept { return g >= kSnareMinGap && g <= kSnareMaxGap; };
+    const auto steady = [&inRange] (double gap, double reference) noexcept
+    { return inRange (gap) && inRange (reference) && std::abs (gap - reference) <= kSnareGapTolerance * reference; };
     // Its own pattern: the gap to the previous snare-like hit matches the gap before it (a backbeat's third snare on).
     if (steady (t - snareLast, snareLast - snareBefore))
+    {
+        period = t - snareLast;
         return true;
+    }
+    // A counted pattern carries over one missed snare: nothing snare-like was heard since the last counted snare, and
+    // this hit lands one or two of its gaps after it (a miss of the detector, a snare left out). A snare-like hit in
+    // between (a fill, a shot) breaks it.
+    if (snarePeriod > 0.0 && ! snareSinceBeat)
+        for (int k = 1; k <= 2; ++k)
+        {
+            const double since = t - lastSnareBeat;
+            if (inRange (since / k) && std::abs (since - k * snarePeriod) <= kSnareGapTolerance * snarePeriod)
+            {
+                period = since / k;
+                return true;
+            }
+        }
     // The counted beats' grid: the last three beats (kicks or snares) are steady and this hit is the next one.
     if (beatLogCount < 3)
         return false;
     const double b1 = getBeatTime (beatLogCount - 1), b2 = getBeatTime (beatLogCount - 2), b3 = getBeatTime (beatLogCount - 3);
-    return steady (b1 - b2, b2 - b3) && steady (t - b1, b1 - b2);
+    if (! (steady (b1 - b2, b2 - b3) && steady (t - b1, b1 - b2)))
+        return false;
+    period = inRange (t - lastSnareBeat) ? t - lastSnareBeat : 0.0;
+    return true;
 }
 
 void BrainListener::updateMacro (double time, double streamSeconds, float totalP, float lowP, float highP, bool hfHit, BrainActivity& sink) noexcept
