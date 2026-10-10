@@ -267,12 +267,12 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
   first implementation, exactly the review bugs. CI on `wip/brain-view`: 37918984219, 37927298969, 38030655885 (all
   12 jobs green; 38030655885's `pipewire` job needed a re-run, docs/11 E48 2026-10-10).
 - Measured: a left-ear tone lights the right Heschl's gyrus 0.50 vs 0.17; app test music 23 of 24 kicks, 0 false
-  beats, 0 build-ups / drops; render 2.4-3.0 ms at 1280×720 and 4.0-5.1 ms at 1920×1080 on CI (aim ~4 ms).
+  beats, 0 build-ups / drops; render 2.4-3.0 ms at 1280×720 and 4.0-5.1 ms at 1920×1080 on CI (aim ~4 ms; the owner keeps full screen sharp).
 - Limits (docs/06, docs/12): heuristics checked only on the app's test music and synthetic signals; gunshots and
   short noise bursts read as snares and pulse the beat network. Not yet seen on the owner's screen.
 - The worktree `.claude/worktrees/wf_0f5beb3e-d6e-1` (branch `worktree-wf_0f5beb3e-d6e-1`, also `a8206a0` with the
-  last test split) is kept for reference; the remote branch `wip/brain-view` still exists (delete with the owner's
-  OK). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
+  last test split) is kept for reference; the remote branch `wip/brain-view` was deleted on 2026-10-10 with the
+  owner's OK. Full screen stays sharp (owner, 2026-10-10). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
   scratchpad.
 
 ### Next steps for the local session, in priority order
@@ -325,9 +325,9 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
      −1.91 LU, Enhanced −0.56 LU)?; E53: soften the positional-focus guard's instant attack (the user-gaming 97.05 s
      step)?; E35: keep the polling twin of the paced VoiceCleanup test (about 1 s per run) or drop it?; E59: the strict
      render diff blocks CI and the golden renders / demo pack also run after an earlier failed step - OK?
-   - New (2026-10-10, brain view): render full screen at a lower internal resolution and scale up (about 25 % less
-     render time, slightly softer) or keep it sharp?; should a snare count as a beat only when it repeats within 2 s
-     (gunshots and noise bursts now pulse the beat network)?; delete `wip/brain-view`?
+   - Decided 2026-10-10 (brain view): full screen stays sharp (no smaller internal render); `wip/brain-view` deleted.
+   - New (2026-10-10, brain view): should a snare count as a beat only when it repeats within 2 s (gunshots and noise
+     bursts now pulse the beat network)?
 4. **Known open items (software).**
    - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine
      (on the merged code with the PC 93 % busy from another project's WSL builds: 48 late / 2 over budget of

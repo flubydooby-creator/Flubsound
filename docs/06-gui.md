@@ -1285,9 +1285,9 @@ an id this build does not know (written by a newer version) or registered for th
     full-screen paint took 9.1 ms, with a 24-bit software image 10.9 ms. The review fixes (the mirrored projection, two
     more tracts, the pause rules) do not change the cost: the same harness, run minutes apart on the PC under the same
     load, read 2.79 / 5.07 ms (render at 1280 × 720 / 1920 × 1080) after them and 2.76 / 5.18 ms before; with the PC
-    68 – 86 % busy it read 3.2 – 3.3 / 5.9 – 6.3 ms (3 runs). Full screen stays above the ~4 ms aim (an owner choice:
-    render it smaller and scale it up, or keep it sharp).
-  - Tests: `tests/app/test_app_brain_view.cpp` (20 cases: the tract graph and the table, the tonotopic maps, a tone in
+    68 – 86 % busy it read 3.2 – 3.3 / 5.9 – 6.3 ms (3 runs). Full screen stays above the ~4 ms aim; the owner keeps it
+    sharp (decided 2026-10-10: no smaller internal render scaled up).
+  - Tests: `tests/app/test_app_brain_view.cpp` (24 cases, one per synthetic loop and per frame size: the tract graph and the table, the tonotopic maps, a tone in
     one ear, the superior olive's wiring, levels and silence, the kick pattern, chord surprise and its timing, build-up
     and drop, the test music, the synthetic loops, pauses, chords after silence or a gap, a re-struck chord, noise and
     noise bursts, NaN / inf input, hover / menu / reset, the picture's handedness at 21 angles and tilts, no render
