@@ -243,18 +243,37 @@ The worktrees `.claude/worktrees/wf_7df3eb45-bb4-1..5` are kept for reference; n
 New temporary remote branches: `wip/golden-gcc`, `wip/e22-room`, `wip/neural-wake`, `wip/neural-wake-print` (a
 print-only CI step, never merged), `wip/e53-bypass-limiter`, `wip/e28-comb`; all deleted on 2026-10-08 with the owner's OK.
 
-### IN FLIGHT (2026-10-09): the 3D brain visualiser (owner request), unmerged
+### Merged 2026-10-10: the 3D brain visualiser (owner request 2026-10-09)
 
-Owner request: a 3D brain view of how the music travels through the brain, based on real neurology. The owner
-approved a three.js browser mock-up after four rounds (3D point-cloud brain he loves; connected nerve tracts;
-no orbs; landing spots that brighten and grow with intensity, dark when quiet). Workflow wf_0f5beb3e-d6e builds it
-as the analyser visualiser "brain" (CPU rendering like Waterfall3D; ascending auditory pathway with tonotopy and
-real relative latencies shown 20x slower, contralateral dominance, beat network, chord-surprise IFG, dopamine
-caudate / accumbens; approximate MNI coordinates) in a workflow worktree, branch pushed as `wip/brain-view`, then two
-reviews, a fix pass and a verification. To finish if interrupted: find the worktree with `git worktree list`
-(branch name from the workflow journal), check `git log 93eb318..HEAD` there, finish or review, merge onto this
-branch, full ctest, push, rebuild the app; the owner said "commit when ready". The mock-up and its screenshots:
-the session scratchpad's `brain3d_v5.html` and `brain-shots/`.
+Owner request: a 3D brain view of how the music travels through the brain, **based on real neurology**. The owner
+approved a three.js browser mock-up after four rounds (a turning 3D point-cloud brain he loves; connected nerve
+tracts; no orbs; landing spots that brighten and grow with intensity, dark when quiet). Built by workflow
+wf_0f5beb3e-d6e (implement, two independent reviews - neuroscience / look and code -, fix, verification: approved)
+and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner said "commit when ready".
+
+- `app/Source/ui/vis/BrainView` ("brain", main view and visualiser window; View › Visualiser › Brain), with
+  `BrainAnatomy` (stations from approximate MNI coordinates, table and sources in docs/06 §6.4.2; 44 tracts, 12
+  crossing the midline; Greenwood cochlea map, Heschl's gyrus tonotopy), `BrainListener` (32 bands per ear and
+  onsets from the post tap; kick, snare, chord surprise against the key, build-up and drop heuristics) and
+  `BrainActivity` (delayed readout along the pathway: ear → CN → olive → lateral lemniscus → IC → MGN → Heschl's
+  gyrus at 2 / 3.5 / 4.5 / 5.5 / 9 / 15 ms shown 20× slower, crossing 65 / 35 above the olive; beat network,
+  ERAN → right IFG, dopamine → caudate (build-up) / accumbens (drop)). CPU rendering, no OpenGL; caption: a model
+  from published research, not a scan.
+- Review fixes: it was drawn as the brain's mirror image (now tested at 21 angles / tilts); the olive is wired as in
+  Grothe, Pecka and McAlpine 2010 (MSO both ears 0.5 / 0.5, LSO own ear less 0.5 × the other via the MNTB); pauses
+  and track gaps no longer fake drops / build-ups, nor does a re-struck chord; NaN / inf input no longer latches the
+  view; a still, dark brain is not re-rendered.
+- Tests: `tests/app/test_app_brain_view.cpp`, 24 cases (each ≤ 1.15 s alone at ~50 % load); 8 of them failed on the
+  first implementation, exactly the review bugs. CI on `wip/brain-view`: 37918984219, 37927298969, 38030655885 (all
+  12 jobs green; 38030655885's `pipewire` job needed a re-run, docs/11 E48 2026-10-10).
+- Measured: a left-ear tone lights the right Heschl's gyrus 0.50 vs 0.17; app test music 23 of 24 kicks, 0 false
+  beats, 0 build-ups / drops; render 2.4-3.0 ms at 1280×720 and 4.0-5.1 ms at 1920×1080 on CI (aim ~4 ms).
+- Limits (docs/06, docs/12): heuristics checked only on the app's test music and synthetic signals; gunshots and
+  short noise bursts read as snares and pulse the beat network. Not yet seen on the owner's screen.
+- The worktree `.claude/worktrees/wf_0f5beb3e-d6e-1` (branch `worktree-wf_0f5beb3e-d6e-1`, also `a8206a0` with the
+  last test split) is kept for reference; the remote branch `wip/brain-view` still exists (delete with the owner's
+  OK). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
+  scratchpad.
 
 ### Next steps for the local session, in priority order
 
@@ -271,6 +290,8 @@ the session scratchpad's `brain3d_v5.html` and `brain-shots/`.
    - R5.3: the `neural-voice-cleanup` demo pair, then the switch on real Discord / chat audio.
    - E28: the `enhanced-renderer` demo pair, then a 7.1 game's footsteps moving between side and front; in the app
      wait about a second after switching the renderer before comparing.
+   - Brain view (View › Visualiser › Brain, best in the visualiser window): a tone panned left should light the right
+     side more; a song with a build-up and drop (e.g. deadmau5) should light the caudate, then the accumbens.
    - R4.5: the move-away with Edge: does Edge (or a game) play to the headset again after an unassign without a reload?
    - R4.4: record a chord, reset during a recording, check that Alt+F4 is refused.
 3. **Owner decisions** (docs/11 §5.4, the batch 4 / 5 paragraphs, and the Status lines).
@@ -304,6 +325,9 @@ the session scratchpad's `brain3d_v5.html` and `brain-shots/`.
      −1.91 LU, Enhanced −0.56 LU)?; E53: soften the positional-focus guard's instant attack (the user-gaming 97.05 s
      step)?; E35: keep the polling twin of the paced VoiceCleanup test (about 1 s per run) or drop it?; E59: the strict
      render diff blocks CI and the golden renders / demo pack also run after an earlier failed step - OK?
+   - New (2026-10-10, brain view): render full screen at a lower internal resolution and scale up (about 25 % less
+     render time, slightly softer) or keep it sharp?; should a snare count as a beat only when it repeats within 2 s
+     (gunshots and noise bursts now pulse the beat network)?; delete `wip/brain-view`?
 4. **Known open items (software).**
    - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine
      (on the merged code with the PC 93 % busy from another project's WSL builds: 48 late / 2 over budget of
@@ -323,7 +347,9 @@ the session scratchpad's `brain3d_v5.html` and `brain-shots/`.
    - Tests that draw random numbers inside one argument list get other inputs per compiler (they pass everywhere):
      `tests/test_compressor.cpp` (~line 1434), `tests/test_parametric_eq.cpp` (~line 1021).
    - PipeWire on CI: the job is blocking since 2026-10-08; an idle xrun is tolerated only as an attributed
-     scheduling stall; a desktop with real-time priority is not checked (E48).
+     scheduling stall; a desktop with real-time priority is not checked (E48). It failed once on 2026-10-10
+     (38030655885 attempt 1): an idle callback with 3.98 ms of its own CPU time, not attributed (possibly hypervisor
+     steal time; reading `/proc/stat` steal around the callback would tell); a re-run was green.
 5. **Gated items** (they need hardware, people or network, not code):
    - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E55 / E22 on
      hardware, and the E54 update check against a real release.
