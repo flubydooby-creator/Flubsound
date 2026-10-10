@@ -25,6 +25,10 @@
 //   * Give the component a title and description (accessibility) and a
 //     tooltip where a hover explains something; VisualiserHost sets the
 //     title and description from the registry entry when it creates the view.
+//   * Most views ignore the mouse (setInterceptsMouseClicks (false, false)).
+//     One that takes clicks (the brain: drag to turn) still gets the
+//     visualiser window's menu, double-click and idle handling: the window
+//     listens to its mouse events and adds addMenuItems() to its menu.
 //
 // To add a view: write vis/MyView.{h,cpp} (a class derived from Visualiser),
 // then add one line for it to the list in vis/VisualiserRegistry.cpp. The
@@ -96,6 +100,12 @@ public:
 
     /** Height of the view as a strip under the spectrum (Descriptor::canBeStrip). */
     virtual int getStripHeight() const { return 34; }
+
+    /** The view's own right-click items (e.g. the brain's "Stop turning"), added
+        with their actions (PopupMenu::addItem (text, enabled, ticked, action)).
+        The visualiser window puts them at the top of its menu; a view that takes
+        mouse clicks shows them itself in the analyser panel. Default: none. */
+    virtual void addMenuItems (juce::PopupMenu& /*menu*/) {}
 };
 
 /** One registry entry (vis/VisualiserRegistry.cpp). */

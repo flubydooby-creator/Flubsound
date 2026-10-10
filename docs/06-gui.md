@@ -631,7 +631,7 @@ flowchart LR
 | — every 15 frames | ≈ 4 Hz | `HeaderBar::updateStatus()`: latency, CPU, strip activity dots, preset-modified dot |
 | `SpectrumAnalyzer` FFT | one hop per 1024 new samples (≈ 46.9/s at 48 kHz); at most one per stream per frame | 4096-point FFT |
 | — optional views (§6.4.1) | Sharper lows: one 8192-point FFT per stream per `kHop / decimation` decimated samples; Stereo width: one 4096-point FFT of the side per hop; Spectrogram: one image row per post hop | each only while its view is on |
-| Visualisers (§6.4.2) | `advance` once per frame for the selected view and strip and the created history views; Stereo field: two 4096-point FFTs per 2048 samples; Goniometer: a 320 × 320 phosphor fade + render per frame | nothing for views never chosen |
+| Visualisers (§6.4.2) | `advance` once per frame for the selected view and strip and the created history views; Stereo field: two 4096-point FFTs per 2048 samples; Goniometer: a 320 × 320 phosphor fade + render per frame; Brain: a 4096- and a 1024-point complex FFT per 512 samples, the music views' 16384-point FFT per 32 ms, the model every frame and a new picture at most 75 times a second | nothing for views never chosen |
 | `LevelMeters` numeric readouts | ≥ 0.08 s apart (≈ 12 Hz) | TRUE PEAK and L/R readouts; the bars repaint every frame |
 | `LoudnessPanel` | repaint ≥ 0.05 s apart (≤ 20 Hz), and only when a value changed | readouts and bars |
 | `WaveformHistory` | 100 columns/s (10 ms each); paths rebuilt in the frame when a column completed | envelope and LUFS trace |
@@ -1002,7 +1002,8 @@ an id this build does not know (written by a newer version) or registered for th
   `setSampleRate (double)`, `reset()` (strip switch / engine rebuilt), `pushPre (mid, n)`,
   `pushPost (mid, side, n)` (aligned: `L = mid + side`, `R = mid − side`), `advance (const FrameContext&)` (pure
   virtual; once per frame after the pushes: analyse, update, repaint), `keepsHistory()` (default false) and
-  `getStripHeight()` (default 34). `FrameContext` carries this frame's `MeterSnapshot` (levels, LUFS, correlation, gain
+  `getStripHeight()` (default 34) and `addMenuItems (PopupMenu&)` (the view's own right-click items, default none; the
+  visualiser window puts them at the top of its menu). `FrameContext` carries this frame's `MeterSnapshot` (levels, LUFS, correlation, gain
   reductions, …), `dtSeconds`, `sampleRate`, the `SpectrumAnalyzer*` (its latest analysis and geometry; nullptr in
   tests) and the loudness target (`targetLufs`, NaN for none, and `targetName`). Rules: pushes only copy into
   preallocated buffers, analysis happens in `advance`; no allocation per frame (images, FFT buffers and paths are sized
@@ -1096,6 +1097,163 @@ an id this build does not know (written by a newer version) or registered for th
   6 dB`, fast: instant rise, 0.12 s fall), taken only while the bass rises (a hit, not a held note), decaying 0.18 s; it swells the inner ring (+12 %), its accent rim and a halo image
   behind the rays (+10 %, brighter). The centre shows the meter bus's momentary loudness (`-14.2` / `LUFS`) while the
   strip plays; *30 Hz* and *16 kHz* mark the top and bottom.
+- **Brain** (`brain`, `BrainView.*` with `BrainAnatomy.*`, `BrainListener.*`, `BrainActivity.*`; owner request
+  2026-10-09, the look of the approved three.js mockup redone with the app's own CPU rendering; main view and the
+  visualiser window, not a strip). How the music playing now travels through a model of the human brain: a rotating
+  3D point cloud (two folded hemispheres with the lateral and central sulci open, the cerebellum, the brainstem), the
+  ears, the cochlea spirals and the nerve tracts that connect every station; a signal lights the tract itself as a
+  bright segment that runs along it and leaves a fading trail (no travelling orbs); the landing spots (nuclei and
+  cortical patches) grow brighter and bigger with the level that reaches them and go dark in silence. The caption says
+  it is a model from published research driven by the music, not a scan of the listener, and that the signals are shown
+  20 times slower than real; the legend gives the colours (signal hue by frequency, HSL hue 0 → 0.52 over log
+  30 Hz – 16 kHz, low red to high cyan; beat purple `#7F77DD`, chord surprise teal `#1D9E75`, dopamine pink `#D4537E`);
+  status pills show *Beat*, the chord (*outside the key* when it surprised), *Build-up* and *Drop* as they are detected.
+  Hovering a landing spot names it (a label in the view and the tooltip: what it does, and *heuristic* for the spots
+  lit by detected features). Drag turns it, a click stops or restarts the turning (0.16 rad/s), the right-click menu
+  has *Stop turning* / *Turn* and *Reset view* (in the visualiser window they head its menu, whose double-click still
+  toggles full screen: the window listens to the view's mouse events; `Visualiser::addMenuItems`).
+  - **Anatomy** (`BrainAnatomy`, built once, deterministic). Every station has an approximate MNI coordinate (mm, right
+    side; x is mirrored for the left), mapped to the view's axes by `fromMni`: view x = x / 90, view y = (z − 10) / 90,
+    view z = (y + 18) / 90 (x lateral, y up, z front; 90 mm per unit, so the mockup's cloud of about ±0.8 × ±0.6 ×
+    ±0.95 holds a 144 × 108 × 171 mm brain). The cortex patches (premotor, SMA, IFG) are the drawn cortex points
+    nearest their coordinate (the mean of the 8 nearest; the members within a Gaussian of 0.14 / 0.12 view units); the
+    ear and cochlea are drawn beside the head so the temporal lobe does not hide them. All coordinates are approximate
+    placements for a picture, not measurements:
+
+    | Station | MNI x, y, z (mm) | Where drawn | Source / reason |
+    |---|---|---|---|
+    | Ear | — | (±1.2, −0.12, 0), a ring of radius 0.13 | drawn beside the head (the mockup's) |
+    | Cochlea | ±33, −22, −38 | (±1.0, −0.24, 0.02), a 2.5-turn spiral | petrous temporal bone; drawn outside the head |
+    | Cochlear nucleus | ±14, −43, −45 | at the coordinate | pontomedullary junction, dorsolateral |
+    | Superior olive: MSO | ±9, −34, −40 | at the coordinate | medial olive (low frequencies, timing between the ears) |
+    | Superior olive: LSO | ±13, −35, −41 | at the coordinate | lateral olive (high frequencies, level between the ears) |
+    | Lateral lemniscus (nuclei) | ±13, −35, −25 | at the coordinate | lateral pons |
+    | Inferior colliculus | ±6, −35, −10 | at the coordinate | midbrain tectum |
+    | Medial geniculate nucleus | ±15, −26, −6 | at the coordinate | thalamus |
+    | Heschl's gyrus (primary auditory cortex) | centre ±47, −20, 7; low end ±56, −11, 3; high end ±38, −29, 10 | a strip along its axis, buried in the lateral sulcus | Te1.0 of Morosan et al. 2001; low frequencies anterolateral, high posteromedial (the classic gradient along the gyrus; Formisano et al. 2003 describe it as part of a mirror-symmetric map) |
+    | Premotor cortex (dorsal) | ±30, −4, 58 | the cortex patch nearest | after Mayka et al. 2006 |
+    | SMA (proper) | ±4, −7, 55 | the cortex patch nearest | after Mayka et al. 2006 |
+    | Putamen | ±25, 2, 0 | at the coordinate | Harvard-Oxford subcortical atlas (FSL), about its centre |
+    | Ventrolateral thalamus | ±13, −13, 6 | at the coordinate | thalamus, ventrolateral nucleus |
+    | Cerebellum | ±24, −64, −24 | its hemisphere (lobule VI near the coordinate) | lobule VI, where rhythm studies report it (e.g. Chen, Penhune and Zatorre 2008) |
+    | Inferior frontal gyrus | ±50, 14, 12 | the cortex patch nearest | pars opercularis (BA 44), where Maess et al. 2001 placed the ERAN's sources |
+    | Caudate | ±13, 12, 10 | at the coordinate | Harvard-Oxford subcortical atlas (FSL), the head |
+    | Nucleus accumbens | ±10, 12, −8 | at the coordinate | Harvard-Oxford subcortical atlas (FSL), about its centre |
+    | VTA | 0, −16, −12 | on the midline | ventral midbrain (both sides at about x = ±4) |
+
+    A measured MNI atlas of the subcortical auditory nuclei is Sitek et al. 2019 (eLife 8:e48932); the values above
+    are approximate and not taken from it. Tracts (42, each 48 segments of a Catmull-Rom curve through hand-placed
+    waypoints): per side the ear canal, the auditory nerve, the cochlear nucleus to both MSOs and both LSOs (the
+    crossing ones through the trapezoid body), MSO / LSO → lateral lemniscus → inferior colliculus → MGN → Heschl's
+    gyrus (the auditory radiation); inferior colliculus → cerebellum (via the pons), cerebellum → the *opposite*
+    ventrolateral thalamus (crossing the midline in the midbrain) → premotor; Heschl's gyrus → premotor (dorsal stream)
+    → SMA → putamen; Heschl's gyrus → IFG (ventral stream); Heschl's gyrus → accumbens; VTA → accumbens and VTA →
+    caudate. Every tract starts and ends within its stations' drawn size; each ear reaches both auditory cortices, and
+    every station is reached from the ears or the VTA (whose own inputs are not drawn). The point cloud: about 6 800
+    cortex points, 900 cerebellum, 420 brainstem, 1 120 on Heschl's gyrus and a blob per nucleus (11 308 in all),
+    sorted top to bottom for drawing.
+  - **Tonotopy.** The cochlea's place for a frequency follows Greenwood (1990), human: f = 165.4 (10^(2.1 x) − 0.88)
+    with x from the apex, so the base (the outer turn, where the canal arrives) answers high frequencies and the apex
+    (the centre) low ones; 1 kHz sits at 60 % of the way from the base. Heschl's gyrus maps log frequency 30 Hz – 16 kHz
+    from its anterolateral to its posteromedial end.
+  - **What it hears** (`BrainListener`, from the post tap's aligned mid / side pairs, L = M + S, R = M − S). Every hop
+    of 512 samples (10.7 ms at 48 kHz) one complex FFT of L + iR per window, both Hann windows centred on the same
+    instant: 4096 samples for the bands under 300 Hz, 1024 above; 32 log-spaced bands per ear, 30 Hz – 16 kHz,
+    calibrated so a sine of amplitude a reads 20 log10 a dB. Per band and ear: the level (instant attack, 80 ms
+    release) and an onset (8 dB over the band's mean of the previous hops, at least −62 dBFS, 80 ms refractory); an
+    onset is percussive when at least 6 bands of that ear start within three hops, else tonal. Activity, what lights
+    the model: x = (dB − floor) / 60 dB, floor −72 dBFS for a band and −66 dBFS for an ear's summed power (roughly how
+    a neuron's firing rate grows with the level in dB over its range); displayed brightness and size follow
+    x^1.2 (up to 1.3), so loud and very loud stay apart, and a colour never turns white (a hue at full brightness; the
+    renderer also keeps every pixel's grey part under 80 % of its brightest channel). Measured: the cochlear nucleus
+    reads 0.24 / 0.49 / 0.68 for noise at −40 / −20 / −6 dBFS; silence leaves every spot and tract at exactly 0.
+  - **The ascending pathway** (`BrainActivity`). Each hop goes into a history ring; segment j of a tract shows what
+    entered the ear `delayStart + (delayEnd − delayStart) × j / 48` display seconds ago, the delays being 20 × the real
+    latencies after the cochlea (Jewett and Williston 1971 for the brainstem waves; the cortex at about 15 ms): cochlear
+    nucleus 2 ms, superior olive 3.5 ms, lateral lemniscus 4.5 ms, inferior colliculus 5.5 ms, MGN 9 ms, Heschl's gyrus
+    15 ms, i.e. 0.06 / 0.09 / 0.11 / 0.13 / 0.20 / 0.32 s on screen after a 20 ms lead-in through the ear canal. An
+    onset therefore runs along each tract as a bright segment, with a 0.18 s trail; a sustained sound pulses along it
+    every 0.125 s at 0.7 × its level and keeps a floor of 0.35 × its level (its path stays lit with repeated weaker
+    activity). Landing spots take the onsets and 0.75 × the level at their own delay and hold it (0.35 s; Heschl's gyrus
+    and the cochlea per band, 0.2 / 0.15 s). Below the olive each tract carries its own ear (all bands; the low bands
+    under 1.5 kHz to the MSOs, the high ones to the LSOs); from the olive up each side carries 0.35 × its own ear +
+    0.65 × the other ear (contralateral about 65 / 35). The radiation to Heschl's gyrus weights percussive onsets
+    +15 % on the left and tonal sound +15 % on the right, −15 % on the other side (Zatorre and Belin 2001). The view
+    runs 0.116 s (at 48 kHz) behind the newest sample, so every hop is in the history before its time is shown.
+    Measured: 440 Hz in the left ear lights the right Heschl's gyrus at 0.50 and the left at 0.17 (the right ear: left
+    0.35, right 0.24, the tonal +15 % on the right working against it); a 150 Hz and a 4 kHz tone light the cochlea and
+    Heschl's gyrus in the band of 152 Hz / 3876 Hz.
+  - **Beyond hearing**, driven by detected features (all heuristics, named so in the tooltips):
+    - *Beat* (kick and snare, from the short window, L + R): a candidate is a 40 – 150 Hz rise of 8 dB carrying the mix
+      (within 12 dB of the whole) or a noisy (spectral flatness ≥ 0.25) 1 – 4 kHz rise of 6 dB with a 150 – 500 Hz
+      rise; it is decided 4 hops (43 ms) later: a kick when the low band's spectral centroid has sunk smoothly (no step
+      up of more than 12 Hz) to 0.8 of where it started (a kick drum's falling pitch; a bass note's centroid stays or
+      jitters), a snare when the 1 – 4 kHz band is still noise; 150 ms refractory. A beat of strength a starts waves:
+      inferior colliculus → cerebellum (both sides) at +0.13 s for 0.05 s (0.55 a), cerebellum → opposite thalamus
+      +0.18 / 0.16 s (0.45 a), thalamus → premotor +0.34 / 0.12 s (0.45 a), Heschl's gyrus → premotor (dorsal stream)
+      +0.32 / 0.16 s (0.6 a), premotor → SMA +0.48 / 0.1 s (0.6 a), SMA → putamen +0.58 / 0.1 s (0.5 a) — roughly the
+      mockup's delays, not to scale (Grahn and Brett 2007 for the network). Measured: a 120 BPM kick pattern gives 6 of
+      6 kicks, each within 40 ms, and lights cerebellum 0.49, thalamus 0.38, premotor 0.54, SMA 0.54, putamen 0.44.
+    - *Chord change* (the chord view's PitchEstimator, KeyDetector and ChordTracker): a change from one chord to another
+      sends the ventral stream to the inferior frontal gyrus, arriving 0.22 s after the change is named (the ERAN peaks
+      about 0.2 s after the chord; Koelsch et al. 2000, Maess et al. 2001), shown at about its real time (not slowed):
+      1.0 on the right and 0.4 on the left when the new chord has a pitch class outside the estimated key (minor keys
+      also allow the melodic minor's raised sixth and seventh; only once the key's confidence is at least 0.3), else
+      0.22 / 0.1. The tracker names a change 0.25 – 0.5 s after it sounds. Measured (I–IV–V–I in C for 8 s, then):
+      C → Am lights the right IFG at 0.16, C → A♭ at 1.00 (left 0.33).
+    - *Build-up and drop* (on 0.25 s slots): a build-up is a sustained rise over 3 s (the level by 2.5 dB, or the
+      power from 4 kHz by 4 dB, each second above the one before, or the high-band onsets per second up by 3 to at
+      least 6: snare rolls), not the bass returning and not within 4 s of a drop; while it lasts a dopamine pulse runs
+      VTA → caudate every 0.5 s (0.3 + 0.6 × its progress, full after 4 s; anticipation, Salimpoor et al. 2011). A drop
+      is the 40 – 150 Hz band jumping 10 dB above its mean of the 2 s before and carrying the mix again (within 9 dB of
+      the whole, at least −40 dBFS) with the level up (1 dB after a build-up, 3 dB after a quieter passage), after a
+      build-up (or within 1.5 s of its end) or a quieter passage (5 dB under the 8 s before it, not silence): VTA →
+      accumbens (both sides, 1.0) and Heschl's gyrus → accumbens 0.35 s later (0.8; Salimpoor et al. 2011, 2013); 6 s
+      refractory, nothing in a stream's first 4 s. Measured on a synthetic breakdown (3 s), build-up (4 s of a rising
+      noise riser and an accelerating snare roll) and drop (kick and bass at 7 s): one build-up with 6 pulses, the
+      caudate at 0.61 before the drop (0 in the breakdown), the drop found at 7.02 s, the accumbens 0 before and 1.00
+      after it.
+    - *False triggers measured* (MSVC, the tests below): the app's own test music (12 s, Am – F – C – G at 120 BPM with
+      kick, snare, hats, a bass line on the eighths and a pad): 23 of 24 kicks found, 0 beats off a kick, 8 chord changes
+      with 0 outside the key (A minor), 0 build-ups, 0 drops. Six seconds each of a sustained pad: 0 beats; a gated
+      bass line on the eighths without a click: 1 beat in 24 notes; hi-hats on the eighths: 0; a steady groove (kick,
+      hats, bass, pad): 11 of 12 kicks, 0 build-ups, 0 drops. Limits: the beat rule wants a kick with a falling pitch
+      (most electronic kicks; an acoustic kick without one is missed) and can take a plucked bass note whose spectrum
+      happens to sink; a song that starts loud after silence is not a drop, a breakdown that only thins the mix without
+      lowering the level is not a quieter passage; the chord rule inherits the chord tracker's passing names and the key
+      detector's 15 s window (a new song reads in its old key at first); none of these was tried on the owner's music.
+  - **Rendering** (message thread; no OpenGL). Camera as the mockup: perspective, 36° vertical field of view, from
+    (0, 0.42, 3.1) at (0, −0.17, 0), fitted to the plot (the ears' outer edges ±1.42 across); the root turns about y
+    (angle) and tilts about x (−0.6 … 0.9). Into a preallocated 32-bit frame buffer: the tracts as anti-aliased lines
+    whose joints are split exactly along the bisectors (each segment's colour the tract's base `(0.09, 0.11, 0.18)` mixed
+    with its lit colour, and a glow while lit), the ear rings, the cochlea spirals lit per band at their Greenwood place,
+    then every point as an additive dot with the mockup's profile (alpha 1 at the centre, 0.6 at 30 % of the radius,
+    0 at the edge; diameter = size × the focal length × tan 18° / depth; cortex 0.032, Heschl's gyrus 0.036 + 0.03 I,
+    spot members 0.022 + 0.05 I), the landing spots' glows ((min (extent, 0.07) + 0.05 I) view units), integer
+    arithmetic with a hue-preserving saturation. Only the rectangle that changed is copied into a native ARGB image
+    (`uploadScene`), which a Direct2D window draws without converting a whole frame; the legend and caption are drawn
+    once per size into an image. A new picture is rendered at most 75 times a second (every frame at 60 Hz, every
+    second one at 120 / 144 Hz; the model advances every frame), at the display's scale up to 2.3 megapixels.
+    `pushPost`, `advance` and `renderScene` allocate nothing; `uploadScene`'s BitmapData on a Direct2D image maps the
+    rectangle through a staging buffer JUCE allocates (one per frame). Measured on this PC (MSVC Release, Windows 11,
+    the PC 42 – 57 % busy with other work, the display at 143 Hz): in the test harness the analysis and model take
+    0.3 ms a frame and the scene render 2.3 – 2.5 ms at 1280 × 720 and 4.0 – 4.8 ms at 1920 × 1080; on screen (the
+    screenshot driver's real window, Direct2D) a whole paint (render, upload, blit, overlay) takes 1.2 ms for the
+    analyser panel's 732 × 234 view, 3.3 ms (render 2.25 ms) for a 1256 × 664 view in a 1280 × 720 window and 6.3 ms
+    (render 4.3 ms, p95 5.2 ms) full screen at 1900 × 1060. With a software ARGB image instead of the native one the
+    full-screen paint took 9.1 ms, with a 24-bit software image 10.9 ms.
+  - Tests: `tests/app/test_app_brain_view.cpp` (12 cases: the tract graph and the table, the tonotopic maps, a tone in
+    one ear, levels and silence, the kick pattern, chord surprise, build-up and drop, the test music, the synthetic
+    loops, hover / menu / reset, no allocation and the frame time at 1280 × 720 and 1920 × 1080 with no white pixel,
+    and PNGs of the view when `FLUB_BRAIN_SHOTS` names a folder); the framework tests in
+    `tests/app/test_app_visualisers.cpp` and the window tests cover it through the registry. Screenshot states
+    `vis-brain`, `vis-popout-brain` (and `vis-popout-full`).
+  - Sources: Greenwood DD (1990) J Acoust Soc Am 87:2592–2605; Jewett DL, Williston JS (1971) Brain 94:681–696;
+    Morosan P et al. (2001) NeuroImage 13:684–701; Formisano E et al. (2003) Neuron 40:859–869; Mayka MA et al.
+    (2006) NeuroImage 31:1453–1474; Zatorre RJ, Belin P (2001) Cereb Cortex 11:946–953; Grahn JA, Brett M (2007)
+    J Cogn Neurosci 19:893–906; Chen JL, Penhune VB, Zatorre RJ (2008) Cereb Cortex 18:2844–2854; Koelsch S et al.
+    (2000) J Cogn Neurosci 12:520–541; Maess B et al. (2001) Nat Neurosci 4:540–545; Salimpoor VN et al. (2011) Nat
+    Neurosci 14:257–262; Salimpoor VN et al. (2013) Science 340:216–219; Sitek KR et al. (2019) eLife 8:e48932.
 
 **The visualiser window** (`vis/VisualiserWindow.{h,cpp}`, `SpectrumMirror.{h,cpp}`; owner request 2026-10-06). The
 View menu's last item, *Open in a window (full screen, second monitor)…*, opens one top-level window (a native

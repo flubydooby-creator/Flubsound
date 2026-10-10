@@ -1,5 +1,6 @@
 #include "VisualiserRegistry.h"
 
+#include "BrainView.h"
 #include "ChordView.h"
 #include "ChromagramView.h"
 #include "CorrelationMeter.h"
@@ -46,6 +47,13 @@ const std::vector<Descriptor>& registry()
           "The output spectrum around a ring, mirrored left and right: lows at the top, highs at the bottom, louder "
           "reaches further out. The centre swells on kicks and shows the momentary loudness.",
           true, false, &make<RadialSpectrum> },
+        { "brain", "Brain (how the music travels)", "BRAIN",
+          "How the music playing now travels through a model of the human brain, from published research (not a scan of your "
+          "brain): each note runs from the ear up the hearing pathway, mostly to the opposite side, to the auditory cortex, shown "
+          "20 times slower than real; beats light the movement areas, a chord outside the key the right inferior frontal gyrus, "
+          "build-ups and drops dopamine (beat, chord and drop are detected by heuristics). Drag to turn, click to stop turning, "
+          "hover a spot for its name.",
+          true, false, &make<BrainView> },
         { "correlation", "Correlation meter", "CORRELATION",
           "Phase correlation of the output's left and right channels: +1 mono, 0 unrelated (wide), below 0 "
           "(red) partly out of phase. The marker holds the lowest value of the last 3 seconds.",

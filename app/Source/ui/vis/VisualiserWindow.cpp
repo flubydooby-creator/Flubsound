@@ -123,9 +123,13 @@ public:
 
     void setView (Visualiser* v)
     {
+        if (view != nullptr)
+            view->removeMouseListener (this);
         view = v;
         if (view != nullptr)
         {
+            // A view that takes clicks (the brain) still brings up this window's menu, full screen and chrome.
+            view->addMouseListener (this, false);
             addAndMakeVisible (*view, 0);
             const auto* c = findChoice (window.getViewId());
             picker.setSelectedId (c != nullptr ? static_cast<int> (c - choices().data()) + 1 : 0, juce::dontSendNotification);
@@ -213,7 +217,7 @@ public:
     void mouseDrag (const juce::MouseEvent&) override { wake(); }
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
-        if (! header.contains (e.getPosition()))
+        if (! header.contains (e.getEventRelativeTo (this).getPosition()))
             window.setFullScreenMode (! window.isFullScreenMode());
     }
     void mouseDown (const juce::MouseEvent& e) override
@@ -222,6 +226,12 @@ public:
         if (! e.mods.isPopupMenu())
             return;
         juce::PopupMenu menu;
+        if (view != nullptr)
+        {
+            view->addMenuItems (menu); // the view's own items first (e.g. the brain's Stop turning)
+            if (menu.getNumItems() > 0)
+                menu.addSeparator();
+        }
         menu.addItem (kMenuFullScreen, window.isFullScreenMode() ? "Exit full screen (Esc)" : "Full screen (F11)");
         menu.addSeparator();
         for (size_t i = 0; i < choices().size(); ++i)
@@ -259,6 +269,8 @@ private:
             picker.setVisible (show);
             fullButton.setVisible (show);
             setMouseCursor (show ? juce::MouseCursor::NormalCursor : juce::MouseCursor::NoCursor);
+            if (view != nullptr)
+                view->updateMouseCursor(); // a view with a cursor of its own follows (BrainView::getMouseCursor)
             repaint();
         }
     }

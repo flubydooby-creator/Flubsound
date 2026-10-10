@@ -458,7 +458,9 @@ Flubsound/
 │           ├── vis/                        the analyser's visualiser views (06 §6.4.2): Visualiser.h (interface),
 │           │                               VisualiserRegistry (the list), VisualiserHost, VisCommon (shared pieces),
 │           │                               Goniometer, StereoField, CorrelationMeter, LoudnessHistory, WaveformView,
-│           │                               GainReductionTrace
+│           │                               GainReductionTrace, Waterfall3D, RadialSpectrum, ChordView, ChromagramView, KeyView,
+│           │                               BrainView (BrainAnatomy: stations, tracts, point cloud; BrainListener: bands,
+│           │                               onsets, beat / chord / build-up / drop; BrainActivity: what lights when)
 │           ├── EqCurveEditor.{h,cpp}       interactive 10-band EQ curve drawn from ParametricEq::responseDb
 │           ├── WaveformHistory.{h,cpp}     scrolling min/max output history with a short-term LUFS trace
 │           ├── LevelMeters.{h,cpp}         input / output peak + RMS bars, peak hold, clip latch, true-peak readout
