@@ -687,8 +687,8 @@ TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a d
 
 TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - random gunfire (30 s, a shot every 0.7 s on average)")
 {
-    // Gaps drawn from an exponential distribution (mean 0.7 s, at least 0.12 s): a match within 15 % of the gap before
-    // happens by chance (about 7.5 % of the pairs for exponential gaps).
+    // Gaps drawn from an exponential distribution (mean 0.7 s, at least 0.12 s): a match within 8 % of the gap before
+    // happens by chance (about 4 % of the pairs for exponential gaps).
     Runner run;
     Gunshots shots;
     uint32_t state = 2024u;
@@ -705,6 +705,156 @@ TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a d
     CHECK (c.snareHits >= static_cast<int> (shots.times.size()) * 3 / 4);
     CHECK (c.snares * 10 <= c.snareHits); // at most 10 %
     CHECK (c.kicks == 0);
+}
+
+namespace
+{
+/** A backbeat (kick on 1 and 3, the test music's snare on 2 and 4, hats on the eighths) at `bpm`, from 0 s; the snare
+    at `leftOut` s (if any) is not played. */
+struct Backbeat
+{
+    double beat = 0.5, leftOut = -1.0;
+    Noise noise;
+    Snare snare;
+    HighPass h1 { 6500.0 }, h2 { 6500.0 };
+    explicit Backbeat (double bpm, double leftOutAt = -1.0) : beat (60.0 / bpm), leftOut (leftOutAt) {}
+    void operator() (int64_t n, float& l, float& r)
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        const float hat = 0.15f * h2 (h1 (x)) * decay (std::fmod (t, 0.5 * beat), 0.03);
+        double tau = t < beat ? -1.0 : std::fmod (t - beat, 2.0 * beat); // since the last snare (beats 2 and 4)
+        if (tau >= 0.0 && std::abs (t - tau - leftOut) < 0.01)
+            tau += 2.0 * beat; // not played: the snare before it rings on (long decayed)
+        l = r = 0.55f * (kick (std::fmod (t, 2.0 * beat), x) + snare (tau, x) + hat);
+    }
+};
+
+/** Shots from a seeded LCG: steps of `gap` (1 +- jitter, uniform); each u drawn on its own line (a draw inside an
+    argument list would run in another order on another compiler). */
+std::vector<double> jitteredShots (double from, double to, double gap, double jitter, uint32_t seed)
+{
+    std::vector<double> times;
+    uint32_t state = seed;
+    for (double t = from; t < to;)
+    {
+        times.push_back (t);
+        state = state * 1664525u + 1013904223u;
+        const double u = (static_cast<double> (state >> 8) + 0.5) / 16777216.0;
+        t += gap * (1.0 + jitter * (2.0 * u - 1.0));
+    }
+    return times;
+}
+} // namespace
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a 60 BPM backbeat (a snare every 2.0 s) counts from "
+           "the third snare")
+{
+    // 16 s: kicks at 0, 2, .. 14 s, snares at 1, 3, .. 15 s. The hop grid (10.7 ms) measures the 2.0 s gaps as 1.995 /
+    // 2.005 s, so the gaps' upper bound must not sit at 2.0 s (with it there: 0 of 8 counted).
+    Runner run;
+    Backbeat groove (60.0);
+    const auto c = countBeats ("60 BPM backbeat, 16 s (8 kicks, 8 snares)", 960, std::ref (groove), run);
+    const auto& listener = run.view.getListener();
+    CHECK (c.snareHits == 8);
+    CHECK (c.snares == 6);
+    CHECK (! beatNear (listener, 1.0, 0.1));
+    CHECK (! beatNear (listener, 3.0, 0.1));
+    for (int k = 2; k < 8; ++k)
+        CHECK (beatNear (listener, 1.0 + 2.0 * k, 0.04));
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a backbeat with one snare left out carries on "
+           "over the gap")
+{
+    // 120 BPM, 10 s, the snare at 4.5 s not played (as a snare the detector misses): with nothing snare-like in its
+    // place, the snares at 5.5 and 6.5 s continue the counted pattern (without the carry neither counts: the gaps
+    // 2.0 / 1.0 s do not match the ones before).
+    Runner run;
+    Backbeat groove (120.0, 4.5);
+    const auto c = countBeats ("backbeat 120 BPM without the snare at 4.5 s, 10 s (9 snares)", 600, std::ref (groove), run);
+    const auto& listener = run.view.getListener();
+    CHECK (c.snareHits == 9);
+    CHECK (c.snares == 7);
+    CHECK (! beatNear (listener, 0.5, 0.1));
+    CHECK (! beatNear (listener, 1.5, 0.1));
+    for (const double t : { 2.5, 3.5, 5.5, 6.5, 7.5, 8.5, 9.5 })
+        CHECK (beatNear (listener, t, 0.04));
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - 3-round bursts at human gaps never count")
+{
+    // Bursts of 3 shots 0.075 s apart (under the 0.2 s gap), a burst every 0.45 - 0.9 s, 10 s.
+    Runner run;
+    Gunshots shots;
+    uint32_t state = 77u;
+    for (double b = 0.3; b < 10.0;)
+    {
+        for (int k = 0; k < 3; ++k)
+            shots.times.push_back (b + 0.075 * k);
+        state = state * 1664525u + 1013904223u;
+        const double u = (static_cast<double> (state >> 8) + 0.5) / 16777216.0;
+        b += 0.45 + 0.45 * u;
+    }
+    const auto c = countBeats ("3-round bursts at 0.45 - 0.9 s, 10 s", 630, [&shots] (int64_t n, float& l, float& r) { l = r = shots (n); }, run);
+    std::printf ("  %zu shots\n", shots.times.size());
+    CHECK (c.snareHits >= 20);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a human tapping 4 shots a second (+-10 %) counts "
+           "at most half (a documented limit)")
+{
+    // Steady game fire repeats: each gap 0.25 s +- 10 % (uniform). A gap within 8 % of the one before counts, so some
+    // shots light the beat network; with 15 % most did (25 of 31).
+    Runner run;
+    Gunshots shots;
+    shots.times = jitteredShots (0.3, 8.0, 0.25, 0.10, 11u);
+    const auto c = countBeats ("taps 4 a second +- 10 %, 8 s", 510, [&shots] (int64_t n, float& l, float& r) { l = r = shots (n); }, run);
+    std::printf ("  %zu shots: %d snare-like hits, %d beats (%.0f %%)\n", shots.times.size(), c.snareHits, c.snares,
+                 100.0 * c.snares / std::max (1, c.snareHits));
+    CHECK (c.snareHits >= 28);
+    CHECK (c.snares * 2 <= c.snareHits);
+    CHECK (c.kicks <= 1);
+}
+
+TEST_CASE ("App: brain: footsteps with a low falling thud read as kicks (a documented limit of the unchanged kick rule)")
+{
+    // Walking, a step every 0.52 s +- 3 %: a thud whose pitch falls from 120 to 70 Hz (45 ms) and a 1.5 - 6 kHz scuff.
+    // A kick drum's falling pitch is what the kick rule looks for, so these pulse the beat network (docs/06 §6.4.2).
+    Runner run;
+    const auto steps = jitteredShots (0.3, 10.0, 0.52, 0.03, 31u);
+    Noise noise;
+    HighPass scuffHp (1500.0);
+    LowPass scuffLp (6000.0);
+    size_t next = 0;
+    double last = -1.0;
+    float gain = 1.0f;
+    const auto c = countBeats ("footsteps, 0.52 s +- 3 %, 10 s", 630,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   const double t = seconds (n);
+                                   const float scuff = scuffLp (scuffHp (noise()));
+                                   while (next < steps.size() && steps[next] <= t)
+                                   {
+                                       last = steps[next];
+                                       gain = next % 2 == 0 ? 1.0f : 0.8f;
+                                       ++next;
+                                   }
+                                   l = r = 0.0f;
+                                   if (last < 0.0)
+                                       return;
+                                   const double tau = t - last;
+                                   const double phase = 2.0 * kPi * (70.0 * tau + 50.0 * 0.02 * (1.0 - std::exp (-tau / 0.02)));
+                                   l = r = gain * 0.3f
+                                           * (0.8f * static_cast<float> (std::sin (phase)) * decay (tau, 0.045)
+                                              + 0.6f * scuff * decay (tau, 0.03) * std::min (1.0f, static_cast<float> (tau / 0.002)));
+                               },
+                               run);
+    std::printf ("  %zu steps\n", steps.size());
+    CHECK (c.kicks >= static_cast<int> (steps.size()) * 3 / 4);
+    CHECK (c.snares == 0);
 }
 
 TEST_CASE ("App: brain: a chord outside the key lights the right inferior frontal gyrus more than an in-key change")
