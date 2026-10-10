@@ -185,13 +185,17 @@ void BrainView::advance (const FrameContext& frame)
     // The display runs the analysis latency behind, so the cochlea and the canal (0 - 20 ms) see every hop.
     activity.update (clock - listener.getLatency(), dt);
     if (turning && ! pressed)
-        angle = std::fmod (angle + kTurnRadiansPerSecond * static_cast<float> (dt), 2.0f * juce::MathConstants<float>::pi);
+        angle = std::fmod (angle - kTurnRadiansPerSecond * static_cast<float> (dt), 2.0f * juce::MathConstants<float>::pi);
     // A new picture at most kMaxFramesPerSecond: every frame at 60 Hz, every second one at 120 / 144 Hz.
     sinceRender += dt;
     if (sinceRender < 0.9 / kMaxFramesPerSecond)
         return;
     sinceRender = 0.0;
-    dirty = true;
+    // A still, dark brain looks the same as the last picture: no new render (the overlay is still repainted, so the
+    // status pills fade). A drag, a resize, a theme change or resetView sets `dirty` itself.
+    const bool still = ! turning && ! pressed && activity.isDark();
+    if (! (still && lastRenderStill))
+        dirty = true;
     if (isVisible())
         repaint();
 }
@@ -209,6 +213,14 @@ void BrainView::resetView()
 {
     angle = kStartAngle;
     tilt = kStartTilt;
+    dirty = true;
+    repaint();
+}
+
+void BrainView::setView (float newAngle, float newTilt)
+{
+    angle = newAngle;
+    tilt = juce::jlimit (kMinTilt, kMaxTilt, newTilt);
     dirty = true;
     repaint();
 }
@@ -284,7 +296,7 @@ void BrainView::mouseDrag (const juce::MouseEvent& e)
     if (! dragged && d.getDistanceFromOrigin() < 4.0f)
         return;
     dragged = true;
-    angle = pressAngle + d.x * 0.01f;
+    angle = pressAngle - d.x * 0.01f; // the near side follows the hand
     tilt = juce::jlimit (kMinTilt, kMaxTilt, pressTilt + d.y * 0.01f);
     dirty = true;
     repaint();
@@ -340,8 +352,11 @@ bool BrainView::Projection::project (Vec3 p, float& x, float& y, float& depth) c
     const float zc = m[6] * p.x + m[7] * p.y + m[8] * p.z + t[2];
     if (zc < 0.2f)
         return false;
+    // The view's axes (x right, y up, z front) are a left-handed frame (MNI's right, anterior, superior swapped to
+    // right, superior, anterior): screen x runs against the camera's right so the picture is the brain, not its mirror
+    // image (facing it, its right side is on the viewer's left).
     const float inv = focal / zc;
-    x = cx + xc * inv;
+    x = cx - xc * inv;
     y = cy - yc * inv;
     depth = zc;
     return true;
@@ -373,6 +388,15 @@ void BrainView::updateProjection() noexcept
     projection.cx = (plot.getCentreX() - well.getX()) * s;
     projection.cy = (plot.getCentreY() - well.getY()) * s;
     projection.pointScale = projection.focal * kTanHalfFov * 0.5f; // a point of size d has the radius d x this / depth
+}
+
+bool BrainView::projectPoint (Vec3 p, juce::Point<float>& at, float& depth) const noexcept
+{
+    float x = 0.0f, y = 0.0f;
+    if (! projection.project (p, x, y, depth))
+        return false;
+    at = { well.getX() + x / renderScale, well.getY() + y / renderScale };
+    return true;
 }
 
 juce::Point<float> BrainView::getNodeScreenPosition (int index) const noexcept
@@ -588,6 +612,8 @@ void BrainView::renderScene() noexcept
     dirty = false;
     if (! canvas.isValid())
         return;
+    ++renders;
+    lastRenderStill = ! turning && ! pressed && activity.isDark();
     const auto started = juce::Time::getHighResolutionTicks();
     Target t;
     t.data = pixels.data();
@@ -730,9 +756,10 @@ void BrainView::renderScene() noexcept
 
 void BrainView::uploadScene()
 {
-    // Into the image: only what changed (what was cleared and what was drawn). A native image, so a window that
-    // draws on the GPU (Direct2D) takes the rectangle as it is, without converting a whole frame; JUCE maps it
-    // through a staging buffer of its own.
+    // Into the image: only what changed (what was cleared and what was drawn). A native image: a window that draws on
+    // the GPU (Direct2D) takes its pixels as they are (no format conversion). After a write JUCE marks every GPU page of
+    // the image outdated and re-uploads the whole image when it is next drawn, so the rectangle saves the CPU-side copy;
+    // the BitmapData itself makes JUCE allocate one small releaser object on Windows.
     const auto changed = pendingUpload.getIntersection (canvas.getBounds());
     pendingUpload = {};
     if (changed.isEmpty())
@@ -874,11 +901,27 @@ void BrainView::renderLegend()
                       { colourOf (brain::BrainActivity::kDopamineRgb), "Dopamine (build-up, drop)" },
                       { Palette::text.withAlpha (0.6f), "Brighter, bigger spot = more intense" } });
     }
-    g.setFont (Theme::font (roomy ? 11.5f : 10.5f));
+    // The caption: the longest wording that fits (only the hearing pathway is slowed 20 times; the beat, chord and
+    // reward responses run at roughly the mockup's delays, not to scale).
+    static const char* const captions[] = {
+        "A model from published research, driven by the music playing now - not a scan of your brain. The trip from ear to "
+        "cortex (about 15 ms) is shown 20 times slower; the beat, chord and reward responses are not to scale.",
+        "A model from published research driven by the music, not a scan of your brain. Ear to cortex (about 15 ms) shown "
+        "20 times slower; beat, chord and reward not to scale.",
+        "A research-based model driven by the music, not a brain scan. Ear to cortex shown 20x slower; beat, chord, reward "
+        "not to scale.",
+    };
+    const auto captionFont = Theme::font (roomy ? 11.5f : 10.5f);
+    juce::String caption;
+    for (const char* text : captions)
+    {
+        caption = juce::String (text);
+        if (juce::GlyphArrangement::getStringWidth (captionFont, caption) * 0.9f <= bottom.getWidth())
+            break;
+    }
+    g.setFont (captionFont);
     g.setColour (Palette::text.withAlpha (0.72f));
-    g.drawFittedText ("A model from published research, driven by the music playing now - not a scan of your brain. "
-                      "Signals are shown 20 times slower than real.",
-                      bottom.toNearestInt(), juce::Justification::centredLeft, 1, 0.85f);
+    g.drawFittedText (caption, bottom.toNearestInt(), juce::Justification::centredLeft, 1, 0.85f);
 }
 
 void BrainView::paintOverlay (juce::Graphics& g)

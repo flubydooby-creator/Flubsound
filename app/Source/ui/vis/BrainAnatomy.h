@@ -17,12 +17,18 @@
 //   * Tracts: polylines (kSegments segments each, Catmull-Rom through their
 //     waypoints) from one station to another, the auditory ones with the
 //     display delays (seconds, 20 x the real latency) at their two ends.
+//     Each cochlear nucleus feeds both MSOs alike and its own LSO; its crossed
+//     path to the other LSO runs through the trapezoid body and the MNTB
+//     (inhibitory there). The pathway crosses above the olive: the LSO's
+//     output and the cochlear nucleus's direct route go to the other lateral
+//     lemniscus, the MSO's output stays on its side. Beyond hearing the lines
+//     are functional routes (some of them several steps), not single bundles.
 //   * The point cloud: two folded hemispheres with the lateral and central
 //     sulci left open, the cerebellum, the brainstem, Heschl's gyrus (each
 //     point with its tonotopic coordinate) and one blob per nucleus.
 //   * Tonotopic maps: cochleaPlace (Greenwood 1990: the base answers high
-//     frequencies, the apex low) and heschlCoordinate (low anterolateral,
-//     high posteromedial along Heschl's gyrus).
+//     frequencies, the apex low) and heschlCoordinate (the classic gradient:
+//     low anterolateral, high posteromedial along Heschl's gyrus).
 // Pure data and geometry, no JUCE graphics. Any thread once built.
 #pragma once
 
@@ -125,15 +131,18 @@ enum class Channel : uint8_t
     EarAll,      // one ear, all bands (side = the ear)
     EarLow,      // one ear, the bands below kLowHighSplitHz (-> MSO)
     EarHigh,     // one ear, the bands from kLowHighSplitHz (-> LSO)
-    AscendAll,   // one side above the olive: 0.35 x the same-side ear + 0.65 x the other ear
-    AscendLow,
-    AscendHigh,
-    Radiation,   // AscendAll with the hemispheric weighting (Zatorre and Belin 2001)
+    AscendAll,   // one side from the lateral lemniscus up: 0.35 x the same-side ear + 0.65 x the other ear
+    OliveLow,    // the MSO: kMsoEachEar x each ear's low bands (excited by both ears alike)
+    OliveHigh,   // the LSO: its own ear's high bands minus kLsoInhibition x the other ear's (inhibited through the MNTB)
+    Radiation,   // AscendAll with the hemispheric weighting (after Zatorre and Belin 2001)
     None         // not auditory
 };
 constexpr int kNumChannelKinds = 7;
 constexpr double kLowHighSplitHz = 1500.0;
 constexpr float kIpsilateral = 0.35f, kContralateral = 0.65f;
+/** The superior olive (Grothe, Pecka and McAlpine 2010): the MSO weighs both ears alike; the LSO is excited by its own
+    ear and inhibited by the other one, so it answers the side where a high sound is louder (about half for a centred one). */
+constexpr float kMsoEachEar = 0.5f, kLsoInhibition = 0.5f;
 
 struct Tract
 {

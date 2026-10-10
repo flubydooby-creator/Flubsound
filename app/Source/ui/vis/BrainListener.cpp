@@ -166,14 +166,26 @@ double BrainListener::getBeatTime (int i) const noexcept
 
 void BrainListener::push (const float* mid, const float* side, int numSamples) noexcept
 {
-    for (int i = 0; i < numSamples; ++i)
+    // NaN, inf and absurd values never enter: one bad block would latch the level followers, the drop's averages and
+    // the chord listener. A small stack chunk carries the cleaned mid to the music listener (no allocation).
+    const auto clean = [] (float v) noexcept { return std::isfinite (v) ? std::clamp (v, -16.0f, 16.0f) : 0.0f; };
+    constexpr int kChunk = 256;
+    float chunk[kChunk];
+    for (int done = 0; done < numSamples;)
     {
-        const auto at = static_cast<size_t> ((received + i) & (kRing - 1));
-        ringL[at] = mid[i] + side[i];
-        ringR[at] = mid[i] - side[i];
+        const int n = std::min (numSamples - done, kChunk);
+        for (int i = 0; i < n; ++i)
+        {
+            const float m = clean (mid[done + i]), s = clean (side[done + i]);
+            const auto at = static_cast<size_t> ((received + done + i) & (kRing - 1));
+            ringL[at] = m + s;
+            ringR[at] = m - s;
+            chunk[i] = m;
+        }
+        musicListener.push (chunk, n);
+        done += n;
     }
     received += numSamples;
-    musicListener.push (mid, numSamples);
 }
 
 void BrainListener::advance (double clock, double dt, BrainActivity& sink) noexcept
@@ -437,15 +449,22 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
 void BrainListener::updateMacro (double time, double streamSeconds, float totalP, float lowP, float highP, bool hfHit, BrainActivity& sink) noexcept
 {
     const double hopSeconds = static_cast<double> (hop) / sampleRate;
-    const auto ageMean = [this] (int from, int to, float Slot::*field)
+    // A slot under kSilentDb is a pause (stop / play, a gap between tracks), not a quiet passage: it counts in no
+    // mean, and `counted` says how many slots the last mean took.
+    int counted = 0;
+    const auto ageMean = [this, &counted] (int from, int to, float Slot::*field)
     {
         float sum = 0.0f;
         int n = 0;
         for (int age = from; age <= to && age < slotsFilled; ++age)
         {
-            sum += std::max (-90.0f, slots[static_cast<size_t> (((slotNewest - age) % kSlots + kSlots) % kSlots)].*field);
+            const auto& slot = slots[static_cast<size_t> (((slotNewest - age) % kSlots + kSlots) % kSlots)];
+            if (slot.total < kSilentDb)
+                continue;
+            sum += std::max (-90.0f, slot.*field);
             ++n;
         }
+        counted = n;
         return n > 0 ? sum / static_cast<float> (n) : -90.0f;
     };
     const auto ageHits = [this] (int from, int to)
@@ -475,15 +494,24 @@ void BrainListener::updateMacro (double time, double streamSeconds, float totalP
 
         if (slotsFilled >= 12)
         {
-            const float now = ageMean (0, 3, &Slot::total), mid = ageMean (4, 7, &Slot::total), then = ageMean (8, 11, &Slot::total);
+            // Only over 3 s without a pause: every slot of the three seconds counted.
+            const float now = ageMean (0, 3, &Slot::total);
+            const int nowSlots = counted;
+            const float mid = ageMean (4, 7, &Slot::total);
+            const int midSlots = counted;
+            const float then = ageMean (8, 11, &Slot::total);
+            const bool complete = nowSlots == 4 && midSlots == 4 && counted == 4;
             const float hNow = ageMean (0, 3, &Slot::high), hMid = ageMean (4, 7, &Slot::high), hThen = ageMean (8, 11, &Slot::high);
             const int hfNow = ageHits (0, 3), hfThen = ageHits (8, 11);
             // Not a build-up: the bass coming back (that is a drop) or the seconds after a drop.
             const float lowRecent = ageMean (0, 3, &Slot::low);
             const bool bassJump = lowRecent >= -45.0f && lowRecent >= now - 12.0f && lowRecent >= ageMean (8, 11, &Slot::low) + 6.0f;
-            const bool rising = now >= -60.0f && ! bassJump && time - lastDropTime >= 4.0
-                                && ((now - then >= 2.5f && mid >= then + 0.5f && now >= mid + 0.5f)
-                                    || (hNow - hThen >= 4.0f && hMid >= hThen + 1.0f && hNow >= hMid + 1.0f) || (hfNow >= hfThen + 3 && hfNow >= 6));
+            // The highs only count when they are there: at least -60 dBFS and within 30 dB of the whole (the splatter of a
+            // re-struck chord's attacks, far under it, moves with the beat's phase against the hops and fakes a rise).
+            const bool highsRise = hNow - hThen >= 4.0f && hMid >= hThen + 1.0f && hNow >= hMid + 1.0f && hNow >= -60.0f && hNow >= now - 30.0f;
+            const bool rising = complete && now >= -60.0f && ! bassJump && time - lastDropTime >= 4.0
+                                && ((now - then >= 2.5f && mid >= then + 0.5f && now >= mid + 0.5f) || highsRise
+                                    || (hfNow >= hfThen + 3 && hfNow >= 6));
             if (rising)
             {
                 ++buildRising;
@@ -525,12 +553,18 @@ void BrainListener::updateMacro (double time, double streamSeconds, float totalP
     momTotal += (totalP - momTotal) * static_cast<float> (1.0 - std::exp (-hopSeconds / 0.15));
     if (slotsFilled < 16 || streamSeconds < 4.0 || time - lastDropTime < 6.0)
         return;
-    const float refLow = ageMean (0, 7, &Slot::low), refTotal = ageMean (0, 7, &Slot::total);
+    const float refLow = ageMean (0, 7, &Slot::low);
+    const float refTotal = ageMean (0, 7, &Slot::total);
+    if (counted < 6)
+        return; // the 2 s before were mostly a pause: the music coming back is not a drop
     const float lowNow = toDb (momLow), totalNow = toDb (momTotal);
     const bool afterBuild = buildActive || time - buildEnd <= 1.5;
     bool quieter = false;
     if (slotsFilled >= 24)
-        quieter = refTotal <= ageMean (8, 39, &Slot::total) - 5.0f && refTotal >= -55.0f;
+    {
+        const float older = ageMean (8, 39, &Slot::total);
+        quieter = counted >= 16 && refTotal <= older - 5.0f && refTotal >= -55.0f;
+    }
     // The low end returns: 10 dB over the 2 s before, and it carries the mix again (within 9 dB of the whole).
     const bool jump = lowNow >= refLow + 10.0f && lowNow >= -40.0f && lowNow >= totalNow - 9.0f && totalNow >= refTotal + (afterBuild ? 1.0f : 3.0f);
     if (jump && (afterBuild || quieter))
@@ -564,6 +598,8 @@ void BrainListener::updateChords (double clock, double dt, BrainActivity& sink) 
         surprise = (chord.mask & ~scale & 0xfffu) != 0;
     }
     lastSurprise = surprise ? 1 : 0;
-    sink.chord (clock, surprise ? 1.0f : 0.22f, surprise ? 0.4f : 0.1f);
+    // In display time, as the beats and the hops (the activity runs getLatency() behind the clock): the wave starts
+    // 0.1 s after the change is named and reaches the gyrus 0.22 s after it.
+    sink.chord (clock - getLatency(), surprise ? 1.0f : 0.22f, surprise ? 0.4f : 0.1f);
 }
 } // namespace flub::app::ui::vis::brain

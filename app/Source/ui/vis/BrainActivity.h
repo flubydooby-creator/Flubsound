@@ -3,15 +3,17 @@
 // What lights where and when, from what BrainListener heard:
 //
 //   * Activity is "dB above a floor" scaled to 0..1 (x = (dB - floor) / 60 dB,
-//     up to 1.3), roughly how an auditory neuron's firing rate grows with the
-//     level in dB over its range. The display intensity of anything is
+//     up to 1.3), roughly how the auditory population's firing grows with the
+//     level in dB. The display intensity of anything is
 //     brightness (x) = x^1.2 (soft, so loud and very loud stay apart; colours
 //     never turn white: a hue at full brightness).
 //   * Ascending pathway: every analysis hop (BrainListener::HopFrame) goes into
 //     a history ring. A tract carries one channel (an ear's activity, all /
-//     low / high bands; above the olive 0.35 x the same-side ear + 0.65 x the
-//     other ear; the radiation to the cortex with percussive onsets +15 % on
-//     the left and tonal sound +15 % on the right, Zatorre and Belin 2001).
+//     low / high bands; the MSO: 0.5 x each ear's low bands; the LSO: its own
+//     ear's high bands less 0.5 x the other ear's; from the lateral lemniscus
+//     up 0.35 x the same-side ear + 0.65 x the other ear; the radiation to the
+//     cortex with percussive onsets +15 % on the left and tonal sound +15 % on
+//     the right, a simplification of Zatorre and Belin 2001).
 //     Segment j of a tract shows what entered the pathway delayStart +
 //     (delayEnd - delayStart) x j / kSegments seconds ago (display time, 20 x
 //     the real latency): an onset runs along it as a bright segment and leaves
@@ -25,6 +27,8 @@
 //     start waves on their tracts at fixed delays (the mockup's): a wave's head
 //     runs from the start to the end in its duration with a trail behind it,
 //     then fades (kWaveFadeSeconds); on arrival it lights the target.
+//   * Held activity that decays under 1e-4 is set to 0, so a faded brain is
+//     exactly dark (isDark(): the view then stops rendering while it is still).
 // Message thread only; no allocation after construction.
 #pragma once
 
@@ -120,6 +124,9 @@ public:
 
     /** Display intensity of an activity x. */
     static float brightness (float x) noexcept;
+    /** Nothing is lit (every tract, spot, Heschl band and cochlea band at exactly 0; held activity under 1e-4 counts
+        as gone) as of the last update. */
+    bool isDark() const noexcept { return dark; }
 
     // ---- Counters (tests, the status line) --------------------------------------------------
     int getBeats() const noexcept { return beats; }
@@ -194,7 +201,7 @@ private:
     std::array<Wave, kMaxWaves> waves {};
     int nextWave = 0;
     double now = 0.0, previous = 0.0;
-    bool started = false;
+    bool started = false, dark = true;
 
     // Tract indices of the event networks, per side.
     struct EventTracts

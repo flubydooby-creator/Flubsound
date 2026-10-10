@@ -21,13 +21,17 @@
 // additively into a preallocated 32-bit frame buffer (integer arithmetic, a
 // hue-preserving saturation: a crowded spot reaches its hue at full brightness,
 // never white), the points in a fixed top-to-bottom order (cache friendly);
-// only the changed rectangle is copied into a native image (BitmapData), which
-// a Direct2D window draws without converting a whole frame. The legend and
+// only the changed rectangle is copied into a native image (BitmapData; a
+// Direct2D window then re-uploads the whole image to the GPU when it next
+// draws it, so the rectangle saves the CPU-side copy). The view's axes are a
+// left-handed frame (x right, y up, z front), so the projection mirrors screen
+// x: the picture is the brain itself, not its mirror image. The legend and
 // caption are drawn once per size into an image; the status pills and hover
 // label are drawn with Graphics. A new picture is rendered in paint() when one
 // is due, at most kMaxFramesPerSecond (every second frame on a 144 Hz display;
 // the model itself advances every frame), at the display's scale up to
-// kMaxPixels (beyond that rendered smaller and scaled up).
+// kMaxPixels (beyond that rendered smaller and scaled up); a still (not turning,
+// not dragged), dark brain is not rendered again (the overlay still is).
 //
 // Mouse: drag turns the brain, a click stops or restarts the turning, the
 // right-click menu has Stop turning / Turn and Reset view (in the visualiser
@@ -36,8 +40,8 @@
 //
 // Message thread only. Buffers, images and model are allocated in the
 // constructor, setSampleRate and resized(); pushPost(), advance() and
-// renderScene() allocate nothing (uploadScene()'s BitmapData on a Direct2D
-// image maps the rectangle through a staging buffer JUCE allocates).
+// renderScene() allocate nothing. On Windows uploadScene()'s BitmapData on the
+// Direct2D image makes JUCE allocate one small releaser object per frame.
 #pragma once
 
 #include "BrainActivity.h"
@@ -52,8 +56,10 @@ namespace flub::app::ui::vis
 class BrainView : public Visualiser, public juce::TooltipClient
 {
 public:
+    /** Turning speed; the angle decreases, so the face moves to the viewer's right first (the mockup's direction). */
     static constexpr float kTurnRadiansPerSecond = 0.16f;
-    static constexpr float kStartAngle = 0.5f, kStartTilt = 0.15f;
+    /** The mockup's pose: the face to the viewer's right, the right hemisphere nearer. */
+    static constexpr float kStartAngle = -0.5f, kStartTilt = 0.15f;
     static constexpr float kMinTilt = -0.6f, kMaxTilt = 0.9f;
     static constexpr double kMaxPixels = 2.3e6; // the rendered image at most (scaled up beyond)
     static constexpr double kMaxFramesPerSecond = 75.0; // pictures rendered at most (the model runs every frame)
@@ -72,6 +78,8 @@ public:
     void setTurning (bool shouldTurn);
     /** Back to the starting angle and tilt. */
     void resetView();
+    /** Turns the brain to an angle and tilt (tests; the turning, if on, goes on from there). */
+    void setView (float newAngle, float newTilt);
     float getAngle() const noexcept { return angle; }
     float getTilt() const noexcept { return tilt; }
 
@@ -89,6 +97,11 @@ public:
     const juce::Image& getCanvas() const noexcept { return canvas; }
     /** Milliseconds the last renderScene took. */
     double getLastRenderMs() const noexcept { return lastRenderMs; }
+    /** Scenes rendered so far (a still, dark view stops rendering new ones). */
+    int64_t getRenderCount() const noexcept { return renders; }
+    /** Where a point of the model (view units) lands with the last render's camera: component coordinates and its
+        depth (larger = further away); false when it is behind the camera. */
+    bool projectPoint (brain::Vec3 p, juce::Point<float>& at, float& depth) const noexcept;
     /** Where a node was drawn in the last render (component coordinates). */
     juce::Point<float> getNodeScreenPosition (int node) const noexcept;
     /** The landing spot under a point (component coordinates) in the last render, or -1. */
@@ -161,6 +174,8 @@ private:
     juce::Rectangle<float> well, plot;
     juce::Rectangle<int> lastDrawn;
     bool dirty = true;
+    bool lastRenderStill = false; // the last picture showed a still, dark brain
+    int64_t renders = 0;
     double lastRenderMs = 0.0;
     Projection projection;
     std::array<uint8_t, 3> background {};

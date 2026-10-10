@@ -31,17 +31,22 @@
 //     minor's raised sixth and seventh) while the key is known with a
 //     confidence of at least 0.3.
 //   * Build-up and drop (heuristic), on 0.25 s slots of the summed power,
-//     the 40 - 150 Hz power, the power from 4 kHz and the high-band onsets:
-//     a build-up is a sustained rise over 3 s (the level by 2.5 dB, or the
-//     highs by 4 dB, each second higher than the one before, or the high-band
-//     onsets per second up by 3 to at least 6: snare rolls), not the bass
-//     returning and not within 4 s of a drop; while it lasts a dopamine pulse
-//     every 0.5 s. A drop is the 40 - 150 Hz band jumping 10 dB above its mean
-//     of the 2 s before and carrying the mix again (within 9 dB of the whole,
-//     at least -40 dBFS) with the level up (1 dB after a build-up, 3 dB after a
-//     quieter passage), after a build-up (or within 1.5 s of its end) or a
-//     quieter passage (5 dB under the 8 s before it, not silence); 6 s
-//     refractory; nothing in the first 4 s of a stream.
+//     the 40 - 150 Hz power, the power from 4 kHz and the high-band onsets;
+//     a slot under kSilentDb (-60 dBFS) is a pause and counts in no mean:
+//     a build-up is a sustained rise over 3 s without a pause (the level by
+//     2.5 dB, or the highs by 4 dB while they are at least -60 dBFS and within
+//     30 dB of the whole, each second higher than the one before, or the
+//     high-band onsets per second up by 3 to at least 6: snare rolls), not the
+//     bass returning and not within 4 s of a drop; while it lasts a dopamine
+//     pulse every 0.5 s. A drop is the 40 - 150 Hz band jumping 10 dB above
+//     its mean of the 2 s before (at least 6 of its 8 slots not a pause) and
+//     carrying the mix again (within 9 dB of the whole, at least -40 dBFS)
+//     with the level up (1 dB after a build-up, 3 dB after a quieter passage),
+//     after a build-up (or within 1.5 s of its end) or a quieter passage
+//     (5 dB under the 8 s before it, at least 16 of those slots not a pause);
+//     6 s refractory; nothing in the first 4 s of a stream.
+//   * Input: NaN / inf samples are taken as 0 (and values clamped to +-16), so
+//     one bad block cannot latch the followers.
 // Message thread only; allocates only in setSampleRate.
 #pragma once
 
@@ -69,6 +74,8 @@ public:
     static constexpr int kLookahead = 4; // hops before a beat candidate is decided (43 ms at 48 kHz)
     static constexpr double kBeatRefractory = 0.15, kSlotSeconds = 0.25;
     static constexpr int kSlots = 64;
+    /** A 0.25 s slot under this (summed power, dBFS) is a pause, left out of the build-up's and the drop's means. */
+    static constexpr float kSilentDb = -60.0f;
 
     BrainListener();
 

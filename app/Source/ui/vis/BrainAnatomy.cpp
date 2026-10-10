@@ -254,20 +254,25 @@ void BrainAnatomy::buildNodes()
         { Station::CochlearNucleus, NodeKind::Nucleus, "Cochlear nucleus",
           "First stop in the brainstem (about 2 ms): every fibre of the auditory nerve ends here, on the same side.", false, 0.05f },
         { Station::Mso, NodeKind::Nucleus, "Superior olive: MSO",
-          "Medial superior olive (about 3.5 ms): compares the timing of the two ears for low frequencies (where a sound is).",
+          "Medial superior olive (about 3.5 ms): excited by both ears alike, it compares their timing for low frequencies (where a "
+          "sound is). Its output stays on its own side.",
           false, 0.03f },
         { Station::Lso, NodeKind::Nucleus, "Superior olive: LSO",
-          "Lateral superior olive (about 3.5 ms): compares the level of the two ears for high frequencies.", false, 0.03f },
+          "Lateral superior olive (about 3.5 ms): excited by its own ear and inhibited by the other ear (through the trapezoid body "
+          "and the MNTB), so it lights for the side where a high sound is louder. Its output crosses to the other side.",
+          false, 0.03f },
         { Station::LateralLemniscus, NodeKind::Nucleus, "Lateral lemniscus",
-          "The ascending tract to the midbrain and its nuclei (about 4.5 ms); from here on each ear feeds mostly the opposite side.",
+          "The ascending tract to the midbrain and its nuclei (about 4.5 ms). The LSO's output and the cochlear nucleus's direct route "
+          "cross to it, so from here on each side carries mostly the other ear.",
           false, 0.03f },
         { Station::InferiorColliculus, NodeKind::Nucleus, "Inferior colliculus",
           "Midbrain hub of the hearing pathway (about 5.5 ms): every ascending route meets here.", false, 0.05f },
         { Station::Mgn, NodeKind::Nucleus, "Medial geniculate nucleus",
           "The thalamus's hearing relay (about 9 ms) to the auditory cortex.", false, 0.05f },
         { Station::Heschl, NodeKind::Heschl, "Heschl's gyrus (primary auditory cortex)",
-          "Arrives about 15 ms after the ear, buried in the lateral sulcus. Low notes land at its front outer end, high notes at its "
-          "back inner end. Percussive sound weighs a little more on the left, tonal sound on the right (Zatorre and Belin 2001).",
+          "Arrives about 15 ms after the ear, buried in the lateral sulcus. In the classic picture low notes land at its front outer "
+          "end, high notes at its back inner end. Percussive sound (fast changes in time) weighs a little more on the left, tonal "
+          "sound (fine detail in pitch) on the right: a simplification of Zatorre and Belin 2001.",
           false, 0.15f },
         { Station::Premotor, NodeKind::Cortex, "Premotor cortex",
           "Movement planning: lights on the beat, from the auditory cortex (dorsal stream) and the thalamus.", true, 0.1f },
@@ -276,17 +281,22 @@ void BrainAnatomy::buildNodes()
         { Station::Putamen, NodeKind::Nucleus, "Putamen", "Basal ganglia: keeps the beat (Grahn and Brett 2007).", true, 0.1f },
         { Station::Ventrolateral, NodeKind::Nucleus, "Ventrolateral thalamus",
           "Relays the cerebellum's timing to the premotor cortex (the tract crosses the midline).", true, 0.05f },
-        { Station::Cerebellum, NodeKind::Cerebellum, "Cerebellum", "Timing: lights on the beat and sends it to the opposite thalamus.", true,
-          0.15f },
+        { Station::Cerebellum, NodeKind::Cerebellum, "Cerebellum",
+          "Timing: lights on the beat (its input comes through the pons from the other side) and sends it to the opposite thalamus.",
+          true, 0.15f },
         { Station::Ifg, NodeKind::Cortex, "Inferior frontal gyrus",
           "Musical syntax: a chord that does not fit the key answers here about 0.2 s later, mostly on the right (the ERAN, Koelsch).",
           true, 0.1f },
         { Station::Caudate, NodeKind::Nucleus, "Caudate",
           "Dopamine during the anticipation of a peak: lights in a build-up (Salimpoor et al. 2011).", true, 0.08f },
         { Station::Accumbens, NodeKind::Nucleus, "Nucleus accumbens",
-          "Dopamine and reward at the peak: lights at the drop (Salimpoor et al. 2011, 2013).", true, 0.05f },
+          "Dopamine and reward at a peak moment (Salimpoor et al. 2011: listeners' chills; 2013: its coupling with the auditory "
+          "cortex); here the detected drop stands in for that moment.",
+          true, 0.05f },
         { Station::Vta, NodeKind::Nucleus, "Ventral tegmental area (VTA)",
-          "The midbrain's dopamine source for the caudate and the nucleus accumbens.", true, 0.06f },
+          "Midbrain dopamine neurons: the VTA mainly feeds the nucleus accumbens, the neighbouring substantia nigra mainly the "
+          "caudate (drawn here as one source).",
+          true, 0.06f },
     };
     const auto& table = mniTable();
     for (const auto& i : info)
@@ -528,13 +538,13 @@ void BrainAnatomy::buildTracts()
 
     const auto pos = [this] (Station s, int side) { return nodes[static_cast<size_t> (node (s, side))].position; };
     const auto at = [] (float x, float y, float z, int side) { return Vec3 { x * sideSign (side), y, z }; };
-    static const char* const names[2][21] = {
+    static const char* const names[2][22] = {
         { "canal-L", "nerve-L", "cn-mso-ipsi-L", "cn-mso-contra-L", "cn-lso-ipsi-L", "cn-lso-contra-L", "mso-nll-L", "lso-nll-L", "nll-ic-L",
           "ic-mgn-L", "radiation-L", "pons-cerebellum-L", "cerebellum-thalamus-L", "thalamus-premotor-L", "dorsal-L", "premotor-sma-L",
-          "sma-putamen-L", "ventral-L", "heschl-accumbens-L", "vta-accumbens-L", "vta-caudate-L" },
+          "sma-putamen-L", "ventral-L", "heschl-accumbens-L", "vta-accumbens-L", "vta-caudate-L", "cn-nll-contra-L" },
         { "canal-R", "nerve-R", "cn-mso-ipsi-R", "cn-mso-contra-R", "cn-lso-ipsi-R", "cn-lso-contra-R", "mso-nll-R", "lso-nll-R", "nll-ic-R",
           "ic-mgn-R", "radiation-R", "pons-cerebellum-R", "cerebellum-thalamus-R", "thalamus-premotor-R", "dorsal-R", "premotor-sma-R",
-          "sma-putamen-R", "ventral-R", "heschl-accumbens-R", "vta-accumbens-R", "vta-caudate-R" },
+          "sma-putamen-R", "ventral-R", "heschl-accumbens-R", "vta-accumbens-R", "vta-caudate-R", "cn-nll-contra-R" },
     };
     for (int s = kLeft; s <= kRight; ++s)
     {
@@ -548,24 +558,34 @@ void BrainAnatomy::buildTracts()
                   { earCentre (s), at (1.12f, -0.15f, 0.04f, s), cochleaPoint (s, 0.0f) }, Channel::EarAll, s, 1.0f);
         addTract (nm[1], TractKind::Auditory, N (Station::Cochlea), N (Station::CochlearNucleus), s,
                   { pos (Station::Cochlea, s), at (0.7f, -0.4f, -0.08f, s), at (0.42f, -0.53f, -0.2f, s), cn }, Channel::EarAll, s, 1.0f);
-        // Each cochlear nucleus feeds both olives (low bands -> MSO, high -> LSO): 35 % on its own side, 65 % across
-        // (the trapezoid body); above the olive each side so carries mostly the other ear.
+        // The superior olive (Grothe, Pecka and McAlpine 2010). Each cochlear nucleus excites both MSOs alike (low bands)
+        // and its own LSO (high bands); its crossed path to the other LSO runs through the trapezoid body to the MNTB,
+        // which inhibits that LSO (drawn thinner and at half weight).
         const Vec3 crossing { 0.0f, -0.6f, -0.17f };
         addTract (nm[2], TractKind::Auditory, N (Station::CochlearNucleus), N (Station::Mso), s,
                   { cn, lerp (cn, pos (Station::Mso, s), 0.5f) + Vec3 { 0.0f, -0.03f, 0.03f }, pos (Station::Mso, s) }, Channel::EarLow, s,
-                  kIpsilateral, 0.0045f);
+                  kMsoEachEar, 0.0045f);
         addTract (nm[3], TractKind::Auditory, N (Station::CochlearNucleus), node (Station::Mso, o), s,
-                  { cn, crossing + Vec3 { 0.0f, 0.0f, 0.01f }, pos (Station::Mso, o) }, Channel::EarLow, s, kContralateral, 0.0045f);
+                  { cn, crossing + Vec3 { 0.0f, 0.0f, 0.01f }, pos (Station::Mso, o) }, Channel::EarLow, s, kMsoEachEar, 0.0045f);
         addTract (nm[4], TractKind::Auditory, N (Station::CochlearNucleus), N (Station::Lso), s,
                   { cn, lerp (cn, pos (Station::Lso, s), 0.5f) + Vec3 { 0.0f, -0.02f, 0.02f }, pos (Station::Lso, s) }, Channel::EarHigh, s,
-                  kIpsilateral, 0.0045f);
+                  1.0f, 0.0045f);
         addTract (nm[5], TractKind::Auditory, N (Station::CochlearNucleus), node (Station::Lso, o), s,
-                  { cn, crossing + Vec3 { 0.0f, -0.015f, 0.0f }, pos (Station::Lso, o) }, Channel::EarHigh, s, kContralateral, 0.0045f);
-        const Vec3 nll = pos (Station::LateralLemniscus, s);
+                  { cn, crossing + Vec3 { 0.0f, -0.015f, 0.0f }, at (0.06f, -0.585f, -0.16f, o), pos (Station::Lso, o) }, Channel::EarHigh, s,
+                  kLsoInhibition, 0.0032f);
+        // Above the olive the pathway crosses: the MSO's output stays on its side, the LSO's goes to the other lateral
+        // lemniscus, and so does the cochlear nucleus's direct route (over the back of the brainstem).
         addTract (nm[6], TractKind::Auditory, N (Station::Mso), N (Station::LateralLemniscus), s,
-                  { pos (Station::Mso, s), at (0.12f, -0.48f, -0.17f, s), nll }, Channel::AscendLow, s, 1.0f, 0.005f);
-        addTract (nm[7], TractKind::Auditory, N (Station::Lso), N (Station::LateralLemniscus), s,
-                  { pos (Station::Lso, s), at (0.155f, -0.48f, -0.2f, s), nll }, Channel::AscendHigh, s, 1.0f, 0.005f);
+                  { pos (Station::Mso, s), at (0.12f, -0.48f, -0.17f, s), pos (Station::LateralLemniscus, s) }, Channel::OliveLow, s, 1.0f,
+                  0.005f);
+        addTract (nm[7], TractKind::Auditory, N (Station::Lso), node (Station::LateralLemniscus, o), s,
+                  { pos (Station::Lso, s), Vec3 { 0.0f, -0.56f, -0.205f }, at (0.155f, -0.48f, -0.2f, o), pos (Station::LateralLemniscus, o) },
+                  Channel::OliveHigh, s, 1.0f, 0.005f);
+        addTract (nm[21], TractKind::Auditory, N (Station::CochlearNucleus), node (Station::LateralLemniscus, o), s,
+                  { cn, at (0.07f, -0.56f, -0.27f, s), Vec3 { 0.0f, -0.53f, -0.265f }, at (0.1f, -0.46f, -0.235f, o),
+                    pos (Station::LateralLemniscus, o) },
+                  Channel::EarAll, s, kContralateral, 0.005f);
+        const Vec3 nll = pos (Station::LateralLemniscus, s);
         addTract (nm[8], TractKind::Auditory, N (Station::LateralLemniscus), N (Station::InferiorColliculus), s,
                   { nll, at (0.11f, -0.3f, -0.2f, s), pos (Station::InferiorColliculus, s) }, Channel::AscendAll, s, 1.0f);
         addTract (nm[9], TractKind::Auditory, N (Station::InferiorColliculus), N (Station::Mgn), s,
@@ -574,9 +594,13 @@ void BrainAnatomy::buildTracts()
                   { pos (Station::Mgn, s), at (0.3f, -0.15f, -0.06f, s), pos (Station::Heschl, s) }, Channel::Radiation, s, 1.0f, 0.0075f);
 
         // ---- Beat network (Grahn and Brett 2007) ---------------------------------------
+        // Inferior colliculus -> the basilar pons -> the opposite cerebellar hemisphere (the pontocerebellar fibres cross
+        // the midline in the basilar pons, then enter the opposite hemisphere through its middle cerebellar peduncle);
+        // with the crossed cerebellothalamic tract the loop crosses twice.
         const Vec3 cer = pos (Station::Cerebellum, s);
-        addTract (nm[11], TractKind::Beat, N (Station::InferiorColliculus), N (Station::Cerebellum), s,
-                  { pos (Station::InferiorColliculus, s), at (0.1f, -0.35f, -0.3f, s), at (0.18f, -0.4f, -0.42f, s), cer });
+        addTract (nm[11], TractKind::Beat, N (Station::InferiorColliculus), node (Station::Cerebellum, o), s,
+                  { pos (Station::InferiorColliculus, s), at (0.06f, -0.33f, -0.12f, s), Vec3 { 0.0f, -0.45f, -0.04f }, at (0.16f, -0.46f, -0.22f, o),
+                    pos (Station::Cerebellum, o) });
         // Cerebellum -> the opposite ventrolateral thalamus (crossing in the midbrain).
         addTract (nm[12], TractKind::Beat, N (Station::Cerebellum), node (Station::Ventrolateral, o), s,
                   { cer, at (0.1f, -0.33f, -0.33f, s), Vec3 { 0.0f, -0.22f, -0.2f }, at (-0.06f, -0.12f, -0.06f, s), pos (Station::Ventrolateral, o) });

@@ -54,9 +54,26 @@ Part blend (const Part& pa, float a, const Part& pb, float b) noexcept
     return p;
 }
 
+/** The LSO's view of a part: its own ear's activity less kLsoInhibition x the other ear's (never below 0), its colour. */
+Part inhibited (const Part& own, const Part& other) noexcept
+{
+    Part p = own;
+    p.x = std::max (0.0f, own.x - kLsoInhibition * other.x);
+    return p;
+}
+
 float decayFactor (double dt, float seconds) noexcept
 {
     return static_cast<float> (std::exp (-std::max (0.0, dt) / seconds));
+}
+
+/** Held activity that has decayed out of sight is 0 (no denormals; a faded brain is exactly dark). */
+constexpr float kGone = 1.0e-4f;
+inline void decay (float& x, float factor) noexcept
+{
+    x *= factor;
+    if (x < kGone)
+        x = 0.0f;
 }
 
 /** Normalised colour (max channel 1). */
@@ -126,6 +143,7 @@ void BrainActivity::reset() noexcept
     nextWave = 0;
     now = previous = 0.0;
     started = false;
+    dark = true;
     beats = chords = surprises = anticipations = drops = 0;
     lastBeat = lastDrop = lastAnticipation = lastSurprise = -1.0e9;
 }
@@ -198,35 +216,36 @@ void BrainActivity::addHop (const HopFrame& f) noexcept
         const int other = 1 - side;
         const auto& me = f.ear[static_cast<size_t> (side)];
         const auto& op = f.ear[static_cast<size_t> (other)];
+        const auto channel = [r, side] (Channel c) -> Drive& { return r->channel[static_cast<size_t> (channelIndex (c, side))]; };
         const struct
         {
-            Channel ear, ascend;
+            Channel ear;
             G group;
-        } groups[] = { { Channel::EarAll, Channel::AscendAll, G::All }, { Channel::EarLow, Channel::AscendLow, G::Low },
-                       { Channel::EarHigh, Channel::AscendHigh, G::High } };
+        } groups[] = { { Channel::EarAll, G::All }, { Channel::EarLow, G::Low }, { Channel::EarHigh, G::High } };
         for (const auto& gr : groups)
         {
             const auto g = static_cast<size_t> (gr.group);
-            drive (me[C::OnsetTonal][g], me[C::OnsetPercussive][g], me[C::Level][g], 1.0f, 1.0f,
-                   r->channel[static_cast<size_t> (channelIndex (gr.ear, side))]);
-            // Above the olive: 35 % this side's ear, 65 % the other ear.
-            const Part onT = blend (me[C::OnsetTonal][g], kIpsilateral, op[C::OnsetTonal][g], kContralateral);
-            const Part onP = blend (me[C::OnsetPercussive][g], kIpsilateral, op[C::OnsetPercussive][g], kContralateral);
-            const Part lev = blend (me[C::Level][g], kIpsilateral, op[C::Level][g], kContralateral);
-            drive (onT, onP, lev, 1.0f, 1.0f, r->channel[static_cast<size_t> (channelIndex (gr.ascend, side))]);
-            if (gr.group == G::All)
-            {
-                // The radiation to the cortex: percussive onsets weigh more on the left, tonal sound on the right.
-                const float wT = side == kRight ? kTonalRight : kOtherSide;
-                const float wP = side == kLeft ? kPercussiveLeft : kOtherSide;
-                drive (onT, onP, lev, wT, wP, r->channel[static_cast<size_t> (channelIndex (Channel::Radiation, side))]);
-            }
+            drive (me[C::OnsetTonal][g], me[C::OnsetPercussive][g], me[C::Level][g], 1.0f, 1.0f, channel (gr.ear));
         }
+        // The superior olive: the MSO hears both ears alike (low bands), the LSO its own ear less the other one (high bands).
+        const auto low = static_cast<size_t> (G::Low), high = static_cast<size_t> (G::High), all = static_cast<size_t> (G::All);
+        drive (blend (me[C::OnsetTonal][low], kMsoEachEar, op[C::OnsetTonal][low], kMsoEachEar),
+               blend (me[C::OnsetPercussive][low], kMsoEachEar, op[C::OnsetPercussive][low], kMsoEachEar),
+               blend (me[C::Level][low], kMsoEachEar, op[C::Level][low], kMsoEachEar), 1.0f, 1.0f, channel (Channel::OliveLow));
+        drive (inhibited (me[C::OnsetTonal][high], op[C::OnsetTonal][high]), inhibited (me[C::OnsetPercussive][high], op[C::OnsetPercussive][high]),
+               inhibited (me[C::Level][high], op[C::Level][high]), 1.0f, 1.0f, channel (Channel::OliveHigh));
+        // From the lateral lemniscus up: 35 % this side's ear, 65 % the other ear.
+        const Part ascendT = blend (me[C::OnsetTonal][all], kIpsilateral, op[C::OnsetTonal][all], kContralateral);
+        const Part ascendP = blend (me[C::OnsetPercussive][all], kIpsilateral, op[C::OnsetPercussive][all], kContralateral);
+        const Part ascendL = blend (me[C::Level][all], kIpsilateral, op[C::Level][all], kContralateral);
+        drive (ascendT, ascendP, ascendL, 1.0f, 1.0f, channel (Channel::AscendAll));
+        // The radiation to the cortex: percussive onsets weigh more on the left, tonal sound on the right.
+        const float wT = side == kRight ? kTonalRight : kOtherSide;
+        const float wP = side == kLeft ? kPercussiveLeft : kOtherSide;
+        drive (ascendT, ascendP, ascendL, wT, wP, channel (Channel::Radiation));
         // Per band: the cochlea (one ear) and Heschl's gyrus (this side above the olive).
         const auto& bm = f.band[static_cast<size_t> (side)];
         const auto& bo = f.band[static_cast<size_t> (other)];
-        const float wT = side == kRight ? kTonalRight : kOtherSide;
-        const float wP = side == kLeft ? kPercussiveLeft : kOtherSide;
         for (size_t b = 0; b < static_cast<size_t> (kBands); ++b)
         {
             r->coch[static_cast<size_t> (side)][b] = std::max ({ bm[C::OnsetTonal][b], bm[C::OnsetPercussive][b], kSteady * bm[C::Level][b] });
@@ -355,6 +374,7 @@ void BrainActivity::update (double t, double dt) noexcept
     const auto& tracts = anatomy.getTracts();
     const float trail = decayFactor (frame, kTrailSeconds), regionDecay = decayFactor (frame, kRegionSeconds);
     const float hgDecay = decayFactor (frame, kHeschlSeconds), cochDecay = decayFactor (frame, kCochleaSeconds);
+    float brightest = 0.0f; // of every tract segment and node (Heschl's gyrus and the cochlea: their strongest band)
 
     // ---- Ascending pathway: delayed readout of the history ----------------------------------
     for (size_t ti = 0; ti < tracts.size(); ++ti)
@@ -368,7 +388,7 @@ void BrainActivity::update (double t, double dt) noexcept
         for (int j = 0; j < kPoints; ++j)
         {
             auto& h = held[j];
-            h.x *= trail;
+            decay (h.x, trail);
             const double d = tr.delayStart + (tr.delayEnd - tr.delayStart) * static_cast<double> (j) / BrainAnatomy::kSegments;
             const double a = previous - d, b = now - d;
             for (int k = firstAfter (a); k < count && record (k).time <= b; ++k)
@@ -378,6 +398,7 @@ void BrainActivity::update (double t, double dt) noexcept
             }
             auto& gl = glow[j];
             gl.level = brightness (h.x);
+            brightest = std::max (brightest, gl.level);
             gl.r = h.r;
             gl.g = h.g;
             gl.b = h.b;
@@ -387,15 +408,15 @@ void BrainActivity::update (double t, double dt) noexcept
 
     // ---- Landing spots of the ascending pathway ----------------------------------------------
     for (auto& h : nodeHeld)
-        h.x *= regionDecay;
+        decay (h.x, regionDecay);
     for (auto& side : hgHeld)
         for (auto& v : side)
-            v *= hgDecay;
+            decay (v, hgDecay);
     for (auto& side : cochHeld)
         for (auto& v : side)
-            v *= cochDecay;
+            decay (v, cochDecay);
     for (auto& v : earHeld)
-        v *= cochDecay;
+        decay (v, cochDecay);
     const auto readRegion = [this] (double delay, auto&& take)
     {
         for (int k = firstAfter (previous - delay); k < count && record (k).time <= now - delay; ++k)
@@ -408,7 +429,7 @@ void BrainActivity::update (double t, double dt) noexcept
         {
             Station station;
             Channel channel;
-        } spots[] = { { Station::CochlearNucleus, Channel::EarAll }, { Station::Mso, Channel::AscendLow }, { Station::Lso, Channel::AscendHigh },
+        } spots[] = { { Station::CochlearNucleus, Channel::EarAll }, { Station::Mso, Channel::OliveLow }, { Station::Lso, Channel::OliveHigh },
                       { Station::LateralLemniscus, Channel::AscendAll }, { Station::InferiorColliculus, Channel::AscendAll },
                       { Station::Mgn, Channel::AscendAll } };
         for (const auto& spot : spots)
@@ -500,6 +521,7 @@ void BrainActivity::update (double t, double dt) noexcept
             const auto& a = eventAccum[ti * kPoints + j];
             auto& gl = segments[ti * kPoints + j];
             gl.level = brightness (a[3]);
+            brightest = std::max (brightest, gl.level);
             gl.r = a[0];
             gl.g = a[1];
             gl.b = a[2];
@@ -513,10 +535,12 @@ void BrainActivity::update (double t, double dt) noexcept
         const auto& h = nodeHeld[n];
         auto& gl = nodeGlow[n];
         gl.level = brightness (h.x);
+        brightest = std::max (brightest, gl.level);
         gl.r = h.r;
         gl.g = h.g;
         gl.b = h.b;
         normalise (gl.r, gl.g, gl.b);
     }
+    dark = brightest <= 0.0f;
 }
 } // namespace flub::app::ui::vis::brain

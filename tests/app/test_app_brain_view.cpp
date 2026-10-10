@@ -1,9 +1,12 @@
 // App-level tests: the brain visualiser ("brain", docs/06 §6.4.2): the anatomy
 // and its tract graph, the tonotopic maps, the crossed ascending pathway (a
-// tone in one ear lights the opposite auditory cortex more), the beat network,
-// chord surprise, build-up and drop, the heuristics' false triggers on the
-// app's own test music and synthetic loops, intensity, hover names, no
-// allocation per frame and the frame time at 1280 x 720 and 1920 x 1080.
+// tone in one ear lights the opposite auditory cortex more) and the superior
+// olive's wiring, the beat network, chord surprise and its timing, build-up
+// and drop, the heuristics' false triggers on the app's own test music,
+// synthetic loops, pauses, a re-struck chord and noise, NaN / inf input,
+// intensity, hover names, the picture's handedness (not a mirror image), no
+// render while still and dark, no allocation per frame and the frame time at
+// 1280 x 720 and 1920 x 1080.
 // Set FLUB_BRAIN_SHOTS=<folder> to also write rendered PNGs of the view there.
 #include "AppTestSupport.h"
 
@@ -15,9 +18,11 @@
 
 #include <juce_graphics/juce_graphics.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -153,6 +158,7 @@ TEST_CASE ("App: brain anatomy: every tract runs from one station to another, fr
     const auto& points = a.getTractPoints();
     REQUIRE (! tracts.empty());
     std::set<std::string> names;
+    std::string crossers;
     int auditory = 0, crossing = 0;
     for (const auto& t : tracts)
     {
@@ -179,10 +185,18 @@ TEST_CASE ("App: brain anatomy: every tract runs from one station to another, fr
             CHECK (t.channel != brain::Channel::None);
         }
         if (first.x * last.x < 0.0f)
+        {
             ++crossing;
+            crossers += std::string (crossers.empty() ? "" : ", ") + t.name;
+        }
     }
-    CHECK (auditory == 22);
-    CHECK (crossing >= 6); // the trapezoid body (4) and the cerebellothalamic tracts (2)
+    std::printf ("  tracts crossing the midline: %s\n", crossers.c_str());
+    CHECK (tracts.size() == 44);
+    CHECK (auditory == 24);
+    // Per side: the trapezoid body to the other MSO and (via the MNTB) the other LSO, the LSO's output and the cochlear
+    // nucleus's direct route to the other lateral lemniscus, the pons to the other cerebellum, the cerebellum to the
+    // other thalamus.
+    CHECK (crossing == 12);
 
     // Reachability along the tracts: each ear reaches both auditory cortices; every station is reached
     // from the ears or the VTA (the dopamine source).
@@ -340,7 +354,7 @@ TEST_CASE ("App: brain: a tone in one ear lights the opposite Heschl's gyrus mor
         opposite /= frames;
         std::printf ("  440 Hz in the %s ear: Heschl's gyrus same side %.3f, opposite %.3f; IC %.3f / %.3f\n", ear == 0 ? "left" : "right", same,
                      opposite, icSame / frames, icOpposite / frames);
-        // 65 % / 35 % above the olive; the cortex adds +15 % for tonal sound on the right (Zatorre and Belin), so a
+        // 65 % / 35 % from the lateral lemniscus up; the cortex adds +15 % for tonal sound on the right (Zatorre and Belin), so a
         // tone in the right ear lights the left gyrus about 0.65 x 0.85 / (0.35 x 1.15) = 1.37 times the right one.
         CHECK (opposite > (ear == brain::kLeft ? 2.0 : 1.25) * same);
         CHECK (icOpposite > 1.5 * icSame);
@@ -349,6 +363,70 @@ TEST_CASE ("App: brain: a tone in one ear lights the opposite Heschl's gyrus mor
         CHECK (act.glow (nodeOf (Station::Cochlea, ear)).level > 0.3f);
         CHECK (act.glow (nodeOf (Station::Cochlea, 1 - ear)).level == 0.0f);
     }
+}
+
+TEST_CASE ("App: brain superior olive: the LSO answers its own ear (the other ear inhibits it), the MSO both ears; the pathway crosses above "
+           "the olive")
+{
+    // Grothe, Pecka and McAlpine 2010: the LSO is excited by the same-side cochlear nucleus and inhibited by the other ear
+    // (through the MNTB); the MSO is excited by both; the crossed excitation to the midbrain leaves from the LSO (and
+    // directly from the cochlear nucleus), the MSO's output stays on its own side.
+    const auto& a = brain::BrainAnatomy::get();
+    const int ipsi = a.findTract ("cn-lso-ipsi-L"), contra = a.findTract ("cn-lso-contra-L"), lsoOut = a.findTract ("lso-nll-L"),
+              direct = a.findTract ("cn-nll-contra-L"), msoOut = a.findTract ("mso-nll-L");
+    REQUIRE (ipsi >= 0);
+    REQUIRE (contra >= 0);
+    REQUIRE (lsoOut >= 0);
+    REQUIRE (direct >= 0);
+    REQUIRE (msoOut >= 0);
+    const auto& tracts = a.getTracts();
+    CHECK (tracts[static_cast<size_t> (lsoOut)].to == nodeOf (Station::LateralLemniscus, brain::kRight));
+    CHECK (tracts[static_cast<size_t> (direct)].to == nodeOf (Station::LateralLemniscus, brain::kRight));
+    CHECK (tracts[static_cast<size_t> (msoOut)].to == nodeOf (Station::LateralLemniscus, brain::kLeft));
+
+    // A 300 Hz (MSO) and a 4 kHz (LSO) tone in the left ear only.
+    Runner run;
+    double lso[2] = {}, mso[2] = {}, nll[2] = {}, ipsiLevel = 0.0, contraLevel = 0.0;
+    int frames = 0;
+    const auto tractMean = [&run] (int tract)
+    {
+        double sum = 0.0;
+        for (int j = 0; j <= brain::BrainAnatomy::kSegments; ++j)
+            sum += run.view.getActivity().segment (tract, j).level;
+        return sum / (brain::BrainAnatomy::kSegments + 1);
+    };
+    run.run (90,
+             [] (int64_t n, float& l, float& r)
+             {
+                 const double t = seconds (n);
+                 l = static_cast<float> (0.2 * std::sin (2.0 * kPi * 300.0 * t) + 0.2 * std::sin (2.0 * kPi * 4000.0 * t));
+                 r = 0.0f;
+             },
+             [&]
+             {
+                 if (run.view.getClock() < 0.6)
+                     return;
+                 for (int s = brain::kLeft; s <= brain::kRight; ++s)
+                 {
+                     lso[s] += run.glow (Station::Lso, s);
+                     mso[s] += run.glow (Station::Mso, s);
+                     nll[s] += run.glow (Station::LateralLemniscus, s);
+                 }
+                 ipsiLevel += tractMean (ipsi);
+                 contraLevel += tractMean (contra);
+                 ++frames;
+             });
+    REQUIRE (frames > 20);
+    std::printf ("  left-ear tones: LSO left %.3f right %.3f; MSO left %.3f right %.3f; lateral lemniscus left %.3f right %.3f; "
+                 "cochlear nucleus -> LSO same side %.3f, other side %.3f\n",
+                 lso[0] / frames, lso[1] / frames, mso[0] / frames, mso[1] / frames, nll[0] / frames, nll[1] / frames, ipsiLevel / frames,
+                 contraLevel / frames);
+    CHECK (lso[brain::kLeft] > 0.2 * frames);
+    CHECK (lso[brain::kLeft] > 2.0 * lso[brain::kRight]);
+    CHECK (mso[brain::kLeft] > 0.1 * frames);
+    CHECK (std::abs (mso[brain::kLeft] - mso[brain::kRight]) < 0.2 * std::max (mso[brain::kLeft], mso[brain::kRight]));
+    CHECK (nll[brain::kRight] > 1.5 * nll[brain::kLeft]);
+    CHECK (ipsiLevel > contraLevel);
 }
 
 TEST_CASE ("App: brain: landing spots follow the level (quiet < loud < very loud, never white), silence is dark")
@@ -430,10 +508,14 @@ TEST_CASE ("App: brain: a chord outside the key lights the right inferior fronta
 {
     // C major (I - IV - V - I, twice) to set the key, then an in-key change (C -> Am) or one outside it (C -> Ab).
     const std::vector<std::vector<int>> progression { { 48, 60, 64, 67 }, { 41, 60, 65, 69 }, { 43, 59, 62, 67 }, { 48, 60, 64, 67 } };
-    const auto runWith = [&progression] (const std::vector<int>& last, float& right, float& left, int& surprise, std::string& key)
+    const auto runWith = [&progression] (const std::vector<int>& last, float& right, float& left, int& surprise, std::string& key, double& arrival)
     {
         Runner run;
         right = left = 0.0f;
+        int changes = 0;
+        double namedAt = -1.0;
+        float previousRight = 0.0f;
+        arrival = -1.0;
         run.run (
             570,
             [&] (int64_t n, float& l, float& r)
@@ -444,9 +526,20 @@ TEST_CASE ("App: brain: a chord outside the key lights the right inferior fronta
             },
             [&]
             {
+                const auto& act = run.view.getActivity();
+                if (act.getChordChanges() != changes)
+                {
+                    changes = act.getChordChanges();
+                    if (run.view.getClock() >= 8.0 && namedAt < 0.0)
+                        namedAt = run.view.getClock(); // the frame the tracker names the change to the last chord
+                }
+                const float nowRight = run.glow (Station::Ifg, brain::kRight);
+                if (namedAt >= 0.0 && arrival < 0.0 && nowRight > 0.05f && nowRight > previousRight + 0.02f)
+                    arrival = run.view.getClock() - namedAt; // the wave reaches the gyrus
+                previousRight = nowRight;
                 if (run.view.getClock() < 8.0)
                     return;
-                right = std::max (right, run.glow (Station::Ifg, brain::kRight));
+                right = std::max (right, nowRight);
                 left = std::max (left, run.glow (Station::Ifg, brain::kLeft));
             });
         surprise = run.view.getListener().getLastChordSurprise();
@@ -455,17 +548,25 @@ TEST_CASE ("App: brain: a chord outside the key lights the right inferior fronta
     float inRight = 0.0f, inLeft = 0.0f, outRight = 0.0f, outLeft = 0.0f;
     int inSurprise = -1, outSurprise = -1;
     std::string inKey, outKey;
-    runWith ({ 45, 57, 60, 64 }, inRight, inLeft, inSurprise, inKey);  // A minor: in C major
-    runWith ({ 44, 56, 60, 63 }, outRight, outLeft, outSurprise, outKey); // A-flat major: A-flat and E-flat are outside
-    std::printf ("  key %s / %s; C -> Am: IFG right %.2f left %.2f (surprise %d); C -> Ab: right %.2f left %.2f (surprise %d)\n", inKey.c_str(),
-                 outKey.c_str(), static_cast<double> (inRight), static_cast<double> (inLeft), inSurprise, static_cast<double> (outRight),
-                 static_cast<double> (outLeft), outSurprise);
+    double inArrival = -1.0, outArrival = -1.0;
+    runWith ({ 45, 57, 60, 64 }, inRight, inLeft, inSurprise, inKey, inArrival);     // A minor: in C major
+    runWith ({ 44, 56, 60, 63 }, outRight, outLeft, outSurprise, outKey, outArrival); // A-flat major: A-flat and E-flat are outside
+    std::printf ("  key %s / %s; C -> Am: IFG right %.2f left %.2f (surprise %d); C -> Ab: right %.2f left %.2f (surprise %d); the IFG lights "
+                 "%.3f / %.3f s after the change is named\n",
+                 inKey.c_str(), outKey.c_str(), static_cast<double> (inRight), static_cast<double> (inLeft), inSurprise, static_cast<double> (outRight),
+                 static_cast<double> (outLeft), outSurprise, inArrival, outArrival);
     CHECK (inKey == "C major");
     CHECK (inSurprise == 0);
     CHECK (outSurprise == 1);
     CHECK (outRight > 2.0f * inRight);
     CHECK (outRight > outLeft);
     CHECK (outRight > 0.5f);
+    // The ventral wave starts 0.1 s after the change is named and runs 0.12 s (docs/06: arrives 0.22 s after), within a frame.
+    for (const double arrival : { inArrival, outArrival })
+    {
+        CHECK (arrival > 0.2);
+        CHECK (arrival < 0.22 + 1.5 * kDt);
+    }
 }
 
 namespace
@@ -606,7 +707,9 @@ TEST_CASE ("App: brain heuristics on the app's own test music: beats on the kick
     CHECK (listener.getDrops() == 0);
 }
 
-TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, hats or a pad; no build-up or drop in a steady groove")
+// One loop per case (each under 2 s on a busy PC); the cases are built together so the shared noise and filters
+// keep their order, and only the loop asked for is run.
+static void checkSyntheticLoop (int which)
 {
     struct Case
     {
@@ -644,8 +747,8 @@ TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, 
                                    + 0.12f * static_cast<float> (bass) * decay (std::fmod (t, 0.25), 0.18) + chordSample ({ 57, 60, 64 }, n, 0.03);
                        },
                        12 });
-    for (auto& c : cases)
     {
+        const auto& c = cases[static_cast<size_t> (which)];
         Runner run;
         run.run (360, c.gen);
         const auto& listener = run.view.getListener();
@@ -658,6 +761,173 @@ TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, 
         CHECK (listener.getBuildUps() == 0);
         CHECK (listener.getDrops() == 0);
     }
+}
+
+TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, hats or a pad; no build-up or drop in a steady groove - sustained pad")
+{
+    checkSyntheticLoop (0);
+}
+
+TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, hats or a pad; no build-up or drop in a steady groove - bass line")
+{
+    checkSyntheticLoop (1);
+}
+
+TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, hats or a pad; no build-up or drop in a steady groove - hi-hats")
+{
+    checkSyntheticLoop (2);
+}
+
+TEST_CASE ("App: brain heuristics on synthetic loops: no beats from bass notes, hats or a pad; no build-up or drop in a steady groove - steady groove")
+{
+    checkSyntheticLoop (3);
+}
+
+TEST_CASE ("App: brain heuristics: a pause in the music (pause and play, a gap between tracks) is not a drop")
+{
+    const TestMusic music (12.0);
+    for (const double gap : { 0.5, 2.0 })
+    {
+        // The test music to 6 s, `gap` seconds of silence, then the music goes on where it stopped.
+        Runner run;
+        const auto pausedAt = static_cast<int64_t> (6.0 * kRate), resumeAt = pausedAt + static_cast<int64_t> (gap * kRate);
+        run.run (static_cast<int> ((11.0 + gap) * kRate / kFrame),
+                 [&] (int64_t n, float& l, float& r)
+                 {
+                     if (n >= pausedAt && n < resumeAt)
+                     {
+                         l = r = 0.0f;
+                         return;
+                     }
+                     const auto i = static_cast<size_t> (n < pausedAt ? n : n - (resumeAt - pausedAt));
+                     l = music.l[i];
+                     r = music.r[i];
+                 });
+        const auto& listener = run.view.getListener();
+        std::printf ("  test music paused for %.1f s at 6 s: drops %d, build-ups %d (anticipation pulses %d)\n", gap, listener.getDrops(),
+                     listener.getBuildUps(), run.view.getActivity().getAnticipations());
+        CHECK (listener.getDrops() == 0);
+        CHECK (listener.getBuildUps() == 0);
+    }
+}
+
+TEST_CASE ("App: brain heuristics: chords after silence or after a gap are not a build-up")
+{
+    // Chords without bass (C - F - G - C, a second each) with a 2 s gap at 5 s; then 6 s of silence before a held chord.
+    const std::vector<std::vector<int>> chords { { 60, 64, 67 }, { 60, 65, 69 }, { 59, 62, 67 }, { 60, 64, 67 } };
+    {
+        Runner run;
+        run.run (720,
+                 [&chords] (int64_t n, float& l, float& r)
+                 {
+                     const double t = seconds (n);
+                     l = r = t >= 5.0 && t < 7.0 ? 0.0f : chordSample (chords[static_cast<size_t> (static_cast<int> (t) % 4)], n);
+                 });
+        const auto& listener = run.view.getListener();
+        std::printf ("  chords without bass, a 2 s gap at 5 s: build-ups %d (anticipation pulses %d), drops %d\n", listener.getBuildUps(),
+                     run.view.getActivity().getAnticipations(), listener.getDrops());
+        CHECK (listener.getBuildUps() == 0);
+        CHECK (listener.getDrops() == 0);
+    }
+    {
+        Runner run;
+        run.run (720, [&chords] (int64_t n, float& l, float& r) { l = r = seconds (n) < 6.0 ? 0.0f : chordSample (chords[0], n); });
+        const auto& listener = run.view.getListener();
+        std::printf ("  6 s of silence, then a held chord: build-ups %d (anticipation pulses %d), drops %d\n", listener.getBuildUps(),
+                     run.view.getActivity().getAnticipations(), listener.getDrops());
+        CHECK (listener.getBuildUps() == 0);
+        CHECK (listener.getDrops() == 0);
+    }
+}
+
+TEST_CASE ("App: brain heuristics: a chord re-struck on every beat (a pumping synth, no hats) is not a build-up")
+{
+    // C major at -26 dBFS a note, struck every 0.5 s (a step to 1.0, decaying to 0.6), 17 s.
+    Runner run;
+    run.run (1020,
+             [] (int64_t n, float& l, float& r)
+             {
+                 const double t = seconds (n), tau = std::fmod (t, 0.5);
+                 double v = 0.0;
+                 for (const int m : { 60, 64, 67 })
+                     v += 0.05 * std::sin (2.0 * kPi * vis::PitchEstimator::midiToHz (m) * t + 0.3 * m);
+                 l = r = static_cast<float> ((0.6 + 0.4 * std::exp (-tau / 0.15)) * v);
+             });
+    const auto& listener = run.view.getListener();
+    std::printf ("  re-struck triad, 17 s: build-ups %d (anticipation pulses %d), drops %d, beats %d\n", listener.getBuildUps(),
+                 run.view.getActivity().getAnticipations(), listener.getDrops(), listener.getNumBeatTimes());
+    CHECK (listener.getBuildUps() == 0);
+    CHECK (run.view.getActivity().getAnticipations() == 0);
+    CHECK (listener.getDrops() == 0);
+}
+
+TEST_CASE ("App: brain heuristics on noise and short noise bursts (documented limits): no chord surprise, build-up or drop")
+{
+    struct Case
+    {
+        const char* name;
+        int frames;
+        std::function<void (int64_t, float&, float&)> gen;
+    };
+    Noise noise;
+    std::vector<Case> cases;
+    // White noise at -20 dBFS RMS (uniform noise: RMS = peak / sqrt 3).
+    cases.push_back ({ "white noise at -20 dBFS, 12 s", 720, [&noise] (int64_t, float& l, float& r) { l = r = 0.1f * 1.7320508f * noise(); } });
+    // 40 ms noise bursts every 0.7 s (gunshots in a game), 6 s.
+    cases.push_back ({ "40 ms noise bursts every 0.7 s, 6 s", 360,
+                       [&noise] (int64_t n, float& l, float& r)
+                       {
+                           const double tau = std::fmod (seconds (n), 0.7);
+                           l = r = tau < 0.04 ? 0.5f * noise() : 0.0f;
+                       } });
+    for (auto& c : cases)
+    {
+        Runner run;
+        run.run (c.frames, c.gen);
+        const auto& listener = run.view.getListener();
+        const auto& act = run.view.getActivity();
+        std::printf ("  %s: beats %d (kicks %d, snares %d), chord changes %d (%d outside the key), build-ups %d, drops %d\n", c.name,
+                     listener.getNumBeatTimes(), listener.getKicks(), listener.getSnares(), act.getChordChanges(), act.getSurprises(),
+                     listener.getBuildUps(), listener.getDrops());
+        CHECK (act.getSurprises() == 0);
+        CHECK (listener.getBuildUps() == 0);
+        CHECK (listener.getDrops() == 0);
+    }
+}
+
+TEST_CASE ("App: brain: a NaN or infinite block does not latch the view (the level and the drop come back)")
+{
+    const auto tone = [] (int64_t n, float& l, float& r) { l = r = static_cast<float> (0.3 * std::sin (2.0 * kPi * 440.0 * seconds (n))); };
+    const auto heschlAfter = [&tone] (float bad)
+    {
+        // The tone, one bad display frame at 1 s, then 2 s more of the tone.
+        Runner run;
+        run.run (60, tone);
+        if (! std::isfinite (bad))
+            run.run (1, [bad] (int64_t, float& l, float& r) { l = r = bad; });
+        else
+            run.run (1, tone);
+        run.run (120, tone);
+        return run.view.getActivity().heschlPeak (brain::kRight);
+    };
+    const float control = heschlAfter (0.0f);
+    const float afterNan = heschlAfter (std::numeric_limits<float>::quiet_NaN());
+    const float afterInf = heschlAfter (std::numeric_limits<float>::infinity());
+    std::printf ("  Heschl's gyrus 2 s after one bad frame: control %.3f, NaN %.3f, inf %.3f\n", static_cast<double> (control),
+                 static_cast<double> (afterNan), static_cast<double> (afterInf));
+    CHECK (control > 0.3f);
+    CHECK (afterNan > 0.9f * control);
+    CHECK (afterInf > 0.9f * control);
+
+    // The build-up and drop with a NaN frame at 1 s: the drop is still found.
+    Runner run;
+    BuildUpAndDrop music;
+    run.run (60, std::ref (music));
+    run.run (1, [] (int64_t, float& l, float& r) { l = r = std::numeric_limits<float>::quiet_NaN(); });
+    run.run (509, std::ref (music));
+    std::printf ("  build-up and drop with a NaN frame at 1 s: drops %d at %.2f s\n", run.view.getActivity().getDrops(),
+                 run.view.getActivity().getLastDropTime());
+    CHECK (run.view.getActivity().getDrops() == 1);
 }
 
 // =============================================================================
@@ -695,16 +965,134 @@ TEST_CASE ("App: brain view: hover names a landing spot, the menu stops the turn
     CHECK (run.view.getAngle() == angle);
     run.view.setTurning (true);
     run.run (10, [] (int64_t, float& l, float& r) { l = r = 0.0f; });
-    CHECK (run.view.getAngle() > angle);
+    CHECK (run.view.getAngle() != angle);
     run.view.resetView();
     CHECK (run.view.getAngle() == vis::BrainView::kStartAngle);
     CHECK (run.view.getTilt() == vis::BrainView::kStartTilt);
 }
 
-TEST_CASE ("App: brain view does not allocate per frame and renders a frame quickly at 1280 x 720 and 1920 x 1080")
+TEST_CASE ("App: brain view draws a real brain, not its mirror image (facing it, its right side is on the viewer's left)")
+{
+    Runner run;
+    run.view.setBounds (0, 0, 1000, 600);
+    run.view.setVisible (true);
+    const auto& a = brain::BrainAnatomy::get();
+    using A = brain::BrainAnatomy;
+    const auto front = A::fromMni ({ 0.0f, 70.0f, 0.0f }), back = A::fromMni ({ 0.0f, -104.0f, 0.0f });
+    const auto rightEar = a.earCentre (brain::kRight), leftEar = a.earCentre (brain::kLeft);
+    const auto rightHeschl = a.getNode (nodeOf (Station::Heschl, brain::kRight)).position;
+    const auto leftHeschl = a.getNode (nodeOf (Station::Heschl, brain::kLeft)).position;
+    struct Seen
+    {
+        float x = 0.0f, y = 0.0f, depth = 0.0f;
+    };
+    const auto see = [&run] (brain::Vec3 p)
+    {
+        Seen s;
+        juce::Point<float> at;
+        CHECK (run.view.projectPoint (p, at, s.depth));
+        s.x = at.x;
+        s.y = at.y;
+        return s;
+    };
+    const auto look = [&run] (float angle, float tilt)
+    {
+        run.view.setView (angle, tilt);
+        run.view.renderScene();
+    };
+
+    // Facing it (angle 0, level): the face is nearer than the back of the head, and the right ear and the right
+    // Heschl's gyrus are on the viewer's left (as with a person facing you).
+    look (0.0f, 0.0f);
+    CHECK (see (front).depth < see (back).depth);
+    CHECK (see (rightEar).x < see (leftEar).x);
+    CHECK (see (rightHeschl).x < see (leftHeschl).x);
+    // From behind (angle pi): the back of the head is nearer, the right ear on the viewer's right.
+    look (static_cast<float> (kPi), 0.0f);
+    CHECK (see (back).depth < see (front).depth);
+    CHECK (see (rightEar).x > see (leftEar).x);
+
+    // At any angle and tilt the picture is the brain turned, never reflected: its axes right, front and up (right-handed,
+    // as MNI's x, y, z) stay right-handed on screen (x to the right, y up, towards the viewer).
+    const brain::Vec3 centre { 0.0f, -0.17f, 0.0f };
+    for (const float angle : { -2.5f, -0.5f, 0.0f, 0.7f, 2.0f, 3.14159f, 4.5f })
+        for (const float tilt : { -0.5f, 0.15f, 0.8f })
+        {
+            look (angle, tilt);
+            const auto o = see (centre);
+            const auto axis = [&] (brain::Vec3 v)
+            {
+                const auto s = see (centre + v);
+                return std::array<double, 3> { s.x - o.x, -(s.y - o.y), -(s.depth - o.depth) };
+            };
+            const auto r = axis ({ 0.05f, 0.0f, 0.0f }), f = axis ({ 0.0f, 0.0f, 0.05f }), u = axis ({ 0.0f, 0.05f, 0.0f });
+            // det [r f u] (columns): screen x, up and towards the viewer as rows; a positive scale per row keeps its sign.
+            const double det = r[0] * (f[1] * u[2] - f[2] * u[1]) - f[0] * (r[1] * u[2] - r[2] * u[1]) + u[0] * (r[1] * f[2] - r[2] * f[1]);
+            if (det <= 0.0)
+                std::printf ("  angle %.2f tilt %.2f: mirrored (det %.4f)\n", static_cast<double> (angle), static_cast<double> (tilt), det);
+            CHECK (det > 0.0);
+        }
+
+    // The start view (the approved mockup's pose): the face to the viewer's right, the right side of the brain nearer;
+    // turning moves the face further to the right first, as the mockup's.
+    run.view.resetView();
+    run.view.renderScene();
+    CHECK (see (front).x > see (back).x);
+    CHECK (see (rightHeschl).depth < see (leftHeschl).depth);
+    const float faceBefore = see (front).x;
+    run.run (30, [] (int64_t, float& l, float& r) { l = r = 0.0f; });
+    run.view.renderScene();
+    CHECK (see (front).x > faceBefore);
+}
+
+TEST_CASE ("App: brain view stops rendering while it is dark and still, and starts again when it lights or turns")
+{
+    Runner run;
+    run.view.setBounds (0, 0, 800, 450);
+    run.view.setVisible (true);
+    juce::Image screen (juce::Image::ARGB, 800, 450, true, juce::SoftwareImageType());
+    const auto frames = [&run, &screen] (int count, const std::function<void (int64_t, float&, float&)>& gen)
+    {
+        for (int f = 0; f < count; ++f)
+        {
+            run.run (1, gen);
+            juce::Graphics g (screen);
+            run.view.paintEntireComponent (g, false);
+        }
+    };
+    const auto silence = [] (int64_t, float& l, float& r) { l = r = 0.0f; };
+    const auto tone = [] (int64_t n, float& l, float& r) { l = r = static_cast<float> (0.3 * std::sin (2.0 * kPi * 440.0 * seconds (n))); };
+    run.view.setTurning (false);
+    frames (30, silence);
+    auto before = run.view.getRenderCount();
+    frames (30, silence);
+    const auto stillDark = run.view.getRenderCount() - before;
+    before = run.view.getRenderCount();
+    frames (30, tone);
+    const auto lit = run.view.getRenderCount() - before;
+    // 5 s: everything fades out (the model only: painting these frames is what made the case slow), then the first
+    // paint renders the dark brain once and the next one does not.
+    run.run (298, silence);
+    frames (2, silence);
+    before = run.view.getRenderCount();
+    frames (30, silence);
+    const auto darkAgain = run.view.getRenderCount() - before;
+    run.view.setTurning (true);
+    before = run.view.getRenderCount();
+    frames (30, silence);
+    const auto turning = run.view.getRenderCount() - before;
+    std::printf ("  renders in 30 frames: dark and still %lld, a tone %lld, dark again %lld, turning %lld\n", static_cast<long long> (stillDark),
+                 static_cast<long long> (lit), static_cast<long long> (darkAgain), static_cast<long long> (turning));
+    CHECK (stillDark == 0);
+    CHECK (lit >= 20); // the display runs 0.116 s (7 frames) behind the sound: the first frames of the tone are still dark
+    CHECK (darkAgain == 0);
+    CHECK (turning >= 25);
+}
+
+// One size per case (each under 2 s on a busy PC).
+static void checkFrameCost (juce::Point<int> size)
 {
     const TestMusic music (3.2);
-    for (const auto& size : { juce::Point<int> (1280, 720), juce::Point<int> (1920, 1080) })
     {
         Runner run;
         run.view.setBounds (0, 0, size.x, size.y);
@@ -777,6 +1165,16 @@ TEST_CASE ("App: brain view does not allocate per frame and renders a frame quic
         CHECK (lit > 200);
         CHECK (white == 0);
     }
+}
+
+TEST_CASE ("App: brain view does not allocate per frame and renders a frame quickly at 1280 x 720 and 1920 x 1080 - 1280 x 720")
+{
+    checkFrameCost ({ 1280, 720 });
+}
+
+TEST_CASE ("App: brain view does not allocate per frame and renders a frame quickly at 1280 x 720 and 1920 x 1080 - 1920 x 1080")
+{
+    checkFrameCost ({ 1920, 1080 });
 }
 
 TEST_CASE ("App: brain view renders PNGs when FLUB_BRAIN_SHOTS names a folder (not a check)")
