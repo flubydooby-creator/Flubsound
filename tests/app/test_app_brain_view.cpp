@@ -104,6 +104,17 @@ struct HighPass
     }
 };
 
+struct LowPass
+{
+    float a = 0.0f, y1 = 0.0f;
+    explicit LowPass (double hz) : a (static_cast<float> (1.0 - std::exp (-2.0 * kPi * hz / kRate))) {}
+    float operator() (float x) noexcept
+    {
+        y1 += a * (x - y1);
+        return y1;
+    }
+};
+
 float decay (double tau, double timeConstant) noexcept
 {
     return tau < 0.0 ? 0.0f : static_cast<float> (std::exp (-tau / timeConstant));
@@ -116,6 +127,56 @@ float kick (double tau, float click) noexcept
         return 0.0f;
     const double phase = 2.0 * kPi * (48.0 * tau + 110.0 * 0.035 * (1.0 - std::exp (-tau / 0.035)));
     return 0.85f * static_cast<float> (std::sin (phase)) * decay (tau, 0.28) + 0.25f * click * decay (tau, 0.002);
+}
+
+/** The test music's snare (tau seconds after the hit): band-passed noise (1.2 - 7 kHz) and a 185 Hz body. */
+struct Snare
+{
+    HighPass hp { 1200.0 };
+    LowPass lp { 7000.0 };
+    float operator() (double tau, float noise) noexcept
+    {
+        const float wires = lp (hp (noise));
+        if (tau < 0.0)
+            return 0.0f;
+        return 0.55f * wires * decay (tau, 0.14) + 0.3f * static_cast<float> (std::sin (2.0 * kPi * 185.0 * tau)) * decay (tau, 0.07);
+    }
+};
+
+/** Gunshots at `times` (seconds, ascending): a noise crack (1 ms rise, 25 ms decay) over a body of noise under
+    1 kHz (90 ms decay), `level` at the peak. */
+struct Gunshots
+{
+    std::vector<double> times;
+    float level = 0.5f;
+    Noise noise { 987654321u }; // not the music's noise
+    LowPass body { 1000.0 };
+    size_t next = 0;
+    double last = -1.0;
+    float operator() (int64_t n) noexcept
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        const float low = body (x);
+        while (next < times.size() && times[next] <= t)
+            last = times[next++];
+        if (last < 0.0)
+            return 0.0f;
+        const double tau = t - last;
+        return level * std::min (1.0f, static_cast<float> (tau / 0.001)) * (x * decay (tau, 0.025) + 2.5f * low * decay (tau, 0.09));
+    }
+};
+
+/** Single shots at irregular gaps (0.9, 0.45, 1.3, 0.6, 1.7, 0.75, 0.35, 1.1 s: no gap within 15 % of the one before). */
+const std::vector<double> kIrregularShots { 0.3, 1.2, 1.65, 2.95, 3.55, 5.25, 6.0, 6.35, 7.45 };
+
+/** Whether a beat log holds a beat within `tolerance` seconds of t. */
+bool beatNear (const brain::BrainListener& listener, double t, double tolerance)
+{
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+        if (std::abs (listener.getBeatTime (i) - t) < tolerance)
+            return true;
+    return false;
 }
 
 /** A sum of harmonic notes (MIDI), 4 harmonics each at level / h. */
@@ -504,6 +565,148 @@ TEST_CASE ("App: brain: a kick pattern lights the beat network (cerebellum, thal
         CHECK (p > 0.2f);
 }
 
+// A snare-like hit (the noisy 1 - 4 kHz candidate) is a beat only when it repeats like a drum beat (owner decision
+// 2026-10-10): single shots, automatic fire and irregular bursts on the Game strip must not pulse the beat network.
+// One case per signal (each under 2 s).
+namespace
+{
+struct BeatCount
+{
+    int kicks = 0, snares = 0, snareHits = 0, beats = 0, networkBeats = 0;
+};
+
+BeatCount countBeats (const char* name, int frames, const std::function<void (int64_t, float&, float&)>& gen, Runner& run)
+{
+    run.run (frames, gen);
+    const auto& listener = run.view.getListener();
+    BeatCount c { listener.getKicks(), listener.getSnares(), listener.getSnareHits(), listener.getNumBeatTimes(), run.view.getActivity().getBeats() };
+    juce::String times;
+    for (int i = 0; i < std::min (24, listener.getNumBeatTimes()); ++i)
+        times << juce::String (listener.getBeatTime (i), 2) << " ";
+    std::printf ("  %s: %d snare-like hits, %d counted as snare beats; %d kicks; %d beats in all (the beat network pulsed %d times)%s%s\n", name,
+                 c.snareHits, c.snares, c.kicks, c.beats, c.networkBeats, times.isEmpty() ? "" : "; at ", times.trimEnd().toRawUTF8());
+    return c;
+}
+} // namespace
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - single gunshots at irregular intervals")
+{
+    Runner run;
+    Gunshots shots;
+    shots.times = kIrregularShots;
+    const auto c = countBeats ("9 single gunshots in 8 s at irregular gaps", 480, [&shots] (int64_t n, float& l, float& r) { l = r = shots (n); }, run);
+    CHECK (c.snareHits >= 7); // they read as snares (before the rule each was a beat)
+    CHECK (c.snares == 0);
+    CHECK (c.kicks == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - automatic fire (10 shots a second for 2 s)")
+{
+    Runner run;
+    Gunshots shots;
+    for (int k = 0; k < 20; ++k)
+        shots.times.push_back (0.5 + 0.1 * k);
+    const auto c = countBeats ("automatic fire, 20 shots 0.1 s apart", 180, [&shots] (int64_t n, float& l, float& r) { l = r = shots (n); }, run);
+    CHECK (c.snareHits >= 10);
+    CHECK (c.snares == 0);
+    CHECK (c.kicks == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a backbeat (kick on 1 and 3, snare on 2 and 4) "
+           "counts from the third snare on, on time")
+{
+    // 120 BPM, 6 s: kicks at 0, 1, .. 5 s, the test music's snare at 0.5, 1.5, .. 5.5 s, hats on the eighths.
+    Runner run;
+    Noise noise;
+    Snare snare;
+    HighPass h1 (6500.0), h2 (6500.0);
+    const auto c = countBeats ("backbeat, 6 s (6 kicks, 6 snares)", 360,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   const double t = seconds (n);
+                                   const float x = noise();
+                                   const float hat = 0.15f * h2 (h1 (x)) * decay (std::fmod (t, 0.25), 0.03);
+                                   const float s = snare (t < 0.5 ? -1.0 : std::fmod (t - 0.5, 1.0), x);
+                                   l = r = 0.55f * (kick (std::fmod (t, 1.0), x) + s + hat);
+                               },
+                               run);
+    const auto& listener = run.view.getListener();
+    CHECK (c.kicks >= 5); // measured 5 of 6, before the rule and after (the kick detector misses the one at 2 s)
+    CHECK (c.snareHits == 6);
+    CHECK (c.snares == 4);
+    // The first two snares only start the pattern; from the third on each is a beat within 40 ms of its hit.
+    CHECK (! beatNear (listener, 0.5, 0.1));
+    CHECK (! beatNear (listener, 1.5, 0.1));
+    for (const double t : { 2.5, 3.5, 4.5, 5.5 })
+        CHECK (beatNear (listener, t, 0.04));
+    CHECK (c.networkBeats == c.beats);
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - gunshots over a four-on-the-floor groove")
+{
+    // The steady groove of the synthetic loops (kick every 0.5 s, hats, bass, pad) with the 9 irregular gunshots on top.
+    Runner run;
+    Noise noise;
+    HighPass h1 (6500.0), h2 (6500.0);
+    Gunshots shots;
+    shots.times = kIrregularShots;
+    const auto c = countBeats ("steady groove and 9 irregular gunshots, 8 s (16 kicks)", 480,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   const double t = seconds (n);
+                                   const float x = noise();
+                                   double bass = 0.0;
+                                   for (int h = 1; h <= 5; ++h)
+                                       bass += std::sin (2.0 * kPi * 55.0 * h * t) / h;
+                                   l = r = 0.5f * kick (std::fmod (t, 0.5), x) + 0.15f * h2 (h1 (x)) * decay (std::fmod (t, 0.25), 0.03)
+                                           + 0.12f * static_cast<float> (bass) * decay (std::fmod (t, 0.25), 0.18) + chordSample ({ 57, 60, 64 }, n, 0.03)
+                                           + shots (n);
+                               },
+                               run);
+    const auto& listener = run.view.getListener();
+    // A beat off the kicks' grid would be a shot.
+    int offGrid = 0;
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+    {
+        const double t = listener.getBeatTime (i);
+        offGrid += std::abs (t - 0.5 * std::round (t / 0.5)) < 0.06 ? 0 : 1;
+    }
+    // How many shots fall within 15 % of a beat (75 ms) of the kicks' grid: what a rule "on the beat grid" could take.
+    int nearGrid = 0;
+    for (const double t : kIrregularShots)
+        nearGrid += std::abs (t - 0.5 * std::round (t / 0.5)) < 0.075 ? 1 : 0;
+    std::printf ("  beats off the kicks' grid %d; shots within 75 ms of the grid %d of %zu\n", offGrid, nearGrid, kIrregularShots.size());
+    // A shot just before a kick hides the kick's onset (one candidate for both); on the steady grid it takes the kick's
+    // place as a beat. No shot adds a beat of its own.
+    CHECK (offGrid == 0);
+    CHECK (c.snares <= nearGrid);
+    CHECK (c.beats <= 16);
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - random gunfire (30 s, a shot every 0.7 s on average)")
+{
+    // Gaps drawn from an exponential distribution (mean 0.7 s, at least 0.12 s): a match within 15 % of the gap before
+    // happens by chance (about 7.5 % of the pairs for exponential gaps).
+    Runner run;
+    Gunshots shots;
+    uint32_t state = 2024u;
+    for (double t = 0.3; t < 29.5;)
+    {
+        shots.times.push_back (t);
+        state = state * 1664525u + 1013904223u;
+        const double u = (static_cast<double> (state >> 8) + 0.5) / 16777216.0;
+        t += std::max (0.12, -0.7 * std::log (u));
+    }
+    const auto c = countBeats ("random gunfire, 30 s", 1800, [&shots] (int64_t n, float& l, float& r) { l = r = shots (n); }, run);
+    std::printf ("  %zu shots: %d snare-like hits, %d beats (%.1f %%)\n", shots.times.size(), c.snareHits, c.snares,
+                 100.0 * c.snares / std::max (1, c.snareHits));
+    CHECK (c.snareHits >= static_cast<int> (shots.times.size()) * 3 / 4);
+    CHECK (c.snares * 10 <= c.snareHits); // at most 10 %
+    CHECK (c.kicks == 0);
+}
+
 TEST_CASE ("App: brain: a chord outside the key lights the right inferior frontal gyrus more than an in-key change")
 {
     // C major (I - IV - V - I, twice) to set the key, then an in-key change (C -> Am) or one outside it (C -> Ab).
@@ -656,10 +859,16 @@ TEST_CASE ("App: brain: a build-up then a drop lights the caudate, then the nucl
     const auto& act = run.view.getActivity();
     const auto& listener = run.view.getListener();
     std::printf ("  build-ups %d (anticipation pulses %d, the last at %.2f s), drops %d at %.2f s; caudate %.2f in the breakdown, %.2f before the drop, "
-                 "peak %.2f at %.2f s; accumbens %.2f before the drop, %.2f at %.2f s\n",
+                 "peak %.2f at %.2f s; accumbens %.2f before the drop, %.2f at %.2f s; beats %d (%d kicks, %d snares of %d snare-like hits)\n",
                  listener.getBuildUps(), act.getAnticipations(), act.getLastAnticipationTime(), act.getDrops(), act.getLastDropTime(),
                  static_cast<double> (caudateEarly), static_cast<double> (caudateBefore), static_cast<double> (caudate), caudatePeakAt,
-                 static_cast<double> (accumbensBefore), static_cast<double> (accumbensAfter), accumbensPeakAt);
+                 static_cast<double> (accumbensBefore), static_cast<double> (accumbensAfter), accumbensPeakAt, listener.getNumBeatTimes(),
+                 listener.getKicks(), listener.getSnares(), listener.getSnareHits());
+    juce::String beforeDrop;
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+        if (listener.getBeatTime (i) < 7.0)
+            beforeDrop << juce::String (listener.getBeatTime (i), 2) << " ";
+    std::printf ("  beats before the drop (the snare roll speeds up from 4 to 16 hits a second from 3 s): %s\n", beforeDrop.trimEnd().toRawUTF8());
     CHECK (listener.getBuildUps() == 1);
     CHECK (act.getAnticipations() >= 2);
     CHECK (act.getDrops() == 1);
@@ -694,9 +903,10 @@ TEST_CASE ("App: brain heuristics on the app's own test music: beats on the kick
             ++falseTriggers;
     }
     const int kicksPlayed = 24;
-    std::printf ("  test music 12 s: %d beats (%d kicks + %d snares) for %d kicks played: %d on a kick, %d false; chord changes %d (%d outside the "
-                 "key %s); build-ups %d, drops %d\n",
-                 listener.getNumBeatTimes(), listener.getKicks(), listener.getSnares(), kicksPlayed, hits, falseTriggers, act.getChordChanges(),
+    std::printf ("  test music 12 s: %d beats (%d kicks + %d snares; %d snare-like hits) for %d kicks played: %d on a kick, %d false; chord "
+                 "changes %d (%d outside the key %s); build-ups %d, drops %d\n",
+                 listener.getNumBeatTimes(), listener.getKicks(), listener.getSnares(), listener.getSnareHits(), kicksPlayed, hits, falseTriggers,
+                 act.getChordChanges(),
                  act.getSurprises(), flub::app::ui::vis::music::keyName (listener.getMusic().key.getKey()).toStdString().c_str(), listener.getBuildUps(),
                  listener.getDrops());
     CHECK (hits >= kicksPlayed - 2); // measured on MSVC: 23 of 24
@@ -861,38 +1071,88 @@ TEST_CASE ("App: brain heuristics: a chord re-struck on every beat (a pumping sy
     CHECK (listener.getDrops() == 0);
 }
 
-TEST_CASE ("App: brain heuristics on noise and short noise bursts (documented limits): no chord surprise, build-up or drop")
+// One signal per case (each under 2 s).
+static void checkNoise (int which)
 {
-    struct Case
-    {
-        const char* name;
-        int frames;
-        std::function<void (int64_t, float&, float&)> gen;
-    };
     Noise noise;
-    std::vector<Case> cases;
-    // White noise at -20 dBFS RMS (uniform noise: RMS = peak / sqrt 3).
-    cases.push_back ({ "white noise at -20 dBFS, 12 s", 720, [&noise] (int64_t, float& l, float& r) { l = r = 0.1f * 1.7320508f * noise(); } });
-    // 40 ms noise bursts every 0.7 s (gunshots in a game), 6 s.
-    cases.push_back ({ "40 ms noise bursts every 0.7 s, 6 s", 360,
-                       [&noise] (int64_t n, float& l, float& r)
-                       {
-                           const double tau = std::fmod (seconds (n), 0.7);
-                           l = r = tau < 0.04 ? 0.5f * noise() : 0.0f;
-                       } });
-    for (auto& c : cases)
+    Runner run;
+    std::function<void (int64_t, float&, float&)> gen;
+    const char* name = "";
+    int frames = 360;
+    if (which == 0)
     {
-        Runner run;
-        run.run (c.frames, c.gen);
-        const auto& listener = run.view.getListener();
-        const auto& act = run.view.getActivity();
-        std::printf ("  %s: beats %d (kicks %d, snares %d), chord changes %d (%d outside the key), build-ups %d, drops %d\n", c.name,
-                     listener.getNumBeatTimes(), listener.getKicks(), listener.getSnares(), act.getChordChanges(), act.getSurprises(),
-                     listener.getBuildUps(), listener.getDrops());
-        CHECK (act.getSurprises() == 0);
-        CHECK (listener.getBuildUps() == 0);
-        CHECK (listener.getDrops() == 0);
+        // White noise at -20 dBFS RMS (uniform noise: RMS = peak / sqrt 3).
+        name = "white noise at -20 dBFS, 12 s";
+        frames = 720;
+        gen = [&noise] (int64_t, float& l, float& r) { l = r = 0.1f * 1.7320508f * noise(); };
     }
+    else if (which == 1)
+    {
+        // 40 ms noise bursts at the irregular gunshots' times, 8 s.
+        name = "9 noise bursts of 40 ms at irregular gaps, 8 s";
+        frames = 480;
+        gen = [&noise] (int64_t n, float& l, float& r)
+        {
+            const double t = seconds (n);
+            const float x = noise();
+            bool on = false;
+            for (const double h : kIrregularShots)
+                on = on || (t >= h && t < h + 0.04);
+            l = r = on ? 0.5f * x : 0.0f;
+        };
+    }
+    else
+    {
+        // 40 ms noise bursts every 0.7 s, 6 s: a perfectly regular gun, the limit of a rule on timing alone.
+        name = "40 ms noise bursts every 0.7 s, 6 s";
+        gen = [&noise] (int64_t n, float& l, float& r)
+        {
+            const double tau = std::fmod (seconds (n), 0.7);
+            l = r = tau < 0.04 ? 0.5f * noise() : 0.0f;
+        };
+    }
+    const auto c = countBeats (name, frames, gen, run);
+    const auto& listener = run.view.getListener();
+    const auto& act = run.view.getActivity();
+    std::printf ("  %s: chord changes %d (%d outside the key), build-ups %d, drops %d\n", name, act.getChordChanges(), act.getSurprises(),
+                 listener.getBuildUps(), listener.getDrops());
+    CHECK (act.getSurprises() == 0);
+    CHECK (listener.getBuildUps() == 0);
+    CHECK (listener.getDrops() == 0);
+    CHECK (c.kicks == 0);
+    if (which < 2)
+    {
+        CHECK (c.snares == 0);
+        CHECK (c.networkBeats == 0);
+    }
+    else
+    {
+        // Repeating steadily, the bursts count from the third on (each on its burst): the documented limit.
+        CHECK (c.snareHits == 9);
+        CHECK (c.snares == 7);
+        CHECK (! beatNear (listener, 0.0, 0.1));
+        CHECK (! beatNear (listener, 0.7, 0.1));
+        for (int k = 2; k < 9; ++k)
+            CHECK (beatNear (listener, 0.7 * k, 0.04));
+    }
+}
+
+TEST_CASE ("App: brain heuristics on noise and noise bursts: a snare beat only when the bursts repeat steadily; no chord surprise, build-up or drop "
+           "- white noise")
+{
+    checkNoise (0);
+}
+
+TEST_CASE ("App: brain heuristics on noise and noise bursts: a snare beat only when the bursts repeat steadily; no chord surprise, build-up or drop "
+           "- irregular bursts")
+{
+    checkNoise (1);
+}
+
+TEST_CASE ("App: brain heuristics on noise and noise bursts: a snare beat only when the bursts repeat steadily; no chord surprise, build-up or drop "
+           "- bursts every 0.7 s")
+{
+    checkNoise (2);
 }
 
 TEST_CASE ("App: brain: a NaN or infinite block does not latch the view (the level and the drop come back)")

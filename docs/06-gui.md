@@ -1211,12 +1211,39 @@ an id this build does not know (written by a newer version) or registered for th
       (within 12 dB of the whole) or a noisy (spectral flatness ≥ 0.25) 1 – 4 kHz rise of 6 dB with a 150 – 500 Hz
       rise; it is decided 4 hops (43 ms) later: a kick when the low band's spectral centroid has sunk smoothly (no step
       up of more than 12 Hz) to 0.8 of where it started (a kick drum's falling pitch; a bass note's centroid stays or
-      jitters), a snare when the 1 – 4 kHz band is still noise; 150 ms refractory. A beat of strength a starts waves:
+      jitters), a snare when the 1 – 4 kHz band is still noise; 150 ms refractory. A snare-like hit is a beat only
+      when it repeats like a drum beat (owner decision 2026-10-10: gunshots and noise bursts on the Game strip read as
+      snares and pulsed the beat network): its gap to the previous snare-like hit and the gap before that are both
+      0.2 – 2 s (300 – 30 a minute) and match within ±15 % (so a backbeat counts from its third snare), or it lands one
+      beat (±15 %) after the last of three counted beats whose two gaps match (a snare on a steady kick's grid, as the
+      test music's snare on a kick, or the next hit of a pattern already counted; only counted beats make the grid, so
+      hits between that do not count leave it intact). Every snare-like hit, counted or not, extends the pattern; one
+      that does not count stays
+      sound: its onset lights the auditory pathway (a percussive onset), not the beat network. Kicks are unchanged.
+      The grid is the counted beats' next slot only, where the kick usually is (no half beats, no rule "anywhere on
+      the kick grid"): 4 of the 9 irregular gunshots below land within 75 ms (15 % of a beat) of a 120 BPM kick grid,
+      and the rule counts only the 2 that hid a kick. A beat of strength a starts waves:
       inferior colliculus → cerebellum (both sides) at +0.13 s for 0.05 s (0.55 a), cerebellum → opposite thalamus
       +0.18 / 0.16 s (0.45 a), thalamus → premotor +0.34 / 0.12 s (0.45 a), Heschl's gyrus → premotor (dorsal stream)
       +0.32 / 0.16 s (0.6 a), premotor → SMA +0.48 / 0.1 s (0.6 a), SMA → putamen +0.58 / 0.1 s (0.5 a) — roughly the
       mockup's delays, not to scale (Grahn and Brett 2007 for the network). Measured: a 120 BPM kick pattern gives 6 of
       6 kicks, each within 40 ms, and lights cerebellum 0.49, thalamus 0.38, premotor 0.54, SMA 0.54, putamen 0.44.
+      The snare rule, measured before → after on the same signals (MSVC; "snare-like hits" are the candidates the rule
+      judges): 9 single gunshots at irregular gaps (0.35 – 1.7 s; a noise crack over a body under 1 kHz): 9 → 0 snare
+      beats (9 snare-like hits, 0 kicks); automatic fire, 20 shots 0.1 s apart: 10 → 0 (19 hits; before, the 150 ms
+      refractory let every second one through); 30 s of random fire (exponential gaps, mean 0.7 s, 44 shots): 35 → 2
+      (43 hits: 4.7 % line up by chance); white noise at −20 dBFS for 12 s: 1 → 0; 9 noise bursts of 40 ms at the
+      gunshots' irregular gaps: 9 → 0; a backbeat (120 BPM, kick on 1 and 3, the test music's snare on 2 and 4, hats,
+      6 s): 6 → 4 snare beats, the first two left out, the others within 40 ms of their hits (2.50, 3.50, 4.50,
+      5.50 s); kicks 5 of 6 before and after (the kick detector misses the one at 2 s); the steady groove (kick every
+      0.5 s, 16 kicks in 8 s) with the 9 gunshots on top: beats off the kicks' grid 3 → 0, snare beats 6 → 2, kicks
+      12 → 13 (a counted shot no longer holds off the kick after it), beats 18 → 15; the 2 shots still counted (2.95,
+      5.99 s) each hid the kick at 3.0 / 6.0 s (one candidate for both) and took its place on the grid; the app's own
+      test music: 22 kicks + 1 snare (on a kick, 1 snare-like hit) before and after, 23 of 24 kicks found; the
+      build-up and drop scene: 18 → 4 snare beats of 24 snare-like hits (the roll's 3rd to 6th hits, 3.49 – 4.14 s,
+      while its gaps shrink from 0.24 to 0.21 s; after that it is faster than 5 a second), 1 build-up and 1 drop as
+      before. Its limit: a gun fired at a perfectly regular pace between 30 and 300 shots a minute is a drum beat to
+      the rule: 40 ms noise bursts every 0.7 s give 9 → 7 snare beats (from the third burst on).
     - *Chord change* (the chord view's PitchEstimator, KeyDetector and ChordTracker): a change from one chord to another
       sends the ventral stream to the inferior frontal gyrus (stamped in display time, as the beats and the hops),
       arriving 0.22 s after the change is named (measured 0.233 s, within a 60 Hz frame; the ERAN peaks about 0.2 s
@@ -1249,12 +1276,18 @@ an id this build does not know (written by a newer version) or registered for th
       0 drops; chords without bass with a 2 s gap: 0 build-ups; 6 s of silence, then a held chord: 0 build-ups (before
       the pause rule each of these gave one or two false events). A C major triad re-struck every 0.5 s for 17 s (a
       pumping synth without hats): 0 build-ups (before the highs' floors: 1, from attack splatter near −90 dBFS). Noise:
-      white noise at −20 dBFS for 12 s: 1 snare, 4 chord changes (0 outside the key), 0 build-ups, 0 drops; 40 ms noise
-      bursts every 0.7 s (gunshots in a game) for 6 s: 9 of 9 read as snares, 5 chord changes (0 outside the key), 0
-      build-ups, 0 drops. Limits: the beat rule wants a kick with a falling pitch (most electronic kicks; an acoustic
-      kick without one is missed) and can take a plucked bass note whose spectrum happens to sink; noise and game
-      effects (gunshots, impacts) can read as snares and light the beat network, and noise can name chords (weak
-      expected-change waves); a song that starts loud after silence, a pause or a gap between tracks is not a drop, and
+      white noise at −20 dBFS for 12 s: 0 beats (before the snare rule 1 snare), 4 chord changes (0 outside the key),
+      0 build-ups, 0 drops; 9 noise bursts of 40 ms at irregular gaps for 8 s: 0 beats (before 9 snares), 7 chord
+      changes (0 outside the key), 0 build-ups, 0 drops; 40 ms noise bursts every 0.7 s for 6 s (a perfectly regular
+      gun): 7 snare beats from the third burst on (before 9 of 9), 5 chord changes (0 outside the key), 0 build-ups,
+      0 drops. Limits: the beat rule wants a kick with a falling pitch (most electronic kicks; an acoustic kick without
+      one is missed) and can take a plucked bass note whose spectrum happens to sink; a snare counts only from its
+      third steady hit (or on the counted beats' grid), so the first two snares of a backbeat and a roll faster than
+      5 hits a second do not pulse the beat network; game effects that repeat at a perfectly regular pace of 30 – 300
+      a minute do, random fire now and then lines up by chance (4.7 % of the snare-like hits in 30 s of random fire),
+      and a shot that hides a kick on a steady kick grid takes its place; the kick rule is unchanged (the gunshots here
+      read as 0 kicks; a sound with a falling low pitch was not tried); noise can name chords (weak expected-change
+      waves); a song that starts loud after silence, a pause or a gap between tracks is not a drop, and
       a breakdown that only thins the mix without lowering the level is not a quieter passage; the chord rule inherits
       the chord tracker's passing names and the key detector's 15 s window (a new song reads in its old key at first);
       none of these was tried on the owner's music.
@@ -1287,10 +1320,11 @@ an id this build does not know (written by a newer version) or registered for th
     load, read 2.79 / 5.07 ms (render at 1280 × 720 / 1920 × 1080) after them and 2.76 / 5.18 ms before; with the PC
     68 – 86 % busy it read 3.2 – 3.3 / 5.9 – 6.3 ms (3 runs). Full screen stays above the ~4 ms aim; the owner keeps it
     sharp (decided 2026-10-10: no smaller internal render scaled up).
-  - Tests: `tests/app/test_app_brain_view.cpp` (24 cases, one per synthetic loop and per frame size: the tract graph and the table, the tonotopic maps, a tone in
-    one ear, the superior olive's wiring, levels and silence, the kick pattern, chord surprise and its timing, build-up
-    and drop, the test music, the synthetic loops, pauses, chords after silence or a gap, a re-struck chord, noise and
-    noise bursts, NaN / inf input, hover / menu / reset, the picture's handedness at 21 angles and tilts, no render
+  - Tests: `tests/app/test_app_brain_view.cpp` (31 cases, one per synthetic loop, per noise signal, per snare-rule signal and per frame size: the tract graph and the table, the tonotopic maps, a tone in
+    one ear, the superior olive's wiring, levels and silence, the kick pattern, the snare rule (single gunshots,
+    automatic fire, a backbeat, gunshots over a groove, 30 s of random fire), chord surprise and its timing, build-up
+    and drop, the test music, the synthetic loops, pauses, chords after silence or a gap, a re-struck chord, white
+    noise, irregular and regular noise bursts, NaN / inf input, hover / menu / reset, the picture's handedness at 21 angles and tilts, no render
     while still and dark, no allocation and the frame time at 1280 × 720 and 1920 × 1080 with no white pixel, and PNGs
     of the view when `FLUB_BRAIN_SHOTS` names a folder); the framework tests in
     `tests/app/test_app_visualisers.cpp` and the window tests cover it through the registry. Screenshot states

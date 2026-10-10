@@ -23,7 +23,17 @@
 //     where it started (a kick drum's falling pitch; a bass note's centroid
 //     stays or jitters), a snare when the 1 - 4 kHz band is still noise (an
 //     onset from silence is flat only for a moment). 150 ms refractory.
-//     Hi-hats (nothing under 1 kHz), pads and bass notes do not count.
+//     Hi-hats (nothing under 1 kHz), pads and bass notes do not count. A
+//     snare-like hit is a beat only when it repeats like a drum beat (owner
+//     decision 2026-10-10: gunshots and bursts in a game read as snares): its
+//     gap to the previous snare-like hit and the gap before that are both
+//     0.2 - 2 s and match within 15 % (so a backbeat counts from its third
+//     snare), or it lands one beat (within 15 %) after the last of three counted
+//     beats whose two gaps match (a snare on a steady kick's grid, or the next
+//     hit of a pattern already counted). Single shots, automatic fire (gaps
+//     under 0.2 s), irregular bursts and noise stay sound: their onsets light
+//     the auditory pathway, not the beat network. A perfectly regular train of
+//     bursts at 30 - 300 per minute still counts from its third.
 //   * Chord change (heuristic): the shared music listener (PitchEstimator +
 //     KeyDetector, as the chord view) and a ChordTracker; a change from one
 //     chord to another is "unexpected" when the new chord has a pitch class
@@ -73,6 +83,9 @@ public:
     static constexpr float kKickRiseDb = 8.0f, kSnareRiseDb = 6.0f, kBodyRiseDb = 3.0f, kSnareFlatness = 0.25f, kSweep = 0.8f, kSweepStepHz = 12.0f;
     static constexpr int kLookahead = 4; // hops before a beat candidate is decided (43 ms at 48 kHz)
     static constexpr double kBeatRefractory = 0.15, kSlotSeconds = 0.25;
+    /** A snare-like hit is a beat only when it repeats like a drum beat: gaps of kSnareMinGap .. kSnareMaxGap s
+        (300 .. 30 per minute) that match the one before within kSnareGapTolerance of it. */
+    static constexpr double kSnareMinGap = 0.2, kSnareMaxGap = 2.0, kSnareGapTolerance = 0.15;
     static constexpr int kSlots = 64;
     /** A 0.25 s slot under this (summed power, dBFS) is a pause, left out of the build-up's and the drop's means. */
     static constexpr float kSilentDb = -60.0f;
@@ -101,7 +114,10 @@ public:
     /** Band level (dB) of an ear at the latest hop. */
     float getBandDb (int ear, int band) const noexcept { return bandDb[static_cast<size_t> (ear)][static_cast<size_t> (band)]; }
     int getKicks() const noexcept { return kicks; }
+    /** Snare beats: the snare-like hits that repeated like a drum beat (the beat network's). */
     int getSnares() const noexcept { return snares; }
+    /** Every snare-like hit, counted as a beat or not. */
+    int getSnareHits() const noexcept { return snareHits; }
     /** Display times of the last kBeatLog beats (oldest first: getBeatTime (0)). */
     static constexpr int kBeatLog = 64;
     int getNumBeatTimes() const noexcept { return beatLogCount; }
@@ -134,6 +150,9 @@ private:
     float bandPower (const BandMap& m, const std::vector<float>& shortP, const std::vector<float>& longP) const noexcept;
     float rangeSum (const std::vector<float>& p, double fromHz, double toHz, int size) const noexcept;
     void detectBeat (double time, float centroid, float flatness, float allDb, BrainActivity& activity) noexcept;
+    /** Whether a snare-like hit at t continues a steady pattern: its own (the two gaps to the previous snare-like hits
+        match) or the counted beats' (it lands one beat after the last of three steady beats). */
+    bool snareRepeats (double t) const noexcept;
     void updateMacro (double time, double streamSeconds, float totalP, float lowP, float highP, bool hfHit, BrainActivity& activity) noexcept;
     void updateChords (double clock, double dt, BrainActivity& activity) noexcept;
 
@@ -168,7 +187,8 @@ private:
     };
     Candidate candidate;
     double lastBeatTime = -1.0e9;
-    int kicks = 0, snares = 0;
+    double snareLast = -1.0e9, snareBefore = -1.0e9; // the last two snare-like hits, counted or not
+    int kicks = 0, snares = 0, snareHits = 0;
     std::array<double, kBeatLog> beatLog {};
     int beatLogCount = 0, beatLogNext = 0;
 
