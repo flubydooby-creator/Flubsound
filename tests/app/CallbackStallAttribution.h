@@ -76,18 +76,29 @@ struct RunnerSamples
     std::vector<int64_t> stealTotal;  // ticks, all CPUs
     std::vector<int64_t> stealPerCpu; // ticks, numCpus per sample
     std::vector<int64_t> waitNs;      // the data thread's run-queue wait (cumulative ns; -1: not read)
+    // Information only (counts, not time): the interrupts and softirqs each
+    // CPU handled (/proc/interrupts, /proc/softirqs), numCpus per sample.
+    // Without CONFIG_IRQ_TIME_ACCOUNTING their time is in the CPU time of
+    // the thread they interrupted.
+    std::vector<int64_t> irqsPerCpu, softirqsPerCpu;
 
     size_t size() const { return wallNs.size(); }
-    int64_t steal (size_t sample, int cpu) const
+    size_t at (size_t sample, int cpu) const { return sample * static_cast<size_t> (numCpus) + static_cast<size_t> (cpu); }
+    int64_t steal (size_t sample, int cpu) const { return stealPerCpu[at (sample, cpu)]; }
+    int64_t irqs (size_t sample, int cpu) const { return irqsPerCpu[at (sample, cpu)]; }
+    int64_t softirqs (size_t sample, int cpu) const { return softirqsPerCpu[at (sample, cpu)]; }
+    void add (int64_t wall, int64_t total, const std::vector<int64_t>& perCpu, int64_t wait, const std::vector<int64_t>& irqCounts = {},
+              const std::vector<int64_t>& softirqCounts = {})
     {
-        return stealPerCpu[sample * static_cast<size_t> (numCpus) + static_cast<size_t> (cpu)];
-    }
-    void add (int64_t wall, int64_t total, const std::vector<int64_t>& perCpu, int64_t wait)
-    {
+        const auto value = [] (const std::vector<int64_t>& v, int c) { return c < static_cast<int> (v.size()) ? v[static_cast<size_t> (c)] : 0; };
         wallNs.push_back (wall);
         stealTotal.push_back (total);
         for (int c = 0; c < numCpus; ++c)
-            stealPerCpu.push_back (c < static_cast<int> (perCpu.size()) ? perCpu[static_cast<size_t> (c)] : 0);
+        {
+            stealPerCpu.push_back (value (perCpu, c));
+            irqsPerCpu.push_back (value (irqCounts, c));
+            softirqsPerCpu.push_back (value (softirqCounts, c));
+        }
         waitNs.push_back (wait);
     }
 };
@@ -102,6 +113,7 @@ struct Runner
     int64_t stealTicks = 0;   // steal on those CPUs (all CPUs when neither is known), up to the accounting lag after the cycle
     int64_t stealTotal = 0;   // steal on all CPUs in the same span
     int64_t waitNs = -1;      // the thread's run-queue wait in the cycle (-1: not read)
+    int64_t irqs = 0, softirqs = 0; // interrupts and softirqs on the thread's CPU(s) in the cycle (information)
     int64_t explainedNs = 0;  // CPU time the runner explains: (ticks + 1) x tick when steal was seen and counts as CPU time
 };
 
@@ -137,20 +149,37 @@ inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callback
         r.cpuBefore = callbacks[k - 1].cpu;
         r.cpuAfter = callbacks[k].cpu;
         const auto known = [&] (int cpu) { return cpu >= 0 && cpu < samples.numCpus; };
-        if (known (r.cpuBefore) || known (r.cpuAfter))
+        // A counter over the thread's CPUs between two samples: each distinct
+        // CPU once (the thread usually wakes where it slept), all CPUs when
+        // neither is known.
+        const auto onThreadCpus = [&] (auto counter, size_t sampleFrom, size_t sampleTo)
         {
-            // Each distinct CPU once: the thread usually wakes where it slept.
+            int64_t sum = 0;
             if (known (r.cpuBefore))
-                r.stealTicks += samples.steal (s1, r.cpuBefore) - samples.steal (s0, r.cpuBefore);
+                sum += counter (sampleTo, r.cpuBefore) - counter (sampleFrom, r.cpuBefore);
             if (known (r.cpuAfter) && r.cpuAfter != r.cpuBefore)
-                r.stealTicks += samples.steal (s1, r.cpuAfter) - samples.steal (s0, r.cpuAfter);
-        }
+                sum += counter (sampleTo, r.cpuAfter) - counter (sampleFrom, r.cpuAfter);
+            if (! known (r.cpuBefore) && ! known (r.cpuAfter))
+                for (int c = 0; c < samples.numCpus; ++c)
+                    sum += counter (sampleTo, c) - counter (sampleFrom, c);
+            return sum;
+        };
+        if (known (r.cpuBefore) || known (r.cpuAfter))
+            r.stealTicks = onThreadCpus ([&] (size_t i, int c) { return samples.steal (i, c); }, s0, s1);
         else
             r.stealTicks = samples.stealTotal[s1] - samples.stealTotal[s0];
         r.stealTotal = samples.stealTotal[s1] - samples.stealTotal[s0];
-        const auto w1 = sampleAtOrAfter (samples, end);
-        if (w1 < samples.size() && samples.waitNs[s0] >= 0 && samples.waitNs[w1] >= 0)
-            r.waitNs = samples.waitNs[w1] - samples.waitNs[s0];
+        const auto w1 = sampleAtOrAfter (samples, end); // counted when they happen: no lag
+        if (w1 < samples.size())
+        {
+            if (samples.waitNs[s0] >= 0 && samples.waitNs[w1] >= 0)
+                r.waitNs = samples.waitNs[w1] - samples.waitNs[s0];
+            if (! samples.irqsPerCpu.empty())
+            {
+                r.irqs = onThreadCpus ([&] (size_t i, int c) { return samples.irqs (i, c); }, s0, w1);
+                r.softirqs = onThreadCpus ([&] (size_t i, int c) { return samples.softirqs (i, c); }, s0, w1);
+            }
+        }
         if (r.stealTicks > 0 && samples.stealInCpuTime != StealInCpuTime::No)
             r.explainedNs = (r.stealTicks + 1) * samples.tickNs;
     }
@@ -249,6 +278,7 @@ inline std::string describeRunner (const Window& w, size_t k)
     s << " (" << r->stealTotal << " on all CPUs)";
     if (r->waitNs >= 0)
         s << ", run-queue wait " << toMs (r->waitNs) << " ms";
+    s << ", " << r->irqs << " interrupts and " << r->softirqs << " softirqs on its CPU";
     if (r->explainedNs > 0)
         s << ", the runner's up to " << toMs (r->explainedNs) << " ms of its CPU time";
     return s.str();

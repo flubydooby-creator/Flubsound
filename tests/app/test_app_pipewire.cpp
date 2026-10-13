@@ -765,14 +765,18 @@ int64_t threadCpuNs()
 /** The runner's counters about every millisecond, on a thread of its own at
     the lowest priority (SCHED_IDLE: it never preempts the data thread, and
     reading /proc is I/O the data thread must not do): the steal time per
-    CPU and in all (/proc/stat, in USER_HZ ticks) and the data thread's
-    run-queue wait (/proc/self/task/<tid>/schedstat, ns). Preallocated. */
+    CPU and in all (/proc/stat, in USER_HZ ticks), the data thread's
+    run-queue wait (/proc/self/task/<tid>/schedstat, ns) and, for
+    information, the interrupts and softirqs per CPU (/proc/interrupts,
+    /proc/softirqs). Preallocated. */
 class RunnerSampler
 {
 public:
     RunnerSampler()
         : numCpus (std::clamp (static_cast<int> (::sysconf (_SC_NPROCESSORS_CONF)), 1, 1024)), wall (kCapacity, 0), total (kCapacity, 0),
-          perCpu (kCapacity * static_cast<size_t> (numCpus), 0), wait (kCapacity, -1), buffer (size_t { 1 } << 18, '\0')
+          perCpu (kCapacity * static_cast<size_t> (numCpus), 0), irqs (kCapacity * static_cast<size_t> (numCpus), 0),
+          softirqs (kCapacity * static_cast<size_t> (numCpus), 0), wait (kCapacity, -1), buffer (size_t { 1 } << 18, '\0'),
+          columnCpu (static_cast<size_t> (numCpus) + 64, -1)
     {
     }
     ~RunnerSampler() { stop(); }
@@ -801,11 +805,14 @@ public:
         s.tickNs = tickNs;
         s.stealInCpuTime = counted;
         const auto m = count();
-        std::vector<int64_t> cpus (static_cast<size_t> (numCpus));
+        std::vector<int64_t> steal (static_cast<size_t> (numCpus)), irqCounts (steal.size()), softirqCounts (steal.size());
         for (size_t i = 0; i < m; ++i)
         {
-            std::copy_n (perCpu.begin() + static_cast<std::ptrdiff_t> (i * static_cast<size_t> (numCpus)), numCpus, cpus.begin());
-            s.add (wall[i], total[i], cpus, wait[i]);
+            const auto offset = static_cast<std::ptrdiff_t> (i * static_cast<size_t> (numCpus));
+            std::copy_n (perCpu.begin() + offset, numCpus, steal.begin());
+            std::copy_n (irqs.begin() + offset, numCpus, irqCounts.begin());
+            std::copy_n (softirqs.begin() + offset, numCpus, softirqCounts.begin());
+            s.add (wall[i], total[i], steal, wait[i], irqCounts, softirqCounts);
         }
         return s;
     }
@@ -826,19 +833,22 @@ private:
                 break;
             // Stamped first: the counters read after it hold everything up to it.
             wall[i] = std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (readStat (total[i], perCpu.data() + i * static_cast<size_t> (numCpus)))
+            const auto offset = i * static_cast<size_t> (numCpus);
+            if (readStat (total[i], perCpu.data() + offset))
             {
                 wait[i] = readWait();
+                readPerCpuTable ("/proc/interrupts", irqs.data() + offset);
+                readPerCpuTable ("/proc/softirqs", softirqs.data() + offset);
                 n.store (i + 1, std::memory_order_release);
             }
             std::this_thread::sleep_for (std::chrono::milliseconds (1));
         }
     }
 
-    /** /proc/stat's "cpu" lines: the 8th value is steal. */
-    bool readStat (int64_t& all, int64_t* cpus)
+    /** The whole file into 'buffer', zero-terminated. */
+    bool readAll (const char* path)
     {
-        const int fd = ::open ("/proc/stat", O_RDONLY | O_CLOEXEC);
+        const int fd = ::open (path, O_RDONLY | O_CLOEXEC);
         if (fd < 0)
             return false;
         size_t used = 0;
@@ -851,6 +861,68 @@ private:
         }
         ::close (fd);
         buffer[used] = '\0';
+        return used > 0;
+    }
+
+    /** Per-CPU sums of a table with a "CPU0 CPU1 ..." header and one row per
+        interrupt or softirq ("label: count count ..."; ERR and MIS hold
+        one total, not per-CPU counts). */
+    void readPerCpuTable (const char* path, int64_t* sums)
+    {
+        std::fill (sums, sums + numCpus, int64_t { 0 });
+        if (! readAll (path))
+            return;
+        const char* p = buffer.data();
+        const char* lineEnd = std::strchr (p, '\n');
+        if (lineEnd == nullptr)
+            return;
+        size_t columns = 0;
+        while (p < lineEnd && columns < columnCpu.size())
+        {
+            while (p < lineEnd && *p == ' ')
+                ++p;
+            if (std::strncmp (p, "CPU", 3) != 0)
+                break;
+            char* end = nullptr;
+            columnCpu[columns++] = static_cast<int> (std::strtol (p + 3, &end, 10));
+            p = end;
+        }
+        p = lineEnd + 1;
+        while (*p != '\0')
+        {
+            lineEnd = std::strchr (p, '\n');
+            if (lineEnd == nullptr)
+                lineEnd = p + std::strlen (p);
+            const char* colon = std::strchr (p, ':');
+            if (colon != nullptr && colon < lineEnd)
+            {
+                const char* label = p;
+                while (*label == ' ')
+                    ++label;
+                const bool oneTotal = std::strncmp (label, "ERR:", 4) == 0 || std::strncmp (label, "MIS:", 4) == 0;
+                const char* q = colon + 1;
+                for (size_t column = 0; ! oneTotal && column < columns; ++column)
+                {
+                    char* end = nullptr;
+                    const auto value = std::strtoll (q, &end, 10);
+                    if (end == q || end > lineEnd)
+                        break;
+                    if (columnCpu[column] >= 0 && columnCpu[column] < numCpus)
+                        sums[columnCpu[column]] += value;
+                    q = end;
+                }
+            }
+            if (*lineEnd == '\0')
+                break;
+            p = lineEnd + 1;
+        }
+    }
+
+    /** /proc/stat's "cpu" lines: the 8th value is steal. */
+    bool readStat (int64_t& all, int64_t* cpus)
+    {
+        if (! readAll ("/proc/stat"))
+            return false;
         std::fill (cpus, cpus + numCpus, int64_t { 0 });
         bool sawTotal = false;
         const char* p = buffer.data();
@@ -903,8 +975,9 @@ private:
         return std::sscanf (text, "%lld %lld", &onCpu, &waited) == 2 ? waited : -1;
     }
 
-    std::vector<int64_t> wall, total, perCpu, wait;
+    std::vector<int64_t> wall, total, perCpu, irqs, softirqs, wait;
     std::vector<char> buffer;
+    std::vector<int> columnCpu; // the CPU of each column of a per-CPU table
     char schedstatPath[64] {};
     std::atomic<bool> running { false };
     std::atomic<size_t> n { 0 };
@@ -997,7 +1070,11 @@ KernelFacts readKernelFacts (long dataThreadTid)
 
 /** Engine slowness for the attribution to catch, in a device callback that
     runs after the engine's and before the recorder's (the same cycle): 4 ms
-    of the data thread's CPU time in one cycle, a 4 ms sleep in another. */
+    of the data thread's CPU time in one cycle, a 4 ms sleep in another.
+    Added after the recorder (JUCE runs the callbacks after the first in
+    reverse order); before it, run 38357673366 had the work in the cycle
+    after the one the recorder closed, so neither cycle finished late and
+    the sleep, crossing the next trigger, replaced that cycle's wait. */
 class WorkInjector final : public juce::AudioIODeviceCallback
 {
 public:
@@ -1089,9 +1166,12 @@ IdleRun runIdleWindow (bool inject)
                 manager.removeAudioCallback (callback);
         }
     } detach { host.getDeviceManager(), { &injector, &wall } };
-    if (inject)
-        host.getDeviceManager().addAudioCallback (&injector); // after the engine's callback, before the recorder
+    // JUCE runs the first callback (the engine's), then the others from the
+    // last added back: the injector, added last, runs before the recorder,
+    // so its work and waits fall in the cycle the recorder closes.
     host.getDeviceManager().addAudioCallback (&wall);
+    if (inject)
+        host.getDeviceManager().addAudioCallback (&injector);
     REQUIRE (waitUntil ([&] { return wall.tid.load (std::memory_order_acquire) != 0; }));
     const auto tid = wall.tid.load (std::memory_order_acquire);
     const auto facts = readKernelFacts (tid);
@@ -1209,10 +1289,15 @@ IdleRun runIdleWindow (bool inject)
         lines << "not bracketed by the samples";
     int64_t maxWaitNs = -1;
     std::vector<int> threadCpus;
+    std::vector<int64_t> irqCounts, softirqCounts; // per cycle, on the thread's CPU
     for (size_t k = first; k < last; ++k)
     {
         if (const auto* r = stalls::runnerOf (w, k))
+        {
             maxWaitNs = std::max (maxWaitNs, r->waitNs);
+            irqCounts.push_back (r->irqs);
+            softirqCounts.push_back (r->softirqs);
+        }
         if (w.callbacks[k].cpu >= 0 && std::find (threadCpus.begin(), threadCpus.end(), w.callbacks[k].cpu) == threadCpus.end())
             threadCpus.push_back (w.callbacks[k].cpu);
     }
@@ -1220,6 +1305,11 @@ IdleRun runIdleWindow (bool inject)
     lines << " (at most " << ms (maxWaitNs) << " ms in a cycle) on CPUs";
     for (const auto c : threadCpus)
         lines << " " << c;
+    std::sort (irqCounts.begin(), irqCounts.end());
+    std::sort (softirqCounts.begin(), softirqCounts.end());
+    if (! irqCounts.empty())
+        lines << "; interrupts / softirqs per cycle on its CPU: median " << irqCounts[irqCounts.size() / 2] << " / " << softirqCounts[softirqCounts.size() / 2]
+              << ", max " << irqCounts.back() << " / " << softirqCounts.back();
     lines << "; reported steal in the thread's CPU time: " << stalls::describe (facts.stealInCpuTime) << " (" << facts.accounting << "); "
           << samples.size() << " samples";
     if (samples.size() > 1)

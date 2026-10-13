@@ -93,8 +93,9 @@ std::vector<Spec> failingRun()
 }
 
 /** Samples every millisecond over the window, no steal, the thread waiting
-    0.01 ms on the run queue per sample; 'steal' adds ticks on 'cpu' from
-    time 't' on. */
+    0.01 ms on the run queue per sample, 2 interrupts and 1 softirq per
+    sample on CPU 1 (the thread's) and 50 interrupts on CPU 3; 'steal' adds
+    ticks on 'cpu' from time 't' on. */
 struct StealAt
 {
     int cpu;
@@ -106,7 +107,7 @@ stalls::RunnerSamples samplesFor (const stalls::Window& w, const std::vector<Ste
     stalls::RunnerSamples s;
     s.numCpus = 4;
     s.stealInCpuTime = counted;
-    std::vector<int64_t> perCpu (4, 0);
+    std::vector<int64_t> perCpu (4, 0), irqs (4, 0), softirqs (4, 0);
     const auto begin = w.callbacks.front().wallNs - 1000000, end = w.callbacks.back().wallNs + 20000000;
     int64_t wait = 0;
     for (int64_t t = begin; t <= end; t += 1000000)
@@ -121,7 +122,10 @@ stalls::RunnerSamples samplesFor (const stalls::Window& w, const std::vector<Ste
             total += perCpu[static_cast<size_t> (c)];
         }
         wait += 10000;
-        s.add (t, total, perCpu, wait);
+        irqs[1] += 2;
+        irqs[3] += 50;
+        softirqs[1] += 1;
+        s.add (t, total, perCpu, wait, irqs, softirqs);
     }
     return s;
 }
@@ -154,6 +158,12 @@ TEST_CASE ("App: PipeWire xrun attribution - an idle window passes; run 38030655
     CHECK (idle.runner[at (idle, 100)].measured);
     CHECK (idle.runner[at (idle, 100)].stealTicks == 0);
     CHECK (idle.runner[at (idle, 100)].waitNs >= 10000); // about 3 samples' worth of run-queue wait
+    // Interrupts and softirqs are counted on the thread's CPU only (3 to 4
+    // samples a cycle: CPU 3's 50 per sample are not in them).
+    CHECK (idle.runner[at (idle, 100)].irqs >= 4);
+    CHECK (idle.runner[at (idle, 100)].irqs <= 10);
+    CHECK (idle.runner[at (idle, 100)].softirqs >= 2);
+    CHECK (idle.runner[at (idle, 100)].softirqs <= 5);
 
     // The failing loop's numbers: nothing measured from the runner (as in
     // that run), and the runner sampled without steal (what the new case
@@ -243,6 +253,7 @@ TEST_CASE ("App: PipeWire xrun attribution - steal on another CPU, steal the ker
     }());
     withRunner (unknown, samplesFor (unknown, { { 3, during, 1 } }, stalls::StealInCpuTime::Yes));
     CHECK (unknown.runner[at (unknown, 48)].stealTicks == 1);
+    CHECK (unknown.runner[at (unknown, 48)].irqs >= 4 * 52); // and every CPU's interrupts
     check ("steal on CPU 3, the thread's CPU not known", unknown, true);
 
     // A kernel that takes steal out of the thread's CPU time
