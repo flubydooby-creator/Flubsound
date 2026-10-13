@@ -8,6 +8,9 @@ on:
       pipewire_xrun_loops:
         description: "pipewire job: extra loops of the idle xrun case alone, to catch a rare xrun with the runner's steal around it (0: none)"
         default: "0"
+      pipewire_sampler_ab:
+        description: "pipewire job: pairs of idle xrun case loops with the vCPU run time sampler paused, then running, to measure what it costs the data thread (0: none)"
+        default: "0"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -540,6 +543,8 @@ jobs:
             cat "$XDG_RUNTIME_DIR/vp-runtime.log"
             if [ -s "$log" ]; then
               echo "FLUB_VP_RUNTIME_LOG=$log" >> "$GITHUB_ENV"
+              # The helper itself (not sudo): the sampler's cost step pauses it.
+              echo "FLUB_VP_RUNTIME_PID=$(pgrep -f '^python3 tools/scripts/hv-vp-runtime[.]py' | head -n 1)" >> "$GITHUB_ENV"
             else
               echo "::warning::no vCPU run time samples: the xrun case cannot bound the hypervisor's share"
             fi
@@ -588,6 +593,63 @@ jobs:
             if [ "$ok" = 0 ]; then failed=$((failed + 1)); echo "::error::loop $run failed"; fi
           done
           echo "$loops loops: $events with an idle event, $failed failed"
+          [ "$failed" = 0 ]
+      # A dispatch with pipewire_sampler_ab > 0 measures what the vCPU run
+      # time sampler costs the node's data thread (its reads of the other
+      # vCPUs' MSRs are interrupts there, whose time the kernel charges to the
+      # thread they interrupt): that many pairs of idle xrun case loops, the
+      # sampler paused (SIGSTOP) in the first of each pair and running in the
+      # second. It prints, per half, the medians over the loops of the data
+      # thread's CPU time per cycle and of the interrupts on its CPU per cycle,
+      # and the per-pair difference. A failed loop's lines are printed; the
+      # step fails at the end when one failed.
+      - name: The vCPU run time sampler's cost (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.pipewire_sampler_ab != '0' && env.FLUB_VP_RUNTIME_PID != '' }}
+        env:
+          PAIRS: ${{ inputs.pipewire_sampler_ab }}
+        run: |
+          app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
+          table="$RUNNER_TEMP/sampler-ab.txt"; : > "$table"
+          failed=0
+          for pair in $(seq $((PAIRS + 0))); do
+            for state in paused running; do
+              if [ "$state" = paused ]; then sudo kill -STOP "$FLUB_VP_RUNTIME_PID"; else sudo kill -CONT "$FLUB_VP_RUNTIME_PID"; fi
+              ok=1
+              out=$("$app" "reports its xruns" 2>&1) || ok=0
+              if echo "$out" | grep -qF "(skipped"; then echo "$out"; echo "::error::pair $pair was skipped"; sudo kill -CONT "$FLUB_VP_RUNTIME_PID"; exit 1; fi
+              if [ "$ok" = 0 ]; then
+                failed=$((failed + 1)); echo "::error::pair $pair, sampler $state: the case failed"
+                echo "$out" | grep -E "own work:|runner:|stall attribution:|not the runner's:|FAILED" | sed "s/^ */  pair $pair $state: /"
+              fi
+              cpu=$(echo "$out" | sed -nE "s/.*CPU time per cycle median ([0-9.e+-]+) ms, max ([0-9.e+-]+) ms.*/\1 \2/p" | head -n 1)
+              irq=$(echo "$out" | sed -nE "s/.*interrupts \/ softirqs per cycle on its CPU: median ([0-9]+) \/ ([0-9]+).*/\1 \2/p" | head -n 1)
+              echo "$pair $state $cpu $irq" >> "$table"
+            done
+          done
+          sudo kill -CONT "$FLUB_VP_RUNTIME_PID"
+          python3 - "$table" <<'EOF'
+          import statistics, sys
+          rows = [line.split() for line in open(sys.argv[1]) if len(line.split()) == 6]
+          by = {s: [r for r in rows if r[1] == s] for s in ("paused", "running")}
+          for s, rs in by.items():
+              if not rs:
+                  print(f"sampler {s}: no loops measured"); continue
+              cpu = [float(r[2]) for r in rs]; mx = [float(r[3]) for r in rs]
+              irq = [int(r[4]) for r in rs]; soft = [int(r[5]) for r in rs]
+              print(f"sampler {s}: {len(rs)} loops; the data thread's CPU time per cycle: median {statistics.median(cpu):.3f} ms "
+                    f"(loops {min(cpu):.3f} - {max(cpu):.3f}), max per loop median {statistics.median(mx):.3f} ms (up to {max(mx):.3f}); "
+                    f"interrupts / softirqs per cycle on its CPU: median {statistics.median(irq):g} / {statistics.median(soft):g}")
+          pairs = {}
+          for r in rows:
+              pairs.setdefault(r[0], {})[r[1]] = r
+          d = [float(p["running"][2]) - float(p["paused"][2]) for p in pairs.values() if len(p) == 2]
+          di = [int(p["running"][4]) - int(p["paused"][4]) for p in pairs.values() if len(p) == 2]
+          if d:
+              q = statistics.quantiles(d, n=4) if len(d) > 1 else [d[0], d[0], d[0]]
+              print(f"running - paused, per pair ({len(d)}): CPU time per cycle median {statistics.median(d):+.3f} ms "
+                    f"(quartiles {q[0]:+.3f} / {q[2]:+.3f}, range {min(d):+.3f} / {max(d):+.3f}), "
+                    f"interrupts per cycle median {statistics.median(di):+g}")
+          EOF
           [ "$failed" = 0 ]
       - name: Runner steal after the tests
         if: always()
