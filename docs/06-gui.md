@@ -1306,18 +1306,43 @@ an id this build does not know (written by a newer version) or registered for th
       (the drop itself is found at 7.02 s as before). Game: footsteps with a falling thud (120 → 70 Hz, 45 ms, a
       1.5 – 6 kHz scuff) at an irregular pace (each gap 0.3 – 0.9 s, 12 s): 20 → 1 of 20 steps; three explosion booms
       with debris (a crack, a boom falling 110 → 40 Hz, a rumble under 150 Hz, 1.6 s of debris grains), each read as
-      a kick: 3 → 0; the falling thud at random gaps (exponential, mean 0.7 s, 30 s): 36 → 0 of 43 kick-like hits;
+      a kick: 3 → 0 (their gaps of 3.1 and 2.5 s are over the 2.3 s bound); seven explosions at gaps inside the range
+      (1.2, 1.36, 0.9, 1.03, 1.5 and 1.3 s; three of them 13 – 14 % off the gap before): 7 → 0 of 7 (with the
+      tolerance loosened to 15 %: 2, so the test pins the 8 %); the falling thud at random gaps (exponential, mean
+      0.7 s, 30 s): 36 → 0 of 43 kick-like hits;
       irregular footsteps over the steady groove: 0 beats off the kicks before and after (under the music most steps
       are not read as kicks), beats on its 20 kicks 17 → 15; a gated bass line's one kick-like note: 1 → 0; the
       steady groove with the 9 irregular gunshots: kicks 13 → 11 (14 kick-like hits), beats 14 → 12, none off the
       grid. Limits: steady footsteps still count from their third step (walking every 0.52 s ±3 %: 19 → 17 of 19;
       running every 0.34 s ±3 %: 23 → 21 of 23), and so do explosions at a steady rate (every 2.0 s: 5 → 3 of 5
-      booms); irregular steps line up by chance now and then (gaps of 0.3 – 0.9 s, five seeds: 1, 0, 4, 2 and 4 of
-      19 – 21 steps, 11 of 100; each gap 0.55 s ±20 %: 4 of 22 and 5 of 21); two people walking at 0.52 and 0.61 s:
-      1 of 32 steps. A song start loses its first two kicks. Syncopated kicks mostly do not count, as syncopated
+      booms); irregular steps line up by chance now and then: about 1 step in 7 at gaps of 0.3 – 0.9 s (over 60
+      seeds of the test's generator 176 of 1221 kick-like hits, 14.4 %, 0 – 7 of 18 – 24 a seed; the test's seed
+      reads 1 of 20, the low end) and about 1 in 3 at 0.55 s ±20 % (60 seeds: 417 of 1308, 31.9 %, 4 – 13 of 21 – 23
+      a seed); an explosion every 0.8 – 2.2 s (30 s, 15 seeds): 24 of 245 kick-like hits (9.8 %; 245 of the 301
+      booms read as kicks, 0 – 5 a seed counted); a steady walk counts 17 of 19 steps on each of 20 seeds, running
+      269 of 290 over 10 seeds; two people walking at 0.52 and 0.61 s: 1 of 32 steps. A song start loses its first
+      two kicks, and so does a drop after a breakdown: in the build-up and drop scene (drop at 7.0 s, a kick every
+      0.5 s) the first kick beat after the drop comes at 8.0 s, the third kick, while the nucleus accumbens flashes
+      at 7.0 s; four on the floor at 128 BPM (a clap on 2 and 4) for 4 bars, a 4-bar breakdown of hats only, then
+      the groove again from 15.0 s: the first beat after the drop at 16.875 s, the fifth kick, because the clap on
+      the second kick read as a snare and the kick pattern began again (scratch harness). Carrying a counted pattern
+      across a breakdown (a follow-up, not measured) would need its period to within 0.3 – 0.6 ms to land within
+      8 % of a beat on the drop's kick after 16 – 32 bars at 128 BPM; one gap measured on the hop grid is off by up
+      to 10.7 ms. Syncopated kicks mostly do not count, as syncopated
       snares: a rock beat at 110 BPM with a damped kick (95 → 58 Hz, 60 ms) on 1, 3 and the and of 3 (gaps of 2, 0.5
       and 1.5 beats): kicks 16 → 0 of 16, its snares 9 of 11 as before (from the third); a drum and bass two-step at
-      174 BPM (kick on 1 and the and of 3): 12 → 0 of 15 kicks, snares 12 of 14 as before.
+      174 BPM (kick on 1 and the and of 3): 12 → 0 of 15 kicks, snares 12 of 14 as before. That covers many
+      everyday grooves (scratch harness, 12 s each, the test music's kick and snare and hats on the eighths; kick
+      beats of the kicks played, snare beats of the snares played): a pop or rock groove at 120 BPM with the kick on
+      1, the and of 2 and 3 (12 of its 18 kicks read): kicks 0 of 18, snares 10 of 12; the same rock-style kick in
+      synthwave at 110 BPM with the synthwave kick: 0 of 17, snares 9 of 11; a trap half-time groove at 140 BPM
+      (kick on 1, the a of 2 and the and of 3, snare on 3): 2 of 21, snares 3 of 7; a UK garage two-step at 132 BPM
+      (kick on 1 and the and of 3): 0 of 13, snares 11 of 13; boom-bap at 90 BPM (kick on 1, the and of 2, 3 and
+      the and of 3): 3 of 18, snares 7 of 9; for comparison a kick on 1 and 3 at 120 BPM: 10 of 12, snares 10 of 12.
+      One kick a bar counts only above 104 BPM (a bar of at most 2.3 s, 4 × 60 / 104 = 2.31 s): a half-time groove
+      (kick on 1, snare on 3) at 100 BPM: kicks 0 of 6 and snares 0 of 6, the beat network dark (before 2026-10-13
+      the 6 kicks were beats); at 110 BPM 4 and 4 of 6; at 70 BPM 0 and 0 of 5; one kick a bar with the snare on 2 and
+      4: at 100 BPM kicks 0 of 6 (snares 10 of 12), at 106 BPM 4 of 7.
       No spectral cue was adopted. On the kick-like hits of these signals (per signal the median, and the range): the
       40 – 150 Hz band 43 ms after the onset sits −5.7 to −6.2 dB under its peak for the footsteps (one walker's steps −4.1 to −6.7),
       −0.6 to −2.3 dB for the electronic kicks (down to −3.6), but −4.8 dB for the damped kick and down to −6.2 dB for
@@ -1326,13 +1351,18 @@ an id this build does not know (written by a newer version) or registered for th
       is 0.72 – 0.73 for the footsteps, 0.44 – 0.61 for the electronic kicks, but 0.71 for the damped kick and up to
       0.75 in the test music; the low band's tonality (its strongest bin's share) 0.52 for the footsteps, 0.35 – 0.55
       for kicks. Each cue that would drop the footsteps also drops damped acoustic kicks or kicks under a clap.
+      Every test signal is mono (left = right), so two cues that are not spectral were not measured (a follow-up): the
+      40 – 150 Hz band's centre / side balance (a mix keeps its kick centred, a game places other players' steps and
+      explosions around the listener; it would not help where the steps are centred) and hats or snares on the kick
+      grid's subdivisions (a drum pattern has them, footsteps do not; it would drop a kick-only intro).
       Physically a footstep is an impact as a drum hit is: listeners detect footsteps no better than matched impacts
       such as drumbeats, and a walker's cadence is one cue to recognise them (Cottrell and Campbell 2014); and people
       step about twice a second (MacDougall and Moore 2005), the tempo of house music (120 – 130 BPM). So the rule is
       timing, and a steady walk is its documented limit.
       Measured and not adopted (a scratch harness, not committed): a rhythm of two or three gaps that repeats (each
       of the last m gaps within 8 % of the one m before) brings drum and bass kicks back (0 → 11 of 15) but lets
-      more chance matches through (steps at 0.55 s ±20 %: 5 → 8 of 21; random thumps 0 → 1 of 43; applied to snares,
+      more chance matches through (steps at 0.55 s ±20 %, one seed: 5 → 8 of 21, the strict rule's rate over 60 seeds
+      being 31.9 %, above; random thumps 0 → 1 of 43; applied to snares,
       double taps 0 → 4 of 19 and a human's taps 14 → 18 of 31): an owner decision; a snare or clap with a low-band
       rise under it counted in the kick pattern too gained nothing on music once the late-onset fix read the claps
       on kicks as kicks, and added game beats (explosions every 2.0 s: 1 → 3).
@@ -1378,11 +1408,14 @@ an id this build does not know (written by a newer version) or registered for th
       one is missed) and reads a plucked bass note whose spectrum happens to sink, or a footstep's or an explosion's
       low thud whose pitch falls, as a kick; a kick or a snare counts only from its third steady hit (or after one
       missed hit of its kind, or on the counted beats' grid), so a song's first two kicks and snares, the two after a
-      fill or a tempo change, most syncopated kicks and snares (a rock beat's kick on the and of 3, drum and bass,
-      breakbeats) and a roll faster than 5 hits a second do not pulse the beat network; game sounds that repeat
-      steadily do (a gun at its cycle rate, about half of a human's taps at ±10 %, steady footsteps, explosions at a
-      steady rate), random hits now and then line up by chance (2.3 % of the snare-like hits in 30 s of random fire,
-      about 1 in 10 steps at an irregular pace), and a shot that hides a kick on a steady kick grid can take its
+      fill, a tempo change or a breakdown (a drop pulses the beat network from its third kick at the earliest, about
+      1 s after the drop at 120 – 128 BPM), most syncopated kicks and snares (a kick on 1, the and of 2 and 3 as in
+      many pop, rock and synthwave grooves, a rock beat's kick on the and of 3, trap, two-step, drum and bass,
+      breakbeats), one kick a bar under 104 BPM (a half-time groove under 104 BPM stays dark) and a roll faster than
+      5 hits a second do not pulse the beat network; game sounds that repeat steadily do (a gun at its cycle rate,
+      about half of a human's taps at ±10 %, steady footsteps, explosions at a steady rate), random hits now and then line up by chance (2.3 % of the snare-like hits in 30 s of random fire,
+      about 1 in 7 steps at gaps of 0.3 – 0.9 s and 1 in 3 at 0.55 s ±20 %, about 1 explosion in 10 at gaps of
+      0.8 – 2.2 s), and a shot that hides a kick on a steady kick grid can take its
       place (the snare rule's limits above); noise can name
       chords (weak expected-change waves); a song that starts loud after silence, a pause or a gap between tracks is
       not a drop, and
@@ -1418,12 +1451,14 @@ an id this build does not know (written by a newer version) or registered for th
     load, read 2.79 / 5.07 ms (render at 1280 × 720 / 1920 × 1080) after them and 2.76 / 5.18 ms before; with the PC
     68 – 86 % busy it read 3.2 – 3.3 / 5.9 – 6.3 ms (3 runs). Full screen stays above the ~4 ms aim; the owner keeps it
     sharp (decided 2026-10-10: no smaller internal render scaled up).
-  - Tests: `tests/app/test_app_brain_view.cpp` (43 cases with the zoom case, one per synthetic loop, per noise signal, per snare-rule and kick-rule signal and per frame size: the tract graph and the table, the tonotopic maps, a tone in
+  - Tests: `tests/app/test_app_brain_view.cpp` (46 cases with the zoom case, one per synthetic loop, per noise signal, per snare-rule and kick-rule signal and per frame size: the tract graph and the table, the tonotopic maps, a tone in
     one ear, the superior olive's wiring, levels and silence, the kick pattern, the snare rule (single gunshots,
     automatic fire, a backbeat, gunshots over a groove, 30 s of random fire, a 60 BPM backbeat, a backbeat with one
     snare left out, 3-round bursts, a human's taps), the kick rule (four on the floor at 120 and 128 BPM, a synthwave
-    groove, footsteps at a steady walk (a documented limit) and at an irregular pace, explosion booms with debris, a
-    rock beat's syncopated kick (a documented limit); the backbeats also check their kicks), chord surprise and its timing, build-up
+    groove, footsteps at a steady walk (a documented limit) and at an irregular pace, explosion booms with debris
+    (three far apart, and seven at gaps inside the range that miss the gap before by 13 – 14 %, which pins the 8 %
+    tolerance), a rock beat's syncopated kick and a half-time groove at 110 and 100 BPM (one kick a bar counts only
+    above 104 BPM; documented limits); the backbeats also check their kicks), chord surprise and its timing, build-up
     and drop, the test music, the synthetic loops, pauses, chords after silence or a gap, a re-struck chord, white
     noise, irregular and regular noise bursts, NaN / inf input, hover / menu / reset, the picture's handedness at 21 angles and tilts, no render
     while still and dark, no allocation and the frame time at 1280 × 720 and 1920 × 1080 with no white pixel, and PNGs

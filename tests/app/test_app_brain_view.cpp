@@ -3,7 +3,7 @@
 // tone in one ear lights the opposite auditory cortex more) and the superior
 // olive's wiring, the beat network, the repeat rule for snares and kicks
 // (gunshots, bursts, backbeats, four on the floor, synthwave, footsteps,
-// explosions, a rock beat), chord surprise and its timing, build-up
+// explosions, a rock beat, half-time grooves), chord surprise and its timing, build-up
 // and drop, the heuristics' false triggers on the app's own test music,
 // synthetic loops, pauses, a re-struck chord and noise, NaN / inf input,
 // intensity, hover names, the picture's handedness (not a mirror image), no
@@ -1126,13 +1126,16 @@ TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern 
     const auto c = countBeats ("footsteps, gaps 0.3 - 0.9 s, 12 s", 750, [&steps] (int64_t n, float& l, float& r) { l = r = steps (n); }, run);
     std::printf ("  %zu steps\n", steps.times.size());
     CHECK (c.kickHits >= static_cast<int> (steps.times.size()) * 3 / 4); // they read as kicks
-    CHECK (c.kicks * 5 <= c.kickHits); // at most 20 % line up by chance (measured 1 of 20; 11 of 100 over five seeds)
+    // At most 20 % line up by chance: measured 1 of 20 on this seed, the low end; over 60 seeds of the same generator
+    // 176 of 1221 (14.4 %, 0 - 7 of 18 - 24 a seed).
+    CHECK (c.kicks * 5 <= c.kickHits);
     CHECK (c.snares == 0);
 }
 
 TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - explosion booms with debris")
 {
-    // Three explosions at 0.8, 3.9 and 6.4 s, 9 s: each boom reads as a kick (before 2026-10-13: 3 beats).
+    // Three explosions at 0.8, 3.9 and 6.4 s, 9 s: each boom reads as a kick (before 2026-10-13: 3 beats). Their gaps
+    // (3.1, 2.5 s) are over the 2.3 s bound; the case below keeps the gaps in range.
     Runner run;
     Explosions booms ({ 0.8, 3.9, 6.4 });
     const auto c = countBeats ("3 explosions with debris, 9 s", 540, [&booms] (int64_t n, float& l, float& r) { l = r = booms (n); }, run);
@@ -1185,6 +1188,91 @@ TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern 
     CHECK (c.kicks <= 2);     // measured 0
     CHECK (c.snares >= 8);    // the beat network still pulses on 2 and 4 (measured 9, from the third snare)
     CHECK (o.off == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - explosion booms at irregular gaps inside the beat range "
+           "(near misses of 13 - 14 %)")
+{
+    // Seven explosions in 9 s, gaps 1.2, 1.36, 0.9, 1.03, 1.5 and 1.3 s: every gap is inside the 0.2 - 2.3 s range, and
+    // three of them miss the one before by only 13 - 14 % (the hop grid moves a gap by at most 10.7 ms, about 1 %). So
+    // this case fails if the repeat test's 8 % tolerance is loosened (measured with 15 %: the explosions at 3.06 and
+    // 7.79 s count), which the three widely spaced explosions above cannot show (their gaps of 3.1 and 2.5 s are out
+    // of range, so they pass with any tolerance). The carry-over and the counted beats' grid need a counted beat
+    // first, so this tests the matching gaps alone.
+    Runner run;
+    Explosions booms ({ 0.5, 1.7, 3.06, 3.96, 4.99, 6.49, 7.79 });
+    const auto c = countBeats ("7 explosions at irregular gaps of 0.9 - 1.5 s, 9 s", 540, [&booms] (int64_t n, float& l, float& r) { l = r = booms (n); }, run);
+    CHECK (c.kickHits >= 6); // the booms read as kicks
+    CHECK (c.kicks == 0);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+namespace
+{
+/** The test music's kick at `kicksAt` and its snare at `snaresAt` (ascending), hats on the eighths of `beat`. */
+struct DrumTrack
+{
+    std::vector<double> kicksAt, snaresAt;
+    double beat = 0.5;
+    Noise noise;
+    Snare snare;
+    HighPass h1 { 6500.0 }, h2 { 6500.0 };
+    size_t nextKick = 0, nextSnare = 0;
+    double lastKick = -1.0, lastSnare = -1.0;
+    void operator() (int64_t n, float& l, float& r)
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        while (nextKick < kicksAt.size() && kicksAt[nextKick] <= t)
+            lastKick = kicksAt[nextKick++];
+        while (nextSnare < snaresAt.size() && snaresAt[nextSnare] <= t)
+            lastSnare = snaresAt[nextSnare++];
+        const float hat = 0.12f * h2 (h1 (x)) * decay (std::fmod (t, 0.5 * beat), 0.03);
+        l = r = 0.55f * (kick (lastKick < 0.0 ? -1.0 : t - lastKick, x) + snare (lastSnare < 0.0 ? -1.0 : t - lastSnare, x) + hat);
+    }
+};
+
+/** A half-time groove at `bpm` for `bars` bars from 0 s: a kick on 1 and a snare on 3 of each bar (one of each a bar),
+    hats on the eighths. Counts its kicks and snares. */
+BeatCount halfTimeGroove (double bpm, int bars, Runner& run)
+{
+    DrumTrack drums;
+    drums.beat = 60.0 / bpm;
+    const double bar = 4.0 * drums.beat;
+    for (int b = 0; b < bars; ++b)
+    {
+        drums.kicksAt.push_back (b * bar);
+        drums.snaresAt.push_back (b * bar + 2.0 * drums.beat);
+    }
+    const auto name = juce::String (bpm, 0) + " BPM half-time groove (a kick on 1, a snare on 3; a gap of " + juce::String (bar, 2) + " s), "
+                      + juce::String (bars) + " bars";
+    return countBeats (name.toRawUTF8(), static_cast<int> (std::ceil (bars * bar / kDt)), std::ref (drums), run);
+}
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - one kick a bar counts only above 104 BPM (a documented "
+           "limit) - 110 BPM")
+{
+    // A bar of 2.18 s is inside the 0.2 - 2.3 s range: the kicks and the snares count from their third.
+    Runner run;
+    const auto c = halfTimeGroove (110.0, 6, run);
+    CHECK (c.kickHits == 6);
+    CHECK (c.kicks == 4);
+    CHECK (c.snares == 4);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - one kick a bar counts only above 104 BPM (a documented "
+           "limit) - 100 BPM")
+{
+    // A bar of 2.4 s is longer than the 2.3 s bound (60 / 104 x 4 = 2.31 s): neither the kicks nor the snares ever
+    // count, so the beat network stays dark (before 2026-10-13 every kick was a beat).
+    Runner run;
+    const auto c = halfTimeGroove (100.0, 6, run);
+    CHECK (c.kickHits == 6);
+    CHECK (c.kicks == 0);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
 }
 
 TEST_CASE ("App: brain: a chord outside the key lights the right inferior frontal gyrus more than an in-key change")

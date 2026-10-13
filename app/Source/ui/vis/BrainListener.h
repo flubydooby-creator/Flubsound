@@ -42,11 +42,17 @@
 //     beat network. Limits: game sounds that repeat steadily count from their
 //     third hit (a gun fired at its cycle rate, steady footsteps - walking is
 //     about two steps a second, a dance tempo -, about half of a human's taps
-//     at +-10 %, explosions at a steady rate); after a fill or a tempo change
-//     the next two hits of a kind do not count; syncopated snares and kicks
-//     (breakbeats, a rock beat's kick on the and of 3, drum and bass) mostly do
-//     not. No spectral cue tells a footstep's thud from a kick drum (measured:
-//     each one that would also drops damped acoustic kicks or kicks under hats).
+//     at +-10 %, explosions at a steady rate), and irregular ones line up by
+//     chance now and then (about 1 step in 7 at gaps of 0.3 - 0.9 s, 1 in 3
+//     at 0.55 s +-20 %); after a fill, a tempo change or a breakdown the next
+//     two hits of a kind do not count (a drop pulses the beat network from its
+//     third kick); syncopated snares and kicks (breakbeats; a kick on 1, the
+//     and of 2 and 3, as in many pop, rock and synthwave grooves; trap, 2-step,
+//     drum and bass) mostly do not; one kick a bar counts only above 104 BPM
+//     (a bar of at most 2.3 s).
+//     No spectral cue tells a footstep's thud from a kick drum (measured: each
+//     cue that would drop footsteps also drops damped acoustic kicks or kicks
+//     under a clap; all signals mono, a stereo or a metrical cue not measured).
 //   * Chord change (heuristic): the shared music listener (PitchEstimator +
 //     KeyDetector, as the chord view) and a ChordTracker; a change from one
 //     chord to another is "unexpected" when the new chord has a pitch class
