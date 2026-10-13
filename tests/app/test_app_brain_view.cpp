@@ -1,7 +1,9 @@
 // App-level tests: the brain visualiser ("brain", docs/06 §6.4.2): the anatomy
 // and its tract graph, the tonotopic maps, the crossed ascending pathway (a
 // tone in one ear lights the opposite auditory cortex more) and the superior
-// olive's wiring, the beat network, chord surprise and its timing, build-up
+// olive's wiring, the beat network, the repeat rule for snares and kicks
+// (gunshots, bursts, backbeats, four on the floor, synthwave, footsteps,
+// explosions, a rock beat), chord surprise and its timing, build-up
 // and drop, the heuristics' false triggers on the app's own test music,
 // synthetic loops, pauses, a re-struck chord and noise, NaN / inf input,
 // intensity, hover names, the picture's handedness (not a mirror image), no
@@ -25,6 +27,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace flub::app;
@@ -550,16 +553,21 @@ TEST_CASE ("App: brain: a kick pattern lights the beat network (cerebellum, thal
                          peak[k] = std::max (peak[k], run.glow (beatSpots[k], side));
              });
     const auto& listener = run.view.getListener();
-    std::printf ("  6 kicks in 3 s: %d kicks, %d snares detected; peaks cerebellum %.2f, VL thalamus %.2f, premotor %.2f, SMA %.2f, putamen %.2f\n",
-                 listener.getKicks(), listener.getSnares(), static_cast<double> (peak[0]), static_cast<double> (peak[1]), static_cast<double> (peak[2]),
-                 static_cast<double> (peak[3]), static_cast<double> (peak[4]));
-    CHECK (listener.getKicks() == 6);
+    std::printf ("  6 kicks in 3 s: %d kick-like hits, %d counted as kick beats, %d snares; peaks cerebellum %.2f, VL thalamus %.2f, premotor %.2f, "
+                 "SMA %.2f, putamen %.2f\n",
+                 listener.getKickHits(), listener.getKicks(), listener.getSnares(), static_cast<double> (peak[0]), static_cast<double> (peak[1]),
+                 static_cast<double> (peak[2]), static_cast<double> (peak[3]), static_cast<double> (peak[4]));
+    // All 6 read as kicks; a kick is a beat from the third on, when it repeats like a drum beat (before 2026-10-13: 6).
+    CHECK (listener.getKickHits() == 6);
+    CHECK (listener.getKicks() == 4);
     CHECK (listener.getSnares() == 0);
-    // Each detection within 40 ms of its kick (display time is the stream time of the analysis window's centre).
+    // Each beat within 40 ms of its kick (display time is the stream time of the analysis window's centre), the first on
+    // the third kick.
     for (int i = 0; i < listener.getNumBeatTimes(); ++i)
     {
         const double t = listener.getBeatTime (i);
         CHECK (std::abs (t - 0.5 * std::round (t / 0.5)) < 0.04);
+        CHECK (t > 0.9);
     }
     for (const float p : peak)
         CHECK (p > 0.2f);
@@ -572,19 +580,21 @@ namespace
 {
 struct BeatCount
 {
-    int kicks = 0, snares = 0, snareHits = 0, beats = 0, networkBeats = 0;
+    int kicks = 0, snares = 0, snareHits = 0, beats = 0, networkBeats = 0, kickHits = 0;
 };
 
 BeatCount countBeats (const char* name, int frames, const std::function<void (int64_t, float&, float&)>& gen, Runner& run)
 {
     run.run (frames, gen);
     const auto& listener = run.view.getListener();
-    BeatCount c { listener.getKicks(), listener.getSnares(), listener.getSnareHits(), listener.getNumBeatTimes(), run.view.getActivity().getBeats() };
+    BeatCount c { listener.getKicks(), listener.getSnares(), listener.getSnareHits(), listener.getNumBeatTimes(), run.view.getActivity().getBeats(),
+                  listener.getKickHits() };
     juce::String times;
-    for (int i = 0; i < std::min (24, listener.getNumBeatTimes()); ++i)
+    for (int i = 0; i < std::min (32, listener.getNumBeatTimes()); ++i)
         times << juce::String (listener.getBeatTime (i), 2) << " ";
-    std::printf ("  %s: %d snare-like hits, %d counted as snare beats; %d kicks; %d beats in all (the beat network pulsed %d times)%s%s\n", name,
-                 c.snareHits, c.snares, c.kicks, c.beats, c.networkBeats, times.isEmpty() ? "" : "; at ", times.trimEnd().toRawUTF8());
+    std::printf ("  %s: %d snare-like hits, %d counted as snare beats; %d kick-like hits, %d counted as kick beats; %d beats in all (the beat "
+                 "network pulsed %d times)%s%s\n",
+                 name, c.snareHits, c.snares, c.kickHits, c.kicks, c.beats, c.networkBeats, times.isEmpty() ? "" : "; at ", times.trimEnd().toRawUTF8());
     return c;
 }
 } // namespace
@@ -633,13 +643,20 @@ TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a d
                                },
                                run);
     const auto& listener = run.view.getListener();
-    CHECK (c.kicks >= 5); // measured 5 of 6, before the rule and after (the kick detector misses the one at 2 s)
     CHECK (c.snareHits == 6);
     CHECK (c.snares == 4);
     // The first two snares only start the pattern; from the third on each is a beat within 40 ms of its hit.
     CHECK (! beatNear (listener, 0.5, 0.1));
     CHECK (! beatNear (listener, 1.5, 0.1));
     for (const double t : { 2.5, 3.5, 4.5, 5.5 })
+        CHECK (beatNear (listener, t, 0.04));
+    // The kicks the same way (2026-10-13): all 6 read as kicks (before the late-onset fix 5: the one at 2 s was missed),
+    // the first two only start their pattern.
+    CHECK (c.kickHits == 6);
+    CHECK (c.kicks == 4);
+    CHECK (! beatNear (listener, 0.0, 0.1));
+    CHECK (! beatNear (listener, 1.0, 0.1));
+    for (const double t : { 2.0, 3.0, 4.0, 5.0 })
         CHECK (beatNear (listener, t, 0.04));
     CHECK (c.networkBeats == c.beats);
 }
@@ -762,6 +779,14 @@ TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a d
     CHECK (! beatNear (listener, 3.0, 0.1));
     for (int k = 2; k < 8; ++k)
         CHECK (beatNear (listener, 1.0 + 2.0 * k, 0.04));
+    // The kicks (2026-10-13): all 8 read as kicks (before the late-onset fix 4: the hop grid's phase hid every other
+    // one), from the third on each is a beat.
+    CHECK (c.kickHits == 8);
+    CHECK (c.kicks == 6);
+    CHECK (! beatNear (listener, 0.0, 0.1));
+    CHECK (! beatNear (listener, 2.0, 0.1));
+    for (int k = 2; k < 8; ++k)
+        CHECK (beatNear (listener, 2.0 * k, 0.04));
 }
 
 TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a backbeat with one snare left out carries on "
@@ -819,42 +844,347 @@ TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a d
     CHECK (c.kicks <= 1);
 }
 
-TEST_CASE ("App: brain: footsteps with a low falling thud read as kicks (a documented limit of the unchanged kick rule)")
+// A kick-like hit (a low-band rise whose pitch then falls) is a beat only when it belongs to a drum pattern: the same
+// repeat test as a snare's. Footsteps with a low thud and explosion booms read as kicks; music keeps its kicks from the
+// third on. One case per signal (each under 2 s).
+namespace
 {
-    // Walking, a step every 0.52 s +- 3 %: a thud whose pitch falls from 120 to 70 Hz (45 ms) and a 1.5 - 6 kHz scuff.
-    // A kick drum's falling pitch is what the kick rule looks for, so these pulse the beat network (docs/06 §6.4.2).
-    Runner run;
-    const auto steps = jitteredShots (0.3, 10.0, 0.52, 0.03, 31u);
+/** A kick drum, tau seconds after the hit: a sine whose pitch falls from `fromHz` to `toHz` (time constant `sweep`),
+    decaying with `ring`, and a 2 ms click (`click`: a noise sample). kick() is (158, 48, 0.035, 0.28, 0.85). */
+float kickDrum (double tau, float click, double fromHz, double toHz, double sweep, double ring, float level) noexcept
+{
+    if (tau < 0.0)
+        return 0.0f;
+    const double phase = 2.0 * kPi * (toHz * tau + (fromHz - toHz) * sweep * (1.0 - std::exp (-tau / sweep)));
+    return level * static_cast<float> (std::sin (phase)) * decay (tau, ring) + 0.25f * click * decay (tau, 0.002);
+}
+
+/** The times k x gap from `from` while under `to`. */
+std::vector<double> grid (double from, double to, double gap)
+{
+    std::vector<double> times;
+    for (int k = 0; from + k * gap < to - 1.0e-9; ++k)
+        times.push_back (from + k * gap);
+    return times;
+}
+
+/** How the counted beats fall on the kicks played: on one (within 40 ms; each kick once), the first such, and beats on
+    no played drum hit (`drums`: every kick and snare played). */
+struct OnKicks
+{
+    int on = 0, off = 0;
+    double first = -1.0;
+};
+
+OnKicks beatsOnKicks (const brain::BrainListener& listener, const std::vector<double>& kicksPlayed, const std::vector<double>& drums)
+{
+    OnKicks o;
+    std::set<size_t> used;
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+    {
+        const double t = listener.getBeatTime (i);
+        bool onKick = false;
+        for (size_t k = 0; k < kicksPlayed.size() && ! onKick; ++k)
+            if (std::abs (t - kicksPlayed[k]) < 0.04 && used.insert (k).second)
+                onKick = true;
+        if (onKick)
+        {
+            ++o.on;
+            if (o.first < 0.0)
+                o.first = t;
+            continue;
+        }
+        bool onDrum = false;
+        for (const double d : drums)
+            onDrum = onDrum || std::abs (t - d) < 0.04;
+        o.off += onDrum ? 0 : 1;
+    }
+    std::printf ("  counted beats on a played kick: %d of %zu (the first at %.2f s); beats on no played drum hit: %d\n", o.on, kicksPlayed.size(),
+                 o.first, o.off);
+    return o;
+}
+
+/** Four on the floor at `bpm` from 0 s: a kick on every beat (`sub`: a deeper, longer one, 150 -> 45 Hz in about 30 ms,
+    0.35 s), a clap (the test music's snare) on 2 and 4, an open hat and a 55 Hz bass note on each off-beat. */
+struct FourOnTheFloor
+{
+    double beat = 0.5;
+    bool sub = false;
     Noise noise;
-    HighPass scuffHp (1500.0);
-    LowPass scuffLp (6000.0);
+    Snare clap;
+    HighPass h1 { 6500.0 }, h2 { 6500.0 };
+    LowPass bassLp { 500.0 };
+    FourOnTheFloor (double bpm, bool subKick) : beat (60.0 / bpm), sub (subKick) {}
+    void operator() (int64_t n, float& l, float& r)
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        const double tauBeat = std::fmod (t, beat);
+        const double tauClap = t < beat ? -1.0 : std::fmod (t - beat, 2.0 * beat);
+        const double tauOff = t < 0.5 * beat ? -1.0 : std::fmod (t - 0.5 * beat, beat);
+        const float k = sub ? kickDrum (tauBeat, x, 150.0, 45.0, 0.03, 0.35, 0.9f) : kick (tauBeat, x);
+        const float hat = 0.12f * h2 (h1 (x)) * decay (tauOff, 0.07);
+        const float c = 0.8f * clap (tauClap, x);
+        double saw = 0.0;
+        for (int h = 1; h <= 5; ++h)
+            saw += std::sin (2.0 * kPi * 55.0 * h * t) / h;
+        const float bass = bassLp (static_cast<float> (saw));
+        const float b = tauOff < 0.0 ? 0.0f : 0.2f * bass * std::min (1.0f, static_cast<float> (tauOff / 0.004)) * decay (tauOff, 0.12);
+        l = r = 0.5f * (k + c + hat + b);
+    }
+};
+
+/** Synthwave at 110 BPM from 0 s: a punchy drum-machine kick (130 -> 52 Hz in about 20 ms, 0.16 s) on 1 and 3, a gated
+    snare (noise held for 0.22 s, then cut, and a 200 Hz body) on 2 and 4, an octave bass on the eighths (A1 / A2, a
+    five-harmonic saw, ducked by each kick) and an A minor pad. */
+struct Synthwave
+{
+    static constexpr double kBeat = 60.0 / 110.0;
+    Noise noise;
+    HighPass snareHp { 900.0 };
+    LowPass snareLp { 8000.0 }, bassLp { 900.0 };
+    double bassPhase = 0.0;
+    void operator() (int64_t n, float& l, float& r)
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        const double tauKick = std::fmod (t, 2.0 * kBeat);
+        const double tauSnare = t < kBeat ? -1.0 : std::fmod (t - kBeat, 2.0 * kBeat);
+        const double eighth = 0.5 * kBeat;
+        const auto eighthIndex = static_cast<int64_t> (t / eighth);
+        const double tauEighth = t - static_cast<double> (eighthIndex) * eighth;
+        const float k = kickDrum (tauKick, x, 130.0, 52.0, 0.02, 0.16, 0.9f);
+        const float wires = snareLp (snareHp (x));
+        float s = 0.0f;
+        if (tauSnare >= 0.0)
+        {
+            const float gate = tauSnare < 0.22 ? 1.0f : decay (tauSnare - 0.22, 0.008);
+            s = gate * (0.35f * wires * (0.5f + 0.5f * decay (tauSnare, 0.05)) + 0.3f * static_cast<float> (std::sin (2.0 * kPi * 200.0 * tauSnare)) * decay (tauSnare, 0.05));
+        }
+        bassPhase += (eighthIndex % 2 == 0 ? 55.0 : 110.0) / kRate;
+        if (bassPhase >= 1.0)
+            bassPhase -= 1.0;
+        double saw = 0.0;
+        for (int h = 1; h <= 5; ++h)
+            saw += std::sin (2.0 * kPi * h * bassPhase) / h;
+        const float duck = 1.0f - 0.7f * decay (tauKick, 0.08);
+        const float b = 0.25f * bassLp (static_cast<float> (saw)) * std::min (1.0f, static_cast<float> (tauEighth / 0.003)) * (0.4f + 0.6f * decay (tauEighth, 0.1)) * duck;
+        l = r = 0.5f * (k + s + b) + duck * chordSample ({ 57, 60, 64 }, n, 0.02);
+    }
+};
+
+/** Footsteps at `times` (ascending): a thud whose pitch falls from 120 to 70 Hz (45 ms decay) and a 1.5 - 6 kHz scuff
+    (30 ms), every other step 2 dB softer. A kick drum's falling pitch is what the kick rule looks for. */
+struct Footsteps
+{
+    std::vector<double> times;
+    Noise noise;
+    HighPass scuffHp { 1500.0 };
+    LowPass scuffLp { 6000.0 };
     size_t next = 0;
     double last = -1.0;
     float gain = 1.0f;
-    const auto c = countBeats ("footsteps, 0.52 s +- 3 %, 10 s", 630,
+    explicit Footsteps (std::vector<double> at) : times (std::move (at)) {}
+    float operator() (int64_t n) noexcept
+    {
+        const double t = seconds (n);
+        const float scuff = scuffLp (scuffHp (noise()));
+        while (next < times.size() && times[next] <= t)
+        {
+            last = times[next];
+            gain = next % 2 == 0 ? 1.0f : 0.8f;
+            ++next;
+        }
+        if (last < 0.0)
+            return 0.0f;
+        const double tau = t - last;
+        const double phase = 2.0 * kPi * (70.0 * tau + 50.0 * 0.02 * (1.0 - std::exp (-tau / 0.02)));
+        return gain * 0.3f
+               * (0.8f * static_cast<float> (std::sin (phase)) * decay (tau, 0.045)
+                  + 0.6f * scuff * decay (tau, 0.03) * std::min (1.0f, static_cast<float> (tau / 0.002)));
+    }
+};
+
+/** Explosions at `times` (ascending): a crack (noise, 10 ms), a boom whose pitch falls as a kick drum's does (110 ->
+    40 Hz in about 40 ms, 0.6 s decay), a rumble (noise under 150 Hz, 1.2 s) and debris (grains of noise over 2 kHz,
+    3 - 15 ms each, for 1.6 s). */
+struct Explosions
+{
+    std::vector<double> times;
+    Noise noise { 55555u };
+    LowPass rumble1 { 150.0 }, rumble2 { 150.0 };
+    HighPass debris1 { 2000.0 }, debris2 { 2000.0 };
+    uint32_t state = 99u;
+    size_t next = 0;
+    double last = -1.0, grainStart = -1.0, grainLength = 0.0, nextGrain = 0.0;
+    float grainLevel = 0.0f;
+    explicit Explosions (std::vector<double> at) : times (std::move (at)) {}
+    double draw() noexcept
+    {
+        state = state * 1664525u + 1013904223u;
+        return (static_cast<double> (state >> 8) + 0.5) / 16777216.0;
+    }
+    float operator() (int64_t n) noexcept
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        const float low = rumble2 (rumble1 (x));
+        const float high = debris2 (debris1 (x));
+        while (next < times.size() && times[next] <= t)
+        {
+            last = times[next++];
+            nextGrain = last + 0.04;
+        }
+        if (last < 0.0)
+            return 0.0f;
+        const double tau = t - last;
+        if (tau < 1.6 && t >= nextGrain)
+        {
+            grainStart = t;
+            const double u1 = draw();
+            grainLength = 0.003 + 0.012 * u1;
+            const double u2 = draw();
+            grainLevel = static_cast<float> (0.1 + 0.3 * u2) * decay (tau, 0.7);
+            const double u3 = draw();
+            nextGrain = t + 0.02 + 0.1 * u3;
+        }
+        const float grain = t - grainStart < grainLength ? grainLevel * high : 0.0f;
+        const double phase = 2.0 * kPi * (40.0 * tau + 70.0 * 0.04 * (1.0 - std::exp (-tau / 0.04)));
+        const float rise = std::min (1.0f, static_cast<float> (tau / 0.001));
+        return rise * (0.6f * x * decay (tau, 0.01) + 0.55f * static_cast<float> (std::sin (phase)) * decay (tau, 0.6) + 4.0f * low * decay (tau, 1.2))
+               + grain;
+    }
+};
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor at 120 BPM counts from the third kick, "
+           "on time")
+{
+    // Before 2026-10-13 all 16 were beats from the first (14 read as kicks, 2 claps on a kick as snares).
+    Runner run;
+    FourOnTheFloor groove (120.0, false);
+    const auto c = countBeats ("four on the floor, 120 BPM, 8 s (16 kicks, a clap on 2 and 4)", 480, std::ref (groove), run);
+    const auto kicksPlayed = grid (0.0, 8.0, 0.5);
+    const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, kicksPlayed);
+    CHECK (c.kickHits == 16);
+    CHECK (o.on == 14);
+    CHECK (std::abs (o.first - 1.0) < 0.04);
+    CHECK (o.off == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor at 128 BPM with a long sub kick")
+{
+    // Before: 16 of the 18 kicks were beats from the first (12 read as kicks, 4 claps on a kick as snares).
+    Runner run;
+    FourOnTheFloor groove (128.0, true);
+    const auto c = countBeats ("four on the floor, 128 BPM, sub kick, 8 s (18 kicks)", 480, std::ref (groove), run);
+    const auto kicksPlayed = grid (0.0, 8.0, 60.0 / 128.0);
+    const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, kicksPlayed);
+    CHECK (c.kickHits + c.snareHits >= 15);
+    CHECK (o.on >= 13); // measured 14
+    CHECK (std::abs (o.first - 2.0 * 60.0 / 128.0) < 0.04); // the third kick
+    CHECK (o.off == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - a synthwave groove (110 BPM, kick on 1 and 3, gated snare, "
+           "octave bass)")
+{
+    // Before: all 10 kicks were beats from the first.
+    Runner run;
+    Synthwave groove;
+    const auto c = countBeats ("synthwave, 110 BPM, 10 s (10 kicks, 9 snares)", 600, std::ref (groove), run);
+    const auto kicksPlayed = grid (0.0, 10.0, 2.0 * Synthwave::kBeat);
+    const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, grid (0.0, 10.0, Synthwave::kBeat));
+    CHECK (c.kickHits == 10);
+    CHECK (o.on == 8);
+    CHECK (std::abs (o.first - 2.0 * 2.0 * Synthwave::kBeat) < 0.04); // the third kick
+    CHECK (c.snares == 7);                                            // from the third snare, as before
+    CHECK (o.off == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - footsteps with a falling thud at a steady walk still count "
+           "from the third step (a documented limit)")
+{
+    // Walking, a step every 0.52 s +- 3 %: as regular as a drum beat (about 2 steps a second, a dance tempo), so from the
+    // third step each one repeats the gap before it within 8 % (before 2026-10-13: 19 of 19 steps were beats).
+    Runner run;
+    Footsteps steps (jitteredShots (0.3, 10.0, 0.52, 0.03, 31u));
+    const auto c = countBeats ("footsteps, 0.52 s +- 3 %, 10 s", 630, [&steps] (int64_t n, float& l, float& r) { l = r = steps (n); }, run);
+    std::printf ("  %zu steps\n", steps.times.size());
+    CHECK (c.kickHits >= static_cast<int> (steps.times.size()) * 3 / 4);
+    CHECK (c.kicks <= c.kickHits - 2); // measured 17 of 19
+    CHECK (! beatNear (run.view.getListener(), steps.times[0], 0.1));
+    CHECK (! beatNear (run.view.getListener(), steps.times[1], 0.1));
+    CHECK (c.snares == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - footsteps with a falling thud at an irregular pace")
+{
+    // Moving about: each gap 0.3 - 0.9 s (0.6 s +- 50 %, uniform), 12 s. Before 2026-10-13: 20 of 20 steps were beats.
+    Runner run;
+    Footsteps steps (jitteredShots (0.3, 12.0, 0.6, 0.5, 47u));
+    const auto c = countBeats ("footsteps, gaps 0.3 - 0.9 s, 12 s", 750, [&steps] (int64_t n, float& l, float& r) { l = r = steps (n); }, run);
+    std::printf ("  %zu steps\n", steps.times.size());
+    CHECK (c.kickHits >= static_cast<int> (steps.times.size()) * 3 / 4); // they read as kicks
+    CHECK (c.kicks * 5 <= c.kickHits); // at most 20 % line up by chance (measured 1 of 20; 11 of 100 over five seeds)
+    CHECK (c.snares == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - explosion booms with debris")
+{
+    // Three explosions at 0.8, 3.9 and 6.4 s, 9 s: each boom reads as a kick (before 2026-10-13: 3 beats).
+    Runner run;
+    Explosions booms ({ 0.8, 3.9, 6.4 });
+    const auto c = countBeats ("3 explosions with debris, 9 s", 540, [&booms] (int64_t n, float& l, float& r) { l = r = booms (n); }, run);
+    CHECK (c.kickHits == 3);
+    CHECK (c.kicks == 0);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - a rock beat's syncopated kick does not count, its snares do "
+           "(a documented limit)")
+{
+    // 110 BPM, 12 s: a damped kick (95 -> 58 Hz, 60 ms) on 1, 3 and the and of 3 (gaps of 2, 0.5 and 1.5 beats: no gap
+    // repeats the one before), the test music's snare on 2 and 4, hats on the eighths. Before 2026-10-13: all 16 kicks
+    // were beats.
+    const double beat = 60.0 / 110.0, bar = 4.0 * beat;
+    std::vector<double> kicksPlayed, snaresPlayed;
+    for (double b = 0.0; b < 12.0; b += bar)
+    {
+        for (const double p : { 0.0, 2.0, 2.5 })
+            if (b + p * beat < 12.0)
+                kicksPlayed.push_back (b + p * beat);
+        for (const double p : { 1.0, 3.0 })
+            if (b + p * beat < 12.0)
+                snaresPlayed.push_back (b + p * beat);
+    }
+    Runner run;
+    Noise noise;
+    Snare snare;
+    HighPass h1 (6500.0), h2 (6500.0);
+    const auto c = countBeats ("rock beat 110 BPM, damped kick on 1, 3 and the and of 3, 12 s (16 kicks, 11 snares)", 720,
                                [&] (int64_t n, float& l, float& r)
                                {
                                    const double t = seconds (n);
-                                   const float scuff = scuffLp (scuffHp (noise()));
-                                   while (next < steps.size() && steps[next] <= t)
-                                   {
-                                       last = steps[next];
-                                       gain = next % 2 == 0 ? 1.0f : 0.8f;
-                                       ++next;
-                                   }
-                                   l = r = 0.0f;
-                                   if (last < 0.0)
-                                       return;
-                                   const double tau = t - last;
-                                   const double phase = 2.0 * kPi * (70.0 * tau + 50.0 * 0.02 * (1.0 - std::exp (-tau / 0.02)));
-                                   l = r = gain * 0.3f
-                                           * (0.8f * static_cast<float> (std::sin (phase)) * decay (tau, 0.045)
-                                              + 0.6f * scuff * decay (tau, 0.03) * std::min (1.0f, static_cast<float> (tau / 0.002)));
+                                   const float x = noise();
+                                   double tk = -1.0;
+                                   for (const double k : kicksPlayed)
+                                       if (k <= t)
+                                           tk = t - k;
+                                   const double tb = std::fmod (t, bar);
+                                   const double ts = tb >= 3.0 * beat ? tb - 3.0 * beat : (tb >= beat ? tb - beat : -1.0);
+                                   const float hat = 0.12f * h2 (h1 (x)) * decay (std::fmod (t, 0.5 * beat), 0.03);
+                                   l = r = 0.55f * (kickDrum (tk, x, 95.0, 58.0, 0.015, 0.06, 0.9f) + snare (ts, x) + hat);
                                },
                                run);
-    std::printf ("  %zu steps\n", steps.size());
-    CHECK (c.kicks >= static_cast<int> (steps.size()) * 3 / 4);
-    CHECK (c.snares == 0);
+    auto drums = kicksPlayed;
+    drums.insert (drums.end(), snaresPlayed.begin(), snaresPlayed.end());
+    const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, drums);
+    CHECK (c.kickHits >= 14); // they read as kicks (measured 16)
+    CHECK (c.kicks <= 2);     // measured 0
+    CHECK (c.snares >= 8);    // the beat network still pulses on 2 and 4 (measured 9, from the third snare)
+    CHECK (o.off == 0);
 }
 
 TEST_CASE ("App: brain: a chord outside the key lights the right inferior frontal gyrus more than an in-key change")
@@ -1009,11 +1339,12 @@ TEST_CASE ("App: brain: a build-up then a drop lights the caudate, then the nucl
     const auto& act = run.view.getActivity();
     const auto& listener = run.view.getListener();
     std::printf ("  build-ups %d (anticipation pulses %d, the last at %.2f s), drops %d at %.2f s; caudate %.2f in the breakdown, %.2f before the drop, "
-                 "peak %.2f at %.2f s; accumbens %.2f before the drop, %.2f at %.2f s; beats %d (%d kicks, %d snares of %d snare-like hits)\n",
+                 "peak %.2f at %.2f s; accumbens %.2f before the drop, %.2f at %.2f s; beats %d (%d kicks of %d kick-like hits, %d snares of %d "
+                 "snare-like hits)\n",
                  listener.getBuildUps(), act.getAnticipations(), act.getLastAnticipationTime(), act.getDrops(), act.getLastDropTime(),
                  static_cast<double> (caudateEarly), static_cast<double> (caudateBefore), static_cast<double> (caudate), caudatePeakAt,
                  static_cast<double> (accumbensBefore), static_cast<double> (accumbensAfter), accumbensPeakAt, listener.getNumBeatTimes(),
-                 listener.getKicks(), listener.getSnares(), listener.getSnareHits());
+                 listener.getKicks(), listener.getKickHits(), listener.getSnares(), listener.getSnareHits());
     juce::String beforeDrop;
     for (int i = 0; i < listener.getNumBeatTimes(); ++i)
         if (listener.getBeatTime (i) < 7.0)
@@ -1053,13 +1384,20 @@ TEST_CASE ("App: brain heuristics on the app's own test music: beats on the kick
             ++falseTriggers;
     }
     const int kicksPlayed = 24;
-    std::printf ("  test music 12 s: %d beats (%d kicks + %d snares; %d snare-like hits) for %d kicks played: %d on a kick, %d false; chord "
-                 "changes %d (%d outside the key %s); build-ups %d, drops %d\n",
-                 listener.getNumBeatTimes(), listener.getKicks(), listener.getSnares(), listener.getSnareHits(), kicksPlayed, hits, falseTriggers,
+    std::printf ("  test music 12 s: %d beats (%d kicks of %d kick-like hits + %d snares of %d snare-like hits) for %d kicks played: %d on a kick, "
+                 "%d false, the first at %.2f s; chord changes %d (%d outside the key %s); build-ups %d, drops %d\n",
+                 listener.getNumBeatTimes(), listener.getKicks(), listener.getKickHits(), listener.getSnares(), listener.getSnareHits(), kicksPlayed, hits,
+                 falseTriggers, listener.getNumBeatTimes() > 0 ? listener.getBeatTime (0) : -1.0,
                  act.getChordChanges(),
                  act.getSurprises(), flub::app::ui::vis::music::keyName (listener.getMusic().key.getKey()).toStdString().c_str(), listener.getBuildUps(),
                  listener.getDrops());
-    CHECK (hits >= kicksPlayed - 2); // measured on MSVC: 23 of 24
+    // Measured on MSVC: 21 of 24. The first two kicks only start the pattern (a kick is a beat when it repeats like a
+    // drum beat, 2026-10-13; before: 23 of 24 from the first kick); the one at 10.0 s, under a new bass note, does not
+    // read as a kick (before and after).
+    CHECK (hits >= kicksPlayed - 3);
+    CHECK (listener.getNumBeatTimes() > 0);
+    if (listener.getNumBeatTimes() > 0)
+        CHECK (std::abs (listener.getBeatTime (0) - 1.0) < 0.04); // the third kick
     CHECK (falseTriggers == 0);
     CHECK (act.getChordChanges() >= 4);
     CHECK (act.getSurprises() == 0);
@@ -1090,7 +1428,8 @@ static void checkSyntheticLoop (int which)
                                bass += std::sin (2.0 * kPi * 55.0 * h * t) / h;
                            l = r = 0.3f * static_cast<float> (bass) * std::min (1.0f, static_cast<float> (tau / 0.004)) * decay (tau, 0.18);
                        },
-                       2 }); // measured on MSVC: 1 of the 24 notes reads as a kick (its centroid happened to fall smoothly)
+                       0 }); // measured on MSVC: 1 of the 24 notes reads as a kick (its centroid happened to fall smoothly); alone it
+                             // does not repeat, so it is no beat (before 2026-10-13 it was)
     cases.push_back ({ "hi-hats on the eighths", [&noise, &h1, &h2] (int64_t n, float& l, float& r)
                        { l = r = 0.3f * h2 (h1 (noise())) * decay (std::fmod (seconds (n), 0.25), 0.03); },
                        0 });
@@ -1115,8 +1454,9 @@ static void checkSyntheticLoop (int which)
         juce::String times;
         for (int i = 0; i < std::min (6, listener.getNumBeatTimes()); ++i)
             times << juce::String (listener.getBeatTime (i), 2) << " ";
-        std::printf ("  %s, 6 s: %d beats (%d kicks, %d snares%s%s), build-ups %d, drops %d\n", c.name, listener.getNumBeatTimes(), listener.getKicks(),
-                     listener.getSnares(), times.isEmpty() ? "" : "; at ", times.trimEnd().toRawUTF8(), listener.getBuildUps(), listener.getDrops());
+        std::printf ("  %s, 6 s: %d beats (%d kicks of %d kick-like hits, %d snares of %d snare-like hits%s%s), build-ups %d, drops %d\n", c.name,
+                     listener.getNumBeatTimes(), listener.getKicks(), listener.getKickHits(), listener.getSnares(), listener.getSnareHits(),
+                     times.isEmpty() ? "" : "; at ", times.trimEnd().toRawUTF8(), listener.getBuildUps(), listener.getDrops());
         CHECK (listener.getNumBeatTimes() <= c.maxBeats);
         CHECK (listener.getBuildUps() == 0);
         CHECK (listener.getDrops() == 0);
