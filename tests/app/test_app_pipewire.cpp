@@ -1380,6 +1380,20 @@ IdleRun runIdleWindow (bool inject)
             }
         }
     lines << "; Hyper-V vCPU run time: " << vpRuntime;
+    // Each vCPU's run time over the window's wall time: a halted (idle) vCPU
+    // does not run, so this is how busy each one was, not 100 %.
+    const auto vpFirst = static_cast<size_t> (std::lower_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), w.callbacks[first].wallNs) - samples.vpWallNs.begin());
+    const auto vpEnd = static_cast<size_t> (std::upper_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), w.callbacks[last - 1].wallNs) - samples.vpWallNs.begin());
+    if (vpEnd >= vpFirst + 2)
+    {
+        const auto vpLast = vpEnd - 1;
+        const auto spanNs = static_cast<double> (samples.vpWallNs[vpLast] - samples.vpWallNs[vpFirst]);
+        lines << " (busy over the window:";
+        for (int c = 0; c < samples.numCpus; ++c)
+            if (samples.vpRun (vpFirst, c) >= 0 && samples.vpRun (vpLast, c) >= 0)
+                lines << " CPU " << c << " " << 100.0 * static_cast<double> (samples.vpRun (vpLast, c) - samples.vpRun (vpFirst, c)) / spanNs << " %";
+        lines << ")";
+    }
     if (vpCycles > 0)
     {
         lines << ", " << vpCycles << " cycles bounded: the hypervisor's share of the thread's CPU time at least " << ms (hypervisorTotalNs) << " ms in all, "
