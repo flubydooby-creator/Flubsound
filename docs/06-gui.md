@@ -1112,8 +1112,12 @@ an id this build does not know (written by a newer version) or registered for th
   Hovering a landing spot names it (a label in the view and the tooltip: what it does, and *heuristic* for the spots
   lit by detected features). Drag turns it (the near side follows the hand), a click stops or restarts the turning
   (0.16 rad/s, the face moving to the viewer's right first, as in the mockup), the right-click menu
-  has *Stop turning* / *Turn* and *Reset view* (in the visualiser window they head its menu, whose double-click still
-  toggles full screen: the window listens to the view's mouse events; `Visualiser::addMenuItems`).
+  has *Stop turning* / *Turn*, *Zoom in*, *Zoom out* and *Reset view* (in the visualiser window they head its menu, whose
+  double-click still toggles full screen: the window listens to the view's mouse events; `Visualiser::addMenuItems`).
+  The wheel (a trackpad pinch on macOS) zooms about the centre, about 15 % a notch, from 0.7 to 3 times the framing
+  that fits the ear rings; it starts at 1.2 (the owner asked for the brain a little closer, 2026-10-13), so the ears
+  can leave the picture; *Reset view* restores angle, tilt and zoom (`BrainView::kDefaultZoom`, `kMinZoom`,
+  `kMaxZoom`, `kWheelZoomRate`).
   - **Anatomy** (`BrainAnatomy`, built once, deterministic). Every station has an approximate MNI coordinate (mm, right
     side; x is mirrored for the left), mapped to the view's axes by `fromMni`: view x = x / 90, view y = (z − 10) / 90,
     view z = (y + 18) / 90 (x lateral, y up, z front; 90 mm per unit, so the mockup's cloud of about ±0.8 × ±0.6 ×
@@ -1355,7 +1359,7 @@ an id this build does not know (written by a newer version) or registered for th
     load, read 2.79 / 5.07 ms (render at 1280 × 720 / 1920 × 1080) after them and 2.76 / 5.18 ms before; with the PC
     68 – 86 % busy it read 3.2 – 3.3 / 5.9 – 6.3 ms (3 runs). Full screen stays above the ~4 ms aim; the owner keeps it
     sharp (decided 2026-10-10: no smaller internal render scaled up).
-  - Tests: `tests/app/test_app_brain_view.cpp` (36 cases, one per synthetic loop, per noise signal, per snare-rule signal and per frame size: the tract graph and the table, the tonotopic maps, a tone in
+  - Tests: `tests/app/test_app_brain_view.cpp` (37 cases with the zoom case, one per synthetic loop, per noise signal, per snare-rule signal and per frame size: the tract graph and the table, the tonotopic maps, a tone in
     one ear, the superior olive's wiring, levels and silence, the kick pattern, the snare rule (single gunshots,
     automatic fire, a backbeat, gunshots over a groove, 30 s of random fire, a 60 BPM backbeat, a backbeat with one
     snare left out, 3-round bursts, a human's taps), footsteps read as kicks (a documented limit), chord surprise and its timing, build-up

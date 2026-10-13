@@ -61,6 +61,11 @@ public:
     /** The mockup's pose: the face to the viewer's right, the right hemisphere nearer. */
     static constexpr float kStartAngle = -0.5f, kStartTilt = 0.15f;
     static constexpr float kMinTilt = -0.6f, kMaxTilt = 0.9f;
+    /** Zoom on top of the framing that fits the ears (1 = the whole scene); the owner asked for the brain a little
+        closer (2026-10-13), so it starts at 1.2. The wheel, a trackpad pinch and the menu change it. */
+    static constexpr float kDefaultZoom = 1.2f, kMinZoom = 0.7f, kMaxZoom = 3.0f;
+    /** Zoom per wheel unit (JUCE's deltaY is about 0.23 per notch on Windows: about 15 % per notch). */
+    static constexpr float kWheelZoomRate = 0.6f;
     static constexpr double kMaxPixels = 2.3e6; // the rendered image at most (scaled up beyond)
     static constexpr double kMaxFramesPerSecond = 75.0; // pictures rendered at most (the model runs every frame)
 
@@ -76,8 +81,13 @@ public:
     // ---- View ---------------------------------------------------------------------------------
     bool isTurning() const noexcept { return turning; }
     void setTurning (bool shouldTurn);
-    /** Back to the starting angle and tilt. */
+    /** Back to the starting angle, tilt and zoom. */
     void resetView();
+    float getZoom() const noexcept { return zoom; }
+    /** Sets the zoom (kept in kMinZoom .. kMaxZoom). */
+    void setZoom (float newZoom);
+    /** Multiplies the zoom (> 1 closer). */
+    void zoomBy (float factor) { setZoom (zoom * factor); }
     /** Turns the brain to an angle and tilt (tests; the turning, if on, goes on from there). */
     void setView (float newAngle, float newTilt);
     float getAngle() const noexcept { return angle; }
@@ -123,6 +133,8 @@ public:
     void mouseDrag (const juce::MouseEvent& e) override;
     void mouseUp (const juce::MouseEvent& e) override;
     void mouseDoubleClick (const juce::MouseEvent& e) override;
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override;
+    void mouseMagnify (const juce::MouseEvent& e, float scaleFactor) override;
 
 private:
     struct Projection
@@ -156,7 +168,7 @@ private:
     brain::BrainListener listener;
     brain::BrainActivity activity;
     double clock = 0.0;
-    float angle = kStartAngle, tilt = kStartTilt;
+    float angle = kStartAngle, tilt = kStartTilt, zoom = kDefaultZoom;
     bool turning = true;
 
     // Mouse.

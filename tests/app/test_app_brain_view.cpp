@@ -1368,7 +1368,7 @@ TEST_CASE ("App: brain view: hover names a landing spot, the menu stops the turn
     CHECK (run.view.isTurning());
     juce::PopupMenu menu;
     run.view.addMenuItems (menu);
-    CHECK (menu.getNumItems() == 2);
+    CHECK (menu.getNumItems() == 4); // Stop turning, Zoom in, Zoom out, Reset view
     run.view.setTurning (false);
     const float angle = run.view.getAngle();
     run.run (10, [] (int64_t, float& l, float& r) { l = r = 0.0f; });
@@ -1379,6 +1379,82 @@ TEST_CASE ("App: brain view: hover names a landing spot, the menu stops the turn
     run.view.resetView();
     CHECK (run.view.getAngle() == vis::BrainView::kStartAngle);
     CHECK (run.view.getTilt() == vis::BrainView::kStartTilt);
+}
+
+TEST_CASE ("App: brain view zooms: the wheel, a pinch and the menu bring the brain closer or further (it starts at 1.2 x), Reset view restores it")
+{
+    Runner run;
+    run.view.setBounds (0, 0, 1000, 600);
+    run.view.setVisible (true);
+    run.run (5, [] (int64_t, float& l, float& r) { l = r = 0.0f; });
+    run.view.setTurning (false);
+    CHECK (run.view.getZoom() == vis::BrainView::kDefaultZoom);
+
+    // The zoom scales every distance on screen about the centre: the two Heschl's gyri at 1.2 x are 1.2 times as far
+    // apart as at 1 x (the framing that fits the ear rings).
+    const int left = nodeOf (Station::Heschl, brain::kLeft), right = nodeOf (Station::Heschl, brain::kRight);
+    const auto spread = [&run, left, right]
+    {
+        run.view.renderScene();
+        return run.view.getNodeScreenPosition (left).getDistanceFrom (run.view.getNodeScreenPosition (right));
+    };
+    const float atDefault = spread();
+    run.view.setZoom (1.0f);
+    const float atOne = spread();
+    std::printf ("  Heschl's gyri apart on screen: %.1f px at 1 x, %.1f px at the default %.1f x\n", static_cast<double> (atOne),
+                 static_cast<double> (atDefault), static_cast<double> (vis::BrainView::kDefaultZoom));
+    CHECK (atOne > 10.0f);
+    CHECK_NEAR (atDefault / atOne, vis::BrainView::kDefaultZoom, 0.01);
+
+    // The wheel: one notch (deltaY about 0.23 on Windows) is about 15 %, and back.
+    const juce::MouseEvent e (juce::Desktop::getInstance().getMainMouseSource(), { 500.0f, 300.0f }, {}, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &run.view,
+                              &run.view, juce::Time::getCurrentTime(), { 500.0f, 300.0f }, juce::Time::getCurrentTime(), 1, false);
+    juce::MouseWheelDetails wheel {};
+    wheel.deltaY = 0.23f;
+    run.view.mouseWheelMove (e, wheel);
+    CHECK_NEAR (run.view.getZoom(), std::exp (0.23 * vis::BrainView::kWheelZoomRate), 1.0e-4);
+    CHECK (run.view.getZoom() > 1.1f && run.view.getZoom() < 1.2f);
+    wheel.deltaY = -0.23f;
+    run.view.mouseWheelMove (e, wheel);
+    CHECK_NEAR (run.view.getZoom(), 1.0, 1.0e-4);
+    // A trackpad pinch (macOS) multiplies the zoom by its scale.
+    run.view.mouseMagnify (e, 1.5f);
+    CHECK_NEAR (run.view.getZoom(), 1.5, 1.0e-4);
+
+    // Limits, and a non-finite value is ignored.
+    run.view.setZoom (10.0f);
+    CHECK (run.view.getZoom() == vis::BrainView::kMaxZoom);
+    run.view.setZoom (std::nanf (""));
+    CHECK (run.view.getZoom() == vis::BrainView::kMaxZoom);
+    {
+        // At the closest, the menu's Zoom in is greyed out and Zoom out is not.
+        juce::PopupMenu menu;
+        run.view.addMenuItems (menu);
+        int seen = 0;
+        for (juce::PopupMenu::MenuItemIterator it (menu); it.next();)
+        {
+            const auto& item = it.getItem();
+            if (item.text == "Zoom in")
+            {
+                CHECK (! item.isEnabled);
+                ++seen;
+            }
+            if (item.text == "Zoom out")
+            {
+                CHECK (item.isEnabled);
+                ++seen;
+            }
+        }
+        CHECK (seen == 2);
+    }
+    run.view.setZoom (0.01f);
+    CHECK (run.view.getZoom() == vis::BrainView::kMinZoom);
+    // Still a picture at both limits (the brain stays on screen at the furthest, the centre at the closest).
+    run.view.renderScene();
+    CHECK (run.view.getPlotArea().contains (run.view.getNodeScreenPosition (left)));
+
+    run.view.resetView();
+    CHECK (run.view.getZoom() == vis::BrainView::kDefaultZoom);
 }
 
 TEST_CASE ("App: brain view draws a real brain, not its mirror image (facing it, its right side is on the viewer's left)")

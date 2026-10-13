@@ -18,6 +18,9 @@ using brain::Vec3;
 constexpr Vec3 kEye { 0.0f, 0.42f, 3.1f }, kTarget { 0.0f, -0.17f, 0.0f };
 constexpr float kTanHalfFov = 0.3249197f; // tan 18 degrees: the mockup's 36-degree field of view
 constexpr float kSceneHalfWidth = 1.42f;  // the ear rings' outer edges and a margin (view units)
+// The hint at the right of the legend row (the view's mouse controls).
+constexpr const char* kHintTurning = "Drag to turn, wheel to zoom, click to stop turning";
+constexpr const char* kHintStill = "Drag to turn, wheel to zoom, click to turn again";
 
 // Base colours (0..1; the mockup's, the cloud a little brighter for the app's darker well) and point diameters
 // (view units, the mockup's).
@@ -213,6 +216,16 @@ void BrainView::resetView()
 {
     angle = kStartAngle;
     tilt = kStartTilt;
+    zoom = kDefaultZoom;
+    dirty = true;
+    repaint();
+}
+
+void BrainView::setZoom (float newZoom)
+{
+    if (! std::isfinite (newZoom))
+        return;
+    zoom = juce::jlimit (kMinZoom, kMaxZoom, newZoom);
     dirty = true;
     repaint();
 }
@@ -233,6 +246,18 @@ void BrainView::addMenuItems (juce::PopupMenu& menu)
                   {
                       if (safe != nullptr)
                           safe->setTurning (! safe->isTurning());
+                  });
+    menu.addItem ("Zoom in", zoom < kMaxZoom, false,
+                  [safe]
+                  {
+                      if (safe != nullptr)
+                          safe->zoomBy (1.25f);
+                  });
+    menu.addItem ("Zoom out", zoom > kMinZoom, false,
+                  [safe]
+                  {
+                      if (safe != nullptr)
+                          safe->zoomBy (0.8f);
                   });
     menu.addItem ("Reset view", true, false,
                   [safe]
@@ -316,6 +341,19 @@ void BrainView::mouseDoubleClick (const juce::MouseEvent&)
     // The two clicks toggled the turning twice (unchanged); the visualiser window's listener toggles full screen.
 }
 
+void BrainView::mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    // The wheel zooms about the centre (it does not scroll the panel behind the view).
+    if (wheel.deltaY != 0.0f)
+        zoomBy (std::exp (wheel.deltaY * kWheelZoomRate));
+}
+
+void BrainView::mouseMagnify (const juce::MouseEvent&, float scaleFactor)
+{
+    if (scaleFactor > 0.0f)
+        zoomBy (scaleFactor);
+}
+
 juce::MouseCursor BrainView::getMouseCursor()
 {
     if (auto* parent = getParentComponent(); parent != nullptr && parent->getMouseCursor() == juce::MouseCursor::NoCursor)
@@ -384,7 +422,9 @@ void BrainView::updateProjection() noexcept
     const float s = renderScale;
     const float w = plot.getWidth() * s, h = plot.getHeight() * s;
     const float distance = brain::length (kTarget - kEye);
-    projection.focal = std::max (1.0f, std::min (h * 0.5f / kTanHalfFov, w * 0.5f * distance / kSceneHalfWidth));
+    // Zoom 1 fits the whole scene (the ear rings) into the plot; above it the brain comes closer and the ears may
+    // leave the picture. The points and tracts grow with it (pointScale follows focal).
+    projection.focal = std::max (1.0f, std::min (h * 0.5f / kTanHalfFov, w * 0.5f * distance / kSceneHalfWidth)) * zoom;
     projection.cx = (plot.getCentreX() - well.getX()) * s;
     projection.cy = (plot.getCentreY() - well.getY()) * s;
     projection.pointScale = projection.focal * kTanHalfFov * 0.5f; // a point of size d has the radius d x this / depth
@@ -883,7 +923,10 @@ void BrainView::renderLegend()
     const auto colourOf = [] (const std::array<float, 3>& c) { return juce::Colour::fromFloatRGBA (c[0], c[1], c[2], 1.0f); };
     if (roomy)
     {
-        auto legend = bottom.removeFromTop (17.0f).withTrimmedRight (200.0f); // the hint sits at the right
+        // The hint sits at the right (paintOverlay draws it): keep its width free.
+        const float hint = std::max (juce::GlyphArrangement::getStringWidth (labelFont(), kHintTurning),
+                                     juce::GlyphArrangement::getStringWidth (labelFont(), kHintStill));
+        auto legend = bottom.removeFromTop (17.0f).withTrimmedRight (hint + 16.0f);
         // The signal's colour: low (red) to high (cyan) notes.
         const auto bar = legend.removeFromLeft (34.0f).withSizeKeepingCentre (30.0f, 4.0f);
         juce::ColourGradient grad (colourOf (brain::frequencyRgb (60.0)), bar.getX(), 0.0f, colourOf (brain::frequencyRgb (12000.0)), bar.getRight(), 0.0f, false);
@@ -972,8 +1015,7 @@ void BrainView::paintOverlay (juce::Graphics& g)
         // The hint at the right of the legend row (clear of the window's header and buttons).
         g.setFont (labelFont());
         g.setColour (labelColour());
-        g.drawText (turning ? "Drag to turn, click to stop turning" : "Drag to turn, click to turn again", legendArea.withHeight (17.0f),
-                    juce::Justification::centredRight, false);
+        g.drawText (turning ? kHintTurning : kHintStill, legendArea.withHeight (17.0f), juce::Justification::centredRight, false);
     }
 
     // Legend and caption at the bottom (static: drawn once into legendImage).
