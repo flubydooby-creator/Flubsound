@@ -14,15 +14,19 @@
 // numbers on every OS (test_app_stall_attribution.cpp).
 //
 // The CPU time a guest kernel counts for a thread can include time the
-// hypervisor took from its vCPU: a kernel with no steal clock (Hyper-V gives
-// Linux none) cannot see it, and one with a steal clock but without
-// CONFIG_PARAVIRT_TIME_ACCOUNTING (or booted with no-steal-acc) reports it
-// in /proc/stat but still charges it to the running thread. A cycle whose CPU
-// time reached the period counts as the runner's only when steal on the CPU
-// the thread ran on explains it; with no steal it stays the engine's own work
-// and the case fails. /proc/stat counts steal in USER_HZ ticks (10 ms), so
-// d ticks in a cycle's window bound its steal below (d + 1) ticks: one tick
-// explains any overrun under 20 ms, no tick explains none.
+// hypervisor took from its vCPU: a kernel with no steal clock cannot see it
+// (Hyper-V gives Linux none: GitHub's runners report 0 steal), and one with
+// a steal clock but without CONFIG_PARAVIRT_TIME_ACCOUNTING (or booted with
+// no-steal-acc) reports it in /proc/stat but still charges it to the
+// running thread. A cycle whose CPU time reached the period counts as the
+// runner's only when the runner's measured share explains it; otherwise it
+// stays the engine's own work and the case fails. Two measures:
+// - steal on the CPU the thread ran on. /proc/stat counts it in USER_HZ
+//   ticks (10 ms), so d ticks in a cycle's window bound its steal below
+//   (d + 1) ticks: one tick explains any overrun under 20 ms, no tick none;
+// - on Hyper-V, each vCPU's run time (HV_X64_MSR_VP_RUNTIME, sampled by a
+//   root helper: tools/scripts/hv-vp-runtime.py): a cycle charged C of CPU
+//   time while its vCPU ran V had at least C - V taken by the hypervisor.
 #pragma once
 
 #include "flub/analysis/CallbackTiming.h"
@@ -81,8 +85,20 @@ struct RunnerSamples
     // Without CONFIG_IRQ_TIME_ACCOUNTING their time is in the CPU time of
     // the thread they interrupted.
     std::vector<int64_t> irqsPerCpu, softirqsPerCpu;
+    // Hyper-V's run time per vCPU (HV_X64_MSR_VP_RUNTIME, sampled by a root
+    // helper: tools/scripts/hv-vp-runtime.py) on its own clock stamps, ns,
+    // numCpus per sample indexed by CPU id (-1: that CPU not sampled);
+    // empty when not sampled.
+    std::vector<int64_t> vpWallNs, vpRunNs;
 
     size_t size() const { return wallNs.size(); }
+    int64_t vpRun (size_t sample, int cpu) const { return vpRunNs[at (sample, cpu)]; }
+    void addVp (int64_t wall, const std::vector<int64_t>& runNs)
+    {
+        vpWallNs.push_back (wall);
+        for (int c = 0; c < numCpus; ++c)
+            vpRunNs.push_back (c < static_cast<int> (runNs.size()) ? runNs[static_cast<size_t> (c)] : -1);
+    }
     size_t at (size_t sample, int cpu) const { return sample * static_cast<size_t> (numCpus) + static_cast<size_t> (cpu); }
     int64_t steal (size_t sample, int cpu) const { return stealPerCpu[at (sample, cpu)]; }
     int64_t irqs (size_t sample, int cpu) const { return irqsPerCpu[at (sample, cpu)]; }
@@ -113,8 +129,11 @@ struct Runner
     int64_t stealTicks = 0;   // steal on those CPUs (all CPUs when neither is known), up to the accounting lag after the cycle
     int64_t stealTotal = 0;   // steal on all CPUs in the same span
     int64_t waitNs = -1;      // the thread's run-queue wait in the cycle (-1: not read)
-    int64_t irqs = 0, softirqs = 0; // interrupts and softirqs on the thread's CPU(s) in the cycle (information)
-    int64_t explainedNs = 0;  // CPU time the runner explains: (ticks + 1) x tick when steal was seen and counts as CPU time
+    int64_t irqs = -1, softirqs = -1; // interrupts and softirqs on the thread's CPU(s) in the cycle (information; -1: not read)
+    int64_t vpRunNs = -1;     // how long those vCPUs really ran over the cycle's span (Hyper-V; -1: not sampled)
+    int64_t hypervisorNs = 0; // the cycle's CPU time less that: charged to the thread while its vCPU did not run
+    int64_t explainedNs = 0;  // CPU time the runner explains: the hypervisor's share, or (ticks + 1) x tick
+                              // when steal was seen and counts as CPU time
 };
 
 /** The latest sample at or before 't' (size() when none). */
@@ -131,21 +150,21 @@ inline size_t sampleAtOrAfter (const RunnerSamples& s, int64_t t)
 }
 
 /** The runner per cycle for callbacks from .. to - 1 (index 0 has no cycle
-    before it). A cycle spans the callback before to this one; its steal is
+    before it). A cycle spans the callback before to this one. Its steal is
     read up to 'lagNs' later, because the kernel adds a CPU's steal to
-    /proc/stat at that CPU's next tick (or when it leaves idle). */
+    /proc/stat at that CPU's next tick (or when it leaves idle). Its vCPU's
+    run time (Hyper-V) is read over the samples around the span, which can
+    only add run time of the neighbouring cycles: the hypervisor's share
+    (CPU time less run time) is a lower bound. */
 inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callbacks, const RunnerSamples& samples, size_t from, size_t to, int64_t lagNs)
 {
     std::vector<Runner> runner (callbacks.size());
     to = std::min (to, callbacks.size());
+    const auto vpSamples = samples.vpWallNs.size();
     for (size_t k = std::max<size_t> (from, 1); k < to; ++k)
     {
         auto& r = runner[k];
         const auto begin = callbacks[k - 1].wallNs, end = callbacks[k].wallNs;
-        const auto s0 = sampleAtOrBefore (samples, begin), s1 = sampleAtOrAfter (samples, end + lagNs);
-        if (s0 >= samples.size() || s1 >= samples.size())
-            continue; // not bracketed: not measured
-        r.measured = true;
         r.cpuBefore = callbacks[k - 1].cpu;
         r.cpuAfter = callbacks[k].cpu;
         const auto known = [&] (int cpu) { return cpu >= 0 && cpu < samples.numCpus; };
@@ -164,24 +183,47 @@ inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callback
                     sum += counter (sampleTo, c) - counter (sampleFrom, c);
             return sum;
         };
-        if (known (r.cpuBefore) || known (r.cpuAfter))
-            r.stealTicks = onThreadCpus ([&] (size_t i, int c) { return samples.steal (i, c); }, s0, s1);
-        else
-            r.stealTicks = samples.stealTotal[s1] - samples.stealTotal[s0];
-        r.stealTotal = samples.stealTotal[s1] - samples.stealTotal[s0];
-        const auto w1 = sampleAtOrAfter (samples, end); // counted when they happen: no lag
-        if (w1 < samples.size())
+
+        // Hyper-V: how long the thread's vCPU(s) ran (not with an unknown
+        // CPU: all vCPUs together would excuse anything).
+        if (vpSamples > 0 && (known (r.cpuBefore) || known (r.cpuAfter)))
         {
-            if (samples.waitNs[s0] >= 0 && samples.waitNs[w1] >= 0)
-                r.waitNs = samples.waitNs[w1] - samples.waitNs[s0];
-            if (! samples.irqsPerCpu.empty())
+            const auto after = static_cast<size_t> (std::lower_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), end) - samples.vpWallNs.begin());
+            const auto upTo = std::upper_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), begin);
+            const auto before = upTo == samples.vpWallNs.begin() ? vpSamples : static_cast<size_t> (upTo - samples.vpWallNs.begin()) - 1;
+            const auto sampled = [&] (int cpu) { return ! known (cpu) || (samples.vpRun (before, cpu) >= 0 && samples.vpRun (after, cpu) >= 0); };
+            if (before < vpSamples && after < vpSamples && sampled (r.cpuBefore) && sampled (r.cpuAfter))
             {
-                r.irqs = onThreadCpus ([&] (size_t i, int c) { return samples.irqs (i, c); }, s0, w1);
-                r.softirqs = onThreadCpus ([&] (size_t i, int c) { return samples.softirqs (i, c); }, s0, w1);
+                r.measured = true;
+                r.vpRunNs = onThreadCpus ([&] (size_t i, int c) { return samples.vpRun (i, c); }, before, after);
+                r.hypervisorNs = std::max<int64_t> (0, (callbacks[k].cpuNs - callbacks[k - 1].cpuNs) - r.vpRunNs);
+            }
+        }
+
+        const auto s0 = sampleAtOrBefore (samples, begin), s1 = sampleAtOrAfter (samples, end + lagNs);
+        if (s0 < samples.size() && s1 < samples.size())
+        {
+            r.measured = true;
+            if (known (r.cpuBefore) || known (r.cpuAfter))
+                r.stealTicks = onThreadCpus ([&] (size_t i, int c) { return samples.steal (i, c); }, s0, s1);
+            else
+                r.stealTicks = samples.stealTotal[s1] - samples.stealTotal[s0];
+            r.stealTotal = samples.stealTotal[s1] - samples.stealTotal[s0];
+            const auto w1 = sampleAtOrAfter (samples, end); // counted when they happen: no lag
+            if (w1 < samples.size())
+            {
+                if (samples.waitNs[s0] >= 0 && samples.waitNs[w1] >= 0)
+                    r.waitNs = samples.waitNs[w1] - samples.waitNs[s0];
+                if (! samples.irqsPerCpu.empty())
+                {
+                    r.irqs = onThreadCpus ([&] (size_t i, int c) { return samples.irqs (i, c); }, s0, w1);
+                    r.softirqs = onThreadCpus ([&] (size_t i, int c) { return samples.softirqs (i, c); }, s0, w1);
+                }
             }
         }
         if (r.stealTicks > 0 && samples.stealInCpuTime != StealInCpuTime::No)
             r.explainedNs = (r.stealTicks + 1) * samples.tickNs;
+        r.explainedNs = std::max (r.explainedNs, r.hypervisorNs);
     }
     return runner;
 }
@@ -278,9 +320,13 @@ inline std::string describeRunner (const Window& w, size_t k)
     s << " (" << r->stealTotal << " on all CPUs)";
     if (r->waitNs >= 0)
         s << ", run-queue wait " << toMs (r->waitNs) << " ms";
-    s << ", " << r->irqs << " interrupts and " << r->softirqs << " softirqs on its CPU";
-    if (r->explainedNs > 0)
-        s << ", the runner's up to " << toMs (r->explainedNs) << " ms of its CPU time";
+    if (r->irqs >= 0)
+        s << ", " << r->irqs << " interrupts and " << r->softirqs << " softirqs on its CPU";
+    if (r->vpRunNs >= 0)
+        s << ", its vCPU ran " << toMs (r->vpRunNs) << " ms around it (Hyper-V: at least " << toMs (r->hypervisorNs)
+          << " ms of its CPU time the hypervisor's)";
+    if (r->explainedNs > 0 && r->explainedNs > r->hypervisorNs)
+        s << ", the runner's up to " << toMs (r->explainedNs) << " ms of its CPU time (steal)";
     return s.str();
 }
 

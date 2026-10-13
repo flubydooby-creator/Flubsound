@@ -524,6 +524,28 @@ jobs:
           grep -E '^cpu' /proc/stat
           echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid); event sources: $(ls /sys/bus/event_source/devices | tr '\n' ' ')"
           sudo dmesg | grep -iE 'Performance Events|Hyper-V|steal' | head -n 12 || true
+      # Hyper-V gives the Linux guest no steal clock (steal reads 0), so the
+      # xrun case bounds the hypervisor's share of the data thread's CPU time
+      # with each vCPU's own run time (HV_X64_MSR_VP_RUNTIME through the msr
+      # driver, root only): a root helper at idle priority samples it every
+      # millisecond for the rest of the job (tools/scripts/hv-vp-runtime.py;
+      # each read of another vCPU's MSR is an interrupt there). Without it
+      # the case runs as before and says so.
+      - name: Hyper-V vCPU run time sampler
+        run: |
+          log="$XDG_RUNTIME_DIR/vp-runtime.bin"
+          if sudo modprobe msr && [ -e /dev/cpu/0/msr ]; then
+            sudo nohup chrt -i 0 python3 tools/scripts/hv-vp-runtime.py "$log" 1 > "$XDG_RUNTIME_DIR/vp-runtime.log" 2>&1 &
+            for i in $(seq 50); do [ -s "$log" ] && break; sleep 0.1; done
+            cat "$XDG_RUNTIME_DIR/vp-runtime.log"
+            if [ -s "$log" ]; then
+              echo "FLUB_VP_RUNTIME_LOG=$log" >> "$GITHUB_ENV"
+            else
+              echo "::warning::no vCPU run time samples: the xrun case cannot bound the hypervisor's share"
+            fi
+          else
+            echo "::warning::no msr driver: the xrun case cannot bound the hypervisor's share"
+          fi
       - name: Node and journal tests (20 runs in a row)
         run: |
           app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)

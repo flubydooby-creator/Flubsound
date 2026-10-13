@@ -992,6 +992,56 @@ std::string readTextFile (const std::string& path)
     return text.str();
 }
 
+/** Hyper-V's run time per vCPU as tools/scripts/hv-vp-runtime.py writes it
+    to $FLUB_VP_RUNTIME_LOG (CI's pipewire job starts it as root): the
+    samples from 'fromNs' on, into 's'. Returns what was read, or why not. */
+std::string readVpRuntime (stalls::RunnerSamples& s, int64_t fromNs)
+{
+    const char* path = std::getenv ("FLUB_VP_RUNTIME_LOG");
+    if (path == nullptr || *path == '\0')
+        return "not sampled (no FLUB_VP_RUNTIME_LOG)";
+    std::ifstream in (path, std::ios::binary);
+    int32_t numCpus = 0;
+    if (! in.read (reinterpret_cast<char*> (&numCpus), sizeof (numCpus)) || numCpus <= 0 || numCpus > 1024)
+        return std::string ("not sampled (no header in ") + path + ")";
+    std::vector<int32_t> ids (static_cast<size_t> (numCpus));
+    if (! in.read (reinterpret_cast<char*> (ids.data()), static_cast<std::streamsize> (ids.size() * sizeof (int32_t))))
+        return "not sampled (a short header)";
+    const auto header = static_cast<std::streamoff> (sizeof (int32_t) * (ids.size() + 1));
+    const auto record = static_cast<std::streamoff> (sizeof (int64_t) * (ids.size() + 1));
+    in.seekg (0, std::ios::end);
+    const auto records = (static_cast<std::streamoff> (in.tellg()) - header) / record; // a record being written is left out
+    const auto tail = std::min<std::streamoff> (records, 20000);                      // about the last 20 s
+    in.seekg (header + (records - tail) * record);
+    std::vector<char> bytes (static_cast<size_t> (tail * record));
+    if (tail <= 0 || ! in.read (bytes.data(), static_cast<std::streamsize> (bytes.size())))
+        return "not sampled (no records)";
+    std::vector<int64_t> runNs (static_cast<size_t> (s.numCpus), -1);
+    size_t added = 0;
+    for (std::streamoff i = 0; i < tail; ++i)
+    {
+        const char* p = bytes.data() + i * record;
+        int64_t t = 0;
+        std::memcpy (&t, p, sizeof (t));
+        if (t < fromNs)
+            continue;
+        for (size_t c = 0; c < ids.size(); ++c)
+        {
+            uint64_t units = 0; // 100 ns
+            std::memcpy (&units, p + sizeof (int64_t) * (c + 1), sizeof (units));
+            if (ids[c] >= 0 && ids[c] < s.numCpus)
+                runNs[static_cast<size_t> (ids[c])] = static_cast<int64_t> (units) * 100;
+        }
+        s.addVp (t, runNs);
+        ++added;
+    }
+    std::ostringstream text;
+    text << added << " samples of " << numCpus << " vCPUs";
+    if (added > 1)
+        text << ", every " << static_cast<double> (s.vpWallNs.back() - s.vpWallNs.front()) / 1.0e6 / static_cast<double> (added - 1) << " ms";
+    return text.str();
+}
+
 /** What the guest can tell about the hypervisor and its own accounting. */
 struct KernelFacts
 {
@@ -1245,7 +1295,8 @@ IdleRun runIdleWindow (bool inject)
     w.recorded = recorded;
     w.periodNs = periodNs;
     w.unsplit = static_cast<double> (node.quantumFrames) <= block; // no quantum split: the stamps are cycle starts
-    const auto samples = sampler.samples (facts.stealInCpuTime, facts.tickNs);
+    auto samples = sampler.samples (facts.stealInCpuTime, facts.tickNs);
+    const auto vpRuntime = readVpRuntime (samples, w.callbacks.front().wallNs - 10000000);
     w.runner = stalls::runnerPerCycle (w.callbacks, samples, first, recorded, lagNs);
     run.attribution = stalls::attribute (w);
     const auto& a = run.attribution;
@@ -1295,8 +1346,11 @@ IdleRun runIdleWindow (bool inject)
         if (const auto* r = stalls::runnerOf (w, k))
         {
             maxWaitNs = std::max (maxWaitNs, r->waitNs);
-            irqCounts.push_back (r->irqs);
-            softirqCounts.push_back (r->softirqs);
+            if (r->irqs >= 0)
+            {
+                irqCounts.push_back (r->irqs);
+                softirqCounts.push_back (r->softirqs);
+            }
         }
         if (w.callbacks[k].cpu >= 0 && std::find (threadCpus.begin(), threadCpus.end(), w.callbacks[k].cpu) == threadCpus.end())
             threadCpus.push_back (w.callbacks[k].cpu);
@@ -1310,6 +1364,29 @@ IdleRun runIdleWindow (bool inject)
     if (! irqCounts.empty())
         lines << "; interrupts / softirqs per cycle on its CPU: median " << irqCounts[irqCounts.size() / 2] << " / " << softirqCounts[softirqCounts.size() / 2]
               << ", max " << irqCounts.back() << " / " << softirqCounts.back();
+    // Hyper-V: how much of the data thread's CPU time its vCPU did not run.
+    int vpCycles = 0;
+    int64_t hypervisorTotalNs = 0, hypervisorMaxNs = 0;
+    size_t hypervisorMaxAt = 0;
+    for (size_t k = first; k < last; ++k)
+        if (const auto* r = stalls::runnerOf (w, k); r != nullptr && r->vpRunNs >= 0)
+        {
+            ++vpCycles;
+            hypervisorTotalNs += r->hypervisorNs;
+            if (r->hypervisorNs > hypervisorMaxNs)
+            {
+                hypervisorMaxNs = r->hypervisorNs;
+                hypervisorMaxAt = k;
+            }
+        }
+    lines << "; Hyper-V vCPU run time: " << vpRuntime;
+    if (vpCycles > 0)
+    {
+        lines << ", " << vpCycles << " cycles bounded: the hypervisor's share of the thread's CPU time at least " << ms (hypervisorTotalNs) << " ms in all, "
+              << ms (hypervisorMaxNs) << " ms at most in a cycle";
+        if (hypervisorMaxNs > 0)
+            lines << " (callback " << hypervisorMaxAt - first << ", CPU " << ms (stalls::cycleCpu (w, hypervisorMaxAt)) << " ms)";
+    }
     lines << "; reported steal in the thread's CPU time: " << stalls::describe (facts.stealInCpuTime) << " (" << facts.accounting << "); "
           << samples.size() << " samples";
     if (samples.size() > 1)

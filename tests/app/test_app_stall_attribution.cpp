@@ -130,6 +130,25 @@ stalls::RunnerSamples samplesFor (const stalls::Window& w, const std::vector<Ste
     return s;
 }
 
+/** Hyper-V's run time per vCPU every 0.5 ms (what tools/scripts/hv-vp-runtime.py
+    samples): CPU 1 (the thread's) runs a quarter of the time, except
+    'slowRunPerMs' of each millisecond from 'slowFrom' to 'slowTo'; the
+    other vCPUs a quarter of the time. */
+void addVpRuntime (stalls::RunnerSamples& s, const stalls::Window& w, int64_t slowFrom, int64_t slowTo, double slowRunPerMs)
+{
+    std::vector<int64_t> run (4, 0);
+    double cpu1 = 0.0;
+    const auto begin = w.callbacks.front().wallNs - 1000000, end = w.callbacks.back().wallNs + 20000000;
+    for (int64_t t = begin; t <= end; t += 500000)
+    {
+        run[1] = static_cast<int64_t> (std::llround (cpu1));
+        s.addVp (t, run); // the run time up to t
+        cpu1 += 500000.0 * (t >= slowFrom && t < slowTo ? slowRunPerMs : 0.25);
+        for (const size_t c : { size_t { 0 }, size_t { 2 }, size_t { 3 } })
+            run[c] += 125000;
+    }
+}
+
 /** The case's own lag: steal is read up to 2 periods + 4 ms after a cycle. */
 const int64_t kLagNs = 2 * kPeriod + 4000000;
 
@@ -355,4 +374,61 @@ TEST_CASE ("App: PipeWire xrun attribution - a missed cycle and a held callback 
     CHECK ((a.engineCycles == std::vector<size_t> { at (w, 60) }));
     CHECK (a.xrunsStalled == 0);
     CHECK (! failed.empty());
+}
+
+TEST_CASE ("App: PipeWire xrun attribution - on Hyper-V the vCPU's run time bounds the hypervisor's share: run 38030655885's slow cycle passes when its vCPU ran 0.7 ms of it, fails when it ran 4.2 ms (E48, R1.2)")
+{
+    // The slow cycle spans 6.04 ms from the callback before; its thread was
+    // charged 3.98 ms of CPU time. The vCPU's run time is sampled alone
+    // (no /proc/stat), as on a runner where steal reads 0.
+    auto w = makeWindow (failingRun());
+    const auto slowFrom = w.callbacks[at (w, 47)].wallNs, slowTo = w.callbacks[at (w, 48)].wallNs;
+    const auto span = static_cast<double> (slowTo - slowFrom) / 1.0e6;
+    for (const double ranMs : { 0.7, 4.2 })
+    {
+        stalls::RunnerSamples s;
+        s.numCpus = 4;
+        addVpRuntime (s, w, slowFrom, slowTo, ranMs / span);
+        withRunner (w, s);
+        const auto& r = w.runner[at (w, 48)];
+        const auto a = stalls::attribute (w);
+        const auto failed = stalls::judge (a, w, 1, 0, 1);
+        print (ranMs < 1.0 ? "vCPU ran 0.7 ms of the slow cycle" : "vCPU ran 4.2 ms of the slow cycle", a, failed);
+        CHECK (r.measured);
+        CHECK (r.stealTicks == 0);
+        // The samples around the span add at most 0.5 ms at a quarter rate.
+        CHECK (r.vpRunNs >= static_cast<int64_t> (ranMs * 1.0e6) - 100000);
+        CHECK (r.vpRunNs <= static_cast<int64_t> (ranMs * 1.0e6) + 300000);
+        if (ranMs < 1.0)
+        {
+            CHECK (r.hypervisorNs >= 2900000); // at least 3.98 - 0.95 ms
+            CHECK (r.explainedNs == r.hypervisorNs);
+            CHECK (stalls::isStall (w, at (w, 48), a.usualWaits));
+            CHECK (failed.empty());
+            CHECK (a.events.find ("its vCPU ran") != std::string::npos);
+        }
+        else
+        {
+            CHECK (r.hypervisorNs == 0);
+            CHECK ((a.engineCycles == std::vector<size_t> { at (w, 48) }));
+            CHECK (! failed.empty());
+        }
+        // An ordinary cycle: its vCPU ran at least its 0.62 ms of CPU time.
+        CHECK (w.runner[at (w, 100)].vpRunNs >= 620000);
+        CHECK (w.runner[at (w, 100)].hypervisorNs == 0);
+    }
+
+    // With the thread's CPU not known, the vCPUs' run time bounds nothing.
+    auto unknown = makeWindow ([] {
+        auto specs = failingRun();
+        for (auto& spec : specs)
+            spec.cpu = -1;
+        return specs;
+    }());
+    stalls::RunnerSamples s;
+    s.numCpus = 4;
+    addVpRuntime (s, unknown, slowFrom, slowTo, 0.7 / span);
+    withRunner (unknown, s);
+    CHECK (unknown.runner[at (unknown, 48)].vpRunNs == -1);
+    CHECK (unknown.runner[at (unknown, 48)].explainedNs == 0);
 }
