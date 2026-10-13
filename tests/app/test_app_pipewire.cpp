@@ -994,7 +994,10 @@ std::string readTextFile (const std::string& path)
 
 /** Hyper-V's run time per vCPU as tools/scripts/hv-vp-runtime.py writes it
     to $FLUB_VP_RUNTIME_LOG (CI's pipewire job starts it as root): the
-    samples from 'fromNs' on, into 's'. Returns what was read, or why not. */
+    samples from 'fromNs' on, into 's', each with its stamps before and
+    after its reads. Returns what was read (with how long the reads took:
+    the helper runs at idle priority and can be held between its stamps),
+    or why not. */
 std::string readVpRuntime (stalls::RunnerSamples& s, int64_t fromNs)
 {
     const char* path = std::getenv ("FLUB_VP_RUNTIME_LOG");
@@ -1008,7 +1011,7 @@ std::string readVpRuntime (stalls::RunnerSamples& s, int64_t fromNs)
     if (! in.read (reinterpret_cast<char*> (ids.data()), static_cast<std::streamsize> (ids.size() * sizeof (int32_t))))
         return "not sampled (a short header)";
     const auto header = static_cast<std::streamoff> (sizeof (int32_t) * (ids.size() + 1));
-    const auto record = static_cast<std::streamoff> (sizeof (int64_t) * (ids.size() + 1));
+    const auto record = static_cast<std::streamoff> (sizeof (int64_t) * (ids.size() + 2)); // two stamps, then the run times
     in.seekg (0, std::ios::end);
     const auto records = (static_cast<std::streamoff> (in.tellg()) - header) / record; // a record being written is left out
     const auto tail = std::min<std::streamoff> (records, 20000);                      // about the last 20 s
@@ -1017,28 +1020,35 @@ std::string readVpRuntime (stalls::RunnerSamples& s, int64_t fromNs)
     if (tail <= 0 || ! in.read (bytes.data(), static_cast<std::streamsize> (bytes.size())))
         return "not sampled (no records)";
     std::vector<int64_t> runNs (static_cast<size_t> (s.numCpus), -1);
-    size_t added = 0;
+    std::vector<int64_t> readNs; // per sample: from its first stamp to its second
     for (std::streamoff i = 0; i < tail; ++i)
     {
         const char* p = bytes.data() + i * record;
-        int64_t t = 0;
+        int64_t t = 0, done = 0;
         std::memcpy (&t, p, sizeof (t));
+        std::memcpy (&done, p + sizeof (int64_t), sizeof (done));
         if (t < fromNs)
             continue;
         for (size_t c = 0; c < ids.size(); ++c)
         {
             uint64_t units = 0; // 100 ns
-            std::memcpy (&units, p + sizeof (int64_t) * (c + 1), sizeof (units));
+            std::memcpy (&units, p + sizeof (int64_t) * (c + 2), sizeof (units));
             if (ids[c] >= 0 && ids[c] < s.numCpus)
                 runNs[static_cast<size_t> (ids[c])] = static_cast<int64_t> (units) * 100;
         }
-        s.addVp (t, runNs);
-        ++added;
+        s.addVp (t, done, runNs);
+        readNs.push_back (done - t);
     }
+    const auto added = readNs.size();
     std::ostringstream text;
     text << added << " samples of " << numCpus << " vCPUs";
     if (added > 1)
+    {
         text << ", every " << static_cast<double> (s.vpWallNs.back() - s.vpWallNs.front()) / 1.0e6 / static_cast<double> (added - 1) << " ms";
+        std::sort (readNs.begin(), readNs.end());
+        text << ", reads took median " << static_cast<double> (readNs[added / 2]) / 1.0e3 << " us, max " << static_cast<double> (readNs.back()) / 1.0e3
+             << " us";
+    }
     return text.str();
 }
 

@@ -7,9 +7,11 @@
 #include "AppTestSupport.h"
 #include "CallbackStallAttribution.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace flubtest;
@@ -130,23 +132,36 @@ stalls::RunnerSamples samplesFor (const stalls::Window& w, const std::vector<Ste
     return s;
 }
 
-/** Hyper-V's run time per vCPU every 0.5 ms (what tools/scripts/hv-vp-runtime.py
-    samples): CPU 1 (the thread's) runs a quarter of the time, except
-    'slowRunPerMs' of each millisecond from 'slowFrom' to 'slowTo'; the
-    other vCPUs a quarter of the time. */
-void addVpRuntime (stalls::RunnerSamples& s, const stalls::Window& w, int64_t slowFrom, int64_t slowTo, double slowRunPerMs)
+/** A sample of the run time helper stamped at 'start' that did its reads
+    only at 'done' (preempted in between: it runs at idle priority). */
+struct HeldSample
 {
-    std::vector<int64_t> run (4, 0);
-    double cpu1 = 0.0;
+    int64_t start = -1, done = -1;
+};
+
+/** Hyper-V's run time per vCPU every 0.5 ms (what tools/scripts/hv-vp-runtime.py
+    samples, its reads taking 20 us): CPU 1 (the thread's) runs a quarter of
+    the time, except 'slowRunPerMs' of each millisecond from 'slowFrom' to
+    'slowTo'; the other vCPUs a quarter of the time. With a 'held' sample,
+    the samples it held up are not taken. */
+void addVpRuntime (stalls::RunnerSamples& s, const stalls::Window& w, int64_t slowFrom, int64_t slowTo, double slowRunPerMs, HeldSample held = {})
+{
     const auto begin = w.callbacks.front().wallNs - 1000000, end = w.callbacks.back().wallNs + 20000000;
-    for (int64_t t = begin; t <= end; t += 500000)
+    const auto quarter = [begin] (int64_t t) { return static_cast<int64_t> (std::llround (0.25 * static_cast<double> (t - begin))); };
+    const auto cpu1 = [&] (int64_t t) // CPU 1's run time up to t
     {
-        run[1] = static_cast<int64_t> (std::llround (cpu1));
-        s.addVp (t, run); // the run time up to t
-        cpu1 += 500000.0 * (t >= slowFrom && t < slowTo ? slowRunPerMs : 0.25);
-        for (const size_t c : { size_t { 0 }, size_t { 2 }, size_t { 3 } })
-            run[c] += 125000;
-    }
+        const auto slow = std::max<int64_t> (0, std::min (t, slowTo) - std::max (begin, slowFrom));
+        return quarter (t) + static_cast<int64_t> (std::llround ((slowRunPerMs - 0.25) * static_cast<double> (slow)));
+    };
+    std::vector<std::pair<int64_t, int64_t>> stamps; // start, done
+    for (int64_t t = begin; t <= end; t += 500000)
+        if (held.start < 0 || t < held.start || t > held.done)
+            stamps.emplace_back (t, t + 20000);
+    if (held.start >= 0)
+        stamps.emplace_back (held.start, held.done);
+    std::sort (stamps.begin(), stamps.end());
+    for (const auto& [start, done] : stamps)
+        s.addVp (start, done, { quarter (done), cpu1 (done), quarter (done), quarter (done) }); // read at the end of its reads
 }
 
 /** The case's own lag: steal is read up to 2 periods + 4 ms after a cycle. */
@@ -431,4 +446,44 @@ TEST_CASE ("App: PipeWire xrun attribution - on Hyper-V the vCPU's run time boun
     withRunner (unknown, s);
     CHECK (unknown.runner[at (unknown, 48)].vpRunNs == -1);
     CHECK (unknown.runner[at (unknown, 48)].explainedNs == 0);
+}
+
+TEST_CASE ("App: PipeWire xrun attribution - a run time sample stamped before the slow cycle but read inside it (the helper preempted) does not bound it: the slow cycle stays the engine's (E48, R1.2)")
+{
+    // The helper stamps a sample, then reads the MSRs; at idle priority it
+    // can be preempted in between. Here it stamped 10 us before the slow
+    // cycle's span and read only 0.1 ms before its end, after the vCPU had
+    // run 4.2 ms of it (real work). Taken as the sample before the span, it
+    // would leave that run time out (the vCPU "ran" about 0.2 ms) and call
+    // 3.8 ms of the cycle's 3.98 ms the hypervisor's. Its reads were not
+    // done by the span's start, so the sample before it bounds the cycle.
+    auto w = makeWindow (failingRun());
+    const auto slowFrom = w.callbacks[at (w, 47)].wallNs, slowTo = w.callbacks[at (w, 48)].wallNs;
+    const auto span = static_cast<double> (slowTo - slowFrom) / 1.0e6;
+    stalls::RunnerSamples s;
+    s.numCpus = 4;
+    addVpRuntime (s, w, slowFrom, slowTo, 4.2 / span, { slowFrom - 10000, slowTo - 100000 });
+    withRunner (w, s);
+    const auto& r = w.runner[at (w, 48)];
+    const auto a = stalls::attribute (w);
+    const auto failed = stalls::judge (a, w, 1, 0, 1);
+    print ("a held sample before the slow cycle", a, failed);
+    REQUIRE (r.measured);
+    CHECK (r.vpRunNs >= 4200000); // the work is inside the bracket
+    CHECK (r.hypervisorNs == 0);
+    CHECK ((a.engineCycles == std::vector<size_t> { at (w, 48) }));
+    CHECK (! failed.empty());
+
+    // What a bracket by first stamps alone would have read: from the held
+    // sample to the first one stamped at the span's end or later.
+    const auto heldAt = static_cast<size_t> (std::find (s.vpWallNs.begin(), s.vpWallNs.end(), slowFrom - 10000) - s.vpWallNs.begin());
+    const auto afterAt = static_cast<size_t> (std::lower_bound (s.vpWallNs.begin(), s.vpWallNs.end(), slowTo) - s.vpWallNs.begin());
+    REQUIRE (heldAt < s.vpWallNs.size());
+    REQUIRE (afterAt < s.vpWallNs.size());
+    const auto heldRun = s.vpRun (afterAt, 1) - s.vpRun (heldAt, 1);
+    std::cout << "    bracketed by first stamps: the vCPU ran " << static_cast<double> (heldRun) / 1.0e6 << " ms, a hypervisor's share of "
+              << static_cast<double> (stalls::cycleCpu (w, at (w, 48)) - heldRun) / 1.0e6 << " ms; by the reads: ran " << static_cast<double> (r.vpRunNs) / 1.0e6
+              << " ms, share " << static_cast<double> (r.hypervisorNs) / 1.0e6 << " ms\n";
+    CHECK (heldRun < 300000);
+    CHECK (stalls::cycleCpu (w, at (w, 48)) - heldRun >= 3600000);
 }

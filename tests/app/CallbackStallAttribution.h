@@ -26,7 +26,8 @@
 //   (d + 1) ticks: one tick explains any overrun under 20 ms, no tick none;
 // - on Hyper-V, each vCPU's run time (HV_X64_MSR_VP_RUNTIME, sampled by a
 //   root helper: tools/scripts/hv-vp-runtime.py): a cycle charged C of CPU
-//   time while its vCPU ran V had at least C - V taken by the hypervisor.
+//   time while its vCPU ran V had at least C - V taken by the hypervisor
+//   (V over samples whose reads bracket the cycle).
 #pragma once
 
 #include "flub/analysis/CallbackTiming.h"
@@ -86,16 +87,19 @@ struct RunnerSamples
     // the thread they interrupted.
     std::vector<int64_t> irqsPerCpu, softirqsPerCpu;
     // Hyper-V's run time per vCPU (HV_X64_MSR_VP_RUNTIME, sampled by a root
-    // helper: tools/scripts/hv-vp-runtime.py) on its own clock stamps, ns,
-    // numCpus per sample indexed by CPU id (-1: that CPU not sampled);
-    // empty when not sampled.
-    std::vector<int64_t> vpWallNs, vpRunNs;
+    // helper: tools/scripts/hv-vp-runtime.py), ns, numCpus per sample
+    // indexed by CPU id (-1: that CPU not sampled); empty when not sampled.
+    // Each sample has two clock stamps: before its reads (vpWallNs) and
+    // after them (vpDoneNs). The helper runs at idle priority and can be
+    // preempted between the two, so its reads happened somewhere in between.
+    std::vector<int64_t> vpWallNs, vpDoneNs, vpRunNs;
 
     size_t size() const { return wallNs.size(); }
     int64_t vpRun (size_t sample, int cpu) const { return vpRunNs[at (sample, cpu)]; }
-    void addVp (int64_t wall, const std::vector<int64_t>& runNs)
+    void addVp (int64_t wall, int64_t done, const std::vector<int64_t>& runNs)
     {
         vpWallNs.push_back (wall);
+        vpDoneNs.push_back (done);
         for (int c = 0; c < numCpus; ++c)
             vpRunNs.push_back (c < static_cast<int> (runNs.size()) ? runNs[static_cast<size_t> (c)] : -1);
     }
@@ -155,7 +159,12 @@ inline size_t sampleAtOrAfter (const RunnerSamples& s, int64_t t)
     /proc/stat at that CPU's next tick (or when it leaves idle). Its vCPU's
     run time (Hyper-V) is read over the samples around the span, which can
     only add run time of the neighbouring cycles: the hypervisor's share
-    (CPU time less run time) is a lower bound. */
+    (CPU time less run time) is a lower bound. That holds only when the
+    reads bracket the span: the sample before it must have finished its
+    reads by the span's start (stamped after them), the sample after it
+    must have begun them at its end or later (stamped before them). A
+    sample stamped before the span but read inside it would leave run time
+    out and make the hypervisor's share look larger. */
 inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callbacks, const RunnerSamples& samples, size_t from, size_t to, int64_t lagNs)
 {
     std::vector<Runner> runner (callbacks.size());
@@ -188,9 +197,12 @@ inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callback
         // CPU: all vCPUs together would excuse anything).
         if (vpSamples > 0 && (known (r.cpuBefore) || known (r.cpuAfter)))
         {
+            // The first sample whose reads began at the span's end or later,
+            // the last one whose reads were done by its start (both stamps
+            // ascend: the helper reads one sample after the other).
             const auto after = static_cast<size_t> (std::lower_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), end) - samples.vpWallNs.begin());
-            const auto upTo = std::upper_bound (samples.vpWallNs.begin(), samples.vpWallNs.end(), begin);
-            const auto before = upTo == samples.vpWallNs.begin() ? vpSamples : static_cast<size_t> (upTo - samples.vpWallNs.begin()) - 1;
+            const auto upTo = std::upper_bound (samples.vpDoneNs.begin(), samples.vpDoneNs.end(), begin);
+            const auto before = upTo == samples.vpDoneNs.begin() ? vpSamples : static_cast<size_t> (upTo - samples.vpDoneNs.begin()) - 1;
             const auto sampled = [&] (int cpu) { return ! known (cpu) || (samples.vpRun (before, cpu) >= 0 && samples.vpRun (after, cpu) >= 0); };
             if (before < vpSamples && after < vpSamples && sampled (r.cpuBefore) && sampled (r.cpuAfter))
             {

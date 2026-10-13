@@ -18,9 +18,12 @@ MSR is an interrupt on that CPU). Run it at idle priority:
     sudo chrt -i 0 python3 tools/scripts/hv-vp-runtime.py OUT.bin [PERIOD_MS]
 
 OUT.bin (world-readable): a header of little-endian int32 numCpus and the
-CPU ids, then fixed records of int64 CLOCK_MONOTONIC ns (read before the
-MSRs) and one uint64 VP run time (100 ns units) per CPU. It runs until
-killed. A first read that fails prints why and exits 2.
+CPU ids, then fixed records of two int64 CLOCK_MONOTONIC ns stamps (before
+and after the MSR reads: at idle priority it can be preempted in between,
+so a reader bracketing a span takes the record before it by its second
+stamp and the one after it by its first) and one uint64 VP run time
+(100 ns units) per CPU. It runs until killed. A first read that fails
+prints why and exits 2.
 """
 
 import os
@@ -50,16 +53,17 @@ def main() -> int:
         except OSError as error:
             print(f"hv-vp-runtime: CPU {cpu}: cannot read HV_X64_MSR_VP_RUNTIME: {error}", file=sys.stderr)
             return 2
-    record = struct.Struct("<q" + "Q" * len(fds))
+    record = struct.Struct("<qq" + "Q" * len(fds))
     old = os.umask(0o022)
     out = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     os.umask(old)
     os.write(out, struct.pack("<i" + "i" * len(cpus), len(cpus), *cpus))
     print(f"hv-vp-runtime: {len(cpus)} CPUs, a sample every {period * 1000:.2f} ms into {out_path}", flush=True)
     while True:
-        now = time.monotonic_ns()
+        start = time.monotonic_ns()
         values = [struct.unpack("<Q", os.pread(fd, 8, HV_X64_MSR_VP_RUNTIME))[0] for fd in fds]
-        os.write(out, record.pack(now, *values))
+        done = time.monotonic_ns()
+        os.write(out, record.pack(start, done, *values))
         time.sleep(period)
 
 
