@@ -281,10 +281,24 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
   ±10 %, steady footsteps); a gun at exactly 300 a minute flaps; the two snares after a fill or tempo change and
   most syncopated snares do not count; low-thud footsteps and explosion booms can read as kicks (kick rule
   unchanged, a follow-up). 36 brain cases; app suite 414 / 414.
+- **Zoom (owner request 2026-10-13; d85dfc7, CI 38348675828 green):** the view starts 1.2× closer than the framing
+  that fits the ear rings (`BrainView::kDefaultZoom`); the mouse wheel (~15 % a notch), a trackpad pinch and the
+  menu's Zoom in / out go from 0.7 to 3×; *Reset view* restores it. 37 brain cases, app suite 415 / 415. The
+  owner's app was running, so his copy is rebuilt only when he closes it.
 - The worktree `.claude/worktrees/wf_0f5beb3e-d6e-1` (branch `worktree-wf_0f5beb3e-d6e-1`, also `a8206a0` with the
   last test split) is kept for reference; the remote branch `wip/brain-view` was deleted on 2026-10-10 with the
   owner's OK. Full screen stays sharp (owner, 2026-10-10). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
   scratchpad.
+
+### IN FLIGHT (2026-10-13): three open software items, unmerged
+
+A workflow builds, reviews and fixes each in its own worktree (`git worktree list`; branches pushed as `wip/<topic>`
+for CI): (1) brain view kicks - footsteps and explosion booms read as kicks and pulse the beat network (apply the
+owner's repeat rule to kicks, measure); (2) the float release stall of HeadphoneVirtualizer's fold headroom and
+`FoldHeadroom` (E28a; renders move, re-record the render baseline with before → after numbers); (3) the `pipewire`
+CI job's unattributed idle xrun (read steal time around the callback, E48). To finish if interrupted: per worktree
+`git log d85dfc7..HEAD`, finish or review, merge one at a time, full ctest, push, rebuild the app (needs the
+owner's app closed).
 
 ### Next steps for the local session, in priority order
 
