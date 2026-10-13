@@ -1547,6 +1547,89 @@ TEST_CASE ("HeadphoneVirtualizer: fold headroom - full-scale correlated 5.1 / 7.
     CHECK (maxAbsDiff (outs[0], outs[1]) == 0.0);
 }
 
+TEST_CASE ("HeadphoneVirtualizer: fold headroom - after an over the release reaches exactly 0 dB and the output is the headroom-off render again (docs/11 E28a, 2026-10-13)")
+{
+    // A 200 Hz sine at 0.5 on every main speaker of 7.1 (about +7 dBFS at
+    // the ears: the headroom holds it at 0 dBFS) for 0.5 s, then at 0.05
+    // (under 0 dBFS) for 2.5 s; level match on, rendered with the headroom
+    // on and off. After the last over the gain holds 10 ms, then its depth
+    // (1 - gain) decays with 150 ms and snaps to 0 under 1e-6: exactly 0 dB
+    // hold + 150 ms x ln (depth / 1e-6) after it, and from there the output
+    // is the headroom-off render bit for bit (the level match measures the
+    // render before its make-up, so it is the same in both). Before
+    // 2026-10-13 the gain released as g += (1 - g) (1 - r) in float and
+    // stalled about 2.2e-4 under 1: -0.0019 dB for ever at 48 kHz.
+    const int n = static_cast<int> (3.0 * kFs), quietFrom = static_cast<int> (0.5 * kFs), tail = static_cast<int> (2.75 * kFs);
+    auto x = sine (200.0, kFs, n, 0.5f);
+    for (int i = quietFrom; i < n; ++i)
+        x[static_cast<size_t> (i)] *= 0.1f;
+    Planar in (8, n);
+    for (int c = 0; c < 8; ++c)
+        if (c != LFE)
+            fill (in, c, x);
+    // Around the step down the blocks are one sample long, so the gain read
+    // after each is the gain of that sample: an over is where it drops (in
+    // the hold it is constant, in the release it rises). Both renders use
+    // the same partition.
+    const int fineFrom = quietFrom - 2400, fineTo = quietFrom + 4800;
+    const auto blockAt = [&] (int pos) { return pos < fineFrom ? std::min (64, fineFrom - pos) : pos < fineTo ? 1 : std::min (64, n - pos); };
+    std::array<std::array<std::vector<float>, 2>, 2> ears; // [headroom off, on][ear]
+    float held = 0.0f, endDb = -1.0f, overDb = 0.0f;
+    int lastOver = -1, overAfterFine = 0;
+    for (const bool headroom : { false, true })
+    {
+        HeadphoneVirtualizer v;
+        auto p = matchedFor (ChannelLayout::Surround71);
+        p.foldHeadroom = headroom;
+        setUp (v, p);
+        Planar out = in;
+        float prevDb = 0.0f;
+        for (int pos = 0, len = 0; pos < n; pos += len)
+        {
+            len = blockAt (pos);
+            v.process (out.block (pos, len));
+            if (! headroom)
+                continue;
+            const float db = v.getHeadroomGainDb();
+            held = std::min (held, db);
+            if (db < prevDb)
+            {
+                lastOver = pos; // (len 1 in the fine part)
+                overDb = db;
+                overAfterFine += pos >= fineTo ? 1 : 0;
+            }
+            prevDb = db;
+        }
+        if (headroom)
+            endDb = v.getHeadroomGainDb();
+        CHECK (allFinite (out));
+        for (size_t e = 0; e < 2; ++e)
+            ears[headroom ? 1 : 0][e] = out.ch[e];
+    }
+    // The release has reached 1 where the two renders agree to the end.
+    int sameFrom = n;
+    while (sameFrom > 0 && ears[0][0][static_cast<size_t> (sameFrom - 1)] == ears[1][0][static_cast<size_t> (sameFrom - 1)]
+           && ears[0][1][static_cast<size_t> (sameFrom - 1)] == ears[1][1][static_cast<size_t> (sameFrom - 1)])
+        --sameFrom;
+    const double depth = 1.0 - static_cast<double> (dbToGain (overDb));
+    const double expected = 0.010 + 0.150 * std::log (depth / 1.0e-6); // 10 ms hold, 150 ms release
+    const bool released = sameFrom < tail;
+    const double took = released ? (sameFrom - lastOver) / kFs : -1.0;
+    double diff = 0.0;
+    for (size_t e = 0; e < 2; ++e)
+        diff = std::max (diff, maxAbsDiff (ears[0][e], ears[1][e], tail));
+    std::cout << "    [E28a] virtualiser fold headroom: held " << held << " dB, last over at " << lastOver / kFs << " s (depth " << depth
+              << "), the headroom-off render again " << took << " s after it (expected " << expected << " s; -1 = never), at the end " << endDb
+              << " dB; largest difference to the headroom-off render in the last 0.25 s: " << diff << "\n";
+    CHECK (held < -3.0f);
+    CHECK (lastOver >= fineFrom); // the over found sample-exactly ...
+    CHECK (overAfterFine == 0);   // ... and none later
+    CHECK (released);
+    CHECK_NEAR (took, expected, 0.002);
+    CHECK (endDb == 0.0f);
+    CHECK (diff == 0.0);
+}
+
 TEST_CASE ("HeadphoneVirtualizer: switching the level match and the fold headroom on and off is click-free (docs/11 E28a)")
 {
     // A 200 Hz sine on every speaker (correlated). Level match: off at 1 s,

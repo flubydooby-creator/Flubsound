@@ -37,9 +37,11 @@
 // surround fold's output at 0 dBFS with the same linked zero-latency peak
 // gain as the virtualiser's binaural output: when a sample would exceed
 // 0 dBFS the gain drops at once to exactly 0 dBFS / peak, holds for 10 ms
-// and recovers with a 150 ms one-pole. It never acts below 0 dBFS, so such
-// content is bit-identical. The stereo passthrough fold (overall 1) has none:
-// it stays exactly the 2-channel stream.
+// and recovers with a 150 ms one-pole on its depth (1 - gain), which reaches
+// unity exactly. It never acts below 0 dBFS, so such content is
+// bit-identical, also once an over has been released. The stereo
+// passthrough fold (overall 1) has none: it stays exactly the 2-channel
+// stream. HeadphoneVirtualizer runs the same class on its binaural output.
 //
 // The app's per-frame folds (the capture FIFO's and the test signal's own
 // BS.775 copies) take the LFE through LfeFold::next(), the same path.
@@ -168,47 +170,62 @@ private:
 };
 
 /** Fold headroom (docs/11 E28a, see the file comment): a linked
-    zero-latency peak gain that holds a stereo fold at or below 0 dBFS. The
-    law of HeadphoneVirtualizer's binaural output, for the chain's BS.775
-    fold. Per sample, so it is the same for any block partition. */
+    zero-latency peak gain that holds a stereo fold at or below 0 dBFS: the
+    chain's BS.775 fold and HeadphoneVirtualizer's binaural output. Per
+    sample, so it is the same for any block partition.
+
+    The release runs on the depth (1 - gain): depth = r x depth, snapped to
+    0 under 1e-6, so the gain reaches exactly 1 (hold + 150 ms x
+    ln (depth / 1e-6) after the last over: 1.98 s after a +6 dB one) and the
+    samples are untouched again. An over during the release sets the depth
+    to 1 - 1 / peak and restarts the hold, so the released depth is
+    max (1 - target, r x depth) as in ChatDucker's limiter (docs/11 E22).
+    Until 2026-10-13 the gain itself released, g += (1 - g) (1 - r) in
+    float: once 1 - g fell under about 2.2e-4 the step was under half an
+    ulp, so after its first over a fold stayed at -0.0019 dB for ever. */
 class FoldHeadroom
 {
 public:
     static constexpr float kCeiling = 1.0f; // 0 dBFS
     static constexpr float kHoldMs = 10.0f;
     static constexpr float kReleaseMs = 150.0f;
+    static constexpr float kSnapDepth = 1.0e-6f; // a smaller depth is 0: unity gain (-8.7e-6 dB)
 
     void prepare (double sampleRate) noexcept
     {
         holdSamples = msToSamples (kHoldMs, sampleRate);
-        release = static_cast<float> (1.0 - std::exp (-1.0 / (static_cast<double> (kReleaseMs) * 0.001 * sampleRate)));
+        decay = static_cast<float> (std::exp (-1.0 / (static_cast<double> (kReleaseMs) * 0.001 * sampleRate)));
         reset();
     }
 
     void reset() noexcept FLUB_NONBLOCKING
     {
         gain = 1.0f;
+        depth = 0.0f;
         hold = 0;
     }
 
     /** The gain for the next sample, whose peak over both channels before
         the gain is `peak`: hold, then release; an over drops the gain at
-        once to exactly the ceiling (and restarts the hold). */
+        once to exactly the ceiling (and restarts the hold). A peak of 0
+        only releases (HeadphoneVirtualizer with its fold headroom off). */
     float next (float peak) noexcept FLUB_NONBLOCKING
     {
         if (hold > 0)
         {
             --hold;
         }
-        else if (gain < 1.0f)
+        else if (depth > 0.0f)
         {
-            gain += (1.0f - gain) * release;
-            if (gain > 0.999999f)
-                gain = 1.0f;
+            depth *= decay;
+            if (depth < kSnapDepth)
+                depth = 0.0f;
+            gain = 1.0f - depth;
         }
         if (peak * gain > kCeiling && std::isfinite (peak))
         {
-            gain = kCeiling / peak;
+            gain = kCeiling / peak; // exactly the ceiling: held as it is
+            depth = 1.0f - gain;
             hold = holdSamples;
         }
         return gain;
@@ -233,7 +250,8 @@ public:
     float getGainDb() const noexcept { return gainToDb (gain); }
 
 private:
-    float gain = 1.0f, release = 0.0f;
+    float gain = 1.0f, depth = 0.0f; // depth = 1 - gain (the release's state)
+    float decay = 0.0f;              // r = e^(-1 / (150 ms x fs)) per sample
     int hold = 0, holdSamples = 0;
 };
 

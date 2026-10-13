@@ -448,6 +448,62 @@ TEST_CASE ("FoldHeadroom: an over drops the gain at once to exactly 0 dBFS, hold
     CHECK (h.getGain() == 1.0f);
 }
 
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13)")
+{
+    // One over (+0.83, +6.02 or +12.04 dBFS: depth 1 - 1 / peak = 0.09, 0.5
+    // or 0.75), then 3 s at -6 dBFS. The gain holds 10 ms, then its depth
+    // (1 - gain) decays with 150 ms to 1 / e and snaps to 0 under 1e-6: the
+    // gain is exactly 1 hold + 150 ms x ln (depth / 1e-6) after the over
+    // (1.72 / 1.98 / 2.04 s), and from there every sample is the input bit
+    // for bit. Before 2026-10-13 the gain released as g += (1 - g) (1 - r)
+    // in float and stalled about 2.2e-4 under 1 (the step fell under half an
+    // ulp): -0.0019 dB for ever at 48 kHz, every later sample scaled by it.
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001, holdS = static_cast<double> (FoldHeadroom::kHoldMs) * 0.001;
+    for (const float over : { 1.1f, 2.0f, 4.0f })
+    {
+        FoldHeadroom h;
+        h.prepare (kFs);
+        const int n = static_cast<int> (3.0 * kFs), at = 1000, tail = static_cast<int> (2.5 * kFs);
+        std::vector<float> l (static_cast<size_t> (n), 0.5f), r (static_cast<size_t> (n), -0.25f);
+        l[static_cast<size_t> (at)] = over;
+        const auto l0 = l, r0 = r;
+        const double depth = 1.0 - static_cast<double> (1.0f / over);
+        const int oneTau = at + msToSamples (FoldHeadroom::kHoldMs + FoldHeadroom::kReleaseMs, kFs);
+        int unityAt = -1, nearAt = -1;
+        double atOneTau = 0.0;
+        for (int i = 0; i < n; ++i)
+        {
+            h.process (l.data() + i, r.data() + i, 1);
+            if (i == oneTau)
+                atOneTau = 1.0 - static_cast<double> (h.getGain());
+            if (i > at && nearAt < 0 && h.getGainDb() > -0.01f)
+                nearAt = i;
+            if (i > at && unityAt < 0 && h.getGain() == 1.0f)
+                unityAt = i;
+        }
+        int changedAfterUnity = 0, changedTail = 0;
+        for (int i = std::max (at + 1, unityAt); i < n; ++i)
+        {
+            const auto s = static_cast<size_t> (i);
+            const bool changed = l[s] != l0[s] || r[s] != r0[s];
+            changedAfterUnity += unityAt >= 0 && changed ? 1 : 0;
+            changedTail += i >= tail && changed ? 1 : 0;
+        }
+        const double expected = holdS + tau * std::log (depth / 1.0e-6);
+        const auto seconds = [&] (int i) { return i < 0 ? -1.0 : (i - at) / kFs; };
+        std::cout << "    [E28a] FoldHeadroom, one over at +" << 20.0 * std::log10 (static_cast<double> (over)) << " dBFS: depth one release time after the hold "
+                  << atOneTau / depth << " of the held one, -0.01 dB after " << seconds (nearAt) << " s, exactly 0 dB after " << seconds (unityAt)
+                  << " s (expected " << expected << " s; -1 = never), at the end " << h.getGainDb() << " dB, samples changed in the last 0.5 s "
+                  << changedTail << "\n";
+        CHECK_NEAR (atOneTau / depth, std::exp (-1.0), 2e-3);
+        CHECK (unityAt >= 0);
+        CHECK_NEAR (seconds (unityAt), expected, 0.002);
+        CHECK (h.getGain() == 1.0f);
+        CHECK (changedAfterUnity == 0);
+        CHECK (changedTail == 0);
+    }
+}
+
 TEST_CASE ("Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale correlated 5.1 / 7.1 at 0 dBFS before the limiter; below 0 dBFS it is untouched")
 {
     // Done-when: the pre-limiter peak of full-scale correlated 7.1 with virt
@@ -515,6 +571,55 @@ TEST_CASE ("Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale co
         for (int i = 0; i + latency < n; ++i)
             err = std::max (err, static_cast<double> (std::abs (out.ch[c][static_cast<size_t> (i + latency)] - ref.ch[c][static_cast<size_t> (i)])));
     std::cout << "    measured below 0 dBFS: largest difference to the plain fold " << err << "\n";
+    CHECK (err == 0.0);
+}
+
+TEST_CASE ("Chain (docs/11 E28a): after an over the BS.775 fold's headroom releases to exactly 0 dB and the output is the plain fold again (2026-10-13)")
+{
+    // Full-scale correlated 7.1 for 0.3 s (the fold reaches +6.88 dBFS: held
+    // at 0 dBFS), then the same content at 0.35 for 2.7 s (the fold under
+    // 0 dBFS), every module off. The headroom gain on the meter reaches
+    // exactly 0 dB about 2 s after the last over (hold + 150 ms x
+    // ln (depth / 1e-6), depth up to 0.55), and from there the output is the
+    // plain BS.775 fold of the input bit for bit. Before 2026-10-13 the gain
+    // stalled at -0.0019 dB for ever (the float release, see the
+    // FoldHeadroom case above), so every later sample stayed 2.2e-4 low.
+    const int n = static_cast<int> (3.0 * kFs), loud = static_cast<int> (0.3 * kFs), tail = static_cast<int> (2.5 * kFs);
+    Planar in = fullScaleCorrelated (8, n);
+    for (auto& c : in.ch)
+        for (int i = loud; i < n; ++i)
+            c[static_cast<size_t> (i)] *= 0.35f;
+    Planar ref = in;
+    Bs775Fold fold;
+    fold.prepare (kFs, LfeFold::gainFor (true, layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue));
+    fold.process (ref.block (0, n), Bs775Fold::kMatrixGain);
+    FoldChain fc (8, false);
+    Planar out = in;
+    float deepest = 0.0f, endDb = -1.0f;
+    int unityAt = -1; // the block end from which the meter reads 0 dB to the end
+    fc.run (out, 512, [&] (int end) {
+        const float db = fc.chain.meters().foldHeadroomDb.load();
+        deepest = std::min (deepest, db);
+        endDb = db;
+        if (db < 0.0f)
+            unityAt = -1;
+        else if (unityAt < 0)
+            unityAt = end;
+    });
+    const int latency = fc.chain.getLatencySamples();
+    const bool released = unityAt > loud;
+    const int from = released ? unityAt : tail;
+    double err = 0.0;
+    for (size_t c = 0; c < 2; ++c)
+        for (int i = from; i + latency < n; ++i)
+            err = std::max (err, static_cast<double> (std::abs (out.ch[c][static_cast<size_t> (i + latency)] - ref.ch[c][static_cast<size_t> (i)])));
+    std::cout << "    [E28a] chain fold headroom: deepest " << deepest << " dB, exactly 0 dB " << (released ? (unityAt - loud) / kFs : -1.0)
+              << " s after the last loud sample (-1 = never), at the end " << endDb << " dB; largest difference to the plain fold from "
+              << from / kFs << " s: " << err << "\n";
+    CHECK (deepest < -3.0f);
+    CHECK (released);
+    CHECK (unityAt - loud <= static_cast<int> (2.05 * kFs)); // the last over is at most 0.55 deep: 1.99 s, plus a block
+    CHECK (endDb == 0.0f);
     CHECK (err == 0.0);
 }
 
