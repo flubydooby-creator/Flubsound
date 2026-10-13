@@ -504,6 +504,56 @@ TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the
     }
 }
 
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - 44.1 to 192 kHz")
+{
+    // The case above runs at 48 kHz only. Here one +6.02 dB over (depth 0.5),
+    // then -6 dBFS, at every rate from 44.1 to 192 kHz: the gain reaches
+    // exactly 1 hold + 150 ms x ln (depth / 1e-6) after the over (1.978 s),
+    // never moves away from it again, and never falls during the release.
+    // The decay r = e^(-1 / (150 ms x fs)) is a float, and its rounding sets
+    // the time constant: within 0.008 % of 150 ms up to 176.4 kHz, -0.080 %
+    // at 192 kHz (149.88 ms: 1.6 ms early). With r's own time constant the
+    // formula holds within 3 samples at every rate. Before 2026-10-13 the
+    // float gain release stalled 2^-25 / (1 - r) under 1, so the deeper the
+    // higher the rate: -0.0017 / -0.0019 / -0.0034 / -0.0037 / -0.0069 /
+    // -0.0075 dB at 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz.
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001;
+    const float over = 2.0f;
+    const double depth = 1.0 - static_cast<double> (1.0f / over);
+    for (const double fs : { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
+    {
+        FoldHeadroom h;
+        h.prepare (fs);
+        const int at = 100, n = at + static_cast<int> (2.2 * fs);
+        int unityAt = -1, offUnityAfter = 0, falls = 0;
+        float prev = 1.0f;
+        for (int i = 0; i < n; ++i)
+        {
+            const float g = h.next (i == at ? over : 0.5f);
+            if (i > at && g < prev)
+                ++falls;
+            prev = g;
+            if (i > at && unityAt < 0 && g == 1.0f)
+                unityAt = i;
+            if (unityAt >= 0 && g != 1.0f)
+                ++offUnityAfter;
+        }
+        const double holdS = msToSamples (FoldHeadroom::kHoldMs, fs) / fs;
+        const double tauR = -1.0 / (fs * std::log (static_cast<double> (static_cast<float> (std::exp (-1.0 / (tau * fs))))));
+        const double formula = holdS + tau * std::log (depth / 1.0e-6), withR = holdS + tauR * std::log (depth / 1.0e-6);
+        const double t = unityAt < 0 ? -1.0 : (unityAt - at) / fs;
+        std::cout << "    [E28a] FoldHeadroom at " << fs / 1000.0 << " kHz, one +6.02 dB over: exactly 0 dB after " << t << " s (-1 = never; formula "
+                  << formula << " s, " << 100.0 * (t - formula) / formula << " %; r's time constant " << tauR * 1000.0 << " ms, formula with it "
+                  << (t - withR) * fs << " samples off), at the end " << h.getGainDb() << " dB, falls during the release " << falls
+                  << ", samples off 0 dB after it " << offUnityAfter << "\n";
+        CHECK (unityAt >= 0);
+        CHECK (offUnityAfter == 0);
+        CHECK (falls == 0);
+        CHECK_NEAR (t, formula, 1.0e-3 * formula); // within 0.1 % (192 kHz: -0.080 %)
+        CHECK_NEAR ((t - withR) * fs, 0.0, 3.0);
+    }
+}
+
 TEST_CASE ("Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale correlated 5.1 / 7.1 at 0 dBFS before the limiter; below 0 dBFS it is untouched")
 {
     // Done-when: the pre-limiter peak of full-scale correlated 7.1 with virt
@@ -582,7 +632,7 @@ TEST_CASE ("Chain (docs/11 E28a): after an over the BS.775 fold's headroom relea
     // exactly 0 dB about 2 s after the last over (hold + 150 ms x
     // ln (depth / 1e-6), depth up to 0.55), and from there the output is the
     // plain BS.775 fold of the input bit for bit. Before 2026-10-13 the gain
-    // stalled at -0.0019 dB for ever (the float release, see the
+    // stalled at -0.0019 dB for ever at 48 kHz (the float release, see the
     // FoldHeadroom case above), so every later sample stayed 2.2e-4 low.
     const int n = static_cast<int> (3.0 * kFs), loud = static_cast<int> (0.3 * kFs), tail = static_cast<int> (2.5 * kFs);
     Planar in = fullScaleCorrelated (8, n);
@@ -621,6 +671,91 @@ TEST_CASE ("Chain (docs/11 E28a): after an over the BS.775 fold's headroom relea
     CHECK (unityAt - loud <= static_cast<int> (2.05 * kFs)); // the last over is at most 0.55 deep: 1.99 s, plus a block
     CHECK (endDb == 0.0f);
     CHECK (err == 0.0);
+}
+
+namespace
+{
+/** The case above with the release running in foldToStereo's crossfade,
+    where the fold headroom's gain is FoldHeadroom::next per sample (into the
+    ramp's headroom row), not FoldHeadroom::process on the steady BS.775
+    path. Full-scale correlated 7.1 for 0.3 s (the overs the headroom holds),
+    then the same content at 0.2 (the fold at -7 dBFS, the binaural render
+    under 0 dBFS). From 0.4 s to 2.6 s virt.on (passCase: virt.input Force
+    Stereo / Force Surround) flips after every 512-sample block, so its 20 ms
+    (400 ms) ramp never settles and every block takes the crossfade; the
+    last flip leaves virt off on the surround fold. The meter's headroom
+    reaches exactly 0 dB during the flips (hold + 150 ms x ln (depth / 1e-6)
+    after the last over, depth up to 0.55: at most 2.0 s), and once the ramp
+    has ended the output is the plain BS.775 fold bit for bit. */
+void checkReleaseInCrossfade (bool passCase)
+{
+    const int block = 512, loud = static_cast<int> (0.3 * kFs), flipFrom = static_cast<int> (0.4 * kFs), flipTo = static_cast<int> (2.6 * kFs);
+    const int settled = flipTo + msToSamples (passCase ? 400.0f : 20.0f, kFs) + block, n = settled + static_cast<int> (0.4 * kFs);
+    Planar in = fullScaleCorrelated (8, n);
+    for (auto& c : in.ch)
+        for (int i = loud; i < n; ++i)
+            c[static_cast<size_t> (i)] *= 0.2f;
+    Planar ref = in;
+    Bs775Fold fold;
+    fold.prepare (kFs, LfeFold::gainFor (true, layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue));
+    fold.process (ref.block (0, n), Bs775Fold::kMatrixGain);
+    FoldChain fc (8, false);
+    fc.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+    const auto flip = [&] (bool toOther) {
+        if (passCase)
+            fc.store.set (VirtInputMode, static_cast<float> (toOther ? InputModeValue::ForceStereo : InputModeValue::ForceSurround));
+        else
+            fc.store.set (VirtualizerOn, toOther ? 1.0f : 0.0f);
+    };
+    Planar out = in;
+    float deepest = 0.0f, endDb = -1.0f;
+    int unityAt = -1, flips = 0; // unityAt: the block end from which the meter reads 0 dB to the end
+    bool other = false;
+    fc.run (out, block, [&] (int end) {
+        const float db = fc.chain.meters().foldHeadroomDb.load();
+        deepest = std::min (deepest, db);
+        endDb = db;
+        if (db < 0.0f)
+            unityAt = -1;
+        else if (unityAt < 0)
+            unityAt = end;
+        other = end >= flipFrom && end < flipTo && ! other;
+        flips += end >= flipFrom && end < flipTo ? 1 : 0;
+        flip (other);
+    });
+    const int latency = fc.chain.getLatencySamples();
+    double during = 0.0, after = 0.0; // the largest difference to the plain fold during the flips and once the ramp has ended
+    for (size_t c = 0; c < 2; ++c)
+        for (int i = flipFrom + block; i + latency < n; ++i)
+        {
+            const double d = std::abs (static_cast<double> (out.ch[c][static_cast<size_t> (i + latency)]) - static_cast<double> (ref.ch[c][static_cast<size_t> (i)]));
+            if (i < flipTo)
+                during = std::max (during, d);
+            else if (i >= settled)
+                after = std::max (after, d);
+        }
+    std::cout << "    [E28a] chain fold headroom through the " << (passCase ? "passthrough" : "virt") << " crossfade (" << flips
+              << " flips from 0.4 to 2.6 s): deepest " << deepest << " dB, exactly 0 dB " << (unityAt > loud ? (unityAt - loud) / kFs : -1.0)
+              << " s after the last loud sample (-1 = never), at the end " << endDb << " dB; largest difference to the plain fold during the flips "
+              << during << ", from " << settled / kFs << " s " << after << "\n";
+    CHECK (deepest < -3.0f);
+    CHECK (unityAt > loud);
+    CHECK (unityAt < flipTo); // released inside the crossfade
+    CHECK (unityAt - loud <= static_cast<int> (2.0 * kFs) + block);
+    CHECK (during > 1.0e-3); // the flips did take the crossfade
+    CHECK (endDb == 0.0f);
+    CHECK (after == 0.0);
+}
+} // namespace
+
+TEST_CASE ("Chain (docs/11 E28a): after an over the BS.775 fold's headroom releases to exactly 0 dB and the output is the plain fold again (2026-10-13) - virt crossfade")
+{
+    checkReleaseInCrossfade (false);
+}
+
+TEST_CASE ("Chain (docs/11 E28a): after an over the BS.775 fold's headroom releases to exactly 0 dB and the output is the plain fold again (2026-10-13) - passthrough crossfade")
+{
+    checkReleaseInCrossfade (true);
 }
 
 TEST_CASE ("Chain (docs/11 E28a): on full-scale correlated 5.1 / 7.1 overs, virt on vs off 3.8 / 5.6 -> 2.1 / 2.2 LU")
