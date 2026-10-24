@@ -300,6 +300,15 @@ CI job's unattributed idle xrun (read steal time around the callback, E48). To f
 `git log d85dfc7..HEAD`, finish or review, merge one at a time, full ctest, push, rebuild the app (needs the
 owner's app closed).
 
+Also in flight (2026-10-24, owner request): the **preset audit** (workflow wf_7f61caa4-71e): "make sure all presets
+are set up correctly; why is Late Night louder than Flubsound Signature; maximize each preset's benefit". Measured
+so far: Late Night is an auto-leveller holding about -20 LUFS (music programme in -21.4: Late Night -19.08,
+Signature -20.96; game-quiet -22.47 vs -46.27), so it is louder whenever the input is quieter than about -20 LUFS;
+presets span -14.0 (Club Loud) to -24.7 LUFS (Night Mode) on the same input. The workflow audits all 31 presets,
+plans, implements the clear fixes / loudness calibration in a worktree (`wip/preset-audit`), reviews and fixes;
+voicing changes to owner-approved presets go to the owner. The fold-release item also re-records the render
+baseline: merge both, then re-record the baseline once on the merged tree.
+
 ### Next steps for the local session, in priority order
 
 1. **Build on Windows: done** (step 1 above; CI first fully green on all three OSes in run 37572308549; latest
