@@ -598,11 +598,13 @@ jobs:
       # time sampler costs the node's data thread (its reads of the other
       # vCPUs' MSRs are interrupts there, whose time the kernel charges to the
       # thread they interrupt): that many pairs of idle xrun case loops, the
-      # sampler paused (SIGSTOP) in the first of each pair and running in the
-      # second. It prints, per half, the medians over the loops of the data
-      # thread's CPU time per cycle and of the interrupts on its CPU per cycle,
-      # and the per-pair difference. A failed loop's lines are printed; the
-      # step fails at the end when one failed.
+      # sampler paused (SIGSTOP) in one loop of each pair and running in the
+      # other, paused first in odd pairs and running first in even ones (so an
+      # effect of the order is not read as the sampler's). It prints, per
+      # half, the medians over the loops of the data thread's CPU time per
+      # cycle and of the interrupts on its CPU per cycle, and the per-pair
+      # difference, also split by the order. A failed loop's lines are
+      # printed; the step fails at the end when one failed.
       - name: The vCPU run time sampler's cost (dispatch only)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.pipewire_sampler_ab != '0' && env.FLUB_VP_RUNTIME_PID != '' }}
         env:
@@ -612,7 +614,8 @@ jobs:
           table="$RUNNER_TEMP/sampler-ab.txt"; : > "$table"
           failed=0
           for pair in $(seq $((PAIRS + 0))); do
-            for state in paused running; do
+            if [ $((pair % 2)) = 1 ]; then order="paused running"; else order="running paused"; fi
+            for state in $order; do
               if [ "$state" = paused ]; then sudo kill -STOP "$FLUB_VP_RUNTIME_PID"; else sudo kill -CONT "$FLUB_VP_RUNTIME_PID"; fi
               ok=1
               out=$("$app" "reports its xruns" 2>&1) || ok=0
@@ -642,13 +645,19 @@ jobs:
           pairs = {}
           for r in rows:
               pairs.setdefault(r[0], {})[r[1]] = r
-          d = [float(p["running"][2]) - float(p["paused"][2]) for p in pairs.values() if len(p) == 2]
-          di = [int(p["running"][4]) - int(p["paused"][4]) for p in pairs.values() if len(p) == 2]
-          if d:
+          def difference(label, chosen):
+              d = [float(p["running"][2]) - float(p["paused"][2]) for p in chosen]
+              di = [int(p["running"][4]) - int(p["paused"][4]) for p in chosen]
+              if not d:
+                  return
               q = statistics.quantiles(d, n=4) if len(d) > 1 else [d[0], d[0], d[0]]
-              print(f"running - paused, per pair ({len(d)}): CPU time per cycle median {statistics.median(d):+.3f} ms "
+              print(f"running - paused, {label} ({len(d)}): CPU time per cycle median {statistics.median(d):+.3f} ms "
                     f"(quartiles {q[0]:+.3f} / {q[2]:+.3f}, range {min(d):+.3f} / {max(d):+.3f}), "
                     f"interrupts per cycle median {statistics.median(di):+g}")
+          complete = {k: p for k, p in pairs.items() if len(p) == 2}
+          difference("per pair", list(complete.values()))
+          difference("pairs with the sampler paused first", [p for k, p in complete.items() if int(k) % 2 == 1])
+          difference("pairs with the sampler running first", [p for k, p in complete.items() if int(k) % 2 == 0])
           EOF
           [ "$failed" = 0 ]
       - name: Runner steal after the tests
