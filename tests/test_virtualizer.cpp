@@ -1650,16 +1650,21 @@ TEST_CASE ("HeadphoneVirtualizer: switching the level match and the fold headroo
         HeadphoneVirtualizer v;
         auto p = matchedFor (ChannelLayout::Surround71);
         setUp (v, p);
+        float headroomAtOffDb = 0.0f, headroomAtOnDb = 0.0f;
         for (int pos = 0; pos < n; pos += 128)
         {
             if (pos == off || pos == on)
             {
+                (pos == off ? headroomAtOffDb : headroomAtOnDb) = v.getHeadroomGainDb();
                 (headroomCase ? p.foldHeadroom : p.levelMatch) = pos == on;
                 v.setParams (p);
             }
             v.process (buf.block (pos, 128));
         }
         CHECK (allFinite (buf));
+        if (headroomCase) // the gain the steady window before the switch-on (1.8 - 2.0 s) ends at
+            std::cout << "    measured fold headroom gain at the switch-off " << headroomAtOffDb << " dB, at the switch-on " << headroomAtOnDb
+                      << " dB (released since the switch-off)\n";
         for (size_t e = 0; e < 2; ++e)
         {
             const auto& y = buf.ch[e];

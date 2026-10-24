@@ -554,6 +554,105 @@ TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the
     }
 }
 
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - a second peak in the hold or the release")
+{
+    // The rule for a second over (docs/03 8.3.8): a sample is an over only
+    // when it would exceed 0 dBFS at the gain reached (peak x gain > 1 in
+    // float), and only then the gain drops to exactly 1 / peak and the hold
+    // restarts; so the released depth is max (1 - 1 / peak, r x depth). One
+    // +6.02 dB over (gain 0.5) at sample 1000, then -6 dBFS, and a second
+    // peak 2 ms later (in the hold) or 300 ms later (in the release, gain
+    // 0.9277):
+    // - not an over at the gain reached (+5.58 dB in the hold; +0.51 dB and
+    //   the largest float peak with peak x gain <= 1 in the release): the gain
+    //   is the one-over run's bit for bit (the hold is not restarted);
+    // - an over (+12.04 dB in the hold; the smallest float peak with
+    //   peak x gain > 1 and +2.98 dB in the release): the gain is exactly
+    //   1 / peak, held 10 ms from that sample, never falls in the release and
+    //   is exactly 0 dB 10 ms + 150 ms x ln ((1 - 1 / peak) / 1e-6) after it
+    //   (within 2 ms), then stays there.
+    // In every row the second peak's own sample leaves at 0 dBFS or under.
+    // The old float gain release (before 2026-10-13) followed the same rule
+    // but never reached 0 dB (-0.0019 dB at the end of every row).
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001, holdS = static_cast<double> (FoldHeadroom::kHoldMs) * 0.001;
+    const int at = 1000, n = static_cast<int> (3.0 * kFs), hold = msToSamples (FoldHeadroom::kHoldMs, kFs);
+    const auto gains = [&] (int second, float peak) {
+        FoldHeadroom h;
+        h.prepare (kFs);
+        std::vector<float> out (static_cast<size_t> (n));
+        for (int i = 0; i < n; ++i)
+            out[static_cast<size_t> (i)] = h.next (i == at ? 2.0f : (i == second ? peak : 0.5f));
+        return out;
+    };
+    const auto one = gains (-1, 0.0f);
+    const int inHold = at + msToSamples (2.0f, kFs), inRelease = at + msToSamples (300.0f, kFs);
+    const float reached = one[static_cast<size_t> (inRelease)];
+    float under = 1.0f / reached, above = under; // the float peaks either side of the over test
+    while (under * reached > 1.0f)
+        under = std::nextafter (under, 0.0f);
+    while (! (above * reached > 1.0f))
+        above = std::nextafter (above, 2.0f);
+    struct Row
+    {
+        const char* where;
+        int second;
+        float peak;
+        bool over;
+    };
+    const Row rows[] = {
+        { "in the hold", inHold, 1.9f, false },
+        { "in the hold", inHold, 4.0f, true },
+        { "in the release", inRelease, 1.06f, false },
+        { "in the release", inRelease, under, false },
+        { "in the release", inRelease, above, true },
+        { "in the release", inRelease, 1.41f, true },
+    };
+    for (const auto& row : rows)
+    {
+        const auto g = gains (row.second, row.peak);
+        const auto s2 = static_cast<size_t> (row.second);
+        CHECK ((row.peak * one[s2] > 1.0f) == row.over); // the row is what it says
+        int differ = 0, differBefore = 0, falls = 0, unityAt = -1, offUnityAfter = 0, heldFor = 0;
+        for (int i = 0; i < n; ++i)
+        {
+            const auto s = static_cast<size_t> (i);
+            differ += g[s] != one[s] ? 1 : 0;
+            differBefore += i < row.second && g[s] != one[s] ? 1 : 0;
+            falls += i > row.second + hold && g[s] < g[s - 1] ? 1 : 0;
+            if (i > row.second && unityAt < 0 && g[s] == 1.0f)
+                unityAt = i;
+            offUnityAfter += unityAt >= 0 && g[s] != 1.0f ? 1 : 0;
+        }
+        while (row.second + heldFor + 1 < n && g[static_cast<size_t> (row.second + heldFor + 1)] == g[s2])
+            ++heldFor;
+        const double depth = 1.0 - static_cast<double> (1.0f / row.peak);
+        const double formula = holdS + tau * std::log (depth / 1.0e-6), t = unityAt < 0 ? -1.0 : (unityAt - row.second) / kFs;
+        std::cout << "    [E28a] FoldHeadroom, a second peak " << row.where << " at +" << 20.0 * std::log10 (static_cast<double> (row.peak))
+                  << " dB (peak " << row.peak << ", gain reached " << one[s2] << ", peak x gain " << row.peak * one[s2] << "): "
+                  << (row.over ? "an over" : "not an over") << ", samples off the one-over run " << differ << " (before it " << differBefore
+                  << "), gain there " << g[s2] << " (1 / peak " << 1.0f / row.peak << "), the sample out " << row.peak * g[s2] << ", held "
+                  << heldFor << " more samples, exactly 0 dB " << t << " s after it (-1 = never";
+        if (row.over)
+            std::cout << "; formula for its depth " << formula << " s";
+        std::cout << "), falls in the release " << falls << ", samples off 0 dB after it " << offUnityAfter << "\n";
+        CHECK (row.peak * g[s2] <= 1.0f); // the second peak leaves at 0 dBFS or under
+        CHECK (differBefore == 0);
+        CHECK (falls == 0);
+        CHECK (unityAt >= 0);
+        CHECK (offUnityAfter == 0);
+        if (row.over)
+        {
+            CHECK (g[s2] == 1.0f / row.peak); // exactly the ceiling
+            CHECK (heldFor == hold);          // 10 ms from the second over
+            CHECK_NEAR (t, formula, 0.002);
+        }
+        else
+        {
+            CHECK (differ == 0); // the release goes on as if it never came
+        }
+    }
+}
+
 TEST_CASE ("Chain (docs/11 E28a): the BS.775 fold (virt off) holds full-scale correlated 5.1 / 7.1 at 0 dBFS before the limiter; below 0 dBFS it is untouched")
 {
     // Done-when: the pre-limiter peak of full-scale correlated 7.1 with virt
