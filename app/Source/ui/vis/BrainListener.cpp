@@ -446,7 +446,7 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
     auto& pattern = kick ? kickPattern : snarePattern;
     ++(kick ? kickHits : snareHits);
     double period = 0.0; // the counted pattern's gap this hit continues (0: not known)
-    const bool repeats = repeatsLikeADrumBeat (pattern, candidate.time, period);
+    const bool repeats = repeatsLikeADrumBeat (pattern, candidate.time, kick, period);
     pattern.before = pattern.last;
     pattern.last = candidate.time;
     pattern.sinceBeat = true; // until it is counted below
@@ -464,7 +464,7 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
     beatLogCount = std::min (beatLogCount + 1, kBeatLog);
 }
 
-bool BrainListener::repeatsLikeADrumBeat (const HitPattern& p, double t, double& period) const noexcept
+bool BrainListener::repeatsLikeADrumBeat (const HitPattern& p, double t, bool bridgeHitsBetween, double& period) const noexcept
 {
     const auto inRange = [] (double g) noexcept { return g >= kBeatMinGap && g <= kBeatMaxGap; };
     const auto steady = [&inRange] (double gap, double reference) noexcept
@@ -476,10 +476,13 @@ bool BrainListener::repeatsLikeADrumBeat (const HitPattern& p, double t, double&
         period = t - p.last;
         return true;
     }
-    // A counted pattern carries over one missed hit: nothing of its kind was heard since the last counted one, and this
-    // hit lands one or two of its gaps after it (a miss of the detector, a hit left out). A hit of its kind in between
-    // (a fill, a shot, a footstep) breaks it.
-    if (p.period > 0.0 && ! p.sinceBeat)
+    // A counted pattern carries over one missed hit: this hit lands one or two of its gaps after the last counted one (a
+    // miss of the detector, a hit left out). For snares only when nothing snare-like was heard since: a hit of its kind
+    // in between (a fill, a shot) breaks it (the owner's snare rule, 2026-10-10). A kick pattern also carries over the
+    // kick-like hits between its beats (2026-10-24): a rolling bass's plucked notes, a ghost or syncopated kick; else a
+    // stray note next to a kick the detector missed (one right after a loud note rises less) broke a progressive-house
+    // groove's pattern until three clean kicks came in a row. Such a hit counts itself only when it lands on the grid.
+    if (p.period > 0.0 && (! p.sinceBeat || bridgeHitsBetween))
         for (int k = 1; k <= 2; ++k)
         {
             const double since = t - p.lastBeat;
