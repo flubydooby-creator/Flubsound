@@ -7,9 +7,11 @@ a thread runs on it is counted as that thread's CPU time. Hyper-V's
 synthetic MSR HV_X64_MSR_VP_RUNTIME (0x40000010) counts, per virtual
 processor, the time it really ran (100 ns units, including the hypervisor's
 work on its behalf). Sampling it next to the data thread's CPU time bounds
-the hypervisor's share: a cycle charged C ns of CPU time while its vCPU ran
-V ns had at least C - V ns taken by the hypervisor
-(tests/app/CallbackStallAttribution.h).
+the hypervisor's share: a thread really runs only while its vCPU runs, so a
+cycle charged C ns of CPU time while the vCPUs it can have run on ran V ns
+in all had at least C - V ns taken by the hypervisor. Those vCPUs are the
+ones at the cycle's two ends when the thread's migrations prove it ran on
+no other, otherwise every vCPU (tests/app/CallbackStallAttribution.h).
 
 Needs root and the msr module (/dev/cpu/N/msr; each read of another CPU's
 MSR is an interrupt on that CPU). Run it at idle priority:
