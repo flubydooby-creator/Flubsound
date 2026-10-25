@@ -679,17 +679,19 @@ juce::String openNodeDevice (AudioEngineHost& host)
     RUSAGE_THREAD), so a callback that ran late can be told apart: the
     engine's own work (CPU time), a wait of its own (a voluntary switch more
     than the cycle's wait for its trigger) or the kernel's preemption. And it
-    notes the CPU the thread ran on (sched_getcpu, for the runner's steal on
-    that CPU) and, at its first call, the thread's id (for RunnerSampler). It
-    records every callback from the moment it is added until 'recording'
-    goes false (at most kCapacity), so an xrun at the edge of a measured
-    window still has the callbacks around it. Preallocated; writes silence. */
+    notes the CPU the thread ran on (sched_getcpu, for the vCPU whose run
+    time bounds the hypervisor's share) and, at its first call, the thread's
+    id (for RunnerSampler), and reads the clock again after its reads (the
+    span that holds the cycle's CPU time ends there). It records every
+    callback from the moment it is added until 'recording' goes false (at
+    most kCapacity), so an xrun at the edge of a measured window still has
+    the callbacks around it. Preallocated; writes silence. */
 class WallClockRecorder final : public juce::AudioIODeviceCallback
 {
 public:
     explicit WallClockRecorder (const juce::AudioIODevice& deviceToRead)
-        : wallNs (kCapacity, 0), stampNs (kCapacity, 0), cpuNs (kCapacity, 0), voluntary (kCapacity, 0), involuntary (kCapacity, 0),
-          xruns (kCapacity, 0), cpus (kCapacity, -1), device (deviceToRead)
+        : wallNs (kCapacity, 0), doneNs (kCapacity, 0), stampNs (kCapacity, 0), cpuNs (kCapacity, 0), voluntary (kCapacity, 0),
+          involuntary (kCapacity, 0), xruns (kCapacity, 0), cpus (kCapacity, -1), device (deviceToRead)
     {
     }
 
@@ -721,6 +723,8 @@ public:
         // (XrunCounter::cycleDone), so this is the count up to the previous
         // cycle: an xrun of callback i's cycle shows at callback i + 1.
         xruns[i] = device.getXRunCount();
+        doneNs[i] = static_cast<int64_t> (
+            std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count());
         count.store (i + 1, std::memory_order_release);
     }
     void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
@@ -733,6 +737,7 @@ public:
         for (size_t i = 0; i < n; ++i)
         {
             out[i].wallNs = wallNs[i];
+            out[i].doneNs = doneNs[i];
             out[i].stampNs = stampNs[i];
             out[i].cpuNs = cpuNs[i];
             out[i].voluntary = voluntary[i];
@@ -747,7 +752,7 @@ public:
     std::atomic<bool> recording { true };
     std::atomic<size_t> count { 0 };
     std::atomic<long> tid { 0 }; // the data thread's id, from its first callback
-    std::vector<int64_t> wallNs, stampNs, cpuNs;
+    std::vector<int64_t> wallNs, doneNs, stampNs, cpuNs;
     std::vector<long> voluntary, involuntary;
     std::vector<int> xruns, cpus;
 
@@ -764,19 +769,22 @@ int64_t threadCpuNs()
 
 /** The runner's counters about every millisecond, on a thread of its own at
     the lowest priority (SCHED_IDLE: it never preempts the data thread, and
-    reading /proc is I/O the data thread must not do): the steal time per
-    CPU and in all (/proc/stat, in USER_HZ ticks), the data thread's
-    run-queue wait (/proc/self/task/<tid>/schedstat, ns) and, for
-    information, the interrupts and softirqs per CPU (/proc/interrupts,
-    /proc/softirqs). Preallocated. */
+    reading /proc is I/O the data thread must not do): the data thread's CPU
+    migrations (se.nr_migrations in /proc/self/task/<tid>/sched: which vCPUs
+    a cycle can have run on), the steal time per CPU and in all (/proc/stat,
+    in USER_HZ ticks), the data thread's run-queue wait
+    (/proc/self/task/<tid>/schedstat, ns) and, for information, the
+    interrupts and softirqs per CPU (/proc/interrupts, /proc/softirqs). Each
+    sample is stamped before and after its reads (it can be held in
+    between). Preallocated. */
 class RunnerSampler
 {
 public:
     RunnerSampler()
-        : numCpus (std::clamp (static_cast<int> (::sysconf (_SC_NPROCESSORS_CONF)), 1, 1024)), wall (kCapacity, 0), total (kCapacity, 0),
-          perCpu (kCapacity * static_cast<size_t> (numCpus), 0), irqs (kCapacity * static_cast<size_t> (numCpus), 0),
-          softirqs (kCapacity * static_cast<size_t> (numCpus), 0), wait (kCapacity, -1), buffer (size_t { 1 } << 18, '\0'),
-          columnCpu (static_cast<size_t> (numCpus) + 64, -1)
+        : numCpus (std::clamp (static_cast<int> (::sysconf (_SC_NPROCESSORS_CONF)), 1, 1024)), wall (kCapacity, 0), done (kCapacity, 0),
+          total (kCapacity, 0), perCpu (kCapacity * static_cast<size_t> (numCpus), 0), irqs (kCapacity * static_cast<size_t> (numCpus), 0),
+          softirqs (kCapacity * static_cast<size_t> (numCpus), 0), wait (kCapacity, -1), migrations (kCapacity, -1),
+          buffer (size_t { 1 } << 18, '\0'), columnCpu (static_cast<size_t> (numCpus) + 64, -1)
     {
     }
     ~RunnerSampler() { stop(); }
@@ -784,6 +792,7 @@ public:
     void start (long dataThreadTid)
     {
         std::snprintf (schedstatPath, sizeof (schedstatPath), "/proc/self/task/%ld/schedstat", dataThreadTid);
+        std::snprintf (schedPath, sizeof (schedPath), "/proc/self/task/%ld/sched", dataThreadTid);
         running.store (true, std::memory_order_release);
         thread = std::thread ([this] { run(); });
     }
@@ -798,12 +807,10 @@ public:
     size_t count() const { return n.load (std::memory_order_acquire); }
 
     /** The samples so far, for the attribution. */
-    stalls::RunnerSamples samples (stalls::StealInCpuTime counted, int64_t tickNs) const
+    stalls::RunnerSamples samples() const
     {
         stalls::RunnerSamples s;
         s.numCpus = numCpus;
-        s.tickNs = tickNs;
-        s.stealInCpuTime = counted;
         const auto m = count();
         std::vector<int64_t> steal (static_cast<size_t> (numCpus)), irqCounts (steal.size()), softirqCounts (steal.size());
         for (size_t i = 0; i < m; ++i)
@@ -812,9 +819,17 @@ public:
             std::copy_n (perCpu.begin() + offset, numCpus, steal.begin());
             std::copy_n (irqs.begin() + offset, numCpus, irqCounts.begin());
             std::copy_n (softirqs.begin() + offset, numCpus, softirqCounts.begin());
-            s.add (wall[i], total[i], steal, wait[i], irqCounts, softirqCounts);
+            s.add (wall[i], total[i], steal, wait[i], irqCounts, softirqCounts, migrations[i], done[i]);
         }
         return s;
+    }
+
+    /** How many samples read the data thread's migrations (0: its sched
+        file is missing or has no se.nr_migrations). */
+    size_t migrationsRead() const
+    {
+        const auto m = count();
+        return static_cast<size_t> (std::count_if (migrations.begin(), migrations.begin() + static_cast<std::ptrdiff_t> (m), [] (int64_t v) { return v >= 0; }));
     }
 
     const int numCpus;
@@ -831,14 +846,17 @@ private:
             const auto i = n.load (std::memory_order_relaxed);
             if (i >= kCapacity)
                 break;
-            // Stamped first: the counters read after it hold everything up to it.
+            // Stamped before and after the reads: the counters hold everything
+            // up to the first stamp, and nothing after the second.
             wall[i] = std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
             const auto offset = i * static_cast<size_t> (numCpus);
+            migrations[i] = readMigrations();
             if (readStat (total[i], perCpu.data() + offset))
             {
                 wait[i] = readWait();
                 readPerCpuTable ("/proc/interrupts", irqs.data() + offset);
                 readPerCpuTable ("/proc/softirqs", softirqs.data() + offset);
+                done[i] = std::chrono::duration_cast<std::chrono::nanoseconds> (std::chrono::steady_clock::now().time_since_epoch()).count();
                 n.store (i + 1, std::memory_order_release);
             }
             std::this_thread::sleep_for (std::chrono::milliseconds (1));
@@ -959,6 +977,23 @@ private:
         return sawTotal;
     }
 
+    /** The data thread's se.nr_migrations: every move to another CPU
+        (set_task_cpu), cumulative; -1 when the kernel does not show it. */
+    int64_t readMigrations()
+    {
+        if (! readAll (schedPath))
+            return -1;
+        const char* key = std::strstr (buffer.data(), "se.nr_migrations");
+        if (key == nullptr)
+            return -1;
+        const char* colon = std::strchr (key, ':');
+        if (colon == nullptr)
+            return -1;
+        char* end = nullptr;
+        const auto value = std::strtoll (colon + 1, &end, 10);
+        return end != colon + 1 ? static_cast<int64_t> (value) : -1;
+    }
+
     /** schedstat: time on the CPU, time waiting on a run queue, slices. */
     int64_t readWait() const
     {
@@ -975,10 +1010,10 @@ private:
         return std::sscanf (text, "%lld %lld", &onCpu, &waited) == 2 ? waited : -1;
     }
 
-    std::vector<int64_t> wall, total, perCpu, irqs, softirqs, wait;
+    std::vector<int64_t> wall, done, total, perCpu, irqs, softirqs, wait, migrations;
     std::vector<char> buffer;
     std::vector<int> columnCpu; // the CPU of each column of a per-CPU table
-    char schedstatPath[64] {};
+    char schedstatPath[64] {}, schedPath[64] {};
     std::atomic<bool> running { false };
     std::atomic<size_t> n { 0 };
     std::thread thread;
@@ -1305,7 +1340,7 @@ IdleRun runIdleWindow (bool inject)
     w.recorded = recorded;
     w.periodNs = periodNs;
     w.unsplit = static_cast<double> (node.quantumFrames) <= block; // no quantum split: the stamps are cycle starts
-    auto samples = sampler.samples (facts.stealInCpuTime, facts.tickNs);
+    auto samples = sampler.samples();
     const auto vpRuntime = readVpRuntime (samples, w.callbacks.front().wallNs - 10000000);
     w.runner = stalls::runnerPerCycle (w.callbacks, samples, first, recorded, lagNs);
     run.attribution = stalls::attribute (w);
@@ -1321,15 +1356,15 @@ IdleRun runIdleWindow (bool inject)
     // cycle start (no quantum split here: block = quantum <= 256). The data
     // thread's CPU time from one recorder call to the next is a cycle's own
     // work (the engine's callback and PipeWire's for the node), whatever the
-    // scheduler did meanwhile, and whatever the hypervisor took that the
-    // kernel charged to it (steal, below).
+    // scheduler did meanwhile, less what the hypervisor measurably took that
+    // the kernel charged to it (the vCPU run time, below).
     const auto ms = [] (int64_t ns) { return static_cast<double> (ns) / 1.0e6; };
     lines << "    wall clock: " << last - first << " callbacks, mean interval " << a.wallMeanNs / 1.0e6 << " ms, max " << ms (a.maxIntervalNs) << " ms, "
           << a.wideIntervals << " over 1.5 periods; done after the cycle start: median " << ms (a.medianDelayNs) << " ms, max " << ms (a.maxDelayNs)
           << " ms (period " << periodNs / 1.0e6 << " ms)\n";
     lines << "    own work: the data thread's CPU time per cycle median " << ms (a.medianCpuNs) << " ms, max " << ms (a.maxCpuNs) << " ms; preempted in "
           << a.preemptedCycles << " of " << a.cycles << " cycles; voluntary switches per cycle (median) " << a.usualWaits << "; " << a.cpuOverPeriod
-          << " cycles at or over the period (" << a.cpuOverRunner << " explained by steal)" << a.overs << "\n";
+          << " cycles at or over the period (" << a.cpuOverRunner << " explained by the runner: the hypervisor's measured share)" << a.overs << "\n";
 
     // The runner over the window: steal per CPU and in all, the data
     // thread's CPUs and run-queue wait, the sampler's cadence.
@@ -1374,14 +1409,35 @@ IdleRun runIdleWindow (bool inject)
     if (! irqCounts.empty())
         lines << "; interrupts / softirqs per cycle on its CPU: median " << irqCounts[irqCounts.size() / 2] << " / " << softirqCounts[softirqCounts.size() / 2]
               << ", max " << irqCounts.back() << " / " << softirqCounts.back();
-    // Hyper-V: how much of the data thread's CPU time its vCPU did not run.
-    int vpCycles = 0;
+    // The thread's migrations: which vCPUs a cycle can have run on.
+    int provenCycles = 0, migratedCycles = 0;
+    int64_t windowMigrations = 0;
+    for (size_t k = first; k < last; ++k)
+        if (const auto* r = stalls::runnerOf (w, k); r != nullptr && r->migrations >= 0)
+        {
+            provenCycles += r->cpusProven ? 1 : 0;
+            migratedCycles += r->cpuBefore != r->cpuAfter ? 1 : 0;
+        }
+    const auto m0 = stalls::sampleReadBy (samples.doneNs, w.callbacks[first].wallNs);
+    const auto m1 = stalls::sampleReadFrom (samples.wallNs, w.callbacks[last - 1].doneNs);
+    const bool migrationsBracketed = m0 < samples.size() && m1 < samples.size() && samples.migrations[m0] >= 0 && samples.migrations[m1] >= 0;
+    if (migrationsBracketed)
+        windowMigrations = samples.migrations[m1] - samples.migrations[m0];
+    lines << "; migrations (se.nr_migrations, read in " << sampler.migrationsRead() << " of " << samples.size() << " samples): ";
+    if (migrationsBracketed)
+        lines << windowMigrations << " in the window, " << migratedCycles << " cycles ended on another CPU than the one before, " << provenCycles << " of "
+              << a.cycles << " cycles proven on the CPUs at their ends";
+    else
+        lines << "not read (no se.nr_migrations in " << "/proc/self/task/" << tid << "/sched)";
+    // Hyper-V: how much of the data thread's CPU time its vCPU(s) did not run.
+    int vpCycles = 0, vpAllCycles = 0;
     int64_t hypervisorTotalNs = 0, hypervisorMaxNs = 0;
     size_t hypervisorMaxAt = 0;
     for (size_t k = first; k < last; ++k)
         if (const auto* r = stalls::runnerOf (w, k); r != nullptr && r->vpRunNs >= 0)
         {
             ++vpCycles;
+            vpAllCycles += r->cpusProven ? 0 : 1;
             hypervisorTotalNs += r->hypervisorNs;
             if (r->hypervisorNs > hypervisorMaxNs)
             {
@@ -1406,13 +1462,14 @@ IdleRun runIdleWindow (bool inject)
     }
     if (vpCycles > 0)
     {
-        lines << ", " << vpCycles << " cycles bounded: the hypervisor's share of the thread's CPU time at least " << ms (hypervisorTotalNs) << " ms in all, "
-              << ms (hypervisorMaxNs) << " ms at most in a cycle";
+        lines << ", " << vpCycles << " cycles bounded (" << vpCycles - vpAllCycles << " with the vCPUs they ran on, " << vpAllCycles
+              << " with all vCPUs: their own not proven): the hypervisor's share of the thread's CPU time at least " << ms (hypervisorTotalNs)
+              << " ms in all, " << ms (hypervisorMaxNs) << " ms at most in a cycle";
         if (hypervisorMaxNs > 0)
             lines << " (callback " << hypervisorMaxAt - first << ", CPU " << ms (stalls::cycleCpu (w, hypervisorMaxAt)) << " ms)";
     }
-    lines << "; reported steal in the thread's CPU time: " << stalls::describe (facts.stealInCpuTime) << " (" << facts.accounting << "); "
-          << samples.size() << " samples";
+    lines << "; reported steal in the thread's CPU time: " << stalls::describe (facts.stealInCpuTime) << " (" << facts.accounting
+          << "; steal explains no CPU time: 10 ms ticks); " << samples.size() << " samples";
     if (samples.size() > 1)
     {
         int64_t maxGap = 0;
@@ -1482,14 +1539,18 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
     // waited for nothing but its trigger (a voluntary switch more than usual
     // is a lock or a wait in the engine), and that still ran late: more than
     // 1.5 periods after the callback before it, or finished after its
-    // cycle's end while the kernel preempted it or the hypervisor took time
-    // from it. A cycle's own work is its CPU time less the steal seen on its
-    // CPU while the kernel charges steal to the running thread: run
-    // 38030655885 had one cycle of 3.98 ms CPU time (median 0.62 ms), which
-    // only steal could excuse (stalls::judge). One without such a stall, one
-    // the recorder did not locate, more than 2 of a kind in 0.6 s or a cycle
-    // whose own work reached the period fails (CallbackStallAttribution.h;
-    // the rules on recorded numbers: test_app_stall_attribution.cpp).
+    // cycle's end while the kernel preempted it or the hypervisor took
+    // enough of its time to explain that. A cycle's own work is its CPU time
+    // less the hypervisor's measured share: on Hyper-V, its CPU time less
+    // the run time of the vCPUs it can have run on (those at its two ends
+    // when its migrations prove there was no other, all of them otherwise).
+    // Run 38030655885 had one cycle of 3.98 ms CPU time (median 0.62 ms),
+    // which only time the hypervisor took could excuse; /proc/stat's steal,
+    // in 10 ms ticks, cannot prove that inside a cycle and explains nothing.
+    // One without such a stall, one the recorder did not locate, more than 2
+    // of a kind in 0.6 s or a cycle whose own work reached the period fails
+    // (CallbackStallAttribution.h; the rules on recorded numbers:
+    // test_app_stall_attribution.cpp).
     const auto run = runIdleWindow (false);
     if (! run.ran)
         return;
@@ -1502,10 +1563,15 @@ TEST_CASE ("App: the PipeWire device reports its xruns and the driver's time - c
 TEST_CASE ("App: the PipeWire xrun attribution blames the engine for its own work or wait - 4 ms of CPU time or a 4 ms sleep injected into an idle callback is no scheduling stall (E48, R1.2)")
 {
     // The same window with engine slowness the attribution must not excuse:
-    // 4 ms of the data thread's CPU time in one cycle (no steal: real work)
-    // and a 4 ms sleep in another (a wait of its own). Both finish after
-    // their cycle and make xruns, and the xrun case's verdict on the window
-    // must fail.
+    // 4 ms of the data thread's CPU time in one cycle (real work) and a 4 ms
+    // sleep in another (a wait of its own). Both finish after their cycle
+    // and make xruns, and the xrun case's verdict on the window must fail.
+    // On Hyper-V with the run time helper (CI) the work cycle must also be
+    // bounded and its vCPU(s) must have run more than a period of it: a
+    // wrong vCPU id, a unit error in the helper's records or a bound with
+    // too few vCPUs would read a hypervisor's share there and excuse it
+    // (2026-10-25 review: until then any share of the runner skipped these
+    // checks, and the sleep alone kept the case green).
     const auto run = runIdleWindow (true);
     if (! run.ran)
         return;
@@ -1528,20 +1594,27 @@ TEST_CASE ("App: the PipeWire xrun attribution blames the engine for its own wor
 
     CHECK (stalls::cycleCpu (w, worked) >= WorkInjector::kInjectedNs);
     CHECK (stalls::finishedLate (w, worked));
-    const bool stealDuringWork = stalls::explainedNs (w, worked) > 0;
-    if (stealDuringWork)
-        std::cout << "    (steal on its CPU during the injected work: nothing to conclude for it)\n";
-    else
+    CHECK (engineWork);
+    CHECK (static_cast<double> (stalls::ownCpu (w, worked)) >= w.periodNs);
+    CHECK (! stalls::isStall (w, worked, a.usualWaits));
+    const auto* r = stalls::runnerOf (w, worked);
+    const char* runTimeLog = std::getenv ("FLUB_VP_RUNTIME_LOG");
+    if (runTimeLog != nullptr && *runTimeLog != '\0')
     {
-        CHECK (engineWork);
-        CHECK (! stalls::isStall (w, worked, a.usualWaits));
+        REQUIRE (r != nullptr);
+        CHECK (r->vpRunNs >= 0); // bounded
+    }
+    if (r != nullptr && r->vpRunNs >= 0)
+    {
+        std::cout << "    injected work: bounded with " << r->vpCpus << " vCPUs (" << (r->cpusProven ? "the ones it ran on" : "all: its own not proven") << ", "
+                  << r->migrations << " migrations): they ran " << ms (r->vpRunNs) << " ms, a hypervisor's share of " << ms (r->hypervisorNs) << " ms\n";
+        CHECK (r->hypervisorNs < stalls::cycleCpu (w, worked) - static_cast<int64_t> (w.periodNs));
     }
     CHECK (stalls::waitsOf (w, slept) > a.usualWaits);
     CHECK (stalls::finishedLate (w, slept));
     CHECK (! stalls::isStall (w, slept, a.usualWaits));
-    const int notExcused = stealDuringWork ? 1 : 2; // the injected finishes
     CHECK (a.finishesSeen >= 2);
-    CHECK (a.finishesStalled <= a.finishesSeen - notExcused);
+    CHECK (a.finishesStalled <= a.finishesSeen - 2); // neither injected finish excused
     CHECK (run.xruns >= 1);
     CHECK (! run.failed.empty());
 }

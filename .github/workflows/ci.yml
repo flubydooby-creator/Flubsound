@@ -522,9 +522,12 @@ jobs:
         run: |
           uname -r
           lscpu | grep -iE '^(Model name|CPU\(s\)|Hypervisor vendor|Virtualization type)' || true
-          grep -E '^CONFIG_(HZ|PARAVIRT|PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING|VIRT_CPU_ACCOUNTING_GEN|SCHED_INFO|HYPERV)=|^# CONFIG_(PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING) is not set' "/boot/config-$(uname -r)" || true
+          grep -E '^CONFIG_(HZ|PARAVIRT|PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING|VIRT_CPU_ACCOUNTING_GEN|SCHED_INFO|SCHED_DEBUG|HYPERV)=|^# CONFIG_(PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING|SCHED_DEBUG) is not set' "/boot/config-$(uname -r)" || true
           cat /proc/cmdline
           grep -E '^cpu' /proc/stat
+          # The xrun case proves which vCPUs a cycle ran on from the data
+          # thread's se.nr_migrations (/proc/<pid>/task/<tid>/sched).
+          grep -E '^se\.nr_migrations' /proc/self/sched || echo "::warning::no se.nr_migrations in /proc/self/sched: the xrun case bounds every cycle with all vCPUs' run time"
           echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid); event sources: $(ls /sys/bus/event_source/devices | tr '\n' ' ')"
           sudo dmesg | grep -iE 'Performance Events|Hyper-V|steal' | head -n 12 || true
       # Hyper-V gives the Linux guest no steal clock (steal reads 0), so the
