@@ -60,7 +60,8 @@
 // Fold headroom (foldHeadroom): a linked zero-latency peak limiter keeps the
 //   binaural output at or below 0 dBFS, so correlated full-scale content on
 //   every channel is not handed to the chain as a +10 dBFS over (instant
-//   attack, 10 ms hold, 150 ms release; it never acts below 0 dBFS).
+//   attack, 10 ms hold, 150 ms release to exactly 0 dB; it never acts below
+//   0 dBFS). It is the chain's FoldHeadroom (Bs775Fold.h).
 // Output: binaural stereo in channels 0/1; channels >= 2 are cleared. The
 // chain treats everything after this module as stereo. -3 dB headroom trim.
 // Zero latency (ITD delays are part of the binaural cue, not added latency).
@@ -169,7 +170,7 @@ public:
         the running layout's diffuse-field gain, and the fold-headroom gain. */
     float getMakeupDb() const noexcept { return gainToDb (makeupTo); }
     float getDiffuseMakeupDb() const noexcept { return gainToDb (diffuseGain); }
-    float getHeadroomGainDb() const noexcept { return gainToDb (headroomGain); }
+    float getHeadroomGainDb() const noexcept { return headroom.getGainDb(); }
 
 private:
     // ---- implementation-defined below this line ----
@@ -301,9 +302,8 @@ private:
     int fastSlewPeriods = 0;                 // periods left at the faster slew
     bool relearnPending = false;             // a renderer glide awaits its second restart
 
-    // Fold headroom (E28a): linked zero-latency peak gain.
-    float headroomGain = 1.0f, headroomRelease = 0.0f;
-    int headroomHold = 0, headroomHoldSamples = 0;
+    // Fold headroom (E28a): linked zero-latency peak gain, the chain's law.
+    FoldHeadroom headroom;
 
     // Control-rate state, aligned to absolute stream time.
     int samplesToTick = 0;

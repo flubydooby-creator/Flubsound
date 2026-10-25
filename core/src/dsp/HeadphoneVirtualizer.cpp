@@ -48,9 +48,12 @@
 // the same full-scale signal everywhere reaches about +10 dBFS. A linked peak
 // gain on the output (before the swap fade) holds it at 0 dBFS: when a sample
 // would exceed 0 dBFS the gain drops at once to exactly 0 dBFS / peak, holds
-// for 10 ms and then recovers with a 150 ms one-pole. It has no look-ahead
-// (the module has zero latency), so the first rising edge of an over is
-// flattened; below 0 dBFS it does nothing. foldHeadroom off lets it recover.
+// for 10 ms and then recovers with a 150 ms one-pole on its depth (1 - gain)
+// to exactly 0 dB (FoldHeadroom in Bs775Fold.h, the chain's BS.775 fold's
+// law; until 2026-10-13 a float release of the gain stalled at -0.0019 dB).
+// It has no look-ahead (the module has zero latency), so the first rising
+// edge of an over is flattened; below 0 dBFS it does nothing. foldHeadroom
+// off lets it recover.
 //
 // Geometry (Brown & Duda 1998 spherical head, radius a, c = 343 m/s): for a
 // source at azimuth az and an ear at -90 (left) / +90 (right) degrees,
@@ -221,9 +224,6 @@ constexpr float kRelearnSlewFactor = 4.0f; // 24 dB/s
 constexpr float kRelearnMs = 500.0f;
 // Gate: K-weighted mean square of D summed over both channels >= -70 LUFS.
 constexpr double kMakeupGate = 1.1695e-7;   // 10^((-70 + 0.691) / 10)
-constexpr float kHeadroomCeiling = 1.0f;    // 0 dBFS
-constexpr float kHeadroomHoldMs = 10.0f;
-constexpr float kHeadroomReleaseMs = 150.0f;
 
 // Longest HRIR kept by the direct-form convolver (21 ms at 48 kHz: every
 // anechoic HRIR set fits). Direct form costs O(taps) per sample and ear: 1024
@@ -732,8 +732,7 @@ void HeadphoneVirtualizer::prepare (const ProcessSpec& newSpec)
     makeupSlew = dbToGain (kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
     makeupSlewFast = dbToGain (kRelearnSlewFactor * kMakeupSlewDbPerS * static_cast<float> (kControlInterval / fs));
     relearnPeriods = std::max (1, static_cast<int> (std::lround (static_cast<double> (kRelearnMs) * 0.001 * fs / kControlInterval)));
-    headroomHoldSamples = msToSamples (kHeadroomHoldMs, fs);
-    headroomRelease = static_cast<float> (1.0 - std::exp (-1.0 / (static_cast<double> (kHeadroomReleaseMs) * 0.001 * fs)));
+    headroom.prepare (fs);
     servoSeeded = false;
 
     // Geometry smoothers step once per control period, so their coefficient
@@ -777,8 +776,7 @@ void HeadphoneVirtualizer::reset() noexcept FLUB_NONBLOCKING
     periodRef = periodBin = 0.0;
     servoPhase = 0;
     makeupFrom = makeupTo;
-    headroomGain = 1.0f;
-    headroomHold = 0;
+    headroom.reset();
     swapLayout();
     reflHpState.reset();
     reflLpState.reset();
@@ -1546,25 +1544,10 @@ void HeadphoneVirtualizer::renderSegment (const AudioBlock& block, int start, in
         float yl = kTrim * (m * l[i] + lfeOut[i]);
         float yr = kTrim * (m * r[i] + lfeOut[i]);
 
-        // Fold headroom: hold, then release; an over drops the gain at once
-        // to exactly the ceiling (and restarts the hold).
-        if (headroomHold > 0)
-        {
-            --headroomHold;
-        }
-        else if (headroomGain < 1.0f)
-        {
-            headroomGain += (1.0f - headroomGain) * headroomRelease;
-            if (headroomGain > 0.999999f)
-                headroomGain = 1.0f;
-        }
-        const float peak = std::max (std::abs (yl), std::abs (yr));
-        if (limit && peak * headroomGain > kHeadroomCeiling && std::isfinite (peak))
-        {
-            headroomGain = kHeadroomCeiling / peak;
-            headroomHold = headroomHoldSamples;
-        }
-        float g = headroomGain;
+        // Fold headroom: hold, then release to exactly 0 dB; an over drops
+        // the gain at once to exactly the ceiling (and restarts the hold).
+        // Off, it only releases.
+        float g = headroom.next (limit ? std::max (std::abs (yl), std::abs (yr)) : 0.0f);
         if (fading)
         {
             // Integer position -> exact 0 / 1 end points.
