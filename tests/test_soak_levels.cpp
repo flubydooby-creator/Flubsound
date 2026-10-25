@@ -1,5 +1,5 @@
 // Levellers over long mixed programme (docs/11 E21 remainder): Late Night
-// Low Volume at -20 LUFS from -14 / -24 / -40 LUFS input, Podcast & Voice
+// Low Volume at -24 LUFS from -14 / -24 / -40 LUFS input, Podcast & Voice
 // on docs/11 E23's speech rows, and a seeded 10-minute mixed programme
 // (speech, music with track changes, silence, game ambience, combat)
 // through Night Mode Gaming, Late Night, Podcast & Voice and Competitive FPS
@@ -704,16 +704,25 @@ void checkSoak (const SoakPreset& p, double seconds, bool tenMinutes)
 } // namespace
 
 // =============================================================================
-// Late Night Low Volume: -20 LUFS from -14 / -24 / -40 LUFS input
+// Late Night Low Volume: -24 LUFS from -14 / -24 / -40 LUFS input
 // =============================================================================
 namespace
 {
 constexpr double kRowSeconds = 16.0, kSettledFrom = 10.0;
 
+/** Late Night's level: -24 LUFS since the preset audit (2026-10-24, owner
+    request "why is Late Night louder than Signature"): its make-up 11.8 ->
+    8 dB, the night level of Night Mode Gaming, so it is louder than the
+    presets that do not level only on sources under about -24 LUFS. Before:
+    -20 LUFS, music -19.31 / -19.94 / -19.26 and speech -20.04 / -20.24 /
+    -20.78 LUFS at -14 / -24 / -40 LUFS input; after -23.07 / -23.67 /
+    -23.06 and -23.84 / -24.01 / -24.58 LUFS (MSVC 19.51). */
+constexpr double kLateNightLufs = -24.0;
+
 /** Output loudness of Late Night on 16 s of the E60 music or speech
     mastered to `lufs`, integrated over 10-16 s (Auto Level settled: at
     1 dB/s its +6 dB cap takes 6 s); docs/11 E21 Done-when: within 1 LU of
-    -20 LUFS. */
+    kLateNightLufs. */
 void lateNightRow (bool music, double lufs)
 {
     const auto values = factoryValues ("music-late-night-low-volume.json");
@@ -732,37 +741,37 @@ void lateNightRow (bool music, double lufs)
     measured (what + ": input integrated", integratedOf (in), "LUFS");
     measured (what + ": output 10-16 s", settled.integratedLufs, "LUFS");
     measured (what + ": output true peak 10-16 s", settled.truePeakDbtp, "dBTP");
-    CHECK_NEAR (settled.integratedLufs, -20.0, 1.0);
+    CHECK_NEAR (settled.integratedLufs, kLateNightLufs, 1.0);
     CHECK_LE (settled.truePeakDbtp, -1.0);
 }
 } // namespace
 
-TEST_CASE ("Late Night Low Volume: music at -14 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: music at -14 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (true, -14.0);
 }
 
-TEST_CASE ("Late Night Low Volume: music at -24 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: music at -24 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (true, -24.0);
 }
 
-TEST_CASE ("Late Night Low Volume: music at -40 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: music at -40 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (true, -40.0);
 }
 
-TEST_CASE ("Late Night Low Volume: speech at -14 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: speech at -14 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (false, -14.0);
 }
 
-TEST_CASE ("Late Night Low Volume: speech at -24 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: speech at -24 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (false, -24.0);
 }
 
-TEST_CASE ("Late Night Low Volume: speech at -40 LUFS plays within 1 LU of -20 LUFS (docs/11 E21)")
+TEST_CASE ("Late Night Low Volume: speech at -40 LUFS plays within 1 LU of -24 LUFS (docs/11 E21)")
 {
     lateNightRow (false, -40.0);
 }

@@ -22,7 +22,7 @@
 //                   by flub::preset::fromJson, as the notice bar shows them
 //   recovery        the notice for a damaged settings file restored from .bak1
 //   latency-prompt  a preset made for another latency profile is loaded
-//                   (Audiophile Subtle / Competitive FPS on Balanced)
+//                   (Warm Vinyl / Competitive FPS on Balanced)
 //   governor        Boost 100 %, Loudness / Impact 100 %, maximizer drive
 //                   12 dB, protection Strict: the governor backs off (use
 //                   --seconds 8 so its 3 s averages settle)

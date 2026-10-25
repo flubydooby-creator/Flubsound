@@ -21,6 +21,7 @@
     "comp.release": 200,
     "comp.autoRelease": true,
     "comp.makeup": 2.5,
+    "max.bedLift": 1,
     "eq.9.type": "High Shelf",
     "eq.9.freq": 9000,
     "eq.9.gain": -1,
@@ -37,10 +38,10 @@
   "intent": {
     "tone": {
       "pink": { "db": [-0.3, 0.4, 0.3, 0.2, 0.4, 0.6, 0.7, -0.5, -0.5, -0.4], "toleranceDb": 1.0 },
-      "music": { "db": [-0.1, 0.0, 0.0, 0.0, 0.1, 0.1, 0.5, 1.2, 0.2, -0.7], "toleranceDb": 1.5 }
+      "music": { "db": [0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.6, 1.2, 0.3, -0.7], "toleranceDb": 1.5 }
     },
-    "loudnessOffsetLu": { "pink": -0.6, "music": 2.1, "toleranceLu": 1.0 },
-    "lraLossMaxLu": 1.1,
+    "loudnessOffsetLu": { "pink": -0.6, "music": 1.0, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.6,
     "thdnMaxDb": -100,
     "stepBedContrastDb": { "value": 0.4, "toleranceDb": 1.0 }
   }

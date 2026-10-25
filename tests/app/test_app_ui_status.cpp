@@ -306,14 +306,14 @@ TEST_CASE ("App UI: a preset made for another latency profile leaves the profile
     REQUIRE (controller.getLatencyProfile() == LatencyProfileValue::Balanced);
     juce::String error;
 
-    // Audiophile Subtle was made for Quality: the profile stays Balanced.
-    REQUIRE (controller.loadPreset (presetNamed (controller, "Audiophile Subtle"), music, error));
+    // Warm Vinyl was made for Quality: the profile stays Balanced.
+    REQUIRE (controller.loadPreset (presetNamed (controller, "Warm Vinyl"), music, error));
     CHECK (controller.getLatencyProfile() == LatencyProfileValue::Balanced);
     for (int s = 0; s < controller.getNumStrips(); ++s)
         CHECK (controller.getParams (s).get (LatencyProfile) == 1.0f);
     auto suggestion = controller.takeLatencySuggestion();
     REQUIRE (suggestion.has_value());
-    CHECK (suggestion->presetName == "Audiophile Subtle");
+    CHECK (suggestion->presetName == "Warm Vinyl");
     CHECK (suggestion->suggested == LatencyProfileValue::Quality);
     CHECK (suggestion->current == LatencyProfileValue::Balanced);
     CHECK (! controller.takeLatencySuggestion().has_value()); // taken once
@@ -323,7 +323,7 @@ TEST_CASE ("App UI: a preset made for another latency profile leaves the profile
     bar.setBounds (0, 0, 900, 34);
     bar.post (ui::NoticeBar::latencyNotice (*suggestion, [&] { controller.setLatencyProfile (suggestion->suggested); }));
     REQUIRE (bar.current() != nullptr);
-    CHECK (bar.current()->text == "\"Audiophile Subtle\" was made for Quality; the engine runs Balanced.");
+    CHECK (bar.current()->text == "\"Warm Vinyl\" was made for Quality; the engine runs Balanced.");
     CHECK (bar.getActionButton().getButtonText() == "Use Quality");
     bar.getActionButton().triggerClick();
     REQUIRE (flubapptest::pumpMessagesUntil ([&] { return controller.getLatencyProfile() == LatencyProfileValue::Quality; }, 2000));
@@ -332,7 +332,7 @@ TEST_CASE ("App UI: a preset made for another latency profile leaves the profile
             CHECK (controller.getParams (s).get (bank, LatencyProfile) == 0.0f);
 
     // A preset without a suggestion, or one matching the profile, asks nothing.
-    REQUIRE (controller.loadPreset (presetNamed (controller, "Audiophile Subtle"), music, error));
+    REQUIRE (controller.loadPreset (presetNamed (controller, "Warm Vinyl"), music, error));
     CHECK (! controller.takeLatencySuggestion().has_value());
     REQUIRE (controller.loadPreset (presetNamed (controller, "Flubsound Signature"), music, error));
     CHECK (! controller.takeLatencySuggestion().has_value());
@@ -714,7 +714,7 @@ TEST_CASE ("App UI: MainComponent shows the device banner, the preset toast and 
     // A preset made for Quality, loaded by hand: the prompt.
     const int music = controller.findStrip ("Music");
     controller.setSelectedStrip (music);
-    REQUIRE (controller.loadPreset (presetNamed (controller, "Audiophile Subtle"), music, error));
+    REQUIRE (controller.loadPreset (presetNamed (controller, "Warm Vinyl"), music, error));
     REQUIRE (notices.current() != nullptr);
     CHECK (notices.current()->key == ui::NoticeBar::kLatencyKey);
     CHECK (notices.isVisible());
@@ -734,7 +734,7 @@ TEST_CASE ("App UI: MainComponent shows the device banner, the preset toast and 
     CHECK (notices.current()->text.contains ("\"bost\""));
 
     // The prompt's action switches the profile and removes the prompt.
-    REQUIRE (controller.loadPreset (presetNamed (controller, "Audiophile Subtle"), music, error));
+    REQUIRE (controller.loadPreset (presetNamed (controller, "Warm Vinyl"), music, error));
     REQUIRE (notices.current() != nullptr);
     REQUIRE (notices.current()->key == ui::NoticeBar::kLatencyKey);
     notices.getActionButton().triggerClick();

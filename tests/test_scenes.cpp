@@ -1007,30 +1007,46 @@ const ScenePinned kScenePins[] = {
       { { 1.74, 1.03, -7.91, -0.20, -9.09, 0.56, -0.43, 0.00, 0.01 },
         { 2.01, 1.03, -0.15, 0.75, -7.25, 1.47, -1.19, 2.43, 1.06 },
         { 3.83, 1.96, 3.82, 1.94, -0.33, 0.47, -1.86, 4.18, 2.80 } } },
+    // Horror Detail, 7.1 Headphone Surround, Cinematic Adventure, MOBA &
+    // Strategy and Racing at -24 / -40 LUFS: re-pinned by the preset audit
+    // (2026-10-24, docs/11 E19 step 3 adopted): "max.bedLift": 1 trims the
+    // maximizer drive their compressor make-up and Detail would add to a
+    // bed that stays clear of the ceiling. Before -> after at -24 / -40:
+    // bed lift Horror 2.02 / 2.66 -> 0.44 / 0.23, 7.1 2.09 / 3.07 -> 0.67 /
+    // 0.26, Cinematic 2.91 / 3.83 -> 0.86 / 0.66, MOBA 2.80 / 4.22 -> 1.15 /
+    // 0.62, Racing 3.17 / 4.04 -> 1.02 / 0.76 dB; the combat, clear of the
+    // ceiling too, is trimmed with it (event change Horror -0.06 / 2.31 ->
+    // -0.67 / 0.18, 7.1 -1.36 / 1.88 -> -2.57 / -0.67, Cinematic 0.83 /
+    // 4.09 -> -0.25 / 0.83, MOBA -1.34 / 2.28 -> -2.98 / -1.39, Racing -0.77
+    // / 3.82 -> -2.53 / 0.45 dB); onset jump Horror at -24 0.69 -> 0.36,
+    // Racing 1.51 -> 1.73, MOBA 1.37 -> 1.53 dB; contrast within 0.3 dB
+    // (MOBA at -24 -2.28 -> -2.55) or higher (Horror 3.09 / 3.10 -> 3.23 /
+    // 3.27), holes within 0.35 dB (MOBA at -24 -0.04 -> 0.28, Horror at -40
+    // -0.02 -> -0.33), recovery 0 s; -14 LUFS unchanged.
     { "gaming-horror-detail.json",
       { { 3.07, 2.56, 0.39, -0.08, 0.06, 0.27, -0.25, 0.00, 0.23 },
-        { 3.97, 3.09, 2.02, 0.00, -0.06, 0.69, -0.08, 0.00, 0.13 },
-        { 4.96, 3.10, 2.66, -0.03, 2.31, -0.02, -0.02, 0.00, -0.05 } } },
+        { 4.11, 3.23, 0.44, 0.08, -0.67, 0.36, -0.29, 0.00, 0.24 },
+        { 5.14, 3.27, 0.23, 0.00, 0.18, -0.03, -0.33, 0.00, 0.08 } } },
     { "gaming-7-1-headphone-surround.json",
       { { 2.49, 1.89, -0.95, -0.09, -1.52, 0.32, -0.27, 0.00, 0.23 },
-        { 3.40, 2.41, 2.09, -0.06, -1.36, 0.86, -0.20, 0.00, 0.23 },
-        { 4.76, 2.72, 3.07, -0.04, 1.88, 0.00, -0.03, 0.00, -0.07 } } },
+        { 3.44, 2.44, 0.67, 0.10, -2.57, 0.95, -0.08, 0.00, 0.15 },
+        { 4.92, 2.88, 0.26, -0.01, -0.67, 0.00, -0.29, 0.00, 0.04 } } },
     { "gaming-cinematic-adventure.json",
       { { 0.11, -0.45, 0.78, -0.05, 0.16, 0.69, -0.14, 0.00, 0.01 },
-        { 1.16, -0.26, 2.91, -0.01, 0.83, 0.95, 0.00, 0.00, -0.11 },
-        { 2.41, -0.40, 3.83, -0.07, 4.09, 0.06, -0.02, 0.00, -0.35 } } },
+        { 1.12, -0.29, 0.86, 0.04, -0.25, 0.91, 0.07, 0.00, -0.11 },
+        { 2.38, -0.43, 0.66, -0.03, 0.83, 0.06, 0.07, 0.00, -0.40 } } },
     { "gaming-moba-strategy.json",
       { { -1.30, -1.01, -1.49, -0.03, -2.28, 0.29, -0.19, 0.00, -0.39 },
-        { -0.72, -2.28, 2.80, -0.03, -1.34, 1.37, -0.04, 0.00, -0.60 },
-        { 2.88, -0.48, 4.22, -0.11, 2.28, 0.13, -0.05, 0.00, -0.46 } } },
+        { -0.99, -2.55, 1.15, 0.07, -2.98, 1.53, 0.28, 0.00, -0.64 },
+        { 2.83, -0.53, 0.62, -0.06, -1.39, 0.13, 0.03, 0.00, -0.49 } } },
     // Racing: re-pinned by docs/11 E04 step 2 (Phase 3 batch 2; its
     // Tighten 0.2 no longer cuts onsets and is applied as a one-pole
     // shelf). Before: onset jump 0.30 / 1.56 / 0.15, step lift after vs
     // before 0.31 / 0.27 / -0.22, cue SNR gain -0.34 / 0.35 / 1.89.
     { "gaming-racing.json",
       { { -0.37, -0.93, -0.81, -0.06, -1.78, 0.57, -0.19, 0.00, -0.17 },
-        { 0.35, -0.83, 3.17, -0.04, -0.77, 1.51, -0.06, 0.00, -0.19 },
-        { 1.77, -0.47, 4.04, -0.06, 3.82, -0.03, -0.03, 0.00, -0.35 } } },
+        { 0.21, -0.97, 1.02, 0.07, -2.53, 1.73, 0.15, 0.00, -0.21 },
+        { 1.73, -0.50, 0.76, -0.02, 0.45, -0.02, 0.07, 0.00, -0.41 } } },
     { "gaming-tournament-clean.json",
       { { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
         { 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00 },
@@ -1040,11 +1056,18 @@ const ScenePinned kScenePins[] = {
     // make-up, a stronger upward section) and the Auto Level time
     // constants. A leveller now: the -40 LUFS bed is brought up to the
     // target (+7.30 -> +22.56 dB), the -24 LUFS onset jump 6.03 -> 1.76 dB,
-    // hole 1.86 -> -0.89 dB, recovery 4.18 -> 2.43 s.
+    // hole 1.86 -> -0.89 dB, recovery 4.18 -> 2.43 s. Re-pinned by the
+    // preset audit (2026-10-24): its make-up 11.8 -> 8 dB moves its level
+    // from about -20 to about -24 LUFS, a gain after the levelling: bed
+    // lift -5.91 / 4.45 / 22.56 -> -9.71 / 0.65 / 18.76 dB and event change
+    // -6.34 / -4.53 / 6.79 -> -10.14 / -8.33 / 3.05 dB (-3.8 dB each, the
+    // -40 LUFS event -3.74 dB); at -40 LUFS, where the event is lifted the
+    // most, the onset jump 2.56 -> 3.34 dB (3.8 dB further from the
+    // ceiling, the maximizer holds the first shot less); the rest unchanged.
     { "music-late-night-low-volume.json",
-      { { -0.02, -0.11, -5.91, 0.42, -6.34, 0.42, -0.30, 0.00, -0.04 },
-        { -0.02, -0.16, 4.45, -0.15, -4.53, 1.76, -0.89, 2.43, -0.06 },
-        { 0.33, -0.13, 22.56, 0.12, 6.79, 2.56, 0.07, 1.03, -1.37 } } },
+      { { -0.02, -0.11, -9.71, 0.42, -10.14, 0.42, -0.30, 0.00, -0.04 },
+        { -0.02, -0.16, 0.65, -0.15, -8.33, 1.76, -0.89, 2.43, -0.06 },
+        { 0.33, -0.13, 18.76, 0.12, 3.05, 3.34, 0.07, 1.03, -1.37 } } },
 };
 
 /** The three scenes of the matrix, made once. */
@@ -1135,7 +1158,7 @@ namespace
 // (FPS 5.25 without it). At -14 / -24 / -40 LUFS the upward section is
 // idle on this scene (its threshold is under the bed), so the matrix
 // above does not move.
-void checkQuietSceneUpward (const char* file, double bedDb, double contrastDb)
+void checkQuietSceneUpward (const char* file, double bedDb, double contrastDb, double holeMaxDb = 0.3)
 {
     const auto scene = makeScene (-60.0);
     const auto shipped = resolve (factoryPreset (file));
@@ -1151,13 +1174,19 @@ void checkQuietSceneUpward (const char* file, double bedDb, double contrastDb)
     CHECK_GE (a.contrastChangeDb, b.contrastChangeDb - 0.1);
     CHECK_NEAR (a.bedLiftDb, bedDb, 0.3);
     CHECK_NEAR (a.contrastChangeDb, contrastDb, 0.3);
-    CHECK_LE (std::abs (a.holeDb), 0.3);
+    CHECK_LE (std::abs (a.holeDb), holeMaxDb);
 }
 } // namespace
 
+// Horror Detail re-pinned by the preset audit (2026-10-24, "max.bedLift": 1,
+// docs/11 E19 step 3 adopted; measured on MSVC 19.51 with the old and the new
+// preset file): bed lift 2.60 -> 0.18 dB (0.20 dB with the upward section
+// off), contrast 3.47 -> 3.68 dB, hole 1-2 s after the event -0.01 -> -0.36 dB
+// (the budget's trim on the bed after the event is 0.36 dB deeper than before
+// it), so its hole bound is 0.45 dB here instead of 0.3.
 TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background: Horror Detail (docs/11 E19 step 2)")
 {
-    checkQuietSceneUpward ("gaming-horror-detail.json", 2.62, 3.60);
+    checkQuietSceneUpward ("gaming-horror-detail.json", 0.18, 3.68, 0.45);
 }
 
 TEST_CASE ("Scenes: Detail's upward compressor does not lift the bed of the quiet scene - its floor follows the background: Competitive FPS (docs/11 E19 step 2)")
@@ -1211,7 +1240,11 @@ void checkDialogueScene (int l)
     static const Pinned pinned[] = {
         { nullptr, false, { { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 }, { 0.00, -0.03, -0.03 } } },
         { "gaming-competitive-fps.json", false, { { 2.90, 2.57, -0.10 }, { 3.00, 3.18, 0.49 }, { 3.15, 3.87, 0.90 } } },
-        { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.07, 0.29, 3.31 }, { -1.98, 3.86, 4.60 } } },
+        // MOBA at -24 / -40 LUFS re-pinned by the preset audit (2026-10-24,
+        // "max.bedLift": 1): dialogue and effects are trimmed together, the
+        // SNR gain within 0.2 dB: -4.07 / 0.29 / 3.31 -> -4.05 / -1.38 / 1.58
+        // and -1.98 / 3.86 / 4.60 -> -1.79 / 0.82 / 1.39.
+        { "gaming-moba-strategy.json", true, { { -5.30, -4.85, -0.67 }, { -4.05, -1.38, 1.58 }, { -1.79, 0.82, 1.39 } } },
         // Night Mode at -14 LUFS re-pinned by docs/11 E21's time constants
         // (Phase 3 batch 3): -5.75 / -10.91 / -6.19 -> -5.30 / -10.64 / -6.29.
         { "gaming-night-mode.json", true, { { -5.30, -10.64, -6.29 }, { -5.44, -2.95, 1.56 }, { -0.32, 4.92, 4.54 } } },
@@ -1304,8 +1337,12 @@ void checkSpeechMusicSilence (int l)
           { { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 }, { 0.00, 0.00, 0.00, -79.98, 0.00 } } },
         { "gaming-night-mode.json", { false, false, true }, { true, false, false },
           { { -1.42, -0.13, 8.12, -79.35, 0.11 }, { -1.08, -1.05, 5.83, -75.74, 0.97 }, { -2.42, -2.52, 0.90, -75.81, 2.68 } } },
+        // Late Night's silence output re-pinned by the preset audit
+        // (2026-10-24: make-up 11.8 -> 8 dB, about -24 LUFS): -79.22 /
+        // -70.42 / -62.34 -> -83.02 / -74.22 / -66.14 dBFS; every relative
+        // value (balance, onset, silence lift re speech, return) unchanged.
         { "music-late-night-low-volume.json", { false, false, true }, { false, true, false },
-          { { 1.25, 0.35, 5.81, -79.22, -0.48 }, { 1.76, 0.08, 6.53, -70.42, 0.02 }, { 7.86, -5.96, 2.91, -62.34, 2.79 } } },
+          { { 1.25, 0.35, 5.81, -83.02, -0.48 }, { 1.76, 0.08, 6.53, -74.22, 0.02 }, { 7.86, -5.96, 2.91, -66.14, 2.79 } } },
     };
     const auto scene = makeSpeechMusicSilence (kLevels[l]);
     measured ("speech -> music -> silence turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");
@@ -1379,7 +1416,10 @@ void checkTrackChange (int l)
     static const Pinned pinned[] = {
         { nullptr, { false, false, false }, { { -0.01, 0.00, 0.00, -2.51 }, { 0.00, 0.00, 0.00, -8.41 }, { 0.00, 0.00, 0.00, -24.40 } } },
         { "gaming-night-mode.json", { false, false, false }, { { -5.39, 0.45, 0.00, -9.50 }, { -2.32, 0.36, 0.00, -12.14 }, { 2.00, -1.21, 0.00, -24.82 } } },
-        { "music-late-night-low-volume.json", { true, true, false }, { { -14.83, 0.98, 0.00, -2.20 }, { -15.79, 0.81, 1.88, -2.89 }, { -1.26, 0.91, 0.00, -2.52 } } },
+        // Late Night's peak re-pinned by the preset audit (2026-10-24:
+        // make-up 11.8 -> 8 dB): -2.20 / -2.89 / -2.52 -> -6.00 / -6.69 /
+        // -6.32 dBFS; step change, overshoot and settle unchanged.
+        { "music-late-night-low-volume.json", { true, true, false }, { { -14.83, 0.98, 0.00, -6.00 }, { -15.79, 0.81, 1.88, -6.69 }, { -1.26, 0.91, 0.00, -6.32 } } },
     };
     const auto scene = makeTrackChange (kLevels[l]);
     measured ("track change turned down to stay under -1 dBFS at " + levelName (l), scene.fullScaleDb, "dB");

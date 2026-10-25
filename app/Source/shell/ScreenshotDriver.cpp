@@ -234,7 +234,7 @@ void ScreenshotDriver::applyStates (int gameStrip, int focusStrip)
     {
         // The real path: a preset made for another profile, loaded by hand.
         controller.setLatencyProfile (LatencyProfileValue::Balanced);
-        const auto* preset = controller.getPresetManager().findByName (options.gamingMode ? "Competitive FPS" : "Audiophile Subtle");
+        const auto* preset = controller.getPresetManager().findByName (options.gamingMode ? "Competitive FPS" : "Warm Vinyl");
         juce::String error;
         if (preset != nullptr)
             controller.loadPreset (*preset, focusStrip, error);

@@ -491,11 +491,11 @@ TEST_CASE ("App UI: the browser shows a preset's description, tags, latency prof
 
     Browser browser (c, shared);
     browser.setPreviewEnabled (false);
-    REQUIRE (browser.selectPreset (preset (c, "Audiophile Subtle").id));
+    REQUIRE (browser.selectPreset (preset (c, "Warm Vinyl").id)); // made for Quality
     auto lines = browser.getDetailLines();
-    CHECK (lines[0] == "Audiophile Subtle");
+    CHECK (lines[0] == "Warm Vinyl");
     CHECK (lines[1].startsWith ("Factory"));
-    CHECK (lines.joinIntoString ("\n").contains ("Tags: audiophile, transparent"));
+    CHECK (lines.joinIntoString ("\n").contains ("Tags: warm, vinyl"));
     CHECK (lines.joinIntoString ("\n").contains ("Made for the Quality latency profile (the engine runs Balanced; loading never changes it)"));
 
     browser.setPreviewEnabled (true);
