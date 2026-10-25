@@ -180,9 +180,15 @@ private:
     samples are untouched again. An over during the release sets the depth
     to 1 - 1 / peak and restarts the hold, so the released depth is
     max (1 - target, r x depth) as in ChatDucker's limiter (docs/11 E22).
-    Until 2026-10-13 the gain itself released, g += (1 - g) (1 - r) in
-    float: once 1 - g fell under about 2.2e-4 the step was under half an
-    ulp, so after its first over a fold stayed at -0.0019 dB for ever. */
+    The decay r is a float, rounded by at most 2^-25, so its time constant
+    is within about 2^-25 x 150 ms x fs of 150 ms, relative (0.021 % at
+    48 kHz, 0.086 % at 192 kHz): measured within 0.008 % at 44.1 / 48 /
+    88.2 / 96 / 176.4 kHz, -0.080 % at 192 kHz (the release 1.6 ms early),
+    -0.027 % at 64 kHz, +0.092 % at 384 kHz. Until 2026-10-13 the gain
+    itself released, g += (1 - g) (1 - r) in float: once 1 - g fell under
+    2^-25 / (1 - r) the step was under half an ulp, so after its first over
+    a fold stayed there for ever, -0.0019 dB at 48 kHz (-0.0017 dB at
+    44.1 kHz, -0.0037 dB at 96 kHz, -0.0075 dB at 192 kHz). */
 class FoldHeadroom
 {
 public:

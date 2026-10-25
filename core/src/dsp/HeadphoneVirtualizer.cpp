@@ -50,7 +50,8 @@
 // would exceed 0 dBFS the gain drops at once to exactly 0 dBFS / peak, holds
 // for 10 ms and then recovers with a 150 ms one-pole on its depth (1 - gain)
 // to exactly 0 dB (FoldHeadroom in Bs775Fold.h, the chain's BS.775 fold's
-// law; until 2026-10-13 a float release of the gain stalled at -0.0019 dB).
+// law; until 2026-10-13 a float release of the gain stalled at -0.0019 dB
+// at 48 kHz, -0.0075 dB at 192 kHz).
 // It has no look-ahead (the module has zero latency), so the first rising
 // edge of an over is flattened; below 0 dBFS it does nothing. foldHeadroom
 // off lets it recover.

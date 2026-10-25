@@ -1549,16 +1549,20 @@ TEST_CASE ("HeadphoneVirtualizer: fold headroom - full-scale correlated 5.1 / 7.
 
 TEST_CASE ("HeadphoneVirtualizer: fold headroom - after an over the release reaches exactly 0 dB and the output is the headroom-off render again (docs/11 E28a, 2026-10-13)")
 {
-    // A 200 Hz sine at 0.5 on every main speaker of 7.1 (about +7 dBFS at
-    // the ears: the headroom holds it at 0 dBFS) for 0.5 s, then at 0.05
-    // (under 0 dBFS) for 2.5 s; level match on, rendered with the headroom
-    // on and off. After the last over the gain holds 10 ms, then its depth
-    // (1 - gain) decays with 150 ms and snaps to 0 under 1e-6: exactly 0 dB
-    // hold + 150 ms x ln (depth / 1e-6) after it, and from there the output
-    // is the headroom-off render bit for bit (the level match measures the
-    // render before its make-up, so it is the same in both). Before
-    // 2026-10-13 the gain released as g += (1 - g) (1 - r) in float and
-    // stalled about 2.2e-4 under 1: -0.0019 dB for ever at 48 kHz.
+    // A 200 Hz sine at 0.5 on every main speaker of 7.1 for 0.5 s, then at
+    // 0.05 (under 0 dBFS) for 2.5 s; level match on, rendered with the
+    // headroom on and off. Without the headroom the ears peak at +3.66 dBFS,
+    // 16.5 ms in, while the level match's make-up is within 0.1 dB of its
+    // start (it moves at most 6 dB/s; -6.18 dB by the step down), so the
+    // headroom's deepest gain is -3.66 dB: exactly 1 / that peak, the overs
+    // leave at exactly 0 dBFS. After the last over the gain holds 10 ms,
+    // then its depth (1 - gain) decays with 150 ms and snaps to 0 under
+    // 1e-6: exactly 0 dB hold + 150 ms x ln (depth / 1e-6) after it, and
+    // from there the output is the headroom-off render bit for bit (the
+    // level match measures the render before its make-up, so it is the same
+    // in both). Before 2026-10-13 the gain released as g += (1 - g) (1 - r)
+    // in float and stalled about 2.2e-4 under 1: -0.0019 dB for ever at
+    // 48 kHz.
     const int n = static_cast<int> (3.0 * kFs), quietFrom = static_cast<int> (0.5 * kFs), tail = static_cast<int> (2.75 * kFs);
     auto x = sine (200.0, kFs, n, 0.5f);
     for (int i = quietFrom; i < n; ++i)
@@ -1574,7 +1578,7 @@ TEST_CASE ("HeadphoneVirtualizer: fold headroom - after an over the release reac
     const int fineFrom = quietFrom - 2400, fineTo = quietFrom + 4800;
     const auto blockAt = [&] (int pos) { return pos < fineFrom ? std::min (64, fineFrom - pos) : pos < fineTo ? 1 : std::min (64, n - pos); };
     std::array<std::array<std::vector<float>, 2>, 2> ears; // [headroom off, on][ear]
-    float held = 0.0f, endDb = -1.0f, overDb = 0.0f;
+    float held = 0.0f, endDb = -1.0f, overDb = 0.0f, makeupAtStepDb = 0.0f;
     int lastOver = -1, overAfterFine = 0;
     for (const bool headroom : { false, true })
     {
@@ -1587,6 +1591,8 @@ TEST_CASE ("HeadphoneVirtualizer: fold headroom - after an over the release reac
         for (int pos = 0, len = 0; pos < n; pos += len)
         {
             len = blockAt (pos);
+            if (pos == quietFrom)
+                makeupAtStepDb = v.getMakeupDb();
             v.process (out.block (pos, len));
             if (! headroom)
                 continue;
@@ -1618,10 +1624,26 @@ TEST_CASE ("HeadphoneVirtualizer: fold headroom - after an over the release reac
     double diff = 0.0;
     for (size_t e = 0; e < 2; ++e)
         diff = std::max (diff, maxAbsDiff (ears[0][e], ears[1][e], tail));
-    std::cout << "    [E28a] virtualiser fold headroom: held " << held << " dB, last over at " << lastOver / kFs << " s (depth " << depth
+    // The headroom-off render is the signal the headroom sees: its peak sets
+    // the deepest gain (exactly 1 / peak).
+    float peakOff = 0.0f;
+    int peakAt = 0;
+    for (size_t e = 0; e < 2; ++e)
+        for (int i = 0; i < n; ++i)
+            if (std::abs (ears[0][e][static_cast<size_t> (i)]) > peakOff)
+            {
+                peakOff = std::abs (ears[0][e][static_cast<size_t> (i)]);
+                peakAt = i;
+            }
+    const double peakOffDb = 20.0 * std::log10 (static_cast<double> (peakOff));
+    std::cout << "    [E28a] virtualiser fold headroom: the ears peak at +" << peakOffDb << " dBFS without it (at " << peakAt / kFs
+              << " s; the level match's make-up " << makeupAtStepDb << " dB at the step down), held " << held << " dB, last over at "
+              << lastOver / kFs << " s (depth " << depth
               << "), the headroom-off render again " << took << " s after it (expected " << expected << " s; -1 = never), at the end " << endDb
               << " dB; largest difference to the headroom-off render in the last 0.25 s: " << diff << "\n";
     CHECK (held < -3.0f);
+    CHECK_NEAR (static_cast<double> (held), -peakOffDb, 1.0e-3); // held at exactly 0 dBFS
+    CHECK (peakAt < quietFrom);
     CHECK (lastOver >= fineFrom); // the over found sample-exactly ...
     CHECK (overAfterFine == 0);   // ... and none later
     CHECK (released);
@@ -1650,16 +1672,21 @@ TEST_CASE ("HeadphoneVirtualizer: switching the level match and the fold headroo
         HeadphoneVirtualizer v;
         auto p = matchedFor (ChannelLayout::Surround71);
         setUp (v, p);
+        float headroomAtOffDb = 0.0f, headroomAtOnDb = 0.0f;
         for (int pos = 0; pos < n; pos += 128)
         {
             if (pos == off || pos == on)
             {
+                (pos == off ? headroomAtOffDb : headroomAtOnDb) = v.getHeadroomGainDb();
                 (headroomCase ? p.foldHeadroom : p.levelMatch) = pos == on;
                 v.setParams (p);
             }
             v.process (buf.block (pos, 128));
         }
         CHECK (allFinite (buf));
+        if (headroomCase) // the gain the steady window before the switch-on (1.8 - 2.0 s) ends at
+            std::cout << "    measured fold headroom gain at the switch-off " << headroomAtOffDb << " dB, at the switch-on " << headroomAtOnDb
+                      << " dB (released since the switch-off)\n";
         for (size_t e = 0; e < 2; ++e)
         {
             const auto& y = buf.ch[e];
