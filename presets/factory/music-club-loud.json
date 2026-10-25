@@ -5,7 +5,7 @@
   "name": "Club Loud",
   "category": "Music",
   "author": "Flubsound (Flubes & Claude)",
-  "description": "Big, dense and loud for parties, EDM and workouts. The Loudness macro adds governed maximizer drive, capped by a -9 LUFS loudness target (the loop only ever reduces drive, it never adds any), multiband glue, LF-first limiting and the soft clipper share the work so the kick does not pump the mix, and the bass is tightened and centred. On masters that are already loud there is little level left to gain and the limiter works hard; Smart macros back the drive off there.",
+  "description": "Big, dense and loud for parties, EDM and workouts. The Loudness macro adds governed maximizer drive, capped by a -9 LUFS loudness target (the loop only ever reduces drive, it never adds any), multiband glue, LF-first limiting and the soft clipper share the work so the kick pumps the mix less (the low end is limited first, which takes a little of the kick's body), and the bass is tightened and centred. On masters that are already loud there is little level left to gain and the limiter works hard; Smart macros back the drive off there.",
   "tags": ["loud", "club", "edm", "party", "maximizer", "loudness-target"],
   "params": {
     "boost": 0.45,
