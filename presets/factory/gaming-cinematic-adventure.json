@@ -28,16 +28,17 @@
     "comp.release": 250,
     "comp.autoRelease": true,
     "comp.makeup": 1.5,
-    "max.glue": 0.25
+    "max.glue": 0.25,
+    "max.bedLift": 1
   },
   "intent": {
     "tone": {
       "pink": { "db": [0.7, 0.5, -0.1, -0.4, -0.4, -0.2, 0.2, 0.4, 0.0, -0.3], "toleranceDb": 1.0 },
-      "music": { "db": [0.1, 0.0, 0.4, 0.4, -1.0, -1.0, -0.6, 0.3, -0.4, -0.9], "toleranceDb": 1.5 }
+      "music": { "db": [0.2, 0.1, 0.3, 0.1, -1.0, -1.0, -0.5, 0.3, -0.3, -0.9], "toleranceDb": 1.5 }
     },
-    "loudnessOffsetLu": { "pink": 1.5, "music": 3.2, "toleranceLu": 1.0 },
-    "lraLossMaxLu": 1.4,
+    "loudnessOffsetLu": { "pink": 1.5, "music": 2.0, "toleranceLu": 1.0 },
+    "lraLossMaxLu": 0.0,
     "thdnMaxDb": -100,
-    "stepBedContrastDb": { "value": 0.3, "toleranceDb": 1.0 }
+    "stepBedContrastDb": { "value": 0.4, "toleranceDb": 1.0 }
   }
 }

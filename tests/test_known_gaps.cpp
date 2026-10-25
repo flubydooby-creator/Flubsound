@@ -2435,9 +2435,18 @@ TEST_CASE ("KnownGap closed: hot master - the automatic preamp (auto.preamp, all
     // 6.93 % / -41.53 / -50.78 dB -> the values below, Punchy Pop 50.13 /
     // 7.47 % / -38.65 / -54.87 dB -> the values below (confirmed in review
     // on a tree with only the E04 / E20 macro rows reverted: the old values).
+    // Re-based by the preset audit (2026-10-24): Signature's bass.protect
+    // -12 -> -6 dBFS (the protection withdraws its sub shelf only above
+    // -6 dBFS of predicted low end, so it holds on -14 LUFS streams and more
+    // of it stays on this master's kicks) 17.33 / 7.20 % / -40.91 / -50.20 dB
+    // -> the values below; Punchy Pop without mono bass below 90 Hz (the
+    // kicks' low end is no longer delayed behind their onset, so the onset
+    // lift Punch gives reaches the limiter and clipper) 43.47 / 6.93 % /
+    // -36.47 / -50.17 dB -> the values below. The Done-when row (preamp on +
+    // hot programme <= 2 %) still holds: 1.07 / 0.00 %.
     const Row rows[] = {
-        { "music-flubsound-signature.json", 17.33, 7.20, -40.91, -50.20 },
-        { "music-punchy-pop.json", 43.47, 6.93, -36.47, -50.17 },
+        { "music-flubsound-signature.json", 19.47, 8.00, -33.93, -40.44 },
+        { "music-punchy-pop.json", 44.80, 8.27, -29.18, -42.29 },
     };
     for (const auto& row : rows)
     {

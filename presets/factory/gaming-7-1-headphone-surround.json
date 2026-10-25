@@ -24,6 +24,7 @@
     "comp.attack": 5,
     "comp.release": 150,
     "comp.makeup": 2,
+    "max.bedLift": 1,
     "dyneq.0.on": true,
     "dyneq.0.shape": "Low Shelf",
     "dyneq.0.q": 0.7,
@@ -39,8 +40,8 @@
       "music": { "db": [-0.8, -0.7, -0.2, 0.4, 1.0, 1.0, 1.8, 3.5, 2.3, 1.5], "toleranceDb": 1.5 }
     },
     "loudnessOffsetLu": { "pink": 0.1, "music": 0.6, "toleranceLu": 1.0 },
-    "lraLossMaxLu": 2.0,
+    "lraLossMaxLu": 0.8,
     "thdnMaxDb": -100,
-    "stepBedContrastDb": { "value": 3.2, "toleranceDb": 1.0 }
+    "stepBedContrastDb": { "value": 3.4, "toleranceDb": 1.0 }
   }
 }

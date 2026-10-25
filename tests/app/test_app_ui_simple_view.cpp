@@ -213,7 +213,7 @@ TEST_CASE ("App UI: in both views and at 800 x 560 .. 2560 x 1440 no control lea
     juce::String error;
     const int music = controller.findStrip ("Music");
     controller.setSelectedStrip (music);
-    REQUIRE (controller.loadPreset (*controller.getPresetManager().findByName ("Audiophile Subtle"), music, error));
+    REQUIRE (controller.loadPreset (*controller.getPresetManager().findByName ("Warm Vinyl"), music, error)); // made for Quality
     REQUIRE (main.getNoticeBar().shouldShow());
     for (const auto view : { View::Simple, View::Advanced })
     {

@@ -202,40 +202,40 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
 
   | Preset | In one line |
   |---|---|
-  | Flubsound Signature | the everyday balanced sound: a touch of sub-bass, tighter low end, clearer mids, a little air |
-  | Punchy Pop | kick and snare transients, tightened and centred bass below 90 Hz, less low-mid boxiness |
+  | Flubsound Signature | the everyday balanced sound: a touch of sub-bass (it now holds on −14 LUFS streams), tighter low end, clearer mids, a little air; the loudness reference (within about 1 LU of its input) |
+  | Punchy Pop | kick and snare transients, tightened bass, less low-mid boxiness |
   | Bass Head | deep controlled low end: +4.3 dB at 31.5 Hz, harmonic bass for small drivers |
-  | Club Loud | big, dense and loud: +6.2 / +7.4 LU, capped by a −9 LUFS loudness target |
+  | Club Loud | big, dense and loud: +6.1 / +7.3 LU, capped by a −9 LUFS loudness target; LF-first limiting keeps the kick from pumping the mix |
   | Crystal Clarity | detail without harshness: mud trimmed, presence rises only when 3 kHz is quiet |
-  | Audiophile Subtle | almost transparent, a trace of sub-bass and air (made for Quality) |
-  | Wide Stage | sides widened above 220 Hz, a little space |
+  | Audiophile Subtle | almost transparent, a trace of sub-bass and air |
+  | Wide Stage | sides widened above 220 Hz (nothing below), a little space |
   | Warm Vinyl | oversampled tape saturation (Tape grit), a soft top |
-  | Lo-Fi Chill | tape saturation, top rolled off above 10 kHz (−6.5 dB at 16 kHz), softened transients |
+  | Lo-Fi Chill | tape saturation, top rolled off above 10 kHz (−6.6 dB at 16 kHz), softened transients, a narrower image (width 0.75) |
   | Classical & Jazz Dynamic | no drive, no clipper, no compression: only a slow limiter |
   | Rock & Metal | 250 / 500 Hz −1.0 / −0.7 dB, 1 / 2 kHz +0.5 / +1.0 dB, 4 / 8 kHz −0.4 / −0.5 dB |
   | Orchestral & Film | 31.5 / 63 Hz +1.7 / +1.4 dB, 2 / 4 kHz −0.8 dB, Meier crossfeed, LRA loss 0.15 LU |
   | Acoustic & Singer-Songwriter | Warmth 35 %: 125 / 250 Hz +0.8 dB, 8 kHz −0.5 dB, a light tube colour |
   | R&B & Vocal | 31.5 / 63 Hz +1.4 / +1.1 dB, 2 kHz +0.6 dB, 8 / 16 kHz −0.8 / −0.6 dB |
-  | Electronic & Ambient | 31.5 Hz +2.3 dB, the rest within 0.3 dB, width 1.15, space 0.2 |
-  | Synthwave | synthwave, synth-pop, progressive house / electro: 31.5 / 63 Hz +2.2 / +1.3 dB with 125 Hz (the kick) at 0.0, Warmth 30 % (Tube), 2 / 4 kHz +0.5 / +0.7 dB over 500 Hz–1 kHz at −0.8 / −0.6 dB (the leads forward), width 1.1 above 220 Hz, space 0.15; +1.3 LU on pink, LRA loss 0.3 LU |
+  | Electronic & Ambient | 31.5 Hz +2.5 dB, the rest within 0.3 dB, width 1.15, space 0.2 |
+  | Synthwave | synthwave, synth-pop, progressive house / electro: 31.5 / 63 Hz +2.3 / +1.4 dB with 125 Hz (the kick) at 0.0, Warmth 30 % (Tube), 2 / 4 kHz +0.5 / +0.7 dB over 500 Hz–1 kHz at −0.8 / −0.6 dB (the leads forward), width 1.1 above 220 Hz, space 0.15; +1.3 LU on pink, LRA loss 0.1 LU |
   | Podcast & Voice, Late Night Low Volume, Voice Chat | levellers: see [§5](#5-night-and-voice) |
   | Competitive FPS | footsteps lifted as they rise out of the ambience: step / bed contrast +5.4 dB |
   | Battle Royale | the same for large maps: contrast +5.0 dB |
-  | Horror Detail | upward compression, Detail and Footsteps for the quietest sounds |
-  | Cinematic Adventure | weight and impact on hits and explosions, the score and dialogue open |
-  | MOBA & Strategy | voice lines and announcer clear through team fights |
-  | Racing | engine note body without drone, tyre and grip cues |
-  | 7.1 Headphone Surround | the virtualiser on all eight channels for a 7.1 game |
+  | Horror Detail | upward compression, Detail and Footsteps for the quietest sounds; a quiet bed lifted about 1 dB at most |
+  | Cinematic Adventure | weight and impact on hits and explosions, the score and dialogue open; a quiet bed lifted about 1 dB at most |
+  | MOBA & Strategy | voice lines and announcer clear through team fights; a quiet bed lifted about 1 dB at most |
+  | Racing | engine note body without drone, tyre and grip cues; a quiet bed lifted about 1 dB at most |
+  | 7.1 Headphone Surround | the virtualiser on all eight channels for a 7.1 game; a quiet bed lifted about 1 dB at most |
   | Night Mode Gaming | Auto Level, the Startle Guard at 20 LU and a two-way compressor: [§5](#5-night-and-voice) |
   | Tournament Clean | everything off but the true-peak limiter at −1 dBTP: 0.0 everywhere |
   | Laptop Speakers | small-speaker mode: harmonics instead of lows (−15.5 / −8.9 dB at 31.5 / 63 Hz) |
   | Earbuds | sub-bass weight small drivers lose, dynamic taming of harsh peaks |
   | Bluetooth Headphones | −2 dBTP ceiling for lossy codecs, a gentle clipper |
 
-- **Demo pack (defaults → preset, matched):** Rock & Metal 250 Hz −0.6, 2–16 kHz +1.3 … +2.3 dB; Orchestral & Film 2 / 4 kHz −1.0 / −1.4 dB; Acoustic 250 Hz +0.3, 8 kHz −0.4 dB; R&B 2 / 4 kHz +0.7 / +1.0 dB; Electronic 31.5 / 63 Hz +0.2, 4–16 kHz +0.3 … +0.5 dB; Synthwave 2 / 4 / 8 / 16 kHz +1.1 / +1.9 / +0.7 / +0.4 dB, 125 Hz–1 kHz −0.2 … −0.3 dB (its sub shelf is held back by the headroom protection on this bass-heavy programme: 31.5 / 63 Hz +0.0 / +0.1 dB).
+- **Demo pack (defaults → preset, matched):** Rock & Metal 250 Hz −0.6, 2–16 kHz +1.3 … +2.3 dB; Orchestral & Film 2 / 4 kHz −1.0 / −1.4 dB; Acoustic 250 Hz +0.3, 8 kHz −0.4 dB; R&B 31.5 / 63 Hz +0.4 / +0.3, 2 / 4 kHz +0.6 / +0.9 dB; Electronic 31.5 / 63 Hz +1.0 / +0.6, 4–16 kHz −0.1 … +0.1 dB; Synthwave 31.5 / 63 Hz +0.9 / +0.5, 2 / 4 / 8 / 16 kHz +0.6 / +1.4 / +0.2 / −0.1 dB, 125 Hz–1 kHz −0.4 … −0.8 dB. Before the preset audit (2026-10-24) the headroom protection took the sub shelf back on this loud programme (Synthwave 31.5 / 63 Hz +0.0 / +0.1, Electronic +0.2 / +0.2, R&B +0.2 / +0.1 dB) and the presets read brighter instead (Synthwave 2 / 4 kHz +1.1 / +1.9 dB).
 - **Listen for:** each preset against the flat defaults, matched: the table's tone, not more level.
 - **Demo pairs:** `preset-rock-metal`, `preset-orchestral-film`, `preset-acoustic-singer-songwriter`, `preset-rnb-vocal`, `preset-electronic-ambient`, `preset-synthwave`, `preset-late-night`, `preset-podcast-voice`, `preset-voice-chat`
-- **Limits (owner decisions and the panel):** the five genre presets are conservative (0.6–1.0 dB from their nearest preset on pink) and no listener has heard them; their voicing is the listening panel's call (E14 step 4). Synthwave (owner request 2026-10-06) has not been heard yet either; it is the first factory preset with Relative presence. Classical & Jazz loses 1.42 LU of LRA on a −10.5 LUFS master (a pinned KnownGap).
+- **Limits (owner decisions and the panel):** the five genre presets are conservative (0.6–1.0 dB from their nearest preset on pink) and no listener has heard them; their voicing is the listening panel's call (E14 step 4). Synthwave (owner request 2026-10-06) has not been heard yet either; it is the first factory preset with Relative presence. Classical & Jazz loses 1.42 LU of LRA on a −10.5 LUFS master (a pinned KnownGap). The preset audit (owner request 2026-10-24, [E14](11-enhancement-report.md#e14)) re-calibrated 16 presets (Late Night's level, the sub shelves of Signature, Synthwave, Electronic and R&B on −14 LUFS streams, mono bass out of six presets, Club Loud's LF-first limiting, Lo-Fi's drive and width, Audiophile's profile, the gaming bed-lift budget) on synthetic programmes; none of the changes has been heard yet. A plain preset switch is not loudness-matched: compare with the browser's preview or the header's A / B.
 
 ---
 
@@ -487,15 +487,16 @@ Each card has a power switch, its key controls, an ear (hold to hear without, [�
 
 ### Late Night Low Volume
 
-- **What it is:** a Music preset for listening quietly: Auto Level and a two-way compressor with 12 dB of make-up. A level feature.
-- **What it does to the sound:** Status: the output within ±1 LU of −20 LUFS; LRA loss 5.40 LU (it is a leveller by design). Demo pack (defaults → preset, not matched): −4.33 LU, compressor GR max −18.4 dB, Auto Level down to −9.2 dB.
+- **What it is:** a Music preset for listening quietly: Auto Level and a two-way compressor with 8 dB of make-up that hold every source at about −24 LUFS, the night level of Night Mode Gaming. A level feature.
+- **What it does to the sound:** Status: the output within ±1 LU of −24 LUFS (E21 rows: music −23.07 / −23.67 / −23.06, speech −23.84 / −24.01 / −24.58 LUFS from −14 / −24 / −40 LUFS); LRA loss 5.40 LU (it is a leveller by design). Until 2026-10-24 it held −20 LUFS (make-up 11.8 dB), so it played louder than Flubsound Signature on every source under about −20 LUFS, for example YouTube or Edge below full volume (per-app capture takes Edge's stream after its own volume): that was the owner's "why is Late Night louder". Now, against Signature on the same synth master: a −30 LUFS source +8.9 → +5.1 LU, −21 LUFS +0.1 → −3.8 LU, a −14 LUFS stream −6.1 → −10.2 LU; tone, levelling and dynamics unchanged (a gain after the levelling). Demo pack (defaults → preset, not matched): −8.13 LU (was −4.33), compressor GR max −18.4 dB, Auto Level down to −9.2 dB.
 - **Listen for:** at a low volume every part of the song stays audible without the drums jumping out.
 - **Demo pairs:** `preset-late-night`
+- **Limits:** it still lifts very quiet sources, which is its levelling job (a −40 LUFS game bed about +19 dB); an engine lift cap or the old −20 LUFS level (make-up 11.8 dB) are owner decisions.
 
 ### Podcast & Voice
 
-- **What it is:** a Music preset for podcasts, audiobooks and talk: rumble and boxiness removed, a light spectral gate, Auto Level and compression. A level feature.
-- **What it does to the sound:** Status: +8.1 … +8.4 dB over 4–16 kHz on music re its +4.8 LU; LRA loss 5.46 LU. Demo pack (speech, not matched): −0.23 LU, 1 / 2 kHz +1.7 / +1.3 dB, compressor GR max −7.2 dB, Auto Level down to −7.6 dB.
+- **What it is:** a Music preset for podcasts, audiobooks and talk: rumble and boxiness removed, a light spectral gate, Auto Level and compression that level every source to about −16 to −20 LUFS. A level feature.
+- **What it does to the sound:** Status: +8.1 … +8.4 dB over 4–16 kHz on music re its +4.8 LU; LRA loss 5.46 LU. Louder than Flubsound Signature on quiet sources and quieter on loud masters (a synth master at −21 LUFS +4.0 LU, at −14 LUFS −2.5 LU). The spectral gate runs only in Quality: in Balanced the background between phrases comes up 4.2–4.5 dB re the voice (pink noise at −60 / −50 dBFS under the demo speech), in Quality it goes down 2.4 dB. Demo pack (speech, not matched): −0.23 LU, 1 / 2 kHz +1.7 / +1.3 dB, compressor GR max −7.2 dB, Auto Level down to −7.6 dB.
 - **Listen for:** quiet and loud phrases at about the same level, the consonants clearer, no rumble.
 - **Demo pairs:** `preset-podcast-voice`
 

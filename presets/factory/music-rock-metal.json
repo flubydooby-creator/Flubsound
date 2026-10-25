@@ -5,7 +5,7 @@
   "name": "Rock & Metal",
   "category": "Music",
   "author": "Flubsound (Flubes & Claude)",
-  "description": "For rock, metal and punk: guitars and drums with bite, without mud or fizz. Low-mid boxiness around 250-500 Hz is trimmed by about 1 dB, the guitar and vocal bite around 2 kHz comes forward by about 1 dB, and a dynamic band near 5 kHz holds back cymbal and distortion fizz only when it gets loud. Kick and bass stay tight and centred below 100 Hz, Punch sharpens the drums' attack and light glue holds the mix together. It adds no loudness: rock and metal masters are loud already.",
+  "description": "For rock, metal and punk: guitars and drums with bite, without mud or fizz. Low-mid boxiness around 250-500 Hz is trimmed by about 1 dB, the guitar and vocal bite around 2 kHz comes forward by about 1 dB, and a dynamic band near 5 kHz holds back cymbal and distortion fizz only when it gets loud. Kick and bass stay tight below 100 Hz, Punch sharpens the drums' attack and light glue holds the mix together. It adds no loudness: rock and metal masters are loud already.",
   "tags": ["rock", "metal", "punk", "guitars", "drums", "live-band"],
   "params": {
     "boost": 0.3,
@@ -13,7 +13,6 @@
     "macro.3": 0.1,
     "bass.boost": 1,
     "bass.tighten": 0.25,
-    "bass.monoBelow": 100,
     "clarity.demud": 0.25,
     "max.glue": 0.2,
     "eq.3.freq": 400,
@@ -33,7 +32,7 @@
   "intent": {
     "tone": {
       "pink": { "db": [0.0, 0.3, -0.4, -1.0, -0.7, 0.5, 1.0, -0.4, -0.5, 0.3], "toleranceDb": 1.0 },
-      "music": { "db": [0.0, 0.0, 0.2, -0.3, -0.7, -0.3, 0.2, 0.5, 0.7, 1.2], "toleranceDb": 1.5 }
+      "music": { "db": [0.0, 0.0, 0.2, -0.2, -0.7, -0.3, 0.2, 0.5, 0.7, 1.2], "toleranceDb": 1.5 }
     },
     "loudnessOffsetLu": { "pink": -0.3, "music": -0.5, "toleranceLu": 1.0 },
     "lraLossMaxLu": 0.9,
