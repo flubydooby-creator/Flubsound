@@ -298,13 +298,17 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
   owner's OK. Full screen stays sharp (owner, 2026-10-10). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
   scratchpad.
 
-### IN FLIGHT (2026-10-25): the PipeWire attribution and the preset audit, unmerged
+### IN FLIGHT (2026-10-25): the preset audit, unmerged
 
 Merged 2026-10-25 from the three items below: (1) the brain view's kick rule (688981c, 5686540) and (2) the E28a
 fold headroom release (9c1ceca, d8e61f2: after an over the gain is exactly 0 dB 10 ms + 150 ms × ln (depth / 1e-6)
 later at every rate from 8 to 384 kHz; before it stalled at -0.0019 dB for the session; strict render diff 0 of
-5121, nothing re-recorded; CI on `wip/fold-release` 38357749878 .. 40174705305, all 12 green). Item (3) is in a
-final independent verification (its review found two majors, fixed in 68ab4a3 / ba819fc on `wip/pipewire-steal`).
+5121, nothing re-recorded; CI on `wip/fold-release` 38357749878 .. 40174705305, all 12 green) and (3) the E48
+PipeWire idle-xrun attribution (d7ea363 + review fixes d502295, verified: a cycle's own work is its CPU time less
+the hypervisor's measured share from each vCPU's Hyper-V run time, `tests/app/CallbackStallAttribution.h`, root
+helper `tools/scripts/hv-vp-runtime.py` in CI; bounded with the vCPUs at its ends only when the thread's migrations
+prove them; steal explains nothing; own work at or over the period fails on every path; CI on `wip/pipewire-steal`
+40173831647 (600 extra loops) and 40175830352, all 12 green; the 2026-10-10 failure is still unreproduced).
 
 ### (history) IN FLIGHT (2026-10-13): three open software items
 
@@ -399,8 +403,10 @@ baseline: merge both, then re-record the baseline once on the merged tree.
      `tests/test_compressor.cpp` (~line 1434), `tests/test_parametric_eq.cpp` (~line 1021).
    - PipeWire on CI: the job is blocking since 2026-10-08; an idle xrun is tolerated only as an attributed
      scheduling stall; a desktop with real-time priority is not checked (E48). It failed once on 2026-10-10
-     (38030655885 attempt 1): an idle callback with 3.98 ms of its own CPU time, not attributed (possibly hypervisor
-     steal time; reading `/proc/stat` steal around the callback would tell); a re-run was green.
+     (38030655885 attempt 1) and once on 2026-10-13 (38357749878): idle callbacks with long own CPU time, not
+     attributed. Since 2026-10-25 the case subtracts the hypervisor's measured share (Hyper-V vCPU run time,
+     d7ea363 / d502295); no idle event since in 140 loops of the 20-loop step and 3 400 extra loops, so the cause
+     is still unconfirmed.
 5. **Gated items** (they need hardware, people or network, not code):
    - On the Windows PC: PresentMon with the OSD, the Win/mac volume reads for the hearing guard, E55 / E22 on
      hardware, and the E54 update check against a real release.

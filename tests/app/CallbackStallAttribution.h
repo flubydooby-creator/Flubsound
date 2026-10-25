@@ -247,7 +247,9 @@ inline std::vector<Runner> runnerPerCycle (const std::vector<Callback>& callback
                 {
                     if (r.cpusProven && c != r.cpuBefore && c != r.cpuAfter)
                         continue;
-                    if (samples.vpRun (before, c) < 0 || samples.vpRun (after, c) < 0)
+                    // A counter that went backwards (a VM save / restore resets it) or a damaged record proves nothing:
+                    // leave the cycle unbounded rather than excuse it with a negative run time.
+                    if (samples.vpRun (before, c) < 0 || samples.vpRun (after, c) < 0 || samples.vpRun (after, c) < samples.vpRun (before, c))
                         sampled = false;
                     ran += samples.vpRun (after, c) - samples.vpRun (before, c);
                     ++counted;
