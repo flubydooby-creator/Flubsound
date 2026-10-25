@@ -44,18 +44,20 @@
 //     their onsets light the auditory pathway, not the beat network. Limits:
 //     game sounds that repeat steadily count from their third hit (a gun fired
 //     at its cycle rate, footsteps while walking or running - about two steps
-//     a second, a dance tempo; with each gap +-6 % about 3 steps in 4 count,
+//     a second, a dance tempo; with each gap +-6 % about 4 steps in 5 count,
 //     +-10 % about 3 in 5 -, about half of a human's taps at +-10 %,
 //     explosions at a steady rate), and irregular ones line up by chance now
-//     and then (about 1 step in 6 at gaps of 0.3 - 0.9 s, 1 in 3 at 0.55 s
-//     +-20 %, 1 explosion in 10); after a fill, a tempo change or a breakdown
-//     the next two hits of a kind do not count (a drop pulses the beat network
-//     from its third kick), nor do kicks after two missed ones in a row (a
-//     bass louder than the kick can hide them); syncopated snares and kicks
-//     (breakbeats; a kick on 1, the and of 2 and 3, as in many pop, rock and
-//     synthwave grooves, or a pickup kick on the and of 4; trap, 2-step, drum
-//     and bass) mostly do not; one kick a bar counts only above 104 BPM (a bar
-//     of at most 2.3 s).
+//     and then (about 1 step in 6 at gaps of 0.3 - 0.9 s, more than 1 in 3 at
+//     0.55 s +-20 %, 1 explosion in 10); a steady walk over music also hides
+//     some of its kicks (the steps interleave with them among the kick-like
+//     hits); after a fill, a tempo change or a breakdown the next two hits of
+//     a kind do not count (a drop pulses the beat network from its third
+//     kick), nor do kicks after two missed ones in a row (a bass louder than
+//     the kick can hide them); syncopated snares and kicks (breakbeats; a kick
+//     on 1, the and of 2 and 3, as in many pop, rock and synthwave grooves, or
+//     a pickup kick on the and of 4; trap, 2-step, drum and bass) mostly do
+//     not, nor a fast snare roll or double kick (gaps under 0.2 s); one kick a
+//     bar counts only above 104 BPM (a bar of at most 2.3 s).
 //     No single spectral cue separated a footstep's thud from a kick drum here
 //     (measured: each cue that would drop footsteps also drops damped acoustic
 //     kicks or kicks under a clap; all signals mono, a stereo or a metrical cue
