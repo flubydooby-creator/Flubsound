@@ -298,36 +298,48 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
   owner's OK. Full screen stays sharp (owner, 2026-10-10). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
   scratchpad.
 
-### IN FLIGHT (2026-10-25): the preset audit, unmerged
+### Merged 2026-10-25
 
-Merged 2026-10-25 from the three items below: (1) the brain view's kick rule (688981c, 5686540) and (2) the E28a
-fold headroom release (9c1ceca, d8e61f2: after an over the gain is exactly 0 dB 10 ms + 150 ms × ln (depth / 1e-6)
-later at every rate from 8 to 384 kHz; before it stalled at -0.0019 dB for the session; strict render diff 0 of
-5121, nothing re-recorded; CI on `wip/fold-release` 38357749878 .. 40174705305, all 12 green) and (3) the E48
-PipeWire idle-xrun attribution (d7ea363 + review fixes d502295, verified: a cycle's own work is its CPU time less
-the hypervisor's measured share from each vCPU's Hyper-V run time, `tests/app/CallbackStallAttribution.h`, root
-helper `tools/scripts/hv-vp-runtime.py` in CI; bounded with the vCPUs at its ends only when the thread's migrations
-prove them; steal explains nothing; own work at or over the period fails on every path; CI on `wip/pipewire-steal`
-40173831647 (600 extra loops) and 40175830352, all 12 green; the 2026-10-10 failure is still unreproduced).
+**Three software items** (workflow, each built, independently reviewed and fixed in its own worktree): (1) the brain
+view's kick rule (688981c, 5686540), (2) the E28a fold headroom release (9c1ceca, d8e61f2: after an over the gain is
+exactly 0 dB 10 ms + 150 ms × ln (depth / 1e-6) later at every rate from 8 to 384 kHz; before it stalled at
+-0.0019 dB for the session; no factory render moved; CI on `wip/fold-release` 38357749878 .. 40174705305, all 12
+green) and (3) the E48 PipeWire idle-xrun attribution (d7ea363, d502295, bc48bcc: a cycle's own work is its CPU
+time less the hypervisor's measured share from each vCPU's Hyper-V run time, `tests/app/CallbackStallAttribution.h`,
+root helper `tools/scripts/hv-vp-runtime.py` in CI; bounded with the vCPUs at its ends only when the thread's
+migrations prove them; steal explains nothing; own work at or over the period fails on every path; CI on
+`wip/pipewire-steal` 40173831647 (600 extra loops) and 40175830352, all 12 green; the 2026-10-10 failure is still
+unreproduced).
 
-### (history) IN FLIGHT (2026-10-13): three open software items
+**The preset audit** (owner request 2026-10-24: "make sure all presets are set up correctly; not sure why Late Night
+sounds louder than Flubsound Signature; make sure all presets are set up to fully maximize their potential
+benefits"; workflow wf_7f61caa4-71e: audit of all 31 presets, plan, implementation, independent review (approved,
+seven minors, all fixed); merged as b91c8d6, 4b5fdba (render baseline, 16 presets, 69 renders) and 4538f3a; CI on
+`wip/preset-audit` 40174174351 and 40179849176, all 12 green). Details, before → after numbers and costs: docs/11
+E14 / E19 / E21 Status 2026-10-24 and the *Loudness policy* in `presets/README.md`. Not heard yet.
+- **Why Late Night was louder:** it is a leveller (about -20 LUFS for any source) and Signature keeps its input's
+  loudness, so on any source under about -20 LUFS (Edge or YouTube below full volume, quiet videos) Late Night won an
+  unmatched switch. Now `comp.makeup` 11.8 → 8 dB: about -24 LUFS (Night Mode Gaming's level), bands identical.
+- **Loudness policy:** Signature is the reference; presets that do not level play within about ±1.5 LU of it (Club
+  Loud and Laptop Speakers excepted); gaming presets lift a quiet bed by about 1 dB at most (`max.bedLift` 1 in
+  Horror, Cinematic, Racing, MOBA and 7.1); the levellers aim at a fixed level (night -24, speech -16 .. -20 LUFS).
+  A plain preset switch is not loudness-matched: compare with the browser's preview or the header's A / B.
+- **Other changes:** sub shelves that hold on -14 LUFS streams (`bass.protect` Signature -6, Synthwave and
+  Electronic -4, R&B -6); mono bass removed from Punchy Pop, Rock, Wide Stage, R&B, Electronic and Synthwave (kick
+  0-10 ms -5.1 .. -6.9 → +1.1 .. -2.0 dB); Club Loud LF-first limiting; Lo-Fi drive 6 → 3 dB, width 0.85 → 0.75;
+  Audiophile Subtle without the Quality suggestion; Podcast's description. Cost: more limiting on dense -9 LUFS
+  masters, and Signature's protection knee distortion now at the level of a -14 LUFS stream (multitone at -14 dBFS
+  RMS -29.9 → -25.0 dB, below 100 Hz).
+- **Owner decisions** from the audit: the list with the audit's recommendations is docs/11 E14's *Owner decisions*
+  line (Late Night's level, Bass Head's mono bass and harmonics, Club Loud with Smart on, the Racing / MOBA /
+  Cinematic / Horror re-voices, Voice Chat's level, Crystal Clarity Relative presence, Audiophile crossfeed, the
+  hot-only preamp for Orchestral and Acoustic, accepting the hot-master cost, Signature -6 or -12, Orchestral's
+  protect, the app keeping the contour across preset loads and showing the level change on a switch). Engine
+  follow-ups named there: side-only mono bass and a smoother bass-protection gain first.
 
-A workflow builds, reviews and fixes each in its own worktree (`git worktree list`; branches pushed as `wip/<topic>`
-for CI): (1) brain view kicks - footsteps and explosion booms read as kicks and pulse the beat network (apply the
-owner's repeat rule to kicks, measure); (2) the float release stall of HeadphoneVirtualizer's fold headroom and
-`FoldHeadroom` (E28a; renders move, re-record the render baseline with before → after numbers); (3) the `pipewire`
-CI job's unattributed idle xrun (read steal time around the callback, E48). To finish if interrupted: per worktree
-`git log d85dfc7..HEAD`, finish or review, merge one at a time, full ctest, push, rebuild the app (needs the
-owner's app closed).
-
-Also in flight (2026-10-24, owner request): the **preset audit** (workflow wf_7f61caa4-71e): "make sure all presets
-are set up correctly; why is Late Night louder than Flubsound Signature; maximize each preset's benefit". Measured
-so far: Late Night is an auto-leveller holding about -20 LUFS (music programme in -21.4: Late Night -19.08,
-Signature -20.96; game-quiet -22.47 vs -46.27), so it is louder whenever the input is quieter than about -20 LUFS;
-presets span -14.0 (Club Loud) to -24.7 LUFS (Night Mode) on the same input. The workflow audits all 31 presets,
-plans, implements the clear fixes / loudness calibration in a worktree (`wip/preset-audit`), reviews and fixes;
-voicing changes to owner-approved presets go to the owner. The fold-release item also re-records the render
-baseline: merge both, then re-record the baseline once on the merged tree.
+The worktrees `.claude/worktrees/wf_*` of these four items are kept for reference; their remote branches
+`wip/brain-kicks`, `wip/fold-release`, `wip/pipewire-steal` and `wip/preset-audit` are still on GitHub (delete only
+with the owner's OK). The owner's app (running since 2026-10-13) is rebuilt only when he closes it.
 
 ### Next steps for the local session, in priority order
 
@@ -339,6 +351,9 @@ baseline: merge both, then re-record the baseline once on the merged tree.
      enhancement cap (Superhuman Hearing), the OSD over a fullscreen game with PresentMon, Tournament mode with an
      anti-cheat game (E55).
    - R1.1: Settings › Audio › *Measure latency* with the headset mic against an ear cup.
+   - The preset audit (2026-10-25): Late Night against Signature with A / B or the browser's preview on a quiet
+     and a normal Edge video; Signature's and Synthwave's sub on a YouTube synthwave stream; a game in Horror /
+     Cinematic / Racing / MOBA (quiet beds about 1 dB up at most).
    - Listening / looking: Synthwave (not heard yet), the analyser views and visualisers (not yet seen on the owner's
      screen; 60 fps on real music), the music-theory views on real songs.
    - R5.3: the `neural-voice-cleanup` demo pair, then the switch on real Discord / chat audio.
@@ -358,7 +373,8 @@ baseline: merge both, then re-record the baseline once on the merged tree.
      stays at −6 dB (the engine default, so the app needs no setting; −9 dB was the alternative). The `wip/*` CI
      branches are deleted (all 13, after checking that their work is on this branch).
    - Release notes: 21 presets sound different after the Punch / Footsteps / Impact / Detail remap; 25 → 31 presets
-     (Synthwave added locally); Late Night and Podcast are re-voiced; *Automatic buffer size* is new and on by default,
+     (Synthwave added locally); Late Night and Podcast are re-voiced; the preset audit (2026-10-25) re-calibrates
+     16 presets (Late Night 3.8 dB quieter, sub shelves, mono bass, gaming bed lift); *Automatic buffer size* is new and on by default,
      and a buffer size picked before keeps it off (E42c).
    - Should Enhanced become the default virtualiser renderer?
    - Night Mode attack: 3 → 1 ms?
@@ -384,6 +400,8 @@ baseline: merge both, then re-record the baseline once on the merged tree.
    - Decided 2026-10-10 (brain view): full screen stays sharp (no smaller internal render); `wip/brain-view` deleted.
    - Decided 2026-10-10 (brain view): a snare-like hit counts as a beat only when it repeats like a drum beat (snare
      rule below; merged 8f075e5 + 0c0dd7b).
+   - New (2026-10-25): the preset audit's decisions (docs/11 E14 *Owner decisions*, summarised under Merged
+     2026-10-25 above).
 4. **Known open items (software).**
    - Soak: R1.5 on a real device: captures, device inputs and the drift FIFO, a 128-sample run on an idle machine
      (on the merged code with the PC 93 % busy from another project's WSL builds: 48 late / 2 over budget of
@@ -397,8 +415,9 @@ baseline: merge both, then re-record the baseline once on the merged tree.
    - E22: the room is done (2026-10-08); its floor stays at the engine default −6 dB (owner, 2026-10-08).
    - E07: the 2.00 dB row.
    - Golden: the MSVC-recorded rows pass CI's gcc golden-render step (±0.05 dB) since run 37427019405 and, since
-     2026-10-08, the blocking strict render diff of `tests/golden/preset-render-baseline.json` (0 of 5121 values
-     different); nothing is left to re-record.
+     2026-10-08, the blocking strict render diff of `tests/golden/preset-render-baseline.json` (0 of 5123 values
+     different on the merged tree of 2026-10-25; the preset audit re-recorded 69 renders, MSVC, confirmed by CI's gcc
+     leg); nothing is left to re-record.
    - Tests that draw random numbers inside one argument list get other inputs per compiler (they pass everywhere):
      `tests/test_compressor.cpp` (~line 1434), `tests/test_parametric_eq.cpp` (~line 1021).
    - PipeWire on CI: the job is blocking since 2026-10-08; an idle xrun is tolerated only as an attributed
