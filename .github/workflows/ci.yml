@@ -4,6 +4,13 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      pipewire_xrun_loops:
+        description: "pipewire job: extra loops of the idle xrun case alone, to catch a rare xrun with the runner's steal around it (0: none)"
+        default: "0"
+      pipewire_sampler_ab:
+        description: "pipewire job: pairs of idle xrun case loops with the vCPU run time sampler paused, then running, to measure what it costs the data thread (0: none)"
+        default: "0"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -507,6 +514,43 @@ jobs:
           for i in $(seq 100); do pactl info > /dev/null 2>&1 && break; sleep 0.1; done
           pactl info | head -n 3
           pw-cli ls Node | grep node.name
+      # docs/11 E48 (2026-10-13): what the xrun case's attribution can see of
+      # the virtual machine: the hypervisor, whether the kernel reports steal
+      # time and charges it to the running thread, the steal so far, and
+      # whether a hardware cycle counter exists. Read only.
+      - name: Runner facts (hypervisor, steal accounting)
+        run: |
+          uname -r
+          lscpu | grep -iE '^(Model name|CPU\(s\)|Hypervisor vendor|Virtualization type)' || true
+          grep -E '^CONFIG_(HZ|PARAVIRT|PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING|VIRT_CPU_ACCOUNTING_GEN|SCHED_INFO|HYPERV)=|^# CONFIG_(PARAVIRT_TIME_ACCOUNTING|IRQ_TIME_ACCOUNTING) is not set' "/boot/config-$(uname -r)" || true
+          cat /proc/cmdline
+          grep -E '^cpu' /proc/stat
+          echo "perf_event_paranoid $(cat /proc/sys/kernel/perf_event_paranoid); event sources: $(ls /sys/bus/event_source/devices | tr '\n' ' ')"
+          sudo dmesg | grep -iE 'Performance Events|Hyper-V|steal' | head -n 12 || true
+      # Hyper-V gives the Linux guest no steal clock (steal reads 0), so the
+      # xrun case bounds the hypervisor's share of the data thread's CPU time
+      # with each vCPU's own run time (HV_X64_MSR_VP_RUNTIME through the msr
+      # driver, root only): a root helper at idle priority samples it every
+      # millisecond for the rest of the job (tools/scripts/hv-vp-runtime.py;
+      # each read of another vCPU's MSR is an interrupt there). Without it
+      # the case runs as before and says so.
+      - name: Hyper-V vCPU run time sampler
+        run: |
+          log="$XDG_RUNTIME_DIR/vp-runtime.bin"
+          if sudo modprobe msr && [ -e /dev/cpu/0/msr ]; then
+            sudo nohup chrt -i 0 python3 tools/scripts/hv-vp-runtime.py "$log" 1 > "$XDG_RUNTIME_DIR/vp-runtime.log" 2>&1 &
+            for i in $(seq 50); do [ -s "$log" ] && break; sleep 0.1; done
+            cat "$XDG_RUNTIME_DIR/vp-runtime.log"
+            if [ -s "$log" ]; then
+              echo "FLUB_VP_RUNTIME_LOG=$log" >> "$GITHUB_ENV"
+              # The helper itself (not sudo): the sampler's cost step pauses it.
+              echo "FLUB_VP_RUNTIME_PID=$(pgrep -f '^python3 tools/scripts/hv-vp-runtime[.]py' | head -n 1)" >> "$GITHUB_ENV"
+            else
+              echo "::warning::no vCPU run time samples: the xrun case cannot bound the hypervisor's share"
+            fi
+          else
+            echo "::warning::no msr driver: the xrun case cannot bound the hypervisor's share"
+          fi
       - name: Node and journal tests (20 runs in a row)
         run: |
           app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
@@ -519,12 +563,106 @@ jobs:
                 echo "$out"; echo "::error::run $run, '$filter' was skipped (no server or a missing tool)"; exit 1
               fi
               # R1.2's measurements (callbacks / xruns, the wall clock and the
-              # data thread's own work, each idle xrun's attribution,
-              # hot-plug, recovery time, the stale-error case).
-              echo "$out" | grep -E "s on the node:|wall clock:|own work:|stall attribution:|unplugged:|re-opened:|stale error:|first start:" | sed "s/^ */  run $run: /" || true
+              # data thread's own work, the runner's steal, each idle xrun's
+              # attribution, the injected engine slowness, hot-plug, recovery
+              # time, the stale-error case).
+              echo "$out" | grep -E "s on the node:|wall clock:|own work:|runner:|stall attribution:|injected work:|unplugged:|re-opened:|stale error:|first start:" | sed "s/^ */  run $run: /" || true
             done
             echo "run $run: green"
           done
+      # A dispatch with pipewire_xrun_loops > 0 runs the idle xrun case that
+      # many times more, on its own (about 1 s each), and prints the runner's
+      # numbers of every loop that saw an event. Every loop runs; the step
+      # fails at the end when one failed.
+      - name: Idle xrun case, extra loops (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.pipewire_xrun_loops != '0' }}
+        env:
+          LOOPS: ${{ inputs.pipewire_xrun_loops }}
+        run: |
+          app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
+          loops=$((LOOPS + 0))
+          failed=0; events=0
+          for run in $(seq "$loops"); do
+            ok=1
+            out=$("$app" "reports its xruns" 2>&1) || ok=0
+            if echo "$out" | grep -qF "(skipped"; then echo "$out"; echo "::error::loop $run was skipped"; exit 1; fi
+            if [ "$ok" = 0 ] || ! echo "$out" | grep -q "none, as expected"; then
+              events=$((events + 1))
+              echo "$out" | grep -E "s on the node:|own work:|runner:|stall attribution:|not the runner's:|FAILED" | sed "s/^ */  loop $run: /"
+            fi
+            if [ "$ok" = 0 ]; then failed=$((failed + 1)); echo "::error::loop $run failed"; fi
+          done
+          echo "$loops loops: $events with an idle event, $failed failed"
+          [ "$failed" = 0 ]
+      # A dispatch with pipewire_sampler_ab > 0 measures what the vCPU run
+      # time sampler costs the node's data thread (its reads of the other
+      # vCPUs' MSRs are interrupts there, whose time the kernel charges to the
+      # thread they interrupt): that many pairs of idle xrun case loops, the
+      # sampler paused (SIGSTOP) in one loop of each pair and running in the
+      # other, paused first in odd pairs and running first in even ones (so an
+      # effect of the order is not read as the sampler's). It prints, per
+      # half, the medians over the loops of the data thread's CPU time per
+      # cycle and of the interrupts on its CPU per cycle, and the per-pair
+      # difference, also split by the order. A failed loop's lines are
+      # printed; the step fails at the end when one failed.
+      - name: The vCPU run time sampler's cost (dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.pipewire_sampler_ab != '0' && env.FLUB_VP_RUNTIME_PID != '' }}
+        env:
+          PAIRS: ${{ inputs.pipewire_sampler_ab }}
+        run: |
+          app=$(find build -type f -name flub_app_tests -perm -u+x | head -n 1)
+          table="$RUNNER_TEMP/sampler-ab.txt"; : > "$table"
+          failed=0
+          for pair in $(seq $((PAIRS + 0))); do
+            if [ $((pair % 2)) = 1 ]; then order="paused running"; else order="running paused"; fi
+            for state in $order; do
+              if [ "$state" = paused ]; then sudo kill -STOP "$FLUB_VP_RUNTIME_PID"; else sudo kill -CONT "$FLUB_VP_RUNTIME_PID"; fi
+              ok=1
+              out=$("$app" "reports its xruns" 2>&1) || ok=0
+              if echo "$out" | grep -qF "(skipped"; then echo "$out"; echo "::error::pair $pair was skipped"; sudo kill -CONT "$FLUB_VP_RUNTIME_PID"; exit 1; fi
+              if [ "$ok" = 0 ]; then
+                failed=$((failed + 1)); echo "::error::pair $pair, sampler $state: the case failed"
+                echo "$out" | grep -E "own work:|runner:|stall attribution:|not the runner's:|FAILED" | sed "s/^ */  pair $pair $state: /"
+              fi
+              cpu=$(echo "$out" | sed -nE "s/.*CPU time per cycle median ([0-9.e+-]+) ms, max ([0-9.e+-]+) ms.*/\1 \2/p" | head -n 1)
+              irq=$(echo "$out" | sed -nE "s/.*interrupts \/ softirqs per cycle on its CPU: median ([0-9]+) \/ ([0-9]+).*/\1 \2/p" | head -n 1)
+              echo "$pair $state $cpu $irq" >> "$table"
+            done
+          done
+          sudo kill -CONT "$FLUB_VP_RUNTIME_PID"
+          python3 - "$table" <<'EOF'
+          import statistics, sys
+          rows = [line.split() for line in open(sys.argv[1]) if len(line.split()) == 6]
+          by = {s: [r for r in rows if r[1] == s] for s in ("paused", "running")}
+          for s, rs in by.items():
+              if not rs:
+                  print(f"sampler {s}: no loops measured"); continue
+              cpu = [float(r[2]) for r in rs]; mx = [float(r[3]) for r in rs]
+              irq = [int(r[4]) for r in rs]; soft = [int(r[5]) for r in rs]
+              print(f"sampler {s}: {len(rs)} loops; the data thread's CPU time per cycle: median {statistics.median(cpu):.3f} ms "
+                    f"(loops {min(cpu):.3f} - {max(cpu):.3f}), max per loop median {statistics.median(mx):.3f} ms (up to {max(mx):.3f}); "
+                    f"interrupts / softirqs per cycle on its CPU: median {statistics.median(irq):g} / {statistics.median(soft):g}")
+          pairs = {}
+          for r in rows:
+              pairs.setdefault(r[0], {})[r[1]] = r
+          def difference(label, chosen):
+              d = [float(p["running"][2]) - float(p["paused"][2]) for p in chosen]
+              di = [int(p["running"][4]) - int(p["paused"][4]) for p in chosen]
+              if not d:
+                  return
+              q = statistics.quantiles(d, n=4) if len(d) > 1 else [d[0], d[0], d[0]]
+              print(f"running - paused, {label} ({len(d)}): CPU time per cycle median {statistics.median(d):+.3f} ms "
+                    f"(quartiles {q[0]:+.3f} / {q[2]:+.3f}, range {min(d):+.3f} / {max(d):+.3f}), "
+                    f"interrupts per cycle median {statistics.median(di):+g}")
+          complete = {k: p for k, p in pairs.items() if len(p) == 2}
+          difference("per pair", list(complete.values()))
+          difference("pairs with the sampler paused first", [p for k, p in complete.items() if int(k) % 2 == 1])
+          difference("pairs with the sampler running first", [p for k, p in complete.items() if int(k) % 2 == 0])
+          EOF
+          [ "$failed" = 0 ]
+      - name: Runner steal after the tests
+        if: always()
+        run: grep -E '^cpu' /proc/stat
       - name: Daemon logs
         if: failure()
         run: tail -n 50 "$XDG_RUNTIME_DIR"/*.log
