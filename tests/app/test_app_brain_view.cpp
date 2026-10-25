@@ -3,7 +3,7 @@
 // tone in one ear lights the opposite auditory cortex more) and the superior
 // olive's wiring, the beat network, the repeat rule for snares and kicks
 // (gunshots, bursts, backbeats, four on the floor, synthwave, footsteps,
-// explosions, a rock beat), chord surprise and its timing, build-up
+// explosions, a rock beat, half-time grooves), chord surprise and its timing, build-up
 // and drop, the heuristics' false triggers on the app's own test music,
 // synthetic loops, pauses, a re-struck chord and noise, NaN / inf input,
 // intensity, hover names, the picture's handedness (not a mirror image), no
@@ -1081,6 +1081,10 @@ TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern 
     const auto kicksPlayed = grid (0.0, 8.0, 60.0 / 128.0);
     const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, kicksPlayed);
     CHECK (c.kickHits + c.snareHits >= 15);
+    // The late-onset fix reads the claps on a kick as the kick (measured 15 kick-like hits and 1 snare-like hit; without
+    // the fix 12 and 4, which these two checks catch).
+    CHECK (c.kickHits >= 15);
+    CHECK (c.snareHits <= 1);
     CHECK (o.on >= 13); // measured 14
     CHECK (std::abs (o.first - 2.0 * 60.0 / 128.0) < 0.04); // the third kick
     CHECK (o.off == 0);
@@ -1126,13 +1130,16 @@ TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern 
     const auto c = countBeats ("footsteps, gaps 0.3 - 0.9 s, 12 s", 750, [&steps] (int64_t n, float& l, float& r) { l = r = steps (n); }, run);
     std::printf ("  %zu steps\n", steps.times.size());
     CHECK (c.kickHits >= static_cast<int> (steps.times.size()) * 3 / 4); // they read as kicks
-    CHECK (c.kicks * 5 <= c.kickHits); // at most 20 % line up by chance (measured 1 of 20; 11 of 100 over five seeds)
+    // At most 20 % line up by chance: measured 1 of 20 on this seed, the low end; over 60 seeds of the same generator
+    // (1000 - 1059) 190 of 1203 (15.8 %; 167, 13.9 %, before the kicks' carry over hits between their beats).
+    CHECK (c.kicks * 5 <= c.kickHits);
     CHECK (c.snares == 0);
 }
 
 TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - explosion booms with debris")
 {
-    // Three explosions at 0.8, 3.9 and 6.4 s, 9 s: each boom reads as a kick (before 2026-10-13: 3 beats).
+    // Three explosions at 0.8, 3.9 and 6.4 s, 9 s: each boom reads as a kick (before 2026-10-13: 3 beats). Their gaps
+    // (3.1, 2.5 s) are over the 2.3 s bound; the case below keeps the gaps in range.
     Runner run;
     Explosions booms ({ 0.8, 3.9, 6.4 });
     const auto c = countBeats ("3 explosions with debris, 9 s", 540, [&booms] (int64_t n, float& l, float& r) { l = r = booms (n); }, run);
@@ -1185,6 +1192,420 @@ TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern 
     CHECK (c.kicks <= 2);     // measured 0
     CHECK (c.snares >= 8);    // the beat network still pulses on 2 and 4 (measured 9, from the third snare)
     CHECK (o.off == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - explosion booms at irregular gaps inside the beat range "
+           "(near misses of 13 - 14 %)")
+{
+    // Seven explosions in 9 s, gaps 1.2, 1.36, 0.9, 1.03, 1.5 and 1.3 s: every gap is inside the 0.2 - 2.3 s range, and
+    // three of them miss the one before by only 13 - 14 % (the hop grid moves a gap by at most 10.7 ms, about 1 %). So
+    // this case fails if the repeat test's 8 % tolerance is loosened (measured with 15 %: the explosions at 3.06 and
+    // 7.79 s count), which the three widely spaced explosions above cannot show (their gaps of 3.1 and 2.5 s are out
+    // of range, so they pass with any tolerance). The carry-over and the counted beats' grid need a counted beat
+    // first, so this tests the matching gaps alone.
+    Runner run;
+    Explosions booms ({ 0.5, 1.7, 3.06, 3.96, 4.99, 6.49, 7.79 });
+    const auto c = countBeats ("7 explosions at irregular gaps of 0.9 - 1.5 s, 9 s", 540, [&booms] (int64_t n, float& l, float& r) { l = r = booms (n); }, run);
+    CHECK (c.kickHits >= 6); // the booms read as kicks
+    CHECK (c.kicks == 0);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+namespace
+{
+/** The test music's kick at `kicksAt` and its snare at `snaresAt` (ascending), hats on the eighths of `beat`. */
+struct DrumTrack
+{
+    std::vector<double> kicksAt, snaresAt;
+    double beat = 0.5;
+    Noise noise;
+    Snare snare;
+    HighPass h1 { 6500.0 }, h2 { 6500.0 };
+    size_t nextKick = 0, nextSnare = 0;
+    double lastKick = -1.0, lastSnare = -1.0;
+    void operator() (int64_t n, float& l, float& r)
+    {
+        const double t = seconds (n);
+        const float x = noise();
+        while (nextKick < kicksAt.size() && kicksAt[nextKick] <= t)
+            lastKick = kicksAt[nextKick++];
+        while (nextSnare < snaresAt.size() && snaresAt[nextSnare] <= t)
+            lastSnare = snaresAt[nextSnare++];
+        const float hat = 0.12f * h2 (h1 (x)) * decay (std::fmod (t, 0.5 * beat), 0.03);
+        l = r = 0.55f * (kick (lastKick < 0.0 ? -1.0 : t - lastKick, x) + snare (lastSnare < 0.0 ? -1.0 : t - lastSnare, x) + hat);
+    }
+};
+
+/** A half-time groove at `bpm` for `bars` bars from 0 s: a kick on 1 and a snare on 3 of each bar (one of each a bar),
+    hats on the eighths. Counts its kicks and snares. */
+BeatCount halfTimeGroove (double bpm, int bars, Runner& run)
+{
+    DrumTrack drums;
+    drums.beat = 60.0 / bpm;
+    const double bar = 4.0 * drums.beat;
+    for (int b = 0; b < bars; ++b)
+    {
+        drums.kicksAt.push_back (b * bar);
+        drums.snaresAt.push_back (b * bar + 2.0 * drums.beat);
+    }
+    const auto name = juce::String (bpm, 0) + " BPM half-time groove (a kick on 1, a snare on 3; a gap of " + juce::String (bar, 2) + " s), "
+                      + juce::String (bars) + " bars";
+    return countBeats (name.toRawUTF8(), static_cast<int> (std::ceil (bars * bar / kDt)), std::ref (drums), run);
+}
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - one kick a bar counts only above 104 BPM (a documented "
+           "limit) - 110 BPM")
+{
+    // A bar of 2.18 s is inside the 0.2 - 2.3 s range: the kicks and the snares count from their third.
+    Runner run;
+    const auto c = halfTimeGroove (110.0, 6, run);
+    CHECK (c.kickHits == 6);
+    CHECK (c.kicks == 4);
+    CHECK (c.snares == 4);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - one kick a bar counts only above 104 BPM (a documented "
+           "limit) - 100 BPM")
+{
+    // A bar of 2.4 s is longer than the 2.3 s bound (60 / 104 x 4 = 2.31 s): neither the kicks nor the snares ever
+    // count, so the beat network stays dark (before 2026-10-13 every kick was a beat).
+    Runner run;
+    const auto c = halfTimeGroove (100.0, 6, run);
+    CHECK (c.kickHits == 6);
+    CHECK (c.kicks == 0);
+    CHECK (c.snares == 0);
+    CHECK (c.networkBeats == 0);
+}
+
+namespace
+{
+/** A plucked bass note, tau seconds after it: a 12-harmonic saw at `hz` through a 4-pole low-pass whose cutoff falls
+    from `fromHz` to `toHz` (time constant `envTau`), a 2 ms attack and a 0.12 s decay. Its spectrum sinks as a kick
+    drum's pitch does, so some notes read as kick-like hits. */
+struct Pluck
+{
+    double phase = 0.0;
+    std::array<float, 4> y {};
+    float operator() (double tau, double hz, double fromHz, double toHz, double envTau) noexcept
+    {
+        if (tau < 0.0)
+            return 0.0f;
+        phase += hz / kRate;
+        if (phase >= 1.0)
+            phase -= 1.0;
+        double saw = 0.0;
+        for (int h = 1; h <= 12; ++h)
+            saw += std::sin (2.0 * kPi * h * phase) / h;
+        const double fc = toHz + (fromHz - toHz) * std::exp (-tau / envTau);
+        const float a = static_cast<float> (1.0 - std::exp (-2.0 * kPi * fc / kRate));
+        auto x = static_cast<float> (saw);
+        for (auto& s : y)
+        {
+            s += a * (x - s);
+            x = s;
+        }
+        return x * std::min (1.0f, static_cast<float> (tau / 0.002)) * decay (tau, 0.12);
+    }
+};
+
+/** Four on the floor at 128 BPM for 10 s (the test music's kick, 22 kicks) with a rolling bass on the three 16ths after
+    each kick (A1 / A2 in turn, a pluck whose filter falls from 800 to 80 Hz in about 10 ms, ducked by the kick), the
+    bass at `level` against the kick's 0.5: a progressive-house bassline. Returns the counts; `o` gets the beats on the
+    kicks played (a beat on no kick would be a bass note's). */
+BeatCount rollingBass (const char* name, float level, Runner& run, OnKicks& o)
+{
+    const double beat = 60.0 / 128.0;
+    Noise noise;
+    Pluck pluck;
+    const auto c = countBeats (name, 600,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   const double t = seconds (n);
+                                   const float x = noise();
+                                   const double tauBeat = std::fmod (t, beat);
+                                   const double sixteenth = 0.25 * beat;
+                                   const auto i = static_cast<int64_t> (t / sixteenth);
+                                   const double tau = i % 4 == 0 ? -1.0 : t - static_cast<double> (i) * sixteenth;
+                                   const float duck = 1.0f - 0.7f * decay (tauBeat, 0.08);
+                                   l = r = 0.5f * kick (tauBeat, x) + level * duck * pluck (tau, i % 2 == 0 ? 55.0 : 110.0, 800.0, 80.0, 0.01);
+                               },
+                               run);
+    const auto kicksPlayed = grid (0.0, 10.0, beat);
+    o = beatsOnKicks (run.view.getListener(), kicksPlayed, kicksPlayed);
+    return c;
+}
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor at 128 BPM with a rolling 16th bass keeps "
+           "its kick beats")
+{
+    // Some bass notes read as kick-like hits between the kicks, and a kick right after a loud note can be missed (its
+    // low band rises less). A counted kick pattern carries over the hits between its beats, so neither breaks it.
+    // Before (each hit in between broke the pattern until three clean kicks came in a row): 7 of the 22 kicks.
+    Runner run;
+    OnKicks o;
+    const auto c = rollingBass ("four on the floor 128 BPM, rolling 16th bass at 0.35, 10 s (22 kicks)", 0.35f, run, o);
+    CHECK (c.kickHits >= 24); // bass notes among them (measured 28)
+    CHECK (o.on >= 15);       // measured 16
+    CHECK (o.off == 0);       // no bass note is a beat
+    CHECK (c.snares == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor at 128 BPM with a loud rolling 16th bass "
+           "keeps its kick beats")
+{
+    // The bass at 0.7 (the kick 0.5): more of its notes read as kicks. Before: 4 of the 22 kicks.
+    Runner run;
+    OnKicks o;
+    const auto c = rollingBass ("four on the floor 128 BPM, rolling 16th bass at 0.7, 10 s (22 kicks)", 0.7f, run, o);
+    CHECK (c.kickHits >= 30); // measured 36
+    CHECK (o.on >= 17);       // measured 20
+    CHECK (o.off == 0);
+    CHECK (c.snares == 0);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor with one kick left out carries on over "
+           "the gap")
+{
+    // 120 BPM, 8 s, kicks only (and hats), the kick at 4.0 s not played: the kick at 4.5 s lands two of the counted
+    // pattern's gaps after the last counted one (one missed kick), the one at 5.0 s one gap after it. Without the
+    // carry neither counts (their gaps 1.0 / 0.5 s do not match the ones before, nor the counted beats' next slot).
+    DrumTrack drums;
+    for (const double t : grid (0.0, 8.0, 0.5))
+        if (std::abs (t - 4.0) > 0.01)
+            drums.kicksAt.push_back (t);
+    const auto kicksPlayed = drums.kicksAt;
+    Runner run;
+    const auto c = countBeats ("four on the floor 120 BPM without the kick at 4.0 s, 8 s (15 kicks)", 480, std::ref (drums), run);
+    const auto o = beatsOnKicks (run.view.getListener(), kicksPlayed, kicksPlayed);
+    CHECK (c.kickHits == 15);
+    CHECK (o.on == 13); // all but the first two
+    CHECK (o.off == 0);
+    CHECK (beatNear (run.view.getListener(), 4.5, 0.04));
+    CHECK (beatNear (run.view.getListener(), 5.0, 0.04));
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - four on the floor with one kick left out and a ghost kick "
+           "in the gap carries on (a kick pattern bridges kick-like hits between its beats)")
+{
+    // As above, with a ghost kick (a short, damped one: 95 -> 58 Hz, 60 ms) at 4.2 s, in the gap: a counted kick
+    // pattern carries over the kick-like hits between its beats, so the kicks at 4.5 and 5.0 s still count and the
+    // ghost does not. Before (a hit of its kind in between ended the carry, as it still does for snares, below):
+    // neither counted, 11 of the 15 kicks on the beat.
+    DrumTrack drums;
+    for (const double t : grid (0.0, 8.0, 0.5))
+        if (std::abs (t - 4.0) > 0.01)
+            drums.kicksAt.push_back (t);
+    const auto onTheBeat = drums.kicksAt;
+    auto played = onTheBeat;
+    played.push_back (4.2);
+    Runner run;
+    const auto c = countBeats ("four on the floor 120 BPM without the kick at 4.0 s, a ghost kick at 4.2 s, 8 s (15 kicks on the beat)", 480,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   drums (n, l, r);
+                                   const float ghost = 0.55f * kickDrum (seconds (n) - 4.2, 0.0f, 95.0, 58.0, 0.015, 0.06, 0.9f);
+                                   l += ghost;
+                                   r += ghost;
+                               },
+                               run);
+    const auto o = beatsOnKicks (run.view.getListener(), onTheBeat, played);
+    CHECK (c.kickHits == 16); // the ghost reads as a kick
+    CHECK (o.on == 13);       // the kicks on the beat but the first two
+    CHECK (! beatNear (run.view.getListener(), 4.2, 0.04));
+    CHECK (o.off == 0);
+    CHECK (beatNear (run.view.getListener(), 4.5, 0.04));
+    CHECK (beatNear (run.view.getListener(), 5.0, 0.04));
+}
+
+namespace
+{
+/** Four on the floor at 128 BPM for 10 s (22 kicks; `subKick` as FourOnTheFloor) with a steady walk on top: Footsteps
+    every 0.52 s +- 3 % from 0.3 s (seed 31, 19 steps) at `stepGain`. Returns the beats on the kicks; `onSteps` gets the
+    beats on a step and on no kick. */
+OnKicks walkOverFourOnTheFloor (const char* name, bool subKick, float stepGain, int& onSteps)
+{
+    Runner run;
+    FourOnTheFloor groove (128.0, subKick);
+    Footsteps steps (jitteredShots (0.3, 10.0, 0.52, 0.03, 31u));
+    countBeats (name, 600,
+                [&] (int64_t n, float& l, float& r)
+                {
+                    groove (n, l, r);
+                    const float step = stepGain * steps (n);
+                    l += step;
+                    r += step;
+                },
+                run);
+    const auto kicksPlayed = grid (0.0, 10.0, 60.0 / 128.0);
+    const auto& listener = run.view.getListener();
+    const auto o = beatsOnKicks (listener, kicksPlayed, kicksPlayed);
+    onSteps = 0;
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+    {
+        const double t = listener.getBeatTime (i);
+        bool nearKick = false, nearStep = false;
+        for (const double k : kicksPlayed)
+            nearKick = nearKick || std::abs (t - k) < 0.04;
+        for (const double st : steps.times)
+            nearStep = nearStep || std::abs (t - st) < 0.04;
+        onSteps += (nearStep && ! nearKick) ? 1 : 0;
+    }
+    std::printf ("  beats on a step (not on a kick): %d of the %zu steps\n", onSteps, steps.times.size());
+    return o;
+}
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - a steady walk over four on the floor hides some of its kicks "
+           "(a documented limit) - steps 6 dB up")
+{
+    // A game with music on one strip: the steps (every 0.52 s) fall between the kicks (every 0.469 s) among the
+    // kick-like hits and drift across them. A counted pattern carries over the steps between its beats and one missed
+    // kick, not two in a row; then the kicks count again only from three steady ones, and steady gaps between kick-like
+    // hits are rare with a step in most of them. Timing alone cannot tell the steps from the kicks (the walk is as
+    // regular as the beat). Measured: 20 kick-like hits (of 22 kicks and 19 steps), 11 of the 22 kicks are beats, 4
+    // beats on steps (before 2026-10-13: 18 and 1); over seeds 31 - 35, 58 of 110 kicks and 14 beats on steps (before
+    // 87 and 13); with the steps at the music's level 94 of 110 (before 103).
+    int onSteps = 0;
+    const auto o = walkOverFourOnTheFloor ("four on the floor 128 BPM, a steady walk 6 dB up (0.52 s +- 3 %), 10 s (22 kicks)", false, 2.0f, onSteps);
+    CHECK (o.on >= 8);
+    CHECK (o.on <= 15);
+    CHECK (onSteps <= 6);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - a steady walk over four on the floor hides some of its kicks "
+           "(a documented limit) - a long sub kick, the steps at the music's level")
+{
+    // The sub kick (150 -> 45 Hz, 0.35 s) holds the low band up, so fewer sounds rise enough to be read: 16 kick-like hits
+    // of 22 kicks and 19 steps. Measured: 11 of the 22 kicks are beats, none on a step (before 2026-10-13: 18 and 0);
+    // over seeds 31 - 35, 54 of 110 (before 85).
+    int onSteps = 0;
+    const auto o = walkOverFourOnTheFloor ("four on the floor 128 BPM, sub kick, a steady walk at the music's level (0.52 s +- 3 %), 10 s (22 kicks)",
+                                           true, 1.0f, onSteps);
+    CHECK (o.on >= 8);
+    CHECK (o.on <= 15);
+    CHECK (onSteps <= 2);
+}
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - a double kick faster than 5 hits a second never counts, its "
+           "snares do (a documented limit)")
+{
+    // Metal double bass: a damped kick (110 -> 55 Hz, 50 ms) on every 16th at 150 BPM (every 0.1 s), the test music's
+    // snare on 2 and 4, hats on the eighths, 8 s. Every gap between kicks is under the 0.2 s bound, so no kick counts
+    // (before 2026-10-13 about every other one was a beat, outside the 150 ms refractory: 30 of the 80); the snares on 2
+    // and 4 still pulse the beat network. Measured: 67 kick-like hits, 0 kick beats; 10 snare-like hits, 8 snare beats
+    // (before 8). At 100 / 120 / 180 BPM: 0 kick beats (before 28 / 32 / 30).
+    DrumTrack drums;
+    drums.beat = 60.0 / 150.0;
+    drums.snaresAt = grid (drums.beat, 8.0, 2.0 * drums.beat);
+    const auto kicksAt = grid (0.0, 8.0, 0.25 * drums.beat);
+    Noise clicks { 777u };
+    size_t next = 0;
+    double last = -1.0;
+    Runner run;
+    const auto c = countBeats ("16th double bass at 150 BPM (every 0.1 s, 80 kicks), a snare on 2 and 4 (10), 8 s", 500,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   const double t = seconds (n);
+                                   const float x = clicks();
+                                   while (next < kicksAt.size() && kicksAt[next] <= t)
+                                       last = kicksAt[next++];
+                                   drums (n, l, r); // the snare and the hats (no kicks in the track)
+                                   const float k = 0.55f * kickDrum (last < 0.0 ? -1.0 : t - last, x, 110.0, 55.0, 0.01, 0.05, 0.9f);
+                                   l += k;
+                                   r += k;
+                               },
+                               run);
+    CHECK (c.kickHits >= 50); // they read as kicks (measured 67)
+    CHECK (c.kicks == 0);
+    CHECK (c.snares >= 6); // measured 8 of the 10
+}
+
+namespace
+{
+/** Four on the floor at 128 BPM (FourOnTheFloor, a clap on 2 and 4) with only its off-beat hats from `from` to `to` s: a
+    breakdown, then the drop. */
+struct FourOnTheFloorWithBreakdown
+{
+    FourOnTheFloor groove { 128.0, false };
+    double from = 7.5, to = 15.0;
+    HighPass h1 { 6500.0 }, h2 { 6500.0 };
+    Noise hatNoise { 4242u };
+    void operator() (int64_t n, float& l, float& r)
+    {
+        groove (n, l, r);
+        const double t = seconds (n);
+        const float hat = 0.12f * h2 (h1 (hatNoise()));
+        if (t >= from && t < to)
+            l = r = 0.5f * hat * decay (std::fmod (t - 0.5 * groove.beat, groove.beat), 0.07);
+    }
+};
+} // namespace
+
+TEST_CASE ("App: brain: a kick is a beat only when it belongs to a drum pattern - after a 4-bar breakdown the beat network comes back from the "
+           "third kick after the drop")
+{
+    // 4 bars of four on the floor at 128 BPM, a 4-bar breakdown of hats only, the groove again from 15.0 s, until 19 s.
+    // The counted pattern ended 8 s before the drop (more than the carry's two gaps), so the drop's kicks start a new
+    // one: the first beat after the drop is the third kick (15.94 s, 0.94 s after it; the same in 24 variants of this
+    // scene: a breakdown of 2, 4 or 8 bars, the drop 0 - 8 ms off the hop grid, the groove continued or restarted).
+    // docs/12 says 1 - 2 s at 128 BPM: in an earlier harness the clap on the drop's second kick read as a snare and the
+    // first beat came at the fifth kick (16.875 s). Before 2026-10-13 the drop's first kick was a beat (15.00 s).
+    Runner run;
+    FourOnTheFloorWithBreakdown music;
+    countBeats ("four on the floor 128 BPM, a 4-bar breakdown from 7.5 s, the drop at 15.0 s, 19 s", 1140, std::ref (music), run);
+    const auto& listener = run.view.getListener();
+    double first = -1.0;
+    int inBreakdown = 0;
+    for (int i = 0; i < listener.getNumBeatTimes(); ++i)
+    {
+        const double t = listener.getBeatTime (i);
+        inBreakdown += (t > 7.4 && t < 14.95) ? 1 : 0;
+        if (t >= 14.95 && first < 0.0)
+            first = t;
+    }
+    std::printf ("  the first beat after the drop at %.3f s (%.3f s after it)\n", first, first - 15.0);
+    CHECK (inBreakdown == 0);
+    CHECK (first - 15.0 > 0.9); // not before the third kick (measured 0.947 s)
+    CHECK (first - 15.0 < 2.0); // by the fifth kick
+    CHECK (beatNear (listener, 2.0 * 60.0 / 128.0, 0.04)); // before the breakdown also from the third kick
+    CHECK (! beatNear (listener, 60.0 / 128.0, 0.1));
+}
+
+TEST_CASE ("App: brain: a snare-like hit is a beat only when it repeats like a drum beat - a clap on every beat with one left out and a "
+           "gunshot in the gap does not carry on (the snare rule unchanged)")
+{
+    // The owner's snare rule (2026-10-10), kept as decided when kicks got their carry over hits in between: claps (the
+    // test music's snare) on every beat at 120 BPM from 0.5 s, 8 s, the one at 4.0 s not played and a gunshot at
+    // 4.15 s: the shot ends the carry, so the claps at 4.5 and 5.0 s do not count (gaps 0.35 / 0.65 and 0.5 / 0.35 s,
+    // and they miss the counted beats' next slot); from 5.5 s they count again. Without the shot they would (the
+    // backbeat with one snare left out, above).
+    DrumTrack drums;
+    for (const double t : grid (0.5, 8.0, 0.5))
+        if (std::abs (t - 4.0) > 0.01)
+            drums.snaresAt.push_back (t);
+    Gunshots shot;
+    shot.times = { 4.15 };
+    Runner run;
+    const auto c = countBeats ("claps on every beat 120 BPM without the one at 4.0 s, a gunshot at 4.15 s, 8 s (14 claps)", 480,
+                               [&] (int64_t n, float& l, float& r)
+                               {
+                                   drums (n, l, r);
+                                   const float s = shot (n);
+                                   l += s;
+                                   r += s;
+                               },
+                               run);
+    const auto& listener = run.view.getListener();
+    CHECK (c.snareHits == 15); // the 14 claps and the shot
+    CHECK (c.snares == 10);    // from the third clap, less the two after the gap
+    CHECK (! beatNear (listener, 4.15, 0.04));
+    CHECK (! beatNear (listener, 4.5, 0.04));
+    CHECK (! beatNear (listener, 5.0, 0.04));
+    for (const double t : { 3.5, 5.5, 6.0, 7.5 })
+        CHECK (beatNear (listener, t, 0.04));
 }
 
 TEST_CASE ("App: brain: a chord outside the key lights the right inferior frontal gyrus more than an in-key change")

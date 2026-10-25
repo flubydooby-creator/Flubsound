@@ -32,21 +32,36 @@
 //     thud and explosion booms read as kicks), each kind on its own: its gap to
 //     the previous hit of its kind and the gap before that are both 0.2 - 2.3 s
 //     and match within 8 % (a backbeat counts from its third snare, four on the
-//     floor from its third kick); or nothing of its kind came since the last
-//     counted one and it lands one or two of that pattern's gaps after it (one
-//     missed hit); or it lands one beat (within 8 %) after the last of three
-//     counted beats whose two gaps match (a hit on a steady grid). Single shots
-//     at irregular gaps, automatic fire (gaps under 0.2 s), 3-round bursts,
-//     irregular bursts and noise, footsteps at an irregular pace and single
-//     explosions stay sound: their onsets light the auditory pathway, not the
-//     beat network. Limits: game sounds that repeat steadily count from their
-//     third hit (a gun fired at its cycle rate, steady footsteps - walking is
-//     about two steps a second, a dance tempo -, about half of a human's taps
-//     at +-10 %, explosions at a steady rate); after a fill or a tempo change
-//     the next two hits of a kind do not count; syncopated snares and kicks
-//     (breakbeats, a rock beat's kick on the and of 3, drum and bass) mostly do
-//     not. No spectral cue tells a footstep's thud from a kick drum (measured:
-//     each one that would also drops damped acoustic kicks or kicks under hats).
+//     floor from its third kick); or it lands one or two of its kind's counted
+//     pattern's gaps after the last counted one (one missed hit) - for snares
+//     only when nothing snare-like came in between (a fill or a shot breaks
+//     it), while a kick pattern carries over the kick-like hits between its
+//     beats (2026-10-24: a rolling bass's plucked notes, a ghost kick); or it
+//     lands one beat (within 8 %) after the last of three counted beats whose
+//     two gaps match (a hit on a steady grid). Single shots at irregular gaps,
+//     automatic fire (gaps under 0.2 s), 3-round bursts, irregular bursts and
+//     noise, footsteps at an irregular pace and single explosions stay sound:
+//     their onsets light the auditory pathway, not the beat network. Limits:
+//     game sounds that repeat steadily count from their third hit (a gun fired
+//     at its cycle rate, footsteps while walking or running - about two steps
+//     a second, a dance tempo; with each gap +-6 % about 4 steps in 5 count,
+//     +-10 % about 3 in 5 -, about half of a human's taps at +-10 %,
+//     explosions at a steady rate), and irregular ones line up by chance now
+//     and then (about 1 step in 6 at gaps of 0.3 - 0.9 s, more than 1 in 3 at
+//     0.55 s +-20 %, 1 explosion in 10); a steady walk over music also hides
+//     some of its kicks (the steps interleave with them among the kick-like
+//     hits); after a fill, a tempo change or a breakdown the next two hits of
+//     a kind do not count (a drop pulses the beat network from its third
+//     kick), nor do kicks after two missed ones in a row (a bass louder than
+//     the kick can hide them); syncopated snares and kicks (breakbeats; a kick
+//     on 1, the and of 2 and 3, as in many pop, rock and synthwave grooves, or
+//     a pickup kick on the and of 4; trap, 2-step, drum and bass) mostly do
+//     not, nor a fast snare roll or double kick (gaps under 0.2 s); one kick a
+//     bar counts only above 104 BPM (a bar of at most 2.3 s).
+//     No single spectral cue separated a footstep's thud from a kick drum here
+//     (measured: each cue that would drop footsteps also drops damped acoustic
+//     kicks or kicks under a clap; all signals mono, a stereo or a metrical cue
+//     not measured), so the rule is timing.
 //   * Chord change (heuristic): the shared music listener (PitchEstimator +
 //     KeyDetector, as the chord view) and a ChordTracker; a change from one
 //     chord to another is "unexpected" when the new chord has a pitch class
@@ -178,10 +193,10 @@ private:
         bool sinceBeat = false;                 // a hit of this kind was heard after the last counted one
     };
     /** Whether a hit at t continues a steady pattern: its own kind's (the two gaps to the previous hits of its kind
-        match), its kind's counted pattern across one missed hit (nothing of its kind since the last counted one, and t
-        one or two of its gaps after it) or the counted beats' (it lands one beat after the last of three steady beats).
-        `period` gets the pattern's gap it continues (0 when not known). */
-    bool repeatsLikeADrumBeat (const HitPattern& p, double t, double& period) const noexcept;
+        match), its kind's counted pattern across one missed hit (t one or two of its gaps after the last counted one,
+        and nothing of its kind since unless `bridgeHitsBetween`: kicks) or the counted beats' (it lands one beat after
+        the last of three steady beats). `period` gets the pattern's gap it continues (0 when not known). */
+    bool repeatsLikeADrumBeat (const HitPattern& p, double t, bool bridgeHitsBetween, double& period) const noexcept;
     void updateMacro (double time, double streamSeconds, float totalP, float lowP, float highP, bool hfHit, BrainActivity& activity) noexcept;
     void updateChords (double clock, double dt, BrainActivity& activity) noexcept;
 
