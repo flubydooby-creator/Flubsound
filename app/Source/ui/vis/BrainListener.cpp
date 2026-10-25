@@ -138,10 +138,8 @@ void BrainListener::reset() noexcept
     low = click = body = Feature {};
     candidate = Candidate {};
     lastBeatTime = -1.0e9;
-    snareLast = snareBefore = lastSnareBeat = -1.0e9;
-    snarePeriod = 0.0;
-    snareSinceBeat = false;
-    kicks = snares = snareHits = 0;
+    kickPattern = snarePattern = HitPattern {};
+    kicks = snares = snareHits = kickHits = 0;
     beatLog.fill (0.0);
     beatLogCount = beatLogNext = 0;
     slots.fill (Slot {});
@@ -410,7 +408,7 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
         candidate.lowLike = lowOnset;
         candidate.snareLike = snareOnset;
         candidate.centroids[0] = centroid;
-        candidate.lowDb = low.db;
+        candidate.lowDb = candidate.firstLowDb = low.db;
         candidate.clickDb = click.db;
         return;
     }
@@ -422,6 +420,7 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
     {
         candidate.lowLike = candidate.lowLike || lowOnset;
         candidate.snareLike = candidate.snareLike || snareOnset;
+        candidate.secondLowDb = low.db;
         candidate.lowDb = std::max (candidate.lowDb, low.db);
         candidate.clickDb = std::max (candidate.clickDb, click.db);
     }
@@ -429,65 +428,62 @@ void BrainListener::detectBeat (double time, float centroid, float flatness, flo
         return;
     candidate.active = false;
     const auto& c = candidate.centroids;
+    // The first hop can end just before the kick: its window then holds mostly the sound before it (its low band at
+    // least kLateOnsetDb under the next hop's), and a step up from its centroid to the next one's is not the kick's
+    // (before this, the hop grid's phase made the detector miss such kicks: 4 of a 60 BPM backbeat's 8).
+    const bool lateOnset = candidate.secondLowDb >= candidate.firstLowDb + kLateOnsetDb;
     bool smooth = c[0] > 0.0f;
     for (size_t k = 1; k < c.size(); ++k)
-        smooth = smooth && c[k] > 0.0f && c[k] <= c[k - 1] + kSweepStepHz;
+        smooth = smooth && c[k] > 0.0f && ((k == 1 && lateOnset) || c[k] <= c[k - 1] + kSweepStepHz);
     const bool kick = candidate.lowLike && smooth && c.back() <= kSweep * std::max (c[0], c[1]);
     // A snare is still noise when decided (an onset from silence is flat only for a moment).
     const bool snare = ! kick && candidate.snareLike && flatness >= kSnareFlatness * 0.8f;
     if (! (kick || snare))
         return;
-    double period = 0.0; // the counted snare pattern's gap this hit continues (0: not known)
-    if (snare)
-    {
-        // A beat only when it repeats like a drum beat; otherwise (a shot, a burst, noise) it stays sound: its onset
-        // lights the auditory pathway, not the beat network. Every snare-like hit, counted or not, extends the pattern.
-        ++snareHits;
-        const bool repeats = snareRepeats (candidate.time, period);
-        snareBefore = snareLast;
-        snareLast = candidate.time;
-        snareSinceBeat = true; // until it is counted below
-        if (! repeats)
-            return;
-    }
-    if (candidate.time - lastBeatTime < kBeatRefractory)
+    // A beat only when it belongs to a drum pattern (it repeats like a drum beat); otherwise (a shot, a burst, a
+    // footstep, an explosion's boom, noise) it stays sound: its onset lights the auditory pathway, not the beat
+    // network. Every hit, counted or not, extends its kind's pattern.
+    auto& pattern = kick ? kickPattern : snarePattern;
+    ++(kick ? kickHits : snareHits);
+    double period = 0.0; // the counted pattern's gap this hit continues (0: not known)
+    const bool repeats = repeatsLikeADrumBeat (pattern, candidate.time, period);
+    pattern.before = pattern.last;
+    pattern.last = candidate.time;
+    pattern.sinceBeat = true; // until it is counted below
+    if (! repeats || candidate.time - lastBeatTime < kBeatRefractory)
         return;
     lastBeatTime = candidate.time;
+    pattern.period = period;
+    pattern.lastBeat = candidate.time;
+    pattern.sinceBeat = false;
+    ++(kick ? kicks : snares);
     const auto strength = [] (float db) { return std::clamp ((db + 60.0f) / 50.0f, 0.0f, 1.0f); };
-    if (kick)
-        ++kicks;
-    else
-    {
-        ++snares;
-        snarePeriod = period;
-        lastSnareBeat = candidate.time;
-        snareSinceBeat = false;
-    }
     sink.beat (candidate.time, kick ? strength (candidate.lowDb) : 0.7f * strength (candidate.clickDb + 10.0f));
     beatLog[static_cast<size_t> (beatLogNext)] = candidate.time;
     beatLogNext = (beatLogNext + 1) % kBeatLog;
     beatLogCount = std::min (beatLogCount + 1, kBeatLog);
 }
 
-bool BrainListener::snareRepeats (double t, double& period) const noexcept
+bool BrainListener::repeatsLikeADrumBeat (const HitPattern& p, double t, double& period) const noexcept
 {
-    const auto inRange = [] (double g) noexcept { return g >= kSnareMinGap && g <= kSnareMaxGap; };
+    const auto inRange = [] (double g) noexcept { return g >= kBeatMinGap && g <= kBeatMaxGap; };
     const auto steady = [&inRange] (double gap, double reference) noexcept
-    { return inRange (gap) && inRange (reference) && std::abs (gap - reference) <= kSnareGapTolerance * reference; };
-    // Its own pattern: the gap to the previous snare-like hit matches the gap before it (a backbeat's third snare on).
-    if (steady (t - snareLast, snareLast - snareBefore))
+    { return inRange (gap) && inRange (reference) && std::abs (gap - reference) <= kBeatGapTolerance * reference; };
+    // Its own pattern: the gap to the previous hit of its kind matches the gap before it (from the third hit on: a
+    // backbeat's third snare, four on the floor's third kick).
+    if (steady (t - p.last, p.last - p.before))
     {
-        period = t - snareLast;
+        period = t - p.last;
         return true;
     }
-    // A counted pattern carries over one missed snare: nothing snare-like was heard since the last counted snare, and
-    // this hit lands one or two of its gaps after it (a miss of the detector, a snare left out). A snare-like hit in
-    // between (a fill, a shot) breaks it.
-    if (snarePeriod > 0.0 && ! snareSinceBeat)
+    // A counted pattern carries over one missed hit: nothing of its kind was heard since the last counted one, and this
+    // hit lands one or two of its gaps after it (a miss of the detector, a hit left out). A hit of its kind in between
+    // (a fill, a shot, a footstep) breaks it.
+    if (p.period > 0.0 && ! p.sinceBeat)
         for (int k = 1; k <= 2; ++k)
         {
-            const double since = t - lastSnareBeat;
-            if (inRange (since / k) && std::abs (since - k * snarePeriod) <= kSnareGapTolerance * snarePeriod)
+            const double since = t - p.lastBeat;
+            if (inRange (since / k) && std::abs (since - k * p.period) <= kBeatGapTolerance * p.period)
             {
                 period = since / k;
                 return true;
@@ -499,7 +495,7 @@ bool BrainListener::snareRepeats (double t, double& period) const noexcept
     const double b1 = getBeatTime (beatLogCount - 1), b2 = getBeatTime (beatLogCount - 2), b3 = getBeatTime (beatLogCount - 3);
     if (! (steady (b1 - b2, b2 - b3) && steady (t - b1, b1 - b2)))
         return false;
-    period = inRange (t - lastSnareBeat) ? t - lastSnareBeat : 0.0;
+    period = inRange (t - p.lastBeat) ? t - p.lastBeat : 0.0;
     return true;
 }
 
