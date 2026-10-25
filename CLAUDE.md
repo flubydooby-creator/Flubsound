@@ -285,12 +285,28 @@ and merged as f18dcf3 (implementation) and 5f74783 (review fixes); the owner sai
   that fits the ear rings (`BrainView::kDefaultZoom`); the mouse wheel (~15 % a notch), a trackpad pinch and the
   menu's Zoom in / out go from 0.7 to 3×; *Reset view* restores it. 37 brain cases, app suite 415 / 415. The
   owner's app was running, so his copy is rebuilt only when he closes it.
+- **Kick rule (2026-10-13 .. 10-25; merged 688981c + review fixes 5686540; CI on `wip/brain-kicks` 40079067050 and
+  40173992719, all 12 green):** a kick-like hit is a beat only when it repeats like a drum beat (the snare rule's
+  test, each kind with its own pattern: `BrainListener::repeatsLikeADrumBeat`, `HitPattern`, `getKickHits()`); a
+  counted kick pattern carries over the kick-like hits between its beats (a rolling bass); the kick detector no
+  longer misses kicks on the hop grid's phase (`kLateOnsetDb`). Before → after: irregular footsteps 20 → 1 of 20,
+  explosion booms 3 → 0, four on the floor 16 → 14 beats (from the third kick), test music 23 → 21 of 24. Limits:
+  a steady walk or run still counts; a steady walk over a song hides some kicks; syncopated kicks and double kicks
+  faster than 5 a second do not count (their snares still do). 55 brain cases; app suite 433 / 433.
 - The worktree `.claude/worktrees/wf_0f5beb3e-d6e-1` (branch `worktree-wf_0f5beb3e-d6e-1`, also `a8206a0` with the
   last test split) is kept for reference; the remote branch `wip/brain-view` was deleted on 2026-10-10 with the
   owner's OK. Full screen stays sharp (owner, 2026-10-10). The mock-ups (`brain3d_v4.html`, `brain3d_v5.html`) and screenshots (`brain-shots/`) are in the session
   scratchpad.
 
-### IN FLIGHT (2026-10-13): three open software items, unmerged
+### IN FLIGHT (2026-10-25): the PipeWire attribution and the preset audit, unmerged
+
+Merged 2026-10-25 from the three items below: (1) the brain view's kick rule (688981c, 5686540) and (2) the E28a
+fold headroom release (9c1ceca, d8e61f2: after an over the gain is exactly 0 dB 10 ms + 150 ms × ln (depth / 1e-6)
+later at every rate from 8 to 384 kHz; before it stalled at -0.0019 dB for the session; strict render diff 0 of
+5121, nothing re-recorded; CI on `wip/fold-release` 38357749878 .. 40174705305, all 12 green). Item (3) is in a
+final independent verification (its review found two majors, fixed in 68ab4a3 / ba819fc on `wip/pipewire-steal`).
+
+### (history) IN FLIGHT (2026-10-13): three open software items
 
 A workflow builds, reviews and fixes each in its own worktree (`git worktree list`; branches pushed as `wip/<topic>`
 for CI): (1) brain view kicks - footsteps and explosion booms read as kicks and pulse the beat network (apply the
@@ -372,9 +388,8 @@ baseline: merge both, then re-record the baseline once on the merged tree.
      bypass reference limiter and the detector item are done, 2026-10-08.)
    - E28: the comb row is met (9.38 dB, 2026-10-08); left: Enhanced's far-ear ILD at 16 kHz (a better far-ear
      interpolator, its own change).
-   - Float release stall: HeadphoneVirtualizer's fold headroom and FoldHeadroom (E28a, `Bs775Fold.h`) release like
-     the old duck limiter and stall at about −0.0019 dB after an over (fixed for the duck in E22); the fix moves
-     renders, so it needs its own change with render diffs and a baseline re-record.
+   - Float release stall: fixed 2026-10-25 (9c1ceca + d8e61f2, docs/11 E28a): both fold headrooms now release to
+     exactly 0 dB; no factory render moved.
    - E22: the room is done (2026-10-08); its floor stays at the engine default −6 dB (owner, 2026-10-08).
    - E07: the 2.00 dB row.
    - Golden: the MSVC-recorded rows pass CI's gcc golden-render step (±0.05 dB) since run 37427019405 and, since
