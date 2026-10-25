@@ -210,7 +210,7 @@ Louder almost always sounds better: brighter, fuller and "more detailed", even w
   | Audiophile Subtle | almost transparent, a trace of sub-bass and air |
   | Wide Stage | sides widened above 220 Hz (nothing below), a little space |
   | Warm Vinyl | oversampled tape saturation (Tape grit), a soft top |
-  | Lo-Fi Chill | tape saturation, top rolled off above 10 kHz (−6.6 dB at 16 kHz), softened transients, a narrower image (width 0.75) |
+  | Lo-Fi Chill | tape saturation, top rolled off above 10 kHz (−6.6 dB at 16 kHz), softened transients, a narrower, roomier image (width 0.75, space 0.2) |
   | Classical & Jazz Dynamic | no drive, no clipper, no compression: only a slow limiter |
   | Rock & Metal | 250 / 500 Hz −1.0 / −0.7 dB, 1 / 2 kHz +0.5 / +1.0 dB, 4 / 8 kHz −0.4 / −0.5 dB |
   | Orchestral & Film | 31.5 / 63 Hz +1.7 / +1.4 dB, 2 / 4 kHz −0.8 dB, Meier crossfeed, LRA loss 0.15 LU |
