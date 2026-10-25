@@ -376,6 +376,21 @@ struct FoldChain
     {
         run (buf, block, [] (int) {});
     }
+
+    /** Runs buf in blocks of blockAt (start position) samples; after each
+        block, `watch (end position)`. */
+    template <typename BlockAt, typename Watch>
+    void runPartitioned (Planar& buf, BlockAt&& blockAt, Watch&& watch)
+    {
+        ScopedNoDenormals noDenormals;
+        const int n = buf.numSamples();
+        for (int pos = 0, len = 0; pos < n; pos += len)
+        {
+            len = std::min (std::max (1, blockAt (pos)), n - pos);
+            chain.process (buf.block (pos, len));
+            watch (pos + len);
+        }
+    }
 };
 
 /** K-weighted power of channels 0 and 1 from `from` on (dB; the integrated
@@ -504,54 +519,131 @@ TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the
     }
 }
 
-TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - 44.1 to 192 kHz")
+namespace
 {
-    // The case above runs at 48 kHz only. Here one +6.02 dB over (depth 0.5),
-    // then -6 dBFS, at every rate from 44.1 to 192 kHz: the gain reaches
-    // exactly 1 hold + 150 ms x ln (depth / 1e-6) after the over (1.978 s),
-    // never moves away from it again, and never falls during the release.
-    // The decay r = e^(-1 / (150 ms x fs)) is a float, and its rounding sets
-    // the time constant: within 0.008 % of 150 ms up to 176.4 kHz, -0.080 %
-    // at 192 kHz (149.88 ms: 1.6 ms early). With r's own time constant the
-    // formula holds within 3 samples at every rate. Before 2026-10-13 the
-    // float gain release stalled 2^-25 / (1 - r) under 1, so the deeper the
-    // higher the rate: -0.0017 / -0.0019 / -0.0034 / -0.0037 / -0.0069 /
-    // -0.0075 dB at 44.1 / 48 / 88.2 / 96 / 176.4 / 192 kHz.
+/** r's own time constant (s) at fs: FoldHeadroom::prepare's float decay. */
+double foldDecayTau (double fs)
+{
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001;
+    return -1.0 / (fs * std::log (static_cast<double> (static_cast<float> (std::exp (-1.0 / (tau * fs))))));
+}
+
+/** One +6.02 dB over (depth 0.5), then -6 dBFS, at fs: the gain reaches
+    exactly 1 hold + 150 ms x ln (depth / 1e-6) after the over (within 0.1 %
+    of the formula with 150 ms, within 3 samples of it with r's own time
+    constant), never moves away from it again, and never falls during the
+    release. */
+void checkReleaseAtRate (double fs)
+{
     const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001;
     const float over = 2.0f;
     const double depth = 1.0 - static_cast<double> (1.0f / over);
+    FoldHeadroom h;
+    h.prepare (fs);
+    const int at = 100, n = at + static_cast<int> (2.2 * fs);
+    int unityAt = -1, offUnityAfter = 0, falls = 0;
+    float prev = 1.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        const float g = h.next (i == at ? over : 0.5f);
+        if (i > at && g < prev)
+            ++falls;
+        prev = g;
+        if (i > at && unityAt < 0 && g == 1.0f)
+            unityAt = i;
+        if (unityAt >= 0 && g != 1.0f)
+            ++offUnityAfter;
+    }
+    const double holdS = msToSamples (FoldHeadroom::kHoldMs, fs) / fs;
+    const double tauR = foldDecayTau (fs);
+    const double formula = holdS + tau * std::log (depth / 1.0e-6), withR = holdS + tauR * std::log (depth / 1.0e-6);
+    const double t = unityAt < 0 ? -1.0 : (unityAt - at) / fs;
+    std::cout << "    [E28a] FoldHeadroom at " << fs / 1000.0 << " kHz, one +6.02 dB over: exactly 0 dB after " << t << " s (-1 = never; formula "
+              << formula << " s, " << 100.0 * (t - formula) / formula << " %; r's time constant " << tauR * 1000.0 << " ms, "
+              << 100.0 * (tauR - tau) / tau << " %, formula with it " << (t - withR) * fs << " samples off), at the end " << h.getGainDb()
+              << " dB, falls during the release " << falls << ", samples off 0 dB after it " << offUnityAfter << "\n";
+    CHECK (unityAt >= 0);
+    CHECK (offUnityAfter == 0);
+    CHECK (falls == 0);
+    CHECK_NEAR (t, formula, 1.0e-3 * formula); // within 0.1 %
+    CHECK_NEAR ((t - withR) * fs, 0.0, 3.0);
+}
+} // namespace
+
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - 44.1 to 192 kHz")
+{
+    // The case above runs at 48 kHz only. Here the standard rates 44.1 / 48 /
+    // 88.2 / 96 / 176.4 / 192 kHz (checkReleaseAtRate: exactly 0 dB 1.978 s
+    // after a +6.02 dB over, then unity to the end). The decay
+    // r = e^(-1 / (150 ms x fs)) is a float, and its rounding sets the time
+    // constant: within 0.008 % of 150 ms at 44.1 / 48 / 88.2 / 96 / 176.4 kHz
+    // (checked here), -0.080 % at 192 kHz (149.88 ms: 1.6 ms early); other
+    // rates are the next two cases. Before 2026-10-13 the float gain release
+    // stalled 2^-25 / (1 - r) under 1, so the deeper the higher the rate:
+    // -0.0017 / -0.0019 / -0.0034 / -0.0037 / -0.0069 / -0.0075 dB at 44.1 /
+    // 48 / 88.2 / 96 / 176.4 / 192 kHz.
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001;
     for (const double fs : { 44100.0, 48000.0, 88200.0, 96000.0, 176400.0, 192000.0 })
     {
-        FoldHeadroom h;
-        h.prepare (fs);
-        const int at = 100, n = at + static_cast<int> (2.2 * fs);
-        int unityAt = -1, offUnityAfter = 0, falls = 0;
-        float prev = 1.0f;
-        for (int i = 0; i < n; ++i)
-        {
-            const float g = h.next (i == at ? over : 0.5f);
-            if (i > at && g < prev)
-                ++falls;
-            prev = g;
-            if (i > at && unityAt < 0 && g == 1.0f)
-                unityAt = i;
-            if (unityAt >= 0 && g != 1.0f)
-                ++offUnityAfter;
-        }
-        const double holdS = msToSamples (FoldHeadroom::kHoldMs, fs) / fs;
-        const double tauR = -1.0 / (fs * std::log (static_cast<double> (static_cast<float> (std::exp (-1.0 / (tau * fs))))));
-        const double formula = holdS + tau * std::log (depth / 1.0e-6), withR = holdS + tauR * std::log (depth / 1.0e-6);
-        const double t = unityAt < 0 ? -1.0 : (unityAt - at) / fs;
-        std::cout << "    [E28a] FoldHeadroom at " << fs / 1000.0 << " kHz, one +6.02 dB over: exactly 0 dB after " << t << " s (-1 = never; formula "
-                  << formula << " s, " << 100.0 * (t - formula) / formula << " %; r's time constant " << tauR * 1000.0 << " ms, formula with it "
-                  << (t - withR) * fs << " samples off), at the end " << h.getGainDb() << " dB, falls during the release " << falls
-                  << ", samples off 0 dB after it " << offUnityAfter << "\n";
-        CHECK (unityAt >= 0);
-        CHECK (offUnityAfter == 0);
-        CHECK (falls == 0);
-        CHECK_NEAR (t, formula, 1.0e-3 * formula); // within 0.1 % (192 kHz: -0.080 %)
-        CHECK_NEAR ((t - withR) * fs, 0.0, 3.0);
+        checkReleaseAtRate (fs);
+        CHECK (std::abs (foldDecayTau (fs) - tau) / tau <= (fs == 192000.0 ? 8.1e-4 : 8.0e-5));
     }
+}
+
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - other rates, 8 to 384 kHz")
+{
+    // checkReleaseAtRate at the other rates a device may run: 8 / 11.025 /
+    // 16 / 22.05 / 24 / 32 / 64 / 128 / 352.8 / 384 kHz. The float r's time
+    // constant is -0.027 % off 150 ms at 64 kHz and +0.092 % at 384 kHz
+    // (the next case bounds it at any rate); the release still reaches
+    // exactly 0 dB within 0.1 % of the formula and within 3 samples of it
+    // with r's own time constant.
+    for (const double fs : { 8000.0, 11025.0, 16000.0, 22050.0, 24000.0, 32000.0, 64000.0, 128000.0, 352800.0, 384000.0 })
+        checkReleaseAtRate (fs);
+}
+
+TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - the float decay's time constant at any rate")
+{
+    // r = e^(-1 / (150 ms x fs)) rounded to a float moves by at most 2^-25
+    // (r in [0.5, 1)), so its time constant is off 150 ms by at most about
+    // 2^-25 x 150 ms x fs, relative (exactly eps / (1 - eps) with eps that
+    // times e^(1 / (150 ms x fs)), at most 1.0009 from 8 kHz up): 0.021 % at
+    // 48 kHz, 0.086 % at 192 kHz, 0.17 % at 384 kHz. Checked at every rate
+    // from 8 to 384 kHz in 50 Hz steps and at 11.025 kHz
+    // (docs/03 8.3.8 and the FoldHeadroom comment state the bound and the
+    // measured values). The rounding is not monotonic in the rate (0.0003 %
+    // at 48 kHz, -0.027 % at 64 kHz), so a range cannot be stated from a few
+    // rates in it.
+    const double tau = static_cast<double> (FoldHeadroom::kReleaseMs) * 0.001;
+    std::vector<double> rates;
+    for (int hz = 8000; hz <= 384000; hz += 50)
+        rates.push_back (static_cast<double> (hz));
+    rates.push_back (11025.0); // (the rest of the 44.1 kHz family is on the 50 Hz grid)
+    double worstRatio = 0.0, worstAt = 0.0, worst44To192 = 0.0, worst44To192At = 0.0;
+    int over = 0;
+    for (const double fs : rates)
+    {
+        const double rel = (foldDecayTau (fs) - tau) / tau;
+        const double eps = std::ldexp (1.0, -25) * std::exp (1.0 / (tau * fs)) * tau * fs; // ln r moves by up to eps of itself
+        const double bound = eps / (1.0 - eps) * (1.0 + 1.0e-6);
+        over += std::abs (rel) > bound ? 1 : 0;
+        if (std::abs (rel) / bound > worstRatio)
+        {
+            worstRatio = std::abs (rel) / bound;
+            worstAt = fs;
+        }
+        if (fs >= 44100.0 && fs <= 192000.0 && std::abs (rel) > std::abs (worst44To192))
+        {
+            worst44To192 = rel;
+            worst44To192At = fs;
+        }
+    }
+    std::cout << "    [E28a] FoldHeadroom's float decay at " << rates.size() << " rates from 8 to 384 kHz: time constant within the bound at "
+              << rates.size() - static_cast<size_t> (over) << " (closest to it " << worstRatio << " of it, at " << worstAt / 1000.0
+              << " kHz); from 44.1 to 192 kHz at most " << 100.0 * worst44To192 << " % (at " << worst44To192At / 1000.0 << " kHz); 48 kHz "
+              << 100.0 * (foldDecayTau (48000.0) - tau) / tau << " %, 64 kHz " << 100.0 * (foldDecayTau (64000.0) - tau) / tau << " %, 384 kHz "
+              << 100.0 * (foldDecayTau (384000.0) - tau) / tau << " %\n";
+    CHECK (over == 0);
 }
 
 TEST_CASE ("FoldHeadroom: after an over the release reaches exactly 0 dB and the samples are untouched again (docs/11 E28a, 2026-10-13) - a second peak in the hold or the release")
@@ -780,16 +872,22 @@ namespace
     path. Full-scale correlated 7.1 for 0.3 s (the overs the headroom holds),
     then the same content at 0.2 (the fold at -7 dBFS, the binaural render
     under 0 dBFS). From 0.4 s to 2.6 s virt.on (passCase: virt.input Force
-    Stereo / Force Surround) flips after every 512-sample block, so its 20 ms
-    (400 ms) ramp never settles and every block takes the crossfade; the
-    last flip leaves virt off on the surround fold. The meter's headroom
-    reaches exactly 0 dB during the flips (hold + 150 ms x ln (depth / 1e-6)
-    after the last over, depth up to 0.55: at most 2.0 s), and once the ramp
-    has ended the output is the plain BS.775 fold bit for bit. */
+    Stereo / Force Surround) flips after every block, so its 20 ms (400 ms)
+    ramp never settles and every block takes the crossfade; the last flip
+    leaves virt off on the surround fold. The blocks are 512 samples, and
+    1 sample from 1.9 to 2.0 s after the loud part, where the release ends
+    (hold + 150 ms x ln (depth / 1e-6) after the last over, depth up to 0.55:
+    at most 2.0 s): there the meter, which reads the headroom gain at the
+    block end, reads it per sample. The meter reaches exactly 0 dB during the
+    flips at the same sample as a steady run (virt off on the surround fold,
+    no flips, the same blocks), and once the ramp has ended the output is the
+    plain BS.775 fold bit for bit. */
 void checkReleaseInCrossfade (bool passCase)
 {
     const int block = 512, loud = static_cast<int> (0.3 * kFs), flipFrom = static_cast<int> (0.4 * kFs), flipTo = static_cast<int> (2.6 * kFs);
     const int settled = flipTo + msToSamples (passCase ? 400.0f : 20.0f, kFs) + block, n = settled + static_cast<int> (0.4 * kFs);
+    const int fineFrom = loud + static_cast<int> (1.9 * kFs), fineTo = loud + static_cast<int> (2.0 * kFs);
+    const auto blockAt = [&] (int pos) { return pos < fineFrom ? std::min (block, fineFrom - pos) : pos < fineTo ? 1 : block; };
     Planar in = fullScaleCorrelated (8, n);
     for (auto& c : in.ch)
         for (int i = loud; i < n; ++i)
@@ -798,6 +896,24 @@ void checkReleaseInCrossfade (bool passCase)
     Bs775Fold fold;
     fold.prepare (kFs, LfeFold::gainFor (true, layout()[static_cast<size_t> (VirtLfeGainDb)].defaultValue));
     fold.process (ref.block (0, n), Bs775Fold::kMatrixGain);
+    // The meter's unity point: the block end from which it reads 0 dB to the end.
+    const auto watchUnity = [] (FoldChain& c, int end, float& deepest, float& endDb, int& unityAt) {
+        const float db = c.chain.meters().foldHeadroomDb.load();
+        deepest = std::min (deepest, db);
+        endDb = db;
+        if (db < 0.0f)
+            unityAt = -1;
+        else if (unityAt < 0)
+            unityAt = end;
+    };
+    float steadyDeepest = 0.0f, steadyEndDb = -1.0f;
+    int steadyUnityAt = -1;
+    {
+        FoldChain steady (8, false);
+        steady.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
+        Planar out = in;
+        steady.runPartitioned (out, blockAt, [&] (int end) { watchUnity (steady, end, steadyDeepest, steadyEndDb, steadyUnityAt); });
+    }
     FoldChain fc (8, false);
     fc.store.set (VirtInputMode, static_cast<float> (InputModeValue::ForceSurround));
     const auto flip = [&] (bool toOther) {
@@ -808,16 +924,10 @@ void checkReleaseInCrossfade (bool passCase)
     };
     Planar out = in;
     float deepest = 0.0f, endDb = -1.0f;
-    int unityAt = -1, flips = 0; // unityAt: the block end from which the meter reads 0 dB to the end
+    int unityAt = -1, flips = 0;
     bool other = false;
-    fc.run (out, block, [&] (int end) {
-        const float db = fc.chain.meters().foldHeadroomDb.load();
-        deepest = std::min (deepest, db);
-        endDb = db;
-        if (db < 0.0f)
-            unityAt = -1;
-        else if (unityAt < 0)
-            unityAt = end;
+    fc.runPartitioned (out, blockAt, [&] (int end) {
+        watchUnity (fc, end, deepest, endDb, unityAt);
         other = end >= flipFrom && end < flipTo && ! other;
         flips += end >= flipFrom && end < flipTo ? 1 : 0;
         flip (other);
@@ -833,14 +943,21 @@ void checkReleaseInCrossfade (bool passCase)
             else if (i >= settled)
                 after = std::max (after, d);
         }
+    const auto sinceLoud = [&] (int at) { return at > loud ? (at - loud) / kFs : -1.0; };
     std::cout << "    [E28a] chain fold headroom through the " << (passCase ? "passthrough" : "virt") << " crossfade (" << flips
-              << " flips from 0.4 to 2.6 s): deepest " << deepest << " dB, exactly 0 dB " << (unityAt > loud ? (unityAt - loud) / kFs : -1.0)
-              << " s after the last loud sample (-1 = never), at the end " << endDb << " dB; largest difference to the plain fold during the flips "
-              << during << ", from " << settled / kFs << " s " << after << "\n";
+              << " flips from 0.4 to 2.6 s): deepest " << deepest << " dB, exactly 0 dB " << sinceLoud (unityAt)
+              << " s after the last loud sample (-1 = never; the steady run " << sinceLoud (steadyUnityAt) << " s, deepest " << steadyDeepest
+              << " dB, samples apart " << unityAt - steadyUnityAt << "), at the end " << endDb
+              << " dB; largest difference to the plain fold during the flips " << during << ", from " << settled / kFs << " s " << after << "\n";
     CHECK (deepest < -3.0f);
     CHECK (unityAt > loud);
     CHECK (unityAt < flipTo); // released inside the crossfade
     CHECK (unityAt - loud <= static_cast<int> (2.0 * kFs) + block);
+    CHECK (unityAt > fineFrom); // in the 1-sample blocks: per sample ...
+    CHECK (unityAt <= fineTo);
+    CHECK (unityAt == steadyUnityAt); // ... at the steady path's sample
+    CHECK (steadyDeepest == deepest);
+    CHECK (steadyEndDb == 0.0f);
     CHECK (during > 1.0e-3); // the flips did take the crossfade
     CHECK (endDb == 0.0f);
     CHECK (after == 0.0);
